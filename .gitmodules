@@ -1,6 +1,6 @@
-[submodule "sqlite-vec"]
-	path = sqlite-vec
+[submodule "third_party/sqlite-vec"]
+	path = third_party/sqlite-vec
 	url = https://github.com/asg017/sqlite-vec
-[submodule "sqlite-graph"]
-	path = sqlite-graph
+[submodule "third_party/sqlite-graph"]
+	path = third_party/sqlite-graph
 	url = https://github.com/agentflare-ai/sqlite-graph
