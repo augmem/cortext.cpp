@@ -1,19 +1,19 @@
-## Memstream — Algorithms Only (3‑Knob Memory)
+## Cortext — Algorithms Only (3‑Knob Memory)
 
 This document contains only the algorithmic definitions extracted from the plan. Narrative text, rationale, and non‑algorithm commentary are omitted.
 
-⸻
+***
 
 ### Module map updates
 
 * New modules:
-  * `memstream.algorithms.core` — clamp, lerp, sigmoid, ewma
-  * `memstream.algorithms.predictive` — Alg 22 pre-activation helpers
-  * `memstream.algorithms.emotion` — Alg 23 emotional cascade
-  * `memstream.algorithms.influence` — Alg 19 influence + lambda tuning
-  * `memstream.algorithms.serial` — Alg 26 serial-position helpers
-* Moved derives: WM derives and metacog params now in `memstream.algorithms.working_memory`.
-* Re-exports: legacy symbols remain in `memstream.adaptive` with DeprecationWarnings.
+  * `cortext.algorithms.core` — clamp, lerp, sigmoid, ewma
+  * `cortext.algorithms.predictive` — Alg 22 pre-activation helpers
+  * `cortext.algorithms.emotion` — Alg 23 emotional cascade
+  * `cortext.algorithms.influence` — Alg 19 influence + lambda tuning
+  * `cortext.algorithms.serial` — Alg 26 serial-position helpers
+* Moved derives: WM derives and metacog params now in `cortext.algorithms.working_memory`.
+* Re-exports: legacy symbols remain in `cortext.adaptive` with DeprecationWarnings.
 
 ### Overview — Three‑Knob Philosophy
 
@@ -91,7 +91,7 @@ def on_signal(x_t):
     maybe_emit_precision_delta()   # §5.5 → ΔThreshold_precision_t
 
     # 6) Threshold evolution
-    update_threshold()             # Alg 8 (uses Δ from 4/5/emo)
+    update_threshold()             # Alg 8 (fuses Δ from Alg 4, Sec 5.5, and homeo)
 
     # 7) Boundary handling
     if drift_exceeds_threshold():  # Alg 12
@@ -150,6 +150,7 @@ EWMA(prev, x, α) = (1 − α)×prev + α×x
 cos(u,v) = cosine\_similarity(u,v)
 normalize(v) = v / ||v||                  # L2 normalization (vectors)
 normalize(x, \[a,b]) = (x − a) / (b − a)  # range normalization (scalars)
+map01(z) = clamp((z + 1)/2, 0, 1)         # maps \[-1,1] → \[0,1] for signed metrics
 ln = natural log; π = 3.14159…
 
 # Coverage gain primitive (Algorithm 27)
@@ -316,7 +317,7 @@ window\_size(T)         = w\_score(T)
 context\_window\_size(T) = n\_ctx(T)
 density\_k(T)           = k\_neighbors(T)
 
-⸻
+***
 
 ### Summary Tables
 
@@ -419,7 +420,7 @@ observed\_cosine ← cos(x\_t, mean(recent\_context))
 weight\_relevance\_t ← EWMA(weight\_relevance\_{t−1}, observed\_cosine, α = α\_F(relevance))
 attention\_width\_t ← clamp(attention\_width\_{t−1}, \[attention\_width\_min, attention\_width\_max])
 
-⸻
+***
 
 2. Sensitivity‑Driven Plasticity
 
@@ -472,20 +473,18 @@ rate_target_t ← EWMA(rate_target_{t−1}, observed_write_rate(w_rate_seconds),
 κ_emo ← κ_base × S
 ΔThreshold_emotion_t ← − κ_emo × emotion_intensity_t × (0.5 + 0.5 × arousal_t)
 
-ΔThreshold_sensitivity_t ← clamp(
-    − gain_t × (S − 0.5) + ΔThreshold_emotion_t,
-    −max_ΔT_per_min, +max_ΔT_per_min
-)   # pass to Algorithm 8
+ΔThreshold_sensitivity_t ← (− gain_t × (S − 0.5) + ΔThreshold_emotion_t)
+# This raw delta is passed to Algorithm 8 for final clamping
 ```
 
 Parameter derivation for metric weights:
 For each metric m (after sufficient history):
 μ\_m ← mean(metric\_m over w\_score(T))
 σ\_m ← std(metric\_m over w\_score(T))
-base\_m ← normalize(μ\_m ± σ\_m) → \[0,1]
+base\_m ← normalize(μ\_m + σ\_m) → \[0,1]  # Target one std dev above mean
 weight\_m\_t ← EWMA(weight\_m\_{t-1}, base\_m × (0.5 + 0.5S), α = α\_S(weight))
 
-⸻
+***
 
 3. Stability‑Driven Persistence
 
@@ -510,7 +509,8 @@ hysteresis\_t ← EWMA(hysteresis\_{t−1}, observed\_retention, α = α\_T(hyst
 last\_w\_ret ← last w\_ret(T) values of observed\_retention
 μ\_ret ← mean(last\_w\_ret); σ\_ret ← max(std(last\_w\_ret), 1.0)
 zscore\_ret ← clamp((observed\_retention − μ\_ret)/σ\_ret, −3, +3)
-target\_half\_life\_t ← clamp(base\_half\_life\_prior(T) × (1 + 0.25 × zscore\_ret), hl\_min, hl\_max)
+stability\_adj ← (ΔHalfLife\_adj\_t is provided) ? ΔHalfLife\_adj\_t : 0
+target\_half\_life\_t ← clamp(base\_half\_life\_prior(T) × (1 + 0.25 × zscore\_ret + stability\_adj), hl\_min, hl\_max)
 half\_life\_t ← EWMA(half\_life\_{t−1}, target\_half\_life\_t, α = α\_T(half\_life))
 rate\_decay\_t ← clamp(rate\_decay\_{t−1}, \[0,1])
 
@@ -539,20 +539,25 @@ weight\_i(t) ← (1 − confidence\_rls) × w\_bootstrap\[i] + confidence\_rls �
 Composite Score Calculation
 
 Given:
-metrics\_0\_100 = {relevance: v₁, mismatch: v₂, ..., arousal: v₁₂}  # values in \[0,100]
+metrics\_norm = {relevance: v₁, mismatch: v₂, ..., arousal: v₁₂}    # each vᵢ ∈ \[-1,1] or \[0,1]
 weights\_0\_1   = {relevance: w₁, mismatch: w₂, ..., arousal: w₁₂}  # raw weights in \[0,1]
+
+Preprocess (per metric definition):
+m01\[i] = (metric is signed \[-1,1]) ? map01(metrics\_norm\[i]) : clamp(metrics\_norm\[i], 0, 1)
+
 Compute:
 weight\_sum ← Σ(wᵢ)
 if weight\_sum < ε: return 0
 weights\_normalized\[i] ← wᵢ / weight\_sum
-score\_norm ← Σ(weights\_normalized\[i] × metrics\_0\_100\[i] / 100)
-score ← 100 × clamp(score\_norm, 0, 1)
+score\_norm ← Σ(weights\_normalized\[i] × m01\[i])
+score ← clamp(score\_norm, 0, 1)
 
 Critical Implementation Note (Expanded)
-\- Always normalize weights to sum to 1.0 before averaging. Example: with 12 metrics and raw weights ≈0.6 each, Σw ≈ 7.2; without normalization, the weighted sum would saturate above 1.0 and collapse variance.
-\- Clamp inputs: each metric must be clipped to \[0,100]; replace NaN/Inf with safe defaults (0) before weighting.
-\- Non‑negativity: ensure all weights ≥0; if an adaptive fit proposes negatives, zero them and renormalize.
-\- Observability: emit weight\_sum and effective\_metric\_count each update to catch silent saturation.
+
+* Always normalize weights to sum to 1.0 before averaging. Example: with 12 metrics and raw weights ≈0.6 each, Σw ≈ 7.2; without normalization, the weighted sum would saturate above 1.0 and collapse variance.
+* Clamp inputs: each metric must be clipped to its normalized domain; convert signed values to \[0,1] via map01 before weighting; replace NaN/Inf with safe defaults (0).
+* Non‑negativity: ensure all weights ≥0; if an adaptive fit proposes negatives, zero them and renormalize.
+* Observability: emit weight\_sum and effective\_metric\_count each update to catch silent saturation.
 
 ⸻
 
@@ -568,7 +573,7 @@ Output: T\_dynamic
 3. T\_prior ← T\_prior(F, S, T)
 4. observed\_p90 ← percentile(scores\_{t−w:t}, 90)
 5. ρ\_prior ← prior\_mass(T);  ρ\_obs ← u(t) × min(w, count)
-6. T\_target ← (ρ\_prior × T\_prior + ρ\_obs × observed\_p90) / max(ε, ρ\_prior + ρ\_obs)
+6. T\_target ← (ρ\_prior × T\_prior + ρ\_obs × observed\_p90) / max(1e−6, ρ\_prior + ρ\_obs)
 7. T\_dynamic\_t ← EWMA(T\_dynamic\_{t−1}, T\_target, α = α\_T(t))
 8. ΔT\_sens ← (ΔThreshold\_sensitivity\_t is provided) ? ΔThreshold\_sensitivity\_t : (S − 0.5) × sensitivity\_gain
 9. Continuous‑time rate control (EMA + ESS):
@@ -583,7 +588,7 @@ Output: T\_dynamic
 11. ΔT\_emo ← (ΔThreshold\_emotion\_t is provided) ? ΔThreshold\_emotion\_t : 0
 12. ΔT ← ΔT\_sens + ΔT\_homeo + ΔT\_prec + ΔT\_emo
 13. ΔT\_limited ← clamp(ΔT, −max\_ΔT\_per\_min(t), +max\_ΔT\_per\_min(t))
-14. T\_dynamic\_t ← clamp(T\_prior(F,S,T) + ΔT\_limited, Tmin(t), Tmax(t))
+14. T\_dynamic\_t ← clamp(T\_dynamic\_t + ΔT\_limited, Tmin(t), Tmax(t))
 15. hysteresis\_t ← lerp(band\_min, band\_max, T)
 
 Telemetry (diagnostics): Δt, dt\_base, τ\_rate, α, β, ESS, reliability, ρ\_inst, ρ\_hat, rate\_target\_t, rate\_error, κ\_r (gain), m\_gate = (1 − T) × (1 − maturity), cap, ΔT\_homeo, ΔT\_total, T\_prior, T\_dynamic\_t, hysteresis\_t
@@ -631,7 +636,7 @@ Input: mean(ctx_t), mean(ctx_{t−k})
 Output: drift_mag_t
 	1.	drift_vec_t ← normalize(mean(ctx_t)) − normalize(mean(ctx_{t−k}))
 	2.	drift_mag_t ← ||drift_vec_t||
-	3.	drift_threshold ← lerp(0.10, 0.35, 1 − T)
+	3.	drift_threshold ← lerp(0.10, 0.35, T)
 	4.	Event: if drift_mag_t > drift_threshold → commit episodic boundary
 
 ### Algorithm 13: Logprob‑Derived Surprise
@@ -681,19 +686,23 @@ stability(m) ← stability(m) + γT
 else:
 stability(m) ← stability(m) × (1 − γT)
 
-adj ← clamp(mean(stability(m_used)) − 1, −0.25, +0.25)
-target_half_life_t ← clamp(base_half_life₀(T) × (1 + adj), hl_min, hl_max)
+# Calculate stability adjustment factor
+adj ← clamp(mean(stability(m_used)) − 1.0, −0.25, +0.25)
+
+# Define a delta for the half-life target, to be used by Alg 6
+# This stops Alg 17 from fighting with Alg 6's z-score logic
+ΔHalfLife_adj_t ← adj  # (Passes the adjustment factor, e.g., -0.1 or +0.2)
 
 ### Algorithm 18: Influence‑Weighted Update
 
 For each memory m:
 denom ← max(1, retrieved_count)
 influence_factor = (used_count / denom) × clamp(contextual_gain(m), -1, +1)
-strength_t ← strength_{t−1} + (S × use_frequency_t) + (F × normalize(influence_factor)) − λ(T)
+strength_t ← strength_{t−1} + (S × use_frequency_t) + (F × influence_factor) − λ(T)
 
 ### Adaptive Threshold Modulation (5.5)
 
-retrieval_precision_t = used_count_total / retrieved_count_total
+retrieval_precision_t = used_count_total / max(1, retrieved_count_total)
 if retrieval_precision_t < target_precision:
 κ ← 0.10 × (1 − T)
 ΔThreshold_precision_t ← − κ × (target_precision − retrieval_precision_t)
@@ -774,8 +783,10 @@ flashbulb_threshold_eff = flashbulb_threshold × (1 − 0.5 × emotion_intensity
 
 base_capacity = round(lerp(9, 5, S) + lerp(-2, 2, F))
 maintenance_cost_per_slot = lerp(0.05, 0.15, S)
+# entropy_signal is the SIGNAL complexity (e.g., token‑level entropy when available; 
+# otherwise an embedding‑based proxy such as std over dimensions). 
+# It is NOT WM‑state entropy.
 complexity_penalty = entropy_signal × lerp(0.5, 1.5, S)
-# entropy_signal is the SIGNAL complexity (e.g., token‑level entropy when available; otherwise an embedding‑based proxy such as std over dimensions). It is NOT WM‑state entropy.
 chunking_threshold = lerp(0.7, 0.9, F)
 gate_threshold = lerp(0.1, 0.4, F)
 rehearsal_rate = lerp(0.5, 2.0, S)
@@ -808,7 +819,7 @@ Zone determination (for observability):
 - elif rarity > distinctiveness_threshold → "distinctive"
 - else → "middle"
 
----
+***
 
 ## 11. Interrupt Gate
 
@@ -866,6 +877,11 @@ boundary_mult = lerp(1.3, 2.0, F) * lerp(1.1, 0.9, S)
 
 **Gate Decision:**
 
+# Gate logic:
+# 1. Must pass base relevance and duplication checks.
+# 2. Must pass base novelty (jaccard or mu).
+# 3. Must EITHER be at a boundary, OR pass a *stricter* mu threshold (boundary_mult)
+# This suppresses mid-sentence interrupts that are only "medium" novel.
 allow_interrupt = (
 max_relevance >= retrieval_thresh and
 (jaccard >= tau_jaccard_eff or best_mu >= tau_mu_eff) and
@@ -875,7 +891,7 @@ max_semantic_overlap < dup_thresh and
 
 **Observability payload (on suppression):**
 
-```json
+```
 {
   "event": "INTERRUPT_SUPPRESSED",
   "reason": "duplicate | below_threshold | low_novelty | not_boundary",
@@ -897,7 +913,7 @@ max_semantic_overlap < dup_thresh and
 
 On interrupt trigger, include:
 
-```json
+```
 {
   "active_context_size_before": ,
   "active_context_size_after": ,
@@ -906,3 +922,486 @@ On interrupt trigger, include:
 ```
 
 **Minimal state:** `active_context_ids`, `last_interrupt_token`, `ctx_centroid`, `coherence_penalty`.
+
+## 12. Consolidation and Graph Integration System
+
+Status: Planned — Last Updated: November 2, 2025
+
+***
+
+### Overview
+
+The Consolidation and Graph Integration System extends cortext with long‑term semantic organization. It periodically compresses redundant memories, merges related entries, and constructs a knowledge graph that captures persistent relationships, co‑occurrences, and causal patterns. The graph enhances recall precision, abstraction, and reasoning while preserving low‑latency stream operations. Consolidation runs in the background, triggered by capacity, write‑rate slowdown, or time‑based cadence, transforming episodic memories into semantic structures.
+
+***
+
+### 12.1 Consolidation Triggers
+
+### Algorithm 28: Trigger Evaluation
+
+```
+Input: write_rate_t, db_size, consolidation_threshold, rate_target_t, elapsed_time, consolidation_interval, gemma_available
+
+# Capacity or rate-based triggers (always run clustering)
+if (db_size > consolidation_threshold)
+   or (write_rate_t < rate_target_t / 2)
+   or (elapsed_time > consolidation_interval):
+    
+    # Phase 1: Embedding-based clustering and archival (fast)
+    clusters ← cluster_memories()
+    summaries ← create_summary_nodes(clusters)
+    archive_sources(clusters)
+    build_embedding_edges(summaries)
+    
+    # Phase 2: Semantic extraction (async, if enabled)
+    if gemma_available and extraction_enabled:
+        for s in summaries:
+            if should_extract(s):
+                enqueue_extraction_job(s, gemma_3n_e2b)
+    
+    # Phase 3: Graph edge creation (completes asynchronously)
+    # Extraction jobs populate graph_nodes and graph_edges tables
+
+# Telemetry
+emit_metric("consolidation.clusters_created", len(clusters))
+emit_metric("consolidation.extractions_queued", len(extraction_jobs))
+emit_metric("consolidation.duration_seconds", elapsed)
+```
+
+#### Algorithm 28b: Activity‑Aware Scheduling & Preemption
+
+```
+Input: last_retrieval_ts, tokens_in_flight, retrieval_queue_depth
+Derived:
+idle_required_seconds(T) = round(0.25 × w_rate_seconds(T))     # gate by stability
+
+idle_for = now() − last_retrieval_ts
+should_start = (tokens_in_flight == 0) and
+               (retrieval_queue_depth == 0) and
+               (idle_for ≥ idle_required_seconds(T))
+
+if should_start:
+    start_consolidation()
+else:
+    defer_until_idle()   # recheck periodically
+
+# Preemption (hot‑path first)
+on retrieval_event():
+    pause_consolidation()
+    commit_micro_batch()         # short txn only; avoid long locks
+    release_db_resources()
+    resume_when_idle()           # re‑evaluate should_start
+
+# DB/IO contract:
+# - Use WAL; prefer many short transactions
+# - Yield between chunks; avoid table‑wide locks
+# - Keep ANN index updates incremental
+```
+
+***
+
+### 12.2 Memory Scoring for Consolidation
+
+Each memory m is evaluated with:
+
+* strength(m) — reinforcement‑based persistence
+* redundancy(m) — similarity to nearby embeddings
+* connectivity(m) — shared entities or relation overlap
+* stability(m) — persistence over decay curve
+
+### Algorithm 29: Consolidation Scoring
+
+```
+score_consolidate(m) = w_s×strength(m) − w_r×redundancy(m) + w_c×connectivity(m) + w_t×stability(m)
+
+if score_consolidate(m) < consolidation_floor:
+    mark_for_merge(m)
+```
+
+Knob‑derived weights (no magic numbers):
+
+```
+w_s = T
+w_r = F
+w_c = S
+w_t = T
+```
+
+### 12.3.1 Semantic Extraction via Gemma
+
+After clustering, extract interpretable entities and relations from consolidated text using Gemma 3n E2B Multimodal.
+
+#### Algorithm 29c: Entity and Relation Extraction
+
+```
+Input: summary.text, cluster_i.text[]
+Output: entities[], relations[]
+
+1. context_window ← concatenate(cluster_i.text, max_tokens=2048)
+2. prompt ← build_extraction_prompt(summary.text, context_window)
+3. response ← gemma_3n_e2b.generate(prompt, max_tokens=512, temperature=0.3)
+4. entities ← parse_entities(response)         # {name, type, salience}
+5. relations ← parse_relations(response)       # {subject, predicate, object, confidence}
+6. for e in entities:
+       e.embedding_id ← embed_text(e.name) if is_frequent(e) else NULL
+return entities, relations
+```
+
+Knob‑Derived Parameters:
+
+```
+extraction_batch_size = round(lerp(8, 32, T))                  # memories per batch
+min_cluster_size_for_extraction = round(lerp(3, 10, F))        # skip small clusters at high F
+entity_frequency_threshold = round(lerp(5, 15, T))             # vectorize if seen > threshold
+```
+
+Prompt Template:
+
+```
+Analyze this consolidated memory cluster and extract:
+1. Named entities (people, places, organizations, concepts)
+2. Relationships between entities (co-occurs, implies, contradicts)
+3. Key themes or topics
+
+Summary: {summary.text}
+Context: {context_window}
+
+Format as JSON:
+{
+  "entities": [{"name": "...", "type": "...", "salience": 0-1}],
+  "relations": [{"subject": "...", "predicate": "...", "object": "...", "confidence": 0-1}]
+}
+```
+
+Cost Optimization:
+
+* Run extraction only when len(cluster\_i) ≥ min\_cluster\_size\_for\_extraction
+* Batch multiple clusters per Gemma call (up to extraction\_batch\_size)
+* Cache entity embeddings for high-frequency entities
+* Skip extraction if T > 0.8 and cluster\_i already has entity metadata
+
+***
+
+### 12.3 Memory Merging and Clustering
+
+Marked memories are grouped via density‑based clustering (DBSCAN) or k‑means using sqlite‑vec:
+
+```
+cluster_i = { m_j | cos(m_j, μ_i) > merge_threshold }
+μ_i = centroid(cluster_i)
+```
+
+Create a summary memory and replace the cluster:
+
+```
+summary.embedding = μ_i
+summary.text = summarize(cluster_i.text)
+summary.metadata.sources = [m.id for m in cluster_i]
+```
+
+All source memories are cross‑referenced in the graph via derived\_from edges.
+
+***
+
+### 12.4 Knowledge Graph Construction
+
+Node types:
+
+* Entity Nodes: from named entities and topics extracted from text
+* Memory Nodes: summarized embeddings from merged clusters
+* Concept Nodes: emergent centroids representing recurrent topics
+
+Edge types:
+
+* co\_occurs\_with: shared context or time proximity
+* implies / causes: directional correlation in embedding drift
+* contradicts: strong negative cosine similarity or schema violation
+* reinforces: frequent joint retrieval
+* derived\_from: links summaries to source memories
+
+```
+**Node Storage Assignment:**
+- Memory nodes → embeddings table (always vectorized)
+- Summary nodes → embeddings table (centroids from Algorithm 29)
+- Concept nodes → embeddings table (emergent topic centroids)
+- Entity nodes → graph_nodes table (optional embedding_id reference)
+
+This separation enables:
+- Fast ANN queries over embedded content (memories, summaries, concepts)
+- Clean graph traversal for structural queries (entity relationships)
+- Optional entity vectorization when beneficial (e.g., frequently retrieved entities)
+```
+
+### Algorithm 30: Graph Construction (Hybrid Embeddings + Gemma)
+
+```
+Input: summary nodes, cluster sources, embeddings, gemma_3n_e2b
+Output: populated graph_nodes, graph_edges
+
+for each summary node s:
+    # Semantic extraction via Gemma (Algorithm 29c)
+    if len(s.sources) ≥ min_cluster_size_for_extraction:
+        entities, relations ← extract_via_gemma(s, s.sources)
+    else:
+        entities ← []
+        relations ← []
+    
+    # Create entity nodes and mention edges
+    for e in entities:
+        node_id ← ensure_node(e.name, type="Entity", label=e.name)
+        if e.salience > 0.7 or is_frequent(e.name):
+            node_id.embedding_id ← embed_text(e.name)
+        create_edge(s, node_id, type="mentions", weight=e.salience)
+    
+    # Create relation edges from Gemma output
+    for r in relations:
+        subj ← ensure_node(r.subject, type="Entity")
+        obj ← ensure_node(r.object, type="Entity")
+        create_edge(subj, obj, type=r.predicate, weight=r.confidence)
+    
+    # Embedding-derived co-occurrence edges
+    for (m_i, m_j) in s.sources:
+        cos_sim ← cos(m_i.embedding, m_j.embedding)
+        if cos_sim > lerp(0.85, 0.95, F):
+            create_edge(m_i, m_j, type="co_occurs_with", weight=cos_sim)
+    
+    # Embedding-derived causal edges (drift detection)
+    if len(s.sources) > 1:
+        temporal_order ← sort_by_timestamp(s.sources)
+        for i in range(len(temporal_order) - 1):
+            m_i, m_j ← temporal_order[i], temporal_order[i+1]
+            drift_vec ← normalize(m_j.embedding - m_i.embedding)
+            drift_mag ← ||drift_vec||
+            drift_threshold ← lerp(0.15, 0.35, T)
+            if drift_mag > drift_threshold:
+                create_edge(m_i, m_j, type="causes", weight=drift_mag)
+    
+    # Provenance edges to archived sources
+    for m in s.sources:
+        create_edge(s, m, type="derived_from", weight=m.original_strength)
+```
+
+Division of Labor:
+
+Embeddings handle:
+
+* Co-occurrence via cosine similarity
+* Temporal causality via drift magnitude
+* Concept clustering (Algorithm 29)
+
+Gemma handles:
+
+* Named entity recognition
+* Semantic relation extraction (contradicts, reinforces, implies)
+* Human-readable labels for clusters
+
+***
+
+### 12.5 Graph‑Augmented Retrieval
+
+When processing a query or signal x\_t, vector lookup uses both direct similarity and graph expansion.
+
+### Algorithm 31: Graph‑Augmented Retrieval
+
+```
+Input: x_t, kNN_size, graph_depth
+
+1. results_vec ← topK(sqlite_vec.search(x_t, k=kNN_size))
+   # Query embeddings table only (type IN ('memory', 'summary', 'concept'))
+
+2. seed_nodes ← [r.id for r in results_vec]
+
+3. expanded_nodes ← graph.traverse(seed_nodes, depth=graph_depth)
+   # Recursive CTE over graph_edges table:
+   # WITH RECURSIVE expand(id, depth) AS (
+   #   SELECT source_id, 0 FROM graph_edges WHERE target_id IN seed_nodes
+   #   UNION ALL
+   #   SELECT e.source_id, ex.depth+1 
+   #   FROM graph_edges e JOIN expand ex ON e.target_id = ex.id
+   #   WHERE ex.depth < graph_depth
+   # )
+
+4. combined_ids ← union(seed_nodes ∪ expanded_nodes)
+
+5. combined_context ← fetch_embeddings(combined_ids)
+   # Join back to embeddings table; entities without embeddings are filtered
+
+6. re_ranked ← sort_by(cos(x_t, combined_context))
+return re_ranked
+```
+
+#### Schema: Graph‑Integrated Tables
+
+##### Embeddings Table (Vector-Backed Nodes)
+
+Extended embeddings table stores all nodes with vector representations (memory, summary, concept):
+
+| Column         | Type             | Description                                 |
+| -------------- | ---------------- | ------------------------------------------- |
+| `id`           | TEXT PRIMARY KEY | Memory or node ID                           |
+| `embedding`    | BLOB             | Vector representation                       |
+| `type`         | TEXT             | (memory, summary, concept)                  |
+| `strength`     | REAL             | Reinforcement score (used in consolidation) |
+| `connectivity` | INTEGER          | Number of linked graph edges                |
+| `drift_mag`    | REAL             | Temporal drift magnitude                    |
+| `cluster_id`   | TEXT             | Consolidation cluster group ID              |
+| `last_access`  | INTEGER          | Unix time of last retrieval                 |
+
+Indices:
+
+```sql
+CREATE INDEX idx_embeddings_type ON embeddings(type);
+CREATE INDEX idx_embeddings_connectivity ON embeddings(connectivity) 
+  WHERE type IN ('summary', 'concept');
+CREATE INDEX idx_embeddings_cluster ON embeddings(cluster_id) 
+  WHERE cluster_id IS NOT NULL;
+```
+
+##### Graph Nodes Table (Entity References)
+
+Stores entity nodes and other non-embedded graph elements:
+
+| Column         | Type             | Description                       |
+| -------------- | ---------------- | --------------------------------- |
+| `id`           | TEXT PRIMARY KEY | Node identifier                   |
+| `type`         | TEXT NOT NULL    | (entity, goal)                    |
+| `label`        | TEXT             | Human-readable name               |
+| `embedding_id` | TEXT             | FK to embeddings table (nullable) |
+| `metadata`     | JSONB            | Additional attributes             |
+| `created_at`   | INTEGER          | Unix time of creation             |
+
+##### Graph Edges Table
+
+Stores all relationships between nodes:
+
+| Column                                              | Type    | Description                                |
+| --------------------------------------------------- | ------- | ------------------------------------------ |
+| `source_id`                                         | TEXT    | Origin node (any table)                    |
+| `target_id`                                         | TEXT    | Destination node (any table)               |
+| `edge_type`                                         | TEXT    | (co\_occurs\_with, implies, derived\_from) |
+| `weight`                                            | REAL    | Relationship strength (default 1.0)        |
+| `decay_rate`                                        | REAL    | Knob-derived via T                         |
+| `last_reinforced`                                   | INTEGER | Unix time of last activation               |
+| PRIMARY KEY (`source_id`, `target_id`, `edge_type`) |         |                                            |
+
+Indices:
+
+```sql
+CREATE INDEX idx_edges_source ON graph_edges(source_id);
+CREATE INDEX idx_edges_target ON graph_edges(target_id);
+CREATE INDEX idx_edges_type ON graph_edges(edge_type);
+```
+
+**Storage Strategy:**
+
+* **Memory & Summary nodes**: Always in embeddings table (require vectors for similarity)
+* **Concept nodes**: In embeddings table (emergent centroids need vectors)
+* **Entity nodes**: In graph\_nodes table (may reference embeddings via embedding\_id if vectorized)
+* **All relationships**: In graph\_edges table
+
+Optional:
+
+* Add FTS5 virtual table for memory text (hybrid retrieval).
+* Maintain edge\_cache table storing graph adjacency for faster expansions.
+
+***
+
+### 12.6 Adaptive Integration with cortext
+
+| Knob            | Effect in Consolidation                                                                           |
+| --------------- | ------------------------------------------------------------------------------------------------- |
+| Focus (F)       | Determines merge strictness (high F → conservative merges). Controls entity extraction threshold. |
+| Sensitivity (S) | Influences how readily new graph nodes are created. Gates relation extraction confidence.         |
+| Stability (T)   | Controls consolidation cadence, edge decay, and extraction batch size.                            |
+
+### Algorithm 32: Adaptive Consolidation Rate
+
+```
+rate_consolidate_t = base_rate × (0.3 + 0.7T) × (1 − 0.5S)
+
+# Gemma extraction throttling (background only, not on hot path)
+extraction_enabled = (T > 0.2) and (len(cluster_i) ≥ min_cluster_size_for_extraction)
+extraction_interval_seconds = lerp(300, 3600, T)  # 5 min → 1 hour
+
+# Cost budget: max Gemma calls per consolidation cycle
+max_extractions_per_cycle = round(lerp(20, 5, T))
+```
+
+Execution Model:
+
+0. Wait for idle window (Algorithm 28b); preempt immediately on retrieval events
+1. Cluster memories (fast, embeddings only)
+2. Create summary nodes with centroid embeddings
+3. Queue Gemma extraction jobs (async, rate-limited)
+4. Build embedding-derived edges immediately (co-occurrence, drift)
+5. Build Gemma-derived edges as extraction completes
+6. Archive source memories after all edges created
+
+At 30 tok/sec, extracting entities from a 512-token cluster summary takes \~17 seconds. With max\_extractions\_per\_cycle=20 at T=0, full consolidation completes in \~6 minutes (acceptable for background work).
+
+***
+
+### 12.7 Feedback into Scoring
+
+Graph signals enrich scoring and context formation:
+
+* Goal Alignment incorporates connected nodes of goal concepts.
+* Coverage Gain expands over related nodes, improving recall diversity.
+* Schema Violation edges log long‑term contradictions for reflection.
+
+### Algorithm 33: Graph‑Enhanced Goal Alignment
+
+```
+Input: x_t, δ̂, graph
+
+1. related_goals ← graph.expand(goal_nodes, depth=1)
+2. goal_context ← mean(embeddings(related_goals))
+3. goal_score_t ← cos(x_t, goal_context)
+```
+
+***
+
+### 12.8 Lifecycle Summary
+
+| Phase       | Operation               | Purpose                                         |
+| ----------- | ----------------------- | ----------------------------------------------- |
+| Stream      | Capture + Score + Store | Ingest short‑term experiences.                  |
+| Consolidate | Merge + Graphify        | Compress experiences into structured knowledge. |
+| Retrieve    | Recall + Expand         | Use episodic and semantic memory for reasoning. |
+
+***
+
+### 12.9 Integration Touchpoints with Algorithms 1–27
+
+Core formulas for Algorithms 1–27 remain unchanged. Consolidation and the graph provide optional, knob‑consistent inputs and modifiers that enrich metrics, stabilize priors, and improve retrieval. Use these augmentations where available; fall back to the original signals otherwise.
+
+Augmented signals (optional):
+
+```
+node_degree(v)            ∈ [0,∞)      # graph_edges out+in degree
+clustering_coeff(v)       ∈ [0,1]      # local transitivity
+contradiction_rate        ∈ [0,1]      # fraction of edges with type='contradicts' in active subgraph
+active_subgraph_coherence ∈ [0,1]      # cohesion of expanded context neighborhood
+precision_graph           ∈ [0,1]      # precision of graph-augmented retrieval (12.5)
+```
+
+Touchpoints:
+
+* Algorithms 1–2 (Focus): tighten `attention_width_t` in dense subgraphs; boost `weight_relevance_t` near goal/summary hubs; use `active_subgraph_coherence` when available.
+* Algorithms 3–4 (Sensitivity): raise novelty/surprise when new high‑confidence relations appear; gate `ΔThreshold_emotion_t` by relation confidence and entity salience.
+* Algorithms 5–6 (Stability): lengthen `half_life_t` for summaries/concepts with high `node_degree`/`reinforces`; bound `rate_decay_t` using edge‑derived `decay_rate`.
+* Algorithm 7 (Metric blending): include graph features in RLS inputs (degree, clustering, contradiction\_rate, connectivity).
+* Algorithm 8 (Thresholding): compute precision from graph‑augmented retrieval; use it in `ΔT_prec`; improved stability from summaries reduces oscillations.
+* Algorithms 10–11 (Coherence/Focus spread): compute over graph‑expanded context (entities+concepts) to refine `F_eff`.
+* Algorithm 12 (Drift): measure drift via centroid motion of the active subgraph; trigger boundaries on structural topic shifts.
+* Algorithm 13 (Surprise): incorporate spikes from new relations and `contradicts` edges.
+* Algorithms 14, 18 (Strength/Influence): fold `connectivity` and provenance (`derived_from`) into `strength_t` updates; propagate attenuated gains to sources.
+* Algorithms 15–17 (Feedback): apply contextual gains to neighbors via edge weights; incrementally increase attention precision and per‑memory stability.
+* Algorithm 19 (Generation influence): consider similarity to concept nodes and drift along relation edges; use sustained influence to adjust `hysteresis_t`.
+* Algorithm 21 (Competition): adapt `winners_k` to local cluster size; lateral inhibition within neighborhoods reduces interference.
+* Algorithm 22 (Predictive): pre‑activate probable next nodes via bounded graph traversal (edge hops align to `prediction_horizon`).
+* Algorithm 23 (Emotional tags): attach tags to summaries/entities; cascade along edges with decay.
+* Algorithm 24 (Working memory): align chunking slots to concept nodes; complexity reflects entity/edge diversity.
+* Algorithm 25 (Metacognition): increase FOK with consistent subgraph evidence; TOT when vectors are close but graph lacks support.
+* Algorithm 26 (Serial position): distinctiveness includes graph centrality/outlier score.
+* Algorithm 27 (Interrupt gate): compute `coverage_gain` over the active subgraph; duplicate suppression uses entity overlap.

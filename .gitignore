@@ -1,0 +1,104 @@
+# Build directories
+build/
+build-wasm/
+cmake-build-*/
+out/
+bin/
+Debug/
+Release/
+x64/
+x86/
+# poc/
+# CMake generated files
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+CTestTestfile.cmake
+CTestCustom.cmake
+DartConfiguration.tcl
+Makefile
+compile_commands.json
+*.cmake
+.ninja
+*.ninja
+
+# Compiled binaries and libraries
+*.a
+*.so
+*.dylib
+*.dll
+*.exe
+*.out
+*.o
+*.obj
+*.pdb
+*.ilk
+*.manifest
+*.wasm
+*.js
+
+# Test executables and data
+*_tests
+tests/*_tests
+*.db
+*.db-*
+*.lmdb
+.lmdb/
+*memory*.lmdb/
+*cortext_test_stub*.lmdb/
+!tests/CMakeLists.txt
+!tests/*.test.cpp
+
+# IDE files
+.vscode/
+.cursor/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Rust artifacts (this is a C++ project)
+Cargo.lock
+
+# Temporary files
+*.tmp
+*.temp
+*.log
+*.cache
+
+# Coverage reports
+*.gcda
+*.gcno
+*.gcov
+coverage/
+*.profraw
+*.profdata
+lcov.info
+coverage.info
+
+# Package files
+*.deb
+*.rpm
+*.tar.gz
+*.zip
+
+# Generated data files
+objects/
+data/
+models/
+*.dat
+*.npy
+
+# Third-party build artifacts (if building locally)
+third_party/*/build/
+third_party/*/.git/
+poc/

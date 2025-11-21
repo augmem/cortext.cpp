@@ -1,0 +1,90 @@
+#include <catch2/catch_test_macros.hpp>
+#include <cortext/operations/effective_focus.hpp>
+#include <cortext/operations/metrics.hpp>
+#include <cortext/processor.hpp>
+#include <cortext/processor/operation_context.hpp>
+
+using namespace cortext;
+using cortext::operations::ComputeEffectiveFocus;
+using cortext::operations::ComputeMetrics;
+
+TEST_CASE ("ComputeMetrics sets all 12 metrics in normalized ranges",
+           "[operations][metrics]")
+{
+  Signal s;
+  s.embedding = Eigen::VectorXf::Ones (4);
+  ProcessorContext pctx;
+  // Seed some recent context so relevance etc. are meaningful
+  pctx.recent_context_embeddings.push_back (Eigen::VectorXf::Ones (4));
+  pctx.recent_context_embeddings.push_back (2.0f * Eigen::VectorXf::Ones (4));
+  pctx.recent_scores.push_back (0.2);
+  pctx.recent_scores.push_back (0.4);
+  pctx.recent_scores.push_back (0.6);
+
+  SignalProcessor::Config cfg;
+  cfg.focus = 0.6;
+  cfg.sensitivity = 0.5;
+  cfg.stability = 0.5;
+  std::vector<BufferedWriteInstruction> buf;
+  OperationContext ctx (s, pctx, cfg, buf);
+
+  ComputeMetrics op;
+  op.Execute (ctx);
+
+  static const operations::Metric kMetrics[] = {
+    operations::Metric::relevance, operations::Metric::mismatch,
+    operations::Metric::surprise,  operations::Metric::rarity,
+    operations::Metric::drift,     operations::Metric::contradiction,
+    operations::Metric::utility,   operations::Metric::periphery,
+    operations::Metric::coverage,  operations::Metric::salience,
+    operations::Metric::valence,   operations::Metric::arousal,
+  };
+  for (const auto metric : kMetrics)
+    {
+      auto v = ctx.GetMetric (metric);
+      REQUIRE (v.has_value ());
+      // All metrics should be normalized: within [-1,1]
+      REQUIRE (*v >= -1.0);
+      REQUIRE (*v <= 1.0);
+    }
+}
+
+TEST_CASE (
+    "Metrics use F_eff to reduce F-dependent metrics when coherence is low",
+    "[operations][metrics][feff]")
+{
+  Signal s;
+  s.embedding = Eigen::VectorXf::Ones (4);
+  ProcessorContext pctx;
+  // Seed recent context so relevance computations are meaningful
+  pctx.recent_context_embeddings.push_back (Eigen::VectorXf::Ones (4));
+  pctx.recent_context_embeddings.push_back (Eigen::VectorXf::Ones (4));
+
+  SignalProcessor::Config cfg;
+  cfg.focus = 0.6; // base F
+  cfg.sensitivity = 0.5;
+  cfg.stability = 0.5;
+  std::vector<BufferedWriteInstruction> buf;
+
+  ComputeEffectiveFocus feff;
+  ComputeMetrics metrics;
+
+  // High coherence path
+  OperationContext ctx_hi (s, pctx, cfg, buf);
+  ctx_hi.SetCoherence (1.0);
+  feff.Execute (ctx_hi);
+  metrics.Execute (ctx_hi);
+  auto cov_hi = ctx_hi.GetMetric (operations::Metric::coverage).value_or (0.0);
+  auto sal_hi = ctx_hi.GetMetric (operations::Metric::salience).value_or (0.0);
+
+  // Low coherence path
+  OperationContext ctx_lo (s, pctx, cfg, buf);
+  ctx_lo.SetCoherence (0.0);
+  feff.Execute (ctx_lo);
+  metrics.Execute (ctx_lo);
+  auto cov_lo = ctx_lo.GetMetric (operations::Metric::coverage).value_or (0.0);
+  auto sal_lo = ctx_lo.GetMetric (operations::Metric::salience).value_or (0.0);
+
+  REQUIRE (cov_lo <= cov_hi);
+  REQUIRE (sal_lo <= sal_hi);
+}

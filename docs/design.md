@@ -1,4 +1,4 @@
-# Production MVP: Streaming Memory System
+# Production MVP Design : Cortext
 
 **Version:** 1.0.1\
 **Status:** Production MVP Design\
@@ -8,11 +8,11 @@
 
 ## Executive Summary
 
-**Streaming Memory MVP** is a production-ready multimodal memory system that monitors LLM token generation in real-time and dynamically injects relevant context through semantic retrieval and knowledge graph augmentation. Unlike traditional RAG systems, it interrupts generation mid-stream when semantic relevance exceeds configurable thresholds, while continuously consolidating memories into structured knowledge graphs for long-term understanding.
+**Cortext** is a production-ready intelligent context system that monitors LLM token generation in real-time and dynamically injects relevant context through semantic retrieval and knowledge graph augmentation. Unlike traditional RAG systems, it interrupts generation mid-stream when semantic relevance exceeds configurable thresholds, while continuously consolidating memories into structured knowledge graphs for long-term understanding.
 
-### Core Innovation: Closed-Loop Multimodal Memory System
+### Core Innovation: Closed-Loop Intelligent Context System
 
-Traditional agentic systems load entire conversation histories upfront. Streaming Memory MVP solves this with a **closed-loop multimodal system** that continuously learns from memory injection outcomes across text, vision, and audio:
+Traditional agentic systems load entire conversation histories upfront. Cortext solves this with a **closed-loop intelligent context system** that continuously learns from memory injection outcomes across text, vision, and audio:
 
 1. **Real-time Monitoring**: Watches tokens as they're generated
 2. **Multimodal Semantic Relevance**: Uses unified embeddings to detect context needs across modalities
@@ -43,7 +43,7 @@ Traditional agentic systems load entire conversation histories upfront. Streamin
                      │ token stream
                      ↓
 ┌─────────────────────────────────────────────────────────────┐
-│                StreamingMemory Engine                       │
+│                Cortext Intelligent Engine                   │
 │  ┌──────────────────────────────────────────────────────────┤  │
 │  │  Token Buffer (ring buffer, size=64)                │  │
 │  │  • Rolling context window                           │  │
@@ -136,6 +136,7 @@ Traditional agentic systems load entire conversation histories upfront. Streamin
 * **Lightweight Projection Layers**: Trained projectors mapping encoder outputs to 256d space
 * **[sqlite-vec](https://github.com/asg017/sqlite-vec)**: High-performance vector similarity search extension for SQLite (C++)
 * **[sqlite-graph](https://github.com/agentflare-ai/sqlite-graph)**: Knowledge graph with Cypher queries for relationship modeling
+* **[sqlite-objstore](mdc:docs/sqlite-objstore.md)**: Blob/object storage extension for raw multimodal artifacts (images, audio, large binary payloads) with transactional coordination via SQLite
 * **WebAssembly Component Model**: Cross-language bindings
 
 ### Key Technology Choices
@@ -186,8 +187,8 @@ Traditional agentic systems load entire conversation histories upfront. Streamin
 
 ### Language Bindings
 
-* **Python**: `pip install streaming-memory`
-* **Go**: `go get github.com/agentflare/streaming-memory/go`
+* **Python**: `pip install cortext`
+* **Go**: `go get github.com/agentflare/cortext/go`
 * **JavaScript/TypeScript**: NPM package for browser integration
 
 ### Model Stack
@@ -203,7 +204,7 @@ Traditional agentic systems load entire conversation histories upfront. Streamin
 
 ## Core Components
 
-### StreamingMemory Engine
+### Cortext Intelligent Engine
 
 Main orchestrator written in C++ for performance and WASM compilation.
 
@@ -212,6 +213,7 @@ Main orchestrator written in C++ for performance and WASM compilation.
 * Process incoming tokens and maintain rolling context window
 * Generate unified multimodal embeddings at regular intervals using custom projection model
 * Query memory store for semantically relevant memories across text, vision, and audio
+* Persist and retrieve raw multimodal assets (image/audio blobs and large binaries) via `sqlite-objstore` while keeping semantic indices lightweight
 * Apply adaptive threshold filtering
 * Decide when to interrupt generation based on relevance
 * Build context from retrieved multimodal memories for injection
@@ -263,6 +265,19 @@ CREATE INDEX idx_memories_timestamp ON memories(timestamp DESC);
 CREATE INDEX idx_memories_source ON memories(source);
 CREATE INDEX idx_memories_episode ON memories(json_extract(metadata, '$.episode_id'));
 ```
+
+### Binary Object Storage for Multimodal Content
+
+Raw image and audio modality content is stored using the `sqlite-objstore` extension rather than embedding large BLOBs directly into `memories`:
+
+* **`objstore` virtual table** (see `docs/sqlite-objstore.md`) provides a minimal `(id BLOB PRIMARY KEY, data BLOB NOT NULL)` schema backed by content-addressed storage (SHA256 IDs) and streaming I/O.
+* **Memories reference blobs via metadata**: the `metadata` JSON column stores stable object IDs (for example, `$.blob_id` or `$.audio_blob_id`) as hex-encoded strings, linking each semantic embedding row to its source bytes without coupling the schema to a specific backend layout.
+* **Transactional consistency**: cortext participates in the same SQLite transaction for `memories`, graph updates, and `objstore` mutations so that vector rows, graph relationships, and underlying multimodal assets are committed or rolled back together.
+* **`memory_index.blob_id`**: the C++ core stores the raw 32-byte object identifier alongside each embedding row. Hydration paths call `objstore_get(blob_id)` to populate `Context::Memory::content`, falling back to user-defined metadata when blobs are unavailable.
+
+Native builds run `objstore_register` with the `OBJSTORE_BACKEND_AUTO` strategy so sqlite-objstore chooses the sharded file backend when a filesystem path is available and transparently falls back to the SQLite backend for in-memory databases. WASM builds embed the OPFS + VFS backends and automatically persist blobs inside Origin Private File System (browser) or WASI virtual volumes.
+
+This keeps the semantic memory schema compact while still preserving full-fidelity multimodal inputs for re-encoding, downstream export, or auditability.
 
 ### Knowledge Graph Schema
 
@@ -371,7 +386,7 @@ LIMIT 10
 
 ### Adaptive Integration
 
-The consolidation system inherits memstream's adaptive knobs:
+The consolidation system inherits cortext's adaptive knobs:
 
 * **Focus (F)**: Controls merge strictness and consolidation conservativeness
 * **Sensitivity (S)**: Influences graph node creation and relationship discovery
@@ -385,7 +400,7 @@ The system operates in three phases:
 2. **Consolidate**: Background merging and graph construction
 3. **Retrieve**: Combined episodic and semantic memory recall
 
-This creates a self-organizing memory system that evolves from immediate sensory capture to abstracted relational understanding.
+This creates a self-organizing intelligent context system that evolves from immediate sensory capture to abstracted relational understanding.
 
 ***
 
@@ -515,6 +530,14 @@ Using the WebAssembly Component Model for language-neutral interfaces.
 
 C++ compilation with Emscripten for WASM targets.
 
+#### SQLite Extensions (Embedding vs. Dynamic)
+
+* Native default: `sqlite-vec`, `sqlite-graph`, and `sqlite-objstore` are statically embedded into the core library.
+* Dynamic fallback (native): When embedding is disabled, runtime loading is attempted from well-known paths with env overrides:
+  * `SQLITE_VEC_PATH`, `SQLITE_GRAPH_PATH`
+  * Defaults: `third_party/sqlite-vec/dist/vec0.*`, `third_party/sqlite-graph/build/libgraph.*`
+* WASM: All three extensions are compiled into `cortext.wasm` and auto-registered at initialization; runtime `load_extension` is disabled.
+
 **Package Structure:**
 
 * **Dual Targets**: Native (x86\_64, ARM) and WebAssembly builds from same C++ source
@@ -555,7 +578,7 @@ All bindings expose the same API surface with idiomatic error handling and conve
 High-level Python API for seamless integration with existing Python applications and frameworks.
 
 ```python
-from streaming_memory import StreamingMemory, Config
+from cortext import CortextEngine, Config
 
 # Initialize with configuration
 config = Config(
@@ -566,11 +589,11 @@ config = Config(
     database_path="./memory.db"
 )
 
-memory = StreamingMemory(config)
+engine = CortextEngine(config)
 
 # Process token stream
 for token in llm_stream:
-    should_interrupt, context = memory.process_token(token)
+    should_interrupt, context = engine.process_token(token)
     if should_interrupt:
         # Inject context and resume
         llm.inject_context(context)
@@ -581,9 +604,9 @@ for token in llm_stream:
 Idiomatic Go API following Go conventions for error handling and context management.
 
 ```go
-import "github.com/agentflare/streaming-memory/go"
+import "github.com/agentflare/cortext/go"
 
-config := memory.Config{
+config := cortext.Config{
     Focus:       0.7,
     Sensitivity: 0.5,
     Stability:   0.8,
@@ -591,7 +614,7 @@ config := memory.Config{
     DatabasePath: "./memory.db",
 }
 
-mem, err := memory.New(config)
+engine, err := cortext.New(config)
 if err != nil {
     log.Fatal(err)
 }
@@ -599,7 +622,7 @@ if err != nil {
 // Process tokens with context
 ctx := context.Background()
 for token := range llmStream {
-    interrupt, context, err := mem.ProcessToken(ctx, token)
+    interrupt, context, err := engine.ProcessToken(ctx, token)
     if err != nil {
         log.Printf("Error: %v", err)
         continue
@@ -684,11 +707,11 @@ Comprehensive testing of individual components and algorithms.
 
 ### Integration Tests
 
-End-to-end testing of complete memory streaming workflows.
+End-to-end testing of complete intelligent context workflows.
 
 **Test Scenarios:**
 
-* **Basic Streaming**: Token processing, interrupt triggering, context injection
+* **Basic Processing**: Token processing, interrupt triggering, context injection
 * **Multimodal**: Text, vision, and audio memory integration
 * **Consolidation**: Background merging, graph construction
 * **Cross-Modal Retrieval**: Query with one modality, retrieve others
@@ -749,7 +772,7 @@ Integration with server-side LLM APIs and frameworks.
 **Framework Support:**
 
 * **FastAPI/Flask**: Async web framework integration
-* **LangChain/LlamaIndex**: Plugin architecture for memory augmentation
+* **LangChain/LlamaIndex**: Plugin architecture for intelligent context augmentation
 * **Custom Pipelines**: Drop-in replacement for existing RAG systems
 * **Microservices**: Deploy as separate memory service with REST/gRPC APIs
 
@@ -797,7 +820,7 @@ Target quality characteristics for memory retrieval and injection effectiveness:
 
 ### MVP (Current)
 
-* [x] Core streaming memory engine
+* [x] Core cortext intelligent engine
 * [x] WASM compilation support
 * [x] Python and Go bindings
 * [x] Adaptive threshold system
@@ -829,7 +852,7 @@ Target quality characteristics for memory retrieval and injection effectiveness:
 
 **v2.0**: Advanced algorithms from research prototype
 
-* Full 27-algorithm suite from memstream
+* Full 27-algorithm suite from cortext
 * Emotional consolidation and metacognition
 * Working memory gates and predictive pre-activation
 
