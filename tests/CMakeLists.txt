@@ -21,6 +21,7 @@ list(APPEND CMAKE_MODULE_PATH ${Catch2_SOURCE_DIR}/extras)
 
 add_executable(cortext_tests
   cortext.test.cpp
+  imagebind_encoder.test.cpp
   store.test.cpp
   store_extensions.test.cpp
   graph.test.cpp

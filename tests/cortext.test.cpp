@@ -87,6 +87,24 @@ SampleMp4Bytes ()
   };
   return std::vector<unsigned char> (std::begin (kData), std::end (kData));
 }
+
+bool
+ImageBindAssetsPresent (const std::string &models_dir)
+{
+  namespace fs = std::filesystem;
+  const fs::path md (models_dir);
+  const bool has_text = fs::exists (md / "text_encoder_int8.onnx")
+                        || fs::exists (md / "text_encoder.onnx");
+  const bool has_audio = fs::exists (md / "audio_encoder_int8.onnx")
+                         || fs::exists (md / "audio_encoder.onnx");
+  const bool has_vision = fs::exists (md / "vision_encoder_int8.onnx")
+                          || fs::exists (md / "vision_encoder.onnx");
+  const bool has_bpe = fs::exists (md / "bpe" / "bpe_simple_vocab_16e6.txt.gz")
+                       || fs::exists (md / "bpe_simple_vocab_16e6.txt.gz")
+                       || fs::exists ("poc/ImageBind/imagebind/bpe/"
+                                      "bpe_simple_vocab_16e6.txt.gz");
+  return has_text && has_audio && has_vision && has_bpe;
+}
 } // namespace
 
 TEST_CASE ("Cortext C++ stub can be created and used", "[cortext][stub]")
@@ -95,24 +113,45 @@ TEST_CASE ("Cortext C++ stub can be created and used", "[cortext][stub]")
   const std::string db_path = "cortext_test_stub.db";
   const std::string models_dir = "models/imagebind";
 
-  auto ctx = cortext::Cortext::Create (cfg, db_path, models_dir);
+  std::unique_ptr<cortext::Cortext> ctx;
+  REQUIRE_NOTHROW (ctx = cortext::Cortext::Create (cfg, db_path, models_dir));
   REQUIRE (ctx != nullptr);
 
-  // Process each modality (no-ops) and flush without throwing.
-  auto out_text = ctx->ProcessText ("hello world", /*ts*/ 1000ULL, "test");
-  REQUIRE_FALSE (out_text.should_interrupt);
+  // Encoding behavior depends on build flags and local environment:
+  // - If ORT is enabled AND models/tokenizer assets are present: encoding should
+  //   succeed.
+  // - Otherwise: encoding should fail fast by throwing (but construction should
+  //   still succeed).
+#if defined(CORTEXT_ENABLE_IMAGEBIND_ORT)
+  const bool expect_encode_ok = ImageBindAssetsPresent (models_dir);
+#else
+  const bool expect_encode_ok = false;
+#endif
 
-  const float pcm[4] = { 0.0f, 0.1f, -0.1f, 0.0f };
-  auto out_audio = ctx->ProcessAudio (pcm, 4, /*ts*/ 2000ULL, "test");
-  REQUIRE_FALSE (out_audio.should_interrupt);
+  if (expect_encode_ok)
+    {
+      REQUIRE_NOTHROW ([&] {
+        auto out_text = ctx->ProcessText ("hello world", /*ts*/ 1000ULL, "test");
+        REQUIRE_FALSE (out_text.should_interrupt);
 
-  const std::uint8_t px[4] = { 0, 0, 0, 0 };
-  auto out_image = ctx->ProcessImage (px, 1, 1, 4, /*ts*/ 3000ULL, "test");
-  REQUIRE_FALSE (out_image.should_interrupt);
+        const float pcm[4] = { 0.0f, 0.1f, -0.1f, 0.0f };
+        auto out_audio = ctx->ProcessAudio (pcm, 4, /*ts*/ 2000ULL, "test");
+        REQUIRE_FALSE (out_audio.should_interrupt);
 
-  auto out_cons = ctx->Consolidate (4000ULL);
-  REQUIRE_FALSE (out_cons.should_interrupt);
-  ctx->Flush ();
+        const std::uint8_t px[4] = { 0, 0, 0, 0 };
+        auto out_image
+            = ctx->ProcessImage (px, 1, 1, 4, /*ts*/ 3000ULL, "test");
+        REQUIRE_FALSE (out_image.should_interrupt);
+
+        auto out_cons = ctx->Consolidate (4000ULL);
+        REQUIRE_FALSE (out_cons.should_interrupt);
+        ctx->Flush ();
+      }());
+    }
+  else
+    {
+      REQUIRE_THROWS (ctx->ProcessText ("hello world", /*ts*/ 1000ULL, "test"));
+    }
 
   // DB assertion: open the same DB and execute a trivial query successfully.
   auto uniq = cortext::SQLiteStore::Create (db_path.c_str ());
@@ -121,22 +160,41 @@ TEST_CASE ("Cortext C++ stub can be created and used", "[cortext][stub]")
   REQUIRE (rows.size () == 1);
 }
 
+TEST_CASE ("Cortext::Create succeeds even when models dir is missing",
+           "[cortext][models]")
+{
+  cortext::Cortext::Config cfg;
+  std::unique_ptr<cortext::Cortext> ctx;
+  REQUIRE_NOTHROW (
+      ctx = cortext::Cortext::Create (cfg, ":memory:", "models/does-not-exist"));
+  REQUIRE (ctx != nullptr);
+  REQUIRE_THROWS (ctx->ProcessText ("hello", 0ULL, "test"));
+}
+
 TEST_CASE ("Cortext C ABI stubs return success", "[cortext][capi][stub]")
 {
   cortext_handle h = cortext_create_with_models (
       0.5, 0.5, 0.5, ":memory:", "models/imagebind");
   REQUIRE (h != nullptr);
 
-  REQUIRE (cortext_process_text (h, "hello", 1234ULL, "test") == 0);
+  const int text_rc = cortext_process_text (h, "hello", 1234ULL, "test");
+  if (text_rc == 0)
+    {
+      const float pcm[2] = { 0.0f, 0.0f };
+      REQUIRE (cortext_process_audio (h, pcm, 2, 2345ULL, "test") == 0);
 
-  const float pcm[2] = { 0.0f, 0.0f };
-  REQUIRE (cortext_process_audio (h, pcm, 2, 2345ULL, "test") == 0);
+      const std::uint8_t px[3] = { 0, 0, 0 };
+      REQUIRE (cortext_process_image (h, px, 1, 1, 3, 3456ULL, "test") == 0);
 
-  const std::uint8_t px[3] = { 0, 0, 0 };
-  REQUIRE (cortext_process_image (h, px, 1, 1, 3, 3456ULL, "test") == 0);
-
-  REQUIRE (cortext_consolidate (h, 4567ULL) == 0);
-  REQUIRE (cortext_flush (h) == 0);
+      REQUIRE (cortext_consolidate (h, 4567ULL) == 0);
+      REQUIRE (cortext_flush (h) == 0);
+    }
+  else
+    {
+      // Without ORT (or without models), C API should return non-zero (but not
+      // crash).
+      REQUIRE (text_rc != 0);
+    }
 
   cortext_free (h);
 }

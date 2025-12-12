@@ -65,8 +65,16 @@ extern "C"
       {
         return 1;
       }
-    (void)p->ProcessText (std::string (text), timestamp, std::string (source_id));
-    return 0;
+    try
+      {
+        (void)p->ProcessText (std::string (text), timestamp,
+                              std::string (source_id));
+        return 0;
+      }
+    catch (...)
+      {
+        return 2;
+      }
   }
 
   int
@@ -79,8 +87,16 @@ extern "C"
       {
         return 1;
       }
-    (void)p->ProcessAudio (pcm, num_samples, timestamp, std::string (source_id));
-    return 0;
+    try
+      {
+        (void)p->ProcessAudio (pcm, num_samples, timestamp,
+                               std::string (source_id));
+        return 0;
+      }
+    catch (...)
+      {
+        return 2;
+      }
   }
 
   int
@@ -93,9 +109,16 @@ extern "C"
       {
         return 1;
       }
-    (void)p->ProcessImage (data, width, height, channels, timestamp,
-                           std::string (source_id));
-    return 0;
+    try
+      {
+        (void)p->ProcessImage (data, width, height, channels, timestamp,
+                               std::string (source_id));
+        return 0;
+      }
+    catch (...)
+      {
+        return 2;
+      }
   }
 
   int
@@ -106,8 +129,15 @@ extern "C"
       {
         return 1;
       }
-    (void)p->Consolidate (now_timestamp);
-    return 0;
+    try
+      {
+        (void)p->Consolidate (now_timestamp);
+        return 0;
+      }
+    catch (...)
+      {
+        return 2;
+      }
   }
 
   int
@@ -118,8 +148,15 @@ extern "C"
       {
         return 1;
       }
-    p->Flush ();
-    return 0;
+    try
+      {
+        p->Flush ();
+        return 0;
+      }
+    catch (...)
+      {
+        return 2;
+      }
   }
 
 } // extern "C"

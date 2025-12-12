@@ -1,17 +1,19 @@
 #pragma once
 
 #include "cortext/encoder/encoder.hpp"
+#include <memory>
 #include <string>
 #include <vector>
 
 namespace cortext
 {
 
-/// @brief ImageBind-oriented encoder stub. Methods are no-ops for now.
+/// @brief ImageBind encoder backed by ONNX Runtime sessions.
 class ImageBindEncoder : public Encoder
 {
 public:
   explicit ImageBindEncoder (std::string models_dir);
+  ~ImageBindEncoder () override;
 
   void EncodeText (const std::string &text,
                    std::vector<float> &out_embedding) override;
@@ -23,9 +25,9 @@ public:
                     int channels, std::vector<float> &out_embedding) override;
 
 private:
-  std::string models_dir_;
+  struct Impl;
+  std::unique_ptr<Impl> impl_;
   static constexpr int kDim = 256;
-  static void FillZeros (std::vector<float> &out, int dim);
 };
 
 } // namespace cortext

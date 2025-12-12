@@ -225,22 +225,66 @@ endif()
 
 # Optional ONNX Runtime integration for ImageBind embedder
 if(CORTEXT_ENABLE_IMAGEBIND_ORT)
-  target_compile_definitions(cortext PRIVATE CORTEXT_ENABLE_IMAGEBIND_ORT=1)
-  target_include_directories(cortext PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/onnxruntime/include
-  )
-  find_library(ONNXRUNTIME_LIB NAMES onnxruntime
-    HINTS
-      ${CMAKE_CURRENT_SOURCE_DIR}/third_party/onnxruntime/lib
-      ${CMAKE_CURRENT_SOURCE_DIR}/third_party/onnxruntime/build/Release
-      ${CMAKE_CURRENT_SOURCE_DIR}/third_party/onnxruntime/build/Debug
-    PATHS ENV ONNXRUNTIME_LIBDIR
-  )
-  if(ONNXRUNTIME_LIB)
-    target_link_libraries(cortext PRIVATE ${ONNXRUNTIME_LIB})
-  else()
-    message(WARNING "ONNX Runtime library not found; CORTEXT_ENABLE_IMAGEBIND_ORT will have no effect (fallback to zeros).")
+  include(ExternalProject)
+  find_package(ZLIB REQUIRED)
+
+  # Expose this feature macro to dependents (tests, downstream consumers).
+  target_compile_definitions(cortext PUBLIC CORTEXT_ENABLE_IMAGEBIND_ORT=1)
+
+  # Build ONNX Runtime from vendored source when needed.
+  set(CORTEXT_ORT_BUILD_TYPE "${CMAKE_BUILD_TYPE}")
+  if(NOT CORTEXT_ORT_BUILD_TYPE)
+    set(CORTEXT_ORT_BUILD_TYPE "Release")
   endif()
+
+  set(CORTEXT_ORT_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/onnxruntime/cmake")
+  set(CORTEXT_ORT_BINARY_DIR "${CMAKE_BINARY_DIR}/third_party/onnxruntime-build")
+  set(CORTEXT_ORT_INSTALL_DIR "${CMAKE_BINARY_DIR}/third_party/onnxruntime-install")
+  set(CORTEXT_ORT_LIB_PATH
+      "${CORTEXT_ORT_INSTALL_DIR}/lib/${CMAKE_SHARED_LIBRARY_PREFIX}onnxruntime${CMAKE_SHARED_LIBRARY_SUFFIX}")
+
+  # Use headers from the ORT install tree.
+  target_include_directories(cortext PRIVATE
+    ${CORTEXT_ORT_INSTALL_DIR}/include
+  )
+
+  # If a prebuilt library exists, prefer it. Otherwise build/install into the
+  # build tree.
+  if(NOT EXISTS "${CORTEXT_ORT_LIB_PATH}")
+    ExternalProject_Add(onnxruntime_ep
+      SOURCE_DIR "${CORTEXT_ORT_SOURCE_DIR}"
+      BINARY_DIR "${CORTEXT_ORT_BINARY_DIR}"
+      INSTALL_DIR "${CORTEXT_ORT_INSTALL_DIR}"
+      CMAKE_ARGS
+        -DCMAKE_BUILD_TYPE=${CORTEXT_ORT_BUILD_TYPE}
+        -DCMAKE_INSTALL_PREFIX=${CORTEXT_ORT_INSTALL_DIR}
+        -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+        # Prevent ORT from picking up Homebrew/system Protobuf configs,
+        # which can reference Abseil targets we aren't providing here.
+        -DCMAKE_DISABLE_FIND_PACKAGE_Protobuf=ON
+        -DCMAKE_DISABLE_FIND_PACKAGE_protobuf=ON
+        # Prevent ORT from picking up Homebrew/system ONNX config, which can
+        # pull in system Protobuf transitively.
+        -DCMAKE_DISABLE_FIND_PACKAGE_ONNX=ON
+        -DCMAKE_DISABLE_FIND_PACKAGE_onnx=ON
+        -Donnxruntime_BUILD_SHARED_LIB=ON
+        -Donnxruntime_BUILD_UNIT_TESTS=OFF
+        -Donnxruntime_ENABLE_PYTHON=OFF
+      BUILD_BYPRODUCTS "${CORTEXT_ORT_LIB_PATH}"
+      USES_TERMINAL_CONFIGURE TRUE
+      USES_TERMINAL_BUILD TRUE
+      USES_TERMINAL_INSTALL TRUE
+    )
+  else()
+    add_custom_target(onnxruntime_ep)
+  endif()
+
+  add_library(onnxruntime SHARED IMPORTED GLOBAL)
+  set_target_properties(onnxruntime PROPERTIES IMPORTED_LOCATION "${CORTEXT_ORT_LIB_PATH}")
+  add_dependencies(onnxruntime onnxruntime_ep)
+
+  target_link_libraries(cortext PRIVATE onnxruntime ZLIB::ZLIB)
+  add_dependencies(cortext onnxruntime_ep)
 endif()
 
 # Use C++17 features
