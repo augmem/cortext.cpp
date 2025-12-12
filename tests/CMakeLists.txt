@@ -50,6 +50,12 @@ add_executable(cortext_tests
   operations_metacognitive.test.cpp
   operations_serial_position.test.cpp
   operations_serial_position_apply.test.cpp
+  operations_logprob_surprise.test.cpp
+  operations_precision_modulation.test.cpp
+  operations_graph_schema.test.cpp
+  operations_graph_build.test.cpp
+  operations_graph_retrieval.test.cpp
+  operations_goal_alignment.test.cpp
   operations_consolidation.test.cpp
   cortext.test.cpp
   signal_processor.test.cpp

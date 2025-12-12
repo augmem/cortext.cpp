@@ -149,6 +149,43 @@ TEST_CASE ("Alg29c batches up to ExtractionBatchSize(T) per run",
   REQUIRE (std::any_cast<long long> (rows[0].at ("c")) == 8LL);
 }
 
+TEST_CASE ("Alg32 caps jobs to MaxExtractionsPerCycle(T)",
+           "[operations][extraction][alg32]")
+{
+  auto unique_store = SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<Store> (std::move (unique_store));
+  CreateInputTables (store);
+
+  SignalProcessor::Config cfg;
+  cfg.focus = 0.5;
+  cfg.sensitivity = 0.5;
+  cfg.stability = 1.0; // enabled, batch size=32, max_extractions_per_cycle=5
+
+  // Create 10 eligible summaries; cap should limit to 5.
+  for (int i = 0; i < 10; ++i)
+    {
+      const std::string id = "c" + std::to_string (i);
+      store->Execute ("INSERT INTO consolidation_summaries(summary_id, "
+                      "summary_text, cluster_size) VALUES (?,?,?)",
+                      { id, std::string ("summary "), 100LL });
+      store->Execute (
+          "INSERT INTO consolidation_sources(summary_id, source_text) "
+          "VALUES (?,?)",
+          { id, std::string ("ctx") });
+    }
+
+  auto op = std::make_unique<EnqueueExtractionJobs> ();
+  auto ops = std::make_unique<OperationSet> (std::move (op));
+  SignalProcessor processor (cfg, store, std::move (ops));
+
+  processor.Process (MakeSignal (60'000ULL));
+  processor.Flush ();
+
+  auto rows = store->Execute ("SELECT COUNT(*) AS c FROM extraction_jobs");
+  REQUIRE (rows.size () == 1);
+  REQUIRE (std::any_cast<long long> (rows[0].at ("c")) == 5LL);
+}
+
 TEST_CASE ("Alg29c prompt contains summary and concatenated context",
            "[operations][extraction][alg29c]")
 {

@@ -36,6 +36,46 @@ KNeighbors (double T)
   return static_cast<int> (std::round (Lerp (8.0, 32.0, T)));
 }
 
+// --- Section 0.7: Operational Retrieval & Streaming Parameters ---
+inline int
+MaxResults (double F)
+{
+  // max_results(F) = round(lerp(R_max, R_min, F)), R_min=4, R_max=64
+  return static_cast<int> (std::round (Lerp (64.0, 4.0, Clamp (F, 0.0, 1.0))));
+}
+
+inline int
+AdjacentWindow (double F)
+{
+  // adjacent_window(F) = round(lerp(adjacent_max, adjacent_min, F)),
+  // adjacent_min=1, adjacent_max=8
+  return static_cast<int> (std::round (Lerp (8.0, 1.0, Clamp (F, 0.0, 1.0))));
+}
+
+inline int
+MaxWaitTokens (double F)
+{
+  // max_wait_tokens(F) = round(lerp(wait_max, wait_min, F)),
+  // wait_min=16, wait_max=128
+  return static_cast<int> (std::round (Lerp (128.0, 16.0, Clamp (F, 0.0, 1.0))));
+}
+
+inline int
+CheckIntervalTokens (double S)
+{
+  // check_interval(S) = round(lerp(check_max_tokens, check_min_tokens, S)),
+  // check_min_tokens=8, check_max_tokens=64
+  return static_cast<int> (std::round (Lerp (64.0, 8.0, Clamp (S, 0.0, 1.0))));
+}
+
+inline int
+GraphDepth (double F)
+{
+  // A small, knob-derived traversal depth (Alg 31).
+  // Depth in [1,2], favoring shallower at high focus.
+  return static_cast<int> (std::round (Lerp (2.0, 1.0, Clamp (F, 0.0, 1.0))));
+}
+
 inline int
 PriorMass (double T)
 {
@@ -156,6 +196,26 @@ ExtractionBatchSize (double T)
 {
   // extraction_batch_size = round(lerp(8, 32, T))
   return static_cast<int> (std::round (Lerp (8.0, 32.0, T)));
+}
+
+// Max extraction jobs per consolidation cycle — Algorithm 32
+inline int
+MaxExtractionsPerCycle (double T)
+{
+  // max_extractions_per_cycle = round(lerp(20, 5, T))
+  return static_cast<int> (std::round (Lerp (20.0, 5.0, Clamp (T, 0.0, 1.0))));
+}
+
+// Capacity trigger threshold — Algorithm 28 (capacity trigger).
+inline long long
+ConsolidationThresholdCount (double T)
+{
+  // Derive a threshold from stability-scaled windows so it grows with system
+  // maturity and persistence. This stays knob-only and avoids extra tunables.
+  const long long n = static_cast<long long> (NCtx (Clamp (T, 0.0, 1.0)));
+  const long long w = static_cast<long long> (WScore (Clamp (T, 0.0, 1.0)));
+  const long long thr = n * w;
+  return (thr < 1) ? 1 : thr;
 }
 
 // Minimum cluster size for extraction — Algorithm 29c
@@ -381,6 +441,23 @@ CertaintyRequirement (double T)
 {
   // certainty_requirement = lerp(0.6, 0.9, T)
   return Lerp (0.6, 0.9, T);
+}
+
+// --- Section 5.5 (Adaptive Threshold Precision Modulation) ---
+inline double
+TargetPrecision (double F, double T)
+{
+  // algorithms.md defines ΔThreshold_precision_t in terms of a
+  // target_precision. The target itself is derived (not configurable).
+  //
+  // We anchor it to the metacognitive certainty requirement (Alg 25) and
+  // scale it by focus to reflect that higher focus demands higher precision.
+  //
+  // target_precision = certainty_requirement(T) * (0.5 + 0.5*F)
+  const double f01 = Clamp (F, 0.0, 1.0);
+  const double t01 = Clamp (T, 0.0, 1.0);
+  const double certainty = CertaintyRequirement (t01);
+  return Clamp (certainty * (0.5 + 0.5 * f01), 0.0, 1.0);
 }
 
 inline double

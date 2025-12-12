@@ -15,6 +15,11 @@ InitializeFocusPriors::Execute (OperationContext &context) const
   const auto &config = context.GetConfig ();
   auto &p_ctx = context.GetProcessorContext ();
 
+  if (p_ctx.focus_priors_initialized)
+    {
+      return;
+    }
+
   p_ctx.weight_relevance_prior = core::Sigmoid (2 * config.focus - 1);
   p_ctx.coverage_gain_floor_prior = 0.3 + 0.7 * config.focus;
   p_ctx.mismatch_weight_prior = (1.0 - config.focus);
@@ -27,6 +32,7 @@ InitializeFocusPriors::Execute (OperationContext &context) const
   // Also initialize the dynamic values from the priors.
   p_ctx.weight_relevance = p_ctx.weight_relevance_prior;
   p_ctx.attention_width = p_ctx.attention_width_prior;
+  p_ctx.focus_priors_initialized = true;
 }
 
 void

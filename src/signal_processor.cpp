@@ -33,7 +33,8 @@ SignalProcessor::~SignalProcessor () = default;
 SignalProcessor::Output
 SignalProcessor::Process (const Signal &signal)
 {
-  OperationContext op_context (signal, *context_, config_, write_buffer_);
+  OperationContext op_context (signal, *context_, config_, write_buffer_,
+                               store_.get ());
 
   // Record timestamp for observed write-rate window before ops execute.
   context_->write_rate_window_.Record (signal.timestamp);

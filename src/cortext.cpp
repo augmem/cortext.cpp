@@ -7,8 +7,16 @@
 #include "cortext/store/sqlite_store.hpp"
 
 #include "cortext/operations/consolidation.hpp"
+#include "cortext/operations/blend.hpp"
+#include "cortext/operations/graph_build.hpp"
+#include "cortext/operations/graph_retrieval.hpp"
+#include "cortext/operations/graph_schema.hpp"
+#include "cortext/operations/goal_alignment.hpp"
+#include "cortext/operations/logprob_surprise.hpp"
+#include "cortext/operations/precision.hpp"
 #include "cortext/operations/sensitivity.hpp"
 #include "cortext/operations/threshold.hpp"
+#include "cortext/operations/uncertainty.hpp"
 #include "cortext/processor/operation.hpp"
 
 #include <Eigen/Dense>
@@ -21,6 +29,7 @@
 
 // ConsolidationGate operation declaration
 #include "cortext/operations/boundary.hpp"
+#include "cortext/operations/coherence.hpp"
 #include "cortext/operations/competition.hpp"
 #include "cortext/operations/effective_focus.hpp"
 #include "cortext/operations/emotion.hpp"
@@ -80,18 +89,94 @@ struct Cortext::Impl
     // Encoder stub (ImageBind-oriented)
     encoder = std::make_unique<ImageBindEncoder> (models_dir);
 
-    // Default pipeline: sensitivity → threshold → eval_consolidation → gate
+    // Default pipeline: full per-signal processing chain.
     using cortext::OperationSet;
     using cortext::operations::ConsolidationGate;
     using cortext::operations::EvaluateConsolidation;
+    using cortext::operations::FitMetricWeightsRLS;
+    using cortext::operations::GraphAugmentedRetrieveCandidates;
+    using cortext::operations::ComputeGoalAlignment;
+    using cortext::operations::ComputeCompositeScore;
+    using cortext::operations::ComputeCoherence;
+    using cortext::operations::ComputeEffectiveFocus;
+    using cortext::operations::ComputeFocusSpread;
+    using cortext::operations::ComputeMniGateDecision;
+    using cortext::operations::InitializeFocusPriors;
+    using cortext::operations::InitializeSensitivityPriors;
+    using cortext::operations::InitializeStabilityPriors;
+    using cortext::operations::ApplyEmotionalConsolidation;
+    using cortext::operations::ApplyFocusFeedback;
+    using cortext::operations::ApplyInfluenceFeedback;
+    using cortext::operations::ApplyPredictivePreActivation;
+    using cortext::operations::ApplyReconsolidation;
+    using cortext::operations::ApplyRetrievalCompetition;
+    using cortext::operations::ApplySensitivityFeedback;
+    using cortext::operations::ApplySerialPositionEffects;
+    using cortext::operations::ApplySerialPositionMultiplier;
+    using cortext::operations::ApplyStabilityFeedback;
+    using cortext::operations::BuildGraphFromConsolidation;
+    using cortext::operations::CheckEpisodeBoundary;
+    using cortext::operations::ComputeMetrics;
+    using cortext::operations::EnsureGraphSchema;
+    using cortext::operations::MetacognitiveMonitoring;
+    using cortext::operations::UpdateFocus;
+    using cortext::operations::UpdateLogprobSurprise;
+    using cortext::operations::UpdateMemoryStrength;
+    using cortext::operations::UpdatePrecisionDelta;
     using cortext::operations::UpdateSensitivity;
+    using cortext::operations::UpdateStability;
     using cortext::operations::UpdateThreshold;
+    using cortext::operations::UpdateUncertainty;
+    using cortext::operations::WorkingMemory;
 
     pipeline_root = std::make_unique<OperationSet> (
+        std::make_unique<EnsureGraphSchema> (),
+
+        std::make_unique<InitializeFocusPriors> (),
+        std::make_unique<InitializeSensitivityPriors> (),
+        std::make_unique<InitializeStabilityPriors> (),
+
+        std::make_unique<UpdateFocus> (),
         std::make_unique<UpdateSensitivity> (),
+
+        std::make_unique<ComputeCoherence> (),
+        std::make_unique<ComputeFocusSpread> (),
+        std::make_unique<ComputeEffectiveFocus> (),
+        std::make_unique<CheckEpisodeBoundary> (),
+
+        std::make_unique<UpdateLogprobSurprise> (),
+        std::make_unique<UpdateUncertainty> (),
+        std::make_unique<ComputeMetrics> (),
+        std::make_unique<FitMetricWeightsRLS> (),
+        std::make_unique<ComputeCompositeScore> (),
+
+        std::make_unique<UpdatePrecisionDelta> (),
         std::make_unique<UpdateThreshold> (),
+
+        std::make_unique<GraphAugmentedRetrieveCandidates> (),
+        std::make_unique<ComputeGoalAlignment> (),
+        std::make_unique<ComputeMniGateDecision> (),
+
+        std::make_unique<ApplyRetrievalCompetition> (),
+        std::make_unique<ApplyPredictivePreActivation> (),
+        std::make_unique<ApplyReconsolidation> (),
+
+        std::make_unique<ApplyFocusFeedback> (),
+        std::make_unique<ApplySensitivityFeedback> (),
+        std::make_unique<ApplyStabilityFeedback> (),
+        std::make_unique<UpdateStability> (),
+        std::make_unique<ApplyInfluenceFeedback> (),
+
+        std::make_unique<ApplySerialPositionEffects> (),
+        std::make_unique<ApplySerialPositionMultiplier> (),
+        std::make_unique<UpdateMemoryStrength> (),
+        std::make_unique<ApplyEmotionalConsolidation> (),
+        std::make_unique<WorkingMemory> (),
+        std::make_unique<MetacognitiveMonitoring> (),
+
         std::make_unique<EvaluateConsolidation> (),
-        std::make_unique<ConsolidationGate> ());
+        std::make_unique<ConsolidationGate> (),
+        std::make_unique<BuildGraphFromConsolidation> ());
 
     cortext::SignalProcessor::Config pcfg;
     pcfg.focus = cfg.focus;

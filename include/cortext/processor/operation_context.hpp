@@ -14,6 +14,8 @@
 namespace cortext
 {
 
+class Store;
+
 /// @brief Contains all the state for a single signal processing run.
 ///
 /// This object is created by the SignalProcessor for each signal and is passed
@@ -38,6 +40,15 @@ public:
   OperationContext (const Signal &signal, ProcessorContext &context,
                     const SignalProcessor::Config &config,
                     std::vector<BufferedWriteInstruction> &write_buffer);
+
+  /// @brief Constructs an OperationContext with an attached Store.
+  ///
+  /// The store pointer is non-owning and may be null. Operations that need
+  /// read access to persisted state (e.g. retrieval) can use it when present.
+  OperationContext (const Signal &signal, ProcessorContext &context,
+                    const SignalProcessor::Config &config,
+                    std::vector<BufferedWriteInstruction> &write_buffer,
+                    Store *store);
 
   // --- Accessors ---
 
@@ -67,6 +78,13 @@ public:
   GetConfig () const
   {
     return config_;
+  }
+
+  /// @brief Gets the backing store (may be null).
+  Store *
+  GetStore () const
+  {
+    return store_;
   }
 
   // --- Output ---
@@ -588,6 +606,7 @@ private:
   ProcessorContext &context_;
   const SignalProcessor::Config &config_;
   std::vector<BufferedWriteInstruction> &write_buffer_;
+  Store *store_ = nullptr;
 
   // Typed scratch fields
   std::optional<double> composite_score_;

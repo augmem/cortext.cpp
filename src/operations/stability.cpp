@@ -14,6 +14,11 @@ InitializeStabilityPriors::Execute (OperationContext &context) const
   const auto &cfg = context.GetConfig ();
   const double T = cfg.stability;
 
+  if (p_ctx.stability_priors_initialized)
+    {
+      return;
+    }
+
   p_ctx.hysteresis_band_prior = core::BaseBandPrior (T);
   p_ctx.half_life_prior = core::BaseHalfLifePrior (T);
   p_ctx.rate_decay_prior = core::Lerp (0.60, 0.98, T);
@@ -30,6 +35,7 @@ InitializeStabilityPriors::Execute (OperationContext &context) const
       = core::ClampHalfLife (constants::kOneHalf * p_ctx.half_life);
   p_ctx.salience_half_life
       = core::ClampHalfLife (constants::kOneHalf * p_ctx.half_life);
+  p_ctx.stability_priors_initialized = true;
 }
 
 void

@@ -16,6 +16,11 @@ InitializeSensitivityPriors::Execute (OperationContext &context) const
   auto &p_ctx = context.GetProcessorContext ();
   const auto &config = context.GetConfig ();
 
+  if (p_ctx.sensitivity_priors_initialized)
+    {
+      return;
+    }
+
   const double S = config.sensitivity;
 
   // Priors per algorithms.md Algorithm 3
@@ -30,6 +35,7 @@ InitializeSensitivityPriors::Execute (OperationContext &context) const
   p_ctx.rate_target_prior = p_ctx.base_rate_prior * (0.5 + 1.5 * S);
   // Initialize dynamic values from priors
   p_ctx.weight_novelty = p_ctx.weight_novelty_prior;
+  p_ctx.sensitivity_priors_initialized = true;
 }
 
 namespace

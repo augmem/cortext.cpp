@@ -79,6 +79,12 @@ add_library(cortext
     src/operations/interrupt_gate.cpp
     src/operations/consolidation.cpp
     src/operations/consolidation_gate.cpp
+    src/operations/logprob_surprise.cpp
+    src/operations/precision.cpp
+    src/operations/graph_schema.cpp
+    src/operations/graph_build.cpp
+    src/operations/graph_retrieval.cpp
+    src/operations/goal_alignment.cpp
 )
 add_library(cortext::cortext ALIAS cortext)
 

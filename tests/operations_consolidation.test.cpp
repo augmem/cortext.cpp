@@ -189,6 +189,60 @@ TEST_CASE ("Alg28 interval trigger starts when elapsed exceeds interval",
   REQUIRE (std::any_cast<std::string> (r.at ("action")) == "start");
 }
 
+TEST_CASE ("Alg28 capacity trigger starts when db_size exceeds threshold",
+           "[operations][consolidation][capacity]")
+{
+  auto unique_store = SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<Store> (std::move (unique_store));
+
+  // Use low stability to keep threshold small-ish.
+  SignalProcessor::Config cfg;
+  cfg.focus = 0.5;
+  cfg.sensitivity = 0.5;
+  cfg.stability = 0.0;
+
+  // Create embeddings table and insert just over threshold.
+  store->Execute ("CREATE TABLE IF NOT EXISTS embeddings ("
+                  "embedding_id INTEGER PRIMARY KEY,"
+                  "embedding BLOB"
+                  ");");
+  const long long threshold = core::ConsolidationThresholdCount (cfg.stability);
+  const long long want = threshold + 1;
+  const std::vector<float> emb = { 1.0f, 0.0f };
+  for (long long i = 1; i <= want; ++i)
+    {
+      store->Execute ("INSERT INTO embeddings(embedding_id, embedding) VALUES "
+                      "(?,?)",
+                      { i, emb });
+    }
+
+  const uint64_t now_ts = 70'000ULL;
+  const int idle_required = core::IdleRequiredSeconds (cfg.stability);
+  const uint64_t last_ret = now_ts - static_cast<uint64_t> (idle_required + 1);
+
+  auto setup = std::make_unique<SetupConsolidationInputsOp> (
+      /*tokens_in_flight=*/0,
+      /*queue_depth=*/0,
+      /*m_rate=*/3.0,
+      /*rate_target=*/2.0,
+      /*last_retrieval_ts=*/last_ret,
+      /*last_consolidation_ts=*/std::nullopt);
+  auto eval = std::make_unique<EvaluateConsolidation> ();
+  auto ops
+      = std::make_unique<OperationSet> (std::move (setup), std::move (eval));
+  SignalProcessor processor (cfg, store, std::move (ops));
+
+  processor.Process (MakeSignal (now_ts));
+  processor.Flush ();
+
+  auto rows = store->Execute ("SELECT reason, action FROM "
+                              "consolidation_events ORDER BY id DESC LIMIT 1");
+  REQUIRE (rows.size () == 1);
+  const auto &r = rows[0];
+  REQUIRE (std::any_cast<std::string> (r.at ("reason")) == "capacity");
+  REQUIRE (std::any_cast<std::string> (r.at ("action")) == "start");
+}
+
 TEST_CASE ("Alg28 no trigger emits no event table rows",
            "[operations][consolidation]")
 {

@@ -3,6 +3,7 @@
 #include "cortext/core/knobs.hpp"
 #include "cortext/operations/constants.hpp"
 #include "cortext/processor/operation_context.hpp"
+#include <any>
 #include <algorithm>
 #include <cmath>
 #include <string>
@@ -15,6 +16,7 @@ EvaluateConsolidation::Execute (OperationContext &context) const
 {
   auto &p_ctx = context.GetProcessorContext ();
   const auto &cfg = context.GetConfig ();
+  Store *store = context.GetStore ();
 
   // Triggers (Algorithm 28)
   const uint64_t now_ts = context.GetSignal ().timestamp;
@@ -34,7 +36,32 @@ EvaluateConsolidation::Execute (OperationContext &context) const
                > static_cast<int64_t> (interval_req))
             : false;
 
-  const bool any_trigger = trigger_rate || trigger_interval;
+  // Capacity trigger: db_size > consolidation_threshold
+  long long db_size = 0;
+  const long long consolidation_threshold
+      = core::ConsolidationThresholdCount (cfg.stability);
+  bool trigger_capacity = false;
+  if (store)
+    {
+      try
+        {
+          auto rows = store->Execute (
+              "SELECT COUNT(*) AS c FROM embeddings", {});
+          if (!rows.empty () && rows[0].count ("c") == 1)
+            {
+              const auto &v = rows[0].at ("c");
+              if (v.type () == typeid (long long))
+                db_size = std::any_cast<long long> (v);
+            }
+        }
+      catch (...)
+        {
+          db_size = 0;
+        }
+    }
+  trigger_capacity = (db_size > consolidation_threshold);
+
+  const bool any_trigger = trigger_rate || trigger_interval || trigger_capacity;
   if (!any_trigger)
     {
       // No event when no triggers fire.
@@ -60,8 +87,9 @@ EvaluateConsolidation::Execute (OperationContext &context) const
             : (idle_basic_ok
                && (idle_for >= static_cast<double> (idle_required)));
 
-  const std::string reason
-      = trigger_rate ? std::string ("rate") : std::string ("interval");
+  const std::string reason = trigger_capacity ? std::string ("capacity")
+                              : (trigger_rate ? std::string ("rate")
+                                              : std::string ("interval"));
   const std::string action
       = idle_ok ? std::string ("start") : std::string ("defer");
 
@@ -73,6 +101,8 @@ EvaluateConsolidation::Execute (OperationContext &context) const
                "ts INTEGER,"
                "reason TEXT,"
                "action TEXT,"
+               "db_size INTEGER,"
+               "consolidation_threshold INTEGER,"
                "m_rate REAL,"
                "rate_target REAL,"
                "idle_for REAL,"
@@ -86,12 +116,15 @@ EvaluateConsolidation::Execute (OperationContext &context) const
   {
     BufferedWriteInstruction op;
     op.query = "INSERT INTO consolidation_events("
-               "ts, reason, action, m_rate, rate_target, idle_for, "
+               "ts, reason, action, db_size, consolidation_threshold, "
+               "m_rate, rate_target, idle_for, "
                "tokens_in_flight, retrieval_queue_depth"
-               ") VALUES (?, ?, ?, ?, ?, ?, ?, ?);";
+               ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);";
     op.params = { static_cast<long long> (now_ts),
                   reason,
                   action,
+                  db_size,
+                  consolidation_threshold,
                   m_rate,
                   rate_target,
                   idle_for,
@@ -144,6 +177,8 @@ EnqueueExtractionJobs::Execute (OperationContext &context) const
 
   const int min_cluster = core::MinClusterSizeForExtraction (F);
   const int batch_size = core::ExtractionBatchSize (T);
+  const int max_cycle = core::MaxExtractionsPerCycle (T);
+  const int limit = std::max (1, std::min (batch_size, max_cycle));
 
   // Insert-or-ignore queued jobs for eligible summaries, limited by batch
   // size. Prompt is built from algorithms.md template: includes Summary and
@@ -174,7 +209,7 @@ EnqueueExtractionJobs::Execute (OperationContext &context) const
           "GROUP BY cs.summary_id, cs.summary_text "
           "LIMIT ?3;";
     op.params = { now_ts, static_cast<long long> (min_cluster),
-                  static_cast<long long> (batch_size) };
+                  static_cast<long long> (limit) };
     context.AddWriteInstruction (std::move (op));
   }
 }

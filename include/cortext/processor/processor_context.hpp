@@ -153,6 +153,10 @@ struct ProcessorContext
   // --- General State ---
   int signals_processed = 0;
   double u_t = 0.0; // Smoothed uncertainty
+  // One-time initialization guards for prior-setting operations.
+  bool focus_priors_initialized = false;
+  bool sensitivity_priors_initialized = false;
+  bool stability_priors_initialized = false;
   // Algorithm 27 refractory tick (last interrupt position)
   int last_interrupt_tick = -1000000;
   // Algorithm 7 RLS update throttling counter

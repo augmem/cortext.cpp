@@ -20,6 +20,7 @@ enum class Metric
   salience,
   valence,
   arousal,
+  goal_alignment,
   focus_spread,
   drift_mag,
   // Test/debugging metrics
