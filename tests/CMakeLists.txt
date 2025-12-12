@@ -2,12 +2,22 @@
 cmake_minimum_required(VERSION 3.24)
 
 include(FetchContent)
-FetchContent_Declare(
-  Catch2
-  GIT_REPOSITORY https://github.com/catchorg/Catch2.git
-  GIT_TAG v3.5.3
-)
-FetchContent_MakeAvailable(Catch2)
+
+# Use a block to prevent Catch2's own tests from being added to ctest
+block(SCOPE_FOR VARIABLES)
+  set(BUILD_TESTING OFF)
+  set(CATCH_BUILD_TESTING OFF)
+  
+  FetchContent_Declare(
+    Catch2
+    GIT_REPOSITORY https://github.com/catchorg/Catch2.git
+    GIT_TAG v3.5.3
+  )
+  FetchContent_MakeAvailable(Catch2)
+endblock()
+
+# Now include Catch2 cmake modules for test discovery
+list(APPEND CMAKE_MODULE_PATH ${Catch2_SOURCE_DIR}/extras)
 
 add_executable(cortext_tests
   cortext.test.cpp

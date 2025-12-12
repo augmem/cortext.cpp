@@ -22,18 +22,21 @@ if(EMSCRIPTEN AND BUILD_TESTING)
 endif()
 
 include(FetchContent)
-set(CORTEXT_BUILD_TESTING ${BUILD_TESTING})
-FetchContent_Declare(
-  eigen
-  GIT_REPOSITORY https://gitlab.com/libeigen/eigen.git
-  GIT_TAG 3.4.0
-)
-# Disable Eigen's internal tests to keep ctest focused on cortext targets.
-set(EIGEN_TESTING OFF CACHE BOOL "" FORCE)
-set(EIGEN_BUILD_TESTING OFF CACHE BOOL "" FORCE)
-set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
-FetchContent_MakeAvailable(eigen)
-set(BUILD_TESTING ${CORTEXT_BUILD_TESTING} CACHE BOOL "" FORCE)
+
+# Use a block to scope BUILD_TESTING variable for third-party dependencies
+# This prevents Eigen tests from being added to ctest
+block(SCOPE_FOR VARIABLES)
+  set(BUILD_TESTING OFF)
+  set(EIGEN_BUILD_TESTING OFF)
+  set(EIGEN_TESTING OFF)
+  
+  FetchContent_Declare(
+    eigen
+    GIT_REPOSITORY https://gitlab.com/libeigen/eigen.git
+    GIT_TAG 3.4.0
+  )
+  FetchContent_MakeAvailable(eigen)
+endblock()
 
 
 if(NOT EMSCRIPTEN)
@@ -201,7 +204,11 @@ target_compile_definitions(cortext PRIVATE SQLITE_CORE=1)
 # Link dependencies (SQLite handling differs per target)
 target_link_libraries(cortext PUBLIC Eigen3::Eigen)
 if(EMSCRIPTEN)
-  add_subdirectory(third_party/sqlite)
+  # Use a block to prevent SQLite tests from being added to ctest
+  block(SCOPE_FOR VARIABLES)
+    set(BUILD_TESTING OFF)
+    add_subdirectory(third_party/sqlite)
+  endblock()
   target_link_libraries(cortext PRIVATE sqlite3)
   target_compile_definitions(cortext PRIVATE SQLITE_OMIT_LOAD_EXTENSION=1)
   target_sources(cortext PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/wasm/auto_extensions.cpp)
