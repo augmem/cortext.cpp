@@ -66,5 +66,21 @@ add_executable(cortext_tests
 target_link_libraries(cortext_tests PRIVATE cortext Catch2::Catch2WithMain)
 target_compile_definitions(cortext_tests PRIVATE CORTEXT_TESTING=1)
 
+# Ensure the ONNX Runtime dylib can be found when Catch2 runs test discovery
+# during the build (macOS uses @rpath + LC_RPATH entries).
+if(CORTEXT_ENABLE_IMAGEBIND_ORT)
+  if(APPLE)
+    # cortext_tests lives in <build>/tests; ORT is installed to
+    # <build>/third_party/onnxruntime-install/lib
+    set_property(TARGET cortext_tests APPEND PROPERTY BUILD_RPATH
+      "@loader_path/../third_party/onnxruntime-install/lib"
+    )
+  elseif(UNIX)
+    set_property(TARGET cortext_tests APPEND PROPERTY BUILD_RPATH
+      "$ORIGIN/../third_party/onnxruntime-install/lib"
+    )
+  endif()
+endif()
+
 include(Catch)
 catch_discover_tests(cortext_tests)
