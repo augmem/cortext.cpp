@@ -8,13 +8,12 @@ namespace cortext::operations
 
 /// @brief Creates idempotent schema for graph and extraction tables.
 ///
-/// This operation only emits DDL statements into the episode write buffer.
-/// It does not populate any rows.
+/// This operation registers schema migrations at startup.
 class EnsureGraphSchema : public IOperation
 {
 public:
   void Execute (OperationContext &context) const override;
+  void CollectSchema (cortext::store::SchemaRegistry &registry) const override;
 };
 
 } // namespace cortext::operations
-

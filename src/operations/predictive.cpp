@@ -4,6 +4,7 @@
 #include "cortext/core/algorithms.hpp"
 #include "cortext/operations/constants.hpp"
 #include "cortext/processor/operation_context.hpp"
+#include "cortext/store/schema.hpp"
 #include <Eigen/Dense>
 #include <algorithm>
 #include <cmath>
@@ -119,20 +120,6 @@ ApplyPredictivePreActivation::Execute (OperationContext &context) const
       return;
     }
 
-  // Ensure persistence table exists (idempotent).
-  {
-    BufferedWriteInstruction op;
-    op.query = "CREATE TABLE IF NOT EXISTS memory_feedback ("
-               "  embedding_id INTEGER PRIMARY KEY,"
-               "  retrieved_count INTEGER NOT NULL DEFAULT 0,"
-               "  used_count INTEGER NOT NULL DEFAULT 0,"
-               "  contextual_gain REAL NOT NULL DEFAULT 0.0,"
-               "  use_frequency REAL NOT NULL DEFAULT 0.0,"
-               "  strength REAL NOT NULL DEFAULT 1.0"
-               ");";
-    context.AddWriteInstruction (std::move (op));
-  }
-
   const double conf_thresh = PredictionConfidenceThreshold (cfg.focus);
   const double pad = PreActivationDecay (cfg.stability);
   // Base delta in ~[0.012, 0.02]
@@ -200,6 +187,12 @@ ApplyPredictivePreActivation::Execute (OperationContext &context) const
         context.AddWriteInstruction (std::move (op));
       }
     }
+}
+
+void
+ApplyPredictivePreActivation::CollectSchema (cortext::store::SchemaRegistry &registry) const
+{
+  (void)registry; // No extra tables, relies on core memory_feedback.
 }
 
 } // namespace cortext::operations

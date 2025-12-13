@@ -58,9 +58,12 @@ add_executable(cortext_tests
   operations_graph_retrieval.test.cpp
   operations_goal_alignment.test.cpp
   operations_consolidation.test.cpp
+  migration_core.test.cpp
   cortext.test.cpp
   signal_processor.test.cpp
   operations_adherence_fixes.test.cpp
+  telemetry_propagation.test.cpp
+  telemetry_file_exporter.test.cpp
 )
 
 target_link_libraries(cortext_tests PRIVATE cortext Catch2::Catch2WithMain)

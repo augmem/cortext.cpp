@@ -4,6 +4,7 @@
 #include "cortext/core/algorithms.hpp"
 #include "cortext/core/knobs.hpp"
 #include "cortext/processor/operation_context.hpp"
+#include "cortext/store/schema.hpp"
 #include <algorithm>
 #include <cmath>
 #include <vector>
@@ -43,26 +44,6 @@ ApplyEmotionalConsolidation::Execute (OperationContext &context) const
   const double fb_threshold_eff
       = core::FlashbulbThresholdEff (S, intensity, arousal);
 
-  // Ensure emotional_tags table exists.
-  {
-    BufferedWriteInstruction op;
-    op.query = "CREATE TABLE IF NOT EXISTS emotional_tags ("
-               "embedding_id INTEGER PRIMARY KEY,"
-               "flashbulb INTEGER NOT NULL DEFAULT 0,"
-               "intensity REAL,"
-               "arousal REAL,"
-               "valence REAL,"
-               "half_life_bonus REAL,"
-               "detail_suppression REAL,"
-               "gist_components INTEGER,"
-               "cascade_radius INTEGER,"
-               "cascade_decay REAL,"
-               "flashbulb_threshold_eff REAL,"
-               "ts INTEGER"
-               ");";
-    context.AddWriteInstruction (std::move (op));
-  }
-
   const long long now_ts
       = static_cast<long long> (context.GetSignal ().timestamp);
 
@@ -95,6 +76,32 @@ ApplyEmotionalConsolidation::Execute (OperationContext &context) const
                     now_ts };
       context.AddWriteInstruction (std::move (op));
     }
+}
+
+void
+ApplyEmotionalConsolidation::CollectSchema (
+    cortext::store::SchemaRegistry &registry) const
+{
+  registry.Register ({
+      23, // Algorithm 23
+      "Emotional consolidation tags",
+      {
+          "CREATE TABLE IF NOT EXISTS emotional_tags ("
+          "embedding_id INTEGER PRIMARY KEY,"
+          "flashbulb INTEGER NOT NULL DEFAULT 0,"
+          "intensity REAL,"
+          "arousal REAL,"
+          "valence REAL,"
+          "half_life_bonus REAL,"
+          "detail_suppression REAL,"
+          "gist_components INTEGER,"
+          "cascade_radius INTEGER,"
+          "cascade_decay REAL,"
+          "flashbulb_threshold_eff REAL,"
+          "ts INTEGER"
+          ")",
+      },
+  });
 }
 
 } // namespace cortext::operations

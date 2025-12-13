@@ -13,38 +13,13 @@
 #include "cortext/processor/operation_context.hpp"
 #include "cortext/processor/operation_set.hpp"
 #include "cortext/signal.hpp"
+#include "cortext/store/sqlite_store.hpp" // Changed from abstract Store to SQLiteStore
 
 using namespace cortext;
 using namespace cortext::operations;
 
-namespace
-{
-struct DummyStore : public Store
-{
-  std::vector<std::map<std::string, std::any> >
-  Execute (const std::string &, const std::vector<std::any> &) override
-  {
-    return {};
-  }
-  std::unique_ptr<Transaction>
-  Begin () override
-  {
-    return nullptr;
-  }
-  void
-  Commit () override
-  {
-  }
-  void
-  Rollback () override
-  {
-  }
-  void
-  Close () override
-  {
-  }
-};
-} // namespace
+// Removed DummyStore because SignalProcessor now runs migrations which require a functional store
+// (or at least one that returns a valid Transaction object).
 
 TEST_CASE ("Uncertainty weights respond to F and S", "[uncertainty]")
 {
@@ -53,7 +28,10 @@ TEST_CASE ("Uncertainty weights respond to F and S", "[uncertainty]")
   cfg.sensitivity = 0.9;
   cfg.stability = 0.1;
 
-  auto store = std::make_shared<DummyStore> ();
+  // Use in-memory SQLite store instead of dummy
+  auto unique_store = SQLiteStore::Create(":memory:");
+  auto store = std::shared_ptr<Store>(std::move(unique_store));
+  
   // Minimal op set: just UpdateUncertainty
   auto ops = std::make_unique<OperationSet> (
       std::make_unique<UpdateUncertainty> ());

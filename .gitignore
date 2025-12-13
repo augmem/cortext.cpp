@@ -107,3 +107,5 @@ third_party/*build/
 build-ort/
 third_party/*/.git/
 poc/
+env.sh
+build-otel/

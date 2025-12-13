@@ -3,8 +3,10 @@
 #include <algorithm>
 #include <iostream>
 #include <sstream>
+#include <string_view>
 
 #include "cortext/store/extension_loader.hpp"
+#include "cortext/telemetry/telemetry.hpp"
 
 namespace cortext
 {
@@ -300,14 +302,48 @@ std::vector<std::map<std::string, std::any> >
 SQLiteStore::ExecuteDirect (const std::string &query,
                             const std::vector<std::any> &params)
 {
+  auto ParseDbOperation = [] (const std::string &q) -> std::string_view {
+    std::string_view s (q);
+    while (!s.empty () && (s.front () == ' ' || s.front () == '\n'
+                           || s.front () == '\r' || s.front () == '\t'))
+      {
+        s.remove_prefix (1);
+      }
+    const size_t n = s.size ();
+    size_t i = 0;
+    while (i < n)
+      {
+        const char c = s[i];
+        if (c == ' ' || c == '\n' || c == '\r' || c == '\t')
+          break;
+        i++;
+      }
+    std::string_view tok = s.substr (0, i);
+    if (tok.empty ())
+      return "UNKNOWN";
+    return tok;
+  };
+
+  const std::string_view op = ParseDbOperation (query);
+  telemetry::ScopedSpan span (
+      "cortext.db.execute",
+      { telemetry::Attribute::String ("db.system", "sqlite"),
+        telemetry::Attribute::String ("db.operation", op) });
+
   sqlite3_stmt *stmt = nullptr;
   std::vector<std::map<std::string, std::any> > results;
 
   // Prepare the statement
-  if (sqlite3_prepare_v2 (connection_->GetConnection (), query.c_str (), -1,
-                          &stmt, nullptr)
-      != SQLITE_OK)
+  const int prepare_rc = sqlite3_prepare_v2 (
+      connection_->GetConnection (), query.c_str (), -1, &stmt, nullptr);
+  if (prepare_rc != SQLITE_OK)
     {
+      span.SetStatusError ("sqlite.prepare_failed");
+      telemetry::LogError (
+          "SQLite prepare failed",
+          { telemetry::Attribute::String ("component", "store"),
+            telemetry::Attribute::String ("db.system", "sqlite"),
+            telemetry::Attribute::String ("db.operation", op) });
       throw StoreError (
           "Failed to prepare statement: "
           + std::string (sqlite3_errmsg (connection_->GetConnection ())));
@@ -448,10 +484,17 @@ SQLiteStore::ExecuteDirect (const std::string &query,
     {
       std::string error_msg = sqlite3_errmsg (connection_->GetConnection ());
       sqlite3_finalize (stmt);
+      span.SetStatusError ("sqlite.step_failed");
+      telemetry::LogError (
+          "SQLite step failed",
+          { telemetry::Attribute::String ("component", "store"),
+            telemetry::Attribute::String ("db.system", "sqlite"),
+            telemetry::Attribute::String ("db.operation", op) });
       throw StoreError ("Query execution failed: " + error_msg);
     }
 
   sqlite3_finalize (stmt);
+  span.SetStatusOk ();
   return results;
 }
 

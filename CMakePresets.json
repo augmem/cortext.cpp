@@ -29,6 +29,20 @@
             }
         },
         {
+            "name": "host-debug-examples",
+            "displayName": "Host Debug (Examples)",
+            "description": "Debug build including examples (e.g. cortext_chat)",
+            "inherits": "host-base",
+            "binaryDir": "${sourceDir}/build/debug-examples",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "CORTEXT_WARNINGS_AS_ERRORS": "ON",
+                "CORTEXT_BUILD_EXAMPLES": "ON",
+                "CORTEXT_ENABLE_IMAGEBIND_ORT": "ON",
+                "CORTEXT_ENABLE_OTEL": "ON"
+            }
+        },
+        {
             "name": "host-release",
             "displayName": "Host Release",
             "description": "Optimized release build for native targets",
@@ -66,6 +80,10 @@
         {
             "name": "host-debug",
             "configurePreset": "host-debug"
+        },
+        {
+            "name": "host-debug-examples",
+            "configurePreset": "host-debug-examples"
         },
         {
             "name": "host-release",

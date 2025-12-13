@@ -4,6 +4,7 @@
 #include "cortext/core/algorithms.hpp"
 #include "cortext/operations/constants.hpp"
 #include "cortext/processor/operation_context.hpp"
+#include "cortext/store/schema.hpp"
 #include <Eigen/Dense>
 #include <algorithm>
 #include <cmath>
@@ -94,29 +95,6 @@ ApplyRetrievalCompetition::Execute (OperationContext &context) const
     {
       return;
     }
-
-  // Ensure persistence tables exist (idempotent).
-  {
-    BufferedWriteInstruction op;
-    op.query = "CREATE TABLE IF NOT EXISTS memory_feedback ("
-               "  embedding_id INTEGER PRIMARY KEY,"
-               "  retrieved_count INTEGER NOT NULL DEFAULT 0,"
-               "  used_count INTEGER NOT NULL DEFAULT 0,"
-               "  contextual_gain REAL NOT NULL DEFAULT 0.0,"
-               "  use_frequency REAL NOT NULL DEFAULT 0.0,"
-               "  strength REAL NOT NULL DEFAULT 1.0"
-               ");";
-    context.AddWriteInstruction (std::move (op));
-  }
-  {
-    BufferedWriteInstruction op;
-    op.query = "CREATE TABLE IF NOT EXISTS rif_state ("
-               "  embedding_id INTEGER PRIMARY KEY,"
-               "  suppression REAL NOT NULL DEFAULT 0.0,"
-               "  ts INTEGER DEFAULT 0"
-               ");";
-    context.AddWriteInstruction (std::move (op));
-  }
 
   // 1) Recovery step for all rows in rif_state based on elapsed time.
   const long long now_ts
@@ -273,6 +251,23 @@ ApplyRetrievalCompetition::Execute (OperationContext &context) const
         context.AddWriteInstruction (std::move (op));
       }
     }
+}
+
+void
+ApplyRetrievalCompetition::CollectSchema (
+    cortext::store::SchemaRegistry &registry) const
+{
+  registry.Register ({
+      20, // Competition & RIF
+      "Retrieval Induced Forgetting (rif_state)",
+      {
+          "CREATE TABLE IF NOT EXISTS rif_state ("
+          "  embedding_id INTEGER PRIMARY KEY,"
+          "  suppression REAL NOT NULL DEFAULT 0.0,"
+          "  ts INTEGER DEFAULT 0"
+          ")",
+      },
+  });
 }
 
 } // namespace cortext::operations

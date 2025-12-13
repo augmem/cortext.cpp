@@ -8,6 +8,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 option(BUILD_TESTING "Build tests" ON)
 option(CORTEXT_WARNINGS_AS_ERRORS "Treat warnings as errors" OFF)
+option(CORTEXT_BUILD_EXAMPLES "Build examples" OFF)
 option(BUILD_WASM "Build WebAssembly version" OFF)
 option(CORTEXT_WASM_EXPORT_ALL "Export all functions in WASM build" ON)
 option(CORTEXT_EMBED_VEC "Embed sqlite-vec extension" ON)
@@ -15,10 +16,16 @@ option(CORTEXT_EMBED_GRAPH "Embed sqlite-graph extension" ON)
 option(CORTEXT_EMBED_OBJSTORE "Embed sqlite-objstore extension" ON)
 option(CORTEXT_ENABLE_DYNAMIC_EXTENSIONS "Enable dynamic extension loading fallback" ON)
 option(CORTEXT_ENABLE_IMAGEBIND_ORT "Enable ONNX Runtime for ImageBind embedder" OFF)
+option(CORTEXT_ENABLE_OTEL "Enable OpenTelemetry instrumentation" ON)
 
 if(EMSCRIPTEN AND BUILD_TESTING)
   message(STATUS "Disabling tests for WebAssembly builds (not supported).")
   set(BUILD_TESTING OFF CACHE BOOL "Build tests" FORCE)
+endif()
+
+if(EMSCRIPTEN AND CORTEXT_ENABLE_OTEL)
+  message(STATUS "Disabling OpenTelemetry for WebAssembly builds (not supported).")
+  set(CORTEXT_ENABLE_OTEL OFF CACHE BOOL "Enable OpenTelemetry instrumentation" FORCE)
 endif()
 
 include(FetchContent)
@@ -38,6 +45,39 @@ block(SCOPE_FOR VARIABLES)
   FetchContent_MakeAvailable(eigen)
 endblock()
 
+#
+# Optional OpenTelemetry dependency (native builds only).
+#
+# Runtime configuration is done via standard OTEL_* environment variables.
+#
+if(CORTEXT_ENABLE_OTEL AND NOT EMSCRIPTEN)
+  # Temporarily disable BUILD_TESTING while configuring the dependency to avoid
+  # adding its tests into this build, then restore.
+  set(_cortext_saved_build_testing "${BUILD_TESTING}")
+  set(BUILD_TESTING OFF CACHE BOOL "Disable tests while configuring deps" FORCE)
+
+  # Enable both OTLP transports so runtime can pick via OTEL_EXPORTER_OTLP_PROTOCOL.
+  set(WITH_OTLP_GRPC ON CACHE BOOL "Enable OTLP gRPC exporter" FORCE)
+  set(WITH_OTLP_HTTP ON CACHE BOOL "Enable OTLP HTTP exporter" FORCE)
+  # Enable OTLP file exporter (JSONL) for local dev dumps.
+  set(WITH_OTLP_FILE ON CACHE BOOL "Enable OTLP file exporter" FORCE)
+
+  # Keep the dependency lightweight.
+  set(WITH_EXAMPLES OFF CACHE BOOL "Disable OTel examples" FORCE)
+  set(WITH_PROMETHEUS OFF CACHE BOOL "Disable Prometheus exporter" FORCE)
+  set(WITH_JAEGER OFF CACHE BOOL "Disable Jaeger exporter" FORCE)
+  set(WITH_ZIPKIN OFF CACHE BOOL "Disable Zipkin exporter" FORCE)
+
+  FetchContent_Declare(
+    opentelemetry_cpp
+    GIT_REPOSITORY https://github.com/open-telemetry/opentelemetry-cpp.git
+    GIT_TAG v1.24.0
+  )
+  FetchContent_MakeAvailable(opentelemetry_cpp)
+
+  set(BUILD_TESTING "${_cortext_saved_build_testing}" CACHE BOOL "Build tests" FORCE)
+endif()
+
 
 if(NOT EMSCRIPTEN)
   find_package(PkgConfig REQUIRED)
@@ -47,10 +87,12 @@ endif()
 add_library(cortext
     src/store.cpp
     src/store/extension_loader.cpp
+    src/store/schema.cpp
     src/processor/operation_context.cpp
     src/signal_processor.cpp
     src/cortext.cpp
     src/capi.cpp
+    src/telemetry/telemetry.cpp
     src/encoder/imagebind.cpp
     src/operations/focus.cpp
     src/operations/sensitivity.cpp
@@ -223,6 +265,55 @@ else()
   target_link_libraries(cortext PRIVATE ${SQLITE3_LIBRARIES})
 endif()
 
+# Optional OpenTelemetry linkage.
+if(CORTEXT_ENABLE_OTEL AND NOT EMSCRIPTEN)
+  target_compile_definitions(cortext PUBLIC CORTEXT_ENABLE_OTEL=1)
+
+  # opentelemetry-cpp headers currently emit some warnings on AppleClang/Clang
+  # (e.g. zero-arg variadic macro usage and deprecated EventLogger types).
+  # When CORTEXT_WARNINGS_AS_ERRORS=ON, those become hard errors. Suppress only
+  # for the translation unit that includes OTel headers.
+  if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|AppleClang")
+    set_source_files_properties(
+      ${CMAKE_CURRENT_SOURCE_DIR}/src/telemetry/telemetry.cpp
+      PROPERTIES
+        COMPILE_OPTIONS "-Wno-gnu-zero-variadic-macro-arguments;-Wno-deprecated-declarations"
+    )
+  elseif(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    set_source_files_properties(
+      ${CMAKE_CURRENT_SOURCE_DIR}/src/telemetry/telemetry.cpp
+      PROPERTIES
+        COMPILE_OPTIONS "-Wno-deprecated-declarations"
+    )
+  endif()
+
+  set(_cortext_otel_targets "")
+  foreach(_t IN ITEMS
+      opentelemetry-cpp::api
+      opentelemetry-cpp::sdk
+      opentelemetry-cpp::otlp_grpc_exporter
+      opentelemetry-cpp::otlp_http_exporter
+      opentelemetry-cpp::otlp_file_exporter
+      opentelemetry-cpp::otlp_grpc_log_record_exporter
+      opentelemetry-cpp::otlp_http_log_record_exporter
+      opentelemetry-cpp::otlp_file_log_record_exporter
+      opentelemetry-cpp::otlp_grpc_metrics_exporter
+      opentelemetry-cpp::otlp_http_metric_exporter
+      opentelemetry-cpp::otlp_file_metric_exporter
+      opentelemetry-cpp::ostream_span_exporter
+      opentelemetry-cpp::ostream_metrics_exporter
+      opentelemetry-cpp::ostream_log_record_exporter
+    )
+    if(TARGET ${_t})
+      list(APPEND _cortext_otel_targets ${_t})
+    endif()
+  endforeach()
+  if(_cortext_otel_targets STREQUAL "")
+    message(FATAL_ERROR "CORTEXT_ENABLE_OTEL=ON but no expected opentelemetry-cpp targets were found.")
+  endif()
+  target_link_libraries(cortext PRIVATE ${_cortext_otel_targets})
+endif()
+
 # Optional ONNX Runtime integration for ImageBind embedder
 if(CORTEXT_ENABLE_IMAGEBIND_ORT)
   include(ExternalProject)
@@ -328,4 +419,8 @@ endif()
 include(CTest)
 if(BUILD_TESTING)
   add_subdirectory(tests)
+endif()
+
+if(CORTEXT_BUILD_EXAMPLES AND NOT EMSCRIPTEN)
+  add_subdirectory(examples)
 endif()

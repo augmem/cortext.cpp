@@ -5,6 +5,7 @@
 #include "cortext/operations/constants.hpp"
 #include "cortext/core/knobs.hpp"
 #include "cortext/processor/operation_context.hpp"
+#include "cortext/store/schema.hpp"
 #include <Eigen/Dense>
 #include <algorithm>
 #include <cmath>
@@ -69,31 +70,6 @@ ApplyReconsolidation::Execute (OperationContext &context) const
   // Ripple not used (no neighbor graph), kept for parity.
   (void)core::RippleDecay (T);
   const double lability_susc = core::LabilitySusceptibility (S, T);
-
-  // Ensure required tables exist (idempotent).
-  {
-    BufferedWriteInstruction op;
-    op.query = "CREATE TABLE IF NOT EXISTS embeddings ("
-               "embedding_id INTEGER PRIMARY KEY,"
-               "embedding BLOB"
-               ")";
-    context.AddWriteInstruction (std::move (op));
-  }
-  {
-    BufferedWriteInstruction op;
-    op.query = "CREATE TABLE IF NOT EXISTS memory_feedback ("
-               "embedding_id INTEGER PRIMARY KEY,"
-               "retrieved_count INTEGER NOT NULL DEFAULT 0,"
-               "used_count INTEGER NOT NULL DEFAULT 0,"
-               "contextual_gain REAL NOT NULL DEFAULT 0.0,"
-               "use_frequency REAL NOT NULL DEFAULT 0.0,"
-               "strength REAL NOT NULL DEFAULT 1.0,"
-               "original_embedding BLOB,"
-               "lability_state REAL NOT NULL DEFAULT 0.0,"
-               "lability_ts INTEGER"
-               ")";
-    context.AddWriteInstruction (std::move (op));
-  }
 
   double max_drift = 0.0;
   const long long now_ts
@@ -174,6 +150,15 @@ ApplyReconsolidation::Execute (OperationContext &context) const
   const double bump = std::min (kUncertaintyBumpCap, max_drift);
   p_ctx.u_t = core::Clamp (p_ctx.u_t + bump, constants::kNormalizedMin,
                            constants::kNormalizedMax);
+}
+
+void
+ApplyReconsolidation::CollectSchema (cortext::store::SchemaRegistry &registry) const
+{
+  // Reconsolidation relies on memory_feedback and embeddings, which are core tables.
+  // However, if we want to be explicit about table requirements or indexes for lability,
+  // we could add them here. For now, core tables are handled by RegisterCoreSchema.
+  (void)registry;
 }
 
 } // namespace cortext::operations

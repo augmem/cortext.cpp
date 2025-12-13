@@ -3,6 +3,7 @@
 #include "cortext/core/knobs.hpp"
 #include "cortext/operations/constants.hpp"
 #include "cortext/processor/operation_context.hpp"
+#include "cortext/store/schema.hpp"
 #include <any>
 #include <algorithm>
 #include <cmath>
@@ -93,25 +94,6 @@ EvaluateConsolidation::Execute (OperationContext &context) const
   const std::string action
       = idle_ok ? std::string ("start") : std::string ("defer");
 
-  // Ensure events table exists.
-  {
-    BufferedWriteInstruction op;
-    op.query = "CREATE TABLE IF NOT EXISTS consolidation_events ("
-               "id INTEGER PRIMARY KEY AUTOINCREMENT,"
-               "ts INTEGER,"
-               "reason TEXT,"
-               "action TEXT,"
-               "db_size INTEGER,"
-               "consolidation_threshold INTEGER,"
-               "m_rate REAL,"
-               "rate_target REAL,"
-               "idle_for REAL,"
-               "tokens_in_flight INTEGER,"
-               "retrieval_queue_depth INTEGER"
-               ");";
-    context.AddWriteInstruction (std::move (op));
-  }
-
   // Emit event row.
   {
     BufferedWriteInstruction op;
@@ -141,6 +123,30 @@ EvaluateConsolidation::Execute (OperationContext &context) const
     }
 }
 
+void
+EvaluateConsolidation::CollectSchema (cortext::store::SchemaRegistry &registry) const
+{
+  registry.Register ({
+      30, // Consolidation Events
+      "Consolidation events (triggers/actions)",
+      {
+          "CREATE TABLE IF NOT EXISTS consolidation_events ("
+          "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+          "ts INTEGER,"
+          "reason TEXT,"
+          "action TEXT,"
+          "db_size INTEGER,"
+          "consolidation_threshold INTEGER,"
+          "m_rate REAL,"
+          "rate_target REAL,"
+          "idle_for REAL,"
+          "tokens_in_flight INTEGER,"
+          "retrieval_queue_depth INTEGER"
+          ")",
+      },
+  });
+}
+
 } // namespace cortext::operations
 
 namespace cortext::operations
@@ -154,20 +160,6 @@ EnqueueExtractionJobs::Execute (OperationContext &context) const
   const double T = cfg.stability;
   const long long now_ts
       = static_cast<long long> (context.GetSignal ().timestamp);
-
-  // Ensure jobs table exists regardless of gating to allow
-  // observability/tests.
-  {
-    BufferedWriteInstruction op;
-    op.query = "CREATE TABLE IF NOT EXISTS extraction_jobs ("
-               "id INTEGER PRIMARY KEY AUTOINCREMENT,"
-               "summary_id TEXT UNIQUE,"
-               "prompt TEXT,"
-               "status TEXT NOT NULL DEFAULT 'queued',"
-               "created_at INTEGER"
-               ");";
-    context.AddWriteInstruction (std::move (op));
-  }
 
   // Gate by stability (Algorithm 29c): extraction_enabled = (T > 0.2)
   if (T <= 0.2)
@@ -214,7 +206,26 @@ EnqueueExtractionJobs::Execute (OperationContext &context) const
   }
 }
 
+void
+EnqueueExtractionJobs::CollectSchema (cortext::store::SchemaRegistry &registry) const
+{
+  registry.Register ({
+      31, // Extraction Jobs
+      "Extraction jobs queue",
+      {
+          "CREATE TABLE IF NOT EXISTS extraction_jobs ("
+          "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+          "summary_id TEXT UNIQUE,"
+          "prompt TEXT,"
+          "status TEXT NOT NULL DEFAULT 'queued',"
+          "created_at INTEGER"
+          ")",
+      },
+  });
+}
+
 } // namespace cortext::operations
+
 namespace cortext::operations
 {
 
@@ -229,32 +240,6 @@ ScoreConsolidation::Execute (OperationContext &context) const
 
   // Floor derived from knobs (no magic numbers).
   const double floor_cutoff = core::PeripheryCutoff (T);
-
-  // Ensure memory_feedback exists (Alg 14/18 table shape).
-  {
-    BufferedWriteInstruction op;
-    op.query = "CREATE TABLE IF NOT EXISTS memory_feedback ("
-               "embedding_id INTEGER PRIMARY KEY,"
-               "retrieved_count INTEGER NOT NULL DEFAULT 0,"
-               "used_count INTEGER NOT NULL DEFAULT 0,"
-               "contextual_gain REAL NOT NULL DEFAULT 0.0,"
-               "use_frequency REAL NOT NULL DEFAULT 0.0,"
-               "strength REAL NOT NULL DEFAULT 1.0"
-               ")";
-    context.AddWriteInstruction (std::move (op));
-  }
-
-  // Ensure consolidation_candidates table exists.
-  {
-    BufferedWriteInstruction op;
-    op.query = "CREATE TABLE IF NOT EXISTS consolidation_candidates ("
-               "embedding_id INTEGER PRIMARY KEY,"
-               "score REAL NOT NULL,"
-               "created_at INTEGER,"
-               "reason TEXT"
-               ")";
-    context.AddWriteInstruction (std::move (op));
-  }
 
   // Insert or update candidates whose score is below floor.
   // score = T*strength - F*redundancy + S*connectivity + T*stability
@@ -281,6 +266,23 @@ ScoreConsolidation::Execute (OperationContext &context) const
     op.params = { T, F, S, T, static_cast<long long> (now_ts), floor_cutoff };
     context.AddWriteInstruction (std::move (op));
   }
+}
+
+void
+ScoreConsolidation::CollectSchema (cortext::store::SchemaRegistry &registry) const
+{
+  registry.Register ({
+      32, // Consolidation Candidates
+      "Consolidation candidates (scoring)",
+      {
+          "CREATE TABLE IF NOT EXISTS consolidation_candidates ("
+          "embedding_id INTEGER PRIMARY KEY,"
+          "score REAL NOT NULL,"
+          "created_at INTEGER,"
+          "reason TEXT"
+          ")",
+      },
+  });
 }
 
 } // namespace cortext::operations

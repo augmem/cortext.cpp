@@ -10,30 +10,19 @@
 using namespace cortext;
 using cortext::operations::EnsureGraphSchema;
 
-namespace
-{
-static Signal
-MakeSignal ()
-{
-  Signal s;
-  s.embedding = Eigen::VectorXf::Ones (4);
-  s.timestamp = 1;
-  s.source_id = "test";
-  return s;
-}
-} // namespace
-
-TEST_CASE ("EnsureGraphSchema creates required tables", "[operations][graph]")
+TEST_CASE ("EnsureGraphSchema creates required tables at startup", "[operations][graph]")
 {
   auto unique_store = SQLiteStore::Create (":memory:");
   auto store = std::shared_ptr<Store> (std::move (unique_store));
 
   SignalProcessor::Config cfg;
   auto ops = std::make_unique<OperationSet> (std::make_unique<EnsureGraphSchema> ());
+  
+  // Tables should be created immediately upon processor construction,
+  // as migration runs in the ctor.
   SignalProcessor processor (cfg, store, std::move (ops));
 
-  processor.Process (MakeSignal ());
-  processor.Flush ();
+  // No Process() or Flush() needed.
 
   auto rows = store->Execute (
       "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name", {});
@@ -61,4 +50,3 @@ TEST_CASE ("EnsureGraphSchema creates required tables", "[operations][graph]")
   REQUIRE (has ("extraction_entities"));
   REQUIRE (has ("extraction_relations"));
 }
-

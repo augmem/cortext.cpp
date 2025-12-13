@@ -2,6 +2,9 @@
 #include "cortext/processor.hpp"
 #include "cortext/processor/operation_context.hpp"
 #include "cortext/store/store.hpp"
+#include "cortext/telemetry/telemetry.hpp"
+#include "cortext/store/schema.hpp"
+#include <chrono>
 #include <any>
 #include <map>
 #include <vector>
@@ -25,6 +28,18 @@ SignalProcessor::SignalProcessor (const Config &config,
       context_->write_rate_window_.SetCapacity (
           static_cast<size_t> (std::max (1, cap)));
     }
+  
+  // Apply schema migrations exactly once during initialization.
+  if (store_)
+  {
+      cortext::store::SchemaRegistry registry;
+      if (root_operation_)
+      {
+          root_operation_->CollectSchema(registry);
+      }
+      cortext::store::ApplyMigrations(*store_, registry);
+  }
+
   StartNewEpisode ();
 }
 
@@ -33,6 +48,9 @@ SignalProcessor::~SignalProcessor () = default;
 SignalProcessor::Output
 SignalProcessor::Process (const Signal &signal)
 {
+  const auto t0 = std::chrono::steady_clock::now ();
+  telemetry::ScopedSpan span ("cortext.process");
+
   OperationContext op_context (signal, *context_, config_, write_buffer_,
                                store_.get ());
 
@@ -96,11 +114,26 @@ SignalProcessor::Process (const Signal &signal)
         }
       catch (...)
         {
+          telemetry::LogWarn (
+              "Observed retention query failed; skipping",
+              { telemetry::Attribute::String ("component", "signal_processor"),
+                telemetry::Attribute::String ("db.system", "sqlite"),
+                telemetry::Attribute::String ("db.operation", "SELECT") });
           // If the store does not have the table yet or other error, skip.
         }
     }
 
   root_operation_->Execute (op_context);
+
+  // Enrich process span with low-cardinality decisions.
+  span.SetAttribute ("cortext.at_boundary", op_context.GetAtBoundary ());
+  span.SetAttribute ("cortext.interrupt_allowed",
+                     op_context.GetInterruptAllowed ());
+  span.SetAttribute ("cortext.threshold_T_dynamic",
+                     op_context.GetThresholdTDynamic ());
+  span.SetAttribute ("cortext.threshold_hysteresis",
+                     op_context.GetThresholdHysteresis ());
+  span.SetAttribute ("cortext.effective_focus", op_context.GetEffectiveFocus ());
 
   // Honor Algorithm 12 boundary request from operations.
   if (op_context.ShouldFinalizeEpisode ())
@@ -161,12 +194,114 @@ SignalProcessor::Process (const Signal &signal)
   // Metrics (Algorithm 7)
   out.metrics = op_context.GetAllMetrics ();
 
+  const auto t1 = std::chrono::steady_clock::now ();
+  const double ms = std::chrono::duration_cast<std::chrono::duration<double, std::milli> > (t1 - t0).count ();
+  telemetry::RecordHistogram ("cortext.process_duration_ms", ms);
+  telemetry::AddCounter ("cortext.signals_processed_total", 1);
+  if (out.at_boundary)
+    {
+      telemetry::AddCounter ("cortext.at_boundary_total", 1);
+    }
+  if (out.interrupt_allowed)
+    {
+      telemetry::AddCounter ("cortext.interrupt_allowed_total", 1);
+    }
+
+  // OperationContext-derived metrics for monitoring behavior/adaptation.
+  for (const auto &kv : out.metrics)
+    {
+      const char *metric_name = "unknown";
+      switch (kv.first)
+        {
+        case operations::Metric::relevance:
+          metric_name = "relevance";
+          break;
+        case operations::Metric::mismatch:
+          metric_name = "mismatch";
+          break;
+        case operations::Metric::surprise:
+          metric_name = "surprise";
+          break;
+        case operations::Metric::rarity:
+          metric_name = "rarity";
+          break;
+        case operations::Metric::drift:
+          metric_name = "drift";
+          break;
+        case operations::Metric::contradiction:
+          metric_name = "contradiction";
+          break;
+        case operations::Metric::utility:
+          metric_name = "utility";
+          break;
+        case operations::Metric::periphery:
+          metric_name = "periphery";
+          break;
+        case operations::Metric::coverage:
+          metric_name = "coverage";
+          break;
+        case operations::Metric::salience:
+          metric_name = "salience";
+          break;
+        case operations::Metric::valence:
+          metric_name = "valence";
+          break;
+        case operations::Metric::arousal:
+          metric_name = "arousal";
+          break;
+        case operations::Metric::goal_alignment:
+          metric_name = "goal_alignment";
+          break;
+        case operations::Metric::focus_spread:
+          metric_name = "focus_spread";
+          break;
+        case operations::Metric::drift_mag:
+          metric_name = "drift_mag";
+          break;
+        case operations::Metric::aw_prev:
+          metric_name = "aw_prev";
+          break;
+        case operations::Metric::rate_prev:
+          metric_name = "rate_prev";
+          break;
+        case operations::Metric::hys_prev:
+          metric_name = "hys_prev";
+          break;
+        default:
+          metric_name = "unknown";
+          break;
+        }
+      const std::string metric_full_name
+          = std::string ("cortext.metric.") + metric_name;
+      telemetry::RecordHistogram (metric_full_name, kv.second);
+    }
+
+  telemetry::RecordHistogram ("cortext.threshold_T_dynamic",
+                              op_context.GetThresholdTDynamic ());
+  telemetry::RecordHistogram ("cortext.threshold_hysteresis",
+                              op_context.GetThresholdHysteresis ());
+  telemetry::RecordHistogram ("cortext.effective_focus",
+                              op_context.GetEffectiveFocus ());
+  telemetry::RecordHistogram ("cortext.coherence", op_context.GetCoherence ());
+  telemetry::RecordHistogram ("cortext.emotion_intensity",
+                              op_context.GetEmotionIntensity ());
+  telemetry::RecordHistogram ("cortext.mni_jaccard", op_context.GetMniJaccard ());
+  telemetry::RecordHistogram ("cortext.mni_best_mu", op_context.GetMniBestMu ());
+  telemetry::RecordHistogram ("cortext.mni_dup_thresh",
+                              op_context.GetMniDupThresh ());
+  telemetry::RecordHistogram ("cortext.last_weight_sum",
+                              op_context.GetLastWeightSum ());
+  telemetry::RecordHistogram ("cortext.last_effective_metric_count",
+                              static_cast<double> (
+                                  op_context.GetLastEffectiveMetricCount ()));
+  span.SetStatusOk ();
   return out;
 }
 
 void
 SignalProcessor::Flush ()
 {
+  telemetry::AddCounter ("cortext.flush_total", 1);
   FinalizeEpisode ();
   StartNewEpisode ();
 }
@@ -174,20 +309,29 @@ SignalProcessor::Flush ()
 void
 SignalProcessor::StartNewEpisode ()
 {
-  if (store_)
-    {
-      episode_transaction_ = store_->Begin ();
-    }
+  // Keep the episode transaction closed during signal processing to avoid
+  // holding a long-lived read transaction that blocks other writers. We open
+  // a short-lived transaction only when finalizing buffered writes.
+  episode_transaction_.reset ();
 }
 
 void
 SignalProcessor::FinalizeEpisode ()
 {
-  if (!episode_transaction_)
+  if (!store_)
     {
       return;
     }
 
+  telemetry::ScopedSpan span ("cortext.episode.finalize");
+
+  if (write_buffer_.empty ())
+    {
+      span.SetStatusOk ();
+      return;
+    }
+
+  episode_transaction_ = store_->Begin ();
   for (const auto &instruction : write_buffer_)
     {
       episode_transaction_->Execute (instruction.query, instruction.params);
@@ -195,6 +339,9 @@ SignalProcessor::FinalizeEpisode ()
   write_buffer_.clear ();
 
   episode_transaction_->Commit ();
+  episode_transaction_.reset ();
+  telemetry::AddCounter ("cortext.episode_commit_total", 1);
+  span.SetStatusOk ();
 
   // Maintain recent_context to last n_ctx(T) after boundary (Alg 12).
   const size_t keep = static_cast<size_t> (core::NCtx (config_.stability));

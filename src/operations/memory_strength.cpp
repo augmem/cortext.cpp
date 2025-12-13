@@ -5,6 +5,7 @@
 #include "cortext/operations/constants.hpp"
 #include "cortext/core/knobs.hpp"
 #include "cortext/processor/operation_context.hpp"
+#include "cortext/store/schema.hpp"
 #include <cmath>
 #include <string>
 #include <vector>
@@ -26,21 +27,6 @@ UpdateMemoryStrength::Execute (OperationContext &context) const
   const double lambda
       = std::log (constants::kTwo) / std::max (half_life, constants::kNormEpsilon);
   const double cutoff = core::PeripheryCutoff (T);
-
-  // Ensure feedback table exists (idempotent).
-  {
-    BufferedWriteInstruction op;
-    op.query = "CREATE TABLE IF NOT EXISTS memory_feedback ("
-               "embedding_id INTEGER PRIMARY KEY,"
-               "retrieved_count INTEGER NOT NULL DEFAULT 0,"
-               "used_count INTEGER NOT NULL DEFAULT 0,"
-               "contextual_gain REAL NOT NULL DEFAULT 0.0,"
-               "use_frequency REAL NOT NULL DEFAULT 0.0,"
-               "last_used INTEGER NOT NULL DEFAULT 0,"
-               "strength REAL NOT NULL DEFAULT 1.0"
-               ")";
-    context.AddWriteInstruction (std::move (op));
-  }
 
   // Evict weak memories below periphery cutoff first, so the last buffered
   // instruction after this operation reflects the latest reinforcement UPDATE.
@@ -99,8 +85,7 @@ UpdateMemoryStrength::Execute (OperationContext &context) const
               "  last_used = CASE WHEN ? > 0 THEN ? ELSE last_used END, "
               "  strength = MAX(0.0, "
               "    strength "
-              "    + (? * ? * ((1.0 - ?) * use_frequency + ? * ?)) " // reinforcement
-                                                                     // * serial-position
+              "    + (? * ? * ((1.0 - ?) * use_frequency + ? * ?)) " // reinforcement * serial-position
               "    + (? * (? * (" // influence gate * F *
               "           (CASE WHEN ? < -1.0 THEN -1.0 "
               "                 WHEN ? >  1.0 THEN  1.0 "
@@ -122,15 +107,15 @@ UpdateMemoryStrength::Execute (OperationContext &context) const
         //  7: ts (last_used)
         //  8: S
         //  9: alpha
-        // 10: alpha
-        // 11: used_flag
-        // 12: gate_influence
-        // 13: F
-        // 14: cg_event (clamp lower)
-        // 15: cg_event (clamp upper)
-        // 16: cg_event (original)
-        // 17: lambda
-        // 18: id
+        //  10: alpha
+        //  11: used_flag
+        //  12: gate_influence
+        //  13: F
+        //  14: cg_event (clamp lower)
+        //  15: cg_event (clamp upper)
+        //  16: cg_event (original)
+        //  17: lambda
+        //  18: id
         const double sp_mult
             = context.GetSerialPositionMultiplier ().value_or (
                 constants::kNormalizedMax);
@@ -142,6 +127,12 @@ UpdateMemoryStrength::Execute (OperationContext &context) const
         context.AddWriteInstruction (std::move (op));
       }
     }
+}
+
+void
+UpdateMemoryStrength::CollectSchema (cortext::store::SchemaRegistry &registry) const
+{
+  (void)registry; // Relies on core memory_feedback
 }
 
 } // namespace cortext::operations

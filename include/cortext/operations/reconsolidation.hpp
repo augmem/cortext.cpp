@@ -16,6 +16,7 @@ class ApplyReconsolidation : public IOperation
 {
 public:
   void Execute (OperationContext &context) const override;
+  void CollectSchema (cortext::store::SchemaRegistry &registry) const override;
 };
 
 } // namespace cortext::operations
