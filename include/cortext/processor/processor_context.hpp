@@ -17,6 +17,21 @@ namespace cortext
 ///
 /// This includes all dynamic variables such as EWMAs, rolling windows,
 /// dynamic thresholds, and counters that persist across multiple signals.
+///
+/// State is organized into logical groups:
+/// - General: signals_processed, u_t, initialization flags
+/// - Focus: weight_relevance, attention_width, recent_context (Alg 1, 2, 15)
+/// - Sensitivity: base_rate, emotion weights/centroids, rate_target (Alg 3, 4, 16)
+/// - Stability: half_lives, hysteresis, retention history (Alg 5, 6, 17)
+/// - Threshold: T_dynamic, recent_scores, rate control (Alg 8)
+/// - Blender: metric weights, RLS state (Alg 7)
+/// - Consolidation: last_consolidation_ts, last_retrieval_ts (Alg 28)
+/// - Influence: sustained_influence (Alg 19)
+/// - Working Memory: wm_slots, acceptance state (Alg 24)
+///
+/// Note: This struct could be refactored into smaller sub-structs (e.g.,
+/// FocusState, SensitivityState, StabilityState) to improve encapsulation,
+/// but this would be a breaking change requiring updates to all operations.
 struct ProcessorContext
 {
   // --- Observed write-rate window ---
@@ -150,36 +165,34 @@ struct ProcessorContext
     size_t capacity_;
   };
 
-  // --- General State ---
+  // ======================================================================
+  // General State
+  // ======================================================================
   int signals_processed = 0;
-  double u_t = 0.0; // Smoothed uncertainty
-  // One-time initialization guards for prior-setting operations.
+  double u_t = 0.0;
   bool focus_priors_initialized = false;
   bool sensitivity_priors_initialized = false;
   bool stability_priors_initialized = false;
-  // Algorithm 27 refractory tick (last interrupt position)
   int last_interrupt_tick = -1000000;
-  // Algorithm 7 RLS update throttling counter
   int blender_update_count = 0;
-  // Observed write-rate window
   WriteRateWindow write_rate_window_;
-  // Rolling set of recent memory IDs for novelty computation
   RecentIdsLru recent_ids_lru_;
 
-  // --- Focus-Related State (Algs 1 & 2) ---
-  // Priors (set once at initialization)
+  // ======================================================================
+  // Focus-Related State (Algorithms 1, 2, 15)
+  // ======================================================================
   double weight_relevance_prior = 0.5;
   double coverage_gain_floor_prior = 0.65;
   double mismatch_weight_prior = 0.5;
-  double attention_width_prior = 1.57; // PI / 2
-
-  // Dynamic values (updated each signal)
+  double attention_width_prior = 1.57;
   double weight_relevance = 0.5;
   double attention_width = 1.57;
   std::deque<Eigen::VectorXf> recent_context_embeddings;
 
-  // --- Sensitivity-Related Priors (Alg 3) ---
-  double base_rate_prior = 0.2; // writes/min
+  // ======================================================================
+  // Sensitivity-Related State (Algorithms 3, 4, 16)
+  // ======================================================================
+  double base_rate_prior = 0.2;
   double weight_novelty_prior = 0.3;
   double weight_surprise_prior = 0.2;
   double weight_valence_prior = 0.4;
@@ -187,77 +200,65 @@ struct ProcessorContext
   double weight_emotion_prior = 0.2;
   double emotion_gain_prior = 1.0;
   double score_gain_prior = 1.0;
-  double rate_target_prior = 0.2; // writes/min
-
-  // Optional emotion centroids for Algorithm 4
-  // (anger,fear,joy,love,sadness,surprise)
-  std::vector<Eigen::VectorXf> emotion_centroids; // size 6 if provided
-
-  // --- Sensitivity Dynamic State (Alg 4) ---
-  // Estimated target write rate (dynamic) and last-seen timestamp for rate
-  // calc
-  double rate_target = 0.0; // writes/min (EWMA)
+  double rate_target_prior = 0.2;
+  std::vector<Eigen::VectorXf> emotion_centroids;
+  double rate_target = 0.0;
   uint64_t last_signal_timestamp = 0;
-  // Dynamic novelty weight (Alg 16 adjusts from usage feedback)
   double weight_novelty = 0.3;
 
-  // --- Stability-Related Priors (Alg 5) ---
+  // ======================================================================
+  // Stability-Related State (Algorithms 5, 6, 17)
+  // ======================================================================
   double hysteresis_band_prior = 0.02;
   double half_life_prior = 120.0;
   double rate_decay_prior = 0.60;
   double periphery_half_life_prior = 120.0;
   double salience_half_life_prior = 120.0;
   double drift_weight_prior = 0.5;
-
-  // --- Stability Dynamic State (Alg 6) ---
-  // Rolling history of observed retention (seconds)
   std::deque<double> observed_retention_history;
-  // Dynamic half-life parameters (seconds)
   double half_life = 120.0;
   double rate_decay = 0.60;
   double periphery_half_life = 120.0;
   double salience_half_life = 120.0;
 
-  // --- Dynamic Threshold State (Alg 8) ---
-  // Rolling history of composite scores used for threshold adaptation
+  // ======================================================================
+  // Threshold & Score Tracking State (Algorithm 8)
+  // ======================================================================
   std::deque<double> recent_scores;
-  // Current dynamic threshold value and hysteresis band
   double T_dynamic = 0.2;
   double hysteresis = 0.05;
+  double dt_ema = 0.0;
+  double m_rate = 0.0;
+  int rate_ticks = 0;
+  uint64_t last_rate_timestamp = 0;
 
-  // --- Algorithm 7 (Metric Weight Blending) State ---
-  // Online blender state (RLS with forgetting)
+  // ======================================================================
+  // Metric Weight Blending State (Algorithm 7)
+  // ======================================================================
   std::unordered_map<operations::Metric, double> blender_state;
   std::vector<operations::Metric> blender_order;
   std::vector<std::vector<double> > blender_P;
   bool blender_ready = false;
 
-  // --- Algorithm 8 (Rate Control State) ---
-  // Exponential moving average of inter-arrival time (seconds)
-  double dt_ema = 0.0;
-  // Smoothed observed write rate estimate (writes per minute)
-  double m_rate = 0.0;
-  // Number of rate-update ticks observed
-  int rate_ticks = 0;
-  // Timestamp of last rate update (same units as Signal.timestamp)
-  uint64_t last_rate_timestamp = 0;
-
-  // --- Consolidation (Algorithm 28/28b) State ---
-  // Last time consolidation started/completed (used for interval trigger)
+  // ======================================================================
+  // Consolidation State (Algorithms 28, 28b)
+  // ======================================================================
   uint64_t last_consolidation_ts = 0;
-  // Last time a retrieval event occurred (used for idle gating)
   uint64_t last_retrieval_ts = 0;
 
-  // --- Algorithm 19 (Influence Feedback) State ---
-  // Sustained (longer-horizon) influence EWMA
+  // ======================================================================
+  // Influence Feedback State (Algorithm 19)
+  // ======================================================================
   double sustained_influence = 0.0;
 
-  // --- Algorithm 24 (Working Memory) State ---
+  // ======================================================================
+  // Working Memory State (Algorithm 24)
+  // ======================================================================
   struct WMSlot
   {
     Eigen::VectorXf embedding;
     double strength = 0.0;
-    double last_ts = 0.0; // seconds
+    double last_ts = 0.0;
     int pos_index = 0;
   };
   std::vector<WMSlot> wm_slots;

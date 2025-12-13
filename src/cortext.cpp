@@ -5,6 +5,7 @@
 #include "cortext/processor/operation_set.hpp"
 #include "cortext/signal.hpp"
 #include "cortext/store/sqlite_store.hpp"
+#include "cortext/telemetry/telemetry.hpp"
 
 #include "cortext/operations/consolidation.hpp"
 #include "cortext/operations/blend.hpp"
@@ -55,18 +56,223 @@
 
 namespace cortext
 {
+
 namespace
 {
+/// @brief Converts a std::vector<float> to an Eigen::VectorXf using Eigen::Map.
 inline Eigen::VectorXf
 ToEigen (const std::vector<float> &v)
 {
-  Eigen::VectorXf e (static_cast<int> (v.size ()));
-  for (int i = 0; i < e.size (); ++i)
-    {
-      e[i] = v[static_cast<std::size_t> (i)];
-    }
-  return e;
+  return Eigen::Map<const Eigen::VectorXf> (v.data (),
+                                            static_cast<int> (v.size ()));
 }
+
+std::vector<unsigned char>
+ToUnsignedVector (const std::vector<char> &blob)
+{
+  if (blob.empty ())
+    {
+      return {};
+    }
+  std::vector<unsigned char> out;
+  out.resize (blob.size ());
+  std::memcpy (out.data (), blob.data (), blob.size ());
+  return out;
+}
+
+bool
+LoadObjstorePayload (Store *store, const std::vector<unsigned char> &blob_id,
+                     std::string &out)
+{
+  if (blob_id.empty () || !store)
+    {
+      return false;
+    }
+  try
+    {
+      auto rows
+          = store->Execute ("SELECT objstore_get(?1) AS data", { blob_id });
+      if (!rows.empty ())
+        {
+          const auto it = rows[0].find ("data");
+          if (it != rows[0].end ())
+            {
+              std::vector<unsigned char> bytes;
+              if (it->second.type () == typeid (std::vector<char>))
+                {
+                  const auto &blob
+                      = std::any_cast<const std::vector<char> &> (
+                          it->second);
+                  bytes = ToUnsignedVector (blob);
+                }
+              else if (it->second.type ()
+                       == typeid (std::vector<unsigned char>))
+                {
+                  bytes = std::any_cast<const std::vector<unsigned char> &> (
+                      it->second);
+                }
+              if (!bytes.empty ())
+                {
+                  out.assign (reinterpret_cast<const char *> (bytes.data ()),
+                              static_cast<std::size_t> (bytes.size ()));
+                  return true;
+                }
+            }
+        }
+    }
+  catch (const std::exception &e)
+    {
+      telemetry::LogWarn (
+          "Failed to load objstore payload",
+          { telemetry::Attribute::String ("component", "cortext"),
+            telemetry::Attribute::String ("error", e.what ()) });
+    }
+  catch (...)
+    {
+      telemetry::LogWarn (
+          "Failed to load objstore payload (unknown error)",
+          { telemetry::Attribute::String ("component", "cortext") });
+    }
+  return false;
+}
+
+void
+QueryMemoryIndex (Store *store, long long id, Cortext::Context::Memory &m)
+{
+  if (!store)
+    {
+      return;
+    }
+  try
+    {
+      auto rows = store->Execute (
+          "SELECT modality, mime, source_id, timestamp, blob_id "
+          "FROM memory_index WHERE embedding_id = ?",
+          { id });
+      if (!rows.empty ())
+        {
+          const auto &row = rows[0];
+          auto get_s = [&row] (const char *k) -> std::string {
+            auto it = row.find (k);
+            if (it == row.end ())
+              return {};
+            if (it->second.type () == typeid (std::string))
+              return std::any_cast<std::string> (it->second);
+            return {};
+          };
+          auto get_ll = [&row] (const char *k) -> long long {
+            auto it = row.find (k);
+            if (it == row.end ())
+              return 0LL;
+            if (it->second.type () == typeid (long long))
+              return std::any_cast<long long> (it->second);
+            if (it->second.type () == typeid (int))
+              return static_cast<long long> (
+                  std::any_cast<int> (it->second));
+            return 0LL;
+          };
+          m.modality = get_s ("modality");
+          m.mimetype = get_s ("mime");
+          m.source_id = get_s ("source_id");
+          m.timestamp
+              = static_cast<std::uint64_t> (get_ll ("timestamp"));
+          auto get_blob = [&row] (const char *k) {
+            auto it = row.find (k);
+            if (it == row.end ())
+              {
+                return std::vector<unsigned char> ();
+              }
+            if (it->second.type () == typeid (std::vector<char>))
+              {
+                const auto &blob
+                    = std::any_cast<const std::vector<char> &> (
+                        it->second);
+                return ToUnsignedVector (blob);
+              }
+            if (it->second.type ()
+                == typeid (std::vector<unsigned char>))
+              {
+                return std::any_cast<
+                    const std::vector<unsigned char> &> (it->second);
+              }
+            return std::vector<unsigned char> ();
+          };
+          const auto blob_id_bytes = get_blob ("blob_id");
+          if (!blob_id_bytes.empty ())
+            {
+              std::string payload;
+              if (LoadObjstorePayload (store, blob_id_bytes, payload))
+                {
+                  m.content = std::move (payload);
+                }
+            }
+        }
+    }
+  catch (const std::exception &e)
+    {
+      telemetry::LogWarn (
+          "Failed to query memory index",
+          { telemetry::Attribute::String ("component", "cortext"),
+            telemetry::Attribute::Int64 ("embedding_id", id),
+            telemetry::Attribute::String ("error", e.what ()) });
+    }
+  catch (...)
+    {
+      telemetry::LogWarn (
+          "Failed to query memory index (unknown error)",
+          { telemetry::Attribute::String ("component", "cortext"),
+            telemetry::Attribute::Int64 ("embedding_id", id) });
+    }
+}
+
+void
+QueryMemoryFeedback (Store *store, long long id, Cortext::Context::Memory &m)
+{
+  if (!store)
+    {
+      return;
+    }
+  try
+    {
+      auto rows = store->Execute (
+          "SELECT retrieved_count, used_count "
+          "FROM memory_feedback WHERE embedding_id = ?",
+          { id });
+      if (!rows.empty ())
+        {
+          const auto &row = rows[0];
+          auto get_ll = [&row] (const char *k) -> long long {
+            auto it = row.find (k);
+            if (it == row.end ())
+              return 0LL;
+            if (it->second.type () == typeid (long long))
+              return std::any_cast<long long> (it->second);
+            if (it->second.type () == typeid (int))
+              return static_cast<long long> (
+                  std::any_cast<int> (it->second));
+            return 0LL;
+          };
+          m.retrieved_count = get_ll ("retrieved_count");
+          m.used_count = get_ll ("used_count");
+        }
+    }
+  catch (const std::exception &e)
+    {
+      telemetry::LogWarn (
+          "Failed to query memory feedback",
+          { telemetry::Attribute::String ("component", "cortext"),
+            telemetry::Attribute::Int64 ("embedding_id", id),
+            telemetry::Attribute::String ("error", e.what ()) });
+    }
+  catch (...)
+    {
+      telemetry::LogWarn (
+          "Failed to query memory feedback (unknown error)",
+          { telemetry::Attribute::String ("component", "cortext"),
+            telemetry::Attribute::Int64 ("embedding_id", id) });
+    }
+}
+
 } // namespace
 
 struct Cortext::Impl
@@ -199,65 +405,6 @@ struct Cortext::Impl
     return processor->Process (s);
   }
 
-  static std::vector<unsigned char>
-  ToUnsignedVector (const std::vector<char> &blob)
-  {
-    if (blob.empty ())
-      {
-        return {};
-      }
-    std::vector<unsigned char> out;
-    out.resize (blob.size ());
-    std::memcpy (out.data (), blob.data (), blob.size ());
-    return out;
-  }
-
-  bool
-  LoadObjstorePayload (const std::vector<unsigned char> &blob_id,
-                       std::string &out)
-  {
-    if (blob_id.empty () || !store)
-      {
-        return false;
-      }
-    try
-      {
-        auto rows
-            = store->Execute ("SELECT objstore_get(?1) AS data", { blob_id });
-        if (!rows.empty ())
-          {
-            const auto it = rows[0].find ("data");
-            if (it != rows[0].end ())
-              {
-                std::vector<unsigned char> bytes;
-                if (it->second.type () == typeid (std::vector<char>))
-                  {
-                    const auto &blob
-                        = std::any_cast<const std::vector<char> &> (
-                            it->second);
-                    bytes = ToUnsignedVector (blob);
-                  }
-                else if (it->second.type ()
-                         == typeid (std::vector<unsigned char>))
-                  {
-                    bytes = std::any_cast<const std::vector<unsigned char> &> (
-                        it->second);
-                  }
-                if (!bytes.empty ())
-                  {
-                    out.assign (reinterpret_cast<const char *> (bytes.data ()),
-                                static_cast<std::size_t> (bytes.size ()));
-                    return true;
-                  }
-              }
-          }
-      }
-    catch (...)
-      {
-      }
-    return false;
-  }
-
   Cortext::Context
   HydrateContext (const cortext::SignalProcessor::Output &out)
   {
@@ -267,116 +414,14 @@ struct Cortext::Impl
       {
         return result;
       }
-
     for (const long long id : out.candidate_memory_ids)
       {
         Cortext::Context::Memory m;
         m.id = id;
-
-        // memory_index
-        try
-          {
-            auto rows = store->Execute (
-                "SELECT modality, mime, source_id, timestamp, blob_id "
-                "FROM memory_index WHERE embedding_id = ?",
-                { id });
-            if (!rows.empty ())
-              {
-                const auto &row = rows[0];
-                auto get_s = [&row] (const char *k) -> std::string {
-                  auto it = row.find (k);
-                  if (it == row.end ())
-                    return {};
-                  if (it->second.type () == typeid (std::string))
-                    return std::any_cast<std::string> (it->second);
-                  return {};
-                };
-                auto get_ll = [&row] (const char *k) -> long long {
-                  auto it = row.find (k);
-                  if (it == row.end ())
-                    return 0LL;
-                  if (it->second.type () == typeid (long long))
-                    return std::any_cast<long long> (it->second);
-                  if (it->second.type () == typeid (int))
-                    return static_cast<long long> (
-                        std::any_cast<int> (it->second));
-                  return 0LL;
-                };
-                m.modality = get_s ("modality");
-                m.mimetype = get_s ("mime");
-                m.source_id = get_s ("source_id");
-                m.timestamp
-                    = static_cast<std::uint64_t> (get_ll ("timestamp"));
-                auto get_blob = [&row] (const char *k) {
-                  auto it = row.find (k);
-                  if (it == row.end ())
-                    {
-                      return std::vector<unsigned char> ();
-                    }
-                  if (it->second.type () == typeid (std::vector<char>))
-                    {
-                      const auto &blob
-                          = std::any_cast<const std::vector<char> &> (
-                              it->second);
-                      return ToUnsignedVector (blob);
-                    }
-                  if (it->second.type ()
-                      == typeid (std::vector<unsigned char>))
-                    {
-                      return std::any_cast<
-                          const std::vector<unsigned char> &> (it->second);
-                    }
-                  return std::vector<unsigned char> ();
-                };
-                const auto blob_id_bytes = get_blob ("blob_id");
-                if (!blob_id_bytes.empty ())
-                  {
-                    std::string payload;
-                    if (LoadObjstorePayload (blob_id_bytes, payload))
-                      {
-                        m.content = std::move (payload);
-                      }
-                  }
-              }
-          }
-        catch (...)
-          {
-            // ignore
-          }
-
-        // memory_feedback metrics
-        try
-          {
-            auto rows = store->Execute (
-                "SELECT retrieved_count, used_count "
-                "FROM memory_feedback WHERE embedding_id = ?",
-                { id });
-            if (!rows.empty ())
-              {
-                const auto &row = rows[0];
-                auto get_ll = [&row] (const char *k) -> long long {
-                  auto it = row.find (k);
-                  if (it == row.end ())
-                    return 0LL;
-                  if (it->second.type () == typeid (long long))
-                    return std::any_cast<long long> (it->second);
-                  if (it->second.type () == typeid (int))
-                    return static_cast<long long> (
-                        std::any_cast<int> (it->second));
-                  return 0LL;
-                };
-                m.retrieved_count = get_ll ("retrieved_count");
-                m.used_count = get_ll ("used_count");
-              }
-          }
-        catch (...)
-          {
-            // ignore
-          }
-
+        QueryMemoryIndex (store.get (), id, m);
+        QueryMemoryFeedback (store.get (), id, m);
         result.memories.push_back (std::move (m));
       }
-
     return result;
   }
 };

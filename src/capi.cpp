@@ -1,3 +1,10 @@
+/// @file
+/// @brief C API implementation for Cortext.
+///
+/// Return codes convention:
+///   0 = success
+///   1 = invalid parameters (NULL pointer, invalid handle)
+///   2 = internal error (exception caught during processing)
 #include "cortext/capi.h"
 #include "cortext/cortext.hpp"
 

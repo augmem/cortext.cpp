@@ -1,3 +1,12 @@
+/// @file
+/// @brief ImageBind encoder implementation (HOST-ONLY, excluded from WASM builds).
+///
+/// This module requires ONNX Runtime, filesystem I/O for loading BPE vocabulary
+/// and model files, and zlib for decompressing the vocabulary. It is completely
+/// disabled when CORTEXT_ENABLE_IMAGEBIND_ORT is not defined, and all methods
+/// throw std::runtime_error to indicate unavailability.
+///
+/// WASM builds should not link this module or should use stub encoders instead.
 #include "cortext/encoder/imagebind.hpp"
 
 #include <algorithm>

@@ -364,46 +364,11 @@ ShouldUseFileExporterFor (const char *otel_env, const char *signal_name)
   return FileSignalEnabled (signals_csv, signal_name);
 }
 
-} // namespace
-
-struct ScopedSpan::Impl
+/// @brief Configures and registers the trace provider from environment variables.
+void
+ConfigureTraceProvider (TelemetryState &state,
+                        const resource_sdk::Resource &resource)
 {
-  opentelemetry::nostd::shared_ptr<trace_api::Span> span;
-  std::unique_ptr<trace_api::Scope> scope;
-};
-
-bool
-InitializeFromEnv ()
-{
-  TelemetryState &state = GetState ();
-  if (state.is_initialized.load ())
-    {
-      return true;
-    }
-
-  std::lock_guard<std::mutex> lock (state.mu);
-  if (state.is_initialized.load ())
-    {
-      return true;
-    }
-
-  const resource_sdk::Resource resource = MakeResourceFromEnv ();
-
-  // Optional local file exporter sink shared across signals.
-  const std::string file_path = GetFileExporterPath ();
-  if (!file_path.empty () && !state.file_stream)
-    {
-      state.file_export_path = file_path;
-      state.file_stream = std::make_unique<std::ofstream> (
-          file_path, std::ios::out | std::ios::app);
-      if (!state.file_stream->is_open ())
-        {
-          state.file_stream.reset ();
-          state.file_export_path.clear ();
-        }
-    }
-
-  // Traces
   if (!ExporterDisabled ("OTEL_TRACES_EXPORTER")
       || ShouldUseFileExporterFor ("OTEL_TRACES_EXPORTER", "traces"))
     {
@@ -412,7 +377,6 @@ InitializeFromEnv ()
       const OtlpProtocol protocol = GetOtlpProtocolFromEnv ();
 
 #if defined(CORTEXT_HAVE_OSTREAM_TRACE_EXPORTER)
-      // Prefer OTLP file exporter when available (writes JSONL: one line per record).
 #if defined(CORTEXT_HAVE_OTLP_FILE_TRACE_EXPORTER)
       if (!exporter && state.file_stream
           && ShouldUseFileExporterFor ("OTEL_TRACES_EXPORTER", "traces"))
@@ -439,8 +403,7 @@ InitializeFromEnv ()
           && protocol == OtlpProtocol::kGrpc)
         {
           exporter
-              = opentelemetry::exporter::otlp::OtlpGrpcExporterFactory::Create
-                    ();
+              = opentelemetry::exporter::otlp::OtlpGrpcExporterFactory::Create ();
         }
 #endif
 #if defined(CORTEXT_HAVE_OTLP_HTTP_TRACE_EXPORTER)
@@ -448,29 +411,27 @@ InitializeFromEnv ()
           && protocol == OtlpProtocol::kHttpProtobuf)
         {
           exporter
-              = opentelemetry::exporter::otlp::OtlpHttpExporterFactory::Create
-                    ();
+              = opentelemetry::exporter::otlp::OtlpHttpExporterFactory::Create ();
         }
 #endif
 
       if (exporter)
         {
-      trace_sdk::BatchSpanProcessorOptions processor_options;
-      // Standard OTel env vars for batch span processor (milliseconds).
-      if (const auto v = GetEnvU64 ("OTEL_BSP_SCHEDULE_DELAY"); v.has_value ())
-        {
-          processor_options.schedule_delay_millis
-              = std::chrono::milliseconds (*v);
-        }
-      if (const auto v = GetEnvU64 ("OTEL_BSP_MAX_QUEUE_SIZE"); v.has_value ())
-        {
-          processor_options.max_queue_size = static_cast<size_t> (*v);
-        }
-      if (const auto v = GetEnvU64 ("OTEL_BSP_MAX_EXPORT_BATCH_SIZE");
-          v.has_value ())
-        {
-          processor_options.max_export_batch_size = static_cast<size_t> (*v);
-        }
+          trace_sdk::BatchSpanProcessorOptions processor_options;
+          if (const auto v = GetEnvU64 ("OTEL_BSP_SCHEDULE_DELAY"); v.has_value ())
+            {
+              processor_options.schedule_delay_millis
+                  = std::chrono::milliseconds (*v);
+            }
+          if (const auto v = GetEnvU64 ("OTEL_BSP_MAX_QUEUE_SIZE"); v.has_value ())
+            {
+              processor_options.max_queue_size = static_cast<size_t> (*v);
+            }
+          if (const auto v = GetEnvU64 ("OTEL_BSP_MAX_EXPORT_BATCH_SIZE");
+              v.has_value ())
+            {
+              processor_options.max_export_batch_size = static_cast<size_t> (*v);
+            }
           auto processor = std::make_unique<trace_sdk::BatchSpanProcessor> (
               std::move (exporter), processor_options);
           auto sdk_provider = std::make_shared<trace_sdk::TracerProvider> (
@@ -484,8 +445,13 @@ InitializeFromEnv ()
               "cortext");
         }
     }
+}
 
-  // Metrics
+/// @brief Configures and registers the metrics provider from environment variables.
+void
+ConfigureMetricsProvider (TelemetryState &state,
+                          const resource_sdk::Resource &resource)
+{
   if (!ExporterDisabled ("OTEL_METRICS_EXPORTER")
       || ShouldUseFileExporterFor ("OTEL_METRICS_EXPORTER", "metrics"))
     {
@@ -533,20 +499,19 @@ InitializeFromEnv ()
 #endif
       if (metric_exporter)
         {
-      metrics_sdk::PeriodicExportingMetricReaderOptions reader_options;
-      // Standard OTel env vars for periodic metric reader (milliseconds).
-      if (const auto v = GetEnvU64 ("OTEL_METRIC_EXPORT_INTERVAL");
-          v.has_value ())
-        {
-          reader_options.export_interval_millis
-              = std::chrono::milliseconds (*v);
-        }
-      if (const auto v = GetEnvU64 ("OTEL_METRIC_EXPORT_TIMEOUT");
-          v.has_value ())
-        {
-          reader_options.export_timeout_millis
-              = std::chrono::milliseconds (*v);
-        }
+          metrics_sdk::PeriodicExportingMetricReaderOptions reader_options;
+          if (const auto v = GetEnvU64 ("OTEL_METRIC_EXPORT_INTERVAL");
+              v.has_value ())
+            {
+              reader_options.export_interval_millis
+                  = std::chrono::milliseconds (*v);
+            }
+          if (const auto v = GetEnvU64 ("OTEL_METRIC_EXPORT_TIMEOUT");
+              v.has_value ())
+            {
+              reader_options.export_timeout_millis
+                  = std::chrono::milliseconds (*v);
+            }
           meter_provider->AddMetricReader (
               std::make_unique<metrics_sdk::PeriodicExportingMetricReader> (
                   std::move (metric_exporter), reader_options));
@@ -561,8 +526,14 @@ InitializeFromEnv ()
       state.meter
           = metrics_api::Provider::GetMeterProvider ()->GetMeter ("cortext");
     }
+}
 
 #if defined(CORTEXT_HAVE_OTEL_LOGS_API)
+/// @brief Configures and registers the logs provider from environment variables.
+void
+ConfigureLogsProvider (TelemetryState &state,
+                       const resource_sdk::Resource &resource)
+{
   if (!ExporterDisabled ("OTEL_LOGS_EXPORTER")
       || ShouldUseFileExporterFor ("OTEL_LOGS_EXPORTER", "logs"))
     {
@@ -623,6 +594,52 @@ InitializeFromEnv ()
               = logs_api::Provider::GetLoggerProvider ()->GetLogger ("cortext");
         }
     }
+}
+#endif
+
+} // namespace
+
+struct ScopedSpan::Impl
+{
+  opentelemetry::nostd::shared_ptr<trace_api::Span> span;
+  std::unique_ptr<trace_api::Scope> scope;
+};
+
+bool
+InitializeFromEnv ()
+{
+  TelemetryState &state = GetState ();
+  if (state.is_initialized.load ())
+    {
+      return true;
+    }
+
+  std::lock_guard<std::mutex> lock (state.mu);
+  if (state.is_initialized.load ())
+    {
+      return true;
+    }
+
+  const resource_sdk::Resource resource = MakeResourceFromEnv ();
+
+  // Optional local file exporter sink shared across signals.
+  const std::string file_path = GetFileExporterPath ();
+  if (!file_path.empty () && !state.file_stream)
+    {
+      state.file_export_path = file_path;
+      state.file_stream = std::make_unique<std::ofstream> (
+          file_path, std::ios::out | std::ios::app);
+      if (!state.file_stream->is_open ())
+        {
+          state.file_stream.reset ();
+          state.file_export_path.clear ();
+        }
+    }
+
+  ConfigureTraceProvider (state, resource);
+  ConfigureMetricsProvider (state, resource);
+#if defined(CORTEXT_HAVE_OTEL_LOGS_API)
+  ConfigureLogsProvider (state, resource);
 #endif
 
   state.is_initialized.store (true);
@@ -902,7 +919,7 @@ LogInfo (std::string_view message)
 
 namespace
 {
-
+/// @brief Applies attributes to a span from an initializer list.
 void
 ApplySpanLogAttributes (ScopedSpan &span,
                         std::initializer_list<Attribute> attrs)
@@ -928,6 +945,48 @@ ApplySpanLogAttributes (ScopedSpan &span,
     }
 }
 
+#if defined(CORTEXT_HAVE_OTEL_LOGS_API)
+/// @brief Emits a log record via the OTel Logs API.
+void
+EmitLogRecordImpl (logs_api::Severity severity, std::string_view message,
+                   std::initializer_list<Attribute> attrs)
+{
+  InitializeFromEnv ();
+  TelemetryState &state = GetState ();
+  if (!state.logger)
+    return;
+  std::vector<std::pair<opentelemetry::nostd::string_view,
+                        opentelemetry::common::AttributeValue> >
+      kvs;
+  kvs.reserve (attrs.size ());
+  for (const auto &a : attrs)
+    {
+      const opentelemetry::nostd::string_view k (a.key.data (), a.key.size ());
+      switch (a.type)
+        {
+        case Attribute::Type::kBool:
+          kvs.emplace_back (k, a.bool_value);
+          break;
+        case Attribute::Type::kInt64:
+          kvs.emplace_back (k, a.int64_value);
+          break;
+        case Attribute::Type::kDouble:
+          kvs.emplace_back (k, a.double_value);
+          break;
+        case Attribute::Type::kString:
+        default:
+          kvs.emplace_back (
+              k, opentelemetry::nostd::string_view (a.string_value.data (),
+                                                    a.string_value.size ()));
+          break;
+        }
+    }
+  state.logger->EmitLogRecord (
+      severity,
+      opentelemetry::nostd::string_view (message.data (), message.size ()),
+      kvs);
+}
+#endif
 } // namespace
 
 void
@@ -942,43 +1001,7 @@ LogError (std::string_view message, std::initializer_list<Attribute> attrs)
       ApplySpanLogAttributes (span, attrs);
       span.AddEvent ("cortext.log.error");
 #if defined(CORTEXT_HAVE_OTEL_LOGS_API)
-      InitializeFromEnv ();
-      TelemetryState &state = GetState ();
-      if (state.logger)
-        {
-          std::vector<std::pair<opentelemetry::nostd::string_view,
-                                opentelemetry::common::AttributeValue> >
-              kvs;
-          kvs.reserve (attrs.size ());
-          for (const auto &a : attrs)
-            {
-              const opentelemetry::nostd::string_view k (a.key.data (),
-                                                        a.key.size ());
-              switch (a.type)
-                {
-                case Attribute::Type::kBool:
-                  kvs.emplace_back (k, a.bool_value);
-                  break;
-                case Attribute::Type::kInt64:
-                  kvs.emplace_back (k, a.int64_value);
-                  break;
-                case Attribute::Type::kDouble:
-                  kvs.emplace_back (k, a.double_value);
-                  break;
-                case Attribute::Type::kString:
-                default:
-                  kvs.emplace_back (
-                      k, opentelemetry::nostd::string_view (
-                             a.string_value.data (), a.string_value.size ()));
-                  break;
-                }
-            }
-          state.logger->EmitLogRecord (
-              logs_api::Severity::kError,
-              opentelemetry::nostd::string_view (message.data (),
-                                                 message.size ()),
-              kvs);
-        }
+      EmitLogRecordImpl (logs_api::Severity::kError, message, attrs);
 #endif
     }
 }
@@ -995,43 +1018,7 @@ LogWarn (std::string_view message, std::initializer_list<Attribute> attrs)
       ApplySpanLogAttributes (span, attrs);
       span.AddEvent ("cortext.log.warn");
 #if defined(CORTEXT_HAVE_OTEL_LOGS_API)
-      InitializeFromEnv ();
-      TelemetryState &state = GetState ();
-      if (state.logger)
-        {
-          std::vector<std::pair<opentelemetry::nostd::string_view,
-                                opentelemetry::common::AttributeValue> >
-              kvs;
-          kvs.reserve (attrs.size ());
-          for (const auto &a : attrs)
-            {
-              const opentelemetry::nostd::string_view k (a.key.data (),
-                                                        a.key.size ());
-              switch (a.type)
-                {
-                case Attribute::Type::kBool:
-                  kvs.emplace_back (k, a.bool_value);
-                  break;
-                case Attribute::Type::kInt64:
-                  kvs.emplace_back (k, a.int64_value);
-                  break;
-                case Attribute::Type::kDouble:
-                  kvs.emplace_back (k, a.double_value);
-                  break;
-                case Attribute::Type::kString:
-                default:
-                  kvs.emplace_back (
-                      k, opentelemetry::nostd::string_view (
-                             a.string_value.data (), a.string_value.size ()));
-                  break;
-                }
-            }
-          state.logger->EmitLogRecord (
-              logs_api::Severity::kWarn,
-              opentelemetry::nostd::string_view (message.data (),
-                                                 message.size ()),
-              kvs);
-        }
+      EmitLogRecordImpl (logs_api::Severity::kWarn, message, attrs);
 #endif
     }
 }
@@ -1048,43 +1035,7 @@ LogInfo (std::string_view message, std::initializer_list<Attribute> attrs)
       ApplySpanLogAttributes (span, attrs);
       span.AddEvent ("cortext.log.info");
 #if defined(CORTEXT_HAVE_OTEL_LOGS_API)
-      InitializeFromEnv ();
-      TelemetryState &state = GetState ();
-      if (state.logger)
-        {
-          std::vector<std::pair<opentelemetry::nostd::string_view,
-                                opentelemetry::common::AttributeValue> >
-              kvs;
-          kvs.reserve (attrs.size ());
-          for (const auto &a : attrs)
-            {
-              const opentelemetry::nostd::string_view k (a.key.data (),
-                                                        a.key.size ());
-              switch (a.type)
-                {
-                case Attribute::Type::kBool:
-                  kvs.emplace_back (k, a.bool_value);
-                  break;
-                case Attribute::Type::kInt64:
-                  kvs.emplace_back (k, a.int64_value);
-                  break;
-                case Attribute::Type::kDouble:
-                  kvs.emplace_back (k, a.double_value);
-                  break;
-                case Attribute::Type::kString:
-                default:
-                  kvs.emplace_back (
-                      k, opentelemetry::nostd::string_view (
-                             a.string_value.data (), a.string_value.size ()));
-                  break;
-                }
-            }
-          state.logger->EmitLogRecord (
-              logs_api::Severity::kInfo,
-              opentelemetry::nostd::string_view (message.data (),
-                                                 message.size ()),
-              kvs);
-        }
+      EmitLogRecordImpl (logs_api::Severity::kInfo, message, attrs);
 #endif
     }
 }
@@ -1221,5 +1172,4 @@ LogInfo (std::string_view, std::initializer_list<Attribute>)
 #endif // defined(CORTEXT_ENABLE_OTEL)
 
 } // namespace cortext::telemetry
-
 

@@ -93,7 +93,9 @@ public:
   /// @param op The buffered write instruction to add.
   void AddWriteInstruction (BufferedWriteInstruction op);
 
-  // --- Memory usage events API (Algorithm 14/18 inputs) ---
+  // ======================================================================
+  // Memory Usage Events API (Algorithms 14, 18 inputs)
+  // ======================================================================
   void SetMemoryUsageEvents (std::vector<MemoryUsageEvent> events);
   const std::vector<MemoryUsageEvent> &GetMemoryUsageEvents () const;
 
@@ -110,9 +112,10 @@ public:
     return retrieved_memory_embeddings_;
   }
 
-  // --- Typed per-signal variables (no conversions) ---
-  //
-  // Inputs set by earlier operations or external instrumentation
+  // ======================================================================
+  // Threshold Modulation API (Algorithm 8 inputs/outputs)
+  // ======================================================================
+  
   void
   SetCompositeScore (std::optional<double> v)
   {
@@ -180,7 +183,10 @@ public:
     return threshold_hysteresis_;
   }
 
-  // --- Boundary / Interrupt (Algorithm 27) ---
+  // ======================================================================
+  // Boundary & Interrupt Gate API (Algorithm 27)
+  // ======================================================================
+  
   void
   SetAtBoundary (bool v)
   {
@@ -201,7 +207,10 @@ public:
   {
     return interrupt_allowed_;
   }
-  // --- Consolidation triggers (Algorithm 28/28b) inputs/outputs ---
+  // ======================================================================
+  // Consolidation Triggers API (Algorithms 28, 28b)
+  // ======================================================================
+  
   void
   SetTokensInFlight (int v)
   {
@@ -295,7 +304,10 @@ public:
     return coherence_;
   }
 
-  // Emotions (Alg 4) - outputs for telemetry/downstream
+  // ======================================================================
+  // Emotion API (Algorithm 4 outputs for downstream/telemetry)
+  // ======================================================================
+  
   void
   SetEmotionIntensity (double v)
   {
@@ -329,7 +341,10 @@ public:
     return arousal_;
   }
 
-  // --- Stability feedback (Alg 17 → Alg 6) bridge ---
+  // ======================================================================
+  // Stability Feedback API (Algorithm 17 → Algorithm 6 bridge)
+  // ======================================================================
+  
   void
   SetDeltaHalfLifeAdjustment (std::optional<double> v)
   {
@@ -353,7 +368,10 @@ public:
     return observed_retention_sec_;
   }
 
-  // --- Metacognitive monitoring (Algorithm 25) ---
+  // ======================================================================
+  // Metacognitive Monitoring API (Algorithm 25)
+  // ======================================================================
+  
   void
   SetFeelingOfKnowing (std::optional<double> v)
   {
@@ -435,7 +453,10 @@ public:
     return metacog_sensitivity_;
   }
 
-  // --- Serial Position Effects (Algorithm 26) ---
+  // ======================================================================
+  // Serial Position Effects API (Algorithm 26)
+  // ======================================================================
+  
   void
   SetSerialPrimacyWindow (int v)
   {
@@ -507,7 +528,10 @@ public:
     return serial_middle_suppression_;
   }
 
-  // --- Effective Focus (Algorithm 10 stabilizer) ---
+  // ======================================================================
+  // Effective Focus API (Algorithm 10 stabilizer)
+  // ======================================================================
+  
   void
   SetEffectiveFocus (double v)
   {
@@ -519,11 +543,13 @@ public:
     return f_eff_;
   }
 
-  // --- Metrics API for Algorithm 7 ---
-  //
+  // ======================================================================
+  // Metrics API (Algorithm 7 and composite score computation)
+  // ======================================================================
   // Metrics are stored as normalized values in either [-1,1] or [0,1],
   // depending on the metric definition (see algorithms.md). Consumers that
   // require [0,1] should map negatives via (v+1)/2 when needed.
+  
   void
   SetMetric (operations::Metric name, double value_0_to_100)
   {
@@ -589,7 +615,10 @@ public:
     return last_effective_metric_count_;
   }
 
-  // --- Episode boundary request (Algorithm 12) ---
+  // ======================================================================
+  // Episode Boundary API (Algorithm 12)
+  // ======================================================================
+  
   void
   RequestFinalizeEpisode ()
   {

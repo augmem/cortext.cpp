@@ -1,12 +1,76 @@
 #include "cortext/store/schema.hpp"
+#include "cortext/telemetry/telemetry.hpp"
 #include <algorithm>
-#include <iostream>
 #include <map>
 #include <set>
 #include <stdexcept>
 
 namespace cortext::store
 {
+
+namespace
+{
+
+/// @brief Reads the set of already-applied migration IDs from the tracking table.
+///
+/// Migration IDs are monotonically increasing integers (e.g., YYYYMMDDnn format)
+/// that must be unique across all registered migrations to prevent collisions.
+std::set<int>
+GetAppliedMigrations (Store &store)
+{
+  std::set<int> applied_ids;
+  auto rows = store.Execute ("SELECT id FROM cortext_schema_migrations");
+  for (const auto &row : rows)
+    {
+      if (row.count ("id"))
+        {
+          auto val = row.at ("id");
+          if (val.type () == typeid (int))
+            applied_ids.insert (std::any_cast<int> (val));
+          else if (val.type () == typeid (long long))
+            applied_ids.insert (static_cast<int> (std::any_cast<long long> (val)));
+        }
+    }
+  return applied_ids;
+}
+
+void
+ApplySingleMigration (Store &store, const Migration &m)
+{
+  auto tx = store.Begin ();
+  try
+    {
+      for (const auto &sql : m.up_statements)
+        {
+          try
+            {
+              tx->Execute (sql);
+            }
+          catch (const std::exception &e)
+            {
+              throw;
+            }
+        }
+      tx->Execute (
+          "INSERT INTO cortext_schema_migrations (id, description, applied_at) "
+          "VALUES (?, ?, strftime('%s', 'now'))",
+          { m.id, m.description });
+      tx->Commit ();
+    }
+  catch (const std::exception &e)
+    {
+      tx->Rollback ();
+      telemetry::LogError (
+          "Schema migration failed",
+          { telemetry::Attribute::String ("component", "store.schema"),
+            telemetry::Attribute::Int64 ("migration_id", m.id),
+            telemetry::Attribute::String ("migration_description", m.description),
+            telemetry::Attribute::String ("error", e.what ()) });
+      throw;
+    }
+}
+
+} // namespace
 
 void
 SchemaRegistry::Register (Migration migration)
@@ -129,39 +193,15 @@ RegisterCoreSchema (SchemaRegistry &registry)
 void
 ApplyMigrations (Store &store, const SchemaRegistry &registry)
 {
-  // 1. Ensure migrations table exists.
   store.Execute (
       "CREATE TABLE IF NOT EXISTS cortext_schema_migrations ("
       "  id INTEGER PRIMARY KEY,"
       "  description TEXT,"
       "  applied_at INTEGER"
       ")");
-
-  // 2. Get already applied migrations.
-  std::set<int> applied_ids;
-  auto rows = store.Execute ("SELECT id FROM cortext_schema_migrations");
-  for (const auto &row : rows)
-    {
-      if (row.count ("id"))
-        {
-          auto val = row.at ("id");
-          if (val.type () == typeid (int))
-            applied_ids.insert (std::any_cast<int> (val));
-          else if (val.type () == typeid (long long))
-            applied_ids.insert (static_cast<int> (std::any_cast<long long> (val)));
-        }
-    }
-
-  // 3. Register core schema (always present).
-  // We make a copy of registry to append core migrations, or modify the function sig.
-  // Better: ApplyMigrations takes a registry, and the caller (SignalProcessor)
-  // is responsible for populating it. But we need to ensure core schema is there.
-  // Let's modify ApplyMigrations to automatically include core schema.
-  
+  std::set<int> applied_ids = GetAppliedMigrations (store);
   SchemaRegistry full_registry = registry;
   RegisterCoreSchema(full_registry);
-
-  // 4. Apply pending migrations in order.
   auto migrations = full_registry.GetSortedMigrations ();
   for (const auto &m : migrations)
     {
@@ -169,46 +209,7 @@ ApplyMigrations (Store &store, const SchemaRegistry &registry)
         {
           continue;
         }
-
-      // Run migration in a transaction.
-      auto tx = store.Begin ();
-      try
-        {
-          for (const auto &sql : m.up_statements)
-            {
-              // Handle conditional logic for virtual tables or columns here if needed,
-              // or just execute raw SQL.
-              // For robustness, we catch errors on individual statements if they are "soft" fails,
-              // but typically a migration failure should halt.
-              try 
-              {
-                  tx->Execute (sql);
-              }
-              catch (const std::exception& e)
-              {
-                  // Special case: objstore vtab might fail if extension not loaded.
-                  // We log/ignore? For now, we let it bubble up unless it is critically optional.
-                  // If "objstore" migration fails, it usually means extension missing.
-                  // We'll rethrow for now to be safe.
-                  throw;
-              }
-            }
-
-          // Record as applied.
-          tx->Execute (
-              "INSERT INTO cortext_schema_migrations (id, description, applied_at) "
-              "VALUES (?, ?, strftime('%s', 'now'))",
-              { m.id, m.description });
-
-          tx->Commit ();
-        }
-      catch (const std::exception &e)
-        {
-          tx->Rollback ();
-          // Log failure
-          std::cerr << "Migration " << m.id << " (" << m.description << ") failed: " << e.what() << std::endl;
-          throw; 
-        }
+      ApplySingleMigration (store, m);
     }
 }
 

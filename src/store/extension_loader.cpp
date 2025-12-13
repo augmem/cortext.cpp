@@ -23,6 +23,18 @@ extern "C"
 #endif
 }
 
+/// @brief Registers statically linked SQLite extensions for process-wide use.
+///
+/// Platform-specific behavior:
+/// - **Apple platforms**: sqlite3_auto_extension() is deprecated, so this only
+///   initializes SQLite. Actual extension registration happens per-connection
+///   via RegisterBuiltInExtensionsOnDb().
+/// - **Other platforms**: Uses sqlite3_auto_extension() to register vec/graph
+///   globally so all new connections inherit them.
+/// - **WASM**: Handled separately in src/wasm/auto_extensions.cpp via constructor
+///   attribute.
+///
+/// Thread-safety: Uses std::call_once to ensure one-time initialization.
 void
 RegisterBuiltInExtensions ()
 {
