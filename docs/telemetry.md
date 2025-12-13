@@ -5,39 +5,20 @@
 
 ## Build-time enablement
 
-OpenTelemetry is **optional** and is disabled by default.
+On native builds, `cortext` always compiles with the OpenTelemetry **API** and
+emits spans/metrics/logs to the **global providers**. If the application does
+not install an OpenTelemetry SDK provider/exporter pipeline, instrumentation is
+effectively **noop**.
 
-Build with:
+On WebAssembly (Emscripten) builds, telemetry is stubbed out.
 
-```bash
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCORTEXT_ENABLE_OTEL=ON
-cmake --build build -j
-```
+## Runtime configuration
 
-## Runtime configuration (environment variables)
+`cortext` does not configure exporters/providers. The **application** is
+responsible for installing SDK providers/exporters (often configured via
+standard `OTEL_*` environment variables in the app).
 
-All configuration is done via standard OpenTelemetry environment variables
-(no hardcoded endpoints in `cortext`).
-
-### Local file exporter (for debugging)
-
-For local development, `cortext` supports writing telemetry to a file via
-OpenTelemetry’s **OTLP file exporter**, which writes **JSONL** (newline-delimited
-JSON: one record per line) for spans/metrics/logs.
-
-Set:
-
-* `CORTEXT_OTEL_FILE_PATH`: file path to append telemetry output to
-* `CORTEXT_OTEL_FILE_SIGNALS` (optional): comma-separated subset of `traces,metrics,logs`
-
-Notes:
-
-* This activates only when the corresponding `OTEL_*_EXPORTER` is **unset** or
-  set to `none`, so it won’t override an explicitly configured exporter like
-  `otlp`.
-* The output is **single-line JSON** per record (easy to `tail -f` / `grep`).
-
-Common variables:
+Common environment variables (when the application uses the OTEL SDK):
 
 * `OTEL_SERVICE_NAME`: service name (defaults to `cortext` if unset)
 * `OTEL_RESOURCE_ATTRIBUTES`: resource attributes (e.g. `service.version=...`)

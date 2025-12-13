@@ -13,7 +13,9 @@
 #include "cortext/operations/graph_retrieval.hpp"
 #include "cortext/operations/graph_schema.hpp"
 #include "cortext/operations/goal_alignment.hpp"
+#include "cortext/operations/goal_alignment_fallback.hpp"
 #include "cortext/operations/logprob_surprise.hpp"
+#include "cortext/operations/centroids.hpp"
 #include "cortext/operations/precision.hpp"
 #include "cortext/operations/sensitivity.hpp"
 #include "cortext/operations/threshold.hpp"
@@ -302,7 +304,9 @@ struct Cortext::Impl
     using cortext::operations::EvaluateConsolidation;
     using cortext::operations::FitMetricWeightsRLS;
     using cortext::operations::GraphAugmentedRetrieveCandidates;
+    using cortext::operations::InitializeEmbeddedCentroids;
     using cortext::operations::ComputeGoalAlignment;
+    using cortext::operations::ComputeGoalAlignmentFallback;
     using cortext::operations::ComputeCompositeScore;
     using cortext::operations::ComputeCoherence;
     using cortext::operations::ComputeEffectiveFocus;
@@ -339,6 +343,8 @@ struct Cortext::Impl
     pipeline_root = std::make_unique<OperationSet> (
         std::make_unique<EnsureGraphSchema> (),
 
+        std::make_unique<InitializeEmbeddedCentroids> (),
+
         std::make_unique<InitializeFocusPriors> (),
         std::make_unique<InitializeSensitivityPriors> (),
         std::make_unique<InitializeStabilityPriors> (),
@@ -362,6 +368,7 @@ struct Cortext::Impl
 
         std::make_unique<GraphAugmentedRetrieveCandidates> (),
         std::make_unique<ComputeGoalAlignment> (),
+        std::make_unique<ComputeGoalAlignmentFallback> (),
         std::make_unique<ComputeMniGateDecision> (),
 
         std::make_unique<ApplyRetrievalCompetition> (),
@@ -410,6 +417,21 @@ struct Cortext::Impl
   {
     Cortext::Context result;
     result.should_interrupt = out.interrupt_allowed;
+    
+    // Populate output metrics
+    result.output.composite_score = out.composite_score;
+    result.output.threshold = out.threshold_T_dynamic;
+    result.output.effective_focus = out.effective_focus;
+    result.output.coherence = cfg.focus; // Placeholder - coherence not in Output yet
+    result.output.emotion_intensity = out.emotion_intensity;
+    result.output.valence = out.valence;
+    result.output.arousal = out.arousal;
+    
+    // Convert metrics map (enum -> int)
+    for (const auto& [metric_enum, value] : out.metrics) {
+      result.output.metrics[static_cast<int>(metric_enum)] = value;
+    }
+    
     if (!store)
       {
         return result;

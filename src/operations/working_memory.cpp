@@ -1,36 +1,25 @@
 #include "cortext/operations/working_memory.hpp"
+
 #include "cortext/core/algorithms.hpp"
-#include "cortext/operations/constants.hpp"
 #include "cortext/core/knobs.hpp"
+#include "cortext/core/utils.hpp"
+#include "cortext/operations/constants.hpp"
 #include "cortext/processor/operation_context.hpp"
 #include <algorithm>
 #include <cmath>
 #include <limits>
 #include <vector>
+
 namespace cortext::operations
 {
+
 namespace
 {
-constexpr double kTiny = 1e-6;
-constexpr double kStrengthMax = 10.0;
-constexpr double kWMBaseMin = 0.5;
-constexpr double kWMBaseMax = 1.5;
-inline double
-Clamp01 (double v)
-{
-  if (v < constants::kNormalizedMin)
-    return constants::kNormalizedMin;
-  if (v > constants::kNormalizedMax)
-    return constants::kNormalizedMax;
-  return v;
-}
-
+/// @brief Computes WM strength base contribution scale based on Stability.
 inline double
 WMStrengthBase (double T)
 {
-  // Base contribution scale for WM slot updates; tie to Stability.
-  // Range [0.5, 1.5] keeps values well-behaved without DB persistence.
-  return core::Lerp (kWMBaseMin, kWMBaseMax, T);
+  return core::Lerp (constants::kWMBaseMin, constants::kWMBaseMax, T);
 }
 
 inline double
@@ -122,7 +111,7 @@ WorkingMemory::Execute (OperationContext &context) const
       return; // nothing to gate
     }
 
-  const double benefit = Clamp01 (
+  const double benefit = core::Clamp01 (
       context.GetCompositeScore ().value_or (p_ctx.weight_relevance));
   const double threshold_T = core::Clamp (p_ctx.T_dynamic,
                                           constants::kNormalizedMin,
@@ -163,8 +152,8 @@ WorkingMemory::Execute (OperationContext &context) const
     {
       auto &slot = p_ctx.wm_slots[static_cast<size_t> (best_idx)];
       const double add_strength = WMStrengthBase (cfg.stability) * benefit;
-      const double alpha = std::max (kTiny, slot.strength);
-      const double beta = std::max (kTiny, add_strength);
+      const double alpha = std::max (constants::kTiny, slot.strength);
+      const double beta = std::max (constants::kTiny, add_strength);
       Eigen::VectorXf new_vec
           = alpha * slot.embedding + beta * signal.embedding;
       const double norm = new_vec.norm ();
@@ -174,7 +163,7 @@ WorkingMemory::Execute (OperationContext &context) const
         }
       slot.embedding = new_vec;
       slot.strength
-          = std::min (kStrengthMax,
+          = std::min (constants::kStrengthMax,
                       std::max (constants::kNormalizedMin,
                                 slot.strength + add_strength));
       slot.last_ts = now_s;
@@ -215,7 +204,7 @@ WorkingMemory::Execute (OperationContext &context) const
   ProcessorContext::WMSlot slot;
   slot.embedding = vec;
   slot.strength
-      = std::min (kStrengthMax,
+      = std::min (constants::kStrengthMax,
                   std::max (constants::kNormalizedMin,
                             WMStrengthBase (cfg.stability)
                                 * (constants::kOneHalf

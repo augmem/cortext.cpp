@@ -2,13 +2,13 @@
 
 #include "cortext/core/algorithms.hpp"
 #include "cortext/core/knobs.hpp"
+#include "cortext/core/utils.hpp"
 #include "cortext/operations/constants.hpp"
 #include "cortext/processor/operation_context.hpp"
 #include "cortext/store/store.hpp"
 #include <algorithm>
 #include <any>
 #include <cmath>
-#include <cstring>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -20,64 +20,12 @@ namespace cortext::operations
 
 namespace
 {
-inline bool
-StartsWith (const std::string &s, const char *prefix)
-{
-  const std::string p (prefix);
-  return s.size () >= p.size () && s.compare (0, p.size (), p) == 0;
-}
-
-bool
-AnyToBytes (const std::any &v, const unsigned char *&data, size_t &len)
-{
-  if (v.type () == typeid (std::vector<char>))
-    {
-      const auto &blob = std::any_cast<const std::vector<char> &> (v);
-      data = reinterpret_cast<const unsigned char *> (blob.data ());
-      len = blob.size ();
-      return true;
-    }
-  if (v.type () == typeid (std::vector<unsigned char>))
-    {
-      const auto &blob = std::any_cast<const std::vector<unsigned char> &> (v);
-      data = blob.data ();
-      len = blob.size ();
-      return true;
-    }
-  return false;
-}
-
-bool
-DecodeFloatBlob (const std::any &v, int dim, Eigen::VectorXf &out)
-{
-  const unsigned char *data = nullptr;
-  size_t len = 0;
-  if (!AnyToBytes (v, data, len))
-    {
-      return false;
-    }
-  const size_t want = static_cast<size_t> (dim) * sizeof (float);
-  if (dim <= 0 || len != want)
-    {
-      return false;
-    }
-  out.resize (dim);
-  for (int i = 0; i < dim; ++i)
-    {
-      float f = 0.0f;
-      std::memcpy (&f, data + static_cast<size_t> (i) * sizeof (float),
-                   sizeof (float));
-      out[i] = f;
-    }
-  return true;
-}
-
+/// @brief Constructs a graph node ID from an embedding ID.
 std::string
 EmbNodeId (long long embedding_id)
 {
   return std::string ("emb:") + std::to_string (embedding_id);
 }
-
 } // namespace
 
 void
@@ -125,7 +73,7 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context) const
 
           const long long id = std::any_cast<long long> (it_id->second);
           Eigen::VectorXf v;
-          if (!DecodeFloatBlob (it_emb->second, q.size (), v))
+          if (!core::DecodeFloatBlob (it_emb->second, q.size (), v))
             continue;
           const double sim = core::CosineSimilarity (q, v);
           seeds.push_back (Scored{ id, sim, v });
@@ -215,7 +163,7 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context) const
   expanded_embedding_ids.reserve (expanded_nodes.size ());
   for (const auto &n : expanded_nodes)
     {
-      if (StartsWith (n, "emb:"))
+      if (core::StartsWith (n, "emb:"))
         {
           const char *p = n.c_str () + 4;
           char *end = nullptr;
@@ -295,7 +243,7 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context) const
                 continue;
               const long long id = std::any_cast<long long> (it_id->second);
               Eigen::VectorXf v;
-              if (!DecodeFloatBlob (it_emb->second, q.size (), v))
+              if (!core::DecodeFloatBlob (it_emb->second, q.size (), v))
                 continue;
               const double sim = core::CosineSimilarity (q, v);
               scored.push_back (Scored{ id, sim, v });

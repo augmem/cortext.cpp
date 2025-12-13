@@ -9,7 +9,8 @@ namespace cortext::operations
 
 namespace
 {
-static void
+/// @brief Adds a buffered write instruction to the context.
+void
 Add (OperationContext &ctx, const std::string &q,
      const std::vector<std::any> &p = {})
 {
@@ -125,4 +126,3 @@ BuildGraphFromConsolidation::Execute (OperationContext &context) const
 }
 
 } // namespace cortext::operations
-

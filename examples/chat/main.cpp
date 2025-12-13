@@ -1,5 +1,6 @@
 #include <cortext/cortext.hpp>
 #include <cortext/encoder/imagebind.hpp>
+#include <cortext/operations/metrics.hpp>
 #include <cortext/store/sqlite_store.hpp>
 #include <cortext/telemetry/telemetry.hpp>
 
@@ -17,8 +18,10 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <exception>
 #include <filesystem>
+#include <fstream>
 #include <iomanip>
 #include <mutex>
 #include <optional>
@@ -33,6 +36,65 @@ namespace {
 struct ChatMessage {
   std::string role;    // "user" | "assistant" | "system"
   std::string content; // utf-8
+};
+
+enum class MemoryEventType {
+  STORED,
+  RETRIEVED,
+};
+
+struct MemoryEvent {
+  MemoryEventType type;
+  int memory_id;
+  std::string content;
+  std::string source_id;
+  uint64_t timestamp;
+  
+  // Metrics (from ProcessorOutput)
+  std::optional<double> composite_score;
+  std::optional<double> threshold;
+  std::optional<bool> decision;
+  std::optional<bool> should_interrupt;
+  
+  // Individual metrics (Algorithm 7 inputs)
+  std::optional<double> relevance;
+  std::optional<double> surprise;
+  std::optional<double> mismatch;
+  std::optional<double> rarity;
+  std::optional<double> drift;
+  std::optional<double> contradiction;
+  std::optional<double> utility;
+  std::optional<double> periphery;
+  std::optional<double> salience;
+  std::optional<double> valence;
+  std::optional<double> arousal;
+  
+  // System-level
+  std::optional<double> coherence;
+  std::optional<double> focus_spread;
+  std::optional<double> F_eff;
+};
+
+// Simple stderr/stdout capture buffer
+class LogBuffer {
+public:
+  void Append(const std::string& line) {
+    std::lock_guard<std::mutex> lock(mu_);
+    lines_.push_back(line);
+    if (lines_.size() > kMaxLines) {
+      lines_.pop_front();
+    }
+  }
+
+  std::vector<std::string> GetLines() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    return std::vector<std::string>(lines_.begin(), lines_.end());
+  }
+
+private:
+  static constexpr size_t kMaxLines = 1000;
+  mutable std::mutex mu_;
+  std::deque<std::string> lines_;
 };
 
 std::string GetEnv(const char* name, const std::string& fallback = {}) {
@@ -217,32 +279,11 @@ Json BuildOpenAIMessages(const std::vector<ChatMessage>& history,
 } // namespace
 
 int main(int argc, char** argv) {
-  // Enable local OTel file export by default for this example, without
-  // hardcoding any collector endpoints. Users can override via environment.
-  std::string default_otel_file_path;
-  if (!HasEnv("CORTEXT_OTEL_FILE_PATH") && !HasEnv("OTEL_TRACES_EXPORTER") &&
-      !HasEnv("OTEL_METRICS_EXPORTER") && !HasEnv("OTEL_LOGS_EXPORTER")) {
-    try {
-      const auto dir = std::filesystem::temp_directory_path();
-      const auto p = dir / "cortext_chat_otel.log";
-      default_otel_file_path = p.string();
-      setenv("CORTEXT_OTEL_FILE_PATH", p.string().c_str(), 1);
-      if (!HasEnv("CORTEXT_OTEL_FILE_SIGNALS")) {
-        setenv("CORTEXT_OTEL_FILE_SIGNALS", "traces,metrics,logs", 1);
-      }
-      if (!HasEnv("OTEL_SERVICE_NAME")) {
-        setenv("OTEL_SERVICE_NAME", "cortext_chat", 1);
-      }
-    } catch (...) {
-    }
-  }
-  const bool telemetry_ok = cortext::telemetry::InitializeFromEnv();
-  if (!telemetry_ok) {
-    std::cerr << "Telemetry disabled (build without CORTEXT_ENABLE_OTEL=ON).\n";
-  } else if (!default_otel_file_path.empty()) {
-    std::cerr << "Telemetry enabled: writing to " << default_otel_file_path
-              << "\n";
-  }
+  // Shared log buffer for logs view.
+  auto log_buffer = std::make_shared<LogBuffer>();
+  log_buffer->Append(
+      "Telemetry: cortext instruments OpenTelemetry via global providers. "
+      "This example does not configure SDK exporters by default.");
   const bool has_models_env = HasEnv("CORTEXT_MODELS_DIR");
   const bool has_db_env = HasEnv("CORTEXT_CHAT_DB");
 
@@ -331,13 +372,16 @@ int main(int argc, char** argv) {
   std::mutex mu;
   std::vector<ChatMessage> history;
   std::vector<cortext::Cortext::Context::Memory> last_memories;
+  std::deque<MemoryEvent> memory_events;
   bool last_should_interrupt = false;
   std::optional<std::string> last_error;
   bool generating = false;
   std::string input;
+  int tab_selected = 0;
+  static constexpr size_t kMaxMemoryEvents = 50;
 
   // Seed greeting.
-  history.push_back({"system", "cortext_chat: Enter to send | Ctrl+C to quit"});
+  history.push_back({"system", "cortext_chat: Tab to switch views | Enter to send | Ctrl+C to quit"});
 
   auto screen = ftxui::ScreenInteractive::Fullscreen();
 
@@ -366,39 +410,155 @@ int main(int argc, char** argv) {
     return ftxui::vbox(std::move(lines)) | ftxui::yframe | ftxui::vscroll_indicator;
   };
 
-  auto render_memory = [&] {
+  auto get_metric = [](const std::unordered_map<int, double>& metrics, cortext::operations::Metric metric) -> std::optional<double> {
+    auto it = metrics.find(static_cast<int>(metric));
+    if (it != metrics.end()) {
+      return it->second;
+    }
+    return std::nullopt;
+  };
+
+  auto format_metric = [](const std::optional<double>& val, const std::string& label) -> std::string {
+    if (!val.has_value()) return "";
+    std::ostringstream oss;
+    oss << label << ": " << std::fixed << std::setprecision(2) << (*val * 100.0) << "%";
+    return oss.str();
+  };
+
+  auto render_memory = [&, format_metric] {
     ftxui::Elements lines;
     std::lock_guard<std::mutex> lock(mu);
 
-    lines.push_back(ftxui::text("Memory / Interrupt") | ftxui::bold);
+    lines.push_back(ftxui::text("🧠 MEMORY EVENTS (Real-time)") | ftxui::bold);
     lines.push_back(ftxui::separator());
 
-    lines.push_back(ftxui::text(std::string("should_interrupt: ") + (last_should_interrupt ? "true" : "false"))
+    lines.push_back(ftxui::text(std::string("Interrupt: ") + (last_should_interrupt ? "⚠️ TRIGGERED" : "✓ None"))
                     | ftxui::color(last_should_interrupt ? ftxui::Color::Red : ftxui::Color::Green));
 
     if (last_error.has_value()) {
-      lines.push_back(ftxui::separator());
       lines.push_back(ftxui::text("Error: " + *last_error) | ftxui::color(ftxui::Color::Red));
     }
 
     lines.push_back(ftxui::separator());
-    lines.push_back(ftxui::text("Retrieved memories:") | ftxui::bold);
 
+    if (memory_events.empty()) {
+      lines.push_back(ftxui::text("(no memory events yet)") | ftxui::color(ftxui::Color::GrayDark));
+    } else {
     int shown = 0;
-    for (const auto& m : last_memories) {
-      if (shown++ >= 6) break;
-      std::string preview = m.content;
-      if (preview.size() > 200) preview = preview.substr(0, 200) + "...";
-      std::ostringstream hdr;
-      hdr << "#" << m.id;
-      if (!m.source_id.empty()) hdr << " (" << m.source_id << ")";
-      lines.push_back(ftxui::text(hdr.str()) | ftxui::color(ftxui::Color::Blue));
-      lines.push_back(ftxui::paragraph(preview) | ftxui::color(ftxui::Color::White));
+      for (auto it = memory_events.rbegin(); it != memory_events.rend() && shown < 10; ++it, ++shown) {
+        const auto& evt = *it;
+        
+        // Header with type indicator
+        std::string type_icon = (evt.type == MemoryEventType::STORED) ? "💾 STORED" : "🔍 RETRIEVED";
+        auto type_color = (evt.type == MemoryEventType::STORED) ? ftxui::Color::Green : ftxui::Color::Blue;
+        
+        lines.push_back(ftxui::text(type_icon + " #" + std::to_string(evt.memory_id)) 
+                        | ftxui::bold | ftxui::color(type_color));
+        
+        if (!evt.source_id.empty()) {
+          lines.push_back(ftxui::text("  source: " + evt.source_id) | ftxui::color(ftxui::Color::GrayDark));
+        }
+        
+        // Decision and score
+        if (evt.composite_score.has_value() && evt.threshold.has_value()) {
+          std::ostringstream score_line;
+          score_line << "  Score: " << std::fixed << std::setprecision(3) << *evt.composite_score
+                     << " | T: " << std::fixed << std::setprecision(3) << *evt.threshold;
+          if (evt.decision.has_value()) {
+            score_line << " | decision: " << (*evt.decision ? "STORE" : "SKIP");
+          }
+          lines.push_back(ftxui::text(score_line.str()) | ftxui::color(ftxui::Color::Yellow));
+        }
+        
+        // Metrics row 1
+        std::vector<std::string> row1;
+        if (evt.relevance.has_value()) row1.push_back(format_metric(evt.relevance, "Rel"));
+        if (evt.surprise.has_value()) row1.push_back(format_metric(evt.surprise, "Sur"));
+        if (evt.mismatch.has_value()) row1.push_back(format_metric(evt.mismatch, "Mis"));
+        if (evt.rarity.has_value()) row1.push_back(format_metric(evt.rarity, "Rar"));
+        if (!row1.empty()) {
+          std::string row1_str = "  ";
+          for (size_t i = 0; i < row1.size(); ++i) {
+            if (i > 0) row1_str += " | ";
+            row1_str += row1[i];
+          }
+          lines.push_back(ftxui::text(row1_str) | ftxui::color(ftxui::Color::Cyan));
+        }
+        
+        // Metrics row 2
+        std::vector<std::string> row2;
+        if (evt.drift.has_value()) row2.push_back(format_metric(evt.drift, "Drift"));
+        if (evt.contradiction.has_value()) row2.push_back(format_metric(evt.contradiction, "Contra"));
+        if (evt.utility.has_value()) row2.push_back(format_metric(evt.utility, "Util"));
+        if (evt.periphery.has_value()) row2.push_back(format_metric(evt.periphery, "Periph"));
+        if (!row2.empty()) {
+          std::string row2_str = "  ";
+          for (size_t i = 0; i < row2.size(); ++i) {
+            if (i > 0) row2_str += " | ";
+            row2_str += row2[i];
+          }
+          lines.push_back(ftxui::text(row2_str) | ftxui::color(ftxui::Color::Magenta));
+        }
+        
+        // Emotion metrics
+        std::vector<std::string> row3;
+        if (evt.salience.has_value()) row3.push_back(format_metric(evt.salience, "Sal"));
+        if (evt.valence.has_value()) row3.push_back(format_metric(evt.valence, "Val"));
+        if (evt.arousal.has_value()) row3.push_back(format_metric(evt.arousal, "Aro"));
+        if (!row3.empty()) {
+          std::string row3_str = "  ";
+          for (size_t i = 0; i < row3.size(); ++i) {
+            if (i > 0) row3_str += " | ";
+            row3_str += row3[i];
+          }
+          lines.push_back(ftxui::text(row3_str) | ftxui::color(ftxui::Color::Yellow));
+        }
+        
+        // System-level metrics
+        std::vector<std::string> row4;
+        if (evt.coherence.has_value()) row4.push_back(format_metric(evt.coherence, "Coh"));
+        if (evt.focus_spread.has_value()) row4.push_back(format_metric(evt.focus_spread, "FSpread"));
+        if (evt.F_eff.has_value()) row4.push_back(format_metric(evt.F_eff, "F_eff"));
+        if (!row4.empty()) {
+          std::string row4_str = "  ";
+          for (size_t i = 0; i < row4.size(); ++i) {
+            if (i > 0) row4_str += " | ";
+            row4_str += row4[i];
+          }
+          lines.push_back(ftxui::text(row4_str) | ftxui::color(ftxui::Color::GrayLight));
+        }
+        
+        // Content preview
+        std::string preview = evt.content;
+        if (preview.size() > 120) preview = preview.substr(0, 120) + "...";
+        lines.push_back(ftxui::text("  \"" + preview + "\"") | ftxui::color(ftxui::Color::White));
       lines.push_back(ftxui::separator());
+      }
     }
 
-    if (last_memories.empty()) {
-      lines.push_back(ftxui::text("(none)") | ftxui::color(ftxui::Color::GrayDark));
+    return ftxui::vbox(std::move(lines)) | ftxui::yframe | ftxui::vscroll_indicator;
+  };
+
+  auto render_logs = [&, log_buffer] {
+    ftxui::Elements lines;
+    lines.push_back(ftxui::text("System Logs (OpenTelemetry)") | ftxui::bold);
+    lines.push_back(ftxui::separator());
+
+    auto log_lines = log_buffer->GetLines();
+    if (log_lines.empty()) {
+      lines.push_back(ftxui::text("(no logs yet)") | ftxui::color(ftxui::Color::GrayDark));
+    } else {
+      for (const auto& line : log_lines) {
+        auto color = ftxui::Color::White;
+        if (line.find("ERROR") != std::string::npos || line.find("error") != std::string::npos) {
+          color = ftxui::Color::Red;
+        } else if (line.find("WARN") != std::string::npos || line.find("warning") != std::string::npos) {
+          color = ftxui::Color::Yellow;
+        } else if (line.find("INFO") != std::string::npos) {
+          color = ftxui::Color::Cyan;
+        }
+        lines.push_back(ftxui::text(line) | ftxui::color(color));
+      }
     }
 
     return ftxui::vbox(std::move(lines)) | ftxui::yframe | ftxui::vscroll_indicator;
@@ -406,22 +566,30 @@ int main(int argc, char** argv) {
 
   auto input_component = ftxui::Input(&input, "Type a message...");
 
+  std::vector<std::string> tab_names = {"Chat", "Memory", "Logs"};
+  auto tab_toggle = ftxui::Toggle(&tab_names, &tab_selected);
+
+  auto tab_container = ftxui::Container::Tab(
+    {
+      ftxui::Renderer(render_chat),
+      ftxui::Renderer(render_memory),
+      ftxui::Renderer(render_logs),
+    },
+    &tab_selected
+  );
+
   auto root = ftxui::Container::Vertical({
-      ftxui::Container::Horizontal({
-          ftxui::Renderer(render_chat),
-          ftxui::Renderer(render_memory),
-      }),
+      tab_toggle,
+      tab_container,
       input_component,
   });
 
   // Make panes look nicer.
   auto root_renderer = ftxui::Renderer(root, [&] {
-    auto left = render_chat() | ftxui::border | ftxui::flex;
-    auto right = render_memory() | ftxui::border | ftxui::size(ftxui::WIDTH, ftxui::EQUAL, 50);
-
-    auto main = ftxui::hbox({left, right});
+    auto tab_bar = tab_toggle->Render() | ftxui::border;
+    auto content = tab_container->Render() | ftxui::border | ftxui::flex;
     auto input_box = ftxui::hbox({ftxui::text(" > "), input_component->Render()}) | ftxui::border;
-    return ftxui::vbox({main | ftxui::flex, input_box});
+    return ftxui::vbox({tab_bar, content, input_box});
   });
 
   // Event handling.
@@ -449,6 +617,44 @@ int main(int argc, char** argv) {
           // Ensure cortext sees latest externally persisted rows by refreshing its episode.
           cortext_ctx->Flush();
           retrieved = cortext_ctx->ProcessText(text, ts, "chat/user");
+          
+          // Create memory events for retrieved memories
+          {
+            std::lock_guard<std::mutex> lock(mu);
+            for (const auto& mem : retrieved.memories) {
+              MemoryEvent evt;
+              evt.type = MemoryEventType::RETRIEVED;
+              evt.memory_id = mem.id;
+              evt.content = mem.content;
+              evt.source_id = mem.source_id;
+              evt.timestamp = mem.timestamp;
+              evt.composite_score = retrieved.output.composite_score;
+              evt.threshold = retrieved.output.threshold;
+              evt.should_interrupt = retrieved.should_interrupt;
+              
+              // Extract individual metrics using helper
+              using M = cortext::operations::Metric;
+              evt.relevance = get_metric(retrieved.output.metrics, M::relevance);
+              evt.surprise = get_metric(retrieved.output.metrics, M::surprise);
+              evt.mismatch = get_metric(retrieved.output.metrics, M::mismatch);
+              evt.rarity = get_metric(retrieved.output.metrics, M::rarity);
+              evt.drift = get_metric(retrieved.output.metrics, M::drift);
+              evt.contradiction = get_metric(retrieved.output.metrics, M::contradiction);
+              evt.utility = get_metric(retrieved.output.metrics, M::utility);
+              evt.periphery = get_metric(retrieved.output.metrics, M::periphery);
+              evt.salience = get_metric(retrieved.output.metrics, M::salience);
+              evt.valence = retrieved.output.valence;
+              evt.arousal = retrieved.output.arousal;
+              evt.F_eff = retrieved.output.effective_focus;
+              evt.focus_spread = get_metric(retrieved.output.metrics, M::focus_spread);
+              
+              memory_events.push_back(evt);
+              if (memory_events.size() > kMaxMemoryEvents) {
+                memory_events.pop_front();
+              }
+            }
+          }
+          
           injected_system = FormatMemoriesForSystemPrompt(retrieved.memories);
           if (!injected_system.empty()) {
             injected_system = std::string("## Relevant Context from Memory\n\n")
@@ -487,8 +693,52 @@ int main(int argc, char** argv) {
           auto uniq = cortext::SQLiteStore::Create(db_path.string());
           auto store = std::shared_ptr<cortext::Store>(std::move(uniq));
 
-          (void)PersistTextMemory(*store, encoder, text, "chat/user", ts);
-          (void)PersistTextMemory(*store, encoder, assistant_reply, "chat/assistant", ts);
+          auto user_row = PersistTextMemory(*store, encoder, text, "chat/user", ts);
+          auto asst_row = PersistTextMemory(*store, encoder, assistant_reply, "chat/assistant", ts + 1);
+
+          // Create memory events for stored memories
+          {
+            std::lock_guard<std::mutex> lock(mu);
+            using M = cortext::operations::Metric;
+            
+            MemoryEvent user_evt;
+            user_evt.type = MemoryEventType::STORED;
+            user_evt.memory_id = static_cast<int>(user_row.embedding_id);
+            user_evt.content = text;
+            user_evt.source_id = "chat/user";
+            user_evt.timestamp = ts;
+            user_evt.composite_score = retrieved.output.composite_score;
+            user_evt.threshold = retrieved.output.threshold;
+            user_evt.decision = retrieved.output.composite_score.has_value() && retrieved.output.threshold.has_value()
+                ? std::optional<bool>((*retrieved.output.composite_score) > (*retrieved.output.threshold))
+                : std::nullopt;
+            user_evt.relevance = get_metric(retrieved.output.metrics, M::relevance);
+            user_evt.surprise = get_metric(retrieved.output.metrics, M::surprise);
+            user_evt.mismatch = get_metric(retrieved.output.metrics, M::mismatch);
+            user_evt.rarity = get_metric(retrieved.output.metrics, M::rarity);
+            user_evt.drift = get_metric(retrieved.output.metrics, M::drift);
+            user_evt.contradiction = get_metric(retrieved.output.metrics, M::contradiction);
+            user_evt.utility = get_metric(retrieved.output.metrics, M::utility);
+            user_evt.periphery = get_metric(retrieved.output.metrics, M::periphery);
+            user_evt.salience = get_metric(retrieved.output.metrics, M::salience);
+            user_evt.valence = retrieved.output.valence;
+            user_evt.arousal = retrieved.output.arousal;
+            user_evt.F_eff = retrieved.output.effective_focus;
+            user_evt.focus_spread = get_metric(retrieved.output.metrics, M::focus_spread);
+            memory_events.push_back(user_evt);
+            
+            MemoryEvent asst_evt;
+            asst_evt.type = MemoryEventType::STORED;
+            asst_evt.memory_id = static_cast<int>(asst_row.embedding_id);
+            asst_evt.content = assistant_reply;
+            asst_evt.source_id = "chat/assistant";
+            asst_evt.timestamp = ts + 1;
+            memory_events.push_back(asst_evt);
+            
+            while (memory_events.size() > kMaxMemoryEvents) {
+              memory_events.pop_front();
+            }
+          }
 
           // Refresh cortext episode snapshot after external writes.
           cortext_ctx->Flush();
@@ -519,14 +769,25 @@ int main(int argc, char** argv) {
     return false;
   });
 
+  // Periodic refresh to update logs (every 2 seconds)
+  std::atomic<bool> running{true};
+  std::thread refresh_thread([&] {
+    while (running) {
+      std::this_thread::sleep_for(std::chrono::seconds(2));
+      screen.PostEvent(ftxui::Event::Custom);
+    }
+  });
+
   screen.Loop(app);
+  running = false;
+  if (refresh_thread.joinable()) {
+    refresh_thread.join();
+  }
 
   try {
     cortext_ctx->Flush();
   } catch (...) {
   }
-  cortext::telemetry::ForceFlush();
-  cortext::telemetry::Shutdown();
 
   return 0;
 }

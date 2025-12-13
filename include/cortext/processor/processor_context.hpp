@@ -1,5 +1,6 @@
 #pragma once
 
+#include "cortext/data/centroids.hpp"
 #include "cortext/operations/metrics.hpp"
 #include "cortext/signal.hpp"
 #include <Eigen/Dense>
@@ -201,7 +202,7 @@ struct ProcessorContext
   double emotion_gain_prior = 1.0;
   double score_gain_prior = 1.0;
   double rate_target_prior = 0.2;
-  std::vector<Eigen::VectorXf> emotion_centroids;
+  std::optional<data::Centroids> centroids;
   double rate_target = 0.0;
   uint64_t last_signal_timestamp = 0;
   double weight_novelty = 0.3;

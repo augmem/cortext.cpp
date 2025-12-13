@@ -11,6 +11,176 @@
 namespace cortext
 {
 
+namespace
+{
+
+std::string_view
+ParseDbOperation (const std::string &q)
+{
+  std::string_view s (q);
+  while (!s.empty () && (s.front () == ' ' || s.front () == '\n'
+                         || s.front () == '\r' || s.front () == '\t'))
+    {
+      s.remove_prefix (1);
+    }
+  const size_t n = s.size ();
+  size_t i = 0;
+  while (i < n)
+    {
+      const char c = s[i];
+      if (c == ' ' || c == '\n' || c == '\r' || c == '\t')
+        break;
+      i++;
+    }
+  std::string_view tok = s.substr (0, i);
+  if (tok.empty ())
+    return "UNKNOWN";
+  return tok;
+}
+
+sqlite3_stmt *
+PrepareStatement (sqlite3 *db, const std::string &query)
+{
+  sqlite3_stmt *stmt = nullptr;
+  const int prepare_rc = sqlite3_prepare_v2 (
+      db, query.c_str (), -1, &stmt, nullptr);
+  if (prepare_rc != SQLITE_OK)
+    {
+      throw StoreError (
+          "Failed to prepare statement: "
+          + std::string (sqlite3_errmsg (db)));
+    }
+  return stmt;
+}
+
+void
+BindParameters (sqlite3_stmt *stmt, const std::vector<std::any> &params)
+{
+  for (size_t i = 0; i < params.size (); ++i)
+    {
+      int param_index = static_cast<int> (i + 1);
+      const auto &param = params[i];
+      try
+        {
+          if (param.type () == typeid (int))
+            {
+              sqlite3_bind_int (stmt, param_index, std::any_cast<int> (param));
+            }
+          else if (param.type () == typeid (long))
+            {
+              sqlite3_bind_int64 (stmt, param_index,
+                                  std::any_cast<long> (param));
+            }
+          else if (param.type () == typeid (long long))
+            {
+              sqlite3_bind_int64 (stmt, param_index,
+                                  std::any_cast<long long> (param));
+            }
+          else if (param.type () == typeid (double))
+            {
+              sqlite3_bind_double (stmt, param_index,
+                                   std::any_cast<double> (param));
+            }
+          else if (param.type () == typeid (std::string))
+            {
+              const std::string &str = std::any_cast<std::string> (param);
+              sqlite3_bind_text (stmt, param_index, str.c_str (),
+                                 static_cast<int> (str.size ()),
+                                 SQLITE_TRANSIENT);
+            }
+          else if (param.type () == typeid (const char *))
+            {
+              const char *str = std::any_cast<const char *> (param);
+              sqlite3_bind_text (stmt, param_index, str, -1, SQLITE_TRANSIENT);
+            }
+          else if (param.type () == typeid (std::vector<char>))
+            {
+              const auto &vec
+                  = std::any_cast<const std::vector<char> &> (param);
+              sqlite3_bind_blob (
+                  stmt, param_index, vec.empty () ? nullptr : vec.data (),
+                  static_cast<int> (vec.size ()), SQLITE_TRANSIENT);
+            }
+          else if (param.type () == typeid (std::vector<unsigned char>))
+            {
+              const auto &vec
+                  = std::any_cast<const std::vector<unsigned char> &> (param);
+              sqlite3_bind_blob (
+                  stmt, param_index,
+                  vec.empty () ? nullptr
+                               : reinterpret_cast<const void *> (vec.data ()),
+                  static_cast<int> (vec.size ()), SQLITE_TRANSIENT);
+            }
+          else if (param.type () == typeid (std::vector<float>))
+            {
+              const auto &vec
+                  = std::any_cast<const std::vector<float> &> (param);
+              sqlite3_bind_blob (
+                  stmt, param_index,
+                  vec.empty () ? nullptr
+                               : reinterpret_cast<const void *> (vec.data ()),
+                  static_cast<int> (vec.size () * sizeof (float)),
+                  SQLITE_TRANSIENT);
+            }
+          else
+            {
+              sqlite3_bind_null (stmt, param_index);
+            }
+        }
+      catch (const std::bad_any_cast &)
+        {
+          sqlite3_bind_null (stmt, param_index);
+        }
+    }
+}
+
+void
+FetchResultRow (sqlite3_stmt *stmt, std::map<std::string, std::any> &row)
+{
+  int column_count = sqlite3_column_count (stmt);
+  for (int i = 0; i < column_count; ++i)
+    {
+      const char *column_name = sqlite3_column_name (stmt, i);
+      if (!column_name)
+        continue;
+      std::string col_name (column_name);
+      int column_type = sqlite3_column_type (stmt, i);
+      switch (column_type)
+        {
+        case SQLITE_INTEGER:
+          row[col_name]
+              = static_cast<long long> (sqlite3_column_int64 (stmt, i));
+          break;
+        case SQLITE_FLOAT:
+          row[col_name] = sqlite3_column_double (stmt, i);
+          break;
+        case SQLITE_TEXT:
+          {
+            const unsigned char *text = sqlite3_column_text (stmt, i);
+            int text_len = sqlite3_column_bytes (stmt, i);
+            row[col_name] = std::string (
+                reinterpret_cast<const char *> (text), text_len);
+            break;
+          }
+        case SQLITE_BLOB:
+          {
+            const void *blob = sqlite3_column_blob (stmt, i);
+            int blob_len = sqlite3_column_bytes (stmt, i);
+            row[col_name] = std::vector<char> (
+                static_cast<const char *> (blob),
+                static_cast<const char *> (blob) + blob_len);
+            break;
+          }
+        case SQLITE_NULL:
+        default:
+          row[col_name] = nullptr;
+          break;
+        }
+    }
+}
+
+} // namespace
+
 // SQLiteConnection implementation
 SQLiteConnection::SQLiteConnection (const std::string &database_path)
     : connection_ (nullptr)
@@ -302,41 +472,18 @@ std::vector<std::map<std::string, std::any> >
 SQLiteStore::ExecuteDirect (const std::string &query,
                             const std::vector<std::any> &params)
 {
-  auto ParseDbOperation = [] (const std::string &q) -> std::string_view {
-    std::string_view s (q);
-    while (!s.empty () && (s.front () == ' ' || s.front () == '\n'
-                           || s.front () == '\r' || s.front () == '\t'))
-      {
-        s.remove_prefix (1);
-      }
-    const size_t n = s.size ();
-    size_t i = 0;
-    while (i < n)
-      {
-        const char c = s[i];
-        if (c == ' ' || c == '\n' || c == '\r' || c == '\t')
-          break;
-        i++;
-      }
-    std::string_view tok = s.substr (0, i);
-    if (tok.empty ())
-      return "UNKNOWN";
-    return tok;
-  };
-
   const std::string_view op = ParseDbOperation (query);
   telemetry::ScopedSpan span (
       "cortext.db.execute",
       { telemetry::Attribute::String ("db.system", "sqlite"),
         telemetry::Attribute::String ("db.operation", op) });
-
   sqlite3_stmt *stmt = nullptr;
   std::vector<std::map<std::string, std::any> > results;
-
-  // Prepare the statement
-  const int prepare_rc = sqlite3_prepare_v2 (
-      connection_->GetConnection (), query.c_str (), -1, &stmt, nullptr);
-  if (prepare_rc != SQLITE_OK)
+  try
+    {
+      stmt = PrepareStatement (connection_->GetConnection (), query);
+    }
+  catch (const StoreError &)
     {
       span.SetStatusError ("sqlite.prepare_failed");
       telemetry::LogError (
@@ -344,142 +491,16 @@ SQLiteStore::ExecuteDirect (const std::string &query,
           { telemetry::Attribute::String ("component", "store"),
             telemetry::Attribute::String ("db.system", "sqlite"),
             telemetry::Attribute::String ("db.operation", op) });
-      throw StoreError (
-          "Failed to prepare statement: "
-          + std::string (sqlite3_errmsg (connection_->GetConnection ())));
+      throw;
     }
-
-  // Bind parameters
-  for (size_t i = 0; i < params.size (); ++i)
-    {
-      int param_index = static_cast<int> (i + 1);
-      const auto &param = params[i];
-
-      try
-        {
-          if (param.type () == typeid (int))
-            {
-              sqlite3_bind_int (stmt, param_index, std::any_cast<int> (param));
-            }
-          else if (param.type () == typeid (long))
-            {
-              sqlite3_bind_int64 (stmt, param_index,
-                                  std::any_cast<long> (param));
-            }
-          else if (param.type () == typeid (long long))
-            {
-              sqlite3_bind_int64 (stmt, param_index,
-                                  std::any_cast<long long> (param));
-            }
-          else if (param.type () == typeid (double))
-            {
-              sqlite3_bind_double (stmt, param_index,
-                                   std::any_cast<double> (param));
-            }
-          else if (param.type () == typeid (std::string))
-            {
-              const std::string &str = std::any_cast<std::string> (param);
-              sqlite3_bind_text (stmt, param_index, str.c_str (),
-                                 static_cast<int> (str.size ()),
-                                 SQLITE_TRANSIENT);
-            }
-          else if (param.type () == typeid (const char *))
-            {
-              const char *str = std::any_cast<const char *> (param);
-              sqlite3_bind_text (stmt, param_index, str, -1, SQLITE_TRANSIENT);
-            }
-          else if (param.type () == typeid (std::vector<char>))
-            {
-              const auto &vec
-                  = std::any_cast<const std::vector<char> &> (param);
-              sqlite3_bind_blob (
-                  stmt, param_index, vec.empty () ? nullptr : vec.data (),
-                  static_cast<int> (vec.size ()), SQLITE_TRANSIENT);
-            }
-          else if (param.type () == typeid (std::vector<unsigned char>))
-            {
-              const auto &vec
-                  = std::any_cast<const std::vector<unsigned char> &> (param);
-              sqlite3_bind_blob (
-                  stmt, param_index,
-                  vec.empty () ? nullptr
-                               : reinterpret_cast<const void *> (vec.data ()),
-                  static_cast<int> (vec.size ()), SQLITE_TRANSIENT);
-            }
-          else if (param.type () == typeid (std::vector<float>))
-            {
-              const auto &vec
-                  = std::any_cast<const std::vector<float> &> (param);
-              sqlite3_bind_blob (
-                  stmt, param_index,
-                  vec.empty () ? nullptr
-                               : reinterpret_cast<const void *> (vec.data ()),
-                  static_cast<int> (vec.size () * sizeof (float)),
-                  SQLITE_TRANSIENT);
-            }
-          else
-            {
-              // For unsupported types, bind as null
-              sqlite3_bind_null (stmt, param_index);
-            }
-        }
-      catch (const std::bad_any_cast &)
-        {
-          sqlite3_bind_null (stmt, param_index);
-        }
-    }
-
-  // Execute and collect results
+  BindParameters (stmt, params);
   int rc;
   while ((rc = sqlite3_step (stmt)) == SQLITE_ROW)
     {
       std::map<std::string, std::any> row;
-      int column_count = sqlite3_column_count (stmt);
-
-      for (int i = 0; i < column_count; ++i)
-        {
-          const char *column_name = sqlite3_column_name (stmt, i);
-          if (!column_name)
-            continue;
-
-          std::string col_name (column_name);
-          int column_type = sqlite3_column_type (stmt, i);
-
-          switch (column_type)
-            {
-            case SQLITE_INTEGER:
-              row[col_name]
-                  = static_cast<long long> (sqlite3_column_int64 (stmt, i));
-              break;
-            case SQLITE_FLOAT:
-              row[col_name] = sqlite3_column_double (stmt, i);
-              break;
-            case SQLITE_TEXT:
-              {
-                const unsigned char *text = sqlite3_column_text (stmt, i);
-                int text_len = sqlite3_column_bytes (stmt, i);
-                row[col_name] = std::string (
-                    reinterpret_cast<const char *> (text), text_len);
-                break;
-              }
-            case SQLITE_BLOB:
-              {
-                const void *blob = sqlite3_column_blob (stmt, i);
-                int blob_len = sqlite3_column_bytes (stmt, i);
-                row[col_name] = std::vector<char> (
-                    static_cast<const char *> (blob),
-                    static_cast<const char *> (blob) + blob_len);
-                break;
-              }
-            case SQLITE_NULL:
-            default:
-              row[col_name] = nullptr;
-              break;
-            }
-        }
+      FetchResultRow (stmt, row);
       results.push_back (std::move (row));
     }
-
   if (rc != SQLITE_DONE && rc != SQLITE_OK)
     {
       std::string error_msg = sqlite3_errmsg (connection_->GetConnection ());
@@ -492,7 +513,6 @@ SQLiteStore::ExecuteDirect (const std::string &query,
             telemetry::Attribute::String ("db.operation", op) });
       throw StoreError ("Query execution failed: " + error_msg);
     }
-
   sqlite3_finalize (stmt);
   span.SetStatusOk ();
   return results;

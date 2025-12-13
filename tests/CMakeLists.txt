@@ -22,6 +22,8 @@ list(APPEND CMAKE_MODULE_PATH ${Catch2_SOURCE_DIR}/extras)
 add_executable(cortext_tests
   cortext.test.cpp
   imagebind_encoder.test.cpp
+  data.test.cpp
+  operations_centroids.test.cpp
   store.test.cpp
   store_extensions.test.cpp
   graph.test.cpp
@@ -62,8 +64,7 @@ add_executable(cortext_tests
   cortext.test.cpp
   signal_processor.test.cpp
   operations_adherence_fixes.test.cpp
-  telemetry_propagation.test.cpp
-  telemetry_file_exporter.test.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/telemetry_noop_by_default.test.cpp
 )
 
 target_link_libraries(cortext_tests PRIVATE cortext Catch2::Catch2WithMain)

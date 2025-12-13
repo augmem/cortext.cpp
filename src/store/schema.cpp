@@ -48,6 +48,13 @@ ApplySingleMigration (Store &store, const Migration &m)
             }
           catch (const std::exception &e)
             {
+              telemetry::LogError (
+                  "Migration statement failed",
+                  { telemetry::Attribute::String ("component", "store.schema"),
+                    telemetry::Attribute::Int64 ("migration_id", m.id),
+                    telemetry::Attribute::String ("migration_description", m.description),
+                    telemetry::Attribute::String ("sql", sql),
+                    telemetry::Attribute::String ("error", e.what ()) });
               throw;
             }
         }

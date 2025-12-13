@@ -14,12 +14,14 @@
 
 namespace cortext::operations
 {
+
 namespace
 {
 constexpr double kDriftClampMax = 0.3;
-constexpr double kDriftClampMin = 0.0;
 constexpr double kDriftSkipEpsilon = 0.001;
 constexpr double kUncertaintyBumpCap = 0.2;
+
+/// @brief Normalizes a vector to unit length.
 inline Eigen::VectorXf
 Unit (const Eigen::VectorXf &v)
 {
@@ -99,8 +101,8 @@ ApplyReconsolidation::Execute (OperationContext &context) const
           = (1.0 - T) * S * current_lability * contextual_relevance;
       drift_mag *= recon_gain;
       // Safety clamp
-      drift_mag
-          = std::min (kDriftClampMax, std::max (kDriftClampMin, drift_mag));
+      drift_mag = std::min (kDriftClampMax,
+                            std::max (constants::kNormalizedMin, drift_mag));
       max_drift = std::max (max_drift, drift_mag);
 
       // Ensure feedback row exists.

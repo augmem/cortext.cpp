@@ -35,7 +35,9 @@ UpdatePrecisionDelta::Execute (OperationContext &context) const
   // Keep the computation local to avoid relying on optional helpers in
   // compilation units that may not be indexed by all tooling.
   const double target_precision = core::Clamp (
-      core::CertaintyRequirement (T) * (0.5 + 0.5 * F),
+      core::CertaintyRequirement (T)
+          * (constants::kTargetPrecisionBaseScale
+             + constants::kTargetPrecisionBaseScale * F),
       constants::kNormalizedMin, constants::kNormalizedMax);
 
   // κ = 0.10 * (1 - T) (algorithms.md §5.5), using shared medium gain constant.
@@ -50,4 +52,3 @@ UpdatePrecisionDelta::Execute (OperationContext &context) const
 }
 
 } // namespace cortext::operations
-

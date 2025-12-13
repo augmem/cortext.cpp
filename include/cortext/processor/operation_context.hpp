@@ -341,6 +341,17 @@ public:
     return arousal_;
   }
 
+  void
+  SetViolation (std::optional<double> v)
+  {
+    violation_ = v;
+  }
+  std::optional<double>
+  GetViolation () const
+  {
+    return violation_;
+  }
+
   // ======================================================================
   // Stability Feedback API (Algorithm 17 → Algorithm 6 bridge)
   // ======================================================================
@@ -648,6 +659,7 @@ private:
   double emotion_intensity_ = 0.0;
   double valence_ = 0.5;
   double arousal_ = 0.0;
+  std::optional<double> violation_;
 
   // Algorithm 7 metrics and diagnostics
   std::unordered_map<operations::Metric, double> metrics_;

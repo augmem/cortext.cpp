@@ -12,6 +12,205 @@
 namespace cortext
 {
 
+namespace
+{
+
+void
+ComputeObservedRetention (Store *store, const SignalProcessor::Config &config,
+                          const Signal &signal, OperationContext &op_context)
+{
+  if (!store)
+    {
+      return;
+    }
+  const double cutoff = core::PeripheryCutoff (config.stability);
+  const uint64_t now_ts = signal.timestamp;
+  try
+    {
+      const std::vector<std::map<std::string, std::any> > rows
+          = store->Execute ("SELECT last_used FROM memory_feedback "
+                            "WHERE strength >= ? AND last_used > 0",
+                            { cutoff });
+      if (!rows.empty ())
+        {
+          double sum_age = 0.0;
+          int count = 0;
+          for (const auto &row : rows)
+            {
+              auto it = row.find ("last_used");
+              if (it == row.end ())
+                continue;
+              const std::any &v = it->second;
+              uint64_t last_used_ts = 0;
+              if (v.type () == typeid (long long))
+                {
+                  last_used_ts = static_cast<uint64_t> (
+                      std::any_cast<long long> (v));
+                }
+              else if (v.type () == typeid (int64_t))
+                {
+                  last_used_ts
+                      = static_cast<uint64_t> (std::any_cast<int64_t> (v));
+                }
+              else if (v.type () == typeid (int))
+                {
+                  last_used_ts
+                      = static_cast<uint64_t> (std::any_cast<int> (v));
+                }
+              else
+                {
+                  continue;
+                }
+              if (now_ts > last_used_ts)
+                {
+                  sum_age += static_cast<double> (now_ts - last_used_ts);
+                  count += 1;
+                }
+            }
+          if (count > 0)
+            {
+              op_context.SetObservedRetentionSeconds (
+                  sum_age / static_cast<double> (count));
+            }
+        }
+    }
+  catch (...)
+    {
+      telemetry::LogWarn (
+          "Observed retention query failed; skipping",
+          { telemetry::Attribute::String ("component", "signal_processor"),
+            telemetry::Attribute::String ("db.system", "sqlite"),
+            telemetry::Attribute::String ("db.operation", "SELECT") });
+    }
+}
+
+void
+AssembleOutputMemories (const OperationContext &op_context,
+                        SignalProcessor::Output &out)
+{
+  const auto &cands = op_context.GetRetrievedMemoryEmbeddings ();
+  out.candidate_memory_ids.reserve (cands.size ());
+  for (const auto &kv : cands)
+    {
+      out.candidate_memory_ids.push_back (kv.first);
+    }
+  for (const auto &e : op_context.GetMemoryUsageEvents ())
+    {
+      if (e.used)
+        {
+          out.used_memory_ids.push_back (
+              static_cast<long long> (e.embedding_id));
+        }
+    }
+}
+
+void
+AssembleOutputFields (const OperationContext &op_context,
+                      SignalProcessor::Output &out)
+{
+  out.interrupt_allowed = op_context.GetInterruptAllowed ();
+  out.at_boundary = op_context.GetAtBoundary ();
+  out.threshold_T_dynamic = op_context.GetThresholdTDynamic ();
+  out.threshold_hysteresis = op_context.GetThresholdHysteresis ();
+  out.effective_focus = op_context.GetEffectiveFocus ();
+  out.emotion_intensity = op_context.GetEmotionIntensity ();
+  out.valence = op_context.GetValence ();
+  out.arousal = op_context.GetArousal ();
+  out.mni_jaccard = op_context.GetMniJaccard ();
+  out.mni_best_mu = op_context.GetMniBestMu ();
+  out.mni_dup_thresh = op_context.GetMniDupThresh ();
+  out.mni_tau_jaccard_eff = op_context.GetMniTauJaccardEff ();
+  out.mni_tau_mu_eff = op_context.GetMniTauMuEff ();
+  out.composite_score = op_context.GetCompositeScore ();
+  out.serial_position_multiplier = op_context.GetSerialPositionMultiplier ();
+  out.metrics = op_context.GetAllMetrics ();
+}
+
+const char *
+GetMetricName (operations::Metric metric)
+{
+  switch (metric)
+    {
+    case operations::Metric::relevance:
+      return "relevance";
+    case operations::Metric::mismatch:
+      return "mismatch";
+    case operations::Metric::surprise:
+      return "surprise";
+    case operations::Metric::rarity:
+      return "rarity";
+    case operations::Metric::drift:
+      return "drift";
+    case operations::Metric::contradiction:
+      return "contradiction";
+    case operations::Metric::utility:
+      return "utility";
+    case operations::Metric::periphery:
+      return "periphery";
+    case operations::Metric::coverage:
+      return "coverage";
+    case operations::Metric::salience:
+      return "salience";
+    case operations::Metric::valence:
+      return "valence";
+    case operations::Metric::arousal:
+      return "arousal";
+    case operations::Metric::goal_alignment:
+      return "goal_alignment";
+    case operations::Metric::focus_spread:
+      return "focus_spread";
+    case operations::Metric::drift_mag:
+      return "drift_mag";
+    case operations::Metric::aw_prev:
+      return "aw_prev";
+    case operations::Metric::rate_prev:
+      return "rate_prev";
+    case operations::Metric::hys_prev:
+      return "hys_prev";
+    default:
+      return "unknown";
+    }
+}
+
+void
+LogMetricTelemetry (const std::unordered_map<operations::Metric, double> &metrics)
+{
+  for (const auto &kv : metrics)
+    {
+      const char *metric_name = GetMetricName (kv.first);
+      const std::string metric_full_name
+          = std::string ("cortext.metric.") + metric_name;
+      telemetry::RecordHistogram (metric_full_name, kv.second);
+    }
+}
+
+void
+LogProcessTelemetry (const OperationContext &op_context,
+                     const SignalProcessor::Output &out)
+{
+  telemetry::RecordHistogram ("cortext.threshold_T_dynamic",
+                              op_context.GetThresholdTDynamic ());
+  telemetry::RecordHistogram ("cortext.threshold_hysteresis",
+                              op_context.GetThresholdHysteresis ());
+  telemetry::RecordHistogram ("cortext.effective_focus",
+                              op_context.GetEffectiveFocus ());
+  telemetry::RecordHistogram ("cortext.coherence", op_context.GetCoherence ());
+  telemetry::RecordHistogram ("cortext.emotion_intensity",
+                              op_context.GetEmotionIntensity ());
+  telemetry::RecordHistogram ("cortext.mni_jaccard", op_context.GetMniJaccard ());
+  telemetry::RecordHistogram ("cortext.mni_best_mu", op_context.GetMniBestMu ());
+  telemetry::RecordHistogram ("cortext.mni_dup_thresh",
+                              op_context.GetMniDupThresh ());
+  telemetry::RecordHistogram ("cortext.last_weight_sum",
+                              op_context.GetLastWeightSum ());
+  telemetry::RecordHistogram ("cortext.last_effective_metric_count",
+                              static_cast<double> (
+                                  op_context.GetLastEffectiveMetricCount ()));
+  LogMetricTelemetry (out.metrics);
+}
+
+} // namespace
+
 SignalProcessor::SignalProcessor (const Config &config,
                                   std::shared_ptr<Store> store,
                                   std::unique_ptr<IOperation> root_operation)
@@ -28,7 +227,6 @@ SignalProcessor::SignalProcessor (const Config &config,
       context_->write_rate_window_.SetCapacity (
           static_cast<size_t> (std::max (1, cap)));
     }
-  
   // Apply schema migrations exactly once during initialization.
   if (store_)
   {
@@ -50,82 +248,11 @@ SignalProcessor::Process (const Signal &signal)
 {
   const auto t0 = std::chrono::steady_clock::now ();
   telemetry::ScopedSpan span ("cortext.process");
-
   OperationContext op_context (signal, *context_, config_, write_buffer_,
                                store_.get ());
-
-  // Record timestamp for observed write-rate window before ops execute.
   context_->write_rate_window_.Record (signal.timestamp);
-
-  // Compute optional observed retention (avg age of active memories)
-  // active = strength >= periphery_cutoff(T) AND last_used > 0
-  if (store_)
-    {
-      const double cutoff = core::PeripheryCutoff (config_.stability);
-      const uint64_t now_ts = signal.timestamp;
-      try
-        {
-          const std::vector<std::map<std::string, std::any> > rows
-              = store_->Execute ("SELECT last_used FROM memory_feedback "
-                                 "WHERE strength >= ? AND last_used > 0",
-                                 { cutoff });
-          if (!rows.empty ())
-            {
-              double sum_age = 0.0;
-              int count = 0;
-              for (const auto &row : rows)
-                {
-                  auto it = row.find ("last_used");
-                  if (it == row.end ())
-                    continue;
-                  const std::any &v = it->second;
-                  uint64_t last_used_ts = 0;
-                  if (v.type () == typeid (long long))
-                    {
-                      last_used_ts = static_cast<uint64_t> (
-                          std::any_cast<long long> (v));
-                    }
-                  else if (v.type () == typeid (int64_t))
-                    {
-                      last_used_ts
-                          = static_cast<uint64_t> (std::any_cast<int64_t> (v));
-                    }
-                  else if (v.type () == typeid (int))
-                    {
-                      last_used_ts
-                          = static_cast<uint64_t> (std::any_cast<int> (v));
-                    }
-                  else
-                    {
-                      continue;
-                    }
-                  if (now_ts > last_used_ts)
-                    {
-                      sum_age += static_cast<double> (now_ts - last_used_ts);
-                      count += 1;
-                    }
-                }
-              if (count > 0)
-                {
-                  op_context.SetObservedRetentionSeconds (
-                      sum_age / static_cast<double> (count));
-                }
-            }
-        }
-      catch (...)
-        {
-          telemetry::LogWarn (
-              "Observed retention query failed; skipping",
-              { telemetry::Attribute::String ("component", "signal_processor"),
-                telemetry::Attribute::String ("db.system", "sqlite"),
-                telemetry::Attribute::String ("db.operation", "SELECT") });
-          // If the store does not have the table yet or other error, skip.
-        }
-    }
-
+  ComputeObservedRetention (store_.get (), config_, signal, op_context);
   root_operation_->Execute (op_context);
-
-  // Enrich process span with low-cardinality decisions.
   span.SetAttribute ("cortext.at_boundary", op_context.GetAtBoundary ());
   span.SetAttribute ("cortext.interrupt_allowed",
                      op_context.GetInterruptAllowed ());
@@ -134,66 +261,15 @@ SignalProcessor::Process (const Signal &signal)
   span.SetAttribute ("cortext.threshold_hysteresis",
                      op_context.GetThresholdHysteresis ());
   span.SetAttribute ("cortext.effective_focus", op_context.GetEffectiveFocus ());
-
-  // Honor Algorithm 12 boundary request from operations.
   if (op_context.ShouldFinalizeEpisode ())
     {
       FinalizeEpisode ();
       StartNewEpisode ();
     }
-
-  // Increment maturity counters post-processing (current signal observed).
   context_->signals_processed += 1;
-
-  // Assemble Output from OperationContext (no additional computation).
   Output out;
-
-  // Memory candidates and usage
-  {
-    const auto &cands = op_context.GetRetrievedMemoryEmbeddings ();
-    out.candidate_memory_ids.reserve (cands.size ());
-    for (const auto &kv : cands)
-      {
-        out.candidate_memory_ids.push_back (kv.first);
-      }
-    for (const auto &e : op_context.GetMemoryUsageEvents ())
-      {
-        if (e.used)
-          {
-            out.used_memory_ids.push_back (
-                static_cast<long long> (e.embedding_id));
-          }
-      }
-  }
-
-  // Gate decision and boundary
-  out.interrupt_allowed = op_context.GetInterruptAllowed ();
-  out.at_boundary = op_context.GetAtBoundary ();
-
-  // Thresholds and stabilizers
-  out.threshold_T_dynamic = op_context.GetThresholdTDynamic ();
-  out.threshold_hysteresis = op_context.GetThresholdHysteresis ();
-  out.effective_focus = op_context.GetEffectiveFocus ();
-
-  // Emotion projections
-  out.emotion_intensity = op_context.GetEmotionIntensity ();
-  out.valence = op_context.GetValence ();
-  out.arousal = op_context.GetArousal ();
-
-  // MNI diagnostics
-  out.mni_jaccard = op_context.GetMniJaccard ();
-  out.mni_best_mu = op_context.GetMniBestMu ();
-  out.mni_dup_thresh = op_context.GetMniDupThresh ();
-  out.mni_tau_jaccard_eff = op_context.GetMniTauJaccardEff ();
-  out.mni_tau_mu_eff = op_context.GetMniTauMuEff ();
-
-  // Optional composites
-  out.composite_score = op_context.GetCompositeScore ();
-  out.serial_position_multiplier = op_context.GetSerialPositionMultiplier ();
-
-  // Metrics (Algorithm 7)
-  out.metrics = op_context.GetAllMetrics ();
-
+  AssembleOutputMemories (op_context, out);
+  AssembleOutputFields (op_context, out);
   const auto t1 = std::chrono::steady_clock::now ();
   const double ms = std::chrono::duration_cast<std::chrono::duration<double, std::milli> > (t1 - t0).count ();
   telemetry::RecordHistogram ("cortext.process_duration_ms", ms);
@@ -206,94 +282,7 @@ SignalProcessor::Process (const Signal &signal)
     {
       telemetry::AddCounter ("cortext.interrupt_allowed_total", 1);
     }
-
-  // OperationContext-derived metrics for monitoring behavior/adaptation.
-  for (const auto &kv : out.metrics)
-    {
-      const char *metric_name = "unknown";
-      switch (kv.first)
-        {
-        case operations::Metric::relevance:
-          metric_name = "relevance";
-          break;
-        case operations::Metric::mismatch:
-          metric_name = "mismatch";
-          break;
-        case operations::Metric::surprise:
-          metric_name = "surprise";
-          break;
-        case operations::Metric::rarity:
-          metric_name = "rarity";
-          break;
-        case operations::Metric::drift:
-          metric_name = "drift";
-          break;
-        case operations::Metric::contradiction:
-          metric_name = "contradiction";
-          break;
-        case operations::Metric::utility:
-          metric_name = "utility";
-          break;
-        case operations::Metric::periphery:
-          metric_name = "periphery";
-          break;
-        case operations::Metric::coverage:
-          metric_name = "coverage";
-          break;
-        case operations::Metric::salience:
-          metric_name = "salience";
-          break;
-        case operations::Metric::valence:
-          metric_name = "valence";
-          break;
-        case operations::Metric::arousal:
-          metric_name = "arousal";
-          break;
-        case operations::Metric::goal_alignment:
-          metric_name = "goal_alignment";
-          break;
-        case operations::Metric::focus_spread:
-          metric_name = "focus_spread";
-          break;
-        case operations::Metric::drift_mag:
-          metric_name = "drift_mag";
-          break;
-        case operations::Metric::aw_prev:
-          metric_name = "aw_prev";
-          break;
-        case operations::Metric::rate_prev:
-          metric_name = "rate_prev";
-          break;
-        case operations::Metric::hys_prev:
-          metric_name = "hys_prev";
-          break;
-        default:
-          metric_name = "unknown";
-          break;
-        }
-      const std::string metric_full_name
-          = std::string ("cortext.metric.") + metric_name;
-      telemetry::RecordHistogram (metric_full_name, kv.second);
-    }
-
-  telemetry::RecordHistogram ("cortext.threshold_T_dynamic",
-                              op_context.GetThresholdTDynamic ());
-  telemetry::RecordHistogram ("cortext.threshold_hysteresis",
-                              op_context.GetThresholdHysteresis ());
-  telemetry::RecordHistogram ("cortext.effective_focus",
-                              op_context.GetEffectiveFocus ());
-  telemetry::RecordHistogram ("cortext.coherence", op_context.GetCoherence ());
-  telemetry::RecordHistogram ("cortext.emotion_intensity",
-                              op_context.GetEmotionIntensity ());
-  telemetry::RecordHistogram ("cortext.mni_jaccard", op_context.GetMniJaccard ());
-  telemetry::RecordHistogram ("cortext.mni_best_mu", op_context.GetMniBestMu ());
-  telemetry::RecordHistogram ("cortext.mni_dup_thresh",
-                              op_context.GetMniDupThresh ());
-  telemetry::RecordHistogram ("cortext.last_weight_sum",
-                              op_context.GetLastWeightSum ());
-  telemetry::RecordHistogram ("cortext.last_effective_metric_count",
-                              static_cast<double> (
-                                  op_context.GetLastEffectiveMetricCount ()));
+  LogProcessTelemetry (op_context, out);
   span.SetStatusOk ();
   return out;
 }

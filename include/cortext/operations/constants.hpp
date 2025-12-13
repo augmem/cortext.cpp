@@ -42,6 +42,50 @@ constexpr double kWeightHigh = 0.35;
 constexpr double kWeightMid = 0.25;
 constexpr double kWeightLow = 0.15;
 constexpr double kWeight20 = 0.20;
+
+// Competition (Alg 20: Retrieval-Induced Forgetting)
+constexpr double kWinnersKMax = 7.0;         // Max winners count (low F)
+constexpr double kWinnersKMin = 3.0;         // Min winners count (high F)
+constexpr double kInhibitionRadiusMin = 0.5; // Min inhibition radius (low F)
+constexpr double kInhibitionRadiusMax = 0.85; // Max inhibition radius (high F)
+constexpr double kSuppressionBaseMax = 0.1;  // Max suppression per retrieval (low T)
+constexpr double kSuppressionBaseMin = 0.01; // Min suppression per retrieval (high T)
+constexpr double kLateralInhibitionSMult = 0.5; // S multiplier for lateral inhibition
+constexpr double kCompetitionIterMin = 3.0;  // Min competition iterations (low F)
+constexpr double kCompetitionIterMax = 10.0; // Max competition iterations (high F)
+constexpr double kRecoveryTimeMinSeconds = 60.0;  // Min recovery time (low T)
+constexpr double kRecoveryTimeMaxSeconds = 600.0; // Max recovery time (high T)
+
+// Working Memory
+constexpr double kTiny = 1e-6;           // Small epsilon for WM strength
+constexpr double kStrengthMax = 10.0;    // Max WM slot strength
+constexpr double kWMBaseMin = 0.5;       // Min WM strength base (low T)
+constexpr double kWMBaseMax = 1.5;       // Max WM strength base (high T)
+
+// Logprob Surprise (Alg 13)
+constexpr double kLogprobNormalizationDivisor = 5.0; // NLL normalization divisor
+
+// Precision Modulation (Section 5.5)
+constexpr double kTargetPrecisionBaseScale = 0.5; // Base scale for target precision
+
+// Sensitivity Priors (Alg 3)
+constexpr double kRateTargetBase = 0.5;       // Base rate target multiplier
+constexpr double kRateTargetMultiplier = 1.5; // S multiplier for rate target
+
+// Focus Priors (Alg 1)
+constexpr double kCoverageGainFloorBase = 0.3; // Base coverage gain floor
+constexpr double kCoverageGainScale = 0.7;     // F-scaled coverage gain
+
+// Metrics (Alg 16)
+constexpr double kRarityTCoeff = 0.2;  // T coefficient for rarity
+constexpr double kUtilitySCoeff = 0.3; // S coefficient for utility
+
+// Goal Alignment (Alg 33)
+constexpr double kCosineToAlignmentScale = 0.5;  // cos -> alignment scale
+constexpr double kCosineToAlignmentOffset = 1.0; // cos -> alignment offset
+
+// Consolidation (Alg 29)
+constexpr double kExtractionStabilityThreshold = 0.2; // Min stability to enable extraction
 } // namespace cortext::operations::constants
 
 

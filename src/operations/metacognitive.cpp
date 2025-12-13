@@ -1,37 +1,24 @@
 #include "cortext/operations/metacognitive.hpp"
 
 #include "cortext/core/knobs.hpp"
+#include "cortext/core/utils.hpp"
 #include "cortext/processor/operation_context.hpp"
 #include <cmath>
 
 namespace cortext::operations
 {
 
-namespace
-{
-inline double
-Clamp01 (double v)
-{
-  if (v < 0.0)
-    return 0.0;
-  if (v > 1.0)
-    return 1.0;
-  return v;
-}
-} // namespace
-
 void
 MetacognitiveMonitoring::Execute (OperationContext &context) const
 {
   const auto &cfg = context.GetConfig ();
-  const double F = std::max (0.0, std::min (1.0, cfg.focus));
-  const double S = std::max (0.0, std::min (1.0, cfg.sensitivity));
-  const double T = std::max (0.0, std::min (1.0, cfg.stability));
-
-  // Inputs
+  const double F = core::Clamp01 (cfg.focus);
+  const double S = core::Clamp01 (cfg.sensitivity);
+  const double T = core::Clamp01 (cfg.stability);
   const double retrieval
-      = Clamp01 (context.GetCompositeScore ().value_or (0.0));
-  const double FOK = Clamp01 (context.GetFeelingOfKnowing ().value_or (0.0));
+      = core::Clamp01 (context.GetCompositeScore ().value_or (0.0));
+  const double FOK
+      = core::Clamp01 (context.GetFeelingOfKnowing ().value_or (0.0));
 
   // Derived thresholds and params
   const double fok_threshold = core::FOKThreshold (F);

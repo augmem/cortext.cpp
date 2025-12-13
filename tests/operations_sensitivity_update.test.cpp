@@ -1,5 +1,6 @@
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
+#include <cortext/data/centroids.hpp>
 #include <cortext/operations/sensitivity.hpp>
 #include <cortext/processor.hpp>
 #include <cortext/processor/operation_context.hpp>
@@ -53,13 +54,15 @@ TEST_CASE (
   s.embedding = unit_at (2, dim); // align strongly with 'joy' index 2
   ProcessorContext pctx;
   // Provide 6 centroids in order: anger,fear,joy,love,sadness,surprise
-  pctx.emotion_centroids.resize (6);
-  pctx.emotion_centroids[0] = unit_at (0, dim);
-  pctx.emotion_centroids[1] = unit_at (1, dim);
-  pctx.emotion_centroids[2] = unit_at (2, dim); // match
-  pctx.emotion_centroids[3] = unit_at (3, dim);
-  pctx.emotion_centroids[4] = -unit_at (2, dim); // opposite of joy
-  pctx.emotion_centroids[5] = unit_at (1, dim);  // duplicate fear
+  cortext::data::Centroids centroids;
+  centroids.emotion_centroids.resize (6);
+  centroids.emotion_centroids[0] = unit_at (0, dim);
+  centroids.emotion_centroids[1] = unit_at (1, dim);
+  centroids.emotion_centroids[2] = unit_at (2, dim); // match
+  centroids.emotion_centroids[3] = unit_at (3, dim);
+  centroids.emotion_centroids[4] = -unit_at (2, dim); // opposite of joy
+  centroids.emotion_centroids[5] = unit_at (1, dim);  // duplicate fear
+  pctx.centroids = centroids;
 #
   SignalProcessor::Config cfg;
   cfg.sensitivity = 0.8;

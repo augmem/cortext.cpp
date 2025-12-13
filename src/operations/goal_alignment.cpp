@@ -1,68 +1,19 @@
 #include "cortext/operations/goal_alignment.hpp"
 
 #include "cortext/core/algorithms.hpp"
+#include "cortext/core/utils.hpp"
 #include "cortext/operations/constants.hpp"
 #include "cortext/operations/metrics.hpp"
 #include "cortext/processor/operation_context.hpp"
 #include "cortext/store/store.hpp"
 #include <algorithm>
 #include <any>
-#include <cstring>
 #include <string>
 #include <unordered_set>
 #include <vector>
 
 namespace cortext::operations
 {
-
-namespace
-{
-bool
-AnyToBytes (const std::any &v, const unsigned char *&data, size_t &len)
-{
-  if (v.type () == typeid (std::vector<char>))
-    {
-      const auto &blob = std::any_cast<const std::vector<char> &> (v);
-      data = reinterpret_cast<const unsigned char *> (blob.data ());
-      len = blob.size ();
-      return true;
-    }
-  if (v.type () == typeid (std::vector<unsigned char>))
-    {
-      const auto &blob = std::any_cast<const std::vector<unsigned char> &> (v);
-      data = blob.data ();
-      len = blob.size ();
-      return true;
-    }
-  return false;
-}
-
-bool
-DecodeFloatBlob (const std::any &v, int dim, Eigen::VectorXf &out)
-{
-  const unsigned char *data = nullptr;
-  size_t len = 0;
-  if (!AnyToBytes (v, data, len))
-    {
-      return false;
-    }
-  const size_t want = static_cast<size_t> (dim) * sizeof (float);
-  if (dim <= 0 || len != want)
-    {
-      return false;
-    }
-  out.resize (dim);
-  for (int i = 0; i < dim; ++i)
-    {
-      float f = 0.0f;
-      std::memcpy (&f, data + static_cast<size_t> (i) * sizeof (float),
-                   sizeof (float));
-      out[i] = f;
-    }
-  return true;
-}
-
-} // namespace
 
 void
 ComputeGoalAlignment::Execute (OperationContext &context) const
@@ -221,7 +172,7 @@ ComputeGoalAlignment::Execute (OperationContext &context) const
           if (it == r.end ())
             continue;
           Eigen::VectorXf v;
-          if (!DecodeFloatBlob (it->second, q.size (), v))
+          if (!core::DecodeFloatBlob (it->second, q.size (), v))
             continue;
           sum += v;
           count += 1;
@@ -239,7 +190,10 @@ ComputeGoalAlignment::Execute (OperationContext &context) const
 
   const Eigen::VectorXf mean = sum / static_cast<float> (count);
   const double cos = core::CosineSimilarity (q, mean);
-  const double ga = core::Clamp (0.5 * (cos + 1.0), 0.0, 1.0);
+  const double ga = core::Clamp (
+      constants::kCosineToAlignmentScale
+          * (cos + constants::kCosineToAlignmentOffset),
+      constants::kNormalizedMin, constants::kNormalizedMax);
   context.SetMetric (operations::Metric::goal_alignment, ga);
 }
 

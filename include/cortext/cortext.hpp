@@ -2,16 +2,38 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace cortext
 {
 
+// Forward declaration for ProcessorOutput fields
+namespace operations
+{
+enum class Metric;
+}
+
 /// @brief High-level entrypoint for Cortext with tri-modal process stubs.
 class Cortext
 {
 public:
+  /// @brief Simplified output metrics from processor.
+  struct ProcessorOutput
+  {
+    std::optional<double> composite_score;
+    std::optional<double> threshold;
+    std::optional<bool> decision;
+    double effective_focus = 0.0;
+    double coherence = 0.0;
+    double emotion_intensity = 0.0;
+    double valence = 0.5;
+    double arousal = 0.0;
+    std::unordered_map<int, double> metrics; // Metric enum cast to int -> value
+  };
+  
   /// @brief Context returned from processing calls, containing hydrated
   /// memories.
   struct Context
@@ -30,6 +52,7 @@ public:
 
     std::vector<Memory> memories;
     bool should_interrupt = false;
+    ProcessorOutput output;
   };
 
   /// @brief Three-knob configuration preserved across the system.

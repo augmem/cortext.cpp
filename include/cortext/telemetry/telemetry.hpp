@@ -72,18 +72,6 @@ struct Attribute
   }
 };
 
-/// @brief Initializes OpenTelemetry providers from OTEL_* environment variables.
-///
-/// This is idempotent and safe to call multiple times. When OpenTelemetry is
-/// not compiled in, this returns false and becomes a no-op.
-bool InitializeFromEnv ();
-
-/// @brief Forces a flush of any configured processors/exporters.
-void ForceFlush ();
-
-/// @brief Shuts down providers/exporters (best-effort).
-void Shutdown ();
-
 /// @brief An RAII span that also activates the span in the current thread
 /// context for automatic propagation.
 class ScopedSpan

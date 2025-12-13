@@ -30,8 +30,8 @@ UpdateLogprobSurprise::Execute (OperationContext &context) const
     }
 
   const double logprob_surprisal
-      = core::Clamp (mean_nll / 5.0, constants::kNormalizedMin,
-                     constants::kNormalizedMax);
+      = core::Clamp (mean_nll / constants::kLogprobNormalizationDivisor,
+                     constants::kNormalizedMin, constants::kNormalizedMax);
 
   const double drift_mag
       = context.GetMetric (operations::Metric::drift_mag).value_or (0.0);
@@ -50,4 +50,3 @@ UpdateLogprobSurprise::Execute (OperationContext &context) const
 }
 
 } // namespace cortext::operations
-

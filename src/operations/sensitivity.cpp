@@ -32,7 +32,9 @@ InitializeSensitivityPriors::Execute (OperationContext &context) const
   p_ctx.weight_emotion_prior = 0.2 + 0.8 * S;
   p_ctx.emotion_gain_prior = std::exp (1.5 * S);
   p_ctx.score_gain_prior = std::exp (2.0 * S);
-  p_ctx.rate_target_prior = p_ctx.base_rate_prior * (0.5 + 1.5 * S);
+  p_ctx.rate_target_prior = p_ctx.base_rate_prior
+                           * (constants::kRateTargetBase
+                              + constants::kRateTargetMultiplier * S);
   // Initialize dynamic values from priors
   p_ctx.weight_novelty = p_ctx.weight_novelty_prior;
   p_ctx.sensitivity_priors_initialized = true;
@@ -100,15 +102,17 @@ UpdateSensitivity::Execute (OperationContext &context) const
   double valence = constants::kOneHalf;
   double arousal = 0.0;
   const auto &x = context.GetSignal ().embedding;
-  if (p_ctx.emotion_centroids.size () == kNumEmotions)
+  if (p_ctx.centroids.has_value ()
+      && p_ctx.centroids->emotion_centroids.size () == kNumEmotions)
     {
+      const auto &centroids = p_ctx.centroids->emotion_centroids;
       std::vector<double> raw_cos;
       raw_cos.reserve (kNumEmotions);
       bool any_pos = false;
       for (int i = 0; i < kNumEmotions; ++i)
         {
           const double c = core::CosineSimilarity (
-              x, p_ctx.emotion_centroids[static_cast<size_t> (i)]);
+              x, centroids[static_cast<size_t> (i)]);
           raw_cos.push_back (c);
           if (c > 0.0)
             any_pos = true;

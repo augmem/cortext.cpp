@@ -18,54 +18,59 @@ namespace cortext::operations
 
 namespace
 {
+/// @brief Computes the number of winners based on Focus.
 inline int
 ComputeWinnersK (double F)
 {
-  // winners_k = round(lerp(7, 3, F))
-  return static_cast<int> (std::round (core::Lerp (7.0, 3.0, F)));
+  return static_cast<int> (std::round (
+      core::Lerp (constants::kWinnersKMax, constants::kWinnersKMin, F)));
 }
 
+/// @brief Computes inhibition radius based on Focus.
 inline double
 InhibitionRadius (double F)
 {
-  // inhibition_radius = lerp(0.5, 0.85, F)
-  return core::Lerp (0.5, 0.85, F);
+  return core::Lerp (constants::kInhibitionRadiusMin,
+                     constants::kInhibitionRadiusMax, F);
 }
 
+/// @brief Computes suppression per retrieval based on Stability.
 inline double
 SuppressionPerRetrieval (double T, double winning_activation)
 {
-  // suppression_per_retrieval = lerp(0.1, 0.01, T) * (1 - winning_activation)
-  const double base = core::Lerp (0.1, 0.01, T);
-  double term = 1.0 - winning_activation;
-  if (term < 0.0)
-    term = 0.0;
-  if (term > 1.0)
-    term = 1.0;
+  const double base = core::Lerp (constants::kSuppressionBaseMax,
+                                  constants::kSuppressionBaseMin, T);
+  const double term = core::Clamp (constants::kNormalizedMax - winning_activation,
+                                   constants::kNormalizedMin,
+                                   constants::kNormalizedMax);
   return base * term;
 }
 
+/// @brief Computes lateral inhibition strength based on Focus and Sensitivity.
 inline double
 LateralInhibitionStrength (double F, double S)
 {
-  // lateral_inhibition_strength = F * (1 + 0.5*S)
-  return F * (1.0 + 0.5 * S);
+  return F * (constants::kNormalizedMax + constants::kLateralInhibitionSMult * S);
 }
 
+/// @brief Computes number of competition iterations based on Focus.
 inline int
 CompetitionIterations (double F)
 {
-  // competition_iterations = round(lerp(3, 10, F))
-  return static_cast<int> (std::round (core::Lerp (3.0, 10.0, F)));
+  return static_cast<int> (std::round (
+      core::Lerp (constants::kCompetitionIterMin,
+                  constants::kCompetitionIterMax, F)));
 }
 
+/// @brief Computes RIF recovery time in seconds based on Stability.
 inline double
 RecoveryTimeSeconds (double T)
 {
-  // recovery_time_RIF = lerp(60, 600, T) seconds
-  return core::Lerp (60.0, 600.0, T);
+  return core::Lerp (constants::kRecoveryTimeMinSeconds,
+                     constants::kRecoveryTimeMaxSeconds, T);
 }
 
+/// @brief Clamps a value to [0, 1].
 inline double
 Clamp01 (double v)
 {
@@ -75,33 +80,11 @@ Clamp01 (double v)
     return constants::kNormalizedMax;
   return v;
 }
-
-} // namespace
-
 void
-ApplyRetrievalCompetition::Execute (OperationContext &context) const
+ApplyRIFRecovery (OperationContext &context, long long now_ts,
+                  double recovery_time)
 {
-  auto &p_ctx = context.GetProcessorContext ();
-  const auto &cfg = context.GetConfig ();
-
-  // Need current context embedding and retrieved candidates.
-  if (p_ctx.recent_context_embeddings.empty ())
-    {
-      return;
-    }
-  const Eigen::VectorXf &x_ctx = p_ctx.recent_context_embeddings.back ();
-  const auto &retrieved = context.GetRetrievedMemoryEmbeddings ();
-  if (retrieved.empty ())
-    {
-      return;
-    }
-
-  // 1) Recovery step for all rows in rif_state based on elapsed time.
-  const long long now_ts
-      = static_cast<long long> (context.GetSignal ().timestamp);
-  const double recovery_time = RecoveryTimeSeconds (cfg.stability);
   {
-    // Restore strength by suppression * frac; do nothing if no rif_state row.
     BufferedWriteInstruction op;
     op.query = "UPDATE memory_feedback "
                "SET strength = MAX(0.0, strength + ("
@@ -121,8 +104,6 @@ ApplyRetrievalCompetition::Execute (OperationContext &context) const
     context.AddWriteInstruction (std::move (op));
   }
   {
-    // Decay rif_state.suppression by the same recovered fraction and update
-    // ts.
     BufferedWriteInstruction op;
     op.query = "UPDATE rif_state "
                "SET suppression = MAX(0.0, suppression - (suppression * ("
@@ -136,14 +117,19 @@ ApplyRetrievalCompetition::Execute (OperationContext &context) const
     op.params = { now_ts, recovery_time, now_ts, recovery_time, now_ts };
     context.AddWriteInstruction (std::move (op));
   }
+}
 
-  // 2) Compute activations against current context for all candidates.
-  struct Candidate
-  {
-    long long id;
-    Eigen::VectorXf vec;
-    double activation;
-  };
+struct Candidate
+{
+  long long id;
+  Eigen::VectorXf vec;
+  double activation;
+};
+
+std::vector<Candidate>
+ScoreCandidates (const std::unordered_map<long long, Eigen::VectorXf> &retrieved,
+                 const Eigen::VectorXf &x_ctx)
+{
   std::vector<Candidate> cands;
   cands.reserve (retrieved.size ());
   for (const auto &kv : retrieved)
@@ -158,68 +144,47 @@ ApplyRetrievalCompetition::Execute (OperationContext &context) const
       act = Clamp01 (act);
       cands.push_back (Candidate{ id, v, act });
     }
-  if (cands.empty ())
-    {
-      return;
-    }
-
   std::sort (cands.begin (), cands.end (),
              [] (const Candidate &a, const Candidate &b) {
                return a.activation > b.activation;
              });
+  return cands;
+}
 
-  const int k = std::min (ComputeWinnersK (cfg.focus),
-                          static_cast<int> (cands.size ()));
-  const double radius = InhibitionRadius (cfg.focus);
-  const double lat_strength
-      = LateralInhibitionStrength (cfg.focus, cfg.sensitivity);
-  const int iters = CompetitionIterations (cfg.focus);
-  const double iter_mult = static_cast<double> (iters) / 3.0; // mild scale
-
-  // Winners are top-k; losers are the rest.
-  std::vector<Candidate> winners (cands.begin (), cands.begin () + k);
-  std::vector<Candidate> losers (cands.begin () + k, cands.end ());
-  if (winners.empty () || losers.empty ())
-    {
-      return; // nothing to inhibit
-    }
-
-  // 3) Apply lateral inhibition to losers near any winner.
+void
+ApplyLateralInhibition (const std::vector<Candidate> &winners,
+                        const std::vector<Candidate> &losers,
+                        double radius, double lat_strength, double iter_mult,
+                        double stability, long long now_ts,
+                        OperationContext &context)
+{
   for (const auto &loser : losers)
     {
       double total_supp = 0.0;
       for (const auto &winner : winners)
         {
-          // Proximity in [0,1] based on cosine similarity to the winner,
-          // thresholded by inhibition radius.
           double sim_lw = core::CosineSimilarity (loser.vec, winner.vec);
           sim_lw = Clamp01 (sim_lw);
           if (sim_lw < radius)
             {
               continue;
             }
-          // Map similarity above radius → [0,1]
           const double proximity = (1.0 - radius) > constants::kNormEpsilon
                                        ? (sim_lw - radius) / (1.0 - radius)
                                        : constants::kNormalizedMin;
-          // Per winner suppression contribution.
           const double spr
-              = SuppressionPerRetrieval (cfg.stability, winner.activation);
+              = SuppressionPerRetrieval (stability, winner.activation);
           total_supp += spr * lat_strength * proximity;
         }
-      // Scale by iterations multiplier; clamp to a safe cap.
       total_supp *= iter_mult;
       if (total_supp < 0.0)
         total_supp = 0.0;
       if (total_supp > constants::kOneHalf)
-        total_supp = constants::kOneHalf; // safety to avoid large jumps
-
+        total_supp = constants::kOneHalf;
       if (total_supp <= std::numeric_limits<double>::epsilon ())
         {
           continue;
         }
-
-      // Ensure rows exist, then persist suppression and reduce strength.
       {
         BufferedWriteInstruction op;
         op.query = "INSERT OR IGNORE INTO memory_feedback (embedding_id) "
@@ -251,6 +216,50 @@ ApplyRetrievalCompetition::Execute (OperationContext &context) const
         context.AddWriteInstruction (std::move (op));
       }
     }
+}
+
+} // namespace
+
+void
+ApplyRetrievalCompetition::Execute (OperationContext &context) const
+{
+  auto &p_ctx = context.GetProcessorContext ();
+  const auto &cfg = context.GetConfig ();
+  if (p_ctx.recent_context_embeddings.empty ())
+    {
+      return;
+    }
+  const Eigen::VectorXf &x_ctx = p_ctx.recent_context_embeddings.back ();
+  const auto &retrieved = context.GetRetrievedMemoryEmbeddings ();
+  if (retrieved.empty ())
+    {
+      return;
+    }
+  const long long now_ts
+      = static_cast<long long> (context.GetSignal ().timestamp);
+  const double recovery_time = RecoveryTimeSeconds (cfg.stability);
+  ApplyRIFRecovery (context, now_ts, recovery_time);
+
+  std::vector<Candidate> cands = ScoreCandidates (retrieved, x_ctx);
+  if (cands.empty ())
+    {
+      return;
+    }
+  const int k = std::min (ComputeWinnersK (cfg.focus),
+                          static_cast<int> (cands.size ()));
+  const double radius = InhibitionRadius (cfg.focus);
+  const double lat_strength
+      = LateralInhibitionStrength (cfg.focus, cfg.sensitivity);
+  const int iters = CompetitionIterations (cfg.focus);
+  const double iter_mult = static_cast<double> (iters) / 3.0;
+  std::vector<Candidate> winners (cands.begin (), cands.begin () + k);
+  std::vector<Candidate> losers (cands.begin () + k, cands.end ());
+  if (winners.empty () || losers.empty ())
+    {
+      return;
+    }
+  ApplyLateralInhibition (winners, losers, radius, lat_strength, iter_mult,
+                          cfg.stability, now_ts, context);
 }
 
 void

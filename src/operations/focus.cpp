@@ -3,6 +3,7 @@
 #include "cortext/core/algorithms.hpp"
 #include "cortext/core/constants.hpp"
 #include "cortext/core/knobs.hpp"
+#include "cortext/operations/constants.hpp"
 #include "cortext/processor/operation_context.hpp"
 #include <Eigen/Dense>
 
@@ -20,9 +21,14 @@ InitializeFocusPriors::Execute (OperationContext &context) const
       return;
     }
 
-  p_ctx.weight_relevance_prior = core::Sigmoid (2 * config.focus - 1);
-  p_ctx.coverage_gain_floor_prior = 0.3 + 0.7 * config.focus;
-  p_ctx.mismatch_weight_prior = (1.0 - config.focus);
+  p_ctx.weight_relevance_prior
+      = core::Sigmoid (operations::constants::kTwo * config.focus
+                       - operations::constants::kNormalizedMax);
+  p_ctx.coverage_gain_floor_prior
+      = operations::constants::kCoverageGainFloorBase
+        + operations::constants::kCoverageGainScale * config.focus;
+  p_ctx.mismatch_weight_prior
+      = operations::constants::kNormalizedMax - config.focus;
 
   // Values from algorithms.md, section 0.2
   p_ctx.attention_width_prior = core::Lerp (

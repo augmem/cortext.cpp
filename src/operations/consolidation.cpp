@@ -12,64 +12,94 @@
 namespace cortext::operations
 {
 
+namespace
+{
+
+bool
+CheckRateTrigger (double rate_target, double m_rate)
+{
+  return (rate_target > 0.0)
+        && (m_rate < constants::kOneHalf * rate_target);
+}
+
+bool
+CheckIntervalTrigger (uint64_t last_consolidation_ts, uint64_t now_ts,
+                      int interval_req)
+{
+  const bool has_last_cons = last_consolidation_ts > 0 && now_ts > 0;
+  return has_last_cons
+            ? (static_cast<int64_t> (now_ts - last_consolidation_ts)
+               > static_cast<int64_t> (interval_req))
+            : false;
+}
+
+bool
+CheckCapacityTrigger (Store *store, long long consolidation_threshold,
+                      long long &db_size)
+{
+  db_size = 0;
+  if (!store)
+    {
+      return false;
+    }
+  try
+    {
+      auto rows = store->Execute (
+          "SELECT COUNT(*) AS c FROM embeddings", {});
+      if (!rows.empty () && rows[0].count ("c") == 1)
+        {
+          const auto &v = rows[0].at ("c");
+          if (v.type () == typeid (long long))
+            db_size = std::any_cast<long long> (v);
+        }
+    }
+  catch (...)
+    {
+      db_size = 0;
+    }
+  return (db_size > consolidation_threshold);
+}
+
+bool
+CheckIdleCondition (int tokens_in_flight, int retrieval_queue_depth,
+                    double idle_for, int idle_required, bool trigger_interval)
+{
+  const bool idle_basic_ok
+      = (tokens_in_flight == 0) && (retrieval_queue_depth == 0);
+  return trigger_interval
+            ? idle_basic_ok
+            : (idle_basic_ok
+               && (idle_for >= static_cast<double> (idle_required)));
+}
+
+} // namespace
+
 void
 EvaluateConsolidation::Execute (OperationContext &context) const
 {
   auto &p_ctx = context.GetProcessorContext ();
   const auto &cfg = context.GetConfig ();
   Store *store = context.GetStore ();
-
-  // Triggers (Algorithm 28)
   const uint64_t now_ts = context.GetSignal ().timestamp;
   const double rate_target = (p_ctx.rate_target > 0.0)
                                  ? p_ctx.rate_target
                                  : p_ctx.rate_target_prior;
   const double m_rate = p_ctx.m_rate;
-  const bool trigger_rate
-      = (rate_target > 0.0)
-        && (m_rate < constants::kOneHalf * rate_target);
-
+  const bool trigger_rate = CheckRateTrigger (rate_target, m_rate);
   const int interval_req = core::ConsolidationIntervalSeconds (cfg.stability);
-  const bool has_last_cons = p_ctx.last_consolidation_ts > 0 && now_ts > 0;
   const bool trigger_interval
-      = has_last_cons
-            ? (static_cast<int64_t> (now_ts - p_ctx.last_consolidation_ts)
-               > static_cast<int64_t> (interval_req))
-            : false;
-
-  // Capacity trigger: db_size > consolidation_threshold
+      = CheckIntervalTrigger (p_ctx.last_consolidation_ts, now_ts, interval_req);
   long long db_size = 0;
   const long long consolidation_threshold
       = core::ConsolidationThresholdCount (cfg.stability);
-  bool trigger_capacity = false;
-  if (store)
-    {
-      try
-        {
-          auto rows = store->Execute (
-              "SELECT COUNT(*) AS c FROM embeddings", {});
-          if (!rows.empty () && rows[0].count ("c") == 1)
-            {
-              const auto &v = rows[0].at ("c");
-              if (v.type () == typeid (long long))
-                db_size = std::any_cast<long long> (v);
-            }
-        }
-      catch (...)
-        {
-          db_size = 0;
-        }
-    }
-  trigger_capacity = (db_size > consolidation_threshold);
+  const bool trigger_capacity
+      = CheckCapacityTrigger (store, consolidation_threshold, db_size);
 
   const bool any_trigger = trigger_rate || trigger_interval || trigger_capacity;
   if (!any_trigger)
     {
-      // No event when no triggers fire.
       return;
     }
-
-  // Scheduling (Algorithm 28b)
   const int tokens_in_flight = context.GetTokensInFlight ();
   const int retrieval_queue_depth = context.GetRetrievalQueueDepth ();
   double idle_for = 0.0;
@@ -78,16 +108,9 @@ EvaluateConsolidation::Execute (OperationContext &context) const
       idle_for = static_cast<double> (now_ts - p_ctx.last_retrieval_ts);
     }
   const int idle_required = core::IdleRequiredSeconds (cfg.stability);
-  const bool idle_basic_ok
-      = (tokens_in_flight == 0) && (retrieval_queue_depth == 0);
-  // Interval trigger: require idle_basic_ok only (allow prompt start).
-  // Rate trigger: require full idle window to avoid contention with retrieval.
   const bool idle_ok
-      = trigger_interval
-            ? idle_basic_ok
-            : (idle_basic_ok
-               && (idle_for >= static_cast<double> (idle_required)));
-
+      = CheckIdleCondition (tokens_in_flight, retrieval_queue_depth,
+                            idle_for, idle_required, trigger_interval);
   const std::string reason = trigger_capacity ? std::string ("capacity")
                               : (trigger_rate ? std::string ("rate")
                                               : std::string ("interval"));
@@ -161,8 +184,8 @@ EnqueueExtractionJobs::Execute (OperationContext &context) const
   const long long now_ts
       = static_cast<long long> (context.GetSignal ().timestamp);
 
-  // Gate by stability (Algorithm 29c): extraction_enabled = (T > 0.2)
-  if (T <= 0.2)
+  // Gate by stability (Algorithm 29c): extraction_enabled = (T > threshold)
+  if (T <= constants::kExtractionStabilityThreshold)
     {
       return;
     }

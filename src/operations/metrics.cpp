@@ -121,12 +121,12 @@ ComputeMetrics::Execute (OperationContext &context) const
       constants::kNormalizedMin, constants::kNormalizedMax);
   context.SetMetric (operations::Metric::surprise, surprise);
 
-  // Rarity: (1 − mean_sim) × (0.5 + 0.5F) × (1 − 0.2T)
+  // Rarity: (1 − mean_sim) × (0.5 + 0.5F) × (1 − kRarityTCoeff×T)
   const double rarity
       = core::Clamp (
           (constants::kNormalizedMax - relevance)
               * (constants::kOneHalf + constants::kOneHalf * F_eff)
-              * (1.0 - 0.2 * T),
+              * (constants::kNormalizedMax - constants::kRarityTCoeff * T),
           constants::kNormalizedMin, constants::kNormalizedMax);
   context.SetMetric (operations::Metric::rarity, rarity);
 
@@ -187,7 +187,7 @@ ComputeMetrics::Execute (OperationContext &context) const
   const double utility
       = core::Clamp (delta_score
                          * (constants::kOneHalf + constants::kOneHalf * F_eff)
-                         * (1.0 - 0.3 * S),
+                         * (constants::kNormalizedMax - constants::kUtilitySCoeff * S),
                      constants::kNormalizedMin, constants::kNormalizedMax);
   context.SetMetric (operations::Metric::utility, utility);
 
@@ -211,13 +211,28 @@ ComputeMetrics::Execute (OperationContext &context) const
                      constants::kNormalizedMin, constants::kNormalizedMax);
   context.SetMetric (operations::Metric::salience, salience);
 
-  // Valence/Arousal from sensitivity op outputs (already in [0,1])
-  const double valence
-      = core::Clamp (context.GetValence (), constants::kNormalizedMin,
-                     constants::kNormalizedMax);
-  const double arousal
-      = core::Clamp (context.GetArousal (), constants::kNormalizedMin,
-                     constants::kNormalizedMax);
+  // Valence/Arousal (prefer affect centroids when available)
+  double valence = core::Clamp (context.GetValence (), constants::kNormalizedMin,
+                                constants::kNormalizedMax);
+  double arousal = core::Clamp (context.GetArousal (), constants::kNormalizedMin,
+                                constants::kNormalizedMax);
+  if (p_ctx.centroids.has_value () && x.size () == 256)
+    {
+      const float v_signed = p_ctx.centroids->affect.ComputeValence (x); // [-1,1]
+      valence = core::Clamp (constants::kOneHalf
+                                 * (static_cast<double> (v_signed)
+                                    + constants::kNormalizedMax),
+                             constants::kNormalizedMin,
+                             constants::kNormalizedMax);
+      const float a01 = p_ctx.centroids->affect.ComputeArousal (x); // [0,1]
+      arousal = core::Clamp (static_cast<double> (a01),
+                             constants::kNormalizedMin,
+                             constants::kNormalizedMax);
+      const float viol01 = p_ctx.centroids->affect.ComputeViolation (x); // [0,1]
+      context.SetViolation (
+          core::Clamp (static_cast<double> (viol01), constants::kNormalizedMin,
+                       constants::kNormalizedMax));
+    }
   context.SetMetric (operations::Metric::valence, valence);
   context.SetMetric (operations::Metric::arousal, arousal);
 }
