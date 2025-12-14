@@ -39,10 +39,10 @@ ParseDbOperation (const std::string &q)
 }
 
 sqlite3_stmt *
-PrepareStatement (sqlite3 *db, const std::string &query)
+PrepareStatement (sqlite3 *db, const std::string &query, int &prepare_rc)
 {
   sqlite3_stmt *stmt = nullptr;
-  const int prepare_rc = sqlite3_prepare_v2 (
+  prepare_rc = sqlite3_prepare_v2 (
       db, query.c_str (), -1, &stmt, nullptr);
   if (prepare_rc != SQLITE_OK)
     {
@@ -479,18 +479,35 @@ SQLiteStore::ExecuteDirect (const std::string &query,
         telemetry::Attribute::String ("db.operation", op) });
   sqlite3_stmt *stmt = nullptr;
   std::vector<std::map<std::string, std::any> > results;
+  int prepare_rc = SQLITE_OK;
   try
     {
-      stmt = PrepareStatement (connection_->GetConnection (), query);
+      stmt = PrepareStatement (connection_->GetConnection (), query, prepare_rc);
     }
   catch (const StoreError &)
     {
+      const int errcode = sqlite3_errcode (connection_->GetConnection ());
+      const int extended_errcode
+          = sqlite3_extended_errcode (connection_->GetConnection ());
+      const char *errstr = sqlite3_errstr (errcode);
+      const char *errmsg = sqlite3_errmsg (connection_->GetConnection ());
       span.SetStatusError ("sqlite.prepare_failed");
       telemetry::LogError (
           "SQLite prepare failed",
           { telemetry::Attribute::String ("component", "store"),
             telemetry::Attribute::String ("db.system", "sqlite"),
-            telemetry::Attribute::String ("db.operation", op) });
+            telemetry::Attribute::String ("db.operation", op),
+            telemetry::Attribute::Int64 ("sqlite.rc",
+                                         static_cast<std::int64_t> (prepare_rc)),
+            telemetry::Attribute::Int64 ("sqlite.errcode",
+                                         static_cast<std::int64_t> (errcode)),
+            telemetry::Attribute::Int64 (
+                "sqlite.extended_errcode",
+                static_cast<std::int64_t> (extended_errcode)),
+            telemetry::Attribute::String ("sqlite.errmsg",
+                                          errmsg ? errmsg : ""),
+            telemetry::Attribute::String ("sqlite.errstr",
+                                          errstr ? errstr : "") });
       throw;
     }
   BindParameters (stmt, params);
@@ -504,13 +521,27 @@ SQLiteStore::ExecuteDirect (const std::string &query,
   if (rc != SQLITE_DONE && rc != SQLITE_OK)
     {
       std::string error_msg = sqlite3_errmsg (connection_->GetConnection ());
+      const int errcode = sqlite3_errcode (connection_->GetConnection ());
+      const int extended_errcode
+          = sqlite3_extended_errcode (connection_->GetConnection ());
+      const char *errstr = sqlite3_errstr (errcode);
       sqlite3_finalize (stmt);
       span.SetStatusError ("sqlite.step_failed");
       telemetry::LogError (
           "SQLite step failed",
           { telemetry::Attribute::String ("component", "store"),
             telemetry::Attribute::String ("db.system", "sqlite"),
-            telemetry::Attribute::String ("db.operation", op) });
+            telemetry::Attribute::String ("db.operation", op),
+            telemetry::Attribute::Int64 ("sqlite.step_rc",
+                                         static_cast<std::int64_t> (rc)),
+            telemetry::Attribute::Int64 ("sqlite.errcode",
+                                         static_cast<std::int64_t> (errcode)),
+            telemetry::Attribute::Int64 (
+                "sqlite.extended_errcode",
+                static_cast<std::int64_t> (extended_errcode)),
+            telemetry::Attribute::String ("sqlite.errmsg", error_msg),
+            telemetry::Attribute::String ("sqlite.errstr",
+                                          errstr ? errstr : "") });
       throw StoreError ("Query execution failed: " + error_msg);
     }
   sqlite3_finalize (stmt);

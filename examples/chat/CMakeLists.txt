@@ -34,6 +34,7 @@ find_package(CURL REQUIRED)
 
 add_executable(cortext_chat
   main.cpp
+  context_tab.cpp
 )
 
 target_link_libraries(cortext_chat PRIVATE
@@ -43,6 +44,13 @@ target_link_libraries(cortext_chat PRIVATE
   ftxui::component
   ftxui::dom
   ftxui::screen
+  opentelemetry-cpp::api
+  opentelemetry-cpp::trace
+  opentelemetry-cpp::metrics
+  opentelemetry-cpp::logs
+  opentelemetry-cpp::otlp_file_exporter
+  opentelemetry-cpp::otlp_file_metric_exporter
+  opentelemetry-cpp::otlp_file_log_record_exporter
 )
 
 target_include_directories(cortext_chat PRIVATE

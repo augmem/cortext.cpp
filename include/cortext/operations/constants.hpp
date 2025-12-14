@@ -59,8 +59,8 @@ constexpr double kRecoveryTimeMaxSeconds = 600.0; // Max recovery time (high T)
 // Working Memory
 constexpr double kTiny = 1e-6;           // Small epsilon for WM strength
 constexpr double kStrengthMax = 10.0;    // Max WM slot strength
-constexpr double kWMBaseMin = 0.5;       // Min WM strength base (low T)
-constexpr double kWMBaseMax = 1.5;       // Max WM strength base (high T)
+constexpr double kWMBaseMin = 0.3;       // Min WM strength base (low T)
+constexpr double kWMBaseMax = 0.9;       // Max WM strength base (high T)
 
 // Logprob Surprise (Alg 13)
 constexpr double kLogprobNormalizationDivisor = 5.0; // NLL normalization divisor

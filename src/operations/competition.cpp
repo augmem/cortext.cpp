@@ -187,9 +187,13 @@ ApplyLateralInhibition (const std::vector<Candidate> &winners,
         }
       {
         BufferedWriteInstruction op;
-        op.query = "INSERT OR IGNORE INTO memory_feedback (embedding_id) "
-                   "VALUES (?);";
-        op.params = { loser.id };
+        op.query = "INSERT INTO memory_feedback "
+                   "(embedding_id, strength, retrieved_count, used_count, "
+                   "contextual_gain, use_frequency, last_used, lability_state) "
+                   "SELECT ?, 1.0, 0, 0, 0.0, 0.0, 0, 0.0 "
+                   "WHERE NOT EXISTS (SELECT 1 FROM "
+                   "memory_feedback WHERE embedding_id = ?)";
+        op.params = { loser.id, loser.id };
         context.AddWriteInstruction (std::move (op));
       }
       {

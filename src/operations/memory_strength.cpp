@@ -50,8 +50,11 @@ UpdateMemoryStrength::Execute (OperationContext &context) const
       if (e.used || e.contextual_gain.has_value ())
         {
           BufferedWriteInstruction op;
-          op.query = "INSERT INTO memory_feedback (embedding_id) "
-                     "SELECT ? WHERE NOT EXISTS (SELECT 1 FROM "
+          op.query = "INSERT INTO memory_feedback "
+                     "(embedding_id, strength, retrieved_count, used_count, "
+                     "contextual_gain, use_frequency, last_used, lability_state) "
+                     "SELECT ?, 1.0, 0, 0, 0.0, 0.0, 0, 0.0 "
+                     "WHERE NOT EXISTS (SELECT 1 FROM "
                      "memory_feedback WHERE "
                      "embedding_id = ?)";
           op.params = { id, id };

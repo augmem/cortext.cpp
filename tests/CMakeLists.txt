@@ -64,6 +64,7 @@ add_executable(cortext_tests
   cortext.test.cpp
   signal_processor.test.cpp
   operations_adherence_fixes.test.cpp
+  memory_feedback_insert.test.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/telemetry_noop_by_default.test.cpp
 )
 

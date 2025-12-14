@@ -54,6 +54,7 @@ if(NOT EMSCRIPTEN)
   # Keep the dependency lightweight (API only is linked, but the upstream build
   # still supports optional components).
   set(WITH_EXAMPLES OFF CACHE BOOL "Disable OTel examples" FORCE)
+  set(WITH_OTLP_FILE ON CACHE BOOL "Enable OTLP file exporters" FORCE)
   set(WITH_PROMETHEUS OFF CACHE BOOL "Disable Prometheus exporter" FORCE)
   set(WITH_JAEGER OFF CACHE BOOL "Disable Jaeger exporter" FORCE)
   set(WITH_ZIPKIN OFF CACHE BOOL "Disable Zipkin exporter" FORCE)

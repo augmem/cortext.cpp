@@ -469,14 +469,19 @@ Cortext::ProcessText (const std::string &text, std::uint64_t timestamp,
 {
   telemetry::ScopedSpan span ("cortext.api.process_text");
   std::vector<float> v;
+  telemetry::ScopedSpan encode_span ("cortext.encode");
   impl_->encoder->EncodeText (text, v);
+  encode_span.SetStatusOk ();
   auto out = impl_->ProcessEmbedding (ToEigen (v), timestamp, source_id);
   span.SetAttribute ("cortext.candidate_memory_count",
                      static_cast<std::int64_t> (out.candidate_memory_ids.size ()));
   span.SetAttribute ("cortext.used_memory_count",
                      static_cast<std::int64_t> (out.used_memory_ids.size ()));
   span.SetStatusOk ();
-  return impl_->HydrateContext (out);
+  telemetry::ScopedSpan hydrate_span ("cortext.hydrate");
+  Cortext::Context result = impl_->HydrateContext (out);
+  hydrate_span.SetStatusOk ();
+  return result;
 }
 
 Cortext::Context
@@ -485,14 +490,19 @@ Cortext::ProcessAudio (const float *pcm, std::size_t num_samples,
 {
   telemetry::ScopedSpan span ("cortext.api.process_audio");
   std::vector<float> v;
+  telemetry::ScopedSpan encode_span ("cortext.encode");
   impl_->encoder->EncodeAudio (pcm, num_samples, v);
+  encode_span.SetStatusOk ();
   auto out = impl_->ProcessEmbedding (ToEigen (v), timestamp, source_id);
   span.SetAttribute ("cortext.candidate_memory_count",
                      static_cast<std::int64_t> (out.candidate_memory_ids.size ()));
   span.SetAttribute ("cortext.used_memory_count",
                      static_cast<std::int64_t> (out.used_memory_ids.size ()));
   span.SetStatusOk ();
-  return impl_->HydrateContext (out);
+  telemetry::ScopedSpan hydrate_span ("cortext.hydrate");
+  Cortext::Context result = impl_->HydrateContext (out);
+  hydrate_span.SetStatusOk ();
+  return result;
 }
 
 Cortext::Context
@@ -502,14 +512,19 @@ Cortext::ProcessImage (const std::uint8_t *data, int width, int height,
 {
   telemetry::ScopedSpan span ("cortext.api.process_image");
   std::vector<float> v;
+  telemetry::ScopedSpan encode_span ("cortext.encode");
   impl_->encoder->EncodeImage (data, width, height, channels, v);
+  encode_span.SetStatusOk ();
   auto out = impl_->ProcessEmbedding (ToEigen (v), timestamp, source_id);
   span.SetAttribute ("cortext.candidate_memory_count",
                      static_cast<std::int64_t> (out.candidate_memory_ids.size ()));
   span.SetAttribute ("cortext.used_memory_count",
                      static_cast<std::int64_t> (out.used_memory_ids.size ()));
   span.SetStatusOk ();
-  return impl_->HydrateContext (out);
+  telemetry::ScopedSpan hydrate_span ("cortext.hydrate");
+  Cortext::Context result = impl_->HydrateContext (out);
+  hydrate_span.SetStatusOk ();
+  return result;
 }
 
 Cortext::Context
@@ -519,7 +534,9 @@ Cortext::Consolidate (std::uint64_t now_timestamp)
   // Drive the pipeline to allow EvaluateConsolidation to emit events
   // and ConsolidationGate to run scoring/jobs when start is signaled.
   std::vector<float> v;
+  telemetry::ScopedSpan encode_span ("cortext.encode");
   impl_->encoder->EncodeText (std::string (), v);
+  encode_span.SetStatusOk ();
   auto out = impl_->ProcessEmbedding (ToEigen (v), now_timestamp,
                                       "cortext/consolidate");
   span.SetAttribute ("cortext.candidate_memory_count",
@@ -527,7 +544,10 @@ Cortext::Consolidate (std::uint64_t now_timestamp)
   span.SetAttribute ("cortext.used_memory_count",
                      static_cast<std::int64_t> (out.used_memory_ids.size ()));
   span.SetStatusOk ();
-  return impl_->HydrateContext (out);
+  telemetry::ScopedSpan hydrate_span ("cortext.hydrate");
+  Cortext::Context result = impl_->HydrateContext (out);
+  hydrate_span.SetStatusOk ();
+  return result;
 }
 
 void

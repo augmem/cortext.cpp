@@ -3,6 +3,8 @@
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <array>
+#include <algorithm>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -191,6 +193,27 @@ GetOrCreateMeterLocked (TelemetryState &state)
   return state.meter;
 }
 
+struct StableStringPool
+{
+  static constexpr std::size_t kMaxStrings = 64;
+  static constexpr std::size_t kMaxBytesPerString = 2048;
+  std::array<std::string, kMaxStrings> slots;
+  std::size_t next_slot = 0;
+};
+
+opentelemetry::nostd::string_view
+MakeStableStringView (std::string_view input)
+{
+  thread_local StableStringPool pool;
+  const std::size_t slot = pool.next_slot;
+  pool.next_slot = (pool.next_slot + 1) % StableStringPool::kMaxStrings;
+  std::string &dest = pool.slots[slot];
+  const std::size_t copy_len
+      = std::min (input.size (), StableStringPool::kMaxBytesPerString);
+  dest.assign (input.data (), copy_len);
+  return opentelemetry::nostd::string_view (dest.data (), dest.size ());
+}
+
 std::vector<std::pair<opentelemetry::nostd::string_view,
                       opentelemetry::common::AttributeValue> >
 BuildAttributes (std::initializer_list<Attribute> attrs)
@@ -215,9 +238,7 @@ BuildAttributes (std::initializer_list<Attribute> attrs)
           break;
         case Attribute::Type::kString:
         default:
-          kvs.emplace_back (
-              k, opentelemetry::nostd::string_view (a.string_value.data (),
-                                                    a.string_value.size ()));
+          kvs.emplace_back (k, MakeStableStringView (a.string_value));
           break;
         }
     }
@@ -433,7 +454,7 @@ void
 LogError (std::string_view message, std::initializer_list<Attribute> attrs)
 {
   ScopedSpan span ("cortext.log");
-  span.SetAttribute ("log.severity", "error");
+  span.SetAttribute ("log.severity", std::string_view ("error"));
   span.SetAttribute ("log.message", message);
   for (const auto &a : attrs)
     {
@@ -461,8 +482,7 @@ LogError (std::string_view message, std::initializer_list<Attribute> attrs)
       = provider->GetLogger ("cortext");
   const auto kvs = BuildAttributes (attrs);
   logger->EmitLogRecord (logs_api::Severity::kError,
-                         opentelemetry::nostd::string_view (message.data (),
-                                                            message.size ()),
+                         MakeStableStringView (message),
                          kvs);
 }
 
@@ -470,7 +490,7 @@ void
 LogWarn (std::string_view message, std::initializer_list<Attribute> attrs)
 {
   ScopedSpan span ("cortext.log");
-  span.SetAttribute ("log.severity", "warn");
+  span.SetAttribute ("log.severity", std::string_view ("warn"));
   span.SetAttribute ("log.message", message);
   for (const auto &a : attrs)
     {
@@ -498,8 +518,7 @@ LogWarn (std::string_view message, std::initializer_list<Attribute> attrs)
       = provider->GetLogger ("cortext");
   const auto kvs = BuildAttributes (attrs);
   logger->EmitLogRecord (logs_api::Severity::kWarn,
-                         opentelemetry::nostd::string_view (message.data (),
-                                                            message.size ()),
+                         MakeStableStringView (message),
                          kvs);
 }
 
@@ -507,7 +526,7 @@ void
 LogInfo (std::string_view message, std::initializer_list<Attribute> attrs)
 {
   ScopedSpan span ("cortext.log");
-  span.SetAttribute ("log.severity", "info");
+  span.SetAttribute ("log.severity", std::string_view ("info"));
   span.SetAttribute ("log.message", message);
   for (const auto &a : attrs)
     {
@@ -535,8 +554,7 @@ LogInfo (std::string_view message, std::initializer_list<Attribute> attrs)
       = provider->GetLogger ("cortext");
   const auto kvs = BuildAttributes (attrs);
   logger->EmitLogRecord (logs_api::Severity::kInfo,
-                         opentelemetry::nostd::string_view (message.data (),
-                                                            message.size ()),
+                         MakeStableStringView (message),
                          kvs);
 }
 

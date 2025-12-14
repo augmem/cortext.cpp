@@ -7,8 +7,6 @@
 #include "cortext/store/schema.hpp"
 #include <Eigen/Dense>
 #include <algorithm>
-#include <cmath>
-#include <limits>
 #include <vector>
 
 namespace cortext::operations
@@ -26,7 +24,7 @@ constexpr double kSurpriseMax = 2.0;
 constexpr double kSurpriseMin = 0.5;
 constexpr double kBaseDeltaScale = 0.02;
 constexpr double kPadRef = 0.3;
-static const double kStrengthMax = 1.2;
+constexpr double kStrengthMax = 1.2;
 inline int
 TrajectorySamples (double F)
 {
@@ -170,12 +168,16 @@ ApplyPredictivePreActivation::Execute (OperationContext &context) const
       if (delta > constants::kGainSmall)
         delta = constants::kGainSmall;
 
-      // Ensure row, then apply boost with clamp to a small ceiling > 1.0.
+      // Ensure row exists with all required columns explicitly set.
       {
         BufferedWriteInstruction op;
-        op.query = "INSERT OR IGNORE INTO memory_feedback (embedding_id) "
-                   "VALUES (?);";
-        op.params = { id };
+        op.query = "INSERT INTO memory_feedback "
+                   "(embedding_id, strength, retrieved_count, used_count, "
+                   "contextual_gain, use_frequency, last_used, lability_state) "
+                   "SELECT ?, 1.0, 0, 0, 0.0, 0.0, 0, 0.0 "
+                   "WHERE NOT EXISTS (SELECT 1 FROM "
+                   "memory_feedback WHERE embedding_id = ?)";
+        op.params = { id, id };
         context.AddWriteInstruction (std::move (op));
       }
       {

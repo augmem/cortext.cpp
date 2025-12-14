@@ -105,12 +105,16 @@ ApplyReconsolidation::Execute (OperationContext &context) const
                             std::max (constants::kNormalizedMin, drift_mag));
       max_drift = std::max (max_drift, drift_mag);
 
-      // Ensure feedback row exists.
+      // Ensure feedback row exists with all required columns explicitly set.
       {
         BufferedWriteInstruction op;
-        op.query = "INSERT OR IGNORE INTO memory_feedback (embedding_id) "
-                   "VALUES (?)";
-        op.params = { embedding_id };
+        op.query = "INSERT INTO memory_feedback "
+                   "(embedding_id, strength, retrieved_count, used_count, "
+                   "contextual_gain, use_frequency, last_used, lability_state) "
+                   "SELECT ?, 1.0, 0, 0, 0.0, 0.0, 0, 0.0 "
+                   "WHERE NOT EXISTS (SELECT 1 FROM "
+                   "memory_feedback WHERE embedding_id = ?)";
+        op.params = { embedding_id, embedding_id };
         context.AddWriteInstruction (std::move (op));
       }
 
