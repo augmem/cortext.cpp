@@ -264,6 +264,132 @@ CREATE INDEX idx_memories_timestamp ON memories(timestamp DESC);
 -- Metadata indices for filtering
 CREATE INDEX idx_memories_source ON memories(source);
 CREATE INDEX idx_memories_episode ON memories(json_extract(metadata, '$.episode_id'));
+
+-- Signal metrics table (per-signal scoring for observability and learning)
+CREATE TABLE signal_metrics (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp INTEGER NOT NULL,
+    embedding_id INTEGER,  -- FK to memories (NULL if signal was gated)
+    relevance REAL,
+    mismatch REAL,
+    surprise REAL,
+    rarity REAL,
+    drift REAL,
+    contradiction REAL,
+    utility REAL,
+    periphery REAL,
+    coverage REAL,
+    salience REAL,
+    valence REAL,
+    arousal REAL,
+    composite_score REAL,
+    threshold_t REAL,
+    write_decision INTEGER NOT NULL DEFAULT 0
+);
+
+-- Indices for signal metrics analysis
+CREATE INDEX idx_signal_metrics_ts ON signal_metrics(timestamp DESC);
+CREATE INDEX idx_signal_metrics_embedding ON signal_metrics(embedding_id);
+CREATE INDEX idx_signal_metrics_decision ON signal_metrics(write_decision);
+
+-- Processor state table (single-row, enables algorithm resumption)
+CREATE TABLE processor_state (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    signals_processed INTEGER NOT NULL DEFAULT 0,
+    u_t REAL NOT NULL DEFAULT 0.0,
+
+    -- Focus State (Algorithms 1, 2, 15)
+    weight_relevance_prior REAL NOT NULL DEFAULT 0.5,
+    coverage_gain_floor_prior REAL NOT NULL DEFAULT 0.65,
+    mismatch_weight_prior REAL NOT NULL DEFAULT 0.5,
+    attention_width_prior REAL NOT NULL DEFAULT 1.57,
+    weight_relevance REAL NOT NULL DEFAULT 0.5,
+    attention_width REAL NOT NULL DEFAULT 1.57,
+
+    -- Sensitivity State (Algorithms 3, 4, 16)
+    base_rate_prior REAL NOT NULL DEFAULT 0.2,
+    weight_novelty_prior REAL NOT NULL DEFAULT 0.3,
+    weight_surprise_prior REAL NOT NULL DEFAULT 0.2,
+    weight_valence_prior REAL NOT NULL DEFAULT 0.4,
+    weight_arousal_prior REAL NOT NULL DEFAULT 0.0,
+    weight_emotion_prior REAL NOT NULL DEFAULT 0.2,
+    emotion_gain_prior REAL NOT NULL DEFAULT 1.0,
+    score_gain_prior REAL NOT NULL DEFAULT 1.0,
+    rate_target_prior REAL NOT NULL DEFAULT 0.2,
+    rate_target REAL NOT NULL DEFAULT 0.0,
+    weight_novelty REAL NOT NULL DEFAULT 0.3,
+
+    -- Stability State (Algorithms 5, 6, 17)
+    hysteresis_band_prior REAL NOT NULL DEFAULT 0.02,
+    half_life_prior REAL NOT NULL DEFAULT 120.0,
+    rate_decay_prior REAL NOT NULL DEFAULT 0.60,
+    periphery_half_life_prior REAL NOT NULL DEFAULT 120.0,
+    salience_half_life_prior REAL NOT NULL DEFAULT 120.0,
+    drift_weight_prior REAL NOT NULL DEFAULT 0.5,
+    half_life REAL NOT NULL DEFAULT 120.0,
+    rate_decay REAL NOT NULL DEFAULT 0.60,
+    periphery_half_life REAL NOT NULL DEFAULT 120.0,
+    salience_half_life REAL NOT NULL DEFAULT 120.0,
+
+    -- Threshold State (Algorithm 8)
+    T_dynamic REAL NOT NULL DEFAULT 0.2,
+    hysteresis REAL NOT NULL DEFAULT 0.05,
+    dt_ema REAL NOT NULL DEFAULT 0.0,
+    m_rate REAL NOT NULL DEFAULT 0.0,
+    rate_ticks INTEGER NOT NULL DEFAULT 0,
+
+    -- Influence State (Algorithm 19)
+    sustained_influence REAL NOT NULL DEFAULT 0.0,
+
+    -- Timestamps
+    last_signal_timestamp INTEGER NOT NULL DEFAULT 0,
+    last_rate_timestamp INTEGER NOT NULL DEFAULT 0,
+    last_consolidation_ts INTEGER NOT NULL DEFAULT 0,
+    last_retrieval_ts INTEGER NOT NULL DEFAULT 0,
+    updated_at INTEGER NOT NULL DEFAULT 0
+);
+
+-- Blender weights table (RLS-fitted metric weights for Algorithm 7)
+CREATE TABLE blender_weights (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    w_relevance REAL NOT NULL DEFAULT 0.5,
+    w_mismatch REAL NOT NULL DEFAULT 0.5,
+    w_surprise REAL NOT NULL DEFAULT 0.5,
+    w_rarity REAL NOT NULL DEFAULT 0.5,
+    w_drift REAL NOT NULL DEFAULT 0.5,
+    w_contradiction REAL NOT NULL DEFAULT 0.5,
+    w_utility REAL NOT NULL DEFAULT 0.5,
+    w_periphery REAL NOT NULL DEFAULT 0.5,
+    w_coverage REAL NOT NULL DEFAULT 0.5,
+    w_salience REAL NOT NULL DEFAULT 0.5,
+    w_valence REAL NOT NULL DEFAULT 0.5,
+    w_arousal REAL NOT NULL DEFAULT 0.5,
+    blender_ready INTEGER NOT NULL DEFAULT 0,
+    update_count INTEGER NOT NULL DEFAULT 0
+);
+
+-- Blender covariance table (RLS P matrix for Algorithm 7)
+CREATE TABLE blender_covariance (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    P_matrix BLOB  -- Flattened 12x12 covariance matrix (144 doubles)
+);
+
+-- Recent context embeddings (rolling window for relevance/drift)
+CREATE TABLE recent_context (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    embedding BLOB NOT NULL,  -- 256d vector
+    timestamp INTEGER NOT NULL,
+    seq_order INTEGER NOT NULL
+);
+CREATE INDEX idx_recent_context_order ON recent_context(seq_order DESC);
+
+-- Recent scores (rolling window for threshold adaptation)
+CREATE TABLE recent_scores (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    score REAL NOT NULL,
+    timestamp INTEGER NOT NULL
+);
+CREATE INDEX idx_recent_scores_ts ON recent_scores(timestamp DESC);
 ```
 
 ### Binary Object Storage for Multimodal Content

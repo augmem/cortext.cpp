@@ -388,6 +388,167 @@ semantic_drift	REAL	Δ direction vs previous output
 
 ```
 
+### Signal Metrics Table — Schema
+
+Per-signal metrics persisted for observability, debugging, and adaptive weight learning. Each row corresponds to a processed signal event.
+
+```
+Column	Type	Purpose
+id	INTEGER	Primary key (autoincrement)
+timestamp	INTEGER	Signal processing time
+embedding_id	INTEGER	FK to memory (if written, else NULL)
+relevance	REAL	cos(x, mean(ctx)) × (0.5 + F)
+mismatch	REAL	(1 − F) × S × novelty
+surprise	REAL	entropy_spike × S × (1 − T)
+rarity	REAL	(1 − mean_sim) × (0.5 + 0.5F) × (1 − 0.2T)
+drift	REAL	‖mean(ctx_t) − mean(ctx_{t−k})‖ × (1 − T)
+contradiction	REAL	max(0, S − F)
+utility	REAL	ΔSSE × (0.5 + 0.5F) × (1 − 0.3S)
+periphery	REAL	1 − decay(mean_sim, half_life_T)
+coverage	REAL	avg(max(0, cos(x,q) − top_db(q))) × F
+salience	REAL	(rarity + novelty_recent)/2 × (F + S)/2
+valence	REAL	Emotional valence mapped to [0,1]
+arousal	REAL	Emotional arousal in [0,1]
+composite_score	REAL	Weighted blend of above metrics
+threshold_t	REAL	Dynamic threshold at time t
+write_decision	INTEGER	1 if memory written, 0 if gated
+
+```
+
+**Usage:**
+- Enables post-hoc analysis of write gate decisions
+- Supports RLS weight fitting validation (Algorithm 7)
+- Provides training data for adaptive threshold tuning
+- Facilitates debugging of threshold/sensitivity interactions
+
+### Processor State Table — Schema
+
+Persisted adaptive state enabling algorithm resumption across restarts. Single-row table (id=1) storing all evolving parameters.
+
+```
+Column	Type	Purpose
+id	INTEGER	Primary key (always 1)
+signals_processed	INTEGER	Total signals seen (maturity denominator)
+u_t	REAL	Current uncertainty estimate [0,1]
+
+-- Focus State (Algorithms 1, 2, 15)
+weight_relevance_prior	REAL	Prior from sigmoid(2F − 1)
+coverage_gain_floor_prior	REAL	Prior: 0.3 + 0.7F
+mismatch_weight_prior	REAL	Prior: 1 − F
+attention_width_prior	REAL	Prior: lerp(0.1π, π, 1 − F)
+weight_relevance	REAL	Dynamic EWMA value
+attention_width	REAL	Dynamic attention width
+
+-- Sensitivity State (Algorithms 3, 4, 16)
+base_rate_prior	REAL	Prior: lerp(0.2, 5.0, S)
+weight_novelty_prior	REAL	Prior: 0.3 + 0.7S
+weight_surprise_prior	REAL	Prior: 0.2 + 0.8S
+weight_valence_prior	REAL	Prior: 0.4 + 0.6S
+weight_arousal_prior	REAL	Prior: S
+weight_emotion_prior	REAL	Prior: 0.2 + 0.8S
+emotion_gain_prior	REAL	Prior: exp(1.5S)
+score_gain_prior	REAL	Prior: exp(2S)
+rate_target_prior	REAL	Prior: base_rate × (0.5 + 1.5S)
+rate_target	REAL	Dynamic rate target
+weight_novelty	REAL	Dynamic novelty weight
+
+-- Stability State (Algorithms 5, 6, 17)
+hysteresis_band_prior	REAL	Prior hysteresis band
+half_life_prior	REAL	Prior half-life (seconds)
+rate_decay_prior	REAL	Prior rate decay factor
+periphery_half_life_prior	REAL	Prior periphery half-life
+salience_half_life_prior	REAL	Prior salience half-life
+drift_weight_prior	REAL	Prior drift weight
+half_life	REAL	Dynamic half-life
+rate_decay	REAL	Dynamic rate decay
+periphery_half_life	REAL	Dynamic periphery half-life
+salience_half_life	REAL	Dynamic salience half-life
+
+-- Threshold State (Algorithm 8)
+T_dynamic	REAL	Current adaptive threshold
+hysteresis	REAL	Current hysteresis band
+dt_ema	REAL	Delta-time EMA for rate control
+m_rate	REAL	Write rate EMA
+rate_ticks	INTEGER	Tick counter for rate estimation
+
+-- Influence State (Algorithm 19)
+sustained_influence	REAL	Accumulated influence feedback
+
+-- Timestamps
+last_signal_timestamp	INTEGER	Last signal processing time
+last_rate_timestamp	INTEGER	Last rate update time
+last_consolidation_ts	INTEGER	Last consolidation time
+last_retrieval_ts	INTEGER	Last retrieval time
+updated_at	INTEGER	Row update timestamp
+
+```
+
+### Blender Weights Table — Schema
+
+RLS-fitted metric weights for composite scoring (Algorithm 7). Separate table for the 12 metric weights.
+
+```
+Column	Type	Purpose
+id	INTEGER	Primary key (always 1)
+w_relevance	REAL	Weight for relevance metric
+w_mismatch	REAL	Weight for mismatch metric
+w_surprise	REAL	Weight for surprise metric
+w_rarity	REAL	Weight for rarity metric
+w_drift	REAL	Weight for drift metric
+w_contradiction	REAL	Weight for contradiction metric
+w_utility	REAL	Weight for utility metric
+w_periphery	REAL	Weight for periphery metric
+w_coverage	REAL	Weight for coverage metric
+w_salience	REAL	Weight for salience metric
+w_valence	REAL	Weight for valence metric
+w_arousal	REAL	Weight for arousal metric
+blender_ready	INTEGER	1 if RLS has converged
+update_count	INTEGER	Number of RLS updates performed
+
+```
+
+### Blender Covariance Table — Schema
+
+RLS covariance matrix P for online weight learning (Algorithm 7). Stored as flattened 12×12 matrix.
+
+```
+Column	Type	Purpose
+id	INTEGER	Primary key (always 1)
+P_matrix	BLOB	Flattened 12×12 covariance matrix (144 doubles)
+
+```
+
+### Recent Context Table — Schema
+
+Rolling window of recent context embeddings for relevance and drift computation.
+
+```
+Column	Type	Purpose
+id	INTEGER	Primary key (autoincrement)
+embedding	BLOB	256d context embedding
+timestamp	INTEGER	When this context was recorded
+seq_order	INTEGER	Sequence position in window
+
+```
+
+### Recent Scores Table — Schema
+
+Rolling window of recent composite scores for threshold adaptation.
+
+```
+Column	Type	Purpose
+id	INTEGER	Primary key (autoincrement)
+score	REAL	Composite score value
+timestamp	INTEGER	When this score was recorded
+
+```
+
+**Resumption Protocol:**
+1. On startup, load `processor_state` row (or initialize from knob priors if absent)
+2. Load `blender_weights` and `blender_covariance` for RLS state
+3. Load last N rows from `recent_context` and `recent_scores` based on w_score(T)
+4. Resume processing with restored state — algorithms continue evolution seamlessly
+
 ### Feedback Summary
 
 ```
