@@ -105,29 +105,49 @@ ApplyReconsolidation::Execute (OperationContext &context) const
                             std::max (constants::kNormalizedMin, drift_mag));
       max_drift = std::max (max_drift, drift_mag);
 
-      // Ensure feedback row exists with all required columns explicitly set.
+      // Ensure embeddings_meta row exists for strength/frequency columns.
+      {
+        BufferedWriteInstruction op;
+        op.query = "INSERT INTO embeddings_meta "
+                   "(embedding_id, strength, contextual_gain, use_frequency, "
+                   "lability_state) "
+                   "SELECT ?, 1.0, 0.0, 0.0, 0.0 "
+                   "WHERE NOT EXISTS (SELECT 1 FROM "
+                   "embeddings_meta WHERE embedding_id = ?)";
+        op.params = { embedding_id, embedding_id };
+        context.AddWriteInstruction (std::move (op));
+      }
+
+      // Ensure memory_feedback row exists for retrieval tracking.
       {
         BufferedWriteInstruction op;
         op.query = "INSERT INTO memory_feedback "
-                   "(embedding_id, strength, retrieved_count, used_count, "
-                   "contextual_gain, use_frequency, last_used, lability_state) "
-                   "SELECT ?, 1.0, 0, 0, 0.0, 0.0, 0, 0.0 "
+                   "(embedding_id, retrieved_count, used_count, last_used) "
+                   "SELECT ?, 0, 0, 0 "
                    "WHERE NOT EXISTS (SELECT 1 FROM "
                    "memory_feedback WHERE embedding_id = ?)";
         op.params = { embedding_id, embedding_id };
         context.AddWriteInstruction (std::move (op));
       }
 
-      // Update lability fields and set original_embedding if first-time.
+      // Update lability_state in embeddings_meta.
+      {
+        BufferedWriteInstruction op;
+        op.query = "UPDATE embeddings_meta "
+                   "SET lability_state = ? "
+                   "WHERE embedding_id = ?";
+        op.params = { current_lability, embedding_id };
+        context.AddWriteInstruction (std::move (op));
+      }
+
+      // Update original_embedding and lability_ts in memory_feedback.
       {
         BufferedWriteInstruction op;
         op.query = "UPDATE memory_feedback "
                    "SET original_embedding = COALESCE(original_embedding, ?), "
-                   "    lability_state = ?, "
                    "    lability_ts = ? "
                    "WHERE embedding_id = ?";
-        op.params
-            = { ToFloatVector (u_m), current_lability, now_ts, embedding_id };
+        op.params = { ToFloatVector (u_m), now_ts, embedding_id };
         context.AddWriteInstruction (std::move (op));
       }
 
@@ -141,17 +161,7 @@ ApplyReconsolidation::Execute (OperationContext &context) const
                                 + static_cast<float> (drift_mag) * u_cur;
       blended = Unit (blended);
 
-      // Upsert into embeddings table.
-      {
-        BufferedWriteInstruction op;
-        op.query
-            = "INSERT OR REPLACE INTO embeddings (embedding_id, embedding) "
-              "VALUES (?, ?)";
-        op.params = { embedding_id, ToFloatVector (blended) };
-        context.AddWriteInstruction (std::move (op));
-      }
-
-      // Also update vec0 index for KNN search.
+      // Update vec_embeddings (primary vector storage for KNN search).
       {
         BufferedWriteInstruction op;
         op.query

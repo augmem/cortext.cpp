@@ -96,19 +96,22 @@ TEST_CASE ("Alg20 drifts embedding and writes lability fields",
   processor.Process (s);
   processor.Flush ();
 
-  // Embedding row created
+  // Embedding row created in vec_embeddings
   {
     auto rows = store->Execute (
-        "SELECT COUNT(*) AS cnt FROM embeddings WHERE embedding_id = ?",
+        "SELECT COUNT(*) AS cnt FROM vec_embeddings WHERE embedding_id = ?",
         { 1LL });
     REQUIRE (rows.size () == 1);
     REQUIRE (std::any_cast<long long> (rows[0].at ("cnt")) == 1LL);
   }
   // Lability fields updated
   {
-    auto rows = store->Execute ("SELECT lability_state, lability_ts FROM "
-                                "memory_feedback WHERE embedding_id = ?",
-                                { 1LL });
+    auto rows = store->Execute (
+        "SELECT em.lability_state, mf.lability_ts FROM "
+        "embeddings_meta em "
+        "JOIN memory_feedback mf ON em.embedding_id = mf.embedding_id "
+        "WHERE em.embedding_id = ?",
+        { 1LL });
     REQUIRE (rows.size () == 1);
     const double lab = std::any_cast<double> (rows[0].at ("lability_state"));
     const long long ts = std::any_cast<long long> (rows[0].at ("lability_ts"));
@@ -142,19 +145,22 @@ TEST_CASE ("Alg20 no drift when S=0: no embedding row; lability updated",
   processor.Process (s);
   processor.Flush ();
 
-  // No embeddings row
+  // No vec_embeddings row (drift skipped when S=0)
   {
     auto rows = store->Execute (
-        "SELECT COUNT(*) AS cnt FROM embeddings WHERE embedding_id = ?",
+        "SELECT COUNT(*) AS cnt FROM vec_embeddings WHERE embedding_id = ?",
         { 2LL });
     REQUIRE (rows.size () == 1);
     REQUIRE (std::any_cast<long long> (rows[0].at ("cnt")) == 0LL);
   }
   // Lability fields updated
   {
-    auto rows = store->Execute ("SELECT lability_state, lability_ts FROM "
-                                "memory_feedback WHERE embedding_id = ?",
-                                { 2LL });
+    auto rows = store->Execute (
+        "SELECT em.lability_state, mf.lability_ts FROM "
+        "embeddings_meta em "
+        "JOIN memory_feedback mf ON em.embedding_id = mf.embedding_id "
+        "WHERE em.embedding_id = ?",
+        { 2LL });
     REQUIRE (rows.size () == 1);
     const double lab = std::any_cast<double> (rows[0].at ("lability_state"));
     const long long ts = std::any_cast<long long> (rows[0].at ("lability_ts"));

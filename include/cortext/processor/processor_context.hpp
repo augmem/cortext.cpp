@@ -1,6 +1,7 @@
 #pragma once
 
 #include "cortext/data/centroids.hpp"
+#include "cortext/operations/extraction.hpp"
 #include "cortext/operations/metrics.hpp"
 #include "cortext/signal.hpp"
 #include <Eigen/Dense>
@@ -250,6 +251,7 @@ struct ProcessorContext
   double m_rate = 0.0;
   int rate_ticks = 0;
   uint64_t last_rate_timestamp = 0;
+  double reliability = 1.0;  // ESS-based reliability measure
 
   // ======================================================================
   // Metric Weight Blending State (Algorithm 7)
@@ -273,11 +275,26 @@ struct ProcessorContext
   // ======================================================================
   uint64_t last_consolidation_ts = 0;
   uint64_t last_retrieval_ts = 0;
+  int consolidation_count = 0;
+  bool is_processing_signal = false;
+
+  // ======================================================================
+  // Extraction State (Section 7.4)
+  // ======================================================================
+  uint64_t last_extraction_ts = 0;
+  std::vector<operations::ExtractionResult> pending_extraction_results;
 
   // ======================================================================
   // Episode Tracking State (Algorithm 12)
   // ======================================================================
   uint64_t episode_start_ts = 0;
+
+  // ======================================================================
+  // Streaming Pacing State (Section 10)
+  // ======================================================================
+  double drift_accum = 0.0;              // Accumulated drift for pacing
+  double drift_at_last_interrupt = 0.0;  // Refractory baseline drift
+  std::optional<Eigen::VectorXf> last_pacing_check_embedding;  // Embedding at last pacing check
 
   // ======================================================================
   // Influence Feedback State (Algorithm 19)

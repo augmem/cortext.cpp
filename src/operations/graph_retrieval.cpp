@@ -1,5 +1,6 @@
 #include "cortext/operations/graph_retrieval.hpp"
 
+#include "cortext/buffered_write_instruction.hpp"
 #include "cortext/core/algorithms.hpp"
 #include "cortext/core/knobs.hpp"
 #include "cortext/core/utils.hpp"
@@ -26,11 +27,52 @@ EmbNodeId (long long embedding_id)
 {
   return std::string ("emb:") + std::to_string (embedding_id);
 }
+
+/// @brief Creates reinforcement edges for co-retrieved memories.
+/// Upserts 'reinforces' edges between all pairs of retrieved memories,
+/// incrementing weight on existing edges.
+void
+CreateReinforcementEdges (OperationContext &ctx,
+                          const std::vector<long long> &retrieved_ids,
+                          long long now_ts)
+{
+  // Need at least 2 retrievals for co-retrieval edges
+  if (retrieved_ids.size () < 2)
+    {
+      return;
+    }
+
+  // Create reinforcement edges for all pairs
+  for (size_t i = 0; i < retrieved_ids.size (); ++i)
+    {
+      for (size_t j = i + 1; j < retrieved_ids.size (); ++j)
+        {
+          // Order IDs consistently (smaller first) for consistent edge direction
+          long long id1 = std::min (retrieved_ids[i], retrieved_ids[j]);
+          long long id2 = std::max (retrieved_ids[i], retrieved_ids[j]);
+
+          BufferedWriteInstruction op;
+          op.query = "INSERT INTO graph_edges "
+                     "(source_id, target_id, edge_type, weight, last_reinforced) "
+                     "VALUES ('emb:' || ?1, 'emb:' || ?2, 'reinforces', 1.0, ?3) "
+                     "ON CONFLICT (source_id, target_id, edge_type) DO UPDATE "
+                     "SET weight = weight + 1.0, last_reinforced = excluded.last_reinforced";
+          op.params = { id1, id2, now_ts };
+          ctx.AddWriteInstruction (std::move (op));
+        }
+    }
+}
 } // namespace
 
 void
 GraphAugmentedRetrieveCandidates::Execute (OperationContext &context) const
 {
+  // Check streaming pacing gate - skip retrieval if not triggered
+  if (!context.GetShouldCheckRetrieval ())
+    {
+      return;
+    }
+
   Store *store = context.GetStore ();
   if (!store)
     {
@@ -263,6 +305,18 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context) const
         }
       context.SetRetrievedMemoryEmbeddings (std::move (out));
 
+      // Create reinforcement edges for co-retrieved seeds
+      {
+        std::vector<long long> seed_ids;
+        seed_ids.reserve (seeds.size ());
+        for (const auto &s : seeds)
+          {
+            seed_ids.push_back (s.id);
+          }
+        CreateReinforcementEdges (context, seed_ids,
+                                  static_cast<long long> (context.GetSignal ().timestamp));
+      }
+
       // Cache seeds for implicit feedback detection
       const uint64_t now_ts = context.GetSignal ().timestamp;
       auto &cache = p_ctx.recent_retrievals_cache;
@@ -291,6 +345,20 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context) const
     }
 
   context.SetRetrievedMemoryEmbeddings (std::move (out));
+
+  // Create reinforcement edges for co-retrieved memories
+  // This strengthens connections between memories that are frequently
+  // retrieved together.
+  {
+    std::vector<long long> retrieved_ids;
+    retrieved_ids.reserve (scored.size ());
+    for (const auto &s : scored)
+      {
+        retrieved_ids.push_back (s.id);
+      }
+    CreateReinforcementEdges (context, retrieved_ids,
+                              static_cast<long long> (context.GetSignal ().timestamp));
+  }
 
   // Cache retrieved embeddings for implicit feedback detection
   // (DetectMemoryUsage will compare future signals against these cached

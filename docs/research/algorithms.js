@@ -722,7 +722,7 @@ const doc = new Document({
             p([code("μ_i = centroid(cluster_i)")], { style: "Equation" }),
 
             p([code("summary.embedding = μ_i")], { style: "Equation" }),
-            p([code("summary.text = summarize(cluster_i.text)")], { style: "Equation" }),
+            p([code("summary.text = summarize(fetch_blobs(cluster_i))")], { style: "Equation" }),
             p([code("summary.metadata.sources = [m.id for m in cluster_i]")], { style: "Equation" }),
 
             p([tr("7.4 Semantic Extraction")], { heading: HeadingLevel.HEADING_2 }),

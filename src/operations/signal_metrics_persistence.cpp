@@ -29,8 +29,9 @@ PersistSignalMetrics::Execute (OperationContext &context) const
   op.query = "INSERT INTO signal_metrics "
              "(timestamp, embedding_id, relevance, mismatch, surprise, rarity, "
              "drift, contradiction, utility, periphery, coverage, salience, "
-             "valence, arousal, composite_score, threshold_t, write_decision) "
-             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+             "valence, arousal, composite_score, threshold_t, write_decision, "
+             "coherence, focus_spread, f_effective) "
+             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
 
   // Extract all metric values
   double relevance = GetMetricValue (metrics, Metric::relevance);
@@ -60,6 +61,11 @@ PersistSignalMetrics::Execute (OperationContext &context) const
                                     ? std::any (embedding_id_opt.value ())
                                     : std::any ();
 
+  // Get structural metrics from context
+  double coherence = context.GetCoherence ();
+  double focus_spread = GetMetricValue (metrics, Metric::focus_spread);
+  double f_effective = context.GetEffectiveFocus ();
+
   op.params = { static_cast<long long> (signal.timestamp),
                 embedding_id_param,
                 relevance,
@@ -76,7 +82,10 @@ PersistSignalMetrics::Execute (OperationContext &context) const
                 arousal,
                 composite_score,
                 threshold_t,
-                write_decision };
+                write_decision,
+                coherence,
+                focus_spread,
+                f_effective };
 
   context.AddWriteInstruction (std::move (op));
 }

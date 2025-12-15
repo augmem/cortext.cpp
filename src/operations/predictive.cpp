@@ -14,8 +14,10 @@ namespace cortext::operations
 
 namespace
 {
-constexpr double kTrajSamplesMax = 5.0;
-constexpr double kTrajSamplesMin = 1.0;
+// Prediction horizon: higher Focus yields longer horizon (more samples)
+// Paper Section 8.5: prediction_horizon = round(lerp(2, 8, F))
+constexpr double kPredictionHorizonMin = 2.0;
+constexpr double kPredictionHorizonMax = 8.0;
 constexpr double kConfMin = 0.3;
 constexpr double kConfMax = 0.7;
 constexpr double kDecayMax = 0.7;
@@ -26,12 +28,13 @@ constexpr double kBaseDeltaScale = 0.02;
 constexpr double kPadRef = 0.3;
 constexpr double kStrengthMax = 1.2;
 inline int
-TrajectorySamples (double F)
+PredictionHorizon (double F)
 {
-  // trajectory_samples = round(lerp(5, 1, F))
+  // prediction_horizon = round(lerp(2, 8, F))
+  // Higher Focus = longer prediction horizon
   return std::max (1, static_cast<int> (
-                          std::round (core::Lerp (kTrajSamplesMax,
-                                                   kTrajSamplesMin, F))));
+                          std::round (core::Lerp (kPredictionHorizonMin,
+                                                   kPredictionHorizonMax, F))));
 }
 
 inline double
@@ -91,7 +94,7 @@ ApplyPredictivePreActivation::Execute (OperationContext &context) const
     }
   const int available
       = static_cast<int> (p_ctx.recent_context_embeddings.size ());
-  const int want = TrajectorySamples (cfg.focus);
+  const int want = PredictionHorizon (cfg.focus);
   const int take = std::max (1, std::min (available, want));
 
   // Predicted direction: mean of last `take` embeddings, then normalized.
@@ -168,21 +171,21 @@ ApplyPredictivePreActivation::Execute (OperationContext &context) const
       if (delta > constants::kGainSmall)
         delta = constants::kGainSmall;
 
-      // Ensure row exists with all required columns explicitly set.
+      // Ensure embeddings_meta row exists with strength
       {
         BufferedWriteInstruction op;
-        op.query = "INSERT INTO memory_feedback "
-                   "(embedding_id, strength, retrieved_count, used_count, "
-                   "contextual_gain, use_frequency, last_used, lability_state) "
-                   "SELECT ?, 1.0, 0, 0, 0.0, 0.0, 0, 0.0 "
+        op.query = "INSERT INTO embeddings_meta "
+                   "(embedding_id, strength, contextual_gain, use_frequency, "
+                   "lability_state) "
+                   "SELECT ?, 1.0, 0.0, 0.0, 0.0 "
                    "WHERE NOT EXISTS (SELECT 1 FROM "
-                   "memory_feedback WHERE embedding_id = ?)";
+                   "embeddings_meta WHERE embedding_id = ?)";
         op.params = { id, id };
         context.AddWriteInstruction (std::move (op));
       }
       {
         BufferedWriteInstruction op;
-        op.query = "UPDATE memory_feedback "
+        op.query = "UPDATE embeddings_meta "
                    "SET strength = MIN(?, strength + ?) "
                    "WHERE embedding_id = ?;";
         op.params = { kStrengthMax, delta, id };

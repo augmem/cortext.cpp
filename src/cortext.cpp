@@ -58,8 +58,16 @@
 #include "cortext/operations/generation_trace.hpp"
 #include "cortext/operations/working_memory.hpp"
 #include "cortext/operations/detect_memory_usage.hpp"
+#include "cortext/operations/drift_accumulation.hpp"
+#include "cortext/operations/streaming_pacing.hpp"
 
+#include "cortext/operations/consolidation_cluster.hpp"
 #include "cortext/operations/consolidation_gate.hpp"
+#include "cortext/operations/consolidation_summarize.hpp"
+#include "cortext/operations/process_extraction_results.hpp"
+// Phase 4: Knowledge Graph Enhancement
+#include "cortext/operations/concept_detection.hpp"
+#include "cortext/operations/emotion_cascade.hpp"
 #include "cortext/telemetry/telemetry.hpp"
 
 namespace cortext
@@ -128,17 +136,17 @@ HydrateMemory (Store *store, long long id, Cortext::Context::Memory &m)
     {
       auto rows = store->Execute (
           "SELECT "
-          "  mi.modality, mi.mime, mi.source_id, mi.timestamp, mi.blob_id, "
+          "  m.modality, m.mime, m.source_id, m.timestamp, m.blob_id, "
           "  COALESCE(mf.retrieved_count, 0) AS retrieved_count, "
           "  COALESCE(mf.used_count, 0) AS used_count, "
           "  sm.relevance, sm.mismatch, sm.surprise, sm.rarity, sm.drift, "
           "  sm.contradiction, sm.utility, sm.periphery, sm.coverage, "
           "  sm.salience, sm.valence, sm.arousal, sm.composite_score, "
           "  sm.threshold_t "
-          "FROM memory_index mi "
-          "LEFT JOIN memory_feedback mf ON mi.embedding_id = mf.embedding_id "
-          "LEFT JOIN signal_metrics sm ON mi.embedding_id = sm.embedding_id "
-          "WHERE mi.embedding_id = ?",
+          "FROM memories m "
+          "LEFT JOIN memory_feedback mf ON m.embedding_id = mf.embedding_id "
+          "LEFT JOIN signal_metrics sm ON m.embedding_id = sm.embedding_id "
+          "WHERE m.embedding_id = ?",
           { id });
 
       if (!rows.empty ())
@@ -265,8 +273,12 @@ struct Cortext::Impl
 
     // Default pipeline: full per-signal processing chain.
     using cortext::OperationSet;
+    using cortext::operations::ConsolidationCluster;
     using cortext::operations::ConsolidationGate;
+    using cortext::operations::ConsolidationSummarize;
+    using cortext::operations::EnqueueExtractionJobs;
     using cortext::operations::EvaluateConsolidation;
+    using cortext::operations::ProcessExtractionResults;
     using cortext::operations::FitMetricWeightsRLS;
     using cortext::operations::GraphAugmentedRetrieveCandidates;
     using cortext::operations::InitializeEmbeddedCentroids;
@@ -310,6 +322,11 @@ struct Cortext::Impl
     using cortext::operations::ComputeWriteGate;
     using cortext::operations::MemoryStorage;
     using cortext::operations::DetectMemoryUsage;
+    using cortext::operations::UpdateDriftAccumulation;
+    using cortext::operations::CheckStreamingPacing;
+    // Phase 4: Knowledge Graph Enhancement
+    using cortext::operations::DetectConceptNodes;
+    using cortext::operations::PropagateEmotionalCascade;
 
     pipeline_root = std::make_unique<OperationSet> (
         std::make_unique<EnsureGraphSchema> (),
@@ -330,6 +347,7 @@ struct Cortext::Impl
         std::make_unique<UpdateMood> (),
 
         std::make_unique<ComputeCoherence> (),
+        std::make_unique<UpdateDriftAccumulation> (),
         std::make_unique<ComputeFocusSpread> (),
         std::make_unique<ComputeEffectiveFocus> (),
         std::make_unique<CheckEpisodeBoundary> (),
@@ -346,6 +364,7 @@ struct Cortext::Impl
         std::make_unique<MemoryStorage> (),
         std::make_unique<PersistSignalMetrics> (),
 
+        std::make_unique<CheckStreamingPacing> (),
         std::make_unique<GraphAugmentedRetrieveCandidates> (),
         std::make_unique<ComputeGoalAlignment> (),
         std::make_unique<ComputeGoalAlignmentFallback> (),
@@ -371,7 +390,15 @@ struct Cortext::Impl
 
         std::make_unique<EvaluateConsolidation> (),
         std::make_unique<ConsolidationGate> (),
-        std::make_unique<BuildGraphFromConsolidation> ());
+        // Phase 3: Consolidation pipeline
+        std::make_unique<ConsolidationCluster> (),
+        std::make_unique<ConsolidationSummarize> (),
+        std::make_unique<EnqueueExtractionJobs> (),
+        std::make_unique<ProcessExtractionResults> (),
+        std::make_unique<BuildGraphFromConsolidation> (),
+        // Phase 4: Knowledge Graph Enhancement
+        std::make_unique<DetectConceptNodes> (),
+        std::make_unique<PropagateEmotionalCascade> ());
 
     cortext::SignalProcessor::Config pcfg;
     pcfg.focus = cfg.focus;

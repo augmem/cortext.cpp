@@ -109,8 +109,9 @@ ImageBindAssetsPresent (const std::string &models_dir)
 
 TEST_CASE ("Cortext C++ stub can be created and used", "[cortext][stub]")
 {
+  ScopedTempDb temp_db;
   cortext::Cortext::Config cfg;
-  const std::string db_path = "cortext_test_stub.db";
+  const std::string &db_path = temp_db.path ();
   const std::string models_dir = "models/imagebind";
 
   std::unique_ptr<cortext::Cortext> ctx;
@@ -210,7 +211,7 @@ TEST_CASE ("Cortext hydrates sqlite-objstore payloads",
                   "  embedding_id INTEGER PRIMARY KEY,"
                   "  embedding BLOB"
                   ")");
-  store->Execute ("CREATE TABLE IF NOT EXISTS memory_index ("
+  store->Execute ("CREATE TABLE IF NOT EXISTS memories ("
                   "  embedding_id INTEGER PRIMARY KEY,"
                   "  modality TEXT,"
                   "  mime TEXT,"
@@ -258,7 +259,7 @@ TEST_CASE ("Cortext hydrates sqlite-objstore payloads",
                       " VALUES (?, ?)",
                       { sample.embedding_id, embedding_blob });
 
-      store->Execute ("INSERT INTO memory_index (embedding_id, modality, mime,"
+      store->Execute ("INSERT INTO memories (embedding_id, modality, mime,"
                       " content_key, source_id, timestamp, width, height,"
                       " channels, sample_rate, num_samples, blob_id)"
                       " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",

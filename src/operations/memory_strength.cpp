@@ -32,7 +32,7 @@ UpdateMemoryStrength::Execute (OperationContext &context) const
   // instruction after this operation reflects the latest reinforcement UPDATE.
   {
     BufferedWriteInstruction op;
-    op.query = "DELETE FROM memory_feedback WHERE strength < ?";
+    op.query = "DELETE FROM embeddings_meta WHERE strength < ?";
     op.params = { cutoff };
     context.AddWriteInstruction (std::move (op));
   }
@@ -49,16 +49,28 @@ UpdateMemoryStrength::Execute (OperationContext &context) const
       // This avoids recreating rows for purely non-used events with no gain.
       if (e.used || e.contextual_gain.has_value ())
         {
+          // Insert into embeddings_meta for strength/frequency columns
           BufferedWriteInstruction op;
-          op.query = "INSERT INTO memory_feedback "
-                     "(embedding_id, strength, retrieved_count, used_count, "
-                     "contextual_gain, use_frequency, last_used, lability_state) "
-                     "SELECT ?, 1.0, 0, 0, 0.0, 0.0, 0, 0.0 "
+          op.query = "INSERT INTO embeddings_meta "
+                     "(embedding_id, strength, contextual_gain, use_frequency, "
+                     "lability_state) "
+                     "SELECT ?, 1.0, 0.0, 0.0, 0.0 "
                      "WHERE NOT EXISTS (SELECT 1 FROM "
-                     "memory_feedback WHERE "
+                     "embeddings_meta WHERE "
                      "embedding_id = ?)";
           op.params = { id, id };
           context.AddWriteInstruction (std::move (op));
+
+          // Insert into memory_feedback for count columns
+          BufferedWriteInstruction op2;
+          op2.query = "INSERT INTO memory_feedback "
+                      "(embedding_id, retrieved_count, used_count, last_used) "
+                      "SELECT ?, 0, 0, 0 "
+                      "WHERE NOT EXISTS (SELECT 1 FROM "
+                      "memory_feedback WHERE "
+                      "embedding_id = ?)";
+          op2.params = { id, id };
+          context.AddWriteInstruction (std::move (op2));
         }
 
       // Algorithm 14 + 18:
@@ -77,54 +89,66 @@ UpdateMemoryStrength::Execute (OperationContext &context) const
             = (e.used || e.contextual_gain.has_value ()) ? 1.0 : 0.0;
         const long long ts
             = static_cast<long long> (context.GetSignal ().timestamp);
-        BufferedWriteInstruction op;
-        op.query
+
+        // First, update memory_feedback for count columns
+        BufferedWriteInstruction op_mf;
+        op_mf.query
             = "UPDATE memory_feedback "
               "SET "
               "  retrieved_count = retrieved_count + 1, "
               "  used_count = used_count + ?, "
+              "  last_used = CASE WHEN ? > 0 THEN ? ELSE last_used END "
+              "WHERE embedding_id = ?";
+        op_mf.params = { used_flag, used_flag, ts, id };
+        context.AddWriteInstruction (std::move (op_mf));
+
+        // Then, update embeddings_meta for strength/frequency columns
+        // Use subquery to get retrieved_count and used_count from memory_feedback
+        BufferedWriteInstruction op_em;
+        op_em.query
+            = "UPDATE embeddings_meta "
+              "SET "
               "  contextual_gain = contextual_gain + ?, "
               "  use_frequency = (1.0 - ?) * use_frequency + ? * ?, "
-              "  last_used = CASE WHEN ? > 0 THEN ? ELSE last_used END, "
               "  strength = MAX(0.0, "
               "    strength "
               "    + (? * ((1.0 - ?) * use_frequency + ? * ?)) " // reinforcement (S × EWMA)
-              "    + (? * (? * (" // influence gate * F *
+              "    + (? * (? * ((" // influence gate * F * ((
               "           (CASE WHEN ? < -1.0 THEN -1.0 "
               "                 WHEN ? >  1.0 THEN  1.0 "
               "                 ELSE ? END) "
-              "           * (used_count * 1.0 / "
-              "              CASE WHEN retrieved_count < 1 "
-              "                   THEN 1 ELSE retrieved_count END)"
-              "       ))) "
+              "           * (COALESCE((SELECT used_count FROM memory_feedback WHERE embedding_id = ?), 0) * 1.0 / "
+              "              CASE WHEN COALESCE((SELECT retrieved_count FROM memory_feedback WHERE embedding_id = ?), 1) < 1 "
+              "                   THEN 1 ELSE COALESCE((SELECT retrieved_count FROM memory_feedback WHERE embedding_id = ?), 1) END)"
+              "           + 1.0) / 2.0))) " // map01: (influence_factor + 1) / 2
               "    - ?"
               "  ) "
               "WHERE embedding_id = ?";
         // Placeholders order:
-        //  1: used_flag (used_count += ?)
-        //  2: cg_event  (contextual_gain += ?)
+        //  1: cg_event  (contextual_gain += ?)
+        //  2: alpha
         //  3: alpha
-        //  4: alpha
-        //  5: used_flag
-        //  6: used_flag (for last_used gate)
-        //  7: ts (last_used)
-        //  8: S
-        //  9: alpha
-        //  10: alpha
-        //  11: used_flag
-        //  12: gate_influence
-        //  13: F
-        //  14: cg_event (clamp lower)
-        //  15: cg_event (clamp upper)
-        //  16: cg_event (original)
+        //  4: used_flag
+        //  5: S
+        //  6: alpha
+        //  7: alpha
+        //  8: used_flag
+        //  9: gate_influence
+        //  10: F
+        //  11: cg_event (clamp lower)
+        //  12: cg_event (clamp upper)
+        //  13: cg_event (original)
+        //  14: id (for used_count subquery)
+        //  15: id (for retrieved_count subquery check)
+        //  16: id (for retrieved_count subquery value)
         //  17: lambda
-        //  18: id
-        op.params = { used_flag,      cg_event,  alpha,    alpha,
-                      used_flag,      used_flag, ts,       S,
-                      alpha,          alpha,     used_flag,
-                      gate_influence, F,         cg_event, cg_event,
-                      cg_event,       lambda,    id };
-        context.AddWriteInstruction (std::move (op));
+        //  18: id (WHERE)
+        op_em.params = { cg_event,       alpha,    alpha,    used_flag,
+                         S,              alpha,    alpha,    used_flag,
+                         gate_influence, F,        cg_event, cg_event,
+                         cg_event,       id,       id,       id,
+                         lambda,         id };
+        context.AddWriteInstruction (std::move (op_em));
       }
     }
 }

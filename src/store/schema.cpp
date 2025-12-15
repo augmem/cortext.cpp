@@ -141,116 +141,223 @@ ColumnExists (Store &store, const std::string &table_name,
 void
 RegisterCoreSchema (SchemaRegistry &registry)
 {
+  // ==========================================================================
+  // Migration 0: Complete schema per docs/diagrams/database.md
+  // Clean slate - all tables in single migration
+  // ==========================================================================
   registry.Register ({
-      1,
-      "Core tables (memory_index, memory_feedback, embeddings)",
+      0,
+      "Core schema (all tables per docs/diagrams/database.md)",
       {
-          // Embeddings table (vector store)
-          "CREATE TABLE IF NOT EXISTS embeddings ("
+          // ------------------------------------------------------------------
+          // sqlite-objstore virtual table
+          // ------------------------------------------------------------------
+          "CREATE VIRTUAL TABLE IF NOT EXISTS objstore USING objstore()",
+
+          // ------------------------------------------------------------------
+          // VEC_EMBEDDINGS - sqlite-vec virtual table (Section 3.1, 5.1-5.4)
+          // Note: sqlite-vec only stores vector for KNN search.
+          // Metadata is stored in separate embeddings_meta table.
+          // ------------------------------------------------------------------
+          "CREATE VIRTUAL TABLE IF NOT EXISTS vec_embeddings USING vec0("
           "  embedding_id INTEGER PRIMARY KEY,"
-          "  embedding BLOB"
+          "  embedding float[256]"
           ")",
 
-          // Memory index (metadata + payload pointer)
-          "CREATE TABLE IF NOT EXISTS memory_index ("
+          // ------------------------------------------------------------------
+          // EMBEDDINGS_META - Per-embedding state (companion to vec_embeddings)
+          // ------------------------------------------------------------------
+          "CREATE TABLE IF NOT EXISTS embeddings_meta ("
           "  embedding_id INTEGER PRIMARY KEY,"
+          "  type TEXT,"
+          "  strength REAL NOT NULL DEFAULT 1.0,"
+          "  use_frequency REAL NOT NULL DEFAULT 0.0,"
+          "  stability REAL NOT NULL DEFAULT 1.0,"
+          "  connectivity REAL NOT NULL DEFAULT 0.0,"
+          "  drift_mag REAL NOT NULL DEFAULT 0.0,"
+          "  influence REAL NOT NULL DEFAULT 0.0,"
+          "  sustained_influence REAL NOT NULL DEFAULT 0.0,"
+          "  contextual_gain REAL NOT NULL DEFAULT 0.0,"
+          "  redundancy REAL NOT NULL DEFAULT 0.0,"
+          "  pre_activation REAL NOT NULL DEFAULT 0.0,"
+          "  lability_state REAL NOT NULL DEFAULT 0.0,"
+          "  suppression_count INTEGER NOT NULL DEFAULT 0,"
+          "  cluster_id INTEGER,"
+          "  last_access INTEGER,"
+          "  created_at INTEGER"
+          ")",
+
+          // ------------------------------------------------------------------
+          // MEMORIES - Memory metadata + payload reference (Section 2.2.2, 6.6)
+          // ------------------------------------------------------------------
+          "CREATE TABLE IF NOT EXISTS memories ("
+          "  embedding_id INTEGER PRIMARY KEY,"
+          "  source_id TEXT,"
           "  modality TEXT,"
           "  mime TEXT,"
-          "  content_key TEXT,"
-          "  source_id TEXT,"
           "  timestamp INTEGER,"
+          "  blob_id BLOB,"
+          "  event_emotion BLOB,"
+          "  ambient_mood BLOB,"
+          "  episode_id INTEGER,"
+          "  serial_position INTEGER,"
           "  width INTEGER,"
           "  height INTEGER,"
           "  channels INTEGER,"
           "  sample_rate INTEGER,"
-          "  num_samples INTEGER,"
-          "  blob_id BLOB"
+          "  num_samples INTEGER"
           ")",
 
-          // Memory feedback (metrics/learning)
+          // ------------------------------------------------------------------
+          // MEMORY_FEEDBACK - Retrieval/usage tracking (Section 5.2, 5.4, 6.3, 6.4)
+          // ------------------------------------------------------------------
           "CREATE TABLE IF NOT EXISTS memory_feedback ("
           "  embedding_id INTEGER PRIMARY KEY,"
           "  retrieved_count INTEGER NOT NULL DEFAULT 0,"
           "  used_count INTEGER NOT NULL DEFAULT 0,"
-          "  contextual_gain REAL NOT NULL DEFAULT 0.0,"
-          "  use_frequency REAL NOT NULL DEFAULT 0.0,"
+          "  influence_factor REAL NOT NULL DEFAULT 0.0,"
+          "  mean_influence REAL NOT NULL DEFAULT 0.0,"
           "  last_used INTEGER NOT NULL DEFAULT 0,"
-          "  strength REAL NOT NULL DEFAULT 1.0,"
           "  original_embedding BLOB,"
-          "  lability_state REAL NOT NULL DEFAULT 0.0,"
-          "  lability_ts INTEGER"
-          ")",
-      },
-  });
-
-  registry.Register ({
-      2,
-      "Ensure objstore virtual table",
-      {
-          // Only works if extension is loaded; harmless if fails usually, but
-          // better to wrap in try-catch or check module existence if possible.
-          // For now, we assume if extension is missing, this will fail safely or
-          // be caught by the migration runner loop.
-          // Note: CREATE VIRTUAL TABLE IF NOT EXISTS is supported in newer SQLite.
-          "CREATE VIRTUAL TABLE IF NOT EXISTS objstore USING objstore()",
-      },
-  });
-
-  // Migration 3: Processor state persistence tables (Algorithms 1-8, 15-17, 19)
-  registry.Register ({
-      3,
-      "Processor state persistence tables",
-      {
-          // PROCESSOR_STATE - Single row for all scalar adaptive parameters
-          "CREATE TABLE IF NOT EXISTS processor_state ("
-          "  id INTEGER PRIMARY KEY CHECK (id = 1),"
-          "  signals_processed INTEGER NOT NULL DEFAULT 0,"
-          "  u_t REAL NOT NULL DEFAULT 0.0,"
-          "  weight_relevance_prior REAL NOT NULL DEFAULT 0.5,"
-          "  weight_relevance REAL NOT NULL DEFAULT 0.5,"
-          "  attention_width REAL NOT NULL DEFAULT 1.57,"
-          "  T_dynamic REAL NOT NULL DEFAULT 0.2,"
-          "  hysteresis REAL NOT NULL DEFAULT 0.05,"
-          "  half_life REAL NOT NULL DEFAULT 120.0,"
-          "  rate_target REAL NOT NULL DEFAULT 0.0,"
-          "  sustained_influence REAL NOT NULL DEFAULT 0.0,"
-          "  last_signal_timestamp INTEGER NOT NULL DEFAULT 0,"
-          "  updated_at INTEGER NOT NULL DEFAULT 0"
+          "  lability_ts INTEGER,"
+          "  recovery_time_start INTEGER"
           ")",
 
-          // BLENDER_WEIGHTS - RLS-fitted metric weights (Algorithm 7)
-          "CREATE TABLE IF NOT EXISTS blender_weights ("
-          "  id INTEGER PRIMARY KEY CHECK (id = 1),"
-          "  w_relevance REAL,"
-          "  w_mismatch REAL,"
-          "  w_surprise REAL,"
-          "  w_rarity REAL,"
-          "  w_drift REAL,"
-          "  w_contradiction REAL,"
-          "  w_utility REAL,"
-          "  w_periphery REAL,"
-          "  w_coverage REAL,"
-          "  w_salience REAL,"
-          "  w_valence REAL,"
-          "  w_arousal REAL,"
-          "  blender_ready INTEGER NOT NULL DEFAULT 0,"
-          "  update_count INTEGER NOT NULL DEFAULT 0"
+          // ------------------------------------------------------------------
+          // GRAPH_NODES - Knowledge graph nodes (Section 7.4-7.6)
+          // ------------------------------------------------------------------
+          "CREATE TABLE IF NOT EXISTS graph_nodes ("
+          "  node_id TEXT PRIMARY KEY,"
+          "  type TEXT NOT NULL,"
+          "  label TEXT,"
+          "  embedding_id INTEGER,"
+          "  metadata TEXT,"
+          "  created_at INTEGER"
           ")",
 
-          // BLENDER_COVARIANCE - RLS P matrix as BLOB (12x12 = 144 floats)
-          "CREATE TABLE IF NOT EXISTS blender_covariance ("
-          "  id INTEGER PRIMARY KEY CHECK (id = 1),"
-          "  P_matrix BLOB"
+          // ------------------------------------------------------------------
+          // GRAPH_EDGES - Knowledge graph edges (Section 7.4-7.6)
+          // ------------------------------------------------------------------
+          "CREATE TABLE IF NOT EXISTS graph_edges ("
+          "  source_id TEXT NOT NULL,"
+          "  target_id TEXT NOT NULL,"
+          "  edge_type TEXT NOT NULL,"
+          "  weight REAL NOT NULL DEFAULT 1.0,"
+          "  decay_rate REAL,"
+          "  last_reinforced INTEGER,"
+          "  PRIMARY KEY (source_id, target_id, edge_type)"
           ")",
-      },
-  });
+          "CREATE INDEX IF NOT EXISTS idx_graph_edges_source ON graph_edges(source_id)",
+          "CREATE INDEX IF NOT EXISTS idx_graph_edges_target ON graph_edges(target_id)",
+          "CREATE INDEX IF NOT EXISTS idx_graph_edges_type ON graph_edges(edge_type)",
 
-  // Migration 4: Episode and signal tracking tables
-  registry.Register ({
-      4,
-      "Episode and signal tracking tables",
-      {
-          // EPISODES - Algorithm 12 episode boundaries
+          // ------------------------------------------------------------------
+          // CONSOLIDATION_SUMMARIES - Cluster summaries (Section 7.3)
+          // ------------------------------------------------------------------
+          "CREATE TABLE IF NOT EXISTS consolidation_summaries ("
+          "  summary_id TEXT PRIMARY KEY,"
+          "  summary_text TEXT,"
+          "  centroid BLOB,"
+          "  cluster_size INTEGER"
+          ")",
+
+          // ------------------------------------------------------------------
+          // CONSOLIDATION_SOURCES - Source tracking (Section 7.3)
+          // ------------------------------------------------------------------
+          "CREATE TABLE IF NOT EXISTS consolidation_sources ("
+          "  summary_id TEXT,"
+          "  source_embedding_id INTEGER"
+          ")",
+
+          // ------------------------------------------------------------------
+          // EXTRACTION_ENTITIES - Named entities (Section 7.4)
+          // ------------------------------------------------------------------
+          "CREATE TABLE IF NOT EXISTS extraction_entities ("
+          "  summary_id TEXT NOT NULL,"
+          "  name TEXT NOT NULL,"
+          "  type TEXT NOT NULL,"
+          "  salience REAL,"
+          "  embedding_id INTEGER,"
+          "  PRIMARY KEY (summary_id, name, type)"
+          ")",
+
+          // ------------------------------------------------------------------
+          // EXTRACTION_RELATIONS - Semantic relations (Section 7.5)
+          // ------------------------------------------------------------------
+          "CREATE TABLE IF NOT EXISTS extraction_relations ("
+          "  summary_id TEXT NOT NULL,"
+          "  subject TEXT NOT NULL,"
+          "  predicate TEXT NOT NULL,"
+          "  object TEXT NOT NULL,"
+          "  confidence REAL"
+          ")",
+
+          // ------------------------------------------------------------------
+          // ENTITY_INDEX - Name to node mapping (Section 7.5)
+          // ------------------------------------------------------------------
+          "CREATE TABLE IF NOT EXISTS entity_index ("
+          "  name TEXT PRIMARY KEY,"
+          "  node_id TEXT NOT NULL"
+          ")",
+
+          // ------------------------------------------------------------------
+          // GOAL_NODES - Goal alignment targets
+          // ------------------------------------------------------------------
+          "CREATE TABLE IF NOT EXISTS goal_nodes ("
+          "  node_id TEXT PRIMARY KEY"
+          ")",
+
+          // ------------------------------------------------------------------
+          // RIF_STATE - Retrieval-Induced Forgetting (Section 8.4)
+          // ------------------------------------------------------------------
+          "CREATE TABLE IF NOT EXISTS rif_state ("
+          "  embedding_id INTEGER PRIMARY KEY,"
+          "  suppression REAL NOT NULL DEFAULT 0.0,"
+          "  ts INTEGER"
+          ")",
+
+          // ------------------------------------------------------------------
+          // EMOTIONAL_TAGS - Flashbulb/emotional consolidation (Section 8.7)
+          // ------------------------------------------------------------------
+          "CREATE TABLE IF NOT EXISTS emotional_tags ("
+          "  embedding_id INTEGER PRIMARY KEY,"
+          "  flashbulb INTEGER NOT NULL DEFAULT 0,"
+          "  intensity REAL NOT NULL DEFAULT 0.0,"
+          "  arousal REAL NOT NULL DEFAULT 0.0,"
+          "  valence REAL NOT NULL DEFAULT 0.5,"
+          "  half_life_bonus REAL NOT NULL DEFAULT 0.0,"
+          "  detail_suppression REAL NOT NULL DEFAULT 0.0,"
+          "  gist_components INTEGER NOT NULL DEFAULT 0,"
+          "  cascade_radius INTEGER NOT NULL DEFAULT 0,"
+          "  cascade_decay REAL NOT NULL DEFAULT 0.0,"
+          "  flashbulb_threshold_eff REAL NOT NULL DEFAULT 0.0,"
+          "  ts INTEGER"
+          ")",
+
+          // ------------------------------------------------------------------
+          // CONSOLIDATION_CANDIDATES - Scoring candidates (Section 9.2)
+          // ------------------------------------------------------------------
+          "CREATE TABLE IF NOT EXISTS consolidation_candidates ("
+          "  embedding_id INTEGER PRIMARY KEY,"
+          "  score REAL NOT NULL,"
+          "  created_at INTEGER,"
+          "  reason TEXT"
+          ")",
+
+          // ------------------------------------------------------------------
+          // GENERATION_TRACE - Output influence tracking (Section 5.4)
+          // ------------------------------------------------------------------
+          "CREATE TABLE IF NOT EXISTS generation_trace ("
+          "  id INTEGER PRIMARY KEY,"
+          "  embedding BLOB NOT NULL,"
+          "  timestamp INTEGER NOT NULL,"
+          "  semantic_drift REAL"
+          ")",
+          "CREATE INDEX IF NOT EXISTS idx_generation_trace_ts ON generation_trace(timestamp)",
+
+          // ------------------------------------------------------------------
+          // EPISODES - Episodic boundaries (Section 3.1.3)
+          // ------------------------------------------------------------------
           "CREATE TABLE IF NOT EXISTS episodes ("
           "  id INTEGER PRIMARY KEY,"
           "  start_ts INTEGER NOT NULL,"
@@ -260,7 +367,9 @@ RegisterCoreSchema (SchemaRegistry &registry)
           ")",
           "CREATE INDEX IF NOT EXISTS idx_episodes_start ON episodes(start_ts)",
 
-          // SIGNAL_METRICS - Algorithm 7 composite scoring observability
+          // ------------------------------------------------------------------
+          // SIGNAL_METRICS - Per-signal composite scoring (Section 3.1-3.3)
+          // ------------------------------------------------------------------
           "CREATE TABLE IF NOT EXISTS signal_metrics ("
           "  id INTEGER PRIMARY KEY,"
           "  timestamp INTEGER NOT NULL,"
@@ -279,216 +388,201 @@ RegisterCoreSchema (SchemaRegistry &registry)
           "  arousal REAL,"
           "  composite_score REAL,"
           "  threshold_t REAL,"
-          "  write_decision INTEGER"
+          "  write_decision INTEGER,"
+          "  coherence REAL,"
+          "  focus_spread REAL,"
+          "  f_effective REAL"
           ")",
-          "CREATE INDEX IF NOT EXISTS idx_signal_metrics_ts ON "
-          "signal_metrics(timestamp)",
+          "CREATE INDEX IF NOT EXISTS idx_signal_metrics_ts ON signal_metrics(timestamp)",
 
-          // GENERATION_TRACE - Algorithm 19 output embeddings
-          "CREATE TABLE IF NOT EXISTS generation_trace ("
-          "  id INTEGER PRIMARY KEY,"
-          "  embedding BLOB NOT NULL,"
-          "  timestamp INTEGER NOT NULL,"
-          "  topic_id INTEGER,"
-          "  semantic_drift REAL"
+          // ------------------------------------------------------------------
+          // PROCESSOR_STATE - Full algorithm state (singleton, id=1)
+          // ------------------------------------------------------------------
+          "CREATE TABLE IF NOT EXISTS processor_state ("
+          "  id INTEGER PRIMARY KEY CHECK (id = 1),"
+          "  signals_processed INTEGER NOT NULL DEFAULT 0,"
+          // Threshold state (Section 4)
+          "  theta_dynamic REAL NOT NULL DEFAULT 0.2,"
+          "  theta_target REAL NOT NULL DEFAULT 0.2,"
+          "  hysteresis REAL NOT NULL DEFAULT 0.05,"
+          "  half_life REAL NOT NULL DEFAULT 120.0,"
+          // Focus state (Section 2.1)
+          "  weight_relevance REAL NOT NULL DEFAULT 0.5,"
+          "  weight_relevance_prior REAL NOT NULL DEFAULT 0.5,"
+          "  attention_width REAL NOT NULL DEFAULT 1.57,"
+          "  attention_width_prior REAL NOT NULL DEFAULT 1.57,"
+          "  coverage_gain_floor REAL NOT NULL DEFAULT 0.65,"
+          "  coverage_gain_floor_prior REAL NOT NULL DEFAULT 0.65,"
+          "  mismatch_weight REAL NOT NULL DEFAULT 0.5,"
+          "  mismatch_weight_prior REAL NOT NULL DEFAULT 0.5,"
+          // Sensitivity state (Section 2.2)
+          "  weight_novelty REAL NOT NULL DEFAULT 0.3,"
+          "  weight_novelty_prior REAL NOT NULL DEFAULT 0.3,"
+          "  weight_surprise REAL NOT NULL DEFAULT 0.2,"
+          "  weight_surprise_prior REAL NOT NULL DEFAULT 0.2,"
+          "  weight_valence REAL NOT NULL DEFAULT 0.4,"
+          "  weight_valence_prior REAL NOT NULL DEFAULT 0.4,"
+          "  weight_arousal REAL NOT NULL DEFAULT 0.0,"
+          "  weight_arousal_prior REAL NOT NULL DEFAULT 0.0,"
+          "  emotion_gain REAL NOT NULL DEFAULT 1.0,"
+          "  emotion_gain_prior REAL NOT NULL DEFAULT 1.0,"
+          "  score_gain REAL NOT NULL DEFAULT 1.0,"
+          "  score_gain_prior REAL NOT NULL DEFAULT 1.0,"
+          "  rate_target REAL NOT NULL DEFAULT 0.2,"
+          "  rate_target_prior REAL NOT NULL DEFAULT 0.2,"
+          "  base_rate_prior REAL NOT NULL DEFAULT 0.2,"
+          "  weight_emotion_prior REAL NOT NULL DEFAULT 0.2,"
+          // Emotion state (Section 2.2.2-4)
+          "  emotion_intensity REAL NOT NULL DEFAULT 0.0,"
+          "  valence REAL NOT NULL DEFAULT 0.5,"
+          "  arousal REAL NOT NULL DEFAULT 0.0,"
+          "  mood_vector BLOB,"
+          // Stability state (Section 2.3)
+          "  rate_decay REAL NOT NULL DEFAULT 0.60,"
+          "  rate_decay_prior REAL NOT NULL DEFAULT 0.60,"
+          "  periphery_half_life REAL NOT NULL DEFAULT 120.0,"
+          "  periphery_half_life_prior REAL NOT NULL DEFAULT 120.0,"
+          "  salience_half_life REAL NOT NULL DEFAULT 120.0,"
+          "  salience_half_life_prior REAL NOT NULL DEFAULT 120.0,"
+          "  drift_weight REAL NOT NULL DEFAULT 0.5,"
+          "  drift_weight_prior REAL NOT NULL DEFAULT 0.5,"
+          "  retention_ema REAL NOT NULL DEFAULT 0.0,"
+          "  hysteresis_band_prior REAL NOT NULL DEFAULT 0.02,"
+          "  half_life_prior REAL NOT NULL DEFAULT 120.0,"
+          // Rate control (Section 4.2)
+          "  m_rate REAL NOT NULL DEFAULT 0.0,"
+          "  dt_ema REAL NOT NULL DEFAULT 0.0,"
+          "  rate_ticks INTEGER NOT NULL DEFAULT 0,"
+          "  last_rate_timestamp INTEGER NOT NULL DEFAULT 0,"
+          "  reliability REAL NOT NULL DEFAULT 1.0,"
+          // Uncertainty (Section 1.4)
+          "  u_uncertainty REAL NOT NULL DEFAULT 0.0,"
+          // Embedding prediction (Section 3.1.4)
+          "  last_embedding BLOB,"
+          "  delta_x_trend BLOB,"
+          // Generation tracking (Section 5.4)
+          "  generation_centroid BLOB,"
+          "  drift_mag_generation REAL NOT NULL DEFAULT 0.0,"
+          "  delta_half_life_adj REAL NOT NULL DEFAULT 0.0,"
+          "  sustained_influence REAL NOT NULL DEFAULT 0.0,"
+          // Working memory (Section 6.1)
+          "  wm_maintenance_cost REAL NOT NULL DEFAULT 0.0,"
+          "  wm_slot_count INTEGER NOT NULL DEFAULT 0,"
+          "  wm_last_accepted INTEGER NOT NULL DEFAULT 0,"
+          "  wm_last_chunked INTEGER NOT NULL DEFAULT 0,"
+          // Metacognition (Section 6.2)
+          "  fok_state REAL NOT NULL DEFAULT 0.0,"
+          "  retrieval_strength REAL NOT NULL DEFAULT 0.0,"
+          "  metacognitive_confidence REAL NOT NULL DEFAULT 0.0,"
+          // Consolidation (Section 7.1)
+          "  last_consolidation_ts INTEGER NOT NULL DEFAULT 0,"
+          "  consolidation_count INTEGER NOT NULL DEFAULT 0,"
+          "  is_processing_signal INTEGER NOT NULL DEFAULT 0,"
+          "  last_retrieval_ts INTEGER NOT NULL DEFAULT 0,"
+          // Streaming pacing (Section 10)
+          "  drift_accum REAL NOT NULL DEFAULT 0.0,"
+          "  drift_at_last_interrupt REAL NOT NULL DEFAULT 0.0,"
+          // Episode tracking (Section 3.1.3)
+          "  episode_start_ts INTEGER NOT NULL DEFAULT 0,"
+          "  last_interrupt_tick INTEGER NOT NULL DEFAULT 0,"
+          // Initialization flags
+          "  focus_priors_initialized INTEGER NOT NULL DEFAULT 0,"
+          "  sensitivity_priors_initialized INTEGER NOT NULL DEFAULT 0,"
+          "  stability_priors_initialized INTEGER NOT NULL DEFAULT 0,"
+          // Timestamps
+          "  last_signal_timestamp INTEGER NOT NULL DEFAULT 0,"
+          "  updated_at INTEGER NOT NULL DEFAULT 0"
           ")",
-          "CREATE INDEX IF NOT EXISTS idx_generation_trace_ts ON "
-          "generation_trace(timestamp)",
-      },
-  });
 
-  // Migration 5: Rolling window persistence tables
-  registry.Register ({
-      5,
-      "Rolling window persistence tables",
-      {
-          // RECENT_CONTEXT - Rolling window of context embeddings
+          // ------------------------------------------------------------------
+          // BLENDER_WEIGHTS - RLS-fitted metric weights (Section 3.2)
+          // ------------------------------------------------------------------
+          "CREATE TABLE IF NOT EXISTS blender_weights ("
+          "  id INTEGER PRIMARY KEY CHECK (id = 1),"
+          "  w_relevance REAL,"
+          "  w_mismatch REAL,"
+          "  w_surprise REAL,"
+          "  w_rarity REAL,"
+          "  w_drift REAL,"
+          "  w_contradiction REAL,"
+          "  w_utility REAL,"
+          "  w_periphery REAL,"
+          "  w_coverage REAL,"
+          "  w_salience REAL,"
+          "  w_valence REAL,"
+          "  w_arousal REAL,"
+          "  blender_ready INTEGER NOT NULL DEFAULT 0,"
+          "  update_count INTEGER NOT NULL DEFAULT 0"
+          ")",
+
+          // ------------------------------------------------------------------
+          // BLENDER_COVARIANCE - RLS P matrix 12x12 (Section 3.2)
+          // ------------------------------------------------------------------
+          "CREATE TABLE IF NOT EXISTS blender_covariance ("
+          "  id INTEGER PRIMARY KEY CHECK (id = 1),"
+          "  P_matrix BLOB"
+          ")",
+
+          // ------------------------------------------------------------------
+          // BLENDER_COEFFICIENTS - RLS learned coefficients (Section 3.2)
+          // ------------------------------------------------------------------
+          "CREATE TABLE IF NOT EXISTS blender_coefficients ("
+          "  id INTEGER PRIMARY KEY CHECK (id = 1),"
+          "  coefficients BLOB,"
+          "  update_count INTEGER NOT NULL DEFAULT 0"
+          ")",
+
+          // ------------------------------------------------------------------
+          // BLENDER_COEFF_COVARIANCE - RLS P matrix 48x48 (Section 3.2)
+          // ------------------------------------------------------------------
+          "CREATE TABLE IF NOT EXISTS blender_coeff_covariance ("
+          "  id INTEGER PRIMARY KEY CHECK (id = 1),"
+          "  P_matrix BLOB"
+          ")",
+
+          // ------------------------------------------------------------------
+          // RECENT_CONTEXT - Sliding window of context embeddings
+          // ------------------------------------------------------------------
           "CREATE TABLE IF NOT EXISTS recent_context ("
           "  id INTEGER PRIMARY KEY,"
           "  embedding BLOB NOT NULL,"
           "  timestamp INTEGER NOT NULL,"
           "  seq_order INTEGER NOT NULL"
           ")",
-          "CREATE INDEX IF NOT EXISTS idx_recent_context_seq ON "
-          "recent_context(seq_order)",
+          "CREATE INDEX IF NOT EXISTS idx_recent_context_seq ON recent_context(seq_order)",
 
-          // RECENT_SCORES - Rolling window of composite scores
+          // ------------------------------------------------------------------
+          // RECENT_SCORES - Sliding window of composite scores
+          // ------------------------------------------------------------------
           "CREATE TABLE IF NOT EXISTS recent_scores ("
           "  id INTEGER PRIMARY KEY,"
           "  score REAL NOT NULL,"
           "  timestamp INTEGER NOT NULL"
           ")",
-          "CREATE INDEX IF NOT EXISTS idx_recent_scores_ts ON "
-          "recent_scores(timestamp)",
-      },
-  });
+          "CREATE INDEX IF NOT EXISTS idx_recent_scores_ts ON recent_scores(timestamp)",
 
-  // Migration 6: Vector search index (sqlite-vec)
-  // NOTE: vec0 requires fixed dimension at table creation. The table is created
-  // empty; embeddings are synced via reconsolidation.cpp writes. The dimension
-  // (256) must match what the encoder produces.
-  registry.Register ({
-      6,
-      "Vector search index (sqlite-vec)",
-      {
-          // vec0 virtual table with 256-dimensional embeddings for KNN search
-          "CREATE VIRTUAL TABLE IF NOT EXISTS vec_embeddings USING vec0("
-          "  embedding_id INTEGER PRIMARY KEY,"
-          "  embedding float[256]"
-          ")",
-      },
-  });
-
-  // Migration 7: Extend memory_feedback table with additional columns
-  // per docs/algorithms.md schema requirements
-  registry.Register ({
-      7,
-      "Extend memory_feedback table (episode_id, mean_influence, stability)",
-      {
-          "ALTER TABLE memory_feedback ADD COLUMN episode_id INTEGER",
-          "ALTER TABLE memory_feedback ADD COLUMN mean_influence REAL NOT NULL "
-          "DEFAULT 0.0",
-          "ALTER TABLE memory_feedback ADD COLUMN stability REAL NOT NULL "
-          "DEFAULT 1.0",
-      },
-  });
-
-  // Migration 8: Extend processor_state table with additional columns
-  // for full algorithm state persistence per docs/algorithms.md
-  registry.Register ({
-      8,
-      "Extend processor_state table (priors, dynamic state, threshold state)",
-      {
-          // Focus priors (Algorithm 1)
-          "ALTER TABLE processor_state ADD COLUMN coverage_gain_floor_prior "
-          "REAL NOT NULL DEFAULT 0.65",
-          "ALTER TABLE processor_state ADD COLUMN mismatch_weight_prior REAL "
-          "NOT NULL DEFAULT 0.5",
-          "ALTER TABLE processor_state ADD COLUMN attention_width_prior REAL "
-          "NOT NULL DEFAULT 1.57",
-
-          // Sensitivity priors (Algorithm 3)
-          "ALTER TABLE processor_state ADD COLUMN base_rate_prior REAL NOT "
-          "NULL DEFAULT 0.2",
-          "ALTER TABLE processor_state ADD COLUMN weight_novelty_prior REAL "
-          "NOT NULL DEFAULT 0.3",
-          "ALTER TABLE processor_state ADD COLUMN weight_surprise_prior REAL "
-          "NOT NULL DEFAULT 0.2",
-          "ALTER TABLE processor_state ADD COLUMN weight_valence_prior REAL "
-          "NOT NULL DEFAULT 0.4",
-          "ALTER TABLE processor_state ADD COLUMN weight_arousal_prior REAL "
-          "NOT NULL DEFAULT 0.0",
-          "ALTER TABLE processor_state ADD COLUMN weight_emotion_prior REAL "
-          "NOT NULL DEFAULT 0.2",
-          "ALTER TABLE processor_state ADD COLUMN emotion_gain_prior REAL NOT "
-          "NULL DEFAULT 1.0",
-          "ALTER TABLE processor_state ADD COLUMN score_gain_prior REAL NOT "
-          "NULL DEFAULT 1.0",
-          "ALTER TABLE processor_state ADD COLUMN rate_target_prior REAL NOT "
-          "NULL DEFAULT 0.2",
-
-          // Sensitivity dynamic (Algorithm 4)
-          "ALTER TABLE processor_state ADD COLUMN weight_novelty REAL NOT NULL "
-          "DEFAULT 0.3",
-
-          // Stability priors (Algorithm 5)
-          "ALTER TABLE processor_state ADD COLUMN hysteresis_band_prior REAL "
-          "NOT NULL DEFAULT 0.02",
-          "ALTER TABLE processor_state ADD COLUMN half_life_prior REAL NOT "
-          "NULL DEFAULT 120.0",
-          "ALTER TABLE processor_state ADD COLUMN rate_decay_prior REAL NOT "
-          "NULL DEFAULT 0.60",
-          "ALTER TABLE processor_state ADD COLUMN periphery_half_life_prior "
-          "REAL NOT NULL DEFAULT 120.0",
-          "ALTER TABLE processor_state ADD COLUMN salience_half_life_prior "
-          "REAL NOT NULL DEFAULT 120.0",
-          "ALTER TABLE processor_state ADD COLUMN drift_weight_prior REAL NOT "
-          "NULL DEFAULT 0.5",
-
-          // Stability dynamic (Algorithm 6)
-          "ALTER TABLE processor_state ADD COLUMN rate_decay REAL NOT NULL "
-          "DEFAULT 0.60",
-          "ALTER TABLE processor_state ADD COLUMN periphery_half_life REAL NOT "
-          "NULL DEFAULT 120.0",
-          "ALTER TABLE processor_state ADD COLUMN salience_half_life REAL NOT "
-          "NULL DEFAULT 120.0",
-
-          // Threshold state (Algorithm 8)
-          "ALTER TABLE processor_state ADD COLUMN m_rate REAL NOT NULL DEFAULT "
-          "0.0",
-          "ALTER TABLE processor_state ADD COLUMN rate_ticks INTEGER NOT NULL "
-          "DEFAULT 0",
-          "ALTER TABLE processor_state ADD COLUMN dt_ema REAL NOT NULL DEFAULT "
-          "0.0",
-          "ALTER TABLE processor_state ADD COLUMN last_rate_timestamp INTEGER "
-          "NOT NULL DEFAULT 0",
-      },
-  });
-
-  // Migration 9: Phase 3 - Observation windows, emotion state, RLS coefficients
-  registry.Register ({
-      9,
-      "Phase 3: Observation windows, emotion state, RLS coefficients",
-      {
-          // Task 2: Observed retention history table
+          // ------------------------------------------------------------------
+          // OBSERVED_RETENTION_HISTORY - Retention observations (Section 2.3.2)
+          // ------------------------------------------------------------------
           "CREATE TABLE IF NOT EXISTS observed_retention_history ("
           "  id INTEGER PRIMARY KEY,"
-          "  retention_seconds REAL NOT NULL,"
+          "  retention_value REAL NOT NULL,"
           "  timestamp INTEGER NOT NULL"
           ")",
-          "CREATE INDEX IF NOT EXISTS idx_retention_history_ts ON "
-          "observed_retention_history(timestamp)",
+          "CREATE INDEX IF NOT EXISTS idx_retention_history_ts ON observed_retention_history(timestamp)",
 
-          // Task 3: Emotion state persistence (EWMA-smoothed values)
-          "ALTER TABLE processor_state ADD COLUMN emotion_intensity_ewma REAL "
-          "NOT NULL DEFAULT 0.0",
-          "ALTER TABLE processor_state ADD COLUMN valence_ewma REAL NOT NULL "
-          "DEFAULT 0.5",
-          "ALTER TABLE processor_state ADD COLUMN arousal_ewma REAL NOT NULL "
-          "DEFAULT 0.0",
-
-          // Task 1: RLS coefficient storage (Algorithm 7)
-          // 12 metrics x 4 coefficients = 48 doubles for learned coefficients
-          "CREATE TABLE IF NOT EXISTS blender_coefficients ("
-          "  id INTEGER PRIMARY KEY CHECK (id = 1),"
-          "  coefficients BLOB"
+          // ------------------------------------------------------------------
+          // WORKING_MEMORY_SLOTS - Session persistence (Section 6.1)
+          // ------------------------------------------------------------------
+          "CREATE TABLE IF NOT EXISTS working_memory_slots ("
+          "  id INTEGER PRIMARY KEY,"
+          "  slot_index INTEGER NOT NULL,"
+          "  embedding_id INTEGER,"
+          "  strength REAL NOT NULL DEFAULT 0.0,"
+          "  timestamp INTEGER NOT NULL,"
+          "  embedding BLOB NOT NULL"
           ")",
-          // 48x48 covariance matrix = 2304 doubles
-          "CREATE TABLE IF NOT EXISTS blender_coeff_covariance ("
-          "  id INTEGER PRIMARY KEY CHECK (id = 1),"
-          "  P_matrix BLOB"
-          ")",
-      },
-  });
-
-  // Migration 11: Mood state (Algorithm 4b)
-  registry.Register ({
-      11,
-      "Phase 4: Mood state persistence (Algorithm 4b)",
-      {
-          // Mood vector: 6 dimensions [anger, fear, joy, love, sadness, surprise]
-          "ALTER TABLE processor_state ADD COLUMN mood_vector_0 REAL NOT NULL "
-          "DEFAULT 0.0",
-          "ALTER TABLE processor_state ADD COLUMN mood_vector_1 REAL NOT NULL "
-          "DEFAULT 0.0",
-          "ALTER TABLE processor_state ADD COLUMN mood_vector_2 REAL NOT NULL "
-          "DEFAULT 0.0",
-          "ALTER TABLE processor_state ADD COLUMN mood_vector_3 REAL NOT NULL "
-          "DEFAULT 0.0",
-          "ALTER TABLE processor_state ADD COLUMN mood_vector_4 REAL NOT NULL "
-          "DEFAULT 0.0",
-          "ALTER TABLE processor_state ADD COLUMN mood_vector_5 REAL NOT NULL "
-          "DEFAULT 0.0",
-      },
-  });
-
-  // Migration 12: Embedding prediction error state (Section 3.1.4)
-  registry.Register ({
-      12,
-      "Embedding prediction error state (Section 3.1.4)",
-      {
-          "ALTER TABLE processor_state ADD COLUMN last_embedding BLOB",
-          "ALTER TABLE processor_state ADD COLUMN delta_x_trend BLOB",
+          "CREATE INDEX IF NOT EXISTS idx_wm_slots_index ON working_memory_slots(slot_index)",
       },
   });
 }

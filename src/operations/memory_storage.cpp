@@ -97,9 +97,9 @@ MemoryStorage::Execute (OperationContext &context) const
           "INSERT INTO vec_embeddings (embedding_id, embedding) VALUES (?, ?)",
           { embedding_id, emb_vec });
 
-      // 3. Insert memory_index
+      // 3. Insert memories (metadata)
       transaction->Execute (
-          "INSERT INTO memory_index (embedding_id, modality, mime, source_id, "
+          "INSERT INTO memories (embedding_id, modality, mime, source_id, "
           "timestamp, width, height, channels, sample_rate, num_samples, "
           "blob_id) "
           "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -111,11 +111,11 @@ MemoryStorage::Execute (OperationContext &context) const
             static_cast<long long> (signal.sample_rate),
             static_cast<long long> (signal.num_samples), blob_id });
 
-      // 4. Insert memory_feedback
+      // 4. Insert embeddings_meta (per-embedding state)
       transaction->Execute (
-          "INSERT INTO memory_feedback (embedding_id, strength) "
-          "VALUES (?, 1.0)",
-          { embedding_id });
+          "INSERT INTO embeddings_meta (embedding_id, strength, created_at) "
+          "VALUES (?, 1.0, ?)",
+          { embedding_id, static_cast<long long> (signal.timestamp) });
 
       // Commit the savepoint
       transaction->Commit ();

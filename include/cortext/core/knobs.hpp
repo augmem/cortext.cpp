@@ -77,6 +77,24 @@ CheckIntervalTokens (double S)
   return static_cast<int> (std::round (Lerp (64.0, 8.0, Clamp (S, 0.0, 1.0))));
 }
 
+// --- Section 10.4: Streaming Pacing Parameters ---
+
+inline double
+StreamingPacingThreshold (double S)
+{
+  // pacing_thresh(S) = lerp(0.5, 0.1, S)
+  // Higher sensitivity = lower threshold = more frequent pacing checks
+  return Lerp (0.5, 0.1, Clamp (S, 0.0, 1.0));
+}
+
+inline double
+MaxWaitDrift (double F)
+{
+  // max_wait_drift(F) = lerp(2.0, 0.5, F)
+  // Higher focus = lower max drift = more aggressive forced checks
+  return Lerp (2.0, 0.5, Clamp (F, 0.0, 1.0));
+}
+
 inline int
 GraphDepth (double F)
 {
@@ -233,6 +251,45 @@ MinClusterSizeForExtraction (double F)
 {
   // min_cluster_size_for_extraction = round(lerp(3, 10, F))
   return static_cast<int> (std::round (Lerp (3.0, 10.0, F)));
+}
+
+// --- Consolidation Clustering (Section 7.3-7.4) ---
+
+// Merge threshold for clustering — Section 7.5.1
+inline double
+MergeThreshold (double F)
+{
+  // merge_threshold(F) = lerp(0.85, 0.95, F)
+  // Higher focus = stricter merging (higher similarity required)
+  // Also used for co-occurrence edges in Section 7.5.1
+  return Lerp (0.85, 0.95, Clamp (F, 0.0, 1.0));
+}
+
+// Minimum cluster size — Section 7.4
+inline int
+MinClusterSize (double F)
+{
+  // min_cluster_size(F) = round(lerp(3, 10, F))
+  // Higher focus = larger minimum clusters required
+  return static_cast<int> (std::round (Lerp (3.0, 10.0, Clamp (F, 0.0, 1.0))));
+}
+
+// Entity frequency threshold — Section 7.4
+inline int
+EntityFrequencyThreshold (double T)
+{
+  // entity_frequency_threshold(T) = round(lerp(5, 15, T))
+  // Higher stability = higher frequency required for entity to be notable
+  return static_cast<int> (std::round (Lerp (5.0, 15.0, Clamp (T, 0.0, 1.0))));
+}
+
+// Extraction interval — Section 7.4
+inline int
+ExtractionIntervalSeconds (double T)
+{
+  // extraction_interval(T) = lerp(300, 3600, T)
+  // Section 7.4: 5 minutes to 1 hour based on stability
+  return static_cast<int> (std::round (Lerp (300.0, 3600.0, Clamp (T, 0.0, 1.0))));
 }
 
 // Retention window size (w_ret) — Algorithm 0.2
@@ -393,8 +450,9 @@ LambdaMood (double T)
 inline int
 WMBaseCapacity (double S, double F)
 {
-  // base_capacity = round(lerp(9, 5, S) + lerp(-2, 2, F))
-  const double cap = Lerp (9.0, 5.0, S) + Lerp (-2.0, 2.0, F);
+  // base_capacity = round(lerp(5, 3, S) + lerp(-1, 1, F))
+  // Paper Section 8.1: capacity range [2, 6]
+  const double cap = Lerp (5.0, 3.0, S) + Lerp (-1.0, 1.0, F);
   return static_cast<int> (std::round (cap));
 }
 
@@ -599,6 +657,48 @@ MemoryUsageCacheDuration (double T)
   // Higher stability = longer memory of what was retrieved
   // Range [30, 300] seconds (30s to 5 minutes)
   return Lerp (30.0, 300.0, Clamp (T, 0.0, 1.0));
+}
+
+// --- Knowledge Graph Enhancement (Section 9.5) ---
+
+inline double
+CausalDriftThreshold (double T)
+{
+  // causal_drift_threshold(T) = lerp(0.15, 0.35, T)
+  // Higher stability = higher drift required for causal edge
+  return Lerp (0.15, 0.35, Clamp (T, 0.0, 1.0));
+}
+
+inline double
+ReinforcementDecay (double T)
+{
+  // reinforcement_decay(T) = lerp(0.9, 0.99, T)
+  // Higher stability = slower decay of reinforcement edges
+  return Lerp (0.9, 0.99, Clamp (T, 0.0, 1.0));
+}
+
+inline int
+MinEpisodesForConcept (double T)
+{
+  // min_episodes_for_concept(T) = round(lerp(2, 5, T))
+  // Higher stability = more episodes required for concept detection
+  return static_cast<int> (std::round (Lerp (2.0, 5.0, Clamp (T, 0.0, 1.0))));
+}
+
+inline double
+CoOccurrenceThreshold (double F)
+{
+  // Same as MergeThreshold - co-occurrence uses same similarity threshold
+  // co_occurrence_threshold(F) = lerp(0.85, 0.95, F)
+  return MergeThreshold (F);
+}
+
+inline double
+ContradictionThreshold ()
+{
+  // Fixed threshold for contradiction detection
+  // cos_sim < -0.5 indicates contradiction
+  return -0.5;
 }
 
 } // namespace cortext::core

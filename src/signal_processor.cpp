@@ -367,12 +367,12 @@ LoadProcessorState (Store &store, ProcessorContext &ctx)
       const auto &row = rows[0];
       ctx.signals_processed
           = static_cast<int> (ExtractInt64 (row, "signals_processed", 0));
-      ctx.u_t = ExtractDouble (row, "u_t", 0.0);
+      ctx.u_t = ExtractDouble (row, "u_uncertainty", 0.0);
       ctx.weight_relevance_prior
           = ExtractDouble (row, "weight_relevance_prior", 0.5);
       ctx.weight_relevance = ExtractDouble (row, "weight_relevance", 0.5);
       ctx.attention_width = ExtractDouble (row, "attention_width", 1.57);
-      ctx.T_dynamic = ExtractDouble (row, "T_dynamic", 0.2);
+      ctx.T_dynamic = ExtractDouble (row, "theta_dynamic", 0.2);
       ctx.hysteresis = ExtractDouble (row, "hysteresis", 0.05);
       ctx.half_life = ExtractDouble (row, "half_life", 120.0);
       ctx.rate_target = ExtractDouble (row, "rate_target", 0.0);
@@ -432,19 +432,38 @@ LoadProcessorState (Store &store, ProcessorContext &ctx)
       ctx.last_rate_timestamp
           = static_cast<uint64_t> (ExtractInt64 (row, "last_rate_timestamp", 0));
 
-      // Emotion state (Algorithm 4, EWMA-smoothed)
+      // Emotion state (Algorithm 4) - column names without _ewma suffix per docs
       ctx.emotion_intensity_ewma
-          = ExtractDouble (row, "emotion_intensity_ewma", 0.0);
-      ctx.valence_ewma = ExtractDouble (row, "valence_ewma", 0.5);
-      ctx.arousal_ewma = ExtractDouble (row, "arousal_ewma", 0.0);
+          = ExtractDouble (row, "emotion_intensity", 0.0);
+      ctx.valence_ewma = ExtractDouble (row, "valence", 0.5);
+      ctx.arousal_ewma = ExtractDouble (row, "arousal", 0.0);
 
-      // Mood state (Algorithm 4b)
-      ctx.mood_vector[0] = ExtractDouble (row, "mood_vector_0", 0.0);
-      ctx.mood_vector[1] = ExtractDouble (row, "mood_vector_1", 0.0);
-      ctx.mood_vector[2] = ExtractDouble (row, "mood_vector_2", 0.0);
-      ctx.mood_vector[3] = ExtractDouble (row, "mood_vector_3", 0.0);
-      ctx.mood_vector[4] = ExtractDouble (row, "mood_vector_4", 0.0);
-      ctx.mood_vector[5] = ExtractDouble (row, "mood_vector_5", 0.0);
+      // Mood state (Algorithm 4b) - stored as BLOB (48 bytes = 6 doubles)
+      auto mood_it = row.find ("mood_vector");
+      if (mood_it != row.end () && mood_it->second.has_value ())
+        {
+          const double *data = nullptr;
+          size_t byte_size = 0;
+          if (mood_it->second.type () == typeid (std::vector<char>))
+            {
+              const auto &vec
+                  = std::any_cast<const std::vector<char> &> (mood_it->second);
+              data = reinterpret_cast<const double *> (vec.data ());
+              byte_size = vec.size ();
+            }
+          else if (mood_it->second.type () == typeid (std::vector<unsigned char>))
+            {
+              const auto &vec = std::any_cast<const std::vector<unsigned char> &> (
+                  mood_it->second);
+              data = reinterpret_cast<const double *> (vec.data ());
+              byte_size = vec.size ();
+            }
+          if (data && byte_size >= 6 * sizeof (double))
+            {
+              for (size_t i = 0; i < 6; ++i)
+                ctx.mood_vector[i] = data[i];
+            }
+        }
 
       // Embedding prediction error state (Section 3.1.4)
       auto last_emb_it = row.find ("last_embedding");
@@ -589,12 +608,12 @@ LoadObservedRetentionHistory (Store &store, ProcessorContext &ctx)
   try
     {
       auto rows = store.Execute (
-          "SELECT retention_seconds FROM observed_retention_history "
+          "SELECT retention_value FROM observed_retention_history "
           "ORDER BY timestamp ASC");
       for (const auto &row : rows)
         {
           ctx.observed_retention_history.push_back (
-              ExtractDouble (row, "retention_seconds", 0.0));
+              ExtractDouble (row, "retention_value", 0.0));
         }
     }
   catch (const std::exception &e)
@@ -835,10 +854,16 @@ SignalProcessor::PersistProcessorState ()
                        std::chrono::system_clock::now ().time_since_epoch ())
                        .count ();
 
+  // Serialize mood_vector as raw binary BLOB (48 bytes = 6 doubles)
+  std::vector<char> mood_blob (6 * sizeof (double));
+  std::memcpy (mood_blob.data (), context_->mood_vector.data (),
+               6 * sizeof (double));
+
   episode_transaction_->Execute (
       "INSERT OR REPLACE INTO processor_state "
-      "(id, signals_processed, u_t, weight_relevance_prior, weight_relevance, "
-      "attention_width, T_dynamic, hysteresis, half_life, rate_target, "
+      "(id, signals_processed, u_uncertainty, weight_relevance_prior, "
+      "weight_relevance, "
+      "attention_width, theta_dynamic, hysteresis, half_life, rate_target, "
       "sustained_influence, last_signal_timestamp, updated_at, "
       // Focus priors (Algorithm 1)
       "coverage_gain_floor_prior, mismatch_weight_prior, attention_width_prior, "
@@ -855,16 +880,15 @@ SignalProcessor::PersistProcessorState ()
       "rate_decay, periphery_half_life, salience_half_life, "
       // Threshold state (Algorithm 8)
       "m_rate, rate_ticks, dt_ema, last_rate_timestamp, "
-      // Emotion state (Algorithm 4, EWMA-smoothed)
-      "emotion_intensity_ewma, valence_ewma, arousal_ewma, "
-      // Mood state (Algorithm 4b)
-      "mood_vector_0, mood_vector_1, mood_vector_2, "
-      "mood_vector_3, mood_vector_4, mood_vector_5, "
+      // Emotion state (Algorithm 4) - no _ewma suffix per docs
+      "emotion_intensity, valence, arousal, "
+      // Mood state (Algorithm 4b) - single BLOB
+      "mood_vector, "
       // Embedding prediction error state (Section 3.1.4)
       "last_embedding, delta_x_trend) "
       "VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
       "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
-      "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      "?, ?, ?, ?, ?, ?)",
       { // Original fields
         context_->signals_processed, context_->u_t,
         context_->weight_relevance_prior, context_->weight_relevance,
@@ -892,13 +916,11 @@ SignalProcessor::PersistProcessorState ()
         // Threshold state (Algorithm 8)
         context_->m_rate, context_->rate_ticks, context_->dt_ema,
         static_cast<long long> (context_->last_rate_timestamp),
-        // Emotion state (Algorithm 4, EWMA-smoothed)
+        // Emotion state (Algorithm 4)
         context_->emotion_intensity_ewma, context_->valence_ewma,
         context_->arousal_ewma,
-        // Mood state (Algorithm 4b)
-        context_->mood_vector[0], context_->mood_vector[1],
-        context_->mood_vector[2], context_->mood_vector[3],
-        context_->mood_vector[4], context_->mood_vector[5],
+        // Mood state (Algorithm 4b) - as BLOB
+        mood_blob,
         // Embedding prediction error state (Section 3.1.4)
         context_->last_embedding.has_value ()
             ? std::any (ToFloatVector (*context_->last_embedding))

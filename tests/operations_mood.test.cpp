@@ -155,8 +155,6 @@ TEST_CASE ("UpdateMood ΔT_mood calculation", "[operations][mood]")
 
   // Set a known mood state
   pctx.mood_vector = { 0.3, 0.0, 0.4, 0.0, 0.0, 0.0 };
-  const double magnitude
-      = std::sqrt (0.3 * 0.3 + 0.4 * 0.4); // = 0.5
 
   // Zero emotion to not change mood magnitude
   std::array<double, 6> e_t = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
@@ -165,14 +163,16 @@ TEST_CASE ("UpdateMood ΔT_mood calculation", "[operations][mood]")
   UpdateMood op;
   op.Execute (ctx);
 
-  // ΔT_mood = -κ_base × S × ||M_t||
+  // ΔT_mood = -κ_mood × clamp(||M_t|| / √6, 0, 1)
   // Note: mood decays slightly, so recalculate magnitude
   const double lambda = core::LambdaMood (cfg.stability);
   const double decayed_mag
       = std::sqrt ((0.3 * lambda) * (0.3 * lambda)
                    + (0.4 * lambda) * (0.4 * lambda));
+  // Normalize by √6 per paper Section 4.2.4
+  const double m_norm = core::Clamp (decayed_mag / std::sqrt (6.0), 0.0, 1.0);
   const double kappa_mood = operations::constants::kGainMedium * cfg.sensitivity;
-  const double expected_delta = -kappa_mood * decayed_mag;
+  const double expected_delta = -kappa_mood * m_norm;
 
   REQUIRE (ctx.GetDeltaThresholdMood ().has_value ());
   REQUIRE (*ctx.GetDeltaThresholdMood () == Catch::Approx (expected_delta));
@@ -345,13 +345,15 @@ TEST_CASE ("UpdateMood with mixed emotions", "[operations][mood]")
       mag_sq += pctx.mood_vector[i] * pctx.mood_vector[i];
     }
   const double mag = std::sqrt (mag_sq);
+  // Normalize by √6 per paper Section 4.2.4
+  const double m_norm = core::Clamp (mag / std::sqrt (6.0), 0.0, 1.0);
 
   // Verify ΔT_mood
   const double kappa_mood
       = operations::constants::kGainMedium * cfg.sensitivity;
   REQUIRE (ctx.GetDeltaThresholdMood ().has_value ());
   REQUIRE (*ctx.GetDeltaThresholdMood ()
-           == Catch::Approx (-kappa_mood * mag));
+           == Catch::Approx (-kappa_mood * m_norm));
 }
 
 TEST_CASE ("UpdateMood zero mood yields zero ΔT_mood", "[operations][mood]")
@@ -374,4 +376,46 @@ TEST_CASE ("UpdateMood zero mood yields zero ΔT_mood", "[operations][mood]")
   // ||M|| = 0, so ΔT_mood = 0
   REQUIRE (ctx.GetDeltaThresholdMood ().has_value ());
   REQUIRE (*ctx.GetDeltaThresholdMood () == Catch::Approx (0.0));
+}
+
+TEST_CASE ("UpdateMood max mood state normalization", "[operations][mood]")
+{
+  Signal s = MakeSignal ();
+  ProcessorContext pctx;
+  SignalProcessor::Config cfg;
+  cfg.sensitivity = 1.0; // max sensitivity
+  cfg.stability = 1.0;   // max stability (slow decay)
+  std::vector<BufferedWriteInstruction> buf;
+  OperationContext ctx (s, pctx, cfg, buf);
+
+  // Set all dimensions to max value 1.0
+  // ||M|| = √6 when all dimensions are 1.0
+  pctx.mood_vector = { 1.0, 1.0, 1.0, 1.0, 1.0, 1.0 };
+
+  // Zero emotion to minimize mood change
+  std::array<double, 6> e_t = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
+  ctx.SetEmotionProbabilities (e_t);
+
+  UpdateMood op;
+  op.Execute (ctx);
+
+  // After decay: λ = 0.999, each dimension ~ 0.999
+  const double lambda = core::LambdaMood (cfg.stability);
+  const double decayed_dim = 1.0 * lambda; // ~0.999
+  const double decayed_mag = std::sqrt (6.0 * decayed_dim * decayed_dim);
+  // m_norm = ||M|| / √6 should be close to 1.0 (clamped)
+  const double m_norm = core::Clamp (decayed_mag / std::sqrt (6.0), 0.0, 1.0);
+
+  // m_norm should be approximately equal to decayed_dim (~0.999)
+  REQUIRE (m_norm == Catch::Approx (decayed_dim).epsilon (0.001));
+
+  // Verify ΔT_mood uses normalized value
+  const double kappa_mood
+      = operations::constants::kGainMedium * cfg.sensitivity;
+  const double expected_delta = -kappa_mood * m_norm;
+
+  REQUIRE (ctx.GetDeltaThresholdMood ().has_value ());
+  REQUIRE (*ctx.GetDeltaThresholdMood () == Catch::Approx (expected_delta));
+  // At max S=1.0 and near-max mood, ΔT_mood should be bounded
+  REQUIRE (*ctx.GetDeltaThresholdMood () >= -kappa_mood);
 }

@@ -36,7 +36,7 @@ public:
                      "  embedding BLOB"
                      ")",
                      {});
-    store_->Execute ("CREATE TABLE IF NOT EXISTS memory_index ("
+    store_->Execute ("CREATE TABLE IF NOT EXISTS memories ("
                      "  embedding_id INTEGER PRIMARY KEY,"
                      "  modality TEXT,"
                      "  mime TEXT,"
@@ -50,11 +50,13 @@ public:
                      "  blob_id BLOB"
                      ")",
                      {});
-    store_->Execute ("CREATE TABLE IF NOT EXISTS memory_feedback ("
+    store_->Execute ("CREATE TABLE IF NOT EXISTS embeddings_meta ("
                      "  embedding_id INTEGER PRIMARY KEY,"
                      "  strength REAL DEFAULT 1.0,"
-                     "  retrieved_count INTEGER DEFAULT 0,"
-                     "  used_count INTEGER DEFAULT 0"
+                     "  contextual_gain REAL DEFAULT 0.0,"
+                     "  use_frequency REAL DEFAULT 0.0,"
+                     "  lability_state REAL DEFAULT 0.0,"
+                     "  created_at INTEGER"
                      ")",
                      {});
     // vec0 virtual table for KNN search (using float[3] for test embeddings)
@@ -122,14 +124,14 @@ TEST_CASE ("MemoryStorage stores payload when write_decision is true",
                         { *stored_id });
   REQUIRE (emb_rows.size () == 1);
 
-  // Verify memory_index was inserted (savepoint commits directly)
+  // Verify memories was inserted (savepoint commits directly)
   auto idx_rows = store->Execute (
-      "SELECT * FROM memory_index WHERE embedding_id = ?", { *stored_id });
+      "SELECT * FROM memories WHERE embedding_id = ?", { *stored_id });
   REQUIRE (idx_rows.size () == 1);
 
-  // Verify memory_feedback was inserted
+  // Verify embeddings_meta was inserted
   auto fb_rows = store->Execute (
-      "SELECT * FROM memory_feedback WHERE embedding_id = ?", { *stored_id });
+      "SELECT * FROM embeddings_meta WHERE embedding_id = ?", { *stored_id });
   REQUIRE (fb_rows.size () == 1);
 
   // No buffered instructions since we use savepoints
@@ -250,9 +252,9 @@ TEST_CASE ("MemoryStorage stores payload in objstore and retrieves it",
   // Savepoint commits directly, no need to execute buffered writes
   REQUIRE (buf.empty ());
 
-  // Retrieve blob_id from memory_index
+  // Retrieve blob_id from memories
   auto idx_rows = store->Execute (
-      "SELECT blob_id FROM memory_index WHERE embedding_id = ?",
+      "SELECT blob_id FROM memories WHERE embedding_id = ?",
       { *stored_id });
   REQUIRE (idx_rows.size () == 1);
   auto blob_id = BlobFromAny (idx_rows[0].at ("blob_id"));

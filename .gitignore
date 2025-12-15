@@ -111,3 +111,4 @@ env.sh
 build-otel/
 .venv/
 venv/
+**/node_modules/

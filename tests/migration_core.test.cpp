@@ -27,11 +27,15 @@ TEST_CASE("Migrations apply core tables automatically", "[schema][migration]") {
         return false;
     };
 
-    REQUIRE(has("embeddings"));
-    REQUIRE(has("memory_index"));
+    // Core tables from migration 0
+    REQUIRE(has("memories"));
+    REQUIRE(has("embeddings_meta"));
     REQUIRE(has("memory_feedback"));
     REQUIRE(has("cortext_schema_migrations"));
-    // objstore might be present depending on compile flags, but core tables must exist.
+    // vec_embeddings is a virtual table, check it separately
+    auto vec_rows = store->Execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='vec_embeddings'", {});
+    REQUIRE(vec_rows.size() == 1);
 }
 
 TEST_CASE("Migrations track version history", "[schema][migration]") {
@@ -43,17 +47,17 @@ TEST_CASE("Migrations track version history", "[schema][migration]") {
 
     auto rows = store->Execute("SELECT id, description FROM cortext_schema_migrations ORDER BY id");
     REQUIRE(rows.size() >= 1);
-    
-    // Core migration is ID 1. Note: SQLiteStore returns integers as long long.
+
+    // Core migration is ID 0 (clean slate schema). Note: SQLiteStore returns integers as long long.
     auto id_val = rows[0].at("id");
-    long long id = 0;
+    long long id = -1;
     if(id_val.type() == typeid(long long)) {
         id = std::any_cast<long long>(id_val);
     } else if(id_val.type() == typeid(int)) {
         id = std::any_cast<int>(id_val);
     }
-    
-    REQUIRE(id == 1);
+
+    REQUIRE(id == 0);
 }
 
 TEST_CASE("Migrations are idempotent", "[schema][migration]") {

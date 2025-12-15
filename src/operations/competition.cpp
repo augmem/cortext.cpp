@@ -86,7 +86,7 @@ ApplyRIFRecovery (OperationContext &context, long long now_ts,
 {
   {
     BufferedWriteInstruction op;
-    op.query = "UPDATE memory_feedback "
+    op.query = "UPDATE embeddings_meta "
                "SET strength = MAX(0.0, strength + ("
                "  SELECT suppression * ("
                "    CASE "
@@ -96,10 +96,10 @@ ApplyRIFRecovery (OperationContext &context, long long now_ts,
                "    END"
                "  )"
                "  FROM rif_state WHERE rif_state.embedding_id = "
-               "memory_feedback.embedding_id"
+               "embeddings_meta.embedding_id"
                ")) "
                "WHERE EXISTS (SELECT 1 FROM rif_state WHERE "
-               "rif_state.embedding_id = memory_feedback.embedding_id);";
+               "rif_state.embedding_id = embeddings_meta.embedding_id);";
     op.params = { now_ts, now_ts, recovery_time, now_ts, recovery_time };
     context.AddWriteInstruction (std::move (op));
   }
@@ -187,12 +187,12 @@ ApplyLateralInhibition (const std::vector<Candidate> &winners,
         }
       {
         BufferedWriteInstruction op;
-        op.query = "INSERT INTO memory_feedback "
-                   "(embedding_id, strength, retrieved_count, used_count, "
-                   "contextual_gain, use_frequency, last_used, lability_state) "
-                   "SELECT ?, 1.0, 0, 0, 0.0, 0.0, 0, 0.0 "
+        op.query = "INSERT INTO embeddings_meta "
+                   "(embedding_id, strength, contextual_gain, use_frequency, "
+                   "lability_state) "
+                   "SELECT ?, 1.0, 0.0, 0.0, 0.0 "
                    "WHERE NOT EXISTS (SELECT 1 FROM "
-                   "memory_feedback WHERE embedding_id = ?)";
+                   "embeddings_meta WHERE embedding_id = ?)";
         op.params = { loser.id, loser.id };
         context.AddWriteInstruction (std::move (op));
       }
@@ -213,7 +213,7 @@ ApplyLateralInhibition (const std::vector<Candidate> &winners,
       }
       {
         BufferedWriteInstruction op;
-        op.query = "UPDATE memory_feedback "
+        op.query = "UPDATE embeddings_meta "
                    "SET strength = MAX(0.0, strength - ?) "
                    "WHERE embedding_id = ?;";
         op.params = { total_supp, loser.id };

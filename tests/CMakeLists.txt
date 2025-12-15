@@ -62,10 +62,14 @@ add_executable(cortext_tests
   operations_graph_schema.test.cpp
   operations_graph_build.test.cpp
   operations_graph_retrieval.test.cpp
+  operations_concept_detection.test.cpp
+  operations_emotion_cascade.test.cpp
   operations_goal_alignment.test.cpp
   operations_consolidation.test.cpp
+  operations_consolidation_cluster.test.cpp
   operations_write_gate.test.cpp
   operations_memory_storage.test.cpp
+  operations_streaming_pacing.test.cpp
   migration_core.test.cpp
   cortext.test.cpp
   signal_processor.test.cpp
@@ -74,14 +78,20 @@ add_executable(cortext_tests
   state_persistence.test.cpp
   implicit_feedback.test.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/telemetry_noop_by_default.test.cpp
+  # Generator tests
+  generator_tokenizer.test.cpp
+  generator_kv_cache.test.cpp
+  generator_json_decoder.test.cpp
+  generator_text_generator.test.cpp
+  generator_multimodal.test.cpp
 )
 
-target_link_libraries(cortext_tests PRIVATE cortext Catch2::Catch2WithMain)
+target_link_libraries(cortext_tests PRIVATE cortext Catch2::Catch2WithMain nlohmann_json::nlohmann_json)
 target_compile_definitions(cortext_tests PRIVATE CORTEXT_TESTING=1)
 
 # Ensure the ONNX Runtime dylib can be found when Catch2 runs test discovery
 # during the build (macOS uses @rpath + LC_RPATH entries).
-if(CORTEXT_ENABLE_IMAGEBIND_ORT)
+if(CORTEXT_ENABLE_IMAGEBIND_ORT OR CORTEXT_ENABLE_GEMMA_ORT)
   if(APPLE)
     # cortext_tests lives in <build>/tests; ORT is installed to
     # <build>/third_party/onnxruntime-install/lib

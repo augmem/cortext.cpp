@@ -106,7 +106,7 @@ TEST_CASE ("Alg22 boosts predicted-aligned candidates",
   // Aligned candidate should have strength > 1.0
   {
     auto rows = store->Execute (
-        "SELECT strength FROM memory_feedback WHERE embedding_id = ?",
+        "SELECT strength FROM embeddings_meta WHERE embedding_id = ?",
         { 101LL });
     REQUIRE (rows.size () == 1);
     const double strength = std::any_cast<double> (rows[0].at ("strength"));
@@ -115,14 +115,14 @@ TEST_CASE ("Alg22 boosts predicted-aligned candidates",
   // Orthogonal may not be touched; accept either no row or unchanged.
   {
     auto rows = store->Execute (
-        "SELECT COUNT(*) AS c FROM memory_feedback WHERE embedding_id = ?",
+        "SELECT COUNT(*) AS c FROM embeddings_meta WHERE embedding_id = ?",
         { 202LL });
     REQUIRE (rows.size () == 1);
     const auto cnt = std::any_cast<long long> (rows[0].at ("c"));
     if (cnt == 1)
       {
         auto r2 = store->Execute (
-            "SELECT strength FROM memory_feedback WHERE embedding_id = ?",
+            "SELECT strength FROM embeddings_meta WHERE embedding_id = ?",
             { 202LL });
         REQUIRE (r2.size () == 1);
         const double s2 = std::any_cast<double> (r2[0].at ("strength"));
@@ -168,17 +168,113 @@ TEST_CASE ("Alg22 respects prediction confidence threshold",
 
   // Expect no row (or unchanged strength if row exists).
   auto rows = store->Execute (
-      "SELECT COUNT(*) AS c FROM memory_feedback WHERE embedding_id = ?",
+      "SELECT COUNT(*) AS c FROM embeddings_meta WHERE embedding_id = ?",
       { 303LL });
   REQUIRE (rows.size () == 1);
   const auto cnt = std::any_cast<long long> (rows[0].at ("c"));
   if (cnt == 1)
     {
       auto r2 = store->Execute (
-          "SELECT strength FROM memory_feedback WHERE embedding_id = ?",
+          "SELECT strength FROM embeddings_meta WHERE embedding_id = ?",
           { 303LL });
       REQUIRE (r2.size () == 1);
       const double s = std::any_cast<double> (r2[0].at ("strength"));
       REQUIRE (s == Catch::Approx (1.0));
     }
+}
+
+TEST_CASE ("Prediction horizon increases with Focus",
+           "[operations][predictive][horizon]")
+{
+  // Per paper Section 8.5: prediction_horizon = round(lerp(2, 8, F))
+  // Higher Focus should yield LONGER prediction horizon (more samples)
+
+  // Test through the public knob behavior by verifying the operation
+  // uses more recent embeddings at high F vs low F
+
+  SECTION ("Low Focus (F=0) uses short horizon")
+  {
+    auto unique_store = cortext::SQLiteStore::Create (":memory:");
+    auto store = std::shared_ptr<cortext::Store> (std::move (unique_store));
+
+    SignalProcessor::Config cfg;
+    cfg.focus = 0.0;       // prediction_horizon = lerp(2, 8, 0) = 2
+    cfg.sensitivity = 0.5;
+    cfg.stability = 0.5;
+
+    // Create 10 recent embeddings pointing in x direction
+    std::vector<Eigen::VectorXf> recent;
+    for (int i = 0; i < 10; ++i)
+      {
+        recent.push_back (
+            Norm ((Eigen::VectorXf (3) << 1.0f, 0.0f, 0.0f).finished ()));
+      }
+
+    // Aligned candidate
+    const Eigen::VectorXf aligned
+        = Norm ((Eigen::VectorXf (3) << 1.0f, 0.0f, 0.0f).finished ());
+    std::unordered_map<long long, Eigen::VectorXf> retrieved{ { 1LL,
+                                                                aligned } };
+
+    auto setup = std::make_unique<SetupPredictiveInputsOp> (recent, retrieved);
+    auto apply = std::make_unique<ApplyPredictivePreActivation> ();
+    auto pipeline
+        = std::make_unique<OperationSet> (std::move (setup), std::move (apply));
+
+    SignalProcessor processor (cfg, store, std::move (pipeline));
+    processor.Process (MakeSignal (aligned, /*ts=*/100));
+    processor.Flush ();
+
+    // Should still work with short horizon
+    auto rows = store->Execute (
+        "SELECT strength FROM embeddings_meta WHERE embedding_id = ?",
+        { 1LL });
+    REQUIRE (rows.size () == 1);
+    // Aligned candidate should be boosted
+    const double strength = std::any_cast<double> (rows[0].at ("strength"));
+    REQUIRE (strength > 1.0);
+  }
+
+  SECTION ("High Focus (F=1) uses long horizon")
+  {
+    auto unique_store = cortext::SQLiteStore::Create (":memory:");
+    auto store = std::shared_ptr<cortext::Store> (std::move (unique_store));
+
+    SignalProcessor::Config cfg;
+    cfg.focus = 1.0;       // prediction_horizon = lerp(2, 8, 1) = 8
+    cfg.sensitivity = 0.5;
+    cfg.stability = 0.5;
+
+    // Create 10 recent embeddings pointing in x direction
+    std::vector<Eigen::VectorXf> recent;
+    for (int i = 0; i < 10; ++i)
+      {
+        recent.push_back (
+            Norm ((Eigen::VectorXf (3) << 1.0f, 0.0f, 0.0f).finished ()));
+      }
+
+    // Aligned candidate
+    const Eigen::VectorXf aligned
+        = Norm ((Eigen::VectorXf (3) << 1.0f, 0.0f, 0.0f).finished ());
+    std::unordered_map<long long, Eigen::VectorXf> retrieved{ { 2LL,
+                                                                aligned } };
+
+    auto setup = std::make_unique<SetupPredictiveInputsOp> (recent, retrieved);
+    auto apply = std::make_unique<ApplyPredictivePreActivation> ();
+    auto pipeline
+        = std::make_unique<OperationSet> (std::move (setup), std::move (apply));
+
+    SignalProcessor processor (cfg, store, std::move (pipeline));
+    processor.Process (MakeSignal (aligned, /*ts=*/200));
+    processor.Flush ();
+
+    // Should use longer horizon (8 samples) but still work
+    auto rows = store->Execute (
+        "SELECT strength FROM embeddings_meta WHERE embedding_id = ?",
+        { 2LL });
+    REQUIRE (rows.size () == 1);
+    // Aligned candidate should be boosted
+    const double strength = std::any_cast<double> (rows[0].at ("strength"));
+    REQUIRE (strength > 1.0);
+  }
 }

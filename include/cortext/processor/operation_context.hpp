@@ -1,6 +1,7 @@
 #pragma once
 
 #include "cortext/buffered_write_instruction.hpp"
+#include "cortext/operations/extraction.hpp"
 #include "cortext/operations/metrics.hpp"
 #include "cortext/processor.hpp" // For SignalProcessor::Config
 #include "cortext/processor/processor_context.hpp"
@@ -16,6 +17,17 @@ namespace cortext
 {
 
 class Store;
+
+/// @brief Information about a cluster of memories from consolidation.
+///
+/// Created by ConsolidationCluster and consumed by ConsolidationSummarize.
+struct ClusterInfo
+{
+  int cluster_id;
+  std::vector<long long> embedding_ids;
+  std::vector<float> centroid;
+  double avg_score;
+};
 
 /// @brief Contains all the state for a single signal processing run.
 ///
@@ -696,6 +708,69 @@ public:
     return stored_embedding_id_;
   }
 
+  // ======================================================================
+  // Streaming Pacing API (Section 10.4)
+  // ======================================================================
+
+  void
+  SetShouldCheckRetrieval (bool v)
+  {
+    should_check_retrieval_ = v;
+  }
+  bool
+  GetShouldCheckRetrieval () const
+  {
+    return should_check_retrieval_;
+  }
+
+  void
+  SetDriftAccumSnapshot (double v)
+  {
+    drift_accum_snapshot_ = v;
+  }
+  double
+  GetDriftAccumSnapshot () const
+  {
+    return drift_accum_snapshot_;
+  }
+
+  // ======================================================================
+  // Consolidation Cluster API (Cluster -> Summarize data passing)
+  // ======================================================================
+
+  void
+  SetConsolidationClusters (std::vector<ClusterInfo> clusters)
+  {
+    consolidation_clusters_ = std::move (clusters);
+  }
+  const std::vector<ClusterInfo> &
+  GetConsolidationClusters () const
+  {
+    return consolidation_clusters_;
+  }
+
+  void
+  SetExtractionRequests (std::vector<operations::ExtractionRequest> requests)
+  {
+    extraction_requests_ = std::move (requests);
+  }
+  const std::vector<operations::ExtractionRequest> &
+  GetExtractionRequests () const
+  {
+    return extraction_requests_;
+  }
+
+  void
+  SetExtractionCallback (operations::ExtractionCallback *cb)
+  {
+    extraction_callback_ = cb;
+  }
+  operations::ExtractionCallback *
+  GetExtractionCallback () const
+  {
+    return extraction_callback_;
+  }
+
 private:
   const Signal &signal_;
   ProcessorContext &context_;
@@ -773,6 +848,15 @@ private:
   int tokens_in_flight_ = 0;
   int retrieval_queue_depth_ = 0;
   bool consolidation_should_start_ = false;
+
+  // Streaming Pacing fields (Section 10.4)
+  bool should_check_retrieval_ = true;   // Default: always check (backward compat)
+  double drift_accum_snapshot_ = 0.0;
+
+  // Consolidation Cluster fields (Section 7.3)
+  std::vector<ClusterInfo> consolidation_clusters_;
+  std::vector<operations::ExtractionRequest> extraction_requests_;
+  operations::ExtractionCallback *extraction_callback_ = nullptr;
 };
 
 } // namespace cortext

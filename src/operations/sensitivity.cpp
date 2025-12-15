@@ -279,9 +279,13 @@ UpdateMood::Execute (OperationContext &context) const
     }
   const double magnitude = std::sqrt (magnitude_sq);
 
-  // Compute threshold delta: ΔT_mood = −κ_base × S × ||M_t||
+  // Normalize by √6 (max possible magnitude for 6-dim unit-bounded vector)
+  // and clamp to [0, 1] per paper Section 4.2.4
+  const double m_norm = core::Clamp (magnitude / std::sqrt (6.0), 0.0, 1.0);
+
+  // Compute threshold delta: ΔT_mood = −κ_mood × clamp(m_norm, 0, 1)
   const double kappa_mood = constants::kGainMedium * S;
-  const double delta_T_mood = -kappa_mood * magnitude;
+  const double delta_T_mood = -kappa_mood * m_norm;
   context.SetDeltaThresholdMood (delta_T_mood);
 }
 

@@ -46,7 +46,7 @@ MakeSignal (int dim, uint64_t ts = 1)
 
 } // namespace
 
-TEST_CASE ("Algorithm 14 creates and updates memory_feedback row", "[op14]")
+TEST_CASE ("Algorithm 14 creates and updates embeddings_meta row", "[op14]")
 {
   auto unique_store = cortext::SQLiteStore::Create (":memory:");
   auto store = std::shared_ptr<cortext::Store> (std::move (unique_store));
@@ -74,7 +74,7 @@ TEST_CASE ("Algorithm 14 creates and updates memory_feedback row", "[op14]")
   processor.Flush ();
 
   auto rows = store->Execute ("SELECT embedding_id, use_frequency, strength "
-                              "FROM memory_feedback WHERE "
+                              "FROM embeddings_meta WHERE "
                               "embedding_id = ?",
                               { 1LL });
   REQUIRE (rows.size () == 1);
@@ -117,7 +117,7 @@ TEST_CASE ("Algorithm 14 decays and evicts below cutoff", "[op14]")
   processor.Flush ();
 
   auto rows = store->Execute (
-      "SELECT COUNT(*) AS cnt FROM memory_feedback WHERE embedding_id = ?",
+      "SELECT COUNT(*) AS cnt FROM embeddings_meta WHERE embedding_id = ?",
       { 42LL });
   const auto cnt = std::any_cast<long long> (rows[0].at ("cnt"));
   REQUIRE (cnt == 0LL); // evicted
@@ -154,8 +154,10 @@ TEST_CASE (
   processor.Flush ();
 
   auto rows = store->Execute (
-      "SELECT retrieved_count, used_count, use_frequency, strength "
-      "FROM memory_feedback WHERE embedding_id = ?",
+      "SELECT mf.retrieved_count, mf.used_count, em.use_frequency, em.strength "
+      "FROM embeddings_meta em "
+      "JOIN memory_feedback mf ON em.embedding_id = mf.embedding_id "
+      "WHERE em.embedding_id = ?",
       { 7LL });
   REQUIRE (rows.size () == 1);
   const auto retrieved
@@ -201,8 +203,10 @@ TEST_CASE (
   processor.Flush ();
 
   auto rows = store->Execute (
-      "SELECT retrieved_count, used_count, use_frequency, strength "
-      "FROM memory_feedback WHERE embedding_id = ?",
+      "SELECT mf.retrieved_count, mf.used_count, em.use_frequency, em.strength "
+      "FROM embeddings_meta em "
+      "JOIN memory_feedback mf ON em.embedding_id = mf.embedding_id "
+      "WHERE em.embedding_id = ?",
       { 8LL });
   REQUIRE (rows.size () == 1);
   const auto retrieved

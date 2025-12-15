@@ -24,14 +24,10 @@ ConsolidationGate::Execute (OperationContext &context) const
 void
 ConsolidationGate::CollectSchema (cortext::store::SchemaRegistry &registry) const
 {
-  // Forward schema collection to dynamically instantiated operations.
-  // This ensures their table migrations (extraction_jobs, consolidation_candidates)
-  // are applied during SignalProcessor initialization.
-  ScoreConsolidation scorer;
-  scorer.CollectSchema (registry);
-
-  EnqueueExtractionJobs jobs;
-  jobs.CollectSchema (registry);
+  // No-op: all tables now in core schema.cpp migration 0.
+  // consolidation_candidates is in core schema.
+  // extraction_jobs and consolidation_events have been removed (undocumented).
+  (void)registry;
 }
 
 } // namespace cortext::operations

@@ -227,9 +227,10 @@ ComputeMniGateDecision::Execute (OperationContext &context) const
                         * (constants::kNormalizedMax - kTauMuMinusS * S)
                         * (constants::kNormalizedMax + kTauMuPlusT * T);
 
-  // Refractory multiplier based on signals_processed ticks
-  const double Delta = static_cast<double> (p_ctx.signals_processed
-                                            - p_ctx.last_interrupt_tick);
+  // Refractory multiplier based on drift accumulation (Section 10)
+  // Delta = cumulative drift since last interrupt
+  const double Delta = std::max (0.0, p_ctx.drift_accum
+                                          - p_ctx.drift_at_last_interrupt);
   const double tau_refrac = cortext::core::Lerp (kTauRefracMin, kTauRefracMax, T)
                             * cortext::core::Lerp (kTauRefracSMin, kTauRefracSMax,
                                                    S);
@@ -315,6 +316,7 @@ ComputeMniGateDecision::Execute (OperationContext &context) const
   if (allow_interrupt)
     {
       p_ctx.last_interrupt_tick = p_ctx.signals_processed;
+      p_ctx.drift_at_last_interrupt = p_ctx.drift_accum;  // Update drift baseline
     }
 
   // Diagnostics

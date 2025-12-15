@@ -16,6 +16,7 @@ option(CORTEXT_EMBED_GRAPH "Embed sqlite-graph extension" ON)
 option(CORTEXT_EMBED_OBJSTORE "Embed sqlite-objstore extension" ON)
 option(CORTEXT_ENABLE_DYNAMIC_EXTENSIONS "Enable dynamic extension loading fallback" ON)
 option(CORTEXT_ENABLE_IMAGEBIND_ORT "Enable ONNX Runtime for ImageBind embedder" OFF)
+option(CORTEXT_ENABLE_GEMMA_ORT "Enable ONNX Runtime for Gemma text generator" OFF)
 
 if(EMSCRIPTEN AND BUILD_TESTING)
   message(STATUS "Disabling tests for WebAssembly builds (not supported).")
@@ -37,6 +38,14 @@ block(SCOPE_FOR VARIABLES)
     GIT_TAG 3.4.0
   )
   FetchContent_MakeAvailable(eigen)
+
+  # nlohmann/json for generator JSON schema handling
+  FetchContent_Declare(
+    nlohmann_json
+    GIT_REPOSITORY https://github.com/nlohmann/json.git
+    GIT_TAG v3.11.3
+  )
+  FetchContent_MakeAvailable(nlohmann_json)
 endblock()
 
 #
@@ -114,12 +123,18 @@ add_library(cortext
     src/operations/serial_position_apply.cpp
     src/operations/interrupt_gate.cpp
     src/operations/consolidation.cpp
+    src/operations/consolidation_cluster.cpp
     src/operations/consolidation_gate.cpp
+    src/operations/consolidation_summarize.cpp
+    src/operations/process_extraction_results.cpp
     src/operations/embedding_prediction_error.cpp
     src/operations/precision.cpp
     src/operations/graph_schema.cpp
     src/operations/graph_build.cpp
     src/operations/graph_retrieval.cpp
+    # Phase 4: Knowledge Graph Enhancement
+    src/operations/concept_detection.cpp
+    src/operations/emotion_cascade.cpp
     src/operations/goal_alignment.cpp
     src/operations/goal_alignment_fallback.cpp
     src/operations/signal_metrics_persistence.cpp
@@ -127,6 +142,16 @@ add_library(cortext
     src/operations/write_gate.cpp
     src/operations/memory_storage.cpp
     src/operations/detect_memory_usage.cpp
+    src/operations/drift_accumulation.cpp
+    src/operations/streaming_pacing.cpp
+    # Generator components
+    src/generator/gemma_tokenizer.cpp
+    src/generator/kv_cache.cpp
+    src/generator/decoder_runner.cpp
+    src/generator/json_decoder.cpp
+    src/generator/constrained_sampler.cpp
+    src/generator/gemma_text_generator.cpp
+    src/generator/multimodal_encoder.cpp
 )
 add_library(cortext::cortext ALIAS cortext)
 
@@ -253,6 +278,7 @@ target_compile_definitions(cortext PRIVATE SQLITE_CORE=1)
 
 # Link dependencies (SQLite handling differs per target)
 target_link_libraries(cortext PUBLIC Eigen3::Eigen)
+target_link_libraries(cortext PRIVATE nlohmann_json::nlohmann_json)
 if(EMSCRIPTEN)
   # Use a block to prevent SQLite tests from being added to ctest
   block(SCOPE_FOR VARIABLES)
@@ -352,6 +378,65 @@ if(CORTEXT_ENABLE_IMAGEBIND_ORT)
 
   target_link_libraries(cortext PRIVATE onnxruntime ZLIB::ZLIB)
   add_dependencies(cortext onnxruntime_ep)
+endif()
+
+# Optional ONNX Runtime integration for Gemma text generator
+# Shares the same ORT build as ImageBind if both are enabled
+if(CORTEXT_ENABLE_GEMMA_ORT)
+  target_compile_definitions(cortext PUBLIC CORTEXT_ENABLE_GEMMA_ORT=1)
+
+  if(NOT CORTEXT_ENABLE_IMAGEBIND_ORT)
+    # Build ORT if not already built for ImageBind
+    include(ExternalProject)
+    find_package(ZLIB REQUIRED)
+
+    set(CORTEXT_ORT_BUILD_TYPE "${CMAKE_BUILD_TYPE}")
+    if(NOT CORTEXT_ORT_BUILD_TYPE)
+      set(CORTEXT_ORT_BUILD_TYPE "Release")
+    endif()
+
+    set(CORTEXT_ORT_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/onnxruntime/cmake")
+    set(CORTEXT_ORT_BINARY_DIR "${CMAKE_BINARY_DIR}/third_party/onnxruntime-build")
+    set(CORTEXT_ORT_INSTALL_DIR "${CMAKE_BINARY_DIR}/third_party/onnxruntime-install")
+    set(CORTEXT_ORT_LIB_PATH
+        "${CORTEXT_ORT_INSTALL_DIR}/lib/${CMAKE_SHARED_LIBRARY_PREFIX}onnxruntime${CMAKE_SHARED_LIBRARY_SUFFIX}")
+
+    target_include_directories(cortext PRIVATE
+      ${CORTEXT_ORT_INSTALL_DIR}/include
+    )
+
+    if(NOT EXISTS "${CORTEXT_ORT_LIB_PATH}")
+      ExternalProject_Add(onnxruntime_ep
+        SOURCE_DIR "${CORTEXT_ORT_SOURCE_DIR}"
+        BINARY_DIR "${CORTEXT_ORT_BINARY_DIR}"
+        INSTALL_DIR "${CORTEXT_ORT_INSTALL_DIR}"
+        CMAKE_ARGS
+          -DCMAKE_BUILD_TYPE=${CORTEXT_ORT_BUILD_TYPE}
+          -DCMAKE_INSTALL_PREFIX=${CORTEXT_ORT_INSTALL_DIR}
+          -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+          -DCMAKE_DISABLE_FIND_PACKAGE_Protobuf=ON
+          -DCMAKE_DISABLE_FIND_PACKAGE_protobuf=ON
+          -DCMAKE_DISABLE_FIND_PACKAGE_ONNX=ON
+          -DCMAKE_DISABLE_FIND_PACKAGE_onnx=ON
+          -Donnxruntime_BUILD_SHARED_LIB=ON
+          -Donnxruntime_BUILD_UNIT_TESTS=OFF
+          -Donnxruntime_ENABLE_PYTHON=OFF
+        BUILD_BYPRODUCTS "${CORTEXT_ORT_LIB_PATH}"
+        USES_TERMINAL_CONFIGURE TRUE
+        USES_TERMINAL_BUILD TRUE
+        USES_TERMINAL_INSTALL TRUE
+      )
+    else()
+      add_custom_target(onnxruntime_ep)
+    endif()
+
+    add_library(onnxruntime SHARED IMPORTED GLOBAL)
+    set_target_properties(onnxruntime PROPERTIES IMPORTED_LOCATION "${CORTEXT_ORT_LIB_PATH}")
+    add_dependencies(onnxruntime onnxruntime_ep)
+
+    target_link_libraries(cortext PRIVATE onnxruntime ZLIB::ZLIB)
+    add_dependencies(cortext onnxruntime_ep)
+  endif()
 endif()
 
 # Use C++17 features

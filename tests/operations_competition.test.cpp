@@ -108,7 +108,7 @@ TEST_CASE ("Alg21 inhibits near losers but not distant ones",
   // Near loser suppressed
   {
     auto rows = store->Execute (
-        "SELECT strength FROM memory_feedback WHERE embedding_id = ?",
+        "SELECT strength FROM embeddings_meta WHERE embedding_id = ?",
         { 13LL });
     REQUIRE (rows.size () == 1);
     const double strength = std::any_cast<double> (rows[0].at ("strength"));
@@ -118,14 +118,14 @@ TEST_CASE ("Alg21 inhibits near losers but not distant ones",
   // cases)
   {
     auto rows = store->Execute (
-        "SELECT COUNT(*) AS c FROM memory_feedback WHERE embedding_id = ?",
+        "SELECT COUNT(*) AS c FROM embeddings_meta WHERE embedding_id = ?",
         { 20LL });
     REQUIRE (rows.size () == 1);
     const auto cnt = std::any_cast<long long> (rows[0].at ("c"));
     if (cnt == 1)
       {
         auto r2 = store->Execute (
-            "SELECT strength FROM memory_feedback WHERE embedding_id = ?",
+            "SELECT strength FROM embeddings_meta WHERE embedding_id = ?",
             { 20LL });
         REQUIRE (r2.size () == 1);
         const double s2 = std::any_cast<double> (r2[0].at ("strength"));
@@ -175,7 +175,7 @@ TEST_CASE ("Alg21 recovery restores strength over time",
   double strength_after_supp = 0.0;
   {
     auto rows = store->Execute (
-        "SELECT strength FROM memory_feedback WHERE embedding_id = ?",
+        "SELECT strength FROM embeddings_meta WHERE embedding_id = ?",
         { 2LL });
     REQUIRE (rows.size () == 1);
     strength_after_supp = std::any_cast<double> (rows[0].at ("strength"));
@@ -197,7 +197,7 @@ TEST_CASE ("Alg21 recovery restores strength over time",
 
   {
     auto rows = store->Execute (
-        "SELECT strength FROM memory_feedback WHERE embedding_id = ?",
+        "SELECT strength FROM embeddings_meta WHERE embedding_id = ?",
         { 2LL });
     REQUIRE (rows.size () == 1);
     const double strength_after_recovery
