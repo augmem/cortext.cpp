@@ -320,7 +320,37 @@ err_max = 0.5
 
 surprisal_t ← clamp(prediction_error_t / err_max, 0, 1)
 
-3.2 Metric Weight Blending
+3.2 Composite Score Computation
+
+The system computes 12 metrics that blend into a composite write score:
+
+  -----------------------------------------------------------------------
+  **Metric**         **Knob**        **Expression**
+  ------------------ --------------- ------------------------------------
+  Relevance          ↑F              cos(x, μ_ctx) × (0.5 + F)
+
+  Mismatch           ↓F, ↑S          (1 − F) × S × novelty
+
+  Prediction Error   ↑S, ↓T          surprisal_t × S × (1 − T)
+
+  Rarity             ↑F, ↓T          (1 − μ_sim) × (0.5 + 0.5F) × (1 −
+                                     0.2T)
+
+  Drift              ↓T              (drift_mag / 2) × (1 − T)
+
+  Utility            ↑F, ↓S          ΔSSE × (0.5 + 0.5F) × (1 − 0.3S)
+
+  Salience           F, S            (rarity + novelty) / 2 × (F + S) / 2
+
+  Valence            S, ↓T           map01(Σ p_c × v_map\[c\])
+
+  Arousal            S, ↓T           clamp(Σ p_c × a_map\[c\], 0, 1)
+  -----------------------------------------------------------------------
+
+Table 1: Metric definitions and knob dependencies. Arrows indicate
+direction of influence.
+
+3.3 Metric Weight Blending
 
 w_bootstrap\[i\] ← sigmoid(c_F\[i\]×F + c_S\[i\]×S + c_T\[i\]×T + d_i)
 
@@ -336,7 +366,7 @@ weight_i(t) ← (1 − confidence_rls) × w_bootstrap\[i\] +
 
 confidence_rls × w_rls\[i\]
 
-3.3 Score Normalization
+3.3.1 Score Normalization
 
 for each metric i:
 
