@@ -13,6 +13,8 @@ using cortext::operations::ApplyReconsolidation;
 namespace
 {
 
+constexpr int kEmbeddingDim = 256;
+
 // Helper op to preload current context and retrieved embeddings into context.
 class SetupReconInputsOp : public IOperation
 {
@@ -48,6 +50,15 @@ public:
   }
 };
 
+/// @brief Creates a 256-dim unit vector with value at specified index.
+static Eigen::VectorXf
+MakeUnitVec256 (int idx)
+{
+  Eigen::VectorXf v = Eigen::VectorXf::Zero (kEmbeddingDim);
+  v[idx] = 1.0f;
+  return v;
+}
+
 static Signal
 MakeSignal (const Eigen::VectorXf &emb, uint64_t ts = 1)
 {
@@ -71,10 +82,8 @@ TEST_CASE ("Alg20 drifts embedding and writes lability fields",
   cfg.sensitivity = 1.0; // maximize plasticity
   cfg.stability = 0.0;   // minimize persistence
 
-  const Eigen::VectorXf cur
-      = (Eigen::VectorXf (4) << 1.0f, 0.0f, 0.0f, 0.0f).finished ();
-  const Eigen::VectorXf mem
-      = (Eigen::VectorXf (4) << 1.0f, 0.0f, 0.0f, 0.0f).finished ();
+  const Eigen::VectorXf cur = MakeUnitVec256 (0);
+  const Eigen::VectorXf mem = MakeUnitVec256 (0);
 
   auto setup = std::make_unique<SetupReconInputsOp> (
       cur, std::unordered_map<long long, Eigen::VectorXf>{ { 1LL, mem } });
@@ -119,10 +128,8 @@ TEST_CASE ("Alg20 no drift when S=0: no embedding row; lability updated",
   cfg.sensitivity = 0.0; // no drift
   cfg.stability = 0.5;
 
-  const Eigen::VectorXf cur
-      = (Eigen::VectorXf (4) << 0.0f, 1.0f, 0.0f, 0.0f).finished ();
-  const Eigen::VectorXf mem
-      = (Eigen::VectorXf (4) << 0.0f, 1.0f, 0.0f, 0.0f).finished ();
+  const Eigen::VectorXf cur = MakeUnitVec256 (1);
+  const Eigen::VectorXf mem = MakeUnitVec256 (1);
 
   auto setup = std::make_unique<SetupReconInputsOp> (
       cur, std::unordered_map<long long, Eigen::VectorXf>{ { 2LL, mem } });
@@ -167,10 +174,8 @@ TEST_CASE ("Alg20 bumps uncertainty with positive drift",
   cfg.sensitivity = 1.0;
   cfg.stability = 0.0;
 
-  const Eigen::VectorXf cur
-      = (Eigen::VectorXf (4) << 1.0f, 0.0f, 0.0f, 0.0f).finished ();
-  const Eigen::VectorXf mem
-      = (Eigen::VectorXf (4) << 1.0f, 0.0f, 0.0f, 0.0f).finished ();
+  const Eigen::VectorXf cur = MakeUnitVec256 (0);
+  const Eigen::VectorXf mem = MakeUnitVec256 (0);
 
   auto setup = std::make_unique<SetupReconInputsOp> (
       cur, std::unordered_map<long long, Eigen::VectorXf>{ { 3LL, mem } });

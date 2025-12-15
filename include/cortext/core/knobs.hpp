@@ -36,6 +36,15 @@ KNeighbors (double T)
   return static_cast<int> (std::round (Lerp (8.0, 32.0, T)));
 }
 
+// RLS observation window size (Algorithm 7)
+inline int
+RLSWindowN (double T)
+{
+  // N = round(lerp(64, 512, T))
+  // Higher stability = larger window = more historical context
+  return static_cast<int> (std::round (Lerp (64.0, 512.0, Clamp (T, 0.0, 1.0))));
+}
+
 // --- Section 0.7: Operational Retrieval & Streaming Parameters ---
 inline int
 MaxResults (double F)
@@ -387,6 +396,15 @@ WMChunkingThreshold (double F)
 }
 
 inline double
+WMGateThreshold (double F)
+{
+  // gate_threshold = lerp(0.1, 0.4, F)
+  // At F=0 (wide attention): permissive (0.1)
+  // At F=1 (narrow attention): strict (0.4)
+  return Lerp (0.1, 0.4, F);
+}
+
+inline double
 WMComplexityScale (double S)
 {
   // complexity penalty scale ~ sensitivity
@@ -545,6 +563,25 @@ SerialDetermineZone (double F, int position, int N, double rarity)
       return SerialZone::Distinctive;
     }
   return SerialZone::Middle;
+}
+
+// --- Implicit Feedback (Memory Usage Detection) Helpers ---
+
+inline double
+MemoryUsageThreshold (double F)
+{
+  // Higher focus = stricter threshold for what counts as "used"
+  // Range [0.5, 0.8] - at F=0, similarity of 0.5 counts as used;
+  // at F=1, requires 0.8 similarity
+  return Lerp (0.5, 0.8, Clamp (F, 0.0, 1.0));
+}
+
+inline double
+MemoryUsageCacheDuration (double T)
+{
+  // Higher stability = longer memory of what was retrieved
+  // Range [30, 300] seconds (30s to 5 minutes)
+  return Lerp (30.0, 300.0, Clamp (T, 0.0, 1.0));
 }
 
 } // namespace cortext::core

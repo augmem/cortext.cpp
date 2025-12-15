@@ -60,11 +60,15 @@ add_executable(cortext_tests
   operations_graph_retrieval.test.cpp
   operations_goal_alignment.test.cpp
   operations_consolidation.test.cpp
+  operations_write_gate.test.cpp
+  operations_memory_storage.test.cpp
   migration_core.test.cpp
   cortext.test.cpp
   signal_processor.test.cpp
   operations_adherence_fixes.test.cpp
   memory_feedback_insert.test.cpp
+  state_persistence.test.cpp
+  implicit_feedback.test.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/telemetry_noop_by_default.test.cpp
 )
 

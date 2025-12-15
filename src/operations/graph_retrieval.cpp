@@ -48,7 +48,7 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context) const
   const int k = std::max (1, core::MaxResults (cfg.focus));
   const int depth = std::max (1, core::GraphDepth (cfg.focus));
 
-  // Seed vector retrieval (linear scan over embeddings table).
+  // Seed vector retrieval via sqlite-vec KNN query.
   struct Scored
   {
     long long id;
@@ -58,44 +58,44 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context) const
   std::vector<Scored> seeds;
   seeds.reserve (static_cast<size_t> (k));
 
-  try
-    {
-      auto rows = store->Execute ("SELECT embedding_id, embedding FROM embeddings",
-                                  {});
-      for (const auto &row : rows)
-        {
-          auto it_id = row.find ("embedding_id");
-          auto it_emb = row.find ("embedding");
-          if (it_id == row.end () || it_emb == row.end ())
-            continue;
-          if (it_id->second.type () != typeid (long long))
-            continue;
+  // Convert query vector to std::vector<float> for parameter binding.
+  std::vector<float> q_vec (q.data (), q.data () + q.size ());
 
-          const long long id = std::any_cast<long long> (it_id->second);
-          Eigen::VectorXf v;
-          if (!core::DecodeFloatBlob (it_emb->second, q.size (), v))
-            continue;
-          const double sim = core::CosineSimilarity (q, v);
-          seeds.push_back (Scored{ id, sim, v });
-        }
-    }
-  catch (...)
+  auto rows = store->Execute (
+      "SELECT embedding_id, embedding, distance "
+      "FROM vec_embeddings "
+      "WHERE embedding MATCH ? "
+      "ORDER BY distance "
+      "LIMIT ?",
+      { q_vec, static_cast<long long> (k) });
+
+  for (const auto &row : rows)
     {
-      return;
+      auto it_id = row.find ("embedding_id");
+      auto it_emb = row.find ("embedding");
+      auto it_dist = row.find ("distance");
+      if (it_id == row.end () || it_emb == row.end ())
+        continue;
+      if (it_id->second.type () != typeid (long long))
+        continue;
+
+      const long long id = std::any_cast<long long> (it_id->second);
+      Eigen::VectorXf v;
+      if (!core::DecodeFloatBlob (it_emb->second, q.size (), v))
+        continue;
+
+      // sqlite-vec returns L2 distance; convert to similarity score.
+      double dist = 0.0;
+      if (it_dist != row.end () && it_dist->second.type () == typeid (double))
+        dist = std::any_cast<double> (it_dist->second);
+      const double sim = 1.0 / (1.0 + dist);
+
+      seeds.push_back (Scored{ id, sim, v });
     }
 
   if (seeds.empty ())
     {
       return;
-    }
-
-  std::sort (seeds.begin (), seeds.end (),
-             [] (const Scored &a, const Scored &b) {
-               return a.score > b.score;
-             });
-  if (static_cast<int> (seeds.size ()) > k)
-    {
-      seeds.resize (static_cast<size_t> (k));
     }
 
   // Update last retrieval timestamp for consolidation idle-gating.
@@ -262,6 +262,18 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context) const
           out.emplace (s.id, s.vec);
         }
       context.SetRetrievedMemoryEmbeddings (std::move (out));
+
+      // Cache seeds for implicit feedback detection
+      const uint64_t now_ts = context.GetSignal ().timestamp;
+      auto &cache = p_ctx.recent_retrievals_cache;
+      for (const auto &s : seeds)
+        {
+          cache.push_back ({ s.id, s.vec, now_ts });
+        }
+      while (cache.size () > ProcessorContext::kMaxRetrievalCacheSize)
+        {
+          cache.pop_front ();
+        }
       return;
     }
 
@@ -279,6 +291,22 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context) const
     }
 
   context.SetRetrievedMemoryEmbeddings (std::move (out));
+
+  // Cache retrieved embeddings for implicit feedback detection
+  // (DetectMemoryUsage will compare future signals against these cached
+  // retrievals)
+  const uint64_t now_ts = context.GetSignal ().timestamp;
+  auto &cache = p_ctx.recent_retrievals_cache;
+  for (const auto &s : scored)
+    {
+      cache.push_back (
+          { s.id, s.vec, now_ts });
+    }
+  // Trim cache to max size (FIFO eviction)
+  while (cache.size () > ProcessorContext::kMaxRetrievalCacheSize)
+    {
+      cache.pop_front ();
+    }
 }
 
 } // namespace cortext::operations

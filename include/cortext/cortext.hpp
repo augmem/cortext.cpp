@@ -32,6 +32,7 @@ public:
     double valence = 0.5;
     double arousal = 0.0;
     std::unordered_map<int, double> metrics; // Metric enum cast to int -> value
+    std::optional<long long> stored_embedding_id;  // Set if stored to memory
   };
   
   /// @brief Context returned from processing calls, containing hydrated

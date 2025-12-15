@@ -645,6 +645,33 @@ For each metric m (after sufficient history):
 base\_m ← normalize(μ\_m + σ\_m) → \[0,1]  # Target one std dev above mean
 weight\_m\_t ← EWMA(weight\_m\_{t-1}, base\_m × (0.5 + 0.5S), α = α\_S(weight))
 
+Algorithm 4b: The Mood Integrator (Tonic State)
+
+Purpose: Maintain a persistent background state (M_t) distinct from instantaneous emotion (e_t).
+
+Inputs:
+- e_t: Instantaneous emotion vector (from Alg 4)
+- M_{t-1}: Previous mood state (6d vector)
+- S, T: Sensitivity and Stability knobs
+
+Dynamics:
+1. Reactivity (α_mood): α_mood(S) = lerp(0.01, 0.20, S)
+2. Decay (λ_mood):     λ_mood(T) = lerp(0.90, 0.999, T)
+
+Update Equation:
+M_t = (λ_mood(T) × M_{t-1}) + (α_mood(S) × e_t)
+M_t ← clamp(M_t, -1.0, 1.0)  # simple stability clamp
+
+Output:
+- M_t: Current mood vector
+- ||M_t||: Mood magnitude used for threshold bias
+
+Note on Storage (Dual-Signal):
+When writing to memory, store both:
+- event_emotion: e_t
+- ambient_mood: M_t
+This enables "Prosthetic Mode" attribution during retrieval.
+
 ***
 
 3. Stability‑Driven Persistence
@@ -726,7 +753,7 @@ Critical Implementation Note (Expanded)
 
 Algorithm 8: Adaptive Threshold Evolution (Unified, Bayesian Prior/Evidence, Homeostatic)
 
-Input: scores\[0:t], knobs (F, S, T), optional ΔThreshold\_sensitivity\_t (Alg 4), optional ΔThreshold\_precision\_t (Sec. 5.5)
+Input: scores\[0:t], knobs (F, S, T), optional ΔThreshold\_sensitivity\_t (Alg 4), optional ΔThreshold\_precision\_t (Sec. 5.5), optional ΔThreshold\_mood\_t (Alg 4b)
 Output: T\_dynamic
 
 1. w ← w\_score(T)
@@ -747,10 +774,11 @@ Output: T\_dynamic
    g) cap ← 0.25 × hysteresis\_t; ΔT\_homeo ← clamp(reliability × κ\_r × (1 − T) × (1 − maturity(t)) × rate\_error, −cap, +cap)
 10. ΔT\_prec ← (ΔThreshold\_precision\_t is provided) ? ΔThreshold\_precision\_t : 0
 11. ΔT\_emo ← (ΔThreshold\_emotion\_t is provided) ? ΔThreshold\_emotion\_t : 0
-12. ΔT ← ΔT\_sens + ΔT\_homeo + ΔT\_prec + ΔT\_emo
-13. ΔT\_limited ← clamp(ΔT, −max\_ΔT\_per\_min(t), +max\_ΔT\_per\_min(t))
-14. T\_dynamic\_t ← clamp(T\_dynamic\_t + ΔT\_limited, Tmin(t), Tmax(t))
-15. hysteresis\_t ← lerp(band\_min, band\_max, T)
+12. ΔT\_mood ← (ΔThreshold\_mood\_t is provided) ? ΔThreshold\_mood\_t : 0
+13. ΔT ← ΔT\_sens + ΔT\_homeo + ΔT\_prec + ΔT\_emo + ΔT\_mood
+14. ΔT\_limited ← clamp(ΔT, −max\_ΔT\_per\_min(t), +max\_ΔT\_per\_min(t))
+15. T\_dynamic\_t ← clamp(T\_dynamic\_t + ΔT\_limited, Tmin(t), Tmax(t))
+16. hysteresis\_t ← lerp(band\_min, band\_max, T)
 
 Telemetry (diagnostics): Δt, dt\_base, τ\_rate, α, β, ESS, reliability, ρ\_inst, ρ\_hat, rate\_target\_t, rate\_error, κ\_r (gain), m\_gate = (1 − T) × (1 − maturity), cap, ΔT\_homeo, ΔT\_total, T\_prior, T\_dynamic\_t, hysteresis\_t
 
@@ -1566,3 +1594,23 @@ Touchpoints:
 * Algorithm 25 (Metacognition): increase FOK with consistent subgraph evidence; TOT when vectors are close but graph lacks support.
 * Algorithm 26 (Serial position): distinctiveness includes graph centrality/outlier score.
 * Algorithm 27 (Interrupt gate): compute `coverage_gain` over the active subgraph; duplicate suppression uses entity overlap.
+
+***
+
+### Algorithm 34: Mood-Congruent Retrieval Safety (Prosthetic Mode)
+
+Purpose: Prevent feedback loops where negative mood biases retrieval, causing further negative mood.
+
+1. Force Neutral Ranking:
+   During retrieval, ensure `w_mood` is forced to 0.
+   Score(m) = sim(q, m)  (purely semantic)
+
+2. Focus Spike:
+   If explicit query detected (e.g., "Who is this?"):
+   F_temporary ← 1.0 (maximize precision and objectivity)
+
+3. Context Display (Attribution Heuristic):
+   If `||M_t|| > threshold` (High Mood) AND `e_t approx 0` (Neutral Event):
+     Display: "Context: You met them while you were already feeling [Mood]."
+   Else if `e_t > threshold`:
+     Display: "Context: You reacted with [Emotion] to this specific event."

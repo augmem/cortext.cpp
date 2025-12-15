@@ -125,11 +125,11 @@ TEST_CASE ("Alg24 maintenance reduces strength without removal when dt small",
   slot.last_ts = 0.0;
   slot.pos_index = 0;
   pctx.wm_slots.push_back (slot);
-  pctx.T_dynamic = 0.95; // force rejection
+  pctx.T_dynamic = 0.95; // unused now, but kept for legacy
 
   WorkingMemory op;
   OperationContext ctx (s, pctx, cfg, buf);
-  ctx.SetCompositeScore (0.2);
+  ctx.SetCompositeScore (0.2); // margin = 0.2 - gate_threshold(0.5=0.25) = -0.05 < cost → reject
   op.Execute (ctx);
 
   REQUIRE (pctx.wm_slots.size () == 1);
@@ -137,4 +137,71 @@ TEST_CASE ("Alg24 maintenance reduces strength without removal when dt small",
   REQUIRE (pctx.wm_slots.front ().strength == Catch::Approx (expected));
   REQUIRE (pctx.wm_slots.front ().last_ts
            == Catch::Approx (static_cast<double> (s.timestamp)));
+}
+
+TEST_CASE ("Alg24 uses Focus-derived gate_threshold for gating decision",
+           "[operations][working_memory][gate_threshold]")
+{
+  // gate_threshold = lerp(0.1, 0.4, F) per Algorithm 24 spec
+  // At F=0: threshold=0.1, at F=1: threshold=0.4
+  Signal s;
+  s.embedding = Eigen::VectorXf::Constant (4, 1.0f);
+  s.timestamp = 100;
+  std::vector<BufferedWriteInstruction> buf;
+
+  SECTION ("Low Focus (F=0) has permissive threshold (0.1)")
+  {
+    ProcessorContext pctx;
+    SignalProcessor::Config cfg;
+    cfg.focus = 0.0;       // gate_threshold = 0.1
+    cfg.sensitivity = 0.0; // cost_per_slot = lerp(0.05, 0.15, 0) = 0.05
+    cfg.stability = 0.5;
+    // With 0 slots, cost_total = 0.05 * 1 + complexity = ~0.05
+    // Need margin > cost_total, so use higher benefit
+
+    WorkingMemory op;
+    OperationContext ctx (s, pctx, cfg, buf);
+    ctx.SetCompositeScore (0.25); // benefit - threshold = 0.25 - 0.1 = 0.15 > cost
+
+    op.Execute (ctx);
+    // With positive margin exceeding cost, should accept
+    REQUIRE (pctx.wm_last_accepted == true);
+    REQUIRE (pctx.wm_slots.size () == 1);
+  }
+
+  SECTION ("High Focus (F=1) has strict threshold (0.4)")
+  {
+    ProcessorContext pctx;
+    SignalProcessor::Config cfg;
+    cfg.focus = 1.0;       // gate_threshold = 0.4
+    cfg.sensitivity = 0.0; // minimal cost
+    cfg.stability = 0.5;
+
+    WorkingMemory op;
+    OperationContext ctx (s, pctx, cfg, buf);
+    ctx.SetCompositeScore (0.35); // benefit - threshold = 0.35 - 0.4 = -0.05 < 0
+
+    op.Execute (ctx);
+    // Negative margin, should reject
+    REQUIRE (pctx.wm_last_accepted == false);
+    REQUIRE (pctx.wm_slots.size () == 0);
+  }
+
+  SECTION ("Medium Focus (F=0.5) has threshold 0.25")
+  {
+    ProcessorContext pctx;
+    SignalProcessor::Config cfg;
+    cfg.focus = 0.5;       // gate_threshold = 0.25
+    cfg.sensitivity = 0.0; // minimal cost
+    cfg.stability = 0.5;
+
+    WorkingMemory op;
+    OperationContext ctx (s, pctx, cfg, buf);
+    ctx.SetCompositeScore (0.5); // benefit - threshold = 0.5 - 0.25 = 0.25
+
+    op.Execute (ctx);
+    // Positive margin, should accept
+    REQUIRE (pctx.wm_last_accepted == true);
+    REQUIRE (pctx.wm_slots.size () == 1);
+  }
 }

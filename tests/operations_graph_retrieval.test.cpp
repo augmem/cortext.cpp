@@ -12,16 +12,37 @@ using cortext::operations::GraphAugmentedRetrieveCandidates;
 
 namespace
 {
+constexpr int kEmbeddingDim = 256;
+
+/// @brief Creates a 256-dim unit vector with value at index 0.
 static Eigen::VectorXf
-Unit2 (float x, float y)
+UnitVec256 (float first_val)
 {
-  Eigen::VectorXf v (2);
-  v[0] = x;
-  v[1] = y;
+  Eigen::VectorXf v = Eigen::VectorXf::Zero (kEmbeddingDim);
+  v[0] = first_val;
   const float n = v.norm ();
   if (n > 1e-9f)
     v /= n;
   return v;
+}
+
+/// @brief Creates a 256-dim unit vector with value at index 1.
+static Eigen::VectorXf
+UnitVec256Second (float second_val)
+{
+  Eigen::VectorXf v = Eigen::VectorXf::Zero (kEmbeddingDim);
+  v[1] = second_val;
+  const float n = v.norm ();
+  if (n > 1e-9f)
+    v /= n;
+  return v;
+}
+
+/// @brief Converts Eigen vector to std::vector<float> for DB storage.
+static std::vector<float>
+ToFloatVec (const Eigen::VectorXf &v)
+{
+  return std::vector<float> (v.data (), v.data () + v.size ());
 }
 
 static Signal
@@ -41,16 +62,30 @@ TEST_CASE ("Alg31 expands vector seeds via graph_edges and returns expanded ids"
   auto unique_store = SQLiteStore::Create (":memory:");
   auto store = std::shared_ptr<Store> (std::move (unique_store));
 
+  // Create 256-dim embeddings for vec0 compatibility.
+  Eigen::VectorXf emb1 = UnitVec256 (1.0f);   // First dimension = 1
+  Eigen::VectorXf emb2 = UnitVec256Second (1.0f); // Second dimension = 1
+
   // Embeddings table with two memories.
   store->Execute ("CREATE TABLE IF NOT EXISTS embeddings ("
                   "embedding_id INTEGER PRIMARY KEY,"
                   "embedding BLOB"
                   ");");
+  // vec0 virtual table for KNN search.
+  store->Execute ("CREATE VIRTUAL TABLE IF NOT EXISTS vec_embeddings USING vec0("
+                  "embedding_id INTEGER PRIMARY KEY,"
+                  "embedding float[256]"
+                  ");");
+
   // id=1 aligns with query, id=2 does not.
   store->Execute ("INSERT INTO embeddings(embedding_id, embedding) VALUES (?,?)",
-                  { 1LL, std::vector<float>{ 1.0f, 0.0f } });
+                  { 1LL, ToFloatVec (emb1) });
   store->Execute ("INSERT INTO embeddings(embedding_id, embedding) VALUES (?,?)",
-                  { 2LL, std::vector<float>{ 0.0f, 1.0f } });
+                  { 2LL, ToFloatVec (emb2) });
+  store->Execute ("INSERT INTO vec_embeddings(embedding_id, embedding) VALUES (?,?)",
+                  { 1LL, ToFloatVec (emb1) });
+  store->Execute ("INSERT INTO vec_embeddings(embedding_id, embedding) VALUES (?,?)",
+                  { 2LL, ToFloatVec (emb2) });
 
   // Graph tables connecting emb:1 -> entity:Alice -> emb:2
   store->Execute ("CREATE TABLE IF NOT EXISTS graph_nodes ("
@@ -100,7 +135,7 @@ TEST_CASE ("Alg31 expands vector seeds via graph_edges and returns expanded ids"
       std::make_unique<GraphAugmentedRetrieveCandidates> ());
   SignalProcessor processor (cfg, store, std::move (ops));
 
-  auto out = processor.Process (MakeSignal (Unit2 (1.0f, 0.0f), 10));
+  auto out = processor.Process (MakeSignal (UnitVec256 (1.0f), 10));
 
   // Should include both seed (1) and expanded (2).
   bool has1 = false, has2 = false;

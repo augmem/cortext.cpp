@@ -4,6 +4,7 @@
 #include "cortext/operations/metrics.hpp"
 #include "cortext/signal.hpp"
 #include <Eigen/Dense>
+#include <array>
 #include <deque>
 #include <optional>
 #include <string>
@@ -207,6 +208,11 @@ struct ProcessorContext
   uint64_t last_signal_timestamp = 0;
   double weight_novelty = 0.3;
 
+  // Emotion state (Algorithm 4, persisted EWMA values)
+  double emotion_intensity_ewma = 0.0;
+  double valence_ewma = 0.5;
+  double arousal_ewma = 0.0;
+
   // ======================================================================
   // Stability-Related State (Algorithms 5, 6, 17)
   // ======================================================================
@@ -241,11 +247,25 @@ struct ProcessorContext
   std::vector<std::vector<double> > blender_P;
   bool blender_ready = false;
 
+  // Coefficient-space RLS state (Algorithm 7, formal specification)
+  // Each metric has 4 coefficients: [a_F, a_S, a_T, b]
+  // w_rls[i] = sigmoid(a_F[i]*F + a_S[i]*S + a_T[i]*T + b[i])
+  static constexpr size_t kNumMetrics = 12;
+  static constexpr size_t kCoeffsPerMetric = 4;  // a_F, a_S, a_T, b
+  std::vector<std::array<double, 4>> rls_coefficients;  // 12 x 4
+  std::vector<std::vector<double>> rls_coeff_P;  // 48 x 48 covariance matrix
+  bool rls_coefficients_ready = false;
+
   // ======================================================================
   // Consolidation State (Algorithms 28, 28b)
   // ======================================================================
   uint64_t last_consolidation_ts = 0;
   uint64_t last_retrieval_ts = 0;
+
+  // ======================================================================
+  // Episode Tracking State (Algorithm 12)
+  // ======================================================================
+  uint64_t episode_start_ts = 0;
 
   // ======================================================================
   // Influence Feedback State (Algorithm 19)
@@ -265,6 +285,24 @@ struct ProcessorContext
   std::vector<WMSlot> wm_slots;
   bool wm_last_accepted = false;
   bool wm_last_chunked = false;
+
+  // ======================================================================
+  // Implicit Feedback State (Memory Usage Detection)
+  // ======================================================================
+  /// @brief Cached retrieval for implicit feedback detection.
+  ///
+  /// When memories are retrieved, their embeddings are cached here.
+  /// On subsequent Process() calls, the current signal is compared against
+  /// cached embeddings to detect if retrieved memories were "used" (i.e.,
+  /// the input is semantically similar to previously retrieved content).
+  struct CachedRetrieval
+  {
+    long long embedding_id;
+    Eigen::VectorXf embedding;
+    uint64_t retrieved_at; // timestamp when retrieved
+  };
+  std::deque<CachedRetrieval> recent_retrievals_cache;
+  static constexpr size_t kMaxRetrievalCacheSize = 128;
 };
 
 } // namespace cortext

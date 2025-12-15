@@ -1,11 +1,13 @@
 #include "cortext/operations/boundary.hpp"
 
+#include "cortext/buffered_write_instruction.hpp"
 #include "cortext/core/algorithms.hpp"
 #include "cortext/core/knobs.hpp"
 #include "cortext/operations/constants.hpp"
 #include "cortext/processor/operation_context.hpp"
 #include <algorithm>
 #include <cmath>
+#include <string>
 #include <vector>
 
 namespace cortext::operations
@@ -87,6 +89,26 @@ CheckEpisodeBoundary::Execute (OperationContext &context) const
                     cfg.stability);
   if (drift01 > threshold)
     {
+      // Compute episode centroid from recent context embeddings
+      const Eigen::VectorXf centroid
+          = ComputeMean (p_ctx.recent_context_embeddings, 0, n);
+
+      // Convert to std::vector<float> for sqlite-vec compatible BLOB storage
+      std::vector<float> centroid_blob (centroid.data (),
+                                        centroid.data () + centroid.size ());
+
+      // Buffer episode INSERT
+      BufferedWriteInstruction op;
+      op.query = "INSERT INTO episodes (start_ts, end_ts, boundary_type, "
+                 "centroid) VALUES (?, ?, ?, ?)";
+      op.params = { static_cast<long long> (p_ctx.episode_start_ts),
+                    static_cast<long long> (context.GetSignal ().timestamp),
+                    std::string ("drift"), centroid_blob };
+      context.AddWriteInstruction (std::move (op));
+
+      // Update episode_start_ts for next episode
+      p_ctx.episode_start_ts = context.GetSignal ().timestamp;
+
       context.RequestFinalizeEpisode ();
     }
 }

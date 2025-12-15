@@ -1,9 +1,12 @@
 #include "cortext/operations/sensitivity_feedback.hpp"
 
 #include "cortext/core/algorithms.hpp"
+#include "cortext/core/knobs.hpp"
 #include "cortext/operations/constants.hpp"
 #include "cortext/processor/operation_context.hpp"
+#include "cortext/store/store.hpp"
 #include <algorithm>
+#include <any>
 #include <vector>
 
 namespace cortext::operations
@@ -32,6 +35,53 @@ CosTo01 (double c /* [-1,1] */)
       constants::kNormalizedMax,
       std::max (constants::kNormalizedMin,
                 constants::kOneHalf * (c + constants::kNormalizedMax)));
+}
+
+/// @brief Compute redundancy for a memory via kNN similarity lookup.
+/// @param store The store to query (may be null).
+/// @param embedding_id The memory's embedding row ID.
+/// @param k Number of neighbors to consider.
+/// @return Redundancy in [0,1]: 1 - mean similarity to kNN neighbors.
+inline double
+ComputeRedundancy (Store *store, int64_t embedding_id, int k)
+{
+  if (!store || embedding_id <= 0 || k <= 0)
+    {
+      return constants::kNormalizedMin;
+    }
+
+  // Query kNN neighbors for this embedding (k+1 to exclude self at distance 0)
+  auto rows = store->Execute (
+      "SELECT distance FROM vec_embeddings "
+      "WHERE embedding MATCH (SELECT embedding FROM embeddings WHERE rowid = ?) "
+      "ORDER BY distance LIMIT ?",
+      { embedding_id, static_cast<long long> (k + 1) });
+
+  if (rows.size () <= 1)
+    {
+      // No neighbors or only self returned
+      return constants::kNormalizedMin;
+    }
+
+  double sum_sim = 0.0;
+  int count = 0;
+  for (size_t i = 1; i < rows.size (); ++i)
+    { // Skip self (i=0)
+      auto it = rows[i].find ("distance");
+      if (it != rows[i].end () && it->second.type () == typeid (double))
+        {
+          double dist = std::any_cast<double> (it->second);
+          sum_sim += 1.0 / (1.0 + dist); // L2 distance → similarity
+          ++count;
+        }
+    }
+
+  if (count == 0)
+    {
+      return constants::kNormalizedMin;
+    }
+  const double mean_sim = sum_sim / count;
+  return 1.0 - mean_sim; // redundancy = 1 - mean similarity
 }
 
 void
@@ -69,8 +119,10 @@ ApplySensitivityFeedback::Execute (OperationContext &context) const
         }
     }
 
-  // Redundancy fallback (no kNN DB here) → 0.0 per plan choice.
-  const double redundancy = constants::kNormalizedMin;
+  // Algorithm 16: Compute per-memory redundancy from kNN neighbors.
+  const auto &cfg = context.GetConfig ();
+  Store *store = context.GetStore ();
+  const int k = core::KNeighbors (cfg.stability);
 
   const auto &events = context.GetMemoryUsageEvents ();
   for (const auto &e : events)
@@ -80,6 +132,8 @@ ApplySensitivityFeedback::Execute (OperationContext &context) const
           continue;
         }
       const double cg = *e.contextual_gain; // may be negative
+      const double redundancy
+          = ComputeRedundancy (store, e.embedding_id, k);
       const double adjustment = eta * (novelty_from_metric * cg - redundancy);
       p_ctx.weight_novelty
           = core::Clamp (p_ctx.weight_novelty + adjustment,

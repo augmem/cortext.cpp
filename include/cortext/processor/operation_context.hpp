@@ -629,7 +629,7 @@ public:
   // ======================================================================
   // Episode Boundary API (Algorithm 12)
   // ======================================================================
-  
+
   void
   RequestFinalizeEpisode ()
   {
@@ -639,6 +639,36 @@ public:
   ShouldFinalizeEpisode () const
   {
     return should_finalize_episode_;
+  }
+
+  // ======================================================================
+  // Write Gate API (Algorithm 7+8: composite_score > T_dynamic - hysteresis)
+  // ======================================================================
+
+  void
+  SetWriteDecision (bool v)
+  {
+    write_decision_ = v;
+  }
+  bool
+  GetWriteDecision () const
+  {
+    return write_decision_;
+  }
+
+  // ======================================================================
+  // Memory Storage API (MemoryStorage operation output)
+  // ======================================================================
+
+  void
+  SetStoredEmbeddingId (std::optional<long long> id)
+  {
+    stored_embedding_id_ = id;
+  }
+  std::optional<long long>
+  GetStoredEmbeddingId () const
+  {
+    return stored_embedding_id_;
   }
 
 private:
@@ -696,6 +726,12 @@ private:
   double serial_von_restorff_multiplier_ = 0.0;
   double serial_middle_suppression_ = 0.0;
   std::optional<double> serial_position_multiplier_;
+
+  // Write gate decision (Algorithm 7+8)
+  bool write_decision_ = false;
+
+  // Memory storage output (MemoryStorage operation)
+  std::optional<long long> stored_embedding_id_;
 
   // Algorithm 27 fields
   bool at_boundary_ = false;

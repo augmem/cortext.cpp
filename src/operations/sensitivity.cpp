@@ -155,6 +155,15 @@ UpdateSensitivity::Execute (OperationContext &context) const
     }
   // else: fallback path → keep defaults above
 
+  // Apply EWMA smoothing to emotion state for persistence
+  // Higher Sensitivity = faster adaptation (α ∈ [0.05, 0.30])
+  const double alpha_emotion = core::Lerp (0.05, 0.30, S);
+  p_ctx.emotion_intensity_ewma
+      = core::Ewma (p_ctx.emotion_intensity_ewma, emotion_intensity, alpha_emotion);
+  p_ctx.valence_ewma = core::Ewma (p_ctx.valence_ewma, valence, alpha_emotion);
+  p_ctx.arousal_ewma = core::Ewma (p_ctx.arousal_ewma, arousal, alpha_emotion);
+
+  // Set raw values for output (use smoothed values for threshold modulation)
   context.SetEmotionIntensity (emotion_intensity);
   context.SetValence (valence);
   context.SetArousal (arousal);

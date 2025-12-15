@@ -2,6 +2,7 @@
 
 #include "cortext/core/algorithms.hpp"
 #include "cortext/operations/constants.hpp"
+#include "cortext/operations/metrics.hpp"
 #include "cortext/core/knobs.hpp"
 #include "cortext/processor/operation_context.hpp"
 #include <algorithm>
@@ -144,11 +145,78 @@ UpdateUncertainty::Execute (OperationContext &context) const
                         constants::kNormalizedMax);
   };
 
+  // Helper: novelty measure as distance from mean of recent context embeddings
+  // (contributes to Algorithm 4 novelty component)
+  auto compute_novelty_measure = [&] () -> std::optional<double> {
+    const auto &x = context.GetSignal ().embedding;
+    if (x.size () == 0)
+      {
+        return std::nullopt;
+      }
+    const int n = static_cast<int> (p_ctx.recent_context_embeddings.size ());
+    if (n < 2)
+      {
+        return std::nullopt;
+      }
+
+    // Compute mean of recent context embeddings
+    Eigen::VectorXf mean_ctx = Eigen::VectorXf::Zero (x.size ());
+    int valid_count = 0;
+    for (const auto &emb : p_ctx.recent_context_embeddings)
+      {
+        if (emb.size () == x.size ())
+          {
+            mean_ctx += emb;
+            ++valid_count;
+          }
+      }
+    if (valid_count < 2)
+      {
+        return std::nullopt;
+      }
+    mean_ctx /= static_cast<float> (valid_count);
+
+    // Novelty = 1 - similarity to mean context
+    // High novelty when current signal is dissimilar to recent context
+    const double sim = core::CosineSimilarity (x, mean_ctx);
+    // Map cosine similarity from [-1, 1] to [0, 1]
+    const double sim_01
+        = core::Clamp ((sim + 1.0) / 2.0, constants::kNormalizedMin,
+                       constants::kNormalizedMax);
+    // Novelty is inverse of similarity
+    return constants::kNormalizedMax - sim_01;
+  };
+
   const auto var_scores = compute_scores_variance ();
   const auto focus_entropy = compute_focus_spread_entropy ();
   const auto coh_complement = compute_coherence_complement ();
-  const double novelty_surprise_spikes
-      = 0.0; // placeholder until Alg 4/13 added
+  const auto novelty_measure = compute_novelty_measure ();
+
+  // Fuse novelty (Alg 4) + surprise (Alg 13) into novelty_surprise_spikes
+  // per algorithms.md §0.4: fusion of Algorithm 4 novelty + Algorithm 13
+  // surprisal
+  const double surprise_val
+      = context.GetMetric (operations::Metric::surprise).value_or (0.0);
+  double novelty_surprise_spikes = 0.0;
+  bool has_novelty_surprise = false;
+  if (novelty_measure.has_value () && surprise_val > 0.0)
+    {
+      // Average of novelty and surprise when both available
+      novelty_surprise_spikes
+          = core::Clamp ((novelty_measure.value () + surprise_val) / 2.0,
+                         constants::kNormalizedMin, constants::kNormalizedMax);
+      has_novelty_surprise = true;
+    }
+  else if (novelty_measure.has_value ())
+    {
+      novelty_surprise_spikes = novelty_measure.value ();
+      has_novelty_surprise = true;
+    }
+  else if (surprise_val > 0.0)
+    {
+      novelty_surprise_spikes = surprise_val;
+      has_novelty_surprise = true;
+    }
 
   // Collect available metrics and corresponding weights.
   std::vector<double> metrics;
@@ -171,9 +239,9 @@ UpdateUncertainty::Execute (OperationContext &context) const
       // Tie complement coherence to Stability inverse.
       weights.push_back (1.0 - config.stability);
     }
-  // If/when novelty/surprise is provided, weight with Sensitivity.
-  // For now, include only if non-zero to avoid biasing.
-  if (novelty_surprise_spikes > 0.0)
+  // Include novelty_surprise_spikes (fusion of Alg 4 + Alg 13) when available.
+  // Weight with Sensitivity (S) per §0.4.
+  if (has_novelty_surprise)
     {
       metrics.push_back (novelty_surprise_spikes);
       weights.push_back (config.sensitivity);

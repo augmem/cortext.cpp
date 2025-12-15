@@ -122,6 +122,11 @@ add_library(cortext
     src/operations/graph_retrieval.cpp
     src/operations/goal_alignment.cpp
     src/operations/goal_alignment_fallback.cpp
+    src/operations/signal_metrics_persistence.cpp
+    src/operations/generation_trace.cpp
+    src/operations/write_gate.cpp
+    src/operations/memory_storage.cpp
+    src/operations/detect_memory_usage.cpp
 )
 add_library(cortext::cortext ALIAS cortext)
 

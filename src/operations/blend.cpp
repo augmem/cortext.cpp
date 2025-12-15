@@ -19,6 +19,74 @@ constexpr double kLamSlope = 0.09;
 constexpr double kTauRlsMin = 20.0;
 constexpr double kTauRlsMax = 80.0;
 
+// Number of metrics supported
+constexpr size_t kNumMetrics = 12;
+// Number of coefficients per metric (a_F, a_S, a_T, b)
+constexpr size_t kCoeffsPerMetric = 4;
+// Total coefficients for coefficient-space RLS
+constexpr size_t kTotalCoeffs = kNumMetrics * kCoeffsPerMetric;
+
+// Bootstrap coefficient matrices derived from current heuristics
+// w_bootstrap[i] = sigmoid(c_F[i]*F + c_S[i]*S + c_T[i]*T + d[i])
+// Order: relevance, mismatch, surprise, rarity, drift, contradiction,
+//        utility, periphery, coverage, salience, valence, arousal
+constexpr double kBootstrapCF[kNumMetrics] = {
+    1.4,   // relevance: 0.7*F + 0.2*T → z=1.4F+0.4T-1
+    -1.0,  // mismatch: (1-F)*S → linearized
+    0.0,   // surprise: S*(1-0.5T)
+    0.9,   // rarity: (0.5+0.5F)*(1-0.2T)
+    0.0,   // drift: 0.5*(1-T)
+    -2.0,  // contradiction: max(0,S-F) → linearized
+    0.85,  // utility: (0.5+0.5F)*(1-0.3S)
+    0.0,   // periphery: 0.5*T
+    2.0,   // coverage: F
+    1.0,   // salience: 0.5*(F+S)
+    0.0,   // valence: (0.4+0.6S)*(1-0.3T)
+    0.0    // arousal: S*(1-0.2T)
+};
+constexpr double kBootstrapCS[kNumMetrics] = {
+    0.0,   // relevance
+    1.0,   // mismatch
+    1.5,   // surprise
+    0.0,   // rarity
+    0.0,   // drift
+    2.0,   // contradiction
+    -0.45, // utility
+    0.0,   // periphery
+    0.0,   // coverage
+    1.0,   // salience
+    1.02,  // valence
+    1.8    // arousal
+};
+constexpr double kBootstrapCT[kNumMetrics] = {
+    0.4,   // relevance
+    0.0,   // mismatch
+    -0.5,  // surprise
+    -0.3,  // rarity
+    -1.0,  // drift
+    0.0,   // contradiction
+    0.0,   // utility
+    1.0,   // periphery
+    0.0,   // coverage
+    0.0,   // salience
+    -0.42, // valence
+    -0.2   // arousal
+};
+constexpr double kBootstrapD[kNumMetrics] = {
+    -1.0,   // relevance
+    -0.5,   // mismatch
+    -0.75,  // surprise
+    0.05,   // rarity
+    0.0,    // drift
+    -1.0,   // contradiction
+    0.075,  // utility
+    -1.0,   // periphery
+    -1.0,   // coverage
+    -1.0,   // salience
+    -0.11,  // valence
+    -0.9    // arousal
+};
+
 inline const std::vector<operations::Metric> &
 SupportedMetrics ()
 {
@@ -51,65 +119,49 @@ NormTo01 (double v_norm)
                    std::max (constants::kNormalizedMin, v_norm));
 }
 
+// Computes bootstrap weight using formal coefficient matrices
+// w_bootstrap[i] = sigmoid(c_F[i]*F + c_S[i]*S + c_T[i]*T + d[i])
+inline double
+BootstrapWeightByIndex (size_t metric_index, double F, double S, double T)
+{
+  if (metric_index >= kNumMetrics)
+    {
+      return 0.5; // Fallback for unknown metrics
+    }
+  const double z = kBootstrapCF[metric_index] * F
+                 + kBootstrapCS[metric_index] * S
+                 + kBootstrapCT[metric_index] * T
+                 + kBootstrapD[metric_index];
+  return core::Clamp (core::Sigmoid (z),
+                      constants::kNormalizedMin,
+                      constants::kNormalizedMax);
+}
+
+// Legacy wrapper for compatibility - maps metric enum to index
 inline double
 BootstrapWeight (operations::Metric name, double F, double S, double T)
 {
-  double a = 0.5;
-  if (name == operations::Metric::relevance)
+  const auto &names = SupportedMetrics ();
+  for (size_t i = 0; i < names.size (); ++i)
     {
-      a = 0.7 * F + 0.2 * T;
+      if (names[i] == name)
+        {
+          return BootstrapWeightByIndex (i, F, S, T);
+        }
     }
-  else if (name == operations::Metric::mismatch)
-    {
-      a = (1.0 - F) * S;
-    }
-  else if (name == operations::Metric::surprise)
-    {
-      a = S * (1.0 - 0.5 * T);
-    }
-  else if (name == operations::Metric::rarity)
-    {
-      a = (0.5 + 0.5 * F) * (1.0 - 0.2 * T);
-    }
-  else if (name == operations::Metric::drift)
-    {
-      a = 0.5 * (1.0 - T);
-    }
-  else if (name == operations::Metric::contradiction)
-    {
-      a = std::max (0.0, S - F);
-    }
-  else if (name == operations::Metric::utility)
-    {
-      a = (0.5 + 0.5 * F) * (1.0 - 0.3 * S);
-    }
-  else if (name == operations::Metric::periphery)
-    {
-      a = 0.5 * T;
-    }
-  else if (name == operations::Metric::coverage)
-    {
-      a = F;
-    }
-  else if (name == operations::Metric::salience)
-    {
-      a = 0.5 * (F + S);
-    }
-  else if (name == operations::Metric::valence)
-    {
-      a = 0.4 + 0.6 * S * (1.0 - 0.3 * T);
-    }
-  else if (name == operations::Metric::arousal)
-    {
-      a = S * (1.0 - 0.2 * T);
-    }
-  else
-    {
-      a = 0.5 * (F + S);
-    }
-  const double z = constants::kTwo * a - 1.0;
-  const double w = core::Sigmoid (z);
-  return core::Clamp (w, constants::kNormalizedMin, constants::kNormalizedMax);
+  return 0.5; // Fallback
+}
+
+// Computes RLS weight using learned coefficients
+// w_rls[i] = sigmoid(a_F[i]*F + a_S[i]*S + a_T[i]*T + b[i])
+inline double
+ComputeRLSWeight (const std::array<double, 4> &coeffs, double F, double S,
+                  double T)
+{
+  const double z
+      = coeffs[0] * F + coeffs[1] * S + coeffs[2] * T + coeffs[3];
+  return core::Clamp (core::Sigmoid (z), constants::kNormalizedMin,
+                      constants::kNormalizedMax);
 }
 
 inline void
@@ -136,6 +188,30 @@ EnsureStateInitialized (cortext::ProcessorContext &p_ctx,
       for (std::size_t i = 0; i < n; ++i)
         {
           p_ctx.blender_P[i][i] = kLarge;
+        }
+    }
+
+  // Initialize coefficient-space RLS state from bootstrap coefficients
+  if (p_ctx.rls_coefficients.empty ())
+    {
+      p_ctx.rls_coefficients.resize (kNumMetrics);
+      for (size_t i = 0; i < kNumMetrics; ++i)
+        {
+          p_ctx.rls_coefficients[i][0] = kBootstrapCF[i];  // a_F
+          p_ctx.rls_coefficients[i][1] = kBootstrapCS[i];  // a_S
+          p_ctx.rls_coefficients[i][2] = kBootstrapCT[i];  // a_T
+          p_ctx.rls_coefficients[i][3] = kBootstrapD[i];   // b
+        }
+    }
+
+  // Initialize 48x48 covariance matrix for coefficient-space RLS
+  if (p_ctx.rls_coeff_P.empty ())
+    {
+      p_ctx.rls_coeff_P.assign (kTotalCoeffs,
+                                std::vector<double> (kTotalCoeffs, 0.0));
+      for (size_t i = 0; i < kTotalCoeffs; ++i)
+        {
+          p_ctx.rls_coeff_P[i][i] = kLarge;
         }
     }
 }
@@ -347,16 +423,39 @@ ComputeCompositeScore::Execute (OperationContext &context) const
   std::vector<double> x = BuildMetricVector (names, metrics);
   std::vector<double> w_boot (names.size (), 0.0);
   std::vector<double> w_rls (names.size (), 0.0);
+
+  // Compute bootstrap weights using formal coefficient matrices
   for (std::size_t i = 0; i < names.size (); ++i)
     {
-      const auto &n = names[i];
-      w_boot[i]
-          = BootstrapWeight (n, cfg.focus, cfg.sensitivity, cfg.stability);
-      auto it = p_ctx.blender_state.find (n);
-      w_rls[i] = (it == p_ctx.blender_state.end ()) ? 0.0 : it->second;
+      w_boot[i] = BootstrapWeightByIndex (i, cfg.focus, cfg.sensitivity,
+                                          cfg.stability);
     }
-  const double confidence = ComputeBlendConfidence (p_ctx.signals_processed,
-                                                    cfg.stability);
+
+  // Compute RLS weights using learned coefficients if available
+  if (!p_ctx.rls_coefficients.empty ()
+      && p_ctx.rls_coefficients.size () == kNumMetrics)
+    {
+      // Use coefficient-space RLS weights: w_rls[i] = sigmoid(a_F*F + a_S*S +
+      // a_T*T + b)
+      for (std::size_t i = 0; i < names.size () && i < kNumMetrics; ++i)
+        {
+          w_rls[i] = ComputeRLSWeight (p_ctx.rls_coefficients[i], cfg.focus,
+                                       cfg.sensitivity, cfg.stability);
+        }
+      p_ctx.rls_coefficients_ready = true;
+    }
+  else
+    {
+      // Fallback to legacy blender_state if coefficients not initialized
+      for (std::size_t i = 0; i < names.size (); ++i)
+        {
+          auto it = p_ctx.blender_state.find (names[i]);
+          w_rls[i] = (it == p_ctx.blender_state.end ()) ? w_boot[i] : it->second;
+        }
+    }
+
+  const double confidence
+      = ComputeBlendConfidence (p_ctx.signals_processed, cfg.stability);
   std::vector<double> w_raw = BlendWeights (w_boot, w_rls, confidence);
   double weight_sum = 0.0;
   int effective = 0;

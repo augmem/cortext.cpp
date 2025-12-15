@@ -37,6 +37,8 @@ erDiagram
         int timestamp
         text source
         json metadata "blob_id reference"
+        blob event_emotion "6d vector"
+        blob ambient_mood "6d vector"
         int retrieved_count
         int used_count
         real contextual_gain
@@ -184,7 +186,7 @@ erDiagram
 | Entity | Algorithm | Purpose |
 |--------|-----------|---------|
 | `EMBEDDINGS` | Section 12.4 | Vector-backed nodes (memory, summary, concept types) |
-| `MEMORIES` | Alg 14, 18 | Extended memory store with feedback metrics |
+| `MEMORIES` | Alg 14, 18, 4b | Extended memory store with feedback & mood metrics |
 | `GRAPH_NODES` | Section 12.4 | Entity nodes with optional vectorization |
 | `GRAPH_EDGES` | Section 12.4 | Relationships: co_occurs, implies, contradicts, reinforces, derived_from |
 | `GENERATION_TRACE` | Alg 19 | Output embeddings for influence feedback |

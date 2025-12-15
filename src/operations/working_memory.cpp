@@ -113,10 +113,11 @@ WorkingMemory::Execute (OperationContext &context) const
 
   const double benefit = core::Clamp01 (
       context.GetCompositeScore ().value_or (p_ctx.weight_relevance));
-  const double threshold_T = core::Clamp (p_ctx.T_dynamic,
-                                          constants::kNormalizedMin,
-                                          constants::kNormalizedMax);
-  const double margin = benefit - threshold_T;
+  // gate_threshold = lerp(0.1, 0.4, F) per Algorithm 24 spec
+  // Higher Focus (narrower attention) => stricter gating (0.4)
+  // Lower Focus (wider attention) => permissive gating (0.1)
+  const double gate_threshold = core::WMGateThreshold (cfg.focus);
+  const double margin = benefit - gate_threshold;
   const double cost_total
       = cost_per_slot * (static_cast<double> (p_ctx.wm_slots.size ()) + 1.0)
         + complexity_penalty;

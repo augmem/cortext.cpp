@@ -53,9 +53,13 @@ public:
     std::vector<long long>
         used_memory_ids; // subset marked used in this processing step
 
-    // Gate decision (Algorithm 27)
-    bool interrupt_allowed = false;
-    bool at_boundary = false;
+    // Gate decisions
+    bool interrupt_allowed = false;  // Algorithm 27
+    bool at_boundary = false;        // Algorithm 12
+    bool write_decision = false;     // Algorithm 7+8: score > (T - hysteresis)
+
+    // Storage output (MemoryStorage operation)
+    std::optional<long long> stored_embedding_id;  // Set if stored to memory
 
     // Key thresholds and stabilizers
     double threshold_T_dynamic = 0.0;  // Alg 8
@@ -92,6 +96,14 @@ public:
 private:
   void StartNewEpisode ();
   void FinalizeEpisode ();
+
+  // State persistence helpers (called within FinalizeEpisode transaction)
+  void PersistProcessorState ();
+  void PersistBlenderState ();
+  void PersistRecentContext ();
+  void PersistRecentScores ();
+  void PersistObservedRetentionHistory ();
+  void PersistRLSCoefficients ();
 
   Config config_;
   std::shared_ptr<Store> store_;

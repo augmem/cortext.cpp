@@ -88,7 +88,7 @@ UpdateMemoryStrength::Execute (OperationContext &context) const
               "  last_used = CASE WHEN ? > 0 THEN ? ELSE last_used END, "
               "  strength = MAX(0.0, "
               "    strength "
-              "    + (? * ? * ((1.0 - ?) * use_frequency + ? * ?)) " // reinforcement * serial-position
+              "    + (? * ((1.0 - ?) * use_frequency + ? * ?)) " // reinforcement (S × EWMA)
               "    + (? * (? * (" // influence gate * F *
               "           (CASE WHEN ? < -1.0 THEN -1.0 "
               "                 WHEN ? >  1.0 THEN  1.0 "
@@ -119,12 +119,9 @@ UpdateMemoryStrength::Execute (OperationContext &context) const
         //  16: cg_event (original)
         //  17: lambda
         //  18: id
-        const double sp_mult
-            = context.GetSerialPositionMultiplier ().value_or (
-                constants::kNormalizedMax);
         op.params = { used_flag,      cg_event,  alpha,    alpha,
                       used_flag,      used_flag, ts,       S,
-                      sp_mult,        alpha,     alpha,    used_flag,
+                      alpha,          alpha,     used_flag,
                       gate_influence, F,         cg_event, cg_event,
                       cg_event,       lambda,    id };
         context.AddWriteInstruction (std::move (op));

@@ -5,6 +5,7 @@
 #include "cortext/processor/operation_set.hpp"
 #include "cortext/signal.hpp"
 #include "cortext/store/sqlite_store.hpp"
+#include "cortext/store/utils.hpp"
 #include "cortext/telemetry/telemetry.hpp"
 
 #include "cortext/operations/consolidation.hpp"
@@ -49,9 +50,14 @@
 #include "cortext/operations/sensitivity_feedback.hpp"
 #include "cortext/operations/serial_position.hpp"
 #include "cortext/operations/serial_position_apply.hpp"
+#include "cortext/operations/signal_metrics_persistence.hpp"
 #include "cortext/operations/stability.hpp"
+#include "cortext/operations/write_gate.hpp"
+#include "cortext/operations/memory_storage.hpp"
 #include "cortext/operations/stability_feedback.hpp"
+#include "cortext/operations/generation_trace.hpp"
 #include "cortext/operations/working_memory.hpp"
+#include "cortext/operations/detect_memory_usage.hpp"
 
 #include "cortext/operations/consolidation_gate.hpp"
 #include "cortext/telemetry/telemetry.hpp"
@@ -69,18 +75,6 @@ ToEigen (const std::vector<float> &v)
                                             static_cast<int> (v.size ()));
 }
 
-std::vector<unsigned char>
-ToUnsignedVector (const std::vector<char> &blob)
-{
-  if (blob.empty ())
-    {
-      return {};
-    }
-  std::vector<unsigned char> out;
-  out.resize (blob.size ());
-  std::memcpy (out.data (), blob.data (), blob.size ());
-  return out;
-}
 
 bool
 LoadObjstorePayload (Store *store, const std::vector<unsigned char> &blob_id,
@@ -99,20 +93,7 @@ LoadObjstorePayload (Store *store, const std::vector<unsigned char> &blob_id,
           const auto it = rows[0].find ("data");
           if (it != rows[0].end ())
             {
-              std::vector<unsigned char> bytes;
-              if (it->second.type () == typeid (std::vector<char>))
-                {
-                  const auto &blob
-                      = std::any_cast<const std::vector<char> &> (
-                          it->second);
-                  bytes = ToUnsignedVector (blob);
-                }
-              else if (it->second.type ()
-                       == typeid (std::vector<unsigned char>))
-                {
-                  bytes = std::any_cast<const std::vector<unsigned char> &> (
-                      it->second);
-                }
+              const auto bytes = store::BlobFromAny (it->second);
               if (!bytes.empty ())
                 {
                   out.assign (reinterpret_cast<const char *> (bytes.data ()),
@@ -184,20 +165,7 @@ QueryMemoryIndex (Store *store, long long id, Cortext::Context::Memory &m)
               {
                 return std::vector<unsigned char> ();
               }
-            if (it->second.type () == typeid (std::vector<char>))
-              {
-                const auto &blob
-                    = std::any_cast<const std::vector<char> &> (
-                        it->second);
-                return ToUnsignedVector (blob);
-              }
-            if (it->second.type ()
-                == typeid (std::vector<unsigned char>))
-              {
-                return std::any_cast<
-                    const std::vector<unsigned char> &> (it->second);
-              }
-            return std::vector<unsigned char> ();
+            return store::BlobFromAny (it->second);
           };
           const auto blob_id_bytes = get_blob ("blob_id");
           if (!blob_id_bytes.empty ())
@@ -339,6 +307,11 @@ struct Cortext::Impl
     using cortext::operations::UpdateThreshold;
     using cortext::operations::UpdateUncertainty;
     using cortext::operations::WorkingMemory;
+    using cortext::operations::PersistSignalMetrics;
+    using cortext::operations::RecordGenerationTrace;
+    using cortext::operations::ComputeWriteGate;
+    using cortext::operations::MemoryStorage;
+    using cortext::operations::DetectMemoryUsage;
 
     pipeline_root = std::make_unique<OperationSet> (
         std::make_unique<EnsureGraphSchema> (),
@@ -348,6 +321,11 @@ struct Cortext::Impl
         std::make_unique<InitializeFocusPriors> (),
         std::make_unique<InitializeSensitivityPriors> (),
         std::make_unique<InitializeStabilityPriors> (),
+
+        // Implicit feedback: detect if cached retrievals were "used" in this
+        // signal. Must run before feedback operations (ApplyFocusFeedback,
+        // ApplySensitivityFeedback, etc.) that consume MemoryUsageEvents.
+        std::make_unique<DetectMemoryUsage> (),
 
         std::make_unique<UpdateFocus> (),
         std::make_unique<UpdateSensitivity> (),
@@ -365,6 +343,9 @@ struct Cortext::Impl
 
         std::make_unique<UpdatePrecisionDelta> (),
         std::make_unique<UpdateThreshold> (),
+        std::make_unique<ComputeWriteGate> (),
+        std::make_unique<MemoryStorage> (),
+        std::make_unique<PersistSignalMetrics> (),
 
         std::make_unique<GraphAugmentedRetrieveCandidates> (),
         std::make_unique<ComputeGoalAlignment> (),
@@ -380,6 +361,7 @@ struct Cortext::Impl
         std::make_unique<ApplyStabilityFeedback> (),
         std::make_unique<UpdateStability> (),
         std::make_unique<ApplyInfluenceFeedback> (),
+        std::make_unique<RecordGenerationTrace> (),
 
         std::make_unique<ApplySerialPositionEffects> (),
         std::make_unique<ApplySerialPositionMultiplier> (),
@@ -421,6 +403,7 @@ struct Cortext::Impl
     // Populate output metrics
     result.output.composite_score = out.composite_score;
     result.output.threshold = out.threshold_T_dynamic;
+    result.output.decision = out.write_decision;
     result.output.effective_focus = out.effective_focus;
     result.output.coherence = cfg.focus; // Placeholder - coherence not in Output yet
     result.output.emotion_intensity = out.emotion_intensity;
@@ -431,6 +414,9 @@ struct Cortext::Impl
     for (const auto& [metric_enum, value] : out.metrics) {
       result.output.metrics[static_cast<int>(metric_enum)] = value;
     }
+
+    // Wire stored_embedding_id from MemoryStorage operation
+    result.output.stored_embedding_id = out.stored_embedding_id;
     
     if (!store)
       {
@@ -472,7 +458,17 @@ Cortext::ProcessText (const std::string &text, std::uint64_t timestamp,
   telemetry::ScopedSpan encode_span ("cortext.encode");
   impl_->encoder->EncodeText (text, v);
   encode_span.SetStatusOk ();
-  auto out = impl_->ProcessEmbedding (ToEigen (v), timestamp, source_id);
+
+  // Build signal with payload for MemoryStorage
+  cortext::Signal s;
+  s.embedding = ToEigen (v);
+  s.timestamp = timestamp;
+  s.source_id = source_id;
+  s.payload = std::vector<unsigned char> (text.begin (), text.end ());
+  s.modality = "text";
+  s.mimetype = "text/plain";
+
+  auto out = impl_->processor->Process (s);
   span.SetAttribute ("cortext.candidate_memory_count",
                      static_cast<std::int64_t> (out.candidate_memory_ids.size ()));
   span.SetAttribute ("cortext.used_memory_count",
@@ -493,7 +489,22 @@ Cortext::ProcessAudio (const float *pcm, std::size_t num_samples,
   telemetry::ScopedSpan encode_span ("cortext.encode");
   impl_->encoder->EncodeAudio (pcm, num_samples, v);
   encode_span.SetStatusOk ();
-  auto out = impl_->ProcessEmbedding (ToEigen (v), timestamp, source_id);
+
+  // Build signal with payload for MemoryStorage
+  cortext::Signal s;
+  s.embedding = ToEigen (v);
+  s.timestamp = timestamp;
+  s.source_id = source_id;
+  // Store raw PCM bytes (f32le) as payload
+  const std::size_t byte_len = num_samples * sizeof (float);
+  s.payload = std::vector<unsigned char> (byte_len);
+  std::memcpy (s.payload->data (), pcm, byte_len);
+  s.modality = "audio";
+  s.mimetype = "audio/pcm;format=f32";
+  s.sample_rate = 16000; // ImageBind expects 16kHz
+  s.num_samples = num_samples;
+
+  auto out = impl_->processor->Process (s);
   span.SetAttribute ("cortext.candidate_memory_count",
                      static_cast<std::int64_t> (out.candidate_memory_ids.size ()));
   span.SetAttribute ("cortext.used_memory_count",
@@ -515,7 +526,25 @@ Cortext::ProcessImage (const std::uint8_t *data, int width, int height,
   telemetry::ScopedSpan encode_span ("cortext.encode");
   impl_->encoder->EncodeImage (data, width, height, channels, v);
   encode_span.SetStatusOk ();
-  auto out = impl_->ProcessEmbedding (ToEigen (v), timestamp, source_id);
+
+  // Build signal with payload for MemoryStorage
+  cortext::Signal s;
+  s.embedding = ToEigen (v);
+  s.timestamp = timestamp;
+  s.source_id = source_id;
+  // Store raw image bytes as payload
+  const std::size_t byte_len
+      = static_cast<std::size_t> (width) * static_cast<std::size_t> (height)
+        * static_cast<std::size_t> (channels);
+  s.payload = std::vector<unsigned char> (byte_len);
+  std::memcpy (s.payload->data (), data, byte_len);
+  s.modality = "image";
+  s.mimetype = "image/raw"; // Raw pixel bytes (RGB/RGBA)
+  s.width = width;
+  s.height = height;
+  s.channels = channels;
+
+  auto out = impl_->processor->Process (s);
   span.SetAttribute ("cortext.candidate_memory_count",
                      static_cast<std::int64_t> (out.candidate_memory_ids.size ()));
   span.SetAttribute ("cortext.used_memory_count",

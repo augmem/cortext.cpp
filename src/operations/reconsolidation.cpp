@@ -150,6 +150,16 @@ ApplyReconsolidation::Execute (OperationContext &context) const
         op.params = { embedding_id, ToFloatVector (blended) };
         context.AddWriteInstruction (std::move (op));
       }
+
+      // Also update vec0 index for KNN search.
+      {
+        BufferedWriteInstruction op;
+        op.query
+            = "INSERT OR REPLACE INTO vec_embeddings (embedding_id, embedding) "
+              "VALUES (?, ?)";
+        op.params = { embedding_id, ToFloatVector (blended) };
+        context.AddWriteInstruction (std::move (op));
+      }
     }
 
   // Increase uncertainty proportional to max drift (cap 0.2).

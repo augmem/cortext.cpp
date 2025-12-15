@@ -34,3 +34,16 @@ TEST_CASE ("AlphaF monotonicity and bounds", "[core][knobs]")
   REQUIRE (low >= Catch::Approx (0.05));
   REQUIRE (highU <= Catch::Approx (0.50));
 }
+
+TEST_CASE ("WMGateThreshold follows spec: lerp(0.1, 0.4, F)", "[core][knobs]")
+{
+  // gate_threshold = lerp(0.1, 0.4, F) per Algorithm 24
+  // At F=0 (wide attention): permissive (0.1)
+  // At F=1 (narrow attention): strict (0.4)
+  REQUIRE (WMGateThreshold (0.0) == Catch::Approx (0.1));
+  REQUIRE (WMGateThreshold (1.0) == Catch::Approx (0.4));
+  REQUIRE (WMGateThreshold (0.5) == Catch::Approx (0.25));
+
+  // Monotonic: higher F means higher (stricter) threshold
+  REQUIRE (WMGateThreshold (0.3) < WMGateThreshold (0.7));
+}
