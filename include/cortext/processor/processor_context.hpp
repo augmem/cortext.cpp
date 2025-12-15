@@ -181,6 +181,14 @@ struct ProcessorContext
   RecentIdsLru recent_ids_lru_;
 
   // ======================================================================
+  // Embedding Prediction Error State (Section 3.1.4)
+  // ======================================================================
+  /// @brief Previous signal embedding for delta calculation
+  std::optional<Eigen::VectorXf> last_embedding;
+  /// @brief EWMA of embedding deltas (Δx_trend)
+  std::optional<Eigen::VectorXf> delta_x_trend;
+
+  // ======================================================================
   // Focus-Related State (Algorithms 1, 2, 15)
   // ======================================================================
   double weight_relevance_prior = 0.5;
@@ -212,6 +220,10 @@ struct ProcessorContext
   double emotion_intensity_ewma = 0.0;
   double valence_ewma = 0.5;
   double arousal_ewma = 0.0;
+
+  // Mood state (Algorithm 4b, persisted tonic state)
+  // Order: [anger, fear, joy, love, sadness, surprise]
+  std::array<double, 6> mood_vector = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
 
   // ======================================================================
   // Stability-Related State (Algorithms 5, 6, 17)

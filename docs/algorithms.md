@@ -148,8 +148,8 @@ clamp(v, lo, hi)
 sigmoid(z) = 1 / (1 + e^(−z))
 EWMA(prev, x, α) = (1 − α)×prev + α×x
 cos(u,v) = cosine\_similarity(u,v)
-normalize(v) = v / ||v||                  # L2 normalization (vectors)
-normalize(x, \[a,b]) = (x − a) / (b − a)  # range normalization (scalars)
+l2_normalize(v) = v / ||v||                  # L2 normalization (vectors)
+minmax_normalize(x, [a,b]) = (x − a) / (b − a)  # range normalization (scalars)
 map01(z) = clamp((z + 1)/2, 0, 1)         # maps \[-1,1] → \[0,1] for signed metrics
 ln = natural log; π = 3.14159…
 
@@ -210,7 +210,7 @@ w\_ret(T)             = round(lerp(20, 120, T))
 
 # Threshold prior and adaptation rate
 
-T\_prior(F,S,T)       = lerp(0.10, 0.30, T) × (1 − 0.3×S)
+θ_prior(F,S,T)       = lerp(0.10, 0.30, T) × (1 − 0.3×S)
 tau(T)               = lerp(5.0, 20.0, T)
 
 # Periphery cutoff
@@ -252,12 +252,12 @@ u(t) = EWMA(u(t−1), u\_raw(t), α = α\_u(T))
 
 # Primary estimator (preferred)
 
-u\_raw(t) = normalize\_weighted\_blend(\[
+u\_raw(t) = minmax_normalize(blend(\[
 var\_recent\_scores,          # variance of recent composite scores over w\_score(T)
 focus\_spread\_entropy,       # Algorithm 11 (normalized entropy of kNN sims)
 coherence\_complement,       # 1 − coherence from Algorithm 10
 novelty\_surprise\_spikes     # fusion of Algorithm 4 novelty + Algorithm 13 surprisal
-], weights = normalize(\[F, S, 1 − T]))
+], weights = l2_normalize(\[F, S, 1 − T])), 0, 1)
 
 # Fallback when structural metrics are unavailable
 
@@ -276,8 +276,11 @@ u\_raw(t) = 1 − maturity(t)
 
 # Homeostatic controller (Alg 8)
 
-κ\_r = 0.10                      # rate‑error gain
-sensitivity\_gain = 0.10         # ΔT\_sens default gain when Alg 4 not provided
+# Homeostatic controller (Alg 8)
+κ_r = 0.10                      # rate‑error gain
+sensitivity_gain = 0.10         # Δθ_sens default gain when Alg 4 not provided
+LOGPROB_SCALE = 5.0             # Alg 13 scaling factor
+SENSITIVITY_GAIN_DEFAULT = 0.10 # Fallback gain for sensitivity
 
 # Sustained horizon (Alg 19)
 
@@ -325,13 +328,13 @@ density\_k(T)           = k\_neighbors(T)
 
 ```
 Metric	Knob Dependence	Expression (normalized domains)
-Relevance	↑F	cos(x, mean(ctx)) × (0.5 + F)
+Relevance	↑F	clamp(cos(x, mean(ctx)) × (0.5 + F), -1, 1)
 Mismatch	↓F, ↑S	(1 − F) × S × novelty(x)
 Surprise	↑S, ↓T	entropy_spike × S × (1 − T)
-Rarity	↑F, ↓T	(1 − mean_sim) × (0.5 + 0.5F) × (1 − 0.2T)
+Rarity	↑F, ↓T	min(1, (1 − mean_sim) × (0.5 + 0.5F) × (1 − 0.2T))
 Drift	↓T	‖mean(ctx_t) − mean(ctx_{t−k})‖ × (1 − T)
 Contradiction	S vs F	max(0, S − F)
-Utility (ΔSSE)	↑F, ↓S	ΔSSE × (0.5 + 0.5F) × (1 − 0.3S)
+Utility (ΔSSE)	↑F, ↓S	l2_normalize(ΔSSE) × (0.5 + 0.5F) × (1 − 0.3S)
 Periphery	↑T	1 − decay(mean_sim, half_life_T)
 Coverage	↑F	avg(max(0, cos(x,q) − top_db(q))) × F
 Salience	F,S	(rarity + novelty_recent)/2 × (F + S)/2
@@ -576,10 +579,11 @@ Output: relevance/gating priors
 Algorithm 2: Dynamic Update per Signal (Focus)
 
 At each signal event t:
-recent\_context ← last n\_ctx(T) items
-observed\_cosine ← cos(x\_t, mean(recent\_context))
-weight\_relevance\_t ← EWMA(weight\_relevance\_{t−1}, observed\_cosine, α = α\_F(relevance))
-attention\_width\_t ← clamp(attention\_width\_{t−1}, \[attention\_width\_min, attention\_width\_max])
+recent_context ← last n_ctx(T) items
+observed_cosine ← cos(x_t, mean(recent_context))
+weight_relevance_t ← EWMA(weight_relevance_{t−1}, map01(observed_cosine), α = α_F(t))
+# attention_width_t is updated via feedback (Alg 15) or drift (Alg 12), not here.
+attention_width_t ← clamp(attention_width_{t−1}, [attention_width_min, attention_width_max])
 
 ***
 
@@ -634,15 +638,15 @@ rate_target_t ← EWMA(rate_target_{t−1}, observed_write_rate(w_rate_seconds),
 κ_emo ← κ_base × S
 ΔThreshold_emotion_t ← − κ_emo × emotion_intensity_t × (0.5 + 0.5 × arousal_t)
 
-ΔThreshold_sensitivity_t ← (− gain_t × (S − 0.5) + ΔThreshold_emotion_t)
-# This raw delta is passed to Algorithm 8 for final clamping
+ΔThreshold_sensitivity_t ← − gain_t × (S − 0.5)
+# Note: ΔThreshold_emotion_t is passed separately to Algorithm 8
 ```
 
 Parameter derivation for metric weights:
 For each metric m (after sufficient history):
 μ\_m ← mean(metric\_m over w\_score(T))
 σ\_m ← std(metric\_m over w\_score(T))
-base\_m ← normalize(μ\_m + σ\_m) → \[0,1]  # Target one std dev above mean
+base\_m ← minmax_normalize(μ\_m + σ\_m, 0, 1)  # Target one std dev above mean
 weight\_m\_t ← EWMA(weight\_m\_{t-1}, base\_m × (0.5 + 0.5S), α = α\_S(weight))
 
 Algorithm 4b: The Mood Integrator (Tonic State)
@@ -662,9 +666,14 @@ Update Equation:
 M_t = (λ_mood(T) × M_{t-1}) + (α_mood(S) × e_t)
 M_t ← clamp(M_t, -1.0, 1.0)  # simple stability clamp
 
+Calculation (Threshold Bias):
+κ_mood ← κ_base × S
+m_norm ← ||M_t|| / sqrt(6)
+ΔThreshold_mood_t ← − κ_mood × clamp(m_norm, 0, 1)
+
 Output:
 - M_t: Current mood vector
-- ||M_t||: Mood magnitude used for threshold bias
+- ΔThreshold_mood_t: Bias passed to Algorithm 8
 
 Note on Storage (Dual-Signal):
 When writing to memory, store both:
@@ -693,7 +702,7 @@ Algorithm 6: Dynamic Update per Signal (Stability)
 At each signal event t:
 active\_memories ← { m | strength(m) ≥ periphery\_cutoff(T) }
 observed\_retention ← avg\_age(active\_memories)
-hysteresis\_t ← EWMA(hysteresis\_{t−1}, observed\_retention, α = α\_T(hysteresis))
+retention_ema_t ← EWMA(retention_ema_{t−1}, observed_retention, α = α_T(retention))
 last\_w\_ret ← last w\_ret(T) values of observed\_retention
 μ\_ret ← mean(last\_w\_ret); σ\_ret ← max(std(last\_w\_ret), 1.0)
 zscore\_ret ← clamp((observed\_retention − μ\_ret)/σ\_ret, −3, +3)
@@ -753,32 +762,33 @@ Critical Implementation Note (Expanded)
 
 Algorithm 8: Adaptive Threshold Evolution (Unified, Bayesian Prior/Evidence, Homeostatic)
 
-Input: scores\[0:t], knobs (F, S, T), optional ΔThreshold\_sensitivity\_t (Alg 4), optional ΔThreshold\_precision\_t (Sec. 5.5), optional ΔThreshold\_mood\_t (Alg 4b)
-Output: T\_dynamic
+Input: scores[0:t], knobs (F, S, T), optional ΔThreshold_sensitivity_t (Alg 4), optional ΔThreshold_precision_t (Alg 27), optional ΔThreshold_mood_t (Alg 4b)
+Output: θ_dynamic
 
-1. w ← w\_score(T)
+1. w ← w_score(T)
 2. count ← len(scores)
-3. T\_prior ← T\_prior(F, S, T)
-4. observed\_p90 ← percentile(scores\_{t−w:t}, 90)
-5. ρ\_prior ← prior\_mass(T);  ρ\_obs ← u(t) × min(w, count)
-6. T\_target ← (ρ\_prior × T\_prior + ρ\_obs × observed\_p90) / max(1e−6, ρ\_prior + ρ\_obs)
-7. T\_dynamic\_t ← EWMA(T\_dynamic\_{t−1}, T\_target, α = α\_T(t))
-8. ΔT\_sens ← (ΔThreshold\_sensitivity\_t is provided) ? ΔThreshold\_sensitivity\_t : (S − 0.5) × sensitivity\_gain
+3. θ_prior ← θ_prior(F, S, T)
+4. observed_p90 ← percentile(scores_{t−w:t}, 90)
+5. ρ_prior ← prior_mass(T);  ρ_obs ← u(t) × min(w, count)
+6. θ_target ← (ρ_prior × θ_prior + ρ_obs × observed_p90) / max(1e−6, ρ_prior + ρ_obs)
+7. θ_dynamic_t ← EWMA(θ_dynamic_{t−1}, θ_target, α = α_T(t))
+8. Δθ_sens ← (ΔThreshold_sensitivity_t is provided) ? ΔThreshold_sensitivity_t : -(S − 0.5) × SENSITIVITY_GAIN_DEFAULT
 9. Continuous‑time rate control (EMA + ESS):
-   a) Δt ← now − last\_timestamp; last\_timestamp ← now; Δt ← max(Δt, 1e−3)
-   b) α\_dt ← 1 − exp(−Δt/max(Δt,1e−3)); dt\_ema ← (1 − α\_dt)×dt\_ema + α\_dt×Δt; dt\_base ← max(dt\_ema, 1.0)
-   c) τ\_rate ← max(2^(3T) × dt\_base, 1.0); α ← 1 − exp(−Δt/τ\_rate)
-   d) ρ\_inst ← (Δwrites/Δt) × 60; m\_rate ← (1 − α)×m\_rate + α×ρ\_inst; denom ← max(1 − (1 − α)^(ticks+1), 1e−6); ρ\_hat ← m\_rate/denom
+   a) Δt ← now − last_timestamp; last_timestamp ← now; Δt ← max(Δt, 1e−3)
+   b) α_dt ← 1 − exp(−Δt/1.0); dt_ema ← (1 − α_dt)×dt_ema + α_dt×Δt; dt_base ← max(dt_ema, 1.0)
+   c) τ_rate ← max(2^(3T) × dt_base, 1.0); α ← 1 − exp(−Δt/τ_rate)
+   d) ρ_inst ← (Δwrites/Δt) × 60; m_rate ← (1 − α)×m_rate + α×ρ_inst; denom ← max(1 − (1 − α)^(ticks+1), 1e−6); ρ_hat ← m_rate/denom
    e) β ← max(0, 1 − α); ESS ← min((1 + β)/max(1 − β, 1e−6), 100); reliability ← 1 − exp(−ESS × (1 − T))
-   f) rate\_error ← tanh((ρ\_hat − rate\_target\_t) / max(rate\_target\_t, 1e−6))
-   g) cap ← 0.25 × hysteresis\_t; ΔT\_homeo ← clamp(reliability × κ\_r × (1 − T) × (1 − maturity(t)) × rate\_error, −cap, +cap)
-10. ΔT\_prec ← (ΔThreshold\_precision\_t is provided) ? ΔThreshold\_precision\_t : 0
-11. ΔT\_emo ← (ΔThreshold\_emotion\_t is provided) ? ΔThreshold\_emotion\_t : 0
-12. ΔT\_mood ← (ΔThreshold\_mood\_t is provided) ? ΔThreshold\_mood\_t : 0
-13. ΔT ← ΔT\_sens + ΔT\_homeo + ΔT\_prec + ΔT\_emo + ΔT\_mood
-14. ΔT\_limited ← clamp(ΔT, −max\_ΔT\_per\_min(t), +max\_ΔT\_per\_min(t))
-15. T\_dynamic\_t ← clamp(T\_dynamic\_t + ΔT\_limited, Tmin(t), Tmax(t))
-16. hysteresis\_t ← lerp(band\_min, band\_max, T)
+   f) rate_error ← tanh((ρ_hat − rate_target_t) / max(rate_target_t, 1e−6))
+   g) cap_homeo ← 0.25 × hysteresis_t; Δθ_homeo ← clamp(reliability × κ_r × (1 − T) × (1 − maturity(t)) × rate_error, −cap_homeo, +cap_homeo)
+10. Δθ_prec ← (ΔThreshold_precision_t is provided) ? ΔThreshold_precision_t : 0
+11. Δθ_emo ← (ΔThreshold_emotion_t is provided) ? ΔThreshold_emotion_t : 0
+12. Δθ_mood ← (ΔThreshold_mood_t is provided) ? ΔThreshold_mood_t : 0
+13. Δθ ← Δθ_sens + Δθ_homeo + Δθ_prec + Δθ_emo + Δθ_mood
+14. cap_total ← max_ΔT_per_min(t) * (Δt / 60.0)
+15. Δθ_limited ← clamp(Δθ, −cap_total, +cap_total)
+16. θ_dynamic_t ← clamp(θ_dynamic_t + Δθ_limited, Tmin(t), Tmax(t))
+16. hysteresis_t ← lerp(band_min, band_max, T)
 
 Telemetry (diagnostics): Δt, dt\_base, τ\_rate, α, β, ESS, reliability, ρ\_inst, ρ\_hat, rate\_target\_t, rate\_error, κ\_r (gain), m\_gate = (1 − T) × (1 − maturity), cap, ΔT\_homeo, ΔT\_total, T\_prior, T\_dynamic\_t, hysteresis\_t
 
@@ -809,7 +819,7 @@ Algorithm 12: Trajectory Drift / Temporal Gradient
 
 **Pseudocode — finalize\_episode() (Algorithm 12 extension)**
 
-````python
+```python
 def finalize_episode():
     db.begin_txn()
     db.write_episode_summary(current_episode)
@@ -820,20 +830,22 @@ def finalize_episode():
     recent_context = tail(recent_context, n_ctx(T))
     current_episode.boundary_ts = now()
     db.commit_txn()
+```
 
 Input: mean(ctx_t), mean(ctx_{t−k})
 Output: drift_mag_t
-	1.	drift_vec_t ← normalize(mean(ctx_t)) − normalize(mean(ctx_{t−k}))
+	1.	drift_vec_t ← l2_normalize(mean(ctx_t)) − l2_normalize(mean(ctx_{t−k}))
 	2.	drift_mag_t ← ||drift_vec_t||
 	3.	drift_threshold ← lerp(0.10, 0.35, T)
 	4.	Event: if drift_mag_t > drift_threshold → commit episodic boundary
+    Note: drift_mag_t ranges [0, 2] (Euclidean distance between unit vectors).
 
 ### Algorithm 13: Logprob‑Derived Surprise
 
-Input: token_logprobs[0:n]
+Input: token_logprobs[0:n] (natural log)
 Output: logprob_surprisal_t
-	1.	mean_logp ← mean(−log(token_logprobs))
-	2.	logprob_surprisal_t ← clamp(mean_logp / 5.0, 0, 1)
+	1.	mean_logp ← mean(-token_logprobs)
+	2.	logprob_surprisal_t ← clamp(mean_logp / LOGPROB_SCALE, 0, 1)
 	3.	surprise_t ← 1 − (1 − drift_mag_t) × (1 − logprob_surprisal_t)
 
 ---
@@ -845,7 +857,7 @@ Output: logprob_surprisal_t
 For each memory m at time t:
 use_frequency_t ← EWMA(use_frequency_{t−1}, used_flag(m), α = α_S(use))
 λ(T) ← ln(2) / base_half_life_prior(T)
-strength_t ← strength_{t−1} + (S × use_frequency_t) − λ(T)
+strength_t ← strength_{t−1} + (S × use_frequency_t) − (λ(T) × Δt)
 if strength_t < periphery_cutoff(T): evict(m)
 
 ---
@@ -887,7 +899,7 @@ adj ← clamp(mean(stability(m_used)) − 1.0, −0.25, +0.25)
 For each memory m:
 denom ← max(1, retrieved_count)
 influence_factor = (used_count / denom) × clamp(contextual_gain(m), -1, +1)
-strength_t ← strength_{t−1} + (S × use_frequency_t) + (F × influence_factor) − λ(T)
+strength_t ← strength_{t−1} + (S × use_frequency_t) + (F × influence_factor) − (λ(T) × Δt)
 
 ### Adaptive Threshold Modulation (5.5)
 
@@ -1080,25 +1092,25 @@ max_semantic_overlap < dup_thresh and
 
 **Observability payload (on suppression):**
 
-```
+```json
 {
   "event": "INTERRUPT_SUPPRESSED",
   "reason": "duplicate | below_threshold | low_novelty | not_boundary",
-  "jaccard": ,
-  "best_mu": ,
-  "max_semantic_overlap": ,
-  "dup_thresh": ,
-  "effective_threshold": ,
-  "refractory_multiplier": ,
-  "Delta_tokens": ,
-  "active_context_size": ,
-  "max_relevance": ,
-  "boundary": ,
-  "boundary_mult": ,
-  "K": ,
-  "weights": {"cov": , "rel": , "red": , "coh": }
+  "jaccard": 0.0,
+  "best_mu": 0.0,
+  "max_semantic_overlap": 0.0,
+  "dup_thresh": 0.0,
+  "effective_threshold": 0.0,
+  "refractory_multiplier": 0.0,
+  "Delta_tokens": 0,
+  "active_context_size": 0,
+  "max_relevance": 0.0,
+  "boundary": false,
+  "boundary_mult": 0.0,
+  "K": 10,
+  "weights": {"cov": 0.0, "rel": 0.0, "red": 0.0, "coh": 0.0}
 }
-````
+```
 
 On interrupt trigger, include:
 
@@ -1456,7 +1468,7 @@ Stores entity nodes and other non-embedded graph elements:
 | `type`         | TEXT NOT NULL    | (entity, goal)                    |
 | `label`        | TEXT             | Human-readable name               |
 | `embedding_id` | TEXT             | FK to embeddings table (nullable) |
-| `metadata`     | JSONB            | Additional attributes             |
+| `metadata`     | TEXT             | JSON attributes (SQLite)          |
 | `created_at`   | INTEGER          | Unix time of creation             |
 
 ##### Graph Edges Table
@@ -1597,20 +1609,14 @@ Touchpoints:
 
 ***
 
-### Algorithm 34: Mood-Congruent Retrieval Safety (Prosthetic Mode)
+### Annex: Helper Definitions
 
-Purpose: Prevent feedback loops where negative mood biases retrieval, causing further negative mood.
+* `measure_novelty(x)`: 1.0 - max(cosine_similarity(x, recent_context))
+* `entropy_spike(x)`: KL-divergence between current attention distribution and uniform.
+* `redundancy(m, context)`: Average similarity of `m` to other items in `context`.
+* `observed_write_rate(window)`: Count of writes in the last `window` seconds / `window`.
+* `blend(values, weights)`: Weighted sum of values.
+* `sim_gen(m)`: Similarity between memory `m` and the generated output embedding.
+* `used_flag(m)`: 1 if memory `m` was used in the current step, 0 otherwise.
 
-1. Force Neutral Ranking:
-   During retrieval, ensure `w_mood` is forced to 0.
-   Score(m) = sim(q, m)  (purely semantic)
 
-2. Focus Spike:
-   If explicit query detected (e.g., "Who is this?"):
-   F_temporary ← 1.0 (maximize precision and objectivity)
-
-3. Context Display (Attribution Heuristic):
-   If `||M_t|| > threshold` (High Mood) AND `e_t approx 0` (Neutral Event):
-     Display: "Context: You met them while you were already feeling [Mood]."
-   Else if `e_t > threshold`:
-     Display: "Context: You reacted with [Emotion] to this specific event."

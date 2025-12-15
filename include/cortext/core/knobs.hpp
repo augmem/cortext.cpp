@@ -371,6 +371,23 @@ FlashbulbThresholdEff (double S, double emotion_intensity, double arousal)
   return base * (1.0 - 0.5 * emotion_intensity) * (1.0 - 0.3 * arousal);
 }
 
+// --- Algorithm 4b (Mood Integrator) Helpers ---
+inline double
+AlphaMood (double S)
+{
+  // α_mood(S) = lerp(0.01, 0.20, S)
+  // Higher sensitivity = faster mood reactivity to emotion events
+  return Lerp (0.01, 0.20, Clamp (S, 0.0, 1.0));
+}
+
+inline double
+LambdaMood (double T)
+{
+  // λ_mood(T) = lerp(0.90, 0.999, T)
+  // Higher stability = slower mood decay (more persistent mood)
+  return Lerp (0.90, 0.999, Clamp (T, 0.0, 1.0));
+}
+
 // --- Algorithm 24 (Working Memory) Helpers ---
 
 inline int

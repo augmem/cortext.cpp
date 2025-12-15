@@ -115,7 +115,7 @@ add_library(cortext
     src/operations/interrupt_gate.cpp
     src/operations/consolidation.cpp
     src/operations/consolidation_gate.cpp
-    src/operations/logprob_surprise.cpp
+    src/operations/embedding_prediction_error.cpp
     src/operations/precision.cpp
     src/operations/graph_schema.cpp
     src/operations/graph_build.cpp

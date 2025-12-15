@@ -92,6 +92,11 @@ MemoryStorage::Execute (OperationContext &context) const
         }
       const long long embedding_id = *id_opt;
 
+      // 2b. Insert into vec_embeddings for KNN search
+      transaction->Execute (
+          "INSERT INTO vec_embeddings (embedding_id, embedding) VALUES (?, ?)",
+          { embedding_id, emb_vec });
+
       // 3. Insert memory_index
       transaction->Execute (
           "INSERT INTO memory_index (embedding_id, modality, mime, source_id, "

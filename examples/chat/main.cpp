@@ -77,15 +77,10 @@ struct RetrievalLatencyState {
   std::optional<double> retrieval_latency_ms;
 };
 
-struct PersistLatencyState {
-  std::optional<double> encoder_latency_ms;
-  std::optional<double> storage_latency_ms;
-};
-
 class InMemorySpanExporter final : public opentelemetry::sdk::trace::SpanExporter {
 public:
-  explicit InMemorySpanExporter(std::shared_ptr<RetrievalLatencyState> retrieval_state, std::shared_ptr<PersistLatencyState> persist_state)
-      : retrieval_state_(std::move(retrieval_state)), persist_state_(std::move(persist_state)) {}
+  explicit InMemorySpanExporter(std::shared_ptr<RetrievalLatencyState> retrieval_state)
+      : retrieval_state_(std::move(retrieval_state)) {}
   std::unique_ptr<opentelemetry::sdk::trace::Recordable> MakeRecordable() noexcept override {
     return std::unique_ptr<opentelemetry::sdk::trace::Recordable>(new opentelemetry::sdk::trace::SpanData());
   }
@@ -104,7 +99,6 @@ public:
         if (it != attrs.end() && opentelemetry::nostd::holds_alternative<std::string>(it->second)) {
           const auto &op = opentelemetry::nostd::get<std::string>(it->second);
           if (retrieval_active_ && op == "SELECT") { retrieval_db_select_ms_ += duration_ms; }
-          if (persist_active_ && (op == "INSERT" || op == "UPDATE" || op == "REPLACE")) { persist_db_write_ms_ += duration_ms; }
         }
         continue;
       }
@@ -118,16 +112,6 @@ public:
         retrieval_last_hydrate_ms_.reset();
         continue;
       }
-      if (name == "chat.encode_text") { persist_active_ = true; persist_db_write_ms_ = 0.0; persist_last_encode_ms_ = duration_ms; continue; }
-      if (name == "chat.persist_text_memory") {
-        if (persist_state_) {
-          persist_state_->encoder_latency_ms = persist_last_encode_ms_;
-          persist_state_->storage_latency_ms = persist_db_write_ms_;
-        }
-        persist_active_ = false;
-        persist_last_encode_ms_.reset();
-        continue;
-      }
     }
     return opentelemetry::sdk::common::ExportResult::kSuccess;
   }
@@ -135,23 +119,16 @@ public:
   bool Shutdown(std::chrono::microseconds) noexcept override { return true; }
 private:
   std::shared_ptr<RetrievalLatencyState> retrieval_state_;
-  std::shared_ptr<PersistLatencyState> persist_state_;
   thread_local static bool retrieval_active_;
-  thread_local static bool persist_active_;
   thread_local static double retrieval_db_select_ms_;
-  thread_local static double persist_db_write_ms_;
   thread_local static std::optional<double> retrieval_last_encode_ms_;
   thread_local static std::optional<double> retrieval_last_hydrate_ms_;
-  thread_local static std::optional<double> persist_last_encode_ms_;
 };
 
 thread_local bool InMemorySpanExporter::retrieval_active_ = false;
-thread_local bool InMemorySpanExporter::persist_active_ = false;
 thread_local double InMemorySpanExporter::retrieval_db_select_ms_ = 0.0;
-thread_local double InMemorySpanExporter::persist_db_write_ms_ = 0.0;
 thread_local std::optional<double> InMemorySpanExporter::retrieval_last_encode_ms_ = std::nullopt;
 thread_local std::optional<double> InMemorySpanExporter::retrieval_last_hydrate_ms_ = std::nullopt;
-thread_local std::optional<double> InMemorySpanExporter::persist_last_encode_ms_ = std::nullopt;
 
 class InMemoryMetricExporter final : public opentelemetry::sdk::metrics::PushMetricExporter {
 public:
@@ -212,34 +189,95 @@ struct MemoryEvent {
   std::string content;
   std::string source_id;
   uint64_t timestamp;
-  
-  // Metrics (from ProcessorOutput)
-  std::optional<double> composite_score;
-  std::optional<double> threshold;
-  std::optional<bool> decision;
-  std::optional<bool> should_interrupt;
-  std::optional<double> encoder_latency_ms;
-  std::optional<double> retrieval_latency_ms;
-  std::optional<double> storage_latency_ms;
-  
-  // Individual metrics (Algorithm 7 inputs)
-  std::optional<double> relevance;
-  std::optional<double> surprise;
-  std::optional<double> mismatch;
-  std::optional<double> rarity;
-  std::optional<double> drift;
-  std::optional<double> contradiction;
-  std::optional<double> utility;
-  std::optional<double> periphery;
-  std::optional<double> salience;
-  std::optional<double> valence;
-  std::optional<double> arousal;
-  
-  // System-level
-  std::optional<double> coherence;
-  std::optional<double> focus_spread;
-  std::optional<double> F_eff;
+
+  // Per-memory feedback
+  long long retrieved_count = 0;
+  long long used_count = 0;
+
+  // Per-memory metrics (from Memory.metrics - computed when memory was stored)
+  double relevance = 0.0;
+  double mismatch = 0.0;
+  double surprise = 0.0;
+  double rarity = 0.0;
+  double drift = 0.0;
+  double contradiction = 0.0;
+  double utility = 0.0;
+  double periphery = 0.0;
+  double coverage = 0.0;
+  double salience = 0.0;
+  double valence = 0.5;
+  double arousal = 0.0;
+  double composite_score = 0.0;
+  double threshold_t = 0.0;
 };
+
+MemoryEvent
+CreateMemoryEvent (MemoryEventType type,
+                   const cortext::Cortext::Context::Memory &mem)
+{
+  MemoryEvent evt;
+  evt.type = type;
+  evt.memory_id = static_cast<int> (mem.id);
+  evt.content = mem.content;
+  evt.source_id = mem.source_id;
+  evt.timestamp = mem.timestamp;
+  evt.retrieved_count = mem.retrieved_count;
+  evt.used_count = mem.used_count;
+
+  evt.relevance = mem.metrics.relevance;
+  evt.mismatch = mem.metrics.mismatch;
+  evt.surprise = mem.metrics.surprise;
+  evt.rarity = mem.metrics.rarity;
+  evt.drift = mem.metrics.drift;
+  evt.contradiction = mem.metrics.contradiction;
+  evt.utility = mem.metrics.utility;
+  evt.periphery = mem.metrics.periphery;
+  evt.coverage = mem.metrics.coverage;
+  evt.salience = mem.metrics.salience;
+  evt.valence = mem.metrics.valence;
+  evt.arousal = mem.metrics.arousal;
+  evt.composite_score = mem.metrics.composite_score;
+  evt.threshold_t = mem.metrics.threshold_t;
+
+  return evt;
+}
+
+MemoryEvent
+CreateStoredEvent (long long embedding_id, const std::string &content,
+                   const std::string &source_id, uint64_t ts,
+                   const cortext::Cortext::ProcessorOutput &output)
+{
+  MemoryEvent evt;
+  evt.type = MemoryEventType::STORED;
+  evt.memory_id = static_cast<int> (embedding_id);
+  evt.content = content;
+  evt.source_id = source_id;
+  evt.timestamp = ts;
+  evt.retrieved_count = 0;
+  evt.used_count = 0;
+
+  using M = cortext::operations::Metric;
+  auto get = [&] (M m) -> double {
+    auto it = output.metrics.find (static_cast<int> (m));
+    return it != output.metrics.end () ? it->second : 0.0;
+  };
+  evt.relevance = get (M::relevance);
+  evt.mismatch = get (M::mismatch);
+  evt.surprise = get (M::surprise);
+  evt.rarity = get (M::rarity);
+  evt.drift = get (M::drift);
+  evt.contradiction = get (M::contradiction);
+  evt.utility = get (M::utility);
+  evt.periphery = get (M::periphery);
+  evt.coverage = get (M::coverage);
+  evt.salience = get (M::salience);
+  evt.valence = output.valence;
+  evt.arousal = output.arousal;
+  evt.composite_score = output.composite_score.value_or (0.0);
+  evt.threshold_t = output.threshold.value_or (0.0);
+
+  return evt;
+}
 
 // Simple stderr/stdout capture buffer
 struct LogEntry {
@@ -335,91 +373,8 @@ std::optional<std::filesystem::path> FindRepoRootFromExe(const char* argv0) {
   return std::nullopt;
 }
 
-std::vector<unsigned char> BlobFromAny(const std::any& value) {
-  if (value.type() == typeid(std::vector<unsigned char>)) {
-    return std::any_cast<const std::vector<unsigned char>&>(value);
-  }
-  if (value.type() == typeid(std::vector<char>)) {
-    const auto& blob = std::any_cast<const std::vector<char>&>(value);
-    return std::vector<unsigned char>(blob.begin(), blob.end());
-  }
-  return {};
-}
-
-std::optional<long long> AnyToLongLong(const std::any& v) {
-  if (v.type() == typeid(long long)) return std::any_cast<long long>(v);
-  if (v.type() == typeid(long)) return static_cast<long long>(std::any_cast<long>(v));
-  if (v.type() == typeid(int)) return static_cast<long long>(std::any_cast<int>(v));
-  return std::nullopt;
-}
-
 // EnsureChatSchema removed (handled by core migrations).
-
-struct PersistedRow {
-  long long embedding_id = 0;
-  std::vector<unsigned char> blob_id;
-};
-
-PersistedRow PersistTextMemory(cortext::Store& store,
-                              cortext::ImageBindEncoder& encoder,
-                              const std::string& text,
-                              const std::string& source_id,
-                              uint64_t ts) {
-  // Schema is already ensured by processor startup.
-  cortext::telemetry::ScopedSpan persist_span("chat.persist_text_memory");
-  persist_span.SetAttribute("chat.source_id", source_id);
-  // 1) Put payload.
-  const std::vector<unsigned char> payload(text.begin(), text.end());
-  auto blob_rows = store.Execute("SELECT objstore_put(?1) AS id", {payload});
-  if (blob_rows.empty() || blob_rows[0].count("id") == 0) {
-    throw std::runtime_error("objstore_put returned no id");
-  }
-  const auto blob_id = BlobFromAny(blob_rows[0].at("id"));
-  if (blob_id.empty()) {
-    throw std::runtime_error("objstore_put returned empty blob id");
-  }
-
-  // 2) Compute embedding.
-  std::vector<float> emb;
-  cortext::telemetry::ScopedSpan encode_span("chat.encode_text");
-  encoder.EncodeText(text, emb);
-  encode_span.SetStatusOk();
-  if (emb.empty()) {
-    throw std::runtime_error("encoder produced empty embedding");
-  }
-
-  // 3) Insert embedding row (auto id).
-  store.Execute("INSERT INTO embeddings (embedding) VALUES (?1)", {emb});
-  auto id_rows = store.Execute("SELECT last_insert_rowid() AS id", {});
-  if (id_rows.empty() || id_rows[0].count("id") == 0) {
-    throw std::runtime_error("last_insert_rowid missing");
-  }
-  const auto id_opt = AnyToLongLong(id_rows[0].at("id"));
-  if (!id_opt.has_value()) {
-    throw std::runtime_error("last_insert_rowid had unexpected type");
-  }
-  const long long embedding_id = *id_opt;
-
-  // 4) Insert metadata row.
-  store.Execute(
-      "INSERT OR REPLACE INTO memory_index(embedding_id, modality, mime, content_key, source_id, timestamp, blob_id) "
-      "VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-      {
-          embedding_id,
-          std::string("text"),
-          std::string("text/plain"),
-          cortext::Cortext::MakeContentKey(embedding_id),
-          source_id,
-          static_cast<long long>(ts),
-          blob_id,
-      });
-
-  PersistedRow row;
-  row.embedding_id = embedding_id;
-  row.blob_id = blob_id;
-  persist_span.SetStatusOk();
-  return row;
-}
+// PersistTextMemory removed - Cortext handles storage internally via MemoryStorage operation.
 
 std::string FormatTimestampRfc2822(std::uint64_t timestamp) {
   if (timestamp == 0) return "";
@@ -718,7 +673,6 @@ int main(int argc, char** argv) {
 
   auto status_state = std::make_shared<StatusBarState>();
   auto retrieval_latency_state = std::make_shared<RetrievalLatencyState>();
-  auto persist_latency_state = std::make_shared<PersistLatencyState>();
   auto last_tokens_used = std::make_shared<std::atomic<std::int64_t>>(0);
   auto last_context = std::make_shared<chat::LastContext>();
   {
@@ -740,7 +694,7 @@ int main(int argc, char** argv) {
     const std::string metric_path = MakeSiblingPath(jsonl_path, ".metrics");
     const std::string log_path = MakeSiblingPath(jsonl_path, ".logs");
     auto resource = resource_sdk::Resource::Create({{"service.name", "cortext_chat"}});
-    auto in_memory_span_exporter = std::unique_ptr<trace_sdk::SpanExporter>(new InMemorySpanExporter(retrieval_latency_state, persist_latency_state));
+    auto in_memory_span_exporter = std::unique_ptr<trace_sdk::SpanExporter>(new InMemorySpanExporter(retrieval_latency_state));
     otlp_exporter::OtlpFileClientFileSystemOptions otlp_trace_fs;
     otlp_trace_fs.file_pattern = trace_path;
     otlp_trace_fs.alias_pattern = trace_path + ".latest";
@@ -915,22 +869,7 @@ int main(int argc, char** argv) {
            | ftxui::yframe;
   };
 
-  auto get_metric = [](const std::unordered_map<int, double>& metrics, cortext::operations::Metric metric) -> std::optional<double> {
-    auto it = metrics.find(static_cast<int>(metric));
-    if (it != metrics.end()) {
-      return it->second;
-    }
-    return std::nullopt;
-  };
-
-  auto format_metric = [](const std::optional<double>& val, const std::string& label) -> std::string {
-    if (!val.has_value()) return "";
-    std::ostringstream oss;
-    oss << label << ": " << std::fixed << std::setprecision(2) << (*val * 100.0) << "%";
-    return oss.str();
-  };
-
-  auto render_memory = [&, format_metric] {
+  auto render_memory = [&] {
     ftxui::Elements lines;
     std::lock_guard<std::mutex> lock(mu);
 
@@ -946,106 +885,66 @@ int main(int argc, char** argv) {
 
     lines.push_back(ftxui::separator());
 
+    auto fmt = [](double v) {
+      std::ostringstream ss;
+      ss << std::fixed << std::setprecision(2) << v;
+      return ss.str();
+    };
+
     if (memory_events.empty()) {
       lines.push_back(ftxui::text("(no memory events yet)") | ftxui::color(ftxui::Color::GrayDark));
     } else {
-    int shown = 0;
+      int shown = 0;
       for (auto it = memory_events.rbegin(); it != memory_events.rend() && shown < 10; ++it, ++shown) {
         const auto& evt = *it;
-        
+
         // Header with type indicator
         std::string type_icon = (evt.type == MemoryEventType::STORED) ? "💾 STORED" : "🔍 RETRIEVED";
         auto type_color = (evt.type == MemoryEventType::STORED) ? ftxui::Color::Green : ftxui::Color::Blue;
-        
-        lines.push_back(ftxui::text(type_icon + " #" + std::to_string(evt.memory_id)) 
+
+        lines.push_back(ftxui::text(type_icon + " #" + std::to_string(evt.memory_id))
                         | ftxui::bold | ftxui::color(type_color));
-        
+
         if (!evt.source_id.empty()) {
           lines.push_back(ftxui::text("  source: " + evt.source_id) | ftxui::color(ftxui::Color::GrayDark));
         }
-        
-        // Decision and score
-        if (evt.composite_score.has_value() && evt.threshold.has_value()) {
-          std::ostringstream score_line;
-          score_line << "  Score: " << std::fixed << std::setprecision(3) << *evt.composite_score
-                     << " | T: " << std::fixed << std::setprecision(3) << *evt.threshold;
-          if (evt.decision.has_value()) {
-            score_line << " | decision: " << (*evt.decision ? "STORE" : "SKIP");
-          }
-          lines.push_back(ftxui::text(score_line.str()) | ftxui::color(ftxui::Color::Yellow));
-        }
-        
+
+        // Feedback counts
+        lines.push_back(ftxui::text("  retrieved: " + std::to_string(evt.retrieved_count) +
+                                    " | used: " + std::to_string(evt.used_count))
+                        | ftxui::color(ftxui::Color::GrayLight));
+
+        // Score and threshold
+        lines.push_back(ftxui::text("  score=" + fmt(evt.composite_score) +
+                                    " thresh=" + fmt(evt.threshold_t))
+                        | ftxui::color(ftxui::Color::Yellow));
+
         // Metrics row 1
-        std::vector<std::string> row1;
-        if (evt.relevance.has_value()) row1.push_back(format_metric(evt.relevance, "Rel"));
-        if (evt.surprise.has_value()) row1.push_back(format_metric(evt.surprise, "Sur"));
-        if (evt.mismatch.has_value()) row1.push_back(format_metric(evt.mismatch, "Mis"));
-        if (evt.rarity.has_value()) row1.push_back(format_metric(evt.rarity, "Rar"));
-        if (!row1.empty()) {
-          std::string row1_str = "  ";
-          for (size_t i = 0; i < row1.size(); ++i) {
-            if (i > 0) row1_str += " | ";
-            row1_str += row1[i];
-          }
-          lines.push_back(ftxui::text(row1_str) | ftxui::color(ftxui::Color::Cyan));
-        }
-        
+        lines.push_back(ftxui::text("  rel=" + fmt(evt.relevance) +
+                                    " mis=" + fmt(evt.mismatch) +
+                                    " sur=" + fmt(evt.surprise) +
+                                    " rar=" + fmt(evt.rarity))
+                        | ftxui::color(ftxui::Color::Cyan));
+
         // Metrics row 2
-        std::vector<std::string> row2;
-        if (evt.drift.has_value()) row2.push_back(format_metric(evt.drift, "Drift"));
-        if (evt.contradiction.has_value()) row2.push_back(format_metric(evt.contradiction, "Contra"));
-        if (evt.utility.has_value()) row2.push_back(format_metric(evt.utility, "Util"));
-        if (evt.periphery.has_value()) row2.push_back(format_metric(evt.periphery, "Periph"));
-        if (!row2.empty()) {
-          std::string row2_str = "  ";
-          for (size_t i = 0; i < row2.size(); ++i) {
-            if (i > 0) row2_str += " | ";
-            row2_str += row2[i];
-          }
-          lines.push_back(ftxui::text(row2_str) | ftxui::color(ftxui::Color::Magenta));
-        }
-        
-        // Emotion metrics
-        std::vector<std::string> row3;
-        if (evt.salience.has_value()) row3.push_back(format_metric(evt.salience, "Sal"));
-        if (evt.valence.has_value()) row3.push_back(format_metric(evt.valence, "Val"));
-        if (evt.arousal.has_value()) row3.push_back(format_metric(evt.arousal, "Aro"));
-        if (!row3.empty()) {
-          std::string row3_str = "  ";
-          for (size_t i = 0; i < row3.size(); ++i) {
-            if (i > 0) row3_str += " | ";
-            row3_str += row3[i];
-          }
-          lines.push_back(ftxui::text(row3_str) | ftxui::color(ftxui::Color::Yellow));
-        }
-        
-        // System-level metrics
-        std::vector<std::string> row4;
-        if (evt.coherence.has_value()) row4.push_back(format_metric(evt.coherence, "Coh"));
-        if (evt.focus_spread.has_value()) row4.push_back(format_metric(evt.focus_spread, "FSpread"));
-        if (evt.F_eff.has_value()) row4.push_back(format_metric(evt.F_eff, "F_eff"));
-        if (!row4.empty()) {
-          std::string row4_str = "  ";
-          for (size_t i = 0; i < row4.size(); ++i) {
-            if (i > 0) row4_str += " | ";
-            row4_str += row4[i];
-          }
-          lines.push_back(ftxui::text(row4_str) | ftxui::color(ftxui::Color::GrayLight));
-        }
-        if (evt.encoder_latency_ms.has_value() || evt.retrieval_latency_ms.has_value() || evt.storage_latency_ms.has_value()) {
-          std::ostringstream oss;
-          oss << "  latency:";
-          if (evt.encoder_latency_ms.has_value()) { oss << " enc=" << std::fixed << std::setprecision(1) << *evt.encoder_latency_ms << "ms"; }
-          if (evt.retrieval_latency_ms.has_value()) { oss << " ret=" << std::fixed << std::setprecision(1) << *evt.retrieval_latency_ms << "ms"; }
-          if (evt.storage_latency_ms.has_value()) { oss << " store=" << std::fixed << std::setprecision(1) << *evt.storage_latency_ms << "ms"; }
-          lines.push_back(ftxui::text(oss.str()) | ftxui::color(ftxui::Color::GrayLight));
-        }
-        
+        lines.push_back(ftxui::text("  drf=" + fmt(evt.drift) +
+                                    " con=" + fmt(evt.contradiction) +
+                                    " utl=" + fmt(evt.utility) +
+                                    " per=" + fmt(evt.periphery))
+                        | ftxui::color(ftxui::Color::Magenta));
+
+        // Metrics row 3
+        lines.push_back(ftxui::text("  cov=" + fmt(evt.coverage) +
+                                    " sal=" + fmt(evt.salience) +
+                                    " val=" + fmt(evt.valence) +
+                                    " aro=" + fmt(evt.arousal))
+                        | ftxui::color(ftxui::Color::Yellow));
+
         // Content preview
         std::string preview = evt.content;
         if (preview.size() > 120) preview = preview.substr(0, 120) + "...";
         lines.push_back(ftxui::text("  \"" + preview + "\"") | ftxui::color(ftxui::Color::White));
-      lines.push_back(ftxui::separator());
+        lines.push_back(ftxui::separator());
       }
     }
 
@@ -1204,38 +1103,16 @@ int main(int argc, char** argv) {
           // Create memory events for retrieved memories
           {
             std::lock_guard<std::mutex> lock(mu);
-            const std::optional<double> encoder_latency_ms = retrieval_latency_state->encoder_latency_ms;
-            const std::optional<double> retrieval_latency_ms = retrieval_latency_state->retrieval_latency_ms;
             for (const auto& mem : retrieved.memories) {
-              MemoryEvent evt;
-              evt.type = MemoryEventType::RETRIEVED;
-              evt.memory_id = mem.id;
-              evt.content = mem.content;
-              evt.source_id = mem.source_id;
-              evt.timestamp = mem.timestamp;
-              evt.composite_score = retrieved.output.composite_score;
-              evt.threshold = retrieved.output.threshold;
-              evt.should_interrupt = retrieved.should_interrupt;
-              evt.encoder_latency_ms = encoder_latency_ms;
-              evt.retrieval_latency_ms = retrieval_latency_ms;
-              
-              // Extract individual metrics using helper
-              using M = cortext::operations::Metric;
-              evt.relevance = get_metric(retrieved.output.metrics, M::relevance);
-              evt.surprise = get_metric(retrieved.output.metrics, M::surprise);
-              evt.mismatch = get_metric(retrieved.output.metrics, M::mismatch);
-              evt.rarity = get_metric(retrieved.output.metrics, M::rarity);
-              evt.drift = get_metric(retrieved.output.metrics, M::drift);
-              evt.contradiction = get_metric(retrieved.output.metrics, M::contradiction);
-              evt.utility = get_metric(retrieved.output.metrics, M::utility);
-              evt.periphery = get_metric(retrieved.output.metrics, M::periphery);
-              evt.salience = get_metric(retrieved.output.metrics, M::salience);
-              evt.valence = retrieved.output.valence;
-              evt.arousal = retrieved.output.arousal;
-              evt.F_eff = retrieved.output.effective_focus;
-              evt.focus_spread = get_metric(retrieved.output.metrics, M::focus_spread);
-              
-              memory_events.push_back(evt);
+              memory_events.push_back(CreateMemoryEvent(MemoryEventType::RETRIEVED, mem));
+              if (memory_events.size() > kMaxMemoryEvents) {
+                memory_events.pop_front();
+              }
+            }
+            // Create STORED event if user message was stored
+            if (retrieved.output.stored_embedding_id.has_value()) {
+              memory_events.push_back(CreateStoredEvent(
+                  *retrieved.output.stored_embedding_id, text, "chat/user", ts, retrieved.output));
               if (memory_events.size() > kMaxMemoryEvents) {
                 memory_events.pop_front();
               }
@@ -1287,86 +1164,32 @@ int main(int argc, char** argv) {
           last_error = std::string("openai: ") + ex.what();
         }
 
-        // Persist both user and assistant turns so future retrieval can find them.
+        // Process assistant reply through Cortext (may store if write gate passes)
         try {
-          // Serialize DB writes with internal processor flushes.
-          std::optional<PersistedRow> user_row_opt;
-          std::optional<PersistedRow> asst_row_opt;
-          std::optional<double> user_encoder_latency_ms;
-          std::optional<double> user_storage_latency_ms;
-          std::optional<double> asst_encoder_latency_ms;
-          std::optional<double> asst_storage_latency_ms;
+          cortext::Cortext::Context asst_ctx;
           {
             std::lock_guard<std::mutex> lock(db_write_mu);
-            auto uniq = cortext::SQLiteStore::Create(db_path.string());
-            auto store = std::shared_ptr<cortext::Store>(std::move(uniq));
-
-            auto user_row = PersistTextMemory(*store, encoder, text, "chat/user", ts);
-            user_encoder_latency_ms = persist_latency_state->encoder_latency_ms;
-            user_storage_latency_ms = persist_latency_state->storage_latency_ms;
-            auto asst_row = PersistTextMemory(*store, encoder, assistant_reply, "chat/assistant", ts + 1);
-            asst_encoder_latency_ms = persist_latency_state->encoder_latency_ms;
-            asst_storage_latency_ms = persist_latency_state->storage_latency_ms;
-            user_row_opt = user_row;
-            asst_row_opt = asst_row;
+            asst_ctx = cortext_ctx->ProcessText(assistant_reply, ts + 1, "chat/assistant");
           }
 
-          // Create memory events for stored memories
-          {
+          // Create STORED event if assistant reply was stored
+          if (asst_ctx.output.stored_embedding_id.has_value()) {
             std::lock_guard<std::mutex> lock(mu);
-            using M = cortext::operations::Metric;
-            
-            MemoryEvent user_evt;
-            user_evt.type = MemoryEventType::STORED;
-            user_evt.memory_id = static_cast<int>(user_row_opt->embedding_id);
-            user_evt.content = text;
-            user_evt.source_id = "chat/user";
-            user_evt.timestamp = ts;
-            user_evt.composite_score = retrieved.output.composite_score;
-            user_evt.threshold = retrieved.output.threshold;
-            user_evt.decision = retrieved.output.composite_score.has_value() && retrieved.output.threshold.has_value()
-                ? std::optional<bool>((*retrieved.output.composite_score) > (*retrieved.output.threshold))
-                : std::nullopt;
-            user_evt.encoder_latency_ms = user_encoder_latency_ms;
-            user_evt.storage_latency_ms = user_storage_latency_ms;
-            user_evt.relevance = get_metric(retrieved.output.metrics, M::relevance);
-            user_evt.surprise = get_metric(retrieved.output.metrics, M::surprise);
-            user_evt.mismatch = get_metric(retrieved.output.metrics, M::mismatch);
-            user_evt.rarity = get_metric(retrieved.output.metrics, M::rarity);
-            user_evt.drift = get_metric(retrieved.output.metrics, M::drift);
-            user_evt.contradiction = get_metric(retrieved.output.metrics, M::contradiction);
-            user_evt.utility = get_metric(retrieved.output.metrics, M::utility);
-            user_evt.periphery = get_metric(retrieved.output.metrics, M::periphery);
-            user_evt.salience = get_metric(retrieved.output.metrics, M::salience);
-            user_evt.valence = retrieved.output.valence;
-            user_evt.arousal = retrieved.output.arousal;
-            user_evt.F_eff = retrieved.output.effective_focus;
-            user_evt.focus_spread = get_metric(retrieved.output.metrics, M::focus_spread);
-            memory_events.push_back(user_evt);
-            
-            MemoryEvent asst_evt;
-            asst_evt.type = MemoryEventType::STORED;
-            asst_evt.memory_id = static_cast<int>(asst_row_opt->embedding_id);
-            asst_evt.content = assistant_reply;
-            asst_evt.source_id = "chat/assistant";
-            asst_evt.timestamp = ts + 1;
-            asst_evt.encoder_latency_ms = asst_encoder_latency_ms;
-            asst_evt.storage_latency_ms = asst_storage_latency_ms;
-            memory_events.push_back(asst_evt);
-            
+            memory_events.push_back(CreateStoredEvent(
+                *asst_ctx.output.stored_embedding_id, assistant_reply, "chat/assistant", ts + 1, asst_ctx.output));
             while (memory_events.size() > kMaxMemoryEvents) {
               memory_events.pop_front();
             }
           }
 
-          // Refresh cortext episode snapshot after external writes.
+          // Flush to ensure writes are persisted
           {
             std::lock_guard<std::mutex> lock(db_write_mu);
             cortext_ctx->Flush();
           }
         } catch (const std::exception& ex) {
           std::lock_guard<std::mutex> lock(mu);
-          last_error = std::string("persist: ") + ex.what();
+          last_error = std::string("cortext assistant: ") + ex.what();
         }
 
         // Apply UI updates.

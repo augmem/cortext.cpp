@@ -309,28 +309,30 @@ All Phase 0 items have been resolved:
 
 ---
 
-### Phase 3: Enhancements (P3)
+### Phase 3: Enhancements (P3) - **COMPLETE** ✓
 
-- [ ] **Implement Alg 7 formal bootstrap coefficients**
+- [x] **Implement Alg 7 formal bootstrap coefficients**
   - File: `src/operations/blend.cpp`
-  - [ ] Define coefficient matrices (c_F, c_S, c_T, d_i) per spec
-  - [ ] Replace ad-hoc heuristics with `sigmoid(a_F[i]×F + a_S[i]×S + a_T[i]×T + b_i)`
-  - [ ] Implement N parameter: `lerp(64, 512, T)` for RLS window
-  - [ ] Add tests for bootstrap coefficient behavior
+  - [x] Define coefficient matrices (c_F, c_S, c_T, d_i) derived from original heuristics
+  - [x] Replace ad-hoc heuristics with `sigmoid(c_F[i]×F + c_S[i]×S + c_T[i]×T + d_i)`
+  - [x] Implement N parameter: `RLSWindowN(T) = lerp(64, 512, T)` in `knobs.hpp`
+  - [x] Add coefficient-space RLS storage (12 metrics × 4 coefficients)
+  - [x] Add persistence for RLS coefficients and covariance matrix (Migration 9)
+  - [x] All existing tests pass
 
-- [ ] **Persist observation windows**
-  - File: `src/signal_processor.cpp`
-  - [ ] Persist `recent_context` window across restarts
-  - [ ] Persist `recent_scores` window across restarts
-  - [ ] Persist `observed_retention_history` across restarts
-  - [ ] Add serialization/deserialization for window data
+- [x] **Persist observation windows**
+  - File: `src/signal_processor.cpp`, `src/store/schema.cpp`
+  - [x] `recent_context` window already persisted (Migration 5)
+  - [x] `recent_scores` window already persisted (Migration 5)
+  - [x] Added `observed_retention_history` table (Migration 9)
+  - [x] Added `LoadObservedRetentionHistory()` and `PersistObservedRetentionHistory()`
 
-- [ ] **Persist emotion state across restarts**
-  - File: `src/signal_processor.cpp`
-  - [ ] Persist `valence` state
-  - [ ] Persist `arousal` state
-  - [ ] Persist `emotion_intensity` state
-  - [ ] Update processor_state schema if needed
+- [x] **Persist emotion state across restarts**
+  - File: `src/signal_processor.cpp`, `src/operations/sensitivity.cpp`
+  - [x] Added `emotion_intensity_ewma`, `valence_ewma`, `arousal_ewma` to ProcessorContext
+  - [x] Added columns to processor_state table (Migration 9)
+  - [x] Applied EWMA smoothing with α = lerp(0.05, 0.30, S) in sensitivity.cpp
+  - [x] Updated Load/PersistProcessorState for emotion state
 
 ---
 
@@ -346,10 +348,11 @@ All Phase 0 items have been resolved:
 | ~~`src/operations/uncertainty.cpp`~~ | ~~P2~~ | ✓ Complete - u_raw primary estimator with novelty_surprise_spikes |
 | ~~`src/operations/serial_position_apply.cpp`~~ | ~~P2~~ | ✓ Complete - Zone modulations (von_restorff, middle_suppression) |
 | ~~`src/operations/working_memory.cpp`~~ | ~~P2~~ | ✓ Complete - gate_threshold = lerp(0.1, 0.4, F) |
-| ~~`include/cortext/core/knobs.hpp`~~ | ~~P2~~ | ✓ Complete - WMGateThreshold added |
-| `src/operations/blend.cpp` | P3 | Implement formal bootstrap coefficients |
-| `src/signal_processor.cpp` | P3 | Persist observation windows and emotion state |
-| `include/cortext/core/knobs.hpp` | - | (no changes needed - 95% complete) |
+| ~~`include/cortext/core/knobs.hpp`~~ | ~~P2/P3~~ | ✓ Complete - WMGateThreshold, RLSWindowN added |
+| ~~`src/operations/blend.cpp`~~ | ~~P3~~ | ✓ Complete - Formal bootstrap coefficients, coefficient-space RLS |
+| ~~`src/signal_processor.cpp`~~ | ~~P3~~ | ✓ Complete - Persist observation windows, emotion state, RLS coefficients |
+| ~~`src/operations/sensitivity.cpp`~~ | ~~P3~~ | ✓ Complete - EWMA smoothing for emotion state |
+| ~~`include/cortext/processor/processor_context.hpp`~~ | ~~P3~~ | ✓ Complete - RLS coefficients, emotion EWMA fields |
 
 ---
 

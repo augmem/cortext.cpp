@@ -192,18 +192,19 @@ UpdateUncertainty::Execute (OperationContext &context) const
   const auto coh_complement = compute_coherence_complement ();
   const auto novelty_measure = compute_novelty_measure ();
 
-  // Fuse novelty (Alg 4) + surprise (Alg 13) into novelty_surprise_spikes
-  // per algorithms.md §0.4: fusion of Algorithm 4 novelty + Algorithm 13
-  // surprisal
-  const double surprise_val
-      = context.GetMetric (operations::Metric::surprise).value_or (0.0);
+  // Fuse novelty (Alg 4) + embedding surprisal (Section 3.1.4) into
+  // novelty_surprise_spikes per algorithms.md §0.4
+  const double embedding_surprisal_val
+      = context.GetMetric (operations::Metric::embedding_surprisal)
+            .value_or (0.0);
   double novelty_surprise_spikes = 0.0;
   bool has_novelty_surprise = false;
-  if (novelty_measure.has_value () && surprise_val > 0.0)
+  if (novelty_measure.has_value () && embedding_surprisal_val > 0.0)
     {
-      // Average of novelty and surprise when both available
+      // Average of novelty and embedding surprisal when both available
       novelty_surprise_spikes
-          = core::Clamp ((novelty_measure.value () + surprise_val) / 2.0,
+          = core::Clamp ((novelty_measure.value () + embedding_surprisal_val)
+                             / 2.0,
                          constants::kNormalizedMin, constants::kNormalizedMax);
       has_novelty_surprise = true;
     }
@@ -212,9 +213,9 @@ UpdateUncertainty::Execute (OperationContext &context) const
       novelty_surprise_spikes = novelty_measure.value ();
       has_novelty_surprise = true;
     }
-  else if (surprise_val > 0.0)
+  else if (embedding_surprisal_val > 0.0)
     {
-      novelty_surprise_spikes = surprise_val;
+      novelty_surprise_spikes = embedding_surprisal_val;
       has_novelty_surprise = true;
     }
 

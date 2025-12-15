@@ -460,6 +460,37 @@ RegisterCoreSchema (SchemaRegistry &registry)
           ")",
       },
   });
+
+  // Migration 11: Mood state (Algorithm 4b)
+  registry.Register ({
+      11,
+      "Phase 4: Mood state persistence (Algorithm 4b)",
+      {
+          // Mood vector: 6 dimensions [anger, fear, joy, love, sadness, surprise]
+          "ALTER TABLE processor_state ADD COLUMN mood_vector_0 REAL NOT NULL "
+          "DEFAULT 0.0",
+          "ALTER TABLE processor_state ADD COLUMN mood_vector_1 REAL NOT NULL "
+          "DEFAULT 0.0",
+          "ALTER TABLE processor_state ADD COLUMN mood_vector_2 REAL NOT NULL "
+          "DEFAULT 0.0",
+          "ALTER TABLE processor_state ADD COLUMN mood_vector_3 REAL NOT NULL "
+          "DEFAULT 0.0",
+          "ALTER TABLE processor_state ADD COLUMN mood_vector_4 REAL NOT NULL "
+          "DEFAULT 0.0",
+          "ALTER TABLE processor_state ADD COLUMN mood_vector_5 REAL NOT NULL "
+          "DEFAULT 0.0",
+      },
+  });
+
+  // Migration 12: Embedding prediction error state (Section 3.1.4)
+  registry.Register ({
+      12,
+      "Embedding prediction error state (Section 3.1.4)",
+      {
+          "ALTER TABLE processor_state ADD COLUMN last_embedding BLOB",
+          "ALTER TABLE processor_state ADD COLUMN delta_x_trend BLOB",
+      },
+  });
 }
 
 void

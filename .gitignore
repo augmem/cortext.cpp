@@ -48,7 +48,7 @@ tests/*_tests
 *cortext_test_stub*.lmdb/
 !tests/CMakeLists.txt
 !tests/*.test.cpp
-
+!docs/**/*.js 
 # IDE files
 .vscode/
 .cursor/
@@ -109,3 +109,5 @@ third_party/*/.git/
 poc/
 env.sh
 build-otel/
+.venv/
+venv/

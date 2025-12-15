@@ -15,7 +15,7 @@
 #include "cortext/operations/graph_schema.hpp"
 #include "cortext/operations/goal_alignment.hpp"
 #include "cortext/operations/goal_alignment_fallback.hpp"
-#include "cortext/operations/logprob_surprise.hpp"
+#include "cortext/operations/embedding_prediction_error.hpp"
 #include "cortext/operations/centroids.hpp"
 #include "cortext/operations/precision.hpp"
 #include "cortext/operations/sensitivity.hpp"
@@ -120,116 +120,113 @@ LoadObjstorePayload (Store *store, const std::vector<unsigned char> &blob_id,
 }
 
 void
-QueryMemoryIndex (Store *store, long long id, Cortext::Context::Memory &m)
+HydrateMemory (Store *store, long long id, Cortext::Context::Memory &m)
 {
   if (!store)
-    {
-      return;
-    }
+    return;
   try
     {
       auto rows = store->Execute (
-          "SELECT modality, mime, source_id, timestamp, blob_id "
-          "FROM memory_index WHERE embedding_id = ?",
+          "SELECT "
+          "  mi.modality, mi.mime, mi.source_id, mi.timestamp, mi.blob_id, "
+          "  COALESCE(mf.retrieved_count, 0) AS retrieved_count, "
+          "  COALESCE(mf.used_count, 0) AS used_count, "
+          "  sm.relevance, sm.mismatch, sm.surprise, sm.rarity, sm.drift, "
+          "  sm.contradiction, sm.utility, sm.periphery, sm.coverage, "
+          "  sm.salience, sm.valence, sm.arousal, sm.composite_score, "
+          "  sm.threshold_t "
+          "FROM memory_index mi "
+          "LEFT JOIN memory_feedback mf ON mi.embedding_id = mf.embedding_id "
+          "LEFT JOIN signal_metrics sm ON mi.embedding_id = sm.embedding_id "
+          "WHERE mi.embedding_id = ?",
           { id });
+
       if (!rows.empty ())
         {
           const auto &row = rows[0];
+
           auto get_s = [&row] (const char *k) -> std::string {
             auto it = row.find (k);
-            if (it == row.end ())
+            if (it == row.end () || !it->second.has_value ())
               return {};
             if (it->second.type () == typeid (std::string))
               return std::any_cast<std::string> (it->second);
             return {};
           };
+
           auto get_ll = [&row] (const char *k) -> long long {
             auto it = row.find (k);
-            if (it == row.end ())
+            if (it == row.end () || !it->second.has_value ())
               return 0LL;
             if (it->second.type () == typeid (long long))
               return std::any_cast<long long> (it->second);
             if (it->second.type () == typeid (int))
-              return static_cast<long long> (
-                  std::any_cast<int> (it->second));
+              return static_cast<long long> (std::any_cast<int> (it->second));
             return 0LL;
           };
+
+          auto get_dbl = [&row] (const char *k, double def = 0.0) -> double {
+            auto it = row.find (k);
+            if (it == row.end () || !it->second.has_value ())
+              return def;
+            if (it->second.type () == typeid (double))
+              return std::any_cast<double> (it->second);
+            if (it->second.type () == typeid (float))
+              return static_cast<double> (std::any_cast<float> (it->second));
+            if (it->second.type () == typeid (int))
+              return static_cast<double> (std::any_cast<int> (it->second));
+            if (it->second.type () == typeid (long long))
+              return static_cast<double> (std::any_cast<long long> (it->second));
+            return def;
+          };
+
+          auto get_blob = [&row] (const char *k) {
+            auto it = row.find (k);
+            if (it == row.end () || !it->second.has_value ())
+              return std::vector<unsigned char> ();
+            return store::BlobFromAny (it->second);
+          };
+
+          // Populate from memory_index
           m.modality = get_s ("modality");
           m.mimetype = get_s ("mime");
           m.source_id = get_s ("source_id");
-          m.timestamp
-              = static_cast<std::uint64_t> (get_ll ("timestamp"));
-          auto get_blob = [&row] (const char *k) {
-            auto it = row.find (k);
-            if (it == row.end ())
-              {
-                return std::vector<unsigned char> ();
-              }
-            return store::BlobFromAny (it->second);
-          };
+          m.timestamp = static_cast<std::uint64_t> (get_ll ("timestamp"));
+
+          // Load content from objstore if blob_id present
           const auto blob_id_bytes = get_blob ("blob_id");
           if (!blob_id_bytes.empty ())
             {
               std::string payload;
               if (LoadObjstorePayload (store, blob_id_bytes, payload))
-                {
-                  m.content = std::move (payload);
-                }
+                m.content = std::move (payload);
             }
-        }
-    }
-  catch (const std::exception &e)
-    {
-      telemetry::LogWarn (
-          "Failed to query memory index",
-          { telemetry::Attribute::String ("component", "cortext"),
-            telemetry::Attribute::Int64 ("embedding_id", id),
-            telemetry::Attribute::String ("error", e.what ()) });
-    }
-  catch (...)
-    {
-      telemetry::LogWarn (
-          "Failed to query memory index (unknown error)",
-          { telemetry::Attribute::String ("component", "cortext"),
-            telemetry::Attribute::Int64 ("embedding_id", id) });
-    }
-}
 
-void
-QueryMemoryFeedback (Store *store, long long id, Cortext::Context::Memory &m)
-{
-  if (!store)
-    {
-      return;
-    }
-  try
-    {
-      auto rows = store->Execute (
-          "SELECT retrieved_count, used_count "
-          "FROM memory_feedback WHERE embedding_id = ?",
-          { id });
-      if (!rows.empty ())
-        {
-          const auto &row = rows[0];
-          auto get_ll = [&row] (const char *k) -> long long {
-            auto it = row.find (k);
-            if (it == row.end ())
-              return 0LL;
-            if (it->second.type () == typeid (long long))
-              return std::any_cast<long long> (it->second);
-            if (it->second.type () == typeid (int))
-              return static_cast<long long> (
-                  std::any_cast<int> (it->second));
-            return 0LL;
-          };
+          // Populate from memory_feedback
           m.retrieved_count = get_ll ("retrieved_count");
           m.used_count = get_ll ("used_count");
+
+          // Populate from signal_metrics
+          m.metrics.relevance = get_dbl ("relevance");
+          m.metrics.mismatch = get_dbl ("mismatch");
+          m.metrics.surprise = get_dbl ("surprise");
+          m.metrics.rarity = get_dbl ("rarity");
+          m.metrics.drift = get_dbl ("drift");
+          m.metrics.contradiction = get_dbl ("contradiction");
+          m.metrics.utility = get_dbl ("utility");
+          m.metrics.periphery = get_dbl ("periphery");
+          m.metrics.coverage = get_dbl ("coverage");
+          m.metrics.salience = get_dbl ("salience");
+          m.metrics.valence = get_dbl ("valence", 0.5);
+          m.metrics.arousal = get_dbl ("arousal");
+          m.metrics.composite_score = get_dbl ("composite_score");
+          m.metrics.threshold_t = get_dbl ("threshold_t");
         }
     }
   catch (const std::exception &e)
     {
       telemetry::LogWarn (
-          "Failed to query memory feedback",
+          "Failed to hydrate memory",
           { telemetry::Attribute::String ("component", "cortext"),
             telemetry::Attribute::Int64 ("embedding_id", id),
             telemetry::Attribute::String ("error", e.what ()) });
@@ -237,7 +234,7 @@ QueryMemoryFeedback (Store *store, long long id, Cortext::Context::Memory &m)
   catch (...)
     {
       telemetry::LogWarn (
-          "Failed to query memory feedback (unknown error)",
+          "Failed to hydrate memory (unknown error)",
           { telemetry::Attribute::String ("component", "cortext"),
             telemetry::Attribute::Int64 ("embedding_id", id) });
     }
@@ -299,8 +296,9 @@ struct Cortext::Impl
     using cortext::operations::EnsureGraphSchema;
     using cortext::operations::MetacognitiveMonitoring;
     using cortext::operations::UpdateFocus;
-    using cortext::operations::UpdateLogprobSurprise;
+    using cortext::operations::UpdateEmbeddingPredictionError;
     using cortext::operations::UpdateMemoryStrength;
+    using cortext::operations::UpdateMood;
     using cortext::operations::UpdatePrecisionDelta;
     using cortext::operations::UpdateSensitivity;
     using cortext::operations::UpdateStability;
@@ -329,13 +327,14 @@ struct Cortext::Impl
 
         std::make_unique<UpdateFocus> (),
         std::make_unique<UpdateSensitivity> (),
+        std::make_unique<UpdateMood> (),
 
         std::make_unique<ComputeCoherence> (),
         std::make_unique<ComputeFocusSpread> (),
         std::make_unique<ComputeEffectiveFocus> (),
         std::make_unique<CheckEpisodeBoundary> (),
 
-        std::make_unique<UpdateLogprobSurprise> (),
+        std::make_unique<UpdateEmbeddingPredictionError> (),
         std::make_unique<UpdateUncertainty> (),
         std::make_unique<ComputeMetrics> (),
         std::make_unique<FitMetricWeightsRLS> (),
@@ -426,8 +425,7 @@ struct Cortext::Impl
       {
         Cortext::Context::Memory m;
         m.id = id;
-        QueryMemoryIndex (store.get (), id, m);
-        QueryMemoryFeedback (store.get (), id, m);
+        HydrateMemory (store.get (), id, m);
         result.memories.push_back (std::move (m));
       }
     return result;

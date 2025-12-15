@@ -92,7 +92,7 @@ UpdateThreshold::Execute (OperationContext &context) const
                                 core::Clamp (alpha_T, constants::kNormalizedMin,
                                              constants::kNormalizedMax));
 
-  // 6) Threshold deltas
+  // 6) Threshold deltas (Algorithm 8 steps 8-13)
   const double kSensitivityGain = constants::kGainMedium;
   const double delta_sens = context.GetDeltaThresholdSensitivity ().value_or (
       (cfg.sensitivity - 0.5) * kSensitivityGain);
@@ -100,7 +100,9 @@ UpdateThreshold::Execute (OperationContext &context) const
       = context.GetDeltaThresholdPrecision ().value_or (constants::kNormalizedMin);
   const double delta_emo
       = context.GetDeltaThresholdEmotion ().value_or (constants::kNormalizedMin);
-  double delta_total = delta_sens + delta_prec + delta_emo;
+  const double delta_mood
+      = context.GetDeltaThresholdMood ().value_or (constants::kNormalizedMin);
+  double delta_total = delta_sens + delta_prec + delta_emo + delta_mood;
 
   // 7) Continuous-time rate control (EMA + ESS) → ΔT_homeo
   // Use signal timestamps to estimate Δt; fallback to 1.0s if unavailable.

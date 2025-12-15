@@ -170,6 +170,8 @@ GetMetricName (operations::Metric metric)
       return "rate_prev";
     case operations::Metric::hys_prev:
       return "hys_prev";
+    case operations::Metric::embedding_surprisal:
+      return "embedding_surprisal";
     default:
       return "unknown";
     }
@@ -435,6 +437,30 @@ LoadProcessorState (Store &store, ProcessorContext &ctx)
           = ExtractDouble (row, "emotion_intensity_ewma", 0.0);
       ctx.valence_ewma = ExtractDouble (row, "valence_ewma", 0.5);
       ctx.arousal_ewma = ExtractDouble (row, "arousal_ewma", 0.0);
+
+      // Mood state (Algorithm 4b)
+      ctx.mood_vector[0] = ExtractDouble (row, "mood_vector_0", 0.0);
+      ctx.mood_vector[1] = ExtractDouble (row, "mood_vector_1", 0.0);
+      ctx.mood_vector[2] = ExtractDouble (row, "mood_vector_2", 0.0);
+      ctx.mood_vector[3] = ExtractDouble (row, "mood_vector_3", 0.0);
+      ctx.mood_vector[4] = ExtractDouble (row, "mood_vector_4", 0.0);
+      ctx.mood_vector[5] = ExtractDouble (row, "mood_vector_5", 0.0);
+
+      // Embedding prediction error state (Section 3.1.4)
+      auto last_emb_it = row.find ("last_embedding");
+      if (last_emb_it != row.end () && last_emb_it->second.has_value ())
+        {
+          Eigen::VectorXf emb = BlobToEigen (last_emb_it->second);
+          if (emb.size () > 0)
+            ctx.last_embedding = std::move (emb);
+        }
+      auto delta_trend_it = row.find ("delta_x_trend");
+      if (delta_trend_it != row.end () && delta_trend_it->second.has_value ())
+        {
+          Eigen::VectorXf trend = BlobToEigen (delta_trend_it->second);
+          if (trend.size () > 0)
+            ctx.delta_x_trend = std::move (trend);
+        }
     }
   catch (const std::exception &e)
     {
@@ -830,10 +856,15 @@ SignalProcessor::PersistProcessorState ()
       // Threshold state (Algorithm 8)
       "m_rate, rate_ticks, dt_ema, last_rate_timestamp, "
       // Emotion state (Algorithm 4, EWMA-smoothed)
-      "emotion_intensity_ewma, valence_ewma, arousal_ewma) "
+      "emotion_intensity_ewma, valence_ewma, arousal_ewma, "
+      // Mood state (Algorithm 4b)
+      "mood_vector_0, mood_vector_1, mood_vector_2, "
+      "mood_vector_3, mood_vector_4, mood_vector_5, "
+      // Embedding prediction error state (Section 3.1.4)
+      "last_embedding, delta_x_trend) "
       "VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
       "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
-      "?, ?, ?)",
+      "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
       { // Original fields
         context_->signals_processed, context_->u_t,
         context_->weight_relevance_prior, context_->weight_relevance,
@@ -863,7 +894,18 @@ SignalProcessor::PersistProcessorState ()
         static_cast<long long> (context_->last_rate_timestamp),
         // Emotion state (Algorithm 4, EWMA-smoothed)
         context_->emotion_intensity_ewma, context_->valence_ewma,
-        context_->arousal_ewma });
+        context_->arousal_ewma,
+        // Mood state (Algorithm 4b)
+        context_->mood_vector[0], context_->mood_vector[1],
+        context_->mood_vector[2], context_->mood_vector[3],
+        context_->mood_vector[4], context_->mood_vector[5],
+        // Embedding prediction error state (Section 3.1.4)
+        context_->last_embedding.has_value ()
+            ? std::any (ToFloatVector (*context_->last_embedding))
+            : std::any (std::vector<float> ()),
+        context_->delta_x_trend.has_value ()
+            ? std::any (ToFloatVector (*context_->delta_x_trend))
+            : std::any (std::vector<float> ()) });
 }
 
 void

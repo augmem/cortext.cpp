@@ -6,6 +6,7 @@
 #include "cortext/processor/processor_context.hpp"
 #include "cortext/signal.hpp"
 #include <Eigen/Dense>
+#include <array>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -29,7 +30,7 @@ public:
     long long embedding_id;
     bool used;
     std::optional<double>
-        contextual_gain; // Logprob delta; std::nullopt if unknown
+        contextual_gain; // Cosine similarity to input; std::nullopt if unknown
   };
 
   /// @brief Constructs an OperationContext.
@@ -158,6 +159,17 @@ public:
   GetDeltaThresholdEmotion () const
   {
     return delta_threshold_emotion_;
+  }
+
+  void
+  SetDeltaThresholdMood (std::optional<double> v)
+  {
+    delta_threshold_mood_ = v;
+  }
+  std::optional<double>
+  GetDeltaThresholdMood () const
+  {
+    return delta_threshold_mood_;
   }
 
   // Outputs exposed by operations for downstream consumers/telemetry
@@ -339,6 +351,19 @@ public:
   GetArousal () const
   {
     return arousal_;
+  }
+
+  // Emotion probability distribution (Algorithm 4 → Algorithm 4b bridge)
+  // Order: [anger, fear, joy, love, sadness, surprise]
+  void
+  SetEmotionProbabilities (const std::array<double, 6> &probs)
+  {
+    emotion_probabilities_ = probs;
+  }
+  const std::array<double, 6> &
+  GetEmotionProbabilities () const
+  {
+    return emotion_probabilities_;
   }
 
   void
@@ -683,12 +708,14 @@ private:
   std::optional<double> delta_threshold_sensitivity_;
   std::optional<double> delta_threshold_precision_;
   std::optional<double> delta_threshold_emotion_;
+  std::optional<double> delta_threshold_mood_;
   double threshold_T_dynamic_ = 0.0;
   double threshold_hysteresis_ = 0.0;
   double coherence_ = 0.0;
   double emotion_intensity_ = 0.0;
   double valence_ = 0.5;
   double arousal_ = 0.0;
+  std::array<double, 6> emotion_probabilities_ = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
   std::optional<double> violation_;
 
   // Algorithm 7 metrics and diagnostics

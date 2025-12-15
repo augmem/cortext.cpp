@@ -48,12 +48,16 @@ add_executable(cortext_tests
   operations_competition.test.cpp
   operations_predictive.test.cpp
   operations_emotion.test.cpp
+  operations_mood.test.cpp
+  operations_sensitivity.test.cpp
+  operations_sensitivity_update.test.cpp
+  centroids.test.cpp
   operations_interrupt_gate.test.cpp
   operations_working_memory.test.cpp
   operations_metacognitive.test.cpp
   operations_serial_position.test.cpp
   operations_serial_position_apply.test.cpp
-  operations_logprob_surprise.test.cpp
+  operations_embedding_prediction_error.test.cpp
   operations_precision_modulation.test.cpp
   operations_graph_schema.test.cpp
   operations_graph_build.test.cpp

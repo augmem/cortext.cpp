@@ -3,6 +3,7 @@
 #include "cortext/operations/constants.hpp"
 #include "cortext/processor/operation_context.hpp"
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <numeric>
 #include <vector>
@@ -127,6 +128,16 @@ UpdateSensitivity::Execute (OperationContext &context) const
           // softmax with β(S) = 4 + 8S
           const double beta = 4.0 + 8.0 * S;
           SoftmaxNormalize (raw_cos, beta);
+
+          // Expose emotion probabilities for Algorithm 4b (UpdateMood)
+          std::array<double, 6> emotion_probs;
+          for (int i = 0; i < kNumEmotions; ++i)
+            {
+              emotion_probs[static_cast<size_t> (i)]
+                  = raw_cos[static_cast<size_t> (i)];
+            }
+          context.SetEmotionProbabilities (emotion_probs);
+
           const double peak
               = *std::max_element (raw_cos.begin (), raw_cos.end ());
           const double conf
@@ -234,6 +245,44 @@ UpdateSensitivity::Execute (OperationContext &context) const
       core::Clamp (rate_obs, constants::kNormalizedMin, kClampRateMax),
       alpha_s);
   p_ctx.last_signal_timestamp = ts;
+}
+
+void
+UpdateMood::Execute (OperationContext &context) const
+{
+  auto &p_ctx = context.GetProcessorContext ();
+  const auto &cfg = context.GetConfig ();
+  const double S = cfg.sensitivity;
+  const double T = cfg.stability;
+
+  // Get instantaneous emotion probabilities from Algorithm 4
+  const auto &e_t = context.GetEmotionProbabilities ();
+
+  // Get mood dynamics parameters (Algorithm 4b)
+  const double alpha_mood = core::AlphaMood (S);
+  const double lambda_mood = core::LambdaMood (T);
+
+  // Update mood vector: M_t = λ_mood(T) × M_{t-1} + α_mood(S) × e_t
+  // Then clamp each dimension to [-1, 1]
+  auto &M = p_ctx.mood_vector;
+  for (size_t i = 0; i < 6; ++i)
+    {
+      M[i] = lambda_mood * M[i] + alpha_mood * e_t[i];
+      M[i] = core::Clamp (M[i], -1.0, 1.0);
+    }
+
+  // Compute mood magnitude ||M_t||
+  double magnitude_sq = 0.0;
+  for (size_t i = 0; i < 6; ++i)
+    {
+      magnitude_sq += M[i] * M[i];
+    }
+  const double magnitude = std::sqrt (magnitude_sq);
+
+  // Compute threshold delta: ΔT_mood = −κ_base × S × ||M_t||
+  const double kappa_mood = constants::kGainMedium * S;
+  const double delta_T_mood = -kappa_mood * magnitude;
+  context.SetDeltaThresholdMood (delta_T_mood);
 }
 
 } // namespace cortext::operations

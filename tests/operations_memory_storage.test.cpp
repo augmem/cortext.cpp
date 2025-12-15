@@ -57,6 +57,11 @@ public:
                      "  used_count INTEGER DEFAULT 0"
                      ")",
                      {});
+    // vec0 virtual table for KNN search (using float[3] for test embeddings)
+    store_->Execute ("CREATE VIRTUAL TABLE IF NOT EXISTS vec_embeddings "
+                     "USING vec0(embedding_id INTEGER PRIMARY KEY, "
+                     "embedding float[3])",
+                     {});
   }
 
   ~ScopedTempDb ()
@@ -219,7 +224,7 @@ TEST_CASE ("MemoryStorage stores payload in objstore and retrieves it",
 
   const std::string test_text = "Hello, world!";
   Signal s;
-  s.embedding = Eigen::VectorXf::Ones (4);
+  s.embedding = Eigen::VectorXf::Ones (3);
   s.timestamp = 99999;
   s.source_id = "objstore-test";
   s.payload = std::vector<unsigned char> (test_text.begin (), test_text.end ());

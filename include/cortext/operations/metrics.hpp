@@ -23,6 +23,7 @@ enum class Metric
   goal_alignment,
   focus_spread,
   drift_mag,
+  embedding_surprisal,  // Section 3.1.4 - replaces logprob surprise
   // Test/debugging metrics
   aw_prev,
   rate_prev,
