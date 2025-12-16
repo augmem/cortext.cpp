@@ -13,3 +13,6 @@
 [submodule "third_party/sqlite-objstore"]
 	path = third_party/sqlite-objstore
 	url = file:///Users/gabrielwillen/VSCode/sqlite-objstore
+[submodule "third_party/onnxruntime-genai"]
+	path = third_party/onnxruntime-genai
+	url = https://github.com/microsoft/onnxruntime-genai.git
