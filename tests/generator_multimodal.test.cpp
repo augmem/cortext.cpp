@@ -6,6 +6,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <nlohmann/json.hpp>
 #include <vector>
 
 namespace
@@ -351,3 +352,167 @@ TEST_CASE ("Multimodal preprocessing unit tests", "[generator][multimodal]")
     CHECK (input.audio_pcm[1] == Catch::Approx (-0.2f));
   }
 }
+
+#if defined(CORTEXT_ENABLE_GEMMA_ORT)
+#include "cortext/generator/gemma_text_generator.hpp"
+
+TEST_CASE ("GemmaTextGenerator multimodal generation",
+           "[generator][multimodal][integration]")
+{
+  auto models_dir = GetModelsDir ();
+  if (models_dir.empty ())
+    {
+      SKIP ("Models directory not found");
+    }
+
+  try
+    {
+      cortext::GemmaTextGenerator gen (models_dir);
+
+      if (!gen.IsAvailable ())
+        {
+          SKIP ("Generator not available");
+        }
+
+      SECTION ("Image to text generation")
+      {
+        // Create a simple test image (64x64 red square)
+        std::vector<std::uint8_t> image (64 * 64 * 3, 0);
+        for (std::size_t i = 0; i < image.size (); i += 3)
+          {
+            image[i] = 255; // R
+          }
+
+        std::vector<cortext::GenerationInput> inputs = {
+          cortext::GenerationInput::Text ("Describe this image: "),
+          cortext::GenerationInput::Image (image.data (), 64, 64, 3),
+        };
+
+        cortext::GenerationConfig config;
+        config.max_new_tokens = 30;
+        config.temperature = 0.5f;
+
+        auto result = gen.GenerateMultimodal (inputs, config);
+
+        CHECK (!result.empty ());
+      }
+
+      SECTION ("Text only multimodal")
+      {
+        std::vector<cortext::GenerationInput> inputs = {
+          cortext::GenerationInput::Text ("Hello, "),
+          cortext::GenerationInput::Text ("world!"),
+        };
+
+        cortext::GenerationConfig config;
+        config.max_new_tokens = 10;
+        config.temperature = 0.5f;
+
+        auto result = gen.GenerateMultimodal (inputs, config);
+
+        CHECK (!result.empty ());
+      }
+
+      SECTION ("Audio to text generation")
+      {
+        // Create 0.5 seconds of silence at 16kHz
+        std::vector<float> audio (8000, 0.0f);
+
+        std::vector<cortext::GenerationInput> inputs = {
+          cortext::GenerationInput::Text ("Transcribe this audio: "),
+          cortext::GenerationInput::Audio (audio.data (), audio.size (), 16000),
+        };
+
+        cortext::GenerationConfig config;
+        config.max_new_tokens = 30;
+        config.temperature = 0.5f;
+
+        auto result = gen.GenerateMultimodal (inputs, config);
+
+        CHECK (!result.empty ());
+      }
+
+      SECTION ("Interleaved text and image")
+      {
+        std::vector<std::uint8_t> image (32 * 32 * 3, 128);
+
+        std::vector<cortext::GenerationInput> inputs = {
+          cortext::GenerationInput::Text ("Look at this: "),
+          cortext::GenerationInput::Image (image.data (), 32, 32, 3),
+          cortext::GenerationInput::Text (" What do you see?"),
+        };
+
+        cortext::GenerationConfig config;
+        config.max_new_tokens = 20;
+        config.temperature = 0.5f;
+
+        auto result = gen.GenerateMultimodal (inputs, config);
+
+        CHECK (!result.empty ());
+      }
+    }
+  catch (const std::runtime_error &e)
+    {
+      SKIP ("Generator construction failed: " + std::string (e.what ()));
+    }
+}
+
+TEST_CASE ("GemmaTextGenerator multimodal JSON generation",
+           "[generator][multimodal][integration]")
+{
+  auto models_dir = GetModelsDir ();
+  if (models_dir.empty ())
+    {
+      SKIP ("Models directory not found");
+    }
+
+  try
+    {
+      cortext::GemmaTextGenerator gen (models_dir);
+
+      if (!gen.IsAvailable ())
+        {
+          SKIP ("Generator not available");
+        }
+
+      SECTION ("Image classification with JSON schema")
+      {
+        std::vector<std::uint8_t> image (64 * 64 * 3, 0);
+        // Create a gradient pattern
+        for (std::size_t y = 0; y < 64; ++y)
+          {
+            for (std::size_t x = 0; x < 64; ++x)
+              {
+                std::size_t idx = (y * 64 + x) * 3;
+                image[idx] = static_cast<std::uint8_t> (x * 4);     // R
+                image[idx + 1] = static_cast<std::uint8_t> (y * 4); // G
+                image[idx + 2] = 128;                               // B
+              }
+          }
+
+        std::vector<cortext::GenerationInput> inputs = {
+          cortext::GenerationInput::Text (
+              "Classify this image. Respond in JSON:"),
+          cortext::GenerationInput::Image (image.data (), 64, 64, 3),
+        };
+
+        nlohmann::json schema
+            = { { "type", "object" },
+                { "properties",
+                  { { "category", { { "type", "string" } } },
+                    { "confidence", { { "type", "number" } } } } },
+                { "required", { "category" } } };
+
+        auto result
+            = gen.GenerateJSONMultimodal (inputs, schema, 100, 0.3f, 40, 0.9f);
+
+        REQUIRE (result.contains ("category"));
+        CHECK (result["category"].is_string ());
+      }
+    }
+  catch (const std::runtime_error &e)
+    {
+      SKIP ("Generator construction failed: " + std::string (e.what ()));
+    }
+}
+#endif

@@ -78,14 +78,28 @@ private:
   std::unique_ptr<Impl> impl_;
 };
 
+/// @brief Result from embed forward pass.
+struct EmbedOutput
+{
+  /// @brief Input embeddings [batch, seq_len, hidden_dim].
+  std::vector<float> inputs_embeds;
+  std::vector<std::size_t> embeds_shape;
+
+  /// @brief Per-layer inputs [batch, seq_len, num_layers, head_dim].
+  std::vector<float> per_layer_inputs;
+  std::vector<std::size_t> per_layer_shape;
+};
+
 /// @brief Runs the embedding model (embed_tokens) for token-to-embedding.
 ///
-/// Converts token IDs to embeddings for decoder input.
+/// Converts token IDs to embeddings and per-layer inputs for decoder input.
+/// Provides optimized methods for prefill (variable-length) and step
+/// (single-token with buffer reuse) operations.
 class EmbedRunner
 {
 public:
   /// @brief Construct embed runner from model directory.
-  /// @param models_dir Directory containing embed_tokens_quantized.onnx.
+  /// @param models_dir Directory containing embed_tokens_int8.onnx.
   explicit EmbedRunner (const std::string &models_dir);
 
   ~EmbedRunner ();
@@ -95,12 +109,27 @@ public:
   EmbedRunner (EmbedRunner &&) noexcept;
   EmbedRunner &operator= (EmbedRunner &&) noexcept;
 
-  /// @brief Embed token IDs to hidden states.
+  /// @brief Embed token IDs to hidden states and per-layer inputs.
   /// @param token_ids Token IDs [batch, seq_len].
   /// @param shape Shape of token_ids.
-  /// @return Embeddings [batch, seq_len, hidden_dim].
-  std::vector<float> Embed (const std::vector<int64_t> &token_ids,
+  /// @return EmbedOutput with embeddings and per_layer_inputs.
+  /// @deprecated Use EmbedPrefill or EmbedStep for better performance.
+  EmbedOutput Embed (const std::vector<int64_t> &token_ids,
+                     const std::vector<std::size_t> &shape);
+
+  /// @brief Embed variable-length token sequence (prefill phase).
+  /// @param token_ids Token IDs [batch, seq_len].
+  /// @param shape Shape of token_ids.
+  /// @return EmbedOutput with embeddings and per_layer_inputs.
+  EmbedOutput EmbedPrefill (const std::vector<int64_t> &token_ids,
                             const std::vector<std::size_t> &shape);
+
+  /// @brief Embed single token with buffer reuse (decode step).
+  /// Uses preallocated buffers for zero-copy output on single-token decoding.
+  /// @param token_id Single token ID to embed.
+  /// @return EmbedOutput with embeddings and per_layer_inputs (views into
+  ///         internal buffers - data is valid until next EmbedStep call).
+  EmbedOutput EmbedStep (int64_t token_id);
 
   /// @brief Get hidden dimension of embeddings.
   std::size_t HiddenDim () const;

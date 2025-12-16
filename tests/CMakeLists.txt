@@ -84,6 +84,7 @@ add_executable(cortext_tests
   generator_json_decoder.test.cpp
   generator_text_generator.test.cpp
   generator_multimodal.test.cpp
+  generator_constrained_sampler.test.cpp
 )
 
 target_link_libraries(cortext_tests PRIVATE cortext Catch2::Catch2WithMain nlohmann_json::nlohmann_json)

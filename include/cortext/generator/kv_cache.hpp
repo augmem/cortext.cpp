@@ -62,9 +62,25 @@ public:
   /// @brief Get past KV tensors for model input binding.
   /// @return Map of "past_key_values.{layer}.key/value" -> [B, H, length, D].
   ///
-  /// Returns views (slices) into the cache up to current length.
+  /// NOTE: This copies data. Use PastInputPtrs() for zero-copy access.
   /// Tensors are in row-major order (C contiguous).
   std::map<std::string, std::vector<float> > PastInputs () const;
+
+  /// @brief KV buffer info for zero-copy tensor creation.
+  struct KVBufferInfo
+  {
+    const float *data; ///< Pointer to buffer start
+    std::size_t size;  ///< Total elements in view [B*H*length*D]
+  };
+
+  /// @brief Get pointers to past KV buffers (zero-copy).
+  /// @return Map of "past_key_values.{layer}.key/value" -> buffer info.
+  ///
+  /// Returns pointers to internal buffers. The shape is [B, H, length, D].
+  /// Data is valid until cache is modified (append/init/clear).
+  /// IMPORTANT: Buffer layout is [B, H, capacity, D] but only first
+  /// `length` positions in time dimension are valid.
+  std::map<std::string, KVBufferInfo> PastInputPtrs () const;
 
   /// @brief Initialize cache from prefill model outputs.
   /// @param present Map of "present_key_values.{layer}.key/value" tensors.

@@ -228,6 +228,97 @@ TEST_CASE ("GemmaTextGenerator JSON generation",
         CHECK (gen.LastTokenCount () > 0);
         CHECK (gen.LastTokenCount () <= 50);
       }
+
+      SECTION ("Multi-field required schema")
+      {
+        nlohmann::json schema
+            = { { "type", "object" },
+                { "properties",
+                  { { "name", { { "type", "string" } } },
+                    { "age", { { "type", "integer" } } },
+                    { "active", { { "type", "boolean" } } } } },
+                { "required", { "name", "age" } } };
+
+        auto result = gen.GenerateJSON (
+            "Generate a person with name John and age 30:", schema, 100, 0.3f);
+
+        REQUIRE (result.contains ("name"));
+        REQUIRE (result.contains ("age"));
+        CHECK (result["name"].is_string ());
+        CHECK (result["age"].is_number_integer ());
+      }
+
+      SECTION ("Number field generation")
+      {
+        nlohmann::json schema
+            = { { "type", "object" },
+                { "properties",
+                  { { "temperature", { { "type", "number" } } },
+                    { "count", { { "type", "integer" } } } } },
+                { "required", { "temperature", "count" } } };
+
+        auto result = gen.GenerateJSON (
+            "Return temperature 98.6 and count 5:", schema, 50, 0.3f);
+
+        REQUIRE (result.contains ("temperature"));
+        REQUIRE (result.contains ("count"));
+        CHECK (result["temperature"].is_number ());
+        CHECK (result["count"].is_number_integer ());
+      }
+
+      SECTION ("Boolean field generation")
+      {
+        nlohmann::json schema
+            = { { "type", "object" },
+                { "properties",
+                  { { "enabled", { { "type", "boolean" } } },
+                    { "verified", { { "type", "boolean" } } } } },
+                { "required", { "enabled" } } };
+
+        auto result = gen.GenerateJSON ("Return enabled as true:", schema, 50,
+                                        0.3f);
+
+        REQUIRE (result.contains ("enabled"));
+        CHECK (result["enabled"].is_boolean ());
+      }
+
+      SECTION ("Nested object schema")
+      {
+        nlohmann::json schema
+            = { { "type", "object" },
+                { "properties",
+                  { { "person",
+                      { { "type", "object" },
+                        { "properties",
+                          { { "name", { { "type", "string" } } },
+                            { "age", { { "type", "integer" } } } } },
+                        { "required", { "name" } } } } } },
+                { "required", { "person" } } };
+
+        auto result = gen.GenerateJSON (
+            "Create a person object with name Alice:", schema, 100, 0.3f);
+
+        REQUIRE (result.contains ("person"));
+        CHECK (result["person"].is_object ());
+        CHECK (result["person"].contains ("name"));
+      }
+
+      SECTION ("Array schema")
+      {
+        nlohmann::json schema
+            = { { "type", "object" },
+                { "properties",
+                  { { "numbers",
+                      { { "type", "array" },
+                        { "items", { { "type", "integer" } } } } } } },
+                { "required", { "numbers" } } };
+
+        auto result = gen.GenerateJSON ("Return an array of numbers [1, 2, 3]:",
+                                        schema, 100, 0.3f);
+
+        REQUIRE (result.contains ("numbers"));
+        CHECK (result["numbers"].is_array ());
+      }
     }
   catch (const std::runtime_error &e)
     {
@@ -273,6 +364,135 @@ TEST_CASE ("GemmaTextGenerator text generation",
         auto result = gen.Generate ("The capital of France is", config);
 
         CHECK (!result.empty ());
+      }
+
+      SECTION ("High temperature sampling")
+      {
+        cortext::GenerationConfig config;
+        config.max_new_tokens = 20;
+        config.temperature = 1.2f;
+        config.do_sample = true;
+
+        auto result = gen.Generate ("Once upon a time", config);
+
+        CHECK (!result.empty ());
+      }
+
+      SECTION ("Low temperature sampling")
+      {
+        cortext::GenerationConfig config;
+        config.max_new_tokens = 20;
+        config.temperature = 0.2f;
+        config.do_sample = true;
+
+        auto result = gen.Generate ("The answer is", config);
+
+        CHECK (!result.empty ());
+      }
+
+      SECTION ("Top-k sampling")
+      {
+        cortext::GenerationConfig config;
+        config.max_new_tokens = 15;
+        config.top_k = 10;
+        config.do_sample = true;
+
+        auto result = gen.Generate ("A quick brown fox", config);
+
+        CHECK (!result.empty ());
+      }
+
+      SECTION ("Top-p nucleus sampling")
+      {
+        cortext::GenerationConfig config;
+        config.max_new_tokens = 15;
+        config.top_p = 0.8f;
+        config.do_sample = true;
+
+        auto result = gen.Generate ("In the beginning", config);
+
+        CHECK (!result.empty ());
+      }
+
+      SECTION ("Combined top-k and top-p sampling")
+      {
+        cortext::GenerationConfig config;
+        config.max_new_tokens = 15;
+        config.top_k = 40;
+        config.top_p = 0.95f;
+        config.temperature = 0.7f;
+        config.do_sample = true;
+
+        auto result = gen.Generate ("Hello world", config);
+
+        CHECK (!result.empty ());
+      }
+
+      SECTION ("Max token limit enforcement")
+      {
+        cortext::GenerationConfig config;
+        config.max_new_tokens = 5;
+        config.do_sample = false;
+
+        auto result = gen.Generate ("Count to one hundred:", config);
+
+        // Token count should respect the limit
+        CHECK (gen.LastTokenCount () <= 5);
+      }
+    }
+  catch (const std::runtime_error &e)
+    {
+      SKIP ("Generator construction failed: " + std::string (e.what ()));
+    }
+}
+
+TEST_CASE ("GemmaTextGenerator oneOf schema generation",
+           "[generator][text_generator][integration]")
+{
+  auto models_dir = GetModelsDir ();
+  if (models_dir.empty ())
+    {
+      SKIP ("Models directory not found");
+    }
+
+  try
+    {
+      cortext::GemmaTextGenerator gen (models_dir);
+
+      if (!gen.IsAvailable ())
+        {
+          SKIP ("Generator not available");
+        }
+
+      SECTION ("oneOf with discriminator")
+      {
+        nlohmann::json schema = {
+          { "type", "object" },
+          { "oneOf",
+            { { { "properties",
+                  { { "type", { { "const", "cat" } } },
+                    { "lives", { { "type", "integer" } } } } },
+                { "required", { "type", "lives" } } },
+              { { "properties",
+                  { { "type", { { "const", "dog" } } },
+                    { "breed", { { "type", "string" } } } } },
+                { "required", { "type", "breed" } } } } }
+        };
+
+        auto result = gen.GenerateJSON (
+            "Generate a cat with 9 lives in JSON:", schema, 100, 0.3f);
+
+        REQUIRE (result.contains ("type"));
+        std::string type = result["type"];
+
+        if (type == "cat")
+          {
+            CHECK (result.contains ("lives"));
+          }
+        else if (type == "dog")
+          {
+            CHECK (result.contains ("breed"));
+          }
       }
     }
   catch (const std::runtime_error &e)

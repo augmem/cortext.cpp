@@ -217,8 +217,9 @@ struct GemmaTextGenerator::Impl
 #endif
   }
 
-  /// @brief Embed token IDs to get input embeddings.
-  std::vector<float>
+  /// @brief Embed token IDs to get input embeddings and per-layer inputs.
+  /// Uses EmbedStep for single-token decode steps (more efficient).
+  EmbedOutput
   EmbedTokens (const std::vector<int64_t> &token_ids)
   {
     if (!embedder || !embedder->IsAvailable ())
@@ -226,14 +227,20 @@ struct GemmaTextGenerator::Impl
         throw std::runtime_error ("Embedder not available");
       }
 
+    // Use optimized single-token path for decode steps
+    if (token_ids.size () == 1)
+      {
+        return embedder->EmbedStep (token_ids[0]);
+      }
+
+    // Use prefill path for multi-token sequences
     std::vector<std::size_t> shape = { 1, token_ids.size () };
-    return embedder->Embed (token_ids, shape);
+    return embedder->EmbedPrefill (token_ids, shape);
   }
 
   /// @brief Run decoder with embeddings and KV cache.
   DecoderOutput
-  RunDecoder (const std::vector<float> &inputs_embeds,
-              const std::vector<std::size_t> &embeds_shape,
+  RunDecoder (const EmbedOutput &embed_output,
               const std::vector<int64_t> &position_ids, KVCache &kv_cache)
   {
     if (!decoder || !decoder->IsAvailable ())
@@ -244,15 +251,6 @@ struct GemmaTextGenerator::Impl
     // Get past KV from cache
     auto past_kv = kv_cache.PastInputs ();
 
-    // Create per-layer inputs (zeros for text-only)
-    // Shape: [batch, seq_len, hidden_dim]
-    std::vector<float> per_layer_inputs (embeds_shape[0] * embeds_shape[1]
-                                             * kHiddenDim,
-                                         0.0f);
-    std::vector<std::size_t> per_layer_shape
-        = { embeds_shape[0], embeds_shape[1],
-            static_cast<std::size_t> (kHiddenDim) };
-
     // Position IDs shape
     std::vector<std::size_t> position_shape = { 1, position_ids.size () };
 
@@ -261,9 +259,10 @@ struct GemmaTextGenerator::Impl
         = { 1, static_cast<std::size_t> (kNumKVHeads), kv_cache.Length (),
             static_cast<std::size_t> (kHeadDim) };
 
-    return decoder->Run (inputs_embeds, embeds_shape, per_layer_inputs,
-                         per_layer_shape, position_ids, position_shape,
-                         past_kv, past_kv_shape);
+    return decoder->Run (embed_output.inputs_embeds, embed_output.embeds_shape,
+                         embed_output.per_layer_inputs,
+                         embed_output.per_layer_shape, position_ids,
+                         position_shape, past_kv, past_kv_shape);
   }
 
   /// @brief Generate JSON with schema constraints.
@@ -296,10 +295,8 @@ struct GemmaTextGenerator::Impl
     // Generation loop
     for (int step = 0; step < max_tokens; ++step)
       {
-        // Embed tokens
-        auto embeddings = EmbedTokens (current_input);
-        std::vector<std::size_t> embeds_shape = { 1, current_input.size (),
-                                                  embedder->HiddenDim () };
+        // Embed tokens (returns both embeddings and per_layer_inputs)
+        auto embed_output = EmbedTokens (current_input);
 
         // Create position IDs
         std::vector<int64_t> position_ids (current_input.size ());
@@ -310,8 +307,7 @@ struct GemmaTextGenerator::Impl
           }
 
         // Run decoder
-        auto output = RunDecoder (embeddings, embeds_shape, position_ids,
-                                  kv_cache);
+        auto output = RunDecoder (embed_output, position_ids, kv_cache);
 
         // Update KV cache
         if (step == 0)
@@ -401,10 +397,8 @@ struct GemmaTextGenerator::Impl
     // Generation loop
     for (int step = 0; step < config.max_new_tokens; ++step)
       {
-        // Embed tokens
-        auto embeddings = EmbedTokens (current_input);
-        std::vector<std::size_t> embeds_shape = { 1, current_input.size (),
-                                                  embedder->HiddenDim () };
+        // Embed tokens (returns both embeddings and per_layer_inputs)
+        auto embed_output = EmbedTokens (current_input);
 
         // Create position IDs
         std::vector<int64_t> position_ids (current_input.size ());
@@ -415,8 +409,7 @@ struct GemmaTextGenerator::Impl
           }
 
         // Run decoder
-        auto output = RunDecoder (embeddings, embeds_shape, position_ids,
-                                  kv_cache);
+        auto output = RunDecoder (embed_output, position_ids, kv_cache);
 
         // Update KV cache
         if (step == 0)

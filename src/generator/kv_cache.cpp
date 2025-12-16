@@ -131,10 +131,15 @@ KVCache::InitFromPresent (
 
   for (int layer = 0; layer < spec_.num_layers; ++layer)
     {
-      // Try present_key_values first, fall back to past_key_values
+      // Try multiple naming conventions for model outputs
       std::string key_name
           = "present_key_values." + std::to_string (layer) + ".key";
       auto key_it = present.find (key_name);
+      if (key_it == present.end ())
+        {
+          key_name = "present." + std::to_string (layer) + ".key";
+          key_it = present.find (key_name);
+        }
       if (key_it == present.end ())
         {
           key_name = "past_key_values." + std::to_string (layer) + ".key";
@@ -144,6 +149,11 @@ KVCache::InitFromPresent (
       std::string value_name
           = "present_key_values." + std::to_string (layer) + ".value";
       auto value_it = present.find (value_name);
+      if (value_it == present.end ())
+        {
+          value_name = "present." + std::to_string (layer) + ".value";
+          value_it = present.find (value_name);
+        }
       if (value_it == present.end ())
         {
           value_name = "past_key_values." + std::to_string (layer) + ".value";
@@ -191,10 +201,15 @@ KVCache::AppendFromPresent (
 
   for (int layer = 0; layer < spec_.num_layers; ++layer)
     {
-      // Try present_key_values first, fall back to past_key_values
+      // Try multiple naming conventions for model outputs
       std::string key_name
           = "present_key_values." + std::to_string (layer) + ".key";
       auto key_it = present.find (key_name);
+      if (key_it == present.end ())
+        {
+          key_name = "present." + std::to_string (layer) + ".key";
+          key_it = present.find (key_name);
+        }
       if (key_it == present.end ())
         {
           key_name = "past_key_values." + std::to_string (layer) + ".key";
@@ -204,6 +219,11 @@ KVCache::AppendFromPresent (
       std::string value_name
           = "present_key_values." + std::to_string (layer) + ".value";
       auto value_it = present.find (value_name);
+      if (value_it == present.end ())
+        {
+          value_name = "present." + std::to_string (layer) + ".value";
+          value_it = present.find (value_name);
+        }
       if (value_it == present.end ())
         {
           value_name = "past_key_values." + std::to_string (layer) + ".value";

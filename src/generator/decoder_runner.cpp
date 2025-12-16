@@ -1,8 +1,10 @@
 #include "cortext/generator/decoder_runner.hpp"
 
 #include <algorithm>
+#include <cstdlib>
 #include <filesystem>
 #include <stdexcept>
+#include <thread>
 
 #if defined(CORTEXT_ENABLE_GEMMA_ORT)
 #include <onnxruntime/onnxruntime_cxx_api.h>
@@ -31,8 +33,11 @@ struct DecoderRunner::Impl
   Ort::Env env{ ORT_LOGGING_LEVEL_WARNING, "cortext-gemma-decoder" };
   Ort::SessionOptions opts;
   std::unique_ptr<Ort::Session> session;
-  Ort::IoBinding *io_binding = nullptr;
+  std::unique_ptr<Ort::IoBinding> io_binding;
+  Ort::MemoryInfo mem_info
+      = Ort::MemoryInfo::CreateCpu (OrtDeviceAllocator, OrtMemTypeCPU);
   std::vector<std::string> output_names;
+  std::vector<std::string> kv_input_names; // Persistent storage for KV names
   bool available = false;
 
   void
@@ -48,11 +53,27 @@ struct DecoderRunner::Impl
                                   + model_path.string ());
       }
 
-    opts.SetIntraOpNumThreads (1);
+    // Session options for memory optimization (matches Python)
+    // Check environment for thread count, default to min(4, cpu_count)
+    int cpu_count = static_cast<int> (std::thread::hardware_concurrency ());
+    int intra_threads = std::min (4, std::max (1, cpu_count));
+    const char *env_threads = std::getenv ("CORTEXT_ORT_INTRA_THREADS");
+    if (env_threads)
+      {
+        intra_threads = std::atoi (env_threads);
+      }
+    opts.SetIntraOpNumThreads (intra_threads);
+    opts.SetInterOpNumThreads (1);
     opts.SetGraphOptimizationLevel (GraphOptimizationLevel::ORT_ENABLE_ALL);
+    opts.EnableMemPattern ();
+    opts.EnableCpuMemArena ();
+    opts.SetExecutionMode (ExecutionMode::ORT_SEQUENTIAL);
 
     session
         = std::make_unique<Ort::Session> (env, model_path.c_str (), opts);
+
+    // Create IOBinding for efficient inference
+    io_binding = std::make_unique<Ort::IoBinding> (*session);
 
     // Collect output names
     Ort::AllocatorWithDefaultOptions allocator;
@@ -61,6 +82,15 @@ struct DecoderRunner::Impl
       {
         auto name = session->GetOutputNameAllocated (i, allocator);
         output_names.push_back (name.get ());
+      }
+
+    // Pre-build KV input names for reuse
+    for (int layer = 0; layer < kNumLayers; ++layer)
+      {
+        kv_input_names.push_back ("past_key_values." + std::to_string (layer)
+                                  + ".key");
+        kv_input_names.push_back ("past_key_values." + std::to_string (layer)
+                                  + ".value");
       }
 
     available = true;
@@ -101,8 +131,9 @@ DecoderRunner::Run (const std::vector<float> &inputs_embeds,
       throw std::runtime_error ("Decoder model not available");
     }
 
-  Ort::MemoryInfo mem_info
-      = Ort::MemoryInfo::CreateCpu (OrtDeviceAllocator, OrtMemTypeCPU);
+  auto &io = *impl_->io_binding;
+  io.ClearBoundInputs ();
+  io.ClearBoundOutputs ();
 
   // Convert shapes to int64_t
   std::vector<int64_t> embeds_shape_i64 (embeds_shape.begin (),
@@ -114,98 +145,70 @@ DecoderRunner::Run (const std::vector<float> &inputs_embeds,
   std::vector<int64_t> past_kv_shape_i64 (past_kv_shape.begin (),
                                           past_kv_shape.end ());
 
-  // Build input tensors
-  std::vector<Ort::Value> input_tensors;
-  std::vector<const char *> input_names;
-
-  // inputs_embeds
-  input_names.push_back ("inputs_embeds");
-  input_tensors.push_back (Ort::Value::CreateTensor<float> (
-      mem_info, const_cast<float *> (inputs_embeds.data ()),
+  // Bind inputs_embeds
+  auto embeds_tensor = Ort::Value::CreateTensor<float> (
+      impl_->mem_info, const_cast<float *> (inputs_embeds.data ()),
       inputs_embeds.size (), embeds_shape_i64.data (),
-      embeds_shape_i64.size ()));
+      embeds_shape_i64.size ());
+  io.BindInput ("inputs_embeds", embeds_tensor);
 
-  // per_layer_inputs
-  input_names.push_back ("per_layer_inputs");
-  input_tensors.push_back (Ort::Value::CreateTensor<float> (
-      mem_info, const_cast<float *> (per_layer_inputs.data ()),
+  // Bind per_layer_inputs
+  auto per_layer_tensor = Ort::Value::CreateTensor<float> (
+      impl_->mem_info, const_cast<float *> (per_layer_inputs.data ()),
       per_layer_inputs.size (), per_layer_shape_i64.data (),
-      per_layer_shape_i64.size ()));
+      per_layer_shape_i64.size ());
+  io.BindInput ("per_layer_inputs", per_layer_tensor);
 
-  // position_ids
-  input_names.push_back ("position_ids");
-  input_tensors.push_back (Ort::Value::CreateTensor<int64_t> (
-      mem_info, const_cast<int64_t *> (position_ids.data ()),
+  // Bind position_ids
+  auto position_tensor = Ort::Value::CreateTensor<int64_t> (
+      impl_->mem_info, const_cast<int64_t *> (position_ids.data ()),
       position_ids.size (), position_shape_i64.data (),
-      position_shape_i64.size ()));
+      position_shape_i64.size ());
+  io.BindInput ("position_ids", position_tensor);
 
-  // past_key_values
-  std::vector<std::vector<float> >
-      past_kv_copies; // Keep alive during Run
+  // Bind past_key_values using IOBinding
+  std::vector<Ort::Value> kv_tensors; // Keep tensors alive during Run
+  kv_tensors.reserve (kNumLayers * 2);
   for (int layer = 0; layer < kNumLayers; ++layer)
     {
-      std::string key_name
-          = "past_key_values." + std::to_string (layer) + ".key";
-      std::string value_name
-          = "past_key_values." + std::to_string (layer) + ".value";
+      const std::string &key_name = impl_->kv_input_names[layer * 2];
+      const std::string &value_name = impl_->kv_input_names[layer * 2 + 1];
 
       auto key_it = past_kv.find (key_name);
       auto value_it = past_kv.find (value_name);
 
       if (key_it != past_kv.end ())
         {
-          input_names.push_back (key_name.c_str ());
-          past_kv_copies.push_back (key_it->second);
-          input_tensors.push_back (Ort::Value::CreateTensor<float> (
-              mem_info, past_kv_copies.back ().data (),
-              past_kv_copies.back ().size (), past_kv_shape_i64.data (),
+          kv_tensors.push_back (Ort::Value::CreateTensor<float> (
+              impl_->mem_info,
+              const_cast<float *> (key_it->second.data ()),
+              key_it->second.size (), past_kv_shape_i64.data (),
               past_kv_shape_i64.size ()));
+          io.BindInput (key_name.c_str (), kv_tensors.back ());
         }
 
       if (value_it != past_kv.end ())
         {
-          input_names.push_back (value_name.c_str ());
-          past_kv_copies.push_back (value_it->second);
-          input_tensors.push_back (Ort::Value::CreateTensor<float> (
-              mem_info, past_kv_copies.back ().data (),
-              past_kv_copies.back ().size (), past_kv_shape_i64.data (),
+          kv_tensors.push_back (Ort::Value::CreateTensor<float> (
+              impl_->mem_info,
+              const_cast<float *> (value_it->second.data ()),
+              value_it->second.size (), past_kv_shape_i64.data (),
               past_kv_shape_i64.size ()));
+          io.BindInput (value_name.c_str (), kv_tensors.back ());
         }
     }
 
-  // Convert input_names to vector of const char* that stays valid
-  std::vector<const char *> input_names_cstr;
-  input_names_cstr.reserve (input_names.size ());
-  for (std::size_t i = 0; i < 3; ++i)
-    { // First 3 are string literals
-      input_names_cstr.push_back (input_names[i]);
-    }
-  // For KV names, we need persistent strings
-  std::vector<std::string> kv_names_storage;
-  for (int layer = 0; layer < kNumLayers; ++layer)
-    {
-      kv_names_storage.push_back ("past_key_values." + std::to_string (layer)
-                                  + ".key");
-      kv_names_storage.push_back ("past_key_values." + std::to_string (layer)
-                                  + ".value");
-    }
-  for (const auto &name : kv_names_storage)
-    {
-      input_names_cstr.push_back (name.c_str ());
-    }
-
-  // Output names
-  std::vector<const char *> output_names_cstr;
+  // Bind outputs to CPU
   for (const auto &name : impl_->output_names)
     {
-      output_names_cstr.push_back (name.c_str ());
+      io.BindOutput (name.c_str (), impl_->mem_info);
     }
 
-  // Run inference
-  auto outputs = impl_->session->Run (
-      Ort::RunOptions{ nullptr }, input_names_cstr.data (),
-      input_tensors.data (), input_tensors.size (), output_names_cstr.data (),
-      output_names_cstr.size ());
+  // Run inference with IOBinding
+  impl_->session->Run (Ort::RunOptions{ nullptr }, io);
+
+  // Get outputs from IOBinding
+  auto outputs = io.GetOutputValues ();
 
   // Extract results
   DecoderOutput result;
@@ -228,11 +231,11 @@ DecoderRunner::Run (const std::vector<float> &inputs_embeds,
     }
 
   // Extract present KV from remaining outputs
+  // Model outputs: present.N.key, present.N.value
   for (std::size_t i = 1; i < outputs.size (); ++i)
     {
       const std::string &name = impl_->output_names[i];
-      if (name.find ("present_key_values") != std::string::npos
-          || name.find ("past_key_values") != std::string::npos)
+      if (name.find ("present.") != std::string::npos)
         {
           auto &tensor = outputs[i];
           const float *data = tensor.GetTensorData<float> ();
@@ -296,15 +299,22 @@ struct EmbedRunner::Impl
   Ort::Env env{ ORT_LOGGING_LEVEL_WARNING, "cortext-gemma-embed" };
   Ort::SessionOptions opts;
   std::unique_ptr<Ort::Session> session;
+  std::unique_ptr<Ort::IoBinding> io_binding;
+  Ort::MemoryInfo mem_info
+      = Ort::MemoryInfo::CreateCpu (OrtDeviceAllocator, OrtMemTypeCPU);
   bool available = false;
   std::size_t hidden_dim = kHiddenDim;
+
+  // Preallocated step buffers for single-token decode (B=1, L=1)
+  std::vector<float> step_inputs_embeds;
+  std::vector<float> step_per_layer_inputs;
 
   void
   LoadModel (const std::string &models_dir)
   {
     std::filesystem::path model_path
         = std::filesystem::path (models_dir) / "onnx"
-          / "embed_tokens_quantized.onnx";
+          / "embed_tokens_int8.onnx";
 
     if (!std::filesystem::exists (model_path))
       {
@@ -312,11 +322,33 @@ struct EmbedRunner::Impl
                                   + model_path.string ());
       }
 
-    opts.SetIntraOpNumThreads (1);
+    // Session options for memory optimization (matches Python)
+    // Check environment for thread count, default to min(4, cpu_count)
+    int cpu_count = static_cast<int> (std::thread::hardware_concurrency ());
+    int intra_threads = std::min (4, std::max (1, cpu_count));
+    const char *env_threads = std::getenv ("CORTEXT_ORT_INTRA_THREADS");
+    if (env_threads)
+      {
+        intra_threads = std::atoi (env_threads);
+      }
+    opts.SetIntraOpNumThreads (intra_threads);
+    opts.SetInterOpNumThreads (1);
     opts.SetGraphOptimizationLevel (GraphOptimizationLevel::ORT_ENABLE_ALL);
+    opts.EnableMemPattern ();
+    opts.EnableCpuMemArena ();
+    opts.SetExecutionMode (ExecutionMode::ORT_SEQUENTIAL);
 
     session
         = std::make_unique<Ort::Session> (env, model_path.c_str (), opts);
+
+    // Create IOBinding for efficient inference
+    io_binding = std::make_unique<Ort::IoBinding> (*session);
+
+    // Preallocate step buffers: [1, 1, hidden_dim] and [1, 1, num_layers,
+    // head_dim]
+    step_inputs_embeds.resize (1 * 1 * kHiddenDim, 0.0f);
+    step_per_layer_inputs.resize (1 * 1 * kNumLayers * kHeadDim, 0.0f);
+
     available = true;
   }
 #else
@@ -339,9 +371,17 @@ EmbedRunner::~EmbedRunner () = default;
 EmbedRunner::EmbedRunner (EmbedRunner &&) noexcept = default;
 EmbedRunner &EmbedRunner::operator= (EmbedRunner &&) noexcept = default;
 
-std::vector<float>
+EmbedOutput
 EmbedRunner::Embed (const std::vector<int64_t> &token_ids,
                     const std::vector<std::size_t> &shape)
+{
+  // Delegate to EmbedPrefill for backward compatibility
+  return EmbedPrefill (token_ids, shape);
+}
+
+EmbedOutput
+EmbedRunner::EmbedPrefill (const std::vector<int64_t> &token_ids,
+                           const std::vector<std::size_t> &shape)
 {
 #if defined(CORTEXT_ENABLE_GEMMA_ORT)
   if (!impl_->available)
@@ -349,42 +389,135 @@ EmbedRunner::Embed (const std::vector<int64_t> &token_ids,
       throw std::runtime_error ("Embed model not available");
     }
 
-  Ort::MemoryInfo mem_info
-      = Ort::MemoryInfo::CreateCpu (OrtDeviceAllocator, OrtMemTypeCPU);
+  auto &io = *impl_->io_binding;
+  io.ClearBoundInputs ();
+  io.ClearBoundOutputs ();
 
   std::vector<int64_t> shape_i64 (shape.begin (), shape.end ());
 
-  Ort::Value input = Ort::Value::CreateTensor<int64_t> (
-      mem_info, const_cast<int64_t *> (token_ids.data ()), token_ids.size (),
-      shape_i64.data (), shape_i64.size ());
+  // Bind input
+  auto input_tensor = Ort::Value::CreateTensor<int64_t> (
+      impl_->mem_info, const_cast<int64_t *> (token_ids.data ()),
+      token_ids.size (), shape_i64.data (), shape_i64.size ());
+  io.BindInput ("input_ids", input_tensor);
 
-  const char *input_names[] = { "input_ids" };
-  const char *output_names[] = { "inputs_embeds" };
+  // Bind outputs to CPU
+  io.BindOutput ("inputs_embeds", impl_->mem_info);
+  io.BindOutput ("per_layer_inputs", impl_->mem_info);
 
-  auto outputs = impl_->session->Run (Ort::RunOptions{ nullptr }, input_names,
-                                      &input, 1, output_names, 1);
+  // Run with IOBinding
+  impl_->session->Run (Ort::RunOptions{ nullptr }, io);
 
-  const float *data = outputs[0].GetTensorData<float> ();
-  auto shape_info = outputs[0].GetTensorTypeAndShapeInfo ();
-  auto out_shape = shape_info.GetShape ();
+  // Get outputs
+  auto outputs = io.GetOutputValues ();
 
-  std::size_t total_size = 1;
-  for (auto dim : out_shape)
-    {
-      total_size *= static_cast<std::size_t> (dim);
-    }
+  EmbedOutput result;
 
-  // Update hidden_dim from actual output
-  if (out_shape.size () >= 3)
-    {
-      impl_->hidden_dim = static_cast<std::size_t> (out_shape[2]);
-    }
+  // Extract inputs_embeds
+  {
+    const float *data = outputs[0].GetTensorData<float> ();
+    auto shape_info = outputs[0].GetTensorTypeAndShapeInfo ();
+    auto out_shape = shape_info.GetShape ();
 
-  return std::vector<float> (data, data + total_size);
+    std::size_t total_size = 1;
+    for (auto dim : out_shape)
+      {
+        total_size *= static_cast<std::size_t> (dim);
+        result.embeds_shape.push_back (static_cast<std::size_t> (dim));
+      }
+
+    result.inputs_embeds.assign (data, data + total_size);
+
+    // Update hidden_dim from actual output
+    if (out_shape.size () >= 3)
+      {
+        impl_->hidden_dim = static_cast<std::size_t> (out_shape[2]);
+      }
+  }
+
+  // Extract per_layer_inputs
+  {
+    const float *data = outputs[1].GetTensorData<float> ();
+    auto shape_info = outputs[1].GetTensorTypeAndShapeInfo ();
+    auto out_shape = shape_info.GetShape ();
+
+    std::size_t total_size = 1;
+    for (auto dim : out_shape)
+      {
+        total_size *= static_cast<std::size_t> (dim);
+        result.per_layer_shape.push_back (static_cast<std::size_t> (dim));
+      }
+
+    result.per_layer_inputs.assign (data, data + total_size);
+  }
+
+  return result;
 
 #else
   (void)token_ids;
   (void)shape;
+  throw std::runtime_error (
+      "EmbedRunner: CORTEXT_ENABLE_GEMMA_ORT not defined");
+#endif
+}
+
+EmbedOutput
+EmbedRunner::EmbedStep (int64_t token_id)
+{
+#if defined(CORTEXT_ENABLE_GEMMA_ORT)
+  if (!impl_->available)
+    {
+      throw std::runtime_error ("Embed model not available");
+    }
+
+  auto &io = *impl_->io_binding;
+  io.ClearBoundInputs ();
+  io.ClearBoundOutputs ();
+
+  // Single token input [1, 1]
+  std::vector<int64_t> token_ids = { token_id };
+  std::vector<int64_t> shape_i64 = { 1, 1 };
+
+  // Bind input
+  auto input_tensor = Ort::Value::CreateTensor<int64_t> (
+      impl_->mem_info, token_ids.data (), token_ids.size (), shape_i64.data (),
+      shape_i64.size ());
+  io.BindInput ("input_ids", input_tensor);
+
+  // Bind outputs to preallocated buffers for zero-copy
+  std::vector<int64_t> embeds_shape = { 1, 1,
+                                        static_cast<int64_t> (kHiddenDim) };
+  std::vector<int64_t> per_layer_shape
+      = { 1, 1, static_cast<int64_t> (kNumLayers),
+          static_cast<int64_t> (kHeadDim) };
+
+  auto embeds_out = Ort::Value::CreateTensor<float> (
+      impl_->mem_info, impl_->step_inputs_embeds.data (),
+      impl_->step_inputs_embeds.size (), embeds_shape.data (),
+      embeds_shape.size ());
+  io.BindOutput ("inputs_embeds", embeds_out);
+
+  auto per_layer_out = Ort::Value::CreateTensor<float> (
+      impl_->mem_info, impl_->step_per_layer_inputs.data (),
+      impl_->step_per_layer_inputs.size (), per_layer_shape.data (),
+      per_layer_shape.size ());
+  io.BindOutput ("per_layer_inputs", per_layer_out);
+
+  // Run with IOBinding
+  impl_->session->Run (Ort::RunOptions{ nullptr }, io);
+
+  // Return result pointing to preallocated buffers
+  EmbedOutput result;
+  result.inputs_embeds = impl_->step_inputs_embeds;
+  result.embeds_shape = { 1, 1, static_cast<std::size_t> (kHiddenDim) };
+  result.per_layer_inputs = impl_->step_per_layer_inputs;
+  result.per_layer_shape = { 1, 1, static_cast<std::size_t> (kNumLayers),
+                             static_cast<std::size_t> (kHeadDim) };
+
+  return result;
+
+#else
+  (void)token_id;
   throw std::runtime_error (
       "EmbedRunner: CORTEXT_ENABLE_GEMMA_ORT not defined");
 #endif
