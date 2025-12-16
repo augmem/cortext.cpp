@@ -206,6 +206,30 @@ ScoreConsolidation::Execute (OperationContext &context) const
   // Floor derived from knobs (no magic numbers).
   const double floor_cutoff = core::PeripheryCutoff (T);
 
+  // Update connectivity metric from graph edge count (Section 9.2).
+  // Connectivity = normalized count of edges where this embedding participates.
+  // Normalized by max observed edge count to keep values in [0, 1].
+  {
+    BufferedWriteInstruction op;
+    op.query
+        = "WITH edge_counts AS ("
+          "  SELECT em.embedding_id, "
+          "         (SELECT COUNT(*) FROM graph_edges ge "
+          "          WHERE ge.source_id = 'emb:' || em.embedding_id "
+          "             OR ge.target_id = 'emb:' || em.embedding_id) AS cnt "
+          "  FROM embeddings_meta em"
+          "), max_cnt AS ("
+          "  SELECT MAX(cnt) AS m FROM edge_counts WHERE cnt > 0"
+          ") "
+          "UPDATE embeddings_meta SET connectivity = ("
+          "  SELECT CASE WHEN (SELECT m FROM max_cnt) > 0 "
+          "              THEN CAST(ec.cnt AS REAL) / (SELECT m FROM max_cnt) "
+          "              ELSE 0.0 END "
+          "  FROM edge_counts ec WHERE ec.embedding_id = embeddings_meta.embedding_id"
+          ");";
+    context.AddWriteInstruction (std::move (op));
+  }
+
   // Insert or update candidates whose score is below floor.
   // score = T*strength - F*redundancy + S*connectivity + T*stability
   // Uses embeddings_meta which contains per-embedding state.

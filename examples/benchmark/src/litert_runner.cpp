@@ -1,14 +1,15 @@
 #include "include/litert_runner.hpp"
+#include "include/gemma3n_audio.hpp"
 
 #include <iomanip>
 #include <iostream>
 #include <stdexcept>
 
 #if defined(BENCHMARK_ENABLE_LITERT)
-// LiteRT-LM headers would go here when available
-// #include "runtime/engine/engine.h"
-// #include "runtime/engine/model_assets.h"
-// #include "runtime/session/session.h"
+#include "runtime/engine/engine.h"
+#include "runtime/engine/engine_settings.h"
+#include "runtime/engine/io_types.h"
+#include "runtime/executor/llm_executor_settings.h"
 #endif
 
 namespace benchmark
@@ -16,41 +17,83 @@ namespace benchmark
 
 #if defined(BENCHMARK_ENABLE_LITERT)
 
+using litert::lm::Backend;
+using litert::lm::CpuConfig;
+using litert::lm::Engine;
+using litert::lm::EngineSettings;
+using litert::lm::InputAudio;
+using litert::lm::InputText;
+using litert::lm::ModelAssets;
+using litert::lm::SessionConfig;
+
 struct LiteRTRunner::Impl
 {
-  // LiteRT-LM engine and session state would go here
-  // std::unique_ptr<litert::lm::Engine> engine;
+  std::unique_ptr<Engine> engine;
   std::string model_path;
   bool available = false;
 
   explicit Impl (const std::string &path) : model_path (path)
   {
-    // TODO: Implement LiteRT-LM model loading when SDK is available
-    //
-    // Expected implementation:
-    // try {
-    //   auto model_assets = litert::lm::ModelAssets::Create(path);
-    //   auto engine_settings = litert::lm::EngineSettings::CreateDefault(
-    //       *model_assets, litert::lm::Backend::CPU);
-    //   auto engine_result = litert::lm::Engine::CreateEngine(engine_settings);
-    //   if (engine_result.ok()) {
-    //     engine = std::move(*engine_result);
-    //     available = true;
-    //   }
-    // } catch (const std::exception& e) {
-    //   std::cerr << "LiteRTRunner: Failed to load model: " << e.what() <<
-    //   "\n"; available = false;
-    // }
+    try
+      {
+        // Load model assets
+        auto model_assets = ModelAssets::Create (path);
+        if (!model_assets.ok ())
+          {
+            std::cerr << "LiteRTRunner: Failed to load model assets: "
+                      << model_assets.status () << "\n";
+            return;
+          }
 
-    std::cerr << "LiteRTRunner: LiteRT-LM integration pending. Model path: "
-              << path << "\n";
-    available = false;
+        // Create engine settings with CPU backend
+        auto settings_result = EngineSettings::CreateDefault (
+            *std::move (model_assets), Backend::CPU, std::nullopt, Backend::CPU);
+        if (!settings_result.ok ())
+          {
+            std::cerr << "LiteRTRunner: Failed to create settings: "
+                      << settings_result.status () << "\n";
+            return;
+          }
+
+        // Configure single-threaded execution
+        auto &executor_settings
+            = settings_result->GetMutableMainExecutorSettings ();
+        auto cpu_config_result
+            = executor_settings.MutableBackendConfig<CpuConfig> ();
+        if (cpu_config_result.ok ())
+          {
+            CpuConfig cpu_config = *cpu_config_result;
+            cpu_config.number_of_threads = 1; // Single-threaded for benchmarking
+            executor_settings.SetBackendConfig (cpu_config);
+          }
+
+        // Enable benchmarking
+        settings_result->GetMutableBenchmarkParams ();
+
+        // Create engine
+        auto engine_result = Engine::CreateEngine (*settings_result);
+        if (!engine_result.ok ())
+          {
+            std::cerr << "LiteRTRunner: Failed to create engine: "
+                      << engine_result.status () << "\n";
+            return;
+          }
+
+        engine = *std::move (engine_result);
+        available = true;
+        std::cerr << "LiteRTRunner: Model loaded successfully (C++ API)\n";
+      }
+    catch (const std::exception &e)
+      {
+        std::cerr << "LiteRTRunner: Exception: " << e.what () << "\n";
+        available = false;
+      }
   }
 
   RunMetrics
   RunText (const std::string &text, int max_tokens)
   {
-    if (!available)
+    if (!available || !engine)
       throw std::runtime_error ("LiteRTRunner: Model not available");
 
     RunMetrics metrics;
@@ -58,24 +101,44 @@ struct LiteRTRunner::Impl
 
     total_timer.Start ();
 
-    // TODO: Implement LiteRT-LM text inference
-    //
-    // Expected implementation:
-    // auto session = engine->CreateSession(session_config);
-    //
-    // prefill_timer.Start();
-    // session->RunPrefill({litert::lm::InputText(text)});
-    // metrics.output_tokens = 1;
-    // prefill_timer.Stop();
-    // metrics.prefill_time_ms = prefill_timer.ElapsedMs();
-    //
-    // decode_timer.Start();
-    // while (!session->IsDone() && metrics.output_tokens < max_tokens) {
-    //   auto token = session->RunDecode();
-    //   metrics.output_tokens++;
-    // }
-    // decode_timer.Stop();
-    // metrics.decode_time_ms = decode_timer.ElapsedMs();
+    // Create session
+    auto session_result
+        = engine->CreateSession (SessionConfig::CreateDefault ());
+    if (!session_result.ok ())
+      {
+        throw std::runtime_error ("LiteRTRunner: Failed to create session: "
+                                  + session_result.status ().ToString ());
+      }
+    auto &session = *session_result;
+
+    // Prefill with text input
+    prefill_timer.Start ();
+    std::vector<std::variant<InputText, litert::lm::InputImage, InputAudio,
+                             litert::lm::InputAudioEnd>>
+        inputs;
+    inputs.emplace_back (InputText (text));
+    auto prefill_status = session->RunPrefill (inputs);
+    prefill_timer.Stop ();
+    metrics.prefill_time_ms = prefill_timer.ElapsedMs ();
+
+    if (!prefill_status.ok ())
+      {
+        throw std::runtime_error ("LiteRTRunner: Prefill failed: "
+                                  + prefill_status.ToString ());
+      }
+
+    // Decode loop
+    decode_timer.Start ();
+    metrics.output_tokens = 0;
+    while (!session->IsDone () && metrics.output_tokens < max_tokens)
+      {
+        auto decode_status = session->RunDecode ();
+        if (!decode_status.ok ())
+          break;
+        metrics.output_tokens++;
+      }
+    decode_timer.Stop ();
+    metrics.decode_time_ms = decode_timer.ElapsedMs ();
 
     total_timer.Stop ();
     metrics.total_time_ms = total_timer.ElapsedMs ();
@@ -86,7 +149,7 @@ struct LiteRTRunner::Impl
   RunMetrics
   RunAudio (const AudioData &audio, int max_tokens)
   {
-    if (!available)
+    if (!available || !engine)
       throw std::runtime_error ("LiteRTRunner: Model not available");
 
     if (audio.sample_rate != 16000 || audio.num_channels != 1)
@@ -100,24 +163,57 @@ struct LiteRTRunner::Impl
 
     total_timer.Start ();
 
-    // TODO: Implement LiteRT-LM audio inference
-    //
-    // Expected implementation using Conversation API:
-    // auto conversation = engine->CreateConversation();
-    //
-    // std::vector<litert::lm::ContentPart> parts;
-    // parts.push_back({.type = "audio", .audio_data = audio.samples});
-    // parts.push_back({.type = "text", .text = "Describe what you hear."});
-    //
-    // prefill_timer.Start();
-    // auto response = conversation->SendMessage(parts);
-    // prefill_timer.Stop();
-    // metrics.prefill_time_ms = prefill_timer.ElapsedMs();
-    //
-    // metrics.output_tokens = response.token_count;
-    // decode_timer.Start();
-    // decode_timer.Stop();
-    // metrics.decode_time_ms = decode_timer.ElapsedMs();
+    // Create session with audio modality enabled
+    SessionConfig session_config = SessionConfig::CreateDefault ();
+    session_config.SetAudioModalityEnabled (true);
+
+    auto session_result = engine->CreateSession (session_config);
+    if (!session_result.ok ())
+      {
+        throw std::runtime_error ("LiteRTRunner: Failed to create session: "
+                                  + session_result.status ().ToString ());
+      }
+    auto &session = *session_result;
+
+    // Compute mel spectrogram features from raw PCM
+    std::vector<float> mel_features;
+    int64_t num_frames;
+    ComputeMelSpectrogram (audio.samples.data (), audio.samples.size (),
+                           mel_features, num_frames);
+
+    // Create audio input with mel spectrogram data
+    std::string mel_data (reinterpret_cast<const char *> (mel_features.data ()),
+                          mel_features.size () * sizeof (float));
+
+    // Prefill with audio + text prompt
+    prefill_timer.Start ();
+    std::vector<std::variant<InputText, litert::lm::InputImage, InputAudio,
+                             litert::lm::InputAudioEnd>>
+        inputs;
+    inputs.emplace_back (InputAudio (std::move (mel_data)));
+    inputs.emplace_back (InputText ("Describe what you hear."));
+    auto prefill_status = session->RunPrefill (inputs);
+    prefill_timer.Stop ();
+    metrics.prefill_time_ms = prefill_timer.ElapsedMs ();
+
+    if (!prefill_status.ok ())
+      {
+        throw std::runtime_error ("LiteRTRunner: Prefill failed: "
+                                  + prefill_status.ToString ());
+      }
+
+    // Decode loop
+    decode_timer.Start ();
+    metrics.output_tokens = 0;
+    while (!session->IsDone () && metrics.output_tokens < max_tokens)
+      {
+        auto decode_status = session->RunDecode ();
+        if (!decode_status.ok ())
+          break;
+        metrics.output_tokens++;
+      }
+    decode_timer.Stop ();
+    metrics.decode_time_ms = decode_timer.ElapsedMs ();
 
     total_timer.Stop ();
     metrics.total_time_ms = total_timer.ElapsedMs ();
@@ -182,32 +278,30 @@ LiteRTRunner::Run (const BenchmarkConfig &config, const AudioData *audio_data)
     }
 
   // Warmup runs
-  if (config.verbose)
-    std::cout << "LiteRT: Performing " << config.warmup_runs
-              << " warmup runs...\n";
+  std::cout << "LiteRT: Performing " << config.warmup_runs
+            << " warmup runs..." << std::flush;
 
   for (int i = 0; i < config.warmup_runs; ++i)
     {
-      if (config.verbose)
-        std::cout << "  Warmup " << (i + 1) << "/" << config.warmup_runs
-                  << "\n";
+      std::cout << " " << (i + 1) << std::flush;
 
       if (config.input_type == InputType::Audio && audio_data)
         RunAudioInference (*audio_data, config.max_tokens);
       else
         RunTextInference (config.text_input, config.max_tokens);
     }
+  std::cout << " done.\n" << std::flush;
 
   // Benchmark runs
-  if (config.verbose)
-    std::cout << "LiteRT: Running " << config.iterations
-              << " benchmark iterations...\n";
+  std::cout << "LiteRT: Running " << config.iterations
+            << " benchmark iterations...\n"
+            << std::flush;
 
   results.runs.reserve (config.iterations);
   for (int i = 0; i < config.iterations; ++i)
     {
-      if (config.verbose)
-        std::cout << "  Iteration " << (i + 1) << "/" << config.iterations;
+      std::cout << "  [" << (i + 1) << "/" << config.iterations << "] "
+                << std::flush;
 
       RunMetrics metrics;
       if (config.input_type == InputType::Audio && audio_data)
@@ -217,10 +311,9 @@ LiteRTRunner::Run (const BenchmarkConfig &config, const AudioData *audio_data)
 
       results.runs.push_back (metrics);
 
-      if (config.verbose)
-        std::cout << " - " << metrics.output_tokens << " tokens, "
-                  << std::fixed << std::setprecision (2) << metrics.DecodeTPS ()
-                  << " tok/s\n";
+      std::cout << metrics.output_tokens << " tokens, " << std::fixed
+                << std::setprecision (2) << metrics.DecodeTPS () << " tok/s\n"
+                << std::flush;
     }
 
   return results;
@@ -270,7 +363,7 @@ LiteRTRunner::GetModelName () const
 
 RunMetrics
 LiteRTRunner::RunTextInference (const std::string & /*text*/,
-                                 int /*max_tokens*/)
+                                int /*max_tokens*/)
 {
   throw std::runtime_error (
       "LiteRTRunner: LiteRT-LM disabled. Rebuild with BENCHMARK_ENABLE_LITERT");
@@ -278,7 +371,7 @@ LiteRTRunner::RunTextInference (const std::string & /*text*/,
 
 RunMetrics
 LiteRTRunner::RunAudioInference (const AudioData & /*audio*/,
-                                  int /*max_tokens*/)
+                                 int /*max_tokens*/)
 {
   throw std::runtime_error (
       "LiteRTRunner: LiteRT-LM disabled. Rebuild with BENCHMARK_ENABLE_LITERT");

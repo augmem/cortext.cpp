@@ -433,6 +433,27 @@ const doc = new Document({
                             new TableCell({ borders: cellBorders, children: [p("S, ↓T")] }),
                             new TableCell({ borders: cellBorders, children: [p([code("clamp(Σ p_c × a_map[c], 0, 1)")])] })
                         ]
+                    }),
+                    new TableRow({
+                        children: [
+                            new TableCell({ borders: cellBorders, children: [p("Contradiction")] }),
+                            new TableCell({ borders: cellBorders, children: [p("↑S, ↓F")] }),
+                            new TableCell({ borders: cellBorders, children: [p([code("max(0, S − F)")])] })
+                        ]
+                    }),
+                    new TableRow({
+                        children: [
+                            new TableCell({ borders: cellBorders, children: [p("Periphery")] }),
+                            new TableCell({ borders: cellBorders, children: [p("↑T")] }),
+                            new TableCell({ borders: cellBorders, children: [p([code("(1 − relevance) × T")])] })
+                        ]
+                    }),
+                    new TableRow({
+                        children: [
+                            new TableCell({ borders: cellBorders, children: [p("Coverage")] }),
+                            new TableCell({ borders: cellBorders, children: [p("↑F")] }),
+                            new TableCell({ borders: cellBorders, children: [p([code("F × relevance")])] })
+                        ]
                     })
                 ]
             }),

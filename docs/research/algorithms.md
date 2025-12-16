@@ -4,13 +4,20 @@
 
 **Abstract**
 
-This document details the complete algorithmic specification for Cortext, a biologically-inspired adaptive memory system. It serves as a technical reference for implementation, focusing purely on mathematical definitions, signal processing flows, and adaptive control logic governed by the three primary parameters: Focus (F), Sensitivity (S), and Stability (T).
+This document details the complete algorithmic specification for
+Cortext, a biologically-inspired adaptive memory system. It serves as a
+technical reference for implementation, focusing purely on mathematical
+definitions, signal processing flows, and adaptive control logic
+governed by the three primary parameters: Focus (F), Sensitivity (S),
+and Stability (T).
 
 1\. Mathematical Foundations
 
 1.1 Notation and Primitives
 
-We establish the following notation used throughout this paper. Let ε = 10⁻⁶ denote a small constant for numerical stability. All knob values F, S, T lie in the closed interval \[0, 1\].
+We establish the following notation used throughout this paper. Let ε =
+10⁻⁶ denote a small constant for numerical stability. All knob values F,
+S, T lie in the closed interval \[0, 1\].
 
 Core mathematical primitives:
 
@@ -22,13 +29,17 @@ sigmoid(z) = 1 / (1 + exp(−z))
 
 EWMA(prev, x, α) = (1 − α) × prev + α × x
 
-For vectors, we define cosine similarity as cos(u, v) = u·v / (‖u‖ × ‖v‖), and safe L2 normalization as l2_normalize(v) = v / max(‖v‖, ε). Shannon entropy is computed in nats: H(p) = −Σᵢ pᵢ ln(pᵢ).
+For vectors, we define cosine similarity as cos(u, v) = u·v / (‖u‖ ×
+‖v‖), and safe L2 normalization as l2_normalize(v) = v / max(‖v‖, ε).
+Shannon entropy is computed in nats: H(p) = −Σᵢ pᵢ ln(pᵢ).
 
-The temporal decay function follows exponential dynamics with configurable half-life:
+The temporal decay function follows exponential dynamics with
+configurable half-life:
 
 decay(x, τ_half, Δt) = x × exp(−ln(2) × Δt / max(τ_half, τ_min))
 
-where τ_min = 120 seconds provides a floor to prevent numerical instability from near-zero half-lives.
+where τ_min = 120 seconds provides a floor to prevent numerical
+instability from near-zero half-lives.
 
 1.2 The Three-Knob Philosophy
 
@@ -104,7 +115,8 @@ weights = weights_u), 0, 1)
 
 u(t) = EWMA(u(t−1), u_raw(t), α = α_u(T))
 
-When structural metrics are unavailable, the fallback is u_raw(t) = 1 − maturity(t).
+When structural metrics are unavailable, the fallback is u_raw(t) = 1 −
+maturity(t).
 
 2\. Core Adaptation Algorithms
 
@@ -312,16 +324,17 @@ surprisal_t ← clamp(prediction_error_t / err_max, 0, 1)
 
 The system computes 12 metrics that blend into a composite write score:
 
-  ----------------------------------------------------------------------------
+  -----------------------------------------------------------------------
   **Metric**         **Knob**        **Expression**
-  ------------------ --------------- -----------------------------------------
+  ------------------ --------------- ------------------------------------
   Relevance          ↑F              cos(x, μ_ctx) × (0.5 + F)
 
   Mismatch           ↓F, ↑S          (1 − F) × S × novelty
 
   Prediction Error   ↑S, ↓T          surprisal_t × S × (1 − T)
 
-  Rarity             ↑F, ↓T          (1 − μ_sim) × (0.5 + 0.5F) × (1 − 0.2T)
+  Rarity             ↑F, ↓T          (1 − μ_sim) × (0.5 + 0.5F) × (1 −
+                                     0.2T)
 
   Drift              ↓T              (drift_mag / 2) × (1 − T)
 
@@ -332,9 +345,16 @@ The system computes 12 metrics that blend into a composite write score:
   Valence            S, ↓T           map01(Σ p_c × v_map\[c\])
 
   Arousal            S, ↓T           clamp(Σ p_c × a_map\[c\], 0, 1)
-  ----------------------------------------------------------------------------
 
-Table 1: Metric definitions and knob dependencies. Arrows indicate direction of influence.
+  Contradiction      ↑S, ↓F          max(0, S − F)
+
+  Periphery          ↑T              (1 − relevance) × T
+
+  Coverage           ↑F              F × relevance
+  -----------------------------------------------------------------------
+
+Table 1: Metric definitions and knob dependencies. Arrows indicate
+direction of influence.
 
 3.3 Metric Weight Blending
 
@@ -412,7 +432,8 @@ denom ← max(1 − (1 − α)\^(rate_ticks + 1), ε)
 
 4.2.2 Effective Sample Size
 
-ESS estimates the effective number of independent samples in the EMA, using a heuristic inspired by Liu & Chen (1998):
+ESS estimates the effective number of independent samples in the EMA,
+using a heuristic inspired by Liu & Chen (1998):
 
 β ← max(0, 1 − α)
 
@@ -572,7 +593,9 @@ influence(m),
 
 base_capacity = round(lerp(5, 3, S) + lerp(−1, 1, F))
 
-This yields a range of approximately 2-6 slots, broadening the 4±1 chunk limit to accommodate task-dependent requirements. High Sensitivity reduces capacity (faster turnover), while high Focus modulates breadth.
+This yields a range of approximately 2-6 slots, broadening the 4±1 chunk
+limit to accommodate task-dependent requirements. High Sensitivity
+reduces capacity (faster turnover), while high Focus modulates breadth.
 
 maintenance_cost_per_slot = lerp(0.05, 0.15, S)
 

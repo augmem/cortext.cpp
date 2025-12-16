@@ -202,32 +202,30 @@ OgaRunner::Run (const BenchmarkConfig &config, const AudioData *audio_data)
   results.input_type = InputTypeToString (config.input_type);
 
   // Warmup runs
-  if (config.verbose)
-    std::cout << "OGA: Performing " << config.warmup_runs
-              << " warmup runs...\n";
+  std::cout << "OGA: Performing " << config.warmup_runs << " warmup runs..."
+            << std::flush;
 
   for (int i = 0; i < config.warmup_runs; ++i)
     {
-      if (config.verbose)
-        std::cout << "  Warmup " << (i + 1) << "/" << config.warmup_runs
-                  << "\n";
+      std::cout << " " << (i + 1) << std::flush;
 
       if (config.input_type == InputType::Audio && audio_data)
         RunAudioInference (*audio_data, config.max_tokens);
       else
         RunTextInference (config.text_input, config.max_tokens);
     }
+  std::cout << " done.\n" << std::flush;
 
   // Benchmark runs
-  if (config.verbose)
-    std::cout << "OGA: Running " << config.iterations
-              << " benchmark iterations...\n";
+  std::cout << "OGA: Running " << config.iterations
+            << " benchmark iterations...\n"
+            << std::flush;
 
   results.runs.reserve (config.iterations);
   for (int i = 0; i < config.iterations; ++i)
     {
-      if (config.verbose)
-        std::cout << "  Iteration " << (i + 1) << "/" << config.iterations;
+      std::cout << "  [" << (i + 1) << "/" << config.iterations << "] "
+                << std::flush;
 
       RunMetrics metrics;
       if (config.input_type == InputType::Audio && audio_data)
@@ -237,10 +235,9 @@ OgaRunner::Run (const BenchmarkConfig &config, const AudioData *audio_data)
 
       results.runs.push_back (metrics);
 
-      if (config.verbose)
-        std::cout << " - " << metrics.output_tokens << " tokens, "
-                  << std::fixed << std::setprecision (2) << metrics.DecodeTPS ()
-                  << " tok/s\n";
+      std::cout << metrics.output_tokens << " tokens, " << std::fixed
+                << std::setprecision (2) << metrics.DecodeTPS () << " tok/s\n"
+                << std::flush;
     }
 
   return results;

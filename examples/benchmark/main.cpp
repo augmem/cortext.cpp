@@ -152,15 +152,17 @@ main (int argc, char *argv[])
           if (!oga_path.empty () && IsOgaAvailable ())
             {
               std::cout << "--- Running OGA Backend ---\n";
-              std::cout << "Loading model: " << oga_path << "\n";
+              std::cout << "Loading model: " << oga_path << "..." << std::flush;
 
               OgaRunner oga_runner (oga_path);
               if (oga_runner.IsAvailable ())
                 {
+                  std::cout << " loaded.\n" << std::flush;
                   oga_results = oga_runner.Run (config, audio_ptr);
                 }
               else
                 {
+                  std::cout << "\n";
                   std::cerr << "OGA: Model not available\n";
                 }
             }
@@ -176,15 +178,17 @@ main (int argc, char *argv[])
           if (!litert_path.empty () && IsLiteRTAvailable ())
             {
               std::cout << "--- Running LiteRT-LM Backend ---\n";
-              std::cout << "Loading model: " << litert_path << "\n";
+              std::cout << "Loading model: " << litert_path << "..." << std::flush;
 
               LiteRTRunner litert_runner (litert_path);
               if (litert_runner.IsAvailable ())
                 {
+                  std::cout << " loaded.\n" << std::flush;
                   litert_results = litert_runner.Run (config, audio_ptr);
                 }
               else
                 {
+                  std::cout << "\n";
                   std::cerr << "LiteRT: Model not available\n";
                 }
             }
@@ -237,15 +241,17 @@ main (int argc, char *argv[])
                 }
 
               std::cout << "--- Running OGA Backend ---\n";
-              std::cout << "Loading model: " << model_path << "\n";
+              std::cout << "Loading model: " << model_path << "..." << std::flush;
 
               OgaRunner runner (model_path);
               if (!runner.IsAvailable ())
                 {
+                  std::cout << "\n";
                   std::cerr << "Error: OGA model not available\n";
                   return 1;
                 }
 
+              std::cout << " loaded.\n" << std::flush;
               results = runner.Run (config, audio_ptr);
             }
           else // LiteRTLM
@@ -258,15 +264,17 @@ main (int argc, char *argv[])
                 }
 
               std::cout << "--- Running LiteRT-LM Backend ---\n";
-              std::cout << "Loading model: " << model_path << "\n";
+              std::cout << "Loading model: " << model_path << "..." << std::flush;
 
               LiteRTRunner runner (model_path);
               if (!runner.IsAvailable ())
                 {
+                  std::cout << "\n";
                   std::cerr << "Error: LiteRT-LM model not available\n";
                   return 1;
                 }
 
+              std::cout << " loaded.\n" << std::flush;
               results = runner.Run (config, audio_ptr);
             }
 

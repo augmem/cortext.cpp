@@ -1,5 +1,6 @@
 #include "cortext/operations/sensitivity_feedback.hpp"
 
+#include "cortext/buffered_write_instruction.hpp"
 #include "cortext/core/algorithms.hpp"
 #include "cortext/core/knobs.hpp"
 #include "cortext/operations/constants.hpp"
@@ -138,6 +139,13 @@ ApplySensitivityFeedback::Execute (OperationContext &context) const
       p_ctx.weight_novelty
           = core::Clamp (p_ctx.weight_novelty + adjustment,
                          constants::kNormalizedMin, constants::kNormalizedMax);
+
+      // Store computed redundancy in embeddings_meta for consolidation scoring
+      // (Section 9.2: score = T*strength - F*redundancy + S*connectivity + T*stability)
+      BufferedWriteInstruction op;
+      op.query = "UPDATE embeddings_meta SET redundancy = ? WHERE embedding_id = ?";
+      op.params = { redundancy, e.embedding_id };
+      context.AddWriteInstruction (std::move (op));
     }
 }
 

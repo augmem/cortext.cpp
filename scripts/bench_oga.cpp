@@ -57,12 +57,12 @@ BenchmarkResult benchmark_oga(
     params->SetSearchOptionBool("do_sample", false);  // Greedy
 
     // Encode prompt
-    OgaSequences sequences;
-    tokenizer->Encode(prompt.c_str(), sequences);
+    auto sequences = OgaSequences::Create();
+    tokenizer->Encode(prompt.c_str(), *sequences);
 
     // Create generator and append input tokens
     auto generator = OgaGenerator::Create(*model, *params);
-    generator->AppendTokenSequences(sequences);
+    generator->AppendTokenSequences(*sequences);
 
     // Prefill (first token)
     auto t_prefill_start = Clock::now();
