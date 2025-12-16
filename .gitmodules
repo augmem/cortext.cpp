@@ -16,3 +16,6 @@
 [submodule "third_party/onnxruntime-genai"]
 	path = third_party/onnxruntime-genai
 	url = https://github.com/microsoft/onnxruntime-genai.git
+[submodule "third_party/litert-lm"]
+	path = third_party/litert-lm
+	url = https://github.com/google-ai-edge/LiteRT-LM.git
