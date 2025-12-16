@@ -108,6 +108,7 @@ private:
   void PersistRecentScores ();
   void PersistObservedRetentionHistory ();
   void PersistRLSCoefficients ();
+  void PersistWorkingMemorySlots ();
 
   Config config_;
   std::shared_ptr<Store> store_;

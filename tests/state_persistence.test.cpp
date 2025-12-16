@@ -347,3 +347,265 @@ TEST_CASE ("State persistence is idempotent across restarts",
   auto state_rows = store->Execute ("SELECT signals_processed FROM processor_state");
   REQUIRE (GetInt64 (state_rows[0], "signals_processed") == 3);
 }
+
+// Operation that populates WM slots for testing persistence
+struct PopulateWMSlotsOp : IOperation
+{
+  int num_slots = 2;
+  double strength = 0.8;
+
+  void
+  Execute (OperationContext &ctx) const override
+  {
+    auto &pctx = ctx.GetProcessorContext ();
+    pctx.wm_slots.clear ();
+    for (int i = 0; i < num_slots; ++i)
+      {
+        ProcessorContext::WMSlot slot;
+        slot.embedding = Eigen::VectorXf::Constant (256, static_cast<float> (i + 1) * 0.1f);
+        slot.embedding.normalize ();
+        slot.strength = strength;
+        slot.last_ts = static_cast<double> (ctx.GetSignal ().timestamp);
+        slot.pos_index = i;
+        pctx.wm_slots.push_back (std::move (slot));
+      }
+    ctx.RequestFinalizeEpisode ();
+  }
+};
+
+TEST_CASE ("Working memory slots are persisted",
+           "[state_persistence][working_memory]")
+{
+  auto unique_store = SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<Store> (std::move (unique_store));
+
+  {
+    auto ops = std::make_unique<OperationSet> (
+        std::make_unique<PopulateWMSlotsOp> ());
+    SignalProcessor processor (SignalProcessor::Config{}, store,
+                               std::move (ops));
+
+    Signal s;
+    s.embedding = Eigen::VectorXf::Random (256);
+    s.timestamp = 1000;
+    s.source_id = "test";
+    processor.Process (s);
+    processor.Flush ();
+  }
+
+  // Check working_memory_slots table has entries
+  auto rows = store->Execute (
+      "SELECT slot_index, strength FROM working_memory_slots ORDER BY slot_index");
+  REQUIRE (rows.size () == 2);
+  REQUIRE (GetInt64 (rows[0], "slot_index") == 0);
+  REQUIRE (GetInt64 (rows[1], "slot_index") == 1);
+  REQUIRE_THAT (GetDouble (rows[0], "strength"), WithinAbs (0.8, 0.01));
+  REQUIRE_THAT (GetDouble (rows[1], "strength"), WithinAbs (0.8, 0.01));
+}
+
+TEST_CASE ("Working memory slots are loaded on startup",
+           "[state_persistence][working_memory]")
+{
+  auto unique_store = SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<Store> (std::move (unique_store));
+
+  // Directly insert slots into database
+  {
+    auto ops = std::make_unique<OperationSet> ();
+    SignalProcessor processor (SignalProcessor::Config{}, store,
+                               std::move (ops));
+    // This ensures schema is created
+    processor.Flush ();
+  }
+
+  // Insert test data directly
+  const auto now = std::chrono::duration_cast<std::chrono::seconds> (
+                       std::chrono::system_clock::now ().time_since_epoch ())
+                       .count ();
+
+  std::vector<float> emb1 (256, 0.1f);
+  std::vector<float> emb2 (256, 0.2f);
+
+  store->Execute (
+      "INSERT INTO working_memory_slots (slot_index, strength, timestamp, embedding) "
+      "VALUES (?, ?, ?, ?)",
+      { 0LL, 0.9, now, emb1 });
+  store->Execute (
+      "INSERT INTO working_memory_slots (slot_index, strength, timestamp, embedding) "
+      "VALUES (?, ?, ?, ?)",
+      { 1LL, 0.7, now, emb2 });
+
+  // Create new processor - should load slots
+  {
+    auto verify_op = std::make_unique<OperationSet> ();
+    SignalProcessor::Config cfg;
+    cfg.sensitivity = 0.5;
+    SignalProcessor processor (cfg, store, std::move (verify_op));
+
+    Signal s;
+    s.embedding = Eigen::VectorXf::Random (256);
+    s.timestamp = static_cast<uint64_t> (now);
+    s.source_id = "test";
+    auto out = processor.Process (s);
+
+    // Access processor internals through output or verify via another process
+  }
+
+  // Create processor with custom op to verify slots were loaded
+  struct VerifyWMSlotsOp : IOperation
+  {
+    mutable bool verified = false;
+    mutable size_t slot_count = 0;
+    mutable double slot0_strength = 0.0;
+    mutable double slot1_strength = 0.0;
+
+    void
+    Execute (OperationContext &ctx) const override
+    {
+      const auto &pctx = ctx.GetProcessorContext ();
+      slot_count = pctx.wm_slots.size ();
+      if (slot_count >= 2)
+        {
+          slot0_strength = pctx.wm_slots[0].strength;
+          slot1_strength = pctx.wm_slots[1].strength;
+        }
+      verified = true;
+    }
+  };
+
+  auto verify_ptr = std::make_unique<VerifyWMSlotsOp> ();
+  auto *verify_raw = verify_ptr.get ();
+  auto ops = std::make_unique<OperationSet> (std::move (verify_ptr));
+  SignalProcessor::Config cfg;
+  cfg.sensitivity = 0.5;
+  SignalProcessor processor (cfg, store, std::move (ops));
+
+  Signal s;
+  s.embedding = Eigen::VectorXf::Random (256);
+  s.timestamp = static_cast<uint64_t> (now);
+  s.source_id = "test";
+  processor.Process (s);
+
+  REQUIRE (verify_raw->verified);
+  REQUIRE (verify_raw->slot_count == 2);
+  // Strength may have decayed slightly if any time elapsed
+  REQUIRE (verify_raw->slot0_strength > 0.0);
+  REQUIRE (verify_raw->slot1_strength > 0.0);
+}
+
+TEST_CASE ("Working memory slots decay on load",
+           "[state_persistence][working_memory][decay]")
+{
+  auto unique_store = SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<Store> (std::move (unique_store));
+
+  // Create schema
+  {
+    auto ops = std::make_unique<OperationSet> ();
+    SignalProcessor processor (SignalProcessor::Config{}, store,
+                               std::move (ops));
+    processor.Flush ();
+  }
+
+  // Insert slot with old timestamp (5 seconds ago)
+  const auto now = std::chrono::duration_cast<std::chrono::seconds> (
+                       std::chrono::system_clock::now ().time_since_epoch ())
+                       .count ();
+  const auto old_ts = now - 5; // 5 seconds ago
+
+  std::vector<float> emb (256, 0.1f);
+  store->Execute (
+      "INSERT INTO working_memory_slots (slot_index, strength, timestamp, embedding) "
+      "VALUES (?, ?, ?, ?)",
+      { 0LL, 1.0, old_ts, emb });
+
+  // Load with sensitivity=0.5 → cost_per_slot = lerp(0.05, 0.15, 0.5) = 0.10
+  // After 5 seconds: strength = 1.0 - 0.10 * 5 = 0.5
+  struct VerifyDecayOp : IOperation
+  {
+    mutable double loaded_strength = 0.0;
+
+    void
+    Execute (OperationContext &ctx) const override
+    {
+      const auto &pctx = ctx.GetProcessorContext ();
+      if (!pctx.wm_slots.empty ())
+        {
+          loaded_strength = pctx.wm_slots[0].strength;
+        }
+    }
+  };
+
+  auto verify_ptr = std::make_unique<VerifyDecayOp> ();
+  auto *verify_raw = verify_ptr.get ();
+  auto ops = std::make_unique<OperationSet> (std::move (verify_ptr));
+  SignalProcessor::Config cfg;
+  cfg.sensitivity = 0.5;
+  SignalProcessor processor (cfg, store, std::move (ops));
+
+  Signal s;
+  s.embedding = Eigen::VectorXf::Random (256);
+  s.timestamp = static_cast<uint64_t> (now);
+  s.source_id = "test";
+  processor.Process (s);
+
+  // Strength should have decayed from 1.0 to approximately 0.5
+  REQUIRE_THAT (verify_raw->loaded_strength, WithinAbs (0.5, 0.1));
+}
+
+TEST_CASE ("Fully decayed WM slots are not loaded",
+           "[state_persistence][working_memory][decay]")
+{
+  auto unique_store = SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<Store> (std::move (unique_store));
+
+  // Create schema
+  {
+    auto ops = std::make_unique<OperationSet> ();
+    SignalProcessor processor (SignalProcessor::Config{}, store,
+                               std::move (ops));
+    processor.Flush ();
+  }
+
+  // Insert slot with very old timestamp (20 seconds ago)
+  const auto now = std::chrono::duration_cast<std::chrono::seconds> (
+                       std::chrono::system_clock::now ().time_since_epoch ())
+                       .count ();
+  const auto old_ts = now - 20; // 20 seconds ago
+
+  std::vector<float> emb (256, 0.1f);
+  store->Execute (
+      "INSERT INTO working_memory_slots (slot_index, strength, timestamp, embedding) "
+      "VALUES (?, ?, ?, ?)",
+      { 0LL, 1.0, old_ts, emb });
+
+  // Load with sensitivity=0.5 → cost_per_slot = 0.10
+  // After 20 seconds: strength = 1.0 - 0.10 * 20 = -1.0 → not loaded
+  struct VerifyNotLoadedOp : IOperation
+  {
+    mutable size_t slot_count = 999;
+
+    void
+    Execute (OperationContext &ctx) const override
+    {
+      const auto &pctx = ctx.GetProcessorContext ();
+      slot_count = pctx.wm_slots.size ();
+    }
+  };
+
+  auto verify_ptr = std::make_unique<VerifyNotLoadedOp> ();
+  auto *verify_raw = verify_ptr.get ();
+  auto ops = std::make_unique<OperationSet> (std::move (verify_ptr));
+  SignalProcessor::Config cfg;
+  cfg.sensitivity = 0.5;
+  SignalProcessor processor (cfg, store, std::move (ops));
+
+  Signal s;
+  s.embedding = Eigen::VectorXf::Random (256);
+  s.timestamp = static_cast<uint64_t> (now);
+  s.source_id = "test";
+  processor.Process (s);
+
+  // Slot should not have been loaded due to full decay
+  REQUIRE (verify_raw->slot_count == 0);
+}

@@ -1,81 +1,66 @@
-#include "cortext/extractor/phi4_extractor.hpp"
-#include "cortext/summarizer/phi4_summarizer.hpp"
+#include "include/audio_loader.hpp"
+#include "include/benchmark_config.hpp"
+#include "include/litert_runner.hpp"
+#include "include/metrics.hpp"
+#include "include/oga_runner.hpp"
+#include "include/output_formatter.hpp"
 
-#include <chrono>
 #include <filesystem>
-#include <iomanip>
 #include <iostream>
-#include <nlohmann/json.hpp>
-#include <numeric>
-#include <string>
-#include <vector>
+#include <memory>
 
-using Clock = std::chrono::high_resolution_clock;
-using Ms = std::chrono::milliseconds;
+using namespace benchmark;
 
 namespace
 {
 
 std::string
-FindModelsDir ()
+FindModelsDir (const std::string &model_name)
 {
   std::vector<std::string> paths = {
-    "models/phi4-mm-cpu",
-    "../models/phi4-mm-cpu",
-    "../../models/phi4-mm-cpu",
-    "../../../models/phi4-mm-cpu",
+    "models/" + model_name,
+    "../models/" + model_name,
+    "../../models/" + model_name,
+    "../../../models/" + model_name,
   };
 
   for (const auto &path : paths)
     {
       if (std::filesystem::exists (path))
-        {
-          return path;
-        }
+        return path;
     }
   return "";
 }
 
-struct BenchmarkResult
-{
-  std::string name;
-  std::vector<double> times_ms;
-  int tokens_generated = 0;
-
-  double
-  Mean () const
-  {
-    if (times_ms.empty ())
-      return 0.0;
-    return std::accumulate (times_ms.begin (), times_ms.end (), 0.0)
-           / times_ms.size ();
-  }
-
-  double
-  Min () const
-  {
-    if (times_ms.empty ())
-      return 0.0;
-    return *std::min_element (times_ms.begin (), times_ms.end ());
-  }
-
-  double
-  Max () const
-  {
-    if (times_ms.empty ())
-      return 0.0;
-    return *std::max_element (times_ms.begin (), times_ms.end ());
-  }
-};
-
 void
-PrintResult (const BenchmarkResult &result)
+PrintConfiguration (const BenchmarkConfig &config)
 {
-  std::cout << std::fixed << std::setprecision (2);
-  std::cout << "  " << result.name << ":\n";
-  std::cout << "    Mean: " << result.Mean () << " ms\n";
-  std::cout << "    Min:  " << result.Min () << " ms\n";
-  std::cout << "    Max:  " << result.Max () << " ms\n";
+  std::cout << "\nConfiguration:\n";
+  std::cout << "  Backend:    "
+            << (config.compare_backends ? "Both (comparison mode)"
+                                        : BackendToString (config.backend))
+            << "\n";
+  std::cout << "  Input:      " << InputTypeToString (config.input_type)
+            << "\n";
+  std::cout << "  Iterations: " << config.iterations << "\n";
+  std::cout << "  Warmup:     " << config.warmup_runs << "\n";
+  std::cout << "  Max tokens: " << config.max_tokens << "\n";
+
+  if (!config.model_path.empty ())
+    std::cout << "  Model:      " << config.model_path << "\n";
+  if (!config.oga_model_path.empty ())
+    std::cout << "  OGA Model:  " << config.oga_model_path << "\n";
+  if (!config.litert_model_path.empty ())
+    std::cout << "  LiteRT Model: " << config.litert_model_path << "\n";
+
+  if (config.input_type == InputType::Audio)
+    std::cout << "  Audio file: " << config.audio_file << "\n";
+  else
+    std::cout << "  Text:       \""
+              << config.text_input.substr (
+                     0, std::min (size_t (50), config.text_input.size ()))
+              << "...\"\n";
+
   std::cout << "\n";
 }
 
@@ -84,190 +69,219 @@ PrintResult (const BenchmarkResult &result)
 int
 main (int argc, char *argv[])
 {
-  std::cout << "=== Cortext Phi-4 Benchmark ===\n" << std::flush;
+  std::cout << "=== Cortext Multi-Backend Benchmark ===\n";
+  std::cout << "Comparing LiteRT-LM vs ONNX Runtime GenAI\n";
 
   // Parse arguments
-  int num_iterations = 3;
-
-  for (int i = 1; i < argc; ++i)
+  auto config_result = ParseArguments (argc, argv);
+  if (std::holds_alternative<std::string> (config_result))
     {
-      std::string arg = argv[i];
-      if (arg == "--iterations" && i + 1 < argc)
-        {
-          num_iterations = std::stoi (argv[++i]);
-        }
-      else if (arg == "--help")
-        {
-          std::cout << "Usage: " << argv[0] << " [options]\n";
-          std::cout << "  --iterations N   Number of iterations (default: 3)\n";
-          return 0;
-        }
-    }
-
-  std::cout << "Configuration: iterations=" << num_iterations << "\n"
-            << std::flush;
-
-  // Find models
-  auto models_dir = FindModelsDir ();
-  if (models_dir.empty ())
-    {
-      std::cerr << "Error: Could not find models directory (phi4-mm-cpu)\n";
-      std::cerr << "Download with: huggingface-cli download "
-                   "lokinfey/Phi-4-Multimodal-ONNX-INT4-CPU --local-dir "
-                   "models/phi4-mm-cpu\n";
+      std::cerr << "Error: " << std::get<std::string> (config_result) << "\n\n";
+      PrintUsage (argv[0]);
       return 1;
     }
-  std::cout << "Models: " << models_dir << "\n" << std::flush;
 
-  // Check if OGA is enabled
-#if defined(CORTEXT_DISABLE_OGA)
-  std::cerr << "Error: OGA disabled. Rebuild without CORTEXT_DISABLE_OGA\n";
-  return 1;
-#endif
+  auto config = std::get<BenchmarkConfig> (config_result);
 
-  // Benchmark: Model loading
-  std::cout << "\n--- Loading Models ---\n" << std::flush;
-
-  std::cout << "Loading Phi4Extractor..." << std::flush;
-  BenchmarkResult extractor_load;
-  extractor_load.name = "Phi4Extractor construction";
-
-  std::unique_ptr<cortext::Phi4Extractor> extractor;
-  for (int i = 0; i < num_iterations; ++i)
+  // Auto-detect model paths if not specified
+  if (config.model_path.empty () && config.oga_model_path.empty ())
     {
-      std::cout << " " << (i + 1) << std::flush;
-      auto start = Clock::now ();
-      extractor = std::make_unique<cortext::Phi4Extractor> (models_dir);
-      auto end = Clock::now ();
-      extractor_load.times_ms.push_back (
-          std::chrono::duration<double, std::milli> (end - start).count ());
-    }
-  std::cout << " done\n" << std::flush;
-  PrintResult (extractor_load);
-
-  std::cout << "Loading Phi4Summarizer..." << std::flush;
-  BenchmarkResult summarizer_load;
-  summarizer_load.name = "Phi4Summarizer construction";
-
-  std::unique_ptr<cortext::Phi4Summarizer> summarizer;
-  for (int i = 0; i < num_iterations; ++i)
-    {
-      std::cout << " " << (i + 1) << std::flush;
-      auto start = Clock::now ();
-      summarizer = std::make_unique<cortext::Phi4Summarizer> (models_dir);
-      auto end = Clock::now ();
-      summarizer_load.times_ms.push_back (
-          std::chrono::duration<double, std::milli> (end - start).count ());
-    }
-  std::cout << " done\n" << std::flush;
-  PrintResult (summarizer_load);
-
-  if (!extractor || !extractor->IsAvailable ())
-    {
-      std::cerr << "Error: Extractor not available\n";
-      return 1;
-    }
-  if (!summarizer || !summarizer->IsAvailable ())
-    {
-      std::cerr << "Error: Summarizer not available\n";
-      return 1;
-    }
-  std::cout << "Both components available: true\n" << std::flush;
-
-  // Benchmark: Text extraction
-  std::cout << "\n--- Text Extraction ---\n" << std::flush;
-  BenchmarkResult extract_result;
-  extract_result.name = "ExtractFromText";
-
-  nlohmann::json extraction_schema = nlohmann::json::parse (R"({
-    "type": "object",
-    "properties": {
-      "entities": {
-        "type": "array",
-        "items": {
-          "type": "object",
-          "properties": {
-            "name": {"type": "string"},
-            "type": {"type": "string"}
-          }
-        }
-      },
-      "relations": {
-        "type": "array",
-        "items": {
-          "type": "object",
-          "properties": {
-            "subject": {"type": "string"},
-            "predicate": {"type": "string"},
-            "object": {"type": "string"}
-          }
-        }
-      }
-    }
-  })");
-
-  std::string test_text
-      = "Apple Inc. was founded by Steve Jobs in Cupertino. "
-        "The company created the iPhone and employs Tim Cook as CEO.";
-
-  for (int i = 0; i < num_iterations; ++i)
-    {
-      std::cout << "  Run " << (i + 1) << "..." << std::flush;
-      auto start = Clock::now ();
-      auto result = extractor->ExtractFromText (test_text, extraction_schema);
-      auto end = Clock::now ();
-      auto elapsed
-          = std::chrono::duration<double, std::milli> (end - start).count ();
-      extract_result.times_ms.push_back (elapsed);
-      std::cout << " " << elapsed << "ms\n" << std::flush;
-
-      if (i == 0)
+      config.oga_model_path = FindModelsDir ("phi4-mm-cpu");
+      if (config.oga_model_path.empty ())
         {
-          std::cout << "  Entities found: " << result.entities.size () << "\n";
-          std::cout << "  Relations found: " << result.relations.size ()
+          std::cerr << "Warning: Could not find phi4-mm-cpu model.\n";
+          std::cerr << "Download with: huggingface-cli download "
+                       "lokinfey/Phi-4-Multimodal-ONNX-INT4-CPU --local-dir "
+                       "models/phi4-mm-cpu\n";
+        }
+    }
+
+  if (config.model_path.empty () && config.litert_model_path.empty ())
+    {
+      config.litert_model_path = FindModelsDir ("gemma3n-e2b-litert");
+      if (config.litert_model_path.empty ())
+        {
+          std::cerr << "Warning: Could not find gemma3n-e2b-litert model.\n";
+          std::cerr << "Download with: huggingface-cli download "
+                       "google/gemma-3n-E2B-it-litert-lm --local-dir "
+                       "models/gemma3n-e2b-litert\n";
+        }
+    }
+
+  PrintConfiguration (config);
+
+  // Load audio if needed
+  std::optional<AudioData> audio_data;
+  if (config.input_type == InputType::Audio)
+    {
+      std::cout << "Loading audio file: " << config.audio_file << "\n";
+      audio_data = LoadAudio (config.audio_file);
+      if (!audio_data)
+        {
+          std::cerr << "Error: Failed to load audio file: " << config.audio_file
                     << "\n";
+          return 1;
         }
-    }
-  PrintResult (extract_result);
 
-  // Benchmark: Text summarization
-  std::cout << "\n--- Text Summarization ---\n" << std::flush;
-  BenchmarkResult summarize_result;
-  summarize_result.name = "SummarizeTexts";
+      std::cout << "  Sample rate: " << audio_data->sample_rate << " Hz\n";
+      std::cout << "  Channels:    " << audio_data->num_channels << "\n";
+      std::cout << "  Duration:    " << audio_data->duration_seconds << " s\n";
 
-  std::vector<std::string> texts = {
-    "The quick brown fox jumps over the lazy dog.",
-    "Machine learning is a subset of artificial intelligence.",
-    "Climate change is affecting ecosystems worldwide.",
-  };
-
-  for (int i = 0; i < num_iterations; ++i)
-    {
-      std::cout << "  Run " << (i + 1) << "..." << std::flush;
-      auto start = Clock::now ();
-      auto result = summarizer->SummarizeTexts (texts);
-      auto end = Clock::now ();
-      auto elapsed
-          = std::chrono::duration<double, std::milli> (end - start).count ();
-      summarize_result.times_ms.push_back (elapsed);
-      std::cout << " " << elapsed << "ms\n" << std::flush;
-
-      if (i == 0)
+      // Normalize to 16kHz mono
+      if (audio_data->sample_rate != 16000 || audio_data->num_channels != 1)
         {
-          std::cout << "  Summary: \""
-                    << result.substr (0, std::min (size_t (80), result.size ()))
-                    << "...\"\n";
+          std::cout << "  Normalizing to 16kHz mono...\n";
+          *audio_data = NormalizeTo16kMono (*audio_data);
+        }
+      std::cout << "\n";
+    }
+
+  const AudioData *audio_ptr
+      = audio_data.has_value () ? &audio_data.value () : nullptr;
+
+  try
+    {
+      if (config.compare_backends)
+        {
+          // Run both backends for comparison
+          BenchmarkResults oga_results;
+          BenchmarkResults litert_results;
+
+          // OGA backend
+          std::string oga_path = config.GetModelPath (Backend::OnnxRuntimeGenAI);
+          if (!oga_path.empty () && IsOgaAvailable ())
+            {
+              std::cout << "--- Running OGA Backend ---\n";
+              std::cout << "Loading model: " << oga_path << "\n";
+
+              OgaRunner oga_runner (oga_path);
+              if (oga_runner.IsAvailable ())
+                {
+                  oga_results = oga_runner.Run (config, audio_ptr);
+                }
+              else
+                {
+                  std::cerr << "OGA: Model not available\n";
+                }
+            }
+          else
+            {
+              std::cerr << "OGA: Backend not available or no model path\n";
+            }
+
+          std::cout << "\n";
+
+          // LiteRT backend
+          std::string litert_path = config.GetModelPath (Backend::LiteRTLM);
+          if (!litert_path.empty () && IsLiteRTAvailable ())
+            {
+              std::cout << "--- Running LiteRT-LM Backend ---\n";
+              std::cout << "Loading model: " << litert_path << "\n";
+
+              LiteRTRunner litert_runner (litert_path);
+              if (litert_runner.IsAvailable ())
+                {
+                  litert_results = litert_runner.Run (config, audio_ptr);
+                }
+              else
+                {
+                  std::cerr << "LiteRT: Model not available\n";
+                }
+            }
+          else
+            {
+              std::cerr
+                  << "LiteRT: Backend not available or no model path\n";
+            }
+
+          // Print comparison
+          if (!oga_results.runs.empty () || !litert_results.runs.empty ())
+            {
+              if (config.json_output)
+                {
+                  std::cout << FormatComparisonAsJson (oga_results,
+                                                        litert_results)
+                            << "\n";
+                }
+              else
+                {
+                  PrintComparisonTable (oga_results, litert_results);
+                }
+            }
+          else
+            {
+              std::cerr << "\nNo benchmark results to compare.\n";
+              return 1;
+            }
+        }
+      else
+        {
+          // Single backend run
+          BenchmarkResults results;
+          std::string model_path = config.GetModelPath (config.backend);
+
+          if (model_path.empty ())
+            {
+              std::cerr << "Error: No model path for "
+                        << BackendToString (config.backend) << " backend\n";
+              return 1;
+            }
+
+          if (config.backend == Backend::OnnxRuntimeGenAI)
+            {
+              if (!IsOgaAvailable ())
+                {
+                  std::cerr << "Error: OGA backend not available. "
+                            << "Rebuild without CORTEXT_DISABLE_OGA\n";
+                  return 1;
+                }
+
+              std::cout << "--- Running OGA Backend ---\n";
+              std::cout << "Loading model: " << model_path << "\n";
+
+              OgaRunner runner (model_path);
+              if (!runner.IsAvailable ())
+                {
+                  std::cerr << "Error: OGA model not available\n";
+                  return 1;
+                }
+
+              results = runner.Run (config, audio_ptr);
+            }
+          else // LiteRTLM
+            {
+              if (!IsLiteRTAvailable ())
+                {
+                  std::cerr << "Error: LiteRT-LM backend not available. "
+                            << "Rebuild with BENCHMARK_ENABLE_LITERT\n";
+                  return 1;
+                }
+
+              std::cout << "--- Running LiteRT-LM Backend ---\n";
+              std::cout << "Loading model: " << model_path << "\n";
+
+              LiteRTRunner runner (model_path);
+              if (!runner.IsAvailable ())
+                {
+                  std::cerr << "Error: LiteRT-LM model not available\n";
+                  return 1;
+                }
+
+              results = runner.Run (config, audio_ptr);
+            }
+
+          // Print results
+          if (config.json_output)
+            std::cout << FormatAsJson (results) << "\n";
+          else
+            PrintResults (results);
         }
     }
-  PrintResult (summarize_result);
-
-  // Summary
-  std::cout << "=== Summary ===\n";
-  std::cout << std::fixed << std::setprecision (2);
-  std::cout << "Extractor load: " << extractor_load.Mean () << " ms\n";
-  std::cout << "Summarizer load: " << summarizer_load.Mean () << " ms\n";
-  std::cout << "Text extraction: " << extract_result.Mean () << " ms\n";
-  std::cout << "Text summarization: " << summarize_result.Mean () << " ms\n";
+  catch (const std::exception &e)
+    {
+      std::cerr << "Benchmark failed: " << e.what () << "\n";
+      return 1;
+    }
 
   return 0;
 }

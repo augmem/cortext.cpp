@@ -337,12 +337,34 @@ BuildGraphFromConsolidation::Execute (OperationContext &context) const
        "FROM extraction_relations;",
        { now_ts });
 
+  // 4a) Non-implication relation edges: preserve original predicate as edge_type
   Add (context,
        "INSERT OR REPLACE INTO graph_edges(source_id, target_id, edge_type, weight, "
        "last_reinforced) "
        "SELECT 'entity:' || subject, 'entity:' || object, predicate, "
        "COALESCE(confidence, 1.0), ?1 "
-       "FROM extraction_relations;",
+       "FROM extraction_relations "
+       "WHERE lower(predicate) NOT LIKE '%implies%' "
+       "AND lower(predicate) NOT LIKE '%suggests%' "
+       "AND lower(predicate) NOT LIKE '%indicates%' "
+       "AND lower(predicate) NOT LIKE '%means%' "
+       "AND lower(predicate) NOT LIKE '%entails%';",
+       { now_ts });
+
+  // 4b) Implication relation edges: normalize to 'implies' edge type
+  // Per Section 9.5: implies captures directional correlation distinct from
+  // causes (which uses temporal drift). Implication keywords are normalized.
+  Add (context,
+       "INSERT OR REPLACE INTO graph_edges(source_id, target_id, edge_type, weight, "
+       "last_reinforced) "
+       "SELECT 'entity:' || subject, 'entity:' || object, 'implies', "
+       "COALESCE(confidence, 1.0), ?1 "
+       "FROM extraction_relations "
+       "WHERE lower(predicate) LIKE '%implies%' "
+       "OR lower(predicate) LIKE '%suggests%' "
+       "OR lower(predicate) LIKE '%indicates%' "
+       "OR lower(predicate) LIKE '%means%' "
+       "OR lower(predicate) LIKE '%entails%';",
        { now_ts });
 
   // 5) Derived-from edges: summary -> embedded memory id (if available).

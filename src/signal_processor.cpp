@@ -700,6 +700,61 @@ LoadRLSCoefficients (Store &store, ProcessorContext &ctx)
     }
 }
 
+void
+LoadWorkingMemorySlots (Store &store, ProcessorContext &ctx, double sensitivity)
+{
+  try
+    {
+      const auto now = std::chrono::duration_cast<std::chrono::seconds> (
+                           std::chrono::system_clock::now ().time_since_epoch ())
+                           .count ();
+      const double cost_per_slot = core::WMMaintenanceCostPerSlot (sensitivity);
+
+      auto rows = store.Execute (
+          "SELECT slot_index, strength, timestamp, embedding "
+          "FROM working_memory_slots ORDER BY slot_index ASC");
+
+      for (const auto &row : rows)
+        {
+          ProcessorContext::WMSlot slot;
+          slot.pos_index
+              = static_cast<int> (ExtractInt64 (row, "slot_index", 0));
+          slot.strength = ExtractDouble (row, "strength", 0.0);
+          slot.last_ts
+              = static_cast<double> (ExtractInt64 (row, "timestamp", now));
+
+          // Apply time-based decay (same formula as WorkingMemory::Execute
+          // maintenance)
+          const double elapsed = static_cast<double> (now) - slot.last_ts;
+          if (elapsed > 0)
+            {
+              slot.strength -= cost_per_slot * elapsed;
+            }
+
+          // Skip decayed slots
+          if (slot.strength <= 0.0)
+            continue;
+
+          auto emb_it = row.find ("embedding");
+          if (emb_it != row.end () && emb_it->second.has_value ())
+            {
+              slot.embedding = BlobToEigen (emb_it->second);
+              if (slot.embedding.size () > 0)
+                {
+                  ctx.wm_slots.push_back (std::move (slot));
+                }
+            }
+        }
+    }
+  catch (const std::exception &e)
+    {
+      telemetry::LogWarn (
+          "Failed to load working memory slots",
+          { telemetry::Attribute::String ("component", "signal_processor"),
+            telemetry::Attribute::String ("error", e.what ()) });
+    }
+}
+
 } // namespace
 
 SignalProcessor::SignalProcessor (const Config &config,
@@ -739,6 +794,7 @@ SignalProcessor::SignalProcessor (const Config &config,
       LoadRecentScores (*store_, *context_);
       LoadObservedRetentionHistory (*store_, *context_);
       LoadRLSCoefficients (*store_, *context_);
+      LoadWorkingMemorySlots (*store_, *context_, config_.sensitivity);
     }
 
   StartNewEpisode ();
@@ -826,6 +882,7 @@ SignalProcessor::FinalizeEpisode ()
   PersistRecentScores ();
   PersistObservedRetentionHistory ();
   PersistRLSCoefficients ();
+  PersistWorkingMemorySlots ();
 
   // Execute buffered writes from operations
   for (const auto &instruction : write_buffer_)
@@ -1087,6 +1144,31 @@ SignalProcessor::PersistRLSCoefficients ()
           "INSERT OR REPLACE INTO blender_coeff_covariance (id, P_matrix) "
           "VALUES (1, ?)",
           { P_blob });
+    }
+}
+
+void
+SignalProcessor::PersistWorkingMemorySlots ()
+{
+  if (!episode_transaction_ || !context_)
+    return;
+
+  // Clear old entries
+  episode_transaction_->Execute ("DELETE FROM working_memory_slots", {});
+
+  // Insert current slots
+  const auto now = std::chrono::duration_cast<std::chrono::seconds> (
+                       std::chrono::system_clock::now ().time_since_epoch ())
+                       .count ();
+
+  for (size_t i = 0; i < context_->wm_slots.size (); ++i)
+    {
+      const auto &slot = context_->wm_slots[i];
+      std::vector<float> emb_blob = ToFloatVector (slot.embedding);
+      episode_transaction_->Execute (
+          "INSERT INTO working_memory_slots "
+          "(slot_index, strength, timestamp, embedding) VALUES (?, ?, ?, ?)",
+          { static_cast<int64_t> (i), slot.strength, now, emb_blob });
     }
 }
 

@@ -350,3 +350,243 @@ TEST_CASE ("Phase4: knob functions return expected values",
   REQUIRE (core::ContradictionThreshold () == Catch::Approx (-0.5).margin (1e-6));
 }
 
+TEST_CASE ("Phase2: implies edges created from implication predicates",
+           "[operations][graph][phase2]")
+{
+  auto unique_store = SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<Store> (std::move (unique_store));
+
+  // Create required tables
+  store->Execute ("CREATE TABLE IF NOT EXISTS consolidation_summaries ("
+                  "  summary_id TEXT PRIMARY KEY,"
+                  "  summary_text TEXT,"
+                  "  cluster_size INTEGER"
+                  ");");
+  store->Execute ("CREATE TABLE IF NOT EXISTS consolidation_sources ("
+                  "  summary_id TEXT,"
+                  "  source_text TEXT,"
+                  "  source_embedding_id INTEGER"
+                  ");");
+  store->Execute ("CREATE TABLE IF NOT EXISTS extraction_entities ("
+                  "  summary_id TEXT NOT NULL,"
+                  "  name TEXT NOT NULL,"
+                  "  type TEXT NOT NULL,"
+                  "  salience REAL,"
+                  "  embedding_id INTEGER,"
+                  "  PRIMARY KEY (summary_id, name, type)"
+                  ");");
+  store->Execute ("CREATE TABLE IF NOT EXISTS extraction_relations ("
+                  "  summary_id TEXT NOT NULL,"
+                  "  subject TEXT NOT NULL,"
+                  "  predicate TEXT NOT NULL,"
+                  "  object TEXT NOT NULL,"
+                  "  confidence REAL"
+                  ");");
+
+  store->Execute ("INSERT INTO consolidation_summaries(summary_id, summary_text, "
+                  "cluster_size) VALUES (?,?,?)",
+                  { std::string ("s1"), std::string ("test"), 1LL });
+
+  // Insert relations with various implication predicates
+  store->Execute ("INSERT INTO extraction_relations(summary_id, subject, predicate, "
+                  "object, confidence) VALUES (?,?,?,?,?)",
+                  { std::string ("s1"), std::string ("A"),
+                    std::string ("implies"), std::string ("B"), 0.9 });
+  store->Execute ("INSERT INTO extraction_relations(summary_id, subject, predicate, "
+                  "object, confidence) VALUES (?,?,?,?,?)",
+                  { std::string ("s1"), std::string ("C"),
+                    std::string ("suggests"), std::string ("D"), 0.85 });
+  store->Execute ("INSERT INTO extraction_relations(summary_id, subject, predicate, "
+                  "object, confidence) VALUES (?,?,?,?,?)",
+                  { std::string ("s1"), std::string ("E"),
+                    std::string ("indicates"), std::string ("F"), 0.8 });
+  store->Execute ("INSERT INTO extraction_relations(summary_id, subject, predicate, "
+                  "object, confidence) VALUES (?,?,?,?,?)",
+                  { std::string ("s1"), std::string ("G"),
+                    std::string ("means"), std::string ("H"), 0.75 });
+  store->Execute ("INSERT INTO extraction_relations(summary_id, subject, predicate, "
+                  "object, confidence) VALUES (?,?,?,?,?)",
+                  { std::string ("s1"), std::string ("I"),
+                    std::string ("entails"), std::string ("J"), 0.7 });
+
+  SignalProcessor::Config cfg;
+  auto ops = std::make_unique<OperationSet> (
+      std::make_unique<EnsureGraphSchema> (),
+      std::make_unique<BuildGraphFromConsolidation> ());
+  SignalProcessor processor (cfg, store, std::move (ops));
+
+  processor.Process (MakeSignal (1234ULL));
+  processor.Flush ();
+
+  // All implication predicates should be normalized to 'implies' edge type
+  auto rows = store->Execute (
+      "SELECT COUNT(*) AS c FROM graph_edges WHERE edge_type = 'implies'", {});
+  REQUIRE (rows.size () == 1);
+  REQUIRE (std::any_cast<long long> (rows[0].at ("c")) == 5LL);
+
+  // Verify specific edge with correct weight
+  auto edge_rows = store->Execute (
+      "SELECT weight FROM graph_edges "
+      "WHERE source_id = 'entity:A' AND target_id = 'entity:B' "
+      "AND edge_type = 'implies'",
+      {});
+  REQUIRE (edge_rows.size () == 1);
+  REQUIRE (std::any_cast<double> (edge_rows[0].at ("weight"))
+           == Catch::Approx (0.9).margin (1e-6));
+}
+
+TEST_CASE ("Phase2: implies edge directionality preserved",
+           "[operations][graph][phase2]")
+{
+  auto unique_store = SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<Store> (std::move (unique_store));
+
+  store->Execute ("CREATE TABLE IF NOT EXISTS consolidation_summaries ("
+                  "  summary_id TEXT PRIMARY KEY,"
+                  "  summary_text TEXT,"
+                  "  cluster_size INTEGER"
+                  ");");
+  store->Execute ("CREATE TABLE IF NOT EXISTS consolidation_sources ("
+                  "  summary_id TEXT,"
+                  "  source_text TEXT,"
+                  "  source_embedding_id INTEGER"
+                  ");");
+  store->Execute ("CREATE TABLE IF NOT EXISTS extraction_entities ("
+                  "  summary_id TEXT NOT NULL,"
+                  "  name TEXT NOT NULL,"
+                  "  type TEXT NOT NULL,"
+                  "  salience REAL,"
+                  "  embedding_id INTEGER,"
+                  "  PRIMARY KEY (summary_id, name, type)"
+                  ");");
+  store->Execute ("CREATE TABLE IF NOT EXISTS extraction_relations ("
+                  "  summary_id TEXT NOT NULL,"
+                  "  subject TEXT NOT NULL,"
+                  "  predicate TEXT NOT NULL,"
+                  "  object TEXT NOT NULL,"
+                  "  confidence REAL"
+                  ");");
+
+  store->Execute ("INSERT INTO consolidation_summaries(summary_id, summary_text, "
+                  "cluster_size) VALUES (?,?,?)",
+                  { std::string ("s1"), std::string ("test"), 1LL });
+
+  // Insert: "Rain implies Wet" - directional relationship
+  store->Execute ("INSERT INTO extraction_relations(summary_id, subject, predicate, "
+                  "object, confidence) VALUES (?,?,?,?,?)",
+                  { std::string ("s1"), std::string ("Rain"),
+                    std::string ("implies"), std::string ("Wet"), 0.95 });
+
+  SignalProcessor::Config cfg;
+  auto ops = std::make_unique<OperationSet> (
+      std::make_unique<EnsureGraphSchema> (),
+      std::make_unique<BuildGraphFromConsolidation> ());
+  SignalProcessor processor (cfg, store, std::move (ops));
+
+  processor.Process (MakeSignal (1234ULL));
+  processor.Flush ();
+
+  // Edge should exist: Rain -> Wet (not Wet -> Rain)
+  auto forward = store->Execute (
+      "SELECT COUNT(*) AS c FROM graph_edges "
+      "WHERE source_id = 'entity:Rain' AND target_id = 'entity:Wet' "
+      "AND edge_type = 'implies'",
+      {});
+  REQUIRE (std::any_cast<long long> (forward[0].at ("c")) == 1LL);
+
+  // Reverse edge should NOT exist
+  auto reverse = store->Execute (
+      "SELECT COUNT(*) AS c FROM graph_edges "
+      "WHERE source_id = 'entity:Wet' AND target_id = 'entity:Rain' "
+      "AND edge_type = 'implies'",
+      {});
+  REQUIRE (std::any_cast<long long> (reverse[0].at ("c")) == 0LL);
+}
+
+TEST_CASE ("Phase2: non-implication predicates unchanged",
+           "[operations][graph][phase2]")
+{
+  auto unique_store = SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<Store> (std::move (unique_store));
+
+  store->Execute ("CREATE TABLE IF NOT EXISTS consolidation_summaries ("
+                  "  summary_id TEXT PRIMARY KEY,"
+                  "  summary_text TEXT,"
+                  "  cluster_size INTEGER"
+                  ");");
+  store->Execute ("CREATE TABLE IF NOT EXISTS consolidation_sources ("
+                  "  summary_id TEXT,"
+                  "  source_text TEXT,"
+                  "  source_embedding_id INTEGER"
+                  ");");
+  store->Execute ("CREATE TABLE IF NOT EXISTS extraction_entities ("
+                  "  summary_id TEXT NOT NULL,"
+                  "  name TEXT NOT NULL,"
+                  "  type TEXT NOT NULL,"
+                  "  salience REAL,"
+                  "  embedding_id INTEGER,"
+                  "  PRIMARY KEY (summary_id, name, type)"
+                  ");");
+  store->Execute ("CREATE TABLE IF NOT EXISTS extraction_relations ("
+                  "  summary_id TEXT NOT NULL,"
+                  "  subject TEXT NOT NULL,"
+                  "  predicate TEXT NOT NULL,"
+                  "  object TEXT NOT NULL,"
+                  "  confidence REAL"
+                  ");");
+
+  store->Execute ("INSERT INTO consolidation_summaries(summary_id, summary_text, "
+                  "cluster_size) VALUES (?,?,?)",
+                  { std::string ("s1"), std::string ("test"), 1LL });
+
+  // Insert non-implication relations
+  store->Execute ("INSERT INTO extraction_relations(summary_id, subject, predicate, "
+                  "object, confidence) VALUES (?,?,?,?,?)",
+                  { std::string ("s1"), std::string ("Alice"),
+                    std::string ("KNOWS"), std::string ("Bob"), 0.8 });
+  store->Execute ("INSERT INTO extraction_relations(summary_id, subject, predicate, "
+                  "object, confidence) VALUES (?,?,?,?,?)",
+                  { std::string ("s1"), std::string ("Alice"),
+                    std::string ("works_at"), std::string ("Acme"), 0.9 });
+  store->Execute ("INSERT INTO extraction_relations(summary_id, subject, predicate, "
+                  "object, confidence) VALUES (?,?,?,?,?)",
+                  { std::string ("s1"), std::string ("Fire"),
+                    std::string ("causes"), std::string ("Smoke"), 0.85 });
+
+  SignalProcessor::Config cfg;
+  auto ops = std::make_unique<OperationSet> (
+      std::make_unique<EnsureGraphSchema> (),
+      std::make_unique<BuildGraphFromConsolidation> ());
+  SignalProcessor processor (cfg, store, std::move (ops));
+
+  processor.Process (MakeSignal (1234ULL));
+  processor.Flush ();
+
+  // Non-implication predicates should retain their original edge_type
+  auto knows = store->Execute (
+      "SELECT COUNT(*) AS c FROM graph_edges "
+      "WHERE source_id = 'entity:Alice' AND target_id = 'entity:Bob' "
+      "AND edge_type = 'KNOWS'",
+      {});
+  REQUIRE (std::any_cast<long long> (knows[0].at ("c")) == 1LL);
+
+  auto works = store->Execute (
+      "SELECT COUNT(*) AS c FROM graph_edges "
+      "WHERE source_id = 'entity:Alice' AND target_id = 'entity:Acme' "
+      "AND edge_type = 'works_at'",
+      {});
+  REQUIRE (std::any_cast<long long> (works[0].at ("c")) == 1LL);
+
+  auto causes = store->Execute (
+      "SELECT COUNT(*) AS c FROM graph_edges "
+      "WHERE source_id = 'entity:Fire' AND target_id = 'entity:Smoke' "
+      "AND edge_type = 'causes'",
+      {});
+  REQUIRE (std::any_cast<long long> (causes[0].at ("c")) == 1LL);
+
+  // No 'implies' edges should exist
+  auto implies = store->Execute (
+      "SELECT COUNT(*) AS c FROM graph_edges WHERE edge_type = 'implies'", {});
+  REQUIRE (std::any_cast<long long> (implies[0].at ("c")) == 0LL);
+}
+

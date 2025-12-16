@@ -173,26 +173,87 @@ WorkingMemory::Execute (OperationContext &context) const
       return;
     }
 
-  // Insert new slot (evict weakest if capacity reached).
+  // Input-based rehearsal (task 4.2): boost strength for "close" slots without
+  // merging. Slots with similarity in [rehearsal_threshold, chunk_threshold)
+  // get a strength boost but embedding is NOT merged.
+  const double rehearsal_threshold = core::WMRehearsalThreshold (cfg.focus);
+  if (best_idx >= 0 && best_sim >= rehearsal_threshold)
+    {
+      auto &slot = p_ctx.wm_slots[static_cast<size_t> (best_idx)];
+      const double rehearsal_rate = core::WMRehearsalRate (cfg.sensitivity);
+      const double boost = rehearsal_rate * constants::kWMRehearsalBaseDelta;
+      slot.strength = std::min (constants::kStrengthMax, slot.strength + boost);
+      slot.last_ts = now_s;
+      // Continue to insert logic - rehearsal doesn't prevent new slot creation
+    }
+
+  // Retrieval-based rehearsal (task 4.3): boost WM slots that match retrieved
+  // memories. Uses chunking_threshold as the similarity requirement per spec.
+  const auto &retrieved = context.GetRetrievedMemoryEmbeddings ();
+  if (!retrieved.empty ())
+    {
+      const double retrieval_threshold = core::WMChunkingThreshold (cfg.focus);
+      const double rehearsal_rate = core::WMRehearsalRate (cfg.sensitivity);
+      const double boost = rehearsal_rate * constants::kWMRehearsalBaseDelta;
+
+      for (auto &slot : p_ctx.wm_slots)
+        {
+          for (const auto &[retrieved_id, retrieved_vec] : retrieved)
+            {
+              if (slot.embedding.size () != retrieved_vec.size ())
+                continue;
+              const double sim
+                  = core::CosineSimilarity (slot.embedding, retrieved_vec);
+              if (sim >= retrieval_threshold)
+                {
+                  slot.strength
+                      = std::min (constants::kStrengthMax, slot.strength + boost);
+                  slot.last_ts = now_s;
+                  break; // Only boost once per slot per signal
+                }
+            }
+        }
+    }
+
+  // Insert new slot (evict highest eviction_score if capacity reached).
+  // Eviction considers both dedication (strength * T-derived factor) and recency.
   const int capacity
       = std::max (1, core::WMBaseCapacity (cfg.sensitivity, cfg.focus));
   if (static_cast<int> (p_ctx.wm_slots.size ()) >= capacity)
     {
-      int weakest_idx = -1;
-      double weakest_val = std::numeric_limits<double>::infinity ();
+      const double dedication_strength
+          = core::WMSlotDedicationStrength (cfg.stability);
+      int evict_idx = -1;
+      double max_eviction_score = -std::numeric_limits<double>::infinity ();
+
       for (int i = 0; i < static_cast<int> (p_ctx.wm_slots.size ()); ++i)
         {
-          const double s = p_ctx.wm_slots[static_cast<size_t> (i)].strength;
-          if (s < weakest_val)
+          const auto &slot = p_ctx.wm_slots[static_cast<size_t> (i)];
+
+          // Dedication: higher strength + higher T = more dedicated
+          const double dedication = std::clamp (
+              slot.strength * dedication_strength / constants::kStrengthMax,
+              0.0, 1.0);
+
+          // Recency: recent access = lower eviction priority
+          const double elapsed = std::max (0.0, now_s - slot.last_ts);
+          const double recency
+              = std::exp (-elapsed / constants::kWMRecencyTauSeconds);
+
+          // Eviction score: high = weak + old = evict first
+          const double eviction_score = (1.0 - dedication) * (1.0 - recency);
+
+          if (eviction_score > max_eviction_score)
             {
-              weakest_val = s;
-              weakest_idx = i;
+              max_eviction_score = eviction_score;
+              evict_idx = i;
             }
         }
-      if (weakest_idx >= 0)
+
+      if (evict_idx >= 0)
         {
           p_ctx.wm_slots.erase (p_ctx.wm_slots.begin ()
-                                + static_cast<long> (weakest_idx));
+                                + static_cast<long> (evict_idx));
         }
     }
 

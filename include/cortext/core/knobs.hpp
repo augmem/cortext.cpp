@@ -353,6 +353,13 @@ RippleDecay (double T)
   return Lerp (0.5, 0.1, T);
 }
 
+inline int
+RippleDepth (double T)
+{
+  // ripple_depth = round(lerp(2, 1, T)) — higher stability = shallower ripple
+  return static_cast<int> (std::round (Lerp (2.0, 1.0, T)));
+}
+
 inline double
 LabilitySusceptibility (double S, double T)
 {
@@ -484,6 +491,31 @@ WMComplexityScale (double S)
 {
   // complexity penalty scale ~ sensitivity
   return Lerp (0.5, 1.5, S);
+}
+
+inline double
+WMRehearsalRate (double S)
+{
+  // rehearsal_rate = lerp(0.5, 2.0, S)
+  // Higher Sensitivity = faster rehearsal boost
+  return Lerp (0.5, 2.0, S);
+}
+
+inline double
+WMRehearsalThreshold (double F)
+{
+  // rehearsal_threshold = lerp(0.5, 0.7, F)
+  // Below chunking_threshold(F) = lerp(0.7, 0.9, F)
+  // Slots in [rehearsal_threshold, chunking_threshold) get rehearsal boost
+  return Lerp (0.5, 0.7, F);
+}
+
+inline double
+WMSlotDedicationStrength (double T)
+{
+  // slot_dedication_strength = lerp(0.3, 0.9, T)
+  // Higher Stability = slots become more dedicated (resistant to eviction)
+  return Lerp (0.3, 0.9, T);
 }
 
 // --- Algorithm 25 (Metacognitive Monitoring) Helpers ---

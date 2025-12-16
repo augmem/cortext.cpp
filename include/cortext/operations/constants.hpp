@@ -61,6 +61,8 @@ constexpr double kTiny = 1e-6;           // Small epsilon for WM strength
 constexpr double kStrengthMax = 10.0;    // Max WM slot strength
 constexpr double kWMBaseMin = 0.3;       // Min WM strength base (low T)
 constexpr double kWMBaseMax = 0.9;       // Max WM strength base (high T)
+constexpr double kWMRehearsalBaseDelta = 0.1;  // Base rehearsal strength boost
+constexpr double kWMRecencyTauSeconds = 60.0; // Recency decay time constant
 
 // Precision Modulation (Section 5.5)
 constexpr double kTargetPrecisionBaseScale = 0.5; // Base scale for target precision

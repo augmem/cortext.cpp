@@ -2,14 +2,19 @@
 
 #include "cortext/buffered_write_instruction.hpp"
 #include "cortext/core/algorithms.hpp"
-#include "cortext/operations/constants.hpp"
 #include "cortext/core/knobs.hpp"
+#include "cortext/core/utils.hpp"
+#include "cortext/operations/constants.hpp"
 #include "cortext/processor/operation_context.hpp"
 #include "cortext/store/schema.hpp"
+#include "cortext/store/store.hpp"
 #include <Eigen/Dense>
 #include <algorithm>
 #include <cmath>
 #include <numeric>
+#include <optional>
+#include <string>
+#include <unordered_set>
 #include <vector>
 
 namespace cortext::operations
@@ -20,6 +25,8 @@ namespace
 constexpr double kDriftClampMax = 0.3;
 constexpr double kDriftSkipEpsilon = 0.001;
 constexpr double kUncertaintyBumpCap = 0.2;
+constexpr double kRippleStrengthMin = 0.01;     // Min lability to propagate ripple
+constexpr double kRippleDriftCapFactor = 0.5;  // Ripple drift capped at 50% of primary
 
 /// @brief Normalizes a vector to unit length.
 inline Eigen::VectorXf
@@ -44,6 +51,216 @@ ToFloatVector (const Eigen::VectorXf &v)
     }
   return out;
 }
+
+/// @brief Extracts embedding ID from a graph node ID string (e.g., "emb:123" →
+/// 123).
+inline std::optional<long long>
+ParseEmbeddingId (const std::string &node_id)
+{
+  if (node_id.rfind ("emb:", 0) == 0)
+    {
+      try
+        {
+          return std::stoll (node_id.substr (4));
+        }
+      catch (...)
+        {
+          return std::nullopt;
+        }
+    }
+  return std::nullopt;
+}
+
+/// @brief Neighbor info returned from graph traversal.
+struct NeighborInfo
+{
+  long long embedding_id;
+  int depth;
+};
+
+/// @brief Queries graph neighbors of a given embedding via iterative BFS.
+/// Returns neighbors connected via 'co_occurs_with' or 'reinforces' edges
+/// up to max_depth hops away.
+inline std::vector<NeighborInfo>
+QueryGraphNeighbors (Store *store, long long embedding_id, int max_depth)
+{
+  std::vector<NeighborInfo> neighbors;
+  if (!store || max_depth < 1)
+    {
+      return neighbors;
+    }
+
+  // Use BFS to find neighbors up to max_depth hops
+  std::unordered_set<std::string> visited;
+  std::vector<std::pair<std::string, int>> frontier; // (node_id, depth)
+
+  std::string seed_node = "emb:" + std::to_string (embedding_id);
+  visited.insert (seed_node);
+  frontier.push_back ({ seed_node, 0 });
+
+  size_t frontier_idx = 0;
+  while (frontier_idx < frontier.size ())
+    {
+      const auto &[current_node, current_depth] = frontier[frontier_idx];
+      ++frontier_idx;
+
+      if (current_depth >= max_depth)
+        {
+          continue;
+        }
+
+      // Query edges from/to this node
+      std::string query
+          = "SELECT source_id, target_id FROM graph_edges "
+            "WHERE (source_id = ? OR target_id = ?) "
+            "AND edge_type IN ('co_occurs_with', 'reinforces')";
+
+      auto rows = store->Execute (query, { current_node, current_node });
+      for (const auto &row : rows)
+        {
+          auto src_it = row.find ("source_id");
+          auto tgt_it = row.find ("target_id");
+          if (src_it == row.end () || tgt_it == row.end ())
+            {
+              continue;
+            }
+
+          std::string src, tgt;
+          if (src_it->second.type () == typeid (std::string))
+            {
+              src = std::any_cast<std::string> (src_it->second);
+            }
+          if (tgt_it->second.type () == typeid (std::string))
+            {
+              tgt = std::any_cast<std::string> (tgt_it->second);
+            }
+
+          // The neighbor is the other end of the edge
+          std::string neighbor_node = (src == current_node) ? tgt : src;
+
+          if (visited.count (neighbor_node))
+            {
+              continue;
+            }
+          visited.insert (neighbor_node);
+
+          int neighbor_depth = current_depth + 1;
+          frontier.push_back ({ neighbor_node, neighbor_depth });
+
+          // Parse embedding ID and add to results
+          auto parsed_id = ParseEmbeddingId (neighbor_node);
+          if (parsed_id)
+            {
+              neighbors.push_back ({ *parsed_id, neighbor_depth });
+            }
+        }
+    }
+
+  return neighbors;
+}
+
+/// @brief Loads an embedding from vec_embeddings by ID.
+inline std::optional<Eigen::VectorXf>
+LoadEmbedding (Store *store, long long embedding_id, int expected_dim = 256)
+{
+  if (!store)
+    {
+      return std::nullopt;
+    }
+
+  auto rows = store->Execute (
+      "SELECT embedding FROM vec_embeddings WHERE embedding_id = ?",
+      { embedding_id });
+
+  if (rows.empty ())
+    {
+      return std::nullopt;
+    }
+
+  auto it = rows[0].find ("embedding");
+  if (it == rows[0].end ())
+    {
+      return std::nullopt;
+    }
+
+  // Use DecodeFloatBlob to handle blob data from sqlite-vec
+  Eigen::VectorXf result;
+  if (core::DecodeFloatBlob (it->second, expected_dim, result))
+    {
+      return result;
+    }
+
+  return std::nullopt;
+}
+
+/// @brief Writes ripple updates for a neighbor embedding.
+inline void
+WriteNeighborUpdates (OperationContext &context, long long embedding_id,
+                      double lability, long long timestamp,
+                      const Eigen::VectorXf &blended)
+{
+  // Ensure embeddings_meta row exists
+  {
+    BufferedWriteInstruction op;
+    op.query = "INSERT INTO embeddings_meta "
+               "(embedding_id, strength, contextual_gain, use_frequency, "
+               "lability_state) "
+               "SELECT ?, 1.0, 0.0, 0.0, 0.0 "
+               "WHERE NOT EXISTS (SELECT 1 FROM "
+               "embeddings_meta WHERE embedding_id = ?)";
+    op.params = { embedding_id, embedding_id };
+    context.AddWriteInstruction (std::move (op));
+  }
+
+  // Ensure memory_feedback row exists
+  {
+    BufferedWriteInstruction op;
+    op.query = "INSERT INTO memory_feedback "
+               "(embedding_id, retrieved_count, used_count, last_used) "
+               "SELECT ?, 0, 0, 0 "
+               "WHERE NOT EXISTS (SELECT 1 FROM "
+               "memory_feedback WHERE embedding_id = ?)";
+    op.params = { embedding_id, embedding_id };
+    context.AddWriteInstruction (std::move (op));
+  }
+
+  // Update lability_state in embeddings_meta
+  {
+    BufferedWriteInstruction op;
+    op.query = "UPDATE embeddings_meta "
+               "SET lability_state = ? "
+               "WHERE embedding_id = ?";
+    op.params = { lability, embedding_id };
+    context.AddWriteInstruction (std::move (op));
+  }
+
+  // Update lability_ts in memory_feedback
+  {
+    BufferedWriteInstruction op;
+    op.query = "UPDATE memory_feedback "
+               "SET lability_ts = ? "
+               "WHERE embedding_id = ?";
+    op.params = { timestamp, embedding_id };
+    context.AddWriteInstruction (std::move (op));
+  }
+
+  // Update vec_embeddings with blended embedding
+  // Note: sqlite-vec virtual tables don't support INSERT OR REPLACE,
+  // so we use DELETE + INSERT instead
+  {
+    BufferedWriteInstruction del_op;
+    del_op.query = "DELETE FROM vec_embeddings WHERE embedding_id = ?";
+    del_op.params = { embedding_id };
+    context.AddWriteInstruction (std::move (del_op));
+
+    BufferedWriteInstruction ins_op;
+    ins_op.query
+        = "INSERT INTO vec_embeddings (embedding_id, embedding) VALUES (?, ?)";
+    ins_op.params = { embedding_id, ToFloatVector (blended) };
+    context.AddWriteInstruction (std::move (ins_op));
+  }
+}
+
 } // namespace
 
 void
@@ -51,6 +268,7 @@ ApplyReconsolidation::Execute (OperationContext &context) const
 {
   auto &p_ctx = context.GetProcessorContext ();
   const auto &cfg = context.GetConfig ();
+  Store *store = context.GetStore ();
 
   // Require a current context embedding to drift toward.
   if (p_ctx.recent_context_embeddings.empty ())
@@ -69,13 +287,17 @@ ApplyReconsolidation::Execute (OperationContext &context) const
   const double S = cfg.sensitivity;
   const double T = cfg.stability;
   const double recon_gain = core::ReconsolidationGain (T);
-  // Ripple not used (no neighbor graph), kept for parity.
-  (void)core::RippleDecay (T);
+  const double ripple_decay = core::RippleDecay (T);
+  const int ripple_depth = core::RippleDepth (T);
+  const double tau_labile = core::TauLabile (T);
   const double lability_susc = core::LabilitySusceptibility (S, T);
 
   double max_drift = 0.0;
   const long long now_ts
       = static_cast<long long> (context.GetSignal ().timestamp);
+
+  // Track which embeddings we've already processed (avoid duplicate ripple)
+  std::unordered_set<long long> processed_ids;
 
   for (const auto &kv : retrieved)
     {
@@ -85,6 +307,10 @@ ApplyReconsolidation::Execute (OperationContext &context) const
         {
           continue;
         }
+
+      // Mark as processed to avoid duplicate ripple
+      processed_ids.insert (embedding_id);
+
       const Eigen::VectorXf u_m = Unit (m);
       // contextual_relevance ∈ [0,1]
       double contextual_relevance = core::CosineSimilarity (u_m, u_cur);
@@ -162,14 +388,82 @@ ApplyReconsolidation::Execute (OperationContext &context) const
       blended = Unit (blended);
 
       // Update vec_embeddings (primary vector storage for KNN search).
+      // Note: sqlite-vec virtual tables don't support INSERT OR REPLACE,
+      // so we use DELETE + INSERT instead
       {
-        BufferedWriteInstruction op;
-        op.query
-            = "INSERT OR REPLACE INTO vec_embeddings (embedding_id, embedding) "
-              "VALUES (?, ?)";
-        op.params = { embedding_id, ToFloatVector (blended) };
-        context.AddWriteInstruction (std::move (op));
+        BufferedWriteInstruction del_op;
+        del_op.query = "DELETE FROM vec_embeddings WHERE embedding_id = ?";
+        del_op.params = { embedding_id };
+        context.AddWriteInstruction (std::move (del_op));
+
+        BufferedWriteInstruction ins_op;
+        ins_op.query
+            = "INSERT INTO vec_embeddings (embedding_id, embedding) VALUES (?, ?)";
+        ins_op.params = { embedding_id, ToFloatVector (blended) };
+        context.AddWriteInstruction (std::move (ins_op));
       }
+
+      // --- BEGIN RIPPLE PROPAGATION ---
+      // Only propagate ripple if store is available and primary drift occurred
+      if (!store)
+        {
+          continue;
+        }
+
+      // Query graph neighbors of this reconsolidated memory
+      auto neighbors = QueryGraphNeighbors (store, embedding_id, ripple_depth);
+
+      for (const auto &neighbor : neighbors)
+        {
+          // Skip if already processed (either as primary or via earlier ripple)
+          if (processed_ids.count (neighbor.embedding_id))
+            {
+              continue;
+            }
+          processed_ids.insert (neighbor.embedding_id);
+
+          // Compute decayed lability for this neighbor
+          // neighbor_lability = source_lability * pow(ripple_decay, depth)
+          double neighbor_lability
+              = current_lability
+                * std::pow (ripple_decay, static_cast<double> (neighbor.depth));
+
+          // Skip if lability too low
+          if (neighbor_lability < kRippleStrengthMin)
+            {
+              continue;
+            }
+
+          // Load neighbor embedding
+          auto neighbor_emb = LoadEmbedding (store, neighbor.embedding_id);
+          if (!neighbor_emb)
+            {
+              continue;
+            }
+
+          // Compute neighbor drift (proportional to decayed lability)
+          double neighbor_drift = neighbor_lability * recon_gain;
+          // Cap ripple drift at reduced factor compared to primary
+          neighbor_drift = std::min (kDriftClampMax * kRippleDriftCapFactor,
+                                     std::max (kDriftSkipEpsilon, neighbor_drift));
+
+          if (neighbor_drift < kDriftSkipEpsilon)
+            {
+              continue;
+            }
+
+          // Blend neighbor toward current context
+          Eigen::VectorXf u_neighbor = Unit (*neighbor_emb);
+          Eigen::VectorXf neighbor_blended
+              = static_cast<float> (1.0 - neighbor_drift) * u_neighbor
+                + static_cast<float> (neighbor_drift) * u_cur;
+          neighbor_blended = Unit (neighbor_blended);
+
+          // Write updates for this neighbor
+          WriteNeighborUpdates (context, neighbor.embedding_id, neighbor_lability,
+                                now_ts, neighbor_blended);
+        }
+      // --- END RIPPLE PROPAGATION ---
     }
 
   // Increase uncertainty proportional to max drift (cap 0.2).
