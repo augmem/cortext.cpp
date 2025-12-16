@@ -78,20 +78,20 @@ add_executable(cortext_tests
   state_persistence.test.cpp
   implicit_feedback.test.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/telemetry_noop_by_default.test.cpp
-  # Generator tests
-  generator_tokenizer.test.cpp
-  generator_kv_cache.test.cpp
-  generator_json_decoder.test.cpp
-  generator_text_generator.test.cpp
-  generator_multimodal.test.cpp
-  generator_constrained_sampler.test.cpp
+  # Extractor and Summarizer tests
+  phi4_extractor.test.cpp
+  phi4_summarizer.test.cpp
+  # Phase 5: Testing and Validation
+  formula_validation.test.cpp
+  integration_consolidation.test.cpp
+  regression_behavior.test.cpp
 )
 
 target_link_libraries(cortext_tests PRIVATE cortext Catch2::Catch2WithMain nlohmann_json::nlohmann_json)
 target_compile_definitions(cortext_tests PRIVATE CORTEXT_TESTING=1)
 
-# Ensure the ONNX Runtime dylib can be found when Catch2 runs test discovery
-# during the build (macOS uses @rpath + LC_RPATH entries).
+# Ensure the ONNX Runtime and OGA dylibs can be found when Catch2 runs test
+# discovery during the build (macOS uses @rpath + LC_RPATH entries).
 if(CORTEXT_ENABLE_IMAGEBIND_ORT OR CORTEXT_ENABLE_GEMMA_ORT)
   if(APPLE)
     # cortext_tests lives in <build>/tests; ORT is installed to
@@ -103,6 +103,37 @@ if(CORTEXT_ENABLE_IMAGEBIND_ORT OR CORTEXT_ENABLE_GEMMA_ORT)
     set_property(TARGET cortext_tests APPEND PROPERTY BUILD_RPATH
       "$ORIGIN/../third_party/onnxruntime-install/lib"
     )
+  endif()
+endif()
+# For OGA-enabled builds, add path to ORT and OGA
+# When ImageBind ORT is enabled, OGA shares that ORT; otherwise uses downloaded ORT
+if(NOT CORTEXT_DISABLE_OGA)
+  if(APPLE)
+    if(NOT CORTEXT_DISABLE_IMAGEBIND_ORT)
+      # OGA uses ImageBind ORT from onnxruntime-install
+      set_property(TARGET cortext_tests APPEND PROPERTY BUILD_RPATH
+        "@loader_path/../third_party/onnxruntime-install/lib"
+        "@loader_path/../third_party/onnxruntime-genai"
+      )
+    else()
+      # OGA uses downloaded ORT
+      set_property(TARGET cortext_tests APPEND PROPERTY BUILD_RPATH
+        "@loader_path/../ort-download/onnxruntime-osx-arm64-1.23.0/lib"
+        "@loader_path/../third_party/onnxruntime-genai"
+      )
+    endif()
+  elseif(UNIX)
+    if(NOT CORTEXT_DISABLE_IMAGEBIND_ORT)
+      set_property(TARGET cortext_tests APPEND PROPERTY BUILD_RPATH
+        "$ORIGIN/../third_party/onnxruntime-install/lib"
+        "$ORIGIN/../third_party/onnxruntime-genai"
+      )
+    else()
+      set_property(TARGET cortext_tests APPEND PROPERTY BUILD_RPATH
+        "$ORIGIN/../ort-download/onnxruntime-linux-x64-1.23.0/lib"
+        "$ORIGIN/../third_party/onnxruntime-genai"
+      )
+    endif()
   endif()
 endif()
 

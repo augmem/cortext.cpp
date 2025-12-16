@@ -16,6 +16,10 @@
 namespace cortext
 {
 
+// Forward declarations for LLM components
+class Extractor;
+class Summarizer;
+
 /// @brief Holds the long-lived, evolving state of the SignalProcessor.
 ///
 /// This includes all dynamic variables such as EWMAs, rolling windows,
@@ -332,6 +336,14 @@ struct ProcessorContext
   };
   std::deque<CachedRetrieval> recent_retrievals_cache;
   static constexpr size_t kMaxRetrievalCacheSize = 128;
+
+  // ======================================================================
+  // LLM Components (OGA/Phi-4)
+  // ======================================================================
+  /// @brief Extractor for entity/relation extraction (optional, may be null)
+  Extractor *extractor = nullptr;
+  /// @brief Summarizer for text/audio summarization (optional, may be null)
+  Summarizer *summarizer = nullptr;
 };
 
 } // namespace cortext

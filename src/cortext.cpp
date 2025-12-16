@@ -70,6 +70,9 @@
 #include "cortext/operations/emotion_cascade.hpp"
 #include "cortext/telemetry/telemetry.hpp"
 
+#include "cortext/extractor/phi4_extractor.hpp"
+#include "cortext/summarizer/phi4_summarizer.hpp"
+
 namespace cortext
 {
 
@@ -261,6 +264,10 @@ struct Cortext::Impl
   std::unique_ptr<cortext::IOperation> pipeline_root;
   std::unique_ptr<cortext::SignalProcessor> processor;
 
+  // OGA components (Phi-4 extractor and summarizer)
+  std::unique_ptr<Phi4Extractor> extractor_instance;
+  std::unique_ptr<Phi4Summarizer> summarizer_instance;
+
   Impl (const Config &c, std::string db, std::string models)
       : cfg (c), db_path (std::move (db)), models_dir (std::move (models))
   {
@@ -270,6 +277,13 @@ struct Cortext::Impl
 
     // Encoder stub (ImageBind-oriented)
     encoder = std::make_unique<ImageBindEncoder> (models_dir);
+
+#if !defined(CORTEXT_DISABLE_OGA)
+    // Create Phi-4 extractor and summarizer (enabled by default)
+    std::string phi4_path = models_dir + "/phi4-mm-cpu";
+    extractor_instance = std::make_unique<Phi4Extractor> (phi4_path);
+    summarizer_instance = std::make_unique<Phi4Summarizer> (phi4_path);
+#endif
 
     // Default pipeline: full per-signal processing chain.
     using cortext::OperationSet;
@@ -404,6 +418,11 @@ struct Cortext::Impl
     pcfg.focus = cfg.focus;
     pcfg.sensitivity = cfg.sensitivity;
     pcfg.stability = cfg.stability;
+
+#if !defined(CORTEXT_DISABLE_OGA)
+    pcfg.extractor = extractor_instance.get ();
+    pcfg.summarizer = summarizer_instance.get ();
+#endif
 
     processor = std::make_unique<cortext::SignalProcessor> (
         pcfg, store, std::move (pipeline_root));

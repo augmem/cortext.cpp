@@ -1,299 +1,275 @@
-# Plan: Integrate gemma-3n-e2b ONNX for Consolidation
+# Plan: Integrate Phi-4-Multimodal via OGA for Consolidation
 
 ## Overview
 
-Add gemma-3n-e2b quantized ONNX model under `models/gemma-3n/` and create `Summarizer` and `Extractor` interfaces (following the `Encoder` pattern) to power the consolidation system's semantic extraction and text summarization.
+Use **Phi-4-multimodal** (5.6B params, INT4 quantized) via **onnxruntime-genai (OGA)** for graph consolidation, semantic extraction, and text summarization. Structured JSON output is handled by **llguidance** (built into OGA), eliminating the need for custom JSON parsers.
 
-**Key asset**: Port `poc/memstream/json_decoder.py` (1757 lines) to C++ for schema-constrained JSON generation.
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                     Cortext Stack                           │
+├─────────────────────────────────────────────────────────────┤
+│  Embeddings     │  ImageBind (ONNX Runtime, INT8)          │
+│                 │  - Text: 151ms, Audio: 141ms              │
+├─────────────────────────────────────────────────────────────┤
+│  Understanding  │  Phi-4-multimodal (OGA, INT4)            │
+│                 │  - Text/Audio comprehension               │
+│                 │  - ~11 tps single-thread, ~30 tps 4-thread│
+├─────────────────────────────────────────────────────────────┤
+│  Structured     │  llguidance (built into OGA)             │
+│  Output         │  - JSON Schema constraints                │
+│                 │  - No custom parser needed                │
+└─────────────────────────────────────────────────────────────┘
+```
 
 ## Model Details
 
-- **Source**: https://huggingface.co/onnx-community/gemma-3n-E2B-it-ONNX
-- **Quantization**: q4 decoder, q8 embed_tokens/audio_encoder, fp16 vision_encoder
-- **Size**: ~4-6GB total
-- **Capabilities**: 2B effective params, 32K context, multimodal (text/image/audio)
+- **Model**: `lokinfey/Phi-4-Multimodal-ONNX-INT4-CPU`
+- **Size**: ~3GB (INT4 quantized)
+- **Capabilities**: Text, Vision, Audio understanding
+- **Performance**: 11 tps (1 thread), ~30 tps (4 threads on RPi 5)
+- **Context**: 131K tokens
 
 ## File Structure
 
 ```
 include/cortext/
-  summarizer/
-    summarizer.hpp              # Abstract interface
-    gemma_summarizer.hpp        # Gemma implementation
-  extractor/
-    extractor.hpp               # Abstract interface
-    gemma_extractor.hpp         # Gemma implementation
-  generator/
-    text_generator.hpp          # Core generation interface
-    gemma_text_generator.hpp    # ONNX Runtime implementation
-    gemma_tokenizer.hpp         # HuggingFace tokenizer parser
-    json_decoder.hpp            # Port of StreamingJSONParser
-    constrained_sampler.hpp     # Port of SchemaConstrainedSampler
+  consolidator/
+    consolidator.hpp           # Abstract interface
+    phi4_consolidator.hpp      # Phi-4 OGA implementation
 
 src/
-  summarizer/gemma_summarizer.cpp
-  extractor/gemma_extractor.cpp
-  generator/
-    gemma_text_generator.cpp
-    gemma_tokenizer.cpp
-    json_decoder.cpp            # JSON state machine + schema validation
-    constrained_sampler.cpp     # Logit masking for schema conformance
+  consolidator/
+    phi4_consolidator.cpp      # OGA + llguidance implementation
 
 models/
-  gemma-3n/
-    embed_tokens_q8.onnx
-    decoder_model_merged_q4.onnx
-    audio_encoder_q8.onnx
-    vision_encoder_fp16.onnx
+  phi4-mm-cpu/
+    phi-4-mm-text.onnx
+    phi-4-mm-speech.onnx
+    phi-4-mm-vision.onnx
+    phi-4-mm-embedding.onnx
+    genai_config.json
     tokenizer.json
     tokenizer_config.json
 
-tests/
-  gemma_tokenizer.test.cpp
-  gemma_text_generator.test.cpp
-  gemma_summarizer.test.cpp
-  gemma_extractor.test.cpp
-  json_decoder.test.cpp         # Parser state machine tests
-  constrained_sampler.test.cpp  # Logit constraint tests
+  imagebind/                   # Existing
+    audio_encoder_int8.onnx
+    text_encoder_int8.onnx
 ```
 
 ## Interface Definitions
 
-### Summarizer (`include/cortext/summarizer/summarizer.hpp`)
+### Consolidator (`include/cortext/consolidator/consolidator.hpp`)
 
 ```cpp
-class Summarizer {
+#pragma once
+#include <nlohmann/json.hpp>
+#include <string>
+#include <vector>
+
+namespace cortext {
+
+struct ConsolidationResult {
+  std::string operation;      // "consolidate", "strengthen", "decay"
+  std::string source_node;
+  std::string target_node;
+  std::string relation;
+  double weight;
+};
+
+struct ExtractionResult {
+  std::vector<std::string> entities;
+  std::vector<std::string> concepts;
+  std::vector<std::tuple<std::string, std::string, std::string>> relations;
+};
+
+class Consolidator {
 public:
-  virtual ~Summarizer() = default;
+  virtual ~Consolidator() = default;
+
+  // Summarize multiple text fragments
   virtual std::string Summarize(const std::vector<std::string>& texts) = 0;
+
+  // Extract entities/relations with JSON schema constraint
+  virtual ExtractionResult Extract(const std::string& text,
+                                   const nlohmann::json& schema) = 0;
+
+  // Generate graph operation with JSON schema constraint
+  virtual ConsolidationResult Consolidate(const std::string& context,
+                                          const nlohmann::json& schema) = 0;
+
+  // Process audio input (Phi-4 native audio understanding)
+  virtual std::string ProcessAudio(const float* pcm, size_t num_samples) = 0;
+
   virtual bool IsAvailable() const = 0;
 };
+
+} // namespace cortext
 ```
 
-### Extractor (`include/cortext/extractor/extractor.hpp`)
+## llguidance Integration
+
+OGA's built-in llguidance handles JSON Schema constraints automatically:
 
 ```cpp
-class Extractor {
-public:
-  virtual ~Extractor() = default;
-  virtual operations::ExtractionResult Extract(
-      const std::string& summary,
-      const std::vector<std::string>& sources) = 0;
-  virtual bool IsAvailable() const = 0;
-};
+// C++ usage pattern
+#include <ort_genai.h>
+
+void GenerateStructuredJSON(const std::string& prompt,
+                           const nlohmann::json& schema) {
+  auto model = OgaModel::Create("models/phi4-mm-cpu");
+  auto params = OgaGeneratorParams::Create(*model);
+
+  // Setup JSON schema guidance
+  std::string schema_str = schema.dump();
+  schema_str = R"({"x-guidance":{"whitespace_flexible":false},)" +
+               schema_str.substr(1);
+  std::string guidance = "start: %json " + schema_str + "\n";
+
+  params->SetSearchOption("max_length", 200);
+  params->SetSearchOption("temperature", 0.0);
+  params->SetGuidance("lark_grammar", guidance.c_str(), false);
+
+  auto generator = OgaGenerator::Create(*model, *params);
+  // ... generate with automatic schema constraint
+}
 ```
 
-### TextGenerator (`include/cortext/generator/text_generator.hpp`)
+### Schema Examples
 
-```cpp
-struct GenerationConfig {
-  int max_new_tokens = 256;
-  float temperature = 0.7f;
-  float top_p = 0.9f;
-  int top_k = 50;
-  bool do_sample = true;
-};
-
-class TextGenerator {
-public:
-  virtual ~TextGenerator() = default;
-  virtual std::string Generate(const std::string& prompt,
-                               const GenerationConfig& config = {}) = 0;
-  virtual bool IsAvailable() const = 0;
-};
+**Graph Operation Schema:**
+```json
+{
+  "type": "object",
+  "properties": {
+    "operation": {"type": "string", "enum": ["consolidate", "strengthen", "decay"]},
+    "source_node": {"type": "string"},
+    "target_node": {"type": "string"},
+    "relation": {"type": "string"},
+    "weight": {"type": "number", "minimum": 0, "maximum": 1}
+  },
+  "required": ["operation", "source_node", "target_node"]
+}
 ```
 
-## Python Files to Port from `poc/memstream/`
-
-| Python Source | C++ Target | Lines | Description |
-|--------------|------------|-------|-------------|
-| `json_decoder.py` | `generator/json_decoder.cpp` | 1757 | Streaming JSON parser + constrained sampler |
-| `gemma/kv_cache.py` | `generator/kv_cache.cpp` | 111 | Preallocated KV cache manager |
-| `gemma/runtime.py` | `generator/decoder_runner.cpp` | 70 | IOBinding-based decoder runner |
-| `gemma/graph_spec.py` | `generator/graph_spec.cpp` | ~100 | Output tensor name mapping |
-
-### Key Components to Port
-
-1. **JSONState enum** - 12 states for JSON parsing state machine
-2. **ParserStatus enum** - VALID_PARTIAL, COMPLETE, INVALID
-3. **StreamingJSONParser class**:
-   - Schema-aware incremental JSON parsing
-   - oneOf branch handling (discriminator + heuristic)
-   - Enum value constraints
-   - `AddToken(text) -> ParserStatus`
-   - `GetAllowedTokens() -> vector<string>`
-
-4. **SchemaConstrainedSampler class**:
-   - Token vocabulary mapping (JSON structural tokens)
-   - `ConstrainLogits(logits) -> masked_logits`
-   - Numeric type gating (integer vs number)
-   - String enum gating
-
-5. **KVCache class** (30 layers, 2 heads, 256 head_dim):
-   - `PastInputs() -> map<string, Tensor>`
-   - `AppendFromPresent(present)`
-   - `InitFromPresent(present)` (prefill)
-   - Dynamic capacity growth
-
-6. **GemmaDecoderRunner class** (IOBinding):
-   - Zero-copy CPU outputs
-   - `Run(embeds, per_layer, pos_ids, past_kv) -> outputs`
-
-### Key C++ Data Structures
-
-```cpp
-enum class JSONState {
-  kExpectingObjectStart, kExpectingKeyOrClose, kExpectingKeyString,
-  kExpectingColon, kExpectingValue, kInStringValue, kInNumberValue,
-  kInBooleanValue, kInNullValue, kInArray, kInNestedObject,
-  kExpectingCommaOrClose, kInvalid
-};
-
-struct OneOfBranchInfo {
-  std::vector<nlohmann::json> branches;
-  std::optional<std::string> discriminator_prop;
-  std::unordered_map<std::string, int> value_to_branch;
-  std::set<std::string> union_properties;
-};
-
-class StreamingJSONParser {
-  nlohmann::json schema_;
-  JSONState state_;
-  std::string buffer_;
-  std::vector<std::pair<std::string, nlohmann::json>> stack_;
-  std::set<std::string> seen_fields_;
-  std::set<std::string> required_fields_;
-  OneOfBranchInfo oneof_info_;
-  std::optional<int> active_branch_index_;
-  // ...
-};
+**Extraction Schema:**
+```json
+{
+  "type": "object",
+  "properties": {
+    "entities": {"type": "array", "items": {"type": "string"}},
+    "concepts": {"type": "array", "items": {"type": "string"}},
+    "relations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "subject": {"type": "string"},
+          "predicate": {"type": "string"},
+          "object": {"type": "string"}
+        }
+      }
+    }
+  }
+}
 ```
 
 ## Implementation Phases
 
-### Phase 1: Model Setup + Tokenizer
+### Phase 1: OGA Integration
 
-1. **Download gemma-3n-e2b ONNX files** to `models/gemma-3n/`
-2. **GemmaTokenizer** - Parse HuggingFace `tokenizer.json`
-   - `Encode(text) -> vector<int64_t>`
-   - `Decode(vector<int64_t>) -> string`
-   - Handle BOS/EOS/PAD special tokens (EOS=106)
+1. **Add OGA dependency to CMake**
+   ```cmake
+   option(CORTEXT_ENABLE_OGA "Enable onnxruntime-genai" OFF)
 
-### Phase 2: Port KV Cache + Decoder Runner
+   if(CORTEXT_ENABLE_OGA)
+     find_package(onnxruntime-genai REQUIRED)
+     target_link_libraries(cortext PRIVATE onnxruntime-genai)
+     target_compile_definitions(cortext PUBLIC CORTEXT_ENABLE_OGA=1)
+   endif()
+   ```
 
-3. **KVCache class** (port `gemma/kv_cache.py`)
-   - Preallocated per-layer buffers [B, H, T, D]
-   - `PastInputs()`, `AppendFromPresent()`, `InitFromPresent()`
-   - Dynamic capacity growth with 1.5x reallocation
+2. **Download Phi-4-multimodal model**
+   ```bash
+   huggingface-cli download lokinfey/Phi-4-Multimodal-ONNX-INT4-CPU \
+     --local-dir models/phi4-mm-cpu
+   ```
 
-4. **GemmaDecoderRunner** (port `gemma/runtime.py`)
-   - IOBinding for zero-copy CPU inference
-   - `Run(embeds, per_layer, pos_ids, past_kv) -> outputs`
+### Phase 2: Consolidator Implementation
 
-### Phase 3: Port JSON Decoder (largest piece)
+3. **Phi4Consolidator class**
+   - Wrap OGA Model, Generator, MultimodalProcessor
+   - Implement Summarize() with unconstrained generation
+   - Implement Extract() with llguidance JSON schema
+   - Implement Consolidate() with llguidance JSON schema
+   - Implement ProcessAudio() for native audio understanding
 
-5. **StreamingJSONParser** (port `json_decoder.py:45-667`)
-   - JSONState enum (12 states)
-   - `_process_char()` state machine
-   - oneOf branch handling (discriminator + heuristic)
-   - `AddToken()`, `GetAllowedTokens()`, `IsSchemaSatisfied()`
+### Phase 3: ProcessorContext Integration
 
-6. **SchemaConstrainedSampler** (port `json_decoder.py:957-1391`)
-   - Token vocabulary precomputation
-   - `ConstrainLogits()` with -inf masking
-   - Numeric/boolean/null type gating
-   - String enum prefix matching
+4. **Update ProcessorContext**
+   ```cpp
+   struct ProcessorContext {
+     // Existing...
+     Consolidator* consolidator = nullptr;  // Add this
+   };
+   ```
 
-7. **ConstrainedJSONGenerator** (port `json_decoder.py:1393-1757`)
-   - Generation loop with KV cache
-   - Sampling: greedy, temperature, top-k, top-p
-   - `Generate(prompt, schema, max_tokens) -> nlohmann::json`
+5. **Update consolidation operations**
+   - `ConsolidationSummarize` uses `consolidator->Summarize()`
+   - `ConsolidationCluster` uses `consolidator->Extract()`
+   - Graph operations use `consolidator->Consolidate()`
 
-### Phase 4: High-Level Interfaces
+### Phase 4: Tests
 
-8. **GemmaSummarizer : Summarizer**
-   - Format summarization prompt
-   - Use unconstrained generation (no JSON schema)
-   - Clean output, strip special tokens
+6. **Unit tests**
+   - `tests/phi4_consolidator.test.cpp`
+   - Schema constraint validation
+   - Audio processing tests
 
-9. **GemmaExtractor : Extractor**
-   - Format extraction prompt with JSON schema
-   - Use ConstrainedJSONGenerator
-   - Parse into `ExtractionResult` struct
+## Performance Targets
 
-### Phase 5: CMake + Integration
+| Operation | Tokens | Time (1 thread) | Time (4 threads) |
+|-----------|--------|-----------------|------------------|
+| Summarize (100 tokens) | 100 | 9s | 3s |
+| Extract (50 tokens) | 50 | 4.5s | 1.5s |
+| Consolidate (30 tokens) | 30 | 2.7s | <1s |
 
-10. **CMake Configuration**
-    - Add `CORTEXT_ENABLE_GEMMA_ORT` option
-    - Share ONNX Runtime with ImageBind
-    - Add nlohmann/json dependency (for schema parsing)
+All operations run during **idle time**, so latency is not critical.
 
-11. **ProcessorContext Integration**
-    - Add `Summarizer*` and `Extractor*` pointers
-    - Update `ConsolidationSummarize` to use Summarizer
-    - Re-enable `EnqueueExtractionJobs` with Extractor
-
-### Phase 6: Tests + Multimodal
-
-12. **Unit Tests**
-    - JSON parser state transitions
-    - Constrained sampler logit masking
-    - Tokenizer roundtrip
-    - KV cache append/init
-
-13. **Vision/Audio Encoders** (optional)
-    - Add multimodal generation methods
-    - Preprocess image/audio inputs
-
-## Critical Files to Modify
+## Files to Modify
 
 | File | Changes |
 |------|---------|
-| `CMakeLists.txt` | Add `CORTEXT_ENABLE_GEMMA_ORT`, new sources |
-| `include/cortext/processor/processor_context.hpp` | Add Summarizer*/Extractor* pointers |
-| `src/operations/consolidation_summarize.cpp` | Use Summarizer when available |
-| `src/operations/consolidation.cpp` (EnqueueExtractionJobs) | Re-enable with Extractor |
-| `tests/CMakeLists.txt` | Add new test files |
+| `CMakeLists.txt` | Add `CORTEXT_ENABLE_OGA`, link onnxruntime-genai |
+| `include/cortext/processor/processor_context.hpp` | Add `Consolidator*` |
+| `src/operations/consolidation_summarize.cpp` | Use Consolidator |
+| `src/operations/consolidation_cluster.cpp` | Use Consolidator for extraction |
+| `tests/CMakeLists.txt` | Add consolidator tests |
 
-## Code Patterns to Follow
+## Dependencies
 
-1. **PIMPL with lazy init** (from `imagebind.cpp:907-942`)
-2. **Conditional compilation** (`#if defined(CORTEXT_ENABLE_GEMMA_ORT)`)
-3. **ONNX tensor creation** (from `imagebind.cpp:976-1003`)
-4. **Interface style** (from `encoder.hpp` - pure virtual, throws on failure)
+| Dependency | Version | Purpose |
+|------------|---------|---------|
+| onnxruntime-genai | ≥0.11.4 | LLM inference with KV cache |
+| llguidance | (bundled) | JSON Schema constrained decoding |
+| nlohmann/json | (existing) | Schema parsing |
 
-## CMake Changes
+## Comparison: Old vs New Approach
 
-```cmake
-option(CORTEXT_ENABLE_GEMMA_ORT "Enable ONNX Runtime for Gemma" OFF)
-
-if(CORTEXT_ENABLE_GEMMA_ORT)
-  target_compile_definitions(cortext PUBLIC CORTEXT_ENABLE_GEMMA_ORT=1)
-endif()
-
-# Share ONNX Runtime linking
-if(CORTEXT_ENABLE_IMAGEBIND_ORT OR CORTEXT_ENABLE_GEMMA_ORT)
-  # ... existing ONNX RT config ...
-endif()
-```
-
-## Model Download
-
-Download from HuggingFace and place in `models/gemma-3n/`:
-
-```bash
-# Using huggingface-cli (recommended)
-huggingface-cli download onnx-community/gemma-3n-E2B-it-ONNX \
-  --include "onnx/*" --local-dir models/gemma-3n
-
-# Or manual: download from https://huggingface.co/onnx-community/gemma-3n-E2B-it-ONNX/tree/main/onnx
-```
+| Aspect | Old (Gemma-3n + Custom) | New (Phi-4 + OGA) |
+|--------|------------------------|-------------------|
+| Model | Gemma-3n (not supported) | Phi-4-multimodal |
+| JSON Constraints | Custom StreamingJSONParser | llguidance (built-in) |
+| Code Complexity | ~2000 lines custom parser | ~200 lines wrapper |
+| Audio Support | Separate encoder | Native understanding |
+| Maintenance | High (custom parser) | Low (OGA maintained) |
 
 ## Risks and Mitigations
 
 | Risk | Mitigation |
 |------|------------|
-| KV cache OOM | Implement cache pruning, limit max context |
-| JSON parsing failures | Robust parsing with fallbacks, retry prompting |
-| Large model size | q4 quantization reduces to ~2-3GB decoder |
-| Thread safety | Mutex-protected lazy init (no std::thread for WASM) |
+| OGA build complexity | Use pip-installed wheel for Python, prebuilt for C++ |
+| llguidance not in C++ build | Rebuild OGA with `-DUSE_GUIDANCE=ON` |
+| Model size (3GB) | INT4 quantization, fits in 8GB RPi 5 |
+| Thread safety | OGA handles internally, one model instance per thread |

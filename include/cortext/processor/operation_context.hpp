@@ -771,6 +771,24 @@ public:
     return extraction_callback_;
   }
 
+  // ======================================================================
+  // LLM Components API (OGA/Phi-4)
+  // ======================================================================
+
+  /// @brief Gets the extractor (may be null if OGA disabled).
+  Extractor *
+  GetExtractor () const
+  {
+    return context_.extractor;
+  }
+
+  /// @brief Gets the summarizer (may be null if OGA disabled).
+  Summarizer *
+  GetSummarizer () const
+  {
+    return context_.summarizer;
+  }
+
 private:
   const Signal &signal_;
   ProcessorContext &context_;

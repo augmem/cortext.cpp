@@ -25,10 +25,6 @@ ctest --test-dir build -R cortext_tests --output-on-failure
 cmake --preset wasm
 cmake --build --preset wasm
 
-# Build with ONNX Runtime (ImageBind encoder)
-cmake -S . -B build -DCORTEXT_ENABLE_IMAGEBIND_ORT=ON
-cmake --build build -j
-
 # Build examples
 cmake -S . -B build -DCORTEXT_BUILD_EXAMPLES=ON
 cmake --build build -j

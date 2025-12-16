@@ -1,5 +1,5 @@
-#include "cortext/generator/gemma_text_generator.hpp"
-#include "cortext/generator/gemma_tokenizer.hpp"
+#include "cortext/extractor/phi4_extractor.hpp"
+#include "cortext/summarizer/phi4_summarizer.hpp"
 
 #include <chrono>
 #include <filesystem>
@@ -20,10 +20,10 @@ std::string
 FindModelsDir ()
 {
   std::vector<std::string> paths = {
-    "models/gemma-3n",
-    "../models/gemma-3n",
-    "../../models/gemma-3n",
-    "../../../models/gemma-3n",
+    "models/phi4-mm-cpu",
+    "../models/phi4-mm-cpu",
+    "../../models/phi4-mm-cpu",
+    "../../../models/phi4-mm-cpu",
   };
 
   for (const auto &path : paths)
@@ -66,14 +66,6 @@ struct BenchmarkResult
       return 0.0;
     return *std::max_element (times_ms.begin (), times_ms.end ());
   }
-
-  double
-  TokensPerSecond () const
-  {
-    if (tokens_generated == 0 || Mean () == 0.0)
-      return 0.0;
-    return (tokens_generated * 1000.0) / Mean ();
-  }
 };
 
 void
@@ -84,12 +76,6 @@ PrintResult (const BenchmarkResult &result)
   std::cout << "    Mean: " << result.Mean () << " ms\n";
   std::cout << "    Min:  " << result.Min () << " ms\n";
   std::cout << "    Max:  " << result.Max () << " ms\n";
-  if (result.tokens_generated > 0)
-    {
-      std::cout << "    Tokens: " << result.tokens_generated << "\n";
-      std::cout << "    Throughput: " << result.TokensPerSecond ()
-                << " tokens/sec\n";
-    }
   std::cout << "\n";
 }
 
@@ -98,11 +84,10 @@ PrintResult (const BenchmarkResult &result)
 int
 main (int argc, char *argv[])
 {
-  std::cout << "=== Cortext Generator Benchmark ===\n" << std::flush;
+  std::cout << "=== Cortext Phi-4 Benchmark ===\n" << std::flush;
 
   // Parse arguments
   int num_iterations = 3;
-  int max_tokens = 20;
 
   for (int i = 1; i < argc; ++i)
     {
@@ -111,166 +96,178 @@ main (int argc, char *argv[])
         {
           num_iterations = std::stoi (argv[++i]);
         }
-      else if (arg == "--max-tokens" && i + 1 < argc)
-        {
-          max_tokens = std::stoi (argv[++i]);
-        }
       else if (arg == "--help")
         {
           std::cout << "Usage: " << argv[0] << " [options]\n";
           std::cout << "  --iterations N   Number of iterations (default: 3)\n";
-          std::cout << "  --max-tokens N   Max tokens to generate (default: "
-                       "20)\n";
           return 0;
         }
     }
 
-  std::cout << "Configuration: iterations=" << num_iterations
-            << ", max_tokens=" << max_tokens << "\n"
+  std::cout << "Configuration: iterations=" << num_iterations << "\n"
             << std::flush;
 
   // Find models
   auto models_dir = FindModelsDir ();
   if (models_dir.empty ())
     {
-      std::cerr << "Error: Could not find models directory\n";
+      std::cerr << "Error: Could not find models directory (phi4-mm-cpu)\n";
+      std::cerr << "Download with: huggingface-cli download "
+                   "lokinfey/Phi-4-Multimodal-ONNX-INT4-CPU --local-dir "
+                   "models/phi4-mm-cpu\n";
       return 1;
     }
   std::cout << "Models: " << models_dir << "\n" << std::flush;
 
-  // Benchmark: Model loading
-  std::cout << "Loading model..." << std::flush;
-  BenchmarkResult load_result;
-  load_result.name = "GemmaTextGenerator construction";
+  // Check if OGA is enabled
+#if defined(CORTEXT_DISABLE_OGA)
+  std::cerr << "Error: OGA disabled. Rebuild without CORTEXT_DISABLE_OGA\n";
+  return 1;
+#endif
 
-  std::unique_ptr<cortext::GemmaTextGenerator> gen;
+  // Benchmark: Model loading
+  std::cout << "\n--- Loading Models ---\n" << std::flush;
+
+  std::cout << "Loading Phi4Extractor..." << std::flush;
+  BenchmarkResult extractor_load;
+  extractor_load.name = "Phi4Extractor construction";
+
+  std::unique_ptr<cortext::Phi4Extractor> extractor;
   for (int i = 0; i < num_iterations; ++i)
     {
       std::cout << " " << (i + 1) << std::flush;
       auto start = Clock::now ();
-      gen = std::make_unique<cortext::GemmaTextGenerator> (models_dir);
+      extractor = std::make_unique<cortext::Phi4Extractor> (models_dir);
       auto end = Clock::now ();
-      load_result.times_ms.push_back (
+      extractor_load.times_ms.push_back (
           std::chrono::duration<double, std::milli> (end - start).count ());
     }
   std::cout << " done\n" << std::flush;
-  PrintResult (load_result);
+  PrintResult (extractor_load);
 
-  if (!gen || !gen->IsAvailable ())
+  std::cout << "Loading Phi4Summarizer..." << std::flush;
+  BenchmarkResult summarizer_load;
+  summarizer_load.name = "Phi4Summarizer construction";
+
+  std::unique_ptr<cortext::Phi4Summarizer> summarizer;
+  for (int i = 0; i < num_iterations; ++i)
     {
-      std::cerr << "Error: Generator not available (ORT not enabled?)\n";
+      std::cout << " " << (i + 1) << std::flush;
+      auto start = Clock::now ();
+      summarizer = std::make_unique<cortext::Phi4Summarizer> (models_dir);
+      auto end = Clock::now ();
+      summarizer_load.times_ms.push_back (
+          std::chrono::duration<double, std::milli> (end - start).count ());
+    }
+  std::cout << " done\n" << std::flush;
+  PrintResult (summarizer_load);
+
+  if (!extractor || !extractor->IsAvailable ())
+    {
+      std::cerr << "Error: Extractor not available\n";
       return 1;
     }
-  std::cout << "Generator available: true\n" << std::flush;
+  if (!summarizer || !summarizer->IsAvailable ())
+    {
+      std::cerr << "Error: Summarizer not available\n";
+      return 1;
+    }
+  std::cout << "Both components available: true\n" << std::flush;
 
-  // Quick profiling: separate embed vs decode time
-  std::cout << "\n--- Profiling Embed vs Decode ---\n" << std::flush;
-  {
-    // Get tokenizer to encode a short prompt
-    auto tokens = gen->EosTokenId (); // Just to verify gen works
-    std::cout << "EOS token ID: " << tokens << "\n" << std::flush;
-  }
+  // Benchmark: Text extraction
+  std::cout << "\n--- Text Extraction ---\n" << std::flush;
+  BenchmarkResult extract_result;
+  extract_result.name = "ExtractFromText";
 
-  // Benchmark: Text generation (greedy)
-  std::cout << "--- Text Generation (Greedy) ---\n" << std::flush;
-  BenchmarkResult greedy_result;
-  greedy_result.name = "Generate (greedy, " + std::to_string (max_tokens)
-                       + " tokens)";
+  nlohmann::json extraction_schema = nlohmann::json::parse (R"({
+    "type": "object",
+    "properties": {
+      "entities": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "name": {"type": "string"},
+            "type": {"type": "string"}
+          }
+        }
+      },
+      "relations": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "subject": {"type": "string"},
+            "predicate": {"type": "string"},
+            "object": {"type": "string"}
+          }
+        }
+      }
+    }
+  })");
 
-  cortext::GenerationConfig greedy_config;
-  greedy_config.max_new_tokens = max_tokens;
-  greedy_config.do_sample = false;
+  std::string test_text
+      = "Apple Inc. was founded by Steve Jobs in Cupertino. "
+        "The company created the iPhone and employs Tim Cook as CEO.";
 
   for (int i = 0; i < num_iterations; ++i)
     {
       std::cout << "  Run " << (i + 1) << "..." << std::flush;
       auto start = Clock::now ();
-      auto output = gen->Generate ("The capital of France is", greedy_config);
+      auto result = extractor->ExtractFromText (test_text, extraction_schema);
       auto end = Clock::now ();
       auto elapsed
           = std::chrono::duration<double, std::milli> (end - start).count ();
-      greedy_result.times_ms.push_back (elapsed);
-      greedy_result.tokens_generated = gen->LastTokenCount ();
-      std::cout << " " << elapsed << "ms (" << gen->LastTokenCount ()
-                << " tokens)\n"
-                << std::flush;
+      extract_result.times_ms.push_back (elapsed);
+      std::cout << " " << elapsed << "ms\n" << std::flush;
 
       if (i == 0)
         {
-          std::cout << "  Output: \"" << output.substr (0, 80) << "...\"\n"
-                    << std::flush;
+          std::cout << "  Entities found: " << result.entities.size () << "\n";
+          std::cout << "  Relations found: " << result.relations.size ()
+                    << "\n";
         }
     }
-  PrintResult (greedy_result);
+  PrintResult (extract_result);
 
-  // Benchmark: Text generation (sampling)
-  std::cout << "--- Text Generation (Sampling) ---\n";
-  BenchmarkResult sample_result;
-  sample_result.name = "Generate (sampling, " + std::to_string (max_tokens)
-                       + " tokens)";
+  // Benchmark: Text summarization
+  std::cout << "\n--- Text Summarization ---\n" << std::flush;
+  BenchmarkResult summarize_result;
+  summarize_result.name = "SummarizeTexts";
 
-  cortext::GenerationConfig sample_config;
-  sample_config.max_new_tokens = max_tokens;
-  sample_config.temperature = 0.7f;
-  sample_config.top_k = 40;
-  sample_config.do_sample = true;
+  std::vector<std::string> texts = {
+    "The quick brown fox jumps over the lazy dog.",
+    "Machine learning is a subset of artificial intelligence.",
+    "Climate change is affecting ecosystems worldwide.",
+  };
 
   for (int i = 0; i < num_iterations; ++i)
     {
+      std::cout << "  Run " << (i + 1) << "..." << std::flush;
       auto start = Clock::now ();
-      auto output = gen->Generate ("Once upon a time", sample_config);
+      auto result = summarizer->SummarizeTexts (texts);
       auto end = Clock::now ();
-      sample_result.times_ms.push_back (
-          std::chrono::duration<double, std::milli> (end - start).count ());
-      sample_result.tokens_generated = gen->LastTokenCount ();
+      auto elapsed
+          = std::chrono::duration<double, std::milli> (end - start).count ();
+      summarize_result.times_ms.push_back (elapsed);
+      std::cout << " " << elapsed << "ms\n" << std::flush;
 
       if (i == 0)
         {
-          std::cout << "  Sample output: \"" << output.substr (0, 100)
-                    << "...\"\n\n";
+          std::cout << "  Summary: \""
+                    << result.substr (0, std::min (size_t (80), result.size ()))
+                    << "...\"\n";
         }
     }
-  PrintResult (sample_result);
-
-  // Benchmark: JSON generation
-  std::cout << "--- JSON Generation ---\n";
-  BenchmarkResult json_result;
-  json_result.name
-      = "GenerateJSON (schema, " + std::to_string (max_tokens) + " tokens)";
-
-  nlohmann::json schema
-      = { { "type", "object" },
-          { "properties",
-            { { "answer", { { "type", "string" } } },
-              { "confidence", { { "type", "number" } } } } },
-          { "required", { "answer" } } };
-
-  for (int i = 0; i < num_iterations; ++i)
-    {
-      auto start = Clock::now ();
-      auto output = gen->GenerateJSON ("What is 2+2? Answer in JSON:", schema,
-                                       max_tokens, 0.3f);
-      auto end = Clock::now ();
-      json_result.times_ms.push_back (
-          std::chrono::duration<double, std::milli> (end - start).count ());
-      json_result.tokens_generated = gen->LastTokenCount ();
-
-      if (i == 0)
-        {
-          std::cout << "  Sample output: " << output.dump () << "\n\n";
-        }
-    }
-  PrintResult (json_result);
+  PrintResult (summarize_result);
 
   // Summary
   std::cout << "=== Summary ===\n";
   std::cout << std::fixed << std::setprecision (2);
-  std::cout << "Greedy generation: " << greedy_result.TokensPerSecond ()
-            << " tokens/sec\n";
-  std::cout << "Sampling generation: " << sample_result.TokensPerSecond ()
-            << " tokens/sec\n";
-  std::cout << "JSON generation: " << json_result.TokensPerSecond ()
-            << " tokens/sec\n";
+  std::cout << "Extractor load: " << extractor_load.Mean () << " ms\n";
+  std::cout << "Summarizer load: " << summarizer_load.Mean () << " ms\n";
+  std::cout << "Text extraction: " << extract_result.Mean () << " ms\n";
+  std::cout << "Text summarization: " << summarize_result.Mean () << " ms\n";
 
   return 0;
 }

@@ -1,9 +1,11 @@
 #include "cortext/operations/process_extraction_results.hpp"
 
 #include "cortext/buffered_write_instruction.hpp"
+#include "cortext/extractor/extractor.hpp"
 #include "cortext/operations/extraction.hpp"
 #include "cortext/processor/operation_context.hpp"
 #include <any>
+#include <nlohmann/json.hpp>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -34,6 +36,38 @@ GenerateNodeId (const std::string &name, const std::string &type)
   return ss.str ();
 }
 
+/// @brief Default JSON schema for extraction.
+const nlohmann::json kExtractionSchema = nlohmann::json::parse (R"({
+  "type": "object",
+  "properties": {
+    "entities": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": {"type": "string"},
+          "type": {"type": "string"},
+          "salience": {"type": "number"}
+        },
+        "required": ["name", "type"]
+      }
+    },
+    "relations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "subject": {"type": "string"},
+          "predicate": {"type": "string"},
+          "object": {"type": "string"},
+          "confidence": {"type": "number"}
+        },
+        "required": ["subject", "predicate", "object"]
+      }
+    }
+  }
+})");
+
 } // namespace
 
 void
@@ -41,6 +75,52 @@ ProcessExtractionResults::Execute (OperationContext &context) const
 {
   auto &p_ctx = context.GetProcessorContext ();
 
+  // Get extractor (may be null if OGA disabled)
+  Extractor *extractor = context.GetExtractor ();
+
+  // Process extraction requests using in-process extractor if available
+  const auto &requests = context.GetExtractionRequests ();
+  if (extractor && extractor->IsAvailable () && !requests.empty ())
+    {
+      for (const auto &req : requests)
+        {
+          try
+            {
+              // Combine source texts for extraction
+              std::string combined_text = req.summary_text;
+              if (!req.source_texts.empty ())
+                {
+                  combined_text += "\n\nSource texts:\n";
+                  for (const auto &txt : req.source_texts)
+                    {
+                      combined_text += txt + "\n---\n";
+                    }
+                }
+
+              auto result
+                  = extractor->ExtractFromText (combined_text, kExtractionSchema);
+              result.summary_id = req.summary_id;
+
+              // Add to pending results for processing
+              p_ctx.pending_extraction_results.push_back (std::move (result));
+            }
+          catch (const std::exception &)
+            {
+              // Skip failed extractions
+            }
+        }
+    }
+  else if (!requests.empty ())
+    {
+      // Extractor not available - invoke callback if set
+      auto *callback = context.GetExtractionCallback ();
+      if (callback && *callback)
+        {
+          (*callback) (requests);
+        }
+    }
+
+  // Process pending extraction results (from extractor or external callback)
   if (p_ctx.pending_extraction_results.empty ())
     {
       return;

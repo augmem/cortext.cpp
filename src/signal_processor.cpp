@@ -717,6 +717,10 @@ SignalProcessor::SignalProcessor (const Config &config,
           = static_cast<int> (std::round (core::Lerp (10.0, 60.0, T)));
       context_->write_rate_window_.SetCapacity (
           static_cast<size_t> (std::max (1, cap)));
+
+      // Initialize LLM components from config
+      context_->extractor = config_.extractor;
+      context_->summarizer = config_.summarizer;
     }
   // Apply schema migrations exactly once during initialization.
   if (store_)

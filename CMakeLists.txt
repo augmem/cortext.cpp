@@ -15,8 +15,9 @@ option(CORTEXT_EMBED_VEC "Embed sqlite-vec extension" ON)
 option(CORTEXT_EMBED_GRAPH "Embed sqlite-graph extension" ON)
 option(CORTEXT_EMBED_OBJSTORE "Embed sqlite-objstore extension" ON)
 option(CORTEXT_ENABLE_DYNAMIC_EXTENSIONS "Enable dynamic extension loading fallback" ON)
-option(CORTEXT_ENABLE_IMAGEBIND_ORT "Enable ONNX Runtime for ImageBind embedder" OFF)
+option(CORTEXT_DISABLE_IMAGEBIND_ORT "Disable ONNX Runtime for ImageBind embedder" OFF)
 option(CORTEXT_ENABLE_GEMMA_ORT "Enable ONNX Runtime for Gemma text generator" OFF)
+option(CORTEXT_DISABLE_OGA "Disable onnxruntime-genai for Phi-4 Extractor/Summarizer" OFF)
 
 if(EMSCRIPTEN AND BUILD_TESTING)
   message(STATUS "Disabling tests for WebAssembly builds (not supported).")
@@ -144,14 +145,10 @@ add_library(cortext
     src/operations/detect_memory_usage.cpp
     src/operations/drift_accumulation.cpp
     src/operations/streaming_pacing.cpp
-    # Generator components
-    src/generator/gemma_tokenizer.cpp
-    src/generator/kv_cache.cpp
-    src/generator/decoder_runner.cpp
-    src/generator/json_decoder.cpp
-    src/generator/constrained_sampler.cpp
-    src/generator/gemma_text_generator.cpp
-    src/generator/multimodal_encoder.cpp
+    # Extractor component
+    src/extractor/phi4_extractor.cpp
+    # Summarizer component
+    src/summarizer/phi4_summarizer.cpp
 )
 add_library(cortext::cortext ALIAS cortext)
 
@@ -317,7 +314,7 @@ if(NOT EMSCRIPTEN)
 endif()
 
 # Optional ONNX Runtime integration for ImageBind embedder
-if(CORTEXT_ENABLE_IMAGEBIND_ORT)
+if(NOT CORTEXT_DISABLE_IMAGEBIND_ORT AND NOT EMSCRIPTEN)
   include(ExternalProject)
   find_package(ZLIB REQUIRED)
 
@@ -385,7 +382,7 @@ endif()
 if(CORTEXT_ENABLE_GEMMA_ORT)
   target_compile_definitions(cortext PUBLIC CORTEXT_ENABLE_GEMMA_ORT=1)
 
-  if(NOT CORTEXT_ENABLE_IMAGEBIND_ORT)
+  if(CORTEXT_DISABLE_IMAGEBIND_ORT)
     # Build ORT if not already built for ImageBind
     include(ExternalProject)
     find_package(ZLIB REQUIRED)
@@ -437,6 +434,94 @@ if(CORTEXT_ENABLE_GEMMA_ORT)
     target_link_libraries(cortext PRIVATE onnxruntime ZLIB::ZLIB)
     add_dependencies(cortext onnxruntime_ep)
   endif()
+endif()
+
+# Optional onnxruntime-genai (OGA) integration for Phi-4 Extractor/Summarizer
+# Enabled by default; set CORTEXT_DISABLE_OGA=ON to disable
+if(CORTEXT_DISABLE_OGA)
+  target_compile_definitions(cortext PUBLIC CORTEXT_DISABLE_OGA=1)
+endif()
+
+if(NOT CORTEXT_DISABLE_OGA AND NOT EMSCRIPTEN)
+  # On Apple Silicon, explicitly set CMAKE_OSX_ARCHITECTURES if not already set
+  # This is needed for OGA's ortlib.cmake to detect the correct architecture
+  if(APPLE AND CMAKE_SYSTEM_PROCESSOR STREQUAL "arm64" AND NOT CMAKE_OSX_ARCHITECTURES)
+    set(CMAKE_OSX_ARCHITECTURES "arm64" CACHE STRING "Build architecture" FORCE)
+  endif()
+
+  # Use the same ORT library as ImageBind when enabled
+  # This avoids version mismatch issues between downloaded ORT and built-from-source ORT
+  if(NOT CORTEXT_DISABLE_IMAGEBIND_ORT)
+    # Use the ORT built from third_party/onnxruntime source (for ImageBind)
+    # OGA expects headers directly in include/, but ORT installs to include/onnxruntime/
+    # Copy headers to the expected location if not already there
+    if(NOT EXISTS "${CORTEXT_ORT_INSTALL_DIR}/include/onnxruntime_c_api.h")
+      file(GLOB ORT_HEADERS_TO_COPY "${CORTEXT_ORT_INSTALL_DIR}/include/onnxruntime/*.h")
+      if(ORT_HEADERS_TO_COPY)
+        file(COPY ${ORT_HEADERS_TO_COPY} DESTINATION "${CORTEXT_ORT_INSTALL_DIR}/include/")
+        message(STATUS "Copied ORT headers to ${CORTEXT_ORT_INSTALL_DIR}/include/")
+      endif()
+    endif()
+    set(ORT_HOME "${CORTEXT_ORT_INSTALL_DIR}" CACHE PATH "ONNX Runtime home" FORCE)
+    message(STATUS "Using ONNX Runtime from ImageBind build: ${ORT_HOME}")
+  else()
+    # Download ORT from GitHub releases (CPU-only) when ImageBind ORT is disabled
+    set(ORT_VERSION "1.23.0")
+    if(APPLE)
+      if(CMAKE_OSX_ARCHITECTURES STREQUAL "arm64" OR CMAKE_SYSTEM_PROCESSOR STREQUAL "arm64")
+        set(ORT_PACKAGE "onnxruntime-osx-arm64-${ORT_VERSION}")
+      else()
+        set(ORT_PACKAGE "onnxruntime-osx-x86_64-${ORT_VERSION}")
+      endif()
+    elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+      if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64")
+        set(ORT_PACKAGE "onnxruntime-linux-aarch64-${ORT_VERSION}")
+      else()
+        set(ORT_PACKAGE "onnxruntime-linux-x64-${ORT_VERSION}")
+      endif()
+    else()
+      message(FATAL_ERROR "Unsupported platform for OGA")
+    endif()
+
+    set(ORT_URL "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/${ORT_PACKAGE}.tgz")
+    set(ORT_DOWNLOAD_DIR "${CMAKE_BINARY_DIR}/ort-download")
+
+    if(NOT EXISTS "${ORT_DOWNLOAD_DIR}/${ORT_PACKAGE}")
+      message(STATUS "Downloading ONNX Runtime ${ORT_VERSION}...")
+      file(DOWNLOAD ${ORT_URL} "${ORT_DOWNLOAD_DIR}/ort.tgz" SHOW_PROGRESS)
+      file(ARCHIVE_EXTRACT INPUT "${ORT_DOWNLOAD_DIR}/ort.tgz" DESTINATION "${ORT_DOWNLOAD_DIR}")
+    endif()
+
+    # Set ORT_HOME for OGA - must be set as CACHE FORCE to propagate to subdirectory
+    set(ORT_HOME "${ORT_DOWNLOAD_DIR}/${ORT_PACKAGE}" CACHE PATH "ONNX Runtime home" FORCE)
+    message(STATUS "Using downloaded ONNX Runtime from: ${ORT_HOME}")
+  endif()
+
+  # Save and disable BUILD_TESTING for OGA subdirectory
+  set(_cortext_saved_testing_for_oga "${BUILD_TESTING}")
+
+  # Configure OGA build options (must be set as CACHE FORCE before add_subdirectory)
+  set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
+  set(ENABLE_TESTS OFF CACHE BOOL "" FORCE)
+  set(ENABLE_PYTHON OFF CACHE BOOL "" FORCE)
+  set(ENABLE_MODEL_BENCHMARK OFF CACHE BOOL "" FORCE)
+  # CPU-only build, no CUDA/DML/ROCm
+  set(USE_CUDA OFF CACHE BOOL "" FORCE)
+  set(USE_DML OFF CACHE BOOL "" FORCE)
+  set(USE_ROCM OFF CACHE BOOL "" FORCE)
+  # Enable llguidance for JSON schema constrained decoding
+  set(USE_GUIDANCE ON CACHE BOOL "" FORCE)
+
+  add_subdirectory(third_party/onnxruntime-genai EXCLUDE_FROM_ALL)
+
+  # Restore BUILD_TESTING
+  set(BUILD_TESTING "${_cortext_saved_testing_for_oga}" CACHE BOOL "Build tests" FORCE)
+
+  # Add OGA include directories
+  target_include_directories(cortext PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/onnxruntime-genai/src
+  )
+  target_link_libraries(cortext PRIVATE onnxruntime-genai)
 endif()
 
 # Use C++17 features

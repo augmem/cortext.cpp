@@ -28,6 +28,10 @@ public:
     double focus = 0.5;
     double sensitivity = 0.5;
     double stability = 0.5;
+
+    // Optional LLM components (may be null)
+    Extractor *extractor = nullptr;
+    Summarizer *summarizer = nullptr;
   };
 
   /// @brief Constructs a SignalProcessor with a defined set of operations.

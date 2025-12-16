@@ -7,6 +7,7 @@
 #include "cortext/operations/extraction.hpp"
 #include "cortext/processor/operation_context.hpp"
 #include "cortext/store/store.hpp"
+#include "cortext/summarizer/summarizer.hpp"
 #include <any>
 #include <ctime>
 #include <sstream>
@@ -105,12 +106,15 @@ ConsolidationSummarize::Execute (OperationContext &context) const
   std::vector<ExtractionRequest> extraction_requests;
   int summary_counter = 0;
 
+  // Get summarizer (may be null if OGA disabled)
+  Summarizer *summarizer = context.GetSummarizer ();
+
   for (const auto &cluster : clusters)
     {
       std::string summary_id = GenerateSummaryId (now_ts, summary_counter++);
 
-      // 1. Find most representative memory (closest to centroid).
-      // We need to query the embeddings and compute cosine similarity.
+      // Collect all source texts and find most representative memory
+      std::vector<std::string> source_texts;
       std::string best_text;
       double best_sim = -1.0;
 
@@ -153,31 +157,59 @@ ConsolidationSummarize::Execute (OperationContext &context) const
               continue;
             }
 
-          double sim = core::CosineSimilarity (centroid_eigen, emb);
-          if (sim > best_sim)
+          // Try to fetch text from objstore.
+          std::string text;
+          auto it_blob = row.find ("blob_id");
+          if (it_blob != row.end ())
             {
-              best_sim = sim;
-
-              // Try to fetch text from objstore.
-              auto it_blob = row.find ("blob_id");
-              if (it_blob != row.end ())
+              auto blob_id = GetBlobBytes (it_blob->second);
+              if (!blob_id.empty ())
                 {
-                  auto blob_id = GetBlobBytes (it_blob->second);
-                  if (!blob_id.empty ())
+                  auto data_rows = store->Execute (
+                      "SELECT objstore_get(?1) AS data", { blob_id });
+                  if (!data_rows.empty ())
                     {
-                      auto data_rows = store->Execute (
-                          "SELECT objstore_get(?1) AS data", { blob_id });
-                      if (!data_rows.empty ())
+                      auto it_data = data_rows[0].find ("data");
+                      if (it_data != data_rows[0].end ())
                         {
-                          auto it_data = data_rows[0].find ("data");
-                          if (it_data != data_rows[0].end ())
-                            {
-                              best_text = BlobToString (it_data->second);
-                            }
+                          text = BlobToString (it_data->second);
                         }
                     }
                 }
             }
+
+          // Collect text for summarizer
+          if (!text.empty ())
+            {
+              source_texts.push_back (text);
+            }
+
+          // Track best (most representative) for extractive fallback
+          double sim = core::CosineSimilarity (centroid_eigen, emb);
+          if (sim > best_sim)
+            {
+              best_sim = sim;
+              best_text = text;
+            }
+        }
+
+      // Use abstractive summarizer if available, else extractive fallback
+      std::string summary_text;
+      if (summarizer && summarizer->IsAvailable () && !source_texts.empty ())
+        {
+          try
+            {
+              summary_text = summarizer->SummarizeTexts (source_texts);
+            }
+          catch (const std::exception &)
+            {
+              // Fallback to extractive on error
+              summary_text = best_text;
+            }
+        }
+      else
+        {
+          summary_text = best_text;
         }
 
       // 2. Convert centroid to blob for storage.
@@ -188,7 +220,7 @@ ConsolidationSummarize::Execute (OperationContext &context) const
                 "INSERT INTO consolidation_summaries"
                 "(summary_id, summary_text, centroid, cluster_size) "
                 "VALUES(?, ?, ?, ?)",
-                { summary_id, best_text, centroid_blob,
+                { summary_id, summary_text, centroid_blob,
                   static_cast<long long> (cluster.embedding_ids.size ()) });
 
       // 4. Insert source mappings into consolidation_sources.
@@ -224,44 +256,10 @@ ConsolidationSummarize::Execute (OperationContext &context) const
         {
           ExtractionRequest req;
           req.summary_id = summary_id;
-          req.summary_text = best_text;
+          req.summary_text = summary_text;
           req.cluster_size = static_cast<int> (cluster.embedding_ids.size ());
           req.created_at = now_ts;
-
-          // Collect source texts for extraction context.
-          for (long long emb_id : cluster.embedding_ids)
-            {
-              auto rows = store->Execute (
-                  "SELECT m.blob_id FROM memories m WHERE m.embedding_id = ?",
-                  { emb_id });
-              if (!rows.empty ())
-                {
-                  auto it_blob = rows[0].find ("blob_id");
-                  if (it_blob != rows[0].end ())
-                    {
-                      auto blob_id = GetBlobBytes (it_blob->second);
-                      if (!blob_id.empty ())
-                        {
-                          auto data_rows = store->Execute (
-                              "SELECT objstore_get(?1) AS data", { blob_id });
-                          if (!data_rows.empty ())
-                            {
-                              auto it_data = data_rows[0].find ("data");
-                              if (it_data != data_rows[0].end ())
-                                {
-                                  std::string txt
-                                      = BlobToString (it_data->second);
-                                  if (!txt.empty ())
-                                    {
-                                      req.source_texts.push_back (
-                                          std::move (txt));
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+          req.source_texts = source_texts;  // Reuse already collected texts
           extraction_requests.push_back (std::move (req));
         }
     }
