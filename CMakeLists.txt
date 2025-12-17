@@ -605,8 +605,8 @@ if(NOT CORTEXT_DISABLE_LITERT AND NOT EMSCRIPTEN)
   add_dependencies(litert_lm litert_ep)
 
   target_include_directories(cortext PRIVATE ${LITERT_INSTALL_DIR}/include)
-  # PUBLIC link so consumers of cortext (like tests) can resolve LiteRT-LM symbols
-  target_link_libraries(cortext PUBLIC litert_lm)
+  # PRIVATE link - LiteRT-LM symbols are hidden via visibility settings
+  target_link_libraries(cortext PRIVATE litert_lm)
   add_dependencies(cortext litert_ep)
 
   # Set RPATH for runtime library discovery
@@ -623,6 +623,19 @@ endif()
 
 # Use C++20 features
 target_compile_features(cortext PUBLIC cxx_std_20)
+
+# Set hidden visibility by default to avoid symbol collisions with dependencies
+# (e.g., protobuf from LiteRT-LM vs OpenTelemetry). Only symbols marked with
+# CORTEXT_EXPORT will be visible to consumers.
+# Only apply when building as shared library - static libs don't have visibility.
+if(NOT EMSCRIPTEN AND BUILD_SHARED_LIBS)
+  set_target_properties(cortext PROPERTIES
+    CXX_VISIBILITY_PRESET hidden
+    C_VISIBILITY_PRESET hidden
+    VISIBILITY_INLINES_HIDDEN ON
+  )
+  target_compile_definitions(cortext PRIVATE CORTEXT_BUILDING_SHARED)
+endif()
 
 # Sanitizer instrumentation (must be applied after target is defined)
 if(CORTEXT_ENABLE_ASAN AND NOT EMSCRIPTEN)

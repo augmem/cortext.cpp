@@ -24,6 +24,23 @@
 #include <stddef.h>
 #include <stdint.h>
 
+// Define CORTEXT_EXPORT for C code (C++ uses cortext/export.hpp)
+#ifndef CORTEXT_EXPORT
+#if defined(_WIN32)
+#if defined(CORTEXT_BUILDING_SHARED)
+#define CORTEXT_EXPORT __declspec(dllexport)
+#elif defined(CORTEXT_USING_SHARED)
+#define CORTEXT_EXPORT __declspec(dllimport)
+#else
+#define CORTEXT_EXPORT
+#endif
+#elif defined(__GNUC__) && __GNUC__ >= 4
+#define CORTEXT_EXPORT __attribute__((visibility("default")))
+#else
+#define CORTEXT_EXPORT
+#endif
+#endif
+
 #ifdef __cplusplus
 extern "C"
 {
@@ -43,8 +60,9 @@ extern "C"
   ///
   /// The returned handle must be freed with cortext_free().
   /// Default models directory is "models/imagebind".
-  cortext_handle cortext_create (double focus, double sensitivity,
-                                 double stability, const char *db_path);
+  CORTEXT_EXPORT cortext_handle cortext_create (double focus, double sensitivity,
+                                                double stability,
+                                                const char *db_path);
 
   /// @brief Creates a Cortext instance with custom models directory.
   /// @param focus Focus knob value in [0.0, 1.0].
@@ -55,16 +73,15 @@ extern "C"
   /// @return Handle to the created instance, or NULL on failure.
   ///
   /// The returned handle must be freed with cortext_free().
-  cortext_handle cortext_create_with_models (double focus, double sensitivity,
-                                             double stability,
-                                             const char *db_path,
-                                             const char *models_dir);
+  CORTEXT_EXPORT cortext_handle
+  cortext_create_with_models (double focus, double sensitivity, double stability,
+                              const char *db_path, const char *models_dir);
 
   /// @brief Frees a Cortext instance and releases all resources.
   /// @param h Handle to the instance to free. Safe to pass NULL.
   ///
   /// After calling this function, the handle is invalid and must not be used.
-  void cortext_free (cortext_handle h);
+  CORTEXT_EXPORT void cortext_free (cortext_handle h);
 
   /// @brief Processes text input through the memory system.
   /// @param h Handle to a Cortext instance.
@@ -75,8 +92,9 @@ extern "C"
   ///
   /// This function encodes the text and processes it through the signal
   /// pipeline. Any retrieved memories are buffered until cortext_flush().
-  int cortext_process_text (cortext_handle h, const char *text,
-                            uint64_t timestamp, const char *source_id);
+  CORTEXT_EXPORT int cortext_process_text (cortext_handle h, const char *text,
+                                           uint64_t timestamp,
+                                           const char *source_id);
 
   /// @brief Processes audio input through the memory system.
   /// @param h Handle to a Cortext instance.
@@ -88,9 +106,10 @@ extern "C"
   ///
   /// Audio must be 16kHz mono float32 PCM. Any retrieved memories are
   /// buffered until cortext_flush().
-  int cortext_process_audio (cortext_handle h, const float *pcm,
-                             size_t num_samples, uint64_t timestamp,
-                             const char *source_id);
+  CORTEXT_EXPORT int cortext_process_audio (cortext_handle h, const float *pcm,
+                                            size_t num_samples,
+                                            uint64_t timestamp,
+                                            const char *source_id);
 
   /// @brief Processes image input through the memory system.
   /// @param h Handle to a Cortext instance.
@@ -104,9 +123,11 @@ extern "C"
   ///
   /// Image data is expected in row-major order (height × width × channels).
   /// Any retrieved memories are buffered until cortext_flush().
-  int cortext_process_image (cortext_handle h, const uint8_t *data, int width,
-                             int height, int channels, uint64_t timestamp,
-                             const char *source_id);
+  CORTEXT_EXPORT int cortext_process_image (cortext_handle h,
+                                            const uint8_t *data, int width,
+                                            int height, int channels,
+                                            uint64_t timestamp,
+                                            const char *source_id);
 
   /// @brief Triggers consolidation evaluation.
   /// @param h Handle to a Cortext instance.
@@ -115,7 +136,8 @@ extern "C"
   ///
   /// This evaluates whether background consolidation should start based on
   /// system conditions. Changes are buffered until cortext_flush().
-  int cortext_consolidate (cortext_handle h, uint64_t now_timestamp);
+  CORTEXT_EXPORT int cortext_consolidate (cortext_handle h,
+                                          uint64_t now_timestamp);
 
   /// @brief Commits all buffered database writes.
   /// @param h Handle to a Cortext instance.
@@ -123,7 +145,7 @@ extern "C"
   ///
   /// This commits the current episode transaction and starts a new episode.
   /// Call after processing a batch of signals or before querying results.
-  int cortext_flush (cortext_handle h);
+  CORTEXT_EXPORT int cortext_flush (cortext_handle h);
 
 #ifdef __cplusplus
 }
