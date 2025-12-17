@@ -43,6 +43,14 @@ Ewma (T previous_value, T new_value, double alpha)
   return (1.0 - alpha) * previous_value + alpha * new_value;
 }
 
+/// @brief Maps cosine similarity from [-1, 1] to [0, 1].
+/// Reference: algorithms.md Section 2.1.2, lines 220-223
+inline double
+Map01 (double cosine)
+{
+  return Clamp ((cosine + 1.0) / 2.0, 0.0, 1.0);
+}
+
 /// @brief Calculates the cosine similarity between two vectors using Eigen.
 inline double
 CosineSimilarity (const Eigen::VectorXf &a, const Eigen::VectorXf &b)

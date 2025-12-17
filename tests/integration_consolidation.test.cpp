@@ -129,8 +129,10 @@ struct SetupConsolidationTriggerOp : IOperation
 {
   uint64_t now_ts;
   double stability;
+  double sensitivity;
 
-  SetupConsolidationTriggerOp (uint64_t ts, double T) : now_ts (ts), stability (T)
+  SetupConsolidationTriggerOp (uint64_t ts, double T, double S = 0.5)
+      : now_ts (ts), stability (T), sensitivity (S)
   {
   }
 
@@ -140,8 +142,11 @@ struct SetupConsolidationTriggerOp : IOperation
     ctx.SetTokensInFlight (0);
     ctx.SetRetrievalQueueDepth (0);
     auto &p = ctx.GetProcessorContext ();
-    p.m_rate = 0.5;
-    p.rate_target = 2.0; // m_rate < 0.5 * rate_target triggers
+
+    // Compute knob-derived rate target and set m_rate below threshold
+    const double rate_target = ConsolidationRate (stability, sensitivity);
+    p.m_rate = rate_target * 0.4; // Below 50% threshold to trigger
+    p.rate_target = rate_target;  // Not used anymore but kept for compatibility
 
     int idle_required = IdleRequiredSeconds (stability);
     p.last_retrieval_ts = now_ts - static_cast<uint64_t> (idle_required + 1);

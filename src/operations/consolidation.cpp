@@ -16,6 +16,8 @@ namespace cortext::operations
 namespace
 {
 
+// Checks if consolidation should trigger due to rate falling below target.
+// Triggers when measured rate falls below 50% of the knob-derived target.
 bool
 CheckRateTrigger (double rate_target, double m_rate)
 {
@@ -82,9 +84,10 @@ EvaluateConsolidation::Execute (OperationContext &context, Transaction &tx) cons
   const auto &cfg = context.GetConfig ();
   Store *store = context.GetStore ();
   const uint64_t now_ts = context.GetSignal ().timestamp;
-  const double rate_target = (p_ctx.rate_target > 0.0)
-                                 ? p_ctx.rate_target
-                                 : p_ctx.rate_target_prior;
+  // Derive rate_target from knobs per algorithms.md Section 7.1:
+  // rate_consolidate = (1/max(interval,1)) × (0.3+0.7T) × (1−0.5S)
+  const double rate_target
+      = core::ConsolidationRate (cfg.stability, cfg.sensitivity);
   const double m_rate = p_ctx.m_rate;
   const bool trigger_rate = CheckRateTrigger (rate_target, m_rate);
   const int interval_req = core::ConsolidationIntervalSeconds (cfg.stability);
@@ -160,9 +163,13 @@ EnqueueExtractionJobs::Execute (OperationContext &context, Transaction &tx) cons
       return;
     }
 
-  // Respect max_per_cycle limit.
+  // Respect both batch_size and max_per_cycle limits.
+  // ExtractionBatchSize(T): how many to process per batch (8-32)
+  // MaxExtractionsPerCycle(T): max extractions per consolidation cycle (20-5)
+  const int batch_size = core::ExtractionBatchSize (cfg.stability);
   const int max_per_cycle = core::MaxExtractionsPerCycle (cfg.stability);
-  const int count = std::min (static_cast<int> (requests.size ()), max_per_cycle);
+  const int count = std::min ({ static_cast<int> (requests.size ()),
+                                batch_size, max_per_cycle });
 
   // Invoke extraction callback if registered.
   auto *callback = context.GetExtractionCallback ();

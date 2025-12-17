@@ -176,10 +176,14 @@ AlphaT (double T, double u_t)
 inline double
 AlphaF (double F, double u_t)
 {
+  // Spec (Section 2.1.2): α_F(t) = α_min_F + F × α_span_F × u(t)
+  // Intentional deviation: We add an uncertainty-scaled floor (term1) to ensure
+  // responsiveness during high uncertainty even when F=0. This matches AlphaT
+  // and AlphaS patterns and prevents sluggish adaptation in volatile conditions.
   const double kAlphaMinF = 0.05;
   const double kAlphaSpanF = 0.45;
-  double term1 = kAlphaMinF * (1.0 + 0.5 * u_t);
-  double term2 = kAlphaMinF + F * kAlphaSpanF * u_t;
+  double term1 = kAlphaMinF * (1.0 + 0.5 * u_t);  // Floor: scales with uncertainty
+  double term2 = kAlphaMinF + F * kAlphaSpanF * u_t;  // Spec formula
   return std::max (term1, term2);
 }
 
@@ -206,6 +210,17 @@ ConsolidationIntervalSeconds (double T)
 {
   // consolidation interval = lerp(300, 3600, T)  # 5 min → 1 hour
   return static_cast<int> (std::round (Lerp (300.0, 3600.0, T)));
+}
+
+// Consolidation rate (writes/min) — Section 7.1
+inline double
+ConsolidationRate (double T, double S)
+{
+  // rate_consolidate = (1 / max(interval, 1)) × (0.3 + 0.7T) × (1 − 0.5S)
+  // Reference: algorithms.md Section 7.1, lines 1015-1017
+  const double interval
+      = static_cast<double> (ConsolidationIntervalSeconds (T));
+  return (1.0 / std::max (interval, 1.0)) * (0.3 + 0.7 * T) * (1.0 - 0.5 * S);
 }
 
 // Idle required seconds — Algorithm 28b
@@ -731,6 +746,34 @@ ContradictionThreshold ()
   // Fixed threshold for contradiction detection
   // cos_sim < -0.5 indicates contradiction
   return -0.5;
+}
+
+// --- Section 8: Interrupt Gate Parameters ---
+
+inline double
+TauNovelty (double F, double S, double T)
+{
+  // tau_novelty = lerp(0.10, 0.35, F) * (1 - 0.15S) * (1 + 0.3T)
+  // Reference: algorithms.md Section 8.1
+  return Lerp (0.10, 0.35, Clamp (F, 0.0, 1.0))
+       * (1.0 - 0.15 * Clamp (S, 0.0, 1.0))
+       * (1.0 + 0.3 * Clamp (T, 0.0, 1.0));
+}
+
+inline double
+RetrievalThreshold (double F)
+{
+  // retrieval_thresh(F) = lerp(0.25, 0.60, F)
+  // Reference: algorithms.md Section 8.1
+  return Lerp (0.25, 0.60, Clamp (F, 0.0, 1.0));
+}
+
+inline int
+InterruptCandidateCount (double F)
+{
+  // K = round(lerp(10, 6, F))
+  // Reference: algorithms.md Section 8.3
+  return static_cast<int> (std::round (Lerp (10.0, 6.0, Clamp (F, 0.0, 1.0))));
 }
 
 } // namespace cortext::core

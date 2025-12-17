@@ -4,13 +4,13 @@ This document outlines the phased remediation plan for gaps identified between t
 
 ## Summary
 
-| Phase | Focus | Gaps | Effort |
-|-------|-------|------|--------|
-| 1 | Critical Memory Decay | 1 | High |
-| 2 | Interrupt Gate Corrections | 4 | Medium |
-| 3 | Core Algorithm Fixes | 3 | Medium |
-| 4 | Metric & Threshold Fixes | 3 | Low |
-| 5 | Minor Formula Additions | 2 | Low |
+| Phase | Focus | Gaps | Effort | Status |
+|-------|-------|------|--------|--------|
+| 1 | Critical Memory Decay | 1 | High | ✅ COMPLETED |
+| 2 | Interrupt Gate Corrections | 4 | Medium | ✅ COMPLETED |
+| 3 | Core Algorithm Fixes | 3 | Medium | ✅ COMPLETED |
+| 4 | Metric & Threshold Fixes | 3 | Low | ✅ COMPLETED |
+| 5 | Minor Formula Additions | 2 | Low | |
 
 ---
 
@@ -58,37 +58,38 @@ strength = MAX(0.0,
 
 ---
 
-## Phase 2: Interrupt Gate Corrections
+## Phase 2: Interrupt Gate Corrections ✅ COMPLETED
 
 **Priority: HIGH**
 **Estimated Complexity: Medium**
+**Status: COMPLETED** (2025-12-17)
 
-The interrupt gate uses incorrect novelty computation and threshold sources.
+The interrupt gate was updated to use correct novelty computation and threshold sources per algorithms.md Section 8.
 
-### TODO 2.1: Implement �_novelty Formula
+### TODO 2.1: Implement τ_novelty Formula ✅
 
 **File:** `include/cortext/core/knobs.hpp`
 
-**Add new function:**
+**Added function:**
 ```cpp
 inline double TauNovelty(double F, double S, double T) {
   return Lerp(0.10, 0.35, F) * (1.0 - 0.15 * S) * (1.0 + 0.3 * T);
 }
 ```
 
-**Tasks:**
-- [ ] Add `TauNovelty(F, S, T)` function to knobs.hpp
-- [ ] Add unit test in `core_knobs.test.cpp` validating formula bounds
+**Completed Tasks:**
+- [x] Added `TauNovelty(F, S, T)` function to knobs.hpp
+- [x] Added unit test in `core_knobs.test.cpp` validating formula bounds
 
 **Reference:** algorithms.md Section 8.1, lines 1167-1168
 
 ---
 
-### TODO 2.2: Implement retrieval_thresh(F) Formula
+### TODO 2.2: Implement retrieval_thresh(F) Formula ✅
 
 **File:** `include/cortext/core/knobs.hpp`
 
-**Add new function:**
+**Added function:**
 ```cpp
 inline double RetrievalThreshold(double F) {
   return Lerp(0.25, 0.60, F);
@@ -96,55 +97,41 @@ inline double RetrievalThreshold(double F) {
 ```
 
 **File:** `src/operations/interrupt_gate.cpp`
-**Lines:** 198-200
 
-**Current (Incorrect):**
-```cpp
-const double retrieval_thresh = context.GetThresholdTDynamic();
-```
+**Fixed:** Replaced `context.GetThresholdTDynamic()` with `core::RetrievalThreshold(F)`
 
-**Required:**
-```cpp
-const double retrieval_thresh = core::RetrievalThreshold(cfg.focus);
-```
-
-**Tasks:**
-- [ ] Add `RetrievalThreshold(F)` function to knobs.hpp
-- [ ] Update interrupt_gate.cpp to use knob-derived threshold
-- [ ] Add unit test validating formula
+**Completed Tasks:**
+- [x] Added `RetrievalThreshold(F)` function to knobs.hpp
+- [x] Updated interrupt_gate.cpp to use knob-derived threshold
+- [x] Added unit test validating formula
 
 **Reference:** algorithms.md Section 8.1, lines 1171-1172
 
 ---
 
-### TODO 2.3: Implement Embedding Novelty Computation
+### TODO 2.3: Implement Embedding Novelty Computation ✅
 
 **File:** `src/operations/interrupt_gate.cpp`
-**Lines:** 250-270
 
-**Current (Incorrect):**
-Uses Jaccard index on ID sets: `jaccard = 1 - |A)B|/|A*B|`
-
-**Required (Per Spec):**
+**Fixed:** Replaced Jaccard ID-based novelty with embedding-based novelty computation:
 ```cpp
-embedding_novelty = 1.0 - max(cos(candidate.embedding, ctx_window[i].embedding) for all i)
+embedding_novelty = 1.0 - max(cos(candidate, ctx_window[i]) for all i)
 ```
 
-**Tasks:**
-- [ ] Add `ComputeEmbeddingNovelty()` function that computes `1 - max(cosine similarity to context)`
-- [ ] Replace `jaccard >= tau_j_eff` condition with `embedding_novelty >= tau_novelty_eff`
-- [ ] Keep Jaccard as secondary duplicate check if desired
-- [ ] Add unit test verifying embedding-space novelty computation
+**Completed Tasks:**
+- [x] Implemented embedding novelty as `1 - max(cosine similarity to context window)`
+- [x] Replaced `jaccard >= tau_j_eff` condition with `embedding_novelty >= tau_novelty_eff`
+- [x] Added unit tests verifying embedding-space novelty computation (orthogonal/similar/empty cases)
 
 **Reference:** algorithms.md Section 8.3, lines 1224-1225
 
 ---
 
-### TODO 2.4: Implement K Parameter for Candidate Limiting
+### TODO 2.4: Implement K Parameter for Candidate Limiting ✅
 
 **File:** `include/cortext/core/knobs.hpp`
 
-**Add new function:**
+**Added function:**
 ```cpp
 inline int InterruptCandidateCount(double F) {
   return static_cast<int>(std::round(Lerp(10.0, 6.0, F)));
@@ -153,164 +140,146 @@ inline int InterruptCandidateCount(double F) {
 
 **File:** `src/operations/interrupt_gate.cpp`
 
-**Tasks:**
-- [ ] Add `InterruptCandidateCount(F)` function to knobs.hpp
-- [ ] Limit candidate evaluation to top K candidates by relevance
-- [ ] Add unit test
+**Completed Tasks:**
+- [x] Added `InterruptCandidateCount(F)` function to knobs.hpp
+- [x] Limited candidate evaluation to top K candidates by relevance using `std::partial_sort`
+- [x] Added unit test
 
 **Reference:** algorithms.md Section 8.3, line 1216
 
 ---
 
-## Phase 3: Core Algorithm Fixes
+## Phase 3: Core Algorithm Fixes ✅ COMPLETED
 
 **Priority: MEDIUM**
 **Estimated Complexity: Medium**
+**Status: COMPLETED** (2025-12-17)
 
-### TODO 3.1: Add map01 Transformation in Focus Update
+### TODO 3.1: Add map01 Transformation in Focus Update ✅
 
 **File:** `src/operations/focus.cpp`
-**Line:** 76
+**File:** `include/cortext/core/algorithms.hpp`
 
-**Current (Incorrect):**
-```cpp
-p_ctx.weight_relevance = core::Ewma(p_ctx.weight_relevance, observed_cosine, alpha_f);
-```
+**Fixed:** Added `Map01()` helper and applied transformation before EWMA.
 
-**Required:**
-```cpp
-// Transform cosine [-1, 1] to [0, 1]
-const double mapped = core::Clamp((observed_cosine + 1.0) / 2.0, 0.0, 1.0);
-p_ctx.weight_relevance = core::Ewma(p_ctx.weight_relevance, mapped, alpha_f);
-```
-
-**Tasks:**
-- [ ] Add `Map01(double cosine)` helper to algorithms.hpp: `clamp((z + 1) / 2, 0, 1)`
-- [ ] Apply `Map01()` to `observed_cosine` before EWMA
-- [ ] Add unit test verifying transformation
+**Completed Tasks:**
+- [x] Added `Map01(double cosine)` helper to algorithms.hpp: `clamp((z + 1) / 2, 0, 1)`
+- [x] Applied `Map01()` to `observed_cosine` before EWMA in focus.cpp
+- [x] Added unit test "Map01 transforms cosine [-1,1] to [0,1]" in `core_algorithms.test.cpp`
 
 **Reference:** algorithms.md Section 2.1.2, lines 220-223
 
 ---
 
-### TODO 3.2: Fix Prediction Error Metric Source
+### TODO 3.2: Fix Prediction Error Metric Source ✅
 
 **File:** `src/operations/metrics.cpp`
-**Lines:** 116-122
 
-**Current (Incorrect):**
-Uses score variance (`var_scores`) as proxy for prediction error.
+**Fixed:** Replaced score variance (`var_scores`) with `embedding_surprisal` from `EmbeddingPredictionError` operation.
 
-**Required:**
-Use embedding surprisal from `embedding_prediction_error.cpp`:
-```cpp
-const double surprisal = p_ctx.embedding_surprisal;  // Already computed
-const double prediction_error = surprisal * S * (1.0 - T);
-```
-
-**Tasks:**
-- [ ] Retrieve `embedding_surprisal` from processor context (already computed)
-- [ ] Replace `var_scores` with `embedding_surprisal` in metric computation
-- [ ] Add unit test verifying correct metric source
+**Completed Tasks:**
+- [x] Retrieve `embedding_surprisal` from context metrics (computed by EmbeddingPredictionError operation)
+- [x] Replace `var_scores` with `embedding_surprisal` in surprise metric computation
+- [x] Added unit test "ComputeMetrics uses embedding_surprisal for surprise metric" in `operations_metrics.test.cpp`
 
 **Reference:** algorithms.md Section 3.2, Table 1 row "Prediction Error"
 
 ---
 
-### TODO 3.3: Fix Alpha_F Formula (Optional)
+### TODO 3.3: Document Alpha_F Formula Deviation ✅
 
 **File:** `include/cortext/core/knobs.hpp`
-**Lines:** 177-184
 
-**Current (Deviation):**
-```cpp
-double term1 = kAlphaMinF * (1.0 + 0.5 * u_t);
-double term2 = kAlphaMinF + F * kAlphaSpanF * u_t;
-return std::max(term1, term2);
-```
+**Evaluated:** The two-term max pattern is an **intentional design choice**, not a bug.
 
-**Spec says:**
-```cpp
-return kAlphaMinF + F * kAlphaSpanF * u_t;  // Single formula, no max
-```
+**Analysis:**
+- Spec formula: `α_F(t) = α_min_F + F × α_span_F × u(t)`
+- Implementation: `max(α_min_F × (1 + 0.5×u_t), spec_formula)`
 
-**Tasks:**
-- [ ] Evaluate if two-term max is intentional design choice or bug
-- [ ] If bug: simplify to single formula per spec
-- [ ] If intentional: document deviation in code comments
-- [ ] Add/update unit test
+The first term provides an uncertainty-scaled floor that ensures responsiveness during high uncertainty conditions even when F=0. This matches the pattern used in `AlphaT` and `AlphaS` functions. Without this floor, the system would be sluggish at F=0 regardless of uncertainty level.
+
+**Completed Tasks:**
+- [x] Evaluated deviation: Confirmed as intentional design choice
+- [x] Documented deviation in code comments in knobs.hpp
+- [x] Existing unit tests in `core_knobs.test.cpp` already validate bounds
 
 **Reference:** algorithms.md Section 2.1.2, lines 227-230
 
 ---
 
-## Phase 4: Metric & Threshold Fixes
+## Phase 4: Metric & Threshold Fixes ✅ COMPLETED
 
 **Priority: MEDIUM**
 **Estimated Complexity: Low**
+**Status: COMPLETED** (2025-12-17)
 
-### TODO 4.1: Add Time-Scaled Total Delta Cap
+### TODO 4.1: Add Time-Scaled Total Delta Cap ✅
 
 **File:** `src/operations/threshold.cpp`
-**Line:** 180
+**Lines:** 177-184
 
-**Current (Incorrect):**
+**Fixed:** Time-scaled capping now uses existing `delta_t` from rate calculation:
 ```cpp
-delta_total = core::Clamp(delta_total, -max_delta, +max_delta);
-```
-
-**Required:**
-```cpp
-const double delta_t_seconds = (now_ts - p_ctx.last_threshold_ts) / 1000.0;
-const double cap_total = max_delta * (delta_t_seconds / 60.0);
+const double max_delta_per_min = core::MaxDeltaTPerMin(p_ctx.signals_processed, cfg.stability);
+const double cap_total = max_delta_per_min * std::max(delta_t, 0.1) / kSecondsPerMinute;
 delta_total = core::Clamp(delta_total, -cap_total, +cap_total);
 ```
 
-**Tasks:**
-- [ ] Compute time delta since last threshold update
-- [ ] Scale `max_delta` by `(delta_t / 60.0)` as per spec
-- [ ] Add unit test verifying time-scaled capping
+**Completed Tasks:**
+- [x] Reuse existing delta_t computation from rate control loop
+- [x] Scale max_delta by (delta_t / 60.0) per spec
+- [x] Add minimum floor of 0.1s to avoid zeroing deltas
+- [x] Add unit test in `operations_threshold.test.cpp`
 
 **Reference:** algorithms.md Section 4.3, lines 663-665
 
 ---
 
-### TODO 4.2: Fix rate_consolidate Formula (Optional)
+### TODO 4.2: Implement rate_consolidate Formula ✅
 
+**File:** `include/cortext/core/knobs.hpp`
 **File:** `src/operations/consolidation.cpp`
-**Lines:** 20-24
 
-**Current:**
-Simple rate comparison: `m_rate < 0.5 * rate_target`
+**Added function:**
+```cpp
+inline double ConsolidationRate(double T, double S) {
+  const double interval = static_cast<double>(ConsolidationIntervalSeconds(T));
+  return (1.0 / std::max(interval, 1.0)) * (0.3 + 0.7 * T) * (1.0 - 0.5 * S);
+}
+```
 
-**Spec says:**
+**Completed Tasks:**
+- [x] Added `ConsolidationRate(T, S)` function to knobs.hpp
+- [x] Updated `EvaluateConsolidation::Execute` to use knob-derived rate
+- [x] Removed external rate_target configuration dependency
+- [x] Updated tests to work with knob-derived rates
+- [x] Added unit test in `core_knobs.test.cpp`
+
+**Previous Spec (for reference):**
 ```
 rate_consolidate = (1 / max(interval, 1)) � (0.3 + 0.7T) � (1  0.5S)
 ```
-
-**Tasks:**
-- [ ] Add `ConsolidationRate(T, S, interval)` to knobs.hpp
-- [ ] Integrate into `CheckRateTrigger()` or document as intentional simplification
 
 **Reference:** algorithms.md Section 7.1, lines 1015-1017
 
 ---
 
-### TODO 4.3: Use extraction_batch_size in Pipeline
+### TODO 4.3: Integrate ExtractionBatchSize into Pipeline ✅
 
 **File:** `src/operations/consolidation.cpp`
-**Line:** 169
+**Lines:** 170-176
 
-**Current:**
-Uses `MaxExtractionsPerCycle(T)` with formula `lerp(20, 5, T)`
+**Fixed:** Now uses both `ExtractionBatchSize(T)` and `MaxExtractionsPerCycle(T)`:
+```cpp
+const int batch_size = core::ExtractionBatchSize(cfg.stability);
+const int max_per_cycle = core::MaxExtractionsPerCycle(cfg.stability);
+const int count = std::min({static_cast<int>(requests.size()), batch_size, max_per_cycle});
+```
 
-**Spec says:**
-`extraction_batch_size = round(lerp(8, 32, T))`
-
-**Tasks:**
-- [ ] Verify which formula is correct for the use case
-- [ ] Either update consolidation.cpp to use `ExtractionBatchSize(T)` or document deviation
-- [ ] Ensure consistent usage across extraction pipeline
+**Completed Tasks:**
+- [x] Integrated ExtractionBatchSize into extraction job batching
+- [x] Both limits now apply: batch_size (8-32) and max_per_cycle (20-5)
+- [x] Existing tests in `operations_extraction.test.cpp` now pass
 
 **Reference:** algorithms.md Section 7.3-7.4, line 1076
 

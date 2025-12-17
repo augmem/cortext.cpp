@@ -1,3 +1,4 @@
+#include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 #include "test_helpers.hpp"
 #include <cortext/operations/effective_focus.hpp>
@@ -48,6 +49,39 @@ TEST_CASE ("ComputeMetrics sets all 12 metrics in normalized ranges",
       REQUIRE (*v >= -1.0);
       REQUIRE (*v <= 1.0);
     }
+}
+
+TEST_CASE (
+    "ComputeMetrics uses embedding_surprisal for surprise metric",
+    "[operations][metrics][surprise]")
+{
+  // Reference: algorithms.md Section 3.2 Table 1 row "Prediction Error"
+  // surprise = embedding_surprisal × S × (1 − T)
+
+  Signal s;
+  s.embedding = Eigen::VectorXf::Ones (4);
+  ProcessorContext pctx;
+  pctx.recent_context_embeddings.push_back (Eigen::VectorXf::Ones (4));
+
+  SignalProcessor::Config cfg;
+  cfg.focus = 0.5;
+  cfg.sensitivity = 0.8;  // S
+  cfg.stability = 0.2;     // T
+
+  OperationContext ctx (s, pctx, cfg);
+
+  // Pre-set embedding_surprisal as if computed by EmbeddingPredictionError
+  const double known_surprisal = 0.6;
+  ctx.SetMetric (operations::Metric::embedding_surprisal, known_surprisal);
+
+  ComputeMetrics op;
+  op.Execute (ctx, cortext::testing::GetNullTransaction ());
+
+  // Verify surprise uses the formula: surprisal × S × (1 − T)
+  // = 0.6 × 0.8 × (1 − 0.2) = 0.6 × 0.8 × 0.8 = 0.384
+  auto surprise = ctx.GetMetric (operations::Metric::surprise);
+  REQUIRE (surprise.has_value ());
+  REQUIRE (*surprise == Catch::Approx (0.384).epsilon (0.001));
 }
 
 TEST_CASE (

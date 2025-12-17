@@ -101,15 +101,23 @@ TEST_CASE ("Alg28 rate trigger starts when idle",
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;
 
+  // Compute the knob-derived rate target
+  // rate_consolidate = (1/interval) * (0.3+0.7T) * (1-0.5S)
+  // At T=0.5, S=0.5: rate ≈ 0.00025
+  const double rate_target = core::ConsolidationRate (cfg.stability, cfg.sensitivity);
+
   const uint64_t now_ts = 10'000ULL;
   const int idle_required = core::IdleRequiredSeconds (cfg.stability);
   const uint64_t last_ret = now_ts - static_cast<uint64_t> (idle_required);
 
+  // Set m_rate below half of the knob-derived rate to trigger
+  const double m_rate = rate_target * 0.4; // Below 50% threshold
+
   auto setup = std::make_unique<SetupConsolidationInputsOp> (
       /*tokens_in_flight=*/0,
       /*queue_depth=*/0,
-      /*m_rate=*/0.8,
-      /*rate_target=*/2.0,
+      /*m_rate=*/m_rate,
+      /*rate_target=*/rate_target, // Not used anymore, but kept for setup
       /*last_retrieval_ts=*/last_ret,
       /*last_consolidation_ts=*/std::nullopt);
   auto eval = std::make_unique<EvaluateConsolidation> ();
@@ -134,15 +142,21 @@ TEST_CASE ("Alg28 rate trigger defers when busy",
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;
 
+  // Compute the knob-derived rate target
+  const double rate_target = core::ConsolidationRate (cfg.stability, cfg.sensitivity);
+
   const uint64_t now_ts = 20'000ULL;
   const int idle_required = core::IdleRequiredSeconds (cfg.stability);
   const uint64_t last_ret = now_ts - static_cast<uint64_t> (idle_required);
 
+  // Set m_rate below threshold to trigger rate check, but busy so should defer
+  const double m_rate = rate_target * 0.4;
+
   auto setup = std::make_unique<SetupConsolidationInputsOp> (
       /*tokens_in_flight=*/3,
       /*queue_depth=*/5,
-      /*m_rate=*/0.8,
-      /*rate_target=*/2.0,
+      /*m_rate=*/m_rate,
+      /*rate_target=*/rate_target,
       /*last_retrieval_ts=*/last_ret,
       /*last_consolidation_ts=*/std::nullopt);
   auto eval = std::make_unique<EvaluateConsolidation> ();

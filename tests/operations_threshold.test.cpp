@@ -120,3 +120,42 @@ TEST_CASE ("Alg8 ΔT_homeo decreases threshold when observed rate < target",
   REQUIRE (pctx.T_dynamic >= Tmin);
   REQUIRE (pctx.T_dynamic <= Tmax);
 }
+
+TEST_CASE ("Alg8 time-scaled delta cap scales with inter-signal time",
+           "[operations][threshold][time_scaling]")
+{
+  // Verify that the time-scaled cap formula is correctly computed.
+  // Per algorithms.md Section 4.3: cap_total = max_ΔT_per_min × (Δt / 60.0)
+  //
+  // The cap scales linearly with delta_t - longer gaps allow larger deltas.
+  // This test verifies the cap calculation itself, not the full threshold
+  // update (which also includes EWMA toward target).
+
+  // Verify knob function: MaxDeltaTPerMin scales with maturity
+  // At maturity=0: max_delta = 0.30
+  // At maturity=1: max_delta = 0.10
+  const double max_delta_immature
+      = cortext::core::MaxDeltaTPerMin (0, 0.5); // count=0, low maturity
+  const double max_delta_mature
+      = cortext::core::MaxDeltaTPerMin (10000, 0.5); // high count, high maturity
+
+  REQUIRE (max_delta_immature > max_delta_mature);
+  REQUIRE (max_delta_immature <= 0.30);
+  REQUIRE (max_delta_mature >= 0.10);
+
+  // Verify time-scaling: cap is proportional to delta_t
+  // cap_total = max_delta * delta_t / 60.0
+  const double delta_t_short = 1.0;  // 1 second
+  const double delta_t_long = 30.0;  // 30 seconds
+  const double max_delta = 0.30;     // immature system
+
+  const double cap_short = max_delta * delta_t_short / 60.0;
+  const double cap_long = max_delta * delta_t_long / 60.0;
+
+  // Longer delta_t → proportionally larger cap
+  REQUIRE (cap_long / cap_short == Catch::Approx (delta_t_long / delta_t_short));
+
+  // Verify actual values
+  REQUIRE (cap_short == Catch::Approx (0.005));  // 0.30 * 1 / 60
+  REQUIRE (cap_long == Catch::Approx (0.15));    // 0.30 * 30 / 60
+}

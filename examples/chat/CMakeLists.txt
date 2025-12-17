@@ -1,5 +1,3 @@
-cmake_minimum_required(VERSION 3.24)
-
 include(FetchContent)
 
 # --- Dependencies ---
@@ -25,14 +23,6 @@ FetchContent_Declare(
   GIT_TAG v0.1.3
 )
 FetchContent_Populate(openai_cpp)
-
-# nlohmann/json (required by openai-cpp headers)
-FetchContent_Declare(
-  nlohmann_json
-  GIT_REPOSITORY https://github.com/nlohmann/json.git
-  GIT_TAG v3.11.3
-)
-FetchContent_MakeAvailable(nlohmann_json)
 
 find_package(CURL REQUIRED)
 
@@ -78,7 +68,7 @@ target_link_libraries(cortext_chat PRIVATE
   opentelemetry-cpp::otlp_grpc_log_record_exporter
 )
 
-target_compile_features(cortext_chat PRIVATE cxx_std_17)
+target_compile_features(cortext_chat PRIVATE cxx_std_20)
 
 # Ensure the runtime loader can find vendored dylibs on macOS.
 if(APPLE)

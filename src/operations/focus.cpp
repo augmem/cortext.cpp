@@ -71,9 +71,12 @@ UpdateFocus::Execute (OperationContext &context, Transaction &tx) const
   // Calculate the learning rate using the schedule from Section 0.3
   const double alpha_f = core::AlphaF (config.focus, p_ctx.u_t);
 
+  // Transform cosine [-1, 1] to [0, 1] per algorithms.md Section 2.1.2
+  const double mapped_cosine = core::Map01 (observed_cosine);
+
   // Alg 2: weight_relevance_t ← EWMA(...)
   p_ctx.weight_relevance
-      = core::Ewma (p_ctx.weight_relevance, observed_cosine, alpha_f);
+      = core::Ewma (p_ctx.weight_relevance, mapped_cosine, alpha_f);
 
   // Alg 2: attention_width_t ← clamp(...) - the doc doesn't specify a change,
   // just that it should be clamped. The actual change comes from feedback in

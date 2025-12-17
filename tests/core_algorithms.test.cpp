@@ -44,3 +44,22 @@ TEST_CASE ("Clamp and Lerp", "[core][algorithms]")
   REQUIRE (Lerp (0.0, 10.0, 1.0) == Catch::Approx (10.0));
   REQUIRE (Lerp (0.0, 10.0, 0.3) == Catch::Approx (3.0));
 }
+
+TEST_CASE ("Map01 transforms cosine [-1,1] to [0,1]", "[core][algorithms]")
+{
+  // Reference: algorithms.md Section 2.1.2, lines 220-223
+  // map01(z) = clamp((z + 1) / 2, 0, 1)
+
+  // Boundary cases
+  REQUIRE (Map01 (-1.0) == Catch::Approx (0.0));
+  REQUIRE (Map01 (1.0) == Catch::Approx (1.0));
+  REQUIRE (Map01 (0.0) == Catch::Approx (0.5));
+
+  // Mid-points
+  REQUIRE (Map01 (-0.5) == Catch::Approx (0.25));
+  REQUIRE (Map01 (0.5) == Catch::Approx (0.75));
+
+  // Values outside [-1,1] should be clamped
+  REQUIRE (Map01 (-2.0) == Catch::Approx (0.0));
+  REQUIRE (Map01 (2.0) == Catch::Approx (1.0));
+}

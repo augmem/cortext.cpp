@@ -1214,6 +1214,22 @@ dup_thresh = lerp(0.88, 0.96, F) × (0.98 + 0.02T)
 
 K = round(lerp(10, 6, F)) \# candidates to evaluate
 
+8.3.1 Write Exclusion Filter
+
+Memories stored during the current signal processing cycle are excluded
+from interrupt consideration to prevent self-triggering:
+
+write_exclusion_ts ← current_signal.start_timestamp
+
+candidates_eligible ← {c ∈ candidates \| c.stored_at \<
+write_exclusion_ts}
+
+This filter is applied before novelty and marginal utility evaluation.
+All subsequent gate logic operates on candidates_eligible rather than
+the raw candidate set, ensuring that recently written memories cannot
+immediately trigger retrieval interrupts regardless of their semantic
+properties.
+
 Boundary-aware override permits lower-threshold interrupts at natural
 boundaries:
 

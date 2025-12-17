@@ -113,11 +113,14 @@ ComputeMetrics::Execute (OperationContext &context, Transaction &tx) const
       constants::kNormalizedMin, constants::kNormalizedMax);
   context.SetMetric (operations::Metric::mismatch, mismatch);
 
-  // Surprise: var recent scores × S × (1 − T)
-  const int w = core::WScore (T);
-  const double var_scores = VarRecentScores01 (p_ctx.recent_scores, w);
+  // Prediction Error: embedding_surprisal × S × (1 − T)
+  // Per algorithms.md Section 3.2 Table 1 row "Prediction Error"
+  // Use embedding_surprisal from EmbeddingPredictionError operation
+  const double embedding_surprisal
+      = context.GetMetric (operations::Metric::embedding_surprisal)
+            .value_or (constants::kNormalizedMin);
   const double surprise = core::Clamp (
-      var_scores * S * (constants::kNormalizedMax - T),
+      embedding_surprisal * S * (constants::kNormalizedMax - T),
       constants::kNormalizedMin, constants::kNormalizedMax);
   context.SetMetric (operations::Metric::surprise, surprise);
 

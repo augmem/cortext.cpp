@@ -104,3 +104,95 @@ TEST_CASE ("MaxWaitDrift knob function", "[core][knobs]")
   // Monotonic: higher F means lower max wait
   REQUIRE (MaxWaitDrift (0.3) > MaxWaitDrift (0.7));
 }
+
+TEST_CASE ("TauNovelty follows spec: lerp(0.10, 0.35, F) * (1 - 0.15S) * (1 + "
+           "0.3T)",
+           "[core][knobs]")
+{
+  // tau_novelty = lerp(0.10, 0.35, F) * (1 - 0.15S) * (1 + 0.3T)
+  // Reference: algorithms.md Section 8.1
+
+  // At F=0, S=0, T=0: 0.10 * 1.0 * 1.0 = 0.10
+  REQUIRE (TauNovelty (0.0, 0.0, 0.0) == Catch::Approx (0.10));
+
+  // At F=1, S=0, T=0: 0.35 * 1.0 * 1.0 = 0.35
+  REQUIRE (TauNovelty (1.0, 0.0, 0.0) == Catch::Approx (0.35));
+
+  // At F=0, S=1, T=0: 0.10 * 0.85 * 1.0 = 0.085
+  REQUIRE (TauNovelty (0.0, 1.0, 0.0) == Catch::Approx (0.085));
+
+  // At F=0, S=0, T=1: 0.10 * 1.0 * 1.3 = 0.13
+  REQUIRE (TauNovelty (0.0, 0.0, 1.0) == Catch::Approx (0.13));
+
+  // At F=1, S=1, T=1: 0.35 * 0.85 * 1.3 = 0.38675
+  REQUIRE (TauNovelty (1.0, 1.0, 1.0) == Catch::Approx (0.38675));
+
+  // Mid-point: F=0.5, S=0.5, T=0.5
+  // lerp(0.10, 0.35, 0.5) = 0.225
+  // (1 - 0.15*0.5) = 0.925
+  // (1 + 0.3*0.5) = 1.15
+  // 0.225 * 0.925 * 1.15 = 0.23934375
+  REQUIRE (TauNovelty (0.5, 0.5, 0.5) == Catch::Approx (0.23934375));
+}
+
+TEST_CASE ("RetrievalThreshold follows spec: lerp(0.25, 0.60, F)",
+           "[core][knobs]")
+{
+  // retrieval_thresh(F) = lerp(0.25, 0.60, F)
+  // Reference: algorithms.md Section 8.1
+
+  // F=0: permissive (0.25)
+  REQUIRE (RetrievalThreshold (0.0) == Catch::Approx (0.25));
+
+  // F=1: strict (0.60)
+  REQUIRE (RetrievalThreshold (1.0) == Catch::Approx (0.60));
+
+  // F=0.5: midpoint (0.425)
+  REQUIRE (RetrievalThreshold (0.5) == Catch::Approx (0.425));
+
+  // Monotonic: higher F means higher (stricter) threshold
+  REQUIRE (RetrievalThreshold (0.3) < RetrievalThreshold (0.7));
+}
+
+TEST_CASE ("InterruptCandidateCount follows spec: round(lerp(10, 6, F))",
+           "[core][knobs]")
+{
+  // K = round(lerp(10, 6, F))
+  // Reference: algorithms.md Section 8.3
+
+  // F=0: max candidates (10)
+  REQUIRE (InterruptCandidateCount (0.0) == 10);
+
+  // F=1: min candidates (6)
+  REQUIRE (InterruptCandidateCount (1.0) == 6);
+
+  // F=0.5: midpoint (8)
+  REQUIRE (InterruptCandidateCount (0.5) == 8);
+
+  // Monotonic: higher F means fewer candidates
+  REQUIRE (InterruptCandidateCount (0.3) >= InterruptCandidateCount (0.7));
+}
+
+TEST_CASE (
+    "ConsolidationRate follows spec: (1/interval) * (0.3+0.7T) * (1-0.5S)",
+    "[core][knobs]")
+{
+  // rate_consolidate = (1 / max(interval, 1)) × (0.3 + 0.7T) × (1 − 0.5S)
+  // Reference: algorithms.md Section 7.1
+
+  // At T=0, S=0: interval=300, rate = (1/300) * 0.3 * 1.0 = 0.001
+  REQUIRE (ConsolidationRate (0.0, 0.0) == Catch::Approx (0.001));
+
+  // At T=1, S=0: interval=3600, rate = (1/3600) * 1.0 * 1.0 ≈ 0.000278
+  REQUIRE (ConsolidationRate (1.0, 0.0) == Catch::Approx (1.0 / 3600.0));
+
+  // At T=0, S=1: interval=300, rate = (1/300) * 0.3 * 0.5 = 0.0005
+  REQUIRE (ConsolidationRate (0.0, 1.0) == Catch::Approx (0.0005));
+
+  // Higher S decreases rate factor (1-0.5S)
+  REQUIRE (ConsolidationRate (0.0, 0.5) < ConsolidationRate (0.0, 0.0));
+
+  // Higher T: interval increases faster than rate factor, so overall rate decreases
+  // (interval grows 300→3600 while factor grows 0.3→1.0, net effect is lower rate)
+  REQUIRE (ConsolidationRate (0.5, 0.0) < ConsolidationRate (0.0, 0.0));
+}

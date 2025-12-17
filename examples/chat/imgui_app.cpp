@@ -9,6 +9,7 @@
 #include <atomic>
 #include <iostream>
 #include <stdexcept>
+#include <filesystem>
 
 namespace chat {
 
@@ -71,8 +72,27 @@ ImGuiApp::ImGuiApp(const ImGuiAppConfig& config) : impl_(std::make_unique<Impl>(
   ImGui_ImplGlfw_InitForOpenGL(impl_->window, true);
   ImGui_ImplOpenGL3_Init("#version 150");
 
-  // Load default font with larger size for readability
-  io.Fonts->AddFontDefault();
+  // Load a readable system font (Menlo) on macOS
+  // Fallback to default if not found
+  const char* font_path = "/System/Library/Fonts/Menlo.ttc";
+  const float font_size = 16.0f;
+  
+  // Use std::filesystem to check existence (C++17)
+  bool font_loaded = false;
+  if (std::filesystem::exists(font_path)) {
+    ImFont* font = io.Fonts->AddFontFromFileTTF(font_path, font_size);
+    if (font) {
+      font_loaded = true;
+      std::cout << "Loaded font: " << font_path << " (" << font_size << "px)" << std::endl;
+    }
+  }
+
+  if (!font_loaded) {
+    std::cout << "Using default font (could not load " << font_path << ")" << std::endl;
+    // Load default font but scale it if possible? Default is bitmap, scaling looks bad.
+    // Just add it as is.
+    io.Fonts->AddFontDefault();
+  }
 
   std::cout << "ImGui application initialized: " << config.width << "x" << config.height << std::endl;
 }

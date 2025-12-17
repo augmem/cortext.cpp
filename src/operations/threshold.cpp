@@ -174,10 +174,14 @@ UpdateThreshold::Execute (OperationContext &context, Transaction &tx) const
                      -cap, +cap);
   delta_total += delta_homeo;
 
-  // 8) Apply annealed rails and clamp total delta.
-  const double max_delta
+  // 8) Apply time-scaled annealed rails and clamp total delta.
+  // Per algorithms.md Section 4.3: cap_total = max_ΔT_per_min × (Δt / 60.0)
+  const double max_delta_per_min
       = core::MaxDeltaTPerMin (p_ctx.signals_processed, cfg.stability);
-  delta_total = core::Clamp (delta_total, -max_delta, +max_delta);
+  // Scale by elapsed time; use minimum floor of 0.1s to avoid zeroing deltas
+  const double cap_total
+      = max_delta_per_min * std::max (delta_t, 0.1) / kSecondsPerMinute;
+  delta_total = core::Clamp (delta_total, -cap_total, +cap_total);
   const double Tmin = core::TMin (p_ctx.signals_processed, cfg.stability);
   const double Tmax = core::TMax (p_ctx.signals_processed, cfg.stability);
   p_ctx.T_dynamic = core::Clamp (p_ctx.T_dynamic + delta_total, Tmin, Tmax);

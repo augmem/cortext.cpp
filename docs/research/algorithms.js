@@ -1055,6 +1055,15 @@ const createAlgorithmSections = (offset = 0) => {
             p([code("dup_thresh = lerp(0.88, 0.96, F) × (0.98 + 0.02T)")], { style: "Equation" }),
             p([code("K = round(lerp(10, 6, F))  # candidates to evaluate")], { style: "Equation" }),
 
+            p([tr(`${s(8)}.3.1 Write Exclusion Filter`)], { heading: HeadingLevel.HEADING_3 }),
+
+            p([tr("Memories stored during the current signal processing cycle are excluded from interrupt consideration to prevent self-triggering:")]),
+
+            p([code("write_exclusion_ts ← current_signal.start_timestamp")], { style: "Equation" }),
+            p([code("candidates_eligible ← {c ∈ candidates | c.stored_at < write_exclusion_ts}")], { style: "Equation" }),
+
+            p([tr("This filter is applied before novelty and marginal utility evaluation. All subsequent gate logic operates on candidates_eligible rather than the raw candidate set, ensuring that recently written memories cannot immediately trigger retrieval interrupts regardless of their semantic properties.")]),
+
             p([tr("Boundary-aware override permits lower-threshold interrupts at natural boundaries:")]),
 
             p([code("boundary_mult = lerp(1.3, 2.0, F) × lerp(1.1, 0.9, S)")], { style: "Equation" }),

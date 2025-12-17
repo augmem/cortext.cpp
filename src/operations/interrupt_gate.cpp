@@ -1,13 +1,18 @@
 #include "cortext/operations/interrupt_gate.hpp"
 
 #include "cortext/core/algorithms.hpp"
+#include "cortext/core/knobs.hpp"
 #include "cortext/operations/constants.hpp"
 #include "cortext/processor/operation_context.hpp"
 #include "cortext/processor/processor_context.hpp"
+#include "cortext/store/store.hpp"
 #include <algorithm>
+#include <any>
 #include <cmath>
 #include <limits>
 #include <numeric>
+#include <string>
+#include <unordered_set>
 
 namespace cortext::operations
 {
@@ -29,8 +34,6 @@ constexpr double kDupBase = 0.98;
 constexpr double kDupSlope = 0.02;
 constexpr double kTauMuMin = 0.08;
 constexpr double kTauMuMax = 0.18;
-constexpr double kTauJMinusS = 0.15;
-constexpr double kTauJPlusT = 0.3;
 constexpr double kTauMuMinusS = 0.4;
 constexpr double kTauMuPlusT = 0.4;
 constexpr double kTauRefracMin = 24.0;
@@ -128,11 +131,114 @@ ComputeMniGateDecision::Execute (OperationContext &context, Transaction &tx) con
   const auto &cfg = context.GetConfig ();
 
   // Retrieve candidates (id -> embedding)
-  const auto &candidates = context.GetRetrievedMemoryEmbeddings ();
-  if (candidates.empty ())
+  const auto &raw_candidates = context.GetRetrievedMemoryEmbeddings ();
+  if (raw_candidates.empty ())
     {
       context.SetInterruptAllowed (false);
       // Diagnostics defaults
+      context.SetMniJaccard (constants::kNormalizedMax);
+      context.SetMniBestMu (constants::kNormalizedMin);
+      context.SetMniDupThresh (constants::kNormalizedMin);
+      context.SetMniTauJaccardEff (constants::kNormalizedMin);
+      context.SetMniTauMuEff (constants::kNormalizedMin);
+      return;
+    }
+
+  // Section 8.3.1: Write Exclusion Filter
+  // Filter out candidates stored during the current signal processing cycle
+  // to prevent self-triggering interrupts.
+  Store *store = context.GetStore ();
+  if (!store)
+    {
+      // No store available - cannot perform timestamp filtering.
+      // Deny interrupt to prevent recursive interruptions.
+      context.SetInterruptAllowed (false);
+      context.SetMniJaccard (constants::kNormalizedMax);
+      context.SetMniBestMu (constants::kNormalizedMin);
+      context.SetMniDupThresh (constants::kNormalizedMin);
+      context.SetMniTauJaccardEff (constants::kNormalizedMin);
+      context.SetMniTauMuEff (constants::kNormalizedMin);
+      return;
+    }
+
+  const uint64_t write_exclusion_ts = context.GetSignal ().timestamp;
+
+  // Query created_at timestamps for all candidate IDs
+  std::unordered_map<long long, Eigen::VectorXf> candidates;
+  {
+    // Build IN clause for candidate IDs
+    std::string sql = "SELECT embedding_id, created_at FROM embeddings "
+                      "WHERE embedding_id IN (";
+    std::vector<std::any> params;
+    params.reserve (raw_candidates.size ());
+    bool first = true;
+    for (const auto &kv : raw_candidates)
+      {
+        if (!first)
+          sql += ",";
+        first = false;
+        sql += "?";
+        params.push_back (kv.first);
+      }
+    sql += ")";
+
+    try
+      {
+        auto rows = store->Execute (sql, params);
+
+        // Build set of eligible IDs (created_at < write_exclusion_ts)
+        std::unordered_set<long long> eligible_ids;
+        eligible_ids.reserve (rows.size ());
+        for (const auto &row : rows)
+          {
+            auto it_id = row.find ("embedding_id");
+            auto it_ts = row.find ("created_at");
+            if (it_id == row.end () || it_ts == row.end ())
+              continue;
+            if (it_id->second.type () != typeid (long long))
+              continue;
+
+            const long long id = std::any_cast<long long> (it_id->second);
+            uint64_t created_at = 0;
+            if (it_ts->second.type () == typeid (long long))
+              {
+                created_at
+                    = static_cast<uint64_t> (std::any_cast<long long> (it_ts->second));
+              }
+
+            // Include only if created_at < write_exclusion_ts
+            if (created_at < write_exclusion_ts)
+              {
+                eligible_ids.insert (id);
+              }
+          }
+
+        // Build filtered candidates map
+        for (const auto &kv : raw_candidates)
+          {
+            if (eligible_ids.find (kv.first) != eligible_ids.end ())
+              {
+                candidates.emplace (kv.first, kv.second);
+              }
+          }
+      }
+    catch (...)
+      {
+        // Query failed - deny interrupt to be safe
+        context.SetInterruptAllowed (false);
+        context.SetMniJaccard (constants::kNormalizedMax);
+        context.SetMniBestMu (constants::kNormalizedMin);
+        context.SetMniDupThresh (constants::kNormalizedMin);
+        context.SetMniTauJaccardEff (constants::kNormalizedMin);
+        context.SetMniTauMuEff (constants::kNormalizedMin);
+        return;
+      }
+  }
+
+  // If all candidates were filtered out, deny interrupt
+  if (candidates.empty ())
+    {
+      context.SetInterruptAllowed (false);
       context.SetMniJaccard (constants::kNormalizedMax);
       context.SetMniBestMu (constants::kNormalizedMin);
       context.SetMniDupThresh (constants::kNormalizedMin);
@@ -194,10 +300,8 @@ ComputeMniGateDecision::Execute (OperationContext &context, Transaction &tx) con
                                                  constants::kNormalizedMin,
                                                  constants::kNormalizedMax);
 
-  // Thresholds
-  const double retrieval_thresh = cortext::core::Clamp<double> (
-      context.GetThresholdTDynamic (), constants::kNormalizedMin,
-      constants::kNormalizedMax);
+  // Retrieval threshold (Section 8.1)
+  const double retrieval_thresh = cortext::core::RetrievalThreshold (F);
 
   // Derived weights (raw)
   const double w_cov_raw = cortext::core::Lerp (kCovMin, kCovMax, F);
@@ -212,17 +316,16 @@ ComputeMniGateDecision::Execute (OperationContext &context, Transaction &tx) con
   const double w_red = w_red_raw / total_w;
   const double w_coh = w_coh_raw / total_w;
 
-  // Duplicate suppression and derived thresholds
+  // Duplicate suppression threshold
   const double dup_thresh
       = cortext::core::Lerp (kDupMin, kDupMax, F)
         * (kDupBase + kDupSlope
                             * cortext::core::Clamp<double> (
                                 T, constants::kNormalizedMin,
                                 constants::kNormalizedMax));
-  const double tau_jaccard
-      = cortext::core::Lerp (constants::kGainMedium, constants::kWeightHigh, F)
-        * (constants::kNormalizedMax - kTauJMinusS * S)
-        * (constants::kNormalizedMax + kTauJPlusT * T);
+  // Novelty threshold (Section 8.1)
+  const double tau_novelty = cortext::core::TauNovelty (F, S, T);
+  // MU threshold
   const double tau_mu = cortext::core::Lerp (kTauMuMin, kTauMuMax, F)
                         * (constants::kNormalizedMax - kTauMuMinusS * S)
                         * (constants::kNormalizedMax + kTauMuPlusT * T);
@@ -240,7 +343,7 @@ ComputeMniGateDecision::Execute (OperationContext &context, Transaction &tx) con
   const double M_refrac
       = 1.0 + k_refrac * std::exp (-Delta / std::max (kExpEpsilon, tau_refrac));
 
-  const double tau_j_eff = tau_jaccard * M_refrac;
+  const double tau_novelty_eff = tau_novelty * M_refrac;
   const double tau_m_eff = tau_mu * M_refrac;
 
   // Boundary multiplier
@@ -249,13 +352,53 @@ ComputeMniGateDecision::Execute (OperationContext &context, Transaction &tx) con
         * cortext::core::Lerp (kBoundarySMin, kBoundarySMax, S);
   const bool at_boundary = context.GetAtBoundary ();
 
-  // Iterate candidates and compute MU and overlaps
+  // Limit candidates to top K by relevance (Section 8.3)
+  const int K = cortext::core::InterruptCandidateCount (F);
+
+  std::vector<std::pair<long long, double>> candidate_relevances;
+  candidate_relevances.reserve (candidates.size ());
+  for (const auto &kv : candidates)
+    {
+      const auto &cand = kv.second;
+      if (cand.size () > 0 && cand.size () == ctx_centroid.size ())
+        {
+          const double sim = Clamp01 (CosSim (ctx_centroid, cand));
+          candidate_relevances.emplace_back (kv.first, sim);
+        }
+    }
+
+  const size_t k_size
+      = std::min (static_cast<size_t> (K), candidate_relevances.size ());
+  if (k_size < candidate_relevances.size ())
+    {
+      std::partial_sort (candidate_relevances.begin (),
+                         candidate_relevances.begin ()
+                             + static_cast<ptrdiff_t> (k_size),
+                         candidate_relevances.end (),
+                         [] (const auto &a, const auto &b) {
+                           return a.second > b.second; // descending by relevance
+                         });
+      candidate_relevances.resize (k_size);
+    }
+
+  std::unordered_set<long long> top_k_ids;
+  top_k_ids.reserve (k_size);
+  for (const auto &cr : candidate_relevances)
+    {
+      top_k_ids.insert (cr.first);
+    }
+
+  // Iterate top K candidates and compute MU and overlaps
   double best_mu = -std::numeric_limits<double>::infinity ();
   double max_relevance = 0.0;
   double max_semantic_overlap = 0.0;
 
   for (const auto &kv : candidates)
     {
+      if (top_k_ids.find (kv.first) == top_k_ids.end ())
+        {
+          continue; // Skip candidates not in top K
+        }
       const auto &cand = kv.second;
       if (cand.size () == 0 || cand.size () != ctx_centroid.size ())
         {
@@ -275,40 +418,55 @@ ComputeMniGateDecision::Execute (OperationContext &context, Transaction &tx) con
       max_relevance = std::max (max_relevance, sim_ctx);
     }
 
-  // Compute Jaccard novelty against recent ID LRU if available.
-  // A = candidate IDs; B = recent_ids_lru_ set.
+  // Compute embedding novelty: 1 - max(cos(candidate, ctx_window)) (Section 8.3)
+  double max_embedding_novelty = 0.0;
+  const auto &ctx_window = p_ctx.recent_context_embeddings;
+
+  for (const auto &kv : candidates)
+    {
+      if (top_k_ids.find (kv.first) == top_k_ids.end ())
+        {
+          continue;
+        }
+      const auto &cand = kv.second;
+      if (cand.size () == 0)
+        {
+          continue;
+        }
+
+      // Find maximum cosine similarity to any embedding in context window
+      double max_sim_to_ctx = 0.0;
+      for (const auto &ctx_emb : ctx_window)
+        {
+          if (ctx_emb.size () == cand.size ())
+            {
+              const double sim = CosSim (cand, ctx_emb);
+              max_sim_to_ctx = std::max (max_sim_to_ctx, sim);
+            }
+        }
+
+      // Embedding novelty = 1 - max_similarity
+      const double candidate_novelty = 1.0 - Clamp01 (max_sim_to_ctx);
+      max_embedding_novelty = std::max (max_embedding_novelty, candidate_novelty);
+    }
+
+  // If context window is empty, all candidates are fully novel
+  if (ctx_window.empty ())
+    {
+      max_embedding_novelty = 1.0;
+    }
+
+  // Keep candidate ID list for LRU recording
   std::vector<long long> A;
   A.reserve (candidates.size ());
   for (const auto &kv : candidates)
     {
       A.push_back (kv.first);
     }
-  const auto &Bset = p_ctx.recent_ids_lru_.GetIdSet ();
-  double jaccard = 0.0;
-  if (!A.empty ())
-    {
-      size_t intersection = 0;
-      for (const auto &id : A)
-        {
-          if (Bset.find (id) != Bset.end ())
-            {
-              ++intersection;
-            }
-        }
-      const size_t union_size = A.size () + Bset.size () - intersection;
-      jaccard = (union_size > 0) ? (1.0
-                                    - static_cast<double> (intersection)
-                                          / static_cast<double> (union_size))
-                                 : 0.0;
-    }
-  else
-    {
-      jaccard = 0.0; // empty candidate set -> no novelty
-    }
 
   const bool allow_interrupt
       = (max_relevance >= retrieval_thresh)
-        && ((jaccard >= tau_j_eff) || (best_mu >= tau_m_eff))
+        && ((max_embedding_novelty >= tau_novelty_eff) || (best_mu >= tau_m_eff))
         && (max_semantic_overlap < dup_thresh)
         && (at_boundary || best_mu >= boundary_mult * tau_m_eff);
 
@@ -316,14 +474,14 @@ ComputeMniGateDecision::Execute (OperationContext &context, Transaction &tx) con
   if (allow_interrupt)
     {
       p_ctx.last_interrupt_tick = p_ctx.signals_processed;
-      p_ctx.drift_at_last_interrupt = p_ctx.drift_accum;  // Update drift baseline
+      p_ctx.drift_at_last_interrupt = p_ctx.drift_accum; // Update drift baseline
     }
 
-  // Diagnostics
-  context.SetMniJaccard (jaccard);
+  // Diagnostics (field names unchanged for API compatibility)
+  context.SetMniJaccard (max_embedding_novelty);     // Now stores embedding novelty
   context.SetMniBestMu (best_mu);
   context.SetMniDupThresh (dup_thresh);
-  context.SetMniTauJaccardEff (tau_j_eff);
+  context.SetMniTauJaccardEff (tau_novelty_eff);     // Now stores tau_novelty_eff
   context.SetMniTauMuEff (tau_m_eff);
 
   // Record used and retrieved IDs into the LRU after decision is finalized.

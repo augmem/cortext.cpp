@@ -123,19 +123,12 @@ void ChatWindow::RenderChatTab() {
     ImGui::Separator();
   }
 
-  // Show partial streaming response
-  if (state_.generating && *state_.generating && state_.partial_response && !state_.partial_response->empty()) {
-    ImGui::TextColored(RoleColor("assistant"), "Assistant:");
-    ImGui::SameLine();
-    ImGui::TextWrapped("%s", state_.partial_response->c_str());
-    ImGui::Separator();
-  }
-
-  // Show streaming status
   if (state_.generating && *state_.generating) {
-    std::string status = "Streaming...";
+    int dots = (static_cast<int>(ImGui::GetTime() / 0.4) % 3) + 1;
+    std::string status = "generating" + std::string(dots, '.');
     if (state_.generation_restarts && *state_.generation_restarts > 0) {
-      status += " (restarted " + std::to_string(*state_.generation_restarts) + "x with new context)";
+      status += " (restarted " + std::to_string(*state_.generation_restarts) +
+                "x with new context)";
     }
     ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.3f, 1.0f), "%s", status.c_str());
   }
