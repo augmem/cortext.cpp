@@ -175,6 +175,68 @@ TEST_CASE ("Alg21 inhibits near losers but not distant ones",
   }
 }
 
+TEST_CASE ("Alg21 RIF recovery UPDATE does not violate NOT NULL constraint",
+           "[operations][competition][rif_state]")
+{
+  auto unique_store = cortext::SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<cortext::Store> (std::move (unique_store));
+
+  SignalProcessor::Config cfg;
+  cfg.focus = 1.0;
+  cfg.sensitivity = 1.0;
+  cfg.stability = 0.5;
+
+  const Eigen::VectorXf ctx = Make256DEmb ({ { 0, 1.0f } });
+  const Eigen::VectorXf w1 = Make256DEmb ({ { 0, 0.99f }, { 1, 0.05f } });
+  const Eigen::VectorXf w2 = Make256DEmb ({ { 0, 0.98f }, { 1, 0.06f } });
+  const Eigen::VectorXf w3 = Make256DEmb ({ { 0, 0.95f }, { 1, 0.10f } });
+  const Eigen::VectorXf loser = Make256DEmb ({ { 0, 0.88f }, { 1, 0.47f } });
+
+  std::unordered_map<long long, Eigen::VectorXf> retrieved{
+    { 1LL, w1 }, { 2LL, w2 }, { 3LL, w3 }, { 4LL, loser }
+  };
+
+  {
+    auto seed = std::make_unique<SeedEmbeddingsOp> (retrieved);
+    auto setup = std::make_unique<SetupCompetitionInputsOp> (ctx, retrieved);
+    auto apply = std::make_unique<ApplyRetrievalCompetition> ();
+    auto pipeline = std::make_unique<OperationSet> (
+        std::move (seed), std::move (setup), std::move (apply));
+    SignalProcessor processor (cfg, store, std::move (pipeline));
+    processor.Process (MakeSignal (ctx, /*ts=*/1000));
+    processor.Flush ();
+  }
+
+  auto rif_rows
+      = store->Execute ("SELECT embedding_id, suppression FROM rif_state");
+  REQUIRE (rif_rows.size () >= 1);
+  for (const auto &row : rif_rows)
+    {
+      REQUIRE (row.count ("suppression") == 1);
+      const double supp = std::any_cast<double> (row.at ("suppression"));
+      REQUIRE (supp >= 0.0);
+    }
+
+  {
+    auto setup = std::make_unique<SetupCompetitionInputsOp> (ctx, retrieved);
+    auto apply = std::make_unique<ApplyRetrievalCompetition> ();
+    auto pipeline
+        = std::make_unique<OperationSet> (std::move (setup), std::move (apply));
+    SignalProcessor processor (cfg, store, std::move (pipeline));
+    REQUIRE_NOTHROW (processor.Process (MakeSignal (ctx, /*ts=*/2000)));
+    processor.Flush ();
+  }
+
+  rif_rows
+      = store->Execute ("SELECT embedding_id, suppression FROM rif_state");
+  for (const auto &row : rif_rows)
+    {
+      REQUIRE (row.count ("suppression") == 1);
+      const double supp = std::any_cast<double> (row.at ("suppression"));
+      REQUIRE (supp >= 0.0);
+    }
+}
+
 TEST_CASE ("Alg21 recovery restores strength over time",
            "[operations][competition][recovery]")
 {

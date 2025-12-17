@@ -108,7 +108,7 @@ ApplyRIFRecovery (Transaction &tx, long long now_ts, double recovery_time)
               "    END"
               "  ))), "
               "    ts = ?;",
-              { now_ts, recovery_time, now_ts, recovery_time, now_ts });
+              { now_ts, now_ts, recovery_time, now_ts, recovery_time, now_ts });
 }
 
 struct Candidate
