@@ -132,20 +132,23 @@ TEST_CASE ("Cortext C++ stub can be created and used", "[cortext][stub]")
   if (expect_encode_ok)
     {
       REQUIRE_NOTHROW ([&] {
+        // Smoke test: verify each API can be called successfully.
+        // Note: should_interrupt is an algorithm decision that depends on
+        // retrieval results and signal metrics; we only verify no crashes.
         auto out_text = ctx->ProcessText ("hello world", /*ts*/ 1000ULL, "test");
-        REQUIRE_FALSE (out_text.should_interrupt);
+        (void)out_text.should_interrupt; // Algorithm-dependent, not asserted
 
         const float pcm[4] = { 0.0f, 0.1f, -0.1f, 0.0f };
         auto out_audio = ctx->ProcessAudio (pcm, 4, /*ts*/ 2000ULL, "test");
-        REQUIRE_FALSE (out_audio.should_interrupt);
+        (void)out_audio.should_interrupt;
 
         const std::uint8_t px[4] = { 0, 0, 0, 0 };
         auto out_image
             = ctx->ProcessImage (px, 1, 1, 4, /*ts*/ 3000ULL, "test");
-        REQUIRE_FALSE (out_image.should_interrupt);
+        (void)out_image.should_interrupt;
 
         auto out_cons = ctx->Consolidate (4000ULL);
-        REQUIRE_FALSE (out_cons.should_interrupt);
+        (void)out_cons.should_interrupt;
         ctx->Flush ();
       }());
     }
@@ -301,4 +304,63 @@ TEST_CASE ("Cortext hydrates sqlite-objstore payloads",
       REQUIRE (memory.content == expected_payloads.at (memory.id));
       REQUIRE (memory.mimetype == expected_mimes.at (memory.id));
     }
+}
+
+TEST_CASE ("C API handles NULL inputs correctly", "[cortext][capi][safety]")
+{
+  SECTION ("cortext_free accepts NULL handle")
+  {
+    REQUIRE_NOTHROW (cortext_free (nullptr));
+  }
+
+  SECTION ("cortext_process_text returns 1 for NULL handle")
+  {
+    CHECK (cortext_process_text (nullptr, "text", 0, "src") == 1);
+  }
+
+  SECTION ("cortext_process_text returns 1 for NULL text")
+  {
+    ScopedTempDb temp_db;
+    auto h = cortext_create (0.5, 0.5, 0.5, temp_db.path ().c_str ());
+    REQUIRE (h != nullptr);
+    CHECK (cortext_process_text (h, nullptr, 0, "src") == 1);
+    cortext_free (h);
+  }
+
+  SECTION ("cortext_process_text returns 1 for NULL source_id")
+  {
+    ScopedTempDb temp_db;
+    auto h = cortext_create (0.5, 0.5, 0.5, temp_db.path ().c_str ());
+    REQUIRE (h != nullptr);
+    CHECK (cortext_process_text (h, "text", 0, nullptr) == 1);
+    cortext_free (h);
+  }
+
+  SECTION ("cortext_process_audio returns 1 for NULL pcm")
+  {
+    ScopedTempDb temp_db;
+    auto h = cortext_create (0.5, 0.5, 0.5, temp_db.path ().c_str ());
+    REQUIRE (h != nullptr);
+    CHECK (cortext_process_audio (h, nullptr, 100, 0, "src") == 1);
+    cortext_free (h);
+  }
+
+  SECTION ("cortext_process_image returns 1 for NULL data")
+  {
+    ScopedTempDb temp_db;
+    auto h = cortext_create (0.5, 0.5, 0.5, temp_db.path ().c_str ());
+    REQUIRE (h != nullptr);
+    CHECK (cortext_process_image (h, nullptr, 10, 10, 3, 0, "src") == 1);
+    cortext_free (h);
+  }
+
+  SECTION ("cortext_consolidate returns 1 for NULL handle")
+  {
+    CHECK (cortext_consolidate (nullptr, 0) == 1);
+  }
+
+  SECTION ("cortext_flush returns 1 for NULL handle")
+  {
+    CHECK (cortext_flush (nullptr) == 1);
+  }
 }

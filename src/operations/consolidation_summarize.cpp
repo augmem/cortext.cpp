@@ -6,6 +6,7 @@
 #include "cortext/core/utils.hpp"
 #include "cortext/operations/extraction.hpp"
 #include "cortext/processor/operation_context.hpp"
+#include "cortext/store/schema_helpers.hpp"
 #include "cortext/store/store.hpp"
 #include "cortext/summarizer/summarizer.hpp"
 #include <any>
@@ -130,10 +131,10 @@ ConsolidationSummarize::Execute (OperationContext &context) const
         {
           // Query embedding and blob_id for this memory.
           auto rows = store->Execute (
-              "SELECT ve.embedding, m.blob_id "
-              "FROM vec_embeddings ve "
-              "LEFT JOIN memories m ON ve.embedding_id = m.embedding_id "
-              "WHERE ve.embedding_id = ?",
+              "SELECT e.embedding, m.blob_id "
+              "FROM embeddings e "
+              "LEFT JOIN memories m ON e.embedding_id = m.embedding_id "
+              "WHERE e.embedding_id = ?",
               { emb_id });
 
           if (rows.empty ())
@@ -233,19 +234,23 @@ ConsolidationSummarize::Execute (OperationContext &context) const
                     { summary_id, emb_id });
         }
 
-      // 5. Create vec_embeddings entry for centroid.
+      // 5. Create embeddings entry for centroid.
       // Get next embedding_id via MAX + 1.
-      AddWrite (context,
-                "INSERT INTO vec_embeddings(embedding_id, embedding) "
-                "SELECT COALESCE(MAX(embedding_id), 0) + 1, ? "
-                "FROM vec_embeddings",
-                { centroid_blob });
+      // Note: sqlite-vec doesn't support DEFAULT values, so we must set all fields
+      const std::string centroid_sql
+          = std::string ("INSERT INTO embeddings(embedding_id, embedding, type, ")
+            + "strength, use_frequency, stability, connectivity, drift_mag, "
+            + "influence, sustained_influence, contextual_gain, redundancy, "
+            + "pre_activation, lability_state, suppression_count) "
+            + "SELECT COALESCE(MAX(embedding_id), 0) + 1, ?, "
+            + store::kEmbeddingsCentroidDefaults + " FROM embeddings";
+      AddWrite (context, centroid_sql, { centroid_blob });
 
-      // 6. Update cluster_id in embeddings_meta for source embeddings.
+      // 6. Update cluster_id in embeddings for source embeddings.
       for (long long emb_id : cluster.embedding_ids)
         {
           AddWrite (context,
-                    "UPDATE embeddings_meta SET cluster_id = ? "
+                    "UPDATE embeddings SET cluster_id = ? "
                     "WHERE embedding_id = ?",
                     { cluster.cluster_id, emb_id });
         }

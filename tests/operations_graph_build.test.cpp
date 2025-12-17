@@ -141,7 +141,7 @@ TEST_CASE ("Alg30 builds nodes and edges from extraction outputs",
   }
 }
 
-// Helper to encode float vector as blob for vec_embeddings
+// Helper to encode float vector as blob for embeddings
 namespace
 {
 constexpr int kTestEmbeddingDim = 256;
@@ -189,27 +189,45 @@ TEST_CASE ("Phase4: co-occurrence edges are created for similar embeddings",
                   "  embedding_id INTEGER PRIMARY KEY,"
                   "  timestamp INTEGER"
                   ");");
-  store->Execute ("CREATE TABLE IF NOT EXISTS embeddings_meta ("
-                  "  embedding_id INTEGER PRIMARY KEY,"
-                  "  created_at INTEGER"
-                  ");");
 
-  // Create vec_embeddings table (simplified for testing)
-  store->Execute ("CREATE TABLE IF NOT EXISTS vec_embeddings ("
-                  "  embedding_id INTEGER PRIMARY KEY,"
-                  "  embedding BLOB"
+  // Create unified embeddings table using vec0
+  store->Execute ("CREATE VIRTUAL TABLE IF NOT EXISTS embeddings USING vec0("
+                  "embedding_id INTEGER PRIMARY KEY,"
+                  "embedding float[256],"
+                  "+type text,"
+                  "+strength float,"
+                  "+use_frequency float,"
+                  "+stability float,"
+                  "+connectivity float,"
+                  "+drift_mag float,"
+                  "+influence float,"
+                  "+sustained_influence float,"
+                  "+contextual_gain float,"
+                  "+redundancy float,"
+                  "+pre_activation float,"
+                  "+lability_state float,"
+                  "+suppression_count integer,"
+                  "+cluster_id integer,"
+                  "+last_access integer,"
+                  "+created_at integer"
                   ");");
 
   // Create two similar 256D embeddings (high cosine similarity > 0.85)
   auto emb1 = Make256DEmb ({ 1.0f, 0.0f, 0.0f, 0.0f }); // Normalized direction
   auto emb2 = Make256DEmb ({ 0.95f, 0.05f, 0.0f, 0.0f }); // Similar direction
-  auto blob1 = EncodeFloatBlob (emb1);
-  auto blob2 = EncodeFloatBlob (emb2);
 
-  store->Execute ("INSERT INTO vec_embeddings (embedding_id, embedding) VALUES (?, ?)",
-                  { 1LL, blob1 });
-  store->Execute ("INSERT INTO vec_embeddings (embedding_id, embedding) VALUES (?, ?)",
-                  { 2LL, blob2 });
+  store->Execute ("INSERT INTO embeddings (embedding_id, embedding, type, strength, "
+                  "use_frequency, stability, connectivity, drift_mag, influence, "
+                  "sustained_influence, contextual_gain, redundancy, pre_activation, "
+                  "lability_state, suppression_count) VALUES (?, ?, 'memory', 1.0, 0.0, "
+                  "1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0)",
+                  { 1LL, emb1 });
+  store->Execute ("INSERT INTO embeddings (embedding_id, embedding, type, strength, "
+                  "use_frequency, stability, connectivity, drift_mag, influence, "
+                  "sustained_influence, contextual_gain, redundancy, pre_activation, "
+                  "lability_state, suppression_count) VALUES (?, ?, 'memory', 1.0, 0.0, "
+                  "1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0)",
+                  { 2LL, emb2 });
 
   // Create consolidation data
   store->Execute ("INSERT INTO consolidation_summaries (summary_id, summary_text, "
@@ -266,25 +284,45 @@ TEST_CASE ("Phase4: causal edges are created for temporal drift",
                   "  embedding_id INTEGER PRIMARY KEY,"
                   "  timestamp INTEGER"
                   ");");
-  store->Execute ("CREATE TABLE IF NOT EXISTS embeddings_meta ("
-                  "  embedding_id INTEGER PRIMARY KEY,"
-                  "  created_at INTEGER"
-                  ");");
-  store->Execute ("CREATE TABLE IF NOT EXISTS vec_embeddings ("
-                  "  embedding_id INTEGER PRIMARY KEY,"
-                  "  embedding BLOB"
+
+  // Create unified embeddings table using vec0
+  store->Execute ("CREATE VIRTUAL TABLE IF NOT EXISTS embeddings USING vec0("
+                  "embedding_id INTEGER PRIMARY KEY,"
+                  "embedding float[256],"
+                  "+type text,"
+                  "+strength float,"
+                  "+use_frequency float,"
+                  "+stability float,"
+                  "+connectivity float,"
+                  "+drift_mag float,"
+                  "+influence float,"
+                  "+sustained_influence float,"
+                  "+contextual_gain float,"
+                  "+redundancy float,"
+                  "+pre_activation float,"
+                  "+lability_state float,"
+                  "+suppression_count integer,"
+                  "+cluster_id integer,"
+                  "+last_access integer,"
+                  "+created_at integer"
                   ");");
 
   // Create two 256D embeddings with significant drift (L2 distance > 0.35)
   auto emb1 = Make256DEmb ({ 1.0f, 0.0f, 0.0f, 0.0f });
   auto emb2 = Make256DEmb ({ 0.5f, 0.5f, 0.5f, 0.0f }); // Different direction
-  auto blob1 = EncodeFloatBlob (emb1);
-  auto blob2 = EncodeFloatBlob (emb2);
 
-  store->Execute ("INSERT INTO vec_embeddings (embedding_id, embedding) VALUES (?, ?)",
-                  { 1LL, blob1 });
-  store->Execute ("INSERT INTO vec_embeddings (embedding_id, embedding) VALUES (?, ?)",
-                  { 2LL, blob2 });
+  store->Execute ("INSERT INTO embeddings (embedding_id, embedding, type, strength, "
+                  "use_frequency, stability, connectivity, drift_mag, influence, "
+                  "sustained_influence, contextual_gain, redundancy, pre_activation, "
+                  "lability_state, suppression_count) VALUES (?, ?, 'memory', 1.0, 0.0, "
+                  "1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0)",
+                  { 1LL, emb1 });
+  store->Execute ("INSERT INTO embeddings (embedding_id, embedding, type, strength, "
+                  "use_frequency, stability, connectivity, drift_mag, influence, "
+                  "sustained_influence, contextual_gain, redundancy, pre_activation, "
+                  "lability_state, suppression_count) VALUES (?, ?, 'memory', 1.0, 0.0, "
+                  "1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0)",
+                  { 2LL, emb2 });
 
   // Add timestamps for temporal ordering
   store->Execute ("INSERT INTO memories (embedding_id, timestamp) VALUES (?, ?)",

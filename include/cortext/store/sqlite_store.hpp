@@ -13,6 +13,16 @@
 namespace cortext
 {
 
+/// @brief Configuration options for SQLite connection.
+struct SQLiteConfig
+{
+  bool enable_wal = true;           ///< Use WAL journal mode (file DBs only)
+  int busy_timeout_ms = 5000;       ///< Wait time on SQLITE_BUSY (ms)
+  bool enable_foreign_keys = true;  ///< Enforce foreign key constraints
+  int synchronous = 1;              ///< NORMAL (1), FULL (2), OFF (0)
+  int cache_size_kb = 2048;         ///< Cache size in KB (negative for KB)
+};
+
 // Forward declaration
 class SQLiteStore;
 
@@ -30,7 +40,7 @@ public:
   SQLiteTransaction (SQLiteStore *store,
                      SQLiteTransaction *parent_transaction);
 
-  ~SQLiteTransaction () override = default;
+  ~SQLiteTransaction () override;
 
   /// @brief Begin a nested transaction using a savepoint.
   /// @return A unique pointer to the new transaction.
@@ -80,10 +90,12 @@ private:
 class SQLiteConnection
 {
 public:
-  /// @brief Construct a SQLite connection.
+  /// @brief Construct a SQLite connection with configuration.
   /// @param database_path Path to the database file, or ":memory:"
   /// for in-memory database.
-  explicit SQLiteConnection (const std::string &database_path = ":memory:");
+  /// @param config Configuration options for the connection.
+  explicit SQLiteConnection (const std::string &database_path = ":memory:",
+                             const SQLiteConfig &config = SQLiteConfig{});
   ~SQLiteConnection ();
 
   // Delete copy operations
@@ -118,12 +130,21 @@ private:
 class SQLiteStore : public Store
 {
 public:
+  /// @brief WAL status information.
+  struct WalStatus
+  {
+    int wal_pages;     ///< Number of pages in WAL file.
+    int checkpointed;  ///< Number of pages checkpointed.
+  };
+
   /// @brief Create a SQLiteStore with a new database connection.
   /// @param database_path Path to the database file, or ":memory:"
   /// for in-memory database.
+  /// @param config Configuration options for the connection.
   /// @return A unique pointer to the SQLiteStore.
-  static std::unique_ptr<SQLiteStore> Create (const std::string &database_path
-                                              = ":memory:");
+  static std::unique_ptr<SQLiteStore> Create (
+      const std::string &database_path = ":memory:",
+      const SQLiteConfig &config = SQLiteConfig{});
 
   /// @brief Constructor taking ownership of connection.
   /// @param connection A unique pointer to the SQLite connection.
@@ -151,6 +172,20 @@ public:
 
   /// @brief Close the database connection.
   void Close () override;
+
+  /// @brief Trigger WAL checkpoint.
+  /// @param full If true, use RESTART mode (waits for readers);
+  /// otherwise PASSIVE (non-blocking).
+  void Checkpoint (bool full = false);
+
+  /// @brief Get WAL status information.
+  /// @return WAL status with page counts.
+  WalStatus GetWalStatus () const;
+
+  /// @brief Unregister a transaction from the transaction stack.
+  /// Called by SQLiteTransaction destructor to prevent dangling pointers.
+  /// @param tx Pointer to the transaction to unregister.
+  void UnregisterTransaction (SQLiteTransaction *tx);
 
 private:
   std::unique_ptr<SQLiteConnection> connection_;

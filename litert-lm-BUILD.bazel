@@ -1,22 +1,35 @@
-# Custom Bazel target for Cortext - exports ALL C++ API symbols
-# This file is copied to BUILD.cortext in litert-lm root by build_litert.sh
+# Custom Bazel target for Cortext - exports only litert::lm API symbols
+# This file is appended to the LiteRT-LM BUILD file by cmake/litert_append_build.cmake
 #
-# Unlike the default litert_lm_shared which filters to only C API symbols,
-# this builds a shared library with all symbols exported for C++ consumers.
+# Uses -exported_symbols_list to hide internal dependencies (like protobuf)
+# that would conflict with system libraries (e.g., OpenTelemetry OTLP).
 
 load("@rules_cc//cc:defs.bzl", "cc_binary")
 
-# C++ shared library that exports all symbols (no -exported_symbol filtering)
+# Exported symbols list file (copied by cmake/litert_append_build.cmake)
+exports_files(["litert-exported-symbols.txt"])
+
+# C++ shared library with controlled symbol exports
 # Uses cc_binary with linkshared=True to create a .so/.dylib
 #
-# Key difference from litert_lm_shared: NO symbol filtering flags
-# This exports all C++ symbols including litert::lm::Engine, etc.
+# On macOS: Uses -exported_symbols_list to hide protobuf symbols
+# On Linux: Uses version script to hide protobuf symbols
 cc_binary(
     name = "liblitert_lm_cpp.so",
     deps = [
         "//runtime/engine:litert_lm_lib",
     ],
     linkshared = True,
-    # NO exported_symbol filtering - exports everything
+    linkopts = select({
+        "@platforms//os:macos": [
+            "-Wl,-exported_symbols_list,$(location :litert-exported-symbols.txt)",
+        ],
+        "@platforms//os:linux": [
+            # Linux uses version script (TODO: create litert-version-script.map)
+            # "-Wl,--version-script=$(location :litert-version-script.map)",
+        ],
+        "//conditions:default": [],
+    }),
+    additional_linker_inputs = [":litert-exported-symbols.txt"],
     visibility = ["//visibility:public"],
 )

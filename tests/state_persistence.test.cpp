@@ -89,7 +89,6 @@ TEST_CASE ("State persistence tables are created", "[state_persistence][schema]"
   {
     REQUIRE (has ("episodes"));
     REQUIRE (has ("signal_metrics"));
-    REQUIRE (has ("generation_trace"));
   }
 
   SECTION ("Migration 5 tables exist")

@@ -182,13 +182,52 @@ FetchResultRow (sqlite3_stmt *stmt, std::map<std::string, std::any> &row)
 } // namespace
 
 // SQLiteConnection implementation
-SQLiteConnection::SQLiteConnection (const std::string &database_path)
+SQLiteConnection::SQLiteConnection (const std::string &database_path,
+                                    const SQLiteConfig &config)
     : connection_ (nullptr)
 {
   if (sqlite3_open (database_path.c_str (), &connection_) != SQLITE_OK)
     {
       throw StoreError ("Failed to open database: "
                         + std::string (sqlite3_errmsg (connection_)));
+    }
+
+  // Set busy timeout for concurrent access handling
+  sqlite3_busy_timeout (connection_, config.busy_timeout_ms);
+
+  // Helper to execute PRAGMA statements
+  auto exec_pragma = [this] (const std::string &pragma) {
+    char *errmsg = nullptr;
+    int rc
+        = sqlite3_exec (connection_, pragma.c_str (), nullptr, nullptr, &errmsg);
+    if (rc != SQLITE_OK)
+      {
+        std::string msg = errmsg ? errmsg : "Unknown error";
+        sqlite3_free (errmsg);
+        throw StoreError ("PRAGMA failed: " + msg);
+      }
+  };
+
+  // Enable WAL mode for file databases (not :memory:)
+  if (config.enable_wal && database_path != ":memory:")
+    {
+      exec_pragma ("PRAGMA journal_mode = WAL");
+    }
+
+  // Set synchronous mode (NORMAL by default for WAL)
+  exec_pragma ("PRAGMA synchronous = " + std::to_string (config.synchronous));
+
+  // Enable foreign key constraints
+  if (config.enable_foreign_keys)
+    {
+      exec_pragma ("PRAGMA foreign_keys = ON");
+    }
+
+  // Set cache size (negative value = KB)
+  if (config.cache_size_kb > 0)
+    {
+      exec_pragma ("PRAGMA cache_size = -"
+                   + std::to_string (config.cache_size_kb));
     }
 }
 
@@ -226,6 +265,38 @@ SQLiteTransaction::SQLiteTransaction (SQLiteStore *store)
     : store_ (store), parent_transaction_ (nullptr), savepoint_name_ (),
       is_committed_ (false), is_rolled_back_ (false)
 {
+}
+
+SQLiteTransaction::~SQLiteTransaction ()
+{
+  // If transaction was not finished, rollback to clean up
+  if (store_ && !is_committed_ && !is_rolled_back_)
+    {
+      try
+        {
+          // For nested transactions with savepoints, rollback the savepoint
+          if (!savepoint_name_.empty ())
+            {
+              store_->ExecuteDirect ("ROLLBACK TO SAVEPOINT " + savepoint_name_);
+            }
+          // For root transactions, rollback the entire transaction
+          else if (store_->in_transaction_)
+            {
+              store_->ExecuteDirect ("ROLLBACK");
+              store_->in_transaction_ = false;
+            }
+        }
+      catch (...)
+        {
+          // Ignore errors during cleanup - we're in a destructor
+        }
+    }
+
+  // Unregister from store to prevent dangling pointer in transaction_stack_
+  if (store_)
+    {
+      store_->UnregisterTransaction (this);
+    }
 }
 
 SQLiteTransaction::SQLiteTransaction (SQLiteStore *store,
@@ -315,9 +386,10 @@ SQLiteTransaction::Rollback ()
 
 // SQLiteStore implementation
 std::unique_ptr<SQLiteStore>
-SQLiteStore::Create (const std::string &database_path)
+SQLiteStore::Create (const std::string &database_path,
+                     const SQLiteConfig &config)
 {
-  auto connection = std::make_unique<SQLiteConnection> (database_path);
+  auto connection = std::make_unique<SQLiteConnection> (database_path, config);
   return std::make_unique<SQLiteStore> (std::move (connection));
 }
 
@@ -342,16 +414,19 @@ std::vector<std::map<std::string, std::any> >
 SQLiteStore::Execute (const std::string &query,
                       const std::vector<std::any> &params)
 {
-  if (!transaction_stack_.empty ())
+  // Clean up any finished transactions from the stack
+  while (!transaction_stack_.empty ())
     {
-      // Use the current (topmost) active transaction
-      auto &current_tx = transaction_stack_.back ();
-      if (!current_tx->IsFinished ())
+      auto *current_tx = transaction_stack_.back ();
+      if (current_tx && !current_tx->IsFinished ())
         {
+          // Found an active transaction, use it
           return current_tx->Execute (query, params);
         }
-      // Transaction is finished, execute directly
+      // Transaction is finished or null, remove it and check next
+      transaction_stack_.pop_back ();
     }
+  // No active transactions, execute directly
   return ExecuteDirect (query, params);
 }
 
@@ -555,6 +630,46 @@ SQLiteStore::Close ()
   // The connection is automatically closed by the RAII wrapper when destroyed
   // The store doesn't own the connection lifecycle in the same way as Python,
   // but the RAII wrapper ensures proper cleanup
+}
+
+void
+SQLiteStore::Checkpoint (bool full)
+{
+  const int mode
+      = full ? SQLITE_CHECKPOINT_RESTART : SQLITE_CHECKPOINT_PASSIVE;
+  int wal_log = 0;
+  int wal_ckpt = 0;
+  int rc = sqlite3_wal_checkpoint_v2 (connection_->GetConnection (), nullptr,
+                                      mode, &wal_log, &wal_ckpt);
+
+  // SQLITE_OK = success, SQLITE_BUSY = couldn't complete (acceptable for PASSIVE)
+  if (rc != SQLITE_OK && rc != SQLITE_BUSY)
+    {
+      throw StoreError (
+          "Checkpoint failed: "
+          + std::string (sqlite3_errmsg (connection_->GetConnection ())));
+    }
+}
+
+SQLiteStore::WalStatus
+SQLiteStore::GetWalStatus () const
+{
+  int wal_log = 0;
+  int wal_ckpt = 0;
+  // Use PASSIVE mode to get status without blocking
+  sqlite3_wal_checkpoint_v2 (connection_->GetConnection (), nullptr,
+                             SQLITE_CHECKPOINT_PASSIVE, &wal_log, &wal_ckpt);
+  return { wal_log, wal_ckpt };
+}
+
+void
+SQLiteStore::UnregisterTransaction (SQLiteTransaction *tx)
+{
+  auto it = std::find (transaction_stack_.begin (), transaction_stack_.end (), tx);
+  if (it != transaction_stack_.end ())
+    {
+      transaction_stack_.erase (it);
+    }
 }
 
 } // namespace cortext

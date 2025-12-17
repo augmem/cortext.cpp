@@ -32,7 +32,7 @@ UpdateMemoryStrength::Execute (OperationContext &context) const
   // instruction after this operation reflects the latest reinforcement UPDATE.
   {
     BufferedWriteInstruction op;
-    op.query = "DELETE FROM embeddings_meta WHERE strength < ?";
+    op.query = "DELETE FROM embeddings WHERE strength < ?";
     op.params = { cutoff };
     context.AddWriteInstruction (std::move (op));
   }
@@ -52,16 +52,17 @@ UpdateMemoryStrength::Execute (OperationContext &context) const
           const long long ts
               = static_cast<long long> (context.GetSignal ().timestamp);
 
-          // Insert into embeddings_meta for strength/frequency columns
+          // Ensure embeddings row has default values for strength/frequency columns
+          // (embeddings table already exists from storage, update if needed)
           BufferedWriteInstruction op;
-          op.query = "INSERT INTO embeddings_meta "
-                     "(embedding_id, strength, contextual_gain, use_frequency, "
-                     "lability_state, last_strength_update_ts) "
-                     "SELECT ?, 1.0, 0.0, 0.0, 0.0, ? "
-                     "WHERE NOT EXISTS (SELECT 1 FROM "
-                     "embeddings_meta WHERE "
-                     "embedding_id = ?)";
-          op.params = { id, ts, id };
+          op.query = "UPDATE embeddings "
+                     "SET strength = COALESCE(strength, 1.0), "
+                     "    contextual_gain = COALESCE(contextual_gain, 0.0), "
+                     "    use_frequency = COALESCE(use_frequency, 0.0), "
+                     "    lability_state = COALESCE(lability_state, 0.0), "
+                     "    last_access = COALESCE(last_access, ?) "
+                     "WHERE embedding_id = ?";
+          op.params = { ts, id };
           context.AddWriteInstruction (std::move (op));
 
           // Insert into memory_feedback for count columns
@@ -105,19 +106,19 @@ UpdateMemoryStrength::Execute (OperationContext &context) const
         op_mf.params = { used_flag, used_flag, ts, id };
         context.AddWriteInstruction (std::move (op_mf));
 
-        // Then, update embeddings_meta for strength/frequency columns
+        // Then, update embeddings for strength/frequency columns
         // Use subquery to get retrieved_count and used_count from memory_feedback
         // Algorithm 14: Apply exponential decay with half-life semantics
         // strength_t = strength_{t-1} × exp(-λ × Δt) + S × use_frequency + F × influence
         BufferedWriteInstruction op_em;
         op_em.query
-            = "UPDATE embeddings_meta "
+            = "UPDATE embeddings "
               "SET "
               "  contextual_gain = contextual_gain + ?, "
               "  use_frequency = (1.0 - ?) * use_frequency + ? * ?, "
               "  strength = MAX(0.0, "
               // Exponential decay: strength × exp(-λ × Δt) where Δt is seconds
-              "    strength * exp(-? * MAX(0.0, ? - COALESCE(last_strength_update_ts, ?)) / 1000.0) "
+              "    strength * exp(-? * MAX(0.0, ? - COALESCE(last_access, ?)) / 1000.0) "
               "    + (? * ((1.0 - ?) * use_frequency + ? * ?)) " // reinforcement (S × EWMA)
               "    + (? * (? * ((" // influence gate * F * ((
               "           (CASE WHEN ? < -1.0 THEN -1.0 "
@@ -128,7 +129,7 @@ UpdateMemoryStrength::Execute (OperationContext &context) const
               "                   THEN 1 ELSE COALESCE((SELECT retrieved_count FROM memory_feedback WHERE embedding_id = ?), 1) END)"
               "           + 1.0) / 2.0))) " // map01: (influence_factor + 1) / 2
               "  ), "
-              "  last_strength_update_ts = ? "
+              "  last_access = ? "
               "WHERE embedding_id = ?";
         // Placeholders order:
         //  1: cg_event  (contextual_gain += ?)
@@ -137,7 +138,7 @@ UpdateMemoryStrength::Execute (OperationContext &context) const
         //  4: used_flag
         //  5: lambda (for exp decay)
         //  6: ts (current timestamp)
-        //  7: ts (fallback if last_strength_update_ts is NULL)
+        //  7: ts (fallback if last_access is NULL)
         //  8: S
         //  9: alpha
         //  10: alpha
@@ -150,7 +151,7 @@ UpdateMemoryStrength::Execute (OperationContext &context) const
         //  17: id (for used_count subquery)
         //  18: id (for retrieved_count subquery check)
         //  19: id (for retrieved_count subquery value)
-        //  20: ts (for updating last_strength_update_ts)
+        //  20: ts (for updating last_access)
         //  21: id (WHERE)
         op_em.params = { cg_event, alpha,          alpha,    used_flag,
                          lambda,   ts,             ts,       S,

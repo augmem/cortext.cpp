@@ -418,3 +418,363 @@ TEST_CASE ("Large dataset handling", "[store]")
     REQUIRE (std::any_cast<long long> (paged_results[9].at ("id")) == 10LL);
   }
 }
+
+TEST_CASE ("Transaction lifecycle safety", "[store][safety]")
+{
+  auto store = cortext::SQLiteStore::Create (":memory:");
+  store->Execute ("CREATE TABLE test (id INTEGER PRIMARY KEY, value TEXT)", {});
+
+  SECTION ("Transaction destruction removes from stack")
+  {
+    // Create and immediately destroy a transaction
+    {
+      auto tx = store->Begin ();
+      tx->Execute ("INSERT INTO test (value) VALUES (?)", { "temp" });
+      // tx destroyed here without commit - should unregister from stack
+    }
+
+    // Store should still work after orphaned transaction destruction
+    REQUIRE_NOTHROW (store->Execute ("SELECT 1", {}));
+
+    // New transaction should work normally
+    auto tx2 = store->Begin ();
+    tx2->Execute ("INSERT INTO test (value) VALUES (?)", { "after" });
+    tx2->Commit ();
+
+    auto results = store->Execute ("SELECT value FROM test", {});
+    // Only "after" should be present (temp was rolled back implicitly)
+    REQUIRE (results.size () == 1);
+    REQUIRE (std::any_cast<std::string> (results[0].at ("value")) == "after");
+  }
+
+  SECTION ("Nested transaction destroyed before parent")
+  {
+    auto outer = store->Begin ();
+    outer->Execute ("INSERT INTO test (value) VALUES (?)", { "outer" });
+
+    {
+      auto inner = outer->Begin ();
+      inner->Execute ("INSERT INTO test (value) VALUES (?)", { "inner" });
+      // inner destroyed here without commit
+    }
+
+    // Outer transaction should still work
+    REQUIRE_NOTHROW (
+        outer->Execute ("INSERT INTO test (value) VALUES (?)", { "after_inner" }));
+    outer->Commit ();
+
+    auto results
+        = store->Execute ("SELECT value FROM test ORDER BY id", {});
+    // Should have outer and after_inner (inner was implicitly rolled back)
+    REQUIRE (results.size () == 2);
+  }
+
+  SECTION ("Execute after transaction destruction uses direct execution")
+  {
+    {
+      auto tx = store->Begin ();
+      tx->Execute ("INSERT INTO test (value) VALUES (?)", { "in_tx" });
+      tx->Commit ();
+    }
+
+    // After transaction is destroyed and committed, Execute should work directly
+    auto results = store->Execute ("SELECT COUNT(*) as cnt FROM test", {});
+    REQUIRE (std::any_cast<long long> (results[0].at ("cnt")) == 1LL);
+  }
+
+  SECTION ("Multiple transaction create-destroy cycles")
+  {
+    for (int i = 0; i < 10; ++i)
+      {
+        auto tx = store->Begin ();
+        tx->Execute ("INSERT INTO test (value) VALUES (?)",
+                     { "cycle_" + std::to_string (i) });
+        if (i % 2 == 0)
+          {
+            tx->Commit ();
+          }
+        // Odd iterations: tx destroyed without commit
+      }
+
+    // Only even iterations should be committed
+    auto results = store->Execute ("SELECT COUNT(*) as cnt FROM test", {});
+    REQUIRE (std::any_cast<long long> (results[0].at ("cnt")) == 5LL);
+  }
+}
+
+TEST_CASE ("WAL mode configuration", "[store][wal]")
+{
+  SECTION ("WAL mode is enabled for file databases")
+  {
+    TempDatabase temp_db;
+    cortext::SQLiteConfig config;
+    config.enable_wal = true;
+
+    auto store = cortext::SQLiteStore::Create (temp_db.path (), config);
+    auto result = store->Execute ("PRAGMA journal_mode", {});
+    REQUIRE (result.size () == 1);
+    REQUIRE (std::any_cast<std::string> (result[0].at ("journal_mode"))
+             == "wal");
+  }
+
+  SECTION ("Memory databases use memory journal mode")
+  {
+    auto store = cortext::SQLiteStore::Create (":memory:");
+    auto result = store->Execute ("PRAGMA journal_mode", {});
+    REQUIRE (result.size () == 1);
+    // Memory databases ignore WAL mode
+    REQUIRE (std::any_cast<std::string> (result[0].at ("journal_mode"))
+             == "memory");
+  }
+
+  SECTION ("Busy timeout is configured")
+  {
+    TempDatabase temp_db;
+    cortext::SQLiteConfig config;
+    config.busy_timeout_ms = 3000;
+
+    auto store = cortext::SQLiteStore::Create (temp_db.path (), config);
+    auto result = store->Execute ("PRAGMA busy_timeout", {});
+    REQUIRE (result.size () == 1);
+    // SQLite returns busy_timeout PRAGMA with column name "timeout"
+    REQUIRE (std::any_cast<long long> (result[0].at ("timeout")) == 3000LL);
+  }
+
+  SECTION ("Foreign keys are enabled by default")
+  {
+    auto store = cortext::SQLiteStore::Create (":memory:");
+    auto result = store->Execute ("PRAGMA foreign_keys", {});
+    REQUIRE (result.size () == 1);
+    REQUIRE (std::any_cast<long long> (result[0].at ("foreign_keys")) == 1LL);
+  }
+
+  SECTION ("Foreign keys can be disabled")
+  {
+    cortext::SQLiteConfig config;
+    config.enable_foreign_keys = false;
+
+    auto store = cortext::SQLiteStore::Create (":memory:", config);
+    auto result = store->Execute ("PRAGMA foreign_keys", {});
+    REQUIRE (result.size () == 1);
+    REQUIRE (std::any_cast<long long> (result[0].at ("foreign_keys")) == 0LL);
+  }
+
+  SECTION ("Synchronous mode is configurable")
+  {
+    cortext::SQLiteConfig config;
+    config.synchronous = 2; // FULL
+
+    auto store = cortext::SQLiteStore::Create (":memory:", config);
+    auto result = store->Execute ("PRAGMA synchronous", {});
+    REQUIRE (result.size () == 1);
+    REQUIRE (std::any_cast<long long> (result[0].at ("synchronous")) == 2LL);
+  }
+}
+
+TEST_CASE ("WAL checkpoint operations", "[store][wal]")
+{
+  SECTION ("Passive checkpoint succeeds")
+  {
+    TempDatabase temp_db;
+    auto store = cortext::SQLiteStore::Create (temp_db.path ());
+
+    store->Execute ("CREATE TABLE test (id INTEGER)", {});
+    for (int i = 0; i < 100; ++i)
+      {
+        store->Execute ("INSERT INTO test (id) VALUES (?)", { i });
+      }
+
+    REQUIRE_NOTHROW (store->Checkpoint (false));
+  }
+
+  SECTION ("Full checkpoint succeeds")
+  {
+    TempDatabase temp_db;
+    auto store = cortext::SQLiteStore::Create (temp_db.path ());
+
+    store->Execute ("CREATE TABLE test (id INTEGER)", {});
+    store->Execute ("INSERT INTO test (id) VALUES (1)", {});
+
+    REQUIRE_NOTHROW (store->Checkpoint (true));
+  }
+
+  SECTION ("GetWalStatus returns valid info")
+  {
+    TempDatabase temp_db;
+    auto store = cortext::SQLiteStore::Create (temp_db.path ());
+
+    store->Execute ("CREATE TABLE test (id INTEGER)", {});
+    store->Execute ("INSERT INTO test (id) VALUES (1)", {});
+
+    auto status = store->GetWalStatus ();
+    REQUIRE (status.wal_pages >= 0);
+    REQUIRE (status.checkpointed >= 0);
+  }
+
+  SECTION ("Checkpoint on memory database is no-op")
+  {
+    auto store = cortext::SQLiteStore::Create (":memory:");
+    store->Execute ("CREATE TABLE test (id INTEGER)", {});
+    // Should not throw - memory DBs don't use WAL but checkpoint is harmless
+    REQUIRE_NOTHROW (store->Checkpoint (false));
+  }
+}
+
+TEST_CASE ("WAL file persistence", "[store][wal]")
+{
+  SECTION ("Data persists after close and reopen")
+  {
+    TempDatabase temp_db;
+    const std::string &path = temp_db.path ();
+
+    {
+      auto store = cortext::SQLiteStore::Create (path);
+      store->Execute ("CREATE TABLE test (value TEXT)", {});
+      store->Execute ("INSERT INTO test (value) VALUES (?)", { "persisted" });
+      store->Checkpoint (true);
+    }
+
+    // Reopen and verify
+    auto store2 = cortext::SQLiteStore::Create (path);
+    auto results = store2->Execute ("SELECT value FROM test", {});
+    REQUIRE (results.size () == 1);
+    REQUIRE (std::any_cast<std::string> (results[0].at ("value"))
+             == "persisted");
+  }
+
+  SECTION ("Transaction isolation in WAL mode")
+  {
+    TempDatabase temp_db;
+    auto store = cortext::SQLiteStore::Create (temp_db.path ());
+
+    store->Execute ("CREATE TABLE test (id INTEGER PRIMARY KEY, value TEXT)",
+                    {});
+    store->Execute ("INSERT INTO test (value) VALUES (?)", { "initial" });
+
+    // Start transaction but don't commit
+    auto tx = store->Begin ();
+    tx->Execute ("UPDATE test SET value = ?", { "modified" });
+
+    // Rollback
+    tx->Rollback ();
+
+    auto results = store->Execute ("SELECT value FROM test", {});
+    REQUIRE (std::any_cast<std::string> (results[0].at ("value")) == "initial");
+  }
+}
+
+TEST_CASE ("Concurrent access patterns in WAL", "[store][wal]")
+{
+  SECTION ("Multiple sequential transactions")
+  {
+    TempDatabase temp_db;
+    auto store = cortext::SQLiteStore::Create (temp_db.path ());
+
+    store->Execute ("CREATE TABLE counter (value INTEGER)", {});
+    store->Execute ("INSERT INTO counter (value) VALUES (0)", {});
+
+    // Simulate concurrent-like access with many transactions
+    for (int i = 0; i < 50; ++i)
+      {
+        auto tx = store->Begin ();
+        tx->Execute ("UPDATE counter SET value = value + 1", {});
+        tx->Commit ();
+      }
+
+    auto result = store->Execute ("SELECT value FROM counter", {});
+    REQUIRE (std::any_cast<long long> (result[0].at ("value")) == 50LL);
+  }
+
+  SECTION ("Nested transactions with savepoints in WAL mode")
+  {
+    TempDatabase temp_db;
+    auto store = cortext::SQLiteStore::Create (temp_db.path ());
+
+    store->Execute ("CREATE TABLE log (msg TEXT)", {});
+
+    auto outer = store->Begin ();
+    outer->Execute ("INSERT INTO log (msg) VALUES (?)", { "outer" });
+
+    auto inner = outer->Begin ();
+    inner->Execute ("INSERT INTO log (msg) VALUES (?)", { "inner" });
+    inner->Rollback (); // Only inner rolled back
+
+    outer->Execute ("INSERT INTO log (msg) VALUES (?)", { "after_inner" });
+    outer->Commit ();
+
+    auto results = store->Execute ("SELECT msg FROM log ORDER BY rowid", {});
+    REQUIRE (results.size () == 2);
+    REQUIRE (std::any_cast<std::string> (results[0].at ("msg")) == "outer");
+    REQUIRE (std::any_cast<std::string> (results[1].at ("msg"))
+             == "after_inner");
+  }
+}
+
+TEST_CASE ("Error recovery in WAL mode", "[store][wal]")
+{
+  SECTION ("Store recovers from aborted transaction")
+  {
+    TempDatabase temp_db;
+    auto store = cortext::SQLiteStore::Create (temp_db.path ());
+
+    store->Execute ("CREATE TABLE test (id INTEGER PRIMARY KEY)", {});
+
+    {
+      auto tx = store->Begin ();
+      tx->Execute ("INSERT INTO test (id) VALUES (1)", {});
+      // tx destroyed without commit - should rollback
+    }
+
+    // Store should still work
+    auto tx2 = store->Begin ();
+    tx2->Execute ("INSERT INTO test (id) VALUES (2)", {});
+    tx2->Commit ();
+
+    auto results = store->Execute ("SELECT id FROM test", {});
+    REQUIRE (results.size () == 1);
+    REQUIRE (std::any_cast<long long> (results[0].at ("id")) == 2LL);
+  }
+
+  SECTION ("Constraint errors don't corrupt WAL")
+  {
+    TempDatabase temp_db;
+    auto store = cortext::SQLiteStore::Create (temp_db.path ());
+
+    store->Execute ("CREATE TABLE test (id INTEGER PRIMARY KEY)", {});
+    store->Execute ("INSERT INTO test (id) VALUES (1)", {});
+
+    // This should fail
+    REQUIRE_THROWS (store->Execute ("INSERT INTO test (id) VALUES (1)", {}));
+
+    // Store should still work
+    store->Execute ("INSERT INTO test (id) VALUES (2)", {});
+    store->Checkpoint (false);
+
+    auto results = store->Execute ("SELECT COUNT(*) as cnt FROM test", {});
+    REQUIRE (std::any_cast<long long> (results[0].at ("cnt")) == 2LL);
+  }
+
+  SECTION ("Foreign key constraint errors work correctly")
+  {
+    TempDatabase temp_db;
+    auto store = cortext::SQLiteStore::Create (temp_db.path ());
+
+    store->Execute ("CREATE TABLE parent (id INTEGER PRIMARY KEY)", {});
+    store->Execute (
+        "CREATE TABLE child (id INTEGER PRIMARY KEY, "
+        "parent_id INTEGER REFERENCES parent(id))",
+        {});
+    store->Execute ("INSERT INTO parent (id) VALUES (1)", {});
+
+    // This should fail - foreign key violation
+    REQUIRE_THROWS (store->Execute ("INSERT INTO child (parent_id) VALUES (99)",
+                                    {}));
+
+    // This should succeed
+    REQUIRE_NOTHROW (
+        store->Execute ("INSERT INTO child (parent_id) VALUES (1)", {}));
+
+    auto results = store->Execute ("SELECT COUNT(*) as cnt FROM child", {});
+    REQUIRE (std::any_cast<long long> (results[0].at ("cnt")) == 1LL);
+  }
+}

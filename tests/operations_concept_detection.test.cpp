@@ -96,9 +96,26 @@ TEST_CASE ("DetectConceptNodes creates concept nodes for frequent entities",
                   "  embedding_id INTEGER,"
                   "  PRIMARY KEY (summary_id, name, type)"
                   ");");
-  store->Execute ("CREATE TABLE IF NOT EXISTS vec_embeddings ("
-                  "  embedding_id INTEGER PRIMARY KEY,"
-                  "  embedding BLOB"
+  // Unified embeddings table using vec0 with auxiliary columns
+  store->Execute ("CREATE VIRTUAL TABLE IF NOT EXISTS embeddings USING vec0("
+                  "embedding_id INTEGER PRIMARY KEY,"
+                  "embedding float[256],"
+                  "+type text,"
+                  "+strength float,"
+                  "+use_frequency float,"
+                  "+stability float,"
+                  "+connectivity float,"
+                  "+drift_mag float,"
+                  "+influence float,"
+                  "+sustained_influence float,"
+                  "+contextual_gain float,"
+                  "+redundancy float,"
+                  "+pre_activation float,"
+                  "+lability_state float,"
+                  "+suppression_count integer,"
+                  "+cluster_id integer,"
+                  "+last_access integer,"
+                  "+created_at integer"
                   ");");
 
   // Create test data: entity "Alice" appearing in multiple episodes

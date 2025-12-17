@@ -47,12 +47,11 @@ LoadClusterSourceEmbeddings (Store *store)
   // Query sources with timestamps and embeddings
   auto rows = store->Execute (
       "SELECT cs.summary_id, cs.source_embedding_id, "
-      "COALESCE(m.timestamp, em.created_at, 0) AS created_at, "
-      "ve.embedding "
+      "COALESCE(m.timestamp, e.created_at, 0) AS created_at, "
+      "e.embedding "
       "FROM consolidation_sources cs "
-      "JOIN vec_embeddings ve ON cs.source_embedding_id = ve.embedding_id "
+      "JOIN embeddings e ON cs.source_embedding_id = e.embedding_id "
       "LEFT JOIN memories m ON cs.source_embedding_id = m.embedding_id "
-      "LEFT JOIN embeddings_meta em ON cs.source_embedding_id = em.embedding_id "
       "WHERE cs.source_embedding_id IS NOT NULL "
       "ORDER BY cs.summary_id, created_at",
       {});

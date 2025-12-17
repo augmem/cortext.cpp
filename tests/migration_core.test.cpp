@@ -29,13 +29,12 @@ TEST_CASE("Migrations apply core tables automatically", "[schema][migration]") {
 
     // Core tables from migration 0
     REQUIRE(has("memories"));
-    REQUIRE(has("embeddings_meta"));
     REQUIRE(has("memory_feedback"));
     REQUIRE(has("cortext_schema_migrations"));
-    // vec_embeddings is a virtual table, check it separately
-    auto vec_rows = store->Execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name='vec_embeddings'", {});
-    REQUIRE(vec_rows.size() == 1);
+    // embeddings is a virtual table (vec0), check it separately
+    auto emb_rows = store->Execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='embeddings'", {});
+    REQUIRE(emb_rows.size() == 1);
 }
 
 TEST_CASE("Migrations track version history", "[schema][migration]") {

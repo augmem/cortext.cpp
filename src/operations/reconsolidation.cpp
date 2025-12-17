@@ -7,6 +7,7 @@
 #include "cortext/operations/constants.hpp"
 #include "cortext/processor/operation_context.hpp"
 #include "cortext/store/schema.hpp"
+#include "cortext/store/schema_helpers.hpp"
 #include "cortext/store/store.hpp"
 #include <Eigen/Dense>
 #include <algorithm>
@@ -159,7 +160,7 @@ QueryGraphNeighbors (Store *store, long long embedding_id, int max_depth)
   return neighbors;
 }
 
-/// @brief Loads an embedding from vec_embeddings by ID.
+/// @brief Loads an embedding from embeddings by ID.
 inline std::optional<Eigen::VectorXf>
 LoadEmbedding (Store *store, long long embedding_id, int expected_dim = 256)
 {
@@ -169,7 +170,7 @@ LoadEmbedding (Store *store, long long embedding_id, int expected_dim = 256)
     }
 
   auto rows = store->Execute (
-      "SELECT embedding FROM vec_embeddings WHERE embedding_id = ?",
+      "SELECT embedding FROM embeddings WHERE embedding_id = ?",
       { embedding_id });
 
   if (rows.empty ())
@@ -199,19 +200,6 @@ WriteNeighborUpdates (OperationContext &context, long long embedding_id,
                       double lability, long long timestamp,
                       const Eigen::VectorXf &blended)
 {
-  // Ensure embeddings_meta row exists
-  {
-    BufferedWriteInstruction op;
-    op.query = "INSERT INTO embeddings_meta "
-               "(embedding_id, strength, contextual_gain, use_frequency, "
-               "lability_state) "
-               "SELECT ?, 1.0, 0.0, 0.0, 0.0 "
-               "WHERE NOT EXISTS (SELECT 1 FROM "
-               "embeddings_meta WHERE embedding_id = ?)";
-    op.params = { embedding_id, embedding_id };
-    context.AddWriteInstruction (std::move (op));
-  }
-
   // Ensure memory_feedback row exists
   {
     BufferedWriteInstruction op;
@@ -224,10 +212,10 @@ WriteNeighborUpdates (OperationContext &context, long long embedding_id,
     context.AddWriteInstruction (std::move (op));
   }
 
-  // Update lability_state in embeddings_meta
+  // Update lability_state in embeddings (unified table)
   {
     BufferedWriteInstruction op;
-    op.query = "UPDATE embeddings_meta "
+    op.query = "UPDATE embeddings "
                "SET lability_state = ? "
                "WHERE embedding_id = ?";
     op.params = { lability, embedding_id };
@@ -244,19 +232,20 @@ WriteNeighborUpdates (OperationContext &context, long long embedding_id,
     context.AddWriteInstruction (std::move (op));
   }
 
-  // Update vec_embeddings with blended embedding
-  // Note: sqlite-vec virtual tables don't support INSERT OR REPLACE,
-  // so we use DELETE + INSERT instead
+  // Update embeddings with blended embedding
+  // Note: sqlite-vec virtual tables don't support UPDATE on vector columns,
+  // so we use DELETE + INSERT instead, preserving all metadata fields
   {
     BufferedWriteInstruction del_op;
-    del_op.query = "DELETE FROM vec_embeddings WHERE embedding_id = ?";
+    del_op.query = "DELETE FROM embeddings WHERE embedding_id = ?";
     del_op.params = { embedding_id };
     context.AddWriteInstruction (std::move (del_op));
 
     BufferedWriteInstruction ins_op;
-    ins_op.query
-        = "INSERT INTO vec_embeddings (embedding_id, embedding) VALUES (?, ?)";
-    ins_op.params = { embedding_id, ToFloatVector (blended) };
+    ins_op.query = std::string ("INSERT INTO embeddings (")
+                   + store::kEmbeddingsReconsolidateColumns + ") VALUES ("
+                   + store::kEmbeddingsReconsolidateDefaults + ")";
+    ins_op.params = { embedding_id, ToFloatVector (blended), lability };
     context.AddWriteInstruction (std::move (ins_op));
   }
 }
@@ -331,18 +320,7 @@ ApplyReconsolidation::Execute (OperationContext &context) const
                             std::max (constants::kNormalizedMin, drift_mag));
       max_drift = std::max (max_drift, drift_mag);
 
-      // Ensure embeddings_meta row exists for strength/frequency columns.
-      {
-        BufferedWriteInstruction op;
-        op.query = "INSERT INTO embeddings_meta "
-                   "(embedding_id, strength, contextual_gain, use_frequency, "
-                   "lability_state) "
-                   "SELECT ?, 1.0, 0.0, 0.0, 0.0 "
-                   "WHERE NOT EXISTS (SELECT 1 FROM "
-                   "embeddings_meta WHERE embedding_id = ?)";
-        op.params = { embedding_id, embedding_id };
-        context.AddWriteInstruction (std::move (op));
-      }
+      // Note: embeddings row already exists - no need to ensure it exists
 
       // Ensure memory_feedback row exists for retrieval tracking.
       {
@@ -356,10 +334,10 @@ ApplyReconsolidation::Execute (OperationContext &context) const
         context.AddWriteInstruction (std::move (op));
       }
 
-      // Update lability_state in embeddings_meta.
+      // Update lability_state in embeddings (unified table).
       {
         BufferedWriteInstruction op;
-        op.query = "UPDATE embeddings_meta "
+        op.query = "UPDATE embeddings "
                    "SET lability_state = ? "
                    "WHERE embedding_id = ?";
         op.params = { current_lability, embedding_id };
@@ -387,19 +365,20 @@ ApplyReconsolidation::Execute (OperationContext &context) const
                                 + static_cast<float> (drift_mag) * u_cur;
       blended = Unit (blended);
 
-      // Update vec_embeddings (primary vector storage for KNN search).
-      // Note: sqlite-vec virtual tables don't support INSERT OR REPLACE,
-      // so we use DELETE + INSERT instead
+      // Update embeddings (unified table for vector storage and metadata).
+      // Note: sqlite-vec virtual tables don't support UPDATE on vector columns,
+      // so we use DELETE + INSERT instead, preserving all metadata fields
       {
         BufferedWriteInstruction del_op;
-        del_op.query = "DELETE FROM vec_embeddings WHERE embedding_id = ?";
+        del_op.query = "DELETE FROM embeddings WHERE embedding_id = ?";
         del_op.params = { embedding_id };
         context.AddWriteInstruction (std::move (del_op));
 
         BufferedWriteInstruction ins_op;
-        ins_op.query
-            = "INSERT INTO vec_embeddings (embedding_id, embedding) VALUES (?, ?)";
-        ins_op.params = { embedding_id, ToFloatVector (blended) };
+        ins_op.query = std::string ("INSERT INTO embeddings (")
+                       + store::kEmbeddingsReconsolidateColumns + ") VALUES ("
+                       + store::kEmbeddingsReconsolidateDefaults + ")";
+        ins_op.params = { embedding_id, ToFloatVector (blended), current_lability };
         context.AddWriteInstruction (std::move (ins_op));
       }
 

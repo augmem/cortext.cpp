@@ -114,10 +114,14 @@ void RecordHistogram (std::string_view name, double value);
 void LogError (std::string_view message);
 void LogWarn (std::string_view message);
 void LogInfo (std::string_view message);
+void LogDebug (std::string_view message);
+void LogTrace (std::string_view message);
 
 void LogError (std::string_view message, std::initializer_list<Attribute> attrs);
 void LogWarn (std::string_view message, std::initializer_list<Attribute> attrs);
 void LogInfo (std::string_view message, std::initializer_list<Attribute> attrs);
+void LogDebug (std::string_view message, std::initializer_list<Attribute> attrs);
+void LogTrace (std::string_view message, std::initializer_list<Attribute> attrs);
 
 } // namespace cortext::telemetry
 

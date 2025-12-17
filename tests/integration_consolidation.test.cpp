@@ -60,26 +60,20 @@ MakeOrthogonalEmbedding (int dim, int index)
   return emb;
 }
 
-// Helper to seed embeddings_meta for testing
+// Helper to seed embeddings for testing (unified table)
 void
-SeedEmbeddingsMeta (Store *store, long long id, double strength,
-                    double redundancy, double connectivity, double stability)
-{
-  store->Execute (
-      "INSERT OR REPLACE INTO embeddings_meta(embedding_id, strength, "
-      "redundancy, connectivity, stability) VALUES(?,?,?,?,?)",
-      { id, strength, redundancy, connectivity, stability });
-}
-
-// Helper to seed vec_embeddings for testing
-void
-SeedVecEmbedding (Store *store, long long id, const Eigen::VectorXf &emb)
+SeedEmbedding (Store *store, long long id, const Eigen::VectorXf &emb,
+               double strength = 1.0, double redundancy = 0.0,
+               double connectivity = 0.0, double stability = 1.0)
 {
   std::vector<float> vec (emb.data (), emb.data () + emb.size ());
   store->Execute (
-      "INSERT OR REPLACE INTO vec_embeddings(embedding_id, embedding) "
-      "VALUES(?,?)",
-      { id, vec });
+      "INSERT OR REPLACE INTO embeddings(embedding_id, embedding, type, "
+      "strength, use_frequency, stability, connectivity, drift_mag, "
+      "influence, sustained_influence, contextual_gain, redundancy, "
+      "pre_activation, lability_state, suppression_count) "
+      "VALUES(?, ?, 'memory', ?, 0.0, ?, ?, 0.0, 0.0, 0.0, 0.0, ?, 0.0, 0.0, 0)",
+      { id, vec, strength, stability, connectivity, redundancy });
 }
 
 // Helper to seed memories for testing
@@ -181,9 +175,7 @@ struct SeedClusteringDataOp : IOperation
         emb[0] = 1.0f;
         emb[static_cast<int> (i)] = 0.1f; // Small variation
 
-        SeedVecEmbedding (store, i, emb);
-        SeedEmbeddingsMeta (store, i, 0.1, 0.0, 0.0,
-                            0.0); // Low strength = candidates
+        SeedEmbedding (store, i, emb, 0.1, 0.0, 0.0, 0.0); // Low strength = candidates
 
         // Add to candidates
         store->Execute (
@@ -199,8 +191,7 @@ struct SeedClusteringDataOp : IOperation
         emb[100] = 1.0f;
         emb[static_cast<int> (i)] = 0.1f; // Small variation
 
-        SeedVecEmbedding (store, i, emb);
-        SeedEmbeddingsMeta (store, i, 0.1, 0.0, 0.0, 0.0);
+        SeedEmbedding (store, i, emb, 0.1, 0.0, 0.0, 0.0);
 
         store->Execute (
             "INSERT INTO consolidation_candidates(embedding_id, score, "
@@ -237,8 +228,7 @@ struct SeedGraphDataOp : IOperation
         Eigen::VectorXf emb = Eigen::VectorXf::Zero (256);
         emb[0] = 0.9f;
         emb[static_cast<int> (i)] = 0.1f;
-        SeedVecEmbedding (store, i, emb);
-        SeedEmbeddingsMeta (store, i, 0.5, 0.0, 0.1, 0.3);
+        SeedEmbedding (store, i, emb, 0.5, 0.0, 0.1, 0.3);
 
         // Add memories with timestamps for causal edges
         uint64_t ts = static_cast<uint64_t> (i * 1000);
@@ -366,7 +356,7 @@ TEST_CASE ("Summarization creates summary records",
     {
       Eigen::VectorXf emb = Eigen::VectorXf::Constant (256, 0.5f);
       emb[0] = 1.0f;
-      SeedVecEmbedding (store.get (), i, emb);
+      SeedEmbedding (store.get (), i, emb);
       SeedMemory (store.get (), i, "Test memory content " + std::to_string (i),
                   static_cast<uint64_t> (i * 1000));
     }

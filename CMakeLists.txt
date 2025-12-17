@@ -20,6 +20,11 @@ option(CORTEXT_ENABLE_GEMMA_ORT "Enable ONNX Runtime for Gemma text generator" O
 option(CORTEXT_DISABLE_OGA "Disable onnxruntime-genai for Phi-4 Extractor/Summarizer" OFF)
 option(CORTEXT_DISABLE_LITERT "Disable LiteRT-LM for Gemma Extractor/Summarizer" OFF)
 
+# Sanitizer options for catching memory bugs during development
+option(CORTEXT_ENABLE_ASAN "Enable AddressSanitizer" OFF)
+option(CORTEXT_ENABLE_UBSAN "Enable UndefinedBehaviorSanitizer" OFF)
+option(CORTEXT_ENABLE_MSAN "Enable MemorySanitizer (Clang only)" OFF)
+
 if(EMSCRIPTEN AND BUILD_TESTING)
   message(STATUS "Disabling tests for WebAssembly builds (not supported).")
   set(BUILD_TESTING OFF CACHE BOOL "Build tests" FORCE)
@@ -67,6 +72,7 @@ if(NOT EMSCRIPTEN)
   # still supports optional components).
   set(WITH_EXAMPLES OFF CACHE BOOL "Disable OTel examples" FORCE)
   set(WITH_OTLP_FILE ON CACHE BOOL "Enable OTLP file exporters" FORCE)
+  set(WITH_OTLP_GRPC ON CACHE BOOL "Enable OTLP gRPC exporters" FORCE)
   set(WITH_PROMETHEUS OFF CACHE BOOL "Disable Prometheus exporter" FORCE)
   set(WITH_JAEGER OFF CACHE BOOL "Disable Jaeger exporter" FORCE)
   set(WITH_ZIPKIN OFF CACHE BOOL "Disable Zipkin exporter" FORCE)
@@ -142,7 +148,6 @@ add_library(cortext
     src/operations/goal_alignment.cpp
     src/operations/goal_alignment_fallback.cpp
     src/operations/signal_metrics_persistence.cpp
-    src/operations/generation_trace.cpp
     src/operations/write_gate.cpp
     src/operations/memory_storage.cpp
     src/operations/detect_memory_usage.cpp
@@ -618,6 +623,25 @@ endif()
 
 # Use C++20 features
 target_compile_features(cortext PUBLIC cxx_std_20)
+
+# Sanitizer instrumentation (must be applied after target is defined)
+if(CORTEXT_ENABLE_ASAN AND NOT EMSCRIPTEN)
+  target_compile_options(cortext PUBLIC -fsanitize=address -fno-omit-frame-pointer)
+  target_link_options(cortext PUBLIC -fsanitize=address)
+  message(STATUS "AddressSanitizer enabled for cortext")
+endif()
+
+if(CORTEXT_ENABLE_UBSAN AND NOT EMSCRIPTEN)
+  target_compile_options(cortext PUBLIC -fsanitize=undefined)
+  target_link_options(cortext PUBLIC -fsanitize=undefined)
+  message(STATUS "UndefinedBehaviorSanitizer enabled for cortext")
+endif()
+
+if(CORTEXT_ENABLE_MSAN AND NOT EMSCRIPTEN)
+  target_compile_options(cortext PUBLIC -fsanitize=memory -fno-omit-frame-pointer)
+  target_link_options(cortext PUBLIC -fsanitize=memory)
+  message(STATUS "MemorySanitizer enabled for cortext")
+endif()
 
 if(BUILD_TESTING)
   target_compile_definitions(cortext PRIVATE CORTEXT_TESTING=1)

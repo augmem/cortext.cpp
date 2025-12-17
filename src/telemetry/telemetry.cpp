@@ -113,6 +113,16 @@ LogInfo (std::string_view)
 }
 
 void
+LogDebug (std::string_view)
+{
+}
+
+void
+LogTrace (std::string_view)
+{
+}
+
+void
 LogError (std::string_view, std::initializer_list<Attribute>)
 {
 }
@@ -124,6 +134,16 @@ LogWarn (std::string_view, std::initializer_list<Attribute>)
 
 void
 LogInfo (std::string_view, std::initializer_list<Attribute>)
+{
+}
+
+void
+LogDebug (std::string_view, std::initializer_list<Attribute>)
+{
+}
+
+void
+LogTrace (std::string_view, std::initializer_list<Attribute>)
 {
 }
 
@@ -243,6 +263,31 @@ BuildAttributes (std::initializer_list<Attribute> attrs)
         }
     }
   return kvs;
+}
+
+trace_api::SpanContext
+GetCurrentSpanContext ()
+{
+  const opentelemetry::nostd::shared_ptr<trace_api::Span> span
+      = trace_api::Tracer::GetCurrentSpan ();
+  return span->GetContext ();
+}
+
+void
+EmitLog (logs_api::Severity severity,
+         std::string_view message,
+         std::initializer_list<Attribute> attrs)
+{
+  const opentelemetry::nostd::shared_ptr<logs_api::LoggerProvider> provider
+      = logs_api::Provider::GetLoggerProvider ();
+  const opentelemetry::nostd::shared_ptr<logs_api::Logger> logger
+      = provider->GetLogger ("cortext");
+  const trace_api::SpanContext span_ctx = GetCurrentSpanContext ();
+  const auto kvs = BuildAttributes (attrs);
+  logger->EmitLogRecord (severity,
+                         MakeStableStringView (message),
+                         span_ctx,
+                         kvs);
 }
 
 } // namespace
@@ -453,109 +498,43 @@ LogInfo (std::string_view message)
 void
 LogError (std::string_view message, std::initializer_list<Attribute> attrs)
 {
-  ScopedSpan span ("cortext.log");
-  span.SetAttribute ("log.severity", std::string_view ("error"));
-  span.SetAttribute ("log.message", message);
-  for (const auto &a : attrs)
-    {
-      switch (a.type)
-        {
-        case Attribute::Type::kBool:
-          span.SetAttribute (a.key, a.bool_value);
-          break;
-        case Attribute::Type::kInt64:
-          span.SetAttribute (a.key, a.int64_value);
-          break;
-        case Attribute::Type::kDouble:
-          span.SetAttribute (a.key, a.double_value);
-          break;
-        case Attribute::Type::kString:
-        default:
-          span.SetAttribute (a.key, a.string_value);
-          break;
-        }
-    }
-  span.AddEvent ("cortext.log.error");
-  const opentelemetry::nostd::shared_ptr<logs_api::LoggerProvider> provider
-      = logs_api::Provider::GetLoggerProvider ();
-  const opentelemetry::nostd::shared_ptr<logs_api::Logger> logger
-      = provider->GetLogger ("cortext");
-  const auto kvs = BuildAttributes (attrs);
-  logger->EmitLogRecord (logs_api::Severity::kError,
-                         MakeStableStringView (message),
-                         kvs);
+  EmitLog (logs_api::Severity::kError, message, attrs);
 }
 
 void
 LogWarn (std::string_view message, std::initializer_list<Attribute> attrs)
 {
-  ScopedSpan span ("cortext.log");
-  span.SetAttribute ("log.severity", std::string_view ("warn"));
-  span.SetAttribute ("log.message", message);
-  for (const auto &a : attrs)
-    {
-      switch (a.type)
-        {
-        case Attribute::Type::kBool:
-          span.SetAttribute (a.key, a.bool_value);
-          break;
-        case Attribute::Type::kInt64:
-          span.SetAttribute (a.key, a.int64_value);
-          break;
-        case Attribute::Type::kDouble:
-          span.SetAttribute (a.key, a.double_value);
-          break;
-        case Attribute::Type::kString:
-        default:
-          span.SetAttribute (a.key, a.string_value);
-          break;
-        }
-    }
-  span.AddEvent ("cortext.log.warn");
-  const opentelemetry::nostd::shared_ptr<logs_api::LoggerProvider> provider
-      = logs_api::Provider::GetLoggerProvider ();
-  const opentelemetry::nostd::shared_ptr<logs_api::Logger> logger
-      = provider->GetLogger ("cortext");
-  const auto kvs = BuildAttributes (attrs);
-  logger->EmitLogRecord (logs_api::Severity::kWarn,
-                         MakeStableStringView (message),
-                         kvs);
+  EmitLog (logs_api::Severity::kWarn, message, attrs);
 }
 
 void
 LogInfo (std::string_view message, std::initializer_list<Attribute> attrs)
 {
-  ScopedSpan span ("cortext.log");
-  span.SetAttribute ("log.severity", std::string_view ("info"));
-  span.SetAttribute ("log.message", message);
-  for (const auto &a : attrs)
-    {
-      switch (a.type)
-        {
-        case Attribute::Type::kBool:
-          span.SetAttribute (a.key, a.bool_value);
-          break;
-        case Attribute::Type::kInt64:
-          span.SetAttribute (a.key, a.int64_value);
-          break;
-        case Attribute::Type::kDouble:
-          span.SetAttribute (a.key, a.double_value);
-          break;
-        case Attribute::Type::kString:
-        default:
-          span.SetAttribute (a.key, a.string_value);
-          break;
-        }
-    }
-  span.AddEvent ("cortext.log.info");
-  const opentelemetry::nostd::shared_ptr<logs_api::LoggerProvider> provider
-      = logs_api::Provider::GetLoggerProvider ();
-  const opentelemetry::nostd::shared_ptr<logs_api::Logger> logger
-      = provider->GetLogger ("cortext");
-  const auto kvs = BuildAttributes (attrs);
-  logger->EmitLogRecord (logs_api::Severity::kInfo,
-                         MakeStableStringView (message),
-                         kvs);
+  EmitLog (logs_api::Severity::kInfo, message, attrs);
+}
+
+void
+LogDebug (std::string_view message)
+{
+  LogDebug (message, {});
+}
+
+void
+LogTrace (std::string_view message)
+{
+  LogTrace (message, {});
+}
+
+void
+LogDebug (std::string_view message, std::initializer_list<Attribute> attrs)
+{
+  EmitLog (logs_api::Severity::kDebug, message, attrs);
+}
+
+void
+LogTrace (std::string_view message, std::initializer_list<Attribute> attrs)
+{
+  EmitLog (logs_api::Severity::kTrace, message, attrs);
 }
 
 } // namespace cortext::telemetry

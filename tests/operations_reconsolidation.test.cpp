@@ -16,6 +16,43 @@ namespace
 
 constexpr int kEmbeddingDim = 256;
 
+// Helper op to seed embeddings and memory_feedback into the database before operations run.
+class SeedEmbeddingsOp : public IOperation
+{
+public:
+  explicit SeedEmbeddingsOp (std::unordered_map<long long, Eigen::VectorXf> embs)
+      : embeddings_ (std::move (embs))
+  {
+  }
+
+  void
+  Execute (OperationContext &ctx) const override
+  {
+    auto *store = ctx.GetStore ();
+    for (const auto &[id, emb] : embeddings_)
+      {
+        std::vector<float> vec (emb.data (), emb.data () + emb.size ());
+        store->Execute (
+            "INSERT OR REPLACE INTO embeddings(embedding_id, embedding, type, "
+            "strength, use_frequency, stability, connectivity, drift_mag, "
+            "influence, sustained_influence, contextual_gain, redundancy, "
+            "pre_activation, lability_state, suppression_count) "
+            "VALUES (?, ?, 'memory', 1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, "
+            "0.0, 0.0, 0.0, 0)",
+            { id, vec });
+        // Also seed memory_feedback for lability_ts
+        store->Execute (
+            "INSERT OR IGNORE INTO memory_feedback(embedding_id, retrieved_count, "
+            "used_count, last_used, lability_ts) "
+            "VALUES (?, 0, 0, 0, 0)",
+            { id });
+      }
+  }
+
+private:
+  std::unordered_map<long long, Eigen::VectorXf> embeddings_;
+};
+
 // Helper op to preload current context and retrieved embeddings into context.
 class SetupReconInputsOp : public IOperation
 {
@@ -97,10 +134,10 @@ TEST_CASE ("Alg20 drifts embedding and writes lability fields",
   processor.Process (s);
   processor.Flush ();
 
-  // Embedding row created in vec_embeddings
+  // Embedding row created in embeddings
   {
     auto rows = store->Execute (
-        "SELECT COUNT(*) AS cnt FROM vec_embeddings WHERE embedding_id = ?",
+        "SELECT COUNT(*) AS cnt FROM embeddings WHERE embedding_id = ?",
         { 1LL });
     REQUIRE (rows.size () == 1);
     REQUIRE (std::any_cast<long long> (rows[0].at ("cnt")) == 1LL);
@@ -109,7 +146,7 @@ TEST_CASE ("Alg20 drifts embedding and writes lability fields",
   {
     auto rows = store->Execute (
         "SELECT em.lability_state, mf.lability_ts FROM "
-        "embeddings_meta em "
+        "embeddings em "
         "JOIN memory_feedback mf ON em.embedding_id = mf.embedding_id "
         "WHERE em.embedding_id = ?",
         { 1LL });
@@ -121,7 +158,7 @@ TEST_CASE ("Alg20 drifts embedding and writes lability fields",
   }
 }
 
-TEST_CASE ("Alg20 no drift when S=0: no embedding row; lability updated",
+TEST_CASE ("Alg20 no drift when S=0: embedding unchanged; lability updated",
            "[operations][recon]")
 {
   auto unique_store = cortext::SQLiteStore::Create (":memory:");
@@ -135,30 +172,32 @@ TEST_CASE ("Alg20 no drift when S=0: no embedding row; lability updated",
   const Eigen::VectorXf cur = MakeUnitVec256 (1);
   const Eigen::VectorXf mem = MakeUnitVec256 (1);
 
-  auto setup = std::make_unique<SetupReconInputsOp> (
-      cur, std::unordered_map<long long, Eigen::VectorXf>{ { 2LL, mem } });
+  std::unordered_map<long long, Eigen::VectorXf> retrieved{ { 2LL, mem } };
+  auto seed = std::make_unique<SeedEmbeddingsOp> (retrieved);
+  auto setup = std::make_unique<SetupReconInputsOp> (cur, retrieved);
   auto apply = std::make_unique<ApplyReconsolidation> ();
-  auto ops = std::make_unique<cortext::OperationSet> (std::move (setup),
-                                                      std::move (apply));
+  auto ops = std::make_unique<cortext::OperationSet> (
+      std::move (seed), std::move (setup), std::move (apply));
 
   cortext::SignalProcessor processor (cfg, store, std::move (ops));
   auto s = MakeSignal (cur, /*ts=*/42);
   processor.Process (s);
   processor.Flush ();
 
-  // No vec_embeddings row (drift skipped when S=0)
+  // Embeddings row exists (seeded) but drift_mag should be 0 when S=0
   {
     auto rows = store->Execute (
-        "SELECT COUNT(*) AS cnt FROM vec_embeddings WHERE embedding_id = ?",
+        "SELECT drift_mag FROM embeddings WHERE embedding_id = ?",
         { 2LL });
     REQUIRE (rows.size () == 1);
-    REQUIRE (std::any_cast<long long> (rows[0].at ("cnt")) == 0LL);
+    const double drift = std::any_cast<double> (rows[0].at ("drift_mag"));
+    REQUIRE (drift == 0.0); // No drift when S=0
   }
   // Lability fields updated
   {
     auto rows = store->Execute (
         "SELECT em.lability_state, mf.lability_ts FROM "
-        "embeddings_meta em "
+        "embeddings em "
         "JOIN memory_feedback mf ON em.embedding_id = mf.embedding_id "
         "WHERE em.embedding_id = ?",
         { 2LL });
@@ -218,7 +257,7 @@ TEST_CASE ("Alg20 ripple propagation reaches graph neighbors",
   std::vector<float> neighbor_data (neighbor_vec.data (),
                                     neighbor_vec.data () + neighbor_vec.size ());
   store->Execute (
-      "INSERT INTO vec_embeddings (embedding_id, embedding) VALUES (?, ?)",
+      "INSERT INTO embeddings (embedding_id, embedding) VALUES (?, ?)",
       { 10LL, neighbor_data });
 
   // Create a 'reinforces' edge from emb:1 to emb:10
@@ -266,7 +305,7 @@ TEST_CASE ("Alg20 ripple propagation reaches graph neighbors",
   // Verify primary reconsolidation worked
   {
     auto rows = store->Execute (
-        "SELECT COUNT(*) AS cnt FROM embeddings_meta WHERE embedding_id = ?",
+        "SELECT COUNT(*) AS cnt FROM embeddings WHERE embedding_id = ?",
         { 1LL });
     REQUIRE (rows.size () == 1);
     auto cnt = std::any_cast<long long> (rows[0].at ("cnt"));
@@ -276,7 +315,7 @@ TEST_CASE ("Alg20 ripple propagation reaches graph neighbors",
   // Verify neighbor (emb:10) received ripple update
   {
     auto rows = store->Execute (
-        "SELECT COUNT(*) AS cnt FROM embeddings_meta WHERE embedding_id = ?",
+        "SELECT COUNT(*) AS cnt FROM embeddings WHERE embedding_id = ?",
         { 10LL });
     REQUIRE (rows.size () == 1);
     auto cnt = std::any_cast<long long> (rows[0].at ("cnt"));
@@ -316,10 +355,10 @@ TEST_CASE ("Alg20 ripple decay applied correctly per hop",
   std::vector<float> data21 (vec21.data (), vec21.data () + vec21.size ());
 
   store->Execute (
-      "INSERT INTO vec_embeddings (embedding_id, embedding) VALUES (?, ?)",
+      "INSERT INTO embeddings (embedding_id, embedding) VALUES (?, ?)",
       { 20LL, data20 });
   store->Execute (
-      "INSERT INTO vec_embeddings (embedding_id, embedding) VALUES (?, ?)",
+      "INSERT INTO embeddings (embedding_id, embedding) VALUES (?, ?)",
       { 21LL, data21 });
 
   // Edge: emb:1 -> emb:20 (depth 1)
@@ -343,14 +382,14 @@ TEST_CASE ("Alg20 ripple decay applied correctly per hop",
   double lab20 = 0.0, lab21 = 0.0;
   {
     auto rows = store->Execute (
-        "SELECT lability_state FROM embeddings_meta WHERE embedding_id = ?",
+        "SELECT lability_state FROM embeddings WHERE embedding_id = ?",
         { 20LL });
     REQUIRE (rows.size () == 1);
     lab20 = std::any_cast<double> (rows[0].at ("lability_state"));
   }
   {
     auto rows = store->Execute (
-        "SELECT lability_state FROM embeddings_meta WHERE embedding_id = ?",
+        "SELECT lability_state FROM embeddings WHERE embedding_id = ?",
         { 21LL });
     REQUIRE (rows.size () == 1);
     lab21 = std::any_cast<double> (rows[0].at ("lability_state"));
@@ -367,7 +406,7 @@ TEST_CASE ("Alg20 RippleDepth knob affects traversal depth",
            "[operations][recon][ripple]")
 {
   // With T=0.8, ripple_depth = round(lerp(2,1,0.8)) = round(1.2) = 1
-  // So depth-2 neighbors should NOT be reached
+  // So depth-2 neighbors should NOT be reached by ripple propagation
   // Note: T=1.0 would make drift_mag=0 (formula has 1-T factor), blocking all ripple
   auto unique_store = cortext::SQLiteStore::Create (":memory:");
   auto store = std::shared_ptr<cortext::Store> (std::move (unique_store));
@@ -379,37 +418,30 @@ TEST_CASE ("Alg20 RippleDepth knob affects traversal depth",
 
   const Eigen::VectorXf cur = MakeUnitVec256 (0);
   const Eigen::VectorXf mem = MakeUnitVec256 (0);
+  const Eigen::VectorXf vec30 = MakeUnitVec256 (8);
+  const Eigen::VectorXf vec31 = MakeUnitVec256 (9);
 
+  // Seed all embeddings before operation runs
+  std::unordered_map<long long, Eigen::VectorXf> allEmbs{
+    { 1LL, mem }, { 30LL, vec30 }, { 31LL, vec31 }
+  };
+  auto seed = std::make_unique<SeedEmbeddingsOp> (allEmbs);
   auto setup = std::make_unique<SetupReconInputsOp> (
       cur, std::unordered_map<long long, Eigen::VectorXf>{ { 1LL, mem } });
   auto apply = std::make_unique<ApplyReconsolidation> ();
-  auto ops = std::make_unique<cortext::OperationSet> (std::move (setup),
-                                                      std::move (apply));
+  auto ops = std::make_unique<cortext::OperationSet> (
+      std::move (seed), std::move (setup), std::move (apply));
 
   // Create processor first to initialize schema
   cortext::SignalProcessor processor (cfg, store, std::move (ops));
 
-  // Now insert test data after schema is initialized
+  // Insert graph edges after schema is initialized
   // Create chain: emb:1 --reinforces--> emb:30 --reinforces--> emb:31
-  const Eigen::VectorXf vec30 = MakeUnitVec256 (8);
-  const Eigen::VectorXf vec31 = MakeUnitVec256 (9);
-  std::vector<float> data30 (vec30.data (), vec30.data () + vec30.size ());
-  std::vector<float> data31 (vec31.data (), vec31.data () + vec31.size ());
-
-  store->Execute (
-      "INSERT INTO vec_embeddings (embedding_id, embedding) VALUES (?, ?)",
-      { 30LL, data30 });
-  store->Execute (
-      "INSERT INTO vec_embeddings (embedding_id, embedding) VALUES (?, ?)",
-      { 31LL, data31 });
-
-  // Edge: emb:1 -> emb:30 (depth 1)
   store->Execute (
       "INSERT INTO graph_edges (source_id, target_id, edge_type, weight) "
       "VALUES (?, ?, ?, ?)",
       { std::string ("emb:1"), std::string ("emb:30"),
         std::string ("reinforces"), 1.0 });
-  // Edge: emb:30 -> emb:31 (depth 2 from emb:1)
   store->Execute (
       "INSERT INTO graph_edges (source_id, target_id, edge_type, weight) "
       "VALUES (?, ?, ?, ?)",
@@ -420,22 +452,24 @@ TEST_CASE ("Alg20 RippleDepth knob affects traversal depth",
   processor.Process (s);
   processor.Flush ();
 
-  // Depth-1 neighbor (emb:30) should be updated
+  // Depth-1 neighbor (emb:30) should have lability_state > 0 (updated by ripple)
   {
     auto rows = store->Execute (
-        "SELECT COUNT(*) AS cnt FROM embeddings_meta WHERE embedding_id = ?",
+        "SELECT lability_state FROM embeddings WHERE embedding_id = ?",
         { 30LL });
     REQUIRE (rows.size () == 1);
-    REQUIRE (std::any_cast<long long> (rows[0].at ("cnt")) == 1LL);
+    const double lab = std::any_cast<double> (rows[0].at ("lability_state"));
+    REQUIRE (lab > 0.0); // Ripple reached depth-1
   }
 
-  // Depth-2 neighbor (emb:31) should NOT be updated (beyond ripple_depth=1)
+  // Depth-2 neighbor (emb:31) should have lability_state = 0 (beyond ripple_depth=1)
   {
     auto rows = store->Execute (
-        "SELECT COUNT(*) AS cnt FROM embeddings_meta WHERE embedding_id = ?",
+        "SELECT lability_state FROM embeddings WHERE embedding_id = ?",
         { 31LL });
     REQUIRE (rows.size () == 1);
-    REQUIRE (std::any_cast<long long> (rows[0].at ("cnt")) == 0LL);
+    const double lab = std::any_cast<double> (rows[0].at ("lability_state"));
+    REQUIRE (lab == 0.0); // Ripple did NOT reach depth-2
   }
 }
 
@@ -468,7 +502,7 @@ TEST_CASE ("Alg20 ripple respects co_occurs_with edge type",
   std::vector<float> data40 (vec40.data (), vec40.data () + vec40.size ());
 
   store->Execute (
-      "INSERT INTO vec_embeddings (embedding_id, embedding) VALUES (?, ?)",
+      "INSERT INTO embeddings (embedding_id, embedding) VALUES (?, ?)",
       { 40LL, data40 });
 
   // Edge: emb:1 --co_occurs_with--> emb:40
@@ -485,7 +519,7 @@ TEST_CASE ("Alg20 ripple respects co_occurs_with edge type",
   // Neighbor via co_occurs_with should also receive ripple
   {
     auto rows = store->Execute (
-        "SELECT lability_state FROM embeddings_meta WHERE embedding_id = ?",
+        "SELECT lability_state FROM embeddings WHERE embedding_id = ?",
         { 40LL });
     REQUIRE (rows.size () == 1);
     const double lab = std::any_cast<double> (rows[0].at ("lability_state"));

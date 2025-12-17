@@ -22,7 +22,7 @@ erDiagram
     EMBEDDINGS {
         int embedding_id PK "rowid"
         blob embedding "float[256] - sqlite-vec"
-        text type "memory|summary|concept|generation"
+        text type "memory|summary|concept"
         real strength "Section 5.1 decay model"
         real use_frequency "Section 5.1 EWMA"
         real stability "Section 5.3.3 per-memory"
@@ -145,15 +145,6 @@ erDiagram
     GOAL_NODES }|--|| GRAPH_NODES : "is_goal"
     GOAL_NODES {
         text node_id PK,FK
-    }
-
-    %% Generation Trace (Section 5.4)
-    EPISODES ||--o{ GENERATION_TRACE : "tracks_output"
-    GENERATION_TRACE {
-        int id PK
-        blob embedding "256d vector"
-        int timestamp
-        real semantic_drift
     }
 
     %% Binary Object Store (sqlite-objstore virtual table)
@@ -310,8 +301,6 @@ erDiagram
         blob last_embedding "Section 3.1.4 256d"
         blob delta_x_trend "256d"
 
-        blob generation_centroid "Section 5.4 256d"
-        real drift_mag_generation
         real delta_half_life_adj
         real sustained_influence
 
@@ -339,6 +328,7 @@ erDiagram
 
         int last_signal_timestamp
         int updated_at
+        blob write_rate_timestamps "Section 2.2 rate window"
     }
 
     %% Blender Weights (Section 3.2 RLS)
@@ -410,6 +400,25 @@ erDiagram
         real strength
         int timestamp
         blob embedding "256d vector"
+    }
+
+    %% Recent IDs LRU (Section 8.6 Algorithm 27 - novelty detection)
+    EMBEDDINGS ||--o{ RECENT_IDS : "tracked_in"
+    RECENT_IDS {
+        int id PK
+        int embedding_id FK
+        int access_type "0=inserted, 1=retrieved"
+        int timestamp
+        int seq_order
+    }
+
+    %% Recent Retrievals Cache (Section 5.2 - implicit feedback detection)
+    EMBEDDINGS ||--o{ RECENT_RETRIEVALS : "cached_for_feedback"
+    RECENT_RETRIEVALS {
+        int id PK
+        int embedding_id FK
+        int timestamp
+        int seq_order
     }
 ```
 
@@ -487,11 +496,12 @@ SELECT objstore_get(?blob_id) AS data;
 | `GRAPH_NODES` | 7.4-7.6 | Entity nodes (sqlite-graph) |
 | `GRAPH_EDGES` | 7.4-7.6 | Semantic relationships (sqlite-graph) |
 | `EPISODES` | 3.1.3 | Episodic boundaries |
-| `GENERATION_TRACE` | 5.4 | Output influence tracking |
 | `RECENT_CONTEXT` | 2.1.2, 4.1 | Sliding window of context embeddings |
 | `RECENT_SCORES` | 4.1 | Sliding window of composite scores |
 | `OBSERVED_RETENTION_HISTORY` | 2.3.2 | Retention observations for stability adaptation |
 | `WORKING_MEMORY_SLOTS` | 6.1 | Working memory slot persistence |
+| `RECENT_IDS` | 8.6 (Algorithm 27) | LRU tracking of recently seen IDs for novelty detection |
+| `RECENT_RETRIEVALS` | 5.2 | Cached retrievals for implicit feedback detection |
 
 ### Consolidation & Extraction Tables (Section 7)
 
@@ -534,7 +544,6 @@ SELECT objstore_get(?blob_id) AS data;
 | MEMORIES → OBJSTORE | 1:0..1 | Memory optionally references a blob via blob_id |
 | MEMORIES → EPISODES | N:1 | Many memories belong to one episode |
 | GRAPH_NODES → GRAPH_EDGES | 1:N | Nodes connect via edges |
-| EPISODES → GENERATION_TRACE | 1:N | Episode tracks multiple generation outputs |
 | PROCESSOR_STATE → BLENDER_WEIGHTS | 1:1 | State references current metric weights |
 | PROCESSOR_STATE → BLENDER_COVARIANCE | 1:1 | State references RLS covariance matrix (12x12) |
 | PROCESSOR_STATE → BLENDER_COEFFICIENTS | 1:1 | State references RLS learned coefficients |
@@ -548,6 +557,8 @@ SELECT objstore_get(?blob_id) AS data;
 | EMBEDDINGS → RIF_STATE | 1:0..1 | Embedding optionally has RIF suppression state |
 | EMBEDDINGS → EMOTIONAL_TAGS | 1:0..1 | Embedding optionally has emotional consolidation tags |
 | EMBEDDINGS → CONSOLIDATION_CANDIDATES | 1:0..1 | Embedding optionally marked as consolidation candidate |
+| EMBEDDINGS → RECENT_IDS | 1:N | Embedding tracked in recent IDs LRU cache |
+| EMBEDDINGS → RECENT_RETRIEVALS | 1:N | Embedding cached for implicit feedback detection |
 
 ## Algorithm Coverage
 
@@ -565,7 +576,6 @@ SELECT objstore_get(?blob_id) AS data;
 | BLENDER_COEFF_COVARIANCE | 3.2 | RLS P matrix for coefficients (48x48) |
 | GRAPH_NODES, GRAPH_EDGES | 7.4-7.6 | Knowledge graph (sqlite-graph) |
 | EPISODES | 3.1.3 | Episodic boundaries |
-| GENERATION_TRACE | 5.4 | Output influence tracking |
 | RECENT_CONTEXT, RECENT_SCORES | 2.1.2, 4.1 | Sliding windows |
 | OBSERVED_RETENTION_HISTORY | 2.3.2 | Retention for stability adaptation |
 | WORKING_MEMORY_SLOTS | 6.1 | Working memory persistence |
@@ -578,6 +588,8 @@ SELECT objstore_get(?blob_id) AS data;
 | RIF_STATE | 8.4 | Retrieval-Induced Forgetting suppression |
 | EMOTIONAL_TAGS | 8.7 | Flashbulb/emotional consolidation metadata |
 | CONSOLIDATION_CANDIDATES | 9.2 | Consolidation scoring candidates |
+| RECENT_IDS | 8.6 | Novelty detection via ID recency (Algorithm 27) |
+| RECENT_RETRIEVALS | 5.2 | Implicit feedback from retrieval usage |
 
 ## State Resumption
 
@@ -592,5 +604,7 @@ On startup, the processor loads persisted state to continue algorithm evolution:
 7. **`recent_scores`**: Last M composite scores (M = `w_score(T)` from Section 4.1)
 8. **`observed_retention_history`**: Retention observations for stability adaptation
 9. **`working_memory_slots`**: Persisted working memory slots (Section 6.1)
+10. **`recent_ids`**: LRU cache of recently accessed embedding IDs (max 1024)
+11. **`recent_retrievals`**: Cached retrievals for implicit feedback (max 128)
 
 If tables are empty or missing, initialize from knob priors (Sections 2.1, 2.2, 2.3).

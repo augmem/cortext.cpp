@@ -155,37 +155,30 @@ RegisterCoreSchema (SchemaRegistry &registry)
           "CREATE VIRTUAL TABLE IF NOT EXISTS objstore USING objstore()",
 
           // ------------------------------------------------------------------
-          // VEC_EMBEDDINGS - sqlite-vec virtual table (Section 3.1, 5.1-5.4)
-          // Note: sqlite-vec only stores vector for KNN search.
-          // Metadata is stored in separate embeddings_meta table.
+          // EMBEDDINGS - sqlite-vec virtual table with auxiliary columns
+          // (Section 3.1, 5.1-5.4) - single unified table per database.md
+          // Note: sqlite-vec has max 16 auxiliary columns, doesn't support DEFAULTs
+          // embedding_id INTEGER PRIMARY KEY aliases rowid (doesn't count as auxiliary)
           // ------------------------------------------------------------------
-          "CREATE VIRTUAL TABLE IF NOT EXISTS vec_embeddings USING vec0("
-          "  embedding_id INTEGER PRIMARY KEY,"
-          "  embedding float[256]"
-          ")",
-
-          // ------------------------------------------------------------------
-          // EMBEDDINGS_META - Per-embedding state (companion to vec_embeddings)
-          // ------------------------------------------------------------------
-          "CREATE TABLE IF NOT EXISTS embeddings_meta ("
-          "  embedding_id INTEGER PRIMARY KEY,"
-          "  type TEXT,"
-          "  strength REAL NOT NULL DEFAULT 1.0,"
-          "  use_frequency REAL NOT NULL DEFAULT 0.0,"
-          "  stability REAL NOT NULL DEFAULT 1.0,"
-          "  connectivity REAL NOT NULL DEFAULT 0.0,"
-          "  drift_mag REAL NOT NULL DEFAULT 0.0,"
-          "  influence REAL NOT NULL DEFAULT 0.0,"
-          "  sustained_influence REAL NOT NULL DEFAULT 0.0,"
-          "  contextual_gain REAL NOT NULL DEFAULT 0.0,"
-          "  redundancy REAL NOT NULL DEFAULT 0.0,"
-          "  pre_activation REAL NOT NULL DEFAULT 0.0,"
-          "  lability_state REAL NOT NULL DEFAULT 0.0,"
-          "  suppression_count INTEGER NOT NULL DEFAULT 0,"
-          "  cluster_id INTEGER,"
-          "  last_access INTEGER,"
-          "  created_at INTEGER,"
-          "  last_strength_update_ts INTEGER"
+          "CREATE VIRTUAL TABLE IF NOT EXISTS embeddings USING vec0("
+          "embedding_id INTEGER PRIMARY KEY,"
+          "embedding float[256],"
+          "+type text,"
+          "+strength float,"
+          "+use_frequency float,"
+          "+stability float,"
+          "+connectivity float,"
+          "+drift_mag float,"
+          "+influence float,"
+          "+sustained_influence float,"
+          "+contextual_gain float,"
+          "+redundancy float,"
+          "+pre_activation float,"
+          "+lability_state float,"
+          "+suppression_count integer,"
+          "+cluster_id integer,"
+          "+last_access integer,"
+          "+created_at integer"
           ")",
 
           // ------------------------------------------------------------------
@@ -346,17 +339,6 @@ RegisterCoreSchema (SchemaRegistry &registry)
           ")",
 
           // ------------------------------------------------------------------
-          // GENERATION_TRACE - Output influence tracking (Section 5.4)
-          // ------------------------------------------------------------------
-          "CREATE TABLE IF NOT EXISTS generation_trace ("
-          "  id INTEGER PRIMARY KEY,"
-          "  embedding BLOB NOT NULL,"
-          "  timestamp INTEGER NOT NULL,"
-          "  semantic_drift REAL"
-          ")",
-          "CREATE INDEX IF NOT EXISTS idx_generation_trace_ts ON generation_trace(timestamp)",
-
-          // ------------------------------------------------------------------
           // EPISODES - Episodic boundaries (Section 3.1.3)
           // ------------------------------------------------------------------
           "CREATE TABLE IF NOT EXISTS episodes ("
@@ -461,9 +443,6 @@ RegisterCoreSchema (SchemaRegistry &registry)
           // Embedding prediction (Section 3.1.4)
           "  last_embedding BLOB,"
           "  delta_x_trend BLOB,"
-          // Generation tracking (Section 5.4)
-          "  generation_centroid BLOB,"
-          "  drift_mag_generation REAL NOT NULL DEFAULT 0.0,"
           "  delta_half_life_adj REAL NOT NULL DEFAULT 0.0,"
           "  sustained_influence REAL NOT NULL DEFAULT 0.0,"
           // Working memory (Section 6.1)
@@ -492,7 +471,9 @@ RegisterCoreSchema (SchemaRegistry &registry)
           "  stability_priors_initialized INTEGER NOT NULL DEFAULT 0,"
           // Timestamps
           "  last_signal_timestamp INTEGER NOT NULL DEFAULT 0,"
-          "  updated_at INTEGER NOT NULL DEFAULT 0"
+          "  updated_at INTEGER NOT NULL DEFAULT 0,"
+          // Rate window (Section 2.2)
+          "  write_rate_timestamps BLOB"
           ")",
 
           // ------------------------------------------------------------------
@@ -584,6 +565,31 @@ RegisterCoreSchema (SchemaRegistry &registry)
           "  embedding BLOB NOT NULL"
           ")",
           "CREATE INDEX IF NOT EXISTS idx_wm_slots_index ON working_memory_slots(slot_index)",
+
+          // ------------------------------------------------------------------
+          // RECENT_IDS - LRU tracking for novelty detection (Section 8.6, Algorithm 27)
+          // ------------------------------------------------------------------
+          "CREATE TABLE IF NOT EXISTS recent_ids ("
+          "  id INTEGER PRIMARY KEY,"
+          "  embedding_id INTEGER NOT NULL,"
+          "  access_type INTEGER NOT NULL,"  // 0=inserted, 1=retrieved
+          "  timestamp INTEGER NOT NULL,"
+          "  seq_order INTEGER NOT NULL"
+          ")",
+          "CREATE INDEX IF NOT EXISTS idx_recent_ids_embedding ON recent_ids(embedding_id)",
+          "CREATE INDEX IF NOT EXISTS idx_recent_ids_seq ON recent_ids(seq_order)",
+
+          // ------------------------------------------------------------------
+          // RECENT_RETRIEVALS - Implicit feedback cache (Section 5.2)
+          // ------------------------------------------------------------------
+          "CREATE TABLE IF NOT EXISTS recent_retrievals ("
+          "  id INTEGER PRIMARY KEY,"
+          "  embedding_id INTEGER NOT NULL,"
+          "  timestamp INTEGER NOT NULL,"
+          "  seq_order INTEGER NOT NULL"
+          ")",
+          "CREATE INDEX IF NOT EXISTS idx_recent_retrievals_embedding ON recent_retrievals(embedding_id)",
+          "CREATE INDEX IF NOT EXISTS idx_recent_retrievals_seq ON recent_retrievals(seq_order)",
       },
   });
 }

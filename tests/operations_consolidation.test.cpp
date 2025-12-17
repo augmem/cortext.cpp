@@ -192,7 +192,7 @@ TEST_CASE ("Alg28 interval trigger starts when elapsed exceeds interval",
   processor.Flush ();
 }
 
-// Helper op that seeds vec_embeddings with test data.
+// Helper op that seeds embeddings with test data.
 struct SeedVecEmbeddingsOp : IOperation
 {
   SeedVecEmbeddingsOp (long long count) : count_ (count) {}
@@ -205,7 +205,7 @@ struct SeedVecEmbeddingsOp : IOperation
     for (long long i = 1; i <= count_; ++i)
       {
         store->Execute (
-            "INSERT INTO vec_embeddings(embedding_id, embedding) VALUES (?,?)",
+            "INSERT INTO embeddings(embedding_id, embedding) VALUES (?,?)",
             { i, emb });
       }
   }
@@ -312,12 +312,12 @@ TEST_CASE ("Alg29 scores and marks low-strength candidates",
   processor.Process (dummy);
   processor.Flush ();
 
-  // Seed embeddings_meta with two rows: one below, one above the floor.
+  // Seed embeddings with two rows: one below, one above the floor.
   store->Execute (
-      "INSERT INTO embeddings_meta(embedding_id, strength) VALUES(?,?)",
+      "INSERT INTO embeddings(embedding_id, strength) VALUES(?,?)",
       { 1LL, 0.10 });
   store->Execute (
-      "INSERT INTO embeddings_meta(embedding_id, strength) VALUES(?,?)",
+      "INSERT INTO embeddings(embedding_id, strength) VALUES(?,?)",
       { 2LL, 0.80 });
 
   // Calculate score and floor using same formulas as ScoreConsolidation
@@ -338,7 +338,7 @@ TEST_CASE ("Alg29 scores and marks low-strength candidates",
       "        + (?4 * COALESCE(em.stability, 0.0))) AS computed_score, "
       "       ?5 AS created_at, "
       "       'score_below_floor' AS reason "
-      "FROM embeddings_meta em "
+      "FROM embeddings em "
       "WHERE ((?1 * COALESCE(em.strength, 1.0)) "
       "       - (?2 * COALESCE(em.redundancy, 0.0)) "
       "       + (?3 * COALESCE(em.connectivity, 0.0)) "
@@ -388,7 +388,7 @@ TEST_CASE ("Alg29 is idempotent on repeated runs",
 
   // Seed test data
   store->Execute (
-      "INSERT INTO embeddings_meta(embedding_id, strength) VALUES(?,?)",
+      "INSERT INTO embeddings(embedding_id, strength) VALUES(?,?)",
       { 3LL, 0.15 }); // below floor at T=1.0
 
   const double T = cfg.stability;
@@ -407,7 +407,7 @@ TEST_CASE ("Alg29 is idempotent on repeated runs",
         "        + (?4 * COALESCE(em.stability, 0.0))) AS computed_score, "
         "       ?5 AS created_at, "
         "       'score_below_floor' AS reason "
-        "FROM embeddings_meta em "
+        "FROM embeddings em "
         "WHERE ((?1 * COALESCE(em.strength, 1.0)) "
         "       - (?2 * COALESCE(em.redundancy, 0.0)) "
         "       + (?3 * COALESCE(em.connectivity, 0.0)) "

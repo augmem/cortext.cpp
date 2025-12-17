@@ -86,7 +86,7 @@ ApplyRIFRecovery (OperationContext &context, long long now_ts,
 {
   {
     BufferedWriteInstruction op;
-    op.query = "UPDATE embeddings_meta "
+    op.query = "UPDATE embeddings "
                "SET strength = MAX(0.0, strength + ("
                "  SELECT suppression * ("
                "    CASE "
@@ -96,10 +96,10 @@ ApplyRIFRecovery (OperationContext &context, long long now_ts,
                "    END"
                "  )"
                "  FROM rif_state WHERE rif_state.embedding_id = "
-               "embeddings_meta.embedding_id"
+               "embeddings.embedding_id"
                ")) "
                "WHERE EXISTS (SELECT 1 FROM rif_state WHERE "
-               "rif_state.embedding_id = embeddings_meta.embedding_id);";
+               "rif_state.embedding_id = embeddings.embedding_id);";
     op.params = { now_ts, now_ts, recovery_time, now_ts, recovery_time };
     context.AddWriteInstruction (std::move (op));
   }
@@ -185,17 +185,7 @@ ApplyLateralInhibition (const std::vector<Candidate> &winners,
         {
           continue;
         }
-      {
-        BufferedWriteInstruction op;
-        op.query = "INSERT INTO embeddings_meta "
-                   "(embedding_id, strength, contextual_gain, use_frequency, "
-                   "lability_state) "
-                   "SELECT ?, 1.0, 0.0, 0.0, 0.0 "
-                   "WHERE NOT EXISTS (SELECT 1 FROM "
-                   "embeddings_meta WHERE embedding_id = ?)";
-        op.params = { loser.id, loser.id };
-        context.AddWriteInstruction (std::move (op));
-      }
+      // Note: embeddings row already exists from storage
       {
         BufferedWriteInstruction op;
         op.query = "INSERT OR IGNORE INTO rif_state (embedding_id) "
@@ -213,7 +203,7 @@ ApplyLateralInhibition (const std::vector<Candidate> &winners,
       }
       {
         BufferedWriteInstruction op;
-        op.query = "UPDATE embeddings_meta "
+        op.query = "UPDATE embeddings "
                    "SET strength = MAX(0.0, strength - ?) "
                    "WHERE embedding_id = ?;";
         op.params = { total_supp, loser.id };

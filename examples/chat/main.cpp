@@ -1,4 +1,6 @@
+#include "chat_window.hpp"
 #include "context_tab.hpp"
+#include "imgui_app.hpp"
 #include "streaming_client.hpp"
 
 #include <cortext/cortext.hpp>
@@ -8,20 +10,7 @@
 #include <cortext/store/sqlite_store.hpp>
 #include <cortext/telemetry/telemetry.hpp>
 
-#include <ftxui/component/component.hpp>
-#include <ftxui/component/component_base.hpp>
-#include <ftxui/component/event.hpp>
-#include <ftxui/component/screen_interactive.hpp>
-#include <ftxui/dom/elements.hpp>
-
 #include <openai/openai.hpp>
-
-#include <opentelemetry/exporters/otlp/otlp_file_exporter_factory.h>
-#include <opentelemetry/exporters/otlp/otlp_file_exporter_options.h>
-#include <opentelemetry/exporters/otlp/otlp_file_metric_exporter_factory.h>
-#include <opentelemetry/exporters/otlp/otlp_file_metric_exporter_options.h>
-#include <opentelemetry/exporters/otlp/otlp_file_log_record_exporter_factory.h>
-#include <opentelemetry/exporters/otlp/otlp_file_log_record_exporter_options.h>
 
 #include <opentelemetry/metrics/provider.h>
 #include <opentelemetry/nostd/shared_ptr.h>
@@ -34,14 +23,23 @@
 #include <opentelemetry/sdk/metrics/meter_provider_factory.h>
 #include <opentelemetry/sdk/metrics/push_metric_exporter.h>
 #include <opentelemetry/sdk/resource/resource.h>
-#include <opentelemetry/sdk/logs/logger_provider.h>
-#include <opentelemetry/sdk/logs/simple_log_record_processor.h>
-#include <opentelemetry/logs/provider.h>
 #include <opentelemetry/sdk/trace/recordable.h>
 #include <opentelemetry/sdk/trace/simple_processor.h>
 #include <opentelemetry/sdk/trace/span_data.h>
 #include <opentelemetry/sdk/trace/exporter.h>
 #include <opentelemetry/sdk/trace/tracer_provider.h>
+#include <opentelemetry/sdk/trace/batch_span_processor.h>
+
+#include <opentelemetry/exporters/otlp/otlp_grpc_exporter.h>
+#include <opentelemetry/exporters/otlp/otlp_grpc_exporter_options.h>
+#include <opentelemetry/exporters/otlp/otlp_grpc_metric_exporter.h>
+#include <opentelemetry/exporters/otlp/otlp_grpc_metric_exporter_options.h>
+#include <opentelemetry/exporters/otlp/otlp_grpc_log_record_exporter_factory.h>
+#include <opentelemetry/exporters/otlp/otlp_grpc_log_record_exporter_options.h>
+
+#include <opentelemetry/logs/provider.h>
+#include <opentelemetry/sdk/logs/logger_provider_factory.h>
+#include <opentelemetry/sdk/logs/simple_log_record_processor_factory.h>
 
 #include <any>
 #include <atomic>
@@ -54,9 +52,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
-#include <fstream>
-
-// Debug log removed
+#include <iostream>
 #include <mutex>
 #include <optional>
 #include <sstream>
@@ -68,12 +64,6 @@
 #include <map>
 
 namespace {
-
-struct StatusBarState {
-  mutable std::mutex mu;
-  std::optional<double> processing_latency_ms;
-  std::optional<std::int64_t> tokens_used;
-};
 
 struct RetrievalLatencyState {
   std::optional<double> encoder_latency_ms;
@@ -135,7 +125,7 @@ thread_local std::optional<double> InMemorySpanExporter::retrieval_last_hydrate_
 
 class InMemoryMetricExporter final : public opentelemetry::sdk::metrics::PushMetricExporter {
 public:
-  explicit InMemoryMetricExporter(std::shared_ptr<StatusBarState> status_state) : status_state_(std::move(status_state)) {}
+  explicit InMemoryMetricExporter(std::shared_ptr<chat::StatusBarState> status_state) : status_state_(std::move(status_state)) {}
   opentelemetry::sdk::common::ExportResult Export(const opentelemetry::sdk::metrics::ResourceMetrics &data) noexcept override {
     if (!status_state_) { return opentelemetry::sdk::common::ExportResult::kSuccess; }
     std::lock_guard<std::mutex> lock(status_state_->mu);
@@ -173,12 +163,7 @@ public:
     return opentelemetry::sdk::metrics::AggregationTemporality::kDelta;
   }
 private:
-  std::shared_ptr<StatusBarState> status_state_;
-};
-
-struct ChatMessage {
-  std::string role;    // "user" | "assistant" | "system"
-  std::string content; // utf-8
+  std::shared_ptr<chat::StatusBarState> status_state_;
 };
 
 struct StreamingState {
@@ -196,17 +181,20 @@ struct StreamingState {
 };
 
 struct IdleTracker {
+  mutable std::mutex mu;
   std::chrono::steady_clock::time_point last_activity;
   bool consolidation_pending = false;
 
   IdleTracker() : last_activity(std::chrono::steady_clock::now()) {}
 
   void RecordActivity() {
+    std::lock_guard<std::mutex> lock(mu);
     last_activity = std::chrono::steady_clock::now();
     consolidation_pending = true;
   }
 
   bool ShouldConsolidate(double stability) {
+    std::lock_guard<std::mutex> lock(mu);
     if (!consolidation_pending) return false;
     int idle_required = cortext::core::IdleRequiredSeconds(stability);
     auto idle = std::chrono::steady_clock::now() - last_activity;
@@ -214,50 +202,18 @@ struct IdleTracker {
   }
 
   void MarkConsolidated() {
+    std::lock_guard<std::mutex> lock(mu);
     consolidation_pending = false;
   }
 };
 
-enum class MemoryEventType {
-  STORED,
-  RETRIEVED,
-};
-
-struct MemoryEvent {
-  MemoryEventType type;
-  int memory_id;
-  std::string content;
-  std::string source_id;
-  uint64_t timestamp;
-
-  // Per-memory feedback
-  long long retrieved_count = 0;
-  long long used_count = 0;
-
-  // Per-memory metrics (from Memory.metrics - computed when memory was stored)
-  double relevance = 0.0;
-  double mismatch = 0.0;
-  double surprise = 0.0;
-  double rarity = 0.0;
-  double drift = 0.0;
-  double contradiction = 0.0;
-  double utility = 0.0;
-  double periphery = 0.0;
-  double coverage = 0.0;
-  double salience = 0.0;
-  double valence = 0.5;
-  double arousal = 0.0;
-  double composite_score = 0.0;
-  double threshold_t = 0.0;
-};
-
-MemoryEvent
-CreateMemoryEvent (MemoryEventType type,
-                   const cortext::Cortext::Context::Memory &mem)
+chat::MemoryEvent
+CreateMemoryEvent(chat::MemoryEventType type,
+                  const cortext::Cortext::Context::Memory &mem)
 {
-  MemoryEvent evt;
+  chat::MemoryEvent evt;
   evt.type = type;
-  evt.memory_id = static_cast<int> (mem.id);
+  evt.memory_id = static_cast<int>(mem.id);
   evt.content = mem.content;
   evt.source_id = mem.source_id;
   evt.timestamp = mem.timestamp;
@@ -282,14 +238,14 @@ CreateMemoryEvent (MemoryEventType type,
   return evt;
 }
 
-MemoryEvent
-CreateStoredEvent (long long embedding_id, const std::string &content,
-                   const std::string &source_id, uint64_t ts,
-                   const cortext::Cortext::ProcessorOutput &output)
+chat::MemoryEvent
+CreateStoredEvent(long long embedding_id, const std::string &content,
+                  const std::string &source_id, uint64_t ts,
+                  const cortext::Cortext::ProcessorOutput &output)
 {
-  MemoryEvent evt;
-  evt.type = MemoryEventType::STORED;
-  evt.memory_id = static_cast<int> (embedding_id);
+  chat::MemoryEvent evt;
+  evt.type = chat::MemoryEventType::STORED;
+  evt.memory_id = static_cast<int>(embedding_id);
   evt.content = content;
   evt.source_id = source_id;
   evt.timestamp = ts;
@@ -297,67 +253,27 @@ CreateStoredEvent (long long embedding_id, const std::string &content,
   evt.used_count = 0;
 
   using M = cortext::operations::Metric;
-  auto get = [&] (M m) -> double {
-    auto it = output.metrics.find (static_cast<int> (m));
-    return it != output.metrics.end () ? it->second : 0.0;
+  auto get = [&](M m) -> double {
+    auto it = output.metrics.find(static_cast<int>(m));
+    return it != output.metrics.end() ? it->second : 0.0;
   };
-  evt.relevance = get (M::relevance);
-  evt.mismatch = get (M::mismatch);
-  evt.surprise = get (M::surprise);
-  evt.rarity = get (M::rarity);
-  evt.drift = get (M::drift);
-  evt.contradiction = get (M::contradiction);
-  evt.utility = get (M::utility);
-  evt.periphery = get (M::periphery);
-  evt.coverage = get (M::coverage);
-  evt.salience = get (M::salience);
+  evt.relevance = get(M::relevance);
+  evt.mismatch = get(M::mismatch);
+  evt.surprise = get(M::surprise);
+  evt.rarity = get(M::rarity);
+  evt.drift = get(M::drift);
+  evt.contradiction = get(M::contradiction);
+  evt.utility = get(M::utility);
+  evt.periphery = get(M::periphery);
+  evt.coverage = get(M::coverage);
+  evt.salience = get(M::salience);
   evt.valence = output.valence;
   evt.arousal = output.arousal;
-  evt.composite_score = output.composite_score.value_or (0.0);
-  evt.threshold_t = output.threshold.value_or (0.0);
+  evt.composite_score = output.composite_score.value_or(0.0);
+  evt.threshold_t = output.threshold.value_or(0.0);
 
   return evt;
 }
-
-// Simple stderr/stdout capture buffer
-struct LogEntry {
-  uint64_t id;
-  std::string raw;
-  mutable bool expanded = false;
-};
-
-class LogBuffer {
-public:
-  void Append(const std::string& line) {
-    std::lock_guard<std::mutex> lock(mu_);
-    lines_.push_back({next_id_++, line, false});
-    if (lines_.size() > kMaxLines) {
-      lines_.pop_front();
-    }
-  }
-
-  std::vector<LogEntry> GetEntriesSince(uint64_t last_id) const {
-    std::lock_guard<std::mutex> lock(mu_);
-    std::vector<LogEntry> result;
-    if (lines_.empty()) return result;
-    
-    // valid range check
-    if (last_id >= lines_.back().id) return result;
-    
-    for (const auto& entry : lines_) {
-      if (entry.id > last_id) {
-        result.push_back(entry);
-      }
-    }
-    return result;
-  }
-
-private:
-  static constexpr size_t kMaxLines = 1000;
-  mutable std::mutex mu_;
-  std::deque<LogEntry> lines_;
-  uint64_t next_id_ = 1;
-};
 
 std::string GetEnv(const char* name, const std::string& fallback = {}) {
   const char* v = std::getenv(name);
@@ -413,9 +329,6 @@ std::optional<std::filesystem::path> FindRepoRootFromExe(const char* argv0) {
   return std::nullopt;
 }
 
-// EnsureChatSchema removed (handled by core migrations).
-// PersistTextMemory removed - Cortext handles storage internally via MemoryStorage operation.
-
 std::string FormatTimestampRfc2822(std::uint64_t timestamp) {
   if (timestamp == 0) return "";
   std::time_t t = static_cast<std::time_t>(timestamp);
@@ -423,7 +336,6 @@ std::string FormatTimestampRfc2822(std::uint64_t timestamp) {
   std::tm* tm_ptr = localtime_r(&t, &tm_buf);
   if (!tm_ptr) return "";
   char buf[64];
-  // RFC 2822 format: "Sat, 13 Dec 2025 11:45:00 -0600"
   std::strftime(buf, sizeof(buf), "%a, %d %b %Y %H:%M:%S %z", tm_ptr);
   return std::string(buf);
 }
@@ -451,7 +363,6 @@ std::string FormatMemoriesForSystemPrompt(
   std::ostringstream oss;
   oss << "<memories>\n";
   for (const auto& m : memories) {
-    // Determine source: use source_id if it contains "user" or "assistant", otherwise default
     std::string source = "unknown";
     if (m.source_id.find("user") != std::string::npos) {
       source = "user";
@@ -470,7 +381,6 @@ std::string FormatMemoriesForSystemPrompt(
     }
     oss << " modality=\"" << XmlEscape(modality) << "\">";
 
-    // Content - truncate if too long and escape XML
     std::string c = m.content;
     if (c.size() > 800) c = c.substr(0, 800) + "...";
     oss << XmlEscape(c);
@@ -481,10 +391,8 @@ std::string FormatMemoriesForSystemPrompt(
   return oss.str();
 }
 
-// Build OpenAI messages from conversation history (sliding window) and an
-// optional system prompt.
 template <typename Json>
-Json BuildOpenAIMessages(const std::vector<ChatMessage>& history,
+Json BuildOpenAIMessages(const std::vector<chat::ChatMessage>& history,
                          int window_size,
                          const std::string& injected_system) {
   Json messages = Json::array();
@@ -501,176 +409,9 @@ Json BuildOpenAIMessages(const std::vector<ChatMessage>& history,
   return messages;
 }
 
-class LogListComponent : public ftxui::ComponentBase {
-public:
-  explicit LogListComponent(std::shared_ptr<LogBuffer> buffer) : buffer_(buffer) {
-  }
-
-  using Json = openai::Json;
-
-  struct ParsedLog {
-    std::string timestamp;
-    std::string severity;
-    std::string body;
-    std::map<std::string, std::string> attributes;
-  };
-
-
-  std::optional<std::string> StringifyOtlpAnyValue(const Json& value) {
-    if (value.contains("stringValue") && value["stringValue"].is_string()) {
-      return value["stringValue"].get<std::string>();
-    }
-    if (value.contains("intValue")) {
-      const auto& v = value["intValue"];
-      if (v.is_string()) { return v.get<std::string>(); }
-      if (v.is_number_integer()) { return std::to_string(v.get<long long>()); }
-      if (v.is_number_unsigned()) { return std::to_string(v.get<unsigned long long>()); }
-    }
-    if (value.contains("doubleValue")) {
-      const auto& v = value["doubleValue"];
-      if (v.is_number_float() || v.is_number_integer() || v.is_number_unsigned()) {
-        std::ostringstream oss;
-        oss << std::setprecision(17) << v.get<double>();
-        return oss.str();
-      }
-    }
-    if (value.contains("boolValue") && value["boolValue"].is_boolean()) {
-      return value["boolValue"].get<bool>() ? "true" : "false";
-    }
-    return std::nullopt;
-  }
-
-  bool IsLikelyOtlpLogLine(const std::string& line) {
-    if (line.find('{') == std::string::npos) { return false; }
-    if (line.find("\"resourceLogs\"") == std::string::npos) { return false; }
-    if (line.find("\"logRecords\"") == std::string::npos) { return false; }
-    return true;
-  }
-
-  ParsedLog ParseLogLine(const std::string& line) {
-    ParsedLog result;
-    size_t json_start = line.find('{');
-    if (json_start == std::string::npos) {
-      result.body = line;
-      return result;
-    }
-
-    std::string json_str = line.substr(json_start);
-    try {
-      auto j = Json::parse(json_str);
-      if (j.contains("resourceLogs") && !j["resourceLogs"].empty()) {
-        auto& rl = j["resourceLogs"][0];
-        if (rl.contains("scopeLogs") && !rl["scopeLogs"].empty()) {
-          auto& sl = rl["scopeLogs"][0];
-          if (sl.contains("logRecords") && !sl["logRecords"].empty()) {
-            auto& lr = sl["logRecords"][0];
-            
-            if (lr.contains("body") && lr["body"].contains("stringValue")) {
-              result.body = lr["body"]["stringValue"].get<std::string>();
-            }
-            if (lr.contains("severityText")) {
-              result.severity = lr["severityText"].get<std::string>();
-            }
-            // Additional attribute parsing if needed...
-            if (lr.contains("attributes") && lr["attributes"].is_array()) {
-              for (const auto& attr : lr["attributes"]) {
-                if (attr.contains("key") && attr.contains("value")) {
-                   std::string key = attr["key"].get<std::string>();
-                   const std::optional<std::string> str = StringifyOtlpAnyValue(attr["value"]);
-                   if (str.has_value()) { result.attributes[key] = *str; }
-                }
-              }
-            }
-          }
-        }
-      }
-    } catch (...) {
-      result.body = line;
-    }
-    if (result.body.empty()) result.body = line;
-    return result;
-  }
-
-  ftxui::Element Render() {
-    ftxui::Elements lines;
-    lines.push_back(ftxui::text("System Logs (OpenTelemetry)") | ftxui::bold);
-    lines.push_back(ftxui::separator());
-
-    if (parsed_logs_.empty()) {
-      lines.push_back(ftxui::text("(no logs yet)") | ftxui::color(ftxui::Color::GrayDark));
-    } else {
-      // Show most recent logs first (reversed)
-      for (auto it = parsed_logs_.rbegin(); it != parsed_logs_.rend(); ++it) {
-        const auto& log = *it;
-
-        // Severity + body header
-        auto severity_color = ftxui::Color::White;
-        if (log.severity == "ERROR") severity_color = ftxui::Color::Red;
-        else if (log.severity == "WARN") severity_color = ftxui::Color::Yellow;
-        else if (log.severity == "INFO") severity_color = ftxui::Color::Green;
-        else if (log.severity == "DEBUG") severity_color = ftxui::Color::Cyan;
-
-        std::string header = log.body;
-        if (!log.severity.empty()) {
-          header = "[" + log.severity + "] " + header;
-        }
-        // Truncate long headers
-        if (header.size() > 100) header = header.substr(0, 100) + "...";
-        lines.push_back(ftxui::text(header) | ftxui::color(severity_color));
-
-        // Show attributes
-        for (const auto& [k, v] : log.attributes) {
-          std::string attr_line = "  " + k + ": " + v;
-          if (attr_line.size() > 120) attr_line = attr_line.substr(0, 120) + "...";
-          lines.push_back(ftxui::hbox({
-              ftxui::text("  "),
-              ftxui::text(k) | ftxui::color(ftxui::Color::Cyan),
-              ftxui::text(": "),
-              ftxui::text(v.size() > 80 ? v.substr(0, 80) + "..." : v) | ftxui::color(ftxui::Color::Yellow)
-          }));
-        }
-
-        lines.push_back(ftxui::separator());
-      }
-    }
-
-    return ftxui::vbox(std::move(lines))
-           | ftxui::focusPositionRelative(0, scroll_position_)
-           | ftxui::vscroll_indicator
-           | ftxui::yframe;
-  }
-
-  void SetScrollPosition(float pos) { scroll_position_ = pos; }
-  float GetScrollPosition() const { return scroll_position_; }
-
-  void Sync() {
-    auto new_entries = buffer_->GetEntriesSince(last_seen_id_);
-    for (const auto& entry : new_entries) {
-      last_seen_id_ = entry.id;
-      if (!IsLikelyOtlpLogLine(entry.raw)) {
-        continue;
-      }
-      ParsedLog parsed = ParseLogLine(entry.raw);
-      parsed_logs_.push_back(std::move(parsed));
-    }
-    // Keep max 200 entries
-    while (parsed_logs_.size() > 200) {
-      parsed_logs_.pop_front();
-    }
-  }
-
-private:
-  std::shared_ptr<LogBuffer> buffer_;
-  uint64_t last_seen_id_ = 0;
-  float scroll_position_ = 0.0f;  // Start at top (newest first)
-  std::deque<ParsedLog> parsed_logs_;
-};
-
 } // namespace
 
 int main(int argc, char** argv) {
-  // Shared log buffer for logs view.
-  auto log_buffer = std::make_shared<LogBuffer>();
   const bool has_models_env = HasEnv("CORTEXT_MODELS_DIR");
   const bool has_db_env = HasEnv("CORTEXT_CHAT_DB");
 
@@ -688,9 +429,6 @@ int main(int argc, char** argv) {
   std::filesystem::path db_path = GetEnv("CORTEXT_CHAT_DB", "examples/chat/chat_memory.db");
   std::filesystem::path models_dir = GetEnv("CORTEXT_MODELS_DIR", "models/imagebind");
 
-  // If defaults are used (env var not set), interpret relative paths as relative
-  // to the repo root (when available). This makes VSCode/CMake launches robust
-  // even when cwd is the build folder.
   if (!has_models_env && models_dir.is_relative() && repo_root.has_value()) {
     models_dir = *repo_root / models_dir;
   }
@@ -698,7 +436,6 @@ int main(int argc, char** argv) {
     db_path = *repo_root / db_path;
   }
 
-  // Ensure DB parent directory exists.
   try {
     if (!db_path.empty()) {
       std::error_code ec;
@@ -708,82 +445,66 @@ int main(int argc, char** argv) {
       }
     }
   } catch (...) {
-    // Best effort; SQLite open will fail with a useful error.
   }
 
-  auto status_state = std::make_shared<StatusBarState>();
+  auto status_state = std::make_shared<chat::StatusBarState>();
   auto retrieval_latency_state = std::make_shared<RetrievalLatencyState>();
   auto last_tokens_used = std::make_shared<std::atomic<std::int64_t>>(0);
   auto last_context = std::make_shared<chat::LastContext>();
+
+  // OpenTelemetry setup
+  // OTLP gRPC exporters auto-read from OTEL_EXPORTER_OTLP_* environment variables:
+  //   OTEL_EXPORTER_OTLP_ENDPOINT, OTEL_EXPORTER_OTLP_HEADERS, OTEL_EXPORTER_OTLP_COMPRESSION
   {
     namespace trace_sdk = opentelemetry::sdk::trace;
     namespace metrics_sdk = opentelemetry::sdk::metrics;
-    namespace logs_sdk = opentelemetry::sdk::logs;
     namespace resource_sdk = opentelemetry::sdk::resource;
-    namespace otlp_exporter = opentelemetry::exporter::otlp;
-    const std::filesystem::path jsonl_path_default = db_path.parent_path() / "otel.jsonl";
-    const std::string jsonl_path = GetEnv("CORTEXT_CHAT_OTEL_JSONL", jsonl_path_default.string());
-    auto MakeSiblingPath = [](const std::string &path, const std::string &suffix) -> std::string {
-      const std::string ext = ".jsonl";
-      if (path.size() >= ext.size() && path.compare(path.size() - ext.size(), ext.size(), ext) == 0) {
-        return path.substr(0, path.size() - ext.size()) + suffix + ext;
-      }
-      return path + suffix;
-    };
-    const std::string trace_path = MakeSiblingPath(jsonl_path, ".traces");
-    const std::string metric_path = MakeSiblingPath(jsonl_path, ".metrics");
-    const std::string log_path = MakeSiblingPath(jsonl_path, ".logs");
+    namespace otlp = opentelemetry::exporter::otlp;
     auto resource = resource_sdk::Resource::Create({{"service.name", "cortext_chat"}});
+
     auto in_memory_span_exporter = std::unique_ptr<trace_sdk::SpanExporter>(new InMemorySpanExporter(retrieval_latency_state));
-    otlp_exporter::OtlpFileClientFileSystemOptions otlp_trace_fs;
-    otlp_trace_fs.file_pattern = trace_path;
-    otlp_trace_fs.alias_pattern = trace_path + ".latest";
-    otlp_trace_fs.flush_interval = std::chrono::milliseconds(200);
-    otlp_trace_fs.flush_count = 1;
-    otlp_exporter::OtlpFileExporterOptions trace_options;
-    trace_options.backend_options = otlp_trace_fs;
-    auto otlp_trace_exporter = otlp_exporter::OtlpFileExporterFactory::Create(trace_options);
-    std::vector<std::unique_ptr<trace_sdk::SpanProcessor>> span_processors;
-    span_processors.push_back(std::unique_ptr<trace_sdk::SpanProcessor>(new trace_sdk::SimpleSpanProcessor(std::move(in_memory_span_exporter))));
-    span_processors.push_back(std::unique_ptr<trace_sdk::SpanProcessor>(new trace_sdk::SimpleSpanProcessor(std::move(otlp_trace_exporter))));
-    auto tracer_provider = opentelemetry::nostd::shared_ptr<opentelemetry::trace::TracerProvider>(new trace_sdk::TracerProvider(std::move(span_processors), resource));
-    opentelemetry::trace::Provider::SetTracerProvider(tracer_provider);
-    otlp_exporter::OtlpFileLogRecordExporterOptions log_options;
-    otlp_exporter::OtlpFileClientFileSystemOptions otlp_log_fs;
-    otlp_log_fs.file_pattern = log_path;
-    otlp_log_fs.alias_pattern = log_path + ".latest";
-    otlp_log_fs.flush_interval = std::chrono::milliseconds(200);
-    otlp_log_fs.flush_count = 1;
-    log_options.backend_options = otlp_log_fs;
-    auto otlp_log_exporter = otlp_exporter::OtlpFileLogRecordExporterFactory::Create(log_options);
-    auto log_processor = std::unique_ptr<logs_sdk::LogRecordProcessor>(new logs_sdk::SimpleLogRecordProcessor(std::move(otlp_log_exporter)));
-    auto logger_provider = opentelemetry::nostd::shared_ptr<opentelemetry::logs::LoggerProvider>(new logs_sdk::LoggerProvider(std::move(log_processor), resource));
-    opentelemetry::logs::Provider::SetLoggerProvider(logger_provider);
-    auto sdk_meter_provider = metrics_sdk::MeterProviderFactory::Create(std::unique_ptr<metrics_sdk::ViewRegistry>(new metrics_sdk::ViewRegistry()), resource);
-    auto meter_provider = opentelemetry::nostd::shared_ptr<opentelemetry::metrics::MeterProvider>(sdk_meter_provider.release());
+    auto in_memory_processor = std::unique_ptr<trace_sdk::SpanProcessor>(new trace_sdk::SimpleSpanProcessor(std::move(in_memory_span_exporter)));
+    auto* sdk_tracer_provider = new trace_sdk::TracerProvider(std::move(in_memory_processor), resource);
+
+    // OTLP gRPC trace exporter (reads config from env vars)
     {
-      otlp_exporter::OtlpFileMetricExporterOptions metric_options;
-      otlp_exporter::OtlpFileClientFileSystemOptions otlp_metric_fs;
-      otlp_metric_fs.file_pattern = metric_path;
-      otlp_metric_fs.alias_pattern = metric_path + ".latest";
-      otlp_metric_fs.flush_interval = std::chrono::milliseconds(200);
-      otlp_metric_fs.flush_count = 1;
-      metric_options.backend_options = otlp_metric_fs;
-      auto otlp_metric_exporter = otlp_exporter::OtlpFileMetricExporterFactory::Create(metric_options);
-      metrics_sdk::PeriodicExportingMetricReaderOptions reader_options;
-      reader_options.export_interval_millis = std::chrono::milliseconds(200);
-      reader_options.export_timeout_millis = std::chrono::milliseconds(1000);
-      std::unique_ptr<metrics_sdk::MetricReader> reader(new metrics_sdk::PeriodicExportingMetricReader(std::move(otlp_metric_exporter), reader_options));
-      static_cast<metrics_sdk::MeterProvider*>(meter_provider.get())->AddMetricReader(std::move(reader));
+      otlp::OtlpGrpcExporterOptions trace_opts;
+      auto otlp_exporter = std::unique_ptr<trace_sdk::SpanExporter>(new otlp::OtlpGrpcExporter(trace_opts));
+      trace_sdk::BatchSpanProcessorOptions batch_opts;
+      batch_opts.max_queue_size = 2048;
+      batch_opts.schedule_delay_millis = std::chrono::milliseconds(5000);
+      auto otlp_processor = std::unique_ptr<trace_sdk::SpanProcessor>(new trace_sdk::BatchSpanProcessor(std::move(otlp_exporter), batch_opts));
+      sdk_tracer_provider->AddProcessor(std::move(otlp_processor));
     }
+
+    auto tracer_provider = opentelemetry::nostd::shared_ptr<opentelemetry::trace::TracerProvider>(sdk_tracer_provider);
+    opentelemetry::trace::Provider::SetTracerProvider(tracer_provider);
+
+    auto sdk_meter_provider = metrics_sdk::MeterProviderFactory::Create(std::unique_ptr<metrics_sdk::ViewRegistry>(new metrics_sdk::ViewRegistry()), resource);
+    auto* raw_meter_provider = sdk_meter_provider.release();
+    auto meter_provider = opentelemetry::nostd::shared_ptr<opentelemetry::metrics::MeterProvider>(raw_meter_provider);
+
+    // In-memory metric exporter for status bar
     {
       auto in_memory_metric_exporter = std::unique_ptr<metrics_sdk::PushMetricExporter>(new InMemoryMetricExporter(status_state));
       metrics_sdk::PeriodicExportingMetricReaderOptions reader_options;
-      reader_options.export_interval_millis = std::chrono::milliseconds(200);
-      reader_options.export_timeout_millis = std::chrono::milliseconds(1000);
+      reader_options.export_interval_millis = std::chrono::milliseconds(1000);
+      reader_options.export_timeout_millis = std::chrono::milliseconds(500);
       std::unique_ptr<metrics_sdk::MetricReader> reader(new metrics_sdk::PeriodicExportingMetricReader(std::move(in_memory_metric_exporter), reader_options));
-      static_cast<metrics_sdk::MeterProvider*>(meter_provider.get())->AddMetricReader(std::move(reader));
+      static_cast<metrics_sdk::MeterProvider*>(raw_meter_provider)->AddMetricReader(std::move(reader));
     }
+
+    // OTLP gRPC metric exporter (reads config from env vars)
+    {
+      otlp::OtlpGrpcMetricExporterOptions metric_opts;
+      auto otlp_metric_exporter = std::unique_ptr<metrics_sdk::PushMetricExporter>(new otlp::OtlpGrpcMetricExporter(metric_opts));
+      metrics_sdk::PeriodicExportingMetricReaderOptions reader_options;
+      reader_options.export_interval_millis = std::chrono::milliseconds(10000);
+      reader_options.export_timeout_millis = std::chrono::milliseconds(5000);
+      std::unique_ptr<metrics_sdk::MetricReader> reader(new metrics_sdk::PeriodicExportingMetricReader(std::move(otlp_metric_exporter), reader_options));
+      static_cast<metrics_sdk::MeterProvider*>(raw_meter_provider)->AddMetricReader(std::move(reader));
+    }
+
     opentelemetry::metrics::Provider::SetMeterProvider(meter_provider);
     auto meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("chat");
     static auto tokens_gauge = meter->CreateInt64ObservableGauge("chat.tokens_used", "Tokens used for last response", "1");
@@ -793,20 +514,18 @@ int main(int argc, char** argv) {
       opentelemetry::nostd::visit([&](auto &r) { if (r) { r->Observe(v); } }, result);
     };
     tokens_gauge->AddCallback(observe_tokens, last_tokens_used.get());
-  }
-  // Compute JSONL file locations again here for tailing in UI.
-  auto MakeSiblingPathUI = [](const std::string &path, const std::string &suffix) -> std::string {
-    const std::string ext = ".jsonl";
-    if (path.size() >= ext.size() && path.compare(path.size() - ext.size(), ext.size(), ext) == 0) {
-      return path.substr(0, path.size() - ext.size()) + suffix + ext;
+
+    // OTLP gRPC log exporter (reads config from env vars)
+    {
+      namespace logs_sdk = opentelemetry::sdk::logs;
+      otlp::OtlpGrpcLogRecordExporterOptions log_opts;
+      auto log_exporter = otlp::OtlpGrpcLogRecordExporterFactory::Create(log_opts);
+      auto log_processor = logs_sdk::SimpleLogRecordProcessorFactory::Create(std::move(log_exporter));
+      auto logger_provider = logs_sdk::LoggerProviderFactory::Create(std::move(log_processor), resource);
+      opentelemetry::logs::Provider::SetLoggerProvider(
+          opentelemetry::nostd::shared_ptr<opentelemetry::logs::LoggerProvider>(logger_provider.release()));
     }
-    return path + suffix;
-  };
-  const std::filesystem::path jsonl_path_default_ui = db_path.parent_path() / "otel.jsonl";
-  const std::string jsonl_path_ui = GetEnv("CORTEXT_CHAT_OTEL_JSONL", jsonl_path_default_ui.string());
-  const std::string log_path_ui = MakeSiblingPathUI(jsonl_path_ui, ".logs");
-  const std::string log_alias_ui = log_path_ui + ".latest";
-  // DebugLog("Main: Log alias UI: " + log_alias_ui);
+  }
   {
     cortext::telemetry::ScopedSpan span("chat.startup");
     span.SetStatusOk();
@@ -818,13 +537,11 @@ int main(int argc, char** argv) {
   const double sensitivity = GetEnvDouble("CORTEXT_SENSITIVITY", 0.5);
   const double stability = GetEnvDouble("CORTEXT_STABILITY", 0.5);
 
-  // Initialize OpenAI client.
   openai::start(api_key, openai_org);
   if (!openai_base_url.empty()) {
     openai::instance().setBaseUrl(EnsureTrailingSlash(openai_base_url));
   }
 
-  // Initialize encoder early so we can fail fast with actionable errors.
   cortext::ImageBindEncoder encoder(models_dir.string());
   try {
     std::vector<float> probe;
@@ -839,7 +556,6 @@ int main(int argc, char** argv) {
     return 1;
   }
 
-  // Initialize cortext.
   cortext::Cortext::Config cfg;
   cfg.focus = focus;
   cfg.sensitivity = sensitivity;
@@ -858,515 +574,64 @@ int main(int argc, char** argv) {
     return 1;
   }
 
-  // UI shared state.
+  // UI shared state
   std::mutex mu;
-  // Serialize all SQLite write operations (both internal processor flushes
-  // and our explicit persistence) to avoid SQLITE_BUSY/LOCKED conflicts.
   static std::mutex db_write_mu;
-  std::vector<ChatMessage> history;
+  std::vector<chat::ChatMessage> history;
   std::vector<cortext::Cortext::Context::Memory> last_memories;
-  std::deque<MemoryEvent> memory_events;
+  std::deque<chat::MemoryEvent> memory_events;
   bool last_should_interrupt = false;
   std::optional<std::string> last_error;
   bool generating = false;
   std::string input;
-  int tab_selected = 0;
   static constexpr size_t kMaxMemoryEvents = 50;
 
-  // Streaming state
   StreamingState streaming_state;
-  std::string partial_response;  // Shows in-progress generation
-  int generation_restarts = 0;   // Count of restarts due to interrupts
+  std::string partial_response;
+  int generation_restarts = 0;
   IdleTracker idle_tracker;
 
-  // Create streaming client
+  // Track streaming thread to ensure proper cleanup before exit
+  std::thread streaming_thread;
+  std::atomic<bool> streaming_thread_active{false};
+
   chat::StreamingChatClient streaming_client(api_key, openai_base_url.empty()
       ? "https://api.openai.com/v1/"
       : openai_base_url);
 
-  // Scroll state for each tab (0.0 = top, 1.0 = bottom)
-  // Context and Logs tabs manage their own scroll state internally
-  float chat_scroll = 1.0f;    // Start at bottom for chat
-  float memory_scroll = 0.0f;
-
-
-  auto screen = ftxui::ScreenInteractive::Fullscreen();
-
-  auto render_chat = [&] {
-    ftxui::Elements lines;
-    std::lock_guard<std::mutex> lock(mu);
-    for (const auto& m : history) {
-      std::string prefix;
-      if (m.role == "user") prefix = "You: ";
-      else if (m.role == "assistant") prefix = "Assistant: ";
-      else prefix = "System: ";
-
-      auto style = ftxui::color(ftxui::Color::White);
-      if (m.role == "user") style = ftxui::color(ftxui::Color::Cyan);
-      if (m.role == "assistant") style = ftxui::color(ftxui::Color::Green);
-      if (m.role == "system") style = ftxui::color(ftxui::Color::GrayDark);
-
-      lines.push_back(ftxui::text(prefix + m.content) | style);
-      lines.push_back(ftxui::separator());
-    }
-
-    if (generating) {
-      // Show partial streaming response
-      if (!partial_response.empty()) {
-        lines.push_back(ftxui::text("Assistant: " + partial_response)
-                        | ftxui::color(ftxui::Color::Green));
-        lines.push_back(ftxui::separator());
-      }
-      std::string status = "Streaming...";
-      if (generation_restarts > 0) {
-        status += " (restarted " + std::to_string(generation_restarts) + "x with new context)";
-      }
-      lines.push_back(ftxui::text(status) | ftxui::color(ftxui::Color::Yellow));
-    }
-
-    return ftxui::vbox(std::move(lines))
-           | ftxui::focusPositionRelative(0, chat_scroll)
-           | ftxui::vscroll_indicator
-           | ftxui::yframe;
-  };
-
-  auto render_memory = [&] {
-    ftxui::Elements lines;
-    std::lock_guard<std::mutex> lock(mu);
-
-    lines.push_back(ftxui::text("🧠 MEMORY EVENTS (Real-time)") | ftxui::bold);
-    lines.push_back(ftxui::separator());
-
-    lines.push_back(ftxui::text(std::string("Interrupt: ") + (last_should_interrupt ? "⚠️ TRIGGERED" : "✓ None"))
-                    | ftxui::color(last_should_interrupt ? ftxui::Color::Red : ftxui::Color::Green));
-
-    if (last_error.has_value()) {
-      lines.push_back(ftxui::text("Error: " + *last_error) | ftxui::color(ftxui::Color::Red));
-    }
-
-    lines.push_back(ftxui::separator());
-
-    auto fmt = [](double v) {
-      std::ostringstream ss;
-      ss << std::fixed << std::setprecision(2) << v;
-      return ss.str();
-    };
-
-    if (memory_events.empty()) {
-      lines.push_back(ftxui::text("(no memory events yet)") | ftxui::color(ftxui::Color::GrayDark));
-    } else {
-      int shown = 0;
-      for (auto it = memory_events.rbegin(); it != memory_events.rend() && shown < 10; ++it, ++shown) {
-        const auto& evt = *it;
-
-        // Header with type indicator
-        std::string type_icon = (evt.type == MemoryEventType::STORED) ? "💾 STORED" : "🔍 RETRIEVED";
-        auto type_color = (evt.type == MemoryEventType::STORED) ? ftxui::Color::Green : ftxui::Color::Blue;
-
-        lines.push_back(ftxui::text(type_icon + " #" + std::to_string(evt.memory_id))
-                        | ftxui::bold | ftxui::color(type_color));
-
-        if (!evt.source_id.empty()) {
-          lines.push_back(ftxui::text("  source: " + evt.source_id) | ftxui::color(ftxui::Color::GrayDark));
-        }
-
-        // Feedback counts
-        lines.push_back(ftxui::text("  retrieved: " + std::to_string(evt.retrieved_count) +
-                                    " | used: " + std::to_string(evt.used_count))
-                        | ftxui::color(ftxui::Color::GrayLight));
-
-        // Score and threshold
-        lines.push_back(ftxui::text("  score=" + fmt(evt.composite_score) +
-                                    " thresh=" + fmt(evt.threshold_t))
-                        | ftxui::color(ftxui::Color::Yellow));
-
-        // Metrics row 1
-        lines.push_back(ftxui::text("  rel=" + fmt(evt.relevance) +
-                                    " mis=" + fmt(evt.mismatch) +
-                                    " sur=" + fmt(evt.surprise) +
-                                    " rar=" + fmt(evt.rarity))
-                        | ftxui::color(ftxui::Color::Cyan));
-
-        // Metrics row 2
-        lines.push_back(ftxui::text("  drf=" + fmt(evt.drift) +
-                                    " con=" + fmt(evt.contradiction) +
-                                    " utl=" + fmt(evt.utility) +
-                                    " per=" + fmt(evt.periphery))
-                        | ftxui::color(ftxui::Color::Magenta));
-
-        // Metrics row 3
-        lines.push_back(ftxui::text("  cov=" + fmt(evt.coverage) +
-                                    " sal=" + fmt(evt.salience) +
-                                    " val=" + fmt(evt.valence) +
-                                    " aro=" + fmt(evt.arousal))
-                        | ftxui::color(ftxui::Color::Yellow));
-
-        // Content preview
-        std::string preview = evt.content;
-        if (preview.size() > 120) preview = preview.substr(0, 120) + "...";
-        lines.push_back(ftxui::text("  \"" + preview + "\"") | ftxui::color(ftxui::Color::White));
-        lines.push_back(ftxui::separator());
-      }
-    }
-
-    return ftxui::vbox(std::move(lines))
-           | ftxui::focusPositionRelative(0, memory_scroll)
-           | ftxui::vscroll_indicator
-           | ftxui::yframe;
-  };
-
-  // LogListComponent is now globally defined.
-  auto log_list_component = std::make_shared<LogListComponent>(log_buffer);
-  ftxui::Component log_component = log_list_component;
-
-  auto render_status_bar = [&] {
-    std::optional<double> processing_ms;
-    std::optional<std::int64_t> tokens_used;
-    {
-      std::lock_guard<std::mutex> lock(status_state->mu);
-      processing_ms = status_state->processing_latency_ms;
-      tokens_used = status_state->tokens_used;
-    }
-    std::ostringstream oss;
-    if (processing_ms.has_value()) { oss << "proc=" << std::fixed << std::setprecision(1) << *processing_ms << "ms"; }
-    else { oss << "proc=?"; }
-    oss << " | ";
-    if (tokens_used.has_value()) { oss << "tokens=" << *tokens_used; }
-    else { oss << "tokens=?"; }
-    return ftxui::hbox({
-        ftxui::text("Tab: switch | Enter: send | Ctrl+C: quit") | ftxui::color(ftxui::Color::GrayDark),
-        ftxui::filler(),
-        ftxui::text(oss.str())
-    }) | ftxui::border;
-  };
-
-  auto input_component = ftxui::Input(&input, "Type a message...");
-
-  std::vector<std::string> tab_names = {"Chat", "Memory", "Context", "Logs"};
-  auto tab_toggle = ftxui::Toggle(&tab_names, &tab_selected);
-
-  auto tab_container = ftxui::Container::Tab({}, &tab_selected);
-  tab_container->Add(ftxui::Renderer(render_chat));
-  tab_container->Add(ftxui::Renderer(render_memory));
-  tab_container->Add(chat::MakeContextTab(last_context));
-  tab_container->Add(log_component);
-
-  auto root = ftxui::Container::Vertical({
-      tab_toggle,
-      tab_container,
-      input_component,
-  });
-
-  // Make panes look nicer.
-  auto root_renderer = ftxui::Renderer(root, [&] {
-    auto tab_bar = tab_toggle->Render() | ftxui::border;
-    auto content = tab_container->Render() | ftxui::border | ftxui::flex;
-    auto input_box = ftxui::hbox({ftxui::text(" > "), input_component->Render()}) | ftxui::border;
-    auto status_bar = render_status_bar();
-    return ftxui::vbox({tab_bar, content, input_box, status_bar});
-  });
-
-  // Helper to get scroll position pointer for current tab
-  auto get_current_scroll = [&]() -> float* {
-    switch (tab_selected) {
-      case 0: return &chat_scroll;
-      case 1: return &memory_scroll;
-      case 2: return &last_context->scroll_position;
-      default: return nullptr;  // Logs tab has its own handling
-    }
-  };
-
-  // Event handling.
-  auto app = ftxui::CatchEvent(root_renderer, [&, get_current_scroll] (const ftxui::Event& e) {
-    if (e == ftxui::Event::Custom) {
-       log_list_component->Sync();
-       return false;
-    }
-
-    // Handle mouse wheel scrolling
-    if (e.is_mouse()) {
-      constexpr float kScrollStep = 0.05f;
-      auto mouse_event = const_cast<ftxui::Event&>(e).mouse();
-      if (mouse_event.button == ftxui::Mouse::WheelUp) {
-        if (tab_selected == 3) {
-          // Logs tab
-          float pos = log_list_component->GetScrollPosition();
-          log_list_component->SetScrollPosition(std::max(0.0f, pos - kScrollStep));
-        } else if (float* scroll = get_current_scroll()) {
-          *scroll = std::max(0.0f, *scroll - kScrollStep);
-        }
-        return true;
-      }
-      if (mouse_event.button == ftxui::Mouse::WheelDown) {
-        if (tab_selected == 3) {
-          // Logs tab
-          float pos = log_list_component->GetScrollPosition();
-          log_list_component->SetScrollPosition(std::min(1.0f, pos + kScrollStep));
-        } else if (float* scroll = get_current_scroll()) {
-          *scroll = std::min(1.0f, *scroll + kScrollStep);
-        }
-        return true;
-      }
-    }
-
-    // Handle arrow keys for scrolling
-    constexpr float kKeyScrollStep = 0.1f;
-    if (e == ftxui::Event::ArrowUp) {
-      if (tab_selected == 3) {
-        float pos = log_list_component->GetScrollPosition();
-        log_list_component->SetScrollPosition(std::max(0.0f, pos - kKeyScrollStep));
-      } else if (float* scroll = get_current_scroll()) {
-        *scroll = std::max(0.0f, *scroll - kKeyScrollStep);
-      }
-      return true;
-    }
-    if (e == ftxui::Event::ArrowDown) {
-      if (tab_selected == 3) {
-        float pos = log_list_component->GetScrollPosition();
-        log_list_component->SetScrollPosition(std::min(1.0f, pos + kKeyScrollStep));
-      } else if (float* scroll = get_current_scroll()) {
-        *scroll = std::min(1.0f, *scroll + kKeyScrollStep);
-      }
-      return true;
-    }
-
-    if (e == ftxui::Event::Return) {
-      std::string text;
-      {
-        std::lock_guard<std::mutex> lock(mu);
-        if (generating) return true;
-        text = input;
-        input.clear();
-        if (text.empty()) return true;
-        generating = true;
-        last_error.reset();
-        partial_response.clear();
-        generation_restarts = 0;
-        streaming_state.Reset();
-        history.push_back({"user", text});
-      }
-
-      // Record activity for idle tracking
-      idle_tracker.RecordActivity();
-
-      // Launch background job: streaming retrieval + generation + persistence.
-      std::thread([&, text] {
-        const uint64_t ts = NowUnixSeconds();
-
-        // --- Phase 1: Process user input through Cortext (before generation) ---
-        cortext::Cortext::Context retrieved;
-        try {
-          std::lock_guard<std::mutex> lock(db_write_mu);
-          cortext_ctx->Flush();
-          retrieved = cortext_ctx->ProcessText(text, ts, "chat/user");
-        } catch (const std::exception& ex) {
-          std::lock_guard<std::mutex> lock(mu);
-          last_error = std::string("cortext user: ") + ex.what();
-        }
-
-        // Initialize streaming state with retrieved memories
-        {
-          std::lock_guard<std::mutex> lock(mu);
-          streaming_state.current_memories = retrieved.memories;
-          for (const auto& mem : retrieved.memories) {
-            memory_events.push_back(CreateMemoryEvent(MemoryEventType::RETRIEVED, mem));
-            if (memory_events.size() > kMaxMemoryEvents) {
-              memory_events.pop_front();
-            }
-          }
-          if (retrieved.output.stored_embedding_id.has_value()) {
-            memory_events.push_back(CreateStoredEvent(
-                *retrieved.output.stored_embedding_id, text, "chat/user", ts, retrieved.output));
-            if (memory_events.size() > kMaxMemoryEvents) {
-              memory_events.pop_front();
-            }
-          }
-        }
-
-        // --- Phase 2: Streaming generation with interrupt checking ---
-        std::string assistant_reply;
-        int local_restarts = 0;
-
-        while (local_restarts < StreamingState::kMaxRestarts) {
-          // Build system prompt with current memories
-          std::string injected_system;
-          std::vector<ChatMessage> local_history;
-          {
-            std::lock_guard<std::mutex> lock(mu);
-            injected_system = FormatMemoriesForSystemPrompt(streaming_state.current_memories);
-            local_history = history;
-          }
-
-          // Build request
-          using Json = openai::Json;
-          Json messages = BuildOpenAIMessages<Json>(local_history, /*window*/ 10, injected_system);
-
-          // Capture context for the Context tab
-          {
-            std::lock_guard<std::mutex> lock(last_context->mu);
-            last_context->system_prompt = injected_system;
-            last_context->messages.clear();
-            for (const auto& m : messages) {
-              last_context->messages.push_back({m["role"].get<std::string>(), m["content"].get<std::string>()});
-            }
-            Json req_json;
-            req_json["model"] = model;
-            req_json["messages"] = messages;
-            last_context->raw_json = req_json.dump(2);
-            last_context->has_data = true;
-          }
-
-          // Reset streaming state for this attempt
-          {
-            std::lock_guard<std::mutex> lock(mu);
-            streaming_state.accumulated_tokens.clear();
-            streaming_state.cancel_requested.store(false);
-            partial_response.clear();
-          }
-
-          // Build streaming request
-          chat::StreamingRequest request;
-          request.model = model;
-          request.messages = messages;
-          request.temperature = 0.7;
-          request.cancel_flag = &streaming_state.cancel_requested;
-
-          bool interrupted = false;
-
-          // Stream with ProcessText called on every token
-          auto result = streaming_client.Stream(request, [&](const std::string& token, bool done) {
-            if (done || token.empty()) return;
-
-            std::string accumulated;
-            {
-              std::lock_guard<std::mutex> lock(mu);
-              streaming_state.accumulated_tokens += token;
-              accumulated = streaming_state.accumulated_tokens;
-              partial_response = accumulated;
-            }
-
-            // Call ProcessText on every token - Cortext handles gating internally
-            try {
-              cortext::Cortext::Context ctx;
-              {
-                std::lock_guard<std::mutex> lock(db_write_mu);
-                ctx = cortext_ctx->ProcessText(accumulated, NowUnixSeconds(), "chat/assistant-streaming");
-              }
-
-              if (ctx.should_interrupt && local_restarts < StreamingState::kMaxRestarts) {
-                // Cortext decided this is worth interrupting for
-                // Merge new memories with existing
-                {
-                  std::lock_guard<std::mutex> lock(mu);
-                  std::unordered_set<long long> existing_ids;
-                  for (const auto& m : streaming_state.current_memories) {
-                    existing_ids.insert(m.id);
-                  }
-                  for (const auto& m : ctx.memories) {
-                    if (existing_ids.find(m.id) == existing_ids.end()) {
-                      streaming_state.current_memories.push_back(m);
-                      memory_events.push_back(CreateMemoryEvent(MemoryEventType::RETRIEVED, m));
-                      if (memory_events.size() > kMaxMemoryEvents) {
-                        memory_events.pop_front();
-                      }
-                    }
-                  }
-                  last_should_interrupt = true;
-                }
-                streaming_state.cancel_requested.store(true);
-                interrupted = true;
-              }
-            } catch (const std::exception& ex) {
-              // Log but continue streaming
-              std::lock_guard<std::mutex> lock(mu);
-              last_error = std::string("cortext streaming: ") + ex.what();
-            }
-
-            // Update UI
-            screen.PostEvent(ftxui::Event::Custom);
-          });
-
-          // Check if we need to restart
-          if (result.was_cancelled && interrupted && local_restarts < StreamingState::kMaxRestarts) {
-            local_restarts++;
-            {
-              std::lock_guard<std::mutex> lock(mu);
-              generation_restarts = local_restarts;
-            }
-            continue;  // Restart with new memories
-          }
-
-          // Generation complete or error
-          if (result.error.has_value()) {
-            std::lock_guard<std::mutex> lock(mu);
-            last_error = "streaming: " + *result.error;
-            assistant_reply = "(Streaming error: " + *result.error + ")";
-          } else {
-            assistant_reply = result.full_content;
-          }
-          break;
-        }
-
-        // --- Phase 3: Process final assistant reply through Cortext ---
-        try {
-          cortext::Cortext::Context asst_ctx;
-          {
-            std::lock_guard<std::mutex> lock(db_write_mu);
-            asst_ctx = cortext_ctx->ProcessText(assistant_reply, ts + 1, "chat/assistant");
-          }
-
-          if (asst_ctx.output.stored_embedding_id.has_value()) {
-            std::lock_guard<std::mutex> lock(mu);
-            memory_events.push_back(CreateStoredEvent(
-                *asst_ctx.output.stored_embedding_id, assistant_reply, "chat/assistant", ts + 1, asst_ctx.output));
-            while (memory_events.size() > kMaxMemoryEvents) {
-              memory_events.pop_front();
-            }
-          }
-        } catch (const std::exception& ex) {
-          std::lock_guard<std::mutex> lock(mu);
-          last_error = std::string("cortext assistant: ") + ex.what();
-        }
-
-        // --- Phase 4: Post-generation consolidation ---
-        try {
-          std::lock_guard<std::mutex> lock(db_write_mu);
-          cortext_ctx->Consolidate(NowUnixSeconds());
-          cortext_ctx->Flush();
-        } catch (const std::exception& ex) {
-          // Best effort - don't fail on consolidation errors
-        }
-
-        // Record activity after generation completes
-        idle_tracker.RecordActivity();
-
-        // Apply UI updates
-        {
-          std::lock_guard<std::mutex> lock(mu);
-          last_memories = streaming_state.current_memories;
-          history.push_back({"assistant", assistant_reply});
-          generating = false;
-          partial_response.clear();
-        }
-
-        screen.PostEvent(ftxui::Event::Custom);
-      }).detach();
-
-      return true;
-    }
-
-
-
-    return false;
-  });
-
-  // Periodic refresh to update logs and trigger idle consolidation (every 2 seconds)
+  const bool otlp_grpc_enabled = HasEnv("OTEL_EXPORTER_OTLP_ENDPOINT") || HasEnv("OTEL_EXPORTER_OTLP_HEADERS");
+
+  // Create ImGui application
+  chat::ImGuiAppConfig app_config;
+  app_config.title = "Cortext Chat";
+  app_config.width = 1280;
+  app_config.height = 800;
+
+  chat::ImGuiApp app(app_config);
+
+  // Create chat window with references to shared state
+  chat::ChatWindow::State window_state;
+  window_state.mu = &mu;
+  window_state.history = &history;
+  window_state.memory_events = &memory_events;
+  window_state.context = last_context;
+  window_state.status = status_state;
+  window_state.input = &input;
+  window_state.generating = &generating;
+  window_state.partial_response = &partial_response;
+  window_state.generation_restarts = &generation_restarts;
+  window_state.last_should_interrupt = &last_should_interrupt;
+  window_state.last_error = &last_error;
+  window_state.otlp_enabled = otlp_grpc_enabled;
+
+  chat::ChatWindow window(window_state);
+
+  // Background refresh thread for idle consolidation
   std::atomic<bool> running{true};
   std::thread refresh_thread([&] {
     while (running) {
       std::this_thread::sleep_for(std::chrono::seconds(2));
 
-      // Check for idle consolidation
       bool is_generating = false;
       {
         std::lock_guard<std::mutex> lock(mu);
@@ -1379,58 +644,245 @@ int main(int argc, char** argv) {
           cortext_ctx->Consolidate(NowUnixSeconds());
           idle_tracker.MarkConsolidated();
         } catch (const std::exception& ex) {
-          // Best effort - log but don't fail
           std::lock_guard<std::mutex> lock(mu);
           last_error = std::string("idle consolidation: ") + ex.what();
         }
       }
-
-      screen.PostEvent(ftxui::Event::Custom);
     }
   });
 
-  // Background tailer thread to stream JSONL files into the Logs tab.
-  std::thread tail_thread([&, log_alias_ui] {
-    std::map<std::string, std::uintmax_t> offsets; // last read byte offset per file
-    auto try_tail = [&](const std::string &path) {
-      namespace fs = std::filesystem;
-      std::error_code ec;
-      if (!fs::exists(path, ec)) {
-        return; // file not yet created
+  std::cout << "Cortext Chat started. Window opened." << std::endl;
+
+  // Main render loop
+  app.Run([&] {
+    window.Render();
+
+    // Check for pending message from input
+    if (window.HasPendingMessage()) {
+      std::string text = window.TakePendingMessage();
+
+      {
+        std::lock_guard<std::mutex> lock(mu);
+        if (!generating && !text.empty()) {
+          generating = true;
+          last_error.reset();
+          partial_response.clear();
+          generation_restarts = 0;
+          streaming_state.Reset();
+          history.push_back({"user", text});
+        } else {
+          text.clear();
+        }
       }
-      const std::uintmax_t size = fs::file_size(path, ec);
-      if (ec) return;
-      std::uintmax_t &off = offsets[path];
-      if (off > size) {
-        // file rotated or truncated; reset
-        off = 0;
+
+      if (!text.empty()) {
+        idle_tracker.RecordActivity();
+
+        // Wait for any previous streaming thread to complete before starting new one
+        if (streaming_thread.joinable()) {
+          streaming_thread.join();
+        }
+
+        // Launch background job for streaming
+        streaming_thread_active.store(true);
+        streaming_thread = std::thread([&, text, model_copy = model] {
+          const uint64_t ts = NowUnixSeconds();
+
+          // Phase 1: Process user input through Cortext
+          cortext::Cortext::Context retrieved;
+          try {
+            std::lock_guard<std::mutex> lock(db_write_mu);
+            cortext_ctx->Flush();
+            retrieved = cortext_ctx->ProcessText(text, ts, "chat/user");
+          } catch (const std::exception& ex) {
+            std::lock_guard<std::mutex> lock(mu);
+            last_error = std::string("cortext user: ") + ex.what();
+          }
+
+          {
+            std::lock_guard<std::mutex> lock(mu);
+            streaming_state.current_memories = retrieved.memories;
+            for (const auto& mem : retrieved.memories) {
+              memory_events.push_back(CreateMemoryEvent(chat::MemoryEventType::RETRIEVED, mem));
+              if (memory_events.size() > kMaxMemoryEvents) {
+                memory_events.pop_front();
+              }
+            }
+            if (retrieved.output.stored_embedding_id.has_value()) {
+              memory_events.push_back(CreateStoredEvent(
+                  *retrieved.output.stored_embedding_id, text, "chat/user", ts, retrieved.output));
+              if (memory_events.size() > kMaxMemoryEvents) {
+                memory_events.pop_front();
+              }
+            }
+          }
+
+          // Phase 2: Streaming generation with interrupt checking
+          std::string assistant_reply;
+          int local_restarts = 0;
+
+          while (local_restarts < StreamingState::kMaxRestarts) {
+            std::string injected_system;
+            std::vector<chat::ChatMessage> local_history;
+            {
+              std::lock_guard<std::mutex> lock(mu);
+              injected_system = FormatMemoriesForSystemPrompt(streaming_state.current_memories);
+              local_history = history;
+            }
+
+            using Json = openai::Json;
+            Json messages = BuildOpenAIMessages<Json>(local_history, 10, injected_system);
+
+            {
+              std::lock_guard<std::mutex> lock(last_context->mu);
+              last_context->system_prompt = injected_system;
+              last_context->messages.clear();
+              for (const auto& m : messages) {
+                last_context->messages.push_back({m["role"].get<std::string>(), m["content"].get<std::string>()});
+              }
+              Json req_json;
+              req_json["model"] = model_copy;
+              req_json["messages"] = messages;
+              last_context->raw_json = req_json.dump(2);
+              last_context->has_data = true;
+            }
+
+            {
+              std::lock_guard<std::mutex> lock(mu);
+              streaming_state.accumulated_tokens.clear();
+              streaming_state.cancel_requested.store(false);
+              partial_response.clear();
+            }
+
+            chat::StreamingRequest request;
+            request.model = model_copy;
+            request.messages = messages;
+            request.temperature = 0.7;
+            request.cancel_flag = &streaming_state.cancel_requested;
+
+            bool interrupted = false;
+
+            auto result = streaming_client.Stream(request, [&](const std::string& token, bool done) {
+              if (done || token.empty()) return;
+
+              std::string accumulated;
+              {
+                std::lock_guard<std::mutex> lock(mu);
+                streaming_state.accumulated_tokens += token;
+                accumulated = streaming_state.accumulated_tokens;
+                partial_response = accumulated;
+              }
+
+              try {
+                cortext::Cortext::Context ctx;
+                {
+                  std::lock_guard<std::mutex> lock(db_write_mu);
+                  ctx = cortext_ctx->ProcessText(accumulated, NowUnixSeconds(), "chat/assistant-streaming");
+                }
+
+                if (ctx.should_interrupt && local_restarts < StreamingState::kMaxRestarts) {
+                  {
+                    std::lock_guard<std::mutex> lock(mu);
+                    std::unordered_set<long long> existing_ids;
+                    for (const auto& m : streaming_state.current_memories) {
+                      existing_ids.insert(m.id);
+                    }
+                    for (const auto& m : ctx.memories) {
+                      if (existing_ids.find(m.id) == existing_ids.end()) {
+                        streaming_state.current_memories.push_back(m);
+                        memory_events.push_back(CreateMemoryEvent(chat::MemoryEventType::RETRIEVED, m));
+                        if (memory_events.size() > kMaxMemoryEvents) {
+                          memory_events.pop_front();
+                        }
+                      }
+                    }
+                    last_should_interrupt = true;
+                  }
+                  streaming_state.cancel_requested.store(true);
+                  interrupted = true;
+                }
+              } catch (const std::exception& ex) {
+                std::lock_guard<std::mutex> lock(mu);
+                last_error = std::string("cortext streaming: ") + ex.what();
+              }
+            });
+
+            if (result.was_cancelled && interrupted && local_restarts < StreamingState::kMaxRestarts) {
+              local_restarts++;
+              {
+                std::lock_guard<std::mutex> lock(mu);
+                generation_restarts = local_restarts;
+              }
+              continue;
+            }
+
+            if (result.error.has_value()) {
+              std::lock_guard<std::mutex> lock(mu);
+              last_error = "streaming: " + *result.error;
+              assistant_reply = "(Streaming error: " + *result.error + ")";
+            } else {
+              assistant_reply = result.full_content;
+            }
+            break;
+          }
+
+          // Phase 3: Process final assistant reply through Cortext
+          try {
+            cortext::Cortext::Context asst_ctx;
+            {
+              std::lock_guard<std::mutex> lock(db_write_mu);
+              asst_ctx = cortext_ctx->ProcessText(assistant_reply, ts + 1, "chat/assistant");
+            }
+
+            if (asst_ctx.output.stored_embedding_id.has_value()) {
+              std::lock_guard<std::mutex> lock(mu);
+              memory_events.push_back(CreateStoredEvent(
+                  *asst_ctx.output.stored_embedding_id, assistant_reply, "chat/assistant", ts + 1, asst_ctx.output));
+              while (memory_events.size() > kMaxMemoryEvents) {
+                memory_events.pop_front();
+              }
+            }
+          } catch (const std::exception& ex) {
+            std::lock_guard<std::mutex> lock(mu);
+            last_error = std::string("cortext assistant: ") + ex.what();
+          }
+
+          // Phase 4: Post-generation consolidation
+          try {
+            std::lock_guard<std::mutex> lock(db_write_mu);
+            cortext_ctx->Consolidate(NowUnixSeconds());
+            cortext_ctx->Flush();
+          } catch (const std::exception&) {
+          }
+
+          idle_tracker.RecordActivity();
+
+          {
+            std::lock_guard<std::mutex> lock(mu);
+            last_memories = streaming_state.current_memories;
+            history.push_back({"assistant", assistant_reply});
+            generating = false;
+            partial_response.clear();
+          }
+          streaming_thread_active.store(false);
+        });
       }
-      if (size == off) {
-        return; // nothing new
-      }
-      std::ifstream in(path, std::ios::in | std::ios::binary);
-      if (!in) return;
-      in.seekg(static_cast<std::streamoff>(off));
-      std::string line;
-      while (std::getline(in, line)) {
-        if (!line.empty() && line.back() == '\r') line.pop_back();
-        log_buffer->Append(line);
-      }
-      off = static_cast<std::uintmax_t>(in.tellg());
-    };
-    while (running) {
-      try_tail(log_alias_ui);
-      std::this_thread::sleep_for(std::chrono::milliseconds(500));
     }
   });
 
-  screen.Loop(app);
   running = false;
+
+  // Cancel any ongoing streaming if active
+  if (streaming_thread_active.load()) {
+    streaming_state.cancel_requested.store(true);
+  }
+
+  // Wait for threads to complete before cleanup
+  if (streaming_thread.joinable()) {
+    streaming_thread.join();
+  }
   if (refresh_thread.joinable()) {
     refresh_thread.join();
-  }
-  if (tail_thread.joinable()) {
-    tail_thread.join();
   }
 
   try {
@@ -1438,5 +890,6 @@ int main(int argc, char** argv) {
   } catch (...) {
   }
 
+  std::cout << "Cortext Chat exited." << std::endl;
   return 0;
 }

@@ -66,25 +66,40 @@ TEST_CASE ("Alg31 expands vector seeds via graph_edges and returns expanded ids"
   Eigen::VectorXf emb1 = UnitVec256 (1.0f);   // First dimension = 1
   Eigen::VectorXf emb2 = UnitVec256Second (1.0f); // Second dimension = 1
 
-  // Embeddings table with two memories.
-  store->Execute ("CREATE TABLE IF NOT EXISTS embeddings ("
+  // Unified embeddings table using vec0 with auxiliary columns.
+  store->Execute ("CREATE VIRTUAL TABLE IF NOT EXISTS embeddings USING vec0("
                   "embedding_id INTEGER PRIMARY KEY,"
-                  "embedding BLOB"
-                  ");");
-  // vec0 virtual table for KNN search.
-  store->Execute ("CREATE VIRTUAL TABLE IF NOT EXISTS vec_embeddings USING vec0("
-                  "embedding_id INTEGER PRIMARY KEY,"
-                  "embedding float[256]"
+                  "embedding float[256],"
+                  "+type text,"
+                  "+strength float,"
+                  "+use_frequency float,"
+                  "+stability float,"
+                  "+connectivity float,"
+                  "+drift_mag float,"
+                  "+influence float,"
+                  "+sustained_influence float,"
+                  "+contextual_gain float,"
+                  "+redundancy float,"
+                  "+pre_activation float,"
+                  "+lability_state float,"
+                  "+suppression_count integer,"
+                  "+cluster_id integer,"
+                  "+last_access integer,"
+                  "+created_at integer"
                   ");");
 
   // id=1 aligns with query, id=2 does not.
-  store->Execute ("INSERT INTO embeddings(embedding_id, embedding) VALUES (?,?)",
+  store->Execute ("INSERT INTO embeddings(embedding_id, embedding, type, strength, "
+                  "use_frequency, stability, connectivity, drift_mag, influence, "
+                  "sustained_influence, contextual_gain, redundancy, pre_activation, "
+                  "lability_state, suppression_count) VALUES (?,?,'memory',1.0,0.0,"
+                  "1.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0)",
                   { 1LL, ToFloatVec (emb1) });
-  store->Execute ("INSERT INTO embeddings(embedding_id, embedding) VALUES (?,?)",
-                  { 2LL, ToFloatVec (emb2) });
-  store->Execute ("INSERT INTO vec_embeddings(embedding_id, embedding) VALUES (?,?)",
-                  { 1LL, ToFloatVec (emb1) });
-  store->Execute ("INSERT INTO vec_embeddings(embedding_id, embedding) VALUES (?,?)",
+  store->Execute ("INSERT INTO embeddings(embedding_id, embedding, type, strength, "
+                  "use_frequency, stability, connectivity, drift_mag, influence, "
+                  "sustained_influence, contextual_gain, redundancy, pre_activation, "
+                  "lability_state, suppression_count) VALUES (?,?,'memory',1.0,0.0,"
+                  "1.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0)",
                   { 2LL, ToFloatVec (emb2) });
 
   // Graph tables connecting emb:1 -> entity:Alice -> emb:2

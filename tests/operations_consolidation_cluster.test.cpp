@@ -39,7 +39,7 @@ EncodeFloatBlob (const std::vector<float> &v)
   return std::vector<unsigned char> (src, src + v.size () * sizeof (float));
 }
 
-/// @brief Op to seed consolidation_candidates and vec_embeddings.
+/// @brief Op to seed consolidation_candidates and embeddings.
 struct SeedCandidatesOp : IOperation
 {
   struct Candidate
@@ -61,10 +61,13 @@ struct SeedCandidatesOp : IOperation
     auto *store = ctx.GetStore ();
     for (const auto &c : candidates_)
       {
-        auto blob = EncodeFloatBlob (c.embedding);
         store->Execute (
-            "INSERT INTO vec_embeddings(embedding_id, embedding) VALUES(?, ?)",
-            { c.embedding_id, blob });
+            "INSERT INTO embeddings(embedding_id, embedding, type, strength, "
+            "use_frequency, stability, connectivity, drift_mag, influence, "
+            "sustained_influence, contextual_gain, redundancy, pre_activation, "
+            "lability_state, suppression_count) VALUES(?, ?, 'memory', 1.0, 0.0, "
+            "1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0)",
+            { c.embedding_id, c.embedding });
         store->Execute (
             "INSERT INTO consolidation_candidates(embedding_id, score, "
             "created_at, reason) VALUES(?, ?, ?, ?)",

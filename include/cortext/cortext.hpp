@@ -7,6 +7,8 @@
 #include <unordered_map>
 #include <vector>
 
+#include "cortext/export.hpp"
+
 namespace cortext
 {
 
@@ -17,7 +19,7 @@ enum class Metric;
 }
 
 /// @brief High-level entrypoint for Cortext with tri-modal process stubs.
-class Cortext
+class CORTEXT_EXPORT Cortext
 {
 public:
   /// @brief Simplified output metrics from processor.

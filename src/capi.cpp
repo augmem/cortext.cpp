@@ -59,6 +59,10 @@ extern "C"
   void
   cortext_free (cortext_handle h)
   {
+    if (!h)
+      {
+        return; // Safe no-op for NULL handle
+      }
     auto *p = cast_handle (h);
     delete p;
   }

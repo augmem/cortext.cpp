@@ -171,22 +171,11 @@ ApplyPredictivePreActivation::Execute (OperationContext &context) const
       if (delta > constants::kGainSmall)
         delta = constants::kGainSmall;
 
-      // Ensure embeddings_meta row exists with strength
+      // Update embeddings strength (row exists from storage)
       {
         BufferedWriteInstruction op;
-        op.query = "INSERT INTO embeddings_meta "
-                   "(embedding_id, strength, contextual_gain, use_frequency, "
-                   "lability_state) "
-                   "SELECT ?, 1.0, 0.0, 0.0, 0.0 "
-                   "WHERE NOT EXISTS (SELECT 1 FROM "
-                   "embeddings_meta WHERE embedding_id = ?)";
-        op.params = { id, id };
-        context.AddWriteInstruction (std::move (op));
-      }
-      {
-        BufferedWriteInstruction op;
-        op.query = "UPDATE embeddings_meta "
-                   "SET strength = MIN(?, strength + ?) "
+        op.query = "UPDATE embeddings "
+                   "SET strength = MIN(?, COALESCE(strength, 1.0) + ?) "
                    "WHERE embedding_id = ?;";
         op.params = { kStrengthMax, delta, id };
         context.AddWriteInstruction (std::move (op));

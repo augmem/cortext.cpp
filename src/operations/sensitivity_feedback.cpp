@@ -53,8 +53,8 @@ ComputeRedundancy (Store *store, int64_t embedding_id, int k)
 
   // Query kNN neighbors for this embedding (k+1 to exclude self at distance 0)
   auto rows = store->Execute (
-      "SELECT distance FROM vec_embeddings "
-      "WHERE embedding MATCH (SELECT embedding FROM embeddings WHERE rowid = ?) "
+      "SELECT distance FROM embeddings "
+      "WHERE embedding MATCH (SELECT embedding FROM embeddings WHERE embedding_id = ?) "
       "ORDER BY distance LIMIT ?",
       { embedding_id, static_cast<long long> (k + 1) });
 
@@ -140,10 +140,10 @@ ApplySensitivityFeedback::Execute (OperationContext &context) const
           = core::Clamp (p_ctx.weight_novelty + adjustment,
                          constants::kNormalizedMin, constants::kNormalizedMax);
 
-      // Store computed redundancy in embeddings_meta for consolidation scoring
+      // Store computed redundancy in embeddings for consolidation scoring
       // (Section 9.2: score = T*strength - F*redundancy + S*connectivity + T*stability)
       BufferedWriteInstruction op;
-      op.query = "UPDATE embeddings_meta SET redundancy = ? WHERE embedding_id = ?";
+      op.query = "UPDATE embeddings SET redundancy = ? WHERE embedding_id = ?";
       op.params = { redundancy, e.embedding_id };
       context.AddWriteInstruction (std::move (op));
     }

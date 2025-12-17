@@ -5,6 +5,7 @@
 #include "cortext/core/knobs.hpp"
 #include "cortext/core/utils.hpp"
 #include "cortext/processor/operation_context.hpp"
+#include "cortext/store/schema_helpers.hpp"
 #include "cortext/store/store.hpp"
 #include <Eigen/Dense>
 #include <any>
@@ -228,10 +229,10 @@ DetectConceptNodes::Execute (OperationContext &context) const
           continue;
         }
 
-      // Insert concept embedding into vec_embeddings
+      // Insert concept embedding into embeddings
       // First get next embedding_id
       auto id_rows = store->Execute (
-          "SELECT COALESCE(MAX(embedding_id), 0) + 1 AS next_id FROM vec_embeddings",
+          "SELECT COALESCE(MAX(embedding_id), 0) + 1 AS next_id FROM embeddings",
           {});
 
       long long embedding_id = 1;
@@ -248,10 +249,12 @@ DetectConceptNodes::Execute (OperationContext &context) const
       std::vector<float> centroid_vec (centroid.data (),
                                        centroid.data () + centroid.size ());
 
-      // Insert concept embedding
-      Add (context,
-           "INSERT INTO vec_embeddings (embedding_id, embedding) VALUES (?1, ?2)",
-           { embedding_id, centroid_vec });
+      // Insert concept embedding with all required fields
+      const std::string concept_sql
+          = std::string ("INSERT INTO embeddings (")
+            + store::kEmbeddingsReconsolidateColumns + ") VALUES ("
+            + store::kEmbeddingsConceptDefaults + ")";
+      Add (context, concept_sql, { embedding_id, centroid_vec });
 
       // Create concept node in graph_nodes
       Add (context,

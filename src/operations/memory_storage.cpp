@@ -1,10 +1,12 @@
 #include "cortext/operations/memory_storage.hpp"
 #include "cortext/processor/operation_context.hpp"
 #include "cortext/signal.hpp"
+#include "cortext/store/schema_helpers.hpp"
 #include "cortext/store/store.hpp"
 #include "cortext/store/utils.hpp"
 #include "cortext/telemetry/telemetry.hpp"
 #include <cstring>
+#include <string>
 
 namespace cortext::operations
 {
@@ -70,9 +72,13 @@ MemoryStorage::Execute (OperationContext &context) const
           return;
         }
 
-      // 2. Insert embedding
-      transaction->Execute ("INSERT INTO embeddings (embedding) VALUES (?)",
-                            { emb_blob });
+      // 2. Insert embedding with initial metadata (unified embeddings table)
+      // Note: sqlite-vec doesn't support DEFAULT values, so we must set all fields
+      const std::string insert_sql = std::string ("INSERT INTO embeddings (")
+                                     + store::kEmbeddingsInsertColumns + ") VALUES ("
+                                     + store::kEmbeddingsMemoryDefaults + ")";
+      transaction->Execute (insert_sql,
+                            { emb_vec, static_cast<long long> (signal.timestamp) });
       auto id_rows
           = transaction->Execute ("SELECT last_insert_rowid() AS id", {});
       if (id_rows.empty () || id_rows[0].count ("id") == 0)
@@ -92,11 +98,6 @@ MemoryStorage::Execute (OperationContext &context) const
         }
       const long long embedding_id = *id_opt;
 
-      // 2b. Insert into vec_embeddings for KNN search
-      transaction->Execute (
-          "INSERT INTO vec_embeddings (embedding_id, embedding) VALUES (?, ?)",
-          { embedding_id, emb_vec });
-
       // 3. Insert memories (metadata)
       transaction->Execute (
           "INSERT INTO memories (embedding_id, modality, mime, source_id, "
@@ -110,12 +111,6 @@ MemoryStorage::Execute (OperationContext &context) const
             static_cast<long long> (signal.channels),
             static_cast<long long> (signal.sample_rate),
             static_cast<long long> (signal.num_samples), blob_id });
-
-      // 4. Insert embeddings_meta (per-embedding state)
-      transaction->Execute (
-          "INSERT INTO embeddings_meta (embedding_id, strength, created_at) "
-          "VALUES (?, 1.0, ?)",
-          { embedding_id, static_cast<long long> (signal.timestamp) });
 
       // Commit the savepoint
       transaction->Commit ();

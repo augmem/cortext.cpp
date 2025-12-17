@@ -29,8 +29,9 @@ ComputeObservedRetention (Store *store, const SignalProcessor::Config &config,
   try
     {
       const std::vector<std::map<std::string, std::any> > rows
-          = store->Execute ("SELECT last_used FROM memory_feedback "
-                            "WHERE strength >= ? AND last_used > 0",
+          = store->Execute ("SELECT mf.last_used FROM memory_feedback mf "
+                            "JOIN embeddings e ON e.embedding_id = mf.embedding_id "
+                            "WHERE e.strength >= ? AND mf.last_used > 0",
                             { cutoff });
       if (!rows.empty ())
         {
@@ -220,13 +221,6 @@ inline std::vector<float>
 ToFloatVector (const Eigen::VectorXf &v)
 {
   return std::vector<float> (v.data (), v.data () + v.size ());
-}
-
-inline Eigen::VectorXf
-ToEigen (const std::vector<float> &v)
-{
-  return Eigen::Map<const Eigen::VectorXf> (
-      v.data (), static_cast<Eigen::Index> (v.size ()));
 }
 
 inline Eigen::VectorXf

@@ -42,11 +42,11 @@ ConsolidationCluster::Execute (OperationContext &context) const
                                                        cfg.stability);
 
   // 1. Load candidates with embeddings from consolidation_candidates joined
-  // with vec_embeddings.
+  // with embeddings.
   auto rows = store->Execute (
-      "SELECT cc.embedding_id, cc.score, ve.embedding "
+      "SELECT cc.embedding_id, cc.score, e.embedding "
       "FROM consolidation_candidates cc "
-      "JOIN vec_embeddings ve ON cc.embedding_id = ve.embedding_id "
+      "JOIN embeddings e ON cc.embedding_id = e.embedding_id "
       "ORDER BY cc.score ASC",
       {});
 

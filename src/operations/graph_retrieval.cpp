@@ -105,7 +105,7 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context) const
 
   auto rows = store->Execute (
       "SELECT embedding_id, embedding, distance "
-      "FROM vec_embeddings "
+      "FROM embeddings "
       "WHERE embedding MATCH ? "
       "ORDER BY distance "
       "LIMIT ?",

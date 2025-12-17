@@ -46,7 +46,7 @@ CheckCapacityTrigger (Store *store, long long consolidation_threshold,
   try
     {
       auto rows = store->Execute (
-          "SELECT COUNT(*) AS c FROM vec_embeddings", {});
+          "SELECT COUNT(*) AS c FROM embeddings", {});
       if (!rows.empty () && rows[0].count ("c") == 1)
         {
           const auto &v = rows[0].at ("c");
@@ -213,43 +213,43 @@ ScoreConsolidation::Execute (OperationContext &context) const
     BufferedWriteInstruction op;
     op.query
         = "WITH edge_counts AS ("
-          "  SELECT em.embedding_id, "
+          "  SELECT e.embedding_id, "
           "         (SELECT COUNT(*) FROM graph_edges ge "
-          "          WHERE ge.source_id = 'emb:' || em.embedding_id "
-          "             OR ge.target_id = 'emb:' || em.embedding_id) AS cnt "
-          "  FROM embeddings_meta em"
+          "          WHERE ge.source_id = 'emb:' || e.embedding_id "
+          "             OR ge.target_id = 'emb:' || e.embedding_id) AS cnt "
+          "  FROM embeddings e"
           "), max_cnt AS ("
           "  SELECT MAX(cnt) AS m FROM edge_counts WHERE cnt > 0"
           ") "
-          "UPDATE embeddings_meta SET connectivity = ("
+          "UPDATE embeddings SET connectivity = ("
           "  SELECT CASE WHEN (SELECT m FROM max_cnt) > 0 "
           "              THEN CAST(ec.cnt AS REAL) / (SELECT m FROM max_cnt) "
           "              ELSE 0.0 END "
-          "  FROM edge_counts ec WHERE ec.embedding_id = embeddings_meta.embedding_id"
+          "  FROM edge_counts ec WHERE ec.embedding_id = embeddings.embedding_id"
           ");";
     context.AddWriteInstruction (std::move (op));
   }
 
   // Insert or update candidates whose score is below floor.
   // score = T*strength - F*redundancy + S*connectivity + T*stability
-  // Uses embeddings_meta which contains per-embedding state.
+  // Uses unified embeddings table which contains per-embedding state.
   {
     BufferedWriteInstruction op;
     op.query
         = "INSERT INTO consolidation_candidates(embedding_id, score, "
           "created_at, reason) "
-          "SELECT em.embedding_id, "
-          "       ((?1 * COALESCE(em.strength, 1.0)) "
-          "        - (?2 * COALESCE(em.redundancy, 0.0)) "
-          "        + (?3 * COALESCE(em.connectivity, 0.0)) "
-          "        + (?4 * COALESCE(em.stability, 0.0))) AS computed_score, "
+          "SELECT e.embedding_id, "
+          "       ((?1 * COALESCE(e.strength, 1.0)) "
+          "        - (?2 * COALESCE(e.redundancy, 0.0)) "
+          "        + (?3 * COALESCE(e.connectivity, 0.0)) "
+          "        + (?4 * COALESCE(e.stability, 0.0))) AS computed_score, "
           "       ?5 AS created_at, "
           "       'score_below_floor' AS reason "
-          "FROM embeddings_meta em "
-          "WHERE ((?1 * COALESCE(em.strength, 1.0)) "
-          "       - (?2 * COALESCE(em.redundancy, 0.0)) "
-          "       + (?3 * COALESCE(em.connectivity, 0.0)) "
-          "       + (?4 * COALESCE(em.stability, 0.0))) < ?6 "
+          "FROM embeddings e "
+          "WHERE ((?1 * COALESCE(e.strength, 1.0)) "
+          "       - (?2 * COALESCE(e.redundancy, 0.0)) "
+          "       + (?3 * COALESCE(e.connectivity, 0.0)) "
+          "       + (?4 * COALESCE(e.stability, 0.0))) < ?6 "
           "ON CONFLICT(embedding_id) DO UPDATE SET "
           "  score=excluded.score, "
           "  created_at=excluded.created_at, "

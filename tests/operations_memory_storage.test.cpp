@@ -31,9 +31,27 @@ public:
     store_->Execute ("CREATE VIRTUAL TABLE IF NOT EXISTS objstore USING "
                      "objstore()",
                      {});
-    store_->Execute ("CREATE TABLE IF NOT EXISTS embeddings ("
-                     "  embedding_id INTEGER PRIMARY KEY,"
-                     "  embedding BLOB"
+    // Unified embeddings table using vec0 with auxiliary columns
+    store_->Execute ("CREATE VIRTUAL TABLE IF NOT EXISTS embeddings "
+                     "USING vec0("
+                     "embedding_id INTEGER PRIMARY KEY,"
+                     "embedding float[3],"
+                     "+type text,"
+                     "+strength float,"
+                     "+use_frequency float,"
+                     "+stability float,"
+                     "+connectivity float,"
+                     "+drift_mag float,"
+                     "+influence float,"
+                     "+sustained_influence float,"
+                     "+contextual_gain float,"
+                     "+redundancy float,"
+                     "+pre_activation float,"
+                     "+lability_state float,"
+                     "+suppression_count integer,"
+                     "+cluster_id integer,"
+                     "+last_access integer,"
+                     "+created_at integer"
                      ")",
                      {});
     store_->Execute ("CREATE TABLE IF NOT EXISTS memories ("
@@ -49,20 +67,6 @@ public:
                      "  num_samples INTEGER DEFAULT 0,"
                      "  blob_id BLOB"
                      ")",
-                     {});
-    store_->Execute ("CREATE TABLE IF NOT EXISTS embeddings_meta ("
-                     "  embedding_id INTEGER PRIMARY KEY,"
-                     "  strength REAL DEFAULT 1.0,"
-                     "  contextual_gain REAL DEFAULT 0.0,"
-                     "  use_frequency REAL DEFAULT 0.0,"
-                     "  lability_state REAL DEFAULT 0.0,"
-                     "  created_at INTEGER"
-                     ")",
-                     {});
-    // vec0 virtual table for KNN search (using float[3] for test embeddings)
-    store_->Execute ("CREATE VIRTUAL TABLE IF NOT EXISTS vec_embeddings "
-                     "USING vec0(embedding_id INTEGER PRIMARY KEY, "
-                     "embedding float[3])",
                      {});
   }
 
@@ -129,9 +133,9 @@ TEST_CASE ("MemoryStorage stores payload when write_decision is true",
       "SELECT * FROM memories WHERE embedding_id = ?", { *stored_id });
   REQUIRE (idx_rows.size () == 1);
 
-  // Verify embeddings_meta was inserted
+  // Verify embeddings has all expected columns
   auto fb_rows = store->Execute (
-      "SELECT * FROM embeddings_meta WHERE embedding_id = ?", { *stored_id });
+      "SELECT strength, use_frequency FROM embeddings WHERE embedding_id = ?", { *stored_id });
   REQUIRE (fb_rows.size () == 1);
 
   // No buffered instructions since we use savepoints

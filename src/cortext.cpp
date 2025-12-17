@@ -55,7 +55,6 @@
 #include "cortext/operations/write_gate.hpp"
 #include "cortext/operations/memory_storage.hpp"
 #include "cortext/operations/stability_feedback.hpp"
-#include "cortext/operations/generation_trace.hpp"
 #include "cortext/operations/working_memory.hpp"
 #include "cortext/operations/detect_memory_usage.hpp"
 #include "cortext/operations/drift_accumulation.hpp"
@@ -332,7 +331,6 @@ struct Cortext::Impl
     using cortext::operations::UpdateUncertainty;
     using cortext::operations::WorkingMemory;
     using cortext::operations::PersistSignalMetrics;
-    using cortext::operations::RecordGenerationTrace;
     using cortext::operations::ComputeWriteGate;
     using cortext::operations::MemoryStorage;
     using cortext::operations::DetectMemoryUsage;
@@ -393,7 +391,6 @@ struct Cortext::Impl
         std::make_unique<ApplyStabilityFeedback> (),
         std::make_unique<UpdateStability> (),
         std::make_unique<ApplyInfluenceFeedback> (),
-        std::make_unique<RecordGenerationTrace> (),
 
         std::make_unique<ApplySerialPositionEffects> (),
         std::make_unique<ApplySerialPositionMultiplier> (),
@@ -497,6 +494,10 @@ Cortext::Context
 Cortext::ProcessText (const std::string &text, std::uint64_t timestamp,
                       const std::string &source_id)
 {
+  if (!impl_)
+    {
+      throw std::runtime_error ("Cortext not initialized");
+    }
   telemetry::ScopedSpan span ("cortext.api.process_text");
   std::vector<float> v;
   telemetry::ScopedSpan encode_span ("cortext.encode");
@@ -528,6 +529,10 @@ Cortext::Context
 Cortext::ProcessAudio (const float *pcm, std::size_t num_samples,
                        std::uint64_t timestamp, const std::string &source_id)
 {
+  if (!impl_)
+    {
+      throw std::runtime_error ("Cortext not initialized");
+    }
   telemetry::ScopedSpan span ("cortext.api.process_audio");
   std::vector<float> v;
   telemetry::ScopedSpan encode_span ("cortext.encode");
@@ -565,6 +570,10 @@ Cortext::ProcessImage (const std::uint8_t *data, int width, int height,
                        int channels, std::uint64_t timestamp,
                        const std::string &source_id)
 {
+  if (!impl_)
+    {
+      throw std::runtime_error ("Cortext not initialized");
+    }
   telemetry::ScopedSpan span ("cortext.api.process_image");
   std::vector<float> v;
   telemetry::ScopedSpan encode_span ("cortext.encode");
@@ -603,6 +612,10 @@ Cortext::ProcessImage (const std::uint8_t *data, int width, int height,
 Cortext::Context
 Cortext::Consolidate (std::uint64_t now_timestamp)
 {
+  if (!impl_)
+    {
+      throw std::runtime_error ("Cortext not initialized");
+    }
   telemetry::ScopedSpan span ("cortext.api.consolidate");
   // Drive the pipeline to allow EvaluateConsolidation to emit events
   // and ConsolidationGate to run scoring/jobs when start is signaled.
@@ -626,6 +639,10 @@ Cortext::Consolidate (std::uint64_t now_timestamp)
 void
 Cortext::Flush ()
 {
+  if (!impl_)
+    {
+      return; // Safe no-op if not initialized
+    }
   if (impl_->processor)
     {
       telemetry::ScopedSpan span ("cortext.api.flush");

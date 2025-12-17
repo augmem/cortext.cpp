@@ -85,6 +85,22 @@ constexpr double kCosineToAlignmentOffset = 1.0; // cos -> alignment offset
 
 // Consolidation (Alg 29)
 constexpr double kExtractionStabilityThreshold = 0.2; // Min stability to enable extraction
+
+// Embedding defaults (for INSERT into sqlite-vec embeddings table)
+// Note: sqlite-vec doesn't support DEFAULT values, so we must provide these explicitly
+constexpr double kEmbeddingStrengthDefault = 1.0;
+constexpr double kEmbeddingUseFrequencyDefault = 0.0;
+constexpr double kEmbeddingStabilityDefault = 1.0;
+constexpr double kEmbeddingConnectivityDefault = 0.0;
+constexpr double kEmbeddingDriftMagDefault = 0.0;
+constexpr double kEmbeddingInfluenceDefault = 0.0;
+constexpr double kEmbeddingSustainedInfluenceDefault = 0.0;
+constexpr double kEmbeddingContextualGainDefault = 0.0;
+constexpr double kEmbeddingRedundancyDefault = 0.0;
+constexpr double kEmbeddingPreActivationDefault = 0.0;
+constexpr double kEmbeddingLabilityStateDefault = 0.0;
+constexpr int kEmbeddingSuppressionCountDefault = 0;
+
 } // namespace cortext::operations::constants
 
 
