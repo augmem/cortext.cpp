@@ -56,7 +56,7 @@ struct SeedCandidatesOp : IOperation
   }
 
   void
-  Execute (OperationContext &ctx) const override
+  Execute (OperationContext &ctx, Transaction & /*tx*/) const override
   {
     auto *store = ctx.GetStore ();
     for (const auto &c : candidates_)
@@ -80,7 +80,7 @@ struct SeedCandidatesOp : IOperation
 struct EnableConsolidationOp : IOperation
 {
   void
-  Execute (OperationContext &ctx) const override
+  Execute (OperationContext &ctx, Transaction & /*tx*/) const override
   {
     ctx.SetConsolidationShouldStart (true);
   }
@@ -96,7 +96,7 @@ struct AssertClustersOp : IOperation
   }
 
   void
-  Execute (OperationContext &ctx) const override
+  Execute (OperationContext &ctx, Transaction & /*tx*/) const override
   {
     const auto &clusters = ctx.GetConsolidationClusters ();
     REQUIRE (static_cast<int> (clusters.size ()) == expected_cluster_count_);
@@ -111,7 +111,7 @@ struct AssertSummariesOp : IOperation
   explicit AssertSummariesOp (int expected) : expected_count_ (expected) {}
 
   void
-  Execute (OperationContext &ctx) const override
+  Execute (OperationContext &ctx, Transaction & /*tx*/) const override
   {
     auto *store = ctx.GetStore ();
     auto rows
@@ -130,7 +130,7 @@ struct AssertSourcesOp : IOperation
   explicit AssertSourcesOp (int expected) : expected_count_ (expected) {}
 
   void
-  Execute (OperationContext &ctx) const override
+  Execute (OperationContext &ctx, Transaction & /*tx*/) const override
   {
     auto *store = ctx.GetStore ();
     auto rows

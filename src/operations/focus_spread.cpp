@@ -11,7 +11,7 @@ namespace cortext::operations
 {
 
 void
-ComputeFocusSpread::Execute (OperationContext &context) const
+ComputeFocusSpread::Execute (OperationContext &context, Transaction &tx) const
 {
   const auto &cfg = context.GetConfig ();
   auto &p_ctx = context.GetProcessorContext ();

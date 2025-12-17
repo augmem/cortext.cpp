@@ -1,6 +1,6 @@
 #include "cortext/operations/process_extraction_results.hpp"
 
-#include "cortext/buffered_write_instruction.hpp"
+#include "cortext/store/store.hpp"
 #include "cortext/extractor/extractor.hpp"
 #include "cortext/operations/extraction.hpp"
 #include "cortext/processor/operation_context.hpp"
@@ -16,15 +16,12 @@ namespace cortext::operations
 namespace
 {
 
-/// @brief Add a buffered write instruction.
+/// @brief Add a write instruction to the transaction.
 void
-AddWrite (OperationContext &ctx, const std::string &q,
+AddWrite (Transaction &tx, const std::string &q,
           const std::vector<std::any> &p = {})
 {
-  BufferedWriteInstruction op;
-  op.query = q;
-  op.params = p;
-  ctx.AddWriteInstruction (std::move (op));
+  tx.Execute (q, p);
 }
 
 /// @brief Generate a deterministic node_id from entity name and type.
@@ -71,7 +68,7 @@ const nlohmann::json kExtractionSchema = nlohmann::json::parse (R"({
 } // namespace
 
 void
-ProcessExtractionResults::Execute (OperationContext &context) const
+ProcessExtractionResults::Execute (OperationContext &context, Transaction &tx) const
 {
   auto &p_ctx = context.GetProcessorContext ();
 
@@ -131,7 +128,7 @@ ProcessExtractionResults::Execute (OperationContext &context) const
       // 1. Insert entities into extraction_entities.
       for (const auto &entity : result.entities)
         {
-          AddWrite (context,
+          AddWrite (tx,
                     "INSERT OR REPLACE INTO extraction_entities"
                     "(summary_id, name, type, salience) "
                     "VALUES(?, ?, ?, ?)",
@@ -140,7 +137,7 @@ ProcessExtractionResults::Execute (OperationContext &context) const
 
           // 2. Update entity_index for name→node_id mapping.
           std::string node_id = GenerateNodeId (entity.name, entity.type);
-          AddWrite (context,
+          AddWrite (tx,
                     "INSERT OR IGNORE INTO entity_index(name, node_id) "
                     "VALUES(?, ?)",
                     { entity.name, node_id });
@@ -149,7 +146,7 @@ ProcessExtractionResults::Execute (OperationContext &context) const
       // 3. Insert relations into extraction_relations.
       for (const auto &relation : result.relations)
         {
-          AddWrite (context,
+          AddWrite (tx,
                     "INSERT INTO extraction_relations"
                     "(summary_id, subject, predicate, object, confidence) "
                     "VALUES(?, ?, ?, ?, ?)",

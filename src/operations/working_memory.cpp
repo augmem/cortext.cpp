@@ -60,7 +60,7 @@ ComputeNormalizedEntropy (const std::vector<double> &weights)
 } // namespace
 
 void
-WorkingMemory::Execute (OperationContext &context) const
+WorkingMemory::Execute (OperationContext &context, Transaction &tx) const
 {
   auto &p_ctx = context.GetProcessorContext ();
   const auto &cfg = context.GetConfig ();

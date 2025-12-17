@@ -1,4 +1,5 @@
 #include <catch2/catch_approx.hpp>
+#include "test_helpers.hpp"
 #include <catch2/catch_test_macros.hpp>
 #include <cortext/operations/metrics.hpp>
 #include <cortext/operations/sensitivity.hpp>
@@ -41,18 +42,18 @@ TEST_CASE ("Alg16 positive gain with novelty increases weight_novelty",
   cfg.sensitivity = 0.8;
   cfg.stability = 0.5;
 
-  std::vector<BufferedWriteInstruction> buf;
-  OperationContext ctx (s, pctx, cfg, buf);
+
+  OperationContext ctx (s, pctx, cfg);
 
   // Initialize sensitivity priors and dynamic novelty weight
   InitializeSensitivityPriors init;
-  init.Execute (ctx);
+  init.Execute (ctx, cortext::testing::GetNullTransaction ());
   auto &pc = ctx.GetProcessorContext ();
   const double before = pc.weight_novelty;
 
   // Compute metrics so 'relevance' is available
   ComputeMetrics metrics;
-  metrics.Execute (ctx);
+  metrics.Execute (ctx, cortext::testing::GetNullTransaction ());
 
   // Attach a positive contextual gain event
   OperationContext::MemoryUsageEvent ev{};
@@ -62,7 +63,7 @@ TEST_CASE ("Alg16 positive gain with novelty increases weight_novelty",
   ctx.SetMemoryUsageEvents ({ ev });
 
   ApplySensitivityFeedback op;
-  op.Execute (ctx);
+  op.Execute (ctx, cortext::testing::GetNullTransaction ());
 
   REQUIRE (pc.weight_novelty > before);
   REQUIRE (pc.weight_novelty <= 1.0);
@@ -86,16 +87,16 @@ TEST_CASE (
   cfg.sensitivity = 0.7;
   cfg.stability = 0.5;
 
-  std::vector<BufferedWriteInstruction> buf;
-  OperationContext ctx (s, pctx, cfg, buf);
+
+  OperationContext ctx (s, pctx, cfg);
 
   InitializeSensitivityPriors init;
-  init.Execute (ctx);
+  init.Execute (ctx, cortext::testing::GetNullTransaction ());
   auto &pc = ctx.GetProcessorContext ();
   const double before = pc.weight_novelty;
 
   ComputeMetrics metrics;
-  metrics.Execute (ctx);
+  metrics.Execute (ctx, cortext::testing::GetNullTransaction ());
 
   // Attach a negative contextual gain event
   OperationContext::MemoryUsageEvent ev{};
@@ -105,7 +106,7 @@ TEST_CASE (
   ctx.SetMemoryUsageEvents ({ ev });
 
   ApplySensitivityFeedback op;
-  op.Execute (ctx);
+  op.Execute (ctx, cortext::testing::GetNullTransaction ());
 
   REQUIRE (pc.weight_novelty <= before);
   REQUIRE (pc.weight_novelty >= 0.0);

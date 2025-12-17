@@ -1,4 +1,5 @@
 #include <catch2/catch_test_macros.hpp>
+#include "test_helpers.hpp"
 #include <cortext/operations/blend.hpp>
 #include <cortext/operations/threshold.hpp>
 #include <cortext/processor.hpp>
@@ -21,7 +22,7 @@ struct SetMetricsOp : IOperation
   {
   }
   void
-  Execute (OperationContext &ctx) const override
+  Execute (OperationContext &ctx, Transaction & /*tx*/) const override
   {
     for (const auto &kv : metrics)
       {
@@ -42,8 +43,8 @@ TEST_CASE ("Alg7 composite produces clamped normalized score",
   cfg.focus = 0.6;
   cfg.sensitivity = 0.5;
   cfg.stability = 0.4;
-  std::vector<BufferedWriteInstruction> buf;
-  OperationContext ctx (s, pctx, cfg, buf);
+
+  OperationContext ctx (s, pctx, cfg);
 
   // Set a variety of metrics; values are normalized.
   SetMetricsOp set_metrics ({
@@ -60,10 +61,10 @@ TEST_CASE ("Alg7 composite produces clamped normalized score",
       { operations::Metric::valence, 0.60 },
       { operations::Metric::arousal, 0.25 },
   });
-  set_metrics.Execute (ctx);
+  set_metrics.Execute (ctx, cortext::testing::GetNullTransaction ());
 
   ComputeCompositeScore compute;
-  compute.Execute (ctx);
+  compute.Execute (ctx, cortext::testing::GetNullTransaction ());
 
   const auto score = ctx.GetCompositeScore ();
   REQUIRE (score.has_value ());
@@ -83,12 +84,12 @@ TEST_CASE ("Alg7 RLS increases relevance weight with consistent evidence",
   cfg.focus = 0.4; // modest initial relevance prior
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;
-  std::vector<BufferedWriteInstruction> buf;
-  OperationContext ctx (s, pctx, cfg, buf);
+
+  OperationContext ctx (s, pctx, cfg);
 
   // Initial weights via bootstrap
   ComputeCompositeScore bootstrap_compute;
-  bootstrap_compute.Execute (ctx); // initializes blender state
+  bootstrap_compute.Execute (ctx, cortext::testing::GetNullTransaction ()); // initializes blender state
   const double w0 = pctx.blender_state[operations::Metric::relevance];
 
   // Provide strong evidence that relevance should be high: x has only
@@ -97,8 +98,8 @@ TEST_CASE ("Alg7 RLS increases relevance weight with consistent evidence",
   FitMetricWeightsRLS fit;
   for (int i = 0; i < 50; ++i)
     {
-      set_rel_only.Execute (ctx);
-      fit.Execute (ctx);
+      set_rel_only.Execute (ctx, cortext::testing::GetNullTransaction ());
+      fit.Execute (ctx, cortext::testing::GetNullTransaction ());
     }
   const double w1 = pctx.blender_state[operations::Metric::relevance];
   REQUIRE (w1 >= w0);
@@ -115,8 +116,8 @@ TEST_CASE ("Alg7→Alg8 integration adjusts threshold with composite",
   cfg.focus = 0.5;
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;
-  std::vector<BufferedWriteInstruction> buf;
-  OperationContext ctx (s, pctx, cfg, buf);
+
+  OperationContext ctx (s, pctx, cfg);
 
   FitMetricWeightsRLS fit;
   ComputeCompositeScore compute;
@@ -124,20 +125,20 @@ TEST_CASE ("Alg7→Alg8 integration adjusts threshold with composite",
 
   // Low composite case
   SetMetricsOp low ({ { operations::Metric::relevance, 0.0 } });
-  low.Execute (ctx);
-  compute.Execute (ctx);
-  update_T.Execute (ctx);
+  low.Execute (ctx, cortext::testing::GetNullTransaction ());
+  compute.Execute (ctx, cortext::testing::GetNullTransaction ());
+  update_T.Execute (ctx, cortext::testing::GetNullTransaction ());
   const double T1 = ctx.GetThresholdTDynamic ();
 
   // High composite case
   SetMetricsOp high ({ { operations::Metric::relevance, 1.0 } });
-  high.Execute (ctx);
+  high.Execute (ctx, cortext::testing::GetNullTransaction ());
   // Run a small loop to populate recent scores and allow a visible change.
   for (int i = 0; i < 5; ++i)
     {
-      fit.Execute (ctx);
-      compute.Execute (ctx);
-      update_T.Execute (ctx);
+      fit.Execute (ctx, cortext::testing::GetNullTransaction ());
+      compute.Execute (ctx, cortext::testing::GetNullTransaction ());
+      update_T.Execute (ctx, cortext::testing::GetNullTransaction ());
     }
   const double T2 = ctx.GetThresholdTDynamic ();
   REQUIRE (T1 != T2);
@@ -153,12 +154,12 @@ TEST_CASE ("Alg7 RLS resets covariance on ill-conditioning",
   cfg.focus = 0.4;
   cfg.sensitivity = 0.4;
   cfg.stability = 0.4;
-  std::vector<BufferedWriteInstruction> buf;
-  OperationContext ctx (s, pctx, cfg, buf);
+
+  OperationContext ctx (s, pctx, cfg);
 
   // Initialize state and then corrupt P with NaN to trigger reset.
   ComputeCompositeScore bootstrap_compute;
-  bootstrap_compute.Execute (ctx);
+  bootstrap_compute.Execute (ctx, cortext::testing::GetNullTransaction ());
   // corrupt
   if (!pctx.blender_P.empty ())
     {
@@ -170,8 +171,8 @@ TEST_CASE ("Alg7 RLS resets covariance on ill-conditioning",
   // Loop enough times to trigger throttled update
   for (int i = 0; i < 10; ++i)
     {
-      set_rel_only.Execute (ctx);
-      fit.Execute (ctx);
+      set_rel_only.Execute (ctx, cortext::testing::GetNullTransaction ());
+      fit.Execute (ctx, cortext::testing::GetNullTransaction ());
     }
   // After reset and update, diagonal should be positive and finite (not NaN)
   REQUIRE (!pctx.blender_P.empty ());

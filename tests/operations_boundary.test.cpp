@@ -1,4 +1,5 @@
 #include <catch2/catch_test_macros.hpp>
+#include "test_helpers.hpp"
 #include <cortext/operations/boundary.hpp>
 #include <cortext/processor.hpp>
 #include <cortext/processor/operation_context.hpp>
@@ -30,11 +31,11 @@ TEST_CASE ("Boundary check requests finalize when drift exceeds threshold",
 
   SignalProcessor::Config cfg;
   cfg.stability = 0.5; // mid threshold
-  std::vector<BufferedWriteInstruction> buf;
-  OperationContext ctx (s, pctx, cfg, buf);
+
+  OperationContext ctx (s, pctx, cfg);
 
   CheckEpisodeBoundary op;
-  op.Execute (ctx);
+  op.Execute (ctx, cortext::testing::GetNullTransaction ());
 
   REQUIRE (ctx.ShouldFinalizeEpisode ());
   auto drift = ctx.GetMetric (operations::Metric::drift_mag);
@@ -61,11 +62,11 @@ TEST_CASE ("Boundary check does not request finalize for low drift",
 
   SignalProcessor::Config cfg;
   cfg.stability = 0.5;
-  std::vector<BufferedWriteInstruction> buf;
-  OperationContext ctx (s, pctx, cfg, buf);
+
+  OperationContext ctx (s, pctx, cfg);
 
   CheckEpisodeBoundary op;
-  op.Execute (ctx);
+  op.Execute (ctx, cortext::testing::GetNullTransaction ());
 
   REQUIRE_FALSE (ctx.ShouldFinalizeEpisode ());
   auto drift = ctx.GetMetric (operations::Metric::drift_mag);

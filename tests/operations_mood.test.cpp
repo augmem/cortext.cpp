@@ -6,6 +6,7 @@
 #include <cortext/operations/sensitivity.hpp>
 #include <cortext/processor.hpp>
 #include <cortext/processor/operation_context.hpp>
+#include "test_helpers.hpp"
 #include <array>
 #include <cmath>
 
@@ -35,7 +36,7 @@ public:
   }
 
   void
-  Execute (OperationContext &ctx) const override
+  Execute (OperationContext &ctx, Transaction & /*tx*/) const override
   {
     ctx.SetEmotionProbabilities (probs_);
   }
@@ -54,8 +55,7 @@ TEST_CASE ("UpdateMood integrates emotion into mood vector",
   SignalProcessor::Config cfg;
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;
-  std::vector<BufferedWriteInstruction> buf;
-  OperationContext ctx (s, pctx, cfg, buf);
+  OperationContext ctx (s, pctx, cfg);
 
   // Set emotion probabilities (softmax-like, sums to ~1)
   std::array<double, 6> e_t = { 0.1, 0.1, 0.5, 0.1, 0.1, 0.1 }; // joy-dominant
@@ -68,7 +68,7 @@ TEST_CASE ("UpdateMood integrates emotion into mood vector",
     }
 
   UpdateMood op;
-  op.Execute (ctx);
+  op.Execute (ctx, cortext::testing::GetNullTransaction ());
 
   // After first update: M = λ × 0 + α × e_t = α × e_t
   const double alpha_mood = core::AlphaMood (cfg.sensitivity);
@@ -89,8 +89,7 @@ TEST_CASE ("UpdateMood decay dynamics with λ_mood", "[operations][mood]")
   SignalProcessor::Config cfg;
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;
-  std::vector<BufferedWriteInstruction> buf;
-  OperationContext ctx (s, pctx, cfg, buf);
+  OperationContext ctx (s, pctx, cfg);
 
   const double alpha = core::AlphaMood (cfg.sensitivity);
   const double lambda = core::LambdaMood (cfg.stability);
@@ -104,7 +103,7 @@ TEST_CASE ("UpdateMood decay dynamics with λ_mood", "[operations][mood]")
   ctx.SetEmotionProbabilities (e_t);
 
   UpdateMood op;
-  op.Execute (ctx);
+  op.Execute (ctx, cortext::testing::GetNullTransaction ());
 
   // After update: M = λ × M_{t-1} + α × 0 = λ × M_{t-1}
   for (size_t i = 0; i < 6; ++i)
@@ -122,8 +121,7 @@ TEST_CASE ("UpdateMood clamps per-dimension to [-1, 1]",
   SignalProcessor::Config cfg;
   cfg.sensitivity = 1.0; // high reactivity: α = 0.20
   cfg.stability = 1.0;   // high persistence: λ = 0.999
-  std::vector<BufferedWriteInstruction> buf;
-  OperationContext ctx (s, pctx, cfg, buf);
+  OperationContext ctx (s, pctx, cfg);
 
   // Start with mood near upper bound
   pctx.mood_vector = { 0.95, 0.0, 0.95, 0.0, 0.0, 0.0 };
@@ -133,7 +131,7 @@ TEST_CASE ("UpdateMood clamps per-dimension to [-1, 1]",
   ctx.SetEmotionProbabilities (e_t);
 
   UpdateMood op;
-  op.Execute (ctx);
+  op.Execute (ctx, cortext::testing::GetNullTransaction ());
 
   // After update, values should be clamped to [-1, 1]
   for (size_t i = 0; i < 6; ++i)
@@ -150,8 +148,7 @@ TEST_CASE ("UpdateMood ΔT_mood calculation", "[operations][mood]")
   SignalProcessor::Config cfg;
   cfg.sensitivity = 0.8;
   cfg.stability = 0.5;
-  std::vector<BufferedWriteInstruction> buf;
-  OperationContext ctx (s, pctx, cfg, buf);
+  OperationContext ctx (s, pctx, cfg);
 
   // Set a known mood state
   pctx.mood_vector = { 0.3, 0.0, 0.4, 0.0, 0.0, 0.0 };
@@ -161,7 +158,7 @@ TEST_CASE ("UpdateMood ΔT_mood calculation", "[operations][mood]")
   ctx.SetEmotionProbabilities (e_t);
 
   UpdateMood op;
-  op.Execute (ctx);
+  op.Execute (ctx, cortext::testing::GetNullTransaction ());
 
   // ΔT_mood = -κ_mood × clamp(||M_t|| / √6, 0, 1)
   // Note: mood decays slightly, so recalculate magnitude
@@ -188,14 +185,14 @@ TEST_CASE ("UpdateMood edge cases S=0 and S=1", "[operations][mood]")
     SignalProcessor::Config cfg;
     cfg.sensitivity = 0.0;
     cfg.stability = 0.5;
-    std::vector<BufferedWriteInstruction> buf;
-    OperationContext ctx (s, pctx, cfg, buf);
+  
+    OperationContext ctx (s, pctx, cfg);
 
     std::array<double, 6> e_t = { 1.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
     ctx.SetEmotionProbabilities (e_t);
 
     UpdateMood op;
-    op.Execute (ctx);
+    op.Execute (ctx, cortext::testing::GetNullTransaction ());
 
     // α_mood(0) = 0.01
     REQUIRE (core::AlphaMood (0.0) == Catch::Approx (0.01));
@@ -214,14 +211,14 @@ TEST_CASE ("UpdateMood edge cases S=0 and S=1", "[operations][mood]")
     SignalProcessor::Config cfg;
     cfg.sensitivity = 1.0;
     cfg.stability = 0.5;
-    std::vector<BufferedWriteInstruction> buf;
-    OperationContext ctx (s, pctx, cfg, buf);
+  
+    OperationContext ctx (s, pctx, cfg);
 
     std::array<double, 6> e_t = { 1.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
     ctx.SetEmotionProbabilities (e_t);
 
     UpdateMood op;
-    op.Execute (ctx);
+    op.Execute (ctx, cortext::testing::GetNullTransaction ());
 
     // α_mood(1) = 0.20
     REQUIRE (core::AlphaMood (1.0) == Catch::Approx (0.20));
@@ -239,15 +236,15 @@ TEST_CASE ("UpdateMood edge cases T=0 and T=1", "[operations][mood]")
     SignalProcessor::Config cfg;
     cfg.sensitivity = 0.5;
     cfg.stability = 0.0;
-    std::vector<BufferedWriteInstruction> buf;
-    OperationContext ctx (s, pctx, cfg, buf);
+  
+    OperationContext ctx (s, pctx, cfg);
 
     pctx.mood_vector = { 1.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
     std::array<double, 6> e_t = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
     ctx.SetEmotionProbabilities (e_t);
 
     UpdateMood op;
-    op.Execute (ctx);
+    op.Execute (ctx, cortext::testing::GetNullTransaction ());
 
     // λ_mood(0) = 0.90
     REQUIRE (core::LambdaMood (0.0) == Catch::Approx (0.90));
@@ -262,15 +259,15 @@ TEST_CASE ("UpdateMood edge cases T=0 and T=1", "[operations][mood]")
     SignalProcessor::Config cfg;
     cfg.sensitivity = 0.5;
     cfg.stability = 1.0;
-    std::vector<BufferedWriteInstruction> buf;
-    OperationContext ctx (s, pctx, cfg, buf);
+  
+    OperationContext ctx (s, pctx, cfg);
 
     pctx.mood_vector = { 1.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
     std::array<double, 6> e_t = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
     ctx.SetEmotionProbabilities (e_t);
 
     UpdateMood op;
-    op.Execute (ctx);
+    op.Execute (ctx, cortext::testing::GetNullTransaction ());
 
     // λ_mood(1) = 0.999
     REQUIRE (core::LambdaMood (1.0) == Catch::Approx (0.999));
@@ -286,8 +283,7 @@ TEST_CASE ("UpdateMood accumulation over multiple signals",
   SignalProcessor::Config cfg;
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;
-  std::vector<BufferedWriteInstruction> buf;
-  OperationContext ctx (s, pctx, cfg, buf);
+  OperationContext ctx (s, pctx, cfg);
 
   const double alpha = core::AlphaMood (cfg.sensitivity);
   const double lambda = core::LambdaMood (cfg.stability);
@@ -301,7 +297,7 @@ TEST_CASE ("UpdateMood accumulation over multiple signals",
   // Run multiple iterations
   for (int i = 0; i < 10; ++i)
     {
-      op.Execute (ctx);
+      op.Execute (ctx, cortext::testing::GetNullTransaction ());
     }
 
   // Joy dimension should accumulate (converge toward α/(1-λ) if unclamped)
@@ -319,8 +315,7 @@ TEST_CASE ("UpdateMood with mixed emotions", "[operations][mood]")
   SignalProcessor::Config cfg;
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;
-  std::vector<BufferedWriteInstruction> buf;
-  OperationContext ctx (s, pctx, cfg, buf);
+  OperationContext ctx (s, pctx, cfg);
 
   const double alpha = core::AlphaMood (cfg.sensitivity);
 
@@ -330,7 +325,7 @@ TEST_CASE ("UpdateMood with mixed emotions", "[operations][mood]")
   ctx.SetEmotionProbabilities (e_t);
 
   UpdateMood op;
-  op.Execute (ctx);
+  op.Execute (ctx, cortext::testing::GetNullTransaction ());
 
   // Verify all dimensions updated proportionally
   for (size_t i = 0; i < 6; ++i)
@@ -363,15 +358,14 @@ TEST_CASE ("UpdateMood zero mood yields zero ΔT_mood", "[operations][mood]")
   SignalProcessor::Config cfg;
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;
-  std::vector<BufferedWriteInstruction> buf;
-  OperationContext ctx (s, pctx, cfg, buf);
+  OperationContext ctx (s, pctx, cfg);
 
   // Mood is already zero (default), zero emotion input
   std::array<double, 6> e_t = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
   ctx.SetEmotionProbabilities (e_t);
 
   UpdateMood op;
-  op.Execute (ctx);
+  op.Execute (ctx, cortext::testing::GetNullTransaction ());
 
   // ||M|| = 0, so ΔT_mood = 0
   REQUIRE (ctx.GetDeltaThresholdMood ().has_value ());
@@ -385,8 +379,7 @@ TEST_CASE ("UpdateMood max mood state normalization", "[operations][mood]")
   SignalProcessor::Config cfg;
   cfg.sensitivity = 1.0; // max sensitivity
   cfg.stability = 1.0;   // max stability (slow decay)
-  std::vector<BufferedWriteInstruction> buf;
-  OperationContext ctx (s, pctx, cfg, buf);
+  OperationContext ctx (s, pctx, cfg);
 
   // Set all dimensions to max value 1.0
   // ||M|| = √6 when all dimensions are 1.0
@@ -397,7 +390,7 @@ TEST_CASE ("UpdateMood max mood state normalization", "[operations][mood]")
   ctx.SetEmotionProbabilities (e_t);
 
   UpdateMood op;
-  op.Execute (ctx);
+  op.Execute (ctx, cortext::testing::GetNullTransaction ());
 
   // After decay: λ = 0.999, each dimension ~ 0.999
   const double lambda = core::LambdaMood (cfg.stability);

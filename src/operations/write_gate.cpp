@@ -7,7 +7,7 @@ namespace cortext::operations
 {
 
 void
-ComputeWriteGate::Execute (OperationContext &context) const
+ComputeWriteGate::Execute (OperationContext &context, Transaction &tx) const
 {
   // Get composite score (defaults to 0.0 if not computed)
   const auto composite_opt = context.GetCompositeScore ();

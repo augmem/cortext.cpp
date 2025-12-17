@@ -1,4 +1,5 @@
 #include <catch2/catch_approx.hpp>
+#include "test_helpers.hpp"
 #include <catch2/catch_test_macros.hpp>
 #include <cortext/core/knobs.hpp>
 #include <cortext/operations/stability.hpp>
@@ -18,17 +19,17 @@ TEST_CASE ("Alg17 positive contextual gain increases half_life",
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
   cfg.stability = 0.5;
-  std::vector<BufferedWriteInstruction> buf;
+
 
   // Initialize stability priors and seed dynamic state
   {
-    OperationContext ctx (s, pctx, cfg, buf);
+    OperationContext ctx (s, pctx, cfg);
     InitializeStabilityPriors init;
-    init.Execute (ctx);
+    init.Execute (ctx, cortext::testing::GetNullTransaction ());
   }
   const double prior_hl = pctx.half_life;
 
-  OperationContext ctx (s, pctx, cfg, buf);
+  OperationContext ctx (s, pctx, cfg);
   // Attach a positive contextual gain event
   OperationContext::MemoryUsageEvent ev{};
   ev.embedding_id = 1LL;
@@ -37,13 +38,13 @@ TEST_CASE ("Alg17 positive contextual gain increases half_life",
   ctx.SetMemoryUsageEvents ({ ev });
 
   ApplyStabilityFeedback op;
-  op.Execute (ctx);
+  op.Execute (ctx, cortext::testing::GetNullTransaction ());
   // Alg17 now emits ΔHalfLife_adj_t for Alg6 to consume; apply Alg6
   REQUIRE (ctx.GetDeltaHalfLifeAdjustment ().has_value ());
   // Provide a retention observation and run Alg6
   ctx.SetObservedRetentionSeconds (120.0);
   cortext::operations::UpdateStability st;
-  st.Execute (ctx);
+  st.Execute (ctx, cortext::testing::GetNullTransaction ());
   REQUIRE (pctx.half_life > prior_hl);
   REQUIRE (
       pctx.periphery_half_life
@@ -61,17 +62,17 @@ TEST_CASE ("Alg17 non-positive contextual gain decreases half_life",
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
   cfg.stability = 0.5;
-  std::vector<BufferedWriteInstruction> buf;
+
 
   // Initialize stability priors and seed dynamic state
   {
-    OperationContext ctx (s, pctx, cfg, buf);
+    OperationContext ctx (s, pctx, cfg);
     InitializeStabilityPriors init;
-    init.Execute (ctx);
+    init.Execute (ctx, cortext::testing::GetNullTransaction ());
   }
   const double prior_hl = pctx.half_life;
 
-  OperationContext ctx (s, pctx, cfg, buf);
+  OperationContext ctx (s, pctx, cfg);
   // Attach a negative contextual gain event
   OperationContext::MemoryUsageEvent ev{};
   ev.embedding_id = 2LL;
@@ -80,13 +81,13 @@ TEST_CASE ("Alg17 non-positive contextual gain decreases half_life",
   ctx.SetMemoryUsageEvents ({ ev });
 
   ApplyStabilityFeedback op;
-  op.Execute (ctx);
+  op.Execute (ctx, cortext::testing::GetNullTransaction ());
   // Alg17 now emits ΔHalfLife_adj_t for Alg6 to consume; apply Alg6
   REQUIRE (ctx.GetDeltaHalfLifeAdjustment ().has_value ());
   // Provide a retention observation and run Alg6
   ctx.SetObservedRetentionSeconds (120.0);
   cortext::operations::UpdateStability st;
-  st.Execute (ctx);
+  st.Execute (ctx, cortext::testing::GetNullTransaction ());
   REQUIRE (pctx.half_life < prior_hl);
   REQUIRE (
       pctx.periphery_half_life

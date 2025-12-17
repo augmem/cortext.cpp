@@ -1,6 +1,6 @@
 #include "cortext/operations/consolidation_summarize.hpp"
 
-#include "cortext/buffered_write_instruction.hpp"
+#include "cortext/store/store.hpp"
 #include "cortext/core/algorithms.hpp"
 #include "cortext/core/knobs.hpp"
 #include "cortext/core/utils.hpp"
@@ -30,15 +30,12 @@ GenerateSummaryId (uint64_t ts, int counter)
   return ss.str ();
 }
 
-/// @brief Add a buffered write instruction.
+/// @brief Execute a write query on the transaction.
 void
-AddWrite (OperationContext &ctx, const std::string &q,
+AddWrite (Transaction &tx, const std::string &q,
           const std::vector<std::any> &p = {})
 {
-  BufferedWriteInstruction op;
-  op.query = q;
-  op.params = p;
-  ctx.AddWriteInstruction (std::move (op));
+  tx.Execute (q, p);
 }
 
 /// @brief Decode blob to string if possible.
@@ -79,7 +76,7 @@ ConsolidationSummarizeParams::FromKnobs (double F, double /*S*/, double /*T*/)
 }
 
 void
-ConsolidationSummarize::Execute (OperationContext &context) const
+ConsolidationSummarize::Execute (OperationContext &context, Transaction &tx) const
 {
   if (!context.GetConsolidationShouldStart ())
     {
@@ -217,7 +214,7 @@ ConsolidationSummarize::Execute (OperationContext &context) const
       std::vector<float> centroid_blob = cluster.centroid;
 
       // 3. Insert into consolidation_summaries.
-      AddWrite (context,
+      AddWrite (tx,
                 "INSERT INTO consolidation_summaries"
                 "(summary_id, summary_text, centroid, cluster_size) "
                 "VALUES(?, ?, ?, ?)",
@@ -227,7 +224,7 @@ ConsolidationSummarize::Execute (OperationContext &context) const
       // 4. Insert source mappings into consolidation_sources.
       for (long long emb_id : cluster.embedding_ids)
         {
-          AddWrite (context,
+          AddWrite (tx,
                     "INSERT INTO consolidation_sources"
                     "(summary_id, source_embedding_id) "
                     "VALUES(?, ?)",
@@ -244,12 +241,12 @@ ConsolidationSummarize::Execute (OperationContext &context) const
             + "pre_activation, lability_state, suppression_count) "
             + "SELECT COALESCE(MAX(embedding_id), 0) + 1, ?, "
             + store::kEmbeddingsCentroidDefaults + " FROM embeddings";
-      AddWrite (context, centroid_sql, { centroid_blob });
+      AddWrite (tx, centroid_sql, { centroid_blob });
 
       // 6. Update cluster_id in embeddings for source embeddings.
       for (long long emb_id : cluster.embedding_ids)
         {
-          AddWrite (context,
+          AddWrite (tx,
                     "UPDATE embeddings SET cluster_id = ? "
                     "WHERE embedding_id = ?",
                     { cluster.cluster_id, emb_id });
@@ -270,7 +267,7 @@ ConsolidationSummarize::Execute (OperationContext &context) const
     }
 
   // 8. Clear processed candidates.
-  AddWrite (context,
+  AddWrite (tx,
             "DELETE FROM consolidation_candidates WHERE embedding_id IN "
             "(SELECT source_embedding_id FROM consolidation_sources)");
 

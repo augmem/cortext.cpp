@@ -1,4 +1,5 @@
 #include <catch2/catch_approx.hpp>
+#include "test_helpers.hpp"
 #include <catch2/catch_test_macros.hpp>
 #include <cortext/core/algorithms.hpp>
 #include <cortext/operations/focus.hpp>
@@ -18,11 +19,11 @@ TEST_CASE ("InitializeFocusPriors computes from config", "[operations][focus]")
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
   cfg.focus = 0.8;
-  std::vector<BufferedWriteInstruction> buf;
-  OperationContext ctx (s, pctx, cfg, buf);
+
+  OperationContext ctx (s, pctx, cfg);
 
   InitializeFocusPriors init;
-  init.Execute (ctx);
+  init.Execute (ctx, cortext::testing::GetNullTransaction ());
 
   REQUIRE (pctx.weight_relevance_prior
            == Catch::Approx (cortext::core::Sigmoid (2 * cfg.focus - 1)));
@@ -41,17 +42,17 @@ TEST_CASE ("UpdateFocus EWMA toward observed cosine and clamping",
   SignalProcessor::Config cfg;
   cfg.focus = 0.5;     // mid
   cfg.stability = 0.5; // mid
-  std::vector<BufferedWriteInstruction> buf;
-  OperationContext ctx (s, pctx, cfg, buf);
+
+  OperationContext ctx (s, pctx, cfg);
 
   // Priors must be initialized
   InitializeFocusPriors init;
-  init.Execute (ctx);
+  init.Execute (ctx, cortext::testing::GetNullTransaction ());
 
   // Set uncertainty to a mid value to get non-trivial alpha_f
   UpdateUncertainty uop;
   pctx.signals_processed = 10;
-  uop.Execute (ctx); // updates pctx.u_t
+  uop.Execute (ctx, cortext::testing::GetNullTransaction ()); // updates pctx.u_t
 
   // Seed context with a mean slightly different than current signal to get
   // cosine<1
@@ -59,7 +60,7 @@ TEST_CASE ("UpdateFocus EWMA toward observed cosine and clamping",
 
   double prev = pctx.weight_relevance;
   UpdateFocus op;
-  op.Execute (ctx);
+  op.Execute (ctx, cortext::testing::GetNullTransaction ());
 
   // After one EWMA step, weight_relevance should move toward observed cosine
   REQUIRE (pctx.weight_relevance > prev);

@@ -1,4 +1,5 @@
 #include <catch2/catch_test_macros.hpp>
+#include "test_helpers.hpp"
 #include <cortext/operations/effective_focus.hpp>
 #include <cortext/operations/metrics.hpp>
 #include <cortext/processor.hpp>
@@ -25,11 +26,11 @@ TEST_CASE ("ComputeMetrics sets all 12 metrics in normalized ranges",
   cfg.focus = 0.6;
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;
-  std::vector<BufferedWriteInstruction> buf;
-  OperationContext ctx (s, pctx, cfg, buf);
+
+  OperationContext ctx (s, pctx, cfg);
 
   ComputeMetrics op;
-  op.Execute (ctx);
+  op.Execute (ctx, cortext::testing::GetNullTransaction ());
 
   static const operations::Metric kMetrics[] = {
     operations::Metric::relevance, operations::Metric::mismatch,
@@ -64,24 +65,24 @@ TEST_CASE (
   cfg.focus = 0.6; // base F
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;
-  std::vector<BufferedWriteInstruction> buf;
+
 
   ComputeEffectiveFocus feff;
   ComputeMetrics metrics;
 
   // High coherence path
-  OperationContext ctx_hi (s, pctx, cfg, buf);
+  OperationContext ctx_hi (s, pctx, cfg);
   ctx_hi.SetCoherence (1.0);
-  feff.Execute (ctx_hi);
-  metrics.Execute (ctx_hi);
+  feff.Execute (ctx_hi, cortext::testing::GetNullTransaction ());
+  metrics.Execute (ctx_hi, cortext::testing::GetNullTransaction ());
   auto cov_hi = ctx_hi.GetMetric (operations::Metric::coverage).value_or (0.0);
   auto sal_hi = ctx_hi.GetMetric (operations::Metric::salience).value_or (0.0);
 
   // Low coherence path
-  OperationContext ctx_lo (s, pctx, cfg, buf);
+  OperationContext ctx_lo (s, pctx, cfg);
   ctx_lo.SetCoherence (0.0);
-  feff.Execute (ctx_lo);
-  metrics.Execute (ctx_lo);
+  feff.Execute (ctx_lo, cortext::testing::GetNullTransaction ());
+  metrics.Execute (ctx_lo, cortext::testing::GetNullTransaction ());
   auto cov_lo = ctx_lo.GetMetric (operations::Metric::coverage).value_or (0.0);
   auto sal_lo = ctx_lo.GetMetric (operations::Metric::salience).value_or (0.0);
 

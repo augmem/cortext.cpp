@@ -1,4 +1,5 @@
 // tests/operations_emotion.test.cpp
+#include "test_helpers.hpp"
 #include <Eigen/Dense>
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
@@ -13,10 +14,13 @@
 #include <vector>
 
 using namespace cortext;
+
 using cortext::operations::ApplyEmotionalConsolidation;
 
 namespace
 {
+
+constexpr int kEmbeddingDim = 256;
 
 class SetupEmotionInputsOp : public IOperation
 {
@@ -29,7 +33,7 @@ public:
   }
 
   void
-  Execute (OperationContext &ctx) const override
+  Execute (OperationContext &ctx, Transaction & /*tx*/) const override
   {
     ctx.SetEmotionIntensity (intensity_);
     ctx.SetArousal (arousal_);
@@ -48,7 +52,7 @@ static Signal
 MakeSignal (uint64_t ts = 1)
 {
   Signal s;
-  s.embedding = Eigen::VectorXf::Ones (4);
+  s.embedding = Eigen::VectorXf::Ones (kEmbeddingDim);
   s.timestamp = ts;
   s.source_id = "test";
   return s;
@@ -173,16 +177,7 @@ TEST_CASE ("Alg23 below thresholds performs no-op", "[operations][emotion]")
   processor.Flush ();
 
   {
-    // Ensure table exists to allow counting rows even if operation was a
-    // no-op.
-    store->Execute (
-        "CREATE TABLE IF NOT EXISTS emotional_tags ("
-        "embedding_id INTEGER PRIMARY KEY,"
-        "flashbulb INTEGER NOT NULL DEFAULT 0,"
-        "intensity REAL, arousal REAL, valence REAL,"
-        "half_life_bonus REAL, detail_suppression REAL,"
-        "gist_components INTEGER, cascade_radius INTEGER,"
-        "cascade_decay REAL, flashbulb_threshold_eff REAL, ts INTEGER);");
+    // Table exists via SignalProcessor migrations
     auto rows = store->Execute ("SELECT COUNT(*) AS c FROM emotional_tags");
     REQUIRE (rows.size () == 1);
     REQUIRE (std::any_cast<long long> (rows[0].at ("c")) == 0LL);

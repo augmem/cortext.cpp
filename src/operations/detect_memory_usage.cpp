@@ -9,7 +9,7 @@ namespace cortext::operations
 {
 
 void
-DetectMemoryUsage::Execute (OperationContext &context) const
+DetectMemoryUsage::Execute (OperationContext &context, Transaction &tx) const
 {
   auto &p_ctx = context.GetProcessorContext ();
   const auto &signal = context.GetSignal ();

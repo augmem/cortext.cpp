@@ -1,6 +1,6 @@
 #include "cortext/operations/predictive.hpp"
 
-#include "cortext/buffered_write_instruction.hpp"
+#include "cortext/store/store.hpp"
 #include "cortext/core/algorithms.hpp"
 #include "cortext/operations/constants.hpp"
 #include "cortext/processor/operation_context.hpp"
@@ -82,7 +82,7 @@ Clamp01 (double v)
 } // namespace
 
 void
-ApplyPredictivePreActivation::Execute (OperationContext &context) const
+ApplyPredictivePreActivation::Execute (OperationContext &context, Transaction &tx) const
 {
   auto &p_ctx = context.GetProcessorContext ();
   const auto &cfg = context.GetConfig ();
@@ -172,14 +172,10 @@ ApplyPredictivePreActivation::Execute (OperationContext &context) const
         delta = constants::kGainSmall;
 
       // Update embeddings strength (row exists from storage)
-      {
-        BufferedWriteInstruction op;
-        op.query = "UPDATE embeddings "
-                   "SET strength = MIN(?, COALESCE(strength, 1.0) + ?) "
-                   "WHERE embedding_id = ?;";
-        op.params = { kStrengthMax, delta, id };
-        context.AddWriteInstruction (std::move (op));
-      }
+      tx.Execute ("UPDATE embeddings "
+                  "SET strength = MIN(?, COALESCE(strength, 1.0) + ?) "
+                  "WHERE embedding_id = ?;",
+                  { kStrengthMax, delta, id });
     }
 }
 

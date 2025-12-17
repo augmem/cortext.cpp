@@ -12,6 +12,7 @@ namespace cortext
 {
 
 class OperationContext;
+class Transaction;
 
 /// @brief Defines the interface for an operation in the signal processing
 /// model.
@@ -24,7 +25,8 @@ public:
 
   /// @brief Executes the operation.
   /// @param context The context object for the current signal.
-  virtual void Execute (OperationContext &context) const = 0;
+  /// @param tx The active database transaction for this signal.
+  virtual void Execute (OperationContext &context, Transaction &tx) const = 0;
 
   /// @brief Registers database schema migrations required by this operation.
   /// @param registry The registry to add migrations to.

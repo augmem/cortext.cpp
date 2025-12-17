@@ -24,7 +24,7 @@ ConsolidationClusterParams::FromKnobs (double F, double /*S*/, double /*T*/)
 }
 
 void
-ConsolidationCluster::Execute (OperationContext &context) const
+ConsolidationCluster::Execute (OperationContext &context, Transaction &tx) const
 {
   if (!context.GetConsolidationShouldStart ())
     {

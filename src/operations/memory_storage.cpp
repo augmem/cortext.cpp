@@ -12,7 +12,7 @@ namespace cortext::operations
 {
 
 void
-MemoryStorage::Execute (OperationContext &context) const
+MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
 {
   // Check write gate decision - if rejected, discard entirely
   if (!context.GetWriteDecision ())
@@ -37,8 +37,8 @@ MemoryStorage::Execute (OperationContext &context) const
       return;
     }
 
-  // Use savepoint for atomicity - all writes succeed or none
-  auto transaction = store->Begin ();
+  // Use nested transaction for atomicity - all writes succeed or none
+  auto savepoint = tx.Begin ();
 
   try
     {
@@ -54,11 +54,11 @@ MemoryStorage::Execute (OperationContext &context) const
       std::memcpy (emb_blob.data (), emb_vec.data (), emb_blob.size ());
 
       // 1. Store payload in objstore
-      auto blob_rows = transaction->Execute ("SELECT objstore_put(?1) AS id",
-                                             { *signal.payload });
+      auto blob_rows = savepoint->Execute ("SELECT objstore_put(?1) AS id",
+                                           { *signal.payload });
       if (blob_rows.empty () || blob_rows[0].count ("id") == 0)
         {
-          transaction->Rollback ();
+          savepoint->Rollback ();
           telemetry::AddCounter (
               "cortext.memory_storage.objstore_error_total", 1);
           return;
@@ -66,7 +66,7 @@ MemoryStorage::Execute (OperationContext &context) const
       const auto blob_id = BlobFromAny (blob_rows[0].at ("id"));
       if (blob_id.empty ())
         {
-          transaction->Rollback ();
+          savepoint->Rollback ();
           telemetry::AddCounter (
               "cortext.memory_storage.objstore_error_total", 1);
           return;
@@ -77,13 +77,13 @@ MemoryStorage::Execute (OperationContext &context) const
       const std::string insert_sql = std::string ("INSERT INTO embeddings (")
                                      + store::kEmbeddingsInsertColumns + ") VALUES ("
                                      + store::kEmbeddingsMemoryDefaults + ")";
-      transaction->Execute (insert_sql,
-                            { emb_vec, static_cast<long long> (signal.timestamp) });
+      savepoint->Execute (insert_sql,
+                          { emb_vec, static_cast<long long> (signal.timestamp) });
       auto id_rows
-          = transaction->Execute ("SELECT last_insert_rowid() AS id", {});
+          = savepoint->Execute ("SELECT last_insert_rowid() AS id", {});
       if (id_rows.empty () || id_rows[0].count ("id") == 0)
         {
-          transaction->Rollback ();
+          savepoint->Rollback ();
           telemetry::AddCounter (
               "cortext.memory_storage.embedding_error_total", 1);
           return;
@@ -91,7 +91,7 @@ MemoryStorage::Execute (OperationContext &context) const
       const auto id_opt = AnyToLongLong (id_rows[0].at ("id"));
       if (!id_opt)
         {
-          transaction->Rollback ();
+          savepoint->Rollback ();
           telemetry::AddCounter (
               "cortext.memory_storage.embedding_error_total", 1);
           return;
@@ -99,7 +99,7 @@ MemoryStorage::Execute (OperationContext &context) const
       const long long embedding_id = *id_opt;
 
       // 3. Insert memories (metadata)
-      transaction->Execute (
+      savepoint->Execute (
           "INSERT INTO memories (embedding_id, modality, mime, source_id, "
           "timestamp, width, height, channels, sample_rate, num_samples, "
           "blob_id) "
@@ -113,7 +113,7 @@ MemoryStorage::Execute (OperationContext &context) const
             static_cast<long long> (signal.num_samples), blob_id });
 
       // Commit the savepoint
-      transaction->Commit ();
+      savepoint->Commit ();
 
       // Set stored_embedding_id in context for output
       context.SetStoredEmbeddingId (embedding_id);
@@ -121,7 +121,7 @@ MemoryStorage::Execute (OperationContext &context) const
     }
   catch (const std::exception &e)
     {
-      transaction->Rollback ();
+      savepoint->Rollback ();
       telemetry::AddCounter ("cortext.memory_storage.error_total", 1);
       telemetry::LogError (
           "MemoryStorage failed",

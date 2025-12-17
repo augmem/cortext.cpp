@@ -1,4 +1,5 @@
 #include <catch2/catch_approx.hpp>
+#include "test_helpers.hpp"
 #include <catch2/catch_test_macros.hpp>
 #include <cortext/core/knobs.hpp>
 #include <cortext/operations/sensitivity.hpp>
@@ -16,11 +17,11 @@ TEST_CASE ("InitializeSensitivityPriors computes priors (S=0.5)",
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
   cfg.sensitivity = 0.5;
-  std::vector<BufferedWriteInstruction> buf;
-  OperationContext ctx (s, pctx, cfg, buf);
+
+  OperationContext ctx (s, pctx, cfg);
 #
   InitializeSensitivityPriors op;
-  op.Execute (ctx);
+  op.Execute (ctx, cortext::testing::GetNullTransaction ());
 #
   // Expected values per algorithms.md
   const double S = 0.5;
@@ -42,16 +43,16 @@ TEST_CASE ("InitializeSensitivityPriors edge cases (S=0 and S=1)",
 {
   Signal s;
   s.embedding = Eigen::VectorXf::Zero (3);
-  std::vector<BufferedWriteInstruction> buf;
+
 #
   // S = 0
   {
     ProcessorContext pctx;
     SignalProcessor::Config cfg;
     cfg.sensitivity = 0.0;
-    OperationContext ctx (s, pctx, cfg, buf);
+    OperationContext ctx (s, pctx, cfg);
     InitializeSensitivityPriors op;
-    op.Execute (ctx);
+    op.Execute (ctx, cortext::testing::GetNullTransaction ());
     REQUIRE (pctx.base_rate_prior
              == Catch::Approx (cortext::core::BaseRatePrior (0.0)));
     REQUIRE (pctx.weight_novelty_prior == Catch::Approx (0.3));
@@ -70,9 +71,9 @@ TEST_CASE ("InitializeSensitivityPriors edge cases (S=0 and S=1)",
     ProcessorContext pctx;
     SignalProcessor::Config cfg;
     cfg.sensitivity = 1.0;
-    OperationContext ctx (s, pctx, cfg, buf);
+    OperationContext ctx (s, pctx, cfg);
     InitializeSensitivityPriors op;
-    op.Execute (ctx);
+    op.Execute (ctx, cortext::testing::GetNullTransaction ());
     REQUIRE (pctx.base_rate_prior
              == Catch::Approx (cortext::core::BaseRatePrior (1.0)));
     REQUIRE (pctx.weight_novelty_prior == Catch::Approx (1.0));

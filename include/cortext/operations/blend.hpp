@@ -14,7 +14,7 @@ namespace cortext::operations
 class FitMetricWeightsRLS : public IOperation
 {
 public:
-  void Execute (OperationContext &context) const override;
+  void Execute (OperationContext &context, Transaction &tx) const override;
 };
 
 /// @brief Algorithm 7 (part 2): Compute composite score from metrics and
@@ -28,7 +28,7 @@ public:
 class ComputeCompositeScore : public IOperation
 {
 public:
-  void Execute (OperationContext &context) const override;
+  void Execute (OperationContext &context, Transaction &tx) const override;
 };
 
 } // namespace cortext::operations

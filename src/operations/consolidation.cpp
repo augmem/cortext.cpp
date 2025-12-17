@@ -1,5 +1,5 @@
 #include "cortext/operations/consolidation.hpp"
-#include "cortext/buffered_write_instruction.hpp"
+#include "cortext/store/store.hpp"
 #include "cortext/core/knobs.hpp"
 #include "cortext/operations/constants.hpp"
 #include "cortext/operations/extraction.hpp"
@@ -76,7 +76,7 @@ CheckIdleCondition (int tokens_in_flight, int retrieval_queue_depth,
 } // namespace
 
 void
-EvaluateConsolidation::Execute (OperationContext &context) const
+EvaluateConsolidation::Execute (OperationContext &context, Transaction &tx) const
 {
   auto &p_ctx = context.GetProcessorContext ();
   const auto &cfg = context.GetConfig ();
@@ -133,13 +133,8 @@ EvaluateConsolidation::CollectSchema (cortext::store::SchemaRegistry &registry) 
   (void)registry;
 }
 
-} // namespace cortext::operations
-
-namespace cortext::operations
-{
-
 void
-EnqueueExtractionJobs::Execute (OperationContext &context) const
+EnqueueExtractionJobs::Execute (OperationContext &context, Transaction &tx) const
 {
   if (!context.GetConsolidationShouldStart ())
     {
@@ -189,13 +184,8 @@ EnqueueExtractionJobs::CollectSchema (cortext::store::SchemaRegistry &registry) 
   (void)registry;
 }
 
-} // namespace cortext::operations
-
-namespace cortext::operations
-{
-
 void
-ScoreConsolidation::Execute (OperationContext &context) const
+ScoreConsolidation::Execute (OperationContext &context, Transaction &tx) const
 {
   const auto &cfg = context.GetConfig ();
   const double F = cfg.focus;
@@ -209,54 +199,46 @@ ScoreConsolidation::Execute (OperationContext &context) const
   // Update connectivity metric from graph edge count (Section 9.2).
   // Connectivity = normalized count of edges where this embedding participates.
   // Normalized by max observed edge count to keep values in [0, 1].
-  {
-    BufferedWriteInstruction op;
-    op.query
-        = "WITH edge_counts AS ("
-          "  SELECT e.embedding_id, "
-          "         (SELECT COUNT(*) FROM graph_edges ge "
-          "          WHERE ge.source_id = 'emb:' || e.embedding_id "
-          "             OR ge.target_id = 'emb:' || e.embedding_id) AS cnt "
-          "  FROM embeddings e"
-          "), max_cnt AS ("
-          "  SELECT MAX(cnt) AS m FROM edge_counts WHERE cnt > 0"
-          ") "
-          "UPDATE embeddings SET connectivity = ("
-          "  SELECT CASE WHEN (SELECT m FROM max_cnt) > 0 "
-          "              THEN CAST(ec.cnt AS REAL) / (SELECT m FROM max_cnt) "
-          "              ELSE 0.0 END "
-          "  FROM edge_counts ec WHERE ec.embedding_id = embeddings.embedding_id"
-          ");";
-    context.AddWriteInstruction (std::move (op));
-  }
+  tx.Execute ("WITH edge_counts AS ("
+              "  SELECT e.embedding_id, "
+              "         (SELECT COUNT(*) FROM graph_edges ge "
+              "          WHERE ge.source_id = 'emb:' || e.embedding_id "
+              "             OR ge.target_id = 'emb:' || e.embedding_id) AS cnt "
+              "  FROM embeddings e"
+              "), max_cnt AS ("
+              "  SELECT MAX(cnt) AS m FROM edge_counts WHERE cnt > 0"
+              ") "
+              "UPDATE embeddings SET connectivity = ("
+              "  SELECT CASE WHEN (SELECT m FROM max_cnt) > 0 "
+              "              THEN CAST(ec.cnt AS REAL) / (SELECT m FROM max_cnt) "
+              "              ELSE 0.0 END "
+              "  FROM edge_counts ec WHERE ec.embedding_id = "
+              "embeddings.embedding_id"
+              ");",
+              {});
 
   // Insert or update candidates whose score is below floor.
   // score = T*strength - F*redundancy + S*connectivity + T*stability
   // Uses unified embeddings table which contains per-embedding state.
-  {
-    BufferedWriteInstruction op;
-    op.query
-        = "INSERT INTO consolidation_candidates(embedding_id, score, "
-          "created_at, reason) "
-          "SELECT e.embedding_id, "
-          "       ((?1 * COALESCE(e.strength, 1.0)) "
-          "        - (?2 * COALESCE(e.redundancy, 0.0)) "
-          "        + (?3 * COALESCE(e.connectivity, 0.0)) "
-          "        + (?4 * COALESCE(e.stability, 0.0))) AS computed_score, "
-          "       ?5 AS created_at, "
-          "       'score_below_floor' AS reason "
-          "FROM embeddings e "
-          "WHERE ((?1 * COALESCE(e.strength, 1.0)) "
-          "       - (?2 * COALESCE(e.redundancy, 0.0)) "
-          "       + (?3 * COALESCE(e.connectivity, 0.0)) "
-          "       + (?4 * COALESCE(e.stability, 0.0))) < ?6 "
-          "ON CONFLICT(embedding_id) DO UPDATE SET "
-          "  score=excluded.score, "
-          "  created_at=excluded.created_at, "
-          "  reason=excluded.reason;";
-    op.params = { T, F, S, T, static_cast<long long> (now_ts), floor_cutoff };
-    context.AddWriteInstruction (std::move (op));
-  }
+  tx.Execute ("INSERT INTO consolidation_candidates(embedding_id, score, "
+              "created_at, reason) "
+              "SELECT e.embedding_id, "
+              "       ((?1 * COALESCE(e.strength, 1.0)) "
+              "        - (?2 * COALESCE(e.redundancy, 0.0)) "
+              "        + (?3 * COALESCE(e.connectivity, 0.0)) "
+              "        + (?4 * COALESCE(e.stability, 0.0))) AS computed_score, "
+              "       ?5 AS created_at, "
+              "       'score_below_floor' AS reason "
+              "FROM embeddings e "
+              "WHERE ((?1 * COALESCE(e.strength, 1.0)) "
+              "       - (?2 * COALESCE(e.redundancy, 0.0)) "
+              "       + (?3 * COALESCE(e.connectivity, 0.0)) "
+              "       + (?4 * COALESCE(e.stability, 0.0))) < ?6 "
+              "ON CONFLICT(embedding_id) DO UPDATE SET "
+              "  score=excluded.score, "
+              "  created_at=excluded.created_at, "
+              "  reason=excluded.reason;",
+              { T, F, S, T, static_cast<long long> (now_ts), floor_cutoff });
 }
 
 void

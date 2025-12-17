@@ -1,4 +1,5 @@
 #include <catch2/catch_approx.hpp>
+#include "test_helpers.hpp"
 #include <catch2/catch_test_macros.hpp>
 #include <cortext/data/centroids.hpp>
 #include <cortext/operations/sensitivity.hpp>
@@ -26,14 +27,14 @@ TEST_CASE ("UpdateSensitivity without centroids sets sane defaults and deltas",
   SignalProcessor::Config cfg;
   cfg.sensitivity = 0.7;
   cfg.stability = 0.5;
-  std::vector<BufferedWriteInstruction> buf;
-  OperationContext ctx (s, pctx, cfg, buf);
+
+  OperationContext ctx (s, pctx, cfg);
 #
   // Populate recent scores to create non-zero variance
   pctx.recent_scores = { 0.1, 0.3, 0.9, 0.5, 0.7 };
 #
   UpdateSensitivity op;
-  op.Execute (ctx);
+  op.Execute (ctx, cortext::testing::GetNullTransaction ());
 #
   // Emotions defaults (no centroids)
   REQUIRE (ctx.GetEmotionIntensity () == Catch::Approx (0.0));
@@ -67,11 +68,11 @@ TEST_CASE (
   SignalProcessor::Config cfg;
   cfg.sensitivity = 0.8;
   cfg.stability = 0.4;
-  std::vector<BufferedWriteInstruction> buf;
-  OperationContext ctx (s, pctx, cfg, buf);
+
+  OperationContext ctx (s, pctx, cfg);
 #
   UpdateSensitivity op;
-  op.Execute (ctx);
+  op.Execute (ctx, cortext::testing::GetNullTransaction ());
 #
   REQUIRE (ctx.GetEmotionIntensity () > 0.0);
   REQUIRE (ctx.GetDeltaThresholdEmotion ().has_value ());
@@ -91,8 +92,8 @@ TEST_CASE ("Write-rate window affects rate_target with bursts and gaps",
     SignalProcessor::Config cfg;
     cfg.sensitivity = 0.6;
     cfg.stability = 0.4;
-    std::vector<BufferedWriteInstruction> buf;
-    OperationContext ctx (s, pctx, cfg, buf);
+  
+    OperationContext ctx (s, pctx, cfg);
     // Populate window with 1s intervals
     uint64_t t = 900;
     for (int i = 0; i < 10; ++i)
@@ -101,7 +102,7 @@ TEST_CASE ("Write-rate window affects rate_target with bursts and gaps",
         t += 1;
       }
     UpdateSensitivity op;
-    op.Execute (ctx);
+    op.Execute (ctx, cortext::testing::GetNullTransaction ());
     REQUIRE (pctx.rate_target > 0.0);
   }
   // Low-rate case (~12/min), ensure lower than previous
@@ -113,8 +114,8 @@ TEST_CASE ("Write-rate window affects rate_target with bursts and gaps",
     SignalProcessor::Config cfg;
     cfg.sensitivity = 0.6;
     cfg.stability = 0.4;
-    std::vector<BufferedWriteInstruction> buf;
-    OperationContext ctx (s, pctx, cfg, buf);
+  
+    OperationContext ctx (s, pctx, cfg);
     uint64_t t = 1800;
     for (int i = 0; i < 10; ++i)
       {
@@ -122,7 +123,7 @@ TEST_CASE ("Write-rate window affects rate_target with bursts and gaps",
         t += 5;
       }
     UpdateSensitivity op;
-    op.Execute (ctx);
+    op.Execute (ctx, cortext::testing::GetNullTransaction ());
     REQUIRE (pctx.rate_target > 0.0);
     // With 5s intervals, rate should be ~12/min, ensure < 30/min rough bound
     REQUIRE (pctx.rate_target < 30.0);
@@ -136,13 +137,13 @@ TEST_CASE ("Write-rate window affects rate_target with bursts and gaps",
     SignalProcessor::Config cfg;
     cfg.sensitivity = 0.5;
     cfg.stability = 0.5;
-    std::vector<BufferedWriteInstruction> buf;
-    OperationContext ctx (s, pctx, cfg, buf);
+  
+    OperationContext ctx (s, pctx, cfg);
     pctx.write_rate_window_.Record (100);
     pctx.write_rate_window_.Record (100); // should be ignored
     pctx.write_rate_window_.Record (101);
     UpdateSensitivity op;
-    op.Execute (ctx);
+    op.Execute (ctx, cortext::testing::GetNullTransaction ());
     REQUIRE (pctx.rate_target >= 0.0);
   }
 }

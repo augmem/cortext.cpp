@@ -1,4 +1,5 @@
 #include <catch2/catch_approx.hpp>
+#include "test_helpers.hpp"
 #include <catch2/catch_test_macros.hpp>
 #include <cortext/core/algorithms.hpp>
 #include <cortext/operations/focus.hpp>
@@ -27,12 +28,10 @@ MakeContext (double focus, double stability)
   SignalProcessor::Config cfg;
   cfg.focus = focus;
   cfg.stability = stability;
-  static std::vector<BufferedWriteInstruction> buf;
-  buf.clear ();
 
-  OperationContext ctx (s, pctx, cfg, buf);
+  OperationContext ctx (s, pctx, cfg);
   InitializeFocusPriors init;
-  init.Execute (ctx);
+  init.Execute (ctx, cortext::testing::GetNullTransaction ());
   return ctx;
 }
 
@@ -54,7 +53,7 @@ TEST_CASE ("Alg15 positive contextual gain boosts relevance and narrows width",
   ctx.SetMemoryUsageEvents ({ ev });
 
   ApplyFocusFeedback op;
-  op.Execute (ctx);
+  op.Execute (ctx, cortext::testing::GetNullTransaction ());
 
   REQUIRE (pctx.weight_relevance > prev_wr);
   REQUIRE (pctx.attention_width < prev_aw);
@@ -78,7 +77,7 @@ TEST_CASE (
     ev0.contextual_gain = 0.0;
     ctx.SetMemoryUsageEvents ({ ev0 });
     ApplyFocusFeedback op;
-    op.Execute (ctx);
+    op.Execute (ctx, cortext::testing::GetNullTransaction ());
   }
 
   REQUIRE (pctx.weight_relevance == Catch::Approx (prev_wr));
@@ -92,6 +91,6 @@ TEST_CASE (
   ev.contextual_gain = -0.3;
   ctx.SetMemoryUsageEvents ({ ev });
   ApplyFocusFeedback op;
-  op.Execute (ctx);
+  op.Execute (ctx, cortext::testing::GetNullTransaction ());
   REQUIRE (pctx.attention_width >= aw_after_zero);
 }

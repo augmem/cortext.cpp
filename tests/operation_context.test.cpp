@@ -1,10 +1,9 @@
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
-#include <cortext/buffered_write_instruction.hpp>
 #include <cortext/processor.hpp>
 #include <cortext/processor/operation_context.hpp>
 
-using cortext::BufferedWriteInstruction;
+
 using cortext::OperationContext;
 using cortext::ProcessorContext;
 using cortext::Signal;
@@ -19,9 +18,9 @@ TEST_CASE ("OperationContext intermediate results and accessors", "[context]")
 
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
-  std::vector<BufferedWriteInstruction> buf;
 
-  OperationContext ctx (s, pctx, cfg, buf);
+
+  OperationContext ctx (s, pctx, cfg);
 
   // Accessors return references
   REQUIRE (&ctx.GetSignal () == &s);
@@ -33,11 +32,4 @@ TEST_CASE ("OperationContext intermediate results and accessors", "[context]")
   auto comp = ctx.GetCompositeScore ();
   REQUIRE (comp.has_value ());
   REQUIRE (*comp == Catch::Approx (0.75));
-
-  // Write instruction buffer
-  BufferedWriteInstruction ins{ "INSERT INTO t(v) VALUES(?)",
-                                { std::string{ "x" } } };
-  ctx.AddWriteInstruction (ins);
-  REQUIRE (buf.size () == 1);
-  REQUIRE (buf[0].query == "INSERT INTO t(v) VALUES(?)");
 }

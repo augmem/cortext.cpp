@@ -7,7 +7,7 @@ namespace cortext::operations
 {
 
 void
-ConsolidationGate::Execute (OperationContext &context) const
+ConsolidationGate::Execute (OperationContext &context, Transaction &tx) const
 {
   if (!context.GetConsolidationShouldStart ())
     {
@@ -15,10 +15,10 @@ ConsolidationGate::Execute (OperationContext &context) const
     }
   // Run scoring and enqueue extraction jobs when start signal is present.
   ScoreConsolidation scorer;
-  scorer.Execute (context);
+  scorer.Execute (context, tx);
 
   EnqueueExtractionJobs jobs;
-  jobs.Execute (context);
+  jobs.Execute (context, tx);
 }
 
 void

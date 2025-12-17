@@ -1,4 +1,5 @@
 #include <catch2/catch_approx.hpp>
+#include "test_helpers.hpp"
 #include <catch2/catch_test_macros.hpp>
 #include <cortext/core/knobs.hpp>
 #include <cortext/operations/stability.hpp>
@@ -17,11 +18,11 @@ TEST_CASE ("InitializeStabilityPriors sets priors at T=0",
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
   cfg.stability = 0.0;
-  std::vector<BufferedWriteInstruction> buf;
-  OperationContext ctx (s, pctx, cfg, buf);
+
+  OperationContext ctx (s, pctx, cfg);
 #
   InitializeStabilityPriors op;
-  op.Execute (ctx);
+  op.Execute (ctx, cortext::testing::GetNullTransaction ());
 #
   REQUIRE (pctx.hysteresis_band_prior
            == Catch::Approx (cortext::core::BaseBandPrior (0.0)));
@@ -45,11 +46,11 @@ TEST_CASE ("InitializeStabilityPriors sets priors at T=1",
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
   cfg.stability = 1.0;
-  std::vector<BufferedWriteInstruction> buf;
-  OperationContext ctx (s, pctx, cfg, buf);
+
+  OperationContext ctx (s, pctx, cfg);
 #
   InitializeStabilityPriors op;
-  op.Execute (ctx);
+  op.Execute (ctx, cortext::testing::GetNullTransaction ());
 #
   REQUIRE (pctx.hysteresis_band_prior
            == Catch::Approx (cortext::core::BaseBandPrior (1.0)));
@@ -72,11 +73,11 @@ TEST_CASE ("InitializeStabilityPriors mid T", "[operations][stability]")
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
   cfg.stability = 0.5;
-  std::vector<BufferedWriteInstruction> buf;
-  OperationContext ctx (s, pctx, cfg, buf);
+
+  OperationContext ctx (s, pctx, cfg);
 #
   InitializeStabilityPriors op;
-  op.Execute (ctx);
+  op.Execute (ctx, cortext::testing::GetNullTransaction ());
 #
   REQUIRE (pctx.hysteresis_band_prior
            == Catch::Approx (cortext::core::BaseBandPrior (0.5)));
@@ -101,16 +102,16 @@ TEST_CASE ("UpdateStability no history keeps half-life at prior",
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
   cfg.stability = 0.5;
-  std::vector<BufferedWriteInstruction> buf;
-  OperationContext ctx_init (s, pctx, cfg, buf);
+
+  OperationContext ctx_init (s, pctx, cfg);
   InitializeStabilityPriors init_op;
-  init_op.Execute (ctx_init);
+  init_op.Execute (ctx_init, cortext::testing::GetNullTransaction ());
   const double prior_hl = pctx.half_life_prior;
   const double hysteresis_before = pctx.hysteresis;
   //
   UpdateStability op;
-  OperationContext ctx (s, pctx, cfg, buf);
-  op.Execute (ctx);
+  OperationContext ctx (s, pctx, cfg);
+  op.Execute (ctx, cortext::testing::GetNullTransaction ());
   //
   REQUIRE (pctx.half_life == Catch::Approx (prior_hl));
   REQUIRE (
@@ -131,11 +132,11 @@ TEST_CASE ("UpdateStability increases half-life when retention above mean",
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
   cfg.stability = 0.5;
-  std::vector<BufferedWriteInstruction> buf;
+
   InitializeStabilityPriors init_op;
   {
-    OperationContext ctx (s, pctx, cfg, buf);
-    init_op.Execute (ctx);
+    OperationContext ctx (s, pctx, cfg);
+    init_op.Execute (ctx, cortext::testing::GetNullTransaction ());
   }
   const double prior_hl = pctx.half_life;
   // Fill history with tail near 100, last value much larger (e.g., 500)
@@ -147,8 +148,8 @@ TEST_CASE ("UpdateStability increases half-life when retention above mean",
   pctx.observed_retention_history.push_back (500.0);
   //
   UpdateStability op;
-  OperationContext ctx2 (s, pctx, cfg, buf);
-  op.Execute (ctx2);
+  OperationContext ctx2 (s, pctx, cfg);
+  op.Execute (ctx2, cortext::testing::GetNullTransaction ());
   //
   REQUIRE (pctx.half_life > prior_hl);
   REQUIRE (
@@ -167,11 +168,11 @@ TEST_CASE ("UpdateStability decreases half-life when retention below mean",
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
   cfg.stability = 0.5;
-  std::vector<BufferedWriteInstruction> buf;
+
   InitializeStabilityPriors init_op;
   {
-    OperationContext ctx (s, pctx, cfg, buf);
-    init_op.Execute (ctx);
+    OperationContext ctx (s, pctx, cfg);
+    init_op.Execute (ctx, cortext::testing::GetNullTransaction ());
   }
   const double prior_hl = pctx.half_life;
   // Tail near 100, last value much smaller (e.g., 10)
@@ -183,8 +184,8 @@ TEST_CASE ("UpdateStability decreases half-life when retention below mean",
   pctx.observed_retention_history.push_back (10.0);
   //
   UpdateStability op;
-  OperationContext ctx2 (s, pctx, cfg, buf);
-  op.Execute (ctx2);
+  OperationContext ctx2 (s, pctx, cfg);
+  op.Execute (ctx2, cortext::testing::GetNullTransaction ());
   //
   REQUIRE (pctx.half_life < prior_hl);
 }
@@ -198,11 +199,11 @@ TEST_CASE ("UpdateStability uses tail window w_ret(T)",
   SignalProcessor::Config cfg;
   // Use a small but non-zero T so half-life prior > hl_min and can decrease.
   cfg.stability = 0.1; // w_ret ≈ 30
-  std::vector<BufferedWriteInstruction> buf;
+
   InitializeStabilityPriors init_op;
   {
-    OperationContext ctx (s, pctx, cfg, buf);
-    init_op.Execute (ctx);
+    OperationContext ctx (s, pctx, cfg);
+    init_op.Execute (ctx, cortext::testing::GetNullTransaction ());
   }
   const double prior_hl = pctx.half_life;
   const int w = cortext::core::WRet (cfg.stability); // expect ~30
@@ -218,8 +219,8 @@ TEST_CASE ("UpdateStability uses tail window w_ret(T)",
   pctx.observed_retention_history.push_back (80.0);
   //
   UpdateStability op;
-  OperationContext ctx2 (s, pctx, cfg, buf);
-  op.Execute (ctx2);
+  OperationContext ctx2 (s, pctx, cfg);
+  op.Execute (ctx2, cortext::testing::GetNullTransaction ());
   //
   // With tail-only stats, observed 80 is below tail mean (~high) → half-life
   // decreases.

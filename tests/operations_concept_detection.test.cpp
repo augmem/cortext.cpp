@@ -1,4 +1,5 @@
 // tests/operations_concept_detection.test.cpp
+#include "test_helpers.hpp"
 #include <any>
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
@@ -19,11 +20,13 @@ using cortext::operations::EnsureGraphSchema;
 
 namespace
 {
+constexpr int kEmbeddingDim = 256;
+
 static Signal
 MakeSignal (uint64_t ts)
 {
   Signal s;
-  s.embedding = Eigen::VectorXf::Ones (4);
+  s.embedding = Eigen::VectorXf::Ones (kEmbeddingDim);
   s.timestamp = ts;
   s.source_id = "test";
   return s;
@@ -72,51 +75,8 @@ TEST_CASE ("DetectConceptNodes creates concept nodes for frequent entities",
   auto unique_store = SQLiteStore::Create (":memory:");
   auto store = std::shared_ptr<Store> (std::move (unique_store));
 
-  // Create required tables
-  store->Execute ("CREATE TABLE IF NOT EXISTS consolidation_summaries ("
-                  "  summary_id TEXT PRIMARY KEY,"
-                  "  summary_text TEXT,"
-                  "  centroid BLOB,"
-                  "  cluster_size INTEGER"
-                  ");");
-  store->Execute ("CREATE TABLE IF NOT EXISTS consolidation_sources ("
-                  "  summary_id TEXT,"
-                  "  source_embedding_id INTEGER"
-                  ");");
-  store->Execute ("CREATE TABLE IF NOT EXISTS memories ("
-                  "  embedding_id INTEGER PRIMARY KEY,"
-                  "  episode_id INTEGER,"
-                  "  timestamp INTEGER"
-                  ");");
-  store->Execute ("CREATE TABLE IF NOT EXISTS extraction_entities ("
-                  "  summary_id TEXT NOT NULL,"
-                  "  name TEXT NOT NULL,"
-                  "  type TEXT NOT NULL,"
-                  "  salience REAL,"
-                  "  embedding_id INTEGER,"
-                  "  PRIMARY KEY (summary_id, name, type)"
-                  ");");
-  // Unified embeddings table using vec0 with auxiliary columns
-  store->Execute ("CREATE VIRTUAL TABLE IF NOT EXISTS embeddings USING vec0("
-                  "embedding_id INTEGER PRIMARY KEY,"
-                  "embedding float[256],"
-                  "+type text,"
-                  "+strength float,"
-                  "+use_frequency float,"
-                  "+stability float,"
-                  "+connectivity float,"
-                  "+drift_mag float,"
-                  "+influence float,"
-                  "+sustained_influence float,"
-                  "+contextual_gain float,"
-                  "+redundancy float,"
-                  "+pre_activation float,"
-                  "+lability_state float,"
-                  "+suppression_count integer,"
-                  "+cluster_id integer,"
-                  "+last_access integer,"
-                  "+created_at integer"
-                  ");");
+  // Initialize core schema
+  cortext::testing::InitializeCoreSchema (*store);
 
   // Create test data: entity "Alice" appearing in multiple episodes
   auto centroid = Make256DEmb ({ 1.0f, 0.0f, 0.0f, 0.0f });

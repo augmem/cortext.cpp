@@ -29,8 +29,9 @@ public:
 
   /// @brief Executes each contained operation in sequence.
   /// @param context The context to pass to each operation.
+  /// @param tx The active database transaction for this signal.
   void
-  Execute (OperationContext &context) const override
+  Execute (OperationContext &context, Transaction &tx) const override
   {
     for (const auto &op : operations_)
       {
@@ -40,7 +41,7 @@ public:
             "cortext.operation",
             { telemetry::Attribute::String ("cortext.operation_type",
                                             op_type ? op_type : "unknown") });
-        op->Execute (context);
+        op->Execute (context, tx);
       }
   }
 

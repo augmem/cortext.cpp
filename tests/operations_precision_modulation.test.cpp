@@ -1,5 +1,6 @@
 // tests/operations_precision_modulation.test.cpp
 #include <catch2/catch_approx.hpp>
+#include "test_helpers.hpp"
 #include <catch2/catch_test_macros.hpp>
 
 #include <cortext/core/knobs.hpp>
@@ -32,9 +33,8 @@ TEST_CASE ("§5.5 sets negative Δ when retrieval precision below target",
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;
 
-  std::vector<BufferedWriteInstruction> wb;
   auto sig = MakeSignal ();
-  OperationContext ctx (sig, pc, cfg, wb);
+  OperationContext ctx (sig, pc, cfg);
 
   // retrieved=10, used=2 => precision=0.2
   std::vector<OperationContext::MemoryUsageEvent> events;
@@ -50,7 +50,7 @@ TEST_CASE ("§5.5 sets negative Δ when retrieval precision below target",
   REQUIRE (target > 0.2);
 
   UpdatePrecisionDelta op;
-  op.Execute (ctx);
+  op.Execute (ctx, cortext::testing::GetNullTransaction ());
 
   REQUIRE (ctx.GetDeltaThresholdPrecision ().has_value ());
   const double delta = *ctx.GetDeltaThresholdPrecision ();
@@ -66,9 +66,8 @@ TEST_CASE ("§5.5 sets zero Δ when retrieval precision meets/exceeds target",
   cfg.sensitivity = 0.5;
   cfg.stability = 1.0;
 
-  std::vector<BufferedWriteInstruction> wb;
   auto sig = MakeSignal ();
-  OperationContext ctx (sig, pc, cfg, wb);
+  OperationContext ctx (sig, pc, cfg);
 
   // With low focus and high stability, target_precision is modest.
   const double target
@@ -83,7 +82,7 @@ TEST_CASE ("§5.5 sets zero Δ when retrieval precision meets/exceeds target",
   });
 
   UpdatePrecisionDelta op;
-  op.Execute (ctx);
+  op.Execute (ctx, cortext::testing::GetNullTransaction ());
 
   REQUIRE (ctx.GetDeltaThresholdPrecision ().has_value ());
   REQUIRE (*ctx.GetDeltaThresholdPrecision () == Catch::Approx (0.0));

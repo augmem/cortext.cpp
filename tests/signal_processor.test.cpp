@@ -9,11 +9,9 @@ using namespace cortext;
 struct InsertOp : IOperation
 {
   void
-  Execute (OperationContext &ctx) const override
+  Execute (OperationContext & /*ctx*/, Transaction &tx) const override
   {
-    BufferedWriteInstruction ins{ "INSERT INTO t(v) VALUES(?)",
-                                  { std::string{ "hello" } } };
-    ctx.AddWriteInstruction (ins);
+    tx.Execute ("INSERT INTO t(v) VALUES(?)", { std::string{ "hello" } });
   }
 };
 

@@ -8,7 +8,7 @@ namespace cortext::operations
 {
 
 void
-InitializeStabilityPriors::Execute (OperationContext &context) const
+InitializeStabilityPriors::Execute (OperationContext &context, Transaction &tx) const
 {
   auto &p_ctx = context.GetProcessorContext ();
   const auto &cfg = context.GetConfig ();
@@ -39,7 +39,7 @@ InitializeStabilityPriors::Execute (OperationContext &context) const
 }
 
 void
-UpdateStability::Execute (OperationContext &context) const
+UpdateStability::Execute (OperationContext &context, Transaction &tx) const
 {
   auto &p_ctx = context.GetProcessorContext ();
   const auto &cfg = context.GetConfig ();

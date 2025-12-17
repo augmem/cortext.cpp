@@ -1,4 +1,5 @@
 #include <catch2/catch_test_macros.hpp>
+#include "test_helpers.hpp"
 #include <cortext/operations/memory_storage.hpp>
 #include <cortext/processor.hpp>
 #include <cortext/processor/operation_context.hpp>
@@ -15,6 +16,8 @@ using cortext::store::BlobFromAny;
 namespace
 {
 
+constexpr int kEmbeddingDim = 256;
+
 /// @brief RAII wrapper for a temporary database file.
 class ScopedTempDb
 {
@@ -27,47 +30,8 @@ public:
     path_ = tmp.string ();
     store_ = SQLiteStore::Create (path_.c_str ());
 
-    // Create required schema tables
-    store_->Execute ("CREATE VIRTUAL TABLE IF NOT EXISTS objstore USING "
-                     "objstore()",
-                     {});
-    // Unified embeddings table using vec0 with auxiliary columns
-    store_->Execute ("CREATE VIRTUAL TABLE IF NOT EXISTS embeddings "
-                     "USING vec0("
-                     "embedding_id INTEGER PRIMARY KEY,"
-                     "embedding float[3],"
-                     "+type text,"
-                     "+strength float,"
-                     "+use_frequency float,"
-                     "+stability float,"
-                     "+connectivity float,"
-                     "+drift_mag float,"
-                     "+influence float,"
-                     "+sustained_influence float,"
-                     "+contextual_gain float,"
-                     "+redundancy float,"
-                     "+pre_activation float,"
-                     "+lability_state float,"
-                     "+suppression_count integer,"
-                     "+cluster_id integer,"
-                     "+last_access integer,"
-                     "+created_at integer"
-                     ")",
-                     {});
-    store_->Execute ("CREATE TABLE IF NOT EXISTS memories ("
-                     "  embedding_id INTEGER PRIMARY KEY,"
-                     "  modality TEXT,"
-                     "  mime TEXT,"
-                     "  source_id TEXT,"
-                     "  timestamp INTEGER,"
-                     "  width INTEGER DEFAULT 0,"
-                     "  height INTEGER DEFAULT 0,"
-                     "  channels INTEGER DEFAULT 0,"
-                     "  sample_rate INTEGER DEFAULT 0,"
-                     "  num_samples INTEGER DEFAULT 0,"
-                     "  blob_id BLOB"
-                     ")",
-                     {});
+    // Initialize core schema
+    cortext::testing::InitializeCoreSchema (*store_);
   }
 
   ~ScopedTempDb ()
@@ -97,7 +61,7 @@ TEST_CASE ("MemoryStorage stores payload when write_decision is true",
   REQUIRE (store != nullptr);
 
   Signal s;
-  s.embedding = Eigen::VectorXf::Ones (3);
+  s.embedding = Eigen::VectorXf::Ones (kEmbeddingDim);
   s.timestamp = 12345;
   s.source_id = "test-source";
   s.payload = std::vector<unsigned char>{ 'h', 'e', 'l', 'l', 'o' };
@@ -109,13 +73,15 @@ TEST_CASE ("MemoryStorage stores payload when write_decision is true",
   cfg.focus = 0.5;
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;
-  std::vector<BufferedWriteInstruction> buf;
 
-  OperationContext ctx (s, pctx, cfg, buf, store);
+
+  OperationContext ctx (s, pctx, cfg, store);
   ctx.SetWriteDecision (true);
 
   MemoryStorage op;
-  op.Execute (ctx);
+  auto tx = store->Begin ();
+  op.Execute (ctx, *tx);
+  tx->Commit ();
 
   // Verify stored_embedding_id is set
   auto stored_id = ctx.GetStoredEmbeddingId ();
@@ -139,7 +105,6 @@ TEST_CASE ("MemoryStorage stores payload when write_decision is true",
   REQUIRE (fb_rows.size () == 1);
 
   // No buffered instructions since we use savepoints
-  REQUIRE (buf.empty ());
 }
 
 TEST_CASE ("MemoryStorage discards when write_decision is false",
@@ -150,7 +115,7 @@ TEST_CASE ("MemoryStorage discards when write_decision is false",
   REQUIRE (store != nullptr);
 
   Signal s;
-  s.embedding = Eigen::VectorXf::Ones (3);
+  s.embedding = Eigen::VectorXf::Ones (kEmbeddingDim);
   s.timestamp = 12345;
   s.source_id = "test-source";
   s.payload = std::vector<unsigned char>{ 'h', 'e', 'l', 'l', 'o' };
@@ -162,20 +127,19 @@ TEST_CASE ("MemoryStorage discards when write_decision is false",
   cfg.focus = 0.5;
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;
-  std::vector<BufferedWriteInstruction> buf;
 
-  OperationContext ctx (s, pctx, cfg, buf, store);
+
+  OperationContext ctx (s, pctx, cfg, store);
   ctx.SetWriteDecision (false); // Rejected
 
   MemoryStorage op;
-  op.Execute (ctx);
+  op.Execute (ctx, cortext::testing::GetNullTransaction ());
 
   // Verify stored_embedding_id is NOT set
   auto stored_id = ctx.GetStoredEmbeddingId ();
   REQUIRE_FALSE (stored_id.has_value ());
 
   // Verify no buffered instructions
-  REQUIRE (buf.empty ());
 
   // Verify no embeddings were inserted
   auto emb_rows = store->Execute ("SELECT COUNT(*) AS cnt FROM embeddings", {});
@@ -193,7 +157,7 @@ TEST_CASE ("MemoryStorage does nothing when no payload",
   REQUIRE (store != nullptr);
 
   Signal s;
-  s.embedding = Eigen::VectorXf::Ones (3);
+  s.embedding = Eigen::VectorXf::Ones (kEmbeddingDim);
   s.timestamp = 12345;
   s.source_id = "test-source";
   // No payload set
@@ -205,20 +169,19 @@ TEST_CASE ("MemoryStorage does nothing when no payload",
   cfg.focus = 0.5;
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;
-  std::vector<BufferedWriteInstruction> buf;
 
-  OperationContext ctx (s, pctx, cfg, buf, store);
+
+  OperationContext ctx (s, pctx, cfg, store);
   ctx.SetWriteDecision (true);
 
   MemoryStorage op;
-  op.Execute (ctx);
+  op.Execute (ctx, cortext::testing::GetNullTransaction ());
 
   // Verify stored_embedding_id is NOT set
   auto stored_id = ctx.GetStoredEmbeddingId ();
   REQUIRE_FALSE (stored_id.has_value ());
 
   // Verify no buffered instructions
-  REQUIRE (buf.empty ());
 }
 
 TEST_CASE ("MemoryStorage stores payload in objstore and retrieves it",
@@ -230,7 +193,7 @@ TEST_CASE ("MemoryStorage stores payload in objstore and retrieves it",
 
   const std::string test_text = "Hello, world!";
   Signal s;
-  s.embedding = Eigen::VectorXf::Ones (3);
+  s.embedding = Eigen::VectorXf::Ones (kEmbeddingDim);
   s.timestamp = 99999;
   s.source_id = "objstore-test";
   s.payload = std::vector<unsigned char> (test_text.begin (), test_text.end ());
@@ -242,19 +205,20 @@ TEST_CASE ("MemoryStorage stores payload in objstore and retrieves it",
   cfg.focus = 0.5;
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;
-  std::vector<BufferedWriteInstruction> buf;
 
-  OperationContext ctx (s, pctx, cfg, buf, store);
+
+  OperationContext ctx (s, pctx, cfg, store);
   ctx.SetWriteDecision (true);
 
   MemoryStorage op;
-  op.Execute (ctx);
+  auto tx = store->Begin ();
+  op.Execute (ctx, *tx);
+  tx->Commit ();
 
   auto stored_id = ctx.GetStoredEmbeddingId ();
   REQUIRE (stored_id.has_value ());
 
   // Savepoint commits directly, no need to execute buffered writes
-  REQUIRE (buf.empty ());
 
   // Retrieve blob_id from memories
   auto idx_rows = store->Execute (

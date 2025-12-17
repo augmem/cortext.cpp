@@ -1,6 +1,6 @@
 #include "cortext/operations/graph_retrieval.hpp"
 
-#include "cortext/buffered_write_instruction.hpp"
+#include "cortext/store/store.hpp"
 #include "cortext/core/algorithms.hpp"
 #include "cortext/core/knobs.hpp"
 #include "cortext/core/utils.hpp"
@@ -32,7 +32,7 @@ EmbNodeId (long long embedding_id)
 /// Upserts 'reinforces' edges between all pairs of retrieved memories,
 /// incrementing weight on existing edges.
 void
-CreateReinforcementEdges (OperationContext &ctx,
+CreateReinforcementEdges (Transaction &tx,
                           const std::vector<long long> &retrieved_ids,
                           long long now_ts)
 {
@@ -51,21 +51,20 @@ CreateReinforcementEdges (OperationContext &ctx,
           long long id1 = std::min (retrieved_ids[i], retrieved_ids[j]);
           long long id2 = std::max (retrieved_ids[i], retrieved_ids[j]);
 
-          BufferedWriteInstruction op;
-          op.query = "INSERT INTO graph_edges "
-                     "(source_id, target_id, edge_type, weight, last_reinforced) "
-                     "VALUES ('emb:' || ?1, 'emb:' || ?2, 'reinforces', 1.0, ?3) "
-                     "ON CONFLICT (source_id, target_id, edge_type) DO UPDATE "
-                     "SET weight = weight + 1.0, last_reinforced = excluded.last_reinforced";
-          op.params = { id1, id2, now_ts };
-          ctx.AddWriteInstruction (std::move (op));
+          tx.Execute (
+              "INSERT INTO graph_edges "
+              "(source_id, target_id, edge_type, weight, last_reinforced) "
+              "VALUES ('emb:' || ?1, 'emb:' || ?2, 'reinforces', 1.0, ?3) "
+              "ON CONFLICT (source_id, target_id, edge_type) DO UPDATE "
+              "SET weight = weight + 1.0, last_reinforced = excluded.last_reinforced",
+              { id1, id2, now_ts });
         }
     }
 }
 } // namespace
 
 void
-GraphAugmentedRetrieveCandidates::Execute (OperationContext &context) const
+GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transaction &tx) const
 {
   // Check streaming pacing gate - skip retrieval if not triggered
   if (!context.GetShouldCheckRetrieval ())
@@ -313,8 +312,9 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context) const
           {
             seed_ids.push_back (s.id);
           }
-        CreateReinforcementEdges (context, seed_ids,
-                                  static_cast<long long> (context.GetSignal ().timestamp));
+        CreateReinforcementEdges (
+            tx, seed_ids,
+            static_cast<long long> (context.GetSignal ().timestamp));
       }
 
       // Cache seeds for implicit feedback detection
@@ -356,8 +356,9 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context) const
       {
         retrieved_ids.push_back (s.id);
       }
-    CreateReinforcementEdges (context, retrieved_ids,
-                              static_cast<long long> (context.GetSignal ().timestamp));
+    CreateReinforcementEdges (
+        tx, retrieved_ids,
+        static_cast<long long> (context.GetSignal ().timestamp));
   }
 
   // Cache retrieved embeddings for implicit feedback detection

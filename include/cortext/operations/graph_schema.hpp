@@ -12,7 +12,7 @@ namespace cortext::operations
 class EnsureGraphSchema : public IOperation
 {
 public:
-  void Execute (OperationContext &context) const override;
+  void Execute (OperationContext &context, Transaction &tx) const override;
   void CollectSchema (cortext::store::SchemaRegistry &registry) const override;
 };
 

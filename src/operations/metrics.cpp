@@ -77,7 +77,7 @@ VarRecentScores01 (const std::deque<double> &scores, int window)
 } // namespace
 
 void
-ComputeMetrics::Execute (OperationContext &context) const
+ComputeMetrics::Execute (OperationContext &context, Transaction &tx) const
 {
   auto &p_ctx = context.GetProcessorContext ();
   const auto &cfg = context.GetConfig ();

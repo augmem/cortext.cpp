@@ -342,7 +342,7 @@ ComputeWeightedScore (const std::vector<double> &x,
 } // namespace
 
 void
-FitMetricWeightsRLS::Execute (OperationContext &context) const
+FitMetricWeightsRLS::Execute (OperationContext &context, Transaction &tx) const
 {
   auto &p_ctx = context.GetProcessorContext ();
   const auto &cfg = context.GetConfig ();
@@ -413,7 +413,7 @@ FitMetricWeightsRLS::Execute (OperationContext &context) const
 }
 
 void
-ComputeCompositeScore::Execute (OperationContext &context) const
+ComputeCompositeScore::Execute (OperationContext &context, Transaction &tx) const
 {
   auto &p_ctx = context.GetProcessorContext ();
   const auto &cfg = context.GetConfig ();

@@ -1,6 +1,5 @@
 #pragma once
 
-#include "cortext/buffered_write_instruction.hpp"
 #include "cortext/operations/extraction.hpp"
 #include "cortext/operations/metrics.hpp"
 #include "cortext/processor.hpp" // For SignalProcessor::Config
@@ -49,19 +48,15 @@ public:
   /// @param signal The input signal being processed.
   /// @param context The long-lived context of the SignalProcessor.
   /// @param config The processor's configuration knobs.
-  /// @param write_buffer A reference to the episode's database write buffer.
   OperationContext (const Signal &signal, ProcessorContext &context,
-                    const SignalProcessor::Config &config,
-                    std::vector<BufferedWriteInstruction> &write_buffer);
+                    const SignalProcessor::Config &config);
 
   /// @brief Constructs an OperationContext with an attached Store.
   ///
   /// The store pointer is non-owning and may be null. Operations that need
   /// read access to persisted state (e.g. retrieval) can use it when present.
   OperationContext (const Signal &signal, ProcessorContext &context,
-                    const SignalProcessor::Config &config,
-                    std::vector<BufferedWriteInstruction> &write_buffer,
-                    Store *store);
+                    const SignalProcessor::Config &config, Store *store);
 
   // --- Accessors ---
 
@@ -100,11 +95,6 @@ public:
     return store_;
   }
 
-  // --- Output ---
-
-  /// @brief Adds a database instruction to the buffer for the current episode.
-  /// @param op The buffered write instruction to add.
-  void AddWriteInstruction (BufferedWriteInstruction op);
 
   // ======================================================================
   // Memory Usage Events API (Algorithms 14, 18 inputs)
@@ -793,7 +783,6 @@ private:
   const Signal &signal_;
   ProcessorContext &context_;
   const SignalProcessor::Config &config_;
-  std::vector<BufferedWriteInstruction> &write_buffer_;
   Store *store_ = nullptr;
 
   // Typed scratch fields

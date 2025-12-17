@@ -1,6 +1,6 @@
 #include "cortext/operations/boundary.hpp"
 
-#include "cortext/buffered_write_instruction.hpp"
+#include "cortext/store/store.hpp"
 #include "cortext/core/algorithms.hpp"
 #include "cortext/core/knobs.hpp"
 #include "cortext/operations/constants.hpp"
@@ -35,7 +35,7 @@ ComputeMean (const std::deque<Eigen::VectorXf> &embs, int start, int end)
 } // namespace
 
 void
-CheckEpisodeBoundary::Execute (OperationContext &context) const
+CheckEpisodeBoundary::Execute (OperationContext &context, Transaction &tx) const
 {
   const auto &cfg = context.GetConfig ();
   auto &p_ctx = context.GetProcessorContext ();
@@ -97,14 +97,12 @@ CheckEpisodeBoundary::Execute (OperationContext &context) const
       std::vector<float> centroid_blob (centroid.data (),
                                         centroid.data () + centroid.size ());
 
-      // Buffer episode INSERT
-      BufferedWriteInstruction op;
-      op.query = "INSERT INTO episodes (start_ts, end_ts, boundary_type, "
-                 "centroid) VALUES (?, ?, ?, ?)";
-      op.params = { static_cast<long long> (p_ctx.episode_start_ts),
+      // Insert episode
+      tx.Execute ("INSERT INTO episodes (start_ts, end_ts, boundary_type, "
+                  "centroid) VALUES (?, ?, ?, ?)",
+                  { static_cast<long long> (p_ctx.episode_start_ts),
                     static_cast<long long> (context.GetSignal ().timestamp),
-                    std::string ("drift"), centroid_blob };
-      context.AddWriteInstruction (std::move (op));
+                    std::string ("drift"), centroid_blob });
 
       // Update episode_start_ts for next episode
       p_ctx.episode_start_ts = context.GetSignal ().timestamp;

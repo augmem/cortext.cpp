@@ -25,7 +25,7 @@ Unit (const Eigen::VectorXf &v)
 }
 
 void
-ApplyInfluenceFeedback::Execute (OperationContext &context) const
+ApplyInfluenceFeedback::Execute (OperationContext &context, Transaction &tx) const
 {
   auto &p_ctx = context.GetProcessorContext ();
   const auto &cfg = context.GetConfig ();

@@ -28,7 +28,7 @@ namespace cortext::operations
 class DetectMemoryUsage : public IOperation
 {
 public:
-  void Execute (OperationContext &context) const override;
+  void Execute (OperationContext &context, Transaction &tx) const override;
 };
 
 } // namespace cortext::operations

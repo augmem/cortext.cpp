@@ -801,30 +801,63 @@ SignalProcessor::Process (const Signal &signal)
 {
   const auto t0 = std::chrono::steady_clock::now ();
   telemetry::ScopedSpan span ("cortext.process");
-  OperationContext op_context (signal, *context_, config_, write_buffer_,
-                               store_.get ());
+
+  // Create transaction for this signal processing
+  auto tx = store_ ? store_->Begin () : nullptr;
+
+  OperationContext op_context (signal, *context_, config_, store_.get ());
   context_->write_rate_window_.Record (signal.timestamp);
   ComputeObservedRetention (store_.get (), config_, signal, op_context);
-  root_operation_->Execute (op_context);
-  span.SetAttribute ("cortext.at_boundary", op_context.GetAtBoundary ());
-  span.SetAttribute ("cortext.interrupt_allowed",
-                     op_context.GetInterruptAllowed ());
-  span.SetAttribute ("cortext.threshold_T_dynamic",
-                     op_context.GetThresholdTDynamic ());
-  span.SetAttribute ("cortext.threshold_hysteresis",
-                     op_context.GetThresholdHysteresis ());
-  span.SetAttribute ("cortext.effective_focus", op_context.GetEffectiveFocus ());
-  if (op_context.ShouldFinalizeEpisode ())
+
+  try
     {
-      FinalizeEpisode ();
-      StartNewEpisode ();
+      if (tx)
+        {
+          root_operation_->Execute (op_context, *tx);
+        }
+
+      span.SetAttribute ("cortext.at_boundary", op_context.GetAtBoundary ());
+      span.SetAttribute ("cortext.interrupt_allowed",
+                         op_context.GetInterruptAllowed ());
+      span.SetAttribute ("cortext.threshold_T_dynamic",
+                         op_context.GetThresholdTDynamic ());
+      span.SetAttribute ("cortext.threshold_hysteresis",
+                         op_context.GetThresholdHysteresis ());
+      span.SetAttribute ("cortext.effective_focus",
+                         op_context.GetEffectiveFocus ());
+
+      if (op_context.ShouldFinalizeEpisode () && tx)
+        {
+          FinalizeEpisode (*tx);
+          StartNewEpisode ();
+        }
+
+      // Persist state within the same transaction
+      if (tx)
+        {
+          PersistProcessorState (*tx);
+          PersistBlenderState (*tx);
+          tx->Commit ();
+        }
     }
+  catch (...)
+    {
+      if (tx)
+        {
+          tx->Rollback ();
+        }
+      throw;
+    }
+
   context_->signals_processed += 1;
   Output out;
   AssembleOutputMemories (op_context, out);
   AssembleOutputFields (op_context, out);
   const auto t1 = std::chrono::steady_clock::now ();
-  const double ms = std::chrono::duration_cast<std::chrono::duration<double, std::milli> > (t1 - t0).count ();
+  const double ms
+      = std::chrono::duration_cast<std::chrono::duration<double, std::milli> > (
+            t1 - t0)
+            .count ();
   telemetry::RecordHistogram ("cortext.process_duration_ms", ms);
   telemetry::AddCounter ("cortext.signals_processed_total", 1);
   if (out.at_boundary)
@@ -844,49 +877,36 @@ void
 SignalProcessor::Flush ()
 {
   telemetry::AddCounter ("cortext.flush_total", 1);
-  FinalizeEpisode ();
+  if (!store_)
+    {
+      return;
+    }
+  auto tx = store_->Begin ();
+  FinalizeEpisode (*tx);
+  PersistProcessorState (*tx);
+  PersistBlenderState (*tx);
+  tx->Commit ();
   StartNewEpisode ();
 }
 
 void
 SignalProcessor::StartNewEpisode ()
 {
-  // Keep the episode transaction closed during signal processing to avoid
-  // holding a long-lived read transaction that blocks other writers. We open
-  // a short-lived transaction only when finalizing buffered writes.
-  episode_transaction_.reset ();
+  // No-op: transaction management is now per-signal in Process()
 }
 
 void
-SignalProcessor::FinalizeEpisode ()
+SignalProcessor::FinalizeEpisode (Transaction &tx)
 {
-  if (!store_)
-    {
-      return;
-    }
-
   telemetry::ScopedSpan span ("cortext.episode.finalize");
 
-  episode_transaction_ = store_->Begin ();
-
   // Persist processor state (singleton tables)
-  PersistProcessorState ();
-  PersistBlenderState ();
-  PersistRecentContext ();
-  PersistRecentScores ();
-  PersistObservedRetentionHistory ();
-  PersistRLSCoefficients ();
-  PersistWorkingMemorySlots ();
+  PersistRecentContext (tx);
+  PersistRecentScores (tx);
+  PersistObservedRetentionHistory (tx);
+  PersistRLSCoefficients (tx);
+  PersistWorkingMemorySlots (tx);
 
-  // Execute buffered writes from operations
-  for (const auto &instruction : write_buffer_)
-    {
-      episode_transaction_->Execute (instruction.query, instruction.params);
-    }
-  write_buffer_.clear ();
-
-  episode_transaction_->Commit ();
-  episode_transaction_.reset ();
   telemetry::AddCounter ("cortext.episode_commit_total", 1);
   span.SetStatusOk ();
 
@@ -900,9 +920,9 @@ SignalProcessor::FinalizeEpisode ()
 }
 
 void
-SignalProcessor::PersistProcessorState ()
+SignalProcessor::PersistProcessorState (Transaction &tx)
 {
-  if (!episode_transaction_ || !context_)
+  if (!context_)
     return;
 
   const auto now = std::chrono::duration_cast<std::chrono::seconds> (
@@ -914,7 +934,7 @@ SignalProcessor::PersistProcessorState ()
   std::memcpy (mood_blob.data (), context_->mood_vector.data (),
                6 * sizeof (double));
 
-  episode_transaction_->Execute (
+  tx.Execute (
       "INSERT OR REPLACE INTO processor_state "
       "(id, signals_processed, u_uncertainty, weight_relevance_prior, "
       "weight_relevance, "
@@ -986,9 +1006,9 @@ SignalProcessor::PersistProcessorState ()
 }
 
 void
-SignalProcessor::PersistBlenderState ()
+SignalProcessor::PersistBlenderState (Transaction &tx)
 {
-  if (!episode_transaction_ || !context_)
+  if (!context_)
     return;
 
   // Persist weights
@@ -1014,7 +1034,7 @@ SignalProcessor::PersistBlenderState ()
   w_valence = get_weight (operations::Metric::valence);
   w_arousal = get_weight (operations::Metric::arousal);
 
-  episode_transaction_->Execute (
+  tx.Execute (
       "INSERT OR REPLACE INTO blender_weights "
       "(id, w_relevance, w_mismatch, w_surprise, w_rarity, w_drift, "
       "w_contradiction, w_utility, w_periphery, w_coverage, w_salience, "
@@ -1028,21 +1048,20 @@ SignalProcessor::PersistBlenderState ()
   if (!context_->blender_P.empty ())
     {
       std::vector<float> P_blob = SerializeMatrix (context_->blender_P);
-      episode_transaction_->Execute (
-          "INSERT OR REPLACE INTO blender_covariance (id, P_matrix) "
-          "VALUES (1, ?)",
-          { P_blob });
+      tx.Execute ("INSERT OR REPLACE INTO blender_covariance (id, P_matrix) "
+                  "VALUES (1, ?)",
+                  { P_blob });
     }
 }
 
 void
-SignalProcessor::PersistRecentContext ()
+SignalProcessor::PersistRecentContext (Transaction &tx)
 {
-  if (!episode_transaction_ || !context_)
+  if (!context_)
     return;
 
   // Clear old entries
-  episode_transaction_->Execute ("DELETE FROM recent_context", {});
+  tx.Execute ("DELETE FROM recent_context", {});
 
   // Insert current window
   int seq = 0;
@@ -1053,21 +1072,20 @@ SignalProcessor::PersistRecentContext ()
   for (const auto &emb : context_->recent_context_embeddings)
     {
       std::vector<float> emb_blob = ToFloatVector (emb);
-      episode_transaction_->Execute (
-          "INSERT INTO recent_context (embedding, timestamp, seq_order) "
-          "VALUES (?, ?, ?)",
-          { emb_blob, now, seq++ });
+      tx.Execute ("INSERT INTO recent_context (embedding, timestamp, seq_order) "
+                  "VALUES (?, ?, ?)",
+                  { emb_blob, now, seq++ });
     }
 }
 
 void
-SignalProcessor::PersistRecentScores ()
+SignalProcessor::PersistRecentScores (Transaction &tx)
 {
-  if (!episode_transaction_ || !context_)
+  if (!context_)
     return;
 
   // Clear old entries
-  episode_transaction_->Execute ("DELETE FROM recent_scores", {});
+  tx.Execute ("DELETE FROM recent_scores", {});
 
   // Insert current window
   const auto now = std::chrono::duration_cast<std::chrono::seconds> (
@@ -1076,20 +1094,19 @@ SignalProcessor::PersistRecentScores ()
 
   for (const auto &score : context_->recent_scores)
     {
-      episode_transaction_->Execute (
-          "INSERT INTO recent_scores (score, timestamp) VALUES (?, ?)",
-          { score, now });
+      tx.Execute ("INSERT INTO recent_scores (score, timestamp) VALUES (?, ?)",
+                  { score, now });
     }
 }
 
 void
-SignalProcessor::PersistObservedRetentionHistory ()
+SignalProcessor::PersistObservedRetentionHistory (Transaction &tx)
 {
-  if (!episode_transaction_ || !context_)
+  if (!context_)
     return;
 
   // Clear old entries
-  episode_transaction_->Execute ("DELETE FROM observed_retention_history", {});
+  tx.Execute ("DELETE FROM observed_retention_history", {});
 
   // Insert current window
   const auto now = std::chrono::duration_cast<std::chrono::seconds> (
@@ -1098,17 +1115,16 @@ SignalProcessor::PersistObservedRetentionHistory ()
 
   for (const auto &retention : context_->observed_retention_history)
     {
-      episode_transaction_->Execute (
-          "INSERT INTO observed_retention_history "
-          "(retention_seconds, timestamp) VALUES (?, ?)",
-          { retention, now });
+      tx.Execute ("INSERT INTO observed_retention_history "
+                  "(retention_value, timestamp) VALUES (?, ?)",
+                  { retention, now });
     }
 }
 
 void
-SignalProcessor::PersistRLSCoefficients ()
+SignalProcessor::PersistRLSCoefficients (Transaction &tx)
 {
-  if (!episode_transaction_ || !context_)
+  if (!context_)
     return;
 
   // Serialize rls_coefficients (12 x 4 = 48 doubles) to float BLOB
@@ -1124,31 +1140,29 @@ SignalProcessor::PersistRLSCoefficients ()
               coeff_blob.push_back (static_cast<float> (c));
             }
         }
-      episode_transaction_->Execute (
-          "INSERT OR REPLACE INTO blender_coefficients (id, coefficients) "
-          "VALUES (1, ?)",
-          { coeff_blob });
+      tx.Execute ("INSERT OR REPLACE INTO blender_coefficients (id, coefficients) "
+                  "VALUES (1, ?)",
+                  { coeff_blob });
     }
 
   // Persist coefficient covariance matrix if populated
   if (!context_->rls_coeff_P.empty ())
     {
       std::vector<float> P_blob = SerializeMatrix (context_->rls_coeff_P);
-      episode_transaction_->Execute (
-          "INSERT OR REPLACE INTO blender_coeff_covariance (id, P_matrix) "
-          "VALUES (1, ?)",
-          { P_blob });
+      tx.Execute ("INSERT OR REPLACE INTO blender_coeff_covariance (id, P_matrix) "
+                  "VALUES (1, ?)",
+                  { P_blob });
     }
 }
 
 void
-SignalProcessor::PersistWorkingMemorySlots ()
+SignalProcessor::PersistWorkingMemorySlots (Transaction &tx)
 {
-  if (!episode_transaction_ || !context_)
+  if (!context_)
     return;
 
   // Clear old entries
-  episode_transaction_->Execute ("DELETE FROM working_memory_slots", {});
+  tx.Execute ("DELETE FROM working_memory_slots", {});
 
   // Insert current slots
   const auto now = std::chrono::duration_cast<std::chrono::seconds> (
@@ -1159,10 +1173,9 @@ SignalProcessor::PersistWorkingMemorySlots ()
     {
       const auto &slot = context_->wm_slots[i];
       std::vector<float> emb_blob = ToFloatVector (slot.embedding);
-      episode_transaction_->Execute (
-          "INSERT INTO working_memory_slots "
-          "(slot_index, strength, timestamp, embedding) VALUES (?, ?, ?, ?)",
-          { static_cast<int64_t> (i), slot.strength, now, emb_blob });
+      tx.Execute ("INSERT INTO working_memory_slots "
+                  "(slot_index, strength, timestamp, embedding) VALUES (?, ?, ?, ?)",
+                  { static_cast<int64_t> (i), slot.strength, now, emb_blob });
     }
 }
 

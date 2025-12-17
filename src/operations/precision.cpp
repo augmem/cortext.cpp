@@ -9,7 +9,7 @@ namespace cortext::operations
 {
 
 void
-UpdatePrecisionDelta::Execute (OperationContext &context) const
+UpdatePrecisionDelta::Execute (OperationContext &context, Transaction &tx) const
 {
   const auto &cfg = context.GetConfig ();
   const double F = core::Clamp (cfg.focus, constants::kNormalizedMin,

@@ -7,7 +7,7 @@ namespace cortext::operations
 {
 
 void
-ComputeGoalAlignmentFallback::Execute (OperationContext &context) const
+ComputeGoalAlignmentFallback::Execute (OperationContext &context, Transaction &tx) const
 {
   if (context.GetMetric (operations::Metric::goal_alignment).has_value ())
     {

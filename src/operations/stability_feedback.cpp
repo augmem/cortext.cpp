@@ -11,7 +11,7 @@ namespace cortext::operations
 {
 
 void
-ApplyStabilityFeedback::Execute (OperationContext &context) const
+ApplyStabilityFeedback::Execute (OperationContext &context, Transaction &tx) const
 {
   const auto &cfg = context.GetConfig ();
   const double T = core::Clamp (cfg.stability, constants::kNormalizedMin,

@@ -7,7 +7,7 @@ namespace cortext::operations
 {
 
 void
-InitializeEmbeddedCentroids::Execute (OperationContext &context) const
+InitializeEmbeddedCentroids::Execute (OperationContext &context, Transaction &tx) const
 {
   auto &p_ctx = context.GetProcessorContext ();
   if (p_ctx.centroids.has_value ())

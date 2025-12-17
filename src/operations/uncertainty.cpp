@@ -14,7 +14,7 @@ namespace cortext::operations
 {
 
 void
-UpdateUncertainty::Execute (OperationContext &context) const
+UpdateUncertainty::Execute (OperationContext &context, Transaction &tx) const
 {
   auto &p_ctx = context.GetProcessorContext ();
   const auto &config = context.GetConfig ();

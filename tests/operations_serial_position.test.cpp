@@ -1,4 +1,5 @@
 #include <catch2/catch_approx.hpp>
+#include "test_helpers.hpp"
 #include <catch2/catch_test_macros.hpp>
 #include <cortext/core/knobs.hpp>
 #include <cortext/operations/serial_position.hpp>
@@ -21,11 +22,11 @@ TEST_CASE ("Alg26 exposes parameter derivations per algorithms.md",
   cfg.focus = 0.3;       // F
   cfg.sensitivity = 0.7; // S
   cfg.stability = 0.5;
-  std::vector<BufferedWriteInstruction> buf;
+
 
   ApplySerialPositionEffects op;
-  OperationContext ctx (s, pctx, cfg, buf);
-  op.Execute (ctx);
+  OperationContext ctx (s, pctx, cfg);
+  op.Execute (ctx, cortext::testing::GetNullTransaction ());
 
   // Expectations via core helpers
   REQUIRE (ctx.GetSerialPrimacyWindow ()

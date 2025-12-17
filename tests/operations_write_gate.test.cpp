@@ -1,4 +1,5 @@
 #include <catch2/catch_test_macros.hpp>
+#include "test_helpers.hpp"
 #include <cortext/operations/write_gate.hpp>
 #include <cortext/processor.hpp>
 #include <cortext/processor/operation_context.hpp>
@@ -16,9 +17,9 @@ TEST_CASE ("ComputeWriteGate accepts score above effective threshold",
   cfg.focus = 0.5;
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;
-  std::vector<BufferedWriteInstruction> buf;
 
-  OperationContext ctx (s, pctx, cfg, buf);
+
+  OperationContext ctx (s, pctx, cfg);
 
   // Set composite_score = 0.5, T_dynamic = 0.4, hysteresis = 0.05
   // effective_threshold = 0.4 - 0.05 = 0.35
@@ -28,7 +29,7 @@ TEST_CASE ("ComputeWriteGate accepts score above effective threshold",
   ctx.SetThresholdHysteresis (0.05);
 
   ComputeWriteGate op;
-  op.Execute (ctx);
+  op.Execute (ctx, cortext::testing::GetNullTransaction ());
 
   REQUIRE (ctx.GetWriteDecision () == true);
 }
@@ -43,9 +44,9 @@ TEST_CASE ("ComputeWriteGate rejects score below effective threshold",
   cfg.focus = 0.5;
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;
-  std::vector<BufferedWriteInstruction> buf;
 
-  OperationContext ctx (s, pctx, cfg, buf);
+
+  OperationContext ctx (s, pctx, cfg);
 
   // Set composite_score = 0.3, T_dynamic = 0.4, hysteresis = 0.05
   // effective_threshold = 0.4 - 0.05 = 0.35
@@ -55,7 +56,7 @@ TEST_CASE ("ComputeWriteGate rejects score below effective threshold",
   ctx.SetThresholdHysteresis (0.05);
 
   ComputeWriteGate op;
-  op.Execute (ctx);
+  op.Execute (ctx, cortext::testing::GetNullTransaction ());
 
   REQUIRE (ctx.GetWriteDecision () == false);
 }
@@ -70,9 +71,9 @@ TEST_CASE ("ComputeWriteGate rejects score exactly at effective threshold",
   cfg.focus = 0.5;
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;
-  std::vector<BufferedWriteInstruction> buf;
 
-  OperationContext ctx (s, pctx, cfg, buf);
+
+  OperationContext ctx (s, pctx, cfg);
 
   // Set composite_score = 0.35, T_dynamic = 0.4, hysteresis = 0.05
   // effective_threshold = 0.4 - 0.05 = 0.35
@@ -82,7 +83,7 @@ TEST_CASE ("ComputeWriteGate rejects score exactly at effective threshold",
   ctx.SetThresholdHysteresis (0.05);
 
   ComputeWriteGate op;
-  op.Execute (ctx);
+  op.Execute (ctx, cortext::testing::GetNullTransaction ());
 
   REQUIRE (ctx.GetWriteDecision () == false);
 }
@@ -97,9 +98,9 @@ TEST_CASE ("ComputeWriteGate defaults to reject when no composite score",
   cfg.focus = 0.5;
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;
-  std::vector<BufferedWriteInstruction> buf;
 
-  OperationContext ctx (s, pctx, cfg, buf);
+
+  OperationContext ctx (s, pctx, cfg);
 
   // No composite score set => defaults to 0.0
   // effective_threshold = 0.4 - 0.05 = 0.35
@@ -108,7 +109,7 @@ TEST_CASE ("ComputeWriteGate defaults to reject when no composite score",
   ctx.SetThresholdHysteresis (0.05);
 
   ComputeWriteGate op;
-  op.Execute (ctx);
+  op.Execute (ctx, cortext::testing::GetNullTransaction ());
 
   REQUIRE (ctx.GetWriteDecision () == false);
 }
@@ -123,9 +124,9 @@ TEST_CASE ("ComputeWriteGate accepts with zero threshold and hysteresis",
   cfg.focus = 0.5;
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;
-  std::vector<BufferedWriteInstruction> buf;
 
-  OperationContext ctx (s, pctx, cfg, buf);
+
+  OperationContext ctx (s, pctx, cfg);
 
   // Set composite_score = 0.01, T_dynamic = 0.0, hysteresis = 0.0
   // effective_threshold = 0.0 - 0.0 = 0.0
@@ -135,7 +136,7 @@ TEST_CASE ("ComputeWriteGate accepts with zero threshold and hysteresis",
   ctx.SetThresholdHysteresis (0.0);
 
   ComputeWriteGate op;
-  op.Execute (ctx);
+  op.Execute (ctx, cortext::testing::GetNullTransaction ());
 
   REQUIRE (ctx.GetWriteDecision () == true);
 }

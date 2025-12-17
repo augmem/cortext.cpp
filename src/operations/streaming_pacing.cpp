@@ -8,7 +8,7 @@ namespace cortext::operations
 {
 
 void
-CheckStreamingPacing::Execute (OperationContext &context) const
+CheckStreamingPacing::Execute (OperationContext &context, Transaction &tx) const
 {
   auto &p_ctx = context.GetProcessorContext ();
   const auto &cfg = context.GetConfig ();

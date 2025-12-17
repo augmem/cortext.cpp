@@ -31,7 +31,7 @@ struct SetupConsolidationInputsOp : IOperation
   {
   }
   void
-  Execute (OperationContext &ctx) const override
+  Execute (OperationContext &ctx, Transaction & /*tx*/) const override
   {
     ctx.SetTokensInFlight (tokens_in_flight_);
     ctx.SetRetrievalQueueDepth (queue_depth_);
@@ -72,7 +72,7 @@ struct AssertConsolidationStartedOp : IOperation
   {
   }
   void
-  Execute (OperationContext &ctx) const override
+  Execute (OperationContext &ctx, Transaction & /*tx*/) const override
   {
     REQUIRE (ctx.GetConsolidationShouldStart () == true);
     auto &p = ctx.GetProcessorContext ();
@@ -84,7 +84,7 @@ struct AssertConsolidationStartedOp : IOperation
 struct AssertConsolidationNotStartedOp : IOperation
 {
   void
-  Execute (OperationContext &ctx) const override
+  Execute (OperationContext &ctx, Transaction & /*tx*/) const override
   {
     REQUIRE (ctx.GetConsolidationShouldStart () == false);
   }
@@ -197,7 +197,7 @@ struct SeedVecEmbeddingsOp : IOperation
 {
   SeedVecEmbeddingsOp (long long count) : count_ (count) {}
   void
-  Execute (OperationContext &ctx) const override
+  Execute (OperationContext &ctx, Transaction & /*tx*/) const override
   {
     auto *store = ctx.GetStore ();
     std::vector<float> emb (256, 0.0f);

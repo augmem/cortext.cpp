@@ -12,7 +12,7 @@ namespace cortext::operations
 {
 
 void
-InitializeSensitivityPriors::Execute (OperationContext &context) const
+InitializeSensitivityPriors::Execute (OperationContext &context, Transaction &tx) const
 {
   auto &p_ctx = context.GetProcessorContext ();
   const auto &config = context.GetConfig ();
@@ -92,7 +92,7 @@ Entropy (const std::vector<double> &p)
 } // namespace
 
 void
-UpdateSensitivity::Execute (OperationContext &context) const
+UpdateSensitivity::Execute (OperationContext &context, Transaction &tx) const
 {
   auto &p_ctx = context.GetProcessorContext ();
   const auto &cfg = context.GetConfig ();
@@ -248,7 +248,7 @@ UpdateSensitivity::Execute (OperationContext &context) const
 }
 
 void
-UpdateMood::Execute (OperationContext &context) const
+UpdateMood::Execute (OperationContext &context, Transaction &tx) const
 {
   auto &p_ctx = context.GetProcessorContext ();
   const auto &cfg = context.GetConfig ();

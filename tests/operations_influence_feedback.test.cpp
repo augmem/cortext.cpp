@@ -31,7 +31,7 @@ public:
   {
   }
   void
-  Execute (OperationContext &ctx) const override
+  Execute (OperationContext &ctx, Transaction & /*tx*/) const override
   {
     auto &pctx = ctx.GetProcessorContext ();
     pctx.recent_context_embeddings.clear ();
@@ -64,7 +64,7 @@ class AssertPositiveEffectsOp : public IOperation
 {
 public:
   void
-  Execute (OperationContext &ctx) const override
+  Execute (OperationContext &ctx, Transaction & /*tx*/) const override
   {
     auto &pctx = ctx.GetProcessorContext ();
     const auto &cfg = ctx.GetConfig ();
@@ -82,7 +82,7 @@ class AssertNegativeEffectsOp : public IOperation
 {
 public:
   void
-  Execute (OperationContext &ctx) const override
+  Execute (OperationContext &ctx, Transaction & /*tx*/) const override
   {
     auto &pctx = ctx.GetProcessorContext ();
     const auto &cfg = ctx.GetConfig ();
@@ -100,7 +100,7 @@ class AssertNoopEffectsOp : public IOperation
 {
 public:
   void
-  Execute (OperationContext &ctx) const override
+  Execute (OperationContext &ctx, Transaction & /*tx*/) const override
   {
     auto &pctx = ctx.GetProcessorContext ();
     const auto &cfg = ctx.GetConfig ();

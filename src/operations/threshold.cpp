@@ -47,7 +47,7 @@ PercentileP90 (const std::deque<double> &values, int window)
 } // namespace
 
 void
-UpdateThreshold::Execute (OperationContext &context) const
+UpdateThreshold::Execute (OperationContext &context, Transaction &tx) const
 {
   auto &p_ctx = context.GetProcessorContext ();
   const auto &cfg = context.GetConfig ();

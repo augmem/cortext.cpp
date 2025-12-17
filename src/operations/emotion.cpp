@@ -1,6 +1,6 @@
 #include "cortext/operations/emotion.hpp"
 
-#include "cortext/buffered_write_instruction.hpp"
+#include "cortext/store/store.hpp"
 #include "cortext/core/algorithms.hpp"
 #include "cortext/core/knobs.hpp"
 #include "cortext/processor/operation_context.hpp"
@@ -13,7 +13,7 @@ namespace cortext::operations
 {
 
 void
-ApplyEmotionalConsolidation::Execute (OperationContext &context) const
+ApplyEmotionalConsolidation::Execute (OperationContext &context, Transaction &tx) const
 {
   const auto &cfg = context.GetConfig ();
   const double F = cfg.focus;
@@ -56,13 +56,12 @@ ApplyEmotionalConsolidation::Execute (OperationContext &context) const
         }
       const long long id = static_cast<long long> (evt.embedding_id);
 
-      BufferedWriteInstruction op;
-      op.query = "INSERT OR REPLACE INTO emotional_tags ("
-                 "embedding_id, flashbulb, intensity, arousal, valence, "
-                 "half_life_bonus, detail_suppression, gist_components, "
-                 "cascade_radius, cascade_decay, flashbulb_threshold_eff, ts"
-                 ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);";
-      op.params = { id,
+      tx.Execute ("INSERT OR REPLACE INTO emotional_tags ("
+                  "embedding_id, flashbulb, intensity, arousal, valence, "
+                  "half_life_bonus, detail_suppression, gist_components, "
+                  "cascade_radius, cascade_decay, flashbulb_threshold_eff, ts"
+                  ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
+                  { id,
                     1,
                     intensity,
                     arousal,
@@ -73,8 +72,7 @@ ApplyEmotionalConsolidation::Execute (OperationContext &context) const
                     cascade_radius,
                     cascade_decay,
                     fb_threshold_eff,
-                    now_ts };
-      context.AddWriteInstruction (std::move (op));
+                    now_ts });
     }
 }
 

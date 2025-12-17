@@ -1,6 +1,6 @@
 #include "cortext/operations/sensitivity_feedback.hpp"
 
-#include "cortext/buffered_write_instruction.hpp"
+#include "cortext/store/store.hpp"
 #include "cortext/core/algorithms.hpp"
 #include "cortext/core/knobs.hpp"
 #include "cortext/operations/constants.hpp"
@@ -86,7 +86,7 @@ ComputeRedundancy (Store *store, int64_t embedding_id, int k)
 }
 
 void
-ApplySensitivityFeedback::Execute (OperationContext &context) const
+ApplySensitivityFeedback::Execute (OperationContext &context, Transaction &tx) const
 {
   auto &p_ctx = context.GetProcessorContext ();
 
@@ -142,10 +142,8 @@ ApplySensitivityFeedback::Execute (OperationContext &context) const
 
       // Store computed redundancy in embeddings for consolidation scoring
       // (Section 9.2: score = T*strength - F*redundancy + S*connectivity + T*stability)
-      BufferedWriteInstruction op;
-      op.query = "UPDATE embeddings SET redundancy = ? WHERE embedding_id = ?";
-      op.params = { redundancy, e.embedding_id };
-      context.AddWriteInstruction (std::move (op));
+      tx.Execute ("UPDATE embeddings SET redundancy = ? WHERE embedding_id = ?",
+                  { redundancy, e.embedding_id });
     }
 }
 

@@ -34,7 +34,7 @@ Variance (const std::vector<double> &values)
 } // namespace
 
 void
-ComputeCoherence::Execute (OperationContext &context) const
+ComputeCoherence::Execute (OperationContext &context, Transaction &tx) const
 {
   const auto &cfg = context.GetConfig ();
   auto &p_ctx = context.GetProcessorContext ();

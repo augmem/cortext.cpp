@@ -3,6 +3,7 @@
 // and interrupt gate with refractory dynamics.
 
 #include <Eigen/Dense>
+#include "test_helpers.hpp"
 #include <any>
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
@@ -134,7 +135,7 @@ struct SetupConsolidationTriggerOp : IOperation
   }
 
   void
-  Execute (OperationContext &ctx) const override
+  Execute (OperationContext &ctx, Transaction & /*tx*/) const override
   {
     ctx.SetTokensInFlight (0);
     ctx.SetRetrievalQueueDepth (0);
@@ -153,7 +154,7 @@ struct SetupConsolidationTriggerOp : IOperation
 struct AssertConsolidationStartedOp : IOperation
 {
   void
-  Execute (OperationContext &ctx) const override
+  Execute (OperationContext &ctx, Transaction & /*tx*/) const override
   {
     REQUIRE (ctx.GetConsolidationShouldStart () == true);
   }
@@ -163,7 +164,7 @@ struct AssertConsolidationStartedOp : IOperation
 struct SeedClusteringDataOp : IOperation
 {
   void
-  Execute (OperationContext &ctx) const override
+  Execute (OperationContext &ctx, Transaction & /*tx*/) const override
   {
     auto *store = ctx.GetStore ();
 
@@ -205,7 +206,7 @@ struct SeedClusteringDataOp : IOperation
 struct SeedGraphDataOp : IOperation
 {
   void
-  Execute (OperationContext &ctx) const override
+  Execute (OperationContext &ctx, Transaction & /*tx*/) const override
   {
     auto *store = ctx.GetStore ();
 
@@ -300,19 +301,19 @@ TEST_CASE ("Clustering groups similar embeddings",
 
   // Seed clustering data
   ProcessorContext pctx;
-  std::vector<BufferedWriteInstruction> buf;
+
   Signal s = MakeSignal (2000);
-  OperationContext ctx (s, pctx, cfg, buf, store.get ());
+  OperationContext ctx (s, pctx, cfg, store.get ());
 
   SeedClusteringDataOp seed_op;
-  seed_op.Execute (ctx);
+  seed_op.Execute (ctx, cortext::testing::GetNullTransaction ());
 
   // Verify candidates seeded
   REQUIRE (CountRows (store.get (), "consolidation_candidates") == 8);
 
   // Run clustering
   ConsolidationCluster cluster_op;
-  cluster_op.Execute (ctx);
+  cluster_op.Execute (ctx, cortext::testing::GetNullTransaction ());
 
   // Verify clusters were formed
   auto clusters = ctx.GetConsolidationClusters ();
@@ -347,9 +348,9 @@ TEST_CASE ("Summarization creates summary records",
 
   // Create test cluster directly
   ProcessorContext pctx;
-  std::vector<BufferedWriteInstruction> buf;
+
   Signal s = MakeSignal (3000);
-  OperationContext ctx (s, pctx, cfg, buf, store.get ());
+  OperationContext ctx (s, pctx, cfg, store.get ());
 
   // Seed embeddings and memories
   for (long long i = 1; i <= 4; ++i)
@@ -373,7 +374,7 @@ TEST_CASE ("Summarization creates summary records",
 
   // Run summarization
   ConsolidationSummarize summarize_op;
-  summarize_op.Execute (ctx);
+  summarize_op.Execute (ctx, cortext::testing::GetNullTransaction ());
 
   // Verify summary was created
   auto summaries = store->Execute (
@@ -409,16 +410,16 @@ TEST_CASE ("Graph build creates co_occurs_with edges",
 
   // Seed graph data
   ProcessorContext pctx;
-  std::vector<BufferedWriteInstruction> buf;
+
   Signal s = MakeSignal (4000);
-  OperationContext ctx (s, pctx, cfg, buf, store.get ());
+  OperationContext ctx (s, pctx, cfg, store.get ());
 
   SeedGraphDataOp seed_op;
-  seed_op.Execute (ctx);
+  seed_op.Execute (ctx, cortext::testing::GetNullTransaction ());
 
   // Run graph build
   BuildGraphFromConsolidation graph_op;
-  graph_op.Execute (ctx);
+  graph_op.Execute (ctx, cortext::testing::GetNullTransaction ());
 
   // Verify edges were created
   auto edges = store->Execute (
@@ -451,16 +452,16 @@ TEST_CASE ("Graph build creates entity nodes and edges",
 
   // Seed graph data
   ProcessorContext pctx;
-  std::vector<BufferedWriteInstruction> buf;
+
   Signal s = MakeSignal (5000);
-  OperationContext ctx (s, pctx, cfg, buf, store.get ());
+  OperationContext ctx (s, pctx, cfg, store.get ());
 
   SeedGraphDataOp seed_op;
-  seed_op.Execute (ctx);
+  seed_op.Execute (ctx, cortext::testing::GetNullTransaction ());
 
   // Run graph build
   BuildGraphFromConsolidation graph_op;
-  graph_op.Execute (ctx);
+  graph_op.Execute (ctx, cortext::testing::GetNullTransaction ());
 
   // Verify entity nodes were created
   auto entity_nodes = store->Execute (
@@ -486,16 +487,16 @@ TEST_CASE ("Streaming pacing blocks retrieval below threshold",
   SignalProcessor::Config cfg;
   cfg.sensitivity = 0.0; // threshold = 0.5 (highest)
   cfg.focus = 0.0;       // max_wait = 2.0 (highest)
-  std::vector<BufferedWriteInstruction> buf;
+
 
   // Set drift below threshold
   pctx.drift_accum = 0.3;
 
   Signal s = MakeSignal (1000, Eigen::VectorXf::Ones (4));
-  OperationContext ctx (s, pctx, cfg, buf);
+  OperationContext ctx (s, pctx, cfg);
 
   CheckStreamingPacing op;
-  op.Execute (ctx);
+  op.Execute (ctx, cortext::testing::GetNullTransaction ());
 
   // Should NOT trigger retrieval
   REQUIRE (ctx.GetShouldCheckRetrieval () == false);
@@ -510,17 +511,17 @@ TEST_CASE ("Streaming pacing triggers above threshold",
   SignalProcessor::Config cfg;
   cfg.sensitivity = 1.0; // threshold = 0.1 (lowest)
   cfg.focus = 0.5;
-  std::vector<BufferedWriteInstruction> buf;
+
 
   // Set drift above threshold
   pctx.drift_accum = 0.2;
   pctx.last_pacing_check_embedding = Eigen::VectorXf::Ones (4);
 
   Signal s = MakeSignal (1000, Eigen::VectorXf::Ones (4));
-  OperationContext ctx (s, pctx, cfg, buf);
+  OperationContext ctx (s, pctx, cfg);
 
   CheckStreamingPacing op;
-  op.Execute (ctx);
+  op.Execute (ctx, cortext::testing::GetNullTransaction ());
 
   // Should trigger retrieval
   REQUIRE (ctx.GetShouldCheckRetrieval () == true);
@@ -535,17 +536,17 @@ TEST_CASE ("Streaming pacing forces check on max_wait_drift",
   SignalProcessor::Config cfg;
   cfg.sensitivity = 0.0; // threshold = 0.5
   cfg.focus = 1.0;       // max_wait = 0.5
-  std::vector<BufferedWriteInstruction> buf;
+
 
   // Set drift above max_wait but below threshold
   pctx.drift_accum = 0.6;
   pctx.last_pacing_check_embedding = Eigen::VectorXf::Ones (4);
 
   Signal s = MakeSignal (1000, Eigen::VectorXf::Ones (4));
-  OperationContext ctx (s, pctx, cfg, buf);
+  OperationContext ctx (s, pctx, cfg);
 
   CheckStreamingPacing op;
-  op.Execute (ctx);
+  op.Execute (ctx, cortext::testing::GetNullTransaction ());
 
   // Should trigger due to exceeding max_wait
   REQUIRE (ctx.GetShouldCheckRetrieval () == true);
@@ -557,15 +558,15 @@ TEST_CASE ("Drift accumulation tracks semantic drift",
 {
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
-  std::vector<BufferedWriteInstruction> buf;
+
 
   // First signal initializes
   Eigen::VectorXf emb1 = Eigen::VectorXf::Zero (4);
   Signal s1 = MakeSignal (1000, emb1);
-  OperationContext ctx1 (s1, pctx, cfg, buf);
+  OperationContext ctx1 (s1, pctx, cfg);
 
   UpdateDriftAccumulation drift_op;
-  drift_op.Execute (ctx1);
+  drift_op.Execute (ctx1, cortext::testing::GetNullTransaction ());
 
   REQUIRE (pctx.drift_accum == 0.0);
   REQUIRE (pctx.last_pacing_check_embedding.has_value ());
@@ -574,9 +575,9 @@ TEST_CASE ("Drift accumulation tracks semantic drift",
   Eigen::VectorXf emb2 = Eigen::VectorXf::Zero (4);
   emb2[0] = 1.0f;
   Signal s2 = MakeSignal (1001, emb2);
-  OperationContext ctx2 (s2, pctx, cfg, buf);
+  OperationContext ctx2 (s2, pctx, cfg);
 
-  drift_op.Execute (ctx2);
+  drift_op.Execute (ctx2, cortext::testing::GetNullTransaction ());
 
   REQUIRE (pctx.drift_accum == Catch::Approx (1.0));
 
@@ -584,9 +585,9 @@ TEST_CASE ("Drift accumulation tracks semantic drift",
   Eigen::VectorXf emb3 = Eigen::VectorXf::Zero (4);
   emb3[1] = 1.0f;
   Signal s3 = MakeSignal (1002, emb3);
-  OperationContext ctx3 (s3, pctx, cfg, buf);
+  OperationContext ctx3 (s3, pctx, cfg);
 
-  drift_op.Execute (ctx3);
+  drift_op.Execute (ctx3, cortext::testing::GetNullTransaction ());
 
   // Total drift should accumulate
   REQUIRE (pctx.drift_accum > 1.0);
@@ -612,12 +613,11 @@ TEST_CASE ("Interrupt gate uses drift-based refractory",
   pc.drift_accum = 0.1;
   pc.drift_at_last_interrupt = 0.0;
 
-  std::vector<BufferedWriteInstruction> wb;
   Signal sig;
   sig.embedding = Eigen::VectorXf::Ones (3);
   sig.timestamp = 0;
   sig.source_id = "test";
-  OperationContext oc (sig, pc, cfg, wb);
+  OperationContext oc (sig, pc, cfg);
 
   oc.SetCoherence (1.0);
   oc.SetThresholdTDynamic (0.1);
@@ -631,7 +631,7 @@ TEST_CASE ("Interrupt gate uses drift-based refractory",
   oc.SetRetrievedMemoryEmbeddings (cands);
 
   ComputeMniGateDecision op;
-  op.Execute (oc);
+  op.Execute (oc, cortext::testing::GetNullTransaction ());
 
   // The refractory multiplier should be based on drift, not ticks
   INFO ("M_refrac calculation uses: drift_accum - drift_at_last_interrupt");
@@ -664,14 +664,13 @@ TEST_CASE ("Refractory multiplier decays with accumulated drift",
   pc_high_drift.recent_context_embeddings.push_back (
       Eigen::VectorXf::Ones (3).normalized ());
 
-  std::vector<BufferedWriteInstruction> wb;
   Signal sig;
   sig.embedding = Eigen::VectorXf::Ones (3);
   sig.timestamp = 0;
   sig.source_id = "test";
 
-  OperationContext oc_low (sig, pc_low_drift, cfg, wb);
-  OperationContext oc_high (sig, pc_high_drift, cfg, wb);
+  OperationContext oc_low (sig, pc_low_drift, cfg);
+  OperationContext oc_high (sig, pc_high_drift, cfg);
 
   oc_low.SetCoherence (1.0);
   oc_low.SetThresholdTDynamic (0.1);
@@ -704,8 +703,8 @@ TEST_CASE ("Refractory multiplier decays with accumulated drift",
 
   // Now execute the operation to verify it processes without error
   ComputeMniGateDecision op;
-  op.Execute (oc_low);
-  op.Execute (oc_high);
+  op.Execute (oc_low, cortext::testing::GetNullTransaction ());
+  op.Execute (oc_high, cortext::testing::GetNullTransaction ());
 }
 
 // =============================================================================

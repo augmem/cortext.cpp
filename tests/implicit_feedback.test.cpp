@@ -45,7 +45,7 @@ public:
   }
 
   void
-  Execute (OperationContext &ctx) const override
+  Execute (OperationContext &ctx, Transaction & /*tx*/) const override
   {
     auto &pctx = ctx.GetProcessorContext ();
     pctx.recent_retrievals_cache.clear ();
@@ -70,7 +70,7 @@ public:
   }
 
   void
-  Execute (OperationContext &ctx) const override
+  Execute (OperationContext &ctx, Transaction & /*tx*/) const override
   {
     out_events_ = ctx.GetMemoryUsageEvents ();
   }

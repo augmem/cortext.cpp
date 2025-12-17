@@ -1,4 +1,5 @@
 // tests/operations_graph_build.test.cpp
+#include "test_helpers.hpp"
 #include <any>
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
@@ -18,11 +19,13 @@ using cortext::operations::EnsureGraphSchema;
 
 namespace
 {
+constexpr int kEmbeddingDim = 256;
+
 static Signal
 MakeSignal (uint64_t ts)
 {
   Signal s;
-  s.embedding = Eigen::VectorXf::Ones (4);
+  s.embedding = Eigen::VectorXf::Ones (kEmbeddingDim);
   s.timestamp = ts;
   s.source_id = "test";
   return s;
@@ -35,39 +38,15 @@ TEST_CASE ("Alg30 builds nodes and edges from extraction outputs",
   auto unique_store = SQLiteStore::Create (":memory:");
   auto store = std::shared_ptr<Store> (std::move (unique_store));
 
-  // Seed input tables and rows (external worker outputs).
-  store->Execute ("CREATE TABLE IF NOT EXISTS consolidation_summaries ("
-                  "  summary_id TEXT PRIMARY KEY,"
-                  "  summary_text TEXT,"
-                  "  cluster_size INTEGER"
-                  ");");
-  store->Execute ("CREATE TABLE IF NOT EXISTS consolidation_sources ("
-                  "  summary_id TEXT,"
-                  "  source_text TEXT,"
-                  "  source_embedding_id INTEGER"
-                  ");");
-  store->Execute ("CREATE TABLE IF NOT EXISTS extraction_entities ("
-                  "  summary_id TEXT NOT NULL,"
-                  "  name TEXT NOT NULL,"
-                  "  type TEXT NOT NULL,"
-                  "  salience REAL,"
-                  "  embedding_id INTEGER,"
-                  "  PRIMARY KEY (summary_id, name, type)"
-                  ");");
-  store->Execute ("CREATE TABLE IF NOT EXISTS extraction_relations ("
-                  "  summary_id TEXT NOT NULL,"
-                  "  subject TEXT NOT NULL,"
-                  "  predicate TEXT NOT NULL,"
-                  "  object TEXT NOT NULL,"
-                  "  confidence REAL"
-                  ");");
+  // Initialize core schema
+  cortext::testing::InitializeCoreSchema (*store);
 
   store->Execute ("INSERT INTO consolidation_summaries(summary_id, summary_text, "
                   "cluster_size) VALUES (?,?,?)",
                   { std::string ("s1"), std::string ("summary one"), 10LL });
-  store->Execute ("INSERT INTO consolidation_sources(summary_id, source_text, "
-                  "source_embedding_id) VALUES (?,?,?)",
-                  { std::string ("s1"), std::string ("source"), 42LL });
+  store->Execute ("INSERT INTO consolidation_sources(summary_id, "
+                  "source_embedding_id) VALUES (?,?)",
+                  { std::string ("s1"), 42LL });
   store->Execute ("INSERT INTO extraction_entities(summary_id, name, type, "
                   "salience, embedding_id) VALUES (?,?,?,?,?)",
                   { std::string ("s1"), std::string ("Alice"),
@@ -175,42 +154,8 @@ TEST_CASE ("Phase4: co-occurrence edges are created for similar embeddings",
   auto unique_store = SQLiteStore::Create (":memory:");
   auto store = std::shared_ptr<Store> (std::move (unique_store));
 
-  // Create required tables
-  store->Execute ("CREATE TABLE IF NOT EXISTS consolidation_summaries ("
-                  "  summary_id TEXT PRIMARY KEY,"
-                  "  summary_text TEXT,"
-                  "  cluster_size INTEGER"
-                  ");");
-  store->Execute ("CREATE TABLE IF NOT EXISTS consolidation_sources ("
-                  "  summary_id TEXT,"
-                  "  source_embedding_id INTEGER"
-                  ");");
-  store->Execute ("CREATE TABLE IF NOT EXISTS memories ("
-                  "  embedding_id INTEGER PRIMARY KEY,"
-                  "  timestamp INTEGER"
-                  ");");
-
-  // Create unified embeddings table using vec0
-  store->Execute ("CREATE VIRTUAL TABLE IF NOT EXISTS embeddings USING vec0("
-                  "embedding_id INTEGER PRIMARY KEY,"
-                  "embedding float[256],"
-                  "+type text,"
-                  "+strength float,"
-                  "+use_frequency float,"
-                  "+stability float,"
-                  "+connectivity float,"
-                  "+drift_mag float,"
-                  "+influence float,"
-                  "+sustained_influence float,"
-                  "+contextual_gain float,"
-                  "+redundancy float,"
-                  "+pre_activation float,"
-                  "+lability_state float,"
-                  "+suppression_count integer,"
-                  "+cluster_id integer,"
-                  "+last_access integer,"
-                  "+created_at integer"
-                  ");");
+  // Initialize core schema
+  cortext::testing::InitializeCoreSchema (*store);
 
   // Create two similar 256D embeddings (high cosine similarity > 0.85)
   auto emb1 = Make256DEmb ({ 1.0f, 0.0f, 0.0f, 0.0f }); // Normalized direction
@@ -270,42 +215,8 @@ TEST_CASE ("Phase4: causal edges are created for temporal drift",
   auto unique_store = SQLiteStore::Create (":memory:");
   auto store = std::shared_ptr<Store> (std::move (unique_store));
 
-  // Create required tables
-  store->Execute ("CREATE TABLE IF NOT EXISTS consolidation_summaries ("
-                  "  summary_id TEXT PRIMARY KEY,"
-                  "  summary_text TEXT,"
-                  "  cluster_size INTEGER"
-                  ");");
-  store->Execute ("CREATE TABLE IF NOT EXISTS consolidation_sources ("
-                  "  summary_id TEXT,"
-                  "  source_embedding_id INTEGER"
-                  ");");
-  store->Execute ("CREATE TABLE IF NOT EXISTS memories ("
-                  "  embedding_id INTEGER PRIMARY KEY,"
-                  "  timestamp INTEGER"
-                  ");");
-
-  // Create unified embeddings table using vec0
-  store->Execute ("CREATE VIRTUAL TABLE IF NOT EXISTS embeddings USING vec0("
-                  "embedding_id INTEGER PRIMARY KEY,"
-                  "embedding float[256],"
-                  "+type text,"
-                  "+strength float,"
-                  "+use_frequency float,"
-                  "+stability float,"
-                  "+connectivity float,"
-                  "+drift_mag float,"
-                  "+influence float,"
-                  "+sustained_influence float,"
-                  "+contextual_gain float,"
-                  "+redundancy float,"
-                  "+pre_activation float,"
-                  "+lability_state float,"
-                  "+suppression_count integer,"
-                  "+cluster_id integer,"
-                  "+last_access integer,"
-                  "+created_at integer"
-                  ");");
+  // Initialize core schema
+  cortext::testing::InitializeCoreSchema (*store);
 
   // Create two 256D embeddings with significant drift (L2 distance > 0.35)
   auto emb1 = Make256DEmb ({ 1.0f, 0.0f, 0.0f, 0.0f });
@@ -394,32 +305,8 @@ TEST_CASE ("Phase2: implies edges created from implication predicates",
   auto unique_store = SQLiteStore::Create (":memory:");
   auto store = std::shared_ptr<Store> (std::move (unique_store));
 
-  // Create required tables
-  store->Execute ("CREATE TABLE IF NOT EXISTS consolidation_summaries ("
-                  "  summary_id TEXT PRIMARY KEY,"
-                  "  summary_text TEXT,"
-                  "  cluster_size INTEGER"
-                  ");");
-  store->Execute ("CREATE TABLE IF NOT EXISTS consolidation_sources ("
-                  "  summary_id TEXT,"
-                  "  source_text TEXT,"
-                  "  source_embedding_id INTEGER"
-                  ");");
-  store->Execute ("CREATE TABLE IF NOT EXISTS extraction_entities ("
-                  "  summary_id TEXT NOT NULL,"
-                  "  name TEXT NOT NULL,"
-                  "  type TEXT NOT NULL,"
-                  "  salience REAL,"
-                  "  embedding_id INTEGER,"
-                  "  PRIMARY KEY (summary_id, name, type)"
-                  ");");
-  store->Execute ("CREATE TABLE IF NOT EXISTS extraction_relations ("
-                  "  summary_id TEXT NOT NULL,"
-                  "  subject TEXT NOT NULL,"
-                  "  predicate TEXT NOT NULL,"
-                  "  object TEXT NOT NULL,"
-                  "  confidence REAL"
-                  ");");
+  // Initialize core schema
+  cortext::testing::InitializeCoreSchema (*store);
 
   store->Execute ("INSERT INTO consolidation_summaries(summary_id, summary_text, "
                   "cluster_size) VALUES (?,?,?)",
@@ -479,31 +366,8 @@ TEST_CASE ("Phase2: implies edge directionality preserved",
   auto unique_store = SQLiteStore::Create (":memory:");
   auto store = std::shared_ptr<Store> (std::move (unique_store));
 
-  store->Execute ("CREATE TABLE IF NOT EXISTS consolidation_summaries ("
-                  "  summary_id TEXT PRIMARY KEY,"
-                  "  summary_text TEXT,"
-                  "  cluster_size INTEGER"
-                  ");");
-  store->Execute ("CREATE TABLE IF NOT EXISTS consolidation_sources ("
-                  "  summary_id TEXT,"
-                  "  source_text TEXT,"
-                  "  source_embedding_id INTEGER"
-                  ");");
-  store->Execute ("CREATE TABLE IF NOT EXISTS extraction_entities ("
-                  "  summary_id TEXT NOT NULL,"
-                  "  name TEXT NOT NULL,"
-                  "  type TEXT NOT NULL,"
-                  "  salience REAL,"
-                  "  embedding_id INTEGER,"
-                  "  PRIMARY KEY (summary_id, name, type)"
-                  ");");
-  store->Execute ("CREATE TABLE IF NOT EXISTS extraction_relations ("
-                  "  summary_id TEXT NOT NULL,"
-                  "  subject TEXT NOT NULL,"
-                  "  predicate TEXT NOT NULL,"
-                  "  object TEXT NOT NULL,"
-                  "  confidence REAL"
-                  ");");
+  // Initialize core schema
+  cortext::testing::InitializeCoreSchema (*store);
 
   store->Execute ("INSERT INTO consolidation_summaries(summary_id, summary_text, "
                   "cluster_size) VALUES (?,?,?)",
@@ -547,31 +411,8 @@ TEST_CASE ("Phase2: non-implication predicates unchanged",
   auto unique_store = SQLiteStore::Create (":memory:");
   auto store = std::shared_ptr<Store> (std::move (unique_store));
 
-  store->Execute ("CREATE TABLE IF NOT EXISTS consolidation_summaries ("
-                  "  summary_id TEXT PRIMARY KEY,"
-                  "  summary_text TEXT,"
-                  "  cluster_size INTEGER"
-                  ");");
-  store->Execute ("CREATE TABLE IF NOT EXISTS consolidation_sources ("
-                  "  summary_id TEXT,"
-                  "  source_text TEXT,"
-                  "  source_embedding_id INTEGER"
-                  ");");
-  store->Execute ("CREATE TABLE IF NOT EXISTS extraction_entities ("
-                  "  summary_id TEXT NOT NULL,"
-                  "  name TEXT NOT NULL,"
-                  "  type TEXT NOT NULL,"
-                  "  salience REAL,"
-                  "  embedding_id INTEGER,"
-                  "  PRIMARY KEY (summary_id, name, type)"
-                  ");");
-  store->Execute ("CREATE TABLE IF NOT EXISTS extraction_relations ("
-                  "  summary_id TEXT NOT NULL,"
-                  "  subject TEXT NOT NULL,"
-                  "  predicate TEXT NOT NULL,"
-                  "  object TEXT NOT NULL,"
-                  "  confidence REAL"
-                  ");");
+  // Initialize core schema
+  cortext::testing::InitializeCoreSchema (*store);
 
   store->Execute ("INSERT INTO consolidation_summaries(summary_id, summary_text, "
                   "cluster_size) VALUES (?,?,?)",

@@ -1,4 +1,5 @@
 // tests/operations_extraction.test.cpp
+#include "test_helpers.hpp"
 #include <any>
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
@@ -15,26 +16,16 @@ using cortext::operations::EnqueueExtractionJobs;
 namespace
 {
 
+constexpr int kEmbeddingDim = 256;
+
 static Signal
 MakeSignal (uint64_t ts)
 {
   Signal s;
-  s.embedding = Eigen::VectorXf::Ones (4);
+  s.embedding = Eigen::VectorXf::Ones (kEmbeddingDim);
   s.timestamp = ts;
   s.source_id = "test";
   return s;
-}
-
-static void
-CreateInputTables (const std::shared_ptr<Store> &store)
-{
-  store->Execute ("CREATE TABLE IF NOT EXISTS consolidation_summaries ("
-                  "summary_id TEXT PRIMARY KEY,"
-                  "summary_text TEXT,"
-                  "cluster_size INTEGER)");
-  store->Execute ("CREATE TABLE IF NOT EXISTS consolidation_sources ("
-                  "summary_id TEXT,"
-                  "source_text TEXT)");
 }
 
 } // namespace
@@ -44,7 +35,7 @@ TEST_CASE ("Alg29c gating by stability disables enqueue when T <= 0.2",
 {
   auto unique_store = SQLiteStore::Create (":memory:");
   auto store = std::shared_ptr<Store> (std::move (unique_store));
-  CreateInputTables (store);
+  cortext::testing::InitializeCoreSchema (*store);
   // Seed one eligible-looking summary (but T will gate it off).
   store->Execute (
       "INSERT INTO consolidation_summaries(summary_id, summary_text, "
@@ -81,7 +72,7 @@ TEST_CASE ("Alg29c enqueues job when enabled and cluster_size >= min",
 {
   auto unique_store = SQLiteStore::Create (":memory:");
   auto store = std::shared_ptr<Store> (std::move (unique_store));
-  CreateInputTables (store);
+  cortext::testing::InitializeCoreSchema (*store);
 
   SignalProcessor::Config cfg;
   cfg.focus = 0.5;
@@ -116,7 +107,7 @@ TEST_CASE ("Alg29c batches up to ExtractionBatchSize(T) per run",
 {
   auto unique_store = SQLiteStore::Create (":memory:");
   auto store = std::shared_ptr<Store> (std::move (unique_store));
-  CreateInputTables (store);
+  cortext::testing::InitializeCoreSchema (*store);
 
   SignalProcessor::Config cfg;
   cfg.focus = 0.5;
@@ -154,7 +145,7 @@ TEST_CASE ("Alg32 caps jobs to MaxExtractionsPerCycle(T)",
 {
   auto unique_store = SQLiteStore::Create (":memory:");
   auto store = std::shared_ptr<Store> (std::move (unique_store));
-  CreateInputTables (store);
+  cortext::testing::InitializeCoreSchema (*store);
 
   SignalProcessor::Config cfg;
   cfg.focus = 0.5;
@@ -191,7 +182,7 @@ TEST_CASE ("Alg29c prompt contains summary and concatenated context",
 {
   auto unique_store = SQLiteStore::Create (":memory:");
   auto store = std::shared_ptr<Store> (std::move (unique_store));
-  CreateInputTables (store);
+  cortext::testing::InitializeCoreSchema (*store);
 
   SignalProcessor::Config cfg;
   cfg.focus = 0.4;
@@ -229,7 +220,7 @@ TEST_CASE ("Alg29c is idempotent on repeated runs",
 {
   auto unique_store = SQLiteStore::Create (":memory:");
   auto store = std::shared_ptr<Store> (std::move (unique_store));
-  CreateInputTables (store);
+  cortext::testing::InitializeCoreSchema (*store);
 
   SignalProcessor::Config cfg;
   cfg.focus = 0.5;

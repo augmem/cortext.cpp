@@ -1,6 +1,5 @@
 #pragma once
 
-#include "cortext/buffered_write_instruction.hpp"
 #include "cortext/operations/metrics.hpp"
 #include "cortext/processor/operation.hpp"
 #include "cortext/processor/processor_context.hpp"
@@ -99,24 +98,22 @@ public:
 
 private:
   void StartNewEpisode ();
-  void FinalizeEpisode ();
+  void FinalizeEpisode (Transaction &tx);
 
-  // State persistence helpers (called within FinalizeEpisode transaction)
-  void PersistProcessorState ();
-  void PersistBlenderState ();
-  void PersistRecentContext ();
-  void PersistRecentScores ();
-  void PersistObservedRetentionHistory ();
-  void PersistRLSCoefficients ();
-  void PersistWorkingMemorySlots ();
+  // State persistence helpers (called within Process transaction)
+  void PersistProcessorState (Transaction &tx);
+  void PersistBlenderState (Transaction &tx);
+  void PersistRecentContext (Transaction &tx);
+  void PersistRecentScores (Transaction &tx);
+  void PersistObservedRetentionHistory (Transaction &tx);
+  void PersistRLSCoefficients (Transaction &tx);
+  void PersistWorkingMemorySlots (Transaction &tx);
 
   Config config_;
   std::shared_ptr<Store> store_;
-  std::unique_ptr<Transaction> episode_transaction_;
   std::unique_ptr<IOperation> root_operation_;
 
   std::unique_ptr<ProcessorContext> context_;
-  std::vector<BufferedWriteInstruction> write_buffer_;
 };
 
 } // namespace cortext

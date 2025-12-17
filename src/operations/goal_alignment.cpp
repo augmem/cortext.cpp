@@ -16,7 +16,7 @@ namespace cortext::operations
 {
 
 void
-ComputeGoalAlignment::Execute (OperationContext &context) const
+ComputeGoalAlignment::Execute (OperationContext &context, Transaction &tx) const
 {
   Store *store = context.GetStore ();
   if (!store)

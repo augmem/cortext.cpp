@@ -1,4 +1,5 @@
 #include <catch2/catch_approx.hpp>
+#include "test_helpers.hpp"
 #include <catch2/catch_test_macros.hpp>
 #include <cortext/core/algorithms.hpp>
 #include <cortext/operations/coherence.hpp>
@@ -14,14 +15,14 @@ TEST_CASE ("ComputeCoherence handles small windows", "[operations][coherence]")
   s.embedding = Eigen::VectorXf::Ones (4);
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
-  std::vector<BufferedWriteInstruction> buf;
+
 #
   ComputeCoherence op;
 #
   // Case 1: Empty context → variance 0 → coherence = 1
   {
-    OperationContext ctx (s, pctx, cfg, buf);
-    op.Execute (ctx);
+    OperationContext ctx (s, pctx, cfg);
+    op.Execute (ctx, cortext::testing::GetNullTransaction ());
     REQUIRE (ctx.GetCoherence () == Catch::Approx (1.0));
   }
 #
@@ -29,8 +30,8 @@ TEST_CASE ("ComputeCoherence handles small windows", "[operations][coherence]")
   {
     pctx.recent_context_embeddings.clear ();
     pctx.recent_context_embeddings.push_back (Eigen::VectorXf::Ones (4));
-    OperationContext ctx (s, pctx, cfg, buf);
-    op.Execute (ctx);
+    OperationContext ctx (s, pctx, cfg);
+    op.Execute (ctx, cortext::testing::GetNullTransaction ());
     REQUIRE (ctx.GetCoherence () == Catch::Approx (1.0));
   }
 }
@@ -43,7 +44,7 @@ TEST_CASE ("ComputeCoherence lowers with mixed directions",
   s.embedding[0] = 1.0f; // unit vector along axis 0
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
-  std::vector<BufferedWriteInstruction> buf;
+
 #
   // Fill window with diverse directions to increase variance of cosines.
   pctx.recent_context_embeddings.clear ();
@@ -58,8 +59,8 @@ TEST_CASE ("ComputeCoherence lowers with mixed directions",
   pctx.recent_context_embeddings.push_back (e3);
 #
   ComputeCoherence op;
-  OperationContext ctx (s, pctx, cfg, buf);
-  op.Execute (ctx);
+  OperationContext ctx (s, pctx, cfg);
+  op.Execute (ctx, cortext::testing::GetNullTransaction ());
 #
   const double coh = ctx.GetCoherence ();
   REQUIRE (coh >= 0.0);
@@ -74,7 +75,7 @@ TEST_CASE ("ComputeCoherence clamping", "[operations][coherence]")
   s.embedding[0] = 1.0f;
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
-  std::vector<BufferedWriteInstruction> buf;
+
 #
   // Extreme mix of cosines should still clamp in [0,1]
   pctx.recent_context_embeddings.clear ();
@@ -86,8 +87,8 @@ TEST_CASE ("ComputeCoherence clamping", "[operations][coherence]")
     }
 #
   ComputeCoherence op;
-  OperationContext ctx (s, pctx, cfg, buf);
-  op.Execute (ctx);
+  OperationContext ctx (s, pctx, cfg);
+  op.Execute (ctx, cortext::testing::GetNullTransaction ());
 #
   const double coh = ctx.GetCoherence ();
   REQUIRE (coh >= 0.0);

@@ -51,7 +51,7 @@ public:
   }
 
   void
-  Execute (OperationContext &ctx) const override
+  Execute (OperationContext &ctx, Transaction & /*tx*/) const override
   {
     auto *store = ctx.GetStore ();
     for (const auto &[id, emb] : embeddings_)
@@ -82,7 +82,7 @@ public:
   {
   }
   void
-  Execute (OperationContext &ctx) const override
+  Execute (OperationContext &ctx, Transaction & /*tx*/) const override
   {
     auto &pctx = ctx.GetProcessorContext ();
     pctx.recent_context_embeddings.clear ();

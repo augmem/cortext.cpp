@@ -9,14 +9,14 @@ namespace cortext::operations
 class InitializeSensitivityPriors : public IOperation
 {
 public:
-  void Execute (OperationContext &context) const override;
+  void Execute (OperationContext &context, Transaction &tx) const override;
 };
 
 /// @brief Implements Algorithm 4: Sensitivity Dynamic Update per Signal.
 class UpdateSensitivity : public IOperation
 {
 public:
-  void Execute (OperationContext &context) const override;
+  void Execute (OperationContext &context, Transaction &tx) const override;
 };
 
 /// @brief Implements Algorithm 4b: Mood Integrator (Tonic State).
@@ -27,7 +27,7 @@ public:
 class UpdateMood : public IOperation
 {
 public:
-  void Execute (OperationContext &context) const override;
+  void Execute (OperationContext &context, Transaction &tx) const override;
 };
 
 } // namespace cortext::operations

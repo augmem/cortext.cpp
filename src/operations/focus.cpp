@@ -11,7 +11,7 @@ namespace cortext::operations
 {
 
 void
-InitializeFocusPriors::Execute (OperationContext &context) const
+InitializeFocusPriors::Execute (OperationContext &context, Transaction &tx) const
 {
   const auto &config = context.GetConfig ();
   auto &p_ctx = context.GetProcessorContext ();
@@ -42,7 +42,7 @@ InitializeFocusPriors::Execute (OperationContext &context) const
 }
 
 void
-UpdateFocus::Execute (OperationContext &context) const
+UpdateFocus::Execute (OperationContext &context, Transaction &tx) const
 {
   auto &p_ctx = context.GetProcessorContext ();
   const auto &config = context.GetConfig ();

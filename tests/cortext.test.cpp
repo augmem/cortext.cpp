@@ -1,3 +1,4 @@
+#include "test_helpers.hpp"
 #include <any>
 #include <catch2/catch_test_macros.hpp>
 #include <chrono>
@@ -209,25 +210,9 @@ TEST_CASE ("Cortext hydrates sqlite-objstore payloads",
   ScopedTempDb temp_db;
   const auto &db_path = temp_db.path ();
   auto store = cortext::SQLiteStore::Create (db_path);
-  store->Execute ("CREATE VIRTUAL TABLE objstore USING objstore()", {});
-  store->Execute ("CREATE TABLE IF NOT EXISTS embeddings ("
-                  "  embedding_id INTEGER PRIMARY KEY,"
-                  "  embedding BLOB"
-                  ")");
-  store->Execute ("CREATE TABLE IF NOT EXISTS memories ("
-                  "  embedding_id INTEGER PRIMARY KEY,"
-                  "  modality TEXT,"
-                  "  mime TEXT,"
-                  "  content_key TEXT,"
-                  "  source_id TEXT,"
-                  "  timestamp INTEGER,"
-                  "  width INTEGER,"
-                  "  height INTEGER,"
-                  "  channels INTEGER,"
-                  "  sample_rate INTEGER,"
-                  "  num_samples INTEGER,"
-                  "  blob_id BLOB"
-                  ")");
+
+  // Initialize core schema
+  cortext::testing::InitializeCoreSchema (*store);
 
   struct Sample
   {
@@ -242,10 +227,13 @@ TEST_CASE ("Cortext hydrates sqlite-objstore payloads",
     { 43, "video", "video/mp4", SampleMp4Bytes () },
   };
 
-  const std::vector<float> embedding = { 0.0f, 1.0f, 2.0f, 3.0f };
-  std::vector<char> embedding_blob (sizeof (float) * embedding.size ());
-  std::memcpy (embedding_blob.data (), embedding.data (),
-               embedding_blob.size ());
+  // Create 256D embedding for vec0 compatibility
+  constexpr int kEmbeddingDim = 256;
+  std::vector<float> embedding (kEmbeddingDim, 0.0f);
+  embedding[0] = 0.0f;
+  embedding[1] = 1.0f;
+  embedding[2] = 2.0f;
+  embedding[3] = 3.0f;
 
   std::unordered_map<long long, std::string> expected_payloads;
   std::unordered_map<long long, std::string> expected_mimes;
@@ -258,19 +246,21 @@ TEST_CASE ("Cortext hydrates sqlite-objstore payloads",
       const auto blob_id = BlobFromAny (blob_rows[0].at ("id"));
       REQUIRE (!blob_id.empty ());
 
-      store->Execute ("INSERT INTO embeddings (embedding_id, embedding)"
-                      " VALUES (?, ?)",
-                      { sample.embedding_id, embedding_blob });
+      store->Execute ("INSERT INTO embeddings (embedding_id, embedding, type, strength, "
+                      "use_frequency, stability, connectivity, drift_mag, influence, "
+                      "sustained_influence, contextual_gain, redundancy, pre_activation, "
+                      "lability_state, suppression_count) VALUES (?,?,'memory',1.0,0.0,"
+                      "1.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0)",
+                      { sample.embedding_id, embedding });
 
       store->Execute ("INSERT INTO memories (embedding_id, modality, mime,"
-                      " content_key, source_id, timestamp, width, height,"
+                      " source_id, timestamp, width, height,"
                       " channels, sample_rate, num_samples, blob_id)"
-                      " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                      " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                       {
                           sample.embedding_id,
                           sample.modality,
                           sample.mime,
-                          std::string (),
                           std::string ("unit-test"),
                           0LL,
                           sample.modality == "video" ? 2LL : 1LL,

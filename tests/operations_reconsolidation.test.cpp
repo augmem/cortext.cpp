@@ -1,5 +1,6 @@
 // tests/operations_reconsolidation.test.cpp
 #include <Eigen/Dense>
+#include "test_helpers.hpp"
 #include <catch2/catch_test_macros.hpp>
 #include <cortext/operations/reconsolidation.hpp>
 #include <cortext/processor.hpp>
@@ -26,7 +27,7 @@ public:
   }
 
   void
-  Execute (OperationContext &ctx) const override
+  Execute (OperationContext &ctx, Transaction & /*tx*/) const override
   {
     auto *store = ctx.GetStore ();
     for (const auto &[id, emb] : embeddings_)
@@ -63,7 +64,7 @@ public:
   {
   }
   void
-  Execute (OperationContext &ctx) const override
+  Execute (OperationContext &ctx, Transaction & /*tx*/) const override
   {
     auto &pctx = ctx.GetProcessorContext ();
     pctx.recent_context_embeddings.clear ();
@@ -81,7 +82,7 @@ class AssertUncertaintyIncreasedOp : public IOperation
 {
 public:
   void
-  Execute (OperationContext &ctx) const override
+  Execute (OperationContext &ctx, Transaction & /*tx*/) const override
   {
     auto &pctx = ctx.GetProcessorContext ();
     REQUIRE (pctx.u_t > 0.0);
@@ -280,10 +281,8 @@ TEST_CASE ("Alg20 ripple propagation reaches graph neighbors",
   ProcessorContext pctx;
   pctx.recent_context_embeddings.push_back (cur);
 
-  std::vector<BufferedWriteInstruction> write_buffer;
-
   // Create OperationContext with the store pointer
-  OperationContext ctx (s, pctx, cfg, write_buffer, store.get ());
+  OperationContext ctx (s, pctx, cfg, store.get ());
 
   // Verify store is set in context
   REQUIRE (ctx.GetStore () != nullptr);
@@ -292,15 +291,11 @@ TEST_CASE ("Alg20 ripple propagation reaches graph neighbors",
   ctx.SetRetrievedMemoryEmbeddings (
       std::unordered_map<long long, Eigen::VectorXf>{ { 1LL, mem } });
 
-  // Execute reconsolidation
+  // Execute reconsolidation with a real transaction
+  auto tx = store->Begin ();
   ApplyReconsolidation recon_op;
-  recon_op.Execute (ctx);
-
-  // Execute buffered writes
-  for (const auto &instr : write_buffer)
-    {
-      store->Execute (instr.query, instr.params);
-    }
+  recon_op.Execute (ctx, *tx);
+  tx->Commit ();
 
   // Verify primary reconsolidation worked
   {

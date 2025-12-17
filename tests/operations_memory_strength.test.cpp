@@ -6,10 +6,11 @@
 #include <cortext/processor/operation_set.hpp>
 #include <cortext/store/sqlite_store.hpp>
 
-using cortext::BufferedWriteInstruction;
+
 using cortext::OperationContext;
 using cortext::Signal;
 using cortext::SignalProcessor;
+using cortext::Transaction;
 
 namespace
 {
@@ -25,7 +26,7 @@ public:
   }
 
   void
-  Execute (OperationContext &ctx) const override
+  Execute (OperationContext &ctx, Transaction & /*tx*/) const override
   {
     auto *store = ctx.GetStore ();
     std::vector<float> vec (kEmbeddingDim, 0.0f);
@@ -57,7 +58,7 @@ public:
   {
   }
   void
-  Execute (OperationContext &ctx) const override
+  Execute (OperationContext &ctx, Transaction & /*tx*/) const override
   {
     ctx.SetMemoryUsageEvents (events_);
   }

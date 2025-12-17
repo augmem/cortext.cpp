@@ -2,6 +2,7 @@
 #include "cortext/processor/operation_context.hpp"
 #include "cortext/processor/processor_context.hpp"
 #include "cortext/signal.hpp"
+#include "test_helpers.hpp"
 #include <Eigen/Dense>
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
@@ -56,9 +57,8 @@ TEST_CASE ("Alg27 allows on MU path", "[operations][interrupt_gate]")
   // No included set to maximize novelty/relevance for this allow case
 
   // Create op-context
-  std::vector<BufferedWriteInstruction> wb;
   auto sig = MakeSignal (3);
-  OperationContext oc (sig, pc, cfg, wb);
+  OperationContext oc (sig, pc, cfg);
 
   // Coherence high (low penalty), threshold very low to focus on MU/Jaccard
   oc.SetCoherence (1.0);
@@ -71,7 +71,8 @@ TEST_CASE ("Alg27 allows on MU path", "[operations][interrupt_gate]")
   oc.SetRetrievedMemoryEmbeddings (cands);
 
   ComputeMniGateDecision op;
-  op.Execute (oc);
+  cortext::testing::NullTransaction null_tx;
+  op.Execute (oc, null_tx);
 
   CAPTURE (oc.GetMniBestMu ());
   CAPTURE (oc.GetMniTauMuEff ());
@@ -101,9 +102,8 @@ TEST_CASE ("Alg27 duplicate suppression", "[operations][interrupt_gate]")
   slot.strength = 1.0;
   pc.wm_slots.push_back (slot);
 
-  std::vector<BufferedWriteInstruction> wb;
   auto sig = MakeSignal (2);
-  OperationContext oc (sig, pc, cfg, wb);
+  OperationContext oc (sig, pc, cfg);
   oc.SetCoherence (1.0);
   oc.SetThresholdTDynamic (0.2);
   oc.SetAtBoundary (true);
@@ -113,7 +113,8 @@ TEST_CASE ("Alg27 duplicate suppression", "[operations][interrupt_gate]")
   oc.SetRetrievedMemoryEmbeddings (cands);
 
   ComputeMniGateDecision op;
-  op.Execute (oc);
+  cortext::testing::NullTransaction null_tx;
+  op.Execute (oc, null_tx);
 
   CAPTURE (oc.GetMniBestMu ());
   CAPTURE (oc.GetMniTauMuEff ());
@@ -138,9 +139,8 @@ TEST_CASE ("Alg27 refractory raises thresholds",
   pc.last_interrupt_tick = 100; // very recent
   pc.recent_context_embeddings.push_back (MakeUnit ({ 0.0f, 1.0f }));
 
-  std::vector<BufferedWriteInstruction> wb;
   auto sig = MakeSignal (2);
-  OperationContext oc (sig, pc, cfg, wb);
+  OperationContext oc (sig, pc, cfg);
   oc.SetCoherence (1.0);
   oc.SetThresholdTDynamic (0.4); // require higher relevance
   oc.SetAtBoundary (false);      // force boundary multiplier path
@@ -151,7 +151,8 @@ TEST_CASE ("Alg27 refractory raises thresholds",
   oc.SetRetrievedMemoryEmbeddings (cands);
 
   ComputeMniGateDecision op;
-  op.Execute (oc);
+  cortext::testing::NullTransaction null_tx;
+  op.Execute (oc, null_tx);
 
   REQUIRE (oc.GetMniTauMuEff () > 0.0);
   // With Delta small, thresholds elevated; decision may still allow
@@ -173,9 +174,8 @@ TEST_CASE ("Alg27 Jaccard novelty computed vs LRU set",
   // Seed LRU set B = {1,2,3}
   pc.recent_ids_lru_.RecordIds ({ 1LL, 2LL, 3LL });
 
-  std::vector<BufferedWriteInstruction> wb;
   auto sig = MakeSignal (2);
-  OperationContext oc (sig, pc, cfg, wb);
+  OperationContext oc (sig, pc, cfg);
   oc.SetCoherence (1.0);
   oc.SetThresholdTDynamic (0.0);
   oc.SetAtBoundary (true);
@@ -189,7 +189,8 @@ TEST_CASE ("Alg27 Jaccard novelty computed vs LRU set",
   oc.SetRetrievedMemoryEmbeddings (cands);
 
   ComputeMniGateDecision op;
-  op.Execute (oc);
+  cortext::testing::NullTransaction null_tx;
+  op.Execute (oc, null_tx);
 
   // |A∩B| = 2, |A∪B| = 5 => novelty = 1 - 2/5 = 0.6
   REQUIRE (oc.GetMniJaccard () == Catch::Approx (0.6).margin (1e-6));

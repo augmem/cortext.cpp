@@ -1,4 +1,5 @@
 #include <catch2/catch_approx.hpp>
+#include "test_helpers.hpp"
 #include <catch2/catch_test_macros.hpp>
 #include <cortext/operations/drift_accumulation.hpp>
 #include <cortext/operations/streaming_pacing.hpp>
@@ -30,16 +31,16 @@ TEST_CASE ("UpdateDriftAccumulation initializes on first signal",
 {
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
-  std::vector<BufferedWriteInstruction> buf;
+
 
   Eigen::VectorXf emb = Eigen::VectorXf::Ones (4);
   Signal s = MakeSignal (emb);
-  OperationContext ctx (s, pctx, cfg, buf);
+  OperationContext ctx (s, pctx, cfg);
 
   REQUIRE_FALSE (pctx.last_pacing_check_embedding.has_value ());
 
   UpdateDriftAccumulation op;
-  op.Execute (ctx);
+  op.Execute (ctx, cortext::testing::GetNullTransaction ());
 
   REQUIRE (pctx.last_pacing_check_embedding.has_value ());
   REQUIRE (pctx.drift_accum == 0.0);
@@ -51,15 +52,15 @@ TEST_CASE ("UpdateDriftAccumulation accumulates drift",
 {
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
-  std::vector<BufferedWriteInstruction> buf;
+
 
   // First signal: initialize
   Eigen::VectorXf emb1 = Eigen::VectorXf::Zero (4);
   Signal s1 = MakeSignal (emb1);
-  OperationContext ctx1 (s1, pctx, cfg, buf);
+  OperationContext ctx1 (s1, pctx, cfg);
 
   UpdateDriftAccumulation op;
-  op.Execute (ctx1);
+  op.Execute (ctx1, cortext::testing::GetNullTransaction ());
 
   REQUIRE (pctx.drift_accum == 0.0);
 
@@ -67,9 +68,9 @@ TEST_CASE ("UpdateDriftAccumulation accumulates drift",
   Eigen::VectorXf emb2 = Eigen::VectorXf::Zero (4);
   emb2[0] = 1.0f;
   Signal s2 = MakeSignal (emb2);
-  OperationContext ctx2 (s2, pctx, cfg, buf);
+  OperationContext ctx2 (s2, pctx, cfg);
 
-  op.Execute (ctx2);
+  op.Execute (ctx2, cortext::testing::GetNullTransaction ());
 
   REQUIRE (pctx.drift_accum == Catch::Approx (1.0));
   REQUIRE (ctx2.GetDriftAccumSnapshot () == Catch::Approx (1.0));
@@ -80,15 +81,15 @@ TEST_CASE ("UpdateDriftAccumulation handles empty embedding",
 {
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
-  std::vector<BufferedWriteInstruction> buf;
+
 
   // Empty embedding should be skipped
   Eigen::VectorXf emb;
   Signal s = MakeSignal (emb);
-  OperationContext ctx (s, pctx, cfg, buf);
+  OperationContext ctx (s, pctx, cfg);
 
   UpdateDriftAccumulation op;
-  op.Execute (ctx);
+  op.Execute (ctx, cortext::testing::GetNullTransaction ());
 
   REQUIRE_FALSE (pctx.last_pacing_check_embedding.has_value ());
   REQUIRE (pctx.drift_accum == 0.0);
@@ -99,24 +100,24 @@ TEST_CASE ("UpdateDriftAccumulation handles dimension mismatch",
 {
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
-  std::vector<BufferedWriteInstruction> buf;
+
 
   // First signal: 4D
   Eigen::VectorXf emb1 = Eigen::VectorXf::Ones (4);
   Signal s1 = MakeSignal (emb1);
-  OperationContext ctx1 (s1, pctx, cfg, buf);
+  OperationContext ctx1 (s1, pctx, cfg);
 
   UpdateDriftAccumulation op;
-  op.Execute (ctx1);
+  op.Execute (ctx1, cortext::testing::GetNullTransaction ());
 
   pctx.drift_accum = 1.0; // Simulate accumulated drift
 
   // Second signal: 8D (dimension mismatch)
   Eigen::VectorXf emb2 = Eigen::VectorXf::Ones (8);
   Signal s2 = MakeSignal (emb2);
-  OperationContext ctx2 (s2, pctx, cfg, buf);
+  OperationContext ctx2 (s2, pctx, cfg);
 
-  op.Execute (ctx2);
+  op.Execute (ctx2, cortext::testing::GetNullTransaction ());
 
   // Should reset tracking
   REQUIRE (pctx.drift_accum == 0.0);
@@ -130,15 +131,15 @@ TEST_CASE ("CheckStreamingPacing gates retrieval below threshold",
   SignalProcessor::Config cfg;
   cfg.sensitivity = 0.5;  // threshold = 0.3
   cfg.focus = 0.5;        // max_wait = 1.25
-  std::vector<BufferedWriteInstruction> buf;
+
 
   pctx.drift_accum = 0.1;  // Below threshold 0.3
 
   Signal s = MakeSignal (Eigen::VectorXf::Ones (4));
-  OperationContext ctx (s, pctx, cfg, buf);
+  OperationContext ctx (s, pctx, cfg);
 
   CheckStreamingPacing op;
-  op.Execute (ctx);
+  op.Execute (ctx, cortext::testing::GetNullTransaction ());
 
   REQUIRE (ctx.GetShouldCheckRetrieval () == false);
   // Drift accum should NOT be reset
@@ -152,17 +153,17 @@ TEST_CASE ("CheckStreamingPacing triggers retrieval above threshold",
   SignalProcessor::Config cfg;
   cfg.sensitivity = 0.5;  // threshold = 0.3
   cfg.focus = 0.5;        // max_wait = 1.25
-  std::vector<BufferedWriteInstruction> buf;
+
 
   pctx.drift_accum = 0.5;  // Above threshold 0.3
   pctx.last_pacing_check_embedding = Eigen::VectorXf::Zero (4);
 
   Eigen::VectorXf emb = Eigen::VectorXf::Ones (4);
   Signal s = MakeSignal (emb);
-  OperationContext ctx (s, pctx, cfg, buf);
+  OperationContext ctx (s, pctx, cfg);
 
   CheckStreamingPacing op;
-  op.Execute (ctx);
+  op.Execute (ctx, cortext::testing::GetNullTransaction ());
 
   REQUIRE (ctx.GetShouldCheckRetrieval () == true);
   // Should reset after trigger
@@ -178,16 +179,16 @@ TEST_CASE ("CheckStreamingPacing force check on max_wait_drift",
   SignalProcessor::Config cfg;
   cfg.sensitivity = 0.0;  // threshold = 0.5
   cfg.focus = 1.0;        // max_wait = 0.5
-  std::vector<BufferedWriteInstruction> buf;
+
 
   pctx.drift_accum = 0.6;  // Above max_wait 0.5 but below threshold 0.5
   pctx.last_pacing_check_embedding = Eigen::VectorXf::Zero (4);
 
   Signal s = MakeSignal (Eigen::VectorXf::Ones (4));
-  OperationContext ctx (s, pctx, cfg, buf);
+  OperationContext ctx (s, pctx, cfg);
 
   CheckStreamingPacing op;
-  op.Execute (ctx);
+  op.Execute (ctx, cortext::testing::GetNullTransaction ());
 
   // Should trigger because drift_accum (0.6) > max_wait (0.5)
   REQUIRE (ctx.GetShouldCheckRetrieval () == true);
@@ -199,10 +200,10 @@ TEST_CASE ("CheckStreamingPacing default is true for backward compatibility",
 {
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
-  std::vector<BufferedWriteInstruction> buf;
+
 
   Signal s = MakeSignal (Eigen::VectorXf::Ones (4));
-  OperationContext ctx (s, pctx, cfg, buf);
+  OperationContext ctx (s, pctx, cfg);
 
   // Before any operation runs, default should be true
   REQUIRE (ctx.GetShouldCheckRetrieval () == true);

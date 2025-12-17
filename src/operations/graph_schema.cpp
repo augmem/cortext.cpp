@@ -6,7 +6,7 @@ namespace cortext::operations
 {
 
 void
-EnsureGraphSchema::Execute (OperationContext &context) const
+EnsureGraphSchema::Execute (OperationContext &context, Transaction &tx) const
 {
   // No-op: schema is managed via core schema.cpp migration 0.
   (void)context;

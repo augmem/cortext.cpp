@@ -8,7 +8,7 @@ namespace cortext::operations
 {
 
 void
-ComputeEffectiveFocus::Execute (OperationContext &context) const
+ComputeEffectiveFocus::Execute (OperationContext &context, Transaction &tx) const
 {
   const auto &cfg = context.GetConfig ();
   const double F = cfg.focus;

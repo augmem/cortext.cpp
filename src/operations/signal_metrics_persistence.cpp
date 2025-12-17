@@ -1,8 +1,8 @@
 #include "cortext/operations/signal_metrics_persistence.hpp"
 
-#include "cortext/buffered_write_instruction.hpp"
 #include "cortext/operations/metrics.hpp"
 #include "cortext/processor/operation_context.hpp"
+#include "cortext/store/store.hpp"
 
 namespace cortext::operations
 {
@@ -20,18 +20,10 @@ GetMetricValue (const std::unordered_map<Metric, double> &metrics, Metric m)
 } // namespace
 
 void
-PersistSignalMetrics::Execute (OperationContext &context) const
+PersistSignalMetrics::Execute (OperationContext &context, Transaction &tx) const
 {
   const auto &metrics = context.GetAllMetrics ();
   const auto &signal = context.GetSignal ();
-
-  BufferedWriteInstruction op;
-  op.query = "INSERT INTO signal_metrics "
-             "(timestamp, embedding_id, relevance, mismatch, surprise, rarity, "
-             "drift, contradiction, utility, periphery, coverage, salience, "
-             "valence, arousal, composite_score, threshold_t, write_decision, "
-             "coherence, focus_spread, f_effective) "
-             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
 
   // Extract all metric values
   double relevance = GetMetricValue (metrics, Metric::relevance);
@@ -66,7 +58,13 @@ PersistSignalMetrics::Execute (OperationContext &context) const
   double focus_spread = GetMetricValue (metrics, Metric::focus_spread);
   double f_effective = context.GetEffectiveFocus ();
 
-  op.params = { static_cast<long long> (signal.timestamp),
+  tx.Execute ("INSERT INTO signal_metrics "
+              "(timestamp, embedding_id, relevance, mismatch, surprise, rarity, "
+              "drift, contradiction, utility, periphery, coverage, salience, "
+              "valence, arousal, composite_score, threshold_t, write_decision, "
+              "coherence, focus_spread, f_effective) "
+              "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+              { static_cast<long long> (signal.timestamp),
                 embedding_id_param,
                 relevance,
                 mismatch,
@@ -85,9 +83,7 @@ PersistSignalMetrics::Execute (OperationContext &context) const
                 write_decision,
                 coherence,
                 focus_spread,
-                f_effective };
-
-  context.AddWriteInstruction (std::move (op));
+                f_effective });
 }
 
 } // namespace cortext::operations

@@ -1,5 +1,6 @@
 // Catch2 unit tests focused on adherence fixes from validation report
 #include <catch2/catch_test_macros.hpp>
+#include "test_helpers.hpp"
 
 #include "cortext/operations/boundary.hpp"
 #include "cortext/operations/focus_feedback.hpp"
@@ -54,11 +55,10 @@ TEST_CASE ("Boundary threshold uses T (not 1-T)", "[boundary]")
   ProcessorContext pctx;
   SignalProcessor::Config cfg{};
   cfg.stability = 1.0; // threshold should be 0.35 at max T
-  std::vector<BufferedWriteInstruction> wb;
   Signal sig;
   sig.timestamp = 1;
   sig.embedding = Eigen::VectorXf::Zero (4);
-  OperationContext ctx (sig, pctx, cfg, wb);
+  OperationContext ctx (sig, pctx, cfg);
 
   // Populate recent embeddings to avoid early return
   for (int i = 0; i < 8; ++i)
@@ -66,7 +66,7 @@ TEST_CASE ("Boundary threshold uses T (not 1-T)", "[boundary]")
       pctx.recent_context_embeddings.push_back (Eigen::VectorXf::Random (4));
     }
   CheckEpisodeBoundary op;
-  op.Execute (ctx);
+  op.Execute (ctx, cortext::testing::GetNullTransaction ());
   // No assert for numeric value; we trust execution and lack of regression.
   SUCCEED ();
 }
@@ -76,10 +76,9 @@ TEST_CASE ("Alg17 emits adj; Alg6 consumes it", "[stability]")
   ProcessorContext pctx;
   SignalProcessor::Config cfg{};
   cfg.stability = 0.5;
-  std::vector<BufferedWriteInstruction> wb;
   Signal sig;
   sig.timestamp = 100;
-  OperationContext ctx (sig, pctx, cfg, wb);
+  OperationContext ctx (sig, pctx, cfg);
 
   // Feed some usage events with positive/negative gains
   ctx.SetMemoryUsageEvents ({
@@ -88,14 +87,14 @@ TEST_CASE ("Alg17 emits adj; Alg6 consumes it", "[stability]")
       { 3, true, +0.3 },
   });
   ApplyStabilityFeedback fdbk;
-  fdbk.Execute (ctx);
+  fdbk.Execute (ctx, cortext::testing::GetNullTransaction ());
   // Should set a delta
   REQUIRE (ctx.GetDeltaHalfLifeAdjustment ().has_value ());
 
   // Provide observed retention and run Alg6
   ctx.SetObservedRetentionSeconds (120.0);
   UpdateStability st;
-  st.Execute (ctx);
+  st.Execute (ctx, cortext::testing::GetNullTransaction ());
   SUCCEED ();
 }
 
@@ -106,16 +105,15 @@ TEST_CASE ("Alg4: ΔT_sensitivity is not clamped (Alg8 clamps later)",
   SignalProcessor::Config cfg{};
   cfg.sensitivity = 0.9;
   cfg.stability = 0.5;
-  std::vector<BufferedWriteInstruction> wb;
   Signal sig;
   sig.timestamp = 10;
   sig.embedding = Eigen::VectorXf::Ones (4);
-  OperationContext ctx (sig, pctx, cfg, wb);
+  OperationContext ctx (sig, pctx, cfg);
 
   InitializeSensitivityPriors init;
-  init.Execute (ctx);
+  init.Execute (ctx, cortext::testing::GetNullTransaction ());
   UpdateSensitivity up;
-  up.Execute (ctx);
+  up.Execute (ctx, cortext::testing::GetNullTransaction ());
   // Ensure value is set (not necessarily clamped here)
   REQUIRE (ctx.GetDeltaThresholdSensitivity ().has_value ());
 }
@@ -125,18 +123,17 @@ TEST_CASE ("Alg15/16 use base gains (no knob scaling)", "[feedback]")
   ProcessorContext pctx;
   SignalProcessor::Config cfg{};
   cfg.sensitivity = 0.7;
-  std::vector<BufferedWriteInstruction> wb;
   Signal sig;
   sig.timestamp = 1;
-  OperationContext ctx (sig, pctx, cfg, wb);
+  OperationContext ctx (sig, pctx, cfg);
   // Provide usage events
   ctx.SetMemoryUsageEvents ({
       { 1, true, +0.2 },
       { 2, true, -0.1 },
   });
   ApplyFocusFeedback ffb;
-  ffb.Execute (ctx);
+  ffb.Execute (ctx, cortext::testing::GetNullTransaction ());
   ApplySensitivityFeedback sfb;
-  sfb.Execute (ctx);
+  sfb.Execute (ctx, cortext::testing::GetNullTransaction ());
   SUCCEED ();
 }

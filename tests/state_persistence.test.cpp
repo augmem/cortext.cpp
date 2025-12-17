@@ -47,7 +47,7 @@ GetDouble (const std::map<std::string, std::any> &row, const std::string &key)
 struct TriggerBoundaryOp : IOperation
 {
   void
-  Execute (OperationContext &ctx) const override
+  Execute (OperationContext &ctx, Transaction & /*tx*/) const override
   {
     ctx.RequestFinalizeEpisode ();
   }
@@ -354,7 +354,7 @@ struct PopulateWMSlotsOp : IOperation
   double strength = 0.8;
 
   void
-  Execute (OperationContext &ctx) const override
+  Execute (OperationContext &ctx, Transaction & /*tx*/) const override
   {
     auto &pctx = ctx.GetProcessorContext ();
     pctx.wm_slots.clear ();
@@ -459,7 +459,7 @@ TEST_CASE ("Working memory slots are loaded on startup",
     mutable double slot1_strength = 0.0;
 
     void
-    Execute (OperationContext &ctx) const override
+    Execute (OperationContext &ctx, Transaction & /*tx*/) const override
     {
       const auto &pctx = ctx.GetProcessorContext ();
       slot_count = pctx.wm_slots.size ();
@@ -525,7 +525,7 @@ TEST_CASE ("Working memory slots decay on load",
     mutable double loaded_strength = 0.0;
 
     void
-    Execute (OperationContext &ctx) const override
+    Execute (OperationContext &ctx, Transaction & /*tx*/) const override
     {
       const auto &pctx = ctx.GetProcessorContext ();
       if (!pctx.wm_slots.empty ())
@@ -585,7 +585,7 @@ TEST_CASE ("Fully decayed WM slots are not loaded",
     mutable size_t slot_count = 999;
 
     void
-    Execute (OperationContext &ctx) const override
+    Execute (OperationContext &ctx, Transaction & /*tx*/) const override
     {
       const auto &pctx = ctx.GetProcessorContext ();
       slot_count = pctx.wm_slots.size ();

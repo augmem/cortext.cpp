@@ -1,6 +1,6 @@
 #include "cortext/operations/competition.hpp"
 
-#include "cortext/buffered_write_instruction.hpp"
+#include "cortext/store/store.hpp"
 #include "cortext/core/algorithms.hpp"
 #include "cortext/operations/constants.hpp"
 #include "cortext/processor/operation_context.hpp"
@@ -81,42 +81,34 @@ Clamp01 (double v)
   return v;
 }
 void
-ApplyRIFRecovery (OperationContext &context, long long now_ts,
-                  double recovery_time)
+ApplyRIFRecovery (Transaction &tx, long long now_ts, double recovery_time)
 {
-  {
-    BufferedWriteInstruction op;
-    op.query = "UPDATE embeddings "
-               "SET strength = MAX(0.0, strength + ("
-               "  SELECT suppression * ("
-               "    CASE "
-               "      WHEN (? - ts) <= 0 THEN 0.0 "
-               "      WHEN (? - ts) >= ? THEN 1.0 "
-               "      ELSE ((? - ts) * 1.0 / ?) "
-               "    END"
-               "  )"
-               "  FROM rif_state WHERE rif_state.embedding_id = "
-               "embeddings.embedding_id"
-               ")) "
-               "WHERE EXISTS (SELECT 1 FROM rif_state WHERE "
-               "rif_state.embedding_id = embeddings.embedding_id);";
-    op.params = { now_ts, now_ts, recovery_time, now_ts, recovery_time };
-    context.AddWriteInstruction (std::move (op));
-  }
-  {
-    BufferedWriteInstruction op;
-    op.query = "UPDATE rif_state "
-               "SET suppression = MAX(0.0, suppression - (suppression * ("
-               "    CASE "
-               "      WHEN (? - ts) <= 0 THEN 0.0 "
-               "      WHEN (? - ts) >= ? THEN 1.0 "
-               "      ELSE ((? - ts) * 1.0 / ?) "
-               "    END"
-               "  ))), "
-               "    ts = ?;";
-    op.params = { now_ts, recovery_time, now_ts, recovery_time, now_ts };
-    context.AddWriteInstruction (std::move (op));
-  }
+  tx.Execute ("UPDATE embeddings "
+              "SET strength = MAX(0.0, strength + ("
+              "  SELECT suppression * ("
+              "    CASE "
+              "      WHEN (? - ts) <= 0 THEN 0.0 "
+              "      WHEN (? - ts) >= ? THEN 1.0 "
+              "      ELSE ((? - ts) * 1.0 / ?) "
+              "    END"
+              "  )"
+              "  FROM rif_state WHERE rif_state.embedding_id = "
+              "embeddings.embedding_id"
+              ")) "
+              "WHERE EXISTS (SELECT 1 FROM rif_state WHERE "
+              "rif_state.embedding_id = embeddings.embedding_id);",
+              { now_ts, now_ts, recovery_time, now_ts, recovery_time });
+
+  tx.Execute ("UPDATE rif_state "
+              "SET suppression = MAX(0.0, suppression - (suppression * ("
+              "    CASE "
+              "      WHEN (? - ts) <= 0 THEN 0.0 "
+              "      WHEN (? - ts) >= ? THEN 1.0 "
+              "      ELSE ((? - ts) * 1.0 / ?) "
+              "    END"
+              "  ))), "
+              "    ts = ?;",
+              { now_ts, recovery_time, now_ts, recovery_time, now_ts });
 }
 
 struct Candidate
@@ -153,10 +145,9 @@ ScoreCandidates (const std::unordered_map<long long, Eigen::VectorXf> &retrieved
 
 void
 ApplyLateralInhibition (const std::vector<Candidate> &winners,
-                        const std::vector<Candidate> &losers,
-                        double radius, double lat_strength, double iter_mult,
-                        double stability, long long now_ts,
-                        OperationContext &context)
+                        const std::vector<Candidate> &losers, double radius,
+                        double lat_strength, double iter_mult, double stability,
+                        long long now_ts, Transaction &tx)
 {
   for (const auto &loser : losers)
     {
@@ -186,36 +177,23 @@ ApplyLateralInhibition (const std::vector<Candidate> &winners,
           continue;
         }
       // Note: embeddings row already exists from storage
-      {
-        BufferedWriteInstruction op;
-        op.query = "INSERT OR IGNORE INTO rif_state (embedding_id) "
-                   "VALUES (?);";
-        op.params = { loser.id };
-        context.AddWriteInstruction (std::move (op));
-      }
-      {
-        BufferedWriteInstruction op;
-        op.query
-            = "UPDATE rif_state SET suppression = suppression + ?, ts = ? "
-              "WHERE embedding_id = ?;";
-        op.params = { total_supp, now_ts, loser.id };
-        context.AddWriteInstruction (std::move (op));
-      }
-      {
-        BufferedWriteInstruction op;
-        op.query = "UPDATE embeddings "
-                   "SET strength = MAX(0.0, strength - ?) "
-                   "WHERE embedding_id = ?;";
-        op.params = { total_supp, loser.id };
-        context.AddWriteInstruction (std::move (op));
-      }
+      tx.Execute ("INSERT OR IGNORE INTO rif_state (embedding_id) VALUES (?);",
+                  { loser.id });
+      tx.Execute ("UPDATE rif_state SET suppression = suppression + ?, ts = ? "
+                  "WHERE embedding_id = ?;",
+                  { total_supp, now_ts, loser.id });
+      tx.Execute ("UPDATE embeddings "
+                  "SET strength = MAX(0.0, strength - ?) "
+                  "WHERE embedding_id = ?;",
+                  { total_supp, loser.id });
     }
 }
 
 } // namespace
 
 void
-ApplyRetrievalCompetition::Execute (OperationContext &context) const
+ApplyRetrievalCompetition::Execute (OperationContext &context,
+                                    Transaction &tx) const
 {
   auto &p_ctx = context.GetProcessorContext ();
   const auto &cfg = context.GetConfig ();
@@ -232,7 +210,7 @@ ApplyRetrievalCompetition::Execute (OperationContext &context) const
   const long long now_ts
       = static_cast<long long> (context.GetSignal ().timestamp);
   const double recovery_time = RecoveryTimeSeconds (cfg.stability);
-  ApplyRIFRecovery (context, now_ts, recovery_time);
+  ApplyRIFRecovery (tx, now_ts, recovery_time);
 
   std::vector<Candidate> cands = ScoreCandidates (retrieved, x_ctx);
   if (cands.empty ())
@@ -253,7 +231,7 @@ ApplyRetrievalCompetition::Execute (OperationContext &context) const
       return;
     }
   ApplyLateralInhibition (winners, losers, radius, lat_strength, iter_mult,
-                          cfg.stability, now_ts, context);
+                          cfg.stability, now_ts, tx);
 }
 
 void

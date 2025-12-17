@@ -1,4 +1,5 @@
 // tests/operations_graph_retrieval.test.cpp
+#include "test_helpers.hpp"
 #include <any>
 #include <catch2/catch_test_macros.hpp>
 
@@ -62,31 +63,12 @@ TEST_CASE ("Alg31 expands vector seeds via graph_edges and returns expanded ids"
   auto unique_store = SQLiteStore::Create (":memory:");
   auto store = std::shared_ptr<Store> (std::move (unique_store));
 
+  // Initialize core schema
+  cortext::testing::InitializeCoreSchema (*store);
+
   // Create 256-dim embeddings for vec0 compatibility.
   Eigen::VectorXf emb1 = UnitVec256 (1.0f);   // First dimension = 1
   Eigen::VectorXf emb2 = UnitVec256Second (1.0f); // Second dimension = 1
-
-  // Unified embeddings table using vec0 with auxiliary columns.
-  store->Execute ("CREATE VIRTUAL TABLE IF NOT EXISTS embeddings USING vec0("
-                  "embedding_id INTEGER PRIMARY KEY,"
-                  "embedding float[256],"
-                  "+type text,"
-                  "+strength float,"
-                  "+use_frequency float,"
-                  "+stability float,"
-                  "+connectivity float,"
-                  "+drift_mag float,"
-                  "+influence float,"
-                  "+sustained_influence float,"
-                  "+contextual_gain float,"
-                  "+redundancy float,"
-                  "+pre_activation float,"
-                  "+lability_state float,"
-                  "+suppression_count integer,"
-                  "+cluster_id integer,"
-                  "+last_access integer,"
-                  "+created_at integer"
-                  ");");
 
   // id=1 aligns with query, id=2 does not.
   store->Execute ("INSERT INTO embeddings(embedding_id, embedding, type, strength, "
@@ -102,25 +84,7 @@ TEST_CASE ("Alg31 expands vector seeds via graph_edges and returns expanded ids"
                   "1.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0)",
                   { 2LL, ToFloatVec (emb2) });
 
-  // Graph tables connecting emb:1 -> entity:Alice -> emb:2
-  store->Execute ("CREATE TABLE IF NOT EXISTS graph_nodes ("
-                  "node_id TEXT PRIMARY KEY,"
-                  "type TEXT NOT NULL,"
-                  "label TEXT,"
-                  "embedding_id INTEGER,"
-                  "metadata TEXT,"
-                  "created_at INTEGER"
-                  ");");
-  store->Execute ("CREATE TABLE IF NOT EXISTS graph_edges ("
-                  "source_id TEXT NOT NULL,"
-                  "target_id TEXT NOT NULL,"
-                  "edge_type TEXT NOT NULL,"
-                  "weight REAL NOT NULL DEFAULT 1.0,"
-                  "decay_rate REAL,"
-                  "last_reinforced INTEGER,"
-                  "PRIMARY KEY (source_id, target_id, edge_type)"
-                  ");");
-
+  // Graph nodes connecting emb:1 -> entity:Alice -> emb:2
   store->Execute ("INSERT INTO graph_nodes(node_id, type, embedding_id) "
                   "VALUES (?,?,?)",
                   { std::string ("emb:1"), std::string ("memory"), 1LL });

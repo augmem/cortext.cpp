@@ -1,6 +1,6 @@
 #include "cortext/operations/reconsolidation.hpp"
 
-#include "cortext/buffered_write_instruction.hpp"
+#include "cortext/store/store.hpp"
 #include "cortext/core/algorithms.hpp"
 #include "cortext/core/knobs.hpp"
 #include "cortext/core/utils.hpp"
@@ -196,64 +196,46 @@ LoadEmbedding (Store *store, long long embedding_id, int expected_dim = 256)
 
 /// @brief Writes ripple updates for a neighbor embedding.
 inline void
-WriteNeighborUpdates (OperationContext &context, long long embedding_id,
+WriteNeighborUpdates (Transaction &tx, long long embedding_id,
                       double lability, long long timestamp,
                       const Eigen::VectorXf &blended)
 {
   // Ensure memory_feedback row exists
-  {
-    BufferedWriteInstruction op;
-    op.query = "INSERT INTO memory_feedback "
-               "(embedding_id, retrieved_count, used_count, last_used) "
-               "SELECT ?, 0, 0, 0 "
-               "WHERE NOT EXISTS (SELECT 1 FROM "
-               "memory_feedback WHERE embedding_id = ?)";
-    op.params = { embedding_id, embedding_id };
-    context.AddWriteInstruction (std::move (op));
-  }
+  tx.Execute ("INSERT INTO memory_feedback "
+              "(embedding_id, retrieved_count, used_count, last_used) "
+              "SELECT ?, 0, 0, 0 "
+              "WHERE NOT EXISTS (SELECT 1 FROM "
+              "memory_feedback WHERE embedding_id = ?)",
+              { embedding_id, embedding_id });
 
   // Update lability_state in embeddings (unified table)
-  {
-    BufferedWriteInstruction op;
-    op.query = "UPDATE embeddings "
-               "SET lability_state = ? "
-               "WHERE embedding_id = ?";
-    op.params = { lability, embedding_id };
-    context.AddWriteInstruction (std::move (op));
-  }
+  tx.Execute ("UPDATE embeddings "
+              "SET lability_state = ? "
+              "WHERE embedding_id = ?",
+              { lability, embedding_id });
 
   // Update lability_ts in memory_feedback
-  {
-    BufferedWriteInstruction op;
-    op.query = "UPDATE memory_feedback "
-               "SET lability_ts = ? "
-               "WHERE embedding_id = ?";
-    op.params = { timestamp, embedding_id };
-    context.AddWriteInstruction (std::move (op));
-  }
+  tx.Execute ("UPDATE memory_feedback "
+              "SET lability_ts = ? "
+              "WHERE embedding_id = ?",
+              { timestamp, embedding_id });
 
   // Update embeddings with blended embedding
   // Note: sqlite-vec virtual tables don't support UPDATE on vector columns,
   // so we use DELETE + INSERT instead, preserving all metadata fields
-  {
-    BufferedWriteInstruction del_op;
-    del_op.query = "DELETE FROM embeddings WHERE embedding_id = ?";
-    del_op.params = { embedding_id };
-    context.AddWriteInstruction (std::move (del_op));
+  tx.Execute ("DELETE FROM embeddings WHERE embedding_id = ?",
+              { embedding_id });
 
-    BufferedWriteInstruction ins_op;
-    ins_op.query = std::string ("INSERT INTO embeddings (")
-                   + store::kEmbeddingsReconsolidateColumns + ") VALUES ("
-                   + store::kEmbeddingsReconsolidateDefaults + ")";
-    ins_op.params = { embedding_id, ToFloatVector (blended), lability };
-    context.AddWriteInstruction (std::move (ins_op));
-  }
+  tx.Execute (std::string ("INSERT INTO embeddings (")
+                  + store::kEmbeddingsReconsolidateColumns + ") VALUES ("
+                  + store::kEmbeddingsReconsolidateDefaults + ")",
+              { embedding_id, ToFloatVector (blended), lability });
 }
 
 } // namespace
 
 void
-ApplyReconsolidation::Execute (OperationContext &context) const
+ApplyReconsolidation::Execute (OperationContext &context, Transaction &tx) const
 {
   auto &p_ctx = context.GetProcessorContext ();
   const auto &cfg = context.GetConfig ();
@@ -323,37 +305,25 @@ ApplyReconsolidation::Execute (OperationContext &context) const
       // Note: embeddings row already exists - no need to ensure it exists
 
       // Ensure memory_feedback row exists for retrieval tracking.
-      {
-        BufferedWriteInstruction op;
-        op.query = "INSERT INTO memory_feedback "
-                   "(embedding_id, retrieved_count, used_count, last_used) "
-                   "SELECT ?, 0, 0, 0 "
-                   "WHERE NOT EXISTS (SELECT 1 FROM "
-                   "memory_feedback WHERE embedding_id = ?)";
-        op.params = { embedding_id, embedding_id };
-        context.AddWriteInstruction (std::move (op));
-      }
+      tx.Execute ("INSERT INTO memory_feedback "
+                  "(embedding_id, retrieved_count, used_count, last_used) "
+                  "SELECT ?, 0, 0, 0 "
+                  "WHERE NOT EXISTS (SELECT 1 FROM "
+                  "memory_feedback WHERE embedding_id = ?)",
+                  { embedding_id, embedding_id });
 
       // Update lability_state in embeddings (unified table).
-      {
-        BufferedWriteInstruction op;
-        op.query = "UPDATE embeddings "
-                   "SET lability_state = ? "
-                   "WHERE embedding_id = ?";
-        op.params = { current_lability, embedding_id };
-        context.AddWriteInstruction (std::move (op));
-      }
+      tx.Execute ("UPDATE embeddings "
+                  "SET lability_state = ? "
+                  "WHERE embedding_id = ?",
+                  { current_lability, embedding_id });
 
       // Update original_embedding and lability_ts in memory_feedback.
-      {
-        BufferedWriteInstruction op;
-        op.query = "UPDATE memory_feedback "
-                   "SET original_embedding = COALESCE(original_embedding, ?), "
-                   "    lability_ts = ? "
-                   "WHERE embedding_id = ?";
-        op.params = { ToFloatVector (u_m), now_ts, embedding_id };
-        context.AddWriteInstruction (std::move (op));
-      }
+      tx.Execute ("UPDATE memory_feedback "
+                  "SET original_embedding = COALESCE(original_embedding, ?), "
+                  "    lability_ts = ? "
+                  "WHERE embedding_id = ?",
+                  { ToFloatVector (u_m), now_ts, embedding_id });
 
       if (drift_mag < kDriftSkipEpsilon)
         {
@@ -368,19 +338,13 @@ ApplyReconsolidation::Execute (OperationContext &context) const
       // Update embeddings (unified table for vector storage and metadata).
       // Note: sqlite-vec virtual tables don't support UPDATE on vector columns,
       // so we use DELETE + INSERT instead, preserving all metadata fields
-      {
-        BufferedWriteInstruction del_op;
-        del_op.query = "DELETE FROM embeddings WHERE embedding_id = ?";
-        del_op.params = { embedding_id };
-        context.AddWriteInstruction (std::move (del_op));
+      tx.Execute ("DELETE FROM embeddings WHERE embedding_id = ?",
+                  { embedding_id });
 
-        BufferedWriteInstruction ins_op;
-        ins_op.query = std::string ("INSERT INTO embeddings (")
-                       + store::kEmbeddingsReconsolidateColumns + ") VALUES ("
-                       + store::kEmbeddingsReconsolidateDefaults + ")";
-        ins_op.params = { embedding_id, ToFloatVector (blended), current_lability };
-        context.AddWriteInstruction (std::move (ins_op));
-      }
+      tx.Execute (std::string ("INSERT INTO embeddings (")
+                      + store::kEmbeddingsReconsolidateColumns + ") VALUES ("
+                      + store::kEmbeddingsReconsolidateDefaults + ")",
+                  { embedding_id, ToFloatVector (blended), current_lability });
 
       // --- BEGIN RIPPLE PROPAGATION ---
       // Only propagate ripple if store is available and primary drift occurred
@@ -439,7 +403,7 @@ ApplyReconsolidation::Execute (OperationContext &context) const
           neighbor_blended = Unit (neighbor_blended);
 
           // Write updates for this neighbor
-          WriteNeighborUpdates (context, neighbor.embedding_id, neighbor_lability,
+          WriteNeighborUpdates (tx, neighbor.embedding_id, neighbor_lability,
                                 now_ts, neighbor_blended);
         }
       // --- END RIPPLE PROPAGATION ---

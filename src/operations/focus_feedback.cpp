@@ -9,7 +9,7 @@ namespace cortext::operations
 {
 
 void
-ApplyFocusFeedback::Execute (OperationContext &context) const
+ApplyFocusFeedback::Execute (OperationContext &context, Transaction &tx) const
 {
   auto &p_ctx = context.GetProcessorContext ();
   // Avoid relying on context.GetConfig() here because some tests create

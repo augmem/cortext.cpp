@@ -1,4 +1,5 @@
 #include <catch2/catch_approx.hpp>
+#include "test_helpers.hpp"
 #include <catch2/catch_test_macros.hpp>
 #include <cortext/core/knobs.hpp>
 #include <cortext/operations/constants.hpp>
@@ -20,16 +21,16 @@ TEST_CASE ("Alg24 inserts new WM slot when margin exceeds cost",
   cfg.focus = 0.5;
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;
-  std::vector<BufferedWriteInstruction> buf;
+
 
   // Ensure empty WM and permissive threshold
   pctx.T_dynamic = 0.2;
   pctx.weight_relevance = 0.5;
 
   WorkingMemory op;
-  OperationContext ctx (s, pctx, cfg, buf);
+  OperationContext ctx (s, pctx, cfg);
   ctx.SetCompositeScore (0.9); // benefit high
-  op.Execute (ctx);
+  op.Execute (ctx, cortext::testing::GetNullTransaction ());
 
   REQUIRE (pctx.wm_last_accepted == true);
   REQUIRE (pctx.wm_last_chunked == false);
@@ -49,7 +50,7 @@ TEST_CASE ("Alg24 chunks into best-matching slot above threshold",
   cfg.focus = 1.0;       // high focus → high chunk threshold ~0.9
   cfg.sensitivity = 0.3; // modest maintenance cost
   cfg.stability = 0.6;
-  std::vector<BufferedWriteInstruction> buf;
+
 
   // Seed an existing slot with the same direction
   ProcessorContext::WMSlot slot;
@@ -64,9 +65,9 @@ TEST_CASE ("Alg24 chunks into best-matching slot above threshold",
   // Threshold permissive enough with high benefit
   pctx.T_dynamic = 0.2;
   WorkingMemory op;
-  OperationContext ctx (s, pctx, cfg, buf);
+  OperationContext ctx (s, pctx, cfg);
   ctx.SetCompositeScore (0.95);
-  op.Execute (ctx);
+  op.Execute (ctx, cortext::testing::GetNullTransaction ());
 
   REQUIRE (pctx.wm_last_accepted == true);
   REQUIRE (pctx.wm_last_chunked == true);
@@ -86,7 +87,7 @@ TEST_CASE ("Alg24 maintenance decays and removes empty slots",
   cfg.focus = 0.5;
   cfg.sensitivity = 0.5; // cost_per_slot = 0.10
   cfg.stability = 0.5;
-  std::vector<BufferedWriteInstruction> buf;
+
 
   // One slot at t=0 with strength 1.0 → after 10s at 0.1/s → 0
   ProcessorContext::WMSlot slot;
@@ -98,9 +99,9 @@ TEST_CASE ("Alg24 maintenance decays and removes empty slots",
   pctx.T_dynamic = 0.95; // ensure reject to avoid adding strength
 
   WorkingMemory op;
-  OperationContext ctx (s, pctx, cfg, buf);
+  OperationContext ctx (s, pctx, cfg);
   ctx.SetCompositeScore (0.2); // margin negative
-  op.Execute (ctx);
+  op.Execute (ctx, cortext::testing::GetNullTransaction ());
 
   REQUIRE (pctx.wm_slots.size () == 0); // removed after decay to zero
   REQUIRE (pctx.wm_last_accepted == false);
@@ -118,7 +119,7 @@ TEST_CASE ("Alg24 maintenance reduces strength without removal when dt small",
   cfg.focus = 0.5;
   cfg.sensitivity = 0.5; // cost_per_slot = 0.10
   cfg.stability = 0.5;
-  std::vector<BufferedWriteInstruction> buf;
+
 
   ProcessorContext::WMSlot slot;
   slot.embedding = s.embedding;
@@ -129,9 +130,9 @@ TEST_CASE ("Alg24 maintenance reduces strength without removal when dt small",
   pctx.T_dynamic = 0.95; // unused now, but kept for legacy
 
   WorkingMemory op;
-  OperationContext ctx (s, pctx, cfg, buf);
+  OperationContext ctx (s, pctx, cfg);
   ctx.SetCompositeScore (0.2); // margin = 0.2 - gate_threshold(0.5=0.25) = -0.05 < cost → reject
-  op.Execute (ctx);
+  op.Execute (ctx, cortext::testing::GetNullTransaction ());
 
   REQUIRE (pctx.wm_slots.size () == 1);
   const double expected = 1.0 - 0.10 * 5.0;
@@ -148,7 +149,7 @@ TEST_CASE ("Alg24 uses Focus-derived gate_threshold for gating decision",
   Signal s;
   s.embedding = Eigen::VectorXf::Constant (4, 1.0f);
   s.timestamp = 100;
-  std::vector<BufferedWriteInstruction> buf;
+
 
   SECTION ("Low Focus (F=0) has permissive threshold (0.1)")
   {
@@ -161,10 +162,10 @@ TEST_CASE ("Alg24 uses Focus-derived gate_threshold for gating decision",
     // Need margin > cost_total, so use higher benefit
 
     WorkingMemory op;
-    OperationContext ctx (s, pctx, cfg, buf);
+    OperationContext ctx (s, pctx, cfg);
     ctx.SetCompositeScore (0.25); // benefit - threshold = 0.25 - 0.1 = 0.15 > cost
 
-    op.Execute (ctx);
+    op.Execute (ctx, cortext::testing::GetNullTransaction ());
     // With positive margin exceeding cost, should accept
     REQUIRE (pctx.wm_last_accepted == true);
     REQUIRE (pctx.wm_slots.size () == 1);
@@ -179,10 +180,10 @@ TEST_CASE ("Alg24 uses Focus-derived gate_threshold for gating decision",
     cfg.stability = 0.5;
 
     WorkingMemory op;
-    OperationContext ctx (s, pctx, cfg, buf);
+    OperationContext ctx (s, pctx, cfg);
     ctx.SetCompositeScore (0.35); // benefit - threshold = 0.35 - 0.4 = -0.05 < 0
 
-    op.Execute (ctx);
+    op.Execute (ctx, cortext::testing::GetNullTransaction ());
     // Negative margin, should reject
     REQUIRE (pctx.wm_last_accepted == false);
     REQUIRE (pctx.wm_slots.size () == 0);
@@ -197,10 +198,10 @@ TEST_CASE ("Alg24 uses Focus-derived gate_threshold for gating decision",
     cfg.stability = 0.5;
 
     WorkingMemory op;
-    OperationContext ctx (s, pctx, cfg, buf);
+    OperationContext ctx (s, pctx, cfg);
     ctx.SetCompositeScore (0.5); // benefit - threshold = 0.5 - 0.25 = 0.25
 
-    op.Execute (ctx);
+    op.Execute (ctx, cortext::testing::GetNullTransaction ());
     // Positive margin, should accept
     REQUIRE (pctx.wm_last_accepted == true);
     REQUIRE (pctx.wm_slots.size () == 1);
@@ -225,7 +226,7 @@ TEST_CASE ("Alg24 input-based rehearsal boosts slot strength for similarity in "
   cfg.focus = 0.0;       // chunk_threshold = 0.7, rehearsal_threshold = 0.5
   cfg.sensitivity = 0.5; // rehearsal_rate = 1.25
   cfg.stability = 0.5;
-  std::vector<BufferedWriteInstruction> buf;
+
 
   // Seed slot with different vector to get ~0.6 similarity (in rehearsal range)
   ProcessorContext::WMSlot slot;
@@ -248,9 +249,9 @@ TEST_CASE ("Alg24 input-based rehearsal boosts slot strength for similarity in "
   const double before_strength = pctx.wm_slots[0].strength;
 
   WorkingMemory op;
-  OperationContext ctx (s, pctx, cfg, buf);
+  OperationContext ctx (s, pctx, cfg);
   ctx.SetCompositeScore (0.9); // High benefit to pass gate
-  op.Execute (ctx);
+  op.Execute (ctx, cortext::testing::GetNullTransaction ());
 
   // Similarity = dot([0.707, 0.707, 0], [1, 0, 0]) = 0.707
   // At F=0: chunk_threshold = 0.7, rehearsal_threshold = 0.5
@@ -284,7 +285,7 @@ TEST_CASE ("Alg24 rehearsal strength capped at kStrengthMax",
   cfg.focus = 0.0;       // chunk_threshold = 0.7, rehearsal_threshold = 0.5
   cfg.sensitivity = 1.0; // rehearsal_rate = 2.0 (max)
   cfg.stability = 0.5;
-  std::vector<BufferedWriteInstruction> buf;
+
 
   // Seed slot at max strength
   ProcessorContext::WMSlot slot;
@@ -297,9 +298,9 @@ TEST_CASE ("Alg24 rehearsal strength capped at kStrengthMax",
   pctx.wm_slots.push_back (slot);
 
   WorkingMemory op;
-  OperationContext ctx (s, pctx, cfg, buf);
+  OperationContext ctx (s, pctx, cfg);
   ctx.SetCompositeScore (0.9);
-  op.Execute (ctx);
+  op.Execute (ctx, cortext::testing::GetNullTransaction ());
 
   // Strength should still be capped at max
   REQUIRE (pctx.wm_slots[0].strength
@@ -315,7 +316,7 @@ TEST_CASE ("Alg24 rehearsal rate scales with Sensitivity knob",
   s.embedding[1] = 0.8f;
   s.embedding.normalize ();
   s.timestamp = 100;
-  std::vector<BufferedWriteInstruction> buf;
+
 
   // Test with low S (0.0) -> rehearsal_rate = 0.5
   // Test with high S (1.0) -> rehearsal_rate = 2.0
@@ -341,9 +342,9 @@ TEST_CASE ("Alg24 rehearsal rate scales with Sensitivity knob",
     const double before = pctx.wm_slots[0].strength;
 
     WorkingMemory op;
-    OperationContext ctx (s, pctx, cfg, buf);
+    OperationContext ctx (s, pctx, cfg);
     ctx.SetCompositeScore (0.9);
-    op.Execute (ctx);
+    op.Execute (ctx, cortext::testing::GetNullTransaction ());
 
     low_s_boost = pctx.wm_slots[0].strength - before;
   }
@@ -367,9 +368,9 @@ TEST_CASE ("Alg24 rehearsal rate scales with Sensitivity knob",
     const double before = pctx.wm_slots[0].strength;
 
     WorkingMemory op;
-    OperationContext ctx (s, pctx, cfg, buf);
+    OperationContext ctx (s, pctx, cfg);
     ctx.SetCompositeScore (0.9);
-    op.Execute (ctx);
+    op.Execute (ctx, cortext::testing::GetNullTransaction ());
 
     high_s_boost = pctx.wm_slots[0].strength - before;
   }
@@ -394,7 +395,7 @@ TEST_CASE ("Alg24 no input-based rehearsal when similarity below "
   cfg.focus = 0.0;       // chunk_threshold = 0.7, rehearsal_threshold = 0.5
   cfg.sensitivity = 0.5; // rehearsal_rate = 1.25
   cfg.stability = 0.5;
-  std::vector<BufferedWriteInstruction> buf;
+
 
   ProcessorContext::WMSlot slot;
   slot.embedding = Eigen::VectorXf::Zero (3);
@@ -408,9 +409,9 @@ TEST_CASE ("Alg24 no input-based rehearsal when similarity below "
   const double before_strength = pctx.wm_slots[0].strength;
 
   WorkingMemory op;
-  OperationContext ctx (s, pctx, cfg, buf);
+  OperationContext ctx (s, pctx, cfg);
   ctx.SetCompositeScore (0.9);
-  op.Execute (ctx);
+  op.Execute (ctx, cortext::testing::GetNullTransaction ());
 
   // Similarity = 0 (orthogonal), below rehearsal_threshold of 0.5
   // Original slot should NOT get rehearsal boost (strength unchanged from
@@ -434,7 +435,7 @@ TEST_CASE ("Alg24 retrieval-based rehearsal boosts WM slot matching retrieved "
   cfg.focus = 0.0;       // chunk_threshold = 0.7
   cfg.sensitivity = 0.5; // rehearsal_rate = 1.25
   cfg.stability = 0.5;
-  std::vector<BufferedWriteInstruction> buf;
+
 
   // Seed WM slot
   ProcessorContext::WMSlot slot;
@@ -456,10 +457,10 @@ TEST_CASE ("Alg24 retrieval-based rehearsal boosts WM slot matching retrieved "
   retrieved.emplace (1LL, match_vec);
 
   WorkingMemory op;
-  OperationContext ctx (s, pctx, cfg, buf);
+  OperationContext ctx (s, pctx, cfg);
   ctx.SetCompositeScore (0.9);
   ctx.SetRetrievedMemoryEmbeddings (std::move (retrieved));
-  op.Execute (ctx);
+  op.Execute (ctx, cortext::testing::GetNullTransaction ());
 
   // Retrieved memory matches WM slot with similarity = 1.0 >= chunk_threshold
   // Retrieval-based rehearsal should boost the slot
@@ -480,7 +481,7 @@ TEST_CASE ("Alg24 retrieval-based rehearsal skips non-matching WM slots",
   cfg.focus = 0.0;       // chunk_threshold = 0.7
   cfg.sensitivity = 0.5; // rehearsal_rate = 1.25
   cfg.stability = 0.5;
-  std::vector<BufferedWriteInstruction> buf;
+
 
   // Seed WM slot at [1, 0, 0]
   ProcessorContext::WMSlot slot;
@@ -502,10 +503,10 @@ TEST_CASE ("Alg24 retrieval-based rehearsal skips non-matching WM slots",
   retrieved.emplace (1LL, ortho_vec);
 
   WorkingMemory op;
-  OperationContext ctx (s, pctx, cfg, buf);
+  OperationContext ctx (s, pctx, cfg);
   ctx.SetCompositeScore (0.9);
   ctx.SetRetrievedMemoryEmbeddings (std::move (retrieved));
-  op.Execute (ctx);
+  op.Execute (ctx, cortext::testing::GetNullTransaction ());
 
   // Signal is orthogonal to slot → similarity = 0 < rehearsal_threshold = 0.5
   // Retrieved memory is orthogonal to slot → similarity = 0 < chunk_threshold = 0.7
@@ -541,7 +542,7 @@ TEST_CASE ("Alg24 eviction prioritizes weak old slots over strong recent ones",
 
   cfg.focus = 0.0;
   cfg.sensitivity = 1.0;
-  std::vector<BufferedWriteInstruction> buf;
+
 
   // Slot 0: Weak (strength=0.5) and old (last_ts=50, 150s elapsed)
   ProcessorContext::WMSlot slot0;
@@ -568,9 +569,9 @@ TEST_CASE ("Alg24 eviction prioritizes weak old slots over strong recent ones",
   const auto slot1_emb = slot1.embedding;
 
   WorkingMemory op;
-  OperationContext ctx (s, pctx, cfg, buf);
+  OperationContext ctx (s, pctx, cfg);
   ctx.SetCompositeScore (0.9); // Ensure acceptance
-  op.Execute (ctx);
+  op.Execute (ctx, cortext::testing::GetNullTransaction ());
 
   // Should have 2 slots (capacity), one evicted and one new added
   REQUIRE (pctx.wm_slots.size () == 2);
@@ -616,7 +617,7 @@ TEST_CASE ("Alg24 high-T increases slot dedication resistance to eviction",
   s.embedding[2] = 1.0f;
   s.embedding.normalize ();
   s.timestamp = 200;
-  std::vector<BufferedWriteInstruction> buf;
+
 
   // Test with T=0 (low dedication_strength = 0.3)
   // Use timestamps close together to avoid decay removing slots
@@ -648,9 +649,9 @@ TEST_CASE ("Alg24 high-T increases slot dedication resistance to eviction",
     pctx.wm_slots.push_back (slot1);
 
     WorkingMemory op;
-    OperationContext ctx (s, pctx, cfg, buf);
+    OperationContext ctx (s, pctx, cfg);
     ctx.SetCompositeScore (0.9);
-    op.Execute (ctx);
+    op.Execute (ctx, cortext::testing::GetNullTransaction ());
 
     // With T=0: dedication_strength = 0.3
     // dedication = (2.0 - 0.75) * 0.3 / 10.0 ≈ 0.0375
@@ -686,9 +687,9 @@ TEST_CASE ("Alg24 high-T increases slot dedication resistance to eviction",
     pctx.wm_slots.push_back (slot1);
 
     WorkingMemory op;
-    OperationContext ctx (s, pctx, cfg, buf);
+    OperationContext ctx (s, pctx, cfg);
     ctx.SetCompositeScore (0.9);
-    op.Execute (ctx);
+    op.Execute (ctx, cortext::testing::GetNullTransaction ());
 
     // With T=1: dedication_strength = 0.9
     // dedication = (2.0 - 0.75) * 0.9 / 10.0 ≈ 0.1125
@@ -717,7 +718,7 @@ TEST_CASE ("Alg24 recent slots resist eviction regardless of strength",
   cfg.focus = 0.0;
   cfg.sensitivity = 1.0; // capacity = 2
   cfg.stability = 0.5;   // dedication_strength = 0.6
-  std::vector<BufferedWriteInstruction> buf;
+
 
   // Slot 0: Weaker (strength=1.0) but very recent (last_ts=199, 1s elapsed)
   ProcessorContext::WMSlot slot0;
@@ -749,9 +750,9 @@ TEST_CASE ("Alg24 recent slots resist eviction regardless of strength",
   // Slot 1 has MUCH higher eviction score → gets evicted
 
   WorkingMemory op;
-  OperationContext ctx (s, pctx, cfg, buf);
+  OperationContext ctx (s, pctx, cfg);
   ctx.SetCompositeScore (0.9);
-  op.Execute (ctx);
+  op.Execute (ctx, cortext::testing::GetNullTransaction ());
 
   REQUIRE (pctx.wm_slots.size () == 2);
 

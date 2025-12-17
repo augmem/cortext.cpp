@@ -1,4 +1,5 @@
 #include <catch2/catch_approx.hpp>
+#include "test_helpers.hpp"
 #include <catch2/catch_test_macros.hpp>
 #include <cortext/core/knobs.hpp>
 #include <cortext/operations/threshold.hpp>
@@ -17,7 +18,7 @@ TEST_CASE ("UpdateThreshold basic adaptation toward p90",
   cfg.focus = 0.5;
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;
-  std::vector<BufferedWriteInstruction> buf;
+
 
   // Start with moderate uncertainty to give non-zero experiential mass.
   pctx.u_t = 1.0;
@@ -29,11 +30,11 @@ TEST_CASE ("UpdateThreshold basic adaptation toward p90",
       = cortext::core::TPrior (cfg.focus, cfg.sensitivity, cfg.stability);
   for (int i = 0; i < 25; ++i)
     {
-      OperationContext ctx (s, pctx, cfg, buf);
+      OperationContext ctx (s, pctx, cfg);
       ctx.SetCompositeScore (0.9);
       // Provide increasing timestamps to drive Δt
       s.timestamp += 1; // 1s per signal
-      op.Execute (ctx);
+      op.Execute (ctx, cortext::testing::GetNullTransaction ());
     }
 
   REQUIRE (pctx.T_dynamic > t_prior);
@@ -53,7 +54,7 @@ TEST_CASE ("Alg8 ΔT_homeo increases threshold when observed rate > target",
   cfg.focus = 0.5;
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;
-  std::vector<BufferedWriteInstruction> buf;
+
 
   // Set a modest rate_target to be exceeded by fast timestamps
   pctx.rate_target_prior = 0.5; // writes/min
@@ -66,9 +67,9 @@ TEST_CASE ("Alg8 ΔT_homeo increases threshold when observed rate > target",
   for (int i = 0; i < 10; ++i)
     {
       s.timestamp += 1; // assume 1 unit = 0.2s; emulate via multiple updates
-      OperationContext ctx (s, pctx, cfg, buf);
+      OperationContext ctx (s, pctx, cfg);
       ctx.SetCompositeScore (0.5);
-      op.Execute (ctx);
+      op.Execute (ctx, cortext::testing::GetNullTransaction ());
       // emulate 0.2s by calling multiple times per second; the α smoothing
       // will handle it
     }
@@ -92,7 +93,7 @@ TEST_CASE ("Alg8 ΔT_homeo decreases threshold when observed rate < target",
   cfg.focus = 0.5;
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;
-  std::vector<BufferedWriteInstruction> buf;
+
 
   // Set a higher target; slow timestamps will be below target
   pctx.rate_target_prior = 5.0; // writes/min
@@ -106,9 +107,9 @@ TEST_CASE ("Alg8 ΔT_homeo decreases threshold when observed rate < target",
   for (int i = 0; i < 6; ++i)
     {
       s.timestamp += 10;
-      OperationContext ctx (s, pctx, cfg, buf);
+      OperationContext ctx (s, pctx, cfg);
       ctx.SetCompositeScore (0.5);
-      op.Execute (ctx);
+      op.Execute (ctx, cortext::testing::GetNullTransaction ());
     }
   // Expect movement opposite to fast case; not necessarily strictly less due
   // to prior blend but should not explode and must stay within rails.

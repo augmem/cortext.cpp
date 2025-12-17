@@ -26,13 +26,12 @@ public:
   }
 
   void
-  Execute (OperationContext &ctx) const override
+  Execute (OperationContext &ctx, Transaction &tx) const override
   {
-    auto *store = ctx.GetStore ();
     for (const auto &[id, emb] : embeddings_)
       {
         std::vector<float> vec (emb.data (), emb.data () + emb.size ());
-        store->Execute (
+        tx.Execute (
             "INSERT OR REPLACE INTO embeddings(embedding_id, embedding, type, "
             "strength, use_frequency, stability, connectivity, drift_mag, "
             "influence, sustained_influence, contextual_gain, redundancy, "
@@ -58,7 +57,7 @@ public:
   }
 
   void
-  Execute (OperationContext &ctx) const override
+  Execute (OperationContext &ctx, Transaction & /*tx*/) const override
   {
     auto &pctx = ctx.GetProcessorContext ();
     pctx.recent_context_embeddings.clear ();

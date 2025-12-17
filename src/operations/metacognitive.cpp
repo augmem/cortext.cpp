@@ -9,7 +9,7 @@ namespace cortext::operations
 {
 
 void
-MetacognitiveMonitoring::Execute (OperationContext &context) const
+MetacognitiveMonitoring::Execute (OperationContext &context, Transaction &tx) const
 {
   const auto &cfg = context.GetConfig ();
   const double F = core::Clamp01 (cfg.focus);

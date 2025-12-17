@@ -1,4 +1,5 @@
 #include <catch2/catch_approx.hpp>
+#include "test_helpers.hpp"
 #include <catch2/catch_test_macros.hpp>
 #include <cortext/core/algorithms.hpp>
 #include <cortext/core/knobs.hpp>
@@ -20,13 +21,13 @@ TEST_CASE ("Alg25 detects TOT when FOK high and retrieval low",
   cfg.focus = 0.8; // higher focus
   cfg.sensitivity = 0.2;
   cfg.stability = 0.7;
-  std::vector<BufferedWriteInstruction> buf;
+
 
   MetacognitiveMonitoring op;
-  OperationContext ctx (s, pctx, cfg, buf);
+  OperationContext ctx (s, pctx, cfg);
   ctx.SetFeelingOfKnowing (0.90); // high FOK
   ctx.SetCompositeScore (0.20);   // low retrieval
-  op.Execute (ctx);
+  op.Execute (ctx, cortext::testing::GetNullTransaction ());
 
   const double tot_fok_cut = cortext::core::TOTFokCutoff (cfg.focus);
   const double tot_ret_cut = cortext::core::TOTRetrievalCutoff (cfg.focus);
@@ -46,14 +47,14 @@ TEST_CASE ("Alg25 detects unknown when retrieval below threshold",
   cfg.focus = 0.5;
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;
-  std::vector<BufferedWriteInstruction> buf;
+
 
   MetacognitiveMonitoring op;
-  OperationContext ctx (s, pctx, cfg, buf);
+  OperationContext ctx (s, pctx, cfg);
   const double unk = cortext::core::UnknownThreshold (cfg.focus);
   ctx.SetFeelingOfKnowing (0.10);
   ctx.SetCompositeScore (unk - 0.05);
-  op.Execute (ctx);
+  op.Execute (ctx, cortext::testing::GetNullTransaction ());
   REQUIRE (ctx.GetMetacogUnknownDetected () == true);
 }
 
@@ -68,13 +69,13 @@ TEST_CASE ("Alg25 exposes parameter derivations per algorithms.md",
   cfg.focus = 0.6;
   cfg.sensitivity = 0.3;
   cfg.stability = 0.8;
-  std::vector<BufferedWriteInstruction> buf;
+
 
   MetacognitiveMonitoring op;
-  OperationContext ctx (s, pctx, cfg, buf);
+  OperationContext ctx (s, pctx, cfg);
   ctx.SetFeelingOfKnowing (0.4);
   ctx.SetCompositeScore (0.7);
-  op.Execute (ctx);
+  op.Execute (ctx, cortext::testing::GetNullTransaction ());
 
   const double expected_fok_th = cortext::core::FOKThreshold (cfg.focus);
   REQUIRE (ctx.GetMetacogFOKThreshold ()

@@ -16,7 +16,7 @@ constexpr double kErrMax = 0.5;     // Normalization ceiling
 } // namespace
 
 void
-UpdateEmbeddingPredictionError::Execute (OperationContext &context) const
+UpdateEmbeddingPredictionError::Execute (OperationContext &context, Transaction &tx) const
 {
   auto &p_ctx = context.GetProcessorContext ();
   const auto &x_t = context.GetSignal ().embedding;

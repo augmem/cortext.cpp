@@ -12,7 +12,7 @@ class InitializeFocusPriors : public IOperation
 {
 public:
   /// @brief Calculates and sets the focus priors in the ProcessorContext.
-  void Execute (OperationContext &context) const override;
+  void Execute (OperationContext &context, Transaction &tx) const override;
 };
 
 /// @brief Implements Algorithm 2: Dynamic Update per Signal (Focus).
@@ -23,7 +23,7 @@ class UpdateFocus : public IOperation
 {
 public:
   /// @brief Executes the dynamic focus update logic.
-  void Execute (OperationContext &context) const override;
+  void Execute (OperationContext &context, Transaction &tx) const override;
 };
 
 } // namespace cortext::operations

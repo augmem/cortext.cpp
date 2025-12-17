@@ -1,6 +1,5 @@
 #include "cortext/operations/emotion_cascade.hpp"
 
-#include "cortext/buffered_write_instruction.hpp"
 #include "cortext/core/algorithms.hpp"
 #include "cortext/core/knobs.hpp"
 #include "cortext/processor/operation_context.hpp"
@@ -26,15 +25,12 @@ EmotionCascadeParams::FromKnobs (double /*F*/, double S, double /*T*/)
 namespace
 {
 
-/// @brief Adds a buffered write instruction to the context.
+/// @brief Adds a write instruction to the transaction.
 void
-Add (OperationContext &ctx, const std::string &q,
+Add (Transaction &tx, const std::string &q,
      const std::vector<std::any> &p = {})
 {
-  BufferedWriteInstruction op;
-  op.query = q;
-  op.params = p;
-  ctx.AddWriteInstruction (std::move (op));
+  tx.Execute (q, p);
 }
 
 /// @brief Structure for emotional source memories.
@@ -237,7 +233,7 @@ FindCascadeNeighbors (Store *store, long long source_embedding_id, int max_depth
 } // namespace
 
 void
-PropagateEmotionalCascade::Execute (OperationContext &context) const
+PropagateEmotionalCascade::Execute (OperationContext &context, Transaction &tx) const
 {
   Store *store = context.GetStore ();
   if (!store)
@@ -305,7 +301,7 @@ PropagateEmotionalCascade::Execute (OperationContext &context) const
 
           // Update or insert emotional tag for neighbor
           // Use INSERT OR REPLACE to update if exists, preserving max intensity
-          Add (context,
+          Add (tx,
                "INSERT INTO emotional_tags "
                "(embedding_id, flashbulb, intensity, arousal, valence, "
                " half_life_bonus, detail_suppression, gist_components, "

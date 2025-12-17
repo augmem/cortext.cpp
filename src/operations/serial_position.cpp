@@ -7,7 +7,7 @@ namespace cortext::operations
 {
 
 void
-ApplySerialPositionEffects::Execute (OperationContext &context) const
+ApplySerialPositionEffects::Execute (OperationContext &context, Transaction &tx) const
 {
   const auto &cfg = context.GetConfig ();
   const double F = cfg.focus;

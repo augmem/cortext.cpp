@@ -1,4 +1,5 @@
 // tests/operations_goal_alignment.test.cpp
+#include "test_helpers.hpp"
 #include <any>
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
@@ -15,10 +16,13 @@ using cortext::operations::Metric;
 
 namespace
 {
+constexpr int kEmbeddingDim = 256;
+
+/// @brief Creates a 256D unit vector with first two dimensions set.
 static Eigen::VectorXf
-Unit2 (float x, float y)
+Unit256 (float x, float y)
 {
-  Eigen::VectorXf v (2);
+  Eigen::VectorXf v = Eigen::VectorXf::Zero (kEmbeddingDim);
   v[0] = x;
   v[1] = y;
   const float n = v.norm ();
@@ -44,34 +48,28 @@ TEST_CASE ("Alg33 computes goal alignment from goal neighborhood",
   auto unique_store = SQLiteStore::Create (":memory:");
   auto store = std::shared_ptr<Store> (std::move (unique_store));
 
-  store->Execute ("CREATE TABLE IF NOT EXISTS embeddings ("
-                  "embedding_id INTEGER PRIMARY KEY,"
-                  "embedding BLOB"
-                  ");");
-  store->Execute ("CREATE TABLE IF NOT EXISTS graph_nodes ("
-                  "node_id TEXT PRIMARY KEY,"
-                  "type TEXT NOT NULL,"
-                  "label TEXT,"
-                  "embedding_id INTEGER,"
-                  "metadata TEXT,"
-                  "created_at INTEGER"
-                  ");");
-  store->Execute ("CREATE TABLE IF NOT EXISTS graph_edges ("
-                  "source_id TEXT NOT NULL,"
-                  "target_id TEXT NOT NULL,"
-                  "edge_type TEXT NOT NULL,"
-                  "weight REAL NOT NULL DEFAULT 1.0,"
-                  "decay_rate REAL,"
-                  "last_reinforced INTEGER,"
-                  "PRIMARY KEY (source_id, target_id, edge_type)"
-                  ");");
-  store->Execute ("CREATE TABLE IF NOT EXISTS goal_nodes (node_id TEXT PRIMARY KEY);");
+  // Initialize core schema
+  cortext::testing::InitializeCoreSchema (*store);
+
+  // Create 256D embedding vectors
+  Eigen::VectorXf emb1 = Unit256 (1.0f, 0.0f);
+  Eigen::VectorXf emb2 = Unit256 (0.0f, 1.0f);
+  std::vector<float> emb1_vec (emb1.data (), emb1.data () + emb1.size ());
+  std::vector<float> emb2_vec (emb2.data (), emb2.data () + emb2.size ());
 
   // Two embeddings in the neighborhood: goal (id=1) and neighbor (id=2).
-  store->Execute ("INSERT INTO embeddings(embedding_id, embedding) VALUES (?,?)",
-                  { 1LL, std::vector<float>{ 1.0f, 0.0f } });
-  store->Execute ("INSERT INTO embeddings(embedding_id, embedding) VALUES (?,?)",
-                  { 2LL, std::vector<float>{ 0.0f, 1.0f } });
+  store->Execute ("INSERT INTO embeddings(embedding_id, embedding, type, strength, "
+                  "use_frequency, stability, connectivity, drift_mag, influence, "
+                  "sustained_influence, contextual_gain, redundancy, pre_activation, "
+                  "lability_state, suppression_count) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                  { 1LL, emb1_vec, std::string ("goal"), 1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0,
+                    0.0, 0.0, 0.0, 0.0, 0LL });
+  store->Execute ("INSERT INTO embeddings(embedding_id, embedding, type, strength, "
+                  "use_frequency, stability, connectivity, drift_mag, influence, "
+                  "sustained_influence, contextual_gain, redundancy, pre_activation, "
+                  "lability_state, suppression_count) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                  { 2LL, emb2_vec, std::string ("memory"), 1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0,
+                    0.0, 0.0, 0.0, 0.0, 0LL });
 
   store->Execute ("INSERT INTO graph_nodes(node_id, type, embedding_id) "
                   "VALUES (?,?,?)",
@@ -90,7 +88,7 @@ TEST_CASE ("Alg33 computes goal alignment from goal neighborhood",
   auto ops = std::make_unique<OperationSet> (std::make_unique<ComputeGoalAlignment> ());
   SignalProcessor processor (cfg, store, std::move (ops));
 
-  auto out = processor.Process (MakeSignal (Unit2 (1.0f, 0.0f)));
+  auto out = processor.Process (MakeSignal (Unit256 (1.0f, 0.0f)));
 
   // Metric should be present and fairly high (mean of [1,0] and [0,1] has cos 0.707..).
   auto it = out.metrics.find (Metric::goal_alignment);

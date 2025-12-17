@@ -1,4 +1,5 @@
 // tests/operations_emotion_cascade.test.cpp
+#include "test_helpers.hpp"
 #include <any>
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
@@ -18,11 +19,13 @@ using cortext::operations::PropagateEmotionalCascade;
 
 namespace
 {
+constexpr int kEmbeddingDim = 256;
+
 static Signal
 MakeSignal (uint64_t ts)
 {
   Signal s;
-  s.embedding = Eigen::VectorXf::Ones (4);
+  s.embedding = Eigen::VectorXf::Ones (kEmbeddingDim);
   s.timestamp = ts;
   s.source_id = "test";
   return s;
@@ -61,40 +64,8 @@ TEST_CASE ("PropagateEmotionalCascade propagates through graph edges",
   auto unique_store = SQLiteStore::Create (":memory:");
   auto store = std::shared_ptr<Store> (std::move (unique_store));
 
-  // Create required tables
-  store->Execute ("CREATE TABLE IF NOT EXISTS emotional_tags ("
-                  "  embedding_id INTEGER PRIMARY KEY,"
-                  "  flashbulb INTEGER NOT NULL DEFAULT 0,"
-                  "  intensity REAL,"
-                  "  arousal REAL,"
-                  "  valence REAL,"
-                  "  half_life_bonus REAL,"
-                  "  detail_suppression REAL,"
-                  "  gist_components INTEGER,"
-                  "  cascade_radius INTEGER,"
-                  "  cascade_decay REAL,"
-                  "  flashbulb_threshold_eff REAL,"
-                  "  ts INTEGER"
-                  ");");
-
-  store->Execute ("CREATE TABLE IF NOT EXISTS graph_nodes ("
-                  "  node_id TEXT PRIMARY KEY,"
-                  "  type TEXT NOT NULL,"
-                  "  label TEXT,"
-                  "  embedding_id INTEGER,"
-                  "  metadata TEXT,"
-                  "  created_at INTEGER"
-                  ");");
-
-  store->Execute ("CREATE TABLE IF NOT EXISTS graph_edges ("
-                  "  source_id TEXT NOT NULL,"
-                  "  target_id TEXT NOT NULL,"
-                  "  edge_type TEXT NOT NULL,"
-                  "  weight REAL NOT NULL DEFAULT 1.0,"
-                  "  decay_rate REAL,"
-                  "  last_reinforced INTEGER,"
-                  "  PRIMARY KEY (source_id, target_id, edge_type)"
-                  ");");
+  // Initialize core schema
+  cortext::testing::InitializeCoreSchema (*store);
 
   // Create graph nodes
   store->Execute ("INSERT INTO graph_nodes (node_id, type, created_at) VALUES (?, ?, ?)",

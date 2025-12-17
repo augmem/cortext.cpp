@@ -1,6 +1,6 @@
 #include "cortext/operations/concept_detection.hpp"
 
-#include "cortext/buffered_write_instruction.hpp"
+#include "cortext/store/store.hpp"
 #include "cortext/core/algorithms.hpp"
 #include "cortext/core/knobs.hpp"
 #include "cortext/core/utils.hpp"
@@ -28,15 +28,12 @@ ConceptDetectionParams::FromKnobs (double /*F*/, double /*S*/, double T)
 namespace
 {
 
-/// @brief Adds a buffered write instruction to the context.
+/// @brief Executes a write query on the transaction.
 void
-Add (OperationContext &ctx, const std::string &q,
+Add (Transaction &tx, const std::string &q,
      const std::vector<std::any> &p = {})
 {
-  BufferedWriteInstruction op;
-  op.query = q;
-  op.params = p;
-  ctx.AddWriteInstruction (std::move (op));
+  tx.Execute (q, p);
 }
 
 /// @brief Structure for candidate concepts.
@@ -182,7 +179,7 @@ ComputeConceptCentroid (Store *store,
 } // namespace
 
 void
-DetectConceptNodes::Execute (OperationContext &context) const
+DetectConceptNodes::Execute (OperationContext &context, Transaction &tx) const
 {
   Store *store = context.GetStore ();
   if (!store)
@@ -254,10 +251,10 @@ DetectConceptNodes::Execute (OperationContext &context) const
           = std::string ("INSERT INTO embeddings (")
             + store::kEmbeddingsReconsolidateColumns + ") VALUES ("
             + store::kEmbeddingsConceptDefaults + ")";
-      Add (context, concept_sql, { embedding_id, centroid_vec });
+      Add (tx, concept_sql, { embedding_id, centroid_vec });
 
       // Create concept node in graph_nodes
-      Add (context,
+      Add (tx,
            "INSERT OR IGNORE INTO graph_nodes "
            "(node_id, type, label, embedding_id, created_at) "
            "VALUES (?1, 'concept', ?2, ?3, ?4)",
@@ -265,7 +262,7 @@ DetectConceptNodes::Execute (OperationContext &context) const
 
       // Create 'generalizes' edges from concept to related entities
       const std::string entity_node_id = "entity:" + c.entity_name;
-      Add (context,
+      Add (tx,
            "INSERT OR REPLACE INTO graph_edges "
            "(source_id, target_id, edge_type, weight, last_reinforced) "
            "VALUES (?1, ?2, 'generalizes', ?3, ?4)",
@@ -275,7 +272,7 @@ DetectConceptNodes::Execute (OperationContext &context) const
       // Link concept to all summaries it appears in
       for (const auto &sid : c.summary_ids)
         {
-          Add (context,
+          Add (tx,
                "INSERT OR REPLACE INTO graph_edges "
                "(source_id, target_id, edge_type, weight, last_reinforced) "
                "VALUES (?1, ?2, 'abstracted_from', 1.0, ?3)",
