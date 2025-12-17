@@ -257,3 +257,171 @@ TEST_CASE ("Algorithm 18 counts retrieval when not used",
   REQUIRE (retrieved == 1LL);
   REQUIRE (used == 0LL);
 }
+
+TEST_CASE ("Algorithm 14 applies exponential decay based on elapsed time",
+           "[op14][decay]")
+{
+  // Test that strength follows half-life semantics:
+  // With T=0, half_life = 120s, so after 120s the decay_factor should be 0.5
+
+  auto unique_store = cortext::SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<cortext::Store> (std::move (unique_store));
+
+  // T=0 gives half_life=120s; S=0 removes reinforcement; F=0 removes influence
+  SignalProcessor::Config cfg;
+  cfg.focus = 0.0;
+  cfg.sensitivity = 0.0;
+  cfg.stability = 0.0;
+
+  // Create processor with a fresh op set for each signal
+  // Use used=true to ensure row is created (INSERT requires used || contextual_gain)
+  auto make_ops = [] () {
+    OperationContext::MemoryUsageEvent ev{};
+    ev.embedding_id = 100LL;
+    ev.used = true;
+    ev.contextual_gain = 0.0; // Neutral gain to avoid influence term
+    auto set_events = std::make_unique<SetUsageEventsOp> (
+        std::vector<OperationContext::MemoryUsageEvent>{ ev });
+    auto update_strength
+        = std::make_unique<cortext::operations::UpdateMemoryStrength> ();
+    return std::make_unique<cortext::OperationSet> (
+        std::move (set_events), std::move (update_strength));
+  };
+
+  // First signal at t=0: creates row with strength=1.0, last_strength_update_ts=0
+  {
+    cortext::SignalProcessor processor (cfg, store, make_ops ());
+    auto signal = MakeSignal (4, 0);
+    processor.Process (signal);
+    processor.Flush ();
+  }
+
+  // Verify initial strength
+  auto rows = store->Execute (
+      "SELECT strength, last_strength_update_ts FROM embeddings_meta "
+      "WHERE embedding_id = ?",
+      { 100LL });
+  REQUIRE (rows.size () == 1);
+  const double initial_strength
+      = std::any_cast<double> (rows[0].at ("strength"));
+  REQUIRE (initial_strength >= 0.99);
+  REQUIRE (initial_strength <= 1.01);
+
+  // Second signal at t=120000ms (120 seconds = one half-life for T=0)
+  {
+    cortext::SignalProcessor processor (cfg, store, make_ops ());
+    auto signal = MakeSignal (4, 120000);
+    processor.Process (signal);
+    processor.Flush ();
+  }
+
+  // Verify decayed strength: should be approximately 0.5 (one half-life)
+  rows = store->Execute (
+      "SELECT strength, last_strength_update_ts FROM embeddings_meta "
+      "WHERE embedding_id = ?",
+      { 100LL });
+  REQUIRE (rows.size () == 1);
+  const double decayed_strength
+      = std::any_cast<double> (rows[0].at ("strength"));
+  // decay_factor = exp(-ln(2)/120 * 120) = exp(-ln(2)) = 0.5
+  // Allow 10% tolerance for floating point and any minor numerical effects
+  REQUIRE (decayed_strength >= 0.45);
+  REQUIRE (decayed_strength <= 0.55);
+}
+
+TEST_CASE ("Algorithm 14 no decay when delta_t is zero", "[op14][decay]")
+{
+  // When two updates happen at the same timestamp, decay_factor = exp(0) = 1.0
+
+  auto unique_store = cortext::SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<cortext::Store> (std::move (unique_store));
+
+  // T=0 gives fastest decay (half_life=120s); S=0 and F=0 remove reinforcement
+  SignalProcessor::Config cfg;
+  cfg.focus = 0.0;
+  cfg.sensitivity = 0.0;
+  cfg.stability = 0.0;
+
+  // Use used=true to ensure row is created
+  auto make_ops = [] () {
+    OperationContext::MemoryUsageEvent ev{};
+    ev.embedding_id = 200LL;
+    ev.used = true;
+    ev.contextual_gain = 0.0;
+    auto set_events = std::make_unique<SetUsageEventsOp> (
+        std::vector<OperationContext::MemoryUsageEvent>{ ev });
+    auto update_strength
+        = std::make_unique<cortext::operations::UpdateMemoryStrength> ();
+    return std::make_unique<cortext::OperationSet> (
+        std::move (set_events), std::move (update_strength));
+  };
+
+  // First signal at t=1000ms
+  {
+    cortext::SignalProcessor processor (cfg, store, make_ops ());
+    auto signal = MakeSignal (4, 1000);
+    processor.Process (signal);
+    processor.Flush ();
+  }
+
+  auto rows = store->Execute ("SELECT strength FROM embeddings_meta "
+                              "WHERE embedding_id = ?",
+                              { 200LL });
+  REQUIRE (rows.size () == 1);
+  const double strength_after_first
+      = std::any_cast<double> (rows[0].at ("strength"));
+
+  // Second signal at same timestamp t=1000ms
+  {
+    cortext::SignalProcessor processor (cfg, store, make_ops ());
+    auto signal = MakeSignal (4, 1000);
+    processor.Process (signal);
+    processor.Flush ();
+  }
+
+  rows = store->Execute ("SELECT strength FROM embeddings_meta "
+                         "WHERE embedding_id = ?",
+                         { 200LL });
+  REQUIRE (rows.size () == 1);
+  const double strength_after_second
+      = std::any_cast<double> (rows[0].at ("strength"));
+
+  // With zero time delta, decay_factor = 1.0, so strength should be unchanged
+  // (within floating point tolerance)
+  REQUIRE (std::abs (strength_after_second - strength_after_first) < 0.01);
+}
+
+TEST_CASE ("Algorithm 14 initializes last_strength_update_ts on INSERT",
+           "[op14][decay]")
+{
+  auto unique_store = cortext::SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<cortext::Store> (std::move (unique_store));
+
+  SignalProcessor::Config cfg;
+  cfg.focus = 0.5;
+  cfg.sensitivity = 0.5;
+  cfg.stability = 0.5;
+
+  auto set_events = std::make_unique<SetUsageEventsOp> (
+      std::vector<OperationContext::MemoryUsageEvent>{ { 300LL, true } });
+  auto update_strength
+      = std::make_unique<cortext::operations::UpdateMemoryStrength> ();
+  auto ops = std::make_unique<cortext::OperationSet> (
+      std::move (set_events), std::move (update_strength));
+
+  cortext::SignalProcessor processor (cfg, store, std::move (ops));
+
+  // Process at timestamp 5000ms
+  auto signal = MakeSignal (4, 5000);
+  processor.Process (signal);
+  processor.Flush ();
+
+  auto rows
+      = store->Execute ("SELECT last_strength_update_ts FROM embeddings_meta "
+                        "WHERE embedding_id = ?",
+                        { 300LL });
+  REQUIRE (rows.size () == 1);
+  const auto last_ts
+      = std::any_cast<long long> (rows[0].at ("last_strength_update_ts"));
+  REQUIRE (last_ts == 5000LL);
+}

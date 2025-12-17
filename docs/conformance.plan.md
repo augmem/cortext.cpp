@@ -1,225 +1,399 @@
-# Cortext Paper Conformance Plan
+# Cortext Algorithm Conformance Plan
 
-This document outlines the implementation work required to achieve full conformance with the Cortext paper specification (`docs/research/paper.md`).
+This document outlines the phased remediation plan for gaps identified between the codebase implementation and the algorithmic specification in `docs/research/algorithms.md`.
 
-**Baseline Assessment:**
-- Implementation Completeness: 99% (Phases 1-4 complete)
-- Formula Accuracy: 99%
-- Architectural Alignment: 99%
+## Summary
 
----
-
-## Phase 1: Streaming Pacing Enhancement (MEDIUM Priority)
-
-**Goal:** Implement full token-level streaming pacing per Section 10.4 of the paper.
-
-**Current State:** ✅ COMPLETE - Full implementation conforms to Section 10.4 specification.
-
-**Paper Reference:** Section 10.4 (Streaming Pacing)
-
-### Todos
-
-- [x] **1.1** Add token-level drift accumulation tracking
-  - File: `src/operations/drift_accumulation.cpp`
-  - Implement: `drift_accum += dist(x_t, x_last_check)` per token
-  - Track `x_last_check` embedding in ProcessorContext
-  - **Status:** Already implemented
-
-- [x] **1.2** Implement `max_wait_drift(F)` gate logic
-  - File: `src/operations/streaming_pacing.cpp`
-  - Formula: `max_wait_drift(F) = lerp(2.0, 0.5, F)`
-  - Trigger retrieval check when `drift_accum > max_wait_drift(F)`
-  - **Status:** Already implemented in `core::MaxWaitDrift()` and used in `CheckStreamingPacing`
-
-- [x] ~~**1.3** Add `max_wait_tokens(F)` fallback timer~~ **REMOVED - Not in paper spec**
-  - Note: Section 10.4 only specifies embedding drift-based pacing, not token counting
-  - `MaxWaitTokens(F)` exists in knobs.hpp but is not part of the paper specification
-
-- [x] **1.4** Integrate pacing with interrupt gate
-  - File: `src/operations/interrupt_gate.cpp`
-  - Connect drift accumulation reset on successful interrupt
-  - Track `cumulative_drift_since_last_interrupt` for refractory calculation
-  - **Status:** Already implemented via `drift_at_last_interrupt` in `ComputeMniGateDecision`
-
-- [x] **1.5** Add streaming pacing tests
-  - File: `tests/operations_streaming_pacing.test.cpp`
-  - Test drift accumulation across token sequences
-  - Test integration with interrupt gate
-  - **Status:** 8 comprehensive test cases already exist
+| Phase | Focus | Gaps | Effort |
+|-------|-------|------|--------|
+| 1 | Critical Memory Decay | 1 | High |
+| 2 | Interrupt Gate Corrections | 4 | Medium |
+| 3 | Core Algorithm Fixes | 3 | Medium |
+| 4 | Metric & Threshold Fixes | 3 | Low |
+| 5 | Minor Formula Additions | 2 | Low |
 
 ---
 
-## Phase 2: Knowledge Graph Contradiction Edges (LOW Priority)
+## Phase 1: Critical - Memory Strength Decay ✅ COMPLETED
 
-**Goal:** Add contradiction edge detection to knowledge graph construction per Section 9.5.
+**Priority: CRITICAL**
+**Estimated Complexity: High**
+**Status: COMPLETED** (2025-12-16)
 
-**Current State:** ✅ COMPLETE - Full implementation conforms to Section 9.5 specification.
+The exponential decay mechanism was fixed to follow half-life semantics per algorithms.md Section 5.1.
 
-**Paper Reference:** Section 9.5.1 (Edge Construction)
+### TODO 1.1: Implement Exponential Decay Formula ✅
 
-### Todos
+**File:** `src/operations/memory_strength.cpp`
+**Lines:** 113-132
 
-- [x] **2.1** Add contradiction threshold constant
-  - File: `include/cortext/core/knobs.hpp`
-  - Add: `constexpr double kContradictionThreshold = -0.5;`
-  - Document: Strong negative similarity indicates semantic contradiction
-  - **Status:** Implemented as `ContradictionThreshold()` returning -0.5
+**Previous (Incorrect):**
+```cpp
+strength = MAX(0.0, strength + reinforcement + influence - lambda)
+```
 
-- [x] **2.2** Implement contradiction edge detection
-  - File: `src/operations/graph_build.cpp`
-  - Formula: `if cos_sim < kContradictionThreshold: create_edge(m_i, m_j, 'contradicts', abs(cos_sim))`
-  - Add to existing edge construction loop
-  - **Status:** Implemented in `BuildContradictionEdges()` (lines 197-236)
+**Fixed (Per Spec):**
+```cpp
+strength = MAX(0.0,
+    strength * exp(-lambda * MAX(0.0, ts - last_strength_update_ts) / 1000.0)
+    + reinforcement + influence)
+```
 
-- [x] **2.3** Update graph schema for contradiction edges
-  - File: `src/operations/graph_build.cpp` (CollectSchema)
-  - Ensure 'contradicts' edge type is registered
-  - Add index for efficient contradiction queries
-  - **Status:** Schema supports any edge_type in graph_edges table
+**Completed Tasks:**
+- [x] Added `last_strength_update_ts` column to `embeddings_meta` in migration 0 (`src/store/schema.cpp`)
+- [x] Compute `delta_t = MAX(0, ts - last_strength_update_ts) / 1000.0` in SQL
+- [x] Replace linear subtraction with SQL `exp(-lambda * delta_t)` decay
+- [x] Update `last_strength_update_ts` after each strength computation
+- [x] Added unit tests verifying half-life behavior in `tests/operations_memory_strength.test.cpp`
 
-- [x] ~~**2.4** Handle contradictions in retrieval~~ **Optional - not in paper spec**
-  - Note: Paper Section 9.6 doesn't specify special handling of contradiction edges
-  - Current behavior: Contradiction edges included in graph traversal
+**Reference:** algorithms.md Section 5.1, lines 688-700
 
-- [x] **2.5** Add contradiction edge tests
-  - File: `tests/graph_build.test.cpp`
-  - Test edge creation for highly dissimilar embeddings
-  - Test threshold boundary conditions
-  - **Status:** Tests exist in `operations_graph_build.test.cpp` and `formula_validation.test.cpp`
+**Verified Acceptance Criteria:**
+- ✅ Memory with `half_life = 120s` has `strength ≈ 0.5 * initial` after 120 seconds
+- ✅ Test: "Algorithm 14 applies exponential decay based on elapsed time" validates exponential curve
+- ✅ Test: "Algorithm 14 no decay when delta_t is zero" validates no spurious decay
+- ✅ Test: "Algorithm 14 initializes last_strength_update_ts on INSERT" validates timestamp tracking
 
----
-
-## Phase 3: Consolidation Scoring Weights (LOW Priority)
-
-**Goal:** Implement explicit knob-derived consolidation scoring weights per Algorithm 29.
-
-**Current State:** ✅ COMPLETE - Full implementation conforms to Section 9.2 specification.
-
-**Paper Reference:** Section 9.2 (Consolidation Scoring)
-
-### Todos
-
-- [x] **3.1** Add consolidation weight functions to knobs.hpp
-  - File: `include/cortext/core/knobs.hpp`
-  - **Status:** Weights used directly in SQL: `T, F, S, T` per paper spec
-  - No separate functions needed - weights are knob values themselves
-
-- [x] **3.2** Update consolidation scoring formula
-  - File: `src/operations/consolidation.cpp`
-  - Formula: `score = w_s * strength - w_r * redundancy + w_c * connectivity + w_t * stability`
-  - **Status:** Implemented in `ScoreConsolidation::Execute()` (lines 233-260)
-
-- [x] **3.3** Compute connectivity metric
-  - File: `src/operations/consolidation.cpp`
-  - Query graph for edge count per memory
-  - Normalize by max observed connectivity
-  - **Status:** Implemented - connectivity computed from `graph_edges` and stored in `embeddings_meta`
-
-- [x] **3.4** Compute redundancy metric
-  - File: `src/operations/sensitivity_feedback.cpp`
-  - Use mean similarity to k-nearest neighbors
-  - Higher redundancy = lower consolidation priority
-  - **Status:** Implemented - `ComputeRedundancy()` computes and stores in `embeddings_meta`
-
-- [x] **3.5** Add consolidation scoring tests
-  - File: `tests/consolidation.test.cpp`
-  - Test weight derivation from knobs
-  - Test scoring formula with known inputs
-  - Test merge priority ordering
-  - **Status:** Existing tests cover scoring formula with known inputs
+**Note:** Implementation uses SQLite `exp()` function which requires SQLite 3.35.0+ with math functions enabled
 
 ---
 
-## Phase 4: Contradiction Metric in Composite Scoring (LOW Priority)
+## Phase 2: Interrupt Gate Corrections
 
-**Goal:** Document the 3 missing metrics in the paper specification.
+**Priority: HIGH**
+**Estimated Complexity: Medium**
 
-**Current State:** ✅ COMPLETE - Paper updated to document all 12 metrics.
+The interrupt gate uses incorrect novelty computation and threshold sources.
 
-**Paper Reference:** Section 5.2 (Composite Score Computation), Table 1
+### TODO 2.1: Implement �_novelty Formula
 
-**Resolution:** The original Phase 4 todos were based on an incorrect premise. Analysis revealed:
+**File:** `include/cortext/core/knobs.hpp`
 
-1. The paper claimed "12 metrics" but Table 1 only defined 9
-2. The implementation already had 12 working metrics including contradiction, periphery, and coverage
-3. The formulas in the original Phase 4 todos were not from the paper spec
+**Add new function:**
+```cpp
+inline double TauNovelty(double F, double S, double T) {
+  return Lerp(0.10, 0.35, F) * (1.0 - 0.15 * S) * (1.0 + 0.3 * T);
+}
+```
 
-**Action Taken:** Updated `paper.js` and `algorithms.js` to add the 3 missing metrics to Table 1:
-- Contradiction: `max(0, S − F)` (↑S, ↓F)
-- Periphery: `(1 − relevance) × T` (↑T)
-- Coverage: `F × relevance` (↑F)
+**Tasks:**
+- [ ] Add `TauNovelty(F, S, T)` function to knobs.hpp
+- [ ] Add unit test in `core_knobs.test.cpp` validating formula bounds
 
-This was a documentation gap, not a code gap. The implementation was already correct.
-
-### Todos
-
-- [x] **4.1** ~~Add contradiction metric computation~~ Already implemented in `metrics.cpp:168-171`
-
-- [x] **4.2** ~~Include contradiction in metrics struct~~ Already in `operations::Metric` enum
-
-- [x] **4.3** ~~Add contradiction weight to RLS blending~~ Already in `blend.cpp` bootstrap coefficients
-
-- [x] **4.4** ~~Use continuous metric in interrupt gate~~ Not required - paper doesn't specify this
-
-- [x] **4.5** ~~Add contradiction metric tests~~ Existing tests cover metric computation
+**Reference:** algorithms.md Section 8.1, lines 1167-1168
 
 ---
 
-## Phase 5: Validation & Documentation
+### TODO 2.2: Implement retrieval_thresh(F) Formula
 
-**Goal:** Verify conformance and document any intentional deviations.
+**File:** `include/cortext/core/knobs.hpp`
 
-### Todos
+**Add new function:**
+```cpp
+inline double RetrievalThreshold(double F) {
+  return Lerp(0.25, 0.60, F);
+}
+```
 
-- [ ] **5.1** Create conformance test suite
-  - File: `tests/conformance.test.cpp`
-  - Test each paper algorithm against reference formulas
-  - Verify knob boundary conditions (F=0, F=1, etc.)
+**File:** `src/operations/interrupt_gate.cpp`
+**Lines:** 198-200
 
-- [ ] **5.2** Run full integration tests
-  - Execute end-to-end signal processing
-  - Verify developmental phase transitions
-  - Check homeostatic rate control stability
+**Current (Incorrect):**
+```cpp
+const double retrieval_thresh = context.GetThresholdTDynamic();
+```
 
-- [ ] **5.3** Document intentional deviations
-  - File: `docs/deviations.md`
-  - List any deliberate changes from paper spec
-  - Provide rationale for each deviation
+**Required:**
+```cpp
+const double retrieval_thresh = core::RetrievalThreshold(cfg.focus);
+```
 
-- [ ] **5.4** Update algorithms.md with implementation notes
-  - File: `docs/algorithms.md`
-  - Add implementation status markers
-  - Cross-reference source file locations
+**Tasks:**
+- [ ] Add `RetrievalThreshold(F)` function to knobs.hpp
+- [ ] Update interrupt_gate.cpp to use knob-derived threshold
+- [ ] Add unit test validating formula
 
-- [ ] **5.5** Final conformance audit
-  - Re-run explore agents against updated codebase
-  - Target: 98%+ implementation completeness
-  - Target: 99%+ formula accuracy
-
----
-
-## Implementation Order
-
-| Phase | Priority | Estimated Complexity | Dependencies |
-|-------|----------|---------------------|--------------|
-| Phase 1 | MEDIUM | High | None |
-| Phase 2 | LOW | Medium | None |
-| Phase 3 | LOW | Medium | None |
-| Phase 4 | LOW | Low | Phase 2 |
-| Phase 5 | LOW | Low | Phases 1-4 |
-
-**Recommended sequence:** Phase 1 → Phase 2 → Phase 3 → Phase 4 → Phase 5
-
-Phase 1 has the highest impact on real-time responsiveness and should be prioritized. Phases 2-4 can be parallelized. Phase 5 should run after all implementation work is complete.
+**Reference:** algorithms.md Section 8.1, lines 1171-1172
 
 ---
 
-## Success Criteria
+### TODO 2.3: Implement Embedding Novelty Computation
 
-- [x] All streaming pacing formulas from Section 10.4 implemented
-- [x] Contradiction edges created in knowledge graph
-- [x] Consolidation scoring uses explicit knob-derived weights
-- [x] Contradiction metric integrated into composite scoring (paper updated to document existing metric)
-- [ ] Conformance test suite passes
-- [ ] No regressions in existing test suite
-- [x] Documentation updated with implementation status
+**File:** `src/operations/interrupt_gate.cpp`
+**Lines:** 250-270
+
+**Current (Incorrect):**
+Uses Jaccard index on ID sets: `jaccard = 1 - |A)B|/|A*B|`
+
+**Required (Per Spec):**
+```cpp
+embedding_novelty = 1.0 - max(cos(candidate.embedding, ctx_window[i].embedding) for all i)
+```
+
+**Tasks:**
+- [ ] Add `ComputeEmbeddingNovelty()` function that computes `1 - max(cosine similarity to context)`
+- [ ] Replace `jaccard >= tau_j_eff` condition with `embedding_novelty >= tau_novelty_eff`
+- [ ] Keep Jaccard as secondary duplicate check if desired
+- [ ] Add unit test verifying embedding-space novelty computation
+
+**Reference:** algorithms.md Section 8.3, lines 1224-1225
+
+---
+
+### TODO 2.4: Implement K Parameter for Candidate Limiting
+
+**File:** `include/cortext/core/knobs.hpp`
+
+**Add new function:**
+```cpp
+inline int InterruptCandidateCount(double F) {
+  return static_cast<int>(std::round(Lerp(10.0, 6.0, F)));
+}
+```
+
+**File:** `src/operations/interrupt_gate.cpp`
+
+**Tasks:**
+- [ ] Add `InterruptCandidateCount(F)` function to knobs.hpp
+- [ ] Limit candidate evaluation to top K candidates by relevance
+- [ ] Add unit test
+
+**Reference:** algorithms.md Section 8.3, line 1216
+
+---
+
+## Phase 3: Core Algorithm Fixes
+
+**Priority: MEDIUM**
+**Estimated Complexity: Medium**
+
+### TODO 3.1: Add map01 Transformation in Focus Update
+
+**File:** `src/operations/focus.cpp`
+**Line:** 76
+
+**Current (Incorrect):**
+```cpp
+p_ctx.weight_relevance = core::Ewma(p_ctx.weight_relevance, observed_cosine, alpha_f);
+```
+
+**Required:**
+```cpp
+// Transform cosine [-1, 1] to [0, 1]
+const double mapped = core::Clamp((observed_cosine + 1.0) / 2.0, 0.0, 1.0);
+p_ctx.weight_relevance = core::Ewma(p_ctx.weight_relevance, mapped, alpha_f);
+```
+
+**Tasks:**
+- [ ] Add `Map01(double cosine)` helper to algorithms.hpp: `clamp((z + 1) / 2, 0, 1)`
+- [ ] Apply `Map01()` to `observed_cosine` before EWMA
+- [ ] Add unit test verifying transformation
+
+**Reference:** algorithms.md Section 2.1.2, lines 220-223
+
+---
+
+### TODO 3.2: Fix Prediction Error Metric Source
+
+**File:** `src/operations/metrics.cpp`
+**Lines:** 116-122
+
+**Current (Incorrect):**
+Uses score variance (`var_scores`) as proxy for prediction error.
+
+**Required:**
+Use embedding surprisal from `embedding_prediction_error.cpp`:
+```cpp
+const double surprisal = p_ctx.embedding_surprisal;  // Already computed
+const double prediction_error = surprisal * S * (1.0 - T);
+```
+
+**Tasks:**
+- [ ] Retrieve `embedding_surprisal` from processor context (already computed)
+- [ ] Replace `var_scores` with `embedding_surprisal` in metric computation
+- [ ] Add unit test verifying correct metric source
+
+**Reference:** algorithms.md Section 3.2, Table 1 row "Prediction Error"
+
+---
+
+### TODO 3.3: Fix Alpha_F Formula (Optional)
+
+**File:** `include/cortext/core/knobs.hpp`
+**Lines:** 177-184
+
+**Current (Deviation):**
+```cpp
+double term1 = kAlphaMinF * (1.0 + 0.5 * u_t);
+double term2 = kAlphaMinF + F * kAlphaSpanF * u_t;
+return std::max(term1, term2);
+```
+
+**Spec says:**
+```cpp
+return kAlphaMinF + F * kAlphaSpanF * u_t;  // Single formula, no max
+```
+
+**Tasks:**
+- [ ] Evaluate if two-term max is intentional design choice or bug
+- [ ] If bug: simplify to single formula per spec
+- [ ] If intentional: document deviation in code comments
+- [ ] Add/update unit test
+
+**Reference:** algorithms.md Section 2.1.2, lines 227-230
+
+---
+
+## Phase 4: Metric & Threshold Fixes
+
+**Priority: MEDIUM**
+**Estimated Complexity: Low**
+
+### TODO 4.1: Add Time-Scaled Total Delta Cap
+
+**File:** `src/operations/threshold.cpp`
+**Line:** 180
+
+**Current (Incorrect):**
+```cpp
+delta_total = core::Clamp(delta_total, -max_delta, +max_delta);
+```
+
+**Required:**
+```cpp
+const double delta_t_seconds = (now_ts - p_ctx.last_threshold_ts) / 1000.0;
+const double cap_total = max_delta * (delta_t_seconds / 60.0);
+delta_total = core::Clamp(delta_total, -cap_total, +cap_total);
+```
+
+**Tasks:**
+- [ ] Compute time delta since last threshold update
+- [ ] Scale `max_delta` by `(delta_t / 60.0)` as per spec
+- [ ] Add unit test verifying time-scaled capping
+
+**Reference:** algorithms.md Section 4.3, lines 663-665
+
+---
+
+### TODO 4.2: Fix rate_consolidate Formula (Optional)
+
+**File:** `src/operations/consolidation.cpp`
+**Lines:** 20-24
+
+**Current:**
+Simple rate comparison: `m_rate < 0.5 * rate_target`
+
+**Spec says:**
+```
+rate_consolidate = (1 / max(interval, 1)) � (0.3 + 0.7T) � (1  0.5S)
+```
+
+**Tasks:**
+- [ ] Add `ConsolidationRate(T, S, interval)` to knobs.hpp
+- [ ] Integrate into `CheckRateTrigger()` or document as intentional simplification
+
+**Reference:** algorithms.md Section 7.1, lines 1015-1017
+
+---
+
+### TODO 4.3: Use extraction_batch_size in Pipeline
+
+**File:** `src/operations/consolidation.cpp`
+**Line:** 169
+
+**Current:**
+Uses `MaxExtractionsPerCycle(T)` with formula `lerp(20, 5, T)`
+
+**Spec says:**
+`extraction_batch_size = round(lerp(8, 32, T))`
+
+**Tasks:**
+- [ ] Verify which formula is correct for the use case
+- [ ] Either update consolidation.cpp to use `ExtractionBatchSize(T)` or document deviation
+- [ ] Ensure consistent usage across extraction pipeline
+
+**Reference:** algorithms.md Section 7.3-7.4, line 1076
+
+---
+
+## Phase 5: Minor Formula Additions
+
+**Priority: LOW**
+**Estimated Complexity: Low**
+
+### TODO 5.1: Add update_rate_on_surprise Formula
+
+**File:** `include/cortext/core/knobs.hpp`
+
+**Add new function:**
+```cpp
+inline double UpdateRateOnSurprise(double T, double S) {
+  return Lerp(0.2, 0.02, T) * S;
+}
+```
+
+**File:** `src/operations/predictive.cpp`
+
+**Tasks:**
+- [ ] Add `UpdateRateOnSurprise(T, S)` function to knobs.hpp
+- [ ] Implement trajectory model update when surprise exceeds threshold
+- [ ] Add unit test
+
+**Reference:** algorithms.md Section 6.5, lines 941-942
+
+---
+
+### TODO 5.2: Document Emotion Projection Architecture Difference
+
+**File:** `src/data/centroids.cpp`
+
+The implementation uses learned affective dimension centroids (valence_positive/negative, arousal_high/low) instead of the spec's discrete 6-emotion Russell circumplex with softmax.
+
+**Tasks:**
+- [ ] Add documentation comment explaining architectural choice
+- [ ] Consider if spec should be updated to match implementation or vice versa
+- [ ] No code change required if intentional architectural decision
+
+**Reference:** algorithms.md Section 2.2.2, lines 262-303
+
+---
+
+## Testing Requirements
+
+Each fix should include:
+
+1. **Unit test** validating the specific formula
+2. **Integration test** verifying end-to-end behavior
+3. **Regression test** ensuring existing functionality unchanged
+
+### Test File Locations:
+- `tests/core_knobs.test.cpp` - Knob formula validation
+- `tests/operations_*.test.cpp` - Operation-specific tests
+- `tests/integration_*.test.cpp` - End-to-end tests
+
+---
+
+## Verification Checklist
+
+After all phases complete:
+
+- [ ] All 13 gaps addressed (fixed or documented as intentional)
+- [ ] Unit tests pass for all new/modified formulas
+- [ ] Integration tests pass
+- [ ] `ctest --test-dir build -R cortext_tests --output-on-failure` passes
+- [ ] Code review completed
+- [ ] Documentation updated if spec changed
+
+---
+
+## Timeline Recommendation
+
+| Phase | Dependencies | Suggested Order |
+|-------|--------------|-----------------|
+| Phase 1 | None | First (critical) |
+| Phase 2 | None | Second (high impact) |
+| Phase 3 | Phase 1 | Third |
+| Phase 4 | None | Fourth |
+| Phase 5 | None | Fifth |
+
+Phases 2-5 can be parallelized after Phase 1 is complete.

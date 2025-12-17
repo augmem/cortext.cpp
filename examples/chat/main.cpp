@@ -1,6 +1,8 @@
 #include "context_tab.hpp"
+#include "streaming_client.hpp"
 
 #include <cortext/cortext.hpp>
+#include <cortext/core/knobs.hpp>
 #include <cortext/encoder/imagebind.hpp>
 #include <cortext/operations/metrics.hpp>
 #include <cortext/store/sqlite_store.hpp>
@@ -60,6 +62,7 @@
 #include <sstream>
 #include <string>
 #include <thread>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 #include <map>
@@ -176,6 +179,43 @@ private:
 struct ChatMessage {
   std::string role;    // "user" | "assistant" | "system"
   std::string content; // utf-8
+};
+
+struct StreamingState {
+  std::atomic<bool> cancel_requested{false};
+  std::string accumulated_tokens;
+  std::vector<cortext::Cortext::Context::Memory> current_memories;
+  int restart_count = 0;
+  static constexpr int kMaxRestarts = 3;
+
+  void Reset() {
+    cancel_requested.store(false);
+    accumulated_tokens.clear();
+    restart_count = 0;
+  }
+};
+
+struct IdleTracker {
+  std::chrono::steady_clock::time_point last_activity;
+  bool consolidation_pending = false;
+
+  IdleTracker() : last_activity(std::chrono::steady_clock::now()) {}
+
+  void RecordActivity() {
+    last_activity = std::chrono::steady_clock::now();
+    consolidation_pending = true;
+  }
+
+  bool ShouldConsolidate(double stability) {
+    if (!consolidation_pending) return false;
+    int idle_required = cortext::core::IdleRequiredSeconds(stability);
+    auto idle = std::chrono::steady_clock::now() - last_activity;
+    return std::chrono::duration_cast<std::chrono::seconds>(idle).count() >= idle_required;
+  }
+
+  void MarkConsolidated() {
+    consolidation_pending = false;
+  }
 };
 
 enum class MemoryEventType {
@@ -833,6 +873,17 @@ int main(int argc, char** argv) {
   int tab_selected = 0;
   static constexpr size_t kMaxMemoryEvents = 50;
 
+  // Streaming state
+  StreamingState streaming_state;
+  std::string partial_response;  // Shows in-progress generation
+  int generation_restarts = 0;   // Count of restarts due to interrupts
+  IdleTracker idle_tracker;
+
+  // Create streaming client
+  chat::StreamingChatClient streaming_client(api_key, openai_base_url.empty()
+      ? "https://api.openai.com/v1/"
+      : openai_base_url);
+
   // Scroll state for each tab (0.0 = top, 1.0 = bottom)
   // Context and Logs tabs manage their own scroll state internally
   float chat_scroll = 1.0f;    // Start at bottom for chat
@@ -860,7 +911,17 @@ int main(int argc, char** argv) {
     }
 
     if (generating) {
-      lines.push_back(ftxui::text("Generating...") | ftxui::color(ftxui::Color::Yellow));
+      // Show partial streaming response
+      if (!partial_response.empty()) {
+        lines.push_back(ftxui::text("Assistant: " + partial_response)
+                        | ftxui::color(ftxui::Color::Green));
+        lines.push_back(ftxui::separator());
+      }
+      std::string status = "Streaming...";
+      if (generation_restarts > 0) {
+        status += " (restarted " + std::to_string(generation_restarts) + "x with new context)";
+      }
+      lines.push_back(ftxui::text(status) | ftxui::color(ftxui::Color::Yellow));
     }
 
     return ftxui::vbox(std::move(lines))
@@ -1079,92 +1140,174 @@ int main(int argc, char** argv) {
         if (text.empty()) return true;
         generating = true;
         last_error.reset();
+        partial_response.clear();
+        generation_restarts = 0;
+        streaming_state.Reset();
         history.push_back({"user", text});
       }
 
-      // Launch background job: retrieval + OpenAI + persistence.
+      // Record activity for idle tracking
+      idle_tracker.RecordActivity();
+
+      // Launch background job: streaming retrieval + generation + persistence.
       std::thread([&, text] {
         const uint64_t ts = NowUnixSeconds();
 
+        // --- Phase 1: Process user input through Cortext (before generation) ---
         cortext::Cortext::Context retrieved;
-        std::string injected_system;
         try {
-          // Ensure cortext sees latest externally persisted rows by refreshing
-          // its episode. Also serialize ProcessText() itself: it can perform
-          // SQLite writes (updates/feedback) and will otherwise race with the
-          // explicit persistence connection below, causing SQLITE_BUSY/LOCKED
-          // and "SQLite step failed" telemetry.
-          {
-            std::lock_guard<std::mutex> lock(db_write_mu);
-            cortext_ctx->Flush();
-            retrieved = cortext_ctx->ProcessText(text, ts, "chat/user");
-          }
-          
-          // Create memory events for retrieved memories
-          {
-            std::lock_guard<std::mutex> lock(mu);
-            for (const auto& mem : retrieved.memories) {
-              memory_events.push_back(CreateMemoryEvent(MemoryEventType::RETRIEVED, mem));
-              if (memory_events.size() > kMaxMemoryEvents) {
-                memory_events.pop_front();
-              }
-            }
-            // Create STORED event if user message was stored
-            if (retrieved.output.stored_embedding_id.has_value()) {
-              memory_events.push_back(CreateStoredEvent(
-                  *retrieved.output.stored_embedding_id, text, "chat/user", ts, retrieved.output));
-              if (memory_events.size() > kMaxMemoryEvents) {
-                memory_events.pop_front();
-              }
-            }
-          }
-          
-          injected_system = FormatMemoriesForSystemPrompt(retrieved.memories);
+          std::lock_guard<std::mutex> lock(db_write_mu);
+          cortext_ctx->Flush();
+          retrieved = cortext_ctx->ProcessText(text, ts, "chat/user");
         } catch (const std::exception& ex) {
           std::lock_guard<std::mutex> lock(mu);
-          last_error = std::string("cortext: ") + ex.what();
+          last_error = std::string("cortext user: ") + ex.what();
         }
 
+        // Initialize streaming state with retrieved memories
+        {
+          std::lock_guard<std::mutex> lock(mu);
+          streaming_state.current_memories = retrieved.memories;
+          for (const auto& mem : retrieved.memories) {
+            memory_events.push_back(CreateMemoryEvent(MemoryEventType::RETRIEVED, mem));
+            if (memory_events.size() > kMaxMemoryEvents) {
+              memory_events.pop_front();
+            }
+          }
+          if (retrieved.output.stored_embedding_id.has_value()) {
+            memory_events.push_back(CreateStoredEvent(
+                *retrieved.output.stored_embedding_id, text, "chat/user", ts, retrieved.output));
+            if (memory_events.size() > kMaxMemoryEvents) {
+              memory_events.pop_front();
+            }
+          }
+        }
+
+        // --- Phase 2: Streaming generation with interrupt checking ---
         std::string assistant_reply;
-        try {
-          using Json = openai::Json;
+        int local_restarts = 0;
+
+        while (local_restarts < StreamingState::kMaxRestarts) {
+          // Build system prompt with current memories
+          std::string injected_system;
           std::vector<ChatMessage> local_history;
           {
             std::lock_guard<std::mutex> lock(mu);
+            injected_system = FormatMemoriesForSystemPrompt(streaming_state.current_memories);
             local_history = history;
           }
 
-          Json req;
-          req["model"] = model;
-          req["temperature"] = 0.7;
-          req["messages"] = BuildOpenAIMessages<Json>(local_history, /*window*/ 10, injected_system);
+          // Build request
+          using Json = openai::Json;
+          Json messages = BuildOpenAIMessages<Json>(local_history, /*window*/ 10, injected_system);
 
           // Capture context for the Context tab
           {
             std::lock_guard<std::mutex> lock(last_context->mu);
             last_context->system_prompt = injected_system;
             last_context->messages.clear();
-            for (const auto& m : req["messages"]) {
+            for (const auto& m : messages) {
               last_context->messages.push_back({m["role"].get<std::string>(), m["content"].get<std::string>()});
             }
-            last_context->raw_json = req.dump(2);
+            Json req_json;
+            req_json["model"] = model;
+            req_json["messages"] = messages;
+            last_context->raw_json = req_json.dump(2);
             last_context->has_data = true;
           }
 
-          auto resp = openai::chat().create(req);
-          assistant_reply = resp["choices"][0]["message"]["content"].get<std::string>();
-          std::int64_t tokens_used = 0;
-          if (resp.contains("usage") && resp["usage"].contains("total_tokens")) {
-            tokens_used = resp["usage"]["total_tokens"].get<std::int64_t>();
+          // Reset streaming state for this attempt
+          {
+            std::lock_guard<std::mutex> lock(mu);
+            streaming_state.accumulated_tokens.clear();
+            streaming_state.cancel_requested.store(false);
+            partial_response.clear();
           }
-          last_tokens_used->store(tokens_used);
-        } catch (const std::exception& ex) {
-          assistant_reply = std::string("(OpenAI error: ") + ex.what() + ")";
-          std::lock_guard<std::mutex> lock(mu);
-          last_error = std::string("openai: ") + ex.what();
+
+          // Build streaming request
+          chat::StreamingRequest request;
+          request.model = model;
+          request.messages = messages;
+          request.temperature = 0.7;
+          request.cancel_flag = &streaming_state.cancel_requested;
+
+          bool interrupted = false;
+
+          // Stream with ProcessText called on every token
+          auto result = streaming_client.Stream(request, [&](const std::string& token, bool done) {
+            if (done || token.empty()) return;
+
+            std::string accumulated;
+            {
+              std::lock_guard<std::mutex> lock(mu);
+              streaming_state.accumulated_tokens += token;
+              accumulated = streaming_state.accumulated_tokens;
+              partial_response = accumulated;
+            }
+
+            // Call ProcessText on every token - Cortext handles gating internally
+            try {
+              cortext::Cortext::Context ctx;
+              {
+                std::lock_guard<std::mutex> lock(db_write_mu);
+                ctx = cortext_ctx->ProcessText(accumulated, NowUnixSeconds(), "chat/assistant-streaming");
+              }
+
+              if (ctx.should_interrupt && local_restarts < StreamingState::kMaxRestarts) {
+                // Cortext decided this is worth interrupting for
+                // Merge new memories with existing
+                {
+                  std::lock_guard<std::mutex> lock(mu);
+                  std::unordered_set<long long> existing_ids;
+                  for (const auto& m : streaming_state.current_memories) {
+                    existing_ids.insert(m.id);
+                  }
+                  for (const auto& m : ctx.memories) {
+                    if (existing_ids.find(m.id) == existing_ids.end()) {
+                      streaming_state.current_memories.push_back(m);
+                      memory_events.push_back(CreateMemoryEvent(MemoryEventType::RETRIEVED, m));
+                      if (memory_events.size() > kMaxMemoryEvents) {
+                        memory_events.pop_front();
+                      }
+                    }
+                  }
+                  last_should_interrupt = true;
+                }
+                streaming_state.cancel_requested.store(true);
+                interrupted = true;
+              }
+            } catch (const std::exception& ex) {
+              // Log but continue streaming
+              std::lock_guard<std::mutex> lock(mu);
+              last_error = std::string("cortext streaming: ") + ex.what();
+            }
+
+            // Update UI
+            screen.PostEvent(ftxui::Event::Custom);
+          });
+
+          // Check if we need to restart
+          if (result.was_cancelled && interrupted && local_restarts < StreamingState::kMaxRestarts) {
+            local_restarts++;
+            {
+              std::lock_guard<std::mutex> lock(mu);
+              generation_restarts = local_restarts;
+            }
+            continue;  // Restart with new memories
+          }
+
+          // Generation complete or error
+          if (result.error.has_value()) {
+            std::lock_guard<std::mutex> lock(mu);
+            last_error = "streaming: " + *result.error;
+            assistant_reply = "(Streaming error: " + *result.error + ")";
+          } else {
+            assistant_reply = result.full_content;
+          }
+          break;
         }
 
-        // Process assistant reply through Cortext (may store if write gate passes)
+        // --- Phase 3: Process final assistant reply through Cortext ---
         try {
           cortext::Cortext::Context asst_ctx;
           {
@@ -1172,7 +1315,6 @@ int main(int argc, char** argv) {
             asst_ctx = cortext_ctx->ProcessText(assistant_reply, ts + 1, "chat/assistant");
           }
 
-          // Create STORED event if assistant reply was stored
           if (asst_ctx.output.stored_embedding_id.has_value()) {
             std::lock_guard<std::mutex> lock(mu);
             memory_events.push_back(CreateStoredEvent(
@@ -1181,24 +1323,30 @@ int main(int argc, char** argv) {
               memory_events.pop_front();
             }
           }
-
-          // Flush to ensure writes are persisted
-          {
-            std::lock_guard<std::mutex> lock(db_write_mu);
-            cortext_ctx->Flush();
-          }
         } catch (const std::exception& ex) {
           std::lock_guard<std::mutex> lock(mu);
           last_error = std::string("cortext assistant: ") + ex.what();
         }
 
-        // Apply UI updates.
+        // --- Phase 4: Post-generation consolidation ---
+        try {
+          std::lock_guard<std::mutex> lock(db_write_mu);
+          cortext_ctx->Consolidate(NowUnixSeconds());
+          cortext_ctx->Flush();
+        } catch (const std::exception& ex) {
+          // Best effort - don't fail on consolidation errors
+        }
+
+        // Record activity after generation completes
+        idle_tracker.RecordActivity();
+
+        // Apply UI updates
         {
           std::lock_guard<std::mutex> lock(mu);
-          last_memories = retrieved.memories;
-          last_should_interrupt = retrieved.should_interrupt;
+          last_memories = streaming_state.current_memories;
           history.push_back({"assistant", assistant_reply});
           generating = false;
+          partial_response.clear();
         }
 
         screen.PostEvent(ftxui::Event::Custom);
@@ -1212,11 +1360,31 @@ int main(int argc, char** argv) {
     return false;
   });
 
-  // Periodic refresh to update logs (every 2 seconds)
+  // Periodic refresh to update logs and trigger idle consolidation (every 2 seconds)
   std::atomic<bool> running{true};
   std::thread refresh_thread([&] {
     while (running) {
       std::this_thread::sleep_for(std::chrono::seconds(2));
+
+      // Check for idle consolidation
+      bool is_generating = false;
+      {
+        std::lock_guard<std::mutex> lock(mu);
+        is_generating = generating;
+      }
+
+      if (!is_generating && idle_tracker.ShouldConsolidate(stability)) {
+        try {
+          std::lock_guard<std::mutex> lock(db_write_mu);
+          cortext_ctx->Consolidate(NowUnixSeconds());
+          idle_tracker.MarkConsolidated();
+        } catch (const std::exception& ex) {
+          // Best effort - log but don't fail
+          std::lock_guard<std::mutex> lock(mu);
+          last_error = std::string("idle consolidation: ") + ex.what();
+        }
+      }
+
       screen.PostEvent(ftxui::Event::Custom);
     }
   });

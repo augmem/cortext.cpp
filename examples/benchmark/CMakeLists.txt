@@ -33,7 +33,7 @@ option(BENCHMARK_ENABLE_LITERT "Enable LiteRT-LM backend in benchmark" OFF)
 if(BENCHMARK_ENABLE_LITERT)
   message(STATUS "Benchmark: LiteRT-LM backend enabled (C++ API)")
 
-  # LiteRT-LM build output directory
+  # LiteRT-LM build output directory (contains lib + headers from Bazel build)
   set(LITERT_BUILD_DIR "${CMAKE_SOURCE_DIR}/third_party/litert-lm-build")
 
   if(NOT EXISTS "${LITERT_BUILD_DIR}/lib")
@@ -41,48 +41,48 @@ if(BENCHMARK_ENABLE_LITERT)
       "LiteRT-LM not built. Run: ./scripts/build_litert.sh")
   endif()
 
-  # Fetch Abseil (required for LiteRT-LM C++ headers)
-  include(FetchContent)
-  set(ABSL_PROPAGATE_CXX_STD ON)
-  set(ABSL_BUILD_TESTING OFF)
-  FetchContent_Declare(
-    abseil-cpp
-    GIT_REPOSITORY https://github.com/abseil/abseil-cpp.git
-    GIT_TAG 20240722.0  # Match LiteRT-LM's Abseil version
-    GIT_SHALLOW TRUE
-  )
-  FetchContent_MakeAvailable(abseil-cpp)
-  message(STATUS "Fetched Abseil 20240722.0")
+  # Check for Bazel-copied external headers
+  if(NOT EXISTS "${LITERT_BUILD_DIR}/include/absl")
+    message(FATAL_ERROR
+      "Abseil headers not found. Re-run: ./scripts/build_litert.sh")
+  endif()
+  if(NOT EXISTS "${LITERT_BUILD_DIR}/include/litert")
+    message(FATAL_ERROR
+      "LiteRT headers not found. Re-run: ./scripts/build_litert.sh")
+  endif()
 
-  # Find the shared library (bundles all dependencies)
-  find_library(LITERT_LM_SHARED
-    NAMES litert_lm_shared
+  # Find the C++ shared library (exports all C++ symbols, bundles all dependencies)
+  find_library(LITERT_LM_CPP
+    NAMES litert_lm_cpp
     PATHS "${LITERT_BUILD_DIR}/lib"
     NO_DEFAULT_PATH
   )
 
-  if(NOT LITERT_LM_SHARED)
+  # Fall back to C API shared library if C++ variant not found
+  if(NOT LITERT_LM_CPP)
+    find_library(LITERT_LM_CPP
+      NAMES litert_lm_shared
+      PATHS "${LITERT_BUILD_DIR}/lib"
+      NO_DEFAULT_PATH
+    )
+  endif()
+
+  if(NOT LITERT_LM_CPP)
     message(FATAL_ERROR "LiteRT-LM shared library not found in ${LITERT_BUILD_DIR}/lib")
   endif()
 
-  message(STATUS "Found LiteRT-LM: ${LITERT_LM_SHARED}")
+  message(STATUS "Found LiteRT-LM: ${LITERT_LM_CPP}")
+  message(STATUS "Using Bazel-cached Abseil and LiteRT headers from ${LITERT_BUILD_DIR}/include")
 
   # Add include directories for C++ API headers
+  # The build directory contains: absl/, litert/, runtime/, engine/, etc.
   target_include_directories(cortext_benchmark PRIVATE
     "${LITERT_BUILD_DIR}/include"
-    "${CMAKE_SOURCE_DIR}/third_party/litert-lm"  # For runtime/ headers
   )
 
-  # Link the shared library and Abseil components
+  # Link the C++ shared library (Abseil is bundled in the shared library)
   target_link_libraries(cortext_benchmark PRIVATE
-    ${LITERT_LM_SHARED}
-    absl::status
-    absl::statusor
-    absl::strings
-    absl::time
-    absl::log
-    absl::any_invocable
-    absl::nullability
+    ${LITERT_LM_CPP}
   )
 
   # Require C++20 for LiteRT-LM

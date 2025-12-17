@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.16)
 project(cortext LANGUAGES C CXX)
 
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
@@ -18,6 +18,7 @@ option(CORTEXT_ENABLE_DYNAMIC_EXTENSIONS "Enable dynamic extension loading fallb
 option(CORTEXT_DISABLE_IMAGEBIND_ORT "Disable ONNX Runtime for ImageBind embedder" OFF)
 option(CORTEXT_ENABLE_GEMMA_ORT "Enable ONNX Runtime for Gemma text generator" OFF)
 option(CORTEXT_DISABLE_OGA "Disable onnxruntime-genai for Phi-4 Extractor/Summarizer" OFF)
+option(CORTEXT_DISABLE_LITERT "Disable LiteRT-LM for Gemma Extractor/Summarizer" OFF)
 
 if(EMSCRIPTEN AND BUILD_TESTING)
   message(STATUS "Disabling tests for WebAssembly builds (not supported).")
@@ -41,10 +42,11 @@ block(SCOPE_FOR VARIABLES)
   FetchContent_MakeAvailable(eigen)
 
   # nlohmann/json for generator JSON schema handling
+  # Note: v3.12.0 required to match LiteRT-LM's nlohmann/json version
   FetchContent_Declare(
     nlohmann_json
     GIT_REPOSITORY https://github.com/nlohmann/json.git
-    GIT_TAG v3.11.3
+    GIT_TAG v3.12.0
   )
   FetchContent_MakeAvailable(nlohmann_json)
 endblock()
@@ -92,6 +94,7 @@ add_library(cortext
     src/processor/operation_context.cpp
     src/signal_processor.cpp
     src/cortext.cpp
+    src/core/thread_config.cpp
     src/capi.cpp
     src/telemetry/telemetry.cpp
     src/encoder/imagebind.cpp
@@ -147,8 +150,12 @@ add_library(cortext
     src/operations/streaming_pacing.cpp
     # Extractor component
     src/extractor/phi4_extractor.cpp
+    src/extractor/gemma_extractor.cpp
     # Summarizer component
     src/summarizer/phi4_summarizer.cpp
+    src/summarizer/gemma_summarizer.cpp
+    # Audio preprocessing
+    src/audio/gemma_audio.cpp
 )
 add_library(cortext::cortext ALIAS cortext)
 
@@ -524,8 +531,93 @@ if(NOT CORTEXT_DISABLE_OGA AND NOT EMSCRIPTEN)
   target_link_libraries(cortext PRIVATE onnxruntime-genai)
 endif()
 
-# Use C++17 features
-target_compile_features(cortext PUBLIC cxx_std_17)
+# Optional LiteRT-LM integration for Gemma Extractor/Summarizer
+# Enabled by default; set CORTEXT_DISABLE_LITERT=ON to disable
+if(CORTEXT_DISABLE_LITERT)
+  target_compile_definitions(cortext PUBLIC CORTEXT_DISABLE_LITERT=1)
+endif()
+
+if(NOT CORTEXT_DISABLE_LITERT AND NOT EMSCRIPTEN)
+  include(ExternalProject)
+
+  # Detect platform for Bazel config
+  if(APPLE)
+    if(CMAKE_SYSTEM_PROCESSOR STREQUAL "arm64")
+      set(LITERT_BAZEL_CONFIG "macos_arm64")
+    else()
+      set(LITERT_BAZEL_CONFIG "macos_x86_64")
+    endif()
+  elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64")
+      set(LITERT_BAZEL_CONFIG "linux_arm64")
+    else()
+      set(LITERT_BAZEL_CONFIG "linux_x86_64")
+    endif()
+  else()
+    message(FATAL_ERROR "Unsupported platform for LiteRT-LM")
+  endif()
+
+  set(LITERT_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/litert-lm")
+  set(LITERT_INSTALL_DIR "${CMAKE_BINARY_DIR}/third_party/litert-lm-install")
+  set(LITERT_LIB_PATH "${LITERT_INSTALL_DIR}/lib/${CMAKE_SHARED_LIBRARY_PREFIX}litert_lm_cpp${CMAKE_SHARED_LIBRARY_SUFFIX}")
+
+  # Check for bazel/bazelisk
+  find_program(BAZEL_EXECUTABLE NAMES bazelisk bazel)
+  if(NOT BAZEL_EXECUTABLE)
+    message(FATAL_ERROR "Bazel not found. Install with: brew install bazelisk")
+  endif()
+
+  # Append custom BUILD target for C++ shared library if not already added
+  set(LITERT_CUSTOM_BUILD "${CMAKE_CURRENT_SOURCE_DIR}/litert-lm-BUILD.bazel")
+  set(LITERT_ROOT_BUILD "${LITERT_SOURCE_DIR}/BUILD")
+
+  if(NOT EXISTS "${LITERT_LIB_PATH}")
+    ExternalProject_Add(litert_ep
+      SOURCE_DIR "${LITERT_SOURCE_DIR}"
+      CONFIGURE_COMMAND ${CMAKE_COMMAND} -E echo "Appending custom BUILD target..." &&
+        ${CMAKE_COMMAND} -DLITERT_CUSTOM_BUILD=${LITERT_CUSTOM_BUILD}
+          -DLITERT_ROOT_BUILD=${LITERT_ROOT_BUILD}
+          -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/litert_append_build.cmake
+      BUILD_COMMAND ${BAZEL_EXECUTABLE} build //:liblitert_lm_cpp.so
+        //runtime/engine:litert_lm_shared
+        --config=${LITERT_BAZEL_CONFIG}
+        --compilation_mode=opt
+        --verbose_failures
+      BUILD_IN_SOURCE TRUE
+      INSTALL_COMMAND ${CMAKE_COMMAND}
+        -DLITERT_SOURCE_DIR=${LITERT_SOURCE_DIR}
+        -DLITERT_INSTALL_DIR=${LITERT_INSTALL_DIR}
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/litert_install.cmake
+      BUILD_BYPRODUCTS "${LITERT_LIB_PATH}"
+      USES_TERMINAL_BUILD TRUE
+    )
+  else()
+    add_custom_target(litert_ep)
+  endif()
+
+  add_library(litert_lm SHARED IMPORTED GLOBAL)
+  set_target_properties(litert_lm PROPERTIES IMPORTED_LOCATION "${LITERT_LIB_PATH}")
+  add_dependencies(litert_lm litert_ep)
+
+  target_include_directories(cortext PRIVATE ${LITERT_INSTALL_DIR}/include)
+  # PUBLIC link so consumers of cortext (like tests) can resolve LiteRT-LM symbols
+  target_link_libraries(cortext PUBLIC litert_lm)
+  add_dependencies(cortext litert_ep)
+
+  # Set RPATH for runtime library discovery
+  if(APPLE)
+    set_property(TARGET cortext APPEND PROPERTY BUILD_RPATH
+      "@loader_path/../third_party/litert-lm-install/lib"
+    )
+  elseif(UNIX)
+    set_property(TARGET cortext APPEND PROPERTY BUILD_RPATH
+      "$ORIGIN/../third_party/litert-lm-install/lib"
+    )
+  endif()
+endif()
+
+# Use C++20 features
+target_compile_features(cortext PUBLIC cxx_std_20)
 
 if(BUILD_TESTING)
   target_compile_definitions(cortext PRIVATE CORTEXT_TESTING=1)

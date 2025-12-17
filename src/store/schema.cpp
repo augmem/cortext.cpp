@@ -184,7 +184,8 @@ RegisterCoreSchema (SchemaRegistry &registry)
           "  suppression_count INTEGER NOT NULL DEFAULT 0,"
           "  cluster_id INTEGER,"
           "  last_access INTEGER,"
-          "  created_at INTEGER"
+          "  created_at INTEGER,"
+          "  last_strength_update_ts INTEGER"
           ")",
 
           // ------------------------------------------------------------------

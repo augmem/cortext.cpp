@@ -29,6 +29,7 @@ add_executable(cortext_tests
   graph.test.cpp
   core_algorithms.test.cpp
   core_knobs.test.cpp
+  thread_config.test.cpp
   operation_context.test.cpp
   operation_set.test.cpp
   operations_uncertainty.test.cpp
@@ -81,6 +82,8 @@ add_executable(cortext_tests
   # Extractor and Summarizer tests
   phi4_extractor.test.cpp
   phi4_summarizer.test.cpp
+  gemma_extractor.test.cpp
+  gemma_summarizer.test.cpp
   # Phase 5: Testing and Validation
   formula_validation.test.cpp
   integration_consolidation.test.cpp
@@ -134,6 +137,19 @@ if(NOT CORTEXT_DISABLE_OGA)
         "$ORIGIN/../third_party/onnxruntime-genai"
       )
     endif()
+  endif()
+endif()
+
+# For LiteRT-LM enabled builds, add path to LiteRT-LM library
+if(NOT CORTEXT_DISABLE_LITERT)
+  if(APPLE)
+    set_property(TARGET cortext_tests APPEND PROPERTY BUILD_RPATH
+      "@loader_path/../third_party/litert-lm-install/lib"
+    )
+  elseif(UNIX)
+    set_property(TARGET cortext_tests APPEND PROPERTY BUILD_RPATH
+      "$ORIGIN/../third_party/litert-lm-install/lib"
+    )
   endif()
 endif()
 

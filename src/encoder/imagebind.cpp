@@ -29,6 +29,8 @@
 #if defined(CORTEXT_ENABLE_IMAGEBIND_ORT)
 #include <onnxruntime/onnxruntime_cxx_api.h>
 #include <zlib.h>
+
+#include "cortext/core/thread_config.hpp"
 #endif
 
 namespace cortext
@@ -947,8 +949,9 @@ ImageBindEncoder::ImageBindEncoder (std::string models_dir)
     : impl_ (std::make_unique<Impl> (std::move (models_dir)))
 {
 #if defined(CORTEXT_ENABLE_IMAGEBIND_ORT)
-  impl_->opts.SetIntraOpNumThreads (1);
-  impl_->opts.SetInterOpNumThreads (1);
+  auto threads = static_cast<int> (core::GetEmbedThreadCount ());
+  impl_->opts.SetIntraOpNumThreads (threads);
+  impl_->opts.SetInterOpNumThreads (threads);
   impl_->opts.SetGraphOptimizationLevel (
       GraphOptimizationLevel::ORT_ENABLE_BASIC);
 #endif

@@ -17,7 +17,8 @@ namespace benchmark
 
 #if defined(BENCHMARK_ENABLE_LITERT)
 
-using litert::lm::Backend;
+// Use fully qualified names to avoid conflict with benchmark::Backend
+using LiteRtBackend = litert::lm::Backend;
 using litert::lm::CpuConfig;
 using litert::lm::Engine;
 using litert::lm::EngineSettings;
@@ -47,7 +48,7 @@ struct LiteRTRunner::Impl
 
         // Create engine settings with CPU backend
         auto settings_result = EngineSettings::CreateDefault (
-            *std::move (model_assets), Backend::CPU, std::nullopt, Backend::CPU);
+            *std::move (model_assets), LiteRtBackend::CPU, std::nullopt, LiteRtBackend::CPU);
         if (!settings_result.ok ())
           {
             std::cerr << "LiteRTRunner: Failed to create settings: "
@@ -127,15 +128,19 @@ struct LiteRTRunner::Impl
                                   + prefill_status.ToString ());
       }
 
-    // Decode loop
+    // Decode loop - check TaskState to detect completion
     decode_timer.Start ();
     metrics.output_tokens = 0;
-    while (!session->IsDone () && metrics.output_tokens < max_tokens)
+    bool done = false;
+    while (!done && metrics.output_tokens < max_tokens)
       {
-        auto decode_status = session->RunDecode ();
-        if (!decode_status.ok ())
+        auto decode_result = session->RunDecode ();
+        if (!decode_result.ok ())
           break;
         metrics.output_tokens++;
+        // Check if generation is complete
+        auto task_state = decode_result->GetTaskState ();
+        done = litert::lm::IsTaskEndState (task_state);
       }
     decode_timer.Stop ();
     metrics.decode_time_ms = decode_timer.ElapsedMs ();
@@ -202,15 +207,19 @@ struct LiteRTRunner::Impl
                                   + prefill_status.ToString ());
       }
 
-    // Decode loop
+    // Decode loop - check TaskState to detect completion
     decode_timer.Start ();
     metrics.output_tokens = 0;
-    while (!session->IsDone () && metrics.output_tokens < max_tokens)
+    bool done = false;
+    while (!done && metrics.output_tokens < max_tokens)
       {
-        auto decode_status = session->RunDecode ();
-        if (!decode_status.ok ())
+        auto decode_result = session->RunDecode ();
+        if (!decode_result.ok ())
           break;
         metrics.output_tokens++;
+        // Check if generation is complete
+        auto task_state = decode_result->GetTaskState ();
+        done = litert::lm::IsTaskEndState (task_state);
       }
     decode_timer.Stop ();
     metrics.decode_time_ms = decode_timer.ElapsedMs ();
