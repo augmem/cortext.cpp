@@ -860,7 +860,9 @@ int main(int argc, char** argv) {
           {
             std::lock_guard<std::mutex> lock(mu);
             last_memories = streaming_state.current_memories;
-            history.push_back({"assistant", assistant_reply});
+            if (!assistant_reply.empty()) {
+              history.push_back({"assistant", assistant_reply});
+            }
             generating = false;
             partial_response.clear();
           }

@@ -23,9 +23,8 @@ ComputeWriteGate::Execute (OperationContext &context, Transaction &tx) const
 
   context.SetWriteDecision (write_decision);
 
-  // Telemetry for observability
   telemetry::RecordHistogram ("cortext.write_gate.effective_threshold",
-                              effective_threshold);
+                              std::max (0.0, effective_threshold));
   telemetry::RecordHistogram ("cortext.write_gate.composite_score",
                               composite_score);
   if (write_decision)
