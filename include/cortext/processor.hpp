@@ -108,6 +108,7 @@ private:
   void PersistObservedRetentionHistory (Transaction &tx);
   void PersistRLSCoefficients (Transaction &tx);
   void PersistWorkingMemorySlots (Transaction &tx);
+  void PersistAccumulatorState (Transaction &tx);
 
   Config config_;
   std::shared_ptr<Store> store_;

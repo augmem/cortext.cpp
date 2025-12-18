@@ -5,6 +5,7 @@
 #include "cortext/core/knobs.hpp"
 #include "cortext/operations/constants.hpp"
 #include "cortext/processor/operation_context.hpp"
+#include "cortext/telemetry/telemetry.hpp"
 #include <Eigen/Dense>
 #include <cmath>
 #include <numeric>
@@ -102,11 +103,13 @@ ApplyInfluenceFeedback::Execute (OperationContext &context, Transaction &tx) con
 
   // Apply to derived parameters (not knobs)
   // attention_width_t ← clamp(attention_width_t × (1 − 0.05 × mean_influence))
+  const double prev_attention_width = p_ctx.attention_width;
   p_ctx.attention_width
       = core::Clamp (p_ctx.attention_width
                          * (1.0 - constants::kGainSmall * mean_influence),
                      static_cast<double> (core::kAttentionWidthMin),
                      static_cast<double> (core::kAttentionWidthMax));
+  const double attention_delta = p_ctx.attention_width - prev_attention_width;
 
   // rate_target_t ← EWMA(rate_target_t, rate_target_t × (1 + 0.10 ×
   // mean_influence), α = α_S(rate))
@@ -117,7 +120,9 @@ ApplyInfluenceFeedback::Execute (OperationContext &context, Transaction &tx) con
   const double alpha_s = core::AlphaS (cfg.sensitivity, p_ctx.u_t);
   const double rate_target_new
       = p_ctx.rate_target * (1.0 + constants::kGainMedium * mean_influence);
+  const double prev_rate_target = p_ctx.rate_target;
   p_ctx.rate_target = core::Ewma (p_ctx.rate_target, rate_target_new, alpha_s);
+  const double rate_delta = p_ctx.rate_target - prev_rate_target;
 
   // sustained_influence ← EWMA(sustained_influence, mean_influence, α =
   // 2/(L_sustain(T)+1))
@@ -131,9 +136,21 @@ ApplyInfluenceFeedback::Execute (OperationContext &context, Transaction &tx) con
 
   // hysteresis_t ← clamp(hysteresis_t × (1 + 0.05 × sustained_influence),
   // band_min, band_max)
+  const double prev_hysteresis = p_ctx.hysteresis;
   p_ctx.hysteresis = core::Clamp (
       p_ctx.hysteresis * (1.0 + constants::kGainSmall * p_ctx.sustained_influence),
       constants::kHysteresisBandMin, constants::kHysteresisBandMax);
+  const double hysteresis_delta = p_ctx.hysteresis - prev_hysteresis;
+
+  telemetry::LogDebug ("cortext.influence",
+                       { telemetry::Attribute::Double ("mean_influence",
+                                                       mean_influence),
+                         telemetry::Attribute::Double ("attention_delta",
+                                                       attention_delta),
+                         telemetry::Attribute::Double ("rate_delta",
+                                                       rate_delta),
+                         telemetry::Attribute::Double ("hysteresis_delta",
+                                                       hysteresis_delta) });
 }
 
 } // namespace cortext::operations

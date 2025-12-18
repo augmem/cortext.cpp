@@ -1,21 +1,67 @@
 #include "cortext/operations/memory_storage.hpp"
+#include "cortext/processor/accumulator_state.hpp"
 #include "cortext/processor/operation_context.hpp"
 #include "cortext/signal.hpp"
 #include "cortext/store/schema_helpers.hpp"
 #include "cortext/store/store.hpp"
 #include "cortext/store/utils.hpp"
 #include "cortext/telemetry/telemetry.hpp"
+#include <algorithm>
 #include <cstring>
 #include <string>
+#include <unordered_map>
 
 namespace cortext::operations
 {
+
+namespace
+{
+
+/// @brief Determine primary modality from signal records (majority vote)
+std::string
+GetPrimaryModality (const std::vector<SignalRecord> &signals,
+                    const std::string &fallback_modality)
+{
+  if (signals.empty ())
+    {
+      return fallback_modality;
+    }
+
+  std::unordered_map<std::string, int> counts;
+  for (const auto &sig : signals)
+    {
+      counts[sig.modality]++;
+    }
+
+  std::string primary = signals[0].modality;
+  int max_count = 0;
+  for (const auto &kv : counts)
+    {
+      if (kv.second > max_count)
+        {
+          max_count = kv.second;
+          primary = kv.first;
+        }
+    }
+  return primary;
+}
+
+/// @brief Serialize 6d emotion/mood vector to blob
+std::vector<char>
+SerializeEmotionVector (const std::array<double, 6> &vec)
+{
+  std::vector<char> blob (sizeof (double) * 6);
+  std::memcpy (blob.data (), vec.data (), blob.size ());
+  return blob;
+}
+
+} // namespace
 
 void
 MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
 {
   // Check write gate decision - if rejected, discard entirely
-  if (!context.GetWriteDecision ())
+  if (!context.GetAccumulatorWriteDecision ())
     {
       telemetry::AddCounter ("cortext.memory_storage.rejected_total", 1);
       return;
@@ -23,19 +69,23 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
 
   const auto &signal = context.GetSignal ();
 
-  // Check if there's a payload to store
-  if (!signal.payload || signal.payload->empty ())
-    {
-      telemetry::AddCounter ("cortext.memory_storage.no_payload_total", 1);
-      return;
-    }
-
   Store *store = context.GetStore ();
   if (!store)
     {
       telemetry::AddCounter ("cortext.memory_storage.no_store_total", 1);
       return;
     }
+
+  auto &p_ctx = context.GetProcessorContext ();
+
+  // Get accumulator state for this source
+  auto acc_it = p_ctx.accumulator_states.find (signal.source_id);
+  if (acc_it == p_ctx.accumulator_states.end ())
+    {
+      telemetry::AddCounter ("cortext.memory_storage.no_accumulator_total", 1);
+      return;
+    }
+  auto &acc = acc_it->second;
 
   // Use nested transaction for atomicity - all writes succeed or none
   auto savepoint = tx.Begin ();
@@ -46,41 +96,52 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
       using store::BlobFromAny;
       using store::EigenToFloatVec;
 
+      // Section 4.4: Use representative embedding if available (memory write)
+      const auto &rep_emb = context.GetRepresentativeEmbedding ();
+      const Eigen::VectorXf &embedding_to_store
+          = rep_emb.has_value () ? *rep_emb : signal.embedding;
+
       // Convert embedding from Eigen to vector<float> for SQL storage
-      const std::vector<float> emb_vec = EigenToFloatVec (signal.embedding);
+      const std::vector<float> emb_vec = EigenToFloatVec (embedding_to_store);
 
-      // Convert embedding to char blob for sqlite-vec storage
-      std::vector<char> emb_blob (sizeof (float) * emb_vec.size ());
-      std::memcpy (emb_blob.data (), emb_vec.data (), emb_blob.size ());
+      // 1. Compute memory-level aggregates from accumulator (Section 4.4)
+      const int n_signals = std::max (acc.n_signals, 1);
+      const double s_avg = acc.s_sum / static_cast<double> (n_signals);
+      const double s_max = acc.s_max;
+      const uint64_t start_ts = acc.t_start;
+      const uint64_t end_ts = signal.timestamp;
 
-      // 1. Store payload in objstore
-      auto blob_rows = savepoint->Execute ("SELECT objstore_put(?1) AS id",
-                                           { *signal.payload });
-      if (blob_rows.empty () || blob_rows[0].count ("id") == 0)
+      // 2. Get emotion and mood from context (Section 6.1.1)
+      const auto &emotion_probs = context.GetEmotionProbabilities ();
+      const auto &mood_vec = p_ctx.mood_vector;
+      const std::vector<char> emotion_blob = SerializeEmotionVector (emotion_probs);
+      const std::vector<char> mood_blob = SerializeEmotionVector (mood_vec);
+
+      // 3. Determine primary modality from tracked signals
+      const std::string primary_modality
+          = GetPrimaryModality (acc.signals, signal.modality);
+
+      // 4. Store content blob (use current signal's payload if available)
+      std::vector<unsigned char> content_blob_id;
+      if (signal.payload && !signal.payload->empty ())
         {
-          savepoint->Rollback ();
-          telemetry::AddCounter (
-              "cortext.memory_storage.objstore_error_total", 1);
-          return;
-        }
-      const auto blob_id = BlobFromAny (blob_rows[0].at ("id"));
-      if (blob_id.empty ())
-        {
-          savepoint->Rollback ();
-          telemetry::AddCounter (
-              "cortext.memory_storage.objstore_error_total", 1);
-          return;
+          auto blob_rows = savepoint->Execute ("SELECT objstore_put(?1) AS id",
+                                               { *signal.payload });
+          if (!blob_rows.empty () && blob_rows[0].count ("id") != 0)
+            {
+              content_blob_id = BlobFromAny (blob_rows[0].at ("id"));
+            }
         }
 
-      // 2. Insert embedding with initial metadata (unified embeddings table)
-      // Note: sqlite-vec doesn't support DEFAULT values, so we must set all fields
+      // 5. Insert embedding with initial metadata (unified embeddings table)
       const std::string insert_sql = std::string ("INSERT INTO embeddings (")
-                                     + store::kEmbeddingsInsertColumns + ") VALUES ("
+                                     + store::kEmbeddingsInsertColumns
+                                     + ") VALUES ("
                                      + store::kEmbeddingsMemoryDefaults + ")";
       savepoint->Execute (insert_sql,
-                          { emb_vec, static_cast<long long> (signal.timestamp) });
-      auto id_rows
-          = savepoint->Execute ("SELECT last_insert_rowid() AS id", {});
+                          { emb_vec, static_cast<long long> (end_ts) });
+
+      auto id_rows = savepoint->Execute ("SELECT last_insert_rowid() AS id", {});
       if (id_rows.empty () || id_rows[0].count ("id") == 0)
         {
           savepoint->Rollback ();
@@ -98,19 +159,45 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
         }
       const long long embedding_id = *id_opt;
 
-      // 3. Insert memories (metadata)
+      // 6. Insert MEMORIES row with aggregated metadata (per database.md schema)
+      std::any episode_id_any;
+      if (p_ctx.episode_start_ts > 0)
+        {
+          episode_id_any = static_cast<long long> (p_ctx.episode_start_ts);
+        }
+
       savepoint->Execute (
-          "INSERT INTO memories (embedding_id, modality, mime, source_id, "
-          "timestamp, width, height, channels, sample_rate, num_samples, "
-          "blob_id) "
-          "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-          { embedding_id, signal.modality, signal.mimetype, signal.source_id,
-            static_cast<long long> (signal.timestamp),
-            static_cast<long long> (signal.width),
-            static_cast<long long> (signal.height),
-            static_cast<long long> (signal.channels),
-            static_cast<long long> (signal.sample_rate),
-            static_cast<long long> (signal.num_samples), blob_id });
+          "INSERT INTO memories ("
+          "  embedding_id, start_ts, end_ts, n_signals, primary_modality, "
+          "  content_blob_id, s_max, s_avg, emotion, ambient_mood, "
+          "  episode_id, status"
+          ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          { embedding_id, static_cast<long long> (start_ts),
+            static_cast<long long> (end_ts),
+            static_cast<long long> (n_signals), primary_modality,
+            content_blob_id.empty () ? std::any () : std::any (content_blob_id),
+            s_max, s_avg, emotion_blob, mood_blob, episode_id_any,
+            std::string ("active") });
+
+      // 7. Insert SIGNALS rows (one per tracked signal)
+      for (const auto &sig_rec : acc.signals)
+        {
+          savepoint->Execute (
+              "INSERT INTO signals ("
+              "  embedding_id, timestamp, modality, mime, blob_id, "
+              "  serial_position, score"
+              ") VALUES (?, ?, ?, ?, ?, ?, ?)",
+              { embedding_id, static_cast<long long> (sig_rec.timestamp),
+                sig_rec.modality, sig_rec.mime,
+                sig_rec.blob_id.empty ()
+                    ? std::any ()
+                    : std::any (sig_rec.blob_id),
+                static_cast<long long> (sig_rec.serial_position),
+                sig_rec.score });
+        }
+
+      // 8. Clear signal tracking from accumulator (signals now persisted)
+      acc.signals.clear ();
 
       // Commit the savepoint
       savepoint->Commit ();
@@ -118,6 +205,18 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
       // Set stored_embedding_id in context for output
       context.SetStoredEmbeddingId (embedding_id);
       telemetry::AddCounter ("cortext.memory_storage.stored_total", 1);
+      telemetry::AddCounter ("cortext.memory_storage.signals_written_total",
+                             static_cast<int64_t> (n_signals));
+
+      // Debug logging
+      telemetry::LogDebug (
+          "cortext.memory_storage",
+          { telemetry::Attribute::Bool ("stored", true),
+            telemetry::Attribute::Int64 ("embedding_id", embedding_id),
+            telemetry::Attribute::Int64 ("n_signals", n_signals),
+            telemetry::Attribute::String ("primary_modality", primary_modality),
+            telemetry::Attribute::Double ("s_max", s_max),
+            telemetry::Attribute::Double ("s_avg", s_avg) });
     }
   catch (const std::exception &e)
     {

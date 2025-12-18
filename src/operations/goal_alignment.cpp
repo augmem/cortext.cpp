@@ -6,6 +6,7 @@
 #include "cortext/operations/metrics.hpp"
 #include "cortext/processor/operation_context.hpp"
 #include "cortext/store/store.hpp"
+#include "cortext/telemetry/telemetry.hpp"
 #include <algorithm>
 #include <any>
 #include <string>
@@ -195,6 +196,11 @@ ComputeGoalAlignment::Execute (OperationContext &context, Transaction &tx) const
           * (cos + constants::kCosineToAlignmentOffset),
       constants::kNormalizedMin, constants::kNormalizedMax);
   context.SetMetric (operations::Metric::goal_alignment, ga);
+
+  telemetry::LogDebug("cortext.goal_alignment", {
+    telemetry::Attribute::Int64("goal_node_count", static_cast<long long>(goals.size())),
+    telemetry::Attribute::Double("alignment_score", ga)
+  });
 }
 
 } // namespace cortext::operations

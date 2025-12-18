@@ -4,6 +4,7 @@
 #include "cortext/core/knobs.hpp"
 #include "cortext/processor/operation_context.hpp"
 #include "cortext/store/store.hpp"
+#include "cortext/telemetry/telemetry.hpp"
 #include <any>
 #include <cmath>
 #include <string>
@@ -258,11 +259,16 @@ PropagateEmotionalCascade::Execute (OperationContext &context, Transaction &tx) 
 
   if (sources.empty ())
     {
+      telemetry::LogDebug("cortext.emotion_cascade", {
+        telemetry::Attribute::Int64("cascade_sources", 0),
+        telemetry::Attribute::Int64("max_hops", 0)
+      });
       return;
     }
 
   // Track which embeddings we've already processed to avoid duplicates
   std::unordered_set<long long> processed;
+  int max_hops = 0;
 
   for (const auto &src : sources)
     {
@@ -272,6 +278,9 @@ PropagateEmotionalCascade::Execute (OperationContext &context, Transaction &tx) 
                                                   : params.cascade_radius;
       const double decay = (src.cascade_decay > 0.0) ? src.cascade_decay
                                                      : params.cascade_decay;
+
+      if (radius > max_hops)
+        max_hops = radius;
 
       // Find neighbors via graph traversal
       auto neighbors = FindCascadeNeighbors (store, src.embedding_id, radius);
@@ -315,6 +324,11 @@ PropagateEmotionalCascade::Execute (OperationContext &context, Transaction &tx) 
                  decayed_bonus, now_ts });
         }
     }
+
+  telemetry::LogDebug("cortext.emotion_cascade", {
+    telemetry::Attribute::Int64("cascade_sources", static_cast<long long>(sources.size())),
+    telemetry::Attribute::Int64("max_hops", max_hops)
+  });
 }
 
 } // namespace cortext::operations

@@ -89,8 +89,8 @@ TEST_CASE ("Alg27 allows on MU path", "[operations][interrupt_gate]")
   pc.signals_processed = 100; // far from last interrupt
   pc.last_interrupt_tick = 0;
 
-  // Recent context centroid toward +X
-  pc.recent_context_embeddings.push_back (MakeUnit256 ({ 1.0f, 0.0f, 0.0f }));
+  // Section 8.2: Recent memory centroids (μ_acc) toward +X
+  pc.recent_memory_centroids.push_back (MakeUnit256 ({ 1.0f, 0.0f, 0.0f }));
 
   // No included set to maximize novelty/relevance for this allow case
 
@@ -138,7 +138,8 @@ TEST_CASE ("Alg27 duplicate suppression", "[operations][interrupt_gate]")
   ProcessorContext pc;
   pc.signals_processed = 50;
   pc.last_interrupt_tick = -1000;
-  pc.recent_context_embeddings.push_back (MakeUnit256 ({ 1.0f, 0.0f }));
+  // Section 8.2: Recent memory centroids
+  pc.recent_memory_centroids.push_back (MakeUnit256 ({ 1.0f, 0.0f }));
 
   // Included contains a vector almost identical to candidate
   ProcessorContext::WMSlot slot;
@@ -187,7 +188,8 @@ TEST_CASE ("Alg27 refractory raises thresholds",
   ProcessorContext pc;
   pc.signals_processed = 101;
   pc.last_interrupt_tick = 100; // very recent
-  pc.recent_context_embeddings.push_back (MakeUnit256 ({ 0.0f, 1.0f }));
+  // Section 8.2: Recent memory centroids
+  pc.recent_memory_centroids.push_back (MakeUnit256 ({ 0.0f, 1.0f }));
 
   // Insert candidate embedding into store
   auto cand_emb = MakeUnit256 ({ 0.0f, 1.0f });
@@ -229,9 +231,9 @@ TEST_CASE ("Alg27 embedding novelty high for orthogonal candidate",
   pc.signals_processed = 10;
   pc.last_interrupt_tick = -1000;
 
-  // Context window with two embeddings in X-Y plane
-  pc.recent_context_embeddings.push_back (MakeUnit256 ({ 1.0f, 0.0f, 0.0f }));
-  pc.recent_context_embeddings.push_back (MakeUnit256 ({ 0.0f, 1.0f, 0.0f }));
+  // Section 8.2: Context window with two memory centroids in X-Y plane
+  pc.recent_memory_centroids.push_back (MakeUnit256 ({ 1.0f, 0.0f, 0.0f }));
+  pc.recent_memory_centroids.push_back (MakeUnit256 ({ 0.0f, 1.0f, 0.0f }));
 
   // Insert candidate embedding into store
   auto cand_emb = MakeUnit256 ({ 0.0f, 0.0f, 1.0f });
@@ -273,8 +275,8 @@ TEST_CASE ("Alg27 embedding novelty low for similar candidate",
   pc.signals_processed = 10;
   pc.last_interrupt_tick = -1000;
 
-  // Context window with one embedding
-  pc.recent_context_embeddings.push_back (MakeUnit256 ({ 1.0f, 0.0f, 0.0f }));
+  // Section 8.2: Context window with one memory centroid
+  pc.recent_memory_centroids.push_back (MakeUnit256 ({ 1.0f, 0.0f, 0.0f }));
 
   // Insert candidate embedding into store
   auto cand_emb = MakeUnit256 ({ 0.99f, 0.1f, 0.0f });
@@ -359,8 +361,8 @@ TEST_CASE ("Alg27 Section 8.3.1 Write Exclusion Filter prevents self-triggering"
   pc.signals_processed = 10;
   pc.last_interrupt_tick = -1000;
 
-  // Context window with one embedding for centroid
-  pc.recent_context_embeddings.push_back (MakeUnit256 ({ 1.0f, 0.0f, 0.0f }));
+  // Section 8.2: Context window uses recent_memory_centroids for centroid
+  pc.recent_memory_centroids.push_back (MakeUnit256 ({ 1.0f, 0.0f, 0.0f }));
 
   // Create candidate embedding that would normally be allowed
   auto cand_emb = MakeUnit256 ({ 0.95f, 0.05f, 0.0f });
@@ -406,8 +408,8 @@ TEST_CASE ("Alg27 Section 8.3.1 mixes eligible and ineligible candidates",
   pc.signals_processed = 100;
   pc.last_interrupt_tick = 0;
 
-  // Context centroid toward +X
-  pc.recent_context_embeddings.push_back (MakeUnit256 ({ 1.0f, 0.0f, 0.0f }));
+  // Section 8.2: Context centroid from recent memory centroids toward +X
+  pc.recent_memory_centroids.push_back (MakeUnit256 ({ 1.0f, 0.0f, 0.0f }));
 
   // Candidate 1: Old embedding (eligible) - strongly aligned
   auto cand1_emb = MakeUnit256 ({ 0.95f, 0.05f, 0.0f });

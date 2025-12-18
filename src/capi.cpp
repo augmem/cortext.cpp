@@ -68,7 +68,7 @@ extern "C"
   }
 
   int
-  cortext_process_text (cortext_handle h, const char *text, uint64_t timestamp,
+  cortext_process_text (cortext_handle h, const char *text,
                         const char *source_id)
   {
     auto *p = cast_handle (h);
@@ -78,8 +78,7 @@ extern "C"
       }
     try
       {
-        (void)p->ProcessText (std::string (text), timestamp,
-                              std::string (source_id));
+        (void)p->ProcessText (std::string (text), std::string (source_id));
         return 0;
       }
     catch (...)
@@ -90,8 +89,7 @@ extern "C"
 
   int
   cortext_process_audio (cortext_handle h, const float *pcm,
-                         size_t num_samples, uint64_t timestamp,
-                         const char *source_id)
+                         size_t num_samples, const char *source_id)
   {
     auto *p = cast_handle (h);
     if (!p || !pcm || !source_id)
@@ -100,8 +98,7 @@ extern "C"
       }
     try
       {
-        (void)p->ProcessAudio (pcm, num_samples, timestamp,
-                               std::string (source_id));
+        (void)p->ProcessAudio (pcm, num_samples, std::string (source_id));
         return 0;
       }
     catch (...)
@@ -112,8 +109,7 @@ extern "C"
 
   int
   cortext_process_image (cortext_handle h, const uint8_t *data, int width,
-                         int height, int channels, uint64_t timestamp,
-                         const char *source_id)
+                         int height, int channels, const char *source_id)
   {
     auto *p = cast_handle (h);
     if (!p || !data || !source_id)
@@ -122,7 +118,7 @@ extern "C"
       }
     try
       {
-        (void)p->ProcessImage (data, width, height, channels, timestamp,
+        (void)p->ProcessImage (data, width, height, channels,
                                std::string (source_id));
         return 0;
       }
@@ -133,7 +129,7 @@ extern "C"
   }
 
   int
-  cortext_consolidate (cortext_handle h, uint64_t now_timestamp)
+  cortext_consolidate (cortext_handle h)
   {
     auto *p = cast_handle (h);
     if (!p)
@@ -142,7 +138,7 @@ extern "C"
       }
     try
       {
-        (void)p->Consolidate (now_timestamp);
+        (void)p->Consolidate ();
         return 0;
       }
     catch (...)

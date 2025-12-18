@@ -5,6 +5,7 @@
 #include "cortext/core/utils.hpp"
 #include "cortext/operations/constants.hpp"
 #include "cortext/processor/operation_context.hpp"
+#include "cortext/telemetry/telemetry.hpp"
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -66,28 +67,27 @@ WorkingMemory::Execute (OperationContext &context, Transaction &tx) const
   const auto &cfg = context.GetConfig ();
   const auto &signal = context.GetSignal ();
 
-  // Maintenance: decay strengths and update timestamps.
+  // Maintenance: decay strengths based on elapsed time.
+  // NOTE: We do NOT evict slots during passive decay. Slots should only be
+  // replaced when at capacity and a new signal is accepted. This prevents
+  // WM from going empty when signals are rejected or during idle periods.
+  // NOTE: We do NOT update last_ts during passive decay - recency should only
+  // reflect when a slot was actually accessed (chunked, rehearsed, or inserted).
   const double cost_per_slot
       = core::WMMaintenanceCostPerSlot (cfg.sensitivity);
-  const double now_s = static_cast<double> (signal.timestamp);
-  {
-    std::vector<ProcessorContext::WMSlot> kept;
-    kept.reserve (p_ctx.wm_slots.size ());
-    for (auto &slot : p_ctx.wm_slots)
-      {
-        const double last = slot.last_ts;
-        const double dt = std::max (0.0, now_s - last);
-        const double strength_after
-            = std::max (0.0, slot.strength - cost_per_slot * dt);
-        slot.strength = strength_after;
-        slot.last_ts = now_s;
-        if (strength_after > 0.0 && slot.embedding.size () > 0)
-          {
-            kept.push_back (slot);
-          }
-      }
-    p_ctx.wm_slots.swap (kept);
-  }
+  // Convert timestamp from milliseconds to seconds for decay calculations
+  const double now_s = static_cast<double> (signal.timestamp) / 1000.0;
+  for (auto &slot : p_ctx.wm_slots)
+    {
+      const double last = slot.last_ts;
+      const double dt = std::max (0.0, now_s - last);
+      // Decay strength but floor at a minimum to preserve slot
+      // Slot will be replaced via eviction when capacity is reached
+      const double strength_after
+          = std::max (0.01, slot.strength - cost_per_slot * dt);
+      slot.strength = strength_after;
+      // Do NOT update last_ts here - only update when slot is accessed
+    }
 
   // Complexity penalty from entropy over strengths.
   double complexity_penalty = 0.0;
@@ -106,40 +106,77 @@ WorkingMemory::Execute (OperationContext &context, Transaction &tx) const
   p_ctx.wm_last_accepted = false;
   p_ctx.wm_last_chunked = false;
 
-  if (signal.embedding.size () == 0)
+  // Section 6.1.3: Memory-Level Gating
+  // Working memory gating evaluates coherent memories at accumulation boundaries,
+  // not individual signals. Only proceed if a memory write was accepted.
+  if (!context.GetAccumulatorWriteDecision ())
     {
-      return; // nothing to gate
+      return; // No memory boundary - skip WM gating
     }
 
-  const double benefit = core::Clamp01 (
-      context.GetCompositeScore ().value_or (p_ctx.weight_relevance));
+  // Get memory-level data: e_rep and S_window
+  const auto &rep_emb_opt = context.GetRepresentativeEmbedding ();
+  if (!rep_emb_opt.has_value () || rep_emb_opt->size () == 0)
+    {
+      return; // No representative embedding available
+    }
+  const Eigen::VectorXf &e_rep = *rep_emb_opt;
+
+  // Get accumulator state for memory metadata
+  auto acc_it = p_ctx.accumulator_states.find (signal.source_id);
+  if (acc_it == p_ctx.accumulator_states.end ())
+    {
+      return; // No accumulator state
+    }
+  const auto &acc = acc_it->second;
+
+  // Section 6.1.3: memory_benefit = α × S_window + β × relevance + γ × novelty
+  // For simplicity, use S_window as the primary benefit (already computed in write_gate)
+  const double S_window = context.GetWindowScore ().value_or (0.0);
+  const double benefit = core::Clamp01 (S_window);
+
   // gate_threshold = lerp(0.1, 0.4, F) per Algorithm 24 spec
   // Higher Focus (narrower attention) => stricter gating (0.4)
   // Lower Focus (wider attention) => permissive gating (0.1)
   const double gate_threshold = core::WMGateThreshold (cfg.focus);
   const double margin = benefit - gate_threshold;
+  // Only charge maintenance cost for existing slots, not the prospective new one.
+  // This prevents a bootstrap problem where empty WM requires unreasonably high
+  // composite scores to accept the first item.
   const double cost_total
-      = cost_per_slot * (static_cast<double> (p_ctx.wm_slots.size ()) + 1.0)
+      = cost_per_slot * static_cast<double> (p_ctx.wm_slots.size ())
         + complexity_penalty;
 
   if (margin < cost_total)
     {
       // Reject
+      telemetry::LogDebug ("cortext.working_memory", {
+        telemetry::Attribute::Bool ("accepted", false),
+        telemetry::Attribute::String ("reason", "margin_below_cost"),
+        telemetry::Attribute::Int64 ("wm_slot_count", static_cast<int64_t> (p_ctx.wm_slots.size ())),
+        telemetry::Attribute::Double ("benefit", benefit),
+        telemetry::Attribute::Double ("S_window", S_window),
+        telemetry::Attribute::Double ("gate_threshold", gate_threshold),
+        telemetry::Attribute::Double ("margin", margin),
+        telemetry::Attribute::Double ("cost_total", cost_total),
+        telemetry::Attribute::Double ("now_s", now_s),
+        telemetry::Attribute::Double ("cost_per_slot", cost_per_slot)
+      });
       return;
     }
 
-  // Try to chunk into best-matching slot.
+  // Section 6.1.4: Try to chunk into best-matching slot using e_rep.
   int best_idx = -1;
   double best_sim = -1.0;
   for (int i = 0; i < static_cast<int> (p_ctx.wm_slots.size ()); ++i)
     {
       const auto &slot = p_ctx.wm_slots[static_cast<size_t> (i)];
-      if (slot.embedding.size () != signal.embedding.size ())
+      if (slot.embedding.size () != e_rep.size ())
         {
           continue;
         }
       const double sim
-          = core::Clamp (core::CosineSimilarity (slot.embedding, signal.embedding),
+          = core::Clamp (core::CosineSimilarity (slot.embedding, e_rep),
                          constants::kNormalizedMin, constants::kNormalizedMax);
       if (sim > best_sim)
         {
@@ -155,8 +192,7 @@ WorkingMemory::Execute (OperationContext &context, Transaction &tx) const
       const double add_strength = WMStrengthBase (cfg.stability) * benefit;
       const double alpha = std::max (constants::kTiny, slot.strength);
       const double beta = std::max (constants::kTiny, add_strength);
-      Eigen::VectorXf new_vec
-          = alpha * slot.embedding + beta * signal.embedding;
+      Eigen::VectorXf new_vec = alpha * slot.embedding + beta * e_rep;
       const double norm = new_vec.norm ();
       if (norm > constants::kNormEpsilon)
         {
@@ -168,13 +204,36 @@ WorkingMemory::Execute (OperationContext &context, Transaction &tx) const
                       std::max (constants::kNormalizedMin,
                                 slot.strength + add_strength));
       slot.last_ts = now_s;
+
+      // Update memory-level metadata (Section 6.1.1)
+      slot.n_signals += acc.n_signals;
+      slot.s_max = std::max (slot.s_max, acc.s_max);
+      slot.s_avg = (slot.s_avg + acc.s_sum / std::max (1, acc.n_signals)) / 2.0;
+      slot.drift_acc += acc.drift_acc;
+      slot.s_emotion_max = std::max (slot.s_emotion_max, acc.s_emotion_max);
+      if (acc.n_signals > 0)
+        {
+          const double new_arousal_avg
+              = acc.s_arousal_sum / static_cast<double> (acc.n_signals);
+          slot.s_arousal_avg = (slot.s_arousal_avg + new_arousal_avg) / 2.0;
+        }
+
       p_ctx.wm_last_accepted = true;
       p_ctx.wm_last_chunked = true;
+      telemetry::LogDebug ("cortext.working_memory", {
+        telemetry::Attribute::Bool ("accepted", true),
+        telemetry::Attribute::Bool ("chunked", true),
+        telemetry::Attribute::Int64 ("wm_slot_count", static_cast<int64_t> (p_ctx.wm_slots.size ())),
+        telemetry::Attribute::Int64 ("chunked_into_slot", static_cast<int64_t> (best_idx)),
+        telemetry::Attribute::Double ("best_sim", best_sim),
+        telemetry::Attribute::Double ("chunk_threshold", chunk_threshold),
+        telemetry::Attribute::Double ("now_s", now_s)
+      });
       return;
     }
 
-  // Input-based rehearsal (task 4.2): boost strength for "close" slots without
-  // merging. Slots with similarity in [rehearsal_threshold, chunk_threshold)
+  // Input-based rehearsal: boost strength for "close" slots without merging.
+  // Slots with similarity in [rehearsal_threshold, chunk_threshold)
   // get a strength boost but embedding is NOT merged.
   const double rehearsal_threshold = core::WMRehearsalThreshold (cfg.focus);
   if (best_idx >= 0 && best_sim >= rehearsal_threshold)
@@ -187,8 +246,8 @@ WorkingMemory::Execute (OperationContext &context, Transaction &tx) const
       // Continue to insert logic - rehearsal doesn't prevent new slot creation
     }
 
-  // Retrieval-based rehearsal (task 4.3): boost WM slots that match retrieved
-  // memories. Uses chunking_threshold as the similarity requirement per spec.
+  // Retrieval-based rehearsal: boost WM slots that match retrieved memories.
+  // Uses chunking_threshold as the similarity requirement per spec.
   const auto &retrieved = context.GetRetrievedMemoryEmbeddings ();
   if (!retrieved.empty ())
     {
@@ -209,7 +268,7 @@ WorkingMemory::Execute (OperationContext &context, Transaction &tx) const
                   slot.strength
                       = std::min (constants::kStrengthMax, slot.strength + boost);
                   slot.last_ts = now_s;
-                  break; // Only boost once per slot per signal
+                  break; // Only boost once per slot per memory
                 }
             }
         }
@@ -257,12 +316,15 @@ WorkingMemory::Execute (OperationContext &context, Transaction &tx) const
         }
     }
 
-  Eigen::VectorXf vec = signal.embedding;
+  // Normalize e_rep for storage
+  Eigen::VectorXf vec = e_rep;
   const double nrm = vec.norm ();
   if (nrm > constants::kNormEpsilon)
     {
       vec = vec / static_cast<float> (nrm);
     }
+
+  // Create new WMSlot with memory-level metadata (Section 6.1.1)
   ProcessorContext::WMSlot slot;
   slot.embedding = vec;
   slot.strength
@@ -273,9 +335,34 @@ WorkingMemory::Execute (OperationContext &context, Transaction &tx) const
                                    + constants::kOneHalf * benefit)));
   slot.last_ts = now_s;
   slot.pos_index = p_ctx.signals_processed;
+
+  // Memory-level metadata from accumulator (Section 6.1.1)
+  slot.n_signals = acc.n_signals;
+  slot.s_max = acc.s_max;
+  slot.s_avg = acc.n_signals > 0 ? acc.s_sum / static_cast<double> (acc.n_signals) : 0.0;
+  slot.drift_acc = acc.drift_acc;
+  slot.mem_elapsed
+      = static_cast<double> (signal.timestamp - acc.t_start) / 1000.0;
+  slot.s_emotion_max = acc.s_emotion_max;
+  slot.s_arousal_avg
+      = acc.n_signals > 0
+            ? acc.s_arousal_sum / static_cast<double> (acc.n_signals)
+            : 0.0;
+
   p_ctx.wm_slots.push_back (std::move (slot));
   p_ctx.wm_last_accepted = true;
   p_ctx.wm_last_chunked = false;
+
+  telemetry::LogDebug ("cortext.working_memory", {
+    telemetry::Attribute::Bool ("accepted", true),
+    telemetry::Attribute::Bool ("chunked", false),
+    telemetry::Attribute::Int64 ("wm_slot_count", static_cast<int64_t> (p_ctx.wm_slots.size ())),
+    telemetry::Attribute::Double ("benefit", benefit),
+    telemetry::Attribute::Double ("S_window", S_window),
+    telemetry::Attribute::Double ("gate_threshold", gate_threshold),
+    telemetry::Attribute::Double ("cost_total", cost_total),
+    telemetry::Attribute::Double ("now_s", now_s)
+  });
 }
 
 } // namespace cortext::operations

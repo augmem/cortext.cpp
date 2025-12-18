@@ -4,6 +4,7 @@
 #include "cortext/core/constants.hpp"
 #include "cortext/operations/constants.hpp"
 #include "cortext/processor/operation_context.hpp"
+#include "cortext/telemetry/telemetry.hpp"
 
 namespace cortext::operations
 {
@@ -19,6 +20,11 @@ ApplyFocusFeedback::Execute (OperationContext &context, Transaction &tx) const
   const double alpha_f = constants::kAlphaFBase;
   const double beta_f = constants::kBetaFBase;
 
+  double contextual_gain_mean = 0.0;
+  double weight_adjustment = 0.0;
+  double attention_width_delta = 0.0;
+  int event_count = 0;
+
   const auto &events = context.GetMemoryUsageEvents ();
   for (const auto &e : events)
     {
@@ -27,6 +33,12 @@ ApplyFocusFeedback::Execute (OperationContext &context, Transaction &tx) const
           continue;
         }
       const double cg = *e.contextual_gain;
+      contextual_gain_mean += cg;
+      ++event_count;
+
+      const double prev_weight = p_ctx.weight_relevance;
+      const double prev_width = p_ctx.attention_width;
+
       if (cg > 0.0)
         {
           // Positive gain: boost relevance, narrow attention
@@ -46,7 +58,23 @@ ApplyFocusFeedback::Execute (OperationContext &context, Transaction &tx) const
                              static_cast<double> (core::kAttentionWidthMin),
                              static_cast<double> (core::kAttentionWidthMax));
         }
+
+      weight_adjustment += (p_ctx.weight_relevance - prev_weight);
+      attention_width_delta += (p_ctx.attention_width - prev_width);
     }
+
+  if (event_count > 0)
+    {
+      contextual_gain_mean /= event_count;
+    }
+
+  telemetry::LogDebug ("cortext.focus_feedback",
+                       { telemetry::Attribute::Double ("contextual_gain_mean",
+                                                       contextual_gain_mean),
+                         telemetry::Attribute::Double ("weight_adjustment",
+                                                       weight_adjustment),
+                         telemetry::Attribute::Double ("attention_width_delta",
+                                                       attention_width_delta) });
 }
 
 } // namespace cortext::operations

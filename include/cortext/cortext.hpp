@@ -94,21 +94,32 @@ public:
                                           const std::string &db_path,
                                           const std::string &models_dir);
 
-  /// @brief Process text input (stub - no embeddings yet).
-  Context ProcessText (const std::string &text, std::uint64_t timestamp,
-                       const std::string &source_id);
+  /// @brief Process text input.
+  /// @param text The text content to process.
+  /// @param source_id Identifier for the signal source (e.g., "chat/user").
+  /// @return Context with retrieved memories and processing output.
+  Context ProcessText (const std::string &text, const std::string &source_id);
 
-  /// @brief Process audio PCM input (stub - no embeddings yet).
+  /// @brief Process audio PCM input.
+  /// @param pcm Pointer to PCM float samples (16kHz mono expected).
+  /// @param num_samples Number of samples.
+  /// @param source_id Identifier for the signal source.
+  /// @return Context with retrieved memories and processing output.
   Context ProcessAudio (const float *pcm, std::size_t num_samples,
-                        std::uint64_t timestamp, const std::string &source_id);
-
-  /// @brief Process image input (stub - no embeddings yet).
-  Context ProcessImage (const std::uint8_t *data, int width, int height,
-                        int channels, std::uint64_t timestamp,
                         const std::string &source_id);
 
+  /// @brief Process image input.
+  /// @param data Raw pixel data (RGB/RGBA).
+  /// @param width Image width.
+  /// @param height Image height.
+  /// @param channels Number of channels (3 for RGB, 4 for RGBA).
+  /// @param source_id Identifier for the signal source.
+  /// @return Context with retrieved memories and processing output.
+  Context ProcessImage (const std::uint8_t *data, int width, int height,
+                        int channels, const std::string &source_id);
+
   /// @brief Attempt to trigger consolidation if conditions allow.
-  Context Consolidate (std::uint64_t now_timestamp);
+  Context Consolidate ();
 
   /// @brief Flush/commit any pending episode writes.
   void Flush ();

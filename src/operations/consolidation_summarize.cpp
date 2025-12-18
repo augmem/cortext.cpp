@@ -9,6 +9,7 @@
 #include "cortext/store/schema_helpers.hpp"
 #include "cortext/store/store.hpp"
 #include "cortext/summarizer/summarizer.hpp"
+#include "cortext/telemetry/telemetry.hpp"
 #include <any>
 #include <ctime>
 #include <sstream>
@@ -272,7 +273,13 @@ ConsolidationSummarize::Execute (OperationContext &context, Transaction &tx) con
             "(SELECT source_embedding_id FROM consolidation_sources)");
 
   // 9. Pass extraction requests to next operation.
+  const int jobs_queued = static_cast<int>(extraction_requests.size());
   context.SetExtractionRequests (std::move (extraction_requests));
+
+  telemetry::LogDebug("cortext.consolidation_summarize", {
+    telemetry::Attribute::Int64("summary_count", summary_counter),
+    telemetry::Attribute::Int64("extraction_jobs_queued", jobs_queued)
+  });
 }
 
 } // namespace cortext::operations

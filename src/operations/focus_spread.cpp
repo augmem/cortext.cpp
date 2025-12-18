@@ -3,6 +3,7 @@
 #include "cortext/core/algorithms.hpp"
 #include "cortext/core/knobs.hpp"
 #include "cortext/processor/operation_context.hpp"
+#include "cortext/telemetry/telemetry.hpp"
 #include <algorithm>
 #include <cmath>
 #include <vector>
@@ -71,6 +72,11 @@ ComputeFocusSpread::Execute (OperationContext &context, Transaction &tx) const
 
   const double focus_spread = core::Clamp (entropy / norm, 0.0, 1.0);
   context.SetMetric (operations::Metric::focus_spread, focus_spread);
+
+  telemetry::LogDebug("cortext.compute_focus_spread", {
+    telemetry::Attribute::Double("entropy", entropy),
+    telemetry::Attribute::Double("focus_spread", focus_spread)
+  });
 }
 
 } // namespace cortext::operations

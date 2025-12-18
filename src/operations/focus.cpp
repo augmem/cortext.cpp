@@ -5,6 +5,7 @@
 #include "cortext/core/knobs.hpp"
 #include "cortext/operations/constants.hpp"
 #include "cortext/processor/operation_context.hpp"
+#include "cortext/telemetry/telemetry.hpp"
 #include <Eigen/Dense>
 
 namespace cortext::operations
@@ -39,6 +40,17 @@ InitializeFocusPriors::Execute (OperationContext &context, Transaction &tx) cons
   p_ctx.weight_relevance = p_ctx.weight_relevance_prior;
   p_ctx.attention_width = p_ctx.attention_width_prior;
   p_ctx.focus_priors_initialized = true;
+
+  telemetry::LogDebug ("cortext.focus.init",
+                       { telemetry::Attribute::Double ("F", config.focus),
+                         telemetry::Attribute::Double (
+                             "weight_relevance_prior", p_ctx.weight_relevance_prior),
+                         telemetry::Attribute::Double (
+                             "coverage_gain_floor_prior", p_ctx.coverage_gain_floor_prior),
+                         telemetry::Attribute::Double (
+                             "mismatch_weight_prior", p_ctx.mismatch_weight_prior),
+                         telemetry::Attribute::Double (
+                             "attention_width_prior", p_ctx.attention_width_prior) });
 }
 
 void
@@ -93,6 +105,17 @@ UpdateFocus::Execute (OperationContext &context, Transaction &tx) const
     {
       p_ctx.recent_context_embeddings.pop_front ();
     }
+
+  telemetry::LogDebug (
+      "cortext.focus.update",
+      { telemetry::Attribute::Double ("observed_cosine", observed_cosine),
+        telemetry::Attribute::Double ("mapped_cosine", mapped_cosine),
+        telemetry::Attribute::Double ("alpha_f", alpha_f),
+        telemetry::Attribute::Double ("weight_relevance", p_ctx.weight_relevance),
+        telemetry::Attribute::Double ("attention_width", p_ctx.attention_width),
+        telemetry::Attribute::Int64 (
+            "context_window_size",
+            static_cast<int64_t> (p_ctx.recent_context_embeddings.size ())) });
 }
 
 } // namespace cortext::operations

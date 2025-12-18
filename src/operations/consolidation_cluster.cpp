@@ -5,6 +5,7 @@
 #include "cortext/core/utils.hpp"
 #include "cortext/processor/operation_context.hpp"
 #include "cortext/store/store.hpp"
+#include "cortext/telemetry/telemetry.hpp"
 #include <algorithm>
 #include <any>
 #include <cmath>
@@ -191,7 +192,12 @@ ConsolidationCluster::Execute (OperationContext &context, Transaction &tx) const
     }
 
   // 4. Pass clusters to next operation via context.
+  const int cluster_count = static_cast<int>(clusters.size());
   context.SetConsolidationClusters (std::move (clusters));
+
+  telemetry::LogDebug("cortext.consolidation_cluster", {
+    telemetry::Attribute::Int64("cluster_count", cluster_count)
+  });
 }
 
 } // namespace cortext::operations

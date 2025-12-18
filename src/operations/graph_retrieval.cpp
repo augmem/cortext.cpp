@@ -7,6 +7,7 @@
 #include "cortext/operations/constants.hpp"
 #include "cortext/processor/operation_context.hpp"
 #include "cortext/store/store.hpp"
+#include "cortext/telemetry/telemetry.hpp"
 #include <algorithm>
 #include <any>
 #include <cmath>
@@ -80,7 +81,25 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
 
   const auto &cfg = context.GetConfig ();
   auto &p_ctx = context.GetProcessorContext ();
-  const Eigen::VectorXf &q = context.GetSignal ().embedding;
+  const auto &signal = context.GetSignal ();
+
+  // Section 7.6: Use memory centroid (μ_acc) as query vector for both initial
+  // retrieval and re-ranking. This ensures retrieved memories are ranked by
+  // relevance to overall context rather than momentary signal fluctuations.
+  const Eigen::VectorXf *q_ptr = nullptr;
+  auto acc_it = p_ctx.accumulator_states.find (signal.source_id);
+  if (acc_it != p_ctx.accumulator_states.end () && acc_it->second.n_signals > 0
+      && acc_it->second.mu_acc.size () > 0)
+    {
+      q_ptr = &acc_it->second.mu_acc;
+    }
+  else
+    {
+      // Fallback to signal embedding if no accumulator state exists
+      q_ptr = &signal.embedding;
+    }
+  const Eigen::VectorXf &q = *q_ptr;
+
   if (q.size () == 0)
     {
       return;
@@ -140,7 +159,7 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
     }
 
   // Update last retrieval timestamp for consolidation idle-gating.
-  p_ctx.last_retrieval_ts = context.GetSignal ().timestamp;
+  p_ctx.last_retrieval_ts = signal.timestamp;
 
   // Graph expansion from seed embedding node IDs.
   std::vector<std::string> seed_nodes;
@@ -314,11 +333,11 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
           }
         CreateReinforcementEdges (
             tx, seed_ids,
-            static_cast<long long> (context.GetSignal ().timestamp));
+            static_cast<long long> (signal.timestamp));
       }
 
       // Cache seeds for implicit feedback detection
-      const uint64_t now_ts = context.GetSignal ().timestamp;
+      const uint64_t now_ts = signal.timestamp;
       auto &cache = p_ctx.recent_retrievals_cache;
       for (const auto &s : seeds)
         {
@@ -358,13 +377,13 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
       }
     CreateReinforcementEdges (
         tx, retrieved_ids,
-        static_cast<long long> (context.GetSignal ().timestamp));
+        static_cast<long long> (signal.timestamp));
   }
 
   // Cache retrieved embeddings for implicit feedback detection
   // (DetectMemoryUsage will compare future signals against these cached
   // retrievals)
-  const uint64_t now_ts = context.GetSignal ().timestamp;
+  const uint64_t now_ts = signal.timestamp;
   auto &cache = p_ctx.recent_retrievals_cache;
   for (const auto &s : scored)
     {
@@ -376,6 +395,13 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
     {
       cache.pop_front ();
     }
+
+  // Debug logging
+  telemetry::LogDebug ("cortext.graph_retrieval", {
+    telemetry::Attribute::Int64 ("seed_count", static_cast<int64_t> (seeds.size ())),
+    telemetry::Attribute::Int64 ("expansion_depth", static_cast<int64_t> (depth)),
+    telemetry::Attribute::Int64 ("final_candidate_count", static_cast<int64_t> (scored.size ()))
+  });
 }
 
 } // namespace cortext::operations

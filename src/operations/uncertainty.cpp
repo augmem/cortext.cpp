@@ -5,6 +5,7 @@
 #include "cortext/operations/metrics.hpp"
 #include "cortext/core/knobs.hpp"
 #include "cortext/processor/operation_context.hpp"
+#include "cortext/telemetry/telemetry.hpp"
 #include <algorithm>
 #include <cmath>
 #include <numeric>
@@ -12,6 +13,12 @@
 
 namespace cortext::operations
 {
+
+namespace
+{
+// Spec (§0.4, line 139): var_score_max = 0.25
+constexpr double kVarScoreMax = 0.25;
+}  // namespace
 
 void
 UpdateUncertainty::Execute (OperationContext &context, Transaction &tx) const
@@ -21,8 +28,8 @@ UpdateUncertainty::Execute (OperationContext &context, Transaction &tx) const
 
   // --- Primary structural estimator (algorithms.md §0.4) ---
   // u_raw = normalize_weighted_blend(
-  //   [var_recent_scores, focus_spread_entropy, coherence_complement,
-  //   novelty_surprise_spikes], weights = normalize([F, S, 1 − T, S])
+  //   [var_recent_norm, focus_spread, coherence_complement, novelty_surprise],
+  //   weights = normalize([S, F, 1 − T, S × (1 − T)])
   // )
 
   // Helper: variance of last w scores in [0,1]
@@ -56,7 +63,8 @@ UpdateUncertainty::Execute (OperationContext &context, Transaction &tx) const
         accum += d * d;
       }
     const double var = accum / static_cast<double> (m);
-    return core::Clamp (var, constants::kNormalizedMin,
+    // Spec (§0.4, line 141): var_recent_norm = clamp(var / var_score_max, 0, 1)
+    return core::Clamp (var / kVarScoreMax, constants::kNormalizedMin,
                         constants::kNormalizedMax);
   };
 
@@ -220,32 +228,34 @@ UpdateUncertainty::Execute (OperationContext &context, Transaction &tx) const
     }
 
   // Collect available metrics and corresponding weights.
+  // Spec (§0.4, line 153): weights_u = normalize([S, F, 1 - T, S × (1 - T)])
+  // Metrics order: var_recent_norm, focus_spread, coherence_complement, novelty_surprise
   std::vector<double> metrics;
   std::vector<double> weights;
   if (var_scores.has_value ())
     {
       metrics.push_back (*var_scores);
-      // Weight by Focus (F) per §0.4
-      weights.push_back (config.focus);
+      // Weight by Sensitivity (S) per §0.4 line 153
+      weights.push_back (config.sensitivity);
     }
   if (focus_entropy.has_value ())
     {
       metrics.push_back (*focus_entropy);
-      // Weight by Sensitivity (S) per §0.4
-      weights.push_back (config.sensitivity);
+      // Weight by Focus (F) per §0.4 line 153
+      weights.push_back (config.focus);
     }
   if (coh_complement.has_value ())
     {
       metrics.push_back (*coh_complement);
-      // Tie complement coherence to Stability inverse.
+      // Weight by (1 - T) per §0.4 line 153
       weights.push_back (1.0 - config.stability);
     }
   // Include novelty_surprise_spikes (fusion of Alg 4 + Alg 13) when available.
-  // Weight with Sensitivity (S) per §0.4.
+  // Weight with S × (1 - T) per §0.4 line 153.
   if (has_novelty_surprise)
     {
       metrics.push_back (novelty_surprise_spikes);
-      weights.push_back (config.sensitivity);
+      weights.push_back (config.sensitivity * (1.0 - config.stability));
     }
 
   double u_raw = 0.0;
@@ -287,6 +297,26 @@ UpdateUncertainty::Execute (OperationContext &context, Transaction &tx) const
   // u(t) = EWMA(u(t−1), u_raw(t), α = α_u(T))
   const double alpha_u = core::AlphaU (config.stability);
   p_ctx.u_t = core::Ewma (p_ctx.u_t, u_raw, alpha_u);
+
+  // Compute maturity for telemetry
+  const double count = p_ctx.signals_processed;
+  const double tau_m = core::TauM (config.stability);
+  const double maturity = 1.0 - std::exp (-count / tau_m);
+
+  telemetry::LogDebug("cortext.uncertainty", {
+    telemetry::Attribute::Double("maturity", maturity),
+    telemetry::Attribute::Double("u_raw", u_raw),
+    telemetry::Attribute::Double("u_t", p_ctx.u_t),
+    telemetry::Attribute::Double("var_scores", var_scores.value_or(-1.0)),
+    telemetry::Attribute::Double("focus_entropy", focus_entropy.value_or(-1.0)),
+    telemetry::Attribute::Double("coh_complement", coh_complement.value_or(-1.0)),
+    telemetry::Attribute::Double("novelty_surprise", has_novelty_surprise ? novelty_surprise_spikes : -1.0),
+    telemetry::Attribute::Double("weight_S", config.sensitivity),
+    telemetry::Attribute::Double("weight_F", config.focus),
+    telemetry::Attribute::Double("weight_1minusT", 1.0 - config.stability),
+    telemetry::Attribute::Double("weight_Sx1minusT", config.sensitivity * (1.0 - config.stability)),
+    telemetry::Attribute::Bool("used_primary", used_primary)
+  });
 }
 
 } // namespace cortext::operations

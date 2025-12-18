@@ -5,23 +5,56 @@
 #include <cortext/operations/constants.hpp>
 #include <cortext/operations/working_memory.hpp>
 #include <cortext/processor.hpp>
+#include <cortext/processor/accumulator_state.hpp>
 #include <cortext/processor/operation_context.hpp>
 
 using namespace cortext;
 using cortext::operations::WorkingMemory;
+
+namespace
+{
+/// @brief Set up memory-level gating context for WM tests
+/// Working memory now gates at memory boundaries (Section 6.1.3), not per-signal.
+void
+SetupMemoryGatingContext (OperationContext &ctx, ProcessorContext &pctx,
+                          const Signal &s, double window_score)
+{
+  // Create accumulator state with some signals
+  AccumulatorState acc;
+  acc.mu_acc = s.embedding;
+  acc.e_peak = s.embedding;
+  acc.n_signals = 3;
+  acc.s_sum = 1.5;
+  acc.s_max = 0.8;
+  acc.t_start = s.timestamp - 5000;  // Started 5 seconds ago
+  acc.drift_acc = 0.1;
+  acc.s_emotion_max = 0.5;
+  acc.s_arousal_sum = 0.3;
+  pctx.accumulator_states[s.source_id] = std::move (acc);
+
+  // Set memory write decision (triggers WM gating)
+  ctx.SetAccumulatorWriteDecision (true);
+
+  // Set representative embedding (e_rep)
+  ctx.SetRepresentativeEmbedding (s.embedding);
+
+  // Set window score (S_window)
+  ctx.SetWindowScore (window_score);
+}
+} // namespace
 
 TEST_CASE ("Alg24 inserts new WM slot when margin exceeds cost",
            "[operations][working_memory][insert]")
 {
   Signal s;
   s.embedding = Eigen::VectorXf::Constant (4, 1.0f);
-  s.timestamp = 100;
+  s.timestamp = 100000; // 100 seconds in ms
+  s.source_id = "test";
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
   cfg.focus = 0.5;
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;
-
 
   // Ensure empty WM and permissive threshold
   pctx.T_dynamic = 0.2;
@@ -29,7 +62,10 @@ TEST_CASE ("Alg24 inserts new WM slot when margin exceeds cost",
 
   WorkingMemory op;
   OperationContext ctx (s, pctx, cfg);
-  ctx.SetCompositeScore (0.9); // benefit high
+
+  // Memory-level gating: set up context for memory boundary
+  SetupMemoryGatingContext (ctx, pctx, s, 0.9);  // High S_window
+
   op.Execute (ctx, cortext::testing::GetNullTransaction ());
 
   REQUIRE (pctx.wm_last_accepted == true);
@@ -44,19 +80,19 @@ TEST_CASE ("Alg24 chunks into best-matching slot above threshold",
   Signal s;
   s.embedding = Eigen::VectorXf::Zero (3);
   s.embedding[0] = 1.0f; // unit along x
-  s.timestamp = 200;
+  s.timestamp = 200000; // 200 seconds in ms
+  s.source_id = "test";
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
   cfg.focus = 1.0;       // high focus → high chunk threshold ~0.9
   cfg.sensitivity = 0.3; // modest maintenance cost
   cfg.stability = 0.6;
 
-
   // Seed an existing slot with the same direction
   ProcessorContext::WMSlot slot;
   slot.embedding = s.embedding;
   slot.strength = 1.0;
-  slot.last_ts = static_cast<double> (s.timestamp);
+  slot.last_ts = static_cast<double> (s.timestamp) / 1000.0;  // In seconds
   slot.pos_index = 0;
   pctx.wm_slots.push_back (slot);
   const std::size_t before_size = pctx.wm_slots.size ();
@@ -66,7 +102,10 @@ TEST_CASE ("Alg24 chunks into best-matching slot above threshold",
   pctx.T_dynamic = 0.2;
   WorkingMemory op;
   OperationContext ctx (s, pctx, cfg);
-  ctx.SetCompositeScore (0.95);
+
+  // Memory-level gating: set up context for memory boundary
+  SetupMemoryGatingContext (ctx, pctx, s, 0.95);  // High S_window
+
   op.Execute (ctx, cortext::testing::GetNullTransaction ());
 
   REQUIRE (pctx.wm_last_accepted == true);
@@ -76,12 +115,13 @@ TEST_CASE ("Alg24 chunks into best-matching slot above threshold",
            >= Catch::Approx (before_strength).epsilon (1e-6));
 }
 
-TEST_CASE ("Alg24 maintenance decays and removes empty slots",
+TEST_CASE ("Alg24 maintenance decays slots but preserves them with floor",
            "[operations][working_memory][maintenance]")
 {
   Signal s;
   s.embedding = Eigen::VectorXf::Constant (3, 0.5f);
-  s.timestamp = 10;
+  s.timestamp = 10000; // 10 seconds in ms
+  s.source_id = "test";
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
   cfg.focus = 0.5;
@@ -89,7 +129,8 @@ TEST_CASE ("Alg24 maintenance decays and removes empty slots",
   cfg.stability = 0.5;
 
 
-  // One slot at t=0 with strength 1.0 → after 10s at 0.1/s → 0
+  // One slot at t=0 with strength 1.0 → after 10s at 0.1/s → decay to 0
+  // But floor of 0.01 preserves slot
   ProcessorContext::WMSlot slot;
   slot.embedding = s.embedding;
   slot.strength = 1.0;
@@ -100,10 +141,15 @@ TEST_CASE ("Alg24 maintenance decays and removes empty slots",
 
   WorkingMemory op;
   OperationContext ctx (s, pctx, cfg);
-  ctx.SetCompositeScore (0.2); // margin negative
+
+  // Don't set AccumulatorWriteDecision - this tests passive decay without gating
+  // Decay happens regardless of gating decision
+
   op.Execute (ctx, cortext::testing::GetNullTransaction ());
 
-  REQUIRE (pctx.wm_slots.size () == 0); // removed after decay to zero
+  // Slot preserved with floor strength (0.01), not removed
+  REQUIRE (pctx.wm_slots.size () == 1);
+  REQUIRE (pctx.wm_slots.front ().strength == Catch::Approx (0.01));
   REQUIRE (pctx.wm_last_accepted == false);
   REQUIRE (pctx.wm_last_chunked == false);
 }
@@ -113,7 +159,8 @@ TEST_CASE ("Alg24 maintenance reduces strength without removal when dt small",
 {
   Signal s;
   s.embedding = Eigen::VectorXf::Constant (3, 0.5f);
-  s.timestamp = 5; // 5s
+  s.timestamp = 5000; // 5 seconds in ms
+  s.source_id = "test";
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
   cfg.focus = 0.5;
@@ -131,14 +178,18 @@ TEST_CASE ("Alg24 maintenance reduces strength without removal when dt small",
 
   WorkingMemory op;
   OperationContext ctx (s, pctx, cfg);
-  ctx.SetCompositeScore (0.2); // margin = 0.2 - gate_threshold(0.5=0.25) = -0.05 < cost → reject
+
+  // Don't set AccumulatorWriteDecision - this tests passive decay without gating
+  // Decay happens regardless of gating decision
+
   op.Execute (ctx, cortext::testing::GetNullTransaction ());
 
   REQUIRE (pctx.wm_slots.size () == 1);
   const double expected = 1.0 - 0.10 * 5.0;
   REQUIRE (pctx.wm_slots.front ().strength == Catch::Approx (expected));
-  REQUIRE (pctx.wm_slots.front ().last_ts
-           == Catch::Approx (static_cast<double> (s.timestamp)));
+  // last_ts is NOT updated during passive decay - only when slot is accessed
+  // Original last_ts (0.0) should be preserved
+  REQUIRE (pctx.wm_slots.front ().last_ts == Catch::Approx (0.0));
 }
 
 TEST_CASE ("Alg24 uses Focus-derived gate_threshold for gating decision",
@@ -148,7 +199,8 @@ TEST_CASE ("Alg24 uses Focus-derived gate_threshold for gating decision",
   // At F=0: threshold=0.1, at F=1: threshold=0.4
   Signal s;
   s.embedding = Eigen::VectorXf::Constant (4, 1.0f);
-  s.timestamp = 100;
+  s.timestamp = 100000; // 100 seconds in ms
+  s.source_id = "test";
 
 
   SECTION ("Low Focus (F=0) has permissive threshold (0.1)")
@@ -163,7 +215,10 @@ TEST_CASE ("Alg24 uses Focus-derived gate_threshold for gating decision",
 
     WorkingMemory op;
     OperationContext ctx (s, pctx, cfg);
-    ctx.SetCompositeScore (0.25); // benefit - threshold = 0.25 - 0.1 = 0.15 > cost
+
+    // Memory-level gating: set up context for memory boundary
+    // S_window = 0.25 → benefit - threshold = 0.25 - 0.1 = 0.15 > cost
+    SetupMemoryGatingContext (ctx, pctx, s, 0.25);
 
     op.Execute (ctx, cortext::testing::GetNullTransaction ());
     // With positive margin exceeding cost, should accept
@@ -181,7 +236,10 @@ TEST_CASE ("Alg24 uses Focus-derived gate_threshold for gating decision",
 
     WorkingMemory op;
     OperationContext ctx (s, pctx, cfg);
-    ctx.SetCompositeScore (0.35); // benefit - threshold = 0.35 - 0.4 = -0.05 < 0
+
+    // Memory-level gating: set up context for memory boundary
+    // S_window = 0.35 → benefit - threshold = 0.35 - 0.4 = -0.05 < 0
+    SetupMemoryGatingContext (ctx, pctx, s, 0.35);
 
     op.Execute (ctx, cortext::testing::GetNullTransaction ());
     // Negative margin, should reject
@@ -199,7 +257,10 @@ TEST_CASE ("Alg24 uses Focus-derived gate_threshold for gating decision",
 
     WorkingMemory op;
     OperationContext ctx (s, pctx, cfg);
-    ctx.SetCompositeScore (0.5); // benefit - threshold = 0.5 - 0.25 = 0.25
+
+    // Memory-level gating: set up context for memory boundary
+    // S_window = 0.5 → benefit - threshold = 0.5 - 0.25 = 0.25 > cost
+    SetupMemoryGatingContext (ctx, pctx, s, 0.5);
 
     op.Execute (ctx, cortext::testing::GetNullTransaction ());
     // Positive margin, should accept
@@ -220,7 +281,8 @@ TEST_CASE ("Alg24 input-based rehearsal boosts slot strength for similarity in "
   s.embedding[0] = 0.9f;
   s.embedding[1] = 0.4f;
   s.embedding.normalize ();
-  s.timestamp = 100;
+  s.timestamp = 100000; // 100 seconds in ms
+  s.source_id = "test";
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
   cfg.focus = 0.0;       // chunk_threshold = 0.7, rehearsal_threshold = 0.5
@@ -250,7 +312,10 @@ TEST_CASE ("Alg24 input-based rehearsal boosts slot strength for similarity in "
 
   WorkingMemory op;
   OperationContext ctx (s, pctx, cfg);
-  ctx.SetCompositeScore (0.9); // High benefit to pass gate
+
+  // Memory-level gating: set up context for memory boundary
+  SetupMemoryGatingContext (ctx, pctx, s, 0.9);  // High S_window
+
   op.Execute (ctx, cortext::testing::GetNullTransaction ());
 
   // Similarity = dot([0.707, 0.707, 0], [1, 0, 0]) = 0.707
@@ -279,7 +344,8 @@ TEST_CASE ("Alg24 rehearsal strength capped at kStrengthMax",
   s.embedding[0] = 0.6f;
   s.embedding[1] = 0.8f;
   s.embedding.normalize ();
-  s.timestamp = 100;
+  s.timestamp = 100000; // 100 seconds in ms
+  s.source_id = "test";
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
   cfg.focus = 0.0;       // chunk_threshold = 0.7, rehearsal_threshold = 0.5
@@ -299,7 +365,10 @@ TEST_CASE ("Alg24 rehearsal strength capped at kStrengthMax",
 
   WorkingMemory op;
   OperationContext ctx (s, pctx, cfg);
-  ctx.SetCompositeScore (0.9);
+
+  // Memory-level gating: set up context for memory boundary
+  SetupMemoryGatingContext (ctx, pctx, s, 0.9);  // High S_window
+
   op.Execute (ctx, cortext::testing::GetNullTransaction ());
 
   // Strength should still be capped at max
@@ -315,7 +384,8 @@ TEST_CASE ("Alg24 rehearsal rate scales with Sensitivity knob",
   s.embedding[0] = 0.6f;
   s.embedding[1] = 0.8f;
   s.embedding.normalize ();
-  s.timestamp = 100;
+  s.timestamp = 100000; // 100 seconds in ms
+  s.source_id = "test";
 
 
   // Test with low S (0.0) -> rehearsal_rate = 0.5
@@ -343,7 +413,10 @@ TEST_CASE ("Alg24 rehearsal rate scales with Sensitivity knob",
 
     WorkingMemory op;
     OperationContext ctx (s, pctx, cfg);
-    ctx.SetCompositeScore (0.9);
+
+    // Memory-level gating: set up context for memory boundary
+    SetupMemoryGatingContext (ctx, pctx, s, 0.9);
+
     op.Execute (ctx, cortext::testing::GetNullTransaction ());
 
     low_s_boost = pctx.wm_slots[0].strength - before;
@@ -369,7 +442,10 @@ TEST_CASE ("Alg24 rehearsal rate scales with Sensitivity knob",
 
     WorkingMemory op;
     OperationContext ctx (s, pctx, cfg);
-    ctx.SetCompositeScore (0.9);
+
+    // Memory-level gating: set up context for memory boundary
+    SetupMemoryGatingContext (ctx, pctx, s, 0.9);
+
     op.Execute (ctx, cortext::testing::GetNullTransaction ());
 
     high_s_boost = pctx.wm_slots[0].strength - before;
@@ -389,7 +465,8 @@ TEST_CASE ("Alg24 no input-based rehearsal when similarity below "
   s.embedding[0] = 0.0f;
   s.embedding[1] = 1.0f; // Orthogonal to slot
   s.embedding.normalize ();
-  s.timestamp = 100;
+  s.timestamp = 100000; // 100 seconds in ms
+  s.source_id = "test";
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
   cfg.focus = 0.0;       // chunk_threshold = 0.7, rehearsal_threshold = 0.5
@@ -410,7 +487,10 @@ TEST_CASE ("Alg24 no input-based rehearsal when similarity below "
 
   WorkingMemory op;
   OperationContext ctx (s, pctx, cfg);
-  ctx.SetCompositeScore (0.9);
+
+  // Memory-level gating: set up context for memory boundary
+  SetupMemoryGatingContext (ctx, pctx, s, 0.9);
+
   op.Execute (ctx, cortext::testing::GetNullTransaction ());
 
   // Similarity = 0 (orthogonal), below rehearsal_threshold of 0.5
@@ -429,7 +509,8 @@ TEST_CASE ("Alg24 retrieval-based rehearsal boosts WM slot matching retrieved "
   Signal s;
   s.embedding = Eigen::VectorXf::Constant (3, 0.5f);
   s.embedding.normalize ();
-  s.timestamp = 100;
+  s.timestamp = 100000; // 100 seconds in ms
+  s.source_id = "test";
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
   cfg.focus = 0.0;       // chunk_threshold = 0.7
@@ -458,7 +539,10 @@ TEST_CASE ("Alg24 retrieval-based rehearsal boosts WM slot matching retrieved "
 
   WorkingMemory op;
   OperationContext ctx (s, pctx, cfg);
-  ctx.SetCompositeScore (0.9);
+
+  // Memory-level gating: set up context for memory boundary
+  SetupMemoryGatingContext (ctx, pctx, s, 0.9);
+
   ctx.SetRetrievedMemoryEmbeddings (std::move (retrieved));
   op.Execute (ctx, cortext::testing::GetNullTransaction ());
 
@@ -475,7 +559,8 @@ TEST_CASE ("Alg24 retrieval-based rehearsal skips non-matching WM slots",
   s.embedding = Eigen::VectorXf::Zero (3);
   s.embedding[1] = 1.0f; // Orthogonal to slot [1, 0, 0]
   s.embedding.normalize ();
-  s.timestamp = 100;
+  s.timestamp = 100000; // 100 seconds in ms
+  s.source_id = "test";
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
   cfg.focus = 0.0;       // chunk_threshold = 0.7
@@ -504,7 +589,10 @@ TEST_CASE ("Alg24 retrieval-based rehearsal skips non-matching WM slots",
 
   WorkingMemory op;
   OperationContext ctx (s, pctx, cfg);
-  ctx.SetCompositeScore (0.9);
+
+  // Memory-level gating: set up context for memory boundary
+  SetupMemoryGatingContext (ctx, pctx, s, 0.9);
+
   ctx.SetRetrievedMemoryEmbeddings (std::move (retrieved));
   op.Execute (ctx, cortext::testing::GetNullTransaction ());
 
@@ -524,7 +612,8 @@ TEST_CASE ("Alg24 eviction prioritizes weak old slots over strong recent ones",
   s.embedding = Eigen::VectorXf::Zero (3);
   s.embedding[2] = 1.0f; // Different direction from existing slots
   s.embedding.normalize ();
-  s.timestamp = 200;
+  s.timestamp = 200000; // 200 seconds in ms
+  s.source_id = "test";
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
   cfg.focus = 1.0;       // Forces capacity = 2 (low capacity for test)
@@ -570,7 +659,10 @@ TEST_CASE ("Alg24 eviction prioritizes weak old slots over strong recent ones",
 
   WorkingMemory op;
   OperationContext ctx (s, pctx, cfg);
-  ctx.SetCompositeScore (0.9); // Ensure acceptance
+
+  // Memory-level gating: set up context for memory boundary
+  SetupMemoryGatingContext (ctx, pctx, s, 0.9);  // High S_window
+
   op.Execute (ctx, cortext::testing::GetNullTransaction ());
 
   // Should have 2 slots (capacity), one evicted and one new added
@@ -616,7 +708,8 @@ TEST_CASE ("Alg24 high-T increases slot dedication resistance to eviction",
   s.embedding = Eigen::VectorXf::Zero (3);
   s.embedding[2] = 1.0f;
   s.embedding.normalize ();
-  s.timestamp = 200;
+  s.timestamp = 200000; // 200 seconds in ms
+  s.source_id = "test";
 
 
   // Test with T=0 (low dedication_strength = 0.3)
@@ -650,7 +743,10 @@ TEST_CASE ("Alg24 high-T increases slot dedication resistance to eviction",
 
     WorkingMemory op;
     OperationContext ctx (s, pctx, cfg);
-    ctx.SetCompositeScore (0.9);
+
+    // Memory-level gating: set up context for memory boundary
+    SetupMemoryGatingContext (ctx, pctx, s, 0.9);
+
     op.Execute (ctx, cortext::testing::GetNullTransaction ());
 
     // With T=0: dedication_strength = 0.3
@@ -688,7 +784,10 @@ TEST_CASE ("Alg24 high-T increases slot dedication resistance to eviction",
 
     WorkingMemory op;
     OperationContext ctx (s, pctx, cfg);
-    ctx.SetCompositeScore (0.9);
+
+    // Memory-level gating: set up context for memory boundary
+    SetupMemoryGatingContext (ctx, pctx, s, 0.9);
+
     op.Execute (ctx, cortext::testing::GetNullTransaction ());
 
     // With T=1: dedication_strength = 0.9
@@ -712,7 +811,8 @@ TEST_CASE ("Alg24 recent slots resist eviction regardless of strength",
   s.embedding = Eigen::VectorXf::Zero (3);
   s.embedding[2] = 1.0f;
   s.embedding.normalize ();
-  s.timestamp = 200;
+  s.timestamp = 200000; // 200 seconds in ms
+  s.source_id = "test";
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
   cfg.focus = 0.0;
@@ -751,7 +851,10 @@ TEST_CASE ("Alg24 recent slots resist eviction regardless of strength",
 
   WorkingMemory op;
   OperationContext ctx (s, pctx, cfg);
-  ctx.SetCompositeScore (0.9);
+
+  // Memory-level gating: set up context for memory boundary
+  SetupMemoryGatingContext (ctx, pctx, s, 0.9);
+
   op.Execute (ctx, cortext::testing::GetNullTransaction ());
 
   REQUIRE (pctx.wm_slots.size () == 2);

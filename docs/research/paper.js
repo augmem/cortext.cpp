@@ -112,6 +112,7 @@ const doc = new Document({
             ...paperSections.coreAdaptation,
             ...paperSections.structuralMetrics,
             ...paperSections.dynamicThresholding,
+            ...paperSections.writePacing,
             ...paperSections.reinforcementDecay,
             ...paperSections.advancedCognitive,
             ...paperSections.consolidationGraph,
@@ -140,27 +141,16 @@ const doc = new Document({
             p([bold("Per-episode boundary: "), tr("Batch writes, cache invalidation, episode ID rollover")], { numbering: { reference: "bullet-list", level: 0 } }),
             p([bold("Periodic background: "), tr("Consolidation, ANN index maintenance, graph construction")], { numbering: { reference: "bullet-list", level: 0 } }),
 
-            p([tr("11.3 State Persistence")], { heading: HeadingLevel.HEADING_2 }),
+            p([tr("11.3 State Representation")], { heading: HeadingLevel.HEADING_2 }),
 
-            p([tr("System state partitions across tables for efficient resumption:")]),
+            p([tr("System state partitions into logical components for efficient resumption:")]),
 
-            p([bold("Processor State: "), tr("Single-row table storing all evolving parameters (maturity, uncertainty, threshold, hysteresis, learning rates)")], { numbering: { reference: "bullet-list", level: 0 } }),
+            p([bold("Processor State: "), tr("Global parameter state storing all evolving parameters (maturity, uncertainty, threshold, hysteresis, learning rates)")], { numbering: { reference: "bullet-list", level: 0 } }),
             p([bold("Blender Weights: "), tr("12-element weight vector and RLS covariance matrix")], { numbering: { reference: "bullet-list", level: 0 } }),
             p([bold("Recent Context: "), tr("Rolling window of embedding vectors")], { numbering: { reference: "bullet-list", level: 0 } }),
             p([bold("Recent Scores: "), tr("Rolling window for threshold adaptation")], { numbering: { reference: "bullet-list", level: 0 } }),
 
             p([tr("On startup, the system loads persisted state and resumes processing seamlessly.")]),
-
-            p([tr("11.4 Database Considerations")], { heading: HeadingLevel.HEADING_2 }),
-
-            p([tr("The architecture assumes SQLite with vector extensions (sqlite-vec) for single-node deployment. Key optimizations:")]),
-
-            p([tr("WAL mode for concurrent read/write access")], { numbering: { reference: "bullet-list", level: 0 } }),
-            p([tr("Write coalescing at episode boundaries to reduce fsync overhead")], { numbering: { reference: "bullet-list", level: 0 } }),
-            p([tr("Partial indices on high-cardinality columns (type, cluster_id)")], { numbering: { reference: "bullet-list", level: 0 } }),
-            p([tr("FTS5 virtual tables for hybrid text/vector retrieval")], { numbering: { reference: "bullet-list", level: 0 } }),
-
-            p([tr("For distributed deployment, the consolidation system's batch-oriented design maps naturally to periodic MapReduce-style jobs, while the streaming path remains latency-sensitive and benefits from in-memory caching.")]),
 
             // ==================== 12. CONCLUSION ====================
             new Paragraph({ children: [new PageBreak()] }),
@@ -236,6 +226,7 @@ const doc = new Document({
 
             p([tr("Cowan, N. (2010). The magical mystery four: How is working memory capacity limited, and why? "), italic("Current Directions in Psychological Science, 19"), tr("(1), 51-57.")], { spacing: { after: 120 } }),
 
+            p([tr("Fountas, Z., et al. (2024). Event segmentation in large language models. "), italic("arXiv preprint arXiv:2407.03158"), tr(".")]),
             p([tr("Hart, J. T. (1965). Memory and the feeling-of-knowing experience. "), italic("Journal of Educational Psychology, 56"), tr("(4), 208-216.")], { spacing: { after: 120 } }),
 
             p([tr("Hunt, R. R. (1995). The subtlety of distinctiveness: What von Restorff really did. "), italic("Psychonomic Bulletin & Review, 2"), tr("(1), 105-112.")], { spacing: { after: 120 } }),

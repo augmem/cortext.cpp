@@ -191,7 +191,8 @@ inline double
 AlphaS (double S, double u_t)
 {
   const double kAlphaMinS = 0.05;
-  const double kAlphaSpanS = 0.45;
+  // Spec (§5.1, line 823): α_span_S = 0.35
+  const double kAlphaSpanS = 0.35;
   double term1 = kAlphaMinS * (1.0 + 0.5 * u_t);
   double term2 = kAlphaMinS + S * kAlphaSpanS * u_t;
   return std::max (term1, term2);
@@ -308,10 +309,11 @@ ExtractionIntervalSeconds (double T)
 }
 
 // Retention window size (w_ret) — Algorithm 0.2
+// Spec (§2.3.2, line 339): w_ret(T) = round(lerp(10, 50, T))
 inline int
 WRet (double T)
 {
-  return static_cast<int> (std::round (Lerp (20.0, 120.0, T)));
+  return static_cast<int> (std::round (Lerp (10.0, 50.0, T)));
 }
 
 // Periphery cutoff — Algorithm 0.2
@@ -774,6 +776,117 @@ InterruptCandidateCount (double F)
   // K = round(lerp(10, 6, F))
   // Reference: algorithms.md Section 8.3
   return static_cast<int> (std::round (Lerp (10.0, 6.0, Clamp (F, 0.0, 1.0))));
+}
+
+// Section 4.4: Write Pacing and Memory Accumulation ---
+
+// Section 4.4.2 - Drift EWMA alpha
+inline double
+AlphaEtaAcc (double T)
+{
+  // α = lerp(0.3, 0.1, T)
+  // Higher stability = slower EWMA update
+  return Lerp (0.3, 0.1, Clamp (T, 0.0, 1.0));
+}
+
+// Section 4.4.3 - Boundary detection weight on drift
+inline double
+BoundaryWeightDrift (double T)
+{
+  // w_drift = lerp(0.6, 0.4, T)
+  // Higher stability = less weight on drift
+  return Lerp (0.6, 0.4, Clamp (T, 0.0, 1.0));
+}
+
+// Section 4.4.3 - Boundary threshold
+inline double
+BoundaryThreshold (double F, double S)
+{
+  // b_thresh(F, S) = lerp(0.4, 0.7, F) × lerp(1.1, 0.9, S)
+  // Higher focus = stricter boundary; higher sensitivity = looser boundary
+  return Lerp (0.4, 0.7, Clamp (F, 0.0, 1.0))
+       * Lerp (1.1, 0.9, Clamp (S, 0.0, 1.0));
+}
+
+// Section 4.4.3 - Maximum memory time (seconds)
+inline double
+MaxMemoryTime (double T)
+{
+  // max_mem_time(T) = lerp(30, 120, T) seconds
+  // Higher stability = longer memories allowed
+  return Lerp (30.0, 120.0, Clamp (T, 0.0, 1.0));
+}
+
+// Section 4.4.3 - Maximum cumulative drift before flush
+inline double
+MaxMemoryDrift (double S)
+{
+  // max_mem_drift(S) = lerp(0.8, 2.0, S)
+  // Higher sensitivity = more drift allowed before forced flush
+  return Lerp (0.8, 2.0, Clamp (S, 0.0, 1.0));
+}
+
+// Section 4.4.3 - Gap detection threshold (seconds)
+inline double
+GapThreshold (double T)
+{
+  // gap_threshold(T) = lerp(5, 30, T) seconds
+  // Higher stability = longer pause required to trigger boundary
+  return Lerp (5.0, 30.0, Clamp (T, 0.0, 1.0));
+}
+
+// Section 4.4.4 - Spike bypass margin above θ_dynamic
+inline double
+SpikeMargin (double S)
+{
+  // spike_margin(S) = lerp(0.3, 0.15, S)
+  // Higher sensitivity = lower margin = more flashbulb triggers
+  return Lerp (0.3, 0.15, Clamp (S, 0.0, 1.0));
+}
+
+// Section 4.4.5 - Window score peak vs average weight
+inline double
+WindowScoreAlpha (double F)
+{
+  // α(F) = lerp(0.3, 0.7, F)
+  // Higher focus = more weight on peak score
+  return Lerp (0.3, 0.7, Clamp (F, 0.0, 1.0));
+}
+
+// Section 4.4.5 - Coverage bonus weight
+inline double
+WindowScoreCoverageBeta (double S)
+{
+  // β(S) = lerp(0.05, 0.15, S)
+  // Higher sensitivity = more bonus for complete memorys
+  return Lerp (0.05, 0.15, Clamp (S, 0.0, 1.0));
+}
+
+// Section 4.4.5 - Write refractory time constant (seconds)
+inline double
+WriteRefractoryTau (double T)
+{
+  // τ_write_refrac(T) = lerp(5, 30, T) seconds
+  // Higher stability = longer refractory period
+  return Lerp (5.0, 30.0, Clamp (T, 0.0, 1.0));
+}
+
+// Section 4.4.5 - Write refractory gain
+inline double
+WriteRefractoryK (double T)
+{
+  // k_write_refrac = lerp(0.3, 0.1, T)
+  // Higher stability = weaker refractory suppression
+  return Lerp (0.3, 0.1, Clamp (T, 0.0, 1.0));
+}
+
+// Section 4.4.5 - Representative embedding blend factor
+inline double
+RepresentativeBlendRho (double F)
+{
+  // ρ(F) = lerp(0.3, 0.7, F)
+  // Higher focus = more weight on memory mean vs peak
+  return Lerp (0.3, 0.7, Clamp (F, 0.0, 1.0));
 }
 
 } // namespace cortext::core

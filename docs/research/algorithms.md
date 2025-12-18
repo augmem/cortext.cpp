@@ -4,20 +4,13 @@
 
 **Abstract**
 
-This document details the complete algorithmic specification for
-Cortext, a biologically-inspired adaptive memory system. It serves as a
-technical reference for implementation, focusing purely on mathematical
-definitions, signal processing flows, and adaptive control logic
-governed by the three primary parameters: Focus (F), Sensitivity (S),
-and Stability (T).
+This document details the complete algorithmic specification for Cortext, a biologically-inspired adaptive memory system. It serves as a technical reference for implementation, focusing purely on mathematical definitions, signal processing flows, and adaptive control logic governed by the three primary parameters: Focus (F), Sensitivity (S), and Stability (T).
 
 1\. Mathematical Foundations
 
 1.1 Notation and Primitives
 
-We establish the following notation used throughout this paper. Let ε =
-10⁻⁶ denote a small constant for numerical stability. All knob values F,
-S, T lie in the closed interval \[0, 1\].
+We establish the following notation used throughout this paper. Let ε = 10⁻⁶ denote a small constant for numerical stability. All knob values F, S, T lie in the closed interval \[0, 1\].
 
 Core mathematical primitives:
 
@@ -29,50 +22,61 @@ sigmoid(z) = 1 / (1 + exp(−z))
 
 EWMA(prev, x, α) = (1 − α) × prev + α × x
 
-For vectors, we define cosine similarity as cos(u, v) = u·v / (‖u‖ ×
-‖v‖), and safe L2 normalization as l2_normalize(v) = v / max(‖v‖, ε).
-Shannon entropy is computed in nats: H(p) = −Σᵢ pᵢ ln(pᵢ).
+Weight normalization and blending for combining multiple signals:
 
-The temporal decay function follows exponential dynamics with
-configurable half-life:
+normalize(w) = w / max(sum(w), ε) \# w is a weight vector
+
+Edge case: if sum(w) \< ε, return uniform weights (1/\|w\|) to avoid division by zero or invalid probability distributions.
+
+blend(values, weights) = Σᵢ values\[i\] × weights\[i\]
+
+Note: normalize() operates on weight vectors, not scalars. When used with scalar expressions like lerp(), collect the scalars into a vector first: normalize(\[lerp(\...), lerp(\...), \...\]). The blend() function assumes pre-normalized weights summing to 1.
+
+For vectors, we define cosine similarity as cos(u, v) = u·v / (‖u‖ × ‖v‖), and safe L2 normalization as l2_normalize(v) = v / max(‖v‖, ε). Shannon entropy is computed in nats: H(p) = −Σᵢ pᵢ ln(pᵢ).
+
+The temporal decay function follows exponential dynamics with configurable half-life:
 
 decay(x, τ_half, Δt) = x × exp(−ln(2) × Δt / max(τ_half, τ_min))
 
-where τ_min = 120 seconds provides a floor to prevent numerical
-instability from near-zero half-lives.
+where τ_min = 120 seconds provides a floor to prevent numerical instability from near-zero half-lives.
+
+1.1.1 Units Convention
+
+To ensure consistency and avoid unit mismatch errors, the following conventions apply throughout:
+
+**Input timestamps:** All input timestamps (t) are specified in milliseconds since epoch, consistent with standard system time APIs.
+
+**Internal time representation:** All internal time calculations operate in seconds. The now() function returns the current time in seconds:
+
+now() = system_time_ms / 1000 \# returns seconds
+
+**Stored timestamps:** Internal timestamps (t_acc_start, last_signal_ts, last_timestamp, last_write_ts, last_retrieval_ts) are stored in seconds after conversion from input milliseconds.
+
+**Time deltas:** All Δt values, elapsed times (mem_elapsed, signal_gap, idle_for), and time comparisons operate in seconds:
+
+Δt ← now() − last_timestamp \# seconds
+
+mem_elapsed ← now() − t_acc_start \# seconds
+
+signal_gap ← now() − last_signal_ts \# seconds
+
+**Time constants:** All time-related constants are specified with explicit units (e.g., τ_min = 120 seconds, kRecencyTau = 60 seconds). Threshold limits like max_mem_time(T) and gap_threshold(T) return values in seconds.
 
 1.2 The Three-Knob Philosophy
 
-Cortext is governed by three continuous control parameters, each
-representing a distinct dimension of cognitive regulation:
+Cortext is governed by three continuous control parameters, each representing a distinct dimension of cognitive regulation:
 
-**Focus (F ∈ \[0, 1\]):** Perceptual selectivity and precision. Higher
-Focus narrows attention, increases relevance weighting, and reduces
-retrieval breadth. Focus modulates the trade-off between exploitation of
-known-relevant information and exploration of potentially useful
-context.
+**Focus (F ∈ \[0, 1\]):** Perceptual selectivity and precision. Higher Focus narrows attention, increases relevance weighting, and reduces retrieval breadth. Focus modulates the trade-off between exploitation of known-relevant information and exploration of potentially useful context.
 
-**Sensitivity (S ∈ \[0, 1\]):** Plasticity and affective gain. Higher
-Sensitivity accelerates learning, increases emotional and novelty
-responsiveness, and raises write-rate targets. Sensitivity governs how
-readily the system captures novel information and responds to salient
-stimuli.
+**Sensitivity (S ∈ \[0, 1\]):** Plasticity and affective gain. Higher Sensitivity accelerates learning, increases emotional and novelty responsiveness, and raises write-rate targets. Sensitivity governs how readily the system captures novel information and responds to salient stimuli.
 
-**Stability (T ∈ \[0, 1\]):** Temporal persistence and inertia. Higher
-Stability lengthens memory half-lives, widens hysteresis bands, slows
-adaptive updates, and tightens safety bounds over time. Stability
-controls the resistance to change and the preservation of established
-knowledge.
+**Stability (T ∈ \[0, 1\]):** Temporal persistence and inertia. Higher Stability lengthens memory half-lives, widens hysteresis bands, slows adaptive updates, and tightens safety bounds over time. Stability controls the resistance to change and the preservation of established knowledge.
 
-A central design principle is that knobs set rates rather than modes.
-Behavioral differences emerge continuously from parameter interactions;
-there are no hard-coded phase transitions or discrete operational
-states.
+A central design principle is that knobs set rates rather than modes. Behavioral differences emerge continuously from parameter interactions; there are no hard-coded phase transitions or discrete operational states.
 
 1.3 Knob-Derived Parameters
 
-All system tunables derive from the three primary knobs. This section
-catalogs the key derivations.
+All system tunables derive from the three primary knobs. This section catalogs the key derivations.
 
 1.3.1 Context Windows and Temporal Scales
 
@@ -82,16 +86,11 @@ w_score(T) = round(lerp(20, 120, T))
 
 w_rate_seconds(T) = round(lerp(60, 300, T))
 
-The context window n_ctx determines how many recent items inform
-relevance computation. The scoring window w_score controls the lookback
-for variance estimation and percentile calculation. The rate window
-w_rate_seconds specifies the temporal horizon for write-rate
-measurement.
+The context window n_ctx determines how many recent items inform relevance computation. The scoring window w_score controls the lookback for variance estimation and percentile calculation. The rate window w_rate_seconds specifies the temporal horizon for write-rate measurement.
 
 1.3.2 Half-Life and Decay
 
-Memory half-life follows a log-scale mapping to span multiple orders of
-magnitude:
+Memory half-life follows a log-scale mapping to span multiple orders of magnitude:
 
 τ_min = 120.0 seconds (2 minutes)
 
@@ -99,9 +98,7 @@ magnitude:
 
 base_half_life(T) = exp(ln(τ_min) + T × ln(τ_max / τ_min))
 
-This exponential mapping ensures that low Stability yields half-lives
-near 2 minutes while high Stability approaches 12 hours, with smooth
-interpolation across the range.
+This exponential mapping ensures that low Stability yields half-lives near 2 minutes while high Stability approaches 12 hours, with smooth interpolation across the range.
 
 1.3.3 Hysteresis and Rate Targets
 
@@ -113,22 +110,17 @@ r_min = 0.2; r_max = 5.0 (writes per minute)
 
 base_rate(S) = lerp(r_min, r_max, S)
 
-The hysteresis band prevents oscillation in threshold-crossing
-decisions. Write-rate targets establish homeostatic setpoints for the
-threshold controller.
+The hysteresis band prevents oscillation in threshold-crossing decisions. Write-rate targets establish homeostatic setpoints for the threshold controller.
 
 1.3.4 Experiential Mass and Maturity
 
-The system tracks accumulated experience through a maturity function
-that governs the annealing of safety bounds:
+The system tracks accumulated experience through a maturity function that governs the annealing of safety bounds:
 
 τ_m(T) = lerp(10.0, 200.0, T)
 
 maturity(t) = 1 − exp(−count / τ_m(T))
 
-where count is the total number of signals processed. This produces
-asymptotic approach to unit maturity, with higher Stability slowing the
-progression to reflect greater conservatism.
+where count is the total number of signals processed. This produces asymptotic approach to unit maturity, with higher Stability slowing the progression to reflect greater conservatism.
 
 Safety bounds on the dynamic threshold anneal with maturity:
 
@@ -138,29 +130,25 @@ T_max(t) = lerp(0.99, 0.95, maturity(t))
 
 max_ΔT_per_min(t) = lerp(0.30, 0.10, maturity(t))
 
-Early operation permits wide threshold excursions; mature operation
-constrains movement to a narrower band.
+Early operation permits wide threshold excursions; mature operation constrains movement to a narrower band.
 
 1.4 Uncertainty Estimation
 
-Uncertainty u(t) ∈ \[0, 1\] modulates learning rates and evidence
-weighting. The raw uncertainty estimate blends multiple signals:
+Uncertainty u(t) ∈ \[0, 1\] modulates learning rates and evidence weighting. The raw uncertainty estimate blends multiple signals:
 
 var_score_max = 0.25
 
 var_recent_norm = clamp(var(scores\[t−w:t\]) / var_score_max, 0, 1)
 
-coherence_complement = 1 − coherence_t
+coherence_complement = 1 − coherence_struct_t \# uses structural coherence
 
-When prediction error signals are available, novelty and surprisal are
-blended:
+When prediction error signals are available, novelty and surprisal are blended:
 
 novelty_surprise = blend(\[novelty_t, surprisal_t\],
 
 weights = normalize(\[S, 1 − T\]))
 
-The final raw uncertainty combines these components with knob-derived
-weights:
+The final raw uncertainty combines these components with knob-derived weights:
 
 weights_u = normalize(\[S, F, 1 − T, S × (1 − T)\])
 
@@ -176,20 +164,15 @@ Smoothed uncertainty applies EWMA with a stability-dependent rate:
 
 u(t) = EWMA(u(t−1), u_raw(t), α = α_u(T))
 
-When structural metrics are unavailable, the fallback is u_raw(t) = 1 −
-maturity(t), ensuring high uncertainty during early operation.
+When structural metrics are unavailable, the fallback is u_raw(t) = 1 − maturity(t), ensuring high uncertainty during early operation.
 
 2\. Core Adaptation Algorithms
 
-This section presents the algorithms governing adaptation along each of
-the three primary dimensions. Each algorithm consists of a prior
-computation (executed at initialization) and a dynamic update (executed
-per signal).
+This section presents the algorithms governing adaptation along each of the three primary dimensions. Each algorithm consists of a prior computation (executed at initialization) and a dynamic update (executed per signal).
 
 2.1 Focus-Driven Selectivity
 
-Focus governs perceptual selectivity through relevance weighting and
-attention width.
+Focus governs perceptual selectivity through relevance weighting and attention width.
 
 2.1.1 Focus Priors
 
@@ -203,9 +186,7 @@ mismatch_weight_prior = 1 − F
 
 attention_width_prior = lerp(π, 0.1π, F)
 
-The attention width (in radians) controls the angular spread of the
-receptive field in embedding space. High Focus produces narrow attention
-(0.1π), while low Focus permits broad capture (π).
+The attention width (in radians) controls the angular spread of the receptive field in embedding space. High Focus produces narrow attention (0.1π), while low Focus permits broad capture (π).
 
 2.1.2 Dynamic Focus Update
 
@@ -219,8 +200,7 @@ weight_relevance_t ← EWMA(weight_relevance\_{t−1},
 
 map01(observed_cosine), α = α_F(t))
 
-where map01(z) = clamp((z + 1) / 2, 0, 1) transforms cosine values from
-\[−1, 1\] to \[0, 1\].
+where map01(z) = clamp((z + 1) / 2, 0, 1) transforms cosine values from \[−1, 1\] to \[0, 1\].
 
 The learning rate α_F(t) is modulated by uncertainty:
 
@@ -228,14 +208,11 @@ The learning rate α_F(t) is modulated by uncertainty:
 
 α_F(t) = α_min_F + F × α_span_F × u(t)
 
-High uncertainty increases learning rate, allowing faster adaptation
-when the environment is volatile. The Focus knob scales the uncertainty
-responsiveness.
+High uncertainty increases learning rate, allowing faster adaptation when the environment is volatile. The Focus knob scales the uncertainty responsiveness.
 
 2.2 Sensitivity-Driven Plasticity
 
-Sensitivity governs learning speed, emotional responsiveness, and
-novelty capture.
+Sensitivity governs learning speed, emotional responsiveness, and novelty capture.
 
 2.2.1 Sensitivity Priors
 
@@ -259,10 +236,7 @@ rate_target_prior = base_rate_prior × (0.5 + 1.5S)
 
 2.2.2 Emotional Projection
 
-When emotion category centroids are available, the system projects input
-embeddings onto a discrete emotion space C = {anger, fear, joy, love,
-sadness, surprise}. Inspired by Russell\'s (1980) circumplex model, each
-category maps to valence and arousal coordinates:
+When emotion category centroids are available, the system projects input embeddings onto a discrete emotion space C = {anger, fear, joy, love, sadness, surprise}. Inspired by Russell\'s (1980) circumplex model, each category maps to valence and arousal coordinates:
 
 v_map = {anger: −0.9, fear: −0.8, sadness: −0.9,
 
@@ -298,14 +272,11 @@ valence_t ← (Σ_c p_c × v_map\[c\] + 0.9) / 1.8
 
 arousal_t ← clamp(Σ_c p_c × a_map\[c\], 0, 1)
 
-The emotion intensity combines peak probability with distributional
-confidence via geometric mean, providing a measure that is high only
-when a single emotion dominates with high certainty.
+The emotion intensity combines peak probability with distributional confidence via geometric mean, providing a measure that is high only when a single emotion dominates with high certainty.
 
 2.2.3 Threshold Modulation from Emotion
 
-Emotional activation loosens write thresholds to capture salient
-moments:
+Emotional activation loosens write thresholds to capture salient moments:
 
 κ_emo ← κ_base × S \# where κ_base = 0.10
 
@@ -313,37 +284,33 @@ moments:
 
 (0.5 + 0.5 × arousal_t)
 
-This negative adjustment makes writing more likely during emotionally
-salient events, consistent with McGaugh\'s (2004) findings on
-arousal-enhanced encoding.
+This negative adjustment makes writing more likely during emotionally salient events, consistent with McGaugh\'s (2004) findings on arousal-enhanced encoding.
 
 2.2.4 Mood Integration
 
-Distinct from instantaneous emotion, the mood state M_t maintains a
-persistent background affective tone:
+Distinct from instantaneous emotion, the mood state M_t ∈ ℝ⁶ maintains a persistent background affective tone as a 6-dimensional vector (one component per emotion category from Section 2.2.2):
 
 α_mood(S) = lerp(0.01, 0.20, S) \# reactivity
 
 λ_mood(T) = lerp(0.90, 0.999, T) \# decay
 
+e_t ← p_c for each c ∈ C \# 6D emotion probability vector
+
 M_t = λ_mood(T) × M\_{t−1} + α_mood(S) × e_t
 
-M_t ← clamp(M_t, −1.0, 1.0)
+M_t ← clamp_elementwise(M_t, −1.0, 1.0) \# per-component
 
-Note that this update does not enforce coefficient normalization; the
-explicit clamp handles potential accumulation. The mood state provides a
-separate threshold bias:
+Note that this update does not enforce coefficient normalization; the explicit elementwise clamp handles potential accumulation. The mood state provides a separate threshold bias via its normalized magnitude:
 
 κ_mood ← κ_base × S
 
-m_norm ← ‖M_t‖ / √6
+m_norm ← ‖M_t‖ / √6 \# max norm when all components at 1
 
 ΔThreshold_mood_t ← −κ_mood × clamp(m_norm, 0, 1)
 
 2.3 Stability-Driven Persistence
 
-Stability governs temporal dynamics through half-life, decay rates, and
-hysteresis.
+Stability governs temporal dynamics through half-life, decay rates, and hysteresis.
 
 2.3.1 Stability Priors
 
@@ -362,6 +329,14 @@ periphery_half_life_prior = clamp(0.5 × half_life_prior,
 drift_weight_prior = 0.5 × (1 − T)
 
 2.3.2 Dynamic Stability Update
+
+The stability update uses uncertainty-modulated learning rate and a stability-derived retention window:
+
+α_min_T = 0.02; α_span_T = 0.18
+
+α_T(t) = α_min_T + (1 − T) × α_span_T × u(t)
+
+w_ret(T) = round(lerp(10, 50, T)) \# retention history window size
 
 At each signal event, compute retention statistics and adjust half-life:
 
@@ -383,8 +358,7 @@ last_w_ret ← tail(retention_history, w_ret(T))
 
 zscore_ret ← clamp((observed_retention − μ_ret) / σ_ret, −3, +3)
 
-The target half-life incorporates feedback adjustment from the stability
-feedback mechanism (Section 7.3):
+The target half-life incorporates feedback adjustment from the stability feedback mechanism (Section 7.3):
 
 stability_adj ← ΔHalfLife_adj_t if provided else 0
 
@@ -402,17 +376,15 @@ half_life_t ← EWMA(half_life\_{t−1}, target_half_life_t,
 
 3.1 Embedding-Derived Metrics
 
-3.1.1 Coherence
+3.1.1 Structural Coherence
 
-Coherence measures integration of the current signal with context:
+Structural coherence (coherence_struct) measures integration of the current signal with the broader context window. This metric is distinct from memory coherence (coherence_mem, defined in Section 4.4.2) which tracks within-memory similarity:
 
 raw ← var(\[cos(x_t, c) for c in context_window\])
 
-coherence_t ← 1 − clamp(raw, 0, 1)
+coherence_struct_t ← 1 − clamp(raw, 0, 1) \# range \[0, 1\]
 
-High coherence (low variance in similarities) indicates the signal fits
-consistently with context. The effective Focus is modulated: F_eff = F ×
-(0.5 + 0.5 × coherence_t).
+High structural coherence (low variance in similarities) indicates the signal fits consistently with context. The effective Focus is modulated: F_eff = F × (0.5 + 0.5 × coherence_struct_t).
 
 3.1.2 Focus Spread
 
@@ -424,9 +396,7 @@ p ← softmax(kNN_similarities)
 
 focus_spread_t ← H(p) / ln(k)
 
-Values near 1 indicate diffuse attention; values near 0 indicate
-concentrated attention. The effective Focus is further modulated: F_eff
-← F_eff × (1 − focus_spread_t).
+Values near 1 indicate diffuse attention; values near 0 indicate concentrated attention. The effective Focus is further modulated: F_eff ← F_eff × (1 − focus_spread_t).
 
 3.1.3 Trajectory Drift
 
@@ -438,8 +408,7 @@ l2_normalize(mean(ctx\_{t−k}))
 
 drift_mag_t ← ‖drift_vec_t‖
 
-Since both centroids are unit-normalized, drift_mag_t ∈ \[0, 2\]. A
-threshold determines episode boundaries:
+Since both centroids are unit-normalized, drift_mag_t ∈ \[0, 2\]. A threshold determines episode boundaries:
 
 drift_threshold ← lerp(0.10, 0.35, T)
 
@@ -449,8 +418,7 @@ trigger_episode_boundary()
 
 3.1.4 Embedding Prediction Error
 
-We measure surprisal as the deviation of the current embedding from the
-predicted trajectory in latent space:
+We measure surprisal as the deviation of the current embedding from the predicted trajectory in latent space:
 
 Δx_t = x_t − x\_{t−1}
 
@@ -466,24 +434,22 @@ err_max = 0.5
 
 surprisal_t ← clamp(prediction_error_t / err_max, 0, 1)
 
-This formulation captures purely kinematic surprise in the thought
-process
+This formulation captures purely kinematic surprise in the thought process
 
 3.2 Composite Score Computation
 
 The system computes 12 metrics that blend into a composite write score:
 
-  -----------------------------------------------------------------------
+  ----------------------------------------------------------------------------
   **Metric**         **Knob**        **Expression**
-  ------------------ --------------- ------------------------------------
+  ------------------ --------------- -----------------------------------------
   Relevance          ↑F              cos(x, μ_ctx) × (0.5 + F)
 
   Mismatch           ↓F, ↑S          (1 − F) × S × novelty
 
   Prediction Error   ↑S, ↓T          surprisal_t × S × (1 − T)
 
-  Rarity             ↑F, ↓T          (1 − μ_sim) × (0.5 + 0.5F) × (1 −
-                                     0.2T)
+  Rarity             ↑F, ↓T          (1 − μ_sim) × (0.5 + 0.5F) × (1 − 0.2T)
 
   Drift              ↓T              (drift_mag / 2) × (1 − T)
 
@@ -500,16 +466,13 @@ The system computes 12 metrics that blend into a composite write score:
   Periphery          ↑T              (1 − relevance) × T
 
   Coverage           ↑F              F × relevance
-  -----------------------------------------------------------------------
+  ----------------------------------------------------------------------------
 
-Table 1: Metric definitions and knob dependencies. Arrows indicate
-direction of influence.
+Table 1: Metric definitions and knob dependencies. Arrows indicate direction of influence.
 
 3.3 Metric Weight Blending
 
-Metric weights adapt online using recursive least squares (RLS) to
-minimize prediction error between composite scores and observed
-outcomes. Initial weights derive from bootstrap coefficients:
+Metric weights adapt online using recursive least squares (RLS) to minimize prediction error between composite scores and observed outcomes. Initial weights derive from bootstrap coefficients:
 
 w_bootstrap\[i\] ← sigmoid(c_F\[i\]×F + c_S\[i\]×S + c_T\[i\]×T + d_i)
 
@@ -545,16 +508,11 @@ weights_norm\[i\] ← weights\[i\] / weight_sum
 
 score ← clamp(Σ weights_norm\[i\] × m01\[i\], 0, 1)
 
-Weight normalization is critical: with 12 metrics and raw weights
-averaging \~0.6, the sum approaches 7.2. Without normalization, weighted
-sums would saturate and collapse variance.
+Weight normalization is critical: with 12 metrics and raw weights averaging \~0.6, the sum approaches 7.2. Without normalization, weighted sums would saturate and collapse variance.
 
 4\. Dynamic Thresholding and Homeostatic Control
 
-The write gate compares composite scores against an adaptive threshold
-θ_dynamic. This section details the threshold evolution algorithm
-incorporating Bayesian prior-evidence blending and homeostatic rate
-control.
+The write gate compares composite scores against an adaptive threshold θ_dynamic. This section details the threshold evolution algorithm incorporating Bayesian prior-evidence blending and homeostatic rate control.
 
 4.1 Prior-Evidence Blending
 
@@ -580,15 +538,11 @@ The target threshold blends prior and evidence:
 
 max(ε, ρ_prior + ρ_obs)
 
-High Stability increases prior mass, making the system more resistant to
-observed deviations. High uncertainty increases evidence mass, allowing
-faster adaptation to volatile conditions.
+High Stability increases prior mass, making the system more resistant to observed deviations. High uncertainty increases evidence mass, allowing faster adaptation to volatile conditions.
 
 4.2 Homeostatic Rate Control
 
-The controller maintains write rates near the target setpoint through
-continuous-time estimation with effective sample size (ESS) reliability
-weighting.
+The controller maintains write rates near the target setpoint through continuous-time estimation with effective sample size (ESS) reliability weighting.
 
 4.2.1 Rate Estimation
 
@@ -608,7 +562,9 @@ The rate time constant scales with Stability:
 
 α ← 1 − exp(−Δt / τ_rate)
 
-Instantaneous rate estimation with bias correction:
+Instantaneous rate estimation with bias correction. Δwrites is the binary indicator (0 or 1) of whether a write occurred during the current timestep:
+
+Δwrites ← 1 if write_memory else 0 \# binary write event
 
 ρ_inst ← (Δwrites / Δt) × 60 \# writes per minute
 
@@ -620,8 +576,7 @@ denom ← max(1 − (1 − α)\^(rate_ticks + 1), ε)
 
 4.2.2 Effective Sample Size
 
-ESS estimates the effective number of independent samples in the EMA,
-using a heuristic inspired by Liu & Chen (1998):
+ESS estimates the effective number of independent samples in the EMA, using a heuristic inspired by Liu & Chen (1998):
 
 β ← max(0, 1 − α)
 
@@ -629,8 +584,7 @@ ESS ← min((1 + β) / max(1 − β, ε), 100)
 
 reliability ← 1 − exp(−ESS × (1 − T))
 
-High Stability dampens reliability, preventing aggressive corrections in
-conservative regimes.
+High Stability dampens reliability, preventing aggressive corrections in conservative regimes.
 
 4.2.3 Homeostatic Correction
 
@@ -650,13 +604,41 @@ cap_homeo ← 0.25 × hysteresis_t
 
 −cap_homeo, +cap_homeo)
 
-The correction scales with reliability and is attenuated by both
-Stability and maturity, ensuring conservative, mature systems make
-minimal homeostatic adjustments.
+The correction scales with reliability and is attenuated by both Stability and maturity, ensuring conservative, mature systems make minimal homeostatic adjustments.
+
+4.2.4 Sensitivity-Based Threshold Adjustment
+
+Sensitivity modulates threshold based on recent score volatility:
+
+σ_scores ← std(scores\[t−w:t\])
+
+κ_sens = 0.08 \# sensitivity gain
+
+cap_sens ← 0.20 × hysteresis_t
+
+Δθ_sens ← clamp(−κ_sens × S × (σ_scores − 0.1),
+
+−cap_sens, +cap_sens)
+
+High score variance with high Sensitivity lowers threshold, capturing more volatile signals.
+
+4.2.5 Precision-Based Threshold Adjustment
+
+Focus-driven precision tightens threshold when structural coherence is high:
+
+κ_prec = 0.06 \# precision gain
+
+cap_prec ← 0.15 × hysteresis_t
+
+Δθ_prec ← clamp(κ_prec × F × (coherence_struct_t − 0.5),
+
+−cap_prec, +cap_prec)
+
+High structural coherence with high Focus raises threshold, enforcing stricter relevance filtering.
 
 4.3 Threshold Integration
 
-All threshold deltas combine and pass through safety limiting:
+All threshold deltas combine and pass through safety limiting. The emotion and mood deltas from Section 2.2.3-2.2.4 are denoted Δθ_emo = ΔThreshold_emotion_t and Δθ_mood = ΔThreshold_mood_t:
 
 Δθ_total ← Δθ_sens + Δθ_homeo + Δθ_prec + Δθ_emo + Δθ_mood
 
@@ -678,12 +660,171 @@ base_band(T), α = α_T(t)),
 
 band_min, band_max)
 
+4.4 Write Pacing and Memory Accumulation
+
+The write gate operates per-signal, but coherent \"thoughts\" often span multiple signals. This section introduces memory-level accumulation that groups signals into natural units before storage decisions, inspired by Event Segmentation Theory (Zacks & Swallow, 2007).
+
+This approach draws from EM-LLM (Fountas et al., 2024), which segments token sequences into episodic events using surprise-based boundary detection refined by graph-theoretic cohesion metrics. Their work shows that combining prediction error signals with within-segment coherence produces boundaries strongly correlated with human event perception. Our adaptation uses embedding drift as a proxy for surprise and cosine similarity for cohesion, enabling modality-agnostic operation across text tokens, audio chunks, video frames, or any signal stream.
+
+4.4.1 Memory Accumulator State
+
+Each source stream maintains accumulator state:
+
+μ_acc ← 256d running mean embedding
+
+D_acc ← accumulated drift within memory
+
+s_sum ← sum of signal scores in memory
+
+s_max ← max signal score in memory
+
+n ← count of signals in memory
+
+e_peak ← embedding of highest-scoring signal
+
+t_acc_start ← timestamp of accumulation start
+
+last_signal_ts ← timestamp of previous signal (for gap detection)
+
+On each signal, update running statistics (note: n is the count before this signal):
+
+μ_acc ← (n × μ_acc + x_t) / (n + 1)
+
+n ← n + 1
+
+D_acc ← D_acc + drift_mag_t
+
+s_sum ← s_sum + score_t
+
+if score_t \> s_max:
+
+s_max ← score_t; e_peak ← x_t
+
+last_signal_ts ← now() \# update timestamp for next gap calculation
+
+4.4.2 Hybrid Drift and Coherence Tracking
+
+Boundary detection combines kinematic drift with semantic coherence:
+
+ε_noise = 0.02 \# noise floor for drift
+
+d_step ← max(drift_mag_t − ε_noise, 0)
+
+η_mem ← EWMA(η_mem, d_step, α = lerp(0.3, 0.1, T))
+
+Memory coherence tracks similarity within the current memory accumulation window (range \[−1, 1\] from mean cosine):
+
+coherence_mem_t ← mean(\[cos(x_t, x_i) for x_i in current_window\])
+
+Note: coherence_mem is distinct from coherence_struct (Section 3.1.1). The former tracks within-memory similarity using raw mean cosine, while the latter measures variance-based integration with broader context. This dual-signal approach mirrors EM-LLM\'s boundary detection mechanism. In their formulation, boundaries occur where surprise (token-level prediction error) exceeds a threshold and segment cohesion drops. Our drift spike approximates surprise via embedding-space velocity, while coherence_mem drop captures within-memory similarity degradation.
+
+4.4.3 Natural Boundary Detection
+
+Boundary score combines drift spike and coherence drop:
+
+w_drift = lerp(0.6, 0.4, T) \# weight on drift
+
+w_coh = 1 − w_drift \# weight on coherence drop
+
+drift_spike ← (d_step − η_mem) / max(η_mem, ε)
+
+coh_drop ← max(0, coherence_mem\_{t−1} − coherence_mem_t)
+
+boundary_score ← w_drift × sigmoid(drift_spike) +
+
+w_coh × coh_drop
+
+Boundary threshold and limits:
+
+b_thresh(F, S) = lerp(0.4, 0.7, F) × lerp(1.1, 0.9, S)
+
+max_mem_time(T) = lerp(30, 120, T) \# seconds
+
+max_mem_drift(S) = lerp(0.8, 2.0, S) \# cumulative drift cap
+
+Trigger memory flush when:
+
+mem_elapsed ← now() − t_acc_start
+
+should_flush = (boundary_score \> b_thresh(F, S)) OR
+
+(mem_elapsed \> max_mem_time(T)) OR
+
+(D_acc \> max_mem_drift(S)) OR
+
+(signal_gap \> gap_threshold(T))
+
+where signal_gap = now() − last_signal_ts detects natural pauses (speech pauses, generation delays):
+
+gap_threshold(T) = lerp(5, 30, T) \# seconds
+
+4.4.4 Spike Bypass (Flashbulb Flush)
+
+High-salience signals bypass accumulation and flush immediately, capturing preceding context as a coherent memory unit:
+
+spike_margin(S) = lerp(0.3, 0.15, S) \# above θ_dynamic
+
+spike_bypass = score_t \> (θ_dynamic + spike_margin(S))
+
+When spike_bypass triggers:
+
+if spike_bypass AND n \> 1:
+
+commit_memory() \# includes spike signal
+
+reset_accumulator()
+
+This ensures flashbulb moments capture their surrounding context rather than creating isolated micro-memories.
+
+4.4.5 Window Score and Refractory
+
+Memory-level score combines peak and average with coverage bonus:
+
+s_avg ← s_sum / max(n, 1)
+
+α(F) = lerp(0.3, 0.7, F) \# peak vs avg weight
+
+coverage ← min(n / n_ctx(T), 1.0) \# memory completeness
+
+β(S) = lerp(0.05, 0.15, S) \# coverage weight
+
+S_window ← α(F) × s_max + (1 − α(F)) × s_avg + β(S) × coverage
+
+Write refractory suppresses rapid successive writes:
+
+τ_write_refrac(T) = lerp(5, 30, T) \# seconds
+
+k_write_refrac = lerp(0.3, 0.1, T)
+
+Δt_write ← now() − last_write_ts
+
+M_write_refrac ← 1.0 + k_write_refrac × exp(−Δt_write / τ_write_refrac(T))
+
+Final write decision:
+
+θ_memory ← θ_dynamic × M_write_refrac
+
+write_memory = (should_flush OR spike_bypass) AND (S_window \> θ_memory)
+
+Representative embedding blends accumulator mean with peak:
+
+ρ(F) = lerp(0.3, 0.7, F) \# mean vs peak blend
+
+e_rep ← l2_normalize(ρ(F) × μ_acc + (1 − ρ(F)) × e_peak)
+
+On write: store e_rep with metadata {n, s_max, s_avg, D_acc, mem_elapsed}. Reset accumulator for next unit.
+
 5\. Reinforcement and Decay Dynamics
 
 5.1 Memory Strength Model
 
-Each memory m maintains a strength value updated through use-frequency
-tracking and exponential decay:
+Each memory m maintains a strength value updated through use-frequency tracking and exponential decay. The update uses a sensitivity-modulated learning rate and a binary usage indicator:
+
+α_min_S = 0.05; α_span_S = 0.35
+
+α_S(t) = α_min_S + S × α_span_S × u(t)
+
+used_flag(m) = 1 if m was retrieved and used in current step, else 0
 
 use_frequency_t ← EWMA(use_frequency\_{t−1},
 
@@ -701,8 +842,7 @@ if strength_t \< periphery_cutoff(T): evict(m)
 
 5.2 Influence-Weighted Updates
 
-When contextual gain signals are available, influence factors modulate
-reinforcement:
+When contextual gain signals are available, influence factors modulate reinforcement:
 
 influence_factor ← (used_count / max(retrieved_count, 1)) ×
 
@@ -714,9 +854,7 @@ S × use_frequency_t + F × influence_factor
 
 5.3 Causal Feedback Loop
 
-The system tracks causal influence of retrieved memories on generation
-quality through contextual gain---the improvement in prediction accuracy
-attributable to including each memory in context.
+The system tracks causal influence of retrieved memories on generation quality through contextual gain---the improvement in prediction accuracy attributable to including each memory in context.
 
 5.3.1 Focus Feedback
 
@@ -740,8 +878,7 @@ attention_width_t ← clamp(attention_width_t,
 
 attention_width_min, attention_width_max)
 
-Positive contextual gain narrows attention and boosts relevance
-weighting; negative gain widens attention to explore alternatives.
+Positive contextual gain narrows attention and boosts relevance weighting; negative gain widens attention to explore alternatives.
 
 5.3.2 Sensitivity Feedback
 
@@ -759,8 +896,7 @@ redundancy(m, recent_context))
 
 weight_novelty_t ← clamp(weight_novelty_t, 0, 1)
 
-This rewards novelty that proves useful while penalizing redundant
-retrievals.
+This rewards novelty that proves useful while penalizing redundant retrievals.
 
 5.3.3 Stability Feedback
 
@@ -776,20 +912,17 @@ else:
 
 stability(m) \*= (1 − γT_base)
 
-The mean stability of used memories provides adjustment to the half-life
-target:
+The mean stability of used memories provides adjustment to the half-life target:
 
 adj ← clamp(mean(stability(m_used)) − 1.0, −0.25, +0.25)
 
 ΔHalfLife_adj_t ← adj
 
-This factor is consumed by the Stability update (Section 4.3.2),
-avoiding conflicting adjustments between feedback mechanisms.
+This factor is consumed by the Stability update (Section 2.3.2), avoiding conflicting adjustments between feedback mechanisms.
 
 5.4 Generation Influence Tracking
 
-When generation embeddings are available, influence incorporates output
-trajectory:
+When generation embeddings are available, influence incorporates output trajectory:
 
 Δḡ ← l2_normalize(ḡ_t) − l2_normalize(ḡ\_{t−1})
 
@@ -799,8 +932,7 @@ drift_contribution(m) ← (drift_mag_gen / 2) ×
 
 max(0, cos(m.embedding, l2_normalize(Δḡ)))
 
-Total influence blends contextual gain, generation similarity, and drift
-contribution:
+Total influence blends contextual gain, generation similarity, and drift contribution:
 
 λ₁ = 0.5; λ₂ = 0.4; λ₃ = 0.3
 
@@ -822,20 +954,33 @@ influence(m),
 
 6\. Advanced Cognitive Processes
 
-This section presents algorithms modeling higher-order cognitive
-phenomena: working memory maintenance, metacognitive monitoring,
-reconsolidation dynamics, and serial position effects.
+This section presents algorithms modeling higher-order cognitive phenomena: working memory maintenance, metacognitive monitoring, reconsolidation dynamics, and serial position effects.
 
 6.1 Working Memory Gates
 
-Following Cowan\'s (2001) capacity constraints, working memory maintains
-a limited number of active items:
+Following Cowan\'s (2001) capacity constraints, working memory maintains a limited number of active items. Working memory slots hold coherent memories as defined in Section 4.4, preserving the full content and signal sequence:
 
 base_capacity = round(lerp(5, 3, S) + lerp(−1, 1, F))
 
-This yields a range of approximately 2-6 slots, broadening the 4±1 chunk
-limit to accommodate task-dependent requirements. High Sensitivity
-reduces capacity (faster turnover), while high Focus modulates breadth.
+This yields a range of approximately 2-6 slots, broadening the 4±1 chunk limit to accommodate task-dependent requirements. High Sensitivity reduces capacity (faster turnover), while high Focus modulates breadth.
+
+6.1.1 Slot Content Structure
+
+Each working memory slot holds a coherent memory with its full content and metadata:
+
+slot.content ← concatenated signal texts
+
+slot.embedding ← e_rep \# representative embedding (Section 4.4.5)
+
+slot.signals ← \[x_1, x_2, \..., x_n\] \# ordered signal embeddings
+
+slot.metadata ← {n, s_max, s_avg, D_acc, mem_elapsed,
+
+s_emotion_max, s_arousal_avg}
+
+The emotional metrics (s_emotion_max, s_arousal_avg) are accumulated during memory formation for use by Emotional Consolidation (Section 6.7).
+
+6.1.2 Maintenance Cost
 
 Maintenance incurs cognitive cost:
 
@@ -843,8 +988,9 @@ maintenance_cost_per_slot = lerp(0.05, 0.15, S)
 
 complexity_penalty = manifold_complexity × lerp(0.5, 1.5, S)
 
-The manifold_complexity represents local variance in the embedding
-stream: 1 - mean(cos(window)).
+The manifold_complexity represents local variance in the embedding stream: 1 - mean(cos(window)).
+
+6.1.3 Memory-Level Gating
 
 Gating thresholds determine entry and chunking:
 
@@ -856,10 +1002,35 @@ rehearsal_rate = lerp(0.5, 2.0, S)
 
 slot_dedication_strength = lerp(0.3, 0.9, T)
 
+Working memory gating evaluates coherent memories at accumulation boundaries (Section 4.4.3), not individual signals:
+
+on_memory_boundary:
+
+memory_benefit ← α × S_window + β × relevance(μ_acc, task_context) +
+
+γ × novelty(μ_acc, existing_slots)
+
+margin ← memory_benefit − gate_threshold
+
+total_cost ← maintenance_cost_per_slot × \|existing_slots\| + complexity_penalty
+
+accept_memory = (margin ≥ total_cost)
+
+Note that total_cost is computed from existing slots only, not the prospective new slot. This avoids a bootstrap problem where empty working memory would require unreasonably high benefit scores to accept the first item.
+
+6.1.4 Chunking at Memory Level
+
+Chunking operates on memory embeddings to merge related content:
+
+similar_slots ← {s ∈ slots \| cos(s.embedding, memory.e_rep) \> chunking_threshold}
+
+if \|similar_slots\| \> 0:
+
+merge_into_chunk(similar_slots, memory)
+
 6.2 Metacognitive Monitoring
 
-The system implements feeling-of-knowing (FOK) and tip-of-tongue (TOT)
-detection following Hart\'s (1965) framework:
+The system implements feeling-of-knowing (FOK) and tip-of-tongue (TOT) detection following Hart\'s (1965) framework:
 
 FOK_threshold = lerp(0.2, 0.5, F)
 
@@ -867,9 +1038,7 @@ TOT_detection = (FOK \> lerp(0.5, 0.8, F)) AND
 
 (retrieval_strength \< lerp(0.4, 0.2, F))
 
-TOT occurs when metacognitive confidence is high but retrieval strength
-is low---the characteristic experience of knowing one knows something
-but being unable to access it.
+TOT occurs when metacognitive confidence is high but retrieval strength is low---the characteristic experience of knowing one knows something but being unable to access it.
 
 Additional metacognitive parameters:
 
@@ -885,8 +1054,7 @@ metacognitive_sensitivity = F × (1 + 0.5 × S)
 
 6.3 Memory Reconsolidation
 
-Following Nader et al. (2000), retrieved memories enter a labile state
-permitting modification:
+Following Nader et al. (2000), retrieved memories enter a labile state permitting modification:
 
 τ_labile = lerp(30, 300, T) \# seconds
 
@@ -900,15 +1068,13 @@ drift_magnitude = (1 − T) × S × lability ×
 
 contextual_relevance
 
-Reconsolidation effects propagate to semantically related memories with
-decay:
+Reconsolidation effects propagate to semantically related memories with decay:
 
 ripple_decay = lerp(0.5, 0.1, T) \# per semantic hop
 
 6.4 Retrieval Competition
 
-Retrieved memories compete through lateral inhibition, modeling
-retrieval-induced forgetting (Anderson et al., 1994):
+Retrieved memories compete through lateral inhibition, modeling retrieval-induced forgetting (Anderson et al., 1994):
 
 inhibition_radius = lerp(0.5, 0.85, F)
 
@@ -920,13 +1086,11 @@ suppression_per_retrieval = lerp(0.1, 0.01, T) ×
 
 recovery_time_RIF = lerp(300, 1800, T) \# seconds
 
-High Focus produces narrow winner-take-all dynamics; low Focus permits
-broader activation.
+High Focus produces narrow winner-take-all dynamics; low Focus permits broader activation.
 
 6.5 Predictive Pre-activation
 
-The system pre-activates memories predicted to be relevant based on
-trajectory extrapolation:
+The system pre-activates memories predicted to be relevant based on trajectory extrapolation:
 
 prediction_horizon = round(lerp(2, 8, F))
 
@@ -936,15 +1100,13 @@ prediction_conf_threshold = lerp(0.3, 0.7, F)
 
 surprise_sensitivity = S × lerp(2.0, 0.5, T)
 
-When predictions fail (high surprise), the system updates its trajectory
-model:
+When predictions fail (high surprise), the system updates its trajectory model:
 
 update_rate_on_surprise = lerp(0.2, 0.02, T) × S
 
 6.6 Serial Position Effects
 
-The architecture models primacy, recency, and distinctiveness effects
-observed in human memory (Murdock, 1962):
+The architecture models primacy, recency, and distinctiveness effects observed in human memory (Murdock, 1962):
 
 primacy_window = round(lerp(5, 2, F))
 
@@ -954,8 +1116,7 @@ recency_window = round(lerp(7, 3, F))
 
 rehearsal_curve_depth = lerp(0.2, 0.6, S)
 
-The von Restorff (isolation) effect enhances memory for distinctive
-items (Hunt, 1995):
+The von Restorff (isolation) effect enhances memory for distinctive items (Hunt, 1995):
 
 distinctiveness_threshold = lerp(0.6, 0.8, F)
 
@@ -969,26 +1130,29 @@ middle_suppression = lerp(0.8, 0.5, S) × (1 − F)
 
 6.7 Emotional Consolidation
 
-High-emotion events trigger enhanced consolidation, following McGaugh\'s
-(2004) findings:
+High-emotion events trigger enhanced consolidation, following McGaugh\'s (2004) findings. As detailed in Section 7.1.1, consolidation operates on stored memory metadata:
 
 θ_intensity = lerp(0.6, 0.8, 1 − S)
 
 θ_arousal = lerp(0.4, 0.2, S)
 
-trigger = (emotion_intensity_t ≥ θ_intensity) AND
+\# Consolidation uses stored memory emotional metadata
 
-(arousal_t ≥ θ_arousal)
+trigger = (m.metadata.s_emotion_max ≥ θ_intensity) AND
 
-Flashbulb memories receive extended half-life bonuses:
+(m.metadata.s_arousal_avg ≥ θ_arousal)
+
+Flashbulb memories receive extended half-life bonuses based on the memory\'s peak emotional intensity:
 
 flashbulb_threshold = lerp(0.9, 0.4, S)
 
+\# Half-life bonus uses stored memory emotional peak
+
 emotional_half_life_bonus = exp(lerp(0, ln(3), S)) ×
 
-(1 + emotion_intensity_t)
+(1 + m.metadata.s_emotion_max)
 
-Emotional tags cascade to related memories with decay:
+The emotional metrics (s_emotion_max, s_arousal_avg) are accumulated during memory formation and stored with the memory (Section 6.1.1).
 
 cascade_radius = round(lerp(1, 5, S))
 
@@ -996,21 +1160,19 @@ cascade_decay = lerp(0.7, 0.3, S)
 
 7\. Consolidation and Graph Integration
 
-The consolidation system transforms episodic memories into semantic
-structures through clustering, summarization, and knowledge graph
-construction.
+The consolidation system transforms episodic memories into semantic structures through clustering, summarization, and knowledge graph construction. Memory-level storage (Section 4.4) ensures each embedding represents a coherent unit.
 
 7.1 Consolidation Triggers
 
-Consolidation activates under capacity, rate, or temporal conditions:
+Consolidation operates on stored memory representatives (e_rep from Section 4.4.5), not individual signals. It activates under capacity, rate, or temporal conditions:
 
 should_consolidate = (db_size \> consolidation_threshold) OR
 
-(write_rate_t \< rate_target_t / 2) OR
+(memory_write_rate_t \< rate_target_t / 2) OR
 
 (elapsed_time \> consolidation_interval)
 
-The consolidation rate adapts to Stability and Sensitivity:
+The consolidation rate adapts to Stability and Sensitivity (write_rate tracks memory writes, not signal writes):
 
 rate_consolidate = (1 / max(consolidation_interval, 1)) ×
 
@@ -1018,24 +1180,25 @@ rate_consolidate = (1 / max(consolidation_interval, 1)) ×
 
 7.1.1 Activity-Aware Scheduling
 
-Consolidation runs during idle periods and preempts for retrieval:
+Consolidation runs during idle periods and preempts for retrieval. The is_accumulating_memory check ensures consolidation doesn\'t interrupt mid-memory accumulation:
 
 idle_required(T) = round(0.25 × w_rate_seconds(T))
 
 idle_for = now() − last_retrieval_ts
 
-should_start = (NOT is_processing_signal) AND
+\# Consolidation waits for memory completion, not just signal arrival
+
+should_start = (NOT is_accumulating_memory) AND
 
 (retrieval_queue_depth == 0) AND
 
 (idle_for ≥ idle_required(T))
 
-On retrieval events, consolidation pauses, commits micro-batches, and
-resumes when idle.
+Consolidation begins only after the current memory has been flushed (Section 4.4.3) and the idle period has elapsed. On retrieval events, consolidation pauses, commits micro-batches, and resumes when idle.
 
 7.2 Consolidation Scoring
 
-Each memory receives a consolidation score determining merge priority:
+Each stored embedding represents a memory representative (e_rep from Section 4.4.5). Each memory receives a consolidation score determining merge priority:
 
 score_consolidate(m) = w_s × strength(m) −
 
@@ -1053,8 +1216,7 @@ Low-scoring memories are marked for merging.
 
 7.3 Clustering and Summarization
 
-Marked memories cluster via density-based methods (e.g., DBSCAN) or
-k-means using embedding similarity:
+Marked memories cluster via density-based methods (e.g., DBSCAN) or k-means using embedding similarity:
 
 cluster_i = {m_j \| cos(m_j, μ_i) \> merge_threshold}
 
@@ -1070,8 +1232,7 @@ summary.metadata.sources = \[m.id for m in cluster_i\]
 
 7.4 Semantic Extraction
 
-For sufficiently large clusters, semantic extraction identifies entities
-and relations:
+For sufficiently large clusters, semantic extraction identifies entities and relations:
 
 extraction_batch_size = round(lerp(8, 32, T))
 
@@ -1083,9 +1244,7 @@ extraction_interval = lerp(300, 3600, T) \# 5 min → 1 hour
 
 max_extractions_per_cycle = round(lerp(20, 5, T))
 
-Extraction uses structured prompting to identify named entities (people,
-places, organizations, concepts) and relationships (co-occurrence,
-implication, contradiction).
+Extraction uses structured prompting to identify named entities (people, places, organizations, concepts) and relationships (co-occurrence, implication, contradiction).
 
 7.5 Knowledge Graph Construction
 
@@ -1139,9 +1298,13 @@ create_edge(m_i, m_j, \'causes\', drift_mag)
 
 7.6 Graph-Augmented Retrieval
 
-Retrieval combines vector similarity with graph expansion:
+Retrieval combines vector similarity with graph expansion. Both initial retrieval and re-ranking use the memory centroid (μ_acc from Section 4.4.1) as the query vector, ensuring retrieved memories are ranked by relevance to the overall context rather than momentary signal fluctuations:
 
-results_vec ← topK(vector_search(x_t, k=kNN_size))
+\# Query and re-rank using current memory centroid
+
+q ← μ_acc \# memory centroid from Section 4.4.1
+
+results_vec ← topK(vector_search(q, k=kNN_size))
 
 seed_nodes ← \[r.id for r in results_vec\]
 
@@ -1149,16 +1312,13 @@ expanded_nodes ← graph.traverse(seed_nodes, depth=graph_depth)
 
 combined ← union(seed_nodes, expanded_nodes)
 
-re_ranked ← sort_by(cos(x_t, embeddings(combined)))
+re_ranked ← sort_by(cos(q, embeddings(combined))) \# re-rank by memory centroid
 
-Graph expansion uses recursive traversal with depth limits to find
-related context that pure vector search might miss.
+Graph expansion uses recursive traversal with depth limits to find related context that pure vector search might miss. Using the memory centroid maintains consistency between vector search and graph expansion results.
 
 8\. Interrupt Gate and Streaming Integration
 
-The interrupt gate controls when retrieved memories enter active context
-during streaming generation. The gate balances novelty value against
-disruption cost.
+The interrupt gate controls when retrieved memories enter active context during streaming generation. The gate balances novelty value against disruption cost. The interrupt gate operates on memory-level context, using centroids (μ_acc) rather than individual signal embeddings for novelty and relevance computation.
 
 8.1 Marginal Utility Computation
 
@@ -1188,15 +1348,23 @@ Effective thresholds incorporate refractory pressure:
 
 8.2 Marginal Utility Score
 
-The marginal utility (MU) of a candidate memory combines four factors:
+The marginal utility (MU) of a candidate memory combines four factors. Context comparisons use memory centroids rather than individual signal embeddings:
 
-w_cov = normalize(lerp(0.40, 0.60, F)) \# coverage gain
+\# Context window contains recent memory centroids, not individual signals
 
-w_rel = normalize(lerp(0.35, 0.25, F)) \# relevance
+ctx_window ← recent_memory_centroids \# deque of μ_acc values
 
-w_red = normalize(lerp(0.15, 0.25, S)) \# redundancy penalty
+ctx_centroid ← mean(ctx_window) \# centroid of recent memory centroids
 
-w_coh = normalize(lerp(0.15, 0.25, S)) \# incoherence penalty
+w_raw = \[lerp(0.40, 0.60, F), \# coverage gain
+
+lerp(0.35, 0.25, F), \# relevance
+
+lerp(0.15, 0.25, S), \# redundancy penalty
+
+lerp(0.15, 0.25, S)\] \# incoherence penalty
+
+\[w_cov, w_rel, w_red, w_coh\] = normalize(w_raw)
 
 mu = w_cov × coverage_gain(candidate \| included_set) +
 
@@ -1204,7 +1372,7 @@ w_rel × cos(candidate, ctx_centroid) −
 
 w_red × redundancy(candidate, included_set) −
 
-w_coh × (1 − coherence_t)
+w_coh × (1 − coherence_struct_t) \# structural coherence penalty
 
 8.3 Gate Decision Logic
 
@@ -1216,22 +1384,17 @@ K = round(lerp(10, 6, F)) \# candidates to evaluate
 
 8.3.1 Write Exclusion Filter
 
-Memories stored during the current signal processing cycle are excluded
-from interrupt consideration to prevent self-triggering:
+Memories stored during the current accumulation unit are excluded from interrupt consideration to prevent self-triggering. Using the accumulation start timestamp ensures all memories written within the current unit are excluded:
 
-write_exclusion_ts ← current_signal.start_timestamp
+\# Exclude memories written during current accumulation to prevent self-triggering
 
-candidates_eligible ← {c ∈ candidates \| c.stored_at \<
-write_exclusion_ts}
+write_exclusion_ts ← t_acc_start \# start timestamp from Section 4.4.1
 
-This filter is applied before novelty and marginal utility evaluation.
-All subsequent gate logic operates on candidates_eligible rather than
-the raw candidate set, ensuring that recently written memories cannot
-immediately trigger retrieval interrupts regardless of their semantic
-properties.
+candidates_eligible ← {c ∈ candidates \| c.stored_at \< write_exclusion_ts}
 
-Boundary-aware override permits lower-threshold interrupts at natural
-boundaries:
+This filter is applied before novelty and marginal utility evaluation. All subsequent gate logic operates on candidates_eligible rather than the raw candidate set, preventing recursive triggering within a coherent thought unit.
+
+Boundary-aware override permits lower-threshold interrupts at natural boundaries:
 
 boundary_mult = lerp(1.3, 2.0, F) × lerp(1.1, 0.9, S)
 
@@ -1249,19 +1412,23 @@ allow_interrupt =
 
 (at_drift_boundary OR best_mu ≥ boundary_mult × τ_mu_eff)
 
-This logic suppresses low-drift interrupts unless the marginal utility
-substantially exceeds threshold, while permitting normal-threshold
-interrupts at natural transition points.
+This logic suppresses low-drift interrupts unless the marginal utility substantially exceeds threshold, while permitting normal-threshold interrupts at natural transition points.
 
 8.4 Streaming Pacing
 
-Streaming retrieval is gated by cumulative drift rate:
+Streaming retrieval is gated by cumulative drift rate within the accumulation unit. Retrieval checks trigger when drift exceeds threshold or at boundaries:
+
+\# Pacing tracks drift within current memory formation
 
 drift_accum += dist(x_t, x\_{last_check})
 
 pacing_thresh(S) = lerp(0.5, 0.1, S)
 
-if drift_accum \> pacing_thresh(S): trigger_check()
+\# Retrieval triggered when drift exceeds threshold or at memory boundary
+
+if drift_accum \> pacing_thresh(S) OR should_flush:
+
+trigger_check()
 
 max_wait_drift(F) = lerp(2.0, 0.5, F)
 
@@ -1269,5 +1436,4 @@ max_results(F) = round(lerp(64, 4, F))
 
 adjacent_window(F) = round(lerp(8, 1, F))
 
-High Sensitivity produces frequent checks triggered by small content
-shifts; high Focus enforces strict drift limits.
+High Sensitivity produces frequent checks triggered by small content shifts; high Focus enforces strict drift limits. Memory boundaries (Section 4.4.3) also trigger retrieval checks to ensure context updates align with natural thought transitions.

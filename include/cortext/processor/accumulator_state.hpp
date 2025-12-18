@@ -1,0 +1,122 @@
+#pragma once
+
+#include <Eigen/Core>
+#include <cstdint>
+#include <string>
+#include <vector>
+
+namespace cortext
+{
+
+/**
+ * @brief Individual signal record for SIGNALS table population (Section 4.4)
+ *
+ * Tracks per-signal metadata during memory accumulation for later persistence.
+ */
+struct SignalRecord
+{
+  Eigen::VectorXf embedding;              ///< Signal embedding (256d)
+  uint64_t timestamp = 0;                 ///< Signal arrival time (ms since epoch)
+  std::string modality;                   ///< "text" | "audio" | "image"
+  std::string mime;                       ///< MIME type
+  std::vector<unsigned char> blob_id;     ///< objstore hash (may be empty)
+  double score = 0.0;                     ///< Composite score
+  int serial_position = 0;                ///< Order within memory (0-based)
+};
+
+/**
+ * @brief Per-source-stream memory accumulator state (Section 4.4)
+ *
+ * Maintains running statistics for grouping signals into coherent memories.
+ * Each source_id has its own accumulator.
+ */
+struct AccumulatorState
+{
+  Eigen::VectorXf mu_acc;       ///< Running mean embedding (256d)
+  double drift_acc = 0.0;       ///< Accumulated drift within group (D_acc)
+  double s_sum = 0.0;           ///< Sum of signal scores in group
+  double s_max = 0.0;           ///< Max signal score in group
+  int n_signals = 0;            ///< Count of signals in group
+  Eigen::VectorXf e_peak;       ///< Embedding of highest-scoring signal
+  uint64_t t_start = 0;         ///< Timestamp of accumulation start
+  uint64_t last_write_ts = 0;   ///< Timestamp of last write (for refractory)
+  uint64_t last_signal_ts = 0;  ///< Timestamp of previous signal (for gap)
+  double eta_acc = 0.0;         ///< Drift EWMA (η_acc)
+  double coherence_prev = 1.0;  ///< Previous coherence value
+
+  // Emotional metadata (Section 6.1.1)
+  double s_emotion_max = 0.0;   ///< Peak emotion intensity in memory
+  double s_arousal_sum = 0.0;   ///< Sum of arousal values (for computing avg)
+
+  // Signal tracking for SIGNALS table (Section 4.4)
+  std::vector<SignalRecord> signals;  ///< Tracked signals for persistence
+
+  /**
+   * @brief Reset accumulator for new memory accumulation
+   * @param first_embedding Initial embedding for the new memory
+   * @param timestamp Current timestamp
+   */
+  void
+  Reset (const Eigen::VectorXf &first_embedding, uint64_t timestamp)
+  {
+    mu_acc = first_embedding;
+    e_peak = first_embedding;
+    drift_acc = 0.0;
+    s_sum = 0.0;
+    s_max = 0.0;
+    n_signals = 1;
+    t_start = timestamp;
+    last_signal_ts = timestamp;
+    // Reset emotional metadata
+    s_emotion_max = 0.0;
+    s_arousal_sum = 0.0;
+    // Clear signal tracking
+    signals.clear ();
+    // Note: eta_acc, coherence_prev, and last_write_ts are preserved across
+    // accumulations
+  }
+
+  /**
+   * @brief Accumulate a new signal into the memory
+   * @param embedding Signal embedding
+   * @param score Composite score of the signal
+   * @param drift Drift magnitude of the signal
+   *
+   * Updates running mean: μ_acc = ((n-1) × μ_acc + x_t) / n
+   * Accumulates drift: D_acc += drift_mag_t
+   * Updates scores: s_sum += score_t; if score_t > s_max: s_max=score_t,
+   * e_peak=x_t
+   */
+  void
+  Accumulate (const Eigen::VectorXf &embedding, double score, double drift)
+  {
+    // Update running mean (Welford-style incremental mean)
+    if (n_signals == 0)
+      {
+        mu_acc = embedding;
+        e_peak = embedding;
+        s_max = score;
+      }
+    else
+      {
+        // μ_acc = ((n-1) × μ_acc + x_t) / n
+        // Equivalent to: μ_acc = μ_acc + (x_t - μ_acc) / n
+        mu_acc = mu_acc + (embedding - mu_acc) / static_cast<float> (n_signals + 1);
+      }
+
+    // Accumulate drift
+    drift_acc += drift;
+
+    // Update scores
+    s_sum += score;
+    if (score > s_max)
+      {
+        s_max = score;
+        e_peak = embedding;
+      }
+
+    n_signals++;
+  }
+};
+
+} // namespace cortext

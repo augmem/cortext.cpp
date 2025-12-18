@@ -6,6 +6,7 @@
 #include "cortext/operations/constants.hpp"
 #include "cortext/processor/operation_context.hpp"
 #include "cortext/store/store.hpp"
+#include "cortext/telemetry/telemetry.hpp"
 #include <algorithm>
 #include <any>
 #include <vector>
@@ -125,6 +126,10 @@ ApplySensitivityFeedback::Execute (OperationContext &context, Transaction &tx) c
   Store *store = context.GetStore ();
   const int k = core::KNeighbors (cfg.stability);
 
+  double redundancy_mean = 0.0;
+  double weight_novelty_delta = 0.0;
+  int event_count = 0;
+
   const auto &events = context.GetMemoryUsageEvents ();
   for (const auto &e : events)
     {
@@ -135,16 +140,34 @@ ApplySensitivityFeedback::Execute (OperationContext &context, Transaction &tx) c
       const double cg = *e.contextual_gain; // may be negative
       const double redundancy
           = ComputeRedundancy (store, e.embedding_id, k);
+      redundancy_mean += redundancy;
+      ++event_count;
+
+      const double prev_weight = p_ctx.weight_novelty;
       const double adjustment = eta * (novelty_from_metric * cg - redundancy);
       p_ctx.weight_novelty
           = core::Clamp (p_ctx.weight_novelty + adjustment,
                          constants::kNormalizedMin, constants::kNormalizedMax);
+      weight_novelty_delta += (p_ctx.weight_novelty - prev_weight);
 
       // Store computed redundancy in embeddings for consolidation scoring
       // (Section 9.2: score = T*strength - F*redundancy + S*connectivity + T*stability)
       tx.Execute ("UPDATE embeddings SET redundancy = ? WHERE embedding_id = ?",
                   { redundancy, e.embedding_id });
     }
+
+  if (event_count > 0)
+    {
+      redundancy_mean /= event_count;
+    }
+
+  telemetry::LogDebug ("cortext.sensitivity_feedback",
+                       { telemetry::Attribute::Double ("novelty_reward",
+                                                       novelty_from_metric),
+                         telemetry::Attribute::Double ("redundancy",
+                                                       redundancy_mean),
+                         telemetry::Attribute::Double ("weight_novelty_delta",
+                                                       weight_novelty_delta) });
 }
 
 } // namespace cortext::operations

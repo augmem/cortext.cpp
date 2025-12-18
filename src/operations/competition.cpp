@@ -5,6 +5,7 @@
 #include "cortext/operations/constants.hpp"
 #include "cortext/processor/operation_context.hpp"
 #include "cortext/store/schema.hpp"
+#include "cortext/telemetry/telemetry.hpp"
 #include <Eigen/Dense>
 #include <algorithm>
 #include <cmath>
@@ -147,7 +148,7 @@ void
 ApplyLateralInhibition (const std::vector<Candidate> &winners,
                         const std::vector<Candidate> &losers, double radius,
                         double lat_strength, double iter_mult, double stability,
-                        long long now_ts, Transaction &tx)
+                        long long now_ts, Transaction &tx, int &suppressed_count)
 {
   for (const auto &loser : losers)
     {
@@ -186,6 +187,7 @@ ApplyLateralInhibition (const std::vector<Candidate> &winners,
                   "SET strength = MAX(0.0, strength - ?) "
                   "WHERE embedding_id = ?;",
                   { total_supp, loser.id });
+      ++suppressed_count;
     }
 }
 
@@ -230,8 +232,16 @@ ApplyRetrievalCompetition::Execute (OperationContext &context,
     {
       return;
     }
+  int suppressed_count = 0;
   ApplyLateralInhibition (winners, losers, radius, lat_strength, iter_mult,
-                          cfg.stability, now_ts, tx);
+                          cfg.stability, now_ts, tx, suppressed_count);
+
+  // Debug logging
+  telemetry::LogDebug ("cortext.competition", {
+    telemetry::Attribute::Int64 ("winner_count", static_cast<int64_t> (k)),
+    telemetry::Attribute::Double ("inhibition_radius", radius),
+    telemetry::Attribute::Int64 ("suppressed_count", static_cast<int64_t> (suppressed_count))
+  });
 }
 
 void

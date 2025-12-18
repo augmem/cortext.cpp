@@ -4,6 +4,7 @@
 #include "cortext/core/knobs.hpp"
 #include "cortext/operations/metrics.hpp"
 #include "cortext/processor/operation_context.hpp"
+#include "cortext/telemetry/telemetry.hpp"
 #include <algorithm>
 #include <cmath>
 #include <vector>
@@ -53,6 +54,9 @@ ApplySerialPositionMultiplier::Execute (OperationContext &context, Transaction &
   if (K < 2)
     {
       context.SetSerialPositionMultiplier (1.0);
+      telemetry::LogDebug ("cortext.serial_position_apply",
+                           { telemetry::Attribute::Double ("position_multiplier",
+                                                           1.0) });
       return;
     }
 
@@ -118,6 +122,10 @@ ApplySerialPositionMultiplier::Execute (OperationContext &context, Transaction &
 
   const double avg_mult = sum_mult / static_cast<double> (K);
   context.SetSerialPositionMultiplier (avg_mult);
+
+  telemetry::LogDebug ("cortext.serial_position_apply",
+                       { telemetry::Attribute::Double ("position_multiplier",
+                                                       avg_mult) });
 }
 
 } // namespace cortext::operations

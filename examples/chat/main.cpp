@@ -37,6 +37,8 @@
 #include <opentelemetry/exporters/otlp/otlp_grpc_log_record_exporter_factory.h>
 #include <opentelemetry/exporters/otlp/otlp_grpc_log_record_exporter_options.h>
 
+#include <opentelemetry/sdk/logs/read_write_log_record.h>
+
 #include <opentelemetry/logs/provider.h>
 #include <opentelemetry/sdk/logs/logger_provider_factory.h>
 #include <opentelemetry/sdk/logs/simple_log_record_processor_factory.h>
@@ -64,6 +66,108 @@
 #include <map>
 
 namespace {
+
+// Simple log exporter with pretty one-line format to stdout and file
+class SimpleStdoutLogExporter final : public opentelemetry::sdk::logs::LogRecordExporter {
+public:
+  explicit SimpleStdoutLogExporter(const std::string& log_file_path = "")
+      : log_file_path_(log_file_path) {
+    if (!log_file_path_.empty()) {
+      log_file_.open(log_file_path_, std::ios::out | std::ios::trunc);
+    }
+  }
+
+  ~SimpleStdoutLogExporter() override {
+    if (log_file_.is_open()) {
+      log_file_.close();
+    }
+  }
+
+  std::unique_ptr<opentelemetry::sdk::logs::Recordable> MakeRecordable() noexcept override {
+    return std::make_unique<opentelemetry::sdk::logs::ReadWriteLogRecord>();
+  }
+
+  opentelemetry::sdk::common::ExportResult Export(
+      const opentelemetry::nostd::span<std::unique_ptr<opentelemetry::sdk::logs::Recordable>>& records) noexcept override {
+    for (const auto& record : records) {
+      auto* log_record = static_cast<opentelemetry::sdk::logs::ReadWriteLogRecord*>(record.get());
+      if (!log_record) continue;
+
+      // Get severity text
+      auto severity = log_record->GetSeverity();
+      std::uint32_t severity_index = static_cast<std::uint32_t>(severity);
+      std::string severity_text = "UNKNOWN";
+      if (severity_index < std::extent<decltype(opentelemetry::logs::SeverityNumToText)>::value) {
+        auto sv = opentelemetry::logs::SeverityNumToText[severity_index];
+        severity_text = std::string(sv.data(), sv.size());
+      }
+
+      // Get body as string
+      std::string body;
+      const auto& body_val = log_record->GetBody();
+      if (opentelemetry::nostd::holds_alternative<std::string>(body_val)) {
+        body = opentelemetry::nostd::get<std::string>(body_val);
+      }
+
+      // Get attributes - simplified output
+      std::ostringstream attrs;
+      bool first = true;
+      for (const auto& kv : log_record->GetAttributes()) {
+        if (!first) attrs << ", ";
+        first = false;
+        attrs << kv.first << "=";
+        // Use OwnedAttributeValue visitor
+        opentelemetry::nostd::visit([&attrs](auto&& v) {
+          using T = std::decay_t<decltype(v)>;
+          if constexpr (std::is_same_v<T, bool>) { attrs << (v ? "true" : "false"); }
+          else if constexpr (std::is_same_v<T, int32_t>) { attrs << v; }
+          else if constexpr (std::is_same_v<T, int64_t>) { attrs << v; }
+          else if constexpr (std::is_same_v<T, uint32_t>) { attrs << v; }
+          else if constexpr (std::is_same_v<T, uint64_t>) { attrs << v; }
+          else if constexpr (std::is_same_v<T, double>) { attrs << v; }
+          else if constexpr (std::is_same_v<T, std::string>) { attrs << v; }
+          else { attrs << "?"; }
+        }, kv.second);
+      }
+
+      // Format: [SEVERITY] body {attrs}
+      std::ostringstream line;
+      line << "[" << severity_text << "] " << body;
+      if (!first) line << " {" << attrs.str() << "}";
+      line << "\n";
+
+      // Write to stdout
+      std::cout << line.str();
+      std::cout.flush();
+
+      // Write to file if open
+      if (log_file_.is_open()) {
+        log_file_ << line.str();
+        log_file_.flush();
+      }
+    }
+    return opentelemetry::sdk::common::ExportResult::kSuccess;
+  }
+
+  bool ForceFlush(std::chrono::microseconds) noexcept override {
+    std::cout.flush();
+    if (log_file_.is_open()) {
+      log_file_.flush();
+    }
+    return true;
+  }
+
+  bool Shutdown(std::chrono::microseconds) noexcept override {
+    if (log_file_.is_open()) {
+      log_file_.close();
+    }
+    return true;
+  }
+
+private:
+  std::string log_file_path_;
+  std::ofstream log_file_;
+};
 
 struct RetrievalLatencyState {
   std::optional<double> encoder_latency_ms;
@@ -300,9 +404,9 @@ double GetEnvDouble(const char* name, double fallback) {
   }
 }
 
-uint64_t NowUnixSeconds() {
+uint64_t NowUnixMillis() {
   using namespace std::chrono;
-  return static_cast<uint64_t>(duration_cast<seconds>(system_clock::now().time_since_epoch()).count());
+  return static_cast<uint64_t>(duration_cast<milliseconds>(system_clock::now().time_since_epoch()).count());
 }
 
 std::optional<std::filesystem::path> FindRepoRootFromExe(const char* argv0) {
@@ -329,9 +433,10 @@ std::optional<std::filesystem::path> FindRepoRootFromExe(const char* argv0) {
   return std::nullopt;
 }
 
-std::string FormatTimestampRfc2822(std::uint64_t timestamp) {
-  if (timestamp == 0) return "";
-  std::time_t t = static_cast<std::time_t>(timestamp);
+std::string FormatTimestampRfc2822(std::uint64_t timestamp_ms) {
+  if (timestamp_ms == 0) return "";
+  // Convert milliseconds to seconds for time_t
+  std::time_t t = static_cast<std::time_t>(timestamp_ms / 1000);
   std::tm tm_buf;
   std::tm* tm_ptr = localtime_r(&t, &tm_buf);
   if (!tm_ptr) return "";
@@ -515,13 +620,25 @@ int main(int argc, char** argv) {
     };
     tokens_gauge->AddCallback(observe_tokens, last_tokens_used.get());
 
-    // OTLP gRPC log exporter (reads config from env vars)
+    // Log exporters: stdout (simple pretty format) + OTLP gRPC
     {
       namespace logs_sdk = opentelemetry::sdk::logs;
+
+      // Create simple stdout log exporter first (also writes to logs.txt in examples/chat/)
+      std::string log_file_path = "examples/chat/logs.txt";
+      if (repo_root.has_value()) {
+        log_file_path = (*repo_root / "examples/chat/logs.txt").string();
+      }
+      auto stdout_exporter = std::unique_ptr<logs_sdk::LogRecordExporter>(new SimpleStdoutLogExporter(log_file_path));
+      auto stdout_processor = logs_sdk::SimpleLogRecordProcessorFactory::Create(std::move(stdout_exporter));
+      auto logger_provider = logs_sdk::LoggerProviderFactory::Create(std::move(stdout_processor), resource);
+
+      // Add OTLP gRPC log exporter as additional processor
       otlp::OtlpGrpcLogRecordExporterOptions log_opts;
-      auto log_exporter = otlp::OtlpGrpcLogRecordExporterFactory::Create(log_opts);
-      auto log_processor = logs_sdk::SimpleLogRecordProcessorFactory::Create(std::move(log_exporter));
-      auto logger_provider = logs_sdk::LoggerProviderFactory::Create(std::move(log_processor), resource);
+      auto otlp_exporter = otlp::OtlpGrpcLogRecordExporterFactory::Create(log_opts);
+      auto otlp_processor = logs_sdk::SimpleLogRecordProcessorFactory::Create(std::move(otlp_exporter));
+      static_cast<logs_sdk::LoggerProvider*>(logger_provider.get())->AddProcessor(std::move(otlp_processor));
+
       opentelemetry::logs::Provider::SetLoggerProvider(
           opentelemetry::nostd::shared_ptr<opentelemetry::logs::LoggerProvider>(logger_provider.release()));
     }
@@ -638,16 +755,17 @@ int main(int argc, char** argv) {
         is_generating = generating;
       }
 
-      if (!is_generating && idle_tracker.ShouldConsolidate(stability)) {
-        try {
-          std::lock_guard<std::mutex> lock(db_write_mu);
-          cortext_ctx->Consolidate(NowUnixSeconds());
-          idle_tracker.MarkConsolidated();
-        } catch (const std::exception& ex) {
-          std::lock_guard<std::mutex> lock(mu);
-          last_error = std::string("idle consolidation: ") + ex.what();
-        }
-      }
+      // Consolidation disabled for debugging
+      // if (!is_generating && idle_tracker.ShouldConsolidate(stability)) {
+      //   try {
+      //     std::lock_guard<std::mutex> lock(db_write_mu);
+      //     cortext_ctx->Consolidate();
+      //     idle_tracker.MarkConsolidated();
+      //   } catch (const std::exception& ex) {
+      //     std::lock_guard<std::mutex> lock(mu);
+      //     last_error = std::string("idle consolidation: ") + ex.what();
+      //   }
+      // }
     }
   });
 
@@ -678,6 +796,10 @@ int main(int argc, char** argv) {
       if (!text.empty()) {
         idle_tracker.RecordActivity();
 
+        cortext::telemetry::LogInfo("chat.user_message", {
+          cortext::telemetry::Attribute::Int64("text_length", static_cast<int64_t>(text.size()))
+        });
+
         // Wait for any previous streaming thread to complete before starting new one
         if (streaming_thread.joinable()) {
           streaming_thread.join();
@@ -686,38 +808,62 @@ int main(int argc, char** argv) {
         // Launch background job for streaming
         streaming_thread_active.store(true);
         streaming_thread = std::thread([&, text, model_copy = model] {
-          const uint64_t ts = NowUnixSeconds();
-
           // Phase 1: Process user input through Cortext
+          cortext::telemetry::LogDebug("chat.phase1.start", {
+            cortext::telemetry::Attribute::String("source", "chat/user"),
+            cortext::telemetry::Attribute::Int64("text_length", static_cast<int64_t>(text.size()))
+          });
+
           cortext::Cortext::Context retrieved;
           try {
             std::lock_guard<std::mutex> lock(db_write_mu);
-            cortext_ctx->Flush();
-            retrieved = cortext_ctx->ProcessText(text, ts, "chat/user");
+            retrieved = cortext_ctx->ProcessText(text, "chat/user");
           } catch (const std::exception& ex) {
             std::lock_guard<std::mutex> lock(mu);
             last_error = std::string("cortext user: ") + ex.what();
+            cortext::telemetry::LogError("chat.phase1.error", {
+              cortext::telemetry::Attribute::String("error", ex.what())
+            });
           }
 
           {
             std::lock_guard<std::mutex> lock(mu);
-            streaming_state.current_memories = retrieved.memories;
-            for (const auto& mem : retrieved.memories) {
-              memory_events.push_back(CreateMemoryEvent(chat::MemoryEventType::RETRIEVED, mem));
-              if (memory_events.size() > kMaxMemoryEvents) {
-                memory_events.pop_front();
+            // Only inject memories if the interrupt gate approved them
+            if (retrieved.should_interrupt) {
+              streaming_state.current_memories = retrieved.memories;
+              for (const auto& mem : retrieved.memories) {
+                memory_events.push_back(CreateMemoryEvent(chat::MemoryEventType::RETRIEVED, mem));
+                if (memory_events.size() > kMaxMemoryEvents) {
+                  memory_events.pop_front();
+                }
               }
+            } else {
+              streaming_state.current_memories.clear();
             }
             if (retrieved.output.stored_embedding_id.has_value()) {
               memory_events.push_back(CreateStoredEvent(
-                  *retrieved.output.stored_embedding_id, text, "chat/user", ts, retrieved.output));
+                  *retrieved.output.stored_embedding_id, text, "chat/user", NowUnixMillis(), retrieved.output));
               if (memory_events.size() > kMaxMemoryEvents) {
                 memory_events.pop_front();
               }
             }
           }
 
+          cortext::telemetry::LogDebug("chat.phase1.complete", {
+            cortext::telemetry::Attribute::Bool("should_interrupt", retrieved.should_interrupt),
+            cortext::telemetry::Attribute::Int64("memories_retrieved", static_cast<int64_t>(retrieved.memories.size())),
+            cortext::telemetry::Attribute::Bool("stored", retrieved.output.stored_embedding_id.has_value()),
+            cortext::telemetry::Attribute::Double("composite_score", retrieved.output.composite_score.value_or(0.0)),
+            cortext::telemetry::Attribute::Double("threshold", retrieved.output.threshold.value_or(0.0)),
+            cortext::telemetry::Attribute::Bool("write_decision", retrieved.output.decision.value_or(false))
+          });
+
           // Phase 2: Streaming generation with interrupt checking
+          cortext::telemetry::LogDebug("chat.phase2.start", {
+            cortext::telemetry::Attribute::Int64("memories_injected", static_cast<int64_t>(streaming_state.current_memories.size())),
+            cortext::telemetry::Attribute::String("model", model_copy)
+          });
+
           std::string assistant_reply;
           int local_restarts = 0;
 
@@ -762,6 +908,11 @@ int main(int argc, char** argv) {
 
             bool interrupted = false;
 
+            cortext::telemetry::LogDebug("chat.phase2.stream_start", {
+              cortext::telemetry::Attribute::Int64("restart", static_cast<int64_t>(local_restarts)),
+              cortext::telemetry::Attribute::Int64("history_size", static_cast<int64_t>(local_history.size()))
+            });
+
             auto result = streaming_client.Stream(request, [&](const std::string& token, bool done) {
               if (done || token.empty()) return;
 
@@ -773,14 +924,24 @@ int main(int argc, char** argv) {
                 partial_response = accumulated;
               }
 
+              cortext::telemetry::LogDebug("chat.phase2.token", {
+                cortext::telemetry::Attribute::Int64("accumulated_length", static_cast<int64_t>(accumulated.size())),
+                cortext::telemetry::Attribute::String("accumulated", accumulated.size() <= 100 ? accumulated : accumulated.substr(0, 100) + "...")
+              });
+
               try {
                 cortext::Cortext::Context ctx;
                 {
                   std::lock_guard<std::mutex> lock(db_write_mu);
-                  ctx = cortext_ctx->ProcessText(accumulated, NowUnixSeconds(), "chat/assistant-streaming");
+                  ctx = cortext_ctx->ProcessText(accumulated, "chat/assistant-streaming");
                 }
 
                 if (ctx.should_interrupt && local_restarts < StreamingState::kMaxRestarts) {
+                  cortext::telemetry::LogInfo("chat.phase2.interrupt", {
+                    cortext::telemetry::Attribute::Int64("new_memories", static_cast<int64_t>(ctx.memories.size())),
+                    cortext::telemetry::Attribute::Int64("restart", static_cast<int64_t>(local_restarts)),
+                    cortext::telemetry::Attribute::Int64("tokens_so_far", static_cast<int64_t>(accumulated.size()))
+                  });
                   {
                     std::lock_guard<std::mutex> lock(mu);
                     std::unordered_set<long long> existing_ids;
@@ -817,42 +978,62 @@ int main(int argc, char** argv) {
             }
 
             if (result.error.has_value()) {
+              cortext::telemetry::LogError("chat.phase2.stream_error", {
+                cortext::telemetry::Attribute::String("error", *result.error)
+              });
               std::lock_guard<std::mutex> lock(mu);
               last_error = "streaming: " + *result.error;
               assistant_reply = "(Streaming error: " + *result.error + ")";
             } else {
+              cortext::telemetry::LogDebug("chat.phase2.stream_complete", {
+                cortext::telemetry::Attribute::Int64("reply_length", static_cast<int64_t>(result.full_content.size())),
+                cortext::telemetry::Attribute::Int64("total_restarts", static_cast<int64_t>(local_restarts)),
+                cortext::telemetry::Attribute::Bool("was_cancelled", result.was_cancelled)
+              });
               assistant_reply = result.full_content;
             }
             break;
           }
 
           // Phase 3: Process final assistant reply through Cortext
+          cortext::telemetry::LogDebug("chat.phase3.start", {
+            cortext::telemetry::Attribute::Int64("reply_length", static_cast<int64_t>(assistant_reply.size())),
+            cortext::telemetry::Attribute::String("source", "chat/assistant"),
+            cortext::telemetry::Attribute::String("reply_content", assistant_reply.size() <= 200 ? assistant_reply : assistant_reply.substr(0, 200) + "...")
+          });
+
           try {
             cortext::Cortext::Context asst_ctx;
             {
               std::lock_guard<std::mutex> lock(db_write_mu);
-              asst_ctx = cortext_ctx->ProcessText(assistant_reply, ts + 1, "chat/assistant");
+              asst_ctx = cortext_ctx->ProcessText(assistant_reply, "chat/assistant");
             }
 
+            cortext::telemetry::LogDebug("chat.phase3.complete", {
+              cortext::telemetry::Attribute::Bool("stored", asst_ctx.output.stored_embedding_id.has_value()),
+              cortext::telemetry::Attribute::Double("composite_score", asst_ctx.output.composite_score.value_or(0.0)),
+              cortext::telemetry::Attribute::Double("threshold", asst_ctx.output.threshold.value_or(0.0)),
+              cortext::telemetry::Attribute::Bool("write_decision", asst_ctx.output.decision.value_or(false))
+            });
+
             if (asst_ctx.output.stored_embedding_id.has_value()) {
+              cortext::telemetry::LogInfo("chat.assistant_stored", {
+                cortext::telemetry::Attribute::Int64("embedding_id", *asst_ctx.output.stored_embedding_id),
+                cortext::telemetry::Attribute::Int64("content_length", static_cast<int64_t>(assistant_reply.size()))
+              });
               std::lock_guard<std::mutex> lock(mu);
               memory_events.push_back(CreateStoredEvent(
-                  *asst_ctx.output.stored_embedding_id, assistant_reply, "chat/assistant", ts + 1, asst_ctx.output));
+                  *asst_ctx.output.stored_embedding_id, assistant_reply, "chat/assistant", NowUnixMillis(), asst_ctx.output));
               while (memory_events.size() > kMaxMemoryEvents) {
                 memory_events.pop_front();
               }
             }
           } catch (const std::exception& ex) {
+            cortext::telemetry::LogError("chat.phase3.error", {
+              cortext::telemetry::Attribute::String("error", ex.what())
+            });
             std::lock_guard<std::mutex> lock(mu);
             last_error = std::string("cortext assistant: ") + ex.what();
-          }
-
-          // Phase 4: Post-generation consolidation
-          try {
-            std::lock_guard<std::mutex> lock(db_write_mu);
-            cortext_ctx->Consolidate(NowUnixSeconds());
-            cortext_ctx->Flush();
-          } catch (const std::exception&) {
           }
 
           idle_tracker.RecordActivity();
@@ -862,10 +1043,19 @@ int main(int argc, char** argv) {
             last_memories = streaming_state.current_memories;
             if (!assistant_reply.empty()) {
               history.push_back({"assistant", assistant_reply});
+              cortext::telemetry::LogInfo("chat.assistant_reply_added", {
+                cortext::telemetry::Attribute::Int64("reply_length", static_cast<int64_t>(assistant_reply.size())),
+                cortext::telemetry::Attribute::Int64("history_size", static_cast<int64_t>(history.size())),
+                cortext::telemetry::Attribute::Int64("memories_used", static_cast<int64_t>(last_memories.size()))
+              });
             }
             generating = false;
             partial_response.clear();
           }
+          cortext::telemetry::LogDebug("chat.generation_complete", {
+            cortext::telemetry::Attribute::Int64("total_restarts", static_cast<int64_t>(local_restarts)),
+            cortext::telemetry::Attribute::Bool("has_reply", !assistant_reply.empty())
+          });
           streaming_thread_active.store(false);
         });
       }

@@ -153,6 +153,9 @@ add_library(cortext
     src/operations/detect_memory_usage.cpp
     src/operations/drift_accumulation.cpp
     src/operations/streaming_pacing.cpp
+    # Section 4.4: Accumulator operations
+    src/operations/accumulator.cpp
+    src/operations/spike_bypass.cpp
     # Extractor component
     src/extractor/phi4_extractor.cpp
     src/extractor/gemma_extractor.cpp

@@ -6,6 +6,7 @@
 #include "cortext/core/knobs.hpp"
 #include "cortext/processor/operation_context.hpp"
 #include "cortext/store/schema.hpp"
+#include "cortext/telemetry/telemetry.hpp"
 #include <cmath>
 #include <string>
 #include <vector>
@@ -29,7 +30,10 @@ UpdateMemoryStrength::Execute (OperationContext &context, Transaction &tx) const
   const double cutoff = core::PeripheryCutoff (T);
 
   // Evict weak memories below periphery cutoff first
-  tx.Execute ("DELETE FROM embeddings WHERE strength < ?", { cutoff });
+  auto eviction_result = tx.Execute ("DELETE FROM embeddings WHERE strength < ?", { cutoff });
+  const int64_t eviction_count = eviction_result.size ();
+
+  int64_t update_count = 0;
 
   const auto &events = context.GetMemoryUsageEvents ();
   for (const auto &e : events)
@@ -105,7 +109,15 @@ UpdateMemoryStrength::Execute (OperationContext &context, Transaction &tx) const
             used_flag,      gate_influence, F,        cg_event, cg_event,
             cg_event,       id,       id,       id,        ts,
             id });
+
+      ++update_count;
     }
+
+  telemetry::LogDebug ("cortext.memory_strength",
+                       { telemetry::Attribute::Int64 ("update_count",
+                                                      update_count),
+                         telemetry::Attribute::Int64 ("eviction_count",
+                                                      eviction_count) });
 }
 
 void

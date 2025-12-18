@@ -77,16 +77,16 @@ SeedEmbedding (Store *store, long long id, const Eigen::VectorXf &emb,
       { id, vec, strength, stability, connectivity, redundancy });
 }
 
-// Helper to seed memories for testing
+// Helper to seed memories for testing (new schema per database.md)
 void
 SeedMemory (Store *store, long long embedding_id, const std::string &text,
             uint64_t ts)
 {
   store->Execute (
-      "INSERT OR REPLACE INTO memories(embedding_id, source_id, timestamp, "
-      "modality) VALUES(?,?,?,?)",
-      { embedding_id, std::string ("test"), static_cast<long long> (ts),
-        std::string ("text") });
+      "INSERT OR REPLACE INTO memories(embedding_id, start_ts, end_ts, "
+      "n_signals, primary_modality, s_max, s_avg, status) VALUES(?,?,?,?,?,?,?,?)",
+      { embedding_id, static_cast<long long> (ts), static_cast<long long> (ts),
+        1LL, std::string ("text"), 0.5, 0.5, std::string ("active") });
 
   // Store text in objstore using scalar helper
   // Note: objstore virtual table uses (id BLOB, data BLOB) schema

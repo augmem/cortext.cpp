@@ -2,6 +2,7 @@
 
 #include "cortext/core/knobs.hpp"
 #include "cortext/processor/operation_context.hpp"
+#include "cortext/telemetry/telemetry.hpp"
 
 namespace cortext::operations
 {
@@ -31,6 +32,12 @@ ApplySerialPositionEffects::Execute (OperationContext &context, Transaction &tx)
   context.SetSerialDistinctivenessThreshold (distinctiveness_threshold);
   context.SetSerialVonRestorffMultiplier (von_restorff_multiplier);
   context.SetSerialMiddleSuppression (middle_suppression);
+
+  telemetry::LogDebug ("cortext.serial_position",
+                       { telemetry::Attribute::Int64 ("primacy_window",
+                                                      primacy_window),
+                         telemetry::Attribute::Int64 ("recency_window",
+                                                      recency_window) });
 }
 
 } // namespace cortext::operations

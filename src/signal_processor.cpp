@@ -699,9 +699,9 @@ LoadWorkingMemorySlots (Store &store, ProcessorContext &ctx, double sensitivity)
 {
   try
     {
-      const auto now = std::chrono::duration_cast<std::chrono::seconds> (
-                           std::chrono::system_clock::now ().time_since_epoch ())
-                           .count ();
+      const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds> (
+                              std::chrono::system_clock::now ().time_since_epoch ())
+                              .count ();
       const double cost_per_slot = core::WMMaintenanceCostPerSlot (sensitivity);
 
       auto rows = store.Execute (
@@ -714,12 +714,14 @@ LoadWorkingMemorySlots (Store &store, ProcessorContext &ctx, double sensitivity)
           slot.pos_index
               = static_cast<int> (ExtractInt64 (row, "slot_index", 0));
           slot.strength = ExtractDouble (row, "strength", 0.0);
-          slot.last_ts
-              = static_cast<double> (ExtractInt64 (row, "timestamp", now));
+          // DB stores milliseconds, convert to seconds for last_ts
+          const auto ts_ms = ExtractInt64 (row, "timestamp", now_ms);
+          slot.last_ts = static_cast<double> (ts_ms) / 1000.0;
 
           // Apply time-based decay (same formula as WorkingMemory::Execute
-          // maintenance)
-          const double elapsed = static_cast<double> (now) - slot.last_ts;
+          // maintenance) - elapsed is in seconds
+          const double now_s = static_cast<double> (now_ms) / 1000.0;
+          const double elapsed = now_s - slot.last_ts;
           if (elapsed > 0)
             {
               slot.strength -= cost_per_slot * elapsed;
@@ -744,6 +746,61 @@ LoadWorkingMemorySlots (Store &store, ProcessorContext &ctx, double sensitivity)
     {
       telemetry::LogWarn (
           "Failed to load working memory slots",
+          { telemetry::Attribute::String ("component", "signal_processor"),
+            telemetry::Attribute::String ("error", e.what ()) });
+    }
+}
+
+void
+LoadAccumulatorState (Store &store, ProcessorContext &ctx)
+{
+  try
+    {
+      auto rows = store.Execute ("SELECT * FROM accumulator_state");
+      for (const auto &row : rows)
+        {
+          auto source_id_it = row.find ("source_id");
+          if (source_id_it == row.end () || !source_id_it->second.has_value ())
+            continue;
+
+          std::string source_id;
+          if (source_id_it->second.type () == typeid (std::string))
+            source_id = std::any_cast<std::string> (source_id_it->second);
+          else
+            continue;
+
+          AccumulatorState state;
+
+          // Load embeddings
+          auto mu_it = row.find ("mu_acc");
+          if (mu_it != row.end () && mu_it->second.has_value ())
+            state.mu_acc = BlobToEigen (mu_it->second);
+
+          auto peak_it = row.find ("e_peak");
+          if (peak_it != row.end () && peak_it->second.has_value ())
+            state.e_peak = BlobToEigen (peak_it->second);
+
+          // Load scalars
+          state.drift_acc = ExtractDouble (row, "drift_acc", 0.0);
+          state.s_sum = ExtractDouble (row, "s_sum", 0.0);
+          state.s_max = ExtractDouble (row, "s_max", 0.0);
+          state.n_signals = static_cast<int> (ExtractInt64 (row, "n_signals", 0));
+          state.t_start
+              = static_cast<uint64_t> (ExtractInt64 (row, "t_start", 0));
+          state.last_write_ts
+              = static_cast<uint64_t> (ExtractInt64 (row, "last_write_ts", 0));
+          state.last_signal_ts
+              = static_cast<uint64_t> (ExtractInt64 (row, "last_signal_ts", 0));
+          state.eta_acc = ExtractDouble (row, "eta_acc", 0.0);
+          state.coherence_prev = ExtractDouble (row, "coherence_prev", 1.0);
+
+          ctx.accumulator_states[source_id] = std::move (state);
+        }
+    }
+  catch (const std::exception &e)
+    {
+      telemetry::LogWarn (
+          "Failed to load accumulator state",
           { telemetry::Attribute::String ("component", "signal_processor"),
             telemetry::Attribute::String ("error", e.what ()) });
     }
@@ -789,6 +846,7 @@ SignalProcessor::SignalProcessor (const Config &config,
       LoadObservedRetentionHistory (*store_, *context_);
       LoadRLSCoefficients (*store_, *context_);
       LoadWorkingMemorySlots (*store_, *context_, config_.sensitivity);
+      LoadAccumulatorState (*store_, *context_);
     }
 
   StartNewEpisode ();
@@ -837,6 +895,7 @@ SignalProcessor::Process (const Signal &signal)
         {
           PersistProcessorState (*tx);
           PersistBlenderState (*tx);
+          PersistWorkingMemorySlots (*tx);
           tx->Commit ();
         }
     }
@@ -906,6 +965,7 @@ SignalProcessor::FinalizeEpisode (Transaction &tx)
   PersistObservedRetentionHistory (tx);
   PersistRLSCoefficients (tx);
   PersistWorkingMemorySlots (tx);
+  PersistAccumulatorState (tx);
 
   telemetry::AddCounter ("cortext.episode_commit_total", 1);
   span.SetStatusOk ();
@@ -925,9 +985,9 @@ SignalProcessor::PersistProcessorState (Transaction &tx)
   if (!context_)
     return;
 
-  const auto now = std::chrono::duration_cast<std::chrono::seconds> (
-                       std::chrono::system_clock::now ().time_since_epoch ())
-                       .count ();
+  const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds> (
+                          std::chrono::system_clock::now ().time_since_epoch ())
+                          .count ();
 
   // Serialize mood_vector as raw binary BLOB (48 bytes = 6 doubles)
   std::vector<char> mood_blob (6 * sizeof (double));
@@ -969,7 +1029,7 @@ SignalProcessor::PersistProcessorState (Transaction &tx)
         context_->weight_relevance_prior, context_->weight_relevance,
         context_->attention_width, context_->T_dynamic, context_->hysteresis,
         context_->half_life, context_->rate_target, context_->sustained_influence,
-        static_cast<long long> (context_->last_signal_timestamp), now,
+        static_cast<long long> (context_->last_signal_timestamp), now_ms,
         // Focus priors (Algorithm 1)
         context_->coverage_gain_floor_prior, context_->mismatch_weight_prior,
         context_->attention_width_prior,
@@ -1063,18 +1123,18 @@ SignalProcessor::PersistRecentContext (Transaction &tx)
   // Clear old entries
   tx.Execute ("DELETE FROM recent_context", {});
 
-  // Insert current window
+  // Insert current window - store timestamp in milliseconds
   int seq = 0;
-  const auto now = std::chrono::duration_cast<std::chrono::seconds> (
-                       std::chrono::system_clock::now ().time_since_epoch ())
-                       .count ();
+  const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds> (
+                          std::chrono::system_clock::now ().time_since_epoch ())
+                          .count ();
 
   for (const auto &emb : context_->recent_context_embeddings)
     {
       std::vector<float> emb_blob = ToFloatVector (emb);
       tx.Execute ("INSERT INTO recent_context (embedding, timestamp, seq_order) "
                   "VALUES (?, ?, ?)",
-                  { emb_blob, now, seq++ });
+                  { emb_blob, now_ms, seq++ });
     }
 }
 
@@ -1087,15 +1147,15 @@ SignalProcessor::PersistRecentScores (Transaction &tx)
   // Clear old entries
   tx.Execute ("DELETE FROM recent_scores", {});
 
-  // Insert current window
-  const auto now = std::chrono::duration_cast<std::chrono::seconds> (
-                       std::chrono::system_clock::now ().time_since_epoch ())
-                       .count ();
+  // Insert current window - store timestamp in milliseconds
+  const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds> (
+                          std::chrono::system_clock::now ().time_since_epoch ())
+                          .count ();
 
   for (const auto &score : context_->recent_scores)
     {
       tx.Execute ("INSERT INTO recent_scores (score, timestamp) VALUES (?, ?)",
-                  { score, now });
+                  { score, now_ms });
     }
 }
 
@@ -1108,16 +1168,16 @@ SignalProcessor::PersistObservedRetentionHistory (Transaction &tx)
   // Clear old entries
   tx.Execute ("DELETE FROM observed_retention_history", {});
 
-  // Insert current window
-  const auto now = std::chrono::duration_cast<std::chrono::seconds> (
-                       std::chrono::system_clock::now ().time_since_epoch ())
-                       .count ();
+  // Insert current window - store timestamp in milliseconds
+  const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds> (
+                          std::chrono::system_clock::now ().time_since_epoch ())
+                          .count ();
 
   for (const auto &retention : context_->observed_retention_history)
     {
       tx.Execute ("INSERT INTO observed_retention_history "
                   "(retention_value, timestamp) VALUES (?, ?)",
-                  { retention, now });
+                  { retention, now_ms });
     }
 }
 
@@ -1164,18 +1224,55 @@ SignalProcessor::PersistWorkingMemorySlots (Transaction &tx)
   // Clear old entries
   tx.Execute ("DELETE FROM working_memory_slots", {});
 
-  // Insert current slots
-  const auto now = std::chrono::duration_cast<std::chrono::seconds> (
-                       std::chrono::system_clock::now ().time_since_epoch ())
-                       .count ();
-
+  // Insert current slots - store timestamp in milliseconds for consistency
+  // slot.last_ts is in seconds, convert to milliseconds for DB storage
   for (size_t i = 0; i < context_->wm_slots.size (); ++i)
     {
       const auto &slot = context_->wm_slots[i];
       std::vector<float> emb_blob = ToFloatVector (slot.embedding);
+      const auto ts_ms = static_cast<int64_t> (slot.last_ts * 1000.0);
       tx.Execute ("INSERT INTO working_memory_slots "
                   "(slot_index, strength, timestamp, embedding) VALUES (?, ?, ?, ?)",
-                  { static_cast<int64_t> (i), slot.strength, now, emb_blob });
+                  { static_cast<int64_t> (i), slot.strength, ts_ms, emb_blob });
+    }
+}
+
+void
+SignalProcessor::PersistAccumulatorState (Transaction &tx)
+{
+  if (!context_)
+    return;
+
+  // Clear old entries
+  tx.Execute ("DELETE FROM accumulator_state", {});
+
+  // Insert current accumulator states
+  for (const auto &[source_id, state] : context_->accumulator_states)
+    {
+      // Skip empty/reset accumulators
+      if (state.n_signals == 0 && state.mu_acc.size () == 0)
+        continue;
+
+      std::vector<float> mu_blob;
+      if (state.mu_acc.size () > 0)
+        mu_blob = ToFloatVector (state.mu_acc);
+
+      std::vector<float> peak_blob;
+      if (state.e_peak.size () > 0)
+        peak_blob = ToFloatVector (state.e_peak);
+
+      tx.Execute (
+          "INSERT INTO accumulator_state "
+          "(source_id, mu_acc, drift_acc, s_sum, s_max, n_signals, "
+          " e_peak, t_start, last_write_ts, last_signal_ts, eta_acc, "
+          "coherence_prev) "
+          "VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+          { source_id, mu_blob, state.drift_acc, state.s_sum, state.s_max,
+            static_cast<long long> (state.n_signals), peak_blob,
+            static_cast<long long> (state.t_start),
+            static_cast<long long> (state.last_write_ts),
+            static_cast<long long> (state.last_signal_ts), state.eta_acc,
+            state.coherence_prev });
     }
 }
 

@@ -13,7 +13,7 @@
 ///     // Handle creation failure
 ///     return 1;
 ///   }
-///   int result = cortext_process_text(ctx, "Hello", 1000, "user");
+///   int result = cortext_process_text(ctx, "Hello", "user");
 ///   if (result != 0) {
 ///     // Handle processing error
 ///   }
@@ -86,29 +86,26 @@ extern "C"
   /// @brief Processes text input through the memory system.
   /// @param h Handle to a Cortext instance.
   /// @param text Input text string (must be non-NULL).
-  /// @param timestamp Timestamp in seconds or application-defined units.
   /// @param source_id Source identifier string (must be non-NULL).
   /// @return 0 on success, 1 if invalid parameters, 2 on internal error.
   ///
   /// This function encodes the text and processes it through the signal
-  /// pipeline. Any retrieved memories are buffered until cortext_flush().
+  /// pipeline. Timestamps are generated internally in milliseconds.
+  /// Any retrieved memories are buffered until cortext_flush().
   CORTEXT_EXPORT int cortext_process_text (cortext_handle h, const char *text,
-                                           uint64_t timestamp,
                                            const char *source_id);
 
   /// @brief Processes audio input through the memory system.
   /// @param h Handle to a Cortext instance.
   /// @param pcm PCM audio samples (float32, must be non-NULL).
   /// @param num_samples Number of PCM samples.
-  /// @param timestamp Timestamp in seconds or application-defined units.
   /// @param source_id Source identifier string (must be non-NULL).
   /// @return 0 on success, 1 if invalid parameters, 2 on internal error.
   ///
-  /// Audio must be 16kHz mono float32 PCM. Any retrieved memories are
-  /// buffered until cortext_flush().
+  /// Audio must be 16kHz mono float32 PCM. Timestamps are generated internally.
+  /// Any retrieved memories are buffered until cortext_flush().
   CORTEXT_EXPORT int cortext_process_audio (cortext_handle h, const float *pcm,
                                             size_t num_samples,
-                                            uint64_t timestamp,
                                             const char *source_id);
 
   /// @brief Processes image input through the memory system.
@@ -117,27 +114,24 @@ extern "C"
   /// @param width Image width in pixels.
   /// @param height Image height in pixels.
   /// @param channels Number of channels (3 for RGB, 4 for RGBA).
-  /// @param timestamp Timestamp in seconds or application-defined units.
   /// @param source_id Source identifier string (must be non-NULL).
   /// @return 0 on success, 1 if invalid parameters, 2 on internal error.
   ///
   /// Image data is expected in row-major order (height × width × channels).
-  /// Any retrieved memories are buffered until cortext_flush().
+  /// Timestamps are generated internally. Any retrieved memories are
+  /// buffered until cortext_flush().
   CORTEXT_EXPORT int cortext_process_image (cortext_handle h,
                                             const uint8_t *data, int width,
                                             int height, int channels,
-                                            uint64_t timestamp,
                                             const char *source_id);
 
   /// @brief Triggers consolidation evaluation.
   /// @param h Handle to a Cortext instance.
-  /// @param now_timestamp Current timestamp in seconds or application-defined units.
   /// @return 0 on success, 1 if invalid handle, 2 on internal error.
   ///
   /// This evaluates whether background consolidation should start based on
   /// system conditions. Changes are buffered until cortext_flush().
-  CORTEXT_EXPORT int cortext_consolidate (cortext_handle h,
-                                          uint64_t now_timestamp);
+  CORTEXT_EXPORT int cortext_consolidate (cortext_handle h);
 
   /// @brief Commits all buffered database writes.
   /// @param h Handle to a Cortext instance.

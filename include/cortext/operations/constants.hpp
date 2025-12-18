@@ -53,8 +53,9 @@ constexpr double kSuppressionBaseMin = 0.01; // Min suppression per retrieval (h
 constexpr double kLateralInhibitionSMult = 0.5; // S multiplier for lateral inhibition
 constexpr double kCompetitionIterMin = 3.0;  // Min competition iterations (low F)
 constexpr double kCompetitionIterMax = 10.0; // Max competition iterations (high F)
-constexpr double kRecoveryTimeMinSeconds = 60.0;  // Min recovery time (low T)
-constexpr double kRecoveryTimeMaxSeconds = 600.0; // Max recovery time (high T)
+// Spec (§6.4, line 1087): recovery_time_RIF = lerp(300, 1800, T) seconds
+constexpr double kRecoveryTimeMinSeconds = 300.0;  // Min recovery time (low T)
+constexpr double kRecoveryTimeMaxSeconds = 1800.0; // Max recovery time (high T)
 
 // Working Memory
 constexpr double kTiny = 1e-6;           // Small epsilon for WM strength

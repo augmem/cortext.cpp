@@ -2,6 +2,7 @@
 
 #include "cortext/processor/operation_context.hpp"
 #include "cortext/processor/processor_context.hpp"
+#include "cortext/telemetry/telemetry.hpp"
 
 namespace cortext::operations
 {
@@ -42,6 +43,11 @@ UpdateDriftAccumulation::Execute (OperationContext &context, Transaction &tx) co
   const double dist = (signal.embedding - last).norm ();
   p_ctx.drift_accum += dist;
   context.SetDriftAccumSnapshot (p_ctx.drift_accum);
+
+  telemetry::LogDebug("cortext.drift_accumulation", {
+    telemetry::Attribute::Double("drift_increment", dist),
+    telemetry::Attribute::Double("drift_accum", p_ctx.drift_accum)
+  });
 }
 
 } // namespace cortext::operations

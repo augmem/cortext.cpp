@@ -417,10 +417,10 @@ TEST_CASE ("Working memory slots are loaded on startup",
     processor.Flush ();
   }
 
-  // Insert test data directly
-  const auto now = std::chrono::duration_cast<std::chrono::seconds> (
-                       std::chrono::system_clock::now ().time_since_epoch ())
-                       .count ();
+  // Insert test data directly - DB stores timestamps in milliseconds
+  const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds> (
+                          std::chrono::system_clock::now ().time_since_epoch ())
+                          .count ();
 
   std::vector<float> emb1 (256, 0.1f);
   std::vector<float> emb2 (256, 0.2f);
@@ -428,11 +428,11 @@ TEST_CASE ("Working memory slots are loaded on startup",
   store->Execute (
       "INSERT INTO working_memory_slots (slot_index, strength, timestamp, embedding) "
       "VALUES (?, ?, ?, ?)",
-      { 0LL, 0.9, now, emb1 });
+      { 0LL, 0.9, now_ms, emb1 });
   store->Execute (
       "INSERT INTO working_memory_slots (slot_index, strength, timestamp, embedding) "
       "VALUES (?, ?, ?, ?)",
-      { 1LL, 0.7, now, emb2 });
+      { 1LL, 0.7, now_ms, emb2 });
 
   // Create new processor - should load slots
   {
@@ -443,7 +443,7 @@ TEST_CASE ("Working memory slots are loaded on startup",
 
     Signal s;
     s.embedding = Eigen::VectorXf::Random (256);
-    s.timestamp = static_cast<uint64_t> (now);
+    s.timestamp = static_cast<uint64_t> (now_ms); // Signal timestamps are in milliseconds
     s.source_id = "test";
     auto out = processor.Process (s);
 
@@ -481,7 +481,7 @@ TEST_CASE ("Working memory slots are loaded on startup",
 
   Signal s;
   s.embedding = Eigen::VectorXf::Random (256);
-  s.timestamp = static_cast<uint64_t> (now);
+  s.timestamp = static_cast<uint64_t> (now_ms); // Signal timestamps are in milliseconds
   s.source_id = "test";
   processor.Process (s);
 
@@ -507,16 +507,17 @@ TEST_CASE ("Working memory slots decay on load",
   }
 
   // Insert slot with old timestamp (5 seconds ago)
-  const auto now = std::chrono::duration_cast<std::chrono::seconds> (
-                       std::chrono::system_clock::now ().time_since_epoch ())
-                       .count ();
-  const auto old_ts = now - 5; // 5 seconds ago
+  // DB stores timestamps in milliseconds
+  const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds> (
+                          std::chrono::system_clock::now ().time_since_epoch ())
+                          .count ();
+  const auto old_ts_ms = now_ms - 5000; // 5 seconds ago in milliseconds
 
   std::vector<float> emb (256, 0.1f);
   store->Execute (
       "INSERT INTO working_memory_slots (slot_index, strength, timestamp, embedding) "
       "VALUES (?, ?, ?, ?)",
-      { 0LL, 1.0, old_ts, emb });
+      { 0LL, 1.0, old_ts_ms, emb });
 
   // Load with sensitivity=0.5 → cost_per_slot = lerp(0.05, 0.15, 0.5) = 0.10
   // After 5 seconds: strength = 1.0 - 0.10 * 5 = 0.5
@@ -544,7 +545,7 @@ TEST_CASE ("Working memory slots decay on load",
 
   Signal s;
   s.embedding = Eigen::VectorXf::Random (256);
-  s.timestamp = static_cast<uint64_t> (now);
+  s.timestamp = static_cast<uint64_t> (now_ms); // Signal timestamps are in milliseconds
   s.source_id = "test";
   processor.Process (s);
 
@@ -567,16 +568,17 @@ TEST_CASE ("Fully decayed WM slots are not loaded",
   }
 
   // Insert slot with very old timestamp (20 seconds ago)
-  const auto now = std::chrono::duration_cast<std::chrono::seconds> (
-                       std::chrono::system_clock::now ().time_since_epoch ())
-                       .count ();
-  const auto old_ts = now - 20; // 20 seconds ago
+  // DB stores timestamps in milliseconds
+  const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds> (
+                          std::chrono::system_clock::now ().time_since_epoch ())
+                          .count ();
+  const auto old_ts_ms = now_ms - 20000; // 20 seconds ago in milliseconds
 
   std::vector<float> emb (256, 0.1f);
   store->Execute (
       "INSERT INTO working_memory_slots (slot_index, strength, timestamp, embedding) "
       "VALUES (?, ?, ?, ?)",
-      { 0LL, 1.0, old_ts, emb });
+      { 0LL, 1.0, old_ts_ms, emb });
 
   // Load with sensitivity=0.5 → cost_per_slot = 0.10
   // After 20 seconds: strength = 1.0 - 0.10 * 20 = -1.0 → not loaded
@@ -601,7 +603,7 @@ TEST_CASE ("Fully decayed WM slots are not loaded",
 
   Signal s;
   s.embedding = Eigen::VectorXf::Random (256);
-  s.timestamp = static_cast<uint64_t> (now);
+  s.timestamp = static_cast<uint64_t> (now_ms); // Signal timestamps are in milliseconds
   s.source_id = "test";
   processor.Process (s);
 

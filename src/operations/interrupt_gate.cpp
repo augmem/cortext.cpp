@@ -6,6 +6,7 @@
 #include "cortext/processor/operation_context.hpp"
 #include "cortext/processor/processor_context.hpp"
 #include "cortext/store/store.hpp"
+#include "cortext/telemetry/telemetry.hpp"
 #include <algorithm>
 #include <any>
 #include <cmath>
@@ -161,7 +162,16 @@ ComputeMniGateDecision::Execute (OperationContext &context, Transaction &tx) con
       return;
     }
 
-  const uint64_t write_exclusion_ts = context.GetSignal ().timestamp;
+  // Section 8.3.1: Use t_acc_start from accumulator state for write exclusion.
+  // This ensures all memories written during the current accumulation cycle
+  // are excluded from retrieval, preventing self-triggering interrupts.
+  const auto &signal = context.GetSignal ();
+  uint64_t write_exclusion_ts = signal.timestamp;  // Fallback to signal timestamp
+  auto acc_it = p_ctx.accumulator_states.find (signal.source_id);
+  if (acc_it != p_ctx.accumulator_states.end () && acc_it->second.t_start > 0)
+    {
+      write_exclusion_ts = acc_it->second.t_start;
+    }
 
   // Query created_at timestamps for all candidate IDs
   std::unordered_map<long long, Eigen::VectorXf> candidates;
@@ -258,11 +268,11 @@ ComputeMniGateDecision::Execute (OperationContext &context, Transaction &tx) con
         }
     }
 
-  // Build context vectors for centroid from recent context; fallback to
-  // included
+  // Section 8.2: Build context vectors from recent_memory_centroids (μ_acc)
+  // These are memory-level centroids, not individual signal embeddings.
   std::vector<Eigen::VectorXf> ctx_vecs;
-  ctx_vecs.reserve (p_ctx.recent_context_embeddings.size ());
-  for (const auto &v : p_ctx.recent_context_embeddings)
+  ctx_vecs.reserve (p_ctx.recent_memory_centroids.size ());
+  for (const auto &v : p_ctx.recent_memory_centroids)
     {
       if (v.size () > 0)
         {
@@ -418,9 +428,10 @@ ComputeMniGateDecision::Execute (OperationContext &context, Transaction &tx) con
       max_relevance = std::max (max_relevance, sim_ctx);
     }
 
-  // Compute embedding novelty: 1 - max(cos(candidate, ctx_window)) (Section 8.3)
+  // Section 8.3: Compute embedding novelty: 1 - max(cos(candidate, ctx_window))
+  // Uses memory centroids (μ_acc) per Section 8.2
   double max_embedding_novelty = 0.0;
-  const auto &ctx_window = p_ctx.recent_context_embeddings;
+  const auto &ctx_window = p_ctx.recent_memory_centroids;
 
   for (const auto &kv : candidates)
     {
@@ -506,6 +517,17 @@ ComputeMniGateDecision::Execute (OperationContext &context, Transaction &tx) con
         p_ctx.recent_ids_lru_.RecordIds (ids_to_record);
       }
   }
+
+  telemetry::LogDebug ("cortext.interrupt_gate", {
+    telemetry::Attribute::Double ("best_mu", best_mu),
+    telemetry::Attribute::Double ("jaccard", max_embedding_novelty),
+    telemetry::Attribute::Double ("dup_thresh", dup_thresh),
+    telemetry::Attribute::Double ("refractory_mult", M_refrac),
+    telemetry::Attribute::Bool ("mni_decision", allow_interrupt),
+    telemetry::Attribute::Int64 ("wm_slots_count", static_cast<int64_t> (included_vecs.size ())),
+    telemetry::Attribute::Double ("max_semantic_overlap", max_semantic_overlap),
+    telemetry::Attribute::Int64 ("ctx_window_size", static_cast<int64_t> (ctx_window.size ()))
+  });
 }
 
 } // namespace cortext::operations

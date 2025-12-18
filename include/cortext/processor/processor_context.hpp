@@ -3,6 +3,7 @@
 #include "cortext/data/centroids.hpp"
 #include "cortext/operations/extraction.hpp"
 #include "cortext/operations/metrics.hpp"
+#include "cortext/processor/accumulator_state.hpp"
 #include "cortext/signal.hpp"
 #include <Eigen/Dense>
 #include <array>
@@ -306,14 +307,27 @@ struct ProcessorContext
   double sustained_influence = 0.0;
 
   // ======================================================================
-  // Working Memory State (Algorithm 24)
+  // Working Memory State (Algorithm 24, Section 6.1)
   // ======================================================================
+  /// @brief Working memory slot holding a coherent memory unit (Section 6.1.1)
   struct WMSlot
   {
-    Eigen::VectorXf embedding;
-    double strength = 0.0;
-    double last_ts = 0.0;
-    int pos_index = 0;
+    Eigen::VectorXf embedding;           ///< e_rep (representative embedding)
+    double strength = 0.0;               ///< Slot activation strength
+    double last_ts = 0.0;                ///< Last access timestamp
+    int pos_index = 0;                   ///< Position index
+
+    // Memory-level metadata (Section 6.1.1)
+    int n_signals = 0;                   ///< Number of signals in memory
+    double s_max = 0.0;                  ///< Max signal score
+    double s_avg = 0.0;                  ///< Average signal score
+    double drift_acc = 0.0;              ///< Accumulated drift (D_acc)
+    double mem_elapsed = 0.0;            ///< Memory duration in seconds
+    double s_emotion_max = 0.0;          ///< Max emotion intensity
+    double s_arousal_avg = 0.0;          ///< Average arousal
+
+    std::string content;                 ///< Concatenated signal texts
+    std::vector<Eigen::VectorXf> signals;  ///< Ordered signal embeddings
   };
   std::vector<WMSlot> wm_slots;
   bool wm_last_accepted = false;
@@ -336,6 +350,24 @@ struct ProcessorContext
   };
   std::deque<CachedRetrieval> recent_retrievals_cache;
   static constexpr size_t kMaxRetrievalCacheSize = 128;
+
+  // ======================================================================
+  // Memory Accumulation State (Section 4.4)
+  // ======================================================================
+  /// @brief Per-source-stream accumulators for memory formation.
+  ///
+  /// Maps source_id → AccumulatorState. Each stream accumulates signals into
+  /// coherent memories before making write decisions. This implements
+  /// Event Segmentation Theory (Zacks & Swallow, 2007) for grouping
+  /// signals into natural "thought units".
+  std::unordered_map<std::string, AccumulatorState> accumulator_states;
+
+  /// @brief Recent memory centroids for interrupt gate context (Section 8.2)
+  ///
+  /// Stores μ_acc from recently written memories. Used by interrupt gate
+  /// to compute context centroid for novelty and marginal utility.
+  /// ctx_window ← recent_memory_centroids (not individual signals)
+  std::deque<Eigen::VectorXf> recent_memory_centroids;
 
   // ======================================================================
   // LLM Components (OGA/Phi-4)

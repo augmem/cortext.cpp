@@ -115,16 +115,22 @@ TEST_CASE ("DetectConceptNodes creates concept nodes for frequent entities",
                   "VALUES (?, ?)",
                   { std::string ("s3"), 3LL });
 
-  // Create memories with different episodes
-  store->Execute ("INSERT INTO memories (embedding_id, episode_id, timestamp) "
-                  "VALUES (?, ?, ?)",
-                  { 1LL, 1LL, 1000LL });
-  store->Execute ("INSERT INTO memories (embedding_id, episode_id, timestamp) "
-                  "VALUES (?, ?, ?)",
-                  { 2LL, 2LL, 2000LL });
-  store->Execute ("INSERT INTO memories (embedding_id, episode_id, timestamp) "
-                  "VALUES (?, ?, ?)",
-                  { 3LL, 3LL, 3000LL });
+  // Create memories with different episodes (using new schema columns)
+  store->Execute (
+      "INSERT INTO memories (embedding_id, episode_id, start_ts, end_ts, "
+      "n_signals, primary_modality, s_max, s_avg, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      { 1LL, 1LL, 900LL, 1000LL, 1LL, std::string ("text"), 0.5, 0.5,
+        std::string ("active") });
+  store->Execute (
+      "INSERT INTO memories (embedding_id, episode_id, start_ts, end_ts, "
+      "n_signals, primary_modality, s_max, s_avg, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      { 2LL, 2LL, 1900LL, 2000LL, 1LL, std::string ("text"), 0.5, 0.5,
+        std::string ("active") });
+  store->Execute (
+      "INSERT INTO memories (embedding_id, episode_id, start_ts, end_ts, "
+      "n_signals, primary_modality, s_max, s_avg, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      { 3LL, 3LL, 2900LL, 3000LL, 1LL, std::string ("text"), 0.5, 0.5,
+        std::string ("active") });
 
   SignalProcessor::Config cfg;
   cfg.stability = 0.0; // min_episodes = 2, frequency_threshold = 5

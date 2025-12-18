@@ -3,6 +3,7 @@
 #include "cortext/core/algorithms.hpp"
 #include "cortext/operations/constants.hpp"
 #include "cortext/processor/operation_context.hpp"
+#include "cortext/telemetry/telemetry.hpp"
 
 namespace cortext::operations
 {
@@ -12,15 +13,13 @@ ComputeEffectiveFocus::Execute (OperationContext &context, Transaction &tx) cons
 {
   const auto &cfg = context.GetConfig ();
   const double F = cfg.focus;
-  // If coherence not yet computed, default to 1.0 (no reduction)
-  const double coherence
-      = context.GetCoherence () > constants::kNormalizedMin
-            ? context.GetCoherence ()
-            : constants::kNormalizedMax;
+  // Spec (§3.1.1, line 387): F_eff = F × (0.5 + 0.5 × coherence_struct_t)
+  // Use structural coherence for effective focus modulation
+  const double coherence_struct = context.GetStructuralCoherence ();
   const double scale
       = constants::kOneHalf
         + constants::kOneHalf
-              * core::Clamp (coherence, constants::kNormalizedMin,
+              * core::Clamp (coherence_struct, constants::kNormalizedMin,
                              constants::kNormalizedMax);
   // Algorithm 11 modifier: F_eff ← F_eff × (1 − focus_spread)
   double spread = constants::kNormalizedMin;
@@ -33,6 +32,14 @@ ComputeEffectiveFocus::Execute (OperationContext &context, Transaction &tx) cons
       = core::Clamp (F * scale * (1.0 - spread), constants::kNormalizedMin,
                      constants::kNormalizedMax);
   context.SetEffectiveFocus (f_eff);
+
+  telemetry::LogDebug("cortext.compute_effective_focus", {
+    telemetry::Attribute::Double("F", F),
+    telemetry::Attribute::Double("coherence_struct", coherence_struct),
+    telemetry::Attribute::Double("scale", scale),
+    telemetry::Attribute::Double("focus_spread", spread),
+    telemetry::Attribute::Double("F_eff", f_eff)
+  });
 }
 
 } // namespace cortext::operations

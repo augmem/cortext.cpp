@@ -136,26 +136,25 @@ TEST_CASE ("Cortext C++ stub can be created and used", "[cortext][stub]")
         // Smoke test: verify each API can be called successfully.
         // Note: should_interrupt is an algorithm decision that depends on
         // retrieval results and signal metrics; we only verify no crashes.
-        auto out_text = ctx->ProcessText ("hello world", /*ts*/ 1000ULL, "test");
+        auto out_text = ctx->ProcessText ("hello world", "test");
         (void)out_text.should_interrupt; // Algorithm-dependent, not asserted
 
         const float pcm[4] = { 0.0f, 0.1f, -0.1f, 0.0f };
-        auto out_audio = ctx->ProcessAudio (pcm, 4, /*ts*/ 2000ULL, "test");
+        auto out_audio = ctx->ProcessAudio (pcm, 4, "test");
         (void)out_audio.should_interrupt;
 
         const std::uint8_t px[4] = { 0, 0, 0, 0 };
-        auto out_image
-            = ctx->ProcessImage (px, 1, 1, 4, /*ts*/ 3000ULL, "test");
+        auto out_image = ctx->ProcessImage (px, 1, 1, 4, "test");
         (void)out_image.should_interrupt;
 
-        auto out_cons = ctx->Consolidate (4000ULL);
+        auto out_cons = ctx->Consolidate ();
         (void)out_cons.should_interrupt;
         ctx->Flush ();
       }());
     }
   else
     {
-      REQUIRE_THROWS (ctx->ProcessText ("hello world", /*ts*/ 1000ULL, "test"));
+      REQUIRE_THROWS (ctx->ProcessText ("hello world", "test"));
     }
 
   // DB assertion: open the same DB and execute a trivial query successfully.
@@ -173,7 +172,7 @@ TEST_CASE ("Cortext::Create succeeds even when models dir is missing",
   REQUIRE_NOTHROW (
       ctx = cortext::Cortext::Create (cfg, ":memory:", "models/does-not-exist"));
   REQUIRE (ctx != nullptr);
-  REQUIRE_THROWS (ctx->ProcessText ("hello", 0ULL, "test"));
+  REQUIRE_THROWS (ctx->ProcessText ("hello", "test"));
 }
 
 TEST_CASE ("Cortext C ABI stubs return success", "[cortext][capi][stub]")
@@ -182,16 +181,16 @@ TEST_CASE ("Cortext C ABI stubs return success", "[cortext][capi][stub]")
       0.5, 0.5, 0.5, ":memory:", "models/imagebind");
   REQUIRE (h != nullptr);
 
-  const int text_rc = cortext_process_text (h, "hello", 1234ULL, "test");
+  const int text_rc = cortext_process_text (h, "hello", "test");
   if (text_rc == 0)
     {
       const float pcm[2] = { 0.0f, 0.0f };
-      REQUIRE (cortext_process_audio (h, pcm, 2, 2345ULL, "test") == 0);
+      REQUIRE (cortext_process_audio (h, pcm, 2, "test") == 0);
 
       const std::uint8_t px[3] = { 0, 0, 0 };
-      REQUIRE (cortext_process_image (h, px, 1, 1, 3, 3456ULL, "test") == 0);
+      REQUIRE (cortext_process_image (h, px, 1, 1, 3, "test") == 0);
 
-      REQUIRE (cortext_consolidate (h, 4567ULL) == 0);
+      REQUIRE (cortext_consolidate (h) == 0);
       REQUIRE (cortext_flush (h) == 0);
     }
   else
@@ -253,21 +252,23 @@ TEST_CASE ("Cortext hydrates sqlite-objstore payloads",
                       "1.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0)",
                       { sample.embedding_id, embedding });
 
-      store->Execute ("INSERT INTO memories (embedding_id, modality, mime,"
-                      " source_id, timestamp, width, height,"
-                      " channels, sample_rate, num_samples, blob_id)"
-                      " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      // Insert into memories table with content_blob_id (new schema)
+      store->Execute (
+          "INSERT INTO memories (embedding_id, start_ts, end_ts, n_signals, "
+          "primary_modality, content_blob_id, s_max, s_avg, status) "
+          "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          { sample.embedding_id, 0LL, 1000LL, 1LL, sample.modality, blob_id,
+            0.5, 0.5, std::string ("active") });
+
+      // Also insert into signals table for signal-level mimetype
+      store->Execute ("INSERT INTO signals (embedding_id, timestamp, modality, mime,"
+                      " blob_id)"
+                      " VALUES (?, ?, ?, ?, ?)",
                       {
                           sample.embedding_id,
+                          500LL,
                           sample.modality,
                           sample.mime,
-                          std::string ("unit-test"),
-                          0LL,
-                          sample.modality == "video" ? 2LL : 1LL,
-                          sample.modality == "video" ? 2LL : 1LL,
-                          sample.modality == "audio" ? 1LL : 3LL,
-                          sample.modality == "audio" ? 16000LL : 24LL,
-                          4LL,
                           blob_id,
                       });
       expected_payloads[sample.embedding_id] = std::string (
@@ -305,7 +306,7 @@ TEST_CASE ("C API handles NULL inputs correctly", "[cortext][capi][safety]")
 
   SECTION ("cortext_process_text returns 1 for NULL handle")
   {
-    CHECK (cortext_process_text (nullptr, "text", 0, "src") == 1);
+    CHECK (cortext_process_text (nullptr, "text", "src") == 1);
   }
 
   SECTION ("cortext_process_text returns 1 for NULL text")
@@ -313,7 +314,7 @@ TEST_CASE ("C API handles NULL inputs correctly", "[cortext][capi][safety]")
     ScopedTempDb temp_db;
     auto h = cortext_create (0.5, 0.5, 0.5, temp_db.path ().c_str ());
     REQUIRE (h != nullptr);
-    CHECK (cortext_process_text (h, nullptr, 0, "src") == 1);
+    CHECK (cortext_process_text (h, nullptr, "src") == 1);
     cortext_free (h);
   }
 
@@ -322,7 +323,7 @@ TEST_CASE ("C API handles NULL inputs correctly", "[cortext][capi][safety]")
     ScopedTempDb temp_db;
     auto h = cortext_create (0.5, 0.5, 0.5, temp_db.path ().c_str ());
     REQUIRE (h != nullptr);
-    CHECK (cortext_process_text (h, "text", 0, nullptr) == 1);
+    CHECK (cortext_process_text (h, "text", nullptr) == 1);
     cortext_free (h);
   }
 
@@ -331,7 +332,7 @@ TEST_CASE ("C API handles NULL inputs correctly", "[cortext][capi][safety]")
     ScopedTempDb temp_db;
     auto h = cortext_create (0.5, 0.5, 0.5, temp_db.path ().c_str ());
     REQUIRE (h != nullptr);
-    CHECK (cortext_process_audio (h, nullptr, 100, 0, "src") == 1);
+    CHECK (cortext_process_audio (h, nullptr, 100, "src") == 1);
     cortext_free (h);
   }
 
@@ -340,13 +341,13 @@ TEST_CASE ("C API handles NULL inputs correctly", "[cortext][capi][safety]")
     ScopedTempDb temp_db;
     auto h = cortext_create (0.5, 0.5, 0.5, temp_db.path ().c_str ());
     REQUIRE (h != nullptr);
-    CHECK (cortext_process_image (h, nullptr, 10, 10, 3, 0, "src") == 1);
+    CHECK (cortext_process_image (h, nullptr, 10, 10, 3, "src") == 1);
     cortext_free (h);
   }
 
   SECTION ("cortext_consolidate returns 1 for NULL handle")
   {
-    CHECK (cortext_consolidate (nullptr, 0) == 1);
+    CHECK (cortext_consolidate (nullptr) == 1);
   }
 
   SECTION ("cortext_flush returns 1 for NULL handle")

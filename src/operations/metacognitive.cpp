@@ -3,6 +3,7 @@
 #include "cortext/core/knobs.hpp"
 #include "cortext/core/utils.hpp"
 #include "cortext/processor/operation_context.hpp"
+#include "cortext/telemetry/telemetry.hpp"
 #include <cmath>
 
 namespace cortext::operations
@@ -42,6 +43,12 @@ MetacognitiveMonitoring::Execute (OperationContext &context, Transaction &tx) co
   context.SetMetacogStrategySwitchLatencyMs (switch_latency_ms);
   context.SetMetacogCertaintyRequirement (certainty_req);
   context.SetMetacogSensitivity (meta_sens);
+
+  telemetry::LogDebug ("cortext.metacognitive",
+                       { telemetry::Attribute::Double ("fok_score", FOK),
+                         telemetry::Attribute::Bool ("tot_state", tot_detected),
+                         telemetry::Attribute::Bool ("unknown_state",
+                                                     unknown_detected) });
 }
 
 } // namespace cortext::operations

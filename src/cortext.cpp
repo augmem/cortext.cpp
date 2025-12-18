@@ -25,6 +25,7 @@
 
 #include <Eigen/Dense>
 #include <algorithm>
+#include <chrono>
 #include <cstring>
 #include <memory>
 #include <string>
@@ -60,6 +61,13 @@
 #include "cortext/operations/drift_accumulation.hpp"
 #include "cortext/operations/streaming_pacing.hpp"
 
+// Section 4.4: Memory Accumulation
+#include "cortext/operations/accumulator.hpp"
+#include "cortext/operations/coherence.hpp"
+#include "cortext/operations/boundary.hpp"
+#include "cortext/operations/spike_bypass.hpp"
+#include "cortext/operations/write_gate.hpp"
+
 #include "cortext/operations/consolidation_cluster.hpp"
 #include "cortext/operations/consolidation_gate.hpp"
 #include "cortext/operations/consolidation_summarize.hpp"
@@ -77,6 +85,17 @@ namespace cortext
 
 namespace
 {
+
+/// @brief Get current timestamp in milliseconds since Unix epoch.
+inline std::uint64_t
+NowMillis ()
+{
+  return static_cast<std::uint64_t> (
+      std::chrono::duration_cast<std::chrono::milliseconds> (
+          std::chrono::system_clock::now ().time_since_epoch ())
+          .count ());
+}
+
 /// @brief Converts a std::vector<float> to an Eigen::VectorXf using Eigen::Map.
 inline Eigen::VectorXf
 ToEigen (const std::vector<float> &v)
@@ -136,15 +155,20 @@ HydrateMemory (Store *store, long long id, Cortext::Context::Memory &m)
     return;
   try
     {
+      // Query uses new MEMORIES schema (per database.md)
+      // Mimetype is at the signal level - get from first signal
       auto rows = store->Execute (
           "SELECT "
-          "  m.modality, m.mime, m.source_id, m.timestamp, m.blob_id, "
+          "  m.primary_modality, m.start_ts, m.end_ts, m.content_blob_id, "
+          "  m.n_signals, m.s_max, m.s_avg, m.status, "
           "  COALESCE(mf.retrieved_count, 0) AS retrieved_count, "
           "  COALESCE(mf.used_count, 0) AS used_count, "
           "  sm.relevance, sm.mismatch, sm.surprise, sm.rarity, sm.drift, "
           "  sm.contradiction, sm.utility, sm.periphery, sm.coverage, "
           "  sm.salience, sm.valence, sm.arousal, sm.composite_score, "
-          "  sm.threshold_t "
+          "  sm.threshold_t, "
+          "  (SELECT s.mime FROM signals s WHERE s.embedding_id = m.embedding_id "
+          "   ORDER BY s.timestamp LIMIT 1) AS signal_mime "
           "FROM memories m "
           "LEFT JOIN memory_feedback mf ON m.embedding_id = mf.embedding_id "
           "LEFT JOIN signal_metrics sm ON m.embedding_id = sm.embedding_id "
@@ -197,14 +221,14 @@ HydrateMemory (Store *store, long long id, Cortext::Context::Memory &m)
             return store::BlobFromAny (it->second);
           };
 
-          // Populate from memory_index
-          m.modality = get_s ("modality");
-          m.mimetype = get_s ("mime");
-          m.source_id = get_s ("source_id");
-          m.timestamp = static_cast<std::uint64_t> (get_ll ("timestamp"));
+          // Populate from memories table (new schema)
+          m.modality = get_s ("primary_modality");
+          m.mimetype = get_s ("signal_mime");  // Get from first signal
+          m.source_id = "";  // Not stored at memory level in new schema
+          m.timestamp = static_cast<std::uint64_t> (get_ll ("end_ts"));
 
-          // Load content from objstore if blob_id present
-          const auto blob_id_bytes = get_blob ("blob_id");
+          // Load content from objstore if content_blob_id present
+          const auto blob_id_bytes = get_blob ("content_blob_id");
           if (!blob_id_bytes.empty ())
             {
               std::string payload;
@@ -316,7 +340,6 @@ struct Cortext::Impl
     using cortext::operations::ApplySerialPositionMultiplier;
     using cortext::operations::ApplyStabilityFeedback;
     using cortext::operations::BuildGraphFromConsolidation;
-    using cortext::operations::CheckEpisodeBoundary;
     using cortext::operations::ComputeMetrics;
     using cortext::operations::EnsureGraphSchema;
     using cortext::operations::MetacognitiveMonitoring;
@@ -331,11 +354,16 @@ struct Cortext::Impl
     using cortext::operations::UpdateUncertainty;
     using cortext::operations::WorkingMemory;
     using cortext::operations::PersistSignalMetrics;
-    using cortext::operations::ComputeWriteGate;
     using cortext::operations::MemoryStorage;
     using cortext::operations::DetectMemoryUsage;
     using cortext::operations::UpdateDriftAccumulation;
     using cortext::operations::CheckStreamingPacing;
+    // Section 4.4: Memory Accumulation
+    using cortext::operations::UpdateAccumulator;
+    using cortext::operations::ComputeCoherence;
+    using cortext::operations::DetectBoundary;
+    using cortext::operations::CheckSpikeBypass;
+    using cortext::operations::ComputeWriteGate;
     // Phase 4: Knowledge Graph Enhancement
     using cortext::operations::DetectConceptNodes;
     using cortext::operations::PropagateEmotionalCascade;
@@ -362,7 +390,6 @@ struct Cortext::Impl
         std::make_unique<UpdateDriftAccumulation> (),
         std::make_unique<ComputeFocusSpread> (),
         std::make_unique<ComputeEffectiveFocus> (),
-        std::make_unique<CheckEpisodeBoundary> (),
 
         std::make_unique<UpdateEmbeddingPredictionError> (),
         std::make_unique<UpdateUncertainty> (),
@@ -372,6 +399,12 @@ struct Cortext::Impl
 
         std::make_unique<UpdatePrecisionDelta> (),
         std::make_unique<UpdateThreshold> (),
+
+        // Section 4.4: Memory Accumulation (before write gate)
+        std::make_unique<UpdateAccumulator> (),
+        std::make_unique<ComputeCoherence> (),
+        std::make_unique<DetectBoundary> (),
+        std::make_unique<CheckSpikeBypass> (),
         std::make_unique<ComputeWriteGate> (),
         std::make_unique<MemoryStorage> (),
         std::make_unique<PersistSignalMetrics> (),
@@ -491,8 +524,7 @@ Cortext::Cortext (const Config &cfg, const std::string &db_path,
 Cortext::~Cortext () = default;
 
 Cortext::Context
-Cortext::ProcessText (const std::string &text, std::uint64_t timestamp,
-                      const std::string &source_id)
+Cortext::ProcessText (const std::string &text, const std::string &source_id)
 {
   if (!impl_)
     {
@@ -507,7 +539,7 @@ Cortext::ProcessText (const std::string &text, std::uint64_t timestamp,
   // Build signal with payload for MemoryStorage
   cortext::Signal s;
   s.embedding = ToEigen (v);
-  s.timestamp = timestamp;
+  s.timestamp = NowMillis ();
   s.source_id = source_id;
   s.payload = std::vector<unsigned char> (text.begin (), text.end ());
   s.modality = "text";
@@ -527,7 +559,7 @@ Cortext::ProcessText (const std::string &text, std::uint64_t timestamp,
 
 Cortext::Context
 Cortext::ProcessAudio (const float *pcm, std::size_t num_samples,
-                       std::uint64_t timestamp, const std::string &source_id)
+                       const std::string &source_id)
 {
   if (!impl_)
     {
@@ -542,7 +574,7 @@ Cortext::ProcessAudio (const float *pcm, std::size_t num_samples,
   // Build signal with payload for MemoryStorage
   cortext::Signal s;
   s.embedding = ToEigen (v);
-  s.timestamp = timestamp;
+  s.timestamp = NowMillis ();
   s.source_id = source_id;
   // Store raw PCM bytes (f32le) as payload
   const std::size_t byte_len = num_samples * sizeof (float);
@@ -567,8 +599,7 @@ Cortext::ProcessAudio (const float *pcm, std::size_t num_samples,
 
 Cortext::Context
 Cortext::ProcessImage (const std::uint8_t *data, int width, int height,
-                       int channels, std::uint64_t timestamp,
-                       const std::string &source_id)
+                       int channels, const std::string &source_id)
 {
   if (!impl_)
     {
@@ -583,7 +614,7 @@ Cortext::ProcessImage (const std::uint8_t *data, int width, int height,
   // Build signal with payload for MemoryStorage
   cortext::Signal s;
   s.embedding = ToEigen (v);
-  s.timestamp = timestamp;
+  s.timestamp = NowMillis ();
   s.source_id = source_id;
   // Store raw image bytes as payload
   const std::size_t byte_len
@@ -610,7 +641,7 @@ Cortext::ProcessImage (const std::uint8_t *data, int width, int height,
 }
 
 Cortext::Context
-Cortext::Consolidate (std::uint64_t now_timestamp)
+Cortext::Consolidate ()
 {
   if (!impl_)
     {
@@ -623,7 +654,7 @@ Cortext::Consolidate (std::uint64_t now_timestamp)
   telemetry::ScopedSpan encode_span ("cortext.encode");
   impl_->encoder->EncodeText (std::string (), v);
   encode_span.SetStatusOk ();
-  auto out = impl_->ProcessEmbedding (ToEigen (v), now_timestamp,
+  auto out = impl_->ProcessEmbedding (ToEigen (v), NowMillis (),
                                       "cortext/consolidate");
   span.SetAttribute ("cortext.candidate_memory_count",
                      static_cast<std::int64_t> (out.candidate_memory_ids.size ()));

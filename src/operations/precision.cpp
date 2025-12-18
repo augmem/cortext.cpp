@@ -4,51 +4,52 @@
 #include "cortext/core/knobs.hpp"
 #include "cortext/operations/constants.hpp"
 #include "cortext/processor/operation_context.hpp"
+#include "cortext/telemetry/telemetry.hpp"
 
 namespace cortext::operations
 {
+
+namespace
+{
+// Spec (§4.2.5, line 629): κ_prec = 0.06
+constexpr double kKappaPrec = 0.06;
+// Spec (§4.2.5, line 631): cap_prec = 0.15 × hysteresis_t
+constexpr double kCapPrecCoeff = 0.15;
+// Spec (§4.2.5, line 633): coherence offset
+constexpr double kCoherenceOffset = 0.5;
+}  // namespace
 
 void
 UpdatePrecisionDelta::Execute (OperationContext &context, Transaction &tx) const
 {
   const auto &cfg = context.GetConfig ();
+  auto &p_ctx = context.GetProcessorContext ();
+
   const double F = core::Clamp (cfg.focus, constants::kNormalizedMin,
                                 constants::kNormalizedMax);
-  const double T = core::Clamp (cfg.stability, constants::kNormalizedMin,
-                                constants::kNormalizedMax);
 
-  const auto &events = context.GetMemoryUsageEvents ();
-  const int retrieved = static_cast<int> (events.size ());
-  int used = 0;
-  for (const auto &e : events)
-    {
-      if (e.used)
-        {
-          used += 1;
-        }
-    }
+  // Spec (§4.2.5, lines 627-637): Precision-Based Threshold Adjustment
+  // Focus-driven precision tightens threshold when structural coherence is high:
+  // κ_prec = 0.06
+  // cap_prec ← 0.15 × hysteresis_t
+  // Δθ_prec ← clamp(κ_prec × F × (coherence_struct_t − 0.5), −cap_prec, +cap_prec)
 
-  const double retrieval_precision
-      = (retrieved > 0) ? (static_cast<double> (used)
-                           / static_cast<double> (retrieved))
-                        : constants::kNormalizedMax;
-  // Keep the computation local to avoid relying on optional helpers in
-  // compilation units that may not be indexed by all tooling.
-  const double target_precision = core::Clamp (
-      core::CertaintyRequirement (T)
-          * (constants::kTargetPrecisionBaseScale
-             + constants::kTargetPrecisionBaseScale * F),
-      constants::kNormalizedMin, constants::kNormalizedMax);
+  const double coherence_struct = context.GetStructuralCoherence ();
+  const double cap_prec = kCapPrecCoeff * p_ctx.hysteresis;
 
-  // κ = 0.10 * (1 - T) (algorithms.md §5.5), using shared medium gain constant.
-  const double kappa = constants::kGainMedium * (constants::kNormalizedMax - T);
+  const double raw_delta = kKappaPrec * F * (coherence_struct - kCoherenceOffset);
+  const double delta = core::Clamp (raw_delta, -cap_prec, cap_prec);
 
-  double delta = constants::kNormalizedMin;
-  if (retrieval_precision < target_precision)
-    {
-      delta = -kappa * (target_precision - retrieval_precision);
-    }
   context.SetDeltaThresholdPrecision (delta);
+
+  telemetry::LogDebug("cortext.precision_delta", {
+    telemetry::Attribute::Double("F", F),
+    telemetry::Attribute::Double("coherence_struct", coherence_struct),
+    telemetry::Attribute::Double("hysteresis", p_ctx.hysteresis),
+    telemetry::Attribute::Double("cap_prec", cap_prec),
+    telemetry::Attribute::Double("raw_delta", raw_delta),
+    telemetry::Attribute::Double("delta_prec", delta)
+  });
 }
 
 } // namespace cortext::operations

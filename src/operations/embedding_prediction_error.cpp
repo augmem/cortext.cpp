@@ -4,6 +4,7 @@
 #include "cortext/operations/constants.hpp"
 #include "cortext/operations/metrics.hpp"
 #include "cortext/processor/operation_context.hpp"
+#include "cortext/telemetry/telemetry.hpp"
 #include <cmath>
 
 namespace cortext::operations
@@ -78,6 +79,11 @@ UpdateEmbeddingPredictionError::Execute (OperationContext &context, Transaction 
 
   // Update state for next iteration
   p_ctx.last_embedding = x_t;
+
+  telemetry::LogDebug("cortext.embedding_prediction_error", {
+    telemetry::Attribute::Double("prediction_error", prediction_error),
+    telemetry::Attribute::Double("embedding_surprisal", surprisal)
+  });
 }
 
 } // namespace cortext::operations

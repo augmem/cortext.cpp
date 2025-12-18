@@ -4,6 +4,7 @@
 #include "cortext/operations/constants.hpp"
 #include "cortext/core/knobs.hpp"
 #include "cortext/processor/operation_context.hpp"
+#include "cortext/telemetry/telemetry.hpp"
 #include <algorithm>
 #include <cmath>
 #include <numeric>
@@ -238,6 +239,21 @@ ComputeMetrics::Execute (OperationContext &context, Transaction &tx) const
     }
   context.SetMetric (operations::Metric::valence, valence);
   context.SetMetric (operations::Metric::arousal, arousal);
+
+  telemetry::LogDebug("cortext.metrics", {
+    telemetry::Attribute::Double("relevance", relevance),
+    telemetry::Attribute::Double("mismatch", mismatch),
+    telemetry::Attribute::Double("surprise", surprise),
+    telemetry::Attribute::Double("rarity", rarity),
+    telemetry::Attribute::Double("drift", drift),
+    telemetry::Attribute::Double("contradiction", contradiction),
+    telemetry::Attribute::Double("utility", utility),
+    telemetry::Attribute::Double("periphery", periphery),
+    telemetry::Attribute::Double("coverage", coverage),
+    telemetry::Attribute::Double("salience", salience),
+    telemetry::Attribute::Double("valence", valence),
+    telemetry::Attribute::Double("arousal", arousal)
+  });
 }
 
 } // namespace cortext::operations

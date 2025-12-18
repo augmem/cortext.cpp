@@ -2,6 +2,7 @@
 #include "cortext/core/knobs.hpp"
 #include "cortext/operations/constants.hpp"
 #include "cortext/processor/operation_context.hpp"
+#include "cortext/telemetry/telemetry.hpp"
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -39,6 +40,13 @@ InitializeSensitivityPriors::Execute (OperationContext &context, Transaction &tx
   // Initialize dynamic values from priors
   p_ctx.weight_novelty = p_ctx.weight_novelty_prior;
   p_ctx.sensitivity_priors_initialized = true;
+
+  telemetry::LogDebug("cortext.initialize_sensitivity_priors", {
+    telemetry::Attribute::Double("S", S),
+    telemetry::Attribute::Double("base_rate_prior", p_ctx.base_rate_prior),
+    telemetry::Attribute::Double("weight_novelty_prior", p_ctx.weight_novelty_prior),
+    telemetry::Attribute::Double("weight_surprise_prior", p_ctx.weight_surprise_prior)
+  });
 }
 
 namespace
@@ -188,12 +196,20 @@ UpdateSensitivity::Execute (OperationContext &context, Transaction &tx) const
         * (constants::kOneHalf + constants::kOneHalf * arousal);
   context.SetDeltaThresholdEmotion (delta_T_emo);
 
-  // gain_t = exp(2S) × (1 + 0.1 × var(scores_{t−w:t}))
+  // Spec (§2.2.2, lines 613-621): Sensitivity-based threshold adjustment
+  // σ_scores ← std(scores[t−w:t])
+  // κ_sens = 0.08
+  // cap_sens ← 0.20 × hysteresis_t
+  // Δθ_sens ← clamp(−κ_sens × S × (σ_scores − 0.1), −cap_sens, +cap_sens)
+  constexpr double kKappaSens = 0.08;
+  constexpr double kCapSensCoeff = 0.20;
+  constexpr double kSigmaOffset = 0.1;
+
   const int w = core::WScore (cfg.stability);
   const int n = static_cast<int> (p_ctx.recent_scores.size ());
   const int start = std::max (0, n - w);
   int m = n - start;
-  double var_scores = 0.0;
+  double sigma_scores = 0.0;
   if (m >= 2)
     {
       double sum = 0.0;
@@ -214,12 +230,13 @@ UpdateSensitivity::Execute (OperationContext &context, Transaction &tx) const
           const double d = v - mean;
           accum += d * d;
         }
-      var_scores
-          = core::Clamp (accum / static_cast<double> (m),
-                         constants::kNormalizedMin, constants::kNormalizedMax);
+      const double var_scores = accum / static_cast<double> (m);
+      sigma_scores = std::sqrt (var_scores);
     }
-  const double gain_t = std::exp (2.0 * S) * (1.0 + 0.1 * var_scores);
-  double delta_T_sens = -gain_t * (S - constants::kOneHalf) + delta_T_emo;
+
+  const double cap_sens = kCapSensCoeff * p_ctx.hysteresis;
+  double delta_T_sens = core::Clamp (
+      -kKappaSens * S * (sigma_scores - kSigmaOffset), -cap_sens, cap_sens);
   context.SetDeltaThresholdSensitivity (delta_T_sens);
 
   // --- rate_target_t update (EWMA with observed write rate) ---
@@ -245,6 +262,18 @@ UpdateSensitivity::Execute (OperationContext &context, Transaction &tx) const
       core::Clamp (rate_obs, constants::kNormalizedMin, kClampRateMax),
       alpha_s);
   p_ctx.last_signal_timestamp = ts;
+
+  telemetry::LogDebug("cortext.update_sensitivity", {
+    telemetry::Attribute::Double("emotion_intensity", emotion_intensity),
+    telemetry::Attribute::Double("valence", valence),
+    telemetry::Attribute::Double("arousal", arousal),
+    telemetry::Attribute::Double("delta_T_emo", delta_T_emo),
+    telemetry::Attribute::Double("sigma_scores", sigma_scores),
+    telemetry::Attribute::Double("cap_sens", cap_sens),
+    telemetry::Attribute::Double("delta_T_sens", delta_T_sens),
+    telemetry::Attribute::Double("rate_target", p_ctx.rate_target),
+    telemetry::Attribute::Double("hysteresis", p_ctx.hysteresis)
+  });
 }
 
 void
@@ -287,6 +316,11 @@ UpdateMood::Execute (OperationContext &context, Transaction &tx) const
   const double kappa_mood = constants::kGainMedium * S;
   const double delta_T_mood = -kappa_mood * m_norm;
   context.SetDeltaThresholdMood (delta_T_mood);
+
+  telemetry::LogDebug("cortext.update_mood", {
+    telemetry::Attribute::Double("mood_magnitude", m_norm),
+    telemetry::Attribute::Double("delta_T_mood", delta_T_mood)
+  });
 }
 
 } // namespace cortext::operations

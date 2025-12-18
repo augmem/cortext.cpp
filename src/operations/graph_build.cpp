@@ -6,6 +6,7 @@
 #include "cortext/core/utils.hpp"
 #include "cortext/processor/operation_context.hpp"
 #include "cortext/store/store.hpp"
+#include "cortext/telemetry/telemetry.hpp"
 #include <Eigen/Dense>
 #include <any>
 #include <cmath>
@@ -42,9 +43,10 @@ LoadClusterSourceEmbeddings (Store *store)
   std::map<std::string, std::vector<EmbeddingData>> clusters;
 
   // Query sources with timestamps and embeddings
+  // Uses end_ts from memories (new schema) as the memory timestamp
   auto rows = store->Execute (
       "SELECT cs.summary_id, cs.source_embedding_id, "
-      "COALESCE(m.timestamp, e.created_at, 0) AS created_at, "
+      "COALESCE(m.end_ts, e.created_at, 0) AS created_at, "
       "e.embedding "
       "FROM consolidation_sources cs "
       "JOIN embeddings e ON cs.source_embedding_id = e.embedding_id "
@@ -404,6 +406,34 @@ BuildGraphFromConsolidation::Execute (OperationContext &context, Transaction &tx
 
   // 10) Decay reinforcement edges (created during retrieval)
   DecayReinforcementEdges (tx, reinforcement_decay);
+
+  // Count nodes and edges for logging
+  long long nodes_added = 0;
+  long long edges_added = 0;
+
+  if (store)
+    {
+      auto node_rows = store->Execute("SELECT COUNT(*) AS cnt FROM graph_nodes", {});
+      if (!node_rows.empty() && node_rows[0].count("cnt") == 1)
+        {
+          const auto &v = node_rows[0].at("cnt");
+          if (v.type() == typeid(long long))
+            nodes_added = std::any_cast<long long>(v);
+        }
+
+      auto edge_rows = store->Execute("SELECT COUNT(*) AS cnt FROM graph_edges", {});
+      if (!edge_rows.empty() && edge_rows[0].count("cnt") == 1)
+        {
+          const auto &v = edge_rows[0].at("cnt");
+          if (v.type() == typeid(long long))
+            edges_added = std::any_cast<long long>(v);
+        }
+    }
+
+  telemetry::LogDebug("cortext.graph_build", {
+    telemetry::Attribute::Int64("nodes_added", nodes_added),
+    telemetry::Attribute::Int64("edges_added", edges_added)
+  });
 }
 
 } // namespace cortext::operations

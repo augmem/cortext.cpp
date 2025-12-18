@@ -3,6 +3,7 @@
 #include "cortext/operations/constants.hpp"
 #include "cortext/core/knobs.hpp"
 #include "cortext/processor/operation_context.hpp"
+#include "cortext/telemetry/telemetry.hpp"
 
 namespace cortext::operations
 {
@@ -36,6 +37,13 @@ InitializeStabilityPriors::Execute (OperationContext &context, Transaction &tx) 
   p_ctx.salience_half_life
       = core::ClampHalfLife (constants::kOneHalf * p_ctx.half_life);
   p_ctx.stability_priors_initialized = true;
+
+  telemetry::LogDebug("cortext.initialize_stability_priors", {
+    telemetry::Attribute::Double("T", T),
+    telemetry::Attribute::Double("half_life_prior", p_ctx.half_life_prior),
+    telemetry::Attribute::Double("hysteresis_band_prior", p_ctx.hysteresis_band_prior),
+    telemetry::Attribute::Double("rate_decay_prior", p_ctx.rate_decay_prior)
+  });
 }
 
 void
@@ -104,6 +112,13 @@ UpdateStability::Execute (OperationContext &context, Transaction &tx) const
       = core::ClampHalfLife (constants::kOneHalf * p_ctx.half_life);
   p_ctx.salience_half_life
       = core::ClampHalfLife (constants::kOneHalf * p_ctx.half_life);
+
+  telemetry::LogDebug("cortext.update_stability", {
+    telemetry::Attribute::Double("zscore", zscore),
+    telemetry::Attribute::Double("target_hl", target_hl),
+    telemetry::Attribute::Double("half_life", p_ctx.half_life),
+    telemetry::Attribute::Double("alpha_T", alpha_T)
+  });
 }
 
 } // namespace cortext::operations

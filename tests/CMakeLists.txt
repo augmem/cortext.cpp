@@ -35,7 +35,6 @@ add_executable(cortext_tests
   operations_uncertainty.test.cpp
   operations_focus.test.cpp
   operations_focus_spread.test.cpp
-  operations_boundary.test.cpp
   operations_stability.test.cpp
   operations_threshold.test.cpp
   operations_blend.test.cpp
@@ -71,6 +70,7 @@ add_executable(cortext_tests
   operations_write_gate.test.cpp
   operations_memory_storage.test.cpp
   operations_streaming_pacing.test.cpp
+  operations_accumulator.test.cpp
   migration_core.test.cpp
   cortext.test.cpp
   signal_processor.test.cpp

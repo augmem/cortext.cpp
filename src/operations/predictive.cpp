@@ -5,6 +5,7 @@
 #include "cortext/operations/constants.hpp"
 #include "cortext/processor/operation_context.hpp"
 #include "cortext/store/schema.hpp"
+#include "cortext/telemetry/telemetry.hpp"
 #include <Eigen/Dense>
 #include <algorithm>
 #include <vector>
@@ -148,6 +149,7 @@ ApplyPredictivePreActivation::Execute (OperationContext &context, Transaction &t
         }
     }
 
+  int boost_count = 0;
   for (const auto &kv : retrieved)
     {
       const long long id = kv.first;
@@ -176,7 +178,14 @@ ApplyPredictivePreActivation::Execute (OperationContext &context, Transaction &t
                   "SET strength = MIN(?, COALESCE(strength, 1.0) + ?) "
                   "WHERE embedding_id = ?;",
                   { kStrengthMax, delta, id });
+      ++boost_count;
     }
+
+  // Debug logging
+  telemetry::LogDebug ("cortext.predictive", {
+    telemetry::Attribute::Double ("prediction_norm", static_cast<double> (pred.norm ())),
+    telemetry::Attribute::Int64 ("boost_count", static_cast<int64_t> (boost_count))
+  });
 }
 
 void

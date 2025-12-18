@@ -2,7 +2,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include "test_helpers.hpp"
 
-#include "cortext/operations/boundary.hpp"
+
 #include "cortext/operations/focus_feedback.hpp"
 #include "cortext/operations/memory_strength.hpp"
 #include "cortext/operations/sensitivity.hpp"
@@ -48,28 +48,7 @@ TEST_CASE ("Uncertainty weights respond to F and S", "[uncertainty]")
   SUCCEED ();
 }
 
-TEST_CASE ("Boundary threshold uses T (not 1-T)", "[boundary]")
-{
-  OperationContext::MemoryUsageEvent evt{};
-  // Construct context pieces
-  ProcessorContext pctx;
-  SignalProcessor::Config cfg{};
-  cfg.stability = 1.0; // threshold should be 0.35 at max T
-  Signal sig;
-  sig.timestamp = 1;
-  sig.embedding = Eigen::VectorXf::Zero (4);
-  OperationContext ctx (sig, pctx, cfg);
 
-  // Populate recent embeddings to avoid early return
-  for (int i = 0; i < 8; ++i)
-    {
-      pctx.recent_context_embeddings.push_back (Eigen::VectorXf::Random (4));
-    }
-  CheckEpisodeBoundary op;
-  op.Execute (ctx, cortext::testing::GetNullTransaction ());
-  // No assert for numeric value; we trust execution and lack of regression.
-  SUCCEED ();
-}
 
 TEST_CASE ("Alg17 emits adj; Alg6 consumes it", "[stability]")
 {

@@ -182,24 +182,35 @@ RegisterCoreSchema (SchemaRegistry &registry)
           ")",
 
           // ------------------------------------------------------------------
-          // MEMORIES - Memory metadata + payload reference (Section 2.2.2, 6.6)
+          // MEMORIES - Memory metadata (The unit of retrieval) (Section 4.4, 6.1)
           // ------------------------------------------------------------------
           "CREATE TABLE IF NOT EXISTS memories ("
           "  embedding_id INTEGER PRIMARY KEY,"
-          "  source_id TEXT,"
-          "  modality TEXT,"
-          "  mime TEXT,"
-          "  timestamp INTEGER,"
-          "  blob_id BLOB,"
-          "  event_emotion BLOB,"
+          "  start_ts INTEGER,"
+          "  end_ts INTEGER,"
+          "  n_signals INTEGER,"
+          "  primary_modality TEXT,"
+          "  content_blob_id BLOB,"
+          "  s_max REAL,"
+          "  s_avg REAL,"
+          "  emotion BLOB,"
           "  ambient_mood BLOB,"
           "  episode_id INTEGER,"
+          "  status TEXT"
+          ")",
+
+          // ------------------------------------------------------------------
+          // SIGNALS - Signal metadata (Discrete inputs) (Section 2.2)
+          // ------------------------------------------------------------------
+          "CREATE TABLE IF NOT EXISTS signals ("
+          "  signal_id INTEGER PRIMARY KEY,"
+          "  embedding_id INTEGER,"
+          "  timestamp INTEGER,"
+          "  modality TEXT,"
+          "  mime TEXT,"
+          "  blob_id BLOB,"
           "  serial_position INTEGER,"
-          "  width INTEGER,"
-          "  height INTEGER,"
-          "  channels INTEGER,"
-          "  sample_rate INTEGER,"
-          "  num_samples INTEGER"
+          "  score REAL"
           ")",
 
           // ------------------------------------------------------------------
@@ -590,6 +601,30 @@ RegisterCoreSchema (SchemaRegistry &registry)
           ")",
           "CREATE INDEX IF NOT EXISTS idx_recent_retrievals_embedding ON recent_retrievals(embedding_id)",
           "CREATE INDEX IF NOT EXISTS idx_recent_retrievals_seq ON recent_retrievals(seq_order)",
+
+          // ------------------------------------------------------------------
+          // ACCUMULATOR_STATE - Write pacing accumulator (Section 4.4)
+          // ------------------------------------------------------------------
+          "CREATE TABLE IF NOT EXISTS accumulator_state ("
+          "  source_id TEXT PRIMARY KEY,"
+          "  mu_acc BLOB,"                           // 256d running mean
+          "  drift_acc REAL NOT NULL DEFAULT 0.0,"   // accumulated drift
+          "  s_sum REAL NOT NULL DEFAULT 0.0,"       // score sum
+          "  s_max REAL NOT NULL DEFAULT 0.0,"       // max score
+          "  n_signals INTEGER NOT NULL DEFAULT 0,"  // count
+          "  e_peak BLOB,"                           // 256d peak embedding
+          "  t_start INTEGER NOT NULL DEFAULT 0,"
+          "  last_write_ts INTEGER NOT NULL DEFAULT 0,"
+          "  last_signal_ts INTEGER NOT NULL DEFAULT 0,"
+          "  eta_acc REAL NOT NULL DEFAULT 0.0,"     // drift EWMA
+          "  coherence_prev REAL NOT NULL DEFAULT 1.0"
+          ")",
+
+          // ------------------------------------------------------------------
+          // SIGNALS indexes
+          // ------------------------------------------------------------------
+          "CREATE INDEX IF NOT EXISTS idx_signals_embedding ON signals(embedding_id)",
+          "CREATE INDEX IF NOT EXISTS idx_signals_timestamp ON signals(timestamp)",
       },
   });
 }

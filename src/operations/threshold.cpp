@@ -3,6 +3,7 @@
 #include "cortext/operations/constants.hpp"
 #include "cortext/core/knobs.hpp"
 #include "cortext/processor/operation_context.hpp"
+#include "cortext/telemetry/telemetry.hpp"
 #include <algorithm>
 #include <cmath>
 #include <deque>
@@ -192,6 +193,13 @@ UpdateThreshold::Execute (OperationContext &context, Transaction &tx) const
   // Expose as intermediate results for downstream operations/telemetry.
   context.SetThresholdTDynamic (p_ctx.T_dynamic);
   context.SetThresholdHysteresis (p_ctx.hysteresis);
+
+  telemetry::LogDebug("cortext.threshold", {
+    telemetry::Attribute::Double("prior_threshold", T_prior),
+    telemetry::Attribute::Double("observed_mean", observed_p90),
+    telemetry::Attribute::Double("T_dynamic", p_ctx.T_dynamic),
+    telemetry::Attribute::Double("hysteresis", p_ctx.hysteresis)
+  });
 }
 
 } // namespace cortext::operations

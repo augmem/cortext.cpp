@@ -3,6 +3,7 @@
 #include "cortext/core/knobs.hpp"
 #include "cortext/processor/operation_context.hpp"
 #include "cortext/processor/processor_context.hpp"
+#include "cortext/telemetry/telemetry.hpp"
 
 namespace cortext::operations
 {
@@ -31,6 +32,13 @@ CheckStreamingPacing::Execute (OperationContext &context, Transaction &tx) const
       p_ctx.last_pacing_check_embedding = signal.embedding;
       p_ctx.drift_accum = 0.0;
     }
+
+  // Debug logging
+  telemetry::LogDebug ("cortext.streaming_pacing", {
+    telemetry::Attribute::Double ("drift_accum", p_ctx.drift_accum),
+    telemetry::Attribute::Double ("pacing_threshold", pacing_thresh),
+    telemetry::Attribute::Bool ("should_check_retrieval", should_check)
+  });
 }
 
 } // namespace cortext::operations

@@ -235,11 +235,17 @@ TEST_CASE ("Phase4: causal edges are created for temporal drift",
                   "1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0)",
                   { 2LL, emb2 });
 
-  // Add timestamps for temporal ordering
-  store->Execute ("INSERT INTO memories (embedding_id, timestamp) VALUES (?, ?)",
-                  { 1LL, 1000LL });
-  store->Execute ("INSERT INTO memories (embedding_id, timestamp) VALUES (?, ?)",
-                  { 2LL, 2000LL }); // Later timestamp
+  // Add memories with temporal ordering (end_ts used for ordering per schema)
+  store->Execute (
+      "INSERT INTO memories (embedding_id, start_ts, end_ts, n_signals, "
+      "primary_modality, s_max, s_avg, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+      { 1LL, 900LL, 1000LL, 1LL, std::string ("text"), 0.5, 0.5,
+        std::string ("active") });
+  store->Execute (
+      "INSERT INTO memories (embedding_id, start_ts, end_ts, n_signals, "
+      "primary_modality, s_max, s_avg, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+      { 2LL, 1900LL, 2000LL, 1LL, std::string ("text"), 0.5, 0.5,
+        std::string ("active") }); // Later timestamp
 
   // Create consolidation data
   store->Execute ("INSERT INTO consolidation_summaries (summary_id, summary_text, "

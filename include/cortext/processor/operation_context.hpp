@@ -699,6 +699,110 @@ public:
   }
 
   // ======================================================================
+  // Memory Accumulation API (Section 4.4)
+  // ======================================================================
+
+  void
+  SetBoundaryScore (double v)
+  {
+    boundary_score_ = v;
+  }
+  std::optional<double>
+  GetBoundaryScore () const
+  {
+    return boundary_score_;
+  }
+
+  void
+  SetFlushRequired (bool v)
+  {
+    flush_required_ = v;
+  }
+  bool
+  GetFlushRequired () const
+  {
+    return flush_required_;
+  }
+
+  void
+  SetSpikeBypass (bool v)
+  {
+    spike_bypass_ = v;
+  }
+  bool
+  GetSpikeBypass () const
+  {
+    return spike_bypass_;
+  }
+
+  void
+  SetWindowScore (double v)
+  {
+    window_score_ = v;
+  }
+  std::optional<double>
+  GetWindowScore () const
+  {
+    return window_score_;
+  }
+
+  void
+  SetAccumulatorWriteDecision (bool v)
+  {
+    accumulator_write_decision_ = v;
+  }
+  bool
+  GetAccumulatorWriteDecision () const
+  {
+    return accumulator_write_decision_;
+  }
+
+  void
+  SetRepresentativeEmbedding (Eigen::VectorXf v)
+  {
+    representative_embedding_ = std::move (v);
+  }
+  const std::optional<Eigen::VectorXf> &
+  GetRepresentativeEmbedding () const
+  {
+    return representative_embedding_;
+  }
+
+  void
+  SetAccumulatorCoherence (double v)
+  {
+    accumulator_coherence_ = v;
+  }
+  double
+  GetAccumulatorCoherence () const
+  {
+    return accumulator_coherence_;
+  }
+
+  void
+  SetAccumulatorDriftStep (double v)
+  {
+    accumulator_drift_step_ = v;
+  }
+  double
+  GetAccumulatorDriftStep () const
+  {
+    return accumulator_drift_step_;
+  }
+
+  // Structural coherence (Section 3.1.1): 1 - var(cos(x_t, context_window))
+  void
+  SetStructuralCoherence (double v)
+  {
+    structural_coherence_ = v;
+  }
+  double
+  GetStructuralCoherence () const
+  {
+    return structural_coherence_;
+  }
+
+  // ======================================================================
   // Streaming Pacing API (Section 10.4)
   // ======================================================================
 
@@ -864,6 +968,17 @@ private:
   std::vector<ClusterInfo> consolidation_clusters_;
   std::vector<operations::ExtractionRequest> extraction_requests_;
   operations::ExtractionCallback *extraction_callback_ = nullptr;
+
+  // Memory Accumulation fields (Section 4.4)
+  std::optional<double> boundary_score_;
+  bool flush_required_ = false;
+  bool spike_bypass_ = false;
+  std::optional<double> window_score_;
+  bool accumulator_write_decision_ = false;
+  std::optional<Eigen::VectorXf> representative_embedding_;
+  double accumulator_coherence_ = 1.0;
+  double accumulator_drift_step_ = 0.0;
+  double structural_coherence_ = 1.0;  // Section 3.1.1: defaults to high coherence
 };
 
 } // namespace cortext

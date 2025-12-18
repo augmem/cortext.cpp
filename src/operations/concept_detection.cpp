@@ -7,6 +7,7 @@
 #include "cortext/processor/operation_context.hpp"
 #include "cortext/store/schema_helpers.hpp"
 #include "cortext/store/store.hpp"
+#include "cortext/telemetry/telemetry.hpp"
 #include <Eigen/Dense>
 #include <any>
 #include <cmath>
@@ -201,8 +202,13 @@ DetectConceptNodes::Execute (OperationContext &context, Transaction &tx) const
 
   if (candidates.empty ())
     {
+      telemetry::LogDebug("cortext.concept_detection", {
+        telemetry::Attribute::Int64("new_concepts_count", 0)
+      });
       return;
     }
+
+  int new_concepts_count = 0;
 
   for (const auto &c : candidates)
     {
@@ -218,6 +224,8 @@ DetectConceptNodes::Execute (OperationContext &context, Transaction &tx) const
           // Concept already exists, skip
           continue;
         }
+
+      new_concepts_count++;
 
       // Compute concept centroid from related summary centroids
       Eigen::VectorXf centroid;
@@ -279,6 +287,10 @@ DetectConceptNodes::Execute (OperationContext &context, Transaction &tx) const
                { concept_node_id, "summary:" + sid, now_ts });
         }
     }
+
+  telemetry::LogDebug("cortext.concept_detection", {
+    telemetry::Attribute::Int64("new_concepts_count", new_concepts_count)
+  });
 }
 
 } // namespace cortext::operations

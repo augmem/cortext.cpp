@@ -3,6 +3,7 @@
 #include "cortext/core/algorithms.hpp"
 #include "cortext/operations/constants.hpp"
 #include "cortext/processor/operation_context.hpp"
+#include "cortext/telemetry/telemetry.hpp"
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -410,6 +411,15 @@ FitMetricWeightsRLS::Execute (OperationContext &context, Transaction &tx) const
   UpdateRLSCovariance (K, x, P, lam, P_new);
   p_ctx.blender_P = std::move (P_new);
   p_ctx.blender_ready = true;
+
+  // Compute RLS confidence for logging
+  const double rls_confidence
+      = ComputeBlendConfidence (p_ctx.signals_processed, cfg.stability);
+
+  telemetry::LogDebug("cortext.blend.fit_rls", {
+    telemetry::Attribute::Double("forgetting_factor", lam),
+    telemetry::Attribute::Double("rls_confidence", rls_confidence)
+  });
 }
 
 void
@@ -476,6 +486,14 @@ ComputeCompositeScore::Execute (OperationContext &context, Transaction &tx) cons
     }
   const double y = ComputeWeightedScore (x, w_raw);
   context.SetCompositeScore (y);
+
+  // Compute tau_rls for logging
+  const double tau_rls = core::Lerp (kTauRlsMin, kTauRlsMax, cfg.stability);
+
+  telemetry::LogDebug("cortext.blend.composite_score", {
+    telemetry::Attribute::Double("tau_rls", tau_rls),
+    telemetry::Attribute::Double("composite_score", y)
+  });
 }
 
 } // namespace cortext::operations

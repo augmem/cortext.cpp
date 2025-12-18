@@ -5,6 +5,7 @@
 #include "cortext/operations/extraction.hpp"
 #include "cortext/processor/operation_context.hpp"
 #include "cortext/store/schema.hpp"
+#include "cortext/telemetry/telemetry.hpp"
 #include <algorithm>
 #include <any>
 #include <cmath>
@@ -126,6 +127,12 @@ EvaluateConsolidation::Execute (OperationContext &context, Transaction &tx) cons
       context.SetConsolidationShouldStart (true);
       p_ctx.last_consolidation_ts = now_ts;
     }
+
+  telemetry::LogDebug("cortext.evaluate_consolidation", {
+    telemetry::Attribute::Bool("rate_trigger", trigger_rate),
+    telemetry::Attribute::Bool("interval_trigger", trigger_interval),
+    telemetry::Attribute::Bool("consolidation_start", idle_ok)
+  });
 }
 
 void
@@ -181,6 +188,10 @@ EnqueueExtractionJobs::Execute (OperationContext &context, Transaction &tx) cons
     }
 
   p_ctx.last_extraction_ts = now_ts;
+
+  telemetry::LogDebug("cortext.enqueue_extraction_jobs", {
+    telemetry::Attribute::Int64("jobs_queued", count)
+  });
 }
 
 void
@@ -246,6 +257,21 @@ ScoreConsolidation::Execute (OperationContext &context, Transaction &tx) const
               "  created_at=excluded.created_at, "
               "  reason=excluded.reason;",
               { T, F, S, T, static_cast<long long> (now_ts), floor_cutoff });
+
+  // Count candidates and selected for logging
+  auto rows = tx.Execute("SELECT COUNT(*) AS candidate_count FROM consolidation_candidates", {});
+  long long candidate_count = 0;
+  if (!rows.empty() && rows[0].count("candidate_count") == 1)
+    {
+      const auto &v = rows[0].at("candidate_count");
+      if (v.type() == typeid(long long))
+        candidate_count = std::any_cast<long long>(v);
+    }
+
+  telemetry::LogDebug("cortext.score_consolidation", {
+    telemetry::Attribute::Int64("candidate_count", candidate_count),
+    telemetry::Attribute::Int64("selected_count", candidate_count)
+  });
 }
 
 void

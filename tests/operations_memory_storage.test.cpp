@@ -2,6 +2,7 @@
 #include "test_helpers.hpp"
 #include <cortext/operations/memory_storage.hpp>
 #include <cortext/processor.hpp>
+#include <cortext/processor/accumulator_state.hpp>
 #include <cortext/processor/operation_context.hpp>
 #include <cortext/store/sqlite_store.hpp>
 #include <cortext/store/utils.hpp>
@@ -74,9 +75,18 @@ TEST_CASE ("MemoryStorage stores payload when write_decision is true",
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;
 
+  // Set up accumulator state required by memory storage
+  AccumulatorState acc;
+  acc.mu_acc = s.embedding;
+  acc.n_signals = 1;
+  acc.s_sum = 0.5;
+  acc.s_max = 0.5;
+  acc.t_start = s.timestamp - 1000;
+  pctx.accumulator_states[s.source_id] = std::move (acc);
 
   OperationContext ctx (s, pctx, cfg, store);
-  ctx.SetWriteDecision (true);
+  ctx.SetAccumulatorWriteDecision (true);
+  ctx.SetRepresentativeEmbedding (s.embedding);
 
   MemoryStorage op;
   auto tx = store->Begin ();
@@ -130,7 +140,7 @@ TEST_CASE ("MemoryStorage discards when write_decision is false",
 
 
   OperationContext ctx (s, pctx, cfg, store);
-  ctx.SetWriteDecision (false); // Rejected
+  ctx.SetAccumulatorWriteDecision (false); // Rejected
 
   MemoryStorage op;
   op.Execute (ctx, cortext::testing::GetNullTransaction ());
@@ -149,7 +159,7 @@ TEST_CASE ("MemoryStorage discards when write_decision is false",
   REQUIRE (*cnt == 0);
 }
 
-TEST_CASE ("MemoryStorage does nothing when no payload",
+TEST_CASE ("MemoryStorage stores memory even when no payload",
            "[operations][memory_storage]")
 {
   ScopedTempDb db;
@@ -170,18 +180,35 @@ TEST_CASE ("MemoryStorage does nothing when no payload",
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;
 
+  // Set up accumulator state required by memory storage
+  AccumulatorState acc;
+  acc.mu_acc = s.embedding;
+  acc.n_signals = 1;
+  acc.s_sum = 0.5;
+  acc.s_max = 0.5;
+  acc.t_start = s.timestamp - 1000;
+  pctx.accumulator_states[s.source_id] = std::move (acc);
 
   OperationContext ctx (s, pctx, cfg, store);
-  ctx.SetWriteDecision (true);
+  ctx.SetAccumulatorWriteDecision (true);
+  ctx.SetRepresentativeEmbedding (s.embedding);
 
   MemoryStorage op;
-  op.Execute (ctx, cortext::testing::GetNullTransaction ());
+  auto tx = store->Begin ();
+  op.Execute (ctx, *tx);
+  tx->Commit ();
 
-  // Verify stored_embedding_id is NOT set
+  // Verify stored_embedding_id IS set (memory is stored, just no payload blob)
   auto stored_id = ctx.GetStoredEmbeddingId ();
-  REQUIRE_FALSE (stored_id.has_value ());
+  REQUIRE (stored_id.has_value ());
+  REQUIRE (*stored_id > 0);
 
-  // Verify no buffered instructions
+  // Verify memories row was inserted with null content_blob_id
+  auto mem_rows = store->Execute (
+      "SELECT content_blob_id FROM memories WHERE embedding_id = ?",
+      { *stored_id });
+  REQUIRE (mem_rows.size () == 1);
+  // content_blob_id should be null for no payload
 }
 
 TEST_CASE ("MemoryStorage stores payload in objstore and retrieves it",
@@ -206,9 +233,18 @@ TEST_CASE ("MemoryStorage stores payload in objstore and retrieves it",
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;
 
+  // Set up accumulator state required by memory storage
+  AccumulatorState acc;
+  acc.mu_acc = s.embedding;
+  acc.n_signals = 1;
+  acc.s_sum = 0.5;
+  acc.s_max = 0.5;
+  acc.t_start = s.timestamp - 1000;
+  pctx.accumulator_states[s.source_id] = std::move (acc);
 
   OperationContext ctx (s, pctx, cfg, store);
-  ctx.SetWriteDecision (true);
+  ctx.SetAccumulatorWriteDecision (true);
+  ctx.SetRepresentativeEmbedding (s.embedding);
 
   MemoryStorage op;
   auto tx = store->Begin ();
@@ -220,12 +256,12 @@ TEST_CASE ("MemoryStorage stores payload in objstore and retrieves it",
 
   // Savepoint commits directly, no need to execute buffered writes
 
-  // Retrieve blob_id from memories
+  // Retrieve content_blob_id from memories (renamed from blob_id)
   auto idx_rows = store->Execute (
-      "SELECT blob_id FROM memories WHERE embedding_id = ?",
+      "SELECT content_blob_id FROM memories WHERE embedding_id = ?",
       { *stored_id });
   REQUIRE (idx_rows.size () == 1);
-  auto blob_id = BlobFromAny (idx_rows[0].at ("blob_id"));
+  auto blob_id = BlobFromAny (idx_rows[0].at ("content_blob_id"));
   REQUIRE (!blob_id.empty ());
 
   // Retrieve payload from objstore

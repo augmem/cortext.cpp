@@ -92,6 +92,13 @@ DetectMemoryUsage::Execute (OperationContext &context, Transaction &tx) const
       telemetry::RecordHistogram ("cortext.detect_memory_usage.usage_rate",
                                   usage_rate);
     }
+
+  // Debug logging
+  telemetry::LogDebug ("cortext.detect_memory_usage", {
+    telemetry::Attribute::Int64 ("cached_count", static_cast<int64_t> (p_ctx.recent_retrievals_cache.size ())),
+    telemetry::Attribute::Double ("similarity_threshold", usage_threshold),
+    telemetry::Attribute::Int64 ("usage_count", static_cast<int64_t> (used_count))
+  });
 }
 
 } // namespace cortext::operations

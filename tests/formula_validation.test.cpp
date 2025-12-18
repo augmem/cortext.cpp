@@ -193,16 +193,17 @@ TEST_CASE ("AlphaT follows spec: max(term1, term2)", "[formula][knobs][alpha]")
 
 TEST_CASE ("AlphaS follows spec: max(term1, term2)", "[formula][knobs][alpha]")
 {
-  // AlphaS = max(0.05*(1+0.5*u_t), 0.05+S*0.45*u_t)
+  // AlphaS = max(0.05*(1+0.5*u_t), 0.05+S*0.35*u_t)
+  // Spec (§5.1, line 823): α_span_S = 0.35
 
   // At u_t=0, both terms reduce to 0.05
   REQUIRE (AlphaS (0.0, 0.0) == Catch::Approx (0.05));
   REQUIRE (AlphaS (1.0, 0.0) == Catch::Approx (0.05));
 
-  // At u_t=1, S=1: max(0.05*1.5, 0.05+1*0.45*1) = max(0.075, 0.50) = 0.50
-  REQUIRE (AlphaS (1.0, 1.0) == Catch::Approx (0.50));
+  // At u_t=1, S=1: max(0.05*1.5, 0.05+1*0.35*1) = max(0.075, 0.40) = 0.40
+  REQUIRE (AlphaS (1.0, 1.0) == Catch::Approx (0.40));
 
-  // At u_t=1, S=0: max(0.05*1.5, 0.05+0*0.45*1) = max(0.075, 0.05) = 0.075
+  // At u_t=1, S=0: max(0.05*1.5, 0.05+0*0.35*1) = max(0.075, 0.05) = 0.075
   REQUIRE (AlphaS (0.0, 1.0) == Catch::Approx (0.075));
 
   // Higher S means higher alpha (faster adaptation)
@@ -594,13 +595,14 @@ TEST_CASE ("ExtractionIntervalSeconds follows spec: lerp(300, 3600, T)",
   REQUIRE (ExtractionIntervalSeconds (0.3) < ExtractionIntervalSeconds (0.7));
 }
 
-TEST_CASE ("WRet follows spec: lerp(20, 120, T)",
+TEST_CASE ("WRet follows spec: lerp(10, 50, T)",
            "[formula][knobs][consolidation]")
 {
-  // WRet = round(lerp(20, 120, T))
-  REQUIRE (WRet (0.0) == 20);
-  REQUIRE (WRet (1.0) == 120);
-  REQUIRE (WRet (0.5) == 70);
+  // WRet = round(lerp(10, 50, T))
+  // Spec (§2.3.2, line 339): w_ret(T) = round(lerp(10, 50, T))
+  REQUIRE (WRet (0.0) == 10);
+  REQUIRE (WRet (1.0) == 50);
+  REQUIRE (WRet (0.5) == 30);
 
   // Monotonic
   REQUIRE (WRet (0.3) < WRet (0.7));
