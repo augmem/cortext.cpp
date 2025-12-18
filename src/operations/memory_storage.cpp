@@ -133,11 +133,11 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
             }
         }
 
-      // 5. Insert embedding with initial metadata (unified embeddings table)
+      // 5. Insert embedding (v2: minimal sqlite-vec table)
       const std::string insert_sql = std::string ("INSERT INTO embeddings (")
                                      + store::kEmbeddingsInsertColumns
                                      + ") VALUES ("
-                                     + store::kEmbeddingsMemoryDefaults + ")";
+                                     + store::kEmbeddingsInsertDefaults + ")";
       savepoint->Execute (insert_sql,
                           { emb_vec, static_cast<long long> (end_ts) });
 
@@ -159,7 +159,7 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
         }
       const long long embedding_id = *id_opt;
 
-      // 6. Insert MEMORIES row with aggregated metadata (per database.md schema)
+      // 6. Insert MEMORIES row with aggregated metadata (v2 schema)
       std::any episode_id_any;
       if (p_ctx.episode_start_ts > 0)
         {
@@ -168,35 +168,46 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
 
       savepoint->Execute (
           "INSERT INTO memories ("
-          "  embedding_id, start_ts, end_ts, n_signals, primary_modality, "
-          "  content_blob_id, s_max, s_avg, emotion, ambient_mood, "
-          "  episode_id, status"
-          ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-          { embedding_id, static_cast<long long> (start_ts),
+          "  embedding_id, source_id, kind, start_ts, end_ts, n_signals, "
+          "  modality, s_max, s_avg, emotion, ambient_mood, episode_id, "
+          "  blob_id, created_at"
+          ") VALUES (?, ?, 'LONG_TERM', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          { embedding_id, signal.source_id, static_cast<long long> (start_ts),
             static_cast<long long> (end_ts),
             static_cast<long long> (n_signals), primary_modality,
-            content_blob_id.empty () ? std::any () : std::any (content_blob_id),
             s_max, s_avg, emotion_blob, mood_blob, episode_id_any,
-            std::string ("active") });
+            content_blob_id.empty () ? std::any () : std::any (content_blob_id),
+            static_cast<long long> (end_ts) });
 
-      // 7. Insert SIGNALS rows (one per tracked signal)
+      // 7. Get memory_id from inserted memories row
+      auto mem_id_rows
+          = savepoint->Execute ("SELECT last_insert_rowid() AS id", {});
+      const long long memory_id
+          = mem_id_rows.empty ()
+                ? 0
+                : AnyToLongLong (mem_id_rows[0].at ("id")).value_or (0);
+
+      // 8. Insert SIGNALS rows (one per tracked signal)
+      // Note: In v2, each signal should have its own embedding_id. For now,
+      // we store the memory's embedding_id as a placeholder until per-signal
+      // embedding storage is implemented in Phase 4.
       for (const auto &sig_rec : acc.signals)
         {
           savepoint->Execute (
               "INSERT INTO signals ("
-              "  embedding_id, timestamp, modality, mime, blob_id, "
-              "  serial_position, score"
-              ") VALUES (?, ?, ?, ?, ?, ?, ?)",
-              { embedding_id, static_cast<long long> (sig_rec.timestamp),
-                sig_rec.modality, sig_rec.mime,
-                sig_rec.blob_id.empty ()
-                    ? std::any ()
-                    : std::any (sig_rec.blob_id),
-                static_cast<long long> (sig_rec.serial_position),
-                sig_rec.score });
+              "  memory_id, source_id, embedding_id, timestamp, modality, "
+              "  mime, blob_id, serial_position, score, created_at"
+              ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+              { memory_id, signal.source_id, embedding_id,
+                static_cast<long long> (sig_rec.timestamp), sig_rec.modality,
+                sig_rec.mime,
+                sig_rec.blob_id.empty () ? std::any ()
+                                         : std::any (sig_rec.blob_id),
+                static_cast<long long> (sig_rec.serial_position), sig_rec.score,
+                static_cast<long long> (sig_rec.timestamp) });
         }
 
-      // 8. Clear signal tracking from accumulator (signals now persisted)
+      // 9. Clear signal tracking from accumulator (signals now persisted)
       acc.signals.clear ();
 
       // Commit the savepoint

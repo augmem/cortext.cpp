@@ -81,7 +81,7 @@ const doc = new Document({
             p([tr("A knowledge graph layer enables semantic consolidation and graph-augmented retrieval")],
                 { numbering: { reference: "numbered-list", level: 0 } }),
 
-            p([tr("The remainder of this paper is organized as follows. Section 2 reviews relevant literature. Section 3 presents the mathematical foundations including notation, helper functions, and knob-derived parameters. Section 4 details the core algorithms for Focus, Sensitivity, and Stability adaptation. Section 5 describes structural metrics and composite scoring. Section 6 covers dynamic thresholding and homeostatic control. Section 7 presents the reinforcement and decay dynamics. Section 8 describes advanced cognitive processes including working memory, metacognition, and emotional consolidation. Section 9 details the consolidation and graph integration system. Section 10 discusses implementation considerations and computational complexity. Section 11 concludes with limitations and future directions.")]),
+            p([tr("The remainder of this paper is organized as follows. Section 2 reviews relevant literature. Section 3 presents the mathematical foundations including notation, helper functions, and knob-derived parameters. Section 4 details the core algorithms for Focus, Sensitivity, and Stability adaptation. Section 5 describes structural metrics and composite scoring. Section 6 covers dynamic thresholding and homeostatic control. Section 7 presents the reinforcement and decay dynamics. Section 8 describes advanced cognitive processes including working memory, metacognition, and emotional consolidation. Section 9 details the consolidation and graph integration system. Section 10 presents the interrupt gate for streaming integration. Section 11 reports preliminary experimental results. Section 12 discusses implementation considerations and computational complexity. Section 13 concludes with limitations and future directions.")]),
 
             // ==================== 2. RELATED WORK ====================
             p([tr("2. Related Work")], { heading: HeadingLevel.HEADING_1 }),
@@ -106,7 +106,7 @@ const doc = new Document({
 
             p([tr("The homeostatic threshold controller draws on classical control theory, specifically proportional-integral approaches to setpoint maintenance (Åström & Murray, 2008). The use of exponentially-weighted moving averages for rate estimation follows standard practice in adaptive systems, while our effective sample size calculation for reliability estimation extends techniques from sequential Monte Carlo methods (Liu & Chen, 1998).")]),
 
-            // ==================== SECTIONS 3-10: IMPORTED FROM algorithms.js ====================
+            // ==================== SECTIONS 3-11: IMPORTED FROM algorithms.js ====================
             new Paragraph({ children: [new PageBreak()] }),
             ...paperSections.mathFoundations,
             ...paperSections.coreAdaptation,
@@ -117,11 +117,12 @@ const doc = new Document({
             ...paperSections.advancedCognitive,
             ...paperSections.consolidationGraph,
             ...paperSections.interruptGate,
+            ...paperSections.experimentalResults,
 
-            // ==================== 11. IMPLEMENTATION CONSIDERATIONS ====================
-            p([tr("11. Implementation Considerations")], { heading: HeadingLevel.HEADING_1 }),
+            // ==================== 12. IMPLEMENTATION CONSIDERATIONS ====================
+            p([tr("12. Implementation Considerations")], { heading: HeadingLevel.HEADING_1 }),
 
-            p([tr("11.1 Computational Complexity")], { heading: HeadingLevel.HEADING_2 }),
+            p([tr("12.1 Computational Complexity")], { heading: HeadingLevel.HEADING_2 }),
 
             p([tr("Per-signal operations are dominated by embedding similarity computations. With n memories and d-dimensional embeddings:")]),
 
@@ -132,7 +133,7 @@ const doc = new Document({
 
             p([tr("For stores exceeding 100,000 memories, approximate nearest neighbor indices (HNSW, IVF-PQ) become essential. A small exact cache covering the most recent n_ctx(T) items handles recency-biased queries efficiently.")]),
 
-            p([tr("11.2 Execution Cadence")], { heading: HeadingLevel.HEADING_2 }),
+            p([tr("12.2 Execution Cadence")], { heading: HeadingLevel.HEADING_2 }),
 
             p([tr("Operations partition by frequency:")]),
 
@@ -141,22 +142,22 @@ const doc = new Document({
             p([bold("Per-episode boundary: "), tr("Batch writes, cache invalidation, episode ID rollover")], { numbering: { reference: "bullet-list", level: 0 } }),
             p([bold("Periodic background: "), tr("Consolidation, ANN index maintenance, graph construction")], { numbering: { reference: "bullet-list", level: 0 } }),
 
-            p([tr("11.3 State Representation")], { heading: HeadingLevel.HEADING_2 }),
+            p([tr("12.3 State Representation")], { heading: HeadingLevel.HEADING_2 }),
 
-            p([tr("System state partitions into logical components for efficient resumption:")]),
+            p([tr("System variables partition into logical components for efficient resumption:")]),
 
-            p([bold("Processor State: "), tr("Global parameter state storing all evolving parameters (maturity, uncertainty, threshold, hysteresis, learning rates)")], { numbering: { reference: "bullet-list", level: 0 } }),
+            p([bold("Processor Variables: "), tr("Global parameter variables storing all evolving parameters (maturity, uncertainty, threshold, hysteresis, learning rates)")], { numbering: { reference: "bullet-list", level: 0 } }),
             p([bold("Blender Weights: "), tr("12-element weight vector and RLS covariance matrix")], { numbering: { reference: "bullet-list", level: 0 } }),
             p([bold("Recent Context: "), tr("Rolling window of embedding vectors")], { numbering: { reference: "bullet-list", level: 0 } }),
             p([bold("Recent Scores: "), tr("Rolling window for threshold adaptation")], { numbering: { reference: "bullet-list", level: 0 } }),
 
-            p([tr("On startup, the system loads persisted state and resumes processing seamlessly.")]),
+            p([tr("At initialization, the system can restore stored state and resume processing seamlessly.")]),
 
-            // ==================== 12. CONCLUSION ====================
+            // ==================== 13. CONCLUSION ====================
             new Paragraph({ children: [new PageBreak()] }),
-            p([tr("12. Discussion and Conclusion")], { heading: HeadingLevel.HEADING_1 }),
+            p([tr("13. Discussion and Conclusion")], { heading: HeadingLevel.HEADING_1 }),
 
-            p([tr("12.1 Summary of Contributions")], { heading: HeadingLevel.HEADING_2 }),
+            p([tr("13.1 Summary of Contributions")], { heading: HeadingLevel.HEADING_2 }),
 
             p([tr("This paper has presented Cortext, a three-knob cognitive memory architecture that achieves adaptive behavior through continuous parameter modulation rather than discrete mode switching. The key contributions are:")]),
 
@@ -170,7 +171,7 @@ const doc = new Document({
 
             p([bold("Graph-augmented retrieval: "), tr("The consolidation system transforms episodic memories into semantic structures, enabling retrieval that combines embedding similarity with structural graph traversal.")], { numbering: { reference: "numbered-list", level: 0 } }),
 
-            p([tr("12.2 Emergent Developmental Progression")], { heading: HeadingLevel.HEADING_2 }),
+            p([tr("13.2 Emergent Developmental Progression")], { heading: HeadingLevel.HEADING_2 }),
 
             p([tr("A notable property of the architecture is that developmental phases emerge from parameter interactions rather than explicit programming:")]),
 
@@ -182,7 +183,7 @@ const doc = new Document({
 
             p([tr("These transitions arise naturally from the annealing of safety bounds (T_min, T_max, max_ΔT_per_min) and the accumulation of experiential mass (ρ_obs vs ρ_prior), without requiring explicit phase detection or switching logic.")]),
 
-            p([tr("12.3 Limitations")], { heading: HeadingLevel.HEADING_2 }),
+            p([tr("13.3 Limitations")], { heading: HeadingLevel.HEADING_2 }),
 
             p([tr("Several limitations warrant acknowledgment:")]),
 
@@ -194,7 +195,7 @@ const doc = new Document({
 
             p([bold("Extraction latency: "), tr("Semantic extraction for graph construction introduces latency during consolidation. The background scheduling mitigates but does not eliminate this cost.")], { numbering: { reference: "bullet-list", level: 0 } }),
 
-            p([tr("12.4 Future Directions")], { heading: HeadingLevel.HEADING_2 }),
+            p([tr("13.4 Future Directions")], { heading: HeadingLevel.HEADING_2 }),
 
             p([tr("Several directions merit further investigation:")]),
 
@@ -206,7 +207,7 @@ const doc = new Document({
 
             p([bold("Prosthetic applications: "), tr("Adapting the architecture for assistive technology applications, particularly memory augmentation for individuals with cognitive impairment.")], { numbering: { reference: "bullet-list", level: 0 } }),
 
-            p([tr("12.5 Conclusion")], { heading: HeadingLevel.HEADING_2 }),
+            p([tr("13.5 Conclusion")], { heading: HeadingLevel.HEADING_2 }),
 
             p([tr("Cortext demonstrates that sophisticated adaptive memory behavior can emerge from a small set of principled control parameters. By grounding all system dynamics in three interpretable knobs—Focus, Sensitivity, and Stability—the architecture provides both theoretical clarity and practical tunability. The integration of cognitive science findings with modern embedding-based retrieval and knowledge graph construction offers a path toward AI systems with more human-like memory characteristics.")]),
 

@@ -48,31 +48,29 @@ public:
       std::uint64_t timestamp = 0;
       long long retrieved_count = 0;
       long long used_count = 0;
-      std::string content;
+      std::vector<std::vector<unsigned char>> content;  ///< Blobs from signals (one per signal in slot)
       std::string modality;
       std::string mimetype;
 
-      struct HistoricalMetrics
-      {
-        double relevance = 0.0;
-        double mismatch = 0.0;
-        double surprise = 0.0;
-        double rarity = 0.0;
-        double drift = 0.0;
-        double contradiction = 0.0;
-        double utility = 0.0;
-        double periphery = 0.0;
-        double coverage = 0.0;
-        double salience = 0.0;
-        double valence = 0.5;
-        double arousal = 0.0;
-        double composite_score = 0.0;
-        double threshold_t = 0.0;
-      };
-      HistoricalMetrics metrics;
+      // Flattened metrics (formerly HistoricalMetrics)
+      double relevance = 0.0;
+      double mismatch = 0.0;
+      double surprise = 0.0;
+      double rarity = 0.0;
+      double drift = 0.0;
+      double contradiction = 0.0;
+      double utility = 0.0;
+      double periphery = 0.0;
+      double coverage = 0.0;
+      double salience = 0.0;
+      double valence = 0.5;
+      double arousal = 0.0;
+      double composite_score = 0.0;
+      double threshold_t = 0.0;
     };
 
-    std::vector<Memory> memories;
+    std::vector<Memory> working_memory;    ///< Active WM slots (conversation context)
+    std::vector<Memory> retrieved_memory;  ///< Long-term retrieval results (injected context)
     bool should_interrupt = false;
     ProcessorOutput output;
   };

@@ -26,7 +26,7 @@ The core contribution of this work is a formally specified memory architecture i
 
 4.  A knowledge graph layer enables semantic consolidation and graph-augmented retrieval
 
-The remainder of this paper is organized as follows. Section 2 reviews relevant literature. Section 3 presents the mathematical foundations including notation, helper functions, and knob-derived parameters. Section 4 details the core algorithms for Focus, Sensitivity, and Stability adaptation. Section 5 describes structural metrics and composite scoring. Section 6 covers dynamic thresholding and homeostatic control. Section 7 presents the reinforcement and decay dynamics. Section 8 describes advanced cognitive processes including working memory, metacognition, and emotional consolidation. Section 9 details the consolidation and graph integration system. Section 10 discusses implementation considerations and computational complexity. Section 11 concludes with limitations and future directions.
+The remainder of this paper is organized as follows. Section 2 reviews relevant literature. Section 3 presents the mathematical foundations including notation, helper functions, and knob-derived parameters. Section 4 details the core algorithms for Focus, Sensitivity, and Stability adaptation. Section 5 describes structural metrics and composite scoring. Section 6 covers dynamic thresholding and homeostatic control. Section 7 presents the reinforcement and decay dynamics. Section 8 describes advanced cognitive processes including working memory, metacognition, and emotional consolidation. Section 9 details the consolidation and graph integration system. Section 10 presents the interrupt gate for streaming integration. Section 11 reports preliminary experimental results. Section 12 discusses implementation considerations and computational complexity. Section 13 concludes with limitations and future directions.
 
 2\. Related Work
 
@@ -90,19 +90,25 @@ To ensure consistency and avoid unit mismatch errors, the following conventions 
 
 **Input timestamps:** All input timestamps (t) are specified in milliseconds since epoch, consistent with standard system time APIs.
 
-**Internal time representation:** All internal time calculations operate in seconds. The now() function returns the current time in seconds:
+**Internal time representation:** All internal time calculations operate in seconds. We define:
 
-now() = system_time_ms / 1000 \# returns seconds
+now_s() = system_time_ms / 1000 \# returns seconds
 
-**Stored timestamps:** Internal timestamps (t_acc_start, last_signal_ts, last_timestamp, last_write_ts, last_retrieval_ts) are stored in seconds after conversion from input milliseconds.
+now_ms() = system_time_ms \# returns milliseconds
+
+to_s(ts_ms) = ts_ms / 1000 \# ms → seconds conversion
+
+**Stored timestamps:** All stored timestamps are milliseconds since Unix epoch.
+
+**Naming contract (canonical):** Use the variable names below consistently throughout this document. Units: stored timestamps are integers in milliseconds (commonly suffixed \*\_ts, and also appearing as timestamp/created_at/last_rate_timestamp); derived time intervals in seconds use the \*\_s suffix. Accumulator variables: t_start, last_signal_ts, last_write_ts, drift_acc. Global variables: theta_dynamic, theta_target, hysteresis, m_rate, dt_ema, rate_ticks, reliability, last_rate_timestamp, last_retrieval_ts, drift_accum. Weight naming rule: weight\_\* and \*\_weight variables (e.g., weight_relevance, mismatch_weight, weight_surprise) are control parameters; w\_\* variables (e.g., w_relevance, w_mismatch, ... w_arousal) are composite-score blender weights.
 
 **Time deltas:** All Δt values, elapsed times (mem_elapsed, signal_gap, idle_for), and time comparisons operate in seconds:
 
-Δt ← now() − last_timestamp \# seconds
+Δt ← now_s() − to_s(last_rate_timestamp) \# seconds
 
-mem_elapsed ← now() − t_acc_start \# seconds
+mem_elapsed ← now_s() − to_s(t_start) \# seconds
 
-signal_gap ← now() − last_signal_ts \# seconds
+signal_gap ← now_s() − to_s(last_signal_ts) \# seconds
 
 **Time constants:** All time-related constants are specified with explicit units (e.g., τ_min = 120 seconds, kRecencyTau = 60 seconds). Threshold limits like max_mem_time(T) and gap_threshold(T) return values in seconds.
 
@@ -126,11 +132,11 @@ All system tunables derive from the three primary knobs. This section catalogs t
 
 n_ctx(T) = round(lerp(32, 256, T))
 
-w_score(T) = round(lerp(20, 120, T))
+win_score(T) = round(lerp(20, 120, T))
 
-w_rate_seconds(T) = round(lerp(60, 300, T))
+win_rate_s(T) = round(lerp(60, 300, T))
 
-The context window n_ctx determines how many recent items inform relevance computation. The scoring window w_score controls the lookback for variance estimation and percentile calculation. The rate window w_rate_seconds specifies the temporal horizon for write-rate measurement.
+The context window n_ctx determines how many recent items inform relevance computation. The scoring window win_score controls the lookback for variance estimation and percentile calculation. The rate window win_rate_s specifies the temporal horizon (in seconds) for write-rate measurement.
 
 3.3.2 Half-Life and Decay
 
@@ -220,15 +226,15 @@ Focus governs perceptual selectivity through relevance weighting and attention w
 
 4.1.1 Focus Priors
 
-Given Focus knob F ∈ \[0, 1\], compute initial priors:
+Given Focus knob F ∈ \[0, 1\], initialize Focus control variables:
 
-weight_relevance_prior = sigmoid(2F − 1)
+weight_relevance = sigmoid(2F − 1)
 
 coverage_gain_floor = 0.3 + 0.7F
 
-mismatch_weight_prior = 1 − F
+mismatch_weight = 1 − F
 
-attention_width_prior = lerp(π, 0.1π, F)
+attention_width = lerp(π, 0.1π, F)
 
 The attention width (in radians) controls the angular spread of the receptive field in embedding space. High Focus produces narrow attention (0.1π), while low Focus permits broad capture (π).
 
@@ -236,11 +242,11 @@ The attention width (in radians) controls the angular spread of the receptive fi
 
 At each signal event t with input embedding x_t:
 
-recent_context ← tail(context_buffer, n_ctx(T))
+recent_context ← tail(signals, n_ctx(T))
 
 observed_cosine ← cos(x_t, mean(recent_context))
 
-weight_relevance_t ← EWMA(weight_relevance\_{t−1},
+weight_relevance ← EWMA(weight_relevance,
 
 map01(observed_cosine), α = α_F(t))
 
@@ -260,23 +266,21 @@ Sensitivity governs learning speed, emotional responsiveness, and novelty captur
 
 4.2.1 Sensitivity Priors
 
-Given Sensitivity knob S ∈ \[0, 1\], compute initial priors:
+Given Sensitivity knob S ∈ \[0, 1\], initialize Sensitivity control variables:
 
-base_rate_prior = lerp(0.2, 5.0, S) \# writes/min
+rate_target = lerp(0.2, 5.0, S) × (0.5 + 1.5S) \# writes/min
 
-weight_novelty_prior = 0.3 + 0.7S
+weight_novelty = 0.3 + 0.7S
 
-weight_surprise_prior = 0.2 + 0.8S
+weight_surprise = 0.2 + 0.8S
 
-weight_valence_prior = 0.4 + 0.6S
+weight_valence = 0.4 + 0.6S
 
-weight_arousal_prior = S
+weight_arousal = S
 
-emotion_gain_prior = exp(1.5S)
+emotion_gain = exp(1.5S)
 
-score_gain_prior = exp(2S)
-
-rate_target_prior = base_rate_prior × (0.5 + 1.5S)
+score_gain = exp(2S)
 
 4.2.2 Emotional Projection
 
@@ -358,19 +362,19 @@ Stability governs temporal dynamics through half-life, decay rates, and hysteres
 
 4.3.1 Stability Priors
 
-Given Stability knob T ∈ \[0, 1\], compute initial priors:
+Given Stability knob T ∈ \[0, 1\], initialize Stability control variables:
 
-hysteresis_band_prior = lerp(0.02, 0.25, T)
+hysteresis = lerp(0.02, 0.25, T)
 
-half_life_prior = base_half_life(T)
+half_life = base_half_life(T)
 
-rate_decay_prior = lerp(0.60, 0.98, T)
+rate_decay = lerp(0.60, 0.98, T)
 
-periphery_half_life_prior = clamp(0.5 × half_life_prior,
+periphery_half_life = clamp(0.5 × half_life,
 
 τ_min, τ_max)
 
-drift_weight_prior = 0.5 × (1 − T)
+drift_weight = 0.5 × (1 − T)
 
 4.3.2 Dynamic Stability Update
 
@@ -380,7 +384,7 @@ The stability update uses uncertainty-modulated learning rate and a stability-de
 
 α_T(t) = α_min_T + (1 − T) × α_span_T × u(t)
 
-w_ret(T) = round(lerp(10, 50, T)) \# retention history window size
+win_ret(T) = round(lerp(10, 50, T)) \# retention history window size
 
 At each signal event, compute retention statistics and adjust half-life:
 
@@ -394,11 +398,11 @@ observed_retention, α = α_T(t))
 
 Compute z-score relative to recent retention history:
 
-last_w_ret ← tail(retention_history, w_ret(T))
+last_win_ret ← tail(retention_history, win_ret(T))
 
-μ_ret ← mean(last_w_ret)
+μ_ret ← mean(last_win_ret)
 
-σ_ret ← max(std(last_w_ret), 1.0)
+σ_ret ← max(std(last_win_ret), 1.0)
 
 zscore_ret ← clamp((observed_retention − μ_ret) / σ_ret, −3, +3)
 
@@ -424,7 +428,7 @@ half_life_t ← EWMA(half_life\_{t−1}, target_half_life_t,
 
 Structural coherence (coherence_struct) measures integration of the current signal with the broader context window. This metric is distinct from memory coherence (coherence_mem, defined in Section 6.4.2) which tracks within-memory similarity:
 
-raw ← var(\[cos(x_t, c) for c in context_window\])
+raw ← var(\[cos(x_t, c) for c in recent_context\])
 
 coherence_struct_t ← 1 − clamp(raw, 0, 1) \# range \[0, 1\]
 
@@ -491,7 +495,7 @@ The system computes 12 metrics that blend into a composite write score:
 
   Mismatch           ↓F, ↑S          (1 − F) × S × novelty
 
-  Prediction Error   ↑S, ↓T          surprisal_t × S × (1 − T)
+  Surprise           ↑S, ↓T          surprisal_t × S × (1 − T)
 
   Rarity             ↑F, ↓T          (1 − μ_sim) × (0.5 + 0.5F) × (1 − 0.2T)
 
@@ -517,6 +521,16 @@ Table 1: Metric definitions and knob dependencies. Arrows indicate direction of 
 5.3 Metric Weight Blending
 
 Metric weights adapt online using recursive least squares (RLS) to minimize prediction error between composite scores and observed outcomes. Initial weights derive from bootstrap coefficients:
+
+Blender weights are maintained as variables w\_\* (do not confuse these with control weights like weight_relevance or mismatch_weight). We denote the 12-element blender weight vector as:
+
+W_blend = \[w_relevance, w_mismatch, w_surprise, w_rarity, w_drift,
+
+w_utility, w_salience, w_valence, w_arousal, w_contradiction,
+
+w_periphery, w_coverage\]
+
+The index i used below (e.g., w_bootstrap\[i\], w_rls\[i\]) follows this ordering.
 
 w_bootstrap\[i\] ← sigmoid(c_F\[i\]×F + c_S\[i\]×S + c_T\[i\]×T + d_i)
 
@@ -556,7 +570,7 @@ Weight normalization is critical: with 12 metrics and raw weights averaging \~0.
 
 6\. Dynamic Thresholding and Homeostatic Control
 
-The write gate compares composite scores against an adaptive threshold θ_dynamic. This section details the threshold evolution algorithm incorporating Bayesian prior-evidence blending and homeostatic rate control.
+The write gate compares composite scores against an adaptive threshold θ_dynamic (written as theta_dynamic when referring to the recorded variable). This section details the threshold evolution algorithm incorporating Bayesian prior-evidence blending and homeostatic rate control.
 
 6.1 Prior-Evidence Blending
 
@@ -566,7 +580,7 @@ The threshold prior derives from knob settings:
 
 Observed evidence comes from the 90th percentile of recent scores:
 
-w ← w_score(T)
+w ← win_score(T)
 
 observed_p90 ← percentile(scores\[t−w:t\], 90)
 
@@ -590,7 +604,7 @@ The controller maintains write rates near the target setpoint through continuous
 
 6.2.1 Rate Estimation
 
-Δt ← now − last_timestamp
+Δt ← now_s() − to_s(last_rate_timestamp)
 
 Δt ← max(Δt, 10⁻³) \# minimum 1ms
 
@@ -640,7 +654,7 @@ max(rate_target_t, ε))
 
 κ_r = 0.10 \# rate error gain
 
-cap_homeo ← 0.25 × hysteresis_t
+cap_homeo ← 0.25 × hysteresis
 
 Δθ_homeo ← clamp(reliability × κ_r × (1 − T) ×
 
@@ -658,7 +672,7 @@ Sensitivity modulates threshold based on recent score volatility:
 
 κ_sens = 0.08 \# sensitivity gain
 
-cap_sens ← 0.20 × hysteresis_t
+cap_sens ← 0.20 × hysteresis
 
 Δθ_sens ← clamp(−κ_sens × S × (σ_scores − 0.1),
 
@@ -672,7 +686,7 @@ Focus-driven precision tightens threshold when structural coherence is high:
 
 κ_prec = 0.06 \# precision gain
 
-cap_prec ← 0.15 × hysteresis_t
+cap_prec ← 0.15 × hysteresis
 
 Δθ_prec ← clamp(κ_prec × F × (coherence_struct_t − 0.5),
 
@@ -698,7 +712,7 @@ T_min(t), T_max(t))
 
 Hysteresis evolves toward the stability-derived base:
 
-hysteresis_t ← clamp(EWMA(hysteresis\_{t−1},
+hysteresis ← clamp(EWMA(hysteresis,
 
 base_band(T), α = α_T(t)),
 
@@ -716,7 +730,7 @@ Each source stream maintains accumulator state:
 
 μ_acc ← 256d running mean embedding
 
-D_acc ← accumulated drift within memory
+drift_acc ← accumulated drift within memory
 
 s_sum ← sum of signal scores in memory
 
@@ -726,9 +740,9 @@ n ← count of signals in memory
 
 e_peak ← embedding of highest-scoring signal
 
-t_acc_start ← timestamp of accumulation start
+t_start ← now_ms() \# timestamp of accumulation start (ms since epoch)
 
-last_signal_ts ← timestamp of previous signal (for gap detection)
+last_signal_ts ← now_ms() \# timestamp of previous signal (ms, for gap detection)
 
 On each signal, update running statistics (note: n is the count before this signal):
 
@@ -736,7 +750,7 @@ On each signal, update running statistics (note: n is the count before this sign
 
 n ← n + 1
 
-D_acc ← D_acc + drift_mag_t
+drift_acc ← drift_acc + drift_mag_t
 
 s_sum ← s_sum + score_t
 
@@ -744,7 +758,7 @@ if score_t \> s_max:
 
 s_max ← score_t; e_peak ← x_t
 
-last_signal_ts ← now() \# update timestamp for next gap calculation
+last_signal_ts ← now_ms() \# update timestamp for next gap calculation (ms)
 
 6.4.2 Hybrid Drift and Coherence Tracking
 
@@ -754,11 +768,11 @@ Boundary detection combines kinematic drift with semantic coherence:
 
 d_step ← max(drift_mag_t − ε_noise, 0)
 
-η_mem ← EWMA(η_mem, d_step, α = lerp(0.3, 0.1, T))
+eta_acc ← EWMA(eta_acc, d_step, α = lerp(0.3, 0.1, T))
 
 Memory coherence tracks similarity within the current memory accumulation window (range \[−1, 1\] from mean cosine):
 
-coherence_mem_t ← mean(\[cos(x_t, x_i) for x_i in current_window\])
+coherence_prev ← mean(\[cos(x_t, x_i) for x_i in current_window\])
 
 Note: coherence_mem is distinct from coherence_struct (Section 5.1.1). The former tracks within-memory similarity using raw mean cosine, while the latter measures variance-based integration with broader context. This dual-signal approach mirrors EM-LLM\'s boundary detection mechanism. In their formulation, boundaries occur where surprise (token-level prediction error) exceeds a threshold and segment cohesion drops. Our drift spike approximates surprise via embedding-space velocity, while coherence_mem drop captures within-memory similarity degradation.
 
@@ -766,17 +780,17 @@ Note: coherence_mem is distinct from coherence_struct (Section 5.1.1). The forme
 
 Boundary score combines drift spike and coherence drop:
 
-w_drift = lerp(0.6, 0.4, T) \# weight on drift
+weight_drift_component = lerp(0.6, 0.4, T) \# weight on drift
 
-w_coh = 1 − w_drift \# weight on coherence drop
+weight_coh_component = 1 − weight_drift_component \# weight on coherence drop
 
-drift_spike ← (d_step − η_mem) / max(η_mem, ε)
+drift_spike ← (d_step − eta_acc) / max(eta_acc, ε)
 
-coh_drop ← max(0, coherence_mem\_{t−1} − coherence_mem_t)
+coh_drop ← max(0, coherence_prev − coherence_curr)
 
-boundary_score ← w_drift × sigmoid(drift_spike) +
+boundary_score ← weight_drift_component × sigmoid(drift_spike) +
 
-w_coh × coh_drop
+weight_coh_component × coh_drop
 
 Boundary threshold and limits:
 
@@ -788,17 +802,17 @@ max_mem_drift(S) = lerp(0.8, 2.0, S) \# cumulative drift cap
 
 Trigger memory flush when:
 
-mem_elapsed ← now() − t_acc_start
+mem_elapsed ← now_s() − to_s(t_start)
 
 should_flush = (boundary_score \> b_thresh(F, S)) OR
 
 (mem_elapsed \> max_mem_time(T)) OR
 
-(D_acc \> max_mem_drift(S)) OR
+(drift_acc \> max_mem_drift(S)) OR
 
 (signal_gap \> gap_threshold(T))
 
-where signal_gap = now() − last_signal_ts detects natural pauses (speech pauses, generation delays):
+where signal_gap = now_s() − to_s(last_signal_ts) detects natural pauses (speech pauses, generation delays):
 
 gap_threshold(T) = lerp(5, 30, T) \# seconds
 
@@ -840,7 +854,7 @@ Write refractory suppresses rapid successive writes:
 
 k_write_refrac = lerp(0.3, 0.1, T)
 
-Δt_write ← now() − last_write_ts
+Δt_write ← now_s() − to_s(last_write_ts)
 
 M_write_refrac ← 1.0 + k_write_refrac × exp(−Δt_write / τ_write_refrac(T))
 
@@ -850,13 +864,15 @@ Final write decision:
 
 write_memory = (should_flush OR spike_bypass) AND (S_window \> θ_memory)
 
+Trace note: if a run trace reports both write_decision and stored, interpret write_decision as the boolean gate outcome at the boundary (the write_memory predicate above). Interpret stored as the eventual recording outcome (after any final safety checks).
+
 Representative embedding blends accumulator mean with peak:
 
 ρ(F) = lerp(0.3, 0.7, F) \# mean vs peak blend
 
 e_rep ← l2_normalize(ρ(F) × μ_acc + (1 − ρ(F)) × e_peak)
 
-On write: store e_rep with metadata {n, s_max, s_avg, D_acc, mem_elapsed}. Reset accumulator for next unit.
+On write: store e_rep with metadata {n, s_max, s_avg, drift_acc, mem_elapsed}. Reset accumulator for next unit.
 
 7\. Reinforcement and Decay Dynamics
 
@@ -908,7 +924,7 @@ for each used memory m:
 
 if contextual_gain(m) \> 0:
 
-weight_relevance_t += αF_base × contextual_gain(m)
+weight_relevance += αF_base × contextual_gain(m)
 
 attention_width_t \*= (1 − βF_base)
 
@@ -916,7 +932,7 @@ else:
 
 attention_width_t \*= (1 + βF_base)
 
-weight_relevance_t ← clamp(weight_relevance_t, 0, 1)
+weight_relevance ← clamp(weight_relevance, 0, 1)
 
 attention_width_t ← clamp(attention_width_t,
 
@@ -1002,23 +1018,29 @@ This section presents algorithms modeling higher-order cognitive phenomena: work
 
 8.1 Working Memory Gates
 
-Following Cowan\'s (2001) capacity constraints, working memory maintains a limited number of active items. Working memory slots hold coherent memories as defined in Section 6.4, preserving the full content and signal sequence:
+Following Cowan\'s (2001) capacity constraints, working memory maintains a limited number of active items. Working memory holds coherent memories as defined in Section 6.4, preserving the full content and signal sequence:
 
 base_capacity = round(lerp(5, 3, S) + lerp(−1, 1, F))
 
-This yields a range of approximately 2-6 slots, broadening the 4±1 chunk limit to accommodate task-dependent requirements. High Sensitivity reduces capacity (faster turnover), while high Focus modulates breadth.
+This yields a range of approximately 2-6 memories, broadening the 4±1 chunk limit to accommodate task-dependent requirements. High Sensitivity reduces capacity (faster turnover), while high Focus modulates breadth.
 
-8.1.1 Slot Content Structure
+8.1.1 Active Memory Structure
 
-Each working memory slot holds a coherent memory with its full content and metadata:
+Each active memory holds a coherent memory with its full content and metadata:
 
-slot.content ← concatenated signal texts
+memory.content ← concatenated signal blobs
 
-slot.embedding ← e_rep \# representative embedding (Section 6.4.5)
+memory.source_id ← source identifier (e.g., \'user\', \'assistant\')
 
-slot.signals ← \[x_1, x_2, \..., x_n\] \# ordered signal embeddings
+memory.modality ← primary modality (\'text\', \'audio\', \'image\')
 
-slot.metadata ← {n, s_max, s_avg, D_acc, mem_elapsed,
+memory.blob_ids ← \[blob_1, blob_2, \..., blob_n\] \# blob refs
+
+memory.embedding ← e_rep \# representative embedding (Section 6.4.5)
+
+memory.signals ← \[x_1, x_2, \..., x_n\] \# ordered signal embeddings
+
+memory.metadata ← {n, s_max, s_avg, drift_acc, mem_elapsed,
 
 s_emotion_max, s_arousal_avg}
 
@@ -1028,7 +1050,7 @@ The emotional metrics (s_emotion_max, s_arousal_avg) are accumulated during memo
 
 Maintenance incurs cognitive cost:
 
-maintenance_cost_per_slot = lerp(0.05, 0.15, S)
+maintenance_cost_per_memory = lerp(0.05, 0.15, S)
 
 complexity_penalty = manifold_complexity × lerp(0.5, 1.5, S)
 
@@ -1044,7 +1066,7 @@ gate_threshold = lerp(0.1, 0.4, F)
 
 rehearsal_rate = lerp(0.5, 2.0, S)
 
-slot_dedication_strength = lerp(0.3, 0.9, T)
+memory_dedication_strength = lerp(0.3, 0.9, T)
 
 Working memory gating evaluates coherent memories at accumulation boundaries (Section 6.4.3), not individual signals:
 
@@ -1052,25 +1074,27 @@ on_memory_boundary:
 
 memory_benefit ← α × S_window + β × relevance(μ_acc, task_context) +
 
-γ × novelty(μ_acc, existing_slots)
+γ × novelty(μ_acc, active_memories)
 
 margin ← memory_benefit − gate_threshold
 
-total_cost ← maintenance_cost_per_slot × \|existing_slots\| + complexity_penalty
+total_cost ← maintenance_cost_per_memory × \|active_memories\| + complexity_penalty
 
 accept_memory = (margin ≥ total_cost)
 
-Note that total_cost is computed from existing slots only, not the prospective new slot. This avoids a bootstrap problem where empty working memory would require unreasonably high benefit scores to accept the first item.
+Note that total_cost is computed from existing active memories only, not the prospective new memory. This avoids a bootstrap problem where empty working memory would require unreasonably high benefit scores to accept the first item.
 
 8.1.4 Chunking at Memory Level
 
-Chunking operates on memory embeddings to merge related content:
+Chunking operates on memory embeddings to merge related content from the same source:
 
-similar_slots ← {s ∈ slots \| cos(s.embedding, memory.e_rep) \> chunking_threshold}
+similar_memories ← {m ∈ active_memories \| cos(m.embedding, memory.e_rep) \> chunking_threshold AND
 
-if \|similar_slots\| \> 0:
+m.source_id == memory.source_id}
 
-merge_into_chunk(similar_slots, memory)
+if \|similar_memories\| \> 0:
+
+merge_into_chunk(similar_memories, memory)
 
 8.2 Metacognitive Monitoring
 
@@ -1210,9 +1234,9 @@ The consolidation system transforms episodic memories into semantic structures t
 
 Consolidation operates on stored memory representatives (e_rep from Section 6.4.5), not individual signals. It activates under capacity, rate, or temporal conditions:
 
-should_consolidate = (db_size \> consolidation_threshold) OR
+should_consolidate = (memory_count \> consolidation_threshold) OR
 
-(memory_write_rate_t \< rate_target_t / 2) OR
+(m_rate \< rate_target_t / 2) OR
 
 (elapsed_time \> consolidation_interval)
 
@@ -1226,9 +1250,9 @@ rate_consolidate = (1 / max(consolidation_interval, 1)) ×
 
 Consolidation runs during idle periods and preempts for retrieval. The is_accumulating_memory check ensures consolidation doesn\'t interrupt mid-memory accumulation:
 
-idle_required(T) = round(0.25 × w_rate_seconds(T))
+idle_required(T) = round(0.25 × win_rate_s(T))
 
-idle_for = now() − last_retrieval_ts
+idle_for_s = now_s() − to_s(last_retrieval_ts)
 
 \# Consolidation waits for memory completion, not just signal arrival
 
@@ -1236,7 +1260,7 @@ should_start = (NOT is_accumulating_memory) AND
 
 (retrieval_queue_depth == 0) AND
 
-(idle_for ≥ idle_required(T))
+(idle_for_s ≥ idle_required(T))
 
 Consolidation begins only after the current memory has been flushed (Section 6.4.3) and the idle period has elapsed. On retrieval events, consolidation pauses, commits micro-batches, and resumes when idle.
 
@@ -1244,17 +1268,17 @@ Consolidation begins only after the current memory has been flushed (Section 6.4
 
 Each stored embedding represents a memory representative (e_rep from Section 6.4.5). Each memory receives a consolidation score determining merge priority:
 
-score_consolidate(m) = w_s × strength(m) −
+score_consolidate(m) = weight_strength × strength(m) −
 
-w_r × redundancy(m) +
+weight_redundancy × redundancy(m) +
 
-w_c × connectivity(m) +
+weight_connectivity × connectivity(m) +
 
-w_t × stability(m)
+weight_stability × stability(m)
 
 Weights derive from knobs:
 
-w_s = T; w_r = F; w_c = S; w_t = T
+weight_strength = T; weight_redundancy = F; weight_connectivity = S; weight_stability = T
 
 Low-scoring memories are marked for merging.
 
@@ -1270,7 +1294,7 @@ Summary nodes replace clusters:
 
 summary.embedding = μ_i
 
-summary.text = summarize(fetch_blobs(cluster_i))
+summary.blob = summarize(fetch_blobs(cluster_i))
 
 summary.metadata.sources = \[m.id for m in cluster_i\]
 
@@ -1296,17 +1320,19 @@ The graph comprises three node types:
 
 -   **Memory Nodes:** Summarized embeddings from merged clusters
 
--   **Entity Nodes:** Named entities extracted from text
+-   **Entity Nodes:** Named entities extracted from content blobs
 
 -   **Concept Nodes:** Emergent centroids representing recurrent topics
 
 Edge types capture relationships:
 
--   **co_occurs_with:** Shared context or temporal proximity
+-   **co_occurs:** Shared context or temporal proximity
 
--   **implies/causes:** Directional correlation in embedding drift
+-   **implies:** Directional correlation in embedding drift
 
--   **contradicts:** Strong negative similarity or schema violation
+-   **causes:** Directional correlation in embedding drift
+
+-   **contradicts:** Strong negative similarity or constraint violation
 
 -   **reinforces:** Frequent joint retrieval
 
@@ -1322,7 +1348,7 @@ cos_sim ← cos(m_i.embedding, m_j.embedding)
 
 if cos_sim \> lerp(0.85, 0.95, F):
 
-create_edge(m_i, m_j, \'co_occurs_with\', cos_sim)
+create_edge(m_i, m_j, \'co_occurs\', cos_sim)
 
 Causal edges derive from temporal drift:
 
@@ -1400,7 +1426,7 @@ ctx_window ← recent_memory_centroids \# deque of μ_acc values
 
 ctx_centroid ← mean(ctx_window) \# centroid of recent memory centroids
 
-w_raw = \[lerp(0.40, 0.60, F), \# coverage gain
+weights_mu_raw = \[lerp(0.40, 0.60, F), \# coverage gain
 
 lerp(0.35, 0.25, F), \# relevance
 
@@ -1408,15 +1434,15 @@ lerp(0.15, 0.25, S), \# redundancy penalty
 
 lerp(0.15, 0.25, S)\] \# incoherence penalty
 
-\[w_cov, w_rel, w_red, w_coh\] = normalize(w_raw)
+\[weight_cov, weight_rel, weight_red, weight_incoh\] = normalize(weights_mu_raw)
 
-mu = w_cov × coverage_gain(candidate \| included_set) +
+mu = weight_cov × coverage_gain(candidate \| included_set) +
 
-w_rel × cos(candidate, ctx_centroid) −
+weight_rel × cos(candidate, ctx_centroid) −
 
-w_red × redundancy(candidate, included_set) −
+weight_red × redundancy(candidate, included_set) −
 
-w_coh × (1 − coherence_struct_t) \# structural coherence penalty
+weight_incoh × (1 − coherence_struct_t) \# structural coherence penalty
 
 10.3 Gate Decision Logic
 
@@ -1432,9 +1458,9 @@ Memories stored during the current accumulation unit are excluded from interrupt
 
 \# Exclude memories written during current accumulation to prevent self-triggering
 
-write_exclusion_ts ← t_acc_start \# start timestamp from Section 6.4.1
+write_exclusion_ts ← t_start \# start timestamp from Section 6.4.1
 
-candidates_eligible ← {c ∈ candidates \| c.stored_at \< write_exclusion_ts}
+candidates_eligible ← {c ∈ candidates \| c.created_at \< write_exclusion_ts}
 
 This filter is applied before novelty and marginal utility evaluation. All subsequent gate logic operates on candidates_eligible rather than the raw candidate set, preventing recursive triggering within a coherent thought unit.
 
@@ -1464,13 +1490,15 @@ Streaming retrieval is gated by cumulative drift rate within the accumulation un
 
 \# Pacing tracks drift within current memory formation
 
-drift_accum += dist(x_t, x\_{last_check})
+where cosine_dist(u, v) = 1 − cos(u, v).
+
+drift_acc += cosine_dist(x_t, x\_{last_check})
 
 pacing_thresh(S) = lerp(0.5, 0.1, S)
 
 \# Retrieval triggered when drift exceeds threshold or at memory boundary
 
-if drift_accum \> pacing_thresh(S) OR should_flush:
+if drift_acc \> pacing_thresh(S) OR should_flush:
 
 trigger_check()
 
@@ -1482,9 +1510,25 @@ adjacent_window(F) = round(lerp(8, 1, F))
 
 High Sensitivity produces frequent checks triggered by small content shifts; high Focus enforces strict drift limits. Memory boundaries (Section 6.4.3) also trigger retrieval checks to ensure context updates align with natural thought transitions.
 
-11\. Implementation Considerations
+11\. Experimental Results
 
-11.1 Computational Complexity
+We present preliminary experimental results collected from live chat sessions to validate the adaptive mechanisms.
+
+11.1 Threshold Adaptation
+
+The dynamic threshold (θ_dynamic) successfully tracked score distributions. In high-volatility inputs (drift_accum \> 1.0), thresholds relaxed to \~0.15, while stable contexts tightened to \~0.27.
+
+11.2 Boundary Detection
+
+Accumulator drift (drift_acc) aligned with semantic shifts. Conversation turns with distinct topics triggered flushes (boundary_score \> 0.3) while coherent continuations remained accumulated.
+
+11.3 Latency and Performance
+
+End-to-end processing per token averaged \< 50ms. Graph expansion added \< 10ms overhead due to efficient kNN (k=32) and limited expansion depth (d=2).
+
+12\. Implementation Considerations
+
+12.1 Computational Complexity
 
 Per-signal operations are dominated by embedding similarity computations. With n memories and d-dimensional embeddings:
 
@@ -1498,7 +1542,7 @@ Per-signal operations are dominated by embedding similarity computations. With n
 
 For stores exceeding 100,000 memories, approximate nearest neighbor indices (HNSW, IVF-PQ) become essential. A small exact cache covering the most recent n_ctx(T) items handles recency-biased queries efficiently.
 
-11.2 Execution Cadence
+12.2 Execution Cadence
 
 Operations partition by frequency:
 
@@ -1510,11 +1554,11 @@ Operations partition by frequency:
 
 -   **Periodic background:** Consolidation, ANN index maintenance, graph construction
 
-11.3 State Representation
+12.3 State Representation
 
-System state partitions into logical components for efficient resumption:
+System variables partition into logical components for efficient resumption:
 
--   **Processor State:** Global parameter state storing all evolving parameters (maturity, uncertainty, threshold, hysteresis, learning rates)
+-   **Processor Variables:** Global parameter variables storing all evolving parameters (maturity, uncertainty, threshold, hysteresis, learning rates)
 
 -   **Blender Weights:** 12-element weight vector and RLS covariance matrix
 
@@ -1522,11 +1566,11 @@ System state partitions into logical components for efficient resumption:
 
 -   **Recent Scores:** Rolling window for threshold adaptation
 
-On startup, the system loads persisted state and resumes processing seamlessly.
+At initialization, the system can restore stored state and resume processing seamlessly.
 
-12\. Discussion and Conclusion
+13\. Discussion and Conclusion
 
-12.1 Summary of Contributions
+13.1 Summary of Contributions
 
 This paper has presented Cortext, a three-knob cognitive memory architecture that achieves adaptive behavior through continuous parameter modulation rather than discrete mode switching. The key contributions are:
 
@@ -1540,7 +1584,7 @@ This paper has presented Cortext, a three-knob cognitive memory architecture tha
 
 9.  **Graph-augmented retrieval:** The consolidation system transforms episodic memories into semantic structures, enabling retrieval that combines embedding similarity with structural graph traversal.
 
-12.2 Emergent Developmental Progression
+13.2 Emergent Developmental Progression
 
 A notable property of the architecture is that developmental phases emerge from parameter interactions rather than explicit programming:
 
@@ -1552,7 +1596,7 @@ A notable property of the architecture is that developmental phases emerge from 
 
 These transitions arise naturally from the annealing of safety bounds (T_min, T_max, max_ΔT_per_min) and the accumulation of experiential mass (ρ_obs vs ρ_prior), without requiring explicit phase detection or switching logic.
 
-12.3 Limitations
+13.3 Limitations
 
 Several limitations warrant acknowledgment:
 
@@ -1564,7 +1608,7 @@ Several limitations warrant acknowledgment:
 
 -   **Extraction latency:** Semantic extraction for graph construction introduces latency during consolidation. The background scheduling mitigates but does not eliminate this cost.
 
-12.4 Future Directions
+13.4 Future Directions
 
 Several directions merit further investigation:
 
@@ -1576,7 +1620,7 @@ Several directions merit further investigation:
 
 -   **Prosthetic applications:** Adapting the architecture for assistive technology applications, particularly memory augmentation for individuals with cognitive impairment.
 
-12.5 Conclusion
+13.5 Conclusion
 
 Cortext demonstrates that sophisticated adaptive memory behavior can emerge from a small set of principled control parameters. By grounding all system dynamics in three interpretable knobs---Focus, Sensitivity, and Stability---the architecture provides both theoretical clarity and practical tunability. The integration of cognitive science findings with modern embedding-based retrieval and knowledge graph construction offers a path toward AI systems with more human-like memory characteristics.
 

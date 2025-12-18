@@ -312,9 +312,17 @@ struct ProcessorContext
   /// @brief Working memory slot holding a coherent memory unit (Section 6.1.1)
   struct WMSlot
   {
+    // v2 persistence fields
+    int64_t memory_id = 0;               ///< DB row ID (for updates)
+    std::string source_id;               ///< Signal source (e.g., "chat/user")
+    std::vector<std::vector<unsigned char>> blob_ids;  ///< Content refs for hydration
+    std::string modality = "text";       ///< Content type ("text", "audio", "image")
+    int64_t start_ts = 0;                ///< Memory start timestamp (ms)
+
+    // Core slot state
     Eigen::VectorXf embedding;           ///< e_rep (representative embedding)
     double strength = 0.0;               ///< Slot activation strength
-    double last_ts = 0.0;                ///< Last access timestamp
+    double last_ts = 0.0;                ///< Last access timestamp (seconds)
     int pos_index = 0;                   ///< Position index
 
     // Memory-level metadata (Section 6.1.1)

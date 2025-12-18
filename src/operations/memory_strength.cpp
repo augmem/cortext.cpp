@@ -29,8 +29,14 @@ UpdateMemoryStrength::Execute (OperationContext &context, Transaction &tx) const
       = std::log (constants::kTwo) / std::max (half_life, constants::kNormEpsilon);
   const double cutoff = core::PeripheryCutoff (T);
 
-  // Evict weak memories below periphery cutoff first
-  auto eviction_result = tx.Execute ("DELETE FROM embeddings WHERE strength < ?", { cutoff });
+  // Evict weak memories below periphery cutoff first (v2: memories table)
+  // Also delete corresponding embeddings
+  tx.Execute (
+      "DELETE FROM embeddings WHERE embedding_id IN "
+      "(SELECT embedding_id FROM memories WHERE strength < ?)",
+      { cutoff });
+  auto eviction_result
+      = tx.Execute ("DELETE FROM memories WHERE strength < ?", { cutoff });
   const int64_t eviction_count = eviction_result.size ();
 
   int64_t update_count = 0;
@@ -43,14 +49,15 @@ UpdateMemoryStrength::Execute (OperationContext &context, Transaction &tx) const
           = e.contextual_gain.value_or (constants::kNormalizedMin);
       const long long id = static_cast<long long> (e.embedding_id);
 
-      // Ensure row exists for this embedding_id when feedback is present.
+      // v2: All columns now in memories table
+      // Ensure defaults are set when feedback is present
       if (e.used || e.contextual_gain.has_value ())
         {
           const long long ts
               = static_cast<long long> (context.GetSignal ().timestamp);
 
-          // Ensure embeddings row has default values for strength/frequency columns
-          tx.Execute ("UPDATE embeddings "
+          // Ensure memories row has default values for strength/frequency columns
+          tx.Execute ("UPDATE memories "
                       "SET strength = COALESCE(strength, 1.0), "
                       "    contextual_gain = COALESCE(contextual_gain, 0.0), "
                       "    use_frequency = COALESCE(use_frequency, 0.0), "
@@ -58,15 +65,6 @@ UpdateMemoryStrength::Execute (OperationContext &context, Transaction &tx) const
                       "    last_access = COALESCE(last_access, ?) "
                       "WHERE embedding_id = ?",
                       { ts, id });
-
-          // Insert into memory_feedback for count columns
-          tx.Execute ("INSERT INTO memory_feedback "
-                      "(embedding_id, retrieved_count, used_count, last_used) "
-                      "SELECT ?, 0, 0, 0 "
-                      "WHERE NOT EXISTS (SELECT 1 FROM "
-                      "memory_feedback WHERE "
-                      "embedding_id = ?)",
-                      { id, id });
         }
 
       // Algorithm 14 + 18:
@@ -75,19 +73,14 @@ UpdateMemoryStrength::Execute (OperationContext &context, Transaction &tx) const
       const long long ts
           = static_cast<long long> (context.GetSignal ().timestamp);
 
-      // First, update memory_feedback for count columns
-      tx.Execute ("UPDATE memory_feedback "
-                  "SET "
-                  "  retrieved_count = retrieved_count + 1, "
-                  "  used_count = used_count + ?, "
-                  "  last_used = CASE WHEN ? > 0 THEN ? ELSE last_used END "
-                  "WHERE embedding_id = ?",
-                  { used_flag, used_flag, ts, id });
-
-      // Then, update embeddings for strength/frequency columns
+      // v2: Update memories table for all count and strength columns (merged from
+      // memory_feedback)
       tx.Execute (
-          "UPDATE embeddings "
+          "UPDATE memories "
           "SET "
+          "  retrieved_count = retrieved_count + 1, "
+          "  used_count = used_count + ?, "
+          "  last_used = CASE WHEN ? > 0 THEN ? ELSE last_used END, "
           "  contextual_gain = contextual_gain + ?, "
           "  use_frequency = (1.0 - ?) * use_frequency + ? * ?, "
           "  strength = MAX(0.0, "
@@ -97,18 +90,16 @@ UpdateMemoryStrength::Execute (OperationContext &context, Transaction &tx) const
           "           (CASE WHEN ? < -1.0 THEN -1.0 "
           "                 WHEN ? >  1.0 THEN  1.0 "
           "                 ELSE ? END) "
-          "           * (COALESCE((SELECT used_count FROM memory_feedback WHERE embedding_id = ?), 0) * 1.0 / "
-          "              CASE WHEN COALESCE((SELECT retrieved_count FROM memory_feedback WHERE embedding_id = ?), 1) < 1 "
-          "                   THEN 1 ELSE COALESCE((SELECT retrieved_count FROM memory_feedback WHERE embedding_id = ?), 1) END)"
+          "           * (COALESCE(used_count, 0) * 1.0 / "
+          "              CASE WHEN COALESCE(retrieved_count, 1) < 1 "
+          "                   THEN 1 ELSE COALESCE(retrieved_count, 1) END)"
           "           + 1.0) / 2.0))) "
           "  ), "
           "  last_access = ? "
           "WHERE embedding_id = ?",
-          { cg_event,       alpha,    alpha,    used_flag, lambda,
-            ts,             ts,       S,        alpha,     alpha,
-            used_flag,      gate_influence, F,        cg_event, cg_event,
-            cg_event,       id,       id,       id,        ts,
-            id });
+          { used_flag, used_flag, ts, cg_event, alpha, alpha, used_flag, lambda,
+            ts, ts, S, alpha, alpha, used_flag, gate_influence, F, cg_event,
+            cg_event, cg_event, ts, id });
 
       ++update_count;
     }

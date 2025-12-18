@@ -150,9 +150,9 @@ ApplySensitivityFeedback::Execute (OperationContext &context, Transaction &tx) c
                          constants::kNormalizedMin, constants::kNormalizedMax);
       weight_novelty_delta += (p_ctx.weight_novelty - prev_weight);
 
-      // Store computed redundancy in embeddings for consolidation scoring
+      // v2: Store computed redundancy in memories for consolidation scoring
       // (Section 9.2: score = T*strength - F*redundancy + S*connectivity + T*stability)
-      tx.Execute ("UPDATE embeddings SET redundancy = ? WHERE embedding_id = ?",
+      tx.Execute ("UPDATE memories SET redundancy = ? WHERE embedding_id = ?",
                   { redundancy, e.embedding_id });
     }
 

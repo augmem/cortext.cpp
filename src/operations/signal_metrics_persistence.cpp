@@ -47,43 +47,29 @@ PersistSignalMetrics::Execute (OperationContext &context, Transaction &tx) const
   // Write decision: 1 if composite_score > (T_dynamic - hysteresis)
   int write_decision = context.GetWriteDecision () ? 1 : 0;
 
-  // Get embedding_id if memory was stored, otherwise use null placeholder
-  auto embedding_id_opt = context.GetStoredEmbeddingId ();
-  std::any embedding_id_param = embedding_id_opt.has_value ()
-                                    ? std::any (embedding_id_opt.value ())
-                                    : std::any ();
-
   // Get structural metrics from context
   double coherence = context.GetCoherence ();
   double focus_spread = GetMetricValue (metrics, Metric::focus_spread);
   double f_effective = context.GetEffectiveFocus ();
 
-  tx.Execute ("INSERT INTO signal_metrics "
-              "(timestamp, embedding_id, relevance, mismatch, surprise, rarity, "
-              "drift, contradiction, utility, periphery, coverage, salience, "
-              "valence, arousal, composite_score, threshold_t, write_decision, "
-              "coherence, focus_spread, f_effective) "
-              "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-              { static_cast<long long> (signal.timestamp),
-                embedding_id_param,
-                relevance,
-                mismatch,
-                surprise,
-                rarity,
-                drift,
-                contradiction,
-                utility,
-                periphery,
-                coverage,
-                salience,
-                valence,
-                arousal,
-                composite_score,
-                threshold_t,
-                write_decision,
-                coherence,
-                focus_spread,
-                f_effective });
+  // v2: Update the most recent signal for this source_id with metrics
+  // Metrics are stored inline on the signals table (merged from signal_metrics)
+  tx.Execute (
+      "UPDATE signals "
+      "SET relevance = ?, mismatch = ?, surprise = ?, rarity = ?, "
+      "    drift = ?, contradiction = ?, utility = ?, periphery = ?, "
+      "    coverage = ?, salience = ?, valence = ?, arousal = ?, "
+      "    score = ?, threshold_t = ?, write_decision = ?, "
+      "    coherence = ?, focus_spread = ?, f_effective = ? "
+      "WHERE signal_id = ("
+      "  SELECT signal_id FROM signals "
+      "  WHERE source_id = ? AND timestamp = ? "
+      "  ORDER BY signal_id DESC LIMIT 1"
+      ")",
+      { relevance, mismatch, surprise, rarity, drift, contradiction, utility,
+        periphery, coverage, salience, valence, arousal, composite_score,
+        threshold_t, write_decision, coherence, focus_spread, f_effective,
+        signal.source_id, static_cast<long long> (signal.timestamp) });
 }
 
 } // namespace cortext::operations

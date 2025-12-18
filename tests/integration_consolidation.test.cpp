@@ -61,32 +61,43 @@ MakeOrthogonalEmbedding (int dim, int index)
   return emb;
 }
 
-// Helper to seed embeddings for testing (unified table)
+// Helper to seed embeddings for testing (v2 schema: embeddings + memories)
 void
 SeedEmbedding (Store *store, long long id, const Eigen::VectorXf &emb,
                double strength = 1.0, double redundancy = 0.0,
                double connectivity = 0.0, double stability = 1.0)
 {
   std::vector<float> vec (emb.data (), emb.data () + emb.size ());
+  auto now_ts = cortext::testing::NowMs ();
+
+  // v2: Insert into embeddings (minimal vec0 table)
   store->Execute (
-      "INSERT OR REPLACE INTO embeddings(embedding_id, embedding, type, "
-      "strength, use_frequency, stability, connectivity, drift_mag, "
-      "influence, sustained_influence, contextual_gain, redundancy, "
-      "pre_activation, lability_state, suppression_count) "
-      "VALUES(?, ?, 'memory', ?, 0.0, ?, ?, 0.0, 0.0, 0.0, 0.0, ?, 0.0, 0.0, 0)",
-      { id, vec, strength, stability, connectivity, redundancy });
+      "INSERT OR REPLACE INTO embeddings(embedding_id, embedding, created_at) "
+      "VALUES(?, ?, ?)",
+      { id, vec, now_ts });
+
+  // v2: Insert into memories (comprehensive metadata)
+  store->Execute (
+      "INSERT OR REPLACE INTO memories("
+      "memory_id, embedding_id, source_id, kind, start_ts, n_signals, modality, "
+      "s_max, s_avg, strength, redundancy, connectivity, stability, created_at) "
+      "VALUES(?, ?, 'test', 'LONG_TERM', ?, 1, 'text', 0.5, 0.5, ?, ?, ?, ?, ?)",
+      { id, id, now_ts, strength, redundancy, connectivity, stability, now_ts });
 }
 
-// Helper to seed memories for testing (new schema per database.md)
+// Helper to seed memories for testing (v2 schema)
 void
 SeedMemory (Store *store, long long embedding_id, const std::string &text,
             uint64_t ts)
 {
+  // v2: Update existing memory record (created by SeedEmbedding) or insert new
   store->Execute (
-      "INSERT OR REPLACE INTO memories(embedding_id, start_ts, end_ts, "
-      "n_signals, primary_modality, s_max, s_avg, status) VALUES(?,?,?,?,?,?,?,?)",
-      { embedding_id, static_cast<long long> (ts), static_cast<long long> (ts),
-        1LL, std::string ("text"), 0.5, 0.5, std::string ("active") });
+      "INSERT OR REPLACE INTO memories("
+      "memory_id, embedding_id, source_id, kind, start_ts, end_ts, "
+      "n_signals, modality, s_max, s_avg, created_at) "
+      "VALUES(?, ?, 'test', 'LONG_TERM', ?, ?, 1, 'text', 0.5, 0.5, ?)",
+      { embedding_id, embedding_id, static_cast<long long> (ts),
+        static_cast<long long> (ts), static_cast<long long> (ts) });
 
   // Store text in objstore using scalar helper
   // Note: objstore virtual table uses (id BLOB, data BLOB) schema
@@ -148,8 +159,9 @@ struct SetupConsolidationTriggerOp : IOperation
     p.m_rate = rate_target * 0.4; // Below 50% threshold to trigger
     p.rate_target = rate_target;  // Not used anymore but kept for compatibility
 
-    int idle_required = IdleRequiredSeconds (stability);
-    p.last_retrieval_ts = now_ts - static_cast<uint64_t> (idle_required + 1);
+    // idle_required is in seconds, timestamps in milliseconds
+    int idle_required_s = IdleRequiredSeconds (stability);
+    p.last_retrieval_ts = now_ts - static_cast<uint64_t> (idle_required_s + 1) * 1000ULL;
 
     // Don't set last_consolidation_ts to allow rate trigger
   }
@@ -273,7 +285,8 @@ TEST_CASE ("Consolidation pipeline triggers on rate condition",
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;
 
-  const uint64_t now_ts = 10000ULL;
+  // Ensure now_ts is large enough for idle_required subtraction (idle ~45s at T=0.5)
+  const uint64_t now_ts = 100'000ULL; // 100 seconds in ms
 
   auto setup = std::make_unique<SetupConsolidationTriggerOp> (now_ts, cfg.stability);
   auto eval = std::make_unique<EvaluateConsolidation> ();

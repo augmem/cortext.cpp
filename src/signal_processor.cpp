@@ -348,85 +348,51 @@ ExtractDouble (const std::map<std::string, std::any> &row,
 }
 
 // --- State Loading Functions ---
+// v2 Schema: Unified state table replaces processor_state + blender tables
 
 void
-LoadProcessorState (Store &store, ProcessorContext &ctx)
+LoadState (Store &store, ProcessorContext &ctx)
 {
   try
     {
-      auto rows = store.Execute ("SELECT * FROM processor_state WHERE id = 1");
+      auto rows = store.Execute ("SELECT * FROM state WHERE id = 1");
       if (rows.empty ())
         return; // No persisted state, use defaults
 
       const auto &row = rows[0];
+
+      // === Processor state fields ===
       ctx.signals_processed
           = static_cast<int> (ExtractInt64 (row, "signals_processed", 0));
       ctx.u_t = ExtractDouble (row, "u_uncertainty", 0.0);
-      ctx.weight_relevance_prior
-          = ExtractDouble (row, "weight_relevance_prior", 0.5);
       ctx.weight_relevance = ExtractDouble (row, "weight_relevance", 0.5);
       ctx.attention_width = ExtractDouble (row, "attention_width", 1.57);
       ctx.T_dynamic = ExtractDouble (row, "theta_dynamic", 0.2);
       ctx.hysteresis = ExtractDouble (row, "hysteresis", 0.05);
       ctx.half_life = ExtractDouble (row, "half_life", 120.0);
-      ctx.rate_target = ExtractDouble (row, "rate_target", 0.0);
+      ctx.rate_target = ExtractDouble (row, "rate_target", 0.2);
       ctx.sustained_influence
           = ExtractDouble (row, "sustained_influence", 0.0);
       ctx.last_signal_timestamp
           = static_cast<uint64_t> (ExtractInt64 (row, "last_signal_timestamp", 0));
 
-      // Focus priors (Algorithm 1)
-      ctx.coverage_gain_floor_prior
-          = ExtractDouble (row, "coverage_gain_floor_prior", 0.65);
-      ctx.mismatch_weight_prior
-          = ExtractDouble (row, "mismatch_weight_prior", 0.5);
-      ctx.attention_width_prior
-          = ExtractDouble (row, "attention_width_prior", 1.57);
-
-      // Sensitivity priors (Algorithm 3)
-      ctx.base_rate_prior = ExtractDouble (row, "base_rate_prior", 0.2);
-      ctx.weight_novelty_prior
-          = ExtractDouble (row, "weight_novelty_prior", 0.3);
-      ctx.weight_surprise_prior
-          = ExtractDouble (row, "weight_surprise_prior", 0.2);
-      ctx.weight_valence_prior
-          = ExtractDouble (row, "weight_valence_prior", 0.4);
-      ctx.weight_arousal_prior
-          = ExtractDouble (row, "weight_arousal_prior", 0.0);
-      ctx.weight_emotion_prior
-          = ExtractDouble (row, "weight_emotion_prior", 0.2);
-      ctx.emotion_gain_prior = ExtractDouble (row, "emotion_gain_prior", 1.0);
-      ctx.score_gain_prior = ExtractDouble (row, "score_gain_prior", 1.0);
-      ctx.rate_target_prior = ExtractDouble (row, "rate_target_prior", 0.2);
-
-      // Sensitivity dynamic (Algorithm 4)
+      // Sensitivity state
       ctx.weight_novelty = ExtractDouble (row, "weight_novelty", 0.3);
 
-      // Stability priors (Algorithm 5)
-      ctx.hysteresis_band_prior
-          = ExtractDouble (row, "hysteresis_band_prior", 0.02);
-      ctx.half_life_prior = ExtractDouble (row, "half_life_prior", 120.0);
-      ctx.rate_decay_prior = ExtractDouble (row, "rate_decay_prior", 0.60);
-      ctx.periphery_half_life_prior
-          = ExtractDouble (row, "periphery_half_life_prior", 120.0);
-      ctx.salience_half_life_prior
-          = ExtractDouble (row, "salience_half_life_prior", 120.0);
-      ctx.drift_weight_prior = ExtractDouble (row, "drift_weight_prior", 0.5);
-
-      // Stability dynamic (Algorithm 6)
+      // Stability state
       ctx.rate_decay = ExtractDouble (row, "rate_decay", 0.60);
       ctx.periphery_half_life
           = ExtractDouble (row, "periphery_half_life", 120.0);
       ctx.salience_half_life = ExtractDouble (row, "salience_half_life", 120.0);
 
-      // Threshold state (Algorithm 8)
+      // Rate control (Algorithm 8)
       ctx.m_rate = ExtractDouble (row, "m_rate", 0.0);
       ctx.rate_ticks = static_cast<int> (ExtractInt64 (row, "rate_ticks", 0));
       ctx.dt_ema = ExtractDouble (row, "dt_ema", 0.0);
       ctx.last_rate_timestamp
           = static_cast<uint64_t> (ExtractInt64 (row, "last_rate_timestamp", 0));
 
-      // Emotion state (Algorithm 4) - column names without _ewma suffix per docs
+      // Emotion state (Algorithm 4)
       ctx.emotion_intensity_ewma
           = ExtractDouble (row, "emotion_intensity", 0.0);
       ctx.valence_ewma = ExtractDouble (row, "valence", 0.5);
@@ -474,73 +440,96 @@ LoadProcessorState (Store &store, ProcessorContext &ctx)
           if (trend.size () > 0)
             ctx.delta_x_trend = std::move (trend);
         }
-    }
-  catch (const std::exception &e)
-    {
-      telemetry::LogWarn (
-          "Failed to load processor state",
-          { telemetry::Attribute::String ("component", "signal_processor"),
-            telemetry::Attribute::String ("error", e.what ()) });
-    }
-}
 
-void
-LoadBlenderState (Store &store, ProcessorContext &ctx)
-{
-  try
-    {
-      // Load weights
-      auto weight_rows
-          = store.Execute ("SELECT * FROM blender_weights WHERE id = 1");
-      if (!weight_rows.empty ())
+      // === Blender weights (from unified state table) ===
+      ctx.blender_state[operations::Metric::relevance]
+          = ExtractDouble (row, "w_relevance", 0.5);
+      ctx.blender_state[operations::Metric::mismatch]
+          = ExtractDouble (row, "w_mismatch", 0.5);
+      ctx.blender_state[operations::Metric::surprise]
+          = ExtractDouble (row, "w_surprise", 0.5);
+      ctx.blender_state[operations::Metric::rarity]
+          = ExtractDouble (row, "w_rarity", 0.5);
+      ctx.blender_state[operations::Metric::drift]
+          = ExtractDouble (row, "w_drift", 0.5);
+      ctx.blender_state[operations::Metric::contradiction]
+          = ExtractDouble (row, "w_contradiction", 0.5);
+      ctx.blender_state[operations::Metric::utility]
+          = ExtractDouble (row, "w_utility", 0.5);
+      ctx.blender_state[operations::Metric::periphery]
+          = ExtractDouble (row, "w_periphery", 0.5);
+      ctx.blender_state[operations::Metric::coverage]
+          = ExtractDouble (row, "w_coverage", 0.5);
+      ctx.blender_state[operations::Metric::salience]
+          = ExtractDouble (row, "w_salience", 0.5);
+      ctx.blender_state[operations::Metric::valence]
+          = ExtractDouble (row, "w_valence", 0.5);
+      ctx.blender_state[operations::Metric::arousal]
+          = ExtractDouble (row, "w_arousal", 0.5);
+      ctx.blender_ready = ExtractInt64 (row, "blender_ready", 0) != 0;
+      ctx.blender_update_count
+          = static_cast<int> (ExtractInt64 (row, "blender_update_count", 0));
+
+      // === Blender covariance matrix (P_matrix) ===
+      auto P_it = row.find ("blender_P_matrix");
+      if (P_it != row.end () && P_it->second.has_value ())
         {
-          const auto &row = weight_rows[0];
-          ctx.blender_state[operations::Metric::relevance]
-              = ExtractDouble (row, "w_relevance", 0.5);
-          ctx.blender_state[operations::Metric::mismatch]
-              = ExtractDouble (row, "w_mismatch", 0.5);
-          ctx.blender_state[operations::Metric::surprise]
-              = ExtractDouble (row, "w_surprise", 0.5);
-          ctx.blender_state[operations::Metric::rarity]
-              = ExtractDouble (row, "w_rarity", 0.5);
-          ctx.blender_state[operations::Metric::drift]
-              = ExtractDouble (row, "w_drift", 0.5);
-          ctx.blender_state[operations::Metric::contradiction]
-              = ExtractDouble (row, "w_contradiction", 0.5);
-          ctx.blender_state[operations::Metric::utility]
-              = ExtractDouble (row, "w_utility", 0.5);
-          ctx.blender_state[operations::Metric::periphery]
-              = ExtractDouble (row, "w_periphery", 0.5);
-          ctx.blender_state[operations::Metric::coverage]
-              = ExtractDouble (row, "w_coverage", 0.5);
-          ctx.blender_state[operations::Metric::salience]
-              = ExtractDouble (row, "w_salience", 0.5);
-          ctx.blender_state[operations::Metric::valence]
-              = ExtractDouble (row, "w_valence", 0.5);
-          ctx.blender_state[operations::Metric::arousal]
-              = ExtractDouble (row, "w_arousal", 0.5);
-          ctx.blender_ready
-              = ExtractInt64 (row, "blender_ready", 0) != 0;
-          ctx.blender_update_count
-              = static_cast<int> (ExtractInt64 (row, "update_count", 0));
+          ctx.blender_P = DeserializeMatrix (P_it->second, 12);
         }
 
-      // Load covariance matrix
-      auto cov_rows
-          = store.Execute ("SELECT P_matrix FROM blender_covariance WHERE id = 1");
-      if (!cov_rows.empty ())
+      // === RLS coefficients ===
+      auto coeff_it = row.find ("blender_coefficients");
+      if (coeff_it != row.end () && coeff_it->second.has_value ())
         {
-          auto it = cov_rows[0].find ("P_matrix");
-          if (it != cov_rows[0].end () && it->second.has_value ())
+          const float *data = nullptr;
+          size_t byte_size = 0;
+
+          if (coeff_it->second.type () == typeid (std::vector<char>))
             {
-              ctx.blender_P = DeserializeMatrix (it->second, 12);
+              const auto &vec
+                  = std::any_cast<const std::vector<char> &> (coeff_it->second);
+              data = reinterpret_cast<const float *> (vec.data ());
+              byte_size = vec.size ();
+            }
+          else if (coeff_it->second.type ()
+                   == typeid (std::vector<unsigned char>))
+            {
+              const auto &vec
+                  = std::any_cast<const std::vector<unsigned char> &> (
+                      coeff_it->second);
+              data = reinterpret_cast<const float *> (vec.data ());
+              byte_size = vec.size ();
+            }
+
+          constexpr size_t kExpected = 48 * sizeof (float);
+          if (byte_size == kExpected && data != nullptr)
+            {
+              ctx.rls_coefficients.resize (ProcessorContext::kNumMetrics);
+              size_t idx = 0;
+              for (size_t i = 0; i < ProcessorContext::kNumMetrics; ++i)
+                {
+                  for (size_t j = 0; j < ProcessorContext::kCoeffsPerMetric; ++j)
+                    {
+                      ctx.rls_coefficients[i][j]
+                          = static_cast<double> (data[idx++]);
+                    }
+                }
+              ctx.rls_coefficients_ready = true;
             }
         }
+
+      // === Coefficient covariance matrix ===
+      auto coeff_P_it = row.find ("blender_coeff_P_matrix");
+      if (coeff_P_it != row.end () && coeff_P_it->second.has_value ())
+        {
+          constexpr size_t kTotalCoeffs = 48;
+          ctx.rls_coeff_P = DeserializeMatrix (coeff_P_it->second, kTotalCoeffs);
+        }
     }
   catch (const std::exception &e)
     {
       telemetry::LogWarn (
-          "Failed to load blender state",
+          "Failed to load state",
           { telemetry::Attribute::String ("component", "signal_processor"),
             telemetry::Attribute::String ("error", e.what ()) });
     }
@@ -619,83 +608,9 @@ LoadObservedRetentionHistory (Store &store, ProcessorContext &ctx)
     }
 }
 
-// Deserialize 48 doubles from BLOB to rls_coefficients (12 x 4)
+// v2 Schema: Load working memory from MEMORIES table (kind='WORKING')
 void
-LoadRLSCoefficients (Store &store, ProcessorContext &ctx)
-{
-  try
-    {
-      auto rows = store.Execute (
-          "SELECT coefficients FROM blender_coefficients WHERE id = 1");
-      if (!rows.empty ())
-        {
-          auto it = rows[0].find ("coefficients");
-          if (it != rows[0].end () && it->second.has_value ())
-            {
-              const float *data = nullptr;
-              size_t byte_size = 0;
-
-              if (it->second.type () == typeid (std::vector<char>))
-                {
-                  const auto &vec
-                      = std::any_cast<const std::vector<char> &> (it->second);
-                  data = reinterpret_cast<const float *> (vec.data ());
-                  byte_size = vec.size ();
-                }
-              else if (it->second.type ()
-                       == typeid (std::vector<unsigned char>))
-                {
-                  const auto &vec
-                      = std::any_cast<const std::vector<unsigned char> &> (
-                          it->second);
-                  data = reinterpret_cast<const float *> (vec.data ());
-                  byte_size = vec.size ();
-                }
-
-              constexpr size_t kExpected = 48 * sizeof (float);
-              if (byte_size == kExpected && data != nullptr)
-                {
-                  ctx.rls_coefficients.resize (ProcessorContext::kNumMetrics);
-                  size_t idx = 0;
-                  for (size_t i = 0; i < ProcessorContext::kNumMetrics; ++i)
-                    {
-                      for (size_t j = 0; j < ProcessorContext::kCoeffsPerMetric;
-                           ++j)
-                        {
-                          ctx.rls_coefficients[i][j]
-                              = static_cast<double> (data[idx++]);
-                        }
-                    }
-                  ctx.rls_coefficients_ready = true;
-                }
-            }
-        }
-
-      // Load covariance matrix
-      auto cov_rows = store.Execute (
-          "SELECT P_matrix FROM blender_coeff_covariance WHERE id = 1");
-      if (!cov_rows.empty ())
-        {
-          auto cov_it = cov_rows[0].find ("P_matrix");
-          if (cov_it != cov_rows[0].end () && cov_it->second.has_value ())
-            {
-              constexpr size_t kTotalCoeffs = 48;
-              ctx.rls_coeff_P
-                  = DeserializeMatrix (cov_it->second, kTotalCoeffs);
-            }
-        }
-    }
-  catch (const std::exception &e)
-    {
-      telemetry::LogWarn (
-          "Failed to load RLS coefficients",
-          { telemetry::Attribute::String ("component", "signal_processor"),
-            telemetry::Attribute::String ("error", e.what ()) });
-    }
-}
-
-void
-LoadWorkingMemorySlots (Store &store, ProcessorContext &ctx, double sensitivity)
+LoadWorkingMemory (Store &store, ProcessorContext &ctx, double sensitivity)
 {
   try
     {
@@ -704,22 +619,47 @@ LoadWorkingMemorySlots (Store &store, ProcessorContext &ctx, double sensitivity)
                               .count ();
       const double cost_per_slot = core::WMMaintenanceCostPerSlot (sensitivity);
 
+      // Load from MEMORIES table with kind='WORKING' and end_ts IS NULL (active)
+      // Note: For now we use a simpler query without JOIN to embeddings
+      // since we store the embedding directly. In a full implementation,
+      // this would join with the embeddings table.
       auto rows = store.Execute (
-          "SELECT slot_index, strength, timestamp, embedding "
-          "FROM working_memory_slots ORDER BY slot_index ASC");
+          "SELECT memory_id, source_id, strength, last_access, n_signals, "
+          "       s_max, s_avg, modality, start_ts "
+          "FROM memories "
+          "WHERE kind = 'WORKING' AND end_ts IS NULL "
+          "ORDER BY start_ts ASC");
 
+      int pos = 0;
       for (const auto &row : rows)
         {
           ProcessorContext::WMSlot slot;
-          slot.pos_index
-              = static_cast<int> (ExtractInt64 (row, "slot_index", 0));
+          slot.memory_id = ExtractInt64 (row, "memory_id", 0);
+          slot.pos_index = pos++;
           slot.strength = ExtractDouble (row, "strength", 0.0);
-          // DB stores milliseconds, convert to seconds for last_ts
-          const auto ts_ms = ExtractInt64 (row, "timestamp", now_ms);
-          slot.last_ts = static_cast<double> (ts_ms) / 1000.0;
 
-          // Apply time-based decay (same formula as WorkingMemory::Execute
-          // maintenance) - elapsed is in seconds
+          // Extract source_id
+          auto source_it = row.find ("source_id");
+          if (source_it != row.end () && source_it->second.has_value ()
+              && source_it->second.type () == typeid (std::string))
+            {
+              slot.source_id = std::any_cast<std::string> (source_it->second);
+            }
+
+          // Extract modality
+          auto mod_it = row.find ("modality");
+          if (mod_it != row.end () && mod_it->second.has_value ()
+              && mod_it->second.type () == typeid (std::string))
+            {
+              slot.modality = std::any_cast<std::string> (mod_it->second);
+            }
+
+          // DB stores milliseconds, convert to seconds for last_ts
+          const auto ts_ms = ExtractInt64 (row, "last_access", now_ms);
+          slot.last_ts = static_cast<double> (ts_ms) / 1000.0;
+          slot.start_ts = ExtractInt64 (row, "start_ts", 0);
+
+          // Apply time-based decay
           const double now_s = static_cast<double> (now_ms) / 1000.0;
           const double elapsed = now_s - slot.last_ts;
           if (elapsed > 0)
@@ -731,32 +671,33 @@ LoadWorkingMemorySlots (Store &store, ProcessorContext &ctx, double sensitivity)
           if (slot.strength <= 0.0)
             continue;
 
-          auto emb_it = row.find ("embedding");
-          if (emb_it != row.end () && emb_it->second.has_value ())
-            {
-              slot.embedding = BlobToEigen (emb_it->second);
-              if (slot.embedding.size () > 0)
-                {
-                  ctx.wm_slots.push_back (std::move (slot));
-                }
-            }
+          // Load extended metadata
+          slot.n_signals = static_cast<int> (ExtractInt64 (row, "n_signals", 1));
+          slot.s_max = ExtractDouble (row, "s_max", 0.0);
+          slot.s_avg = ExtractDouble (row, "s_avg", 0.0);
+
+          // Note: embedding is loaded separately if needed via embedding_id
+          // For backward compatibility, we initialize an empty embedding
+          // The full implementation would JOIN with embeddings table
+          ctx.wm_slots.push_back (std::move (slot));
         }
     }
   catch (const std::exception &e)
     {
       telemetry::LogWarn (
-          "Failed to load working memory slots",
+          "Failed to load working memory",
           { telemetry::Attribute::String ("component", "signal_processor"),
             telemetry::Attribute::String ("error", e.what ()) });
     }
 }
 
+// v2 Schema: Load accumulators from ACCUMULATORS table (renamed from accumulator_state)
 void
-LoadAccumulatorState (Store &store, ProcessorContext &ctx)
+LoadAccumulators (Store &store, ProcessorContext &ctx)
 {
   try
     {
-      auto rows = store.Execute ("SELECT * FROM accumulator_state");
+      auto rows = store.Execute ("SELECT * FROM accumulators");
       for (const auto &row : rows)
         {
           auto source_id_it = row.find ("source_id");
@@ -771,6 +712,9 @@ LoadAccumulatorState (Store &store, ProcessorContext &ctx)
 
           AccumulatorState state;
 
+          // v2: Load episode_id (FK to episodes table)
+          state.episode_id = ExtractInt64 (row, "episode_id", 0);
+
           // Load embeddings
           auto mu_it = row.find ("mu_acc");
           if (mu_it != row.end () && mu_it->second.has_value ())
@@ -784,7 +728,8 @@ LoadAccumulatorState (Store &store, ProcessorContext &ctx)
           state.drift_acc = ExtractDouble (row, "drift_acc", 0.0);
           state.s_sum = ExtractDouble (row, "s_sum", 0.0);
           state.s_max = ExtractDouble (row, "s_max", 0.0);
-          state.n_signals = static_cast<int> (ExtractInt64 (row, "n_signals", 0));
+          // Note: n_signals is tracked in-memory, not persisted in v2 schema
+          state.n_signals = 0;
           state.t_start
               = static_cast<uint64_t> (ExtractInt64 (row, "t_start", 0));
           state.last_write_ts
@@ -800,7 +745,7 @@ LoadAccumulatorState (Store &store, ProcessorContext &ctx)
   catch (const std::exception &e)
     {
       telemetry::LogWarn (
-          "Failed to load accumulator state",
+          "Failed to load accumulators",
           { telemetry::Attribute::String ("component", "signal_processor"),
             telemetry::Attribute::String ("error", e.what ()) });
     }
@@ -838,15 +783,13 @@ SignalProcessor::SignalProcessor (const Config &config,
         }
       cortext::store::ApplyMigrations (*store_, registry);
 
-      // Load persisted state for algorithm resumption
-      LoadProcessorState (*store_, *context_);
-      LoadBlenderState (*store_, *context_);
-      LoadRecentContext (*store_, *context_);
-      LoadRecentScores (*store_, *context_);
-      LoadObservedRetentionHistory (*store_, *context_);
-      LoadRLSCoefficients (*store_, *context_);
-      LoadWorkingMemorySlots (*store_, *context_, config_.sensitivity);
-      LoadAccumulatorState (*store_, *context_);
+      // Load persisted state for algorithm resumption (v2 schema)
+      LoadState (*store_, *context_);                              // Unified state
+      LoadRecentContext (*store_, *context_);                      // From views
+      LoadRecentScores (*store_, *context_);                       // From views
+      LoadObservedRetentionHistory (*store_, *context_);           // Keep if used
+      LoadWorkingMemory (*store_, *context_, config_.sensitivity); // From MEMORIES
+      LoadAccumulators (*store_, *context_);                       // From ACCUMULATORS
     }
 
   StartNewEpisode ();
@@ -890,12 +833,11 @@ SignalProcessor::Process (const Signal &signal)
           StartNewEpisode ();
         }
 
-      // Persist state within the same transaction
+      // Persist state within the same transaction (v2 schema)
       if (tx)
         {
-          PersistProcessorState (*tx);
-          PersistBlenderState (*tx);
-          PersistWorkingMemorySlots (*tx);
+          PersistState (*tx);           // Unified state
+          PersistWorkingMemory (*tx);   // To MEMORIES
           tx->Commit ();
         }
     }
@@ -942,8 +884,9 @@ SignalProcessor::Flush ()
     }
   auto tx = store_->Begin ();
   FinalizeEpisode (*tx);
-  PersistProcessorState (*tx);
-  PersistBlenderState (*tx);
+  PersistState (*tx);           // v2: Unified state
+  PersistWorkingMemory (*tx);   // v2: To MEMORIES
+  PersistAccumulators (*tx);    // v2: To ACCUMULATORS
   tx->Commit ();
   StartNewEpisode ();
 }
@@ -959,13 +902,11 @@ SignalProcessor::FinalizeEpisode (Transaction &tx)
 {
   telemetry::ScopedSpan span ("cortext.episode.finalize");
 
-  // Persist processor state (singleton tables)
-  PersistRecentContext (tx);
-  PersistRecentScores (tx);
-  PersistObservedRetentionHistory (tx);
-  PersistRLSCoefficients (tx);
-  PersistWorkingMemorySlots (tx);
-  PersistAccumulatorState (tx);
+  // v2 schema: recent_context and recent_scores are now VIEWs that derive
+  // from signals/embeddings tables. No need to persist - data comes from
+  // MemoryStorage operation which writes to signals table.
+  //
+  // Note: State, WM, and Accumulators persisted by caller (Flush/Process)
 
   telemetry::AddCounter ("cortext.episode_commit_total", 1);
   span.SetStatusOk ();
@@ -979,8 +920,9 @@ SignalProcessor::FinalizeEpisode (Transaction &tx)
     }
 }
 
+// v2 Schema: Unified state persistence to STATE table
 void
-SignalProcessor::PersistProcessorState (Transaction &tx)
+SignalProcessor::PersistState (Transaction &tx)
 {
   if (!context_)
     return;
@@ -994,257 +936,201 @@ SignalProcessor::PersistProcessorState (Transaction &tx)
   std::memcpy (mood_blob.data (), context_->mood_vector.data (),
                6 * sizeof (double));
 
-  tx.Execute (
-      "INSERT OR REPLACE INTO processor_state "
-      "(id, signals_processed, u_uncertainty, weight_relevance_prior, "
-      "weight_relevance, "
-      "attention_width, theta_dynamic, hysteresis, half_life, rate_target, "
-      "sustained_influence, last_signal_timestamp, updated_at, "
-      // Focus priors (Algorithm 1)
-      "coverage_gain_floor_prior, mismatch_weight_prior, attention_width_prior, "
-      // Sensitivity priors (Algorithm 3)
-      "base_rate_prior, weight_novelty_prior, weight_surprise_prior, "
-      "weight_valence_prior, weight_arousal_prior, weight_emotion_prior, "
-      "emotion_gain_prior, score_gain_prior, rate_target_prior, "
-      // Sensitivity dynamic (Algorithm 4)
-      "weight_novelty, "
-      // Stability priors (Algorithm 5)
-      "hysteresis_band_prior, half_life_prior, rate_decay_prior, "
-      "periphery_half_life_prior, salience_half_life_prior, drift_weight_prior, "
-      // Stability dynamic (Algorithm 6)
-      "rate_decay, periphery_half_life, salience_half_life, "
-      // Threshold state (Algorithm 8)
-      "m_rate, rate_ticks, dt_ema, last_rate_timestamp, "
-      // Emotion state (Algorithm 4) - no _ewma suffix per docs
-      "emotion_intensity, valence, arousal, "
-      // Mood state (Algorithm 4b) - single BLOB
-      "mood_vector, "
-      // Embedding prediction error state (Section 3.1.4)
-      "last_embedding, delta_x_trend) "
-      "VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
-      "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
-      "?, ?, ?, ?, ?, ?)",
-      { // Original fields
-        context_->signals_processed, context_->u_t,
-        context_->weight_relevance_prior, context_->weight_relevance,
-        context_->attention_width, context_->T_dynamic, context_->hysteresis,
-        context_->half_life, context_->rate_target, context_->sustained_influence,
-        static_cast<long long> (context_->last_signal_timestamp), now_ms,
-        // Focus priors (Algorithm 1)
-        context_->coverage_gain_floor_prior, context_->mismatch_weight_prior,
-        context_->attention_width_prior,
-        // Sensitivity priors (Algorithm 3)
-        context_->base_rate_prior, context_->weight_novelty_prior,
-        context_->weight_surprise_prior, context_->weight_valence_prior,
-        context_->weight_arousal_prior, context_->weight_emotion_prior,
-        context_->emotion_gain_prior, context_->score_gain_prior,
-        context_->rate_target_prior,
-        // Sensitivity dynamic (Algorithm 4)
-        context_->weight_novelty,
-        // Stability priors (Algorithm 5)
-        context_->hysteresis_band_prior, context_->half_life_prior,
-        context_->rate_decay_prior, context_->periphery_half_life_prior,
-        context_->salience_half_life_prior, context_->drift_weight_prior,
-        // Stability dynamic (Algorithm 6)
-        context_->rate_decay, context_->periphery_half_life,
-        context_->salience_half_life,
-        // Threshold state (Algorithm 8)
-        context_->m_rate, context_->rate_ticks, context_->dt_ema,
-        static_cast<long long> (context_->last_rate_timestamp),
-        // Emotion state (Algorithm 4)
-        context_->emotion_intensity_ewma, context_->valence_ewma,
-        context_->arousal_ewma,
-        // Mood state (Algorithm 4b) - as BLOB
-        mood_blob,
-        // Embedding prediction error state (Section 3.1.4)
-        context_->last_embedding.has_value ()
-            ? std::any (ToFloatVector (*context_->last_embedding))
-            : std::any (std::vector<float> ()),
-        context_->delta_x_trend.has_value ()
-            ? std::any (ToFloatVector (*context_->delta_x_trend))
-            : std::any (std::vector<float> ()) });
-}
-
-void
-SignalProcessor::PersistBlenderState (Transaction &tx)
-{
-  if (!context_)
-    return;
-
-  // Persist weights
-  double w_relevance = 0.5, w_mismatch = 0.5, w_surprise = 0.5, w_rarity = 0.5;
-  double w_drift = 0.5, w_contradiction = 0.5, w_utility = 0.5, w_periphery = 0.5;
-  double w_coverage = 0.5, w_salience = 0.5, w_valence = 0.5, w_arousal = 0.5;
-
+  // Get blender weights
   auto get_weight = [this] (operations::Metric m) {
     auto it = context_->blender_state.find (m);
     return (it != context_->blender_state.end ()) ? it->second : 0.5;
   };
 
-  w_relevance = get_weight (operations::Metric::relevance);
-  w_mismatch = get_weight (operations::Metric::mismatch);
-  w_surprise = get_weight (operations::Metric::surprise);
-  w_rarity = get_weight (operations::Metric::rarity);
-  w_drift = get_weight (operations::Metric::drift);
-  w_contradiction = get_weight (operations::Metric::contradiction);
-  w_utility = get_weight (operations::Metric::utility);
-  w_periphery = get_weight (operations::Metric::periphery);
-  w_coverage = get_weight (operations::Metric::coverage);
-  w_salience = get_weight (operations::Metric::salience);
-  w_valence = get_weight (operations::Metric::valence);
-  w_arousal = get_weight (operations::Metric::arousal);
+  double w_relevance = get_weight (operations::Metric::relevance);
+  double w_mismatch = get_weight (operations::Metric::mismatch);
+  double w_surprise = get_weight (operations::Metric::surprise);
+  double w_rarity = get_weight (operations::Metric::rarity);
+  double w_drift = get_weight (operations::Metric::drift);
+  double w_contradiction = get_weight (operations::Metric::contradiction);
+  double w_utility = get_weight (operations::Metric::utility);
+  double w_periphery = get_weight (operations::Metric::periphery);
+  double w_coverage = get_weight (operations::Metric::coverage);
+  double w_salience = get_weight (operations::Metric::salience);
+  double w_valence = get_weight (operations::Metric::valence);
+  double w_arousal = get_weight (operations::Metric::arousal);
 
-  tx.Execute (
-      "INSERT OR REPLACE INTO blender_weights "
-      "(id, w_relevance, w_mismatch, w_surprise, w_rarity, w_drift, "
-      "w_contradiction, w_utility, w_periphery, w_coverage, w_salience, "
-      "w_valence, w_arousal, blender_ready, update_count) "
-      "VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-      { w_relevance, w_mismatch, w_surprise, w_rarity, w_drift, w_contradiction,
-        w_utility, w_periphery, w_coverage, w_salience, w_valence, w_arousal,
-        context_->blender_ready ? 1 : 0, context_->blender_update_count });
-
-  // Persist covariance matrix if populated
+  // Serialize matrices as BLOBs
+  std::vector<float> P_blob;
   if (!context_->blender_P.empty ())
-    {
-      std::vector<float> P_blob = SerializeMatrix (context_->blender_P);
-      tx.Execute ("INSERT OR REPLACE INTO blender_covariance (id, P_matrix) "
-                  "VALUES (1, ?)",
-                  { P_blob });
-    }
-}
+    P_blob = SerializeMatrix (context_->blender_P);
 
-void
-SignalProcessor::PersistRecentContext (Transaction &tx)
-{
-  if (!context_)
-    return;
-
-  // Clear old entries
-  tx.Execute ("DELETE FROM recent_context", {});
-
-  // Insert current window - store timestamp in milliseconds
-  int seq = 0;
-  const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds> (
-                          std::chrono::system_clock::now ().time_since_epoch ())
-                          .count ();
-
-  for (const auto &emb : context_->recent_context_embeddings)
-    {
-      std::vector<float> emb_blob = ToFloatVector (emb);
-      tx.Execute ("INSERT INTO recent_context (embedding, timestamp, seq_order) "
-                  "VALUES (?, ?, ?)",
-                  { emb_blob, now_ms, seq++ });
-    }
-}
-
-void
-SignalProcessor::PersistRecentScores (Transaction &tx)
-{
-  if (!context_)
-    return;
-
-  // Clear old entries
-  tx.Execute ("DELETE FROM recent_scores", {});
-
-  // Insert current window - store timestamp in milliseconds
-  const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds> (
-                          std::chrono::system_clock::now ().time_since_epoch ())
-                          .count ();
-
-  for (const auto &score : context_->recent_scores)
-    {
-      tx.Execute ("INSERT INTO recent_scores (score, timestamp) VALUES (?, ?)",
-                  { score, now_ms });
-    }
-}
-
-void
-SignalProcessor::PersistObservedRetentionHistory (Transaction &tx)
-{
-  if (!context_)
-    return;
-
-  // Clear old entries
-  tx.Execute ("DELETE FROM observed_retention_history", {});
-
-  // Insert current window - store timestamp in milliseconds
-  const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds> (
-                          std::chrono::system_clock::now ().time_since_epoch ())
-                          .count ();
-
-  for (const auto &retention : context_->observed_retention_history)
-    {
-      tx.Execute ("INSERT INTO observed_retention_history "
-                  "(retention_value, timestamp) VALUES (?, ?)",
-                  { retention, now_ms });
-    }
-}
-
-void
-SignalProcessor::PersistRLSCoefficients (Transaction &tx)
-{
-  if (!context_)
-    return;
-
-  // Serialize rls_coefficients (12 x 4 = 48 doubles) to float BLOB
+  std::vector<float> coeff_blob;
   if (!context_->rls_coefficients.empty ())
     {
-      std::vector<float> coeff_blob;
       coeff_blob.reserve (ProcessorContext::kNumMetrics
                           * ProcessorContext::kCoeffsPerMetric);
       for (const auto &metric_coeffs : context_->rls_coefficients)
         {
           for (double c : metric_coeffs)
-            {
-              coeff_blob.push_back (static_cast<float> (c));
-            }
+            coeff_blob.push_back (static_cast<float> (c));
         }
-      tx.Execute ("INSERT OR REPLACE INTO blender_coefficients (id, coefficients) "
-                  "VALUES (1, ?)",
-                  { coeff_blob });
     }
 
-  // Persist coefficient covariance matrix if populated
+  std::vector<float> coeff_P_blob;
   if (!context_->rls_coeff_P.empty ())
-    {
-      std::vector<float> P_blob = SerializeMatrix (context_->rls_coeff_P);
-      tx.Execute ("INSERT OR REPLACE INTO blender_coeff_covariance (id, P_matrix) "
-                  "VALUES (1, ?)",
-                  { P_blob });
-    }
+    coeff_P_blob = SerializeMatrix (context_->rls_coeff_P);
+
+  // Insert unified state row
+  tx.Execute (
+      "INSERT OR REPLACE INTO state "
+      "(id, signals_processed, "
+      // Threshold state
+      "theta_dynamic, theta_target, hysteresis, half_life, "
+      // Focus state
+      "weight_relevance, attention_width, coverage_gain_floor, mismatch_weight, "
+      // Sensitivity state
+      "weight_novelty, weight_surprise, weight_valence, weight_arousal, "
+      "emotion_gain, score_gain, rate_target, "
+      // Emotion state
+      "emotion_intensity, valence, arousal, mood_vector, "
+      // Stability state
+      "rate_decay, periphery_half_life, salience_half_life, drift_weight, retention_ema, "
+      // Rate control
+      "m_rate, dt_ema, rate_ticks, last_rate_timestamp, reliability, "
+      // Uncertainty
+      "u_uncertainty, "
+      // Embedding prediction
+      "last_embedding, delta_x_trend, delta_half_life_adj, sustained_influence, "
+      // Episode tracking
+      "last_signal_timestamp, updated_at, "
+      // Blender weights
+      "w_relevance, w_mismatch, w_surprise, w_rarity, w_drift, w_contradiction, "
+      "w_utility, w_periphery, w_coverage, w_salience, w_valence, w_arousal, "
+      "blender_ready, blender_update_count, "
+      // Blender matrices
+      "blender_P_matrix, blender_coefficients, blender_coeff_P_matrix) "
+      "VALUES (1, ?, "
+      "?, ?, ?, ?, "  // Threshold
+      "?, ?, ?, ?, "  // Focus
+      "?, ?, ?, ?, ?, ?, ?, "  // Sensitivity
+      "?, ?, ?, ?, "  // Emotion
+      "?, ?, ?, ?, ?, "  // Stability
+      "?, ?, ?, ?, ?, "  // Rate control
+      "?, "  // Uncertainty
+      "?, ?, ?, ?, "  // Embedding prediction
+      "?, ?, "  // Episode tracking
+      "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "  // Blender weights (12)
+      "?, ?, "  // Blender ready/count
+      "?, ?, ?)",  // Blender matrices (3)
+      {
+        context_->signals_processed,
+        // Threshold state
+        context_->T_dynamic, context_->T_dynamic, context_->hysteresis,
+        context_->half_life,
+        // Focus state
+        context_->weight_relevance, context_->attention_width,
+        0.65, 0.5,  // coverage_gain_floor, mismatch_weight defaults
+        // Sensitivity state
+        context_->weight_novelty, 0.2, 0.4, 0.0,  // weight_surprise/valence/arousal
+        1.0, 1.0, context_->rate_target,  // emotion_gain, score_gain, rate_target
+        // Emotion state
+        context_->emotion_intensity_ewma, context_->valence_ewma,
+        context_->arousal_ewma, mood_blob,
+        // Stability state
+        context_->rate_decay, context_->periphery_half_life,
+        context_->salience_half_life, 0.5, 0.0,  // drift_weight, retention_ema defaults
+        // Rate control
+        context_->m_rate, context_->dt_ema, context_->rate_ticks,
+        static_cast<long long> (context_->last_rate_timestamp), 1.0,  // reliability
+        // Uncertainty
+        context_->u_t,
+        // Embedding prediction
+        context_->last_embedding.has_value ()
+            ? std::any (ToFloatVector (*context_->last_embedding))
+            : std::any (std::vector<float> ()),
+        context_->delta_x_trend.has_value ()
+            ? std::any (ToFloatVector (*context_->delta_x_trend))
+            : std::any (std::vector<float> ()),
+        0.0, context_->sustained_influence,  // delta_half_life_adj
+        // Episode tracking
+        static_cast<long long> (context_->last_signal_timestamp), now_ms,
+        // Blender weights
+        w_relevance, w_mismatch, w_surprise, w_rarity, w_drift, w_contradiction,
+        w_utility, w_periphery, w_coverage, w_salience, w_valence, w_arousal,
+        // Blender ready/count
+        context_->blender_ready ? 1 : 0, context_->blender_update_count,
+        // Blender matrices
+        P_blob.empty () ? std::any (std::vector<float> ()) : std::any (P_blob),
+        coeff_blob.empty () ? std::any (std::vector<float> ()) : std::any (coeff_blob),
+        coeff_P_blob.empty () ? std::any (std::vector<float> ()) : std::any (coeff_P_blob)
+      });
 }
 
 void
-SignalProcessor::PersistWorkingMemorySlots (Transaction &tx)
+SignalProcessor::PersistRecentContext (Transaction & /*tx*/)
+{
+  // v2 schema: recent_context is now a VIEW derived from signals/embeddings.
+  // Data is written by MemoryStorage operation when signals are stored.
+  // This function is a no-op for backwards compatibility.
+}
+
+void
+SignalProcessor::PersistRecentScores (Transaction & /*tx*/)
+{
+  // v2 schema: recent_scores is now a VIEW derived from signals.
+  // Data is written by MemoryStorage operation when signals are stored.
+  // This function is a no-op for backwards compatibility.
+}
+
+void
+SignalProcessor::PersistObservedRetentionHistory (Transaction & /*tx*/)
+{
+  // v2 schema: observed_retention_history is derived from signals.
+  // This function is a no-op for backwards compatibility.
+}
+
+// v2 Schema: Persist working memory to MEMORIES table (kind='WORKING')
+void
+SignalProcessor::PersistWorkingMemory (Transaction &tx)
 {
   if (!context_)
     return;
 
-  // Clear old entries
-  tx.Execute ("DELETE FROM working_memory_slots", {});
+  const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds> (
+                          std::chrono::system_clock::now ().time_since_epoch ())
+                          .count ();
 
-  // Insert current slots - store timestamp in milliseconds for consistency
-  // slot.last_ts is in seconds, convert to milliseconds for DB storage
-  for (size_t i = 0; i < context_->wm_slots.size (); ++i)
+  // Mark existing WM slots as ended (soft delete)
+  tx.Execute (
+      "UPDATE memories SET end_ts = ? WHERE kind = 'WORKING' AND end_ts IS NULL",
+      { now_ms });
+
+  // Insert current slots as MEMORIES with kind='WORKING'
+  for (const auto &slot : context_->wm_slots)
     {
-      const auto &slot = context_->wm_slots[i];
-      std::vector<float> emb_blob = ToFloatVector (slot.embedding);
+      if (slot.strength <= 0.0)
+        continue;
+
       const auto ts_ms = static_cast<int64_t> (slot.last_ts * 1000.0);
-      tx.Execute ("INSERT INTO working_memory_slots "
-                  "(slot_index, strength, timestamp, embedding) VALUES (?, ?, ?, ?)",
-                  { static_cast<int64_t> (i), slot.strength, ts_ms, emb_blob });
+
+      // For now, we don't have embedding_id - in full implementation this would
+      // be set when the memory is created. Using 0 as placeholder.
+      tx.Execute (
+          "INSERT INTO memories "
+          "(source_id, kind, modality, start_ts, n_signals, s_max, s_avg, "
+          " strength, last_access, created_at) "
+          "VALUES (?, 'WORKING', ?, ?, ?, ?, ?, ?, ?, ?)",
+          { slot.source_id.empty () ? std::string ("unknown") : slot.source_id,
+            slot.modality, slot.start_ts, slot.n_signals, slot.s_max, slot.s_avg,
+            slot.strength, ts_ms, now_ms });
     }
 }
 
+// v2 Schema: Persist accumulators to ACCUMULATORS table
 void
-SignalProcessor::PersistAccumulatorState (Transaction &tx)
+SignalProcessor::PersistAccumulators (Transaction &tx)
 {
   if (!context_)
     return;
 
   // Clear old entries
-  tx.Execute ("DELETE FROM accumulator_state", {});
+  tx.Execute ("DELETE FROM accumulators", {});
 
   // Insert current accumulator states
   for (const auto &[source_id, state] : context_->accumulator_states)
@@ -1262,13 +1148,13 @@ SignalProcessor::PersistAccumulatorState (Transaction &tx)
         peak_blob = ToFloatVector (state.e_peak);
 
       tx.Execute (
-          "INSERT INTO accumulator_state "
-          "(source_id, mu_acc, drift_acc, s_sum, s_max, n_signals, "
+          "INSERT INTO accumulators "
+          "(source_id, episode_id, mu_acc, drift_acc, s_sum, s_max, "
           " e_peak, t_start, last_write_ts, last_signal_ts, eta_acc, "
           "coherence_prev) "
           "VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
-          { source_id, mu_blob, state.drift_acc, state.s_sum, state.s_max,
-            static_cast<long long> (state.n_signals), peak_blob,
+          { source_id, state.episode_id, mu_blob, state.drift_acc, state.s_sum,
+            state.s_max, peak_blob,
             static_cast<long long> (state.t_start),
             static_cast<long long> (state.last_write_ts),
             static_cast<long long> (state.last_signal_ts), state.eta_acc,

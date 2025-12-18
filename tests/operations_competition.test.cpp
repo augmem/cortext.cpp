@@ -1,4 +1,5 @@
 // tests/operations_competition.test.cpp
+#include "test_helpers.hpp"
 #include <Eigen/Dense>
 #include <algorithm>
 #include <catch2/catch_approx.hpp>
@@ -41,7 +42,7 @@ Make256DEmb (std::initializer_list<std::pair<int, float>> values)
   return Norm (v);
 }
 
-// Helper op to seed embeddings into the database before operations run.
+// Helper op to seed embeddings and memories into the v2 database.
 class SeedEmbeddingsOp : public IOperation
 {
 public:
@@ -54,17 +55,25 @@ public:
   Execute (OperationContext &ctx, Transaction & /*tx*/) const override
   {
     auto *store = ctx.GetStore ();
+    auto now_ts = cortext::testing::NowMs ();
     for (const auto &[id, emb] : embeddings_)
       {
         std::vector<float> vec (emb.data (), emb.data () + emb.size ());
+        // v2: Insert into embeddings (minimal vec0 table)
         store->Execute (
-            "INSERT OR REPLACE INTO embeddings(embedding_id, embedding, type, "
-            "strength, use_frequency, stability, connectivity, drift_mag, "
+            "INSERT OR REPLACE INTO embeddings(embedding_id, embedding, created_at) "
+            "VALUES(?, ?, ?)",
+            { id, vec, now_ts });
+        // v2: Insert into memories (comprehensive metadata)
+        store->Execute (
+            "INSERT OR REPLACE INTO memories("
+            "memory_id, embedding_id, source_id, kind, start_ts, n_signals, modality, "
+            "s_max, s_avg, strength, use_frequency, stability, connectivity, drift_mag, "
             "influence, sustained_influence, contextual_gain, redundancy, "
-            "pre_activation, lability_state, suppression_count) "
-            "VALUES (?, ?, 'memory', 1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, "
-            "0.0, 0.0, 0.0, 0)",
-            { id, vec });
+            "pre_activation, lability_state, suppression_count, created_at) "
+            "VALUES(?, ?, 'test', 'LONG_TERM', ?, 1, 'text', 0.5, 0.5, "
+            "1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0, ?)",
+            { id, id, now_ts, now_ts });
       }
   }
 
@@ -146,27 +155,26 @@ TEST_CASE ("Alg21 inhibits near losers but not distant ones",
   processor.Process (MakeSignal (ctx, /*ts=*/100));
   processor.Flush ();
 
-  // Near loser suppressed
+  // v2: Near loser suppressed - query memories table
   {
     auto rows = store->Execute (
-        "SELECT strength FROM embeddings WHERE embedding_id = ?",
+        "SELECT strength FROM memories WHERE memory_id = ?",
         { 13LL });
     REQUIRE (rows.size () == 1);
     const double strength = std::any_cast<double> (rows[0].at ("strength"));
     REQUIRE (strength < 1.0);
   }
-  // Distant unchanged (row may not exist if never touched; tolerate both
-  // cases)
+  // v2: Distant unchanged - query memories table
   {
     auto rows = store->Execute (
-        "SELECT COUNT(*) AS c FROM embeddings WHERE embedding_id = ?",
+        "SELECT COUNT(*) AS c FROM memories WHERE memory_id = ?",
         { 20LL });
     REQUIRE (rows.size () == 1);
     const auto cnt = std::any_cast<long long> (rows[0].at ("c"));
     if (cnt == 1)
       {
         auto r2 = store->Execute (
-            "SELECT strength FROM embeddings WHERE embedding_id = ?",
+            "SELECT strength FROM memories WHERE memory_id = ?",
             { 20LL });
         REQUIRE (r2.size () == 1);
         const double s2 = std::any_cast<double> (r2[0].at ("strength"));
@@ -207,8 +215,9 @@ TEST_CASE ("Alg21 RIF recovery UPDATE does not violate NOT NULL constraint",
     processor.Flush ();
   }
 
+  // v2: RIF state is inline on memories table
   auto rif_rows
-      = store->Execute ("SELECT embedding_id, suppression FROM rif_state");
+      = store->Execute ("SELECT memory_id, suppression FROM memories WHERE suppression > 0");
   REQUIRE (rif_rows.size () >= 1);
   for (const auto &row : rif_rows)
     {
@@ -227,8 +236,9 @@ TEST_CASE ("Alg21 RIF recovery UPDATE does not violate NOT NULL constraint",
     processor.Flush ();
   }
 
+  // v2: RIF state is inline on memories table
   rif_rows
-      = store->Execute ("SELECT embedding_id, suppression FROM rif_state");
+      = store->Execute ("SELECT memory_id, suppression FROM memories WHERE suppression > 0");
   for (const auto &row : rif_rows)
     {
       REQUIRE (row.count ("suppression") == 1);
@@ -272,10 +282,11 @@ TEST_CASE ("Alg21 recovery restores strength over time",
     processor.Flush ();
   }
 
+  // v2: Query memories table for strength
   double strength_after_supp = 0.0;
   {
     auto rows = store->Execute (
-        "SELECT strength FROM embeddings WHERE embedding_id = ?",
+        "SELECT strength FROM memories WHERE memory_id = ?",
         { 2LL });
     REQUIRE (rows.size () == 1);
     strength_after_supp = std::any_cast<double> (rows[0].at ("strength"));
@@ -295,9 +306,10 @@ TEST_CASE ("Alg21 recovery restores strength over time",
     processor.Flush ();
   }
 
+  // v2: Query memories table for strength
   {
     auto rows = store->Execute (
-        "SELECT strength FROM embeddings WHERE embedding_id = ?",
+        "SELECT strength FROM memories WHERE memory_id = ?",
         { 2LL });
     REQUIRE (rows.size () == 1);
     const double strength_after_recovery

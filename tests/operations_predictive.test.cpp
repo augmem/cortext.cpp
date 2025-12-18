@@ -1,4 +1,5 @@
 // tests/operations_predictive.test.cpp
+#include "test_helpers.hpp"
 #include <Eigen/Dense>
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
@@ -16,7 +17,7 @@ using cortext::operations::ApplyPredictivePreActivation;
 namespace
 {
 
-// Helper op to seed embeddings into the database before operations run.
+// Helper op to seed embeddings and memories into the v2 database.
 class SeedEmbeddingsOp : public IOperation
 {
 public:
@@ -28,17 +29,25 @@ public:
   void
   Execute (OperationContext &ctx, Transaction &tx) const override
   {
+    auto now_ts = cortext::testing::NowMs ();
     for (const auto &[id, emb] : embeddings_)
       {
         std::vector<float> vec (emb.data (), emb.data () + emb.size ());
+        // v2: Insert into embeddings (minimal vec0 table)
         tx.Execute (
-            "INSERT OR REPLACE INTO embeddings(embedding_id, embedding, type, "
-            "strength, use_frequency, stability, connectivity, drift_mag, "
+            "INSERT OR REPLACE INTO embeddings(embedding_id, embedding, created_at) "
+            "VALUES(?, ?, ?)",
+            { id, vec, now_ts });
+        // v2: Insert into memories (comprehensive metadata)
+        tx.Execute (
+            "INSERT OR REPLACE INTO memories("
+            "memory_id, embedding_id, source_id, kind, start_ts, n_signals, modality, "
+            "s_max, s_avg, strength, use_frequency, stability, connectivity, drift_mag, "
             "influence, sustained_influence, contextual_gain, redundancy, "
-            "pre_activation, lability_state, suppression_count) "
-            "VALUES (?, ?, 'memory', 1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, "
-            "0.0, 0.0, 0.0, 0)",
-            { id, vec });
+            "pre_activation, lability_state, suppression_count, created_at) "
+            "VALUES(?, ?, 'test', 'LONG_TERM', ?, 1, 'text', 0.5, 0.5, "
+            "1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0, ?)",
+            { id, id, now_ts, now_ts });
       }
   }
 
@@ -147,7 +156,7 @@ TEST_CASE ("Alg22 boosts predicted-aligned candidates",
   // Aligned candidate should have strength > 1.0
   {
     auto rows = store->Execute (
-        "SELECT strength FROM embeddings WHERE embedding_id = ?",
+        "SELECT strength FROM memories WHERE memory_id = ?",
         { 101LL });
     REQUIRE (rows.size () == 1);
     const double strength = std::any_cast<double> (rows[0].at ("strength"));
@@ -156,14 +165,14 @@ TEST_CASE ("Alg22 boosts predicted-aligned candidates",
   // Orthogonal may not be touched; accept either no row or unchanged.
   {
     auto rows = store->Execute (
-        "SELECT COUNT(*) AS c FROM embeddings WHERE embedding_id = ?",
+        "SELECT COUNT(*) AS c FROM memories WHERE memory_id = ?",
         { 202LL });
     REQUIRE (rows.size () == 1);
     const auto cnt = std::any_cast<long long> (rows[0].at ("c"));
     if (cnt == 1)
       {
         auto r2 = store->Execute (
-            "SELECT strength FROM embeddings WHERE embedding_id = ?",
+            "SELECT strength FROM memories WHERE memory_id = ?",
             { 202LL });
         REQUIRE (r2.size () == 1);
         const double s2 = std::any_cast<double> (r2[0].at ("strength"));
@@ -206,14 +215,14 @@ TEST_CASE ("Alg22 respects prediction confidence threshold",
 
   // Expect no row (or unchanged strength if row exists).
   auto rows = store->Execute (
-      "SELECT COUNT(*) AS c FROM embeddings WHERE embedding_id = ?",
+      "SELECT COUNT(*) AS c FROM memories WHERE memory_id = ?",
       { 303LL });
   REQUIRE (rows.size () == 1);
   const auto cnt = std::any_cast<long long> (rows[0].at ("c"));
   if (cnt == 1)
     {
       auto r2 = store->Execute (
-          "SELECT strength FROM embeddings WHERE embedding_id = ?",
+          "SELECT strength FROM memories WHERE memory_id = ?",
           { 303LL });
       REQUIRE (r2.size () == 1);
       const double s = std::any_cast<double> (r2[0].at ("strength"));
@@ -265,7 +274,7 @@ TEST_CASE ("Prediction horizon increases with Focus",
 
     // Should still work with short horizon
     auto rows = store->Execute (
-        "SELECT strength FROM embeddings WHERE embedding_id = ?",
+        "SELECT strength FROM memories WHERE memory_id = ?",
         { 1LL });
     REQUIRE (rows.size () == 1);
     // Aligned candidate should be boosted
@@ -308,7 +317,7 @@ TEST_CASE ("Prediction horizon increases with Focus",
 
     // Should use longer horizon (8 samples) but still work
     auto rows = store->Execute (
-        "SELECT strength FROM embeddings WHERE embedding_id = ?",
+        "SELECT strength FROM memories WHERE memory_id = ?",
         { 2LL });
     REQUIRE (rows.size () == 1);
     // Aligned candidate should be boosted

@@ -85,12 +85,22 @@ TEST_CASE ("PropagateEmotionalCascade propagates through graph edges",
                   { std::string ("emb:2"), std::string ("emb:3"),
                     std::string ("causes"), 0.8 });
 
-  // Create high-intensity emotional tag for source memory
+  // v2: Create embeddings and memories for the cascade to propagate through
+  std::vector<float> emb (kEmbeddingDim, 0.0f);
+  emb[0] = 1.0f;
+  cortext::testing::SeedEmbeddingV2 (*store, 1LL, emb);
+  cortext::testing::SeedEmbeddingV2 (*store, 2LL, emb);
+  cortext::testing::SeedEmbeddingV2 (*store, 3LL, emb);
+  cortext::testing::SeedMemoryV2 (*store, 1LL, 1LL, "test");
+  cortext::testing::SeedMemoryV2 (*store, 2LL, 2LL, "test");
+  cortext::testing::SeedMemoryV2 (*store, 3LL, 3LL, "test");
+
+  // v2: Set high-intensity flashbulb for source memory (inline on memories)
   const long long now = 5000;
-  store->Execute ("INSERT INTO emotional_tags (embedding_id, flashbulb, intensity, "
-                  "arousal, valence, half_life_bonus, cascade_radius, cascade_decay, ts) "
-                  "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                  { 1LL, 0LL, 0.8, 0.7, 0.6, 2.0, 2LL, 0.5, now - 100 });
+  store->Execute ("UPDATE memories SET flashbulb = 1, emotional_intensity = ?, "
+                  "half_life_bonus = ?, cascade_radius = ?, cascade_decay = ? "
+                  "WHERE embedding_id = ?",
+                  { 0.8, 2.0, 2LL, 0.5, 1LL });
 
   SignalProcessor::Config cfg;
   cfg.sensitivity = 0.5; // cascade_radius = 3, decay = 0.5
@@ -103,12 +113,12 @@ TEST_CASE ("PropagateEmotionalCascade propagates through graph edges",
   processor.Process (MakeSignal (static_cast<uint64_t> (now)));
   processor.Flush ();
 
-  // Verify emotional tags propagated
+  // v2: Verify emotional_intensity propagated through memories table
   auto rows = store->Execute (
-      "SELECT embedding_id, intensity FROM emotional_tags ORDER BY embedding_id",
+      "SELECT embedding_id, emotional_intensity FROM memories ORDER BY embedding_id",
       {});
 
-  // Should have tags for multiple memories (propagated)
+  // Should have emotional values for memories (propagated)
   // Note: Results depend on consolidation interval and timing
 }
 

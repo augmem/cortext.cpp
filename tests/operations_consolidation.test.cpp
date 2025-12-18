@@ -106,9 +106,10 @@ TEST_CASE ("Alg28 rate trigger starts when idle",
   // At T=0.5, S=0.5: rate ≈ 0.00025
   const double rate_target = core::ConsolidationRate (cfg.stability, cfg.sensitivity);
 
-  const uint64_t now_ts = 10'000ULL;
-  const int idle_required = core::IdleRequiredSeconds (cfg.stability);
-  const uint64_t last_ret = now_ts - static_cast<uint64_t> (idle_required);
+  // Timestamps are in milliseconds
+  const uint64_t now_ts = 100'000ULL; // 100 seconds in ms
+  const int idle_required_s = core::IdleRequiredSeconds (cfg.stability);
+  const uint64_t last_ret = now_ts - static_cast<uint64_t> (idle_required_s) * 1000ULL;
 
   // Set m_rate below half of the knob-derived rate to trigger
   const double m_rate = rate_target * 0.4; // Below 50% threshold
@@ -145,9 +146,10 @@ TEST_CASE ("Alg28 rate trigger defers when busy",
   // Compute the knob-derived rate target
   const double rate_target = core::ConsolidationRate (cfg.stability, cfg.sensitivity);
 
-  const uint64_t now_ts = 20'000ULL;
-  const int idle_required = core::IdleRequiredSeconds (cfg.stability);
-  const uint64_t last_ret = now_ts - static_cast<uint64_t> (idle_required);
+  // Timestamps are in milliseconds
+  const uint64_t now_ts = 100'000ULL; // 100 seconds in ms
+  const int idle_required_s = core::IdleRequiredSeconds (cfg.stability);
+  const uint64_t last_ret = now_ts - static_cast<uint64_t> (idle_required_s) * 1000ULL;
 
   // Set m_rate below threshold to trigger rate check, but busy so should defer
   const double m_rate = rate_target * 0.4;
@@ -181,12 +183,13 @@ TEST_CASE ("Alg28 interval trigger starts when elapsed exceeds interval",
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;
 
-  const uint64_t now_ts = 30'000ULL;
-  const int interval = core::ConsolidationIntervalSeconds (cfg.stability);
-  const int idle_required = core::IdleRequiredSeconds (cfg.stability);
-  const uint64_t last_cons = now_ts - static_cast<uint64_t> (interval + 1);
+  // Timestamps in milliseconds, interval/idle in seconds
+  const int interval_s = core::ConsolidationIntervalSeconds (cfg.stability);
+  const int idle_required_s = core::IdleRequiredSeconds (cfg.stability);
+  const uint64_t now_ts = static_cast<uint64_t>(interval_s + 10) * 1000ULL; // enough time passed
+  const uint64_t last_cons = now_ts - static_cast<uint64_t> (interval_s + 1) * 1000ULL;
   const uint64_t last_ret
-      = now_ts - static_cast<uint64_t> (idle_required + 1); // ensure idle OK
+      = now_ts - static_cast<uint64_t> (idle_required_s + 1) * 1000ULL; // ensure idle OK
 
   auto setup = std::make_unique<SetupConsolidationInputsOp> (
       /*tokens_in_flight=*/0,
@@ -206,7 +209,7 @@ TEST_CASE ("Alg28 interval trigger starts when elapsed exceeds interval",
   processor.Flush ();
 }
 
-// Helper op that seeds embeddings with test data.
+// Helper op that seeds embeddings and memories with test data.
 struct SeedVecEmbeddingsOp : IOperation
 {
   SeedVecEmbeddingsOp (long long count) : count_ (count) {}
@@ -218,9 +221,16 @@ struct SeedVecEmbeddingsOp : IOperation
     emb[0] = 1.0f;
     for (long long i = 1; i <= count_; ++i)
       {
+        // v2: Insert into embeddings (minimal vec0 table)
         store->Execute (
-            "INSERT INTO embeddings(embedding_id, embedding) VALUES (?,?)",
-            { i, emb });
+            "INSERT INTO embeddings(embedding_id, embedding, created_at) VALUES (?,?,?)",
+            { i, emb, 0LL });
+        // v2: Insert into memories (capacity check counts memories)
+        store->Execute (
+            "INSERT INTO memories(memory_id, embedding_id, source_id, kind, start_ts, "
+            "n_signals, modality, s_max, s_avg, strength, created_at) "
+            "VALUES (?, ?, 'test', 'LONG_TERM', 0, 1, 'text', 0.5, 0.5, 1.0, 0)",
+            { i, i });
       }
   }
   long long count_;
@@ -241,9 +251,10 @@ TEST_CASE ("Alg28 capacity trigger starts when db_size exceeds threshold",
   const long long threshold = core::ConsolidationThresholdCount (cfg.stability);
   const long long want = threshold + 1;
 
-  const uint64_t now_ts = 70'000ULL;
-  const int idle_required = core::IdleRequiredSeconds (cfg.stability);
-  const uint64_t last_ret = now_ts - static_cast<uint64_t> (idle_required + 1);
+  // Timestamps in milliseconds, idle_required in seconds
+  const int idle_required_s = core::IdleRequiredSeconds (cfg.stability);
+  const uint64_t now_ts = static_cast<uint64_t>(idle_required_s + 10) * 1000ULL;
+  const uint64_t last_ret = now_ts - static_cast<uint64_t> (idle_required_s + 1) * 1000ULL;
 
   // Seed data first, then set up consolidation inputs, then eval.
   auto seed = std::make_unique<SeedVecEmbeddingsOp> (want);
@@ -326,13 +337,26 @@ TEST_CASE ("Alg29 scores and marks low-strength candidates",
   processor.Process (dummy);
   processor.Flush ();
 
-  // Seed embeddings with two rows: one below, one above the floor.
+  // v2: Seed embeddings with two rows: one below, one above the floor.
+  std::vector<float> emb (256, 0.0f);
+  emb[0] = 1.0f;
   store->Execute (
-      "INSERT INTO embeddings(embedding_id, strength) VALUES(?,?)",
-      { 1LL, 0.10 });
+      "INSERT INTO embeddings(embedding_id, embedding, created_at) VALUES(?, ?, ?)",
+      { 1LL, emb, 0LL });
   store->Execute (
-      "INSERT INTO embeddings(embedding_id, strength) VALUES(?,?)",
-      { 2LL, 0.80 });
+      "INSERT INTO embeddings(embedding_id, embedding, created_at) VALUES(?, ?, ?)",
+      { 2LL, emb, 0LL });
+  // v2: Insert into memories with strength values
+  store->Execute (
+      "INSERT INTO memories(memory_id, embedding_id, source_id, kind, start_ts, "
+      "n_signals, modality, s_max, s_avg, strength, created_at) "
+      "VALUES(?, ?, 'test', 'LONG_TERM', 0, 1, 'text', 0.5, 0.5, ?, 0)",
+      { 1LL, 1LL, 0.10 });
+  store->Execute (
+      "INSERT INTO memories(memory_id, embedding_id, source_id, kind, start_ts, "
+      "n_signals, modality, s_max, s_avg, strength, created_at) "
+      "VALUES(?, ?, 'test', 'LONG_TERM', 0, 1, 'text', 0.5, 0.5, ?, 0)",
+      { 2LL, 2LL, 0.80 });
 
   // Calculate score and floor using same formulas as ScoreConsolidation
   const double T = cfg.stability;
@@ -341,22 +365,22 @@ TEST_CASE ("Alg29 scores and marks low-strength candidates",
   const uint64_t now_ts = 50'000ULL;
   const double floor_cutoff = core::PeripheryCutoff (T);
 
-  // Execute the same query that ScoreConsolidation uses
+  // Execute the same query that ScoreConsolidation uses (v2: query memories table)
   store->Execute (
       "INSERT INTO consolidation_candidates(embedding_id, score, "
       "created_at, reason) "
-      "SELECT em.embedding_id, "
-      "       ((?1 * COALESCE(em.strength, 1.0)) "
-      "        - (?2 * COALESCE(em.redundancy, 0.0)) "
-      "        + (?3 * COALESCE(em.connectivity, 0.0)) "
-      "        + (?4 * COALESCE(em.stability, 0.0))) AS computed_score, "
+      "SELECT m.embedding_id, "
+      "       ((?1 * COALESCE(m.strength, 1.0)) "
+      "        - (?2 * COALESCE(m.redundancy, 0.0)) "
+      "        + (?3 * COALESCE(m.connectivity, 0.0)) "
+      "        + (?4 * COALESCE(m.stability, 0.0))) AS computed_score, "
       "       ?5 AS created_at, "
       "       'score_below_floor' AS reason "
-      "FROM embeddings em "
-      "WHERE ((?1 * COALESCE(em.strength, 1.0)) "
-      "       - (?2 * COALESCE(em.redundancy, 0.0)) "
-      "       + (?3 * COALESCE(em.connectivity, 0.0)) "
-      "       + (?4 * COALESCE(em.stability, 0.0))) < ?6 "
+      "FROM memories m "
+      "WHERE ((?1 * COALESCE(m.strength, 1.0)) "
+      "       - (?2 * COALESCE(m.redundancy, 0.0)) "
+      "       + (?3 * COALESCE(m.connectivity, 0.0)) "
+      "       + (?4 * COALESCE(m.stability, 0.0))) < ?6 "
       "ON CONFLICT(embedding_id) DO UPDATE SET "
       "  score=excluded.score, "
       "  created_at=excluded.created_at, "
@@ -400,32 +424,39 @@ TEST_CASE ("Alg29 is idempotent on repeated runs",
   processor.Process (dummy);
   processor.Flush ();
 
-  // Seed test data
+  // v2: Seed test data
+  std::vector<float> emb (256, 0.0f);
+  emb[0] = 1.0f;
   store->Execute (
-      "INSERT INTO embeddings(embedding_id, strength) VALUES(?,?)",
-      { 3LL, 0.15 }); // below floor at T=1.0
+      "INSERT INTO embeddings(embedding_id, embedding, created_at) VALUES(?, ?, ?)",
+      { 3LL, emb, 0LL });
+  store->Execute (
+      "INSERT INTO memories(memory_id, embedding_id, source_id, kind, start_ts, "
+      "n_signals, modality, s_max, s_avg, strength, created_at) "
+      "VALUES(?, ?, 'test', 'LONG_TERM', 0, 1, 'text', 0.5, 0.5, ?, 0)",
+      { 3LL, 3LL, 0.15 }); // below floor at T=1.0
 
   const double T = cfg.stability;
   const double F = cfg.focus;
   const double S = cfg.sensitivity;
   const double floor_cutoff = core::PeripheryCutoff (T);
 
-  // Run scoring query twice
+  // Run scoring query twice (v2: query memories table)
   const std::string query
       = "INSERT INTO consolidation_candidates(embedding_id, score, "
         "created_at, reason) "
-        "SELECT em.embedding_id, "
-        "       ((?1 * COALESCE(em.strength, 1.0)) "
-        "        - (?2 * COALESCE(em.redundancy, 0.0)) "
-        "        + (?3 * COALESCE(em.connectivity, 0.0)) "
-        "        + (?4 * COALESCE(em.stability, 0.0))) AS computed_score, "
+        "SELECT m.embedding_id, "
+        "       ((?1 * COALESCE(m.strength, 1.0)) "
+        "        - (?2 * COALESCE(m.redundancy, 0.0)) "
+        "        + (?3 * COALESCE(m.connectivity, 0.0)) "
+        "        + (?4 * COALESCE(m.stability, 0.0))) AS computed_score, "
         "       ?5 AS created_at, "
         "       'score_below_floor' AS reason "
-        "FROM embeddings em "
-        "WHERE ((?1 * COALESCE(em.strength, 1.0)) "
-        "       - (?2 * COALESCE(em.redundancy, 0.0)) "
-        "       + (?3 * COALESCE(em.connectivity, 0.0)) "
-        "       + (?4 * COALESCE(em.stability, 0.0))) < ?6 "
+        "FROM memories m "
+        "WHERE ((?1 * COALESCE(m.strength, 1.0)) "
+        "       - (?2 * COALESCE(m.redundancy, 0.0)) "
+        "       + (?3 * COALESCE(m.connectivity, 0.0)) "
+        "       + (?4 * COALESCE(m.stability, 0.0))) < ?6 "
         "ON CONFLICT(embedding_id) DO UPDATE SET "
         "  score=excluded.score, "
         "  created_at=excluded.created_at, "

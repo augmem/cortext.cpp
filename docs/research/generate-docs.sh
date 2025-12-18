@@ -17,6 +17,35 @@ pandoc algorithms.docx -o algorithms.md --wrap=none
 pandoc paper.docx -o paper.md --wrap=none
 
 echo ""
+echo "=== Checking for duplicate section anchors ==="
+
+check_dups() {
+    local file="$1"
+    local label="$2"
+
+    # Duplicate section numbers (e.g., two different "3.1.1 ..." headings)
+    local dup_nums
+    dup_nums=$(grep -E '^[0-9]+\.[0-9.]* [A-Z]' "$file" | awk '{print $1}' | sort | uniq -d || true)
+    if [[ -n "$dup_nums" ]]; then
+        echo "ERROR: Duplicate section numbers found in $label:"
+        echo "$dup_nums" | sed 's/^/  - /'
+        exit 1
+    fi
+
+    # Duplicate exact heading lines
+    local dup_lines
+    dup_lines=$(grep -E '^[0-9]+\.[0-9.]* [A-Z]' "$file" | sort | uniq -d || true)
+    if [[ -n "$dup_lines" ]]; then
+        echo "ERROR: Duplicate section headings found in $label:"
+        echo "$dup_lines" | sed 's/^/  - /'
+        exit 1
+    fi
+}
+
+check_dups "algorithms.md" "algorithms.md"
+check_dups "paper.md" "paper.md"
+
+echo ""
 echo "=== Validating paper includes all algorithm sections ==="
 
 MISSING=0
@@ -40,8 +69,13 @@ while IFS= read -r line; do
         paper_section="${paper_major}"
     fi
     
-    if ! grep -qF "$paper_section $section_title" paper.md; then
+    # Must exist exactly once; both missing and duplicated anchors are failures.
+    count=$(grep -cF "$paper_section $section_title" paper.md || true)
+    if [[ "$count" -eq 0 ]]; then
         echo "MISSING: Section $section_num '$section_title' (expected $paper_section in paper)"
+        MISSING=$((MISSING + 1))
+    elif [[ "$count" -gt 1 ]]; then
+        echo "DUPLICATE: Section $section_num '$section_title' appears $count times in paper (expected exactly 1)"
         MISSING=$((MISSING + 1))
     fi
 done < <(grep -E '^[0-9]+\.[0-9.]* [A-Z]' algorithms.md)

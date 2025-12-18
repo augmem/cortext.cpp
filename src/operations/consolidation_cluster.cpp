@@ -42,12 +42,13 @@ ConsolidationCluster::Execute (OperationContext &context, Transaction &tx) const
   auto params = ConsolidationClusterParams::FromKnobs (cfg.focus, cfg.sensitivity,
                                                        cfg.stability);
 
-  // 1. Load candidates with embeddings from consolidation_candidates joined
-  // with embeddings.
+  // v2: Load candidates with embeddings from consolidation_candidates joined
+  // with embeddings (via memories for consistency).
   auto rows = store->Execute (
       "SELECT cc.embedding_id, cc.score, e.embedding "
       "FROM consolidation_candidates cc "
-      "JOIN embeddings e ON cc.embedding_id = e.embedding_id "
+      "JOIN memories m ON cc.embedding_id = m.embedding_id "
+      "JOIN embeddings e ON m.embedding_id = e.embedding_id "
       "ORDER BY cc.score ASC",
       {});
 

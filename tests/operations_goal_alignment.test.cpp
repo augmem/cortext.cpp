@@ -58,18 +58,22 @@ TEST_CASE ("Alg33 computes goal alignment from goal neighborhood",
   std::vector<float> emb2_vec (emb2.data (), emb2.data () + emb2.size ());
 
   // Two embeddings in the neighborhood: goal (id=1) and neighbor (id=2).
-  store->Execute ("INSERT INTO embeddings(embedding_id, embedding, type, strength, "
-                  "use_frequency, stability, connectivity, drift_mag, influence, "
-                  "sustained_influence, contextual_gain, redundancy, pre_activation, "
-                  "lability_state, suppression_count) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                  { 1LL, emb1_vec, std::string ("goal"), 1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0,
-                    0.0, 0.0, 0.0, 0.0, 0LL });
-  store->Execute ("INSERT INTO embeddings(embedding_id, embedding, type, strength, "
-                  "use_frequency, stability, connectivity, drift_mag, influence, "
-                  "sustained_influence, contextual_gain, redundancy, pre_activation, "
-                  "lability_state, suppression_count) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                  { 2LL, emb2_vec, std::string ("memory"), 1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0,
-                    0.0, 0.0, 0.0, 0.0, 0LL });
+  // v2: Insert into embeddings (minimal vec0 table)
+  store->Execute ("INSERT INTO embeddings(embedding_id, embedding, created_at) "
+                  "VALUES (?, ?, ?)",
+                  { 1LL, emb1_vec, 0LL });
+  store->Execute ("INSERT INTO embeddings(embedding_id, embedding, created_at) "
+                  "VALUES (?, ?, ?)",
+                  { 2LL, emb2_vec, 0LL });
+  // v2: Insert into memories (comprehensive metadata)
+  store->Execute ("INSERT INTO memories(memory_id, embedding_id, source_id, kind, "
+                  "start_ts, n_signals, modality, s_max, s_avg, strength, created_at) "
+                  "VALUES (?, ?, 'test', 'GOAL', 0, 1, 'text', 0.5, 0.5, 1.0, 0)",
+                  { 1LL, 1LL });
+  store->Execute ("INSERT INTO memories(memory_id, embedding_id, source_id, kind, "
+                  "start_ts, n_signals, modality, s_max, s_avg, strength, created_at) "
+                  "VALUES (?, ?, 'test', 'LONG_TERM', 0, 1, 'text', 0.5, 0.5, 1.0, 0)",
+                  { 2LL, 2LL });
 
   store->Execute ("INSERT INTO graph_nodes(node_id, type, embedding_id) "
                   "VALUES (?,?,?)",

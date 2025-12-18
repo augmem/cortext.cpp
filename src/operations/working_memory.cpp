@@ -171,6 +171,11 @@ WorkingMemory::Execute (OperationContext &context, Transaction &tx) const
   for (int i = 0; i < static_cast<int> (p_ctx.wm_slots.size ()); ++i)
     {
       const auto &slot = p_ctx.wm_slots[static_cast<size_t> (i)];
+      // v2: Only chunk into same-source slots (working-memory.plan.md)
+      if (!slot.source_id.empty () && slot.source_id != signal.source_id)
+        {
+          continue;
+        }
       if (slot.embedding.size () != e_rep.size ())
         {
           continue;
@@ -216,6 +221,15 @@ WorkingMemory::Execute (OperationContext &context, Transaction &tx) const
           const double new_arousal_avg
               = acc.s_arousal_sum / static_cast<double> (acc.n_signals);
           slot.s_arousal_avg = (slot.s_arousal_avg + new_arousal_avg) / 2.0;
+        }
+
+      // v2: Append blob_ids from accumulated signals to slot
+      for (const auto &rec : acc.signals)
+        {
+          if (!rec.blob_id.empty ())
+            {
+              slot.blob_ids.push_back (rec.blob_id);
+            }
         }
 
       p_ctx.wm_last_accepted = true;
@@ -348,6 +362,19 @@ WorkingMemory::Execute (OperationContext &context, Transaction &tx) const
       = acc.n_signals > 0
             ? acc.s_arousal_sum / static_cast<double> (acc.n_signals)
             : 0.0;
+
+  // v2 persistence fields (working-memory.plan.md Section 4)
+  slot.source_id = signal.source_id;
+  slot.modality
+      = acc.signals.empty () ? signal.modality : acc.signals[0].modality;
+  slot.start_ts = static_cast<int64_t> (acc.t_start);
+  for (const auto &rec : acc.signals)
+    {
+      if (!rec.blob_id.empty ())
+        {
+          slot.blob_ids.push_back (rec.blob_id);
+        }
+    }
 
   p_ctx.wm_slots.push_back (std::move (slot));
   p_ctx.wm_last_accepted = true;

@@ -142,232 +142,106 @@ void
 RegisterCoreSchema (SchemaRegistry &registry)
 {
   // ==========================================================================
-  // Migration 0: Complete schema per docs/diagrams/database.md
-  // Clean slate - all tables in single migration
+  // Migration 0: v2 Schema per docs/diagrams/database-v2.md
+  // Clean slate - EPISODES -> MEMORIES -> SIGNALS -> (EMBEDDINGS, BLOBS)
   // ==========================================================================
   registry.Register ({
       0,
-      "Core schema (all tables per docs/diagrams/database.md)",
+      "Core schema v2 (docs/diagrams/database-v2.md)",
       {
           // ------------------------------------------------------------------
-          // sqlite-objstore virtual table
+          // sqlite-objstore virtual table (BLOBS)
           // ------------------------------------------------------------------
           "CREATE VIRTUAL TABLE IF NOT EXISTS objstore USING objstore()",
 
           // ------------------------------------------------------------------
-          // EMBEDDINGS - sqlite-vec virtual table with auxiliary columns
-          // (Section 3.1, 5.1-5.4) - single unified table per database.md
-          // Note: sqlite-vec has max 16 auxiliary columns, doesn't support DEFAULTs
-          // embedding_id INTEGER PRIMARY KEY aliases rowid (doesn't count as auxiliary)
+          // EPISODES - Episodic boundaries (top of hierarchy)
           // ------------------------------------------------------------------
-          "CREATE VIRTUAL TABLE IF NOT EXISTS embeddings USING vec0("
-          "embedding_id INTEGER PRIMARY KEY,"
-          "embedding float[256],"
-          "+type text,"
-          "+strength float,"
-          "+use_frequency float,"
-          "+stability float,"
-          "+connectivity float,"
-          "+drift_mag float,"
-          "+influence float,"
-          "+sustained_influence float,"
-          "+contextual_gain float,"
-          "+redundancy float,"
-          "+pre_activation float,"
-          "+lability_state float,"
-          "+suppression_count integer,"
-          "+cluster_id integer,"
-          "+last_access integer,"
-          "+created_at integer"
+          "CREATE TABLE IF NOT EXISTS episodes ("
+          "  episode_id INTEGER PRIMARY KEY,"
+          "  start_ts INTEGER NOT NULL,"
+          "  end_ts INTEGER,"
+          "  boundary_type TEXT,"
+          "  centroid BLOB,"
+          "  created_at INTEGER NOT NULL"
           ")",
 
           // ------------------------------------------------------------------
-          // MEMORIES - Memory metadata (The unit of retrieval) (Section 4.4, 6.1)
+          // MEMORIES - Unified memory metadata (was split across 5 tables)
+          // Includes: memories, memory_feedback, rif_state, emotional_tags
           // ------------------------------------------------------------------
           "CREATE TABLE IF NOT EXISTS memories ("
-          "  embedding_id INTEGER PRIMARY KEY,"
-          "  start_ts INTEGER,"
+          "  memory_id INTEGER PRIMARY KEY,"
+          "  episode_id INTEGER,"
+          "  embedding_id INTEGER,"
+          "  blob_id BLOB,"
+          "  source_id TEXT NOT NULL,"
+          "  kind TEXT NOT NULL DEFAULT 'LONG_TERM',"
+          "  label TEXT,"
+          "  start_ts INTEGER NOT NULL,"
           "  end_ts INTEGER,"
-          "  n_signals INTEGER,"
-          "  primary_modality TEXT,"
-          "  content_blob_id BLOB,"
-          "  s_max REAL,"
-          "  s_avg REAL,"
+          "  n_signals INTEGER NOT NULL DEFAULT 1,"
+          "  modality TEXT NOT NULL DEFAULT 'text',"
+          // Score metrics
+          "  s_max REAL NOT NULL DEFAULT 0.0,"
+          "  s_avg REAL NOT NULL DEFAULT 0.0,"
+          // Emotion vectors (6d)
           "  emotion BLOB,"
           "  ambient_mood BLOB,"
-          "  episode_id INTEGER,"
-          "  status TEXT"
-          ")",
-
-          // ------------------------------------------------------------------
-          // SIGNALS - Signal metadata (Discrete inputs) (Section 2.2)
-          // ------------------------------------------------------------------
-          "CREATE TABLE IF NOT EXISTS signals ("
-          "  signal_id INTEGER PRIMARY KEY,"
-          "  embedding_id INTEGER,"
-          "  timestamp INTEGER,"
-          "  modality TEXT,"
-          "  mime TEXT,"
-          "  blob_id BLOB,"
-          "  serial_position INTEGER,"
-          "  score REAL"
-          ")",
-
-          // ------------------------------------------------------------------
-          // MEMORY_FEEDBACK - Retrieval/usage tracking (Section 5.2, 5.4, 6.3, 6.4)
-          // ------------------------------------------------------------------
-          "CREATE TABLE IF NOT EXISTS memory_feedback ("
-          "  embedding_id INTEGER PRIMARY KEY,"
+          // Decay metrics (from embeddings v1)
+          "  strength REAL NOT NULL DEFAULT 1.0,"
+          "  use_frequency REAL NOT NULL DEFAULT 0.0,"
+          "  stability REAL NOT NULL DEFAULT 1.0,"
+          "  connectivity REAL NOT NULL DEFAULT 0.0,"
+          "  drift_mag REAL NOT NULL DEFAULT 0.0,"
+          "  influence REAL NOT NULL DEFAULT 0.0,"
+          "  sustained_influence REAL NOT NULL DEFAULT 0.0,"
+          "  contextual_gain REAL NOT NULL DEFAULT 0.0,"
+          "  redundancy REAL NOT NULL DEFAULT 0.0,"
+          "  pre_activation REAL NOT NULL DEFAULT 0.0,"
+          "  lability_state REAL NOT NULL DEFAULT 0.0,"
+          "  suppression_count INTEGER NOT NULL DEFAULT 0,"
+          "  cluster_id INTEGER,"
+          "  last_access INTEGER,"
+          "  created_at INTEGER NOT NULL,"
+          // Memory feedback (from memory_feedback v1)
           "  retrieved_count INTEGER NOT NULL DEFAULT 0,"
           "  used_count INTEGER NOT NULL DEFAULT 0,"
           "  influence_factor REAL NOT NULL DEFAULT 0.0,"
           "  mean_influence REAL NOT NULL DEFAULT 0.0,"
-          "  last_used INTEGER NOT NULL DEFAULT 0,"
-          "  original_embedding BLOB,"
+          "  last_used INTEGER,"
+          "  original_centroid BLOB,"
           "  lability_ts INTEGER,"
-          "  recovery_time_start INTEGER"
-          ")",
-
-          // ------------------------------------------------------------------
-          // GRAPH_NODES - Knowledge graph nodes (Section 7.4-7.6)
-          // ------------------------------------------------------------------
-          "CREATE TABLE IF NOT EXISTS graph_nodes ("
-          "  node_id TEXT PRIMARY KEY,"
-          "  type TEXT NOT NULL,"
-          "  label TEXT,"
-          "  embedding_id INTEGER,"
-          "  metadata TEXT,"
-          "  created_at INTEGER"
-          ")",
-
-          // ------------------------------------------------------------------
-          // GRAPH_EDGES - Knowledge graph edges (Section 7.4-7.6)
-          // ------------------------------------------------------------------
-          "CREATE TABLE IF NOT EXISTS graph_edges ("
-          "  source_id TEXT NOT NULL,"
-          "  target_id TEXT NOT NULL,"
-          "  edge_type TEXT NOT NULL,"
-          "  weight REAL NOT NULL DEFAULT 1.0,"
-          "  decay_rate REAL,"
-          "  last_reinforced INTEGER,"
-          "  PRIMARY KEY (source_id, target_id, edge_type)"
-          ")",
-          "CREATE INDEX IF NOT EXISTS idx_graph_edges_source ON graph_edges(source_id)",
-          "CREATE INDEX IF NOT EXISTS idx_graph_edges_target ON graph_edges(target_id)",
-          "CREATE INDEX IF NOT EXISTS idx_graph_edges_type ON graph_edges(edge_type)",
-
-          // ------------------------------------------------------------------
-          // CONSOLIDATION_SUMMARIES - Cluster summaries (Section 7.3)
-          // ------------------------------------------------------------------
-          "CREATE TABLE IF NOT EXISTS consolidation_summaries ("
-          "  summary_id TEXT PRIMARY KEY,"
-          "  summary_text TEXT,"
-          "  centroid BLOB,"
-          "  cluster_size INTEGER"
-          ")",
-
-          // ------------------------------------------------------------------
-          // CONSOLIDATION_SOURCES - Source tracking (Section 7.3)
-          // ------------------------------------------------------------------
-          "CREATE TABLE IF NOT EXISTS consolidation_sources ("
-          "  summary_id TEXT,"
-          "  source_embedding_id INTEGER"
-          ")",
-
-          // ------------------------------------------------------------------
-          // EXTRACTION_ENTITIES - Named entities (Section 7.4)
-          // ------------------------------------------------------------------
-          "CREATE TABLE IF NOT EXISTS extraction_entities ("
-          "  summary_id TEXT NOT NULL,"
-          "  name TEXT NOT NULL,"
-          "  type TEXT NOT NULL,"
-          "  salience REAL,"
-          "  embedding_id INTEGER,"
-          "  PRIMARY KEY (summary_id, name, type)"
-          ")",
-
-          // ------------------------------------------------------------------
-          // EXTRACTION_RELATIONS - Semantic relations (Section 7.5)
-          // ------------------------------------------------------------------
-          "CREATE TABLE IF NOT EXISTS extraction_relations ("
-          "  summary_id TEXT NOT NULL,"
-          "  subject TEXT NOT NULL,"
-          "  predicate TEXT NOT NULL,"
-          "  object TEXT NOT NULL,"
-          "  confidence REAL"
-          ")",
-
-          // ------------------------------------------------------------------
-          // ENTITY_INDEX - Name to node mapping (Section 7.5)
-          // ------------------------------------------------------------------
-          "CREATE TABLE IF NOT EXISTS entity_index ("
-          "  name TEXT PRIMARY KEY,"
-          "  node_id TEXT NOT NULL"
-          ")",
-
-          // ------------------------------------------------------------------
-          // GOAL_NODES - Goal alignment targets
-          // ------------------------------------------------------------------
-          "CREATE TABLE IF NOT EXISTS goal_nodes ("
-          "  node_id TEXT PRIMARY KEY"
-          ")",
-
-          // ------------------------------------------------------------------
-          // RIF_STATE - Retrieval-Induced Forgetting (Section 8.4)
-          // ------------------------------------------------------------------
-          "CREATE TABLE IF NOT EXISTS rif_state ("
-          "  embedding_id INTEGER PRIMARY KEY,"
+          "  recovery_time_start INTEGER,"
+          // RIF state (from rif_state v1)
           "  suppression REAL NOT NULL DEFAULT 0.0,"
-          "  ts INTEGER"
-          ")",
-
-          // ------------------------------------------------------------------
-          // EMOTIONAL_TAGS - Flashbulb/emotional consolidation (Section 8.7)
-          // ------------------------------------------------------------------
-          "CREATE TABLE IF NOT EXISTS emotional_tags ("
-          "  embedding_id INTEGER PRIMARY KEY,"
+          "  suppression_ts INTEGER,"
+          // Flashbulb (from emotional_tags v1)
           "  flashbulb INTEGER NOT NULL DEFAULT 0,"
-          "  intensity REAL NOT NULL DEFAULT 0.0,"
-          "  arousal REAL NOT NULL DEFAULT 0.0,"
-          "  valence REAL NOT NULL DEFAULT 0.5,"
+          "  emotional_intensity REAL NOT NULL DEFAULT 0.0,"
           "  half_life_bonus REAL NOT NULL DEFAULT 0.0,"
           "  detail_suppression REAL NOT NULL DEFAULT 0.0,"
           "  gist_components INTEGER NOT NULL DEFAULT 0,"
           "  cascade_radius INTEGER NOT NULL DEFAULT 0,"
-          "  cascade_decay REAL NOT NULL DEFAULT 0.0,"
-          "  flashbulb_threshold_eff REAL NOT NULL DEFAULT 0.0,"
-          "  ts INTEGER"
+          "  cascade_decay REAL NOT NULL DEFAULT 0.0"
           ")",
 
           // ------------------------------------------------------------------
-          // CONSOLIDATION_CANDIDATES - Scoring candidates (Section 9.2)
+          // SIGNALS - Extended signal metadata with inline metrics
+          // (was split: signals + signal_metrics)
           // ------------------------------------------------------------------
-          "CREATE TABLE IF NOT EXISTS consolidation_candidates ("
-          "  embedding_id INTEGER PRIMARY KEY,"
-          "  score REAL NOT NULL,"
-          "  created_at INTEGER,"
-          "  reason TEXT"
-          ")",
-
-          // ------------------------------------------------------------------
-          // EPISODES - Episodic boundaries (Section 3.1.3)
-          // ------------------------------------------------------------------
-          "CREATE TABLE IF NOT EXISTS episodes ("
-          "  id INTEGER PRIMARY KEY,"
-          "  start_ts INTEGER NOT NULL,"
-          "  end_ts INTEGER,"
-          "  boundary_type TEXT,"
-          "  centroid BLOB"
-          ")",
-          "CREATE INDEX IF NOT EXISTS idx_episodes_start ON episodes(start_ts)",
-
-          // ------------------------------------------------------------------
-          // SIGNAL_METRICS - Per-signal composite scoring (Section 3.1-3.3)
-          // ------------------------------------------------------------------
-          "CREATE TABLE IF NOT EXISTS signal_metrics ("
-          "  id INTEGER PRIMARY KEY,"
+          "CREATE TABLE IF NOT EXISTS signals ("
+          "  signal_id INTEGER PRIMARY KEY,"
+          "  memory_id INTEGER,"
+          "  source_id TEXT NOT NULL,"
+          "  embedding_id INTEGER NOT NULL,"
+          "  blob_id BLOB,"
           "  timestamp INTEGER NOT NULL,"
-          "  embedding_id INTEGER,"
+          "  modality TEXT NOT NULL DEFAULT 'text',"
+          "  mime TEXT,"
+          "  serial_position INTEGER NOT NULL DEFAULT 0,"
+          // Inline metrics (from signal_metrics v1)
+          "  score REAL NOT NULL DEFAULT 0.0,"
           "  relevance REAL,"
           "  mismatch REAL,"
           "  surprise REAL,"
@@ -380,118 +254,129 @@ RegisterCoreSchema (SchemaRegistry &registry)
           "  salience REAL,"
           "  valence REAL,"
           "  arousal REAL,"
-          "  composite_score REAL,"
           "  threshold_t REAL,"
           "  write_decision INTEGER,"
           "  coherence REAL,"
           "  focus_spread REAL,"
-          "  f_effective REAL"
+          "  f_effective REAL,"
+          "  created_at INTEGER NOT NULL"
           ")",
-          "CREATE INDEX IF NOT EXISTS idx_signal_metrics_ts ON signal_metrics(timestamp)",
 
           // ------------------------------------------------------------------
-          // PROCESSOR_STATE - Full algorithm state (singleton, id=1)
+          // EMBEDDINGS - Minimal sqlite-vec virtual table
+          // Most metadata moved to MEMORIES
           // ------------------------------------------------------------------
-          "CREATE TABLE IF NOT EXISTS processor_state ("
+          "CREATE VIRTUAL TABLE IF NOT EXISTS embeddings USING vec0("
+          "embedding_id INTEGER PRIMARY KEY,"
+          "embedding float[256],"
+          "+created_at integer"
+          ")",
+
+          // ------------------------------------------------------------------
+          // ASSOCIATIONS - Unified graph (was graph_nodes + graph_edges)
+          // ------------------------------------------------------------------
+          "CREATE TABLE IF NOT EXISTS associations ("
+          "  source_memory_id INTEGER NOT NULL,"
+          "  target_memory_id INTEGER NOT NULL,"
+          "  edge_type TEXT NOT NULL,"
+          "  weight REAL NOT NULL DEFAULT 1.0,"
+          "  decay_rate REAL,"
+          "  last_reinforced INTEGER,"
+          "  PRIMARY KEY (source_memory_id, target_memory_id, edge_type)"
+          ")",
+
+          // ------------------------------------------------------------------
+          // ACCUMULATORS - Write pacing per source (was accumulator_state)
+          // ------------------------------------------------------------------
+          "CREATE TABLE IF NOT EXISTS accumulators ("
+          "  source_id TEXT PRIMARY KEY,"
+          "  episode_id INTEGER,"
+          "  mu_acc BLOB,"
+          "  drift_acc REAL NOT NULL DEFAULT 0.0,"
+          "  s_sum REAL NOT NULL DEFAULT 0.0,"
+          "  s_max REAL NOT NULL DEFAULT 0.0,"
+          "  e_peak BLOB,"
+          "  t_start INTEGER NOT NULL DEFAULT 0,"
+          "  last_write_ts INTEGER NOT NULL DEFAULT 0,"
+          "  last_signal_ts INTEGER NOT NULL DEFAULT 0,"
+          "  eta_acc REAL NOT NULL DEFAULT 0.0,"
+          "  coherence_prev REAL NOT NULL DEFAULT 1.0"
+          ")",
+
+          // ------------------------------------------------------------------
+          // STATE - Unified processor state (singleton, id=1)
+          // Includes: processor_state + 4 blender tables
+          // ------------------------------------------------------------------
+          "CREATE TABLE IF NOT EXISTS state ("
           "  id INTEGER PRIMARY KEY CHECK (id = 1),"
           "  signals_processed INTEGER NOT NULL DEFAULT 0,"
-          // Threshold state (Section 4)
+          // Threshold state
           "  theta_dynamic REAL NOT NULL DEFAULT 0.2,"
           "  theta_target REAL NOT NULL DEFAULT 0.2,"
           "  hysteresis REAL NOT NULL DEFAULT 0.05,"
           "  half_life REAL NOT NULL DEFAULT 120.0,"
-          // Focus state (Section 2.1)
+          // Focus state
           "  weight_relevance REAL NOT NULL DEFAULT 0.5,"
-          "  weight_relevance_prior REAL NOT NULL DEFAULT 0.5,"
           "  attention_width REAL NOT NULL DEFAULT 1.57,"
-          "  attention_width_prior REAL NOT NULL DEFAULT 1.57,"
           "  coverage_gain_floor REAL NOT NULL DEFAULT 0.65,"
-          "  coverage_gain_floor_prior REAL NOT NULL DEFAULT 0.65,"
           "  mismatch_weight REAL NOT NULL DEFAULT 0.5,"
-          "  mismatch_weight_prior REAL NOT NULL DEFAULT 0.5,"
-          // Sensitivity state (Section 2.2)
+          // Sensitivity state
           "  weight_novelty REAL NOT NULL DEFAULT 0.3,"
-          "  weight_novelty_prior REAL NOT NULL DEFAULT 0.3,"
           "  weight_surprise REAL NOT NULL DEFAULT 0.2,"
-          "  weight_surprise_prior REAL NOT NULL DEFAULT 0.2,"
           "  weight_valence REAL NOT NULL DEFAULT 0.4,"
-          "  weight_valence_prior REAL NOT NULL DEFAULT 0.4,"
           "  weight_arousal REAL NOT NULL DEFAULT 0.0,"
-          "  weight_arousal_prior REAL NOT NULL DEFAULT 0.0,"
           "  emotion_gain REAL NOT NULL DEFAULT 1.0,"
-          "  emotion_gain_prior REAL NOT NULL DEFAULT 1.0,"
           "  score_gain REAL NOT NULL DEFAULT 1.0,"
-          "  score_gain_prior REAL NOT NULL DEFAULT 1.0,"
           "  rate_target REAL NOT NULL DEFAULT 0.2,"
-          "  rate_target_prior REAL NOT NULL DEFAULT 0.2,"
-          "  base_rate_prior REAL NOT NULL DEFAULT 0.2,"
-          "  weight_emotion_prior REAL NOT NULL DEFAULT 0.2,"
-          // Emotion state (Section 2.2.2-4)
+          // Emotion state
           "  emotion_intensity REAL NOT NULL DEFAULT 0.0,"
           "  valence REAL NOT NULL DEFAULT 0.5,"
           "  arousal REAL NOT NULL DEFAULT 0.0,"
           "  mood_vector BLOB,"
-          // Stability state (Section 2.3)
+          // Stability state
           "  rate_decay REAL NOT NULL DEFAULT 0.60,"
-          "  rate_decay_prior REAL NOT NULL DEFAULT 0.60,"
           "  periphery_half_life REAL NOT NULL DEFAULT 120.0,"
-          "  periphery_half_life_prior REAL NOT NULL DEFAULT 120.0,"
           "  salience_half_life REAL NOT NULL DEFAULT 120.0,"
-          "  salience_half_life_prior REAL NOT NULL DEFAULT 120.0,"
           "  drift_weight REAL NOT NULL DEFAULT 0.5,"
-          "  drift_weight_prior REAL NOT NULL DEFAULT 0.5,"
           "  retention_ema REAL NOT NULL DEFAULT 0.0,"
-          "  hysteresis_band_prior REAL NOT NULL DEFAULT 0.02,"
-          "  half_life_prior REAL NOT NULL DEFAULT 120.0,"
-          // Rate control (Section 4.2)
+          // Rate control
           "  m_rate REAL NOT NULL DEFAULT 0.0,"
           "  dt_ema REAL NOT NULL DEFAULT 0.0,"
           "  rate_ticks INTEGER NOT NULL DEFAULT 0,"
           "  last_rate_timestamp INTEGER NOT NULL DEFAULT 0,"
           "  reliability REAL NOT NULL DEFAULT 1.0,"
-          // Uncertainty (Section 1.4)
+          // Uncertainty
           "  u_uncertainty REAL NOT NULL DEFAULT 0.0,"
-          // Embedding prediction (Section 3.1.4)
+          // Embedding prediction
           "  last_embedding BLOB,"
           "  delta_x_trend BLOB,"
           "  delta_half_life_adj REAL NOT NULL DEFAULT 0.0,"
           "  sustained_influence REAL NOT NULL DEFAULT 0.0,"
-          // Working memory (Section 6.1)
+          // Working memory
           "  wm_maintenance_cost REAL NOT NULL DEFAULT 0.0,"
           "  wm_slot_count INTEGER NOT NULL DEFAULT 0,"
           "  wm_last_accepted INTEGER NOT NULL DEFAULT 0,"
           "  wm_last_chunked INTEGER NOT NULL DEFAULT 0,"
-          // Metacognition (Section 6.2)
+          // Metacognition
           "  fok_state REAL NOT NULL DEFAULT 0.0,"
           "  retrieval_strength REAL NOT NULL DEFAULT 0.0,"
           "  metacognitive_confidence REAL NOT NULL DEFAULT 0.0,"
-          // Consolidation (Section 7.1)
+          // Consolidation
           "  last_consolidation_ts INTEGER NOT NULL DEFAULT 0,"
           "  consolidation_count INTEGER NOT NULL DEFAULT 0,"
           "  is_processing_signal INTEGER NOT NULL DEFAULT 0,"
           "  last_retrieval_ts INTEGER NOT NULL DEFAULT 0,"
-          // Streaming pacing (Section 10)
+          // Streaming pacing
           "  drift_accum REAL NOT NULL DEFAULT 0.0,"
           "  drift_at_last_interrupt REAL NOT NULL DEFAULT 0.0,"
-          // Episode tracking (Section 3.1.3)
+          // Episode tracking
           "  episode_start_ts INTEGER NOT NULL DEFAULT 0,"
           "  last_interrupt_tick INTEGER NOT NULL DEFAULT 0,"
-          // Initialization flags
-          "  focus_priors_initialized INTEGER NOT NULL DEFAULT 0,"
-          "  sensitivity_priors_initialized INTEGER NOT NULL DEFAULT 0,"
-          "  stability_priors_initialized INTEGER NOT NULL DEFAULT 0,"
-          // Timestamps
           "  last_signal_timestamp INTEGER NOT NULL DEFAULT 0,"
           "  updated_at INTEGER NOT NULL DEFAULT 0,"
-          // Rate window (Section 2.2)
-          "  write_rate_timestamps BLOB"
-          ")",
-
-          // ------------------------------------------------------------------
-          // BLENDER_WEIGHTS - RLS-fitted metric weights (Section 3.2)
-          // ------------------------------------------------------------------
-          "CREATE TABLE IF NOT EXISTS blender_weights ("
-          "  id INTEGER PRIMARY KEY CHECK (id = 1),"
+          // Write rate
+          "  write_rate_timestamps BLOB,"
+          // Blender weights (from blender_weights v1)
           "  w_relevance REAL,"
           "  w_mismatch REAL,"
           "  w_surprise REAL,"
@@ -505,126 +390,150 @@ RegisterCoreSchema (SchemaRegistry &registry)
           "  w_valence REAL,"
           "  w_arousal REAL,"
           "  blender_ready INTEGER NOT NULL DEFAULT 0,"
-          "  update_count INTEGER NOT NULL DEFAULT 0"
+          "  blender_update_count INTEGER NOT NULL DEFAULT 0,"
+          // Blender covariance (from blender_covariance v1)
+          "  blender_P_matrix BLOB,"
+          // Blender coefficients (from blender_coefficients v1)
+          "  blender_coefficients BLOB,"
+          // Blender coeff covariance (from blender_coeff_covariance v1)
+          "  blender_coeff_P_matrix BLOB"
           ")",
 
           // ------------------------------------------------------------------
-          // BLENDER_COVARIANCE - RLS P matrix 12x12 (Section 3.2)
+          // EPISODES indexes
           // ------------------------------------------------------------------
-          "CREATE TABLE IF NOT EXISTS blender_covariance ("
-          "  id INTEGER PRIMARY KEY CHECK (id = 1),"
-          "  P_matrix BLOB"
-          ")",
+          "CREATE INDEX IF NOT EXISTS idx_episodes_end ON episodes(end_ts) WHERE end_ts IS NULL",
 
           // ------------------------------------------------------------------
-          // BLENDER_COEFFICIENTS - RLS learned coefficients (Section 3.2)
+          // MEMORIES indexes
           // ------------------------------------------------------------------
-          "CREATE TABLE IF NOT EXISTS blender_coefficients ("
-          "  id INTEGER PRIMARY KEY CHECK (id = 1),"
-          "  coefficients BLOB,"
-          "  update_count INTEGER NOT NULL DEFAULT 0"
-          ")",
-
-          // ------------------------------------------------------------------
-          // BLENDER_COEFF_COVARIANCE - RLS P matrix 48x48 (Section 3.2)
-          // ------------------------------------------------------------------
-          "CREATE TABLE IF NOT EXISTS blender_coeff_covariance ("
-          "  id INTEGER PRIMARY KEY CHECK (id = 1),"
-          "  P_matrix BLOB"
-          ")",
-
-          // ------------------------------------------------------------------
-          // RECENT_CONTEXT - Sliding window of context embeddings
-          // ------------------------------------------------------------------
-          "CREATE TABLE IF NOT EXISTS recent_context ("
-          "  id INTEGER PRIMARY KEY,"
-          "  embedding BLOB NOT NULL,"
-          "  timestamp INTEGER NOT NULL,"
-          "  seq_order INTEGER NOT NULL"
-          ")",
-          "CREATE INDEX IF NOT EXISTS idx_recent_context_seq ON recent_context(seq_order)",
-
-          // ------------------------------------------------------------------
-          // RECENT_SCORES - Sliding window of composite scores
-          // ------------------------------------------------------------------
-          "CREATE TABLE IF NOT EXISTS recent_scores ("
-          "  id INTEGER PRIMARY KEY,"
-          "  score REAL NOT NULL,"
-          "  timestamp INTEGER NOT NULL"
-          ")",
-          "CREATE INDEX IF NOT EXISTS idx_recent_scores_ts ON recent_scores(timestamp)",
-
-          // ------------------------------------------------------------------
-          // OBSERVED_RETENTION_HISTORY - Retention observations (Section 2.3.2)
-          // ------------------------------------------------------------------
-          "CREATE TABLE IF NOT EXISTS observed_retention_history ("
-          "  id INTEGER PRIMARY KEY,"
-          "  retention_value REAL NOT NULL,"
-          "  timestamp INTEGER NOT NULL"
-          ")",
-          "CREATE INDEX IF NOT EXISTS idx_retention_history_ts ON observed_retention_history(timestamp)",
-
-          // ------------------------------------------------------------------
-          // WORKING_MEMORY_SLOTS - Session persistence (Section 6.1)
-          // ------------------------------------------------------------------
-          "CREATE TABLE IF NOT EXISTS working_memory_slots ("
-          "  id INTEGER PRIMARY KEY,"
-          "  slot_index INTEGER NOT NULL,"
-          "  embedding_id INTEGER,"
-          "  strength REAL NOT NULL DEFAULT 0.0,"
-          "  timestamp INTEGER NOT NULL,"
-          "  embedding BLOB NOT NULL"
-          ")",
-          "CREATE INDEX IF NOT EXISTS idx_wm_slots_index ON working_memory_slots(slot_index)",
-
-          // ------------------------------------------------------------------
-          // RECENT_IDS - LRU tracking for novelty detection (Section 8.6, Algorithm 27)
-          // ------------------------------------------------------------------
-          "CREATE TABLE IF NOT EXISTS recent_ids ("
-          "  id INTEGER PRIMARY KEY,"
-          "  embedding_id INTEGER NOT NULL,"
-          "  access_type INTEGER NOT NULL,"  // 0=inserted, 1=retrieved
-          "  timestamp INTEGER NOT NULL,"
-          "  seq_order INTEGER NOT NULL"
-          ")",
-          "CREATE INDEX IF NOT EXISTS idx_recent_ids_embedding ON recent_ids(embedding_id)",
-          "CREATE INDEX IF NOT EXISTS idx_recent_ids_seq ON recent_ids(seq_order)",
-
-          // ------------------------------------------------------------------
-          // RECENT_RETRIEVALS - Implicit feedback cache (Section 5.2)
-          // ------------------------------------------------------------------
-          "CREATE TABLE IF NOT EXISTS recent_retrievals ("
-          "  id INTEGER PRIMARY KEY,"
-          "  embedding_id INTEGER NOT NULL,"
-          "  timestamp INTEGER NOT NULL,"
-          "  seq_order INTEGER NOT NULL"
-          ")",
-          "CREATE INDEX IF NOT EXISTS idx_recent_retrievals_embedding ON recent_retrievals(embedding_id)",
-          "CREATE INDEX IF NOT EXISTS idx_recent_retrievals_seq ON recent_retrievals(seq_order)",
-
-          // ------------------------------------------------------------------
-          // ACCUMULATOR_STATE - Write pacing accumulator (Section 4.4)
-          // ------------------------------------------------------------------
-          "CREATE TABLE IF NOT EXISTS accumulator_state ("
-          "  source_id TEXT PRIMARY KEY,"
-          "  mu_acc BLOB,"                           // 256d running mean
-          "  drift_acc REAL NOT NULL DEFAULT 0.0,"   // accumulated drift
-          "  s_sum REAL NOT NULL DEFAULT 0.0,"       // score sum
-          "  s_max REAL NOT NULL DEFAULT 0.0,"       // max score
-          "  n_signals INTEGER NOT NULL DEFAULT 0,"  // count
-          "  e_peak BLOB,"                           // 256d peak embedding
-          "  t_start INTEGER NOT NULL DEFAULT 0,"
-          "  last_write_ts INTEGER NOT NULL DEFAULT 0,"
-          "  last_signal_ts INTEGER NOT NULL DEFAULT 0,"
-          "  eta_acc REAL NOT NULL DEFAULT 0.0,"     // drift EWMA
-          "  coherence_prev REAL NOT NULL DEFAULT 1.0"
-          ")",
+          "CREATE INDEX IF NOT EXISTS idx_memories_episode ON memories(episode_id, start_ts)",
+          "CREATE INDEX IF NOT EXISTS idx_memories_kind ON memories(kind)",
+          "CREATE INDEX IF NOT EXISTS idx_memories_working ON memories(end_ts) WHERE kind = 'WORKING'",
+          "CREATE INDEX IF NOT EXISTS idx_memories_strength ON memories(strength, last_access)",
+          "CREATE INDEX IF NOT EXISTS idx_memories_cluster ON memories(cluster_id) WHERE cluster_id IS NOT NULL",
 
           // ------------------------------------------------------------------
           // SIGNALS indexes
           // ------------------------------------------------------------------
-          "CREATE INDEX IF NOT EXISTS idx_signals_embedding ON signals(embedding_id)",
-          "CREATE INDEX IF NOT EXISTS idx_signals_timestamp ON signals(timestamp)",
+          "CREATE INDEX IF NOT EXISTS idx_signals_memory ON signals(memory_id, serial_position)",
+          "CREATE INDEX IF NOT EXISTS idx_signals_source ON signals(source_id) WHERE memory_id IS NULL",
+          "CREATE INDEX IF NOT EXISTS idx_signals_ts ON signals(timestamp DESC)",
+
+          // ------------------------------------------------------------------
+          // ASSOCIATIONS indexes
+          // ------------------------------------------------------------------
+          "CREATE INDEX IF NOT EXISTS idx_associations_source ON associations(source_memory_id, edge_type)",
+          "CREATE INDEX IF NOT EXISTS idx_associations_target ON associations(target_memory_id, edge_type)",
+
+          // ------------------------------------------------------------------
+          // ACCUMULATORS indexes
+          // ------------------------------------------------------------------
+          "CREATE INDEX IF NOT EXISTS idx_accumulators_episode ON accumulators(episode_id)",
+
+          // ------------------------------------------------------------------
+          // Views (Computed Windows) - replace sliding window tables
+          // ------------------------------------------------------------------
+          "CREATE VIEW IF NOT EXISTS recent_context AS "
+          "SELECT s.embedding_id, e.embedding, s.timestamp "
+          "FROM signals s "
+          "JOIN embeddings e ON s.embedding_id = e.embedding_id "
+          "ORDER BY s.timestamp DESC "
+          "LIMIT 64",
+
+          "CREATE VIEW IF NOT EXISTS recent_scores AS "
+          "SELECT signal_id, score, timestamp "
+          "FROM signals "
+          "WHERE score IS NOT NULL "
+          "ORDER BY timestamp DESC "
+          "LIMIT 100",
+
+          "CREATE VIEW IF NOT EXISTS recent_ids AS "
+          "SELECT DISTINCT embedding_id, timestamp "
+          "FROM signals "
+          "ORDER BY timestamp DESC "
+          "LIMIT 1024",
+
+          "CREATE VIEW IF NOT EXISTS recent_retrievals AS "
+          "SELECT memory_id, last_access as timestamp "
+          "FROM memories "
+          "WHERE last_access IS NOT NULL "
+          "ORDER BY last_access DESC "
+          "LIMIT 128",
+
+          // ------------------------------------------------------------------
+          // Legacy compatibility tables (kept for extraction/consolidation)
+          // These will be migrated in later phases
+          // ------------------------------------------------------------------
+          "CREATE TABLE IF NOT EXISTS consolidation_summaries ("
+          "  summary_id TEXT PRIMARY KEY,"
+          "  summary_text TEXT,"
+          "  centroid BLOB,"
+          "  cluster_size INTEGER"
+          ")",
+
+          "CREATE TABLE IF NOT EXISTS consolidation_sources ("
+          "  summary_id TEXT,"
+          "  source_embedding_id INTEGER"
+          ")",
+
+          "CREATE TABLE IF NOT EXISTS extraction_entities ("
+          "  summary_id TEXT NOT NULL,"
+          "  name TEXT NOT NULL,"
+          "  type TEXT NOT NULL,"
+          "  salience REAL,"
+          "  embedding_id INTEGER,"
+          "  PRIMARY KEY (summary_id, name, type)"
+          ")",
+
+          "CREATE TABLE IF NOT EXISTS extraction_relations ("
+          "  summary_id TEXT NOT NULL,"
+          "  subject TEXT NOT NULL,"
+          "  predicate TEXT NOT NULL,"
+          "  object TEXT NOT NULL,"
+          "  confidence REAL"
+          ")",
+
+          "CREATE TABLE IF NOT EXISTS entity_index ("
+          "  name TEXT PRIMARY KEY,"
+          "  node_id TEXT NOT NULL"
+          ")",
+
+          "CREATE TABLE IF NOT EXISTS goal_nodes ("
+          "  node_id TEXT PRIMARY KEY"
+          ")",
+
+          "CREATE TABLE IF NOT EXISTS consolidation_candidates ("
+          "  embedding_id INTEGER PRIMARY KEY,"
+          "  score REAL NOT NULL,"
+          "  created_at INTEGER,"
+          "  reason TEXT"
+          ")",
+
+          // ------------------------------------------------------------------
+          // Legacy graph tables (for backward compatibility during migration)
+          // ------------------------------------------------------------------
+          "CREATE TABLE IF NOT EXISTS graph_nodes ("
+          "  node_id TEXT PRIMARY KEY,"
+          "  type TEXT NOT NULL,"
+          "  label TEXT,"
+          "  embedding_id INTEGER,"
+          "  metadata TEXT,"
+          "  created_at INTEGER"
+          ")",
+
+          "CREATE TABLE IF NOT EXISTS graph_edges ("
+          "  source_id TEXT NOT NULL,"
+          "  target_id TEXT NOT NULL,"
+          "  edge_type TEXT NOT NULL,"
+          "  weight REAL NOT NULL DEFAULT 1.0,"
+          "  decay_rate REAL,"
+          "  last_reinforced INTEGER,"
+          "  PRIMARY KEY (source_id, target_id, edge_type)"
+          ")",
+          "CREATE INDEX IF NOT EXISTS idx_graph_edges_source ON graph_edges(source_id)",
+          "CREATE INDEX IF NOT EXISTS idx_graph_edges_target ON graph_edges(target_id)",
+          "CREATE INDEX IF NOT EXISTS idx_graph_edges_type ON graph_edges(edge_type)",
       },
   });
 }

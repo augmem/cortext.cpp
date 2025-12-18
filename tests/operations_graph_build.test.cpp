@@ -161,18 +161,22 @@ TEST_CASE ("Phase4: co-occurrence edges are created for similar embeddings",
   auto emb1 = Make256DEmb ({ 1.0f, 0.0f, 0.0f, 0.0f }); // Normalized direction
   auto emb2 = Make256DEmb ({ 0.95f, 0.05f, 0.0f, 0.0f }); // Similar direction
 
-  store->Execute ("INSERT INTO embeddings (embedding_id, embedding, type, strength, "
-                  "use_frequency, stability, connectivity, drift_mag, influence, "
-                  "sustained_influence, contextual_gain, redundancy, pre_activation, "
-                  "lability_state, suppression_count) VALUES (?, ?, 'memory', 1.0, 0.0, "
-                  "1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0)",
-                  { 1LL, emb1 });
-  store->Execute ("INSERT INTO embeddings (embedding_id, embedding, type, strength, "
-                  "use_frequency, stability, connectivity, drift_mag, influence, "
-                  "sustained_influence, contextual_gain, redundancy, pre_activation, "
-                  "lability_state, suppression_count) VALUES (?, ?, 'memory', 1.0, 0.0, "
-                  "1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0)",
-                  { 2LL, emb2 });
+  // v2: Insert into embeddings (minimal vec0 table)
+  store->Execute ("INSERT INTO embeddings (embedding_id, embedding, created_at) "
+                  "VALUES (?, ?, ?)",
+                  { 1LL, emb1, 0LL });
+  store->Execute ("INSERT INTO embeddings (embedding_id, embedding, created_at) "
+                  "VALUES (?, ?, ?)",
+                  { 2LL, emb2, 0LL });
+  // v2: Insert into memories (comprehensive metadata)
+  store->Execute ("INSERT INTO memories (memory_id, embedding_id, source_id, kind, "
+                  "start_ts, n_signals, modality, s_max, s_avg, strength, created_at) "
+                  "VALUES (?, ?, 'test', 'LONG_TERM', 0, 1, 'text', 0.5, 0.5, 1.0, 0)",
+                  { 1LL, 1LL });
+  store->Execute ("INSERT INTO memories (memory_id, embedding_id, source_id, kind, "
+                  "start_ts, n_signals, modality, s_max, s_avg, strength, created_at) "
+                  "VALUES (?, ?, 'test', 'LONG_TERM', 0, 1, 'text', 0.5, 0.5, 1.0, 0)",
+                  { 2LL, 2LL });
 
   // Create consolidation data
   store->Execute ("INSERT INTO consolidation_summaries (summary_id, summary_text, "
@@ -222,30 +226,25 @@ TEST_CASE ("Phase4: causal edges are created for temporal drift",
   auto emb1 = Make256DEmb ({ 1.0f, 0.0f, 0.0f, 0.0f });
   auto emb2 = Make256DEmb ({ 0.5f, 0.5f, 0.5f, 0.0f }); // Different direction
 
-  store->Execute ("INSERT INTO embeddings (embedding_id, embedding, type, strength, "
-                  "use_frequency, stability, connectivity, drift_mag, influence, "
-                  "sustained_influence, contextual_gain, redundancy, pre_activation, "
-                  "lability_state, suppression_count) VALUES (?, ?, 'memory', 1.0, 0.0, "
-                  "1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0)",
-                  { 1LL, emb1 });
-  store->Execute ("INSERT INTO embeddings (embedding_id, embedding, type, strength, "
-                  "use_frequency, stability, connectivity, drift_mag, influence, "
-                  "sustained_influence, contextual_gain, redundancy, pre_activation, "
-                  "lability_state, suppression_count) VALUES (?, ?, 'memory', 1.0, 0.0, "
-                  "1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0)",
-                  { 2LL, emb2 });
+  // v2: Insert into embeddings (minimal vec0 table)
+  store->Execute ("INSERT INTO embeddings (embedding_id, embedding, created_at) "
+                  "VALUES (?, ?, ?)",
+                  { 1LL, emb1, 0LL });
+  store->Execute ("INSERT INTO embeddings (embedding_id, embedding, created_at) "
+                  "VALUES (?, ?, ?)",
+                  { 2LL, emb2, 0LL });
 
-  // Add memories with temporal ordering (end_ts used for ordering per schema)
+  // v2: Add memories with temporal ordering (end_ts used for ordering per schema)
   store->Execute (
-      "INSERT INTO memories (embedding_id, start_ts, end_ts, n_signals, "
-      "primary_modality, s_max, s_avg, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-      { 1LL, 900LL, 1000LL, 1LL, std::string ("text"), 0.5, 0.5,
-        std::string ("active") });
+      "INSERT INTO memories (memory_id, embedding_id, source_id, kind, start_ts, "
+      "end_ts, n_signals, modality, s_max, s_avg, strength, created_at) "
+      "VALUES (?, ?, 'test', 'LONG_TERM', ?, ?, ?, ?, ?, ?, 1.0, 0)",
+      { 1LL, 1LL, 900LL, 1000LL, 1LL, std::string ("text"), 0.5, 0.5 });
   store->Execute (
-      "INSERT INTO memories (embedding_id, start_ts, end_ts, n_signals, "
-      "primary_modality, s_max, s_avg, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-      { 2LL, 1900LL, 2000LL, 1LL, std::string ("text"), 0.5, 0.5,
-        std::string ("active") }); // Later timestamp
+      "INSERT INTO memories (memory_id, embedding_id, source_id, kind, start_ts, "
+      "end_ts, n_signals, modality, s_max, s_avg, strength, created_at) "
+      "VALUES (?, ?, 'test', 'LONG_TERM', ?, ?, ?, ?, ?, ?, 1.0, 0)",
+      { 2LL, 2LL, 1900LL, 2000LL, 1LL, std::string ("text"), 0.5, 0.5 }); // Later timestamp
 
   // Create consolidation data
   store->Execute ("INSERT INTO consolidation_summaries (summary_id, summary_text, "

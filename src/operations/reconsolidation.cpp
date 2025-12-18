@@ -1,13 +1,11 @@
 #include "cortext/operations/reconsolidation.hpp"
 
-#include "cortext/store/store.hpp"
 #include "cortext/core/algorithms.hpp"
 #include "cortext/core/knobs.hpp"
 #include "cortext/core/utils.hpp"
 #include "cortext/operations/constants.hpp"
 #include "cortext/processor/operation_context.hpp"
 #include "cortext/store/schema.hpp"
-#include "cortext/store/schema_helpers.hpp"
 #include "cortext/store/store.hpp"
 #include <Eigen/Dense>
 #include <algorithm>
@@ -194,42 +192,29 @@ LoadEmbedding (Store *store, long long embedding_id, int expected_dim = 256)
   return std::nullopt;
 }
 
-/// @brief Writes ripple updates for a neighbor embedding.
+/// @brief Writes ripple updates for a neighbor embedding (v2 schema).
 inline void
 WriteNeighborUpdates (Transaction &tx, long long embedding_id,
                       double lability, long long timestamp,
                       const Eigen::VectorXf &blended)
 {
-  // Ensure memory_feedback row exists
-  tx.Execute ("INSERT INTO memory_feedback "
-              "(embedding_id, retrieved_count, used_count, last_used) "
-              "SELECT ?, 0, 0, 0 "
-              "WHERE NOT EXISTS (SELECT 1 FROM "
-              "memory_feedback WHERE embedding_id = ?)",
-              { embedding_id, embedding_id });
-
-  // Update lability_state in embeddings (unified table)
-  tx.Execute ("UPDATE embeddings "
-              "SET lability_state = ? "
+  // Update lability_state and lability_ts in memories table (v2: merged from
+  // memory_feedback)
+  tx.Execute ("UPDATE memories "
+              "SET lability_state = ?, lability_ts = ? "
               "WHERE embedding_id = ?",
-              { lability, embedding_id });
-
-  // Update lability_ts in memory_feedback
-  tx.Execute ("UPDATE memory_feedback "
-              "SET lability_ts = ? "
-              "WHERE embedding_id = ?",
-              { timestamp, embedding_id });
+              { lability, timestamp, embedding_id });
 
   // Update embeddings with blended embedding
   // Note: sqlite-vec virtual tables don't support UPDATE on vector columns,
-  // so we use DELETE + INSERT instead, preserving all metadata fields
+  // so we use DELETE + INSERT instead
   tx.Execute ("DELETE FROM embeddings WHERE embedding_id = ?",
               { embedding_id });
 
-  tx.Execute (std::string ("INSERT INTO embeddings (")
-                  + store::kEmbeddingsReconsolidateColumns + ") VALUES ("
-                  + store::kEmbeddingsReconsolidateDefaults + ")",
-              { embedding_id, ToFloatVector (blended), lability });
+  // v2: Minimal embeddings table (embedding_id, embedding, created_at)
+  tx.Execute ("INSERT INTO embeddings (embedding_id, embedding, created_at) "
+              "VALUES (?, ?, ?)",
+              { embedding_id, ToFloatVector (blended), timestamp });
 }
 
 } // namespace
@@ -304,26 +289,15 @@ ApplyReconsolidation::Execute (OperationContext &context, Transaction &tx) const
 
       // Note: embeddings row already exists - no need to ensure it exists
 
-      // Ensure memory_feedback row exists for retrieval tracking.
-      tx.Execute ("INSERT INTO memory_feedback "
-                  "(embedding_id, retrieved_count, used_count, last_used) "
-                  "SELECT ?, 0, 0, 0 "
-                  "WHERE NOT EXISTS (SELECT 1 FROM "
-                  "memory_feedback WHERE embedding_id = ?)",
-                  { embedding_id, embedding_id });
-
-      // Update lability_state in embeddings (unified table).
-      tx.Execute ("UPDATE embeddings "
-                  "SET lability_state = ? "
-                  "WHERE embedding_id = ?",
-                  { current_lability, embedding_id });
-
-      // Update original_embedding and lability_ts in memory_feedback.
-      tx.Execute ("UPDATE memory_feedback "
-                  "SET original_embedding = COALESCE(original_embedding, ?), "
+      // v2: Update lability_state, original_centroid, and lability_ts in
+      // memories table (merged from memory_feedback)
+      tx.Execute ("UPDATE memories "
+                  "SET lability_state = ?, "
+                  "    original_centroid = COALESCE(original_centroid, ?), "
                   "    lability_ts = ? "
                   "WHERE embedding_id = ?",
-                  { ToFloatVector (u_m), now_ts, embedding_id });
+                  { current_lability, ToFloatVector (u_m), now_ts,
+                    embedding_id });
 
       if (drift_mag < kDriftSkipEpsilon)
         {
@@ -335,16 +309,16 @@ ApplyReconsolidation::Execute (OperationContext &context, Transaction &tx) const
                                 + static_cast<float> (drift_mag) * u_cur;
       blended = Unit (blended);
 
-      // Update embeddings (unified table for vector storage and metadata).
+      // Update embeddings with blended embedding
       // Note: sqlite-vec virtual tables don't support UPDATE on vector columns,
-      // so we use DELETE + INSERT instead, preserving all metadata fields
+      // so we use DELETE + INSERT instead
       tx.Execute ("DELETE FROM embeddings WHERE embedding_id = ?",
                   { embedding_id });
 
-      tx.Execute (std::string ("INSERT INTO embeddings (")
-                      + store::kEmbeddingsReconsolidateColumns + ") VALUES ("
-                      + store::kEmbeddingsReconsolidateDefaults + ")",
-                  { embedding_id, ToFloatVector (blended), current_lability });
+      // v2: Minimal embeddings table (embedding_id, embedding, created_at)
+      tx.Execute ("INSERT INTO embeddings (embedding_id, embedding, created_at) "
+                  "VALUES (?, ?, ?)",
+                  { embedding_id, ToFloatVector (blended), now_ts });
 
       // --- BEGIN RIPPLE PROPAGATION ---
       // Only propagate ripple if store is available and primary drift occurred

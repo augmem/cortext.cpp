@@ -27,9 +27,12 @@ TEST_CASE("Migrations apply core tables automatically", "[schema][migration]") {
         return false;
     };
 
-    // Core tables from migration 0
+    // Core tables from migration 0 (v2 schema)
     REQUIRE(has("memories"));
-    REQUIRE(has("memory_feedback"));
+    REQUIRE(has("state"));        // v2 unified state
+    REQUIRE(has("accumulators")); // v2 accumulator state
+    REQUIRE(has("signals"));      // v2 signals table
+    REQUIRE(has("episodes"));     // v2 episodes table
     REQUIRE(has("cortext_schema_migrations"));
     // embeddings is a virtual table (vec0), check it separately
     auto emb_rows = store->Execute(

@@ -65,6 +65,9 @@ UpdateAccumulator::Execute (OperationContext &context,
       // Track first signal for SIGNALS table (Section 4.4)
       state.signals.push_back (CreateSignalRecord (signal, score, 0));
 
+      // Track primary modality (v2: first modality wins)
+      state.primary_modality = signal.modality;
+
       p_ctx.accumulator_states[source_id] = std::move (state);
 
       telemetry::AddCounter ("cortext.accumulator.new_source_total", 1);
@@ -87,6 +90,9 @@ UpdateAccumulator::Execute (OperationContext &context,
 
       // Track first signal for SIGNALS table (Section 4.4)
       acc.signals.push_back (CreateSignalRecord (signal, score, 0));
+
+      // Track primary modality (v2: first modality wins)
+      acc.primary_modality = signal.modality;
       return;
     }
 
@@ -102,6 +108,12 @@ UpdateAccumulator::Execute (OperationContext &context,
   // Serial position is the current signal count before accumulation
   const int serial_pos = static_cast<int> (acc.signals.size ());
   acc.signals.push_back (CreateSignalRecord (signal, score, serial_pos));
+
+  // Track primary modality (v2: first modality wins)
+  if (acc.primary_modality.empty ())
+    {
+      acc.primary_modality = signal.modality;
+    }
 
   telemetry::RecordHistogram ("cortext.accumulator.n_signals",
                               static_cast<double> (acc.n_signals));

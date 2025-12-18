@@ -32,6 +32,7 @@ struct SignalRecord
  */
 struct AccumulatorState
 {
+  int64_t episode_id = 0;       ///< FK to episodes table (v2 schema)
   Eigen::VectorXf mu_acc;       ///< Running mean embedding (256d)
   double drift_acc = 0.0;       ///< Accumulated drift within group (D_acc)
   double s_sum = 0.0;           ///< Sum of signal scores in group
@@ -50,6 +51,10 @@ struct AccumulatorState
 
   // Signal tracking for SIGNALS table (Section 4.4)
   std::vector<SignalRecord> signals;  ///< Tracked signals for persistence
+
+  // v2 aggregated blob tracking (working-memory.plan.md Section 2)
+  std::vector<std::vector<unsigned char>> blob_ids;  ///< Aggregated objstore refs
+  std::string primary_modality;                       ///< "text"|"audio"|"image"
 
   /**
    * @brief Reset accumulator for new memory accumulation
@@ -72,6 +77,9 @@ struct AccumulatorState
     s_arousal_sum = 0.0;
     // Clear signal tracking
     signals.clear ();
+    // Clear v2 blob tracking
+    blob_ids.clear ();
+    primary_modality.clear ();
     // Note: eta_acc, coherence_prev, and last_write_ts are preserved across
     // accumulations
   }

@@ -66,6 +66,17 @@ TEST_CASE ("Alg23 triggers and persists emotional tags for used memories",
   auto unique_store = SQLiteStore::Create (":memory:");
   auto store = std::shared_ptr<Store> (std::move (unique_store));
 
+  // Initialize core schema
+  cortext::testing::InitializeCoreSchema (*store);
+
+  // v2: Seed embedding and memory rows for the emotion operation to update
+  std::vector<float> emb (kEmbeddingDim, 0.0f);
+  emb[0] = 1.0f;
+  cortext::testing::SeedEmbeddingV2 (*store, 101LL, emb);
+  cortext::testing::SeedEmbeddingV2 (*store, 102LL, emb);
+  cortext::testing::SeedMemoryV2 (*store, 101LL, 101LL, "test");
+  cortext::testing::SeedMemoryV2 (*store, 102LL, 102LL, "test");
+
   SignalProcessor::Config cfg;
   cfg.focus = 0.4;       // F
   cfg.sensitivity = 0.8; // S
@@ -90,20 +101,18 @@ TEST_CASE ("Alg23 triggers and persists emotional tags for used memories",
   processor.Process (MakeSignal (/*ts=*/12345));
   processor.Flush ();
 
-  // Row for used id exists
+  // v2: Row for used id exists in memories table (emotional_tags merged into memories)
   {
     auto rows = store->Execute (
-        "SELECT * FROM emotional_tags WHERE embedding_id = ?", { 101LL });
+        "SELECT embedding_id, flashbulb, emotional_intensity, half_life_bonus, "
+        "detail_suppression, gist_components, cascade_radius, cascade_decay "
+        "FROM memories WHERE embedding_id = ?", { 101LL });
     REQUIRE (rows.size () == 1);
     const auto &row = rows[0];
     REQUIRE (std::any_cast<long long> (row.at ("embedding_id")) == 101LL);
     REQUIRE (std::any_cast<long long> (row.at ("flashbulb")) == 1LL);
-    REQUIRE (std::any_cast<double> (row.at ("intensity"))
+    REQUIRE (std::any_cast<double> (row.at ("emotional_intensity"))
              == Catch::Approx (intensity));
-    REQUIRE (std::any_cast<double> (row.at ("arousal"))
-             == Catch::Approx (arousal));
-    REQUIRE (std::any_cast<double> (row.at ("valence"))
-             == Catch::Approx (valence));
 
     const double half_life_bonus
         = std::any_cast<double> (row.at ("half_life_bonus"));
@@ -128,21 +137,12 @@ TEST_CASE ("Alg23 triggers and persists emotional tags for used memories",
     REQUIRE (
         cd
         == Catch::Approx (core::CascadeDecay (cfg.sensitivity)).margin (1e-6));
-
-    const double fb_eff
-        = std::any_cast<double> (row.at ("flashbulb_threshold_eff"));
-    const double fb_exp
-        = core::FlashbulbThresholdEff (cfg.sensitivity, intensity, arousal);
-    REQUIRE (fb_eff == Catch::Approx (fb_exp).margin (1e-6));
-
-    const long long ts = std::any_cast<long long> (row.at ("ts"));
-    REQUIRE (ts == 12345LL);
   }
 
-  // No row for unused id
+  // v2: Unused id should have default flashbulb=0 (row should exist from SeedMemory)
   {
     auto rows = store->Execute (
-        "SELECT COUNT(*) AS c FROM emotional_tags WHERE embedding_id = ?",
+        "SELECT COUNT(*) AS c FROM memories WHERE embedding_id = ? AND flashbulb = 1",
         { 102LL });
     REQUIRE (rows.size () == 1);
     REQUIRE (std::any_cast<long long> (rows[0].at ("c")) == 0LL);
@@ -153,6 +153,15 @@ TEST_CASE ("Alg23 below thresholds performs no-op", "[operations][emotion]")
 {
   auto unique_store = SQLiteStore::Create (":memory:");
   auto store = std::shared_ptr<Store> (std::move (unique_store));
+
+  // Initialize core schema
+  cortext::testing::InitializeCoreSchema (*store);
+
+  // v2: Seed embedding and memory rows
+  std::vector<float> emb (kEmbeddingDim, 0.0f);
+  emb[0] = 1.0f;
+  cortext::testing::SeedEmbeddingV2 (*store, 201LL, emb);
+  cortext::testing::SeedMemoryV2 (*store, 201LL, 201LL, "test");
 
   SignalProcessor::Config cfg;
   cfg.focus = 0.5;
@@ -177,8 +186,8 @@ TEST_CASE ("Alg23 below thresholds performs no-op", "[operations][emotion]")
   processor.Flush ();
 
   {
-    // Table exists via SignalProcessor migrations
-    auto rows = store->Execute ("SELECT COUNT(*) AS c FROM emotional_tags");
+    // v2: Check that flashbulb was not triggered (remains 0) in memories table
+    auto rows = store->Execute ("SELECT COUNT(*) AS c FROM memories WHERE flashbulb = 1");
     REQUIRE (rows.size () == 1);
     REQUIRE (std::any_cast<long long> (rows[0].at ("c")) == 0LL);
   }

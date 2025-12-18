@@ -47,25 +47,27 @@ struct EmotionalSource
 };
 
 /// @brief Load recently tagged high-intensity emotional memories.
+/// v2: Uses memories table (emotional fields merged from emotional_tags)
 std::vector<EmotionalSource>
 LoadEmotionalSources (Store *store, long long recent_window_ts)
 {
   std::vector<EmotionalSource> sources;
 
-  // Query emotional tags for high-intensity memories
+  // v2: Query memories for high-intensity flashbulb memories
   // Only process recently tagged ones (within consolidation window)
   auto rows = store->Execute (
-      "SELECT embedding_id, intensity, arousal, valence, half_life_bonus, "
+      "SELECT embedding_id, emotional_intensity, half_life_bonus, "
       "       cascade_radius, cascade_decay "
-      "FROM emotional_tags "
-      "WHERE intensity >= 0.5 AND ts >= ?1 "
-      "ORDER BY intensity DESC",
+      "FROM memories "
+      "WHERE flashbulb = 1 AND emotional_intensity >= 0.5 "
+      "AND created_at >= ?1 "
+      "ORDER BY emotional_intensity DESC",
       { recent_window_ts });
 
   for (const auto &row : rows)
     {
       auto it_id = row.find ("embedding_id");
-      auto it_intensity = row.find ("intensity");
+      auto it_intensity = row.find ("emotional_intensity");
 
       if (it_id == row.end () || it_intensity == row.end ())
         {
@@ -89,26 +91,9 @@ LoadEmotionalSources (Store *store, long long recent_window_ts)
           continue;
         }
 
-      // Parse optional fields with defaults
-      auto it_arousal = row.find ("arousal");
-      if (it_arousal != row.end () && it_arousal->second.type () == typeid (double))
-        {
-          s.arousal = std::any_cast<double> (it_arousal->second);
-        }
-      else
-        {
-          s.arousal = 0.5;
-        }
-
-      auto it_valence = row.find ("valence");
-      if (it_valence != row.end () && it_valence->second.type () == typeid (double))
-        {
-          s.valence = std::any_cast<double> (it_valence->second);
-        }
-      else
-        {
-          s.valence = 0.5;
-        }
+      // v2: arousal/valence not stored per-memory in v2, use defaults
+      s.arousal = 0.5;
+      s.valence = 0.5;
 
       auto it_bonus = row.find ("half_life_bonus");
       if (it_bonus != row.end () && it_bonus->second.type () == typeid (double))
@@ -308,20 +293,14 @@ PropagateEmotionalCascade::Execute (OperationContext &context, Transaction &tx) 
               continue;
             }
 
-          // Update or insert emotional tag for neighbor
-          // Use INSERT OR REPLACE to update if exists, preserving max intensity
+          // v2: Update emotional cascade fields in memories table
+          // Preserve max intensity and half_life_bonus if already higher
           Add (tx,
-               "INSERT INTO emotional_tags "
-               "(embedding_id, flashbulb, intensity, arousal, valence, "
-               " half_life_bonus, detail_suppression, gist_components, "
-               " cascade_radius, cascade_decay, flashbulb_threshold_eff, ts) "
-               "VALUES (?1, 0, ?2, ?3, ?4, ?5, 0.0, 0, 0, 0.0, 0.0, ?6) "
-               "ON CONFLICT (embedding_id) DO UPDATE SET "
-               "intensity = MAX(emotional_tags.intensity, excluded.intensity), "
-               "half_life_bonus = MAX(emotional_tags.half_life_bonus, excluded.half_life_bonus), "
-               "ts = excluded.ts",
-               { neighbor.embedding_id, decayed_intensity, src.arousal, src.valence,
-                 decayed_bonus, now_ts });
+               "UPDATE memories "
+               "SET emotional_intensity = MAX(emotional_intensity, ?1), "
+               "    half_life_bonus = MAX(half_life_bonus, ?2) "
+               "WHERE embedding_id = ?3",
+               { decayed_intensity, decayed_bonus, neighbor.embedding_id });
         }
     }
 

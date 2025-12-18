@@ -3,43 +3,51 @@
 namespace cortext::store
 {
 
-// SQL fragments for embeddings table INSERTs
-// Note: sqlite-vec has max 16 auxiliary columns, doesn't support DEFAULT values
-// Columns: embedding, type, strength, use_frequency, stability, connectivity,
-//          drift_mag, influence, sustained_influence, contextual_gain, redundancy,
-//          pre_activation, lability_state, suppression_count, cluster_id,
-//          last_access, created_at (16 auxiliary + 1 vector = 17 total)
+// ===========================================================================
+// v2 EMBEDDINGS - Minimal sqlite-vec table (only 3 columns)
+// All metadata moved to MEMORIES table
+// ===========================================================================
 
-// Column list for full embeddings INSERT (excluding rowid/embedding_id)
-constexpr const char *kEmbeddingsInsertColumns =
-    "embedding, type, strength, use_frequency, stability, connectivity, "
-    "drift_mag, influence, sustained_influence, contextual_gain, redundancy, "
-    "pre_activation, lability_state, suppression_count, created_at";
+// Column list for embeddings INSERT (sqlite-vec virtual table)
+constexpr const char *kEmbeddingsInsertColumns = "embedding, created_at";
 
-// Column list for reconsolidation (no created_at, has lability_state)
-constexpr const char *kEmbeddingsReconsolidateColumns =
-    "embedding_id, embedding, type, strength, use_frequency, stability, "
-    "connectivity, drift_mag, influence, sustained_influence, contextual_gain, "
-    "redundancy, pre_activation, lability_state, suppression_count";
+// Default values for embeddings INSERT
+// Placeholders: embedding vector, created_at timestamp
+constexpr const char *kEmbeddingsInsertDefaults = "?, ?";
 
-// Default values placeholder for 'memory' type (?, 'memory', defaults..., ?)
-// The two ? are: embedding vector, created_at timestamp
-constexpr const char *kEmbeddingsMemoryDefaults =
-    "?, 'memory', 1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0, ?";
+// ===========================================================================
+// v2 MEMORIES - Full metadata table
+// ===========================================================================
 
-// Default values for reconsolidation (embedding_id, embedding, type, defaults..., lability_state)
-// The three ? are: embedding_id, embedding vector, lability_state
-constexpr const char *kEmbeddingsReconsolidateDefaults =
-    "?, ?, 'memory', 1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, ?, 0";
+// Core insert columns (minimal required for new memory)
+constexpr const char *kMemoriesInsertColumns =
+    "embedding_id, source_id, kind, start_ts, end_ts, n_signals, modality, "
+    "s_max, s_avg, emotion, ambient_mood, created_at";
 
-// Default values for centroid type (used in consolidation_summarize)
-// Single ? is for embedding vector
-constexpr const char *kEmbeddingsCentroidDefaults =
-    "'centroid', 1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0";
+// Default values for new LONG_TERM memory
+constexpr const char *kMemoriesLongTermDefaults =
+    "?, ?, 'LONG_TERM', ?, ?, ?, ?, ?, ?, ?, ?, ?";
 
-// Default values for concept type (used in concept_detection)
-// Two ? are: embedding_id, embedding vector
-constexpr const char *kEmbeddingsConceptDefaults =
-    "?, ?, 'concept', 1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0";
+// Default values for new WORKING memory
+constexpr const char *kMemoriesWorkingDefaults =
+    "?, ?, 'WORKING', ?, ?, ?, ?, ?, ?, ?, ?, ?";
+
+// Default values for ASSOCIATION (consolidation summaries)
+constexpr const char *kMemoriesAssociationDefaults =
+    "?, ?, 'ASSOCIATION', ?, ?, ?, ?, ?, ?, ?, ?, ?";
+
+// Default values for LABEL (concept nodes)
+constexpr const char *kMemoriesLabelDefaults =
+    "?, ?, 'LABEL', ?, ?, ?, ?, ?, ?, ?, ?, ?";
+
+// ===========================================================================
+// v2 SIGNALS - Per-signal metrics (inline, no separate signal_metrics)
+// ===========================================================================
+
+constexpr const char *kSignalsInsertColumns =
+    "memory_id, source_id, embedding_id, blob_id, timestamp, modality, mime, "
+    "serial_position, score, created_at";
+
+constexpr const char *kSignalsInsertDefaults = "?, ?, ?, ?, ?, ?, ?, ?, ?, ?";
 
 } // namespace cortext::store

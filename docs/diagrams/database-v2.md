@@ -279,66 +279,6 @@ erDiagram
 |-----------|--------------|---------|
 | **sqlite-vec** | `EMBEDDINGS` | 256d float vector storage + KNN search |
 | **sqlite-objstore** | `BLOBS` | Content-addressed blob storage |
-| **sqlite-graph** | `GRAPH_NODES`, `GRAPH_EDGES` | Cypher-compatible knowledge graph |
-
-### sqlite-vec Usage (on EMBEDDINGS)
-
-```sql
--- Create embeddings table with 256d float vectors
-CREATE VIRTUAL TABLE embeddings USING vec0(
-    embedding_id INTEGER PRIMARY KEY,
-    embedding float[256],
-    blob_id blob,
-    +created_at integer
-);
-
--- KNN search for k nearest neighbors
-SELECT embedding_id, distance
-FROM embeddings
-WHERE embedding MATCH ?query_vector
-  AND k = 10;
-
--- Join to get signals with their embeddings and content
-SELECT s.*, e.embedding, b.data as content
-FROM signals s
-JOIN embeddings e ON s.embedding_id = e.embedding_id
-JOIN blobs b ON s.blob_id = b.blob_id
-WHERE s.source_id = 'chat/user';
-```
-
-## Working Memory Queries
-
-Working memory is now a `kind` enum on MEMORIES rather than a separate table:
-
-```sql
--- Get working memories (active conversation context)
-SELECT * FROM memories
-WHERE kind = 'WORKING'
-ORDER BY end_ts DESC;
-
--- Get all signals in working memory with content
-SELECT m.memory_id, m.source_id as memory_source,
-       s.signal_id, s.source_id, s.timestamp, s.modality,
-       b.data as content
-FROM memories m
-JOIN signals s ON s.memory_id = m.memory_id
-JOIN blobs b ON s.blob_id = b.blob_id
-WHERE m.kind = 'WORKING'
-ORDER BY m.memory_id, s.serial_position;
-
--- Get labels associated with a memory
-SELECT target.label, a.weight
-FROM associations a
-JOIN memories target ON a.target_memory_id = target.memory_id
-WHERE a.source_memory_id = ?
-  AND a.edge_type = 'has_label'
-  AND target.kind = 'LABEL';
-
--- Count memories by kind
-SELECT kind, COUNT(*) as count
-FROM memories
-GROUP BY kind;
-```
 
 ## Entity Descriptions
 
@@ -413,61 +353,18 @@ These are derived from SIGNALS/MEMORIES via SQL views:
 | ACCUMULATORS → SIGNALS | 1:N | Accumulator produces signals (memory_id NULL until flush) |
 | ASSOCIATIONS | N:N | Links memories together (including labels) |
 
-## Indexes
+## Index Notation
 
-Indexes for common query patterns:
+Indexes are marked inline on columns in the diagram:
 
-```sql
--- SIGNALS: Pending signals for accumulator (hot path)
-CREATE INDEX idx_signals_pending
-    ON signals(source_id) WHERE memory_id IS NULL;
+| Marker | Meaning |
+|--------|---------|
+| `IDX` | Simple index on this column |
+| `IDX with X` | Composite index including column X |
+| `IDX partial Y` | Partial index with WHERE condition Y |
+| `IDX DESC` | Descending order for recency queries |
 
--- SIGNALS: Lookup by memory for hydration
-CREATE INDEX idx_signals_memory
-    ON signals(memory_id, serial_position) WHERE memory_id IS NOT NULL;
-
--- SIGNALS: Recent signals for context window
-CREATE INDEX idx_signals_timestamp
-    ON signals(timestamp DESC);
-
--- MEMORIES: Working memory lookup (hot path)
-CREATE INDEX idx_memories_working
-    ON memories(end_ts DESC) WHERE kind = 'WORKING';
-
--- MEMORIES: By episode for episode queries
-CREATE INDEX idx_memories_episode
-    ON memories(episode_id, start_ts);
-
--- MEMORIES: By kind for type-specific queries
-CREATE INDEX idx_memories_kind
-    ON memories(kind);
-
--- MEMORIES: Decay candidates (strength below threshold)
-CREATE INDEX idx_memories_strength
-    ON memories(strength, last_access);
-
--- MEMORIES: Cluster membership for consolidation
-CREATE INDEX idx_memories_cluster
-    ON memories(cluster_id) WHERE cluster_id IS NOT NULL;
-
--- ASSOCIATIONS: Outgoing edges from a memory
-CREATE INDEX idx_associations_source
-    ON associations(source_memory_id, edge_type);
-
--- ASSOCIATIONS: Incoming edges to a memory
-CREATE INDEX idx_associations_target
-    ON associations(target_memory_id, edge_type);
-
--- EPISODES: Active episode lookup
-CREATE INDEX idx_episodes_active
-    ON episodes(end_ts DESC) WHERE end_ts IS NULL;
-
--- ACCUMULATORS: By episode for cleanup
-CREATE INDEX idx_accumulators_episode
-    ON accumulators(episode_id);
-```
-
-Note: EMBEDDINGS and BLOBS are virtual tables (sqlite-vec, sqlite-objstore) with their own internal indexing.
+EMBEDDINGS and BLOBS are virtual tables with their own internal indexing.
 
 ## State Resumption
 

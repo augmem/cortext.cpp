@@ -1,12 +1,10 @@
 #include "cortext/operations/consolidation_summarize.hpp"
 
-#include "cortext/store/store.hpp"
 #include "cortext/core/algorithms.hpp"
 #include "cortext/core/knobs.hpp"
 #include "cortext/core/utils.hpp"
 #include "cortext/operations/extraction.hpp"
 #include "cortext/processor/operation_context.hpp"
-#include "cortext/store/schema_helpers.hpp"
 #include "cortext/store/store.hpp"
 #include "cortext/summarizer/summarizer.hpp"
 #include "cortext/telemetry/telemetry.hpp"
@@ -232,23 +230,42 @@ ConsolidationSummarize::Execute (OperationContext &context, Transaction &tx) con
                     { summary_id, emb_id });
         }
 
-      // 5. Create embeddings entry for centroid.
-      // Get next embedding_id via MAX + 1.
-      // Note: sqlite-vec doesn't support DEFAULT values, so we must set all fields
-      const std::string centroid_sql
-          = std::string ("INSERT INTO embeddings(embedding_id, embedding, type, ")
-            + "strength, use_frequency, stability, connectivity, drift_mag, "
-            + "influence, sustained_influence, contextual_gain, redundancy, "
-            + "pre_activation, lability_state, suppression_count) "
-            + "SELECT COALESCE(MAX(embedding_id), 0) + 1, ?, "
-            + store::kEmbeddingsCentroidDefaults + " FROM embeddings";
-      AddWrite (tx, centroid_sql, { centroid_blob });
+      // 5. Create embeddings entry for centroid (v2: minimal table).
+      AddWrite (tx,
+                "INSERT INTO embeddings (embedding, created_at) VALUES (?, ?)",
+                { centroid_blob, static_cast<long long> (now_ts) });
 
-      // 6. Update cluster_id in embeddings for source embeddings.
+      // Get the auto-assigned embedding_id
+      auto id_rows = tx.Execute ("SELECT last_insert_rowid() AS id", {});
+      long long centroid_embedding_id = 0;
+      if (!id_rows.empty () && id_rows[0].count ("id"))
+        {
+          auto val = id_rows[0].at ("id");
+          if (val.type () == typeid (long long))
+            {
+              centroid_embedding_id = std::any_cast<long long> (val);
+            }
+          else if (val.type () == typeid (int))
+            {
+              centroid_embedding_id = std::any_cast<int> (val);
+            }
+        }
+
+      // Create MEMORIES row for centroid with kind='ASSOCIATION' (v2 schema)
+      AddWrite (tx,
+                "INSERT INTO memories "
+                "(embedding_id, source_id, kind, start_ts, created_at) "
+                "VALUES (?, ?, 'ASSOCIATION', ?, ?)",
+                { centroid_embedding_id, summary_id,
+                  static_cast<long long> (now_ts),
+                  static_cast<long long> (now_ts) });
+
+      // 6. Update cluster_id in memories for source embeddings (v2: moved from
+      // embeddings).
       for (long long emb_id : cluster.embedding_ids)
         {
           AddWrite (tx,
-                    "UPDATE embeddings SET cluster_id = ? "
+                    "UPDATE memories SET cluster_id = ? "
                     "WHERE embedding_id = ?",
                     { cluster.cluster_id, emb_id });
         }

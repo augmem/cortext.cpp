@@ -17,7 +17,7 @@ namespace
 
 constexpr int kEmbeddingDim = 256;
 
-// Helper op to seed embeddings and memory_feedback into the database before operations run.
+// Helper op to seed embeddings and memories into the v2 database.
 class SeedEmbeddingsOp : public IOperation
 {
 public:
@@ -30,23 +30,25 @@ public:
   Execute (OperationContext &ctx, Transaction & /*tx*/) const override
   {
     auto *store = ctx.GetStore ();
+    auto now_ts = cortext::testing::NowMs ();
     for (const auto &[id, emb] : embeddings_)
       {
         std::vector<float> vec (emb.data (), emb.data () + emb.size ());
+        // v2: Insert into embeddings (minimal vec0 table)
         store->Execute (
-            "INSERT OR REPLACE INTO embeddings(embedding_id, embedding, type, "
-            "strength, use_frequency, stability, connectivity, drift_mag, "
+            "INSERT OR REPLACE INTO embeddings(embedding_id, embedding, created_at) "
+            "VALUES(?, ?, ?)",
+            { id, vec, now_ts });
+        // v2: Insert into memories (comprehensive metadata including lability)
+        store->Execute (
+            "INSERT OR REPLACE INTO memories("
+            "memory_id, embedding_id, source_id, kind, start_ts, n_signals, modality, "
+            "s_max, s_avg, strength, use_frequency, stability, connectivity, drift_mag, "
             "influence, sustained_influence, contextual_gain, redundancy, "
-            "pre_activation, lability_state, suppression_count) "
-            "VALUES (?, ?, 'memory', 1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, "
-            "0.0, 0.0, 0.0, 0)",
-            { id, vec });
-        // Also seed memory_feedback for lability_ts
-        store->Execute (
-            "INSERT OR IGNORE INTO memory_feedback(embedding_id, retrieved_count, "
-            "used_count, last_used, lability_ts) "
-            "VALUES (?, 0, 0, 0, 0)",
-            { id });
+            "pre_activation, lability_state, suppression_count, lability_ts, created_at) "
+            "VALUES(?, ?, 'test', 'LONG_TERM', ?, 1, 'text', 0.5, 0.5, "
+            "1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0, 0, ?)",
+            { id, id, now_ts, now_ts });
       }
   }
 
@@ -124,32 +126,31 @@ TEST_CASE ("Alg20 drifts embedding and writes lability fields",
   const Eigen::VectorXf cur = MakeUnitVec256 (0);
   const Eigen::VectorXf mem = MakeUnitVec256 (0);
 
-  auto setup = std::make_unique<SetupReconInputsOp> (
-      cur, std::unordered_map<long long, Eigen::VectorXf>{ { 1LL, mem } });
+  // v2: Need to seed the memory before reconsolidation can update it
+  std::unordered_map<long long, Eigen::VectorXf> retrieved{ { 1LL, mem } };
+  auto seed = std::make_unique<SeedEmbeddingsOp> (retrieved);
+  auto setup = std::make_unique<SetupReconInputsOp> (cur, retrieved);
   auto apply = std::make_unique<ApplyReconsolidation> ();
-  auto ops = std::make_unique<cortext::OperationSet> (std::move (setup),
-                                                      std::move (apply));
+  auto ops = std::make_unique<cortext::OperationSet> (
+      std::move (seed), std::move (setup), std::move (apply));
 
   cortext::SignalProcessor processor (cfg, store, std::move (ops));
   auto s = MakeSignal (cur, /*ts=*/100);
   processor.Process (s);
   processor.Flush ();
 
-  // Embedding row created in embeddings
+  // v2: Memory row created in memories table
   {
     auto rows = store->Execute (
-        "SELECT COUNT(*) AS cnt FROM embeddings WHERE embedding_id = ?",
+        "SELECT COUNT(*) AS cnt FROM memories WHERE memory_id = ?",
         { 1LL });
     REQUIRE (rows.size () == 1);
     REQUIRE (std::any_cast<long long> (rows[0].at ("cnt")) == 1LL);
   }
-  // Lability fields updated
+  // v2: Lability fields are inline on memories table
   {
     auto rows = store->Execute (
-        "SELECT em.lability_state, mf.lability_ts FROM "
-        "embeddings em "
-        "JOIN memory_feedback mf ON em.embedding_id = mf.embedding_id "
-        "WHERE em.embedding_id = ?",
+        "SELECT lability_state, lability_ts FROM memories WHERE memory_id = ?",
         { 1LL });
     REQUIRE (rows.size () == 1);
     const double lab = std::any_cast<double> (rows[0].at ("lability_state"));
@@ -185,22 +186,19 @@ TEST_CASE ("Alg20 no drift when S=0: embedding unchanged; lability updated",
   processor.Process (s);
   processor.Flush ();
 
-  // Embeddings row exists (seeded) but drift_mag should be 0 when S=0
+  // v2: Memory row exists (seeded) but drift_mag should be 0 when S=0
   {
     auto rows = store->Execute (
-        "SELECT drift_mag FROM embeddings WHERE embedding_id = ?",
+        "SELECT drift_mag FROM memories WHERE memory_id = ?",
         { 2LL });
     REQUIRE (rows.size () == 1);
     const double drift = std::any_cast<double> (rows[0].at ("drift_mag"));
     REQUIRE (drift == 0.0); // No drift when S=0
   }
-  // Lability fields updated
+  // v2: Lability fields are inline on memories table
   {
     auto rows = store->Execute (
-        "SELECT em.lability_state, mf.lability_ts FROM "
-        "embeddings em "
-        "JOIN memory_feedback mf ON em.embedding_id = mf.embedding_id "
-        "WHERE em.embedding_id = ?",
+        "SELECT lability_state, lability_ts FROM memories WHERE memory_id = ?",
         { 2LL });
     REQUIRE (rows.size () == 1);
     const double lab = std::any_cast<double> (rows[0].at ("lability_state"));
@@ -257,9 +255,17 @@ TEST_CASE ("Alg20 ripple propagation reaches graph neighbors",
   const Eigen::VectorXf neighbor_vec = MakeUnitVec256 (5);
   std::vector<float> neighbor_data (neighbor_vec.data (),
                                     neighbor_vec.data () + neighbor_vec.size ());
+  auto now_ts = cortext::testing::NowMs ();
+  // v2: Insert into embeddings (minimal)
   store->Execute (
-      "INSERT INTO embeddings (embedding_id, embedding) VALUES (?, ?)",
-      { 10LL, neighbor_data });
+      "INSERT INTO embeddings (embedding_id, embedding, created_at) VALUES (?, ?, ?)",
+      { 10LL, neighbor_data, now_ts });
+  // v2: Insert into memories (comprehensive)
+  store->Execute (
+      "INSERT INTO memories (memory_id, embedding_id, source_id, kind, start_ts, "
+      "n_signals, modality, s_max, s_avg, created_at) "
+      "VALUES (?, ?, 'test', 'LONG_TERM', ?, 1, 'text', 0.5, 0.5, ?)",
+      { 10LL, 10LL, now_ts, now_ts });
 
   // Create a 'reinforces' edge from emb:1 to emb:10
   store->Execute (
@@ -287,6 +293,17 @@ TEST_CASE ("Alg20 ripple propagation reaches graph neighbors",
   // Verify store is set in context
   REQUIRE (ctx.GetStore () != nullptr);
 
+  // v2: Seed the primary memory before reconsolidation can update it
+  std::vector<float> mem_data (mem.data (), mem.data () + mem.size ());
+  store->Execute (
+      "INSERT INTO embeddings (embedding_id, embedding, created_at) VALUES (?, ?, ?)",
+      { 1LL, mem_data, now_ts });
+  store->Execute (
+      "INSERT INTO memories (memory_id, embedding_id, source_id, kind, start_ts, "
+      "n_signals, modality, s_max, s_avg, created_at) "
+      "VALUES (?, ?, 'test', 'LONG_TERM', ?, 1, 'text', 0.5, 0.5, ?)",
+      { 1LL, 1LL, now_ts, now_ts });
+
   // Set up the retrieved embeddings
   ctx.SetRetrievedMemoryEmbeddings (
       std::unordered_map<long long, Eigen::VectorXf>{ { 1LL, mem } });
@@ -297,20 +314,20 @@ TEST_CASE ("Alg20 ripple propagation reaches graph neighbors",
   recon_op.Execute (ctx, *tx);
   tx->Commit ();
 
-  // Verify primary reconsolidation worked
+  // v2: Verify primary reconsolidation worked (memory exists)
   {
     auto rows = store->Execute (
-        "SELECT COUNT(*) AS cnt FROM embeddings WHERE embedding_id = ?",
+        "SELECT COUNT(*) AS cnt FROM memories WHERE memory_id = ?",
         { 1LL });
     REQUIRE (rows.size () == 1);
     auto cnt = std::any_cast<long long> (rows[0].at ("cnt"));
     REQUIRE (cnt == 1LL);
   }
 
-  // Verify neighbor (emb:10) received ripple update
+  // v2: Verify neighbor (memory_id:10) received ripple update
   {
     auto rows = store->Execute (
-        "SELECT COUNT(*) AS cnt FROM embeddings WHERE embedding_id = ?",
+        "SELECT COUNT(*) AS cnt FROM memories WHERE memory_id = ?",
         { 10LL });
     REQUIRE (rows.size () == 1);
     auto cnt = std::any_cast<long long> (rows[0].at ("cnt"));
@@ -348,13 +365,25 @@ TEST_CASE ("Alg20 ripple decay applied correctly per hop",
   const Eigen::VectorXf vec21 = MakeUnitVec256 (7);
   std::vector<float> data20 (vec20.data (), vec20.data () + vec20.size ());
   std::vector<float> data21 (vec21.data (), vec21.data () + vec21.size ());
+  auto now_ts = cortext::testing::NowMs ();
 
+  // v2: Insert into embeddings and memories
   store->Execute (
-      "INSERT INTO embeddings (embedding_id, embedding) VALUES (?, ?)",
-      { 20LL, data20 });
+      "INSERT INTO embeddings (embedding_id, embedding, created_at) VALUES (?, ?, ?)",
+      { 20LL, data20, now_ts });
   store->Execute (
-      "INSERT INTO embeddings (embedding_id, embedding) VALUES (?, ?)",
-      { 21LL, data21 });
+      "INSERT INTO memories (memory_id, embedding_id, source_id, kind, start_ts, "
+      "n_signals, modality, s_max, s_avg, created_at) "
+      "VALUES (?, ?, 'test', 'LONG_TERM', ?, 1, 'text', 0.5, 0.5, ?)",
+      { 20LL, 20LL, now_ts, now_ts });
+  store->Execute (
+      "INSERT INTO embeddings (embedding_id, embedding, created_at) VALUES (?, ?, ?)",
+      { 21LL, data21, now_ts });
+  store->Execute (
+      "INSERT INTO memories (memory_id, embedding_id, source_id, kind, start_ts, "
+      "n_signals, modality, s_max, s_avg, created_at) "
+      "VALUES (?, ?, 'test', 'LONG_TERM', ?, 1, 'text', 0.5, 0.5, ?)",
+      { 21LL, 21LL, now_ts, now_ts });
 
   // Edge: emb:1 -> emb:20 (depth 1)
   store->Execute (
@@ -373,18 +402,18 @@ TEST_CASE ("Alg20 ripple decay applied correctly per hop",
   processor.Process (s);
   processor.Flush ();
 
-  // Verify depth-1 neighbor (emb:20) and depth-2 neighbor (emb:21) both updated
+  // v2: Verify depth-1 neighbor (memory_id:20) and depth-2 neighbor (memory_id:21) both updated
   double lab20 = 0.0, lab21 = 0.0;
   {
     auto rows = store->Execute (
-        "SELECT lability_state FROM embeddings WHERE embedding_id = ?",
+        "SELECT lability_state FROM memories WHERE memory_id = ?",
         { 20LL });
     REQUIRE (rows.size () == 1);
     lab20 = std::any_cast<double> (rows[0].at ("lability_state"));
   }
   {
     auto rows = store->Execute (
-        "SELECT lability_state FROM embeddings WHERE embedding_id = ?",
+        "SELECT lability_state FROM memories WHERE memory_id = ?",
         { 21LL });
     REQUIRE (rows.size () == 1);
     lab21 = std::any_cast<double> (rows[0].at ("lability_state"));
@@ -447,20 +476,20 @@ TEST_CASE ("Alg20 RippleDepth knob affects traversal depth",
   processor.Process (s);
   processor.Flush ();
 
-  // Depth-1 neighbor (emb:30) should have lability_state > 0 (updated by ripple)
+  // v2: Depth-1 neighbor (memory_id:30) should have lability_state > 0 (updated by ripple)
   {
     auto rows = store->Execute (
-        "SELECT lability_state FROM embeddings WHERE embedding_id = ?",
+        "SELECT lability_state FROM memories WHERE memory_id = ?",
         { 30LL });
     REQUIRE (rows.size () == 1);
     const double lab = std::any_cast<double> (rows[0].at ("lability_state"));
     REQUIRE (lab > 0.0); // Ripple reached depth-1
   }
 
-  // Depth-2 neighbor (emb:31) should have lability_state = 0 (beyond ripple_depth=1)
+  // v2: Depth-2 neighbor (memory_id:31) should have lability_state = 0 (beyond ripple_depth=1)
   {
     auto rows = store->Execute (
-        "SELECT lability_state FROM embeddings WHERE embedding_id = ?",
+        "SELECT lability_state FROM memories WHERE memory_id = ?",
         { 31LL });
     REQUIRE (rows.size () == 1);
     const double lab = std::any_cast<double> (rows[0].at ("lability_state"));
@@ -495,10 +524,17 @@ TEST_CASE ("Alg20 ripple respects co_occurs_with edge type",
   // Create neighbor connected via co_occurs_with (not reinforces)
   const Eigen::VectorXf vec40 = MakeUnitVec256 (10);
   std::vector<float> data40 (vec40.data (), vec40.data () + vec40.size ());
+  auto now_ts = cortext::testing::NowMs ();
 
+  // v2: Insert into embeddings and memories
   store->Execute (
-      "INSERT INTO embeddings (embedding_id, embedding) VALUES (?, ?)",
-      { 40LL, data40 });
+      "INSERT INTO embeddings (embedding_id, embedding, created_at) VALUES (?, ?, ?)",
+      { 40LL, data40, now_ts });
+  store->Execute (
+      "INSERT INTO memories (memory_id, embedding_id, source_id, kind, start_ts, "
+      "n_signals, modality, s_max, s_avg, created_at) "
+      "VALUES (?, ?, 'test', 'LONG_TERM', ?, 1, 'text', 0.5, 0.5, ?)",
+      { 40LL, 40LL, now_ts, now_ts });
 
   // Edge: emb:1 --co_occurs_with--> emb:40
   store->Execute (
@@ -511,10 +547,10 @@ TEST_CASE ("Alg20 ripple respects co_occurs_with edge type",
   processor.Process (s);
   processor.Flush ();
 
-  // Neighbor via co_occurs_with should also receive ripple
+  // v2: Neighbor via co_occurs_with should also receive ripple
   {
     auto rows = store->Execute (
-        "SELECT lability_state FROM embeddings WHERE embedding_id = ?",
+        "SELECT lability_state FROM memories WHERE memory_id = ?",
         { 40LL });
     REQUIRE (rows.size () == 1);
     const double lab = std::any_cast<double> (rows[0].at ("lability_state"));

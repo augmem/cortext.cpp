@@ -54,13 +54,15 @@ InsertTestEmbedding (Store &store, long long id, const Eigen::VectorXf &emb,
                      long long created_at = 0)
 {
   std::vector<float> emb_data (emb.data (), emb.data () + emb.size ());
-  store.Execute ("INSERT INTO embeddings (embedding_id, embedding, type, strength, "
-                 "use_frequency, stability, connectivity, drift_mag, influence, "
-                 "sustained_influence, contextual_gain, redundancy, pre_activation, "
-                 "lability_state, suppression_count, created_at) VALUES (?, ?, "
-                 "'memory', 1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, "
-                 "0, ?)",
+  // v2: Insert into embeddings (minimal vec0 table)
+  store.Execute ("INSERT INTO embeddings (embedding_id, embedding, created_at) "
+                 "VALUES (?, ?, ?)",
                  { id, emb_data, created_at });
+  // v2: Insert into memories (comprehensive metadata)
+  store.Execute ("INSERT INTO memories (memory_id, embedding_id, source_id, kind, "
+                 "start_ts, n_signals, modality, s_max, s_avg, strength, created_at) "
+                 "VALUES (?, ?, 'test', 'LONG_TERM', ?, 1, 'text', 0.5, 0.5, 1.0, ?)",
+                 { id, id, created_at, created_at });
 }
 
 // Creates an in-memory store with initialized schema

@@ -1,11 +1,9 @@
 #include "cortext/operations/concept_detection.hpp"
 
-#include "cortext/store/store.hpp"
 #include "cortext/core/algorithms.hpp"
 #include "cortext/core/knobs.hpp"
 #include "cortext/core/utils.hpp"
 #include "cortext/processor/operation_context.hpp"
-#include "cortext/store/schema_helpers.hpp"
 #include "cortext/store/store.hpp"
 #include "cortext/telemetry/telemetry.hpp"
 #include <Eigen/Dense>
@@ -234,34 +232,40 @@ DetectConceptNodes::Execute (OperationContext &context, Transaction &tx) const
           continue;
         }
 
-      // Insert concept embedding into embeddings
-      // First get next embedding_id
-      auto id_rows = store->Execute (
-          "SELECT COALESCE(MAX(embedding_id), 0) + 1 AS next_id FROM embeddings",
-          {});
-
-      long long embedding_id = 1;
-      if (!id_rows.empty ())
-        {
-          auto it = id_rows[0].find ("next_id");
-          if (it != id_rows[0].end () && it->second.type () == typeid (long long))
-            {
-              embedding_id = std::any_cast<long long> (it->second);
-            }
-        }
-
       // Convert centroid to vector<float> for storage
       std::vector<float> centroid_vec (centroid.data (),
                                        centroid.data () + centroid.size ());
 
-      // Insert concept embedding with all required fields
-      const std::string concept_sql
-          = std::string ("INSERT INTO embeddings (")
-            + store::kEmbeddingsReconsolidateColumns + ") VALUES ("
-            + store::kEmbeddingsConceptDefaults + ")";
-      Add (tx, concept_sql, { embedding_id, centroid_vec });
+      // Insert concept embedding (v2: minimal table)
+      Add (tx,
+           "INSERT INTO embeddings (embedding, created_at) VALUES (?, ?)",
+           { centroid_vec, now_ts });
 
-      // Create concept node in graph_nodes
+      // Get the auto-assigned embedding_id
+      auto id_rows = tx.Execute ("SELECT last_insert_rowid() AS id", {});
+      long long embedding_id = 0;
+      if (!id_rows.empty () && id_rows[0].count ("id"))
+        {
+          auto val = id_rows[0].at ("id");
+          if (val.type () == typeid (long long))
+            {
+              embedding_id = std::any_cast<long long> (val);
+            }
+          else if (val.type () == typeid (int))
+            {
+              embedding_id = std::any_cast<int> (val);
+            }
+        }
+
+      // Create MEMORIES row with kind='LABEL' for concept (v2 schema)
+      Add (tx,
+           "INSERT INTO memories "
+           "(embedding_id, source_id, kind, label, start_ts, created_at) "
+           "VALUES (?, ?, 'LABEL', ?, ?, ?)",
+           { embedding_id, concept_node_id, c.entity_name, now_ts, now_ts });
+
+      // Create concept node in graph_nodes (legacy table for backward
+      // compatibility)
       Add (tx,
            "INSERT OR IGNORE INTO graph_nodes "
            "(node_id, type, label, embedding_id, created_at) "

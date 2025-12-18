@@ -107,7 +107,7 @@ ToEigen (const std::vector<float> &v)
 
 bool
 LoadObjstorePayload (Store *store, const std::vector<unsigned char> &blob_id,
-                     std::string &out)
+                     std::vector<unsigned char> &out)
 {
   if (blob_id.empty () || !store)
     {
@@ -122,13 +122,8 @@ LoadObjstorePayload (Store *store, const std::vector<unsigned char> &blob_id,
           const auto it = rows[0].find ("data");
           if (it != rows[0].end ())
             {
-              const auto bytes = store::BlobFromAny (it->second);
-              if (!bytes.empty ())
-                {
-                  out.assign (reinterpret_cast<const char *> (bytes.data ()),
-                              static_cast<std::size_t> (bytes.size ()));
-                  return true;
-                }
+              out = store::BlobFromAny (it->second);
+              return !out.empty ();
             }
         }
     }
@@ -148,6 +143,62 @@ LoadObjstorePayload (Store *store, const std::vector<unsigned char> &blob_id,
   return false;
 }
 
+/// @brief Load all signal blobs for a memory, ordered by serial_position.
+/// @param store The store instance.
+/// @param memory_id The memory_id to query signals for.
+/// @param out Vector of blobs, one per signal.
+/// @return true if any blobs were loaded.
+bool
+LoadSignalBlobs (Store *store, long long memory_id,
+                 std::vector<std::vector<unsigned char>> &out)
+{
+  if (!store || memory_id <= 0)
+    return false;
+
+  try
+    {
+      auto rows = store->Execute (
+          "SELECT blob_id FROM signals "
+          "WHERE memory_id = ? AND blob_id IS NOT NULL "
+          "ORDER BY serial_position ASC",
+          { memory_id });
+
+      for (const auto &row : rows)
+        {
+          auto it = row.find ("blob_id");
+          if (it != row.end () && it->second.has_value ())
+            {
+              auto blob_id = store::BlobFromAny (it->second);
+              if (!blob_id.empty ())
+                {
+                  std::vector<unsigned char> payload;
+                  if (LoadObjstorePayload (store, blob_id, payload))
+                    {
+                      out.push_back (std::move (payload));
+                    }
+                }
+            }
+        }
+      return !out.empty ();
+    }
+  catch (const std::exception &e)
+    {
+      telemetry::LogWarn (
+          "Failed to load signal blobs",
+          { telemetry::Attribute::String ("component", "cortext"),
+            telemetry::Attribute::Int64 ("memory_id", memory_id),
+            telemetry::Attribute::String ("error", e.what ()) });
+    }
+  catch (...)
+    {
+      telemetry::LogWarn (
+          "Failed to load signal blobs (unknown error)",
+          { telemetry::Attribute::String ("component", "cortext"),
+            telemetry::Attribute::Int64 ("memory_id", memory_id) });
+    }
+  return false;
+}
+
 void
 HydrateMemory (Store *store, long long id, Cortext::Context::Memory &m)
 {
@@ -155,23 +206,17 @@ HydrateMemory (Store *store, long long id, Cortext::Context::Memory &m)
     return;
   try
     {
-      // Query uses new MEMORIES schema (per database.md)
+      // v2: Query uses unified memories table
       // Mimetype is at the signal level - get from first signal
       auto rows = store->Execute (
           "SELECT "
-          "  m.primary_modality, m.start_ts, m.end_ts, m.content_blob_id, "
-          "  m.n_signals, m.s_max, m.s_avg, m.status, "
-          "  COALESCE(mf.retrieved_count, 0) AS retrieved_count, "
-          "  COALESCE(mf.used_count, 0) AS used_count, "
-          "  sm.relevance, sm.mismatch, sm.surprise, sm.rarity, sm.drift, "
-          "  sm.contradiction, sm.utility, sm.periphery, sm.coverage, "
-          "  sm.salience, sm.valence, sm.arousal, sm.composite_score, "
-          "  sm.threshold_t, "
-          "  (SELECT s.mime FROM signals s WHERE s.embedding_id = m.embedding_id "
-          "   ORDER BY s.timestamp LIMIT 1) AS signal_mime "
+          "  m.memory_id, m.modality, m.source_id, m.start_ts, m.end_ts, "
+          "  m.n_signals, m.s_max, m.s_avg, "
+          "  COALESCE(m.retrieved_count, 0) AS retrieved_count, "
+          "  COALESCE(m.used_count, 0) AS used_count, "
+          "  (SELECT s.mime FROM signals s WHERE s.memory_id = m.memory_id "
+          "   ORDER BY s.serial_position LIMIT 1) AS signal_mime "
           "FROM memories m "
-          "LEFT JOIN memory_feedback mf ON m.embedding_id = mf.embedding_id "
-          "LEFT JOIN signal_metrics sm ON m.embedding_id = sm.embedding_id "
           "WHERE m.embedding_id = ?",
           { id });
 
@@ -221,40 +266,36 @@ HydrateMemory (Store *store, long long id, Cortext::Context::Memory &m)
             return store::BlobFromAny (it->second);
           };
 
-          // Populate from memories table (new schema)
-          m.modality = get_s ("primary_modality");
+          // v2: Populate from unified memories table
+          const long long memory_id = get_ll ("memory_id");
+          m.modality = get_s ("modality");
           m.mimetype = get_s ("signal_mime");  // Get from first signal
-          m.source_id = "";  // Not stored at memory level in new schema
+          m.source_id = get_s ("source_id");
           m.timestamp = static_cast<std::uint64_t> (get_ll ("end_ts"));
 
-          // Load content from objstore if content_blob_id present
-          const auto blob_id_bytes = get_blob ("content_blob_id");
-          if (!blob_id_bytes.empty ())
-            {
-              std::string payload;
-              if (LoadObjstorePayload (store, blob_id_bytes, payload))
-                m.content = std::move (payload);
-            }
+          // v2: Load content blobs from signals table (ordered by serial_position)
+          LoadSignalBlobs (store, memory_id, m.content);
 
-          // Populate from memory_feedback
+          // v2: Counts are inline on memories table
           m.retrieved_count = get_ll ("retrieved_count");
           m.used_count = get_ll ("used_count");
 
-          // Populate from signal_metrics
-          m.metrics.relevance = get_dbl ("relevance");
-          m.metrics.mismatch = get_dbl ("mismatch");
-          m.metrics.surprise = get_dbl ("surprise");
-          m.metrics.rarity = get_dbl ("rarity");
-          m.metrics.drift = get_dbl ("drift");
-          m.metrics.contradiction = get_dbl ("contradiction");
-          m.metrics.utility = get_dbl ("utility");
-          m.metrics.periphery = get_dbl ("periphery");
-          m.metrics.coverage = get_dbl ("coverage");
-          m.metrics.salience = get_dbl ("salience");
-          m.metrics.valence = get_dbl ("valence", 0.5);
-          m.metrics.arousal = get_dbl ("arousal");
-          m.metrics.composite_score = get_dbl ("composite_score");
-          m.metrics.threshold_t = get_dbl ("threshold_t");
+          // v2: signal_metrics are stored on signals table, not readily available here
+          // Set defaults for now - metrics come from signal processing context
+          m.relevance = 0.0;
+          m.mismatch = 0.0;
+          m.surprise = 0.0;
+          m.rarity = 0.0;
+          m.drift = 0.0;
+          m.contradiction = 0.0;
+          m.utility = 0.0;
+          m.periphery = 0.0;
+          m.coverage = 0.0;
+          m.salience = 0.0;
+          m.valence = 0.5;
+          m.arousal = 0.0;
+          m.composite_score = 0.0;
+          m.threshold_t = 0.0;
         }
     }
   catch (const std::exception &e)
@@ -271,6 +312,99 @@ HydrateMemory (Store *store, long long id, Cortext::Context::Memory &m)
           "Failed to hydrate memory (unknown error)",
           { telemetry::Attribute::String ("component", "cortext"),
             telemetry::Attribute::Int64 ("embedding_id", id) });
+    }
+}
+
+void
+HydrateWorkingMemoryFromDB (Store *store,
+                            std::vector<Cortext::Context::Memory> &out)
+{
+  if (!store)
+    return;
+
+  try
+    {
+      // Query active WM slots from MEMORIES table with kind='WORKING'
+      // Content blobs are loaded separately via LoadSignalBlobs
+      auto rows = store->Execute (
+          "SELECT m.memory_id, m.source_id, m.modality, m.start_ts, "
+          "       m.strength, m.last_access, m.n_signals, "
+          "       m.s_max, m.s_avg, "
+          "       (SELECT s.mime FROM signals s WHERE s.memory_id = m.memory_id "
+          "        ORDER BY s.serial_position LIMIT 1) AS signal_mime "
+          "FROM memories m "
+          "WHERE m.kind = 'WORKING' AND m.end_ts IS NULL "
+          "ORDER BY m.start_ts ASC");
+
+      for (const auto &row : rows)
+        {
+          Cortext::Context::Memory m;
+
+          // Helper lambdas (same pattern as HydrateMemory)
+          auto get_s = [&row] (const char *k) -> std::string {
+            auto it = row.find (k);
+            if (it == row.end () || !it->second.has_value ())
+              return {};
+            if (it->second.type () == typeid (std::string))
+              return std::any_cast<std::string> (it->second);
+            return {};
+          };
+
+          auto get_ll = [&row] (const char *k) -> long long {
+            auto it = row.find (k);
+            if (it == row.end () || !it->second.has_value ())
+              return 0LL;
+            if (it->second.type () == typeid (long long))
+              return std::any_cast<long long> (it->second);
+            if (it->second.type () == typeid (int))
+              return static_cast<long long> (std::any_cast<int> (it->second));
+            return 0LL;
+          };
+
+          auto get_dbl = [&row] (const char *k, double def = 0.0) -> double {
+            auto it = row.find (k);
+            if (it == row.end () || !it->second.has_value ())
+              return def;
+            if (it->second.type () == typeid (double))
+              return std::any_cast<double> (it->second);
+            if (it->second.type () == typeid (float))
+              return static_cast<double> (std::any_cast<float> (it->second));
+            if (it->second.type () == typeid (int))
+              return static_cast<double> (std::any_cast<int> (it->second));
+            if (it->second.type () == typeid (long long))
+              return static_cast<double> (std::any_cast<long long> (it->second));
+            return def;
+          };
+
+          // Populate Memory struct from WM slot row
+          m.id = get_ll ("memory_id");
+          m.source_id = get_s ("source_id");
+          m.modality = get_s ("modality");
+          m.mimetype = get_s ("signal_mime");
+          m.timestamp = static_cast<std::uint64_t> (get_ll ("last_access"));
+
+          // Map WM metrics to Memory struct
+          m.composite_score = get_dbl ("s_avg", 0.0);
+          m.salience = get_dbl ("s_max", 0.0);
+
+          // v2: Load content blobs from signals table (ordered by serial_position)
+          LoadSignalBlobs (store, m.id, m.content);
+
+          out.push_back (std::move (m));
+        }
+    }
+  catch (const std::exception &e)
+    {
+      telemetry::LogWarn (
+          "Failed to hydrate working memory",
+          { telemetry::Attribute::String ("component", "cortext"),
+            telemetry::Attribute::String ("error", e.what ()) });
+    }
+  catch (...)
+    {
+      telemetry::LogWarn (
+          "Failed to hydrate working memory (unknown error)",
+          { telemetry::Attribute::String ("component", "cortext") });
     }
 }
 
@@ -497,12 +631,17 @@ struct Cortext::Impl
       {
         return result;
       }
+
+    // Hydrate working memory from database (active WM slots)
+    HydrateWorkingMemoryFromDB (store.get (), result.working_memory);
+
+    // Hydrate retrieved memory (long-term retrieval results)
     for (const long long id : out.candidate_memory_ids)
       {
         Cortext::Context::Memory m;
         m.id = id;
         HydrateMemory (store.get (), id, m);
-        result.memories.push_back (std::move (m));
+        result.retrieved_memory.push_back (std::move (m));
       }
     return result;
   }

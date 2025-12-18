@@ -173,8 +173,8 @@ ApplyPredictivePreActivation::Execute (OperationContext &context, Transaction &t
       if (delta > constants::kGainSmall)
         delta = constants::kGainSmall;
 
-      // Update embeddings strength (row exists from storage)
-      tx.Execute ("UPDATE embeddings "
+      // v2: Update memories strength (row exists from storage)
+      tx.Execute ("UPDATE memories "
                   "SET strength = MIN(?, COALESCE(strength, 1.0) + ?) "
                   "WHERE embedding_id = ?;",
                   { kStrengthMax, delta, id });

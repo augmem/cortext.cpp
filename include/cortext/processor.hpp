@@ -101,14 +101,15 @@ private:
   void FinalizeEpisode (Transaction &tx);
 
   // State persistence helpers (called within Process transaction)
-  void PersistProcessorState (Transaction &tx);
-  void PersistBlenderState (Transaction &tx);
+  // v2 schema: Unified state persistence
+  void PersistState (Transaction &tx);           // Unified STATE table
+  void PersistWorkingMemory (Transaction &tx);   // MEMORIES with kind='WORKING'
+  void PersistAccumulators (Transaction &tx);    // ACCUMULATORS table
+
+  // View-backed persistence (still separate for SIGNALS-derived views)
   void PersistRecentContext (Transaction &tx);
   void PersistRecentScores (Transaction &tx);
   void PersistObservedRetentionHistory (Transaction &tx);
-  void PersistRLSCoefficients (Transaction &tx);
-  void PersistWorkingMemorySlots (Transaction &tx);
-  void PersistAccumulatorState (Transaction &tx);
 
   Config config_;
   std::shared_ptr<Store> store_;

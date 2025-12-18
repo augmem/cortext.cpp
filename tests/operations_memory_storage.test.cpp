@@ -109,9 +109,9 @@ TEST_CASE ("MemoryStorage stores payload when write_decision is true",
       "SELECT * FROM memories WHERE embedding_id = ?", { *stored_id });
   REQUIRE (idx_rows.size () == 1);
 
-  // Verify embeddings has all expected columns
+  // v2: Verify memories has all expected columns (strength, use_frequency now on memories)
   auto fb_rows = store->Execute (
-      "SELECT strength, use_frequency FROM embeddings WHERE embedding_id = ?", { *stored_id });
+      "SELECT strength, use_frequency FROM memories WHERE embedding_id = ?", { *stored_id });
   REQUIRE (fb_rows.size () == 1);
 
   // No buffered instructions since we use savepoints
@@ -203,12 +203,12 @@ TEST_CASE ("MemoryStorage stores memory even when no payload",
   REQUIRE (stored_id.has_value ());
   REQUIRE (*stored_id > 0);
 
-  // Verify memories row was inserted with null content_blob_id
+  // v2: Verify memories row was inserted with null blob_id
   auto mem_rows = store->Execute (
-      "SELECT content_blob_id FROM memories WHERE embedding_id = ?",
+      "SELECT blob_id FROM memories WHERE embedding_id = ?",
       { *stored_id });
   REQUIRE (mem_rows.size () == 1);
-  // content_blob_id should be null for no payload
+  // blob_id should be null for no payload
 }
 
 TEST_CASE ("MemoryStorage stores payload in objstore and retrieves it",
@@ -256,12 +256,12 @@ TEST_CASE ("MemoryStorage stores payload in objstore and retrieves it",
 
   // Savepoint commits directly, no need to execute buffered writes
 
-  // Retrieve content_blob_id from memories (renamed from blob_id)
+  // v2: Retrieve blob_id from memories
   auto idx_rows = store->Execute (
-      "SELECT content_blob_id FROM memories WHERE embedding_id = ?",
+      "SELECT blob_id FROM memories WHERE embedding_id = ?",
       { *stored_id });
   REQUIRE (idx_rows.size () == 1);
-  auto blob_id = BlobFromAny (idx_rows[0].at ("content_blob_id"));
+  auto blob_id = BlobFromAny (idx_rows[0].at ("blob_id"));
   REQUIRE (!blob_id.empty ());
 
   // Retrieve payload from objstore

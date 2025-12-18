@@ -61,13 +61,17 @@ struct SeedCandidatesOp : IOperation
     auto *store = ctx.GetStore ();
     for (const auto &c : candidates_)
       {
+        // v2: Insert into embeddings (minimal vec0 table)
         store->Execute (
-            "INSERT INTO embeddings(embedding_id, embedding, type, strength, "
-            "use_frequency, stability, connectivity, drift_mag, influence, "
-            "sustained_influence, contextual_gain, redundancy, pre_activation, "
-            "lability_state, suppression_count) VALUES(?, ?, 'memory', 1.0, 0.0, "
-            "1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0)",
-            { c.embedding_id, c.embedding });
+            "INSERT INTO embeddings(embedding_id, embedding, created_at) "
+            "VALUES(?, ?, ?)",
+            { c.embedding_id, c.embedding, 0LL });
+        // v2: Insert into memories (comprehensive metadata)
+        store->Execute (
+            "INSERT INTO memories(memory_id, embedding_id, source_id, kind, "
+            "start_ts, n_signals, modality, s_max, s_avg, strength, created_at) "
+            "VALUES(?, ?, 'test', 'LONG_TERM', 0, 1, 'text', 0.5, 0.5, 1.0, 0)",
+            { c.embedding_id, c.embedding_id });
         store->Execute (
             "INSERT INTO consolidation_candidates(embedding_id, score, "
             "created_at, reason) VALUES(?, ?, ?, ?)",

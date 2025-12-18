@@ -84,32 +84,35 @@ Clamp01 (double v)
 void
 ApplyRIFRecovery (Transaction &tx, long long now_ts, double recovery_time)
 {
-  tx.Execute ("UPDATE embeddings "
-              "SET strength = MAX(0.0, strength + ("
-              "  SELECT suppression * ("
-              "    CASE "
-              "      WHEN (? - ts) <= 0 THEN 0.0 "
-              "      WHEN (? - ts) >= ? THEN 1.0 "
-              "      ELSE ((? - ts) * 1.0 / ?) "
-              "    END"
-              "  )"
-              "  FROM rif_state WHERE rif_state.embedding_id = "
-              "embeddings.embedding_id"
-              ")) "
-              "WHERE EXISTS (SELECT 1 FROM rif_state WHERE "
-              "rif_state.embedding_id = embeddings.embedding_id);",
-              { now_ts, now_ts, recovery_time, now_ts, recovery_time });
+  // v2: RIF state (suppression, suppression_ts) merged into memories table
+  // Recovery: restore strength proportional to elapsed time since suppression
+  tx.Execute (
+      "UPDATE memories "
+      "SET strength = MAX(0.0, strength + ("
+      "  suppression * ("
+      "    CASE "
+      "      WHEN (? - COALESCE(suppression_ts, 0)) <= 0 THEN 0.0 "
+      "      WHEN (? - COALESCE(suppression_ts, 0)) >= ? THEN 1.0 "
+      "      ELSE ((? - COALESCE(suppression_ts, 0)) * 1.0 / ?) "
+      "    END"
+      "  )"
+      ")) "
+      "WHERE suppression > 0;",
+      { now_ts, now_ts, recovery_time, now_ts, recovery_time });
 
-  tx.Execute ("UPDATE rif_state "
-              "SET suppression = MAX(0.0, suppression - (suppression * ("
-              "    CASE "
-              "      WHEN (? - ts) <= 0 THEN 0.0 "
-              "      WHEN (? - ts) >= ? THEN 1.0 "
-              "      ELSE ((? - ts) * 1.0 / ?) "
-              "    END"
-              "  ))), "
-              "    ts = ?;",
-              { now_ts, now_ts, recovery_time, now_ts, recovery_time, now_ts });
+  // Decay suppression proportional to recovery
+  tx.Execute (
+      "UPDATE memories "
+      "SET suppression = MAX(0.0, suppression - (suppression * ("
+      "    CASE "
+      "      WHEN (? - COALESCE(suppression_ts, 0)) <= 0 THEN 0.0 "
+      "      WHEN (? - COALESCE(suppression_ts, 0)) >= ? THEN 1.0 "
+      "      ELSE ((? - COALESCE(suppression_ts, 0)) * 1.0 / ?) "
+      "    END"
+      "  ))), "
+      "    suppression_ts = ? "
+      "WHERE suppression > 0;",
+      { now_ts, now_ts, recovery_time, now_ts, recovery_time, now_ts });
 }
 
 struct Candidate
@@ -177,16 +180,14 @@ ApplyLateralInhibition (const std::vector<Candidate> &winners,
         {
           continue;
         }
-      // Note: embeddings row already exists from storage
-      tx.Execute ("INSERT OR IGNORE INTO rif_state (embedding_id) VALUES (?);",
-                  { loser.id });
-      tx.Execute ("UPDATE rif_state SET suppression = suppression + ?, ts = ? "
+      // v2: RIF state merged into memories table (suppression, suppression_ts)
+      tx.Execute ("UPDATE memories "
+                  "SET suppression = suppression + ?, "
+                  "    suppression_ts = ?, "
+                  "    suppression_count = suppression_count + 1, "
+                  "    strength = MAX(0.0, strength - ?) "
                   "WHERE embedding_id = ?;",
-                  { total_supp, now_ts, loser.id });
-      tx.Execute ("UPDATE embeddings "
-                  "SET strength = MAX(0.0, strength - ?) "
-                  "WHERE embedding_id = ?;",
-                  { total_supp, loser.id });
+                  { total_supp, now_ts, total_supp, loser.id });
       ++suppressed_count;
     }
 }
@@ -248,17 +249,9 @@ void
 ApplyRetrievalCompetition::CollectSchema (
     cortext::store::SchemaRegistry &registry) const
 {
-  registry.Register ({
-      20, // Competition & RIF
-      "Retrieval Induced Forgetting (rif_state)",
-      {
-          "CREATE TABLE IF NOT EXISTS rif_state ("
-          "  embedding_id INTEGER PRIMARY KEY,"
-          "  suppression REAL NOT NULL DEFAULT 0.0,"
-          "  ts INTEGER DEFAULT 0"
-          ")",
-      },
-  });
+  // v2: RIF state (suppression, suppression_ts, suppression_count) now merged
+  // into memories table. No separate table needed.
+  (void)registry;
 }
 
 } // namespace cortext::operations

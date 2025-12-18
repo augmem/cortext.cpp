@@ -78,23 +78,33 @@ TEST_CASE ("State persistence tables are created", "[state_persistence][schema]"
     return false;
   };
 
-  SECTION ("Migration 3 tables exist")
+  SECTION ("v2 schema tables exist")
   {
-    REQUIRE (has ("processor_state"));
-    REQUIRE (has ("blender_weights"));
-    REQUIRE (has ("blender_covariance"));
-  }
-
-  SECTION ("Migration 4 tables exist")
-  {
+    REQUIRE (has ("state"));
+    REQUIRE (has ("accumulators"));
+    REQUIRE (has ("memories"));
+    REQUIRE (has ("embeddings"));
     REQUIRE (has ("episodes"));
-    REQUIRE (has ("signal_metrics"));
+    REQUIRE (has ("signals"));
   }
 
-  SECTION ("Migration 5 tables exist")
+  SECTION ("v2 views exist")
   {
-    REQUIRE (has ("recent_context"));
-    REQUIRE (has ("recent_scores"));
+    // In v2 schema, recent_context and recent_scores are VIEWs derived from signals
+    auto views = store->Execute (
+        "SELECT name FROM sqlite_master WHERE type='view'", {});
+    auto has_view = [&] (const std::string &name) {
+      for (const auto &r : views)
+        {
+          auto it = r.find ("name");
+          if (it != r.end ()
+              && std::any_cast<std::string> (it->second) == name)
+            return true;
+        }
+      return false;
+    };
+    REQUIRE (has_view ("recent_context"));
+    REQUIRE (has_view ("recent_scores"));
   }
 }
 
@@ -126,8 +136,8 @@ TEST_CASE ("Processor state is persisted on flush",
     processor.Flush ();
   }
 
-  // Check that processor_state was saved
-  auto rows = store->Execute ("SELECT * FROM processor_state WHERE id = 1");
+  // Check that state was saved (v2 schema: unified state table)
+  auto rows = store->Execute ("SELECT * FROM state WHERE id = 1");
   REQUIRE (rows.size () == 1);
 
   long long signals = GetInt64 (rows[0], "signals_processed");
@@ -157,8 +167,8 @@ TEST_CASE ("Processor state is loaded on startup",
     processor.Flush ();
   }
 
-  // Verify state was persisted
-  auto rows1 = store->Execute ("SELECT signals_processed FROM processor_state");
+  // Verify state was persisted (v2 schema: unified state table)
+  auto rows1 = store->Execute ("SELECT signals_processed FROM state");
   REQUIRE (rows1.size () == 1);
   long long saved_count = GetInt64 (rows1[0], "signals_processed");
   REQUIRE (saved_count == 2);
@@ -181,7 +191,7 @@ TEST_CASE ("Processor state is loaded on startup",
   }
 
   // Check that count is cumulative (2 from before + 1 new = 3)
-  auto rows2 = store->Execute ("SELECT signals_processed FROM processor_state");
+  auto rows2 = store->Execute ("SELECT signals_processed FROM state");
   REQUIRE (rows2.size () == 1);
   long long total_count = GetInt64 (rows2[0], "signals_processed");
   REQUIRE (total_count == 3);
@@ -207,8 +217,8 @@ TEST_CASE ("Blender weights are persisted", "[state_persistence][blender]")
     processor.Flush ();
   }
 
-  // Check blender_weights table has data
-  auto rows = store->Execute ("SELECT * FROM blender_weights WHERE id = 1");
+  // Check state table has blender weights (v2 schema: merged into state)
+  auto rows = store->Execute ("SELECT * FROM state WHERE id = 1");
   REQUIRE (rows.size () == 1);
 
   // Default weights should be around 0.5
@@ -216,43 +226,46 @@ TEST_CASE ("Blender weights are persisted", "[state_persistence][blender]")
   REQUIRE_THAT (w_relevance, WithinAbs (0.5, 0.5));
 }
 
-TEST_CASE ("Recent context embeddings are persisted",
+TEST_CASE ("Recent context view derives from signals",
            "[state_persistence][recent_context]")
 {
   auto unique_store = SQLiteStore::Create (":memory:");
   auto store = std::shared_ptr<Store> (std::move (unique_store));
 
-  const int num_signals = 5;
-
   {
-    // Use UpdateFocus to populate recent_context_embeddings, then trigger
-    // boundary
-    auto ops = std::make_unique<OperationSet> (
-        std::make_unique<operations::UpdateFocus> (),
-        std::make_unique<TriggerBoundaryOp> ());
+    // Initialize schema
+    auto ops = std::make_unique<OperationSet> ();
     SignalProcessor processor (SignalProcessor::Config{}, store,
                                std::move (ops));
-
-    for (int i = 0; i < num_signals; ++i)
-      {
-        Signal s;
-        s.embedding = Eigen::VectorXf::Random (256);
-        s.timestamp = static_cast<uint64_t> (1000 + i * 100);
-        s.source_id = "test";
-        processor.Process (s);
-      }
-
     processor.Flush ();
   }
 
-  // Check recent_context table has embeddings
-  auto rows = store->Execute (
-      "SELECT COUNT(*) as c FROM recent_context");
+  // In v2 schema, recent_context is a VIEW that derives from signals/embeddings.
+  // Insert test data into signals table to verify the view works.
+  const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds> (
+                          std::chrono::system_clock::now ().time_since_epoch ())
+                          .count ();
+
+  std::vector<float> emb (256, 0.1f);
+
+  // Insert embedding
+  store->Execute (
+      "INSERT INTO embeddings (embedding, created_at) VALUES (?, ?)",
+      { emb, now_ms });
+
+  // Insert signal
+  store->Execute (
+      "INSERT INTO signals (embedding_id, source_id, timestamp, modality, created_at) "
+      "VALUES (?, ?, ?, 'text', ?)",
+      { 1LL, std::string ("test"), now_ms, now_ms });
+
+  // Check recent_context view returns data
+  auto rows = store->Execute ("SELECT COUNT(*) as c FROM recent_context");
   REQUIRE (rows.size () == 1);
 
   long long count = GetInt64 (rows[0], "c");
-  // Should have persisted some embeddings (exact count depends on n_ctx)
-  REQUIRE (count > 0);
+  // View should show the signal we inserted
+  REQUIRE (count >= 1);
 }
 
 TEST_CASE ("Recent scores are persisted", "[state_persistence][recent_scores]")
@@ -335,16 +348,13 @@ TEST_CASE ("State persistence is idempotent across restarts",
     processor.Flush ();
   }
 
-  // Should have exactly one row in singleton tables
-  auto ps_rows = store->Execute ("SELECT COUNT(*) as c FROM processor_state");
-  REQUIRE (GetInt64 (ps_rows[0], "c") == 1);
-
-  auto bw_rows = store->Execute ("SELECT COUNT(*) as c FROM blender_weights");
-  REQUIRE (GetInt64 (bw_rows[0], "c") == 1);
+  // Should have exactly one row in unified state table (v2 schema)
+  auto state_rows = store->Execute ("SELECT COUNT(*) as c FROM state");
+  REQUIRE (GetInt64 (state_rows[0], "c") == 1);
 
   // Signals processed should be cumulative
-  auto state_rows = store->Execute ("SELECT signals_processed FROM processor_state");
-  REQUIRE (GetInt64 (state_rows[0], "signals_processed") == 3);
+  auto state_vals = store->Execute ("SELECT signals_processed FROM state");
+  REQUIRE (GetInt64 (state_vals[0], "signals_processed") == 3);
 }
 
 // Operation that populates WM slots for testing persistence
@@ -392,12 +402,12 @@ TEST_CASE ("Working memory slots are persisted",
     processor.Flush ();
   }
 
-  // Check working_memory_slots table has entries
+  // Check memories table has WM entries (v2 schema: kind='WORKING', active slots)
+  // Active slots have end_ts IS NULL
   auto rows = store->Execute (
-      "SELECT slot_index, strength FROM working_memory_slots ORDER BY slot_index");
+      "SELECT memory_id, strength FROM memories "
+      "WHERE kind = 'WORKING' AND end_ts IS NULL ORDER BY memory_id");
   REQUIRE (rows.size () == 2);
-  REQUIRE (GetInt64 (rows[0], "slot_index") == 0);
-  REQUIRE (GetInt64 (rows[1], "slot_index") == 1);
   REQUIRE_THAT (GetDouble (rows[0], "strength"), WithinAbs (0.8, 0.01));
   REQUIRE_THAT (GetDouble (rows[1], "strength"), WithinAbs (0.8, 0.01));
 }
@@ -418,6 +428,7 @@ TEST_CASE ("Working memory slots are loaded on startup",
   }
 
   // Insert test data directly - DB stores timestamps in milliseconds
+  // v2 schema: WM slots stored in memories table with kind='WORKING'
   const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds> (
                           std::chrono::system_clock::now ().time_since_epoch ())
                           .count ();
@@ -425,14 +436,25 @@ TEST_CASE ("Working memory slots are loaded on startup",
   std::vector<float> emb1 (256, 0.1f);
   std::vector<float> emb2 (256, 0.2f);
 
+  // First create embeddings
   store->Execute (
-      "INSERT INTO working_memory_slots (slot_index, strength, timestamp, embedding) "
-      "VALUES (?, ?, ?, ?)",
-      { 0LL, 0.9, now_ms, emb1 });
+      "INSERT INTO embeddings (embedding, created_at) VALUES (?, ?)",
+      { emb1, now_ms });
   store->Execute (
-      "INSERT INTO working_memory_slots (slot_index, strength, timestamp, embedding) "
-      "VALUES (?, ?, ?, ?)",
-      { 1LL, 0.7, now_ms, emb2 });
+      "INSERT INTO embeddings (embedding, created_at) VALUES (?, ?)",
+      { emb2, now_ms });
+
+  // Then create WM memory entries
+  store->Execute (
+      "INSERT INTO memories (embedding_id, source_id, kind, modality, strength, "
+      "last_access, start_ts, n_signals, s_max, s_avg, created_at) "
+      "VALUES (?, ?, 'WORKING', 'text', ?, ?, ?, 1, 0.5, 0.5, ?)",
+      { 1LL, std::string ("test"), 0.9, now_ms, now_ms, now_ms });
+  store->Execute (
+      "INSERT INTO memories (embedding_id, source_id, kind, modality, strength, "
+      "last_access, start_ts, n_signals, s_max, s_avg, created_at) "
+      "VALUES (?, ?, 'WORKING', 'text', ?, ?, ?, 1, 0.5, 0.5, ?)",
+      { 2LL, std::string ("test"), 0.7, now_ms, now_ms, now_ms });
 
   // Create new processor - should load slots
   {
@@ -507,17 +529,25 @@ TEST_CASE ("Working memory slots decay on load",
   }
 
   // Insert slot with old timestamp (5 seconds ago)
-  // DB stores timestamps in milliseconds
+  // v2 schema: WM slots stored in memories table with kind='WORKING'
   const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds> (
                           std::chrono::system_clock::now ().time_since_epoch ())
                           .count ();
   const auto old_ts_ms = now_ms - 5000; // 5 seconds ago in milliseconds
 
   std::vector<float> emb (256, 0.1f);
+
+  // First create embedding
   store->Execute (
-      "INSERT INTO working_memory_slots (slot_index, strength, timestamp, embedding) "
-      "VALUES (?, ?, ?, ?)",
-      { 0LL, 1.0, old_ts_ms, emb });
+      "INSERT INTO embeddings (embedding, created_at) VALUES (?, ?)",
+      { emb, now_ms });
+
+  // Then create WM memory entry with old last_access timestamp
+  store->Execute (
+      "INSERT INTO memories (embedding_id, source_id, kind, modality, strength, "
+      "last_access, start_ts, n_signals, s_max, s_avg, created_at) "
+      "VALUES (?, ?, 'WORKING', 'text', ?, ?, ?, 1, 0.5, 0.5, ?)",
+      { 1LL, std::string ("test"), 1.0, old_ts_ms, old_ts_ms, old_ts_ms });
 
   // Load with sensitivity=0.5 → cost_per_slot = lerp(0.05, 0.15, 0.5) = 0.10
   // After 5 seconds: strength = 1.0 - 0.10 * 5 = 0.5
@@ -568,17 +598,25 @@ TEST_CASE ("Fully decayed WM slots are not loaded",
   }
 
   // Insert slot with very old timestamp (20 seconds ago)
-  // DB stores timestamps in milliseconds
+  // v2 schema: WM slots stored in memories table with kind='WORKING'
   const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds> (
                           std::chrono::system_clock::now ().time_since_epoch ())
                           .count ();
   const auto old_ts_ms = now_ms - 20000; // 20 seconds ago in milliseconds
 
   std::vector<float> emb (256, 0.1f);
+
+  // First create embedding
   store->Execute (
-      "INSERT INTO working_memory_slots (slot_index, strength, timestamp, embedding) "
-      "VALUES (?, ?, ?, ?)",
-      { 0LL, 1.0, old_ts_ms, emb });
+      "INSERT INTO embeddings (embedding, created_at) VALUES (?, ?)",
+      { emb, now_ms });
+
+  // Then create WM memory entry with very old last_access timestamp
+  store->Execute (
+      "INSERT INTO memories (embedding_id, source_id, kind, modality, strength, "
+      "last_access, start_ts, n_signals, s_max, s_avg, created_at) "
+      "VALUES (?, ?, 'WORKING', 'text', ?, ?, ?, 1, 0.5, 0.5, ?)",
+      { 1LL, std::string ("test"), 1.0, old_ts_ms, old_ts_ms, old_ts_ms });
 
   // Load with sensitivity=0.5 → cost_per_slot = 0.10
   // After 20 seconds: strength = 1.0 - 0.10 * 20 = -1.0 → not loaded

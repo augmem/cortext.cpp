@@ -311,6 +311,20 @@ struct IdleTracker {
   }
 };
 
+/// @brief Extract text content from binary blobs (concatenated UTF-8).
+/// @param blobs Vector of binary blobs (one per signal).
+/// @return Concatenated text content.
+std::string ExtractTextFromBlobs(const std::vector<std::vector<unsigned char>>& blobs) {
+  if (blobs.empty()) return {};
+  std::string result;
+  for (const auto& blob : blobs) {
+    if (!blob.empty()) {
+      result.append(reinterpret_cast<const char*>(blob.data()), blob.size());
+    }
+  }
+  return result;
+}
+
 chat::MemoryEvent
 CreateMemoryEvent(chat::MemoryEventType type,
                   const cortext::Cortext::Context::Memory &mem)
@@ -318,26 +332,26 @@ CreateMemoryEvent(chat::MemoryEventType type,
   chat::MemoryEvent evt;
   evt.type = type;
   evt.memory_id = static_cast<int>(mem.id);
-  evt.content = mem.content;
+  evt.content = ExtractTextFromBlobs(mem.content);
   evt.source_id = mem.source_id;
   evt.timestamp = mem.timestamp;
   evt.retrieved_count = mem.retrieved_count;
   evt.used_count = mem.used_count;
 
-  evt.relevance = mem.metrics.relevance;
-  evt.mismatch = mem.metrics.mismatch;
-  evt.surprise = mem.metrics.surprise;
-  evt.rarity = mem.metrics.rarity;
-  evt.drift = mem.metrics.drift;
-  evt.contradiction = mem.metrics.contradiction;
-  evt.utility = mem.metrics.utility;
-  evt.periphery = mem.metrics.periphery;
-  evt.coverage = mem.metrics.coverage;
-  evt.salience = mem.metrics.salience;
-  evt.valence = mem.metrics.valence;
-  evt.arousal = mem.metrics.arousal;
-  evt.composite_score = mem.metrics.composite_score;
-  evt.threshold_t = mem.metrics.threshold_t;
+  evt.relevance = mem.relevance;
+  evt.mismatch = mem.mismatch;
+  evt.surprise = mem.surprise;
+  evt.rarity = mem.rarity;
+  evt.drift = mem.drift;
+  evt.contradiction = mem.contradiction;
+  evt.utility = mem.utility;
+  evt.periphery = mem.periphery;
+  evt.coverage = mem.coverage;
+  evt.salience = mem.salience;
+  evt.valence = mem.valence;
+  evt.arousal = mem.arousal;
+  evt.composite_score = mem.composite_score;
+  evt.threshold_t = mem.threshold_t;
 
   return evt;
 }
@@ -486,7 +500,7 @@ std::string FormatMemoriesForSystemPrompt(
     }
     oss << " modality=\"" << XmlEscape(modality) << "\">";
 
-    std::string c = m.content;
+    std::string c = ExtractTextFromBlobs(m.content);
     if (c.size() > 800) c = c.substr(0, 800) + "...";
     oss << XmlEscape(c);
 
@@ -497,19 +511,25 @@ std::string FormatMemoriesForSystemPrompt(
 }
 
 template <typename Json>
-Json BuildOpenAIMessages(const std::vector<chat::ChatMessage>& history,
-                         int window_size,
+Json BuildOpenAIMessages(const std::vector<cortext::Cortext::Context::Memory>& working_memory,
                          const std::string& injected_system) {
   Json messages = Json::array();
   if (!injected_system.empty()) {
     messages.push_back({{"role", "system"}, {"content", injected_system}});
   }
 
-  const int n = static_cast<int>(history.size());
-  const int start = std::max(0, n - window_size);
-  for (int i = start; i < n; ++i) {
-    const auto& m = history[static_cast<size_t>(i)];
-    messages.push_back({{"role", m.role}, {"content", m.content}});
+  // Build from working memory (already ordered by start_ts from database query)
+  for (const auto& m : working_memory) {
+    std::string role;
+    if (m.source_id == "chat/user") {
+      role = "user";
+    } else if (m.source_id == "chat/assistant") {
+      role = "assistant";
+    } else {
+      continue;  // Skip unknown sources
+    }
+    std::string text_content = ExtractTextFromBlobs(m.content);
+    messages.push_back({{"role", role}, {"content", text_content}});
   }
   return messages;
 }
@@ -830,8 +850,8 @@ int main(int argc, char** argv) {
             std::lock_guard<std::mutex> lock(mu);
             // Only inject memories if the interrupt gate approved them
             if (retrieved.should_interrupt) {
-              streaming_state.current_memories = retrieved.memories;
-              for (const auto& mem : retrieved.memories) {
+              streaming_state.current_memories = retrieved.retrieved_memory;
+              for (const auto& mem : retrieved.retrieved_memory) {
                 memory_events.push_back(CreateMemoryEvent(chat::MemoryEventType::RETRIEVED, mem));
                 if (memory_events.size() > kMaxMemoryEvents) {
                   memory_events.pop_front();
@@ -851,7 +871,7 @@ int main(int argc, char** argv) {
 
           cortext::telemetry::LogDebug("chat.phase1.complete", {
             cortext::telemetry::Attribute::Bool("should_interrupt", retrieved.should_interrupt),
-            cortext::telemetry::Attribute::Int64("memories_retrieved", static_cast<int64_t>(retrieved.memories.size())),
+            cortext::telemetry::Attribute::Int64("memories_retrieved", static_cast<int64_t>(retrieved.retrieved_memory.size())),
             cortext::telemetry::Attribute::Bool("stored", retrieved.output.stored_embedding_id.has_value()),
             cortext::telemetry::Attribute::Double("composite_score", retrieved.output.composite_score.value_or(0.0)),
             cortext::telemetry::Attribute::Double("threshold", retrieved.output.threshold.value_or(0.0)),
@@ -869,15 +889,13 @@ int main(int argc, char** argv) {
 
           while (local_restarts < StreamingState::kMaxRestarts) {
             std::string injected_system;
-            std::vector<chat::ChatMessage> local_history;
             {
               std::lock_guard<std::mutex> lock(mu);
               injected_system = FormatMemoriesForSystemPrompt(streaming_state.current_memories);
-              local_history = history;
             }
 
             using Json = openai::Json;
-            Json messages = BuildOpenAIMessages<Json>(local_history, 10, injected_system);
+            Json messages = BuildOpenAIMessages<Json>(retrieved.working_memory, injected_system);
 
             {
               std::lock_guard<std::mutex> lock(last_context->mu);
@@ -910,7 +928,7 @@ int main(int argc, char** argv) {
 
             cortext::telemetry::LogDebug("chat.phase2.stream_start", {
               cortext::telemetry::Attribute::Int64("restart", static_cast<int64_t>(local_restarts)),
-              cortext::telemetry::Attribute::Int64("history_size", static_cast<int64_t>(local_history.size()))
+              cortext::telemetry::Attribute::Int64("working_memory_size", static_cast<int64_t>(retrieved.working_memory.size()))
             });
 
             auto result = streaming_client.Stream(request, [&](const std::string& token, bool done) {
@@ -933,12 +951,12 @@ int main(int argc, char** argv) {
                 cortext::Cortext::Context ctx;
                 {
                   std::lock_guard<std::mutex> lock(db_write_mu);
-                  ctx = cortext_ctx->ProcessText(accumulated, "chat/assistant-streaming");
+                  ctx = cortext_ctx->ProcessText(accumulated, "chat/assistant");
                 }
 
                 if (ctx.should_interrupt && local_restarts < StreamingState::kMaxRestarts) {
                   cortext::telemetry::LogInfo("chat.phase2.interrupt", {
-                    cortext::telemetry::Attribute::Int64("new_memories", static_cast<int64_t>(ctx.memories.size())),
+                    cortext::telemetry::Attribute::Int64("new_memories", static_cast<int64_t>(ctx.retrieved_memory.size())),
                     cortext::telemetry::Attribute::Int64("restart", static_cast<int64_t>(local_restarts)),
                     cortext::telemetry::Attribute::Int64("tokens_so_far", static_cast<int64_t>(accumulated.size()))
                   });
@@ -948,7 +966,7 @@ int main(int argc, char** argv) {
                     for (const auto& m : streaming_state.current_memories) {
                       existing_ids.insert(m.id);
                     }
-                    for (const auto& m : ctx.memories) {
+                    for (const auto& m : ctx.retrieved_memory) {
                       if (existing_ids.find(m.id) == existing_ids.end()) {
                         streaming_state.current_memories.push_back(m);
                         memory_events.push_back(CreateMemoryEvent(chat::MemoryEventType::RETRIEVED, m));

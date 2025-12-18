@@ -48,8 +48,9 @@ CheckCapacityTrigger (Store *store, long long consolidation_threshold,
     }
   try
     {
+      // v2: Count memories (primary metadata table) instead of embeddings
       auto rows = store->Execute (
-          "SELECT COUNT(*) AS c FROM embeddings", {});
+          "SELECT COUNT(*) AS c FROM memories", {});
       if (!rows.empty () && rows[0].count ("c") == 1)
         {
           const auto &v = rows[0].at ("c");
@@ -107,15 +108,16 @@ EvaluateConsolidation::Execute (OperationContext &context, Transaction &tx) cons
     }
   const int tokens_in_flight = context.GetTokensInFlight ();
   const int retrieval_queue_depth = context.GetRetrievalQueueDepth ();
-  double idle_for = 0.0;
+  double idle_for_ms = 0.0;
   if (p_ctx.last_retrieval_ts > 0 && now_ts > p_ctx.last_retrieval_ts)
     {
-      idle_for = static_cast<double> (now_ts - p_ctx.last_retrieval_ts);
+      idle_for_ms = static_cast<double> (now_ts - p_ctx.last_retrieval_ts);
     }
-  const int idle_required = core::IdleRequiredSeconds (cfg.stability);
+  // Convert idle_required from seconds to milliseconds for consistent comparison
+  const int idle_required_ms = core::IdleRequiredSeconds (cfg.stability) * 1000;
   const bool idle_ok
       = CheckIdleCondition (tokens_in_flight, retrieval_queue_depth,
-                            idle_for, idle_required, trigger_interval);
+                            idle_for_ms, idle_required_ms, trigger_interval);
 
   // NOTE: consolidation_events table removed (undocumented).
   // Event logging removed - consolidation decisions are tracked via
@@ -214,44 +216,44 @@ ScoreConsolidation::Execute (OperationContext &context, Transaction &tx) const
   // Floor derived from knobs (no magic numbers).
   const double floor_cutoff = core::PeripheryCutoff (T);
 
-  // Update connectivity metric from graph edge count (Section 9.2).
-  // Connectivity = normalized count of edges where this embedding participates.
+  // v2: Update connectivity metric from graph edge count (Section 9.2).
+  // Connectivity = normalized count of edges where this memory participates.
   // Normalized by max observed edge count to keep values in [0, 1].
   tx.Execute ("WITH edge_counts AS ("
-              "  SELECT e.embedding_id, "
+              "  SELECT m.embedding_id, "
               "         (SELECT COUNT(*) FROM graph_edges ge "
-              "          WHERE ge.source_id = 'emb:' || e.embedding_id "
-              "             OR ge.target_id = 'emb:' || e.embedding_id) AS cnt "
-              "  FROM embeddings e"
+              "          WHERE ge.source_id = 'emb:' || m.embedding_id "
+              "             OR ge.target_id = 'emb:' || m.embedding_id) AS cnt "
+              "  FROM memories m"
               "), max_cnt AS ("
               "  SELECT MAX(cnt) AS m FROM edge_counts WHERE cnt > 0"
               ") "
-              "UPDATE embeddings SET connectivity = ("
+              "UPDATE memories SET connectivity = ("
               "  SELECT CASE WHEN (SELECT m FROM max_cnt) > 0 "
               "              THEN CAST(ec.cnt AS REAL) / (SELECT m FROM max_cnt) "
               "              ELSE 0.0 END "
               "  FROM edge_counts ec WHERE ec.embedding_id = "
-              "embeddings.embedding_id"
+              "memories.embedding_id"
               ");",
               {});
 
-  // Insert or update candidates whose score is below floor.
+  // v2: Insert or update candidates whose score is below floor.
   // score = T*strength - F*redundancy + S*connectivity + T*stability
-  // Uses unified embeddings table which contains per-embedding state.
+  // Uses unified memories table which contains per-memory state.
   tx.Execute ("INSERT INTO consolidation_candidates(embedding_id, score, "
               "created_at, reason) "
-              "SELECT e.embedding_id, "
-              "       ((?1 * COALESCE(e.strength, 1.0)) "
-              "        - (?2 * COALESCE(e.redundancy, 0.0)) "
-              "        + (?3 * COALESCE(e.connectivity, 0.0)) "
-              "        + (?4 * COALESCE(e.stability, 0.0))) AS computed_score, "
+              "SELECT m.embedding_id, "
+              "       ((?1 * COALESCE(m.strength, 1.0)) "
+              "        - (?2 * COALESCE(m.redundancy, 0.0)) "
+              "        + (?3 * COALESCE(m.connectivity, 0.0)) "
+              "        + (?4 * COALESCE(m.stability, 0.0))) AS computed_score, "
               "       ?5 AS created_at, "
               "       'score_below_floor' AS reason "
-              "FROM embeddings e "
-              "WHERE ((?1 * COALESCE(e.strength, 1.0)) "
-              "       - (?2 * COALESCE(e.redundancy, 0.0)) "
-              "       + (?3 * COALESCE(e.connectivity, 0.0)) "
-              "       + (?4 * COALESCE(e.stability, 0.0))) < ?6 "
+              "FROM memories m "
+              "WHERE ((?1 * COALESCE(m.strength, 1.0)) "
+              "       - (?2 * COALESCE(m.redundancy, 0.0)) "
+              "       + (?3 * COALESCE(m.connectivity, 0.0)) "
+              "       + (?4 * COALESCE(m.stability, 0.0))) < ?6 "
               "ON CONFLICT(embedding_id) DO UPDATE SET "
               "  score=excluded.score, "
               "  created_at=excluded.created_at, "

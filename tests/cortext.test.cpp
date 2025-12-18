@@ -234,7 +234,7 @@ TEST_CASE ("Cortext hydrates sqlite-objstore payloads",
   embedding[2] = 2.0f;
   embedding[3] = 3.0f;
 
-  std::unordered_map<long long, std::string> expected_payloads;
+  std::unordered_map<long long, std::vector<unsigned char>> expected_payloads;
   std::unordered_map<long long, std::string> expected_mimes;
 
   for (const auto &sample : samples)
@@ -245,35 +245,34 @@ TEST_CASE ("Cortext hydrates sqlite-objstore payloads",
       const auto blob_id = BlobFromAny (blob_rows[0].at ("id"));
       REQUIRE (!blob_id.empty ());
 
-      store->Execute ("INSERT INTO embeddings (embedding_id, embedding, type, strength, "
-                      "use_frequency, stability, connectivity, drift_mag, influence, "
-                      "sustained_influence, contextual_gain, redundancy, pre_activation, "
-                      "lability_state, suppression_count) VALUES (?,?,'memory',1.0,0.0,"
-                      "1.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0)",
-                      { sample.embedding_id, embedding });
-
-      // Insert into memories table with content_blob_id (new schema)
+      // v2: Insert into embeddings (minimal vec0 table)
       store->Execute (
-          "INSERT INTO memories (embedding_id, start_ts, end_ts, n_signals, "
-          "primary_modality, content_blob_id, s_max, s_avg, status) "
-          "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-          { sample.embedding_id, 0LL, 1000LL, 1LL, sample.modality, blob_id,
-            0.5, 0.5, std::string ("active") });
+          "INSERT INTO embeddings (embedding_id, embedding, created_at) "
+          "VALUES (?, ?, ?)",
+          { sample.embedding_id, embedding, 0LL });
 
-      // Also insert into signals table for signal-level mimetype
-      store->Execute ("INSERT INTO signals (embedding_id, timestamp, modality, mime,"
-                      " blob_id)"
-                      " VALUES (?, ?, ?, ?, ?)",
+      // v2: Insert into memories table with comprehensive metadata
+      store->Execute (
+          "INSERT INTO memories (memory_id, embedding_id, source_id, kind, blob_id, "
+          "start_ts, end_ts, n_signals, modality, s_max, s_avg, strength, created_at) "
+          "VALUES (?, ?, 'test', 'LONG_TERM', ?, 0, 1000, 1, ?, 0.5, 0.5, 1.0, 0)",
+          { sample.embedding_id, sample.embedding_id, blob_id, sample.modality });
+
+      // v2: Insert into signals table for signal-level mimetype
+      // memory_id is needed for LoadSignalBlobs to find the blobs
+      store->Execute ("INSERT INTO signals (memory_id, embedding_id, source_id, timestamp, modality, "
+                      "mime, blob_id, serial_position, created_at)"
+                      " VALUES (?, ?, 'test', ?, ?, ?, ?, 0, ?)",
                       {
+                          sample.embedding_id, // memory_id matches embedding_id in this test
                           sample.embedding_id,
                           500LL,
                           sample.modality,
                           sample.mime,
                           blob_id,
+                          500LL,
                       });
-      expected_payloads[sample.embedding_id] = std::string (
-          reinterpret_cast<const char *> (sample.payload.data ()),
-          sample.payload.size ());
+      expected_payloads[sample.embedding_id] = sample.payload;
       expected_mimes[sample.embedding_id] = sample.mime;
     }
 
@@ -287,12 +286,14 @@ TEST_CASE ("Cortext hydrates sqlite-objstore payloads",
       candidate_ids.push_back (sample.embedding_id);
     }
   auto hydrated = ctx->DebugHydrateForTest (candidate_ids, {});
-  REQUIRE (hydrated.memories.size () == samples.size ());
-  for (const auto &memory : hydrated.memories)
+  REQUIRE (hydrated.retrieved_memory.size () == samples.size ());
+  for (const auto &memory : hydrated.retrieved_memory)
     {
       REQUIRE (expected_payloads.count (memory.id) == 1);
       REQUIRE (expected_mimes.count (memory.id) == 1);
-      REQUIRE (memory.content == expected_payloads.at (memory.id));
+      // v2: content is now a vector of blobs (one per signal)
+      REQUIRE (memory.content.size () == 1);
+      REQUIRE (memory.content[0] == expected_payloads.at (memory.id));
       REQUIRE (memory.mimetype == expected_mimes.at (memory.id));
     }
 }
