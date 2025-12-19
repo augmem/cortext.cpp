@@ -88,14 +88,14 @@ High Stability dampens reliability, preventing aggressive corrections in conserv
 
 ### Homeostatic Correction
 
-The rate error drives threshold adjustment:
+The rate error drives threshold adjustment. The κ_* gains below are fixed controller invariants (not knob-derived) to preserve stable response across regimes:
 
 Normative note (MUST): rho_hat_prev is stored state entering the timestep. After the write decision, the rate-state update computes ρ_hat_t; the assignment rho_hat_prev ← ρ_hat_t occurs at end of step (see Appendix D).
 
 ```
 rate_error ← tanh((rho_hat_prev − rate_target) /
                   max(rate_target, ε))
-κ_r = 0.10  # rate error gain
+κ_r = 0.10  # rate error gain (fixed controller invariant)
 cap_homeo ← 0.25 × hysteresis
 Δθ_homeo ← clamp(reliability × κ_r × (1 − T) ×
                   (1 − maturity(t)) × rate_error,
@@ -114,7 +114,7 @@ if |recent_scores| < 2:
     σ_scores ← 0
 else:
     σ_scores ← std(recent_scores)
-κ_sens = 0.08  # sensitivity gain
+κ_sens = 0.08  # sensitivity gain (fixed controller invariant)
 cap_sens ← 0.20 × hysteresis
 Δθ_sens ← clamp(−κ_sens × S × (σ_scores − 0.1),
                 −cap_sens, +cap_sens)
@@ -127,7 +127,7 @@ High score variance with high Sensitivity lowers threshold, capturing more volat
 Focus-driven precision tightens threshold when structural coherence is high:
 
 ```
-κ_prec = 0.06  # precision gain
+κ_prec = 0.06  # precision gain (fixed controller invariant)
 cap_prec ← 0.15 × hysteresis
 Δθ_prec ← clamp(κ_prec × F × (coherence_struct_t − 0.5),
                 −cap_prec, +cap_prec)

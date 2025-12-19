@@ -16,15 +16,15 @@ Nader’s reconsolidation dynamics—into a unified computational framework.
 We derive all system parameters from the three primary knobs through
 principled mathematical transformations, reducing reliance on fixed
 constants. The system demonstrates self-calibrating priors that blend
-with evidence using uncertainty-weighted Bayesian averaging, homeostatic
-threshold control with effective sample size estimation, and
-graph-augmented retrieval combining embedding similarity with semantic
-extraction. Experimental analysis indicates the architecture maintains
-stable operation across developmental phases while adapting write rates,
-decay dynamics, and retrieval precision to environmental demands. This
-work contributes a formally specified cognitive memory model suitable
-for implementation in streaming AI systems requiring persistent,
-context-aware memory.
+with evidence using
+uncertainty-weighted Bayesian averaging, homeostatic threshold control
+with effective sample size estimation, and graph-augmented retrieval
+combining embedding similarity with semantic extraction. Experimental
+analysis indicates the architecture maintains stable operation across
+developmental phases while adapting write rates, decay dynamics, and
+retrieval precision to environmental demands. This work contributes a
+formally specified cognitive memory model suitable for implementation in
+streaming AI systems requiring persistent, context-aware memory.
 
 **Keywords:** cognitive architecture, adaptive memory, working memory,
 episodic memory, semantic memory, knowledge graphs, homeostatic control
@@ -55,9 +55,10 @@ position effects (Murdock Jr 1962), and emotional modulation of memory
 The core contribution of this work is a formally specified memory
 architecture in which:
 
-1.  All tuneable parameters derive from three primary knobs (Focus,
+1.  Most tuneable parameters derive from three primary knobs (Focus,
     Sensitivity, Stability) through explicit mathematical
-    transformations, reducing reliance on fixed constants.
+    transformations, while fixed invariants (e.g., controller gains) are
+    labeled and justified.
 2.  System priors self-calibrate through uncertainty-weighted Bayesian
     blending with observed evidence.
 3.  Developmental phases emerge from annealed safety bounds and
@@ -234,11 +235,17 @@ in seconds.
 
 Not all tunables are derived from knobs. When a value is specified as a
 fixed constant, it is a deliberate invariant and should be treated as
-such across implementations. Core invariants include:
+such across implementations. Fixed constants fall into two buckets:
+numerical stability floors and controller gains that preserve
+qualitative behavior across knob settings and implementations. Core
+invariants include:
 
     ε = 10^-6          # numeric stability
     τ_min = 120 s      # minimum half-life (decay floor)
     κ_base = 0.10      # base emotional threshold scale
+    κ_r = 0.10         # homeostatic rate gain (Section 4)
+    κ_sens = 0.08      # sensitivity gain (Section 4)
+    κ_prec = 0.06      # precision gain (Section 4)
 
 Other fixed constants are defined inline at first use and are normative
 unless explicitly marked as knob-derived.
@@ -296,8 +303,9 @@ states.
 
 ## Knob-Derived Parameters
 
-All system tunables derive from the three primary knobs. This section
-catalogs the key derivations.
+Most system tunables derive from the three primary knobs. This section
+catalogs the key derivations; fixed invariants are explicitly labeled in
+their respective sections.
 
 ### Context Windows and Temporal Scales
 
@@ -637,8 +645,16 @@ Focus spread quantifies the entropy of attention over nearest neighbors:
 Normative note (MUST): kNN_similarities MUST be computed by querying
 memory_stream with q = x_t and k = k_neighbors(T) (not recent_context).
 
-    p ← softmax(kNN_similarities)
-    focus_spread_t ← H(p) / ln(k)
+    if |memory_stream| == 0:
+        focus_spread_t ← 0  # cold-start fallback
+    else:
+        k_eff ← min(k, |memory_stream|)
+        if k_eff < 2:
+            focus_spread_t ← 0  # avoid degenerate entropy
+        else:
+            kNN_similarities ← topK(vector_search(x_t, k=k_eff))
+            p ← softmax(kNN_similarities)
+            focus_spread_t ← H(p) / ln(k_eff)
 
 Values near 1 indicate diffuse attention; values near 0 indicate
 concentrated attention. The effective Focus is further modulated: F_eff
@@ -1048,7 +1064,9 @@ conservative regimes.
 
 ### Homeostatic Correction
 
-The rate error drives threshold adjustment:
+The rate error drives threshold adjustment. The κ\_\* gains below are
+fixed controller invariants (not knob-derived) to preserve stable
+response across regimes:
 
 Normative note (MUST): rho_hat_prev is stored state entering the
 timestep. After the write decision, the rate-state update computes
@@ -1057,7 +1075,7 @@ timestep. After the write decision, the rate-state update computes
 
     rate_error ← tanh((rho_hat_prev − rate_target) /
                       max(rate_target, ε))
-    κ_r = 0.10  # rate error gain
+    κ_r = 0.10  # rate error gain (fixed controller invariant)
     cap_homeo ← 0.25 × hysteresis
     Δθ_homeo ← clamp(reliability × κ_r × (1 − T) ×
                       (1 − maturity(t)) × rate_error,
@@ -1076,7 +1094,7 @@ Sensitivity modulates threshold based on recent score volatility:
         σ_scores ← 0
     else:
         σ_scores ← std(recent_scores)
-    κ_sens = 0.08  # sensitivity gain
+    κ_sens = 0.08  # sensitivity gain (fixed controller invariant)
     cap_sens ← 0.20 × hysteresis
     Δθ_sens ← clamp(−κ_sens × S × (σ_scores − 0.1),
                     −cap_sens, +cap_sens)
@@ -1089,7 +1107,7 @@ more volatile signals.
 Focus-driven precision tightens threshold when structural coherence is
 high:
 
-    κ_prec = 0.06  # precision gain
+    κ_prec = 0.06  # precision gain (fixed controller invariant)
     cap_prec ← 0.15 × hysteresis
     Δθ_prec ← clamp(κ_prec × F × (coherence_struct_t − 0.5),
                     −cap_prec, +cap_prec)
@@ -1538,9 +1556,15 @@ individual signals:
         C ← max(base_capacity, 1)
         p_cap ← 3
         capacity_pressure(k, C) ← 1 + max(0, (k − C) / C)^p_cap
-        base_cost ← maintenance_cost_per_memory × k + complexity_penalty
-        total_cost ← base_cost × capacity_pressure(k, C)
+        raw_cost ← (maintenance_cost_per_memory × k + complexity_penalty) ×
+                   capacity_pressure(k, C)
+        total_cost ← raw_cost / (1 + raw_cost)  # squash to [0, 1)
         accept_memory = (margin ≥ total_cost)
+
+Normative note (MUST): total_cost is normalized to \[0, 1\] to keep
+gating on the same score scale as margin. This avoids cold-start or
+capacity regimes where costs can exceed 1 and make acceptance
+vanishingly rare.
 
 Note that total_cost is computed from existing active memories only (k
 is the current count), so k=0 yields no bootstrap penalty. Capacity
@@ -1822,8 +1846,12 @@ overall context rather than momentary signal fluctuations:
 
     # Query and re-rank using current memory centroid
     q ← μ_acc  # memory centroid from Section 4.4.1
+    if |memory_stream| == 0:
+        return []  # cold-start fallback (no retrieval candidates)
     results_vec ← topK(vector_search(q, k=kNN_size(F)))
     seed_nodes ← [r.id for r in results_vec]
+    if |seed_nodes| == 0 OR graph is empty:
+        return results_vec  # deterministic fallback, skip expansion
     expanded_nodes ← graph.traverse(seed_nodes, depth=graph_depth(T), min_edge_weight=min_edge_weight(F))
     combined ← union(seed_nodes, expanded_nodes)
     re_ranked ← sort_by(cos(q, embeddings(combined)))  # re-rank by memory centroid
@@ -1938,23 +1966,26 @@ boundaries:
 The gate permits interrupt when:
 
     at_drift_boundary = should_flush  # boundary signal from the current accumulator
-    candidate_star = argmax_{c ∈ candidates_eligible} mu(c)
-    mu_star = mu(candidate_star)
-    rel_star = map01(cos(candidate_star, ctx_centroid))
-    if |included_set| == 0:
-        overlap_star = −1.0
+    if |candidates_eligible| == 0:
+        allow_interrupt = false  # cold-start / empty-store fallback
     else:
-        overlap_star = max_{y ∈ included_set} cos(candidate_star, y)
-    if |ctx_window| == 0:
-        novelty_star = 1.0
-    else:
-        max_cos = max_{c ∈ ctx_window} cos(candidate_star, c)  # in [−1, 1]
-        novelty_star = clamp((1 − max_cos) / 2, 0, 1)
-    allow_interrupt =
-        (rel_star ≥ retrieval_thresh(F)) AND
-        (novelty_star ≥ τ_novelty_eff OR mu_star ≥ τ_mu_eff) AND
-        (overlap_star < dup_thresh) AND
-        (at_drift_boundary OR mu_star ≥ boundary_mult × τ_mu_eff)
+        candidate_star = argmax_{c ∈ candidates_eligible} mu(c)
+        mu_star = mu(candidate_star)
+        rel_star = map01(cos(candidate_star, ctx_centroid))
+        if |included_set| == 0:
+            overlap_star = −1.0
+        else:
+            overlap_star = max_{y ∈ included_set} cos(candidate_star, y)
+        if |ctx_window| == 0:
+            novelty_star = 1.0
+        else:
+            max_cos = max_{c ∈ ctx_window} cos(candidate_star, c)  # in [−1, 1]
+            novelty_star = clamp((1 − max_cos) / 2, 0, 1)
+        allow_interrupt =
+            (rel_star ≥ retrieval_thresh(F)) AND
+            (novelty_star ≥ τ_novelty_eff OR mu_star ≥ τ_mu_eff) AND
+            (overlap_star < dup_thresh) AND
+            (at_drift_boundary OR mu_star ≥ boundary_mult × τ_mu_eff)
 
 This logic suppresses low-drift interrupts unless the marginal utility
 substantially exceeds threshold, while permitting normal-threshold
@@ -2047,9 +2078,11 @@ potentially divergent values (e.g., division by small sums) with ε =
 
 We have presented Cortext, a three-knob adaptive memory architecture
 that unifies working, episodic, and semantic memory processes under a
-continuous control regime. By deriving all system parameters from Focus,
-Sensitivity, and Stability, Cortext avoids the fragility of hard-coded
-constants and enables robust operation across diverse environments.
+continuous control regime. By deriving most system parameters from
+Focus, Sensitivity, and Stability, while fixing a small set of
+invariants for controller stability, Cortext avoids the fragility of
+hard-coded constants and enables robust operation across diverse
+environments.
 
 Key contributions include the formalization of knob-derived parameter
 spaces, the integration of uncertainty-weighted Bayesian adaptation, and
@@ -2301,6 +2334,44 @@ causality and avoid undefined metrics.
 
 This ordering is canonical and supersedes any other sequence described
 elsewhere in the document.
+
+Canonical single-step pseudocode (timestep t):
+
+    # Main loop (single timestep t)
+    now_s, now_ms, x_t ← read_inputs()
+    signal_stream.append(x_t)
+    recent_context ← tail(signal_stream, n_ctx(T))
+
+    # Structural metrics + uncertainty
+    coherence_struct_t, focus_spread_t, drift_mag_t, surprisal_t ← compute_structural_metrics(x_t)
+    u_t ← update_uncertainty(...)
+
+    # Adaptation + scoring
+    update_control_parameters(...)
+    score_t ← compute_composite_score(...)
+    score_stream.append(score_t)
+
+    # Threshold updates
+    θ_target ← prior_evidence_blend(...)
+    Δθ_* ← compute_threshold_deltas(...)
+    θ_dynamic ← update_theta_dynamic(...)
+    hysteresis ← update_hysteresis(...)
+
+    # Accumulator + boundary
+    update_accumulator(...)
+    boundary_score ← compute_boundary_score(...)
+    should_flush ← boundary_decision(boundary_score, gap_caps, time_caps, spike_bypass)
+    θ_memory ← θ_dynamic × M_write_refrac
+    write_memory ← force_write OR (should_flush AND (S_window > θ_memory))
+    Δwrites ← 1 if write_memory else 0  # computed immediately after write decision
+
+    # Post-write and rate updates
+    if write_memory: commit_memory_unit(); last_write_ts ← now_ms()
+    if should_flush: reset_accumulator()  # regardless of write outcome
+    update_rate_state(Δwrites)
+
+    # Interrupt gate
+    interrupt_gate_check()
 
 The normative execution order for a single timestep t:
 

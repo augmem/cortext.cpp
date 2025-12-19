@@ -12,7 +12,7 @@ bibliography: references.bib
 
 # Abstract {.unnumbered}
 
-We present Cortext, a biologically-inspired adaptive memory system governed by three continuous control parameters: Focus (F), Sensitivity (S), and Stability (T). Unlike traditional memory architectures that employ discrete operational modes, Cortext achieves developmental progression through parameter-derived rate modulation, allowing behavior to emerge continuously from the interaction of knob settings and experiential mass. The architecture integrates established cognitive science principles—including Cowan's working memory constraints and Nader's reconsolidation dynamics—into a unified computational framework. We derive all system parameters from the three primary knobs through principled mathematical transformations, reducing reliance on fixed constants. The system demonstrates self-calibrating priors that blend with evidence using uncertainty-weighted Bayesian averaging, homeostatic threshold control with effective sample size estimation, and graph-augmented retrieval combining embedding similarity with semantic extraction. Experimental analysis indicates the architecture maintains stable operation across developmental phases while adapting write rates, decay dynamics, and retrieval precision to environmental demands. This work contributes a formally specified cognitive memory model suitable for implementation in streaming AI systems requiring persistent, context-aware memory.
+We present Cortext, a biologically-inspired adaptive memory system governed by three continuous control parameters: Focus (F), Sensitivity (S), and Stability (T). Unlike traditional memory architectures that employ discrete operational modes, Cortext achieves developmental progression through parameter-derived rate modulation, allowing behavior to emerge continuously from the interaction of knob settings and experiential mass. The architecture integrates established cognitive science principles—including Cowan's working memory constraints and Nader's reconsolidation dynamics—into a unified computational framework. We derive most system parameters from the three primary knobs through principled mathematical transformations, while explicitly labeling the small set of fixed invariants (e.g., controller gains), reducing reliance on hard-coded constants. The system demonstrates self-calibrating priors that blend with evidence using uncertainty-weighted Bayesian averaging, homeostatic threshold control with effective sample size estimation, and graph-augmented retrieval combining embedding similarity with semantic extraction. Experimental analysis indicates the architecture maintains stable operation across developmental phases while adapting write rates, decay dynamics, and retrieval precision to environmental demands. This work contributes a formally specified cognitive memory model suitable for implementation in streaming AI systems requiring persistent, context-aware memory.
 
 **Keywords:** cognitive architecture, adaptive memory, working memory, episodic memory, semantic memory, knowledge graphs, homeostatic control
 
@@ -24,7 +24,7 @@ This paper introduces Cortext, a cognitive memory architecture that addresses th
 
 The core contribution of this work is a formally specified memory architecture in which:
 
-1. All tuneable parameters derive from three primary knobs (Focus, Sensitivity, Stability) through explicit mathematical transformations, reducing reliance on fixed constants.
+1. Most tuneable parameters derive from three primary knobs (Focus, Sensitivity, Stability) through explicit mathematical transformations, while fixed invariants (e.g., controller gains) are labeled and justified.
 2. System priors self-calibrate through uncertainty-weighted Bayesian blending with observed evidence.
 3. Developmental phases emerge from annealed safety bounds and experiential mass accumulation, not explicit mode switching.
 4. A knowledge graph layer enables semantic consolidation and graph-augmented retrieval.
@@ -75,7 +75,7 @@ The homeostatic threshold controller draws on classical control theory, specific
 
 # Conclusion and Future Directions
 
-We have presented Cortext, a three-knob adaptive memory architecture that unifies working, episodic, and semantic memory processes under a continuous control regime. By deriving all system parameters from Focus, Sensitivity, and Stability, Cortext avoids the fragility of hard-coded constants and enables robust operation across diverse environments.
+We have presented Cortext, a three-knob adaptive memory architecture that unifies working, episodic, and semantic memory processes under a continuous control regime. By deriving most system parameters from Focus, Sensitivity, and Stability, while fixing a small set of invariants for controller stability, Cortext avoids the fragility of hard-coded constants and enables robust operation across diverse environments.
 
 Key contributions include the formalization of knob-derived parameter spaces, the integration of uncertainty-weighted Bayesian adaptation, and the implementation of bio-inspired mechanisms like homeostatic rate control and emotional consolidation.
 

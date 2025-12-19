@@ -103,6 +103,46 @@ These rules resolve empty-store and small-store cases to preserve causality and 
 
 This ordering is canonical and supersedes any other sequence described elsewhere in the document.
 
+Canonical single-step pseudocode (timestep t):
+
+```
+# Main loop (single timestep t)
+now_s, now_ms, x_t ← read_inputs()
+signal_stream.append(x_t)
+recent_context ← tail(signal_stream, n_ctx(T))
+
+# Structural metrics + uncertainty
+coherence_struct_t, focus_spread_t, drift_mag_t, surprisal_t ← compute_structural_metrics(x_t)
+u_t ← update_uncertainty(...)
+
+# Adaptation + scoring
+update_control_parameters(...)
+score_t ← compute_composite_score(...)
+score_stream.append(score_t)
+
+# Threshold updates
+θ_target ← prior_evidence_blend(...)
+Δθ_* ← compute_threshold_deltas(...)
+θ_dynamic ← update_theta_dynamic(...)
+hysteresis ← update_hysteresis(...)
+
+# Accumulator + boundary
+update_accumulator(...)
+boundary_score ← compute_boundary_score(...)
+should_flush ← boundary_decision(boundary_score, gap_caps, time_caps, spike_bypass)
+θ_memory ← θ_dynamic × M_write_refrac
+write_memory ← force_write OR (should_flush AND (S_window > θ_memory))
+Δwrites ← 1 if write_memory else 0  # computed immediately after write decision
+
+# Post-write and rate updates
+if write_memory: commit_memory_unit(); last_write_ts ← now_ms()
+if should_flush: reset_accumulator()  # regardless of write outcome
+update_rate_state(Δwrites)
+
+# Interrupt gate
+interrupt_gate_check()
+```
+
 The normative execution order for a single timestep t:
 
 1.  **Read Inputs:** `x_t`, `now_s()`, `system_time_ms`.

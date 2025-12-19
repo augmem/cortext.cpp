@@ -65,10 +65,13 @@ on_memory_boundary:
     C ← max(base_capacity, 1)
     p_cap ← 3
     capacity_pressure(k, C) ← 1 + max(0, (k − C) / C)^p_cap
-    base_cost ← maintenance_cost_per_memory × k + complexity_penalty
-    total_cost ← base_cost × capacity_pressure(k, C)
+    raw_cost ← (maintenance_cost_per_memory × k + complexity_penalty) ×
+               capacity_pressure(k, C)
+    total_cost ← raw_cost / (1 + raw_cost)  # squash to [0, 1)
     accept_memory = (margin ≥ total_cost)
 ```
+
+Normative note (MUST): total_cost is normalized to [0, 1] to keep gating on the same score scale as margin. This avoids cold-start or capacity regimes where costs can exceed 1 and make acceptance vanishingly rare.
 
 Note that total_cost is computed from existing active memories only (k is the current count), so k=0 yields no bootstrap penalty. Capacity pressure activates only when k > C.
 

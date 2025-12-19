@@ -100,23 +100,26 @@ The gate permits interrupt when:
 
 ```
 at_drift_boundary = should_flush  # boundary signal from the current accumulator
-candidate_star = argmax_{c ∈ candidates_eligible} mu(c)
-mu_star = mu(candidate_star)
-rel_star = map01(cos(candidate_star, ctx_centroid))
-if |included_set| == 0:
-    overlap_star = −1.0
+if |candidates_eligible| == 0:
+    allow_interrupt = false  # cold-start / empty-store fallback
 else:
-    overlap_star = max_{y ∈ included_set} cos(candidate_star, y)
-if |ctx_window| == 0:
-    novelty_star = 1.0
-else:
-    max_cos = max_{c ∈ ctx_window} cos(candidate_star, c)  # in [−1, 1]
-    novelty_star = clamp((1 − max_cos) / 2, 0, 1)
-allow_interrupt =
-    (rel_star ≥ retrieval_thresh(F)) AND
-    (novelty_star ≥ τ_novelty_eff OR mu_star ≥ τ_mu_eff) AND
-    (overlap_star < dup_thresh) AND
-    (at_drift_boundary OR mu_star ≥ boundary_mult × τ_mu_eff)
+    candidate_star = argmax_{c ∈ candidates_eligible} mu(c)
+    mu_star = mu(candidate_star)
+    rel_star = map01(cos(candidate_star, ctx_centroid))
+    if |included_set| == 0:
+        overlap_star = −1.0
+    else:
+        overlap_star = max_{y ∈ included_set} cos(candidate_star, y)
+    if |ctx_window| == 0:
+        novelty_star = 1.0
+    else:
+        max_cos = max_{c ∈ ctx_window} cos(candidate_star, c)  # in [−1, 1]
+        novelty_star = clamp((1 − max_cos) / 2, 0, 1)
+    allow_interrupt =
+        (rel_star ≥ retrieval_thresh(F)) AND
+        (novelty_star ≥ τ_novelty_eff OR mu_star ≥ τ_mu_eff) AND
+        (overlap_star < dup_thresh) AND
+        (at_drift_boundary OR mu_star ≥ boundary_mult × τ_mu_eff)
 ```
 
 This logic suppresses low-drift interrupts unless the marginal utility substantially exceeds threshold, while permitting normal-threshold interrupts at natural transition points.

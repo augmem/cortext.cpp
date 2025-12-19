@@ -143,8 +143,12 @@ Retrieval combines vector similarity with graph expansion. Both initial retrieva
 ```
 # Query and re-rank using current memory centroid
 q ← μ_acc  # memory centroid from Section 4.4.1
+if |memory_stream| == 0:
+    return []  # cold-start fallback (no retrieval candidates)
 results_vec ← topK(vector_search(q, k=kNN_size(F)))
 seed_nodes ← [r.id for r in results_vec]
+if |seed_nodes| == 0 OR graph is empty:
+    return results_vec  # deterministic fallback, skip expansion
 expanded_nodes ← graph.traverse(seed_nodes, depth=graph_depth(T), min_edge_weight=min_edge_weight(F))
 combined ← union(seed_nodes, expanded_nodes)
 re_ranked ← sort_by(cos(q, embeddings(combined)))  # re-rank by memory centroid

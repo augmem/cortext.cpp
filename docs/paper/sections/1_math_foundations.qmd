@@ -68,12 +68,15 @@ signal_gap ← now_s() − to_s(last_signal_ts)  # seconds
 
 ### Fixed Constants and Invariants
 
-Not all tunables are derived from knobs. When a value is specified as a fixed constant, it is a deliberate invariant and should be treated as such across implementations. Core invariants include:
+Not all tunables are derived from knobs. When a value is specified as a fixed constant, it is a deliberate invariant and should be treated as such across implementations. Fixed constants fall into two buckets: numerical stability floors and controller gains that preserve qualitative behavior across knob settings and implementations. Core invariants include:
 
 ```
 ε = 10^-6          # numeric stability
 τ_min = 120 s      # minimum half-life (decay floor)
 κ_base = 0.10      # base emotional threshold scale
+κ_r = 0.10         # homeostatic rate gain (Section 4)
+κ_sens = 0.08      # sensitivity gain (Section 4)
+κ_prec = 0.06      # precision gain (Section 4)
 ```
 
 Other fixed constants are defined inline at first use and are normative unless explicitly marked as knob-derived.
@@ -109,7 +112,7 @@ A central design principle is that knobs set rates rather than modes. Behavioral
 
 ## Knob-Derived Parameters
 
-All system tunables derive from the three primary knobs. This section catalogs the key derivations.
+Most system tunables derive from the three primary knobs. This section catalogs the key derivations; fixed invariants are explicitly labeled in their respective sections.
 
 ### Context Windows and Temporal Scales
 

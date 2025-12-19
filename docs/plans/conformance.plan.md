@@ -1,235 +1,94 @@
-# Plan: Fix Audit Action Items
+# Plan: Operations Conformance Alignment (Phase 0 Complete)
 
-## Overview
+## Goal
+Systematically align `src/operations` (plus persistence/tests) with:
+- `docs/paper/_manuscript/index.md`
+- `docs/paper/diagrams/entity-relationship.qmd`
 
-This plan addresses the remaining issues identified in the comprehensive alignment audit. Many items from the original audit have been completed as part of the legacy code removal (see `remove-leagcy.plan.md`).
+## Phase 0: Inventory + Findings (Complete)
 
-**Status:** Updated after legacy table migration completed (Phase 1-6 of remove-leagcy.plan.md)
+### Traceability Snapshot (doc → ops → persistence/tests)
+- **Sections 3–5 (metrics + scoring):** `coherence.cpp`, `focus_spread.cpp`, `drift_accumulation.cpp`, `embedding_prediction_error.cpp`, `metrics.cpp`, `uncertainty.cpp` → `signals` metrics columns → `tests/operations_*metrics*.test.cpp`, `tests/formula_validation.test.cpp`
+- **Sections 4–6 (adaptation, thresholds, accumulation):** `focus.cpp`, `sensitivity.cpp`, `stability.cpp`, `threshold.cpp`, `accumulator.cpp`, `boundary.cpp`, `spike_bypass.cpp`, `write_gate.cpp`, `streaming_pacing.cpp` → `state`, `accumulators`, `memories`, `signals` → `tests/operations_*threshold*.test.cpp`, `tests/operations_accumulator.test.cpp`, `tests/operations_write_gate.test.cpp`
+- **Section 7 (reinforcement/decay/competition):** `memory_strength.cpp`, `competition.cpp`, `influence.cpp` → `memories`, `associations` → `tests/operations_memory_strength.test.cpp`, `tests/operations_competition.test.cpp`
+- **Section 8 (advanced cognition):** `working_memory.cpp`, `metacognitive.cpp`, `reconsolidation.cpp`, `predictive.cpp`, `serial_position*.cpp`, `emotion*.cpp` → `memories`, `signals`, `state` → `tests/operations_working_memory.test.cpp`, `tests/operations_serial_position*.test.cpp`, `tests/operations_emotion*.test.cpp`
+- **Section 9 (consolidation + graph):** `consolidation*.cpp`, `process_extraction_results.cpp`, `graph_build.cpp`, `graph_retrieval.cpp`, `concept_detection.cpp` → `memories`, `associations` → `tests/operations_consolidation*.test.cpp`, `tests/operations_graph_*.test.cpp`
+- **Section 10 (interrupt gate + streaming):** `interrupt_gate.cpp`, `streaming_pacing.cpp`, `write_gate.cpp` → `state`, `accumulators` → `tests/operations_interrupt_gate.test.cpp`, `tests/operations_streaming_pacing.test.cpp`
 
----
-
-## Critical Fixes (Breaking Issues)
-
-### 1. Fix `recent_context` view query (Runtime Error)
-
-**File:** `src/signal_processor.cpp`
-**Line:** 473
-
-**Problem:** Query uses non-existent `seq_order` column
-```cpp
-// Current:
-"SELECT embedding FROM recent_context ORDER BY seq_order ASC"
-
-// Fix:
-"SELECT embedding FROM recent_context ORDER BY timestamp ASC"
-```
-
-**Test:** Run existing signal processor tests to verify context loading works.
-
----
-
-### 2. Remove/Fix observed_retention_history loading (Runtime Error)
-
-**File:** `src/signal_processor.cpp`
-**Lines:** 518-538 (`LoadObservedRetentionHistory` function)
-
-**Problem:** Tries to load from non-existent `observed_retention_history` table, catches exception silently.
-
-**Fix:** Make it a no-op that returns empty since this is transient data derived from memories.
-
-```cpp
-void LoadObservedRetentionHistory(Store& /*store*/, ProcessorContext& /*ctx*/) {
-  // v2 schema: observed_retention_history is transient, computed from memories.last_used
-  // No persistence needed - the history rebuilds naturally during signal processing
-}
-```
-
-**Also remove call site at line 714.**
-
-**Test:** Verify stability operations work without pre-loaded history.
+### Gaps Found (Prioritized)
+1. **Episodes table not populated.** `episodes` exists in schema but no inserts/updates; `memories.episode_id` is set to `episode_start_ts` without a corresponding `episodes` row.
+2. **Signals embed/blob persistence incomplete.** `signals.embedding_id` uses memory embedding placeholder, and `signals.blob_id` is never set (accumulator notes “later” but never stores).
+3. **Recent context load query invalid.** `LoadRecentContext` orders by `seq_order`, which does not exist in the `recent_context` view.
+4. **Observed retention history table missing.** Loader reads `observed_retention_history` (not in schema); spec expects retention history buffer derived from signals/memories.
+5. **Metric definitions drift from manuscript.**
+   - **Novelty/Rarity:** computed as `1 - relevance` vs. Appendix B (max-cos novelty and mean-cos μ_sim/rarity).
+   - **Relevance fallback:** empty context yields `0`, but spec expects `map01(cos)=0.5` baseline.
+   - **Drift:** uses split of recent context with `KNeighbors`; spec requires lagged centroid drift with `k_ctx(T)`.
+   - **Utility:** uses delta-to-mean score; spec requires ΔSSE based on prediction error.
+6. **Focus spread uses recent_context instead of memory_stream kNN.** Spec requires kNN over memory_stream; code uses recent signals.
+7. **Threshold update units + fallbacks.** `delta_t` uses milliseconds but formula assumes seconds; `observed_p90` fallback should be `theta_prior` when recent_scores empty (not 0).
+8. **Pipeline order diverges from Appendix D.** `UpdateFocus/UpdateSensitivity` run before structural metrics/uncertainty, but they depend on `u_t`.
+9. **Graph edges diverge from ER diagram.** Edge type `co_occurs_with` (vs. `co_occurs`) and weights stored as raw cosine/drift, not clamped to `[0,1]`.
+10. **Emotion cascade threshold hardcoded.** `EmotionCascade` uses `emotional_intensity >= 0.5` instead of `ThetaIntensity(S)`.
+11. **State fields exist but are unused/persisted.** `rho_hat_prev` and `write_rate_timestamps` are in schema/spec but unused in logic.
 
 ---
 
-### 3. Fix blob tracking in accumulator (Critical for Working Memory)
+## Phase 1: Schema + Persistence Conformance
+- [ ] Implement **episode lifecycle**: insert `episodes` rows on new episode start, update `end_ts`, `boundary_type`, and `centroid`; use real `episode_id` FK in `memories` and `accumulators`.
+- [ ] Fix `LoadRecentContext` query to order by `timestamp` (and align view columns).
+- [ ] Remove or replace `LoadObservedRetentionHistory` by deriving `retention_history` from `memories.last_used/last_access` or `signals`.
+- [ ] Persist **per-signal embeddings**: insert one row per signal into `embeddings`, set `signals.embedding_id` accordingly.
+- [ ] Persist **per-signal blobs**: store payload per signal in accumulator/memory storage, fill `signals.blob_id`, remove placeholder logic.
+- [ ] Persist/restore `write_rate_timestamps` (or explicitly remove from spec + schema if deprecated).
+- [ ] Persist/restore `rho_hat_prev` (bias-corrected rate state) per Appendix A.
+- [ ] Update tests: `tests/store.test.cpp`, `tests/migration_core.test.cpp`, `tests/state_persistence.test.cpp`, `tests/operations_memory_storage.test.cpp`, `tests/operations_accumulator.test.cpp`.
 
-**Files:**
-- `src/operations/accumulator.cpp` - Lines 17-30 (`CreateSignalRecord`)
-- `include/cortext/operations/accumulator.hpp` - Add Store* parameter
+## Phase 2: Core Signal Metrics + Scoring (Sections 3–5)
+- [ ] Implement Appendix B novelty/μ_sim/rarity and relevance fallbacks for empty context.
+- [ ] Update drift to `k_ctx(T)` lagged centroid drift; ensure `drift_mag_t ∈ [0,2]` and scaling `(drift_mag_t/2)×(1−T)`.
+- [ ] Rework focus spread to query **memory_stream** kNN (not recent_context). Add/maintain memory_stream buffer (or DB-backed kNN) with Appendix C fallbacks.
+- [ ] Replace utility’s delta-score proxy with **ΔSSE** from prediction error (per Section 3.1.4).
+- [ ] Align uncertainty’s novelty component and focus-spread entropy to the updated definitions.
+- [ ] Update tests: `tests/formula_validation.test.cpp`, `tests/operations_metrics.test.cpp`, `tests/operations_focus_spread.test.cpp`, `tests/operations_uncertainty.test.cpp`, `tests/operations_embedding_prediction_error.test.cpp`.
 
-**Problem:** Comment says "blob_id will be populated later" but it never is. This breaks working memory content hydration.
+## Phase 3: Thresholding + Homeostatic Control (Section 6)
+- [ ] Convert `delta_t` in threshold/rate control to **seconds** (units per manuscript).
+- [ ] Use `theta_prior` as `observed_p90` fallback when `recent_scores` is empty.
+- [ ] Wire `rho_hat_prev` into rate estimation (persist/restore in state).
+- [ ] Validate ESS/reliability and homeostatic deltas vs Section 6 formulas and Appendix A defaults.
+- [ ] Update tests: `tests/operations_threshold.test.cpp`, `tests/operations_*_feedback.test.cpp`, `tests/implicit_feedback.test.cpp`.
 
-**Spec alignment:**
-- algorithms.md Section 6.1.1: `memory.blob_ids ← [blob_1, blob_2, ..., blob_n]` - each signal tracks its blob
-- database-v2.md: "SIGNALS owns both embedding_id and blob_id" and "Each signal has one content blob"
+## Phase 4: Reinforcement, Decay, Competition (Section 7)
+- [ ] Validate memory strength/decay/redundancy formulas vs Section 7 definitions.
+- [ ] Ensure connectivity/influence/sustained_influence updates align with graph usage and persistence.
+- [ ] Update tests: `tests/operations_memory_strength.test.cpp`, `tests/operations_competition.test.cpp`, `tests/operations_influence_feedback.test.cpp`.
 
-**Solution: Store blob at accumulation time** (aligns with spec - signals own their blobs)
+## Phase 5: Advanced Cognitive Processes (Section 8)
+- [ ] Align working memory gating and metadata persistence with Section 8.1/8.2.
+- [ ] Update emotional cascade threshold to `ThetaIntensity(S)` (and arousal if available).
+- [ ] Verify reconsolidation, predictive pre-activation, serial position, and metacognition against manuscript formulas.
+- [ ] Update tests: `tests/operations_working_memory.test.cpp`, `tests/operations_serial_position*.test.cpp`, `tests/operations_emotion*.test.cpp`, `tests/operations_metacognitive.test.cpp`, `tests/operations_predictive.test.cpp`.
 
-**Part A - Update CreateSignalRecord signature and body (lines 17-30):**
-```cpp
-SignalRecord
-CreateSignalRecord (const Signal &signal, double score, int serial_position,
-                    Store* store)  // Add store parameter
-{
-  SignalRecord rec;
-  rec.embedding = signal.embedding;
-  rec.timestamp = signal.timestamp;
-  rec.modality = signal.modality;
-  rec.mime = signal.mimetype;
-  rec.score = score;
-  rec.serial_position = serial_position;
+## Phase 6: Consolidation + Graph Integration (Section 9)
+- [ ] Align association edge types to ER (`co_occurs`, `has_label`, etc.).
+- [ ] Normalize association weights to `[0,1]` (map01(cos), clamp) per ER diagram.
+- [ ] Verify consolidation scoring, clustering, and extraction sequencing vs manuscript.
+- [ ] Update tests: `tests/operations_consolidation*.test.cpp`, `tests/operations_graph_build.test.cpp`, `tests/operations_graph_retrieval.test.cpp`.
 
-  // Store payload to objstore and capture blob_id (v2: SIGNALS owns blob_id)
-  if (signal.payload && !signal.payload->empty() && store != nullptr) {
-    auto blob_rows = store->Execute("SELECT objstore_put(?1) AS id",
-                                    { *signal.payload });
-    if (!blob_rows.empty() && blob_rows[0].count("id") != 0) {
-      rec.blob_id = BlobFromAny(blob_rows[0].at("id"));
-    }
-  }
+## Phase 7: Streaming Integration + Interrupt Gate (Section 10)
+- [ ] Verify interrupt gate inputs/outputs use updated memory_stream/recent_memory_centroids.
+- [ ] Align write gate order with Appendix D (post-threshold, post-accumulator).
+- [ ] Update tests: `tests/operations_interrupt_gate.test.cpp`, `tests/operations_streaming_pacing.test.cpp`, `tests/operations_write_gate.test.cpp`.
 
-  return rec;
-}
-```
-
-**Part B - Update call sites** (lines 66, 92, 110):
-- Get Store* from registry: `auto* store = registry.Get<Store>("store");`
-- Pass to CreateSignalRecord
-
-**Part C - Update memory_storage.cpp:**
-- Remove duplicate blob storage (lines 124-134) since blobs are now stored at accumulation
-- The acc.signals already have blob_ids, just use them in INSERT
-
-**Test:** Create test that verifies working memory slots have non-empty blob_ids after signal processing.
-
----
-
-## Moderate Fixes (Consistency Issues)
-
-### 4. Fix emotional cascade threshold (Section 6.7 alignment)
-
-**File:** `src/operations/emotion_cascade.cpp`
-**Line:** 62
-
-**Problem:** Uses hardcoded `0.5` instead of knob-derived `ThetaIntensity(S)`
-
-```cpp
-// Current:
-"WHERE flashbulb = 1 AND emotional_intensity >= 0.5 "
-
-// Fix - use parameterized threshold:
-"WHERE flashbulb = 1 AND emotional_intensity >= ?2 "
-// And pass: { recent_window_ts, core::ThetaIntensity(cfg.sensitivity) }
-```
-
-**Also update function signature (line 52):**
-```cpp
-LoadEmotionalSources(Store *store, long long recent_window_ts, double S)
-```
-
-**Note:** Arousal threshold cannot be checked in SQL since arousal is not stored per-memory in v2 schema.
-
-**Test:** Verify emotional cascade uses sensitivity-derived thresholds.
+## Phase 8: End-to-End Validation
+- [ ] Reorder pipeline in `src/cortext.cpp` to match Appendix D (structural metrics + uncertainty before focus/sensitivity updates).
+- [ ] Update operation ordering tests: `tests/operation_set.test.cpp`, `tests/signal_processor.test.cpp`.
+- [ ] Extend integration/regression tests: `tests/integration_consolidation.test.cpp`, `tests/regression_behavior.test.cpp`.
+- [ ] Run full test suite and update fixtures/goldens as needed.
 
 ---
 
-### 5. Update stale comments referencing v1 tables
-
-**Files and lines:**
-- `src/operations/memory_strength.cpp:117` - "memory_feedback" → "memories table"
-- `src/operations/reconsolidation.cpp:202, 293` - "memory_feedback" → "memories table"
-- `src/operations/predictive.cpp:194` - "memory_feedback" → "memories table"
-
----
-
-## Optional Cleanup
-
-### 6. Rename objstore to blobs for documentation consistency
-
-**File:** `src/store/schema.cpp`
-**Line:** 107
-
-Change: `"CREATE VIRTUAL TABLE IF NOT EXISTS objstore USING objstore()"`
-To: `"CREATE VIRTUAL TABLE IF NOT EXISTS blobs USING objstore()"`
-
-Then update all references from `objstore` to `blobs` throughout codebase.
-
-**Note:** This is optional cosmetic cleanup. The current `objstore` name works correctly.
-
----
-
-## Completed Items (Removed from Plan)
-
-The following items were completed as part of the legacy code removal plan:
-
-- **Section 2 (memory_feedback reference)** - Already fixed, no `memory_feedback` references remain
-- **Section 8 (Legacy v1 table migrations)** - All 9 subsections completed:
-  - 8.1-8.7: All operations migrated to V2 schema (ASSOCIATIONS, MEMORIES)
-  - 8.8: `goal_alignment.cpp` removed entirely (file deleted)
-  - 8.9: `process_extraction_results.cpp` migrated
-  - 8.10: Legacy table definitions removed from schema.cpp
-  - 8.11: All tests updated to V2 schema
-  - 8.12: Headers updated
-- **`operations_graph_schema.test.cpp`** - Removed (file deleted)
-- **`consolidation_candidates` table** - Now uses in-memory passing via OperationContext
-
----
-
-## Implementation Order
-
-### Phase 1: Critical Runtime Fixes
-1. **Fix seq_order query** (`signal_processor.cpp:473`) - unblocks runtime
-2. **Remove LoadObservedRetentionHistory** (`signal_processor.cpp:518-538`) - remove dead code
-
-### Phase 2: Working Memory Fix
-3. **Fix blob tracking in accumulator** - critical for WM content hydration
-4. **Update memory_storage.cpp** - remove duplicate blob storage
-
-### Phase 3: Algorithm Alignment
-5. **Fix emotional threshold** (`emotion_cascade.cpp:62`) - use knob-derived threshold
-6. **Update stale comments** - trivial cleanup
-
-### Phase 4: Optional Cleanup
-7. **Rename objstore to blobs** - schema and all references (optional)
-
----
-
-## Files to Modify
-
-### Phase 1: Critical Fixes
-| File | Lines | Change |
-|------|-------|--------|
-| `src/signal_processor.cpp` | 473 | Change `seq_order` to `timestamp` |
-| `src/signal_processor.cpp` | 518-538, 714 | Remove `LoadObservedRetentionHistory` function and call |
-
-### Phase 2: Working Memory Fix
-| File | Lines | Change |
-|------|-------|--------|
-| `src/operations/accumulator.cpp` | 17-30, 66, 92, 110 | Store blob at accumulation, populate blob_id |
-| `src/operations/memory_storage.cpp` | 124-134 | Remove duplicate blob storage |
-
-### Phase 3: Algorithm Alignment
-| File | Lines | Change |
-|------|-------|--------|
-| `src/operations/emotion_cascade.cpp` | 52, 62 | Use `ThetaIntensity(S)` instead of 0.5 |
-| `src/operations/memory_strength.cpp` | 117 | Update comment |
-| `src/operations/reconsolidation.cpp` | 202, 293 | Update comments |
-| `src/operations/predictive.cpp` | 194 | Update comment |
-
-### Phase 4: Optional Cleanup
-| File | Lines | Change |
-|------|-------|--------|
-| `src/store/schema.cpp` | 107 | Rename `objstore` to `blobs` |
-| Multiple files | - | Update all `objstore` references |
-
----
-
-## Test Plan
-
-1. Run `ctest --test-dir build -R cortext_tests --output-on-failure` after each change
-2. Specifically run:
-   - `./build/tests/cortext_tests "[signal_processor]"`
-   - `./build/tests/cortext_tests "[memory_strength]"`
-   - `./build/tests/cortext_tests "[consolidation]"`
-   - `./build/tests/cortext_tests "[working_memory]"`
-   - `./build/tests/cortext_tests "[emotion]"`
-3. Build and run chat example to verify working memory content hydration
+## Notes
+- Use the traceability snapshot to decide whether to **update code** or **revise tests** when mismatches appear.
+- Any new fields added for conformance must be persisted and covered by tests.

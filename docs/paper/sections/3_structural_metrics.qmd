@@ -33,8 +33,16 @@ k ← k_neighbors(T) = round(lerp(8, 32, T))
 ```
 Normative note (MUST): kNN_similarities MUST be computed by querying memory_stream with q = x_t and k = k_neighbors(T) (not recent_context).
 ```
-p ← softmax(kNN_similarities)
-focus_spread_t ← H(p) / ln(k)
+if |memory_stream| == 0:
+    focus_spread_t ← 0  # cold-start fallback
+else:
+    k_eff ← min(k, |memory_stream|)
+    if k_eff < 2:
+        focus_spread_t ← 0  # avoid degenerate entropy
+    else:
+        kNN_similarities ← topK(vector_search(x_t, k=k_eff))
+        p ← softmax(kNN_similarities)
+        focus_spread_t ← H(p) / ln(k_eff)
 ```
 
 Values near 1 indicate diffuse attention; values near 0 indicate concentrated attention. The effective Focus is further modulated: F_eff ← F_eff × (1 − focus_spread_t).
