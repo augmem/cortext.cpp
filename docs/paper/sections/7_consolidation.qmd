@@ -72,7 +72,7 @@ summary.metadata.sources = [m.id for m in cluster_i]
 
 ## Semantic Extraction
 
-For sufficiently large clusters, semantic extraction identifies entities and relations:
+For sufficiently large clusters, semantic extraction identifies labels and relations:
 
 ```
 extraction_batch_size = round(lerp(8, 32, T))
@@ -82,15 +82,14 @@ extraction_interval = lerp(300, 3600, T)  # 5 min → 1 hour
 max_extractions_per_cycle = round(lerp(20, 5, T))
 ```
 
-Extraction uses structured prompting to identify named entities (people, places, organizations, concepts) and relationships (co-occurrence, implication, contradiction).
+Extraction uses structured prompting to identify labels/tags (people, places, organizations, concepts) and relationships (co-occurrence, implication, contradiction).
 
 ## Knowledge Graph Construction
 
-The graph comprises three node types:
+The graph comprises two node types:
 
 * **Memory Nodes:** Summarized embeddings from merged clusters
-* **Entity Nodes:** Named entities extracted from content blobs
-* **Concept Nodes:** Emergent centroids representing recurrent topics
+* **Label Nodes:** Extracted labels/tags derived from content blobs
 
 Edge types capture relationships:
 

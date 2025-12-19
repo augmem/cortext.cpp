@@ -1,0 +1,288 @@
+```{mermaid}
+erDiagram
+    direction TB
+
+    %% =======================================================================
+    %% CORE HIERARCHY: EPISODES → MEMORIES → SIGNALS → (EMBEDDINGS, BLOBS)
+    %% =======================================================================
+
+    %% INDEX NOTATION (from docs/research/database.md)
+    %% IDX = simple index | IDX with X = composite index | IDX partial Y = partial index with WHERE Y | IDX DESC = descending index
+    %% TABLE INDEXES (from docs/research/database.md)
+    %% EPISODES: end_ts (partial NULL)
+    %% MEMORIES: episode_id + start_ts, kind, end_ts (partial WORKING), strength + last_access, cluster_id (partial NOT NULL)
+    %% SIGNALS: memory_id + serial_position, source_id (partial NULL memory_id), timestamp (DESC)
+    %% ASSOCIATIONS: source_memory_id + edge_type, target_memory_id + edge_type
+    %% ACCUMULATORS: episode_id
+    %% EMBEDDINGS/BLOBS: virtual tables with internal indexing (sqlite-vec / sqlite-objstore)
+
+    EPISODES ||--o{ MEMORIES : "contains"
+    MEMORIES ||--o{ SIGNALS : "contains"
+    SIGNALS ||--|| EMBEDDINGS : "has"
+    SIGNALS ||--|| BLOBS : "stores"
+
+    %% Episodes: Temporal/semantic context boundaries (Section 3.1.3)
+    EPISODES {
+        int episode_id PK
+        int start_ts "timestamp (ms)"
+        int end_ts "timestamp (ms), IDX partial NULL"
+        text boundary_type "drift|explicit|timeout"
+        blob centroid "256d aggregate vector"
+        int created_at "timestamp (ms)"
+    }
+
+    %% Memories / Graph nodes: grouped signals with decay metrics (LABEL nodes live here)
+    MEMORIES ||--|| EMBEDDINGS : "has"
+    MEMORIES ||--o| BLOBS : "stores"
+
+    MEMORIES {
+        int memory_id PK
+        int episode_id FK "IDX with start_ts"
+        int embedding_id FK "aggregate embedding (centroid)"
+        blob blob_id FK "optional summary content"
+        text source_id "chat/user, chat/assistant"
+        text kind "WORKING|LONG_TERM|ASSOCIATION|LABEL, IDX"
+        text label "human readable name (for LABEL kind)"
+        int start_ts "timestamp (ms)"
+        int end_ts "timestamp (ms), IDX partial WORKING"
+        int n_signals "count of signals"
+        text modality "text|audio|image"
+        real s_max "max signal score"
+        real s_avg "average signal score"
+        real s_emotion_max "max emotion_intensity_t during formation"
+        real s_arousal_avg "mean arousal_t during formation"
+        blob emotion "6d vector - Section 2.2.2"
+        blob ambient_mood "6d vector - Section 2.2.4"
+        real strength "Section 5.1, IDX with last_access"
+        real use_frequency "Section 5.1 EWMA"
+        real stability "Section 5.3.3"
+        real connectivity "Section 7.2 graph metric"
+        real drift_mag "Section 3.1.3"
+        real influence "Section 5.4 composite"
+        real sustained_influence "Section 5.4 EWMA"
+        real contextual_gain "Section 5.2"
+        real redundancy "Section 7.2"
+        real pre_activation "Section 6.5"
+        real lability_state "Section 6.3"
+        int suppression_count "Section 6.4 RIF"
+        int cluster_id FK "Section 7.3, IDX partial NOT NULL"
+        int last_access "timestamp (ms)"
+        int created_at "timestamp (ms)"
+        int retrieved_count "Section 5.2"
+        int used_count "Section 5.2"
+        real influence_factor "Section 5.2"
+        real mean_influence "Section 5.4"
+        int last_used "timestamp (ms)"
+        blob original_centroid "Section 6.3 reconsolidation"
+        int lability_ts "Section 6.3 (ms)"
+        int recovery_time_start "Section 6.4 (ms)"
+        real suppression "Section 8.4 - competing memory inhibition"
+        int suppression_ts "timestamp (ms)"
+        int flashbulb "Section 8.7 - boolean"
+        real emotional_intensity "Section 8.7"
+        real half_life_bonus "Section 8.7"
+        real detail_suppression "Section 8.7"
+        int gist_components "Section 8.7"
+        int cascade_radius "Section 8.7"
+        real cascade_decay "Section 8.7"
+    }
+
+    %% Signals: Discrete inputs with per-signal metrics
+    SIGNALS {
+        int signal_id PK
+        int memory_id FK "NULL until flush, IDX with serial_position"
+        text source_id FK "accumulator, IDX partial NULL memory_id"
+        int embedding_id FK
+        blob blob_id FK "content hash"
+        int timestamp "signal arrival (ms), IDX DESC"
+        text modality "text|audio|image"
+        text mime
+        int serial_position "order within memory"
+        real score "composite score"
+        real relevance "Section 3.1"
+        real mismatch "Section 3.2"
+        real surprise "Section 3.2"
+        real rarity "Section 3.2"
+        real drift "Section 3.1.3"
+        real contradiction "Section 3.2"
+        real utility "Section 3.3"
+        real periphery "Section 3.3"
+        real coverage "Section 3.3"
+        real salience "Section 2.2"
+        real valence "Section 2.2.2"
+        real arousal "Section 2.2.2"
+        real threshold_t "Section 4.2"
+        int write_decision "0|1"
+        real coherence "Section 3.1.1"
+        real focus_spread "Section 3.1.2"
+        real f_effective "Section 3.1.1"
+        int created_at "timestamp (ms)"
+    }
+
+    %% Embeddings: Vector representations (sqlite-vec virtual table)
+    EMBEDDINGS {
+        int embedding_id PK "rowid"
+        blob embedding "float[256] - sqlite-vec"
+        int created_at "timestamp (ms)"
+    }
+
+    %% Blobs: Raw content storage (sqlite-objstore virtual table)
+    BLOBS {
+        blob blob_id PK "SHA256 content hash"
+        blob data "raw content: text, audio PCM, image bytes"
+    }
+
+    %% =======================================================================
+    %% VIEWS (computed, not persisted)
+    %% =======================================================================
+
+    SIGNALS ||--o{ RECENT_CONTEXT : "view"
+    EMBEDDINGS ||--o{ RECENT_CONTEXT : "view"
+    SIGNALS ||--o{ RECENT_SCORES : "view"
+    SIGNALS ||--o{ RECENT_IDS : "view"
+    MEMORIES ||--o{ RECENT_RETRIEVALS : "view"
+
+    RECENT_CONTEXT {
+        int signal_id FK "from SIGNALS"
+        int embedding_id FK "from EMBEDDINGS"
+    }
+
+    RECENT_SCORES {
+        int signal_id FK "from SIGNALS"
+        real score "recent composite scores"
+    }
+
+    RECENT_IDS {
+        int signal_id FK "from SIGNALS"
+        int timestamp "recency/LRU tracking"
+    }
+
+    RECENT_RETRIEVALS {
+        int memory_id FK "from MEMORIES"
+        int last_retrieval_ts "implicit feedback cache"
+    }
+
+    %% =======================================================================
+    %% ASSOCIATIONS - Graph edges between memory/label nodes
+    %% =======================================================================
+
+    MEMORIES ||--o{ ASSOCIATIONS : "connects"
+
+    %% Associations: Relationships between graph nodes (memories/labels)
+    ASSOCIATIONS {
+        int source_memory_id PK,FK "IDX with edge_type"
+        int target_memory_id PK,FK "IDX with edge_type"
+        text edge_type PK "derived_from|similar_to|co_occurs|implies|contradicts|reinforces|causes|has_label"
+        real weight "normalized [0,1] association weight (for cosine-based edges: clamp((cos+1)/2,0,1))"
+        real decay_rate
+        int last_reinforced "timestamp (ms)"
+    }
+
+    %% =======================================================================
+    %% ACCUMULATORS (Section 4.4) - Pending memories being built
+    %% =======================================================================
+
+    EPISODES ||--o{ ACCUMULATORS : "building"
+    ACCUMULATORS ||--o{ SIGNALS : "produces"
+    ACCUMULATORS {
+        text source_id PK "per-signal accumulator"
+        int episode_id FK "current episode, IDX"
+        blob mu_acc "256d running mean"
+        real drift_acc "WITHIN-UNIT drift accumulator (resets on reset_accumulator). Accumulates normalized context-centroid drift: drift_acc += drift_mag_t/2"
+        real s_sum "score sum"
+        real s_max "max score"
+        int n "count of signals in current unit"
+        blob e_peak "256d peak embedding"
+        real emo_max "max emotion_intensity_t within current unit"
+        real arousal_sum "sum of arousal_t within current unit"
+        blob acc_signals_window "ring buffer of recent embeddings for coherence (<= win_coh(T))"
+        real drift_accum "PER-STREAM cumulative drift used only for interrupt refractory; does NOT reset on unit boundaries. Updated each step: drift_accum += cosine_dist(x_t, x_{t-1})"
+        real drift_at_last_interrupt "PER-STREAM snapshot of drift_accum taken on interrupt; refractory drift since last interrupt is Δ = drift_accum - drift_at_last_interrupt"
+        real drift_acc_pacing "streaming pacing accumulator (per stream)"
+        blob x_last_check "embedding at last trigger_check (per stream; 256d)"
+        blob prev_x "previous signal embedding for this stream (per stream; 256d) used when referencing x_{t−1}"
+        int t_start "memory start timestamp (ms)"
+        int last_write_ts "for write refractory (ms)"
+        int last_signal_ts "for gap detection (ms)"
+        real eta_acc "drift EWMA"
+        real coherence_prev "previous coherence"
+    }
+
+    %% =======================================================================
+    %% STATE - Global processor parameters (singleton)
+    %% =======================================================================
+
+    STATE {
+        int id PK "singleton (id=1)"
+        int signals_processed
+        real theta_dynamic "Section 4.2"
+        real theta_target "Section 4.2"
+        real hysteresis "Section 4.2"
+        real half_life
+        real weight_relevance "Section 2.1"
+        real attention_width "Section 2.1"
+        real coverage_gain_floor "Section 2.1"
+        real mismatch_weight "Section 2.1"
+        real weight_novelty "Section 2.2"
+        real weight_surprise "Section 2.2"
+        real weight_valence "Section 2.2"
+        real weight_arousal "Section 2.2"
+        real emotion_gain "Section 2.2"
+        real score_gain "Section 2.2"
+        real rate_target "Section 2.2"
+        real emotion_intensity "Section 2.2.2"
+        real valence "Section 2.2.2"
+        real arousal "Section 2.2.2"
+        blob mood_vector "6d vector"
+        int last_mood_ts "timestamp (ms) for mood decay"
+        real rate_decay "Section 2.3"
+        real periphery_half_life "Section 2.3"
+        real salience_half_life "Section 2.3"
+        real drift_weight "Section 2.3"
+        real retention_ema "Section 2.3"
+        real m_rate "Section 4.2"
+        real dt_ema "Section 4.2"
+        int rate_ticks "Section 4.2"
+        int last_rate_timestamp "Section 4.2"
+        real reliability "Section 4.2"
+        real u_uncertainty "Section 1.4"
+        blob last_embedding "Section 3.1.4"
+        blob delta_x_trend "Section 3.1.4"
+        real delta_half_life_adj "Section 3.1.4"
+        real sustained_influence "Section 3.1.4"
+        real wm_maintenance_cost "Section 6.1"
+        int wm_slot_count "Section 6.1"
+        int wm_last_accepted "Section 6.1"
+        int wm_last_chunked "Section 6.1"
+        real fok_state "Section 6.2"
+        real retrieval_strength "Section 6.2"
+        real metacognitive_confidence "Section 6.2"
+        int last_consolidation_ts "Section 7.1"
+        int consolidation_count "Section 7.1"
+        int is_processing_signal
+        int last_retrieval_ts
+        int episode_start_ts "Section 3.1.3"
+        int last_interrupt_tick
+        int last_signal_timestamp
+        int updated_at "timestamp (ms)"
+        blob write_rate_timestamps "Section 2.2"
+        real w_relevance "Section 3.2 blender"
+        real w_mismatch "Section 3.2 blender"
+        real w_surprise "Section 3.2 blender"
+        real w_rarity "Section 3.2 blender"
+        real w_drift "Section 3.2 blender"
+        real w_contradiction "Section 3.2 blender"
+        real w_utility "Section 3.2 blender"
+        real w_periphery "Section 3.2 blender"
+        real w_coverage "Section 3.2 blender"
+        real w_salience "Section 3.2 blender"
+        real w_valence "Section 3.2 blender"
+        real w_arousal "Section 3.2 blender"
+        int blender_ready "Section 3.2"
+        int blender_update_count "Section 3.2"
+        blob blender_P_matrix "Section 3.2 - 12x12 covariance"
+        blob blender_coefficients "Section 3.2 - learned coefficients"
+        blob blender_coeff_P_matrix "Section 3.2 - 48x48 covariance"
+    }
+
+```
