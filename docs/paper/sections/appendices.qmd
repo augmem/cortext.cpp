@@ -1,6 +1,16 @@
 # Appendix A. State Variables Map {#sec-app-state .unnumbered}
 
-This appendix enumerates the state variables used by the specification and separates retained state (carried across timesteps) from per-step derived quantities.
+This appendix enumerates the state variables used by the specification and separates retained state (carried across timesteps) from per-step derived quantities. The canonical source for section references is `docs/paper/sections/*.qmd`; anchors in these files are authoritative when resolving cross-reference drift.
+
+## State + Initialization (Canonical) {#sec-state-init .unnumbered}
+
+On cold start (no persisted state), initialize retained state as follows (unless otherwise specified by knob priors):
+
+* **Global defaults:** `u_uncertainty = 0`, `mood_vector = 0_vector`, `last_mood_ts = now_ms()`, `theta_dynamic = theta_target = θ_prior(F,S,T)`, `hysteresis = lerp(0.02, 0.25, T)`, `m_rate = 0`, `dt_ema = 0`, `rate_ticks = 0`, `reliability = 1`, `last_rate_timestamp = now_ms()`, `last_retrieval_ts = 0`, `last_embedding = unset`, `delta_x_trend = unset`.
+* **Accumulator defaults (per stream):** `μ_acc = 0_vector`, `drift_acc = 0`, `s_sum = 0`, `s_max = 0`, `n = 0`, `e_peak = 0_vector`, `emo_max = 0`, `arousal_sum = 0`, `acc_signals_window = []`, `t_start = 0`, `last_signal_ts = 0`, `last_write_ts = 0`, `eta_acc = 0`, `coherence_prev = 1`, `drift_accum = 0`, `drift_at_last_interrupt = 0`, `drift_acc_pacing = 0`, `x_last_check = unset`, `prev_x = unset`.
+* **Per-memory defaults (on insert):** `strength = 1`, `use_frequency = 0`, `stability = 1`, `connectivity = 0`, `drift_mag = 0`, `influence = 0`, `sustained_influence = 0`, `contextual_gain = 0`, `redundancy = 0`, `pre_activation = 0`, `lability_state = 0`, `suppression_count = 0`, `suppression = 0`, `flashbulb = 0`, `s_emotion_max = 0`, `s_arousal_avg = 0`.
+* **Buffers:** `signal_stream`, `score_stream`, `memory_stream`, `recent_memory_centroids` start empty.
+* **Retention history:** `retention_history` starts empty (populated after the first signal step).
 
 * **Accumulator state (per stream; retained across timesteps):**
   * `{μ_acc, drift_acc, s_sum, s_max, n, e_peak, emo_max, arousal_sum, eta_acc, coherence_prev, acc_signals_window, t_start, last_signal_ts, last_write_ts, drift_accum, drift_at_last_interrupt, drift_acc_pacing, x_last_check, prev_x}`
@@ -9,7 +19,7 @@ This appendix enumerates the state variables used by the specification and separ
   * `{u_uncertainty, mood_vector, last_mood_ts, theta_dynamic, theta_target, hysteresis, m_rate, dt_ema, rate_ticks, reliability, last_retrieval_ts}`
 
 * **Buffers (retained across timesteps; bounded by window rules):**
-  * `{signal_stream, score_stream, memory_stream, recent_memory_centroids}`
+  * `{signal_stream, score_stream, memory_stream, recent_memory_centroids, retention_history}`
 
 * **Recorded signal fields (per signal):**
   * `{coherence_struct_t → SIGNALS.coherence, focus_spread_t → SIGNALS.focus_spread}`

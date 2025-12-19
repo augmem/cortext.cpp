@@ -79,6 +79,7 @@ The projection procedure:
 ```
 raw_cos_c ← cos(x_t, centroids[c]) for each c ∈ C
 if all raw_cos_c ≤ 0:
+    p_c ← uniform(1/6)  # ensures downstream mood update is well-defined
     emotion_intensity_t ← 0; valence_t ← 0.5; arousal_t ← 0
 else:
     logits_c ← max(0, raw_cos_c)
@@ -119,7 +120,7 @@ M_t ← clamp_elementwise(M_t, −1.0, 1.0)  # per-component
 last_mood_ts ← now_ms()  # update timestamp after mood update (ms)
 ```
 
-Because e_t is centered around zero, M_t can have both positive and negative components, reflecting sustained elevation or suppression relative to baseline. The mood state provides a separate threshold bias via its normalized magnitude:
+Note: when all raw_cos_c ≤ 0, p_c is uniform and e_t = 0, so mood only decays. Because e_t is centered around zero, M_t can have both positive and negative components, reflecting sustained elevation or suppression relative to baseline. The mood state provides a separate threshold bias via its normalized magnitude:
 
 ```
 κ_mood ← κ_base × S
@@ -161,6 +162,13 @@ active_memories ← {m | strength(m) ≥ periphery_cutoff(T)}
 observed_retention ← mean_age(active_memories)
 retention_ema_t ← EWMA(retention_ema_{t−1},
                        observed_retention, α = α_T(t))
+```
+
+Definitions:
+```
+age_s(m) ← now_s() − to_s(m.created_at)  # fallback: use start_ts if created_at unset
+mean_age(active_memories) ← mean_{m ∈ active_memories} age_s(m); if empty, return 0
+retention_history ← append(observed_retention); keep last win_ret(T) values
 ```
 
 Compute z-score relative to recent retention history:

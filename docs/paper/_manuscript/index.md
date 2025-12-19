@@ -461,6 +461,7 @@ The projection procedure:
 
     raw_cos_c ← cos(x_t, centroids[c]) for each c ∈ C
     if all raw_cos_c ≤ 0:
+        p_c ← uniform(1/6)  # ensures downstream mood update is well-defined
         emotion_intensity_t ← 0; valence_t ← 0.5; arousal_t ← 0
     else:
         logits_c ← max(0, raw_cos_c)
@@ -505,8 +506,9 @@ class="quarto-xref">Section 4.2.2</a>):
     M_t ← clamp_elementwise(M_t, −1.0, 1.0)  # per-component
     last_mood_ts ← now_ms()  # update timestamp after mood update (ms)
 
-Because e_t is centered around zero, M_t can have both positive and
-negative components, reflecting sustained elevation or suppression
+Note: when all raw_cos_c ≤ 0, p_c is uniform and e_t = 0, so mood only
+decays. Because e_t is centered around zero, M_t can have both positive
+and negative components, reflecting sustained elevation or suppression
 relative to baseline. The mood state provides a separate threshold bias
 via its normalized magnitude:
 
@@ -547,6 +549,12 @@ At each signal event, compute retention statistics and adjust half-life:
     retention_ema_t ← EWMA(retention_ema_{t−1},
                            observed_retention, α = α_T(t))
 
+Definitions:
+
+    age_s(m) ← now_s() − to_s(m.created_at)  # fallback: use start_ts if created_at unset
+    mean_age(active_memories) ← mean_{m ∈ active_memories} age_s(m); if empty, return 0
+    retention_history ← append(observed_retention); keep last win_ret(T) values
+
 Compute z-score relative to recent retention history:
 
     last_win_ret ← tail(retention_history, win_ret(T))
@@ -556,7 +564,7 @@ Compute z-score relative to recent retention history:
 
 The target half-life incorporates feedback adjustment from the stability
 feedback mechanism
-(<a href="#sec-feedback" class="quarto-xref">Section 7.3</a>):
+(<a href="#sec-feedback" class="quarto-xref">Section 7.4</a>):
 
     stability_adj ← ΔHalfLife_adj_t if provided else 0
     target_half_life_t ← clamp(base_half_life(T) ×
@@ -764,10 +772,142 @@ ordering.
 
     w_bootstrap[i] ← sigmoid(c_F[i]×F + c_S[i]×S + c_T[i]×T + d_i)
 
-RLS fitting updates coefficients with stability-dependent forgetting:
+Bootstrap coefficient defaults (canonical; used for initialization):
 
-    φ(T) = 0.90 + 0.09T
-    N ← round(lerp(64, 512, T))  # fitting window
+<table>
+<thead>
+<tr>
+<th>Metric</th>
+<th>c_F</th>
+<th>c_S</th>
+<th>c_T</th>
+<th>d</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>relevance</td>
+<td>1.4</td>
+<td>0.0</td>
+<td>0.4</td>
+<td>−1.0</td>
+</tr>
+<tr>
+<td>mismatch</td>
+<td>−1.0</td>
+<td>1.0</td>
+<td>0.0</td>
+<td>−0.5</td>
+</tr>
+<tr>
+<td>surprise</td>
+<td>0.0</td>
+<td>1.5</td>
+<td>−0.5</td>
+<td>−0.75</td>
+</tr>
+<tr>
+<td>rarity</td>
+<td>0.9</td>
+<td>0.0</td>
+<td>−0.3</td>
+<td>0.05</td>
+</tr>
+<tr>
+<td>drift</td>
+<td>0.0</td>
+<td>0.0</td>
+<td>−1.0</td>
+<td>0.0</td>
+</tr>
+<tr>
+<td>utility</td>
+<td>0.85</td>
+<td>−0.45</td>
+<td>0.0</td>
+<td>0.075</td>
+</tr>
+<tr>
+<td>salience</td>
+<td>1.0</td>
+<td>1.0</td>
+<td>0.0</td>
+<td>−1.0</td>
+</tr>
+<tr>
+<td>valence</td>
+<td>0.0</td>
+<td>1.02</td>
+<td>−0.42</td>
+<td>−0.11</td>
+</tr>
+<tr>
+<td>arousal</td>
+<td>0.0</td>
+<td>1.8</td>
+<td>−0.2</td>
+<td>−0.9</td>
+</tr>
+<tr>
+<td>contradiction</td>
+<td>−2.0</td>
+<td>2.0</td>
+<td>0.0</td>
+<td>−1.0</td>
+</tr>
+<tr>
+<td>periphery</td>
+<td>0.0</td>
+<td>0.0</td>
+<td>1.0</td>
+<td>−1.0</td>
+</tr>
+<tr>
+<td>coverage</td>
+<td>2.0</td>
+<td>0.0</td>
+<td>0.0</td>
+<td>−1.0</td>
+</tr>
+</tbody>
+</table>
+
+### RLS Weight Adaptation (Canonical)
+
+RLS fits the blender weights directly in **weight-space**, using the
+current metrics as predictors and an observed outcome signal as the
+target. State is retained as a weight vector `w` and covariance matrix
+`P`.
+
+Target and predictor:
+
+    x_t ← [metric_i] (each metric clamped to [0,1])
+    y_t ← relevance_t  # observed outcome (in [0,1])
+
+Update cadence and forgetting:
+
+    k_update = round(lerp(1, 8, T))  # update every k_update signals
+    λ(T) = 0.90 + 0.09T              # forgetting factor
+
+RLS update (performed when step % k_update == 0):
+
+    y_hat ← wᵀ x_t
+    e_t ← y_t − y_hat
+    K ← (P x_t) / (λ + x_tᵀ P x_t)
+    w ← clamp(w + K × e_t, 0, 1)
+    P ← (I − K x_tᵀ) P / λ
+
+Note: RLS fits **unnormalized** weights `w`; normalization happens later
+in composite score computation.
+
+Initialization:
+
+    w_0 ← w_bootstrap   # from the coefficient table above
+    P_0 ← diag(1000)
+
+Interpretation-only window size:
+
+    N ← round(lerp(64, 512, T))  # effective fitting window (interpretation only)
 
 The fitted weights blend with bootstrap weights based on RLS confidence:
 
@@ -1166,6 +1306,26 @@ Memories falling below the periphery cutoff are candidates for eviction:
     periphery_cutoff(T) = lerp(0.05, 0.25, T)
     if strength_t < periphery_cutoff(T): evict(m)
 
+## Contextual Gain and Per-Memory Stability (Definitions)
+
+Contextual gain is a per-retrieval signal used by multiple feedback
+loops:
+
+    contextual_gain_t(m) ← cos(x_t, m.embedding)    # if m was retrieved and used (range [−1, 1])
+    contextual_gain_t(m) ← undefined                # otherwise
+
+When undefined, treat contextual_gain_t(m) as 0 in downstream updates.
+Persisted per-memory gain is tracked as a smoothed value:
+
+    L_cg = round(lerp(8, 32, T))
+    α_cg = 2 / (L_cg + 1)
+    contextual_gain(m) ← EWMA(contextual_gain(m), contextual_gain_t(m), α_cg)
+
+Per-memory stability initializes at creation and is bounded:
+
+    stability(m)_init = 1.0
+    stability(m) ← clamp(stability(m), 0.0, 2.0)
+
 ## Influence-Weighted Updates
 
 When contextual gain signals are available, influence factors modulate
@@ -1179,8 +1339,9 @@ reinforcement:
 ## Causal Feedback Loop
 
 The system tracks causal influence of retrieved memories on generation
-quality through contextual gain—the improvement in prediction accuracy
-attributable to including each memory in context.
+quality through contextual gain—the semantic alignment (cosine
+similarity) between the current signal embedding and the retrieved
+memory embedding.
 
 ### Focus Feedback
 
@@ -1485,6 +1646,12 @@ conditions:
                           (m_rate < rate_target / 2) OR
                           (elapsed_time > consolidation_interval)
 
+Definitions (knob-derived):
+
+    consolidation_interval(T) = lerp(300, 3600, T)  # seconds (5 min → 1 hour)
+    consolidation_threshold(T) = n_ctx(T) × win_score(T)  # memory-count trigger
+    merge_threshold(F) = lerp(0.85, 0.95, F)  # similarity required for clustering
+
 The consolidation rate adapts to Stability and Sensitivity (write_rate
 tracks memory writes, not signal writes):
 
@@ -1542,7 +1709,7 @@ Summary nodes replace clusters:
 
 ## Semantic Extraction
 
-For sufficiently large clusters, semantic extraction identifies entities
+For sufficiently large clusters, semantic extraction identifies labels
 and relations:
 
     extraction_batch_size = round(lerp(8, 32, T))
@@ -1551,17 +1718,16 @@ and relations:
     extraction_interval = lerp(300, 3600, T)  # 5 min → 1 hour
     max_extractions_per_cycle = round(lerp(20, 5, T))
 
-Extraction uses structured prompting to identify named entities (people,
+Extraction uses structured prompting to identify labels/tags (people,
 places, organizations, concepts) and relationships (co-occurrence,
 implication, contradiction).
 
 ## Knowledge Graph Construction
 
-The graph comprises three node types:
+The graph comprises two node types:
 
 -   **Memory Nodes:** Summarized embeddings from merged clusters
--   **Entity Nodes:** Named entities extracted from content blobs
--   **Concept Nodes:** Emergent centroids representing recurrent topics
+-   **Label Nodes:** Extracted labels/tags derived from content blobs
 
 Edge types capture relationships:
 
@@ -1685,16 +1851,21 @@ Fallback: if included_set is empty, treat redundancy(·, included_set) =
     [weight_cov, weight_rel, weight_red, weight_incoh] = normalize(weights_mu_raw)
 
     mu = weight_cov × coverage_gain(candidate | included_set) +
-          weight_rel × cos(candidate, ctx_centroid) −
+          weight_rel × map01(cos(candidate, ctx_centroid)) −
           weight_red × redundancy(candidate, included_set) −
           weight_incoh × (1 − coherence_struct_t)  # structural coherence penalty
+
+With map01 applied, each MU term is in \[0, 1\], so μ is calibrated to
+the same range as τ_mu.
 
 ## Gate Decision Logic
 
 Duplicate suppression threshold:
 
-    dup_thresh = lerp(0.88, 0.96, F) × (0.98 + 0.02T)
+    dup_thresh = lerp(0.96, 0.88, F) × (0.98 + 0.02T)
     K = round(lerp(10, 6, F))  # candidates to evaluate
+
+Higher Focus lowers `dup_thresh`, making duplicate suppression stricter.
 
 ### Write Exclusion Filter
 
@@ -1722,7 +1893,7 @@ The gate permits interrupt when:
     at_drift_boundary = should_flush  # boundary signal from the current accumulator
     candidate_star = argmax_{c ∈ candidates_eligible} mu(c)
     mu_star = mu(candidate_star)
-    rel_star = cos(candidate_star, ctx_centroid)
+    rel_star = map01(cos(candidate_star, ctx_centroid))
     if |included_set| == 0:
         overlap_star = −1.0
     else:
@@ -1924,19 +2095,66 @@ Memory* 1: 381–403.
 
 This appendix enumerates the state variables used by the specification
 and separates retained state (carried across timesteps) from per-step
-derived quantities.
+derived quantities. The canonical source for section references is
+`docs/paper/sections/*.qmd`; anchors in these files are authoritative
+when resolving cross-reference drift.
+
+## State + Initialization (Canonical)
+
+On cold start (no persisted state), initialize retained state as follows
+(unless otherwise specified by knob priors):
+
+-   **Global defaults:** `u_uncertainty = 0`, `mood_vector = 0_vector`,
+    `last_mood_ts = now_ms()`,
+    `theta_dynamic = theta_target = θ_prior(F,S,T)`,
+    `hysteresis = lerp(0.02, 0.25, T)`, `m_rate = 0`, `dt_ema = 0`,
+    `rate_ticks = 0`, `reliability = 1`,
+    `last_rate_timestamp = now_ms()`, `last_retrieval_ts = 0`,
+    `last_embedding = unset`, `delta_x_trend = unset`.
+
+-   **Accumulator defaults (per stream):** `μ_acc = 0_vector`,
+    `drift_acc = 0`, `s_sum = 0`, `s_max = 0`, `n = 0`,
+    `e_peak = 0_vector`, `emo_max = 0`, `arousal_sum = 0`,
+    `acc_signals_window = []`, `t_start = 0`, `last_signal_ts = 0`,
+    `last_write_ts = 0`, `eta_acc = 0`, `coherence_prev = 1`,
+    `drift_accum = 0`, `drift_at_last_interrupt = 0`,
+    `drift_acc_pacing = 0`, `x_last_check = unset`, `prev_x = unset`.
+
+-   **Per-memory defaults (on insert):** `strength = 1`,
+    `use_frequency = 0`, `stability = 1`, `connectivity = 0`,
+    `drift_mag = 0`, `influence = 0`, `sustained_influence = 0`,
+    `contextual_gain = 0`, `redundancy = 0`, `pre_activation = 0`,
+    `lability_state = 0`, `suppression_count = 0`, `suppression = 0`,
+    `flashbulb = 0`, `s_emotion_max = 0`, `s_arousal_avg = 0`.
+
+-   **Buffers:** `signal_stream`, `score_stream`, `memory_stream`,
+    `recent_memory_centroids` start empty.
+
+-   **Retention history:** `retention_history` starts empty (populated
+    after the first signal step).
 
 -   **Accumulator state (per stream; retained across timesteps):**
+
     -   `{μ_acc, drift_acc, s_sum, s_max, n, e_peak, emo_max, arousal_sum, eta_acc, coherence_prev, acc_signals_window, t_start, last_signal_ts, last_write_ts, drift_accum, drift_at_last_interrupt, drift_acc_pacing, x_last_check, prev_x}`
+
 -   **Global state (retained across timesteps):**
+
     -   `{u_uncertainty, mood_vector, last_mood_ts, theta_dynamic, theta_target, hysteresis, m_rate, dt_ema, rate_ticks, reliability, last_retrieval_ts}`
+
 -   **Buffers (retained across timesteps; bounded by window rules):**
-    -   `{signal_stream, score_stream, memory_stream, recent_memory_centroids}`
+
+    -   `{signal_stream, score_stream, memory_stream, recent_memory_centroids, retention_history}`
+
 -   **Recorded signal fields (per signal):**
+
     -   `{coherence_struct_t → SIGNALS.coherence, focus_spread_t → SIGNALS.focus_spread}`
+
 -   **Recorded global fields:**
+
     -   `{u(t) → STATE.u_uncertainty, M_t → STATE.mood_vector}`
+
 -   **Per-step derived scalars (ephemeral; recomputed each step):**
+
     -   `{signal_gap_s, coherence_curr, s_avg, S_window, boundary_score, should_flush, write_memory, Δwrites}`
 
 # Appendix B. Derived Signals: Definitions and Bounds

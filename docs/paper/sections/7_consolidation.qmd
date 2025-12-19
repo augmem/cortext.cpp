@@ -12,6 +12,13 @@ should_consolidate = (memory_count > consolidation_threshold) OR
                       (elapsed_time > consolidation_interval)
 ```
 
+Definitions (knob-derived):
+```
+consolidation_interval(T) = lerp(300, 3600, T)  # seconds (5 min → 1 hour)
+consolidation_threshold(T) = n_ctx(T) × win_score(T)  # memory-count trigger
+merge_threshold(F) = lerp(0.85, 0.95, F)  # similarity required for clustering
+```
+
 The consolidation rate adapts to Stability and Sensitivity (write_rate tracks memory writes, not signal writes):
 
 ```

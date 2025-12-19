@@ -94,17 +94,17 @@ GetCoreMigrations ()
 {
   return {
       // ==========================================================================
-      // Migration 0: v2 Schema per docs/diagrams/database-v2.md
+      // Migration 0: v2 Schema per docs/paper/diagrams/entity-relationship.qmd
       // Clean slate - EPISODES -> MEMORIES -> SIGNALS -> (EMBEDDINGS, BLOBS)
       // ==========================================================================
       {
           0,
-          "Core schema v2 (docs/diagrams/database-v2.md)",
+          "Core schema v2 (docs/paper/diagrams/entity-relationship.qmd)",
           {
               // ------------------------------------------------------------------
               // sqlite-objstore virtual table (BLOBS)
               // ------------------------------------------------------------------
-              "CREATE VIRTUAL TABLE IF NOT EXISTS objstore USING objstore()",
+              "CREATE VIRTUAL TABLE IF NOT EXISTS blobs USING objstore()",
 
               // ------------------------------------------------------------------
               // EPISODES - Episodic boundaries (top of hierarchy)
@@ -137,6 +137,8 @@ GetCoreMigrations ()
               // Score metrics
               "  s_max REAL NOT NULL DEFAULT 0.0,"
               "  s_avg REAL NOT NULL DEFAULT 0.0,"
+              "  s_emotion_max REAL NOT NULL DEFAULT 0.0,"
+              "  s_arousal_avg REAL NOT NULL DEFAULT 0.0,"
               // Emotion vectors (6d)
               "  emotion BLOB,"
               "  ambient_mood BLOB,"
@@ -247,7 +249,16 @@ GetCoreMigrations ()
               "  drift_acc REAL NOT NULL DEFAULT 0.0,"
               "  s_sum REAL NOT NULL DEFAULT 0.0,"
               "  s_max REAL NOT NULL DEFAULT 0.0,"
+              "  n INTEGER NOT NULL DEFAULT 0,"
               "  e_peak BLOB,"
+              "  emo_max REAL NOT NULL DEFAULT 0.0,"
+              "  arousal_sum REAL NOT NULL DEFAULT 0.0,"
+              "  acc_signals_window BLOB,"
+              "  drift_accum REAL NOT NULL DEFAULT 0.0,"
+              "  drift_at_last_interrupt REAL NOT NULL DEFAULT 0.0,"
+              "  drift_acc_pacing REAL NOT NULL DEFAULT 0.0,"
+              "  x_last_check BLOB,"
+              "  prev_x BLOB,"
               "  t_start INTEGER NOT NULL DEFAULT 0,"
               "  last_write_ts INTEGER NOT NULL DEFAULT 0,"
               "  last_signal_ts INTEGER NOT NULL DEFAULT 0,"
@@ -285,6 +296,7 @@ GetCoreMigrations ()
               "  valence REAL NOT NULL DEFAULT 0.5,"
               "  arousal REAL NOT NULL DEFAULT 0.0,"
               "  mood_vector BLOB,"
+              "  last_mood_ts INTEGER NOT NULL DEFAULT 0,"
               // Stability state
               "  rate_decay REAL NOT NULL DEFAULT 0.60,"
               "  periphery_half_life REAL NOT NULL DEFAULT 120.0,"
@@ -318,9 +330,6 @@ GetCoreMigrations ()
               "  consolidation_count INTEGER NOT NULL DEFAULT 0,"
               "  is_processing_signal INTEGER NOT NULL DEFAULT 0,"
               "  last_retrieval_ts INTEGER NOT NULL DEFAULT 0,"
-              // Streaming pacing
-              "  drift_accum REAL NOT NULL DEFAULT 0.0,"
-              "  drift_at_last_interrupt REAL NOT NULL DEFAULT 0.0,"
               // Episode tracking
               "  episode_start_ts INTEGER NOT NULL DEFAULT 0,"
               "  last_interrupt_tick INTEGER NOT NULL DEFAULT 0,"
@@ -387,27 +396,26 @@ GetCoreMigrations ()
               // Views (Computed Windows) - replace sliding window tables
               // ------------------------------------------------------------------
               "CREATE VIEW IF NOT EXISTS recent_context AS "
-              "SELECT s.embedding_id, e.embedding, s.timestamp "
+              "SELECT s.signal_id, s.embedding_id "
               "FROM signals s "
-              "JOIN embeddings e ON s.embedding_id = e.embedding_id "
               "ORDER BY s.timestamp DESC "
               "LIMIT 64",
 
               "CREATE VIEW IF NOT EXISTS recent_scores AS "
-              "SELECT signal_id, score, timestamp "
+              "SELECT signal_id, score "
               "FROM signals "
               "WHERE score IS NOT NULL "
               "ORDER BY timestamp DESC "
               "LIMIT 100",
 
               "CREATE VIEW IF NOT EXISTS recent_ids AS "
-              "SELECT DISTINCT embedding_id, timestamp "
+              "SELECT signal_id, timestamp "
               "FROM signals "
               "ORDER BY timestamp DESC "
               "LIMIT 1024",
 
               "CREATE VIEW IF NOT EXISTS recent_retrievals AS "
-              "SELECT memory_id, last_access as timestamp "
+              "SELECT memory_id, last_access as last_retrieval_ts "
               "FROM memories "
               "WHERE last_access IS NOT NULL "
               "ORDER BY last_access DESC "

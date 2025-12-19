@@ -23,6 +23,30 @@ periphery_cutoff(T) = lerp(0.05, 0.25, T)
 if strength_t < periphery_cutoff(T): evict(m)
 ```
 
+## Contextual Gain and Per-Memory Stability (Definitions)
+
+Contextual gain is a per-retrieval signal used by multiple feedback loops:
+
+```
+contextual_gain_t(m) ← cos(x_t, m.embedding)    # if m was retrieved and used (range [−1, 1])
+contextual_gain_t(m) ← undefined                # otherwise
+```
+
+When undefined, treat contextual_gain_t(m) as 0 in downstream updates. Persisted per-memory gain is tracked as a smoothed value:
+
+```
+L_cg = round(lerp(8, 32, T))
+α_cg = 2 / (L_cg + 1)
+contextual_gain(m) ← EWMA(contextual_gain(m), contextual_gain_t(m), α_cg)
+```
+
+Per-memory stability initializes at creation and is bounded:
+
+```
+stability(m)_init = 1.0
+stability(m) ← clamp(stability(m), 0.0, 2.0)
+```
+
 ## Influence-Weighted Updates
 
 When contextual gain signals are available, influence factors modulate reinforcement:
@@ -36,7 +60,7 @@ strength_t ← clamp(strength_{t−1} × exp(−λ_t × Δt) +
 
 ## Causal Feedback Loop {#sec-feedback}
 
-The system tracks causal influence of retrieved memories on generation quality through contextual gain—the improvement in prediction accuracy attributable to including each memory in context.
+The system tracks causal influence of retrieved memories on generation quality through contextual gain—the semantic alignment (cosine similarity) between the current signal embedding and the retrieved memory embedding.
 
 ### Focus Feedback
 

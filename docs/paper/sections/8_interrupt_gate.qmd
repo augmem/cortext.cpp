@@ -60,19 +60,23 @@ weights_mu_raw = [lerp(0.40, 0.60, F),   # coverage gain
 [weight_cov, weight_rel, weight_red, weight_incoh] = normalize(weights_mu_raw)
 
 mu = weight_cov × coverage_gain(candidate | included_set) +
-      weight_rel × cos(candidate, ctx_centroid) −
+      weight_rel × map01(cos(candidate, ctx_centroid)) −
       weight_red × redundancy(candidate, included_set) −
       weight_incoh × (1 − coherence_struct_t)  # structural coherence penalty
 ```
+
+With map01 applied, each MU term is in [0, 1], so μ is calibrated to the same range as τ_mu.
 
 ## Gate Decision Logic
 
 Duplicate suppression threshold:
 
 ```
-dup_thresh = lerp(0.88, 0.96, F) × (0.98 + 0.02T)
+dup_thresh = lerp(0.96, 0.88, F) × (0.98 + 0.02T)
 K = round(lerp(10, 6, F))  # candidates to evaluate
 ```
+
+Higher Focus lowers `dup_thresh`, making duplicate suppression stricter.
 
 ### Write Exclusion Filter
 
@@ -98,7 +102,7 @@ The gate permits interrupt when:
 at_drift_boundary = should_flush  # boundary signal from the current accumulator
 candidate_star = argmax_{c ∈ candidates_eligible} mu(c)
 mu_star = mu(candidate_star)
-rel_star = cos(candidate_star, ctx_centroid)
+rel_star = map01(cos(candidate_star, ctx_centroid))
 if |included_set| == 0:
     overlap_star = −1.0
 else:
