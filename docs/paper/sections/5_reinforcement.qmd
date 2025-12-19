@@ -16,6 +16,12 @@ strength_t ← clamp(strength_{t−1} × exp(−λ_t × Δt) +
                    S × use_frequency_t, 0, 1)
 ```
 
+Δt is measured per memory using its last access timestamp:
+
+```
+Δt(m) ← now_s() − to_s(m.last_access); if last_access is unset, use created_at
+```
+
 Memories falling below the periphery cutoff are candidates for eviction:
 
 ```
@@ -47,6 +53,15 @@ stability(m)_init = 1.0
 stability(m) ← clamp(stability(m), 0.0, 2.0)
 ```
 
+Retrieved vs used:
+
+```
+retrieved(m) = memory returned by retrieval (vector or graph expansion)
+used(m) = retrieved(m) AND injected into active context after gate decisions
+```
+
+Contextual gain is only measured for used memories.
+
 ## Influence-Weighted Updates
 
 When contextual gain signals are available, influence factors modulate reinforcement:
@@ -66,15 +81,18 @@ The system tracks causal influence of retrieved memories on generation quality t
 
 ```
 αF_base = 0.10; βF_base = 0.05
+weight_relevance_t ← weight_relevance
+attention_width_t ← attention_width
 for each used memory m:
     if contextual_gain(m) > 0:
-        weight_relevance += αF_base × contextual_gain(m)
+        weight_relevance_t += αF_base × contextual_gain(m)
         attention_width_t *= (1 − βF_base)
     else:
         attention_width_t *= (1 + βF_base)
-weight_relevance ← clamp(weight_relevance, 0, 1)
+weight_relevance ← clamp(weight_relevance_t, 0, 1)
 attention_width_t ← clamp(attention_width_t,
                           attention_width_min, attention_width_max)
+attention_width ← attention_width_t
 ```
 
 Positive contextual gain narrows attention and boosts relevance weighting; negative gain widens attention to explore alternatives.
@@ -83,12 +101,14 @@ Positive contextual gain narrows attention and boosts relevance weighting; negat
 
 ```
 η_base = 0.10
+weight_novelty_t ← weight_novelty
 for each used memory m:
     novelty_reward ← 1 − sim(m.embedding, recent_context)
     weight_novelty_t += η_base × (novelty_reward ×
                          contextual_gain(m) −
                          redundancy(m, recent_context))
 weight_novelty_t ← clamp(weight_novelty_t, 0, 1)
+weight_novelty ← weight_novelty_t
 ```
 
 This rewards novelty that proves useful while penalizing redundant retrievals.
@@ -99,9 +119,10 @@ This rewards novelty that proves useful while penalizing redundant retrievals.
 γT_base = 0.05
 for each used memory m:
     if contextual_gain(m) > 0:
-        stability(m) += γT_base
+        stability_t(m) ← stability(m) + γT_base
     else:
-        stability(m) *= (1 − γT_base)
+        stability_t(m) ← stability(m) × (1 − γT_base)
+    stability(m) ← clamp(stability_t(m), 0.0, 2.0)
 ```
 
 The mean stability of used memories provides adjustment to the half-life target:

@@ -65,9 +65,11 @@ Instantaneous rate estimation with bias correction. Δwrites is the binary indic
 Normative note (MUST): Δwrites is computed from the current step's write_memory decision. Rate state updates occur after the write decision and affect subsequent timesteps.
 ```
 ρ_inst ← (Δwrites / Δt) × 60  # writes per minute
-m_rate ← (1 − α) × m_rate + α × ρ_inst
+m_rate_t ← (1 − α) × m_rate + α × ρ_inst
 denom ← max(1 − (1 − α)^(rate_ticks + 1), ε)
-ρ_hat_next ← m_rate / denom  # bias-corrected estimate for next step
+ρ_hat_t ← m_rate_t / denom  # bias-corrected estimate for next step
+m_rate ← m_rate_t
+rho_hat_prev ← ρ_hat_t
 rate_ticks ← rate_ticks + 1
 last_rate_timestamp ← now_ms()  # update after rate computation
 ```
@@ -88,10 +90,10 @@ High Stability dampens reliability, preventing aggressive corrections in conserv
 
 The rate error drives threshold adjustment:
 
-Normative note (MUST): ρ_hat_prev is stored state entering the timestep. After the write decision, the rate-state update computes ρ_hat_next; the assignment ρ_hat_prev ← ρ_hat_next occurs at end of step (see Appendix C).
+Normative note (MUST): rho_hat_prev is stored state entering the timestep. After the write decision, the rate-state update computes ρ_hat_t; the assignment rho_hat_prev ← ρ_hat_t occurs at end of step (see Appendix D).
 
 ```
-rate_error ← tanh((ρ_hat_prev − rate_target) /
+rate_error ← tanh((rho_hat_prev − rate_target) /
                   max(rate_target, ε))
 κ_r = 0.10  # rate error gain
 cap_homeo ← 0.25 × hysteresis
@@ -144,14 +146,16 @@ cap_total ← max_ΔT_per_min(t) × (Δt / 60.0)
 θ_dynamic_t ← clamp(EWMA(θ_dynamic_{t−1}, θ_target,
                         α = α_T(t)) + Δθ_limited,
                     T_min(t), T_max(t))
+theta_dynamic ← θ_dynamic_t
 ```
 
 Hysteresis evolves toward the stability-derived base:
 
 ```
-hysteresis ← clamp(EWMA(hysteresis,
+hysteresis_t ← clamp(EWMA(hysteresis,
                      base_band(T), α = α_T(t)),
                 band_min, band_max)
+hysteresis ← hysteresis_t
 ```
 
 ## Write Pacing and Memory Accumulation {#sec-write-pacing}

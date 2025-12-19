@@ -52,7 +52,9 @@ to_s(ts_ms) = ts_ms / 1000       # ms → seconds conversion
 
 **Stored timestamps:** All stored timestamps are milliseconds since Unix epoch.
 
-**Naming contract (canonical):** Use the variable names below consistently throughout this document. Units: stored timestamps are integers in milliseconds (commonly suffixed *_ts, and also appearing as timestamp/created_at/last_rate_timestamp); derived time intervals in seconds use the *_s suffix. Accumulator variables: t_start, last_signal_ts, last_write_ts, drift_acc, eta_acc, coherence_prev, emo_max, arousal_sum, drift_accum, drift_at_last_interrupt, drift_acc_pacing, x_last_check. Global variables: u_uncertainty, mood_vector, last_mood_ts, theta_dynamic, theta_target, hysteresis, m_rate, dt_ema, rate_ticks, reliability, last_rate_timestamp, last_retrieval_ts. Weight naming rule: weight_* and *_weight variables (e.g., weight_relevance, mismatch_weight, weight_surprise) are control parameters; w_* variables (e.g., w_relevance, w_mismatch, … w_arousal) are composite-score blender weights.
+**Naming contract (canonical):** Use the variable names below consistently throughout this document. Units: stored timestamps are integers in milliseconds (commonly suffixed *_ts, and also appearing as timestamp/created_at/last_rate_timestamp); derived time intervals in seconds use the *_s suffix. Accumulator variables: t_start, last_signal_ts, last_write_ts, drift_acc, eta_acc, coherence_prev, emo_max, arousal_sum, drift_accum, drift_at_last_interrupt, drift_acc_pacing, x_last_check. Global variables: signals_processed, u_uncertainty, mood_vector, last_mood_ts, theta_dynamic, theta_target, hysteresis, m_rate, rho_hat_prev, dt_ema, rate_ticks, reliability, last_rate_timestamp, last_retrieval_ts, retention_ema, last_embedding, delta_x_trend. Weight naming rule: weight_* and *_weight variables (e.g., weight_relevance, mismatch_weight, weight_surprise) are control parameters; w_* variables (e.g., w_relevance, w_mismatch, … w_arousal) are composite-score blender weights.
+
+**Time-index convention:** Per-step computed values use a `_t` suffix (e.g., score_t, theta_dynamic_t). Retained state uses the bare name (e.g., theta_dynamic). When a step proposes a new value, compute the `_t` variant and assign the bare name at end of step (see Appendix D).
 
 **Time deltas:** All Δt values, elapsed times (mem_elapsed, signal_gap, idle_for), and time comparisons operate in seconds:
 
@@ -63,6 +65,18 @@ signal_gap ← now_s() − to_s(last_signal_ts)  # seconds
 ```
 
 **Time constants:** All time-related constants are specified with explicit units (e.g., τ_min = 120 seconds, kRecencyTau = 60 seconds). Threshold limits like max_mem_time(T) and gap_threshold(T) return values in seconds.
+
+### Fixed Constants and Invariants
+
+Not all tunables are derived from knobs. When a value is specified as a fixed constant, it is a deliberate invariant and should be treated as such across implementations. Core invariants include:
+
+```
+ε = 10^-6          # numeric stability
+τ_min = 120 s      # minimum half-life (decay floor)
+κ_base = 0.10      # base emotional threshold scale
+```
+
+Other fixed constants are defined inline at first use and are normative unless explicitly marked as knob-derived.
 
 ### Buffers {#sec-buffers}
 

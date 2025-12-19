@@ -30,8 +30,12 @@ if |recent_context| == 0:
 else:
     μ_ctx ← mean(recent_context)
     observed_cosine ← cos(x_t, μ_ctx)
-weight_relevance ← EWMA(weight_relevance,
+weight_relevance_t ← EWMA(weight_relevance,
                       map01(observed_cosine), α = α_F(t))
+```
+
+```
+weight_relevance ← weight_relevance_t
 ```
 
 where map01(z) = clamp((z + 1) / 2, 0, 1) transforms cosine values from [−1, 1] to [0, 1].
@@ -164,6 +168,10 @@ retention_ema_t ← EWMA(retention_ema_{t−1},
                        observed_retention, α = α_T(t))
 ```
 
+```
+retention_ema ← retention_ema_t
+```
+
 Definitions:
 ```
 age_s(m) ← now_s() − to_s(m.created_at)  # fallback: use start_ts if created_at unset
@@ -189,4 +197,8 @@ target_half_life_t ← clamp(base_half_life(T) ×
                           τ_min, τ_max)
 half_life_t ← EWMA(half_life_{t−1}, target_half_life_t,
                    α = α_T(t))
+```
+
+```
+half_life ← half_life_t
 ```

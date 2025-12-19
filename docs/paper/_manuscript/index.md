@@ -204,13 +204,19 @@ as timestamp/created_at/last_rate_timestamp); derived time intervals in
 seconds use the **s suffix. Accumulator variables: t_start,
 last_signal_ts, last_write_ts, drift_acc, eta_acc, coherence_prev,
 emo_max, arousal_sum, drift_accum, drift_at_last_interrupt,
-drift_acc_pacing, x_last_check. Global variables: u_uncertainty,
-mood_vector, last_mood_ts, theta_dynamic, theta_target, hysteresis,
-m_rate, dt_ema, rate_ticks, reliability, last_rate_timestamp,
-last_retrieval_ts. Weight naming rule: weight** and **weight variables
+drift_acc_pacing, x_last_check. Global variables: signals_processed,
+u_uncertainty, mood_vector, last_mood_ts, theta_dynamic, theta_target,
+hysteresis, m_rate, rho_hat_prev, dt_ema, rate_ticks, reliability,
+last_rate_timestamp, last_retrieval_ts, retention_ema, last_embedding,
+delta_x_trend. Weight naming rule: weight** and **weight variables
 (e.g., weight_relevance, mismatch_weight, weight_surprise) are control
 parameters; w** variables (e.g., w_relevance, w_mismatch, … w_arousal)
 are composite-score blender weights.
+
+**Time-index convention:** Per-step computed values use a `_t` suffix
+(e.g., score_t, theta_dynamic_t). Retained state uses the bare name
+(e.g., theta_dynamic). When a step proposes a new value, compute the
+`_t` variant and assign the bare name at end of step (see Appendix D).
 
 **Time deltas:** All Δt values, elapsed times (mem_elapsed, signal_gap,
 idle_for), and time comparisons operate in seconds:
@@ -223,6 +229,19 @@ idle_for), and time comparisons operate in seconds:
 explicit units (e.g., τ_min = 120 seconds, kRecencyTau = 60 seconds).
 Threshold limits like max_mem_time(T) and gap_threshold(T) return values
 in seconds.
+
+### Fixed Constants and Invariants
+
+Not all tunables are derived from knobs. When a value is specified as a
+fixed constant, it is a deliberate invariant and should be treated as
+such across implementations. Core invariants include:
+
+    ε = 10^-6          # numeric stability
+    τ_min = 120 s      # minimum half-life (decay floor)
+    κ_base = 0.10      # base emotional threshold scale
+
+Other fixed constants are defined inline at first use and are normative
+unless explicitly marked as knob-derived.
 
 ### Buffers
 
@@ -412,8 +431,10 @@ At each signal event t with input embedding x_t:
     else:
         μ_ctx ← mean(recent_context)
         observed_cosine ← cos(x_t, μ_ctx)
-    weight_relevance ← EWMA(weight_relevance,
+    weight_relevance_t ← EWMA(weight_relevance,
                           map01(observed_cosine), α = α_F(t))
+
+    weight_relevance ← weight_relevance_t
 
 where map01(z) = clamp((z + 1) / 2, 0, 1) transforms cosine values from
 \[−1, 1\] to \[0, 1\].
@@ -549,6 +570,8 @@ At each signal event, compute retention statistics and adjust half-life:
     retention_ema_t ← EWMA(retention_ema_{t−1},
                            observed_retention, α = α_T(t))
 
+    retention_ema ← retention_ema_t
+
 Definitions:
 
     age_s(m) ← now_s() − to_s(m.created_at)  # fallback: use start_ts if created_at unset
@@ -572,6 +595,8 @@ feedback mechanism
                               τ_min, τ_max)
     half_life_t ← EWMA(half_life_{t−1}, target_half_life_t,
                        α = α_T(t))
+
+    half_life ← half_life_t
 
 # Structural Metrics and Composite Scoring
 
@@ -912,8 +937,9 @@ Interpretation-only window size:
 The fitted weights blend with bootstrap weights based on RLS confidence:
 
     τ_rls ← lerp(20.0, 80.0, T)
+    t ← signals_processed  # global step count (maturity)
     confidence_rls ← 1 − exp(−t / τ_rls)
-    w_rls01[i] ← clamp(w_rls[i], 0, 1)  # constrain fitted weights to mixture range
+    w_rls01[i] ← clamp(w[i], 0, 1)  # constrain fitted weights to mixture range
     weight_i(t) ← clamp((1 − confidence_rls) × w_bootstrap[i] +
                           confidence_rls × w_rls01[i], 0, 1)
 
@@ -1000,9 +1026,11 @@ write_memory decision. Rate state updates occur after the write decision
 and affect subsequent timesteps.
 
     ρ_inst ← (Δwrites / Δt) × 60  # writes per minute
-    m_rate ← (1 − α) × m_rate + α × ρ_inst
+    m_rate_t ← (1 − α) × m_rate + α × ρ_inst
     denom ← max(1 − (1 − α)^(rate_ticks + 1), ε)
-    ρ_hat_next ← m_rate / denom  # bias-corrected estimate for next step
+    ρ_hat_t ← m_rate_t / denom  # bias-corrected estimate for next step
+    m_rate ← m_rate_t
+    rho_hat_prev ← ρ_hat_t
     rate_ticks ← rate_ticks + 1
     last_rate_timestamp ← now_ms()  # update after rate computation
 
@@ -1022,12 +1050,12 @@ conservative regimes.
 
 The rate error drives threshold adjustment:
 
-Normative note (MUST): ρ_hat_prev is stored state entering the timestep.
-After the write decision, the rate-state update computes ρ_hat_next; the
-assignment ρ_hat_prev ← ρ_hat_next occurs at end of step (see Appendix
-C).
+Normative note (MUST): rho_hat_prev is stored state entering the
+timestep. After the write decision, the rate-state update computes
+ρ_hat_t; the assignment rho_hat_prev ← ρ_hat_t occurs at end of step
+(see Appendix D).
 
-    rate_error ← tanh((ρ_hat_prev − rate_target) /
+    rate_error ← tanh((rho_hat_prev − rate_target) /
                       max(rate_target, ε))
     κ_r = 0.10  # rate error gain
     cap_homeo ← 0.25 × hysteresis
@@ -1083,12 +1111,14 @@ denoted Δθ_emo = ΔThreshold_emotion_t and Δθ_mood = ΔThreshold_mood_t:
     θ_dynamic_t ← clamp(EWMA(θ_dynamic_{t−1}, θ_target,
                             α = α_T(t)) + Δθ_limited,
                         T_min(t), T_max(t))
+    theta_dynamic ← θ_dynamic_t
 
 Hysteresis evolves toward the stability-derived base:
 
-    hysteresis ← clamp(EWMA(hysteresis,
+    hysteresis_t ← clamp(EWMA(hysteresis,
                          base_band(T), α = α_T(t)),
                     band_min, band_max)
+    hysteresis ← hysteresis_t
 
 ## Write Pacing and Memory Accumulation
 
@@ -1301,6 +1331,10 @@ learning rate and a binary usage indicator:
     strength_t ← clamp(strength_{t−1} × exp(−λ_t × Δt) +
                        S × use_frequency_t, 0, 1)
 
+Δt is measured per memory using its last access timestamp:
+
+    Δt(m) ← now_s() − to_s(m.last_access); if last_access is unset, use created_at
+
 Memories falling below the periphery cutoff are candidates for eviction:
 
     periphery_cutoff(T) = lerp(0.05, 0.25, T)
@@ -1326,6 +1360,13 @@ Per-memory stability initializes at creation and is bounded:
     stability(m)_init = 1.0
     stability(m) ← clamp(stability(m), 0.0, 2.0)
 
+Retrieved vs used:
+
+    retrieved(m) = memory returned by retrieval (vector or graph expansion)
+    used(m) = retrieved(m) AND injected into active context after gate decisions
+
+Contextual gain is only measured for used memories.
+
 ## Influence-Weighted Updates
 
 When contextual gain signals are available, influence factors modulate
@@ -1346,15 +1387,18 @@ memory embedding.
 ### Focus Feedback
 
     αF_base = 0.10; βF_base = 0.05
+    weight_relevance_t ← weight_relevance
+    attention_width_t ← attention_width
     for each used memory m:
         if contextual_gain(m) > 0:
-            weight_relevance += αF_base × contextual_gain(m)
+            weight_relevance_t += αF_base × contextual_gain(m)
             attention_width_t *= (1 − βF_base)
         else:
             attention_width_t *= (1 + βF_base)
-    weight_relevance ← clamp(weight_relevance, 0, 1)
+    weight_relevance ← clamp(weight_relevance_t, 0, 1)
     attention_width_t ← clamp(attention_width_t,
                               attention_width_min, attention_width_max)
+    attention_width ← attention_width_t
 
 Positive contextual gain narrows attention and boosts relevance
 weighting; negative gain widens attention to explore alternatives.
@@ -1362,12 +1406,14 @@ weighting; negative gain widens attention to explore alternatives.
 ### Sensitivity Feedback
 
     η_base = 0.10
+    weight_novelty_t ← weight_novelty
     for each used memory m:
         novelty_reward ← 1 − sim(m.embedding, recent_context)
         weight_novelty_t += η_base × (novelty_reward ×
                              contextual_gain(m) −
                              redundancy(m, recent_context))
     weight_novelty_t ← clamp(weight_novelty_t, 0, 1)
+    weight_novelty ← weight_novelty_t
 
 This rewards novelty that proves useful while penalizing redundant
 retrievals.
@@ -1377,9 +1423,10 @@ retrievals.
     γT_base = 0.05
     for each used memory m:
         if contextual_gain(m) > 0:
-            stability(m) += γT_base
+            stability_t(m) ← stability(m) + γT_base
         else:
-            stability(m) *= (1 − γT_base)
+            stability_t(m) ← stability(m) × (1 − γT_base)
+        stability(m) ← clamp(stability_t(m), 0.0, 2.0)
 
 The mean stability of used memories provides adjustment to the half-life
 target:
@@ -2104,11 +2151,12 @@ when resolving cross-reference drift.
 On cold start (no persisted state), initialize retained state as follows
 (unless otherwise specified by knob priors):
 
--   **Global defaults:** `u_uncertainty = 0`, `mood_vector = 0_vector`,
-    `last_mood_ts = now_ms()`,
+-   **Global defaults:** `signals_processed = 0`, `u_uncertainty = 0`,
+    `mood_vector = 0_vector`, `last_mood_ts = now_ms()`,
     `theta_dynamic = theta_target = θ_prior(F,S,T)`,
-    `hysteresis = lerp(0.02, 0.25, T)`, `m_rate = 0`, `dt_ema = 0`,
-    `rate_ticks = 0`, `reliability = 1`,
+    `hysteresis = lerp(0.02, 0.25, T)`, `half_life = base_half_life(T)`,
+    `m_rate = 0`, `rho_hat_prev = 0`, `dt_ema = 0`, `rate_ticks = 0`,
+    `reliability = 1`, `retention_ema = 0`,
     `last_rate_timestamp = now_ms()`, `last_retrieval_ts = 0`,
     `last_embedding = unset`, `delta_x_trend = unset`.
 
@@ -2127,6 +2175,16 @@ On cold start (no persisted state), initialize retained state as follows
     `lability_state = 0`, `suppression_count = 0`, `suppression = 0`,
     `flashbulb = 0`, `s_emotion_max = 0`, `s_arousal_avg = 0`.
 
+-   **RLS defaults:** `w_* = w_bootstrap`, `P = diag(1000)`,
+    `blender_ready = false`, `blender_update_count = 0`.
+
+-   **Knob-derived control parameters (initialized from priors):**
+    `weight_relevance`, `attention_width`, `coverage_gain_floor`,
+    `mismatch_weight`, `weight_novelty`, `weight_surprise`,
+    `weight_valence`, `weight_arousal`, `emotion_gain`, `score_gain`,
+    `rate_target`, `rate_decay`, `periphery_half_life`,
+    `salience_half_life`, `drift_weight`.
+
 -   **Buffers:** `signal_stream`, `score_stream`, `memory_stream`,
     `recent_memory_centroids` start empty.
 
@@ -2139,7 +2197,7 @@ On cold start (no persisted state), initialize retained state as follows
 
 -   **Global state (retained across timesteps):**
 
-    -   `{u_uncertainty, mood_vector, last_mood_ts, theta_dynamic, theta_target, hysteresis, m_rate, dt_ema, rate_ticks, reliability, last_retrieval_ts}`
+    -   `{signals_processed, u_uncertainty, mood_vector, last_mood_ts, theta_dynamic, theta_target, hysteresis, half_life, m_rate, rho_hat_prev, dt_ema, rate_ticks, reliability, retention_ema, last_rate_timestamp, last_retrieval_ts, last_embedding, delta_x_trend, weight_relevance, attention_width, coverage_gain_floor, mismatch_weight, weight_novelty, weight_surprise, weight_valence, weight_arousal, emotion_gain, score_gain, rate_target, rate_decay, periphery_half_life, salience_half_life, drift_weight, blender_ready, blender_update_count, blender_P}`
 
 -   **Buffers (retained across timesteps; bounded by window rules):**
 
@@ -2201,7 +2259,13 @@ relative to a set of embeddings.
 
     ΔSSE ← clamp((SSE_prev − SSE_curr) / max(SSE_prev, ε), 0, 1)
 
-Fallback: if SSE signals are unavailable, set ΔSSE ← 0.
+Definitions:
+
+    SSE_curr ← ‖x_t − x_pred_t‖^2          # prediction error at t
+    SSE_prev ← previous SSE_curr (t−1)     # or EWMA if smoothing is used
+
+Fallback: if no prediction model is available, or if dimensions
+mismatch, set ΔSSE ← 0.
 
 **redundancy(a, S_set):** A normalized redundancy of item a w.r.t. a set
 S_set.
@@ -2215,7 +2279,28 @@ contribution of adding candidate.
 
     coverage_gain(candidate | included_set) ← 1 − redundancy(candidate, included_set)
 
-# Appendix C. Main Loop Execution Order and Normative Invariants
+# Appendix C. Edge Case Rules
+
+These rules resolve empty-store and small-store cases to preserve
+causality and avoid undefined metrics.
+
+-   **memory_stream empty:** kNN returns empty; retrieval returns no
+    candidates; graph traversal is skipped. Set `focus_spread_t = 0`.
+-   **memory_stream small:** use
+    `k_eff = min(k_neighbors(T), |memory_stream|)`. If `k_eff < 2`, set
+    `focus_spread_t = 0`.
+-   **graph absent or empty:** skip graph traversal; use vector search
+    only.
+-   **recent_context empty:** apply fallbacks defined in Appendix B
+    (e.g., `novelty_t = 1`, `μ_sim = 0.5`, `rarity_t = 0.5`,
+    `μ_ctx = 0_vector` so `map01(cos)=0.5`).
+-   **recent_scores empty:** set `observed_p90 ← θ_prior` in threshold
+    updates.
+
+# Appendix D. Main Loop Execution Order and Normative Invariants
+
+This ordering is canonical and supersedes any other sequence described
+elsewhere in the document.
 
 The normative execution order for a single timestep t:
 
@@ -2250,6 +2335,11 @@ The normative execution order for a single timestep t:
         `reset_accumulator()`.
     -   Update `rate_state` (homeostatic controller).
 10. **Run Interrupt Gate:** Check for streaming retrieval.
+
+Timing notes: \* `now_s()` is captured at step 1 and reused for all Δt
+computations in this timestep. \* Threshold updates in step 7 use the
+score computed in step 6. \* Rate updates in step 9 use Δwrites from the
+current step’s `write_memory` decision.
 
 **Normative Invariants:** \* **Causality:** Step `k` uses only values
 computed in steps `1` through `k` or retained from `t-1`. \* **Write

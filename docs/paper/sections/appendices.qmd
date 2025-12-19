@@ -6,9 +6,11 @@ This appendix enumerates the state variables used by the specification and separ
 
 On cold start (no persisted state), initialize retained state as follows (unless otherwise specified by knob priors):
 
-* **Global defaults:** `u_uncertainty = 0`, `mood_vector = 0_vector`, `last_mood_ts = now_ms()`, `theta_dynamic = theta_target = θ_prior(F,S,T)`, `hysteresis = lerp(0.02, 0.25, T)`, `m_rate = 0`, `dt_ema = 0`, `rate_ticks = 0`, `reliability = 1`, `last_rate_timestamp = now_ms()`, `last_retrieval_ts = 0`, `last_embedding = unset`, `delta_x_trend = unset`.
+* **Global defaults:** `signals_processed = 0`, `u_uncertainty = 0`, `mood_vector = 0_vector`, `last_mood_ts = now_ms()`, `theta_dynamic = theta_target = θ_prior(F,S,T)`, `hysteresis = lerp(0.02, 0.25, T)`, `half_life = base_half_life(T)`, `m_rate = 0`, `rho_hat_prev = 0`, `dt_ema = 0`, `rate_ticks = 0`, `reliability = 1`, `retention_ema = 0`, `last_rate_timestamp = now_ms()`, `last_retrieval_ts = 0`, `last_embedding = unset`, `delta_x_trend = unset`.
 * **Accumulator defaults (per stream):** `μ_acc = 0_vector`, `drift_acc = 0`, `s_sum = 0`, `s_max = 0`, `n = 0`, `e_peak = 0_vector`, `emo_max = 0`, `arousal_sum = 0`, `acc_signals_window = []`, `t_start = 0`, `last_signal_ts = 0`, `last_write_ts = 0`, `eta_acc = 0`, `coherence_prev = 1`, `drift_accum = 0`, `drift_at_last_interrupt = 0`, `drift_acc_pacing = 0`, `x_last_check = unset`, `prev_x = unset`.
 * **Per-memory defaults (on insert):** `strength = 1`, `use_frequency = 0`, `stability = 1`, `connectivity = 0`, `drift_mag = 0`, `influence = 0`, `sustained_influence = 0`, `contextual_gain = 0`, `redundancy = 0`, `pre_activation = 0`, `lability_state = 0`, `suppression_count = 0`, `suppression = 0`, `flashbulb = 0`, `s_emotion_max = 0`, `s_arousal_avg = 0`.
+* **RLS defaults:** `w_* = w_bootstrap`, `P = diag(1000)`, `blender_ready = false`, `blender_update_count = 0`.
+* **Knob-derived control parameters (initialized from priors):** `weight_relevance`, `attention_width`, `coverage_gain_floor`, `mismatch_weight`, `weight_novelty`, `weight_surprise`, `weight_valence`, `weight_arousal`, `emotion_gain`, `score_gain`, `rate_target`, `rate_decay`, `periphery_half_life`, `salience_half_life`, `drift_weight`.
 * **Buffers:** `signal_stream`, `score_stream`, `memory_stream`, `recent_memory_centroids` start empty.
 * **Retention history:** `retention_history` starts empty (populated after the first signal step).
 
@@ -16,7 +18,7 @@ On cold start (no persisted state), initialize retained state as follows (unless
   * `{μ_acc, drift_acc, s_sum, s_max, n, e_peak, emo_max, arousal_sum, eta_acc, coherence_prev, acc_signals_window, t_start, last_signal_ts, last_write_ts, drift_accum, drift_at_last_interrupt, drift_acc_pacing, x_last_check, prev_x}`
 
 * **Global state (retained across timesteps):**
-  * `{u_uncertainty, mood_vector, last_mood_ts, theta_dynamic, theta_target, hysteresis, m_rate, dt_ema, rate_ticks, reliability, last_retrieval_ts}`
+  * `{signals_processed, u_uncertainty, mood_vector, last_mood_ts, theta_dynamic, theta_target, hysteresis, half_life, m_rate, rho_hat_prev, dt_ema, rate_ticks, reliability, retention_ema, last_rate_timestamp, last_retrieval_ts, last_embedding, delta_x_trend, weight_relevance, attention_width, coverage_gain_floor, mismatch_weight, weight_novelty, weight_surprise, weight_valence, weight_arousal, emotion_gain, score_gain, rate_target, rate_decay, periphery_half_life, salience_half_life, drift_weight, blender_ready, blender_update_count, blender_P}`
 
 * **Buffers (retained across timesteps; bounded by window rules):**
   * `{signal_stream, score_stream, memory_stream, recent_memory_centroids, retention_history}`
@@ -69,7 +71,12 @@ novelty_to_set(q, S_set_embeddings) ← 1 − redundancy(q, S_set_embeddings)
 ```
 ΔSSE ← clamp((SSE_prev − SSE_curr) / max(SSE_prev, ε), 0, 1)
 ```
-Fallback: if SSE signals are unavailable, set ΔSSE ← 0.
+Definitions:
+```
+SSE_curr ← ‖x_t − x_pred_t‖^2          # prediction error at t
+SSE_prev ← previous SSE_curr (t−1)     # or EWMA if smoothing is used
+```
+Fallback: if no prediction model is available, or if dimensions mismatch, set ΔSSE ← 0.
 
 **redundancy(a, S_set):** A normalized redundancy of item a w.r.t. a set S_set.
 ```
@@ -82,7 +89,19 @@ Fallback: if S_set is empty, redundancy(a, S_set) ← 0.
 coverage_gain(candidate | included_set) ← 1 − redundancy(candidate, included_set)
 ```
 
-# Appendix C. Main Loop Execution Order and Normative Invariants {#sec-app-loop .unnumbered}
+# Appendix C. Edge Case Rules {#sec-app-edge .unnumbered}
+
+These rules resolve empty-store and small-store cases to preserve causality and avoid undefined metrics.
+
+* **memory_stream empty:** kNN returns empty; retrieval returns no candidates; graph traversal is skipped. Set `focus_spread_t = 0`.
+* **memory_stream small:** use `k_eff = min(k_neighbors(T), |memory_stream|)`. If `k_eff < 2`, set `focus_spread_t = 0`.
+* **graph absent or empty:** skip graph traversal; use vector search only.
+* **recent_context empty:** apply fallbacks defined in Appendix B (e.g., `novelty_t = 1`, `μ_sim = 0.5`, `rarity_t = 0.5`, `μ_ctx = 0_vector` so `map01(cos)=0.5`).
+* **recent_scores empty:** set `observed_p90 ← θ_prior` in threshold updates.
+
+# Appendix D. Main Loop Execution Order and Normative Invariants {#sec-app-loop .unnumbered}
+
+This ordering is canonical and supersedes any other sequence described elsewhere in the document.
 
 The normative execution order for a single timestep t:
 
@@ -113,6 +132,11 @@ The normative execution order for a single timestep t:
     *   If `should_flush` (regardless of write): Call `reset_accumulator()`.
     *   Update `rate_state` (homeostatic controller).
 10. **Run Interrupt Gate:** Check for streaming retrieval.
+
+Timing notes:
+*   `now_s()` is captured at step 1 and reused for all Δt computations in this timestep.
+*   Threshold updates in step 7 use the score computed in step 6.
+*   Rate updates in step 9 use Δwrites from the current step’s `write_memory` decision.
 
 **Normative Invariants:**
 *   **Causality:** Step `k` uses only values computed in steps `1` through `k` or retained from `t-1`.

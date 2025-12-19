@@ -305,6 +305,7 @@ GetCoreMigrations ()
               "  retention_ema REAL NOT NULL DEFAULT 0.0,"
               // Rate control
               "  m_rate REAL NOT NULL DEFAULT 0.0,"
+              "  rho_hat_prev REAL NOT NULL DEFAULT 0.0,"
               "  dt_ema REAL NOT NULL DEFAULT 0.0,"
               "  rate_ticks INTEGER NOT NULL DEFAULT 0,"
               "  last_rate_timestamp INTEGER NOT NULL DEFAULT 0,"
@@ -396,20 +397,21 @@ GetCoreMigrations ()
               // Views (Computed Windows) - replace sliding window tables
               // ------------------------------------------------------------------
               "CREATE VIEW IF NOT EXISTS recent_context AS "
-              "SELECT s.signal_id, s.embedding_id "
+              "SELECT s.signal_id, s.embedding_id, e.embedding, s.timestamp "
               "FROM signals s "
+              "JOIN embeddings e ON s.embedding_id = e.embedding_id "
               "ORDER BY s.timestamp DESC "
               "LIMIT 64",
 
               "CREATE VIEW IF NOT EXISTS recent_scores AS "
-              "SELECT signal_id, score "
+              "SELECT signal_id, score, timestamp "
               "FROM signals "
               "WHERE score IS NOT NULL "
               "ORDER BY timestamp DESC "
               "LIMIT 100",
 
               "CREATE VIEW IF NOT EXISTS recent_ids AS "
-              "SELECT signal_id, timestamp "
+              "SELECT embedding_id, timestamp "
               "FROM signals "
               "ORDER BY timestamp DESC "
               "LIMIT 1024",

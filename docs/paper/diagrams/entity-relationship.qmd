@@ -140,20 +140,24 @@ erDiagram
     EMBEDDINGS ||--o{ RECENT_CONTEXT : "view"
     SIGNALS ||--o{ RECENT_SCORES : "view"
     SIGNALS ||--o{ RECENT_IDS : "view"
+    EMBEDDINGS ||--o{ RECENT_IDS : "view"
     MEMORIES ||--o{ RECENT_RETRIEVALS : "view"
 
     RECENT_CONTEXT {
         int signal_id FK "from SIGNALS"
         int embedding_id FK "from EMBEDDINGS"
+        blob embedding "from EMBEDDINGS"
+        int timestamp "signal time (ms)"
     }
 
     RECENT_SCORES {
         int signal_id FK "from SIGNALS"
         real score "recent composite scores"
+        int timestamp "signal time (ms)"
     }
 
     RECENT_IDS {
-        int signal_id FK "from SIGNALS"
+        int embedding_id FK "from EMBEDDINGS"
         int timestamp "recency/LRU tracking"
     }
 
@@ -241,6 +245,7 @@ erDiagram
         real drift_weight "Section 2.3"
         real retention_ema "Section 2.3"
         real m_rate "Section 4.2"
+        real rho_hat_prev "Section 4.2 bias-corrected rate state"
         real dt_ema "Section 4.2"
         int rate_ticks "Section 4.2"
         int last_rate_timestamp "Section 4.2"

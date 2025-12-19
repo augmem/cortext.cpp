@@ -180,8 +180,9 @@ The fitted weights blend with bootstrap weights based on RLS confidence:
 
 ```
 τ_rls ← lerp(20.0, 80.0, T)
+t ← signals_processed  # global step count (maturity)
 confidence_rls ← 1 − exp(−t / τ_rls)
-w_rls01[i] ← clamp(w_rls[i], 0, 1)  # constrain fitted weights to mixture range
+w_rls01[i] ← clamp(w[i], 0, 1)  # constrain fitted weights to mixture range
 weight_i(t) ← clamp((1 − confidence_rls) × w_bootstrap[i] +
                       confidence_rls × w_rls01[i], 0, 1)
 ```
