@@ -20,7 +20,7 @@ enum class Metric
   salience,
   valence,
   arousal,
-  goal_alignment,
+
   focus_spread,
   drift_mag,
   embedding_surprisal,  // Section 3.1.4 - replaces logprob surprise

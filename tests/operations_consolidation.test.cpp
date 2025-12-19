@@ -1,6 +1,7 @@
 // tests/operations_consolidation.test.cpp
 #include <Eigen/Dense>
 #include <any>
+#include <iostream>
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 #include <cortext/core/knobs.hpp>
@@ -9,6 +10,7 @@
 #include <cortext/processor/operation_context.hpp>
 #include <cortext/processor/operation_set.hpp>
 #include <cortext/store/sqlite_store.hpp>
+#include <cortext/store/schema.hpp>
 #include <string>
 
 using namespace cortext;
@@ -313,11 +315,13 @@ TEST_CASE ("Alg28 no trigger does not set start flag",
 // with store wrapper. The ScoreConsolidation logic is tested via integration
 // tests - this is a test infrastructure issue, not a code bug.
 
-TEST_CASE ("Alg29 scores and marks low-strength candidates",
-           "[.][operations][consolidation][alg29]") // Hidden with '.'
+TEST_CASE ("ScoreConsolidation identifies low-strength candidates",
+           "[operations][consolidation]")
 {
   auto unique_store = SQLiteStore::Create (":memory:");
   auto store = std::shared_ptr<Store> (std::move (unique_store));
+
+  cortext::store::ApplyMigrations (*store);
 
   // Knobs: high T raises floor via periphery cutoff (~0.25 at T=1.0)
   SignalProcessor::Config cfg;
@@ -325,19 +329,15 @@ TEST_CASE ("Alg29 scores and marks low-strength candidates",
   cfg.sensitivity = 0.5;
   cfg.stability = 1.0; // T=1.0 → floor≈0.25
 
-  // Create a minimal processor to initialize schema
-  auto ops = std::make_unique<OperationSet> ();
-  SignalProcessor processor (cfg, store, std::move (ops));
-
-  // Trigger a process/flush cycle to ensure schema is fully committed
+  // Initialize store and context
   Signal dummy;
-  dummy.embedding = Eigen::VectorXf::Zero (256);
-  dummy.timestamp = 1;
-  dummy.source_id = "init";
-  processor.Process (dummy);
-  processor.Flush ();
+  dummy.timestamp = 50'000ULL;
+  dummy.source_id = "test";
+  dummy.embedding = Eigen::VectorXf::Zero (4); // Not used by op directly
+  ProcessorContext p_ctx;
+  OperationContext ctx (dummy, p_ctx, cfg, store.get ());
 
-  // v2: Seed embeddings with two rows: one below, one above the floor.
+  // v2: Seed embeddings
   std::vector<float> emb (256, 0.0f);
   emb[0] = 1.0f;
   store->Execute (
@@ -346,130 +346,34 @@ TEST_CASE ("Alg29 scores and marks low-strength candidates",
   store->Execute (
       "INSERT INTO embeddings(embedding_id, embedding, created_at) VALUES(?, ?, ?)",
       { 2LL, emb, 0LL });
-  // v2: Insert into memories with strength values
+  // v2: Insert into memories (id=1 below floor, id=2 above)
+  // score = T*strength - F*redundancy + S*connectivity + T*stability
+  // For T=1.0, F=0.5, S=0.5 and floor=0.25:
+  //   memory 1: 1.0*0.10 - 0.5*0 + 0.5*0 + 1.0*0 = 0.10 < 0.25 (candidate)
+  //   memory 2: 1.0*0.80 - 0.5*0 + 0.5*0 + 1.0*0 = 0.80 >= 0.25 (not candidate)
   store->Execute (
       "INSERT INTO memories(memory_id, embedding_id, source_id, kind, start_ts, "
-      "n_signals, modality, s_max, s_avg, strength, created_at) "
-      "VALUES(?, ?, 'test', 'LONG_TERM', 0, 1, 'text', 0.5, 0.5, ?, 0)",
-      { 1LL, 1LL, 0.10 });
+      "n_signals, modality, s_max, s_avg, strength, stability, created_at) "
+      "VALUES(?, ?, 'test', 'LONG_TERM', 0, 1, 'text', 0.5, 0.5, ?, ?, 0)",
+      { 1LL, 1LL, 0.10, 0.0 });
   store->Execute (
       "INSERT INTO memories(memory_id, embedding_id, source_id, kind, start_ts, "
-      "n_signals, modality, s_max, s_avg, strength, created_at) "
-      "VALUES(?, ?, 'test', 'LONG_TERM', 0, 1, 'text', 0.5, 0.5, ?, 0)",
-      { 2LL, 2LL, 0.80 });
+      "n_signals, modality, s_max, s_avg, strength, stability, created_at) "
+      "VALUES(?, ?, 'test', 'LONG_TERM', 0, 1, 'text', 0.5, 0.5, ?, ?, 0)",
+      { 2LL, 2LL, 0.80, 0.0 });
 
-  // Calculate score and floor using same formulas as ScoreConsolidation
-  const double T = cfg.stability;
-  const double F = cfg.focus;
-  const double S = cfg.sensitivity;
-  const uint64_t now_ts = 50'000ULL;
-  const double floor_cutoff = core::PeripheryCutoff (T);
+  // Run ScoreConsolidation
+  ScoreConsolidation op;
+  auto tx = store->Begin ();
+  op.Execute (ctx, *tx);
 
-  // Execute the same query that ScoreConsolidation uses (v2: query memories table)
-  store->Execute (
-      "INSERT INTO consolidation_candidates(embedding_id, score, "
-      "created_at, reason) "
-      "SELECT m.embedding_id, "
-      "       ((?1 * COALESCE(m.strength, 1.0)) "
-      "        - (?2 * COALESCE(m.redundancy, 0.0)) "
-      "        + (?3 * COALESCE(m.connectivity, 0.0)) "
-      "        + (?4 * COALESCE(m.stability, 0.0))) AS computed_score, "
-      "       ?5 AS created_at, "
-      "       'score_below_floor' AS reason "
-      "FROM memories m "
-      "WHERE ((?1 * COALESCE(m.strength, 1.0)) "
-      "       - (?2 * COALESCE(m.redundancy, 0.0)) "
-      "       + (?3 * COALESCE(m.connectivity, 0.0)) "
-      "       + (?4 * COALESCE(m.stability, 0.0))) < ?6 "
-      "ON CONFLICT(embedding_id) DO UPDATE SET "
-      "  score=excluded.score, "
-      "  created_at=excluded.created_at, "
-      "  reason=excluded.reason;",
-      { T, F, S, T, static_cast<long long> (now_ts), floor_cutoff });
-
-  // Only id=1 should be marked as candidate with score ~= 0.10 (T*strength).
-  auto rows = store->Execute (
-      "SELECT embedding_id, score, created_at, reason "
-      "FROM consolidation_candidates ORDER BY embedding_id ASC");
-  REQUIRE (rows.size () == 1);
-  REQUIRE (std::any_cast<long long> (rows[0].at ("embedding_id")) == 1LL);
-  REQUIRE (std::any_cast<double> (rows[0].at ("score"))
-           == Catch::Approx (0.10).margin (1e-6));
-  REQUIRE (std::any_cast<long long> (rows[0].at ("created_at"))
-           == static_cast<long long> (now_ts));
-  REQUIRE (std::any_cast<std::string> (rows[0].at ("reason"))
-           == std::string ("score_below_floor"));
-}
-
-TEST_CASE ("Alg29 is idempotent on repeated runs",
-           "[.][operations][consolidation][alg29]") // Hidden with '.'
-{
-  auto unique_store = SQLiteStore::Create (":memory:");
-  auto store = std::shared_ptr<Store> (std::move (unique_store));
-
-  SignalProcessor::Config cfg;
-  cfg.focus = 0.5;
-  cfg.sensitivity = 0.5;
-  cfg.stability = 1.0;
-
-  // Create a minimal processor to initialize schema
-  auto ops = std::make_unique<OperationSet> ();
-  SignalProcessor processor (cfg, store, std::move (ops));
-
-  // Trigger a process/flush cycle to ensure schema is fully committed
-  Signal dummy;
-  dummy.embedding = Eigen::VectorXf::Zero (256);
-  dummy.timestamp = 1;
-  dummy.source_id = "init";
-  processor.Process (dummy);
-  processor.Flush ();
-
-  // v2: Seed test data
-  std::vector<float> emb (256, 0.0f);
-  emb[0] = 1.0f;
-  store->Execute (
-      "INSERT INTO embeddings(embedding_id, embedding, created_at) VALUES(?, ?, ?)",
-      { 3LL, emb, 0LL });
-  store->Execute (
-      "INSERT INTO memories(memory_id, embedding_id, source_id, kind, start_ts, "
-      "n_signals, modality, s_max, s_avg, strength, created_at) "
-      "VALUES(?, ?, 'test', 'LONG_TERM', 0, 1, 'text', 0.5, 0.5, ?, 0)",
-      { 3LL, 3LL, 0.15 }); // below floor at T=1.0
-
-  const double T = cfg.stability;
-  const double F = cfg.focus;
-  const double S = cfg.sensitivity;
-  const double floor_cutoff = core::PeripheryCutoff (T);
-
-  // Run scoring query twice (v2: query memories table)
-  const std::string query
-      = "INSERT INTO consolidation_candidates(embedding_id, score, "
-        "created_at, reason) "
-        "SELECT m.embedding_id, "
-        "       ((?1 * COALESCE(m.strength, 1.0)) "
-        "        - (?2 * COALESCE(m.redundancy, 0.0)) "
-        "        + (?3 * COALESCE(m.connectivity, 0.0)) "
-        "        + (?4 * COALESCE(m.stability, 0.0))) AS computed_score, "
-        "       ?5 AS created_at, "
-        "       'score_below_floor' AS reason "
-        "FROM memories m "
-        "WHERE ((?1 * COALESCE(m.strength, 1.0)) "
-        "       - (?2 * COALESCE(m.redundancy, 0.0)) "
-        "       + (?3 * COALESCE(m.connectivity, 0.0)) "
-        "       + (?4 * COALESCE(m.stability, 0.0))) < ?6 "
-        "ON CONFLICT(embedding_id) DO UPDATE SET "
-        "  score=excluded.score, "
-        "  created_at=excluded.created_at, "
-        "  reason=excluded.reason;";
-
-  store->Execute (query,
-                  { T, F, S, T, static_cast<long long> (60'000ULL), floor_cutoff });
-  store->Execute (query,
-                  { T, F, S, T, static_cast<long long> (60'100ULL), floor_cutoff });
-
-  auto rows = store->Execute (
-      "SELECT COUNT(*) AS c FROM consolidation_candidates WHERE embedding_id=?",
-      { 3LL });
-  REQUIRE (rows.size () == 1);
-  REQUIRE (std::any_cast<long long> (rows[0].at ("c")) == 1LL);
+  // Verify candidates in context
+  const auto &candidates = ctx.GetConsolidationCandidates ();
+  REQUIRE (candidates.size () == 1);
+  REQUIRE (candidates[0].embedding_id == 1LL);
+  // score = T*strength = 1.0 * 0.10 = 0.10
+  REQUIRE (candidates[0].score == Catch::Approx (0.10).margin (1e-6));
+  // Verify embedding loaded correctly
+  REQUIRE (candidates[0].embedding.size() == 256);
+  REQUIRE (candidates[0].embedding(0) == Catch::Approx(1.0f));
 }

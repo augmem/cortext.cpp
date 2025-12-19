@@ -22,13 +22,6 @@ namespace cortext::operations
 
 namespace
 {
-/// @brief Constructs a graph node ID from an embedding ID.
-std::string
-EmbNodeId (long long embedding_id)
-{
-  return std::string ("emb:") + std::to_string (embedding_id);
-}
-
 /// @brief Creates reinforcement edges for co-retrieved memories.
 /// Upserts 'reinforces' edges between all pairs of retrieved memories,
 /// incrementing weight on existing edges.
@@ -43,7 +36,7 @@ CreateReinforcementEdges (Transaction &tx,
       return;
     }
 
-  // Create reinforcement edges for all pairs
+  // Create reinforcement edges for all pairs using ASSOCIATIONS table
   for (size_t i = 0; i < retrieved_ids.size (); ++i)
     {
       for (size_t j = i + 1; j < retrieved_ids.size (); ++j)
@@ -53,10 +46,10 @@ CreateReinforcementEdges (Transaction &tx,
           long long id2 = std::max (retrieved_ids[i], retrieved_ids[j]);
 
           tx.Execute (
-              "INSERT INTO graph_edges "
-              "(source_id, target_id, edge_type, weight, last_reinforced) "
-              "VALUES ('emb:' || ?1, 'emb:' || ?2, 'reinforces', 1.0, ?3) "
-              "ON CONFLICT (source_id, target_id, edge_type) DO UPDATE "
+              "INSERT INTO associations "
+              "(source_memory_id, target_memory_id, edge_type, weight, last_reinforced) "
+              "VALUES (?1, ?2, 'reinforces', 1.0, ?3) "
+              "ON CONFLICT (source_memory_id, target_memory_id, edge_type) DO UPDATE "
               "SET weight = weight + 1.0, last_reinforced = excluded.last_reinforced",
               { id1, id2, now_ts });
         }
@@ -111,7 +104,8 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
   // Seed vector retrieval via sqlite-vec KNN query.
   struct Scored
   {
-    long long id;
+    long long embedding_id;
+    long long memory_id;
     double score;
     Eigen::VectorXf vec;
   };
@@ -121,25 +115,25 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
   // Convert query vector to std::vector<float> for parameter binding.
   std::vector<float> q_vec (q.data (), q.data () + q.size ());
 
+  // V2: Query embeddings via KNN first, then join with memories for memory_id
+  // sqlite-vec requires simple queries for MATCH, so we do KNN first
   auto rows = store->Execute (
       "SELECT embedding_id, embedding, distance "
       "FROM embeddings "
-      "WHERE embedding MATCH ? "
-      "ORDER BY distance "
-      "LIMIT ?",
+      "WHERE embedding MATCH ? AND k = ?",
       { q_vec, static_cast<long long> (k) });
 
   for (const auto &row : rows)
     {
-      auto it_id = row.find ("embedding_id");
+      auto it_emb_id = row.find ("embedding_id");
       auto it_emb = row.find ("embedding");
       auto it_dist = row.find ("distance");
-      if (it_id == row.end () || it_emb == row.end ())
+      if (it_emb_id == row.end () || it_emb == row.end ())
         continue;
-      if (it_id->second.type () != typeid (long long))
+      if (it_emb_id->second.type () != typeid (long long))
         continue;
 
-      const long long id = std::any_cast<long long> (it_id->second);
+      const long long emb_id = std::any_cast<long long> (it_emb_id->second);
       Eigen::VectorXf v;
       if (!core::DecodeFloatBlob (it_emb->second, q.size (), v))
         continue;
@@ -150,7 +144,21 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
         dist = std::any_cast<double> (it_dist->second);
       const double sim = 1.0 / (1.0 + dist);
 
-      seeds.push_back (Scored{ id, sim, v });
+      // V2: Look up memory_id from memories table
+      long long mem_id = 0;
+      auto mem_rows = store->Execute (
+          "SELECT memory_id FROM memories WHERE embedding_id = ?", { emb_id });
+      if (!mem_rows.empty ())
+        {
+          auto it_mem = mem_rows[0].find ("memory_id");
+          if (it_mem != mem_rows[0].end ()
+              && it_mem->second.type () == typeid (long long))
+            {
+              mem_id = std::any_cast<long long> (it_mem->second);
+            }
+        }
+
+      seeds.push_back (Scored{ emb_id, mem_id, sim, v });
     }
 
   if (seeds.empty ())
@@ -161,129 +169,83 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
   // Update last retrieval timestamp for consolidation idle-gating.
   p_ctx.last_retrieval_ts = signal.timestamp;
 
-  // Graph expansion from seed embedding node IDs.
-  std::vector<std::string> seed_nodes;
-  seed_nodes.reserve (seeds.size ());
+  // V2: Graph expansion from seed memory IDs using ASSOCIATIONS table.
+  std::unordered_set<long long> expanded_memory_ids;
   for (const auto &s : seeds)
     {
-      seed_nodes.push_back (EmbNodeId (s.id));
-    }
-
-  std::unordered_set<std::string> expanded_nodes;
-  for (const auto &s : seed_nodes)
-    {
-      expanded_nodes.insert (s);
-    }
-
-  try
-    {
-      // Build SQL with a VALUES list for seeds.
-      std::string sql = "WITH RECURSIVE seed(id) AS (VALUES ";
-      std::vector<std::any> params;
-      params.reserve (seed_nodes.size () + 2);
-      for (size_t i = 0; i < seed_nodes.size (); ++i)
+      if (s.memory_id > 0)
         {
-          if (i > 0)
-            sql += ", ";
-          sql += "(?)";
-          params.push_back (seed_nodes[i]);
-        }
-      sql += "), expand(id, depth) AS ("
-             "  SELECT id, 0 FROM seed "
-             "  UNION "
-             "  SELECT ge.target_id, expand.depth+1 "
-             "  FROM graph_edges ge JOIN expand ON ge.source_id = expand.id "
-             "  WHERE expand.depth < ? "
-             "  UNION "
-             "  SELECT ge.source_id, expand.depth+1 "
-             "  FROM graph_edges ge JOIN expand ON ge.target_id = expand.id "
-             "  WHERE expand.depth < ? "
-             ") "
-             "SELECT DISTINCT id FROM expand;";
-      params.push_back (static_cast<long long> (depth));
-      params.push_back (static_cast<long long> (depth));
-
-      auto rows = store->Execute (sql, params);
-      for (const auto &r : rows)
-        {
-          auto it = r.find ("id");
-          if (it != r.end () && it->second.type () == typeid (std::string))
-            {
-              expanded_nodes.insert (std::any_cast<std::string> (it->second));
-            }
-        }
-    }
-  catch (...)
-    {
-      // No graph tables or query failed; use seed-only behavior.
-    }
-
-  // Map expanded graph node ids to embedding_ids via graph_nodes (and by emb: prefix).
-  std::unordered_set<long long> expanded_embedding_ids;
-  expanded_embedding_ids.reserve (expanded_nodes.size ());
-  for (const auto &n : expanded_nodes)
-    {
-      if (core::StartsWith (n, "emb:"))
-        {
-          const char *p = n.c_str () + 4;
-          char *end = nullptr;
-          const long long id = std::strtoll (p, &end, 10);
-          if (end != p)
-            expanded_embedding_ids.insert (id);
+          expanded_memory_ids.insert (s.memory_id);
         }
     }
 
-  // Also include any nodes that have embedding_id set.
-  if (!expanded_nodes.empty ())
+  // Expand via ASSOCIATIONS graph traversal
+  if (!expanded_memory_ids.empty ())
     {
       try
         {
-          std::string sql = "SELECT embedding_id FROM graph_nodes WHERE node_id IN (";
+          // Build SQL with a VALUES list for seeds.
+          std::string sql = "WITH RECURSIVE seed(id) AS (VALUES ";
           std::vector<std::any> params;
-          params.reserve (expanded_nodes.size ());
+          params.reserve (expanded_memory_ids.size () + 2);
           bool first = true;
-          for (const auto &nid : expanded_nodes)
+          for (long long mem_id : expanded_memory_ids)
             {
               if (!first)
-                sql += ",";
+                sql += ", ";
               first = false;
-              sql += "?";
-              params.push_back (nid);
+              sql += "(?)";
+              params.push_back (mem_id);
             }
-          sql += ") AND embedding_id IS NOT NULL;";
+          sql += "), expand(id, depth) AS ("
+                 "  SELECT id, 0 FROM seed "
+                 "  UNION "
+                 "  SELECT a.target_memory_id, expand.depth+1 "
+                 "  FROM associations a JOIN expand ON a.source_memory_id = expand.id "
+                 "  WHERE expand.depth < ? "
+                 "  UNION "
+                 "  SELECT a.source_memory_id, expand.depth+1 "
+                 "  FROM associations a JOIN expand ON a.target_memory_id = expand.id "
+                 "  WHERE expand.depth < ? "
+                 ") "
+                 "SELECT DISTINCT id FROM expand;";
+          params.push_back (static_cast<long long> (depth));
+          params.push_back (static_cast<long long> (depth));
 
-          auto rows = store->Execute (sql, params);
-          for (const auto &r : rows)
+          auto exp_rows = store->Execute (sql, params);
+          for (const auto &r : exp_rows)
             {
-              auto it = r.find ("embedding_id");
+              auto it = r.find ("id");
               if (it != r.end () && it->second.type () == typeid (long long))
                 {
-                  expanded_embedding_ids.insert (
-                      std::any_cast<long long> (it->second));
+                  expanded_memory_ids.insert (std::any_cast<long long> (it->second));
                 }
             }
         }
       catch (...)
         {
+          // No associations or query failed; use seed-only behavior.
         }
     }
 
-  // Fetch embeddings for expanded ids and re-rank.
+  // Fetch embeddings for expanded memory_ids via MEMORIES table
   std::unordered_map<long long, Eigen::VectorXf> out;
   std::vector<Scored> scored;
-  scored.reserve (expanded_embedding_ids.size ());
+  scored.reserve (expanded_memory_ids.size ());
 
-  // If we cannot fetch, at least return seeds.
   bool fetched_any = false;
-  if (!expanded_embedding_ids.empty ())
+  if (!expanded_memory_ids.empty ())
     {
       try
         {
-          std::string sql = "SELECT embedding_id, embedding FROM embeddings WHERE embedding_id IN (";
+          std::string sql = "SELECT m.memory_id, m.embedding_id, e.embedding "
+                            "FROM memories m "
+                            "JOIN embeddings e ON m.embedding_id = e.embedding_id "
+                            "WHERE m.memory_id IN (";
           std::vector<std::any> params;
-          params.reserve (expanded_embedding_ids.size ());
+          params.reserve (expanded_memory_ids.size ());
           bool first = true;
-          for (const long long id : expanded_embedding_ids)
+          for (const long long id : expanded_memory_ids)
             {
               if (!first)
                 sql += ",";
@@ -292,21 +254,25 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
               params.push_back (id);
             }
           sql += ");";
-          auto rows = store->Execute (sql, params);
-          for (const auto &row : rows)
+          auto fetch_rows = store->Execute (sql, params);
+          for (const auto &row : fetch_rows)
             {
-              auto it_id = row.find ("embedding_id");
+              auto it_mem_id = row.find ("memory_id");
+              auto it_emb_id = row.find ("embedding_id");
               auto it_emb = row.find ("embedding");
-              if (it_id == row.end () || it_emb == row.end ())
+              if (it_mem_id == row.end () || it_emb_id == row.end () || it_emb == row.end ())
                 continue;
-              if (it_id->second.type () != typeid (long long))
+              if (it_mem_id->second.type () != typeid (long long))
                 continue;
-              const long long id = std::any_cast<long long> (it_id->second);
+              if (it_emb_id->second.type () != typeid (long long))
+                continue;
+              const long long mem_id = std::any_cast<long long> (it_mem_id->second);
+              const long long emb_id = std::any_cast<long long> (it_emb_id->second);
               Eigen::VectorXf v;
               if (!core::DecodeFloatBlob (it_emb->second, q.size (), v))
                 continue;
               const double sim = core::CosineSimilarity (q, v);
-              scored.push_back (Scored{ id, sim, v });
+              scored.push_back (Scored{ emb_id, mem_id, sim, v });
               fetched_any = true;
             }
         }
@@ -319,20 +285,23 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
     {
       for (const auto &s : seeds)
         {
-          out.emplace (s.id, s.vec);
+          out.emplace (s.embedding_id, s.vec);
         }
       context.SetRetrievedMemoryEmbeddings (std::move (out));
 
       // Create reinforcement edges for co-retrieved seeds
       {
-        std::vector<long long> seed_ids;
-        seed_ids.reserve (seeds.size ());
+        std::vector<long long> seed_mem_ids;
+        seed_mem_ids.reserve (seeds.size ());
         for (const auto &s : seeds)
           {
-            seed_ids.push_back (s.id);
+            if (s.memory_id > 0)
+              {
+                seed_mem_ids.push_back (s.memory_id);
+              }
           }
         CreateReinforcementEdges (
-            tx, seed_ids,
+            tx, seed_mem_ids,
             static_cast<long long> (signal.timestamp));
       }
 
@@ -341,7 +310,7 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
       auto &cache = p_ctx.recent_retrievals_cache;
       for (const auto &s : seeds)
         {
-          cache.push_back ({ s.id, s.vec, now_ts });
+          cache.push_back ({ s.embedding_id, s.vec, now_ts });
         }
       while (cache.size () > ProcessorContext::kMaxRetrievalCacheSize)
         {
@@ -360,7 +329,7 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
     }
   for (const auto &s : scored)
     {
-      out.emplace (s.id, s.vec);
+      out.emplace (s.embedding_id, s.vec);
     }
 
   context.SetRetrievedMemoryEmbeddings (std::move (out));
@@ -369,14 +338,17 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
   // This strengthens connections between memories that are frequently
   // retrieved together.
   {
-    std::vector<long long> retrieved_ids;
-    retrieved_ids.reserve (scored.size ());
+    std::vector<long long> retrieved_mem_ids;
+    retrieved_mem_ids.reserve (scored.size ());
     for (const auto &s : scored)
       {
-        retrieved_ids.push_back (s.id);
+        if (s.memory_id > 0)
+          {
+            retrieved_mem_ids.push_back (s.memory_id);
+          }
       }
     CreateReinforcementEdges (
-        tx, retrieved_ids,
+        tx, retrieved_mem_ids,
         static_cast<long long> (signal.timestamp));
   }
 
@@ -388,7 +360,7 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
   for (const auto &s : scored)
     {
       cache.push_back (
-          { s.id, s.vec, now_ts });
+          { s.embedding_id, s.vec, now_ts });
     }
   // Trim cache to max size (FIFO eviction)
   while (cache.size () > ProcessorContext::kMaxRetrievalCacheSize)
@@ -405,4 +377,3 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
 }
 
 } // namespace cortext::operations
-

@@ -12,9 +12,7 @@
 #include "cortext/operations/blend.hpp"
 #include "cortext/operations/graph_build.hpp"
 #include "cortext/operations/graph_retrieval.hpp"
-#include "cortext/operations/graph_schema.hpp"
-#include "cortext/operations/goal_alignment.hpp"
-#include "cortext/operations/goal_alignment_fallback.hpp"
+
 #include "cortext/operations/embedding_prediction_error.hpp"
 #include "cortext/operations/centroids.hpp"
 #include "cortext/operations/precision.hpp"
@@ -244,7 +242,7 @@ HydrateMemory (Store *store, long long id, Cortext::Context::Memory &m)
             return 0LL;
           };
 
-          auto get_dbl = [&row] (const char *k, double def = 0.0) -> double {
+          [[maybe_unused]] auto get_dbl = [&row] (const char *k, double def = 0.0) -> double {
             auto it = row.find (k);
             if (it == row.end () || !it->second.has_value ())
               return def;
@@ -259,7 +257,7 @@ HydrateMemory (Store *store, long long id, Cortext::Context::Memory &m)
             return def;
           };
 
-          auto get_blob = [&row] (const char *k) {
+          [[maybe_unused]] auto get_blob = [&row] (const char *k) {
             auto it = row.find (k);
             if (it == row.end () || !it->second.has_value ())
               return std::vector<unsigned char> ();
@@ -453,8 +451,7 @@ struct Cortext::Impl
     using cortext::operations::FitMetricWeightsRLS;
     using cortext::operations::GraphAugmentedRetrieveCandidates;
     using cortext::operations::InitializeEmbeddedCentroids;
-    using cortext::operations::ComputeGoalAlignment;
-    using cortext::operations::ComputeGoalAlignmentFallback;
+
     using cortext::operations::ComputeCompositeScore;
     using cortext::operations::ComputeCoherence;
     using cortext::operations::ComputeEffectiveFocus;
@@ -475,7 +472,7 @@ struct Cortext::Impl
     using cortext::operations::ApplyStabilityFeedback;
     using cortext::operations::BuildGraphFromConsolidation;
     using cortext::operations::ComputeMetrics;
-    using cortext::operations::EnsureGraphSchema;
+
     using cortext::operations::MetacognitiveMonitoring;
     using cortext::operations::UpdateFocus;
     using cortext::operations::UpdateEmbeddingPredictionError;
@@ -503,7 +500,7 @@ struct Cortext::Impl
     using cortext::operations::PropagateEmotionalCascade;
 
     pipeline_root = std::make_unique<OperationSet> (
-        std::make_unique<EnsureGraphSchema> (),
+
 
         std::make_unique<InitializeEmbeddedCentroids> (),
 
@@ -545,8 +542,7 @@ struct Cortext::Impl
 
         std::make_unique<CheckStreamingPacing> (),
         std::make_unique<GraphAugmentedRetrieveCandidates> (),
-        std::make_unique<ComputeGoalAlignment> (),
-        std::make_unique<ComputeGoalAlignmentFallback> (),
+
         std::make_unique<ComputeMniGateDecision> (),
 
         std::make_unique<ApplyRetrievalCompetition> (),

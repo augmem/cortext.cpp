@@ -149,8 +149,7 @@ SeedSignalV2 (Store &store, long long signal_id, long long embedding_id,
 inline void
 InitializeCoreSchema (Store &store)
 {
-  cortext::store::SchemaRegistry registry;
-  cortext::store::ApplyMigrations (store, registry);
+  cortext::store::ApplyMigrations (store);
 }
 
 /// @brief A no-op transaction for tests that don't need actual database writes.

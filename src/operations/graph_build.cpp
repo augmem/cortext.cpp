@@ -5,7 +5,6 @@
 #include "cortext/core/knobs.hpp"
 #include "cortext/core/utils.hpp"
 #include "cortext/processor/operation_context.hpp"
-#include "cortext/store/store.hpp"
 #include "cortext/telemetry/telemetry.hpp"
 #include <Eigen/Dense>
 #include <any>
@@ -27,127 +26,146 @@ Add (Transaction &tx, const std::string &q,
   tx.Execute (q, p);
 }
 
-/// @brief Data structure holding embedding info for graph edge construction.
-struct EmbeddingData
+/// @brief Data structure holding memory info for graph edge construction.
+struct MemoryData
 {
+  long long memory_id;
   long long embedding_id;
   long long created_at;
   Eigen::VectorXf embedding;
 };
 
-/// @brief Load embeddings for all source memories in consolidation_sources.
-/// Groups by summary_id for cluster-based processing.
-std::map<std::string, std::vector<EmbeddingData>>
-LoadClusterSourceEmbeddings (Store *store)
+/// @brief Load memories for cluster-based processing.
+/// Groups by cluster_id for building edges within clusters.
+std::map<int, std::vector<MemoryData>>
+LoadClusterMemories (Store *store)
 {
-  std::map<std::string, std::vector<EmbeddingData>> clusters;
+  std::map<int, std::vector<MemoryData>> clusters;
 
-  // Query sources with timestamps and embeddings
-  // Uses end_ts from memories (new schema) as the memory timestamp
+  // Query memories with cluster_id, ordered by timestamp
   auto rows = store->Execute (
-      "SELECT cs.summary_id, cs.source_embedding_id, "
-      "COALESCE(m.end_ts, e.created_at, 0) AS created_at, "
+      "SELECT m.memory_id, m.embedding_id, m.cluster_id, "
+      "COALESCE(m.end_ts, m.start_ts, m.created_at, 0) AS created_at, "
       "e.embedding "
-      "FROM consolidation_sources cs "
-      "JOIN embeddings e ON cs.source_embedding_id = e.embedding_id "
-      "LEFT JOIN memories m ON cs.source_embedding_id = m.embedding_id "
-      "WHERE cs.source_embedding_id IS NOT NULL "
-      "ORDER BY cs.summary_id, created_at",
+      "FROM memories m "
+      "JOIN embeddings e ON m.embedding_id = e.embedding_id "
+      "WHERE m.cluster_id IS NOT NULL "
+      "ORDER BY m.cluster_id, created_at",
       {});
 
   constexpr int kEmbeddingDim = 256;
 
   for (const auto &row : rows)
     {
-      auto it_summary = row.find ("summary_id");
-      auto it_id = row.find ("source_embedding_id");
+      auto it_mem_id = row.find ("memory_id");
+      auto it_emb_id = row.find ("embedding_id");
+      auto it_cluster = row.find ("cluster_id");
       auto it_ts = row.find ("created_at");
       auto it_emb = row.find ("embedding");
 
-      if (it_summary == row.end () || it_id == row.end ()
-          || it_emb == row.end ())
+      if (it_mem_id == row.end () || it_emb_id == row.end ()
+          || it_cluster == row.end () || it_emb == row.end ())
         {
           continue;
         }
 
-      EmbeddingData data;
+      MemoryData data;
 
-      // Parse summary_id
-      if (it_summary->second.type () == typeid (std::string))
+      // Parse cluster_id
+      int cluster_id = 0;
+      if (it_cluster->second.type () == typeid (long long))
         {
-          std::string summary_id
-              = std::any_cast<std::string> (it_summary->second);
-
-          // Parse embedding_id
-          if (it_id->second.type () == typeid (long long))
-            {
-              data.embedding_id = std::any_cast<long long> (it_id->second);
-            }
-          else
-            {
-              continue;
-            }
-
-          // Parse timestamp
-          if (it_ts != row.end () && it_ts->second.type () == typeid (long long))
-            {
-              data.created_at = std::any_cast<long long> (it_ts->second);
-            }
-          else
-            {
-              data.created_at = 0;
-            }
-
-          // Decode embedding
-          if (!core::DecodeFloatBlob (it_emb->second, kEmbeddingDim,
-                                      data.embedding))
-            {
-              continue;
-            }
-
-          clusters[summary_id].push_back (std::move (data));
+          cluster_id = static_cast<int> (
+              std::any_cast<long long> (it_cluster->second));
         }
+      else if (it_cluster->second.type () == typeid (int))
+        {
+          cluster_id = std::any_cast<int> (it_cluster->second);
+        }
+      else
+        {
+          continue;
+        }
+
+      // Parse memory_id
+      if (it_mem_id->second.type () == typeid (long long))
+        {
+          data.memory_id = std::any_cast<long long> (it_mem_id->second);
+        }
+      else
+        {
+          continue;
+        }
+
+      // Parse embedding_id
+      if (it_emb_id->second.type () == typeid (long long))
+        {
+          data.embedding_id = std::any_cast<long long> (it_emb_id->second);
+        }
+      else
+        {
+          continue;
+        }
+
+      // Parse timestamp
+      if (it_ts != row.end () && it_ts->second.type () == typeid (long long))
+        {
+          data.created_at = std::any_cast<long long> (it_ts->second);
+        }
+      else
+        {
+          data.created_at = 0;
+        }
+
+      // Decode embedding
+      if (!core::DecodeFloatBlob (it_emb->second, kEmbeddingDim, data.embedding))
+        {
+          continue;
+        }
+
+      clusters[cluster_id].push_back (std::move (data));
     }
 
   return clusters;
 }
 
 /// @brief Build co-occurrence edges within clusters.
-/// Creates 'co_occurs_with' edges between source memories with
-/// cosine similarity above MergeThreshold(F).
+/// Creates 'co_occurs_with' edges in ASSOCIATIONS between memories
+/// with cosine similarity above threshold.
 void
 BuildCoOccurrenceEdges (Transaction &tx,
-                        const std::map<std::string, std::vector<EmbeddingData>> &clusters,
+                        const std::map<int, std::vector<MemoryData>> &clusters,
                         double threshold, long long now_ts)
 {
-  for (const auto &[summary_id, sources] : clusters)
+  for (const auto &[cluster_id, memories] : clusters)
     {
-      // Need at least 2 sources for co-occurrence
-      if (sources.size () < 2)
+      // Need at least 2 memories for co-occurrence
+      if (memories.size () < 2)
         {
           continue;
         }
 
       // Compare all pairs within cluster
-      for (size_t i = 0; i < sources.size (); ++i)
+      for (size_t i = 0; i < memories.size (); ++i)
         {
-          for (size_t j = i + 1; j < sources.size (); ++j)
+          for (size_t j = i + 1; j < memories.size (); ++j)
             {
-              double sim = core::CosineSimilarity (sources[i].embedding,
-                                                   sources[j].embedding);
+              double sim = core::CosineSimilarity (memories[i].embedding,
+                                                   memories[j].embedding);
 
               if (sim > threshold)
                 {
-                  // Create co_occurs_with edge (bidirectional via smaller id first)
-                  long long id1 = std::min (sources[i].embedding_id,
-                                            sources[j].embedding_id);
-                  long long id2 = std::max (sources[i].embedding_id,
-                                            sources[j].embedding_id);
+                  // Create co_occurs_with edge (use smaller id as source)
+                  long long id1 = std::min (memories[i].memory_id,
+                                            memories[j].memory_id);
+                  long long id2 = std::max (memories[i].memory_id,
+                                            memories[j].memory_id);
 
                   Add (tx,
-                       "INSERT OR REPLACE INTO graph_edges"
-                       "(source_id, target_id, edge_type, weight, last_reinforced) "
-                       "VALUES ('emb:' || ?1, 'emb:' || ?2, 'co_occurs_with', ?3, ?4)",
+                       "INSERT OR REPLACE INTO associations "
+                       "(source_memory_id, target_memory_id, edge_type, weight, "
+                       "last_reinforced) "
+                       "VALUES (?, ?, 'co_occurs_with', ?, ?)",
                        { id1, id2, sim, now_ts });
                 }
             }
@@ -156,36 +174,38 @@ BuildCoOccurrenceEdges (Transaction &tx,
 }
 
 /// @brief Build causal/temporal edges within clusters.
-/// Creates 'causes' edges between temporally adjacent source memories
-/// when drift magnitude exceeds CausalDriftThreshold(T).
+/// Creates 'causes' edges in ASSOCIATIONS between temporally adjacent
+/// memories when drift magnitude exceeds threshold.
 void
 BuildCausalEdges (Transaction &tx,
-                  const std::map<std::string, std::vector<EmbeddingData>> &clusters,
+                  const std::map<int, std::vector<MemoryData>> &clusters,
                   double drift_threshold, long long now_ts)
 {
-  for (const auto &[summary_id, sources] : clusters)
+  for (const auto &[cluster_id, memories] : clusters)
     {
-      // Need at least 2 sources for causal edges
-      if (sources.size () < 2)
+      // Need at least 2 memories for causal edges
+      if (memories.size () < 2)
         {
           continue;
         }
 
-      // Sources are already ordered by timestamp from the query
-      for (size_t i = 0; i + 1 < sources.size (); ++i)
+      // Memories are already ordered by timestamp from the query
+      for (size_t i = 0; i + 1 < memories.size (); ++i)
         {
-          // Compute drift vector: m_j.embedding - m_i.embedding
-          Eigen::VectorXf drift = sources[i + 1].embedding - sources[i].embedding;
+          // Compute drift vector
+          Eigen::VectorXf drift
+              = memories[i + 1].embedding - memories[i].embedding;
           double drift_mag = drift.norm ();
 
           if (drift_mag > drift_threshold)
             {
               // Create causes edge (directional: earlier -> later)
               Add (tx,
-                   "INSERT OR REPLACE INTO graph_edges"
-                   "(source_id, target_id, edge_type, weight, last_reinforced) "
-                   "VALUES ('emb:' || ?1, 'emb:' || ?2, 'causes', ?3, ?4)",
-                   { sources[i].embedding_id, sources[i + 1].embedding_id,
+                   "INSERT OR REPLACE INTO associations "
+                   "(source_memory_id, target_memory_id, edge_type, weight, "
+                   "last_reinforced) "
+                   "VALUES (?, ?, 'causes', ?, ?)",
+                   { memories[i].memory_id, memories[i + 1].memory_id,
                      drift_mag, now_ts });
             }
         }
@@ -193,39 +213,40 @@ BuildCausalEdges (Transaction &tx,
 }
 
 /// @brief Build contradiction edges within clusters.
-/// Creates 'contradicts' edges between source memories with
-/// cosine similarity below ContradictionThreshold (-0.5).
+/// Creates 'contradicts' edges in ASSOCIATIONS between memories
+/// with cosine similarity below threshold (negative similarity).
 void
 BuildContradictionEdges (Transaction &tx,
-                         const std::map<std::string, std::vector<EmbeddingData>> &clusters,
+                         const std::map<int, std::vector<MemoryData>> &clusters,
                          double threshold, long long now_ts)
 {
-  for (const auto &[summary_id, sources] : clusters)
+  for (const auto &[cluster_id, memories] : clusters)
     {
-      if (sources.size () < 2)
+      if (memories.size () < 2)
         {
           continue;
         }
 
-      for (size_t i = 0; i < sources.size (); ++i)
+      for (size_t i = 0; i < memories.size (); ++i)
         {
-          for (size_t j = i + 1; j < sources.size (); ++j)
+          for (size_t j = i + 1; j < memories.size (); ++j)
             {
-              double sim = core::CosineSimilarity (sources[i].embedding,
-                                                   sources[j].embedding);
+              double sim = core::CosineSimilarity (memories[i].embedding,
+                                                   memories[j].embedding);
 
               if (sim < threshold)
                 {
                   // Create contradicts edge with weight = |similarity|
-                  long long id1 = std::min (sources[i].embedding_id,
-                                            sources[j].embedding_id);
-                  long long id2 = std::max (sources[i].embedding_id,
-                                            sources[j].embedding_id);
+                  long long id1 = std::min (memories[i].memory_id,
+                                            memories[j].memory_id);
+                  long long id2 = std::max (memories[i].memory_id,
+                                            memories[j].memory_id);
 
                   Add (tx,
-                       "INSERT OR REPLACE INTO graph_edges"
-                       "(source_id, target_id, edge_type, weight, last_reinforced) "
-                       "VALUES ('emb:' || ?1, 'emb:' || ?2, 'contradicts', ?3, ?4)",
+                       "INSERT OR REPLACE INTO associations "
+                       "(source_memory_id, target_memory_id, edge_type, weight, "
+                       "last_reinforced) "
+                       "VALUES (?, ?, 'contradicts', ?, ?)",
                        { id1, id2, std::abs (sim), now_ts });
                 }
             }
@@ -234,18 +255,18 @@ BuildContradictionEdges (Transaction &tx,
 }
 
 /// @brief Apply decay to reinforcement edges.
-/// Decays edge weights by ReinforcementDecay(T) factor.
+/// Decays edge weights by decay_rate factor.
 void
 DecayReinforcementEdges (Transaction &tx, double decay_rate)
 {
   Add (tx,
-       "UPDATE graph_edges SET weight = weight * ?1 "
+       "UPDATE associations SET weight = weight * ?1 "
        "WHERE edge_type = 'reinforces'",
        { decay_rate });
 
   // Remove edges that have decayed below minimum threshold
   Add (tx,
-       "DELETE FROM graph_edges "
+       "DELETE FROM associations "
        "WHERE edge_type = 'reinforces' AND weight < 0.1",
        {});
 }
@@ -266,173 +287,47 @@ BuildGraphFromConsolidation::Execute (OperationContext &context, Transaction &tx
   const double contradiction_threshold = core::ContradictionThreshold ();
   const double reinforcement_decay = core::ReinforcementDecay (cfg.stability);
 
-  // Ensure required tables exist. (Safe to emit repeatedly.)
-  Add (tx,
-       "CREATE TABLE IF NOT EXISTS graph_nodes ("
-       "  node_id TEXT PRIMARY KEY,"
-       "  type TEXT NOT NULL,"
-       "  label TEXT,"
-       "  embedding_id INTEGER,"
-       "  metadata TEXT,"
-       "  created_at INTEGER"
-       ");");
-  Add (tx,
-       "CREATE TABLE IF NOT EXISTS graph_edges ("
-       "  source_id TEXT NOT NULL,"
-       "  target_id TEXT NOT NULL,"
-       "  edge_type TEXT NOT NULL,"
-       "  weight REAL NOT NULL DEFAULT 1.0,"
-       "  decay_rate REAL,"
-       "  last_reinforced INTEGER,"
-       "  PRIMARY KEY (source_id, target_id, edge_type)"
-       ");");
-  Add (tx,
-       "CREATE TABLE IF NOT EXISTS entity_index ("
-       "  name TEXT PRIMARY KEY,"
-       "  node_id TEXT NOT NULL"
-       ");");
+  // V2 schema: Nodes are MEMORIES, edges are ASSOCIATIONS
+  // No need to create graph_nodes or graph_edges tables - using V2 tables
 
-  // 1) Create nodes for all summaries.
-  //    Node id: summary:<summary_id>
-  Add (tx,
-       "INSERT OR IGNORE INTO graph_nodes(node_id, type, label, created_at) "
-       "SELECT 'summary:' || summary_id, 'summary', summary_id, ?1 "
-       "FROM consolidation_summaries;",
-       { now_ts });
-
-  // 2) Ensure entity nodes exist for extraction_entities.
-  Add (tx,
-       "INSERT OR IGNORE INTO graph_nodes(node_id, type, label, embedding_id, "
-       "created_at) "
-       "SELECT 'entity:' || name, 'entity', name, embedding_id, ?1 "
-       "FROM extraction_entities;",
-       { now_ts });
-
-  // 2b) Maintain mapping table (name -> node_id).
-  Add (tx,
-       "INSERT OR IGNORE INTO entity_index(name, node_id) "
-       "SELECT name, 'entity:' || name FROM extraction_entities;");
-
-  // 3) Mentions edges: summary -> entity, weight=salience
-  Add (tx,
-       "INSERT OR REPLACE INTO graph_edges(source_id, target_id, edge_type, weight, "
-       "last_reinforced) "
-       "SELECT 'summary:' || e.summary_id, 'entity:' || e.name, 'mentions', "
-       "COALESCE(e.salience, 1.0), ?1 "
-       "FROM extraction_entities e;",
-       { now_ts });
-
-  // 4) Relation edges: entity(subject) -> entity(object), edge_type=predicate
-  // Ensure both endpoints exist.
-  Add (tx,
-       "INSERT OR IGNORE INTO graph_nodes(node_id, type, label, created_at) "
-       "SELECT 'entity:' || subject, 'entity', subject, ?1 "
-       "FROM extraction_relations;",
-       { now_ts });
-  Add (tx,
-       "INSERT OR IGNORE INTO graph_nodes(node_id, type, label, created_at) "
-       "SELECT 'entity:' || object, 'entity', object, ?1 "
-       "FROM extraction_relations;",
-       { now_ts });
-
-  // 4a) Non-implication relation edges: preserve original predicate as edge_type
-  Add (tx,
-       "INSERT OR REPLACE INTO graph_edges(source_id, target_id, edge_type, weight, "
-       "last_reinforced) "
-       "SELECT 'entity:' || subject, 'entity:' || object, predicate, "
-       "COALESCE(confidence, 1.0), ?1 "
-       "FROM extraction_relations "
-       "WHERE lower(predicate) NOT LIKE '%implies%' "
-       "AND lower(predicate) NOT LIKE '%suggests%' "
-       "AND lower(predicate) NOT LIKE '%indicates%' "
-       "AND lower(predicate) NOT LIKE '%means%' "
-       "AND lower(predicate) NOT LIKE '%entails%';",
-       { now_ts });
-
-  // 4b) Implication relation edges: normalize to 'implies' edge type
-  // Per Section 9.5: implies captures directional correlation distinct from
-  // causes (which uses temporal drift). Implication keywords are normalized.
-  Add (tx,
-       "INSERT OR REPLACE INTO graph_edges(source_id, target_id, edge_type, weight, "
-       "last_reinforced) "
-       "SELECT 'entity:' || subject, 'entity:' || object, 'implies', "
-       "COALESCE(confidence, 1.0), ?1 "
-       "FROM extraction_relations "
-       "WHERE lower(predicate) LIKE '%implies%' "
-       "OR lower(predicate) LIKE '%suggests%' "
-       "OR lower(predicate) LIKE '%indicates%' "
-       "OR lower(predicate) LIKE '%means%' "
-       "OR lower(predicate) LIKE '%entails%';",
-       { now_ts });
-
-  // 5) Derived-from edges: summary -> embedded memory id (if available).
-  Add (tx,
-       "INSERT OR IGNORE INTO graph_nodes(node_id, type, label, embedding_id, "
-       "created_at) "
-       "SELECT 'emb:' || source_embedding_id, 'memory', NULL, source_embedding_id, "
-       "?1 "
-       "FROM consolidation_sources "
-       "WHERE source_embedding_id IS NOT NULL;",
-       { now_ts });
-
-  Add (tx,
-       "INSERT OR REPLACE INTO graph_edges(source_id, target_id, edge_type, weight, "
-       "last_reinforced) "
-       "SELECT 'summary:' || summary_id, 'emb:' || source_embedding_id, "
-       "'derived_from', 1.0, ?1 "
-       "FROM consolidation_sources "
-       "WHERE source_embedding_id IS NOT NULL;",
-       { now_ts });
-
-  // --- Phase 4: Knowledge Graph Enhancement ---
-
-  // 6) Load cluster source embeddings for new edge types
+  // 1) Build edges from MEMORIES with cluster_id (set by ConsolidationSummarize)
   if (store)
     {
-      auto clusters = LoadClusterSourceEmbeddings (store);
+      auto clusters = LoadClusterMemories (store);
 
-      // 7) Co-occurrence edges: memory <-> memory within clusters
+      // 2) Co-occurrence edges: memory <-> memory within clusters
       // Creates 'co_occurs_with' edges for highly similar memories
       BuildCoOccurrenceEdges (tx, clusters, co_occurrence_threshold, now_ts);
 
-      // 8) Causal edges: memory -> memory based on temporal drift
+      // 3) Causal edges: memory -> memory based on temporal drift
       // Creates 'causes' edges for significant semantic drift over time
       BuildCausalEdges (tx, clusters, causal_drift_threshold, now_ts);
 
-      // 9) Contradiction edges: memory <-> memory for opposing semantics
+      // 4) Contradiction edges: memory <-> memory for opposing semantics
       // Creates 'contradicts' edges for strong negative similarity
       BuildContradictionEdges (tx, clusters, contradiction_threshold, now_ts);
     }
 
-  // 10) Decay reinforcement edges (created during retrieval)
+  // 5) Decay reinforcement edges (created during retrieval)
   DecayReinforcementEdges (tx, reinforcement_decay);
 
-  // Count nodes and edges for logging
-  long long nodes_added = 0;
-  long long edges_added = 0;
+  // Count associations for logging
+  long long edges_count = 0;
 
   if (store)
     {
-      auto node_rows = store->Execute("SELECT COUNT(*) AS cnt FROM graph_nodes", {});
-      if (!node_rows.empty() && node_rows[0].count("cnt") == 1)
+      auto edge_rows = store->Execute (
+          "SELECT COUNT(*) AS cnt FROM associations", {});
+      if (!edge_rows.empty () && edge_rows[0].count ("cnt") == 1)
         {
-          const auto &v = node_rows[0].at("cnt");
-          if (v.type() == typeid(long long))
-            nodes_added = std::any_cast<long long>(v);
-        }
-
-      auto edge_rows = store->Execute("SELECT COUNT(*) AS cnt FROM graph_edges", {});
-      if (!edge_rows.empty() && edge_rows[0].count("cnt") == 1)
-        {
-          const auto &v = edge_rows[0].at("cnt");
-          if (v.type() == typeid(long long))
-            edges_added = std::any_cast<long long>(v);
+          const auto &v = edge_rows[0].at ("cnt");
+          if (v.type () == typeid (long long))
+            edges_count = std::any_cast<long long> (v);
         }
     }
 
-  telemetry::LogDebug("cortext.graph_build", {
-    telemetry::Attribute::Int64("nodes_added", nodes_added),
-    telemetry::Attribute::Int64("edges_added", edges_added)
+  telemetry::LogDebug ("cortext.graph_build", {
+      telemetry::Attribute::Int64 ("associations_count", edges_count)
   });
 }
 

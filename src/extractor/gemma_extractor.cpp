@@ -5,12 +5,19 @@
 #if !defined(CORTEXT_DISABLE_LITERT)
 #include "cortext/audio/gemma_audio.hpp"
 #include "cortext/core/thread_config.hpp"
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wgcc-compat"
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+#pragma clang diagnostic ignored "-Wc99-extensions"
+#pragma clang diagnostic ignored "-Wunused-parameter"
+#pragma clang diagnostic ignored "-Wsign-compare"
 #include "runtime/conversation/conversation.h"
 #include "runtime/conversation/io_types.h"
 #include "runtime/engine/engine.h"
 #include "runtime/engine/engine_settings.h"
 #include "runtime/engine/io_types.h"
 #include "runtime/executor/llm_executor_settings.h"
+#pragma clang diagnostic pop
 #endif
 
 namespace cortext
@@ -78,6 +85,7 @@ struct GemmaExtractor::Impl
   ExtractWithConversation (const std::string &prompt,
                            const nlohmann::json &schema)
   {
+    (void)schema;
     if (!available || !engine)
       {
         throw std::runtime_error ("GemmaExtractor: Model not available");
@@ -248,6 +256,7 @@ struct GemmaExtractor::Impl
   ExtractFromAudioImpl (const float *pcm, size_t num_samples,
                         const nlohmann::json &schema)
   {
+    (void)schema;
     if (!available || !engine)
       {
         throw std::runtime_error ("GemmaExtractor: Model not available");

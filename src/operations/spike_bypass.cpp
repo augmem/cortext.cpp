@@ -8,8 +8,9 @@ namespace cortext::operations
 {
 
 void
-CheckSpikeBypass::Execute (OperationContext &context, Transaction & /*tx*/) const
+CheckSpikeBypass::Execute (OperationContext &context, Transaction &tx) const
 {
+  (void)tx;
   const auto &signal = context.GetSignal ();
   auto &p_ctx = context.GetProcessorContext ();
   const auto &config = context.GetConfig ();

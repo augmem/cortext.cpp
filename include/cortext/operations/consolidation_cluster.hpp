@@ -17,9 +17,9 @@ struct ConsolidationClusterParams
 
 /// @brief Algorithm 29b: Cluster consolidation candidates.
 ///
-/// Groups marked candidates from `consolidation_candidates` into clusters
-/// based on embedding similarity. Clusters meeting minimum size requirements
-/// are passed to the summarization phase via OperationContext.
+/// Groups consolidation candidates into clusters based on embedding similarity.
+/// Clusters meeting minimum size requirements are passed to the summarization
+/// phase via OperationContext.
 ///
 /// This operation uses a greedy clustering algorithm:
 /// 1. For each unassigned candidate, start a new cluster
@@ -28,8 +28,7 @@ struct ConsolidationClusterParams
 /// 4. Filter clusters by minimum size requirement
 ///
 /// Input:
-/// - consolidation_candidates table (populated by ScoreConsolidation)
-/// - vec_embeddings table (for embedding vectors)
+/// - context.GetConsolidationCandidates() (populated by ScoreConsolidation)
 ///
 /// Output:
 /// - context.SetConsolidationClusters(clusters) for downstream operations

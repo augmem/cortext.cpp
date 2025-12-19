@@ -4,7 +4,6 @@
 #include "cortext/core/algorithms.hpp"
 #include "cortext/core/knobs.hpp"
 #include "cortext/processor/operation_context.hpp"
-#include "cortext/store/schema.hpp"
 #include <algorithm>
 #include <cmath>
 #include <vector>
@@ -23,6 +22,7 @@ ApplyEmotionalConsolidation::Execute (OperationContext &context, Transaction &tx
   double intensity = core::Clamp (context.GetEmotionIntensity (), 0.0, 1.0);
   double arousal = core::Clamp (context.GetArousal (), 0.0, 1.0);
   double valence = core::Clamp (context.GetValence (), 0.0, 1.0);
+  (void)valence;
 
   // Trigger condition.
   const double theta_intensity = core::ThetaIntensity (S);
@@ -44,6 +44,7 @@ ApplyEmotionalConsolidation::Execute (OperationContext &context, Transaction &tx
 
   const long long now_ts
       = static_cast<long long> (context.GetSignal ().timestamp);
+  (void)now_ts;
 
   // v2: Update flashbulb columns in memories table (merged from emotional_tags)
   for (const auto &evt : context.GetMemoryUsageEvents ())
@@ -66,16 +67,6 @@ ApplyEmotionalConsolidation::Execute (OperationContext &context, Transaction &tx
                   { intensity, half_life_bonus, detail_suppression,
                     gist_components, cascade_radius, cascade_decay, id });
     }
-}
-
-void
-ApplyEmotionalConsolidation::CollectSchema (
-    cortext::store::SchemaRegistry &registry) const
-{
-  // v2: Emotional tags (flashbulb, emotional_intensity, half_life_bonus,
-  // detail_suppression, gist_components, cascade_radius, cascade_decay)
-  // now merged into memories table. No separate table needed.
-  (void)registry;
 }
 
 } // namespace cortext::operations

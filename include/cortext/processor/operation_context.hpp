@@ -28,6 +28,16 @@ struct ClusterInfo
   double avg_score;
 };
 
+/// @brief Represents a candidate memory for consolidation.
+struct ConsolidationCandidate
+{
+  long long embedding_id;
+  double score;
+  Eigen::VectorXf embedding;
+};
+
+
+
 /// @brief Contains all the state for a single signal processing run.
 ///
 /// This object is created by the SignalProcessor for each signal and is passed
@@ -843,6 +853,21 @@ public:
     return consolidation_clusters_;
   }
 
+  // ======================================================================
+  // In-Memory Consolidation Candidates (Phase 2 Refactor)
+  // ======================================================================
+
+  void
+  SetConsolidationCandidates (std::vector<ConsolidationCandidate> candidates)
+  {
+    consolidation_candidates_ = std::move (candidates);
+  }
+  const std::vector<ConsolidationCandidate> &
+  GetConsolidationCandidates () const
+  {
+    return consolidation_candidates_;
+  }
+
   void
   SetExtractionRequests (std::vector<operations::ExtractionRequest> requests)
   {
@@ -966,6 +991,9 @@ private:
 
   // Consolidation Cluster fields (Section 7.3)
   std::vector<ClusterInfo> consolidation_clusters_;
+  // In-Memory Consolidation Candidates
+  std::vector<ConsolidationCandidate> consolidation_candidates_;
+
   std::vector<operations::ExtractionRequest> extraction_requests_;
   operations::ExtractionCallback *extraction_callback_ = nullptr;
 

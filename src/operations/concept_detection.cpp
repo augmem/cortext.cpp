@@ -41,25 +41,35 @@ struct ConceptCandidate
   std::string entity_name;
   int episode_count;
   int total_mentions;
-  std::vector<std::string> summary_ids;
+  std::vector<long long> association_memory_ids; // V2: memory_ids of ASSOCIATION memories
 };
 
 /// @brief Load candidate concepts that meet episode and frequency thresholds.
+/// V2 schema: LABEL memories are entities, ASSOCIATION memories are summaries,
+/// ASSOCIATIONS with edge_type='derived_from' link them.
 std::vector<ConceptCandidate>
 LoadConceptCandidates (Store *store, int min_episodes, int frequency_threshold)
 {
   std::vector<ConceptCandidate> candidates;
 
-  // Query entities that appear across multiple episodes with sufficient frequency
-  // Join through consolidation_sources and memories to get episode_id
+  // V2: Query LABEL memories (entities) that appear across multiple episodes
+  // with sufficient frequency. Join through ASSOCIATIONS (derived_from) to get
+  // the ASSOCIATION memories (summaries) they were derived from, then to source
+  // memories for episode_id.
   auto rows = store->Execute (
-      "SELECT e.name, "
-      "       COUNT(DISTINCT COALESCE(m.episode_id, 0)) AS episode_count, "
+      "SELECT label_mem.label AS name, "
+      "       COUNT(DISTINCT COALESCE(src_mem.episode_id, 0)) AS episode_count, "
       "       COUNT(*) AS total_mentions "
-      "FROM extraction_entities e "
-      "JOIN consolidation_sources cs ON e.summary_id = cs.summary_id "
-      "LEFT JOIN memories m ON cs.source_embedding_id = m.embedding_id "
-      "GROUP BY e.name "
+      "FROM memories label_mem "
+      "JOIN associations a1 ON a1.target_memory_id = label_mem.memory_id "
+      "  AND a1.edge_type = 'derived_from' "
+      "JOIN memories assoc_mem ON a1.source_memory_id = assoc_mem.memory_id "
+      "  AND assoc_mem.kind = 'ASSOCIATION' "
+      "JOIN associations a2 ON a2.source_memory_id = assoc_mem.memory_id "
+      "  AND a2.edge_type = 'derived_from' "
+      "JOIN memories src_mem ON a2.target_memory_id = src_mem.memory_id "
+      "WHERE label_mem.kind = 'LABEL' "
+      "GROUP BY label_mem.label "
       "HAVING episode_count >= ?1 AND total_mentions >= ?2",
       { static_cast<long long> (min_episodes),
         static_cast<long long> (frequency_threshold) });
@@ -107,19 +117,27 @@ LoadConceptCandidates (Store *store, int min_episodes, int frequency_threshold)
       candidates.push_back (std::move (c));
     }
 
-  // For each candidate, get the summary IDs they appear in
+  // For each candidate, get the ASSOCIATION memory_ids they appear in
   for (auto &c : candidates)
     {
-      auto summary_rows = store->Execute (
-          "SELECT DISTINCT summary_id FROM extraction_entities WHERE name = ?",
+      // V2: Find ASSOCIATION memories linked to this LABEL via derived_from
+      auto assoc_rows = store->Execute (
+          "SELECT DISTINCT assoc_mem.memory_id "
+          "FROM memories label_mem "
+          "JOIN associations a ON a.target_memory_id = label_mem.memory_id "
+          "  AND a.edge_type = 'derived_from' "
+          "JOIN memories assoc_mem ON a.source_memory_id = assoc_mem.memory_id "
+          "  AND assoc_mem.kind = 'ASSOCIATION' "
+          "WHERE label_mem.kind = 'LABEL' AND label_mem.label = ?",
           { c.entity_name });
 
-      for (const auto &sr : summary_rows)
+      for (const auto &ar : assoc_rows)
         {
-          auto it = sr.find ("summary_id");
-          if (it != sr.end () && it->second.type () == typeid (std::string))
+          auto it = ar.find ("memory_id");
+          if (it != ar.end () && it->second.type () == typeid (long long))
             {
-              c.summary_ids.push_back (std::any_cast<std::string> (it->second));
+              c.association_memory_ids.push_back (
+                  std::any_cast<long long> (it->second));
             }
         }
     }
@@ -127,14 +145,15 @@ LoadConceptCandidates (Store *store, int min_episodes, int frequency_threshold)
   return candidates;
 }
 
-/// @brief Compute concept centroid from related summary centroids.
+/// @brief Compute concept centroid from related ASSOCIATION memory embeddings.
+/// V2: ASSOCIATION memories store embeddings directly via embedding_id.
 /// Returns true if centroid was computed successfully.
 bool
 ComputeConceptCentroid (Store *store,
-                        const std::vector<std::string> &summary_ids,
+                        const std::vector<long long> &association_memory_ids,
                         Eigen::VectorXf &centroid_out)
 {
-  if (summary_ids.empty ())
+  if (association_memory_ids.empty ())
     {
       return false;
     }
@@ -143,24 +162,27 @@ ComputeConceptCentroid (Store *store,
   Eigen::VectorXf sum = Eigen::VectorXf::Zero (kEmbeddingDim);
   int count = 0;
 
-  for (const auto &sid : summary_ids)
+  for (const long long mem_id : association_memory_ids)
     {
+      // V2: Get embedding from MEMORIES -> embeddings join
       auto rows = store->Execute (
-          "SELECT centroid FROM consolidation_summaries WHERE summary_id = ?",
-          { sid });
+          "SELECT e.embedding FROM memories m "
+          "JOIN embeddings e ON m.embedding_id = e.embedding_id "
+          "WHERE m.memory_id = ?",
+          { mem_id });
 
       for (const auto &row : rows)
         {
-          auto it = row.find ("centroid");
+          auto it = row.find ("embedding");
           if (it == row.end ())
             {
               continue;
             }
 
-          Eigen::VectorXf centroid;
-          if (core::DecodeFloatBlob (it->second, kEmbeddingDim, centroid))
+          Eigen::VectorXf emb;
+          if (core::DecodeFloatBlob (it->second, kEmbeddingDim, emb))
             {
-              sum += centroid;
+              sum += emb;
               ++count;
             }
         }
@@ -200,9 +222,8 @@ DetectConceptNodes::Execute (OperationContext &context, Transaction &tx) const
 
   if (candidates.empty ())
     {
-      telemetry::LogDebug("cortext.concept_detection", {
-        telemetry::Attribute::Int64("new_concepts_count", 0)
-      });
+      telemetry::LogDebug ("cortext.concept_detection",
+                           { telemetry::Attribute::Int64 ("new_concepts_count", 0) });
       return;
     }
 
@@ -210,12 +231,13 @@ DetectConceptNodes::Execute (OperationContext &context, Transaction &tx) const
 
   for (const auto &c : candidates)
     {
-      const std::string concept_node_id = "concept:" + c.entity_name;
+      const std::string concept_source_id = "concept:" + c.entity_name;
 
-      // Check if concept node already exists
+      // V2: Check if concept LABEL memory already exists
       auto existing = store->Execute (
-          "SELECT node_id FROM graph_nodes WHERE node_id = ?",
-          { concept_node_id });
+          "SELECT memory_id FROM memories "
+          "WHERE kind = 'LABEL' AND source_id = ?",
+          { concept_source_id });
 
       if (!existing.empty ())
         {
@@ -225,9 +247,9 @@ DetectConceptNodes::Execute (OperationContext &context, Transaction &tx) const
 
       new_concepts_count++;
 
-      // Compute concept centroid from related summary centroids
+      // Compute concept centroid from related ASSOCIATION memory embeddings
       Eigen::VectorXf centroid;
-      if (!ComputeConceptCentroid (store, c.summary_ids, centroid))
+      if (!ComputeConceptCentroid (store, c.association_memory_ids, centroid))
         {
           continue;
         }
@@ -236,9 +258,8 @@ DetectConceptNodes::Execute (OperationContext &context, Transaction &tx) const
       std::vector<float> centroid_vec (centroid.data (),
                                        centroid.data () + centroid.size ());
 
-      // Insert concept embedding (v2: minimal table)
-      Add (tx,
-           "INSERT INTO embeddings (embedding, created_at) VALUES (?, ?)",
+      // Insert concept embedding
+      Add (tx, "INSERT INTO embeddings (embedding, created_at) VALUES (?, ?)",
            { centroid_vec, now_ts });
 
       // Get the auto-assigned embedding_id
@@ -257,44 +278,68 @@ DetectConceptNodes::Execute (OperationContext &context, Transaction &tx) const
             }
         }
 
-      // Create MEMORIES row with kind='LABEL' for concept (v2 schema)
+      // V2: Create MEMORIES row with kind='LABEL' for concept
       Add (tx,
            "INSERT INTO memories "
            "(embedding_id, source_id, kind, label, start_ts, created_at) "
            "VALUES (?, ?, 'LABEL', ?, ?, ?)",
-           { embedding_id, concept_node_id, c.entity_name, now_ts, now_ts });
+           { embedding_id, concept_source_id, c.entity_name, now_ts, now_ts });
 
-      // Create concept node in graph_nodes (legacy table for backward
-      // compatibility)
-      Add (tx,
-           "INSERT OR IGNORE INTO graph_nodes "
-           "(node_id, type, label, embedding_id, created_at) "
-           "VALUES (?1, 'concept', ?2, ?3, ?4)",
-           { concept_node_id, c.entity_name, embedding_id, now_ts });
+      // Get the concept memory_id
+      auto mem_id_rows = tx.Execute ("SELECT last_insert_rowid() AS id", {});
+      long long concept_memory_id = 0;
+      if (!mem_id_rows.empty () && mem_id_rows[0].count ("id"))
+        {
+          auto val = mem_id_rows[0].at ("id");
+          if (val.type () == typeid (long long))
+            {
+              concept_memory_id = std::any_cast<long long> (val);
+            }
+          else if (val.type () == typeid (int))
+            {
+              concept_memory_id = std::any_cast<int> (val);
+            }
+        }
 
-      // Create 'generalizes' edges from concept to related entities
-      const std::string entity_node_id = "entity:" + c.entity_name;
-      Add (tx,
-           "INSERT OR REPLACE INTO graph_edges "
-           "(source_id, target_id, edge_type, weight, last_reinforced) "
-           "VALUES (?1, ?2, 'generalizes', ?3, ?4)",
-           { concept_node_id, entity_node_id,
-             static_cast<double> (c.total_mentions), now_ts });
+      // V2: Find the entity LABEL memory for 'generalizes' edge
+      auto entity_rows = store->Execute (
+          "SELECT memory_id FROM memories "
+          "WHERE kind = 'LABEL' AND label = ? AND source_id != ?",
+          { c.entity_name, concept_source_id });
 
-      // Link concept to all summaries it appears in
-      for (const auto &sid : c.summary_ids)
+      for (const auto &er : entity_rows)
+        {
+          auto it = er.find ("memory_id");
+          if (it != er.end () && it->second.type () == typeid (long long))
+            {
+              long long entity_memory_id = std::any_cast<long long> (it->second);
+
+              // V2: Create 'generalizes' edge in ASSOCIATIONS
+              Add (tx,
+                   "INSERT OR REPLACE INTO associations "
+                   "(source_memory_id, target_memory_id, edge_type, weight, "
+                   "last_reinforced) "
+                   "VALUES (?, ?, 'generalizes', ?, ?)",
+                   { concept_memory_id, entity_memory_id,
+                     static_cast<double> (c.total_mentions), now_ts });
+            }
+        }
+
+      // V2: Link concept to all ASSOCIATION memories it appears in
+      for (const long long assoc_mem_id : c.association_memory_ids)
         {
           Add (tx,
-               "INSERT OR REPLACE INTO graph_edges "
-               "(source_id, target_id, edge_type, weight, last_reinforced) "
-               "VALUES (?1, ?2, 'abstracted_from', 1.0, ?3)",
-               { concept_node_id, "summary:" + sid, now_ts });
+               "INSERT OR REPLACE INTO associations "
+               "(source_memory_id, target_memory_id, edge_type, weight, "
+               "last_reinforced) "
+               "VALUES (?, ?, 'abstracted_from', 1.0, ?)",
+               { concept_memory_id, assoc_mem_id, now_ts });
         }
     }
 
-  telemetry::LogDebug("cortext.concept_detection", {
-    telemetry::Attribute::Int64("new_concepts_count", new_concepts_count)
-  });
+  telemetry::LogDebug (
+      "cortext.concept_detection",
+      { telemetry::Attribute::Int64 ("new_concepts_count", new_concepts_count) });
 }
 
 } // namespace cortext::operations

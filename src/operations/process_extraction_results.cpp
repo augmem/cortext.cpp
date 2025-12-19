@@ -6,8 +6,8 @@
 #include "cortext/processor/operation_context.hpp"
 #include <any>
 #include <nlohmann/json.hpp>
-#include <sstream>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace cortext::operations
@@ -22,15 +22,6 @@ AddWrite (Transaction &tx, const std::string &q,
           const std::vector<std::any> &p = {})
 {
   tx.Execute (q, p);
-}
-
-/// @brief Generate a deterministic node_id from entity name and type.
-std::string
-GenerateNodeId (const std::string &name, const std::string &type)
-{
-  std::ostringstream ss;
-  ss << type << "_" << name;
-  return ss.str ();
 }
 
 /// @brief Default JSON schema for extraction.
@@ -123,35 +114,108 @@ ProcessExtractionResults::Execute (OperationContext &context, Transaction &tx) c
       return;
     }
 
+  const uint64_t now_ts = context.GetSignal ().timestamp;
+
   for (const auto &result : p_ctx.pending_extraction_results)
     {
-      // 1. Insert entities into extraction_entities.
+      // Track entity name -> memory_id for relation linking
+      std::unordered_map<std::string, long long> entity_memory_ids;
+
+      // 1. Insert entities into MEMORIES (kind='LABEL').
       for (const auto &entity : result.entities)
         {
-          AddWrite (tx,
-                    "INSERT OR REPLACE INTO extraction_entities"
-                    "(summary_id, name, type, salience) "
-                    "VALUES(?, ?, ?, ?)",
-                    { result.summary_id, entity.name, entity.type,
-                      entity.salience });
+          // Create a MEMORIES entry for the entity label
+          // source_id = entity type + name for uniqueness
+          std::string source_id = entity.type + ":" + entity.name;
 
-          // 2. Update entity_index for name→node_id mapping.
-          std::string node_id = GenerateNodeId (entity.name, entity.type);
-          AddWrite (tx,
-                    "INSERT OR IGNORE INTO entity_index(name, node_id) "
-                    "VALUES(?, ?)",
-                    { entity.name, node_id });
+          // Check if this entity already exists
+          auto existing = tx.Execute (
+              "SELECT memory_id FROM memories WHERE source_id = ? AND kind = 'LABEL'",
+              { source_id });
+
+          long long entity_memory_id = 0;
+          if (!existing.empty () && existing[0].count ("memory_id"))
+            {
+              // Entity exists, get its memory_id
+              auto val = existing[0].at ("memory_id");
+              if (val.type () == typeid (long long))
+                {
+                  entity_memory_id = std::any_cast<long long> (val);
+                }
+              else if (val.type () == typeid (int))
+                {
+                  entity_memory_id = std::any_cast<int> (val);
+                }
+
+              // Update salience if higher
+              AddWrite (tx,
+                        "UPDATE memories SET s_max = MAX(s_max, ?) "
+                        "WHERE memory_id = ?",
+                        { entity.salience, entity_memory_id });
+            }
+          else
+            {
+              // Insert new entity as MEMORIES row
+              AddWrite (tx,
+                        "INSERT INTO memories "
+                        "(source_id, kind, label, start_ts, s_max, created_at) "
+                        "VALUES (?, 'LABEL', ?, ?, ?, ?)",
+                        { source_id, entity.name,
+                          static_cast<long long> (now_ts), entity.salience,
+                          static_cast<long long> (now_ts) });
+
+              // Get the new memory_id
+              auto id_rows = tx.Execute ("SELECT last_insert_rowid() AS id", {});
+              if (!id_rows.empty () && id_rows[0].count ("id"))
+                {
+                  auto val = id_rows[0].at ("id");
+                  if (val.type () == typeid (long long))
+                    {
+                      entity_memory_id = std::any_cast<long long> (val);
+                    }
+                  else if (val.type () == typeid (int))
+                    {
+                      entity_memory_id = std::any_cast<int> (val);
+                    }
+                }
+            }
+
+          // Track for relation linking
+          if (entity_memory_id > 0)
+            {
+              entity_memory_ids[entity.name] = entity_memory_id;
+            }
         }
 
-      // 3. Insert relations into extraction_relations.
+      // 2. Insert relations into ASSOCIATIONS.
       for (const auto &relation : result.relations)
         {
-          AddWrite (tx,
-                    "INSERT INTO extraction_relations"
-                    "(summary_id, subject, predicate, object, confidence) "
-                    "VALUES(?, ?, ?, ?, ?)",
-                    { result.summary_id, relation.subject, relation.predicate,
-                      relation.object, relation.confidence });
+          // Look up subject and object memory_ids
+          long long subject_id = 0;
+          long long object_id = 0;
+
+          auto it_subj = entity_memory_ids.find (relation.subject);
+          if (it_subj != entity_memory_ids.end ())
+            {
+              subject_id = it_subj->second;
+            }
+
+          auto it_obj = entity_memory_ids.find (relation.object);
+          if (it_obj != entity_memory_ids.end ())
+            {
+              object_id = it_obj->second;
+            }
+
+          // Only create association if both entities exist
+          if (subject_id > 0 && object_id > 0)
+            {
+              AddWrite (tx,
+                        "INSERT OR REPLACE INTO associations "
+                        "(source_memory_id, target_memory_id, edge_type, weight) "
+                        "VALUES (?, ?, ?, ?)",
+                        { subject_id, object_id, relation.predicate,
+                          relation.confidence });
+            }
         }
     }
 

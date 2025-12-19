@@ -4,7 +4,6 @@
 #include "cortext/core/algorithms.hpp"
 #include "cortext/operations/constants.hpp"
 #include "cortext/processor/operation_context.hpp"
-#include "cortext/store/schema.hpp"
 #include "cortext/telemetry/telemetry.hpp"
 #include <Eigen/Dense>
 #include <algorithm>
@@ -243,15 +242,6 @@ ApplyRetrievalCompetition::Execute (OperationContext &context,
     telemetry::Attribute::Double ("inhibition_radius", radius),
     telemetry::Attribute::Int64 ("suppressed_count", static_cast<int64_t> (suppressed_count))
   });
-}
-
-void
-ApplyRetrievalCompetition::CollectSchema (
-    cortext::store::SchemaRegistry &registry) const
-{
-  // v2: RIF state (suppression, suppression_ts, suppression_count) now merged
-  // into memories table. No separate table needed.
-  (void)registry;
 }
 
 } // namespace cortext::operations

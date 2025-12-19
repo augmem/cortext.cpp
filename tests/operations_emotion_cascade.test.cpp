@@ -8,13 +8,13 @@
 
 #include <cortext/core/knobs.hpp>
 #include <cortext/operations/emotion_cascade.hpp>
-#include <cortext/operations/graph_schema.hpp>
+
 #include <cortext/processor.hpp>
 #include <cortext/processor/operation_set.hpp>
 #include <cortext/store/sqlite_store.hpp>
 
 using namespace cortext;
-using cortext::operations::EnsureGraphSchema;
+
 using cortext::operations::PropagateEmotionalCascade;
 
 namespace
@@ -67,25 +67,7 @@ TEST_CASE ("PropagateEmotionalCascade propagates through graph edges",
   // Initialize core schema
   cortext::testing::InitializeCoreSchema (*store);
 
-  // Create graph nodes
-  store->Execute ("INSERT INTO graph_nodes (node_id, type, created_at) VALUES (?, ?, ?)",
-                  { std::string ("emb:1"), std::string ("memory"), 1000LL });
-  store->Execute ("INSERT INTO graph_nodes (node_id, type, created_at) VALUES (?, ?, ?)",
-                  { std::string ("emb:2"), std::string ("memory"), 1000LL });
-  store->Execute ("INSERT INTO graph_nodes (node_id, type, created_at) VALUES (?, ?, ?)",
-                  { std::string ("emb:3"), std::string ("memory"), 1000LL });
-
-  // Create graph edges: 1 -> 2 -> 3
-  store->Execute ("INSERT INTO graph_edges (source_id, target_id, edge_type, weight) "
-                  "VALUES (?, ?, ?, ?)",
-                  { std::string ("emb:1"), std::string ("emb:2"),
-                    std::string ("co_occurs_with"), 0.9 });
-  store->Execute ("INSERT INTO graph_edges (source_id, target_id, edge_type, weight) "
-                  "VALUES (?, ?, ?, ?)",
-                  { std::string ("emb:2"), std::string ("emb:3"),
-                    std::string ("causes"), 0.8 });
-
-  // v2: Create embeddings and memories for the cascade to propagate through
+  // V2: Create embeddings and memories for the cascade to propagate through
   std::vector<float> emb (kEmbeddingDim, 0.0f);
   emb[0] = 1.0f;
   cortext::testing::SeedEmbeddingV2 (*store, 1LL, emb);
@@ -94,6 +76,14 @@ TEST_CASE ("PropagateEmotionalCascade propagates through graph edges",
   cortext::testing::SeedMemoryV2 (*store, 1LL, 1LL, "test");
   cortext::testing::SeedMemoryV2 (*store, 2LL, 2LL, "test");
   cortext::testing::SeedMemoryV2 (*store, 3LL, 3LL, "test");
+
+  // V2: Create associations (graph edges): 1 -> 2 -> 3 via memory_ids
+  store->Execute ("INSERT INTO associations (source_memory_id, target_memory_id, edge_type, weight) "
+                  "VALUES (?, ?, ?, ?)",
+                  { 1LL, 2LL, std::string ("co_occurs_with"), 0.9 });
+  store->Execute ("INSERT INTO associations (source_memory_id, target_memory_id, edge_type, weight) "
+                  "VALUES (?, ?, ?, ?)",
+                  { 2LL, 3LL, std::string ("causes"), 0.8 });
 
   // v2: Set high-intensity flashbulb for source memory (inline on memories)
   const long long now = 5000;
@@ -106,7 +96,7 @@ TEST_CASE ("PropagateEmotionalCascade propagates through graph edges",
   cfg.sensitivity = 0.5; // cascade_radius = 3, decay = 0.5
   cfg.stability = 0.5;
   auto ops = std::make_unique<OperationSet> (
-      std::make_unique<EnsureGraphSchema> (),
+
       std::make_unique<PropagateEmotionalCascade> ());
   SignalProcessor processor (cfg, store, std::move (ops));
 

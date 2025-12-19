@@ -41,45 +41,14 @@ CosSim01 (const Eigen::VectorXf &a, const Eigen::VectorXf &b)
                       constants::kNormalizedMin, constants::kNormalizedMax);
 }
 
-inline double
-VarRecentScores01 (const std::deque<double> &scores, int window)
-{
-  const int n = static_cast<int> (scores.size ());
-  if (n < 2)
-    {
-      return 0.0;
-    }
-  const int start = std::max (0, n - window);
-  const int m = n - start;
-  if (m < 2)
-    {
-      return 0.0;
-    }
-  double sum = 0.0;
-  for (int i = start; i < n; ++i)
-    {
-      sum += core::Clamp (scores[static_cast<size_t> (i)],
-                          constants::kNormalizedMin, constants::kNormalizedMax);
-    }
-  const double mean = sum / static_cast<double> (m);
-  double accum = 0.0;
-  for (int i = start; i < n; ++i)
-    {
-      const double v = core::Clamp (scores[static_cast<size_t> (i)],
-                                    constants::kNormalizedMin,
-                                    constants::kNormalizedMax);
-      const double d = v - mean;
-      accum += d * d;
-    }
-  return core::Clamp (accum / static_cast<double> (m), constants::kNormalizedMin,
-                      constants::kNormalizedMax);
-}
+
 
 } // namespace
 
 void
 ComputeMetrics::Execute (OperationContext &context, Transaction &tx) const
 {
+  (void)tx;
   auto &p_ctx = context.GetProcessorContext ();
   const auto &cfg = context.GetConfig ();
   const auto &x = context.GetSignal ().embedding;

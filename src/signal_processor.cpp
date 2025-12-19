@@ -17,76 +17,6 @@ namespace
 {
 
 void
-ComputeObservedRetention (Store *store, const SignalProcessor::Config &config,
-                          const Signal &signal, OperationContext &op_context)
-{
-  if (!store)
-    {
-      return;
-    }
-  const double cutoff = core::PeripheryCutoff (config.stability);
-  const uint64_t now_ts = signal.timestamp;
-  try
-    {
-      const std::vector<std::map<std::string, std::any> > rows
-          = store->Execute ("SELECT mf.last_used FROM memory_feedback mf "
-                            "JOIN embeddings e ON e.embedding_id = mf.embedding_id "
-                            "WHERE e.strength >= ? AND mf.last_used > 0",
-                            { cutoff });
-      if (!rows.empty ())
-        {
-          double sum_age = 0.0;
-          int count = 0;
-          for (const auto &row : rows)
-            {
-              auto it = row.find ("last_used");
-              if (it == row.end ())
-                continue;
-              const std::any &v = it->second;
-              uint64_t last_used_ts = 0;
-              if (v.type () == typeid (long long))
-                {
-                  last_used_ts = static_cast<uint64_t> (
-                      std::any_cast<long long> (v));
-                }
-              else if (v.type () == typeid (int64_t))
-                {
-                  last_used_ts
-                      = static_cast<uint64_t> (std::any_cast<int64_t> (v));
-                }
-              else if (v.type () == typeid (int))
-                {
-                  last_used_ts
-                      = static_cast<uint64_t> (std::any_cast<int> (v));
-                }
-              else
-                {
-                  continue;
-                }
-              if (now_ts > last_used_ts)
-                {
-                  sum_age += static_cast<double> (now_ts - last_used_ts);
-                  count += 1;
-                }
-            }
-          if (count > 0)
-            {
-              op_context.SetObservedRetentionSeconds (
-                  sum_age / static_cast<double> (count));
-            }
-        }
-    }
-  catch (...)
-    {
-      telemetry::LogWarn (
-          "Observed retention query failed; skipping",
-          { telemetry::Attribute::String ("component", "signal_processor"),
-            telemetry::Attribute::String ("db.system", "sqlite"),
-            telemetry::Attribute::String ("db.operation", "SELECT") });
-    }
-}
-
-void
 AssembleOutputMemories (const OperationContext &op_context,
                         SignalProcessor::Output &out)
 {
@@ -159,8 +89,7 @@ GetMetricName (operations::Metric metric)
       return "valence";
     case operations::Metric::arousal:
       return "arousal";
-    case operations::Metric::goal_alignment:
-      return "goal_alignment";
+
     case operations::Metric::focus_spread:
       return "focus_spread";
     case operations::Metric::drift_mag:
@@ -776,12 +705,7 @@ SignalProcessor::SignalProcessor (const Config &config,
   // Apply schema migrations exactly once during initialization.
   if (store_)
     {
-      cortext::store::SchemaRegistry registry;
-      if (root_operation_)
-        {
-          root_operation_->CollectSchema (registry);
-        }
-      cortext::store::ApplyMigrations (*store_, registry);
+      cortext::store::ApplyMigrations (*store_);
 
       // Load persisted state for algorithm resumption (v2 schema)
       LoadState (*store_, *context_);                              // Unified state
@@ -808,7 +732,6 @@ SignalProcessor::Process (const Signal &signal)
 
   OperationContext op_context (signal, *context_, config_, store_.get ());
   context_->write_rate_window_.Record (signal.timestamp);
-  ComputeObservedRetention (store_.get (), config_, signal, op_context);
 
   try
     {
@@ -900,6 +823,7 @@ SignalProcessor::StartNewEpisode ()
 void
 SignalProcessor::FinalizeEpisode (Transaction &tx)
 {
+  (void)tx;
   telemetry::ScopedSpan span ("cortext.episode.finalize");
 
   // v2 schema: recent_context and recent_scores are now VIEWs that derive

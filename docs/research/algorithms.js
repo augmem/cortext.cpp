@@ -122,14 +122,14 @@ const createAlgorithmSections = (offset = 0) => {
                 children: [
                     new TableCell({ borders: cellBorders, children: [p("Relevance")] }),
                     new TableCell({ borders: cellBorders, children: [p("↑F")] }),
-                    new TableCell({ borders: cellBorders, children: [p([code("cos(x, μ_ctx) × (0.5 + F)")])] })
+                    new TableCell({ borders: cellBorders, children: [p([code("relevance_t = clamp(map01(cos(x_t, μ_ctx)) × (0.5 + 0.5F), 0, 1)")])] })
                 ]
             }),
             new TableRow({
                 children: [
                     new TableCell({ borders: cellBorders, children: [p("Mismatch")] }),
                     new TableCell({ borders: cellBorders, children: [p("↓F, ↑S")] }),
-                    new TableCell({ borders: cellBorders, children: [p([code("(1 − F) × S × novelty")])] })
+                    new TableCell({ borders: cellBorders, children: [p([code("(1 − F) × S × novelty_t")])] })
                 ]
             }),
             new TableRow({
@@ -143,14 +143,14 @@ const createAlgorithmSections = (offset = 0) => {
                 children: [
                     new TableCell({ borders: cellBorders, children: [p("Rarity")] }),
                     new TableCell({ borders: cellBorders, children: [p("↑F, ↓T")] }),
-                    new TableCell({ borders: cellBorders, children: [p([code("(1 − μ_sim) × (0.5 + 0.5F) × (1 − 0.2T)")])] })
+                    new TableCell({ borders: cellBorders, children: [p([code("rarity_t × (0.5 + 0.5F) × (1 − 0.2T)")])] })
                 ]
             }),
             new TableRow({
                 children: [
                     new TableCell({ borders: cellBorders, children: [p("Drift")] }),
                     new TableCell({ borders: cellBorders, children: [p("↓T")] }),
-                    new TableCell({ borders: cellBorders, children: [p([code("(drift_mag / 2) × (1 − T)")])] })
+                    new TableCell({ borders: cellBorders, children: [p([code("(drift_mag_t / 2) × (1 − T)")])] })
                 ]
             }),
             new TableRow({
@@ -164,21 +164,21 @@ const createAlgorithmSections = (offset = 0) => {
                 children: [
                     new TableCell({ borders: cellBorders, children: [p("Salience")] }),
                     new TableCell({ borders: cellBorders, children: [p("F, S")] }),
-                    new TableCell({ borders: cellBorders, children: [p([code("(rarity + novelty) / 2 × (F + S) / 2")])] })
+                    new TableCell({ borders: cellBorders, children: [p([code("(rarity_t + novelty_t) / 2 × (F + S) / 2")])] })
                 ]
             }),
             new TableRow({
                 children: [
                     new TableCell({ borders: cellBorders, children: [p("Valence")] }),
                     new TableCell({ borders: cellBorders, children: [p("S, ↓T")] }),
-                    new TableCell({ borders: cellBorders, children: [p([code("map01(Σ p_c × v_map[c])")])] })
+                    new TableCell({ borders: cellBorders, children: [p([code("valence_t")])] })
                 ]
             }),
             new TableRow({
                 children: [
                     new TableCell({ borders: cellBorders, children: [p("Arousal")] }),
                     new TableCell({ borders: cellBorders, children: [p("S, ↓T")] }),
-                    new TableCell({ borders: cellBorders, children: [p([code("clamp(Σ p_c × a_map[c], 0, 1)")])] })
+                    new TableCell({ borders: cellBorders, children: [p([code("arousal_t")])] })
                 ]
             }),
             new TableRow({
@@ -192,14 +192,14 @@ const createAlgorithmSections = (offset = 0) => {
                 children: [
                     new TableCell({ borders: cellBorders, children: [p("Periphery")] }),
                     new TableCell({ borders: cellBorders, children: [p("↑T")] }),
-                    new TableCell({ borders: cellBorders, children: [p([code("(1 − relevance) × T")])] })
+                    new TableCell({ borders: cellBorders, children: [p([code("(1 − relevance_t) × T")])] })
                 ]
             }),
             new TableRow({
                 children: [
                     new TableCell({ borders: cellBorders, children: [p("Coverage")] }),
                     new TableCell({ borders: cellBorders, children: [p("↑F")] }),
-                    new TableCell({ borders: cellBorders, children: [p([code("F × relevance")])] })
+                    new TableCell({ borders: cellBorders, children: [p([code("F × relevance_t")])] })
                 ]
             })
         ]
@@ -252,7 +252,7 @@ const createAlgorithmSections = (offset = 0) => {
 
             p([bold("Stored timestamps: "), tr("All stored timestamps are milliseconds since Unix epoch.")]),
 
-            p([bold("Naming contract (canonical): "), tr("Use the variable names below consistently throughout this document. Units: stored timestamps are integers in milliseconds (commonly suffixed *_ts, and also appearing as timestamp/created_at/last_rate_timestamp); derived time intervals in seconds use the *_s suffix. Accumulator variables: t_start, last_signal_ts, last_write_ts, drift_acc. Global variables: theta_dynamic, theta_target, hysteresis, m_rate, dt_ema, rate_ticks, reliability, last_rate_timestamp, last_retrieval_ts, drift_accum. Weight naming rule: weight_* and *_weight variables (e.g., weight_relevance, mismatch_weight, weight_surprise) are control parameters; w_* variables (e.g., w_relevance, w_mismatch, … w_arousal) are composite-score blender weights.")]),
+            p([bold("Naming contract (canonical): "), tr("Use the variable names below consistently throughout this document. Units: stored timestamps are integers in milliseconds (commonly suffixed *_ts, and also appearing as timestamp/created_at/last_rate_timestamp); derived time intervals in seconds use the *_s suffix. Accumulator variables: t_start, last_signal_ts, last_write_ts, drift_acc, eta_acc, coherence_prev, emo_max, arousal_sum, drift_accum, drift_at_last_interrupt, drift_acc_pacing, x_last_check. Global variables: u_uncertainty, mood_vector, last_mood_ts, theta_dynamic, theta_target, hysteresis, m_rate, dt_ema, rate_ticks, reliability, last_rate_timestamp, last_retrieval_ts. Weight naming rule: weight_* and *_weight variables (e.g., weight_relevance, mismatch_weight, weight_surprise) are control parameters; w_* variables (e.g., w_relevance, w_mismatch, … w_arousal) are composite-score blender weights.")]),
 
             p([bold("Time deltas: "), tr("All Δt values, elapsed times (mem_elapsed, signal_gap, idle_for), and time comparisons operate in seconds:")]),
 
@@ -261,6 +261,41 @@ const createAlgorithmSections = (offset = 0) => {
             p([code("signal_gap ← now_s() − to_s(last_signal_ts)  # seconds")], { style: "Equation" }),
 
             p([bold("Time constants: "), tr("All time-related constants are specified with explicit units (e.g., τ_min = 120 seconds, kRecencyTau = 60 seconds). Threshold limits like max_mem_time(T) and gap_threshold(T) return values in seconds.")]),
+
+            p([tr(`${s(1)}.1.2 Buffers`)], { heading: HeadingLevel.HEADING_3 }),
+
+            p([tr("The specification uses distinct streaming buffers:")]),
+
+            p([bold("signal_stream: "), tr("The raw per-signal embedding stream x_t used for scoring, uncertainty estimation, threshold/rate updates, and accumulator updates. Any context slices operate on signal_stream.")]),
+
+            p([bold("score_stream: "), tr("The per-signal scalar score stream. At each step, append score_t to score_stream. Any score lookbacks operate on score_stream.")]),
+
+            p([bold("memory_stream: "), tr("The stream of written memory representatives (e.g., e_rep/μ_acc for completed units) used for retrieval and interrupt-gate context. Sections that reference recent_memory_centroids operate on memory_stream.")]),
+
+            p([bold("recent_memory_centroids: "), tr("A bounded deque of recent memory representatives used by the interrupt gate.")]),
+            p([code("win_mem_ctx(T) = round(lerp(4, 32, T))  # max memories in interrupt context")], { style: "Equation" }),
+            p([code("On successful write_memory: recent_memory_centroids.append(e_rep); recent_memory_centroids ← tail(recent_memory_centroids, win_mem_ctx(T))")], { style: "Equation" }),
+
+            p([tr(`${s(1)}.1.3 Initialization (Normative)`)], { heading: HeadingLevel.HEADING_3 }),
+
+            p([tr("To avoid cold-start artifacts in time-based dynamics, implementations MUST initialize timestamped and EWMA state as follows:")]),
+
+            p([code("last_mood_ts ← now_ms()")], { style: "Equation" }),
+            p([code("mood_vector ← 0_vector")], { style: "Equation" }),
+
+            p([code("theta_target ← θ_prior(F, S, T)")], { style: "Equation" }),
+            p([code("theta_dynamic ← theta_target")], { style: "Equation" }),
+            p([code("hysteresis ← base_band(T)")], { style: "Equation" }),
+            p([code("reliability ← 0")], { style: "Equation" }),
+            p([code("last_retrieval_ts ← now_ms()")], { style: "Equation" }),
+
+            p([code("last_rate_timestamp ← now_ms()")], { style: "Equation" }),
+            p([code("dt_ema ← 1.0")], { style: "Equation" }),
+            p([code("rate_ticks ← 0")], { style: "Equation" }),
+            p([code("m_rate ← rate_target")], { style: "Equation" }),
+            p([code("ρ_hat_prev ← rate_target")], { style: "Equation" }),
+
+            p([tr("Per stream initialization: prev_x is unset; x_last_check is unset.")]),
 
             p([tr(`${s(1)}.2 The Three-Knob Philosophy`)], { heading: HeadingLevel.HEADING_2 }),
 
@@ -327,7 +362,11 @@ const createAlgorithmSections = (offset = 0) => {
             p([tr("Uncertainty u(t) ∈ [0, 1] modulates learning rates and evidence weighting. The raw uncertainty estimate blends multiple signals:")]),
 
             p([code("var_score_max = 0.25")], { style: "Equation" }),
-            p([code("var_recent_norm = clamp(var(scores[t−w:t]) / var_score_max, 0, 1)")], { style: "Equation" }),
+            p([code("recent_scores ← tail(score_stream, win_score(T))")], { style: "Equation" }),
+            p([code("if |recent_scores| < 2:")], { style: "Equation" }),
+            p([code("    var_recent_norm ← 0")], { style: "Equation" }),
+            p([code("else:")], { style: "Equation" }),
+            p([code("    var_recent_norm ← clamp(var(recent_scores) / var_score_max, 0, 1)")], { style: "Equation" }),
             p([code("coherence_complement = 1 − coherence_struct_t  # uses structural coherence")], { style: "Equation" }),
 
             p([tr("When prediction error signals are available, novelty and surprisal are blended:")]),
@@ -337,8 +376,10 @@ const createAlgorithmSections = (offset = 0) => {
 
             p([tr("The final raw uncertainty combines these components with knob-derived weights:")]),
 
+            p([tr("Normative note (MUST): focus_spread_t is the per-step derived focus-spread metric from Section 3.1.2 and is available each step when computing u(t).")]),
+
             p([code("weights_u = normalize([S, F, 1 − T, S × (1 − T)])")], { style: "Equation" }),
-            p([code("u_raw(t) = clamp(blend([var_recent_norm, focus_spread,")], { style: "Equation" }),
+            p([code("u_raw(t) = clamp(blend([var_recent_norm, focus_spread_t,")], { style: "Equation" }),
             p([code("                        coherence_complement, novelty_surprise],")], { style: "Equation" }),
             p([code("                       weights = weights_u), 0, 1)")], { style: "Equation" }),
 
@@ -376,8 +417,12 @@ const createAlgorithmSections = (offset = 0) => {
 
             p([tr("At each signal event t with input embedding x_t:")]),
 
-            p([code("recent_context ← tail(signals, n_ctx(T))")], { style: "Equation" }),
-            p([code("observed_cosine ← cos(x_t, mean(recent_context))")], { style: "Equation" }),
+            p([code("recent_context ← tail(signal_stream, n_ctx(T))")], { style: "Equation" }),
+            p([code("if |recent_context| == 0:")], { style: "Equation" }),
+            p([code("    μ_ctx ← 0_vector; observed_cosine ← 0  # map01(0)=0.5")], { style: "Equation" }),
+            p([code("else:")], { style: "Equation" }),
+            p([code("    μ_ctx ← mean(recent_context)")], { style: "Equation" }),
+            p([code("    observed_cosine ← cos(x_t, μ_ctx)")], { style: "Equation" }),
             p([code("weight_relevance ← EWMA(weight_relevance,")], { style: "Equation" }),
             p([code("                      map01(observed_cosine), α = α_F(t))")], { style: "Equation" }),
 
@@ -398,7 +443,7 @@ const createAlgorithmSections = (offset = 0) => {
 
             p([tr("Given Sensitivity knob S ∈ [0, 1], initialize Sensitivity control variables:")]),
 
-            p([code("rate_target = lerp(0.2, 5.0, S) × (0.5 + 1.5S)  # writes/min")], { style: "Equation" }),
+            p([code("rate_target = base_rate(S)  # writes/min")], { style: "Equation" }),
             p([code("weight_novelty = 0.3 + 0.7S")], { style: "Equation" }),
             p([code("weight_surprise = 0.2 + 0.8S")], { style: "Equation" }),
             p([code("weight_valence = 0.4 + 0.6S")], { style: "Equation" }),
@@ -447,12 +492,15 @@ const createAlgorithmSections = (offset = 0) => {
             p([tr(`Distinct from instantaneous emotion, the mood state M_t ∈ ℝ⁶ maintains a persistent background affective tone as a 6-dimensional vector (one component per emotion category from Section ${s(2)}.2.2):`)]),
 
             p([code("α_mood(S) = lerp(0.01, 0.20, S)  # reactivity")], { style: "Equation" }),
-            p([code("λ_mood(T) = lerp(0.90, 0.999, T)  # decay")], { style: "Equation" }),
-            p([code("e_t ← p_c for each c ∈ C  # 6D emotion probability vector")], { style: "Equation" }),
-            p([code("M_t = λ_mood(T) × M_{t−1} + α_mood(S) × e_t")], { style: "Equation" }),
+            p([code("half_life_mood(T) = lerp(30, 600, T)  # seconds")], { style: "Equation" }),
+            p([code("Δt_mood ← now_s() − to_s(last_mood_ts)")], { style: "Equation" }),
+            p([code("λ_mood(Δt_mood, T) ← exp(−ln(2) × Δt_mood / max(half_life_mood(T), ε))")], { style: "Equation" }),
+            p([code("e_t ← p_c − (1/6)  # centered 6D vector (can be negative)")], { style: "Equation" }),
+            p([code("M_t = λ_mood(Δt_mood, T) × M_{t−1} + α_mood(S) × e_t")], { style: "Equation" }),
             p([code("M_t ← clamp_elementwise(M_t, −1.0, 1.0)  # per-component")], { style: "Equation" }),
+            p([code("last_mood_ts ← now_ms()  # update timestamp after mood update (ms)")], { style: "Equation" }),
 
-            p([tr("Note that this update does not enforce coefficient normalization; the explicit elementwise clamp handles potential accumulation. The mood state provides a separate threshold bias via its normalized magnitude:")]),
+            p([tr("Because e_t is centered around zero, M_t can have both positive and negative components, reflecting sustained elevation or suppression relative to baseline. The mood state provides a separate threshold bias via its normalized magnitude:")]),
 
             p([code("κ_mood ← κ_base × S")], { style: "Equation" }),
             p([code("m_norm ← ‖M_t‖ / √6  # max norm when all components at 1")], { style: "Equation" }),
@@ -510,14 +558,24 @@ const createAlgorithmSections = (offset = 0) => {
             new Paragraph({ children: [new PageBreak()] }),
             p([tr(`${s(3)}. Structural Metrics and Composite Scoring`)], { heading: HeadingLevel.HEADING_1 }),
 
+            p([tr("Context definitions (used throughout Table 1 and structural metrics):")]),
+            p([code("recent_context ← tail(signal_stream, n_ctx(T))")], { style: "Equation" }),
+            p([code("if |recent_context| == 0:")], { style: "Equation" }),
+            p([code("    μ_ctx ← 0_vector  # define cos(x_t, μ_ctx)=0 so map01(cos)=0.5")], { style: "Equation" }),
+            p([code("else:")], { style: "Equation" }),
+            p([code("    μ_ctx ← mean(recent_context)")], { style: "Equation" }),
+
             p([tr(`${s(3)}.1 Embedding-Derived Metrics`)], { heading: HeadingLevel.HEADING_2 }),
 
             p([tr(`${s(3)}.1.1 Structural Coherence`)], { heading: HeadingLevel.HEADING_3 }),
 
             p([tr(`Structural coherence (coherence_struct) measures integration of the current signal with the broader context window. This metric is distinct from memory coherence (coherence_mem, defined in Section ${s(4)}.4.2) which tracks within-memory similarity:`)]),
 
-            p([code("raw ← var([cos(x_t, c) for c in recent_context])")], { style: "Equation" }),
-            p([code("coherence_struct_t ← 1 − clamp(raw, 0, 1)  # range [0, 1]")], { style: "Equation" }),
+            p([code("if |recent_context| < 2:")], { style: "Equation" }),
+            p([code("    coherence_struct_t ← 0.5  # neutral")], { style: "Equation" }),
+            p([code("else:")], { style: "Equation" }),
+            p([code("    raw ← var([cos(x_t, c) for c in recent_context])")], { style: "Equation" }),
+            p([code("    coherence_struct_t ← 1 − clamp(raw, 0, 1)  # range [0, 1]")], { style: "Equation" }),
 
             p([tr("High structural coherence (low variance in similarities) indicates the signal fits consistently with context. The effective Focus is modulated: F_eff = F × (0.5 + 0.5 × coherence_struct_t).")]),
 
@@ -526,6 +584,7 @@ const createAlgorithmSections = (offset = 0) => {
             p([tr("Focus spread quantifies the entropy of attention over nearest neighbors:")]),
 
             p([code("k ← k_neighbors(T) = round(lerp(8, 32, T))")], { style: "Equation" }),
+            p([tr("Normative note (MUST): kNN_similarities MUST be computed by querying memory_stream with q = x_t and k = k_neighbors(T) (not recent_context).")]),
             p([code("p ← softmax(kNN_similarities)")], { style: "Equation" }),
             p([code("focus_spread_t ← H(p) / ln(k)")], { style: "Equation" }),
 
@@ -535,29 +594,36 @@ const createAlgorithmSections = (offset = 0) => {
 
             p([tr("Drift measures directional change in context centroids:")]),
 
+            p([code("k_ctx(T) = round(lerp(3, 10, T))  # step lag for drift")], { style: "Equation" }),
+            p([code("ctx_t = signal_stream[t − n_ctx(T) + 1 : t]  # inclusive end")], { style: "Equation" }),
+            p([code("ctx_{t−k} = signal_stream[t − k_ctx(T) − n_ctx(T) + 1 : t − k_ctx(T)]")], { style: "Equation" }),
             p([code("drift_vec_t ← l2_normalize(mean(ctx_t)) −")], { style: "Equation" }),
             p([code("              l2_normalize(mean(ctx_{t−k}))")], { style: "Equation" }),
             p([code("drift_mag_t ← ‖drift_vec_t‖")], { style: "Equation" }),
 
-            p([tr("Since both centroids are unit-normalized, drift_mag_t ∈ [0, 2]. A threshold determines episode boundaries:")]),
+            p([tr("Since both centroids are unit-normalized, drift_mag_t ∈ [0, 2]. A threshold defines an informational drift-boundary signal:")]),
 
             p([code("drift_threshold ← lerp(0.10, 0.35, T)")], { style: "Equation" }),
-            p([code("if drift_mag_t > drift_threshold:")], { style: "Equation" }),
-            p([code("    trigger_episode_boundary()")], { style: "Equation" }),
+            p([code("drift_boundary_t ← (drift_mag_t > drift_threshold)")], { style: "Equation" }),
+            p([tr(`Normative note (MUST): drift_boundary_t is informational and MUST NOT trigger a memory flush on its own. Memory flush decisions are defined by should_flush in Section ${s(4)}.4.3.`)]),
 
             p([tr(`${s(3)}.1.4 Embedding Prediction Error`)], { heading: HeadingLevel.HEADING_3 }),
 
             p([tr("We measure surprisal as the deviation of the current embedding from the predicted trajectory in latent space:")]),
 
-            p([code("Δx_t = x_t − x_{t−1}")], { style: "Equation" }),
-            p([code("Δx_trend_t = EWMA(Δx_trend_{t−1}, Δx_t, α=0.1)")], { style: "Equation" }),
-            p([code("x_pred_t = x_{t−1} + Δx_trend_{t−1}")], { style: "Equation" }),
-            p([code("prediction_error_t = 1 − cos(x_pred_t, x_t)")], { style: "Equation" }),
+            p([code("if prev_x is unset:")], { style: "Equation" }),
+            p([code("    surprisal_t ← 0")], { style: "Equation" }),
+            p([code("    Δx_trend_t ← 0_vector")], { style: "Equation" }),
+            p([code("else:")], { style: "Equation" }),
+            p([code("    Δx_t = x_t − prev_x")], { style: "Equation" }),
+            p([code("    Δx_trend_t = EWMA(Δx_trend_{t−1}, Δx_t, α=0.1)")], { style: "Equation" }),
+            p([code("    x_pred_t = prev_x + Δx_trend_{t−1}")], { style: "Equation" }),
+            p([code("    prediction_error_t = 1 − cos(x_pred_t, x_t)")], { style: "Equation" }),
 
             p([tr("This error is normalized to produce the surprisal signal:")]),
 
             p([code("err_max = 0.5")], { style: "Equation" }),
-            p([code("surprisal_t ← clamp(prediction_error_t / err_max, 0, 1)")], { style: "Equation" }),
+            p([code("    surprisal_t ← clamp(prediction_error_t / err_max, 0, 1)")], { style: "Equation" }),
 
             p([tr("This formulation captures purely kinematic surprise in the thought process")]),
 
@@ -590,19 +656,22 @@ const createAlgorithmSections = (offset = 0) => {
 
             p([code("τ_rls ← lerp(20.0, 80.0, T)")], { style: "Equation" }),
             p([code("confidence_rls ← 1 − exp(−t / τ_rls)")], { style: "Equation" }),
-            p([code("weight_i(t) ← (1 − confidence_rls) × w_bootstrap[i] +")], { style: "Equation" }),
-            p([code("               confidence_rls × w_rls[i]")], { style: "Equation" }),
+            p([code("w_rls01[i] ← clamp(w_rls[i], 0, 1)  # constrain fitted weights to mixture range")], { style: "Equation" }),
+            p([code("weight_i(t) ← clamp((1 − confidence_rls) × w_bootstrap[i] +")], { style: "Equation" }),
+            p([code("                      confidence_rls × w_rls01[i], 0, 1)")], { style: "Equation" }),
 
             p([tr(`${s(3)}.3.1 Score Normalization`)], { heading: HeadingLevel.HEADING_3 }),
 
             p([tr("Composite score computation requires careful normalization:")]),
 
             p([code("for each metric i:")], { style: "Equation" }),
-            p([code("    m01[i] = map01(metric[i]) if signed else clamp(metric[i], 0, 1)")], { style: "Equation" }),
+            p([code("    m01[i] = clamp(metric[i], 0, 1)")], { style: "Equation" }),
             p([code("weight_sum ← Σ weights[i]")], { style: "Equation" }),
             p([code("if weight_sum < ε: return 0")], { style: "Equation" }),
             p([code("weights_norm[i] ← weights[i] / weight_sum")], { style: "Equation" }),
             p([code("score ← clamp(Σ weights_norm[i] × m01[i], 0, 1)")], { style: "Equation" }),
+
+            p([tr("Invariant (MUST): all 12 Table 1 metric values are defined on [0, 1].")]),
 
             p([tr("Weight normalization is critical: with 12 metrics and raw weights averaging ~0.6, the sum approaches 7.2. Without normalization, weighted sums would saturate and collapse variance.")]),
         ],
@@ -622,13 +691,16 @@ const createAlgorithmSections = (offset = 0) => {
 
             p([tr("Observed evidence comes from the 90th percentile of recent scores:")]),
 
-            p([code("w ← win_score(T)")], { style: "Equation" }),
-            p([code("observed_p90 ← percentile(scores[t−w:t], 90)")], { style: "Equation" }),
+            p([code("recent_scores ← tail(score_stream, win_score(T))")], { style: "Equation" }),
+            p([code("if |recent_scores| == 0:")], { style: "Equation" }),
+            p([code("    observed_p90 ← θ_prior  # no evidence yet")], { style: "Equation" }),
+            p([code("else:")], { style: "Equation" }),
+            p([code("    observed_p90 ← percentile(recent_scores, 90)")], { style: "Equation" }),
 
             p([tr("Prior and evidence masses weight the blend:")]),
 
             p([code("ρ_prior ← prior_mass(T) = round(lerp(2, 32, T))")], { style: "Equation" }),
-            p([code("ρ_obs ← u(t) × min(w, count)")], { style: "Equation" }),
+            p([code("ρ_obs ← u(t) × |recent_scores|")], { style: "Equation" }),
 
             p([tr("The target threshold blends prior and evidence:")]),
 
@@ -644,7 +716,7 @@ const createAlgorithmSections = (offset = 0) => {
             p([tr(`${s(4)}.2.1 Rate Estimation`)], { heading: HeadingLevel.HEADING_3 }),
 
             p([code("Δt ← now_s() − to_s(last_rate_timestamp)")], { style: "Equation" }),
-            p([code("Δt ← max(Δt, 10⁻³)  # minimum 1ms")], { style: "Equation" }),
+            p([code("Δt ← max(Δt, 10⁻³)  # minimum 1e-3 s (1 ms)")], { style: "Equation" }),
             p([code("α_dt ← 1 − exp(−Δt / 1.0)")], { style: "Equation" }),
             p([code("dt_ema ← (1 − α_dt) × dt_ema + α_dt × Δt")], { style: "Equation" }),
             p([code("dt_base ← max(dt_ema, 1.0)")], { style: "Equation" }),
@@ -657,10 +729,13 @@ const createAlgorithmSections = (offset = 0) => {
             p([tr("Instantaneous rate estimation with bias correction. Δwrites is the binary indicator (0 or 1) of whether a write occurred during the current timestep:")]),
 
             p([code("Δwrites ← 1 if write_memory else 0  # binary write event")], { style: "Equation" }),
+            p([tr("Normative note (MUST): Δwrites is computed from the current step's write_memory decision. Rate state updates occur after the write decision and affect subsequent timesteps.")]),
             p([code("ρ_inst ← (Δwrites / Δt) × 60  # writes per minute")], { style: "Equation" }),
             p([code("m_rate ← (1 − α) × m_rate + α × ρ_inst")], { style: "Equation" }),
             p([code("denom ← max(1 − (1 − α)^(rate_ticks + 1), ε)")], { style: "Equation" }),
-            p([code("ρ_hat ← m_rate / denom  # bias-corrected estimate")], { style: "Equation" }),
+            p([code("ρ_hat_next ← m_rate / denom  # bias-corrected estimate for next step")], { style: "Equation" }),
+            p([code("rate_ticks ← rate_ticks + 1")], { style: "Equation" }),
+            p([code("last_rate_timestamp ← now_ms()  # update after rate computation")], { style: "Equation" }),
 
             p([tr(`${s(4)}.2.2 Effective Sample Size`)], { heading: HeadingLevel.HEADING_3 }),
 
@@ -676,8 +751,10 @@ const createAlgorithmSections = (offset = 0) => {
 
             p([tr("The rate error drives threshold adjustment:")]),
 
-            p([code("rate_error ← tanh((ρ_hat − rate_target_t) /")], { style: "Equation" }),
-            p([code("                  max(rate_target_t, ε))")], { style: "Equation" }),
+            p([tr("Normative note (MUST): ρ_hat_prev is stored state entering the timestep. After the write decision, the rate-state update computes ρ_hat_next; the assignment ρ_hat_prev ← ρ_hat_next occurs at end of step (see Appendix C).")]),
+
+            p([code("rate_error ← tanh((ρ_hat_prev − rate_target) /")], { style: "Equation" }),
+            p([code("                  max(rate_target, ε))")], { style: "Equation" }),
             p([code("κ_r = 0.10  # rate error gain")], { style: "Equation" }),
             p([code("cap_homeo ← 0.25 × hysteresis")], { style: "Equation" }),
             p([code("Δθ_homeo ← clamp(reliability × κ_r × (1 − T) ×")], { style: "Equation" }),
@@ -690,7 +767,11 @@ const createAlgorithmSections = (offset = 0) => {
 
             p([tr("Sensitivity modulates threshold based on recent score volatility:")]),
 
-            p([code("σ_scores ← std(scores[t−w:t])")], { style: "Equation" }),
+            p([code("recent_scores ← tail(score_stream, win_score(T))")], { style: "Equation" }),
+            p([code("if |recent_scores| < 2:")], { style: "Equation" }),
+            p([code("    σ_scores ← 0")], { style: "Equation" }),
+            p([code("else:")], { style: "Equation" }),
+            p([code("    σ_scores ← std(recent_scores)")], { style: "Equation" }),
             p([code("κ_sens = 0.08  # sensitivity gain")], { style: "Equation" }),
             p([code("cap_sens ← 0.20 × hysteresis")], { style: "Equation" }),
             p([code("Δθ_sens ← clamp(−κ_sens × S × (σ_scores − 0.1),")], { style: "Equation" }),
@@ -745,15 +826,31 @@ const createAlgorithmSections = (offset = 0) => {
             p([code("s_max ← max signal score in memory")], { style: "Equation" }),
             p([code("n ← count of signals in memory")], { style: "Equation" }),
             p([code("e_peak ← embedding of highest-scoring signal")], { style: "Equation" }),
+            p([code("emo_max ← 0  # max emotion_intensity_t within the unit")], { style: "Equation" }),
+            p([code("arousal_sum ← 0  # sum of arousal_t within the unit (for avg)")], { style: "Equation" }),
             p([code("t_start ← now_ms()  # timestamp of accumulation start (ms since epoch)")], { style: "Equation" }),
             p([code("last_signal_ts ← now_ms()  # timestamp of previous signal (ms, for gap detection)")], { style: "Equation" }),
+            p([code("last_write_ts ← 0  # ms; 0 means \"no prior write\" for refractory")], { style: "Equation" }),
+            p([code("eta_acc ← 0  # drift EWMA state")], { style: "Equation" }),
+            p([code("coherence_prev ← 0  # previous coherence (initialize to 0)")], { style: "Equation" }),
+            p([code("acc_signals_window ← []  # ring buffer of recent embeddings for coherence")], { style: "Equation" }),
+
+            p([tr("Reset behavior: reset_accumulator() clears μ_acc, drift_acc, s_sum, s_max, n, e_peak, emo_max, arousal_sum, eta_acc, coherence_prev, and sets acc_signals_window ← [] (and refreshes t_start/last_signal_ts for the next unit), but retains last_write_ts so the refractory term remains well-defined across boundaries.")]),
+            p([code("reset_accumulator(): acc_signals_window ← []  # MUST clear coherence window at boundaries")], { style: "Equation" }),
 
             p([tr("On each signal, update running statistics (note: n is the count before this signal):")]),
 
+            p([code("signal_gap_s ← now_s() − to_s(last_signal_ts)  # compute BEFORE updating last_signal_ts")], { style: "Equation" }),
+
+            p([code("win_coh(T) = round(lerp(8, 32, T))  # coherence window size")], { style: "Equation" }),
+            p([code("acc_signals_window ← tail(acc_signals_window, win_coh(T))")], { style: "Equation" }),
+
             p([code("μ_acc ← (n × μ_acc + x_t) / (n + 1)")], { style: "Equation" }),
             p([code("n ← n + 1")], { style: "Equation" }),
-            p([code("drift_acc ← drift_acc + drift_mag_t")], { style: "Equation" }),
+            p([code("drift_acc ← drift_acc + (drift_mag_t / 2)  # accumulate normalized context-centroid drift (drift_mag_t ∈ [0,2])")], { style: "Equation" }),
             p([code("s_sum ← s_sum + score_t")], { style: "Equation" }),
+            p([code("emo_max ← max(emo_max, emotion_intensity_t)")], { style: "Equation" }),
+            p([code("arousal_sum ← arousal_sum + arousal_t")], { style: "Equation" }),
             p([code("if score_t > s_max:")], { style: "Equation" }),
             p([code("    s_max ← score_t; e_peak ← x_t")], { style: "Equation" }),
             p([code("last_signal_ts ← now_ms()  # update timestamp for next gap calculation (ms)")], { style: "Equation" }),
@@ -764,11 +861,18 @@ const createAlgorithmSections = (offset = 0) => {
 
             p([code("ε_noise = 0.02  # noise floor for drift")], { style: "Equation" }),
             p([code("d_step ← max(drift_mag_t − ε_noise, 0)")], { style: "Equation" }),
-            p([code("eta_acc ← EWMA(eta_acc, d_step, α = lerp(0.3, 0.1, T))")], { style: "Equation" }),
+            p([code("eta_prev ← eta_acc  # baseline before updating EWMA")], { style: "Equation" }),
 
             p([tr("Memory coherence tracks similarity within the current memory accumulation window (range [−1, 1] from mean cosine):")]),
 
-            p([code("coherence_prev ← mean([cos(x_t, x_i) for x_i in current_window])")], { style: "Equation" }),
+            p([code("current_window ← acc_signals_window  # embeddings from the current unit before x_t")], { style: "Equation" }),
+            p([code("if |current_window| == 0:")], { style: "Equation" }),
+            p([code("    coherence_curr ← 1.0  # empty-window fallback")], { style: "Equation" }),
+            p([code("else:")], { style: "Equation" }),
+            p([code("    coherence_curr ← mean([cos(x_t, x_i) for x_i in current_window])")], { style: "Equation" }),
+            p([code("# After computing coherence_curr, append x_t for the next step")], { style: "Equation" }),
+            p([code("acc_signals_window.append(x_t); acc_signals_window ← tail(acc_signals_window, win_coh(T))")], { style: "Equation" }),
+            p([code("# coherence_prev is the stored coherence value from the previous step")], { style: "Equation" }),
 
             p([tr(`Note: coherence_mem is distinct from coherence_struct (Section ${s(3)}.1.1). The former tracks within-memory similarity using raw mean cosine, while the latter measures variance-based integration with broader context. This dual-signal approach mirrors EM-LLM's boundary detection mechanism. In their formulation, boundaries occur where surprise (token-level prediction error) exceeds a threshold and segment cohesion drops. Our drift spike approximates surprise via embedding-space velocity, while coherence_mem drop captures within-memory similarity degradation.`)]),
 
@@ -778,10 +882,17 @@ const createAlgorithmSections = (offset = 0) => {
 
             p([code("weight_drift_component = lerp(0.6, 0.4, T)  # weight on drift")], { style: "Equation" }),
             p([code("weight_coh_component = 1 − weight_drift_component  # weight on coherence drop")], { style: "Equation" }),
-            p([code("drift_spike ← (d_step − eta_acc) / max(eta_acc, ε)")], { style: "Equation" }),
-            p([code("coh_drop ← max(0, coherence_prev − coherence_curr)")], { style: "Equation" }),
+            p([code("ε0 = 0.01  # cold-start guard for eta_prev")], { style: "Equation" }),
+            p([code("if eta_prev < ε0:")], { style: "Equation" }),
+            p([code("    drift_spike ← 0")], { style: "Equation" }),
+            p([code("else:")], { style: "Equation" }),
+            p([code("    drift_spike ← (d_step − eta_prev) / max(eta_prev, ε)")], { style: "Equation" }),
+            p([code("eta_acc ← EWMA(eta_prev, d_step, α = lerp(0.3, 0.1, T))")], { style: "Equation" }),
+            p([code("coh_drop01 ← clamp((coherence_prev − coherence_curr) / 2, 0, 1)")], { style: "Equation" }),
+            p([code("coherence_prev ← coherence_curr  # update for next step")], { style: "Equation" }),
             p([code("boundary_score ← weight_drift_component × sigmoid(drift_spike) +")], { style: "Equation" }),
-            p([code("                  weight_coh_component × coh_drop")], { style: "Equation" }),
+            p([code("                  weight_coh_component × coh_drop01")], { style: "Equation" }),
+            p([code("boundary_score ← clamp(boundary_score, 0, 1)")], { style: "Equation" }),
 
             p([tr("Boundary threshold and limits:")]),
 
@@ -795,9 +906,9 @@ const createAlgorithmSections = (offset = 0) => {
             p([code("should_flush = (boundary_score > b_thresh(F, S)) OR")], { style: "Equation" }),
             p([code("               (mem_elapsed > max_mem_time(T)) OR")], { style: "Equation" }),
             p([code("               (drift_acc > max_mem_drift(S)) OR")], { style: "Equation" }),
-            p([code("               (signal_gap > gap_threshold(T))")], { style: "Equation" }),
+            p([code("               (signal_gap_s > gap_threshold(T))")], { style: "Equation" }),
 
-            p([tr("where signal_gap = now_s() − to_s(last_signal_ts) detects natural pauses (speech pauses, generation delays):")]),
+            p([tr("where signal_gap_s = now_s() − to_s(last_signal_ts) is computed at the start of signal processing (before last_signal_ts is updated), detecting natural pauses (speech pauses, generation delays):")]),
 
             p([code("gap_threshold(T) = lerp(5, 30, T)  # seconds")], { style: "Equation" }),
 
@@ -807,12 +918,13 @@ const createAlgorithmSections = (offset = 0) => {
 
             p([code("spike_margin(S) = lerp(0.3, 0.15, S)  # above θ_dynamic")], { style: "Equation" }),
             p([code("spike_bypass = score_t > (θ_dynamic + spike_margin(S))")], { style: "Equation" }),
+            p([code("force_write ← false")], { style: "Equation" }),
 
             p([tr("When spike_bypass triggers:")]),
 
-            p([code("if spike_bypass AND n > 1:")], { style: "Equation" }),
-            p([code("    commit_memory()  # includes spike signal")], { style: "Equation" }),
-            p([code("    reset_accumulator()")], { style: "Equation" }),
+            p([code("if spike_bypass:")], { style: "Equation" }),
+            p([code("    should_flush = true   # force a boundary")], { style: "Equation" }),
+            p([code("    force_write = true   # bypass S_window > θ_memory")], { style: "Equation" }),
 
             p([tr("This ensures flashbulb moments capture their surrounding context rather than creating isolated micro-memories.")]),
 
@@ -836,7 +948,9 @@ const createAlgorithmSections = (offset = 0) => {
             p([tr("Final write decision:")]),
 
             p([code("θ_memory ← θ_dynamic × M_write_refrac")], { style: "Equation" }),
-            p([code("write_memory = (should_flush OR spike_bypass) AND (S_window > θ_memory)")], { style: "Equation" }),
+            p([code("write_memory = force_write OR (should_flush AND (S_window > θ_memory))")], { style: "Equation" }),
+            p([code("if write_memory: last_write_ts ← now_ms()  # update refractory timestamp (ms)")], { style: "Equation" }),
+            p([tr("Normative rule (MUST): if should_flush is true, the current unit must be finalized. If write_memory is false, discard the unit and reset_accumulator() anyway (do not update last_write_ts). This prevents perpetual should_flush states (time cap / drift cap / gap cap) while never resetting.")]),
 
             p([tr("Trace note: if a run trace reports both write_decision and stored, interpret write_decision as the boolean gate outcome at the boundary (the write_memory predicate above). Interpret stored as the eventual recording outcome (after any final safety checks).")]),
 
@@ -845,7 +959,7 @@ const createAlgorithmSections = (offset = 0) => {
             p([code("ρ(F) = lerp(0.3, 0.7, F)  # mean vs peak blend")], { style: "Equation" }),
             p([code("e_rep ← l2_normalize(ρ(F) × μ_acc + (1 − ρ(F)) × e_peak)")], { style: "Equation" }),
 
-            p([tr("On write: store e_rep with metadata {n, s_max, s_avg, drift_acc, mem_elapsed}. Reset accumulator for next unit.")]),
+            p([tr("On write: store e_rep with metadata {n, s_max, s_avg, drift_acc, mem_elapsed, s_emotion_max=emo_max, s_arousal_avg=arousal_sum / max(n, 1)}. Append e_rep to memory_stream and recent_memory_centroids. Reset accumulator for next unit.")]),
         ],
 
         // ==================== SECTION 5: REINFORCEMENT AND DECAY ====================
@@ -864,7 +978,8 @@ const createAlgorithmSections = (offset = 0) => {
             p([code("use_frequency_t ← EWMA(use_frequency_{t−1},")], { style: "Equation" }),
             p([code("                       used_flag(m), α = α_S(t))")], { style: "Equation" }),
             p([code("λ_t ← ln(2) / half_life_t")], { style: "Equation" }),
-            p([code("strength_t ← strength_{t−1} × exp(−λ_t × Δt) + S × use_frequency_t")], { style: "Equation" }),
+            p([code("strength_t ← clamp(strength_{t−1} × exp(−λ_t × Δt) +")], { style: "Equation" }),
+            p([code("                   S × use_frequency_t, 0, 1)")], { style: "Equation" }),
 
             p([tr("Memories falling below the periphery cutoff are candidates for eviction:")]),
 
@@ -877,8 +992,8 @@ const createAlgorithmSections = (offset = 0) => {
 
             p([code("influence_factor ← (used_count / max(retrieved_count, 1)) ×")], { style: "Equation" }),
             p([code("                    clamp(contextual_gain(m), −1, +1)")], { style: "Equation" }),
-            p([code("strength_t ← strength_{t−1} × exp(−λ_t × Δt) +")], { style: "Equation" }),
-            p([code("              S × use_frequency_t + F × influence_factor")], { style: "Equation" }),
+            p([code("strength_t ← clamp(strength_{t−1} × exp(−λ_t × Δt) +")], { style: "Equation" }),
+            p([code("                   S × use_frequency_t + F × influence_factor, 0, 1)")], { style: "Equation" }),
 
             p([tr(`${s(5)}.3 Causal Feedback Loop`)], { heading: HeadingLevel.HEADING_2 }),
 
@@ -988,7 +1103,7 @@ const createAlgorithmSections = (offset = 0) => {
             p([code("maintenance_cost_per_memory = lerp(0.05, 0.15, S)")], { style: "Equation" }),
             p([code("complexity_penalty = manifold_complexity × lerp(0.5, 1.5, S)")], { style: "Equation" }),
 
-            p([tr("The manifold_complexity represents local variance in the embedding stream: 1 - mean(cos(window)).")]),
+            p([tr("The manifold_complexity is defined as a normalized local variability proxy (see Appendix B): manifold_complexity ← clamp((1 − mean_cos_window) / 2, 0, 1).")]),
 
             p([tr(`${s(6)}.1.3 Memory-Level Gating`)], { heading: HeadingLevel.HEADING_3 }),
 
@@ -1002,13 +1117,21 @@ const createAlgorithmSections = (offset = 0) => {
             p([tr(`Working memory gating evaluates coherent memories at accumulation boundaries (Section ${s(4)}.4.3), not individual signals:`)]),
 
             p([code("on_memory_boundary:")], { style: "Equation" }),
-            p([code("    memory_benefit ← α × S_window + β × relevance(μ_acc, task_context) +")], { style: "Equation" }),
-            p([code("                       γ × novelty(μ_acc, active_memories)")], { style: "Equation" }),
+            p([code("    [α, β, γ] ← normalize([lerp(0.55, 0.70, F),   # window score weight")], { style: "Equation" }),
+            p([code("                        lerp(0.20, 0.35, F),   # task relevance weight")], { style: "Equation" }),
+            p([code("                        lerp(0.10, 0.30, S)])   # novelty-to-WM weight")], { style: "Equation" }),
+            p([code("    memory_benefit ← α × S_window + β × relevance_to_task(μ_acc, task_context) +")], { style: "Equation" }),
+            p([code("                       γ × novelty_to_set(μ_acc, {m.embedding | m ∈ active_memories})")], { style: "Equation" }),
             p([code("    margin ← memory_benefit − gate_threshold")], { style: "Equation" }),
-            p([code("    total_cost ← maintenance_cost_per_memory × |active_memories| + complexity_penalty")], { style: "Equation" }),
+            p([code("    k ← |active_memories|")], { style: "Equation" }),
+            p([code("    C ← max(base_capacity, 1)")], { style: "Equation" }),
+            p([code("    p_cap ← 3")], { style: "Equation" }),
+            p([code("    capacity_pressure(k, C) ← 1 + max(0, (k − C) / C)^p_cap")], { style: "Equation" }),
+            p([code("    base_cost ← maintenance_cost_per_memory × k + complexity_penalty")], { style: "Equation" }),
+            p([code("    total_cost ← base_cost × capacity_pressure(k, C)")], { style: "Equation" }),
             p([code("    accept_memory = (margin ≥ total_cost)")], { style: "Equation" }),
 
-            p([tr("Note that total_cost is computed from existing active memories only, not the prospective new memory. This avoids a bootstrap problem where empty working memory would require unreasonably high benefit scores to accept the first item.")]),
+            p([tr("Note that total_cost is computed from existing active memories only (k is the current count), so k=0 yields no bootstrap penalty. Capacity pressure activates only when k > C.")]),
 
             p([tr(`${s(6)}.1.4 Chunking at Memory Level`)], { heading: HeadingLevel.HEADING_3 }),
 
@@ -1133,7 +1256,7 @@ const createAlgorithmSections = (offset = 0) => {
             p([tr(`Consolidation operates on stored memory representatives (e_rep from Section ${s(4)}.4.5), not individual signals. It activates under capacity, rate, or temporal conditions:`)]),
 
             p([code("should_consolidate = (memory_count > consolidation_threshold) OR")], { style: "Equation" }),
-            p([code("                      (m_rate < rate_target_t / 2) OR")], { style: "Equation" }),
+            p([code("                      (m_rate < rate_target / 2) OR")], { style: "Equation" }),
             p([code("                      (elapsed_time > consolidation_interval)")], { style: "Equation" }),
 
             p([tr("The consolidation rate adapts to Stability and Sensitivity (write_rate tracks memory writes, not signal writes):")]),
@@ -1147,6 +1270,7 @@ const createAlgorithmSections = (offset = 0) => {
 
             p([code("idle_required(T) = round(0.25 × win_rate_s(T))")], { style: "Equation" }),
             p([code("idle_for_s = now_s() − to_s(last_retrieval_ts)")], { style: "Equation" }),
+            p([tr("Normative rule (MUST): on any retrieval attempt (including interrupt injection), set last_retrieval_ts ← now_ms().")]),
             p([code("# Consolidation waits for memory completion, not just signal arrival")], { style: "Equation" }),
             p([code("should_start = (NOT is_accumulating_memory) AND")], { style: "Equation" }),
             p([code("                (retrieval_queue_depth == 0) AND")], { style: "Equation" }),
@@ -1204,12 +1328,16 @@ const createAlgorithmSections = (offset = 0) => {
 
             p([tr("Edge types capture relationships:")]),
 
+            p([tr("Edge weight convention (MUST): all association weights are normalized to [0, 1]. For cosine-based edges, store weight01 = clamp((cos_sim + 1) / 2, 0, 1).")]),
+
             p([bold("co_occurs: "), tr("Shared context or temporal proximity")], { numbering: { reference: "bullet-list", level: 0 } }),
             p([bold("implies: "), tr("Directional correlation in embedding drift")], { numbering: { reference: "bullet-list", level: 0 } }),
             p([bold("causes: "), tr("Directional correlation in embedding drift")], { numbering: { reference: "bullet-list", level: 0 } }),
             p([bold("contradicts: "), tr("Strong negative similarity or constraint violation")], { numbering: { reference: "bullet-list", level: 0 } }),
             p([bold("reinforces: "), tr("Frequent joint retrieval")], { numbering: { reference: "bullet-list", level: 0 } }),
             p([bold("derived_from: "), tr("Links summaries to source memories")], { numbering: { reference: "bullet-list", level: 0 } }),
+            p([bold("similar_to: "), tr("High cosine similarity (soft equivalence)")], { numbering: { reference: "bullet-list", level: 0 } }),
+            p([bold("has_label: "), tr("Attaches an extracted label/tag to a node")], { numbering: { reference: "bullet-list", level: 0 } }),
 
             p([tr(`${s(7)}.5.1 Edge Construction`)], { heading: HeadingLevel.HEADING_3 }),
 
@@ -1218,7 +1346,8 @@ const createAlgorithmSections = (offset = 0) => {
             p([code("for (m_i, m_j) in cluster.sources:")], { style: "Equation" }),
             p([code("    cos_sim ← cos(m_i.embedding, m_j.embedding)")], { style: "Equation" }),
             p([code("    if cos_sim > lerp(0.85, 0.95, F):")], { style: "Equation" }),
-            p([code("        create_edge(m_i, m_j, 'co_occurs', cos_sim)")], { style: "Equation" }),
+            p([code("        weight01 ← clamp((cos_sim + 1) / 2, 0, 1)")], { style: "Equation" }),
+            p([code("        create_edge(m_i, m_j, 'co_occurs', weight01)")], { style: "Equation" }),
 
             p([tr("Causal edges derive from temporal drift:")]),
 
@@ -1228,7 +1357,8 @@ const createAlgorithmSections = (offset = 0) => {
             p([code("    drift_vec ← m_j.embedding − m_i.embedding")], { style: "Equation" }),
             p([code("    drift_mag ← ‖drift_vec‖")], { style: "Equation" }),
             p([code("    if drift_mag > lerp(0.15, 0.35, T):")], { style: "Equation" }),
-            p([code("        create_edge(m_i, m_j, 'causes', drift_mag)")], { style: "Equation" }),
+            p([code("        weight01 ← clamp(drift_mag / 2, 0, 1)  # drift_mag ∈ [0,2] when embeddings are L2-normalized")], { style: "Equation" }),
+            p([code("        create_edge(m_i, m_j, 'causes', weight01)")], { style: "Equation" }),
 
             p([tr(`${s(7)}.6 Graph-Augmented Retrieval`)], { heading: HeadingLevel.HEADING_2 }),
 
@@ -1236,9 +1366,9 @@ const createAlgorithmSections = (offset = 0) => {
 
             p([code("# Query and re-rank using current memory centroid")], { style: "Equation" }),
             p([code(`q ← μ_acc  # memory centroid from Section ${s(4)}.4.1`)]),
-            p([code("results_vec ← topK(vector_search(q, k=kNN_size))")], { style: "Equation" }),
+            p([code("results_vec ← topK(vector_search(q, k=kNN_size(F)))")], { style: "Equation" }),
             p([code("seed_nodes ← [r.id for r in results_vec]")], { style: "Equation" }),
-            p([code("expanded_nodes ← graph.traverse(seed_nodes, depth=graph_depth)")], { style: "Equation" }),
+            p([code("expanded_nodes ← graph.traverse(seed_nodes, depth=graph_depth(T), min_edge_weight=min_edge_weight(F))")], { style: "Equation" }),
             p([code("combined ← union(seed_nodes, expanded_nodes)")], { style: "Equation" }),
             p([code("re_ranked ← sort_by(cos(q, embeddings(combined)))  # re-rank by memory centroid")], { style: "Equation" }),
 
@@ -1262,10 +1392,19 @@ const createAlgorithmSections = (offset = 0) => {
 
             p([tr("Refractory dynamics suppress rapid successive interrupts:")]),
 
-            p([code("Δ = cumulative_drift_since_last_interrupt")], { style: "Equation" }),
+            p([tr("Interrupt state (per stream):")]),
+            p([code("prev_x is unset on the first signal of a stream; set prev_x ← x_t after processing each signal")], { style: "Equation" }),
+            p([code("first_step ← (prev_x is unset for this stream)")], { style: "Equation" }),
+            p([code("if first_step:")], { style: "Equation" }),
+            p([code("    # cold start: do not update drift_accum")], { style: "Equation" }),
+            p([code("    drift_accum ← drift_accum")], { style: "Equation" }),
+            p([code("else:")], { style: "Equation" }),
+            p([code("    drift_accum ← drift_accum + cosine_dist(x_t, prev_x)  # cumulative drift")], { style: "Equation" }),
+            p([code("Δ ← drift_accum − drift_at_last_interrupt  # cumulative drift since last interrupt")], { style: "Equation" }),
             p([code("τ_refrac = lerp(24, 96, T) × lerp(1.4, 1.0, S)")], { style: "Equation" }),
             p([code("k_refrac = lerp(0.20, 0.05, T) × lerp(0.8, 1.2, F)")], { style: "Equation" }),
             p([code("M_refrac = 1.0 + k_refrac × exp(−Δ / τ_refrac)")], { style: "Equation" }),
+            p([tr("On interrupt: set drift_at_last_interrupt ← drift_accum (resetting Δ to 0 for subsequent signals).")]),
 
             p([tr("Effective thresholds incorporate refractory pressure:")]),
 
@@ -1277,8 +1416,13 @@ const createAlgorithmSections = (offset = 0) => {
             p([tr("The marginal utility (MU) of a candidate memory combines four factors. Context comparisons use memory centroids rather than individual signal embeddings:")]),
 
             p([code("# Context window contains recent memory centroids, not individual signals")], { style: "Equation" }),
-            p([code("ctx_window ← recent_memory_centroids  # deque of μ_acc values")], { style: "Equation" }),
-            p([code("ctx_centroid ← mean(ctx_window)  # centroid of recent memory centroids")], { style: "Equation" }),
+            p([code("ctx_window ← recent_memory_centroids  # bounded deque of recent memory representatives (e_rep)")], { style: "Equation" }),
+            p([code("included_set ← {embedding(m) | m already injected into the current context window}")], { style: "Equation" }),
+            p([tr("Fallback: if included_set is empty, treat redundancy(·, included_set) = 0 and overlap_star = −1.")]),
+            p([code("if |ctx_window| == 0:")], { style: "Equation" }),
+            p([code("    ctx_centroid ← μ_acc  # fallback: use current memory centroid")], { style: "Equation" }),
+            p([code("else:")], { style: "Equation" }),
+            p([code("    ctx_centroid ← mean(ctx_window)  # centroid of recent memory centroids")], { style: "Equation" }),
 
             p([code("weights_mu_raw = [lerp(0.40, 0.60, F),   # coverage gain")], { style: "Equation" }),
             p([code("         lerp(0.35, 0.25, F),   # relevance")], { style: "Equation" }),
@@ -1314,12 +1458,24 @@ const createAlgorithmSections = (offset = 0) => {
 
             p([tr("The gate permits interrupt when:")]),
 
-            p([code("embedding_novelty = 1 − max(cos(candidate, ctx_window))")], { style: "Equation" }),
+            p([code("at_drift_boundary = should_flush  # boundary signal from the current accumulator")], { style: "Equation" }),
+            p([code("candidate_star = argmax_{c ∈ candidates_eligible} mu(c)")], { style: "Equation" }),
+            p([code("mu_star = mu(candidate_star)")], { style: "Equation" }),
+            p([code("rel_star = cos(candidate_star, ctx_centroid)")], { style: "Equation" }),
+            p([code("if |included_set| == 0:")], { style: "Equation" }),
+            p([code("    overlap_star = −1.0")], { style: "Equation" }),
+            p([code("else:")], { style: "Equation" }),
+            p([code("    overlap_star = max_{y ∈ included_set} cos(candidate_star, y)")], { style: "Equation" }),
+            p([code("if |ctx_window| == 0:")], { style: "Equation" }),
+            p([code("    novelty_star = 1.0")], { style: "Equation" }),
+            p([code("else:")], { style: "Equation" }),
+            p([code("    max_cos = max_{c ∈ ctx_window} cos(candidate_star, c)  # in [−1, 1]")], { style: "Equation" }),
+            p([code("    novelty_star = clamp((1 − max_cos) / 2, 0, 1)")], { style: "Equation" }),
             p([code("allow_interrupt = ")], { style: "Equation" }),
-            p([code("    (max_relevance ≥ retrieval_thresh(F)) AND")], { style: "Equation" }),
-            p([code("    (embedding_novelty ≥ τ_novelty_eff OR best_mu ≥ τ_mu_eff) AND")], { style: "Equation" }),
-            p([code("    (max_semantic_overlap < dup_thresh) AND")], { style: "Equation" }),
-            p([code("    (at_drift_boundary OR best_mu ≥ boundary_mult × τ_mu_eff)")], { style: "Equation" }),
+            p([code("    (rel_star ≥ retrieval_thresh(F)) AND")], { style: "Equation" }),
+            p([code("    (novelty_star ≥ τ_novelty_eff OR mu_star ≥ τ_mu_eff) AND")], { style: "Equation" }),
+            p([code("    (overlap_star < dup_thresh) AND")], { style: "Equation" }),
+            p([code("    (at_drift_boundary OR mu_star ≥ boundary_mult × τ_mu_eff)")], { style: "Equation" }),
 
             p([tr("This logic suppresses low-drift interrupts unless the marginal utility substantially exceeds threshold, while permitting normal-threshold interrupts at natural transition points.")]),
 
@@ -1329,14 +1485,15 @@ const createAlgorithmSections = (offset = 0) => {
 
             p([code("# Pacing tracks drift within current memory formation")], { style: "Equation" }),
             p([tr("where cosine_dist(u, v) = 1 − cos(u, v).")]),
-            p([code("drift_acc += cosine_dist(x_t, x_{last_check})")], { style: "Equation" }),
+            p([code("first_step ← (x_last_check is unset for this stream)  # MUST occur once per stream")], { style: "Equation" }),
+            p([code("if first_step: x_last_check ← x_t; drift_acc_pacing ← 0")], { style: "Equation" }),
+            p([code("drift_acc_pacing += cosine_dist(x_t, x_last_check)")], { style: "Equation" }),
             p([code("pacing_thresh(S) = lerp(0.5, 0.1, S)")], { style: "Equation" }),
             p([code("# Retrieval triggered when drift exceeds threshold or at memory boundary")], { style: "Equation" }),
-            p([code("if drift_acc > pacing_thresh(S) OR should_flush:")], { style: "Equation" }),
-            p([code("    trigger_check()")], { style: "Equation" }),
+            p([code("if drift_acc_pacing > pacing_thresh(S) OR should_flush:")], { style: "Equation" }),
+            p([code("    trigger_check(); x_last_check ← x_t; drift_acc_pacing ← 0")], { style: "Equation" }),
 
             p([code("max_wait_drift(F) = lerp(2.0, 0.5, F)")], { style: "Equation" }),
-            p([code("max_results(F) = round(lerp(64, 4, F))")], { style: "Equation" }),
             p([code("adjacent_window(F) = round(lerp(8, 1, F))")], { style: "Equation" }),
 
             p([tr(`High Sensitivity produces frequent checks triggered by small content shifts; high Focus enforces strict drift limits. Memory boundaries (Section ${s(4)}.4.3) also trigger retrieval checks to ensure context updates align with natural thought transitions.`)]),
@@ -1349,13 +1506,120 @@ const createAlgorithmSections = (offset = 0) => {
             p([tr("We present preliminary experimental results collected from live chat sessions to validate the adaptive mechanisms.")]),
 
             p([tr(`${s(9)}.1 Threshold Adaptation`)], { heading: HeadingLevel.HEADING_2 }),
-            p([tr("The dynamic threshold (θ_dynamic) successfully tracked score distributions. In high-volatility inputs (drift_accum > 1.0), thresholds relaxed to ~0.15, while stable contexts tightened to ~0.27.")]),
+            p([tr("The dynamic threshold (θ_dynamic) successfully tracked score distributions. In high-volatility inputs (within-accumulator drift_acc > 1.0), thresholds relaxed to ~0.15, while stable contexts tightened to ~0.27.")]),
 
             p([tr(`${s(9)}.2 Boundary Detection`)], { heading: HeadingLevel.HEADING_2 }),
             p([tr("Accumulator drift (drift_acc) aligned with semantic shifts. Conversation turns with distinct topics triggered flushes (boundary_score > 0.3) while coherent continuations remained accumulated.")]),
 
             p([tr(`${s(9)}.3 Latency and Performance`)], { heading: HeadingLevel.HEADING_2 }),
             p([tr("End-to-end processing per token averaged < 50ms. Graph expansion added < 10ms overhead due to efficient kNN (k=32) and limited expansion depth (d=2).")]),
+        ],
+
+        // ==================== APPENDICES (NON-NUMERIC) ====================
+        appendices: [
+            new Paragraph({ children: [new PageBreak()] }),
+            p([tr("Appendix A. State Variables Map")], { heading: HeadingLevel.HEADING_1 }),
+
+            p([tr("This appendix enumerates the state variables used by the specification and separates retained state (carried across timesteps) from per-step derived quantities.")]),
+
+            p([bold("Accumulator state (per stream; retained across timesteps): ")], { numbering: { reference: "bullet-list", level: 0 } }),
+            p([code("{μ_acc, drift_acc, s_sum, s_max, n, e_peak, emo_max, arousal_sum, eta_acc, coherence_prev, acc_signals_window, t_start, last_signal_ts, last_write_ts, drift_accum, drift_at_last_interrupt, drift_acc_pacing, x_last_check, prev_x}")], { numbering: { reference: "bullet-list", level: 1 } }),
+
+            p([bold("Global state (retained across timesteps): ")], { numbering: { reference: "bullet-list", level: 0 } }),
+            p([code("{u_uncertainty, mood_vector, last_mood_ts, theta_dynamic, theta_target, hysteresis, m_rate, dt_ema, rate_ticks, last_rate_timestamp, reliability, last_retrieval_ts}")], { numbering: { reference: "bullet-list", level: 1 } }),
+
+            p([bold("Buffers (retained across timesteps; bounded by window rules): ")], { numbering: { reference: "bullet-list", level: 0 } }),
+            p([code("{signal_stream, score_stream, memory_stream, recent_memory_centroids}")], { numbering: { reference: "bullet-list", level: 1 } }),
+
+            p([bold("Recorded signal fields (per signal): ")], { numbering: { reference: "bullet-list", level: 0 } }),
+            p([code("{coherence_struct_t → SIGNALS.coherence, focus_spread_t → SIGNALS.focus_spread}")], { numbering: { reference: "bullet-list", level: 1 } }),
+
+            p([bold("Recorded global fields: ")], { numbering: { reference: "bullet-list", level: 0 } }),
+            p([code("{u(t) → STATE.u_uncertainty, M_t → STATE.mood_vector}")], { numbering: { reference: "bullet-list", level: 1 } }),
+
+            p([bold("Per-step derived scalars (ephemeral; recomputed each step): ")], { numbering: { reference: "bullet-list", level: 0 } }),
+            p([code("{signal_gap_s, coherence_curr, s_avg, S_window, boundary_score, should_flush, write_memory, Δwrites}")], { numbering: { reference: "bullet-list", level: 1 } }),
+
+            new Paragraph({ children: [new PageBreak()] }),
+            p([tr("Appendix B. Derived Signals: Definitions and Bounds")], { heading: HeadingLevel.HEADING_1 }),
+
+            p([tr("This appendix defines non-trivial derived signals used throughout the specification. Unless otherwise stated, all derived scalars are clamped to [0, 1].")]),
+
+            p([bold("novelty: "), tr("A normalized dissimilarity-to-context signal.")]),
+            p([code("max_cos ← max_{c ∈ recent_context} cos(x_t, c)  # in [−1, 1]")], { style: "Equation" }),
+            p([code("novelty_t ← clamp((1 − max_cos) / 2, 0, 1)")], { style: "Equation" }),
+            p([tr("Fallback: if recent_context is empty, set novelty_t ← 1.")]),
+
+            p([bold("μ_sim: "), tr("A normalized mean similarity to context.")]),
+            p([code("mean_cos ← mean_{c ∈ recent_context} cos(x_t, c)")], { style: "Equation" }),
+            p([code("μ_sim ← clamp((mean_cos + 1) / 2, 0, 1)")], { style: "Equation" }),
+            p([tr("Fallback: if recent_context is empty, set μ_sim ← 0.5.")]),
+
+            p([bold("rarity_t: "), tr("A normalized rarity signal defined as dissimilarity-to-context mean.")]),
+            p([code("rarity_t ← clamp(1 − μ_sim, 0, 1)")], { style: "Equation" }),
+            p([tr("Fallback: inherits μ_sim fallback, so rarity_t defaults to 0.5 when recent_context is empty.")]),
+
+            p([bold("relevance_to_task(q, task_ctx): "), tr("A normalized relevance of embedding q to a task context set.")]),
+            p([code("if |task_ctx| == 0: return 0.5")], { style: "Equation" }),
+            p([code("return clamp((cos(q, mean(task_ctx)) + 1) / 2, 0, 1)")], { style: "Equation" }),
+
+            p([bold("novelty_to_set(q, S_set_embeddings): "), tr("A normalized novelty of q relative to a set of embeddings.")]),
+            p([code("novelty_to_set(q, S_set_embeddings) ← 1 − redundancy(q, S_set_embeddings)")], { style: "Equation" }),
+
+            p([bold("ΔSSE: "), tr("A normalized improvement in reconstruction/prediction error (utility proxy).")]),
+            p([code("ΔSSE ← clamp((SSE_prev − SSE_curr) / max(SSE_prev, ε), 0, 1)")], { style: "Equation" }),
+            p([tr("Fallback: if SSE signals are unavailable, set ΔSSE ← 0.")]),
+
+            p([bold("redundancy(a, S_set): "), tr("A normalized redundancy of item a w.r.t. a set S_set.")]),
+            p([code("redundancy(a, S_set) ← max_{s ∈ S_set} clamp((cos(a, s) + 1) / 2, 0, 1)")], { style: "Equation" }),
+            p([tr("Fallback: if S_set is empty, redundancy(a, S_set) ← 0.")]),
+
+            p([bold("coverage_gain(candidate | included_set): "), tr("Incremental coverage contribution of adding candidate.")]),
+            p([code("coverage_gain(candidate | included_set) ← 1 − redundancy(candidate, included_set)")], { style: "Equation" }),
+
+            p([bold("contextual_gain(m): "), tr("A normalized marginal gain attributed to using memory m in context.")]),
+            p([code("contextual_gain(m) ∈ [−1, +1]  # normalized gain/loss signal")], { style: "Equation" }),
+            p([tr("Fallback: if marginal gain cannot be estimated, contextual_gain(m) ← 0.")]),
+
+            p([bold("connectivity(m): "), tr("A normalized connectivity score (graph centrality proxy).")]),
+            p([code("connectivity(m) ← clamp(degree(m) / deg_cap, 0, 1)")], { style: "Equation" }),
+            p([tr("Fallback: if no graph structure is present, connectivity(m) ← 0.")]),
+
+            p([bold("manifold_complexity: "), tr("A local embedding-stream complexity proxy used in working-memory cost.")]),
+            p([code("manifold_complexity ← clamp((1 − mean_cos_window) / 2, 0, 1)")], { style: "Equation" }),
+            p([tr("where mean_cos_window is the mean cosine similarity across adjacent embeddings in a short local window.")]),
+            p([code("win_complex(T) = round(lerp(8, 32, T))")], { style: "Equation" }),
+            p([code("window_signals ← tail(signal_stream, win_complex(T) + 1)")], { style: "Equation" }),
+            p([code("if |window_signals| < 2:")], { style: "Equation" }),
+            p([code("    mean_cos_window ← 1.0")], { style: "Equation" }),
+            p([code("else:")], { style: "Equation" }),
+            p([code("    mean_cos_window ← mean([cos(window_signals[i−1], window_signals[i]) for i = 1..|window_signals|−1])")], { style: "Equation" }),
+
+            p([bold("kNN_similarities: "), tr("Vector of cosine similarities returned by nearest-neighbor search for the current query embedding.")]),
+            p([code("kNN_similarities = [sim_1, …, sim_k] where sim_i ∈ [−1, 1]")], { style: "Equation" }),
+
+            p([bold("kNN_size, graph_depth: "), tr("Discrete retrieval hyperparameters.")]),
+            p([code("kNN_size(F) = round(lerp(64, 4, F))")], { style: "Equation" }),
+            p([code("graph_depth(T) = round(lerp(1, 3, T))")], { style: "Equation" }),
+            p([code("min_edge_weight(F) = lerp(0.70, 0.95, F)  # minimum association weight to traverse")], { style: "Equation" }),
+
+            new Paragraph({ children: [new PageBreak()] }),
+            p([tr("Appendix C. Main Loop and Normative Invariants")], { heading: HeadingLevel.HEADING_1 }),
+
+            p([tr("Main loop (per signal):")]),
+            p([tr("1) Compute now_ms(), now_s(), and signal_gap_s (before updating last_signal_ts).")], { numbering: { reference: "numbered-list", level: 0 } }),
+            p([tr("2) Update accumulator running statistics (μ_acc, drift_acc, s_sum, s_max, n, emo_max, arousal_sum, eta_acc, coherence_curr/coherence_prev).")], { numbering: { reference: "numbered-list", level: 0 } }),
+            p([tr("3) Update uncertainty u(t), then update θ_dynamic and hysteresis.")], { numbering: { reference: "numbered-list", level: 0 } }),
+            p([tr("4) Compute should_flush and spike_bypass/force_write; if boundary condition holds, compute S_window and decide write_memory.")], { numbering: { reference: "numbered-list", level: 0 } }),
+            p([tr("5) Update rate state (m_rate, dt_ema, rate_ticks, last_rate_timestamp) using Δwrites derived from this step's write_memory. Compute ρ_hat_next and then set ρ_hat_prev ← ρ_hat_next.")], { numbering: { reference: "numbered-list", level: 0 } }),
+            p([tr("6) If should_flush: finalize the unit. If write_memory: record the memory and update last_write_ts ← now_ms(); else discard. In both cases, reset_accumulator() for the next unit.")], { numbering: { reference: "numbered-list", level: 0 } }),
+
+            p([tr("Normative invariants:")]),
+            p([bold("MUST: "), tr("All stored timestamps are milliseconds since epoch; derived time deltas are seconds.")], { numbering: { reference: "bullet-list", level: 0 } }),
+            p([bold("MUST: "), tr("All thresholds and composite scores are clamped to [0, 1].")], { numbering: { reference: "bullet-list", level: 0 } }),
+            p([bold("MUST: "), tr("Strength is clamped to [0, 1] (bounded reinforcement).")], { numbering: { reference: "bullet-list", level: 0 } }),
+            p([bold("MUST: "), tr("If weight_sum < ε during score normalization, return score = 0.")], { numbering: { reference: "bullet-list", level: 0 } }),
+            p([bold("SHOULD: "), tr("All cosine-derived quantities that are interpreted as probabilities are map01/clamped consistently.")], { numbering: { reference: "bullet-list", level: 0 } }),
         ],
     };
 };
@@ -1377,6 +1641,7 @@ const allSectionChildren = [
     ...algorithmSections.consolidationGraph,
     ...algorithmSections.interruptGate,
     ...algorithmSections.experimentalResults,
+    ...algorithmSections.appendices,
 ];
 
 // Create the document

@@ -12,8 +12,9 @@ namespace cortext::operations
 
 void
 ComputeWriteGate::Execute (OperationContext &context,
-                           Transaction & /*tx*/) const
+                           Transaction &tx) const
 {
+  (void)tx;
   const auto &signal = context.GetSignal ();
   auto &p_ctx = context.GetProcessorContext ();
   const auto &config = context.GetConfig ();

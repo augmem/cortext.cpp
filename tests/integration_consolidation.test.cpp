@@ -184,6 +184,7 @@ struct SeedClusteringDataOp : IOperation
   Execute (OperationContext &ctx, Transaction & /*tx*/) const override
   {
     auto *store = ctx.GetStore ();
+    std::vector<ConsolidationCandidate> candidates;
 
     // Create 4 similar embeddings (should cluster together)
     // Group 1: embeddings 1-4 are similar (all have e[0] = 1.0)
@@ -195,11 +196,12 @@ struct SeedClusteringDataOp : IOperation
 
         SeedEmbedding (store, i, emb, 0.1, 0.0, 0.0, 0.0); // Low strength = candidates
 
-        // Add to candidates
-        store->Execute (
-            "INSERT INTO consolidation_candidates(embedding_id, score, "
-            "created_at, reason) VALUES(?,?,?,?)",
-            { i, 0.05, 1000LL, std::string ("score_below_floor") });
+        // Add to in-memory candidates
+        ConsolidationCandidate c;
+        c.embedding_id = i;
+        c.score = 0.05;
+        c.embedding = emb;
+        candidates.push_back (std::move (c));
       }
 
     // Group 2: embeddings 5-8 are similar (all have e[100] = 1.0)
@@ -211,15 +213,20 @@ struct SeedClusteringDataOp : IOperation
 
         SeedEmbedding (store, i, emb, 0.1, 0.0, 0.0, 0.0);
 
-        store->Execute (
-            "INSERT INTO consolidation_candidates(embedding_id, score, "
-            "created_at, reason) VALUES(?,?,?,?)",
-            { i, 0.05, 1000LL, std::string ("score_below_floor") });
+        // Add to in-memory candidates
+        ConsolidationCandidate c;
+        c.embedding_id = i;
+        c.score = 0.05;
+        c.embedding = emb;
+        candidates.push_back (std::move (c));
       }
+
+    // Set candidates in context (in-memory passing)
+    ctx.SetConsolidationCandidates (std::move (candidates));
   }
 };
 
-// Helper op to seed graph construction data
+// Helper op to seed graph construction data using V2 schema
 struct SeedGraphDataOp : IOperation
 {
   void
@@ -227,44 +234,57 @@ struct SeedGraphDataOp : IOperation
   {
     auto *store = ctx.GetStore ();
 
-    // Create a summary with sources
-    store->Execute (
-        "INSERT INTO consolidation_summaries(summary_id, summary_text, "
-        "centroid, cluster_size) VALUES(?,?,?,?)",
-        { 1LL, std::string ("Test summary"), std::vector<float> (256, 0.5f),
-          4LL });
-
-    // Add source mappings
+    // V2: Create memories with cluster_id for graph edge construction
+    // (GraphBuild queries memories with cluster_id IS NOT NULL)
     for (long long i = 1; i <= 4; ++i)
       {
-        store->Execute (
-            "INSERT INTO consolidation_sources(summary_id, source_embedding_id) "
-            "VALUES(?,?)",
-            { 1LL, i });
-
         // Create similar embeddings for co-occurrence testing
         Eigen::VectorXf emb = Eigen::VectorXf::Zero (256);
         emb[0] = 0.9f;
         emb[static_cast<int> (i)] = 0.1f;
         SeedEmbedding (store, i, emb, 0.5, 0.0, 0.1, 0.3);
 
-        // Add memories with timestamps for causal edges
+        // Add memories with timestamps for causal edges, cluster_id for graph
         uint64_t ts = static_cast<uint64_t> (i * 1000);
         SeedMemory (store, i, "Memory text " + std::to_string (i), ts);
+
+        // Set cluster_id on the memory (V2: graph build uses cluster_id)
+        store->Execute (
+            "UPDATE memories SET cluster_id = ? WHERE memory_id = ?",
+            { 100LL, i }); // All in same cluster for edge testing
       }
 
-    // Add extraction entities
+    // V2: LABEL memories replace extraction_entities
+    // (kind='LABEL' with label field)
+    cortext::testing::SeedEmbeddingV2 (*store, 200LL, std::vector<float>(256, 0.5f));
     store->Execute (
-        "INSERT INTO extraction_entities(summary_id, name, type, salience) "
-        "VALUES(?,?,?,?)",
-        { 1LL, std::string ("TestEntity"), std::string ("Concept"), 0.8 });
+        "INSERT INTO memories(memory_id, embedding_id, source_id, kind, label, "
+        "start_ts, n_signals, modality, s_max, s_avg, created_at) "
+        "VALUES(?, ?, 'test', 'LABEL', ?, 0, 1, 'text', 0.5, 0.5, 0)",
+        { 200LL, 200LL, std::string ("TestEntity") });
 
-    // Add extraction relations
+    // V2: Create ASSOCIATION memory to represent the summary
+    cortext::testing::SeedEmbeddingV2 (*store, 300LL, std::vector<float>(256, 0.5f));
     store->Execute (
-        "INSERT INTO extraction_relations(summary_id, subject, predicate, "
-        "object, confidence) VALUES(?,?,?,?,?)",
-        { 1LL, std::string ("TestEntity"), std::string ("relates_to"),
-          std::string ("OtherEntity"), 0.75 });
+        "INSERT INTO memories(memory_id, embedding_id, source_id, kind, "
+        "start_ts, n_signals, modality, s_max, s_avg, created_at) "
+        "VALUES(?, ?, 'test', 'ASSOCIATION', 0, 1, 'text', 0.5, 0.5, 0)",
+        { 300LL, 300LL });
+
+    // V2: Link ASSOCIATION to LABEL via derived_from edge
+    store->Execute (
+        "INSERT INTO associations(source_memory_id, target_memory_id, edge_type, weight) "
+        "VALUES(?, ?, 'derived_from', 1.0)",
+        { 300LL, 200LL });
+
+    // V2: Link ASSOCIATION to source memories via derived_from
+    for (long long i = 1; i <= 4; ++i)
+      {
+        store->Execute (
+            "INSERT INTO associations(source_memory_id, target_memory_id, edge_type, weight) "
+            "VALUES(?, ?, 'derived_from', 1.0)",
+            { 300LL, i });
+      }
   }
 };
 
@@ -326,8 +346,8 @@ TEST_CASE ("Clustering groups similar embeddings",
   SeedClusteringDataOp seed_op;
   seed_op.Execute (ctx, cortext::testing::GetNullTransaction ());
 
-  // Verify candidates seeded
-  REQUIRE (CountRows (store.get (), "consolidation_candidates") == 8);
+  // Verify candidates seeded (in-memory)
+  REQUIRE (ctx.GetConsolidationCandidates ().size () == 8);
 
   // Run clustering
   ConsolidationCluster cluster_op;
@@ -394,11 +414,11 @@ TEST_CASE ("Summarization creates summary records",
   ConsolidationSummarize summarize_op;
   summarize_op.Execute (ctx, cortext::testing::GetNullTransaction ());
 
-  // Verify summary was created
+  // V2: Verify ASSOCIATION memories were created (replaces consolidation_summaries)
   auto summaries = store->Execute (
-      "SELECT summary_id, summary_text, cluster_size FROM consolidation_summaries",
+      "SELECT memory_id FROM memories WHERE kind = 'ASSOCIATION'",
       {});
-  INFO ("Summary count: " << summaries.size ());
+  INFO ("Summary (ASSOCIATION) count: " << summaries.size ());
 
   // Verify extraction requests were queued (cluster size 4 >= min for extraction)
   auto requests = ctx.GetExtractionRequests ();
@@ -439,9 +459,9 @@ TEST_CASE ("Graph build creates co_occurs_with edges",
   BuildGraphFromConsolidation graph_op;
   graph_op.Execute (ctx, cortext::testing::GetNullTransaction ());
 
-  // Verify edges were created
+  // V2: Verify edges were created in associations table
   auto edges = store->Execute (
-      "SELECT edge_type, COUNT(*) AS c FROM graph_edges GROUP BY edge_type", {});
+      "SELECT edge_type, COUNT(*) AS c FROM associations GROUP BY edge_type", {});
 
   INFO ("Edge types found: " << edges.size ());
   for (const auto &row : edges)
@@ -481,17 +501,17 @@ TEST_CASE ("Graph build creates entity nodes and edges",
   BuildGraphFromConsolidation graph_op;
   graph_op.Execute (ctx, cortext::testing::GetNullTransaction ());
 
-  // Verify entity nodes were created
+  // V2: Verify LABEL memories were created (replaces graph_nodes with type='entity')
   auto entity_nodes = store->Execute (
-      "SELECT node_id, type, label FROM graph_nodes WHERE type = 'entity'", {});
+      "SELECT memory_id, label FROM memories WHERE kind = 'LABEL'", {});
 
-  INFO ("Entity nodes: " << entity_nodes.size ());
+  INFO ("Entity (LABEL) memories: " << entity_nodes.size ());
 
-  // Verify mentions edges (summary -> entity)
-  auto mentions = store->Execute (
-      "SELECT * FROM graph_edges WHERE edge_type = 'mentions'", {});
+  // V2: Verify derived_from edges (ASSOCIATION -> LABEL)
+  auto derived_from = store->Execute (
+      "SELECT * FROM associations WHERE edge_type = 'derived_from'", {});
 
-  INFO ("Mentions edges: " << mentions.size ());
+  INFO ("Derived_from edges: " << derived_from.size ());
 }
 
 // =============================================================================

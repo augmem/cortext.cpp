@@ -245,10 +245,7 @@ TEST_CASE ("Alg20 ripple propagation reaches graph neighbors",
   auto store = std::shared_ptr<cortext::Store> (std::move (unique_store));
 
   // Initialize schema
-  {
-    cortext::store::SchemaRegistry registry;
-    cortext::store::ApplyMigrations (*store, registry);
-  }
+  cortext::store::ApplyMigrations (*store);
 
   // Insert test data
   // Create a neighbor embedding (emb:10) connected to primary (emb:1)
@@ -267,12 +264,11 @@ TEST_CASE ("Alg20 ripple propagation reaches graph neighbors",
       "VALUES (?, ?, 'test', 'LONG_TERM', ?, 1, 'text', 0.5, 0.5, ?)",
       { 10LL, 10LL, now_ts, now_ts });
 
-  // Create a 'reinforces' edge from emb:1 to emb:10
+  // V2: Create a 'reinforces' edge from memory:1 to memory:10 in associations
   store->Execute (
-      "INSERT INTO graph_edges (source_id, target_id, edge_type, weight) "
+      "INSERT INTO associations (source_memory_id, target_memory_id, edge_type, weight) "
       "VALUES (?, ?, ?, ?)",
-      { std::string ("emb:1"), std::string ("emb:10"),
-        std::string ("reinforces"), 1.0 });
+      { 1LL, 10LL, std::string ("reinforces"), 1.0 });
 
   // Create config, signal, and context directly
   SignalProcessor::Config cfg;
@@ -349,54 +345,36 @@ TEST_CASE ("Alg20 ripple decay applied correctly per hop",
 
   const Eigen::VectorXf cur = MakeUnitVec256 (0);
   const Eigen::VectorXf mem = MakeUnitVec256 (0);
+  const Eigen::VectorXf vec20 = MakeUnitVec256 (6);
+  const Eigen::VectorXf vec21 = MakeUnitVec256 (7);
 
+  // V2: Seed all embeddings needed for ripple propagation (including memory_id=1)
+  std::unordered_map<long long, Eigen::VectorXf> allEmbs{
+      { 1LL, mem }, { 20LL, vec20 }, { 21LL, vec21 }
+  };
+  auto seed = std::make_unique<SeedEmbeddingsOp> (allEmbs);
   auto setup = std::make_unique<SetupReconInputsOp> (
       cur, std::unordered_map<long long, Eigen::VectorXf>{ { 1LL, mem } });
   auto apply = std::make_unique<ApplyReconsolidation> ();
-  auto ops = std::make_unique<cortext::OperationSet> (std::move (setup),
-                                                      std::move (apply));
+  auto ops = std::make_unique<cortext::OperationSet> (
+      std::move (seed), std::move (setup), std::move (apply));
 
   // Create processor first to initialize schema
   cortext::SignalProcessor processor (cfg, store, std::move (ops));
 
-  // Now insert test data after schema is initialized
-  // Create chain: emb:1 --reinforces--> emb:20 --reinforces--> emb:21
-  const Eigen::VectorXf vec20 = MakeUnitVec256 (6);
-  const Eigen::VectorXf vec21 = MakeUnitVec256 (7);
-  std::vector<float> data20 (vec20.data (), vec20.data () + vec20.size ());
-  std::vector<float> data21 (vec21.data (), vec21.data () + vec21.size ());
-  auto now_ts = cortext::testing::NowMs ();
+  // Now insert associations after schema is initialized (memories already seeded above)
+  // Create chain: memory 1 --reinforces--> memory 20 --reinforces--> memory 21
 
-  // v2: Insert into embeddings and memories
+  // V2: Edge via ASSOCIATIONS: memory_id 1 -> 20 (depth 1)
   store->Execute (
-      "INSERT INTO embeddings (embedding_id, embedding, created_at) VALUES (?, ?, ?)",
-      { 20LL, data20, now_ts });
-  store->Execute (
-      "INSERT INTO memories (memory_id, embedding_id, source_id, kind, start_ts, "
-      "n_signals, modality, s_max, s_avg, created_at) "
-      "VALUES (?, ?, 'test', 'LONG_TERM', ?, 1, 'text', 0.5, 0.5, ?)",
-      { 20LL, 20LL, now_ts, now_ts });
-  store->Execute (
-      "INSERT INTO embeddings (embedding_id, embedding, created_at) VALUES (?, ?, ?)",
-      { 21LL, data21, now_ts });
-  store->Execute (
-      "INSERT INTO memories (memory_id, embedding_id, source_id, kind, start_ts, "
-      "n_signals, modality, s_max, s_avg, created_at) "
-      "VALUES (?, ?, 'test', 'LONG_TERM', ?, 1, 'text', 0.5, 0.5, ?)",
-      { 21LL, 21LL, now_ts, now_ts });
-
-  // Edge: emb:1 -> emb:20 (depth 1)
-  store->Execute (
-      "INSERT INTO graph_edges (source_id, target_id, edge_type, weight) "
+      "INSERT INTO associations (source_memory_id, target_memory_id, edge_type, weight) "
       "VALUES (?, ?, ?, ?)",
-      { std::string ("emb:1"), std::string ("emb:20"),
-        std::string ("reinforces"), 1.0 });
-  // Edge: emb:20 -> emb:21 (depth 2 from emb:1)
+      { 1LL, 20LL, std::string ("reinforces"), 1.0 });
+  // V2: Edge via ASSOCIATIONS: memory_id 20 -> 21 (depth 2 from memory 1)
   store->Execute (
-      "INSERT INTO graph_edges (source_id, target_id, edge_type, weight) "
+      "INSERT INTO associations (source_memory_id, target_memory_id, edge_type, weight) "
       "VALUES (?, ?, ?, ?)",
-      { std::string ("emb:20"), std::string ("emb:21"),
-        std::string ("reinforces"), 1.0 });
+      { 20LL, 21LL, std::string ("reinforces"), 1.0 });
 
   auto s = MakeSignal (cur, /*ts=*/200);
   processor.Process (s);
@@ -459,18 +437,16 @@ TEST_CASE ("Alg20 RippleDepth knob affects traversal depth",
   // Create processor first to initialize schema
   cortext::SignalProcessor processor (cfg, store, std::move (ops));
 
-  // Insert graph edges after schema is initialized
-  // Create chain: emb:1 --reinforces--> emb:30 --reinforces--> emb:31
+  // V2: Insert ASSOCIATIONS edges after schema is initialized
+  // Create chain: memory 1 --reinforces--> memory 30 --reinforces--> memory 31
   store->Execute (
-      "INSERT INTO graph_edges (source_id, target_id, edge_type, weight) "
+      "INSERT INTO associations (source_memory_id, target_memory_id, edge_type, weight) "
       "VALUES (?, ?, ?, ?)",
-      { std::string ("emb:1"), std::string ("emb:30"),
-        std::string ("reinforces"), 1.0 });
+      { 1LL, 30LL, std::string ("reinforces"), 1.0 });
   store->Execute (
-      "INSERT INTO graph_edges (source_id, target_id, edge_type, weight) "
+      "INSERT INTO associations (source_memory_id, target_memory_id, edge_type, weight) "
       "VALUES (?, ?, ?, ?)",
-      { std::string ("emb:30"), std::string ("emb:31"),
-        std::string ("reinforces"), 1.0 });
+      { 30LL, 31LL, std::string ("reinforces"), 1.0 });
 
   auto s = MakeSignal (cur, /*ts=*/300);
   processor.Process (s);
@@ -510,38 +486,30 @@ TEST_CASE ("Alg20 ripple respects co_occurs_with edge type",
 
   const Eigen::VectorXf cur = MakeUnitVec256 (0);
   const Eigen::VectorXf mem = MakeUnitVec256 (0);
+  const Eigen::VectorXf vec40 = MakeUnitVec256 (10);
 
+  // V2: Seed all embeddings needed for ripple propagation (including memory_id=1)
+  std::unordered_map<long long, Eigen::VectorXf> allEmbs{
+      { 1LL, mem }, { 40LL, vec40 }
+  };
+  auto seed = std::make_unique<SeedEmbeddingsOp> (allEmbs);
   auto setup = std::make_unique<SetupReconInputsOp> (
       cur, std::unordered_map<long long, Eigen::VectorXf>{ { 1LL, mem } });
   auto apply = std::make_unique<ApplyReconsolidation> ();
-  auto ops = std::make_unique<cortext::OperationSet> (std::move (setup),
-                                                      std::move (apply));
+  auto ops = std::make_unique<cortext::OperationSet> (
+      std::move (seed), std::move (setup), std::move (apply));
 
   // Create processor first to initialize schema
   cortext::SignalProcessor processor (cfg, store, std::move (ops));
 
-  // Now insert test data after schema is initialized
+  // Now insert associations after schema is initialized (memories already seeded)
   // Create neighbor connected via co_occurs_with (not reinforces)
-  const Eigen::VectorXf vec40 = MakeUnitVec256 (10);
-  std::vector<float> data40 (vec40.data (), vec40.data () + vec40.size ());
-  auto now_ts = cortext::testing::NowMs ();
 
-  // v2: Insert into embeddings and memories
+  // V2: Edge via ASSOCIATIONS: memory 1 --co_occurs_with--> memory 40
   store->Execute (
-      "INSERT INTO embeddings (embedding_id, embedding, created_at) VALUES (?, ?, ?)",
-      { 40LL, data40, now_ts });
-  store->Execute (
-      "INSERT INTO memories (memory_id, embedding_id, source_id, kind, start_ts, "
-      "n_signals, modality, s_max, s_avg, created_at) "
-      "VALUES (?, ?, 'test', 'LONG_TERM', ?, 1, 'text', 0.5, 0.5, ?)",
-      { 40LL, 40LL, now_ts, now_ts });
-
-  // Edge: emb:1 --co_occurs_with--> emb:40
-  store->Execute (
-      "INSERT INTO graph_edges (source_id, target_id, edge_type, weight) "
+      "INSERT INTO associations (source_memory_id, target_memory_id, edge_type, weight) "
       "VALUES (?, ?, ?, ?)",
-      { std::string ("emb:1"), std::string ("emb:40"),
-        std::string ("co_occurs_with"), 1.0 });
+      { 1LL, 40LL, std::string ("co_occurs_with"), 1.0 });
 
   auto s = MakeSignal (cur, /*ts=*/400);
   processor.Process (s);

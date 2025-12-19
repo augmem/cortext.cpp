@@ -128,6 +128,7 @@ ComputeCoverageGain (const Eigen::VectorXf &centroid,
 void
 ComputeMniGateDecision::Execute (OperationContext &context, Transaction &tx) const
 {
+  (void)tx;
   auto &p_ctx = context.GetProcessorContext ();
   const auto &cfg = context.GetConfig ();
 

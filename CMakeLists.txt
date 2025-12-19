@@ -7,7 +7,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 option(BUILD_TESTING "Build tests" ON)
-option(CORTEXT_WARNINGS_AS_ERRORS "Treat warnings as errors" OFF)
+option(CORTEXT_WARNINGS_AS_ERRORS "Treat warnings as errors" ON)
 option(CORTEXT_BUILD_EXAMPLES "Build examples" OFF)
 option(BUILD_WASM "Build WebAssembly version" OFF)
 option(CORTEXT_WASM_EXPORT_ALL "Export all functions in WASM build" ON)
@@ -139,14 +139,11 @@ add_library(cortext
     src/operations/process_extraction_results.cpp
     src/operations/embedding_prediction_error.cpp
     src/operations/precision.cpp
-    src/operations/graph_schema.cpp
     src/operations/graph_build.cpp
     src/operations/graph_retrieval.cpp
     # Phase 4: Knowledge Graph Enhancement
     src/operations/concept_detection.cpp
     src/operations/emotion_cascade.cpp
-    src/operations/goal_alignment.cpp
-    src/operations/goal_alignment_fallback.cpp
     src/operations/signal_metrics_persistence.cpp
     src/operations/write_gate.cpp
     src/operations/memory_storage.cpp

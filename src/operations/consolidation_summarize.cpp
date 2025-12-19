@@ -212,25 +212,7 @@ ConsolidationSummarize::Execute (OperationContext &context, Transaction &tx) con
       // 2. Convert centroid to blob for storage.
       std::vector<float> centroid_blob = cluster.centroid;
 
-      // 3. Insert into consolidation_summaries.
-      AddWrite (tx,
-                "INSERT INTO consolidation_summaries"
-                "(summary_id, summary_text, centroid, cluster_size) "
-                "VALUES(?, ?, ?, ?)",
-                { summary_id, summary_text, centroid_blob,
-                  static_cast<long long> (cluster.embedding_ids.size ()) });
-
-      // 4. Insert source mappings into consolidation_sources.
-      for (long long emb_id : cluster.embedding_ids)
-        {
-          AddWrite (tx,
-                    "INSERT INTO consolidation_sources"
-                    "(summary_id, source_embedding_id) "
-                    "VALUES(?, ?)",
-                    { summary_id, emb_id });
-        }
-
-      // 5. Create embeddings entry for centroid (v2: minimal table).
+      // 3. Create embeddings entry for centroid (v2: minimal table).
       AddWrite (tx,
                 "INSERT INTO embeddings (embedding, created_at) VALUES (?, ?)",
                 { centroid_blob, static_cast<long long> (now_ts) });
@@ -251,23 +233,70 @@ ConsolidationSummarize::Execute (OperationContext &context, Transaction &tx) con
             }
         }
 
-      // Create MEMORIES row for centroid with kind='ASSOCIATION' (v2 schema)
+      // 4. Create MEMORIES row for centroid with kind='ASSOCIATION' (v2 schema).
+      // Store summary_text as label, n_signals as cluster size.
       AddWrite (tx,
                 "INSERT INTO memories "
-                "(embedding_id, source_id, kind, start_ts, created_at) "
-                "VALUES (?, ?, 'ASSOCIATION', ?, ?)",
-                { centroid_embedding_id, summary_id,
+                "(embedding_id, source_id, kind, label, start_ts, n_signals, created_at) "
+                "VALUES (?, ?, 'ASSOCIATION', ?, ?, ?, ?)",
+                { centroid_embedding_id, summary_id, summary_text,
                   static_cast<long long> (now_ts),
+                  static_cast<long long> (cluster.embedding_ids.size ()),
                   static_cast<long long> (now_ts) });
 
-      // 6. Update cluster_id in memories for source embeddings (v2: moved from
-      // embeddings).
+      // Get the memory_id for the centroid memory
+      auto mem_id_rows = tx.Execute ("SELECT last_insert_rowid() AS id", {});
+      long long centroid_memory_id = 0;
+      if (!mem_id_rows.empty () && mem_id_rows[0].count ("id"))
+        {
+          auto val = mem_id_rows[0].at ("id");
+          if (val.type () == typeid (long long))
+            {
+              centroid_memory_id = std::any_cast<long long> (val);
+            }
+          else if (val.type () == typeid (int))
+            {
+              centroid_memory_id = std::any_cast<int> (val);
+            }
+        }
+
+      // 5. Update cluster_id in memories for source embeddings and create
+      // ASSOCIATIONS (derived_from edges).
       for (long long emb_id : cluster.embedding_ids)
         {
+          // Update cluster_id
           AddWrite (tx,
                     "UPDATE memories SET cluster_id = ? "
                     "WHERE embedding_id = ?",
                     { cluster.cluster_id, emb_id });
+
+          // Get source memory_id for this embedding
+          auto src_rows = tx.Execute (
+              "SELECT memory_id FROM memories WHERE embedding_id = ?",
+              { emb_id });
+          if (!src_rows.empty () && src_rows[0].count ("memory_id"))
+            {
+              auto val = src_rows[0].at ("memory_id");
+              long long src_memory_id = 0;
+              if (val.type () == typeid (long long))
+                {
+                  src_memory_id = std::any_cast<long long> (val);
+                }
+              else if (val.type () == typeid (int))
+                {
+                  src_memory_id = std::any_cast<int> (val);
+                }
+
+              // Create derived_from edge: centroid <- source
+              if (src_memory_id > 0 && centroid_memory_id > 0)
+                {
+                  AddWrite (tx,
+                            "INSERT OR IGNORE INTO associations "
+                            "(source_memory_id, target_memory_id, edge_type, weight) "
+                            "VALUES (?, ?, 'derived_from', 1.0)",
+                            { centroid_memory_id, src_memory_id });
+                }
+            }
         }
 
       // 7. Queue extraction if cluster is large enough.
@@ -284,12 +313,7 @@ ConsolidationSummarize::Execute (OperationContext &context, Transaction &tx) con
         }
     }
 
-  // 8. Clear processed candidates.
-  AddWrite (tx,
-            "DELETE FROM consolidation_candidates WHERE embedding_id IN "
-            "(SELECT source_embedding_id FROM consolidation_sources)");
-
-  // 9. Pass extraction requests to next operation.
+  // 8. Pass extraction requests to next operation.
   const int jobs_queued = static_cast<int>(extraction_requests.size());
   context.SetExtractionRequests (std::move (extraction_requests));
 

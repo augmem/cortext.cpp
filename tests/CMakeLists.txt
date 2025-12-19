@@ -59,12 +59,12 @@ add_executable(cortext_tests
   operations_serial_position_apply.test.cpp
   operations_embedding_prediction_error.test.cpp
   operations_precision_modulation.test.cpp
-  operations_graph_schema.test.cpp
+
   operations_graph_build.test.cpp
   operations_graph_retrieval.test.cpp
   operations_concept_detection.test.cpp
   operations_emotion_cascade.test.cpp
-  operations_goal_alignment.test.cpp
+
   operations_consolidation.test.cpp
   operations_consolidation_cluster.test.cpp
   operations_write_gate.test.cpp

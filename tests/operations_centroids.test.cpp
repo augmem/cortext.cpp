@@ -3,13 +3,13 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <cortext/operations/centroids.hpp>
-#include <cortext/operations/goal_alignment_fallback.hpp>
+
 #include <cortext/operations/metrics.hpp>
 #include <cortext/processor.hpp>
 #include <cortext/processor/operation_context.hpp>
 
 using namespace cortext;
-using cortext::operations::ComputeGoalAlignmentFallback;
+
 using cortext::operations::ComputeMetrics;
 using cortext::operations::InitializeEmbeddedCentroids;
 
@@ -56,31 +56,5 @@ TEST_CASE ("ComputeMetrics uses affect centroids and sets violation telemetry",
   REQUIRE (ctx.GetViolation ().has_value ());
 }
 
-TEST_CASE ("ComputeGoalAlignmentFallback sets metric only when missing",
-           "[operations][centroids][goal_alignment]")
-{
-  Signal s;
-  ProcessorContext pctx;
-  SignalProcessor::Config cfg;
-
-  {
-    OperationContext init_ctx (s, pctx, cfg);
-    InitializeEmbeddedCentroids init;
-    init.Execute (init_ctx, cortext::testing::GetNullTransaction ());
-  }
-  REQUIRE (pctx.centroids.has_value ());
-  s.embedding = pctx.centroids->affect.goal_aligned;
-  OperationContext ctx (s, pctx, cfg);
-  ComputeGoalAlignmentFallback fb;
-  fb.Execute (ctx, cortext::testing::GetNullTransaction ());
-  auto ga = ctx.GetMetric (operations::Metric::goal_alignment);
-  REQUIRE (ga.has_value ());
-  REQUIRE (*ga > 0.5);
-  ctx.SetMetric (operations::Metric::goal_alignment, 0.1);
-  fb.Execute (ctx, cortext::testing::GetNullTransaction ());
-  ga = ctx.GetMetric (operations::Metric::goal_alignment);
-  REQUIRE (ga.has_value ());
-  REQUIRE (*ga == Catch::Approx (0.1));
-}
 
 

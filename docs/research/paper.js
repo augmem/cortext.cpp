@@ -118,6 +118,7 @@ const doc = new Document({
             ...paperSections.consolidationGraph,
             ...paperSections.interruptGate,
             ...paperSections.experimentalResults,
+            ...paperSections.appendices,
 
             // ==================== 12. IMPLEMENTATION CONSIDERATIONS ====================
             p([tr("12. Implementation Considerations")], { heading: HeadingLevel.HEADING_1 }),

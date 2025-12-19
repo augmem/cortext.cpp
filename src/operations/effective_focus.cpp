@@ -11,6 +11,7 @@ namespace cortext::operations
 void
 ComputeEffectiveFocus::Execute (OperationContext &context, Transaction &tx) const
 {
+  (void)tx;
   const auto &cfg = context.GetConfig ();
   const double F = cfg.focus;
   // Spec (§3.1.1, line 387): F_eff = F × (0.5 + 0.5 × coherence_struct_t)

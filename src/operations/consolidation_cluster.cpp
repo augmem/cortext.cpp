@@ -27,6 +27,8 @@ ConsolidationClusterParams::FromKnobs (double F, double /*S*/, double /*T*/)
 void
 ConsolidationCluster::Execute (OperationContext &context, Transaction &tx) const
 {
+  (void)tx;
+  (void)tx;
   if (!context.GetConsolidationShouldStart ())
     {
       return;
@@ -42,22 +44,14 @@ ConsolidationCluster::Execute (OperationContext &context, Transaction &tx) const
   auto params = ConsolidationClusterParams::FromKnobs (cfg.focus, cfg.sensitivity,
                                                        cfg.stability);
 
-  // v2: Load candidates with embeddings from consolidation_candidates joined
-  // with embeddings (via memories for consistency).
-  auto rows = store->Execute (
-      "SELECT cc.embedding_id, cc.score, e.embedding "
-      "FROM consolidation_candidates cc "
-      "JOIN memories m ON cc.embedding_id = m.embedding_id "
-      "JOIN embeddings e ON m.embedding_id = e.embedding_id "
-      "ORDER BY cc.score ASC",
-      {});
-
-  if (rows.empty ())
+  // v2: Load candidates from context (in-memory passing)
+  const auto &input_candidates = context.GetConsolidationCandidates ();
+  if (input_candidates.empty ())
     {
       return;
     }
 
-  // 2. Parse embeddings into memory.
+  // 2. Prepare candidates for clustering.
   struct Candidate
   {
     long long embedding_id;
@@ -66,52 +60,14 @@ ConsolidationCluster::Execute (OperationContext &context, Transaction &tx) const
     bool assigned = false;
   };
   std::vector<Candidate> items;
-  items.reserve (rows.size ());
+  items.reserve (input_candidates.size ());
 
-  // Determine embedding dimension from first valid embedding.
-  int emb_dim = 256; // Default assumption
-
-  for (const auto &row : rows)
+  for (const auto &ic : input_candidates)
     {
-      auto it_id = row.find ("embedding_id");
-      auto it_score = row.find ("score");
-      auto it_emb = row.find ("embedding");
-
-      if (it_id == row.end () || it_score == row.end () || it_emb == row.end ())
-        {
-          continue;
-        }
-
-      if (it_id->second.type () != typeid (long long))
-        {
-          continue;
-        }
-
       Candidate c;
-      c.embedding_id = std::any_cast<long long> (it_id->second);
-
-      // Score can be double or int depending on DB.
-      if (it_score->second.type () == typeid (double))
-        {
-          c.score = std::any_cast<double> (it_score->second);
-        }
-      else if (it_score->second.type () == typeid (long long))
-        {
-          c.score = static_cast<double> (
-              std::any_cast<long long> (it_score->second));
-        }
-      else
-        {
-          continue;
-        }
-
-      // Decode embedding blob.
-      if (!core::DecodeFloatBlob (it_emb->second, emb_dim, c.embedding))
-        {
-          continue;
-        }
-      emb_dim = static_cast<int> (c.embedding.size ());
-
+      c.embedding_id = ic.embedding_id;
+      c.score = ic.score;
+      c.embedding = ic.embedding;
       items.push_back (std::move (c));
     }
 

@@ -3,8 +3,8 @@
 #include "cortext/core/knobs.hpp"
 #include "cortext/operations/constants.hpp"
 #include "cortext/operations/extraction.hpp"
+#include "cortext/core/utils.hpp"
 #include "cortext/processor/operation_context.hpp"
-#include "cortext/store/schema.hpp"
 #include "cortext/telemetry/telemetry.hpp"
 #include <algorithm>
 #include <any>
@@ -82,6 +82,7 @@ CheckIdleCondition (int tokens_in_flight, int retrieval_queue_depth,
 void
 EvaluateConsolidation::Execute (OperationContext &context, Transaction &tx) const
 {
+  (void)tx;
   auto &p_ctx = context.GetProcessorContext ();
   const auto &cfg = context.GetConfig ();
   Store *store = context.GetStore ();
@@ -138,16 +139,9 @@ EvaluateConsolidation::Execute (OperationContext &context, Transaction &tx) cons
 }
 
 void
-EvaluateConsolidation::CollectSchema (cortext::store::SchemaRegistry &registry) const
-{
-  // No-op: consolidation_events table removed (undocumented).
-  // All tables now in core schema.cpp migration 0.
-  (void)registry;
-}
-
-void
 EnqueueExtractionJobs::Execute (OperationContext &context, Transaction &tx) const
 {
+  (void)tx;
   if (!context.GetConsolidationShouldStart ())
     {
       return;
@@ -197,14 +191,6 @@ EnqueueExtractionJobs::Execute (OperationContext &context, Transaction &tx) cons
 }
 
 void
-EnqueueExtractionJobs::CollectSchema (cortext::store::SchemaRegistry &registry) const
-{
-  // No-op: extraction_jobs table removed (undocumented).
-  // All tables now in core schema.cpp migration 0.
-  (void)registry;
-}
-
-void
 ScoreConsolidation::Execute (OperationContext &context, Transaction &tx) const
 {
   const auto &cfg = context.GetConfig ();
@@ -212,21 +198,22 @@ ScoreConsolidation::Execute (OperationContext &context, Transaction &tx) const
   const double S = cfg.sensitivity;
   const double T = cfg.stability;
   const uint64_t now_ts = context.GetSignal ().timestamp;
+  (void)now_ts;
 
   // Floor derived from knobs (no magic numbers).
   const double floor_cutoff = core::PeripheryCutoff (T);
 
-  // v2: Update connectivity metric from graph edge count (Section 9.2).
+  // V2: Update connectivity metric from ASSOCIATIONS edge count (Section 9.2).
   // Connectivity = normalized count of edges where this memory participates.
   // Normalized by max observed edge count to keep values in [0, 1].
   tx.Execute ("WITH edge_counts AS ("
-              "  SELECT m.embedding_id, "
-              "         (SELECT COUNT(*) FROM graph_edges ge "
-              "          WHERE ge.source_id = 'emb:' || m.embedding_id "
-              "             OR ge.target_id = 'emb:' || m.embedding_id) AS cnt "
+              "  SELECT m.memory_id, m.embedding_id, "
+              "         (SELECT COUNT(*) FROM associations a "
+              "          WHERE a.source_memory_id = m.memory_id "
+              "             OR a.target_memory_id = m.memory_id) AS cnt "
               "  FROM memories m"
               "), max_cnt AS ("
-              "  SELECT MAX(cnt) AS m FROM edge_counts WHERE cnt > 0"
+              "  SELECT COALESCE(MAX(cnt), 0) AS m FROM edge_counts"
               ") "
               "UPDATE memories SET connectivity = ("
               "  SELECT CASE WHEN (SELECT m FROM max_cnt) > 0 "
@@ -237,50 +224,81 @@ ScoreConsolidation::Execute (OperationContext &context, Transaction &tx) const
               ");",
               {});
 
-  // v2: Insert or update candidates whose score is below floor.
+  // v2: Select candidates whose score is below floor.
   // score = T*strength - F*redundancy + S*connectivity + T*stability
   // Uses unified memories table which contains per-memory state.
-  tx.Execute ("INSERT INTO consolidation_candidates(embedding_id, score, "
-              "created_at, reason) "
-              "SELECT m.embedding_id, "
-              "       ((?1 * COALESCE(m.strength, 1.0)) "
-              "        - (?2 * COALESCE(m.redundancy, 0.0)) "
-              "        + (?3 * COALESCE(m.connectivity, 0.0)) "
-              "        + (?4 * COALESCE(m.stability, 0.0))) AS computed_score, "
-              "       ?5 AS created_at, "
-              "       'score_below_floor' AS reason "
-              "FROM memories m "
-              "WHERE ((?1 * COALESCE(m.strength, 1.0)) "
-              "       - (?2 * COALESCE(m.redundancy, 0.0)) "
-              "       + (?3 * COALESCE(m.connectivity, 0.0)) "
-              "       + (?4 * COALESCE(m.stability, 0.0))) < ?6 "
-              "ON CONFLICT(embedding_id) DO UPDATE SET "
-              "  score=excluded.score, "
-              "  created_at=excluded.created_at, "
-              "  reason=excluded.reason;",
-              { T, F, S, T, static_cast<long long> (now_ts), floor_cutoff });
+  auto rows = tx.Execute (
+      "SELECT m.embedding_id, "
+      "       ((?1 * COALESCE(m.strength, 1.0)) "
+      "        - (?2 * COALESCE(m.redundancy, 0.0)) "
+      "        + (?3 * COALESCE(m.connectivity, 0.0)) "
+      "        + (?4 * COALESCE(m.stability, 0.0))) AS computed_score, "
+      "       e.embedding "
+      "FROM memories m "
+      "JOIN embeddings e ON m.embedding_id = e.embedding_id "
+      "WHERE ((?1 * COALESCE(m.strength, 1.0)) "
+      "       - (?2 * COALESCE(m.redundancy, 0.0)) "
+      "       + (?3 * COALESCE(m.connectivity, 0.0)) "
+      "       + (?4 * COALESCE(m.stability, 0.0))) < ?5 "
+      "ORDER BY computed_score ASC;",
+      { T, F, S, T, floor_cutoff });
 
-  // Count candidates and selected for logging
-  auto rows = tx.Execute("SELECT COUNT(*) AS candidate_count FROM consolidation_candidates", {});
-  long long candidate_count = 0;
-  if (!rows.empty() && rows[0].count("candidate_count") == 1)
+  std::vector<ConsolidationCandidate> candidates;
+  if (!rows.empty())
     {
-      const auto &v = rows[0].at("candidate_count");
-      if (v.type() == typeid(long long))
-        candidate_count = std::any_cast<long long>(v);
+      candidates.reserve (rows.size ());
+      int emb_dim = 256; // Default assumption
+
+      for (const auto &row : rows)
+        {
+          auto it_id = row.find ("embedding_id");
+          auto it_score = row.find ("computed_score");
+          auto it_emb = row.find ("embedding");
+
+          if (it_id == row.end () || it_score == row.end () || it_emb == row.end ())
+            {
+              continue;
+            }
+
+          if (it_id->second.type () != typeid (long long))
+            {
+              continue;
+            }
+
+          ConsolidationCandidate c;
+          c.embedding_id = std::any_cast<long long> (it_id->second);
+
+          if (it_score->second.type () == typeid (double))
+            {
+              c.score = std::any_cast<double> (it_score->second);
+            }
+          else if (it_score->second.type () == typeid (long long))
+            {
+              c.score = static_cast<double> (
+                  std::any_cast<long long> (it_score->second));
+            }
+          else
+            {
+              continue;
+            }
+
+          if (!core::DecodeFloatBlob (it_emb->second, emb_dim, c.embedding))
+            {
+              continue;
+            }
+          emb_dim = static_cast<int> (c.embedding.size ());
+
+          candidates.push_back (std::move (c));
+        }
     }
+
+  long long candidate_count = static_cast<long long>(candidates.size());
+  context.SetConsolidationCandidates (std::move (candidates));
 
   telemetry::LogDebug("cortext.score_consolidation", {
     telemetry::Attribute::Int64("candidate_count", candidate_count),
     telemetry::Attribute::Int64("selected_count", candidate_count)
   });
-}
-
-void
-ScoreConsolidation::CollectSchema (cortext::store::SchemaRegistry &registry) const
-{
-  // No-op: consolidation_candidates table now in core schema.cpp migration 0.
-  (void)registry;
 }
 
 } // namespace cortext::operations

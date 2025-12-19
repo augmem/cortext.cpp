@@ -1,0 +1,31 @@
+---
+title: "Cortext: A Three-Knob Adaptive Memory Architecture"
+subtitle: "Algorithmic Specification"
+bibliography: references.bib
+---
+
+# Abstract {.unnumbered}
+
+This document details the complete algorithmic specification for Cortext, a biologically-inspired adaptive memory system. It serves as a technical reference for implementation, focusing purely on mathematical definitions, signal processing flows, and adaptive control logic governed by the three primary parameters: Focus (F), Sensitivity (S), and Stability (T).
+
+{{< include sections/1_math_foundations.qmd >}}
+
+{{< include sections/2_core_adaptation.qmd >}}
+
+{{< include sections/3_structural_metrics.qmd >}}
+
+{{< include sections/4_dynamic_thresholding.qmd >}}
+
+{{< include sections/5_reinforcement.qmd >}}
+
+{{< include sections/6_advanced_cognitive.qmd >}}
+
+{{< include sections/7_consolidation.qmd >}}
+
+{{< include sections/8_interrupt_gate.qmd >}}
+
+{{< include sections/9_experimental.qmd >}}
+
+{{< include sections/10_implementation.qmd >}}
+
+{{< include sections/appendices.qmd >}}

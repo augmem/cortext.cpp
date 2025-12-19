@@ -2,7 +2,6 @@
 
 #include "cortext/processor/operation.hpp"
 #include "cortext/processor/operation_context.hpp"
-#include "cortext/store/schema.hpp"
 #include "cortext/telemetry/telemetry.hpp"
 #include <memory>
 #include <typeinfo>
@@ -42,20 +41,6 @@ public:
             { telemetry::Attribute::String ("cortext.operation_type",
                                             op_type ? op_type : "unknown") });
         op->Execute (context, tx);
-      }
-  }
-
-  /// @brief Collects schema migrations from all contained operations.
-  /// @param registry The registry to add migrations to.
-  void
-  CollectSchema (cortext::store::SchemaRegistry &registry) const override
-  {
-    for (const auto &op : operations_)
-      {
-        if (op)
-          {
-            op->CollectSchema (registry);
-          }
       }
   }
 

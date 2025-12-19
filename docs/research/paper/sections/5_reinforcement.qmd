@@ -1,0 +1,119 @@
+# Reinforcement and Decay Dynamics {#sec-reinforcement}
+
+## Memory Strength Model {#sec-memory-strength}
+
+Each memory m maintains a strength value updated through use-frequency tracking and exponential decay. The update uses a sensitivity-modulated learning rate and a binary usage indicator:
+
+```
+α_min_S = 0.05; α_span_S = 0.35
+α_S(t) = α_min_S + S × α_span_S × u(t)
+used_flag(m) = 1 if m was retrieved and used in current step, else 0
+
+use_frequency_t ← EWMA(use_frequency_{t−1},
+                       used_flag(m), α = α_S(t))
+λ_t ← ln(2) / half_life_t
+strength_t ← clamp(strength_{t−1} × exp(−λ_t × Δt) +
+                   S × use_frequency_t, 0, 1)
+```
+
+Memories falling below the periphery cutoff are candidates for eviction:
+
+```
+periphery_cutoff(T) = lerp(0.05, 0.25, T)
+if strength_t < periphery_cutoff(T): evict(m)
+```
+
+## Influence-Weighted Updates
+
+When contextual gain signals are available, influence factors modulate reinforcement:
+
+```
+influence_factor ← (used_count / max(retrieved_count, 1)) ×
+                    clamp(contextual_gain(m), −1, +1)
+strength_t ← clamp(strength_{t−1} × exp(−λ_t × Δt) +
+                   S × use_frequency_t + F × influence_factor, 0, 1)
+```
+
+## Causal Feedback Loop {#sec-feedback}
+
+The system tracks causal influence of retrieved memories on generation quality through contextual gain—the improvement in prediction accuracy attributable to including each memory in context.
+
+### Focus Feedback
+
+```
+αF_base = 0.10; βF_base = 0.05
+for each used memory m:
+    if contextual_gain(m) > 0:
+        weight_relevance += αF_base × contextual_gain(m)
+        attention_width_t *= (1 − βF_base)
+    else:
+        attention_width_t *= (1 + βF_base)
+weight_relevance ← clamp(weight_relevance, 0, 1)
+attention_width_t ← clamp(attention_width_t,
+                          attention_width_min, attention_width_max)
+```
+
+Positive contextual gain narrows attention and boosts relevance weighting; negative gain widens attention to explore alternatives.
+
+### Sensitivity Feedback
+
+```
+η_base = 0.10
+for each used memory m:
+    novelty_reward ← 1 − sim(m.embedding, recent_context)
+    weight_novelty_t += η_base × (novelty_reward ×
+                         contextual_gain(m) −
+                         redundancy(m, recent_context))
+weight_novelty_t ← clamp(weight_novelty_t, 0, 1)
+```
+
+This rewards novelty that proves useful while penalizing redundant retrievals.
+
+### Stability Feedback
+
+```
+γT_base = 0.05
+for each used memory m:
+    if contextual_gain(m) > 0:
+        stability(m) += γT_base
+    else:
+        stability(m) *= (1 − γT_base)
+```
+
+The mean stability of used memories provides adjustment to the half-life target:
+
+```
+adj ← clamp(mean(stability(m_used)) − 1.0, −0.25, +0.25)
+ΔHalfLife_adj_t ← adj
+```
+
+This factor is consumed by the Stability update (@sec-stability-update), avoiding conflicting adjustments between feedback mechanisms.
+
+## Generation Influence Tracking
+
+When generation embeddings are available, influence incorporates output trajectory:
+
+```
+Δḡ ← l2_normalize(ḡ_t) − l2_normalize(ḡ_{t−1})
+drift_mag_gen ← ‖Δḡ‖
+drift_contribution(m) ← (drift_mag_gen / 2) ×
+                         max(0, cos(m.embedding, l2_normalize(Δḡ)))
+```
+
+Total influence blends contextual gain, generation similarity, and drift contribution:
+
+```
+λ₁ = 0.5; λ₂ = 0.4; λ₃ = 0.3
+influence(m) ← λ₁ × contextual_gain(m) +
+                λ₂ × cos(m.embedding, ḡ_t) −
+                λ₃ × drift_contribution(m)
+```
+
+Sustained influence accumulates over a stability-dependent horizon:
+
+```
+L_sustain(T) = round(lerp(3, 5, T))
+sustained_influence ← EWMA(sustained_influence,
+                           influence(m),
+                           α = 2 / (L_sustain(T) + 1))
+```

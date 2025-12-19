@@ -9,13 +9,11 @@ namespace cortext::operations
 ///        only when EvaluateConsolidation signaled start.
 ///
 /// This operation dynamically instantiates ScoreConsolidation and
-/// EnqueueExtractionJobs during Execute(). CollectSchema() forwards to
-/// these operations to ensure their table migrations are applied.
+/// EnqueueExtractionJobs during Execute().
 class ConsolidationGate : public IOperation
 {
 public:
   void Execute (OperationContext &context, Transaction &tx) const override;
-  void CollectSchema (cortext::store::SchemaRegistry &registry) const override;
 };
 
 } // namespace cortext::operations

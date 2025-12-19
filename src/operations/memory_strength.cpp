@@ -5,7 +5,6 @@
 #include "cortext/operations/constants.hpp"
 #include "cortext/core/knobs.hpp"
 #include "cortext/processor/operation_context.hpp"
-#include "cortext/store/schema.hpp"
 #include "cortext/telemetry/telemetry.hpp"
 #include <cmath>
 #include <string>
@@ -109,12 +108,6 @@ UpdateMemoryStrength::Execute (OperationContext &context, Transaction &tx) const
                                                       update_count),
                          telemetry::Attribute::Int64 ("eviction_count",
                                                       eviction_count) });
-}
-
-void
-UpdateMemoryStrength::CollectSchema (cortext::store::SchemaRegistry &registry) const
-{
-  (void)registry; // Relies on core memory_feedback
 }
 
 } // namespace cortext::operations

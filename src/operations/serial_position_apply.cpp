@@ -24,6 +24,7 @@ Clamp01 (double v)
 void
 ApplySerialPositionMultiplier::Execute (OperationContext &context, Transaction &tx) const
 {
+  (void)tx;
   const auto &config = context.GetConfig ();
   const int primacy_window = std::max (0, context.GetSerialPrimacyWindow ());
   const int recency_window = std::max (0, context.GetSerialRecencyWindow ());

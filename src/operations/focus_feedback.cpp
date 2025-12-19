@@ -12,6 +12,7 @@ namespace cortext::operations
 void
 ApplyFocusFeedback::Execute (OperationContext &context, Transaction &tx) const
 {
+  (void)tx;
   auto &p_ctx = context.GetProcessorContext ();
   // Avoid relying on context.GetConfig() here because some tests create
   // OperationContext with a short-lived Config. Derive an effective focus

@@ -1,0 +1,102 @@
+# Cortext: A Three-Knob Adaptive Memory Architecture
+# Abstract
+# Introduction
+# Related Work
+## Working Memory Models
+## Memory Consolidation
+## Emotional Influences on Memory
+## Adaptive Control Systems
+# Mathematical Foundations
+## Notation and Primitives
+### Units Convention
+### Buffers
+## The Three-Knob Philosophy
+## Knob-Derived Parameters
+### Context Windows and Temporal Scales
+### Half-Life and Decay
+### Hysteresis and Rate Targets
+### Experiential Mass and Maturity
+## Uncertainty Estimation
+# Core Adaptation Algorithms
+## Focus-Driven Selectivity
+### Focus Priors
+### Dynamic Focus Update
+## Sensitivity-Driven Plasticity
+### Sensitivity Priors
+### Emotional Projection
+### Threshold Modulation from Emotion
+## Stability-Driven Persistence
+### Stability Priors
+### Dynamic Stability Update
+# Structural Metrics and Composite Scoring
+## Embedding-Derived Metrics
+### Structural Coherence
+### Focus Spread
+### Trajectory Drift
+### Embedding Prediction Error
+## Composite Score Computation
+## Metric Weight Blending
+### Score Normalization
+# Dynamic Thresholding and Homeostatic Control
+## Prior-Evidence Blending
+## Homeostatic Rate Control
+### Rate Estimation
+### Effective Sample Size
+### Homeostatic Correction
+### Sensitivity-Based Threshold Adjustment
+### Precision-Based Threshold Adjustment
+## Threshold Integration
+## Write Pacing and Memory Accumulation
+### Memory Accumulator State
+### Hybrid Drift and Coherence Tracking
+### Natural Boundary Detection
+### Spike Bypass (Flashbulb Flush)
+### Window Score and Refractory
+# Reinforcement and Decay Dynamics
+## Memory Strength Model
+## Influence-Weighted Updates
+## Causal Feedback Loop
+### Focus Feedback
+### Sensitivity Feedback
+### Stability Feedback
+## Generation Influence Tracking
+# Advanced Cognitive Processes
+## Working Memory Gates
+### Active Memory Structure
+### Maintenance Cost
+### Memory-Level Gating
+### Chunking at Memory Level
+## Metacognitive Monitoring
+## Memory Reconsolidation
+## Retrieval Competition
+## Predictive Pre-activation
+## Serial Position Effects
+## Emotional Consolidation
+# Consolidation and Graph Integration
+## Consolidation Triggers
+### Activity-Aware Scheduling
+## Consolidation Scoring
+## Clustering and Summarization
+## Semantic Extraction
+## Knowledge Graph Construction
+### Edge Construction
+## Graph-Augmented Retrieval
+# Interrupt Gate and Streaming Integration
+## Marginal Utility Computation
+## Marginal Utility Score
+## Gate Decision Logic
+### Write Exclusion Filter
+## Streaming Pacing
+# Experimental Results
+## Threshold Adaptation
+## Boundary Detection
+## Latency and Performance
+# Implementation Considerations
+## Computational Complexity
+## Memory Footprint
+## Numerical Stability
+# Conclusion and Future Directions
+# References
+# Appendix A. State Variables Map
+# Appendix B. Derived Signals: Definitions and Bounds
+# Appendix C. Main Loop Execution Order and Normative Invariants

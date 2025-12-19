@@ -23,6 +23,7 @@ constexpr double kVarScoreMax = 0.25;
 void
 UpdateUncertainty::Execute (OperationContext &context, Transaction &tx) const
 {
+  (void)tx;
   auto &p_ctx = context.GetProcessorContext ();
   const auto &config = context.GetConfig ();
 

@@ -5,7 +5,6 @@
 #include "cortext/core/utils.hpp"
 #include "cortext/operations/constants.hpp"
 #include "cortext/processor/operation_context.hpp"
-#include "cortext/store/schema.hpp"
 #include "cortext/store/store.hpp"
 #include <Eigen/Dense>
 #include <algorithm>
@@ -51,25 +50,6 @@ ToFloatVector (const Eigen::VectorXf &v)
   return out;
 }
 
-/// @brief Extracts embedding ID from a graph node ID string (e.g., "emb:123" →
-/// 123).
-inline std::optional<long long>
-ParseEmbeddingId (const std::string &node_id)
-{
-  if (node_id.rfind ("emb:", 0) == 0)
-    {
-      try
-        {
-          return std::stoll (node_id.substr (4));
-        }
-      catch (...)
-        {
-          return std::nullopt;
-        }
-    }
-  return std::nullopt;
-}
-
 /// @brief Neighbor info returned from graph traversal.
 struct NeighborInfo
 {
@@ -78,6 +58,7 @@ struct NeighborInfo
 };
 
 /// @brief Queries graph neighbors of a given embedding via iterative BFS.
+/// V2: Uses ASSOCIATIONS table with memory_ids instead of graph_edges.
 /// Returns neighbors connected via 'co_occurs_with' or 'reinforces' edges
 /// up to max_depth hops away.
 inline std::vector<NeighborInfo>
@@ -89,18 +70,38 @@ QueryGraphNeighbors (Store *store, long long embedding_id, int max_depth)
       return neighbors;
     }
 
-  // Use BFS to find neighbors up to max_depth hops
-  std::unordered_set<std::string> visited;
-  std::vector<std::pair<std::string, int>> frontier; // (node_id, depth)
+  // V2: First find the memory_id for this embedding_id
+  auto mem_rows = store->Execute (
+      "SELECT memory_id FROM memories WHERE embedding_id = ?",
+      { embedding_id });
 
-  std::string seed_node = "emb:" + std::to_string (embedding_id);
-  visited.insert (seed_node);
-  frontier.push_back ({ seed_node, 0 });
+  if (mem_rows.empty ())
+    {
+      return neighbors;
+    }
+
+  long long seed_memory_id = 0;
+  auto it_mem = mem_rows[0].find ("memory_id");
+  if (it_mem != mem_rows[0].end () && it_mem->second.type () == typeid (long long))
+    {
+      seed_memory_id = std::any_cast<long long> (it_mem->second);
+    }
+  else
+    {
+      return neighbors;
+    }
+
+  // V2: Use BFS to traverse ASSOCIATIONS
+  std::unordered_set<long long> visited;
+  std::vector<std::pair<long long, int>> frontier; // (memory_id, depth)
+
+  visited.insert (seed_memory_id);
+  frontier.push_back ({ seed_memory_id, 0 });
 
   size_t frontier_idx = 0;
   while (frontier_idx < frontier.size ())
     {
-      const auto &[current_node, current_depth] = frontier[frontier_idx];
+      const auto &[current_mem_id, current_depth] = frontier[frontier_idx];
       ++frontier_idx;
 
       if (current_depth >= max_depth)
@@ -108,49 +109,58 @@ QueryGraphNeighbors (Store *store, long long embedding_id, int max_depth)
           continue;
         }
 
-      // Query edges from/to this node
-      std::string query
-          = "SELECT source_id, target_id FROM graph_edges "
-            "WHERE (source_id = ? OR target_id = ?) "
-            "AND edge_type IN ('co_occurs_with', 'reinforces')";
+      // V2: Query edges from/to this memory via ASSOCIATIONS
+      auto rows = store->Execute (
+          "SELECT source_memory_id, target_memory_id FROM associations "
+          "WHERE (source_memory_id = ? OR target_memory_id = ?) "
+          "AND edge_type IN ('co_occurs_with', 'reinforces')",
+          { current_mem_id, current_mem_id });
 
-      auto rows = store->Execute (query, { current_node, current_node });
       for (const auto &row : rows)
         {
-          auto src_it = row.find ("source_id");
-          auto tgt_it = row.find ("target_id");
+          auto src_it = row.find ("source_memory_id");
+          auto tgt_it = row.find ("target_memory_id");
           if (src_it == row.end () || tgt_it == row.end ())
             {
               continue;
             }
 
-          std::string src, tgt;
-          if (src_it->second.type () == typeid (std::string))
+          long long src_id = 0, tgt_id = 0;
+          if (src_it->second.type () == typeid (long long))
             {
-              src = std::any_cast<std::string> (src_it->second);
+              src_id = std::any_cast<long long> (src_it->second);
             }
-          if (tgt_it->second.type () == typeid (std::string))
+          if (tgt_it->second.type () == typeid (long long))
             {
-              tgt = std::any_cast<std::string> (tgt_it->second);
+              tgt_id = std::any_cast<long long> (tgt_it->second);
             }
 
           // The neighbor is the other end of the edge
-          std::string neighbor_node = (src == current_node) ? tgt : src;
+          long long neighbor_mem_id = (src_id == current_mem_id) ? tgt_id : src_id;
 
-          if (visited.count (neighbor_node))
+          if (visited.count (neighbor_mem_id))
             {
               continue;
             }
-          visited.insert (neighbor_node);
+          visited.insert (neighbor_mem_id);
 
           int neighbor_depth = current_depth + 1;
-          frontier.push_back ({ neighbor_node, neighbor_depth });
+          frontier.push_back ({ neighbor_mem_id, neighbor_depth });
 
-          // Parse embedding ID and add to results
-          auto parsed_id = ParseEmbeddingId (neighbor_node);
-          if (parsed_id)
+          // Look up embedding_id for this neighbor memory
+          auto emb_rows = store->Execute (
+              "SELECT embedding_id FROM memories WHERE memory_id = ?",
+              { neighbor_mem_id });
+
+          if (!emb_rows.empty ())
             {
-              neighbors.push_back ({ *parsed_id, neighbor_depth });
+              auto emb_it = emb_rows[0].find ("embedding_id");
+              if (emb_it != emb_rows[0].end ()
+                  && emb_it->second.type () == typeid (long long))
+                {
+                  neighbors.push_back (
+                      { std::any_cast<long long> (emb_it->second), neighbor_depth });
+                }
             }
         }
     }
@@ -246,6 +256,7 @@ ApplyReconsolidation::Execute (OperationContext &context, Transaction &tx) const
   const double ripple_decay = core::RippleDecay (T);
   const int ripple_depth = core::RippleDepth (T);
   const double tau_labile = core::TauLabile (T);
+  (void)tau_labile;
   const double lability_susc = core::LabilitySusceptibility (S, T);
 
   double max_drift = 0.0;
@@ -387,15 +398,6 @@ ApplyReconsolidation::Execute (OperationContext &context, Transaction &tx) const
   const double bump = std::min (kUncertaintyBumpCap, max_drift);
   p_ctx.u_t = core::Clamp (p_ctx.u_t + bump, constants::kNormalizedMin,
                            constants::kNormalizedMax);
-}
-
-void
-ApplyReconsolidation::CollectSchema (cortext::store::SchemaRegistry &registry) const
-{
-  // Reconsolidation relies on memory_feedback and embeddings, which are core tables.
-  // However, if we want to be explicit about table requirements or indexes for lability,
-  // we could add them here. For now, core tables are handled by RegisterCoreSchema.
-  (void)registry;
 }
 
 } // namespace cortext::operations

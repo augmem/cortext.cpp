@@ -4,7 +4,6 @@
 #include "cortext/core/algorithms.hpp"
 #include "cortext/operations/constants.hpp"
 #include "cortext/processor/operation_context.hpp"
-#include "cortext/store/schema.hpp"
 #include "cortext/telemetry/telemetry.hpp"
 #include <Eigen/Dense>
 #include <algorithm>
@@ -186,12 +185,6 @@ ApplyPredictivePreActivation::Execute (OperationContext &context, Transaction &t
     telemetry::Attribute::Double ("prediction_norm", static_cast<double> (pred.norm ())),
     telemetry::Attribute::Int64 ("boost_count", static_cast<int64_t> (boost_count))
   });
-}
-
-void
-ApplyPredictivePreActivation::CollectSchema (cortext::store::SchemaRegistry &registry) const
-{
-  (void)registry; // No extra tables, relies on core memory_feedback.
 }
 
 } // namespace cortext::operations

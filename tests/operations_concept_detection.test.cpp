@@ -9,14 +9,14 @@
 
 #include <cortext/core/knobs.hpp>
 #include <cortext/operations/concept_detection.hpp>
-#include <cortext/operations/graph_schema.hpp>
+
 #include <cortext/processor.hpp>
 #include <cortext/processor/operation_set.hpp>
 #include <cortext/store/sqlite_store.hpp>
 
 using namespace cortext;
 using cortext::operations::DetectConceptNodes;
-using cortext::operations::EnsureGraphSchema;
+
 
 namespace
 {
@@ -80,47 +80,17 @@ TEST_CASE ("DetectConceptNodes creates concept nodes for frequent entities",
 
   // Create test data: entity "Alice" appearing in multiple episodes
   auto centroid = Make256DEmb ({ 1.0f, 0.0f, 0.0f, 0.0f });
-  auto centroid_blob = EncodeFloatBlob (centroid);
 
-  // Create summaries with centroids
-  store->Execute ("INSERT INTO consolidation_summaries (summary_id, summary_text, "
-                  "centroid, cluster_size) VALUES (?, ?, ?, ?)",
-                  { std::string ("s1"), std::string ("test1"), centroid_blob, 5LL });
-  store->Execute ("INSERT INTO consolidation_summaries (summary_id, summary_text, "
-                  "centroid, cluster_size) VALUES (?, ?, ?, ?)",
-                  { std::string ("s2"), std::string ("test2"), centroid_blob, 5LL });
-  store->Execute ("INSERT INTO consolidation_summaries (summary_id, summary_text, "
-                  "centroid, cluster_size) VALUES (?, ?, ?, ?)",
-                  { std::string ("s3"), std::string ("test3"), centroid_blob, 5LL });
-
-  // Entity appears in multiple summaries
-  store->Execute ("INSERT INTO extraction_entities (summary_id, name, type, salience) "
-                  "VALUES (?, ?, ?, ?)",
-                  { std::string ("s1"), std::string ("Alice"), std::string ("Person"), 0.9 });
-  store->Execute ("INSERT INTO extraction_entities (summary_id, name, type, salience) "
-                  "VALUES (?, ?, ?, ?)",
-                  { std::string ("s2"), std::string ("Alice"), std::string ("Person"), 0.8 });
-  store->Execute ("INSERT INTO extraction_entities (summary_id, name, type, salience) "
-                  "VALUES (?, ?, ?, ?)",
-                  { std::string ("s3"), std::string ("Alice"), std::string ("Person"), 0.7 });
-
-  // Link sources with different episodes
-  store->Execute ("INSERT INTO consolidation_sources (summary_id, source_embedding_id) "
-                  "VALUES (?, ?)",
-                  { std::string ("s1"), 1LL });
-  store->Execute ("INSERT INTO consolidation_sources (summary_id, source_embedding_id) "
-                  "VALUES (?, ?)",
-                  { std::string ("s2"), 2LL });
-  store->Execute ("INSERT INTO consolidation_sources (summary_id, source_embedding_id) "
-                  "VALUES (?, ?)",
-                  { std::string ("s3"), 3LL });
-
-  // v2: Create embeddings for the memories
+  // V2: Create embeddings for source memories, ASSOCIATION summaries, and LABEL entity
   cortext::testing::SeedEmbeddingV2 (*store, 1LL, centroid);
   cortext::testing::SeedEmbeddingV2 (*store, 2LL, centroid);
   cortext::testing::SeedEmbeddingV2 (*store, 3LL, centroid);
+  cortext::testing::SeedEmbeddingV2 (*store, 101LL, centroid); // ASSOCIATION 1
+  cortext::testing::SeedEmbeddingV2 (*store, 102LL, centroid); // ASSOCIATION 2
+  cortext::testing::SeedEmbeddingV2 (*store, 103LL, centroid); // ASSOCIATION 3
+  cortext::testing::SeedEmbeddingV2 (*store, 200LL, centroid); // LABEL "Alice"
 
-  // v2: Create memories with different episodes (modality, not primary_modality)
+  // V2: Create source LONG_TERM memories with different episode_ids
   store->Execute (
       "INSERT INTO memories (memory_id, embedding_id, source_id, kind, episode_id, "
       "start_ts, end_ts, n_signals, modality, s_max, s_avg, strength, created_at) "
@@ -137,10 +107,62 @@ TEST_CASE ("DetectConceptNodes creates concept nodes for frequent entities",
       "VALUES (?, ?, 'test', 'LONG_TERM', ?, ?, ?, ?, ?, ?, ?, 1.0, 0)",
       { 3LL, 3LL, 3LL, 2900LL, 3000LL, 1LL, std::string ("text"), 0.5, 0.5 });
 
+  // V2: Create ASSOCIATION memories (summaries)
+  store->Execute (
+      "INSERT INTO memories (memory_id, embedding_id, source_id, kind, "
+      "start_ts, n_signals, modality, s_max, s_avg, strength, created_at) "
+      "VALUES (?, ?, 'test', 'ASSOCIATION', ?, 1, 'text', 0.5, 0.5, 1.0, 0)",
+      { 101LL, 101LL, 900LL });
+  store->Execute (
+      "INSERT INTO memories (memory_id, embedding_id, source_id, kind, "
+      "start_ts, n_signals, modality, s_max, s_avg, strength, created_at) "
+      "VALUES (?, ?, 'test', 'ASSOCIATION', ?, 1, 'text', 0.5, 0.5, 1.0, 0)",
+      { 102LL, 102LL, 1900LL });
+  store->Execute (
+      "INSERT INTO memories (memory_id, embedding_id, source_id, kind, "
+      "start_ts, n_signals, modality, s_max, s_avg, strength, created_at) "
+      "VALUES (?, ?, 'test', 'ASSOCIATION', ?, 1, 'text', 0.5, 0.5, 1.0, 0)",
+      { 103LL, 103LL, 2900LL });
+
+  // V2: Create LABEL memory (entity "Alice")
+  store->Execute (
+      "INSERT INTO memories (memory_id, embedding_id, source_id, kind, label, "
+      "start_ts, n_signals, modality, s_max, s_avg, strength, created_at) "
+      "VALUES (?, ?, 'test', 'LABEL', ?, ?, 1, 'text', 0.5, 0.5, 1.0, 0)",
+      { 200LL, 200LL, std::string ("Alice"), 0LL });
+
+  // V2: Create ASSOCIATIONS linking ASSOCIATION -> LABEL (derived_from)
+  store->Execute (
+      "INSERT INTO associations (source_memory_id, target_memory_id, edge_type, weight) "
+      "VALUES (?, ?, 'derived_from', 1.0)",
+      { 101LL, 200LL });
+  store->Execute (
+      "INSERT INTO associations (source_memory_id, target_memory_id, edge_type, weight) "
+      "VALUES (?, ?, 'derived_from', 1.0)",
+      { 102LL, 200LL });
+  store->Execute (
+      "INSERT INTO associations (source_memory_id, target_memory_id, edge_type, weight) "
+      "VALUES (?, ?, 'derived_from', 1.0)",
+      { 103LL, 200LL });
+
+  // V2: Create ASSOCIATIONS linking ASSOCIATION -> source_memory (derived_from)
+  store->Execute (
+      "INSERT INTO associations (source_memory_id, target_memory_id, edge_type, weight) "
+      "VALUES (?, ?, 'derived_from', 1.0)",
+      { 101LL, 1LL });
+  store->Execute (
+      "INSERT INTO associations (source_memory_id, target_memory_id, edge_type, weight) "
+      "VALUES (?, ?, 'derived_from', 1.0)",
+      { 102LL, 2LL });
+  store->Execute (
+      "INSERT INTO associations (source_memory_id, target_memory_id, edge_type, weight) "
+      "VALUES (?, ?, 'derived_from', 1.0)",
+      { 103LL, 3LL });
+
   SignalProcessor::Config cfg;
   cfg.stability = 0.0; // min_episodes = 2, frequency_threshold = 5
   auto ops = std::make_unique<OperationSet> (
-      std::make_unique<EnsureGraphSchema> (),
+
       std::make_unique<DetectConceptNodes> ());
   SignalProcessor processor (cfg, store, std::move (ops));
 

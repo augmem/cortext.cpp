@@ -140,37 +140,58 @@ struct CascadeNeighbor
 };
 
 /// @brief Find neighbor embedding IDs via graph traversal.
+/// V2: Traverses ASSOCIATIONS table using memory_ids, returns embedding_ids.
 std::vector<CascadeNeighbor>
 FindCascadeNeighbors (Store *store, long long source_embedding_id, int max_depth)
 {
   std::vector<CascadeNeighbor> neighbors;
 
-  // Use recursive CTE to traverse graph from source node
-  std::string source_node = "emb:" + std::to_string (source_embedding_id);
+  // V2: First find the memory_id for this embedding_id
+  auto mem_rows = store->Execute (
+      "SELECT memory_id FROM memories WHERE embedding_id = ?",
+      { source_embedding_id });
 
+  if (mem_rows.empty ())
+    {
+      return neighbors;
+    }
+
+  long long source_memory_id = 0;
+  auto it_mem = mem_rows[0].find ("memory_id");
+  if (it_mem != mem_rows[0].end () && it_mem->second.type () == typeid (long long))
+    {
+      source_memory_id = std::any_cast<long long> (it_mem->second);
+    }
+  else
+    {
+      return neighbors;
+    }
+
+  // V2: Traverse ASSOCIATIONS via recursive CTE using memory_ids
   auto rows = store->Execute (
-      "WITH RECURSIVE cascade(id, depth) AS ( "
+      "WITH RECURSIVE cascade(memory_id, depth) AS ( "
       "  SELECT ?1, 0 "
       "  UNION "
-      "  SELECT ge.target_id, cascade.depth + 1 "
-      "  FROM graph_edges ge "
-      "  JOIN cascade ON ge.source_id = cascade.id "
+      "  SELECT a.target_memory_id, cascade.depth + 1 "
+      "  FROM associations a "
+      "  JOIN cascade ON a.source_memory_id = cascade.memory_id "
       "  WHERE cascade.depth < ?2 "
       "  UNION "
-      "  SELECT ge.source_id, cascade.depth + 1 "
-      "  FROM graph_edges ge "
-      "  JOIN cascade ON ge.target_id = cascade.id "
+      "  SELECT a.source_memory_id, cascade.depth + 1 "
+      "  FROM associations a "
+      "  JOIN cascade ON a.target_memory_id = cascade.memory_id "
       "  WHERE cascade.depth < ?2 "
       ") "
-      "SELECT DISTINCT id, MIN(depth) AS min_depth "
-      "FROM cascade "
-      "WHERE depth > 0 AND id LIKE 'emb:%' "
-      "GROUP BY id",
-      { source_node, static_cast<long long> (max_depth) });
+      "SELECT DISTINCT m.embedding_id, MIN(c.depth) AS min_depth "
+      "FROM cascade c "
+      "JOIN memories m ON c.memory_id = m.memory_id "
+      "WHERE c.depth > 0 AND m.embedding_id IS NOT NULL "
+      "GROUP BY m.embedding_id",
+      { source_memory_id, static_cast<long long> (max_depth) });
 
   for (const auto &row : rows)
     {
-      auto it_id = row.find ("id");
+      auto it_id = row.find ("embedding_id");
       auto it_depth = row.find ("min_depth");
 
       if (it_id == row.end () || it_depth == row.end ())
@@ -178,28 +199,13 @@ FindCascadeNeighbors (Store *store, long long source_embedding_id, int max_depth
           continue;
         }
 
-      if (it_id->second.type () != typeid (std::string))
-        {
-          continue;
-        }
-
-      std::string node_id = std::any_cast<std::string> (it_id->second);
-
-      // Extract embedding_id from "emb:123" format
-      if (node_id.size () <= 4 || node_id.substr (0, 4) != "emb:")
+      if (it_id->second.type () != typeid (long long))
         {
           continue;
         }
 
       CascadeNeighbor n;
-      try
-        {
-          n.embedding_id = std::stoll (node_id.substr (4));
-        }
-      catch (...)
-        {
-          continue;
-        }
+      n.embedding_id = std::any_cast<long long> (it_id->second);
 
       if (it_depth->second.type () == typeid (long long))
         {

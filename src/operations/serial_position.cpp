@@ -10,6 +10,7 @@ namespace cortext::operations
 void
 ApplySerialPositionEffects::Execute (OperationContext &context, Transaction &tx) const
 {
+  (void)tx;
   const auto &cfg = context.GetConfig ();
   const double F = cfg.focus;
   const double S = cfg.sensitivity;

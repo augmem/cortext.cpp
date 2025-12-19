@@ -58,25 +58,26 @@ struct SeedCandidatesOp : IOperation
   void
   Execute (OperationContext &ctx, Transaction & /*tx*/) const override
   {
-    auto *store = ctx.GetStore ();
+    std::vector<ConsolidationCandidate> consolidation_candidates;
+    consolidation_candidates.reserve (candidates_.size ());
+
     for (const auto &c : candidates_)
       {
-        // v2: Insert into embeddings (minimal vec0 table)
-        store->Execute (
-            "INSERT INTO embeddings(embedding_id, embedding, created_at) "
-            "VALUES(?, ?, ?)",
-            { c.embedding_id, c.embedding, 0LL });
-        // v2: Insert into memories (comprehensive metadata)
-        store->Execute (
-            "INSERT INTO memories(memory_id, embedding_id, source_id, kind, "
-            "start_ts, n_signals, modality, s_max, s_avg, strength, created_at) "
-            "VALUES(?, ?, 'test', 'LONG_TERM', 0, 1, 'text', 0.5, 0.5, 1.0, 0)",
-            { c.embedding_id, c.embedding_id });
-        store->Execute (
-            "INSERT INTO consolidation_candidates(embedding_id, score, "
-            "created_at, reason) VALUES(?, ?, ?, ?)",
-            { c.embedding_id, c.score, 0LL, std::string ("test") });
+        ConsolidationCandidate cc;
+        cc.embedding_id = c.embedding_id;
+        cc.score = c.score;
+
+        // Convert std::vector<float> to Eigen::VectorXf
+        cc.embedding.resize (c.embedding.size ());
+        for (size_t i = 0; i < c.embedding.size (); ++i)
+          {
+            cc.embedding[static_cast<int> (i)] = c.embedding[i];
+          }
+
+        consolidation_candidates.push_back (std::move (cc));
       }
+
+    ctx.SetConsolidationCandidates (std::move (consolidation_candidates));
   }
 };
 

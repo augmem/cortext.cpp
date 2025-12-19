@@ -19,9 +19,8 @@ struct ConsolidationSummarizeParams
 /// - Generates unique summary_id
 /// - Finds most representative memory (highest cosine to centroid)
 /// - Fetches its text from objstore as summary_text (extractive summarization)
-/// - Inserts into consolidation_summaries with centroid blob
-/// - Inserts source mappings into consolidation_sources
-/// - Creates vec_embeddings entry for centroid
+/// - Creates MEMORIES entry (kind='ASSOCIATION') with centroid embedding
+/// - Creates ASSOCIATIONS edges (edge_type='derived_from') linking centroid to sources
 /// - Queues ExtractionRequest for clusters meeting MinClusterSizeForExtraction
 ///
 /// Input:
@@ -30,11 +29,10 @@ struct ConsolidationSummarizeParams
 /// - objstore (for fetching payload text)
 ///
 /// Output:
-/// - consolidation_summaries table populated
-/// - consolidation_sources table populated
-/// - vec_embeddings entry for each cluster centroid
+/// - MEMORIES entry for each cluster centroid (kind='ASSOCIATION')
+/// - ASSOCIATIONS edges linking centroid to source memories
+/// - embeddings entry for each cluster centroid
 /// - context.SetExtractionRequests(requests) for EnqueueExtractionJobs
-/// - consolidation_candidates cleared for processed sources
 class ConsolidationSummarize : public IOperation
 {
 public:

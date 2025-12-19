@@ -11,6 +11,7 @@ namespace cortext::operations
 void
 DetectMemoryUsage::Execute (OperationContext &context, Transaction &tx) const
 {
+  (void)tx;
   auto &p_ctx = context.GetProcessorContext ();
   const auto &signal = context.GetSignal ();
   const auto &config = context.GetConfig ();

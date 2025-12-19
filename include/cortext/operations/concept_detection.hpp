@@ -20,13 +20,14 @@ struct ConceptDetectionParams
 ///
 /// Concept nodes represent emergent centroids of recurrent topics that appear
 /// across multiple episodes. This operation:
-/// 1. Queries entities that appear in N+ distinct episodes
+/// 1. Queries LABEL memories (entities) that appear in N+ distinct episodes
 /// 2. Filters by entity frequency threshold
-/// 3. Creates concept nodes with computed centroids
-/// 4. Links concepts to related entities with 'generalizes' edges
+/// 3. Creates concept LABEL memories with computed centroids
+/// 4. Links concepts to related entities with 'generalizes' edges in ASSOCIATIONS
 /// 5. Inserts concept embeddings for vector search
 ///
-/// Node id convention: "concept:<entity_name>"
+/// V2 schema: Uses MEMORIES (kind='LABEL') and ASSOCIATIONS instead of
+/// legacy graph_nodes/graph_edges tables.
 class DetectConceptNodes : public IOperation
 {
 public:

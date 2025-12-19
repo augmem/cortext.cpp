@@ -16,7 +16,6 @@ class UpdateMemoryStrength : public IOperation
 {
 public:
   void Execute (OperationContext &context, Transaction &tx) const override;
-  void CollectSchema (cortext::store::SchemaRegistry &registry) const override;
 };
 
 } // namespace cortext::operations

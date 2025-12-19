@@ -22,6 +22,7 @@ constexpr double kCoherenceOffset = 0.5;
 void
 UpdatePrecisionDelta::Execute (OperationContext &context, Transaction &tx) const
 {
+  (void)tx;
   const auto &cfg = context.GetConfig ();
   auto &p_ctx = context.GetProcessorContext ();
 

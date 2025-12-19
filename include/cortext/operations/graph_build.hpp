@@ -6,18 +6,25 @@
 namespace cortext::operations
 {
 
-/// @brief Algorithm 30: Graph Construction (explicit tables).
+/// @brief Algorithm 30: Graph Construction from Clusters.
 ///
-/// Builds graph nodes/edges from consolidation summaries and extraction outputs.
-/// This operation assumes:
-/// - `consolidation_summaries` is populated with `summary_id` and `summary_text`
-/// - `extraction_entities` and `extraction_relations` are populated by an
-///   external worker processing `extraction_jobs`
+/// Builds graph edges (ASSOCIATIONS) from clustered memories.
+/// This operation reads MEMORIES with cluster_id (set by ConsolidationSummarize)
+/// and creates edges in ASSOCIATIONS based on embedding similarity and temporal
+/// patterns.
 ///
-/// Node id conventions:
-/// - summary:  "summary:<summary_id>"
-/// - entity:   "entity:<name>"
-/// - memory:   "emb:<embedding_id>"
+/// Edge types created:
+/// - 'co_occurs_with': Memories with high cosine similarity within a cluster
+/// - 'causes': Temporally adjacent memories with significant semantic drift
+/// - 'contradicts': Memories with strong negative similarity
+/// - 'reinforces': Decay applied to existing reinforcement edges
+///
+/// Input:
+/// - MEMORIES table (with cluster_id from ConsolidationSummarize)
+/// - embeddings table (for computing similarities)
+///
+/// Output:
+/// - ASSOCIATIONS edges between memories
 class BuildGraphFromConsolidation : public IOperation
 {
 public:
@@ -25,4 +32,3 @@ public:
 };
 
 } // namespace cortext::operations
-
