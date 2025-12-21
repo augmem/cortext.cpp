@@ -11,6 +11,7 @@ namespace cortext::operations
 namespace
 {
 constexpr double kEpsilon = 1e-9;
+constexpr double kEtaColdStart = 0.01;
 }  // namespace
 
 void
@@ -38,12 +39,20 @@ DetectBoundary::Execute (OperationContext &context,
   const double coherence = context.GetAccumulatorCoherence ();
   const double d_step = context.GetAccumulatorDriftStep ();
 
-  // Compute drift spike (Section 4.4.3)
-  const double eta_safe = std::max (acc.eta_acc, kEpsilon);
-  const double drift_spike = (d_step - acc.eta_acc) / eta_safe;
+  const double eta_prev
+      = context.GetAccumulatorEtaPrev ().value_or (acc.eta_acc);
 
-  // Compute coherence drop
-  const double coh_drop = std::max (0.0, acc.coherence_prev - coherence);
+  // Compute drift spike (Section 4.4.3) with cold-start guard
+  double drift_spike = 0.0;
+  if (eta_prev >= kEtaColdStart)
+    {
+      const double eta_safe = std::max (eta_prev, kEpsilon);
+      drift_spike = (d_step - eta_prev) / eta_safe;
+    }
+
+  // Compute coherence drop (normalized to [0,1])
+  const double coh_drop = core::Clamp ((acc.coherence_prev - coherence) * 0.5,
+                                       0.0, 1.0);
 
   // Update coherence_prev for next signal
   acc.coherence_prev = coherence;
@@ -51,8 +60,9 @@ DetectBoundary::Execute (OperationContext &context,
   // Boundary score (weighted combination)
   const double w_drift = core::BoundaryWeightDrift (config.stability);
   const double w_coh = 1.0 - w_drift;
-  const double boundary_score
+  double boundary_score
       = w_drift * core::Sigmoid (drift_spike) + w_coh * coh_drop;
+  boundary_score = core::Clamp (boundary_score, 0.0, 1.0);
 
   context.SetBoundaryScore (boundary_score);
 
@@ -138,6 +148,9 @@ DetectBoundary::Execute (OperationContext &context,
       context.SetBoundaryType (std::nullopt);
       context.SetBoundaryCentroid (std::nullopt);
     }
+
+  // Update last_signal_ts after gap computation (spec: compute gap before update)
+  acc.last_signal_ts = signal.timestamp;
 
   telemetry::RecordHistogram ("cortext.accumulator.boundary_score", boundary_score);
   telemetry::RecordHistogram ("cortext.accumulator.memory_elapsed",

@@ -223,6 +223,115 @@ BlobToEigen (const std::any &blob)
   return result;
 }
 
+inline std::vector<char>
+SerializeEmbeddingWindow (const std::vector<Eigen::VectorXf> &window)
+{
+  std::uint32_t dim = 0;
+  std::uint32_t count = 0;
+  for (const auto &emb : window)
+    {
+      if (emb.size () > 0)
+        {
+          dim = static_cast<std::uint32_t> (emb.size ());
+          break;
+        }
+    }
+  if (dim == 0)
+    {
+      return {};
+    }
+
+  std::vector<float> data;
+  data.reserve (window.size () * static_cast<size_t> (dim));
+  for (const auto &emb : window)
+    {
+      if (emb.size () != static_cast<Eigen::Index> (dim))
+        {
+          continue;
+        }
+      data.insert (data.end (), emb.data (), emb.data () + emb.size ());
+      ++count;
+    }
+
+  if (count == 0)
+    {
+      return {};
+    }
+
+  const size_t header_bytes = sizeof (std::uint32_t) * 2;
+  const size_t payload_bytes = static_cast<size_t> (count) * dim * sizeof (float);
+  std::vector<char> blob (header_bytes + payload_bytes);
+  std::memcpy (blob.data (), &count, sizeof (std::uint32_t));
+  std::memcpy (blob.data () + sizeof (std::uint32_t), &dim, sizeof (std::uint32_t));
+  std::memcpy (blob.data () + header_bytes, data.data (), payload_bytes);
+  return blob;
+}
+
+inline std::vector<Eigen::VectorXf>
+DeserializeEmbeddingWindow (const std::any &blob)
+{
+  const char *data = nullptr;
+  size_t size = 0;
+
+  if (blob.type () == typeid (std::vector<char>))
+    {
+      const auto &vec = std::any_cast<const std::vector<char> &> (blob);
+      data = vec.data ();
+      size = vec.size ();
+    }
+  else if (blob.type () == typeid (std::vector<unsigned char>))
+    {
+      const auto &vec
+          = std::any_cast<const std::vector<unsigned char> &> (blob);
+      data = reinterpret_cast<const char *> (vec.data ());
+      size = vec.size ();
+    }
+
+  if (!data || size < sizeof (std::uint32_t) * 2)
+    {
+      return {};
+    }
+
+  std::uint32_t count = 0;
+  std::uint32_t dim = 0;
+  std::memcpy (&count, data, sizeof (std::uint32_t));
+  std::memcpy (&dim, data + sizeof (std::uint32_t), sizeof (std::uint32_t));
+
+  if (count == 0 || dim == 0)
+    {
+      return {};
+    }
+
+  const size_t header_bytes = sizeof (std::uint32_t) * 2;
+  const size_t expected = header_bytes + static_cast<size_t> (count) * dim * sizeof (float);
+  if (size < header_bytes + sizeof (float) * dim)
+    {
+      return {};
+    }
+
+  if (size < expected)
+    {
+      const size_t available = size - header_bytes;
+      count = static_cast<std::uint32_t> (available / (dim * sizeof (float)));
+      if (count == 0)
+        {
+          return {};
+        }
+    }
+
+  std::vector<Eigen::VectorXf> window;
+  window.reserve (count);
+  const char *cursor = data + header_bytes;
+  for (std::uint32_t i = 0; i < count; ++i)
+    {
+      Eigen::VectorXf emb (static_cast<Eigen::Index> (dim));
+      std::memcpy (emb.data (), cursor, static_cast<size_t> (dim) * sizeof (float));
+      cursor += static_cast<size_t> (dim) * sizeof (float);
+      window.push_back (std::move (emb));
+    }
+  return window;
+}
+
 // Serialize blender P matrix (2D vector of doubles) to flat float vector
 inline std::vector<float>
 SerializeMatrix (const std::vector<std::vector<double> > &mat)
@@ -318,14 +427,14 @@ ExtractDouble (const std::map<std::string, std::any> &row,
 // --- State Loading Functions ---
 // v2 Schema: Unified state table replaces processor_state + blender tables
 
-void
+bool
 LoadState (Store &store, ProcessorContext &ctx)
 {
   try
     {
       auto rows = store.Execute ("SELECT * FROM state WHERE id = 1");
       if (rows.empty ())
-        return; // No persisted state, use defaults
+        return false; // No persisted state, use defaults
 
       const auto &row = rows[0];
 
@@ -335,10 +444,16 @@ LoadState (Store &store, ProcessorContext &ctx)
       ctx.u_t = ExtractDouble (row, "u_uncertainty", 0.0);
       ctx.weight_relevance = ExtractDouble (row, "weight_relevance", 0.5);
       ctx.attention_width = ExtractDouble (row, "attention_width", 1.57);
+      ctx.coverage_gain_floor
+          = ExtractDouble (row, "coverage_gain_floor", 0.65);
+      ctx.mismatch_weight = ExtractDouble (row, "mismatch_weight", 0.5);
       ctx.T_dynamic = ExtractDouble (row, "theta_dynamic", 0.2);
+      ctx.T_target = ExtractDouble (row, "theta_target", ctx.T_dynamic);
       ctx.hysteresis = ExtractDouble (row, "hysteresis", 0.05);
       ctx.half_life = ExtractDouble (row, "half_life", 120.0);
       ctx.rate_target = ExtractDouble (row, "rate_target", 0.2);
+      ctx.delta_half_life_adj
+          = ExtractDouble (row, "delta_half_life_adj", 0.0);
       ctx.sustained_influence
           = ExtractDouble (row, "sustained_influence", 0.0);
       ctx.last_signal_timestamp
@@ -348,15 +463,41 @@ LoadState (Store &store, ProcessorContext &ctx)
       ctx.last_interrupt_tick
           = static_cast<int> (ExtractInt64 (row, "last_interrupt_tick",
                                             ctx.last_interrupt_tick));
+      ctx.last_retrieval_ts
+          = static_cast<uint64_t> (ExtractInt64 (row, "last_retrieval_ts", 0));
+      ctx.last_consolidation_ts
+          = static_cast<uint64_t> (ExtractInt64 (row, "last_consolidation_ts", 0));
+      ctx.consolidation_count
+          = static_cast<int> (ExtractInt64 (row, "consolidation_count", 0));
+      ctx.is_processing_signal
+          = ExtractInt64 (row, "is_processing_signal", 0) != 0;
+
+      ctx.wm_last_accepted
+          = ExtractInt64 (row, "wm_last_accepted", 0) != 0;
+      ctx.wm_last_chunked
+          = ExtractInt64 (row, "wm_last_chunked", 0) != 0;
+
+      ctx.fok_state = ExtractDouble (row, "fok_state", 0.0);
+      ctx.retrieval_strength
+          = ExtractDouble (row, "retrieval_strength", 0.0);
+      ctx.metacognitive_confidence
+          = ExtractDouble (row, "metacognitive_confidence", 0.0);
 
       // Sensitivity state
       ctx.weight_novelty = ExtractDouble (row, "weight_novelty", 0.3);
+      ctx.weight_surprise = ExtractDouble (row, "weight_surprise", 0.2);
+      ctx.weight_valence = ExtractDouble (row, "weight_valence", 0.4);
+      ctx.weight_arousal = ExtractDouble (row, "weight_arousal", 0.0);
+      ctx.emotion_gain = ExtractDouble (row, "emotion_gain", 1.0);
+      ctx.score_gain = ExtractDouble (row, "score_gain", 1.0);
 
       // Stability state
       ctx.rate_decay = ExtractDouble (row, "rate_decay", 0.60);
       ctx.periphery_half_life
           = ExtractDouble (row, "periphery_half_life", 120.0);
       ctx.salience_half_life = ExtractDouble (row, "salience_half_life", 120.0);
+      ctx.drift_weight = ExtractDouble (row, "drift_weight", 0.5);
+      ctx.retention_ema = ExtractDouble (row, "retention_ema", 0.0);
 
       // Rate control (Algorithm 8)
       ctx.m_rate = ExtractDouble (row, "m_rate", 0.0);
@@ -410,6 +551,8 @@ LoadState (Store &store, ProcessorContext &ctx)
                 ctx.mood_vector[i] = data[i];
             }
         }
+      ctx.last_mood_ts
+          = static_cast<uint64_t> (ExtractInt64 (row, "last_mood_ts", 0));
 
       // Embedding prediction error state (Section 3.1.4)
       auto last_emb_it = row.find ("last_embedding");
@@ -463,54 +606,10 @@ LoadState (Store &store, ProcessorContext &ctx)
           ctx.blender_P = DeserializeMatrix (P_it->second, 12);
         }
 
-      // === RLS coefficients ===
-      auto coeff_it = row.find ("blender_coefficients");
-      if (coeff_it != row.end () && coeff_it->second.has_value ())
-        {
-          const float *data = nullptr;
-          size_t byte_size = 0;
-
-          if (coeff_it->second.type () == typeid (std::vector<char>))
-            {
-              const auto &vec
-                  = std::any_cast<const std::vector<char> &> (coeff_it->second);
-              data = reinterpret_cast<const float *> (vec.data ());
-              byte_size = vec.size ();
-            }
-          else if (coeff_it->second.type ()
-                   == typeid (std::vector<unsigned char>))
-            {
-              const auto &vec
-                  = std::any_cast<const std::vector<unsigned char> &> (
-                      coeff_it->second);
-              data = reinterpret_cast<const float *> (vec.data ());
-              byte_size = vec.size ();
-            }
-
-          constexpr size_t kExpected = 48 * sizeof (float);
-          if (byte_size == kExpected && data != nullptr)
-            {
-              ctx.rls_coefficients.resize (ProcessorContext::kNumMetrics);
-              size_t idx = 0;
-              for (size_t i = 0; i < ProcessorContext::kNumMetrics; ++i)
-                {
-                  for (size_t j = 0; j < ProcessorContext::kCoeffsPerMetric; ++j)
-                    {
-                      ctx.rls_coefficients[i][j]
-                          = static_cast<double> (data[idx++]);
-                    }
-                }
-              ctx.rls_coefficients_ready = true;
-            }
-        }
-
-      // === Coefficient covariance matrix ===
-      auto coeff_P_it = row.find ("blender_coeff_P_matrix");
-      if (coeff_P_it != row.end () && coeff_P_it->second.has_value ())
-        {
-          constexpr size_t kTotalCoeffs = 48;
-          ctx.rls_coeff_P = DeserializeMatrix (coeff_P_it->second, kTotalCoeffs);
-        }
+      ctx.focus_priors_initialized = true;
+      ctx.sensitivity_priors_initialized = true;
+      ctx.stability_priors_initialized = true;
+      return true;
     }
   catch (const std::exception &e)
     {
@@ -519,6 +618,7 @@ LoadState (Store &store, ProcessorContext &ctx)
           { telemetry::Attribute::String ("component", "signal_processor"),
             telemetry::Attribute::String ("error", e.what ()) });
     }
+  return false;
 }
 
 void
@@ -826,6 +926,13 @@ LoadAccumulators (Store &store, ProcessorContext &ctx)
           if (prev_it != row.end () && prev_it->second.has_value ())
             state.prev_x = BlobToEigen (prev_it->second);
 
+          auto window_it = row.find ("acc_signals_window");
+          if (window_it != row.end () && window_it->second.has_value ())
+            {
+              state.acc_signals_window
+                  = DeserializeEmbeddingWindow (window_it->second);
+            }
+
           ctx.accumulator_states[source_id] = std::move (state);
         }
     }
@@ -856,8 +963,7 @@ SignalProcessor::SignalProcessor (const Config &config,
   if (context_)
     {
       const double T = core::Clamp (config_.stability, 0.0, 1.0);
-      const int cap
-          = static_cast<int> (std::round (core::Lerp (10.0, 60.0, T)));
+      const int cap = core::WRateSeconds (T);
       context_->write_rate_window_.SetCapacity (
           static_cast<size_t> (std::max (1, cap)));
 
@@ -866,17 +972,33 @@ SignalProcessor::SignalProcessor (const Config &config,
       context_->summarizer = config_.summarizer;
     }
   // Apply schema migrations exactly once during initialization.
+  bool loaded_state = false;
   if (store_)
     {
       cortext::store::ApplyMigrations (*store_);
 
       // Load persisted state for algorithm resumption (v2 schema)
-      LoadState (*store_, *context_);                              // Unified state
+      loaded_state = LoadState (*store_, *context_);               // Unified state
       LoadRecentContext (*store_, *context_);                      // From views
       LoadRecentScores (*store_, *context_);                       // From views
       LoadObservedRetentionHistory (*store_, *context_);           // Derived from memories
       LoadWorkingMemory (*store_, *context_, config_.sensitivity); // From MEMORIES
       LoadAccumulators (*store_, *context_);                       // From ACCUMULATORS
+    }
+
+  if (!loaded_state && context_)
+    {
+      const double F = core::Clamp (config_.focus, 0.0, 1.0);
+      const double S = core::Clamp (config_.sensitivity, 0.0, 1.0);
+      const double T = core::Clamp (config_.stability, 0.0, 1.0);
+      context_->T_dynamic = core::TPrior (F, S, T);
+      context_->T_target = context_->T_dynamic;
+      context_->hysteresis = core::BaseBandPrior (T);
+      const auto now_ms
+          = std::chrono::duration_cast<std::chrono::milliseconds> (
+                std::chrono::system_clock::now ().time_since_epoch ())
+                .count ();
+      context_->last_rate_timestamp = static_cast<uint64_t> (now_ms);
     }
 
 }
@@ -893,7 +1015,6 @@ SignalProcessor::Process (const Signal &signal)
   auto tx = store_ ? store_->Begin () : nullptr;
 
   OperationContext op_context (signal, *context_, config_, store_.get ());
-  context_->write_rate_window_.Record (signal.timestamp);
 
   try
     {
@@ -901,6 +1022,11 @@ SignalProcessor::Process (const Signal &signal)
       if (tx)
         {
           root_operation_->Execute (op_context, *tx);
+        }
+
+      if (op_context.GetWriteDecision ())
+        {
+          context_->write_rate_window_.Record (signal.timestamp);
         }
 
       span.SetAttribute ("cortext.at_boundary", op_context.GetAtBoundary ());
@@ -1102,6 +1228,10 @@ SignalProcessor::PersistState (Transaction &tx)
                6 * sizeof (double));
   const std::vector<char> write_rate_blob = SerializeUint64Vector (
       context_->write_rate_window_.GetTimestamps ());
+  const double wm_maintenance_cost
+      = core::WMMaintenanceCostPerSlot (config_.sensitivity);
+  const int wm_slot_count
+      = static_cast<int> (context_->wm_slots.size ());
 
   // Get blender weights
   auto get_weight = [this] (operations::Metric m) {
@@ -1127,22 +1257,6 @@ SignalProcessor::PersistState (Transaction &tx)
   if (!context_->blender_P.empty ())
     P_blob = SerializeMatrix (context_->blender_P);
 
-  std::vector<float> coeff_blob;
-  if (!context_->rls_coefficients.empty ())
-    {
-      coeff_blob.reserve (ProcessorContext::kNumMetrics
-                          * ProcessorContext::kCoeffsPerMetric);
-      for (const auto &metric_coeffs : context_->rls_coefficients)
-        {
-          for (double c : metric_coeffs)
-            coeff_blob.push_back (static_cast<float> (c));
-        }
-    }
-
-  std::vector<float> coeff_P_blob;
-  if (!context_->rls_coeff_P.empty ())
-    coeff_P_blob = SerializeMatrix (context_->rls_coeff_P);
-
   // Insert unified state row
   tx.Execute (
       "INSERT OR REPLACE INTO state "
@@ -1155,7 +1269,7 @@ SignalProcessor::PersistState (Transaction &tx)
       "weight_novelty, weight_surprise, weight_valence, weight_arousal, "
       "emotion_gain, score_gain, rate_target, "
       // Emotion state
-      "emotion_intensity, valence, arousal, mood_vector, "
+      "emotion_intensity, valence, arousal, mood_vector, last_mood_ts, "
       // Stability state
       "rate_decay, periphery_half_life, salience_half_life, drift_weight, retention_ema, "
       // Rate control
@@ -1164,6 +1278,12 @@ SignalProcessor::PersistState (Transaction &tx)
       "u_uncertainty, "
       // Embedding prediction
       "last_embedding, delta_x_trend, delta_half_life_adj, sustained_influence, "
+      // Working memory
+      "wm_maintenance_cost, wm_slot_count, wm_last_accepted, wm_last_chunked, "
+      // Metacognition
+      "fok_state, retrieval_strength, metacognitive_confidence, "
+      // Consolidation
+      "last_consolidation_ts, consolidation_count, is_processing_signal, last_retrieval_ts, "
       // Episode tracking
       "episode_start_ts, last_interrupt_tick, last_signal_timestamp, updated_at, "
       "write_rate_timestamps, "
@@ -1172,37 +1292,43 @@ SignalProcessor::PersistState (Transaction &tx)
       "w_utility, w_periphery, w_coverage, w_salience, w_valence, w_arousal, "
       "blender_ready, blender_update_count, "
       // Blender matrices
-      "blender_P_matrix, blender_coefficients, blender_coeff_P_matrix) "
+      "blender_P_matrix) "
       "VALUES (1, ?, "
       "?, ?, ?, ?, "  // Threshold
       "?, ?, ?, ?, "  // Focus
       "?, ?, ?, ?, ?, ?, ?, "  // Sensitivity
-      "?, ?, ?, ?, "  // Emotion
+      "?, ?, ?, ?, ?, "  // Emotion
       "?, ?, ?, ?, ?, "  // Stability
       "?, ?, ?, ?, ?, ?, "  // Rate control
       "?, "  // Uncertainty
       "?, ?, ?, ?, "  // Embedding prediction
+      "?, ?, ?, ?, "  // Working memory
+      "?, ?, ?, "  // Metacognition
+      "?, ?, ?, ?, "  // Consolidation
       "?, ?, ?, ?, ?, "  // Episode tracking + write_rate_timestamps
       "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "  // Blender weights (12)
       "?, ?, "  // Blender ready/count
-      "?, ?, ?)",  // Blender matrices (3)
+      "?)",  // Blender matrices
       {
         context_->signals_processed,
         // Threshold state
-        context_->T_dynamic, context_->T_dynamic, context_->hysteresis,
+        context_->T_dynamic, context_->T_target, context_->hysteresis,
         context_->half_life,
         // Focus state
         context_->weight_relevance, context_->attention_width,
-        0.65, 0.5,  // coverage_gain_floor, mismatch_weight defaults
+        context_->coverage_gain_floor, context_->mismatch_weight,
         // Sensitivity state
-        context_->weight_novelty, 0.2, 0.4, 0.0,  // weight_surprise/valence/arousal
-        1.0, 1.0, context_->rate_target,  // emotion_gain, score_gain, rate_target
+        context_->weight_novelty, context_->weight_surprise,
+        context_->weight_valence, context_->weight_arousal,
+        context_->emotion_gain, context_->score_gain, context_->rate_target,
         // Emotion state
         context_->emotion_intensity_ewma, context_->valence_ewma,
         context_->arousal_ewma, mood_blob,
+        static_cast<long long> (context_->last_mood_ts),
         // Stability state
         context_->rate_decay, context_->periphery_half_life,
-        context_->salience_half_life, 0.5, 0.0,  // drift_weight, retention_ema defaults
+        context_->salience_half_life, context_->drift_weight,
+        context_->retention_ema,
         // Rate control
         context_->m_rate, context_->rho_hat_prev, context_->dt_ema,
         context_->rate_ticks,
@@ -1217,7 +1343,21 @@ SignalProcessor::PersistState (Transaction &tx)
         context_->delta_x_trend.has_value ()
             ? std::any (ToFloatVector (*context_->delta_x_trend))
             : std::any (std::vector<float> ()),
-        0.0, context_->sustained_influence,  // delta_half_life_adj
+        context_->delta_half_life_adj, context_->sustained_influence,
+        // Working memory
+        wm_maintenance_cost,
+        wm_slot_count,
+        context_->wm_last_accepted ? 1 : 0,
+        context_->wm_last_chunked ? 1 : 0,
+        // Metacognition
+        context_->fok_state,
+        context_->retrieval_strength,
+        context_->metacognitive_confidence,
+        // Consolidation
+        static_cast<long long> (context_->last_consolidation_ts),
+        context_->consolidation_count,
+        context_->is_processing_signal ? 1 : 0,
+        static_cast<long long> (context_->last_retrieval_ts),
         // Episode tracking
         static_cast<long long> (context_->episode_start_ts),
         context_->last_interrupt_tick,
@@ -1230,9 +1370,7 @@ SignalProcessor::PersistState (Transaction &tx)
         // Blender ready/count
         context_->blender_ready ? 1 : 0, context_->blender_update_count,
         // Blender matrices
-        P_blob.empty () ? std::any (std::vector<float> ()) : std::any (P_blob),
-        coeff_blob.empty () ? std::any (std::vector<float> ()) : std::any (coeff_blob),
-        coeff_P_blob.empty () ? std::any (std::vector<float> ()) : std::any (coeff_P_blob)
+        P_blob.empty () ? std::any (std::vector<float> ()) : std::any (P_blob)
       });
 }
 
@@ -1363,19 +1501,25 @@ SignalProcessor::PersistAccumulators (Transaction &tx)
       if (state.prev_x.size () > 0)
         prev_x_blob = ToFloatVector (state.prev_x);
 
+      std::vector<char> window_blob;
+      if (!state.acc_signals_window.empty ())
+        {
+          window_blob = SerializeEmbeddingWindow (state.acc_signals_window);
+        }
+
       tx.Execute (
           "INSERT INTO accumulators "
           "(source_id, episode_id, mu_acc, drift_acc, s_sum, s_max, n, "
           " e_peak, emo_max, arousal_sum, drift_accum, drift_at_last_interrupt, "
-          " drift_acc_pacing, x_last_check, prev_x, t_start, last_write_ts, "
-          " last_signal_ts, eta_acc, coherence_prev) "
+          " drift_acc_pacing, x_last_check, prev_x, acc_signals_window, "
+          " t_start, last_write_ts, last_signal_ts, eta_acc, coherence_prev) "
           "VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, "
-          "?15, ?16, ?17, ?18, ?19, ?20)",
+          "?15, ?16, ?17, ?18, ?19, ?20, ?21)",
           { source_id, state.episode_id, mu_blob, state.drift_acc, state.s_sum,
             state.s_max, static_cast<long long> (state.n_signals), peak_blob,
             state.s_emotion_max, state.s_arousal_sum, state.drift_accum,
             state.drift_at_last_interrupt, state.drift_acc_pacing,
-            last_check_blob, prev_x_blob,
+            last_check_blob, prev_x_blob, window_blob,
             static_cast<long long> (state.t_start),
             static_cast<long long> (state.last_write_ts),
             static_cast<long long> (state.last_signal_ts), state.eta_acc,

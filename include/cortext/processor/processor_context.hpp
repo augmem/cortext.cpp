@@ -52,10 +52,16 @@ struct ProcessorContext
     SetCapacity (size_t cap)
     {
       capacity_ = (cap == 0) ? 1 : cap;
-      // Trim if needed
-      while (timestamps_.size () > capacity_)
+      if (!timestamps_.empty ())
         {
-          timestamps_.pop_front ();
+          const uint64_t latest = timestamps_.back ();
+          const uint64_t window_ms = static_cast<uint64_t> (capacity_) * 1000ULL;
+          while (!timestamps_.empty ()
+                 && latest > timestamps_.front ()
+                        && (latest - timestamps_.front ()) > window_ms)
+            {
+              timestamps_.pop_front ();
+            }
         }
       cached_rate_.reset ();
     }
@@ -67,7 +73,10 @@ struct ProcessorContext
           return; // ignore non-increasing timestamps
         }
       timestamps_.push_back (ts);
-      while (timestamps_.size () > capacity_)
+      const uint64_t window_ms = static_cast<uint64_t> (capacity_) * 1000ULL;
+      while (!timestamps_.empty ()
+             && ts > timestamps_.front ()
+                    && (ts - timestamps_.front ()) > window_ms)
         {
           timestamps_.pop_front ();
         }
@@ -124,9 +133,16 @@ struct ProcessorContext
     SetTimestamps (const std::vector<uint64_t> &timestamps)
     {
       timestamps_.assign (timestamps.begin (), timestamps.end ());
-      while (timestamps_.size () > capacity_)
+      if (!timestamps_.empty ())
         {
-          timestamps_.pop_front ();
+          const uint64_t latest = timestamps_.back ();
+          const uint64_t window_ms = static_cast<uint64_t> (capacity_) * 1000ULL;
+          while (!timestamps_.empty ()
+                 && latest > timestamps_.front ()
+                        && (latest - timestamps_.front ()) > window_ms)
+            {
+              timestamps_.pop_front ();
+            }
         }
       cached_rate_.reset ();
     }
@@ -222,6 +238,8 @@ struct ProcessorContext
   double attention_width_prior = 1.57;
   double weight_relevance = 0.5;
   double attention_width = 1.57;
+  double coverage_gain_floor = 0.65;
+  double mismatch_weight = 0.5;
   std::deque<Eigen::VectorXf> recent_context_embeddings;
 
   // ======================================================================
@@ -240,6 +258,11 @@ struct ProcessorContext
   double rate_target = 0.0;
   uint64_t last_signal_timestamp = 0;
   double weight_novelty = 0.3;
+  double weight_surprise = 0.2;
+  double weight_valence = 0.4;
+  double weight_arousal = 0.0;
+  double emotion_gain = 1.0;
+  double score_gain = 1.0;
 
   // Emotion state (Algorithm 4, persisted EWMA values)
   double emotion_intensity_ewma = 0.0;
@@ -249,6 +272,7 @@ struct ProcessorContext
   // Mood state (Algorithm 4b, persisted tonic state)
   // Order: [anger, fear, joy, love, sadness, surprise]
   std::array<double, 6> mood_vector = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+  uint64_t last_mood_ts = 0;
 
   // ======================================================================
   // Stability-Related State (Algorithms 5, 6, 17)
@@ -264,12 +288,16 @@ struct ProcessorContext
   double rate_decay = 0.60;
   double periphery_half_life = 120.0;
   double salience_half_life = 120.0;
+  double drift_weight = 0.5;
+  double retention_ema = 0.0;
+  double delta_half_life_adj = 0.0;
 
   // ======================================================================
   // Threshold & Score Tracking State (Algorithm 8)
   // ======================================================================
   std::deque<double> recent_scores;
   double T_dynamic = 0.2;
+  double T_target = 0.2;
   double hysteresis = 0.05;
   double dt_ema = 0.0;
   double m_rate = 0.0;
@@ -286,15 +314,6 @@ struct ProcessorContext
   std::vector<std::vector<double> > blender_P;
   bool blender_ready = false;
 
-  // Coefficient-space RLS state (Algorithm 7, formal specification)
-  // Each metric has 4 coefficients: [a_F, a_S, a_T, b]
-  // w_rls[i] = sigmoid(a_F[i]*F + a_S[i]*S + a_T[i]*T + b[i])
-  static constexpr size_t kNumMetrics = 12;
-  static constexpr size_t kCoeffsPerMetric = 4;  // a_F, a_S, a_T, b
-  std::vector<std::array<double, 4>> rls_coefficients;  // 12 x 4
-  std::vector<std::vector<double>> rls_coeff_P;  // 48 x 48 covariance matrix
-  bool rls_coefficients_ready = false;
-
   // ======================================================================
   // Consolidation State (Algorithms 28, 28b)
   // ======================================================================
@@ -302,6 +321,13 @@ struct ProcessorContext
   uint64_t last_retrieval_ts = 0;
   int consolidation_count = 0;
   bool is_processing_signal = false;
+
+  // ======================================================================
+  // Metacognitive State (Section 6.2)
+  // ======================================================================
+  double fok_state = 0.0;
+  double retrieval_strength = 0.0;
+  double metacognitive_confidence = 0.0;
 
   // ======================================================================
   // Extraction State (Section 7.4)
@@ -352,24 +378,6 @@ struct ProcessorContext
   std::vector<WMSlot> wm_slots;
   bool wm_last_accepted = false;
   bool wm_last_chunked = false;
-
-  // ======================================================================
-  // Implicit Feedback State (Memory Usage Detection)
-  // ======================================================================
-  /// @brief Cached retrieval for implicit feedback detection.
-  ///
-  /// When memories are retrieved, their embeddings are cached here.
-  /// On subsequent Process() calls, the current signal is compared against
-  /// cached embeddings to detect if retrieved memories were "used" (i.e.,
-  /// the input is semantically similar to previously retrieved content).
-  struct CachedRetrieval
-  {
-    long long embedding_id;
-    Eigen::VectorXf embedding;
-    uint64_t retrieved_at; // timestamp when retrieved
-  };
-  std::deque<CachedRetrieval> recent_retrievals_cache;
-  static constexpr size_t kMaxRetrievalCacheSize = 128;
 
   // ======================================================================
   // Memory Accumulation State (Section 4.4)

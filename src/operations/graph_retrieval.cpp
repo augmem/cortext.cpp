@@ -41,6 +41,7 @@ CreateReinforcementEdges (Transaction &tx,
     {
       for (size_t j = i + 1; j < retrieved_ids.size (); ++j)
         {
+          constexpr double kReinforcementStep = 0.1;
           // Order IDs consistently (smaller first) for consistent edge direction
           long long id1 = std::min (retrieved_ids[i], retrieved_ids[j]);
           long long id2 = std::max (retrieved_ids[i], retrieved_ids[j]);
@@ -48,10 +49,11 @@ CreateReinforcementEdges (Transaction &tx,
           tx.Execute (
               "INSERT INTO associations "
               "(source_memory_id, target_memory_id, edge_type, weight, last_reinforced) "
-              "VALUES (?1, ?2, 'reinforces', 1.0, ?3) "
+              "VALUES (?1, ?2, 'reinforces', ?3, ?4) "
               "ON CONFLICT (source_memory_id, target_memory_id, edge_type) DO UPDATE "
-              "SET weight = MIN(weight + 1.0, 1.0), last_reinforced = excluded.last_reinforced",
-              { id1, id2, now_ts });
+              "SET weight = MIN(weight + excluded.weight, 1.0), "
+              "    last_reinforced = excluded.last_reinforced",
+              { id1, id2, kReinforcementStep, now_ts });
         }
     }
 }
@@ -76,6 +78,11 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
   auto &p_ctx = context.GetProcessorContext ();
   const auto &signal = context.GetSignal ();
 
+  if (p_ctx.memory_stream.empty ())
+    {
+      return;
+    }
+
   // Section 7.6: Use memory centroid (μ_acc) as query vector for both initial
   // retrieval and re-ranking. This ensures retrieved memories are ranked by
   // relevance to overall context rather than momentary signal fluctuations.
@@ -99,7 +106,8 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
     }
 
   const int k = std::max (1, core::MaxResults (cfg.focus));
-  const int depth = std::max (1, core::GraphDepth (cfg.focus));
+  const int depth = std::max (1, core::GraphDepth (cfg.stability));
+  const double min_edge_weight = core::MinEdgeWeight (cfg.focus);
 
   // Seed vector retrieval via sqlite-vec KNN query.
   struct Scored
@@ -202,15 +210,17 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
                  "  UNION "
                  "  SELECT a.target_memory_id, expand.depth+1 "
                  "  FROM associations a JOIN expand ON a.source_memory_id = expand.id "
-                 "  WHERE expand.depth < ? "
+                 "  WHERE expand.depth < ? AND a.weight >= ? "
                  "  UNION "
                  "  SELECT a.source_memory_id, expand.depth+1 "
                  "  FROM associations a JOIN expand ON a.target_memory_id = expand.id "
-                 "  WHERE expand.depth < ? "
+                 "  WHERE expand.depth < ? AND a.weight >= ? "
                  ") "
                  "SELECT DISTINCT id FROM expand;";
           params.push_back (static_cast<long long> (depth));
+          params.push_back (min_edge_weight);
           params.push_back (static_cast<long long> (depth));
+          params.push_back (min_edge_weight);
 
           auto exp_rows = store->Execute (sql, params);
           for (const auto &r : exp_rows)
@@ -305,17 +315,6 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
             static_cast<long long> (signal.timestamp));
       }
 
-      // Cache seeds for implicit feedback detection
-      const uint64_t now_ts = signal.timestamp;
-      auto &cache = p_ctx.recent_retrievals_cache;
-      for (const auto &s : seeds)
-        {
-          cache.push_back ({ s.embedding_id, s.vec, now_ts });
-        }
-      while (cache.size () > ProcessorContext::kMaxRetrievalCacheSize)
-        {
-          cache.pop_front ();
-        }
       return;
     }
 
@@ -351,22 +350,6 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
         tx, retrieved_mem_ids,
         static_cast<long long> (signal.timestamp));
   }
-
-  // Cache retrieved embeddings for implicit feedback detection
-  // (DetectMemoryUsage will compare future signals against these cached
-  // retrievals)
-  const uint64_t now_ts = signal.timestamp;
-  auto &cache = p_ctx.recent_retrievals_cache;
-  for (const auto &s : scored)
-    {
-      cache.push_back (
-          { s.embedding_id, s.vec, now_ts });
-    }
-  // Trim cache to max size (FIFO eviction)
-  while (cache.size () > ProcessorContext::kMaxRetrievalCacheSize)
-    {
-      cache.pop_front ();
-    }
 
   // Debug logging
   telemetry::LogDebug ("cortext.graph_retrieval", {

@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <any>
 #include <cmath>
+#include <unordered_map>
 #include <vector>
 
 namespace cortext::operations
@@ -76,72 +77,139 @@ ConsolidationCluster::Execute (OperationContext &context, Transaction &tx) const
       return;
     }
 
-  // 3. Greedy clustering (single-linkage style).
+  // 3. Density-based clustering (DBSCAN-style).
+  const int min_pts = std::max (1, params.min_cluster_size);
+  const double eps = params.merge_threshold;
+  const int n = static_cast<int> (items.size ());
+
+  std::vector<int> cluster_labels (n, -1);
+  std::vector<bool> visited (n, false);
   int next_cluster_id = 0;
   std::vector<ClusterInfo> clusters;
 
-  for (size_t i = 0; i < items.size (); ++i)
+  auto neighbors_of = [&](int idx) {
+    std::vector<int> neighbors;
+    neighbors.reserve (static_cast<size_t> (n));
+    const auto &base = items[static_cast<size_t> (idx)].embedding;
+    for (int j = 0; j < n; ++j)
+      {
+        const auto &cand = items[static_cast<size_t> (j)].embedding;
+        if (cand.size () == 0 || cand.size () != base.size ())
+          {
+            continue;
+          }
+        const double sim = core::CosineSimilarity (base, cand);
+        if (sim >= eps)
+          {
+            neighbors.push_back (j);
+          }
+      }
+    return neighbors;
+  };
+
+  for (int i = 0; i < n; ++i)
     {
-      if (items[i].assigned)
+      if (visited[static_cast<size_t> (i)])
+        {
+          continue;
+        }
+      visited[static_cast<size_t> (i)] = true;
+      std::vector<int> neighbors = neighbors_of (i);
+      if (static_cast<int> (neighbors.size ()) < min_pts)
+        {
+          continue; // noise
+        }
+
+      const int cluster_id = next_cluster_id++;
+      cluster_labels[static_cast<size_t> (i)] = cluster_id;
+
+      // Expand cluster
+      for (size_t k = 0; k < neighbors.size (); ++k)
+        {
+          const int nb = neighbors[k];
+          if (!visited[static_cast<size_t> (nb)])
+            {
+              visited[static_cast<size_t> (nb)] = true;
+              std::vector<int> nb_neighbors = neighbors_of (nb);
+              if (static_cast<int> (nb_neighbors.size ()) >= min_pts)
+                {
+                  neighbors.insert (neighbors.end (),
+                                    nb_neighbors.begin (),
+                                    nb_neighbors.end ());
+                }
+            }
+          if (cluster_labels[static_cast<size_t> (nb)] < 0)
+            {
+              cluster_labels[static_cast<size_t> (nb)] = cluster_id;
+            }
+        }
+
+      if (static_cast<int> (clusters.size ()) >= params.max_clusters)
+        {
+          break;
+        }
+    }
+
+  // Build clusters from labels.
+  std::unordered_map<int, std::vector<int>> cluster_members;
+  for (int i = 0; i < n; ++i)
+    {
+      const int label = cluster_labels[static_cast<size_t> (i)];
+      if (label < 0)
+        {
+          continue;
+        }
+      cluster_members[label].push_back (i);
+    }
+
+  for (const auto &kv : cluster_members)
+    {
+      const auto &members = kv.second;
+      if (static_cast<int> (members.size ()) < min_pts)
         {
           continue;
         }
 
-      // Start new cluster with this item.
       ClusterInfo cluster;
-      cluster.cluster_id = next_cluster_id++;
-      cluster.embedding_ids.push_back (items[i].embedding_id);
-      cluster.avg_score = items[i].score;
+      cluster.cluster_id = kv.first;
+      cluster.avg_score = 0.0;
+      Eigen::VectorXf centroid;
+      bool centroid_init = false;
 
-      // Initialize centroid.
-      Eigen::VectorXf centroid = items[i].embedding;
-      items[i].assigned = true;
-      int cluster_count = 1;
-
-      // Find all candidates similar to centroid.
-      for (size_t j = i + 1; j < items.size (); ++j)
+      for (int idx : members)
         {
-          if (items[j].assigned)
+          const auto &item = items[static_cast<size_t> (idx)];
+          cluster.embedding_ids.push_back (item.embedding_id);
+          cluster.avg_score += item.score;
+          if (!centroid_init)
             {
-              continue;
+              centroid = item.embedding;
+              centroid_init = true;
             }
-
-          double sim = core::CosineSimilarity (centroid, items[j].embedding);
-          if (sim > params.merge_threshold)
+          else if (centroid.size () == item.embedding.size ())
             {
-              // Add to cluster.
-              cluster.embedding_ids.push_back (items[j].embedding_id);
-
-              // Update running average score.
-              double old_avg = cluster.avg_score;
-              cluster.avg_score
-                  = (old_avg * cluster_count + items[j].score)
-                    / (cluster_count + 1);
-
-              // Update centroid as running mean.
-              centroid = (centroid * static_cast<float> (cluster_count)
-                          + items[j].embedding)
-                         / static_cast<float> (cluster_count + 1);
-
-              items[j].assigned = true;
-              ++cluster_count;
+              centroid += item.embedding;
             }
         }
 
-      // Store centroid as std::vector<float>.
+      if (!members.empty ())
+        {
+          cluster.avg_score /= static_cast<double> (members.size ());
+        }
+      if (centroid_init && !members.empty ())
+        {
+          centroid
+              = centroid
+                / static_cast<float> (members.size ());
+        }
+
       cluster.centroid.resize (static_cast<size_t> (centroid.size ()));
       for (int k = 0; k < centroid.size (); ++k)
         {
           cluster.centroid[static_cast<size_t> (k)] = centroid (k);
         }
 
-      // Only keep clusters meeting minimum size.
-      if (static_cast<int> (cluster.embedding_ids.size ())
-          >= params.min_cluster_size)
-        {
-          clusters.push_back (std::move (cluster));
-        }
-
+      clusters.push_back (std::move (cluster));
       if (static_cast<int> (clusters.size ()) >= params.max_clusters)
         {
           break;

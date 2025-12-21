@@ -14,6 +14,7 @@ void
 ApplyStabilityFeedback::Execute (OperationContext &context, Transaction &tx) const
 {
   (void)tx;
+  auto &p_ctx = context.GetProcessorContext ();
   const double gamma_T = constants::kGammaTBase;
 
   const auto &events = context.GetMemoryUsageEvents ();
@@ -65,6 +66,7 @@ ApplyStabilityFeedback::Execute (OperationContext &context, Transaction &tx) con
                      constants::kHalfLifeAdjClampMax);
   // Emit ΔHalfLife_adj_t for Algorithm 6 to consume
   context.SetDeltaHalfLifeAdjustment (adj);
+  p_ctx.delta_half_life_adj = adj;
 }
 
 } // namespace cortext::operations

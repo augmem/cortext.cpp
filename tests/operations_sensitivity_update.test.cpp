@@ -82,10 +82,9 @@ TEST_CASE (
   REQUIRE (*ctx.GetDeltaThresholdEmotion () <= 0.0);
 }
 #
-TEST_CASE ("Write-rate window affects rate_target with bursts and gaps",
-           "[operations][sensitivity][rate]")
+TEST_CASE ("rate_target remains knob-derived constant", "[operations][sensitivity][rate]")
 {
-  // High-rate case (~60/min)
+  // High-rate window: should not change rate_target
   {
     Signal s;
     s.embedding = unit_at (0, 2);
@@ -104,11 +103,13 @@ TEST_CASE ("Write-rate window affects rate_target with bursts and gaps",
         pctx.write_rate_window_.Record (t);
         t += 1000;
       }
+    InitializeSensitivityPriors init;
+    init.Execute (ctx, cortext::testing::GetNullTransaction ());
     UpdateSensitivity op;
     op.Execute (ctx, cortext::testing::GetNullTransaction ());
-    REQUIRE (pctx.rate_target > 0.0);
+    REQUIRE (pctx.rate_target == Catch::Approx (pctx.base_rate_prior));
   }
-  // Low-rate case (~12/min), ensure lower than previous
+  // Low-rate window: should still be the same
   {
     Signal s;
     s.embedding = unit_at (0, 2);
@@ -126,13 +127,13 @@ TEST_CASE ("Write-rate window affects rate_target with bursts and gaps",
         pctx.write_rate_window_.Record (t);
         t += 5000;
       }
+    InitializeSensitivityPriors init;
+    init.Execute (ctx, cortext::testing::GetNullTransaction ());
     UpdateSensitivity op;
     op.Execute (ctx, cortext::testing::GetNullTransaction ());
-    REQUIRE (pctx.rate_target > 0.0);
-    // With 5s intervals, rate should be ~12/min, ensure < 30/min rough bound
-    REQUIRE (pctx.rate_target < 30.0);
+    REQUIRE (pctx.rate_target == Catch::Approx (pctx.base_rate_prior));
   }
-  // Non-increasing timestamps ignored
+  // Non-increasing timestamps should not matter
   {
     Signal s;
     s.embedding = unit_at (0, 2);
@@ -147,8 +148,10 @@ TEST_CASE ("Write-rate window affects rate_target with bursts and gaps",
     pctx.write_rate_window_.Record (100);
     pctx.write_rate_window_.Record (100); // should be ignored
     pctx.write_rate_window_.Record (101);
+    InitializeSensitivityPriors init;
+    init.Execute (ctx, cortext::testing::GetNullTransaction ());
     UpdateSensitivity op;
     op.Execute (ctx, cortext::testing::GetNullTransaction ());
-    REQUIRE (pctx.rate_target >= 0.0);
+    REQUIRE (pctx.rate_target == Catch::Approx (pctx.base_rate_prior));
   }
 }

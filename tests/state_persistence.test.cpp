@@ -54,6 +54,14 @@ struct TriggerBoundaryOp : IOperation
   }
 };
 
+inline SignalProcessor::Config
+MakeConfig ()
+{
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  return cfg;
+}
+
 } // namespace
 
 TEST_CASE ("State persistence tables are created", "[state_persistence][schema]")
@@ -62,7 +70,7 @@ TEST_CASE ("State persistence tables are created", "[state_persistence][schema]"
   auto store = std::shared_ptr<Store> (std::move (unique_store));
 
   auto ops = std::make_unique<OperationSet> ();
-  SignalProcessor processor (SignalProcessor::Config{}, store, std::move (ops));
+  SignalProcessor processor (MakeConfig (), store, std::move (ops));
 
   auto rows
       = store->Execute ("SELECT name FROM sqlite_master WHERE type='table'",
@@ -119,8 +127,7 @@ TEST_CASE ("Processor state is persisted on flush",
   {
     auto ops
         = std::make_unique<OperationSet> (std::make_unique<TriggerBoundaryOp> ());
-    SignalProcessor processor (SignalProcessor::Config{}, store,
-                               std::move (ops));
+    SignalProcessor processor (MakeConfig (), store, std::move (ops));
 
     Signal s;
     s.embedding = Eigen::VectorXf::Random (256);
@@ -155,8 +162,7 @@ TEST_CASE ("Processor state is loaded on startup",
   {
     auto ops
         = std::make_unique<OperationSet> (std::make_unique<TriggerBoundaryOp> ());
-    SignalProcessor processor (SignalProcessor::Config{}, store,
-                               std::move (ops));
+    SignalProcessor processor (MakeConfig (), store, std::move (ops));
 
     Signal s;
     s.embedding = Eigen::VectorXf::Random (256);
@@ -178,8 +184,7 @@ TEST_CASE ("Processor state is loaded on startup",
   {
     auto ops
         = std::make_unique<OperationSet> (std::make_unique<TriggerBoundaryOp> ());
-    SignalProcessor processor (SignalProcessor::Config{}, store,
-                               std::move (ops));
+    SignalProcessor processor (MakeConfig (), store, std::move (ops));
 
     Signal s;
     s.embedding = Eigen::VectorXf::Random (256);
@@ -206,8 +211,7 @@ TEST_CASE ("Blender weights are persisted", "[state_persistence][blender]")
   {
     auto ops
         = std::make_unique<OperationSet> (std::make_unique<TriggerBoundaryOp> ());
-    SignalProcessor processor (SignalProcessor::Config{}, store,
-                               std::move (ops));
+    SignalProcessor processor (MakeConfig (), store, std::move (ops));
 
     Signal s;
     s.embedding = Eigen::VectorXf::Random (256);
@@ -236,8 +240,7 @@ TEST_CASE ("Recent context view derives from signals",
   {
     // Initialize schema
     auto ops = std::make_unique<OperationSet> ();
-    SignalProcessor processor (SignalProcessor::Config{}, store,
-                               std::move (ops));
+    SignalProcessor processor (MakeConfig (), store, std::move (ops));
     processor.Flush ();
   }
 
@@ -277,8 +280,7 @@ TEST_CASE ("Recent scores are persisted", "[state_persistence][recent_scores]")
   {
     auto ops
         = std::make_unique<OperationSet> (std::make_unique<TriggerBoundaryOp> ());
-    SignalProcessor processor (SignalProcessor::Config{}, store,
-                               std::move (ops));
+    SignalProcessor processor (MakeConfig (), store, std::move (ops));
 
     for (int i = 0; i < 3; ++i)
       {
@@ -308,8 +310,7 @@ TEST_CASE ("State persistence is idempotent across restarts",
   {
     auto ops
         = std::make_unique<OperationSet> (std::make_unique<TriggerBoundaryOp> ());
-    SignalProcessor processor (SignalProcessor::Config{}, store,
-                               std::move (ops));
+    SignalProcessor processor (MakeConfig (), store, std::move (ops));
 
     Signal s;
     s.embedding = Eigen::VectorXf::Random (256);
@@ -323,8 +324,7 @@ TEST_CASE ("State persistence is idempotent across restarts",
   {
     auto ops
         = std::make_unique<OperationSet> (std::make_unique<TriggerBoundaryOp> ());
-    SignalProcessor processor (SignalProcessor::Config{}, store,
-                               std::move (ops));
+    SignalProcessor processor (MakeConfig (), store, std::move (ops));
 
     Signal s;
     s.embedding = Eigen::VectorXf::Random (256);
@@ -338,8 +338,7 @@ TEST_CASE ("State persistence is idempotent across restarts",
   {
     auto ops
         = std::make_unique<OperationSet> (std::make_unique<TriggerBoundaryOp> ());
-    SignalProcessor processor (SignalProcessor::Config{}, store,
-                               std::move (ops));
+    SignalProcessor processor (MakeConfig (), store, std::move (ops));
 
     Signal s;
     s.embedding = Eigen::VectorXf::Random (256);
@@ -392,8 +391,7 @@ TEST_CASE ("Working memory slots are persisted",
   {
     auto ops = std::make_unique<OperationSet> (
         std::make_unique<PopulateWMSlotsOp> ());
-    SignalProcessor processor (SignalProcessor::Config{}, store,
-                               std::move (ops));
+    SignalProcessor processor (MakeConfig (), store, std::move (ops));
 
     Signal s;
     s.embedding = Eigen::VectorXf::Random (256);
@@ -422,8 +420,7 @@ TEST_CASE ("Working memory slots are loaded on startup",
   // Directly insert slots into database
   {
     auto ops = std::make_unique<OperationSet> ();
-    SignalProcessor processor (SignalProcessor::Config{}, store,
-                               std::move (ops));
+    SignalProcessor processor (MakeConfig (), store, std::move (ops));
     // This ensures schema is created
     processor.Flush ();
   }
@@ -526,8 +523,7 @@ TEST_CASE ("Working memory slots decay on load",
   // Create schema
   {
     auto ops = std::make_unique<OperationSet> ();
-    SignalProcessor processor (SignalProcessor::Config{}, store,
-                               std::move (ops));
+    SignalProcessor processor (MakeConfig (), store, std::move (ops));
     processor.Flush ();
   }
 
@@ -596,8 +592,7 @@ TEST_CASE ("Fully decayed WM slots are not loaded",
   // Create schema
   {
     auto ops = std::make_unique<OperationSet> ();
-    SignalProcessor processor (SignalProcessor::Config{}, store,
-                               std::move (ops));
+    SignalProcessor processor (MakeConfig (), store, std::move (ops));
     processor.Flush ();
   }
 

@@ -5,6 +5,7 @@
 #include "cortext/processor/operation_context.hpp"
 #include "cortext/processor/processor_context.hpp"
 #include "cortext/telemetry/telemetry.hpp"
+#include <limits>
 
 namespace cortext::operations
 {
@@ -20,6 +21,7 @@ CheckStreamingPacing::Execute (OperationContext &context, Transaction &tx) const
   // Compute thresholds from knobs
   const double pacing_thresh = core::StreamingPacingThreshold (cfg.sensitivity);
   const double max_wait = core::MaxWaitDrift (cfg.focus);
+  const int adjacent_window = core::AdjacentWindow (cfg.focus);
 
   auto it = p_ctx.accumulator_states.find (signal.source_id);
   if (it == p_ctx.accumulator_states.end ())
@@ -51,7 +53,21 @@ CheckStreamingPacing::Execute (OperationContext &context, Transaction &tx) const
   // Determine if we should trigger a retrieval check
   const bool exceeds_threshold = acc.drift_acc_pacing > pacing_thresh;
   const bool force_check = acc.drift_acc_pacing > max_wait;
-  const bool should_check = at_boundary || exceeds_threshold || force_check;
+  const uint64_t now_ts = signal.timestamp;
+  double since_last_s = std::numeric_limits<double>::infinity ();
+  if (p_ctx.last_retrieval_ts > 0 && now_ts > p_ctx.last_retrieval_ts)
+    {
+      since_last_s
+          = static_cast<double> (now_ts - p_ctx.last_retrieval_ts) / 1000.0;
+    }
+  const double min_gap_s
+      = static_cast<double> (std::max (0, adjacent_window))
+        * std::max (p_ctx.dt_ema, 0.0);
+  const bool adjacent_ok = since_last_s >= min_gap_s;
+
+  const bool should_check
+      = (at_boundary || exceeds_threshold || force_check)
+        && (adjacent_ok || at_boundary || force_check);
 
   context.SetShouldCheckRetrieval (should_check);
 
@@ -60,13 +76,16 @@ CheckStreamingPacing::Execute (OperationContext &context, Transaction &tx) const
     {
       acc.x_last_check = signal.embedding;
       acc.drift_acc_pacing = 0.0;
+      p_ctx.last_retrieval_ts = now_ts;
     }
 
   // Debug logging
   telemetry::LogDebug ("cortext.streaming_pacing", {
     telemetry::Attribute::Double ("drift_acc_pacing", acc.drift_acc_pacing),
     telemetry::Attribute::Double ("pacing_threshold", pacing_thresh),
-    telemetry::Attribute::Bool ("should_check_retrieval", should_check)
+    telemetry::Attribute::Bool ("should_check_retrieval", should_check),
+    telemetry::Attribute::Int64 ("adjacent_window", adjacent_window),
+    telemetry::Attribute::Double ("since_last_retrieval_s", since_last_s)
   });
 }
 

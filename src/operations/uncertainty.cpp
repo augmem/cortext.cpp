@@ -19,6 +19,7 @@ namespace
 {
 // Spec (§0.4, line 139): var_score_max = 0.25
 constexpr double kVarScoreMax = 0.25;
+constexpr double kWeightEpsilon = 1e-9;
 }  // namespace
 
 void
@@ -135,46 +136,6 @@ UpdateUncertainty::Execute (OperationContext &context, Transaction &tx) const
     return core::Clamp (entropy / norm, 0.0, 1.0);
   };
 
-  // Helper: quick coherence (Algorithm 10) to avoid ordering dependency
-  auto compute_coherence_complement = [&] () -> std::optional<double> {
-    const auto &x = context.GetSignal ().embedding;
-    const int window = static_cast<int> (core::NCtx (config.stability));
-    const int n = static_cast<int> (p_ctx.recent_context_embeddings.size ());
-    if (n < 2)
-      {
-        return std::nullopt;
-      }
-    const int start = std::max (0, n - window);
-    std::vector<double> vals;
-    vals.reserve (static_cast<size_t> (n - start));
-    for (int i = start; i < n; ++i)
-      {
-        const auto &emb
-            = p_ctx.recent_context_embeddings[static_cast<size_t> (i)];
-        vals.push_back (core::CosineSimilarity (x, emb));
-      }
-    if (vals.size () < 2)
-      {
-        return std::nullopt;
-      }
-    double sum = std::accumulate (vals.begin (), vals.end (), 0.0);
-    const double mean = sum / static_cast<double> (vals.size ());
-    double accum = 0.0;
-    for (double v : vals)
-      {
-        const double d = v - mean;
-        accum += d * d;
-      }
-    const double var = accum / static_cast<double> (vals.size ());
-    const double coherence
-        = constants::kNormalizedMax
-          - core::Clamp (var, constants::kNormalizedMin,
-                         constants::kNormalizedMax);
-    const double cc = constants::kNormalizedMax - coherence;
-    return core::Clamp (cc, constants::kNormalizedMin,
-                        constants::kNormalizedMax);
-  };
-
   // Helper: novelty measure as dissimilarity to recent context (Appendix B)
   auto compute_novelty_measure = [&] () -> std::optional<double> {
     const auto &x = context.GetSignal ().embedding;
@@ -214,7 +175,12 @@ UpdateUncertainty::Execute (OperationContext &context, Transaction &tx) const
 
   const auto var_scores = compute_scores_variance ();
   const auto focus_entropy = compute_focus_spread_entropy ();
-  const auto coh_complement = compute_coherence_complement ();
+  const double coherence_struct = core::Clamp (context.GetStructuralCoherence (),
+                                               constants::kNormalizedMin,
+                                               constants::kNormalizedMax);
+  const double coh_complement = core::Clamp (1.0 - coherence_struct,
+                                             constants::kNormalizedMin,
+                                             constants::kNormalizedMax);
   const auto novelty_measure = compute_novelty_measure ();
 
   // Fuse novelty (Alg 4) + embedding surprisal (Section 3.1.4) into
@@ -226,10 +192,23 @@ UpdateUncertainty::Execute (OperationContext &context, Transaction &tx) const
   bool has_novelty_surprise = false;
   if (novelty_measure.has_value () && embedding_surprisal_val > 0.0)
     {
-      // Average of novelty and embedding surprisal when both available
+      // Weighted blend with weights = normalize([S, 1 − T])
+      double w_novelty = config.sensitivity;
+      double w_surprise = 1.0 - config.stability;
+      const double wsum = std::max (w_novelty, 0.0) + std::max (w_surprise, 0.0);
+      if (wsum <= kWeightEpsilon)
+        {
+          w_novelty = 0.5;
+          w_surprise = 0.5;
+        }
+      else
+        {
+          w_novelty = std::max (w_novelty, 0.0) / wsum;
+          w_surprise = std::max (w_surprise, 0.0) / wsum;
+        }
       novelty_surprise_spikes
-          = core::Clamp ((novelty_measure.value () + embedding_surprisal_val)
-                             / 2.0,
+          = core::Clamp (w_novelty * novelty_measure.value ()
+                             + w_surprise * embedding_surprisal_val,
                          constants::kNormalizedMin, constants::kNormalizedMax);
       has_novelty_surprise = true;
     }
@@ -261,12 +240,9 @@ UpdateUncertainty::Execute (OperationContext &context, Transaction &tx) const
       // Weight by Focus (F) per §0.4 line 153
       weights.push_back (config.focus);
     }
-  if (coh_complement.has_value ())
-    {
-      metrics.push_back (*coh_complement);
-      // Weight by (1 - T) per §0.4 line 153
-      weights.push_back (1.0 - config.stability);
-    }
+  metrics.push_back (coh_complement);
+  // Weight by (1 - T) per §0.4 line 153
+  weights.push_back (1.0 - config.stability);
   // Include novelty_surprise_spikes (fusion of Alg 4 + Alg 13) when available.
   // Weight with S × (1 - T) per §0.4 line 153.
   if (has_novelty_surprise)
@@ -285,18 +261,26 @@ UpdateUncertainty::Execute (OperationContext &context, Transaction &tx) const
         {
           wsum += std::max (w, 0.0);
         }
-      if (wsum > 0.0)
+      if (wsum <= kWeightEpsilon)
+        {
+          const double uniform = 1.0 / static_cast<double> (weights.size ());
+          for (double &w : weights)
+            {
+              w = uniform;
+            }
+        }
+      else
         {
           for (double &w : weights)
             {
               w = std::max (w, 0.0) / wsum;
             }
-          for (size_t i = 0; i < metrics.size (); ++i)
-            {
-              u_raw += weights[i] * core::Clamp (metrics[i], 0.0, 1.0);
-            }
-          used_primary = true;
         }
+      for (size_t i = 0; i < metrics.size (); ++i)
+        {
+          u_raw += weights[i] * core::Clamp (metrics[i], 0.0, 1.0);
+        }
+      used_primary = true;
     }
 
   if (!used_primary)
@@ -326,7 +310,7 @@ UpdateUncertainty::Execute (OperationContext &context, Transaction &tx) const
     telemetry::Attribute::Double("u_t", p_ctx.u_t),
     telemetry::Attribute::Double("var_scores", var_scores.value_or(-1.0)),
     telemetry::Attribute::Double("focus_entropy", focus_entropy.value_or(-1.0)),
-    telemetry::Attribute::Double("coh_complement", coh_complement.value_or(-1.0)),
+    telemetry::Attribute::Double("coh_complement", coh_complement),
     telemetry::Attribute::Double("novelty_surprise", has_novelty_surprise ? novelty_surprise_spikes : -1.0),
     telemetry::Attribute::Double("weight_S", config.sensitivity),
     telemetry::Attribute::Double("weight_F", config.focus),

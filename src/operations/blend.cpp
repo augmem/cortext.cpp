@@ -22,10 +22,6 @@ constexpr double kTauRlsMax = 80.0;
 
 // Number of metrics supported
 constexpr size_t kNumMetrics = 12;
-// Number of coefficients per metric (a_F, a_S, a_T, b)
-constexpr size_t kCoeffsPerMetric = 4;
-// Total coefficients for coefficient-space RLS
-constexpr size_t kTotalCoeffs = kNumMetrics * kCoeffsPerMetric;
 
 // Bootstrap coefficient matrices derived from current heuristics
 // w_bootstrap[i] = sigmoid(c_F[i]*F + c_S[i]*S + c_T[i]*T + d[i])
@@ -153,18 +149,6 @@ BootstrapWeight (operations::Metric name, double F, double S, double T)
   return 0.5; // Fallback
 }
 
-// Computes RLS weight using learned coefficients
-// w_rls[i] = sigmoid(a_F[i]*F + a_S[i]*S + a_T[i]*T + b[i])
-inline double
-ComputeRLSWeight (const std::array<double, 4> &coeffs, double F, double S,
-                  double T)
-{
-  const double z
-      = coeffs[0] * F + coeffs[1] * S + coeffs[2] * T + coeffs[3];
-  return core::Clamp (core::Sigmoid (z), constants::kNormalizedMin,
-                      constants::kNormalizedMax);
-}
-
 inline void
 EnsureStateInitialized (cortext::ProcessorContext &p_ctx,
                         const cortext::SignalProcessor::Config &cfg)
@@ -192,29 +176,6 @@ EnsureStateInitialized (cortext::ProcessorContext &p_ctx,
         }
     }
 
-  // Initialize coefficient-space RLS state from bootstrap coefficients
-  if (p_ctx.rls_coefficients.empty ())
-    {
-      p_ctx.rls_coefficients.resize (kNumMetrics);
-      for (size_t i = 0; i < kNumMetrics; ++i)
-        {
-          p_ctx.rls_coefficients[i][0] = kBootstrapCF[i];  // a_F
-          p_ctx.rls_coefficients[i][1] = kBootstrapCS[i];  // a_S
-          p_ctx.rls_coefficients[i][2] = kBootstrapCT[i];  // a_T
-          p_ctx.rls_coefficients[i][3] = kBootstrapD[i];   // b
-        }
-    }
-
-  // Initialize 48x48 covariance matrix for coefficient-space RLS
-  if (p_ctx.rls_coeff_P.empty ())
-    {
-      p_ctx.rls_coeff_P.assign (kTotalCoeffs,
-                                std::vector<double> (kTotalCoeffs, 0.0));
-      for (size_t i = 0; i < kTotalCoeffs; ++i)
-        {
-          p_ctx.rls_coeff_P[i][i] = kLarge;
-        }
-    }
 }
 
 std::vector<double>
@@ -267,24 +228,18 @@ ComputeRLSGain (const std::vector<double> &x,
 
 void
 UpdateRLSCovariance (const std::vector<double> &K,
-                     const std::vector<double> &x,
+                     const std::vector<double> &Px,
                      const std::vector<std::vector<double> > &P,
                      double lam,
                      std::vector<std::vector<double> > &P_new)
 {
-  const std::size_t n = x.size ();
+  const std::size_t n = K.size ();
   P_new.assign (n, std::vector<double> (n, 0.0));
   for (std::size_t i = 0; i < n; ++i)
     {
       for (std::size_t j = 0; j < n; ++j)
         {
-          double I_minus_KxT = (i == j ? 1.0 : 0.0) - K[i] * x[j];
-          double acc = 0.0;
-          for (std::size_t k = 0; k < n; ++k)
-            {
-              acc += I_minus_KxT * P[k][j];
-            }
-          P_new[i][j] = acc / lam;
+          P_new[i][j] = (P[i][j] - K[i] * Px[j]) / lam;
         }
     }
 }
@@ -409,7 +364,7 @@ FitMetricWeightsRLS::Execute (OperationContext &context, Transaction &tx) const
                          constants::kNormalizedMax);
     }
   std::vector<std::vector<double> > P_new;
-  UpdateRLSCovariance (K, x, P, lam, P_new);
+  UpdateRLSCovariance (K, Px, P, lam, P_new);
   p_ctx.blender_P = std::move (P_new);
   p_ctx.blender_ready = true;
 
@@ -443,27 +398,48 @@ ComputeCompositeScore::Execute (OperationContext &context, Transaction &tx) cons
                                           cfg.stability);
     }
 
-  // Compute RLS weights using learned coefficients
-  if (!p_ctx.rls_coefficients.empty ()
-      && p_ctx.rls_coefficients.size () == kNumMetrics)
+  w_rls = BuildWeightVector (names, p_ctx.blender_state);
+  for (double &w : w_rls)
     {
-      // Use coefficient-space RLS weights: w_rls[i] = sigmoid(a_F*F + a_S*S +
-      // a_T*T + b)
-      for (std::size_t i = 0; i < names.size () && i < kNumMetrics; ++i)
-        {
-          w_rls[i] = ComputeRLSWeight (p_ctx.rls_coefficients[i], cfg.focus,
-                                       cfg.sensitivity, cfg.stability);
-        }
-      p_ctx.rls_coefficients_ready = true;
-    }
-  else
-    {
-      w_rls = w_boot;
+      w = core::Clamp (w, constants::kNormalizedMin,
+                       constants::kNormalizedMax);
     }
 
   const double confidence
       = ComputeBlendConfidence (p_ctx.signals_processed, cfg.stability);
   std::vector<double> w_raw = BlendWeights (w_boot, w_rls, confidence);
+
+  // Apply control-weight multipliers before normalization.
+  for (std::size_t i = 0; i < w_raw.size (); ++i)
+    {
+      const auto metric = names[i];
+      double mult = 1.0;
+      switch (metric)
+        {
+        case operations::Metric::relevance:
+          mult = p_ctx.weight_relevance;
+          break;
+        case operations::Metric::mismatch:
+          mult = p_ctx.mismatch_weight;
+          break;
+        case operations::Metric::surprise:
+          mult = p_ctx.weight_surprise;
+          break;
+        case operations::Metric::coverage:
+          mult = p_ctx.coverage_gain_floor;
+          break;
+        case operations::Metric::valence:
+          mult = p_ctx.weight_valence * p_ctx.emotion_gain;
+          break;
+        case operations::Metric::arousal:
+          mult = p_ctx.weight_arousal * p_ctx.emotion_gain;
+          break;
+        default:
+          break;
+        }
+      w_raw[i] *= core::Clamp (mult, constants::kNormalizedMin,
+                               constants::kNormalizedMax);
+    }
   double weight_sum = 0.0;
   int effective = 0;
   for (double w : w_raw)
@@ -481,7 +457,10 @@ ComputeCompositeScore::Execute (OperationContext &context, Transaction &tx) cons
       context.SetCompositeScore (0.0);
       return;
     }
-  const double y = ComputeWeightedScore (x, w_raw);
+  const double y_raw = ComputeWeightedScore (x, w_raw);
+  const double y = core::Clamp (y_raw * p_ctx.score_gain,
+                                constants::kNormalizedMin,
+                                constants::kNormalizedMax);
   context.SetCompositeScore (y);
 
   // Compute tau_rls for logging

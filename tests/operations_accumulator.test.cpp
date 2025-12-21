@@ -365,7 +365,7 @@ TEST_CASE ("AccumulatorState reset and accumulate", "[accumulator][state]")
     REQUIRE (state.n_signals == 2);
     REQUIRE (state.s_sum == Catch::Approx (0.7));
     REQUIRE (state.s_max == Catch::Approx (0.7));
-    REQUIRE (state.drift_acc == Catch::Approx (0.1));
+    REQUIRE (state.drift_acc == Catch::Approx (0.05));
   }
 }
 

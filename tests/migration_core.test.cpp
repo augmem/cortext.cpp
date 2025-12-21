@@ -1,5 +1,6 @@
 // tests/migration_core.test.cpp
 #include <catch2/catch_test_macros.hpp>
+#include "test_helpers.hpp"
 #include <cortext/processor.hpp>
 #include <cortext/store/sqlite_store.hpp>
 #include <cortext/store/schema.hpp>
@@ -14,7 +15,9 @@ TEST_CASE("Migrations apply core tables automatically", "[schema][migration]") {
 
     // No operations, just core processor
     auto ops = std::make_unique<OperationSet>();
-    SignalProcessor processor(SignalProcessor::Config{}, store, std::move(ops));
+    SignalProcessor::Config cfg;
+    cortext::testing::RequireEncoder(cfg);
+    SignalProcessor processor(cfg, store, std::move(ops));
 
     auto rows = store->Execute(
         "SELECT name FROM sqlite_master WHERE type='table'", {});
@@ -45,7 +48,9 @@ TEST_CASE("Migrations track version history", "[schema][migration]") {
     auto store = std::shared_ptr<Store>(std::move(unique_store));
 
     auto ops = std::make_unique<OperationSet>();
-    SignalProcessor processor(SignalProcessor::Config{}, store, std::move(ops));
+    SignalProcessor::Config cfg;
+    cortext::testing::RequireEncoder(cfg);
+    SignalProcessor processor(cfg, store, std::move(ops));
 
     auto rows = store->Execute("SELECT id, description FROM cortext_schema_migrations ORDER BY id");
     REQUIRE(rows.size() >= 1);
@@ -69,13 +74,17 @@ TEST_CASE("Migrations are idempotent", "[schema][migration]") {
     // First run
     {
         auto ops = std::make_unique<OperationSet>();
-        SignalProcessor p1(SignalProcessor::Config{}, store, std::move(ops));
+        SignalProcessor::Config cfg;
+        cortext::testing::RequireEncoder(cfg);
+        SignalProcessor p1(cfg, store, std::move(ops));
     }
 
     // Second run with same store
     {
         auto ops = std::make_unique<OperationSet>();
-        SignalProcessor p2(SignalProcessor::Config{}, store, std::move(ops));
+        SignalProcessor::Config cfg;
+        cortext::testing::RequireEncoder(cfg);
+        SignalProcessor p2(cfg, store, std::move(ops));
     }
 
     // Should not throw and tables should still exist

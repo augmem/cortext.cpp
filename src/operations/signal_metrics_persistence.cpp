@@ -22,6 +22,12 @@ GetMetricValue (const std::unordered_map<Metric, double> &metrics, Metric m)
 void
 PersistSignalMetrics::Execute (OperationContext &context, Transaction &tx) const
 {
+  if (!context.GetAccumulatorWriteDecision ())
+    {
+      return;
+    }
+
+  auto &p_ctx = context.GetProcessorContext ();
   const auto &metrics = context.GetAllMetrics ();
   const auto &signal = context.GetSignal ();
 
@@ -52,24 +58,35 @@ PersistSignalMetrics::Execute (OperationContext &context, Transaction &tx) const
   double focus_spread = GetMetricValue (metrics, Metric::focus_spread);
   double f_effective = context.GetEffectiveFocus ();
 
-  // v2: Update the most recent signal for this source_id with metrics
-  // Metrics are stored inline on the signals table (merged from signal_metrics)
-  tx.Execute (
-      "UPDATE signals "
-      "SET relevance = ?, mismatch = ?, surprise = ?, rarity = ?, "
-      "    drift = ?, contradiction = ?, utility = ?, periphery = ?, "
-      "    coverage = ?, salience = ?, valence = ?, arousal = ?, "
-      "    score = ?, threshold_t = ?, write_decision = ?, "
-      "    coherence = ?, focus_spread = ?, f_effective = ? "
-      "WHERE signal_id = ("
-      "  SELECT signal_id FROM signals "
-      "  WHERE source_id = ? AND timestamp = ? "
-      "  ORDER BY signal_id DESC LIMIT 1"
-      ")",
-      { relevance, mismatch, surprise, rarity, drift, contradiction, utility,
-        periphery, coverage, salience, valence, arousal, composite_score,
-        threshold_t, write_decision, coherence, focus_spread, f_effective,
-        signal.source_id, static_cast<long long> (signal.timestamp) });
+  auto it = p_ctx.accumulator_states.find (signal.source_id);
+  if (it == p_ctx.accumulator_states.end ())
+    {
+      return;
+    }
+
+  const auto &records = it->second.signals;
+  if (records.empty ())
+    {
+      return;
+    }
+
+  // v2: Update all signal rows for this memory (by source_id + timestamp + serial_position).
+  for (const auto &rec : records)
+    {
+      tx.Execute (
+          "UPDATE signals "
+          "SET relevance = ?, mismatch = ?, surprise = ?, rarity = ?, "
+          "    drift = ?, contradiction = ?, utility = ?, periphery = ?, "
+          "    coverage = ?, salience = ?, valence = ?, arousal = ?, "
+          "    score = ?, threshold_t = ?, write_decision = ?, "
+          "    coherence = ?, focus_spread = ?, f_effective = ? "
+          "WHERE source_id = ? AND timestamp = ? AND serial_position = ?",
+          { relevance, mismatch, surprise, rarity, drift, contradiction, utility,
+            periphery, coverage, salience, valence, arousal, composite_score,
+            threshold_t, write_decision, coherence, focus_spread, f_effective,
+            signal.source_id, static_cast<long long> (rec.timestamp),
+            static_cast<long long> (rec.serial_position) });
+    }
 }
 
 } // namespace cortext::operations

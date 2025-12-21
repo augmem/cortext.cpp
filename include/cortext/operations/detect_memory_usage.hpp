@@ -5,26 +5,19 @@
 namespace cortext::operations
 {
 
-/// @brief Detects implicit memory usage via semantic similarity.
+/// @brief Marks retrieved memories as used based on interrupt gate decisions.
 ///
-/// Implements human-like implicit feedback: when previously-retrieved memories
-/// appear semantically similar to the current input, they are marked as "used".
+/// Usage definition (spec): used(m) = retrieved(m) AND injected into active
+/// context after gate decisions. This operation:
+/// 1. Reads retrieved candidate embeddings for the current step.
+/// 2. Marks the selected candidate as used if the interrupt gate allowed it.
+/// 3. Computes contextual_gain as cosine similarity between current signal
+///    embedding and each candidate embedding.
 ///
-/// Detection mechanism:
-/// 1. Compare current signal embedding against cached recently-retrieved
-/// memories
-/// 2. If similarity >= MemoryUsageThreshold(F), mark as "used"
-/// 3. Populate MemoryUsageEvents with (embedding_id, used, contextual_gain)
+/// This enables feedback algorithms (Algorithms 14–19) to use consistent
+/// retrieved/used counts without cache-based heuristics.
 ///
-/// This enables the closed-loop feedback system (Algorithms 14-19) to function
-/// without explicit user feedback - usage is inferred from semantic patterns.
-///
-/// Pipeline order: Must run AFTER initialization priors, BEFORE feedback ops.
-///
-/// Knob effects:
-/// - Focus (F): Higher F → stricter similarity threshold → fewer "used"
-///   detections
-/// - Stability (T): Higher T → longer cache duration → memories tracked longer
+/// Pipeline order: Must run AFTER the interrupt gate, BEFORE feedback ops.
 class DetectMemoryUsage : public IOperation
 {
 public:

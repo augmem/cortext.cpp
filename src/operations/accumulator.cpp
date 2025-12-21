@@ -46,6 +46,7 @@ UpdateAccumulator::Execute (OperationContext &context,
 {
   const auto &signal = context.GetSignal ();
   auto &p_ctx = context.GetProcessorContext ();
+  const auto &config = context.GetConfig ();
   const std::string &source_id = signal.source_id;
   Store *store = context.GetStore ();
   const int64_t episode_id
@@ -83,6 +84,20 @@ UpdateAccumulator::Execute (OperationContext &context,
 
       // Track primary modality (v2: first modality wins)
       state.primary_modality = signal.modality;
+      if (signal.embedding.size () > 0)
+        {
+          state.acc_signals_window.push_back (signal.embedding);
+          const int win_coh = core::WinCoh (config.stability);
+          if (win_coh > 0
+              && static_cast<int> (state.acc_signals_window.size ()) > win_coh)
+            {
+              state.acc_signals_window.erase (
+                  state.acc_signals_window.begin (),
+                  state.acc_signals_window.begin ()
+                      + (static_cast<long> (state.acc_signals_window.size ())
+                         - win_coh));
+            }
+        }
 
       p_ctx.accumulator_states[source_id] = std::move (state);
 
@@ -110,12 +125,25 @@ UpdateAccumulator::Execute (OperationContext &context,
 
       // Track primary modality (v2: first modality wins)
       acc.primary_modality = signal.modality;
+      if (signal.embedding.size () > 0)
+        {
+          acc.acc_signals_window.push_back (signal.embedding);
+          const int win_coh = core::WinCoh (config.stability);
+          if (win_coh > 0
+              && static_cast<int> (acc.acc_signals_window.size ()) > win_coh)
+            {
+              acc.acc_signals_window.erase (
+                  acc.acc_signals_window.begin (),
+                  acc.acc_signals_window.begin ()
+                      + (static_cast<long> (acc.acc_signals_window.size ())
+                         - win_coh));
+            }
+        }
       return;
     }
 
   // Accumulate into memory
   acc.Accumulate (signal.embedding, score, drift_mag);
-  acc.last_signal_ts = signal.timestamp;
 
   // Track emotional metadata (Section 6.1.1)
   acc.s_emotion_max = std::max (acc.s_emotion_max, emotion_intensity);

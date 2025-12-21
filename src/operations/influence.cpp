@@ -30,34 +30,6 @@ ApplyInfluenceFeedback::Execute (OperationContext &context, Transaction &tx) con
 {
   const auto &cfg = context.GetConfig ();
 
-  // Use recent_context_embeddings as source of current/previous generation
-  // embeddings to avoid relying on transient signal lifetime.
-  auto &p_ctx = context.GetProcessorContext ();
-  if (p_ctx.recent_context_embeddings.empty ())
-    {
-      return;
-    }
-  const Eigen::VectorXf &x_t
-      = p_ctx.recent_context_embeddings.back (); // current
-  const Eigen::VectorXf u_cur = Unit (x_t);
-
-  // Previous embedding from history if available.
-  Eigen::VectorXf u_prev = u_cur;
-  if (p_ctx.recent_context_embeddings.size () >= 2)
-    {
-      const Eigen::VectorXf &x_prev
-          = p_ctx.recent_context_embeddings
-                [p_ctx.recent_context_embeddings.size () - 2];
-      u_prev = Unit (x_prev);
-    }
-
-  const Eigen::VectorXf delta = u_cur - u_prev;
-  const double n_delta = delta.norm ();
-  const Eigen::VectorXf delta_hat
-      = (n_delta > constants::kNormEpsilon)
-            ? (delta / static_cast<float> (n_delta))
-            : u_cur;
-
   const auto &events = context.GetMemoryUsageEvents ();
   const auto &emb_map = context.GetRetrievedMemoryEmbeddings ();
 
@@ -84,11 +56,8 @@ ApplyInfluenceFeedback::Execute (OperationContext &context, Transaction &tx) con
       const Eigen::VectorXf u_m = Unit (it->second);
       const double contextual_gain
           = core::Clamp (e.contextual_gain.value_or (0.0), -1.0, 1.0);
-      const double sim_gen = core::Clamp (
-          core::CosineSimilarity (u_cur, u_m), -1.0, 1.0);
-      const double cos_md = core::CosineSimilarity (u_m, delta_hat);
-      const double drift_contrib
-          = (n_delta * 0.5) * std::max (constants::kNormalizedMin, cos_md);
+      const double sim_gen = 0.0;
+      const double drift_contrib = 0.0;
       const double influence
           = constants::kLambda1 * contextual_gain
             + constants::kLambda2 * sim_gen
@@ -96,7 +65,8 @@ ApplyInfluenceFeedback::Execute (OperationContext &context, Transaction &tx) con
       influences.push_back (influence);
 
       auto rows = tx.Execute (
-          "SELECT sustained_influence FROM memories WHERE embedding_id = ?",
+          "SELECT sustained_influence, mean_influence, used_count "
+          "FROM memories WHERE embedding_id = ?",
           { static_cast<long long> (e.embedding_id) });
       if (rows.empty ())
         {
@@ -104,12 +74,20 @@ ApplyInfluenceFeedback::Execute (OperationContext &context, Transaction &tx) con
         }
       const double sustained_prev
           = std::any_cast<double> (rows[0].at ("sustained_influence"));
+      const double mean_prev
+          = std::any_cast<double> (rows[0].at ("mean_influence"));
+      const long long used_prev
+          = std::any_cast<long long> (rows[0].at ("used_count"));
       const double sustained_new
           = core::Ewma (sustained_prev, influence, alpha_sustain);
+      const double denom = static_cast<double> (std::max (used_prev, 0LL) + 1);
+      const double mean_new = (denom > 0.0)
+                                  ? ((mean_prev * used_prev + influence) / denom)
+                                  : influence;
       tx.Execute ("UPDATE memories "
-                  "SET influence = ?, sustained_influence = ? "
+                  "SET influence = ?, sustained_influence = ?, mean_influence = ? "
                   "WHERE embedding_id = ?",
-                  { influence, sustained_new,
+                  { influence, sustained_new, mean_new,
                     static_cast<long long> (e.embedding_id) });
     }
 

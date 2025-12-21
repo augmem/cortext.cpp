@@ -64,7 +64,7 @@ ComputeWriteGate::Execute (OperationContext &context,
       = static_cast<double> (signal.timestamp - acc.last_write_ts) / 1000.0;
 
   double M_write_refrac = 1.0;
-  if (acc.last_write_ts > 0 && dt_write < tau_refrac * 3.0)
+  if (acc.last_write_ts > 0)
     {
       M_write_refrac = 1.0 + k_refrac * std::exp (-dt_write / tau_refrac);
     }
@@ -73,7 +73,9 @@ ComputeWriteGate::Execute (OperationContext &context,
   const double theta_accumulator = T_dynamic * M_write_refrac;
 
   // Final write decision
-  const bool write_accumulator = (flush || spike_bypass) && (S_window > theta_accumulator);
+  const bool force_write = spike_bypass;
+  const bool write_accumulator
+      = force_write || (flush && (S_window > theta_accumulator));
 
   context.SetAccumulatorWriteDecision (write_accumulator);
   context.SetWriteDecision (write_accumulator);
@@ -96,23 +98,17 @@ ComputeWriteGate::Execute (OperationContext &context,
       if (e_rep.size () > 0)
         {
           p_ctx.memory_stream.push_back (e_rep);
-          const size_t max_stream
-              = static_cast<size_t> (core::NCtx (config.stability));
-          while (p_ctx.memory_stream.size () > max_stream)
-            {
-              p_ctx.memory_stream.pop_front ();
-            }
         }
 
       // Section 8.2: Populate recent_memory_centroids for interrupt gate context.
-      // Store μ_acc (memory centroid) not individual signal embeddings.
-      if (acc.mu_acc.size () > 0)
+      // Store representative embedding (e_rep) per spec.
+      if (e_rep.size () > 0)
         {
-          p_ctx.recent_memory_centroids.push_back (acc.mu_acc);
+          p_ctx.recent_memory_centroids.push_back (e_rep);
 
-          // Trim to NCtx(T) size
+          // Trim to win_mem_ctx(T) size
           const size_t max_size
-              = static_cast<size_t> (core::NCtx (config.stability));
+              = static_cast<size_t> (core::WinMemCtx (config.stability));
           while (p_ctx.recent_memory_centroids.size () > max_size)
             {
               p_ctx.recent_memory_centroids.pop_front ();

@@ -91,6 +91,7 @@ UpdateThreshold::Execute (OperationContext &context, Transaction &tx) const
       = std::max (constants::kNormEpsilon, rho_prior + rho_obs);
   const double T_target
       = (rho_prior * T_prior + rho_obs * observed_p90) / denom;
+  p_ctx.T_target = T_target;
 
   // 5) EWMA toward target with α_T schedule.
   const double alpha_T = core::AlphaT (cfg.stability, p_ctx.u_t);

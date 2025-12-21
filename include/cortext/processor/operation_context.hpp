@@ -126,6 +126,18 @@ public:
     return retrieved_memory_embeddings_;
   }
 
+  // Track the candidate selected by the interrupt gate (if any).
+  void
+  SetSelectedCandidateId (std::optional<long long> id)
+  {
+    selected_candidate_id_ = id;
+  }
+  std::optional<long long>
+  GetSelectedCandidateId () const
+  {
+    return selected_candidate_id_;
+  }
+
   // ======================================================================
   // Threshold Modulation API (Algorithm 8 inputs/outputs)
   // ======================================================================
@@ -337,6 +349,17 @@ public:
   GetCoherence () const
   {
     return coherence_;
+  }
+
+  void
+  SetAccumulatorEtaPrev (double v)
+  {
+    accumulator_eta_prev_ = v;
+  }
+  std::optional<double>
+  GetAccumulatorEtaPrev () const
+  {
+    return accumulator_eta_prev_;
   }
 
   // ======================================================================
@@ -954,6 +977,7 @@ private:
   double threshold_T_dynamic_ = 0.0;
   double threshold_hysteresis_ = 0.0;
   double coherence_ = 0.0;
+  std::optional<double> accumulator_eta_prev_;
   double emotion_intensity_ = 0.0;
   double valence_ = 0.5;
   double arousal_ = 0.0;
@@ -977,6 +1001,8 @@ private:
   std::vector<MemoryUsageEvent> memory_usage_events_;
   // Retrieved memory embeddings attached to this signal
   std::unordered_map<long long, Eigen::VectorXf> retrieved_memory_embeddings_;
+  // Selected candidate ID from interrupt gate (if any)
+  std::optional<long long> selected_candidate_id_;
 
   // Metacognitive monitoring (Algorithm 25) fields
   std::optional<double> feeling_of_knowing_;

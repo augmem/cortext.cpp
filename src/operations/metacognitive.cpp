@@ -13,14 +13,30 @@ void
 MetacognitiveMonitoring::Execute (OperationContext &context, Transaction &tx) const
 {
   (void)tx;
+  auto &p_ctx = context.GetProcessorContext ();
   const auto &cfg = context.GetConfig ();
   const double F = core::Clamp01 (cfg.focus);
   const double S = core::Clamp01 (cfg.sensitivity);
   const double T = core::Clamp01 (cfg.stability);
-  const double retrieval
-      = core::Clamp01 (context.GetCompositeScore ().value_or (0.0));
-  const double FOK
-      = core::Clamp01 (context.GetFeelingOfKnowing ().value_or (0.0));
+
+  double retrieval_strength = 0.0;
+  const auto &usage_events = context.GetMemoryUsageEvents ();
+  for (const auto &event : usage_events)
+    {
+      if (!event.contextual_gain.has_value ())
+        {
+          continue;
+        }
+      retrieval_strength = std::max (
+          retrieval_strength, core::Map01 (*event.contextual_gain));
+    }
+  const double retrieval = core::Clamp01 (retrieval_strength);
+
+  const double FOK = core::Clamp01 (1.0 - p_ctx.u_t);
+  context.SetFeelingOfKnowing (FOK);
+  p_ctx.fok_state = FOK;
+  p_ctx.retrieval_strength = retrieval;
+  p_ctx.metacognitive_confidence = FOK;
 
   // Derived thresholds and params
   const double fok_threshold = core::FOKThreshold (F);

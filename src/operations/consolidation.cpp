@@ -31,9 +31,11 @@ CheckIntervalTrigger (uint64_t last_consolidation_ts, uint64_t now_ts,
                       int interval_req)
 {
   const bool has_last_cons = last_consolidation_ts > 0 && now_ts > 0;
+  const uint64_t interval_ms
+      = static_cast<uint64_t> (std::max (interval_req, 0) * 1000);
   return has_last_cons
             ? (static_cast<int64_t> (now_ts - last_consolidation_ts)
-               > static_cast<int64_t> (interval_req))
+               > static_cast<int64_t> (interval_ms))
             : false;
 }
 
@@ -63,18 +65,6 @@ CheckCapacityTrigger (Store *store, long long consolidation_threshold,
       db_size = 0;
     }
   return (db_size > consolidation_threshold);
-}
-
-bool
-CheckIdleCondition (int tokens_in_flight, int retrieval_queue_depth,
-                    double idle_for, int idle_required, bool trigger_interval)
-{
-  const bool idle_basic_ok
-      = (tokens_in_flight == 0) && (retrieval_queue_depth == 0);
-  return trigger_interval
-            ? idle_basic_ok
-            : (idle_basic_ok
-               && (idle_for >= static_cast<double> (idle_required)));
 }
 
 } // namespace
@@ -107,18 +97,27 @@ EvaluateConsolidation::Execute (OperationContext &context, Transaction &tx) cons
     {
       return;
     }
-  const int tokens_in_flight = context.GetTokensInFlight ();
   const int retrieval_queue_depth = context.GetRetrievalQueueDepth ();
-  double idle_for_ms = 0.0;
-  if (p_ctx.last_retrieval_ts > 0 && now_ts > p_ctx.last_retrieval_ts)
+  double idle_for_s = 0.0;
+  if (now_ts > p_ctx.last_retrieval_ts)
     {
-      idle_for_ms = static_cast<double> (now_ts - p_ctx.last_retrieval_ts);
+      idle_for_s
+          = static_cast<double> (now_ts - p_ctx.last_retrieval_ts) / 1000.0;
     }
-  // Convert idle_required from seconds to milliseconds for consistent comparison
-  const int idle_required_ms = core::IdleRequiredSeconds (cfg.stability) * 1000;
-  const bool idle_ok
-      = CheckIdleCondition (tokens_in_flight, retrieval_queue_depth,
-                            idle_for_ms, idle_required_ms, trigger_interval);
+  const int idle_required_s = core::IdleRequiredSeconds (cfg.stability);
+  bool is_accumulating_memory = false;
+  for (const auto &kv : p_ctx.accumulator_states)
+    {
+      if (kv.second.n_signals > 0)
+        {
+          is_accumulating_memory = true;
+          break;
+        }
+    }
+  const bool idle_ok = (!is_accumulating_memory)
+                       && (retrieval_queue_depth == 0)
+                       && (idle_for_s
+                           >= static_cast<double> (idle_required_s));
 
   // NOTE: consolidation_events table removed (undocumented).
   // Event logging removed - consolidation decisions are tracked via
@@ -161,7 +160,7 @@ EnqueueExtractionJobs::Execute (OperationContext &context, Transaction &tx) cons
   const int interval = core::ExtractionIntervalSeconds (cfg.stability);
   if (p_ctx.last_extraction_ts > 0
       && (now_ts - p_ctx.last_extraction_ts)
-             < static_cast<uint64_t> (interval))
+             < static_cast<uint64_t> (std::max (interval, 0) * 1000))
     {
       return;
     }

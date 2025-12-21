@@ -35,11 +35,14 @@ InitializeSensitivityPriors::Execute (OperationContext &context, Transaction &tx
   p_ctx.weight_emotion_prior = 0.2 + 0.8 * S;
   p_ctx.emotion_gain_prior = std::exp (1.5 * S);
   p_ctx.score_gain_prior = std::exp (2.0 * S);
-  p_ctx.rate_target_prior = p_ctx.base_rate_prior
-                           * (constants::kRateTargetBase
-                              + constants::kRateTargetMultiplier * S);
+  p_ctx.rate_target_prior = p_ctx.base_rate_prior;
   // Initialize dynamic values from priors
   p_ctx.weight_novelty = p_ctx.weight_novelty_prior;
+  p_ctx.weight_surprise = p_ctx.weight_surprise_prior;
+  p_ctx.weight_valence = p_ctx.weight_valence_prior;
+  p_ctx.weight_arousal = p_ctx.weight_arousal_prior;
+  p_ctx.emotion_gain = p_ctx.emotion_gain_prior;
+  p_ctx.score_gain = p_ctx.score_gain_prior;
   p_ctx.sensitivity_priors_initialized = true;
 
   telemetry::LogDebug("cortext.initialize_sensitivity_priors", {
@@ -53,10 +56,6 @@ InitializeSensitivityPriors::Execute (OperationContext &context, Transaction &tx
 namespace
 {
 constexpr int kNumEmotions = 6; // anger, fear, joy, love, sadness, surprise
-constexpr double kTiny = 1e-6;
-constexpr double kPerMinute = 60.0;
-constexpr double kMillisToSeconds = 1e-3;
-constexpr double kClampRateMax = 1000.0;
 // Valence map (−1..+1 approx scaled to ~[−0.9,+0.9])
 static const double kVMap[kNumEmotions]
     = { -0.9, -0.8, +0.9, +0.8, -0.9, 0.0 };
@@ -113,6 +112,9 @@ UpdateSensitivity::Execute (OperationContext &context, Transaction &tx) const
   double emotion_intensity = 0.0;
   double valence = constants::kOneHalf;
   double arousal = 0.0;
+  std::array<double, 6> emotion_probs;
+  const double uniform_prob = 1.0 / static_cast<double> (kNumEmotions);
+  emotion_probs.fill (uniform_prob);
   const auto &x = context.GetSignal ().embedding;
   if (p_ctx.centroids.has_value ()
       && p_ctx.centroids->emotion_centroids.size () == kNumEmotions)
@@ -141,13 +143,11 @@ UpdateSensitivity::Execute (OperationContext &context, Transaction &tx) const
           SoftmaxNormalize (raw_cos, beta);
 
           // Expose emotion probabilities for Algorithm 4b (UpdateMood)
-          std::array<double, 6> emotion_probs;
           for (int i = 0; i < kNumEmotions; ++i)
             {
               emotion_probs[static_cast<size_t> (i)]
                   = raw_cos[static_cast<size_t> (i)];
             }
-          context.SetEmotionProbabilities (emotion_probs);
 
           const double peak
               = *std::max_element (raw_cos.begin (), raw_cos.end ());
@@ -176,6 +176,7 @@ UpdateSensitivity::Execute (OperationContext &context, Transaction &tx) const
         }
     }
   // else: fallback path → keep defaults above
+  context.SetEmotionProbabilities (emotion_probs);
 
   // Apply EWMA smoothing to emotion state for persistence
   // Higher Sensitivity = faster adaptation (α ∈ [0.05, 0.30])
@@ -242,30 +243,11 @@ UpdateSensitivity::Execute (OperationContext &context, Transaction &tx) const
       -kKappaSens * S * (sigma_scores - kSigmaOffset), -cap_sens, cap_sens);
   context.SetDeltaThresholdSensitivity (delta_T_sens);
 
-  // --- rate_target_t update (EWMA with observed write rate) ---
-  // Prefer observed write rate from window (writes/min); fallback to Δt proxy.
-  const uint64_t ts = context.GetSignal ().timestamp;
+  // rate_target is a knob-derived constant (base_rate(S))
   if (p_ctx.rate_target == 0.0)
     {
       p_ctx.rate_target = p_ctx.rate_target_prior;
     }
-  // EWMA alpha derived from Sensitivity: α ∈ [0.2, 0.5]
-  const double alpha_rate = core::Lerp (0.2, 0.5, S);
-  double rate_obs = p_ctx.write_rate_window_.RatePerMinute (alpha_rate);
-  if (rate_obs <= 0.0 && p_ctx.last_signal_timestamp != 0
-      && ts > p_ctx.last_signal_timestamp)
-    {
-      const double dt_seconds
-          = static_cast<double> (ts - p_ctx.last_signal_timestamp)
-            * kMillisToSeconds;
-      rate_obs = (dt_seconds > kTiny) ? (kPerMinute / dt_seconds) : 0.0;
-    }
-  const double alpha_s = core::AlphaS (S, p_ctx.u_t);
-  p_ctx.rate_target = core::Ewma (
-      p_ctx.rate_target,
-      core::Clamp (rate_obs, constants::kNormalizedMin, kClampRateMax),
-      alpha_s);
-  p_ctx.last_signal_timestamp = ts;
 
   telemetry::LogDebug("cortext.update_sensitivity", {
     telemetry::Attribute::Double("emotion_intensity", emotion_intensity),
@@ -290,11 +272,25 @@ UpdateMood::Execute (OperationContext &context, Transaction &tx) const
   const double T = cfg.stability;
 
   // Get instantaneous emotion probabilities from Algorithm 4
-  const auto &e_t = context.GetEmotionProbabilities ();
+  const auto &p_c = context.GetEmotionProbabilities ();
 
   // Get mood dynamics parameters (Algorithm 4b)
   const double alpha_mood = core::AlphaMood (S);
-  const double lambda_mood = core::LambdaMood (T);
+  const uint64_t now_ts = context.GetSignal ().timestamp;
+  double delta_mood_s = 0.0;
+  if (p_ctx.last_mood_ts > 0 && now_ts > p_ctx.last_mood_ts)
+    {
+      delta_mood_s = static_cast<double> (now_ts - p_ctx.last_mood_ts) * 1e-3;
+    }
+  const double lambda_mood = core::LambdaMood (delta_mood_s, T);
+
+  // Center probabilities so e_t sums to 0.
+  std::array<double, 6> e_t;
+  const double center = 1.0 / static_cast<double> (kNumEmotions);
+  for (size_t i = 0; i < 6; ++i)
+    {
+      e_t[i] = p_c[i] - center;
+    }
 
   // Update mood vector: M_t = λ_mood(T) × M_{t-1} + α_mood(S) × e_t
   // Then clamp each dimension to [-1, 1]
@@ -303,6 +299,10 @@ UpdateMood::Execute (OperationContext &context, Transaction &tx) const
     {
       M[i] = lambda_mood * M[i] + alpha_mood * e_t[i];
       M[i] = core::Clamp (M[i], -1.0, 1.0);
+    }
+  if (now_ts > 0)
+    {
+      p_ctx.last_mood_ts = now_ts;
     }
 
   // Compute mood magnitude ||M_t||

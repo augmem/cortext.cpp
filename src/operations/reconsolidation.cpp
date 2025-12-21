@@ -256,7 +256,6 @@ ApplyReconsolidation::Execute (OperationContext &context, Transaction &tx) const
   const double ripple_decay = core::RippleDecay (T);
   const int ripple_depth = core::RippleDepth (T);
   const double tau_labile = core::TauLabile (T);
-  (void)tau_labile;
   const double lability_susc = core::LabilitySusceptibility (S, T);
 
   double max_drift = 0.0;
@@ -286,9 +285,58 @@ ApplyReconsolidation::Execute (OperationContext &context, Transaction &tx) const
       if (contextual_relevance > constants::kNormalizedMax)
         contextual_relevance = constants::kNormalizedMax;
 
-      // Without DB reads available here, assume current lability based on
-      // susceptibility (elapsed≈0 at retrieval time).
-      const double current_lability = lability_susc;
+      double current_lability = lability_susc;
+      double stored_lability = 0.0;
+      long long lability_ts = 0;
+      auto lability_rows = tx.Execute (
+          "SELECT lability_state, lability_ts FROM memories WHERE embedding_id = ?",
+          { embedding_id });
+      if (!lability_rows.empty ())
+        {
+          const auto &lab_row = lability_rows[0];
+          auto state_it = lab_row.find ("lability_state");
+          if (state_it != lab_row.end ())
+            {
+              if (state_it->second.type () == typeid (double))
+                {
+                  stored_lability = std::any_cast<double> (state_it->second);
+                }
+              else if (state_it->second.type () == typeid (float))
+                {
+                  stored_lability
+                      = static_cast<double> (std::any_cast<float> (state_it->second));
+                }
+            }
+          auto ts_it = lab_row.find ("lability_ts");
+          if (ts_it != lab_row.end ())
+            {
+              if (ts_it->second.type () == typeid (long long))
+                {
+                  lability_ts = std::any_cast<long long> (ts_it->second);
+                }
+              else if (ts_it->second.type () == typeid (int))
+                {
+                  lability_ts = std::any_cast<int> (ts_it->second);
+                }
+            }
+        }
+
+      if (lability_ts > 0 && now_ts > lability_ts)
+        {
+          const double dt_s
+              = static_cast<double> (now_ts - lability_ts) / 1000.0;
+          const double base
+              = (stored_lability > 0.0) ? stored_lability : lability_susc;
+          current_lability
+              = base
+                * std::exp (-dt_s
+                            / std::max (tau_labile,
+                                        constants::kNormEpsilon));
+        }
+      else if (stored_lability > 0.0)
+        {
+          current_lability = stored_lability;
+        }
 
       double drift_mag
           = (1.0 - T) * S * current_lability * contextual_relevance;

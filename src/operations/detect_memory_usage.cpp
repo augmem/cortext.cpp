@@ -1,7 +1,6 @@
 #include "cortext/operations/detect_memory_usage.hpp"
 
 #include "cortext/core/algorithms.hpp"
-#include "cortext/core/knobs.hpp"
 #include "cortext/processor/operation_context.hpp"
 #include "cortext/telemetry/telemetry.hpp"
 
@@ -12,61 +11,44 @@ void
 DetectMemoryUsage::Execute (OperationContext &context, Transaction &tx) const
 {
   (void)tx;
-  auto &p_ctx = context.GetProcessorContext ();
   const auto &signal = context.GetSignal ();
-  const auto &config = context.GetConfig ();
 
-  // Skip if no cached retrievals
-  if (p_ctx.recent_retrievals_cache.empty ())
+  const auto &retrieved = context.GetRetrievedMemoryEmbeddings ();
+  const bool interrupt_allowed = context.GetInterruptAllowed ();
+  const auto selected_id = context.GetSelectedCandidateId ();
+
+  // Clear events if nothing was retrieved.
+  if (retrieved.empty ())
     {
-      telemetry::AddCounter ("cortext.detect_memory_usage.no_cache_total", 1);
+      context.SetMemoryUsageEvents ({});
+      telemetry::AddCounter ("cortext.detect_memory_usage.no_candidates_total", 1);
       return;
     }
-
-  // Skip if no embedding in current signal
-  if (signal.embedding.size () == 0)
-    {
-      telemetry::AddCounter ("cortext.detect_memory_usage.no_embedding_total",
-                             1);
-      return;
-    }
-
-  // Get knob-derived parameters
-  const double usage_threshold = core::MemoryUsageThreshold (config.focus);
-  const double cache_duration = core::MemoryUsageCacheDuration (config.stability);
-  const uint64_t now_ts = signal.timestamp;
 
   std::vector<OperationContext::MemoryUsageEvent> events;
+  events.reserve (retrieved.size ());
+
   int used_count = 0;
   int total_checked = 0;
 
-  for (const auto &cached : p_ctx.recent_retrievals_cache)
+  for (const auto &kv : retrieved)
     {
-      // Skip stale entries based on stability-derived cache duration
-      const double age_seconds
-          = static_cast<double> (now_ts - cached.retrieved_at) * 1e-3;
-      if (age_seconds > cache_duration)
-        {
-          continue;
-        }
-
-      // Skip if embedding dimensions don't match
-      if (cached.embedding.size () != signal.embedding.size ())
-        {
-          continue;
-        }
+      const long long embedding_id = kv.first;
+      const Eigen::VectorXf &emb = kv.second;
 
       ++total_checked;
 
-      // Compute semantic similarity
-      const double sim
-          = core::CosineSimilarity (signal.embedding, cached.embedding);
+      const bool used
+          = interrupt_allowed && selected_id.has_value ()
+                && (embedding_id == *selected_id);
+      std::optional<double> contextual_gain = std::nullopt;
+      if (signal.embedding.size () > 0 && emb.size () == signal.embedding.size ())
+        {
+          contextual_gain = core::CosineSimilarity (signal.embedding, emb);
+        }
 
-      // Memory is considered "used" if similarity exceeds threshold
-      const bool used = (sim >= usage_threshold);
-
-      events.push_back ({ cached.embedding_id, used,
-                          used ? std::make_optional (sim) : std::nullopt });
+      events.push_back (
+          { embedding_id, used, contextual_gain });
 
       if (used)
         {
@@ -84,8 +66,6 @@ DetectMemoryUsage::Execute (OperationContext &context, Transaction &tx) const
                               static_cast<double> (total_checked));
   telemetry::RecordHistogram ("cortext.detect_memory_usage.used_count",
                               static_cast<double> (used_count));
-  telemetry::RecordHistogram ("cortext.detect_memory_usage.usage_threshold",
-                              usage_threshold);
   if (total_checked > 0)
     {
       const double usage_rate
@@ -96,8 +76,8 @@ DetectMemoryUsage::Execute (OperationContext &context, Transaction &tx) const
 
   // Debug logging
   telemetry::LogDebug ("cortext.detect_memory_usage", {
-    telemetry::Attribute::Int64 ("cached_count", static_cast<int64_t> (p_ctx.recent_retrievals_cache.size ())),
-    telemetry::Attribute::Double ("similarity_threshold", usage_threshold),
+    telemetry::Attribute::Int64 ("candidate_count", static_cast<int64_t> (retrieved.size ())),
+    telemetry::Attribute::Bool ("interrupt_allowed", interrupt_allowed),
     telemetry::Attribute::Int64 ("usage_count", static_cast<int64_t> (used_count))
   });
 }

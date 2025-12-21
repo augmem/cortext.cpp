@@ -300,7 +300,7 @@ TEST_CASE ("ProcessExtractionResults computes label salience from embeddings",
   cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.5;
   cfg.sensitivity = 0.5;
-  cfg.stability = 0.5;
+  cfg.stability = 0.0;
   cfg.encoder = &encoder;
 
   ProcessorContext pctx;
@@ -309,7 +309,10 @@ TEST_CASE ("ProcessExtractionResults computes label salience from embeddings",
 
   operations::ExtractionResult extraction;
   extraction.summary_id = "summary-1";
-  extraction.labels.push_back ({ "Acme", 0.0 });
+  for (int i = 0; i < 5; ++i)
+    {
+      extraction.labels.push_back ({ "Acme", 0.0 });
+    }
   pctx.pending_extraction_results.push_back (std::move (extraction));
 
   operations::ProcessExtractionResults op;
@@ -319,7 +322,7 @@ TEST_CASE ("ProcessExtractionResults computes label salience from embeddings",
 
   auto rows = store->Execute (
       "SELECT s_max, label FROM memories WHERE kind = 'LABEL' AND source_id = ?",
-      { std::string ("Acme") });
+      { std::string ("acme") });
   REQUIRE (rows.size () == 1);
   REQUIRE (std::any_cast<std::string> (rows[0].at ("label")) == "Acme");
   const double s_max = cortext::testing::GetDouble (rows[0], "s_max");

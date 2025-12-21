@@ -25,20 +25,19 @@ constexpr int kEmbeddingDim = 256;
 class SetupEmotionInputsOp : public IOperation
 {
 public:
-  explicit SetupEmotionInputsOp (
-      std::vector<OperationContext::MemoryUsageEvent> events)
-      : events_ (std::move (events))
+  explicit SetupEmotionInputsOp (std::optional<long long> stored_id)
+      : stored_id_ (stored_id)
   {
   }
 
   void
   Execute (OperationContext &ctx, Transaction & /*tx*/) const override
   {
-    ctx.SetMemoryUsageEvents (events_);
+    ctx.SetStoredEmbeddingId (stored_id_);
   }
 
 private:
-  std::vector<OperationContext::MemoryUsageEvent> events_;
+  std::optional<long long> stored_id_;
 };
 
 static Signal
@@ -53,7 +52,7 @@ MakeSignal (uint64_t ts = 1)
 
 } // namespace
 
-TEST_CASE ("Alg23 triggers and persists emotional tags for used memories",
+TEST_CASE ("Alg23 triggers and persists emotional tags for stored memory",
            "[operations][emotion]")
 {
   auto unique_store = SQLiteStore::Create (":memory:");
@@ -87,11 +86,7 @@ TEST_CASE ("Alg23 triggers and persists emotional tags for used memories",
   cfg.sensitivity = 0.8; // S
   cfg.stability = 0.5;
 
-  std::vector<OperationContext::MemoryUsageEvent> events{
-    { 101LL, true, std::nullopt }, { 102LL, false, std::nullopt }
-  };
-
-  auto setup = std::make_unique<SetupEmotionInputsOp> (events);
+  auto setup = std::make_unique<SetupEmotionInputsOp> (101LL);
   auto apply = std::make_unique<ApplyEmotionalConsolidation> ();
   auto ops
       = std::make_unique<OperationSet> (std::move (setup), std::move (apply));
@@ -174,10 +169,7 @@ TEST_CASE ("Alg23 below thresholds performs no-op", "[operations][emotion]")
   cfg.sensitivity = 0.5; // θ_intensity=0.7, θ_arousal=0.3
   cfg.stability = 0.5;
 
-  std::vector<OperationContext::MemoryUsageEvent> events{ { 201LL, true,
-                                                            std::nullopt } };
-
-  auto setup = std::make_unique<SetupEmotionInputsOp> (events);
+  auto setup = std::make_unique<SetupEmotionInputsOp> (201LL);
   auto apply = std::make_unique<ApplyEmotionalConsolidation> ();
   auto ops
       = std::make_unique<OperationSet> (std::move (setup), std::move (apply));

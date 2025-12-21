@@ -4,6 +4,9 @@
 #include "cortext/core/knobs.hpp"
 #include "cortext/processor/operation_context.hpp"
 #include "cortext/telemetry/telemetry.hpp"
+#include <any>
+#include <map>
+#include <string>
 
 namespace cortext::operations
 {
@@ -37,6 +40,7 @@ InitializeStabilityPriors::Execute (OperationContext &context, Transaction &tx) 
       = core::ClampHalfLife (constants::kOneHalf * p_ctx.half_life);
   p_ctx.salience_half_life
       = core::ClampHalfLife (constants::kOneHalf * p_ctx.half_life);
+  p_ctx.drift_weight = p_ctx.drift_weight_prior;
   p_ctx.stability_priors_initialized = true;
 
   telemetry::LogDebug("cortext.initialize_stability_priors", {
@@ -50,15 +54,83 @@ InitializeStabilityPriors::Execute (OperationContext &context, Transaction &tx) 
 void
 UpdateStability::Execute (OperationContext &context, Transaction &tx) const
 {
-  (void)tx;
   auto &p_ctx = context.GetProcessorContext ();
   const auto &cfg = context.GetConfig ();
   const double T = cfg.stability;
 
-  // Append observed retention if provided by upstream (SignalProcessor)
-  if (auto obs = context.GetObservedRetentionSeconds (); obs.has_value ())
+  // Compute observed retention from active memories (strength >= cutoff).
+  std::optional<double> observed_retention;
+  const double cutoff = core::PeripheryCutoff (T);
+  const double now_s
+      = static_cast<double> (context.GetSignal ().timestamp) / 1000.0;
+  if (Store *store = context.GetStore ())
     {
-      p_ctx.observed_retention_history.push_back (*obs);
+      try
+        {
+          auto get_int64 = [] (const std::map<std::string, std::any> &row,
+                               const std::string &key,
+                               long long def) -> long long {
+            auto it = row.find (key);
+            if (it == row.end () || !it->second.has_value ())
+              return def;
+            if (it->second.type () == typeid (long long))
+              return std::any_cast<long long> (it->second);
+            if (it->second.type () == typeid (int))
+              return static_cast<long long> (std::any_cast<int> (it->second));
+            if (it->second.type () == typeid (double))
+              return static_cast<long long> (
+                  std::any_cast<double> (it->second));
+            return def;
+          };
+          auto rows = tx.Execute (
+              "SELECT created_at, start_ts "
+              "FROM memories WHERE strength >= ?",
+              { cutoff });
+          double sum_age = 0.0;
+          int count = 0;
+          for (const auto &row : rows)
+            {
+              const long long created_at
+                  = get_int64 (row, "created_at", 0);
+              const long long start_ts
+                  = get_int64 (row, "start_ts", 0);
+              const long long ts
+                  = (created_at > 0) ? created_at : start_ts;
+              if (ts <= 0)
+                {
+                  continue;
+                }
+              const double age_s = std::max (0.0, now_s
+                                                       - static_cast<double> (ts)
+                                                             / 1000.0);
+              sum_age += age_s;
+              ++count;
+            }
+          observed_retention = (count > 0) ? (sum_age / count) : 0.0;
+        }
+      catch (...)
+        {
+          observed_retention = std::nullopt;
+        }
+    }
+  else if (auto obs = context.GetObservedRetentionSeconds (); obs.has_value ())
+    {
+      observed_retention = *obs;
+    }
+
+  if (observed_retention.has_value ())
+    {
+      const double alpha_T = core::AlphaT (T, p_ctx.u_t);
+      p_ctx.retention_ema = core::Ewma (p_ctx.retention_ema,
+                                        *observed_retention, alpha_T);
+      p_ctx.observed_retention_history.push_back (*observed_retention);
+
+      const int max_window = core::WRet (T);
+      while (static_cast<int> (p_ctx.observed_retention_history.size ())
+             > max_window)
+        {
+          p_ctx.observed_retention_history.pop_front ();
+        }
     }
 
   // Observed retention = last value in history if present

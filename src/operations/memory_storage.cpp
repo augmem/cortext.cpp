@@ -113,6 +113,7 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
           = acc.s_arousal_sum / static_cast<double> (n_signals);
       const uint64_t start_ts = acc.t_start;
       const uint64_t end_ts = signal.timestamp;
+      const double drift_mag = acc.drift_acc;
 
       // 2. Get emotion and mood from context (Section 6.1.1)
       const auto &emotion_probs = context.GetEmotionProbabilities ();
@@ -133,21 +134,46 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
           return;
         }
 
-      // 5. Store memory-level content blob (reuse last signal blob if present).
-      std::vector<unsigned char> content_blob_id;
-      for (auto it = acc.signals.rbegin (); it != acc.signals.rend (); ++it)
+      // 5. Store memory-level content blob by concatenating signal blobs.
+      std::vector<unsigned char> content_payload;
+      std::vector<const SignalRecord *> ordered_signals;
+      ordered_signals.reserve (acc.signals.size ());
+      for (const auto &rec : acc.signals)
         {
-          if (!it->blob_id.empty ())
+          ordered_signals.push_back (&rec);
+        }
+      std::sort (ordered_signals.begin (), ordered_signals.end (),
+                 [] (const SignalRecord *a, const SignalRecord *b) {
+                   return a->serial_position < b->serial_position;
+                 });
+      for (const auto *rec : ordered_signals)
+        {
+          if (!rec || rec->blob_id.empty ())
             {
-              content_blob_id = it->blob_id;
-              break;
+              continue;
+            }
+          auto blob_rows = savepoint->Execute (
+              "SELECT objstore_get(?1) AS data", { rec->blob_id });
+          if (!blob_rows.empty () && blob_rows[0].count ("data") != 0)
+            {
+              auto bytes = BlobFromAny (blob_rows[0].at ("data"));
+              if (!bytes.empty ())
+                {
+                  content_payload.insert (content_payload.end (),
+                                          bytes.begin (), bytes.end ());
+                }
             }
         }
-      if (content_blob_id.empty () && signal.payload
+      if (content_payload.empty () && signal.payload
           && !signal.payload->empty ())
         {
+          content_payload = *signal.payload;
+        }
+      std::vector<unsigned char> content_blob_id;
+      if (!content_payload.empty ())
+        {
           auto blob_rows = savepoint->Execute ("SELECT objstore_put(?1) AS id",
-                                               { *signal.payload });
+                                               { content_payload });
           if (!blob_rows.empty () && blob_rows[0].count ("id") != 0)
             {
               content_blob_id = BlobFromAny (blob_rows[0].at ("id"));
@@ -190,14 +216,14 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
       savepoint->Execute (
           "INSERT INTO memories ("
           "  embedding_id, source_id, kind, start_ts, end_ts, n_signals, "
-          "  modality, s_max, s_avg, s_emotion_max, s_arousal_avg, "
+          "  modality, s_max, s_avg, s_emotion_max, s_arousal_avg, drift_mag, "
           "  emotion, ambient_mood, episode_id, "
           "  blob_id, created_at"
-          ") VALUES (?, ?, 'LONG_TERM', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          ") VALUES (?, ?, 'LONG_TERM', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
           { embedding_id, signal.source_id, static_cast<long long> (start_ts),
             static_cast<long long> (end_ts),
             static_cast<long long> (n_signals), primary_modality,
-            s_max, s_avg, s_emotion_max, s_arousal_avg,
+            s_max, s_avg, s_emotion_max, s_arousal_avg, drift_mag,
             emotion_blob, mood_blob, episode_id_any,
             content_blob_id.empty () ? std::any () : std::any (content_blob_id),
             static_cast<long long> (end_ts) });

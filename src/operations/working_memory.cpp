@@ -54,6 +54,34 @@ ComputeMeanCosWindow (const std::deque<Eigen::VectorXf> &ctx,
   return sum / static_cast<double> (count);
 }
 
+inline double
+RelevanceToTask (const Eigen::VectorXf &q,
+                 const std::deque<Eigen::VectorXf> &task_ctx)
+{
+  if (q.size () == 0 || task_ctx.empty ())
+    {
+      return 0.5;
+    }
+  Eigen::VectorXf mean = Eigen::VectorXf::Zero (q.size ());
+  int count = 0;
+  for (const auto &e : task_ctx)
+    {
+      if (e.size () != q.size ())
+        {
+          continue;
+        }
+      mean += e;
+      ++count;
+    }
+  if (count <= 0)
+    {
+      return 0.5;
+    }
+  mean /= static_cast<float> (count);
+  const double cos = core::CosineSimilarity (q, mean);
+  return core::Clamp ((cos + 1.0) * 0.5, 0.0, 1.0);
+}
+
 } // namespace
 
 void
@@ -133,9 +161,10 @@ WorkingMemory::Execute (OperationContext &context, Transaction &tx) const
 
   // Section 8.1: memory_benefit = α × S_window + β × relevance + γ × novelty
   const double S_window = context.GetWindowScore ().value_or (0.0);
-  const double relevance
-      = core::Clamp01 (
-          context.GetMetric (operations::Metric::relevance).value_or (0.5));
+  const Eigen::VectorXf &task_query
+      = (acc.mu_acc.size () > 0) ? acc.mu_acc : e_rep;
+  const double relevance = RelevanceToTask (
+      task_query, p_ctx.recent_context_embeddings);
 
   double max_cos = -1.0;
   for (const auto &slot : p_ctx.wm_slots)

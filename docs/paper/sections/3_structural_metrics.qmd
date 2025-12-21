@@ -41,6 +41,8 @@ else:
         focus_spread_t ← 0  # avoid degenerate entropy
     else:
         kNN_similarities ← topK(vector_search(x_t, k=k_eff))
+        # attention_width sharpens or flattens similarities
+        kNN_similarities ← clamp(kNN_similarities × (π / attention_width), −1, 1)
         p ← softmax(kNN_similarities)
         focus_spread_t ← H(p) / ln(k_eff)
 ```
@@ -127,6 +129,23 @@ The index i used below (e.g., w_bootstrap[i], w_rls[i]) follows this ordering.
 
 ```
 w_bootstrap[i] ← sigmoid(c_F[i]×F + c_S[i]×S + c_T[i]×T + d_i)
+```
+
+Before normalization, control weights modulate the blender weights:
+
+```
+w_relevance ← w_relevance × weight_relevance
+w_mismatch  ← w_mismatch  × mismatch_weight
+w_surprise  ← w_surprise  × weight_surprise
+w_valence   ← w_valence   × weight_valence × emotion_gain
+w_arousal   ← w_arousal   × weight_arousal × emotion_gain
+w_coverage  ← w_coverage  × coverage_gain_floor
+```
+
+Composite score scaling applies after weight normalization:
+
+```
+score_t ← clamp(score_raw × score_gain, 0, 1)
 ```
 
 Bootstrap coefficient defaults (canonical; used for initialization):

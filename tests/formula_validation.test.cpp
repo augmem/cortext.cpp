@@ -185,38 +185,37 @@ TEST_CASE ("MaxExtractionsPerCycle follows spec: lerp(20, 5, T)",
 // 5.1.3 Learning Rate Functions (3 functions)
 // =============================================================================
 
-TEST_CASE ("AlphaT follows spec: max(term1, term2)", "[formula][knobs][alpha]")
+TEST_CASE ("AlphaT follows spec: α_min_T + (1−T)×α_span_T×u", "[formula][knobs][alpha]")
 {
-  // AlphaT = max(0.05*(1+0.5*u_t), 0.05+(1-T)*0.35*u_t)
+  // AlphaT = 0.02 + (1-T)*0.18*u_t
 
-  // At u_t=0, both terms reduce to 0.05
-  REQUIRE (AlphaT (0.0, 0.0) == Catch::Approx (0.05));
-  REQUIRE (AlphaT (1.0, 0.0) == Catch::Approx (0.05));
+  // At u_t=0, reduces to α_min_T
+  REQUIRE (AlphaT (0.0, 0.0) == Catch::Approx (0.02));
+  REQUIRE (AlphaT (1.0, 0.0) == Catch::Approx (0.02));
 
-  // At u_t=1, T=0: max(0.05*1.5, 0.05+1*0.35*1) = max(0.075, 0.40) = 0.40
-  REQUIRE (AlphaT (0.0, 1.0) == Catch::Approx (0.40));
+  // At u_t=1, T=0: 0.02 + 1*0.18*1 = 0.20
+  REQUIRE (AlphaT (0.0, 1.0) == Catch::Approx (0.20));
 
-  // At u_t=1, T=1: max(0.05*1.5, 0.05+0*0.35*1) = max(0.075, 0.05) = 0.075
-  REQUIRE (AlphaT (1.0, 1.0) == Catch::Approx (0.075));
+  // At u_t=1, T=1: 0.02
+  REQUIRE (AlphaT (1.0, 1.0) == Catch::Approx (0.02));
 
   // Verify higher T (more stable) means lower alpha at high uncertainty
   REQUIRE (AlphaT (0.2, 0.8) > AlphaT (0.8, 0.8));
 }
 
-TEST_CASE ("AlphaS follows spec: max(term1, term2)", "[formula][knobs][alpha]")
+TEST_CASE ("AlphaS follows spec: α_min_S + S×α_span_S×u", "[formula][knobs][alpha]")
 {
-  // AlphaS = max(0.05*(1+0.5*u_t), 0.05+S*0.35*u_t)
-  // Spec (§5.1, line 823): α_span_S = 0.35
+  // AlphaS = 0.05 + S*0.35*u_t
 
-  // At u_t=0, both terms reduce to 0.05
+  // At u_t=0, reduces to α_min_S
   REQUIRE (AlphaS (0.0, 0.0) == Catch::Approx (0.05));
   REQUIRE (AlphaS (1.0, 0.0) == Catch::Approx (0.05));
 
-  // At u_t=1, S=1: max(0.05*1.5, 0.05+1*0.35*1) = max(0.075, 0.40) = 0.40
+  // At u_t=1, S=1: 0.40
   REQUIRE (AlphaS (1.0, 1.0) == Catch::Approx (0.40));
 
-  // At u_t=1, S=0: max(0.05*1.5, 0.05+0*0.35*1) = max(0.075, 0.05) = 0.075
-  REQUIRE (AlphaS (0.0, 1.0) == Catch::Approx (0.075));
+  // At u_t=1, S=0: 0.05
+  REQUIRE (AlphaS (0.0, 1.0) == Catch::Approx (0.05));
 
   // Higher S means higher alpha (faster adaptation)
   REQUIRE (AlphaS (0.8, 0.8) > AlphaS (0.2, 0.8));
@@ -416,16 +415,17 @@ TEST_CASE ("ReinforcementDecay follows spec: lerp(0.9, 0.99, T)",
   REQUIRE (ReinforcementDecay (0.3) < ReinforcementDecay (0.7));
 }
 
-TEST_CASE ("LambdaMood follows spec: lerp(0.90, 0.999, T)",
+TEST_CASE ("LambdaMood follows spec: exp(-ln2 * Δt / half_life)",
            "[formula][knobs][decay]")
 {
-  // LambdaMood = lerp(0.90, 0.999, T)
-  REQUIRE (LambdaMood (0.0) == Catch::Approx (0.90));
-  REQUIRE (LambdaMood (1.0) == Catch::Approx (0.999));
-  REQUIRE (LambdaMood (0.5) == Catch::Approx (0.9495));
+  // half_life_mood(T) = lerp(30, 600, T)
+  // λ_mood(Δt, T) = exp(-ln(2) * Δt / half_life_mood(T))
+  REQUIRE (LambdaMood (0.0, 0.0) == Catch::Approx (1.0));
+  REQUIRE (LambdaMood (30.0, 0.0) == Catch::Approx (0.5));
+  REQUIRE (LambdaMood (600.0, 1.0) == Catch::Approx (0.5));
 
-  // Monotonic
-  REQUIRE (LambdaMood (0.3) < LambdaMood (0.7));
+  // Monotonic: higher T => longer half-life => higher lambda for same Δt
+  REQUIRE (LambdaMood (30.0, 0.3) < LambdaMood (30.0, 0.7));
 }
 
 TEST_CASE ("ConfidenceDecayRate follows spec: lerp(0.01, 0.1, 1-T)",
@@ -1184,14 +1184,14 @@ TEST_CASE ("Extreme stability values", "[formula][knobs][composite]")
   // High stability: long half-lives, slow decay, stable persistence
   double T_high = 1.0;
   REQUIRE (BaseHalfLifePrior (T_high) == Catch::Approx (43200.0));
-  REQUIRE (LambdaMood (T_high) >= 0.99);
+  REQUIRE (LambdaMood (30.0, T_high) > 0.95);
   REQUIRE (ReinforcementDecay (T_high) >= 0.98);
   REQUIRE (ConsolidationIntervalSeconds (T_high) == 3600);
 
   // Low stability: short half-lives, fast decay, responsive
   double T_low = 0.0;
   REQUIRE (BaseHalfLifePrior (T_low) == Catch::Approx (120.0));
-  REQUIRE (LambdaMood (T_low) == Catch::Approx (0.9));
+  REQUIRE (LambdaMood (30.0, T_low) == Catch::Approx (0.5));
   REQUIRE (ReinforcementDecay (T_low) == Catch::Approx (0.9));
   REQUIRE (ConsolidationIntervalSeconds (T_low) == 300);
 }

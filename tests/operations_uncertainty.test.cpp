@@ -7,7 +7,7 @@
 using namespace cortext;
 using cortext::operations::UpdateUncertainty;
 
-TEST_CASE ("UpdateUncertainty fallback maturity path",
+TEST_CASE ("UpdateUncertainty uses structural coherence when weights degenerate",
            "[operations][uncertainty]")
 {
   Signal s;
@@ -16,22 +16,22 @@ TEST_CASE ("UpdateUncertainty fallback maturity path",
   SignalProcessor::Config cfg;
   cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.0;
-  cfg.sensitivity = 0.0; // zero weights -> fallback path
-  cfg.stability = 0.5; // mid stability
+  cfg.sensitivity = 0.0; // zero weights
+  cfg.stability = 1.0; // 1 - T = 0 -> degenerate weights
 
   OperationContext ctx (s, pctx, cfg);
+  ctx.SetStructuralCoherence (0.5); // fallback coherence for short context
 
   UpdateUncertainty op;
 
-  // Initial u_t = 0; first update should move toward u_raw=1 - maturity(0)
+  // Initial u_t = 0; first update should move toward coherence complement (0.5)
   pctx.signals_processed = 0;
   op.Execute (ctx, cortext::testing::GetNullTransaction ());
   REQUIRE (pctx.u_t > 0.0);
 
-  // As signals increase, maturity increases -> u_raw decreases -> u_t should
-  // decrease with smoothing
+  // With only structural coherence available, u_raw stays constant
   double prev_u = pctx.u_t;
   pctx.signals_processed = 1000; // very mature
   op.Execute (ctx, cortext::testing::GetNullTransaction ());
-  REQUIRE (pctx.u_t < prev_u);
+  REQUIRE (pctx.u_t >= prev_u);
 }

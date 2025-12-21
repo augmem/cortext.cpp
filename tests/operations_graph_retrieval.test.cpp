@@ -55,6 +55,21 @@ MakeSignal (const Eigen::VectorXf &emb, uint64_t ts)
   s.source_id = "test";
   return s;
 }
+
+class ForceRetrievalGateOp : public IOperation
+{
+public:
+  void
+  Execute (OperationContext &ctx, Transaction & /*tx*/) const override
+  {
+    ctx.SetShouldCheckRetrieval (true);
+    auto &p_ctx = ctx.GetProcessorContext ();
+    if (p_ctx.memory_stream.empty ())
+      {
+        p_ctx.memory_stream.push_back (ctx.GetSignal ().embedding);
+      }
+  }
+};
 } // namespace
 
 TEST_CASE ("V2: Alg31 expands vector seeds via ASSOCIATIONS and returns expanded ids",
@@ -104,6 +119,7 @@ TEST_CASE ("V2: Alg31 expands vector seeds via ASSOCIATIONS and returns expanded
   cfg.stability = 0.5;
 
   auto ops = std::make_unique<OperationSet> (
+      std::make_unique<ForceRetrievalGateOp> (),
       std::make_unique<GraphAugmentedRetrieveCandidates> ());
   SignalProcessor processor (cfg, store, std::move (ops));
 

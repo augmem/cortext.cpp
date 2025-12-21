@@ -75,54 +75,94 @@ ComputeCoherence::Execute (OperationContext &context,
 
   // Get accumulator state
   auto it = p_ctx.accumulator_states.find (source_id);
-  if (it == p_ctx.accumulator_states.end () || it->second.n_signals == 0)
+  AccumulatorState *acc = nullptr;
+  if (it != p_ctx.accumulator_states.end () && it->second.n_signals > 0)
     {
-      // No accumulator state - use defaults
-      context.SetAccumulatorCoherence (1.0);
-      context.SetAccumulatorDriftStep (0.0);
-      return;
+      acc = &it->second;
     }
 
-  auto &acc = it->second;
-
-  // Get drift magnitude
-  double drift_mag = 0.0;
-  if (auto v = context.GetMetric (Metric::drift_mag))
+  if (!acc)
     {
-      drift_mag = *v;
+      // No accumulator state - use defaults for accumulator-specific signals.
+      context.SetAccumulatorCoherence (1.0);
+      context.SetAccumulatorDriftStep (0.0);
     }
   else
     {
-      drift_mag
-          = ComputeLaggedDriftMag (p_ctx.recent_context_embeddings,
-                                   config.stability);
-      context.SetMetric (Metric::drift_mag, drift_mag);
+      // Get drift magnitude
+      double drift_mag = 0.0;
+      if (auto v = context.GetMetric (Metric::drift_mag))
+        {
+          drift_mag = *v;
+        }
+      else
+        {
+          drift_mag
+              = ComputeLaggedDriftMag (p_ctx.recent_context_embeddings,
+                                       config.stability);
+          context.SetMetric (Metric::drift_mag, drift_mag);
+        }
+
+      // Compute d_step with noise floor (Section 4.4.2)
+      const double d_step = std::max (drift_mag - kEpsilonNoise, 0.0);
+
+      const double eta_prev = acc->eta_acc;
+      context.SetAccumulatorEtaPrev (eta_prev);
+
+      // Update η_acc via EWMA
+      const double alpha = core::AlphaEtaAcc (config.stability);
+      acc->eta_acc = core::Ewma (eta_prev, d_step, alpha);
+
+      // Compute coherence as mean cosine over the accumulator window (raw [-1,1])
+      const int win_coh = core::WinCoh (config.stability);
+      auto &window = acc->acc_signals_window;
+      if (win_coh > 0 && static_cast<int> (window.size ()) > win_coh)
+        {
+          window.erase (window.begin (),
+                        window.begin ()
+                            + (static_cast<long> (window.size ()) - win_coh));
+        }
+
+      double coherence = 1.0;
+      if (!window.empty () && signal.embedding.size () > 0)
+        {
+          double sum = 0.0;
+          int count = 0;
+          for (const auto &emb : window)
+            {
+              if (emb.size () == signal.embedding.size ())
+                {
+                  sum += core::CosineSimilarity (signal.embedding, emb);
+                  ++count;
+                }
+            }
+          if (count > 0)
+            {
+              coherence = sum / static_cast<double> (count);
+            }
+        }
+
+      // Store for boundary detection
+      context.SetAccumulatorCoherence (coherence);
+      context.SetAccumulatorDriftStep (d_step);
+
+      // Append current embedding after coherence calculation (unless accumulator was reset)
+      if (acc->n_signals > 0 && signal.embedding.size () > 0)
+        {
+          window.push_back (signal.embedding);
+          if (win_coh > 0 && static_cast<int> (window.size ()) > win_coh)
+            {
+              window.erase (window.begin (),
+                            window.begin ()
+                                + (static_cast<long> (window.size ()) - win_coh));
+            }
+        }
     }
-
-  // Compute d_step with noise floor (Section 4.4.2)
-  const double d_step = std::max (drift_mag - kEpsilonNoise, 0.0);
-
-  // Update η_acc via EWMA
-  const double alpha = core::AlphaEtaAcc (config.stability);
-  acc.eta_acc = core::Ewma (acc.eta_acc, d_step, alpha);
-
-  // Compute coherence as cosine similarity to accumulator mean
-  double coherence = 1.0;
-  if (acc.mu_acc.size () > 0 && signal.embedding.size () > 0)
-    {
-      coherence = core::CosineSimilarity (signal.embedding, acc.mu_acc);
-      // Map to [0, 1] range for consistency
-      coherence = core::Clamp ((coherence + 1.0) / 2.0, 0.0, 1.0);
-    }
-
-  // Store for boundary detection
-  context.SetAccumulatorCoherence (coherence);
-  context.SetAccumulatorDriftStep (d_step);
 
   // --- Structural Coherence (Section 3.1.1) ---
   // raw = var([cos(x_t, c) for c in context_window])
   // coherence_struct_t = 1 - clamp(raw, 0, 1)
-  double coherence_struct = 1.0;  // Default: high coherence
+  double coherence_struct = 0.5;  // Default: neutral coherence when context < 2
   const int ctx_window = static_cast<int> (core::NCtx (config.stability));
   const int n_ctx = static_cast<int> (p_ctx.recent_context_embeddings.size ());
   if (n_ctx >= 2 && signal.embedding.size () > 0)
@@ -162,15 +202,20 @@ ComputeCoherence::Execute (OperationContext &context,
         }
     }
   context.SetStructuralCoherence (coherence_struct);
+  context.SetCoherence (coherence_struct);
+
+  const double coherence = context.GetAccumulatorCoherence ();
+  const double d_step = context.GetAccumulatorDriftStep ();
+  const double eta_acc = acc ? acc->eta_acc : 0.0;
 
   telemetry::RecordHistogram ("cortext.accumulator.coherence", coherence);
   telemetry::RecordHistogram ("cortext.accumulator.d_step", d_step);
-  telemetry::RecordHistogram ("cortext.accumulator.eta_acc", acc.eta_acc);
+  telemetry::RecordHistogram ("cortext.accumulator.eta_acc", eta_acc);
   telemetry::RecordHistogram ("cortext.structural_coherence", coherence_struct);
 
   telemetry::LogDebug ("cortext.coherence", {
     telemetry::Attribute::Double ("d_step", d_step),
-    telemetry::Attribute::Double ("eta_acc", acc.eta_acc),
+    telemetry::Attribute::Double ("eta_acc", eta_acc),
     telemetry::Attribute::Double ("coherence_t", coherence),
     telemetry::Attribute::Double ("coherence_struct", coherence_struct)
   });

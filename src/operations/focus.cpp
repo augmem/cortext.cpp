@@ -40,6 +40,8 @@ InitializeFocusPriors::Execute (OperationContext &context, Transaction &tx) cons
   // Also initialize the dynamic values from the priors.
   p_ctx.weight_relevance = p_ctx.weight_relevance_prior;
   p_ctx.attention_width = p_ctx.attention_width_prior;
+  p_ctx.coverage_gain_floor = p_ctx.coverage_gain_floor_prior;
+  p_ctx.mismatch_weight = p_ctx.mismatch_weight_prior;
   p_ctx.focus_priors_initialized = true;
 
   telemetry::LogDebug ("cortext.focus.init",

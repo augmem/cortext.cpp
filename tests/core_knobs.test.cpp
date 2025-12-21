@@ -174,20 +174,20 @@ TEST_CASE ("InterruptCandidateCount follows spec: round(lerp(10, 6, F))",
 }
 
 TEST_CASE (
-    "ConsolidationRate follows spec: (1/interval) * (0.3+0.7T) * (1-0.5S)",
+    "ConsolidationRate follows spec: (60/interval) * (0.3+0.7T) * (1-0.5S)",
     "[core][knobs]")
 {
-  // rate_consolidate = (1 / max(interval, 1)) × (0.3 + 0.7T) × (1 − 0.5S)
+  // rate_consolidate = (60 / max(interval, 1)) × (0.3 + 0.7T) × (1 − 0.5S)
   // Reference: algorithms.md Section 7.1
 
-  // At T=0, S=0: interval=300, rate = (1/300) * 0.3 * 1.0 = 0.001
-  REQUIRE (ConsolidationRate (0.0, 0.0) == Catch::Approx (0.001));
+  // At T=0, S=0: interval=300, rate = (60/300) * 0.3 * 1.0 = 0.06
+  REQUIRE (ConsolidationRate (0.0, 0.0) == Catch::Approx (0.06));
 
-  // At T=1, S=0: interval=3600, rate = (1/3600) * 1.0 * 1.0 ≈ 0.000278
-  REQUIRE (ConsolidationRate (1.0, 0.0) == Catch::Approx (1.0 / 3600.0));
+  // At T=1, S=0: interval=3600, rate = (60/3600) * 1.0 * 1.0 ≈ 0.0166667
+  REQUIRE (ConsolidationRate (1.0, 0.0) == Catch::Approx (60.0 / 3600.0));
 
-  // At T=0, S=1: interval=300, rate = (1/300) * 0.3 * 0.5 = 0.0005
-  REQUIRE (ConsolidationRate (0.0, 1.0) == Catch::Approx (0.0005));
+  // At T=0, S=1: interval=300, rate = (60/300) * 0.3 * 0.5 = 0.03
+  REQUIRE (ConsolidationRate (0.0, 1.0) == Catch::Approx (0.03));
 
   // Higher S decreases rate factor (1-0.5S)
   REQUIRE (ConsolidationRate (0.0, 0.5) < ConsolidationRate (0.0, 0.0));

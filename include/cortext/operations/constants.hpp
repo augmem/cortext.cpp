@@ -69,8 +69,6 @@ constexpr double kWMRecencyTauSeconds = 60.0; // Recency decay time constant
 constexpr double kTargetPrecisionBaseScale = 0.5; // Base scale for target precision
 
 // Sensitivity Priors (Alg 3)
-constexpr double kRateTargetBase = 0.5;       // Base rate target multiplier
-constexpr double kRateTargetMultiplier = 1.5; // S multiplier for rate target
 
 // Focus Priors (Alg 1)
 constexpr double kCoverageGainFloorBase = 0.3; // Base coverage gain floor
@@ -103,5 +101,4 @@ constexpr double kEmbeddingLabilityStateDefault = 0.0;
 constexpr int kEmbeddingSuppressionCountDefault = 0;
 
 } // namespace cortext::operations::constants
-
 

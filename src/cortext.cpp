@@ -62,6 +62,7 @@
 
 // Section 4.4: Memory Accumulation
 #include "cortext/operations/accumulator.hpp"
+#include "cortext/operations/accumulator_reset.hpp"
 #include "cortext/operations/coherence.hpp"
 #include "cortext/operations/boundary.hpp"
 #include "cortext/operations/spike_bypass.hpp"
@@ -497,6 +498,7 @@ struct Cortext::Impl
     using cortext::operations::DetectBoundary;
     using cortext::operations::CheckSpikeBypass;
     using cortext::operations::ComputeWriteGate;
+    using cortext::operations::ResetAccumulatorAfterFlush;
     // Phase 4: Knowledge Graph Enhancement
     using cortext::operations::PropagateEmotionalCascade;
 
@@ -508,11 +510,6 @@ struct Cortext::Impl
         std::make_unique<InitializeFocusPriors> (),
         std::make_unique<InitializeSensitivityPriors> (),
         std::make_unique<InitializeStabilityPriors> (),
-
-        // Implicit feedback: detect if cached retrievals were "used" in this
-        // signal. Must run before feedback operations (ApplyFocusFeedback,
-        // ApplySensitivityFeedback, etc.) that consume MemoryUsageEvents.
-        std::make_unique<DetectMemoryUsage> (),
 
         std::make_unique<UpdateRecentContext> (),
 
@@ -536,18 +533,21 @@ struct Cortext::Impl
 
         // Section 4.4: Memory Accumulation (before write gate)
         std::make_unique<UpdateAccumulator> (),
-        std::make_unique<ComputeCoherence> (),
         std::make_unique<DetectBoundary> (),
         std::make_unique<CheckSpikeBypass> (),
         std::make_unique<ComputeWriteGate> (),
         std::make_unique<MemoryStorage> (),
         std::make_unique<PersistSignalMetrics> (),
+        std::make_unique<ResetAccumulatorAfterFlush> (),
         std::make_unique<UpdateRateState> (),
 
         std::make_unique<CheckStreamingPacing> (),
         std::make_unique<GraphAugmentedRetrieveCandidates> (),
 
         std::make_unique<ComputeMniGateDecision> (),
+
+        // Derive retrieved/used events after the interrupt gate decision.
+        std::make_unique<DetectMemoryUsage> (),
 
         std::make_unique<ApplyRetrievalCompetition> (),
         std::make_unique<ApplyPredictivePreActivation> (),

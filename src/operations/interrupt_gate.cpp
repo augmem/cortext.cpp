@@ -12,6 +12,7 @@
 #include <cmath>
 #include <limits>
 #include <numeric>
+#include <optional>
 #include <string>
 #include <unordered_set>
 
@@ -127,12 +128,9 @@ ComputeCoverageGain (const Eigen::VectorXf &centroid,
                      const Eigen::VectorXf &candidate,
                      const std::vector<Eigen::VectorXf> &included)
 {
-  // Simple, bounded proxy: how much the candidate improves similarity
-  // relative to the most-overlapping included vector.
-  const double sim_ctx = cortext::core::Map01 (CosSim (centroid, candidate));
   const double redundancy = ComputeRedundancy (candidate, included);
-  const double gain = std::max (0.0, sim_ctx - redundancy);
-  return Clamp01 (gain);
+  (void)centroid;
+  return Clamp01 (1.0 - redundancy);
 }
 
 } // namespace
@@ -144,6 +142,7 @@ ComputeMniGateDecision::Execute (OperationContext &context, Transaction &tx) con
   auto &p_ctx = context.GetProcessorContext ();
   const auto &cfg = context.GetConfig ();
   const auto &signal = context.GetSignal ();
+  context.SetSelectedCandidateId (std::nullopt);
 
   auto acc_it = p_ctx.accumulator_states.find (signal.source_id);
   if (acc_it == p_ctx.accumulator_states.end ())
@@ -363,7 +362,7 @@ ComputeMniGateDecision::Execute (OperationContext &context, Transaction &tx) con
 
   // Duplicate suppression threshold
   const double dup_thresh
-      = cortext::core::Lerp (kDupMin, kDupMax, F)
+      = cortext::core::Lerp (kDupMax, kDupMin, F)
         * (kDupBase + kDupSlope
                             * cortext::core::Clamp<double> (
                                 T, constants::kNormalizedMin,
@@ -435,8 +434,10 @@ ComputeMniGateDecision::Execute (OperationContext &context, Transaction &tx) con
 
   // Iterate top K candidates and compute MU and overlaps
   double best_mu = -std::numeric_limits<double>::infinity ();
-  double max_relevance = 0.0;
-  double max_semantic_overlap = included_vecs.empty () ? -1.0 : -1.0;
+  double rel_star = 0.0;
+  long long candidate_star_id = 0;
+  Eigen::VectorXf candidate_star;
+  bool has_candidate_star = false;
 
   for (const auto &kv : candidates)
     {
@@ -452,61 +453,62 @@ ComputeMniGateDecision::Execute (OperationContext &context, Transaction &tx) con
 
       const double sim_ctx = cortext::core::Map01 (CosSim (ctx_centroid, cand));
       const double redundancy = ComputeRedundancy (cand, included_vecs);
-      const double raw_overlap = ComputeRawOverlap (cand, included_vecs);
-      if (!included_vecs.empty ())
-        {
-          max_semantic_overlap = std::max (max_semantic_overlap, raw_overlap);
-        }
-      const double cov_gain
-          = ComputeCoverageGain (ctx_centroid, cand, included_vecs);
+      double cov_gain = ComputeCoverageGain (ctx_centroid, cand, included_vecs);
+      cov_gain = std::max (cov_gain, p_ctx.coverage_gain_floor);
 
       const double mu = w_cov * cov_gain + w_rel * sim_ctx - w_red * redundancy
                         - w_coh * coherence_penalty;
 
-      best_mu = std::max (best_mu, mu);
-      max_relevance = std::max (max_relevance, sim_ctx);
+      if (mu > best_mu)
+        {
+          best_mu = mu;
+          rel_star = sim_ctx;
+          candidate_star_id = kv.first;
+          candidate_star = cand;
+          has_candidate_star = true;
+        }
     }
 
-  // Section 8.3: Compute embedding novelty: 1 - max(cos(candidate, ctx_window))
-  // Uses memory centroids (μ_acc) per Section 8.2
-  double max_embedding_novelty = 0.0;
-  const auto &ctx_window = p_ctx.recent_memory_centroids;
-
-  for (const auto &kv : candidates)
+  if (!has_candidate_star)
     {
-      if (top_k_ids.find (kv.first) == top_k_ids.end ())
-        {
-          continue;
-        }
-      const auto &cand = kv.second;
-      if (cand.size () == 0)
-        {
-          continue;
-        }
+      context.SetInterruptAllowed (false);
+      context.SetSelectedCandidateId (std::nullopt);
+      context.SetMniJaccard (constants::kNormalizedMin);
+      context.SetMniBestMu (constants::kNormalizedMin);
+      context.SetMniDupThresh (dup_thresh);
+      context.SetMniOverlapStar (-1.0);
+      context.SetMniTauJaccardEff (tau_novelty_eff);
+      context.SetMniTauMuEff (tau_m_eff);
+      return;
+    }
 
-      // Find maximum cosine similarity to any embedding in context window
+  const double overlap_star = included_vecs.empty ()
+                                  ? -1.0
+                                  : ComputeRawOverlap (candidate_star,
+                                                       included_vecs);
+
+  // Section 8.3: Compute embedding novelty for candidate_star
+  // Uses memory centroids (μ_acc) per Section 8.2
+  double novelty_star = 0.0;
+  const auto &ctx_window = p_ctx.recent_memory_centroids;
+  if (ctx_window.empty ())
+    {
+      novelty_star = 1.0;
+    }
+  else
+    {
       double max_sim_to_ctx = -1.0;
       for (const auto &ctx_emb : ctx_window)
         {
-          if (ctx_emb.size () == cand.size ())
+          if (ctx_emb.size () == candidate_star.size ())
             {
-              const double sim = CosSim (cand, ctx_emb);
+              const double sim = CosSim (candidate_star, ctx_emb);
               max_sim_to_ctx = std::max (max_sim_to_ctx, sim);
             }
         }
-
-      // Embedding novelty = clamp((1 - max_similarity) / 2, 0, 1)
-      const double candidate_novelty = cortext::core::Clamp (
-          (1.0 - max_sim_to_ctx) * 0.5,
-          constants::kNormalizedMin,
-          constants::kNormalizedMax);
-      max_embedding_novelty = std::max (max_embedding_novelty, candidate_novelty);
-    }
-
-  // If context window is empty, all candidates are fully novel
-  if (ctx_window.empty ())
-    {
-      max_embedding_novelty = 1.0;
+      novelty_star = cortext::core::Clamp ((1.0 - max_sim_to_ctx) * 0.5,
+                                           constants::kNormalizedMin,
+                                           constants::kNormalizedMax);
     }
 
   // Keep candidate ID list for LRU recording
@@ -518,22 +520,25 @@ ComputeMniGateDecision::Execute (OperationContext &context, Transaction &tx) con
     }
 
   const bool allow_interrupt
-      = (max_relevance >= retrieval_thresh)
-        && ((max_embedding_novelty >= tau_novelty_eff) || (best_mu >= tau_m_eff))
-        && (max_semantic_overlap < dup_thresh)
+      = (rel_star >= retrieval_thresh)
+        && ((novelty_star >= tau_novelty_eff) || (best_mu >= tau_m_eff))
+        && (overlap_star < dup_thresh)
         && (at_boundary || best_mu >= boundary_mult * tau_m_eff);
 
   context.SetInterruptAllowed (allow_interrupt);
+  context.SetSelectedCandidateId (allow_interrupt
+                                      ? std::make_optional (candidate_star_id)
+                                      : std::nullopt);
   if (allow_interrupt)
     {
       p_ctx.last_interrupt_tick = p_ctx.signals_processed;
       acc.drift_at_last_interrupt = acc.drift_accum; // Update drift baseline
     }
 
-  context.SetMniJaccard (max_embedding_novelty);     // Now stores embedding novelty
+  context.SetMniJaccard (novelty_star);     // Now stores embedding novelty
   context.SetMniBestMu (best_mu);
   context.SetMniDupThresh (dup_thresh);
-  context.SetMniOverlapStar (max_semantic_overlap);
+  context.SetMniOverlapStar (overlap_star);
   context.SetMniTauJaccardEff (tau_novelty_eff);     // Now stores tau_novelty_eff
   context.SetMniTauMuEff (tau_m_eff);
 
@@ -546,13 +551,10 @@ ComputeMniGateDecision::Execute (OperationContext &context, Transaction &tx) con
       {
         ids_to_record.push_back (id);
       }
-    // Record used memory IDs
-    for (const auto &e : context.GetMemoryUsageEvents ())
+    // Record used memory ID (selected candidate)
+    if (allow_interrupt && candidate_star_id > 0)
       {
-        if (e.used)
-          {
-            ids_to_record.push_back (static_cast<long long> (e.embedding_id));
-          }
+        ids_to_record.push_back (candidate_star_id);
       }
     if (!ids_to_record.empty ())
       {
@@ -562,12 +564,12 @@ ComputeMniGateDecision::Execute (OperationContext &context, Transaction &tx) con
 
   telemetry::LogDebug ("cortext.interrupt_gate", {
     telemetry::Attribute::Double ("best_mu", best_mu),
-    telemetry::Attribute::Double ("jaccard", max_embedding_novelty),
+    telemetry::Attribute::Double ("jaccard", novelty_star),
     telemetry::Attribute::Double ("dup_thresh", dup_thresh),
     telemetry::Attribute::Double ("refractory_mult", M_refrac),
     telemetry::Attribute::Bool ("mni_decision", allow_interrupt),
     telemetry::Attribute::Int64 ("wm_slots_count", static_cast<int64_t> (included_vecs.size ())),
-    telemetry::Attribute::Double ("max_semantic_overlap", max_semantic_overlap),
+    telemetry::Attribute::Double ("max_semantic_overlap", overlap_star),
     telemetry::Attribute::Int64 ("ctx_window_size", static_cast<int64_t> (ctx_window.size ()))
   });
 }

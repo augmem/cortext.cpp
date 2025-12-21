@@ -22,6 +22,7 @@ option(CORTEXT_ENABLE_GEMMA_ORT "Enable ONNX Runtime for Gemma text generator" O
 option(CORTEXT_DISABLE_OGA "Disable onnxruntime-genai for Phi-4 Extractor/Summarizer" OFF)
 option(CORTEXT_DISABLE_LITERT "Disable LiteRT-LM for Gemma Extractor/Summarizer" OFF)
 option(CORTEXT_DISABLE_SHERPA_ONNX "Disable sherpa-onnx ASR/TTS integration" OFF)
+option(CORTEXT_ENABLE_EMBEDDINGGEMMA "Build EmbeddingGemma encoder" OFF)
 
 # Sanitizer options for catching memory bugs during development
 option(CORTEXT_ENABLE_ASAN "Enable AddressSanitizer" OFF)
@@ -107,8 +108,6 @@ add_library(cortext
     src/capi.cpp
     src/telemetry/telemetry.cpp
     src/encoder/imagebind.cpp
-    src/encoder/embeddinggemma.cpp
-    src/audio/sherpa_onnx.cpp
     src/data/centroids.cpp
     src/data/embedded_centroid_vectors.cpp
     src/operations/centroids.cpp
@@ -157,6 +156,7 @@ add_library(cortext
     src/operations/streaming_pacing.cpp
     # Section 4.4: Accumulator operations
     src/operations/accumulator.cpp
+    src/operations/accumulator_reset.cpp
     src/operations/spike_bypass.cpp
     # Extractor component
     src/extractor/phi4_extractor.cpp
@@ -170,6 +170,16 @@ add_library(cortext
     # Audio preprocessing
     src/audio/gemma_audio.cpp
 )
+
+if(CORTEXT_ENABLE_EMBEDDINGGEMMA)
+  target_sources(cortext PRIVATE src/encoder/embeddinggemma.cpp)
+else()
+  set(CORTEXT_DISABLE_SHERPA_ONNX ON CACHE BOOL "" FORCE)
+endif()
+
+if(NOT CORTEXT_DISABLE_SHERPA_ONNX)
+  target_sources(cortext PRIVATE src/audio/sherpa_onnx.cpp)
+endif()
 add_library(cortext::cortext ALIAS cortext)
 
 # Public include dirs
@@ -457,9 +467,11 @@ if(CORTEXT_ENABLE_GEMMA_ORT)
 endif()
 
 # EmbeddingGemma ONNX encoder (uses ORT + SentencePiece from LiteRT-LM)
-if((NOT CORTEXT_DISABLE_IMAGEBIND_ORT AND NOT EMSCRIPTEN) OR CORTEXT_ENABLE_GEMMA_ORT)
-  if(NOT CORTEXT_DISABLE_LITERT AND NOT EMSCRIPTEN)
-    target_compile_definitions(cortext PUBLIC CORTEXT_ENABLE_EMBEDDINGGEMMA_ORT=1)
+if(CORTEXT_ENABLE_EMBEDDINGGEMMA)
+  if((NOT CORTEXT_DISABLE_IMAGEBIND_ORT AND NOT EMSCRIPTEN) OR CORTEXT_ENABLE_GEMMA_ORT)
+    if(NOT CORTEXT_DISABLE_LITERT AND NOT EMSCRIPTEN)
+      target_compile_definitions(cortext PUBLIC CORTEXT_ENABLE_EMBEDDINGGEMMA_ORT=1)
+    endif()
   endif()
 endif()
 

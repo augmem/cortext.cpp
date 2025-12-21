@@ -25,6 +25,12 @@ NCtx (double T)
 }
 
 inline int
+WinMemCtx (double T)
+{
+  return static_cast<int> (std::round (Lerp (4.0, 32.0, Clamp (T, 0.0, 1.0))));
+}
+
+inline int
 WScore (double T)
 {
   return static_cast<int> (std::round (Lerp (20.0, 120.0, T)));
@@ -34,6 +40,13 @@ inline int
 KNeighbors (double T)
 {
   return static_cast<int> (std::round (Lerp (8.0, 32.0, T)));
+}
+
+// Coherence window size (Section 4.4)
+inline int
+WinCoh (double T)
+{
+  return static_cast<int> (std::round (Lerp (8.0, 32.0, Clamp (T, 0.0, 1.0))));
 }
 
 inline int
@@ -102,11 +115,10 @@ MaxWaitDrift (double F)
 }
 
 inline int
-GraphDepth (double F)
+GraphDepth (double T)
 {
-  // A small, knob-derived traversal depth (Alg 31).
-  // Depth in [1,2], favoring shallower at high focus.
-  return static_cast<int> (std::round (Lerp (2.0, 1.0, Clamp (F, 0.0, 1.0))));
+  // graph_depth(T): small traversal depth, in [1,2].
+  return static_cast<int> (std::round (Lerp (2.0, 1.0, Clamp (T, 0.0, 1.0))));
 }
 
 inline int
@@ -170,38 +182,27 @@ AlphaU (double T)
 inline double
 AlphaT (double T, double u_t)
 {
-  // α_T(t) = max(α_min_T × (1 + 0.5 × u(t)), α_min_T + (1 − T) × α_span_T ×
-  // u(t))
-  const double kAlphaMinT = 0.05;
-  const double kAlphaSpanT = 0.35;
-  const double term1 = kAlphaMinT * (1.0 + 0.5 * u_t);
-  const double term2 = kAlphaMinT + (1.0 - T) * kAlphaSpanT * u_t;
-  return std::max (term1, term2);
+  // α_T(t) = α_min_T + (1 − T) × α_span_T × u(t)
+  const double kAlphaMinT = 0.02;
+  const double kAlphaSpanT = 0.18;
+  return kAlphaMinT + (1.0 - T) * kAlphaSpanT * u_t;
 }
 
 inline double
 AlphaF (double F, double u_t)
 {
-  // Spec (Section 2.1.2): α_F(t) = α_min_F + F × α_span_F × u(t)
-  // Intentional deviation: We add an uncertainty-scaled floor (term1) to ensure
-  // responsiveness during high uncertainty even when F=0. This matches AlphaT
-  // and AlphaS patterns and prevents sluggish adaptation in volatile conditions.
+  // α_F(t) = α_min_F + F × α_span_F × u(t)
   const double kAlphaMinF = 0.05;
   const double kAlphaSpanF = 0.45;
-  double term1 = kAlphaMinF * (1.0 + 0.5 * u_t);  // Floor: scales with uncertainty
-  double term2 = kAlphaMinF + F * kAlphaSpanF * u_t;  // Spec formula
-  return std::max (term1, term2);
+  return kAlphaMinF + F * kAlphaSpanF * u_t;
 }
 
 inline double
 AlphaS (double S, double u_t)
 {
   const double kAlphaMinS = 0.05;
-  // Spec (§5.1, line 823): α_span_S = 0.35
   const double kAlphaSpanS = 0.35;
-  double term1 = kAlphaMinS * (1.0 + 0.5 * u_t);
-  double term2 = kAlphaMinS + S * kAlphaSpanS * u_t;
-  return std::max (term1, term2);
+  return kAlphaMinS + S * kAlphaSpanS * u_t;
 }
 
 // Rate observation window (seconds)
@@ -227,7 +228,9 @@ ConsolidationRate (double T, double S)
   // Reference: algorithms.md Section 7.1, lines 1015-1017
   const double interval
       = static_cast<double> (ConsolidationIntervalSeconds (T));
-  return (1.0 / std::max (interval, 1.0)) * (0.3 + 0.7 * T) * (1.0 - 0.5 * S);
+  // Convert to writes/min to match m_rate units.
+  return (60.0 / std::max (interval, 1.0)) * (0.3 + 0.7 * T)
+         * (1.0 - 0.5 * S);
 }
 
 // Idle required seconds — Algorithm 28b
@@ -468,11 +471,13 @@ AlphaMood (double S)
 }
 
 inline double
-LambdaMood (double T)
+LambdaMood (double delta_seconds, double T)
 {
-  // λ_mood(T) = lerp(0.90, 0.999, T)
-  // Higher stability = slower mood decay (more persistent mood)
-  return Lerp (0.90, 0.999, Clamp (T, 0.0, 1.0));
+  // λ_mood(Δt, T) = exp(−ln(2) × Δt / max(half_life_mood(T), ε))
+  const double half_life = std::max (Lerp (30.0, 600.0, Clamp (T, 0.0, 1.0)),
+                                     1e-6);
+  const double decay = -std::log (2.0) * delta_seconds / half_life;
+  return std::exp (decay);
 }
 
 // --- Algorithm 24 (Working Memory) Helpers ---
@@ -746,6 +751,27 @@ CoOccurrenceThreshold (double F)
   // Same as MergeThreshold - co-occurrence uses same similarity threshold
   // co_occurrence_threshold(F) = lerp(0.85, 0.95, F)
   return MergeThreshold (F);
+}
+
+inline double
+SimilarToThreshold (double F)
+{
+  // similar_to threshold: high cosine similarity (soft equivalence)
+  return Lerp (0.90, 0.98, Clamp (F, 0.0, 1.0));
+}
+
+inline double
+MinEdgeWeight (double F)
+{
+  // min_edge_weight(F) for graph traversal
+  return Lerp (0.20, 0.60, Clamp (F, 0.0, 1.0));
+}
+
+inline double
+ImpliesDriftThreshold (double T)
+{
+  // implies threshold (directional drift correlation)
+  return Lerp (0.10, 0.25, Clamp (T, 0.0, 1.0));
 }
 
 inline double

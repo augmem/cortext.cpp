@@ -35,8 +35,7 @@ TEST_CASE ("InitializeSensitivityPriors computes priors (S=0.5)",
   REQUIRE (pctx.weight_emotion_prior == Catch::Approx (0.2 + 0.8 * S));
   REQUIRE (pctx.emotion_gain_prior == Catch::Approx (std::exp (1.5 * S)));
   REQUIRE (pctx.score_gain_prior == Catch::Approx (std::exp (2.0 * S)));
-  REQUIRE (pctx.rate_target_prior
-           == Catch::Approx (base_rate_prior * (0.5 + 1.5 * S)));
+  REQUIRE (pctx.rate_target_prior == Catch::Approx (base_rate_prior));
 }
 #
 TEST_CASE ("InitializeSensitivityPriors edge cases (S=0 and S=1)",
@@ -64,8 +63,7 @@ TEST_CASE ("InitializeSensitivityPriors edge cases (S=0 and S=1)",
     REQUIRE (pctx.weight_emotion_prior == Catch::Approx (0.2));
     REQUIRE (pctx.emotion_gain_prior == Catch::Approx (std::exp (0.0)));
     REQUIRE (pctx.score_gain_prior == Catch::Approx (std::exp (0.0)));
-    REQUIRE (pctx.rate_target_prior
-             == Catch::Approx (pctx.base_rate_prior * (0.5 + 0.0)));
+    REQUIRE (pctx.rate_target_prior == Catch::Approx (pctx.base_rate_prior));
   }
 #
   // S = 1
@@ -86,7 +84,6 @@ TEST_CASE ("InitializeSensitivityPriors edge cases (S=0 and S=1)",
     REQUIRE (pctx.weight_emotion_prior == Catch::Approx (1.0));
     REQUIRE (pctx.emotion_gain_prior == Catch::Approx (std::exp (1.5)));
     REQUIRE (pctx.score_gain_prior == Catch::Approx (std::exp (2.0)));
-    REQUIRE (pctx.rate_target_prior
-             == Catch::Approx (pctx.base_rate_prior * (0.5 + 1.5)));
+    REQUIRE (pctx.rate_target_prior == Catch::Approx (pctx.base_rate_prior));
   }
 }

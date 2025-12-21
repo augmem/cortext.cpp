@@ -43,7 +43,8 @@ struct AccumulatorState
   uint64_t last_write_ts = 0;   ///< Timestamp of last write (for refractory)
   uint64_t last_signal_ts = 0;  ///< Timestamp of previous signal (for gap)
   double eta_acc = 0.0;         ///< Drift EWMA (η_acc)
-  double coherence_prev = 1.0;  ///< Previous coherence value
+  double coherence_prev = 0.0;  ///< Previous coherence value
+  std::vector<Eigen::VectorXf> acc_signals_window;  ///< Coherence ring buffer
 
   // Emotional metadata (Section 6.1.1)
   double s_emotion_max = 0.0;   ///< Peak emotion intensity in memory
@@ -79,6 +80,8 @@ struct AccumulatorState
     n_signals = 1;
     t_start = timestamp;
     last_signal_ts = timestamp;
+    eta_acc = 0.0;
+    coherence_prev = 0.0;
     // Reset emotional metadata
     s_emotion_max = 0.0;
     s_arousal_sum = 0.0;
@@ -87,8 +90,33 @@ struct AccumulatorState
     // Clear v2 blob tracking
     blob_ids.clear ();
     primary_modality.clear ();
-    // Note: eta_acc, coherence_prev, and last_write_ts are preserved across
-    // accumulations
+    acc_signals_window.clear ();
+    // Note: last_write_ts is preserved across accumulations
+  }
+
+  /**
+   * @brief Reset accumulator state after a boundary (no new signal yet).
+   * @param timestamp Current timestamp (ms since epoch)
+   */
+  void
+  ResetForNextUnit (uint64_t timestamp)
+  {
+    mu_acc = Eigen::VectorXf ();
+    e_peak = Eigen::VectorXf ();
+    drift_acc = 0.0;
+    s_sum = 0.0;
+    s_max = 0.0;
+    n_signals = 0;
+    t_start = timestamp;
+    last_signal_ts = timestamp;
+    eta_acc = 0.0;
+    coherence_prev = 0.0;
+    s_emotion_max = 0.0;
+    s_arousal_sum = 0.0;
+    signals.clear ();
+    blob_ids.clear ();
+    primary_modality.clear ();
+    acc_signals_window.clear ();
   }
 
   /**
@@ -98,7 +126,7 @@ struct AccumulatorState
    * @param drift Drift magnitude of the signal
    *
    * Updates running mean: μ_acc = ((n-1) × μ_acc + x_t) / n
-   * Accumulates drift: D_acc += drift_mag_t
+   * Accumulates drift: D_acc += drift_mag_t / 2
    * Updates scores: s_sum += score_t; if score_t > s_max: s_max=score_t,
    * e_peak=x_t
    */
@@ -120,7 +148,7 @@ struct AccumulatorState
       }
 
     // Accumulate drift
-    drift_acc += drift;
+    drift_acc += drift * 0.5;
 
     // Update scores
     s_sum += score;

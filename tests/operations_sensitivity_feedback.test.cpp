@@ -6,6 +6,7 @@
 #include <cortext/operations/sensitivity_feedback.hpp>
 #include <cortext/processor.hpp>
 #include <cortext/processor/operation_context.hpp>
+#include <unordered_map>
 
 using namespace cortext;
 using cortext::operations::ApplySensitivityFeedback;
@@ -34,8 +35,8 @@ TEST_CASE ("Alg16 positive gain with novelty increases weight_novelty",
   s.timestamp = 1;
 
   ProcessorContext pctx;
-  // Provide a recent context orthogonal to x to get novelty ~ 0.5
-  pctx.recent_context_embeddings.push_back (unit (1, dim));
+  // Provide a recent context opposite of x to get redundancy ~0 (novelty ~1)
+  pctx.recent_context_embeddings.push_back (-unit (0, dim));
 
   SignalProcessor::Config cfg;
 
@@ -57,12 +58,14 @@ TEST_CASE ("Alg16 positive gain with novelty increases weight_novelty",
   ComputeMetrics metrics;
   metrics.Execute (ctx, cortext::testing::GetNullTransaction ());
 
-  // Attach a positive contextual gain event
+  // Attach a positive contextual gain event with embedding available
   OperationContext::MemoryUsageEvent ev{};
   ev.embedding_id = 42LL;
   ev.used = true;
   ev.contextual_gain = 0.5; // positive gain
   ctx.SetMemoryUsageEvents ({ ev });
+  ctx.SetRetrievedMemoryEmbeddings (
+      std::unordered_map<long long, Eigen::VectorXf>{ { 42LL, s.embedding } });
 
   ApplySensitivityFeedback op;
   op.Execute (ctx, cortext::testing::GetNullTransaction ());
@@ -81,8 +84,8 @@ TEST_CASE (
   s.timestamp = 2;
 
   ProcessorContext pctx;
-  // Provide a recent context orthogonal to x to get novelty ~ 0.5
-  pctx.recent_context_embeddings.push_back (unit (1, dim));
+  // Provide a recent context opposite of x to get redundancy ~0 (novelty ~1)
+  pctx.recent_context_embeddings.push_back (-unit (0, dim));
 
   SignalProcessor::Config cfg;
 
@@ -102,12 +105,14 @@ TEST_CASE (
   ComputeMetrics metrics;
   metrics.Execute (ctx, cortext::testing::GetNullTransaction ());
 
-  // Attach a negative contextual gain event
+  // Attach a negative contextual gain event with embedding available
   OperationContext::MemoryUsageEvent ev{};
   ev.embedding_id = 7LL;
   ev.used = true;
   ev.contextual_gain = -0.4; // negative
   ctx.SetMemoryUsageEvents ({ ev });
+  ctx.SetRetrievedMemoryEmbeddings (
+      std::unordered_map<long long, Eigen::VectorXf>{ { 7LL, s.embedding } });
 
   ApplySensitivityFeedback op;
   op.Execute (ctx, cortext::testing::GetNullTransaction ());

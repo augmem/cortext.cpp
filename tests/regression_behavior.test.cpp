@@ -591,7 +591,7 @@ TEST_CASE ("High Stability affects all persistence parameters consistently",
 
   // All should be "more persistent" / slower decay
   REQUIRE (BaseHalfLifePrior (T) > 10000.0);    // Longer half-life
-  REQUIRE (LambdaMood (T) > 0.98);              // Slower mood decay
+  REQUIRE (LambdaMood (1.0, T) > 0.99);         // Slower mood decay
   REQUIRE (ReinforcementDecay (T) > 0.97);      // Slower edge decay
   REQUIRE (WRateSeconds (T) > 250);             // Longer write intervals
   REQUIRE (ConsolidationIntervalSeconds (T) > 3000); // Longer consolidation

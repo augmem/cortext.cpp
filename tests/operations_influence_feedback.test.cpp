@@ -125,8 +125,8 @@ TEST_CASE ("Alg19 influence persists per-memory", "[operations][influence]")
   const double sustained
       = std::any_cast<double> (rows[0].at ("sustained_influence"));
 
-  // Expected influence: 0.5*cg + 0.4*sim_gen - 0.3*drift (drift=0 here)
-  const double expected_influence = 0.5 * 0.8 + 0.4 * 1.0;
+  // Expected influence: generation terms neutralized when no generation embeddings
+  const double expected_influence = 0.5 * 0.8;
   REQUIRE (influence == Catch::Approx (expected_influence).margin (1e-6));
 
   const double L_sustain = std::round (core::Lerp (3.0, 5.0, cfg.stability));

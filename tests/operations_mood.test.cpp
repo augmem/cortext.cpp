@@ -15,6 +15,7 @@ using cortext::operations::UpdateMood;
 
 namespace
 {
+constexpr double kUniformProb = 1.0 / 6.0;
 
 static Signal
 MakeSignal ()
@@ -24,6 +25,17 @@ MakeSignal ()
   s.timestamp = 1;
   s.source_id = "test";
   return s;
+}
+
+static std::array<double, 6>
+Centered (const std::array<double, 6> &probs)
+{
+  std::array<double, 6> centered{};
+  for (size_t i = 0; i < 6; ++i)
+    {
+      centered[i] = probs[i] - kUniformProb;
+    }
+  return centered;
 }
 
 // Helper to set up emotion probabilities for testing
@@ -59,8 +71,8 @@ TEST_CASE ("UpdateMood integrates emotion into mood vector",
   OperationContext ctx (s, pctx, cfg);
 
   // Set emotion probabilities (softmax-like, sums to ~1)
-  std::array<double, 6> e_t = { 0.1, 0.1, 0.5, 0.1, 0.1, 0.1 }; // joy-dominant
-  ctx.SetEmotionProbabilities (e_t);
+  std::array<double, 6> p_c = { 0.1, 0.1, 0.5, 0.1, 0.1, 0.1 }; // joy-dominant
+  ctx.SetEmotionProbabilities (p_c);
 
   // Initial mood should be zero
   for (size_t i = 0; i < 6; ++i)
@@ -73,9 +85,11 @@ TEST_CASE ("UpdateMood integrates emotion into mood vector",
 
   // After first update: M = λ × 0 + α × e_t = α × e_t
   const double alpha_mood = core::AlphaMood (cfg.sensitivity);
+  const auto centered = Centered (p_c);
   for (size_t i = 0; i < 6; ++i)
     {
-      REQUIRE (pctx.mood_vector[i] == Catch::Approx (alpha_mood * e_t[i]));
+      REQUIRE (pctx.mood_vector[i]
+               == Catch::Approx (alpha_mood * centered[i]));
     }
 
   // Delta threshold should be set
@@ -93,16 +107,19 @@ TEST_CASE ("UpdateMood decay dynamics with λ_mood", "[operations][mood]")
   cfg.stability = 0.5;
   OperationContext ctx (s, pctx, cfg);
 
-  const double alpha = core::AlphaMood (cfg.sensitivity);
-  const double lambda = core::LambdaMood (cfg.stability);
+  s.timestamp = 31'000;
+  pctx.last_mood_ts = 1'000;
+  const double delta_s = (s.timestamp - pctx.last_mood_ts) / 1000.0;
+  const double lambda = core::LambdaMood (delta_s, cfg.stability);
 
   // Set initial mood state
   pctx.mood_vector = { 0.5, 0.0, 0.3, 0.0, 0.0, 0.0 };
   std::array<double, 6> initial_mood = pctx.mood_vector;
 
   // Zero emotion input to test pure decay
-  std::array<double, 6> e_t = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
-  ctx.SetEmotionProbabilities (e_t);
+  std::array<double, 6> p_c = { kUniformProb, kUniformProb, kUniformProb,
+                                kUniformProb, kUniformProb, kUniformProb };
+  ctx.SetEmotionProbabilities (p_c);
 
   UpdateMood op;
   op.Execute (ctx, cortext::testing::GetNullTransaction ());
@@ -130,8 +147,8 @@ TEST_CASE ("UpdateMood clamps per-dimension to [-1, 1]",
   pctx.mood_vector = { 0.95, 0.0, 0.95, 0.0, 0.0, 0.0 };
 
   // Strong emotion input
-  std::array<double, 6> e_t = { 1.0, 0.0, 1.0, 0.0, 0.0, 0.0 };
-  ctx.SetEmotionProbabilities (e_t);
+  std::array<double, 6> p_c = { 1.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
+  ctx.SetEmotionProbabilities (p_c);
 
   UpdateMood op;
   op.Execute (ctx, cortext::testing::GetNullTransaction ());
@@ -158,15 +175,18 @@ TEST_CASE ("UpdateMood ΔT_mood calculation", "[operations][mood]")
   pctx.mood_vector = { 0.3, 0.0, 0.4, 0.0, 0.0, 0.0 };
 
   // Zero emotion to not change mood magnitude
-  std::array<double, 6> e_t = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
-  ctx.SetEmotionProbabilities (e_t);
+  std::array<double, 6> p_c = { kUniformProb, kUniformProb, kUniformProb,
+                                kUniformProb, kUniformProb, kUniformProb };
+  ctx.SetEmotionProbabilities (p_c);
 
   UpdateMood op;
   op.Execute (ctx, cortext::testing::GetNullTransaction ());
 
   // ΔT_mood = -κ_mood × clamp(||M_t|| / √6, 0, 1)
   // Note: mood decays slightly, so recalculate magnitude
-  const double lambda = core::LambdaMood (cfg.stability);
+  s.timestamp = 1'000;
+  pctx.last_mood_ts = 0;
+  const double lambda = core::LambdaMood (0.0, cfg.stability);
   const double decayed_mag
       = std::sqrt ((0.3 * lambda) * (0.3 * lambda)
                    + (0.4 * lambda) * (0.4 * lambda));
@@ -193,15 +213,15 @@ TEST_CASE ("UpdateMood edge cases S=0 and S=1", "[operations][mood]")
   
     OperationContext ctx (s, pctx, cfg);
 
-    std::array<double, 6> e_t = { 1.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
-    ctx.SetEmotionProbabilities (e_t);
+    std::array<double, 6> p_c = { 1.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
+    ctx.SetEmotionProbabilities (p_c);
 
     UpdateMood op;
     op.Execute (ctx, cortext::testing::GetNullTransaction ());
 
     // α_mood(0) = 0.01
     REQUIRE (core::AlphaMood (0.0) == Catch::Approx (0.01));
-    REQUIRE (pctx.mood_vector[0] == Catch::Approx (0.01));
+    REQUIRE (pctx.mood_vector[0] == Catch::Approx (0.01 * (1.0 - kUniformProb)));
 
     // ΔT_mood should be 0 since κ_mood = κ_base × 0 = 0
     REQUIRE (ctx.GetDeltaThresholdMood ().has_value ());
@@ -220,15 +240,15 @@ TEST_CASE ("UpdateMood edge cases S=0 and S=1", "[operations][mood]")
   
     OperationContext ctx (s, pctx, cfg);
 
-    std::array<double, 6> e_t = { 1.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
-    ctx.SetEmotionProbabilities (e_t);
+    std::array<double, 6> p_c = { 1.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
+    ctx.SetEmotionProbabilities (p_c);
 
     UpdateMood op;
     op.Execute (ctx, cortext::testing::GetNullTransaction ());
 
     // α_mood(1) = 0.20
     REQUIRE (core::AlphaMood (1.0) == Catch::Approx (0.20));
-    REQUIRE (pctx.mood_vector[0] == Catch::Approx (0.20));
+    REQUIRE (pctx.mood_vector[0] == Catch::Approx (0.20 * (1.0 - kUniformProb)));
   }
 }
 
@@ -238,6 +258,7 @@ TEST_CASE ("UpdateMood edge cases T=0 and T=1", "[operations][mood]")
   SECTION ("T=0 fast decay")
   {
     Signal s = MakeSignal ();
+    s.timestamp = 31'000;
     ProcessorContext pctx;
     SignalProcessor::Config cfg;
     cortext::testing::RequireEncoder (cfg);
@@ -247,21 +268,25 @@ TEST_CASE ("UpdateMood edge cases T=0 and T=1", "[operations][mood]")
     OperationContext ctx (s, pctx, cfg);
 
     pctx.mood_vector = { 1.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
-    std::array<double, 6> e_t = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
-    ctx.SetEmotionProbabilities (e_t);
+    std::array<double, 6> p_c = { kUniformProb, kUniformProb, kUniformProb,
+                                  kUniformProb, kUniformProb, kUniformProb };
+    ctx.SetEmotionProbabilities (p_c);
+
+    const double delta_s = 30.0;
+    pctx.last_mood_ts = 1'000;
 
     UpdateMood op;
     op.Execute (ctx, cortext::testing::GetNullTransaction ());
 
-    // λ_mood(0) = 0.90
-    REQUIRE (core::LambdaMood (0.0) == Catch::Approx (0.90));
-    REQUIRE (pctx.mood_vector[0] == Catch::Approx (0.90));
+    const double lambda = core::LambdaMood (delta_s, cfg.stability);
+    REQUIRE (pctx.mood_vector[0] == Catch::Approx (lambda));
   }
 
   // T = 1: slow decay (λ = 0.999)
   SECTION ("T=1 slow decay")
   {
     Signal s = MakeSignal ();
+    s.timestamp = 31'000;
     ProcessorContext pctx;
     SignalProcessor::Config cfg;
     cortext::testing::RequireEncoder (cfg);
@@ -271,15 +296,18 @@ TEST_CASE ("UpdateMood edge cases T=0 and T=1", "[operations][mood]")
     OperationContext ctx (s, pctx, cfg);
 
     pctx.mood_vector = { 1.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
-    std::array<double, 6> e_t = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
-    ctx.SetEmotionProbabilities (e_t);
+    std::array<double, 6> p_c = { kUniformProb, kUniformProb, kUniformProb,
+                                  kUniformProb, kUniformProb, kUniformProb };
+    ctx.SetEmotionProbabilities (p_c);
+
+    const double delta_s = 30.0;
+    pctx.last_mood_ts = 1'000;
 
     UpdateMood op;
     op.Execute (ctx, cortext::testing::GetNullTransaction ());
 
-    // λ_mood(1) = 0.999
-    REQUIRE (core::LambdaMood (1.0) == Catch::Approx (0.999));
-    REQUIRE (pctx.mood_vector[0] == Catch::Approx (0.999));
+    const double lambda = core::LambdaMood (delta_s, cfg.stability);
+    REQUIRE (pctx.mood_vector[0] == Catch::Approx (lambda));
   }
 }
 
@@ -294,12 +322,9 @@ TEST_CASE ("UpdateMood accumulation over multiple signals",
   cfg.stability = 0.5;
   OperationContext ctx (s, pctx, cfg);
 
-  const double alpha = core::AlphaMood (cfg.sensitivity);
-  const double lambda = core::LambdaMood (cfg.stability);
-
   // Consistent joy input over multiple steps
-  std::array<double, 6> e_t = { 0.0, 0.0, 1.0, 0.0, 0.0, 0.0 }; // pure joy
-  ctx.SetEmotionProbabilities (e_t);
+  std::array<double, 6> p_c = { 0.0, 0.0, 1.0, 0.0, 0.0, 0.0 }; // pure joy
+  ctx.SetEmotionProbabilities (p_c);
 
   UpdateMood op;
 
@@ -313,8 +338,8 @@ TEST_CASE ("UpdateMood accumulation over multiple signals",
   REQUIRE (pctx.mood_vector[2] > 0.5); // accumulated joy
 
   // Other dimensions should remain near zero
-  REQUIRE (pctx.mood_vector[0] == Catch::Approx (0.0).margin (0.01));
-  REQUIRE (pctx.mood_vector[1] == Catch::Approx (0.0).margin (0.01));
+  REQUIRE (pctx.mood_vector[0] < 0.0);
+  REQUIRE (pctx.mood_vector[1] < 0.0);
 }
 
 TEST_CASE ("UpdateMood with mixed emotions", "[operations][mood]")
@@ -330,17 +355,19 @@ TEST_CASE ("UpdateMood with mixed emotions", "[operations][mood]")
   const double alpha = core::AlphaMood (cfg.sensitivity);
 
   // Mixed emotion input
-  std::array<double, 6> e_t
+  std::array<double, 6> p_c
       = { 0.3, 0.1, 0.2, 0.2, 0.1, 0.1 }; // anger + joy + love dominant
-  ctx.SetEmotionProbabilities (e_t);
+  ctx.SetEmotionProbabilities (p_c);
 
   UpdateMood op;
   op.Execute (ctx, cortext::testing::GetNullTransaction ());
 
   // Verify all dimensions updated proportionally
+  const auto centered = Centered (p_c);
   for (size_t i = 0; i < 6; ++i)
     {
-      REQUIRE (pctx.mood_vector[i] == Catch::Approx (alpha * e_t[i]));
+      REQUIRE (pctx.mood_vector[i]
+               == Catch::Approx (alpha * centered[i]));
     }
 
   // Compute expected magnitude
@@ -372,8 +399,9 @@ TEST_CASE ("UpdateMood zero mood yields zero ΔT_mood", "[operations][mood]")
   OperationContext ctx (s, pctx, cfg);
 
   // Mood is already zero (default), zero emotion input
-  std::array<double, 6> e_t = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
-  ctx.SetEmotionProbabilities (e_t);
+  std::array<double, 6> p_c = { kUniformProb, kUniformProb, kUniformProb,
+                                kUniformProb, kUniformProb, kUniformProb };
+  ctx.SetEmotionProbabilities (p_c);
 
   UpdateMood op;
   op.Execute (ctx, cortext::testing::GetNullTransaction ());
@@ -386,6 +414,7 @@ TEST_CASE ("UpdateMood zero mood yields zero ΔT_mood", "[operations][mood]")
 TEST_CASE ("UpdateMood max mood state normalization", "[operations][mood]")
 {
   Signal s = MakeSignal ();
+  s.timestamp = 31'000;
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
   cortext::testing::RequireEncoder (cfg);
@@ -398,21 +427,21 @@ TEST_CASE ("UpdateMood max mood state normalization", "[operations][mood]")
   pctx.mood_vector = { 1.0, 1.0, 1.0, 1.0, 1.0, 1.0 };
 
   // Zero emotion to minimize mood change
-  std::array<double, 6> e_t = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
-  ctx.SetEmotionProbabilities (e_t);
+  std::array<double, 6> p_c = { kUniformProb, kUniformProb, kUniformProb,
+                                kUniformProb, kUniformProb, kUniformProb };
+  ctx.SetEmotionProbabilities (p_c);
 
+  pctx.last_mood_ts = 1'000;
   UpdateMood op;
   op.Execute (ctx, cortext::testing::GetNullTransaction ());
 
-  // After decay: λ = 0.999, each dimension ~ 0.999
-  const double lambda = core::LambdaMood (cfg.stability);
-  const double decayed_dim = 1.0 * lambda; // ~0.999
-  const double decayed_mag = std::sqrt (6.0 * decayed_dim * decayed_dim);
-  // m_norm = ||M|| / √6 should be close to 1.0 (clamped)
-  const double m_norm = core::Clamp (decayed_mag / std::sqrt (6.0), 0.0, 1.0);
-
-  // m_norm should be approximately equal to decayed_dim (~0.999)
-  REQUIRE (m_norm == Catch::Approx (decayed_dim).epsilon (0.001));
+  double mag_sq = 0.0;
+  for (double v : pctx.mood_vector)
+    {
+      mag_sq += v * v;
+    }
+  const double m_norm
+      = core::Clamp (std::sqrt (mag_sq) / std::sqrt (6.0), 0.0, 1.0);
 
   // Verify ΔT_mood uses normalized value
   const double kappa_mood

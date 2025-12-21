@@ -135,7 +135,8 @@ LoadClusterMemories (Store *store)
 void
 BuildCoOccurrenceEdges (Transaction &tx,
                         const std::map<int, std::vector<MemoryData>> &clusters,
-                        double threshold, long long now_ts)
+                        double threshold, double similar_threshold,
+                        long long now_ts)
 {
   for (const auto &[cluster_id, memories] : clusters)
     {
@@ -153,10 +154,10 @@ BuildCoOccurrenceEdges (Transaction &tx,
               double sim = core::CosineSimilarity (memories[i].embedding,
                                                    memories[j].embedding);
 
+              const double weight01 = core::Map01 (sim);
+              // Create co_occurs edge (use smaller id as source)
               if (sim > threshold)
                 {
-                  const double weight01 = core::Map01 (sim);
-                  // Create co_occurs edge (use smaller id as source)
                   long long id1 = std::min (memories[i].memory_id,
                                             memories[j].memory_id);
                   long long id2 = std::max (memories[i].memory_id,
@@ -167,6 +168,22 @@ BuildCoOccurrenceEdges (Transaction &tx,
                        "(source_memory_id, target_memory_id, edge_type, weight, "
                        "last_reinforced) "
                        "VALUES (?, ?, 'co_occurs', ?, ?)",
+                       { id1, id2, weight01, now_ts });
+                }
+
+              // Create similar_to edge for very high similarity
+              if (sim > similar_threshold)
+                {
+                  long long id1 = std::min (memories[i].memory_id,
+                                            memories[j].memory_id);
+                  long long id2 = std::max (memories[i].memory_id,
+                                            memories[j].memory_id);
+
+                  Add (tx,
+                       "INSERT OR REPLACE INTO associations "
+                       "(source_memory_id, target_memory_id, edge_type, weight, "
+                       "last_reinforced) "
+                       "VALUES (?, ?, 'similar_to', ?, ?)",
                        { id1, id2, weight01, now_ts });
                 }
             }
@@ -180,7 +197,8 @@ BuildCoOccurrenceEdges (Transaction &tx,
 void
 BuildCausalEdges (Transaction &tx,
                   const std::map<int, std::vector<MemoryData>> &clusters,
-                  double drift_threshold, long long now_ts)
+                  double drift_threshold, double implies_threshold,
+                  long long now_ts)
 {
   for (const auto &[cluster_id, memories] : clusters)
     {
@@ -198,16 +216,27 @@ BuildCausalEdges (Transaction &tx,
               = memories[i + 1].embedding - memories[i].embedding;
           double drift_mag = drift.norm ();
 
+          const double weight01
+              = core::Clamp (drift_mag / 2.0, 0.0, 1.0);
           if (drift_mag > drift_threshold)
             {
-              const double weight01
-                  = core::Clamp (drift_mag / 2.0, 0.0, 1.0);
               // Create causes edge (directional: earlier -> later)
               Add (tx,
                    "INSERT OR REPLACE INTO associations "
                    "(source_memory_id, target_memory_id, edge_type, weight, "
                    "last_reinforced) "
                    "VALUES (?, ?, 'causes', ?, ?)",
+                   { memories[i].memory_id, memories[i + 1].memory_id,
+                     weight01, now_ts });
+            }
+          else if (drift_mag > implies_threshold)
+            {
+              // Create implies edge for softer directional drift
+              Add (tx,
+                   "INSERT OR REPLACE INTO associations "
+                   "(source_memory_id, target_memory_id, edge_type, weight, "
+                   "last_reinforced) "
+                   "VALUES (?, ?, 'implies', ?, ?)",
                    { memories[i].memory_id, memories[i + 1].memory_id,
                      weight01, now_ts });
             }
@@ -287,7 +316,9 @@ BuildGraphFromConsolidation::Execute (OperationContext &context, Transaction &tx
 
   // Derive knob-based thresholds
   const double co_occurrence_threshold = core::CoOccurrenceThreshold (cfg.focus);
+  const double similar_threshold = core::SimilarToThreshold (cfg.focus);
   const double causal_drift_threshold = core::CausalDriftThreshold (cfg.stability);
+  const double implies_drift_threshold = core::ImpliesDriftThreshold (cfg.stability);
   const double contradiction_threshold = core::ContradictionThreshold ();
   const double reinforcement_decay = core::ReinforcementDecay (cfg.stability);
 
@@ -301,11 +332,13 @@ BuildGraphFromConsolidation::Execute (OperationContext &context, Transaction &tx
 
       // 2) Co-occurrence edges: memory <-> memory within clusters
       // Creates 'co_occurs' edges for highly similar memories
-      BuildCoOccurrenceEdges (tx, clusters, co_occurrence_threshold, now_ts);
+      BuildCoOccurrenceEdges (tx, clusters, co_occurrence_threshold,
+                              similar_threshold, now_ts);
 
       // 3) Causal edges: memory -> memory based on temporal drift
       // Creates 'causes' edges for significant semantic drift over time
-      BuildCausalEdges (tx, clusters, causal_drift_threshold, now_ts);
+      BuildCausalEdges (tx, clusters, causal_drift_threshold,
+                        implies_drift_threshold, now_ts);
 
       // 4) Contradiction edges: memory <-> memory for opposing semantics
       // Creates 'contradicts' edges for strong negative similarity

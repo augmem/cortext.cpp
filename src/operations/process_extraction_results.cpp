@@ -2,6 +2,7 @@
 
 #include "cortext/store/store.hpp"
 #include "cortext/core/algorithms.hpp"
+#include "cortext/core/knobs.hpp"
 #include "cortext/core/utils.hpp"
 #include "cortext/encoder/encoder.hpp"
 #include "cortext/extractor/extractor.hpp"
@@ -79,6 +80,19 @@ TrimLabel (const std::string &label)
       end = prev;
     }
   return std::string (start, end);
+}
+
+std::string
+NormalizeLabelKey (const std::string &label)
+{
+  std::string trimmed = TrimLabel (label);
+  std::string out;
+  out.reserve (trimmed.size ());
+  for (unsigned char c : trimmed)
+    {
+      out.push_back (static_cast<char> (std::tolower (c)));
+    }
+  return out;
 }
 
 std::optional<Eigen::VectorXf>
@@ -262,6 +276,22 @@ ProcessExtractionResults::Execute (OperationContext &context, Transaction &tx) c
     }
 
   const uint64_t now_ts = context.GetSignal ().timestamp;
+  const int label_threshold
+      = core::LabelFrequencyThreshold (context.GetConfig ().stability);
+  std::unordered_map<std::string, int> label_counts;
+  for (const auto &pending : p_ctx.pending_extraction_results)
+    {
+      for (const auto &label_entry : pending.labels)
+        {
+          const std::string label_key
+              = NormalizeLabelKey (label_entry.label);
+          if (label_key.empty ())
+            {
+              continue;
+            }
+          label_counts[label_key] += 1;
+        }
+    }
 
   for (const auto &result : p_ctx.pending_extraction_results)
     {
@@ -320,7 +350,13 @@ ProcessExtractionResults::Execute (OperationContext &context, Transaction &tx) c
       for (const auto &label_entry : result.labels)
         {
           const std::string label = TrimLabel (label_entry.label);
-          if (label.empty ())
+          const std::string label_key = NormalizeLabelKey (label_entry.label);
+          if (label.empty () || label_key.empty ())
+            {
+              continue;
+            }
+          if (label_threshold > 1
+              && label_counts[label_key] < label_threshold)
             {
               continue;
             }
@@ -329,7 +365,7 @@ ProcessExtractionResults::Execute (OperationContext &context, Transaction &tx) c
               = ComputeLabelSalience (label, summary_embedding, *encoder);
 
           // Use label text as source_id for uniqueness.
-          std::string source_id = label;
+          std::string source_id = label_key;
 
           // Check if this label already exists
           auto existing = tx.Execute (
@@ -386,7 +422,7 @@ ProcessExtractionResults::Execute (OperationContext &context, Transaction &tx) c
           // Attach label to summary (has_label) and track for relation linking
           if (label_memory_id > 0)
             {
-              label_memory_ids[label] = label_memory_id;
+              label_memory_ids[label_key] = label_memory_id;
               if (summary_memory_id > 0)
                 {
                   const double weight01 = core::Clamp (salience, 0.0, 1.0);
@@ -406,13 +442,15 @@ ProcessExtractionResults::Execute (OperationContext &context, Transaction &tx) c
           long long subject_id = 0;
           long long object_id = 0;
 
-          auto it_subj = label_memory_ids.find (TrimLabel (relation.subject));
+          auto it_subj
+              = label_memory_ids.find (NormalizeLabelKey (relation.subject));
           if (it_subj != label_memory_ids.end ())
             {
               subject_id = it_subj->second;
             }
 
-          auto it_obj = label_memory_ids.find (TrimLabel (relation.object));
+          auto it_obj
+              = label_memory_ids.find (NormalizeLabelKey (relation.object));
           if (it_obj != label_memory_ids.end ())
             {
               object_id = it_obj->second;
