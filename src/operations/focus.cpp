@@ -68,19 +68,20 @@ UpdateFocus::Execute (OperationContext &context, Transaction &tx) const
   // Appendix D: recent_context already includes x_t via UpdateRecentContext.
   double observed_cosine = 0.0;
   const size_t n_ctx = p_ctx.recent_context_embeddings.size ();
+  size_t ctx_window_size = 0;
+  size_t denom = 0;
+  size_t start = 0;
   if (n_ctx > 0 && signal.embedding.size () > 0)
     {
       Eigen::VectorXf mean_context
           = Eigen::VectorXf::Zero (signal.embedding.size ());
-      const size_t ctx_window_size
-          = static_cast<size_t> (core::NCtx (config.stability));
-      const size_t start
-          = (n_ctx > ctx_window_size) ? (n_ctx - ctx_window_size) : 0;
+      ctx_window_size = static_cast<size_t> (core::NCtx (config.stability));
+      start = (n_ctx > ctx_window_size) ? (n_ctx - ctx_window_size) : 0;
       for (size_t i = start; i < n_ctx; ++i)
         {
           mean_context += p_ctx.recent_context_embeddings[i];
         }
-      const size_t denom = (n_ctx > ctx_window_size) ? ctx_window_size : n_ctx;
+      denom = (n_ctx > ctx_window_size) ? ctx_window_size : n_ctx;
       if (denom > 0)
         {
           mean_context /= static_cast<float> (denom);
@@ -110,7 +111,13 @@ UpdateFocus::Execute (OperationContext &context, Transaction &tx) const
 
   telemetry::LogDebug (
       "cortext.focus.update",
-      { telemetry::Attribute::Double ("observed_cosine", observed_cosine),
+      { telemetry::Attribute::Double ("F", config.focus),
+        telemetry::Attribute::Double ("u_t", p_ctx.u_t),
+        telemetry::Attribute::Int64 ("n_ctx", static_cast<int64_t> (n_ctx)),
+        telemetry::Attribute::Int64 ("ctx_window_size", static_cast<int64_t> (ctx_window_size)),
+        telemetry::Attribute::Int64 ("ctx_start", static_cast<int64_t> (start)),
+        telemetry::Attribute::Int64 ("ctx_denom", static_cast<int64_t> (denom)),
+        telemetry::Attribute::Double ("observed_cosine", observed_cosine),
         telemetry::Attribute::Double ("mapped_cosine", mapped_cosine),
         telemetry::Attribute::Double ("alpha_f", alpha_f),
         telemetry::Attribute::Double ("weight_relevance", p_ctx.weight_relevance),

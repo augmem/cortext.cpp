@@ -57,8 +57,8 @@ UpdateAccumulator::Execute (OperationContext &context,
   // Get composite score (default to 0.0)
   const double score = context.GetCompositeScore ().value_or (0.0);
 
-  // Get drift magnitude from metrics
-  const double drift_mag = context.GetMetric (Metric::drift_mag).value_or (0.0);
+  // Use drift step for accumulation (Section 4.4.2)
+  const double drift_step = context.GetAccumulatorDriftStep ();
 
   // Get emotional metadata from context (Section 6.1.1)
   const double emotion_intensity = p_ctx.emotion_intensity_ewma;
@@ -73,7 +73,7 @@ UpdateAccumulator::Execute (OperationContext &context,
       state.Reset (signal.embedding, signal.timestamp);
       state.s_sum = score;
       state.s_max = score;
-      state.drift_acc = drift_mag * 0.5;
+      state.drift_acc = drift_step * 0.5;
       state.episode_id = episode_id;
 
       // Track emotional metadata (Section 6.1.1)
@@ -117,7 +117,7 @@ UpdateAccumulator::Execute (OperationContext &context,
       acc.Reset (signal.embedding, signal.timestamp);
       acc.s_sum = score;
       acc.s_max = score;
-      acc.drift_acc = drift_mag * 0.5;
+      acc.drift_acc = drift_step * 0.5;
       acc.episode_id = episode_id;
 
       // Track emotional metadata (Section 6.1.1)
@@ -148,7 +148,7 @@ UpdateAccumulator::Execute (OperationContext &context,
     }
 
   // Accumulate into memory
-  acc.Accumulate (signal.embedding, score, drift_mag);
+  acc.Accumulate (signal.embedding, score, drift_step);
 
   // Track emotional metadata (Section 6.1.1)
   acc.s_emotion_max = std::max (acc.s_emotion_max, emotion_intensity);

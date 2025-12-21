@@ -56,8 +56,9 @@ UpdateThreshold::Execute (OperationContext &context, Transaction &tx) const
   // 1) Determine observed score for this signal.
   // Prefer a composite score set by earlier operations; fallback to
   // relevance weight (bounded [0,1]).
+  const double fallback_score = p_ctx.weight_relevance;
   double observed_score
-      = context.GetCompositeScore ().value_or (p_ctx.weight_relevance);
+      = context.GetCompositeScore ().value_or (fallback_score);
   observed_score = core::Clamp (observed_score, constants::kNormalizedMin,
                                 constants::kNormalizedMax);
 
@@ -93,6 +94,7 @@ UpdateThreshold::Execute (OperationContext &context, Transaction &tx) const
 
   // 5) EWMA toward target with α_T schedule.
   const double alpha_T = core::AlphaT (cfg.stability, p_ctx.u_t);
+  const double T_dynamic_prev = p_ctx.T_dynamic;
   p_ctx.T_dynamic = core::Ewma (p_ctx.T_dynamic, T_target,
                                 core::Clamp (alpha_T, constants::kNormalizedMin,
                                              constants::kNormalizedMax));
@@ -122,6 +124,7 @@ UpdateThreshold::Execute (OperationContext &context, Transaction &tx) const
   // α_dt smoothing for dt_ema
   const double alpha_dt
       = 1.0 - std::exp (-delta_t / core::TauDt (cfg.stability));
+  const double dt_ema_prev = p_ctx.dt_ema;
   p_ctx.dt_ema = (1.0 - alpha_dt) * p_ctx.dt_ema + alpha_dt * delta_t;
   const double dt_base = std::max (p_ctx.dt_ema, core::DtFloor (cfg.stability));
 
@@ -177,6 +180,7 @@ UpdateThreshold::Execute (OperationContext &context, Transaction &tx) const
   p_ctx.T_dynamic = core::Clamp (p_ctx.T_dynamic + delta_total, Tmin, Tmax);
 
   // 9) Hysteresis band derived from Stability knob, smoothed by α_T.
+  const double hysteresis_prev = p_ctx.hysteresis;
   p_ctx.hysteresis = core::Clamp (
       core::Ewma (p_ctx.hysteresis, hysteresis_val, alpha_T),
       constants::kHysteresisBandMin, constants::kHysteresisBandMax);
@@ -186,9 +190,46 @@ UpdateThreshold::Execute (OperationContext &context, Transaction &tx) const
   context.SetThresholdHysteresis (p_ctx.hysteresis);
 
   telemetry::LogDebug("cortext.threshold", {
+    telemetry::Attribute::Double("observed_score", observed_score),
+    telemetry::Attribute::Double("fallback_score", fallback_score),
+    telemetry::Attribute::Int64("recent_scores_count", static_cast<int64_t> (count_scores)),
+    telemetry::Attribute::Int64("tail_count", static_cast<int64_t> (tail_count)),
+    telemetry::Attribute::Double("rho_prior", rho_prior),
     telemetry::Attribute::Double("prior_threshold", T_prior),
     telemetry::Attribute::Double("observed_p90", observed_p90),
+    telemetry::Attribute::Double("rho_obs", rho_obs),
+    telemetry::Attribute::Double("denom", denom),
+    telemetry::Attribute::Double("T_target", T_target),
+    telemetry::Attribute::Double("alpha_T", alpha_T),
+    telemetry::Attribute::Double("T_dynamic_prev", T_dynamic_prev),
     telemetry::Attribute::Double("T_dynamic", p_ctx.T_dynamic),
+    telemetry::Attribute::Double("delta_sens", delta_sens),
+    telemetry::Attribute::Double("delta_prec", delta_prec),
+    telemetry::Attribute::Double("delta_emo", delta_emo),
+    telemetry::Attribute::Double("delta_mood", delta_mood),
+    telemetry::Attribute::Double("delta_total", delta_total),
+    telemetry::Attribute::Double("delta_t", delta_t),
+    telemetry::Attribute::Double("alpha_dt", alpha_dt),
+    telemetry::Attribute::Double("dt_ema_prev", dt_ema_prev),
+    telemetry::Attribute::Double("dt_ema", p_ctx.dt_ema),
+    telemetry::Attribute::Double("dt_base", dt_base),
+    telemetry::Attribute::Double("tau_rate", tau_rate),
+    telemetry::Attribute::Double("alpha_rate", alpha_rate),
+    telemetry::Attribute::Double("beta", beta),
+    telemetry::Attribute::Double("ess", ess),
+    telemetry::Attribute::Double("reliability", reliability),
+    telemetry::Attribute::Double("rate_target", rate_target),
+    telemetry::Attribute::Double("rate_err", rate_err),
+    telemetry::Attribute::Double("hysteresis_val", hysteresis_val),
+    telemetry::Attribute::Double("cap_homeo", cap),
+    telemetry::Attribute::Double("maturity", maturity),
+    telemetry::Attribute::Double("kappa_r", kappa_r),
+    telemetry::Attribute::Double("delta_homeo", delta_homeo),
+    telemetry::Attribute::Double("max_delta_per_min", max_delta_per_min),
+    telemetry::Attribute::Double("cap_total", cap_total),
+    telemetry::Attribute::Double("Tmin", Tmin),
+    telemetry::Attribute::Double("Tmax", Tmax),
+    telemetry::Attribute::Double("hysteresis_prev", hysteresis_prev),
     telemetry::Attribute::Double("hysteresis", p_ctx.hysteresis)
   });
 }

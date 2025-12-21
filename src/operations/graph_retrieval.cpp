@@ -57,6 +57,7 @@ CreateReinforcementEdges (Transaction &tx,
         }
     }
 }
+
 } // namespace
 
 void
@@ -422,6 +423,10 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
 
   // Debug logging
   telemetry::LogDebug ("cortext.graph_retrieval", {
+    telemetry::Attribute::Double ("dup_thresh", dup_thresh),
+    telemetry::Attribute::Int64 ("write_exclusion_ts", static_cast<int64_t> (write_exclusion_ts)),
+    telemetry::Attribute::Bool ("stored_id_present", stored_id.has_value ()),
+    telemetry::Attribute::Int64 ("selected_count", static_cast<int64_t> (added)),
     telemetry::Attribute::Int64 ("seed_count", static_cast<int64_t> (seeds.size ())),
     telemetry::Attribute::Int64 ("expansion_depth", static_cast<int64_t> (depth)),
     telemetry::Attribute::Int64 ("final_candidate_count", static_cast<int64_t> (scored.size ()))

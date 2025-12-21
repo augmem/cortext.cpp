@@ -199,12 +199,16 @@ UpdateUncertainty::Execute (OperationContext &context, Transaction &tx) const
             .value_or (0.0);
   double novelty_surprise_spikes = 0.0;
   bool has_novelty_surprise = false;
+  double w_novelty = -1.0;
+  double w_surprise = -1.0;
+  double w_novelty_surprise_sum = -1.0;
   if (novelty_measure.has_value () && embedding_surprisal_val > 0.0)
     {
       // Weighted blend with weights = normalize([S, 1 − T])
-      double w_novelty = config.sensitivity;
-      double w_surprise = 1.0 - config.stability;
+      w_novelty = config.sensitivity;
+      w_surprise = 1.0 - config.stability;
       const double wsum = std::max (w_novelty, 0.0) + std::max (w_surprise, 0.0);
+      w_novelty_surprise_sum = wsum;
       if (wsum <= kWeightEpsilon)
         {
           w_novelty = 0.5;
@@ -262,15 +266,15 @@ UpdateUncertainty::Execute (OperationContext &context, Transaction &tx) const
 
   double u_raw = 0.0;
   bool used_primary = false;
+  double weights_sum = 0.0;
   if (!metrics.empty ())
     {
       // Normalize weights and compute weighted average
-      double wsum = 0.0;
       for (double w : weights)
         {
-          wsum += std::max (w, 0.0);
+          weights_sum += std::max (w, 0.0);
         }
-      if (wsum <= kWeightEpsilon)
+      if (weights_sum <= kWeightEpsilon)
         {
           const double uniform = 1.0 / static_cast<double> (weights.size ());
           for (double &w : weights)
@@ -282,7 +286,7 @@ UpdateUncertainty::Execute (OperationContext &context, Transaction &tx) const
         {
           for (double &w : weights)
             {
-              w = std::max (w, 0.0) / wsum;
+              w = std::max (w, 0.0) / weights_sum;
             }
         }
       for (size_t i = 0; i < metrics.size (); ++i)
@@ -321,10 +325,16 @@ UpdateUncertainty::Execute (OperationContext &context, Transaction &tx) const
     telemetry::Attribute::Double("focus_entropy", focus_entropy.value_or(-1.0)),
     telemetry::Attribute::Double("coh_complement", coh_complement),
     telemetry::Attribute::Double("novelty_surprise", has_novelty_surprise ? novelty_surprise_spikes : -1.0),
+    telemetry::Attribute::Double("w_novelty", w_novelty),
+    telemetry::Attribute::Double("w_surprise", w_surprise),
+    telemetry::Attribute::Double("w_novelty_surprise_sum", w_novelty_surprise_sum),
     telemetry::Attribute::Double("weight_S", config.sensitivity),
     telemetry::Attribute::Double("weight_F", config.focus),
     telemetry::Attribute::Double("weight_1minusT", 1.0 - config.stability),
     telemetry::Attribute::Double("weight_Sx1minusT", config.sensitivity * (1.0 - config.stability)),
+    telemetry::Attribute::Int64("metrics_count", static_cast<int64_t> (metrics.size ())),
+    telemetry::Attribute::Double("weights_sum", weights_sum),
+    telemetry::Attribute::Double("alpha_u", alpha_u),
     telemetry::Attribute::Bool("used_primary", used_primary)
   });
 }

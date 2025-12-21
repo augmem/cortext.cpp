@@ -252,7 +252,7 @@ erDiagram
         real reliability "Section 4.2"
         real u_uncertainty "Section 1.4"
         blob last_embedding "Section 3.1.4"
-        blob delta_x_trend "Section 3.1.4"
+        blob x_pred_ema "Section 3.1.4"
         real delta_half_life_adj "Section 3.1.4"
         real sustained_influence "Section 3.1.4"
         real wm_maintenance_cost "Section 6.1"

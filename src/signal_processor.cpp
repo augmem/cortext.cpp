@@ -562,12 +562,12 @@ LoadState (Store &store, ProcessorContext &ctx)
           if (emb.size () > 0)
             ctx.last_embedding = std::move (emb);
         }
-      auto delta_trend_it = row.find ("delta_x_trend");
-      if (delta_trend_it != row.end () && delta_trend_it->second.has_value ())
+      auto pred_ema_it = row.find ("x_pred_ema");
+      if (pred_ema_it != row.end () && pred_ema_it->second.has_value ())
         {
-          Eigen::VectorXf trend = BlobToEigen (delta_trend_it->second);
-          if (trend.size () > 0)
-            ctx.delta_x_trend = std::move (trend);
+          Eigen::VectorXf pred = BlobToEigen (pred_ema_it->second);
+          if (pred.size () > 0)
+            ctx.x_pred_ema = std::move (pred);
         }
 
       // === Blender weights (from unified state table) ===
@@ -1278,7 +1278,7 @@ SignalProcessor::PersistState (Transaction &tx)
       // Uncertainty
       "u_uncertainty, "
       // Embedding prediction
-      "last_embedding, delta_x_trend, delta_half_life_adj, sustained_influence, "
+      "last_embedding, x_pred_ema, delta_half_life_adj, sustained_influence, "
       // Working memory
       "wm_maintenance_cost, wm_slot_count, wm_last_accepted, wm_last_chunked, "
       // Metacognition
@@ -1341,8 +1341,8 @@ SignalProcessor::PersistState (Transaction &tx)
         context_->last_embedding.has_value ()
             ? std::any (ToFloatVector (*context_->last_embedding))
             : std::any (std::vector<float> ()),
-        context_->delta_x_trend.has_value ()
-            ? std::any (ToFloatVector (*context_->delta_x_trend))
+        context_->x_pred_ema.has_value ()
+            ? std::any (ToFloatVector (*context_->x_pred_ema))
             : std::any (std::vector<float> ()),
         context_->delta_half_life_adj, context_->sustained_influence,
         // Working memory

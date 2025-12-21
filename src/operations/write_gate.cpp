@@ -80,10 +80,10 @@ ComputeWriteGate::Execute (OperationContext &context,
   context.SetAccumulatorWriteDecision (write_accumulator);
   context.SetWriteDecision (write_accumulator);
 
+  const double rho = core::RepresentativeBlendRho (config.focus);
   if (write_accumulator)
     {
       // Compute representative embedding (Section 4.4.5)
-      const double rho = core::RepresentativeBlendRho (config.focus);
       Eigen::VectorXf e_rep = rho * acc.mu_acc + (1.0 - rho) * acc.e_peak;
 
       // Normalize
@@ -134,10 +134,24 @@ ComputeWriteGate::Execute (OperationContext &context,
   telemetry::RecordHistogram ("cortext.accumulator.coverage", coverage);
 
   telemetry::LogDebug ("cortext.write_gate", {
+    telemetry::Attribute::Bool ("flush", flush),
+    telemetry::Attribute::Bool ("spike_bypass", spike_bypass),
+    telemetry::Attribute::Double ("n_signals", static_cast<double> (n)),
+    telemetry::Attribute::Double ("n_ctx", n_ctx),
+    telemetry::Attribute::Double ("coverage", coverage),
+    telemetry::Attribute::Double ("alpha", alpha),
+    telemetry::Attribute::Double ("beta", beta),
     telemetry::Attribute::Double ("s_max", acc.s_max),
     telemetry::Attribute::Double ("s_avg", s_avg),
     telemetry::Attribute::Double ("S_window", S_window),
+    telemetry::Attribute::Double ("T_dynamic", T_dynamic),
+    telemetry::Attribute::Double ("tau_refrac", tau_refrac),
+    telemetry::Attribute::Double ("k_refrac", k_refrac),
+    telemetry::Attribute::Double ("dt_write", dt_write),
     telemetry::Attribute::Double ("refractory_mult", M_write_refrac),
+    telemetry::Attribute::Double ("theta_accumulator", theta_accumulator),
+    telemetry::Attribute::Double ("rho", rho),
+    telemetry::Attribute::Bool ("force_write", force_write),
     telemetry::Attribute::Bool ("write_accumulator", write_accumulator)
   });
 }

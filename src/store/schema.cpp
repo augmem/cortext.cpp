@@ -314,7 +314,7 @@ GetCoreMigrations ()
               "  u_uncertainty REAL NOT NULL DEFAULT 0.0,"
               // Embedding prediction
               "  last_embedding BLOB,"
-              "  delta_x_trend BLOB,"
+              "  x_pred_ema BLOB,"
               "  delta_half_life_adj REAL NOT NULL DEFAULT 0.0,"
               "  sustained_influence REAL NOT NULL DEFAULT 0.0,"
               // Working memory

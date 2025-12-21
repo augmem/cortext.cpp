@@ -302,19 +302,25 @@ CoherenceNeutral (double T)
   return Lerp (0.45, 0.55, Clamp (T, 0.0, 1.0));
 }
 
-// Trend EWMA alpha for embedding prediction error
+// EMA prediction update rate
 inline double
-TrendAlpha (double S, double T)
+PredEmaBeta (double T)
 {
-  return Lerp (0.05, 0.20, Clamp (S, 0.0, 1.0))
-       * Lerp (1.1, 0.9, Clamp (T, 0.0, 1.0));
+  return Lerp (0.25, 0.02, Clamp (T, 0.0, 1.0));
 }
 
-// Prediction error normalization ceiling
+// Surprise reference floor for EMA prediction error
 inline double
-EmbeddingErrMax (double S, double T)
+SurpriseErrRef (double S)
 {
-  return Lerp (0.35, 0.75, Clamp (S, 0.0, 1.0))
+  return Lerp (0.25, 0.05, Clamp (S, 0.0, 1.0));
+}
+
+// Surprise sigmoid gain
+inline double
+SurpriseGain (double S, double T)
+{
+  return Lerp (6.0, 14.0, Clamp (S, 0.0, 1.0))
        * Lerp (1.1, 0.9, Clamp (T, 0.0, 1.0));
 }
 

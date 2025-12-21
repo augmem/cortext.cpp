@@ -57,8 +57,8 @@ TEST_CASE (
     "ComputeMetrics uses embedding_surprisal for surprise metric",
     "[operations][metrics][surprise]")
 {
-  // Reference: algorithms.md Section 3.2 Table 1 row "Prediction Error"
-  // surprise = embedding_surprisal × S × (1 − T)
+  // Reference: algorithms.md Section 3.2 Table 1 row "Surprise"
+  // surprise = embedding_surprisal × S × (1 − 0.5T)
 
   Signal s;
   s.embedding = Eigen::VectorXf::Ones (4);
@@ -81,11 +81,11 @@ TEST_CASE (
   ComputeMetrics op;
   op.Execute (ctx, cortext::testing::GetNullTransaction ());
 
-  // Verify surprise uses the formula: surprisal × S × (1 − T)
-  // = 0.6 × 0.8 × (1 − 0.2) = 0.6 × 0.8 × 0.8 = 0.384
+  // Verify surprise uses the formula: surprisal × S × (1 − 0.5T)
+  // = 0.6 × 0.8 × (1 − 0.1) = 0.6 × 0.8 × 0.9 = 0.432
   auto surprise = ctx.GetMetric (operations::Metric::surprise);
   REQUIRE (surprise.has_value ());
-  REQUIRE (*surprise == Catch::Approx (0.384).epsilon (0.001));
+  REQUIRE (*surprise == Catch::Approx (0.432).epsilon (0.001));
 }
 
 TEST_CASE (

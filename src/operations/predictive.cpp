@@ -181,6 +181,12 @@ ApplyPredictivePreActivation::Execute (OperationContext &context, Transaction &t
 
   // Debug logging
   telemetry::LogDebug ("cortext.predictive", {
+    telemetry::Attribute::Double ("conf_thresh", conf_thresh),
+    telemetry::Attribute::Double ("pad", pad),
+    telemetry::Attribute::Double ("base_delta", base_delta),
+    telemetry::Attribute::Double ("update_rate_on_surprise", update_rate_on_surprise),
+    telemetry::Attribute::Double ("surp_sens", surp_sens),
+    telemetry::Attribute::Double ("surprise_01", surprise_01),
     telemetry::Attribute::Double ("prediction_norm", static_cast<double> (pred.norm ())),
     telemetry::Attribute::Int64 ("boost_count", static_cast<int64_t> (boost_count))
   });

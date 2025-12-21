@@ -39,12 +39,12 @@ Effective thresholds incorporate refractory pressure:
 
 ## Marginal Utility Score
 
-The marginal utility (MU) of a candidate memory combines four factors. Context comparisons use memory centroids rather than individual signal embeddings:
+The marginal utility (MU) of a candidate memory combines five factors. Context comparisons use memory centroids rather than individual signal embeddings:
 
 ```
 # Context window contains recent memory centroids, not individual signals
 ctx_window ← recent_memory_centroids  # bounded deque of recent memory representatives (e_rep)
-q_retrieval ← (e_rep if available else μ_acc)  # capture before any accumulator reset
+q_retrieval ← μ_acc  # accumulator centroid query
 included_set ← {embedding(m) | m already injected into the current context window}
 ```
 Fallback: if included_set is empty, treat redundancy(·, included_set) = 0 and overlap_star = −1.
@@ -57,13 +57,15 @@ else:
 weights_mu_raw = [lerp(0.40, 0.60, F),   # coverage gain
          lerp(0.35, 0.25, F),   # relevance
          lerp(0.15, 0.25, S),   # redundancy penalty
-         lerp(0.15, 0.25, S)]   # incoherence penalty
-[weight_cov, weight_rel, weight_red, weight_incoh] = normalize(weights_mu_raw)
+         lerp(0.15, 0.25, S),   # incoherence penalty
+         lerp(0.20, 0.50, S)]   # surprise bonus
+[weight_cov, weight_rel, weight_red, weight_incoh, weight_surp] = normalize(weights_mu_raw)
 
 mu = weight_cov × coverage_gain(candidate | included_set) +
       weight_rel × map01(cos(candidate, ctx_centroid)) −
       weight_red × redundancy(candidate, included_set) −
-      weight_incoh × (1 − coherence_struct_t)  # structural coherence penalty
+      weight_incoh × (1 − coherence_struct_t) +
+      weight_surp × surprisal_t  # surprise bonus
 ```
 
 With map01 applied, each MU term is in [0, 1], so μ is calibrated to the same range as τ_mu.
@@ -134,7 +136,7 @@ This logic suppresses low-drift interrupts unless the marginal utility substanti
 
 ## Streaming Pacing
 
-Streaming retrieval is gated by cumulative drift rate within the accumulation unit. Retrieval checks trigger when drift exceeds threshold or at boundaries. Retrieval uses q_retrieval captured before any accumulator reset for this step. Retrieval returns a candidate pool already filtered by write‑exclusion and WM‑overlap rules; the interrupt gate then applies novelty/utility thresholds and redundancy penalties.
+Streaming retrieval is gated by cumulative drift rate within the accumulation unit. Retrieval checks trigger when drift exceeds threshold or at boundaries. Retrieval uses q_retrieval (the accumulator centroid) captured before any accumulator reset for this step. Retrieval returns a candidate pool already filtered by write‑exclusion and WM‑overlap rules; the interrupt gate then applies novelty/utility thresholds and redundancy penalties.
 
 ```
 # Pacing tracks drift within current memory formation

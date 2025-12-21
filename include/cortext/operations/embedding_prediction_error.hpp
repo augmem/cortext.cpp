@@ -7,9 +7,9 @@ namespace cortext::operations
 
 /// @brief Section 3.1.4: Embedding Prediction Error
 ///
-/// Computes surprisal based on embedding trajectory prediction.
-/// Uses EWMA to track movement trends in embedding space, predicts
-/// the next embedding, and measures prediction error via cosine distance.
+/// Computes surprisal using EMA-based expectation of the embedding stream.
+/// The predictor state tracks an exponential moving average of embeddings,
+/// and surprisal is derived from deviation between expectation and input.
 ///
 /// This REPLACES the previous logprob-based surprise (Algorithm 13),
 /// providing a pure embedding-based approach that doesn't require

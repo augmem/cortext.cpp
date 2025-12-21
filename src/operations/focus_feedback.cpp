@@ -20,6 +20,19 @@ ApplyFocusFeedback::Execute (OperationContext &context, Transaction &tx) const
   // focus, otherwise fall back to the prior-derived relevance weight.
   const double alpha_f = constants::kAlphaFBase;
   const double beta_f = constants::kBetaFBase;
+  const double aw_min = static_cast<double> (core::kAttentionWidthMin);
+  const double aw_max = static_cast<double> (core::kAttentionWidthMax);
+  double F = 1.0;
+  if (aw_max > aw_min)
+    {
+      const double prior_ratio
+          = (p_ctx.attention_width_prior - aw_min) / (aw_max - aw_min);
+      F = core::Clamp (1.0 - prior_ratio, 0.0, 1.0);
+    }
+  const double S = core::Clamp ((p_ctx.weight_surprise_prior - 0.2) / 0.8,
+                                0.0, 1.0);
+  const double T
+      = core::Clamp (1.0 - 2.0 * p_ctx.drift_weight_prior, 0.0, 1.0);
 
   double contextual_gain_mean = 0.0;
   double weight_adjustment = 0.0;
@@ -69,13 +82,29 @@ ApplyFocusFeedback::Execute (OperationContext &context, Transaction &tx) const
       contextual_gain_mean /= event_count;
     }
 
+  const double d_step = context.GetAccumulatorDriftStep ();
+  const double dilation_force = S * (1.0 - T) * d_step;
+  const double restoring_force
+      = F * (p_ctx.attention_width_prior - p_ctx.attention_width);
+  const double prev_width = p_ctx.attention_width;
+  p_ctx.attention_width = core::Clamp (
+      p_ctx.attention_width + dilation_force + restoring_force,
+      aw_min, aw_max);
+  attention_width_delta += (p_ctx.attention_width - prev_width);
+
   telemetry::LogDebug ("cortext.focus_feedback",
                        { telemetry::Attribute::Double ("contextual_gain_mean",
                                                        contextual_gain_mean),
                          telemetry::Attribute::Double ("weight_adjustment",
                                                        weight_adjustment),
                          telemetry::Attribute::Double ("attention_width_delta",
-                                                       attention_width_delta) });
+                                                       attention_width_delta),
+                         telemetry::Attribute::Double ("F", F),
+                         telemetry::Attribute::Double ("S", S),
+                         telemetry::Attribute::Double ("T", T),
+                         telemetry::Attribute::Double ("drift_step", d_step),
+                         telemetry::Attribute::Double ("dilation_force", dilation_force),
+                         telemetry::Attribute::Double ("restoring_force", restoring_force) });
 }
 
 } // namespace cortext::operations

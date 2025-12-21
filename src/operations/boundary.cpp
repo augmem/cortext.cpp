@@ -50,7 +50,8 @@ DetectBoundary::Execute (OperationContext &context,
     }
 
   // Compute coherence drop (normalized to [0,1])
-  const double coh_drop = core::Clamp ((acc.coherence_prev - coherence) * 0.5,
+  const double coherence_prev = acc.coherence_prev;
+  const double coh_drop = core::Clamp ((coherence_prev - coherence) * 0.5,
                                        0.0, 1.0);
 
   // Update coherence_prev for next signal
@@ -81,6 +82,7 @@ DetectBoundary::Execute (OperationContext &context,
   bool flush = false;
   bool drift_trigger = false;
   bool timeout_trigger = false;
+  bool pressure_trigger = false;
 
   // 1. Boundary score exceeds threshold
   const double b_thresh
@@ -103,13 +105,23 @@ DetectBoundary::Execute (OperationContext &context,
       telemetry::AddCounter ("cortext.accumulator.flush_max_time", 1);
     }
 
-  // 3. Accumulated drift exceeds max
-  const double max_drift = core::MaxMemoryDrift (config.sensitivity);
-  if (acc.drift_acc > max_drift)
+  // 3. Pressure vs capacity (dynamic flush probability)
+  const double base_capacity = core::MaxMemoryDrift (config.sensitivity);
+  const double capacity_scale = (1.0 + config.stability)
+                                * (1.0 + config.stability);
+  const double capacity = base_capacity * capacity_scale;
+  const double pressure = acc.drift_acc * (1.0 + config.sensitivity);
+  const double saturation_ratio = pressure / std::max (capacity, kEpsilon);
+  const double k_flush
+      = core::SurpriseGain (config.sensitivity, config.stability);
+  const double pressure_score
+      = core::Sigmoid ((saturation_ratio - 1.0) * k_flush);
+  if (pressure_score > b_thresh)
     {
       flush = true;
+      pressure_trigger = true;
       drift_trigger = true;
-      telemetry::AddCounter ("cortext.accumulator.flush_max_drift", 1);
+      telemetry::AddCounter ("cortext.accumulator.flush_pressure", 1);
     }
 
   context.SetFlushRequired (flush);
@@ -155,12 +167,37 @@ DetectBoundary::Execute (OperationContext &context,
   telemetry::RecordHistogram ("cortext.accumulator.gap_score", gap_score);
 
   telemetry::LogDebug ("cortext.boundary", {
+    telemetry::Attribute::Double ("F", config.focus),
+    telemetry::Attribute::Double ("S", config.sensitivity),
+    telemetry::Attribute::Double ("T", config.stability),
+    telemetry::Attribute::Double ("coherence_prev", coherence_prev),
+    telemetry::Attribute::Double ("coherence_curr", coherence),
+    telemetry::Attribute::Double ("coh_drop", coh_drop),
+    telemetry::Attribute::Double ("d_step", d_step),
+    telemetry::Attribute::Double ("eta_prev", eta_prev),
+    telemetry::Attribute::Double ("drift_spike", drift_spike),
+    telemetry::Attribute::Double ("w_gap", w_gap),
+    telemetry::Attribute::Double ("w_drift", w_drift),
+    telemetry::Attribute::Double ("w_coh", w_coh),
     telemetry::Attribute::Double ("boundary_score", boundary_score),
+    telemetry::Attribute::Double ("boundary_threshold", b_thresh),
     telemetry::Attribute::Double ("elapsed_time_ms", memory_elapsed),
+    telemetry::Attribute::Double ("max_time_s", max_time),
     telemetry::Attribute::Double ("drift_accum", acc.drift_acc),
+    telemetry::Attribute::Double ("base_capacity", base_capacity),
+    telemetry::Attribute::Double ("capacity", capacity),
+    telemetry::Attribute::Double ("pressure", pressure),
+    telemetry::Attribute::Double ("saturation_ratio", saturation_ratio),
+    telemetry::Attribute::Double ("pressure_score", pressure_score),
+    telemetry::Attribute::Double ("k_flush", k_flush),
     telemetry::Attribute::Double ("signal_gap_s", signal_gap),
+    telemetry::Attribute::Double ("dt_ref_s", dt_ref),
     telemetry::Attribute::Double ("gap_ref_s", gap_ref_s),
+    telemetry::Attribute::Double ("gap_z", gap_z),
     telemetry::Attribute::Double ("gap_score", gap_score),
+    telemetry::Attribute::Bool ("trigger_drift", drift_trigger),
+    telemetry::Attribute::Bool ("trigger_timeout", timeout_trigger),
+    telemetry::Attribute::Bool ("trigger_pressure", pressure_trigger),
     telemetry::Attribute::Bool ("should_flush", flush)
   });
 }

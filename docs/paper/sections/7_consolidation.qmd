@@ -147,7 +147,7 @@ for i in range(len(temporal_order) − 1):
 
 ## Graph-Augmented Retrieval
 
-Retrieval combines vector similarity with graph expansion. Both initial retrieval and re-ranking use the memory centroid (μ_acc from @sec-accumulator) as the query vector, ensuring retrieved memories are ranked by relevance to the overall context rather than momentary signal fluctuations:
+Retrieval combines vector similarity with graph expansion. The query vector is the **current accumulator centroid** (μ_acc), which aggregates the embeddings of the signals observed so far in the unflushed memory. This makes retrieval responsive to the evolving thought unit rather than any single micro‑signal.
 
 ```
 # Query and re-rank using current memory centroid

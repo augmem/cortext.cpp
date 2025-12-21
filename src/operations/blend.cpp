@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <sstream>
 
 namespace cortext::operations
 {
@@ -96,6 +97,67 @@ SupportedMetrics ()
     operations::Metric::periphery, operations::Metric::coverage,
   };
   return kNames;
+}
+
+inline const char *
+MetricLabel (operations::Metric m)
+{
+  switch (m)
+    {
+    case operations::Metric::relevance:
+      return "relevance";
+    case operations::Metric::mismatch:
+      return "mismatch";
+    case operations::Metric::surprise:
+      return "surprise";
+    case operations::Metric::rarity:
+      return "rarity";
+    case operations::Metric::drift:
+      return "drift";
+    case operations::Metric::utility:
+      return "utility";
+    case operations::Metric::salience:
+      return "salience";
+    case operations::Metric::valence:
+      return "valence";
+    case operations::Metric::arousal:
+      return "arousal";
+    case operations::Metric::contradiction:
+      return "contradiction";
+    case operations::Metric::periphery:
+      return "periphery";
+    case operations::Metric::coverage:
+      return "coverage";
+    case operations::Metric::focus_spread:
+      return "focus_spread";
+    case operations::Metric::drift_mag:
+      return "drift_mag";
+    case operations::Metric::embedding_surprisal:
+      return "embedding_surprisal";
+    case operations::Metric::aw_prev:
+      return "aw_prev";
+    case operations::Metric::rate_prev:
+      return "rate_prev";
+    case operations::Metric::hys_prev:
+      return "hys_prev";
+    }
+  return "unknown";
+}
+
+inline std::string
+BuildVectorString (const std::vector<operations::Metric> &names,
+                   const std::vector<double> &values)
+{
+  std::ostringstream out;
+  for (std::size_t i = 0; i < names.size () && i < values.size (); ++i)
+    {
+      if (i > 0)
+        {
+          out << ", ";
+        }
+      out << MetricLabel (names[i]) << "=" << values[i];
+    }
+  return out.str ();
 }
 
 inline double
@@ -394,6 +456,7 @@ ComputeCompositeScore::Execute (OperationContext &context, Transaction &tx) cons
   std::vector<double> x = BuildMetricVector (names, metrics);
   std::vector<double> w_boot (names.size (), 0.0);
   std::vector<double> w_rls (names.size (), 0.0);
+  std::vector<double> mults (names.size (), 1.0);
 
   // Compute bootstrap weights using formal coefficient matrices
   for (std::size_t i = 0; i < names.size (); ++i)
@@ -443,6 +506,7 @@ ComputeCompositeScore::Execute (OperationContext &context, Transaction &tx) cons
         }
       w_raw[i] *= core::Clamp (mult, constants::kNormalizedMin,
                                constants::kNormalizedMax);
+      mults[i] = mult;
     }
   double weight_sum = 0.0;
   int effective = 0;
@@ -469,8 +533,26 @@ ComputeCompositeScore::Execute (OperationContext &context, Transaction &tx) cons
 
   // Compute tau_rls for logging
   const double tau_rls = core::Lerp (kTauRlsMin, kTauRlsMax, cfg.stability);
+  std::vector<double> w_norm (w_raw.size (), 0.0);
+  if (weight_sum > 0.0)
+    {
+      for (std::size_t i = 0; i < w_raw.size (); ++i)
+        {
+          w_norm[i] = w_raw[i] / weight_sum;
+        }
+    }
 
   telemetry::LogDebug("cortext.blend.composite_score", {
+    telemetry::Attribute::Double("confidence", confidence),
+    telemetry::Attribute::Double("weight_sum", weight_sum),
+    telemetry::Attribute::Int64("effective_metrics", static_cast<int64_t> (effective)),
+    telemetry::Attribute::Double("score_gain", p_ctx.score_gain),
+    telemetry::Attribute::String("metrics", BuildVectorString(names, x)),
+    telemetry::Attribute::String("weights_boot", BuildVectorString(names, w_boot)),
+    telemetry::Attribute::String("weights_rls", BuildVectorString(names, w_rls)),
+    telemetry::Attribute::String("weights_raw", BuildVectorString(names, w_raw)),
+    telemetry::Attribute::String("weights_norm", BuildVectorString(names, w_norm)),
+    telemetry::Attribute::String("multipliers", BuildVectorString(names, mults)),
     telemetry::Attribute::Double("tau_rls", tau_rls),
     telemetry::Attribute::Double("composite_score", y)
   });

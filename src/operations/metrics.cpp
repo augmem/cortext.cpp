@@ -11,29 +11,6 @@
 
 namespace cortext::operations
 {
-namespace
-{
-
-inline Eigen::VectorXf
-ComputeMean (const std::deque<Eigen::VectorXf> &embs, int start, int end)
-{
-  if (start >= end)
-    {
-      return Eigen::VectorXf ();
-    }
-  const int n = end - start;
-  const int dim = static_cast<int> (embs[static_cast<size_t> (start)].size ());
-  Eigen::VectorXf mean = Eigen::VectorXf::Zero (dim);
-  for (int i = start; i < end; ++i)
-    {
-      mean += embs[static_cast<size_t> (i)];
-    }
-  mean /= static_cast<float> (n);
-  return mean;
-}
-
-} // namespace
-
 void
 ComputeMetrics::Execute (OperationContext &context, Transaction &tx) const
 {
@@ -54,6 +31,7 @@ ComputeMetrics::Execute (OperationContext &context, Transaction &tx) const
   double max_cos = -1.0;
   double sum_cos = 0.0;
   int count = 0;
+  double cos_mean = 0.0;
   for (int i = ctx_start; i < n_ctx_total; ++i)
     {
       const auto &emb
@@ -73,7 +51,7 @@ ComputeMetrics::Execute (OperationContext &context, Transaction &tx) const
   if (count > 0)
     {
       mean_ctx /= static_cast<float> (count);
-      const double cos_mean = core::CosineSimilarity (x, mean_ctx);
+      cos_mean = core::CosineSimilarity (x, mean_ctx);
       cos01 = core::Map01 (cos_mean);
     }
   const double relevance = core::Clamp (
@@ -107,14 +85,15 @@ ComputeMetrics::Execute (OperationContext &context, Transaction &tx) const
       constants::kNormalizedMin, constants::kNormalizedMax);
   context.SetMetric (operations::Metric::mismatch, mismatch);
 
-  // Prediction Error: embedding_surprisal × S × (1 − T)
+  // Prediction Error: embedding_surprisal × S × (1 − 0.5T)
   // Per algorithms.md Section 3.2 Table 1 row "Prediction Error"
   // Use embedding_surprisal from EmbeddingPredictionError operation
   const double embedding_surprisal
       = context.GetMetric (operations::Metric::embedding_surprisal)
             .value_or (constants::kNormalizedMin);
   const double surprise = core::Clamp (
-      embedding_surprisal * S * (constants::kNormalizedMax - T),
+      embedding_surprisal * S
+          * (constants::kNormalizedMax - constants::kOneHalf * T),
       constants::kNormalizedMin, constants::kNormalizedMax);
   context.SetMetric (operations::Metric::surprise, surprise);
 
@@ -127,31 +106,8 @@ ComputeMetrics::Execute (OperationContext &context, Transaction &tx) const
           constants::kNormalizedMin, constants::kNormalizedMax);
   context.SetMetric (operations::Metric::rarity, rarity);
 
-  // Drift: lagged centroid drift with k_ctx(T) step lag
-  const int k_ctx = core::KCtx (T);
-  double drift_mag = 0.0;
-  if (n_ctx_total >= ctx_window + k_ctx && x.size () > 0)
-    {
-      const Eigen::VectorXf mean_recent = ComputeMean (
-          p_ctx.recent_context_embeddings, n_ctx_total - ctx_window,
-          n_ctx_total);
-      const Eigen::VectorXf mean_prev
-          = ComputeMean (p_ctx.recent_context_embeddings,
-                         n_ctx_total - k_ctx - ctx_window,
-                         n_ctx_total - k_ctx);
-      if (mean_recent.size () == mean_prev.size ()
-          && mean_recent.size () > 0)
-        {
-          const Eigen::VectorXf nr
-              = (mean_recent.norm () > 0.0f)
-                    ? (mean_recent / mean_recent.norm ())
-                    : mean_recent;
-          const Eigen::VectorXf np = (mean_prev.norm () > 0.0f)
-                                         ? (mean_prev / mean_prev.norm ())
-                                         : mean_prev;
-          drift_mag = (nr - np).norm ();
-        }
-    }
+  // Drift: instantaneous step based on consecutive signals (Section 3.1.2)
+  const double drift_mag = context.GetAccumulatorDriftStep ();
   context.SetMetric (operations::Metric::drift_mag, drift_mag);
   const double drift = core::Clamp (
       (drift_mag * constants::kOneHalf)
@@ -166,11 +122,13 @@ ComputeMetrics::Execute (OperationContext &context, Transaction &tx) const
 
   // Utility (ΔSSE): normalized improvement in prediction error
   double delta_sse = 0.0;
+  double sse_prev = -1.0;
+  double sse_curr = -1.0;
   if (p_ctx.prediction_error_sse.has_value ()
       && p_ctx.prediction_error_sse_prev.has_value ())
     {
-      const double sse_prev = *p_ctx.prediction_error_sse_prev;
-      const double sse_curr = *p_ctx.prediction_error_sse;
+      sse_prev = *p_ctx.prediction_error_sse_prev;
+      sse_curr = *p_ctx.prediction_error_sse;
       const double denom = std::max (sse_prev, 1e-9);
       if (sse_prev > 0.0)
         {
@@ -211,27 +169,53 @@ ComputeMetrics::Execute (OperationContext &context, Transaction &tx) const
                                 constants::kNormalizedMax);
   double arousal = core::Clamp (context.GetArousal (), constants::kNormalizedMin,
                                 constants::kNormalizedMax);
+  double v_signed = -1.0;
+  double a01 = -1.0;
+  double viol01 = -1.0;
+  const bool has_centroids = p_ctx.centroids.has_value ();
   if (p_ctx.centroids.has_value () && x.size () == 256)
     {
-      const float v_signed = p_ctx.centroids->affect.ComputeValence (x); // [-1,1]
+      v_signed = static_cast<double> (p_ctx.centroids->affect.ComputeValence (x)); // [-1,1]
       valence = core::Clamp (constants::kOneHalf
-                                 * (static_cast<double> (v_signed)
+                                 * (v_signed
                                     + constants::kNormalizedMax),
                              constants::kNormalizedMin,
                              constants::kNormalizedMax);
-      const float a01 = p_ctx.centroids->affect.ComputeArousal (x); // [0,1]
-      arousal = core::Clamp (static_cast<double> (a01),
+      a01 = static_cast<double> (p_ctx.centroids->affect.ComputeArousal (x)); // [0,1]
+      arousal = core::Clamp (a01,
                              constants::kNormalizedMin,
                              constants::kNormalizedMax);
-      const float viol01 = p_ctx.centroids->affect.ComputeViolation (x); // [0,1]
+      viol01 = static_cast<double> (p_ctx.centroids->affect.ComputeViolation (x)); // [0,1]
       context.SetViolation (
-          core::Clamp (static_cast<double> (viol01), constants::kNormalizedMin,
+          core::Clamp (viol01, constants::kNormalizedMin,
                        constants::kNormalizedMax));
     }
   context.SetMetric (operations::Metric::valence, valence);
   context.SetMetric (operations::Metric::arousal, arousal);
 
   telemetry::LogDebug("cortext.metrics", {
+    telemetry::Attribute::Double("F", F),
+    telemetry::Attribute::Double("S", S),
+    telemetry::Attribute::Double("T", T),
+    telemetry::Attribute::Int64("ctx_window", static_cast<int64_t> (ctx_window)),
+    telemetry::Attribute::Int64("ctx_start", static_cast<int64_t> (ctx_start)),
+    telemetry::Attribute::Int64("n_ctx_total", static_cast<int64_t> (n_ctx_total)),
+    telemetry::Attribute::Int64("ctx_count", static_cast<int64_t> (count)),
+    telemetry::Attribute::Double("max_cos", max_cos),
+    telemetry::Attribute::Double("mean_cos", mean_cos),
+    telemetry::Attribute::Double("cos01", cos01),
+    telemetry::Attribute::Double("novelty", novelty),
+    telemetry::Attribute::Double("rarity_base", rarity_base),
+    telemetry::Attribute::Double("mu_sim", mu_sim),
+    telemetry::Attribute::Double("embedding_surprisal", embedding_surprisal),
+    telemetry::Attribute::Double("drift_mag", drift_mag),
+    telemetry::Attribute::Double("delta_sse", delta_sse),
+    telemetry::Attribute::Double("sse_prev", sse_prev),
+    telemetry::Attribute::Double("sse_curr", sse_curr),
+    telemetry::Attribute::Bool("has_centroids", has_centroids),
+    telemetry::Attribute::Double("v_signed", v_signed),
+    telemetry::Attribute::Double("a01", a01),
+    telemetry::Attribute::Double("viol01", viol01),
     telemetry::Attribute::Double("relevance", relevance),
     telemetry::Attribute::Double("mismatch", mismatch),
     telemetry::Attribute::Double("surprise", surprise),

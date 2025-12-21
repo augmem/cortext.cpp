@@ -108,6 +108,14 @@ ComputeFocusSpread::Execute (OperationContext &context, Transaction &tx) const
   context.SetMetric (operations::Metric::focus_spread, focus_spread);
 
   telemetry::LogDebug("cortext.compute_focus_spread", {
+    telemetry::Attribute::Double("attention_width", attention_width),
+    telemetry::Attribute::Double("width_scale", width_scale),
+    telemetry::Attribute::Int64("stream_size", static_cast<int64_t> (n)),
+    telemetry::Attribute::Int64("k_neighbors", static_cast<int64_t> (k)),
+    telemetry::Attribute::Int64("k_eff", static_cast<int64_t> (k_eff)),
+    telemetry::Attribute::Double("max_s", max_s),
+    telemetry::Attribute::Double("denom", denom),
+    telemetry::Attribute::Double("norm", norm),
     telemetry::Attribute::Double("entropy", entropy),
     telemetry::Attribute::Double("focus_spread", focus_spread)
   });

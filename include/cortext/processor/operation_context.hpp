@@ -903,6 +903,7 @@ public:
     return drift_accum_snapshot_;
   }
 
+
   // ======================================================================
   // Consolidation Cluster API (Cluster -> Summarize data passing)
   // ======================================================================

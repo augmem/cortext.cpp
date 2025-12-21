@@ -1,0 +1,3100 @@
+% Options for packages loaded elsewhere
+% Options for packages loaded elsewhere
+\PassOptionsToPackage{unicode}{hyperref}
+\PassOptionsToPackage{hyphens}{url}
+\PassOptionsToPackage{dvipsnames,svgnames,x11names}{xcolor}
+%
+\documentclass[
+  letterpaper,
+  DIV=11,
+  numbers=noendperiod]{scrartcl}
+\usepackage{xcolor}
+\usepackage{amsmath,amssymb}
+\setcounter{secnumdepth}{-\maxdimen} % remove section numbering
+\usepackage{iftex}
+\ifPDFTeX
+  \usepackage[T1]{fontenc}
+  \usepackage[utf8]{inputenc}
+  \usepackage{textcomp} % provide euro and other symbols
+\else % if luatex or xetex
+  \usepackage{unicode-math} % this also loads fontspec
+  \defaultfontfeatures{Scale=MatchLowercase}
+  \defaultfontfeatures[\rmfamily]{Ligatures=TeX,Scale=1}
+\fi
+\usepackage{lmodern}
+\ifPDFTeX\else
+  % xetex/luatex font selection
+\fi
+% Use upquote if available, for straight quotes in verbatim environments
+\IfFileExists{upquote.sty}{\usepackage{upquote}}{}
+\IfFileExists{microtype.sty}{% use microtype if available
+  \usepackage[]{microtype}
+  \UseMicrotypeSet[protrusion]{basicmath} % disable protrusion for tt fonts
+}{}
+\makeatletter
+\@ifundefined{KOMAClassName}{% if non-KOMA class
+  \IfFileExists{parskip.sty}{%
+    \usepackage{parskip}
+  }{% else
+    \setlength{\parindent}{0pt}
+    \setlength{\parskip}{6pt plus 2pt minus 1pt}}
+}{% if KOMA class
+  \KOMAoptions{parskip=half}}
+\makeatother
+% Make \paragraph and \subparagraph free-standing
+\makeatletter
+\ifx\paragraph\undefined\else
+  \let\oldparagraph\paragraph
+  \renewcommand{\paragraph}{
+    \@ifstar
+      \xxxParagraphStar
+      \xxxParagraphNoStar
+  }
+  \newcommand{\xxxParagraphStar}[1]{\oldparagraph*{#1}\mbox{}}
+  \newcommand{\xxxParagraphNoStar}[1]{\oldparagraph{#1}\mbox{}}
+\fi
+\ifx\subparagraph\undefined\else
+  \let\oldsubparagraph\subparagraph
+  \renewcommand{\subparagraph}{
+    \@ifstar
+      \xxxSubParagraphStar
+      \xxxSubParagraphNoStar
+  }
+  \newcommand{\xxxSubParagraphStar}[1]{\oldsubparagraph*{#1}\mbox{}}
+  \newcommand{\xxxSubParagraphNoStar}[1]{\oldsubparagraph{#1}\mbox{}}
+\fi
+\makeatother
+
+
+\usepackage{longtable,booktabs,array}
+\usepackage{calc} % for calculating minipage widths
+% Correct order of tables after \paragraph or \subparagraph
+\usepackage{etoolbox}
+\makeatletter
+\patchcmd\longtable{\par}{\if@noskipsec\mbox{}\fi\par}{}{}
+\makeatother
+% Allow footnotes in longtable head/foot
+\IfFileExists{footnotehyper.sty}{\usepackage{footnotehyper}}{\usepackage{footnote}}
+\makesavenoteenv{longtable}
+\usepackage{graphicx}
+\makeatletter
+\newsavebox\pandoc@box
+\newcommand*\pandocbounded[1]{% scales image to fit in text height/width
+  \sbox\pandoc@box{#1}%
+  \Gscale@div\@tempa{\textheight}{\dimexpr\ht\pandoc@box+\dp\pandoc@box\relax}%
+  \Gscale@div\@tempb{\linewidth}{\wd\pandoc@box}%
+  \ifdim\@tempb\p@<\@tempa\p@\let\@tempa\@tempb\fi% select the smaller of both
+  \ifdim\@tempa\p@<\p@\scalebox{\@tempa}{\usebox\pandoc@box}%
+  \else\usebox{\pandoc@box}%
+  \fi%
+}
+% Set default figure placement to htbp
+\def\fps@figure{htbp}
+\makeatother
+
+
+% definitions for citeproc citations
+\NewDocumentCommand\citeproctext{}{}
+\NewDocumentCommand\citeproc{mm}{%
+  \begingroup\def\citeproctext{#2}\cite{#1}\endgroup}
+\makeatletter
+ % allow citations to break across lines
+ \let\@cite@ofmt\@firstofone
+ % avoid brackets around text for \cite:
+ \def\@biblabel#1{}
+ \def\@cite#1#2{{#1\if@tempswa , #2\fi}}
+\makeatother
+\newlength{\cslhangindent}
+\setlength{\cslhangindent}{1.5em}
+\newlength{\csllabelwidth}
+\setlength{\csllabelwidth}{3em}
+\newenvironment{CSLReferences}[2] % #1 hanging-indent, #2 entry-spacing
+ {\begin{list}{}{%
+  \setlength{\itemindent}{0pt}
+  \setlength{\leftmargin}{0pt}
+  \setlength{\parsep}{0pt}
+  % turn on hanging indent if param 1 is 1
+  \ifodd #1
+   \setlength{\leftmargin}{\cslhangindent}
+   \setlength{\itemindent}{-1\cslhangindent}
+  \fi
+  % set entry spacing
+  \setlength{\itemsep}{#2\baselineskip}}}
+ {\end{list}}
+\usepackage{calc}
+\newcommand{\CSLBlock}[1]{\hfill\break\parbox[t]{\linewidth}{\strut\ignorespaces#1\strut}}
+\newcommand{\CSLLeftMargin}[1]{\parbox[t]{\csllabelwidth}{\strut#1\strut}}
+\newcommand{\CSLRightInline}[1]{\parbox[t]{\linewidth - \csllabelwidth}{\strut#1\strut}}
+\newcommand{\CSLIndent}[1]{\hspace{\cslhangindent}#1}
+
+
+
+\setlength{\emergencystretch}{3em} % prevent overfull lines
+
+\providecommand{\tightlist}{%
+  \setlength{\itemsep}{0pt}\setlength{\parskip}{0pt}}
+
+
+
+ 
+
+
+\KOMAoption{captions}{tableheading}
+\makeatletter
+\@ifpackageloaded{caption}{}{\usepackage{caption}}
+\AtBeginDocument{%
+\ifdefined\contentsname
+  \renewcommand*\contentsname{Table of contents}
+\else
+  \newcommand\contentsname{Table of contents}
+\fi
+\ifdefined\listfigurename
+  \renewcommand*\listfigurename{List of Figures}
+\else
+  \newcommand\listfigurename{List of Figures}
+\fi
+\ifdefined\listtablename
+  \renewcommand*\listtablename{List of Tables}
+\else
+  \newcommand\listtablename{List of Tables}
+\fi
+\ifdefined\figurename
+  \renewcommand*\figurename{Figure}
+\else
+  \newcommand\figurename{Figure}
+\fi
+\ifdefined\tablename
+  \renewcommand*\tablename{Table}
+\else
+  \newcommand\tablename{Table}
+\fi
+}
+\@ifpackageloaded{float}{}{\usepackage{float}}
+\floatstyle{ruled}
+\@ifundefined{c@chapter}{\newfloat{codelisting}{h}{lop}}{\newfloat{codelisting}{h}{lop}[chapter]}
+\floatname{codelisting}{Listing}
+\newcommand*\listoflistings{\listof{codelisting}{List of Listings}}
+\makeatother
+\makeatletter
+\makeatother
+\makeatletter
+\@ifpackageloaded{caption}{}{\usepackage{caption}}
+\@ifpackageloaded{subcaption}{}{\usepackage{subcaption}}
+\makeatother
+\usepackage{bookmark}
+\IfFileExists{xurl.sty}{\usepackage{xurl}}{} % add URL line breaks if available
+\urlstyle{same}
+\hypersetup{
+  pdftitle={Cortext: A Three-Knob Adaptive Memory Architecture},
+  pdfauthor={Gabriel Willen; Cortext Team},
+  colorlinks=true,
+  linkcolor={blue},
+  filecolor={Maroon},
+  citecolor={Blue},
+  urlcolor={Blue},
+  pdfcreator={LaTeX via pandoc}}
+
+
+\title{Cortext: A Three-Knob Adaptive Memory Architecture}
+\usepackage{etoolbox}
+\makeatletter
+\providecommand{\subtitle}[1]{% add subtitle to \maketitle
+  \apptocmd{\@title}{\par {\large #1 \par}}{}{}
+}
+\makeatother
+\subtitle{for Continuous Cognitive Processing}
+\author{Gabriel Willen \and Cortext Team}
+\date{2025-12-01}
+\begin{document}
+\maketitle
+
+
+\section*{Abstract}\label{abstract}
+\addcontentsline{toc}{section}{Abstract}
+
+We present Cortext, a biologically-inspired adaptive memory system
+governed by three continuous control parameters: Focus (F), Sensitivity
+(S), and Stability (T). Unlike traditional memory architectures that
+employ discrete operational modes, Cortext achieves developmental
+progression through parameter-derived rate modulation, allowing behavior
+to emerge continuously from the interaction of knob settings and
+experiential mass. The architecture integrates established cognitive
+science principles---including Cowan's working memory constraints and
+Nader's reconsolidation dynamics---into a unified computational
+framework. We derive most system parameters from the three primary knobs
+through principled mathematical transformations, while explicitly
+labeling the small set of fixed invariants (e.g., controller gains),
+reducing reliance on hard-coded constants. The system demonstrates
+self-calibrating priors that blend with evidence using
+uncertainty-weighted Bayesian averaging, homeostatic threshold control
+with effective sample size estimation, and graph-augmented retrieval
+combining embedding similarity with semantic extraction. Experimental
+analysis indicates the architecture maintains stable operation across
+developmental phases while adapting write rates, decay dynamics, and
+retrieval precision to environmental demands. This work contributes a
+formally specified cognitive memory model suitable for implementation in
+streaming AI systems requiring persistent, context-aware memory.
+
+\textbf{Keywords:} cognitive architecture, adaptive memory, working
+memory, episodic memory, semantic memory, knowledge graphs, homeostatic
+control
+
+\section{Introduction}\label{introduction}
+
+Memory systems in artificial intelligence face a fundamental tension
+between plasticity and stability. Systems that learn rapidly risk
+catastrophic interference, while those that maintain stable
+representations may fail to capture novel patterns (McCloskey and Cohen
+1989). Biological memory systems resolve this tension through
+sophisticated regulatory mechanisms that modulate learning rates, decay
+dynamics, and retrieval thresholds in response to environmental demands
+and internal state (McClelland, McNaughton, and O'Reilly 1995).
+
+This paper introduces Cortext, a cognitive memory architecture that
+addresses this stability-plasticity dilemma through three continuous
+control parameters that govern all system behavior. Rather than
+implementing discrete operational modes or hard-coded phase transitions,
+Cortext achieves developmental progression through the continuous
+interaction of parameter settings with accumulated experience. The
+architecture draws on established findings from cognitive psychology and
+neuroscience, including working memory capacity limits (Cowan 2001),
+memory reconsolidation (Nader, Schafe, and Le Doux 2000), serial
+position effects (Murdock Jr 1962), and emotional modulation of memory
+(McGaugh 2004).
+
+The core contribution of this work is a formally specified memory
+architecture in which:
+
+\begin{enumerate}
+\def\labelenumi{\arabic{enumi}.}
+\tightlist
+\item
+  Most tuneable parameters derive from three primary knobs (Focus,
+  Sensitivity, Stability) through explicit mathematical transformations,
+  while fixed invariants (e.g., controller gains) are labeled and
+  justified.
+\item
+  System priors self-calibrate through uncertainty-weighted Bayesian
+  blending with observed evidence.
+\item
+  Developmental phases emerge from annealed safety bounds and
+  experiential mass accumulation, not explicit mode switching.
+\item
+  A knowledge graph layer enables semantic consolidation and
+  graph-augmented retrieval.
+\end{enumerate}
+
+The remainder of this paper is organized as follows. Section 2 reviews
+relevant literature. Section 3 presents the mathematical foundations
+including notation, helper functions, and knob-derived parameters.
+Section 4 details the core algorithms for Focus, Sensitivity, and
+Stability adaptation. Section 5 describes structural metrics and
+composite scoring. Section 6 covers dynamic thresholding and homeostatic
+control. Section 7 presents the reinforcement and decay dynamics.
+Section 8 describes advanced cognitive processes including working
+memory, metacognition, and emotional consolidation. Section 9 details
+the consolidation and graph integration system. Section 10 presents the
+interrupt gate for streaming integration. Section 11 reports preliminary
+experimental results. Section 12 discusses implementation considerations
+and computational complexity. Section 13 concludes with limitations and
+future directions.
+
+\section{Related Work}\label{related-work}
+
+\subsection{Working Memory Models}\label{working-memory-models}
+
+The working memory component of Cortext draws primarily on Cowan (2001)
+embedded-processes model, which posits a capacity limit of approximately
+4±1 chunks for the focus of attention. This contrasts with Miller (1956)
+earlier estimate of 7±2 items, which subsequent research has shown
+conflates chunking with raw capacity (Cowan 2010). Our implementation
+respects these empirically-derived constraints while allowing for
+focus-dependent modulation within bounded ranges.
+
+Baddeley (2000) multicomponent model informs our treatment of
+maintenance and rehearsal processes, though we adopt a more unified
+representational substrate based on distributed embeddings rather than
+separate phonological and visuospatial stores. The episodic buffer
+concept (Baddeley 2000) aligns with our approach to binding information
+across modalities through shared vector spaces.
+
+\subsection{Memory Consolidation}\label{memory-consolidation}
+
+The consolidation mechanisms in Cortext reflect findings from the memory
+reconsolidation literature (Nader, Schafe, and Le Doux 2000; Nader
+2003). Reconsolidation theory posits that retrieved memories enter a
+labile state during which they can be modified before restabilization.
+Our architecture implements this through time-bounded lability windows
+governed by the Stability parameter, with reconsolidation gain modulated
+by both Sensitivity and contextual relevance.
+
+The distinction between episodic and semantic memory (Tulving 1972)
+motivates our two-tier storage approach: a streaming episodic buffer for
+immediate experiences and a consolidated semantic graph for abstracted
+knowledge. The consolidation process transforms high-redundancy episodic
+clusters into summary nodes linked by typed semantic relations,
+consistent with complementary learning systems theory (McClelland,
+McNaughton, and O'Reilly 1995).
+
+\subsection{Emotional Influences on
+Memory}\label{emotional-influences-on-memory}
+
+McGaugh (2004) extensive work on emotional modulation of memory
+consolidation informs our treatment of affect-gated encoding. The
+architecture implements emotional intensity as a threshold modifier,
+consistent with findings that arousal enhances memory through
+amygdala-mediated modulation of hippocampal encoding (LaBar and Cabeza
+2006). We adopt a dimensional model of emotion (Russell 1980) with
+valence and arousal as primary axes, projected from categorical emotion
+embeddings.
+
+\subsection{Adaptive Control Systems}\label{adaptive-control-systems}
+
+The homeostatic threshold controller draws on classical control theory,
+specifically proportional-integral approaches to setpoint maintenance
+(Åström and Murray 2008). The use of exponentially-weighted moving
+averages for rate estimation follows standard practice in adaptive
+systems, while our effective sample size calculation for reliability
+estimation extends techniques from sequential Monte Carlo methods (Liu
+and Chen 1998).
+
+\section{Mathematical Foundations}\label{sec-math}
+
+\subsection{Notation and Primitives}\label{notation-and-primitives}
+
+We establish the following notation used throughout this paper. Let ε(F,
+S, T) = 10\^{}(−8 + 2T) denote a small stability-dependent constant for
+numerical stability (we write ε as shorthand for ε(F, S, T)). All knob
+values F, S, T lie in the closed interval {[}0, 1{]}.
+
+Core mathematical primitives:
+
+\begin{verbatim}
+lerp(a, b, x) = a + (b − a) × x
+clamp(v, lo, hi) = max(lo, min(v, hi))
+sigmoid(z) = 1 / (1 + exp(−z))
+EWMA(prev, x, α) = (1 − α) × prev + α × x
+\end{verbatim}
+
+Weight normalization and blending for combining multiple signals:
+
+\begin{verbatim}
+normalize(w) = w / max(sum(w), ε) # w is a weight vector
+\end{verbatim}
+
+Edge case: if sum(w) \textless{} ε, return uniform weights
+(1/\textbar w\textbar) to avoid division by zero or invalid probability
+distributions.
+
+\begin{verbatim}
+blend(values, weights) = Σᵢ values[i] × weights[i]
+\end{verbatim}
+
+Note: normalize() operates on weight vectors, not scalars. When used
+with scalar expressions like lerp(), collect the scalars into a vector
+first: normalize({[}lerp(\ldots), lerp(\ldots), \ldots{]}). The blend()
+function assumes pre-normalized weights summing to 1.
+
+For vectors, we define cosine similarity as cos(u, v) = u·v / (‖u‖ ×
+‖v‖), and safe L2 normalization as l2\_normalize(v) = v / max(‖v‖, ε).
+Shannon entropy is computed in nats: H(p) = −Σᵢ pᵢ ln(pᵢ).
+
+The temporal decay function follows exponential dynamics with
+configurable half-life:
+
+\begin{verbatim}
+decay(x, τ_half, Δt) = x × exp(−ln(2) × Δt / max(τ_half, τ_min(T)))
+\end{verbatim}
+
+where τ\_min(T) = lerp(60, 300, T) seconds provides a stability-derived
+floor to prevent numerical instability from near-zero half-lives.
+
+\subsubsection{Units Convention}\label{units-convention}
+
+To ensure consistency and avoid unit mismatch errors, the following
+conventions apply throughout:
+
+\textbf{Input timestamps:} All input timestamps (t) are specified in
+milliseconds since epoch, consistent with standard system time APIs.
+
+\textbf{Internal time representation:} All internal time calculations
+operate in seconds. We define:
+
+\begin{verbatim}
+now_s() = system_time_ms / 1000  # returns seconds
+now_ms() = system_time_ms         # returns milliseconds
+to_s(ts_ms) = ts_ms / 1000       # ms → seconds conversion
+\end{verbatim}
+
+\textbf{Stored timestamps:} All stored timestamps are milliseconds since
+Unix epoch.
+
+\textbf{Naming contract (canonical):} Use the variable names below
+consistently throughout this document. Units: stored timestamps are
+integers in milliseconds (commonly suffixed *\_ts, and also appearing as
+timestamp/created\_at/last\_rate\_timestamp); derived time intervals in
+seconds use the \emph{\emph{s suffix. Accumulator variables: t\_start,
+last\_signal\_ts, last\_write\_ts, drift\_acc, eta\_acc,
+coherence\_prev, emo\_max, arousal\_sum, drift\_accum,
+drift\_at\_last\_interrupt, drift\_acc\_pacing, x\_last\_check. Global
+variables: signals\_processed, u\_uncertainty, mood\_vector,
+last\_mood\_ts, theta\_dynamic, theta\_target, hysteresis, m\_rate,
+rho\_hat\_prev, dt\_ema, rate\_ticks, reliability,
+last\_rate\_timestamp, last\_retrieval\_ts, retention\_ema,
+last\_embedding, x\_pred\_ema. Weight naming rule: weight}} and
+\emph{\emph{weight variables (e.g., weight\_relevance, mismatch\_weight,
+weight\_surprise) are control parameters; w}} variables (e.g.,
+w\_relevance, w\_mismatch, \ldots{} w\_arousal) are composite-score
+blender weights.
+
+\textbf{Drift naming note:} \texttt{drift\_acc} tracks
+within-accumulator centroid drift (context drift used for boundary
+decisions); \texttt{drift\_accum} tracks cumulative per-signal embedding
+drift used for interrupt refractory pressure. Treat these as distinct
+signals.
+
+\textbf{Time-index convention:} Per-step computed values use a
+\texttt{\_t} suffix (e.g., score\_t, theta\_dynamic\_t). Retained state
+uses the bare name (e.g., theta\_dynamic). When a step proposes a new
+value, compute the \texttt{\_t} variant and assign the bare name at end
+of step (see Appendix D).
+
+\textbf{Time deltas:} All Δt values, elapsed times (mem\_elapsed,
+signal\_gap, idle\_for), and time comparisons operate in seconds:
+
+\begin{verbatim}
+Δt ← now_s() − to_s(last_rate_timestamp)   # seconds
+mem_elapsed ← now_s() − to_s(t_start)     # seconds
+signal_gap ← now_s() − to_s(last_signal_ts)  # seconds
+\end{verbatim}
+
+\textbf{Time constants:} All time-related constants are specified with
+explicit units (e.g., τ\_min(T) in seconds). Threshold limits like
+max\_mem\_time(T) and gap\_scale(T) return values in seconds (gap\_scale
+multiplies dt\_ema to form gap\_ref\_s).
+
+\subsubsection{No Fixed Behavioral
+Constants}\label{no-fixed-behavioral-constants}
+
+All behavioral thresholds, gains, and caps are derived from the three
+knobs (F, S, T) and/or state. Fixed numeric values are permitted only
+for numerical stability floors (e.g., ε(F, S, T)) and unit conversions.
+This keeps the system's qualitative behavior entirely governed by the
+three knobs, consistent with the human-memory objective.
+
+\subsubsection{Buffers}\label{sec-buffers}
+
+The specification uses distinct streaming buffers:
+
+\textbf{signal\_stream:} The raw per-signal embedding stream x\_t used
+for scoring, uncertainty estimation, threshold/rate updates, and
+accumulator updates. Any context slices operate on signal\_stream.
+
+\textbf{score\_stream:} The per-signal scalar score stream. At each
+step, append score\_t to score\_stream. Any score lookbacks operate on
+score\_stream.
+
+\textbf{memory\_stream:} The stream of written memory representatives
+(e.g., e\_rep/μ\_acc for completed units) used for retrieval and
+interrupt-gate context. Sections that reference
+recent\_memory\_centroids operate on memory\_stream.
+
+\textbf{recent\_memory\_centroids:} A bounded deque of recent memory
+representatives used by the interrupt gate.
+
+\begin{verbatim}
+win_mem_ctx(T) = round(lerp(4, 32, T))  # max memories in interrupt context
+On successful write_memory: recent_memory_centroids.append(e_rep); recent_memory_centroids ← tail(recent_memory_centroids, win_mem_ctx(T))
+\end{verbatim}
+
+\subsection{The Three-Knob Philosophy}\label{the-three-knob-philosophy}
+
+Cortext is governed by three continuous control parameters, each
+representing a distinct dimension of cognitive regulation:
+
+\textbf{Focus (F ∈ {[}0, 1{]}):} Perceptual selectivity and precision.
+Higher Focus narrows attention, increases relevance weighting, and
+reduces retrieval breadth. Focus modulates the trade-off between
+exploitation of known-relevant information and exploration of
+potentially useful context.
+
+\textbf{Sensitivity (S ∈ {[}0, 1{]}):} Plasticity and affective gain.
+Higher Sensitivity accelerates learning, increases emotional and novelty
+responsiveness, and raises write-rate targets. Sensitivity governs how
+readily the system captures novel information and responds to salient
+stimuli.
+
+\textbf{Stability (T ∈ {[}0, 1{]}):} Temporal persistence and inertia.
+Higher Stability lengthens memory half-lives, widens hysteresis bands,
+slows adaptive updates, and tightens safety bounds over time. Stability
+controls the resistance to change and the preservation of established
+knowledge.
+
+A central design principle is that knobs set rates rather than modes.
+Behavioral differences emerge continuously from parameter interactions;
+there are no hard-coded phase transitions or discrete operational
+states.
+
+\subsection{Knob-Derived Parameters}\label{knob-derived-parameters}
+
+Most system tunables derive from the three primary knobs. This section
+catalogs the key derivations; fixed invariants are explicitly labeled in
+their respective sections.
+
+\subsubsection{Context Windows and Temporal
+Scales}\label{context-windows-and-temporal-scales}
+
+\begin{verbatim}
+n_ctx(T) = round(lerp(32, 256, T))
+win_score(T) = round(lerp(20, 120, T))
+win_rate_s(T) = round(lerp(60, 300, T))
+\end{verbatim}
+
+The context window n\_ctx determines how many recent items inform
+relevance computation. The scoring window win\_score controls the
+lookback for variance estimation and percentile calculation. The rate
+window win\_rate\_s specifies the temporal horizon (in seconds) for
+write-rate measurement.
+
+\subsubsection{Half-Life and Decay}\label{half-life-and-decay}
+
+Memory half-life follows a log-scale mapping to span multiple orders of
+magnitude:
+
+\begin{verbatim}
+τ_min = 120.0 seconds (2 minutes)
+τ_max = 43200.0 seconds (12 hours)
+base_half_life(T) = exp(ln(τ_min) + T × ln(τ_max / τ_min))
+\end{verbatim}
+
+This exponential mapping ensures that low Stability yields half-lives
+near 2 minutes while high Stability approaches 12 hours, with smooth
+interpolation across the range.
+
+\subsubsection{Hysteresis and Rate
+Targets}\label{hysteresis-and-rate-targets}
+
+\begin{verbatim}
+band_min = 0.02; band_max = 0.25
+base_band(T) = lerp(band_min, band_max, T)
+r_min = 0.2; r_max = 5.0  (writes per minute)
+base_rate(S) = lerp(r_min, r_max, S)
+\end{verbatim}
+
+The hysteresis band prevents oscillation in threshold-crossing
+decisions. Write-rate targets establish homeostatic setpoints for the
+threshold controller.
+
+These ranges are canonical knob maps; no additional fixed thresholds are
+introduced beyond the three knobs.
+
+\subsubsection{Experiential Mass and
+Maturity}\label{experiential-mass-and-maturity}
+
+The system tracks accumulated experience through a maturity function
+that governs the annealing of safety bounds:
+
+\begin{verbatim}
+τ_m(T) = lerp(10.0, 200.0, T)
+maturity(t) = 1 − exp(−count / τ_m(T))
+\end{verbatim}
+
+where count is the total number of signals processed. This produces
+asymptotic approach to unit maturity, with higher Stability slowing the
+progression to reflect greater conservatism.
+
+Safety bounds on the dynamic threshold anneal with maturity:
+
+\begin{verbatim}
+T_min(t) = lerp(0.01, 0.05, maturity(t))
+T_max(t) = lerp(0.99, 0.95, maturity(t))
+max_ΔT_per_min(t) = lerp(0.30, 0.10, maturity(t))
+\end{verbatim}
+
+Early operation permits wide threshold excursions; mature operation
+constrains movement to a narrower band.
+
+\subsection{Uncertainty Estimation}\label{uncertainty-estimation}
+
+Uncertainty u(t) ∈ {[}0, 1{]} modulates learning rates and evidence
+weighting. The raw uncertainty estimate blends multiple signals:
+
+\begin{verbatim}
+var_score_max(S) = lerp(0.15, 0.35, S)
+recent_scores ← tail(score_stream, win_score(T))
+if |recent_scores| < 2:
+    var_recent_norm ← 0
+else:
+    var_recent_norm ← clamp(var(recent_scores) / var_score_max, 0, 1)
+coherence_complement = 1 − coherence_struct_t  # uses structural coherence
+\end{verbatim}
+
+When prediction error signals are available, novelty and surprisal are
+blended:
+
+\begin{verbatim}
+novelty_surprise = blend([novelty_t, surprisal_t],
+                        weights = normalize([S, 1 − T]))
+\end{verbatim}
+
+The final raw uncertainty combines these components with knob-derived
+weights:
+
+Normative note (MUST): focus\_spread\_t is the per-step derived
+focus-spread metric from Section~\ref{sec-focus-spread} and is available
+each step when computing u(t).
+
+\begin{verbatim}
+weights_u = normalize([S, F, 1 − T, S × (1 − T)])
+u_raw(t) = clamp(blend([var_recent_norm, focus_spread_t,
+                        coherence_complement, novelty_surprise],
+                       weights = weights_u), 0, 1)
+\end{verbatim}
+
+Smoothed uncertainty applies EWMA with a stability-dependent rate:
+
+\begin{verbatim}
+α_u(T) = 0.10 + (1 − T) × 0.60
+u(t) = EWMA(u(t−1), u_raw(t), α = α_u(T))
+\end{verbatim}
+
+When structural metrics are unavailable, the fallback is u\_raw(t) = 1 −
+maturity(t), ensuring high uncertainty during early operation.
+
+\section{Core Adaptation Algorithms}\label{sec-core-adaptation}
+
+This section presents the algorithms governing adaptation along each of
+the three primary dimensions. Each algorithm consists of a prior
+computation (executed at initialization) and a dynamic update (executed
+per signal).
+
+\subsection{Focus-Driven Selectivity}\label{focus-driven-selectivity}
+
+Focus governs perceptual selectivity through relevance weighting and
+attention width.
+
+\subsubsection{Focus Priors}\label{focus-priors}
+
+Given Focus knob F ∈ {[}0, 1{]}, initialize Focus control variables:
+
+\begin{verbatim}
+weight_relevance = sigmoid(2F − 1)
+coverage_gain_floor = 0.3 + 0.7F
+mismatch_weight = 1 − F
+attention_width = lerp(π, 0.1π, F)
+\end{verbatim}
+
+The attention width (in radians) controls the angular spread of the
+receptive field in embedding space. High Focus produces narrow attention
+(0.1π), while low Focus permits broad capture (π).
+
+\subsubsection{Dynamic Focus Update}\label{dynamic-focus-update}
+
+At each signal event t with input embedding x\_t:
+
+\begin{verbatim}
+recent_context ← tail(signal_stream, n_ctx(T))
+if |recent_context| == 0:
+    μ_ctx ← 0_vector; observed_cosine ← 0  # map01(0)=0.5
+else:
+    μ_ctx ← mean(recent_context)
+    observed_cosine ← cos(x_t, μ_ctx)
+weight_relevance_t ← EWMA(weight_relevance,
+                      map01(observed_cosine), α = α_F(t))
+\end{verbatim}
+
+\begin{verbatim}
+weight_relevance ← weight_relevance_t
+\end{verbatim}
+
+where map01(z) = clamp((z + 1) / 2, 0, 1) transforms cosine values from
+{[}−1, 1{]} to {[}0, 1{]}.
+
+The learning rate α\_F(t) is modulated by uncertainty:
+
+\begin{verbatim}
+α_min_F = 0.05; α_span_F = 0.45
+α_F(t) = α_min_F + F × α_span_F × u(t)
+\end{verbatim}
+
+High uncertainty increases learning rate, allowing faster adaptation
+when the environment is volatile. The Focus knob scales the uncertainty
+responsiveness.
+
+\subsection{Sensitivity-Driven
+Plasticity}\label{sensitivity-driven-plasticity}
+
+Sensitivity governs learning speed, emotional responsiveness, and
+novelty capture.
+
+\subsubsection{Sensitivity Priors}\label{sensitivity-priors}
+
+Given Sensitivity knob S ∈ {[}0, 1{]}, initialize Sensitivity control
+variables:
+
+\begin{verbatim}
+rate_target = base_rate(S)  # writes/min
+weight_novelty = 0.3 + 0.7S
+weight_surprise = 0.2 + 0.8S
+weight_valence = 0.4 + 0.6S
+weight_arousal = S
+emotion_gain = exp(1.5S)
+score_gain = exp(2S)
+\end{verbatim}
+
+\subsubsection{Emotional Projection}\label{sec-emotional-projection}
+
+When emotion category centroids are available, the system projects input
+embeddings onto a discrete emotion space C = \{anger, fear, joy, love,
+sadness, surprise\}. categories inspired by Russell (1980) circumplex
+model are projected onto the valence-arousal plane:coordinates:
+
+\begin{verbatim}
+v_map = {anger: −0.9, fear: −0.8, sadness: −0.9,
+         joy: +0.9, love: +0.8, surprise: 0.0}
+a_map = {anger: +0.9, fear: +0.9, sadness: +0.3,
+         joy: +0.6, love: +0.5, surprise: +0.8}
+\end{verbatim}
+
+The projection procedure:
+
+\begin{verbatim}
+raw_cos_c ← cos(x_t, centroids[c]) for each c ∈ C
+if all raw_cos_c ≤ 0:
+    p_c ← uniform(1/6)  # ensures downstream mood update is well-defined
+    emotion_intensity_t ← 0; valence_t ← 0.5; arousal_t ← 0
+else:
+    logits_c ← max(0, raw_cos_c)
+    β(S) = 4 + 8S  # softmax inverse temperature
+    p_c ← softmax(β(S) × logits_c)
+    peak ← max_c(p_c)
+    confidence ← 1 − H(p_c) / ln(6)
+    emotion_intensity_t ← sqrt(peak × confidence)
+    valence_t ← (Σ_c p_c × v_map[c] + 0.9) / 1.8
+    arousal_t ← clamp(Σ_c p_c × a_map[c], 0, 1)
+\end{verbatim}
+
+The emotion intensity combines peak probability with distributional
+confidence via geometric mean, providing a measure that is high only
+when a single emotion dominates with high certainty.
+
+\subsubsection{Threshold Modulation from
+Emotion}\label{sec-emotional-threshold}
+
+Emotional activation loosens write thresholds to capture salient
+moments:
+
+\begin{verbatim}
+κ_emo ← κ_base × S  # where κ_base = 0.10
+ΔThreshold_emotion_t ← −κ_emo × emotion_intensity_t ×
+                        (0.5 + 0.5 × arousal_t)
+\end{verbatim}
+
+The emotional state acts as a modulator for memory
+encoding/consolidation, following McGaugh (2004). High arousal and
+valence magnitude increase the likelihood of threshold crossings.
+
+\subsubsection{Mood Integration}\label{sec-mood}
+
+Distinct from instantaneous emotion, the mood state M\_t ∈ ℝ⁶ maintains
+a persistent background affective tone as a 6-dimensional vector (one
+component per emotion category from
+Section~\ref{sec-emotional-projection}):
+
+\begin{verbatim}
+α_mood(S) = lerp(0.01, 0.20, S)  # reactivity
+half_life_mood(T) = lerp(30, 600, T)  # seconds
+Δt_mood ← now_s() − to_s(last_mood_ts)
+λ_mood(Δt_mood, T) ← exp(−ln(2) × Δt_mood / max(half_life_mood(T), ε))
+e_t ← p_c − (1/6)  # centered 6D vector (can be negative)
+M_t = λ_mood(Δt_mood, T) × M_{t−1} + α_mood(S) × e_t
+M_t ← clamp_elementwise(M_t, −1.0, 1.0)  # per-component
+last_mood_ts ← now_ms()  # update timestamp after mood update (ms)
+\end{verbatim}
+
+Note: when all raw\_cos\_c ≤ 0, p\_c is uniform and e\_t = 0, so mood
+only decays. Because e\_t is centered around zero, M\_t can have both
+positive and negative components, reflecting sustained elevation or
+suppression relative to baseline. The mood state provides a separate
+threshold bias via its normalized magnitude:
+
+\begin{verbatim}
+κ_mood ← κ_base × S
+m_norm ← ‖M_t‖ / √6  # max norm when all components at 1
+ΔThreshold_mood_t ← −κ_mood × clamp(m_norm, 0, 1)
+\end{verbatim}
+
+\subsection{Stability-Driven
+Persistence}\label{stability-driven-persistence}
+
+Stability governs temporal dynamics through half-life, decay rates, and
+hysteresis.
+
+\subsubsection{Stability Priors}\label{stability-priors}
+
+Given Stability knob T ∈ {[}0, 1{]}, initialize Stability control
+variables:
+
+\begin{verbatim}
+hysteresis = lerp(0.02, 0.25, T)
+half_life = base_half_life(T)
+rate_decay = lerp(0.60, 0.98, T)
+periphery_half_life = clamp(0.5 × half_life,
+                                   τ_min, τ_max)
+drift_weight = 0.5 × (1 − T)
+\end{verbatim}
+
+\subsubsection{Dynamic Stability Update}\label{sec-stability-update}
+
+The stability update uses uncertainty-modulated learning rate and a
+stability-derived retention window:
+
+\begin{verbatim}
+α_min_T = 0.02; α_span_T = 0.18
+α_T(t) = α_min_T + (1 − T) × α_span_T × u(t)
+win_ret(T) = round(lerp(10, 50, T))  # retention history window size
+\end{verbatim}
+
+At each signal event, compute retention statistics and adjust half-life:
+
+\begin{verbatim}
+active_memories ← {m | strength(m) ≥ periphery_cutoff(T)}
+observed_retention ← mean_age(active_memories)
+retention_ema_t ← EWMA(retention_ema_{t−1},
+                       observed_retention, α = α_T(t))
+\end{verbatim}
+
+\begin{verbatim}
+retention_ema ← retention_ema_t
+\end{verbatim}
+
+Definitions:
+
+\begin{verbatim}
+age_s(m) ← now_s() − to_s(m.created_at)  # fallback: use start_ts if created_at unset
+mean_age(active_memories) ← mean_{m ∈ active_memories} age_s(m); if empty, return 0
+retention_history ← append(observed_retention); keep last win_ret(T) values
+\end{verbatim}
+
+Compute z-score relative to recent retention history:
+
+\begin{verbatim}
+last_win_ret ← tail(retention_history, win_ret(T))
+μ_ret ← mean(last_win_ret)
+σ_ret ← max(std(last_win_ret), 1.0)
+zscore_ret ← clamp((observed_retention − μ_ret) / σ_ret, −3, +3)
+\end{verbatim}
+
+The target half-life incorporates feedback adjustment from the stability
+feedback mechanism (Section~\ref{sec-feedback}):
+
+\begin{verbatim}
+stability_adj ← ΔHalfLife_adj_t if provided else 0
+target_half_life_t ← clamp(base_half_life(T) ×
+                          (1 + 0.25 × zscore_ret + stability_adj),
+                          τ_min, τ_max)
+half_life_t ← EWMA(half_life_{t−1}, target_half_life_t,
+                   α = α_T(t))
+\end{verbatim}
+
+\begin{verbatim}
+half_life ← half_life_t
+\end{verbatim}
+
+\section{Structural Metrics and Composite
+Scoring}\label{sec-structural-metrics}
+
+Context definitions (used throughout Table 1 and structural metrics):
+
+\begin{verbatim}
+recent_context ← tail(signal_stream, n_ctx(T))
+if |recent_context| == 0:
+    μ_ctx ← 0_vector  # define cos(x_t, μ_ctx)=0 so map01(cos)=0.5
+else:
+    μ_ctx ← mean(recent_context)
+\end{verbatim}
+
+\subsection{Embedding-Derived Metrics}\label{embedding-derived-metrics}
+
+\subsubsection{Structural Coherence}\label{sec-struct-coherence}
+
+Structural coherence (coherence\_struct) measures integration of the
+current signal with the broader context window. This metric is distinct
+from memory coherence (coherence\_mem, defined in
+Section~\ref{sec-drift-coherence}) which tracks within-memory
+similarity:
+
+\begin{verbatim}
+coh_neutral(T) = lerp(0.45, 0.55, T)
+if |recent_context| < 2:
+    coherence_struct_t ← coh_neutral(T)  # neutral, stability-derived
+else:
+    raw ← var([cos(x_t, c) for c in recent_context])
+    coherence_struct_t ← 1 − clamp(raw, 0, 1)  # range [0, 1]
+\end{verbatim}
+
+High structural coherence (low variance in similarities) indicates the
+signal fits consistently with context. The effective Focus is modulated:
+F\_eff = F × (0.5 + 0.5 × coherence\_struct\_t).
+
+\textbf{Effective Focus usage:} F\_eff is a diagnostic modulation of
+Focus. Unless a formula explicitly references F\_eff, the specification
+uses raw F (including all Table 1 metric formulas and knob-derived
+controls).
+
+\subsubsection{Focus Spread}\label{sec-focus-spread}
+
+Focus spread quantifies the entropy of attention over nearest neighbors:
+
+\begin{verbatim}
+k ← k_neighbors(T) = round(lerp(8, 32, T))
+\end{verbatim}
+
+Normative note (MUST): kNN\_similarities MUST be computed by querying
+memory\_stream with q = x\_t and k = k\_neighbors(T) (not
+recent\_context).
+
+\begin{verbatim}
+if |memory_stream| == 0:
+    focus_spread_t ← 0  # cold-start fallback
+else:
+    k_eff ← min(k, |memory_stream|)
+    if k_eff < 2:
+        focus_spread_t ← 0  # avoid degenerate entropy
+    else:
+        kNN_similarities ← topK(vector_search(x_t, k=k_eff))
+        # attention_width sharpens or flattens similarities
+        kNN_similarities ← clamp(kNN_similarities × (π / attention_width), −1, 1)
+        p ← softmax(kNN_similarities)
+        focus_spread_t ← H(p) / ln(k_eff)
+\end{verbatim}
+
+Values near 1 indicate diffuse attention; values near 0 indicate
+concentrated attention. The effective Focus is further modulated: F\_eff
+← F\_eff × (1 − focus\_spread\_t).
+
+\subsubsection{Trajectory Drift}\label{trajectory-drift}
+
+Drift measures directional change in context centroids:
+
+\begin{verbatim}
+k_ctx(T) = round(lerp(3, 10, T))  # step lag for drift
+ctx_t = signal_stream[t − n_ctx(T) + 1 : t]  # inclusive end
+ctx_{t−k} = signal_stream[t − k_ctx(T) − n_ctx(T) + 1 : t − k_ctx(T)]
+drift_vec_t ← l2_normalize(mean(ctx_t)) −
+              l2_normalize(mean(ctx_{t−k}))
+drift_mag_t ← ‖drift_vec_t‖
+\end{verbatim}
+
+Since both centroids are unit-normalized, drift\_mag\_t ∈ {[}0, 2{]}. A
+threshold defines an informational drift-boundary signal:
+
+\begin{verbatim}
+drift_threshold ← lerp(0.10, 0.35, T)
+drift_boundary_t ← (drift_mag_t > drift_threshold)
+\end{verbatim}
+
+Normative note (MUST): drift\_boundary\_t is informational and MUST NOT
+trigger a memory flush on its own. Memory flush decisions are defined by
+should\_flush in Section~\ref{sec-boundary}.
+
+\subsubsection{Real-Time Prediction Error
+(EMA)}\label{real-time-prediction-error-ema}
+
+We model real-time expectation using an exponential moving average (EMA)
+of the signal stream. The predictor state \texttt{x\_pred\_ema}
+represents the current expectation; low Stability (T) adapts quickly,
+high Stability adapts slowly.
+
+We treat orthogonal or anti-correlated vectors (cos ≤ 0) as maximum
+surprise.
+
+\begin{verbatim}
+β_pred(T) = lerp(0.25, 0.02, T)
+err_ref(S) = lerp(0.25, 0.05, S)
+k_surprise(S,T) = lerp(6, 14, S) × lerp(1.1, 0.9, T)
+
+if x_pred_ema is unset:
+    x_pred_ema ← x_t  # initialize expectation
+    surprisal_t ← 0
+else:
+    prediction_error_t ← 1 − max(0, cos(x_t, x_pred_ema))
+    surprisal_t ← sigmoid((prediction_error_t − err_ref(S)) * k_surprise(S,T))
+    x_pred_ema ← l2_normalize((1 − β_pred(T)) × x_pred_ema +
+                               β_pred(T) × x_t)
+\end{verbatim}
+
+This formulation captures prediction failure directly from the stream,
+without requiring an explicit kinematic trend model.
+
+\subsection{Composite Score
+Computation}\label{composite-score-computation}
+
+The system computes 12 metrics that blend into a composite write score:
+
+\begin{longtable}[]{@{}
+  >{\raggedright\arraybackslash}p{(\linewidth - 4\tabcolsep) * \real{0.3333}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 4\tabcolsep) * \real{0.3333}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 4\tabcolsep) * \real{0.3333}}@{}}
+\toprule\noalign{}
+\begin{minipage}[b]{\linewidth}\raggedright
+Metric
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Knob
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Expression
+\end{minipage} \\
+\midrule\noalign{}
+\endhead
+\bottomrule\noalign{}
+\endlastfoot
+Relevance & ↑F &
+\texttt{relevance\_t\ =\ clamp(map01(cos(x\_t,\ μ\_ctx))\ ×\ (0.5\ +\ 0.5F),\ 0,\ 1)} \\
+Mismatch & ↓F, ↑S & \texttt{(1\ −\ F)\ ×\ S\ ×\ novelty\_t} \\
+Surprise & ↑S, ↓T & \texttt{surprisal\_t\ ×\ S\ ×\ (1\ −\ 0.5T)} \\
+Rarity & ↑F, ↓T &
+\texttt{rarity\_t\ ×\ (0.5\ +\ 0.5F)\ ×\ (1\ −\ 0.2T)} \\
+Drift & ↓T & \texttt{(drift\_mag\_t\ /\ 2)\ ×\ (1\ −\ T)} \\
+Utility & ↑F, ↓S & \texttt{ΔSSE\ ×\ (0.5\ +\ 0.5F)\ ×\ (1\ −\ 0.3S)} \\
+Salience & F, S &
+\texttt{(rarity\_t\ +\ novelty\_t)\ /\ 2\ ×\ (F\ +\ S)\ /\ 2} \\
+Valence & S, ↓T & \texttt{valence\_t} \\
+Arousal & S, ↓T & \texttt{arousal\_t} \\
+Contradiction & ↑S, ↓F & \texttt{max(0,\ S\ −\ F)} \\
+Periphery & ↑T & \texttt{(1\ −\ relevance\_t)\ ×\ T} \\
+Coverage & ↑F & \texttt{F\ ×\ relevance\_t} \\
+\end{longtable}
+
+\emph{Table 1: Metric definitions and knob dependencies. Arrows indicate
+direction of influence.}
+
+\subsection{Metric Weight Blending}\label{metric-weight-blending}
+
+Metric weights adapt online using recursive least squares (RLS) to
+minimize prediction error between composite scores and observed
+outcomes. Initial weights derive from bootstrap coefficients:
+
+Blender weights are maintained as variables w\_* (do not confuse these
+with control weights like weight\_relevance or mismatch\_weight). We
+denote the 12-element blender weight vector as:
+
+\begin{verbatim}
+W_blend = [w_relevance, w_mismatch, w_surprise, w_rarity, w_drift,
+          w_utility, w_salience, w_valence, w_arousal, w_contradiction,
+          w_periphery, w_coverage]
+\end{verbatim}
+
+The index i used below (e.g., w\_bootstrap{[}i{]}, w\_rls{[}i{]})
+follows this ordering.
+
+\begin{verbatim}
+w_bootstrap[i] ← sigmoid(c_F[i]×F + c_S[i]×S + c_T[i]×T + d_i)
+\end{verbatim}
+
+Before normalization, control weights modulate the blender weights:
+
+\begin{verbatim}
+w_relevance ← w_relevance × weight_relevance
+w_mismatch  ← w_mismatch  × mismatch_weight
+w_surprise  ← w_surprise  × weight_surprise
+w_valence   ← w_valence   × weight_valence × emotion_gain
+w_arousal   ← w_arousal   × weight_arousal × emotion_gain
+w_coverage  ← w_coverage  × coverage_gain_floor
+\end{verbatim}
+
+Composite score scaling applies after weight normalization:
+
+\begin{verbatim}
+score_t ← clamp(score_raw × score_gain, 0, 1)
+\end{verbatim}
+
+Bootstrap coefficient defaults (canonical; used for initialization):
+
+\begin{longtable}[]{@{}lllll@{}}
+\toprule\noalign{}
+Metric & c\_F & c\_S & c\_T & d \\
+\midrule\noalign{}
+\endhead
+\bottomrule\noalign{}
+\endlastfoot
+relevance & 1.4 & 0.0 & 0.4 & −1.0 \\
+mismatch & −1.0 & 1.0 & 0.0 & −0.5 \\
+surprise & 0.0 & 1.5 & −0.5 & −0.75 \\
+rarity & 0.9 & 0.0 & −0.3 & 0.05 \\
+drift & 0.0 & 0.0 & −1.0 & 0.0 \\
+utility & 0.85 & −0.45 & 0.0 & 0.075 \\
+salience & 1.0 & 1.0 & 0.0 & −1.0 \\
+valence & 0.0 & 1.02 & −0.42 & −0.11 \\
+arousal & 0.0 & 1.8 & −0.2 & −0.9 \\
+contradiction & −2.0 & 2.0 & 0.0 & −1.0 \\
+periphery & 0.0 & 0.0 & 1.0 & −1.0 \\
+coverage & 2.0 & 0.0 & 0.0 & −1.0 \\
+\end{longtable}
+
+These coefficients define a canonical initialization map from the three
+knobs; they do not introduce additional runtime thresholds and may be
+refit from human data without changing the rest of the system.
+
+\subsubsection{RLS Weight Adaptation
+(Canonical)}\label{rls-weight-adaptation-canonical}
+
+RLS fits the blender weights directly in \textbf{weight-space}, using
+the current metrics as predictors and an observed outcome signal as the
+target. State is retained as a weight vector \texttt{w} and covariance
+matrix \texttt{P}.
+
+Target and predictor:
+
+\begin{verbatim}
+x_t ← [metric_i] (each metric clamped to [0,1])
+y_t ← relevance_t  # observed outcome (in [0,1])
+\end{verbatim}
+
+Update cadence and forgetting:
+
+\begin{verbatim}
+k_update = round(lerp(1, 8, T))  # update every k_update signals
+λ(T) = 0.90 + 0.09T              # forgetting factor
+\end{verbatim}
+
+RLS update (performed when step \% k\_update == 0):
+
+\begin{verbatim}
+y_hat ← wᵀ x_t
+e_t ← y_t − y_hat
+K ← (P x_t) / (λ + x_tᵀ P x_t)
+w ← clamp(w + K × e_t, 0, 1)
+P ← (I − K x_tᵀ) P / λ
+\end{verbatim}
+
+Note: RLS fits \textbf{unnormalized} weights \texttt{w}; normalization
+happens later in composite score computation.
+
+Initialization:
+
+\begin{verbatim}
+w_0 ← w_bootstrap   # from the coefficient table above
+P_init(T) = lerp(500, 2000, 1 − T)
+P_0 ← diag(P_init(T))
+\end{verbatim}
+
+Interpretation-only window size:
+
+\begin{verbatim}
+N ← round(lerp(64, 512, T))  # effective fitting window (interpretation only)
+\end{verbatim}
+
+The fitted weights blend with bootstrap weights based on RLS confidence:
+
+\begin{verbatim}
+τ_rls ← lerp(20.0, 80.0, T)
+t ← signals_processed  # global step count (maturity)
+confidence_rls ← 1 − exp(−t / τ_rls)
+w_rls01[i] ← clamp(w[i], 0, 1)  # constrain fitted weights to mixture range
+weight_i(t) ← clamp((1 − confidence_rls) × w_bootstrap[i] +
+                      confidence_rls × w_rls01[i], 0, 1)
+\end{verbatim}
+
+\subsubsection{Score Normalization}\label{score-normalization}
+
+Composite score computation requires careful normalization:
+
+\begin{verbatim}
+for each metric i:
+    m01[i] = clamp(metric[i], 0, 1)
+weight_sum ← Σ weights[i]
+if weight_sum < ε: return 0
+weights_norm[i] ← weights[i] / weight_sum
+score ← clamp(Σ weights_norm[i] × m01[i], 0, 1)
+\end{verbatim}
+
+Invariant (MUST): all 12 Table 1 metric values are defined on {[}0,
+1{]}.
+
+Weight normalization is critical: with 12 metrics and raw weights
+averaging \textasciitilde0.6, the sum approaches 7.2. Without
+normalization, weighted sums would saturate and collapse variance.
+
+\section{Dynamic Thresholding and Homeostatic
+Control}\label{sec-thresholding}
+
+The write gate compares composite scores against an adaptive threshold
+θ\_dynamic (written as theta\_dynamic when referring to the recorded
+variable). This section details the threshold evolution algorithm
+incorporating Bayesian prior-evidence blending and homeostatic rate
+control.
+
+\subsection{Prior-Evidence Blending}\label{prior-evidence-blending}
+
+The threshold prior derives from knob settings:
+
+\begin{verbatim}
+θ_prior(F, S, T) = lerp(0.10, 0.30, T) × (1 − 0.3S)
+\end{verbatim}
+
+Observed evidence comes from the 90th percentile of recent scores:
+
+\begin{verbatim}
+recent_scores ← tail(score_stream, win_score(T))
+if |recent_scores| == 0:
+    observed_p90 ← θ_prior  # no evidence yet
+else:
+    observed_p90 ← percentile(recent_scores, 90)
+\end{verbatim}
+
+Prior and evidence masses weight the blend:
+
+\begin{verbatim}
+ρ_prior ← prior_mass(T) = round(lerp(2, 32, T))
+ρ_obs ← u(t) × |recent_scores|
+\end{verbatim}
+
+The target threshold blends prior and evidence:
+
+\begin{verbatim}
+θ_target ← (ρ_prior × θ_prior + ρ_obs × observed_p90) /
+            max(ε, ρ_prior + ρ_obs)
+\end{verbatim}
+
+High Stability increases prior mass, making the system more resistant to
+observed deviations. High uncertainty increases evidence mass, allowing
+faster adaptation to volatile conditions.
+
+\subsection{Homeostatic Rate Control}\label{homeostatic-rate-control}
+
+The controller maintains write rates near the target setpoint through
+continuous-time estimation with effective sample size (ESS) reliability
+weighting.
+
+\subsubsection{Rate Estimation}\label{rate-estimation}
+
+\begin{verbatim}
+Δt ← now_s() − to_s(last_rate_timestamp)
+dt_min(T) = 10^(−4 + 2T)  # stability-derived minimum Δt (seconds)
+Δt ← max(Δt, dt_min(T))
+τ_dt(T) = lerp(0.5, 2.0, T)
+α_dt ← 1 − exp(−Δt / τ_dt(T))
+dt_ema ← (1 − α_dt) × dt_ema + α_dt × Δt
+dt_floor(T) = lerp(0.1, 0.5, T)  # stability-derived minimum cadence
+dt_base ← max(dt_ema, dt_floor(T))
+\end{verbatim}
+
+The rate time constant scales with Stability:
+
+\begin{verbatim}
+τ_rate ← max(2^(3T) × dt_base, dt_floor(T))
+α ← 1 − exp(−Δt / τ_rate)
+\end{verbatim}
+
+Instantaneous rate estimation with bias correction. Δwrites is the
+binary indicator (0 or 1) of whether a write occurred during the current
+timestep:
+
+\begin{verbatim}
+Δwrites ← 1 if write_memory else 0  # binary write event
+\end{verbatim}
+
+Normative note (MUST): Δwrites is computed from the current step's
+write\_memory decision. Rate state updates occur after the write
+decision and affect subsequent timesteps.
+
+\begin{verbatim}
+ρ_inst ← (Δwrites / Δt) × 60  # writes per minute
+m_rate_t ← (1 − α) × m_rate + α × ρ_inst
+denom ← max(1 − (1 − α)^(rate_ticks + 1), ε)
+ρ_hat_t ← m_rate_t / denom  # bias-corrected estimate for next step
+m_rate ← m_rate_t
+rho_hat_prev ← ρ_hat_t
+rate_ticks ← rate_ticks + 1
+last_rate_timestamp ← now_ms()  # update after rate computation
+\end{verbatim}
+
+\subsubsection{Effective Sample Size}\label{effective-sample-size}
+
+ESS estimates the effective number of independent samples in the EMA,
+using a heuristic inspired by Liu and Chen (1998):
+
+\begin{verbatim}
+β ← max(0, 1 − α)
+ESS_cap(T) = lerp(30, 120, T)
+ESS ← min((1 + β) / max(1 − β, ε), ESS_cap(T))
+reliability ← 1 − exp(−ESS × (1 − T))
+\end{verbatim}
+
+High Stability dampens reliability, preventing aggressive corrections in
+conservative regimes.
+
+\subsubsection{Homeostatic Correction}\label{homeostatic-correction}
+
+The rate error drives threshold adjustment. The κ\_* gains are derived
+from the knobs to avoid fixed behavioral constants:
+
+Normative note (MUST): rho\_hat\_prev is stored state entering the
+timestep. After the write decision, the rate-state update computes
+ρ\_hat\_t; the assignment rho\_hat\_prev ← ρ\_hat\_t occurs at end of
+step (see Appendix D).
+
+\begin{verbatim}
+rate_error ← tanh((rho_hat_prev − rate_target) /
+                  max(rate_target, ε))
+κ_r(F,S,T) = lerp(0.06, 0.14, S) × lerp(1.1, 0.9, T)
+cap_homeo(F,S,T) = lerp(0.35, 0.15, T) × lerp(0.8, 1.2, S) × hysteresis
+Δθ_homeo ← clamp(reliability × κ_r(F,S,T) × (1 − T) ×
+                  (1 − maturity(t)) × rate_error,
+                  −cap_homeo(F,S,T), +cap_homeo(F,S,T))
+\end{verbatim}
+
+The correction scales with reliability and is attenuated by both
+Stability and maturity, ensuring conservative, mature systems make
+minimal homeostatic adjustments.
+
+\subsubsection{Sensitivity-Based Threshold
+Adjustment}\label{sensitivity-based-threshold-adjustment}
+
+Sensitivity modulates threshold based on recent score volatility:
+
+\begin{verbatim}
+recent_scores ← tail(score_stream, win_score(T))
+if |recent_scores| < 2:
+    σ_scores ← 0
+else:
+    σ_scores ← std(recent_scores)
+κ_sens(F,S,T) = lerp(0.04, 0.12, S) × lerp(1.1, 0.9, T)
+cap_sens(F,S,T) = lerp(0.30, 0.10, T) × lerp(0.9, 1.1, S) × hysteresis
+σ_ref(S,T) = lerp(0.08, 0.14, S) × lerp(1.1, 0.9, T)
+Δθ_sens ← clamp(−κ_sens(F,S,T) × S × (σ_scores − σ_ref(S,T)),
+                −cap_sens(F,S,T), +cap_sens(F,S,T))
+\end{verbatim}
+
+High score variance with high Sensitivity lowers threshold, capturing
+more volatile signals.
+
+\subsubsection{Precision-Based Threshold
+Adjustment}\label{precision-based-threshold-adjustment}
+
+Focus-driven precision tightens threshold when structural coherence is
+high:
+
+\begin{verbatim}
+κ_prec(F,S,T) = lerp(0.04, 0.10, F) × lerp(1.1, 0.9, T)
+cap_prec(F,S,T) = lerp(0.25, 0.08, T) × lerp(0.9, 1.1, F) × hysteresis
+Δθ_prec ← clamp(κ_prec(F,S,T) × F × (coherence_struct_t − 0.5),
+                −cap_prec(F,S,T), +cap_prec(F,S,T))
+\end{verbatim}
+
+High structural coherence with high Focus raises threshold, enforcing
+stricter relevance filtering.
+
+\subsection{Threshold Integration}\label{threshold-integration}
+
+All threshold deltas combine and pass through safety limiting. The
+emotion and mood deltas from Section~\ref{sec-emotional-threshold} and
+Section~\ref{sec-mood} are denoted Δθ\_emo = ΔThreshold\_emotion\_t and
+Δθ\_mood = ΔThreshold\_mood\_t:
+
+\begin{verbatim}
+Δθ_total ← Δθ_sens + Δθ_homeo + Δθ_prec + Δθ_emo + Δθ_mood
+cap_total ← max_ΔT_per_min(t) × (Δt / 60.0)
+Δθ_limited ← clamp(Δθ_total, −cap_total, +cap_total)
+θ_dynamic_t ← clamp(EWMA(θ_dynamic_{t−1}, θ_target,
+                        α = α_T(t)) + Δθ_limited,
+                    T_min(t), T_max(t))
+theta_dynamic ← θ_dynamic_t
+\end{verbatim}
+
+Hysteresis evolves toward the stability-derived base:
+
+\begin{verbatim}
+hysteresis_t ← clamp(EWMA(hysteresis,
+                     base_band(T), α = α_T(t)),
+                band_min, band_max)
+hysteresis ← hysteresis_t
+\end{verbatim}
+
+\subsection{Write Pacing and Memory
+Accumulation}\label{sec-write-pacing}
+
+The write gate operates per-signal, but coherent ``thoughts'' often span
+multiple signals. This section introduces memory-level accumulation that
+groups signals into natural units before storage decisions, inspired by
+Event Segmentation Theory (Zacks \& Swallow, 2007).
+
+This approach draws from EM-LLM (Fountas et al., 2024), which segments
+token sequences into episodic events using surprise-based boundary
+detection refined by graph-theoretic cohesion metrics. Their work shows
+that combining prediction error signals with within-segment coherence
+produces boundaries strongly correlated with human event perception. Our
+adaptation uses EMA prediction error (surprisal\_t) for surprise and
+cosine similarity for cohesion, while drift provides auxiliary boundary
+pressure, enabling modality-agnostic operation across text tokens, audio
+chunks, video frames, or any signal stream.
+
+\subsubsection{Memory Accumulator State}\label{sec-accumulator}
+
+Each source stream maintains accumulator state:
+
+\begin{verbatim}
+μ_acc ← 256d running mean embedding
+drift_acc ← accumulated drift within memory
+s_sum ← sum of signal scores in memory
+s_max ← max signal score in memory
+n ← count of signals in memory
+e_peak ← embedding of highest-scoring signal
+emo_max ← 0  # max emotion_intensity_t within the unit
+arousal_sum ← 0  # sum of arousal_t within the unit (for avg)
+t_start ← now_ms()  # timestamp of accumulation start (ms since epoch)
+last_signal_ts ← now_ms()  # timestamp of previous signal (ms, for gap detection)
+last_write_ts ← 0  # ms; 0 means "no prior write" for refractory
+eta_acc ← 0  # drift EWMA state
+coherence_prev ← 0  # previous coherence (initialize to 0)
+acc_signals_window ← []  # ring buffer of recent embeddings for coherence
+\end{verbatim}
+
+Reset behavior: reset\_accumulator() clears μ\_acc, drift\_acc, s\_sum,
+s\_max, n, e\_peak, emo\_max, arousal\_sum, eta\_acc, coherence\_prev,
+and sets acc\_signals\_window ← {[}{]} (and refreshes
+t\_start/last\_signal\_ts for the next unit), but retains
+last\_write\_ts so the refractory term remains well-defined across
+boundaries.
+
+\begin{verbatim}
+reset_accumulator(): acc_signals_window ← []  # MUST clear coherence window at boundaries
+\end{verbatim}
+
+On each signal, update running statistics (note: n is the count before
+this signal):
+
+\begin{verbatim}
+signal_gap_s ← now_s() − to_s(last_signal_ts)  # compute BEFORE updating last_signal_ts
+
+win_coh(T) = round(lerp(8, 32, T))  # coherence window size
+acc_signals_window ← tail(acc_signals_window, win_coh(T))
+
+μ_acc ← (n × μ_acc + x_t) / (n + 1)
+n ← n + 1
+drift_acc ← drift_acc + (drift_mag_t / 2)  # accumulate normalized context-centroid drift (drift_mag_t ∈ [0,2])
+s_sum ← s_sum + score_t
+emo_max ← max(emo_max, emotion_intensity_t)
+arousal_sum ← arousal_sum + arousal_t
+if score_t > s_max:
+    s_max ← score_t; e_peak ← x_t
+last_signal_ts ← now_ms()  # update timestamp for next gap calculation (ms)
+\end{verbatim}
+
+\subsubsection{Hybrid Drift and Coherence
+Tracking}\label{sec-drift-coherence}
+
+Boundary detection operates on the \textbf{current unflushed memory
+centroid} rather than the raw signal, keeping segmentation tied to the
+evolving thought unit:
+
+\begin{verbatim}
+ε_noise(T) = lerp(0.01, 0.05, 1 − T)  # stability-derived noise floor
+# Use centroid drift (μ_acc) instead of per-signal drift
+mu_prev ← mu_acc_{t−1}
+mu_curr ← mu_acc_t
+d_step ← max(1 − cos(mu_curr, mu_prev) − ε_noise(T), 0)
+eta_prev ← eta_acc  # baseline before updating EWMA
+\end{verbatim}
+
+Memory coherence tracks similarity within the current memory
+accumulation window (range {[}−1, 1{]} from mean cosine):
+
+\begin{verbatim}
+current_window ← acc_signals_window  # embeddings from the current unit before mu_curr
+if |current_window| == 0:
+    coherence_curr ← 1.0  # empty-window fallback
+else:
+    coherence_curr ← mean([cos(mu_curr, x_i) for x_i in current_window])
+# After computing coherence_curr, append mu_curr for the next step
+acc_signals_window.append(mu_curr); acc_signals_window ← tail(acc_signals_window, win_coh(T))
+# coherence_prev is the stored coherence value from the previous step
+\end{verbatim}
+
+Note: coherence\_mem is distinct from coherence\_struct
+(Section~\ref{sec-struct-coherence}). The former tracks within-memory
+similarity using raw mean cosine, while the latter measures
+variance-based integration with broader context. This dual-signal
+approach mirrors EM-LLM's boundary detection mechanism. In their
+formulation, boundaries occur where surprise (token-level prediction
+error) exceeds a threshold and segment cohesion drops. In Cortext,
+surprisal\_t provides the prediction-error signal, while drift spike
+provides auxiliary boundary pressure and coherence\_mem drop captures
+within-memory similarity degradation.
+
+\subsubsection{Natural Boundary Detection}\label{sec-boundary}
+
+Boundary score combines drift spike and coherence drop:
+
+\begin{verbatim}
+weight_drift_component = lerp(0.6, 0.4, T)  # weight on drift
+weight_gap_component = lerp(0.05, 0.20, T)  # soft gap influence (low weight)
+weight_drift_component = weight_drift_component × (1 − weight_gap_component)
+weight_coh_component = 1 − weight_gap_component − weight_drift_component
+ε0(T) = lerp(0.005, 0.02, 1 − T)  # cold-start guard for eta_prev
+if eta_prev < ε0(T):
+    drift_spike ← 0
+else:
+    drift_spike ← (d_step − eta_prev) / max(eta_prev, ε)
+eta_acc ← EWMA(eta_prev, d_step, α = lerp(0.3, 0.1, T))
+coh_drop01 ← clamp((coherence_prev − coherence_curr) / 2, 0, 1)
+coherence_prev ← coherence_curr  # update for next step
+
+# Adaptive gap signal (dynamic, not a hard trigger)
+dt_ref ← max(dt_ema, dt_floor(T))  # EWMA of inter-arrival Δt in seconds (robust to jitter)
+gap_scale(T) = lerp(3.0, 8.0, T)  # expected pause multiplier
+gap_ref_s ← gap_scale(T) × dt_ref
+gap_z ← (signal_gap_s − gap_ref_s) / max(gap_ref_s, ε)
+gap_score ← sigmoid(gap_z)
+
+boundary_score ← weight_drift_component × sigmoid(drift_spike) +
+                  weight_coh_component × coh_drop01 +
+                  weight_gap_component × gap_score
+boundary_score ← clamp(boundary_score, 0, 1)
+\end{verbatim}
+
+Boundary threshold and limits:
+
+\begin{verbatim}
+b_thresh(F, S) = lerp(0.4, 0.7, F) × lerp(1.1, 0.9, S)
+max_mem_time(T) = lerp(30, 120, T)  # seconds
+max_mem_drift(S) = lerp(0.8, 2.0, S)  # cumulative drift cap
+\end{verbatim}
+
+Trigger memory flush when:
+
+\begin{verbatim}
+mem_elapsed ← now_s() − to_s(t_start)
+should_flush = (boundary_score > b_thresh(F, S)) OR
+               (mem_elapsed > max_mem_time(T)) OR
+               (drift_acc > max_mem_drift(S))
+\end{verbatim}
+
+where signal\_gap\_s = now\_s() − to\_s(last\_signal\_ts) is computed at
+the start of signal processing (before last\_signal\_ts is updated). Gap
+timing influences boundary\_score via gap\_score rather than forcing an
+unconditional flush, which avoids splitting mid-thought when upstream
+processing introduces non-deterministic latency.
+
+\subsubsection{Spike Bypass (Flashbulb
+Flush)}\label{spike-bypass-flashbulb-flush}
+
+High-salience signals bypass accumulation and flush immediately,
+capturing preceding context as a coherent memory unit:
+
+\begin{verbatim}
+spike_margin(S,T) = lerp(0.2, 0.5, T) × lerp(1.2, 0.8, S)  # above θ_dynamic
+spike_bypass = score_t > (θ_dynamic + spike_margin(S,T))
+force_write ← false
+\end{verbatim}
+
+When spike\_bypass triggers:
+
+\begin{verbatim}
+if spike_bypass:
+    should_flush = true   # force a boundary
+    force_write = true   # bypass S_window > θ_memory
+\end{verbatim}
+
+This ensures flashbulb moments capture their surrounding context rather
+than creating isolated micro-memories.
+
+\subsubsection{Window Score and
+Refractory}\label{window-score-and-refractory}
+
+Memory-level score combines peak and average with coverage bonus:
+
+\begin{verbatim}
+s_avg ← s_sum / max(n, 1)
+α(F) = lerp(0.3, 0.7, F)  # peak vs avg weight
+coverage ← min(n / n_ctx(T), 1.0)  # memory completeness
+β(S) = lerp(0.05, 0.15, S)  # coverage weight
+S_window ← α(F) × s_max + (1 − α(F)) × s_avg + β(S) × coverage
+\end{verbatim}
+
+Write refractory suppresses rapid successive writes:
+
+\begin{verbatim}
+τ_write_refrac(T) = lerp(5, 30, T)  # seconds
+k_write_refrac = lerp(0.3, 0.1, T)
+Δt_write ← now_s() − to_s(last_write_ts)
+M_write_refrac ← 1.0 + k_write_refrac × exp(−Δt_write / τ_write_refrac(T))
+\end{verbatim}
+
+Final write decision:
+
+\begin{verbatim}
+θ_memory ← θ_dynamic × M_write_refrac
+write_memory = force_write OR (should_flush AND (S_window > θ_memory))
+if write_memory: last_write_ts ← now_ms()  # update refractory timestamp (ms)
+\end{verbatim}
+
+Normative rule (MUST): if should\_flush is true, the current unit must
+be finalized. If write\_memory is false, discard the unit and
+reset\_accumulator() anyway (do not update last\_write\_ts). This
+prevents perpetual should\_flush states (time cap / drift cap / gap cap)
+while never resetting.
+
+Trace note: if a run trace reports both write\_decision and stored,
+interpret write\_decision as the boolean gate outcome at the boundary
+(the write\_memory predicate above). Interpret stored as the eventual
+recording outcome (after any final safety checks).
+
+Representative embedding blends accumulator mean with peak:
+
+\subsubsection{Representative Embedding}\label{sec-rep-embedding}
+
+\begin{verbatim}
+ρ(F) = lerp(0.3, 0.7, F)  # mean vs peak blend
+e_rep ← l2_normalize(ρ(F) × μ_acc + (1 − ρ(F)) × e_peak)
+\end{verbatim}
+
+On write: store e\_rep with metadata \{n, s\_max, s\_avg, drift\_acc,
+mem\_elapsed, s\_emotion\_max=emo\_max, s\_arousal\_avg=arousal\_sum /
+max(n, 1)\}. Append e\_rep to memory\_stream and
+recent\_memory\_centroids. Reset accumulator for next unit.
+
+\section{Reinforcement and Decay Dynamics}\label{sec-reinforcement}
+
+\subsection{Memory Strength Model}\label{sec-memory-strength}
+
+Each memory m maintains a strength value updated through use-frequency
+tracking and exponential decay. The update uses a sensitivity-modulated
+learning rate and a binary usage indicator:
+
+\begin{verbatim}
+α_min_S = 0.05; α_span_S = 0.35
+α_S(t) = α_min_S + S × α_span_S × u(t)
+used_flag(m) = 1 if m was retrieved and used in current step, else 0
+
+use_frequency_t ← EWMA(use_frequency_{t−1},
+                       used_flag(m), α = α_S(t))
+λ_t ← ln(2) / half_life_t
+strength_t ← clamp(strength_{t−1} × exp(−λ_t × Δt) +
+                   S × use_frequency_t, 0, 1)
+\end{verbatim}
+
+Δt is measured per memory using its last access timestamp:
+
+\begin{verbatim}
+Δt(m) ← now_s() − to_s(m.last_access); if last_access is unset, use created_at
+\end{verbatim}
+
+Memories falling below the periphery cutoff are candidates for eviction:
+
+\begin{verbatim}
+periphery_cutoff(T) = lerp(0.05, 0.25, T)
+if strength_t < periphery_cutoff(T): evict(m)
+\end{verbatim}
+
+\subsection{Contextual Gain and Per-Memory Stability
+(Definitions)}\label{contextual-gain-and-per-memory-stability-definitions}
+
+Contextual gain is a per-retrieval signal used by multiple feedback
+loops:
+
+\begin{verbatim}
+contextual_gain_t(m) ← cos(x_t, m.embedding)    # if m was retrieved and used (range [−1, 1])
+contextual_gain_t(m) ← undefined                # otherwise
+\end{verbatim}
+
+When undefined, treat contextual\_gain\_t(m) as 0 in downstream updates.
+Persisted per-memory gain is tracked as a smoothed value:
+
+\begin{verbatim}
+L_cg = round(lerp(8, 32, T))
+α_cg = 2 / (L_cg + 1)
+contextual_gain(m) ← EWMA(contextual_gain(m), contextual_gain_t(m), α_cg)
+\end{verbatim}
+
+Per-memory stability initializes at creation and is bounded:
+
+\begin{verbatim}
+stability(m)_init = 1.0
+stability(m) ← clamp(stability(m), 0.0, 2.0)
+\end{verbatim}
+
+Retrieved vs used:
+
+\begin{verbatim}
+retrieved(m) = memory returned by retrieval (vector or graph expansion)
+used(m) = retrieved(m) AND injected into active context after gate decisions
+\end{verbatim}
+
+Contextual gain is only measured for used memories.
+
+\subsection{Influence-Weighted
+Updates}\label{influence-weighted-updates}
+
+When contextual gain signals are available, influence factors modulate
+reinforcement:
+
+\begin{verbatim}
+influence_factor ← (used_count / max(retrieved_count, 1)) ×
+                    clamp(contextual_gain(m), −1, +1)
+strength_t ← clamp(strength_{t−1} × exp(−λ_t × Δt) +
+                   S × use_frequency_t + F × influence_factor, 0, 1)
+\end{verbatim}
+
+\subsection{Causal Feedback Loop}\label{sec-feedback}
+
+The system tracks causal influence of retrieved memories on generation
+quality through contextual gain---the semantic alignment (cosine
+similarity) between the current signal embedding and the retrieved
+memory embedding.
+
+\subsubsection{Focus Feedback}\label{focus-feedback}
+
+\begin{verbatim}
+αF_base = 0.10; βF_base = 0.05
+weight_relevance_t ← weight_relevance
+attention_width_t ← attention_width
+for each used memory m:
+    if contextual_gain(m) > 0:
+        weight_relevance_t += αF_base × contextual_gain(m)
+        attention_width_t *= (1 − βF_base)
+    else:
+        attention_width_t *= (1 + βF_base)
+weight_relevance ← clamp(weight_relevance_t, 0, 1)
+attention_width_t ← clamp(attention_width_t,
+                          attention_width_min, attention_width_max)
+attention_width ← attention_width_t
+\end{verbatim}
+
+Positive contextual gain narrows attention and boosts relevance
+weighting; negative gain widens attention to explore alternatives.
+
+\subsubsection{Sensitivity Feedback}\label{sensitivity-feedback}
+
+\begin{verbatim}
+η_base = 0.10
+weight_novelty_t ← weight_novelty
+for each used memory m:
+    novelty_reward ← 1 − sim(m.embedding, recent_context)
+    weight_novelty_t += η_base × (novelty_reward ×
+                         contextual_gain(m) −
+                         redundancy(m, recent_context))
+weight_novelty_t ← clamp(weight_novelty_t, 0, 1)
+weight_novelty ← weight_novelty_t
+\end{verbatim}
+
+This rewards novelty that proves useful while penalizing redundant
+retrievals.
+
+\subsubsection{Stability Feedback}\label{stability-feedback}
+
+\begin{verbatim}
+γT_base = 0.05
+for each used memory m:
+    if contextual_gain(m) > 0:
+        stability_t(m) ← stability(m) + γT_base
+    else:
+        stability_t(m) ← stability(m) × (1 − γT_base)
+    stability(m) ← clamp(stability_t(m), 0.0, 2.0)
+\end{verbatim}
+
+The mean stability of used memories provides adjustment to the half-life
+target:
+
+\begin{verbatim}
+adj ← clamp(mean(stability(m_used)) − 1.0, −0.25, +0.25)
+ΔHalfLife_adj_t ← adj
+\end{verbatim}
+
+This factor is consumed by the Stability update
+(Section~\ref{sec-stability-update}), avoiding conflicting adjustments
+between feedback mechanisms.
+
+\subsection{Generation Influence
+Tracking}\label{generation-influence-tracking}
+
+When generation embeddings are available, influence incorporates output
+trajectory:
+
+\begin{verbatim}
+Δḡ ← l2_normalize(ḡ_t) − l2_normalize(ḡ_{t−1})
+drift_mag_gen ← ‖Δḡ‖
+drift_contribution(m) ← (drift_mag_gen / 2) ×
+                         max(0, cos(m.embedding, l2_normalize(Δḡ)))
+\end{verbatim}
+
+Total influence blends contextual gain, generation similarity, and drift
+contribution:
+
+\begin{verbatim}
+λ₁ = 0.5; λ₂ = 0.4; λ₃ = 0.3
+influence(m) ← λ₁ × contextual_gain(m) +
+                λ₂ × cos(m.embedding, ḡ_t) −
+                λ₃ × drift_contribution(m)
+\end{verbatim}
+
+Sustained influence accumulates over a stability-dependent horizon:
+
+\begin{verbatim}
+L_sustain(T) = round(lerp(3, 5, T))
+sustained_influence ← EWMA(sustained_influence,
+                           influence(m),
+                           α = 2 / (L_sustain(T) + 1))
+\end{verbatim}
+
+\section{Advanced Cognitive Processes}\label{sec-advanced}
+
+This section presents algorithms modeling higher-order cognitive
+phenomena: working memory maintenance, metacognitive monitoring,
+reconsolidation dynamics, and serial position effects.
+
+\subsection{Working Memory Gates}\label{working-memory-gates}
+
+Following Cowan (2001) capacity constraints, working memory maintains a
+limited number of active items. Working memory holds coherent memories
+as defined in Section~\ref{sec-write-pacing}, preserving the full
+content and signal sequence:
+
+\begin{verbatim}
+base_capacity = round(lerp(5, 3, S) + lerp(−1, 1, F))
+\end{verbatim}
+
+This yields a range of approximately 2-6 memories, broadening the 4±1
+chunk limit to accommodate task-dependent requirements. High Sensitivity
+reduces capacity (faster turnover), while high Focus modulates breadth.
+
+\subsubsection{Active Memory Structure}\label{active-memory-structure}
+
+Each active memory holds a coherent memory with its full content and
+metadata:
+
+\begin{verbatim}
+memory.content ← concatenated signal blobs
+memory.source_id ← source identifier (e.g., 'user', 'assistant')
+memory.modality ← primary modality ('text', 'audio', 'image')
+memory.blob_ids ← [blob_1, blob_2, ..., blob_n]  # blob refs
+memory.embedding ← e_rep  # representative embedding (@sec-rep-embedding)
+memory.signals ← [x_1, x_2, ..., x_n]  # ordered signal embeddings
+memory.metadata ← {n, s_max, s_avg, drift_acc, mem_elapsed,
+                   s_emotion_max, s_arousal_avg}
+\end{verbatim}
+
+The emotional metrics (s\_emotion\_max, s\_arousal\_avg) are accumulated
+during memory formation for use by Emotional Consolidation
+(Section~\ref{sec-emotional-consolidation}).
+
+\subsubsection{Maintenance Cost}\label{maintenance-cost}
+
+Maintenance incurs cognitive cost:
+
+\begin{verbatim}
+maintenance_cost_per_memory = lerp(0.05, 0.15, S)
+complexity_penalty = manifold_complexity × lerp(0.5, 1.5, S)
+\end{verbatim}
+
+The manifold\_complexity is defined as a normalized local variability
+proxy (see Appendix B): manifold\_complexity ← clamp((1 −
+mean\_cos\_window) / 2, 0, 1).
+
+\subsubsection{Memory-Level Gating}\label{memory-level-gating}
+
+Gating thresholds determine entry and chunking:
+
+\begin{verbatim}
+chunking_threshold = lerp(0.7, 0.9, F)
+gate_threshold = lerp(0.1, 0.4, F)
+rehearsal_rate = lerp(0.5, 2.0, S)
+memory_dedication_strength = lerp(0.3, 0.9, T)
+\end{verbatim}
+
+Working memory gating evaluates coherent memories at accumulation
+boundaries (Section~\ref{sec-boundary}), not individual signals:
+
+\begin{verbatim}
+on_memory_boundary:
+    [α, β, γ] ← normalize([lerp(0.55, 0.70, F),   # window score weight
+                        lerp(0.20, 0.35, F),   # task relevance weight
+                        lerp(0.10, 0.30, S)])   # novelty-to-WM weight
+    memory_benefit ← α × S_window + β × relevance_to_task(μ_acc, task_context) +
+                       γ × novelty_to_set(μ_acc, {m.embedding | m ∈ active_memories})
+    margin ← memory_benefit − gate_threshold
+    k ← |active_memories|
+    C ← max(base_capacity, 1)
+    p_cap ← 3
+    capacity_pressure(k, C) ← 1 + max(0, (k − C) / C)^p_cap
+    raw_cost ← (maintenance_cost_per_memory × k + complexity_penalty) ×
+               capacity_pressure(k, C)
+    total_cost ← raw_cost / (1 + raw_cost)  # squash to [0, 1)
+    accept_memory = (margin ≥ total_cost)
+\end{verbatim}
+
+Normative note (MUST): total\_cost is normalized to {[}0, 1{]} to keep
+gating on the same score scale as margin. This avoids cold-start or
+capacity regimes where costs can exceed 1 and make acceptance
+vanishingly rare.
+
+Note that total\_cost is computed from existing active memories only (k
+is the current count), so k=0 yields no bootstrap penalty. Capacity
+pressure activates only when k \textgreater{} C.
+
+\subsubsection{Chunking at Memory Level}\label{chunking-at-memory-level}
+
+Chunking operates on memory embeddings to merge related content from the
+same source:
+
+\begin{verbatim}
+similar_memories ← {m ∈ active_memories | cos(m.embedding, memory.e_rep) > chunking_threshold AND
+                              m.source_id == memory.source_id}
+if |similar_memories| > 0:
+    merge_into_chunk(similar_memories, memory)
+\end{verbatim}
+
+\subsection{Metacognitive Monitoring}\label{metacognitive-monitoring}
+
+The system implements feeling-of-knowing (FOK) and tip-of-tongue (TOT)
+detection following Hart (1965) framework:
+
+\begin{verbatim}
+FOK_threshold = lerp(0.2, 0.5, F)
+TOT_detection = (FOK > lerp(0.5, 0.8, F)) AND
+                 (retrieval_strength < lerp(0.4, 0.2, F))
+\end{verbatim}
+
+TOT occurs when metacognitive confidence is high but retrieval strength
+is low---the characteristic experience of knowing one knows something
+but being unable to access it.
+
+Additional metacognitive parameters:
+
+\begin{verbatim}
+confidence_decay_rate = lerp(0.01, 0.1, 1 − T)
+unknown_threshold = lerp(0.3, 0.1, F)
+strategy_switch_latency = lerp(500, 100, S)  # ms
+certainty_requirement = lerp(0.6, 0.9, T)
+metacognitive_sensitivity = F × (1 + 0.5 × S)
+\end{verbatim}
+
+\subsection{Memory Reconsolidation}\label{memory-reconsolidation}
+
+Following Nader, Schafe, and Le Doux (2000), retrieved memories enter a
+labile state permitting modification:
+
+\begin{verbatim}
+τ_labile = lerp(30, 300, T)  # seconds
+reconsolidation_gain = lerp(0.2, 0.02, T)
+lability_susceptibility = (1 − T) × (0.5 + 0.5 × S)
+\end{verbatim}
+
+During the lability window, memories can drift toward current context:
+
+\begin{verbatim}
+drift_magnitude = (1 − T) × S × lability ×
+                   contextual_relevance
+\end{verbatim}
+
+Reconsolidation effects propagate to semantically related memories with
+decay:
+
+\begin{verbatim}
+ripple_decay = lerp(0.5, 0.1, T)  # per semantic hop
+\end{verbatim}
+
+\subsection{Retrieval Competition}\label{retrieval-competition}
+
+Retrieved memories compete through lateral inhibition, modeling
+retrieval-induced forgetting (Anderson, Bjork, and Bjork 1994):
+
+\begin{verbatim}
+inhibition_radius = lerp(0.5, 0.85, F)
+winners_k = round(lerp(7, 3, F))
+suppression_per_retrieval = lerp(0.1, 0.01, T) ×
+                             (1 − winning_activation)
+recovery_time_RIF = lerp(300, 1800, T)  # seconds
+\end{verbatim}
+
+High Focus produces narrow winner-take-all dynamics; low Focus permits
+broader activation.
+
+\subsection{Predictive Pre-activation}\label{predictive-pre-activation}
+
+The system pre-activates memories predicted to be relevant based on the
+EMA expectation state (\texttt{x\_pred\_ema}) and recent context:
+
+\begin{verbatim}
+prediction_horizon = round(lerp(2, 8, F))
+pre_activation_decay = lerp(0.7, 0.3, T)
+prediction_conf_threshold = lerp(0.3, 0.7, F)
+surprise_sensitivity = S × lerp(2.0, 0.5, T)
+\end{verbatim}
+
+When predictions fail (high surprise), the system increases the refresh
+rate of pre-activation:
+
+\begin{verbatim}
+update_rate_on_surprise = lerp(0.2, 0.02, T) × S
+\end{verbatim}
+
+\subsection{Serial Position Effects}\label{serial-position-effects}
+
+The architecture models primacy, recency, and distinctiveness effects
+observed in human memory (Murdock Jr 1962):
+
+\begin{verbatim}
+primacy_window = round(lerp(5, 2, F))
+primacy_bonus = lerp(1.2, 2.0, S)
+recency_window = round(lerp(7, 3, F))
+rehearsal_curve_depth = lerp(0.2, 0.6, S)
+\end{verbatim}
+
+The von Restorff (isolation) effect enhances memory for distinctive
+items (Hunt 1995):
+
+\begin{verbatim}
+distinctiveness_threshold = lerp(0.6, 0.8, F)
+von_restorff_multiplier = lerp(1.5, 3.0, S)
+\end{verbatim}
+
+Items in the middle region suffer interference:
+
+\begin{verbatim}
+interference_zone = positions[primacy_window+1 : −recency_window]
+middle_suppression = lerp(0.8, 0.5, S) × (1 − F)
+\end{verbatim}
+
+\subsection{Emotional Consolidation}\label{sec-emotional-consolidation}
+
+High-emotion events trigger enhanced consolidation, following McGaugh
+(2004) findings. As detailed in Section~\ref{sec-activity},
+consolidation operates on stored memory metadata:
+
+\begin{verbatim}
+θ_intensity = lerp(0.6, 0.8, 1 − S)
+θ_arousal = lerp(0.4, 0.2, S)
+# Consolidation uses stored memory emotional metadata
+trigger = (m.metadata.s_emotion_max ≥ θ_intensity) AND
+           (m.metadata.s_arousal_avg ≥ θ_arousal)
+\end{verbatim}
+
+Flashbulb memories receive extended half-life bonuses based on the
+memory's peak emotional intensity:
+
+\begin{verbatim}
+flashbulb_threshold = lerp(0.9, 0.4, S)
+# Half-life bonus uses stored memory emotional peak
+emotional_half_life_bonus = exp(lerp(0, ln(3), S)) ×
+                             (1 + m.metadata.s_emotion_max)
+\end{verbatim}
+
+The emotional metrics (s\_emotion\_max, s\_arousal\_avg) are accumulated
+during memory formation and stored with the memory
+(Section~\ref{sec-accumulator}).
+
+\begin{verbatim}
+cascade_radius = round(lerp(1, 5, S))
+cascade_decay = lerp(0.7, 0.3, S)
+\end{verbatim}
+
+\section{Consolidation and Graph Integration}\label{sec-consolidation}
+
+The consolidation system transforms episodic memories into semantic
+structures through clustering, summarization, and knowledge graph
+construction. Memory-level storage (Section~\ref{sec-write-pacing})
+ensures each embedding represents a coherent unit.
+
+\subsection{Consolidation Triggers}\label{sec-consolidation-triggers}
+
+Consolidation operates on stored memory representatives (e\_rep from
+Section~\ref{sec-rep-embedding}), not individual signals. It activates
+under capacity, rate, or temporal conditions:
+
+\begin{verbatim}
+should_consolidate = (memory_count > consolidation_threshold) OR
+                      (m_rate < rate_target / 2) OR
+                      (elapsed_time > consolidation_interval)
+\end{verbatim}
+
+Definitions (knob-derived):
+
+\begin{verbatim}
+consolidation_interval(T) = lerp(300, 3600, T)  # seconds (5 min → 1 hour)
+consolidation_threshold(T) = n_ctx(T) × win_score(T)  # memory-count trigger
+merge_threshold(F) = lerp(0.85, 0.95, F)  # similarity required for clustering
+\end{verbatim}
+
+The consolidation rate adapts to Stability and Sensitivity (write\_rate
+tracks memory writes, not signal writes):
+
+\begin{verbatim}
+rate_consolidate = (1 / max(consolidation_interval, 1)) ×
+                    (0.3 + 0.7T) × (1 − 0.5S)
+\end{verbatim}
+
+\subsubsection{Activity-Aware Scheduling}\label{sec-activity}
+
+Consolidation runs during idle periods and preempts for retrieval. The
+is\_accumulating\_memory check ensures consolidation doesn't interrupt
+mid-memory accumulation:
+
+\begin{verbatim}
+idle_required(T) = round(0.25 × win_rate_s(T))
+idle_for_s = now_s() − to_s(last_retrieval_ts)
+# Consolidation waits for memory completion, not just signal arrival
+should_start = (NOT is_accumulating_memory) AND
+                (retrieval_queue_depth == 0) AND
+                (idle_for_s ≥ idle_required(T))
+\end{verbatim}
+
+Consolidation begins only after the current memory has been flushed
+(Section~\ref{sec-boundary}) and the idle period has elapsed. On
+retrieval events, consolidation pauses, commits micro-batches, and
+resumes when idle.
+
+\subsection{Consolidation Scoring}\label{consolidation-scoring}
+
+Each stored embedding represents a memory representative (e\_rep from
+Section~\ref{sec-rep-embedding}). Each memory receives a consolidation
+score determining merge priority:
+
+\begin{verbatim}
+score_consolidate(m) = weight_strength × strength(m) −
+                        weight_redundancy × redundancy(m) +
+                        weight_connectivity × connectivity(m) +
+                        weight_stability × stability(m)
+\end{verbatim}
+
+Weights derive from knobs:
+
+\begin{verbatim}
+weight_strength = T; weight_redundancy = F; weight_connectivity = S; weight_stability = T
+\end{verbatim}
+
+Low-scoring memories are marked for merging.
+
+\subsection{Clustering and
+Summarization}\label{clustering-and-summarization}
+
+Marked memories cluster via density-based methods (e.g., DBSCAN) or
+k-means using embedding similarity:
+
+\begin{verbatim}
+cluster_i = {m_j | cos(m_j, μ_i) > merge_threshold}
+μ_i = centroid(cluster_i)
+\end{verbatim}
+
+Summary nodes replace clusters:
+
+\begin{verbatim}
+summary.embedding = μ_i
+summary.blob = summarize(fetch_blobs(cluster_i))
+summary.metadata.sources = [m.id for m in cluster_i]
+\end{verbatim}
+
+\subsection{Semantic Extraction}\label{semantic-extraction}
+
+For sufficiently large clusters, semantic extraction identifies labels
+and relations:
+
+\begin{verbatim}
+extraction_batch_size = round(lerp(8, 32, T))
+min_cluster_size = round(lerp(3, 10, F))
+label_frequency_threshold = round(lerp(5, 15, T))
+extraction_interval = lerp(300, 3600, T)  # 5 min → 1 hour
+max_extractions_per_cycle = round(lerp(20, 5, T))
+\end{verbatim}
+
+Extraction uses structured prompting to identify labels/tags (people,
+places, organizations, concepts) and relationships (co-occurrence,
+implication, contradiction). Labels are stored as surface strings only
+(no type/category field).
+
+Label salience is derived from embeddings rather than model guesses:
+
+\begin{verbatim}
+e_label = encode(label_text)
+salience(label) = clamp((cos(e_label, summary.embedding) + 1) / 2, 0, 1)
+\end{verbatim}
+
+If a label already exists, its stored salience is updated with
+\texttt{s\_max\ =\ max(s\_max,\ salience(label))}.
+
+\subsection{Knowledge Graph
+Construction}\label{knowledge-graph-construction}
+
+The graph comprises two node types:
+
+\begin{itemize}
+\tightlist
+\item
+  \textbf{Memory Nodes:} Summarized embeddings from merged clusters
+\item
+  \textbf{Label Nodes:} Extracted labels/tags derived from content blobs
+\end{itemize}
+
+Edge types capture relationships:
+
+Edge weight convention (MUST): all association weights are normalized to
+{[}0, 1{]}. For cosine-based edges, store weight01 = clamp((cos\_sim +
+1) / 2, 0, 1).
+
+\begin{itemize}
+\tightlist
+\item
+  \textbf{co\_occurs:} Shared context or temporal proximity
+\item
+  \textbf{implies:} Directional correlation in embedding drift
+\item
+  \textbf{causes:} Directional correlation in embedding drift
+\item
+  \textbf{contradicts:} Strong negative similarity or constraint
+  violation
+\item
+  \textbf{reinforces:} Frequent joint retrieval
+\item
+  \textbf{derived\_from:} Links summaries to source memories
+\item
+  \textbf{similar\_to:} High cosine similarity (soft equivalence)
+\item
+  \textbf{has\_label:} Attaches an extracted label/tag to a node
+\end{itemize}
+
+\subsubsection{Edge Construction}\label{edge-construction}
+
+Co-occurrence edges derive from embedding similarity:
+
+\begin{verbatim}
+for (m_i, m_j) in cluster.sources:
+    cos_sim ← cos(m_i.embedding, m_j.embedding)
+    if cos_sim > lerp(0.85, 0.95, F):
+        weight01 ← clamp((cos_sim + 1) / 2, 0, 1)
+        create_edge(m_i, m_j, 'co_occurs', weight01)
+\end{verbatim}
+
+Causal edges derive from temporal drift:
+
+\begin{verbatim}
+temporal_order ← sort_by_timestamp(cluster.sources)
+for i in range(len(temporal_order) − 1):
+    m_i, m_j ← temporal_order[i], temporal_order[i+1]
+    drift_vec ← m_j.embedding − m_i.embedding
+    drift_mag ← ‖drift_vec‖
+    if drift_mag > lerp(0.15, 0.35, T):
+        weight01 ← clamp(drift_mag / 2, 0, 1)  # drift_mag ∈ [0,2] when embeddings are L2-normalized
+        create_edge(m_i, m_j, 'causes', weight01)
+\end{verbatim}
+
+\subsection{Graph-Augmented Retrieval}\label{graph-augmented-retrieval}
+
+Retrieval combines vector similarity with graph expansion. The query
+vector is the \textbf{current accumulator centroid} (μ\_acc), which
+aggregates the embeddings of the signals observed so far in the
+unflushed memory. This makes retrieval responsive to the evolving
+thought unit rather than any single micro‑signal.
+
+\begin{verbatim}
+# Query and re-rank using current memory centroid
+q ← μ_acc  # memory centroid from Section 4.4.1
+if |memory_stream| == 0:
+    return []  # cold-start fallback (no retrieval candidates)
+results_vec ← topK(vector_search(q, k=kNN_size(F)))
+seed_nodes ← [r.id for r in results_vec]
+if |seed_nodes| == 0 OR graph is empty:
+    return results_vec  # deterministic fallback, skip expansion
+expanded_nodes ← graph.traverse(seed_nodes, depth=graph_depth(T), min_edge_weight=min_edge_weight(F))
+combined ← union(seed_nodes, expanded_nodes)
+re_ranked ← sort_by(cos(q, embeddings(combined)))  # re-rank by memory centroid
+# Exclude current-unit writes and WM overlaps before returning
+dup_thresh = lerp(0.96, 0.88, F) × (0.98 + 0.02T)
+eligible ← {m ∈ re_ranked | m.created_at < write_exclusion_ts}
+eligible ← {m ∈ eligible | max_{w∈WM} cos(m.embedding, w) < dup_thresh}
+return eligible
+\end{verbatim}
+
+Graph expansion uses recursive traversal with depth limits to find
+related context that pure vector search might miss. Using the memory
+centroid maintains consistency between vector search and graph expansion
+results.
+
+\section{Interrupt Gate and Streaming Integration}\label{sec-interrupt}
+
+The interrupt gate controls when retrieved memories enter active context
+during streaming generation. The gate balances novelty value against
+disruption cost. The interrupt gate operates on memory-level context,
+using centroids (μ\_acc) rather than individual signal embeddings for
+novelty and relevance computation. All thresholds and gains in this
+section are derived from the three knobs (F, S, T); no fixed behavioral
+constants are introduced.
+
+\subsection{Marginal Utility
+Computation}\label{marginal-utility-computation}
+
+Novelty thresholds scale with knobs and refractory state:
+
+\begin{verbatim}
+τ_novelty = lerp(0.10, 0.35, F) × (1 − 0.15S) × (1 + 0.3T)
+τ_mu = lerp(0.08, 0.18, F) × (1 − 0.4S) × (1 + 0.4T)
+retrieval_thresh(F) = lerp(0.25, 0.60, F)
+\end{verbatim}
+
+Refractory dynamics suppress rapid successive interrupts:
+
+Interrupt state (per stream):
+
+\begin{verbatim}
+prev_x is unset on the first signal of a stream; set prev_x ← x_t after processing each signal
+first_step ← (prev_x is unset for this stream)
+if first_step:
+    # cold start: do not update drift_accum
+    drift_accum ← drift_accum
+else:
+    drift_accum ← drift_accum + cosine_dist(x_t, prev_x)  # cumulative drift
+Δ ← drift_accum − drift_at_last_interrupt  # cumulative drift since last interrupt
+τ_refrac = lerp(24, 96, T) × lerp(1.4, 1.0, S)
+k_refrac = lerp(0.20, 0.05, T) × lerp(0.8, 1.2, F)
+M_refrac = 1.0 + k_refrac × exp(−Δ / τ_refrac)
+\end{verbatim}
+
+On interrupt: set drift\_at\_last\_interrupt ← drift\_accum (resetting Δ
+to 0 for subsequent signals).
+
+Effective thresholds incorporate refractory pressure:
+
+\begin{verbatim}
+τ_novelty_eff = τ_novelty × M_refrac
+τ_mu_eff = τ_mu × M_refrac
+\end{verbatim}
+
+\subsection{Marginal Utility Score}\label{marginal-utility-score}
+
+The marginal utility (MU) of a candidate memory combines five factors.
+Context comparisons use memory centroids rather than individual signal
+embeddings:
+
+\begin{verbatim}
+# Context window contains recent memory centroids, not individual signals
+ctx_window ← recent_memory_centroids  # bounded deque of recent memory representatives (e_rep)
+q_retrieval ← μ_acc  # accumulator centroid query
+included_set ← {embedding(m) | m already injected into the current context window}
+\end{verbatim}
+
+Fallback: if included\_set is empty, treat redundancy(·, included\_set)
+= 0 and overlap\_star = −1.
+
+\begin{verbatim}
+if |ctx_window| == 0:
+    ctx_centroid ← q_retrieval  # fallback: use current unit centroid
+else:
+    ctx_centroid ← mean(ctx_window)  # centroid of recent memory centroids
+
+weights_mu_raw = [lerp(0.40, 0.60, F),   # coverage gain
+         lerp(0.35, 0.25, F),   # relevance
+         lerp(0.15, 0.25, S),   # redundancy penalty
+         lerp(0.15, 0.25, S),   # incoherence penalty
+         lerp(0.20, 0.50, S)]   # surprise bonus
+[weight_cov, weight_rel, weight_red, weight_incoh, weight_surp] = normalize(weights_mu_raw)
+
+mu = weight_cov × coverage_gain(candidate | included_set) +
+      weight_rel × map01(cos(candidate, ctx_centroid)) −
+      weight_red × redundancy(candidate, included_set) −
+      weight_incoh × (1 − coherence_struct_t) +
+      weight_surp × surprisal_t  # surprise bonus
+\end{verbatim}
+
+With map01 applied, each MU term is in {[}0, 1{]}, so μ is calibrated to
+the same range as τ\_mu.
+
+\subsection{Gate Decision Logic}\label{gate-decision-logic}
+
+Duplicate suppression threshold:
+
+\begin{verbatim}
+dup_thresh = lerp(0.96, 0.88, F) × (0.98 + 0.02T)
+K = round(lerp(10, 6, F))  # candidates to evaluate
+\end{verbatim}
+
+Higher Focus lowers \texttt{dup\_thresh}, making duplicate suppression
+stricter.
+
+\subsubsection{Write Exclusion Filter}\label{write-exclusion-filter}
+
+Memories stored during the current accumulation unit are excluded from
+interrupt consideration to prevent self-triggering. Using the
+accumulation start timestamp ensures all memories written within the
+current unit are excluded:
+
+\begin{verbatim}
+# Exclude memories written during current accumulation to prevent self-triggering
+    write_exclusion_ts ← t_start  # start timestamp from Accumulator State section
+candidates_eligible ← {c ∈ candidates | c.created_at < write_exclusion_ts}
+\end{verbatim}
+
+This filter is applied before novelty and marginal utility evaluation.
+All subsequent gate logic operates on candidates\_eligible rather than
+the raw candidate set, preventing recursive triggering within a coherent
+thought unit.
+
+\textbf{Working memory exclusion (normative):} retrieval must also
+exclude candidates that overlap with active working‑memory slots. This
+keeps ``what I just said'' in working memory rather than re‑injecting it
+from long‑term memory. The exclusion uses the same duplication threshold
+as the gate:
+
+\begin{verbatim}
+dup_thresh = lerp(0.96, 0.88, F) × (0.98 + 0.02T)
+candidates_eligible ← {c ∈ candidates_eligible | max_{w∈WM} cos(c, w) < dup_thresh}
+\end{verbatim}
+
+Boundary-aware override permits lower-threshold interrupts at natural
+boundaries:
+
+\begin{verbatim}
+boundary_mult = lerp(1.3, 2.0, F) × lerp(1.1, 0.9, S)
+\end{verbatim}
+
+The gate permits interrupt when:
+
+\begin{verbatim}
+at_drift_boundary = should_flush  # boundary signal from the current accumulator
+if |candidates_eligible| == 0:
+    allow_interrupt = false  # cold-start / empty-store fallback
+else:
+    candidate_star = argmax_{c ∈ candidates_eligible} mu(c)
+    mu_star = mu(candidate_star)
+    rel_star = map01(cos(candidate_star, ctx_centroid))
+    if |included_set| == 0:
+        overlap_star = −1.0
+    else:
+        overlap_star = max_{y ∈ included_set} cos(candidate_star, y)
+    if |ctx_window| == 0:
+        novelty_star = 1.0
+    else:
+        max_cos = max_{c ∈ ctx_window} cos(candidate_star, c)  # in [−1, 1]
+        novelty_star = clamp((1 − max_cos) / 2, 0, 1)
+    allow_interrupt =
+        (rel_star ≥ retrieval_thresh(F)) AND
+        (novelty_star ≥ τ_novelty_eff OR mu_star ≥ τ_mu_eff) AND
+        (overlap_star < dup_thresh) AND
+        (at_drift_boundary OR mu_star ≥ boundary_mult × τ_mu_eff)
+\end{verbatim}
+
+This logic suppresses low-drift interrupts unless the marginal utility
+substantially exceeds threshold, while permitting normal-threshold
+interrupts at natural transition points.
+
+\subsection{Streaming Pacing}\label{streaming-pacing}
+
+Streaming retrieval is gated by cumulative drift rate within the
+accumulation unit. Retrieval checks trigger when drift exceeds threshold
+or at boundaries. Retrieval uses q\_retrieval (the accumulator centroid)
+captured before any accumulator reset for this step. Retrieval returns a
+candidate pool already filtered by write‑exclusion and WM‑overlap rules;
+the interrupt gate then applies novelty/utility thresholds and
+redundancy penalties.
+
+\begin{verbatim}
+# Pacing tracks drift within current memory formation
+\end{verbatim}
+
+where cosine\_dist(u, v) = 1 − cos(u, v).
+
+\begin{verbatim}
+first_step ← (x_last_check is unset for this stream)  # MUST occur once per stream
+if first_step: x_last_check ← x_t; drift_acc_pacing ← 0
+drift_acc_pacing += cosine_dist(x_t, x_last_check)
+pacing_thresh(S) = lerp(0.5, 0.1, S)
+max_wait_drift(F) = lerp(2.0, 0.5, F)
+adjacent_window(F) = round(lerp(8, 1, F))
+
+since_last_s ← if last_retrieval_ts == 0 then +∞ else (now_ms() − last_retrieval_ts) / 1000
+min_gap_s ← adjacent_window(F) × dt_ema
+adjacent_ok ← (since_last_s ≥ min_gap_s)
+force_check ← (drift_acc_pacing > max_wait_drift(F))
+
+# Retrieval triggered when drift exceeds threshold, at memory boundary, or when drift exceeds max_wait_drift.
+# Adjacent-window throttling is bypassed on boundaries and force_check.
+if (drift_acc_pacing > pacing_thresh(S) OR should_flush OR force_check) AND
+   (adjacent_ok OR should_flush OR force_check):
+    trigger_check(); x_last_check ← x_t; drift_acc_pacing ← 0; last_retrieval_ts ← now_ms()
+\end{verbatim}
+
+High Sensitivity produces frequent checks triggered by small content
+shifts; high Focus enforces strict drift limits. Memory boundaries
+(Section~\ref{sec-boundary}) also trigger retrieval checks to ensure
+context updates align with natural thought transitions.
+
+\section{Experimental Results}\label{sec-experimental}
+
+We present preliminary experimental results collected from live chat
+sessions to validate the adaptive mechanisms.
+
+\subsection{Threshold Adaptation}\label{threshold-adaptation}
+
+The dynamic threshold (θ\_dynamic) successfully tracked score
+distributions. In high-volatility inputs (within-accumulator drift\_acc
+\textgreater{} 1.0), thresholds relaxed to \textasciitilde0.15, while
+stable contexts tightened to \textasciitilde0.27.
+
+\subsection{Boundary Detection}\label{boundary-detection}
+
+Accumulator drift (drift\_acc) aligned with semantic shifts.
+Conversation turns with distinct topics triggered flushes
+(boundary\_score \textgreater{} 0.3) while coherent continuations
+remained accumulated.
+
+\subsection{Latency and Performance}\label{latency-and-performance}
+
+End-to-end processing per token averaged \textless{} 50ms. Graph
+expansion added \textless{} 10ms overhead due to efficient kNN (k=32)
+and limited expansion depth (d=2).
+
+\section{Implementation Considerations}\label{sec-implementation}
+
+\subsection{Computational Complexity}\label{computational-complexity}
+
+The primary per-stimulus cost is the k-nearest-neighbors (kNN) search
+for metrics and retrieval. With \texttt{N} stored memories, naive search
+is \texttt{O(N)}. We recommend maintaining an HNSW index (Malkov and
+Yashunin 2018) to achieve \texttt{O(log\ N)} retrieval.
+
+Recursive graph expansion adds overhead but is bounded by \texttt{depth}
+and \texttt{branching\_factor}, effectively constant-time relative to
+\texttt{N}. Total complexity per stimulus is \texttt{O(log\ N)} with
+indexing.
+
+\subsection{Memory Footprint}\label{memory-footprint}
+
+The system stores: * \texttt{signal\_stream}: \texttt{n\_ctx} embeddings
+(256d float32 = 1KB each). * \texttt{score\_stream}: Scalar history. *
+\texttt{memory\_stream}: \texttt{N} stored memories (embedding +
+metadata). * \texttt{graph}: Adjacency lists for graph edges.
+
+For long-running instances, \texttt{memory\_stream} and \texttt{graph}
+dominate. Pruning low-strength memories
+(Section~\ref{sec-memory-strength}) is essential for bounding growth.
+
+\subsection{Numerical Stability}\label{numerical-stability}
+
+Exponential decays and probability computations can suffer from
+underflow. We use \texttt{log-space} arithmetic where appropriate and
+clamp all potentially divergent values (e.g., division by small sums)
+with ε = 10⁻⁶.
+
+\section{Conclusion and Future
+Directions}\label{conclusion-and-future-directions}
+
+We have presented Cortext, a three-knob adaptive memory architecture
+that unifies working, episodic, and semantic memory processes under a
+continuous control regime. By deriving most system parameters from
+Focus, Sensitivity, and Stability, while fixing a small set of
+invariants for controller stability, Cortext avoids the fragility of
+hard-coded constants and enables robust operation across diverse
+environments.
+
+Key contributions include the formalization of knob-derived parameter
+spaces, the integration of uncertainty-weighted Bayesian adaptation, and
+the implementation of bio-inspired mechanisms like homeostatic rate
+control and emotional consolidation.
+
+Future work will focus on: 1. \textbf{Large-scale evaluation:}
+Validating the architecture on long-horizon datasets (\textasciitilde1M+
+steps). 2. \textbf{Multi-agent dynamics:} Exploring how Cortext
+instances interact in collaborative settings. 3. \textbf{Hardware
+acceleration:} Optimizing the kNN and graph traversal kernels for edge
+devices.
+
+Cortext represents a step toward more organic, life-long learning
+systems that adapt continuously to their experiences, moving beyond
+static knowledge bases toward truly cognitive memory.
+
+\section*{References}\label{references}
+\addcontentsline{toc}{section}{References}
+
+\phantomsection\label{refs}
+\begin{CSLReferences}{1}{0}
+\bibitem[\citeproctext]{ref-anderson1994remembering}
+Anderson, Michael C, Robert A Bjork, and Elizabeth L Bjork. 1994.
+{``Remembering Can Cause Forgetting: Retrieval Dynamics in Long-Term
+Memory.''} \emph{Journal of Experimental Psychology: Learning, Memory,
+and Cognition} 20 (5): 1063.
+
+\bibitem[\citeproctext]{ref-astrom2008feedback}
+Åström, Karl Johan, and Richard M Murray. 2008. \emph{Feedback Systems:
+An Introduction for Scientists and Engineers}. Princeton university
+press.
+
+\bibitem[\citeproctext]{ref-baddeley2000episodic}
+Baddeley, Alan. 2000. {``The Episodic Buffer: A New Component of Working
+Memory?''} \emph{Trends in Cognitive Sciences} 4 (11): 417--23.
+
+\bibitem[\citeproctext]{ref-cowan2001magical}
+Cowan, Nelson. 2001. {``The Magical Number 4 in Short-Term Memory: A
+Reconsideration of Mental Storage Capacity.''} \emph{Behavioral and
+Brain Sciences} 24 (1): 87--114.
+
+\bibitem[\citeproctext]{ref-cowan2010magical}
+---------. 2010. {``The Magical Mystery Four: How Is Working Memory
+Capacity Limited, and Why?''} \emph{Current Directions in Psychological
+Science} 19 (1): 51--57.
+
+\bibitem[\citeproctext]{ref-hart1965memory}
+Hart, J T. 1965. {``Memory and the Feeling-of-Knowing Experience.''}
+\emph{Journal of Educational Psychology} 56 (4): 208.
+
+\bibitem[\citeproctext]{ref-hunt1995subtlety}
+Hunt, R Reed. 1995. {``The Subtlety of Distinctiveness: What von
+Restorff Really Did.''} \emph{Psychonomic Bulletin \& Review} 2 (1):
+105--12.
+
+\bibitem[\citeproctext]{ref-labar2006cognitive}
+LaBar, Kevin S, and Roberto Cabeza. 2006. {``Cognitive Neuroscience of
+Emotional Memory.''} \emph{Nature Reviews Neuroscience} 7 (1): 54--64.
+
+\bibitem[\citeproctext]{ref-liu1998sequential}
+Liu, Jun S, and Rong Chen. 1998. {``Sequential Monte Carlo Methods for
+Dynamic Systems.''} \emph{Journal of the American Statistical
+Association} 93 (443): 1032--44.
+
+\bibitem[\citeproctext]{ref-malkov2018efficient}
+Malkov, Yu A, and Dmitry A Yashunin. 2018. {``Efficient and Robust
+Approximate Nearest Neighbor Search Using Hierarchical Navigable Small
+World Graphs.''} \emph{IEEE Transactions on Pattern Analysis and Machine
+Intelligence} 42 (4): 824--36.
+
+\bibitem[\citeproctext]{ref-mcclelland1995why}
+McClelland, James L, Bruce L McNaughton, and Randall C O'Reilly. 1995.
+{``Why There Are Complementary Learning Systems in the Hippocampus and
+Neocortex: Insights from the Successes and Failures of Connectionist
+Models of Learning and Memory.''} \emph{Psychological Review} 102 (3):
+419.
+
+\bibitem[\citeproctext]{ref-mccloskey1989catastrophic}
+McCloskey, Michael, and Neal J Cohen. 1989. \emph{Catastrophic
+Interference in Connectionist Networks: The Sequential Learning
+Problem}. Vol. 24. Elsevier.
+
+\bibitem[\citeproctext]{ref-mcgaugh2004amygdala}
+McGaugh, James L. 2004. {``The Amygdala Modulates the Consolidation of
+Memories of Emotionally Arousing Experiences.''} \emph{Annual Review of
+Neuroscience} 27: 1--28.
+
+\bibitem[\citeproctext]{ref-miller1956magical}
+Miller, George A. 1956. {``The Magical Number Seven, Plus or Minus Two:
+Some Limits on Our Capacity for Processing Information.''}
+\emph{Psychological Review} 63 (2): 81.
+
+\bibitem[\citeproctext]{ref-murdock1962serial}
+Murdock Jr, Bennet B. 1962. {``The Serial Position Effect of Free
+Recall.''} \emph{Journal of Experimental Psychology} 64 (5): 482.
+
+\bibitem[\citeproctext]{ref-nader2003memory}
+Nader, Karim. 2003. {``Memory Traces Unbound.''} \emph{Trends in
+Neurosciences} 26 (2): 65--72.
+
+\bibitem[\citeproctext]{ref-nader2000fear}
+Nader, Karim, Glenn E Schafe, and Joseph E Le Doux. 2000. {``Fear
+Memories Require Protein Synthesis in the Amygdala for Reconsolidation
+After Retrieval.''} \emph{Nature} 406 (6797): 722--26.
+
+\bibitem[\citeproctext]{ref-russell1980circumplex}
+Russell, James A. 1980. {``A Circumplex Model of Affect.''}
+\emph{Journal of Personality and Social Psychology} 39 (6): 1161.
+
+\bibitem[\citeproctext]{ref-tulving1972episodic}
+Tulving, Endel. 1972. {``Episodic and Semantic Memory.''}
+\emph{Organization of Memory} 1: 381--403.
+
+\end{CSLReferences}
+
+\section*{Appendix A. State Variables Map}\label{sec-app-state}
+\addcontentsline{toc}{section}{Appendix A. State Variables Map}
+
+This appendix enumerates the state variables used by the specification
+and separates retained state (carried across timesteps) from per-step
+derived quantities. The canonical source for section references is
+\texttt{docs/paper/sections/*.qmd}; anchors in these files are
+authoritative when resolving cross-reference drift.
+
+\subsection*{State + Initialization (Canonical)}\label{sec-state-init}
+\addcontentsline{toc}{subsection}{State + Initialization (Canonical)}
+
+On cold start (no persisted state), initialize retained state as follows
+(unless otherwise specified by knob priors):
+
+\begin{itemize}
+\item
+  \textbf{Global defaults:} \texttt{signals\_processed\ =\ 0},
+  \texttt{u\_uncertainty\ =\ 0}, \texttt{mood\_vector\ =\ 0\_vector},
+  \texttt{last\_mood\_ts\ =\ now\_ms()},
+  \texttt{theta\_dynamic\ =\ theta\_target\ =\ θ\_prior(F,S,T)},
+  \texttt{hysteresis\ =\ lerp(0.02,\ 0.25,\ T)},
+  \texttt{half\_life\ =\ base\_half\_life(T)}, \texttt{m\_rate\ =\ 0},
+  \texttt{rho\_hat\_prev\ =\ 0}, \texttt{dt\_ema\ =\ 0},
+  \texttt{rate\_ticks\ =\ 0}, \texttt{reliability\ =\ 1},
+  \texttt{retention\_ema\ =\ 0},
+  \texttt{last\_rate\_timestamp\ =\ now\_ms()},
+  \texttt{last\_retrieval\_ts\ =\ 0},
+  \texttt{last\_embedding\ =\ unset}, \texttt{x\_pred\_ema\ =\ unset}.
+\item
+  \textbf{Accumulator defaults (per stream):}
+  \texttt{μ\_acc\ =\ 0\_vector}, \texttt{drift\_acc\ =\ 0},
+  \texttt{s\_sum\ =\ 0}, \texttt{s\_max\ =\ 0}, \texttt{n\ =\ 0},
+  \texttt{e\_peak\ =\ 0\_vector}, \texttt{emo\_max\ =\ 0},
+  \texttt{arousal\_sum\ =\ 0}, \texttt{acc\_signals\_window\ =\ {[}{]}},
+  \texttt{t\_start\ =\ 0}, \texttt{last\_signal\_ts\ =\ 0},
+  \texttt{last\_write\_ts\ =\ 0}, \texttt{eta\_acc\ =\ 0},
+  \texttt{coherence\_prev\ =\ 0}, \texttt{drift\_accum\ =\ 0},
+  \texttt{drift\_at\_last\_interrupt\ =\ 0},
+  \texttt{drift\_acc\_pacing\ =\ 0}, \texttt{x\_last\_check\ =\ unset},
+  \texttt{prev\_x\ =\ unset}.
+\item
+  \textbf{Per-memory defaults (on insert):} \texttt{strength\ =\ 1},
+  \texttt{use\_frequency\ =\ 0}, \texttt{stability\ =\ 1},
+  \texttt{connectivity\ =\ 0}, \texttt{drift\_mag\ =\ 0},
+  \texttt{influence\ =\ 0}, \texttt{sustained\_influence\ =\ 0},
+  \texttt{contextual\_gain\ =\ 0}, \texttt{redundancy\ =\ 0},
+  \texttt{pre\_activation\ =\ 0}, \texttt{lability\_state\ =\ 0},
+  \texttt{suppression\_count\ =\ 0}, \texttt{suppression\ =\ 0},
+  \texttt{flashbulb\ =\ 0}, \texttt{s\_emotion\_max\ =\ 0},
+  \texttt{s\_arousal\_avg\ =\ 0}.
+\item
+  \textbf{RLS defaults:} \texttt{w\_*\ =\ w\_bootstrap},
+  \texttt{P\ =\ diag(1000)}, \texttt{blender\_ready\ =\ false},
+  \texttt{blender\_update\_count\ =\ 0}.
+\item
+  \textbf{Knob-derived control parameters (initialized from priors):}
+  \texttt{weight\_relevance}, \texttt{attention\_width},
+  \texttt{coverage\_gain\_floor}, \texttt{mismatch\_weight},
+  \texttt{weight\_novelty}, \texttt{weight\_surprise},
+  \texttt{weight\_valence}, \texttt{weight\_arousal},
+  \texttt{emotion\_gain}, \texttt{score\_gain}, \texttt{rate\_target},
+  \texttt{rate\_decay}, \texttt{periphery\_half\_life},
+  \texttt{salience\_half\_life}, \texttt{drift\_weight}.
+\item
+  \textbf{Buffers:} \texttt{signal\_stream}, \texttt{score\_stream},
+  \texttt{memory\_stream}, \texttt{recent\_memory\_centroids} start
+  empty.
+\item
+  \textbf{Retention history:} \texttt{retention\_history} starts empty
+  (populated after the first signal step).
+\item
+  \textbf{Accumulator state (per stream; retained across timesteps):}
+
+  \begin{itemize}
+  \tightlist
+  \item
+    \texttt{\{μ\_acc,\ drift\_acc,\ s\_sum,\ s\_max,\ n,\ e\_peak,\ emo\_max,\ arousal\_sum,\ eta\_acc,\ coherence\_prev,\ acc\_signals\_window,\ t\_start,\ last\_signal\_ts,\ last\_write\_ts,\ drift\_accum,\ drift\_at\_last\_interrupt,\ drift\_acc\_pacing,\ x\_last\_check,\ prev\_x\}}
+  \end{itemize}
+\item
+  \textbf{Global state (retained across timesteps):}
+
+  \begin{itemize}
+  \tightlist
+  \item
+    \texttt{\{signals\_processed,\ u\_uncertainty,\ mood\_vector,\ last\_mood\_ts,\ theta\_dynamic,\ theta\_target,\ hysteresis,\ half\_life,\ m\_rate,\ rho\_hat\_prev,\ dt\_ema,\ rate\_ticks,\ reliability,\ retention\_ema,\ last\_rate\_timestamp,\ last\_retrieval\_ts,\ last\_embedding,\ x\_pred\_ema,\ weight\_relevance,\ attention\_width,\ coverage\_gain\_floor,\ mismatch\_weight,\ weight\_novelty,\ weight\_surprise,\ weight\_valence,\ weight\_arousal,\ emotion\_gain,\ score\_gain,\ rate\_target,\ rate\_decay,\ periphery\_half\_life,\ salience\_half\_life,\ drift\_weight,\ blender\_ready,\ blender\_update\_count,\ blender\_P\}}
+  \end{itemize}
+\item
+  \textbf{Buffers (retained across timesteps; bounded by window rules):}
+
+  \begin{itemize}
+  \tightlist
+  \item
+    \texttt{\{signal\_stream,\ score\_stream,\ memory\_stream,\ recent\_memory\_centroids,\ retention\_history\}}
+  \end{itemize}
+\item
+  \textbf{Recorded signal fields (per signal):}
+
+  \begin{itemize}
+  \tightlist
+  \item
+    \texttt{\{coherence\_struct\_t\ →\ SIGNALS.coherence,\ focus\_spread\_t\ →\ SIGNALS.focus\_spread\}}
+  \end{itemize}
+\item
+  \textbf{Recorded global fields:}
+
+  \begin{itemize}
+  \tightlist
+  \item
+    \texttt{\{u(t)\ →\ STATE.u\_uncertainty,\ M\_t\ →\ STATE.mood\_vector\}}
+  \end{itemize}
+\item
+  \textbf{Per-step derived scalars/vectors (ephemeral; recomputed each
+  step):}
+
+  \begin{itemize}
+  \tightlist
+  \item
+    \texttt{\{signal\_gap\_s,\ coherence\_curr,\ s\_avg,\ S\_window,\ boundary\_score,\ should\_flush,\ write\_memory,\ Δwrites,\ q\_retrieval\}}
+  \end{itemize}
+\end{itemize}
+
+\section*{Appendix B. Derived Signals: Definitions and
+Bounds}\label{sec-app-derived}
+\addcontentsline{toc}{section}{Appendix B. Derived Signals: Definitions
+and Bounds}
+
+This appendix defines non-trivial derived signals used throughout the
+specification. Unless otherwise stated, all derived scalars are clamped
+to {[}0, 1{]}.
+
+\textbf{novelty:} A normalized dissimilarity-to-context signal.
+
+\begin{verbatim}
+max_cos ← max_{c ∈ recent_context} cos(x_t, c)  # in [−1, 1]
+novelty_t ← clamp((1 − max_cos) / 2, 0, 1)
+\end{verbatim}
+
+Fallback: if recent\_context is empty, set novelty\_t ← 1.
+
+\textbf{μ\_sim:} A normalized mean similarity to context.
+
+\begin{verbatim}
+mean_cos ← mean_{c ∈ recent_context} cos(x_t, c)
+μ_sim ← clamp((mean_cos + 1) / 2, 0, 1)
+\end{verbatim}
+
+Fallback: if recent\_context is empty, set μ\_sim ← 0.5.
+
+\textbf{rarity\_t:} A normalized rarity signal defined as
+dissimilarity-to-context mean.
+
+\begin{verbatim}
+rarity_t ← clamp(1 − μ_sim, 0, 1)
+\end{verbatim}
+
+Fallback: inherits μ\_sim fallback, so rarity\_t defaults to 0.5 when
+recent\_context is empty.
+
+\textbf{relevance\_to\_task(q, task\_ctx):} A normalized relevance of
+embedding q to a task context set.
+
+\begin{verbatim}
+if |task_ctx| == 0: return 0.5
+return clamp((cos(q, mean(task_ctx)) + 1) / 2, 0, 1)
+\end{verbatim}
+
+\textbf{novelty\_to\_set(q, S\_set\_embeddings):} A normalized novelty
+of q relative to a set of embeddings.
+
+\begin{verbatim}
+novelty_to_set(q, S_set_embeddings) ← 1 − redundancy(q, S_set_embeddings)
+\end{verbatim}
+
+\textbf{ΔSSE:} A normalized improvement in reconstruction/prediction
+error (utility proxy).
+
+\begin{verbatim}
+ΔSSE ← clamp((SSE_prev − SSE_curr) / max(SSE_prev, ε), 0, 1)
+\end{verbatim}
+
+Definitions:
+
+\begin{verbatim}
+SSE_curr ← ‖x_t − x_pred_t‖^2          # prediction error at t (x_pred_t = x_pred_ema for EMA predictor)
+SSE_prev ← previous SSE_curr (t−1)     # or EWMA if smoothing is used
+\end{verbatim}
+
+Fallback: if no prediction model is available, or if dimensions
+mismatch, set ΔSSE ← 0.
+
+\textbf{redundancy(a, S\_set):} A normalized redundancy of item a w.r.t.
+a set S\_set.
+
+\begin{verbatim}
+redundancy(a, S_set) ← max_{s ∈ S_set} clamp((cos(a, s) + 1) / 2, 0, 1)
+\end{verbatim}
+
+Fallback: if S\_set is empty, redundancy(a, S\_set) ← 0.
+
+\textbf{coverage\_gain(candidate \textbar{} included\_set):} Incremental
+coverage contribution of adding candidate.
+
+\begin{verbatim}
+coverage_gain(candidate | included_set) ← 1 − redundancy(candidate, included_set)
+\end{verbatim}
+
+\section*{Appendix C. Edge Case Rules}\label{sec-app-edge}
+\addcontentsline{toc}{section}{Appendix C. Edge Case Rules}
+
+These rules resolve empty-store and small-store cases to preserve
+causality and avoid undefined metrics.
+
+\begin{itemize}
+\tightlist
+\item
+  \textbf{memory\_stream empty:} kNN returns empty; retrieval returns no
+  candidates; graph traversal is skipped. Set
+  \texttt{focus\_spread\_t\ =\ 0}.
+\item
+  \textbf{memory\_stream small:} use
+  \texttt{k\_eff\ =\ min(k\_neighbors(T),\ \textbar{}memory\_stream\textbar{})}.
+  If \texttt{k\_eff\ \textless{}\ 2}, set
+  \texttt{focus\_spread\_t\ =\ 0}.
+\item
+  \textbf{graph absent or empty:} skip graph traversal; use vector
+  search only.
+\item
+  \textbf{recent\_context empty:} apply fallbacks defined in Appendix B
+  (e.g., \texttt{novelty\_t\ =\ 1}, \texttt{μ\_sim\ =\ 0.5},
+  \texttt{rarity\_t\ =\ 0.5}, \texttt{μ\_ctx\ =\ 0\_vector} so
+  \texttt{map01(cos)=0.5}).
+\item
+  \textbf{recent\_scores empty:} set \texttt{observed\_p90\ ←\ θ\_prior}
+  in threshold updates.
+\end{itemize}
+
+\section*{Appendix D. Main Loop Execution Order and Normative
+Invariants}\label{sec-app-loop}
+\addcontentsline{toc}{section}{Appendix D. Main Loop Execution Order and
+Normative Invariants}
+
+This ordering is canonical and supersedes any other sequence described
+elsewhere in the document.
+
+Canonical single-step pseudocode (timestep t):
+
+\begin{verbatim}
+# Main loop (single timestep t)
+now_s, now_ms, x_t ← read_inputs()
+signal_stream.append(x_t)
+recent_context ← tail(signal_stream, n_ctx(T))
+
+# Structural metrics + uncertainty
+coherence_struct_t, focus_spread_t, drift_mag_t, surprisal_t ← compute_structural_metrics(x_t)
+x_pred_ema ← update_prediction_ema(x_pred_ema, x_t, T)  # after surprisal_t
+u_t ← update_uncertainty(...)
+
+# Adaptation + scoring
+update_control_parameters(...)
+score_t ← compute_composite_score(...)
+score_stream.append(score_t)
+
+# Threshold updates
+θ_target ← prior_evidence_blend(...)
+Δθ_* ← compute_threshold_deltas(...)
+θ_dynamic ← update_theta_dynamic(...)
+hysteresis ← update_hysteresis(...)
+
+# Accumulator + boundary
+update_accumulator(...)
+boundary_score ← compute_boundary_score(...)
+should_flush ← boundary_decision(boundary_score, time_caps, spike_bypass)
+θ_memory ← θ_dynamic × M_write_refrac
+write_memory ← force_write OR (should_flush AND (S_window > θ_memory))
+Δwrites ← 1 if write_memory else 0  # computed immediately after write decision
+
+# Post-write and retrieval (q_retrieval captured before any reset)
+if write_memory: commit_memory_unit(); last_write_ts ← now_ms()
+q_retrieval ← μ_acc  # cache current-unit query
+streaming_pacing_check()
+graph_retrieval(q_retrieval)
+update_rate_state(Δwrites)
+if should_flush: reset_accumulator()  # regardless of write outcome
+
+# Interrupt gate (consumes retrieved candidates)
+interrupt_gate_check()
+\end{verbatim}
+
+The normative execution order for a single timestep t:
+
+\begin{enumerate}
+\def\labelenumi{\arabic{enumi}.}
+\tightlist
+\item
+  \textbf{Read Inputs:} \texttt{x\_t}, \texttt{now\_s()},
+  \texttt{system\_time\_ms}.
+\item
+  \textbf{Update Buffers:} Append \texttt{x\_t} to
+  \texttt{signal\_stream}. Update \texttt{n\_ctx(T)}. Retrieve
+  \texttt{recent\_context}.
+\item
+  \textbf{Compute Structural Metrics:} \texttt{coherence\_struct},
+  \texttt{focus\_spread}, \texttt{drift}, \texttt{surprisal}, then
+  update \texttt{x\_pred\_ema} for the next step.
+\item
+  \textbf{Update Uncertainty:} \texttt{u(t)}.
+\item
+  \textbf{Compute Adaptation Dynamics:}
+
+  \begin{itemize}
+  \tightlist
+  \item
+    Update \texttt{α\_F(t)}, \texttt{α\_T(t)}.
+  \item
+    Update \texttt{weight\_relevance}, \texttt{half\_life}.
+  \item
+    Update \texttt{emotion} and \texttt{mood} state.
+  \end{itemize}
+\item
+  \textbf{Compute Composite Score:}
+
+  \begin{itemize}
+  \tightlist
+  \item
+    Compute all 12 metrics.
+  \item
+    Update RLS weights \texttt{W\_blend}.
+  \item
+    Compute \texttt{score\_t}. Append to \texttt{score\_stream}.
+  \end{itemize}
+\item
+  \textbf{Update Thresholds:}
+
+  \begin{itemize}
+  \tightlist
+  \item
+    Compute \texttt{θ\_target} (prior/evidence).
+  \item
+    Compute \texttt{Δθ} terms (homeo, sens, prec, emo, mood).
+  \item
+    Update \texttt{θ\_dynamic}. Update \texttt{hysteresis}.
+  \end{itemize}
+\item
+  \textbf{Execute Memory Accumulation:}
+
+  \begin{itemize}
+  \tightlist
+  \item
+    Update accumulator (\texttt{drift\_acc}, \texttt{s\_max}, etc.).
+  \item
+    Compute \texttt{boundary\_score} and \texttt{should\_flush}.
+  \item
+    Check \texttt{spike\_bypass}.
+  \item
+    Compute \texttt{S\_window} and \texttt{θ\_memory}.
+  \item
+    Decide \texttt{write\_memory}.
+  \end{itemize}
+\item
+  \textbf{Post-Write Updates and Retrieval:}
+
+  \begin{itemize}
+  \tightlist
+  \item
+    If \texttt{write\_memory}: Write to \texttt{memory\_stream}. Update
+    \texttt{last\_write\_ts}.
+  \item
+    Cache \texttt{q\_retrieval\ ←\ μ\_acc} before any accumulator reset.
+  \item
+    Run streaming pacing and retrieval using \texttt{q\_retrieval}.
+  \item
+    Update \texttt{rate\_state} (homeostatic controller).
+  \item
+    If \texttt{should\_flush} (regardless of write): Call
+    \texttt{reset\_accumulator()}.
+  \end{itemize}
+\item
+  \textbf{Run Interrupt Gate:} Check for streaming interrupt using
+  retrieved candidates (already filtered by write‑exclusion and WM
+  overlap during retrieval).
+\end{enumerate}
+
+Timing notes: * \texttt{now\_s()} is captured at step 1 and reused for
+all Δt computations in this timestep. * Threshold updates in step 7 use
+the score computed in step 6. * Rate updates in step 9 use Δwrites from
+the current step's \texttt{write\_memory} decision.
+
+\textbf{Normative Invariants:} * \textbf{Causality:} Step \texttt{k}
+uses only values computed in steps \texttt{1} through \texttt{k} or
+retained from \texttt{t-1}. * \textbf{Write Atomicity:} A ``write'' is
+an atomic commit of a \texttt{should\_flush} unit. Partial units are
+never written. * \textbf{Gap Consistency:} \texttt{now\_s()} is fixed at
+step 1. All \texttt{Δt} calculations use this fixed value.
+
+
+
+
+\end{document}

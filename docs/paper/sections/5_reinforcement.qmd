@@ -89,6 +89,10 @@ for each used memory m:
         attention_width_t *= (1 − βF_base)
     else:
         attention_width_t *= (1 + βF_base)
+# Drift-responsive dilation + restorative pull to prior
+dilation_force ← S × (1 − T) × drift_step_t
+restoring_force ← F × (attention_width_prior − attention_width_t)
+attention_width_t ← attention_width_t + dilation_force + restoring_force
 weight_relevance ← clamp(weight_relevance_t, 0, 1)
 attention_width_t ← clamp(attention_width_t,
                           attention_width_min, attention_width_max)
@@ -96,6 +100,7 @@ attention_width ← attention_width_t
 ```
 
 Positive contextual gain narrows attention and boosts relevance weighting; negative gain widens attention to explore alternatives.
+The drift_step_t term is the instantaneous drift signal from @sec-structural-metrics.
 
 ### Sensitivity Feedback
 

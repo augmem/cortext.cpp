@@ -221,10 +221,10 @@ struct ProcessorContext
   // ======================================================================
   // Embedding Prediction Error State (Section 3.1.4)
   // ======================================================================
-  /// @brief Previous signal embedding for delta calculation
+  /// @brief Previous signal embedding (optional utility)
   std::optional<Eigen::VectorXf> last_embedding;
-  /// @brief EWMA of embedding deltas (Δx_trend)
-  std::optional<Eigen::VectorXf> delta_x_trend;
+  /// @brief EMA expectation state for prediction error
+  std::optional<Eigen::VectorXf> x_pred_ema;
   /// @brief Prediction error SSE history for ΔSSE utility
   std::optional<double> prediction_error_sse;
   std::optional<double> prediction_error_sse_prev;

@@ -167,7 +167,7 @@ hysteresis ← hysteresis_t
 
 The write gate operates per-signal, but coherent "thoughts" often span multiple signals. This section introduces memory-level accumulation that groups signals into natural units before storage decisions, inspired by Event Segmentation Theory (Zacks & Swallow, 2007).
 
-This approach draws from EM-LLM (Fountas et al., 2024), which segments token sequences into episodic events using surprise-based boundary detection refined by graph-theoretic cohesion metrics. Their work shows that combining prediction error signals with within-segment coherence produces boundaries strongly correlated with human event perception. Our adaptation uses embedding drift as a proxy for surprise and cosine similarity for cohesion, enabling modality-agnostic operation across text tokens, audio chunks, video frames, or any signal stream.
+This approach draws from EM-LLM (Fountas et al., 2024), which segments token sequences into episodic events using surprise-based boundary detection refined by graph-theoretic cohesion metrics. Their work shows that combining prediction error signals with within-segment coherence produces boundaries strongly correlated with human event perception. Our adaptation uses EMA prediction error (surprisal_t) for surprise and cosine similarity for cohesion, while drift provides auxiliary boundary pressure, enabling modality-agnostic operation across text tokens, audio chunks, video frames, or any signal stream.
 
 ### Memory Accumulator State {#sec-accumulator}
 
@@ -206,7 +206,7 @@ acc_signals_window ← tail(acc_signals_window, win_coh(T))
 
 μ_acc ← (n × μ_acc + x_t) / (n + 1)
 n ← n + 1
-drift_acc ← drift_acc + (drift_mag_t / 2)  # accumulate normalized context-centroid drift (drift_mag_t ∈ [0,2])
+drift_acc ← drift_acc + (drift_mag_t / 2)  # accumulate normalized instantaneous drift (drift_mag_t ∈ [0,2])
 s_sum ← s_sum + score_t
 emo_max ← max(emo_max, emotion_intensity_t)
 arousal_sum ← arousal_sum + arousal_t
@@ -217,28 +217,30 @@ last_signal_ts ← now_ms()  # update timestamp for next gap calculation (ms)
 
 ### Hybrid Drift and Coherence Tracking {#sec-drift-coherence}
 
-Boundary detection combines kinematic drift with semantic coherence:
+Boundary detection combines instantaneous drift with within-memory coherence tied to the evolving centroid μ_acc:
 
 ```
 ε_noise(T) = lerp(0.01, 0.05, 1 − T)  # stability-derived noise floor
-d_step ← max(drift_mag_t − ε_noise(T), 0)
+# Use instantaneous drift_step_t for boundary velocity
+d_step ← max(drift_step_t − ε_noise(T), 0)
 eta_prev ← eta_acc  # baseline before updating EWMA
 ```
 
 Memory coherence tracks similarity within the current memory accumulation window (range [−1, 1] from mean cosine):
 
 ```
-current_window ← acc_signals_window  # embeddings from the current unit before x_t
+mu_curr ← μ_acc  # current accumulator centroid
+current_window ← acc_signals_window  # embeddings from the current unit before mu_curr
 if |current_window| == 0:
     coherence_curr ← 1.0  # empty-window fallback
 else:
-    coherence_curr ← mean([cos(x_t, x_i) for x_i in current_window])
-# After computing coherence_curr, append x_t for the next step
-acc_signals_window.append(x_t); acc_signals_window ← tail(acc_signals_window, win_coh(T))
+    coherence_curr ← mean([cos(mu_curr, x_i) for x_i in current_window])
+# After computing coherence_curr, append mu_curr for the next step
+acc_signals_window.append(mu_curr); acc_signals_window ← tail(acc_signals_window, win_coh(T))
 # coherence_prev is the stored coherence value from the previous step
 ```
 
-Note: coherence_mem is distinct from coherence_struct (@sec-struct-coherence). The former tracks within-memory similarity using raw mean cosine, while the latter measures variance-based integration with broader context. This dual-signal approach mirrors EM-LLM's boundary detection mechanism. In their formulation, boundaries occur where surprise (token-level prediction error) exceeds a threshold and segment cohesion drops. Our drift spike approximates surprise via embedding-space velocity, while coherence_mem drop captures within-memory similarity degradation.
+Note: coherence_mem is distinct from coherence_struct (@sec-struct-coherence). The former tracks within-memory similarity using raw mean cosine, while the latter measures variance-based integration with broader context. This dual-signal approach mirrors EM-LLM's boundary detection mechanism. In their formulation, boundaries occur where surprise (token-level prediction error) exceeds a threshold and segment cohesion drops. In Cortext, surprisal_t provides the prediction-error signal, while drift spike provides auxiliary boundary pressure and coherence_mem drop captures within-memory similarity degradation.
 
 ### Natural Boundary Detection {#sec-boundary}
 
@@ -279,13 +281,24 @@ max_mem_time(T) = lerp(30, 120, T)  # seconds
 max_mem_drift(S) = lerp(0.8, 2.0, S)  # cumulative drift cap
 ```
 
+Pressure-capacity ratio (continuous flush trigger derived from knobs):
+
+```
+capacity_scale(T) = (1 + T)^2  # higher stability = larger capacity
+capacity ← max_mem_drift(S) × capacity_scale(T)
+pressure ← drift_acc × (1 + S)
+saturation_ratio ← pressure / max(capacity, ε)
+k_flush(S,T) = k_surprise(S,T)
+pressure_score ← sigmoid((saturation_ratio − 1) × k_flush(S,T))
+```
+
 Trigger memory flush when:
 
 ```
 mem_elapsed ← now_s() − to_s(t_start)
 should_flush = (boundary_score > b_thresh(F, S)) OR
                (mem_elapsed > max_mem_time(T)) OR
-               (drift_acc > max_mem_drift(S))
+               (pressure_score > b_thresh(F, S))
 ```
 
 where signal_gap_s = now_s() − to_s(last_signal_ts) is computed at the start of signal processing (before last_signal_ts is updated). Gap timing influences boundary_score via gap_score rather than forcing an unconditional flush, which avoids splitting mid-thought when upstream processing introduces non-deterministic latency.

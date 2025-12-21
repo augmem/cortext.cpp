@@ -30,6 +30,8 @@ constexpr double kRedMin = 0.15;
 constexpr double kRedMax = 0.25;
 constexpr double kCohMin = 0.15;
 constexpr double kCohMax = 0.25;
+constexpr double kSurpMin = 0.20;
+constexpr double kSurpMax = 0.50;
 constexpr double kTauMuMin = 0.08;
 constexpr double kTauMuMax = 0.18;
 constexpr double kTauMuMinusS = 0.4;
@@ -332,6 +334,9 @@ ComputeMniGateDecision::Execute (OperationContext &context, Transaction &tx) con
   const Eigen::VectorXf ctx_centroid = ComputeCentroid (ctx_vecs);
   const double coherence = Clamp01 (context.GetCoherence ());
   const double coherence_penalty = Clamp01 (constants::kNormalizedMax - coherence);
+  const double surprisal
+      = Clamp01 (context.GetMetric (operations::Metric::embedding_surprisal)
+                     .value_or (0.0));
 
   // Knob-derived parameters
   const double F = cortext::core::Clamp<double> (cfg.focus,
@@ -352,13 +357,15 @@ ComputeMniGateDecision::Execute (OperationContext &context, Transaction &tx) con
   const double w_rel_raw = cortext::core::Lerp (kRelMax, kRelMin, F);
   const double w_red_raw = cortext::core::Lerp (kRedMin, kRedMax, S);
   const double w_coh_raw = cortext::core::Lerp (kCohMin, kCohMax, S);
+  const double w_surp_raw = cortext::core::Lerp (kSurpMin, kSurpMax, S);
   const double total_w
       = std::max (constants::kNormEpsilon,
-                  w_cov_raw + w_rel_raw + w_red_raw + w_coh_raw);
+                  w_cov_raw + w_rel_raw + w_red_raw + w_coh_raw + w_surp_raw);
   const double w_cov = w_cov_raw / total_w;
   const double w_rel = w_rel_raw / total_w;
   const double w_red = w_red_raw / total_w;
   const double w_coh = w_coh_raw / total_w;
+  const double w_surp = w_surp_raw / total_w;
 
   // Duplicate suppression threshold
   const double dup_thresh = cortext::core::DupThresh (F, T);
@@ -452,7 +459,7 @@ ComputeMniGateDecision::Execute (OperationContext &context, Transaction &tx) con
       cov_gain = std::max (cov_gain, p_ctx.coverage_gain_floor);
 
       const double mu = w_cov * cov_gain + w_rel * sim_ctx - w_red * redundancy
-                        - w_coh * coherence_penalty;
+                        - w_coh * coherence_penalty + w_surp * surprisal;
 
       if (mu > best_mu)
         {
@@ -558,10 +565,41 @@ ComputeMniGateDecision::Execute (OperationContext &context, Transaction &tx) con
   }
 
   telemetry::LogDebug ("cortext.interrupt_gate", {
-    telemetry::Attribute::Double ("best_mu", best_mu),
-    telemetry::Attribute::Double ("jaccard", novelty_star),
+    telemetry::Attribute::Double ("F", F),
+    telemetry::Attribute::Double ("S", S),
+    telemetry::Attribute::Double ("T", T),
+    telemetry::Attribute::Double ("coherence", coherence),
+    telemetry::Attribute::Double ("coherence_penalty", coherence_penalty),
+    telemetry::Attribute::Double ("surprisal", surprisal),
+    telemetry::Attribute::Double ("retrieval_thresh", retrieval_thresh),
+    telemetry::Attribute::Double ("w_cov_raw", w_cov_raw),
+    telemetry::Attribute::Double ("w_rel_raw", w_rel_raw),
+    telemetry::Attribute::Double ("w_red_raw", w_red_raw),
+    telemetry::Attribute::Double ("w_coh_raw", w_coh_raw),
+    telemetry::Attribute::Double ("w_surp_raw", w_surp_raw),
+    telemetry::Attribute::Double ("w_cov", w_cov),
+    telemetry::Attribute::Double ("w_rel", w_rel),
+    telemetry::Attribute::Double ("w_red", w_red),
+    telemetry::Attribute::Double ("w_coh", w_coh),
+    telemetry::Attribute::Double ("w_surp", w_surp),
     telemetry::Attribute::Double ("dup_thresh", dup_thresh),
+    telemetry::Attribute::Double ("tau_novelty", tau_novelty),
+    telemetry::Attribute::Double ("tau_mu", tau_mu),
+    telemetry::Attribute::Double ("tau_novelty_eff", tau_novelty_eff),
+    telemetry::Attribute::Double ("tau_mu_eff", tau_m_eff),
+    telemetry::Attribute::Double ("Delta", Delta),
+    telemetry::Attribute::Double ("tau_refrac", tau_refrac),
+    telemetry::Attribute::Double ("k_refrac", k_refrac),
     telemetry::Attribute::Double ("refractory_mult", M_refrac),
+    telemetry::Attribute::Double ("boundary_mult", boundary_mult),
+    telemetry::Attribute::Bool ("at_boundary", at_boundary),
+    telemetry::Attribute::Int64 ("candidate_limit", static_cast<int64_t> (K)),
+    telemetry::Attribute::Int64 ("candidate_count", static_cast<int64_t> (candidates.size ())),
+    telemetry::Attribute::Int64 ("top_k_count", static_cast<int64_t> (k_size)),
+    telemetry::Attribute::Double ("best_mu", best_mu),
+    telemetry::Attribute::Double ("rel_star", rel_star),
+    telemetry::Attribute::Double ("novelty_star", novelty_star),
+    telemetry::Attribute::Double ("overlap_star", overlap_star),
     telemetry::Attribute::Bool ("mni_decision", allow_interrupt),
     telemetry::Attribute::Int64 ("wm_slots_count", static_cast<int64_t> (included_vecs.size ())),
     telemetry::Attribute::Double ("max_semantic_overlap", overlap_star),

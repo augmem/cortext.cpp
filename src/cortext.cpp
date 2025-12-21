@@ -619,11 +619,11 @@ struct Cortext::Impl
     
     // Convert metrics map (enum -> int)
     for (const auto& [metric_enum, value] : out.metrics) {
-      result.output.metrics[static_cast<int>(metric_enum)] = value;
-    }
+    result.output.metrics[static_cast<int>(metric_enum)] = value;
+  }
 
-    // Wire stored_embedding_id from MemoryStorage operation
-    result.output.stored_embedding_id = out.stored_embedding_id;
+  // Wire stored_embedding_id from MemoryStorage operation
+  result.output.stored_embedding_id = out.stored_embedding_id;
     
     if (!store)
       {

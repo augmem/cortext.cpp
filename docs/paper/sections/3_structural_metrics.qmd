@@ -52,20 +52,19 @@ else:
 
 Values near 1 indicate diffuse attention; values near 0 indicate concentrated attention. The effective Focus is further modulated: F_eff ← F_eff × (1 − focus_spread_t).
 
-### Trajectory Drift
+### Instantaneous Drift
 
-Drift measures directional change in context centroids:
+Drift measures the instantaneous step between consecutive signals rather than a smoothed centroid lag:
 
 ```
-k_ctx(T) = round(lerp(3, 10, T))  # step lag for drift
-ctx_t = signal_stream[t − n_ctx(T) + 1 : t]  # inclusive end
-ctx_{t−k} = signal_stream[t − k_ctx(T) − n_ctx(T) + 1 : t − k_ctx(T)]
-drift_vec_t ← l2_normalize(mean(ctx_t)) −
-              l2_normalize(mean(ctx_{t−k}))
-drift_mag_t ← ‖drift_vec_t‖
+if x_{t−1} is unset:
+    drift_step_t ← 0
+else:
+    drift_step_t ← cosine_dist(x_t, x_{t−1})  # 1 − cos(·), range [0, 2]
+drift_mag_t ← drift_step_t
 ```
 
-Since both centroids are unit-normalized, drift_mag_t ∈ [0, 2]. A threshold defines an informational drift-boundary signal:
+This uses the current signal velocity in embedding space, ensuring drift responds immediately to context shifts. A threshold defines an informational drift-boundary signal:
 
 ```
 drift_threshold ← lerp(0.10, 0.35, T)
@@ -73,30 +72,30 @@ drift_boundary_t ← (drift_mag_t > drift_threshold)
 ```
 Normative note (MUST): drift_boundary_t is informational and MUST NOT trigger a memory flush on its own. Memory flush decisions are defined by should_flush in @sec-boundary.
 
-### Embedding Prediction Error
+The instantaneous drift_step_t also informs boundary pressure and focus-width feedback.
 
-We measure surprisal as the deviation of the current embedding from the predicted trajectory in latent space:
+### Real-Time Prediction Error (EMA)
+
+We model real-time expectation using an exponential moving average (EMA) of the signal stream. The predictor state `x_pred_ema` represents the current expectation; low Stability (T) adapts quickly, high Stability adapts slowly.
+
+We treat orthogonal or anti-correlated vectors (cos ≤ 0) as maximum surprise.
 
 ```
-if prev_x is unset:
+β_pred(T) = lerp(0.25, 0.02, T)
+err_ref(S) = lerp(0.25, 0.05, S)
+k_surprise(S,T) = lerp(6, 14, S) × lerp(1.1, 0.9, T)
+
+if x_pred_ema is unset:
+    x_pred_ema ← x_t  # initialize expectation
     surprisal_t ← 0
-    Δx_trend_t ← 0_vector
 else:
-    Δx_t = x_t − prev_x
-    α_trend(S,T) = lerp(0.05, 0.20, S) × lerp(1.1, 0.9, T)
-    Δx_trend_t = EWMA(Δx_trend_{t−1}, Δx_t, α=α_trend(S,T))
-    x_pred_t = prev_x + Δx_trend_{t−1}
-    prediction_error_t = 1 − cos(x_pred_t, x_t)
+    prediction_error_t ← 1 − max(0, cos(x_t, x_pred_ema))
+    surprisal_t ← sigmoid((prediction_error_t − err_ref(S)) * k_surprise(S,T))
+    x_pred_ema ← l2_normalize((1 − β_pred(T)) × x_pred_ema +
+                               β_pred(T) × x_t)
 ```
 
-This error is normalized to produce the surprisal signal:
-
-```
-err_max(S,T) = lerp(0.35, 0.75, S) × lerp(1.1, 0.9, T)
-surprisal_t ← clamp(prediction_error_t / err_max(S,T), 0, 1)
-```
-
-This formulation captures purely kinematic surprise in the thought process
+This formulation captures prediction failure directly from the stream, without requiring an explicit kinematic trend model.
 
 ## Composite Score Computation
 
@@ -106,7 +105,7 @@ The system computes 12 metrics that blend into a composite write score:
 | :--- | :--- | :--- |
 | Relevance | ↑F | `relevance_t = clamp(map01(cos(x_t, μ_ctx)) × (0.5 + 0.5F), 0, 1)` |
 | Mismatch | ↓F, ↑S | `(1 − F) × S × novelty_t` |
-| Surprise | ↑S, ↓T | `surprisal_t × S × (1 − T)` |
+| Surprise | ↑S, ↓T | `surprisal_t × S × (1 − 0.5T)` |
 | Rarity | ↑F, ↓T | `rarity_t × (0.5 + 0.5F) × (1 − 0.2T)` |
 | Drift | ↓T | `(drift_mag_t / 2) × (1 − T)` |
 | Utility | ↑F, ↓S | `ΔSSE × (0.5 + 0.5F) × (1 − 0.3S)` |

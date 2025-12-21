@@ -211,8 +211,8 @@ drift_acc_pacing, x_last_check. Global variables: signals_processed,
 u_uncertainty, mood_vector, last_mood_ts, theta_dynamic, theta_target,
 hysteresis, m_rate, rho_hat_prev, dt_ema, rate_ticks, reliability,
 last_rate_timestamp, last_retrieval_ts, retention_ema, last_embedding,
-delta_x_trend. Weight naming rule: weight** and **weight variables
-(e.g., weight_relevance, mismatch_weight, weight_surprise) are control
+x_pred_ema. Weight naming rule: weight** and **weight variables (e.g.,
+weight_relevance, mismatch_weight, weight_surprise) are control
 parameters; w** variables (e.g., w_relevance, w_mismatch, … w_arousal)
 are composite-score blender weights.
 
@@ -688,28 +688,31 @@ trigger a memory flush on its own. Memory flush decisions are defined by
 should_flush in
 <a href="#sec-boundary" class="quarto-xref">Section 6.4.3</a>.
 
-### Embedding Prediction Error
+### Real-Time Prediction Error (EMA)
 
-We measure surprisal as the deviation of the current embedding from the
-predicted trajectory in latent space:
+We model real-time expectation using an exponential moving average (EMA)
+of the signal stream. The predictor state `x_pred_ema` represents the
+current expectation; low Stability (T) adapts quickly, high Stability
+adapts slowly.
 
-    if prev_x is unset:
+We treat orthogonal or anti-correlated vectors (cos ≤ 0) as maximum
+surprise.
+
+    β_pred(T) = lerp(0.25, 0.02, T)
+    err_ref(S) = lerp(0.25, 0.05, S)
+    k_surprise(S,T) = lerp(6, 14, S) × lerp(1.1, 0.9, T)
+
+    if x_pred_ema is unset:
+        x_pred_ema ← x_t  # initialize expectation
         surprisal_t ← 0
-        Δx_trend_t ← 0_vector
     else:
-        Δx_t = x_t − prev_x
-        α_trend(S,T) = lerp(0.05, 0.20, S) × lerp(1.1, 0.9, T)
-        Δx_trend_t = EWMA(Δx_trend_{t−1}, Δx_t, α=α_trend(S,T))
-        x_pred_t = prev_x + Δx_trend_{t−1}
-        prediction_error_t = 1 − cos(x_pred_t, x_t)
+        prediction_error_t ← 1 − max(0, cos(x_t, x_pred_ema))
+        surprisal_t ← sigmoid((prediction_error_t − err_ref(S)) * k_surprise(S,T))
+        x_pred_ema ← l2_normalize((1 − β_pred(T)) × x_pred_ema +
+                                   β_pred(T) × x_t)
 
-This error is normalized to produce the surprisal signal:
-
-    err_max(S,T) = lerp(0.35, 0.75, S) × lerp(1.1, 0.9, T)
-    surprisal_t ← clamp(prediction_error_t / err_max(S,T), 0, 1)
-
-This formulation captures purely kinematic surprise in the thought
-process
+This formulation captures prediction failure directly from the stream,
+without requiring an explicit kinematic trend model.
 
 ## Composite Score Computation
 
@@ -744,7 +747,7 @@ style="text-align: left;"><code>relevance_t = clamp(map01(cos(x_t, μ_ctx)) × (
 <td style="text-align: left;">Surprise</td>
 <td style="text-align: left;">↑S, ↓T</td>
 <td
-style="text-align: left;"><code>surprisal_t × S × (1 − T)</code></td>
+style="text-align: left;"><code>surprisal_t × S × (1 − 0.5T)</code></td>
 </tr>
 <tr>
 <td style="text-align: left;">Rarity</td>
@@ -1179,9 +1182,10 @@ token sequences into episodic events using surprise-based boundary
 detection refined by graph-theoretic cohesion metrics. Their work shows
 that combining prediction error signals with within-segment coherence
 produces boundaries strongly correlated with human event perception. Our
-adaptation uses embedding drift as a proxy for surprise and cosine
-similarity for cohesion, enabling modality-agnostic operation across
-text tokens, audio chunks, video frames, or any signal stream.
+adaptation uses EMA prediction error (surprisal_t) for surprise and
+cosine similarity for cohesion, while drift provides auxiliary boundary
+pressure, enabling modality-agnostic operation across text tokens, audio
+chunks, video frames, or any signal stream.
 
 ### Memory Accumulator State
 
@@ -1230,22 +1234,27 @@ this signal):
 
 ### Hybrid Drift and Coherence Tracking
 
-Boundary detection combines kinematic drift with semantic coherence:
+Boundary detection operates on the **current unflushed memory centroid**
+rather than the raw signal, keeping segmentation tied to the evolving
+thought unit:
 
     ε_noise(T) = lerp(0.01, 0.05, 1 − T)  # stability-derived noise floor
-    d_step ← max(drift_mag_t − ε_noise(T), 0)
+    # Use centroid drift (μ_acc) instead of per-signal drift
+    mu_prev ← mu_acc_{t−1}
+    mu_curr ← mu_acc_t
+    d_step ← max(1 − cos(mu_curr, mu_prev) − ε_noise(T), 0)
     eta_prev ← eta_acc  # baseline before updating EWMA
 
 Memory coherence tracks similarity within the current memory
 accumulation window (range \[−1, 1\] from mean cosine):
 
-    current_window ← acc_signals_window  # embeddings from the current unit before x_t
+    current_window ← acc_signals_window  # embeddings from the current unit before mu_curr
     if |current_window| == 0:
         coherence_curr ← 1.0  # empty-window fallback
     else:
-        coherence_curr ← mean([cos(x_t, x_i) for x_i in current_window])
-    # After computing coherence_curr, append x_t for the next step
-    acc_signals_window.append(x_t); acc_signals_window ← tail(acc_signals_window, win_coh(T))
+        coherence_curr ← mean([cos(mu_curr, x_i) for x_i in current_window])
+    # After computing coherence_curr, append mu_curr for the next step
+    acc_signals_window.append(mu_curr); acc_signals_window ← tail(acc_signals_window, win_coh(T))
     # coherence_prev is the stored coherence value from the previous step
 
 Note: coherence_mem is distinct from coherence_struct
@@ -1254,9 +1263,10 @@ The former tracks within-memory similarity using raw mean cosine, while
 the latter measures variance-based integration with broader context.
 This dual-signal approach mirrors EM-LLM’s boundary detection mechanism.
 In their formulation, boundaries occur where surprise (token-level
-prediction error) exceeds a threshold and segment cohesion drops. Our
-drift spike approximates surprise via embedding-space velocity, while
-coherence_mem drop captures within-memory similarity degradation.
+prediction error) exceeds a threshold and segment cohesion drops. In
+Cortext, surprisal_t provides the prediction-error signal, while drift
+spike provides auxiliary boundary pressure and coherence_mem drop
+captures within-memory similarity degradation.
 
 ### Natural Boundary Detection
 
@@ -1675,16 +1685,16 @@ broader activation.
 
 ## Predictive Pre-activation
 
-The system pre-activates memories predicted to be relevant based on
-trajectory extrapolation:
+The system pre-activates memories predicted to be relevant based on the
+EMA expectation state (`x_pred_ema`) and recent context:
 
     prediction_horizon = round(lerp(2, 8, F))
     pre_activation_decay = lerp(0.7, 0.3, T)
     prediction_conf_threshold = lerp(0.3, 0.7, F)
     surprise_sensitivity = S × lerp(2.0, 0.5, T)
 
-When predictions fail (high surprise), the system updates its trajectory
-model:
+When predictions fail (high surprise), the system increases the refresh
+rate of pre-activation:
 
     update_rate_on_surprise = lerp(0.2, 0.02, T) × S
 
@@ -1886,11 +1896,11 @@ Causal edges derive from temporal drift:
 
 ## Graph-Augmented Retrieval
 
-Retrieval combines vector similarity with graph expansion. Both initial
-retrieval and re-ranking use the memory centroid (μ_acc from
-<a href="#sec-accumulator" class="quarto-xref">Section 6.4.1</a>) as the
-query vector, ensuring retrieved memories are ranked by relevance to the
-overall context rather than momentary signal fluctuations:
+Retrieval combines vector similarity with graph expansion. The query
+vector is the **current accumulator centroid** (μ_acc), which aggregates
+the embeddings of the signals observed so far in the unflushed memory.
+This makes retrieval responsive to the evolving thought unit rather than
+any single micro‑signal.
 
     # Query and re-rank using current memory centroid
     q ← μ_acc  # memory centroid from Section 4.4.1
@@ -1958,13 +1968,13 @@ Effective thresholds incorporate refractory pressure:
 
 ## Marginal Utility Score
 
-The marginal utility (MU) of a candidate memory combines four factors.
+The marginal utility (MU) of a candidate memory combines five factors.
 Context comparisons use memory centroids rather than individual signal
 embeddings:
 
     # Context window contains recent memory centroids, not individual signals
     ctx_window ← recent_memory_centroids  # bounded deque of recent memory representatives (e_rep)
-    q_retrieval ← (e_rep if available else μ_acc)  # capture before any accumulator reset
+    q_retrieval ← μ_acc  # accumulator centroid query
     included_set ← {embedding(m) | m already injected into the current context window}
 
 Fallback: if included_set is empty, treat redundancy(·, included_set) =
@@ -1978,13 +1988,15 @@ Fallback: if included_set is empty, treat redundancy(·, included_set) =
     weights_mu_raw = [lerp(0.40, 0.60, F),   # coverage gain
              lerp(0.35, 0.25, F),   # relevance
              lerp(0.15, 0.25, S),   # redundancy penalty
-             lerp(0.15, 0.25, S)]   # incoherence penalty
-    [weight_cov, weight_rel, weight_red, weight_incoh] = normalize(weights_mu_raw)
+             lerp(0.15, 0.25, S),   # incoherence penalty
+             lerp(0.20, 0.50, S)]   # surprise bonus
+    [weight_cov, weight_rel, weight_red, weight_incoh, weight_surp] = normalize(weights_mu_raw)
 
     mu = weight_cov × coverage_gain(candidate | included_set) +
           weight_rel × map01(cos(candidate, ctx_centroid)) −
           weight_red × redundancy(candidate, included_set) −
-          weight_incoh × (1 − coherence_struct_t)  # structural coherence penalty
+          weight_incoh × (1 − coherence_struct_t) +
+          weight_surp × surprisal_t  # surprise bonus
 
 With map01 applied, each MU term is in \[0, 1\], so μ is calibrated to
 the same range as τ_mu.
@@ -2060,10 +2072,11 @@ interrupts at natural transition points.
 
 Streaming retrieval is gated by cumulative drift rate within the
 accumulation unit. Retrieval checks trigger when drift exceeds threshold
-or at boundaries. Retrieval uses q_retrieval captured before any
-accumulator reset for this step. Retrieval returns a candidate pool
-already filtered by write‑exclusion and WM‑overlap rules; the interrupt
-gate then applies novelty/utility thresholds and redundancy penalties.
+or at boundaries. Retrieval uses q_retrieval (the accumulator centroid)
+captured before any accumulator reset for this step. Retrieval returns a
+candidate pool already filtered by write‑exclusion and WM‑overlap rules;
+the interrupt gate then applies novelty/utility thresholds and
+redundancy penalties.
 
     # Pacing tracks drift within current memory formation
 
@@ -2266,7 +2279,7 @@ On cold start (no persisted state), initialize retained state as follows
     `m_rate = 0`, `rho_hat_prev = 0`, `dt_ema = 0`, `rate_ticks = 0`,
     `reliability = 1`, `retention_ema = 0`,
     `last_rate_timestamp = now_ms()`, `last_retrieval_ts = 0`,
-    `last_embedding = unset`, `delta_x_trend = unset`.
+    `last_embedding = unset`, `x_pred_ema = unset`.
 
 -   **Accumulator defaults (per stream):** `μ_acc = 0_vector`,
     `drift_acc = 0`, `s_sum = 0`, `s_max = 0`, `n = 0`,
@@ -2305,7 +2318,7 @@ On cold start (no persisted state), initialize retained state as follows
 
 -   **Global state (retained across timesteps):**
 
-    -   `{signals_processed, u_uncertainty, mood_vector, last_mood_ts, theta_dynamic, theta_target, hysteresis, half_life, m_rate, rho_hat_prev, dt_ema, rate_ticks, reliability, retention_ema, last_rate_timestamp, last_retrieval_ts, last_embedding, delta_x_trend, weight_relevance, attention_width, coverage_gain_floor, mismatch_weight, weight_novelty, weight_surprise, weight_valence, weight_arousal, emotion_gain, score_gain, rate_target, rate_decay, periphery_half_life, salience_half_life, drift_weight, blender_ready, blender_update_count, blender_P}`
+    -   `{signals_processed, u_uncertainty, mood_vector, last_mood_ts, theta_dynamic, theta_target, hysteresis, half_life, m_rate, rho_hat_prev, dt_ema, rate_ticks, reliability, retention_ema, last_rate_timestamp, last_retrieval_ts, last_embedding, x_pred_ema, weight_relevance, attention_width, coverage_gain_floor, mismatch_weight, weight_novelty, weight_surprise, weight_valence, weight_arousal, emotion_gain, score_gain, rate_target, rate_decay, periphery_half_life, salience_half_life, drift_weight, blender_ready, blender_update_count, blender_P}`
 
 -   **Buffers (retained across timesteps; bounded by window rules):**
 
@@ -2370,7 +2383,7 @@ relative to a set of embeddings.
 
 Definitions:
 
-    SSE_curr ← ‖x_t − x_pred_t‖^2          # prediction error at t
+    SSE_curr ← ‖x_t − x_pred_t‖^2          # prediction error at t (x_pred_t = x_pred_ema for EMA predictor)
     SSE_prev ← previous SSE_curr (t−1)     # or EWMA if smoothing is used
 
 Fallback: if no prediction model is available, or if dimensions
@@ -2420,6 +2433,7 @@ Canonical single-step pseudocode (timestep t):
 
     # Structural metrics + uncertainty
     coherence_struct_t, focus_spread_t, drift_mag_t, surprisal_t ← compute_structural_metrics(x_t)
+    x_pred_ema ← update_prediction_ema(x_pred_ema, x_t, T)  # after surprisal_t
     u_t ← update_uncertainty(...)
 
     # Adaptation + scoring
@@ -2443,7 +2457,7 @@ Canonical single-step pseudocode (timestep t):
 
     # Post-write and retrieval (q_retrieval captured before any reset)
     if write_memory: commit_memory_unit(); last_write_ts ← now_ms()
-    q_retrieval ← (e_rep if available else μ_acc)  # cache current-unit query
+    q_retrieval ← μ_acc  # cache current-unit query
     streaming_pacing_check()
     graph_retrieval(q_retrieval)
     update_rate_state(Δwrites)
@@ -2458,7 +2472,7 @@ The normative execution order for a single timestep t:
 2.  **Update Buffers:** Append `x_t` to `signal_stream`. Update
     `n_ctx(T)`. Retrieve `recent_context`.
 3.  **Compute Structural Metrics:** `coherence_struct`, `focus_spread`,
-    `drift`, `surprisal`.
+    `drift`, `surprisal`, then update `x_pred_ema` for the next step.
 4.  **Update Uncertainty:** `u(t)`.
 5.  **Compute Adaptation Dynamics:**
     -   Update `α_F(t)`, `α_T(t)`.
@@ -2481,8 +2495,7 @@ The normative execution order for a single timestep t:
 9.  **Post-Write Updates and Retrieval:**
     -   If `write_memory`: Write to `memory_stream`. Update
         `last_write_ts`.
-    -   Cache `q_retrieval ← e_rep` (or `μ_acc` fallback) before any
-        accumulator reset.
+    -   Cache `q_retrieval ← μ_acc` before any accumulator reset.
     -   Run streaming pacing and retrieval using `q_retrieval`.
     -   Update `rate_state` (homeostatic controller).
     -   If `should_flush` (regardless of write): Call

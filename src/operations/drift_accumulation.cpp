@@ -57,6 +57,7 @@ UpdateDriftAccumulation::Execute (OperationContext &context, Transaction &tx) co
   context.SetDriftAccumSnapshot (acc.drift_accum);
 
   telemetry::LogDebug("cortext.drift_accumulation", {
+    telemetry::Attribute::Double("cos_sim", sim),
     telemetry::Attribute::Double("drift_increment", dist),
     telemetry::Attribute::Double("drift_accum", acc.drift_accum)
   });

@@ -91,6 +91,7 @@ public:
 
     // Metrics (Algorithm 7 inputs) in normalized domains
     std::unordered_map<operations::Metric, double> metrics;
+
   };
 
   /// @brief Processes a single signal by executing the instruction set.

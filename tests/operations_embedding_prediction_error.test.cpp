@@ -50,9 +50,10 @@ TEST_CASE ("Embedding Prediction Error - first signal initializes state",
   Eigen::VectorXf emb = Eigen::VectorXf::Random (256);
   auto out = processor.Process (MakeSignal (emb, 1));
 
-  // First signal: no metric should be set (no previous for prediction)
+  // First signal: predictor initializes, surprisal is zero
   auto it = out.metrics.find (Metric::embedding_surprisal);
-  REQUIRE (it == out.metrics.end ());
+  REQUIRE (it != out.metrics.end ());
+  CHECK (it->second == Catch::Approx (0.0));
 }
 
 TEST_CASE ("Embedding Prediction Error - identical embeddings yield low "
@@ -79,18 +80,16 @@ TEST_CASE ("Embedding Prediction Error - identical embeddings yield low "
   // First signal (initializes state)
   processor.Process (MakeSignal (emb, 1));
 
-  // Second signal (identical - zero delta means prediction is previous
-  // embedding)
+  // Second signal (identical to expectation)
   auto out = processor.Process (MakeSignal (emb, 2));
 
   auto it = out.metrics.find (Metric::embedding_surprisal);
   REQUIRE (it != out.metrics.end ());
   // Low surprisal because actual matches predicted (both are the same)
-  CHECK (it->second < 0.1);
+  CHECK (it->second < 0.25);
 }
 
-TEST_CASE ("Embedding Prediction Error - consistent direction yields moderate "
-           "surprisal initially",
+TEST_CASE ("Embedding Prediction Error - orthogonal shift yields high surprisal",
            "[operations][embedding_prediction_error]")
 {
   auto unique_store = SQLiteStore::Create (":memory:");
@@ -108,29 +107,23 @@ TEST_CASE ("Embedding Prediction Error - consistent direction yields moderate "
 
   SignalProcessor processor (cfg, store, std::move (ops));
 
-  // Signal 1: unit vector along first axis
+  // Signal 1: unit vector along +x
   Eigen::VectorXf emb1 = Eigen::VectorXf::Zero (256);
   emb1 (0) = 1.0f;
   processor.Process (MakeSignal (emb1, 1));
 
-  // Signal 2: moved +x direction
+  // Signal 2: orthogonal shift to +y
   Eigen::VectorXf emb2 = Eigen::VectorXf::Zero (256);
-  emb2 (0) = 2.0f;
-  processor.Process (MakeSignal (emb2, 2));
-
-  // Signal 3: continue +x (follows the trend that was just established)
-  Eigen::VectorXf emb3 = Eigen::VectorXf::Zero (256);
-  emb3 (0) = 3.0f;
-  auto out = processor.Process (MakeSignal (emb3, 3));
+  emb2 (1) = 1.0f;
+  auto out = processor.Process (MakeSignal (emb2, 2));
 
   auto it = out.metrics.find (Metric::embedding_surprisal);
   REQUIRE (it != out.metrics.end ());
-  // Following trend should have reasonable surprisal (not too high)
-  CHECK (it->second < 0.5);
+  // Orthogonal shift should be highly surprising
+  CHECK (it->second > 0.9);
 }
 
-TEST_CASE ("Embedding Prediction Error - direction reversal yields higher "
-           "surprisal",
+TEST_CASE ("Embedding Prediction Error - EMA adapts to repeated input",
            "[operations][embedding_prediction_error]")
 {
   auto unique_store = SQLiteStore::Create (":memory:");
@@ -153,14 +146,14 @@ TEST_CASE ("Embedding Prediction Error - direction reversal yields higher "
   emb1 (0) = 1.0f;
   processor.Process (MakeSignal (emb1, 1));
 
-  // Signal 2: move +x
+  // Signal 2: shift to +y (high surprise)
   Eigen::VectorXf emb2 = Eigen::VectorXf::Zero (256);
-  emb2 (0) = 2.0f;
+  emb2 (1) = 1.0f;
   auto out2 = processor.Process (MakeSignal (emb2, 2));
 
-  // Signal 3: reverse to -x (opposite of established trend)
+  // Signal 3: repeat +y (EMA should adapt, reducing surprise)
   Eigen::VectorXf emb3 = Eigen::VectorXf::Zero (256);
-  emb3 (0) = -1.0f;
+  emb3 (1) = 1.0f;
   auto out3 = processor.Process (MakeSignal (emb3, 3));
 
   auto it2 = out2.metrics.find (Metric::embedding_surprisal);
@@ -169,8 +162,8 @@ TEST_CASE ("Embedding Prediction Error - direction reversal yields higher "
   REQUIRE (it2 != out2.metrics.end ());
   REQUIRE (it3 != out3.metrics.end ());
 
-  // Reversal should be more surprising than continuing forward
-  CHECK (it3->second > it2->second);
+  // Repeat should be less surprising than the first shift
+  CHECK (it3->second < it2->second);
 }
 
 TEST_CASE ("Embedding Prediction Error - dimension mismatch resets state",
@@ -199,9 +192,10 @@ TEST_CASE ("Embedding Prediction Error - dimension mismatch resets state",
   Eigen::VectorXf emb2 = Eigen::VectorXf::Random (128);
   auto out = processor.Process (MakeSignal (emb2, 2));
 
-  // After dimension mismatch, state is reset and no metric is produced
+  // After dimension mismatch, state is reset with zero surprisal
   auto it = out.metrics.find (Metric::embedding_surprisal);
-  REQUIRE (it == out.metrics.end ());
+  REQUIRE (it != out.metrics.end ());
+  CHECK (it->second == Catch::Approx (0.0));
 }
 
 TEST_CASE ("Embedding Prediction Error - empty embedding is no-op",

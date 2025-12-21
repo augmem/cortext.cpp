@@ -572,6 +572,7 @@ int main(int argc, char **argv) {
           }
         }
 
+
         if (stats.turns % 20 == 0) {
           std::cout << "  signals=" << stats.turns
                     << " writes=" << stats.writes
