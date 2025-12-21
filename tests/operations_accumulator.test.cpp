@@ -386,12 +386,12 @@ TEST_CASE ("Knob-derived accumulator functions", "[accumulator][knobs]")
     REQUIRE (val < 1.0);
   }
 
-  SECTION ("SpikeMargin varies with sensitivity")
+  SECTION ("SpikeMargin varies with sensitivity and stability")
   {
-    double low = core::SpikeMargin (0.0);
-    double high = core::SpikeMargin (1.0);
-    REQUIRE (low == Catch::Approx (0.3));
-    REQUIRE (high == Catch::Approx (0.15));
+    double low = core::SpikeMargin (0.0, 0.0);
+    double high = core::SpikeMargin (1.0, 0.0);
+    REQUIRE (low == Catch::Approx (0.24));
+    REQUIRE (high == Catch::Approx (0.16));
   }
 
   SECTION ("WriteRefractoryTau varies with stability")

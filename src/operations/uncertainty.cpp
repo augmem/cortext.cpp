@@ -18,8 +18,6 @@ namespace cortext::operations
 
 namespace
 {
-// Spec (§0.4, line 139): var_score_max = 0.25
-constexpr double kVarScoreMax = 0.25;
 constexpr double kWeightEpsilon = 1e-9;
 }  // namespace
 
@@ -68,7 +66,8 @@ UpdateUncertainty::Execute (OperationContext &context, Transaction &tx) const
       }
     const double var = accum / static_cast<double> (m);
     // Spec (§0.4, line 141): var_recent_norm = clamp(var / var_score_max, 0, 1)
-    return core::Clamp (var / kVarScoreMax, constants::kNormalizedMin,
+    const double var_score_max = core::VarScoreMax (config.sensitivity);
+    return core::Clamp (var / var_score_max, constants::kNormalizedMin,
                         constants::kNormalizedMax);
   };
 

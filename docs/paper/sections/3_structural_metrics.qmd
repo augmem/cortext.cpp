@@ -15,8 +15,9 @@ else:
 Structural coherence (coherence_struct) measures integration of the current signal with the broader context window. This metric is distinct from memory coherence (coherence_mem, defined in @sec-drift-coherence) which tracks within-memory similarity:
 
 ```
+coh_neutral(T) = lerp(0.45, 0.55, T)
 if |recent_context| < 2:
-    coherence_struct_t ← 0.5  # neutral
+    coherence_struct_t ← coh_neutral(T)  # neutral, stability-derived
 else:
     raw ← var([cos(x_t, c) for c in recent_context])
     coherence_struct_t ← 1 − clamp(raw, 0, 1)  # range [0, 1]
@@ -82,7 +83,8 @@ if prev_x is unset:
     Δx_trend_t ← 0_vector
 else:
     Δx_t = x_t − prev_x
-    Δx_trend_t = EWMA(Δx_trend_{t−1}, Δx_t, α=0.1)
+    α_trend(S,T) = lerp(0.05, 0.20, S) × lerp(1.1, 0.9, T)
+    Δx_trend_t = EWMA(Δx_trend_{t−1}, Δx_t, α=α_trend(S,T))
     x_pred_t = prev_x + Δx_trend_{t−1}
     prediction_error_t = 1 − cos(x_pred_t, x_t)
 ```
@@ -90,8 +92,8 @@ else:
 This error is normalized to produce the surprisal signal:
 
 ```
-err_max = 0.5
-    surprisal_t ← clamp(prediction_error_t / err_max, 0, 1)
+err_max(S,T) = lerp(0.35, 0.75, S) × lerp(1.1, 0.9, T)
+surprisal_t ← clamp(prediction_error_t / err_max(S,T), 0, 1)
 ```
 
 This formulation captures purely kinematic surprise in the thought process
@@ -167,6 +169,8 @@ Bootstrap coefficient defaults (canonical; used for initialization):
 | periphery | 0.0 | 0.0 | 1.0 | −1.0 |
 | coverage | 2.0 | 0.0 | 0.0 | −1.0 |
 
+These coefficients define a canonical initialization map from the three knobs; they do not introduce additional runtime thresholds and may be refit from human data without changing the rest of the system.
+
 ### RLS Weight Adaptation (Canonical)
 
 RLS fits the blender weights directly in **weight-space**, using the current metrics as predictors and an observed outcome signal as the target. State is retained as a weight vector `w` and covariance matrix `P`.
@@ -197,7 +201,8 @@ Note: RLS fits **unnormalized** weights `w`; normalization happens later in comp
 Initialization:
 ```
 w_0 ← w_bootstrap   # from the coefficient table above
-P_0 ← diag(1000)
+P_init(T) = lerp(500, 2000, 1 − T)
+P_0 ← diag(P_init(T))
 ```
 
 Interpretation-only window size:

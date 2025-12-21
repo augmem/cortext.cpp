@@ -13,10 +13,8 @@ namespace cortext::operations
 {
 namespace
 {
-constexpr double kMilli = 1e-3;
 constexpr double kTiny = 1e-6;
 constexpr double kMillisToSeconds = 1e-3;
-constexpr double kEssCap = 100.0;
 constexpr double kThree = 3.0;
 constexpr double kSecondsPerMinute = 60.0;
 inline double
@@ -119,23 +117,25 @@ UpdateThreshold::Execute (OperationContext &context, Transaction &tx) const
       delta_t = static_cast<double> (now_ts - p_ctx.last_rate_timestamp)
                 * kMillisToSeconds;
     }
-  delta_t = std::max (delta_t, kMilli);
+  delta_t = std::max (delta_t, core::DeltaTMin (cfg.stability));
 
   // α_dt smoothing for dt_ema
-  const double alpha_dt = 1.0 - std::exp (-delta_t / 1.0);
+  const double alpha_dt
+      = 1.0 - std::exp (-delta_t / core::TauDt (cfg.stability));
   p_ctx.dt_ema = (1.0 - alpha_dt) * p_ctx.dt_ema + alpha_dt * delta_t;
-  const double dt_base = std::max (p_ctx.dt_ema, 1.0);
+  const double dt_base = std::max (p_ctx.dt_ema, core::DtFloor (cfg.stability));
 
   // τ_rate and α for rate EWMA
-  const double tau_rate = std::max (std::pow (constants::kTwo, kThree * cfg.stability)
-                                        * dt_base,
-                                    1.0);
+  const double tau_rate
+      = std::max (std::pow (constants::kTwo, kThree * cfg.stability) * dt_base,
+                  core::DtFloor (cfg.stability));
   const double alpha_rate = 1.0 - std::exp (-delta_t / tau_rate);
 
   // Reliability via ESS
   const double beta = std::max (0.0, 1.0 - alpha_rate);
-  const double ess
-      = std::min ((1.0 + beta) / std::max (1.0 - beta, kTiny), kEssCap);
+  const double ess = std::min (
+      (1.0 + beta) / std::max (1.0 - beta, kTiny),
+      core::EssCap (cfg.stability));
   const double reliability = 1.0 - std::exp (-ess * (1.0 - cfg.stability));
   p_ctx.reliability = reliability;
 
@@ -151,10 +151,13 @@ UpdateThreshold::Execute (OperationContext &context, Transaction &tx) const
 
   // ΔT_homeo with cap from current hysteresis state.
   const double hysteresis_val = p_ctx.hysteresis;
-  const double cap = constants::kQuarter * hysteresis_val;
+  const double cap
+      = core::CapHomeo (cfg.focus, cfg.sensitivity, cfg.stability,
+                        hysteresis_val);
   const double maturity
       = core::ComputeMaturity (p_ctx.signals_processed, cfg.stability);
-  const double kappa_r = constants::kGainMedium;
+  const double kappa_r
+      = core::KappaR (cfg.focus, cfg.sensitivity, cfg.stability);
   const double delta_homeo
       = core::Clamp (reliability * kappa_r * (1.0 - cfg.stability)
                          * (1.0 - maturity) * rate_err,
@@ -204,12 +207,12 @@ UpdateRateState::Execute (OperationContext &context, Transaction &tx) const
       delta_t = static_cast<double> (now_ts - p_ctx.last_rate_timestamp)
                 * kMillisToSeconds;
     }
-  delta_t = std::max (delta_t, kMilli);
+  delta_t = std::max (delta_t, core::DeltaTMin (cfg.stability));
 
-  const double dt_base = std::max (p_ctx.dt_ema, 1.0);
-  const double tau_rate = std::max (std::pow (constants::kTwo, kThree * cfg.stability)
-                                        * dt_base,
-                                    1.0);
+  const double dt_base = std::max (p_ctx.dt_ema, core::DtFloor (cfg.stability));
+  const double tau_rate
+      = std::max (std::pow (constants::kTwo, kThree * cfg.stability) * dt_base,
+                  core::DtFloor (cfg.stability));
   const double alpha_rate = 1.0 - std::exp (-delta_t / tau_rate);
 
   const double writes = context.GetWriteDecision () ? 1.0 : 0.0;

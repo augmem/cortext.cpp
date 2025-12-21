@@ -29,8 +29,8 @@ On cold start (no persisted state), initialize retained state as follows (unless
 * **Recorded global fields:**
   * `{u(t) → STATE.u_uncertainty, M_t → STATE.mood_vector}`
 
-* **Per-step derived scalars (ephemeral; recomputed each step):**
-  * `{signal_gap_s, coherence_curr, s_avg, S_window, boundary_score, should_flush, write_memory, Δwrites}`
+* **Per-step derived scalars/vectors (ephemeral; recomputed each step):**
+  * `{signal_gap_s, coherence_curr, s_avg, S_window, boundary_score, should_flush, write_memory, Δwrites, q_retrieval}`
 
 # Appendix B. Derived Signals: Definitions and Bounds {#sec-app-derived .unnumbered}
 
@@ -134,12 +134,15 @@ should_flush ← boundary_decision(boundary_score, time_caps, spike_bypass)
 write_memory ← force_write OR (should_flush AND (S_window > θ_memory))
 Δwrites ← 1 if write_memory else 0  # computed immediately after write decision
 
-# Post-write and rate updates
+# Post-write and retrieval (q_retrieval captured before any reset)
 if write_memory: commit_memory_unit(); last_write_ts ← now_ms()
-if should_flush: reset_accumulator()  # regardless of write outcome
+q_retrieval ← (e_rep if available else μ_acc)  # cache current-unit query
+streaming_pacing_check()
+graph_retrieval(q_retrieval)
 update_rate_state(Δwrites)
+if should_flush: reset_accumulator()  # regardless of write outcome
 
-# Interrupt gate
+# Interrupt gate (consumes retrieved candidates)
 interrupt_gate_check()
 ```
 
@@ -167,11 +170,13 @@ The normative execution order for a single timestep t:
     *   Check `spike_bypass`.
     *   Compute `S_window` and `θ_memory`.
     *   Decide `write_memory`.
-9.  **Post-Write Updates:**
+9.  **Post-Write Updates and Retrieval:**
     *   If `write_memory`: Write to `memory_stream`. Update `last_write_ts`.
-    *   If `should_flush` (regardless of write): Call `reset_accumulator()`.
+    *   Cache `q_retrieval ← e_rep` (or `μ_acc` fallback) before any accumulator reset.
+    *   Run streaming pacing and retrieval using `q_retrieval`.
     *   Update `rate_state` (homeostatic controller).
-10. **Run Interrupt Gate:** Check for streaming retrieval.
+    *   If `should_flush` (regardless of write): Call `reset_accumulator()`.
+10. **Run Interrupt Gate:** Check for streaming interrupt using retrieved candidates (already filtered by write‑exclusion and WM overlap during retrieval).
 
 Timing notes:
 *   `now_s()` is captured at step 1 and reused for all Δt computations in this timestep.

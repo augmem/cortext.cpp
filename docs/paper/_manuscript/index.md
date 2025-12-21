@@ -144,9 +144,10 @@ and Chen 1998).
 
 ## Notation and Primitives
 
-We establish the following notation used throughout this paper. Let ε =
-10⁻⁶ denote a small constant for numerical stability. All knob values F,
-S, T lie in the closed interval \[0, 1\].
+We establish the following notation used throughout this paper. Let ε(F,
+S, T) = 10^(−8 + 2T) denote a small stability-dependent constant for
+numerical stability (we write ε as shorthand for ε(F, S, T)). All knob
+values F, S, T lie in the closed interval \[0, 1\].
 
 Core mathematical primitives:
 
@@ -176,10 +177,10 @@ Shannon entropy is computed in nats: H(p) = −Σᵢ pᵢ ln(pᵢ).
 The temporal decay function follows exponential dynamics with
 configurable half-life:
 
-    decay(x, τ_half, Δt) = x × exp(−ln(2) × Δt / max(τ_half, τ_min))
+    decay(x, τ_half, Δt) = x × exp(−ln(2) × Δt / max(τ_half, τ_min(T)))
 
-where τ_min = 120 seconds provides a floor to prevent numerical
-instability from near-zero half-lives.
+where τ_min(T) = lerp(60, 300, T) seconds provides a stability-derived
+floor to prevent numerical instability from near-zero half-lives.
 
 ### Units Convention
 
@@ -233,28 +234,17 @@ idle_for), and time comparisons operate in seconds:
     signal_gap ← now_s() − to_s(last_signal_ts)  # seconds
 
 **Time constants:** All time-related constants are specified with
-explicit units (e.g., τ_min = 120 seconds, kRecencyTau = 60 seconds).
-Threshold limits like max_mem_time(T) and gap_scale(T) return values in
-seconds (gap_scale multiplies dt_ema to form gap_ref_s).
+explicit units (e.g., τ_min(T) in seconds). Threshold limits like
+max_mem_time(T) and gap_scale(T) return values in seconds (gap_scale
+multiplies dt_ema to form gap_ref_s).
 
-### Fixed Constants and Invariants
+### No Fixed Behavioral Constants
 
-Not all tunables are derived from knobs. When a value is specified as a
-fixed constant, it is a deliberate invariant and should be treated as
-such across implementations. Fixed constants fall into two buckets:
-numerical stability floors and controller gains that preserve
-qualitative behavior across knob settings and implementations. Core
-invariants include:
-
-    ε = 10^-6          # numeric stability
-    τ_min = 120 s      # minimum half-life (decay floor)
-    κ_base = 0.10      # base emotional threshold scale
-    κ_r = 0.10         # homeostatic rate gain (Section 4)
-    κ_sens = 0.08      # sensitivity gain (Section 4)
-    κ_prec = 0.06      # precision gain (Section 4)
-
-Other fixed constants are defined inline at first use and are normative
-unless explicitly marked as knob-derived.
+All behavioral thresholds, gains, and caps are derived from the three
+knobs (F, S, T) and/or state. Fixed numeric values are permitted only
+for numerical stability floors (e.g., ε(F, S, T)) and unit conversions.
+This keeps the system’s qualitative behavior entirely governed by the
+three knobs, consistent with the human-memory objective.
 
 ### Buffers
 
@@ -349,6 +339,9 @@ The hysteresis band prevents oscillation in threshold-crossing
 decisions. Write-rate targets establish homeostatic setpoints for the
 threshold controller.
 
+These ranges are canonical knob maps; no additional fixed thresholds are
+introduced beyond the three knobs.
+
 ### Experiential Mass and Maturity
 
 The system tracks accumulated experience through a maturity function
@@ -375,7 +368,7 @@ constrains movement to a narrower band.
 Uncertainty u(t) ∈ \[0, 1\] modulates learning rates and evidence
 weighting. The raw uncertainty estimate blends multiple signals:
 
-    var_score_max = 0.25
+    var_score_max(S) = lerp(0.15, 0.35, S)
     recent_scores ← tail(score_stream, win_score(T))
     if |recent_scores| < 2:
         var_recent_norm ← 0
@@ -632,8 +625,9 @@ from memory coherence (coherence_mem, defined in
 <a href="#sec-drift-coherence" class="quarto-xref">Section 6.4.2</a>)
 which tracks within-memory similarity:
 
+    coh_neutral(T) = lerp(0.45, 0.55, T)
     if |recent_context| < 2:
-        coherence_struct_t ← 0.5  # neutral
+        coherence_struct_t ← coh_neutral(T)  # neutral, stability-derived
     else:
         raw ← var([cos(x_t, c) for c in recent_context])
         coherence_struct_t ← 1 − clamp(raw, 0, 1)  # range [0, 1]
@@ -704,14 +698,15 @@ predicted trajectory in latent space:
         Δx_trend_t ← 0_vector
     else:
         Δx_t = x_t − prev_x
-        Δx_trend_t = EWMA(Δx_trend_{t−1}, Δx_t, α=0.1)
+        α_trend(S,T) = lerp(0.05, 0.20, S) × lerp(1.1, 0.9, T)
+        Δx_trend_t = EWMA(Δx_trend_{t−1}, Δx_t, α=α_trend(S,T))
         x_pred_t = prev_x + Δx_trend_{t−1}
         prediction_error_t = 1 − cos(x_pred_t, x_t)
 
 This error is normalized to produce the surprisal signal:
 
-    err_max = 0.5
-        surprisal_t ← clamp(prediction_error_t / err_max, 0, 1)
+    err_max(S,T) = lerp(0.35, 0.75, S) × lerp(1.1, 0.9, T)
+    surprisal_t ← clamp(prediction_error_t / err_max(S,T), 0, 1)
 
 This formulation captures purely kinematic surprise in the thought
 process
@@ -938,6 +933,10 @@ Bootstrap coefficient defaults (canonical; used for initialization):
 </tbody>
 </table>
 
+These coefficients define a canonical initialization map from the three
+knobs; they do not introduce additional runtime thresholds and may be
+refit from human data without changing the rest of the system.
+
 ### RLS Weight Adaptation (Canonical)
 
 RLS fits the blender weights directly in **weight-space**, using the
@@ -969,7 +968,8 @@ in composite score computation.
 Initialization:
 
     w_0 ← w_bootstrap   # from the coefficient table above
-    P_0 ← diag(1000)
+    P_init(T) = lerp(500, 2000, 1 − T)
+    P_0 ← diag(P_init(T))
 
 Interpretation-only window size:
 
@@ -1046,14 +1046,17 @@ weighting.
 ### Rate Estimation
 
     Δt ← now_s() − to_s(last_rate_timestamp)
-    Δt ← max(Δt, 10⁻³)  # minimum 1e-3 s (1 ms)
-    α_dt ← 1 − exp(−Δt / 1.0)
+    dt_min(T) = 10^(−4 + 2T)  # stability-derived minimum Δt (seconds)
+    Δt ← max(Δt, dt_min(T))
+    τ_dt(T) = lerp(0.5, 2.0, T)
+    α_dt ← 1 − exp(−Δt / τ_dt(T))
     dt_ema ← (1 − α_dt) × dt_ema + α_dt × Δt
-    dt_base ← max(dt_ema, 1.0)
+    dt_floor(T) = lerp(0.1, 0.5, T)  # stability-derived minimum cadence
+    dt_base ← max(dt_ema, dt_floor(T))
 
 The rate time constant scales with Stability:
 
-    τ_rate ← max(2^(3T) × dt_base, 1.0)
+    τ_rate ← max(2^(3T) × dt_base, dt_floor(T))
     α ← 1 − exp(−Δt / τ_rate)
 
 Instantaneous rate estimation with bias correction. Δwrites is the
@@ -1081,7 +1084,8 @@ ESS estimates the effective number of independent samples in the EMA,
 using a heuristic inspired by Liu and Chen (1998):
 
     β ← max(0, 1 − α)
-    ESS ← min((1 + β) / max(1 − β, ε), 100)
+    ESS_cap(T) = lerp(30, 120, T)
+    ESS ← min((1 + β) / max(1 − β, ε), ESS_cap(T))
     reliability ← 1 − exp(−ESS × (1 − T))
 
 High Stability dampens reliability, preventing aggressive corrections in
@@ -1089,9 +1093,8 @@ conservative regimes.
 
 ### Homeostatic Correction
 
-The rate error drives threshold adjustment. The κ\_\* gains below are
-fixed controller invariants (not knob-derived) to preserve stable
-response across regimes:
+The rate error drives threshold adjustment. The κ\_\* gains are derived
+from the knobs to avoid fixed behavioral constants:
 
 Normative note (MUST): rho_hat_prev is stored state entering the
 timestep. After the write decision, the rate-state update computes
@@ -1100,11 +1103,11 @@ timestep. After the write decision, the rate-state update computes
 
     rate_error ← tanh((rho_hat_prev − rate_target) /
                       max(rate_target, ε))
-    κ_r = 0.10  # rate error gain (fixed controller invariant)
-    cap_homeo ← 0.25 × hysteresis
-    Δθ_homeo ← clamp(reliability × κ_r × (1 − T) ×
+    κ_r(F,S,T) = lerp(0.06, 0.14, S) × lerp(1.1, 0.9, T)
+    cap_homeo(F,S,T) = lerp(0.35, 0.15, T) × lerp(0.8, 1.2, S) × hysteresis
+    Δθ_homeo ← clamp(reliability × κ_r(F,S,T) × (1 − T) ×
                       (1 − maturity(t)) × rate_error,
-                      −cap_homeo, +cap_homeo)
+                      −cap_homeo(F,S,T), +cap_homeo(F,S,T))
 
 The correction scales with reliability and is attenuated by both
 Stability and maturity, ensuring conservative, mature systems make
@@ -1119,10 +1122,11 @@ Sensitivity modulates threshold based on recent score volatility:
         σ_scores ← 0
     else:
         σ_scores ← std(recent_scores)
-    κ_sens = 0.08  # sensitivity gain (fixed controller invariant)
-    cap_sens ← 0.20 × hysteresis
-    Δθ_sens ← clamp(−κ_sens × S × (σ_scores − 0.1),
-                    −cap_sens, +cap_sens)
+    κ_sens(F,S,T) = lerp(0.04, 0.12, S) × lerp(1.1, 0.9, T)
+    cap_sens(F,S,T) = lerp(0.30, 0.10, T) × lerp(0.9, 1.1, S) × hysteresis
+    σ_ref(S,T) = lerp(0.08, 0.14, S) × lerp(1.1, 0.9, T)
+    Δθ_sens ← clamp(−κ_sens(F,S,T) × S × (σ_scores − σ_ref(S,T)),
+                    −cap_sens(F,S,T), +cap_sens(F,S,T))
 
 High score variance with high Sensitivity lowers threshold, capturing
 more volatile signals.
@@ -1132,10 +1136,10 @@ more volatile signals.
 Focus-driven precision tightens threshold when structural coherence is
 high:
 
-    κ_prec = 0.06  # precision gain (fixed controller invariant)
-    cap_prec ← 0.15 × hysteresis
-    Δθ_prec ← clamp(κ_prec × F × (coherence_struct_t − 0.5),
-                    −cap_prec, +cap_prec)
+    κ_prec(F,S,T) = lerp(0.04, 0.10, F) × lerp(1.1, 0.9, T)
+    cap_prec(F,S,T) = lerp(0.25, 0.08, T) × lerp(0.9, 1.1, F) × hysteresis
+    Δθ_prec ← clamp(κ_prec(F,S,T) × F × (coherence_struct_t − 0.5),
+                    −cap_prec(F,S,T), +cap_prec(F,S,T))
 
 High structural coherence with high Focus raises threshold, enforcing
 stricter relevance filtering.
@@ -1228,8 +1232,8 @@ this signal):
 
 Boundary detection combines kinematic drift with semantic coherence:
 
-    ε_noise = 0.02  # noise floor for drift
-    d_step ← max(drift_mag_t − ε_noise, 0)
+    ε_noise(T) = lerp(0.01, 0.05, 1 − T)  # stability-derived noise floor
+    d_step ← max(drift_mag_t − ε_noise(T), 0)
     eta_prev ← eta_acc  # baseline before updating EWMA
 
 Memory coherence tracks similarity within the current memory
@@ -1262,8 +1266,8 @@ Boundary score combines drift spike and coherence drop:
     weight_gap_component = lerp(0.05, 0.20, T)  # soft gap influence (low weight)
     weight_drift_component = weight_drift_component × (1 − weight_gap_component)
     weight_coh_component = 1 − weight_gap_component − weight_drift_component
-    ε0 = 0.01  # cold-start guard for eta_prev
-    if eta_prev < ε0:
+    ε0(T) = lerp(0.005, 0.02, 1 − T)  # cold-start guard for eta_prev
+    if eta_prev < ε0(T):
         drift_spike ← 0
     else:
         drift_spike ← (d_step − eta_prev) / max(eta_prev, ε)
@@ -1272,7 +1276,7 @@ Boundary score combines drift spike and coherence drop:
     coherence_prev ← coherence_curr  # update for next step
 
     # Adaptive gap signal (dynamic, not a hard trigger)
-    dt_ref ← max(dt_ema, 0.25)  # EWMA of inter-arrival Δt in seconds (robust to jitter)
+    dt_ref ← max(dt_ema, dt_floor(T))  # EWMA of inter-arrival Δt in seconds (robust to jitter)
     gap_scale(T) = lerp(3.0, 8.0, T)  # expected pause multiplier
     gap_ref_s ← gap_scale(T) × dt_ref
     gap_z ← (signal_gap_s − gap_ref_s) / max(gap_ref_s, ε)
@@ -1307,8 +1311,8 @@ processing introduces non-deterministic latency.
 High-salience signals bypass accumulation and flush immediately,
 capturing preceding context as a coherent memory unit:
 
-    spike_margin(S) = lerp(0.3, 0.15, S)  # above θ_dynamic
-    spike_bypass = score_t > (θ_dynamic + spike_margin(S))
+    spike_margin(S,T) = lerp(0.2, 0.5, T) × lerp(1.2, 0.8, S)  # above θ_dynamic
+    spike_bypass = score_t > (θ_dynamic + spike_margin(S,T))
     force_write ← false
 
 When spike_bypass triggers:
@@ -1899,6 +1903,11 @@ overall context rather than momentary signal fluctuations:
     expanded_nodes ← graph.traverse(seed_nodes, depth=graph_depth(T), min_edge_weight=min_edge_weight(F))
     combined ← union(seed_nodes, expanded_nodes)
     re_ranked ← sort_by(cos(q, embeddings(combined)))  # re-rank by memory centroid
+    # Exclude current-unit writes and WM overlaps before returning
+    dup_thresh = lerp(0.96, 0.88, F) × (0.98 + 0.02T)
+    eligible ← {m ∈ re_ranked | m.created_at < write_exclusion_ts}
+    eligible ← {m ∈ eligible | max_{w∈WM} cos(m.embedding, w) < dup_thresh}
+    return eligible
 
 Graph expansion uses recursive traversal with depth limits to find
 related context that pure vector search might miss. Using the memory
@@ -1911,7 +1920,9 @@ The interrupt gate controls when retrieved memories enter active context
 during streaming generation. The gate balances novelty value against
 disruption cost. The interrupt gate operates on memory-level context,
 using centroids (μ_acc) rather than individual signal embeddings for
-novelty and relevance computation.
+novelty and relevance computation. All thresholds and gains in this
+section are derived from the three knobs (F, S, T); no fixed behavioral
+constants are introduced.
 
 ## Marginal Utility Computation
 
@@ -1953,13 +1964,14 @@ embeddings:
 
     # Context window contains recent memory centroids, not individual signals
     ctx_window ← recent_memory_centroids  # bounded deque of recent memory representatives (e_rep)
+    q_retrieval ← (e_rep if available else μ_acc)  # capture before any accumulator reset
     included_set ← {embedding(m) | m already injected into the current context window}
 
 Fallback: if included_set is empty, treat redundancy(·, included_set) =
 0 and overlap_star = −1.
 
     if |ctx_window| == 0:
-        ctx_centroid ← μ_acc  # fallback: use current memory centroid
+        ctx_centroid ← q_retrieval  # fallback: use current unit centroid
     else:
         ctx_centroid ← mean(ctx_window)  # centroid of recent memory centroids
 
@@ -2002,6 +2014,15 @@ All subsequent gate logic operates on candidates_eligible rather than
 the raw candidate set, preventing recursive triggering within a coherent
 thought unit.
 
+**Working memory exclusion (normative):** retrieval must also exclude
+candidates that overlap with active working‑memory slots. This keeps
+“what I just said” in working memory rather than re‑injecting it from
+long‑term memory. The exclusion uses the same duplication threshold as
+the gate:
+
+    dup_thresh = lerp(0.96, 0.88, F) × (0.98 + 0.02T)
+    candidates_eligible ← {c ∈ candidates_eligible | max_{w∈WM} cos(c, w) < dup_thresh}
+
 Boundary-aware override permits lower-threshold interrupts at natural
 boundaries:
 
@@ -2039,7 +2060,10 @@ interrupts at natural transition points.
 
 Streaming retrieval is gated by cumulative drift rate within the
 accumulation unit. Retrieval checks trigger when drift exceeds threshold
-or at boundaries:
+or at boundaries. Retrieval uses q_retrieval captured before any
+accumulator reset for this step. Retrieval returns a candidate pool
+already filtered by write‑exclusion and WM‑overlap rules; the interrupt
+gate then applies novelty/utility thresholds and redundancy penalties.
 
     # Pacing tracks drift within current memory formation
 
@@ -2295,9 +2319,10 @@ On cold start (no persisted state), initialize retained state as follows
 
     -   `{u(t) → STATE.u_uncertainty, M_t → STATE.mood_vector}`
 
--   **Per-step derived scalars (ephemeral; recomputed each step):**
+-   **Per-step derived scalars/vectors (ephemeral; recomputed each
+    step):**
 
-    -   `{signal_gap_s, coherence_curr, s_avg, S_window, boundary_score, should_flush, write_memory, Δwrites}`
+    -   `{signal_gap_s, coherence_curr, s_avg, S_window, boundary_score, should_flush, write_memory, Δwrites, q_retrieval}`
 
 # Appendix B. Derived Signals: Definitions and Bounds
 
@@ -2416,12 +2441,15 @@ Canonical single-step pseudocode (timestep t):
     write_memory ← force_write OR (should_flush AND (S_window > θ_memory))
     Δwrites ← 1 if write_memory else 0  # computed immediately after write decision
 
-    # Post-write and rate updates
+    # Post-write and retrieval (q_retrieval captured before any reset)
     if write_memory: commit_memory_unit(); last_write_ts ← now_ms()
-    if should_flush: reset_accumulator()  # regardless of write outcome
+    q_retrieval ← (e_rep if available else μ_acc)  # cache current-unit query
+    streaming_pacing_check()
+    graph_retrieval(q_retrieval)
     update_rate_state(Δwrites)
+    if should_flush: reset_accumulator()  # regardless of write outcome
 
-    # Interrupt gate
+    # Interrupt gate (consumes retrieved candidates)
     interrupt_gate_check()
 
 The normative execution order for a single timestep t:
@@ -2450,13 +2478,18 @@ The normative execution order for a single timestep t:
     -   Check `spike_bypass`.
     -   Compute `S_window` and `θ_memory`.
     -   Decide `write_memory`.
-9.  **Post-Write Updates:**
+9.  **Post-Write Updates and Retrieval:**
     -   If `write_memory`: Write to `memory_stream`. Update
         `last_write_ts`.
+    -   Cache `q_retrieval ← e_rep` (or `μ_acc` fallback) before any
+        accumulator reset.
+    -   Run streaming pacing and retrieval using `q_retrieval`.
+    -   Update `rate_state` (homeostatic controller).
     -   If `should_flush` (regardless of write): Call
         `reset_accumulator()`.
-    -   Update `rate_state` (homeostatic controller).
-10. **Run Interrupt Gate:** Check for streaming retrieval.
+10. **Run Interrupt Gate:** Check for streaming interrupt using
+    retrieved candidates (already filtered by write‑exclusion and WM
+    overlap during retrieval).
 
 Timing notes: \* `now_s()` is captured at step 1 and reused for all Δt
 computations in this timestep. \* Threshold updates in step 7 use the

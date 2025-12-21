@@ -277,6 +277,75 @@ int CountWords(const std::string &text) {
   return count;
 }
 
+bool IsSentenceBoundaryToken(const std::string &token) {
+  if (token.empty()) {
+    return false;
+  }
+  const char c = token.back();
+  return c == '.' || c == '!' || c == '?' || c == ':';
+}
+
+std::vector<std::string> SplitWords(const std::string &text) {
+  std::vector<std::string> words;
+  std::string current;
+  for (unsigned char c : text) {
+    if (std::isspace(c)) {
+      if (!current.empty()) {
+        words.push_back(current);
+        current.clear();
+      }
+    } else {
+      current.push_back(static_cast<char>(c));
+    }
+  }
+  if (!current.empty()) {
+    words.push_back(current);
+  }
+  return words;
+}
+
+std::vector<std::string> ChunkMessage(const std::string &message,
+                                      int target_words) {
+  std::vector<std::string> chunks;
+  if (target_words < 1) {
+    target_words = 1;
+  }
+  const auto words = SplitWords(message);
+  if (words.empty()) {
+    return chunks;
+  }
+  std::vector<std::string> current;
+  current.reserve(static_cast<std::size_t>(target_words));
+  int count = 0;
+  for (const auto &word : words) {
+    current.push_back(word);
+    count++;
+    if (count >= target_words || IsSentenceBoundaryToken(word)) {
+      std::ostringstream oss;
+      for (std::size_t i = 0; i < current.size(); ++i) {
+        if (i > 0) {
+          oss << ' ';
+        }
+        oss << current[i];
+      }
+      chunks.push_back(oss.str());
+      current.clear();
+      count = 0;
+    }
+  }
+  if (!current.empty()) {
+    std::ostringstream oss;
+    for (std::size_t i = 0; i < current.size(); ++i) {
+      if (i > 0) {
+        oss << ' ';
+      }
+      oss << current[i];
+    }
+    chunks.push_back(oss.str());
+  }
+  return chunks;
+}
+
 std::string BytesToString(const std::vector<unsigned char> &bytes) {
   return std::string(bytes.begin(), bytes.end());
 }
@@ -425,98 +494,113 @@ int main(int argc, char **argv) {
     std::cout << "\n=== Conversation " << conv_id << " ===\n";
     stats.conversations++;
     int turn_idx = 0;
+    bool stop_all = false;
     for (const auto &turn : conv["content"]) {
-      if (stats.turns >= cfg.max_total_turns) {
-        break;
-      }
       if (turn_idx >= cfg.max_turns_per_conversation) {
         break;
       }
 
       std::string agent = turn.value("agent", "agent");
       std::string message = turn.value("message", "");
-      std::string text = agent + ": " + message;
+      const double wps = std::max(1e-3, cfg.cadence_wpm / 60.0);
+      const int target_words = std::max(
+          1, static_cast<int>(std::round(wps * 0.7)));
+      const auto chunks = ChunkMessage(message, target_words);
 
       const std::string source_id = "chat/" + agent;
-      cortext::Cortext::Context ctx;
-      try {
-        ctx = cortext->ProcessText(text, source_id);
-      } catch (const std::exception &e) {
-        std::cerr << "ProcessText failed: " << e.what() << "\n";
-        return 1;
-      }
-
-      stats.turns++;
-      turn_idx++;
-
-      if (ctx.output.stored_embedding_id.has_value()) {
-        stats.writes++;
-        stats.signals_per_write.push_back(stats.signals_since_write + 1);
-        stats.signals_since_write = 0;
-      } else {
-        stats.signals_since_write++;
-      }
-
-      stats.wm_samples++;
-      stats.wm_total_slots += static_cast<int>(ctx.working_memory.size());
-      stats.wm_max_slots = std::max(stats.wm_max_slots,
-                                    static_cast<int>(ctx.working_memory.size()));
-
-      const auto turn_tokens = Tokenize(text);
-      if (!ctx.working_memory.empty()) {
-        double best_overlap = 0.0;
-        for (const auto &mem : ctx.working_memory) {
-          const std::string mem_text = MemoryToText(mem);
-          const auto mem_tokens = Tokenize(mem_text);
-          best_overlap = std::max(best_overlap, Jaccard(turn_tokens, mem_tokens));
+      for (const auto &chunk : chunks) {
+        if (stats.turns >= cfg.max_total_turns) {
+          stop_all = true;
+          break;
         }
-        stats.wm_overlap_sum += best_overlap;
-        stats.wm_overlap_count++;
-      }
+        if (chunk.empty()) {
+          continue;
+        }
+        cortext::Cortext::Context ctx;
+        try {
+          ctx = cortext->ProcessText(chunk, source_id);
+        } catch (const std::exception &e) {
+          std::cerr << "ProcessText failed: " << e.what() << "\n";
+          return 1;
+        }
 
-      if (!ctx.retrieved_memory.empty()) {
-        stats.retrieval_turns++;
-        stats.total_retrieved += static_cast<int>(ctx.retrieved_memory.size());
-        double best_overlap = 0.0;
-        std::string best_text;
-        for (const auto &mem : ctx.retrieved_memory) {
-          const std::string mem_text = MemoryToText(mem);
-          const auto mem_tokens = Tokenize(mem_text);
-          const double overlap = Jaccard(turn_tokens, mem_tokens);
-          if (overlap > best_overlap) {
-            best_overlap = overlap;
-            best_text = mem_text;
+        stats.turns++;
+
+        if (ctx.output.stored_embedding_id.has_value()) {
+          stats.writes++;
+          stats.signals_per_write.push_back(stats.signals_since_write + 1);
+          stats.signals_since_write = 0;
+        } else {
+          stats.signals_since_write++;
+        }
+
+        stats.wm_samples++;
+        stats.wm_total_slots += static_cast<int>(ctx.working_memory.size());
+        stats.wm_max_slots = std::max(stats.wm_max_slots,
+                                      static_cast<int>(ctx.working_memory.size()));
+
+        const auto turn_tokens = Tokenize(chunk);
+        if (!ctx.working_memory.empty()) {
+          double best_overlap = 0.0;
+          for (const auto &mem : ctx.working_memory) {
+            const std::string mem_text = MemoryToText(mem);
+            const auto mem_tokens = Tokenize(mem_text);
+            best_overlap = std::max(best_overlap, Jaccard(turn_tokens, mem_tokens));
+          }
+          stats.wm_overlap_sum += best_overlap;
+          stats.wm_overlap_count++;
+        }
+
+        if (!ctx.retrieved_memory.empty()) {
+          stats.retrieval_turns++;
+          stats.total_retrieved += static_cast<int>(ctx.retrieved_memory.size());
+          double best_overlap = 0.0;
+          std::string best_text;
+          for (const auto &mem : ctx.retrieved_memory) {
+            const std::string mem_text = MemoryToText(mem);
+            const auto mem_tokens = Tokenize(mem_text);
+            const double overlap = Jaccard(turn_tokens, mem_tokens);
+            if (overlap > best_overlap) {
+              best_overlap = overlap;
+              best_text = mem_text;
+            }
+          }
+          stats.retrieval_overlap_sum += best_overlap;
+          stats.retrieval_overlap_count++;
+          if (!best_text.empty()) {
+            RecordRetrievalExample(stats, best_overlap, chunk, best_text);
           }
         }
-        stats.retrieval_overlap_sum += best_overlap;
-        stats.retrieval_overlap_count++;
-        if (!best_text.empty()) {
-          RecordRetrievalExample(stats, best_overlap, text, best_text);
+
+        if (stats.turns % 20 == 0) {
+          std::cout << "  signals=" << stats.turns
+                    << " writes=" << stats.writes
+                    << " wm_slots=" << ctx.working_memory.size()
+                    << " retrieved=" << ctx.retrieved_memory.size()
+                    << "\n";
+        }
+
+        if (cfg.cadence_enabled) {
+          const int words = std::max(1, CountWords(chunk));
+          double delay_s = static_cast<double>(words) / wps;
+          delay_s += 0.1;
+          delay_s *= jitter_dist(rng);
+          if (cfg.cadence_speed > 0.0) {
+            delay_s /= cfg.cadence_speed;
+          }
+          int delay_ms = static_cast<int>(delay_s * 1000.0);
+          delay_ms = std::max(cfg.cadence_min_ms, delay_ms);
+          delay_ms = std::min(cfg.cadence_max_ms, delay_ms);
+          std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
         }
       }
-
-      if (turn_idx % 20 == 0) {
-        std::cout << "  turns=" << turn_idx
-                  << " writes=" << stats.writes
-                  << " wm_slots=" << ctx.working_memory.size()
-                  << " retrieved=" << ctx.retrieved_memory.size()
-                  << "\n";
+      turn_idx++;
+      if (stop_all) {
+        break;
       }
-
-      if (cfg.cadence_enabled) {
-        const int words = std::max(1, CountWords(message));
-        const double wps = std::max(1e-3, cfg.cadence_wpm / 60.0);
-        double delay_s = static_cast<double>(words) / wps;
-        delay_s += 0.35; // conversational pause
-        delay_s *= jitter_dist(rng);
-        if (cfg.cadence_speed > 0.0) {
-          delay_s /= cfg.cadence_speed;
-        }
-        int delay_ms = static_cast<int>(delay_s * 1000.0);
-        delay_ms = std::max(cfg.cadence_min_ms, delay_ms);
-        delay_ms = std::min(cfg.cadence_max_ms, delay_ms);
-        std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
-      }
+    }
+    if (stop_all) {
+      break;
     }
 
     if (cfg.reset_per_conversation) {

@@ -161,6 +161,11 @@ if |seed_nodes| == 0 OR graph is empty:
 expanded_nodes ← graph.traverse(seed_nodes, depth=graph_depth(T), min_edge_weight=min_edge_weight(F))
 combined ← union(seed_nodes, expanded_nodes)
 re_ranked ← sort_by(cos(q, embeddings(combined)))  # re-rank by memory centroid
+# Exclude current-unit writes and WM overlaps before returning
+dup_thresh = lerp(0.96, 0.88, F) × (0.98 + 0.02T)
+eligible ← {m ∈ re_ranked | m.created_at < write_exclusion_ts}
+eligible ← {m ∈ eligible | max_{w∈WM} cos(m.embedding, w) < dup_thresh}
+return eligible
 ```
 
 Graph expansion uses recursive traversal with depth limits to find related context that pure vector search might miss. Using the memory centroid maintains consistency between vector search and graph expansion results.

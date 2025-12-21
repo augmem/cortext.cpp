@@ -200,14 +200,7 @@ UpdateSensitivity::Execute (OperationContext &context, Transaction &tx) const
         * (constants::kOneHalf + constants::kOneHalf * arousal);
   context.SetDeltaThresholdEmotion (delta_T_emo);
 
-  // Spec (§2.2.2, lines 613-621): Sensitivity-based threshold adjustment
-  // σ_scores ← std(scores[t−w:t])
-  // κ_sens = 0.08
-  // cap_sens ← 0.20 × hysteresis_t
-  // Δθ_sens ← clamp(−κ_sens × S × (σ_scores − 0.1), −cap_sens, +cap_sens)
-  constexpr double kKappaSens = 0.08;
-  constexpr double kCapSensCoeff = 0.20;
-  constexpr double kSigmaOffset = 0.1;
+  // Sensitivity-based threshold adjustment (knob-derived)
 
   const int w = core::WScore (cfg.stability);
   const int n = static_cast<int> (p_ctx.recent_scores.size ());
@@ -238,9 +231,14 @@ UpdateSensitivity::Execute (OperationContext &context, Transaction &tx) const
       sigma_scores = std::sqrt (var_scores);
     }
 
-  const double cap_sens = kCapSensCoeff * p_ctx.hysteresis;
+  const double cap_sens
+      = core::CapSens (cfg.focus, cfg.sensitivity, cfg.stability,
+                       p_ctx.hysteresis);
+  const double kappa_sens
+      = core::KappaSens (cfg.focus, cfg.sensitivity, cfg.stability);
+  const double sigma_ref = core::SigmaRef (cfg.sensitivity, cfg.stability);
   double delta_T_sens = core::Clamp (
-      -kKappaSens * S * (sigma_scores - kSigmaOffset), -cap_sens, cap_sens);
+      -kappa_sens * S * (sigma_scores - sigma_ref), -cap_sens, cap_sens);
   context.SetDeltaThresholdSensitivity (delta_T_sens);
 
   // rate_target is a knob-derived constant (base_rate(S))

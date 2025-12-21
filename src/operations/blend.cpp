@@ -1,6 +1,7 @@
 #include "cortext/operations/blend.hpp"
 
 #include "cortext/core/algorithms.hpp"
+#include "cortext/core/knobs.hpp"
 #include "cortext/operations/constants.hpp"
 #include "cortext/processor/operation_context.hpp"
 #include "cortext/telemetry/telemetry.hpp"
@@ -13,7 +14,6 @@ namespace cortext::operations
 namespace
 {
 constexpr double kTiny = 1e-6;
-constexpr double kLarge = 1000.0;
 constexpr double kLamMin = 0.90;
 constexpr double kLamMax = 0.99;
 constexpr double kLamSlope = 0.09;
@@ -169,10 +169,12 @@ EnsureStateInitialized (cortext::ProcessorContext &p_ctx,
   const std::size_t n = p_ctx.blender_order.size ();
   if (p_ctx.blender_P.size () != n)
     {
+      const double init
+          = core::BlenderPInit (cfg.stability);
       p_ctx.blender_P.assign (n, std::vector<double> (n, constants::kNormalizedMin));
       for (std::size_t i = 0; i < n; ++i)
         {
-          p_ctx.blender_P[i][i] = kLarge;
+          p_ctx.blender_P[i][i] = init;
         }
     }
 
@@ -342,7 +344,9 @@ FitMetricWeightsRLS::Execute (OperationContext &context, Transaction &tx) const
         {
           for (std::size_t j = 0; j < n; ++j)
             {
-              P[i][j] = (i == j) ? kLarge : constants::kNormalizedMin;
+              P[i][j] = (i == j)
+                            ? core::BlenderPInit (cfg.stability)
+                            : constants::kNormalizedMin;
             }
         }
       ComputeRLSGain (x, P, lam, Px, denom);

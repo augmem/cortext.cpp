@@ -44,16 +44,19 @@ The controller maintains write rates near the target setpoint through continuous
 
 ```
 Δt ← now_s() − to_s(last_rate_timestamp)
-Δt ← max(Δt, 10⁻³)  # minimum 1e-3 s (1 ms)
-α_dt ← 1 − exp(−Δt / 1.0)
+dt_min(T) = 10^(−4 + 2T)  # stability-derived minimum Δt (seconds)
+Δt ← max(Δt, dt_min(T))
+τ_dt(T) = lerp(0.5, 2.0, T)
+α_dt ← 1 − exp(−Δt / τ_dt(T))
 dt_ema ← (1 − α_dt) × dt_ema + α_dt × Δt
-dt_base ← max(dt_ema, 1.0)
+dt_floor(T) = lerp(0.1, 0.5, T)  # stability-derived minimum cadence
+dt_base ← max(dt_ema, dt_floor(T))
 ```
 
 The rate time constant scales with Stability:
 
 ```
-τ_rate ← max(2^(3T) × dt_base, 1.0)
+τ_rate ← max(2^(3T) × dt_base, dt_floor(T))
 α ← 1 − exp(−Δt / τ_rate)
 ```
 
@@ -80,7 +83,8 @@ ESS estimates the effective number of independent samples in the EMA, using a he
 
 ```
 β ← max(0, 1 − α)
-ESS ← min((1 + β) / max(1 − β, ε), 100)
+ESS_cap(T) = lerp(30, 120, T)
+ESS ← min((1 + β) / max(1 − β, ε), ESS_cap(T))
 reliability ← 1 − exp(−ESS × (1 − T))
 ```
 
@@ -88,18 +92,18 @@ High Stability dampens reliability, preventing aggressive corrections in conserv
 
 ### Homeostatic Correction
 
-The rate error drives threshold adjustment. The κ_* gains below are fixed controller invariants (not knob-derived) to preserve stable response across regimes:
+The rate error drives threshold adjustment. The κ_* gains are derived from the knobs to avoid fixed behavioral constants:
 
 Normative note (MUST): rho_hat_prev is stored state entering the timestep. After the write decision, the rate-state update computes ρ_hat_t; the assignment rho_hat_prev ← ρ_hat_t occurs at end of step (see Appendix D).
 
 ```
 rate_error ← tanh((rho_hat_prev − rate_target) /
                   max(rate_target, ε))
-κ_r = 0.10  # rate error gain (fixed controller invariant)
-cap_homeo ← 0.25 × hysteresis
-Δθ_homeo ← clamp(reliability × κ_r × (1 − T) ×
+κ_r(F,S,T) = lerp(0.06, 0.14, S) × lerp(1.1, 0.9, T)
+cap_homeo(F,S,T) = lerp(0.35, 0.15, T) × lerp(0.8, 1.2, S) × hysteresis
+Δθ_homeo ← clamp(reliability × κ_r(F,S,T) × (1 − T) ×
                   (1 − maturity(t)) × rate_error,
-                  −cap_homeo, +cap_homeo)
+                  −cap_homeo(F,S,T), +cap_homeo(F,S,T))
 ```
 
 The correction scales with reliability and is attenuated by both Stability and maturity, ensuring conservative, mature systems make minimal homeostatic adjustments.
@@ -114,10 +118,11 @@ if |recent_scores| < 2:
     σ_scores ← 0
 else:
     σ_scores ← std(recent_scores)
-κ_sens = 0.08  # sensitivity gain (fixed controller invariant)
-cap_sens ← 0.20 × hysteresis
-Δθ_sens ← clamp(−κ_sens × S × (σ_scores − 0.1),
-                −cap_sens, +cap_sens)
+κ_sens(F,S,T) = lerp(0.04, 0.12, S) × lerp(1.1, 0.9, T)
+cap_sens(F,S,T) = lerp(0.30, 0.10, T) × lerp(0.9, 1.1, S) × hysteresis
+σ_ref(S,T) = lerp(0.08, 0.14, S) × lerp(1.1, 0.9, T)
+Δθ_sens ← clamp(−κ_sens(F,S,T) × S × (σ_scores − σ_ref(S,T)),
+                −cap_sens(F,S,T), +cap_sens(F,S,T))
 ```
 
 High score variance with high Sensitivity lowers threshold, capturing more volatile signals.
@@ -127,10 +132,10 @@ High score variance with high Sensitivity lowers threshold, capturing more volat
 Focus-driven precision tightens threshold when structural coherence is high:
 
 ```
-κ_prec = 0.06  # precision gain (fixed controller invariant)
-cap_prec ← 0.15 × hysteresis
-Δθ_prec ← clamp(κ_prec × F × (coherence_struct_t − 0.5),
-                −cap_prec, +cap_prec)
+κ_prec(F,S,T) = lerp(0.04, 0.10, F) × lerp(1.1, 0.9, T)
+cap_prec(F,S,T) = lerp(0.25, 0.08, T) × lerp(0.9, 1.1, F) × hysteresis
+Δθ_prec ← clamp(κ_prec(F,S,T) × F × (coherence_struct_t − 0.5),
+                −cap_prec(F,S,T), +cap_prec(F,S,T))
 ```
 
 High structural coherence with high Focus raises threshold, enforcing stricter relevance filtering.
@@ -215,8 +220,8 @@ last_signal_ts ← now_ms()  # update timestamp for next gap calculation (ms)
 Boundary detection combines kinematic drift with semantic coherence:
 
 ```
-ε_noise = 0.02  # noise floor for drift
-d_step ← max(drift_mag_t − ε_noise, 0)
+ε_noise(T) = lerp(0.01, 0.05, 1 − T)  # stability-derived noise floor
+d_step ← max(drift_mag_t − ε_noise(T), 0)
 eta_prev ← eta_acc  # baseline before updating EWMA
 ```
 
@@ -244,8 +249,8 @@ weight_drift_component = lerp(0.6, 0.4, T)  # weight on drift
 weight_gap_component = lerp(0.05, 0.20, T)  # soft gap influence (low weight)
 weight_drift_component = weight_drift_component × (1 − weight_gap_component)
 weight_coh_component = 1 − weight_gap_component − weight_drift_component
-ε0 = 0.01  # cold-start guard for eta_prev
-if eta_prev < ε0:
+ε0(T) = lerp(0.005, 0.02, 1 − T)  # cold-start guard for eta_prev
+if eta_prev < ε0(T):
     drift_spike ← 0
 else:
     drift_spike ← (d_step − eta_prev) / max(eta_prev, ε)
@@ -254,7 +259,7 @@ coh_drop01 ← clamp((coherence_prev − coherence_curr) / 2, 0, 1)
 coherence_prev ← coherence_curr  # update for next step
 
 # Adaptive gap signal (dynamic, not a hard trigger)
-dt_ref ← max(dt_ema, 0.25)  # EWMA of inter-arrival Δt in seconds (robust to jitter)
+dt_ref ← max(dt_ema, dt_floor(T))  # EWMA of inter-arrival Δt in seconds (robust to jitter)
 gap_scale(T) = lerp(3.0, 8.0, T)  # expected pause multiplier
 gap_ref_s ← gap_scale(T) × dt_ref
 gap_z ← (signal_gap_s − gap_ref_s) / max(gap_ref_s, ε)
@@ -290,8 +295,8 @@ where signal_gap_s = now_s() − to_s(last_signal_ts) is computed at the start o
 High-salience signals bypass accumulation and flush immediately, capturing preceding context as a coherent memory unit:
 
 ```
-spike_margin(S) = lerp(0.3, 0.15, S)  # above θ_dynamic
-spike_bypass = score_t > (θ_dynamic + spike_margin(S))
+spike_margin(S,T) = lerp(0.2, 0.5, T) × lerp(1.2, 0.8, S)  # above θ_dynamic
+spike_bypass = score_t > (θ_dynamic + spike_margin(S,T))
 force_write ← false
 ```
 

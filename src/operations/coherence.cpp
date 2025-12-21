@@ -14,8 +14,6 @@ namespace cortext::operations
 
 namespace
 {
-constexpr double kEpsilonNoise = 0.02;  // Noise floor for drift (Section 4.4.2)
-
 inline Eigen::VectorXf
 ComputeMean (const std::deque<Eigen::VectorXf> &embs, int start, int end)
 {
@@ -104,7 +102,8 @@ ComputeCoherence::Execute (OperationContext &context,
         }
 
       // Compute d_step with noise floor (Section 4.4.2)
-      const double d_step = std::max (drift_mag - kEpsilonNoise, 0.0);
+      const double d_step
+          = std::max (drift_mag - core::DriftNoiseFloor (config.stability), 0.0);
 
       const double eta_prev = acc->eta_acc;
       context.SetAccumulatorEtaPrev (eta_prev);
@@ -162,7 +161,8 @@ ComputeCoherence::Execute (OperationContext &context,
   // --- Structural Coherence (Section 3.1.1) ---
   // raw = var([cos(x_t, c) for c in context_window])
   // coherence_struct_t = 1 - clamp(raw, 0, 1)
-  double coherence_struct = 0.5;  // Default: neutral coherence when context < 2
+  double coherence_struct
+      = core::CoherenceNeutral (config.stability);  // stability-derived neutral
   const int ctx_window = static_cast<int> (core::NCtx (config.stability));
   const int n_ctx = static_cast<int> (p_ctx.recent_context_embeddings.size ());
   if (n_ctx >= 2 && signal.embedding.size () > 0)

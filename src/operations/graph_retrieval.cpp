@@ -83,19 +83,26 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
       return;
     }
 
-  // Section 7.6: Use memory centroid (μ_acc) as query vector for both initial
-  // retrieval and re-ranking. This ensures retrieved memories are ranked by
-  // relevance to overall context rather than momentary signal fluctuations.
+  // Section 7.6: Use memory centroid (μ_acc) or representative embedding (e_rep)
+  // as query vector for both initial retrieval and re-ranking.
   const Eigen::VectorXf *q_ptr = nullptr;
-  auto acc_it = p_ctx.accumulator_states.find (signal.source_id);
-  if (acc_it != p_ctx.accumulator_states.end () && acc_it->second.n_signals > 0
-      && acc_it->second.mu_acc.size () > 0)
+  const auto &rep = context.GetRepresentativeEmbedding ();
+  if (rep.has_value () && rep->size () > 0)
     {
-      q_ptr = &acc_it->second.mu_acc;
+      q_ptr = &(*rep);
     }
   else
     {
-      return;
+      auto acc_it = p_ctx.accumulator_states.find (signal.source_id);
+      if (acc_it != p_ctx.accumulator_states.end ()
+          && acc_it->second.n_signals > 0 && acc_it->second.mu_acc.size () > 0)
+        {
+          q_ptr = &acc_it->second.mu_acc;
+        }
+      else
+        {
+          return;
+        }
     }
   const Eigen::VectorXf &q = *q_ptr;
 
@@ -113,6 +120,7 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
   {
     long long embedding_id;
     long long memory_id;
+    long long created_at;
     double score;
     Eigen::VectorXf vec;
   };
@@ -125,7 +133,7 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
   // V2: Query embeddings via KNN first, then join with memories for memory_id
   // sqlite-vec requires simple queries for MATCH, so we do KNN first
   auto rows = store->Execute (
-      "SELECT embedding_id, embedding, distance "
+      "SELECT embedding_id, embedding, distance, created_at "
       "FROM embeddings "
       "WHERE embedding MATCH ? AND k = ?",
       { q_vec, static_cast<long long> (k) });
@@ -135,6 +143,7 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
       auto it_emb_id = row.find ("embedding_id");
       auto it_emb = row.find ("embedding");
       auto it_dist = row.find ("distance");
+      auto it_created = row.find ("created_at");
       if (it_emb_id == row.end () || it_emb == row.end ())
         continue;
       if (it_emb_id->second.type () != typeid (long long))
@@ -165,7 +174,12 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
             }
         }
 
-      seeds.push_back (Scored{ emb_id, mem_id, sim, v });
+      long long created_at = 0;
+      if (it_created != row.end () && it_created->second.type () == typeid (long long))
+        {
+          created_at = std::any_cast<long long> (it_created->second);
+        }
+      seeds.push_back (Scored{ emb_id, mem_id, created_at, sim, v });
     }
 
   if (seeds.empty ())
@@ -247,7 +261,7 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
     {
       try
         {
-          std::string sql = "SELECT m.memory_id, m.embedding_id, e.embedding "
+          std::string sql = "SELECT m.memory_id, m.embedding_id, e.embedding, e.created_at "
                             "FROM memories m "
                             "JOIN embeddings e ON m.embedding_id = e.embedding_id "
                             "WHERE m.memory_id IN (";
@@ -269,6 +283,7 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
               auto it_mem_id = row.find ("memory_id");
               auto it_emb_id = row.find ("embedding_id");
               auto it_emb = row.find ("embedding");
+              auto it_created = row.find ("created_at");
               if (it_mem_id == row.end () || it_emb_id == row.end () || it_emb == row.end ())
                 continue;
               if (it_mem_id->second.type () != typeid (long long))
@@ -281,7 +296,12 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
               if (!core::DecodeFloatBlob (it_emb->second, q.size (), v))
                 continue;
               const double sim = core::CosineSimilarity (q, v);
-              scored.push_back (Scored{ emb_id, mem_id, sim, v });
+              long long created_at = 0;
+              if (it_created != row.end () && it_created->second.type () == typeid (long long))
+                {
+                  created_at = std::any_cast<long long> (it_created->second);
+                }
+              scored.push_back (Scored{ emb_id, mem_id, created_at, sim, v });
               fetched_any = true;
             }
         }
@@ -290,10 +310,46 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
         }
     }
 
+  auto is_overlap_wm = [&p_ctx] (const Eigen::VectorXf &v, double dup_thresh) -> bool {
+    if (v.size () == 0)
+      {
+        return false;
+      }
+    for (const auto &slot : p_ctx.wm_slots)
+      {
+        if (slot.embedding.size () == v.size () && slot.embedding.size () > 0)
+          {
+            const double sim = core::CosineSimilarity (slot.embedding, v);
+            if (sim >= dup_thresh)
+              {
+                return true;
+              }
+          }
+      }
+    return false;
+  };
+
+  const double dup_thresh = core::DupThresh (cfg.focus, cfg.stability);
+  const std::uint64_t write_exclusion_ts
+      = context.GetWriteExclusionTs ().value_or (signal.timestamp);
+  const auto stored_id = context.GetStoredEmbeddingId ();
+
   if (!fetched_any)
     {
       for (const auto &s : seeds)
         {
+          if (stored_id.has_value () && s.embedding_id == *stored_id)
+            {
+              continue;
+            }
+          if (s.created_at > 0 && static_cast<std::uint64_t> (s.created_at) >= write_exclusion_ts)
+            {
+              continue;
+            }
+          if (is_overlap_wm (s.vec, dup_thresh))
+            {
+              continue;
+            }
           out.emplace (s.embedding_id, s.vec);
         }
       context.SetRetrievedMemoryEmbeddings (std::move (out));
@@ -321,13 +377,27 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
              [] (const Scored &a, const Scored &b) {
                return a.score > b.score;
              });
-  if (static_cast<int> (scored.size ()) > k)
-    {
-      scored.resize (static_cast<size_t> (k));
-    }
+  int added = 0;
   for (const auto &s : scored)
     {
+      if (stored_id.has_value () && s.embedding_id == *stored_id)
+        {
+          continue;
+        }
+      if (s.created_at > 0 && static_cast<std::uint64_t> (s.created_at) >= write_exclusion_ts)
+        {
+          continue;
+        }
+      if (is_overlap_wm (s.vec, dup_thresh))
+        {
+          continue;
+        }
       out.emplace (s.embedding_id, s.vec);
+      ++added;
+      if (added >= k)
+        {
+          break;
+        }
     }
 
   context.SetRetrievedMemoryEmbeddings (std::move (out));

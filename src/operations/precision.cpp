@@ -11,10 +11,6 @@ namespace cortext::operations
 
 namespace
 {
-// Spec (§4.2.5, line 629): κ_prec = 0.06
-constexpr double kKappaPrec = 0.06;
-// Spec (§4.2.5, line 631): cap_prec = 0.15 × hysteresis_t
-constexpr double kCapPrecCoeff = 0.15;
 // Spec (§4.2.5, line 633): coherence offset
 constexpr double kCoherenceOffset = 0.5;
 }  // namespace
@@ -36,9 +32,13 @@ UpdatePrecisionDelta::Execute (OperationContext &context, Transaction &tx) const
   // Δθ_prec ← clamp(κ_prec × F × (coherence_struct_t − 0.5), −cap_prec, +cap_prec)
 
   const double coherence_struct = context.GetStructuralCoherence ();
-  const double cap_prec = kCapPrecCoeff * p_ctx.hysteresis;
-
-  const double raw_delta = kKappaPrec * F * (coherence_struct - kCoherenceOffset);
+  const double cap_prec
+      = core::CapPrec (cfg.focus, cfg.sensitivity, cfg.stability,
+                       p_ctx.hysteresis);
+  const double kappa_prec
+      = core::KappaPrec (cfg.focus, cfg.sensitivity, cfg.stability);
+  const double raw_delta
+      = kappa_prec * F * (coherence_struct - kCoherenceOffset);
   const double delta = core::Clamp (raw_delta, -cap_prec, cap_prec);
 
   context.SetDeltaThresholdPrecision (delta);

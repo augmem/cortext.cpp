@@ -102,6 +102,8 @@ UpdateAccumulator::Execute (OperationContext &context,
 
       p_ctx.accumulator_states[source_id] = std::move (state);
 
+      context.SetWriteExclusionTs (
+          p_ctx.accumulator_states[source_id].t_start);
       telemetry::AddCounter ("cortext.accumulator.new_source_total", 1);
       return;
     }
@@ -141,6 +143,7 @@ UpdateAccumulator::Execute (OperationContext &context,
                          - win_coh));
             }
         }
+      context.SetWriteExclusionTs (acc.t_start);
       return;
     }
 
@@ -177,6 +180,8 @@ UpdateAccumulator::Execute (OperationContext &context,
     telemetry::Attribute::Double ("arousal_sum", acc.s_arousal_sum),
     telemetry::Attribute::Int64 ("tracked_signals", static_cast<int64_t> (acc.signals.size ()))
   });
+
+  context.SetWriteExclusionTs (acc.t_start);
 }
 
 } // namespace cortext::operations

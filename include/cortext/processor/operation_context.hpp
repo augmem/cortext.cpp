@@ -822,6 +822,17 @@ public:
   }
 
   void
+  SetWriteExclusionTs (std::uint64_t v)
+  {
+    write_exclusion_ts_ = v;
+  }
+  std::optional<std::uint64_t>
+  GetWriteExclusionTs () const
+  {
+    return write_exclusion_ts_;
+  }
+
+  void
   SetRepresentativeEmbedding (Eigen::VectorXf v)
   {
     representative_embedding_ = std::move (v);
@@ -1063,6 +1074,7 @@ private:
   bool spike_bypass_ = false;
   std::optional<double> window_score_;
   bool accumulator_write_decision_ = false;
+  std::optional<std::uint64_t> write_exclusion_ts_;
   std::optional<Eigen::VectorXf> representative_embedding_;
   double accumulator_coherence_ = 1.0;
   double accumulator_drift_step_ = 0.0;

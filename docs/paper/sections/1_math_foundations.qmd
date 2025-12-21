@@ -2,7 +2,7 @@
 
 ## Notation and Primitives
 
-We establish the following notation used throughout this paper. Let ε = 10⁻⁶ denote a small constant for numerical stability. All knob values F, S, T lie in the closed interval [0, 1].
+We establish the following notation used throughout this paper. Let ε(F, S, T) = 10^(−8 + 2T) denote a small stability-dependent constant for numerical stability (we write ε as shorthand for ε(F, S, T)). All knob values F, S, T lie in the closed interval [0, 1].
 
 Core mathematical primitives:
 
@@ -31,10 +31,10 @@ For vectors, we define cosine similarity as cos(u, v) = u·v / (‖u‖ × ‖v�
 The temporal decay function follows exponential dynamics with configurable half-life:
 
 ```
-decay(x, τ_half, Δt) = x × exp(−ln(2) × Δt / max(τ_half, τ_min))
+decay(x, τ_half, Δt) = x × exp(−ln(2) × Δt / max(τ_half, τ_min(T)))
 ```
 
-where τ_min = 120 seconds provides a floor to prevent numerical instability from near-zero half-lives.
+where τ_min(T) = lerp(60, 300, T) seconds provides a stability-derived floor to prevent numerical instability from near-zero half-lives.
 
 ### Units Convention
 
@@ -66,22 +66,11 @@ mem_elapsed ← now_s() − to_s(t_start)     # seconds
 signal_gap ← now_s() − to_s(last_signal_ts)  # seconds
 ```
 
-**Time constants:** All time-related constants are specified with explicit units (e.g., τ_min = 120 seconds, kRecencyTau = 60 seconds). Threshold limits like max_mem_time(T) and gap_scale(T) return values in seconds (gap_scale multiplies dt_ema to form gap_ref_s).
+**Time constants:** All time-related constants are specified with explicit units (e.g., τ_min(T) in seconds). Threshold limits like max_mem_time(T) and gap_scale(T) return values in seconds (gap_scale multiplies dt_ema to form gap_ref_s).
 
-### Fixed Constants and Invariants
+### No Fixed Behavioral Constants
 
-Not all tunables are derived from knobs. When a value is specified as a fixed constant, it is a deliberate invariant and should be treated as such across implementations. Fixed constants fall into two buckets: numerical stability floors and controller gains that preserve qualitative behavior across knob settings and implementations. Core invariants include:
-
-```
-ε = 10^-6          # numeric stability
-τ_min = 120 s      # minimum half-life (decay floor)
-κ_base = 0.10      # base emotional threshold scale
-κ_r = 0.10         # homeostatic rate gain (Section 4)
-κ_sens = 0.08      # sensitivity gain (Section 4)
-κ_prec = 0.06      # precision gain (Section 4)
-```
-
-Other fixed constants are defined inline at first use and are normative unless explicitly marked as knob-derived.
+All behavioral thresholds, gains, and caps are derived from the three knobs (F, S, T) and/or state. Fixed numeric values are permitted only for numerical stability floors (e.g., ε(F, S, T)) and unit conversions. This keeps the system’s qualitative behavior entirely governed by the three knobs, consistent with the human-memory objective.
 
 ### Buffers {#sec-buffers}
 
@@ -149,6 +138,8 @@ base_rate(S) = lerp(r_min, r_max, S)
 
 The hysteresis band prevents oscillation in threshold-crossing decisions. Write-rate targets establish homeostatic setpoints for the threshold controller.
 
+These ranges are canonical knob maps; no additional fixed thresholds are introduced beyond the three knobs.
+
 ### Experiential Mass and Maturity
 
 The system tracks accumulated experience through a maturity function that governs the annealing of safety bounds:
@@ -175,7 +166,7 @@ Early operation permits wide threshold excursions; mature operation constrains m
 Uncertainty u(t) ∈ [0, 1] modulates learning rates and evidence weighting. The raw uncertainty estimate blends multiple signals:
 
 ```
-var_score_max = 0.25
+var_score_max(S) = lerp(0.15, 0.35, S)
 recent_scores ← tail(score_stream, win_score(T))
 if |recent_scores| < 2:
     var_recent_norm ← 0

@@ -127,6 +127,34 @@ PriorMass (double T)
   return static_cast<int> (std::round (Lerp (2.0, 32.0, T)));
 }
 
+// Rate estimation smoothing time constant (seconds)
+inline double
+TauDt (double T)
+{
+  return Lerp (0.5, 2.0, Clamp (T, 0.0, 1.0));
+}
+
+// Minimum delta time (seconds)
+inline double
+DeltaTMin (double T)
+{
+  return std::pow (10.0, -4.0 + 2.0 * Clamp (T, 0.0, 1.0));
+}
+
+// Minimum cadence floor for dt_ema (seconds)
+inline double
+DtFloor (double T)
+{
+  return Lerp (0.1, 0.5, Clamp (T, 0.0, 1.0));
+}
+
+// ESS cap (stability-derived)
+inline double
+EssCap (double T)
+{
+  return Lerp (30.0, 120.0, Clamp (T, 0.0, 1.0));
+}
+
 inline double
 TPrior (double /*F*/, double S, double T)
 {
@@ -169,6 +197,61 @@ MaxDeltaTPerMin (int count, double T)
   return Lerp (0.30, 0.10, ComputeMaturity (count, T));
 }
 
+// Homeostatic gain for threshold adjustment
+inline double
+KappaR (double /*F*/, double S, double T)
+{
+  return Lerp (0.06, 0.14, Clamp (S, 0.0, 1.0))
+         * Lerp (1.1, 0.9, Clamp (T, 0.0, 1.0));
+}
+
+inline double
+CapHomeo (double /*F*/, double S, double T, double hysteresis)
+{
+  return Lerp (0.35, 0.15, Clamp (T, 0.0, 1.0))
+         * Lerp (0.8, 1.2, Clamp (S, 0.0, 1.0))
+         * hysteresis;
+}
+
+// Sensitivity-based threshold adjustment
+inline double
+KappaSens (double /*F*/, double S, double T)
+{
+  return Lerp (0.04, 0.12, Clamp (S, 0.0, 1.0))
+         * Lerp (1.1, 0.9, Clamp (T, 0.0, 1.0));
+}
+
+inline double
+CapSens (double /*F*/, double S, double T, double hysteresis)
+{
+  return Lerp (0.30, 0.10, Clamp (T, 0.0, 1.0))
+         * Lerp (0.9, 1.1, Clamp (S, 0.0, 1.0))
+         * hysteresis;
+}
+
+inline double
+SigmaRef (double S, double T)
+{
+  return Lerp (0.08, 0.14, Clamp (S, 0.0, 1.0))
+         * Lerp (1.1, 0.9, Clamp (T, 0.0, 1.0));
+}
+
+// Precision-based threshold adjustment
+inline double
+KappaPrec (double F, double /*S*/, double T)
+{
+  return Lerp (0.04, 0.10, Clamp (F, 0.0, 1.0))
+         * Lerp (1.1, 0.9, Clamp (T, 0.0, 1.0));
+}
+
+inline double
+CapPrec (double F, double /*S*/, double T, double hysteresis)
+{
+  return Lerp (0.25, 0.08, Clamp (T, 0.0, 1.0))
+         * Lerp (0.9, 1.1, Clamp (F, 0.0, 1.0))
+         * hysteresis;
+}
+
 // --- 0.3 Global EWMA & Uncertainty Schedules ---
 
 inline double
@@ -203,6 +286,43 @@ AlphaS (double S, double u_t)
   const double kAlphaMinS = 0.05;
   const double kAlphaSpanS = 0.35;
   return kAlphaMinS + S * kAlphaSpanS * u_t;
+}
+
+// Uncertainty variance normalization ceiling
+inline double
+VarScoreMax (double S)
+{
+  return Lerp (0.15, 0.35, Clamp (S, 0.0, 1.0));
+}
+
+// Neutral structural coherence fallback
+inline double
+CoherenceNeutral (double T)
+{
+  return Lerp (0.45, 0.55, Clamp (T, 0.0, 1.0));
+}
+
+// Trend EWMA alpha for embedding prediction error
+inline double
+TrendAlpha (double S, double T)
+{
+  return Lerp (0.05, 0.20, Clamp (S, 0.0, 1.0))
+       * Lerp (1.1, 0.9, Clamp (T, 0.0, 1.0));
+}
+
+// Prediction error normalization ceiling
+inline double
+EmbeddingErrMax (double S, double T)
+{
+  return Lerp (0.35, 0.75, Clamp (S, 0.0, 1.0))
+       * Lerp (1.1, 0.9, Clamp (T, 0.0, 1.0));
+}
+
+// RLS initialization scale
+inline double
+BlenderPInit (double T)
+{
+  return Lerp (500.0, 2000.0, 1.0 - Clamp (T, 0.0, 1.0));
 }
 
 // Rate observation window (seconds)
@@ -810,6 +930,14 @@ InterruptCandidateCount (double F)
   return static_cast<int> (std::round (Lerp (10.0, 6.0, Clamp (F, 0.0, 1.0))));
 }
 
+inline double
+DupThresh (double F, double T)
+{
+  // dup_thresh = lerp(0.96, 0.88, F) × (0.98 + 0.02T)
+  return Lerp (0.96, 0.88, Clamp (F, 0.0, 1.0))
+       * (0.98 + 0.02 * Clamp (T, 0.0, 1.0));
+}
+
 // Section 4.4: Write Pacing and Memory Accumulation ---
 
 // Section 4.4.2 - Drift EWMA alpha
@@ -819,6 +947,22 @@ AlphaEtaAcc (double T)
   // α = lerp(0.3, 0.1, T)
   // Higher stability = slower EWMA update
   return Lerp (0.3, 0.1, Clamp (T, 0.0, 1.0));
+}
+
+// Section 4.4.2 - Drift noise floor
+inline double
+DriftNoiseFloor (double T)
+{
+  // ε_noise(T) = lerp(0.01, 0.05, 1 − T)
+  return Lerp (0.01, 0.05, 1.0 - Clamp (T, 0.0, 1.0));
+}
+
+// Section 4.4.3 - Cold-start guard for eta
+inline double
+EtaColdStart (double T)
+{
+  // ε0(T) = lerp(0.005, 0.02, 1 − T)
+  return Lerp (0.005, 0.02, 1.0 - Clamp (T, 0.0, 1.0));
 }
 
 // Section 4.4.3 - Boundary detection weight on drift
@@ -878,11 +1022,11 @@ GapScale (double T)
 
 // Section 4.4.4 - Spike bypass margin above θ_dynamic
 inline double
-SpikeMargin (double S)
+SpikeMargin (double S, double T)
 {
-  // spike_margin(S) = lerp(0.3, 0.15, S)
-  // Higher sensitivity = lower margin = more flashbulb triggers
-  return Lerp (0.3, 0.15, Clamp (S, 0.0, 1.0));
+  // spike_margin(S,T) = lerp(0.2, 0.5, T) × lerp(1.2, 0.8, S)
+  return Lerp (0.2, 0.5, Clamp (T, 0.0, 1.0))
+       * Lerp (1.2, 0.8, Clamp (S, 0.0, 1.0));
 }
 
 // Section 4.4.5 - Window score peak vs average weight

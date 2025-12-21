@@ -1,6 +1,6 @@
 # Interrupt Gate and Streaming Integration {#sec-interrupt}
 
-The interrupt gate controls when retrieved memories enter active context during streaming generation. The gate balances novelty value against disruption cost. The interrupt gate operates on memory-level context, using centroids (μ_acc) rather than individual signal embeddings for novelty and relevance computation.
+The interrupt gate controls when retrieved memories enter active context during streaming generation. The gate balances novelty value against disruption cost. The interrupt gate operates on memory-level context, using centroids (μ_acc) rather than individual signal embeddings for novelty and relevance computation. All thresholds and gains in this section are derived from the three knobs (F, S, T); no fixed behavioral constants are introduced.
 
 ## Marginal Utility Computation
 
@@ -44,12 +44,13 @@ The marginal utility (MU) of a candidate memory combines four factors. Context c
 ```
 # Context window contains recent memory centroids, not individual signals
 ctx_window ← recent_memory_centroids  # bounded deque of recent memory representatives (e_rep)
+q_retrieval ← (e_rep if available else μ_acc)  # capture before any accumulator reset
 included_set ← {embedding(m) | m already injected into the current context window}
 ```
 Fallback: if included_set is empty, treat redundancy(·, included_set) = 0 and overlap_star = −1.
 ```
 if |ctx_window| == 0:
-    ctx_centroid ← μ_acc  # fallback: use current memory centroid
+    ctx_centroid ← q_retrieval  # fallback: use current unit centroid
 else:
     ctx_centroid ← mean(ctx_window)  # centroid of recent memory centroids
 
@@ -90,6 +91,13 @@ candidates_eligible ← {c ∈ candidates | c.created_at < write_exclusion_ts}
 
 This filter is applied before novelty and marginal utility evaluation. All subsequent gate logic operates on candidates_eligible rather than the raw candidate set, preventing recursive triggering within a coherent thought unit.
 
+**Working memory exclusion (normative):** retrieval must also exclude candidates that overlap with active working‑memory slots. This keeps “what I just said” in working memory rather than re‑injecting it from long‑term memory. The exclusion uses the same duplication threshold as the gate:
+
+```
+dup_thresh = lerp(0.96, 0.88, F) × (0.98 + 0.02T)
+candidates_eligible ← {c ∈ candidates_eligible | max_{w∈WM} cos(c, w) < dup_thresh}
+```
+
 Boundary-aware override permits lower-threshold interrupts at natural boundaries:
 
 ```
@@ -126,7 +134,7 @@ This logic suppresses low-drift interrupts unless the marginal utility substanti
 
 ## Streaming Pacing
 
-Streaming retrieval is gated by cumulative drift rate within the accumulation unit. Retrieval checks trigger when drift exceeds threshold or at boundaries:
+Streaming retrieval is gated by cumulative drift rate within the accumulation unit. Retrieval checks trigger when drift exceeds threshold or at boundaries. Retrieval uses q_retrieval captured before any accumulator reset for this step. Retrieval returns a candidate pool already filtered by write‑exclusion and WM‑overlap rules; the interrupt gate then applies novelty/utility thresholds and redundancy penalties.
 
 ```
 # Pacing tracks drift within current memory formation

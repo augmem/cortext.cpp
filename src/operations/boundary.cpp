@@ -11,7 +11,6 @@ namespace cortext::operations
 namespace
 {
 constexpr double kEpsilon = 1e-9;
-constexpr double kEtaColdStart = 0.01;
 }  // namespace
 
 void
@@ -44,7 +43,7 @@ DetectBoundary::Execute (OperationContext &context,
 
   // Compute drift spike (Section 4.4.3) with cold-start guard
   double drift_spike = 0.0;
-  if (eta_prev >= kEtaColdStart)
+  if (eta_prev >= core::EtaColdStart (config.stability))
     {
       const double eta_safe = std::max (eta_prev, kEpsilon);
       drift_spike = (d_step - eta_prev) / eta_safe;
@@ -66,7 +65,7 @@ DetectBoundary::Execute (OperationContext &context,
   // Adaptive gap signal (soft influence only)
   const double signal_gap
       = static_cast<double> (signal.timestamp - acc.last_signal_ts) / 1000.0;
-  const double dt_ref = std::max (p_ctx.dt_ema, 0.25);
+  const double dt_ref = std::max (p_ctx.dt_ema, core::DtFloor (config.stability));
   const double gap_ref_s = core::GapScale (config.stability) * dt_ref;
   const double gap_z = (signal_gap - gap_ref_s) / std::max (gap_ref_s, kEpsilon);
   const double gap_score = core::Sigmoid (gap_z);

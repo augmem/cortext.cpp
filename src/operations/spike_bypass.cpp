@@ -20,7 +20,8 @@ CheckSpikeBypass::Execute (OperationContext &context, Transaction &tx) const
   const double T_dynamic = context.GetThresholdTDynamic ();
 
   // Compute spike margin (Section 4.4.4)
-  const double spike_margin = core::SpikeMargin (config.sensitivity);
+  const double spike_margin
+      = core::SpikeMargin (config.sensitivity, config.stability);
   const double spike_threshold = T_dynamic + spike_margin;
 
   // Check for spike bypass

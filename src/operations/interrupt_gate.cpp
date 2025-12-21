@@ -30,10 +30,6 @@ constexpr double kRedMin = 0.15;
 constexpr double kRedMax = 0.25;
 constexpr double kCohMin = 0.15;
 constexpr double kCohMax = 0.25;
-constexpr double kDupMin = 0.88;
-constexpr double kDupMax = 0.96;
-constexpr double kDupBase = 0.98;
-constexpr double kDupSlope = 0.02;
 constexpr double kTauMuMin = 0.08;
 constexpr double kTauMuMax = 0.18;
 constexpr double kTauMuMinusS = 0.4;
@@ -189,7 +185,11 @@ ComputeMniGateDecision::Execute (OperationContext &context, Transaction &tx) con
   // This ensures all memories written during the current accumulation cycle
   // are excluded from retrieval, preventing self-triggering interrupts.
   uint64_t write_exclusion_ts = signal.timestamp;  // Fallback to signal timestamp
-  if (acc.t_start > 0)
+  if (auto cached = context.GetWriteExclusionTs ())
+    {
+      write_exclusion_ts = *cached;
+    }
+  else if (acc.t_start > 0)
     {
       write_exclusion_ts = acc.t_start;
     }
@@ -361,12 +361,7 @@ ComputeMniGateDecision::Execute (OperationContext &context, Transaction &tx) con
   const double w_coh = w_coh_raw / total_w;
 
   // Duplicate suppression threshold
-  const double dup_thresh
-      = cortext::core::Lerp (kDupMax, kDupMin, F)
-        * (kDupBase + kDupSlope
-                            * cortext::core::Clamp<double> (
-                                T, constants::kNormalizedMin,
-                                constants::kNormalizedMax));
+  const double dup_thresh = cortext::core::DupThresh (F, T);
   // Novelty threshold (Section 8.1)
   const double tau_novelty = cortext::core::TauNovelty (F, S, T);
   // MU threshold

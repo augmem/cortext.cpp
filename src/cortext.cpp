@@ -538,11 +538,10 @@ struct Cortext::Impl
         std::make_unique<ComputeWriteGate> (),
         std::make_unique<MemoryStorage> (),
         std::make_unique<PersistSignalMetrics> (),
-        std::make_unique<ResetAccumulatorAfterFlush> (),
-        std::make_unique<UpdateRateState> (),
-
         std::make_unique<CheckStreamingPacing> (),
         std::make_unique<GraphAugmentedRetrieveCandidates> (),
+        std::make_unique<UpdateRateState> (),
+        std::make_unique<ResetAccumulatorAfterFlush> (),
 
         std::make_unique<ComputeMniGateDecision> (),
 

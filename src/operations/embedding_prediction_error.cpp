@@ -1,6 +1,7 @@
 #include "cortext/operations/embedding_prediction_error.hpp"
 
 #include "cortext/core/algorithms.hpp"
+#include "cortext/core/knobs.hpp"
 #include "cortext/operations/constants.hpp"
 #include "cortext/operations/metrics.hpp"
 #include "cortext/processor/operation_context.hpp"
@@ -12,8 +13,7 @@ namespace cortext::operations
 
 namespace
 {
-constexpr double kTrendAlpha = 0.1; // EWMA smoothing for trend
-constexpr double kErrMax = 0.5;     // Normalization ceiling
+constexpr double kDefaultErrMax = 0.5;
 } // namespace
 
 void
@@ -21,6 +21,7 @@ UpdateEmbeddingPredictionError::Execute (OperationContext &context, Transaction 
 {
   (void)tx;
   auto &p_ctx = context.GetProcessorContext ();
+  const auto &cfg = context.GetConfig ();
   const auto &x_t = context.GetSignal ().embedding;
 
   if (x_t.size () == 0)
@@ -56,14 +57,15 @@ UpdateEmbeddingPredictionError::Execute (OperationContext &context, Transaction 
   Eigen::VectorXf prev_trend = p_ctx.delta_x_trend.value_or (
       Eigen::VectorXf::Zero (x_t.size ()));
 
-  // Δx_trend_t = EWMA(Δx_trend_{t−1}, Δx_t, α=0.1)
+  // Δx_trend_t = EWMA(Δx_trend_{t−1}, Δx_t, α=α_trend(S,T))
   if (!p_ctx.delta_x_trend.has_value ())
     {
       p_ctx.delta_x_trend = delta_x;
     }
   else
     {
-      const float alpha = static_cast<float> (kTrendAlpha);
+      const float alpha = static_cast<float> (
+          core::TrendAlpha (cfg.sensitivity, cfg.stability));
       p_ctx.delta_x_trend
           = (1.0f - alpha) * (*p_ctx.delta_x_trend) + alpha * delta_x;
     }
@@ -76,10 +78,13 @@ UpdateEmbeddingPredictionError::Execute (OperationContext &context, Transaction 
   const double prediction_error = 1.0 - cos_sim;
   const double sse_curr = (x_t - x_pred).squaredNorm ();
 
-  // surprisal_t = clamp(prediction_error_t / err_max, 0, 1)
-  const double surprisal
-      = core::Clamp (prediction_error / kErrMax, constants::kNormalizedMin,
-                     constants::kNormalizedMax);
+  // surprisal_t = clamp(prediction_error_t / err_max(S,T), 0, 1)
+  const double err_max
+      = core::EmbeddingErrMax (cfg.sensitivity, cfg.stability);
+  const double safe_err_max = (err_max > 0.0) ? err_max : kDefaultErrMax;
+  const double surprisal = core::Clamp (
+      prediction_error / safe_err_max, constants::kNormalizedMin,
+      constants::kNormalizedMax);
 
   context.SetMetric (operations::Metric::embedding_surprisal, surprisal);
 
