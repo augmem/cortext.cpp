@@ -14,6 +14,9 @@ TEST_CASE ("UpdateUncertainty fallback maturity path",
   s.embedding = Eigen::VectorXf::Zero (3);
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  cfg.focus = 0.0;
+  cfg.sensitivity = 0.0; // zero weights -> fallback path
   cfg.stability = 0.5; // mid stability
 
   OperationContext ctx (s, pctx, cfg);

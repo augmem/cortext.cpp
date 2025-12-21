@@ -11,6 +11,7 @@ format:
   # docx: default
   # jats: default
   md: default
+  pdf: default
 
   # (other formats)
   # pdf: default

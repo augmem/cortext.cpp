@@ -80,7 +80,7 @@ TEST_CASE ("PropagateEmotionalCascade propagates through graph edges",
   // V2: Create associations (graph edges): 1 -> 2 -> 3 via memory_ids
   store->Execute ("INSERT INTO associations (source_memory_id, target_memory_id, edge_type, weight) "
                   "VALUES (?, ?, ?, ?)",
-                  { 1LL, 2LL, std::string ("co_occurs_with"), 0.9 });
+                  { 1LL, 2LL, std::string ("co_occurs"), 0.9 });
   store->Execute ("INSERT INTO associations (source_memory_id, target_memory_id, edge_type, weight) "
                   "VALUES (?, ?, ?, ?)",
                   { 2LL, 3LL, std::string ("causes"), 0.8 });
@@ -88,11 +88,14 @@ TEST_CASE ("PropagateEmotionalCascade propagates through graph edges",
   // v2: Set high-intensity flashbulb for source memory (inline on memories)
   const long long now = 5000;
   store->Execute ("UPDATE memories SET flashbulb = 1, emotional_intensity = ?, "
-                  "half_life_bonus = ?, cascade_radius = ?, cascade_decay = ? "
+                  "half_life_bonus = ?, cascade_radius = ?, cascade_decay = ?, "
+                  "s_arousal_avg = ? "
                   "WHERE embedding_id = ?",
-                  { 0.8, 2.0, 2LL, 0.5, 1LL });
+                  { 0.8, 2.0, 2LL, 0.5, 0.8, 1LL });
 
   SignalProcessor::Config cfg;
+
+  cortext::testing::RequireEncoder (cfg);
   cfg.sensitivity = 0.5; // cascade_radius = 3, decay = 0.5
   cfg.stability = 0.5;
   auto ops = std::make_unique<OperationSet> (

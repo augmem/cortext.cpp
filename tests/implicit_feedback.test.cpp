@@ -1,5 +1,6 @@
 // tests/implicit_feedback.test.cpp
 #include <Eigen/Dense>
+#include "test_helpers.hpp"
 #include <catch2/catch_test_macros.hpp>
 #include <cortext/operations/detect_memory_usage.hpp>
 #include <cortext/processor.hpp>
@@ -88,6 +89,8 @@ TEST_CASE ("DetectMemoryUsage detects high similarity as used",
   auto store = std::shared_ptr<cortext::Store> (std::move (unique_store));
 
   SignalProcessor::Config cfg;
+
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.0;       // Low focus → low threshold (0.5)
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;
@@ -126,6 +129,8 @@ TEST_CASE ("DetectMemoryUsage marks low similarity as not used",
   auto store = std::shared_ptr<cortext::Store> (std::move (unique_store));
 
   SignalProcessor::Config cfg;
+
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = 1.0;       // High focus → high threshold (0.8)
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;
@@ -164,6 +169,8 @@ TEST_CASE ("DetectMemoryUsage filters stale cache entries by stability",
   auto store = std::shared_ptr<cortext::Store> (std::move (unique_store));
 
   SignalProcessor::Config cfg;
+
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.0;
   cfg.sensitivity = 0.5;
   cfg.stability = 0.0; // Low stability → short cache duration (30s)
@@ -172,7 +179,7 @@ TEST_CASE ("DetectMemoryUsage filters stale cache entries by stability",
 
   // Create cached retrieval that is too old (100 seconds ago, beyond 30s limit)
   std::vector<ProcessorContext::CachedRetrieval> cached = {
-    { 7LL, vec, 50 } // retrieved at ts=50
+    { 7LL, vec, 50000 } // retrieved at ts=50s (ms timestamps)
   };
 
   std::vector<OperationContext::MemoryUsageEvent> events;
@@ -185,9 +192,9 @@ TEST_CASE ("DetectMemoryUsage filters stale cache entries by stability",
 
   cortext::SignalProcessor processor (cfg, store, std::move (ops));
 
-  // Process signal at ts=150 (100 seconds after retrieval, > 30s cache
+  // Process signal at ts=150s (100 seconds after retrieval, > 30s cache
   // duration)
-  auto s = MakeSignal (vec, /*ts=*/150);
+  auto s = MakeSignal (vec, /*ts=*/150000);
   processor.Process (s);
 
   // Entry should be filtered out due to age
@@ -201,6 +208,8 @@ TEST_CASE ("DetectMemoryUsage handles multiple cached retrievals",
   auto store = std::shared_ptr<cortext::Store> (std::move (unique_store));
 
   SignalProcessor::Config cfg;
+
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.5;       // Medium threshold (~0.65)
   cfg.sensitivity = 0.5;
   cfg.stability = 1.0; // High stability → long cache duration (300s)
@@ -256,6 +265,8 @@ TEST_CASE ("DetectMemoryUsage no-ops with empty cache",
   auto store = std::shared_ptr<cortext::Store> (std::move (unique_store));
 
   SignalProcessor::Config cfg;
+
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.5;
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;

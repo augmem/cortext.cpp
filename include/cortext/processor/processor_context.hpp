@@ -86,6 +86,7 @@ struct ProcessorContext
           return 0.0;
         }
       // Compute EWMA of intervals (seconds)
+      constexpr double kMillisToSeconds = 1e-3;
       constexpr double kMinInterval = 0.1;
       constexpr double kMaxInterval = 10.0;
       const double a = (alpha <= 0.0) ? 0.25 : (alpha >= 1.0 ? 1.0 : alpha);
@@ -93,8 +94,8 @@ struct ProcessorContext
       bool first = true;
       for (size_t i = 1; i < timestamps_.size (); ++i)
         {
-          double dt
-              = static_cast<double> (timestamps_[i] - timestamps_[i - 1]);
+          double dt = static_cast<double> (timestamps_[i] - timestamps_[i - 1])
+                      * kMillisToSeconds;
           if (dt < kMinInterval)
             dt = kMinInterval;
           if (dt > kMaxInterval)
@@ -113,6 +114,21 @@ struct ProcessorContext
       const double rate = (ema > eps) ? (60.0 / ema) : 0.0;
       cached_rate_ = std::isfinite (rate) ? rate : 0.0;
       return *cached_rate_;
+    }
+    std::vector<uint64_t>
+    GetTimestamps () const
+    {
+      return std::vector<uint64_t> (timestamps_.begin (), timestamps_.end ());
+    }
+    void
+    SetTimestamps (const std::vector<uint64_t> &timestamps)
+    {
+      timestamps_.assign (timestamps.begin (), timestamps.end ());
+      while (timestamps_.size () > capacity_)
+        {
+          timestamps_.pop_front ();
+        }
+      cached_rate_.reset ();
     }
 
   private:
@@ -193,6 +209,9 @@ struct ProcessorContext
   std::optional<Eigen::VectorXf> last_embedding;
   /// @brief EWMA of embedding deltas (Δx_trend)
   std::optional<Eigen::VectorXf> delta_x_trend;
+  /// @brief Prediction error SSE history for ΔSSE utility
+  std::optional<double> prediction_error_sse;
+  std::optional<double> prediction_error_sse_prev;
 
   // ======================================================================
   // Focus-Related State (Algorithms 1, 2, 15)
@@ -254,6 +273,7 @@ struct ProcessorContext
   double hysteresis = 0.05;
   double dt_ema = 0.0;
   double m_rate = 0.0;
+  double rho_hat_prev = 0.0;
   int rate_ticks = 0;
   uint64_t last_rate_timestamp = 0;
   double reliability = 1.0;  // ESS-based reliability measure
@@ -295,13 +315,6 @@ struct ProcessorContext
   uint64_t episode_start_ts = 0;
 
   // ======================================================================
-  // Streaming Pacing State (Section 10)
-  // ======================================================================
-  double drift_accum = 0.0;              // Accumulated drift for pacing
-  double drift_at_last_interrupt = 0.0;  // Refractory baseline drift
-  std::optional<Eigen::VectorXf> last_pacing_check_embedding;  // Embedding at last pacing check
-
-  // ======================================================================
   // Influence Feedback State (Algorithm 19)
   // ======================================================================
   double sustained_influence = 0.0;
@@ -334,8 +347,7 @@ struct ProcessorContext
     double s_emotion_max = 0.0;          ///< Max emotion intensity
     double s_arousal_avg = 0.0;          ///< Average arousal
 
-    std::string content;                 ///< Concatenated signal texts
-    std::vector<Eigen::VectorXf> signals;  ///< Ordered signal embeddings
+    std::vector<SignalRecord> signal_records;  ///< Ordered signal records
   };
   std::vector<WMSlot> wm_slots;
   bool wm_last_accepted = false;
@@ -370,6 +382,9 @@ struct ProcessorContext
   /// signals into natural "thought units".
   std::unordered_map<std::string, AccumulatorState> accumulator_states;
 
+  /// @brief Stream of written memory representatives (e_rep).
+  std::deque<Eigen::VectorXf> memory_stream;
+
   /// @brief Recent memory centroids for interrupt gate context (Section 8.2)
   ///
   /// Stores μ_acc from recently written memories. Used by interrupt gate
@@ -380,7 +395,7 @@ struct ProcessorContext
   // ======================================================================
   // LLM Components (OGA/Phi-4)
   // ======================================================================
-  /// @brief Extractor for entity/relation extraction (optional, may be null)
+  /// @brief Extractor for label/relation extraction (optional, may be null)
   Extractor *extractor = nullptr;
   /// @brief Summarizer for text/audio summarization (optional, may be null)
   Summarizer *summarizer = nullptr;

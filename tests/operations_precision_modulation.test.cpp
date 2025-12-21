@@ -37,6 +37,7 @@ TEST_CASE ("§4.2.5 sets positive Δ when structural coherence above 0.5",
   ProcessorContext pc;
   pc.hysteresis = 0.10;  // cap_prec = 0.15 * 0.10 = 0.015
   SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = 1.0;
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;
@@ -67,6 +68,7 @@ TEST_CASE ("§4.2.5 sets negative Δ when structural coherence below 0.5",
   ProcessorContext pc;
   pc.hysteresis = 0.10;  // cap_prec = 0.15 * 0.10 = 0.015
   SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = 1.0;
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;
@@ -97,6 +99,7 @@ TEST_CASE ("§4.2.5 sets zero Δ when structural coherence equals 0.5",
   ProcessorContext pc;
   pc.hysteresis = 0.10;
   SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = 1.0;
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;
@@ -128,6 +131,7 @@ TEST_CASE ("§4.2.5 Δ scales with Focus knob",
   ProcessorContext pc_high;
   pc_high.hysteresis = 1.0;  // Very large hysteresis to avoid capping (cap = 0.15)
   SignalProcessor::Config cfg_high;
+  cortext::testing::RequireEncoder (cfg_high);
   cfg_high.focus = 1.0;
   cfg_high.sensitivity = 0.5;
   cfg_high.stability = 0.5;
@@ -137,6 +141,7 @@ TEST_CASE ("§4.2.5 Δ scales with Focus knob",
   ProcessorContext pc_low;
   pc_low.hysteresis = 1.0;
   SignalProcessor::Config cfg_low;
+  cortext::testing::RequireEncoder (cfg_low);
   cfg_low.focus = 0.2;
   cfg_low.sensitivity = 0.5;
   cfg_low.stability = 0.5;

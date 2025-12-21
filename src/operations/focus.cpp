@@ -62,25 +62,32 @@ UpdateFocus::Execute (OperationContext &context, Transaction &tx) const
   const auto &config = context.GetConfig ();
   const auto &signal = context.GetSignal ();
 
-  // On the first signal, just add it to the context and return.
-  if (p_ctx.recent_context_embeddings.empty ())
+  // Calculate the mean of the recent context embeddings.
+  // Appendix D: recent_context already includes x_t via UpdateRecentContext.
+  double observed_cosine = 0.0;
+  const size_t n_ctx = p_ctx.recent_context_embeddings.size ();
+  if (n_ctx > 0 && signal.embedding.size () > 0)
     {
-      p_ctx.recent_context_embeddings.push_back (signal.embedding);
-      return;
-    }
+      Eigen::VectorXf mean_context
+          = Eigen::VectorXf::Zero (signal.embedding.size ());
+      const size_t ctx_window_size
+          = static_cast<size_t> (core::NCtx (config.stability));
+      const size_t start
+          = (n_ctx > ctx_window_size) ? (n_ctx - ctx_window_size) : 0;
+      for (size_t i = start; i < n_ctx; ++i)
+        {
+          mean_context += p_ctx.recent_context_embeddings[i];
+        }
+      const size_t denom = (n_ctx > ctx_window_size) ? ctx_window_size : n_ctx;
+      if (denom > 0)
+        {
+          mean_context /= static_cast<float> (denom);
+        }
 
-  // Calculate the mean of the recent context embeddings
-  Eigen::VectorXf mean_context
-      = Eigen::VectorXf::Zero (signal.embedding.size ());
-  for (const auto &emb : p_ctx.recent_context_embeddings)
-    {
-      mean_context += emb;
+      // Alg 2: observed_cosine ← cos(x_t, mean(recent_context))
+      observed_cosine
+          = core::CosineSimilarity (signal.embedding, mean_context);
     }
-  mean_context /= p_ctx.recent_context_embeddings.size ();
-
-  // Alg 2: observed_cosine ← cos(x_t, mean(recent_context))
-  double observed_cosine
-      = core::CosineSimilarity (signal.embedding, mean_context);
 
   // Calculate the learning rate using the schedule from Section 0.3
   const double alpha_f = core::AlphaF (config.focus, p_ctx.u_t);
@@ -98,15 +105,6 @@ UpdateFocus::Execute (OperationContext &context, Transaction &tx) const
   p_ctx.attention_width = core::Clamp (
       p_ctx.attention_width, static_cast<double> (core::kAttentionWidthMin),
       static_cast<double> (core::kAttentionWidthMax));
-
-  // --- Post-update ---
-  // Manage the recent context window.
-  const size_t context_window_size = core::NCtx (config.stability);
-  p_ctx.recent_context_embeddings.push_back (signal.embedding);
-  if (p_ctx.recent_context_embeddings.size () > context_window_size)
-    {
-      p_ctx.recent_context_embeddings.pop_front ();
-    }
 
   telemetry::LogDebug (
       "cortext.focus.update",

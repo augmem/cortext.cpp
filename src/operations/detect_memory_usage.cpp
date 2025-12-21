@@ -44,7 +44,7 @@ DetectMemoryUsage::Execute (OperationContext &context, Transaction &tx) const
     {
       // Skip stale entries based on stability-derived cache duration
       const double age_seconds
-          = static_cast<double> (now_ts - cached.retrieved_at);
+          = static_cast<double> (now_ts - cached.retrieved_at) * 1e-3;
       if (age_seconds > cache_duration)
         {
           continue;

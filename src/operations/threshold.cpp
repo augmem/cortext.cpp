@@ -15,6 +15,7 @@ namespace
 {
 constexpr double kMilli = 1e-3;
 constexpr double kTiny = 1e-6;
+constexpr double kMillisToSeconds = 1e-3;
 constexpr double kEssCap = 100.0;
 constexpr double kThree = 3.0;
 constexpr double kSecondsPerMinute = 60.0;
@@ -71,18 +72,21 @@ UpdateThreshold::Execute (OperationContext &context, Transaction &tx) const
       p_ctx.recent_scores.pop_front ();
     }
 
-  // 3) Compute observed p90 over the last w samples.
-  const double observed_p90 = PercentileP90 (p_ctx.recent_scores, w);
-
-  // 4) Bayesian blend target using prior and experiential mass.
+  // 3) Bayesian blend target using prior and experiential mass.
   const double rho_prior
       = static_cast<double> (core::PriorMass (cfg.stability));
   const int count_scores = static_cast<int> (p_ctx.recent_scores.size ());
-  const double rho_obs = core::Clamp (p_ctx.u_t, constants::kNormalizedMin,
-                                      constants::kNormalizedMax)
-                         * static_cast<double> (std::min (w, count_scores));
   const double T_prior
       = core::TPrior (cfg.focus, cfg.sensitivity, cfg.stability);
+
+  // 4) Compute observed p90 over the last w samples (fallback to prior).
+  const int tail_count = std::min (w, count_scores);
+  const double observed_p90
+      = (tail_count > 0) ? PercentileP90 (p_ctx.recent_scores, w) : T_prior;
+
+  const double rho_obs = core::Clamp (p_ctx.u_t, constants::kNormalizedMin,
+                                      constants::kNormalizedMax)
+                         * static_cast<double> (tail_count);
   const double denom
       = std::max (constants::kNormEpsilon, rho_prior + rho_obs);
   const double T_target
@@ -95,9 +99,8 @@ UpdateThreshold::Execute (OperationContext &context, Transaction &tx) const
                                              constants::kNormalizedMax));
 
   // 6) Threshold deltas (Algorithm 8 steps 8-13)
-  const double kSensitivityGain = constants::kGainMedium;
-  const double delta_sens = context.GetDeltaThresholdSensitivity ().value_or (
-      (cfg.sensitivity - 0.5) * kSensitivityGain);
+  const double delta_sens
+      = context.GetDeltaThresholdSensitivity ().value_or (0.0);
   const double delta_prec
       = context.GetDeltaThresholdPrecision ().value_or (constants::kNormalizedMin);
   const double delta_emo
@@ -107,22 +110,18 @@ UpdateThreshold::Execute (OperationContext &context, Transaction &tx) const
   double delta_total = delta_sens + delta_prec + delta_emo + delta_mood;
 
   // 7) Continuous-time rate control (EMA + ESS) → ΔT_homeo
-  // Use signal timestamps to estimate Δt; fallback to 1.0s if unavailable.
+  // Use signal timestamps to estimate Δt in seconds; fallback to 1.0s if unavailable.
   const uint64_t now_ts = context.GetSignal ().timestamp;
   double delta_t = 1.0;
   if (p_ctx.last_rate_timestamp != 0 && now_ts > p_ctx.last_rate_timestamp)
     {
-      delta_t = static_cast<double> (now_ts - p_ctx.last_rate_timestamp);
-      if (delta_t <= constants::kNormEpsilon)
-        {
-          delta_t = kMilli;
-        }
+      delta_t = static_cast<double> (now_ts - p_ctx.last_rate_timestamp)
+                * kMillisToSeconds;
     }
-  p_ctx.last_rate_timestamp = now_ts == 0 ? p_ctx.last_rate_timestamp : now_ts;
+  delta_t = std::max (delta_t, kMilli);
 
   // α_dt smoothing for dt_ema
-  const double denom_dt = std::max (delta_t, kMilli);
-  const double alpha_dt = 1.0 - std::exp (-delta_t / denom_dt);
+  const double alpha_dt = 1.0 - std::exp (-delta_t / 1.0);
   p_ctx.dt_ema = (1.0 - alpha_dt) * p_ctx.dt_ema + alpha_dt * delta_t;
   const double dt_base = std::max (p_ctx.dt_ema, 1.0);
 
@@ -132,34 +131,21 @@ UpdateThreshold::Execute (OperationContext &context, Transaction &tx) const
                                     1.0);
   const double alpha_rate = 1.0 - std::exp (-delta_t / tau_rate);
 
-  // Observed instantaneous rate (writes/min); Δwrites=1 per signal
-  const double rho_inst = (delta_t > constants::kNormEpsilon)
-                              ? (kSecondsPerMinute / delta_t)
-                              : constants::kNormalizedMin;
-  p_ctx.m_rate = (1.0 - alpha_rate) * p_ctx.m_rate + alpha_rate * rho_inst;
-  p_ctx.rate_ticks = p_ctx.rate_ticks + 1;
-
-  // Debiased rate estimate ρ_hat
-  const double denom_bias
-      = std::max (1.0
-                      - std::pow (1.0 - alpha_rate,
-                                  static_cast<double> (p_ctx.rate_ticks + 1)),
-                  kTiny);
-  const double rho_hat = p_ctx.m_rate / denom_bias;
-
   // Reliability via ESS
-  const double beta
-      = std::max (constants::kNormalizedMin, 1.0 - alpha_rate);
+  const double beta = std::max (0.0, 1.0 - alpha_rate);
   const double ess
       = std::min ((1.0 + beta) / std::max (1.0 - beta, kTiny), kEssCap);
   const double reliability = 1.0 - std::exp (-ess * (1.0 - cfg.stability));
+  p_ctx.reliability = reliability;
 
   // Rate error vs target write rate
   const double rate_target
       = (context.GetProcessorContext ().rate_target > 0.0)
             ? context.GetProcessorContext ().rate_target
             : context.GetProcessorContext ().rate_target_prior;
-  const double rate_err = std::tanh ((rho_hat - std::max (rate_target, constants::kNormalizedMin))
+  const double rate_err
+      = std::tanh ((p_ctx.rho_hat_prev
+                    - std::max (rate_target, constants::kNormalizedMin))
                                      / std::max (rate_target, kTiny));
 
   // ΔT_homeo with cap from hysteresis (use the current stability-derived band)
@@ -188,8 +174,10 @@ UpdateThreshold::Execute (OperationContext &context, Transaction &tx) const
   const double Tmax = core::TMax (p_ctx.signals_processed, cfg.stability);
   p_ctx.T_dynamic = core::Clamp (p_ctx.T_dynamic + delta_total, Tmin, Tmax);
 
-  // 9) Hysteresis band derived from Stability knob.
-  p_ctx.hysteresis = hysteresis_val;
+  // 9) Hysteresis band derived from Stability knob, smoothed by α_T.
+  p_ctx.hysteresis = core::Clamp (
+      core::Ewma (p_ctx.hysteresis, hysteresis_val, alpha_T),
+      constants::kHysteresisBandMin, constants::kHysteresisBandMax);
 
   // Expose as intermediate results for downstream operations/telemetry.
   context.SetThresholdTDynamic (p_ctx.T_dynamic);
@@ -197,10 +185,52 @@ UpdateThreshold::Execute (OperationContext &context, Transaction &tx) const
 
   telemetry::LogDebug("cortext.threshold", {
     telemetry::Attribute::Double("prior_threshold", T_prior),
-    telemetry::Attribute::Double("observed_mean", observed_p90),
+    telemetry::Attribute::Double("observed_p90", observed_p90),
     telemetry::Attribute::Double("T_dynamic", p_ctx.T_dynamic),
     telemetry::Attribute::Double("hysteresis", p_ctx.hysteresis)
   });
+}
+
+void
+UpdateRateState::Execute (OperationContext &context, Transaction &tx) const
+{
+  (void)tx;
+  auto &p_ctx = context.GetProcessorContext ();
+  const auto &cfg = context.GetConfig ();
+
+  const uint64_t now_ts = context.GetSignal ().timestamp;
+  double delta_t = 1.0;
+  if (p_ctx.last_rate_timestamp != 0 && now_ts > p_ctx.last_rate_timestamp)
+    {
+      delta_t = static_cast<double> (now_ts - p_ctx.last_rate_timestamp)
+                * kMillisToSeconds;
+    }
+  delta_t = std::max (delta_t, kMilli);
+
+  const double dt_base = std::max (p_ctx.dt_ema, 1.0);
+  const double tau_rate = std::max (std::pow (constants::kTwo, kThree * cfg.stability)
+                                        * dt_base,
+                                    1.0);
+  const double alpha_rate = 1.0 - std::exp (-delta_t / tau_rate);
+
+  const double writes = context.GetWriteDecision () ? 1.0 : 0.0;
+  const double rho_inst = (delta_t > constants::kNormEpsilon)
+                              ? (writes * kSecondsPerMinute / delta_t)
+                              : constants::kNormalizedMin;
+
+  p_ctx.m_rate = (1.0 - alpha_rate) * p_ctx.m_rate + alpha_rate * rho_inst;
+  p_ctx.rate_ticks = p_ctx.rate_ticks + 1;
+
+  const double denom_bias
+      = std::max (1.0
+                      - std::pow (1.0 - alpha_rate,
+                                  static_cast<double> (p_ctx.rate_ticks + 1)),
+                  kTiny);
+  p_ctx.rho_hat_prev = p_ctx.m_rate / denom_bias;
+  if (now_ts != 0)
+    {
+      p_ctx.last_rate_timestamp = now_ts;
+    }
 }
 
 } // namespace cortext::operations

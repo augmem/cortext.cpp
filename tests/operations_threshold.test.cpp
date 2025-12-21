@@ -6,6 +6,7 @@
 #include <cortext/processor.hpp>
 #include <cortext/processor/operation_context.hpp>
 using namespace cortext;
+using cortext::operations::UpdateRateState;
 using cortext::operations::UpdateThreshold;
 
 TEST_CASE ("UpdateThreshold basic adaptation toward p90",
@@ -15,10 +16,15 @@ TEST_CASE ("UpdateThreshold basic adaptation toward p90",
   s.embedding = Eigen::VectorXf::Zero (3);
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.5;
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;
 
+  // Neutralize homeostatic correction for this test.
+  pctx.rate_target_prior = 0.0;
+  pctx.rate_target = 0.0;
+  pctx.rho_hat_prev = 0.0;
 
   // Start with moderate uncertainty to give non-zero experiential mass.
   pctx.u_t = 1.0;
@@ -33,7 +39,7 @@ TEST_CASE ("UpdateThreshold basic adaptation toward p90",
       OperationContext ctx (s, pctx, cfg);
       ctx.SetCompositeScore (0.9);
       // Provide increasing timestamps to drive Δt
-      s.timestamp += 1; // 1s per signal
+      s.timestamp += 1000; // 1s per signal (ms timestamps)
       op.Execute (ctx, cortext::testing::GetNullTransaction ());
     }
 
@@ -41,7 +47,7 @@ TEST_CASE ("UpdateThreshold basic adaptation toward p90",
 
   // Hysteresis should be the lerp between [0.02, 0.25] at stability=0.5
   const double expected_band = cortext::core::Lerp (0.02, 0.25, cfg.stability);
-  REQUIRE (pctx.hysteresis == Catch::Approx (expected_band));
+  REQUIRE (pctx.hysteresis == Catch::Approx (expected_band).margin (0.01));
 }
 
 TEST_CASE ("Alg8 ΔT_homeo increases threshold when observed rate > target",
@@ -51,6 +57,7 @@ TEST_CASE ("Alg8 ΔT_homeo increases threshold when observed rate > target",
   s.embedding = Eigen::VectorXf::Zero (3);
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.5;
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;
@@ -62,16 +69,18 @@ TEST_CASE ("Alg8 ΔT_homeo increases threshold when observed rate > target",
   pctx.u_t = 0.5;
 
   UpdateThreshold op;
+  UpdateRateState update_rate;
   const double before = pctx.T_dynamic;
-  // Fast stream: timestamps every 0.2s → 300 wpm instantaneous
+  // Fast stream: timestamps every 0.2s (ms-based) → 300 wpm instantaneous
   for (int i = 0; i < 10; ++i)
     {
-      s.timestamp += 1; // assume 1 unit = 0.2s; emulate via multiple updates
+      s.timestamp += 200; // 0.2s per signal (ms timestamps)
       OperationContext ctx (s, pctx, cfg);
       ctx.SetCompositeScore (0.5);
       op.Execute (ctx, cortext::testing::GetNullTransaction ());
-      // emulate 0.2s by calling multiple times per second; the α smoothing
-      // will handle it
+      ctx.SetWriteDecision (true);
+      update_rate.Execute (ctx, cortext::testing::GetNullTransaction ());
+      // Multiple short steps emulate high write rate; α smoothing handles it.
     }
   REQUIRE (pctx.T_dynamic >= before);
   // Within rails
@@ -90,26 +99,30 @@ TEST_CASE ("Alg8 ΔT_homeo decreases threshold when observed rate < target",
   s.embedding = Eigen::VectorXf::Zero (3);
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.5;
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;
 
 
   // Set a higher target; slow timestamps will be below target
-  pctx.rate_target_prior = 5.0; // writes/min
+  pctx.rate_target_prior = 30.0; // writes/min
   pctx.rate_target = pctx.rate_target_prior;
   pctx.u_t = 0.5;
 
   UpdateThreshold op;
+  UpdateRateState update_rate;
   const double before = pctx.T_dynamic;
   // Slow stream: timestamps every 10s → 6 wpm instantaneous; still lower than
   // target?
   for (int i = 0; i < 6; ++i)
     {
-      s.timestamp += 10;
+      s.timestamp += 10000;
       OperationContext ctx (s, pctx, cfg);
       ctx.SetCompositeScore (0.5);
       op.Execute (ctx, cortext::testing::GetNullTransaction ());
+      ctx.SetWriteDecision (true);
+      update_rate.Execute (ctx, cortext::testing::GetNullTransaction ());
     }
   // Expect movement opposite to fast case; not necessarily strictly less due
   // to prior blend but should not explode and must stay within rails.

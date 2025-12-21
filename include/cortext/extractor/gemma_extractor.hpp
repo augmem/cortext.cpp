@@ -9,8 +9,8 @@ namespace cortext
 
 /// @brief Gemma-based extractor using LiteRT-LM.
 ///
-/// Uses Gemma model via LiteRT-LM's Conversation API with constrained decoding
-/// for JSON schema constrained entity/relation extraction from text and audio.
+/// Uses Gemma model via LiteRT-LM's Session API with structured prompting
+/// for label/relation extraction from text and audio.
 ///
 /// When CORTEXT_DISABLE_LITERT is defined, all methods throw std::runtime_error.
 class GemmaExtractor : public Extractor

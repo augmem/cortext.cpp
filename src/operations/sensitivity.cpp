@@ -55,6 +55,7 @@ namespace
 constexpr int kNumEmotions = 6; // anger, fear, joy, love, sadness, surprise
 constexpr double kTiny = 1e-6;
 constexpr double kPerMinute = 60.0;
+constexpr double kMillisToSeconds = 1e-3;
 constexpr double kClampRateMax = 1000.0;
 // Valence map (−1..+1 approx scaled to ~[−0.9,+0.9])
 static const double kVMap[kNumEmotions]
@@ -255,7 +256,8 @@ UpdateSensitivity::Execute (OperationContext &context, Transaction &tx) const
       && ts > p_ctx.last_signal_timestamp)
     {
       const double dt_seconds
-          = static_cast<double> (ts - p_ctx.last_signal_timestamp);
+          = static_cast<double> (ts - p_ctx.last_signal_timestamp)
+            * kMillisToSeconds;
       rate_obs = (dt_seconds > kTiny) ? (kPerMinute / dt_seconds) : 0.0;
     }
   const double alpha_s = core::AlphaS (S, p_ctx.u_t);

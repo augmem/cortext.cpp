@@ -40,6 +40,7 @@ TEST_CASE ("ComputeWriteGate accepts when S_window above threshold",
 
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.5;
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;
@@ -71,6 +72,7 @@ TEST_CASE ("ComputeWriteGate rejects when S_window below threshold",
 
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.5;
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;
@@ -100,6 +102,7 @@ TEST_CASE ("ComputeWriteGate rejects when no flush required",
 
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.5;
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;
@@ -130,6 +133,7 @@ TEST_CASE ("ComputeWriteGate accepts with spike_bypass",
 
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.5;
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;
@@ -162,6 +166,8 @@ TEST_CASE ("ComputeWriteGate rejects when no accumulator state",
   // No accumulator state set up
 
   SignalProcessor::Config cfg;
+
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.5;
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;
@@ -188,6 +194,7 @@ TEST_CASE ("ComputeWriteGate populates recent_memory_centroids on accept",
 
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.5;
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;

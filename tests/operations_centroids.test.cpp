@@ -20,6 +20,7 @@ TEST_CASE ("InitializeEmbeddedCentroids populates ProcessorContext centroids",
   s.embedding = Eigen::VectorXf::Zero (256);
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
 
   OperationContext ctx (s, pctx, cfg);
   InitializeEmbeddedCentroids op;
@@ -36,6 +37,7 @@ TEST_CASE ("ComputeMetrics uses affect centroids and sets violation telemetry",
   Signal s;
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.5;
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;

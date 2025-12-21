@@ -10,7 +10,7 @@ namespace cortext
 /// @brief Phi-4 multimodal extractor using onnxruntime-genai.
 ///
 /// Uses Phi-4-multimodal model with llguidance for JSON schema constrained
-/// entity/relation extraction from text and audio.
+/// label/relation extraction from text and audio.
 ///
 /// When CORTEXT_DISABLE_OGA is defined, all methods throw std::runtime_error.
 class Phi4Extractor : public Extractor

@@ -58,6 +58,9 @@ DetectBoundary::Execute (OperationContext &context,
 
   // Check flush conditions
   bool flush = false;
+  bool drift_trigger = false;
+  bool timeout_trigger = false;
+  bool gap_trigger = false;
 
   // 1. Boundary score exceeds threshold
   const double b_thresh
@@ -65,6 +68,7 @@ DetectBoundary::Execute (OperationContext &context,
   if (boundary_score > b_thresh)
     {
       flush = true;
+      drift_trigger = true;
       telemetry::AddCounter ("cortext.accumulator.flush_boundary_score", 1);
     }
 
@@ -75,6 +79,7 @@ DetectBoundary::Execute (OperationContext &context,
   if (memory_elapsed > max_time)
     {
       flush = true;
+      timeout_trigger = true;
       telemetry::AddCounter ("cortext.accumulator.flush_max_time", 1);
     }
 
@@ -83,6 +88,7 @@ DetectBoundary::Execute (OperationContext &context,
   if (acc.drift_acc > max_drift)
     {
       flush = true;
+      drift_trigger = true;
       telemetry::AddCounter ("cortext.accumulator.flush_max_drift", 1);
     }
 
@@ -93,10 +99,45 @@ DetectBoundary::Execute (OperationContext &context,
   if (acc.last_signal_ts > 0 && signal_gap > gap_thresh)
     {
       flush = true;
+      gap_trigger = true;
       telemetry::AddCounter ("cortext.accumulator.flush_gap", 1);
     }
 
   context.SetFlushRequired (flush);
+  context.SetAtBoundary (flush);
+
+  if (flush)
+    {
+      // Select boundary type based on dominant trigger.
+      if (gap_trigger)
+        {
+          context.SetBoundaryType (std::string ("explicit"));
+        }
+      else if (timeout_trigger)
+        {
+          context.SetBoundaryType (std::string ("timeout"));
+        }
+      else if (drift_trigger)
+        {
+          context.SetBoundaryType (std::string ("drift"));
+        }
+      else
+        {
+          context.SetBoundaryType (std::string ("explicit"));
+        }
+
+      if (acc.mu_acc.size () > 0)
+        {
+          context.SetBoundaryCentroid (acc.mu_acc);
+        }
+
+      context.RequestFinalizeEpisode ();
+    }
+  else
+    {
+      context.SetBoundaryType (std::nullopt);
+      context.SetBoundaryCentroid (std::nullopt);
+    }
 
   telemetry::RecordHistogram ("cortext.accumulator.boundary_score", boundary_score);
   telemetry::RecordHistogram ("cortext.accumulator.memory_elapsed",

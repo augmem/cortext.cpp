@@ -1,4 +1,5 @@
 #include <catch2/catch_approx.hpp>
+#include "test_helpers.hpp"
 #include <catch2/catch_test_macros.hpp>
 #include <cortext/processor.hpp>
 #include <cortext/processor/operation_context.hpp>
@@ -18,6 +19,7 @@ TEST_CASE ("OperationContext intermediate results and accessors", "[context]")
 
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
 
 
   OperationContext ctx (s, pctx, cfg);

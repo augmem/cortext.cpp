@@ -28,12 +28,11 @@ Unit (const Eigen::VectorXf &v)
 void
 ApplyInfluenceFeedback::Execute (OperationContext &context, Transaction &tx) const
 {
-  (void)tx;
-  auto &p_ctx = context.GetProcessorContext ();
   const auto &cfg = context.GetConfig ();
 
   // Use recent_context_embeddings as source of current/previous generation
   // embeddings to avoid relying on transient signal lifetime.
+  auto &p_ctx = context.GetProcessorContext ();
   if (p_ctx.recent_context_embeddings.empty ())
     {
       return;
@@ -62,6 +61,12 @@ ApplyInfluenceFeedback::Execute (OperationContext &context, Transaction &tx) con
   const auto &events = context.GetMemoryUsageEvents ();
   const auto &emb_map = context.GetRetrievedMemoryEmbeddings ();
 
+  const double L_sustain
+      = std::round (core::Lerp (constants::kSustainWindowMin,
+                                constants::kSustainWindowMax, cfg.stability));
+  const double alpha_sustain
+      = (L_sustain > 0.0) ? (constants::kTwo / (L_sustain + 1.0)) : 1.0;
+
   std::vector<double> influences;
   influences.reserve (events.size ());
 
@@ -77,20 +82,35 @@ ApplyInfluenceFeedback::Execute (OperationContext &context, Transaction &tx) con
           continue;
         }
       const Eigen::VectorXf u_m = Unit (it->second);
-      const double contextual_gain = e.contextual_gain.value_or (0.0);
-      double sim_gen = core::CosineSimilarity (u_cur, u_m);
-      if (sim_gen < constants::kNormalizedMin)
-        sim_gen = constants::kNormalizedMin;
-      if (sim_gen > constants::kNormalizedMax)
-        sim_gen = constants::kNormalizedMax;
+      const double contextual_gain
+          = core::Clamp (e.contextual_gain.value_or (0.0), -1.0, 1.0);
+      const double sim_gen = core::Clamp (
+          core::CosineSimilarity (u_cur, u_m), -1.0, 1.0);
       const double cos_md = core::CosineSimilarity (u_m, delta_hat);
       const double drift_contrib
-          = n_delta * std::max (constants::kNormalizedMin, cos_md);
+          = (n_delta * 0.5) * std::max (constants::kNormalizedMin, cos_md);
       const double influence
           = constants::kLambda1 * contextual_gain
             + constants::kLambda2 * sim_gen
             - constants::kLambda3 * drift_contrib;
       influences.push_back (influence);
+
+      auto rows = tx.Execute (
+          "SELECT sustained_influence FROM memories WHERE embedding_id = ?",
+          { static_cast<long long> (e.embedding_id) });
+      if (rows.empty ())
+        {
+          continue;
+        }
+      const double sustained_prev
+          = std::any_cast<double> (rows[0].at ("sustained_influence"));
+      const double sustained_new
+          = core::Ewma (sustained_prev, influence, alpha_sustain);
+      tx.Execute ("UPDATE memories "
+                  "SET influence = ?, sustained_influence = ? "
+                  "WHERE embedding_id = ?",
+                  { influence, sustained_new,
+                    static_cast<long long> (e.embedding_id) });
     }
 
   if (influences.empty ())
@@ -102,56 +122,9 @@ ApplyInfluenceFeedback::Execute (OperationContext &context, Transaction &tx) con
       = std::accumulate (influences.begin (), influences.end (), 0.0)
         / static_cast<double> (influences.size ());
 
-  // Apply to derived parameters (not knobs)
-  // attention_width_t ← clamp(attention_width_t × (1 − 0.05 × mean_influence))
-  const double prev_attention_width = p_ctx.attention_width;
-  p_ctx.attention_width
-      = core::Clamp (p_ctx.attention_width
-                         * (1.0 - constants::kGainSmall * mean_influence),
-                     static_cast<double> (core::kAttentionWidthMin),
-                     static_cast<double> (core::kAttentionWidthMax));
-  const double attention_delta = p_ctx.attention_width - prev_attention_width;
-
-  // rate_target_t ← EWMA(rate_target_t, rate_target_t × (1 + 0.10 ×
-  // mean_influence), α = α_S(rate))
-  if (p_ctx.rate_target == 0.0)
-    {
-      p_ctx.rate_target = p_ctx.rate_target_prior;
-    }
-  const double alpha_s = core::AlphaS (cfg.sensitivity, p_ctx.u_t);
-  const double rate_target_new
-      = p_ctx.rate_target * (1.0 + constants::kGainMedium * mean_influence);
-  const double prev_rate_target = p_ctx.rate_target;
-  p_ctx.rate_target = core::Ewma (p_ctx.rate_target, rate_target_new, alpha_s);
-  const double rate_delta = p_ctx.rate_target - prev_rate_target;
-
-  // sustained_influence ← EWMA(sustained_influence, mean_influence, α =
-  // 2/(L_sustain(T)+1))
-  const double L_sustain
-      = std::round (core::Lerp (constants::kSustainWindowMin,
-                                constants::kSustainWindowMax, cfg.stability));
-  const double alpha_sustain
-      = (L_sustain > 0.0) ? (constants::kTwo / (L_sustain + 1.0)) : 1.0;
-  p_ctx.sustained_influence
-      = core::Ewma (p_ctx.sustained_influence, mean_influence, alpha_sustain);
-
-  // hysteresis_t ← clamp(hysteresis_t × (1 + 0.05 × sustained_influence),
-  // band_min, band_max)
-  const double prev_hysteresis = p_ctx.hysteresis;
-  p_ctx.hysteresis = core::Clamp (
-      p_ctx.hysteresis * (1.0 + constants::kGainSmall * p_ctx.sustained_influence),
-      constants::kHysteresisBandMin, constants::kHysteresisBandMax);
-  const double hysteresis_delta = p_ctx.hysteresis - prev_hysteresis;
-
   telemetry::LogDebug ("cortext.influence",
                        { telemetry::Attribute::Double ("mean_influence",
-                                                       mean_influence),
-                         telemetry::Attribute::Double ("attention_delta",
-                                                       attention_delta),
-                         telemetry::Attribute::Double ("rate_delta",
-                                                       rate_delta),
-                         telemetry::Attribute::Double ("hysteresis_delta",
-                                                       hysteresis_delta) });
+                                                       mean_influence) });
 }
 
 } // namespace cortext::operations

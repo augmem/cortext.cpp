@@ -31,19 +31,22 @@ TEST_CASE ("UpdateDriftAccumulation initializes on first signal",
 {
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
 
 
   Eigen::VectorXf emb = Eigen::VectorXf::Ones (4);
   Signal s = MakeSignal (emb);
   OperationContext ctx (s, pctx, cfg);
 
-  REQUIRE_FALSE (pctx.last_pacing_check_embedding.has_value ());
+  REQUIRE (pctx.accumulator_states.empty ());
 
   UpdateDriftAccumulation op;
   op.Execute (ctx, cortext::testing::GetNullTransaction ());
 
-  REQUIRE (pctx.last_pacing_check_embedding.has_value ());
-  REQUIRE (pctx.drift_accum == 0.0);
+  REQUIRE (pctx.accumulator_states.count ("test") == 1);
+  const auto &acc = pctx.accumulator_states.at ("test");
+  REQUIRE (acc.prev_x.size () == emb.size ());
+  REQUIRE (acc.drift_accum == 0.0);
   REQUIRE (ctx.GetDriftAccumSnapshot () == 0.0);
 }
 
@@ -52,6 +55,7 @@ TEST_CASE ("UpdateDriftAccumulation accumulates drift",
 {
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
 
 
   // First signal: initialize
@@ -62,7 +66,7 @@ TEST_CASE ("UpdateDriftAccumulation accumulates drift",
   UpdateDriftAccumulation op;
   op.Execute (ctx1, cortext::testing::GetNullTransaction ());
 
-  REQUIRE (pctx.drift_accum == 0.0);
+  REQUIRE (pctx.accumulator_states.at ("test").drift_accum == 0.0);
 
   // Second signal: distance = ||[1,0,0,0] - [0,0,0,0]|| = 1.0
   Eigen::VectorXf emb2 = Eigen::VectorXf::Zero (4);
@@ -72,7 +76,7 @@ TEST_CASE ("UpdateDriftAccumulation accumulates drift",
 
   op.Execute (ctx2, cortext::testing::GetNullTransaction ());
 
-  REQUIRE (pctx.drift_accum == Catch::Approx (1.0));
+  REQUIRE (pctx.accumulator_states.at ("test").drift_accum == Catch::Approx (1.0));
   REQUIRE (ctx2.GetDriftAccumSnapshot () == Catch::Approx (1.0));
 }
 
@@ -81,6 +85,7 @@ TEST_CASE ("UpdateDriftAccumulation handles empty embedding",
 {
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
 
 
   // Empty embedding should be skipped
@@ -91,8 +96,7 @@ TEST_CASE ("UpdateDriftAccumulation handles empty embedding",
   UpdateDriftAccumulation op;
   op.Execute (ctx, cortext::testing::GetNullTransaction ());
 
-  REQUIRE_FALSE (pctx.last_pacing_check_embedding.has_value ());
-  REQUIRE (pctx.drift_accum == 0.0);
+  REQUIRE (pctx.accumulator_states.empty ());
 }
 
 TEST_CASE ("UpdateDriftAccumulation handles dimension mismatch",
@@ -100,6 +104,7 @@ TEST_CASE ("UpdateDriftAccumulation handles dimension mismatch",
 {
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
 
 
   // First signal: 4D
@@ -110,7 +115,7 @@ TEST_CASE ("UpdateDriftAccumulation handles dimension mismatch",
   UpdateDriftAccumulation op;
   op.Execute (ctx1, cortext::testing::GetNullTransaction ());
 
-  pctx.drift_accum = 1.0; // Simulate accumulated drift
+  pctx.accumulator_states["test"].drift_accum = 1.0; // Simulate accumulated drift
 
   // Second signal: 8D (dimension mismatch)
   Eigen::VectorXf emb2 = Eigen::VectorXf::Ones (8);
@@ -120,8 +125,8 @@ TEST_CASE ("UpdateDriftAccumulation handles dimension mismatch",
   op.Execute (ctx2, cortext::testing::GetNullTransaction ());
 
   // Should reset tracking
-  REQUIRE (pctx.drift_accum == 0.0);
-  REQUIRE (pctx.last_pacing_check_embedding->size () == 8);
+  REQUIRE (pctx.accumulator_states.at ("test").drift_accum == 0.0);
+  REQUIRE (pctx.accumulator_states.at ("test").prev_x.size () == 8);
 }
 
 TEST_CASE ("CheckStreamingPacing gates retrieval below threshold",
@@ -129,11 +134,14 @@ TEST_CASE ("CheckStreamingPacing gates retrieval below threshold",
 {
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
   cfg.sensitivity = 0.5;  // threshold = 0.3
   cfg.focus = 0.5;        // max_wait = 1.25
 
 
-  pctx.drift_accum = 0.1;  // Below threshold 0.3
+  auto &acc = pctx.accumulator_states["test"];
+  acc.drift_acc_pacing = 0.1;  // Below threshold 0.3
+  acc.x_last_check = Eigen::VectorXf::Ones (4);
 
   Signal s = MakeSignal (Eigen::VectorXf::Ones (4));
   OperationContext ctx (s, pctx, cfg);
@@ -143,7 +151,8 @@ TEST_CASE ("CheckStreamingPacing gates retrieval below threshold",
 
   REQUIRE (ctx.GetShouldCheckRetrieval () == false);
   // Drift accum should NOT be reset
-  REQUIRE (pctx.drift_accum == Catch::Approx (0.1));
+  REQUIRE (pctx.accumulator_states.at ("test").drift_acc_pacing
+           == Catch::Approx (0.1));
 }
 
 TEST_CASE ("CheckStreamingPacing triggers retrieval above threshold",
@@ -151,12 +160,14 @@ TEST_CASE ("CheckStreamingPacing triggers retrieval above threshold",
 {
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
   cfg.sensitivity = 0.5;  // threshold = 0.3
   cfg.focus = 0.5;        // max_wait = 1.25
 
 
-  pctx.drift_accum = 0.5;  // Above threshold 0.3
-  pctx.last_pacing_check_embedding = Eigen::VectorXf::Zero (4);
+  auto &acc = pctx.accumulator_states["test"];
+  acc.drift_acc_pacing = 0.5;  // Above threshold 0.3
+  acc.x_last_check = Eigen::VectorXf::Zero (4);
 
   Eigen::VectorXf emb = Eigen::VectorXf::Ones (4);
   Signal s = MakeSignal (emb);
@@ -167,9 +178,9 @@ TEST_CASE ("CheckStreamingPacing triggers retrieval above threshold",
 
   REQUIRE (ctx.GetShouldCheckRetrieval () == true);
   // Should reset after trigger
-  REQUIRE (pctx.drift_accum == 0.0);
-  // Should update last_pacing_check_embedding
-  REQUIRE (pctx.last_pacing_check_embedding.has_value ());
+  REQUIRE (pctx.accumulator_states.at ("test").drift_acc_pacing == 0.0);
+  // Should update x_last_check
+  REQUIRE (pctx.accumulator_states.at ("test").x_last_check.size () > 0);
 }
 
 TEST_CASE ("CheckStreamingPacing force check on max_wait_drift",
@@ -177,12 +188,14 @@ TEST_CASE ("CheckStreamingPacing force check on max_wait_drift",
 {
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
   cfg.sensitivity = 0.0;  // threshold = 0.5
   cfg.focus = 1.0;        // max_wait = 0.5
 
 
-  pctx.drift_accum = 0.6;  // Above max_wait 0.5 but below threshold 0.5
-  pctx.last_pacing_check_embedding = Eigen::VectorXf::Zero (4);
+  auto &acc = pctx.accumulator_states["test"];
+  acc.drift_acc_pacing = 0.6;  // Above max_wait 0.5 but below threshold 0.5
+  acc.x_last_check = Eigen::VectorXf::Zero (4);
 
   Signal s = MakeSignal (Eigen::VectorXf::Ones (4));
   OperationContext ctx (s, pctx, cfg);
@@ -190,9 +203,9 @@ TEST_CASE ("CheckStreamingPacing force check on max_wait_drift",
   CheckStreamingPacing op;
   op.Execute (ctx, cortext::testing::GetNullTransaction ());
 
-  // Should trigger because drift_accum (0.6) > max_wait (0.5)
+  // Should trigger because drift_acc_pacing (0.6) > max_wait (0.5)
   REQUIRE (ctx.GetShouldCheckRetrieval () == true);
-  REQUIRE (pctx.drift_accum == 0.0);  // Reset after trigger
+  REQUIRE (pctx.accumulator_states.at ("test").drift_acc_pacing == 0.0);  // Reset after trigger
 }
 
 TEST_CASE ("CheckStreamingPacing default is true for backward compatibility",
@@ -200,6 +213,7 @@ TEST_CASE ("CheckStreamingPacing default is true for backward compatibility",
 {
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
 
 
   Signal s = MakeSignal (Eigen::VectorXf::Ones (4));

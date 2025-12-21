@@ -2,6 +2,7 @@
 #include <Eigen/Dense>
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
+#include "test_helpers.hpp"
 #include <cortext/operations/embedding_prediction_error.hpp>
 #include <cortext/operations/metrics.hpp>
 #include <cortext/processor.hpp>
@@ -35,6 +36,8 @@ TEST_CASE ("Embedding Prediction Error - first signal initializes state",
   auto store = std::shared_ptr<Store> (std::move (unique_store));
 
   SignalProcessor::Config cfg;
+
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.5;
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;
@@ -60,6 +63,8 @@ TEST_CASE ("Embedding Prediction Error - identical embeddings yield low "
   auto store = std::shared_ptr<Store> (std::move (unique_store));
 
   SignalProcessor::Config cfg;
+
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.5;
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;
@@ -92,6 +97,8 @@ TEST_CASE ("Embedding Prediction Error - consistent direction yields moderate "
   auto store = std::shared_ptr<Store> (std::move (unique_store));
 
   SignalProcessor::Config cfg;
+
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.5;
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;
@@ -130,6 +137,8 @@ TEST_CASE ("Embedding Prediction Error - direction reversal yields higher "
   auto store = std::shared_ptr<Store> (std::move (unique_store));
 
   SignalProcessor::Config cfg;
+
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.5;
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;
@@ -171,6 +180,8 @@ TEST_CASE ("Embedding Prediction Error - dimension mismatch resets state",
   auto store = std::shared_ptr<Store> (std::move (unique_store));
 
   SignalProcessor::Config cfg;
+
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.5;
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;
@@ -200,6 +211,8 @@ TEST_CASE ("Embedding Prediction Error - empty embedding is no-op",
   auto store = std::shared_ptr<Store> (std::move (unique_store));
 
   SignalProcessor::Config cfg;
+
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.5;
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;
@@ -216,4 +229,37 @@ TEST_CASE ("Embedding Prediction Error - empty embedding is no-op",
   // No metric should be set for empty embedding
   auto it = out.metrics.find (Metric::embedding_surprisal);
   REQUIRE (it == out.metrics.end ());
+}
+
+TEST_CASE ("Embedding Prediction Error tracks SSE history for ΔSSE",
+           "[operations][embedding_prediction_error]")
+{
+  ProcessorContext pctx;
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  cfg.focus = 0.5;
+  cfg.sensitivity = 0.5;
+  cfg.stability = 0.5;
+
+  UpdateEmbeddingPredictionError op;
+
+  Eigen::VectorXf emb1 = Eigen::VectorXf::Zero (8);
+  emb1 (0) = 1.0f;
+  OperationContext ctx1 (MakeSignal (emb1, 1), pctx, cfg);
+  op.Execute (ctx1, cortext::testing::GetNullTransaction ());
+  REQUIRE (!pctx.prediction_error_sse.has_value ());
+
+  Eigen::VectorXf emb2 = Eigen::VectorXf::Zero (8);
+  emb2 (0) = 2.0f;
+  OperationContext ctx2 (MakeSignal (emb2, 2), pctx, cfg);
+  op.Execute (ctx2, cortext::testing::GetNullTransaction ());
+  REQUIRE (pctx.prediction_error_sse.has_value ());
+  REQUIRE (!pctx.prediction_error_sse_prev.has_value ());
+
+  Eigen::VectorXf emb3 = Eigen::VectorXf::Zero (8);
+  emb3 (0) = 3.0f;
+  OperationContext ctx3 (MakeSignal (emb3, 3), pctx, cfg);
+  op.Execute (ctx3, cortext::testing::GetNullTransaction ());
+  REQUIRE (pctx.prediction_error_sse.has_value ());
+  REQUIRE (pctx.prediction_error_sse_prev.has_value ());
 }

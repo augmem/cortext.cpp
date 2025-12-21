@@ -8,6 +8,7 @@
 #include "cortext/telemetry/telemetry.hpp"
 #include <algorithm>
 #include <cmath>
+#include <functional>
 #include <numeric>
 #include <vector>
 
@@ -69,24 +70,44 @@ UpdateUncertainty::Execute (OperationContext &context, Transaction &tx) const
                         constants::kNormalizedMax);
   };
 
-  // Helper: focus_spread_entropy via softmax over similarities to recent
-  // context
+  // Helper: focus_spread_entropy via softmax over similarities to memory_stream
   auto compute_focus_spread_entropy = [&] () -> std::optional<double> {
+    if (auto v = context.GetMetric (operations::Metric::focus_spread))
+      {
+        return *v;
+      }
     const auto &x = context.GetSignal ().embedding;
-    const int n = static_cast<int> (p_ctx.recent_context_embeddings.size ());
+    const int n = static_cast<int> (p_ctx.memory_stream.size ());
     if (n < 2)
       {
         return std::nullopt;
       }
     const int k = std::min (core::KNeighbors (config.stability), n);
-    const int start = n - k;
     std::vector<double> sims;
-    sims.reserve (static_cast<size_t> (k));
-    for (int i = start; i < n; ++i)
+    sims.reserve (static_cast<size_t> (n));
+    for (int i = 0; i < n; ++i)
       {
         const auto &emb
-            = p_ctx.recent_context_embeddings[static_cast<size_t> (i)];
-        sims.push_back (core::CosineSimilarity (x, emb));
+            = p_ctx.memory_stream[static_cast<size_t> (i)];
+        if (emb.size () == x.size () && x.size () > 0)
+          {
+            sims.push_back (core::CosineSimilarity (x, emb));
+          }
+      }
+    if (static_cast<int> (sims.size ()) < 2)
+      {
+        return std::nullopt;
+      }
+    const int k_eff = std::min (k, static_cast<int> (sims.size ()));
+    if (k_eff < 2)
+      {
+        return std::nullopt;
+      }
+    if (static_cast<int> (sims.size ()) > k_eff)
+      {
+        std::nth_element (sims.begin (), sims.begin () + k_eff, sims.end (),
+                          std::greater<double> ());
+        sims.resize (static_cast<size_t> (k_eff));
       }
     // Softmax with stability: subtract max for numerical stability
     const double max_s = *std::max_element (sims.begin (), sims.end ());
@@ -106,7 +127,7 @@ UpdateUncertainty::Execute (OperationContext &context, Transaction &tx) const
         const double p = s / denom;
         entropy -= (p > 0.0) ? (p * std::log (p)) : 0.0;
       }
-    const double norm = std::log (static_cast<double> (k));
+    const double norm = std::log (static_cast<double> (k_eff));
     if (norm <= 0.0)
       {
         return std::nullopt;
@@ -154,8 +175,7 @@ UpdateUncertainty::Execute (OperationContext &context, Transaction &tx) const
                         constants::kNormalizedMax);
   };
 
-  // Helper: novelty measure as distance from mean of recent context embeddings
-  // (contributes to Algorithm 4 novelty component)
+  // Helper: novelty measure as dissimilarity to recent context (Appendix B)
   auto compute_novelty_measure = [&] () -> std::optional<double> {
     const auto &x = context.GetSignal ().embedding;
     if (x.size () == 0)
@@ -163,37 +183,33 @@ UpdateUncertainty::Execute (OperationContext &context, Transaction &tx) const
         return std::nullopt;
       }
     const int n = static_cast<int> (p_ctx.recent_context_embeddings.size ());
-    if (n < 2)
+    if (n == 0)
       {
-        return std::nullopt;
+        return constants::kNormalizedMax;
       }
-
-    // Compute mean of recent context embeddings
-    Eigen::VectorXf mean_ctx = Eigen::VectorXf::Zero (x.size ());
-    int valid_count = 0;
-    for (const auto &emb : p_ctx.recent_context_embeddings)
+    const int window = static_cast<int> (core::NCtx (config.stability));
+    const int start = std::max (0, n - window);
+    double max_cos = -1.0;
+    int count = 0;
+    for (int i = start; i < n; ++i)
       {
-        if (emb.size () == x.size ())
+        const auto &emb
+            = p_ctx.recent_context_embeddings[static_cast<size_t> (i)];
+        if (emb.size () != x.size ())
           {
-            mean_ctx += emb;
-            ++valid_count;
+            continue;
           }
+        const double c = core::CosineSimilarity (x, emb);
+        max_cos = std::max (max_cos, c);
+        ++count;
       }
-    if (valid_count < 2)
+    if (count == 0)
       {
-        return std::nullopt;
+        return constants::kNormalizedMax;
       }
-    mean_ctx /= static_cast<float> (valid_count);
-
-    // Novelty = 1 - similarity to mean context
-    // High novelty when current signal is dissimilar to recent context
-    const double sim = core::CosineSimilarity (x, mean_ctx);
-    // Map cosine similarity from [-1, 1] to [0, 1]
-    const double sim_01
-        = core::Clamp ((sim + 1.0) / 2.0, constants::kNormalizedMin,
-                       constants::kNormalizedMax);
-    // Novelty is inverse of similarity
-    return constants::kNormalizedMax - sim_01;
+    return core::Clamp ((constants::kNormalizedMax - max_cos)
+                            * constants::kOneHalf,
+                        constants::kNormalizedMin, constants::kNormalizedMax);
   };
 
   const auto var_scores = compute_scores_variance ();

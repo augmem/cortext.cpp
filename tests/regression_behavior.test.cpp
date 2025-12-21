@@ -6,9 +6,16 @@
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 #include <cmath>
+#include "test_helpers.hpp"
 #include <cortext/core/algorithms.hpp>
 #include <cortext/core/knobs.hpp>
+#include <cortext/operations/focus.hpp>
+#include <cortext/operations/recent_context.hpp>
+#include <cortext/operations/uncertainty.hpp>
+#include <cortext/processor.hpp>
+#include <cortext/processor/operation_context.hpp>
 
+using namespace cortext;
 using namespace cortext::core;
 
 // =============================================================================
@@ -217,6 +224,44 @@ TEST_CASE ("Mood magnitude uses sqrt(6) normalization",
     REQUIRE (m_norm == Catch::Approx (std::sqrt (1.5 / 6.0)));
     REQUIRE (m_norm < 1.0);
   }
+}
+
+TEST_CASE ("Focus update uses recent_context buffer ordering",
+           "[regression][focus][order]")
+{
+  Signal s;
+  s.embedding = Eigen::VectorXf::Ones (4);
+  s.timestamp = 1;
+  s.source_id = "test";
+
+  ProcessorContext pctx;
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  cfg.focus = 0.6;
+  cfg.sensitivity = 0.5;
+  cfg.stability = 0.5;
+
+  OperationContext ctx (s, pctx, cfg);
+
+  operations::InitializeFocusPriors init;
+  init.Execute (ctx, cortext::testing::GetNullTransaction ());
+
+  operations::UpdateRecentContext update_ctx;
+  update_ctx.Execute (ctx, cortext::testing::GetNullTransaction ());
+
+  operations::UpdateUncertainty uop;
+  pctx.signals_processed = 5;
+  uop.Execute (ctx, cortext::testing::GetNullTransaction ());
+
+  const double u_t = pctx.u_t;
+  const double prev = pctx.weight_relevance;
+
+  operations::UpdateFocus fop;
+  fop.Execute (ctx, cortext::testing::GetNullTransaction ());
+
+  const double expected = Ewma (prev, 1.0, AlphaF (cfg.focus, u_t));
+  REQUIRE (pctx.weight_relevance
+           == Catch::Approx (expected).epsilon (1e-6));
 }
 
 TEST_CASE ("Delta_threshold_mood bounded by kappa_mood",

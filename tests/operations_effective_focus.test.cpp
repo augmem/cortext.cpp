@@ -15,6 +15,7 @@ TEST_CASE ("ComputeEffectiveFocus uses coherence to scale F",
   s.embedding = Eigen::VectorXf::Zero (3);
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.6; // base F
 
 

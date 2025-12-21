@@ -14,7 +14,7 @@ namespace cortext::operations
 /// patterns.
 ///
 /// Edge types created:
-/// - 'co_occurs_with': Memories with high cosine similarity within a cluster
+/// - 'co_occurs': Memories with high cosine similarity within a cluster
 /// - 'causes': Temporally adjacent memories with significant semantic drift
 /// - 'contradicts': Memories with strong negative similarity
 /// - 'reinforces': Decay applied to existing reinforcement edges

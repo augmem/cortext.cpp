@@ -13,10 +13,11 @@ to emerge continuously from the interaction of knob settings and
 experiential mass. The architecture integrates established cognitive
 science principles—including Cowan’s working memory constraints and
 Nader’s reconsolidation dynamics—into a unified computational framework.
-We derive all system parameters from the three primary knobs through
-principled mathematical transformations, reducing reliance on fixed
-constants. The system demonstrates self-calibrating priors that blend
-with evidence using
+We derive most system parameters from the three primary knobs through
+principled mathematical transformations, while explicitly labeling the
+small set of fixed invariants (e.g., controller gains), reducing
+reliance on hard-coded constants. The system demonstrates
+self-calibrating priors that blend with evidence using
 uncertainty-weighted Bayesian averaging, homeostatic threshold control
 with effective sample size estimation, and graph-augmented retrieval
 combining embedding similarity with semantic extraction. Experimental
@@ -1785,13 +1786,25 @@ and relations:
 
     extraction_batch_size = round(lerp(8, 32, T))
     min_cluster_size = round(lerp(3, 10, F))
-    entity_frequency_threshold = round(lerp(5, 15, T))
+    label_frequency_threshold = round(lerp(5, 15, T))
     extraction_interval = lerp(300, 3600, T)  # 5 min → 1 hour
     max_extractions_per_cycle = round(lerp(20, 5, T))
 
 Extraction uses structured prompting to identify labels/tags (people,
 places, organizations, concepts) and relationships (co-occurrence,
-implication, contradiction).
+implication, contradiction). Labels are stored as surface strings only
+(no type/category field).
+
+Label salience is derived from embeddings rather than model guesses:
+
+    e_label = encode(label_text)
+    salience(label) = clamp((cos(e_label, summary.embedding) + 1) / 2, 0, 1)
+
+If the encoder or summary embedding is unavailable, default to
+`salience(label) = 0.5`.
+
+If a label already exists, its stored salience is updated with
+`s_max = max(s_max, salience(label))`.
 
 ## Knowledge Graph Construction
 

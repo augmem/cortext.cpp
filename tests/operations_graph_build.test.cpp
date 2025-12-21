@@ -78,6 +78,8 @@ TEST_CASE ("V2: GraphBuild creates co-occurrence edges for similar memories in s
                   { 2LL, 2LL, 100 }); // Same cluster
 
   SignalProcessor::Config cfg;
+
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.0; // Low focus = threshold 0.85
   auto ops = std::make_unique<OperationSet> (
       std::make_unique<BuildGraphFromConsolidation> ());
@@ -86,18 +88,18 @@ TEST_CASE ("V2: GraphBuild creates co-occurrence edges for similar memories in s
   processor.Process (MakeSignal (1234ULL));
   processor.Flush ();
 
-  // Verify co_occurs_with edge was created in associations
+  // Verify co_occurs edge was created in associations
   auto rows = store->Execute (
       "SELECT weight FROM associations "
-      "WHERE edge_type = 'co_occurs_with' "
+      "WHERE edge_type = 'co_occurs' "
       "AND ((source_memory_id = 1 AND target_memory_id = 2) "
       "  OR (source_memory_id = 2 AND target_memory_id = 1))",
       {});
 
-  // Edge should exist with similarity as weight
+  // Edge should exist with normalized weight in [0,1]
   REQUIRE (rows.size () == 1);
   double weight = std::any_cast<double> (rows[0].at ("weight"));
-  REQUIRE (weight > 0.85); // Should be high similarity
+  REQUIRE (weight > 0.9); // Map01(sim) should still be high
 }
 
 TEST_CASE ("V2: GraphBuild creates causal edges for temporal drift within cluster",
@@ -134,6 +136,8 @@ TEST_CASE ("V2: GraphBuild creates causal edges for temporal drift within cluste
       { 2LL, 2LL, 1900LL, 2000LL, 100 }); // Later, same cluster
 
   SignalProcessor::Config cfg;
+
+  cortext::testing::RequireEncoder (cfg);
   cfg.stability = 0.0; // Low stability = threshold 0.15
   auto ops = std::make_unique<OperationSet> (
       std::make_unique<BuildGraphFromConsolidation> ());
@@ -149,10 +153,10 @@ TEST_CASE ("V2: GraphBuild creates causal edges for temporal drift within cluste
       "AND source_memory_id = 1 AND target_memory_id = 2",
       {});
 
-  // Edge should exist with drift magnitude as weight
+  // Edge should exist with normalized drift weight
   REQUIRE (rows.size () == 1);
   double weight = std::any_cast<double> (rows[0].at ("weight"));
-  REQUIRE (weight > 0.15); // Should exceed threshold
+  REQUIRE (weight > 0.2); // drift_mag/2 should exceed threshold
 }
 
 TEST_CASE ("V2: GraphBuild creates contradiction edges for opposing semantics",
@@ -187,6 +191,8 @@ TEST_CASE ("V2: GraphBuild creates contradiction edges for opposing semantics",
                   { 2LL, 2LL, 100 });
 
   SignalProcessor::Config cfg;
+
+  cortext::testing::RequireEncoder (cfg);
   auto ops = std::make_unique<OperationSet> (
       std::make_unique<BuildGraphFromConsolidation> ());
   SignalProcessor processor (cfg, store, std::move (ops));
@@ -202,10 +208,10 @@ TEST_CASE ("V2: GraphBuild creates contradiction edges for opposing semantics",
       "  OR (source_memory_id = 2 AND target_memory_id = 1))",
       {});
 
-  // Edge should exist with |similarity| as weight
+  // Edge should exist with normalized weight in [0,1]
   REQUIRE (rows.size () == 1);
   double weight = std::any_cast<double> (rows[0].at ("weight"));
-  REQUIRE (weight > 0.5); // |similarity| should be high (close to 1.0)
+  REQUIRE (weight < 0.3); // map01(negative sim) should be low
 }
 
 TEST_CASE ("V2: GraphBuild does not create edges across different clusters",
@@ -240,6 +246,8 @@ TEST_CASE ("V2: GraphBuild does not create edges across different clusters",
                   { 2LL, 2LL, 200 }); // cluster_id = 200 (different)
 
   SignalProcessor::Config cfg;
+
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.0;
   auto ops = std::make_unique<OperationSet> (
       std::make_unique<BuildGraphFromConsolidation> ());
@@ -299,6 +307,8 @@ TEST_CASE ("V2: GraphBuild decays reinforcement edges",
       { 1LL, 2LL, 1.0 });
 
   SignalProcessor::Config cfg;
+
+  cortext::testing::RequireEncoder (cfg);
   cfg.stability = 0.0; // decay = 0.9
   auto ops = std::make_unique<OperationSet> (
       std::make_unique<BuildGraphFromConsolidation> ());
@@ -335,6 +345,8 @@ TEST_CASE ("V2: GraphBuild removes weak reinforcement edges",
       { 1LL, 2LL, 0.05 }); // Will be < 0.1 after decay
 
   SignalProcessor::Config cfg;
+
+  cortext::testing::RequireEncoder (cfg);
   cfg.stability = 0.0; // decay = 0.9
   auto ops = std::make_unique<OperationSet> (
       std::make_unique<BuildGraphFromConsolidation> ());

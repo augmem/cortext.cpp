@@ -4,10 +4,12 @@
 #include "cortext/core/knobs.hpp"
 #include "cortext/core/utils.hpp"
 #include "cortext/operations/constants.hpp"
+#include "cortext/operations/metrics.hpp"
 #include "cortext/processor/operation_context.hpp"
 #include "cortext/telemetry/telemetry.hpp"
 #include <algorithm>
 #include <cmath>
+#include <deque>
 #include <limits>
 #include <vector>
 
@@ -24,38 +26,32 @@ WMStrengthBase (double T)
 }
 
 inline double
-ComputeNormalizedEntropy (const std::vector<double> &weights)
+ComputeMeanCosWindow (const std::deque<Eigen::VectorXf> &ctx,
+                      const Eigen::VectorXf &emb, int window)
 {
-  if (weights.empty ())
+  if (ctx.empty () || emb.size () == 0 || window <= 0)
     {
-      return 0.0;
+      return 1.0;
     }
+  const int n_total = static_cast<int> (ctx.size ());
+  const int start = std::max (0, n_total - window);
   double sum = 0.0;
-  for (double w : weights)
+  int count = 0;
+  for (int i = start; i < n_total; ++i)
     {
-      if (w > 0.0)
-        sum += w;
+      const auto &e = ctx[static_cast<size_t> (i)];
+      if (e.size () != emb.size ())
+        {
+          continue;
+        }
+      sum += core::CosineSimilarity (e, emb);
+      ++count;
     }
-  if (sum <= std::numeric_limits<double>::epsilon ())
+  if (count <= 0)
     {
-      return 0.0;
+      return 1.0;
     }
-  const double inv_sum = 1.0 / sum;
-  const int n = static_cast<int> (weights.size ());
-  double H = 0.0;
-  for (double w : weights)
-    {
-      if (w <= 0.0)
-        continue;
-      const double p = w * inv_sum;
-      H -= p * std::log (p);
-    }
-  const double H_max = std::log (static_cast<double> (n));
-  if (H_max <= std::numeric_limits<double>::epsilon ())
-    {
-      return 0.0;
-    }
-  return core::Clamp (H / H_max, 0.0, 1.0);
+  return sum / static_cast<double> (count);
 }
 
 } // namespace
@@ -91,17 +87,18 @@ WorkingMemory::Execute (OperationContext &context, Transaction &tx) const
     }
 
   // Complexity penalty from entropy over strengths.
-  double complexity_penalty = 0.0;
-  {
-    std::vector<double> strengths;
-    strengths.reserve (p_ctx.wm_slots.size ());
-    for (const auto &slot : p_ctx.wm_slots)
-      {
-        strengths.push_back (std::max (0.0, slot.strength));
-      }
-    const double H = ComputeNormalizedEntropy (strengths);
-    complexity_penalty = H * core::WMComplexityScale (cfg.sensitivity);
-  }
+  const int ctx_window = static_cast<int> (core::NCtx (cfg.stability));
+  double mean_cos_window = 1.0;
+  if (const auto &rep_emb_opt = context.GetRepresentativeEmbedding ();
+      rep_emb_opt.has_value () && rep_emb_opt->size () > 0)
+    {
+      mean_cos_window = ComputeMeanCosWindow (
+          p_ctx.recent_context_embeddings, *rep_emb_opt, ctx_window);
+    }
+  const double manifold_complexity
+      = core::Clamp ((1.0 - mean_cos_window) * 0.5, 0.0, 1.0);
+  const double complexity_penalty
+      = manifold_complexity * core::WMComplexityScale (cfg.sensitivity);
 
   // Gate decision
   p_ctx.wm_last_accepted = false;
@@ -130,23 +127,60 @@ WorkingMemory::Execute (OperationContext &context, Transaction &tx) const
       return; // No accumulator state
     }
   const auto &acc = acc_it->second;
+  const int acc_signal_count = acc.signals.empty ()
+                                   ? acc.n_signals
+                                   : static_cast<int> (acc.signals.size ());
 
-  // Section 6.1.3: memory_benefit = α × S_window + β × relevance + γ × novelty
-  // For simplicity, use S_window as the primary benefit (already computed in write_gate)
+  // Section 8.1: memory_benefit = α × S_window + β × relevance + γ × novelty
   const double S_window = context.GetWindowScore ().value_or (0.0);
-  const double benefit = core::Clamp01 (S_window);
+  const double relevance
+      = core::Clamp01 (
+          context.GetMetric (operations::Metric::relevance).value_or (0.5));
+
+  double max_cos = -1.0;
+  for (const auto &slot : p_ctx.wm_slots)
+    {
+      if (slot.embedding.size () != e_rep.size () || slot.embedding.size () == 0)
+        {
+          continue;
+        }
+      const double c = core::CosineSimilarity (slot.embedding, e_rep);
+      max_cos = std::max (max_cos, c);
+    }
+  const double novelty_to_set
+      = (max_cos <= -1.0)
+            ? 1.0
+            : core::Clamp ((1.0 - max_cos) * 0.5, 0.0, 1.0);
+
+  const double w_alpha = core::Lerp (0.55, 0.70, cfg.focus);
+  const double w_beta = core::Lerp (0.20, 0.35, cfg.focus);
+  const double w_gamma = core::Lerp (0.10, 0.30, cfg.sensitivity);
+  const double w_sum = std::max (constants::kTiny, w_alpha + w_beta + w_gamma);
+  const double alpha = w_alpha / w_sum;
+  const double beta = w_beta / w_sum;
+  const double gamma = w_gamma / w_sum;
+
+  const double benefit = core::Clamp01 (
+      alpha * core::Clamp01 (S_window) + beta * relevance + gamma * novelty_to_set);
 
   // gate_threshold = lerp(0.1, 0.4, F) per Algorithm 24 spec
   // Higher Focus (narrower attention) => stricter gating (0.4)
   // Lower Focus (wider attention) => permissive gating (0.1)
   const double gate_threshold = core::WMGateThreshold (cfg.focus);
   const double margin = benefit - gate_threshold;
-  // Only charge maintenance cost for existing slots, not the prospective new one.
-  // This prevents a bootstrap problem where empty WM requires unreasonably high
-  // composite scores to accept the first item.
-  const double cost_total
-      = cost_per_slot * static_cast<double> (p_ctx.wm_slots.size ())
-        + complexity_penalty;
+  const int k = static_cast<int> (p_ctx.wm_slots.size ());
+  const int base_capacity
+      = std::max (1, core::WMBaseCapacity (cfg.sensitivity, cfg.focus));
+  const double over_ratio
+      = (k > base_capacity)
+            ? (static_cast<double> (k - base_capacity)
+               / static_cast<double> (base_capacity))
+            : 0.0;
+  const double capacity_pressure = 1.0 + std::pow (over_ratio, 3.0);
+  const double raw_cost
+      = (cost_per_slot * static_cast<double> (k) + complexity_penalty)
+        * capacity_pressure;
+  const double cost_total = raw_cost / (1.0 + raw_cost);
 
   if (margin < cost_total)
     {
@@ -157,9 +191,13 @@ WorkingMemory::Execute (OperationContext &context, Transaction &tx) const
         telemetry::Attribute::Int64 ("wm_slot_count", static_cast<int64_t> (p_ctx.wm_slots.size ())),
         telemetry::Attribute::Double ("benefit", benefit),
         telemetry::Attribute::Double ("S_window", S_window),
+        telemetry::Attribute::Double ("relevance", relevance),
+        telemetry::Attribute::Double ("novelty_to_set", novelty_to_set),
         telemetry::Attribute::Double ("gate_threshold", gate_threshold),
         telemetry::Attribute::Double ("margin", margin),
         telemetry::Attribute::Double ("cost_total", cost_total),
+        telemetry::Attribute::Double ("capacity_pressure", capacity_pressure),
+        telemetry::Attribute::Int64 ("base_capacity", base_capacity),
         telemetry::Attribute::Double ("now_s", now_s),
         telemetry::Attribute::Double ("cost_per_slot", cost_per_slot)
       });
@@ -195,6 +233,7 @@ WorkingMemory::Execute (OperationContext &context, Transaction &tx) const
   if (best_idx >= 0 && best_sim >= chunk_threshold)
     {
       auto &slot = p_ctx.wm_slots[static_cast<size_t> (best_idx)];
+      const int old_n = slot.n_signals;
       const double add_strength = WMStrengthBase (cfg.stability) * benefit;
       const double alpha = std::max (constants::kTiny, slot.strength);
       const double beta = std::max (constants::kTiny, add_strength);
@@ -212,16 +251,35 @@ WorkingMemory::Execute (OperationContext &context, Transaction &tx) const
       slot.last_ts = now_s;
 
       // Update memory-level metadata (Section 6.1.1)
-      slot.n_signals += acc.n_signals;
+      const int acc_n = std::max (1, acc_signal_count);
+      slot.n_signals = old_n + acc_signal_count;
       slot.s_max = std::max (slot.s_max, acc.s_max);
-      slot.s_avg = (slot.s_avg + acc.s_sum / std::max (1, acc.n_signals)) / 2.0;
+      const double acc_avg = acc.s_sum / static_cast<double> (acc_n);
+      const double weighted_sum
+          = slot.s_avg * static_cast<double> (std::max (1, old_n))
+            + acc_avg * static_cast<double> (acc_n);
+      slot.s_avg
+          = weighted_sum / static_cast<double> (std::max (1, slot.n_signals));
       slot.drift_acc += acc.drift_acc;
       slot.s_emotion_max = std::max (slot.s_emotion_max, acc.s_emotion_max);
-      if (acc.n_signals > 0)
+      const double acc_arousal_avg
+          = acc.s_arousal_sum / static_cast<double> (acc_n);
+      const double weighted_arousal
+          = slot.s_arousal_avg * static_cast<double> (std::max (1, old_n))
+            + acc_arousal_avg * static_cast<double> (acc_n);
+      slot.s_arousal_avg
+          = weighted_arousal / static_cast<double> (std::max (1, slot.n_signals));
+      const int64_t acc_start_ts = static_cast<int64_t> (acc.t_start);
+      if (slot.start_ts == 0
+          || (acc_start_ts > 0 && acc_start_ts < slot.start_ts))
         {
-          const double new_arousal_avg
-              = acc.s_arousal_sum / static_cast<double> (acc.n_signals);
-          slot.s_arousal_avg = (slot.s_arousal_avg + new_arousal_avg) / 2.0;
+          slot.start_ts = acc_start_ts;
+        }
+      if (slot.start_ts > 0)
+        {
+          slot.mem_elapsed = std::max (
+              slot.mem_elapsed,
+              static_cast<double> (signal.timestamp - slot.start_ts) / 1000.0);
         }
 
       // v2: Append blob_ids from accumulated signals to slot
@@ -231,6 +289,13 @@ WorkingMemory::Execute (OperationContext &context, Transaction &tx) const
             {
               slot.blob_ids.push_back (rec.blob_id);
             }
+        }
+      // v2: Preserve ordered signal records (offset serial positions)
+      for (const auto &rec : acc.signals)
+        {
+          SignalRecord merged = rec;
+          merged.serial_position = rec.serial_position + old_n;
+          slot.signal_records.push_back (std::move (merged));
         }
 
       p_ctx.wm_last_accepted = true;
@@ -352,23 +417,33 @@ WorkingMemory::Execute (OperationContext &context, Transaction &tx) const
   slot.pos_index = p_ctx.signals_processed;
 
   // Memory-level metadata from accumulator (Section 6.1.1)
-  slot.n_signals = acc.n_signals;
+  slot.n_signals = acc_signal_count;
   slot.s_max = acc.s_max;
-  slot.s_avg = acc.n_signals > 0 ? acc.s_sum / static_cast<double> (acc.n_signals) : 0.0;
+  slot.s_avg = acc_signal_count > 0
+                   ? acc.s_sum / static_cast<double> (acc_signal_count)
+                   : 0.0;
   slot.drift_acc = acc.drift_acc;
   slot.mem_elapsed
       = static_cast<double> (signal.timestamp - acc.t_start) / 1000.0;
   slot.s_emotion_max = acc.s_emotion_max;
   slot.s_arousal_avg
-      = acc.n_signals > 0
-            ? acc.s_arousal_sum / static_cast<double> (acc.n_signals)
+      = acc_signal_count > 0
+            ? acc.s_arousal_sum / static_cast<double> (acc_signal_count)
             : 0.0;
 
   // v2 persistence fields (working-memory.plan.md Section 4)
   slot.source_id = signal.source_id;
-  slot.modality
-      = acc.signals.empty () ? signal.modality : acc.signals[0].modality;
+  if (!acc.primary_modality.empty ())
+    {
+      slot.modality = acc.primary_modality;
+    }
+  else
+    {
+      slot.modality
+          = acc.signals.empty () ? signal.modality : acc.signals[0].modality;
+    }
   slot.start_ts = static_cast<int64_t> (acc.t_start);
+  slot.signal_records = acc.signals;
   for (const auto &rec : acc.signals)
     {
       if (!rec.blob_id.empty ())

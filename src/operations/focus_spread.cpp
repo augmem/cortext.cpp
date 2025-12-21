@@ -6,6 +6,7 @@
 #include "cortext/telemetry/telemetry.hpp"
 #include <algorithm>
 #include <cmath>
+#include <functional>
 #include <vector>
 
 namespace cortext::operations
@@ -19,7 +20,8 @@ ComputeFocusSpread::Execute (OperationContext &context, Transaction &tx) const
   auto &p_ctx = context.GetProcessorContext ();
   const auto &x = context.GetSignal ().embedding;
 
-  const int n = static_cast<int> (p_ctx.recent_context_embeddings.size ());
+  const auto &stream = p_ctx.memory_stream;
+  const int n = static_cast<int> (stream.size ());
   if (n < 2)
     {
       context.SetMetric (operations::Metric::focus_spread, 0.0);
@@ -33,14 +35,35 @@ ComputeFocusSpread::Execute (OperationContext &context, Transaction &tx) const
       return;
     }
 
-  const int start = n - k;
   std::vector<double> sims;
-  sims.reserve (static_cast<size_t> (k));
-  for (int i = start; i < n; ++i)
+  sims.reserve (static_cast<size_t> (n));
+  for (int i = 0; i < n; ++i)
     {
       const auto &emb
-          = p_ctx.recent_context_embeddings[static_cast<size_t> (i)];
-      sims.push_back (core::CosineSimilarity (x, emb));
+          = stream[static_cast<size_t> (i)];
+      if (emb.size () == x.size () && x.size () > 0)
+        {
+          sims.push_back (core::CosineSimilarity (x, emb));
+        }
+    }
+  if (static_cast<int> (sims.size ()) < 2)
+    {
+      context.SetMetric (operations::Metric::focus_spread, 0.0);
+      return;
+    }
+
+  const int k_eff = std::min (k, static_cast<int> (sims.size ()));
+  if (k_eff < 2)
+    {
+      context.SetMetric (operations::Metric::focus_spread, 0.0);
+      return;
+    }
+
+  if (static_cast<int> (sims.size ()) > k_eff)
+    {
+      std::nth_element (sims.begin (), sims.begin () + k_eff, sims.end (),
+                        std::greater<double> ());
+      sims.resize (static_cast<size_t> (k_eff));
     }
 
   // Softmax with numerical stability: subtract max similarity.
@@ -64,7 +87,7 @@ ComputeFocusSpread::Execute (OperationContext &context, Transaction &tx) const
       entropy -= (p > 0.0) ? (p * std::log (p)) : 0.0;
     }
 
-  const double norm = std::log (static_cast<double> (k));
+  const double norm = std::log (static_cast<double> (k_eff));
   if (norm <= 0.0)
     {
       context.SetMetric (operations::Metric::focus_spread, 0.0);

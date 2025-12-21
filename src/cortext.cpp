@@ -45,6 +45,7 @@
 #include "cortext/operations/metacognitive.hpp"
 #include "cortext/operations/metrics.hpp"
 #include "cortext/operations/predictive.hpp"
+#include "cortext/operations/recent_context.hpp"
 #include "cortext/operations/reconsolidation.hpp"
 #include "cortext/operations/sensitivity_feedback.hpp"
 #include "cortext/operations/serial_position.hpp"
@@ -71,7 +72,6 @@
 #include "cortext/operations/consolidation_summarize.hpp"
 #include "cortext/operations/process_extraction_results.hpp"
 // Phase 4: Knowledge Graph Enhancement
-#include "cortext/operations/concept_detection.hpp"
 #include "cortext/operations/emotion_cascade.hpp"
 #include "cortext/telemetry/telemetry.hpp"
 
@@ -479,6 +479,8 @@ struct Cortext::Impl
     using cortext::operations::UpdateMemoryStrength;
     using cortext::operations::UpdateMood;
     using cortext::operations::UpdatePrecisionDelta;
+    using cortext::operations::UpdateRecentContext;
+    using cortext::operations::UpdateRateState;
     using cortext::operations::UpdateSensitivity;
     using cortext::operations::UpdateStability;
     using cortext::operations::UpdateThreshold;
@@ -496,7 +498,6 @@ struct Cortext::Impl
     using cortext::operations::CheckSpikeBypass;
     using cortext::operations::ComputeWriteGate;
     // Phase 4: Knowledge Graph Enhancement
-    using cortext::operations::DetectConceptNodes;
     using cortext::operations::PropagateEmotionalCascade;
 
     pipeline_root = std::make_unique<OperationSet> (
@@ -513,17 +514,19 @@ struct Cortext::Impl
         // ApplySensitivityFeedback, etc.) that consume MemoryUsageEvents.
         std::make_unique<DetectMemoryUsage> (),
 
-        std::make_unique<UpdateFocus> (),
-        std::make_unique<UpdateSensitivity> (),
-        std::make_unique<UpdateMood> (),
+        std::make_unique<UpdateRecentContext> (),
 
         std::make_unique<ComputeCoherence> (),
         std::make_unique<UpdateDriftAccumulation> (),
         std::make_unique<ComputeFocusSpread> (),
-        std::make_unique<ComputeEffectiveFocus> (),
-
         std::make_unique<UpdateEmbeddingPredictionError> (),
         std::make_unique<UpdateUncertainty> (),
+
+        std::make_unique<UpdateFocus> (),
+        std::make_unique<UpdateSensitivity> (),
+        std::make_unique<UpdateMood> (),
+
+        std::make_unique<ComputeEffectiveFocus> (),
         std::make_unique<ComputeMetrics> (),
         std::make_unique<FitMetricWeightsRLS> (),
         std::make_unique<ComputeCompositeScore> (),
@@ -539,6 +542,7 @@ struct Cortext::Impl
         std::make_unique<ComputeWriteGate> (),
         std::make_unique<MemoryStorage> (),
         std::make_unique<PersistSignalMetrics> (),
+        std::make_unique<UpdateRateState> (),
 
         std::make_unique<CheckStreamingPacing> (),
         std::make_unique<GraphAugmentedRetrieveCandidates> (),
@@ -570,14 +574,13 @@ struct Cortext::Impl
         std::make_unique<EnqueueExtractionJobs> (),
         std::make_unique<ProcessExtractionResults> (),
         std::make_unique<BuildGraphFromConsolidation> (),
-        // Phase 4: Knowledge Graph Enhancement
-        std::make_unique<DetectConceptNodes> (),
         std::make_unique<PropagateEmotionalCascade> ());
 
     cortext::SignalProcessor::Config pcfg;
     pcfg.focus = cfg.focus;
     pcfg.sensitivity = cfg.sensitivity;
     pcfg.stability = cfg.stability;
+    pcfg.encoder = encoder.get ();
 
 #if !defined(CORTEXT_DISABLE_OGA)
     pcfg.extractor = extractor_instance.get ();

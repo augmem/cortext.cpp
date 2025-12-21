@@ -43,7 +43,7 @@ DefaultThreadCount ()
     {
       cores = 1; // Fallback if detection fails
     }
-  return std::max (1u, cores / 3);
+  return std::max (1u, std::min (8u, cores));
 }
 
 uint32_t

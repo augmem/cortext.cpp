@@ -8,11 +8,10 @@
 namespace cortext::operations
 {
 
-/// @brief Entity extracted from consolidated text.
-struct ExtractedEntity
+/// @brief Label extracted from consolidated text.
+struct ExtractedLabel
 {
-  std::string name;
-  std::string type;   ///< "PERSON", "ORGANIZATION", "CONCEPT", etc.
+  std::string label;
   double salience;    ///< [0,1] importance score
 };
 
@@ -45,7 +44,7 @@ struct ExtractionRequest
 struct ExtractionResult
 {
   std::string summary_id;
-  std::vector<ExtractedEntity> entities;
+  std::vector<ExtractedLabel> labels;
   std::vector<ExtractedRelation> relations;
 };
 

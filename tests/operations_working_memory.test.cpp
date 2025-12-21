@@ -3,6 +3,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <cortext/core/knobs.hpp>
 #include <cortext/operations/constants.hpp>
+#include <cortext/operations/metrics.hpp>
 #include <cortext/operations/working_memory.hpp>
 #include <cortext/processor.hpp>
 #include <cortext/processor/accumulator_state.hpp>
@@ -17,7 +18,8 @@ namespace
 /// Working memory now gates at memory boundaries (Section 6.1.3), not per-signal.
 void
 SetupMemoryGatingContext (OperationContext &ctx, ProcessorContext &pctx,
-                          const Signal &s, double window_score)
+                          const Signal &s, double window_score,
+                          double relevance = 0.5)
 {
   // Create accumulator state with some signals
   AccumulatorState acc;
@@ -40,6 +42,9 @@ SetupMemoryGatingContext (OperationContext &ctx, ProcessorContext &pctx,
 
   // Set window score (S_window)
   ctx.SetWindowScore (window_score);
+
+  // Set relevance metric (used in WM benefit computation)
+  ctx.SetMetric (operations::Metric::relevance, relevance);
 }
 } // namespace
 
@@ -52,6 +57,7 @@ TEST_CASE ("Alg24 inserts new WM slot when margin exceeds cost",
   s.source_id = "test";
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.5;
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;
@@ -84,6 +90,7 @@ TEST_CASE ("Alg24 chunks into best-matching slot above threshold",
   s.source_id = "test";
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = 1.0;       // high focus → high chunk threshold ~0.9
   cfg.sensitivity = 0.3; // modest maintenance cost
   cfg.stability = 0.6;
@@ -124,6 +131,7 @@ TEST_CASE ("Alg24 maintenance decays slots but preserves them with floor",
   s.source_id = "test";
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.5;
   cfg.sensitivity = 0.5; // cost_per_slot = 0.10
   cfg.stability = 0.5;
@@ -163,6 +171,7 @@ TEST_CASE ("Alg24 maintenance reduces strength without removal when dt small",
   s.source_id = "test";
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.5;
   cfg.sensitivity = 0.5; // cost_per_slot = 0.10
   cfg.stability = 0.5;
@@ -207,6 +216,7 @@ TEST_CASE ("Alg24 uses Focus-derived gate_threshold for gating decision",
   {
     ProcessorContext pctx;
     SignalProcessor::Config cfg;
+    cortext::testing::RequireEncoder (cfg);
     cfg.focus = 0.0;       // gate_threshold = 0.1
     cfg.sensitivity = 0.0; // cost_per_slot = lerp(0.05, 0.15, 0) = 0.05
     cfg.stability = 0.5;
@@ -217,7 +227,7 @@ TEST_CASE ("Alg24 uses Focus-derived gate_threshold for gating decision",
     OperationContext ctx (s, pctx, cfg);
 
     // Memory-level gating: set up context for memory boundary
-    // S_window = 0.25 → benefit - threshold = 0.25 - 0.1 = 0.15 > cost
+    // S_window + relevance + novelty combine to exceed threshold at low focus
     SetupMemoryGatingContext (ctx, pctx, s, 0.25);
 
     op.Execute (ctx, cortext::testing::GetNullTransaction ());
@@ -230,27 +240,37 @@ TEST_CASE ("Alg24 uses Focus-derived gate_threshold for gating decision",
   {
     ProcessorContext pctx;
     SignalProcessor::Config cfg;
+    cortext::testing::RequireEncoder (cfg);
     cfg.focus = 1.0;       // gate_threshold = 0.4
     cfg.sensitivity = 0.0; // minimal cost
     cfg.stability = 0.5;
+
+    // Seed a similar slot to drive novelty_to_set ~ 0
+    ProcessorContext::WMSlot seed;
+    seed.embedding = s.embedding;
+    seed.strength = 1.0;
+    seed.last_ts = static_cast<double> (s.timestamp) / 1000.0;
+    seed.pos_index = 0;
+    pctx.wm_slots.push_back (seed);
 
     WorkingMemory op;
     OperationContext ctx (s, pctx, cfg);
 
     // Memory-level gating: set up context for memory boundary
-    // S_window = 0.35 → benefit - threshold = 0.35 - 0.4 = -0.05 < 0
-    SetupMemoryGatingContext (ctx, pctx, s, 0.35);
+    // Low relevance + low novelty keeps benefit below threshold
+    SetupMemoryGatingContext (ctx, pctx, s, 0.35, 0.0);
 
     op.Execute (ctx, cortext::testing::GetNullTransaction ());
     // Negative margin, should reject
     REQUIRE (pctx.wm_last_accepted == false);
-    REQUIRE (pctx.wm_slots.size () == 0);
+    REQUIRE (pctx.wm_slots.size () == 1);
   }
 
   SECTION ("Medium Focus (F=0.5) has threshold 0.25")
   {
     ProcessorContext pctx;
     SignalProcessor::Config cfg;
+    cortext::testing::RequireEncoder (cfg);
     cfg.focus = 0.5;       // gate_threshold = 0.25
     cfg.sensitivity = 0.0; // minimal cost
     cfg.stability = 0.5;
@@ -259,7 +279,7 @@ TEST_CASE ("Alg24 uses Focus-derived gate_threshold for gating decision",
     OperationContext ctx (s, pctx, cfg);
 
     // Memory-level gating: set up context for memory boundary
-    // S_window = 0.5 → benefit - threshold = 0.5 - 0.25 = 0.25 > cost
+    // S_window + relevance + novelty combine to exceed threshold
     SetupMemoryGatingContext (ctx, pctx, s, 0.5);
 
     op.Execute (ctx, cortext::testing::GetNullTransaction ());
@@ -285,6 +305,7 @@ TEST_CASE ("Alg24 input-based rehearsal boosts slot strength for similarity in "
   s.source_id = "test";
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.0;       // chunk_threshold = 0.7, rehearsal_threshold = 0.5
   cfg.sensitivity = 0.5; // rehearsal_rate = 1.25
   cfg.stability = 0.5;
@@ -348,6 +369,7 @@ TEST_CASE ("Alg24 rehearsal strength capped at kStrengthMax",
   s.source_id = "test";
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.0;       // chunk_threshold = 0.7, rehearsal_threshold = 0.5
   cfg.sensitivity = 1.0; // rehearsal_rate = 2.0 (max)
   cfg.stability = 0.5;
@@ -396,6 +418,7 @@ TEST_CASE ("Alg24 rehearsal rate scales with Sensitivity knob",
   {
     ProcessorContext pctx;
     SignalProcessor::Config cfg;
+    cortext::testing::RequireEncoder (cfg);
     cfg.focus = 0.0;       // chunk_threshold = 0.7, rehearsal_threshold = 0.5
     cfg.sensitivity = 0.0; // rehearsal_rate = 0.5
     cfg.stability = 0.5;
@@ -425,6 +448,7 @@ TEST_CASE ("Alg24 rehearsal rate scales with Sensitivity knob",
   {
     ProcessorContext pctx;
     SignalProcessor::Config cfg;
+    cortext::testing::RequireEncoder (cfg);
     cfg.focus = 0.0;       // chunk_threshold = 0.7, rehearsal_threshold = 0.5
     cfg.sensitivity = 1.0; // rehearsal_rate = 2.0
     cfg.stability = 0.5;
@@ -469,6 +493,7 @@ TEST_CASE ("Alg24 no input-based rehearsal when similarity below "
   s.source_id = "test";
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.0;       // chunk_threshold = 0.7, rehearsal_threshold = 0.5
   cfg.sensitivity = 0.5; // rehearsal_rate = 1.25
   cfg.stability = 0.5;
@@ -513,6 +538,7 @@ TEST_CASE ("Alg24 retrieval-based rehearsal boosts WM slot matching retrieved "
   s.source_id = "test";
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.0;       // chunk_threshold = 0.7
   cfg.sensitivity = 0.5; // rehearsal_rate = 1.25
   cfg.stability = 0.5;
@@ -563,6 +589,7 @@ TEST_CASE ("Alg24 retrieval-based rehearsal skips non-matching WM slots",
   s.source_id = "test";
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.0;       // chunk_threshold = 0.7
   cfg.sensitivity = 0.5; // rehearsal_rate = 1.25
   cfg.stability = 0.5;
@@ -616,6 +643,7 @@ TEST_CASE ("Alg24 eviction prioritizes weak old slots over strong recent ones",
   s.source_id = "test";
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = 1.0;       // Forces capacity = 2 (low capacity for test)
   cfg.sensitivity = 0.5; // S=0.5 → capacity = lerp(5,3,0.5)+lerp(-1,1,1) = 4+1 = 5
   cfg.stability = 0.5;
@@ -718,6 +746,7 @@ TEST_CASE ("Alg24 high-T increases slot dedication resistance to eviction",
   {
     ProcessorContext pctx;
     SignalProcessor::Config cfg;
+    cortext::testing::RequireEncoder (cfg);
     cfg.focus = 0.0;
     cfg.sensitivity = 1.0; // capacity = 2
     cfg.stability = 0.0;   // Low T → dedication_strength = 0.3
@@ -759,6 +788,7 @@ TEST_CASE ("Alg24 high-T increases slot dedication resistance to eviction",
   {
     ProcessorContext pctx;
     SignalProcessor::Config cfg;
+    cortext::testing::RequireEncoder (cfg);
     cfg.focus = 0.0;
     cfg.sensitivity = 1.0; // capacity = 2
     cfg.stability = 1.0;   // High T → dedication_strength = 0.9
@@ -815,6 +845,7 @@ TEST_CASE ("Alg24 recent slots resist eviction regardless of strength",
   s.source_id = "test";
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.0;
   cfg.sensitivity = 1.0; // capacity = 2
   cfg.stability = 0.5;   // dedication_strength = 0.6

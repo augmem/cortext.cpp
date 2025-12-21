@@ -18,6 +18,7 @@ TEST_CASE ("Alg25 detects TOT when FOK high and retrieval low",
   s.timestamp = 1;
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.8; // higher focus
   cfg.sensitivity = 0.2;
   cfg.stability = 0.7;
@@ -44,6 +45,7 @@ TEST_CASE ("Alg25 detects unknown when retrieval below threshold",
   s.timestamp = 2;
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.5;
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;
@@ -66,6 +68,7 @@ TEST_CASE ("Alg25 exposes parameter derivations per algorithms.md",
   s.timestamp = 3;
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.6;
   cfg.sensitivity = 0.3;
   cfg.stability = 0.8;

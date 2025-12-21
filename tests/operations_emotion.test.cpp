@@ -25,26 +25,19 @@ constexpr int kEmbeddingDim = 256;
 class SetupEmotionInputsOp : public IOperation
 {
 public:
-  SetupEmotionInputsOp (double intensity, double arousal, double valence,
-                        std::vector<OperationContext::MemoryUsageEvent> events)
-      : intensity_ (intensity), arousal_ (arousal), valence_ (valence),
-        events_ (std::move (events))
+  explicit SetupEmotionInputsOp (
+      std::vector<OperationContext::MemoryUsageEvent> events)
+      : events_ (std::move (events))
   {
   }
 
   void
   Execute (OperationContext &ctx, Transaction & /*tx*/) const override
   {
-    ctx.SetEmotionIntensity (intensity_);
-    ctx.SetArousal (arousal_);
-    ctx.SetValence (valence_);
     ctx.SetMemoryUsageEvents (events_);
   }
 
 private:
-  double intensity_;
-  double arousal_;
-  double valence_;
   std::vector<OperationContext::MemoryUsageEvent> events_;
 };
 
@@ -77,22 +70,28 @@ TEST_CASE ("Alg23 triggers and persists emotional tags for used memories",
   cortext::testing::SeedMemoryV2 (*store, 101LL, 101LL, "test");
   cortext::testing::SeedMemoryV2 (*store, 102LL, 102LL, "test");
 
+  // Seed emotional metadata on memories (used by consolidation)
+  store->Execute (
+      "UPDATE memories SET s_emotion_max = ?, s_arousal_avg = ? "
+      "WHERE embedding_id = ?",
+      { 0.9, 0.8, 101LL });
+  store->Execute (
+      "UPDATE memories SET s_emotion_max = ?, s_arousal_avg = ? "
+      "WHERE embedding_id = ?",
+      { 0.2, 0.1, 102LL });
+
   SignalProcessor::Config cfg;
+
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.4;       // F
   cfg.sensitivity = 0.8; // S
   cfg.stability = 0.5;
-
-  // High emotion above thresholds for S=0.8: θ_intensity≈0.64, θ_arousal≈0.24
-  const double intensity = 0.9;
-  const double arousal = 0.8;
-  const double valence = 0.7;
 
   std::vector<OperationContext::MemoryUsageEvent> events{
     { 101LL, true, std::nullopt }, { 102LL, false, std::nullopt }
   };
 
-  auto setup = std::make_unique<SetupEmotionInputsOp> (intensity, arousal,
-                                                       valence, events);
+  auto setup = std::make_unique<SetupEmotionInputsOp> (events);
   auto apply = std::make_unique<ApplyEmotionalConsolidation> ();
   auto ops
       = std::make_unique<OperationSet> (std::move (setup), std::move (apply));
@@ -112,7 +111,7 @@ TEST_CASE ("Alg23 triggers and persists emotional tags for used memories",
     REQUIRE (std::any_cast<long long> (row.at ("embedding_id")) == 101LL);
     REQUIRE (std::any_cast<long long> (row.at ("flashbulb")) == 1LL);
     REQUIRE (std::any_cast<double> (row.at ("emotional_intensity"))
-             == Catch::Approx (intensity));
+             == Catch::Approx (0.9));
 
     const double half_life_bonus
         = std::any_cast<double> (row.at ("half_life_bonus"));
@@ -163,20 +162,22 @@ TEST_CASE ("Alg23 below thresholds performs no-op", "[operations][emotion]")
   cortext::testing::SeedEmbeddingV2 (*store, 201LL, emb);
   cortext::testing::SeedMemoryV2 (*store, 201LL, 201LL, "test");
 
+  store->Execute (
+      "UPDATE memories SET s_emotion_max = ?, s_arousal_avg = ? "
+      "WHERE embedding_id = ?",
+      { 0.6, 0.25, 201LL });
+
   SignalProcessor::Config cfg;
+
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.5;
   cfg.sensitivity = 0.5; // θ_intensity=0.7, θ_arousal=0.3
   cfg.stability = 0.5;
 
-  const double intensity = 0.6; // below
-  const double arousal = 0.25;  // below
-  const double valence = 0.4;
-
   std::vector<OperationContext::MemoryUsageEvent> events{ { 201LL, true,
                                                             std::nullopt } };
 
-  auto setup = std::make_unique<SetupEmotionInputsOp> (intensity, arousal,
-                                                       valence, events);
+  auto setup = std::make_unique<SetupEmotionInputsOp> (events);
   auto apply = std::make_unique<ApplyEmotionalConsolidation> ();
   auto ops
       = std::make_unique<OperationSet> (std::move (setup), std::move (apply));

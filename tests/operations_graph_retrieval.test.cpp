@@ -89,15 +89,16 @@ TEST_CASE ("V2: Alg31 expands vector seeds via ASSOCIATIONS and returns expanded
                   "VALUES (?, ?, 'test', 'LONG_TERM', 0, 1, 'text', 0.5, 0.5, 1.0, 0)",
                   { 2LL, 2LL });
 
-  // V2: Create ASSOCIATIONS edge directly between memories (no intermediate entity)
-  // memory_id 1 -> memory_id 2 via 'co_occurs_with' edge
+  // V2: Create ASSOCIATIONS edge directly between memories (no intermediate label)
+  // memory_id 1 -> memory_id 2 via 'co_occurs' edge
   store->Execute (
       "INSERT INTO associations(source_memory_id, target_memory_id, edge_type, weight) "
-      "VALUES (?, ?, 'co_occurs_with', 1.0)",
+      "VALUES (?, ?, 'co_occurs', 1.0)",
       { 1LL, 2LL });
 
   // Low focus => depth=2 (GraphDepth(F)), ensuring expansion reaches memory 2.
   SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.0;
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;
@@ -120,4 +121,3 @@ TEST_CASE ("V2: Alg31 expands vector seeds via ASSOCIATIONS and returns expanded
   REQUIRE (has1);
   REQUIRE (has2);
 }
-

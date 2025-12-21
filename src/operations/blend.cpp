@@ -138,7 +138,7 @@ BootstrapWeightByIndex (size_t metric_index, double F, double S, double T)
                       constants::kNormalizedMax);
 }
 
-// Legacy wrapper for compatibility - maps metric enum to index
+// Map metric enum to bootstrap index
 inline double
 BootstrapWeight (operations::Metric name, double F, double S, double T)
 {
@@ -443,7 +443,7 @@ ComputeCompositeScore::Execute (OperationContext &context, Transaction &tx) cons
                                           cfg.stability);
     }
 
-  // Compute RLS weights using learned coefficients if available
+  // Compute RLS weights using learned coefficients
   if (!p_ctx.rls_coefficients.empty ()
       && p_ctx.rls_coefficients.size () == kNumMetrics)
     {
@@ -458,12 +458,7 @@ ComputeCompositeScore::Execute (OperationContext &context, Transaction &tx) cons
     }
   else
     {
-      // Fallback to legacy blender_state if coefficients not initialized
-      for (std::size_t i = 0; i < names.size (); ++i)
-        {
-          auto it = p_ctx.blender_state.find (names[i]);
-          w_rls[i] = (it == p_ctx.blender_state.end ()) ? w_boot[i] : it->second;
-        }
+      w_rls = w_boot;
     }
 
   const double confidence

@@ -47,7 +47,7 @@ erDiagram
         int end_ts "timestamp (ms), IDX partial WORKING"
         int n_signals "count of signals"
         text modality "text|audio|image"
-        real s_max "max signal score"
+        real s_max "max signal score (or label salience for LABEL kind)"
         real s_avg "average signal score"
         real s_emotion_max "max emotion_intensity_t during formation"
         real s_arousal_avg "mean arousal_t during formation"

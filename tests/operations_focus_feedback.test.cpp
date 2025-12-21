@@ -26,6 +26,8 @@ MakeContext (double focus, double stability)
   pctx = ProcessorContext (); // reset
 
   SignalProcessor::Config cfg;
+
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = focus;
   cfg.stability = stability;
 

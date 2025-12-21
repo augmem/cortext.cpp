@@ -3,6 +3,30 @@
 #include "cortext/summarizer/gemma_summarizer.hpp"
 
 #include <filesystem>
+#include <string>
+
+namespace
+{
+std::string
+FindModelPath (const std::string &relative_path)
+{
+  std::filesystem::path probe = std::filesystem::current_path ();
+  for (int i = 0; i < 6; ++i)
+    {
+      const auto candidate = probe / relative_path;
+      if (std::filesystem::exists (candidate))
+        {
+          return candidate.string ();
+        }
+      if (!probe.has_parent_path ())
+        {
+          break;
+        }
+      probe = probe.parent_path ();
+    }
+  return relative_path;
+}
+} // namespace
 
 TEST_CASE ("GemmaSummarizer behavior", "[summarizer][gemma]")
 {
@@ -41,8 +65,8 @@ TEST_CASE ("GemmaSummarizer behavior", "[summarizer][gemma]")
 
   SECTION ("GIVEN a valid Gemma model path")
   {
-    const std::string model_path
-        = "models/gemma3n-e2b-litert/gemma-3n-E2B-it-int4.litertlm";
+    const std::string model_path = FindModelPath (
+        "models/gemma3n-e2b-litert/gemma-3n-E2B-it-int4.litertlm");
 
     if (!std::filesystem::exists (model_path))
       {

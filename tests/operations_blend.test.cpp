@@ -40,6 +40,7 @@ TEST_CASE ("Alg7 composite produces clamped normalized score",
   s.embedding = Eigen::VectorXf::Zero (3);
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.6;
   cfg.sensitivity = 0.5;
   cfg.stability = 0.4;
@@ -81,6 +82,7 @@ TEST_CASE ("Alg7 RLS increases relevance weight with consistent evidence",
   s.embedding = Eigen::VectorXf::Zero (2);
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.4; // modest initial relevance prior
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;
@@ -113,6 +115,7 @@ TEST_CASE ("Alg7→Alg8 integration adjusts threshold with composite",
   s.embedding = Eigen::VectorXf::Zero (4);
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.5;
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;
@@ -151,6 +154,7 @@ TEST_CASE ("Alg7 RLS resets covariance on ill-conditioning",
   s.embedding = Eigen::VectorXf::Zero (2);
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.4;
   cfg.sensitivity = 0.4;
   cfg.stability = 0.4;

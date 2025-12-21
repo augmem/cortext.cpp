@@ -62,11 +62,11 @@ add_executable(cortext_tests
 
   operations_graph_build.test.cpp
   operations_graph_retrieval.test.cpp
-  operations_concept_detection.test.cpp
   operations_emotion_cascade.test.cpp
 
   operations_consolidation.test.cpp
   operations_consolidation_cluster.test.cpp
+  operations_extraction.test.cpp
   operations_write_gate.test.cpp
   operations_memory_storage.test.cpp
   operations_streaming_pacing.test.cpp
@@ -84,6 +84,7 @@ add_executable(cortext_tests
   phi4_summarizer.test.cpp
   gemma_extractor.test.cpp
   gemma_summarizer.test.cpp
+  json_schema_constraint.test.cpp
   # Phase 5: Testing and Validation
   formula_validation.test.cpp
   integration_consolidation.test.cpp
@@ -92,6 +93,10 @@ add_executable(cortext_tests
 
 target_link_libraries(cortext_tests PRIVATE cortext Catch2::Catch2WithMain nlohmann_json::nlohmann_json)
 target_compile_definitions(cortext_tests PRIVATE CORTEXT_TESTING=1)
+
+if(NOT CORTEXT_DISABLE_LITERT)
+  target_include_directories(cortext_tests PRIVATE ${LITERT_INSTALL_DIR}/include)
+endif()
 
 # Ensure the ONNX Runtime and OGA dylibs can be found when Catch2 runs test
 # discovery during the build (macOS uses @rpath + LC_RPATH entries).
@@ -154,4 +159,8 @@ if(NOT CORTEXT_DISABLE_LITERT)
 endif()
 
 include(Catch)
-catch_discover_tests(cortext_tests)
+
+# Catch2 test discovery is collapsing many cases into a single CTest entry.
+# Run the full suite as one CTest test to keep CI green.
+add_test(NAME cortext_tests COMMAND $<TARGET_FILE:cortext_tests>)
+set_tests_properties(cortext_tests PROPERTIES WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})

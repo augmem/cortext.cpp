@@ -6,10 +6,29 @@
 #include <cortext/operations/stability_feedback.hpp>
 #include <cortext/processor.hpp>
 #include <cortext/processor/operation_context.hpp>
+#include <cortext/store/sqlite_store.hpp>
 
 using namespace cortext;
 using cortext::operations::ApplyStabilityFeedback;
 using cortext::operations::InitializeStabilityPriors;
+
+namespace
+{
+static void
+SeedMemory (Store &store, long long id)
+{
+  const auto now_ts = cortext::testing::NowMs ();
+  store.Execute (
+      "INSERT OR REPLACE INTO memories("
+      "memory_id, embedding_id, source_id, kind, start_ts, n_signals, modality, "
+      "s_max, s_avg, strength, use_frequency, stability, connectivity, drift_mag, "
+      "influence, sustained_influence, contextual_gain, redundancy, "
+      "pre_activation, lability_state, suppression_count, created_at) "
+      "VALUES(?, ?, 'test', 'LONG_TERM', ?, 1, 'text', 0.5, 0.5, "
+      "1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0, ?)",
+      { id, id, now_ts, now_ts });
+}
+} // namespace
 
 TEST_CASE ("Alg17 positive contextual gain increases half_life",
            "[operations][stability_feedback]")
@@ -18,8 +37,13 @@ TEST_CASE ("Alg17 positive contextual gain increases half_life",
   s.embedding = Eigen::VectorXf::Zero (3);
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
   cfg.stability = 0.5;
 
+  auto unique_store = cortext::SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<cortext::Store> (std::move (unique_store));
+  cortext::testing::InitializeCoreSchema (*store);
+  SeedMemory (*store, 1LL);
 
   // Initialize stability priors and seed dynamic state
   {
@@ -38,7 +62,9 @@ TEST_CASE ("Alg17 positive contextual gain increases half_life",
   ctx.SetMemoryUsageEvents ({ ev });
 
   ApplyStabilityFeedback op;
-  op.Execute (ctx, cortext::testing::GetNullTransaction ());
+  auto tx = store->Begin ();
+  op.Execute (ctx, *tx);
+  tx->Commit ();
   // Alg17 now emits ΔHalfLife_adj_t for Alg6 to consume; apply Alg6
   REQUIRE (ctx.GetDeltaHalfLifeAdjustment ().has_value ());
   // Provide a retention observation and run Alg6
@@ -61,8 +87,13 @@ TEST_CASE ("Alg17 non-positive contextual gain decreases half_life",
   s.embedding = Eigen::VectorXf::Zero (3);
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
   cfg.stability = 0.5;
 
+  auto unique_store = cortext::SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<cortext::Store> (std::move (unique_store));
+  cortext::testing::InitializeCoreSchema (*store);
+  SeedMemory (*store, 2LL);
 
   // Initialize stability priors and seed dynamic state
   {
@@ -81,7 +112,9 @@ TEST_CASE ("Alg17 non-positive contextual gain decreases half_life",
   ctx.SetMemoryUsageEvents ({ ev });
 
   ApplyStabilityFeedback op;
-  op.Execute (ctx, cortext::testing::GetNullTransaction ());
+  auto tx = store->Begin ();
+  op.Execute (ctx, *tx);
+  tx->Commit ();
   // Alg17 now emits ΔHalfLife_adj_t for Alg6 to consume; apply Alg6
   REQUIRE (ctx.GetDeltaHalfLifeAdjustment ().has_value ());
   // Provide a retention observation and run Alg6

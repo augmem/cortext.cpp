@@ -71,6 +71,7 @@ TEST_CASE ("MemoryStorage stores payload when write_decision is true",
 
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.5;
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;
@@ -82,6 +83,20 @@ TEST_CASE ("MemoryStorage stores payload when write_decision is true",
   acc.s_sum = 0.5;
   acc.s_max = 0.5;
   acc.t_start = s.timestamp - 1000;
+  {
+    SignalRecord rec;
+    rec.embedding = s.embedding;
+    rec.timestamp = s.timestamp;
+    rec.modality = s.modality;
+    rec.mime = s.mimetype;
+    rec.score = 0.5;
+    rec.serial_position = 0;
+    auto blob_rows = store->Execute ("SELECT objstore_put(?1) AS id",
+                                     { *s.payload });
+    REQUIRE (blob_rows.size () == 1);
+    rec.blob_id = BlobFromAny (blob_rows[0].at ("id"));
+    acc.signals.push_back (std::move (rec));
+  }
   pctx.accumulator_states[s.source_id] = std::move (acc);
 
   OperationContext ctx (s, pctx, cfg, store);
@@ -108,6 +123,19 @@ TEST_CASE ("MemoryStorage stores payload when write_decision is true",
   auto idx_rows = store->Execute (
       "SELECT * FROM memories WHERE embedding_id = ?", { *stored_id });
   REQUIRE (idx_rows.size () == 1);
+  const auto memory_id
+      = AnyToLongLong (idx_rows[0].at ("memory_id")).value_or (0);
+  REQUIRE (memory_id > 0);
+
+  // Verify signal row inserted with its own embedding + blob
+  auto sig_rows = store->Execute (
+      "SELECT embedding_id, blob_id FROM signals WHERE memory_id = ?",
+      { memory_id });
+  REQUIRE (sig_rows.size () == 1);
+  const auto sig_emb_id = AnyToLongLong (sig_rows[0].at ("embedding_id"));
+  REQUIRE (sig_emb_id.has_value ());
+  auto sig_blob_id = BlobFromAny (sig_rows[0].at ("blob_id"));
+  REQUIRE (!sig_blob_id.empty ());
 
   // v2: Verify memories has all expected columns (strength, use_frequency now on memories)
   auto fb_rows = store->Execute (
@@ -134,6 +162,7 @@ TEST_CASE ("MemoryStorage discards when write_decision is false",
 
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.5;
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;
@@ -176,6 +205,7 @@ TEST_CASE ("MemoryStorage stores memory even when no payload",
 
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.5;
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;
@@ -187,6 +217,16 @@ TEST_CASE ("MemoryStorage stores memory even when no payload",
   acc.s_sum = 0.5;
   acc.s_max = 0.5;
   acc.t_start = s.timestamp - 1000;
+  {
+    SignalRecord rec;
+    rec.embedding = s.embedding;
+    rec.timestamp = s.timestamp;
+    rec.modality = s.modality;
+    rec.mime = s.mimetype;
+    rec.score = 0.5;
+    rec.serial_position = 0;
+    acc.signals.push_back (std::move (rec));
+  }
   pctx.accumulator_states[s.source_id] = std::move (acc);
 
   OperationContext ctx (s, pctx, cfg, store);
@@ -209,6 +249,14 @@ TEST_CASE ("MemoryStorage stores memory even when no payload",
       { *stored_id });
   REQUIRE (mem_rows.size () == 1);
   // blob_id should be null for no payload
+
+  // Signals should exist but have no blob_id
+  auto sig_rows = store->Execute (
+      "SELECT blob_id FROM signals WHERE memory_id = (SELECT memory_id FROM memories WHERE embedding_id = ?)",
+      { *stored_id });
+  REQUIRE (sig_rows.size () == 1);
+  auto sig_blob_id = BlobFromAny (sig_rows[0].at ("blob_id"));
+  REQUIRE (sig_blob_id.empty ());
 }
 
 TEST_CASE ("MemoryStorage stores payload in objstore and retrieves it",
@@ -229,6 +277,7 @@ TEST_CASE ("MemoryStorage stores payload in objstore and retrieves it",
 
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.5;
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;
@@ -240,6 +289,20 @@ TEST_CASE ("MemoryStorage stores payload in objstore and retrieves it",
   acc.s_sum = 0.5;
   acc.s_max = 0.5;
   acc.t_start = s.timestamp - 1000;
+  {
+    SignalRecord rec;
+    rec.embedding = s.embedding;
+    rec.timestamp = s.timestamp;
+    rec.modality = s.modality;
+    rec.mime = s.mimetype;
+    rec.score = 0.5;
+    rec.serial_position = 0;
+    auto blob_rows = store->Execute ("SELECT objstore_put(?1) AS id",
+                                     { *s.payload });
+    REQUIRE (blob_rows.size () == 1);
+    rec.blob_id = BlobFromAny (blob_rows[0].at ("id"));
+    acc.signals.push_back (std::move (rec));
+  }
   pctx.accumulator_states[s.source_id] = std::move (acc);
 
   OperationContext ctx (s, pctx, cfg, store);
@@ -271,4 +334,19 @@ TEST_CASE ("MemoryStorage stores payload in objstore and retrieves it",
   auto retrieved_blob = BlobFromAny (payload_rows[0].at ("data"));
   std::string retrieved_text (retrieved_blob.begin (), retrieved_blob.end ());
   REQUIRE (retrieved_text == test_text);
+
+  // Verify signals row references a blob and matches payload
+  auto sig_rows = store->Execute (
+      "SELECT blob_id FROM signals WHERE memory_id = (SELECT memory_id FROM memories WHERE embedding_id = ?)",
+      { *stored_id });
+  REQUIRE (sig_rows.size () == 1);
+  auto sig_blob_id = BlobFromAny (sig_rows[0].at ("blob_id"));
+  REQUIRE (!sig_blob_id.empty ());
+  auto sig_payload_rows
+      = store->Execute ("SELECT objstore_get(?1) AS data", { sig_blob_id });
+  REQUIRE (sig_payload_rows.size () == 1);
+  auto sig_retrieved_blob = BlobFromAny (sig_payload_rows[0].at ("data"));
+  std::string sig_retrieved_text (sig_retrieved_blob.begin (),
+                                  sig_retrieved_blob.end ());
+  REQUIRE (sig_retrieved_text == test_text);
 }

@@ -1,24 +1,53 @@
 // tests/operations_influence_feedback.test.cpp
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
+#include "test_helpers.hpp"
 #include <cortext/core/algorithms.hpp>
-#include <cortext/operations/focus.hpp>
 #include <cortext/operations/influence.hpp>
-#include <cortext/operations/sensitivity.hpp>
 #include <cortext/processor.hpp>
 #include <cortext/processor/operation_context.hpp>
 #include <cortext/processor/operation_set.hpp>
 #include <cortext/store/sqlite_store.hpp>
+#include <cmath>
 
 using namespace cortext;
 using cortext::operations::ApplyInfluenceFeedback;
-using cortext::operations::InitializeFocusPriors;
-using cortext::operations::InitializeSensitivityPriors;
 
 namespace
 {
 
-// Helper op to push embeddings (prev then cur) and attach events/embeddings.
+constexpr int kEmbeddingDim = 256;
+
+static void
+SeedMemory (Store *store, long long id)
+{
+  std::vector<float> vec (kEmbeddingDim, 0.0f);
+  vec[0] = 1.0f;
+  const auto now_ts = cortext::testing::NowMs ();
+  store->Execute (
+      "INSERT OR REPLACE INTO embeddings(embedding_id, embedding, created_at) "
+      "VALUES(?, ?, ?)",
+      { id, vec, now_ts });
+  store->Execute (
+      "INSERT OR REPLACE INTO memories("
+      "memory_id, embedding_id, source_id, kind, start_ts, n_signals, modality, "
+      "s_max, s_avg, strength, use_frequency, stability, connectivity, drift_mag, "
+      "influence, sustained_influence, contextual_gain, redundancy, "
+      "pre_activation, lability_state, suppression_count, created_at) "
+      "VALUES(?, ?, 'test', 'LONG_TERM', ?, 1, 'text', 0.5, 0.5, "
+      "1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0, ?)",
+      { id, id, now_ts, now_ts });
+}
+
+static Eigen::VectorXf
+MakeUnitVec256 (int idx)
+{
+  Eigen::VectorXf v = Eigen::VectorXf::Zero (kEmbeddingDim);
+  v[idx] = 1.0f;
+  return v;
+}
+
+// Helper op to attach embeddings and events to the context.
 class SetupInfluenceInputsOp : public IOperation
 {
 public:
@@ -26,10 +55,13 @@ public:
       Eigen::VectorXf prev, Eigen::VectorXf cur,
       std::vector<OperationContext::MemoryUsageEvent> events,
       std::unordered_map<long long, Eigen::VectorXf> embs)
-      : prev_ (std::move (prev)), cur_ (std::move (cur)),
-        events_ (std::move (events)), embeddings_ (std::move (embs))
+      : prev_ (std::move (prev)),
+        cur_ (std::move (cur)),
+        events_ (std::move (events)),
+        embeddings_ (std::move (embs))
   {
   }
+
   void
   Execute (OperationContext &ctx, Transaction & /*tx*/) const override
   {
@@ -39,17 +71,6 @@ public:
     pctx.recent_context_embeddings.push_back (cur_);
     ctx.SetMemoryUsageEvents (events_);
     ctx.SetRetrievedMemoryEmbeddings (embeddings_);
-    // Store baselines as metrics for later assertion
-    ctx.SetMetric (operations::Metric::aw_prev, pctx.attention_width);
-    const double rate_prev = (pctx.rate_target == 0.0) ? pctx.rate_target_prior
-                                                       : pctx.rate_target;
-    ctx.SetMetric (operations::Metric::rate_prev, rate_prev);
-    ctx.SetMetric (operations::Metric::hys_prev, pctx.hysteresis);
-    // Ensure a well-defined baseline for rate_target
-    if (pctx.rate_target == 0.0)
-      {
-        pctx.rate_target = pctx.rate_target_prior;
-      }
   }
 
 private:
@@ -59,106 +80,34 @@ private:
   std::unordered_map<long long, Eigen::VectorXf> embeddings_;
 };
 
-// Assert op reading baselines from metrics and comparing to current pctx
-class AssertPositiveEffectsOp : public IOperation
-{
-public:
-  void
-  Execute (OperationContext &ctx, Transaction & /*tx*/) const override
-  {
-    auto &pctx = ctx.GetProcessorContext ();
-    const auto &cfg = ctx.GetConfig ();
-    const double kAttentionWidthMin = 0.1 * 3.14159;
-    const double kAttentionWidthMax = 3.14159;
-    const double aw_prev
-        = core::Lerp (kAttentionWidthMin, kAttentionWidthMax, 1.0 - cfg.focus);
-    REQUIRE (pctx.attention_width < aw_prev);
-    REQUIRE (pctx.rate_target > pctx.rate_target_prior);
-    REQUIRE (pctx.hysteresis > 0.05);
-  }
-};
-
-class AssertNegativeEffectsOp : public IOperation
-{
-public:
-  void
-  Execute (OperationContext &ctx, Transaction & /*tx*/) const override
-  {
-    auto &pctx = ctx.GetProcessorContext ();
-    const auto &cfg = ctx.GetConfig ();
-    const double kAttentionWidthMin = 0.1 * 3.14159;
-    const double kAttentionWidthMax = 3.14159;
-    const double aw_prev
-        = core::Lerp (kAttentionWidthMin, kAttentionWidthMax, 1.0 - cfg.focus);
-    REQUIRE (pctx.attention_width > aw_prev);
-    REQUIRE (pctx.rate_target
-             <= Catch::Approx (pctx.rate_target_prior).epsilon (0.05));
-  }
-};
-
-class AssertNoopEffectsOp : public IOperation
-{
-public:
-  void
-  Execute (OperationContext &ctx, Transaction & /*tx*/) const override
-  {
-    auto &pctx = ctx.GetProcessorContext ();
-    const auto &cfg = ctx.GetConfig ();
-    const double kAttentionWidthMin = 0.1 * 3.14159;
-    const double kAttentionWidthMax = 3.14159;
-    const double aw_prev
-        = core::Lerp (kAttentionWidthMin, kAttentionWidthMax, 1.0 - cfg.focus);
-    REQUIRE (pctx.attention_width == Catch::Approx (aw_prev));
-    const double rt = pctx.rate_target;
-    const double rtp = pctx.rate_target_prior;
-    const bool ok
-        = (std::abs (rt - 0.0) < 1e-6) || (std::abs (rt - rtp) < 1e-6);
-    REQUIRE (ok);
-    REQUIRE (pctx.hysteresis == Catch::Approx (0.05));
-  }
-};
-
-static std::unique_ptr<cortext::OperationSet>
-MakePipeline (const Eigen::VectorXf &prev, const Eigen::VectorXf &cur,
-              double F, double S, double T,
-              std::vector<OperationContext::MemoryUsageEvent> events,
-              std::unordered_map<long long, Eigen::VectorXf> embeddings,
-              std::unique_ptr<IOperation> assert_op)
-{
-  auto init_focus = std::make_unique<InitializeFocusPriors> ();
-  auto init_sens = std::make_unique<InitializeSensitivityPriors> ();
-  auto setup = std::make_unique<SetupInfluenceInputsOp> (
-      prev, cur, std::move (events), std::move (embeddings));
-  auto apply = std::make_unique<ApplyInfluenceFeedback> ();
-  auto ops = std::make_unique<cortext::OperationSet> (
-      std::move (init_focus), std::move (init_sens), std::move (setup),
-      std::move (apply), std::move (assert_op));
-  return ops;
-}
-
 } // namespace
 
-TEST_CASE (
-    "Alg19 positive mean influence narrows width, raises rate and hysteresis",
-    "[operations][influence]")
+TEST_CASE ("Alg19 influence persists per-memory", "[operations][influence]")
 {
   auto unique_store = cortext::SQLiteStore::Create (":memory:");
   auto store = std::shared_ptr<cortext::Store> (std::move (unique_store));
+  cortext::testing::InitializeCoreSchema (*store);
+  SeedMemory (store.get (), 101LL);
+
   SignalProcessor::Config cfg;
+
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.6;
   cfg.sensitivity = 0.7;
   cfg.stability = 0.5;
 
-  const Eigen::VectorXf prev = (Eigen::VectorXf (4) << 1, 0, 0, 0).finished ();
-  const Eigen::VectorXf cur
-      = (Eigen::VectorXf (4) << 1, 0.05f, 0, 0).finished ();
-  const Eigen::VectorXf mem = (Eigen::VectorXf (4) << 1, 0, 0, 0).finished ();
+  const Eigen::VectorXf prev = MakeUnitVec256 (0);
+  const Eigen::VectorXf cur = MakeUnitVec256 (0);
+  const Eigen::VectorXf mem = MakeUnitVec256 (0);
+
   OperationContext::MemoryUsageEvent ev{ 101LL, true, 0.8 };
+  auto setup = std::make_unique<SetupInfluenceInputsOp> (
+      prev, cur, std::vector<OperationContext::MemoryUsageEvent>{ ev },
+      std::unordered_map<long long, Eigen::VectorXf>{ { 101LL, mem } });
+  auto apply = std::make_unique<ApplyInfluenceFeedback> ();
+  auto ops = std::make_unique<cortext::OperationSet> (
+      std::move (setup), std::move (apply));
 
-  auto ops = MakePipeline (
-      prev, cur, cfg.focus, cfg.sensitivity, cfg.stability, { ev },
-      std::unordered_map<long long, Eigen::VectorXf>{ { 101LL, mem } },
-      std::make_unique<AssertPositiveEffectsOp> ());
   cortext::SignalProcessor processor (cfg, store, std::move (ops));
   Signal s;
   s.embedding = cur;
@@ -166,28 +115,52 @@ TEST_CASE (
   s.source_id = "test";
   processor.Process (s);
   processor.Flush ();
+
+  auto rows = store->Execute (
+      "SELECT influence, sustained_influence FROM memories WHERE memory_id = ?",
+      { 101LL });
+  REQUIRE (rows.size () == 1);
+  const double influence
+      = std::any_cast<double> (rows[0].at ("influence"));
+  const double sustained
+      = std::any_cast<double> (rows[0].at ("sustained_influence"));
+
+  // Expected influence: 0.5*cg + 0.4*sim_gen - 0.3*drift (drift=0 here)
+  const double expected_influence = 0.5 * 0.8 + 0.4 * 1.0;
+  REQUIRE (influence == Catch::Approx (expected_influence).margin (1e-6));
+
+  const double L_sustain = std::round (core::Lerp (3.0, 5.0, cfg.stability));
+  const double alpha_sustain = 2.0 / (L_sustain + 1.0);
+  const double expected_sustained = alpha_sustain * expected_influence;
+  REQUIRE (sustained == Catch::Approx (expected_sustained).margin (1e-6));
 }
 
-TEST_CASE (
-    "Alg19 negative mean influence widens width and does not raise rate",
-    "[operations][influence]")
+TEST_CASE ("Alg19 negative influence allowed", "[operations][influence]")
 {
   auto unique_store = cortext::SQLiteStore::Create (":memory:");
   auto store = std::shared_ptr<cortext::Store> (std::move (unique_store));
+  cortext::testing::InitializeCoreSchema (*store);
+  SeedMemory (store.get (), 202LL);
+
   SignalProcessor::Config cfg;
+
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.5;
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;
 
-  const Eigen::VectorXf prev = (Eigen::VectorXf (4) << 1, 0, 0, 0).finished ();
-  const Eigen::VectorXf cur = (Eigen::VectorXf (4) << 0, 1, 0, 0).finished ();
-  const Eigen::VectorXf mem = (Eigen::VectorXf (4) << 0, 0, 1, 0).finished ();
+  const Eigen::VectorXf prev = MakeUnitVec256 (0);
+  const Eigen::VectorXf cur = MakeUnitVec256 (1);
+  const Eigen::VectorXf mem = MakeUnitVec256 (2);
+
   OperationContext::MemoryUsageEvent ev{ 202LL, true, -1.0 };
+  auto setup = std::make_unique<SetupInfluenceInputsOp> (
+      prev, cur, std::vector<OperationContext::MemoryUsageEvent>{ ev },
+      std::unordered_map<long long, Eigen::VectorXf>{ { 202LL, mem } });
+  auto apply = std::make_unique<ApplyInfluenceFeedback> ();
+  auto ops = std::make_unique<cortext::OperationSet> (
+      std::move (setup), std::move (apply));
 
-  auto ops = MakePipeline (
-      prev, cur, cfg.focus, cfg.sensitivity, cfg.stability, { ev },
-      std::unordered_map<long long, Eigen::VectorXf>{ { 202LL, mem } },
-      std::make_unique<AssertNegativeEffectsOp> ());
   cortext::SignalProcessor processor (cfg, store, std::move (ops));
   Signal s;
   s.embedding = cur;
@@ -195,30 +168,15 @@ TEST_CASE (
   s.source_id = "test";
   processor.Process (s);
   processor.Flush ();
-}
 
-TEST_CASE ("Alg19 no embeddings → no change", "[operations][influence]")
-{
-  auto unique_store = cortext::SQLiteStore::Create (":memory:");
-  auto store = std::shared_ptr<cortext::Store> (std::move (unique_store));
-  SignalProcessor::Config cfg;
-  cfg.focus = 0.5;
-  cfg.sensitivity = 0.5;
-  cfg.stability = 0.5;
-
-  const Eigen::VectorXf prev = (Eigen::VectorXf (4) << 1, 0, 0, 0).finished ();
-  const Eigen::VectorXf cur = (Eigen::VectorXf (4) << 1, 0, 0, 0).finished ();
-  OperationContext::MemoryUsageEvent ev{ 303LL, true, 0.6 };
-
-  auto ops
-      = MakePipeline (prev, cur, cfg.focus, cfg.sensitivity, cfg.stability,
-                      { ev }, std::unordered_map<long long, Eigen::VectorXf>{},
-                      std::make_unique<AssertNoopEffectsOp> ());
-  cortext::SignalProcessor processor (cfg, store, std::move (ops));
-  Signal s;
-  s.embedding = cur;
-  s.timestamp = 1;
-  s.source_id = "test";
-  processor.Process (s);
-  processor.Flush ();
+  auto rows = store->Execute (
+      "SELECT influence, sustained_influence FROM memories WHERE memory_id = ?",
+      { 202LL });
+  REQUIRE (rows.size () == 1);
+  const double influence
+      = std::any_cast<double> (rows[0].at ("influence"));
+  const double sustained
+      = std::any_cast<double> (rows[0].at ("sustained_influence"));
+  REQUIRE (influence < 0.0);
+  REQUIRE (sustained < 0.0);
 }

@@ -15,6 +15,7 @@ TEST_CASE ("ComputeCoherence handles small windows", "[operations][coherence]")
   s.embedding = Eigen::VectorXf::Ones (4);
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
 
 #
   ComputeCoherence op;
@@ -44,6 +45,7 @@ TEST_CASE ("ComputeCoherence lowers with mixed directions",
   s.embedding[0] = 1.0f; // unit vector along axis 0
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
 
 #
   // Fill window with diverse directions to increase variance of cosines.
@@ -75,6 +77,7 @@ TEST_CASE ("ComputeCoherence clamping", "[operations][coherence]")
   s.embedding[0] = 1.0f;
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
 
 #
   // Extreme mix of cosines should still clamp in [0,1]

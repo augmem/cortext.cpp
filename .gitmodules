@@ -19,3 +19,6 @@
 [submodule "third_party/litert-lm"]
 	path = third_party/litert-lm
 	url = https://github.com/google-ai-edge/LiteRT-LM.git
+[submodule "third_party/sherpa-onnx"]
+	path = third_party/sherpa-onnx
+	url = https://github.com/k2-fsa/sherpa-onnx.git

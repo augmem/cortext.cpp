@@ -59,7 +59,7 @@ struct NeighborInfo
 
 /// @brief Queries graph neighbors of a given embedding via iterative BFS.
 /// V2: Uses ASSOCIATIONS table with memory_ids instead of graph_edges.
-/// Returns neighbors connected via 'co_occurs_with' or 'reinforces' edges
+/// Returns neighbors connected via 'co_occurs' or 'reinforces' edges
 /// up to max_depth hops away.
 inline std::vector<NeighborInfo>
 QueryGraphNeighbors (Store *store, long long embedding_id, int max_depth)
@@ -113,7 +113,7 @@ QueryGraphNeighbors (Store *store, long long embedding_id, int max_depth)
       auto rows = store->Execute (
           "SELECT source_memory_id, target_memory_id FROM associations "
           "WHERE (source_memory_id = ? OR target_memory_id = ?) "
-          "AND edge_type IN ('co_occurs_with', 'reinforces')",
+          "AND edge_type IN ('co_occurs', 'reinforces')",
           { current_mem_id, current_mem_id });
 
       for (const auto &row : rows)

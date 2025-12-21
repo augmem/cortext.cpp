@@ -6,6 +6,7 @@
 #include "cortext/processor/operation_context.hpp"
 #include "cortext/telemetry/telemetry.hpp"
 
+#include <deque>
 #include <vector>
 
 namespace cortext::operations
@@ -14,6 +15,53 @@ namespace cortext::operations
 namespace
 {
 constexpr double kEpsilonNoise = 0.02;  // Noise floor for drift (Section 4.4.2)
+
+inline Eigen::VectorXf
+ComputeMean (const std::deque<Eigen::VectorXf> &embs, int start, int end)
+{
+  if (start >= end)
+    {
+      return Eigen::VectorXf ();
+    }
+  const int dim = static_cast<int> (embs[static_cast<size_t> (start)].size ());
+  Eigen::VectorXf mean = Eigen::VectorXf::Zero (dim);
+  const int count = end - start;
+  for (int i = start; i < end; ++i)
+    {
+      mean += embs[static_cast<size_t> (i)];
+    }
+  mean /= static_cast<float> (count);
+  return mean;
+}
+
+inline double
+ComputeLaggedDriftMag (const std::deque<Eigen::VectorXf> &embs, double T)
+{
+  const int n_ctx_total = static_cast<int> (embs.size ());
+  const int ctx_window = static_cast<int> (core::NCtx (T));
+  const int k_ctx = core::KCtx (T);
+  if (n_ctx_total < ctx_window + k_ctx)
+    {
+      return 0.0;
+    }
+  const Eigen::VectorXf mean_recent
+      = ComputeMean (embs, n_ctx_total - ctx_window, n_ctx_total);
+  const Eigen::VectorXf mean_prev
+      = ComputeMean (embs, n_ctx_total - k_ctx - ctx_window,
+                     n_ctx_total - k_ctx);
+  if (mean_recent.size () == 0 || mean_prev.size () == 0
+      || mean_recent.size () != mean_prev.size ())
+    {
+      return 0.0;
+    }
+  const Eigen::VectorXf nr = (mean_recent.norm () > 0.0f)
+                                 ? (mean_recent / mean_recent.norm ())
+                                 : mean_recent;
+  const Eigen::VectorXf np = (mean_prev.norm () > 0.0f)
+                                 ? (mean_prev / mean_prev.norm ())
+                                 : mean_prev;
+  return (nr - np).norm ();
+}
 }  // namespace
 
 void
@@ -38,7 +86,18 @@ ComputeCoherence::Execute (OperationContext &context,
   auto &acc = it->second;
 
   // Get drift magnitude
-  const double drift_mag = context.GetMetric (Metric::drift_mag).value_or (0.0);
+  double drift_mag = 0.0;
+  if (auto v = context.GetMetric (Metric::drift_mag))
+    {
+      drift_mag = *v;
+    }
+  else
+    {
+      drift_mag
+          = ComputeLaggedDriftMag (p_ctx.recent_context_embeddings,
+                                   config.stability);
+      context.SetMetric (Metric::drift_mag, drift_mag);
+    }
 
   // Compute d_step with noise floor (Section 4.4.2)
   const double d_step = std::max (drift_mag - kEpsilonNoise, 0.0);

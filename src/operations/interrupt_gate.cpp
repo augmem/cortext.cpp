@@ -103,11 +103,23 @@ ComputeRedundancy (const Eigen::VectorXf &candidate,
     {
       max_overlap = std::max (max_overlap, CosSim (candidate, e));
     }
-  if (max_overlap < 0.0)
+  return cortext::core::Map01 (max_overlap);
+}
+
+double
+ComputeRawOverlap (const Eigen::VectorXf &candidate,
+                   const std::vector<Eigen::VectorXf> &included)
+{
+  if (included.empty ())
     {
-      return 0.0;
+      return -1.0;
     }
-  return Clamp01 (max_overlap);
+  double max_overlap = -1.0;
+  for (const auto &e : included)
+    {
+      max_overlap = std::max (max_overlap, CosSim (candidate, e));
+    }
+  return max_overlap;
 }
 
 double
@@ -117,7 +129,7 @@ ComputeCoverageGain (const Eigen::VectorXf &centroid,
 {
   // Simple, bounded proxy: how much the candidate improves similarity
   // relative to the most-overlapping included vector.
-  const double sim_ctx = Clamp01 (CosSim (centroid, candidate));
+  const double sim_ctx = cortext::core::Map01 (CosSim (centroid, candidate));
   const double redundancy = ComputeRedundancy (candidate, included);
   const double gain = std::max (0.0, sim_ctx - redundancy);
   return Clamp01 (gain);
@@ -131,6 +143,15 @@ ComputeMniGateDecision::Execute (OperationContext &context, Transaction &tx) con
   (void)tx;
   auto &p_ctx = context.GetProcessorContext ();
   const auto &cfg = context.GetConfig ();
+  const auto &signal = context.GetSignal ();
+
+  auto acc_it = p_ctx.accumulator_states.find (signal.source_id);
+  if (acc_it == p_ctx.accumulator_states.end ())
+    {
+      p_ctx.accumulator_states[signal.source_id] = AccumulatorState{};
+      acc_it = p_ctx.accumulator_states.find (signal.source_id);
+    }
+  auto &acc = acc_it->second;
 
   // Retrieve candidates (id -> embedding)
   const auto &raw_candidates = context.GetRetrievedMemoryEmbeddings ();
@@ -141,6 +162,7 @@ ComputeMniGateDecision::Execute (OperationContext &context, Transaction &tx) con
       context.SetMniJaccard (constants::kNormalizedMax);
       context.SetMniBestMu (constants::kNormalizedMin);
       context.SetMniDupThresh (constants::kNormalizedMin);
+      context.SetMniOverlapStar (-1.0);
       context.SetMniTauJaccardEff (constants::kNormalizedMin);
       context.SetMniTauMuEff (constants::kNormalizedMin);
       return;
@@ -158,6 +180,7 @@ ComputeMniGateDecision::Execute (OperationContext &context, Transaction &tx) con
       context.SetMniJaccard (constants::kNormalizedMax);
       context.SetMniBestMu (constants::kNormalizedMin);
       context.SetMniDupThresh (constants::kNormalizedMin);
+      context.SetMniOverlapStar (-1.0);
       context.SetMniTauJaccardEff (constants::kNormalizedMin);
       context.SetMniTauMuEff (constants::kNormalizedMin);
       return;
@@ -166,12 +189,10 @@ ComputeMniGateDecision::Execute (OperationContext &context, Transaction &tx) con
   // Section 8.3.1: Use t_acc_start from accumulator state for write exclusion.
   // This ensures all memories written during the current accumulation cycle
   // are excluded from retrieval, preventing self-triggering interrupts.
-  const auto &signal = context.GetSignal ();
   uint64_t write_exclusion_ts = signal.timestamp;  // Fallback to signal timestamp
-  auto acc_it = p_ctx.accumulator_states.find (signal.source_id);
-  if (acc_it != p_ctx.accumulator_states.end () && acc_it->second.t_start > 0)
+  if (acc.t_start > 0)
     {
-      write_exclusion_ts = acc_it->second.t_start;
+      write_exclusion_ts = acc.t_start;
     }
 
   // Query created_at timestamps for all candidate IDs
@@ -240,6 +261,7 @@ ComputeMniGateDecision::Execute (OperationContext &context, Transaction &tx) con
         context.SetMniJaccard (constants::kNormalizedMax);
         context.SetMniBestMu (constants::kNormalizedMin);
         context.SetMniDupThresh (constants::kNormalizedMin);
+        context.SetMniOverlapStar (-1.0);
         context.SetMniTauJaccardEff (constants::kNormalizedMin);
         context.SetMniTauMuEff (constants::kNormalizedMin);
         return;
@@ -253,6 +275,7 @@ ComputeMniGateDecision::Execute (OperationContext &context, Transaction &tx) con
       context.SetMniJaccard (constants::kNormalizedMax);
       context.SetMniBestMu (constants::kNormalizedMin);
       context.SetMniDupThresh (constants::kNormalizedMin);
+      context.SetMniOverlapStar (-1.0);
       context.SetMniTauJaccardEff (constants::kNormalizedMin);
       context.SetMniTauMuEff (constants::kNormalizedMin);
       return;
@@ -280,7 +303,17 @@ ComputeMniGateDecision::Execute (OperationContext &context, Transaction &tx) con
           ctx_vecs.push_back (v);
         }
     }
-  if (ctx_vecs.empty ())
+  if (ctx_vecs.empty () && acc.mu_acc.size () > 0)
+    {
+      Eigen::VectorXf mu_acc = acc.mu_acc;
+      const float norm = mu_acc.norm ();
+      if (norm > 0.0f)
+        {
+          mu_acc /= norm;
+        }
+      ctx_vecs.push_back (mu_acc);
+    }
+  if (ctx_vecs.empty () && !included_vecs.empty ())
     {
       ctx_vecs = included_vecs;
     }
@@ -291,6 +324,7 @@ ComputeMniGateDecision::Execute (OperationContext &context, Transaction &tx) con
       context.SetMniJaccard (constants::kNormalizedMax);
       context.SetMniBestMu (constants::kNormalizedMin);
       context.SetMniDupThresh (constants::kNormalizedMin);
+      context.SetMniOverlapStar (-1.0);
       context.SetMniTauJaccardEff (constants::kNormalizedMin);
       context.SetMniTauMuEff (constants::kNormalizedMin);
       return;
@@ -343,8 +377,8 @@ ComputeMniGateDecision::Execute (OperationContext &context, Transaction &tx) con
 
   // Refractory multiplier based on drift accumulation (Section 10)
   // Delta = cumulative drift since last interrupt
-  const double Delta = std::max (0.0, p_ctx.drift_accum
-                                          - p_ctx.drift_at_last_interrupt);
+  const double Delta = std::max (0.0, acc.drift_accum
+                                          - acc.drift_at_last_interrupt);
   const double tau_refrac = cortext::core::Lerp (kTauRefracMin, kTauRefracMax, T)
                             * cortext::core::Lerp (kTauRefracSMin, kTauRefracSMax,
                                                    S);
@@ -373,7 +407,7 @@ ComputeMniGateDecision::Execute (OperationContext &context, Transaction &tx) con
       const auto &cand = kv.second;
       if (cand.size () > 0 && cand.size () == ctx_centroid.size ())
         {
-          const double sim = Clamp01 (CosSim (ctx_centroid, cand));
+          const double sim = cortext::core::Map01 (CosSim (ctx_centroid, cand));
           candidate_relevances.emplace_back (kv.first, sim);
         }
     }
@@ -402,7 +436,7 @@ ComputeMniGateDecision::Execute (OperationContext &context, Transaction &tx) con
   // Iterate top K candidates and compute MU and overlaps
   double best_mu = -std::numeric_limits<double>::infinity ();
   double max_relevance = 0.0;
-  double max_semantic_overlap = 0.0;
+  double max_semantic_overlap = included_vecs.empty () ? -1.0 : -1.0;
 
   for (const auto &kv : candidates)
     {
@@ -416,9 +450,13 @@ ComputeMniGateDecision::Execute (OperationContext &context, Transaction &tx) con
           continue;
         }
 
-      const double sim_ctx = Clamp01 (CosSim (ctx_centroid, cand));
+      const double sim_ctx = cortext::core::Map01 (CosSim (ctx_centroid, cand));
       const double redundancy = ComputeRedundancy (cand, included_vecs);
-      max_semantic_overlap = std::max (max_semantic_overlap, redundancy);
+      const double raw_overlap = ComputeRawOverlap (cand, included_vecs);
+      if (!included_vecs.empty ())
+        {
+          max_semantic_overlap = std::max (max_semantic_overlap, raw_overlap);
+        }
       const double cov_gain
           = ComputeCoverageGain (ctx_centroid, cand, included_vecs);
 
@@ -447,7 +485,7 @@ ComputeMniGateDecision::Execute (OperationContext &context, Transaction &tx) con
         }
 
       // Find maximum cosine similarity to any embedding in context window
-      double max_sim_to_ctx = 0.0;
+      double max_sim_to_ctx = -1.0;
       for (const auto &ctx_emb : ctx_window)
         {
           if (ctx_emb.size () == cand.size ())
@@ -457,8 +495,11 @@ ComputeMniGateDecision::Execute (OperationContext &context, Transaction &tx) con
             }
         }
 
-      // Embedding novelty = 1 - max_similarity
-      const double candidate_novelty = 1.0 - Clamp01 (max_sim_to_ctx);
+      // Embedding novelty = clamp((1 - max_similarity) / 2, 0, 1)
+      const double candidate_novelty = cortext::core::Clamp (
+          (1.0 - max_sim_to_ctx) * 0.5,
+          constants::kNormalizedMin,
+          constants::kNormalizedMax);
       max_embedding_novelty = std::max (max_embedding_novelty, candidate_novelty);
     }
 
@@ -486,13 +527,13 @@ ComputeMniGateDecision::Execute (OperationContext &context, Transaction &tx) con
   if (allow_interrupt)
     {
       p_ctx.last_interrupt_tick = p_ctx.signals_processed;
-      p_ctx.drift_at_last_interrupt = p_ctx.drift_accum; // Update drift baseline
+      acc.drift_at_last_interrupt = acc.drift_accum; // Update drift baseline
     }
 
-  // Diagnostics (field names unchanged for API compatibility)
   context.SetMniJaccard (max_embedding_novelty);     // Now stores embedding novelty
   context.SetMniBestMu (best_mu);
   context.SetMniDupThresh (dup_thresh);
+  context.SetMniOverlapStar (max_semantic_overlap);
   context.SetMniTauJaccardEff (tau_novelty_eff);     // Now stores tau_novelty_eff
   context.SetMniTauMuEff (tau_m_eff);
 

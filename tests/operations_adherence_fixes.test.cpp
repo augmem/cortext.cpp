@@ -19,12 +19,31 @@
 using namespace cortext;
 using namespace cortext::operations;
 
+namespace
+{
+static void
+SeedMemory (Store &store, long long id)
+{
+  const auto now_ts = cortext::testing::NowMs ();
+  store.Execute (
+      "INSERT OR REPLACE INTO memories("
+      "memory_id, embedding_id, source_id, kind, start_ts, n_signals, modality, "
+      "s_max, s_avg, strength, use_frequency, stability, connectivity, drift_mag, "
+      "influence, sustained_influence, contextual_gain, redundancy, "
+      "pre_activation, lability_state, suppression_count, created_at) "
+      "VALUES(?, ?, 'test', 'LONG_TERM', ?, 1, 'text', 0.5, 0.5, "
+      "1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0, ?)",
+      { id, id, now_ts, now_ts });
+}
+} // namespace
+
 // Removed DummyStore because SignalProcessor now runs migrations which require a functional store
 // (or at least one that returns a valid Transaction object).
 
 TEST_CASE ("Uncertainty weights respond to F and S", "[uncertainty]")
 {
   SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.9;
   cfg.sensitivity = 0.9;
   cfg.stability = 0.1;
@@ -50,14 +69,21 @@ TEST_CASE ("Uncertainty weights respond to F and S", "[uncertainty]")
 
 
 
-TEST_CASE ("Alg17 emits adj; Alg6 consumes it", "[stability]")
+TEST_CASE ("Alg17 emits adj, Alg6 consumes it", "[stability]")
 {
   ProcessorContext pctx;
   SignalProcessor::Config cfg{};
+  cortext::testing::RequireEncoder (cfg);
   cfg.stability = 0.5;
   Signal sig;
   sig.timestamp = 100;
-  OperationContext ctx (sig, pctx, cfg);
+  auto unique_store = cortext::SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<cortext::Store> (std::move (unique_store));
+  cortext::testing::InitializeCoreSchema (*store);
+  SeedMemory (*store, 1LL);
+  SeedMemory (*store, 2LL);
+  SeedMemory (*store, 3LL);
+  OperationContext ctx (sig, pctx, cfg, store.get ());
 
   // Feed some usage events with positive/negative gains
   ctx.SetMemoryUsageEvents ({
@@ -66,7 +92,9 @@ TEST_CASE ("Alg17 emits adj; Alg6 consumes it", "[stability]")
       { 3, true, +0.3 },
   });
   ApplyStabilityFeedback fdbk;
-  fdbk.Execute (ctx, cortext::testing::GetNullTransaction ());
+  auto tx = store->Begin ();
+  fdbk.Execute (ctx, *tx);
+  tx->Commit ();
   // Should set a delta
   REQUIRE (ctx.GetDeltaHalfLifeAdjustment ().has_value ());
 
@@ -82,6 +110,7 @@ TEST_CASE ("Alg4: ΔT_sensitivity is not clamped (Alg8 clamps later)",
 {
   ProcessorContext pctx;
   SignalProcessor::Config cfg{};
+  cortext::testing::RequireEncoder (cfg);
   cfg.sensitivity = 0.9;
   cfg.stability = 0.5;
   Signal sig;
@@ -101,6 +130,7 @@ TEST_CASE ("Alg15/16 use base gains (no knob scaling)", "[feedback]")
 {
   ProcessorContext pctx;
   SignalProcessor::Config cfg{};
+  cortext::testing::RequireEncoder (cfg);
   cfg.sensitivity = 0.7;
   Signal sig;
   sig.timestamp = 1;

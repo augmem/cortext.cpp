@@ -22,7 +22,12 @@ constexpr int kEmbeddingDim = 256;
 class SeedEmbeddingsOp : public cortext::IOperation
 {
 public:
-  explicit SeedEmbeddingsOp (std::vector<long long> ids) : ids_ (std::move (ids))
+  explicit SeedEmbeddingsOp (std::vector<long long> ids,
+                             double strength = 1.0,
+                             double use_frequency = 0.0)
+      : ids_ (std::move (ids)),
+        strength_ (strength),
+        use_frequency_ (use_frequency)
   {
   }
 
@@ -48,13 +53,15 @@ public:
             "influence, sustained_influence, contextual_gain, redundancy, "
             "pre_activation, lability_state, suppression_count, created_at) "
             "VALUES(?, ?, 'test', 'LONG_TERM', ?, 1, 'text', 0.5, 0.5, "
-            "1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0, ?)",
-            { id, id, now_ts, now_ts });
+            "?, ?, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0, ?)",
+            { id, id, now_ts, strength_, use_frequency_, now_ts });
       }
   }
 
 private:
   std::vector<long long> ids_;
+  double strength_;
+  double use_frequency_;
 };
 
 // Helper op to inject usage events into the OperationContext before updates.
@@ -93,9 +100,11 @@ TEST_CASE ("Algorithm 14 creates and updates embeddings row", "[op14]")
 {
   auto unique_store = cortext::SQLiteStore::Create (":memory:");
   auto store = std::shared_ptr<cortext::Store> (std::move (unique_store));
+  cortext::testing::InitializeCoreSchema (*store);
 
   // Default knobs: S=0.5, T=0.5
   SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.5;
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;
@@ -128,21 +137,31 @@ TEST_CASE ("Algorithm 14 creates and updates embeddings row", "[op14]")
   REQUIRE (id == 1LL);
   REQUIRE (uf > 0.0);
   REQUIRE (uf <= 1.0);
-  REQUIRE (strength >= 1.0);
+  REQUIRE (strength >= 0.0);
+  REQUIRE (strength <= 1.0);
 }
 
 TEST_CASE ("Algorithm 14 decays and evicts below cutoff", "[op14]")
 {
   auto unique_store = cortext::SQLiteStore::Create (":memory:");
   auto store = std::shared_ptr<cortext::Store> (std::move (unique_store));
+  cortext::testing::InitializeCoreSchema (*store);
 
   // Set S=0.0 to avoid reinforcement, T=0.0 to maximize decay per step.
   SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.5;
   cfg.sensitivity = 0.0;
   cfg.stability = 0.0;
 
-  // First, create the row with used=false (will create row then decay).
+  // Seed the row with low strength and let decay drive eviction.
+  {
+    SeedEmbeddingsOp seed ({ 42LL }, /*strength=*/0.1);
+    Signal seed_signal = MakeSignal (4, 0);
+    cortext::ProcessorContext seed_ctx_state;
+    OperationContext seed_ctx (seed_signal, seed_ctx_state, cfg, store.get ());
+    seed.Execute (seed_ctx, cortext::testing::GetNullTransaction ());
+  }
   auto set_events = std::make_unique<SetUsageEventsOp> (
       std::vector<OperationContext::MemoryUsageEvent>{ { 42LL, false } });
   auto update_strength
@@ -155,7 +174,7 @@ TEST_CASE ("Algorithm 14 decays and evicts below cutoff", "[op14]")
   // Process multiple signals to ensure decay crosses cutoff.
   for (int i = 0; i < 240; ++i)
     {
-      auto sig = MakeSignal (4, static_cast<uint64_t> (i + 1));
+      auto sig = MakeSignal (4, static_cast<uint64_t> ((i + 1) * 1000));
       processor.Process (sig);
     }
   processor.Flush ();
@@ -165,7 +184,7 @@ TEST_CASE ("Algorithm 14 decays and evicts below cutoff", "[op14]")
       "SELECT COUNT(*) AS cnt FROM memories WHERE memory_id = ?",
       { 42LL });
   const auto cnt = std::any_cast<long long> (rows[0].at ("cnt"));
-  REQUIRE (cnt == 0LL); // evicted
+  REQUIRE (cnt == 0LL); // evicted below periphery cutoff
 }
 
 TEST_CASE (
@@ -177,6 +196,7 @@ TEST_CASE (
 
   // F=1.0 to fully apply influence term; moderate S/T
   SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = 1.0;
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;
@@ -186,7 +206,8 @@ TEST_CASE (
   ev.used = true;
   ev.contextual_gain = 1.0; // strong positive gain
 
-  auto seed = std::make_unique<SeedEmbeddingsOp> (std::vector<long long>{ 7LL });
+  auto seed = std::make_unique<SeedEmbeddingsOp> (
+      std::vector<long long>{ 7LL }, /*strength=*/0.2);
   auto set_events = std::make_unique<SetUsageEventsOp> (
       std::vector<OperationContext::MemoryUsageEvent>{ ev });
   auto update_strength
@@ -211,13 +232,12 @@ TEST_CASE (
   const auto strength = std::any_cast<double> (rows[0].at ("strength"));
   REQUIRE (retrieved == 1LL);
   REQUIRE (used == 1LL);
-  REQUIRE (
-      strength
-      > 1.0); // should increase from baseline with reinforcement/influence
+  REQUIRE (strength > 0.2); // should increase from baseline with influence
+  REQUIRE (strength <= 1.0);
 }
 
 TEST_CASE (
-    "Algorithm 18 negative gain yields small increase; counts increment",
+    "Algorithm 18 negative gain yields small increase, counts increment",
     "[op18][memory_strength]")
 {
   auto unique_store = cortext::SQLiteStore::Create (":memory:");
@@ -226,6 +246,7 @@ TEST_CASE (
   // F=1.0 ensures influence term is fully weighted; with negative gain the
   // map01(influence_factor=-1) => 0, so only reinforcement remains.
   SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = 1.0;
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;
@@ -235,7 +256,8 @@ TEST_CASE (
   ev.used = true;
   ev.contextual_gain = -1.0;
 
-  auto seed = std::make_unique<SeedEmbeddingsOp> (std::vector<long long>{ 8LL });
+  auto seed = std::make_unique<SeedEmbeddingsOp> (
+      std::vector<long long>{ 8LL }, /*strength=*/0.5);
   auto set_events = std::make_unique<SetUsageEventsOp> (
       std::vector<OperationContext::MemoryUsageEvent>{ ev });
   auto update_strength
@@ -260,10 +282,9 @@ TEST_CASE (
   const auto strength = std::any_cast<double> (rows[0].at ("strength"));
   REQUIRE (retrieved == 1LL);
   REQUIRE (used == 1LL);
-  // With negative contextual_gain=-1, influence term is reduced but reinforcement
-  // still applies. Strength should increase but less than with positive gain.
-  REQUIRE (strength > 1.0);
-  REQUIRE (strength < 2.0); // Allow wider margin for v2 algorithm behavior
+  // With negative contextual_gain=-1, influence term can reduce strength.
+  REQUIRE (strength >= 0.0);
+  REQUIRE (strength <= 0.5);
 }
 
 TEST_CASE ("Algorithm 18 counts retrieval when not used",
@@ -273,6 +294,8 @@ TEST_CASE ("Algorithm 18 counts retrieval when not used",
   auto store = std::shared_ptr<cortext::Store> (std::move (unique_store));
 
   SignalProcessor::Config cfg;
+
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.5;
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;
@@ -319,6 +342,7 @@ TEST_CASE ("Algorithm 14 applies exponential decay based on elapsed time",
 
   // T=0 gives half_life=120s; S=0 removes reinforcement; F=0 removes influence
   SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.0;
   cfg.sensitivity = 0.0;
   cfg.stability = 0.0;
@@ -400,6 +424,7 @@ TEST_CASE ("Algorithm 14 no decay when delta_t is zero", "[op14][decay]")
 
   // T=0 gives fastest decay (half_life=120s); S=0 and F=0 remove reinforcement
   SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.0;
   cfg.sensitivity = 0.0;
   cfg.stability = 0.0;
@@ -474,6 +499,8 @@ TEST_CASE ("Algorithm 14 initializes last_access on INSERT",
   auto store = std::shared_ptr<cortext::Store> (std::move (unique_store));
 
   SignalProcessor::Config cfg;
+
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.5;
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;

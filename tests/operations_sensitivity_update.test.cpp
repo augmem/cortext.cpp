@@ -25,6 +25,7 @@ TEST_CASE ("UpdateSensitivity without centroids sets sane defaults and deltas",
   s.embedding = unit_at (0, 4);
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
   cfg.sensitivity = 0.7;
   cfg.stability = 0.5;
 
@@ -66,6 +67,7 @@ TEST_CASE (
   pctx.centroids = centroids;
 #
   SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
   cfg.sensitivity = 0.8;
   cfg.stability = 0.4;
 
@@ -90,16 +92,17 @@ TEST_CASE ("Write-rate window affects rate_target with bursts and gaps",
     s.timestamp = 1000;
     ProcessorContext pctx;
     SignalProcessor::Config cfg;
+    cortext::testing::RequireEncoder (cfg);
     cfg.sensitivity = 0.6;
     cfg.stability = 0.4;
   
     OperationContext ctx (s, pctx, cfg);
-    // Populate window with 1s intervals
-    uint64_t t = 900;
+    // Populate window with 1s intervals (ms timestamps)
+    uint64_t t = 900000;
     for (int i = 0; i < 10; ++i)
       {
         pctx.write_rate_window_.Record (t);
-        t += 1;
+        t += 1000;
       }
     UpdateSensitivity op;
     op.Execute (ctx, cortext::testing::GetNullTransaction ());
@@ -112,15 +115,16 @@ TEST_CASE ("Write-rate window affects rate_target with bursts and gaps",
     s.timestamp = 2000;
     ProcessorContext pctx;
     SignalProcessor::Config cfg;
+    cortext::testing::RequireEncoder (cfg);
     cfg.sensitivity = 0.6;
     cfg.stability = 0.4;
   
     OperationContext ctx (s, pctx, cfg);
-    uint64_t t = 1800;
+    uint64_t t = 1800000;
     for (int i = 0; i < 10; ++i)
       {
         pctx.write_rate_window_.Record (t);
-        t += 5;
+        t += 5000;
       }
     UpdateSensitivity op;
     op.Execute (ctx, cortext::testing::GetNullTransaction ());
@@ -135,6 +139,7 @@ TEST_CASE ("Write-rate window affects rate_target with bursts and gaps",
     s.timestamp = 3000;
     ProcessorContext pctx;
     SignalProcessor::Config cfg;
+    cortext::testing::RequireEncoder (cfg);
     cfg.sensitivity = 0.5;
     cfg.stability = 0.5;
   

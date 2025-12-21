@@ -2,6 +2,7 @@
 #include <Eigen/Dense>
 #include <any>
 #include <catch2/catch_approx.hpp>
+#include "test_helpers.hpp"
 #include <catch2/catch_test_macros.hpp>
 #include <cortext/core/algorithms.hpp>
 #include <cortext/core/knobs.hpp>
@@ -174,6 +175,8 @@ TEST_CASE ("ConsolidationCluster groups similar embeddings",
   auto store = std::shared_ptr<Store> (std::move (unique_store));
 
   SignalProcessor::Config cfg;
+
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.0; // Low focus = lower merge threshold, larger clusters
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;
@@ -208,6 +211,8 @@ TEST_CASE ("ConsolidationCluster filters small clusters",
   auto store = std::shared_ptr<Store> (std::move (unique_store));
 
   SignalProcessor::Config cfg;
+
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = 1.0; // High focus = min_cluster_size=10
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;
@@ -239,6 +244,8 @@ TEST_CASE ("ConsolidationCluster returns empty on no candidates",
   auto store = std::shared_ptr<Store> (std::move (unique_store));
 
   SignalProcessor::Config cfg;
+
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.5;
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;
@@ -262,6 +269,8 @@ TEST_CASE ("ConsolidationCluster skips when consolidation not started",
   auto store = std::shared_ptr<Store> (std::move (unique_store));
 
   SignalProcessor::Config cfg;
+
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.0;
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;

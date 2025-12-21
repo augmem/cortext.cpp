@@ -22,6 +22,7 @@ TEST_CASE ("Serial position multiplier reflects primacy/recency zones",
   s.timestamp = 100;
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.5;
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;
@@ -95,6 +96,7 @@ TEST_CASE ("von_restorff_multiplier applies to distinctive items",
   s.timestamp = 100;
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.3;       // Lower focus to widen primacy/recency windows
   cfg.sensitivity = 1.0; // High sensitivity for max von_restorff (3.0)
   cfg.stability = 0.5;
@@ -134,6 +136,7 @@ TEST_CASE ("middle_suppression reduces multiplier for middle zone items",
   s.timestamp = 100;
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.9;       // High focus to narrow primacy/recency windows
   cfg.sensitivity = 1.0; // High S for stronger middle_suppression
   cfg.stability = 0.5;

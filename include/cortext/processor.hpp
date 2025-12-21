@@ -4,6 +4,7 @@
 #include "cortext/processor/operation.hpp"
 #include "cortext/processor/processor_context.hpp"
 #include "cortext/store/store.hpp"
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <unordered_map>
@@ -13,6 +14,8 @@ namespace cortext
 {
 
 struct Signal;
+class OperationContext;
+class Encoder;
 
 /// @brief Orchestrates the signal processing.
 ///
@@ -28,9 +31,10 @@ public:
     double sensitivity = 0.5;
     double stability = 0.5;
 
-    // Optional LLM components (may be null)
+    // LLM components (extractor/summarizer may be null)
     Extractor *extractor = nullptr;
     Summarizer *summarizer = nullptr;
+    Encoder *encoder = nullptr; // Required for embedding-based operations
   };
 
   /// @brief Constructs a SignalProcessor with a defined set of operations.
@@ -97,19 +101,14 @@ public:
   void Flush ();
 
 private:
-  void StartNewEpisode ();
-  void FinalizeEpisode (Transaction &tx);
+  void StartNewEpisode (Transaction *tx, uint64_t start_ts);
+  void FinalizeEpisode (Transaction *tx, const OperationContext *op_context);
 
   // State persistence helpers (called within Process transaction)
   // v2 schema: Unified state persistence
   void PersistState (Transaction &tx);           // Unified STATE table
   void PersistWorkingMemory (Transaction &tx);   // MEMORIES with kind='WORKING'
   void PersistAccumulators (Transaction &tx);    // ACCUMULATORS table
-
-  // View-backed persistence (still separate for SIGNALS-derived views)
-  void PersistRecentContext (Transaction &tx);
-  void PersistRecentScores (Transaction &tx);
-  void PersistObservedRetentionHistory (Transaction &tx);
 
   Config config_;
   std::shared_ptr<Store> store_;

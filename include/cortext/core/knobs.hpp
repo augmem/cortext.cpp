@@ -36,6 +36,12 @@ KNeighbors (double T)
   return static_cast<int> (std::round (Lerp (8.0, 32.0, T)));
 }
 
+inline int
+KCtx (double T)
+{
+  return static_cast<int> (std::round (Lerp (3.0, 10.0, Clamp (T, 0.0, 1.0))));
+}
+
 // RLS observation window size (Algorithm 7)
 inline int
 RLSWindowN (double T)
@@ -290,12 +296,12 @@ MinClusterSize (double F)
   return static_cast<int> (std::round (Lerp (3.0, 10.0, Clamp (F, 0.0, 1.0))));
 }
 
-// Entity frequency threshold — Section 7.4
+// Label frequency threshold — Section 7.4
 inline int
-EntityFrequencyThreshold (double T)
+LabelFrequencyThreshold (double T)
 {
-  // entity_frequency_threshold(T) = round(lerp(5, 15, T))
-  // Higher stability = higher frequency required for entity to be notable
+  // label_frequency_threshold(T) = round(lerp(5, 15, T))
+  // Higher stability = higher frequency required for label to be notable
   return static_cast<int> (std::round (Lerp (5.0, 15.0, Clamp (T, 0.0, 1.0))));
 }
 

@@ -56,6 +56,13 @@ struct AccumulatorState
   std::vector<std::vector<unsigned char>> blob_ids;  ///< Aggregated objstore refs
   std::string primary_modality;                       ///< "text"|"audio"|"image"
 
+  // Streaming integration (Section 10)
+  Eigen::VectorXf prev_x;           ///< Previous signal embedding for refractory
+  Eigen::VectorXf x_last_check;     ///< Embedding at last pacing check
+  double drift_accum = 0.0;         ///< Cumulative drift since last interrupt
+  double drift_at_last_interrupt = 0.0;  ///< Snapshot for refractory delta
+  double drift_acc_pacing = 0.0;    ///< Drift accumulator for pacing gate
+
   /**
    * @brief Reset accumulator for new memory accumulation
    * @param first_embedding Initial embedding for the new memory

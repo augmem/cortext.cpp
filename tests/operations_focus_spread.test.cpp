@@ -19,14 +19,16 @@ TEST_CASE ("ComputeFocusSpread produces high entropy for uniform similarities",
   s.embedding = Eigen::VectorXf::Ones (8);
   s.embedding.normalize ();
   ProcessorContext pctx;
-  // Seed recent context with multiple identical embeddings to produce uniform
+  // Seed memory_stream with multiple identical embeddings to produce uniform
   // sims.
   for (int i = 0; i < 6; ++i)
     {
-      pctx.recent_context_embeddings.push_back (s.embedding);
+      pctx.memory_stream.push_back (s.embedding);
     }
 
   SignalProcessor::Config cfg;
+
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.6;
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;
@@ -56,16 +58,18 @@ TEST_CASE ("Effective focus is reduced when focus_spread is high",
   s.embedding.normalize ();
 
   SignalProcessor::Config cfg;
+
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.7;
   cfg.sensitivity = 0.4;
   cfg.stability = 0.5;
 
 
-  // High-spread context: many identical (uniform sims)
+  // High-spread memory stream: many identical (uniform sims)
   ProcessorContext p_high;
   for (int i = 0; i < 6; ++i)
     {
-      p_high.recent_context_embeddings.push_back (s.embedding);
+      p_high.memory_stream.push_back (s.embedding);
     }
   OperationContext ctx_high (s, p_high, cfg);
   ctx_high.SetCoherence (1.0); // isolate spread effect
@@ -75,13 +79,13 @@ TEST_CASE ("Effective focus is reduced when focus_spread is high",
   feff.Execute (ctx_high, cortext::testing::GetNullTransaction ());
   const double f_eff_high = ctx_high.GetEffectiveFocus ();
 
-  // Low-spread context: one very similar, others dissimilar
+  // Low-spread memory stream: one very similar, others dissimilar
   ProcessorContext p_low;
-  p_low.recent_context_embeddings.push_back (s.embedding); // high sim
+  p_low.memory_stream.push_back (s.embedding); // high sim
   for (int i = 0; i < 5; ++i)
     {
       Eigen::VectorXf v = -s.embedding; // low/negative similarity
-      p_low.recent_context_embeddings.push_back (v);
+      p_low.memory_stream.push_back (v);
     }
   OperationContext ctx_low (s, p_low, cfg);
   ctx_low.SetCoherence (1.0); // isolate spread effect

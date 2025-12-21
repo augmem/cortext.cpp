@@ -11,6 +11,7 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+#include <utility>
 
 namespace cortext
 {
@@ -295,6 +296,16 @@ public:
   GetMniDupThresh () const
   {
     return mni_dup_thresh_;
+  }
+  void
+  SetMniOverlapStar (double v)
+  {
+    mni_overlap_star_ = v;
+  }
+  double
+  GetMniOverlapStar () const
+  {
+    return mni_overlap_star_;
   }
   void
   SetMniTauJaccardEff (double v)
@@ -677,6 +688,26 @@ public:
   {
     return should_finalize_episode_;
   }
+  void
+  SetBoundaryType (std::optional<std::string> v)
+  {
+    boundary_type_ = std::move (v);
+  }
+  std::optional<std::string>
+  GetBoundaryType () const
+  {
+    return boundary_type_;
+  }
+  void
+  SetBoundaryCentroid (std::optional<Eigen::VectorXf> v)
+  {
+    boundary_centroid_ = std::move (v);
+  }
+  std::optional<Eigen::VectorXf>
+  GetBoundaryCentroid () const
+  {
+    return boundary_centroid_;
+  }
 
   // ======================================================================
   // Write Gate API (Algorithm 7+8: composite_score > T_dynamic - hysteresis)
@@ -935,6 +966,8 @@ private:
   int last_effective_metric_count_ = 0;
   double f_eff_ = 0.0;
   bool should_finalize_episode_ = false;
+  std::optional<std::string> boundary_type_;
+  std::optional<Eigen::VectorXf> boundary_centroid_;
 
   // Stability feedback bridge and optional observed retention
   std::optional<double> delta_half_life_adj_;
@@ -977,6 +1010,7 @@ private:
   double mni_jaccard_ = 0.0;
   double mni_best_mu_ = 0.0;
   double mni_dup_thresh_ = 0.0;
+  double mni_overlap_star_ = -1.0;
   double mni_tau_j_eff_ = 0.0;
   double mni_tau_m_eff_ = 0.0;
 
@@ -986,7 +1020,7 @@ private:
   bool consolidation_should_start_ = false;
 
   // Streaming Pacing fields (Section 10.4)
-  bool should_check_retrieval_ = true;   // Default: always check (backward compat)
+  bool should_check_retrieval_ = true;
   double drift_accum_snapshot_ = 0.0;
 
   // Consolidation Cluster fields (Section 7.3)

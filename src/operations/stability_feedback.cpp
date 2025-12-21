@@ -14,10 +14,7 @@ void
 ApplyStabilityFeedback::Execute (OperationContext &context, Transaction &tx) const
 {
   (void)tx;
-  const auto &cfg = context.GetConfig ();
-  const double T = core::Clamp (cfg.stability, constants::kNormalizedMin,
-                                constants::kNormalizedMax);
-  const double gamma_T = constants::kGammaTBase * T;
+  const double gamma_T = constants::kGammaTBase;
 
   const auto &events = context.GetMemoryUsageEvents ();
   std::vector<double> stability_factors;
@@ -30,14 +27,26 @@ ApplyStabilityFeedback::Execute (OperationContext &context, Transaction &tx) con
           continue;
         }
       const double cg = *e.contextual_gain; // may be negative
-      if (cg > 0.0)
+      auto rows = tx.Execute (
+          "SELECT stability FROM memories WHERE embedding_id = ?",
+          { static_cast<long long> (e.embedding_id) });
+      if (rows.empty ())
         {
-          stability_factors.push_back (1.0 + gamma_T);
+          continue;
         }
-      else
-        {
-          stability_factors.push_back (1.0 - gamma_T);
-        }
+
+      const double stability_prev
+          = std::any_cast<double> (rows[0].at ("stability"));
+      const double stability_new = (cg > 0.0)
+                                       ? (stability_prev + gamma_T)
+                                       : (stability_prev * (1.0 - gamma_T));
+      const double stability_clamped
+          = core::Clamp (stability_new, 0.0, 2.0);
+
+      tx.Execute ("UPDATE memories SET stability = ? WHERE embedding_id = ?",
+                  { stability_clamped,
+                    static_cast<long long> (e.embedding_id) });
+      stability_factors.push_back (stability_clamped);
     }
 
   if (stability_factors.empty ())

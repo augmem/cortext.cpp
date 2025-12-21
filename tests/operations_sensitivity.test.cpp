@@ -16,6 +16,7 @@ TEST_CASE ("InitializeSensitivityPriors computes priors (S=0.5)",
   s.embedding = Eigen::VectorXf::Zero (3);
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
   cfg.sensitivity = 0.5;
 
   OperationContext ctx (s, pctx, cfg);
@@ -49,6 +50,7 @@ TEST_CASE ("InitializeSensitivityPriors edge cases (S=0 and S=1)",
   {
     ProcessorContext pctx;
     SignalProcessor::Config cfg;
+    cortext::testing::RequireEncoder (cfg);
     cfg.sensitivity = 0.0;
     OperationContext ctx (s, pctx, cfg);
     InitializeSensitivityPriors op;
@@ -70,6 +72,7 @@ TEST_CASE ("InitializeSensitivityPriors edge cases (S=0 and S=1)",
   {
     ProcessorContext pctx;
     SignalProcessor::Config cfg;
+    cortext::testing::RequireEncoder (cfg);
     cfg.sensitivity = 1.0;
     OperationContext ctx (s, pctx, cfg);
     InitializeSensitivityPriors op;

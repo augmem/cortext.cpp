@@ -7,7 +7,6 @@
 #include "cortext/telemetry/telemetry.hpp"
 #include <algorithm>
 #include <cmath>
-#include <numeric>
 #include <vector>
 
 namespace cortext::operations
@@ -33,16 +32,6 @@ ComputeMean (const std::deque<Eigen::VectorXf> &embs, int start, int end)
   return mean;
 }
 
-inline double
-CosSim01 (const Eigen::VectorXf &a, const Eigen::VectorXf &b)
-{
-  const double c = core::CosineSimilarity (a, b); // [-1,1]
-  return core::Clamp (constants::kOneHalf * (c + constants::kNormalizedMax),
-                      constants::kNormalizedMin, constants::kNormalizedMax);
-}
-
-
-
 } // namespace
 
 void
@@ -58,23 +47,60 @@ ComputeMetrics::Execute (OperationContext &context, Transaction &tx) const
   const double S = cfg.sensitivity;
   const double T = cfg.stability;
 
-  // Relevance: cos(x, mean(ctx)) mapped to [0,1], scaled by (0.5 + F)
-  double relevance = constants::kNormalizedMin;
-  if (!p_ctx.recent_context_embeddings.empty ())
+  const int n_ctx_total
+      = static_cast<int> (p_ctx.recent_context_embeddings.size ());
+  const int ctx_window = static_cast<int> (core::NCtx (T));
+  const int ctx_start = std::max (0, n_ctx_total - ctx_window);
+
+  Eigen::VectorXf mean_ctx = Eigen::VectorXf::Zero (x.size ());
+  double max_cos = -1.0;
+  double sum_cos = 0.0;
+  int count = 0;
+  for (int i = ctx_start; i < n_ctx_total; ++i)
     {
-      const Eigen::VectorXf mean_ctx = ComputeMean (
-          p_ctx.recent_context_embeddings, 0,
-          static_cast<int> (p_ctx.recent_context_embeddings.size ()));
-      const double cos01 = CosSim01 (x, mean_ctx);
-      relevance = core::Clamp (cos01 * (constants::kOneHalf + F_eff),
-                               constants::kNormalizedMin,
-                               constants::kNormalizedMax);
+      const auto &emb
+          = p_ctx.recent_context_embeddings[static_cast<size_t> (i)];
+      if (emb.size () != x.size () || x.size () == 0)
+        {
+          continue;
+        }
+      mean_ctx += emb;
+      const double c = core::CosineSimilarity (x, emb);
+      max_cos = std::max (max_cos, c);
+      sum_cos += c;
+      ++count;
     }
+
+  double cos01 = 0.5;
+  if (count > 0)
+    {
+      mean_ctx /= static_cast<float> (count);
+      const double cos_mean = core::CosineSimilarity (x, mean_ctx);
+      cos01 = core::Map01 (cos_mean);
+    }
+  const double relevance = core::Clamp (
+      cos01 * (constants::kOneHalf + constants::kOneHalf * F_eff),
+      constants::kNormalizedMin, constants::kNormalizedMax);
   context.SetMetric (operations::Metric::relevance, relevance);
 
-  // Novelty approximate: 1 - relevance
-  const double novelty
-      = core::Clamp (constants::kNormalizedMax - relevance,
+  const double novelty = (count > 0)
+                             ? core::Clamp (
+                                   (constants::kNormalizedMax - max_cos)
+                                       * constants::kOneHalf,
+                                   constants::kNormalizedMin,
+                                   constants::kNormalizedMax)
+                             : constants::kNormalizedMax;
+  const double mean_cos = (count > 0) ? (sum_cos / static_cast<double> (count))
+                                      : 0.0;
+  const double mu_sim = (count > 0)
+                            ? core::Clamp (
+                                  constants::kOneHalf
+                                      * (mean_cos + constants::kNormalizedMax),
+                                  constants::kNormalizedMin,
+                                  constants::kNormalizedMax)
+                            : constants::kOneHalf;
+  const double rarity_base
+      = core::Clamp (constants::kNormalizedMax - mu_sim,
                      constants::kNormalizedMin, constants::kNormalizedMax);
 
   // Mismatch: (1 − F) × S × novelty
@@ -94,48 +120,45 @@ ComputeMetrics::Execute (OperationContext &context, Transaction &tx) const
       constants::kNormalizedMin, constants::kNormalizedMax);
   context.SetMetric (operations::Metric::surprise, surprise);
 
-  // Rarity: (1 − mean_sim) × (0.5 + 0.5F) × (1 − kRarityTCoeff×T)
+  // Rarity: rarity_t × (0.5 + 0.5F) × (1 − 0.2T)
   const double rarity
       = core::Clamp (
-          (constants::kNormalizedMax - relevance)
+          rarity_base
               * (constants::kOneHalf + constants::kOneHalf * F_eff)
               * (constants::kNormalizedMax - constants::kRarityTCoeff * T),
           constants::kNormalizedMin, constants::kNormalizedMax);
   context.SetMetric (operations::Metric::rarity, rarity);
 
-  // Drift: ||mean(ctx_recent) − mean(ctx_prev)|| mapped to [0,1], × (1 − T)
-  double drift = 0.0;
-  const int n_ctx = static_cast<int> (p_ctx.recent_context_embeddings.size ());
-  if (n_ctx >= 4)
+  // Drift: lagged centroid drift with k_ctx(T) step lag
+  const int k_ctx = core::KCtx (T);
+  double drift_mag = 0.0;
+  if (n_ctx_total >= ctx_window + k_ctx && x.size () > 0)
     {
-      const int k = std::min (core::KNeighbors (T), n_ctx / 2);
-      const int split = n_ctx - k;
-      if (k > 0 && split >= k)
+      const Eigen::VectorXf mean_recent = ComputeMean (
+          p_ctx.recent_context_embeddings, n_ctx_total - ctx_window,
+          n_ctx_total);
+      const Eigen::VectorXf mean_prev
+          = ComputeMean (p_ctx.recent_context_embeddings,
+                         n_ctx_total - k_ctx - ctx_window,
+                         n_ctx_total - k_ctx);
+      if (mean_recent.size () == mean_prev.size ()
+          && mean_recent.size () > 0)
         {
-          const Eigen::VectorXf mean_recent = ComputeMean (
-              p_ctx.recent_context_embeddings, n_ctx - k, n_ctx);
-          const Eigen::VectorXf mean_prev = ComputeMean (
-              p_ctx.recent_context_embeddings, split - k, split);
-          if (mean_recent.size () == mean_prev.size ()
-              && mean_prev.size () > 0)
-            {
-              const Eigen::VectorXf nr
-                  = (mean_recent.norm () > 0.0f)
-                        ? (mean_recent / mean_recent.norm ())
-                        : mean_recent;
-              const Eigen::VectorXf np = (mean_prev.norm () > 0.0f)
-                                             ? (mean_prev / mean_prev.norm ())
-                                             : mean_prev;
-              const double d = (nr - np).norm (); // ∈ [0,2]
-              const double d01 = core::Clamp (constants::kOneHalf * d,
-                                              constants::kNormalizedMin,
-                                              constants::kNormalizedMax);
-              drift = core::Clamp (d01 * (constants::kNormalizedMax - T),
-                                   constants::kNormalizedMin,
-                                   constants::kNormalizedMax);
-            }
+          const Eigen::VectorXf nr
+              = (mean_recent.norm () > 0.0f)
+                    ? (mean_recent / mean_recent.norm ())
+                    : mean_recent;
+          const Eigen::VectorXf np = (mean_prev.norm () > 0.0f)
+                                         ? (mean_prev / mean_prev.norm ())
+                                         : mean_prev;
+          drift_mag = (nr - np).norm ();
         }
     }
+  context.SetMetric (operations::Metric::drift_mag, drift_mag);
+  const double drift = core::Clamp (
+      (drift_mag * constants::kOneHalf)
+          * (constants::kNormalizedMax - T),
+      constants::kNormalizedMin, constants::kNormalizedMax);
   context.SetMetric (operations::Metric::drift, drift);
 
   // Contradiction: max(0, S − F)
@@ -143,22 +166,23 @@ ComputeMetrics::Execute (OperationContext &context, Transaction &tx) const
       = std::max (constants::kNormalizedMin, S - F_eff);
   context.SetMetric (operations::Metric::contradiction, contradiction);
 
-  // Utility (Δ proxy): positive deviation from mean recent score,
-  // scaled per table: × (0.5 + 0.5F) × (1 − 0.3S)
-  double mean_recent_score = constants::kNormalizedMin;
-  if (!p_ctx.recent_scores.empty ())
+  // Utility (ΔSSE): normalized improvement in prediction error
+  double delta_sse = 0.0;
+  if (p_ctx.prediction_error_sse.has_value ()
+      && p_ctx.prediction_error_sse_prev.has_value ())
     {
-      mean_recent_score = std::accumulate (p_ctx.recent_scores.begin (),
-                                           p_ctx.recent_scores.end (), 0.0)
-                          / static_cast<double> (p_ctx.recent_scores.size ());
-      mean_recent_score = core::Clamp (mean_recent_score,
-                                       constants::kNormalizedMin,
-                                       constants::kNormalizedMax);
+      const double sse_prev = *p_ctx.prediction_error_sse_prev;
+      const double sse_curr = *p_ctx.prediction_error_sse;
+      const double denom = std::max (sse_prev, 1e-9);
+      if (sse_prev > 0.0)
+        {
+          delta_sse = core::Clamp ((sse_prev - sse_curr) / denom,
+                                   constants::kNormalizedMin,
+                                   constants::kNormalizedMax);
+        }
     }
-  const double delta_score = std::max (constants::kNormalizedMin,
-                                       relevance - mean_recent_score);
   const double utility
-      = core::Clamp (delta_score
+      = core::Clamp (delta_sse
                          * (constants::kOneHalf + constants::kOneHalf * F_eff)
                          * (constants::kNormalizedMax - constants::kUtilitySCoeff * S),
                      constants::kNormalizedMin, constants::kNormalizedMax);
@@ -177,9 +201,9 @@ ComputeMetrics::Execute (OperationContext &context, Transaction &tx) const
                                        constants::kNormalizedMax);
   context.SetMetric (operations::Metric::coverage, coverage);
 
-  // Salience: (rarity + novelty_recent)/2 × (F + S)/2
+  // Salience: (rarity_t + novelty_t)/2 × (F + S)/2
   const double salience
-      = core::Clamp (constants::kOneHalf * (rarity + novelty)
+      = core::Clamp (constants::kOneHalf * (rarity_base + novelty)
                          * constants::kOneHalf * (F_eff + S),
                      constants::kNormalizedMin, constants::kNormalizedMax);
   context.SetMetric (operations::Metric::salience, salience);

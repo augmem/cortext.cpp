@@ -108,6 +108,9 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
       const int n_signals = std::max (acc.n_signals, 1);
       const double s_avg = acc.s_sum / static_cast<double> (n_signals);
       const double s_max = acc.s_max;
+      const double s_emotion_max = acc.s_emotion_max;
+      const double s_arousal_avg
+          = acc.s_arousal_sum / static_cast<double> (n_signals);
       const uint64_t start_ts = acc.t_start;
       const uint64_t end_ts = signal.timestamp;
 
@@ -121,9 +124,27 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
       const std::string primary_modality
           = GetPrimaryModality (acc.signals, signal.modality);
 
-      // 4. Store content blob (use current signal's payload if available)
+      // 4. Require tracked per-signal records for persistence.
+      if (acc.signals.empty ())
+        {
+          savepoint->Rollback ();
+          telemetry::AddCounter (
+              "cortext.memory_storage.missing_signals_total", 1);
+          return;
+        }
+
+      // 5. Store memory-level content blob (reuse last signal blob if present).
       std::vector<unsigned char> content_blob_id;
-      if (signal.payload && !signal.payload->empty ())
+      for (auto it = acc.signals.rbegin (); it != acc.signals.rend (); ++it)
+        {
+          if (!it->blob_id.empty ())
+            {
+              content_blob_id = it->blob_id;
+              break;
+            }
+        }
+      if (content_blob_id.empty () && signal.payload
+          && !signal.payload->empty ())
         {
           auto blob_rows = savepoint->Execute ("SELECT objstore_put(?1) AS id",
                                                { *signal.payload });
@@ -133,7 +154,7 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
             }
         }
 
-      // 5. Insert embedding (v2: minimal sqlite-vec table)
+      // 6. Insert memory embedding (v2: minimal sqlite-vec table)
       const std::string insert_sql = std::string ("INSERT INTO embeddings (")
                                      + store::kEmbeddingsInsertColumns
                                      + ") VALUES ("
@@ -159,7 +180,7 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
         }
       const long long embedding_id = *id_opt;
 
-      // 6. Insert MEMORIES row with aggregated metadata (v2 schema)
+      // 7. Insert MEMORIES row with aggregated metadata (v2 schema)
       std::any episode_id_any;
       if (p_ctx.episode_start_ts > 0)
         {
@@ -169,17 +190,19 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
       savepoint->Execute (
           "INSERT INTO memories ("
           "  embedding_id, source_id, kind, start_ts, end_ts, n_signals, "
-          "  modality, s_max, s_avg, emotion, ambient_mood, episode_id, "
+          "  modality, s_max, s_avg, s_emotion_max, s_arousal_avg, "
+          "  emotion, ambient_mood, episode_id, "
           "  blob_id, created_at"
-          ") VALUES (?, ?, 'LONG_TERM', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          ") VALUES (?, ?, 'LONG_TERM', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
           { embedding_id, signal.source_id, static_cast<long long> (start_ts),
             static_cast<long long> (end_ts),
             static_cast<long long> (n_signals), primary_modality,
-            s_max, s_avg, emotion_blob, mood_blob, episode_id_any,
+            s_max, s_avg, s_emotion_max, s_arousal_avg,
+            emotion_blob, mood_blob, episode_id_any,
             content_blob_id.empty () ? std::any () : std::any (content_blob_id),
             static_cast<long long> (end_ts) });
 
-      // 7. Get memory_id from inserted memories row
+      // 8. Get memory_id from inserted memories row
       auto mem_id_rows
           = savepoint->Execute ("SELECT last_insert_rowid() AS id", {});
       const long long memory_id
@@ -187,18 +210,33 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
                 ? 0
                 : AnyToLongLong (mem_id_rows[0].at ("id")).value_or (0);
 
-      // 8. Insert SIGNALS rows (one per tracked signal)
-      // Note: In v2, each signal should have its own embedding_id. For now,
-      // we store the memory's embedding_id as a placeholder until per-signal
-      // embedding storage is implemented in Phase 4.
+      // 9. Insert SIGNALS rows (one per tracked signal)
       for (const auto &sig_rec : acc.signals)
         {
+          long long signal_embedding_id = embedding_id;
+          if (sig_rec.embedding.size () > 0)
+            {
+              const std::vector<float> sig_vec
+                  = EigenToFloatVec (sig_rec.embedding);
+              savepoint->Execute (insert_sql,
+                                  { sig_vec,
+                                    static_cast<long long> (sig_rec.timestamp) });
+              auto sig_id_rows
+                  = savepoint->Execute ("SELECT last_insert_rowid() AS id", {});
+              if (!sig_id_rows.empty () && sig_id_rows[0].count ("id") != 0)
+                {
+                  signal_embedding_id
+                      = AnyToLongLong (sig_id_rows[0].at ("id"))
+                            .value_or (embedding_id);
+                }
+            }
+
           savepoint->Execute (
               "INSERT INTO signals ("
               "  memory_id, source_id, embedding_id, timestamp, modality, "
               "  mime, blob_id, serial_position, score, created_at"
               ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-              { memory_id, signal.source_id, embedding_id,
+              { memory_id, signal.source_id, signal_embedding_id,
                 static_cast<long long> (sig_rec.timestamp), sig_rec.modality,
                 sig_rec.mime,
                 sig_rec.blob_id.empty () ? std::any ()
@@ -207,8 +245,7 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
                 static_cast<long long> (sig_rec.timestamp) });
         }
 
-      // 9. Clear signal tracking from accumulator (signals now persisted)
-      acc.signals.clear ();
+      // 10. Leave signal tracking until accumulator resets (used by WM gating)
 
       // Commit the savepoint
       savepoint->Commit ();

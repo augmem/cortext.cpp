@@ -83,6 +83,7 @@ TEST_CASE ("Alg27 allows on MU path", "[operations][interrupt_gate]")
 
   // Setup config (moderate F,S,T)
   SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.7;
   cfg.sensitivity = 0.6;
   cfg.stability = 0.5;
@@ -122,10 +123,12 @@ TEST_CASE ("Alg27 allows on MU path", "[operations][interrupt_gate]")
   CAPTURE (oc.GetMniTauMuEff ());
   CAPTURE (oc.GetMniTauJaccardEff ());
   CAPTURE (oc.GetMniDupThresh ());
+  CAPTURE (oc.GetMniOverlapStar ());
 
   REQUIRE (oc.GetInterruptAllowed () == true);
   REQUIRE (oc.GetMniBestMu () >= oc.GetMniTauMuEff ());
   REQUIRE (oc.GetMniDupThresh () > 0.0);
+  REQUIRE (oc.GetMniOverlapStar () == Catch::Approx (-1.0));
 }
 
 TEST_CASE ("Alg27 duplicate suppression", "[operations][interrupt_gate]")
@@ -133,6 +136,8 @@ TEST_CASE ("Alg27 duplicate suppression", "[operations][interrupt_gate]")
   auto store = CreateTestStore ();
 
   SignalProcessor::Config cfg;
+
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.9; // high dup threshold
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;
@@ -171,10 +176,10 @@ TEST_CASE ("Alg27 duplicate suppression", "[operations][interrupt_gate]")
   CAPTURE (oc.GetMniTauMuEff ());
   CAPTURE (oc.GetMniTauJaccardEff ());
   CAPTURE (oc.GetMniDupThresh ());
+  CAPTURE (oc.GetMniOverlapStar ());
 
   REQUIRE (oc.GetInterruptAllowed () == false);
-  REQUIRE (oc.GetMniBestMu ()
-           < oc.GetMniDupThresh ()); // overlap should dominate
+  REQUIRE (oc.GetMniOverlapStar () > 0.95);
 }
 
 TEST_CASE ("Alg27 refractory raises thresholds",
@@ -183,6 +188,8 @@ TEST_CASE ("Alg27 refractory raises thresholds",
   auto store = CreateTestStore ();
 
   SignalProcessor::Config cfg;
+
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.9; // tighten dup and increase boundary_mult
   cfg.sensitivity = 0.5;
   cfg.stability = 0.8; // long refractory
@@ -225,6 +232,7 @@ TEST_CASE ("Alg27 embedding novelty high for orthogonal candidate",
   // Test that embedding novelty is high (~1.0) when candidate is orthogonal
   // to all embeddings in the context window.
   SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.5;
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;
@@ -256,9 +264,9 @@ TEST_CASE ("Alg27 embedding novelty high for orthogonal candidate",
   auto tx = store->Begin ();
   op.Execute (oc, *tx);
 
-  // Embedding novelty = 1 - max(cos) = 1 - 0 = 1.0 (orthogonal)
+  // Embedding novelty = clamp((1 - max_cos) / 2) = 0.5 for orthogonal vectors
   // MniJaccard now stores embedding novelty
-  REQUIRE (oc.GetMniJaccard () == Catch::Approx (1.0).margin (0.01));
+  REQUIRE (oc.GetMniJaccard () == Catch::Approx (0.5).margin (0.01));
 }
 
 TEST_CASE ("Alg27 embedding novelty low for similar candidate",
@@ -269,6 +277,7 @@ TEST_CASE ("Alg27 embedding novelty low for similar candidate",
   // Test that embedding novelty is low (~0.0) when candidate is very
   // similar to an embedding in the context window.
   SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.5;
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;
@@ -302,6 +311,7 @@ TEST_CASE ("Alg27 embedding novelty low for similar candidate",
   // Embedding novelty should be close to 0 (high similarity)
   // MniJaccard now stores embedding novelty
   REQUIRE (oc.GetMniJaccard () < 0.1);
+  REQUIRE (oc.GetMniOverlapStar () == Catch::Approx (-1.0));
 }
 
 TEST_CASE ("Alg27 embedding novelty 1.0 when context window empty",
@@ -311,6 +321,7 @@ TEST_CASE ("Alg27 embedding novelty 1.0 when context window empty",
 
   // Test that embedding novelty defaults to 1.0 when context window is empty.
   SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.5;
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;
@@ -355,6 +366,7 @@ TEST_CASE ("Alg27 Section 8.3.1 Write Exclusion Filter prevents self-triggering"
   // Test that candidates stored during the current signal processing cycle
   // (created_at >= signal.timestamp) are excluded from interrupt consideration.
   SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.5;
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;
@@ -402,6 +414,7 @@ TEST_CASE ("Alg27 Section 8.3.1 mixes eligible and ineligible candidates",
   // Test with a mix of eligible (old) and ineligible (new) candidates.
   // Only the eligible candidate should be considered.
   SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.5;
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;

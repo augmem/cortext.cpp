@@ -76,6 +76,7 @@ ComputeWriteGate::Execute (OperationContext &context,
   const bool write_accumulator = (flush || spike_bypass) && (S_window > theta_accumulator);
 
   context.SetAccumulatorWriteDecision (write_accumulator);
+  context.SetWriteDecision (write_accumulator);
 
   if (write_accumulator)
     {
@@ -91,6 +92,17 @@ ComputeWriteGate::Execute (OperationContext &context,
         }
 
       context.SetRepresentativeEmbedding (e_rep);
+
+      if (e_rep.size () > 0)
+        {
+          p_ctx.memory_stream.push_back (e_rep);
+          const size_t max_stream
+              = static_cast<size_t> (core::NCtx (config.stability));
+          while (p_ctx.memory_stream.size () > max_stream)
+            {
+              p_ctx.memory_stream.pop_front ();
+            }
+        }
 
       // Section 8.2: Populate recent_memory_centroids for interrupt gate context.
       // Store μ_acc (memory centroid) not individual signal embeddings.

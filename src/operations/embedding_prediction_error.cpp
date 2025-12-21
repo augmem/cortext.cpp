@@ -32,6 +32,8 @@ UpdateEmbeddingPredictionError::Execute (OperationContext &context, Transaction 
   if (!p_ctx.last_embedding.has_value ())
     {
       p_ctx.last_embedding = x_t;
+      p_ctx.prediction_error_sse.reset ();
+      p_ctx.prediction_error_sse_prev.reset ();
       return;
     }
 
@@ -42,6 +44,8 @@ UpdateEmbeddingPredictionError::Execute (OperationContext &context, Transaction 
     {
       p_ctx.last_embedding = x_t;
       p_ctx.delta_x_trend.reset ();
+      p_ctx.prediction_error_sse.reset ();
+      p_ctx.prediction_error_sse_prev.reset ();
       return;
     }
 
@@ -70,6 +74,7 @@ UpdateEmbeddingPredictionError::Execute (OperationContext &context, Transaction 
   // prediction_error_t = 1 − cos(x_pred_t, x_t)
   const double cos_sim = core::CosineSimilarity (x_pred, x_t);
   const double prediction_error = 1.0 - cos_sim;
+  const double sse_curr = (x_t - x_pred).squaredNorm ();
 
   // surprisal_t = clamp(prediction_error_t / err_max, 0, 1)
   const double surprisal
@@ -78,12 +83,16 @@ UpdateEmbeddingPredictionError::Execute (OperationContext &context, Transaction 
 
   context.SetMetric (operations::Metric::embedding_surprisal, surprisal);
 
+  p_ctx.prediction_error_sse_prev = p_ctx.prediction_error_sse;
+  p_ctx.prediction_error_sse = sse_curr;
+
   // Update state for next iteration
   p_ctx.last_embedding = x_t;
 
   telemetry::LogDebug("cortext.embedding_prediction_error", {
     telemetry::Attribute::Double("prediction_error", prediction_error),
-    telemetry::Attribute::Double("embedding_surprisal", surprisal)
+    telemetry::Attribute::Double("embedding_surprisal", surprisal),
+    telemetry::Attribute::Double("prediction_error_sse", sse_curr)
   });
 }
 

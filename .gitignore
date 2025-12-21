@@ -107,10 +107,27 @@ third_party/*build/
 build-ort/
 third_party/*/.git/
 poc/
-env.sh
+# env.sh
 build-otel/
 build-*/
 .venv*/
 venv/
 **/node_modules/
 cache_dir/
+
+# Benchmark artifacts
+examples/benchmark/__pycache__/
+examples/benchmark/audio_cache/
+examples/benchmark/results/
+examples/benchmark/mteb_imagebind_tmp/
+examples/benchmark/mteb_imagebind_tmp.json
+examples/benchmark/mteb_results*.json
+examples/benchmark/mteb_results*/
+
+# Paper build outputs
+docs/paper/_manuscript/_tex/
+docs/paper/_manuscript/index.pdf
+
+# Local environment helpers
+env.sh
+conformance.report.md

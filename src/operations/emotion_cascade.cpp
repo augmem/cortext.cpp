@@ -49,7 +49,8 @@ struct EmotionalSource
 /// @brief Load recently tagged high-intensity emotional memories.
 /// v2: Uses memories table (emotional fields merged from emotional_tags)
 std::vector<EmotionalSource>
-LoadEmotionalSources (Store *store, long long recent_window_ts)
+LoadEmotionalSources (Store *store, long long recent_window_ts,
+                      double theta_intensity, double theta_arousal)
 {
   std::vector<EmotionalSource> sources;
 
@@ -59,10 +60,11 @@ LoadEmotionalSources (Store *store, long long recent_window_ts)
       "SELECT embedding_id, emotional_intensity, half_life_bonus, "
       "       cascade_radius, cascade_decay "
       "FROM memories "
-      "WHERE flashbulb = 1 AND emotional_intensity >= 0.5 "
-      "AND created_at >= ?1 "
+      "WHERE flashbulb = 1 AND emotional_intensity >= ?1 "
+      "AND s_arousal_avg >= ?2 "
+      "AND created_at >= ?3 "
       "ORDER BY emotional_intensity DESC",
-      { recent_window_ts });
+      { theta_intensity, theta_arousal, recent_window_ts });
 
   for (const auto &row : rows)
     {
@@ -244,9 +246,13 @@ PropagateEmotionalCascade::Execute (OperationContext &context, Transaction &tx) 
   const int consolidation_interval
       = core::ConsolidationIntervalSeconds (cfg.stability);
   const long long recent_window_ts = now_ts - consolidation_interval;
+  const double theta_intensity = core::ThetaIntensity (cfg.sensitivity);
+  const double theta_arousal = core::ThetaArousal (cfg.sensitivity);
 
   // Load high-intensity emotional sources
-  auto sources = LoadEmotionalSources (store, recent_window_ts);
+  auto sources
+      = LoadEmotionalSources (store, recent_window_ts, theta_intensity,
+                              theta_arousal);
 
   if (sources.empty ())
     {

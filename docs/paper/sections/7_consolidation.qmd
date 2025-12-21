@@ -84,12 +84,21 @@ For sufficiently large clusters, semantic extraction identifies labels and relat
 ```
 extraction_batch_size = round(lerp(8, 32, T))
 min_cluster_size = round(lerp(3, 10, F))
-entity_frequency_threshold = round(lerp(5, 15, T))
+label_frequency_threshold = round(lerp(5, 15, T))
 extraction_interval = lerp(300, 3600, T)  # 5 min → 1 hour
 max_extractions_per_cycle = round(lerp(20, 5, T))
 ```
 
-Extraction uses structured prompting to identify labels/tags (people, places, organizations, concepts) and relationships (co-occurrence, implication, contradiction).
+Extraction uses structured prompting to identify labels/tags (people, places, organizations, concepts) and relationships (co-occurrence, implication, contradiction). Labels are stored as surface strings only (no type/category field).
+
+Label salience is derived from embeddings rather than model guesses:
+
+```
+e_label = encode(label_text)
+salience(label) = clamp((cos(e_label, summary.embedding) + 1) / 2, 0, 1)
+```
+
+If a label already exists, its stored salience is updated with `s_max = max(s_max, salience(label))`.
 
 ## Knowledge Graph Construction
 

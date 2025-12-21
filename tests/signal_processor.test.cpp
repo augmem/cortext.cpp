@@ -1,4 +1,5 @@
 #include <any>
+#include "test_helpers.hpp"
 #include <catch2/catch_test_macros.hpp>
 #include <cortext/processor.hpp>
 #include <cortext/processor/operation_set.hpp>
@@ -15,6 +16,26 @@ struct InsertOp : IOperation
   }
 };
 
+struct RecordOrderOp : IOperation
+{
+  explicit RecordOrderOp (std::vector<int> *order, int id)
+      : order (order), id (id)
+  {
+  }
+
+  void
+  Execute (OperationContext & /*ctx*/, Transaction & /*tx*/) const override
+  {
+    if (order)
+      {
+        order->push_back (id);
+      }
+  }
+
+  std::vector<int> *order;
+  int id = 0;
+};
+
 TEST_CASE ("SignalProcessor processes and flushes to SQLite", "[processor]")
 {
   auto uniq = SQLiteStore::Create (":memory:");
@@ -24,6 +45,8 @@ TEST_CASE ("SignalProcessor processes and flushes to SQLite", "[processor]")
       "CREATE TABLE t(id INTEGER PRIMARY KEY AUTOINCREMENT, v TEXT);");
 
   SignalProcessor::Config cfg;
+
+  cortext::testing::RequireEncoder (cfg);
   auto pipeline
       = std::make_unique<OperationSet> (std::make_unique<InsertOp> ());
   SignalProcessor proc (cfg, store, std::move (pipeline));
@@ -39,4 +62,30 @@ TEST_CASE ("SignalProcessor processes and flushes to SQLite", "[processor]")
   auto rows = store->Execute ("SELECT COUNT(*) AS c FROM t;");
   REQUIRE (rows.size () == 1);
   REQUIRE (std::any_cast<long long> (rows[0].at ("c")) == 1LL);
+}
+
+TEST_CASE ("SignalProcessor executes pipeline in order", "[processor][order]")
+{
+  auto uniq = SQLiteStore::Create (":memory:");
+  std::shared_ptr<Store> store (std::move (uniq));
+
+  SignalProcessor::Config cfg;
+
+  cortext::testing::RequireEncoder (cfg);
+  std::vector<int> order;
+  auto pipeline = std::make_unique<OperationSet> (
+      std::make_unique<RecordOrderOp> (&order, 1),
+      std::make_unique<RecordOrderOp> (&order, 2),
+      std::make_unique<RecordOrderOp> (&order, 3));
+
+  SignalProcessor proc (cfg, store, std::move (pipeline));
+
+  Signal s;
+  s.embedding = Eigen::VectorXf::Zero (2);
+  s.timestamp = 0;
+  s.source_id = "test";
+
+  proc.Process (s);
+
+  REQUIRE (order == std::vector<int> { 1, 2, 3 });
 }

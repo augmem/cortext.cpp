@@ -4,10 +4,13 @@
 #include "cortext/store/store.hpp"
 #include "cortext/telemetry/telemetry.hpp"
 #include "cortext/store/schema.hpp"
+#include "cortext/store/utils.hpp"
+#include <algorithm>
 #include <chrono>
 #include <any>
 #include <cstring>
 #include <map>
+#include <stdexcept>
 #include <vector>
 
 namespace cortext
@@ -150,6 +153,42 @@ inline std::vector<float>
 ToFloatVector (const Eigen::VectorXf &v)
 {
   return std::vector<float> (v.data (), v.data () + v.size ());
+}
+
+inline std::vector<char>
+SerializeUint64Vector (const std::vector<uint64_t> &values)
+{
+  std::vector<char> blob (values.size () * sizeof (uint64_t));
+  if (!values.empty ())
+    {
+      std::memcpy (blob.data (), values.data (), blob.size ());
+    }
+  return blob;
+}
+
+inline std::vector<uint64_t>
+DeserializeUint64Vector (const std::any &blob)
+{
+  const uint64_t *data = nullptr;
+  size_t count = 0;
+
+  if (blob.type () == typeid (std::vector<char>))
+    {
+      const auto &vec = std::any_cast<const std::vector<char> &> (blob);
+      data = reinterpret_cast<const uint64_t *> (vec.data ());
+      count = vec.size () / sizeof (uint64_t);
+    }
+  else if (blob.type () == typeid (std::vector<unsigned char>))
+    {
+      const auto &vec
+          = std::any_cast<const std::vector<unsigned char> &> (blob);
+      data = reinterpret_cast<const uint64_t *> (vec.data ());
+      count = vec.size () / sizeof (uint64_t);
+    }
+
+  if (!data || count == 0)
+    return {};
+  return std::vector<uint64_t> (data, data + count);
 }
 
 inline Eigen::VectorXf
@@ -304,6 +343,11 @@ LoadState (Store &store, ProcessorContext &ctx)
           = ExtractDouble (row, "sustained_influence", 0.0);
       ctx.last_signal_timestamp
           = static_cast<uint64_t> (ExtractInt64 (row, "last_signal_timestamp", 0));
+      ctx.episode_start_ts
+          = static_cast<uint64_t> (ExtractInt64 (row, "episode_start_ts", 0));
+      ctx.last_interrupt_tick
+          = static_cast<int> (ExtractInt64 (row, "last_interrupt_tick",
+                                            ctx.last_interrupt_tick));
 
       // Sensitivity state
       ctx.weight_novelty = ExtractDouble (row, "weight_novelty", 0.3);
@@ -316,10 +360,23 @@ LoadState (Store &store, ProcessorContext &ctx)
 
       // Rate control (Algorithm 8)
       ctx.m_rate = ExtractDouble (row, "m_rate", 0.0);
+      ctx.rho_hat_prev = ExtractDouble (row, "rho_hat_prev", 0.0);
       ctx.rate_ticks = static_cast<int> (ExtractInt64 (row, "rate_ticks", 0));
       ctx.dt_ema = ExtractDouble (row, "dt_ema", 0.0);
       ctx.last_rate_timestamp
           = static_cast<uint64_t> (ExtractInt64 (row, "last_rate_timestamp", 0));
+      ctx.reliability = ExtractDouble (row, "reliability", 1.0);
+
+      // Restore write rate window timestamps if present.
+      auto write_rate_it = row.find ("write_rate_timestamps");
+      if (write_rate_it != row.end () && write_rate_it->second.has_value ())
+        {
+          const auto ts = DeserializeUint64Vector (write_rate_it->second);
+          if (!ts.empty ())
+            {
+              ctx.write_rate_window_.SetTimestamps (ts);
+            }
+        }
 
       // Emotion state (Algorithm 4)
       ctx.emotion_intensity_ewma
@@ -470,7 +527,7 @@ LoadRecentContext (Store &store, ProcessorContext &ctx)
   try
     {
       auto rows = store.Execute (
-          "SELECT embedding FROM recent_context ORDER BY seq_order ASC");
+          "SELECT embedding FROM recent_context ORDER BY timestamp ASC");
       for (const auto &row : rows)
         {
           auto it = row.find ("embedding");
@@ -519,13 +576,24 @@ LoadObservedRetentionHistory (Store &store, ProcessorContext &ctx)
 {
   try
     {
+      const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds> (
+                              std::chrono::system_clock::now ().time_since_epoch ())
+                              .count ();
       auto rows = store.Execute (
-          "SELECT retention_value FROM observed_retention_history "
-          "ORDER BY timestamp ASC");
+          "SELECT COALESCE(last_used, last_access) AS last_used "
+          "FROM memories "
+          "WHERE COALESCE(last_used, last_access) IS NOT NULL "
+          "ORDER BY last_used ASC "
+          "LIMIT 256");
       for (const auto &row : rows)
         {
-          ctx.observed_retention_history.push_back (
-              ExtractDouble (row, "retention_value", 0.0));
+          const auto last_used
+              = ExtractInt64 (row, "last_used", 0);
+          if (last_used <= 0)
+            continue;
+          const double retention_sec
+              = std::max (0.0, static_cast<double> (now_ms - last_used) / 1000.0);
+          ctx.observed_retention_history.push_back (retention_sec);
         }
     }
   catch (const std::exception &e)
@@ -549,12 +617,10 @@ LoadWorkingMemory (Store &store, ProcessorContext &ctx, double sensitivity)
       const double cost_per_slot = core::WMMaintenanceCostPerSlot (sensitivity);
 
       // Load from MEMORIES table with kind='WORKING' and end_ts IS NULL (active)
-      // Note: For now we use a simpler query without JOIN to embeddings
-      // since we store the embedding directly. In a full implementation,
-      // this would join with the embeddings table.
       auto rows = store.Execute (
-          "SELECT memory_id, source_id, strength, last_access, n_signals, "
-          "       s_max, s_avg, modality, start_ts "
+          "SELECT memory_id, embedding_id, source_id, strength, last_access, "
+          "       n_signals, s_max, s_avg, s_emotion_max, s_arousal_avg, "
+          "       drift_mag, modality, start_ts "
           "FROM memories "
           "WHERE kind = 'WORKING' AND end_ts IS NULL "
           "ORDER BY start_ts ASC");
@@ -583,6 +649,23 @@ LoadWorkingMemory (Store &store, ProcessorContext &ctx, double sensitivity)
               slot.modality = std::any_cast<std::string> (mod_it->second);
             }
 
+          // Load embedding for slot
+          const auto embedding_id = ExtractInt64 (row, "embedding_id", 0);
+          if (embedding_id > 0)
+            {
+              auto emb_rows = store.Execute (
+                  "SELECT embedding FROM embeddings WHERE embedding_id = ?",
+                  { embedding_id });
+              if (!emb_rows.empty ())
+                {
+                  auto emb_it = emb_rows[0].find ("embedding");
+                  if (emb_it != emb_rows[0].end () && emb_it->second.has_value ())
+                    {
+                      slot.embedding = BlobToEigen (emb_it->second);
+                    }
+                }
+            }
+
           // DB stores milliseconds, convert to seconds for last_ts
           const auto ts_ms = ExtractInt64 (row, "last_access", now_ms);
           slot.last_ts = static_cast<double> (ts_ms) / 1000.0;
@@ -604,10 +687,70 @@ LoadWorkingMemory (Store &store, ProcessorContext &ctx, double sensitivity)
           slot.n_signals = static_cast<int> (ExtractInt64 (row, "n_signals", 1));
           slot.s_max = ExtractDouble (row, "s_max", 0.0);
           slot.s_avg = ExtractDouble (row, "s_avg", 0.0);
+          slot.s_emotion_max = ExtractDouble (row, "s_emotion_max", 0.0);
+          slot.s_arousal_avg = ExtractDouble (row, "s_arousal_avg", 0.0);
+          slot.drift_acc = ExtractDouble (row, "drift_mag", 0.0);
 
-          // Note: embedding is loaded separately if needed via embedding_id
-          // For backward compatibility, we initialize an empty embedding
-          // The full implementation would JOIN with embeddings table
+          // Load signal records for this WM slot (ordered)
+          auto sig_rows = store.Execute (
+              "SELECT embedding_id, timestamp, modality, mime, blob_id, "
+              "       score, serial_position "
+              "FROM signals WHERE memory_id = ? "
+              "ORDER BY serial_position ASC",
+              { slot.memory_id });
+          for (const auto &sig_row : sig_rows)
+            {
+              SignalRecord rec;
+              rec.timestamp
+                  = static_cast<uint64_t> (ExtractInt64 (sig_row, "timestamp", 0));
+              rec.modality = "";
+              rec.mime = "";
+              auto mod_it = sig_row.find ("modality");
+              if (mod_it != sig_row.end () && mod_it->second.has_value ()
+                  && mod_it->second.type () == typeid (std::string))
+                {
+                  rec.modality = std::any_cast<std::string> (mod_it->second);
+                }
+              auto mime_it = sig_row.find ("mime");
+              if (mime_it != sig_row.end () && mime_it->second.has_value ()
+                  && mime_it->second.type () == typeid (std::string))
+                {
+                  rec.mime = std::any_cast<std::string> (mime_it->second);
+                }
+              rec.score = ExtractDouble (sig_row, "score", 0.0);
+              rec.serial_position
+                  = static_cast<int> (ExtractInt64 (sig_row, "serial_position", 0));
+
+              auto blob_it = sig_row.find ("blob_id");
+              if (blob_it != sig_row.end () && blob_it->second.has_value ())
+                {
+                  rec.blob_id = store::BlobFromAny (blob_it->second);
+                }
+              if (!rec.blob_id.empty ())
+                {
+                  slot.blob_ids.push_back (rec.blob_id);
+                }
+
+              const auto sig_emb_id
+                  = ExtractInt64 (sig_row, "embedding_id", 0);
+              if (sig_emb_id > 0)
+                {
+                  auto sig_emb_rows = store.Execute (
+                      "SELECT embedding FROM embeddings WHERE embedding_id = ?",
+                      { sig_emb_id });
+                  if (!sig_emb_rows.empty ())
+                    {
+                      auto it_emb = sig_emb_rows[0].find ("embedding");
+                      if (it_emb != sig_emb_rows[0].end ()
+                          && it_emb->second.has_value ())
+                        {
+                          rec.embedding = BlobToEigen (it_emb->second);
+                        }
+                    }
+                }
+              slot.signal_records.push_back (std::move (rec));
+            }
+
           ctx.wm_slots.push_back (std::move (slot));
         }
     }
@@ -657,8 +800,10 @@ LoadAccumulators (Store &store, ProcessorContext &ctx)
           state.drift_acc = ExtractDouble (row, "drift_acc", 0.0);
           state.s_sum = ExtractDouble (row, "s_sum", 0.0);
           state.s_max = ExtractDouble (row, "s_max", 0.0);
-          // Note: n_signals is tracked in-memory, not persisted in v2 schema
-          state.n_signals = 0;
+          state.s_emotion_max = ExtractDouble (row, "emo_max", 0.0);
+          state.s_arousal_sum = ExtractDouble (row, "arousal_sum", 0.0);
+          state.n_signals
+              = static_cast<int> (ExtractInt64 (row, "n", 0));
           state.t_start
               = static_cast<uint64_t> (ExtractInt64 (row, "t_start", 0));
           state.last_write_ts
@@ -667,6 +812,19 @@ LoadAccumulators (Store &store, ProcessorContext &ctx)
               = static_cast<uint64_t> (ExtractInt64 (row, "last_signal_ts", 0));
           state.eta_acc = ExtractDouble (row, "eta_acc", 0.0);
           state.coherence_prev = ExtractDouble (row, "coherence_prev", 1.0);
+          state.drift_accum = ExtractDouble (row, "drift_accum", 0.0);
+          state.drift_at_last_interrupt
+              = ExtractDouble (row, "drift_at_last_interrupt", 0.0);
+          state.drift_acc_pacing
+              = ExtractDouble (row, "drift_acc_pacing", 0.0);
+
+          auto x_last_it = row.find ("x_last_check");
+          if (x_last_it != row.end () && x_last_it->second.has_value ())
+            state.x_last_check = BlobToEigen (x_last_it->second);
+
+          auto prev_it = row.find ("prev_x");
+          if (prev_it != row.end () && prev_it->second.has_value ())
+            state.prev_x = BlobToEigen (prev_it->second);
 
           ctx.accumulator_states[source_id] = std::move (state);
         }
@@ -689,6 +847,11 @@ SignalProcessor::SignalProcessor (const Config &config,
       root_operation_ (std::move (root_operation)),
       context_ (std::make_unique<ProcessorContext> ())
 {
+  if (!config_.encoder)
+    {
+      throw std::invalid_argument (
+          "SignalProcessor requires a non-null Encoder (embeddinggemma fallback expected)");
+    }
   // Initialize rate observation window capacity derived from Stability knob.
   if (context_)
     {
@@ -711,12 +874,11 @@ SignalProcessor::SignalProcessor (const Config &config,
       LoadState (*store_, *context_);                              // Unified state
       LoadRecentContext (*store_, *context_);                      // From views
       LoadRecentScores (*store_, *context_);                       // From views
-      LoadObservedRetentionHistory (*store_, *context_);           // Keep if used
+      LoadObservedRetentionHistory (*store_, *context_);           // Derived from memories
       LoadWorkingMemory (*store_, *context_, config_.sensitivity); // From MEMORIES
       LoadAccumulators (*store_, *context_);                       // From ACCUMULATORS
     }
 
-  StartNewEpisode ();
 }
 
 SignalProcessor::~SignalProcessor () = default;
@@ -735,6 +897,7 @@ SignalProcessor::Process (const Signal &signal)
 
   try
     {
+      StartNewEpisode (tx.get (), signal.timestamp);
       if (tx)
         {
           root_operation_->Execute (op_context, *tx);
@@ -750,10 +913,9 @@ SignalProcessor::Process (const Signal &signal)
       span.SetAttribute ("cortext.effective_focus",
                          op_context.GetEffectiveFocus ());
 
-      if (op_context.ShouldFinalizeEpisode () && tx)
+      if (op_context.ShouldFinalizeEpisode ())
         {
-          FinalizeEpisode (*tx);
-          StartNewEpisode ();
+          FinalizeEpisode (tx.get (), &op_context);
         }
 
       // Persist state within the same transaction (v2 schema)
@@ -806,25 +968,99 @@ SignalProcessor::Flush ()
       return;
     }
   auto tx = store_->Begin ();
-  FinalizeEpisode (*tx);
+  FinalizeEpisode (tx.get (), nullptr);
   PersistState (*tx);           // v2: Unified state
   PersistWorkingMemory (*tx);   // v2: To MEMORIES
   PersistAccumulators (*tx);    // v2: To ACCUMULATORS
+  const auto now_ms
+      = std::chrono::duration_cast<std::chrono::milliseconds> (
+            std::chrono::system_clock::now ().time_since_epoch ())
+            .count ();
+  StartNewEpisode (tx.get (), static_cast<uint64_t> (now_ms));
   tx->Commit ();
-  StartNewEpisode ();
 }
 
 void
-SignalProcessor::StartNewEpisode ()
+SignalProcessor::StartNewEpisode (Transaction *tx, uint64_t start_ts)
 {
-  // No-op: transaction management is now per-signal in Process()
+  if (!context_ || start_ts == 0)
+    {
+      return;
+    }
+  if (context_->episode_start_ts != 0)
+    {
+      return;
+    }
+  context_->episode_start_ts = start_ts;
+
+  if (tx)
+    {
+      tx->Execute (
+          "INSERT OR IGNORE INTO episodes "
+          "(episode_id, start_ts, end_ts, boundary_type, centroid, created_at) "
+          "VALUES (?, ?, NULL, NULL, NULL, ?)",
+          { static_cast<long long> (start_ts),
+            static_cast<long long> (start_ts),
+            static_cast<long long> (start_ts) });
+    }
 }
 
 void
-SignalProcessor::FinalizeEpisode (Transaction &tx)
+SignalProcessor::FinalizeEpisode (Transaction *tx,
+                                  const OperationContext *op_context)
 {
-  (void)tx;
   telemetry::ScopedSpan span ("cortext.episode.finalize");
+
+  if (context_ && context_->episode_start_ts != 0)
+    {
+      const uint64_t end_ts
+          = op_context ? op_context->GetSignal ().timestamp
+                       : static_cast<uint64_t> (
+                             std::chrono::duration_cast<
+                                 std::chrono::milliseconds> (
+                                 std::chrono::system_clock::now ()
+                                     .time_since_epoch ())
+                                 .count ());
+      std::optional<std::string> boundary_type;
+      std::optional<Eigen::VectorXf> centroid;
+      if (op_context)
+        {
+          boundary_type = op_context->GetBoundaryType ();
+          centroid = op_context->GetBoundaryCentroid ();
+        }
+      else
+        {
+          boundary_type = std::string ("explicit");
+        }
+
+      std::any boundary_type_any
+          = boundary_type.has_value () ? std::any (*boundary_type)
+                                       : std::any ();
+      std::any centroid_any;
+      if (centroid.has_value () && centroid->size () > 0)
+        {
+          centroid_any = ToFloatVector (*centroid);
+        }
+      else
+        {
+          centroid_any = std::any ();
+        }
+
+      if (tx)
+        {
+          tx->Execute (
+              "UPDATE episodes "
+              "SET end_ts = ?, boundary_type = ?, centroid = ? "
+              "WHERE episode_id = ?",
+              { static_cast<long long> (end_ts), boundary_type_any, centroid_any,
+                static_cast<long long> (context_->episode_start_ts) });
+        }
+    }
+
+  if (context_)
+    {
+      context_->episode_start_ts = 0;
+    }
 
   // v2 schema: recent_context and recent_scores are now VIEWs that derive
   // from signals/embeddings tables. No need to persist - data comes from
@@ -835,12 +1071,17 @@ SignalProcessor::FinalizeEpisode (Transaction &tx)
   telemetry::AddCounter ("cortext.episode_commit_total", 1);
   span.SetStatusOk ();
 
-  // Maintain recent_context to last n_ctx(T) after boundary (Alg 12).
-  const size_t keep = static_cast<size_t> (core::NCtx (config_.stability));
-  auto &embs = context_->recent_context_embeddings;
-  while (embs.size () > keep)
+  // Maintain recent_context to last n_ctx(T) plus drift lag for drift metrics.
+  if (context_)
     {
-      embs.pop_front ();
+      const size_t keep
+          = static_cast<size_t> (core::NCtx (config_.stability)
+                                 + core::KCtx (config_.stability));
+      auto &embs = context_->recent_context_embeddings;
+      while (embs.size () > keep)
+        {
+          embs.pop_front ();
+        }
     }
 }
 
@@ -859,6 +1100,8 @@ SignalProcessor::PersistState (Transaction &tx)
   std::vector<char> mood_blob (6 * sizeof (double));
   std::memcpy (mood_blob.data (), context_->mood_vector.data (),
                6 * sizeof (double));
+  const std::vector<char> write_rate_blob = SerializeUint64Vector (
+      context_->write_rate_window_.GetTimestamps ());
 
   // Get blender weights
   auto get_weight = [this] (operations::Metric m) {
@@ -916,13 +1159,14 @@ SignalProcessor::PersistState (Transaction &tx)
       // Stability state
       "rate_decay, periphery_half_life, salience_half_life, drift_weight, retention_ema, "
       // Rate control
-      "m_rate, dt_ema, rate_ticks, last_rate_timestamp, reliability, "
+      "m_rate, rho_hat_prev, dt_ema, rate_ticks, last_rate_timestamp, reliability, "
       // Uncertainty
       "u_uncertainty, "
       // Embedding prediction
       "last_embedding, delta_x_trend, delta_half_life_adj, sustained_influence, "
       // Episode tracking
-      "last_signal_timestamp, updated_at, "
+      "episode_start_ts, last_interrupt_tick, last_signal_timestamp, updated_at, "
+      "write_rate_timestamps, "
       // Blender weights
       "w_relevance, w_mismatch, w_surprise, w_rarity, w_drift, w_contradiction, "
       "w_utility, w_periphery, w_coverage, w_salience, w_valence, w_arousal, "
@@ -935,10 +1179,10 @@ SignalProcessor::PersistState (Transaction &tx)
       "?, ?, ?, ?, ?, ?, ?, "  // Sensitivity
       "?, ?, ?, ?, "  // Emotion
       "?, ?, ?, ?, ?, "  // Stability
-      "?, ?, ?, ?, ?, "  // Rate control
+      "?, ?, ?, ?, ?, ?, "  // Rate control
       "?, "  // Uncertainty
       "?, ?, ?, ?, "  // Embedding prediction
-      "?, ?, "  // Episode tracking
+      "?, ?, ?, ?, ?, "  // Episode tracking + write_rate_timestamps
       "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "  // Blender weights (12)
       "?, ?, "  // Blender ready/count
       "?, ?, ?)",  // Blender matrices (3)
@@ -960,8 +1204,10 @@ SignalProcessor::PersistState (Transaction &tx)
         context_->rate_decay, context_->periphery_half_life,
         context_->salience_half_life, 0.5, 0.0,  // drift_weight, retention_ema defaults
         // Rate control
-        context_->m_rate, context_->dt_ema, context_->rate_ticks,
-        static_cast<long long> (context_->last_rate_timestamp), 1.0,  // reliability
+        context_->m_rate, context_->rho_hat_prev, context_->dt_ema,
+        context_->rate_ticks,
+        static_cast<long long> (context_->last_rate_timestamp),
+        context_->reliability,
         // Uncertainty
         context_->u_t,
         // Embedding prediction
@@ -973,7 +1219,11 @@ SignalProcessor::PersistState (Transaction &tx)
             : std::any (std::vector<float> ()),
         0.0, context_->sustained_influence,  // delta_half_life_adj
         // Episode tracking
+        static_cast<long long> (context_->episode_start_ts),
+        context_->last_interrupt_tick,
         static_cast<long long> (context_->last_signal_timestamp), now_ms,
+        write_rate_blob.empty () ? std::any (std::vector<char> ())
+                                 : std::any (write_rate_blob),
         // Blender weights
         w_relevance, w_mismatch, w_surprise, w_rarity, w_drift, w_contradiction,
         w_utility, w_periphery, w_coverage, w_salience, w_valence, w_arousal,
@@ -984,29 +1234,6 @@ SignalProcessor::PersistState (Transaction &tx)
         coeff_blob.empty () ? std::any (std::vector<float> ()) : std::any (coeff_blob),
         coeff_P_blob.empty () ? std::any (std::vector<float> ()) : std::any (coeff_P_blob)
       });
-}
-
-void
-SignalProcessor::PersistRecentContext (Transaction & /*tx*/)
-{
-  // v2 schema: recent_context is now a VIEW derived from signals/embeddings.
-  // Data is written by MemoryStorage operation when signals are stored.
-  // This function is a no-op for backwards compatibility.
-}
-
-void
-SignalProcessor::PersistRecentScores (Transaction & /*tx*/)
-{
-  // v2 schema: recent_scores is now a VIEW derived from signals.
-  // Data is written by MemoryStorage operation when signals are stored.
-  // This function is a no-op for backwards compatibility.
-}
-
-void
-SignalProcessor::PersistObservedRetentionHistory (Transaction & /*tx*/)
-{
-  // v2 schema: observed_retention_history is derived from signals.
-  // This function is a no-op for backwards compatibility.
 }
 
 // v2 Schema: Persist working memory to MEMORIES table (kind='WORKING')
@@ -1030,19 +1257,76 @@ SignalProcessor::PersistWorkingMemory (Transaction &tx)
     {
       if (slot.strength <= 0.0)
         continue;
+      if (slot.embedding.size () == 0)
+        continue;
 
       const auto ts_ms = static_cast<int64_t> (slot.last_ts * 1000.0);
 
-      // For now, we don't have embedding_id - in full implementation this would
-      // be set when the memory is created. Using 0 as placeholder.
+      const std::vector<float> emb_vec = ToFloatVector (slot.embedding);
+      tx.Execute (
+          "INSERT INTO embeddings (embedding, created_at) VALUES (?, ?)",
+          { emb_vec, now_ms });
+      auto emb_rows
+          = tx.Execute ("SELECT last_insert_rowid() AS id", {});
+      const long long embedding_id
+          = emb_rows.empty () ? 0 : ExtractInt64 (emb_rows[0], "id", 0);
+      if (embedding_id == 0)
+        {
+          continue;
+        }
+
       tx.Execute (
           "INSERT INTO memories "
-          "(source_id, kind, modality, start_ts, n_signals, s_max, s_avg, "
+          "(embedding_id, source_id, kind, modality, start_ts, n_signals, "
+          " s_max, s_avg, s_emotion_max, s_arousal_avg, drift_mag, "
           " strength, last_access, created_at) "
-          "VALUES (?, 'WORKING', ?, ?, ?, ?, ?, ?, ?, ?)",
-          { slot.source_id.empty () ? std::string ("unknown") : slot.source_id,
+          "VALUES (?, ?, 'WORKING', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          { embedding_id,
+            slot.source_id.empty () ? std::string ("unknown") : slot.source_id,
             slot.modality, slot.start_ts, slot.n_signals, slot.s_max, slot.s_avg,
+            slot.s_emotion_max, slot.s_arousal_avg, slot.drift_acc,
             slot.strength, ts_ms, now_ms });
+
+      auto mem_rows = tx.Execute ("SELECT last_insert_rowid() AS id", {});
+      const long long memory_id
+          = mem_rows.empty () ? 0 : ExtractInt64 (mem_rows[0], "id", 0);
+      if (memory_id == 0)
+        {
+          continue;
+        }
+
+      for (const auto &rec : slot.signal_records)
+        {
+          long long signal_embedding_id = embedding_id;
+          if (rec.embedding.size () > 0)
+            {
+              const std::vector<float> sig_vec = ToFloatVector (rec.embedding);
+              tx.Execute (
+                  "INSERT INTO embeddings (embedding, created_at) VALUES (?, ?)",
+                  { sig_vec, static_cast<long long> (rec.timestamp) });
+              auto sig_rows
+                  = tx.Execute ("SELECT last_insert_rowid() AS id", {});
+              if (!sig_rows.empty ())
+                {
+                  signal_embedding_id = ExtractInt64 (sig_rows[0], "id",
+                                                      embedding_id);
+                }
+            }
+
+          tx.Execute (
+              "INSERT INTO signals "
+              "(memory_id, source_id, embedding_id, timestamp, modality, "
+              " mime, blob_id, serial_position, score, created_at) "
+              "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+              { memory_id,
+                slot.source_id.empty () ? std::string ("unknown") : slot.source_id,
+                signal_embedding_id,
+                static_cast<long long> (rec.timestamp), rec.modality, rec.mime,
+                rec.blob_id.empty () ? std::any ()
+                                     : std::any (rec.blob_id),
+                static_cast<long long> (rec.serial_position), rec.score,
+                static_cast<long long> (rec.timestamp) });
+        }
     }
 }
 
@@ -1071,14 +1355,27 @@ SignalProcessor::PersistAccumulators (Transaction &tx)
       if (state.e_peak.size () > 0)
         peak_blob = ToFloatVector (state.e_peak);
 
+      std::vector<float> last_check_blob;
+      if (state.x_last_check.size () > 0)
+        last_check_blob = ToFloatVector (state.x_last_check);
+
+      std::vector<float> prev_x_blob;
+      if (state.prev_x.size () > 0)
+        prev_x_blob = ToFloatVector (state.prev_x);
+
       tx.Execute (
           "INSERT INTO accumulators "
-          "(source_id, episode_id, mu_acc, drift_acc, s_sum, s_max, "
-          " e_peak, t_start, last_write_ts, last_signal_ts, eta_acc, "
-          "coherence_prev) "
-          "VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+          "(source_id, episode_id, mu_acc, drift_acc, s_sum, s_max, n, "
+          " e_peak, emo_max, arousal_sum, drift_accum, drift_at_last_interrupt, "
+          " drift_acc_pacing, x_last_check, prev_x, t_start, last_write_ts, "
+          " last_signal_ts, eta_acc, coherence_prev) "
+          "VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, "
+          "?15, ?16, ?17, ?18, ?19, ?20)",
           { source_id, state.episode_id, mu_blob, state.drift_acc, state.s_sum,
-            state.s_max, peak_blob,
+            state.s_max, static_cast<long long> (state.n_signals), peak_blob,
+            state.s_emotion_max, state.s_arousal_sum, state.drift_accum,
+            state.drift_at_last_interrupt, state.drift_acc_pacing,
+            last_check_blob, prev_x_blob,
             static_cast<long long> (state.t_start),
             static_cast<long long> (state.last_write_ts),
             static_cast<long long> (state.last_signal_ts), state.eta_acc,

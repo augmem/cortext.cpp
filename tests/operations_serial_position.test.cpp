@@ -19,6 +19,7 @@ TEST_CASE ("Alg26 exposes parameter derivations per algorithms.md",
   s.timestamp = 10;
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.3;       // F
   cfg.sensitivity = 0.7; // S
   cfg.stability = 0.5;
@@ -59,6 +60,8 @@ TEST_CASE ("Alg26 does not create any tables",
   auto store = std::shared_ptr<Store> (std::move (unique_store));
 
   SignalProcessor::Config cfg;
+
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.5;
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;

@@ -3,6 +3,7 @@
 #include <any>
 #include <iostream>
 #include <catch2/catch_approx.hpp>
+#include "test_helpers.hpp"
 #include <catch2/catch_test_macros.hpp>
 #include <cortext/core/knobs.hpp>
 #include <cortext/operations/consolidation.hpp>
@@ -99,6 +100,8 @@ TEST_CASE ("Alg28 rate trigger starts when idle",
   auto store = std::shared_ptr<Store> (std::move (unique_store));
 
   SignalProcessor::Config cfg;
+
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.5;
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;
@@ -141,6 +144,8 @@ TEST_CASE ("Alg28 rate trigger defers when busy",
   auto store = std::shared_ptr<Store> (std::move (unique_store));
 
   SignalProcessor::Config cfg;
+
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.5;
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;
@@ -181,6 +186,8 @@ TEST_CASE ("Alg28 interval trigger starts when elapsed exceeds interval",
   auto store = std::shared_ptr<Store> (std::move (unique_store));
 
   SignalProcessor::Config cfg;
+
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.5;
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;
@@ -246,6 +253,7 @@ TEST_CASE ("Alg28 capacity trigger starts when db_size exceeds threshold",
 
   // Use low stability to keep threshold small-ish.
   SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.5;
   cfg.sensitivity = 0.5;
   cfg.stability = 0.0;
@@ -286,6 +294,8 @@ TEST_CASE ("Alg28 no trigger does not set start flag",
   auto store = std::shared_ptr<Store> (std::move (unique_store));
 
   SignalProcessor::Config cfg;
+
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.5;
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;
@@ -325,6 +335,7 @@ TEST_CASE ("ScoreConsolidation identifies low-strength candidates",
 
   // Knobs: high T raises floor via periphery cutoff (~0.25 at T=1.0)
   SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.5;
   cfg.sensitivity = 0.5;
   cfg.stability = 1.0; // T=1.0 → floor≈0.25

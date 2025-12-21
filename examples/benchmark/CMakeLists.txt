@@ -104,6 +104,33 @@ if(BENCHMARK_ENABLE_LITERT)
   endif()
 endif()
 
+# Audio pipeline benchmark (TTS -> ASR -> EmbeddingGemma / ImageBind)
+add_executable(cortext_audio_pipeline_bench
+  audio_pipeline_bench.cpp
+)
+
+target_include_directories(cortext_audio_pipeline_bench PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}
+)
+
+target_link_libraries(cortext_audio_pipeline_bench PRIVATE
+  cortext
+  nlohmann_json::nlohmann_json
+)
+
+# Ensure runtime libraries are discoverable
+if(APPLE)
+  set_property(TARGET cortext_audio_pipeline_bench APPEND PROPERTY BUILD_RPATH
+    "@loader_path/../../third_party/onnxruntime-install/lib"
+    "@loader_path/../../third_party/litert-lm-install/lib"
+  )
+elseif(UNIX)
+  set_property(TARGET cortext_audio_pipeline_bench APPEND PROPERTY BUILD_RPATH
+    "$ORIGIN/../../third_party/onnxruntime-install/lib"
+    "$ORIGIN/../../third_party/litert-lm-install/lib"
+  )
+endif()
+
 # Ensure ONNX Runtime dylib can be found at runtime
 if(NOT CORTEXT_DISABLE_OGA)
   if(APPLE)

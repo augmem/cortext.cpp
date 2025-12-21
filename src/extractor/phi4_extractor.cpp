@@ -80,16 +80,28 @@ struct Phi4Extractor::Impl
       {
         auto json_output = nlohmann::json::parse (output_str);
 
-        // Extract entities
-        if (json_output.contains ("entities"))
+        // Extract labels
+        if (json_output.contains ("labels"))
           {
-            for (const auto &entity : json_output["entities"])
+            for (const auto &label : json_output["labels"])
               {
-                operations::ExtractedEntity e;
-                e.name = entity.value ("name", "");
-                e.type = entity.value ("type", "");
-                e.salience = entity.value ("salience", 0.5);
-                result.entities.push_back (std::move (e));
+                if (label.is_string ())
+                  {
+                    operations::ExtractedLabel e;
+                    e.label = label.get<std::string> ();
+                    e.salience = 0.5;
+                    result.labels.push_back (std::move (e));
+                  }
+                else if (label.is_object ())
+                  {
+                    operations::ExtractedLabel e;
+                    e.label = label.value ("label", label.value ("name", ""));
+                    e.salience = 0.5;
+                    if (!e.label.empty ())
+                      {
+                        result.labels.push_back (std::move (e));
+                      }
+                  }
               }
           }
 
@@ -145,8 +157,12 @@ struct Phi4Extractor::Impl
     auto audios = OgaAudios::Load (audio_data, audio_sizes, 1);
 
     // Build prompt with audio
-    std::string prompt = "<|audio|>Extract entities and relations from this "
-                         "audio.<|end|><|assistant|>";
+    std::string prompt = "<|audio|>Extract labels and relations from this "
+                         "audio. Return JSON with \"labels\" as an array of "
+                         "strings and \"relations\" as objects with "
+                         "subject/predicate/object. Always return at least "
+                         "one label; if nothing is obvious, choose the "
+                         "single most salient term.<|end|><|assistant|>";
     auto inputs = processor->ProcessAudios (prompt.c_str (), audios.get ());
 
     // Generate
@@ -169,15 +185,27 @@ struct Phi4Extractor::Impl
       {
         auto json_output = nlohmann::json::parse (output_str);
 
-        if (json_output.contains ("entities"))
+        if (json_output.contains ("labels"))
           {
-            for (const auto &entity : json_output["entities"])
+            for (const auto &label : json_output["labels"])
               {
-                operations::ExtractedEntity e;
-                e.name = entity.value ("name", "");
-                e.type = entity.value ("type", "");
-                e.salience = entity.value ("salience", 0.5);
-                result.entities.push_back (std::move (e));
+                if (label.is_string ())
+                  {
+                    operations::ExtractedLabel e;
+                    e.label = label.get<std::string> ();
+                    e.salience = 0.5;
+                    result.labels.push_back (std::move (e));
+                  }
+                else if (label.is_object ())
+                  {
+                    operations::ExtractedLabel e;
+                    e.label = label.value ("label", label.value ("name", ""));
+                    e.salience = 0.5;
+                    if (!e.label.empty ())
+                      {
+                        result.labels.push_back (std::move (e));
+                      }
+                  }
               }
           }
 
@@ -219,7 +247,11 @@ Phi4Extractor::ExtractFromText (const std::string &text,
                                 const nlohmann::json &schema)
 {
   std::string prompt
-      = "<|user|>Extract entities and relations from: " + text
+      = "<|user|>Extract labels and relations from: " + text
+        + " Return JSON with \"labels\" as an array of strings and "
+          "\"relations\" as objects with subject/predicate/object. "
+          "Always return at least one label; if nothing is obvious, choose "
+          "the single most salient term."
         + "<|end|><|assistant|>";
   return impl_->ExtractWithSchema (prompt, schema);
 }

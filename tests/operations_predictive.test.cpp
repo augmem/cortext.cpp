@@ -125,6 +125,8 @@ TEST_CASE ("Alg22 boosts predicted-aligned candidates",
   auto store = std::shared_ptr<cortext::Store> (std::move (unique_store));
 
   SignalProcessor::Config cfg;
+
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.5;       // trajectory_samples ~ 3, conf ~ 0.5
   cfg.sensitivity = 0.5; // moderate surprise sens
   cfg.stability = 0.5;   // moderate decay → moderate delta
@@ -153,14 +155,14 @@ TEST_CASE ("Alg22 boosts predicted-aligned candidates",
   processor.Process (MakeSignal (e2, /*ts=*/123));
   processor.Flush ();
 
-  // Aligned candidate should have strength > 1.0
+  // Aligned candidate should have pre_activation > 0
   {
     auto rows = store->Execute (
-        "SELECT strength FROM memories WHERE memory_id = ?",
+        "SELECT pre_activation FROM memories WHERE memory_id = ?",
         { 101LL });
     REQUIRE (rows.size () == 1);
-    const double strength = std::any_cast<double> (rows[0].at ("strength"));
-    REQUIRE (strength > 1.0);
+    const double pre = std::any_cast<double> (rows[0].at ("pre_activation"));
+    REQUIRE (pre > 0.0);
   }
   // Orthogonal may not be touched; accept either no row or unchanged.
   {
@@ -172,11 +174,11 @@ TEST_CASE ("Alg22 boosts predicted-aligned candidates",
     if (cnt == 1)
       {
         auto r2 = store->Execute (
-            "SELECT strength FROM memories WHERE memory_id = ?",
+            "SELECT pre_activation FROM memories WHERE memory_id = ?",
             { 202LL });
         REQUIRE (r2.size () == 1);
-        const double s2 = std::any_cast<double> (r2[0].at ("strength"));
-        REQUIRE (s2 == Catch::Approx (1.0));
+        const double s2 = std::any_cast<double> (r2[0].at ("pre_activation"));
+        REQUIRE (s2 == Catch::Approx (0.0));
       }
   }
 }
@@ -188,6 +190,8 @@ TEST_CASE ("Alg22 respects prediction confidence threshold",
   auto store = std::shared_ptr<cortext::Store> (std::move (unique_store));
 
   SignalProcessor::Config cfg;
+
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = 1.0;       // conf_thresh ~ 0.7
   cfg.sensitivity = 0.0; // no surprise modulation
   cfg.stability = 0.5;
@@ -213,7 +217,7 @@ TEST_CASE ("Alg22 respects prediction confidence threshold",
   processor.Process (MakeSignal (e2, /*ts=*/456));
   processor.Flush ();
 
-  // Expect no row (or unchanged strength if row exists).
+  // Expect no row (or unchanged pre_activation if row exists).
   auto rows = store->Execute (
       "SELECT COUNT(*) AS c FROM memories WHERE memory_id = ?",
       { 303LL });
@@ -222,11 +226,11 @@ TEST_CASE ("Alg22 respects prediction confidence threshold",
   if (cnt == 1)
     {
       auto r2 = store->Execute (
-          "SELECT strength FROM memories WHERE memory_id = ?",
+          "SELECT pre_activation FROM memories WHERE memory_id = ?",
           { 303LL });
       REQUIRE (r2.size () == 1);
-      const double s = std::any_cast<double> (r2[0].at ("strength"));
-      REQUIRE (s == Catch::Approx (1.0));
+      const double s = std::any_cast<double> (r2[0].at ("pre_activation"));
+      REQUIRE (s == Catch::Approx (0.0));
     }
 }
 
@@ -245,6 +249,8 @@ TEST_CASE ("Prediction horizon increases with Focus",
     auto store = std::shared_ptr<cortext::Store> (std::move (unique_store));
 
     SignalProcessor::Config cfg;
+
+    cortext::testing::RequireEncoder (cfg);
     cfg.focus = 0.0;       // prediction_horizon = lerp(2, 8, 0) = 2
     cfg.sensitivity = 0.5;
     cfg.stability = 0.5;
@@ -274,12 +280,12 @@ TEST_CASE ("Prediction horizon increases with Focus",
 
     // Should still work with short horizon
     auto rows = store->Execute (
-        "SELECT strength FROM memories WHERE memory_id = ?",
+        "SELECT pre_activation FROM memories WHERE memory_id = ?",
         { 1LL });
     REQUIRE (rows.size () == 1);
     // Aligned candidate should be boosted
-    const double strength = std::any_cast<double> (rows[0].at ("strength"));
-    REQUIRE (strength > 1.0);
+    const double pre = std::any_cast<double> (rows[0].at ("pre_activation"));
+    REQUIRE (pre > 0.0);
   }
 
   SECTION ("High Focus (F=1) uses long horizon")
@@ -288,6 +294,8 @@ TEST_CASE ("Prediction horizon increases with Focus",
     auto store = std::shared_ptr<cortext::Store> (std::move (unique_store));
 
     SignalProcessor::Config cfg;
+
+    cortext::testing::RequireEncoder (cfg);
     cfg.focus = 1.0;       // prediction_horizon = lerp(2, 8, 1) = 8
     cfg.sensitivity = 0.5;
     cfg.stability = 0.5;
@@ -317,11 +325,11 @@ TEST_CASE ("Prediction horizon increases with Focus",
 
     // Should use longer horizon (8 samples) but still work
     auto rows = store->Execute (
-        "SELECT strength FROM memories WHERE memory_id = ?",
+        "SELECT pre_activation FROM memories WHERE memory_id = ?",
         { 2LL });
     REQUIRE (rows.size () == 1);
     // Aligned candidate should be boosted
-    const double strength = std::any_cast<double> (rows[0].at ("strength"));
-    REQUIRE (strength > 1.0);
+    const double pre = std::any_cast<double> (rows[0].at ("pre_activation"));
+    REQUIRE (pre > 0.0);
   }
 }

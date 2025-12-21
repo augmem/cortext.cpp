@@ -9,12 +9,11 @@ namespace cortext::operations
 ///
 /// This operation MUST run AFTER ComputeWriteGate.
 ///
-/// If write_decision=true and payload is present:
-///   1. Stores payload in objstore → blob_id
-///   2. Stores embedding in embeddings table → embedding_id
-///   3. Buffers memory_index insert with blob_id reference
-///   4. Buffers memory_feedback initialization
-///   5. Sets stored_embedding_id in OperationContext
+/// If write_decision=true:
+///   1. Stores per-signal payloads in objstore → SIGNALS.blob_id
+///   2. Inserts per-signal embeddings → SIGNALS.embedding_id
+///   3. Inserts a memory-level embedding and MEMORIES row
+///   4. Sets stored_embedding_id in OperationContext
 ///
 /// If write_decision=false:
 ///   - Discards entirely, no storage occurs.

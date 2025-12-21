@@ -5,6 +5,7 @@
 #include "cortext/processor/accumulator_state.hpp"
 #include "cortext/processor/operation_context.hpp"
 #include "cortext/signal.hpp"
+#include "cortext/store/utils.hpp"
 #include "cortext/telemetry/telemetry.hpp"
 
 #include <algorithm>
@@ -16,7 +17,8 @@ namespace
 {
 /// @brief Create a SignalRecord from the current signal and context
 SignalRecord
-CreateSignalRecord (const Signal &signal, double score, int serial_position)
+CreateSignalRecord (const Signal &signal, double score, int serial_position,
+                    Store *store)
 {
   SignalRecord rec;
   rec.embedding = signal.embedding;
@@ -25,7 +27,15 @@ CreateSignalRecord (const Signal &signal, double score, int serial_position)
   rec.mime = signal.mimetype;
   rec.score = score;
   rec.serial_position = serial_position;
-  // blob_id will be populated later if content is stored
+  if (store && signal.payload && !signal.payload->empty ())
+    {
+      auto blob_rows = store->Execute ("SELECT objstore_put(?1) AS id",
+                                       { *signal.payload });
+      if (!blob_rows.empty () && blob_rows[0].count ("id") != 0)
+        {
+          rec.blob_id = store::BlobFromAny (blob_rows[0].at ("id"));
+        }
+    }
   return rec;
 }
 } // namespace
@@ -37,6 +47,11 @@ UpdateAccumulator::Execute (OperationContext &context,
   const auto &signal = context.GetSignal ();
   auto &p_ctx = context.GetProcessorContext ();
   const std::string &source_id = signal.source_id;
+  Store *store = context.GetStore ();
+  const int64_t episode_id
+      = (p_ctx.episode_start_ts > 0)
+            ? static_cast<int64_t> (p_ctx.episode_start_ts)
+            : 0;
 
   // Get composite score (default to 0.0)
   const double score = context.GetCompositeScore ().value_or (0.0);
@@ -57,13 +72,14 @@ UpdateAccumulator::Execute (OperationContext &context,
       state.Reset (signal.embedding, signal.timestamp);
       state.s_sum = score;
       state.s_max = score;
+      state.episode_id = episode_id;
 
       // Track emotional metadata (Section 6.1.1)
       state.s_emotion_max = emotion_intensity;
       state.s_arousal_sum = arousal;
 
       // Track first signal for SIGNALS table (Section 4.4)
-      state.signals.push_back (CreateSignalRecord (signal, score, 0));
+      state.signals.push_back (CreateSignalRecord (signal, score, 0, store));
 
       // Track primary modality (v2: first modality wins)
       state.primary_modality = signal.modality;
@@ -83,13 +99,14 @@ UpdateAccumulator::Execute (OperationContext &context,
       acc.Reset (signal.embedding, signal.timestamp);
       acc.s_sum = score;
       acc.s_max = score;
+      acc.episode_id = episode_id;
 
       // Track emotional metadata (Section 6.1.1)
       acc.s_emotion_max = emotion_intensity;
       acc.s_arousal_sum = arousal;
 
       // Track first signal for SIGNALS table (Section 4.4)
-      acc.signals.push_back (CreateSignalRecord (signal, score, 0));
+      acc.signals.push_back (CreateSignalRecord (signal, score, 0, store));
 
       // Track primary modality (v2: first modality wins)
       acc.primary_modality = signal.modality;
@@ -107,7 +124,8 @@ UpdateAccumulator::Execute (OperationContext &context,
   // Track signal for SIGNALS table (Section 4.4)
   // Serial position is the current signal count before accumulation
   const int serial_pos = static_cast<int> (acc.signals.size ());
-  acc.signals.push_back (CreateSignalRecord (signal, score, serial_pos));
+  acc.signals.push_back (
+      CreateSignalRecord (signal, score, serial_pos, store));
 
   // Track primary modality (v2: first modality wins)
   if (acc.primary_modality.empty ())

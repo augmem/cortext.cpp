@@ -17,6 +17,7 @@ TEST_CASE ("InitializeStabilityPriors sets priors at T=0",
   s.embedding = Eigen::VectorXf::Zero (3);
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
   cfg.stability = 0.0;
 
   OperationContext ctx (s, pctx, cfg);
@@ -45,6 +46,7 @@ TEST_CASE ("InitializeStabilityPriors sets priors at T=1",
   s.embedding = Eigen::VectorXf::Zero (3);
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
   cfg.stability = 1.0;
 
   OperationContext ctx (s, pctx, cfg);
@@ -72,6 +74,7 @@ TEST_CASE ("InitializeStabilityPriors mid T", "[operations][stability]")
   s.embedding = Eigen::VectorXf::Zero (3);
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
   cfg.stability = 0.5;
 
   OperationContext ctx (s, pctx, cfg);
@@ -101,6 +104,7 @@ TEST_CASE ("UpdateStability no history keeps half-life at prior",
   s.embedding = Eigen::VectorXf::Zero (3);
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
   cfg.stability = 0.5;
 
   OperationContext ctx_init (s, pctx, cfg);
@@ -131,6 +135,7 @@ TEST_CASE ("UpdateStability increases half-life when retention above mean",
   s.embedding = Eigen::VectorXf::Zero (3);
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
   cfg.stability = 0.5;
 
   InitializeStabilityPriors init_op;
@@ -167,6 +172,7 @@ TEST_CASE ("UpdateStability decreases half-life when retention below mean",
   s.embedding = Eigen::VectorXf::Zero (3);
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
   cfg.stability = 0.5;
 
   InitializeStabilityPriors init_op;
@@ -197,6 +203,7 @@ TEST_CASE ("UpdateStability uses tail window w_ret(T)",
   s.embedding = Eigen::VectorXf::Zero (3);
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
   // Use a small but non-zero T so half-life prior > hl_min and can decrease.
   cfg.stability = 0.1; // w_ret ≈ 30
 

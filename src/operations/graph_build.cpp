@@ -130,7 +130,7 @@ LoadClusterMemories (Store *store)
 }
 
 /// @brief Build co-occurrence edges within clusters.
-/// Creates 'co_occurs_with' edges in ASSOCIATIONS between memories
+/// Creates 'co_occurs' edges in ASSOCIATIONS between memories
 /// with cosine similarity above threshold.
 void
 BuildCoOccurrenceEdges (Transaction &tx,
@@ -155,7 +155,8 @@ BuildCoOccurrenceEdges (Transaction &tx,
 
               if (sim > threshold)
                 {
-                  // Create co_occurs_with edge (use smaller id as source)
+                  const double weight01 = core::Map01 (sim);
+                  // Create co_occurs edge (use smaller id as source)
                   long long id1 = std::min (memories[i].memory_id,
                                             memories[j].memory_id);
                   long long id2 = std::max (memories[i].memory_id,
@@ -165,8 +166,8 @@ BuildCoOccurrenceEdges (Transaction &tx,
                        "INSERT OR REPLACE INTO associations "
                        "(source_memory_id, target_memory_id, edge_type, weight, "
                        "last_reinforced) "
-                       "VALUES (?, ?, 'co_occurs_with', ?, ?)",
-                       { id1, id2, sim, now_ts });
+                       "VALUES (?, ?, 'co_occurs', ?, ?)",
+                       { id1, id2, weight01, now_ts });
                 }
             }
         }
@@ -199,6 +200,8 @@ BuildCausalEdges (Transaction &tx,
 
           if (drift_mag > drift_threshold)
             {
+              const double weight01
+                  = core::Clamp (drift_mag / 2.0, 0.0, 1.0);
               // Create causes edge (directional: earlier -> later)
               Add (tx,
                    "INSERT OR REPLACE INTO associations "
@@ -206,7 +209,7 @@ BuildCausalEdges (Transaction &tx,
                    "last_reinforced) "
                    "VALUES (?, ?, 'causes', ?, ?)",
                    { memories[i].memory_id, memories[i + 1].memory_id,
-                     drift_mag, now_ts });
+                     weight01, now_ts });
             }
         }
     }
@@ -236,7 +239,8 @@ BuildContradictionEdges (Transaction &tx,
 
               if (sim < threshold)
                 {
-                  // Create contradicts edge with weight = |similarity|
+                  const double weight01 = core::Map01 (sim);
+                  // Create contradicts edge with normalized weight
                   long long id1 = std::min (memories[i].memory_id,
                                             memories[j].memory_id);
                   long long id2 = std::max (memories[i].memory_id,
@@ -247,7 +251,7 @@ BuildContradictionEdges (Transaction &tx,
                        "(source_memory_id, target_memory_id, edge_type, weight, "
                        "last_reinforced) "
                        "VALUES (?, ?, 'contradicts', ?, ?)",
-                       { id1, id2, std::abs (sim), now_ts });
+                       { id1, id2, weight01, now_ts });
                 }
             }
         }
@@ -296,7 +300,7 @@ BuildGraphFromConsolidation::Execute (OperationContext &context, Transaction &tx
       auto clusters = LoadClusterMemories (store);
 
       // 2) Co-occurrence edges: memory <-> memory within clusters
-      // Creates 'co_occurs_with' edges for highly similar memories
+      // Creates 'co_occurs' edges for highly similar memories
       BuildCoOccurrenceEdges (tx, clusters, co_occurrence_threshold, now_ts);
 
       // 3) Causal edges: memory -> memory based on temporal drift

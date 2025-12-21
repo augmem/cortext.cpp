@@ -16,4 +16,14 @@ public:
   void Execute (OperationContext &context, Transaction &tx) const override;
 };
 
+/// @brief Updates rate-control state after the write decision.
+///
+/// Uses the current write decision to update rate EWMA, bias-corrected
+/// estimate, and timestamps per Section 6 (post-write rate update).
+class UpdateRateState : public IOperation
+{
+public:
+  void Execute (OperationContext &context, Transaction &tx) const override;
+};
+
 } // namespace cortext::operations

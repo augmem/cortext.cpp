@@ -1,5 +1,6 @@
 // tests/state_persistence.test.cpp
 #include <any>
+#include "test_helpers.hpp"
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 #include <cortext/operations/focus.hpp>
@@ -460,6 +461,7 @@ TEST_CASE ("Working memory slots are loaded on startup",
   {
     auto verify_op = std::make_unique<OperationSet> ();
     SignalProcessor::Config cfg;
+    cortext::testing::RequireEncoder (cfg);
     cfg.sensitivity = 0.5;
     SignalProcessor processor (cfg, store, std::move (verify_op));
 
@@ -498,6 +500,7 @@ TEST_CASE ("Working memory slots are loaded on startup",
   auto *verify_raw = verify_ptr.get ();
   auto ops = std::make_unique<OperationSet> (std::move (verify_ptr));
   SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
   cfg.sensitivity = 0.5;
   SignalProcessor processor (cfg, store, std::move (ops));
 
@@ -570,6 +573,7 @@ TEST_CASE ("Working memory slots decay on load",
   auto *verify_raw = verify_ptr.get ();
   auto ops = std::make_unique<OperationSet> (std::move (verify_ptr));
   SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
   cfg.sensitivity = 0.5;
   SignalProcessor processor (cfg, store, std::move (ops));
 
@@ -636,6 +640,7 @@ TEST_CASE ("Fully decayed WM slots are not loaded",
   auto *verify_raw = verify_ptr.get ();
   auto ops = std::make_unique<OperationSet> (std::move (verify_ptr));
   SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
   cfg.sensitivity = 0.5;
   SignalProcessor processor (cfg, store, std::move (ops));
 

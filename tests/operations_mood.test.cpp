@@ -53,6 +53,7 @@ TEST_CASE ("UpdateMood integrates emotion into mood vector",
   Signal s = MakeSignal ();
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;
   OperationContext ctx (s, pctx, cfg);
@@ -87,6 +88,7 @@ TEST_CASE ("UpdateMood decay dynamics with λ_mood", "[operations][mood]")
   Signal s = MakeSignal ();
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;
   OperationContext ctx (s, pctx, cfg);
@@ -119,6 +121,7 @@ TEST_CASE ("UpdateMood clamps per-dimension to [-1, 1]",
   Signal s = MakeSignal ();
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
   cfg.sensitivity = 1.0; // high reactivity: α = 0.20
   cfg.stability = 1.0;   // high persistence: λ = 0.999
   OperationContext ctx (s, pctx, cfg);
@@ -146,6 +149,7 @@ TEST_CASE ("UpdateMood ΔT_mood calculation", "[operations][mood]")
   Signal s = MakeSignal ();
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
   cfg.sensitivity = 0.8;
   cfg.stability = 0.5;
   OperationContext ctx (s, pctx, cfg);
@@ -183,6 +187,7 @@ TEST_CASE ("UpdateMood edge cases S=0 and S=1", "[operations][mood]")
     Signal s = MakeSignal ();
     ProcessorContext pctx;
     SignalProcessor::Config cfg;
+    cortext::testing::RequireEncoder (cfg);
     cfg.sensitivity = 0.0;
     cfg.stability = 0.5;
   
@@ -209,6 +214,7 @@ TEST_CASE ("UpdateMood edge cases S=0 and S=1", "[operations][mood]")
     Signal s = MakeSignal ();
     ProcessorContext pctx;
     SignalProcessor::Config cfg;
+    cortext::testing::RequireEncoder (cfg);
     cfg.sensitivity = 1.0;
     cfg.stability = 0.5;
   
@@ -234,6 +240,7 @@ TEST_CASE ("UpdateMood edge cases T=0 and T=1", "[operations][mood]")
     Signal s = MakeSignal ();
     ProcessorContext pctx;
     SignalProcessor::Config cfg;
+    cortext::testing::RequireEncoder (cfg);
     cfg.sensitivity = 0.5;
     cfg.stability = 0.0;
   
@@ -257,6 +264,7 @@ TEST_CASE ("UpdateMood edge cases T=0 and T=1", "[operations][mood]")
     Signal s = MakeSignal ();
     ProcessorContext pctx;
     SignalProcessor::Config cfg;
+    cortext::testing::RequireEncoder (cfg);
     cfg.sensitivity = 0.5;
     cfg.stability = 1.0;
   
@@ -281,6 +289,7 @@ TEST_CASE ("UpdateMood accumulation over multiple signals",
   Signal s = MakeSignal ();
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;
   OperationContext ctx (s, pctx, cfg);
@@ -313,6 +322,7 @@ TEST_CASE ("UpdateMood with mixed emotions", "[operations][mood]")
   Signal s = MakeSignal ();
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;
   OperationContext ctx (s, pctx, cfg);
@@ -356,6 +366,7 @@ TEST_CASE ("UpdateMood zero mood yields zero ΔT_mood", "[operations][mood]")
   Signal s = MakeSignal ();
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;
   OperationContext ctx (s, pctx, cfg);
@@ -377,6 +388,7 @@ TEST_CASE ("UpdateMood max mood state normalization", "[operations][mood]")
   Signal s = MakeSignal ();
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
   cfg.sensitivity = 1.0; // max sensitivity
   cfg.stability = 1.0;   // max stability (slow decay)
   OperationContext ctx (s, pctx, cfg);

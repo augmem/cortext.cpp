@@ -26,7 +26,6 @@ constexpr double kSurpriseMax = 2.0;
 constexpr double kSurpriseMin = 0.5;
 constexpr double kBaseDeltaScale = 0.02;
 constexpr double kPadRef = 0.3;
-constexpr double kStrengthMax = 1.2;
 inline int
 PredictionHorizon (double F)
 {
@@ -125,6 +124,8 @@ ApplyPredictivePreActivation::Execute (OperationContext &context, Transaction &t
   const double pad = PreActivationDecay (cfg.stability);
   // Base delta in ~[0.012, 0.02]
   const double base_delta = kBaseDeltaScale * (1.0 - (pad - kPadRef));
+  const double update_rate_on_surprise
+      = core::Lerp (0.2, 0.02, cfg.stability) * cfg.sensitivity;
   const double surp_sens
       = SurpriseSensitivity (cfg.sensitivity, cfg.stability);
 
@@ -167,16 +168,14 @@ ApplyPredictivePreActivation::Execute (OperationContext &context, Transaction &t
       // Compute modulated delta; keep safe bounds.
       double delta = base_delta * (1.0 + constants::kQuarter * surp_sens
                                               * surprise_01);
-      if (delta < constants::kNormalizedMin)
-        delta = constants::kNormalizedMin;
-      if (delta > constants::kGainSmall)
-        delta = constants::kGainSmall;
+      delta += update_rate_on_surprise * surprise_01;
+      delta = core::Clamp (delta, 0.0, 0.2);
 
-      // v2: Update memories strength (row exists from storage)
+      // v2: Update memories pre_activation (row exists from storage)
       tx.Execute ("UPDATE memories "
-                  "SET strength = MIN(?, COALESCE(strength, 1.0) + ?) "
+                  "SET pre_activation = MIN(?, COALESCE(pre_activation, 0.0) * ? + ?) "
                   "WHERE embedding_id = ?;",
-                  { kStrengthMax, delta, id });
+                  { 1.0, pad, delta, id });
       ++boost_count;
     }
 

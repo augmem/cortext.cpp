@@ -47,6 +47,7 @@ TEST_CASE ("Accumulator updates state", "[accumulator][4.4.1]")
 
     ProcessorContext pctx;
     SignalProcessor::Config cfg;
+    cortext::testing::RequireEncoder (cfg);
     cfg.stability = 0.5;
 
     OperationContext ctx (s, pctx, cfg);
@@ -79,6 +80,8 @@ TEST_CASE ("Accumulator updates state", "[accumulator][4.4.1]")
     pctx.accumulator_states["test_source"] = std::move (state);
 
     SignalProcessor::Config cfg;
+
+    cortext::testing::RequireEncoder (cfg);
     cfg.stability = 0.5;
 
     OperationContext ctx (s, pctx, cfg);
@@ -113,6 +116,8 @@ TEST_CASE ("Boundary detection triggers on drift spike",
     pctx.accumulator_states["test_source"] = std::move (state);
 
     SignalProcessor::Config cfg;
+
+    cortext::testing::RequireEncoder (cfg);
     cfg.stability = 0.5;
     cfg.focus = 0.5;
     cfg.sensitivity = 0.5;
@@ -149,6 +154,8 @@ TEST_CASE ("Boundary detection triggers on temporal gap",
     pctx.accumulator_states["test_source"] = std::move (state);
 
     SignalProcessor::Config cfg;
+
+    cortext::testing::RequireEncoder (cfg);
     cfg.stability = 0.0; // Low stability = short gap threshold
 
     OperationContext ctx (s, pctx, cfg);
@@ -179,6 +186,8 @@ TEST_CASE ("Spike bypass triggers for high-salience signals",
     pctx.accumulator_states["test_source"] = std::move (state);
 
     SignalProcessor::Config cfg;
+
+    cortext::testing::RequireEncoder (cfg);
     cfg.sensitivity = 0.5;
 
     OperationContext ctx (s, pctx, cfg);
@@ -206,6 +215,8 @@ TEST_CASE ("Spike bypass triggers for high-salience signals",
     pctx.accumulator_states["test_source"] = std::move (state);
 
     SignalProcessor::Config cfg;
+
+    cortext::testing::RequireEncoder (cfg);
     cfg.sensitivity = 0.5;
 
     OperationContext ctx (s, pctx, cfg);
@@ -239,6 +250,8 @@ TEST_CASE ("Write gate computes window score", "[accumulator][4.4.5]")
     pctx.accumulator_states["test_source"] = std::move (state);
 
     SignalProcessor::Config cfg;
+
+    cortext::testing::RequireEncoder (cfg);
     cfg.focus = 0.5;
     cfg.sensitivity = 0.5;
     cfg.stability = 0.5;
@@ -272,6 +285,8 @@ TEST_CASE ("Write gate computes window score", "[accumulator][4.4.5]")
 
     SignalProcessor::Config cfg;
 
+    cortext::testing::RequireEncoder (cfg);
+
     OperationContext ctx (s, pctx, cfg);
     ctx.SetFlushRequired (false);
     ctx.SetSpikeBypass (false);
@@ -303,6 +318,8 @@ TEST_CASE ("Write refractory suppresses rapid writes", "[accumulator][4.4.5]")
     pctx.accumulator_states["test_source"] = std::move (state);
 
     SignalProcessor::Config cfg;
+
+    cortext::testing::RequireEncoder (cfg);
     cfg.stability = 0.0; // Low stability = strong refractory
 
     OperationContext ctx (s, pctx, cfg);

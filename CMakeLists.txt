@@ -1,7 +1,9 @@
 cmake_minimum_required(VERSION 3.16)
 project(cortext LANGUAGES C CXX)
 
-set(CMAKE_CXX_STANDARD 20)
+if(NOT DEFINED CMAKE_CXX_STANDARD OR CMAKE_CXX_STANDARD STREQUAL "")
+  set(CMAKE_CXX_STANDARD 20)
+endif()
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
@@ -19,6 +21,7 @@ option(CORTEXT_DISABLE_IMAGEBIND_ORT "Disable ONNX Runtime for ImageBind embedde
 option(CORTEXT_ENABLE_GEMMA_ORT "Enable ONNX Runtime for Gemma text generator" OFF)
 option(CORTEXT_DISABLE_OGA "Disable onnxruntime-genai for Phi-4 Extractor/Summarizer" OFF)
 option(CORTEXT_DISABLE_LITERT "Disable LiteRT-LM for Gemma Extractor/Summarizer" OFF)
+option(CORTEXT_DISABLE_SHERPA_ONNX "Disable sherpa-onnx ASR/TTS integration" OFF)
 
 # Sanitizer options for catching memory bugs during development
 option(CORTEXT_ENABLE_ASAN "Enable AddressSanitizer" OFF)
@@ -104,10 +107,13 @@ add_library(cortext
     src/capi.cpp
     src/telemetry/telemetry.cpp
     src/encoder/imagebind.cpp
+    src/encoder/embeddinggemma.cpp
+    src/audio/sherpa_onnx.cpp
     src/data/centroids.cpp
     src/data/embedded_centroid_vectors.cpp
     src/operations/centroids.cpp
     src/operations/focus.cpp
+    src/operations/recent_context.cpp
     src/operations/sensitivity.cpp
     src/operations/uncertainty.cpp
     src/operations/threshold.cpp
@@ -142,7 +148,6 @@ add_library(cortext
     src/operations/graph_build.cpp
     src/operations/graph_retrieval.cpp
     # Phase 4: Knowledge Graph Enhancement
-    src/operations/concept_detection.cpp
     src/operations/emotion_cascade.cpp
     src/operations/signal_metrics_persistence.cpp
     src/operations/write_gate.cpp
@@ -156,9 +161,12 @@ add_library(cortext
     # Extractor component
     src/extractor/phi4_extractor.cpp
     src/extractor/gemma_extractor.cpp
+    src/extractor/json_schema_constraint.cpp
     # Summarizer component
     src/summarizer/phi4_summarizer.cpp
     src/summarizer/gemma_summarizer.cpp
+    # JSON schema parser for constrained decoding
+    src/generator/json_decoder.cpp
     # Audio preprocessing
     src/audio/gemma_audio.cpp
 )
@@ -448,6 +456,13 @@ if(CORTEXT_ENABLE_GEMMA_ORT)
   endif()
 endif()
 
+# EmbeddingGemma ONNX encoder (uses ORT + SentencePiece from LiteRT-LM)
+if((NOT CORTEXT_DISABLE_IMAGEBIND_ORT AND NOT EMSCRIPTEN) OR CORTEXT_ENABLE_GEMMA_ORT)
+  if(NOT CORTEXT_DISABLE_LITERT AND NOT EMSCRIPTEN)
+    target_compile_definitions(cortext PUBLIC CORTEXT_ENABLE_EMBEDDINGGEMMA_ORT=1)
+  endif()
+endif()
+
 # Optional onnxruntime-genai (OGA) integration for Phi-4 Extractor/Summarizer
 # Enabled by default; set CORTEXT_DISABLE_OGA=ON to disable
 if(CORTEXT_DISABLE_OGA)
@@ -536,6 +551,39 @@ if(NOT CORTEXT_DISABLE_OGA AND NOT EMSCRIPTEN)
   target_link_libraries(cortext PRIVATE onnxruntime-genai)
 endif()
 
+# Optional sherpa-onnx integration for ASR/TTS
+# Enabled by default; set CORTEXT_DISABLE_SHERPA_ONNX=ON to disable
+if(CORTEXT_DISABLE_SHERPA_ONNX)
+  target_compile_definitions(cortext PUBLIC CORTEXT_DISABLE_SHERPA_ONNX=1)
+endif()
+
+if(NOT CORTEXT_DISABLE_SHERPA_ONNX AND NOT EMSCRIPTEN)
+  # Configure sherpa-onnx to be a lightweight library build.
+  set(SHERPA_ONNX_ENABLE_PYTHON OFF CACHE BOOL "" FORCE)
+  set(SHERPA_ONNX_ENABLE_TESTS OFF CACHE BOOL "" FORCE)
+  set(SHERPA_ONNX_ENABLE_CHECK OFF CACHE BOOL "" FORCE)
+  set(SHERPA_ONNX_ENABLE_WEBSOCKET OFF CACHE BOOL "" FORCE)
+  set(SHERPA_ONNX_ENABLE_PORTAUDIO OFF CACHE BOOL "" FORCE)
+  set(SHERPA_ONNX_ENABLE_BINARY OFF CACHE BOOL "" FORCE)
+  set(SHERPA_ONNX_ENABLE_TTS ON CACHE BOOL "" FORCE)
+  set(SHERPA_ONNX_ENABLE_SPEAKER_DIARIZATION OFF CACHE BOOL "" FORCE)
+  set(SHERPA_ONNX_ENABLE_C_API ON CACHE BOOL "" FORCE)
+
+  # Prefer sherpa-onnx to download its own ORT if our build isn't ready yet.
+  if(DEFINED CORTEXT_ORT_LIB_PATH AND EXISTS "${CORTEXT_ORT_LIB_PATH}")
+    set(ENV{SHERPA_ONNXRUNTIME_INCLUDE_DIR} "${CORTEXT_ORT_INSTALL_DIR}/include")
+    set(ENV{SHERPA_ONNXRUNTIME_LIB_DIR} "${CORTEXT_ORT_INSTALL_DIR}/lib")
+    set(SHERPA_ONNX_USE_PRE_INSTALLED_ONNXRUNTIME_IF_AVAILABLE ON CACHE BOOL "" FORCE)
+  else()
+    set(SHERPA_ONNX_USE_PRE_INSTALLED_ONNXRUNTIME_IF_AVAILABLE OFF CACHE BOOL "" FORCE)
+  endif()
+
+  add_subdirectory(third_party/sherpa-onnx EXCLUDE_FROM_ALL)
+  target_include_directories(cortext PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/third_party/sherpa-onnx)
+  target_link_libraries(cortext PRIVATE sherpa-onnx-cxx-api)
+  target_compile_definitions(cortext PUBLIC CORTEXT_ENABLE_SHERPA_ONNX=1)
+endif()
+
 # Optional LiteRT-LM integration for Gemma Extractor/Summarizer
 # Enabled by default; set CORTEXT_DISABLE_LITERT=ON to disable
 if(CORTEXT_DISABLE_LITERT)
@@ -588,6 +636,7 @@ if(NOT CORTEXT_DISABLE_LITERT AND NOT EMSCRIPTEN)
         --config=${LITERT_BAZEL_CONFIG}
         --compilation_mode=opt
         --verbose_failures
+        --output_base=${CMAKE_BINARY_DIR}/bazel-output
       BUILD_IN_SOURCE TRUE
       INSTALL_COMMAND ${CMAKE_COMMAND}
         -DLITERT_SOURCE_DIR=${LITERT_SOURCE_DIR}

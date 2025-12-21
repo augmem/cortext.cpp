@@ -124,6 +124,7 @@ TEST_CASE ("Alg21 inhibits near losers but not distant ones",
 
   // Choose knobs to get k≈3 winners and meaningful inhibition radius.
   SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = 1.0;       // winners_k ~ 3, high inhibition radius 0.85
   cfg.sensitivity = 1.0; // stronger lateral strength
   cfg.stability = 0.0;   // larger base suppression per retrieval
@@ -190,6 +191,8 @@ TEST_CASE ("Alg21 RIF recovery UPDATE does not violate NOT NULL constraint",
   auto store = std::shared_ptr<cortext::Store> (std::move (unique_store));
 
   SignalProcessor::Config cfg;
+
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = 1.0;
   cfg.sensitivity = 1.0;
   cfg.stability = 0.5;
@@ -255,6 +258,7 @@ TEST_CASE ("Alg21 recovery restores strength over time",
 
   // Higher stability → longer recovery_time (600s); we'll advance ts by >=600.
   SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = 1.0;
   cfg.sensitivity = 1.0;
   cfg.stability = 1.0; // recovery_time = 600s

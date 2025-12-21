@@ -50,7 +50,7 @@ CreateReinforcementEdges (Transaction &tx,
               "(source_memory_id, target_memory_id, edge_type, weight, last_reinforced) "
               "VALUES (?1, ?2, 'reinforces', 1.0, ?3) "
               "ON CONFLICT (source_memory_id, target_memory_id, edge_type) DO UPDATE "
-              "SET weight = weight + 1.0, last_reinforced = excluded.last_reinforced",
+              "SET weight = MIN(weight + 1.0, 1.0), last_reinforced = excluded.last_reinforced",
               { id1, id2, now_ts });
         }
     }

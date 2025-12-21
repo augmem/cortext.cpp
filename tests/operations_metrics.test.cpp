@@ -24,6 +24,8 @@ TEST_CASE ("ComputeMetrics sets all 12 metrics in normalized ranges",
   pctx.recent_scores.push_back (0.6);
 
   SignalProcessor::Config cfg;
+
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.6;
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;
@@ -45,8 +47,8 @@ TEST_CASE ("ComputeMetrics sets all 12 metrics in normalized ranges",
     {
       auto v = ctx.GetMetric (metric);
       REQUIRE (v.has_value ());
-      // All metrics should be normalized: within [-1,1]
-      REQUIRE (*v >= -1.0);
+      // All metrics should be normalized: within [0,1]
+      REQUIRE (*v >= 0.0);
       REQUIRE (*v <= 1.0);
     }
 }
@@ -64,6 +66,8 @@ TEST_CASE (
   pctx.recent_context_embeddings.push_back (Eigen::VectorXf::Ones (4));
 
   SignalProcessor::Config cfg;
+
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.5;
   cfg.sensitivity = 0.8;  // S
   cfg.stability = 0.2;     // T
@@ -96,6 +100,8 @@ TEST_CASE (
   pctx.recent_context_embeddings.push_back (Eigen::VectorXf::Ones (4));
 
   SignalProcessor::Config cfg;
+
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.6; // base F
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;
@@ -122,4 +128,59 @@ TEST_CASE (
 
   REQUIRE (cov_lo <= cov_hi);
   REQUIRE (sal_lo <= sal_hi);
+}
+
+TEST_CASE ("ComputeMetrics uses ΔSSE for utility when available",
+           "[operations][metrics][utility]")
+{
+  Signal s;
+  s.embedding = Eigen::VectorXf::Ones (4);
+  ProcessorContext pctx;
+  pctx.recent_context_embeddings.push_back (Eigen::VectorXf::Ones (4));
+
+  // Provide SSE history to enable ΔSSE
+  pctx.prediction_error_sse_prev = 2.0;
+  pctx.prediction_error_sse = 1.0;
+
+  SignalProcessor::Config cfg;
+
+  cortext::testing::RequireEncoder (cfg);
+  cfg.focus = 0.5;
+  cfg.sensitivity = 0.0;
+  cfg.stability = 0.5;
+
+  OperationContext ctx (s, pctx, cfg);
+  ComputeMetrics op;
+  op.Execute (ctx, cortext::testing::GetNullTransaction ());
+
+  auto utility = ctx.GetMetric (operations::Metric::utility);
+  REQUIRE (utility.has_value ());
+  // ΔSSE = (2 - 1) / 2 = 0.5
+  // utility = ΔSSE × (0.5 + 0.5F) × (1 - 0.3S)
+  // = 0.5 × 0.75 × 1.0 = 0.375
+  REQUIRE (*utility == Catch::Approx (0.375).epsilon (1e-6));
+}
+
+TEST_CASE ("ComputeMetrics relevance fallback uses 0.5 baseline with empty context",
+           "[operations][metrics][relevance]")
+{
+  Signal s;
+  s.embedding = Eigen::VectorXf::Ones (4);
+  ProcessorContext pctx;
+
+  SignalProcessor::Config cfg;
+
+  cortext::testing::RequireEncoder (cfg);
+  cfg.focus = 0.6;
+  cfg.sensitivity = 0.5;
+  cfg.stability = 0.5;
+
+  OperationContext ctx (s, pctx, cfg);
+  ComputeMetrics op;
+  op.Execute (ctx, cortext::testing::GetNullTransaction ());
+
+  auto relevance = ctx.GetMetric (operations::Metric::relevance);
+  REQUIRE (relevance.has_value ());
+  const double expected = 0.5 * (0.5 + 0.5 * cfg.focus);
+  REQUIRE (*relevance == Catch::Approx (expected).epsilon (1e-6));
 }

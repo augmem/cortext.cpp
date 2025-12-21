@@ -3,6 +3,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <cortext/core/algorithms.hpp>
 #include <cortext/operations/focus.hpp>
+#include <cortext/operations/recent_context.hpp>
 #include <cortext/operations/uncertainty.hpp>
 #include <cortext/processor.hpp>
 #include <cortext/processor/operation_context.hpp>
@@ -10,6 +11,7 @@
 using namespace cortext;
 using cortext::operations::InitializeFocusPriors;
 using cortext::operations::UpdateFocus;
+using cortext::operations::UpdateRecentContext;
 using cortext::operations::UpdateUncertainty;
 
 TEST_CASE ("InitializeFocusPriors computes from config", "[operations][focus]")
@@ -18,6 +20,7 @@ TEST_CASE ("InitializeFocusPriors computes from config", "[operations][focus]")
   s.embedding = Eigen::VectorXf::Zero (3);
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.8;
 
   OperationContext ctx (s, pctx, cfg);
@@ -40,6 +43,7 @@ TEST_CASE ("UpdateFocus EWMA toward observed cosine and clamping",
   s.embedding = Eigen::VectorXf::Ones (4);
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.5;     // mid
   cfg.stability = 0.5; // mid
 
@@ -49,14 +53,18 @@ TEST_CASE ("UpdateFocus EWMA toward observed cosine and clamping",
   InitializeFocusPriors init;
   init.Execute (ctx, cortext::testing::GetNullTransaction ());
 
+  // Seed context with a mean slightly different than current signal to get
+  // cosine<1
+  pctx.recent_context_embeddings.push_back (0.5f * s.embedding);
+
+  UpdateRecentContext ctx_op;
+  ctx_op.Execute (ctx, cortext::testing::GetNullTransaction ());
+  REQUIRE (pctx.recent_context_embeddings.size () == 2);
+
   // Set uncertainty to a mid value to get non-trivial alpha_f
   UpdateUncertainty uop;
   pctx.signals_processed = 10;
   uop.Execute (ctx, cortext::testing::GetNullTransaction ()); // updates pctx.u_t
-
-  // Seed context with a mean slightly different than current signal to get
-  // cosine<1
-  pctx.recent_context_embeddings.push_back (0.5f * s.embedding);
 
   double prev = pctx.weight_relevance;
   UpdateFocus op;
@@ -67,6 +75,6 @@ TEST_CASE ("UpdateFocus EWMA toward observed cosine and clamping",
   REQUIRE (pctx.attention_width >= 0.1 * 3.14159);
   REQUIRE (pctx.attention_width <= 3.14159);
 
-  // Window management: after push, size should be 2 (seed + current)
+  // Window management: UpdateFocus should not mutate the buffer
   REQUIRE (pctx.recent_context_embeddings.size () == 2);
 }

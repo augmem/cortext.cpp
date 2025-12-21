@@ -36,6 +36,18 @@ TEST_CASE ("KNeighbors follows spec: lerp(8, 32, T)",
   REQUIRE (KNeighbors (0.3) < KNeighbors (0.7));
 }
 
+TEST_CASE ("KCtx follows spec: lerp(3, 10, T)",
+           "[formula][knobs][temporal]")
+{
+  // KCtx = round(lerp(3, 10, T))
+  REQUIRE (KCtx (0.0) == 3);
+  REQUIRE (KCtx (1.0) == 10);
+  REQUIRE (KCtx (0.5) == 7);
+
+  // Monotonic
+  REQUIRE (KCtx (0.3) < KCtx (0.7));
+}
+
 TEST_CASE ("RLSWindowN follows spec: lerp(64, 512, T)",
            "[formula][knobs][temporal]")
 {
@@ -571,16 +583,16 @@ TEST_CASE ("MinClusterSizeForExtraction follows spec: lerp(3, 10, F)",
     }
 }
 
-TEST_CASE ("EntityFrequencyThreshold follows spec: lerp(5, 15, T)",
+TEST_CASE ("LabelFrequencyThreshold follows spec: lerp(5, 15, T)",
            "[formula][knobs][consolidation]")
 {
-  // EntityFrequencyThreshold = round(lerp(5, 15, T))
-  REQUIRE (EntityFrequencyThreshold (0.0) == 5);
-  REQUIRE (EntityFrequencyThreshold (1.0) == 15);
-  REQUIRE (EntityFrequencyThreshold (0.5) == 10);
+  // LabelFrequencyThreshold = round(lerp(5, 15, T))
+  REQUIRE (LabelFrequencyThreshold (0.0) == 5);
+  REQUIRE (LabelFrequencyThreshold (1.0) == 15);
+  REQUIRE (LabelFrequencyThreshold (0.5) == 10);
 
   // Monotonic
-  REQUIRE (EntityFrequencyThreshold (0.3) < EntityFrequencyThreshold (0.7));
+  REQUIRE (LabelFrequencyThreshold (0.3) < LabelFrequencyThreshold (0.7));
 }
 
 TEST_CASE ("ExtractionIntervalSeconds follows spec: lerp(300, 3600, T)",

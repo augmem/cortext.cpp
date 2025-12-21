@@ -1,22 +1,29 @@
 #include "cortext/extractor/gemma_extractor.hpp"
 
+#include <algorithm>
+#include <cctype>
+#include <cstdlib>
+#include <cstring>
+#include <iostream>
+#include <optional>
 #include <stdexcept>
+#include <vector>
 
 #if !defined(CORTEXT_DISABLE_LITERT)
 #include "cortext/audio/gemma_audio.hpp"
 #include "cortext/core/thread_config.hpp"
+#include "cortext/extractor/json_schema_constraint.hpp"
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wgcc-compat"
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
 #pragma clang diagnostic ignored "-Wc99-extensions"
 #pragma clang diagnostic ignored "-Wunused-parameter"
 #pragma clang diagnostic ignored "-Wsign-compare"
-#include "runtime/conversation/conversation.h"
-#include "runtime/conversation/io_types.h"
 #include "runtime/engine/engine.h"
 #include "runtime/engine/engine_settings.h"
 #include "runtime/engine/io_types.h"
 #include "runtime/executor/llm_executor_settings.h"
+#include "litert/c/litert_tensor_buffer.h"
 #pragma clang diagnostic pop
 #endif
 
@@ -24,6 +31,167 @@ namespace cortext
 {
 
 #if !defined(CORTEXT_DISABLE_LITERT)
+
+namespace
+{
+std::optional<nlohmann::json>
+TryParseJsonObject (const std::string &content)
+{
+  const auto start = content.find ('{');
+  const auto end = content.rfind ('}');
+  if (start == std::string::npos || end == std::string::npos || end <= start)
+    {
+      return std::nullopt;
+    }
+  try
+    {
+      return nlohmann::json::parse (content.substr (start, end - start + 1));
+    }
+  catch (const nlohmann::json::exception &)
+    {
+      return std::nullopt;
+    }
+}
+
+std::string
+BuildTextPrompt (const std::string &text)
+{
+  return std::string (
+      "Extract labels and relations from the text below. "
+      "Return only a single JSON object with keys \"labels\" and \"relations\". "
+      "\"labels\" must be an array of non-empty strings copied from the text "
+      "(no placeholders, no objects, no types/categories). "
+      "Each relation must include non-empty \"subject\", \"predicate\", and "
+      "\"object\" strings taken from the text. "
+      "Always return at least one label; if nothing is obvious, choose the "
+      "single most salient term from the text.\n"
+      "Text:\n")
+      + text;
+}
+
+std::string
+BuildAudioPrompt ()
+{
+  return std::string (
+      "Extract labels and relations from the audio. "
+      "Return only a single JSON object with keys \"labels\" and \"relations\". "
+      "\"labels\" must be an array of non-empty strings drawn "
+      "from the audio content (no placeholders, no objects, no types/categories). "
+      "Each relation must include non-empty \"subject\", \"predicate\", and "
+      "\"object\" strings drawn from the audio content. "
+      "Always return at least one label; if nothing is obvious, choose the "
+      "single most salient term from the audio.\n"
+      "<start_of_audio>");
+}
+
+litert::TensorBuffer
+BuildAudioTensor (const GemmaAudioFeatures &features)
+{
+  if (features.num_frames <= 0 || features.mel_bins <= 0)
+    {
+      throw std::runtime_error ("GemmaExtractor: Invalid audio feature shape");
+    }
+
+  const size_t element_count = features.mel_features.size ();
+  const size_t byte_count = element_count * sizeof (float);
+  void *host_buffer = nullptr;
+  if (posix_memalign (&host_buffer, LITERT_HOST_MEMORY_BUFFER_ALIGNMENT,
+                      byte_count)
+          != 0
+      || host_buffer == nullptr)
+    {
+      throw std::runtime_error ("GemmaExtractor: Audio buffer allocation failed");
+    }
+  std::memcpy (host_buffer, features.mel_features.data (), byte_count);
+
+  LiteRtLayout layout{};
+  layout.rank = 3;
+  layout.has_strides = false;
+  layout.dimensions[0] = 1;
+  layout.dimensions[1] = static_cast<int32_t> (features.num_frames);
+  layout.dimensions[2] = static_cast<int32_t> (features.mel_bins);
+
+  LiteRtRankedTensorType tensor_type{};
+  tensor_type.element_type = kLiteRtElementTypeFloat32;
+  tensor_type.layout = layout;
+
+  LiteRtTensorBuffer buffer = nullptr;
+  LiteRtStatus status = LiteRtCreateTensorBufferFromHostMemory (
+      &tensor_type, host_buffer, byte_count, std::free, &buffer);
+  if (status != kLiteRtStatusOk || buffer == nullptr)
+    {
+      std::free (host_buffer);
+      throw std::runtime_error ("GemmaExtractor: Audio tensor creation failed");
+    }
+
+  return litert::TensorBuffer::WrapCObject (buffer, litert::OwnHandle::kYes);
+}
+
+operations::ExtractionResult
+ParseExtractionResponse (const std::string &content)
+{
+  operations::ExtractionResult result;
+  auto json_opt = TryParseJsonObject (content);
+  if (!json_opt)
+    {
+      return result;
+    }
+
+  const auto &json_output = *json_opt;
+  if (json_output.contains ("labels"))
+    {
+      for (const auto &label : json_output["labels"])
+        {
+          if (label.is_string ())
+            {
+              operations::ExtractedLabel e;
+              e.label = label.get<std::string> ();
+              e.salience = 0.5;
+              result.labels.push_back (std::move (e));
+            }
+          else if (label.is_object ())
+            {
+              // Tolerate object-shaped labels if the model fails to follow the prompt.
+              operations::ExtractedLabel e;
+              e.label = label.value ("label", label.value ("name", ""));
+              e.salience = 0.5;
+              if (!e.label.empty ())
+                {
+                  result.labels.push_back (std::move (e));
+                }
+            }
+        }
+    }
+
+  if (json_output.contains ("relations"))
+    {
+      for (const auto &relation : json_output["relations"])
+        {
+          operations::ExtractedRelation r;
+          r.subject = relation.value ("subject", "");
+          r.predicate = relation.value ("predicate", "");
+          r.object = relation.value ("object", "");
+          r.confidence = relation.value ("confidence", 0.5);
+          result.relations.push_back (std::move (r));
+        }
+    }
+
+  return result;
+}
+
+bool
+HasNonEmptyLabel (const operations::ExtractionResult &result)
+{
+  for (const auto &label : result.labels)
+    {
+      if (!label.label.empty ())
+        {
+          return true;
+        }
+    }
+  return false;
+}
+} // namespace
 
 struct GemmaExtractor::Impl
 {
@@ -82,181 +250,95 @@ struct GemmaExtractor::Impl
   }
 
   operations::ExtractionResult
-  ExtractWithConversation (const std::string &prompt,
-                           const nlohmann::json &schema)
+  ExtractFromTextImpl (const std::string &text,
+                       const nlohmann::json &schema)
   {
-    (void)schema;
     if (!available || !engine)
       {
         throw std::runtime_error ("GemmaExtractor: Model not available");
       }
 
-    // Build extraction tool definition based on schema
-    nlohmann::ordered_json entity_props;
-    entity_props["name"] = { { "type", "string" } };
-    entity_props["type"] = { { "type", "string" } };
-    entity_props["salience"] = { { "type", "number" } };
+    constexpr int kMaxAttempts = 2;
+    const std::string prompt = BuildTextPrompt (text);
 
-    nlohmann::ordered_json relation_props;
-    relation_props["subject"] = { { "type", "string" } };
-    relation_props["predicate"] = { { "type", "string" } };
-    relation_props["object"] = { { "type", "string" } };
-    relation_props["confidence"] = { { "type", "number" } };
-
-    nlohmann::ordered_json parameters;
-    parameters["type"] = "object";
-    parameters["properties"]["entities"]["type"] = "array";
-    parameters["properties"]["entities"]["items"]["type"] = "object";
-    parameters["properties"]["entities"]["items"]["properties"] = entity_props;
-    parameters["properties"]["relations"]["type"] = "array";
-    parameters["properties"]["relations"]["items"]["type"] = "object";
-    parameters["properties"]["relations"]["items"]["properties"] = relation_props;
-
-    nlohmann::ordered_json extraction_tool;
-    extraction_tool["type"] = "function";
-    extraction_tool["function"]["name"] = "extract_entities_and_relations";
-    extraction_tool["function"]["description"]
-        = "Extract entities and relations from the given text";
-    extraction_tool["function"]["parameters"] = parameters;
-
-    // Create preface with tool definition
-    litert::lm::JsonPreface preface;
-    preface.tools = nlohmann::ordered_json::array ({ extraction_tool });
-
-    // Create conversation config with constrained decoding enabled
-    auto config_result = litert::lm::ConversationConfig::CreateDefault (
-        *engine,
-        litert::lm::Preface{ preface },
-        std::nullopt, // default prompt template
-        std::nullopt, // default processor config
-        true          // enable_constrained_decoding
-    );
-
-    if (!config_result.ok ())
+    for (int attempt = 0; attempt < kMaxAttempts; ++attempt)
       {
-        throw std::runtime_error (
-            "GemmaExtractor: Failed to create conversation config");
-      }
+        litert::lm::SessionConfig session_config
+            = litert::lm::SessionConfig::CreateDefault ();
 
-    // Create conversation
-    auto conversation_result
-        = litert::lm::Conversation::Create (*engine, *config_result);
-    if (!conversation_result.ok ())
-      {
-        throw std::runtime_error (
-            "GemmaExtractor: Failed to create conversation");
-      }
-    auto &conversation = *conversation_result;
-
-    // Build the extraction prompt
-    std::string extraction_prompt
-        = "Extract all entities and relations from the following text. Use "
-          "the extract_entities_and_relations function to return the "
-          "results.\n\nText: "
-        + prompt;
-
-    // Send message
-    litert::lm::JsonMessage message
-        = { { "role", "user" }, { "content", extraction_prompt } };
-    auto response = conversation->SendMessage (litert::lm::Message{ message });
-
-    if (!response.ok ())
-      {
-        throw std::runtime_error ("GemmaExtractor: Inference failed");
-      }
-
-    // Parse the response (tool call format)
-    operations::ExtractionResult result;
-    try
-      {
-        auto &response_message = std::get<litert::lm::JsonMessage> (*response);
-
-        // Check for tool calls in the response
-        if (response_message.contains ("tool_calls"))
+        auto session_result = engine->CreateSession (session_config);
+        if (!session_result.ok ())
           {
-            for (const auto &tool_call : response_message["tool_calls"])
+            if (attempt + 1 >= kMaxAttempts)
               {
-                if (tool_call.contains ("function")
-                    && tool_call["function"].contains ("arguments"))
-                  {
-                    auto args_str
-                        = tool_call["function"]["arguments"].get<std::string> ();
-                    auto args = nlohmann::json::parse (args_str);
-
-                    // Extract entities
-                    if (args.contains ("entities"))
-                      {
-                        for (const auto &entity : args["entities"])
-                          {
-                            operations::ExtractedEntity e;
-                            e.name = entity.value ("name", "");
-                            e.type = entity.value ("type", "");
-                            e.salience = entity.value ("salience", 0.5);
-                            result.entities.push_back (std::move (e));
-                          }
-                      }
-
-                    // Extract relations
-                    if (args.contains ("relations"))
-                      {
-                        for (const auto &relation : args["relations"])
-                          {
-                            operations::ExtractedRelation r;
-                            r.subject = relation.value ("subject", "");
-                            r.predicate = relation.value ("predicate", "");
-                            r.object = relation.value ("object", "");
-                            r.confidence = relation.value ("confidence", 0.5);
-                            result.relations.push_back (std::move (r));
-                          }
-                      }
-                  }
+                throw std::runtime_error (
+                    "GemmaExtractor: Failed to create session");
               }
+            continue;
           }
-        // Also check for direct content (in case model returns JSON directly)
-        else if (response_message.contains ("content"))
+
+        std::vector<litert::lm::InputData> inputs;
+        inputs.emplace_back (litert::lm::InputText (prompt));
+
+        auto prefill_status = (*session_result)->RunPrefill (inputs);
+        if (!prefill_status.ok ())
           {
-            auto content = response_message["content"].get<std::string> ();
-            auto json_output = nlohmann::json::parse (content);
-
-            if (json_output.contains ("entities"))
+            if (attempt + 1 >= kMaxAttempts)
               {
-                for (const auto &entity : json_output["entities"])
-                  {
-                    operations::ExtractedEntity e;
-                    e.name = entity.value ("name", "");
-                    e.type = entity.value ("type", "");
-                    e.salience = entity.value ("salience", 0.5);
-                    result.entities.push_back (std::move (e));
-                  }
+                throw std::runtime_error ("GemmaExtractor: Prefill failed");
               }
+            continue;
+          }
 
-            if (json_output.contains ("relations"))
+        constexpr int kConstraintVocabSize = 1000000;
+        auto &tokenizer = const_cast<litert::lm::Tokenizer &> (
+            (*session_result)->GetTokenizer ());
+        extractor::JsonSchemaConstraint constraint (schema, tokenizer,
+                                                     kConstraintVocabSize);
+        auto decode_config = litert::lm::DecodeConfig::CreateDefault ();
+        decode_config.SetConstraint (&constraint);
+
+        auto response = (*session_result)->RunDecode (decode_config);
+        if (!response.ok ())
+          {
+            if (attempt + 1 >= kMaxAttempts)
               {
-                for (const auto &relation : json_output["relations"])
-                  {
-                    operations::ExtractedRelation r;
-                    r.subject = relation.value ("subject", "");
-                    r.predicate = relation.value ("predicate", "");
-                    r.object = relation.value ("object", "");
-                    r.confidence = relation.value ("confidence", 0.5);
-                    result.relations.push_back (std::move (r));
-                  }
+                throw std::runtime_error ("GemmaExtractor: Decode failed");
               }
+            continue;
+          }
+
+        const auto &texts = response->GetTexts ();
+        if (texts.empty ())
+          {
+            if (attempt + 1 >= kMaxAttempts)
+              {
+                throw std::runtime_error ("GemmaExtractor: Empty decode output");
+              }
+            continue;
+          }
+
+        if (std::getenv ("CORTEXT_EXTRACTOR_DEBUG") != nullptr)
+          {
+            std::cerr << "GemmaExtractor response (text): " << texts.front ()
+                      << std::endl;
+          }
+
+        auto parsed = ParseExtractionResponse (texts.front ());
+        if (HasNonEmptyLabel (parsed))
+          {
+            return parsed;
           }
       }
-    catch (const nlohmann::json::exception &)
-      {
-        // Failed to parse JSON, return empty result
-      }
 
-    return result;
+    throw std::runtime_error (
+        "GemmaExtractor: Failed to produce valid constrained labels");
   }
 
   operations::ExtractionResult
   ExtractFromAudioImpl (const float *pcm, size_t num_samples,
                         const nlohmann::json &schema)
   {
-    (void)schema;
     if (!available || !engine)
       {
         throw std::runtime_error ("GemmaExtractor: Model not available");
@@ -265,142 +347,90 @@ struct GemmaExtractor::Impl
     // Preprocess audio to mel-spectrogram
     auto features = ExtractGemmaAudioFeatures (pcm, num_samples);
 
-    // Build extraction tool definition
-    nlohmann::ordered_json entity_props;
-    entity_props["name"] = { { "type", "string" } };
-    entity_props["type"] = { { "type", "string" } };
-    entity_props["salience"] = { { "type", "number" } };
+    constexpr int kMaxAttempts = 2;
+    const std::string prompt = BuildAudioPrompt ();
 
-    nlohmann::ordered_json relation_props;
-    relation_props["subject"] = { { "type", "string" } };
-    relation_props["predicate"] = { { "type", "string" } };
-    relation_props["object"] = { { "type", "string" } };
-    relation_props["confidence"] = { { "type", "number" } };
-
-    nlohmann::ordered_json parameters;
-    parameters["type"] = "object";
-    parameters["properties"]["entities"]["type"] = "array";
-    parameters["properties"]["entities"]["items"]["type"] = "object";
-    parameters["properties"]["entities"]["items"]["properties"] = entity_props;
-    parameters["properties"]["relations"]["type"] = "array";
-    parameters["properties"]["relations"]["items"]["type"] = "object";
-    parameters["properties"]["relations"]["items"]["properties"] = relation_props;
-
-    nlohmann::ordered_json extraction_tool;
-    extraction_tool["type"] = "function";
-    extraction_tool["function"]["name"] = "extract_entities_and_relations";
-    extraction_tool["function"]["description"]
-        = "Extract entities and relations from the given audio";
-    extraction_tool["function"]["parameters"] = parameters;
-
-    // Create preface with tool definition
-    litert::lm::JsonPreface preface;
-    preface.tools = nlohmann::ordered_json::array ({ extraction_tool });
-
-    // Create conversation config with audio modality enabled
-    litert::lm::SessionConfig session_config
-        = litert::lm::SessionConfig::CreateDefault ();
-    session_config.SetAudioModalityEnabled (true);
-
-    auto config_result = litert::lm::ConversationConfig::CreateFromSessionConfig (
-        *engine, session_config,
-        litert::lm::Preface{ preface },
-        std::nullopt, // default processor config
-        true          // enable_constrained_decoding
-    );
-
-    if (!config_result.ok ())
+    for (int attempt = 0; attempt < kMaxAttempts; ++attempt)
       {
-        throw std::runtime_error (
-            "GemmaExtractor: Failed to create conversation config");
-      }
+        // Create session config with audio modality enabled
+        litert::lm::SessionConfig session_config
+            = litert::lm::SessionConfig::CreateDefault ();
+        session_config.SetAudioModalityEnabled (true);
 
-    // Create conversation
-    auto conversation_result
-        = litert::lm::Conversation::Create (*engine, *config_result);
-    if (!conversation_result.ok ())
-      {
-        throw std::runtime_error (
-            "GemmaExtractor: Failed to create conversation");
-      }
-    auto &conversation = *conversation_result;
-
-    // Package mel features as binary data for audio input
-    std::string mel_data (
-        reinterpret_cast<const char *> (features.mel_features.data ()),
-        features.mel_features.size () * sizeof (float));
-
-    // Build message with audio reference
-    litert::lm::JsonMessage message = {
-      { "role", "user" },
-      { "content",
-        nlohmann::ordered_json::array (
-            { { { "type", "audio" }, { "data", mel_data } },
-              { { "type", "text" },
-                { "text",
-                  "Extract all entities and relations from this audio. Use "
-                  "the extract_entities_and_relations function to return the "
-                  "results." } } }) }
-    };
-
-    auto response = conversation->SendMessage (litert::lm::Message{ message });
-
-    if (!response.ok ())
-      {
-        throw std::runtime_error ("GemmaExtractor: Audio inference failed");
-      }
-
-    // Parse the response (same as text extraction)
-    operations::ExtractionResult result;
-    try
-      {
-        auto &response_message = std::get<litert::lm::JsonMessage> (*response);
-
-        if (response_message.contains ("tool_calls"))
+        auto session_result = engine->CreateSession (session_config);
+        if (!session_result.ok ())
           {
-            for (const auto &tool_call : response_message["tool_calls"])
+            if (attempt + 1 >= kMaxAttempts)
               {
-                if (tool_call.contains ("function")
-                    && tool_call["function"].contains ("arguments"))
-                  {
-                    auto args_str
-                        = tool_call["function"]["arguments"].get<std::string> ();
-                    auto args = nlohmann::json::parse (args_str);
-
-                    if (args.contains ("entities"))
-                      {
-                        for (const auto &entity : args["entities"])
-                          {
-                            operations::ExtractedEntity e;
-                            e.name = entity.value ("name", "");
-                            e.type = entity.value ("type", "");
-                            e.salience = entity.value ("salience", 0.5);
-                            result.entities.push_back (std::move (e));
-                          }
-                      }
-
-                    if (args.contains ("relations"))
-                      {
-                        for (const auto &relation : args["relations"])
-                          {
-                            operations::ExtractedRelation r;
-                            r.subject = relation.value ("subject", "");
-                            r.predicate = relation.value ("predicate", "");
-                            r.object = relation.value ("object", "");
-                            r.confidence = relation.value ("confidence", 0.5);
-                            result.relations.push_back (std::move (r));
-                          }
-                      }
-                  }
+                throw std::runtime_error (
+                    "GemmaExtractor: Failed to create session");
               }
+            continue;
+          }
+
+        litert::TensorBuffer mel_tensor = BuildAudioTensor (features);
+
+        std::vector<litert::lm::InputData> inputs;
+        inputs.emplace_back (litert::lm::InputText (prompt));
+        inputs.emplace_back (litert::lm::InputAudio (std::move (mel_tensor)));
+        inputs.emplace_back (litert::lm::InputAudioEnd ());
+
+        auto prefill_status = (*session_result)->RunPrefill (inputs);
+        if (!prefill_status.ok ())
+          {
+            if (attempt + 1 >= kMaxAttempts)
+              {
+                throw std::runtime_error (
+                    "GemmaExtractor: Audio prefill failed");
+              }
+            continue;
+          }
+
+        constexpr int kConstraintVocabSize = 1000000;
+        auto &tokenizer = const_cast<litert::lm::Tokenizer &> (
+            (*session_result)->GetTokenizer ());
+        extractor::JsonSchemaConstraint constraint (schema, tokenizer,
+                                                     kConstraintVocabSize);
+        auto decode_config = litert::lm::DecodeConfig::CreateDefault ();
+        decode_config.SetConstraint (&constraint);
+
+        auto response = (*session_result)->RunDecode (decode_config);
+        if (!response.ok ())
+          {
+            if (attempt + 1 >= kMaxAttempts)
+              {
+                throw std::runtime_error (
+                    "GemmaExtractor: Audio decode failed");
+              }
+            continue;
+          }
+
+        const auto &texts = response->GetTexts ();
+        if (texts.empty ())
+          {
+            if (attempt + 1 >= kMaxAttempts)
+              {
+                throw std::runtime_error (
+                    "GemmaExtractor: Empty audio decode output");
+              }
+            continue;
+          }
+
+        if (std::getenv ("CORTEXT_EXTRACTOR_DEBUG") != nullptr)
+          {
+            std::cerr << "GemmaExtractor response (audio): " << texts.front ()
+                      << std::endl;
+          }
+
+        auto parsed = ParseExtractionResponse (texts.front ());
+        if (HasNonEmptyLabel (parsed))
+          {
+            return parsed;
           }
       }
-    catch (const nlohmann::json::exception &)
-      {
-        // Failed to parse JSON, return empty result
-      }
 
-    return result;
+    throw std::runtime_error (
+        "GemmaExtractor: Failed to produce valid constrained labels");
   }
 };
 
@@ -419,7 +449,7 @@ operations::ExtractionResult
 GemmaExtractor::ExtractFromText (const std::string &text,
                                  const nlohmann::json &schema)
 {
-  return impl_->ExtractWithConversation (text, schema);
+  return impl_->ExtractFromTextImpl (text, schema);
 }
 
 operations::ExtractionResult

@@ -119,6 +119,8 @@ TEST_CASE ("Alg20 drifts embedding and writes lability fields",
   auto store = std::shared_ptr<cortext::Store> (std::move (unique_store));
 
   SignalProcessor::Config cfg;
+
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.5;
   cfg.sensitivity = 1.0; // maximize plasticity
   cfg.stability = 0.0;   // minimize persistence
@@ -160,13 +162,15 @@ TEST_CASE ("Alg20 drifts embedding and writes lability fields",
   }
 }
 
-TEST_CASE ("Alg20 no drift when S=0: embedding unchanged; lability updated",
+TEST_CASE ("Alg20 no drift when S=0: embedding unchanged, lability updated",
            "[operations][recon]")
 {
   auto unique_store = cortext::SQLiteStore::Create (":memory:");
   auto store = std::shared_ptr<cortext::Store> (std::move (unique_store));
 
   SignalProcessor::Config cfg;
+
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.5;
   cfg.sensitivity = 0.0; // no drift
   cfg.stability = 0.5;
@@ -215,6 +219,8 @@ TEST_CASE ("Alg20 bumps uncertainty with positive drift",
   auto store = std::shared_ptr<cortext::Store> (std::move (unique_store));
 
   SignalProcessor::Config cfg;
+
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.5;
   cfg.sensitivity = 1.0;
   cfg.stability = 0.0;
@@ -272,6 +278,7 @@ TEST_CASE ("Alg20 ripple propagation reaches graph neighbors",
 
   // Create config, signal, and context directly
   SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.5;
   cfg.sensitivity = 1.0; // maximize plasticity
   cfg.stability = 0.0;   // maximize ripple (ripple_depth=2, ripple_decay=0.5)
@@ -339,6 +346,8 @@ TEST_CASE ("Alg20 ripple decay applied correctly per hop",
   auto store = std::shared_ptr<cortext::Store> (std::move (unique_store));
 
   SignalProcessor::Config cfg;
+
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.5;
   cfg.sensitivity = 1.0; // maximize plasticity
   cfg.stability = 0.0;   // ripple_depth=2, ripple_decay=0.5
@@ -414,6 +423,8 @@ TEST_CASE ("Alg20 RippleDepth knob affects traversal depth",
   auto store = std::shared_ptr<cortext::Store> (std::move (unique_store));
 
   SignalProcessor::Config cfg;
+
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.5;
   cfg.sensitivity = 1.0; // maximize plasticity
   cfg.stability = 0.8;   // HIGH stability: ripple_depth=1, but allows some drift
@@ -473,13 +484,15 @@ TEST_CASE ("Alg20 RippleDepth knob affects traversal depth",
   }
 }
 
-TEST_CASE ("Alg20 ripple respects co_occurs_with edge type",
+TEST_CASE ("Alg20 ripple respects co_occurs edge type",
            "[operations][recon][ripple]")
 {
   auto unique_store = cortext::SQLiteStore::Create (":memory:");
   auto store = std::shared_ptr<cortext::Store> (std::move (unique_store));
 
   SignalProcessor::Config cfg;
+
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.5;
   cfg.sensitivity = 1.0;
   cfg.stability = 0.0;
@@ -503,19 +516,19 @@ TEST_CASE ("Alg20 ripple respects co_occurs_with edge type",
   cortext::SignalProcessor processor (cfg, store, std::move (ops));
 
   // Now insert associations after schema is initialized (memories already seeded)
-  // Create neighbor connected via co_occurs_with (not reinforces)
+  // Create neighbor connected via co_occurs (not reinforces)
 
-  // V2: Edge via ASSOCIATIONS: memory 1 --co_occurs_with--> memory 40
+  // V2: Edge via ASSOCIATIONS: memory 1 --co_occurs--> memory 40
   store->Execute (
       "INSERT INTO associations (source_memory_id, target_memory_id, edge_type, weight) "
       "VALUES (?, ?, ?, ?)",
-      { 1LL, 40LL, std::string ("co_occurs_with"), 1.0 });
+      { 1LL, 40LL, std::string ("co_occurs"), 1.0 });
 
   auto s = MakeSignal (cur, /*ts=*/400);
   processor.Process (s);
   processor.Flush ();
 
-  // v2: Neighbor via co_occurs_with should also receive ripple
+  // v2: Neighbor via co_occurs should also receive ripple
   {
     auto rows = store->Execute (
         "SELECT lability_state FROM memories WHERE memory_id = ?",

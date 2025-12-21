@@ -7,18 +7,24 @@
 #include <any>
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
+#include <cortext/core/algorithms.hpp>
 #include <cortext/core/knobs.hpp>
 #include <cortext/operations/consolidation.hpp>
 #include <cortext/operations/consolidation_cluster.hpp>
 #include <cortext/operations/consolidation_summarize.hpp>
 #include <cortext/operations/drift_accumulation.hpp>
+#include <cortext/operations/embedding_prediction_error.hpp>
+#include <cortext/operations/focus.hpp>
 #include <cortext/operations/graph_build.hpp>
 #include <cortext/operations/interrupt_gate.hpp>
+#include <cortext/operations/recent_context.hpp>
 #include <cortext/operations/streaming_pacing.hpp>
+#include <cortext/operations/uncertainty.hpp>
 #include <cortext/processor.hpp>
 #include <cortext/processor/operation_context.hpp>
 #include <cortext/processor/operation_set.hpp>
 #include <cortext/store/sqlite_store.hpp>
+#include <cortext/store/utils.hpp>
 #include <string>
 #include <vector>
 
@@ -99,16 +105,18 @@ SeedMemory (Store *store, long long embedding_id, const std::string &text,
       { embedding_id, embedding_id, static_cast<long long> (ts),
         static_cast<long long> (ts), static_cast<long long> (ts) });
 
-  // Store text in objstore using scalar helper
-  // Note: objstore virtual table uses (id BLOB, data BLOB) schema
-  std::vector<uint8_t> id_blob (8);  // 8-byte id for embedding_id
-  for (int i = 0; i < 8; ++i)
-    id_blob[i] = static_cast<uint8_t> ((embedding_id >> (i * 8)) & 0xFF);
-
-  std::vector<uint8_t> data_blob (text.begin (), text.end ());
-  store->Execute (
-      "INSERT OR REPLACE INTO objstore(id, data) VALUES(?,?)",
-      { id_blob, data_blob });
+  std::vector<unsigned char> data_blob (text.begin (), text.end ());
+  auto blob_rows
+      = store->Execute ("SELECT objstore_put(?1) AS id", { data_blob });
+  if (!blob_rows.empty () && blob_rows[0].count ("id") != 0)
+    {
+      auto blob_id = store::BlobFromAny (blob_rows[0].at ("id"));
+      if (!blob_id.empty ())
+        {
+          store->Execute ("UPDATE memories SET blob_id = ? WHERE memory_id = ?",
+                          { blob_id, embedding_id });
+        }
+    }
 }
 
 // Helper to count table rows
@@ -133,6 +141,24 @@ GetInt64 (const std::map<std::string, std::any> &row, const std::string &key)
   if (it->second.type () == typeid (int))
     return static_cast<long long> (std::any_cast<int> (it->second));
   return 0;
+}
+
+double
+GetDouble (const std::map<std::string, std::any> &row, const std::string &key,
+           double fallback = 0.0)
+{
+  auto it = row.find (key);
+  if (it == row.end () || !it->second.has_value ())
+    return fallback;
+  if (it->second.type () == typeid (double))
+    return std::any_cast<double> (it->second);
+  if (it->second.type () == typeid (float))
+    return static_cast<double> (std::any_cast<float> (it->second));
+  if (it->second.type () == typeid (long long))
+    return static_cast<double> (std::any_cast<long long> (it->second));
+  if (it->second.type () == typeid (int))
+    return static_cast<double> (std::any_cast<int> (it->second));
+  return fallback;
 }
 
 // Helper op to setup consolidation trigger conditions
@@ -301,6 +327,8 @@ TEST_CASE ("Consolidation pipeline triggers on rate condition",
   auto store = std::shared_ptr<Store> (std::move (unique_store));
 
   SignalProcessor::Config cfg;
+
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.5;
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;
@@ -327,6 +355,8 @@ TEST_CASE ("Clustering groups similar embeddings",
   auto store = std::shared_ptr<Store> (std::move (unique_store));
 
   SignalProcessor::Config cfg;
+
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.3; // Lower focus = lower merge threshold, smaller min cluster
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;
@@ -374,6 +404,8 @@ TEST_CASE ("Summarization creates summary records",
   auto store = std::shared_ptr<Store> (std::move (unique_store));
 
   SignalProcessor::Config cfg;
+
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.0; // Very low focus = min cluster size 3
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;
@@ -429,13 +461,15 @@ TEST_CASE ("Summarization creates summary records",
 // 5.2.2 Graph Construction Test
 // =============================================================================
 
-TEST_CASE ("Graph build creates co_occurs_with edges",
+TEST_CASE ("Graph build creates co_occurs edges",
            "[integration][graph][co_occurrence]")
 {
   auto unique_store = SQLiteStore::Create (":memory:");
   auto store = std::shared_ptr<Store> (std::move (unique_store));
 
   SignalProcessor::Config cfg;
+
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.0; // Low threshold for co-occurrence
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;
@@ -471,13 +505,15 @@ TEST_CASE ("Graph build creates co_occurs_with edges",
     }
 }
 
-TEST_CASE ("Graph build creates entity nodes and edges",
-           "[integration][graph][entities]")
+TEST_CASE ("Graph build creates label nodes and edges",
+           "[integration][graph][labels]")
 {
   auto unique_store = SQLiteStore::Create (":memory:");
   auto store = std::shared_ptr<Store> (std::move (unique_store));
 
   SignalProcessor::Config cfg;
+
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.5;
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;
@@ -501,11 +537,11 @@ TEST_CASE ("Graph build creates entity nodes and edges",
   BuildGraphFromConsolidation graph_op;
   graph_op.Execute (ctx, cortext::testing::GetNullTransaction ());
 
-  // V2: Verify LABEL memories were created (replaces graph_nodes with type='entity')
-  auto entity_nodes = store->Execute (
+  // V2: Verify LABEL memories were created (replaces graph_nodes with type='label')
+  auto label_nodes = store->Execute (
       "SELECT memory_id, label FROM memories WHERE kind = 'LABEL'", {});
 
-  INFO ("Entity (LABEL) memories: " << entity_nodes.size ());
+  INFO ("Label memories: " << label_nodes.size ());
 
   // V2: Verify derived_from edges (ASSOCIATION -> LABEL)
   auto derived_from = store->Execute (
@@ -523,12 +559,15 @@ TEST_CASE ("Streaming pacing blocks retrieval below threshold",
 {
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
   cfg.sensitivity = 0.0; // threshold = 0.5 (highest)
   cfg.focus = 0.0;       // max_wait = 2.0 (highest)
 
 
   // Set drift below threshold
-  pctx.drift_accum = 0.3;
+  auto &acc = pctx.accumulator_states["test"];
+  acc.drift_acc_pacing = 0.3;
+  acc.x_last_check = Eigen::VectorXf::Ones (4);
 
   Signal s = MakeSignal (1000, Eigen::VectorXf::Ones (4));
   OperationContext ctx (s, pctx, cfg);
@@ -539,7 +578,8 @@ TEST_CASE ("Streaming pacing blocks retrieval below threshold",
   // Should NOT trigger retrieval
   REQUIRE (ctx.GetShouldCheckRetrieval () == false);
   // Drift should NOT reset
-  REQUIRE (pctx.drift_accum == Catch::Approx (0.3));
+  REQUIRE (pctx.accumulator_states.at ("test").drift_acc_pacing
+           == Catch::Approx (0.3));
 }
 
 TEST_CASE ("Streaming pacing triggers above threshold",
@@ -547,13 +587,15 @@ TEST_CASE ("Streaming pacing triggers above threshold",
 {
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
   cfg.sensitivity = 1.0; // threshold = 0.1 (lowest)
   cfg.focus = 0.5;
 
 
   // Set drift above threshold
-  pctx.drift_accum = 0.2;
-  pctx.last_pacing_check_embedding = Eigen::VectorXf::Ones (4);
+  auto &acc = pctx.accumulator_states["test"];
+  acc.drift_acc_pacing = 0.2;
+  acc.x_last_check = Eigen::VectorXf::Ones (4);
 
   Signal s = MakeSignal (1000, Eigen::VectorXf::Ones (4));
   OperationContext ctx (s, pctx, cfg);
@@ -564,7 +606,7 @@ TEST_CASE ("Streaming pacing triggers above threshold",
   // Should trigger retrieval
   REQUIRE (ctx.GetShouldCheckRetrieval () == true);
   // Drift should reset
-  REQUIRE (pctx.drift_accum == 0.0);
+  REQUIRE (pctx.accumulator_states.at ("test").drift_acc_pacing == 0.0);
 }
 
 TEST_CASE ("Streaming pacing forces check on max_wait_drift",
@@ -572,13 +614,15 @@ TEST_CASE ("Streaming pacing forces check on max_wait_drift",
 {
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
   cfg.sensitivity = 0.0; // threshold = 0.5
   cfg.focus = 1.0;       // max_wait = 0.5
 
 
   // Set drift above max_wait but below threshold
-  pctx.drift_accum = 0.6;
-  pctx.last_pacing_check_embedding = Eigen::VectorXf::Ones (4);
+  auto &acc = pctx.accumulator_states["test"];
+  acc.drift_acc_pacing = 0.6;
+  acc.x_last_check = Eigen::VectorXf::Ones (4);
 
   Signal s = MakeSignal (1000, Eigen::VectorXf::Ones (4));
   OperationContext ctx (s, pctx, cfg);
@@ -588,7 +632,7 @@ TEST_CASE ("Streaming pacing forces check on max_wait_drift",
 
   // Should trigger due to exceeding max_wait
   REQUIRE (ctx.GetShouldCheckRetrieval () == true);
-  REQUIRE (pctx.drift_accum == 0.0);
+  REQUIRE (pctx.accumulator_states.at ("test").drift_acc_pacing == 0.0);
 }
 
 TEST_CASE ("Drift accumulation tracks semantic drift",
@@ -596,6 +640,7 @@ TEST_CASE ("Drift accumulation tracks semantic drift",
 {
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
 
 
   // First signal initializes
@@ -606,8 +651,8 @@ TEST_CASE ("Drift accumulation tracks semantic drift",
   UpdateDriftAccumulation drift_op;
   drift_op.Execute (ctx1, cortext::testing::GetNullTransaction ());
 
-  REQUIRE (pctx.drift_accum == 0.0);
-  REQUIRE (pctx.last_pacing_check_embedding.has_value ());
+  REQUIRE (pctx.accumulator_states.at ("test").drift_accum == 0.0);
+  REQUIRE (pctx.accumulator_states.at ("test").prev_x.size () > 0);
 
   // Second signal: drift = ||[1,0,0,0] - [0,0,0,0]|| = 1.0
   Eigen::VectorXf emb2 = Eigen::VectorXf::Zero (4);
@@ -617,7 +662,7 @@ TEST_CASE ("Drift accumulation tracks semantic drift",
 
   drift_op.Execute (ctx2, cortext::testing::GetNullTransaction ());
 
-  REQUIRE (pctx.drift_accum == Catch::Approx (1.0));
+  REQUIRE (pctx.accumulator_states.at ("test").drift_accum == Catch::Approx (1.0));
 
   // Third signal: additional drift
   Eigen::VectorXf emb3 = Eigen::VectorXf::Zero (4);
@@ -628,7 +673,7 @@ TEST_CASE ("Drift accumulation tracks semantic drift",
   drift_op.Execute (ctx3, cortext::testing::GetNullTransaction ());
 
   // Total drift should accumulate
-  REQUIRE (pctx.drift_accum > 1.0);
+  REQUIRE (pctx.accumulator_states.at ("test").drift_accum > 1.0);
 }
 
 // =============================================================================
@@ -639,6 +684,7 @@ TEST_CASE ("Interrupt gate uses drift-based refractory",
            "[integration][interrupt]")
 {
   SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.5;
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;
@@ -648,8 +694,9 @@ TEST_CASE ("Interrupt gate uses drift-based refractory",
   pc.last_interrupt_tick = 95; // Recent interrupt
 
   // Setup drift accumulation (replaces tick-based delta)
-  pc.drift_accum = 0.1;
-  pc.drift_at_last_interrupt = 0.0;
+  auto &acc = pc.accumulator_states["test"];
+  acc.drift_accum = 0.1;
+  acc.drift_at_last_interrupt = 0.0;
 
   Signal sig;
   sig.embedding = Eigen::VectorXf::Ones (3);
@@ -662,7 +709,7 @@ TEST_CASE ("Interrupt gate uses drift-based refractory",
   oc.SetAtBoundary (true);
 
   // Add context and candidates
-  pc.recent_context_embeddings.push_back (Eigen::VectorXf::Ones (3).normalized ());
+  pc.recent_memory_centroids.push_back (Eigen::VectorXf::Ones (3).normalized ());
 
   std::unordered_map<long long, Eigen::VectorXf> cands;
   cands.emplace (1LL, Eigen::VectorXf::Ones (3).normalized ());
@@ -673,13 +720,14 @@ TEST_CASE ("Interrupt gate uses drift-based refractory",
 
   // The refractory multiplier should be based on drift, not ticks
   INFO ("M_refrac calculation uses: drift_accum - drift_at_last_interrupt");
-  INFO ("Current drift: " << (pc.drift_accum - pc.drift_at_last_interrupt));
+  INFO ("Current drift: " << (acc.drift_accum - acc.drift_at_last_interrupt));
 }
 
 TEST_CASE ("Refractory multiplier decays with accumulated drift",
            "[integration][interrupt]")
 {
   SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.5;
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;
@@ -688,18 +736,20 @@ TEST_CASE ("Refractory multiplier decays with accumulated drift",
   ProcessorContext pc_low_drift;
   pc_low_drift.signals_processed = 100;
   pc_low_drift.last_interrupt_tick = 99;
-  pc_low_drift.drift_accum = 0.1;
-  pc_low_drift.drift_at_last_interrupt = 0.05;
-  pc_low_drift.recent_context_embeddings.push_back (
+  auto &acc_low = pc_low_drift.accumulator_states["test"];
+  acc_low.drift_accum = 0.1;
+  acc_low.drift_at_last_interrupt = 0.05;
+  pc_low_drift.recent_memory_centroids.push_back (
       Eigen::VectorXf::Ones (3).normalized ());
 
   // Test with high drift (low refractory)
   ProcessorContext pc_high_drift;
   pc_high_drift.signals_processed = 100;
   pc_high_drift.last_interrupt_tick = 50;
-  pc_high_drift.drift_accum = 2.0;
-  pc_high_drift.drift_at_last_interrupt = 0.0;
-  pc_high_drift.recent_context_embeddings.push_back (
+  auto &acc_high = pc_high_drift.accumulator_states["test"];
+  acc_high.drift_accum = 2.0;
+  acc_high.drift_at_last_interrupt = 0.0;
+  pc_high_drift.recent_memory_centroids.push_back (
       Eigen::VectorXf::Ones (3).normalized ());
 
   Signal sig;
@@ -725,8 +775,8 @@ TEST_CASE ("Refractory multiplier decays with accumulated drift",
 
   // Calculate drift deltas BEFORE Execute() since the operation updates
   // drift_at_last_interrupt to match drift_accum
-  double low_drift_delta = pc_low_drift.drift_accum - pc_low_drift.drift_at_last_interrupt;
-  double high_drift_delta = pc_high_drift.drift_accum - pc_high_drift.drift_at_last_interrupt;
+  double low_drift_delta = acc_low.drift_accum - acc_low.drift_at_last_interrupt;
+  double high_drift_delta = acc_high.drift_accum - acc_high.drift_at_last_interrupt;
 
   INFO ("Low drift delta: " << low_drift_delta);
   INFO ("High drift delta: " << high_drift_delta);
@@ -789,4 +839,42 @@ TEST_CASE ("Graph edge thresholds vary with knobs",
   double T_low = 0.0;
   REQUIRE (CausalDriftThreshold (T_low) == Catch::Approx (0.15));
   REQUIRE (ReinforcementDecay (T_low) == Catch::Approx (0.9));
+}
+
+TEST_CASE ("Uncertainty feeds focus update in the pipeline",
+           "[integration][order]")
+{
+  auto unique_store = SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<Store> (std::move (unique_store));
+
+  SignalProcessor::Config cfg;
+
+  cortext::testing::RequireEncoder (cfg);
+  cfg.focus = 0.7;
+  cfg.sensitivity = 0.5;
+  cfg.stability = 0.5;
+
+  auto pipeline = std::make_unique<OperationSet> (
+      std::make_unique<InitializeFocusPriors> (),
+      std::make_unique<UpdateRecentContext> (),
+      std::make_unique<UpdateEmbeddingPredictionError> (),
+      std::make_unique<UpdateUncertainty> (),
+      std::make_unique<UpdateFocus> ());
+
+  SignalProcessor proc (cfg, store, std::move (pipeline));
+
+  Signal s = MakeSignal (1000, Eigen::VectorXf::Ones (8));
+  proc.Process (s);
+
+  auto rows = store->Execute (
+      "SELECT weight_relevance, u_uncertainty FROM state WHERE id = 1;");
+  REQUIRE (rows.size () == 1);
+  const double weight = GetDouble (rows[0], "weight_relevance");
+  const double u_t = GetDouble (rows[0], "u_uncertainty");
+
+  const double prior = core::Sigmoid (2 * cfg.focus - 1);
+  const double alpha_f = core::AlphaF (cfg.focus, u_t);
+  const double expected = core::Ewma (prior, 1.0, alpha_f);
+
+  REQUIRE (weight == Catch::Approx (expected).epsilon (1e-5));
 }

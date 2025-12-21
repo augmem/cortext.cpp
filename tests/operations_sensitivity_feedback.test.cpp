@@ -38,6 +38,8 @@ TEST_CASE ("Alg16 positive gain with novelty increases weight_novelty",
   pctx.recent_context_embeddings.push_back (unit (1, dim));
 
   SignalProcessor::Config cfg;
+
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.5;
   cfg.sensitivity = 0.8;
   cfg.stability = 0.5;
@@ -83,6 +85,8 @@ TEST_CASE (
   pctx.recent_context_embeddings.push_back (unit (1, dim));
 
   SignalProcessor::Config cfg;
+
+  cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.6;
   cfg.sensitivity = 0.7;
   cfg.stability = 0.5;

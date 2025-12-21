@@ -9,34 +9,45 @@
 #include "cortext/telemetry/telemetry.hpp"
 #include <algorithm>
 #include <any>
+#include <deque>
 #include <vector>
 
 namespace cortext::operations
 {
-inline Eigen::VectorXf
-ComputeMean (const std::deque<Eigen::VectorXf> &embs)
-{
-  if (embs.empty ())
-    {
-      return Eigen::VectorXf ();
-    }
-  const int dim = static_cast<int> (embs.front ().size ());
-  Eigen::VectorXf mean = Eigen::VectorXf::Zero (dim);
-  for (const auto &v : embs)
-    {
-      mean += v;
-    }
-  mean /= static_cast<float> (embs.size ());
-  return mean;
-}
-
 inline double
-CosTo01 (double c /* [-1,1] */)
+ComputeNovelty (const std::deque<Eigen::VectorXf> &embs,
+                const Eigen::VectorXf &x, int window)
 {
-  return std::min (
-      constants::kNormalizedMax,
-      std::max (constants::kNormalizedMin,
-                constants::kOneHalf * (c + constants::kNormalizedMax)));
+  if (x.size () == 0)
+    {
+      return constants::kNormalizedMax;
+    }
+  const int n = static_cast<int> (embs.size ());
+  if (n == 0)
+    {
+      return constants::kNormalizedMax;
+    }
+  const int start = std::max (0, n - window);
+  double max_cos = -1.0;
+  int count = 0;
+  for (int i = start; i < n; ++i)
+    {
+      const auto &emb = embs[static_cast<size_t> (i)];
+      if (emb.size () != x.size ())
+        {
+          continue;
+        }
+      const double c = core::CosineSimilarity (x, emb);
+      max_cos = std::max (max_cos, c);
+      ++count;
+    }
+  if (count == 0)
+    {
+      return constants::kNormalizedMax;
+    }
+  return core::Clamp ((constants::kNormalizedMax - max_cos)
+                          * constants::kOneHalf,
+                      constants::kNormalizedMin, constants::kNormalizedMax);
 }
 
 /// @brief Compute redundancy for a memory via kNN similarity lookup.
@@ -93,33 +104,10 @@ ApplySensitivityFeedback::Execute (OperationContext &context, Transaction &tx) c
 
   const double eta = constants::kEtaBase;
 
-  // Attempt to obtain novelty from previously computed metrics.
-  // Fallback computes novelty from embeddings if necessary.
-  auto relevance_metric = context.GetMetric (operations::Metric::relevance);
-  double novelty_from_metric = constants::kNormalizedMin;
-  if (relevance_metric.has_value ())
-    {
-      novelty_from_metric
-          = core::Clamp (constants::kNormalizedMax - *relevance_metric,
-                         constants::kNormalizedMin, constants::kNormalizedMax);
-    }
-  else
-    {
-      const auto &x = context.GetSignal ().embedding;
-      const Eigen::VectorXf mean_ctx
-          = ComputeMean (p_ctx.recent_context_embeddings);
-      if (mean_ctx.size () == x.size () && x.size () > 0)
-        {
-          const double c = core::CosineSimilarity (x, mean_ctx);
-          novelty_from_metric = core::Clamp (
-              constants::kNormalizedMax - CosTo01 (c),
-              constants::kNormalizedMin, constants::kNormalizedMax);
-        }
-      else
-        {
-          novelty_from_metric = constants::kNormalizedMin;
-        }
-    }
+  const auto &x = context.GetSignal ().embedding;
+  const int window = static_cast<int> (core::NCtx (context.GetConfig ().stability));
+  const double novelty_from_metric
+      = ComputeNovelty (p_ctx.recent_context_embeddings, x, window);
 
   // Algorithm 16: Compute per-memory redundancy from kNN neighbors.
   const auto &cfg = context.GetConfig ();

@@ -2,6 +2,8 @@
 
 #include "cortext/store/schema.hpp"
 #include "cortext/store/store.hpp"
+#include "cortext/processor.hpp"
+#include "cortext/encoder/encoder.hpp"
 #include <Eigen/Dense>
 #include <any>
 #include <chrono>
@@ -12,6 +14,47 @@
 
 namespace cortext::testing
 {
+
+class TestEncoder : public Encoder
+{
+public:
+  void
+  EncodeText (const std::string & /*text*/,
+              std::vector<float> &out_embedding) override
+  {
+    out_embedding.assign (256, 0.0f);
+    out_embedding[0] = 1.0f;
+  }
+
+  void
+  EncodeAudio (const float * /*pcm*/, std::size_t /*num_samples*/,
+               std::vector<float> &out_embedding) override
+  {
+    out_embedding.assign (256, 0.0f);
+    out_embedding[0] = 1.0f;
+  }
+
+  void
+  EncodeImage (const std::uint8_t * /*data*/, int /*width*/, int /*height*/,
+               int /*channels*/, std::vector<float> &out_embedding) override
+  {
+    out_embedding.assign (256, 0.0f);
+    out_embedding[0] = 1.0f;
+  }
+};
+
+inline Encoder &
+GetTestEncoder ()
+{
+  static TestEncoder encoder;
+  return encoder;
+}
+
+inline void
+RequireEncoder (SignalProcessor::Config &cfg)
+{
+  cfg.encoder = &GetTestEncoder ();
+}
 
 // ============================================================================
 // Data extraction helpers
