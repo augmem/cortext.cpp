@@ -17,7 +17,9 @@ namespace cortext::operations
  * - boundary_score > b_thresh(F, S)
  * - memory_elapsed > max_mem_time(T)
  * - D_acc > max_mem_drift(S)
- * - signal_gap > gap_threshold(T)
+ *
+ * Gap timing influences boundary_score via a soft gap_score term (no direct
+ * gap-triggered flush).
  *
  * Must run AFTER:
  * - ComputeCoherence (provides d_step, coherence)

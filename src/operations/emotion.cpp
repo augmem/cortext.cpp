@@ -15,15 +15,12 @@ void
 ApplyEmotionalConsolidation::Execute (OperationContext &context, Transaction &tx) const
 {
   const auto &cfg = context.GetConfig ();
-  const double F = cfg.focus;
   const double S = cfg.sensitivity;
   const double theta_intensity = core::ThetaIntensity (S);
   const double theta_arousal = core::ThetaArousal (S);
   const double flashbulb_threshold = core::FlashbulbThreshold (S);
 
   // Derived parameters.
-  const double detail_suppression = core::DetailSuppression (S, F);
-  const int gist_components = core::GistComponents (F);
   const int cascade_radius = core::CascadeRadius (S);
   const double cascade_decay = core::CascadeDecay (S);
 
@@ -79,13 +76,11 @@ ApplyEmotionalConsolidation::Execute (OperationContext &context, Transaction &tx
               "SET flashbulb = MAX(flashbulb, ?), "
               "    emotional_intensity = ?, "
               "    half_life_bonus = ?, "
-              "    detail_suppression = ?, "
-              "    gist_components = ?, "
               "    cascade_radius = ?, "
               "    cascade_decay = ? "
               "WHERE embedding_id = ?;",
-              { flashbulb, mem_emotion, half_life_bonus, detail_suppression,
-                gist_components, cascade_radius, cascade_decay, id });
+              { flashbulb, mem_emotion, half_life_bonus, cascade_radius,
+                cascade_decay, id });
 }
 
 } // namespace cortext::operations

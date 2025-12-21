@@ -149,10 +149,8 @@ UpdateThreshold::Execute (OperationContext &context, Transaction &tx) const
                     - std::max (rate_target, constants::kNormalizedMin))
                                      / std::max (rate_target, kTiny));
 
-  // ΔT_homeo with cap from hysteresis (use the current stability-derived band)
-  const double hysteresis_val
-      = core::Lerp (constants::kHysteresisBandMin, constants::kHysteresisBandMax,
-                    cfg.stability);
+  // ΔT_homeo with cap from current hysteresis state.
+  const double hysteresis_val = p_ctx.hysteresis;
   const double cap = constants::kQuarter * hysteresis_val;
   const double maturity
       = core::ComputeMaturity (p_ctx.signals_processed, cfg.stability);
@@ -167,9 +165,9 @@ UpdateThreshold::Execute (OperationContext &context, Transaction &tx) const
   // Per algorithms.md Section 4.3: cap_total = max_ΔT_per_min × (Δt / 60.0)
   const double max_delta_per_min
       = core::MaxDeltaTPerMin (p_ctx.signals_processed, cfg.stability);
-  // Scale by elapsed time; use minimum floor of 0.1s to avoid zeroing deltas
+  // Scale by elapsed time.
   const double cap_total
-      = max_delta_per_min * std::max (delta_t, 0.1) / kSecondsPerMinute;
+      = max_delta_per_min * delta_t / kSecondsPerMinute;
   delta_total = core::Clamp (delta_total, -cap_total, +cap_total);
   const double Tmin = core::TMin (p_ctx.signals_processed, cfg.stability);
   const double Tmax = core::TMax (p_ctx.signals_processed, cfg.stability);

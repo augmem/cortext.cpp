@@ -58,10 +58,22 @@ DetectBoundary::Execute (OperationContext &context,
   acc.coherence_prev = coherence;
 
   // Boundary score (weighted combination)
-  const double w_drift = core::BoundaryWeightDrift (config.stability);
-  const double w_coh = 1.0 - w_drift;
+  const double w_gap = core::BoundaryWeightGap (config.stability);
+  const double w_drift
+      = core::BoundaryWeightDrift (config.stability) * (1.0 - w_gap);
+  const double w_coh = 1.0 - w_gap - w_drift;
+
+  // Adaptive gap signal (soft influence only)
+  const double signal_gap
+      = static_cast<double> (signal.timestamp - acc.last_signal_ts) / 1000.0;
+  const double dt_ref = std::max (p_ctx.dt_ema, 0.25);
+  const double gap_ref_s = core::GapScale (config.stability) * dt_ref;
+  const double gap_z = (signal_gap - gap_ref_s) / std::max (gap_ref_s, kEpsilon);
+  const double gap_score = core::Sigmoid (gap_z);
+
   double boundary_score
-      = w_drift * core::Sigmoid (drift_spike) + w_coh * coh_drop;
+      = w_drift * core::Sigmoid (drift_spike) + w_coh * coh_drop
+        + w_gap * gap_score;
   boundary_score = core::Clamp (boundary_score, 0.0, 1.0);
 
   context.SetBoundaryScore (boundary_score);
@@ -70,7 +82,6 @@ DetectBoundary::Execute (OperationContext &context,
   bool flush = false;
   bool drift_trigger = false;
   bool timeout_trigger = false;
-  bool gap_trigger = false;
 
   // 1. Boundary score exceeds threshold
   const double b_thresh
@@ -102,28 +113,13 @@ DetectBoundary::Execute (OperationContext &context,
       telemetry::AddCounter ("cortext.accumulator.flush_max_drift", 1);
     }
 
-  // 4. Signal gap exceeds threshold (natural pause detection)
-  const double gap_thresh = core::GapThreshold (config.stability);
-  const double signal_gap
-      = static_cast<double> (signal.timestamp - acc.last_signal_ts) / 1000.0;
-  if (acc.last_signal_ts > 0 && signal_gap > gap_thresh)
-    {
-      flush = true;
-      gap_trigger = true;
-      telemetry::AddCounter ("cortext.accumulator.flush_gap", 1);
-    }
-
   context.SetFlushRequired (flush);
   context.SetAtBoundary (flush);
 
   if (flush)
     {
       // Select boundary type based on dominant trigger.
-      if (gap_trigger)
-        {
-          context.SetBoundaryType (std::string ("explicit"));
-        }
-      else if (timeout_trigger)
+      if (timeout_trigger)
         {
           context.SetBoundaryType (std::string ("timeout"));
         }
@@ -156,11 +152,16 @@ DetectBoundary::Execute (OperationContext &context,
   telemetry::RecordHistogram ("cortext.accumulator.memory_elapsed",
                               memory_elapsed);
   telemetry::RecordHistogram ("cortext.accumulator.signal_gap", signal_gap);
+  telemetry::RecordHistogram ("cortext.accumulator.gap_ref_s", gap_ref_s);
+  telemetry::RecordHistogram ("cortext.accumulator.gap_score", gap_score);
 
   telemetry::LogDebug ("cortext.boundary", {
     telemetry::Attribute::Double ("boundary_score", boundary_score),
     telemetry::Attribute::Double ("elapsed_time_ms", memory_elapsed),
     telemetry::Attribute::Double ("drift_accum", acc.drift_acc),
+    telemetry::Attribute::Double ("signal_gap_s", signal_gap),
+    telemetry::Attribute::Double ("gap_ref_s", gap_ref_s),
+    telemetry::Attribute::Double ("gap_score", gap_score),
     telemetry::Attribute::Bool ("should_flush", flush)
   });
 }

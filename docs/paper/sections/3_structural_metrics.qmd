@@ -24,6 +24,8 @@ else:
 
 High structural coherence (low variance in similarities) indicates the signal fits consistently with context. The effective Focus is modulated: F_eff = F × (0.5 + 0.5 × coherence_struct_t).
 
+**Effective Focus usage:** F_eff is a diagnostic modulation of Focus. Unless a formula explicitly references F_eff, the specification uses raw F (including all Table 1 metric formulas and knob-derived controls).
+
 ### Focus Spread {#sec-focus-spread}
 
 Focus spread quantifies the entropy of attention over nearest neighbors:

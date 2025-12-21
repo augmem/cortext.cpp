@@ -22,7 +22,6 @@ namespace
 {
 constexpr double kDriftClampMax = 0.3;
 constexpr double kDriftSkipEpsilon = 0.001;
-constexpr double kUncertaintyBumpCap = 0.2;
 constexpr double kRippleStrengthMin = 0.01;     // Min lability to propagate ripple
 constexpr double kRippleDriftCapFactor = 0.5;  // Ripple drift capped at 50% of primary
 
@@ -442,10 +441,7 @@ ApplyReconsolidation::Execute (OperationContext &context, Transaction &tx) const
       // --- END RIPPLE PROPAGATION ---
     }
 
-  // Increase uncertainty proportional to max drift (cap 0.2).
-  const double bump = std::min (kUncertaintyBumpCap, max_drift);
-  p_ctx.u_t = core::Clamp (p_ctx.u_t + bump, constants::kNormalizedMin,
-                           constants::kNormalizedMax);
+  (void)max_drift;
 }
 
 } // namespace cortext::operations

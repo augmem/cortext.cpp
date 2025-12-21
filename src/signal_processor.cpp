@@ -911,7 +911,7 @@ LoadAccumulators (Store &store, ProcessorContext &ctx)
           state.last_signal_ts
               = static_cast<uint64_t> (ExtractInt64 (row, "last_signal_ts", 0));
           state.eta_acc = ExtractDouble (row, "eta_acc", 0.0);
-          state.coherence_prev = ExtractDouble (row, "coherence_prev", 1.0);
+          state.coherence_prev = ExtractDouble (row, "coherence_prev", 0.0);
           state.drift_accum = ExtractDouble (row, "drift_accum", 0.0);
           state.drift_at_last_interrupt
               = ExtractDouble (row, "drift_at_last_interrupt", 0.0);
@@ -999,6 +999,7 @@ SignalProcessor::SignalProcessor (const Config &config,
                 std::chrono::system_clock::now ().time_since_epoch ())
                 .count ();
       context_->last_rate_timestamp = static_cast<uint64_t> (now_ms);
+      context_->last_mood_ts = static_cast<uint64_t> (now_ms);
     }
 
 }

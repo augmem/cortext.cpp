@@ -1,9 +1,10 @@
 #include "cortext/operations/uncertainty.hpp"
 
 #include "cortext/core/algorithms.hpp"
+#include "cortext/core/constants.hpp"
+#include "cortext/core/knobs.hpp"
 #include "cortext/operations/constants.hpp"
 #include "cortext/operations/metrics.hpp"
-#include "cortext/core/knobs.hpp"
 #include "cortext/processor/operation_context.hpp"
 #include "cortext/telemetry/telemetry.hpp"
 #include <algorithm>
@@ -83,6 +84,12 @@ UpdateUncertainty::Execute (OperationContext &context, Transaction &tx) const
       {
         return std::nullopt;
       }
+    const double attention_width
+        = core::Clamp (p_ctx.attention_width,
+                       static_cast<double> (core::kAttentionWidthMin),
+                       static_cast<double> (core::kAttentionWidthMax));
+    const double width_scale
+        = static_cast<double> (core::kAttentionWidthMax) / attention_width;
     const int k = std::min (core::KNeighbors (config.stability), n);
     std::vector<double> sims;
     sims.reserve (static_cast<size_t> (n));
@@ -92,7 +99,10 @@ UpdateUncertainty::Execute (OperationContext &context, Transaction &tx) const
             = p_ctx.memory_stream[static_cast<size_t> (i)];
         if (emb.size () == x.size () && x.size () > 0)
           {
-            sims.push_back (core::CosineSimilarity (x, emb));
+            const double sim = core::CosineSimilarity (x, emb);
+            const double scaled
+                = core::Clamp (sim * width_scale, -1.0, 1.0);
+            sims.push_back (scaled);
           }
       }
     if (static_cast<int> (sims.size ()) < 2)

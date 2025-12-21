@@ -51,7 +51,7 @@ UpdateMemoryStrength::Execute (OperationContext &context, Transaction &tx) const
       auto rows = tx.Execute (
           "SELECT strength, use_frequency, contextual_gain, retrieved_count, "
           "       used_count, last_access, created_at, flashbulb, "
-          "       half_life_bonus, detail_suppression, gist_components "
+          "       half_life_bonus "
           "FROM memories WHERE embedding_id = ?",
           { id });
       if (rows.empty ())
@@ -100,10 +100,6 @@ UpdateMemoryStrength::Execute (OperationContext &context, Transaction &tx) const
           = get_int (rows[0].at ("flashbulb"), 0) != 0 ? 1 : 0;
       const double half_life_bonus_raw
           = get_double (rows[0].at ("half_life_bonus"), 0.0);
-      const double detail_suppression
-          = get_double (rows[0].at ("detail_suppression"), 0.0);
-      const int gist_components
-          = static_cast<int> (get_int (rows[0].at ("gist_components"), 0));
 
       const long long access_base
           = has_last_access ? last_access_prev : created_at;
@@ -137,21 +133,8 @@ UpdateMemoryStrength::Execute (OperationContext &context, Transaction &tx) const
                       * contextual_gain
                 : 0.0;
 
-      constexpr double kMaxGistComponents = 5.0;
-      const double detail_factor
-          = core::Clamp (1.0 - detail_suppression,
-                         constants::kNormalizedMin,
-                         constants::kNormalizedMax);
-      const double gist_factor
-          = (gist_components > 0)
-                ? core::Clamp (static_cast<double> (gist_components)
-                                   / kMaxGistComponents,
-                               0.5, 1.0)
-                : 1.0;
-
       const double delta_strength
-          = (S * use_frequency + F * influence_factor) * serial_mult
-            * detail_factor * gist_factor;
+          = (S * use_frequency + F * influence_factor) * serial_mult;
       const double strength
           = core::Clamp (strength_prev * decay + delta_strength,
                          constants::kNormalizedMin,

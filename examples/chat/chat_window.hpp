@@ -1,6 +1,7 @@
 #pragma once
 
 #include "context_tab.hpp"
+#include "cortext/cortext.hpp"
 
 #include <atomic>
 #include <deque>
@@ -11,12 +12,6 @@
 #include <vector>
 
 namespace chat {
-
-// Chat message (from main.cpp)
-struct ChatMessage {
-  std::string role;     // "user" | "assistant" | "system"
-  std::string content;  // utf-8
-};
 
 // Memory event types
 enum class MemoryEventType {
@@ -74,7 +69,7 @@ class ChatWindow {
 public:
   struct State {
     std::mutex* mu = nullptr;
-    std::vector<ChatMessage>* history = nullptr;
+    std::vector<cortext::Cortext::Context::Memory>* working_memory = nullptr;
     std::deque<MemoryEvent>* memory_events = nullptr;
     std::shared_ptr<LastContext> context;
     std::shared_ptr<StatusBarState> status;

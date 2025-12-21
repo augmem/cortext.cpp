@@ -88,6 +88,8 @@ add_executable(cortext_tests
   # Phase 5: Testing and Validation
   formula_validation.test.cpp
   integration_consolidation.test.cpp
+  integration_chat_e2e.test.cpp
+  integration_working_memory_manual.test.cpp
   regression_behavior.test.cpp
 )
 

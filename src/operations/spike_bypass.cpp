@@ -11,10 +11,7 @@ void
 CheckSpikeBypass::Execute (OperationContext &context, Transaction &tx) const
 {
   (void)tx;
-  const auto &signal = context.GetSignal ();
-  auto &p_ctx = context.GetProcessorContext ();
   const auto &config = context.GetConfig ();
-  const std::string &source_id = signal.source_id;
 
   // Get composite score
   const double score = context.GetCompositeScore ().value_or (0.0);
@@ -29,18 +26,13 @@ CheckSpikeBypass::Execute (OperationContext &context, Transaction &tx) const
   // Check for spike bypass
   const bool spike = score > spike_threshold;
 
-  // If spike and we have accumulated signals, force flush
+  // If spike, force flush even for single-signal units.
   bool spike_bypass = false;
   if (spike)
     {
-      auto it = p_ctx.accumulator_states.find (source_id);
-      if (it != p_ctx.accumulator_states.end () && it->second.n_signals > 1)
-        {
-          // Force flush - spike captures surrounding context
-          spike_bypass = true;
-          context.SetFlushRequired (true);
-          telemetry::AddCounter ("cortext.accumulator.spike_bypass_total", 1);
-        }
+      spike_bypass = true;
+      context.SetFlushRequired (true);
+      telemetry::AddCounter ("cortext.accumulator.spike_bypass_total", 1);
     }
 
   context.SetSpikeBypass (spike_bypass);

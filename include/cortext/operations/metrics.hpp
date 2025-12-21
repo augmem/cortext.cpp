@@ -34,8 +34,8 @@ enum class Metric
 /// on the OperationContext as [-1,1] values.
 ///
 /// Metrics:
-/// - relevance, mismatch, surprise, rarity, drift, contradiction,
-///   utility, periphery, coverage, salience, valence, arousal
+/// - relevance, mismatch, surprise, rarity, drift, utility,
+///   salience, valence, arousal, contradiction, periphery, coverage
 class ComputeMetrics : public IOperation
 {
 public:

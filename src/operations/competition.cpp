@@ -46,22 +46,6 @@ SuppressionPerRetrieval (double T, double winning_activation)
   return base * term;
 }
 
-/// @brief Computes lateral inhibition strength based on Focus and Sensitivity.
-inline double
-LateralInhibitionStrength (double F, double S)
-{
-  return F * (constants::kNormalizedMax + constants::kLateralInhibitionSMult * S);
-}
-
-/// @brief Computes number of competition iterations based on Focus.
-inline int
-CompetitionIterations (double F)
-{
-  return static_cast<int> (std::round (
-      core::Lerp (constants::kCompetitionIterMin,
-                  constants::kCompetitionIterMax, F)));
-}
-
 /// @brief Computes RIF recovery time in seconds based on Stability.
 inline double
 RecoveryTimeSeconds (double T)
@@ -149,8 +133,8 @@ ScoreCandidates (const std::unordered_map<long long, Eigen::VectorXf> &retrieved
 void
 ApplyLateralInhibition (const std::vector<Candidate> &winners,
                         const std::vector<Candidate> &losers, double radius,
-                        double lat_strength, double iter_mult, double stability,
-                        long long now_ts, Transaction &tx, int &suppressed_count)
+                        double stability, long long now_ts, Transaction &tx,
+                        int &suppressed_count)
 {
   for (const auto &loser : losers)
     {
@@ -163,18 +147,10 @@ ApplyLateralInhibition (const std::vector<Candidate> &winners,
             {
               continue;
             }
-          const double proximity = (1.0 - radius) > constants::kNormEpsilon
-                                       ? (sim_lw - radius) / (1.0 - radius)
-                                       : constants::kNormalizedMin;
           const double spr
               = SuppressionPerRetrieval (stability, winner.activation);
-          total_supp += spr * lat_strength * proximity;
+          total_supp += spr;
         }
-      total_supp *= iter_mult;
-      if (total_supp < 0.0)
-        total_supp = 0.0;
-      if (total_supp > constants::kOneHalf)
-        total_supp = constants::kOneHalf;
       if (total_supp <= std::numeric_limits<double>::epsilon ())
         {
           continue;
@@ -222,10 +198,6 @@ ApplyRetrievalCompetition::Execute (OperationContext &context,
   const int k = std::min (ComputeWinnersK (cfg.focus),
                           static_cast<int> (cands.size ()));
   const double radius = InhibitionRadius (cfg.focus);
-  const double lat_strength
-      = LateralInhibitionStrength (cfg.focus, cfg.sensitivity);
-  const int iters = CompetitionIterations (cfg.focus);
-  const double iter_mult = static_cast<double> (iters) / 3.0;
   std::vector<Candidate> winners (cands.begin (), cands.begin () + k);
   std::vector<Candidate> losers (cands.begin () + k, cands.end ());
   if (winners.empty () || losers.empty ())
@@ -233,8 +205,8 @@ ApplyRetrievalCompetition::Execute (OperationContext &context,
       return;
     }
   int suppressed_count = 0;
-  ApplyLateralInhibition (winners, losers, radius, lat_strength, iter_mult,
-                          cfg.stability, now_ts, tx, suppressed_count);
+  ApplyLateralInhibition (winners, losers, radius, cfg.stability, now_ts, tx,
+                          suppressed_count);
 
   // Debug logging
   telemetry::LogDebug ("cortext.competition", {

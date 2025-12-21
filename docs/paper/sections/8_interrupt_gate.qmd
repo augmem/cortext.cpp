@@ -137,12 +137,19 @@ first_step ← (x_last_check is unset for this stream)  # MUST occur once per st
 if first_step: x_last_check ← x_t; drift_acc_pacing ← 0
 drift_acc_pacing += cosine_dist(x_t, x_last_check)
 pacing_thresh(S) = lerp(0.5, 0.1, S)
-# Retrieval triggered when drift exceeds threshold or at memory boundary
-if drift_acc_pacing > pacing_thresh(S) OR should_flush:
-    trigger_check(); x_last_check ← x_t; drift_acc_pacing ← 0
-
 max_wait_drift(F) = lerp(2.0, 0.5, F)
 adjacent_window(F) = round(lerp(8, 1, F))
+
+since_last_s ← if last_retrieval_ts == 0 then +∞ else (now_ms() − last_retrieval_ts) / 1000
+min_gap_s ← adjacent_window(F) × dt_ema
+adjacent_ok ← (since_last_s ≥ min_gap_s)
+force_check ← (drift_acc_pacing > max_wait_drift(F))
+
+# Retrieval triggered when drift exceeds threshold, at memory boundary, or when drift exceeds max_wait_drift.
+# Adjacent-window throttling is bypassed on boundaries and force_check.
+if (drift_acc_pacing > pacing_thresh(S) OR should_flush OR force_check) AND
+   (adjacent_ok OR should_flush OR force_check):
+    trigger_check(); x_last_check ← x_t; drift_acc_pacing ← 0; last_retrieval_ts ← now_ms()
 ```
 
 High Sensitivity produces frequent checks triggered by small content shifts; high Focus enforces strict drift limits. Memory boundaries (@sec-boundary) also trigger retrieval checks to ensure context updates align with natural thought transitions.

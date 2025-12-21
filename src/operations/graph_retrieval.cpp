@@ -95,8 +95,7 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
     }
   else
     {
-      // Fallback to signal embedding if no accumulator state exists
-      q_ptr = &signal.embedding;
+      return;
     }
   const Eigen::VectorXf &q = *q_ptr;
 

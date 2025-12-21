@@ -241,7 +241,9 @@ Boundary score combines drift spike and coherence drop:
 
 ```
 weight_drift_component = lerp(0.6, 0.4, T)  # weight on drift
-weight_coh_component = 1 − weight_drift_component  # weight on coherence drop
+weight_gap_component = lerp(0.05, 0.20, T)  # soft gap influence (low weight)
+weight_drift_component = weight_drift_component × (1 − weight_gap_component)
+weight_coh_component = 1 − weight_gap_component − weight_drift_component
 ε0 = 0.01  # cold-start guard for eta_prev
 if eta_prev < ε0:
     drift_spike ← 0
@@ -250,8 +252,17 @@ else:
 eta_acc ← EWMA(eta_prev, d_step, α = lerp(0.3, 0.1, T))
 coh_drop01 ← clamp((coherence_prev − coherence_curr) / 2, 0, 1)
 coherence_prev ← coherence_curr  # update for next step
+
+# Adaptive gap signal (dynamic, not a hard trigger)
+dt_ref ← max(dt_ema, 0.25)  # EWMA of inter-arrival Δt in seconds (robust to jitter)
+gap_scale(T) = lerp(3.0, 8.0, T)  # expected pause multiplier
+gap_ref_s ← gap_scale(T) × dt_ref
+gap_z ← (signal_gap_s − gap_ref_s) / max(gap_ref_s, ε)
+gap_score ← sigmoid(gap_z)
+
 boundary_score ← weight_drift_component × sigmoid(drift_spike) +
-                  weight_coh_component × coh_drop01
+                  weight_coh_component × coh_drop01 +
+                  weight_gap_component × gap_score
 boundary_score ← clamp(boundary_score, 0, 1)
 ```
 
@@ -269,15 +280,10 @@ Trigger memory flush when:
 mem_elapsed ← now_s() − to_s(t_start)
 should_flush = (boundary_score > b_thresh(F, S)) OR
                (mem_elapsed > max_mem_time(T)) OR
-               (drift_acc > max_mem_drift(S)) OR
-               (signal_gap_s > gap_threshold(T))
+               (drift_acc > max_mem_drift(S))
 ```
 
-where signal_gap_s = now_s() − to_s(last_signal_ts) is computed at the start of signal processing (before last_signal_ts is updated), detecting natural pauses (speech pauses, generation delays):
-
-```
-gap_threshold(T) = lerp(5, 30, T)  # seconds
-```
+where signal_gap_s = now_s() − to_s(last_signal_ts) is computed at the start of signal processing (before last_signal_ts is updated). Gap timing influences boundary_score via gap_score rather than forcing an unconditional flush, which avoids splitting mid-thought when upstream processing introduces non-deterministic latency.
 
 ### Spike Bypass (Flashbulb Flush)
 

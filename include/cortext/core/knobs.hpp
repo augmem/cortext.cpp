@@ -830,6 +830,15 @@ BoundaryWeightDrift (double T)
   return Lerp (0.6, 0.4, Clamp (T, 0.0, 1.0));
 }
 
+// Section 4.4.3 - Boundary detection weight on gap (soft influence)
+inline double
+BoundaryWeightGap (double T)
+{
+  // w_gap = lerp(0.05, 0.20, T)
+  // Higher stability = slightly more weight on gaps (still low)
+  return Lerp (0.05, 0.20, Clamp (T, 0.0, 1.0));
+}
+
 // Section 4.4.3 - Boundary threshold
 inline double
 BoundaryThreshold (double F, double S)
@@ -858,13 +867,13 @@ MaxMemoryDrift (double S)
   return Lerp (0.8, 2.0, Clamp (S, 0.0, 1.0));
 }
 
-// Section 4.4.3 - Gap detection threshold (seconds)
+// Section 4.4.3 - Adaptive gap scale (seconds, multiplier applied to dt_ema)
 inline double
-GapThreshold (double T)
+GapScale (double T)
 {
-  // gap_threshold(T) = lerp(5, 30, T) seconds
-  // Higher stability = longer pause required to trigger boundary
-  return Lerp (5.0, 30.0, Clamp (T, 0.0, 1.0));
+  // gap_scale(T) = lerp(3.0, 8.0, T) seconds
+  // Higher stability = longer pause expected before affecting boundary score
+  return Lerp (3.0, 8.0, Clamp (T, 0.0, 1.0));
 }
 
 // Section 4.4.4 - Spike bypass margin above θ_dynamic

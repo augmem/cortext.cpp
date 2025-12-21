@@ -215,6 +215,11 @@ delta_x_trend. Weight naming rule: weight** and **weight variables
 parameters; w** variables (e.g., w_relevance, w_mismatch, … w_arousal)
 are composite-score blender weights.
 
+**Drift naming note:** `drift_acc` tracks within-accumulator centroid
+drift (context drift used for boundary decisions); `drift_accum` tracks
+cumulative per-signal embedding drift used for interrupt refractory
+pressure. Treat these as distinct signals.
+
 **Time-index convention:** Per-step computed values use a `_t` suffix
 (e.g., score_t, theta_dynamic_t). Retained state uses the bare name
 (e.g., theta_dynamic). When a step proposes a new value, compute the
@@ -229,8 +234,8 @@ idle_for), and time comparisons operate in seconds:
 
 **Time constants:** All time-related constants are specified with
 explicit units (e.g., τ_min = 120 seconds, kRecencyTau = 60 seconds).
-Threshold limits like max_mem_time(T) and gap_threshold(T) return values
-in seconds.
+Threshold limits like max_mem_time(T) and gap_scale(T) return values in
+seconds (gap_scale multiplies dt_ema to form gap_ref_s).
 
 ### Fixed Constants and Invariants
 
@@ -637,6 +642,10 @@ High structural coherence (low variance in similarities) indicates the
 signal fits consistently with context. The effective Focus is modulated:
 F_eff = F × (0.5 + 0.5 × coherence_struct_t).
 
+**Effective Focus usage:** F_eff is a diagnostic modulation of Focus.
+Unless a formula explicitly references F_eff, the specification uses raw
+F (including all Table 1 metric formulas and knob-derived controls).
+
 ### Focus Spread
 
 Focus spread quantifies the entropy of attention over nearest neighbors:
@@ -654,6 +663,8 @@ memory_stream with q = x_t and k = k_neighbors(T) (not recent_context).
             focus_spread_t ← 0  # avoid degenerate entropy
         else:
             kNN_similarities ← topK(vector_search(x_t, k=k_eff))
+            # attention_width sharpens or flattens similarities
+            kNN_similarities ← clamp(kNN_similarities × (π / attention_width), −1, 1)
             p ← softmax(kNN_similarities)
             focus_spread_t ← H(p) / ln(k_eff)
 
@@ -813,6 +824,19 @@ The index i used below (e.g., w_bootstrap\[i\], w_rls\[i\]) follows this
 ordering.
 
     w_bootstrap[i] ← sigmoid(c_F[i]×F + c_S[i]×S + c_T[i]×T + d_i)
+
+Before normalization, control weights modulate the blender weights:
+
+    w_relevance ← w_relevance × weight_relevance
+    w_mismatch  ← w_mismatch  × mismatch_weight
+    w_surprise  ← w_surprise  × weight_surprise
+    w_valence   ← w_valence   × weight_valence × emotion_gain
+    w_arousal   ← w_arousal   × weight_arousal × emotion_gain
+    w_coverage  ← w_coverage  × coverage_gain_floor
+
+Composite score scaling applies after weight normalization:
+
+    score_t ← clamp(score_raw × score_gain, 0, 1)
 
 Bootstrap coefficient defaults (canonical; used for initialization):
 
@@ -1235,7 +1259,9 @@ coherence_mem drop captures within-memory similarity degradation.
 Boundary score combines drift spike and coherence drop:
 
     weight_drift_component = lerp(0.6, 0.4, T)  # weight on drift
-    weight_coh_component = 1 − weight_drift_component  # weight on coherence drop
+    weight_gap_component = lerp(0.05, 0.20, T)  # soft gap influence (low weight)
+    weight_drift_component = weight_drift_component × (1 − weight_gap_component)
+    weight_coh_component = 1 − weight_gap_component − weight_drift_component
     ε0 = 0.01  # cold-start guard for eta_prev
     if eta_prev < ε0:
         drift_spike ← 0
@@ -1244,8 +1270,17 @@ Boundary score combines drift spike and coherence drop:
     eta_acc ← EWMA(eta_prev, d_step, α = lerp(0.3, 0.1, T))
     coh_drop01 ← clamp((coherence_prev − coherence_curr) / 2, 0, 1)
     coherence_prev ← coherence_curr  # update for next step
+
+    # Adaptive gap signal (dynamic, not a hard trigger)
+    dt_ref ← max(dt_ema, 0.25)  # EWMA of inter-arrival Δt in seconds (robust to jitter)
+    gap_scale(T) = lerp(3.0, 8.0, T)  # expected pause multiplier
+    gap_ref_s ← gap_scale(T) × dt_ref
+    gap_z ← (signal_gap_s − gap_ref_s) / max(gap_ref_s, ε)
+    gap_score ← sigmoid(gap_z)
+
     boundary_score ← weight_drift_component × sigmoid(drift_spike) +
-                      weight_coh_component × coh_drop01
+                      weight_coh_component × coh_drop01 +
+                      weight_gap_component × gap_score
     boundary_score ← clamp(boundary_score, 0, 1)
 
 Boundary threshold and limits:
@@ -1259,14 +1294,13 @@ Trigger memory flush when:
     mem_elapsed ← now_s() − to_s(t_start)
     should_flush = (boundary_score > b_thresh(F, S)) OR
                    (mem_elapsed > max_mem_time(T)) OR
-                   (drift_acc > max_mem_drift(S)) OR
-                   (signal_gap_s > gap_threshold(T))
+                   (drift_acc > max_mem_drift(S))
 
 where signal_gap_s = now_s() − to_s(last_signal_ts) is computed at the
-start of signal processing (before last_signal_ts is updated), detecting
-natural pauses (speech pauses, generation delays):
-
-    gap_threshold(T) = lerp(5, 30, T)  # seconds
+start of signal processing (before last_signal_ts is updated). Gap
+timing influences boundary_score via gap_score rather than forcing an
+unconditional flush, which avoids splitting mid-thought when upstream
+processing introduces non-deterministic latency.
 
 ### Spike Bypass (Flashbulb Flush)
 
@@ -1800,9 +1834,6 @@ Label salience is derived from embeddings rather than model guesses:
     e_label = encode(label_text)
     salience(label) = clamp((cos(e_label, summary.embedding) + 1) / 2, 0, 1)
 
-If the encoder or summary embedding is unavailable, default to
-`salience(label) = 0.5`.
-
 If a label already exists, its stored salience is updated with
 `s_max = max(s_max, salience(label))`.
 
@@ -2018,12 +2049,19 @@ where cosine_dist(u, v) = 1 − cos(u, v).
     if first_step: x_last_check ← x_t; drift_acc_pacing ← 0
     drift_acc_pacing += cosine_dist(x_t, x_last_check)
     pacing_thresh(S) = lerp(0.5, 0.1, S)
-    # Retrieval triggered when drift exceeds threshold or at memory boundary
-    if drift_acc_pacing > pacing_thresh(S) OR should_flush:
-        trigger_check(); x_last_check ← x_t; drift_acc_pacing ← 0
-
     max_wait_drift(F) = lerp(2.0, 0.5, F)
     adjacent_window(F) = round(lerp(8, 1, F))
+
+    since_last_s ← if last_retrieval_ts == 0 then +∞ else (now_ms() − last_retrieval_ts) / 1000
+    min_gap_s ← adjacent_window(F) × dt_ema
+    adjacent_ok ← (since_last_s ≥ min_gap_s)
+    force_check ← (drift_acc_pacing > max_wait_drift(F))
+
+    # Retrieval triggered when drift exceeds threshold, at memory boundary, or when drift exceeds max_wait_drift.
+    # Adjacent-window throttling is bypassed on boundaries and force_check.
+    if (drift_acc_pacing > pacing_thresh(S) OR should_flush OR force_check) AND
+       (adjacent_ok OR should_flush OR force_check):
+        trigger_check(); x_last_check ← x_t; drift_acc_pacing ← 0; last_retrieval_ts ← now_ms()
 
 High Sensitivity produces frequent checks triggered by small content
 shifts; high Focus enforces strict drift limits. Memory boundaries
@@ -2210,7 +2248,7 @@ On cold start (no persisted state), initialize retained state as follows
     `drift_acc = 0`, `s_sum = 0`, `s_max = 0`, `n = 0`,
     `e_peak = 0_vector`, `emo_max = 0`, `arousal_sum = 0`,
     `acc_signals_window = []`, `t_start = 0`, `last_signal_ts = 0`,
-    `last_write_ts = 0`, `eta_acc = 0`, `coherence_prev = 1`,
+    `last_write_ts = 0`, `eta_acc = 0`, `coherence_prev = 0`,
     `drift_accum = 0`, `drift_at_last_interrupt = 0`,
     `drift_acc_pacing = 0`, `x_last_check = unset`, `prev_x = unset`.
 
@@ -2373,7 +2411,7 @@ Canonical single-step pseudocode (timestep t):
     # Accumulator + boundary
     update_accumulator(...)
     boundary_score ← compute_boundary_score(...)
-    should_flush ← boundary_decision(boundary_score, gap_caps, time_caps, spike_bypass)
+    should_flush ← boundary_decision(boundary_score, time_caps, spike_bypass)
     θ_memory ← θ_dynamic × M_write_refrac
     write_memory ← force_write OR (should_flush AND (S_window > θ_memory))
     Δwrites ← 1 if write_memory else 0  # computed immediately after write decision

@@ -73,6 +73,7 @@ UpdateAccumulator::Execute (OperationContext &context,
       state.Reset (signal.embedding, signal.timestamp);
       state.s_sum = score;
       state.s_max = score;
+      state.drift_acc = drift_mag * 0.5;
       state.episode_id = episode_id;
 
       // Track emotional metadata (Section 6.1.1)
@@ -114,6 +115,7 @@ UpdateAccumulator::Execute (OperationContext &context,
       acc.Reset (signal.embedding, signal.timestamp);
       acc.s_sum = score;
       acc.s_max = score;
+      acc.drift_acc = drift_mag * 0.5;
       acc.episode_id = episode_id;
 
       // Track emotional metadata (Section 6.1.1)

@@ -25,21 +25,21 @@ constexpr size_t kNumMetrics = 12;
 
 // Bootstrap coefficient matrices derived from current heuristics
 // w_bootstrap[i] = sigmoid(c_F[i]*F + c_S[i]*S + c_T[i]*T + d[i])
-// Order: relevance, mismatch, surprise, rarity, drift, contradiction,
-//        utility, periphery, coverage, salience, valence, arousal
+// Order: relevance, mismatch, surprise, rarity, drift, utility,
+//        salience, valence, arousal, contradiction, periphery, coverage
 constexpr double kBootstrapCF[kNumMetrics] = {
     1.4,   // relevance: 0.7*F + 0.2*T → z=1.4F+0.4T-1
     -1.0,  // mismatch: (1-F)*S → linearized
     0.0,   // surprise: S*(1-0.5T)
     0.9,   // rarity: (0.5+0.5F)*(1-0.2T)
     0.0,   // drift: 0.5*(1-T)
-    -2.0,  // contradiction: max(0,S-F) → linearized
     0.85,  // utility: (0.5+0.5F)*(1-0.3S)
-    0.0,   // periphery: 0.5*T
-    2.0,   // coverage: F
     1.0,   // salience: 0.5*(F+S)
     0.0,   // valence: (0.4+0.6S)*(1-0.3T)
-    0.0    // arousal: S*(1-0.2T)
+    0.0,   // arousal: S*(1-0.2T)
+    -2.0,  // contradiction: max(0,S-F) → linearized
+    0.0,   // periphery: 0.5*T
+    2.0    // coverage: F
 };
 constexpr double kBootstrapCS[kNumMetrics] = {
     0.0,   // relevance
@@ -47,13 +47,13 @@ constexpr double kBootstrapCS[kNumMetrics] = {
     1.5,   // surprise
     0.0,   // rarity
     0.0,   // drift
-    2.0,   // contradiction
     -0.45, // utility
-    0.0,   // periphery
-    0.0,   // coverage
     1.0,   // salience
     1.02,  // valence
-    1.8    // arousal
+    1.8,   // arousal
+    2.0,   // contradiction
+    0.0,   // periphery
+    0.0    // coverage
 };
 constexpr double kBootstrapCT[kNumMetrics] = {
     0.4,   // relevance
@@ -61,13 +61,13 @@ constexpr double kBootstrapCT[kNumMetrics] = {
     -0.5,  // surprise
     -0.3,  // rarity
     -1.0,  // drift
-    0.0,   // contradiction
     0.0,   // utility
-    1.0,   // periphery
-    0.0,   // coverage
     0.0,   // salience
     -0.42, // valence
-    -0.2   // arousal
+    -0.2,  // arousal
+    0.0,   // contradiction
+    1.0,   // periphery
+    0.0    // coverage
 };
 constexpr double kBootstrapD[kNumMetrics] = {
     -1.0,   // relevance
@@ -75,13 +75,13 @@ constexpr double kBootstrapD[kNumMetrics] = {
     -0.75,  // surprise
     0.05,   // rarity
     0.0,    // drift
-    -1.0,   // contradiction
     0.075,  // utility
-    -1.0,   // periphery
-    -1.0,   // coverage
     -1.0,   // salience
     -0.11,  // valence
-    -0.9    // arousal
+    -0.9,   // arousal
+    -1.0,   // contradiction
+    -1.0,   // periphery
+    -1.0    // coverage
 };
 
 inline const std::vector<operations::Metric> &
@@ -90,10 +90,10 @@ SupportedMetrics ()
   static const std::vector<operations::Metric> kNames = {
     operations::Metric::relevance, operations::Metric::mismatch,
     operations::Metric::surprise,  operations::Metric::rarity,
-    operations::Metric::drift,     operations::Metric::contradiction,
-    operations::Metric::utility,   operations::Metric::periphery,
-    operations::Metric::coverage,  operations::Metric::salience,
-    operations::Metric::valence,   operations::Metric::arousal,
+    operations::Metric::drift,     operations::Metric::utility,
+    operations::Metric::salience,  operations::Metric::valence,
+    operations::Metric::arousal,   operations::Metric::contradiction,
+    operations::Metric::periphery, operations::Metric::coverage,
   };
   return kNames;
 }

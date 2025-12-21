@@ -51,6 +51,13 @@ Date: 2025-12-19
 - 2025-12-21: Influence feedback now updates per-memory mean_influence.
 - 2025-12-21: Rebuilt and ran `./build/tests/cortext_tests`; all tests passed (384 test cases, 2190 assertions).
 - 2025-12-21: Clarified control-weight usage and attention_width effect in `docs/paper/sections/3_structural_metrics.qmd` (composite scoring + focus spread).
+- 2025-12-21: Began exhaustive operation-by-operation review against manuscript; built checklist of spec sections to verify.
+- 2025-12-21: Audited uncertainty/focus/sensitivity/stability and structural-metric/composite scoring sections; noted blend-order indexing mismatch and a focus_spread fallback deviation in uncertainty.
+- 2025-12-21: Audited thresholding, accumulator/boundary, write gate, interrupt gate, and streaming pacing logic; logged remaining deviations (spike bypass gating, drift_acc first-signal update, homeostatic cap, pacing extras, cap_total floor).
+- 2025-12-21: Audited reinforcement/decay, reconsolidation, retrieval competition, emotional consolidation/cascade, consolidation/extraction, and graph retrieval; logged remaining deviations (extra strength modifiers, reconsolidation uncertainty bump, retrieval-competition extras, graph query fallback).
+- 2025-12-21: Audited state initialization/persistence appendix vs code; logged remaining cold-start/mismatch issues and doc ambiguity.
+- 2025-12-21: Clarified spec language in `docs/paper/sections` (effective Focus usage, drift_acc vs drift_accum naming, streaming pacing adjacency/max-wait rules, and coherence_prev default alignment in Appendix A).
+- 2025-12-21: Fixed remaining conformance gaps from the regenerated manuscript (blender order, uncertainty fallback scaling, spike bypass, drift accumulation on first signal, emotional/memory-strength fields, retrieval competition simplification, reconsolidation uncertainty bump removal, graph query fallback removal, cold-start mood timestamp, accumulator coherence load default).
 
 ## Findings (Draft, Ongoing)
 
@@ -71,6 +78,8 @@ Date: 2025-12-19
 - (Resolved 2025-12-21) Mood integration ignores time decay and centering: `λ_mood` is constant (no `Δt_mood`), `last_mood_ts` is unused, and `e_t` is not centered (`p_c - 1/6`). (`src/operations/sensitivity.cpp`, `include/cortext/core/knobs.hpp`.)
 - (Resolved 2025-12-21) Consolidation interval and extraction interval compare **ms timestamps** to **second** thresholds (missing ×1000 conversion). (`src/operations/consolidation.cpp`.)
 - (Resolved 2025-12-21) Consolidation rate trigger compares `m_rate` (writes/min) against `core::ConsolidationRate` (computed from seconds interval without ×60); spec’s trigger uses the write‑rate target (`rate_target`) and expects consistent units. (`docs/paper/_manuscript/index.md`, `src/operations/consolidation.cpp`, `include/cortext/core/knobs.hpp`.)
+- (Resolved 2025-12-21) Homeostatic cap uses `base_band(T)` instead of current `hysteresis` in Δθ_homeo; spec uses `cap_homeo ← 0.25 × hysteresis`. (`src/operations/threshold.cpp`.)
+- (Resolved 2025-12-21) Threshold cap_total uses `max(Δt, 0.1s)` instead of the spec’s `Δt` (no floor). This widens the cap for fast streams. (`src/operations/threshold.cpp`.)
 
 ### Missing / divergent behavior
 - (Resolved 2025-12-21) **Accumulator coherence window missing**: `acc_signals_window` not implemented; coherence computed vs `mu_acc` instead of raw mean cosine over window. (`src/operations/coherence.cpp`, `include/cortext/processor/accumulator_state.hpp`.)
@@ -80,7 +89,7 @@ Date: 2025-12-19
 - (Resolved 2025-12-21) Boundary gap detection uses `last_signal_ts` updated **before** boundary; thus gap is often zero. Spec says compute gap before update. (`src/operations/boundary.cpp`, `src/operations/accumulator.cpp`.)
 - (Resolved 2025-12-21) `recent_memory_centroids` stores `mu_acc` and length `NCtx(T)`; spec says store `e_rep` and size `win_mem_ctx(T)=lerp(4,32,T)`. (`src/operations/write_gate.cpp`, `include/cortext/core/knobs.hpp`.)
 - (Resolved 2025-12-21) `memory_stream` is capped to `NCtx(T)`; spec treats it as the full stream of written memories for focus_spread/uncertainty kNN queries. (`src/operations/write_gate.cpp`.)
-- Structural coherence is never stored in `context.SetCoherence`, so `signals.coherence` persists as 0 and interrupt coherence penalty is wrong. (`src/operations/signal_metrics_persistence.cpp`, `src/operations/interrupt_gate.cpp`.)
+- (Resolved 2025-12-21) Structural coherence is never stored in `context.SetCoherence`, so `signals.coherence` persists as 0 and interrupt coherence penalty is wrong. (`src/operations/signal_metrics_persistence.cpp`, `src/operations/interrupt_gate.cpp`.)
 - (Resolved 2025-12-21) Core metric formulas use `F_eff` (effective focus) instead of raw `F` for relevance/mismatch/rarity/utility/coverage/salience/contradiction; spec uses `F` in Table 1. (`src/operations/metrics.cpp`.)
 - (Resolved 2025-12-21) RLS blending: `FitMetricWeightsRLS` updates `blender_state`, but `ComputeCompositeScore` ignores it and uses `rls_coefficients` that are never updated. Weight adaptation effectively no-op. (`src/operations/blend.cpp`.)
 - (Resolved 2025-12-21) RLS covariance update appears incorrect (scalar applied where matrix multiply expected). (`src/operations/blend.cpp`.)
@@ -92,7 +101,7 @@ Date: 2025-12-19
 - (Resolved 2025-12-21) Reinforcement edges saturate immediately (`MIN(weight + 1.0, 1.0)`), not frequency-scaled. (`src/operations/graph_retrieval.cpp`.)
 - (Resolved 2025-12-21) Interrupt gate uses max relevance/novelty across candidates instead of `candidate_star` values; overlap_star is max across candidates. Spec uses candidate_star values. (`src/operations/interrupt_gate.cpp`.)
 - (Resolved 2025-12-21) Interrupt gate coherence penalty uses `context.GetCoherence()` which is never set to structural coherence. (`src/operations/interrupt_gate.cpp`, `src/operations/coherence.cpp`.)
-- Interrupt gate coverage_gain uses `max(0, sim_ctx − redundancy)`; spec defines `coverage_gain = 1 − redundancy` (Appendix B/C). (`src/operations/interrupt_gate.cpp`, `docs/paper/_manuscript/index.md`.)
+- (Resolved 2025-12-21) Interrupt gate coverage_gain uses `max(0, sim_ctx − redundancy)`; spec defines `coverage_gain = 1 − redundancy` (Appendix B/C). (`src/operations/interrupt_gate.cpp`, `docs/paper/_manuscript/index.md`.)
 - (Resolved 2025-12-21) Working memory benefit uses signal relevance instead of `relevance_to_task(μ_acc, task_context)`. (`src/operations/working_memory.cpp`.)
 - (Resolved 2025-12-21) Metacognitive FOK/retrieval strength never computed; thresholds output but no FOK state updates. (`src/operations/metacognitive.cpp`.)
 - (Resolved 2025-12-21) Emotional consolidation fields (`flashbulb_threshold`, `half_life_bonus`, `detail_suppression`, `gist_components`) are stored but never used to adjust decay or retrieval. (`src/operations/emotion*.cpp`, `src/operations/memory_strength.cpp`.)
@@ -116,17 +125,29 @@ Date: 2025-12-19
 - (Resolved 2025-12-21) `theta_target` is not tracked; persisted as `theta_dynamic` by default. (`src/signal_processor.cpp`.)
 - (Resolved 2025-12-21) Persisted focus/sensitivity/stability state is overwritten: `LoadState` does not set `*_priors_initialized`, so `InitializeFocusPriors` / `InitializeSensitivityPriors` / `InitializeStabilityPriors` re-seed and clobber loaded values. (Multiple files.)
 - (Resolved 2025-12-21) Cold-start threshold state does not follow Appendix A defaults: `theta_dynamic` is initialized to a fixed 0.2 (not `θ_prior(F,S,T)`), and `hysteresis` starts at a fixed 0.05 rather than `base_band(T)` until `UpdateThreshold` runs. (`include/cortext/processor/processor_context.hpp`, `src/operations/threshold.cpp`.)
-- Cold-start `last_rate_timestamp` should initialize to `now_ms()` per Appendix A; code defaults to `0`, affecting early Δt/rate estimates. (`include/cortext/processor/processor_context.hpp`, `docs/paper/_manuscript/index.md`.)
+- (Resolved 2025-12-21) Cold-start `last_rate_timestamp` now initializes to `now_ms()` in the SignalProcessor constructor when no state is loaded. (`src/signal_processor.cpp`.)
 - (Resolved 2025-12-21) Drift spike uses **post‑EWMA** `eta_acc` as baseline because `ComputeCoherence` updates `eta_acc` before `DetectBoundary`. Spec uses `eta_prev` (pre‑update) for spike calculation. (`src/operations/coherence.cpp`, `src/operations/boundary.cpp`.)
-- Accumulator `coherence_prev` initializes to `1.0` in code; spec initializes to `0` and resets to `0` at boundaries. (`include/cortext/processor/accumulator_state.hpp`, `docs/paper/_manuscript/index.md`.)
+- (Resolved 2025-12-21) Accumulator `coherence_prev` now initializes to `0` and resets to `0`; Appendix A now aligns to `0`. (`include/cortext/processor/accumulator_state.hpp`, `docs/paper/_manuscript/index.md`.)
 - (Resolved 2025-12-21) `adjacent_window(F)` is specified in streaming pacing but never used in implementation. (`docs/paper/_manuscript/index.md`, `include/cortext/core/knobs.hpp`, `src/operations/streaming_pacing.cpp`.)
 - (Resolved 2025-12-21) Influence tracking uses recent input embeddings as generation trajectory; spec applies drift on **generation embeddings when available** and otherwise should skip/neutralize that term. (`src/operations/influence.cpp`.)
+- (Resolved 2025-12-21) Blender metric order is inconsistent with the manuscript’s W_blend ordering. Spec defines index order as `[relevance, mismatch, surprise, rarity, drift, utility, salience, valence, arousal, contradiction, periphery, coverage]`, but code uses `[relevance, mismatch, surprise, rarity, drift, contradiction, utility, periphery, coverage, salience, valence, arousal]` for bootstrap/RLS vectors. Behavior is internally consistent (metric-keyed), but index semantics deviate from the spec. (`src/operations/blend.cpp`, `include/cortext/operations/metrics.hpp`.)
+- (Resolved 2025-12-21) UpdateUncertainty’s internal focus_spread fallback recomputes entropy without the attention_width scaling (π/attention_width). If ComputeFocusSpread is omitted in a pipeline, uncertainty will deviate from the spec focus_spread definition. (`src/operations/uncertainty.cpp`.)
+- (Resolved 2025-12-21) Spike bypass only forces flush when `n_signals > 1`; spec allows immediate flush/force_write on any high-salience signal. Single-signal spike events currently do not bypass. (`src/operations/spike_bypass.cpp`.)
+- (Resolved 2025-12-21) Accumulator drift_acc does not add the first signal’s `drift_mag/2` when starting a new unit (new source or post-reset). Spec applies drift accumulation on every signal. (`src/operations/accumulator.cpp`, `include/cortext/processor/accumulator_state.hpp`.)
+- (Resolved 2025-12-21) Streaming pacing adds `adjacent_window` throttling and `max_wait_drift` forcing logic not described in the manuscript’s pacing algorithm (only parameters are listed). Resolved by clarifying pacing logic in `docs/paper/sections/8_interrupt_gate.qmd`. (`src/operations/streaming_pacing.cpp`.)
+- (Resolved 2025-12-21) Memory strength applies `detail_suppression` and `gist_components` factors to the reinforcement term, but these modifiers are not specified in the manuscript’s memory strength model. (`src/operations/memory_strength.cpp`.)
+- (Resolved 2025-12-21) Emotional consolidation writes `detail_suppression`/`gist_components` values (and cascades) even though the manuscript only specifies flashbulb tagging + half‑life bonus; the downstream strength effect is undocumented. (`src/operations/emotion.cpp`, `src/operations/memory_strength.cpp`.)
+- (Resolved 2025-12-21) Retrieval competition adds lateral inhibition scaling and multi-iteration suppression beyond the manuscript’s parameters (radius, winners_k, suppression_per_retrieval, recovery_time). (`src/operations/competition.cpp`.)
+- (Resolved 2025-12-21) Reconsolidation bumps global uncertainty (`u_t`) by max drift; the manuscript does not specify this side effect. (`src/operations/reconsolidation.cpp`.)
+- (Resolved 2025-12-21) Graph retrieval falls back to `signal.embedding` when no accumulator centroid exists; manuscript specifies query should be `μ_acc` only. (`src/operations/graph_retrieval.cpp`.)
+- (Resolved 2025-12-21) Cold-start `last_mood_ts` is not initialized to `now_ms()`; it remains 0 until the first mood update. Spec sets `last_mood_ts = now_ms()` at cold start. (`include/cortext/processor/processor_context.hpp`, `src/signal_processor.cpp`.)
+- (Resolved 2025-12-21) Appendix state previously listed `coherence_prev = 1` while the accumulator algorithm section specifies `0`; Appendix A now aligns to `0`, and `LoadAccumulators` falls back to `0.0` when the column is missing. (`include/cortext/processor/accumulator_state.hpp`, `src/signal_processor.cpp`.)
 
 ### Persistence / schema gaps
 - (Resolved 2025-12-21) State fields required by manuscript are not persisted or loaded: `coverage_gain_floor`, `mismatch_weight`, `weight_surprise`, `weight_valence`, `weight_arousal`, `emotion_gain`, `score_gain`, `drift_weight`, `retention_ema`, `last_retrieval_ts`. Save uses constants; load reads only `weight_novelty`. (`src/signal_processor.cpp`.) (Resolved 2025-12-21: `last_mood_ts` now persisted/loaded.)
 - (Resolved 2025-12-21) `acc_signals_window` exists in schema but not in `AccumulatorState`, and is neither saved nor loaded. (`docs/paper/diagrams/entity-relationship.qmd`, `src/signal_processor.cpp`.)
 - (Resolved 2025-12-21) `signals.coherence` field persists `context.GetCoherence()` which is never set; should store structural coherence. (`src/operations/signal_metrics_persistence.cpp`, `src/operations/coherence.cpp`.)
-- `retention_ema` is persisted in schema but never updated or read for stability updates. (`src/operations/stability.cpp`, `src/signal_processor.cpp`.)
+- (Resolved 2025-12-21) `retention_ema` is persisted in schema but never updated or read for stability updates. (`src/operations/stability.cpp`, `src/signal_processor.cpp`.)
 - (Resolved 2025-12-21) `mean_influence` is never updated; `last_mood_ts` is updated but needs verification in downstream usage. (`src/operations/influence.cpp`, `src/operations/stability_feedback.cpp`.)
 - (Resolved 2025-12-21) `last_retrieval_ts` was updated in memory but **not persisted**; `delta_half_life_adj` was always persisted as `0.0` (ignores computed adjustments). (`src/signal_processor.cpp`, `src/operations/stability_feedback.cpp`.)
 - (Resolved 2025-12-21) Metacognitive state fields in schema (`fok_state`, `retrieval_strength`, `metacognitive_confidence`) were never persisted or updated. (`src/store/schema.cpp`, `src/operations/metacognitive.cpp`.)

@@ -45,6 +45,7 @@
 
 #include <any>
 #include <atomic>
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
@@ -518,17 +519,27 @@ Json BuildOpenAIMessages(const std::vector<cortext::Cortext::Context::Memory>& w
     messages.push_back({{"role", "system"}, {"content", injected_system}});
   }
 
-  // Build from working memory (already ordered by start_ts from database query)
+  // Build from working memory ordered by timestamp.
+  std::vector<const cortext::Cortext::Context::Memory*> ordered;
+  ordered.reserve(working_memory.size());
   for (const auto& m : working_memory) {
+    ordered.push_back(&m);
+  }
+  std::sort(ordered.begin(), ordered.end(),
+            [](const auto* a, const auto* b) {
+              if (a->timestamp == b->timestamp) return a->id < b->id;
+              return a->timestamp < b->timestamp;
+            });
+  for (const auto* m : ordered) {
     std::string role;
-    if (m.source_id == "chat/user") {
+    if (m->source_id == "chat/user") {
       role = "user";
-    } else if (m.source_id == "chat/assistant") {
+    } else if (m->source_id == "chat/assistant") {
       role = "assistant";
     } else {
       continue;  // Skip unknown sources
     }
-    std::string text_content = ExtractTextFromBlobs(m.content);
+    std::string text_content = ExtractTextFromBlobs(m->content);
     messages.push_back({{"role", role}, {"content", text_content}});
   }
   return messages;
@@ -714,7 +725,7 @@ int main(int argc, char** argv) {
   // UI shared state
   std::mutex mu;
   static std::mutex db_write_mu;
-  std::vector<chat::ChatMessage> history;
+  std::vector<cortext::Cortext::Context::Memory> working_memory;
   std::vector<cortext::Cortext::Context::Memory> last_memories;
   std::deque<chat::MemoryEvent> memory_events;
   bool last_should_interrupt = false;
@@ -749,7 +760,7 @@ int main(int argc, char** argv) {
   // Create chat window with references to shared state
   chat::ChatWindow::State window_state;
   window_state.mu = &mu;
-  window_state.history = &history;
+  window_state.working_memory = &working_memory;
   window_state.memory_events = &memory_events;
   window_state.context = last_context;
   window_state.status = status_state;
@@ -807,7 +818,6 @@ int main(int argc, char** argv) {
           partial_response.clear();
           generation_restarts = 0;
           streaming_state.Reset();
-          history.push_back({"user", text});
         } else {
           text.clear();
         }
@@ -848,6 +858,7 @@ int main(int argc, char** argv) {
 
           {
             std::lock_guard<std::mutex> lock(mu);
+            working_memory = retrieved.working_memory;
             // Only inject memories if the interrupt gate approved them
             if (retrieved.should_interrupt) {
               streaming_state.current_memories = retrieved.retrieved_memory;
@@ -1034,16 +1045,19 @@ int main(int argc, char** argv) {
               cortext::telemetry::Attribute::Bool("write_decision", asst_ctx.output.decision.value_or(false))
             });
 
-            if (asst_ctx.output.stored_embedding_id.has_value()) {
-              cortext::telemetry::LogInfo("chat.assistant_stored", {
-                cortext::telemetry::Attribute::Int64("embedding_id", *asst_ctx.output.stored_embedding_id),
-                cortext::telemetry::Attribute::Int64("content_length", static_cast<int64_t>(assistant_reply.size()))
-              });
+            {
               std::lock_guard<std::mutex> lock(mu);
-              memory_events.push_back(CreateStoredEvent(
-                  *asst_ctx.output.stored_embedding_id, assistant_reply, "chat/assistant", NowUnixMillis(), asst_ctx.output));
-              while (memory_events.size() > kMaxMemoryEvents) {
-                memory_events.pop_front();
+              working_memory = asst_ctx.working_memory;
+              if (asst_ctx.output.stored_embedding_id.has_value()) {
+                cortext::telemetry::LogInfo("chat.assistant_stored", {
+                  cortext::telemetry::Attribute::Int64("embedding_id", *asst_ctx.output.stored_embedding_id),
+                  cortext::telemetry::Attribute::Int64("content_length", static_cast<int64_t>(assistant_reply.size()))
+                });
+                memory_events.push_back(CreateStoredEvent(
+                    *asst_ctx.output.stored_embedding_id, assistant_reply, "chat/assistant", NowUnixMillis(), asst_ctx.output));
+                while (memory_events.size() > kMaxMemoryEvents) {
+                  memory_events.pop_front();
+                }
               }
             }
           } catch (const std::exception& ex) {
@@ -1060,10 +1074,9 @@ int main(int argc, char** argv) {
             std::lock_guard<std::mutex> lock(mu);
             last_memories = streaming_state.current_memories;
             if (!assistant_reply.empty()) {
-              history.push_back({"assistant", assistant_reply});
               cortext::telemetry::LogInfo("chat.assistant_reply_added", {
                 cortext::telemetry::Attribute::Int64("reply_length", static_cast<int64_t>(assistant_reply.size())),
-                cortext::telemetry::Attribute::Int64("history_size", static_cast<int64_t>(history.size())),
+                cortext::telemetry::Attribute::Int64("working_memory_size", static_cast<int64_t>(working_memory.size())),
                 cortext::telemetry::Attribute::Int64("memories_used", static_cast<int64_t>(last_memories.size()))
               });
             }

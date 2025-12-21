@@ -2,6 +2,7 @@
 
 #include <imgui.h>
 
+#include <algorithm>
 #include <cstdarg>
 #include <cstdio>
 #include <iomanip>
@@ -42,6 +43,23 @@ std::string FormatDouble(double v) {
 std::string Truncate(const std::string& s, size_t max_len) {
   if (s.size() <= max_len) return s;
   return s.substr(0, max_len) + "...";
+}
+
+std::string ExtractTextFromBlobs(const std::vector<std::vector<unsigned char>>& blobs) {
+  if (blobs.empty()) return {};
+  std::string result;
+  for (const auto& blob : blobs) {
+    if (!blob.empty()) {
+      result.append(reinterpret_cast<const char*>(blob.data()), blob.size());
+    }
+  }
+  return result;
+}
+
+std::string RoleFromSourceId(const std::string& source_id) {
+  if (source_id == "chat/user") return "user";
+  if (source_id == "chat/assistant") return "assistant";
+  return {};
 }
 
 }  // namespace
@@ -112,14 +130,33 @@ void ChatWindow::RenderTabBar() {
 }
 
 void ChatWindow::RenderChatTab() {
-  if (!state_.mu || !state_.history) return;
+  if (!state_.mu || !state_.working_memory) return;
 
   std::lock_guard<std::mutex> lock(*state_.mu);
 
-  for (const auto& msg : *state_.history) {
-    ImGui::TextColored(RoleColor(msg.role), "%s:", RolePrefix(msg.role).c_str());
+  std::vector<const cortext::Cortext::Context::Memory*> ordered;
+  ordered.reserve(state_.working_memory->size());
+  for (const auto& mem : *state_.working_memory) {
+    ordered.push_back(&mem);
+  }
+  std::sort(ordered.begin(), ordered.end(),
+            [](const auto* a, const auto* b) {
+              if (a->timestamp == b->timestamp) return a->id < b->id;
+              return a->timestamp < b->timestamp;
+            });
+
+  for (const auto* mem : ordered) {
+    const std::string role = RoleFromSourceId(mem->source_id);
+    if (role.empty()) {
+      continue;
+    }
+    std::string content = ExtractTextFromBlobs(mem->content);
+    if (content.empty()) {
+      content = "(empty)";
+    }
+    ImGui::TextColored(RoleColor(role), "%s:", RolePrefix(role).c_str());
     ImGui::SameLine();
-    ImGui::TextWrapped("%s", msg.content.c_str());
+    ImGui::TextWrapped("%s", content.c_str());
     ImGui::Separator();
   }
 
