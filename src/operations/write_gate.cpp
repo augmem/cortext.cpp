@@ -101,10 +101,16 @@ ComputeWriteGate::Execute (OperationContext &context,
         }
 
       // Section 8.2: Populate recent_memory_centroids for interrupt gate context.
-      // Store representative embedding (e_rep) per spec.
-      if (e_rep.size () > 0)
+      // Store normalized accumulator centroid (μ_acc) for memory-level context.
+      if (acc.mu_acc.size () > 0)
         {
-          p_ctx.recent_memory_centroids.push_back (e_rep);
+          Eigen::VectorXf mu_norm = acc.mu_acc;
+          const float mu_norm_val = mu_norm.norm ();
+          if (mu_norm_val > 1e-9f)
+            {
+              mu_norm /= mu_norm_val;
+            }
+          p_ctx.recent_memory_centroids.push_back (mu_norm);
 
           // Trim to win_mem_ctx(T) size
           const size_t max_size

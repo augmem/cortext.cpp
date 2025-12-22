@@ -147,11 +147,11 @@ for i in range(len(temporal_order) − 1):
 
 ## Graph-Augmented Retrieval
 
-Retrieval combines vector similarity with graph expansion. The query vector is the **current accumulator centroid** (μ_acc), which aggregates the embeddings of the signals observed so far in the unflushed memory. This makes retrieval responsive to the evolving thought unit rather than any single micro‑signal.
+Retrieval combines vector similarity with graph expansion. The query vector is the **current accumulator centroid** (μ_acc), L2‑normalized for vector search, which aggregates the embeddings of the signals observed so far in the unflushed memory. This makes retrieval responsive to the evolving thought unit rather than any single micro‑signal.
 
 ```
 # Query and re-rank using current memory centroid
-q ← μ_acc  # memory centroid from Section 4.4.1
+q ← l2_normalize(μ_acc)  # memory centroid from Section 4.4.1 (cached pre-reset)
 if |memory_stream| == 0:
     return []  # cold-start fallback (no retrieval candidates)
 results_vec ← topK(vector_search(q, k=kNN_size(F)))

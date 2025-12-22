@@ -84,32 +84,25 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
       return;
     }
 
-  // Section 7.6: Use memory centroid (μ_acc) or representative embedding (e_rep)
-  // as query vector for both initial retrieval and re-ranking.
-  const Eigen::VectorXf *q_ptr = nullptr;
-  const auto &rep = context.GetRepresentativeEmbedding ();
-  if (rep.has_value () && rep->size () > 0)
+  // Section 7.6: Use the current accumulator centroid (μ_acc) as query.
+  // Cache prior to any accumulator reset to keep retrieval grounded in the
+  // current unit's evolving context.
+  auto acc_it = p_ctx.accumulator_states.find (signal.source_id);
+  if (acc_it == p_ctx.accumulator_states.end ()
+      || acc_it->second.mu_acc.size () == 0)
     {
-      q_ptr = &(*rep);
+      return;
     }
-  else
-    {
-      auto acc_it = p_ctx.accumulator_states.find (signal.source_id);
-      if (acc_it != p_ctx.accumulator_states.end ()
-          && acc_it->second.n_signals > 0 && acc_it->second.mu_acc.size () > 0)
-        {
-          q_ptr = &acc_it->second.mu_acc;
-        }
-      else
-        {
-          return;
-        }
-    }
-  const Eigen::VectorXf &q = *q_ptr;
+  Eigen::VectorXf q = acc_it->second.mu_acc;
 
   if (q.size () == 0)
     {
       return;
+    }
+  const float q_norm = q.norm ();
+  if (q_norm > 0.0f)
+    {
+      q /= q_norm;
     }
 
   const int k = std::max (1, core::MaxResults (cfg.focus));
@@ -337,6 +330,19 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
 
   if (!fetched_any)
     {
+      for (auto &s : seeds)
+        {
+          if (s.vec.size () == q.size () && s.vec.size () > 0)
+            {
+              s.score = core::CosineSimilarity (q, s.vec);
+            }
+        }
+      std::sort (seeds.begin (), seeds.end (),
+                 [] (const Scored &a, const Scored &b) {
+                   return a.score > b.score;
+                 });
+
+      int added_seeds = 0;
       for (const auto &s : seeds)
         {
           if (stored_id.has_value () && s.embedding_id == *stored_id)
@@ -352,6 +358,11 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
               continue;
             }
           out.emplace (s.embedding_id, s.vec);
+          ++added_seeds;
+          if (added_seeds >= k)
+            {
+              break;
+            }
         }
       context.SetRetrievedMemoryEmbeddings (std::move (out));
 

@@ -130,6 +130,7 @@ hysteresis ← update_hysteresis(...)
 # Accumulator + boundary
 update_accumulator(...)
 boundary_score ← compute_boundary_score(...)
+spike_bypass ← check_spike_bypass(score_t, θ_dynamic, mem_maturity, coherence_t)
 should_flush ← boundary_decision(boundary_score, time_caps, spike_bypass)
 θ_memory ← θ_dynamic × M_write_refrac
 write_memory ← force_write OR (should_flush AND (S_window > θ_memory))
@@ -137,7 +138,7 @@ write_memory ← force_write OR (should_flush AND (S_window > θ_memory))
 
 # Post-write and retrieval (q_retrieval captured before any reset)
 if write_memory: commit_memory_unit(); last_write_ts ← now_ms()
-q_retrieval ← μ_acc  # cache current-unit query
+q_retrieval ← l2_normalize(μ_acc)  # cache current-unit query
 streaming_pacing_check()
 graph_retrieval(q_retrieval)
 update_rate_state(Δwrites)
@@ -168,7 +169,8 @@ The normative execution order for a single timestep t:
 8.  **Execute Memory Accumulation:**
     *   Update accumulator (`drift_acc`, `s_max`, etc.).
     *   Compute `boundary_score` and `should_flush`.
-    *   Check `spike_bypass`.
+    *   Check `spike_bypass` using the effective spike margin scaled by
+        `mem_maturity` and `coherence_t`.
     *   Compute `S_window` and `θ_memory`.
     *   Decide `write_memory`.
 9.  **Post-Write Updates and Retrieval:**

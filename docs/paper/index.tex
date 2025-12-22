@@ -447,11 +447,12 @@ weight\_surprise) are control parameters; w}} variables (e.g.,
 w\_relevance, w\_mismatch, \ldots{} w\_arousal) are composite-score
 blender weights.
 
-\textbf{Drift naming note:} \texttt{drift\_acc} tracks
-within-accumulator centroid drift (context drift used for boundary
-decisions); \texttt{drift\_accum} tracks cumulative per-signal embedding
-drift used for interrupt refractory pressure. Treat these as distinct
-signals.
+\textbf{Drift naming note:} \texttt{drift\_step\_t} (also called
+\emph{drift\_increment}) is the instantaneous per-signal cosine distance
+between x\_t and x\_\{t−1\}. \texttt{drift\_acc} accumulates
+drift\_step\_t within the current memory unit for boundary decisions;
+\texttt{drift\_accum} tracks cumulative per-signal embedding drift used
+for interrupt refractory pressure. Treat these as distinct signals.
 
 \textbf{Time-index convention:} Per-step computed values use a
 \texttt{\_t} suffix (e.g., score\_t, theta\_dynamic\_t). Retained state
@@ -495,16 +496,16 @@ step, append score\_t to score\_stream. Any score lookbacks operate on
 score\_stream.
 
 \textbf{memory\_stream:} The stream of written memory representatives
-(e.g., e\_rep/μ\_acc for completed units) used for retrieval and
-interrupt-gate context. Sections that reference
-recent\_memory\_centroids operate on memory\_stream.
+(e\_rep for completed units) used for retrieval and focus-spread
+computations.
 
 \textbf{recent\_memory\_centroids:} A bounded deque of recent memory
-representatives used by the interrupt gate.
+centroids (μ\_acc) used by the interrupt gate.
 
 \begin{verbatim}
 win_mem_ctx(T) = round(lerp(4, 32, T))  # max memories in interrupt context
-On successful write_memory: recent_memory_centroids.append(e_rep); recent_memory_centroids ← tail(recent_memory_centroids, win_mem_ctx(T))
+On successful write_memory: recent_memory_centroids.append(l2_normalize(μ_acc));
+recent_memory_centroids ← tail(recent_memory_centroids, win_mem_ctx(T))
 \end{verbatim}
 
 \subsection{The Three-Knob Philosophy}\label{the-three-knob-philosophy}
@@ -973,21 +974,22 @@ Values near 1 indicate diffuse attention; values near 0 indicate
 concentrated attention. The effective Focus is further modulated: F\_eff
 ← F\_eff × (1 − focus\_spread\_t).
 
-\subsubsection{Trajectory Drift}\label{trajectory-drift}
+\subsubsection{Instantaneous Drift}\label{instantaneous-drift}
 
-Drift measures directional change in context centroids:
+Drift measures the instantaneous step between consecutive signals rather
+than a smoothed centroid lag:
 
 \begin{verbatim}
-k_ctx(T) = round(lerp(3, 10, T))  # step lag for drift
-ctx_t = signal_stream[t − n_ctx(T) + 1 : t]  # inclusive end
-ctx_{t−k} = signal_stream[t − k_ctx(T) − n_ctx(T) + 1 : t − k_ctx(T)]
-drift_vec_t ← l2_normalize(mean(ctx_t)) −
-              l2_normalize(mean(ctx_{t−k}))
-drift_mag_t ← ‖drift_vec_t‖
+if x_{t−1} is unset:
+    drift_step_t ← 0
+else:
+    drift_step_t ← cosine_dist(x_t, x_{t−1})  # 1 − cos(·), range [0, 2]
+drift_mag_t ← drift_step_t
 \end{verbatim}
 
-Since both centroids are unit-normalized, drift\_mag\_t ∈ {[}0, 2{]}. A
-threshold defines an informational drift-boundary signal:
+This uses the current signal velocity in embedding space, ensuring drift
+responds immediately to context shifts. A threshold defines an
+informational drift-boundary signal:
 
 \begin{verbatim}
 drift_threshold ← lerp(0.10, 0.35, T)
@@ -997,6 +999,9 @@ drift_boundary_t ← (drift_mag_t > drift_threshold)
 Normative note (MUST): drift\_boundary\_t is informational and MUST NOT
 trigger a memory flush on its own. Memory flush decisions are defined by
 should\_flush in Section~\ref{sec-boundary}.
+
+The instantaneous drift\_step\_t also informs boundary pressure and
+focus-width feedback.
 
 \subsubsection{Real-Time Prediction Error
 (EMA)}\label{real-time-prediction-error-ema}
@@ -1472,7 +1477,7 @@ acc_signals_window ← tail(acc_signals_window, win_coh(T))
 
 μ_acc ← (n × μ_acc + x_t) / (n + 1)
 n ← n + 1
-drift_acc ← drift_acc + (drift_mag_t / 2)  # accumulate normalized context-centroid drift (drift_mag_t ∈ [0,2])
+drift_acc ← drift_acc + (drift_mag_t / 2)  # accumulate normalized instantaneous drift (drift_mag_t ∈ [0,2])
 s_sum ← s_sum + score_t
 emo_max ← max(emo_max, emotion_intensity_t)
 arousal_sum ← arousal_sum + arousal_t
@@ -1484,16 +1489,13 @@ last_signal_ts ← now_ms()  # update timestamp for next gap calculation (ms)
 \subsubsection{Hybrid Drift and Coherence
 Tracking}\label{sec-drift-coherence}
 
-Boundary detection operates on the \textbf{current unflushed memory
-centroid} rather than the raw signal, keeping segmentation tied to the
-evolving thought unit:
+Boundary detection combines instantaneous drift with within-memory
+coherence tied to the evolving centroid μ\_acc:
 
 \begin{verbatim}
 ε_noise(T) = lerp(0.01, 0.05, 1 − T)  # stability-derived noise floor
-# Use centroid drift (μ_acc) instead of per-signal drift
-mu_prev ← mu_acc_{t−1}
-mu_curr ← mu_acc_t
-d_step ← max(1 − cos(mu_curr, mu_prev) − ε_noise(T), 0)
+# Use instantaneous drift_step_t for boundary velocity
+d_step ← max(drift_step_t − ε_noise(T), 0)
 eta_prev ← eta_acc  # baseline before updating EWMA
 \end{verbatim}
 
@@ -1501,6 +1503,7 @@ Memory coherence tracks similarity within the current memory
 accumulation window (range {[}−1, 1{]} from mean cosine):
 
 \begin{verbatim}
+mu_curr ← μ_acc  # current accumulator centroid
 current_window ← acc_signals_window  # embeddings from the current unit before mu_curr
 if |current_window| == 0:
     coherence_curr ← 1.0  # empty-window fallback
@@ -1556,9 +1559,20 @@ boundary_score ← clamp(boundary_score, 0, 1)
 Boundary threshold and limits:
 
 \begin{verbatim}
-b_thresh(F, S) = lerp(0.4, 0.7, F) × lerp(1.1, 0.9, S)
+b_thresh(F, S) = lerp(0.48, 0.66, F) × lerp(1.1, 0.9, S)
 max_mem_time(T) = lerp(30, 120, T)  # seconds
 max_mem_drift(S) = lerp(0.8, 2.0, S)  # cumulative drift cap
+\end{verbatim}
+
+Pressure-capacity ratio (continuous flush trigger derived from knobs):
+
+\begin{verbatim}
+capacity_scale(T) = (1 + T)^2  # higher stability = larger capacity
+capacity ← max_mem_drift(S) × capacity_scale(T)
+pressure ← drift_acc × (1 + S)
+saturation_ratio ← pressure / max(capacity, ε)
+k_flush(S,T) = k_surprise(S,T)
+pressure_score ← sigmoid((saturation_ratio − 1) × k_flush(S,T))
 \end{verbatim}
 
 Trigger memory flush when:
@@ -1567,7 +1581,7 @@ Trigger memory flush when:
 mem_elapsed ← now_s() − to_s(t_start)
 should_flush = (boundary_score > b_thresh(F, S)) OR
                (mem_elapsed > max_mem_time(T)) OR
-               (drift_acc > max_mem_drift(S))
+               (pressure_score > b_thresh(F, S))
 \end{verbatim}
 
 where signal\_gap\_s = now\_s() − to\_s(last\_signal\_ts) is computed at
@@ -1584,7 +1598,11 @@ capturing preceding context as a coherent memory unit:
 
 \begin{verbatim}
 spike_margin(S,T) = lerp(0.2, 0.5, T) × lerp(1.2, 0.8, S)  # above θ_dynamic
-spike_bypass = score_t > (θ_dynamic + spike_margin(S,T))
+mem_tau(T) = win_mem_ctx(T)
+mem_maturity ← 1 − exp(−n / max(mem_tau(T), 1))  # n = signals in current unit
+coherence_scale ← 1 + (1 − T) × clamp(coherence_t, 0, 1)
+spike_margin_eff ← spike_margin(S,T) × (1 + (1 − mem_maturity)) × coherence_scale
+spike_bypass = score_t > (θ_dynamic + spike_margin_eff)
 force_write ← false
 \end{verbatim}
 
@@ -1596,8 +1614,10 @@ if spike_bypass:
     force_write = true   # bypass S_window > θ_memory
 \end{verbatim}
 
-This ensures flashbulb moments capture their surrounding context rather
-than creating isolated micro-memories.
+This keeps flashbulb moments intact while preventing early or highly
+coherent windows from fragmenting into micro-memories. As the unit
+matures, spike bypass becomes easier, and low coherence reduces the
+effective margin.
 
 \subsubsection{Window Score and
 Refractory}\label{window-score-and-refractory}
@@ -1651,8 +1671,8 @@ e_rep ← l2_normalize(ρ(F) × μ_acc + (1 − ρ(F)) × e_peak)
 
 On write: store e\_rep with metadata \{n, s\_max, s\_avg, drift\_acc,
 mem\_elapsed, s\_emotion\_max=emo\_max, s\_arousal\_avg=arousal\_sum /
-max(n, 1)\}. Append e\_rep to memory\_stream and
-recent\_memory\_centroids. Reset accumulator for next unit.
+max(n, 1)\}. Append e\_rep to memory\_stream and l2\_normalize(μ\_acc)
+to recent\_memory\_centroids. Reset accumulator for next unit.
 
 \section{Reinforcement and Decay Dynamics}\label{sec-reinforcement}
 
@@ -1755,6 +1775,10 @@ for each used memory m:
         attention_width_t *= (1 − βF_base)
     else:
         attention_width_t *= (1 + βF_base)
+# Drift-responsive dilation + restorative pull to prior
+dilation_force ← S × (1 − T) × drift_step_t
+restoring_force ← F × (attention_width_prior − attention_width_t)
+attention_width_t ← attention_width_t + dilation_force + restoring_force
 weight_relevance ← clamp(weight_relevance_t, 0, 1)
 attention_width_t ← clamp(attention_width_t,
                           attention_width_min, attention_width_max)
@@ -1762,7 +1786,9 @@ attention_width ← attention_width_t
 \end{verbatim}
 
 Positive contextual gain narrows attention and boosts relevance
-weighting; negative gain widens attention to explore alternatives.
+weighting; negative gain widens attention to explore alternatives. The
+drift\_step\_t term is the instantaneous drift signal from
+Section~\ref{sec-structural-metrics}.
 
 \subsubsection{Sensitivity Feedback}\label{sensitivity-feedback}
 
@@ -2280,14 +2306,15 @@ for i in range(len(temporal_order) − 1):
 \subsection{Graph-Augmented Retrieval}\label{graph-augmented-retrieval}
 
 Retrieval combines vector similarity with graph expansion. The query
-vector is the \textbf{current accumulator centroid} (μ\_acc), which
-aggregates the embeddings of the signals observed so far in the
-unflushed memory. This makes retrieval responsive to the evolving
-thought unit rather than any single micro‑signal.
+vector is the \textbf{current accumulator centroid} (μ\_acc),
+L2‑normalized for vector search, which aggregates the embeddings of the
+signals observed so far in the unflushed memory. This makes retrieval
+responsive to the evolving thought unit rather than any single
+micro‑signal.
 
 \begin{verbatim}
 # Query and re-rank using current memory centroid
-q ← μ_acc  # memory centroid from Section 4.4.1
+q ← l2_normalize(μ_acc)  # memory centroid from Section 4.4.1 (cached pre-reset)
 if |memory_stream| == 0:
     return []  # cold-start fallback (no retrieval candidates)
 results_vec ← topK(vector_search(q, k=kNN_size(F)))
@@ -2366,8 +2393,8 @@ embeddings:
 
 \begin{verbatim}
 # Context window contains recent memory centroids, not individual signals
-ctx_window ← recent_memory_centroids  # bounded deque of recent memory representatives (e_rep)
-q_retrieval ← μ_acc  # accumulator centroid query
+ctx_window ← recent_memory_centroids  # bounded deque of recent memory centroids (μ_acc)
+q_retrieval ← l2_normalize(μ_acc)  # accumulator centroid query
 included_set ← {embedding(m) | m already injected into the current context window}
 \end{verbatim}
 
@@ -2971,6 +2998,7 @@ hysteresis ← update_hysteresis(...)
 # Accumulator + boundary
 update_accumulator(...)
 boundary_score ← compute_boundary_score(...)
+spike_bypass ← check_spike_bypass(score_t, θ_dynamic, mem_maturity, coherence_t)
 should_flush ← boundary_decision(boundary_score, time_caps, spike_bypass)
 θ_memory ← θ_dynamic × M_write_refrac
 write_memory ← force_write OR (should_flush AND (S_window > θ_memory))
@@ -2978,7 +3006,7 @@ write_memory ← force_write OR (should_flush AND (S_window > θ_memory))
 
 # Post-write and retrieval (q_retrieval captured before any reset)
 if write_memory: commit_memory_unit(); last_write_ts ← now_ms()
-q_retrieval ← μ_acc  # cache current-unit query
+q_retrieval ← l2_normalize(μ_acc)  # cache current-unit query
 streaming_pacing_check()
 graph_retrieval(q_retrieval)
 update_rate_state(Δwrites)
@@ -3052,7 +3080,8 @@ The normative execution order for a single timestep t:
   \item
     Compute \texttt{boundary\_score} and \texttt{should\_flush}.
   \item
-    Check \texttt{spike\_bypass}.
+    Check \texttt{spike\_bypass} using the effective spike margin scaled
+    by \texttt{mem\_maturity} and \texttt{coherence\_t}.
   \item
     Compute \texttt{S\_window} and \texttt{θ\_memory}.
   \item

@@ -993,9 +993,9 @@ BoundaryWeightGap (double T)
 inline double
 BoundaryThreshold (double F, double S)
 {
-  // b_thresh(F, S) = lerp(0.4, 0.7, F) × lerp(1.1, 0.9, S)
+  // b_thresh(F, S) = lerp(0.48, 0.66, F) × lerp(1.1, 0.9, S)
   // Higher focus = stricter boundary; higher sensitivity = looser boundary
-  return Lerp (0.4, 0.7, Clamp (F, 0.0, 1.0))
+  return Lerp (0.48, 0.66, Clamp (F, 0.0, 1.0))
        * Lerp (1.1, 0.9, Clamp (S, 0.0, 1.0));
 }
 

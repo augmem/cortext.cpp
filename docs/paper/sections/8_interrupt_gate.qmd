@@ -43,8 +43,8 @@ The marginal utility (MU) of a candidate memory combines five factors. Context c
 
 ```
 # Context window contains recent memory centroids, not individual signals
-ctx_window ← recent_memory_centroids  # bounded deque of recent memory representatives (e_rep)
-q_retrieval ← μ_acc  # accumulator centroid query
+ctx_window ← recent_memory_centroids  # bounded deque of recent memory centroids (μ_acc)
+q_retrieval ← l2_normalize(μ_acc)  # accumulator centroid query
 included_set ← {embedding(m) | m already injected into the current context window}
 ```
 Fallback: if included_set is empty, treat redundancy(·, included_set) = 0 and overlap_star = −1.

@@ -276,7 +276,7 @@ boundary_score ← clamp(boundary_score, 0, 1)
 Boundary threshold and limits:
 
 ```
-b_thresh(F, S) = lerp(0.4, 0.7, F) × lerp(1.1, 0.9, S)
+b_thresh(F, S) = lerp(0.48, 0.66, F) × lerp(1.1, 0.9, S)
 max_mem_time(T) = lerp(30, 120, T)  # seconds
 max_mem_drift(S) = lerp(0.8, 2.0, S)  # cumulative drift cap
 ```
@@ -309,7 +309,11 @@ High-salience signals bypass accumulation and flush immediately, capturing prece
 
 ```
 spike_margin(S,T) = lerp(0.2, 0.5, T) × lerp(1.2, 0.8, S)  # above θ_dynamic
-spike_bypass = score_t > (θ_dynamic + spike_margin(S,T))
+mem_tau(T) = win_mem_ctx(T)
+mem_maturity ← 1 − exp(−n / max(mem_tau(T), 1))  # n = signals in current unit
+coherence_scale ← 1 + (1 − T) × clamp(coherence_t, 0, 1)
+spike_margin_eff ← spike_margin(S,T) × (1 + (1 − mem_maturity)) × coherence_scale
+spike_bypass = score_t > (θ_dynamic + spike_margin_eff)
 force_write ← false
 ```
 
@@ -321,7 +325,7 @@ if spike_bypass:
     force_write = true   # bypass S_window > θ_memory
 ```
 
-This ensures flashbulb moments capture their surrounding context rather than creating isolated micro-memories.
+This keeps flashbulb moments intact while preventing early or highly coherent windows from fragmenting into micro-memories. As the unit matures, spike bypass becomes easier, and low coherence reduces the effective margin.
 
 ### Window Score and Refractory
 
@@ -364,4 +368,4 @@ Representative embedding blends accumulator mean with peak:
 e_rep ← l2_normalize(ρ(F) × μ_acc + (1 − ρ(F)) × e_peak)
 ```
 
-On write: store e_rep with metadata {n, s_max, s_avg, drift_acc, mem_elapsed, s_emotion_max=emo_max, s_arousal_avg=arousal_sum / max(n, 1)}. Append e_rep to memory_stream and recent_memory_centroids. Reset accumulator for next unit.
+On write: store e_rep with metadata {n, s_max, s_avg, drift_acc, mem_elapsed, s_emotion_max=emo_max, s_arousal_avg=arousal_sum / max(n, 1)}. Append e_rep to memory_stream and l2_normalize(μ_acc) to recent_memory_centroids. Reset accumulator for next unit.

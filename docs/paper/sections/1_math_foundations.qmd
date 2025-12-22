@@ -80,13 +80,14 @@ The specification uses distinct streaming buffers:
 
 **score_stream:** The per-signal scalar score stream. At each step, append score_t to score_stream. Any score lookbacks operate on score_stream.
 
-**memory_stream:** The stream of written memory representatives (e.g., e_rep/μ_acc for completed units) used for retrieval and interrupt-gate context. Sections that reference recent_memory_centroids operate on memory_stream.
+**memory_stream:** The stream of written memory representatives (e_rep for completed units) used for retrieval and focus-spread computations.
 
-**recent_memory_centroids:** A bounded deque of recent memory representatives used by the interrupt gate.
+**recent_memory_centroids:** A bounded deque of recent memory centroids (μ_acc) used by the interrupt gate.
 
 ```
 win_mem_ctx(T) = round(lerp(4, 32, T))  # max memories in interrupt context
-On successful write_memory: recent_memory_centroids.append(e_rep); recent_memory_centroids ← tail(recent_memory_centroids, win_mem_ctx(T))
+On successful write_memory: recent_memory_centroids.append(l2_normalize(μ_acc));
+recent_memory_centroids ← tail(recent_memory_centroids, win_mem_ctx(T))
 ```
 
 ## The Three-Knob Philosophy
