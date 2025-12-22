@@ -304,7 +304,8 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
         }
     }
 
-  auto is_overlap_wm = [&p_ctx] (const Eigen::VectorXf &v, double dup_thresh) -> bool {
+  auto is_overlap_wm = [&p_ctx] (const Eigen::VectorXf &v,
+                                 double dup_thresh) -> bool {
     if (v.size () == 0)
       {
         return false;
@@ -327,6 +328,79 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
   const std::uint64_t write_exclusion_ts
       = context.GetWriteExclusionTs ().value_or (signal.timestamp);
   const auto stored_id = context.GetStoredEmbeddingId ();
+  const auto weights
+      = core::RetrievalDiversificationWeights (cfg.focus, cfg.sensitivity,
+                                               cfg.stability);
+  const double w_rel = weights.first;
+  const double w_div = weights.second;
+
+  auto filter_candidates = [&] (const std::vector<Scored> &candidates) {
+    std::vector<Scored> eligible;
+    eligible.reserve (candidates.size ());
+    for (const auto &s : candidates)
+      {
+        if (stored_id.has_value () && s.embedding_id == *stored_id)
+          {
+            continue;
+          }
+        if (s.created_at > 0
+            && static_cast<std::uint64_t> (s.created_at) >= write_exclusion_ts)
+          {
+            continue;
+          }
+        if (is_overlap_wm (s.vec, dup_thresh))
+          {
+            continue;
+          }
+        eligible.push_back (s);
+      }
+    return eligible;
+  };
+
+  auto select_diversified = [&] (const std::vector<Scored> &candidates, int k) {
+    std::vector<Scored> selected;
+    if (candidates.empty () || k <= 0)
+      {
+        return selected;
+      }
+    const size_t n = candidates.size ();
+    std::vector<bool> used (n, false);
+    selected.reserve (std::min (n, static_cast<size_t> (k)));
+
+    for (int iter = 0; iter < k; ++iter)
+      {
+        double best_score = -1e9;
+        int best_idx = -1;
+        for (size_t i = 0; i < n; ++i)
+          {
+            if (used[i])
+              {
+                continue;
+              }
+            const double relevance = std::max (0.0, candidates[i].score);
+            double max_redundancy = 0.0;
+            for (const auto &sel : selected)
+              {
+                const double sim
+                    = core::CosineSimilarity (candidates[i].vec, sel.vec);
+                max_redundancy = std::max (max_redundancy, std::max (0.0, sim));
+              }
+            const double mmr = w_rel * relevance - w_div * max_redundancy;
+            if (mmr > best_score)
+              {
+                best_score = mmr;
+                best_idx = static_cast<int> (i);
+              }
+          }
+        if (best_idx < 0)
+          {
+            break;
+          }
+        used[best_idx] = true;
+        selected.push_back (candidates[best_idx]);
+      }
+    return selected;
+  };
 
   if (!fetched_any)
     {
@@ -337,40 +411,19 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
               s.score = core::CosineSimilarity (q, s.vec);
             }
         }
-      std::sort (seeds.begin (), seeds.end (),
-                 [] (const Scored &a, const Scored &b) {
-                   return a.score > b.score;
-                 });
-
-      int added_seeds = 0;
-      for (const auto &s : seeds)
+      auto eligible = filter_candidates (seeds);
+      auto selected = select_diversified (eligible, k);
+      for (const auto &s : selected)
         {
-          if (stored_id.has_value () && s.embedding_id == *stored_id)
-            {
-              continue;
-            }
-          if (s.created_at > 0 && static_cast<std::uint64_t> (s.created_at) >= write_exclusion_ts)
-            {
-              continue;
-            }
-          if (is_overlap_wm (s.vec, dup_thresh))
-            {
-              continue;
-            }
           out.emplace (s.embedding_id, s.vec);
-          ++added_seeds;
-          if (added_seeds >= k)
-            {
-              break;
-            }
         }
       context.SetRetrievedMemoryEmbeddings (std::move (out));
 
       // Create reinforcement edges for co-retrieved seeds
       {
         std::vector<long long> seed_mem_ids;
-        seed_mem_ids.reserve (seeds.size ());
-        for (const auto &s : seeds)
+        seed_mem_ids.reserve (selected.size ());
+        for (const auto &s : selected)
           {
             if (s.memory_id > 0)
               {
@@ -385,31 +438,11 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
       return;
     }
 
-  std::sort (scored.begin (), scored.end (),
-             [] (const Scored &a, const Scored &b) {
-               return a.score > b.score;
-             });
-  int added = 0;
-  for (const auto &s : scored)
+  auto eligible = filter_candidates (scored);
+  auto selected = select_diversified (eligible, k);
+  for (const auto &s : selected)
     {
-      if (stored_id.has_value () && s.embedding_id == *stored_id)
-        {
-          continue;
-        }
-      if (s.created_at > 0 && static_cast<std::uint64_t> (s.created_at) >= write_exclusion_ts)
-        {
-          continue;
-        }
-      if (is_overlap_wm (s.vec, dup_thresh))
-        {
-          continue;
-        }
       out.emplace (s.embedding_id, s.vec);
-      ++added;
-      if (added >= k)
-        {
-          break;
-        }
     }
 
   context.SetRetrievedMemoryEmbeddings (std::move (out));
@@ -419,8 +452,8 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
   // retrieved together.
   {
     std::vector<long long> retrieved_mem_ids;
-    retrieved_mem_ids.reserve (scored.size ());
-    for (const auto &s : scored)
+    retrieved_mem_ids.reserve (selected.size ());
+    for (const auto &s : selected)
       {
         if (s.memory_id > 0)
           {
@@ -437,10 +470,12 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
     telemetry::Attribute::Double ("dup_thresh", dup_thresh),
     telemetry::Attribute::Int64 ("write_exclusion_ts", static_cast<int64_t> (write_exclusion_ts)),
     telemetry::Attribute::Bool ("stored_id_present", stored_id.has_value ()),
-    telemetry::Attribute::Int64 ("selected_count", static_cast<int64_t> (added)),
+    telemetry::Attribute::Int64 ("selected_count", static_cast<int64_t> (selected.size ())),
     telemetry::Attribute::Int64 ("seed_count", static_cast<int64_t> (seeds.size ())),
     telemetry::Attribute::Int64 ("expansion_depth", static_cast<int64_t> (depth)),
-    telemetry::Attribute::Int64 ("final_candidate_count", static_cast<int64_t> (scored.size ()))
+    telemetry::Attribute::Int64 ("final_candidate_count", static_cast<int64_t> (scored.size ())),
+    telemetry::Attribute::Double ("retrieval_w_rel", w_rel),
+    telemetry::Attribute::Double ("retrieval_w_div", w_div)
   });
 }
 

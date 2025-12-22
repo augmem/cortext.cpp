@@ -2,6 +2,7 @@
 
 #include "cortext/core/algorithms.hpp"
 #include <cmath>
+#include <utility>
 
 namespace cortext::core
 {
@@ -119,6 +120,25 @@ GraphDepth (double T)
 {
   // graph_depth(T): small traversal depth, in [1,2].
   return static_cast<int> (std::round (Lerp (2.0, 1.0, Clamp (T, 0.0, 1.0))));
+}
+
+inline std::pair<double, double>
+RetrievalDiversificationWeights (double F, double S, double T)
+{
+  const double f = Clamp (F, 0.0, 1.0);
+  const double s = Clamp (S, 0.0, 1.0);
+  const double t = Clamp (T, 0.0, 1.0);
+
+  const double w_rel_raw = Lerp (0.55, 0.90, f) * Lerp (1.0, 0.85, s)
+                           * Lerp (1.0, 0.90, t);
+  const double w_div_raw = Lerp (0.45, 0.10, f) * Lerp (0.80, 1.20, s)
+                           * Lerp (0.90, 0.70, t);
+  const double sum = w_rel_raw + w_div_raw;
+  if (sum <= 0.0)
+    {
+      return { 1.0, 0.0 };
+    }
+  return { w_rel_raw / sum, w_div_raw / sum };
 }
 
 inline int

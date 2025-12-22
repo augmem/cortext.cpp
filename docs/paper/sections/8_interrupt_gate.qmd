@@ -141,7 +141,7 @@ This logic suppresses low-drift interrupts unless the marginal utility substanti
 
 ## Streaming Pacing
 
-Streaming retrieval is gated by cumulative drift rate within the accumulation unit. Retrieval checks trigger when drift exceeds threshold or at boundaries. Retrieval uses q_retrieval (the accumulator centroid) captured before any accumulator reset for this step. Retrieval returns a candidate pool already filtered by write‑exclusion and WM‑overlap rules; the interrupt gate then applies novelty/utility thresholds and redundancy penalties.
+Streaming retrieval is gated by cumulative drift rate within the accumulation unit. Retrieval checks trigger when drift exceeds threshold or at boundaries. Retrieval uses q_retrieval (the accumulator centroid) captured before any accumulator reset for this step. Retrieval returns a candidate pool already filtered by write‑exclusion and WM‑overlap rules and diversified (MMR‑style); the interrupt gate then applies novelty/utility thresholds and redundancy penalties.
 
 ```
 # Pacing tracks drift within current memory formation

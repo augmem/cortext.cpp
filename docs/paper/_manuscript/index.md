@@ -1936,12 +1936,24 @@ to the evolving thought unit rather than any single micro‑signal.
         return results_vec  # deterministic fallback, skip expansion
     expanded_nodes ← graph.traverse(seed_nodes, depth=graph_depth(T), min_edge_weight=min_edge_weight(F))
     combined ← union(seed_nodes, expanded_nodes)
-    re_ranked ← sort_by(cos(q, embeddings(combined)))  # re-rank by memory centroid
-    # Exclude current-unit writes and WM overlaps before returning
     dup_thresh = lerp(0.96, 0.88, F) × (0.98 + 0.02T)
-    eligible ← {m ∈ re_ranked | m.created_at < write_exclusion_ts}
+    eligible ← {m ∈ combined | m.created_at < write_exclusion_ts}
     eligible ← {m ∈ eligible | max_{w∈WM} cos(m.embedding, w) < dup_thresh}
-    return eligible
+
+    # Diversified re-rank (MMR-style) to avoid redundant retrievals
+    w_rel_raw = lerp(0.55, 0.90, F) × lerp(1.0, 0.85, S) × lerp(1.0, 0.90, T)
+    w_div_raw = lerp(0.45, 0.10, F) × lerp(0.80, 1.20, S) × lerp(0.90, 0.70, T)
+    [w_rel, w_div] = normalize([w_rel_raw, w_div_raw])
+
+    selected ← []
+    while |selected| < k AND |eligible| > 0:
+        m* ← argmax_{m ∈ eligible} [
+                w_rel × max(0, cos(q, m)) −
+                w_div × max_{s∈selected} max(0, cos(m, s))
+             ]
+        selected.append(m*)
+        eligible.remove(m*)
+    return selected
 
 Graph expansion uses recursive traversal with depth limits to find
 related context that pure vector search might miss. Using the memory
@@ -2103,9 +2115,9 @@ Streaming retrieval is gated by cumulative drift rate within the
 accumulation unit. Retrieval checks trigger when drift exceeds threshold
 or at boundaries. Retrieval uses q_retrieval (the accumulator centroid)
 captured before any accumulator reset for this step. Retrieval returns a
-candidate pool already filtered by write‑exclusion and WM‑overlap rules;
-the interrupt gate then applies novelty/utility thresholds and
-redundancy penalties.
+candidate pool already filtered by write‑exclusion and WM‑overlap rules
+and diversified (MMR‑style); the interrupt gate then applies
+novelty/utility thresholds and redundancy penalties.
 
     # Pacing tracks drift within current memory formation
 
