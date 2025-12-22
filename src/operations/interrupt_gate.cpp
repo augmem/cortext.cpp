@@ -282,14 +282,14 @@ ComputeMniGateDecision::Execute (OperationContext &context, Transaction &tx) con
       return;
     }
 
-  // Build included set from WM slots
-  std::vector<Eigen::VectorXf> included_vecs;
-  included_vecs.reserve (p_ctx.wm_slots.size ());
+  // Build WM set (used for duplicate suppression and overlap checks)
+  std::vector<Eigen::VectorXf> wm_vecs;
+  wm_vecs.reserve (p_ctx.wm_slots.size ());
   for (const auto &slot : p_ctx.wm_slots)
     {
       if (slot.embedding.size () > 0)
         {
-          included_vecs.push_back (slot.embedding);
+          wm_vecs.push_back (slot.embedding);
         }
     }
 
@@ -314,9 +314,9 @@ ComputeMniGateDecision::Execute (OperationContext &context, Transaction &tx) con
         }
       ctx_vecs.push_back (mu_acc);
     }
-  if (ctx_vecs.empty () && !included_vecs.empty ())
+  if (ctx_vecs.empty () && !wm_vecs.empty ())
     {
-      ctx_vecs = included_vecs;
+      ctx_vecs = wm_vecs;
     }
   if (ctx_vecs.empty ())
     {
@@ -332,6 +332,14 @@ ComputeMniGateDecision::Execute (OperationContext &context, Transaction &tx) con
     }
 
   const Eigen::VectorXf ctx_centroid = ComputeCentroid (ctx_vecs);
+
+  // Use WM + recent memory centroids as the inclusion set for redundancy/coverage.
+  std::vector<Eigen::VectorXf> included_vecs = wm_vecs;
+  if (!ctx_vecs.empty ())
+    {
+      included_vecs.insert (included_vecs.end (), ctx_vecs.begin (),
+                            ctx_vecs.end ());
+    }
   const double coherence = Clamp01 (context.GetCoherence ());
   const double coherence_penalty = Clamp01 (constants::kNormalizedMax - coherence);
   const double surprisal
@@ -390,12 +398,18 @@ ComputeMniGateDecision::Execute (OperationContext &context, Transaction &tx) con
       = 1.0 + k_refrac * std::exp (-Delta / std::max (kExpEpsilon, tau_refrac));
 
   const double tau_novelty_eff = tau_novelty * M_refrac;
-  const double tau_m_eff = tau_mu * M_refrac;
+  const double win_coh = std::max (1.0, static_cast<double> (core::WinCoh (T)));
+  const double acc_maturity
+      = Clamp01 (static_cast<double> (acc.n_signals) / win_coh);
+  const double maturity_scale
+      = 1.0 + (1.0 - acc_maturity) * core::Lerp (0.4, 1.0, T);
+  const double tau_m_eff = tau_mu * M_refrac * maturity_scale;
 
   // Boundary multiplier
   const double boundary_mult
       = cortext::core::Lerp (kBoundaryFMin, kBoundaryFMax, F)
-        * cortext::core::Lerp (kBoundarySMin, kBoundarySMax, S);
+        * cortext::core::Lerp (kBoundarySMin, kBoundarySMax, S)
+        * cortext::core::Lerp (1.4, 0.6, T);
   const bool at_boundary = context.GetAtBoundary ();
 
   // Limit candidates to top K by relevance (Section 8.3)
@@ -440,6 +454,7 @@ ComputeMniGateDecision::Execute (OperationContext &context, Transaction &tx) con
   long long candidate_star_id = 0;
   Eigen::VectorXf candidate_star;
   bool has_candidate_star = false;
+  double best_novelty = 0.0;
 
   for (const auto &kv : candidates)
     {
@@ -454,12 +469,30 @@ ComputeMniGateDecision::Execute (OperationContext &context, Transaction &tx) con
         }
 
       const double sim_ctx = cortext::core::Map01 (CosSim (ctx_centroid, cand));
+
       const double redundancy = ComputeRedundancy (cand, included_vecs);
       double cov_gain = ComputeCoverageGain (ctx_centroid, cand, included_vecs);
       cov_gain = std::max (cov_gain, p_ctx.coverage_gain_floor);
 
+      double novelty_ctx = 1.0;
+      if (!ctx_vecs.empty ())
+        {
+          double max_sim_to_ctx = -1.0;
+          for (const auto &ctx_emb : ctx_vecs)
+            {
+              if (ctx_emb.size () == cand.size ())
+                {
+                  max_sim_to_ctx = std::max (max_sim_to_ctx, CosSim (cand, ctx_emb));
+                }
+            }
+          novelty_ctx = cortext::core::Clamp ((1.0 - max_sim_to_ctx) * 0.5,
+                                              constants::kNormalizedMin,
+                                              constants::kNormalizedMax);
+        }
+
+      const double surprise_bonus = surprisal * novelty_ctx * acc_maturity;
       const double mu = w_cov * cov_gain + w_rel * sim_ctx - w_red * redundancy
-                        - w_coh * coherence_penalty + w_surp * surprisal;
+                        - w_coh * coherence_penalty + w_surp * surprise_bonus;
 
       if (mu > best_mu)
         {
@@ -468,6 +501,7 @@ ComputeMniGateDecision::Execute (OperationContext &context, Transaction &tx) con
           candidate_star_id = kv.first;
           candidate_star = cand;
           has_candidate_star = true;
+          best_novelty = novelty_ctx;
         }
     }
 
@@ -484,34 +518,13 @@ ComputeMniGateDecision::Execute (OperationContext &context, Transaction &tx) con
       return;
     }
 
-  const double overlap_star = included_vecs.empty ()
+  const double overlap_star = wm_vecs.empty ()
                                   ? -1.0
-                                  : ComputeRawOverlap (candidate_star,
-                                                       included_vecs);
+                                  : ComputeRawOverlap (candidate_star, wm_vecs);
 
   // Section 8.3: Compute embedding novelty for candidate_star
   // Uses memory centroids (μ_acc) per Section 8.2
-  double novelty_star = 0.0;
-  const auto &ctx_window = p_ctx.recent_memory_centroids;
-  if (ctx_window.empty ())
-    {
-      novelty_star = 1.0;
-    }
-  else
-    {
-      double max_sim_to_ctx = -1.0;
-      for (const auto &ctx_emb : ctx_window)
-        {
-          if (ctx_emb.size () == candidate_star.size ())
-            {
-              const double sim = CosSim (candidate_star, ctx_emb);
-              max_sim_to_ctx = std::max (max_sim_to_ctx, sim);
-            }
-        }
-      novelty_star = cortext::core::Clamp ((1.0 - max_sim_to_ctx) * 0.5,
-                                           constants::kNormalizedMin,
-                                           constants::kNormalizedMax);
-    }
+  const double novelty_star = best_novelty;
 
   // Keep candidate ID list for LRU recording
   std::vector<long long> A;
@@ -571,6 +584,8 @@ ComputeMniGateDecision::Execute (OperationContext &context, Transaction &tx) con
     telemetry::Attribute::Double ("coherence", coherence),
     telemetry::Attribute::Double ("coherence_penalty", coherence_penalty),
     telemetry::Attribute::Double ("surprisal", surprisal),
+    telemetry::Attribute::Double ("acc_maturity", acc_maturity),
+    telemetry::Attribute::Double ("maturity_scale", maturity_scale),
     telemetry::Attribute::Double ("retrieval_thresh", retrieval_thresh),
     telemetry::Attribute::Double ("w_cov_raw", w_cov_raw),
     telemetry::Attribute::Double ("w_rel_raw", w_rel_raw),
@@ -603,7 +618,7 @@ ComputeMniGateDecision::Execute (OperationContext &context, Transaction &tx) con
     telemetry::Attribute::Bool ("mni_decision", allow_interrupt),
     telemetry::Attribute::Int64 ("wm_slots_count", static_cast<int64_t> (included_vecs.size ())),
     telemetry::Attribute::Double ("max_semantic_overlap", overlap_star),
-    telemetry::Attribute::Int64 ("ctx_window_size", static_cast<int64_t> (ctx_window.size ()))
+    telemetry::Attribute::Int64 ("ctx_window_size", static_cast<int64_t> (ctx_vecs.size ()))
   });
 }
 
