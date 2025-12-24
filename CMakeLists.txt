@@ -155,6 +155,7 @@ add_library(cortext
     src/operations/drift_accumulation.cpp
     src/operations/streaming_pacing.cpp
     # Section 4.4: Accumulator operations
+    src/operations/accumulator_scores.cpp
     src/operations/accumulator.cpp
     src/operations/accumulator_reset.cpp
     src/operations/spike_bypass.cpp

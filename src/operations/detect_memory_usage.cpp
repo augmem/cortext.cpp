@@ -12,6 +12,14 @@ DetectMemoryUsage::Execute (OperationContext &context, Transaction &tx) const
 {
   (void)tx;
   const auto &signal = context.GetSignal ();
+  const auto &p_ctx = context.GetProcessorContext ();
+  const Eigen::VectorXf *x_ptr = &signal.embedding;
+  auto acc_it = p_ctx.accumulator_states.find (signal.source_id);
+  if (acc_it != p_ctx.accumulator_states.end ()
+      && acc_it->second.mu_acc.size () > 0)
+    {
+      x_ptr = &acc_it->second.mu_acc;
+    }
 
   const auto &retrieved = context.GetRetrievedMemoryEmbeddings ();
   const bool interrupt_allowed = context.GetInterruptAllowed ();
@@ -42,9 +50,9 @@ DetectMemoryUsage::Execute (OperationContext &context, Transaction &tx) const
           = interrupt_allowed && selected_id.has_value ()
                 && (embedding_id == *selected_id);
       std::optional<double> contextual_gain = std::nullopt;
-      if (signal.embedding.size () > 0 && emb.size () == signal.embedding.size ())
+      if (x_ptr->size () > 0 && emb.size () == x_ptr->size ())
         {
-          contextual_gain = core::CosineSimilarity (signal.embedding, emb);
+          contextual_gain = core::CosineSimilarity (*x_ptr, emb);
         }
 
       events.push_back (

@@ -14,7 +14,16 @@ UpdateRecentContext::Execute (OperationContext &context,
   const auto &cfg = context.GetConfig ();
   const auto &signal = context.GetSignal ();
 
-  p_ctx.recent_context_embeddings.push_back (signal.embedding);
+  const auto it = p_ctx.accumulator_states.find (signal.source_id);
+  if (it != p_ctx.accumulator_states.end ()
+      && it->second.mu_acc.size () > 0)
+    {
+      p_ctx.recent_context_embeddings.push_back (it->second.mu_acc);
+    }
+  else
+    {
+      p_ctx.recent_context_embeddings.push_back (signal.embedding);
+    }
 
   const size_t context_window_size
       = static_cast<size_t> (core::NCtx (cfg.stability));

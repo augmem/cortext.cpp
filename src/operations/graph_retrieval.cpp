@@ -148,11 +148,17 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
       if (!core::DecodeFloatBlob (it_emb->second, q.size (), v))
         continue;
 
-      // sqlite-vec returns L2 distance; convert to similarity score.
-      double dist = 0.0;
-      if (it_dist != row.end () && it_dist->second.type () == typeid (double))
-        dist = std::any_cast<double> (it_dist->second);
-      const double sim = 1.0 / (1.0 + dist);
+      // Prefer cosine similarity for scoring to align with manuscript logic.
+      double sim = 0.0;
+      if (v.size () == q.size () && v.size () > 0)
+        {
+          sim = core::CosineSimilarity (q, v);
+        }
+      else if (it_dist != row.end () && it_dist->second.type () == typeid (double))
+        {
+          const double dist = std::any_cast<double> (it_dist->second);
+          sim = 1.0 / (1.0 + dist);
+        }
 
       // V2: Look up memory_id from memories table
       long long mem_id = 0;

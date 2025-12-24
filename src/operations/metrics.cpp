@@ -17,7 +17,15 @@ ComputeMetrics::Execute (OperationContext &context, Transaction &tx) const
   (void)tx;
   auto &p_ctx = context.GetProcessorContext ();
   const auto &cfg = context.GetConfig ();
-  const auto &x = context.GetSignal ().embedding;
+  const auto &signal = context.GetSignal ();
+  const Eigen::VectorXf *x_ptr = &signal.embedding;
+  auto acc_it = p_ctx.accumulator_states.find (signal.source_id);
+  if (acc_it != p_ctx.accumulator_states.end ()
+      && acc_it->second.mu_acc.size () > 0)
+    {
+      x_ptr = &acc_it->second.mu_acc;
+    }
+  const auto &x = *x_ptr;
   const double F = cfg.focus;
   const double S = cfg.sensitivity;
   const double T = cfg.stability;

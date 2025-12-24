@@ -99,7 +99,7 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
       // Section 4.4: Use representative embedding if available (memory write)
       const auto &rep_emb = context.GetRepresentativeEmbedding ();
       const Eigen::VectorXf &embedding_to_store
-          = rep_emb.has_value () ? *rep_emb : signal.embedding;
+          = rep_emb.has_value () ? *rep_emb : acc.mu_acc;
 
       // Convert embedding from Eigen to vector<float> for SQL storage
       const std::vector<float> emb_vec = EigenToFloatVec (embedding_to_store);

@@ -2,9 +2,9 @@
 
 Context definitions (used throughout Table 1 and structural metrics):
 ```
-recent_context ← tail(signal_stream, n_ctx(T))
+recent_context ← tail(signal_stream, n_ctx(T))  # signal_stream stores μ_acc
 if |recent_context| == 0:
-    μ_ctx ← 0_vector  # define cos(x_t, μ_ctx)=0 so map01(cos)=0.5
+    μ_ctx ← 0_vector  # define cos(μ_acc, μ_ctx)=0 so map01(cos)=0.5
 else:
     μ_ctx ← mean(recent_context)
 ```
@@ -12,18 +12,18 @@ else:
 ## Embedding-Derived Metrics
 
 ### Structural Coherence {#sec-struct-coherence}
-Structural coherence (coherence_struct) measures integration of the current signal with the broader context window. This metric is distinct from memory coherence (coherence_mem, defined in @sec-drift-coherence) which tracks within-memory similarity:
+Structural coherence (coherence_struct) measures integration of the current accumulator centroid with the broader context window. This metric is distinct from memory coherence (coherence_mem, defined in @sec-drift-coherence) which tracks within-memory similarity:
 
 ```
 coh_neutral(T) = lerp(0.45, 0.55, T)
 if |recent_context| < 2:
     coherence_struct_t ← coh_neutral(T)  # neutral, stability-derived
 else:
-    raw ← var([cos(x_t, c) for c in recent_context])
+    raw ← var([cos(μ_acc, c) for c in recent_context])
     coherence_struct_t ← 1 − clamp(raw, 0, 1)  # range [0, 1]
 ```
 
-High structural coherence (low variance in similarities) indicates the signal fits consistently with context. The effective Focus is modulated: F_eff = F × (0.5 + 0.5 × coherence_struct_t).
+High structural coherence (low variance in similarities) indicates the current accumulator centroid fits consistently with context. The effective Focus is modulated: F_eff = F × (0.5 + 0.5 × coherence_struct_t).
 
 **Effective Focus usage:** F_eff is a diagnostic modulation of Focus. Unless a formula explicitly references F_eff, the specification uses raw F (including all Table 1 metric formulas and knob-derived controls).
 
@@ -34,7 +34,7 @@ Focus spread quantifies the entropy of attention over nearest neighbors:
 ```
 k ← k_neighbors(T) = round(lerp(8, 32, T))
 ```
-Normative note (MUST): kNN_similarities MUST be computed by querying memory_stream with q = x_t and k = k_neighbors(T) (not recent_context).
+Normative note (MUST): kNN_similarities MUST be computed by querying memory_stream with q = μ_acc and k = k_neighbors(T) (not recent_context).
 ```
 if |memory_stream| == 0:
     focus_spread_t ← 0  # cold-start fallback
@@ -43,7 +43,7 @@ else:
     if k_eff < 2:
         focus_spread_t ← 0  # avoid degenerate entropy
     else:
-        kNN_similarities ← topK(vector_search(x_t, k=k_eff))
+        kNN_similarities ← topK(vector_search(μ_acc, k=k_eff))
         # attention_width sharpens or flattens similarities
         kNN_similarities ← clamp(kNN_similarities × (π / attention_width), −1, 1)
         p ← softmax(kNN_similarities)
@@ -54,17 +54,17 @@ Values near 1 indicate diffuse attention; values near 0 indicate concentrated at
 
 ### Instantaneous Drift
 
-Drift measures the instantaneous step between consecutive signals rather than a smoothed centroid lag:
+Drift measures the instantaneous step between consecutive accumulator centroids rather than a smoothed centroid lag:
 
 ```
 if x_{t−1} is unset:
     drift_step_t ← 0
 else:
-    drift_step_t ← cosine_dist(x_t, x_{t−1})  # 1 − cos(·), range [0, 2]
+    drift_step_t ← cosine_dist(μ_acc_t, μ_acc_{t−1})  # 1 − cos(·), range [0, 2]
 drift_mag_t ← drift_step_t
 ```
 
-This uses the current signal velocity in embedding space, ensuring drift responds immediately to context shifts. A threshold defines an informational drift-boundary signal:
+This uses the current centroid velocity in embedding space, ensuring drift responds immediately to context shifts. A threshold defines an informational drift-boundary signal:
 
 ```
 drift_threshold ← lerp(0.10, 0.35, T)
@@ -73,10 +73,11 @@ drift_boundary_t ← (drift_mag_t > drift_threshold)
 Normative note (MUST): drift_boundary_t is informational and MUST NOT trigger a memory flush on its own. Memory flush decisions are defined by should_flush in @sec-boundary.
 
 The instantaneous drift_step_t also informs boundary pressure and focus-width feedback.
+All other composite metrics in this section use the accumulator centroid μ_acc as the effective signal representation.
 
 ### Real-Time Prediction Error (EMA)
 
-We model real-time expectation using an exponential moving average (EMA) of the signal stream. The predictor state `x_pred_ema` represents the current expectation; low Stability (T) adapts quickly, high Stability adapts slowly.
+We model real-time expectation using an exponential moving average (EMA) of the accumulator centroid stream. The predictor state `x_pred_ema` represents the current expectation; low Stability (T) adapts quickly, high Stability adapts slowly.
 
 We treat orthogonal or anti-correlated vectors (cos ≤ 0) as maximum surprise.
 
@@ -86,13 +87,13 @@ err_ref(S) = lerp(0.25, 0.05, S)
 k_surprise(S,T) = lerp(6, 14, S) × lerp(1.1, 0.9, T)
 
 if x_pred_ema is unset:
-    x_pred_ema ← x_t  # initialize expectation
+    x_pred_ema ← μ_acc  # initialize expectation
     surprisal_t ← 0
 else:
-    prediction_error_t ← 1 − max(0, cos(x_t, x_pred_ema))
+    prediction_error_t ← 1 − max(0, cos(μ_acc, x_pred_ema))
     surprisal_t ← sigmoid((prediction_error_t − err_ref(S)) * k_surprise(S,T))
     x_pred_ema ← l2_normalize((1 − β_pred(T)) × x_pred_ema +
-                               β_pred(T) × x_t)
+                               β_pred(T) × μ_acc)
 ```
 
 This formulation captures prediction failure directly from the stream, without requiring an explicit kinematic trend model.
@@ -103,7 +104,7 @@ The system computes 12 metrics that blend into a composite write score:
 
 | Metric | Knob | Expression |
 | :--- | :--- | :--- |
-| Relevance | ↑F | `relevance_t = clamp(map01(cos(x_t, μ_ctx)) × (0.5 + 0.5F), 0, 1)` |
+| Relevance | ↑F | `relevance_t = clamp(map01(cos(μ_acc, μ_ctx)) × (0.5 + 0.5F), 0, 1)` |
 | Mismatch | ↓F, ↑S | `(1 − F) × S × novelty_t` |
 | Surprise | ↑S, ↓T | `surprisal_t × S × (1 − 0.5T)` |
 | Rarity | ↑F, ↓T | `rarity_t × (0.5 + 0.5F) × (1 − 0.2T)` |

@@ -58,6 +58,7 @@ Date: 2025-12-19
 - 2025-12-21: Audited state initialization/persistence appendix vs code; logged remaining cold-start/mismatch issues and doc ambiguity.
 - 2025-12-21: Clarified spec language in `docs/paper/sections` (effective Focus usage, drift_acc vs drift_accum naming, streaming pacing adjacency/max-wait rules, and coherence_prev default alignment in Appendix A).
 - 2025-12-21: Fixed remaining conformance gaps from the regenerated manuscript (blender order, uncertainty fallback scaling, spike bypass, drift accumulation on first signal, emotional/memory-strength fields, retrieval competition simplification, reconsolidation uncertainty bump removal, graph query fallback removal, cold-start mood timestamp, accumulator coherence load default).
+- 2025-12-22: One side effect of moving metrics/decisions to `μ_acc`: novelty and write rate drop. In a 100‑turn Topical‑Chat run (F=0.3, S=0.6, T=0.2), writes fell to 5/100 and interrupt rate went to 0. If this is too low, we’ll need to retune thresholds or add knob‑derived compensation for centroid smoothing.
 
 ## Findings (Draft, Ongoing)
 

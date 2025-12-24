@@ -217,11 +217,11 @@ parameters; w** variables (e.g., w_relevance, w_mismatch, … w_arousal)
 are composite-score blender weights.
 
 **Drift naming note:** `drift_step_t` (also called *drift_increment*) is
-the instantaneous per-signal cosine distance between x_t and x\_{t−1}.
-`drift_acc` accumulates drift_step_t within the current memory unit for
-boundary decisions; `drift_accum` tracks cumulative per-signal embedding
-drift used for interrupt refractory pressure. Treat these as distinct
-signals.
+the instantaneous cosine distance between consecutive accumulator
+centroids μ_acc(t) and μ_acc(t−1). `drift_acc` accumulates drift_step_t
+within the current memory unit for boundary decisions; `drift_accum`
+tracks cumulative centroid drift used for interrupt refractory pressure.
+Treat these as distinct signals.
 
 **Time-index convention:** Per-step computed values use a `_t` suffix
 (e.g., score_t, theta_dynamic_t). Retained state uses the bare name
@@ -252,9 +252,11 @@ three knobs, consistent with the human-memory objective.
 
 The specification uses distinct streaming buffers:
 
-**signal_stream:** The raw per-signal embedding stream x_t used for
-scoring, uncertainty estimation, threshold/rate updates, and accumulator
-updates. Any context slices operate on signal_stream.
+**signal_stream:** The per-step accumulator centroid stream (μ_acc after
+incorporating the current signal). This stream is used for scoring,
+uncertainty estimation, and threshold/rate updates; raw signal
+embeddings are tracked separately inside the accumulator for
+persistence.
 
 **score_stream:** The per-signal scalar score stream. At each step,
 append score_t to score_stream. Any score lookbacks operate on
@@ -431,14 +433,15 @@ receptive field in embedding space. High Focus produces narrow attention
 
 ### Dynamic Focus Update
 
-At each signal event t with input embedding x_t:
+At each signal event t with accumulator centroid μ_acc (the running
+centroid of the unflushed signal group):
 
-    recent_context ← tail(signal_stream, n_ctx(T))
+    recent_context ← tail(signal_stream, n_ctx(T))  # signal_stream stores μ_acc
     if |recent_context| == 0:
         μ_ctx ← 0_vector; observed_cosine ← 0  # map01(0)=0.5
     else:
         μ_ctx ← mean(recent_context)
-        observed_cosine ← cos(x_t, μ_ctx)
+        observed_cosine ← cos(μ_acc, μ_ctx)
     weight_relevance_t ← EWMA(weight_relevance,
                           map01(observed_cosine), α = α_F(t))
 
@@ -488,7 +491,7 @@ model are projected onto the valence-arousal plane:coordinates:
 
 The projection procedure:
 
-    raw_cos_c ← cos(x_t, centroids[c]) for each c ∈ C
+    raw_cos_c ← cos(μ_acc, centroids[c]) for each c ∈ C
     if all raw_cos_c ≤ 0:
         p_c ← uniform(1/6)  # ensures downstream mood update is well-defined
         emotion_intensity_t ← 0; valence_t ← 0.5; arousal_t ← 0
@@ -610,9 +613,9 @@ feedback mechanism
 
 Context definitions (used throughout Table 1 and structural metrics):
 
-    recent_context ← tail(signal_stream, n_ctx(T))
+    recent_context ← tail(signal_stream, n_ctx(T))  # signal_stream stores μ_acc
     if |recent_context| == 0:
-        μ_ctx ← 0_vector  # define cos(x_t, μ_ctx)=0 so map01(cos)=0.5
+        μ_ctx ← 0_vector  # define cos(μ_acc, μ_ctx)=0 so map01(cos)=0.5
     else:
         μ_ctx ← mean(recent_context)
 
@@ -621,8 +624,8 @@ Context definitions (used throughout Table 1 and structural metrics):
 ### Structural Coherence
 
 Structural coherence (coherence_struct) measures integration of the
-current signal with the broader context window. This metric is distinct
-from memory coherence (coherence_mem, defined in
+current accumulator centroid with the broader context window. This
+metric is distinct from memory coherence (coherence_mem, defined in
 <a href="#sec-drift-coherence" class="quarto-xref">Section 6.4.2</a>)
 which tracks within-memory similarity:
 
@@ -630,12 +633,13 @@ which tracks within-memory similarity:
     if |recent_context| < 2:
         coherence_struct_t ← coh_neutral(T)  # neutral, stability-derived
     else:
-        raw ← var([cos(x_t, c) for c in recent_context])
+        raw ← var([cos(μ_acc, c) for c in recent_context])
         coherence_struct_t ← 1 − clamp(raw, 0, 1)  # range [0, 1]
 
 High structural coherence (low variance in similarities) indicates the
-signal fits consistently with context. The effective Focus is modulated:
-F_eff = F × (0.5 + 0.5 × coherence_struct_t).
+current accumulator centroid fits consistently with context. The
+effective Focus is modulated: F_eff = F × (0.5 + 0.5 ×
+coherence_struct_t).
 
 **Effective Focus usage:** F_eff is a diagnostic modulation of Focus.
 Unless a formula explicitly references F_eff, the specification uses raw
@@ -648,7 +652,8 @@ Focus spread quantifies the entropy of attention over nearest neighbors:
     k ← k_neighbors(T) = round(lerp(8, 32, T))
 
 Normative note (MUST): kNN_similarities MUST be computed by querying
-memory_stream with q = x_t and k = k_neighbors(T) (not recent_context).
+memory_stream with q = μ_acc and k = k_neighbors(T) (not
+recent_context).
 
     if |memory_stream| == 0:
         focus_spread_t ← 0  # cold-start fallback
@@ -657,7 +662,7 @@ memory_stream with q = x_t and k = k_neighbors(T) (not recent_context).
         if k_eff < 2:
             focus_spread_t ← 0  # avoid degenerate entropy
         else:
-            kNN_similarities ← topK(vector_search(x_t, k=k_eff))
+            kNN_similarities ← topK(vector_search(μ_acc, k=k_eff))
             # attention_width sharpens or flattens similarities
             kNN_similarities ← clamp(kNN_similarities × (π / attention_width), −1, 1)
             p ← softmax(kNN_similarities)
@@ -669,17 +674,17 @@ concentrated attention. The effective Focus is further modulated: F_eff
 
 ### Instantaneous Drift
 
-Drift measures the instantaneous step between consecutive signals rather
-than a smoothed centroid lag:
+Drift measures the instantaneous step between consecutive accumulator
+centroids rather than a smoothed centroid lag:
 
     if x_{t−1} is unset:
         drift_step_t ← 0
     else:
-        drift_step_t ← cosine_dist(x_t, x_{t−1})  # 1 − cos(·), range [0, 2]
+        drift_step_t ← cosine_dist(μ_acc_t, μ_acc_{t−1})  # 1 − cos(·), range [0, 2]
     drift_mag_t ← drift_step_t
 
-This uses the current signal velocity in embedding space, ensuring drift
-responds immediately to context shifts. A threshold defines an
+This uses the current centroid velocity in embedding space, ensuring
+drift responds immediately to context shifts. A threshold defines an
 informational drift-boundary signal:
 
     drift_threshold ← lerp(0.10, 0.35, T)
@@ -691,14 +696,15 @@ should_flush in
 <a href="#sec-boundary" class="quarto-xref">Section 6.4.3</a>.
 
 The instantaneous drift_step_t also informs boundary pressure and
-focus-width feedback.
+focus-width feedback. All other composite metrics in this section use
+the accumulator centroid μ_acc as the effective signal representation.
 
 ### Real-Time Prediction Error (EMA)
 
 We model real-time expectation using an exponential moving average (EMA)
-of the signal stream. The predictor state `x_pred_ema` represents the
-current expectation; low Stability (T) adapts quickly, high Stability
-adapts slowly.
+of the accumulator centroid stream. The predictor state `x_pred_ema`
+represents the current expectation; low Stability (T) adapts quickly,
+high Stability adapts slowly.
 
 We treat orthogonal or anti-correlated vectors (cos ≤ 0) as maximum
 surprise.
@@ -708,13 +714,13 @@ surprise.
     k_surprise(S,T) = lerp(6, 14, S) × lerp(1.1, 0.9, T)
 
     if x_pred_ema is unset:
-        x_pred_ema ← x_t  # initialize expectation
+        x_pred_ema ← μ_acc  # initialize expectation
         surprisal_t ← 0
     else:
-        prediction_error_t ← 1 − max(0, cos(x_t, x_pred_ema))
+        prediction_error_t ← 1 − max(0, cos(μ_acc, x_pred_ema))
         surprisal_t ← sigmoid((prediction_error_t − err_ref(S)) * k_surprise(S,T))
         x_pred_ema ← l2_normalize((1 − β_pred(T)) × x_pred_ema +
-                                   β_pred(T) × x_t)
+                                   β_pred(T) × μ_acc)
 
 This formulation captures prediction failure directly from the stream,
 without requiring an explicit kinematic trend model.
@@ -741,7 +747,7 @@ The system computes 12 metrics that blend into a composite write score:
 <td style="text-align: left;">Relevance</td>
 <td style="text-align: left;">↑F</td>
 <td
-style="text-align: left;"><code>relevance_t = clamp(map01(cos(x_t, μ_ctx)) × (0.5 + 0.5F), 0, 1)</code></td>
+style="text-align: left;"><code>relevance_t = clamp(map01(cos(μ_acc, μ_ctx)) × (0.5 + 0.5F), 0, 1)</code></td>
 </tr>
 <tr>
 <td style="text-align: left;">Mismatch</td>
@@ -1177,10 +1183,13 @@ Hysteresis evolves toward the stability-derived base:
 
 ## Write Pacing and Memory Accumulation
 
-The write gate operates per-signal, but coherent “thoughts” often span
-multiple signals. This section introduces memory-level accumulation that
-groups signals into natural units before storage decisions, inspired by
-Event Segmentation Theory (Zacks & Swallow, 2007).
+The write gate operates per step, but coherent “thoughts” often span
+multiple signals. Composite scoring is computed on the current
+accumulator centroid (μ_acc), so write decisions are driven by the
+accumulated group rather than any single raw signal. This section
+introduces memory-level accumulation that groups signals into natural
+units before storage decisions, inspired by Event Segmentation Theory
+(Zacks & Swallow, 2007).
 
 This approach draws from EM-LLM (Fountas et al., 2024), which segments
 token sequences into episodic events using surprise-based boundary
@@ -1198,10 +1207,10 @@ Each source stream maintains accumulator state:
 
     μ_acc ← 256d running mean embedding
     drift_acc ← accumulated drift within memory
-    s_sum ← sum of signal scores in memory
-    s_max ← max signal score in memory
+    s_sum ← sum of accumulator scores in memory
+    s_max ← max accumulator score in memory
     n ← count of signals in memory
-    e_peak ← embedding of highest-scoring signal
+    e_peak ← accumulator centroid at highest score
     emo_max ← 0  # max emotion_intensity_t within the unit
     arousal_sum ← 0  # sum of arousal_t within the unit (for avg)
     t_start ← now_ms()  # timestamp of accumulation start (ms since epoch)
@@ -1230,12 +1239,14 @@ this signal):
     μ_acc ← (n × μ_acc + x_t) / (n + 1)
     n ← n + 1
     drift_acc ← drift_acc + (drift_mag_t / 2)  # accumulate normalized instantaneous drift (drift_mag_t ∈ [0,2])
-    s_sum ← s_sum + score_t
     emo_max ← max(emo_max, emotion_intensity_t)
     arousal_sum ← arousal_sum + arousal_t
-    if score_t > s_max:
-        s_max ← score_t; e_peak ← x_t
     last_signal_ts ← now_ms()  # update timestamp for next gap calculation (ms)
+
+    # After composite scoring on μ_acc:
+    s_sum ← s_sum + score_t
+    if score_t > s_max:
+        s_max ← score_t; e_peak ← μ_acc
 
 ### Hybrid Drift and Coherence Tracking
 
@@ -1430,7 +1441,7 @@ Memories falling below the periphery cutoff are candidates for eviction:
 Contextual gain is a per-retrieval signal used by multiple feedback
 loops:
 
-    contextual_gain_t(m) ← cos(x_t, m.embedding)    # if m was retrieved and used (range [−1, 1])
+    contextual_gain_t(m) ← cos(μ_acc, m.embedding)    # if m was retrieved and used (range [−1, 1])
     contextual_gain_t(m) ← undefined                # otherwise
 
 When undefined, treat contextual_gain_t(m) as 0 in downstream updates.
@@ -1982,13 +1993,13 @@ Refractory dynamics suppress rapid successive interrupts:
 
 Interrupt state (per stream):
 
-    prev_x is unset on the first signal of a stream; set prev_x ← x_t after processing each signal
+    prev_x is unset on the first signal of a stream; set prev_x ← μ_acc after processing each signal
     first_step ← (prev_x is unset for this stream)
     if first_step:
         # cold start: do not update drift_accum
         drift_accum ← drift_accum
     else:
-        drift_accum ← drift_accum + cosine_dist(x_t, prev_x)  # cumulative drift
+        drift_accum ← drift_accum + cosine_dist(μ_acc, prev_x)  # cumulative drift
     Δ ← drift_accum − drift_at_last_interrupt  # cumulative drift since last interrupt
     τ_refrac = lerp(24, 96, T) × lerp(1.4, 1.0, S)
     k_refrac = lerp(0.20, 0.05, T) × lerp(0.8, 1.2, F)
@@ -2124,8 +2135,8 @@ novelty/utility thresholds and redundancy penalties.
 where cosine_dist(u, v) = 1 − cos(u, v).
 
     first_step ← (x_last_check is unset for this stream)  # MUST occur once per stream
-    if first_step: x_last_check ← x_t; drift_acc_pacing ← 0
-    drift_acc_pacing += cosine_dist(x_t, x_last_check)
+    if first_step: x_last_check ← μ_acc; drift_acc_pacing ← 0
+    drift_acc_pacing += cosine_dist(μ_acc, x_last_check)
     pacing_thresh(S) = lerp(0.5, 0.1, S)
     max_wait_drift(F) = lerp(2.0, 0.5, F)
     adjacent_window(F) = round(lerp(8, 1, F))
@@ -2139,7 +2150,7 @@ where cosine_dist(u, v) = 1 − cos(u, v).
     # Adjacent-window throttling is bypassed on boundaries and force_check.
     if (drift_acc_pacing > pacing_thresh(S) OR should_flush OR force_check) AND
        (adjacent_ok OR should_flush OR force_check):
-        trigger_check(); x_last_check ← x_t; drift_acc_pacing ← 0; last_retrieval_ts ← now_ms()
+        trigger_check(); x_last_check ← μ_acc; drift_acc_pacing ← 0; last_retrieval_ts ← now_ms()
 
 High Sensitivity produces frequent checks triggered by small content
 shifts; high Focus enforces strict drift limits. Memory boundaries
@@ -2186,10 +2197,10 @@ complexity per stimulus is `O(log N)` with indexing.
 
 ## Memory Footprint
 
-The system stores: \* `signal_stream`: `n_ctx` embeddings (256d float32
-= 1KB each). \* `score_stream`: Scalar history. \* `memory_stream`: `N`
-stored memories (embedding + metadata). \* `graph`: Adjacency lists for
-graph edges.
+The system stores: \* `signal_stream`: `n_ctx` accumulator centroids
+(256d float32 = 1KB each). \* `score_stream`: Scalar history. \*
+`memory_stream`: `N` stored memories (embedding + metadata). \* `graph`:
+Adjacency lists for graph edges.
 
 For long-running instances, `memory_stream` and `graph` dominate.
 Pruning low-strength memories
@@ -2328,7 +2339,8 @@ On cold start (no persisted state), initialize retained state as follows
     `acc_signals_window = []`, `t_start = 0`, `last_signal_ts = 0`,
     `last_write_ts = 0`, `eta_acc = 0`, `coherence_prev = 0`,
     `drift_accum = 0`, `drift_at_last_interrupt = 0`,
-    `drift_acc_pacing = 0`, `x_last_check = unset`, `prev_x = unset`.
+    `drift_acc_pacing = 0`, `x_last_check = unset` (μ_acc),
+    `prev_x = unset` (μ_acc).
 
 -   **Per-memory defaults (on insert):** `strength = 1`,
     `use_frequency = 0`, `stability = 1`, `connectivity = 0`,
@@ -2347,8 +2359,8 @@ On cold start (no persisted state), initialize retained state as follows
     `rate_target`, `rate_decay`, `periphery_half_life`,
     `salience_half_life`, `drift_weight`.
 
--   **Buffers:** `signal_stream`, `score_stream`, `memory_stream`,
-    `recent_memory_centroids` start empty.
+-   **Buffers:** `signal_stream` (μ_acc stream), `score_stream`,
+    `memory_stream`, `recent_memory_centroids` start empty.
 
 -   **Retention history:** `retention_history` starts empty (populated
     after the first signal step).
@@ -2384,16 +2396,17 @@ This appendix defines non-trivial derived signals used throughout the
 specification. Unless otherwise stated, all derived scalars are clamped
 to \[0, 1\].
 
-**novelty:** A normalized dissimilarity-to-context signal.
+**novelty:** A normalized dissimilarity-to-context signal computed on
+the accumulator centroid.
 
-    max_cos ← max_{c ∈ recent_context} cos(x_t, c)  # in [−1, 1]
+    max_cos ← max_{c ∈ recent_context} cos(μ_acc, c)  # in [−1, 1]
     novelty_t ← clamp((1 − max_cos) / 2, 0, 1)
 
 Fallback: if recent_context is empty, set novelty_t ← 1.
 
 **μ_sim:** A normalized mean similarity to context.
 
-    mean_cos ← mean_{c ∈ recent_context} cos(x_t, c)
+    mean_cos ← mean_{c ∈ recent_context} cos(μ_acc, c)
     μ_sim ← clamp((mean_cos + 1) / 2, 0, 1)
 
 Fallback: if recent_context is empty, set μ_sim ← 0.5.
@@ -2424,7 +2437,7 @@ relative to a set of embeddings.
 
 Definitions:
 
-    SSE_curr ← ‖x_t − x_pred_t‖^2          # prediction error at t (x_pred_t = x_pred_ema for EMA predictor)
+    SSE_curr ← ‖μ_acc − x_pred_t‖^2          # prediction error at t (x_pred_t = x_pred_ema for EMA predictor)
     SSE_prev ← previous SSE_curr (t−1)     # or EWMA if smoothing is used
 
 Fallback: if no prediction model is available, or if dimensions
@@ -2469,18 +2482,20 @@ Canonical single-step pseudocode (timestep t):
 
     # Main loop (single timestep t)
     now_s, now_ms, x_t ← read_inputs()
-    signal_stream.append(x_t)
-    recent_context ← tail(signal_stream, n_ctx(T))
+    update_accumulator_embedding(x_t)  # updates μ_acc for current unit
+    recent_context ← tail(signal_stream, n_ctx(T))  # signal_stream stores prior μ_acc
 
     # Structural metrics + uncertainty
-    coherence_struct_t, focus_spread_t, drift_mag_t, surprisal_t ← compute_structural_metrics(x_t)
-    x_pred_ema ← update_prediction_ema(x_pred_ema, x_t, T)  # after surprisal_t
+    coherence_struct_t, focus_spread_t, drift_mag_t, surprisal_t ← compute_structural_metrics(μ_acc)
+    x_pred_ema ← update_prediction_ema(x_pred_ema, μ_acc, T)  # after surprisal_t
     u_t ← update_uncertainty(...)
 
     # Adaptation + scoring
     update_control_parameters(...)
     score_t ← compute_composite_score(...)
     score_stream.append(score_t)
+    update_accumulator_scores(score_t, μ_acc)
+    signal_stream.append(μ_acc)
 
     # Threshold updates
     θ_target ← prior_evidence_blend(...)
@@ -2511,31 +2526,38 @@ Canonical single-step pseudocode (timestep t):
 The normative execution order for a single timestep t:
 
 1.  **Read Inputs:** `x_t`, `now_s()`, `system_time_ms`.
-2.  **Update Buffers:** Append `x_t` to `signal_stream`. Update
-    `n_ctx(T)`. Retrieve `recent_context`.
-3.  **Compute Structural Metrics:** `coherence_struct`, `focus_spread`,
-    `drift`, `surprisal`, then update `x_pred_ema` for the next step.
-4.  **Update Uncertainty:** `u(t)`.
-5.  **Compute Adaptation Dynamics:**
+2.  **Update Accumulator (Embedding):** Update `μ_acc` with `x_t` (no
+    score aggregation yet).
+3.  **Prepare Context:** Retrieve
+    `recent_context ← tail(signal_stream, n_ctx(T))` (prior μ_acc values
+    only).
+4.  **Compute Structural Metrics:** `coherence_struct`, `focus_spread`,
+    `drift`, `surprisal` using `μ_acc`, then update `x_pred_ema` for the
+    next step.
+5.  **Update Uncertainty:** `u(t)`.
+6.  **Compute Adaptation Dynamics:**
     -   Update `α_F(t)`, `α_T(t)`.
     -   Update `weight_relevance`, `half_life`.
     -   Update `emotion` and `mood` state.
-6.  **Compute Composite Score:**
+7.  **Compute Composite Score:**
     -   Compute all 12 metrics.
     -   Update RLS weights `W_blend`.
     -   Compute `score_t`. Append to `score_stream`.
-7.  **Update Thresholds:**
+    -   Update accumulator score aggregates (`s_sum`, `s_max`, `e_peak`)
+        using `score_t`.
+    -   Append `μ_acc` to `signal_stream`.
+8.  **Update Thresholds:**
     -   Compute `θ_target` (prior/evidence).
     -   Compute `Δθ` terms (homeo, sens, prec, emo, mood).
     -   Update `θ_dynamic`. Update `hysteresis`.
-8.  **Execute Memory Accumulation:**
-    -   Update accumulator (`drift_acc`, `s_max`, etc.).
+9.  **Execute Memory Accumulation:**
+    -   Accumulator now holds `μ_acc`, `drift_acc`, `s_max`, etc.
     -   Compute `boundary_score` and `should_flush`.
     -   Check `spike_bypass` using the effective spike margin scaled by
         `mem_maturity` and `coherence_t`.
     -   Compute `S_window` and `θ_memory`.
     -   Decide `write_memory`.
-9.  **Post-Write Updates and Retrieval:**
+10. **Post-Write Updates and Retrieval:**
     -   If `write_memory`: Write to `memory_stream`. Update
         `last_write_ts`.
     -   Cache `q_retrieval ← μ_acc` before any accumulator reset.
@@ -2543,7 +2565,7 @@ The normative execution order for a single timestep t:
     -   Update `rate_state` (homeostatic controller).
     -   If `should_flush` (regardless of write): Call
         `reset_accumulator()`.
-10. **Run Interrupt Gate:** Check for streaming interrupt using
+11. **Run Interrupt Gate:** Check for streaming interrupt using
     retrieved candidates (already filtered by write‑exclusion and WM
     overlap during retrieval).
 

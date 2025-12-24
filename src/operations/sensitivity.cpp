@@ -115,7 +115,15 @@ UpdateSensitivity::Execute (OperationContext &context, Transaction &tx) const
   std::array<double, 6> emotion_probs;
   const double uniform_prob = 1.0 / static_cast<double> (kNumEmotions);
   emotion_probs.fill (uniform_prob);
-  const auto &x = context.GetSignal ().embedding;
+  const auto &signal = context.GetSignal ();
+  const Eigen::VectorXf *x_ptr = &signal.embedding;
+  auto acc_it = p_ctx.accumulator_states.find (signal.source_id);
+  if (acc_it != p_ctx.accumulator_states.end ()
+      && acc_it->second.mu_acc.size () > 0)
+    {
+      x_ptr = &acc_it->second.mu_acc;
+    }
+  const auto &x = *x_ptr;
   if (p_ctx.centroids.has_value ()
       && p_ctx.centroids->emotion_centroids.size () == kNumEmotions)
     {

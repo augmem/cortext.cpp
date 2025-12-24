@@ -34,6 +34,16 @@ UpdateUncertainty::Execute (OperationContext &context, Transaction &tx) const
   //   weights = normalize([S, F, 1 − T, S × (1 − T)])
   // )
 
+  const auto &signal = context.GetSignal ();
+  const Eigen::VectorXf *x_ptr = &signal.embedding;
+  auto acc_it = p_ctx.accumulator_states.find (signal.source_id);
+  if (acc_it != p_ctx.accumulator_states.end ()
+      && acc_it->second.mu_acc.size () > 0)
+    {
+      x_ptr = &acc_it->second.mu_acc;
+    }
+  const auto &x = *x_ptr;
+
   // Helper: variance of last w scores in [0,1]
   auto compute_scores_variance = [&] () -> std::optional<double> {
     const int w = core::WScore (config.stability);
@@ -77,7 +87,6 @@ UpdateUncertainty::Execute (OperationContext &context, Transaction &tx) const
       {
         return *v;
       }
-    const auto &x = context.GetSignal ().embedding;
     const int n = static_cast<int> (p_ctx.memory_stream.size ());
     if (n < 2)
       {
@@ -147,7 +156,6 @@ UpdateUncertainty::Execute (OperationContext &context, Transaction &tx) const
 
   // Helper: novelty measure as dissimilarity to recent context (Appendix B)
   auto compute_novelty_measure = [&] () -> std::optional<double> {
-    const auto &x = context.GetSignal ().embedding;
     if (x.size () == 0)
       {
         return std::nullopt;

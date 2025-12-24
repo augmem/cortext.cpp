@@ -19,7 +19,15 @@ ComputeFocusSpread::Execute (OperationContext &context, Transaction &tx) const
   (void)tx;
   const auto &cfg = context.GetConfig ();
   auto &p_ctx = context.GetProcessorContext ();
-  const auto &x = context.GetSignal ().embedding;
+  const auto &signal = context.GetSignal ();
+  const Eigen::VectorXf *x_ptr = &signal.embedding;
+  const auto acc_it = p_ctx.accumulator_states.find (signal.source_id);
+  if (acc_it != p_ctx.accumulator_states.end ()
+      && acc_it->second.mu_acc.size () > 0)
+    {
+      x_ptr = &acc_it->second.mu_acc;
+    }
+  const auto &x = *x_ptr;
   const double attention_width
       = core::Clamp (p_ctx.attention_width,
                      static_cast<double> (core::kAttentionWidthMin),

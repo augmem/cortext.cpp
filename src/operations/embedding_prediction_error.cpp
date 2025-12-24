@@ -38,7 +38,15 @@ UpdateEmbeddingPredictionError::Execute (OperationContext &context, Transaction 
   (void)tx;
   auto &p_ctx = context.GetProcessorContext ();
   const auto &cfg = context.GetConfig ();
-  const auto &x_t = context.GetSignal ().embedding;
+  const auto &signal = context.GetSignal ();
+  const Eigen::VectorXf *x_ptr = &signal.embedding;
+  auto it = p_ctx.accumulator_states.find (signal.source_id);
+  if (it != p_ctx.accumulator_states.end ()
+      && it->second.mu_acc.size () > 0)
+    {
+      x_ptr = &it->second.mu_acc;
+    }
+  const auto &x_t = *x_ptr;
 
   if (x_t.size () == 0)
     {

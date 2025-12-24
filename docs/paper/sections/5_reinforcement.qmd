@@ -34,7 +34,7 @@ if strength_t < periphery_cutoff(T): evict(m)
 Contextual gain is a per-retrieval signal used by multiple feedback loops:
 
 ```
-contextual_gain_t(m) ← cos(x_t, m.embedding)    # if m was retrieved and used (range [−1, 1])
+contextual_gain_t(m) ← cos(μ_acc, m.embedding)    # if m was retrieved and used (range [−1, 1])
 contextual_gain_t(m) ← undefined                # otherwise
 ```
 

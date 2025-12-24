@@ -1,0 +1,63 @@
+@startuml cortext-objects
+skinparam monochrome reverse
+
+object InputSignal {
+  data: blob
+  modality: "vision|audio|text"
+}
+
+object EncodedSignal {
+  input: InputSignal
+  embedding: vector
+}
+
+object Affect {
+  valence: float
+  arousal: float
+  intensity: float
+  anger: float
+  fear: float
+  joy: float
+  love: float
+  sadness: float
+  surprise: float
+}
+
+object EmotionSignal {
+  signal: EncodedSignal
+  affect: Affect
+}
+
+object Drift {
+  max_dist: float
+  centroid: float
+  min_dist: float
+}
+
+object Memory {
+  signals: [EmotionSignal]
+  centroid: vector
+  coherence: float
+  max_dist: float
+  min_dist: float
+  drift: Drift
+  affect: Affect
+  created_at: timestamp
+  strength: float (0-1)
+}
+
+object Cortext {
+  working_memory: [Memory]
+  long_term_memory: [Memory]
+}
+
+InputSignal <|-- EncodedSignal : contains
+EncodedSignal <|-- EmotionSignal : wrapped in
+Affect <|-- EmotionSignal : tagged with
+EmotionSignal o-- "*" Memory : accumulated in
+Affect <|-- Memory : aggregate
+Drift <|-- Memory : characterizes
+Memory o-- "*" Cortext : working memory
+Memory o-- "*" Cortext : long term memory
+
+@enduml

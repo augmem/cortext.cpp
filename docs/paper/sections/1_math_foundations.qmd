@@ -54,7 +54,7 @@ to_s(ts_ms) = ts_ms / 1000       # ms → seconds conversion
 
 **Naming contract (canonical):** Use the variable names below consistently throughout this document. Units: stored timestamps are integers in milliseconds (commonly suffixed *_ts, and also appearing as timestamp/created_at/last_rate_timestamp); derived time intervals in seconds use the *_s suffix. Accumulator variables: t_start, last_signal_ts, last_write_ts, drift_acc, eta_acc, coherence_prev, emo_max, arousal_sum, drift_accum, drift_at_last_interrupt, drift_acc_pacing, x_last_check. Global variables: signals_processed, u_uncertainty, mood_vector, last_mood_ts, theta_dynamic, theta_target, hysteresis, m_rate, rho_hat_prev, dt_ema, rate_ticks, reliability, last_rate_timestamp, last_retrieval_ts, retention_ema, last_embedding, x_pred_ema. Weight naming rule: weight_* and *_weight variables (e.g., weight_relevance, mismatch_weight, weight_surprise) are control parameters; w_* variables (e.g., w_relevance, w_mismatch, … w_arousal) are composite-score blender weights.
 
-**Drift naming note:** `drift_step_t` (also called *drift_increment*) is the instantaneous per-signal cosine distance between x_t and x_{t−1}. `drift_acc` accumulates drift_step_t within the current memory unit for boundary decisions; `drift_accum` tracks cumulative per-signal embedding drift used for interrupt refractory pressure. Treat these as distinct signals.
+**Drift naming note:** `drift_step_t` (also called *drift_increment*) is the instantaneous cosine distance between consecutive accumulator centroids μ_acc(t) and μ_acc(t−1). `drift_acc` accumulates drift_step_t within the current memory unit for boundary decisions; `drift_accum` tracks cumulative centroid drift used for interrupt refractory pressure. Treat these as distinct signals.
 
 **Time-index convention:** Per-step computed values use a `_t` suffix (e.g., score_t, theta_dynamic_t). Retained state uses the bare name (e.g., theta_dynamic). When a step proposes a new value, compute the `_t` variant and assign the bare name at end of step (see Appendix D).
 
@@ -76,7 +76,7 @@ All behavioral thresholds, gains, and caps are derived from the three knobs (F, 
 
 The specification uses distinct streaming buffers:
 
-**signal_stream:** The raw per-signal embedding stream x_t used for scoring, uncertainty estimation, threshold/rate updates, and accumulator updates. Any context slices operate on signal_stream.
+**signal_stream:** The per-step accumulator centroid stream (μ_acc after incorporating the current signal). This stream is used for scoring, uncertainty estimation, and threshold/rate updates; raw signal embeddings are tracked separately inside the accumulator for persistence.
 
 **score_stream:** The per-signal scalar score stream. At each step, append score_t to score_stream. Any score lookbacks operate on score_stream.
 

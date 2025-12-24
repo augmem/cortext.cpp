@@ -1,0 +1,160 @@
+[LOG] cortext.boundary {gap_score=0.268941, should_flush=false, drift_accum=0, gap_ref_s=44.4814, elapsed_time_ms=0, signal_gap_s=0, boundary_score=0.252368}
+[LOG] cortext.write_gate {write_accumulator=true, S_window=0.613994, refractory_mult=1, s_avg=0.613231, s_max=0.613231}
+[LOG] cortext.memory_storage {s_avg=0.613231, stored=true, s_max=0.613231, primary_modality=text, n_signals=1, embedding_id=1}
+[LOG] cortext.streaming_pacing {should_check_retrieval=true, since_last_retrieval_s=inf, adjacent_window=6, pacing_threshold=0.26, drift_acc_pacing=0}
+[LOG] cortext.working_memory {now_s=1.76633e+09, cost_total=0, gate_threshold=0.19, benefit=0.783327, S_window=0.613994, wm_slot_count=1, chunked=false, accepted=true}
+[LOG] cortext.boundary {gap_score=0.268941, should_flush=false, drift_accum=0, gap_ref_s=23.6165, elapsed_time_ms=0, signal_gap_s=0, boundary_score=0.252368}
+[LOG] cortext.write_gate {write_accumulator=true, S_window=0.671266, refractory_mult=1, s_avg=0.670502, s_max=0.670502}
+[LOG] cortext.memory_storage {s_avg=0.670502, stored=true, s_max=0.670502, primary_modality=text, n_signals=1, embedding_id=4}
+[LOG] cortext.streaming_pacing {should_check_retrieval=true, since_last_retrieval_s=0.724, adjacent_window=6, pacing_threshold=0.26, drift_acc_pacing=0}
+[LOG] cortext.working_memory {now_s=1.76633e+09, cost_total=0.153899, gate_threshold=0.19, benefit=0.627239, S_window=0.671266, wm_slot_count=2, chunked=false, accepted=true}
+[LOG] cortext.boundary {gap_score=0.268941, should_flush=false, drift_accum=0, gap_ref_s=12.4348, elapsed_time_ms=0, signal_gap_s=0, boundary_score=0.252368}
+[LOG] cortext.write_gate {write_accumulator=true, S_window=0.750915, refractory_mult=1.18201, s_avg=0.750151, s_max=0.750151}
+[LOG] cortext.memory_storage {s_avg=0.750151, stored=true, s_max=0.750151, primary_modality=text, n_signals=1, embedding_id=8}
+[LOG] cortext.streaming_pacing {should_check_retrieval=true, since_last_retrieval_s=0.925, adjacent_window=6, pacing_threshold=0.26, drift_acc_pacing=0}
+[LOG] cortext.working_memory {now_s=1.76633e+09, cost_total=0.31286, gate_threshold=0.19, benefit=0.684901, S_window=0.750915, wm_slot_count=3, chunked=false, accepted=true}
+[LOG] cortext.boundary {gap_score=0.268941, should_flush=false, drift_accum=0, gap_ref_s=9.39711, elapsed_time_ms=0, signal_gap_s=0, boundary_score=0.252368}
+[LOG] cortext.write_gate {write_accumulator=true, S_window=0.805582, refractory_mult=1.1735, s_avg=0.804818, s_max=0.804818}
+[LOG] cortext.memory_storage {s_avg=0.804818, stored=true, s_max=0.804818, primary_modality=text, n_signals=1, embedding_id=13}
+[LOG] cortext.streaming_pacing {should_check_retrieval=true, since_last_retrieval_s=1.562, adjacent_window=6, pacing_threshold=0.26, drift_acc_pacing=0}
+[LOG] cortext.working_memory {now_s=1.76633e+09, cost_total=0.336227, gate_threshold=0.19, benefit=0.691354, S_window=0.805582, wm_slot_count=3, chunked=false, accepted=true}
+[LOG] cortext.boundary {gap_score=0.268941, should_flush=false, drift_accum=0, gap_ref_s=7.38038, elapsed_time_ms=0, signal_gap_s=0, boundary_score=0.252368}
+[LOG] cortext.write_gate {write_accumulator=true, S_window=0.735344, refractory_mult=1.171, s_avg=0.73458, s_max=0.73458}
+[LOG] cortext.memory_storage {s_avg=0.73458, stored=true, s_max=0.73458, primary_modality=text, n_signals=1, embedding_id=18}
+[LOG] cortext.streaming_pacing {should_check_retrieval=true, since_last_retrieval_s=1.179, adjacent_window=6, pacing_threshold=0.26, drift_acc_pacing=0}
+[LOG] cortext.working_memory {now_s=1.76633e+09, cost_total=0.349814, gate_threshold=0.19, benefit=0.662712, S_window=0.735344, wm_slot_count=3, chunked=false, accepted=true}
+[LOG] cortext.boundary {gap_score=0.268941, should_flush=false, drift_accum=0, gap_ref_s=6.17789, elapsed_time_ms=0, signal_gap_s=0, boundary_score=0.252368}
+[LOG] cortext.write_gate {write_accumulator=true, S_window=0.802024, refractory_mult=1.17664, s_avg=0.80126, s_max=0.80126}
+[LOG] cortext.memory_storage {s_avg=0.80126, stored=true, s_max=0.80126, primary_modality=text, n_signals=1, embedding_id=23}
+[LOG] cortext.streaming_pacing {should_check_retrieval=true, since_last_retrieval_s=0.995, adjacent_window=6, pacing_threshold=0.26, drift_acc_pacing=0}
+[LOG] cortext.working_memory {now_s=1.76633e+09, cost_total=0.36043, gate_threshold=0.19, benefit=0.691024, S_window=0.802024, wm_slot_count=3, chunked=false, accepted=true}
+[LOG] cortext.boundary {gap_score=0.268941, should_flush=false, drift_accum=0, gap_ref_s=7.09291, elapsed_time_ms=0, signal_gap_s=0, boundary_score=0.252368}
+[LOG] cortext.write_gate {write_accumulator=true, S_window=0.746557, refractory_mult=1.17494, s_avg=0.745793, s_max=0.745793}
+[LOG] cortext.memory_storage {s_avg=0.745793, stored=true, s_max=0.745793, primary_modality=text, n_signals=1, embedding_id=28}
+[LOG] cortext.streaming_pacing {should_check_retrieval=true, since_last_retrieval_s=1.348, adjacent_window=6, pacing_threshold=0.26, drift_acc_pacing=0}
+[LOG] cortext.working_memory {now_s=1.76633e+09, cost_total=0.354278, gate_threshold=0.19, benefit=0.667451, S_window=0.746557, wm_slot_count=3, chunked=false, accepted=true}
+[LOG] cortext.boundary {gap_score=0.268941, should_flush=false, drift_accum=0, gap_ref_s=6.65718, elapsed_time_ms=0, signal_gap_s=0, boundary_score=0.252368}
+[LOG] cortext.write_gate {write_accumulator=true, S_window=0.80215, refractory_mult=1.17315, s_avg=0.801386, s_max=0.801386}
+[LOG] cortext.memory_storage {s_avg=0.801386, stored=true, s_max=0.801386, primary_modality=text, n_signals=1, embedding_id=33}
+[LOG] cortext.streaming_pacing {should_check_retrieval=true, since_last_retrieval_s=1.175, adjacent_window=6, pacing_threshold=0.26, drift_acc_pacing=0}
+[LOG] cortext.working_memory {now_s=1.76633e+09, cost_total=0.339943, gate_threshold=0.19, benefit=0.699569, S_window=0.80215, wm_slot_count=3, chunked=false, accepted=true}
+[LOG] cortext.boundary {gap_score=0.268941, should_flush=false, drift_accum=0, gap_ref_s=5.57177, elapsed_time_ms=0, signal_gap_s=0, boundary_score=0.252368}
+[LOG] cortext.write_gate {write_accumulator=true, S_window=0.744792, refractory_mult=1.17793, s_avg=0.744028, s_max=0.744028}
+[LOG] cortext.memory_storage {s_avg=0.744028, stored=true, s_max=0.744028, primary_modality=text, n_signals=1, embedding_id=38}
+[LOG] cortext.streaming_pacing {should_check_retrieval=true, since_last_retrieval_s=0.871, adjacent_window=6, pacing_threshold=0.26, drift_acc_pacing=0}
+[LOG] cortext.working_memory {now_s=1.76633e+09, cost_total=0.351206, gate_threshold=0.19, benefit=0.664254, S_window=0.744792, wm_slot_count=3, chunked=false, accepted=true}
+[LOG] cortext.boundary {gap_score=0.268941, should_flush=false, drift_accum=0, gap_ref_s=5.12901, elapsed_time_ms=0, signal_gap_s=0, boundary_score=0.252368}
+[LOG] cortext.write_gate {write_accumulator=true, S_window=0.724977, refractory_mult=1.18101, s_avg=0.724213, s_max=0.724213}
+[LOG] cortext.memory_storage {s_avg=0.724213, stored=true, s_max=0.724213, primary_modality=text, n_signals=1, embedding_id=43}
+[LOG] cortext.streaming_pacing {should_check_retrieval=true, since_last_retrieval_s=0.875, adjacent_window=6, pacing_threshold=0.26, drift_acc_pacing=0}
+[LOG] cortext.working_memory {now_s=1.76633e+09, cost_total=0.346741, gate_threshold=0.19, benefit=0.648493, S_window=0.724977, wm_slot_count=3, chunked=false, accepted=true}
+[LOG] cortext.boundary {gap_score=0.268941, should_flush=false, drift_accum=0, gap_ref_s=5.33474, elapsed_time_ms=0, signal_gap_s=0, boundary_score=0.252368}
+[LOG] cortext.write_gate {write_accumulator=true, S_window=0.722938, refractory_mult=1.17976, s_avg=0.722174, s_max=0.722174}
+[LOG] cortext.memory_storage {s_avg=0.722174, stored=true, s_max=0.722174, primary_modality=text, n_signals=1, embedding_id=48}
+[LOG] cortext.streaming_pacing {should_check_retrieval=true, since_last_retrieval_s=0.992, adjacent_window=6, pacing_threshold=0.26, drift_acc_pacing=0}
+[LOG] cortext.working_memory {now_s=1.76633e+09, cost_total=0.350283, gate_threshold=0.19, benefit=0.643227, S_window=0.722938, wm_slot_count=3, chunked=false, accepted=true}
+[LOG] cortext.boundary {gap_score=0.268941, should_flush=false, drift_accum=0, gap_ref_s=4.87596, elapsed_time_ms=0, signal_gap_s=0, boundary_score=0.252368}
+[LOG] cortext.write_gate {write_accumulator=true, S_window=0.714365, refractory_mult=1.18032, s_avg=0.713601, s_max=0.713601}
+[LOG] cortext.memory_storage {s_avg=0.713601, stored=true, s_max=0.713601, primary_modality=text, n_signals=1, embedding_id=53}
+[LOG] cortext.streaming_pacing {should_check_retrieval=true, since_last_retrieval_s=0.821, adjacent_window=6, pacing_threshold=0.26, drift_acc_pacing=0}
+[LOG] cortext.working_memory {now_s=1.76633e+09, cost_total=0.33994, gate_threshold=0.19, benefit=0.648042, S_window=0.714365, wm_slot_count=3, chunked=false, accepted=true}
+[LOG] cortext.boundary {gap_score=0.268941, should_flush=false, drift_accum=0, gap_ref_s=33.0463, elapsed_time_ms=0, signal_gap_s=0, boundary_score=0.252368}
+[LOG] cortext.write_gate {write_accumulator=true, S_window=0.611131, refractory_mult=1, s_avg=0.610367, s_max=0.610367}
+[LOG] cortext.memory_storage {s_avg=0.610367, stored=true, s_max=0.610367, primary_modality=text, n_signals=1, embedding_id=1}
+[LOG] cortext.streaming_pacing {should_check_retrieval=true, since_last_retrieval_s=inf, adjacent_window=6, pacing_threshold=0.26, drift_acc_pacing=0}
+[LOG] cortext.working_memory {now_s=1.76633e+09, cost_total=0, gate_threshold=0.19, benefit=0.78172, S_window=0.611131, wm_slot_count=1, chunked=false, accepted=true}
+[LOG] cortext.boundary {gap_score=0.268941, should_flush=false, drift_accum=0, gap_ref_s=18.2321, elapsed_time_ms=0, signal_gap_s=0, boundary_score=0.252368}
+[LOG] cortext.write_gate {write_accumulator=true, S_window=0.730304, refractory_mult=1, s_avg=0.729541, s_max=0.729541}
+[LOG] cortext.memory_storage {s_avg=0.729541, stored=true, s_max=0.729541, primary_modality=text, n_signals=1, embedding_id=4}
+[LOG] cortext.streaming_pacing {should_check_retrieval=true, since_last_retrieval_s=0.71, adjacent_window=6, pacing_threshold=0.26, drift_acc_pacing=0}
+[LOG] cortext.working_memory {now_s=1.76633e+09, cost_total=0.215111, gate_threshold=0.19, benefit=0.684219, S_window=0.730304, wm_slot_count=2, chunked=false, accepted=true}
+[LOG] cortext.boundary {gap_score=0.268941, should_flush=false, drift_accum=0, gap_ref_s=10.4616, elapsed_time_ms=0, signal_gap_s=0, boundary_score=0.252368}
+[LOG] cortext.write_gate {write_accumulator=true, S_window=0.736516, refractory_mult=1.18291, s_avg=0.735752, s_max=0.735752}
+[LOG] cortext.memory_storage {s_avg=0.735752, stored=true, s_max=0.735752, primary_modality=text, n_signals=1, embedding_id=8}
+[LOG] cortext.streaming_pacing {should_check_retrieval=true, since_last_retrieval_s=0.853, adjacent_window=6, pacing_threshold=0.26, drift_acc_pacing=0}
+[LOG] cortext.working_memory {now_s=1.76633e+09, cost_total=0.287039, gate_threshold=0.19, benefit=0.673646, S_window=0.736516, wm_slot_count=3, chunked=false, accepted=true}
+[LOG] cortext.boundary {gap_score=0.268941, should_flush=false, drift_accum=0, gap_ref_s=7.17813, elapsed_time_ms=0, signal_gap_s=0, boundary_score=0.252368}
+[LOG] cortext.write_gate {write_accumulator=true, S_window=0.836366, refractory_mult=1.18107, s_avg=0.835602, s_max=0.835602}
+[LOG] cortext.memory_storage {s_avg=0.835602, stored=true, s_max=0.835602, primary_modality=text, n_signals=1, embedding_id=13}
+[LOG] cortext.streaming_pacing {should_check_retrieval=true, since_last_retrieval_s=0.887, adjacent_window=6, pacing_threshold=0.26, drift_acc_pacing=0}
+[LOG] cortext.working_memory {now_s=1.76633e+09, cost_total=0.346201, gate_threshold=0.19, benefit=0.721929, S_window=0.836366, wm_slot_count=3, chunked=false, accepted=true}
+[LOG] cortext.boundary {gap_score=0.268941, should_flush=false, drift_accum=0, gap_ref_s=5.44027, elapsed_time_ms=0, signal_gap_s=0, boundary_score=0.252368}
+[LOG] cortext.write_gate {write_accumulator=true, S_window=0.741232, refractory_mult=1.18343, s_avg=0.740468, s_max=0.740468}
+[LOG] cortext.memory_storage {s_avg=0.740468, stored=true, s_max=0.740468, primary_modality=text, n_signals=1, embedding_id=18}
+[LOG] cortext.streaming_pacing {should_check_retrieval=true, since_last_retrieval_s=0.626, adjacent_window=6, pacing_threshold=0.26, drift_acc_pacing=0}
+[LOG] cortext.working_memory {now_s=1.76633e+09, cost_total=0.348206, gate_threshold=0.19, benefit=0.669311, S_window=0.741232, wm_slot_count=3, chunked=false, accepted=true}
+[LOG] cortext.boundary {gap_score=0.268941, should_flush=false, drift_accum=0, gap_ref_s=5.1771, elapsed_time_ms=0, signal_gap_s=0, boundary_score=0.252368}
+[LOG] cortext.write_gate {write_accumulator=true, S_window=0.789422, refractory_mult=1.1832, s_avg=0.788658, s_max=0.788658}
+[LOG] cortext.memory_storage {s_avg=0.788658, stored=true, s_max=0.788658, primary_modality=text, n_signals=1, embedding_id=23}
+[LOG] cortext.streaming_pacing {should_check_retrieval=true, since_last_retrieval_s=0.909, adjacent_window=6, pacing_threshold=0.26, drift_acc_pacing=0}
+[LOG] cortext.working_memory {now_s=1.76633e+09, cost_total=0.352552, gate_threshold=0.19, benefit=0.688467, S_window=0.789422, wm_slot_count=3, chunked=false, accepted=true}
+[LOG] cortext.boundary {gap_score=0.268941, should_flush=false, drift_accum=0, gap_ref_s=5.21327, elapsed_time_ms=0, signal_gap_s=0, boundary_score=0.252368}
+[LOG] cortext.write_gate {write_accumulator=true, S_window=0.755569, refractory_mult=1.17982, s_avg=0.754805, s_max=0.754805}
+[LOG] cortext.memory_storage {s_avg=0.754805, stored=true, s_max=0.754805, primary_modality=text, n_signals=1, embedding_id=28}
+[LOG] cortext.streaming_pacing {should_check_retrieval=true, since_last_retrieval_s=0.952, adjacent_window=6, pacing_threshold=0.26, drift_acc_pacing=0}
+[LOG] cortext.working_memory {now_s=1.76633e+09, cost_total=0.374054, gate_threshold=0.19, benefit=0.675251, S_window=0.755569, wm_slot_count=3, chunked=false, accepted=true}
+[LOG] cortext.boundary {gap_score=0.268941, should_flush=false, drift_accum=0, gap_ref_s=4.58117, elapsed_time_ms=0, signal_gap_s=0, boundary_score=0.252368}
+[LOG] cortext.write_gate {write_accumulator=true, S_window=0.826791, refractory_mult=1.18172, s_avg=0.826027, s_max=0.826027}
+[LOG] cortext.memory_storage {s_avg=0.826027, stored=true, s_max=0.826027, primary_modality=text, n_signals=1, embedding_id=33}
+[LOG] cortext.streaming_pacing {should_check_retrieval=true, since_last_retrieval_s=0.725, adjacent_window=6, pacing_threshold=0.26, drift_acc_pacing=0}
+[LOG] cortext.working_memory {now_s=1.76633e+09, cost_total=0.362331, gate_threshold=0.19, benefit=0.708539, S_window=0.826791, wm_slot_count=3, chunked=false, accepted=true}
+[LOG] cortext.boundary {gap_score=0.268941, should_flush=false, drift_accum=0, gap_ref_s=4.29819, elapsed_time_ms=0, signal_gap_s=0, boundary_score=0.252368}
+[LOG] cortext.write_gate {write_accumulator=true, S_window=0.744052, refractory_mult=1.184, s_avg=0.743288, s_max=0.743288}
+[LOG] cortext.memory_storage {s_avg=0.743288, stored=true, s_max=0.743288, primary_modality=text, n_signals=1, embedding_id=38}
+[LOG] cortext.streaming_pacing {should_check_retrieval=true, since_last_retrieval_s=0.734, adjacent_window=6, pacing_threshold=0.26, drift_acc_pacing=0}
+[LOG] cortext.working_memory {now_s=1.76633e+09, cost_total=0.352249, gate_threshold=0.19, benefit=0.659058, S_window=0.744052, wm_slot_count=3, chunked=false, accepted=true}
+[LOG] cortext.boundary {gap_score=0.268941, should_flush=false, drift_accum=0, gap_ref_s=4.18998, elapsed_time_ms=0, signal_gap_s=0, boundary_score=0.252368}
+[LOG] cortext.write_gate {write_accumulator=true, S_window=0.782544, refractory_mult=1.1838, s_avg=0.78178, s_max=0.78178}
+[LOG] cortext.memory_storage {s_avg=0.78178, stored=true, s_max=0.78178, primary_modality=text, n_signals=1, embedding_id=43}
+[LOG] cortext.streaming_pacing {should_check_retrieval=true, since_last_retrieval_s=0.744, adjacent_window=6, pacing_threshold=0.26, drift_acc_pacing=0}
+[LOG] cortext.working_memory {now_s=1.76633e+09, cost_total=0.357124, gate_threshold=0.19, benefit=0.684133, S_window=0.782544, wm_slot_count=3, chunked=false, accepted=true}
+[LOG] cortext.boundary {gap_score=0.268941, should_flush=false, drift_accum=0, gap_ref_s=4.74634, elapsed_time_ms=0, signal_gap_s=0, boundary_score=0.252368}
+[LOG] cortext.write_gate {write_accumulator=true, S_window=0.768734, refractory_mult=1.18177, s_avg=0.76797, s_max=0.76797}
+[LOG] cortext.memory_storage {s_avg=0.76797, stored=true, s_max=0.76797, primary_modality=text, n_signals=1, embedding_id=48}
+[LOG] cortext.streaming_pacing {should_check_retrieval=true, since_last_retrieval_s=0.929, adjacent_window=6, pacing_threshold=0.26, drift_acc_pacing=0}
+[LOG] cortext.working_memory {now_s=1.76633e+09, cost_total=0.367852, gate_threshold=0.19, benefit=0.673435, S_window=0.768734, wm_slot_count=3, chunked=false, accepted=true}
+[LOG] cortext.boundary {gap_score=0.268941, should_flush=false, drift_accum=0, gap_ref_s=7.53915, elapsed_time_ms=0, signal_gap_s=0, boundary_score=0.252368}
+[LOG] cortext.write_gate {write_accumulator=true, S_window=0.798433, refractory_mult=1.17394, s_avg=0.797669, s_max=0.797669}
+[LOG] cortext.memory_storage {s_avg=0.797669, stored=true, s_max=0.797669, primary_modality=text, n_signals=1, embedding_id=53}
+[LOG] cortext.streaming_pacing {should_check_retrieval=true, since_last_retrieval_s=1.514, adjacent_window=6, pacing_threshold=0.26, drift_acc_pacing=0}
+[LOG] cortext.working_memory {now_s=1.76633e+09, cost_total=0.37079, gate_threshold=0.19, benefit=0.69098, S_window=0.798433, wm_slot_count=3, chunked=false, accepted=true}
+[LOG] cortext.boundary {gap_score=0.268941, should_flush=false, drift_accum=0, gap_ref_s=31.9931, elapsed_time_ms=0, signal_gap_s=0, boundary_score=0.252368}
+[LOG] cortext.write_gate {write_accumulator=true, S_window=0.612525, refractory_mult=1, s_avg=0.611761, s_max=0.611761}
+[LOG] cortext.memory_storage {s_avg=0.611761, stored=true, s_max=0.611761, primary_modality=text, n_signals=1, embedding_id=1}
+[LOG] cortext.streaming_pacing {should_check_retrieval=true, since_last_retrieval_s=inf, adjacent_window=6, pacing_threshold=0.26, drift_acc_pacing=0}
+[LOG] cortext.working_memory {now_s=1.76633e+09, cost_total=0, gate_threshold=0.19, benefit=0.782502, S_window=0.612525, wm_slot_count=1, chunked=false, accepted=true}
+[LOG] cortext.boundary {gap_score=0.268941, should_flush=false, drift_accum=0, gap_ref_s=15.9838, elapsed_time_ms=0, signal_gap_s=0, boundary_score=0.252368}
+[LOG] cortext.write_gate {write_accumulator=true, S_window=0.665262, refractory_mult=1, s_avg=0.664498, s_max=0.664498}
+[LOG] cortext.memory_storage {s_avg=0.664498, stored=true, s_max=0.664498, primary_modality=text, n_signals=1, embedding_id=4}
+[LOG] cortext.streaming_pacing {should_check_retrieval=true, since_last_retrieval_s=0.895, adjacent_window=6, pacing_threshold=0.26, drift_acc_pacing=0}
+[LOG] cortext.working_memory {now_s=1.76633e+09, cost_total=0.14944, gate_threshold=0.19, benefit=0.622227, S_window=0.665262, wm_slot_count=2, chunked=false, accepted=true}
+[LOG] cortext.boundary {gap_score=0.268941, should_flush=false, drift_accum=0, gap_ref_s=9.35335, elapsed_time_ms=0, signal_gap_s=0, boundary_score=0.252368}
+[LOG] cortext.write_gate {write_accumulator=true, S_window=0.72688, refractory_mult=1.17937, s_avg=0.726117, s_max=0.726117}
+[LOG] cortext.memory_storage {s_avg=0.726117, stored=true, s_max=0.726117, primary_modality=text, n_signals=1, embedding_id=8}
+[LOG] cortext.streaming_pacing {should_check_retrieval=true, since_last_retrieval_s=1.01, adjacent_window=6, pacing_threshold=0.26, drift_acc_pacing=0}
+[LOG] cortext.working_memory {now_s=1.76633e+09, cost_total=0.265467, gate_threshold=0.19, benefit=0.657333, S_window=0.72688, wm_slot_count=3, chunked=false, accepted=true}
+[LOG] cortext.boundary {gap_score=0.268941, should_flush=false, drift_accum=0, gap_ref_s=6.63583, elapsed_time_ms=0, signal_gap_s=0, boundary_score=0.252368}
+[LOG] cortext.write_gate {write_accumulator=true, S_window=0.79057, refractory_mult=1.18022, s_avg=0.789806, s_max=0.789806}
+[LOG] cortext.memory_storage {s_avg=0.789806, stored=true, s_max=0.789806, primary_modality=text, n_signals=1, embedding_id=13}
+[LOG] cortext.streaming_pacing {should_check_retrieval=true, since_last_retrieval_s=0.812, adjacent_window=6, pacing_threshold=0.26, drift_acc_pacing=0}
+[LOG] cortext.working_memory {now_s=1.76633e+09, cost_total=0.345107, gate_threshold=0.19, benefit=0.691593, S_window=0.79057, wm_slot_count=3, chunked=false, accepted=true}
+[LOG] cortext.boundary {gap_score=0.268941, should_flush=false, drift_accum=0, gap_ref_s=6.80249, elapsed_time_ms=0, signal_gap_s=0, boundary_score=0.252368}
+[LOG] cortext.write_gate {write_accumulator=true, S_window=0.765576, refractory_mult=1.17778, s_avg=0.764812, s_max=0.764812}
+[LOG] cortext.memory_storage {s_avg=0.764812, stored=true, s_max=0.764812, primary_modality=text, n_signals=1, embedding_id=18}
+[LOG] cortext.streaming_pacing {should_check_retrieval=true, since_last_retrieval_s=1.249, adjacent_window=6, pacing_threshold=0.26, drift_acc_pacing=0}
+[LOG] cortext.working_memory {now_s=1.76633e+09, cost_total=0.331946, gate_threshold=0.19, benefit=0.67805, S_window=0.765576, wm_slot_count=3, chunked=false, accepted=true}
+[LOG] cortext.boundary {gap_score=0.268941, should_flush=false, drift_accum=0, gap_ref_s=6.28684, elapsed_time_ms=0, signal_gap_s=0, boundary_score=0.252368}
+[LOG] cortext.write_gate {write_accumulator=true, S_window=0.762103, refractory_mult=1.17492, s_avg=0.761339, s_max=0.761339}
+[LOG] cortext.memory_storage {s_avg=0.761339, stored=true, s_max=0.761339, primary_modality=text, n_signals=1, embedding_id=23}
+[LOG] cortext.streaming_pacing {should_check_retrieval=true, since_last_retrieval_s=1.096, adjacent_window=6, pacing_threshold=0.26, drift_acc_pacing=0}
+[LOG] cortext.working_memory {now_s=1.76633e+09, cost_total=0.349908, gate_threshold=0.19, benefit=0.660805, S_window=0.762103, wm_slot_count=3, chunked=false, accepted=true}
+[LOG] cortext.boundary {gap_score=0.268941, should_flush=false, drift_accum=0, gap_ref_s=5.17904, elapsed_time_ms=0, signal_gap_s=0, boundary_score=0.252368}
+[LOG] cortext.write_gate {write_accumulator=true, S_window=0.758926, refractory_mult=1.1798, s_avg=0.758162, s_max=0.758162}
+[LOG] cortext.memory_storage {s_avg=0.758162, stored=true, s_max=0.758162, primary_modality=text, n_signals=1, embedding_id=28}
+[LOG] cortext.streaming_pacing {should_check_retrieval=true, since_last_retrieval_s=0.767, adjacent_window=6, pacing_threshold=0.26, drift_acc_pacing=0}
+[LOG] cortext.working_memory {now_s=1.76633e+09, cost_total=0.376329, gate_threshold=0.19, benefit=0.669285, S_window=0.758926, wm_slot_count=3, chunked=false, accepted=true}
+[LOG] cortext.boundary {gap_score=0.268941, should_flush=false, drift_accum=0, gap_ref_s=4.56686, elapsed_time_ms=0, signal_gap_s=0, boundary_score=0.252368}
+[LOG] cortext.write_gate {write_accumulator=true, S_window=0.793329, refractory_mult=1.18364, s_avg=0.792565, s_max=0.792565}
+[LOG] cortext.memory_storage {s_avg=0.792565, stored=true, s_max=0.792565, primary_modality=text, n_signals=1, embedding_id=33}
+[LOG] cortext.streaming_pacing {should_check_retrieval=true, since_last_retrieval_s=0.726, adjacent_window=6, pacing_threshold=0.26, drift_acc_pacing=0}
+[LOG] cortext.working_memory {now_s=1.76633e+09, cost_total=0.360586, gate_threshold=0.19, benefit=0.694233, S_window=0.793329, wm_slot_count=3, chunked=false, accepted=true}

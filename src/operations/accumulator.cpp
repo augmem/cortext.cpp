@@ -1,7 +1,6 @@
 #include "cortext/operations/accumulator.hpp"
 
 #include "cortext/core/knobs.hpp"
-#include "cortext/operations/metrics.hpp"
 #include "cortext/processor/accumulator_state.hpp"
 #include "cortext/processor/operation_context.hpp"
 #include "cortext/signal.hpp"
@@ -54,9 +53,6 @@ UpdateAccumulator::Execute (OperationContext &context,
             ? static_cast<int64_t> (p_ctx.episode_start_ts)
             : 0;
 
-  // Get composite score (default to 0.0)
-  const double score = context.GetCompositeScore ().value_or (0.0);
-
   // Use drift step for accumulation (Section 4.4.2)
   const double drift_step = context.GetAccumulatorDriftStep ();
 
@@ -71,8 +67,6 @@ UpdateAccumulator::Execute (OperationContext &context,
       // New source - initialize accumulator state
       AccumulatorState state;
       state.Reset (signal.embedding, signal.timestamp);
-      state.s_sum = score;
-      state.s_max = score;
       state.drift_acc = drift_step * 0.5;
       state.episode_id = episode_id;
 
@@ -81,13 +75,13 @@ UpdateAccumulator::Execute (OperationContext &context,
       state.s_arousal_sum = arousal;
 
       // Track first signal for SIGNALS table (Section 4.4)
-      state.signals.push_back (CreateSignalRecord (signal, score, 0, store));
+      state.signals.push_back (CreateSignalRecord (signal, 0.0, 0, store));
 
       // Track primary modality (v2: first modality wins)
       state.primary_modality = signal.modality;
-      if (signal.embedding.size () > 0)
+      if (state.mu_acc.size () > 0)
         {
-          state.acc_signals_window.push_back (signal.embedding);
+          state.acc_signals_window.push_back (state.mu_acc);
           const int win_coh = core::WinCoh (config.stability);
           if (win_coh > 0
               && static_cast<int> (state.acc_signals_window.size ()) > win_coh)
@@ -115,8 +109,6 @@ UpdateAccumulator::Execute (OperationContext &context,
   if (acc.n_signals == 0)
     {
       acc.Reset (signal.embedding, signal.timestamp);
-      acc.s_sum = score;
-      acc.s_max = score;
       acc.drift_acc = drift_step * 0.5;
       acc.episode_id = episode_id;
 
@@ -125,13 +117,13 @@ UpdateAccumulator::Execute (OperationContext &context,
       acc.s_arousal_sum = arousal;
 
       // Track first signal for SIGNALS table (Section 4.4)
-      acc.signals.push_back (CreateSignalRecord (signal, score, 0, store));
+      acc.signals.push_back (CreateSignalRecord (signal, 0.0, 0, store));
 
       // Track primary modality (v2: first modality wins)
       acc.primary_modality = signal.modality;
-      if (signal.embedding.size () > 0)
+      if (acc.mu_acc.size () > 0)
         {
-          acc.acc_signals_window.push_back (signal.embedding);
+          acc.acc_signals_window.push_back (acc.mu_acc);
           const int win_coh = core::WinCoh (config.stability);
           if (win_coh > 0
               && static_cast<int> (acc.acc_signals_window.size ()) > win_coh)
@@ -148,7 +140,7 @@ UpdateAccumulator::Execute (OperationContext &context,
     }
 
   // Accumulate into memory
-  acc.Accumulate (signal.embedding, score, drift_step);
+  acc.Accumulate (signal.embedding, drift_step);
 
   // Track emotional metadata (Section 6.1.1)
   acc.s_emotion_max = std::max (acc.s_emotion_max, emotion_intensity);
@@ -158,7 +150,7 @@ UpdateAccumulator::Execute (OperationContext &context,
   // Serial position is the current signal count before accumulation
   const int serial_pos = static_cast<int> (acc.signals.size ());
   acc.signals.push_back (
-      CreateSignalRecord (signal, score, serial_pos, store));
+      CreateSignalRecord (signal, 0.0, serial_pos, store));
 
   // Track primary modality (v2: first modality wins)
   if (acc.primary_modality.empty ())
@@ -169,13 +161,10 @@ UpdateAccumulator::Execute (OperationContext &context,
   telemetry::RecordHistogram ("cortext.accumulator.n_signals",
                               static_cast<double> (acc.n_signals));
   telemetry::RecordHistogram ("cortext.accumulator.drift_acc", acc.drift_acc);
-  telemetry::RecordHistogram ("cortext.accumulator.s_sum", acc.s_sum);
-
   telemetry::LogDebug ("cortext.accumulator", {
     telemetry::Attribute::Int64 ("signal_count", acc.n_signals),
     telemetry::Attribute::Double ("running_mean_norm", acc.mu_acc.norm ()),
     telemetry::Attribute::Double ("drift_sum", acc.drift_acc),
-    telemetry::Attribute::Double ("score_sum", acc.s_sum),
     telemetry::Attribute::Double ("emotion_max", acc.s_emotion_max),
     telemetry::Attribute::Double ("arousal_sum", acc.s_arousal_sum),
     telemetry::Attribute::Int64 ("tracked_signals", static_cast<int64_t> (acc.signals.size ()))

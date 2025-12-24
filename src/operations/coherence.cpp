@@ -31,13 +31,33 @@ ComputeCoherence::Execute (OperationContext &context,
       acc = &it->second;
     }
 
-  // Drift step from consecutive signals (independent of accumulation state).
-  double d_step = 0.0;
-  if (acc && acc->prev_x.size () > 0
-      && acc->prev_x.size () == signal.embedding.size ()
-      && signal.embedding.size () > 0)
+  Eigen::VectorXf mu_prev;
+  Eigen::VectorXf mu_curr;
+  bool has_mu = false;
+  if (acc && signal.embedding.size () > 0)
     {
-      drift_cos = core::CosineSimilarity (signal.embedding, acc->prev_x);
+      if (acc->mu_acc.size () == signal.embedding.size () && acc->n_signals > 0)
+        {
+          mu_prev = acc->mu_acc;
+          mu_curr = mu_prev
+                    + (signal.embedding - mu_prev)
+                          / static_cast<float> (acc->n_signals + 1);
+          has_mu = true;
+        }
+      else
+        {
+          mu_prev = signal.embedding;
+          mu_curr = signal.embedding;
+          has_mu = true;
+        }
+    }
+
+  // Drift step from consecutive accumulator centroids.
+  double d_step = 0.0;
+  if (acc && acc->n_signals > 0 && has_mu
+      && mu_prev.size () == mu_curr.size () && mu_curr.size () > 0)
+    {
+      drift_cos = core::CosineSimilarity (mu_curr, mu_prev);
       d_step = std::max (1.0 - drift_cos - drift_noise_floor, 0.0);
     }
 
@@ -46,19 +66,11 @@ ComputeCoherence::Execute (OperationContext &context,
   if (acc && acc->n_signals > 0)
     {
       // Compute centroid coherence window
-      Eigen::VectorXf mu_prev = acc->mu_acc;
-      Eigen::VectorXf mu_curr;
-      if (mu_prev.size () == signal.embedding.size ()
-          && signal.embedding.size () > 0)
+      if (!has_mu)
         {
-          mu_curr = mu_prev
-                    + (signal.embedding - mu_prev)
-                          / static_cast<float> (acc->n_signals + 1);
-        }
-      else
-        {
-          mu_prev = signal.embedding;
-          mu_curr = signal.embedding;
+          mu_prev = acc->mu_acc;
+          mu_curr = mu_prev;
+          has_mu = (mu_curr.size () > 0);
         }
 
       const double eta_prev = acc->eta_acc;
@@ -122,7 +134,16 @@ ComputeCoherence::Execute (OperationContext &context,
   const int n_ctx = static_cast<int> (p_ctx.recent_context_embeddings.size ());
   double var_raw = -1.0;
   int cos_count = 0;
-  if (n_ctx >= 2 && signal.embedding.size () > 0)
+  const Eigen::VectorXf *x_ref = nullptr;
+  if (has_mu && mu_curr.size () > 0)
+    {
+      x_ref = &mu_curr;
+    }
+  else if (signal.embedding.size () > 0)
+    {
+      x_ref = &signal.embedding;
+    }
+  if (n_ctx >= 2 && x_ref && x_ref->size () > 0)
     {
       const int start = std::max (0, n_ctx - ctx_window);
       std::vector<double> cos_sims;
@@ -132,9 +153,9 @@ ComputeCoherence::Execute (OperationContext &context,
         {
           const auto &c
               = p_ctx.recent_context_embeddings[static_cast<size_t> (i)];
-          if (c.size () == signal.embedding.size ())
+          if (c.size () == x_ref->size ())
             {
-              cos_sims.push_back (core::CosineSimilarity (signal.embedding, c));
+              cos_sims.push_back (core::CosineSimilarity (*x_ref, c));
             }
         }
 
@@ -170,16 +191,8 @@ ComputeCoherence::Execute (OperationContext &context,
   double mu_prev_norm = -1.0;
   double mu_curr_norm = -1.0;
   double mu_cos = -1.0;
-  if (acc && acc->mu_acc.size () > 0 && signal.embedding.size () > 0)
+  if (has_mu && mu_prev.size () > 0 && mu_curr.size () > 0)
     {
-      const Eigen::VectorXf mu_prev = acc->mu_acc;
-      Eigen::VectorXf mu_curr = mu_prev;
-      if (acc->n_signals > 0 && mu_prev.size () == signal.embedding.size ())
-        {
-          mu_curr = mu_prev
-                    + (signal.embedding - mu_prev)
-                          / static_cast<float> (acc->n_signals + 1);
-        }
       mu_prev_norm = static_cast<double> (mu_prev.norm ());
       mu_curr_norm = static_cast<double> (mu_curr.norm ());
       mu_cos = core::CosineSimilarity (mu_curr, mu_prev);

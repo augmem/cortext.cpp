@@ -1,0 +1,88 @@
+@startuml cortext
+skinparam monochrome reverse
+
+[*] --> Cortext.Input : InputSignal
+
+state Cortext {
+  state Input <<entryPoint>>
+  state Consolidate <<entryPoint>>
+  state ModalityCheck <<choice>>
+  state ConsolidationProcess
+
+  Input --> ModalityCheck
+  Consolidate --> ConsolidationProcess
+  ConsolidationProcess : entry / cluster & summarize memories
+
+  state VisualCortex
+  VisualCortex : entry / encode vision & text
+
+  state AudioCortex
+  AudioCortex : entry / encode audio
+
+  state Amygdala
+  Amygdala : entry / project embedding onto emotion space
+
+  state PrefrontalCortex {
+  [*] --> Hippocampus
+
+  state Hippocampus {
+    state CentroidCheck <<choice>>
+    state AssignCentroid
+    AssignCentroid : entry / initialize centroid
+    state ComputeCentroid
+    ComputeCentroid : entry / update centroid
+    state ComputeDistances
+    ComputeDistances : entry / compute distances
+    state ComputeDrift
+    ComputeDrift : entry / compute drift
+    state ComputeCoherence
+    ComputeCoherence : entry / compute coherence
+    state ComputeAffect
+    ComputeAffect : entry / aggregate affect
+    state ComputePersistence
+    ComputePersistence : entry / evaluate persistence
+    state BoundaryCheck <<choice>>
+
+    [*] --> CentroidCheck
+    CentroidCheck --> AssignCentroid : [centroid empty]
+    CentroidCheck --> ComputeCentroid : [centroid exists]
+    AssignCentroid --> ComputeDistances
+    ComputeCentroid --> ComputeDistances
+    ComputeDistances --> ComputeDrift
+    ComputeDrift --> ComputeCoherence
+    ComputeCoherence --> ComputeAffect
+    ComputeAffect --> BoundaryCheck
+    BoundaryCheck --> [*] : [no boundary]
+    BoundaryCheck --> ComputePersistence : [boundary detected]
+  }
+
+  state IsFull <<choice>>
+  state EvictMemory
+  EvictMemory : entry / evict oldest memory
+  state IsLongTerm <<choice>>
+  state Store
+  Store : entry / store in working memory
+
+  ComputePersistence --> IsFull
+  IsFull --> Store : [no]
+  IsFull --> EvictMemory : [yes]
+  EvictMemory --> IsLongTerm
+  IsLongTerm --> Neocortex : [yes]
+  IsLongTerm --> [*] : [no]
+  Neocortex --> Store
+  }
+
+  state Neocortex
+  Neocortex : long-term memory storage
+
+  ModalityCheck --> VisualCortex : [vision, text]
+  ModalityCheck --> AudioCortex : [audio]
+
+  VisualCortex -down-> Amygdala : EncodedSignal
+  AudioCortex -down-> Amygdala : EncodedSignal
+  Amygdala -down-> PrefrontalCortex : EmotionSignal
+}
+
+note right : See cortext-objects.puml for type definitions
+
+@enduml

@@ -62,6 +62,7 @@
 
 // Section 4.4: Memory Accumulation
 #include "cortext/operations/accumulator.hpp"
+#include "cortext/operations/accumulator_scores.hpp"
 #include "cortext/operations/accumulator_reset.hpp"
 #include "cortext/operations/coherence.hpp"
 #include "cortext/operations/boundary.hpp"
@@ -494,6 +495,7 @@ struct Cortext::Impl
     using cortext::operations::CheckStreamingPacing;
     // Section 4.4: Memory Accumulation
     using cortext::operations::UpdateAccumulator;
+    using cortext::operations::UpdateAccumulatorScores;
     using cortext::operations::ComputeCoherence;
     using cortext::operations::DetectBoundary;
     using cortext::operations::CheckSpikeBypass;
@@ -511,9 +513,9 @@ struct Cortext::Impl
         std::make_unique<InitializeSensitivityPriors> (),
         std::make_unique<InitializeStabilityPriors> (),
 
-        std::make_unique<UpdateRecentContext> (),
-
         std::make_unique<ComputeCoherence> (),
+        // Update accumulator embedding/state before metric computation.
+        std::make_unique<UpdateAccumulator> (),
         std::make_unique<UpdateDriftAccumulation> (),
         std::make_unique<ComputeFocusSpread> (),
         std::make_unique<UpdateEmbeddingPredictionError> (),
@@ -527,12 +529,14 @@ struct Cortext::Impl
         std::make_unique<ComputeMetrics> (),
         std::make_unique<FitMetricWeightsRLS> (),
         std::make_unique<ComputeCompositeScore> (),
+        std::make_unique<UpdateAccumulatorScores> (),
 
         std::make_unique<UpdatePrecisionDelta> (),
         std::make_unique<UpdateThreshold> (),
+        // Append accumulator centroid to recent context after scoring.
+        std::make_unique<UpdateRecentContext> (),
 
         // Section 4.4: Memory Accumulation (before write gate)
-        std::make_unique<UpdateAccumulator> (),
         std::make_unique<DetectBoundary> (),
         std::make_unique<CheckSpikeBypass> (),
         std::make_unique<ComputeWriteGate> (),

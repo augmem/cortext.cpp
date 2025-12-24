@@ -16,6 +16,7 @@
 #include <chrono>
 #include <cctype>
 #include <cstdlib>
+#include <deque>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -29,6 +30,8 @@
 #include <unordered_set>
 #include <utility>
 #include <vector>
+
+#include <cortext/operations/metrics.hpp>
 
 namespace {
 
@@ -190,6 +193,7 @@ struct AnalysisConfig {
   double cadence_jitter = 0.15;
   int cadence_min_ms = 80;
   int cadence_max_ms = 1200;
+  int context_window_turns = 4;
   unsigned int seed = 1337;
   double focus = 0.3;
   double sensitivity = 0.6;
@@ -202,12 +206,22 @@ struct RetrievalExample {
   std::string memory_text;
 };
 
+struct DistSummary {
+  std::size_t count = 0;
+  double mean = 0.0;
+  double p10 = 0.0;
+  double p50 = 0.0;
+  double p90 = 0.0;
+};
+
 struct Stats {
   int conversations = 0;
   int turns = 0;
   int writes = 0;
   int retrieval_turns = 0;
   int total_retrieved = 0;
+  int interrupt_turns = 0;
+  int interrupt_turns_with_retrieval = 0;
   int wm_samples = 0;
   int wm_total_slots = 0;
   int wm_max_slots = 0;
@@ -217,6 +231,16 @@ struct Stats {
   int retrieval_overlap_count = 0;
   double wm_overlap_sum = 0.0;
   int wm_overlap_count = 0;
+  std::vector<double> novelty_values;
+  std::vector<double> relevance_values;
+  std::vector<double> surprise_values;
+  std::vector<double> retrieval_overlap_values;
+  std::vector<double> retrieval_context_overlap_values;
+  std::vector<double> interrupt_overlap_values;
+  std::vector<double> interrupt_context_overlap_values;
+  std::vector<double> interrupt_novelty_values;
+  std::vector<double> interrupt_relevance_values;
+  std::vector<double> interrupt_surprise_values;
   std::vector<RetrievalExample> low_overlap_examples;
 };
 
@@ -235,6 +259,15 @@ std::unordered_set<std::string> Tokenize(const std::string &text) {
     tokens.insert(current);
   }
   return tokens;
+}
+
+std::unordered_set<std::string> MergeTokenWindow(
+    const std::deque<std::unordered_set<std::string>> &window) {
+  std::unordered_set<std::string> merged;
+  for (const auto &tokens : window) {
+    merged.insert(tokens.begin(), tokens.end());
+  }
+  return merged;
 }
 
 double Jaccard(const std::unordered_set<std::string> &a,
@@ -259,6 +292,45 @@ double Jaccard(const std::unordered_set<std::string> &a,
     return 0.0;
   }
   return static_cast<double>(intersect) / static_cast<double>(uni);
+}
+
+double Clamp01(double v) {
+  return std::clamp(v, 0.0, 1.0);
+}
+
+double Quantile(const std::vector<double> &values, double q) {
+  if (values.empty()) {
+    return 0.0;
+  }
+  const double pos = q * static_cast<double>(values.size() - 1);
+  const std::size_t idx = static_cast<std::size_t>(std::floor(pos));
+  const std::size_t idx2 = std::min(values.size() - 1, idx + 1);
+  const double frac = pos - static_cast<double>(idx);
+  return values[idx] * (1.0 - frac) + values[idx2] * frac;
+}
+
+DistSummary Summarize(std::vector<double> values) {
+  DistSummary summary;
+  if (values.empty()) {
+    return summary;
+  }
+  summary.count = values.size();
+  const double sum = std::accumulate(values.begin(), values.end(), 0.0);
+  summary.mean = sum / static_cast<double>(values.size());
+  std::sort(values.begin(), values.end());
+  summary.p10 = Quantile(values, 0.10);
+  summary.p50 = Quantile(values, 0.50);
+  summary.p90 = Quantile(values, 0.90);
+  return summary;
+}
+
+std::optional<double> GetMetric(const cortext::Cortext::Context &ctx,
+                                cortext::operations::Metric metric) {
+  auto it = ctx.output.metrics.find(static_cast<int>(metric));
+  if (it == ctx.output.metrics.end()) {
+    return std::nullopt;
+  }
+  return it->second;
 }
 
 int CountWords(const std::string &text) {
@@ -428,6 +500,8 @@ AnalysisConfig ParseArgs(int argc, char **argv) {
       cfg.cadence_min_ms = std::stoi(*v);
     } else if (auto v = take("--cadence-max-ms=")) {
       cfg.cadence_max_ms = std::stoi(*v);
+    } else if (auto v = take("--context-window=")) {
+      cfg.context_window_turns = std::stoi(*v);
     } else if (auto v = take("--seed=")) {
       cfg.seed = static_cast<unsigned int>(std::stoul(*v));
     } else if (arg == "--no-cadence") {
@@ -465,6 +539,7 @@ int main(int argc, char **argv) {
   std::unique_ptr<cortext::Cortext> cortext;
 
   Stats stats;
+  std::deque<std::unordered_set<std::string>> recent_context_tokens;
   std::mt19937 rng(cfg.seed);
   std::uniform_real_distribution<double> jitter_dist(
       1.0 - cfg.cadence_jitter, 1.0 + cfg.cadence_jitter);
@@ -493,6 +568,7 @@ int main(int argc, char **argv) {
 
     std::cout << "\n=== Conversation " << conv_id << " ===\n";
     stats.conversations++;
+    recent_context_tokens.clear();
     int turn_idx = 0;
     bool stop_all = false;
     for (const auto &turn : conv["content"]) {
@@ -516,6 +592,8 @@ int main(int argc, char **argv) {
         if (chunk.empty()) {
           continue;
         }
+        const auto turn_tokens = Tokenize(chunk);
+        const auto context_tokens = MergeTokenWindow(recent_context_tokens);
         cortext::Cortext::Context ctx;
         try {
           ctx = cortext->ProcessText(chunk, source_id);
@@ -539,7 +617,6 @@ int main(int argc, char **argv) {
         stats.wm_max_slots = std::max(stats.wm_max_slots,
                                       static_cast<int>(ctx.working_memory.size()));
 
-        const auto turn_tokens = Tokenize(chunk);
         if (!ctx.working_memory.empty()) {
           double best_overlap = 0.0;
           for (const auto &mem : ctx.working_memory) {
@@ -551,10 +628,40 @@ int main(int argc, char **argv) {
           stats.wm_overlap_count++;
         }
 
+        if (auto relevance = GetMetric(ctx, cortext::operations::Metric::relevance)) {
+          stats.relevance_values.push_back(*relevance);
+          if (ctx.should_interrupt) {
+            stats.interrupt_relevance_values.push_back(*relevance);
+          }
+        }
+        if (auto surprise = GetMetric(ctx, cortext::operations::Metric::surprise)) {
+          stats.surprise_values.push_back(*surprise);
+          if (ctx.should_interrupt) {
+            stats.interrupt_surprise_values.push_back(*surprise);
+          }
+        }
+        if (auto mismatch = GetMetric(ctx, cortext::operations::Metric::mismatch)) {
+          const double denom = (1.0 - cfg.focus) * cfg.sensitivity;
+          double novelty_est = denom > 1e-6 ? (*mismatch / denom) : *mismatch;
+          novelty_est = Clamp01(novelty_est);
+          stats.novelty_values.push_back(novelty_est);
+          if (ctx.should_interrupt) {
+            stats.interrupt_novelty_values.push_back(novelty_est);
+          }
+        }
+
+        if (ctx.should_interrupt) {
+          stats.interrupt_turns++;
+          if (!ctx.retrieved_memory.empty()) {
+            stats.interrupt_turns_with_retrieval++;
+          }
+        }
+
         if (!ctx.retrieved_memory.empty()) {
           stats.retrieval_turns++;
           stats.total_retrieved += static_cast<int>(ctx.retrieved_memory.size());
           double best_overlap = 0.0;
+          double best_context_overlap = 0.0;
           std::string best_text;
           for (const auto &mem : ctx.retrieved_memory) {
             const std::string mem_text = MemoryToText(mem);
@@ -564,9 +671,23 @@ int main(int argc, char **argv) {
               best_overlap = overlap;
               best_text = mem_text;
             }
+            if (!context_tokens.empty()) {
+              const double ctx_overlap = Jaccard(context_tokens, mem_tokens);
+              best_context_overlap = std::max(best_context_overlap, ctx_overlap);
+            }
           }
           stats.retrieval_overlap_sum += best_overlap;
           stats.retrieval_overlap_count++;
+          stats.retrieval_overlap_values.push_back(best_overlap);
+          if (!context_tokens.empty()) {
+            stats.retrieval_context_overlap_values.push_back(best_context_overlap);
+          }
+          if (ctx.should_interrupt) {
+            stats.interrupt_overlap_values.push_back(best_overlap);
+            if (!context_tokens.empty()) {
+              stats.interrupt_context_overlap_values.push_back(best_context_overlap);
+            }
+          }
           if (!best_text.empty()) {
             RecordRetrievalExample(stats, best_overlap, chunk, best_text);
           }
@@ -593,6 +714,13 @@ int main(int argc, char **argv) {
           delay_ms = std::max(cfg.cadence_min_ms, delay_ms);
           delay_ms = std::min(cfg.cadence_max_ms, delay_ms);
           std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
+        }
+
+        if (cfg.context_window_turns > 0) {
+          recent_context_tokens.push_back(turn_tokens);
+          while (static_cast<int>(recent_context_tokens.size()) > cfg.context_window_turns) {
+            recent_context_tokens.pop_front();
+          }
         }
       }
       turn_idx++;
@@ -644,6 +772,28 @@ int main(int argc, char **argv) {
       stats.wm_overlap_count == 0
           ? 0.0
           : stats.wm_overlap_sum / static_cast<double>(stats.wm_overlap_count);
+  const double interrupt_rate =
+      stats.turns == 0 ? 0.0
+                       : static_cast<double>(stats.interrupt_turns)
+                             / static_cast<double>(stats.turns);
+  const double interrupt_with_retrieval_rate =
+      stats.interrupt_turns == 0
+          ? 0.0
+          : static_cast<double>(stats.interrupt_turns_with_retrieval)
+                / static_cast<double>(stats.interrupt_turns);
+
+  const auto novelty_summary = Summarize(stats.novelty_values);
+  const auto relevance_summary = Summarize(stats.relevance_values);
+  const auto surprise_summary = Summarize(stats.surprise_values);
+  const auto retrieval_overlap_summary = Summarize(stats.retrieval_overlap_values);
+  const auto retrieval_context_overlap_summary =
+      Summarize(stats.retrieval_context_overlap_values);
+  const auto interrupt_overlap_summary = Summarize(stats.interrupt_overlap_values);
+  const auto interrupt_context_overlap_summary =
+      Summarize(stats.interrupt_context_overlap_values);
+  const auto interrupt_novelty_summary = Summarize(stats.interrupt_novelty_values);
+  const auto interrupt_relevance_summary = Summarize(stats.interrupt_relevance_values);
+  const auto interrupt_surprise_summary = Summarize(stats.interrupt_surprise_values);
 
   std::cout << "\n=== Summary ===\n";
   std::cout << "conversations=" << stats.conversations << "\n";
@@ -656,6 +806,60 @@ int main(int argc, char **argv) {
   std::cout << "retrieval_avg_candidates=" << avg_retrieval_count << "\n";
   std::cout << "retrieval_best_overlap=" << avg_retrieval_overlap << "\n";
   std::cout << "wm_best_overlap=" << avg_wm_overlap << "\n";
+  std::cout << "interrupt_turn_rate=" << interrupt_rate << "\n";
+  std::cout << "interrupt_with_retrieval_rate=" << interrupt_with_retrieval_rate << "\n";
+
+  std::cout << "\n=== Distributions ===\n";
+  std::cout << "novelty_mean=" << novelty_summary.mean
+            << " p10=" << novelty_summary.p10
+            << " p50=" << novelty_summary.p50
+            << " p90=" << novelty_summary.p90 << "\n";
+  std::cout << "relevance_mean=" << relevance_summary.mean
+            << " p10=" << relevance_summary.p10
+            << " p50=" << relevance_summary.p50
+            << " p90=" << relevance_summary.p90 << "\n";
+  std::cout << "surprise_mean=" << surprise_summary.mean
+            << " p10=" << surprise_summary.p10
+            << " p50=" << surprise_summary.p50
+            << " p90=" << surprise_summary.p90 << "\n";
+  std::cout << "retrieval_overlap_mean=" << retrieval_overlap_summary.mean
+            << " p10=" << retrieval_overlap_summary.p10
+            << " p50=" << retrieval_overlap_summary.p50
+            << " p90=" << retrieval_overlap_summary.p90 << "\n";
+  if (retrieval_context_overlap_summary.count > 0) {
+    std::cout << "retrieval_context_overlap_mean="
+              << retrieval_context_overlap_summary.mean
+              << " p10=" << retrieval_context_overlap_summary.p10
+              << " p50=" << retrieval_context_overlap_summary.p50
+              << " p90=" << retrieval_context_overlap_summary.p90 << "\n";
+  }
+
+  if (interrupt_overlap_summary.count > 0) {
+    std::cout << "\n=== Interrupt Quality ===\n";
+    std::cout << "interrupt_overlap_mean=" << interrupt_overlap_summary.mean
+              << " p10=" << interrupt_overlap_summary.p10
+              << " p50=" << interrupt_overlap_summary.p50
+              << " p90=" << interrupt_overlap_summary.p90 << "\n";
+    if (interrupt_context_overlap_summary.count > 0) {
+      std::cout << "interrupt_context_overlap_mean="
+                << interrupt_context_overlap_summary.mean
+                << " p10=" << interrupt_context_overlap_summary.p10
+                << " p50=" << interrupt_context_overlap_summary.p50
+                << " p90=" << interrupt_context_overlap_summary.p90 << "\n";
+    }
+    std::cout << "interrupt_novelty_mean=" << interrupt_novelty_summary.mean
+              << " p10=" << interrupt_novelty_summary.p10
+              << " p50=" << interrupt_novelty_summary.p50
+              << " p90=" << interrupt_novelty_summary.p90 << "\n";
+    std::cout << "interrupt_relevance_mean=" << interrupt_relevance_summary.mean
+              << " p10=" << interrupt_relevance_summary.p10
+              << " p50=" << interrupt_relevance_summary.p50
+              << " p90=" << interrupt_relevance_summary.p90 << "\n";
+    std::cout << "interrupt_surprise_mean=" << interrupt_surprise_summary.mean
+              << " p10=" << interrupt_surprise_summary.p10
+              << " p50=" << interrupt_surprise_summary.p50
+              << " p90=" << interrupt_surprise_summary.p90 << "\n";
+  }
 
   if (!stats.low_overlap_examples.empty()) {
     std::cout << "\n=== Lowest-overlap retrieval examples ===\n";

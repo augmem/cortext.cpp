@@ -33,18 +33,23 @@ CheckStreamingPacing::Execute (OperationContext &context, Transaction &tx) const
 
   const bool at_boundary = context.GetFlushRequired ();
 
-  if (signal.embedding.size () > 0)
+  const Eigen::VectorXf *x_ptr = &signal.embedding;
+  if (acc.mu_acc.size () > 0)
+    {
+      x_ptr = &acc.mu_acc;
+    }
+  if (x_ptr->size () > 0)
     {
       if (acc.x_last_check.size () == 0
-          || acc.x_last_check.size () != signal.embedding.size ())
+          || acc.x_last_check.size () != x_ptr->size ())
         {
-          acc.x_last_check = signal.embedding;
+          acc.x_last_check = *x_ptr;
           acc.drift_acc_pacing = 0.0;
         }
       else
         {
           const double sim
-              = core::CosineSimilarity (signal.embedding, acc.x_last_check);
+              = core::CosineSimilarity (*x_ptr, acc.x_last_check);
           const double dist = 1.0 - sim;
           acc.drift_acc_pacing += dist;
         }
@@ -72,9 +77,9 @@ CheckStreamingPacing::Execute (OperationContext &context, Transaction &tx) const
   context.SetShouldCheckRetrieval (should_check);
 
   // If triggered, reset drift accumulator and update reference embedding
-  if (should_check && signal.embedding.size () > 0)
+  if (should_check && x_ptr->size () > 0)
     {
-      acc.x_last_check = signal.embedding;
+      acc.x_last_check = *x_ptr;
       acc.drift_acc_pacing = 0.0;
       p_ctx.last_retrieval_ts = now_ts;
     }

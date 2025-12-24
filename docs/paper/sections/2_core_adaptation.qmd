@@ -21,15 +21,15 @@ The attention width (in radians) controls the angular spread of the receptive fi
 
 ### Dynamic Focus Update
 
-At each signal event t with input embedding x_t:
+At each signal event t with accumulator centroid μ_acc (the running centroid of the unflushed signal group):
 
 ```
-recent_context ← tail(signal_stream, n_ctx(T))
+recent_context ← tail(signal_stream, n_ctx(T))  # signal_stream stores μ_acc
 if |recent_context| == 0:
     μ_ctx ← 0_vector; observed_cosine ← 0  # map01(0)=0.5
 else:
     μ_ctx ← mean(recent_context)
-    observed_cosine ← cos(x_t, μ_ctx)
+    observed_cosine ← cos(μ_acc, μ_ctx)
 weight_relevance_t ← EWMA(weight_relevance,
                       map01(observed_cosine), α = α_F(t))
 ```
@@ -81,7 +81,7 @@ a_map = {anger: +0.9, fear: +0.9, sadness: +0.3,
 The projection procedure:
 
 ```
-raw_cos_c ← cos(x_t, centroids[c]) for each c ∈ C
+raw_cos_c ← cos(μ_acc, centroids[c]) for each c ∈ C
 if all raw_cos_c ≤ 0:
     p_c ← uniform(1/6)  # ensures downstream mood update is well-defined
     emotion_intensity_t ← 0; valence_t ← 0.5; arousal_t ← 0

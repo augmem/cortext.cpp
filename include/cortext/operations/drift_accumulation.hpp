@@ -7,7 +7,7 @@ namespace cortext::operations
 
 /// @brief Algorithm 10.4a: Drift Accumulation Tracking.
 ///
-/// Computes: drift_accum += cosine_dist(x_t, prev_x)
+/// Computes: drift_accum += cosine_dist(μ_acc, prev_x)
 /// Runs after ComputeCoherence to leverage context state.
 class UpdateDriftAccumulation : public IOperation
 {

@@ -38,7 +38,7 @@ struct AccumulatorState
   double s_sum = 0.0;           ///< Sum of signal scores in group
   double s_max = 0.0;           ///< Max signal score in group
   int n_signals = 0;            ///< Count of signals in group
-  Eigen::VectorXf e_peak;       ///< Embedding of highest-scoring signal
+  Eigen::VectorXf e_peak;       ///< Accumulator centroid at highest score
   uint64_t t_start = 0;         ///< Timestamp of accumulation start
   uint64_t last_write_ts = 0;   ///< Timestamp of last write (for refractory)
   uint64_t last_signal_ts = 0;  ///< Timestamp of previous signal (for gap)
@@ -58,8 +58,8 @@ struct AccumulatorState
   std::string primary_modality;                       ///< "text"|"audio"|"image"
 
   // Streaming integration (Section 10)
-  Eigen::VectorXf prev_x;           ///< Previous signal embedding for refractory
-  Eigen::VectorXf x_last_check;     ///< Embedding at last pacing check
+  Eigen::VectorXf prev_x;           ///< Previous accumulator centroid for refractory
+  Eigen::VectorXf x_last_check;     ///< Accumulator centroid at last pacing check
   double drift_accum = 0.0;         ///< Cumulative drift since last interrupt
   double drift_at_last_interrupt = 0.0;  ///< Snapshot for refractory delta
   double drift_acc_pacing = 0.0;    ///< Drift accumulator for pacing gate
@@ -120,25 +120,21 @@ struct AccumulatorState
   }
 
   /**
-   * @brief Accumulate a new signal into the memory
+   * @brief Accumulate a new signal into the memory (embedding + drift only)
    * @param embedding Signal embedding
-   * @param score Composite score of the signal
    * @param drift Drift magnitude of the signal
    *
    * Updates running mean: μ_acc = ((n-1) × μ_acc + x_t) / n
    * Accumulates drift: D_acc += drift_mag_t / 2
-   * Updates scores: s_sum += score_t; if score_t > s_max: s_max=score_t,
-   * e_peak=x_t
+   * Score aggregation is handled separately on the accumulator composite.
    */
   void
-  Accumulate (const Eigen::VectorXf &embedding, double score, double drift)
+  Accumulate (const Eigen::VectorXf &embedding, double drift)
   {
     // Update running mean (Welford-style incremental mean)
     if (n_signals == 0)
       {
         mu_acc = embedding;
-        e_peak = embedding;
-        s_max = score;
       }
     else
       {
@@ -149,14 +145,6 @@ struct AccumulatorState
 
     // Accumulate drift
     drift_acc += drift * 0.5;
-
-    // Update scores
-    s_sum += score;
-    if (score > s_max)
-      {
-        s_max = score;
-        e_peak = embedding;
-      }
 
     n_signals++;
   }

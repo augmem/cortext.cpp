@@ -63,18 +63,26 @@ UpdateFocus::Execute (OperationContext &context, Transaction &tx) const
   auto &p_ctx = context.GetProcessorContext ();
   const auto &config = context.GetConfig ();
   const auto &signal = context.GetSignal ();
+  const Eigen::VectorXf *x_ptr = &signal.embedding;
+  auto acc_it = p_ctx.accumulator_states.find (signal.source_id);
+  if (acc_it != p_ctx.accumulator_states.end ()
+      && acc_it->second.mu_acc.size () > 0)
+    {
+      x_ptr = &acc_it->second.mu_acc;
+    }
+  const auto &x = *x_ptr;
 
   // Calculate the mean of the recent context embeddings.
-  // Appendix D: recent_context already includes x_t via UpdateRecentContext.
+  // recent_context excludes current accumulator centroid until after scoring.
   double observed_cosine = 0.0;
   const size_t n_ctx = p_ctx.recent_context_embeddings.size ();
   size_t ctx_window_size = 0;
   size_t denom = 0;
   size_t start = 0;
-  if (n_ctx > 0 && signal.embedding.size () > 0)
+  if (n_ctx > 0 && x.size () > 0)
     {
       Eigen::VectorXf mean_context
-          = Eigen::VectorXf::Zero (signal.embedding.size ());
+          = Eigen::VectorXf::Zero (x.size ());
       ctx_window_size = static_cast<size_t> (core::NCtx (config.stability));
       start = (n_ctx > ctx_window_size) ? (n_ctx - ctx_window_size) : 0;
       for (size_t i = start; i < n_ctx; ++i)
@@ -87,9 +95,9 @@ UpdateFocus::Execute (OperationContext &context, Transaction &tx) const
           mean_context /= static_cast<float> (denom);
         }
 
-      // Alg 2: observed_cosine ← cos(x_t, mean(recent_context))
+      // Alg 2: observed_cosine ← cos(μ_acc, mean(recent_context))
       observed_cosine
-          = core::CosineSimilarity (signal.embedding, mean_context);
+          = core::CosineSimilarity (x, mean_context);
     }
 
   // Calculate the learning rate using the schedule from Section 0.3

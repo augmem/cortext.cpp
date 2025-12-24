@@ -16,13 +16,13 @@ Refractory dynamics suppress rapid successive interrupts:
 
 Interrupt state (per stream):
 ```
-prev_x is unset on the first signal of a stream; set prev_x ← x_t after processing each signal
+prev_x is unset on the first signal of a stream; set prev_x ← μ_acc after processing each signal
 first_step ← (prev_x is unset for this stream)
 if first_step:
     # cold start: do not update drift_accum
     drift_accum ← drift_accum
 else:
-    drift_accum ← drift_accum + cosine_dist(x_t, prev_x)  # cumulative drift
+    drift_accum ← drift_accum + cosine_dist(μ_acc, prev_x)  # cumulative drift
 Δ ← drift_accum − drift_at_last_interrupt  # cumulative drift since last interrupt
 τ_refrac = lerp(24, 96, T) × lerp(1.4, 1.0, S)
 k_refrac = lerp(0.20, 0.05, T) × lerp(0.8, 1.2, F)
@@ -149,8 +149,8 @@ Streaming retrieval is gated by cumulative drift rate within the accumulation un
 where cosine_dist(u, v) = 1 − cos(u, v).
 ```
 first_step ← (x_last_check is unset for this stream)  # MUST occur once per stream
-if first_step: x_last_check ← x_t; drift_acc_pacing ← 0
-drift_acc_pacing += cosine_dist(x_t, x_last_check)
+if first_step: x_last_check ← μ_acc; drift_acc_pacing ← 0
+drift_acc_pacing += cosine_dist(μ_acc, x_last_check)
 pacing_thresh(S) = lerp(0.5, 0.1, S)
 max_wait_drift(F) = lerp(2.0, 0.5, F)
 adjacent_window(F) = round(lerp(8, 1, F))
@@ -164,7 +164,7 @@ force_check ← (drift_acc_pacing > max_wait_drift(F))
 # Adjacent-window throttling is bypassed on boundaries and force_check.
 if (drift_acc_pacing > pacing_thresh(S) OR should_flush OR force_check) AND
    (adjacent_ok OR should_flush OR force_check):
-    trigger_check(); x_last_check ← x_t; drift_acc_pacing ← 0; last_retrieval_ts ← now_ms()
+    trigger_check(); x_last_check ← μ_acc; drift_acc_pacing ← 0; last_retrieval_ts ← now_ms()
 ```
 
 High Sensitivity produces frequent checks triggered by small content shifts; high Focus enforces strict drift limits. Memory boundaries (@sec-boundary) also trigger retrieval checks to ensure context updates align with natural thought transitions.

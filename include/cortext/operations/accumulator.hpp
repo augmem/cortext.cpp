@@ -12,11 +12,10 @@ namespace cortext::operations
  * 1. Gets or creates AccumulatorState for the signal's source_id
  * 2. Updates running mean: μ_acc = ((n-1) × μ_acc + x_t) / n
  * 3. Accumulates drift: D_acc += drift_mag_t
- * 4. Updates scores: s_sum += score_t; if score_t > s_max: update peak
+ * 4. Tracks signal metadata for later score aggregation
  * 5. Updates last_signal_ts for gap detection
  *
  * Must run AFTER:
- * - ComputeCompositeScore (provides composite_score)
  * - UpdateEmbeddingPredictionError (provides drift_mag in context)
  */
 class UpdateAccumulator : public IOperation

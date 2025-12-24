@@ -165,7 +165,7 @@ hysteresis ← hysteresis_t
 
 ## Write Pacing and Memory Accumulation {#sec-write-pacing}
 
-The write gate operates per-signal, but coherent "thoughts" often span multiple signals. This section introduces memory-level accumulation that groups signals into natural units before storage decisions, inspired by Event Segmentation Theory (Zacks & Swallow, 2007).
+The write gate operates per step, but coherent "thoughts" often span multiple signals. Composite scoring is computed on the current accumulator centroid (μ_acc), so write decisions are driven by the accumulated group rather than any single raw signal. This section introduces memory-level accumulation that groups signals into natural units before storage decisions, inspired by Event Segmentation Theory (Zacks & Swallow, 2007).
 
 This approach draws from EM-LLM (Fountas et al., 2024), which segments token sequences into episodic events using surprise-based boundary detection refined by graph-theoretic cohesion metrics. Their work shows that combining prediction error signals with within-segment coherence produces boundaries strongly correlated with human event perception. Our adaptation uses EMA prediction error (surprisal_t) for surprise and cosine similarity for cohesion, while drift provides auxiliary boundary pressure, enabling modality-agnostic operation across text tokens, audio chunks, video frames, or any signal stream.
 
@@ -176,10 +176,10 @@ Each source stream maintains accumulator state:
 ```
 μ_acc ← 256d running mean embedding
 drift_acc ← accumulated drift within memory
-s_sum ← sum of signal scores in memory
-s_max ← max signal score in memory
+s_sum ← sum of accumulator scores in memory
+s_max ← max accumulator score in memory
 n ← count of signals in memory
-e_peak ← embedding of highest-scoring signal
+e_peak ← accumulator centroid at highest score
 emo_max ← 0  # max emotion_intensity_t within the unit
 arousal_sum ← 0  # sum of arousal_t within the unit (for avg)
 t_start ← now_ms()  # timestamp of accumulation start (ms since epoch)
@@ -207,12 +207,14 @@ acc_signals_window ← tail(acc_signals_window, win_coh(T))
 μ_acc ← (n × μ_acc + x_t) / (n + 1)
 n ← n + 1
 drift_acc ← drift_acc + (drift_mag_t / 2)  # accumulate normalized instantaneous drift (drift_mag_t ∈ [0,2])
-s_sum ← s_sum + score_t
 emo_max ← max(emo_max, emotion_intensity_t)
 arousal_sum ← arousal_sum + arousal_t
-if score_t > s_max:
-    s_max ← score_t; e_peak ← x_t
 last_signal_ts ← now_ms()  # update timestamp for next gap calculation (ms)
+
+# After composite scoring on μ_acc:
+s_sum ← s_sum + score_t
+if score_t > s_max:
+    s_max ← score_t; e_peak ← μ_acc
 ```
 
 ### Hybrid Drift and Coherence Tracking {#sec-drift-coherence}
