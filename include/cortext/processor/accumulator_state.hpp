@@ -34,6 +34,7 @@ struct AccumulatorState
 {
   int64_t episode_id = 0;       ///< FK to episodes table (v2 schema)
   Eigen::VectorXf mu_acc;       ///< Running mean embedding (256d)
+  Eigen::VectorXf c_t;          ///< Temporal context vector (slow drift)
   double drift_acc = 0.0;       ///< Accumulated drift within group (D_acc)
   double s_sum = 0.0;           ///< Sum of signal scores in group
   double s_max = 0.0;           ///< Max signal score in group
@@ -74,6 +75,7 @@ struct AccumulatorState
   {
     mu_acc = first_embedding;
     e_peak = first_embedding;
+    c_t = first_embedding;
     drift_acc = 0.0;
     s_sum = 0.0;
     s_max = 0.0;

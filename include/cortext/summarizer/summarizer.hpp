@@ -28,6 +28,17 @@ public:
   virtual std::string SummarizeTexts (const std::vector<std::string> &texts)
       = 0;
 
+  /// @brief Summarize multiple text fragments with a word cap (if > 0).
+  /// @param texts Vector of text fragments to summarize
+  /// @param max_words Maximum number of words to return (<=0 means no cap)
+  /// @return Abstractive summary of the combined content
+  virtual std::string
+  SummarizeTextsLimited (const std::vector<std::string> &texts, int max_words)
+  {
+    (void)max_words;
+    return SummarizeTexts (texts);
+  }
+
   /// @brief Summarize audio content into text.
   /// @param pcm Raw PCM audio samples (16kHz, mono, float32)
   /// @param num_samples Number of samples in the PCM buffer

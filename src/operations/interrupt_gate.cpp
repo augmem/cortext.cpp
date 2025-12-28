@@ -356,16 +356,18 @@ ComputeMniGateDecision::Execute (OperationContext &context, Transaction &tx) con
   const double T = cortext::core::Clamp<double> (cfg.stability,
                                                  constants::kNormalizedMin,
                                                  constants::kNormalizedMax);
+  const double F_eff = cortext::core::FocusBias (F);
+  const double S_eff = cortext::core::SensitivityBias (S);
 
   // Retrieval threshold (Section 8.1)
   const double retrieval_thresh = cortext::core::RetrievalThreshold (F);
 
   // Derived weights (raw)
-  const double w_cov_raw = cortext::core::Lerp (kCovMin, kCovMax, F);
-  const double w_rel_raw = cortext::core::Lerp (kRelMax, kRelMin, F);
-  const double w_red_raw = cortext::core::Lerp (kRedMin, kRedMax, S);
-  const double w_coh_raw = cortext::core::Lerp (kCohMin, kCohMax, S);
-  const double w_surp_raw = cortext::core::Lerp (kSurpMin, kSurpMax, S);
+  const double w_cov_raw = cortext::core::Lerp (kCovMin, kCovMax, F_eff);
+  const double w_rel_raw = cortext::core::Lerp (kRelMax, kRelMin, F_eff);
+  const double w_red_raw = cortext::core::Lerp (kRedMin, kRedMax, S_eff);
+  const double w_coh_raw = cortext::core::Lerp (kCohMin, kCohMax, S_eff);
+  const double w_surp_raw = cortext::core::Lerp (kSurpMin, kSurpMax, S_eff);
   const double total_w
       = std::max (constants::kNormEpsilon,
                   w_cov_raw + w_rel_raw + w_red_raw + w_coh_raw + w_surp_raw);
@@ -581,6 +583,8 @@ ComputeMniGateDecision::Execute (OperationContext &context, Transaction &tx) con
     telemetry::Attribute::Double ("F", F),
     telemetry::Attribute::Double ("S", S),
     telemetry::Attribute::Double ("T", T),
+    telemetry::Attribute::Double ("F_eff", F_eff),
+    telemetry::Attribute::Double ("S_eff", S_eff),
     telemetry::Attribute::Double ("coherence", coherence),
     telemetry::Attribute::Double ("coherence_penalty", coherence_penalty),
     telemetry::Attribute::Double ("surprisal", surprisal),

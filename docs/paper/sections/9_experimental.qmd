@@ -2,6 +2,8 @@
 
 We present preliminary experimental results collected from live chat sessions to validate the adaptive mechanisms.
 
+All runs reported here are generated with the `examples/topical_chat_analysis` pipeline using ImageBind embeddings; consolidation summarization/labeling (when invoked) uses gemma-3n-e2b via `third_party/litert_lm`. Evaluation logs include lexical overlap (token Jaccard) and **semantic overlap** (ImageBind cosine) for retrieval and interrupt quality. A multi-participant harness (`scripts/run_memory_harness.py`) interleaves conversations to stress long-horizon recall under shared-memory load.
+
 ## Threshold Adaptation
 The dynamic threshold (θ_dynamic) successfully tracked score distributions. In high-volatility inputs (within-accumulator drift_acc > 1.0), thresholds relaxed to ~0.15, while stable contexts tightened to ~0.27.
 

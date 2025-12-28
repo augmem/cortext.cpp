@@ -24,6 +24,7 @@ UpdatePrecisionDelta::Execute (OperationContext &context, Transaction &tx) const
 
   const double F = core::Clamp (cfg.focus, constants::kNormalizedMin,
                                 constants::kNormalizedMax);
+  const double F_eff = core::FocusBias (F);
 
   // Spec (§4.2.5, lines 627-637): Precision-Based Threshold Adjustment
   // Focus-driven precision tightens threshold when structural coherence is high:
@@ -38,13 +39,14 @@ UpdatePrecisionDelta::Execute (OperationContext &context, Transaction &tx) const
   const double kappa_prec
       = core::KappaPrec (cfg.focus, cfg.sensitivity, cfg.stability);
   const double raw_delta
-      = kappa_prec * F * (coherence_struct - kCoherenceOffset);
+      = kappa_prec * F_eff * (coherence_struct - kCoherenceOffset);
   const double delta = core::Clamp (raw_delta, -cap_prec, cap_prec);
 
   context.SetDeltaThresholdPrecision (delta);
 
   telemetry::LogDebug("cortext.precision_delta", {
     telemetry::Attribute::Double("F", F),
+    telemetry::Attribute::Double("F_eff", F_eff),
     telemetry::Attribute::Double("coherence_struct", coherence_struct),
     telemetry::Attribute::Double("hysteresis", p_ctx.hysteresis),
     telemetry::Attribute::Double("cap_prec", cap_prec),

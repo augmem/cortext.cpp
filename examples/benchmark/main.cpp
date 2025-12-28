@@ -6,13 +6,63 @@
 #include "include/output_formatter.hpp"
 
 #include <filesystem>
+#include <iomanip>
 #include <iostream>
 #include <memory>
+#include <sstream>
 
 using namespace benchmark;
 
 namespace
 {
+
+std::string
+QuoteArg (const std::string &arg)
+{
+  std::ostringstream oss;
+  oss << std::quoted (arg);
+  return oss.str ();
+}
+
+int
+RunPythonTool (const std::string &script, int argc, char *argv[], int start_idx)
+{
+  std::string python = ".venv-lfm2/bin/python";
+  if (!std::filesystem::exists (python))
+    python = "python3";
+
+  std::ostringstream cmd;
+  cmd << python << " " << QuoteArg (script);
+  for (int i = start_idx; i < argc; ++i)
+    cmd << " " << QuoteArg (argv[i]);
+
+  int status = std::system (cmd.str ().c_str ());
+  return status == 0 ? 0 : 1;
+}
+
+void
+PrintLfm2CpuRequirements ()
+{
+  std::cout << "\nLFM2 CPU prerequisites (from docs/research/lfm2.md):\n";
+  std::cout << "  Runtime:\n";
+  std::cout << "    - ExecuTorch C++ runtime with XNNPACK delegate\n";
+  std::cout << "    - Build flags: -O3 -mcpu=cortex-a76 (or equivalent)\n";
+  std::cout << "    - Quantization: 8da4w (8-bit activations, 4-bit weights)\n";
+  std::cout << "  Model artifacts:\n";
+  std::cout << "    - lfm2_audio_enc_8da4w.pte\n";
+  std::cout << "    - lfm2_backbone_8da4w.pte\n";
+  std::cout << "    - preprocessor.pte (48kHz mel, n_fft=1024, hop=480, n_mels=80)\n";
+  std::cout << "    - tokenizer.json (or tokenizer.model)\n";
+  std::cout << "  Hardware (RPi 5 target):\n";
+  std::cout << "    - 4GB or 8GB RAM, active cooler, governor=performance\n";
+  std::cout << "  Benchmark targets:\n";
+  std::cout << "    - Model size < 1.5 GB\n";
+  std::cout << "    - Audio latency < 200 ms per 5 s chunk\n";
+  std::cout << "    - Text latency < 50 ms per query\n";
+  std::cout << "    - Accuracy > 0.98 cosine similarity vs host\n";
+  std::cout << "    - Thermals < 80 C under sustained load\n";
+  std::cout << "\n";
+}
 
 std::string
 FindModelsDir (const std::string &model_name)
@@ -69,6 +119,31 @@ PrintConfiguration (const BenchmarkConfig &config)
 int
 main (int argc, char *argv[])
 {
+  for (int i = 1; i < argc; ++i)
+    {
+      std::string arg = argv[i];
+      if (arg == "--lfm2-embed-export")
+        {
+          return RunPythonTool ("examples/benchmark/lfm2_audio_embed_export.py",
+                                argc, argv, i + 1);
+        }
+      if (arg == "--lfm2-embed-bench")
+        {
+          return RunPythonTool ("examples/benchmark/lfm2_audio_embed_bench.py",
+                                argc, argv, i + 1);
+        }
+    }
+
+  for (int i = 1; i < argc; ++i)
+    {
+      std::string arg = argv[i];
+      if (arg == "--lfm2-requirements" || arg == "--lfm2-cpu")
+        {
+          PrintLfm2CpuRequirements ();
+          return 0;
+        }
+    }
+
   std::cout << "=== Cortext Multi-Backend Benchmark ===\n";
   std::cout << "Comparing LiteRT-LM vs ONNX Runtime GenAI\n";
 

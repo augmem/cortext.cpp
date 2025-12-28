@@ -8,8 +8,10 @@
 #include "cortext/store/store.hpp"
 #include "cortext/summarizer/summarizer.hpp"
 #include "cortext/telemetry/telemetry.hpp"
+#include <algorithm>
 #include <any>
 #include <ctime>
+#include <stdexcept>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -46,6 +48,11 @@ BlobToString (const std::any &val)
       const auto &blob = std::any_cast<std::vector<unsigned char>> (val);
       return std::string (blob.begin (), blob.end ());
     }
+  if (val.type () == typeid (std::vector<char>))
+    {
+      const auto &blob = std::any_cast<std::vector<char>> (val);
+      return std::string (blob.begin (), blob.end ());
+    }
   if (val.type () == typeid (std::string))
     {
       return std::any_cast<std::string> (val);
@@ -61,16 +68,38 @@ GetBlobBytes (const std::any &val)
     {
       return std::any_cast<std::vector<unsigned char>> (val);
     }
+  if (val.type () == typeid (std::vector<char>))
+    {
+      const auto &blob = std::any_cast<std::vector<char>> (val);
+      return std::vector<unsigned char> (blob.begin (), blob.end ());
+    }
   return {};
+}
+
+/// @brief Convert string payload to blob bytes.
+std::vector<unsigned char>
+StringToBlob (const std::string &text)
+{
+  return std::vector<unsigned char> (text.begin (), text.end ());
 }
 
 } // namespace
 
 ConsolidationSummarizeParams
-ConsolidationSummarizeParams::FromKnobs (double F, double /*S*/, double /*T*/)
+ConsolidationSummarizeParams::FromKnobs (double F, double /*S*/, double T)
 {
   ConsolidationSummarizeParams p;
   p.min_cluster_size_for_extraction = core::MinClusterSizeForExtraction (F);
+  const double F_eff = core::FocusBias (F);
+  const double T_eff = core::Clamp (T, 0.0, 1.0);
+  p.max_source_texts = std::max (
+      2, static_cast<int> (std::round (core::Lerp (3.0, 8.0, F_eff))));
+  p.max_total_chars
+      = static_cast<int> (std::round (core::Lerp (1200.0, 3600.0, T_eff)));
+  p.max_text_chars
+      = static_cast<int> (std::round (core::Lerp (300.0, 900.0, F_eff)));
+  p.max_summary_words
+      = static_cast<int> (std::round (core::Lerp (24.0, 96.0, T_eff)));
   return p;
 }
 
@@ -88,8 +117,7 @@ ConsolidationSummarize::Execute (OperationContext &context, Transaction &tx) con
       return;
     }
 
-  Store *store = context.GetStore ();
-  if (!store)
+  if (!context.GetStore ())
     {
       return;
     }
@@ -102,18 +130,29 @@ ConsolidationSummarize::Execute (OperationContext &context, Transaction &tx) con
 
   std::vector<ExtractionRequest> extraction_requests;
   int summary_counter = 0;
+  int summaries_with_summarizer = 0;
 
   // Get summarizer (may be null if OGA disabled)
   Summarizer *summarizer = context.GetSummarizer ();
+  if (!summarizer || !summarizer->IsAvailable ())
+    {
+      throw std::runtime_error (
+          "Consolidation summarizer unavailable: Gemma LiteRT-LM is required");
+    }
 
   for (const auto &cluster : clusters)
     {
       std::string summary_id = GenerateSummaryId (now_ts, summary_counter++);
 
       // Collect all source texts and find most representative memory
+      struct SourceItem
+      {
+        std::string text;
+        double sim;
+      };
+      std::vector<SourceItem> source_items;
+      source_items.reserve (cluster.embedding_ids.size ());
       std::vector<std::string> source_texts;
-      std::string best_text;
-      double best_sim = -1.0;
 
       // Convert cluster centroid to Eigen for comparison.
       Eigen::VectorXf centroid_eigen (
@@ -126,7 +165,7 @@ ConsolidationSummarize::Execute (OperationContext &context, Transaction &tx) con
       for (long long emb_id : cluster.embedding_ids)
         {
           // Query embedding and blob_id for this memory.
-          auto rows = store->Execute (
+          auto rows = tx.Execute (
               "SELECT e.embedding, m.blob_id "
               "FROM embeddings e "
               "LEFT JOIN memories m ON e.embedding_id = m.embedding_id "
@@ -139,19 +178,17 @@ ConsolidationSummarize::Execute (OperationContext &context, Transaction &tx) con
             }
 
           const auto &row = rows[0];
+          double sim = -1.0;
           auto it_emb = row.find ("embedding");
-          if (it_emb == row.end ())
+          if (it_emb != row.end ())
             {
-              continue;
-            }
-
-          // Decode embedding.
-          Eigen::VectorXf emb;
-          if (!core::DecodeFloatBlob (it_emb->second,
-                                       static_cast<int> (cluster.centroid.size ()),
-                                       emb))
-            {
-              continue;
+              Eigen::VectorXf emb;
+              if (core::DecodeFloatBlob (
+                      it_emb->second,
+                      static_cast<int> (cluster.centroid.size ()), emb))
+                {
+                  sim = core::CosineSimilarity (centroid_eigen, emb);
+                }
             }
 
           // Try to fetch text from objstore.
@@ -162,7 +199,7 @@ ConsolidationSummarize::Execute (OperationContext &context, Transaction &tx) con
               auto blob_id = GetBlobBytes (it_blob->second);
               if (!blob_id.empty ())
                 {
-                  auto data_rows = store->Execute (
+                  auto data_rows = tx.Execute (
                       "SELECT objstore_get(?1) AS data", { blob_id });
                   if (!data_rows.empty ())
                     {
@@ -178,41 +215,104 @@ ConsolidationSummarize::Execute (OperationContext &context, Transaction &tx) con
           // Collect text for summarizer
           if (!text.empty ())
             {
-              source_texts.push_back (text);
-            }
-
-          // Track best (most representative) for extractive fallback
-          double sim = core::CosineSimilarity (centroid_eigen, emb);
-          if (sim > best_sim)
-            {
-              best_sim = sim;
-              best_text = text;
+              source_items.push_back (SourceItem{ std::move (text), sim });
             }
         }
 
-      // Use abstractive summarizer if available, else extractive fallback
+      if (!source_items.empty ())
+        {
+          std::sort (source_items.begin (), source_items.end (),
+                     [] (const SourceItem &a, const SourceItem &b) {
+                       return a.sim > b.sim;
+                     });
+          int total_chars = 0;
+          for (const auto &item : source_items)
+            {
+              if (static_cast<int> (source_texts.size ())
+                  >= params.max_source_texts)
+                {
+                  break;
+                }
+              if (total_chars >= params.max_total_chars)
+                {
+                  break;
+                }
+              std::string trimmed = item.text;
+              if (static_cast<int> (trimmed.size ()) > params.max_text_chars)
+                {
+                  trimmed.resize (
+                      static_cast<size_t> (params.max_text_chars));
+                }
+              if (trimmed.empty ())
+                {
+                  continue;
+                }
+              int remaining = params.max_total_chars - total_chars;
+              if (remaining <= 0)
+                {
+                  break;
+                }
+              if (static_cast<int> (trimmed.size ()) > remaining)
+                {
+                  trimmed.resize (static_cast<size_t> (remaining));
+                }
+              if (trimmed.empty ())
+                {
+                  break;
+                }
+              total_chars += static_cast<int> (trimmed.size ());
+              source_texts.push_back (std::move (trimmed));
+            }
+        }
+
+      if (source_texts.empty ())
+        {
+          throw std::runtime_error (
+              "Consolidation summarization requires source text for "
+              + summary_id);
+        }
+
+      // Use abstractive summarizer (LiteRT-LM Gemma required)
       std::string summary_text;
-      if (summarizer && summarizer->IsAvailable () && !source_texts.empty ())
+      try
         {
-          try
-            {
-              summary_text = summarizer->SummarizeTexts (source_texts);
-            }
-          catch (const std::exception &)
-            {
-              // Fallback to extractive on error
-              summary_text = best_text;
-            }
+          summary_text = summarizer->SummarizeTextsLimited (
+              source_texts, params.max_summary_words);
         }
-      else
+      catch (const std::exception &e)
         {
-          summary_text = best_text;
+          throw std::runtime_error (
+              "Consolidation summarization failed for " + summary_id + ": "
+              + e.what ());
+        }
+      if (summary_text.empty ())
+        {
+          throw std::runtime_error (
+              "Consolidation summarization returned empty text for "
+              + summary_id);
+        }
+      summaries_with_summarizer++;
+
+      // 2. Store summary text as blob for downstream consolidation.
+      std::vector<unsigned char> summary_blob_id;
+      auto blob_rows
+          = tx.Execute ("SELECT objstore_put(?1) AS id",
+                        { StringToBlob (summary_text) });
+      if (!blob_rows.empty () && blob_rows[0].count ("id") != 0)
+        {
+          summary_blob_id = GetBlobBytes (blob_rows[0].at ("id"));
+        }
+      if (summary_blob_id.empty ())
+        {
+          throw std::runtime_error (
+              "Consolidation summarization failed to persist blob for "
+              + summary_id);
         }
 
-      // 2. Convert centroid to blob for storage.
+      // 3. Convert centroid to blob for storage.
       std::vector<float> centroid_blob = cluster.centroid;
 
-      // 3. Create embeddings entry for centroid (v2: minimal table).
+      // 4. Create embeddings entry for centroid (v2: minimal table).
       AddWrite (tx,
                 "INSERT INTO embeddings (embedding, created_at) VALUES (?, ?)",
                 { centroid_blob, static_cast<long long> (now_ts) });
@@ -233,16 +333,16 @@ ConsolidationSummarize::Execute (OperationContext &context, Transaction &tx) con
             }
         }
 
-      // 4. Create MEMORIES row for centroid with kind='ASSOCIATION' (v2 schema).
-      // Store summary_text as label, n_signals as cluster size.
+      // 5. Create MEMORIES row for centroid with kind='ASSOCIATION' (v2 schema).
+      // Store summary_text as label + blob, n_signals as cluster size.
       AddWrite (tx,
                 "INSERT INTO memories "
-                "(embedding_id, source_id, kind, label, start_ts, n_signals, created_at) "
-                "VALUES (?, ?, 'ASSOCIATION', ?, ?, ?, ?)",
+                "(embedding_id, source_id, kind, label, start_ts, n_signals, blob_id, created_at) "
+                "VALUES (?, ?, 'ASSOCIATION', ?, ?, ?, ?, ?)",
                 { centroid_embedding_id, summary_id, summary_text,
                   static_cast<long long> (now_ts),
                   static_cast<long long> (cluster.embedding_ids.size ()),
-                  static_cast<long long> (now_ts) });
+                  summary_blob_id, static_cast<long long> (now_ts) });
 
       // Get the memory_id for the centroid memory
       auto mem_id_rows = tx.Execute ("SELECT last_insert_rowid() AS id", {});
@@ -260,7 +360,7 @@ ConsolidationSummarize::Execute (OperationContext &context, Transaction &tx) con
             }
         }
 
-      // 5. Update cluster_id in memories for source embeddings and create
+      // 6. Update cluster_id in memories for source embeddings and create
       // ASSOCIATIONS (derived_from edges).
       for (long long emb_id : cluster.embedding_ids)
         {
@@ -299,7 +399,7 @@ ConsolidationSummarize::Execute (OperationContext &context, Transaction &tx) con
             }
         }
 
-      // 7. Queue extraction if cluster is large enough.
+      // 8. Queue extraction if cluster is large enough.
       if (static_cast<int> (cluster.embedding_ids.size ())
           >= params.min_cluster_size_for_extraction)
         {
@@ -313,13 +413,15 @@ ConsolidationSummarize::Execute (OperationContext &context, Transaction &tx) con
         }
     }
 
-  // 8. Pass extraction requests to next operation.
+  // 9. Pass extraction requests to next operation.
   const int jobs_queued = static_cast<int>(extraction_requests.size());
   context.SetExtractionRequests (std::move (extraction_requests));
 
-  telemetry::LogDebug("cortext.consolidation_summarize", {
+  telemetry::LogInfo("cortext.consolidation_summarize", {
     telemetry::Attribute::Int64("summary_count", summary_counter),
-    telemetry::Attribute::Int64("extraction_jobs_queued", jobs_queued)
+    telemetry::Attribute::Int64("extraction_jobs_queued", jobs_queued),
+    telemetry::Attribute::Int64("summaries_with_summarizer", summaries_with_summarizer),
+    telemetry::Attribute::Int64("summaries_fallback", 0)
   });
 }
 

@@ -129,6 +129,8 @@ PrintUsage (const char *program_name)
       << "  --verbose, -v               Verbose output\n"
       << "  --json                      Output results as JSON\n"
       << "  --no-memory                 Skip memory reporting\n"
+      << "  --lfm2-embed-export [args]   Export LFM2-Audio embedder to PTE\n"
+      << "  --lfm2-embed-bench [args]    Run ExecuTorch LFM2-Audio embedding benchmark\n"
       << "  --help, -h                  Show this help\n\n"
       << "Examples:\n"
       << "  " << program_name
@@ -138,7 +140,11 @@ PrintUsage (const char *program_name)
          "models/gemma3n-e2b-litert\n"
       << "  " << program_name
       << " --backend litert --model models/gemma3n-e2b-litert --audio-file "
-         "test.wav\n";
+         "test.wav\n"
+      << "  " << program_name
+      << " --lfm2-embed-export --audio-file examples/dog.wav\n"
+      << "  " << program_name
+      << " --lfm2-embed-bench --audio-file examples/dog.wav --iterations 5\n";
 }
 
 /// @brief Parse command-line arguments.

@@ -181,9 +181,11 @@ WorkingMemory::Execute (OperationContext &context, Transaction &tx) const
             ? 1.0
             : core::Clamp ((1.0 - max_cos) * 0.5, 0.0, 1.0);
 
-  const double w_alpha = core::Lerp (0.55, 0.70, cfg.focus);
-  const double w_beta = core::Lerp (0.20, 0.35, cfg.focus);
-  const double w_gamma = core::Lerp (0.10, 0.30, cfg.sensitivity);
+  const double f_eff = core::FocusBias (cfg.focus);
+  const double s_eff = core::SensitivityBias (cfg.sensitivity);
+  const double w_alpha = core::Lerp (0.55, 0.70, f_eff);
+  const double w_beta = core::Lerp (0.20, 0.35, f_eff);
+  const double w_gamma = core::Lerp (0.10, 0.30, s_eff);
   const double w_sum = std::max (constants::kTiny, w_alpha + w_beta + w_gamma);
   const double alpha = w_alpha / w_sum;
   const double beta = w_beta / w_sum;

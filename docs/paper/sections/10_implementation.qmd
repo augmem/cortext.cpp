@@ -1,5 +1,16 @@
 # Implementation Considerations {#sec-implementation}
 
+## Embedding-Only Operations
+
+All online operations (scoring, boundary detection, retrieval, gating, graph updates) operate **only** on embeddings. Raw text/audio/image content is used solely to generate embeddings; the live loop never re-enters token space. This preserves modality-agnostic behavior and prevents hidden heuristics from bypassing knob control.
+
+## Model Stack (Local Inference)
+
+* **ImageBind embeddings:** image/text/audio inputs are embedded via ImageBind executed through ONNX (default path: `models/imagebind/`).
+* **Consolidation LLM:** summarization and labeling use **gemma-3n-e2b** via `third_party/litert_lm`. This is the only generative component and runs only during consolidation (default bundle: `models/gemma3n-e2b-litert/gemma-3n-E2B-it-int4.litertlm`, with auto-selection among available `.litertlm` variants). Consolidation requires this model; there is no extractive fallback.
+
+No other model runtimes are required for the online loop; all operational decisions are embedding-space computations derived from F/S/T.
+
 ## Computational Complexity
 
 The primary per-stimulus cost is the k-nearest-neighbors (kNN) search for metrics and retrieval. With `N` stored memories, naive search is `O(N)`. We recommend maintaining an HNSW index [@malkov2018efficient] to achieve `O(log N)` retrieval.

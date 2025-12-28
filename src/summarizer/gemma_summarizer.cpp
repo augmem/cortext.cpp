@@ -1,5 +1,7 @@
 #include "cortext/summarizer/gemma_summarizer.hpp"
 
+#include <condition_variable>
+#include <mutex>
 #include <sstream>
 #include <stdexcept>
 
@@ -26,10 +28,87 @@ namespace cortext
 
 #if !defined(CORTEXT_DISABLE_LITERT)
 
+namespace
+{
+
+int
+CountWords (const std::string &text)
+{
+  int count = 0;
+  bool in_word = false;
+  for (char c : text)
+    {
+      const bool is_space = (c == ' ' || c == '\n' || c == '\t' || c == '\r');
+      if (!is_space && !in_word)
+        {
+          in_word = true;
+          count++;
+        }
+      if (is_space)
+        {
+          in_word = false;
+        }
+    }
+  return count;
+}
+
+std::string
+BuildSummaryPrompt (const std::vector<std::string> &texts)
+{
+  std::ostringstream combined;
+  combined << "Summarize the following texts into a concise summary:\n\n";
+  for (size_t i = 0; i < texts.size (); ++i)
+    {
+      combined << "Text " << (i + 1) << ":\n" << texts[i] << "\n\n";
+    }
+  return combined.str ();
+}
+
+} // namespace
+
 struct GemmaSummarizer::Impl
 {
   std::unique_ptr<litert::lm::Engine> engine;
   bool available = false;
+
+  static std::string
+  ExtractContentText (const nlohmann::json &response_message)
+  {
+    if (!response_message.contains ("content"))
+      {
+        return {};
+      }
+    const auto &content = response_message["content"];
+    if (content.is_string ())
+      {
+        return content.get<std::string> ();
+      }
+    if (content.is_array ())
+      {
+        std::ostringstream out;
+        for (const auto &item : content)
+          {
+            if (item.is_string ())
+              {
+                out << item.get<std::string> ();
+              }
+            else if (item.is_object ())
+              {
+                if (item.contains ("text") && item["text"].is_string ())
+                  {
+                    out << item["text"].get<std::string> ();
+                  }
+                else if (item.contains ("content")
+                         && item["content"].is_string ())
+                  {
+                    out << item["content"].get<std::string> ();
+                  }
+              }
+          }
+        return out.str ();
+      }
+    return {};
+  }
 
   explicit Impl (const std::string &model_path)
   {
@@ -83,59 +162,113 @@ struct GemmaSummarizer::Impl
   }
 
   std::string
-  Generate (const std::string &prompt)
+  Generate (const std::string &prompt, int max_words)
   {
     if (!available || !engine)
       {
         throw std::runtime_error ("GemmaSummarizer: Model not available");
       }
 
-    // Create default conversation config (no constrained decoding for
-    // summarization)
-    auto config_result
-        = litert::lm::ConversationConfig::CreateDefault (*engine);
-
-    if (!config_result.ok ())
+    litert::lm::SessionConfig session_config
+        = litert::lm::SessionConfig::CreateDefault ();
+    auto session_result = engine->CreateSession (session_config);
+    if (!session_result.ok ())
       {
         throw std::runtime_error (
-            "GemmaSummarizer: Failed to create conversation config");
+            "GemmaSummarizer: Failed to create session");
       }
 
-    // Create conversation
-    auto conversation_result
-        = litert::lm::Conversation::Create (*engine, *config_result);
-    if (!conversation_result.ok ())
-      {
-        throw std::runtime_error (
-            "GemmaSummarizer: Failed to create conversation");
-      }
-    auto &conversation = *conversation_result;
+    std::vector<litert::lm::InputData> inputs;
+    inputs.emplace_back (litert::lm::InputText (prompt));
 
-    // Send message
-    litert::lm::JsonMessage message
-        = { { "role", "user" }, { "content", prompt } };
-    auto response = conversation->SendMessage (litert::lm::Message{ message });
-
-    if (!response.ok ())
+    auto prefill_status = (*session_result)->RunPrefill (inputs);
+    if (!prefill_status.ok ())
       {
-        throw std::runtime_error ("GemmaSummarizer: Inference failed");
+        throw std::runtime_error ("GemmaSummarizer: Prefill failed");
       }
 
-    // Extract text content from response
-    try
+    auto decode_config = litert::lm::DecodeConfig::CreateDefault ();
+
+    if (max_words <= 0)
       {
-        auto &response_message = std::get<litert::lm::JsonMessage> (*response);
-        if (response_message.contains ("content"))
+        auto response = (*session_result)->RunDecode (decode_config);
+        if (!response.ok ())
           {
-            return response_message["content"].get<std::string> ();
+            throw std::runtime_error ("GemmaSummarizer: Decode failed");
           }
-      }
-    catch (const std::exception &)
-      {
-        // Return empty string on parse error
+
+        const auto &texts = response->GetTexts ();
+        if (texts.empty ())
+          {
+            return {};
+          }
+        return texts.front ();
       }
 
-    return {};
+    std::mutex mu;
+    std::condition_variable cv;
+    bool done = false;
+    bool requested_cancel = false;
+    bool has_error = false;
+    std::string error_message;
+    std::string output;
+
+    auto callback =
+        [&] (absl::StatusOr<litert::lm::Responses> responses) mutable {
+          std::unique_lock<std::mutex> lock (mu);
+          if (!responses.ok ())
+            {
+              has_error = true;
+              error_message = responses.status ().ToString ();
+              done = true;
+              cv.notify_all ();
+              return;
+            }
+          const auto &task_state = responses->GetTaskState ();
+          if (litert::lm::IsTaskEndState (task_state))
+            {
+              done = true;
+              cv.notify_all ();
+              return;
+            }
+          if (!responses->GetTexts ().empty ())
+            {
+              output += responses->GetTexts ()[0];
+              if (!requested_cancel && CountWords (output) >= max_words)
+                {
+                  requested_cancel = true;
+                  (*session_result)->CancelProcess ();
+                }
+            }
+        };
+
+    auto async_status = (*session_result)->RunDecodeAsync (callback,
+                                                           decode_config);
+    if (!async_status.ok ())
+      {
+        throw std::runtime_error (
+            "GemmaSummarizer: Failed to start async decode");
+      }
+
+    {
+      std::unique_lock<std::mutex> lock (mu);
+      cv.wait (lock, [&] { return done; });
+    }
+
+    auto wait_status = (*session_result)->WaitUntilDone ();
+    if (!wait_status.ok () && !requested_cancel)
+      {
+        throw std::runtime_error (
+            "GemmaSummarizer: WaitUntilDone failed");
+      }
+
+    if (has_error && !requested_cancel)
+      {
+        throw std::runtime_error (
+            "GemmaSummarizer: Decode failed: " + error_message);
+      }
+
+    return output;
   }
 
   std::string
@@ -199,10 +332,7 @@ struct GemmaSummarizer::Impl
     try
       {
         auto &response_message = std::get<litert::lm::JsonMessage> (*response);
-        if (response_message.contains ("content"))
-          {
-            return response_message["content"].get<std::string> ();
-          }
+        return ExtractContentText (response_message);
       }
     catch (const std::exception &)
       {
@@ -227,20 +357,19 @@ GemmaSummarizer::operator= (GemmaSummarizer &&) noexcept = default;
 std::string
 GemmaSummarizer::SummarizeTexts (const std::vector<std::string> &texts)
 {
+  return SummarizeTextsLimited (texts, 0);
+}
+
+std::string
+GemmaSummarizer::SummarizeTextsLimited (const std::vector<std::string> &texts,
+                                        int max_words)
+{
   if (texts.empty ())
     {
       return {};
     }
-
-  // Combine texts with separators
-  std::ostringstream combined;
-  combined << "Summarize the following texts into a concise summary:\n\n";
-  for (size_t i = 0; i < texts.size (); ++i)
-    {
-      combined << "Text " << (i + 1) << ":\n" << texts[i] << "\n\n";
-    }
-
-  return impl_->Generate (combined.str ());
+  const std::string prompt = BuildSummaryPrompt (texts);
+  return impl_->Generate (prompt, max_words);
 }
 
 std::string

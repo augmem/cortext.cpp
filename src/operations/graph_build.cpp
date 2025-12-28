@@ -32,6 +32,7 @@ struct MemoryData
   long long memory_id;
   long long embedding_id;
   long long created_at;
+  double boundary_score;
   Eigen::VectorXf embedding;
 };
 
@@ -46,6 +47,7 @@ LoadClusterMemories (Store *store)
   auto rows = store->Execute (
       "SELECT m.memory_id, m.embedding_id, m.cluster_id, "
       "COALESCE(m.end_ts, m.start_ts, m.created_at, 0) AS created_at, "
+      "COALESCE(m.boundary_score, 0.0) AS boundary_score, "
       "e.embedding "
       "FROM memories m "
       "JOIN embeddings e ON m.embedding_id = e.embedding_id "
@@ -61,6 +63,7 @@ LoadClusterMemories (Store *store)
       auto it_emb_id = row.find ("embedding_id");
       auto it_cluster = row.find ("cluster_id");
       auto it_ts = row.find ("created_at");
+      auto it_boundary = row.find ("boundary_score");
       auto it_emb = row.find ("embedding");
 
       if (it_mem_id == row.end () || it_emb_id == row.end ()
@@ -115,6 +118,15 @@ LoadClusterMemories (Store *store)
       else
         {
           data.created_at = 0;
+        }
+
+      if (it_boundary != row.end () && it_boundary->second.type () == typeid (double))
+        {
+          data.boundary_score = std::any_cast<double> (it_boundary->second);
+        }
+      else
+        {
+          data.boundary_score = 0.0;
         }
 
       // Decode embedding
@@ -244,6 +256,54 @@ BuildCausalEdges (Transaction &tx,
     }
 }
 
+/// @brief Build sequential edges within clusters.
+void
+BuildSequentialEdges (Transaction &tx,
+                      const std::map<int, std::vector<MemoryData>> &clusters,
+                      double tau_s, long long now_ts)
+{
+  for (const auto &[cluster_id, memories] : clusters)
+    {
+      (void)cluster_id;
+      if (memories.size () < 2)
+        {
+          continue;
+        }
+      for (size_t i = 0; i + 1 < memories.size (); ++i)
+        {
+          const auto &m_i = memories[i];
+          const auto &m_j = memories[i + 1];
+          const double gap_s = std::max (
+              0.0, static_cast<double> (m_j.created_at - m_i.created_at) / 1000.0);
+          const double w_seq = core::Clamp (
+              std::exp (-gap_s / std::max (tau_s, 1e-6))
+                  * (1.0 - core::Clamp (m_j.boundary_score, 0.0, 1.0)),
+              0.0, 1.0);
+          Add (tx,
+               "INSERT OR REPLACE INTO associations "
+               "(source_memory_id, target_memory_id, edge_type, weight, "
+               "last_reinforced) "
+               "VALUES (?, ?, 'next_in_episode', ?, ?)",
+               { m_i.memory_id, m_j.memory_id, w_seq, now_ts });
+          Add (tx,
+               "INSERT OR REPLACE INTO associations "
+               "(source_memory_id, target_memory_id, edge_type, weight, "
+               "last_reinforced) "
+               "VALUES (?, ?, 'prev_in_episode', ?, ?)",
+               { m_j.memory_id, m_i.memory_id, w_seq, now_ts });
+          if (m_j.boundary_score < 0.3)
+            {
+              Add (tx,
+                   "INSERT OR REPLACE INTO associations "
+                   "(source_memory_id, target_memory_id, edge_type, weight, "
+                   "last_reinforced) "
+                   "VALUES (?, ?, 'within_same_event', ?, ?)",
+                   { m_i.memory_id, m_j.memory_id, w_seq, now_ts });
+            }
+        }
+    }
+}
+
 /// @brief Build contradiction edges within clusters.
 /// Creates 'contradicts' edges in ASSOCIATIONS between memories
 /// with cosine similarity below threshold (negative similarity).
@@ -321,6 +381,7 @@ BuildGraphFromConsolidation::Execute (OperationContext &context, Transaction &tx
   const double implies_drift_threshold = core::ImpliesDriftThreshold (cfg.stability);
   const double contradiction_threshold = core::ContradictionThreshold ();
   const double reinforcement_decay = core::ReinforcementDecay (cfg.stability);
+  const double tau_seq = core::Lerp (10.0, 60.0, cfg.stability);
 
   // V2 schema: Nodes are MEMORIES, edges are ASSOCIATIONS
   // No need to create graph_nodes or graph_edges tables - using V2 tables
@@ -343,9 +404,12 @@ BuildGraphFromConsolidation::Execute (OperationContext &context, Transaction &tx
       // 4) Contradiction edges: memory <-> memory for opposing semantics
       // Creates 'contradicts' edges for strong negative similarity
       BuildContradictionEdges (tx, clusters, contradiction_threshold, now_ts);
+
+      // 5) Sequential edges: preserve episode order
+      BuildSequentialEdges (tx, clusters, tau_seq, now_ts);
     }
 
-  // 5) Decay reinforcement edges (created during retrieval)
+  // 6) Decay reinforcement edges (created during retrieval)
   DecayReinforcementEdges (tx, reinforcement_decay);
 
   // Count associations for logging

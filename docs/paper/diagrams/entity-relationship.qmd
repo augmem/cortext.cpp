@@ -1,3 +1,17 @@
+Note: All knob-derived parameters in online operations use the midpoint‑biased
+knobs F̃ and S̃ defined in Section 1. This does not change the schema, but it
+does affect the interpretation of threshold- and gate-related fields.
+Note: Consolidation summaries require Gemma (LiteRT-LM); there is no extractive
+fallback when the model is unavailable.
+Note: Consolidation candidates are limited to LONG_TERM/ASSOCIATION memories
+with non-null blob_id so summarization always has source text.
+Note: Summarization input is capped by knob-derived limits (max texts and
+total chars) to bound consolidation latency.
+Note: Summarization output length is enforced by streaming decode cancel at
+max_summary_words, not prompt instructions.
+Note: Consolidation is external-only; callers invoke `cortext.consolidate()`
+explicitly rather than scheduling it automatically.
+
 ```{mermaid}
 erDiagram
     direction TB
@@ -26,7 +40,7 @@ erDiagram
         int episode_id PK
         int start_ts "timestamp (ms)"
         int end_ts "timestamp (ms), IDX partial NULL"
-        text boundary_type "drift|explicit|timeout"
+        text boundary_type "drift|explicit|timeout|capacity"
         blob centroid "256d aggregate vector"
         int created_at "timestamp (ms)"
     }
@@ -51,9 +65,14 @@ erDiagram
         real s_avg "average signal score"
         real s_emotion_max "max emotion_intensity_t during formation"
         real s_arousal_avg "mean arousal_t during formation"
+        real boundary_score "Section 3.1.3 change-point probability"
         blob emotion "6d vector - Section 2.2.2"
         blob ambient_mood "6d vector - Section 2.2.4"
         real strength "Section 5.1, IDX with last_access"
+        real trace_fast "Section 5.1.1 multi-timescale trace"
+        real trace_med "Section 5.1.1 multi-timescale trace"
+        real trace_slow "Section 5.1.1 multi-timescale trace"
+        real trace_ultra "Section 5.1.1 multi-timescale trace"
         real use_frequency "Section 5.1 EWMA"
         real stability "Section 5.3.3"
         real connectivity "Section 7.2 graph metric"
@@ -68,6 +87,7 @@ erDiagram
         int cluster_id FK "Section 7.3, IDX partial NOT NULL"
         int last_access "timestamp (ms)"
         int created_at "timestamp (ms)"
+        blob context "Section 3.1.4 temporal context"
         int retrieved_count "Section 5.2"
         int used_count "Section 5.2"
         real influence_factor "Section 5.2"
@@ -78,6 +98,10 @@ erDiagram
         int recovery_time_start "Section 6.4 (ms)"
         real suppression "Section 8.4 - competing memory inhibition"
         int suppression_ts "timestamp (ms)"
+        text source_origin "Section 8.8 provenance"
+        real source_reliability "Section 8.8 reliability prior"
+        int source_contradiction_count "Section 8.8"
+        int source_last_verified_ts "Section 8.8 (ms)"
         int flashbulb "Section 8.7 - boolean"
         real emotional_intensity "Section 8.7"
         real half_life_bonus "Section 8.7"
@@ -85,6 +109,8 @@ erDiagram
         int gist_components "Section 8.7"
         int cascade_radius "Section 8.7"
         real cascade_decay "Section 8.7"
+        real tag_strength "Section 8.7.1 synaptic tagging"
+        int tag_expires_at "Section 8.7.1 (ms)"
     }
 
     %% Signals: Discrete inputs with per-signal metrics
@@ -205,6 +231,7 @@ erDiagram
         real drift_acc_pacing "streaming pacing accumulator (per stream)"
         blob x_last_check "embedding at last trigger_check (per stream; 256d)"
         blob prev_x "previous signal embedding for this stream (per stream; 256d) used when referencing x_{t−1}"
+        blob c_t "temporal context state (Section 3.1.4)"
         int t_start "memory start timestamp (ms)"
         int last_write_ts "for write refractory (ms)"
         int last_signal_ts "for gap detection (ms)"
@@ -270,6 +297,11 @@ erDiagram
         int last_interrupt_tick
         int last_signal_timestamp
         int updated_at "timestamp (ms)"
+        real outcome_pred "Section 5.5 outcome prediction"
+        real neuromod_ach "Section 4.1 neuromodulator state"
+        real neuromod_ne "Section 4.1 neuromodulator state"
+        real neuromod_da "Section 4.1 neuromodulator state"
+        real osc_phase "Section 4.1 oscillatory gating"
         blob write_rate_timestamps "Section 2.2"
         real w_relevance "Section 3.2 blender"
         real w_mismatch "Section 3.2 blender"

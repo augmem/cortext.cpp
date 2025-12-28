@@ -202,3 +202,62 @@ half_life_t ← EWMA(half_life_{t−1}, target_half_life_t,
 ```
 half_life ← half_life_t
 ```
+
+## Neuromodulator Layer (Internal Mapping)
+
+To keep the three-knob UI while enabling more biologically faithful control, Cortext maps the knobs and internal signals to continuous neuromodulator-like variables. These are **not** additional user knobs; they are latent control signals derived from F/S/T and real-time stream statistics.
+
+We define three modulators:
+
+* **ACh-like (acetylcholine):** encode vs retrieve bias.
+* **NE-like (norepinephrine):** arousal + interrupt urgency.
+* **DA-like (dopamine):** reward prediction error + value learning.
+
+Baseline levels come from knobs; phasic bursts come from current signals:
+
+```
+ACh_base(F,S,T) = clamp(0.15 + 0.55S + 0.25(1 − T) − 0.15F, 0, 1)
+NE_base(F,S,T)  = clamp(0.10 + 0.60S + 0.20(1 − T), 0, 1)
+DA_base(F,S,T)  = clamp(0.10 + 0.40F + 0.30T, 0, 1)
+
+ACh_t ← clamp(ACh_base + 0.35 × novelty_t − 0.20 × retrieval_pressure, 0, 1)
+NE_t  ← clamp(NE_base  + 0.50 × surprisal_t + 0.30 × arousal_t, 0, 1)
+DA_t  ← clamp(DA_base  + max(0, δ_reward_t), 0, 1)
+```
+
+Where `retrieval_pressure` is the normalized retrieval queue depth, and `δ_reward_t` is a reward prediction error derived from downstream outcome signals (see @sec-structural-metrics). These modulators drive internal gates without introducing new user-facing parameters:
+
+```
+encode_bias ← ACh_t × (0.7 + 0.3S)
+retrieve_bias ← 1 − encode_bias
+write_threshold_scale ← 1 − 0.3 × NE_t
+reconsolidation_scale ← 1 + 0.4 × ACh_t
+retrieval_competition_scale ← 1 + 0.5 × NE_t
+value_update_gain ← 0.5 + 0.5 × DA_t
+```
+
+## Oscillatory Gating (No Discrete Modes)
+
+To reduce interference without introducing hard modes, Cortext adds a continuous oscillatory gate that gently alternates encode- vs retrieve-bias over time.
+
+```
+ω(F,S,T) = lerp(0.03, 0.12, S) × lerp(1.2, 0.8, T)  # rad/s
+φ_t ← (φ_{t−1} + ω × Δt) mod 2π
+osc_t ← 0.5 + 0.5 × sin(φ_t)
+
+encode_bias_t ← encode_bias × (0.6 + 0.4 × osc_t)
+retrieve_bias_t ← 1 − encode_bias_t
+```
+
+The oscillator is continuous and **never** switches modes; it merely biases thresholds and competition in a time-varying, biologically plausible manner.
+
+## Meta-Learning Knob-to-Parameter Maps
+
+All knob-derived ranges and coefficient tables (e.g., bootstrap coefficients for RLS, lerp endpoints, base rates) are treated as **species priors**. They remain the **only** user-visible controls, but are made learnable at deployment or per-user:
+
+```
+p(F,S,T) = lerp(a, b, κ(F,S,T))
+κ(F,S,T) = sigmoid(α_F F + α_S S + α_T T + β)
+```
+
+The coefficients `{α_F, α_S, α_T, β, a, b}` are updated from observed outcomes (acceptance, uncertainty reduction, task reward), while the UI still exposes only F/S/T. This preserves simplicity while allowing the system to adapt its parameterization over time.

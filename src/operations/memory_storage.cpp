@@ -2,6 +2,7 @@
 #include "cortext/processor/accumulator_state.hpp"
 #include "cortext/processor/operation_context.hpp"
 #include "cortext/signal.hpp"
+#include "cortext/core/sparse.hpp"
 #include "cortext/store/schema_helpers.hpp"
 #include "cortext/store/store.hpp"
 #include "cortext/store/utils.hpp"
@@ -53,6 +54,32 @@ SerializeEmotionVector (const std::array<double, 6> &vec)
   std::vector<char> blob (sizeof (double) * 6);
   std::memcpy (blob.data (), vec.data (), blob.size ());
   return blob;
+}
+
+/// @brief Map source_id to an origin label for source monitoring.
+std::string
+SourceOriginFor (const std::string &source_id)
+{
+  if (source_id.find ("user") != std::string::npos)
+    return "user";
+  if (source_id.find ("assistant") != std::string::npos)
+    return "assistant";
+  if (source_id.find ("system") != std::string::npos)
+    return "system";
+  return "external";
+}
+
+/// @brief Baseline source reliability prior.
+double
+SourcePriorReliability (const std::string &origin)
+{
+  if (origin == "user")
+    return 0.8;
+  if (origin == "assistant")
+    return 0.6;
+  if (origin == "system")
+    return 0.9;
+  return 0.7;
 }
 
 } // namespace
@@ -114,6 +141,8 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
       const uint64_t start_ts = acc.t_start;
       const uint64_t end_ts = signal.timestamp;
       const double drift_mag = acc.drift_acc;
+      const double boundary_score
+          = context.GetBoundaryScore ().value_or (0.0);
 
       // 2. Get emotion and mood from context (Section 6.1.1)
       const auto &emotion_probs = context.GetEmotionProbabilities ();
@@ -124,6 +153,9 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
       // 3. Determine primary modality from tracked signals
       const std::string primary_modality
           = GetPrimaryModality (acc.signals, signal.modality);
+
+      const std::string origin = SourceOriginFor (signal.source_id);
+      const double source_reliability = SourcePriorReliability (origin);
 
       // 4. Require tracked per-signal records for persistence.
       if (acc.signals.empty ())
@@ -146,6 +178,7 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
                  [] (const SignalRecord *a, const SignalRecord *b) {
                    return a->serial_position < b->serial_position;
                  });
+      const bool text_mode = (primary_modality == "text");
       for (const auto *rec : ordered_signals)
         {
           if (!rec || rec->blob_id.empty ())
@@ -159,6 +192,10 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
               auto bytes = BlobFromAny (blob_rows[0].at ("data"));
               if (!bytes.empty ())
                 {
+                  if (text_mode && !content_payload.empty ())
+                    {
+                      content_payload.push_back ('\n');
+                    }
                   content_payload.insert (content_payload.end (),
                                           bytes.begin (), bytes.end ());
                 }
@@ -213,20 +250,30 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
           episode_id_any = static_cast<long long> (p_ctx.episode_start_ts);
         }
 
+      std::vector<float> ctx_vec;
+      if (acc.c_t.size () > 0)
+        {
+          ctx_vec = EigenToFloatVec (acc.c_t);
+        }
+
       savepoint->Execute (
           "INSERT INTO memories ("
           "  embedding_id, source_id, kind, start_ts, end_ts, n_signals, "
-          "  modality, s_max, s_avg, s_emotion_max, s_arousal_avg, drift_mag, "
-          "  emotion, ambient_mood, episode_id, "
-          "  blob_id, created_at"
-          ") VALUES (?, ?, 'LONG_TERM', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          "  modality, s_max, s_avg, s_emotion_max, s_arousal_avg, boundary_score, "
+          "  drift_mag, emotion, ambient_mood, episode_id, "
+          "  blob_id, created_at, context, source_origin, source_reliability, "
+          "  trace_fast, trace_med, trace_slow, trace_ultra"
+          ") VALUES (?, ?, 'LONG_TERM', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
           { embedding_id, signal.source_id, static_cast<long long> (start_ts),
             static_cast<long long> (end_ts),
             static_cast<long long> (n_signals), primary_modality,
-            s_max, s_avg, s_emotion_max, s_arousal_avg, drift_mag,
-            emotion_blob, mood_blob, episode_id_any,
+            s_max, s_avg, s_emotion_max, s_arousal_avg, boundary_score,
+            drift_mag, emotion_blob, mood_blob, episode_id_any,
             content_blob_id.empty () ? std::any () : std::any (content_blob_id),
-            static_cast<long long> (end_ts) });
+            static_cast<long long> (end_ts),
+            ctx_vec.empty () ? std::any () : std::any (ctx_vec),
+            origin, source_reliability,
+            1.0, 0.0, 0.0, 0.0 });
 
       // 8. Get memory_id from inserted memories row
       auto mem_id_rows
@@ -278,6 +325,16 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
 
       // Set stored_embedding_id in context for output
       context.SetStoredEmbeddingId (embedding_id);
+      if (memory_id > 0 && embedding_to_store.size () > 0)
+        {
+          const int k_key = core::SparseKeySize (context.GetConfig ().focus);
+          const std::string key = core::SparseKey (embedding_to_store, k_key);
+          if (!key.empty ())
+            {
+              p_ctx.index_store[key].push_back (memory_id);
+              p_ctx.index_reverse[memory_id] = key;
+            }
+        }
       telemetry::AddCounter ("cortext.memory_storage.stored_total", 1);
       telemetry::AddCounter ("cortext.memory_storage.signals_written_total",
                              static_cast<int64_t> (n_signals));

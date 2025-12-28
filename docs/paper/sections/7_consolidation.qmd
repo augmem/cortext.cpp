@@ -2,14 +2,50 @@
 
 The consolidation system transforms episodic memories into semantic structures through clustering, summarization, and knowledge graph construction. Memory-level storage (@sec-write-pacing) ensures each embedding represents a coherent unit.
 
+## Complementary Learning Systems Split (Hippocampus vs Cortex)
+
+Cortext implements a true **Complementary Learning Systems (CLS)** split. The episodic stream remains intact, but a separate **sparse index store** supports rapid binding and pattern completion (hippocampal analogue). Consolidation then transfers structure into the semantic graph and long-lived embeddings (cortical analogue) via replay.
+
+* **Episodic stream (hippocampus-like):** `memory_stream` of coherent units + full metadata.
+* **Index store (hippocampus-like):** sparse keys for fast binding, disambiguation, and pattern completion.
+* **Semantic graph + long-lived embeddings (cortex-like):** consolidated, slowly-changing semantic structures.
+
+This split makes “episodic vs semantic” a functional distinction rather than a storage convention.
+
+## Pattern Separation and Completion {#sec-pattern-separation}
+
+Each memory builds a **sparse key** for pattern separation. Retrieval can then perform **pattern completion** from partial cues.
+
+```
+proj ← W_sparse × e_rep          # learned projection
+key  ← topk_binary(proj, k = round(lerp(16, 64, F)))  # sparsify
+index_store[key].append(memory_id)
+```
+
+Pattern completion from a partial cue uses the sparse key to seed retrieval:
+```
+cue_key ← topk_binary(W_sparse × q_partial, k)
+seed_ids ← index_store.lookup(cue_key, radius = lerp(1, 3, S))
+```
+
+These seeds are merged with vector and graph candidates, improving disambiguation when content similarity is ambiguous.
+
+On write, every memory updates the index store:
+```
+index_store[key].append(memory_id)
+```
+
 ## Consolidation Triggers {#sec-consolidation-triggers}
 
-Consolidation operates on stored memory representatives (e_rep from @sec-rep-embedding), not individual signals. It activates under capacity, rate, or temporal conditions:
+Consolidation operates on stored memory representatives (e_rep from @sec-rep-embedding), not individual signals. Candidates must be **LONG_TERM or ASSOCIATION memories with stored content blobs** (blob_id present) so summarization always has source text. **Consolidation is only initiated via an explicit API call (`Consolidate()`).** The core runtime does not auto-trigger consolidation.
+
+External schedulers can still **derive a trigger policy** from the knobs. One recommended heuristic is:
 
 ```
 should_consolidate = (memory_count > consolidation_threshold) OR
                       (m_rate < rate_target / 2) OR
-                      (elapsed_time > consolidation_interval)
+                      (elapsed_time > consolidation_interval) OR
+                      (tagged_memory_pending == true)
 ```
 
 Definitions (knob-derived):
@@ -26,9 +62,11 @@ rate_consolidate = (1 / max(consolidation_interval, 1)) ×
                     (0.3 + 0.7T) × (1 − 0.5S)
 ```
 
+When `Consolidate()` is invoked and no candidates fall below the periphery cutoff, the forced path selects the lowest-scoring `w_ret(T)` memories; if clustering still yields no groups, a fallback mini-cluster is formed around the lowest-score item using its top cosine neighbors. This keeps replay/summarization active while remaining fully knob-derived.
+
 ### Activity-Aware Scheduling {#sec-activity}
 
-Consolidation runs during idle periods and preempts for retrieval. The is_accumulating_memory check ensures consolidation doesn't interrupt mid-memory accumulation:
+If the caller wants idle-aware scheduling, the following knob-derived gating can be applied **externally**. The is_accumulating_memory check ensures consolidation doesn't interrupt mid-memory accumulation:
 
 ```
 idle_required(T) = round(0.25 × win_rate_s(T))
@@ -40,6 +78,10 @@ should_start = (NOT is_accumulating_memory) AND
 ```
 
 Consolidation begins only after the current memory has been flushed (@sec-boundary) and the idle period has elapsed. On retrieval events, consolidation pauses, commits micro-batches, and resumes when idle.
+
+**Implementation note (topical_chat_analysis):** consolidation is **external-only**.
+The runtime does not schedule consolidation automatically; the caller must
+invoke `Consolidate()` explicitly (e.g., at a known idle window).
 
 ## Consolidation Scoring
 
@@ -60,9 +102,21 @@ weight_strength = T; weight_redundancy = F; weight_connectivity = S; weight_stab
 
 Low-scoring memories are marked for merging.
 
-## Clustering and Summarization
+## Replay-Based Consolidation and Summaries
 
-Marked memories cluster via density-based methods (e.g., DBSCAN) or k-means using embedding similarity:
+Consolidation proceeds via **generative replay** rather than one-shot merges. Representative episodes are re-encoded and used to update semantic structures, reducing drift and preserving detail.
+
+**Summarization + labeling engine:** Consolidation is the only stage that invokes a generative model. Summaries and labels are produced by **gemma-3n-e2b** running through `third_party/litert_lm`. All other operations remain embedding-only. **There is no extractive fallback**: if Gemma is unavailable or summarization fails, consolidation raises an error rather than silently degrading.
+
+Replay batch:
+```
+replay_batch ← sample(memory_stream, weights = strength(m) × (1 + tag_bonus(m)))
+for m in replay_batch:
+    reencoded ← encode(fetch_blobs(m))  # re-encode episodic content
+    update_semantic_structures(reencoded, m.context, m.source_model)
+```
+
+After replay, marked memories can still cluster via density-based methods (e.g., DBSCAN) or k-means using embedding similarity:
 
 ```
 cluster_i = {m_j | cos(m_j, μ_i) > merge_threshold}
@@ -73,8 +127,20 @@ Summary nodes replace clusters:
 
 ```
 summary.embedding = μ_i
-summary.blob = summarize(fetch_blobs(cluster_i))
+summary.blob = summarize(fetch_blobs(cluster_i))  # gemma-3n-e2b via litert_lm (required)
 summary.metadata.sources = [m.id for m in cluster_i]
+```
+
+To keep consolidation latency bounded, summarization input is capped by knob‑derived limits. Source texts are ranked by similarity to the cluster centroid and truncated:
+
+```
+max_source_texts(F̃) = round(lerp(3, 8, F̃))
+max_text_chars(F̃)  = round(lerp(300, 900, F̃))
+max_total_chars(T)  = round(lerp(1200, 3600, T))
+max_summary_words(T) = round(lerp(24, 96, T))
+source_texts = topk_by_cosine(cluster_texts, k=max_source_texts)
+truncate each text to max_text_chars and total to max_total_chars
+constrain decoder to max_summary_words (streaming cancel)
 ```
 
 ## Semantic Extraction
@@ -100,6 +166,8 @@ salience(label) = clamp((cos(e_label, summary.embedding) + 1) / 2, 0, 1)
 
 If a label already exists, its stored salience is updated with `s_max = max(s_max, salience(label))`.
 
+To guarantee that labeling remains informative even for small clusters, if the frequency filter would remove all labels for a summary, the highest-salience label is retained as a fallback.
+
 ## Knowledge Graph Construction
 
 The graph comprises two node types:
@@ -119,6 +187,9 @@ Edge weight convention (MUST): all association weights are normalized to [0, 1].
 * **derived_from:** Links summaries to source memories
 * **similar_to:** High cosine similarity (soft equivalence)
 * **has_label:** Attaches an extracted label/tag to a node
+* **next_in_episode:** Sequential link to next memory in the same episode
+* **prev_in_episode:** Sequential link to previous memory in the same episode
+* **within_same_event:** Link for memories within the same inferred boundary segment
 
 ### Edge Construction
 
@@ -145,35 +216,67 @@ for i in range(len(temporal_order) − 1):
         create_edge(m_i, m_j, 'causes', weight01)
 ```
 
-## Graph-Augmented Retrieval
-
-Retrieval combines vector similarity with graph expansion. The query vector is the **current accumulator centroid** (μ_acc), L2‑normalized for vector search, which aggregates the embeddings of the signals observed so far in the unflushed memory. This makes retrieval responsive to the evolving thought unit rather than any single micro‑signal.
+Sequential edges preserve episode order as first-class memory:
 
 ```
-# Query and re-rank using current memory centroid
-q ← l2_normalize(μ_acc)  # memory centroid from Section 4.4.1 (cached pre-reset)
+for i in range(len(temporal_order) − 1):
+    m_i, m_j ← temporal_order[i], temporal_order[i+1]
+    gap_s ← to_s(m_j.created_at) − to_s(m_i.created_at)
+    boundary_prob ← m_j.boundary_score  # stored posterior from @sec-boundary
+    w_seq ← clamp(exp(−gap_s / lerp(10, 60, T)) × (1 − boundary_prob), 0, 1)
+    create_edge(m_i, m_j, 'next_in_episode', w_seq)
+    create_edge(m_j, m_i, 'prev_in_episode', w_seq)
+    if boundary_prob < 0.3:
+        create_edge(m_i, m_j, 'within_same_event', w_seq)
+```
+
+## Graph-Augmented Retrieval
+
+Retrieval combines vector similarity, **index-store pattern completion**, temporal context reinstatement, and graph expansion. The query vector is the **current accumulator centroid** (μ_acc), L2‑normalized for vector search.
+
+```
+# Query and re-rank using current memory centroid + recent context
+μ_ctx ← mean(recent_context_embeddings)  # recent context window (embedding-only)
+λ_q(F) = lerp(0.25, 0.05, F)
+q ← l2_normalize((1 − λ_q) × μ_acc + λ_q × μ_ctx)  # cached pre-reset
+q_ctx ← c_t               # temporal context from @sec-temporal-context
 if |memory_stream| == 0:
     return []  # cold-start fallback (no retrieval candidates)
+
+kNN_size(F) = round(lerp(96, 8, F))
 results_vec ← topK(vector_search(q, k=kNN_size(F)))
-seed_nodes ← [r.id for r in results_vec]
+seed_vec ← [r.id for r in results_vec]
+seed_idx ← index_store.lookup(sparse_key(q), radius = lerp(1, 3, S))
+seed_nodes ← union(seed_vec, seed_idx)
+
 if |seed_nodes| == 0 OR graph is empty:
     return results_vec  # deterministic fallback, skip expansion
-expanded_nodes ← graph.traverse(seed_nodes, depth=graph_depth(T), min_edge_weight=min_edge_weight(F))
+
+expanded_nodes ← graph.traverse(seed_nodes,
+                                depth=graph_depth(T),
+                                min_edge_weight=min_edge_weight(F),
+                                edge_types={'semantic','next_in_episode','prev_in_episode','within_same_event'})
 combined ← union(seed_nodes, expanded_nodes)
-dup_thresh = lerp(0.96, 0.88, F) × (0.98 + 0.02T)
+min_edge_weight(F) = lerp(0.08, 0.40, F)
+dup_thresh = lerp(0.985, 0.95, F) × (0.98 + 0.02T)
 eligible ← {m ∈ combined | m.created_at < write_exclusion_ts}
 eligible ← {m ∈ eligible | max_{w∈WM} cos(m.embedding, w) < dup_thresh}
+eligible ← {m ∈ eligible | source_confidence(m) ≥ lerp(0.15, 0.45, T)}
 
-# Diversified re-rank (MMR-style) to avoid redundant retrievals
-w_rel_raw = lerp(0.55, 0.90, F) × lerp(1.0, 0.85, S) × lerp(1.0, 0.90, T)
-w_div_raw = lerp(0.45, 0.10, F) × lerp(0.80, 1.20, S) × lerp(0.90, 0.70, T)
+# Diversified re-rank (MMR-style) with context reinstatement
+w_rel_raw = lerp(0.65, 0.94, F) × lerp(1.0, 0.85, S) × lerp(1.0, 0.90, T)
+w_div_raw = lerp(0.35, 0.06, F) × lerp(0.75, 1.15, S) × lerp(0.85, 0.65, T)
 [w_rel, w_div] = normalize([w_rel_raw, w_div_raw])
+w_ctx = lerp(0.15, 0.35, F) × lerp(1.0, 0.85, S)
+w_proc = lerp(0.10, 0.25, S)
 
 selected ← []
 while |selected| < k AND |eligible| > 0:
     m* ← argmax_{m ∈ eligible} [
-            w_rel × max(0, cos(q, m)) −
-            w_div × max_{s∈selected} max(0, cos(m, s))
+            w_rel × max(0, cos(q, m.embedding)) +
+            w_ctx × max(0, cos(q_ctx, m.context)) +
+            w_proc × max(0, proc_sim(m)) −
+            w_div × max_{s∈selected} max(0, cos(m.embedding, s.embedding))
          ]
     selected.append(m*)
     eligible.remove(m*)
@@ -181,3 +284,5 @@ return selected
 ```
 
 Graph expansion uses recursive traversal with depth limits to find related context that pure vector search might miss. Using the memory centroid maintains consistency between vector search and graph expansion results.
+
+`proc_sim(m)` denotes procedural similarity (habit/skill match) when a procedural embedding is available; if no procedural cue is present, treat it as 0 so retrieval remains purely declarative.

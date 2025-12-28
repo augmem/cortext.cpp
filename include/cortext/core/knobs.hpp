@@ -12,11 +12,37 @@ namespace cortext::core
 
 // --- 0.2 Knob-Derived Functions ---
 
+// Midpoint bias for "all‑arounder" tuning: endpoints fixed, midpoint nudged.
+// x' = x − b * 4x(1−x), where b controls the midpoint shift (x=0.5 → 0.5−b).
+// This keeps the UI knobs unchanged while centering the neutral sweet spot at 0.5.
+constexpr double kFocusMidBias = 0.10;
+constexpr double kSensitivityMidBias = 0.10;
+
+inline double
+BiasMid (double x, double bias)
+{
+  const double x01 = Clamp (x, 0.0, 1.0);
+  const double hump = 4.0 * x01 * (1.0 - x01);
+  return Clamp (x01 - bias * hump, 0.0, 1.0);
+}
+
+inline double
+FocusBias (double F)
+{
+  return BiasMid (F, kFocusMidBias);
+}
+
+inline double
+SensitivityBias (double S)
+{
+  return BiasMid (S, kSensitivityMidBias);
+}
+
 inline double
 BaseRatePrior (double S)
 {
   // base_rate_prior(S) = lerp(r_min, r_max, S), r_min=0.2, r_max=5.0
-  return Lerp (0.2, 5.0, S);
+  return Lerp (0.2, 5.0, SensitivityBias (S));
 }
 
 inline double
@@ -69,16 +95,24 @@ RLSWindowN (double T)
 inline int
 MaxResults (double F)
 {
-  // max_results(F) = round(lerp(R_max, R_min, F)), R_min=4, R_max=64
-  return static_cast<int> (std::round (Lerp (64.0, 4.0, Clamp (F, 0.0, 1.0))));
+  // max_results(F) = round(lerp(R_max, R_min, F)), R_min=8, R_max=96
+  return static_cast<int> (std::round (Lerp (96.0, 8.0, FocusBias (F))));
+}
+
+inline double
+RetrievalContextMix (double F)
+{
+  // retrieval_context_mix(F) = lerp(0.25, 0.05, F)
+  // Lower focus blends in more recent context for query stability.
+  return Lerp (0.25, 0.05, FocusBias (F));
 }
 
 inline int
 AdjacentWindow (double F)
 {
   // adjacent_window(F) = round(lerp(adjacent_max, adjacent_min, F)),
-  // adjacent_min=1, adjacent_max=8
-  return static_cast<int> (std::round (Lerp (8.0, 1.0, Clamp (F, 0.0, 1.0))));
+  // adjacent_min=1, adjacent_max=6
+  return static_cast<int> (std::round (Lerp (6.0, 1.0, FocusBias (F))));
 }
 
 inline int
@@ -86,7 +120,7 @@ MaxWaitTokens (double F)
 {
   // max_wait_tokens(F) = round(lerp(wait_max, wait_min, F)),
   // wait_min=16, wait_max=128
-  return static_cast<int> (std::round (Lerp (128.0, 16.0, Clamp (F, 0.0, 1.0))));
+  return static_cast<int> (std::round (Lerp (128.0, 16.0, FocusBias (F))));
 }
 
 inline int
@@ -94,7 +128,8 @@ CheckIntervalTokens (double S)
 {
   // check_interval(S) = round(lerp(check_max_tokens, check_min_tokens, S)),
   // check_min_tokens=8, check_max_tokens=64
-  return static_cast<int> (std::round (Lerp (64.0, 8.0, Clamp (S, 0.0, 1.0))));
+  return static_cast<int> (
+      std::round (Lerp (64.0, 8.0, SensitivityBias (S))));
 }
 
 // --- Section 10.4: Streaming Pacing Parameters ---
@@ -102,37 +137,37 @@ CheckIntervalTokens (double S)
 inline double
 StreamingPacingThreshold (double S)
 {
-  // pacing_thresh(S) = lerp(0.5, 0.1, S)
+  // pacing_thresh(S) = lerp(0.3, 0.05, S)
   // Higher sensitivity = lower threshold = more frequent pacing checks
-  return Lerp (0.5, 0.1, Clamp (S, 0.0, 1.0));
+  return Lerp (0.3, 0.05, SensitivityBias (S));
 }
 
 inline double
 MaxWaitDrift (double F)
 {
-  // max_wait_drift(F) = lerp(2.0, 0.5, F)
+  // max_wait_drift(F) = lerp(1.2, 0.30, F)
   // Higher focus = lower max drift = more aggressive forced checks
-  return Lerp (2.0, 0.5, Clamp (F, 0.0, 1.0));
+  return Lerp (1.2, 0.30, FocusBias (F));
 }
 
 inline int
 GraphDepth (double T)
 {
-  // graph_depth(T): small traversal depth, in [1,2].
-  return static_cast<int> (std::round (Lerp (2.0, 1.0, Clamp (T, 0.0, 1.0))));
+  // graph_depth(T): small traversal depth, in [2,3].
+  return static_cast<int> (std::round (Lerp (3.0, 2.0, Clamp (T, 0.0, 1.0))));
 }
 
 inline std::pair<double, double>
 RetrievalDiversificationWeights (double F, double S, double T)
 {
-  const double f = Clamp (F, 0.0, 1.0);
-  const double s = Clamp (S, 0.0, 1.0);
+  const double f = FocusBias (F);
+  const double s = SensitivityBias (S);
   const double t = Clamp (T, 0.0, 1.0);
 
-  const double w_rel_raw = Lerp (0.55, 0.90, f) * Lerp (1.0, 0.85, s)
+  const double w_rel_raw = Lerp (0.65, 0.94, f) * Lerp (1.0, 0.85, s)
                            * Lerp (1.0, 0.90, t);
-  const double w_div_raw = Lerp (0.45, 0.10, f) * Lerp (0.80, 1.20, s)
-                           * Lerp (0.90, 0.70, t);
+  const double w_div_raw = Lerp (0.35, 0.06, f) * Lerp (0.75, 1.15, s)
+                           * Lerp (0.85, 0.65, t);
   const double sum = w_rel_raw + w_div_raw;
   if (sum <= 0.0)
     {
@@ -179,7 +214,7 @@ inline double
 TPrior (double /*F*/, double S, double T)
 {
   // T_prior(F,S,T) = lerp(0.10, 0.30, T) × (1 − 0.3×S)
-  return Lerp (0.10, 0.30, T) * (1.0 - 0.3 * S);
+  return Lerp (0.10, 0.30, T) * (1.0 - 0.3 * SensitivityBias (S));
 }
 
 inline double
@@ -221,7 +256,7 @@ MaxDeltaTPerMin (int count, double T)
 inline double
 KappaR (double /*F*/, double S, double T)
 {
-  return Lerp (0.06, 0.14, Clamp (S, 0.0, 1.0))
+  return Lerp (0.06, 0.14, SensitivityBias (S))
          * Lerp (1.1, 0.9, Clamp (T, 0.0, 1.0));
 }
 
@@ -229,7 +264,7 @@ inline double
 CapHomeo (double /*F*/, double S, double T, double hysteresis)
 {
   return Lerp (0.35, 0.15, Clamp (T, 0.0, 1.0))
-         * Lerp (0.8, 1.2, Clamp (S, 0.0, 1.0))
+         * Lerp (0.8, 1.2, SensitivityBias (S))
          * hysteresis;
 }
 
@@ -237,7 +272,7 @@ CapHomeo (double /*F*/, double S, double T, double hysteresis)
 inline double
 KappaSens (double /*F*/, double S, double T)
 {
-  return Lerp (0.04, 0.12, Clamp (S, 0.0, 1.0))
+  return Lerp (0.04, 0.12, SensitivityBias (S))
          * Lerp (1.1, 0.9, Clamp (T, 0.0, 1.0));
 }
 
@@ -245,14 +280,14 @@ inline double
 CapSens (double /*F*/, double S, double T, double hysteresis)
 {
   return Lerp (0.30, 0.10, Clamp (T, 0.0, 1.0))
-         * Lerp (0.9, 1.1, Clamp (S, 0.0, 1.0))
+         * Lerp (0.9, 1.1, SensitivityBias (S))
          * hysteresis;
 }
 
 inline double
 SigmaRef (double S, double T)
 {
-  return Lerp (0.08, 0.14, Clamp (S, 0.0, 1.0))
+  return Lerp (0.08, 0.14, SensitivityBias (S))
          * Lerp (1.1, 0.9, Clamp (T, 0.0, 1.0));
 }
 
@@ -260,7 +295,7 @@ SigmaRef (double S, double T)
 inline double
 KappaPrec (double F, double /*S*/, double T)
 {
-  return Lerp (0.04, 0.10, Clamp (F, 0.0, 1.0))
+  return Lerp (0.04, 0.10, FocusBias (F))
          * Lerp (1.1, 0.9, Clamp (T, 0.0, 1.0));
 }
 
@@ -268,7 +303,7 @@ inline double
 CapPrec (double F, double /*S*/, double T, double hysteresis)
 {
   return Lerp (0.25, 0.08, Clamp (T, 0.0, 1.0))
-         * Lerp (0.9, 1.1, Clamp (F, 0.0, 1.0))
+         * Lerp (0.9, 1.1, FocusBias (F))
          * hysteresis;
 }
 
@@ -297,7 +332,7 @@ AlphaF (double F, double u_t)
   // α_F(t) = α_min_F + F × α_span_F × u(t)
   const double kAlphaMinF = 0.05;
   const double kAlphaSpanF = 0.45;
-  return kAlphaMinF + F * kAlphaSpanF * u_t;
+  return kAlphaMinF + FocusBias (F) * kAlphaSpanF * u_t;
 }
 
 inline double
@@ -305,14 +340,14 @@ AlphaS (double S, double u_t)
 {
   const double kAlphaMinS = 0.05;
   const double kAlphaSpanS = 0.35;
-  return kAlphaMinS + S * kAlphaSpanS * u_t;
+  return kAlphaMinS + SensitivityBias (S) * kAlphaSpanS * u_t;
 }
 
 // Uncertainty variance normalization ceiling
 inline double
 VarScoreMax (double S)
 {
-  return Lerp (0.15, 0.35, Clamp (S, 0.0, 1.0));
+  return Lerp (0.15, 0.35, SensitivityBias (S));
 }
 
 // Neutral structural coherence fallback
@@ -333,14 +368,14 @@ PredEmaBeta (double T)
 inline double
 SurpriseErrRef (double S)
 {
-  return Lerp (0.25, 0.05, Clamp (S, 0.0, 1.0));
+  return Lerp (0.25, 0.05, SensitivityBias (S));
 }
 
 // Surprise sigmoid gain
 inline double
 SurpriseGain (double S, double T)
 {
-  return Lerp (6.0, 14.0, Clamp (S, 0.0, 1.0))
+  return Lerp (6.0, 14.0, SensitivityBias (S))
        * Lerp (1.1, 0.9, Clamp (T, 0.0, 1.0));
 }
 
@@ -376,7 +411,7 @@ ConsolidationRate (double T, double S)
       = static_cast<double> (ConsolidationIntervalSeconds (T));
   // Convert to writes/min to match m_rate units.
   return (60.0 / std::max (interval, 1.0)) * (0.3 + 0.7 * T)
-         * (1.0 - 0.5 * S);
+         * (1.0 - 0.5 * SensitivityBias (S));
 }
 
 // Idle required seconds — Algorithm 28b
@@ -421,7 +456,7 @@ inline int
 MinClusterSizeForExtraction (double F)
 {
   // min_cluster_size_for_extraction = round(lerp(3, 10, F))
-  return static_cast<int> (std::round (Lerp (3.0, 10.0, F)));
+  return static_cast<int> (std::round (Lerp (3.0, 10.0, FocusBias (F))));
 }
 
 // --- Consolidation Clustering (Section 7.3-7.4) ---
@@ -433,7 +468,7 @@ MergeThreshold (double F)
   // merge_threshold(F) = lerp(0.85, 0.95, F)
   // Higher focus = stricter merging (higher similarity required)
   // Also used for co-occurrence edges in Section 7.5.1
-  return Lerp (0.85, 0.95, Clamp (F, 0.0, 1.0));
+  return Lerp (0.85, 0.95, FocusBias (F));
 }
 
 // Minimum cluster size — Section 7.4
@@ -442,7 +477,7 @@ MinClusterSize (double F)
 {
   // min_cluster_size(F) = round(lerp(3, 10, F))
   // Higher focus = larger minimum clusters required
-  return static_cast<int> (std::round (Lerp (3.0, 10.0, Clamp (F, 0.0, 1.0))));
+  return static_cast<int> (std::round (Lerp (3.0, 10.0, FocusBias (F))));
 }
 
 // Label frequency threshold — Section 7.4
@@ -475,7 +510,7 @@ WRet (double T)
 inline double
 PeripheryCutoff (double T)
 {
-  return Lerp (0.05, 0.25, T);
+  return Lerp (0.03, 0.20, T);
 }
 
 // --- Stability prior helpers (Algorithm 5) ---
@@ -536,7 +571,7 @@ inline double
 LabilitySusceptibility (double S, double T)
 {
   // lability_susceptibility = (1 − T) × (0.5 + 0.5 × S)
-  return (1.0 - T) * (0.5 + 0.5 * S);
+  return (1.0 - T) * (0.5 + 0.5 * SensitivityBias (S));
 }
 
 // --- Algorithm 23 (Emotional Consolidation Tags) Helpers ---
@@ -544,35 +579,35 @@ inline double
 ThetaIntensity (double S)
 {
   // θ_intensity = lerp(0.6, 0.8, 1 − S)
-  return Lerp (0.6, 0.8, 1.0 - S);
+  return Lerp (0.6, 0.8, 1.0 - SensitivityBias (S));
 }
 
 inline double
 ThetaArousal (double S)
 {
   // θ_arousal = lerp(0.4, 0.2, S)
-  return Lerp (0.4, 0.2, S);
+  return Lerp (0.4, 0.2, SensitivityBias (S));
 }
 
 inline double
 FlashbulbThreshold (double S)
 {
   // flashbulb_threshold = lerp(0.9, 0.4, S)
-  return Lerp (0.9, 0.4, S);
+  return Lerp (0.9, 0.4, SensitivityBias (S));
 }
 
 inline int
 CascadeRadius (double S)
 {
   // cascade_radius = round(lerp(1, 5, S))
-  return static_cast<int> (std::round (Lerp (1.0, 5.0, S)));
+  return static_cast<int> (std::round (Lerp (1.0, 5.0, SensitivityBias (S))));
 }
 
 inline double
 CascadeDecay (double S)
 {
   // cascade_decay = lerp(0.7, 0.3, S)
-  return Lerp (0.7, 0.3, S);
+  return Lerp (0.7, 0.3, SensitivityBias (S));
 }
 
 inline double
@@ -581,21 +616,22 @@ EmotionalHalfLifeBonus (double S, double emotion_intensity)
   // emotional_half_life_bonus = exp(lerp(0, ln(3), S)) × (1 +
   // emotion_intensity)
   const double ln3 = std::log (3.0);
-  return std::exp (Lerp (0.0, ln3, S)) * (1.0 + emotion_intensity);
+  return std::exp (Lerp (0.0, ln3, SensitivityBias (S)))
+         * (1.0 + emotion_intensity);
 }
 
 inline double
 DetailSuppression (double S, double F)
 {
   // detail_suppression = S × (1 − F) × 0.5
-  return S * (1.0 - F) * 0.5;
+  return SensitivityBias (S) * (1.0 - FocusBias (F)) * 0.5;
 }
 
 inline int
 GistComponents (double F)
 {
   // gist_components = round(lerp(5, 2, F))
-  return static_cast<int> (std::round (Lerp (5.0, 2.0, F)));
+  return static_cast<int> (std::round (Lerp (5.0, 2.0, FocusBias (F))));
 }
 
 inline double
@@ -613,7 +649,7 @@ AlphaMood (double S)
 {
   // α_mood(S) = lerp(0.01, 0.20, S)
   // Higher sensitivity = faster mood reactivity to emotion events
-  return Lerp (0.01, 0.20, Clamp (S, 0.0, 1.0));
+  return Lerp (0.01, 0.20, SensitivityBias (S));
 }
 
 inline double
@@ -633,7 +669,8 @@ WMBaseCapacity (double S, double F)
 {
   // base_capacity = round(lerp(5, 3, S) + lerp(-1, 1, F))
   // Paper Section 8.1: capacity range [2, 6]
-  const double cap = Lerp (5.0, 3.0, S) + Lerp (-1.0, 1.0, F);
+  const double cap = Lerp (5.0, 3.0, SensitivityBias (S))
+                     + Lerp (-1.0, 1.0, FocusBias (F));
   return static_cast<int> (std::round (cap));
 }
 
@@ -641,14 +678,14 @@ inline double
 WMMaintenanceCostPerSlot (double S)
 {
   // maintenance_cost_per_slot = lerp(0.05, 0.15, S)
-  return Lerp (0.05, 0.15, S);
+  return Lerp (0.05, 0.15, SensitivityBias (S));
 }
 
 inline double
 WMChunkingThreshold (double F)
 {
   // chunking_threshold = lerp(0.7, 0.9, F)
-  return Lerp (0.7, 0.9, F);
+  return Lerp (0.7, 0.9, FocusBias (F));
 }
 
 inline double
@@ -657,14 +694,14 @@ WMGateThreshold (double F)
   // gate_threshold = lerp(0.1, 0.4, F)
   // At F=0 (wide attention): permissive (0.1)
   // At F=1 (narrow attention): strict (0.4)
-  return Lerp (0.1, 0.4, F);
+  return Lerp (0.1, 0.4, FocusBias (F));
 }
 
 inline double
 WMComplexityScale (double S)
 {
   // complexity penalty scale ~ sensitivity
-  return Lerp (0.5, 1.5, S);
+  return Lerp (0.5, 1.5, SensitivityBias (S));
 }
 
 inline double
@@ -672,7 +709,7 @@ WMRehearsalRate (double S)
 {
   // rehearsal_rate = lerp(0.5, 2.0, S)
   // Higher Sensitivity = faster rehearsal boost
-  return Lerp (0.5, 2.0, S);
+  return Lerp (0.5, 2.0, SensitivityBias (S));
 }
 
 inline double
@@ -681,7 +718,7 @@ WMRehearsalThreshold (double F)
   // rehearsal_threshold = lerp(0.5, 0.7, F)
   // Below chunking_threshold(F) = lerp(0.7, 0.9, F)
   // Slots in [rehearsal_threshold, chunking_threshold) get rehearsal boost
-  return Lerp (0.5, 0.7, F);
+  return Lerp (0.5, 0.7, FocusBias (F));
 }
 
 inline double
@@ -697,21 +734,21 @@ inline double
 FOKThreshold (double F)
 {
   // FOK_threshold = lerp(0.2, 0.5, F)
-  return Lerp (0.2, 0.5, F);
+  return Lerp (0.2, 0.5, FocusBias (F));
 }
 
 inline double
 TOTFokCutoff (double F)
 {
   // TOT FOK cutoff = lerp(0.5, 0.8, F)
-  return Lerp (0.5, 0.8, F);
+  return Lerp (0.5, 0.8, FocusBias (F));
 }
 
 inline double
 TOTRetrievalCutoff (double F)
 {
   // TOT retrieval cutoff = lerp(0.4, 0.2, F)
-  return Lerp (0.4, 0.2, F);
+  return Lerp (0.4, 0.2, FocusBias (F));
 }
 
 inline double
@@ -725,14 +762,15 @@ inline double
 UnknownThreshold (double F)
 {
   // unknown_threshold = lerp(0.3, 0.1, F)
-  return Lerp (0.3, 0.1, F);
+  return Lerp (0.3, 0.1, FocusBias (F));
 }
 
 inline int
 StrategySwitchLatencyMs (double S)
 {
   // strategy_switch_latency = lerp(500, 100, S) ms
-  return static_cast<int> (std::round (Lerp (500.0, 100.0, S)));
+  return static_cast<int> (
+      std::round (Lerp (500.0, 100.0, SensitivityBias (S))));
 }
 
 inline double
@@ -753,7 +791,7 @@ TargetPrecision (double F, double T)
   // scale it by focus to reflect that higher focus demands higher precision.
   //
   // target_precision = certainty_requirement(T) * (0.5 + 0.5*F)
-  const double f01 = Clamp (F, 0.0, 1.0);
+  const double f01 = FocusBias (F);
   const double t01 = Clamp (T, 0.0, 1.0);
   const double certainty = CertaintyRequirement (t01);
   return Clamp (certainty * (0.5 + 0.5 * f01), 0.0, 1.0);
@@ -763,7 +801,9 @@ inline double
 MetacognitiveSensitivity (double F, double S)
 {
   // metacognitive_sensitivity = F × (1 + 0.5 × S)
-  return F * (1.0 + 0.5 * S);
+  const double f01 = FocusBias (F);
+  const double s01 = SensitivityBias (S);
+  return f01 * (1.0 + 0.5 * s01);
 }
 
 // --- Algorithm 26 (Serial Position Effects) Helpers ---
@@ -771,49 +811,49 @@ inline int
 SerialPrimacyWindow (double F)
 {
   // primacy_window = round(lerp(5, 2, F))
-  return static_cast<int> (std::round (Lerp (5.0, 2.0, F)));
+  return static_cast<int> (std::round (Lerp (5.0, 2.0, FocusBias (F))));
 }
 
 inline int
 SerialRecencyWindow (double F)
 {
   // recency_window = round(lerp(7, 3, F))
-  return static_cast<int> (std::round (Lerp (7.0, 3.0, F)));
+  return static_cast<int> (std::round (Lerp (7.0, 3.0, FocusBias (F))));
 }
 
 inline double
 SerialPrimacyBonus (double S)
 {
   // primacy_bonus = lerp(1.2, 2.0, S)
-  return Lerp (1.2, 2.0, S);
+  return Lerp (1.2, 2.0, SensitivityBias (S));
 }
 
 inline double
 SerialRehearsalCurveDepth (double S)
 {
   // rehearsal_curve_depth = lerp(0.2, 0.6, S)
-  return Lerp (0.2, 0.6, S);
+  return Lerp (0.2, 0.6, SensitivityBias (S));
 }
 
 inline double
 SerialDistinctivenessThreshold (double F)
 {
   // distinctiveness_threshold = lerp(0.6, 0.8, F)
-  return Lerp (0.6, 0.8, F);
+  return Lerp (0.6, 0.8, FocusBias (F));
 }
 
 inline double
 SerialVonRestorffMultiplier (double S)
 {
   // von_restorff_multiplier = lerp(1.5, 3.0, S)
-  return Lerp (1.5, 3.0, S);
+  return Lerp (1.5, 3.0, SensitivityBias (S));
 }
 
 inline double
 SerialMiddleSuppression (double S, double F)
 {
   // middle_suppression = lerp(0.8, 0.5, S) × (1 − F)
-  return Lerp (0.8, 0.5, S) * (1.0 - F);
+  return Lerp (0.8, 0.5, SensitivityBias (S)) * (1.0 - FocusBias (F));
 }
 
 // Zone determination helper for observability (Algorithm 26)
@@ -854,7 +894,7 @@ MemoryUsageThreshold (double F)
   // Higher focus = stricter threshold for what counts as "used"
   // Range [0.5, 0.8] - at F=0, similarity of 0.5 counts as used;
   // at F=1, requires 0.8 similarity
-  return Lerp (0.5, 0.8, Clamp (F, 0.0, 1.0));
+  return Lerp (0.5, 0.8, FocusBias (F));
 }
 
 inline double
@@ -903,14 +943,14 @@ inline double
 SimilarToThreshold (double F)
 {
   // similar_to threshold: high cosine similarity (soft equivalence)
-  return Lerp (0.90, 0.98, Clamp (F, 0.0, 1.0));
+  return Lerp (0.90, 0.98, FocusBias (F));
 }
 
 inline double
 MinEdgeWeight (double F)
 {
   // min_edge_weight(F) for graph traversal
-  return Lerp (0.20, 0.60, Clamp (F, 0.0, 1.0));
+  return Lerp (0.08, 0.40, FocusBias (F));
 }
 
 inline double
@@ -933,19 +973,19 @@ ContradictionThreshold ()
 inline double
 TauNovelty (double F, double S, double T)
 {
-  // tau_novelty = lerp(0.10, 0.35, F) * (1 - 0.15S) * (1 + 0.3T)
+  // tau_novelty = lerp(0.12, 0.32, F) * (1 - 0.12S) * (1 + 0.25T)
   // Reference: algorithms.md Section 8.1
-  return Lerp (0.10, 0.35, Clamp (F, 0.0, 1.0))
-       * (1.0 - 0.15 * Clamp (S, 0.0, 1.0))
-       * (1.0 + 0.3 * Clamp (T, 0.0, 1.0));
+  return Lerp (0.12, 0.32, FocusBias (F))
+       * (1.0 - 0.12 * SensitivityBias (S))
+       * (1.0 + 0.25 * Clamp (T, 0.0, 1.0));
 }
 
 inline double
 RetrievalThreshold (double F)
 {
-  // retrieval_thresh(F) = lerp(0.25, 0.60, F)
+  // retrieval_thresh(F) = lerp(0.12, 0.45, F)
   // Reference: algorithms.md Section 8.1
-  return Lerp (0.25, 0.60, Clamp (F, 0.0, 1.0));
+  return Lerp (0.12, 0.45, FocusBias (F));
 }
 
 inline int
@@ -953,14 +993,14 @@ InterruptCandidateCount (double F)
 {
   // K = round(lerp(10, 6, F))
   // Reference: algorithms.md Section 8.3
-  return static_cast<int> (std::round (Lerp (10.0, 6.0, Clamp (F, 0.0, 1.0))));
+  return static_cast<int> (std::round (Lerp (10.0, 6.0, FocusBias (F))));
 }
 
 inline double
 DupThresh (double F, double T)
 {
-  // dup_thresh = lerp(0.96, 0.88, F) × (0.98 + 0.02T)
-  return Lerp (0.96, 0.88, Clamp (F, 0.0, 1.0))
+  // dup_thresh = lerp(0.985, 0.95, F) × (0.98 + 0.02T)
+  return Lerp (0.985, 0.95, FocusBias (F))
        * (0.98 + 0.02 * Clamp (T, 0.0, 1.0));
 }
 
@@ -1015,8 +1055,8 @@ BoundaryThreshold (double F, double S)
 {
   // b_thresh(F, S) = lerp(0.48, 0.66, F) × lerp(1.1, 0.9, S)
   // Higher focus = stricter boundary; higher sensitivity = looser boundary
-  return Lerp (0.48, 0.66, Clamp (F, 0.0, 1.0))
-       * Lerp (1.1, 0.9, Clamp (S, 0.0, 1.0));
+  return Lerp (0.48, 0.66, FocusBias (F))
+       * Lerp (1.1, 0.9, SensitivityBias (S));
 }
 
 // Section 4.4.3 - Maximum memory time (seconds)
@@ -1034,7 +1074,19 @@ MaxMemoryDrift (double S)
 {
   // max_mem_drift(S) = lerp(0.8, 2.0, S)
   // Higher sensitivity = more drift allowed before forced flush
-  return Lerp (0.8, 2.0, Clamp (S, 0.0, 1.0));
+  return Lerp (0.8, 2.0, SensitivityBias (S));
+}
+
+// Section 4.4.3 - Max signals per memory (fallback boundary)
+inline int
+MaxSignalsPerMemory (double F, double S, double T)
+{
+  const double base = Lerp (1.5, 4.5, Clamp (T, 0.0, 1.0));
+  const double f_scale = Lerp (1.00, 0.25, FocusBias (F));
+  const double s_scale = Lerp (1.00, 0.45, SensitivityBias (S));
+  const int capped = static_cast<int> (std::round (base * f_scale * s_scale));
+  const int floor = static_cast<int> (std::round (Lerp (1.0, 3.0, Clamp (T, 0.0, 1.0))));
+  return std::max (floor, capped);
 }
 
 // Section 4.4.3 - Adaptive gap scale (seconds, multiplier applied to dt_ema)
@@ -1052,7 +1104,7 @@ SpikeMargin (double S, double T)
 {
   // spike_margin(S,T) = lerp(0.2, 0.5, T) × lerp(1.2, 0.8, S)
   return Lerp (0.2, 0.5, Clamp (T, 0.0, 1.0))
-       * Lerp (1.2, 0.8, Clamp (S, 0.0, 1.0));
+       * Lerp (1.2, 0.8, SensitivityBias (S));
 }
 
 // Section 4.4.5 - Window score peak vs average weight
@@ -1061,7 +1113,7 @@ WindowScoreAlpha (double F)
 {
   // α(F) = lerp(0.3, 0.7, F)
   // Higher focus = more weight on peak score
-  return Lerp (0.3, 0.7, Clamp (F, 0.0, 1.0));
+  return Lerp (0.3, 0.7, FocusBias (F));
 }
 
 // Section 4.4.5 - Coverage bonus weight
@@ -1070,7 +1122,7 @@ WindowScoreCoverageBeta (double S)
 {
   // β(S) = lerp(0.05, 0.15, S)
   // Higher sensitivity = more bonus for complete memorys
-  return Lerp (0.05, 0.15, Clamp (S, 0.0, 1.0));
+  return Lerp (0.05, 0.15, SensitivityBias (S));
 }
 
 // Section 4.4.5 - Write refractory time constant (seconds)
@@ -1095,9 +1147,9 @@ WriteRefractoryK (double T)
 inline double
 RepresentativeBlendRho (double F)
 {
-  // ρ(F) = lerp(0.3, 0.7, F)
+  // ρ(F) = lerp(0.2, 0.6, F)
   // Higher focus = more weight on memory mean vs peak
-  return Lerp (0.3, 0.7, Clamp (F, 0.0, 1.0));
+  return Lerp (0.2, 0.6, FocusBias (F));
 }
 
 } // namespace cortext::core

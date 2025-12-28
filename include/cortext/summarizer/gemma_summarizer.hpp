@@ -30,6 +30,9 @@ public:
   GemmaSummarizer &operator= (GemmaSummarizer &&) noexcept;
 
   std::string SummarizeTexts (const std::vector<std::string> &texts) override;
+  std::string
+  SummarizeTextsLimited (const std::vector<std::string> &texts,
+                         int max_words) override;
 
   std::string SummarizeAudio (const float *pcm, size_t num_samples) override;
 

@@ -2,6 +2,8 @@
 
 The write gate compares composite scores against an adaptive threshold θ_dynamic (written as theta_dynamic when referring to the recorded variable). This section details the threshold evolution algorithm incorporating Bayesian prior-evidence blending and homeostatic rate control.
 
+**Knob note:** F and S here refer to midpoint‑biased values (F̃, S̃) from Section 1.
+
 ## Prior-Evidence Blending
 
 The threshold prior derives from knob settings:
@@ -175,6 +177,7 @@ Each source stream maintains accumulator state:
 
 ```
 μ_acc ← 256d running mean embedding
+c_t ← temporal context vector (slow drift; @sec-temporal-context)
 drift_acc ← accumulated drift within memory
 s_sum ← sum of accumulator scores in memory
 s_max ← max accumulator score in memory
@@ -244,15 +247,16 @@ acc_signals_window.append(mu_curr); acc_signals_window ← tail(acc_signals_wind
 
 Note: coherence_mem is distinct from coherence_struct (@sec-struct-coherence). The former tracks within-memory similarity using raw mean cosine, while the latter measures variance-based integration with broader context. This dual-signal approach mirrors EM-LLM's boundary detection mechanism. In their formulation, boundaries occur where surprise (token-level prediction error) exceeds a threshold and segment cohesion drops. In Cortext, surprisal_t provides the prediction-error signal, while drift spike provides auxiliary boundary pressure and coherence_mem drop captures within-memory similarity degradation.
 
-### Natural Boundary Detection {#sec-boundary}
+### Natural Boundary Detection (Bayesian Change-Point) {#sec-boundary}
 
-Boundary score combines drift spike and coherence drop:
+Segmentation is framed as online change-point inference. We compute a **calibrated boundary probability** rather than a hand-tuned score. The hazard is knob-controlled; the likelihood is driven by surprisal, cohesion drop, drift, and temporal gaps.
 
 ```
-weight_drift_component = lerp(0.6, 0.4, T)  # weight on drift
-weight_gap_component = lerp(0.05, 0.20, T)  # soft gap influence (low weight)
-weight_drift_component = weight_drift_component × (1 − weight_gap_component)
-weight_coh_component = 1 − weight_gap_component − weight_drift_component
+# Hazard (prior boundary probability)
+h_base(F,S,T) = lerp(0.02, 0.12, S) × lerp(1.2, 0.8, T)
+h_t ← clamp(h_base × (0.8 + 0.2(1 − F)), 0, 0.5)
+
+# Drift spike (same signal, now used for likelihood)
 ε0(T) = lerp(0.005, 0.02, 1 − T)  # cold-start guard for eta_prev
 if eta_prev < ε0(T):
     drift_spike ← 0
@@ -269,9 +273,18 @@ gap_ref_s ← gap_scale(T) × dt_ref
 gap_z ← (signal_gap_s − gap_ref_s) / max(gap_ref_s, ε)
 gap_score ← sigmoid(gap_z)
 
-boundary_score ← weight_drift_component × sigmoid(drift_spike) +
-                  weight_coh_component × coh_drop01 +
-                  weight_gap_component × gap_score
+# Likelihood of a boundary given observations
+[w_s, w_d, w_c, w_g] ← normalize([0.45 + 0.25S, 0.25 + 0.10(1 − T), 0.20 + 0.10F, 0.10])
+z_t ← w_s×(surprisal_t − 0.5) +
+      w_d×(sigmoid(drift_spike) − 0.5) +
+      w_c×(coh_drop01 − 0.5) +
+      w_g×(gap_score − 0.5)
+k_cp(S,T) = lerp(3, 9, S) × lerp(1.1, 0.9, T)
+lik_boundary ← sigmoid(k_cp(S,T) × z_t)
+
+# Bayesian update for boundary posterior
+boundary_score ← (h_t × lik_boundary) /
+                  max(ε, h_t × lik_boundary + (1 − h_t) × (1 − lik_boundary))
 boundary_score ← clamp(boundary_score, 0, 1)
 ```
 
@@ -294,16 +307,29 @@ k_flush(S,T) = k_surprise(S,T)
 pressure_score ← sigmoid((saturation_ratio − 1) × k_flush(S,T))
 ```
 
+Hard capacity ceiling (max signals per memory; knob-derived):
+
+```
+base = lerp(1.5, 4.5, T)
+f_scale = lerp(1.00, 0.25, F)
+s_scale = lerp(1.00, 0.45, S)
+floor = round(lerp(1, 3, T))
+max_signals(F,S,T) = max(floor, round(base × f_scale × s_scale))
+```
+
 Trigger memory flush when:
 
 ```
 mem_elapsed ← now_s() − to_s(t_start)
 should_flush = (boundary_score > b_thresh(F, S)) OR
                (mem_elapsed > max_mem_time(T)) OR
-               (pressure_score > b_thresh(F, S))
+               (pressure_score > b_thresh(F, S)) OR
+               (n ≥ max_signals(F,S,T))
 ```
 
 where signal_gap_s = now_s() − to_s(last_signal_ts) is computed at the start of signal processing (before last_signal_ts is updated). Gap timing influences boundary_score via gap_score rather than forcing an unconditional flush, which avoids splitting mid-thought when upstream processing introduces non-deterministic latency.
+
+**Boundary type note:** When the max-signals ceiling triggers a flush, set `boundary_type = "capacity"` for the enclosing episode. This is a hard safety boundary (not a heuristic score) and is still fully knob-derived.
 
 ### Spike Bypass (Flashbulb Flush)
 
@@ -366,8 +392,8 @@ Representative embedding blends accumulator mean with peak:
 ### Representative Embedding {#sec-rep-embedding}
 
 ```
-ρ(F) = lerp(0.3, 0.7, F)  # mean vs peak blend
+ρ(F) = lerp(0.2, 0.6, F)  # mean vs peak blend
 e_rep ← l2_normalize(ρ(F) × μ_acc + (1 − ρ(F)) × e_peak)
 ```
 
-On write: store e_rep with metadata {n, s_max, s_avg, drift_acc, mem_elapsed, s_emotion_max=emo_max, s_arousal_avg=arousal_sum / max(n, 1)}. Append e_rep to memory_stream and l2_normalize(μ_acc) to recent_memory_centroids. Reset accumulator for next unit.
+On write: store e_rep with metadata {n, s_max, s_avg, drift_acc, mem_elapsed, s_emotion_max=emo_max, s_arousal_avg=arousal_sum / max(n, 1), boundary_score}. Store `c_t` as the temporal context for the memory. Append e_rep to memory_stream and l2_normalize(μ_acc) to recent_memory_centroids. Update `index_store` with the sparse key (@sec-pattern-separation). Reset accumulator for next unit.

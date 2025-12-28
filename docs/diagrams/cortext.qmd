@@ -1,0 +1,27 @@
+```{mermaid}
+sequenceDiagram
+    participant IN as Input Signal
+
+    box Encoding
+        participant VIS as Vision Encoder
+        participant AUD as Audio Encoder
+    end
+
+    participant AMY as Amygdala
+    participant HIPP as Hippocampus
+
+    box Prefrontal Cortex
+        participant EP as Episode
+        participant WM as Working Memory
+    end
+
+    participant NEO as Neocortex
+
+    IN->>VIS: vision
+    IN->>VIS: text
+    IN->>AUD: audio
+    VIS->>AMY: embeddings
+    AUD->>AMY: embeddings
+    AMY->>HIPP: compute affect
+    HIPP->>EP: update centroid
+```

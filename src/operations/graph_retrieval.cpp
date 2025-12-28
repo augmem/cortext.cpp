@@ -4,6 +4,7 @@
 #include "cortext/core/algorithms.hpp"
 #include "cortext/core/knobs.hpp"
 #include "cortext/core/utils.hpp"
+#include "cortext/core/sparse.hpp"
 #include "cortext/operations/constants.hpp"
 #include "cortext/processor/operation_context.hpp"
 #include "cortext/store/store.hpp"
@@ -94,6 +95,30 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
       return;
     }
   Eigen::VectorXf q = acc_it->second.mu_acc;
+  Eigen::VectorXf q_ctx
+      = (acc_it->second.c_t.size () > 0) ? acc_it->second.c_t : q;
+
+  const double ctx_mix = core::RetrievalContextMix (cfg.focus);
+  if (ctx_mix > 0.0 && !p_ctx.recent_context_embeddings.empty ()
+      && q.size () > 0)
+    {
+      Eigen::VectorXf mean_ctx = Eigen::VectorXf::Zero (q.size ());
+      int count = 0;
+      for (const auto &v : p_ctx.recent_context_embeddings)
+        {
+          if (v.size () == q.size ())
+            {
+              mean_ctx += v;
+              ++count;
+            }
+        }
+      if (count > 0)
+        {
+          mean_ctx /= static_cast<float> (count);
+          q = q * static_cast<float> (1.0 - ctx_mix)
+              + mean_ctx * static_cast<float> (ctx_mix);
+        }
+    }
 
   if (q.size () == 0)
     {
@@ -104,10 +129,20 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
     {
       q /= q_norm;
     }
+  if (q_ctx.size () > 0)
+    {
+      const float ctx_norm = q_ctx.norm ();
+      if (ctx_norm > 1e-9f)
+        {
+          q_ctx /= ctx_norm;
+        }
+    }
 
   const int k = std::max (1, core::MaxResults (cfg.focus));
   const int depth = std::max (1, core::GraphDepth (cfg.stability));
   const double min_edge_weight = core::MinEdgeWeight (cfg.focus);
+  const int k_key = core::SparseKeySize (cfg.focus);
+  const std::string sparse_key = core::SparseKey (q, k_key);
 
   // Seed vector retrieval via sqlite-vec KNN query.
   struct Scored
@@ -116,7 +151,12 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
     long long memory_id;
     long long created_at;
     double score;
+    double ctx_score;
+    double source_confidence;
+    double proc_score;
+    int source_contradictions;
     Eigen::VectorXf vec;
+    Eigen::VectorXf ctx;
   };
   std::vector<Scored> seeds;
   seeds.reserve (static_cast<size_t> (k));
@@ -179,7 +219,8 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
         {
           created_at = std::any_cast<long long> (it_created->second);
         }
-      seeds.push_back (Scored{ emb_id, mem_id, created_at, sim, v });
+      seeds.push_back (Scored{ emb_id, mem_id, created_at, sim, 0.0, 1.0,
+                               0.0, 0, v, Eigen::VectorXf () });
     }
 
   if (seeds.empty ())
@@ -197,6 +238,20 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
       if (s.memory_id > 0)
         {
           expanded_memory_ids.insert (s.memory_id);
+        }
+    }
+
+  // Add index-store seeds for pattern completion.
+  if (!sparse_key.empty ())
+    {
+      auto it = p_ctx.index_store.find (sparse_key);
+      if (it != p_ctx.index_store.end ())
+        {
+          for (const auto mem_id : it->second)
+            {
+              if (mem_id > 0)
+                expanded_memory_ids.insert (mem_id);
+            }
         }
     }
 
@@ -261,7 +316,10 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
     {
       try
         {
-          std::string sql = "SELECT m.memory_id, m.embedding_id, e.embedding, e.created_at "
+          std::string sql = "SELECT m.memory_id, m.embedding_id, e.embedding, "
+                            "COALESCE(m.created_at, e.created_at, 0) AS created_at, "
+                            "m.context, m.source_origin, m.source_reliability, "
+                            "m.source_contradiction_count "
                             "FROM memories m "
                             "JOIN embeddings e ON m.embedding_id = e.embedding_id "
                             "WHERE m.memory_id IN (";
@@ -284,6 +342,10 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
               auto it_emb_id = row.find ("embedding_id");
               auto it_emb = row.find ("embedding");
               auto it_created = row.find ("created_at");
+              auto it_ctx = row.find ("context");
+              auto it_origin = row.find ("source_origin");
+              auto it_rel = row.find ("source_reliability");
+              auto it_contra = row.find ("source_contradiction_count");
               if (it_mem_id == row.end () || it_emb_id == row.end () || it_emb == row.end ())
                 continue;
               if (it_mem_id->second.type () != typeid (long long))
@@ -301,7 +363,70 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
                 {
                   created_at = std::any_cast<long long> (it_created->second);
                 }
-              scored.push_back (Scored{ emb_id, mem_id, created_at, sim, v });
+              Eigen::VectorXf ctx_vec;
+              if (it_ctx != row.end () && it_ctx->second.has_value ())
+                {
+                  core::DecodeFloatBlob (it_ctx->second, q_ctx.size (), ctx_vec);
+                }
+              const double ctx_sim
+                  = (ctx_vec.size () == q_ctx.size () && q_ctx.size () > 0)
+                        ? core::CosineSimilarity (q_ctx, ctx_vec)
+                        : 0.0;
+
+              std::string origin;
+              if (it_origin != row.end () && it_origin->second.type () == typeid (std::string))
+                {
+                  origin = std::any_cast<std::string> (it_origin->second);
+                }
+
+              double base_rel = 0.7;
+              if (it_rel != row.end () && it_rel->second.type () == typeid (double))
+                {
+                  base_rel = std::any_cast<double> (it_rel->second);
+                }
+              if (origin == "user")
+                base_rel = std::max (base_rel, 0.8);
+              else if (origin == "assistant")
+                base_rel = std::max (base_rel, 0.6);
+              else if (origin == "system")
+                base_rel = std::max (base_rel, 0.9);
+
+              int contradiction_count = 0;
+              if (it_contra != row.end () && it_contra->second.type () == typeid (long long))
+                {
+                  contradiction_count
+                      = static_cast<int> (std::any_cast<long long> (it_contra->second));
+                }
+
+              double age_s = 0.0;
+              if (created_at > 0
+                  && signal.timestamp > static_cast<uint64_t> (created_at))
+                {
+                  age_s = static_cast<double> (signal.timestamp - created_at) / 1000.0;
+                }
+              const double freshness = std::exp (-age_s / 3600.0);
+              const double source_conf
+                  = core::Clamp (base_rel * (1.0 - 0.15 * contradiction_count)
+                                     * (0.7 + 0.3 * freshness),
+                                 0.0, 1.0);
+
+              double proc_score = 0.0;
+              if (!sparse_key.empty ())
+                {
+                  auto pit = p_ctx.procedural_store.find (sparse_key);
+                  if (pit != p_ctx.procedural_store.end ())
+                    {
+                      auto mit = pit->second.find (mem_id);
+                      if (mit != pit->second.end ())
+                        {
+                          proc_score = mit->second;
+                        }
+                    }
+                }
+
+              scored.push_back (Scored{ emb_id, mem_id, created_at, sim,
+                                        ctx_sim, source_conf, proc_score,
+                                        contradiction_count, v, ctx_vec });
               fetched_any = true;
             }
         }
@@ -339,7 +464,13 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
                                                cfg.stability);
   const double w_rel = weights.first;
   const double w_div = weights.second;
+  const double f_eff = core::FocusBias (cfg.focus);
+  const double s_eff = core::SensitivityBias (cfg.sensitivity);
+  const double w_ctx = core::Lerp (0.15, 0.35, f_eff)
+                       * core::Lerp (1.0, 0.85, s_eff);
+  const double w_proc = core::Lerp (0.10, 0.25, s_eff);
 
+  const double source_thresh = core::Lerp (0.15, 0.45, cfg.stability);
   auto filter_candidates = [&] (const std::vector<Scored> &candidates) {
     std::vector<Scored> eligible;
     eligible.reserve (candidates.size ());
@@ -351,6 +482,28 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
           }
         if (s.created_at > 0
             && static_cast<std::uint64_t> (s.created_at) >= write_exclusion_ts)
+          {
+            continue;
+          }
+        if (is_overlap_wm (s.vec, dup_thresh))
+          {
+            continue;
+          }
+        if (s.source_confidence < source_thresh)
+          {
+            continue;
+          }
+        eligible.push_back (s);
+      }
+    return eligible;
+  };
+
+  auto relax_filters = [&] (const std::vector<Scored> &candidates) {
+    std::vector<Scored> eligible;
+    eligible.reserve (candidates.size ());
+    for (const auto &s : candidates)
+      {
+        if (stored_id.has_value () && s.embedding_id == *stored_id)
           {
             continue;
           }
@@ -384,6 +537,8 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
                 continue;
               }
             const double relevance = std::max (0.0, candidates[i].score);
+            const double ctx_sim = std::max (0.0, candidates[i].ctx_score);
+            const double proc_sim = std::max (0.0, candidates[i].proc_score);
             double max_redundancy = 0.0;
             for (const auto &sel : selected)
               {
@@ -391,7 +546,9 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
                     = core::CosineSimilarity (candidates[i].vec, sel.vec);
                 max_redundancy = std::max (max_redundancy, std::max (0.0, sim));
               }
-            const double mmr = w_rel * relevance - w_div * max_redundancy;
+            const double mmr
+                = w_rel * relevance + w_ctx * ctx_sim + w_proc * proc_sim
+                  - w_div * max_redundancy;
             if (mmr > best_score)
               {
                 best_score = mmr;
@@ -408,6 +565,58 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
     return selected;
   };
 
+  auto reinstate_context = [&] (const std::vector<Scored> &selected) {
+    if (selected.empty ())
+      {
+        return;
+      }
+    Eigen::VectorXf mean_ctx;
+    int ctx_count = 0;
+    for (const auto &s : selected)
+      {
+        if (s.ctx.size () == q_ctx.size () && q_ctx.size () > 0)
+          {
+            if (mean_ctx.size () == 0)
+              {
+                mean_ctx = s.ctx;
+              }
+            else
+              {
+                mean_ctx += s.ctx;
+              }
+            ++ctx_count;
+          }
+      }
+    if (ctx_count > 0)
+      {
+        mean_ctx /= static_cast<float> (ctx_count);
+        const float norm = mean_ctx.norm ();
+        if (norm > 1e-9f)
+          {
+            mean_ctx /= norm;
+          }
+        if (acc_it != p_ctx.accumulator_states.end ())
+          {
+            auto &acc = acc_it->second;
+            const double alpha = core::Lerp (0.20, 0.05, cfg.stability);
+            if (acc.c_t.size () != mean_ctx.size ())
+              {
+                acc.c_t = mean_ctx;
+              }
+            else
+              {
+                acc.c_t = acc.c_t * static_cast<float> (1.0 - alpha)
+                          + mean_ctx * static_cast<float> (alpha);
+              }
+            const float acc_norm = acc.c_t.norm ();
+            if (acc_norm > 1e-9f)
+              {
+                acc.c_t /= acc_norm;
+              }
+          }
+      }
+  };
+
   if (!fetched_any)
     {
       for (auto &s : seeds)
@@ -418,12 +627,17 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
             }
         }
       auto eligible = filter_candidates (seeds);
+      if (eligible.empty ())
+        {
+          eligible = relax_filters (seeds);
+        }
       auto selected = select_diversified (eligible, k);
       for (const auto &s : selected)
         {
           out.emplace (s.embedding_id, s.vec);
         }
       context.SetRetrievedMemoryEmbeddings (std::move (out));
+      reinstate_context (selected);
 
       // Create reinforcement edges for co-retrieved seeds
       {
@@ -445,6 +659,10 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
     }
 
   auto eligible = filter_candidates (scored);
+  if (eligible.empty ())
+    {
+      eligible = relax_filters (scored);
+    }
   auto selected = select_diversified (eligible, k);
   for (const auto &s : selected)
     {
@@ -452,6 +670,7 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
     }
 
   context.SetRetrievedMemoryEmbeddings (std::move (out));
+  reinstate_context (selected);
 
   // Create reinforcement edges for co-retrieved memories
   // This strengthens connections between memories that are frequently
@@ -481,7 +700,9 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
     telemetry::Attribute::Int64 ("expansion_depth", static_cast<int64_t> (depth)),
     telemetry::Attribute::Int64 ("final_candidate_count", static_cast<int64_t> (scored.size ())),
     telemetry::Attribute::Double ("retrieval_w_rel", w_rel),
-    telemetry::Attribute::Double ("retrieval_w_div", w_div)
+    telemetry::Attribute::Double ("retrieval_w_div", w_div),
+    telemetry::Attribute::Double ("retrieval_w_ctx", w_ctx),
+    telemetry::Attribute::Double ("retrieval_w_proc", w_proc)
   });
 }
 

@@ -25,7 +25,7 @@ else:
 
 High structural coherence (low variance in similarities) indicates the current accumulator centroid fits consistently with context. The effective Focus is modulated: F_eff = F × (0.5 + 0.5 × coherence_struct_t).
 
-**Effective Focus usage:** F_eff is a diagnostic modulation of Focus. Unless a formula explicitly references F_eff, the specification uses raw F (including all Table 1 metric formulas and knob-derived controls).
+**Effective Focus usage:** F_eff is a diagnostic modulation of Focus. Unless a formula explicitly references F_eff, the specification uses the midpoint‑biased knobs F̃ and S̃ (see Section 1) for all knob‑derived controls and Table 1 metric formulas.
 
 ### Focus Spread {#sec-focus-spread}
 
@@ -121,7 +121,7 @@ The system computes 12 metrics that blend into a composite write score:
 
 ## Metric Weight Blending
 
-Metric weights adapt online using recursive least squares (RLS) to minimize prediction error between composite scores and observed outcomes. Initial weights derive from bootstrap coefficients:
+Metric weights adapt online using recursive least squares (RLS) to minimize prediction error between composite scores and **downstream utility outcomes**. This avoids circular fitting to relevance and turns the blender into an adaptive cognitive policy. Initial weights derive from bootstrap coefficients:
 
 Blender weights are maintained as variables w_* (do not confuse these with control weights like weight_relevance or mismatch_weight). We denote the 12-element blender weight vector as:
 ```
@@ -173,12 +173,27 @@ These coefficients define a canonical initialization map from the three knobs; t
 
 ### RLS Weight Adaptation (Canonical)
 
-RLS fits the blender weights directly in **weight-space**, using the current metrics as predictors and an observed outcome signal as the target. State is retained as a weight vector `w` and covariance matrix `P`.
+RLS fits the blender weights directly in **weight-space**, using the current metrics as predictors and an observed **outcome signal** as the target. State is retained as a weight vector `w` and covariance matrix `P`.
 
 Target and predictor:
 ```
 x_t ← [metric_i] (each metric clamped to [0,1])
-y_t ← relevance_t  # observed outcome (in [0,1])
+y_t ← outcome_t  # observed downstream utility (in [0,1])
+```
+
+Outcome definition (utility target; normalized to [0,1]):
+```
+o_use ← 1 if a retrieved memory was injected into context and used, else 0
+o_pred ← ΔSSE  # prediction-error reduction proxy (Appendix B)
+o_unc ← clamp(1 − u_uncertainty, 0, 1)
+o_user ← user_accept_t  # explicit accept/correct signal if available, else 0
+
+[w_use, w_pred, w_unc, w_user] ← normalize([0.4 + 0.2F, 0.3 + 0.2S, 0.2 + 0.2T, 0.1])
+outcome_t ← clamp(w_use×o_use + w_pred×o_pred + w_unc×o_unc + w_user×o_user, 0, 1)
+
+α_out(T) = lerp(0.12, 0.03, T)
+outcome_pred_t ← EWMA(outcome_pred_{t−1}, outcome_t, α_out(T))
+δ_reward_t ← outcome_t − outcome_pred_t  # reward prediction error for DA-like modulation
 ```
 
 Update cadence and forgetting:

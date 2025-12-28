@@ -9,6 +9,10 @@ namespace cortext::operations
 struct ConsolidationSummarizeParams
 {
   int min_cluster_size_for_extraction; ///< Minimum cluster size to trigger extraction
+  int max_source_texts;                ///< Max number of source texts per summary
+  int max_total_chars;                 ///< Max total chars across source texts
+  int max_text_chars;                  ///< Max chars per source text
+  int max_summary_words;               ///< Max summary words (<=0 means uncapped)
 
   static ConsolidationSummarizeParams FromKnobs (double F, double S, double T);
 };
@@ -17,8 +21,7 @@ struct ConsolidationSummarizeParams
 ///
 /// For each valid cluster from ConsolidationCluster:
 /// - Generates unique summary_id
-/// - Finds most representative memory (highest cosine to centroid)
-/// - Fetches its text from objstore as summary_text (extractive summarization)
+/// - Fetches its text from objstore as summary_text (Gemma LiteRT-LM required)
 /// - Creates MEMORIES entry (kind='ASSOCIATION') with centroid embedding
 /// - Creates ASSOCIATIONS edges (edge_type='derived_from') linking centroid to sources
 /// - Queues ExtractionRequest for clusters meeting MinClusterSizeForExtraction

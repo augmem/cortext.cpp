@@ -14,126 +14,25 @@
 namespace cortext::operations
 {
 
-namespace
-{
-
-// Checks if consolidation should trigger due to rate falling below target.
-// Triggers when measured rate falls below 50% of the knob-derived target.
-bool
-CheckRateTrigger (double rate_target, double m_rate)
-{
-  return (rate_target > 0.0)
-        && (m_rate < constants::kOneHalf * rate_target);
-}
-
-bool
-CheckIntervalTrigger (uint64_t last_consolidation_ts, uint64_t now_ts,
-                      int interval_req)
-{
-  const bool has_last_cons = last_consolidation_ts > 0 && now_ts > 0;
-  const uint64_t interval_ms
-      = static_cast<uint64_t> (std::max (interval_req, 0) * 1000);
-  return has_last_cons
-            ? (static_cast<int64_t> (now_ts - last_consolidation_ts)
-               > static_cast<int64_t> (interval_ms))
-            : false;
-}
-
-bool
-CheckCapacityTrigger (Store *store, long long consolidation_threshold,
-                      long long &db_size)
-{
-  db_size = 0;
-  if (!store)
-    {
-      return false;
-    }
-  try
-    {
-      // v2: Count memories (primary metadata table) instead of embeddings
-      auto rows = store->Execute (
-          "SELECT COUNT(*) AS c FROM memories", {});
-      if (!rows.empty () && rows[0].count ("c") == 1)
-        {
-          const auto &v = rows[0].at ("c");
-          if (v.type () == typeid (long long))
-            db_size = std::any_cast<long long> (v);
-        }
-    }
-  catch (...)
-    {
-      db_size = 0;
-    }
-  return (db_size > consolidation_threshold);
-}
-
-} // namespace
-
 void
 EvaluateConsolidation::Execute (OperationContext &context, Transaction &tx) const
 {
   (void)tx;
   auto &p_ctx = context.GetProcessorContext ();
-  const auto &cfg = context.GetConfig ();
-  Store *store = context.GetStore ();
   const uint64_t now_ts = context.GetSignal ().timestamp;
-  // Derive rate_target from knobs per algorithms.md Section 7.1:
-  // rate_consolidate = (1/max(interval,1)) × (0.3+0.7T) × (1−0.5S)
-  const double rate_target
-      = core::ConsolidationRate (cfg.stability, cfg.sensitivity);
-  const double m_rate = p_ctx.m_rate;
-  const bool trigger_rate = CheckRateTrigger (rate_target, m_rate);
-  const int interval_req = core::ConsolidationIntervalSeconds (cfg.stability);
-  const bool trigger_interval
-      = CheckIntervalTrigger (p_ctx.last_consolidation_ts, now_ts, interval_req);
-  long long db_size = 0;
-  const long long consolidation_threshold
-      = core::ConsolidationThresholdCount (cfg.stability);
-  const bool trigger_capacity
-      = CheckCapacityTrigger (store, consolidation_threshold, db_size);
+  const bool force_consolidation
+      = (context.GetSignal ().source_id == "cortext/consolidate");
 
-  const bool any_trigger = trigger_rate || trigger_interval || trigger_capacity;
-  if (!any_trigger)
+  if (!force_consolidation)
     {
       return;
     }
-  const int retrieval_queue_depth = context.GetRetrievalQueueDepth ();
-  double idle_for_s = 0.0;
-  if (now_ts > p_ctx.last_retrieval_ts)
-    {
-      idle_for_s
-          = static_cast<double> (now_ts - p_ctx.last_retrieval_ts) / 1000.0;
-    }
-  const int idle_required_s = core::IdleRequiredSeconds (cfg.stability);
-  bool is_accumulating_memory = false;
-  for (const auto &kv : p_ctx.accumulator_states)
-    {
-      if (kv.second.n_signals > 0)
-        {
-          is_accumulating_memory = true;
-          break;
-        }
-    }
-  const bool idle_ok = (!is_accumulating_memory)
-                       && (retrieval_queue_depth == 0)
-                       && (idle_for_s
-                           >= static_cast<double> (idle_required_s));
 
-  // NOTE: consolidation_events table removed (undocumented).
-  // Event logging removed - consolidation decisions are tracked via
-  // last_consolidation_ts in processor_state.
-
-  // Start signal: set flag and update last_consolidation_ts.
-  if (idle_ok)
-    {
-      context.SetConsolidationShouldStart (true);
-      p_ctx.last_consolidation_ts = now_ts;
-    }
-
-  telemetry::LogDebug("cortext.evaluate_consolidation", {
-    telemetry::Attribute::Bool("rate_trigger", trigger_rate),
-    telemetry::Attribute::Bool("interval_trigger", trigger_interval),
-    telemetry::Attribute::Bool("consolidation_start", idle_ok)
+  context.SetConsolidationShouldStart (true);
+  p_ctx.last_consolidation_ts = now_ts;
+  telemetry::LogDebug ("cortext.evaluate_consolidation", {
+    telemetry::Attribute::Bool ("consolidation_start", true),
+    telemetry::Attribute::String ("mode", "forced")
   });
 }
 
@@ -193,11 +92,15 @@ void
 ScoreConsolidation::Execute (OperationContext &context, Transaction &tx) const
 {
   const auto &cfg = context.GetConfig ();
-  const double F = cfg.focus;
-  const double S = cfg.sensitivity;
+  const double F_raw = cfg.focus;
+  const double S_raw = cfg.sensitivity;
   const double T = cfg.stability;
+  const double F_eff = core::FocusBias (F_raw);
+  const double S_eff = core::SensitivityBias (S_raw);
   const uint64_t now_ts = context.GetSignal ().timestamp;
   (void)now_ts;
+  const bool force_consolidation
+      = (context.GetSignal ().source_id == "cortext/consolidate");
 
   // Floor derived from knobs (no magic numbers).
   const double floor_cutoff = core::PeripheryCutoff (T);
@@ -214,33 +117,63 @@ ScoreConsolidation::Execute (OperationContext &context, Transaction &tx) const
               "), max_cnt AS ("
               "  SELECT COALESCE(MAX(cnt), 0) AS m FROM edge_counts"
               ") "
-              "UPDATE memories SET connectivity = ("
+              "UPDATE memories SET connectivity = COALESCE(("
               "  SELECT CASE WHEN (SELECT m FROM max_cnt) > 0 "
               "              THEN CAST(ec.cnt AS REAL) / (SELECT m FROM max_cnt) "
               "              ELSE 0.0 END "
               "  FROM edge_counts ec WHERE ec.embedding_id = "
               "memories.embedding_id"
-              ");",
+              "), 0.0);",
               {});
 
   // v2: Select candidates whose score is below floor.
   // score = T*strength - F*redundancy + S*connectivity + T*stability
   // Uses unified memories table which contains per-memory state.
+  const double tag_weight = core::Lerp (0.10, 0.25, S_eff);
   auto rows = tx.Execute (
       "SELECT m.embedding_id, "
       "       ((?1 * COALESCE(m.strength, 1.0)) "
       "        - (?2 * COALESCE(m.redundancy, 0.0)) "
       "        + (?3 * COALESCE(m.connectivity, 0.0)) "
-      "        + (?4 * COALESCE(m.stability, 0.0))) AS computed_score, "
+      "        + (?4 * COALESCE(m.stability, 0.0)) "
+      "        + (?5 * CASE WHEN m.tag_expires_at > ?6 "
+      "                THEN COALESCE(m.tag_strength, 0.0) ELSE 0.0 END)) "
+      "        AS computed_score, "
       "       e.embedding "
       "FROM memories m "
       "JOIN embeddings e ON m.embedding_id = e.embedding_id "
-      "WHERE ((?1 * COALESCE(m.strength, 1.0)) "
+      "WHERE m.kind IN ('LONG_TERM', 'ASSOCIATION') "
+      "  AND m.blob_id IS NOT NULL "
+      "  AND ((?1 * COALESCE(m.strength, 1.0)) "
       "       - (?2 * COALESCE(m.redundancy, 0.0)) "
       "       + (?3 * COALESCE(m.connectivity, 0.0)) "
-      "       + (?4 * COALESCE(m.stability, 0.0))) < ?5 "
+      "       + (?4 * COALESCE(m.stability, 0.0)) "
+      "       + (?5 * CASE WHEN m.tag_expires_at > ?6 "
+      "               THEN COALESCE(m.tag_strength, 0.0) ELSE 0.0 END)) < ?7 "
       "ORDER BY computed_score ASC;",
-      { T, F, S, T, floor_cutoff });
+      { T, F_eff, S_eff, T, tag_weight, static_cast<long long> (now_ts),
+        floor_cutoff });
+  if (rows.empty () && force_consolidation)
+    {
+      const int fallback_limit = std::max (core::WRet (T), 1);
+      rows = tx.Execute (
+          "SELECT m.embedding_id, "
+          "       ((?1 * COALESCE(m.strength, 1.0)) "
+          "        - (?2 * COALESCE(m.redundancy, 0.0)) "
+          "        + (?3 * COALESCE(m.connectivity, 0.0)) "
+          "        + (?4 * COALESCE(m.stability, 0.0)) "
+          "        + (?5 * CASE WHEN m.tag_expires_at > ?6 "
+          "                THEN COALESCE(m.tag_strength, 0.0) ELSE 0.0 END)) "
+          "        AS computed_score, "
+          "       e.embedding "
+          "FROM memories m "
+          "JOIN embeddings e ON m.embedding_id = e.embedding_id "
+          "WHERE m.kind IN ('LONG_TERM', 'ASSOCIATION') "
+          "  AND m.blob_id IS NOT NULL "
+          "ORDER BY computed_score ASC LIMIT ?7;",
+          { T, F_eff, S_eff, T, tag_weight, static_cast<long long> (now_ts),
+            fallback_limit });
+    }
 
   std::vector<ConsolidationCandidate> candidates;
   if (!rows.empty())

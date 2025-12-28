@@ -146,12 +146,14 @@ add_library(cortext
     src/operations/precision.cpp
     src/operations/graph_build.cpp
     src/operations/graph_retrieval.cpp
+    src/operations/neuromodulators.cpp
     # Phase 4: Knowledge Graph Enhancement
     src/operations/emotion_cascade.cpp
     src/operations/signal_metrics_persistence.cpp
     src/operations/write_gate.cpp
     src/operations/memory_storage.cpp
     src/operations/detect_memory_usage.cpp
+    src/operations/synaptic_tagging.cpp
     src/operations/drift_accumulation.cpp
     src/operations/streaming_pacing.cpp
     # Section 4.4: Accumulator operations

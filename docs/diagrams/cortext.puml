@@ -1,88 +1,76 @@
 @startuml cortext
 skinparam monochrome reverse
 
-[*] --> Cortext.Input : InputSignal
-
-state Cortext {
-  state Input <<entryPoint>>
-  state Consolidate <<entryPoint>>
-  state ModalityCheck <<choice>>
-  state ConsolidationProcess
-
-  Input --> ModalityCheck
-  Consolidate --> ConsolidationProcess
-  ConsolidationProcess : entry / cluster & summarize memories
-
-  state VisualCortex
-  VisualCortex : entry / encode vision & text
-
-  state AudioCortex
-  AudioCortex : entry / encode audio
-
-  state Amygdala
-  Amygdala : entry / project embedding onto emotion space
-
-  state PrefrontalCortex {
-  [*] --> Hippocampus
-
-  state Hippocampus {
-    state CentroidCheck <<choice>>
-    state AssignCentroid
-    AssignCentroid : entry / initialize centroid
-    state ComputeCentroid
-    ComputeCentroid : entry / update centroid
-    state ComputeDistances
-    ComputeDistances : entry / compute distances
-    state ComputeDrift
-    ComputeDrift : entry / compute drift
-    state ComputeCoherence
-    ComputeCoherence : entry / compute coherence
-    state ComputeAffect
-    ComputeAffect : entry / aggregate affect
-    state ComputePersistence
-    ComputePersistence : entry / evaluate persistence
-    state BoundaryCheck <<choice>>
-
-    [*] --> CentroidCheck
-    CentroidCheck --> AssignCentroid : [centroid empty]
-    CentroidCheck --> ComputeCentroid : [centroid exists]
-    AssignCentroid --> ComputeDistances
-    ComputeCentroid --> ComputeDistances
-    ComputeDistances --> ComputeDrift
-    ComputeDrift --> ComputeCoherence
-    ComputeCoherence --> ComputeAffect
-    ComputeAffect --> BoundaryCheck
-    BoundaryCheck --> [*] : [no boundary]
-    BoundaryCheck --> ComputePersistence : [boundary detected]
+group cortext {
+split
+  start
+  group Encoding {
+    if (vision?) then (yes)
+      :EncodeVision;
+    elseif (audio?) then (yes)
+      :EncodeAudio;
+    else (unsupported)
+      stop
+    endif
+  }
+  group Amygdala {
+    :ComputeEmotions;
   }
 
-  state IsFull <<choice>>
-  state EvictMemory
-  EvictMemory : entry / evict oldest memory
-  state IsLongTerm <<choice>>
-  state Store
-  Store : entry / store in working memory
-
-  ComputePersistence --> IsFull
-  IsFull --> Store : [no]
-  IsFull --> EvictMemory : [yes]
-  EvictMemory --> IsLongTerm
-  IsLongTerm --> Neocortex : [yes]
-  IsLongTerm --> [*] : [no]
-  Neocortex --> Store
+  group Hippocampus {
+    fork
+      group Storage {
+        group Centroid {
+          if (empty?) then (yes)
+            :assign;
+          else (no)
+            :update;
+          endif
+          :ComputeDistances;
+          :ComputeDrift;
+          :ComputeCoherence;
+          :ComputeAffect;
+        }
+        if (boundary?) then (detected)
+          :ComputePersistence;
+        else (no boundary)
+        endif
+      }
+    fork again
+      group Retrieval {
+        :QueryMemory;
+        :query with current context;
+        :RankResults;
+        :rank by relevance;
+        :ReturnResults;
+        :return to context;
+      }
+    end fork
   }
 
-  state Neocortex
-  Neocortex : long-term memory storage
+  group PrefrontalCortex {
+    if (full?) then (yes)
+      :EvictMemory;
+      :evict oldest memory;
+      if (long term?) then (yes)
+        :Neocortex;
+        :long-term memory storage;
+      else (no)
+      endif
+    else (no)
+    endif
+    :Store;
+    :store in working memory;
+  }
+  detach
 
-  ModalityCheck --> VisualCortex : [vision, text]
-  ModalityCheck --> AudioCortex : [audio]
-
-  VisualCortex -down-> Amygdala : EncodedSignal
-  AudioCortex -down-> Amygdala : EncodedSignal
-  Amygdala -down-> PrefrontalCortex : EmotionSignal
+split again
+  group Consolidation {
+    start
+    :ConsolidationProcess;
+    :cluster & summarize memories;
+    detach
+  }
+end split
 }
-
-note right : See cortext-objects.puml for type definitions
-
 @enduml

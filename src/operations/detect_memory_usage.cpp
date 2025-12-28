@@ -2,7 +2,9 @@
 
 #include "cortext/core/algorithms.hpp"
 #include "cortext/processor/operation_context.hpp"
+#include "cortext/core/sparse.hpp"
 #include "cortext/telemetry/telemetry.hpp"
+#include "cortext/store/store.hpp"
 
 namespace cortext::operations
 {
@@ -12,7 +14,7 @@ DetectMemoryUsage::Execute (OperationContext &context, Transaction &tx) const
 {
   (void)tx;
   const auto &signal = context.GetSignal ();
-  const auto &p_ctx = context.GetProcessorContext ();
+  auto &p_ctx = context.GetProcessorContext ();
   const Eigen::VectorXf *x_ptr = &signal.embedding;
   auto acc_it = p_ctx.accumulator_states.find (signal.source_id);
   if (acc_it != p_ctx.accumulator_states.end ()
@@ -67,6 +69,53 @@ DetectMemoryUsage::Execute (OperationContext &context, Transaction &tx) const
   // Set events in context for downstream feedback operations
   context.SetMemoryUsageEvents (std::move (events));
 
+  const double usage_rate
+      = (total_checked > 0)
+            ? static_cast<double> (used_count) / static_cast<double> (total_checked)
+            : 0.0;
+  p_ctx.last_used_rate = usage_rate;
+  p_ctx.last_used_flag = used_count > 0 ? 1.0 : 0.0;
+
+  // Update procedural store for successful usage
+  if (used_count > 0 && x_ptr->size () > 0)
+    {
+      const int k_key = core::SparseKeySize (context.GetConfig ().focus);
+      const std::string key = core::SparseKey (*x_ptr, k_key);
+      if (!key.empty ())
+        {
+          for (const auto &kv : retrieved)
+            {
+              const long long embedding_id = kv.first;
+              bool used = false;
+              if (selected_id.has_value () && embedding_id == *selected_id)
+                used = true;
+              if (!used)
+                continue;
+              // Map embedding_id -> memory_id for procedural store
+              Store *store = context.GetStore ();
+              long long memory_id = 0;
+              if (store)
+                {
+                  auto rows = store->Execute (
+                      "SELECT memory_id FROM memories WHERE embedding_id = ?",
+                      { embedding_id });
+                  if (!rows.empty () && rows[0].count ("memory_id") == 1
+                      && rows[0].at ("memory_id").type () == typeid (long long))
+                    {
+                      memory_id = std::any_cast<long long> (rows[0].at ("memory_id"));
+                    }
+                }
+              if (memory_id > 0)
+                {
+                  const double gain = 0.5 + 0.5 * p_ctx.neuromod_da;
+                  double &q = p_ctx.procedural_store[key][memory_id];
+                  q = core::Clamp (q + gain * std::max (0.0, p_ctx.delta_reward),
+                                   0.0, 1.0);
+                }
+            }
+        }
+    }
+
   // Telemetry for observability
   telemetry::AddCounter ("cortext.detect_memory_usage.signals_processed_total",
                          1);
@@ -76,8 +125,6 @@ DetectMemoryUsage::Execute (OperationContext &context, Transaction &tx) const
                               static_cast<double> (used_count));
   if (total_checked > 0)
     {
-      const double usage_rate
-          = static_cast<double> (used_count) / static_cast<double> (total_checked);
       telemetry::RecordHistogram ("cortext.detect_memory_usage.usage_rate",
                                   usage_rate);
     }

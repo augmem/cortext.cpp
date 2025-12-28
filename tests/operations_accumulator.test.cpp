@@ -360,11 +360,11 @@ TEST_CASE ("AccumulatorState reset and accumulate", "[accumulator][state]")
     state.Reset (emb1, 1000);
 
     auto emb2 = MakeSimilarEmbedding (emb1, 0.2f);
-    state.Accumulate (emb2, 0.7, 0.1);
+    state.Accumulate (emb2, 0.1);
 
     REQUIRE (state.n_signals == 2);
-    REQUIRE (state.s_sum == Catch::Approx (0.7));
-    REQUIRE (state.s_max == Catch::Approx (0.7));
+    REQUIRE (state.s_sum == Catch::Approx (0.0));
+    REQUIRE (state.s_max == Catch::Approx (0.0));
     REQUIRE (state.drift_acc == Catch::Approx (0.05));
   }
 }

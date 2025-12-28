@@ -25,6 +25,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstring>
+#include <filesystem>
 #include <memory>
 #include <string>
 #include <utility>
@@ -44,6 +45,7 @@
 #include "cortext/operations/memory_strength.hpp"
 #include "cortext/operations/metacognitive.hpp"
 #include "cortext/operations/metrics.hpp"
+#include "cortext/operations/neuromodulators.hpp"
 #include "cortext/operations/predictive.hpp"
 #include "cortext/operations/recent_context.hpp"
 #include "cortext/operations/reconsolidation.hpp"
@@ -59,6 +61,7 @@
 #include "cortext/operations/detect_memory_usage.hpp"
 #include "cortext/operations/drift_accumulation.hpp"
 #include "cortext/operations/streaming_pacing.hpp"
+#include "cortext/operations/synaptic_tagging.hpp"
 
 // Section 4.4: Memory Accumulation
 #include "cortext/operations/accumulator.hpp"
@@ -77,8 +80,8 @@
 #include "cortext/operations/emotion_cascade.hpp"
 #include "cortext/telemetry/telemetry.hpp"
 
-#include "cortext/extractor/phi4_extractor.hpp"
-#include "cortext/summarizer/phi4_summarizer.hpp"
+#include "cortext/extractor/gemma_extractor.hpp"
+#include "cortext/summarizer/gemma_summarizer.hpp"
 
 namespace cortext
 {
@@ -421,9 +424,11 @@ struct Cortext::Impl
   std::unique_ptr<cortext::IOperation> pipeline_root;
   std::unique_ptr<cortext::SignalProcessor> processor;
 
-  // OGA components (Phi-4 extractor and summarizer)
-  std::unique_ptr<Phi4Extractor> extractor_instance;
-  std::unique_ptr<Phi4Summarizer> summarizer_instance;
+#if !defined(CORTEXT_DISABLE_LITERT)
+  // LiteRT-LM components (Gemma extractor and summarizer)
+  std::unique_ptr<GemmaExtractor> extractor_instance;
+  std::unique_ptr<GemmaSummarizer> summarizer_instance;
+#endif
 
   Impl (const Config &c, std::string db, std::string models)
       : cfg (c), db_path (std::move (db)), models_dir (std::move (models))
@@ -432,14 +437,53 @@ struct Cortext::Impl
     auto uniq = cortext::SQLiteStore::Create (db_path.c_str ());
     store = std::shared_ptr<cortext::Store> (std::move (uniq));
 
-    // Encoder stub (ImageBind-oriented)
-    encoder = std::make_unique<ImageBindEncoder> (models_dir);
+    // Encoder (ImageBind-oriented)
+    std::filesystem::path imagebind_dir = models_dir;
+    const auto has_imagebind = [] (const std::filesystem::path &dir) {
+      return std::filesystem::exists (dir / "text_encoder.onnx")
+             || std::filesystem::exists (dir / "text_encoder_int8.onnx");
+    };
+    if (!has_imagebind (imagebind_dir)
+        && has_imagebind (imagebind_dir / "imagebind"))
+      {
+        imagebind_dir /= "imagebind";
+      }
+    encoder = std::make_unique<ImageBindEncoder> (imagebind_dir.string ());
 
-#if !defined(CORTEXT_DISABLE_OGA)
-    // Create Phi-4 extractor and summarizer (enabled by default)
-    std::string phi4_path = models_dir + "/phi4-mm-cpu";
-    extractor_instance = std::make_unique<Phi4Extractor> (phi4_path);
-    summarizer_instance = std::make_unique<Phi4Summarizer> (phi4_path);
+#if !defined(CORTEXT_DISABLE_LITERT)
+    // Create Gemma extractor and summarizer (LiteRT-LM)
+    std::filesystem::path gemma_root = models_dir;
+    if (!std::filesystem::exists (gemma_root / "gemma3n-e2b-litert")
+        && gemma_root.filename () == "imagebind")
+      {
+        gemma_root = gemma_root.parent_path ();
+      }
+    gemma_root /= "gemma3n-e2b-litert";
+    std::string gemma_path = gemma_root.string ();
+    if (std::filesystem::is_directory (gemma_root))
+      {
+        const std::vector<std::string> candidates = {
+          "gemma-3n-E2B-it-int4.litertlm",
+          "gemma-3n-E2B-it-int4-Web.litertlm",
+          "gemma-3n-E2B-it-int4.mediatek.mt6993.litertlm"
+        };
+        for (const auto &candidate : candidates)
+          {
+            const std::filesystem::path p = gemma_root / candidate;
+            if (std::filesystem::exists (p))
+              {
+                gemma_path = p.string ();
+                break;
+              }
+          }
+      }
+    extractor_instance = std::make_unique<GemmaExtractor> (gemma_path);
+    summarizer_instance = std::make_unique<GemmaSummarizer> (gemma_path);
+    if (!extractor_instance->IsAvailable () || !summarizer_instance->IsAvailable ())
+      {
+        throw std::runtime_error (
+            "Gemma LiteRT-LM model not available at " + gemma_path);
+      }
 #endif
 
     // Default pipeline: full per-signal processing chain.
@@ -480,6 +524,7 @@ struct Cortext::Impl
     using cortext::operations::UpdateEmbeddingPredictionError;
     using cortext::operations::UpdateMemoryStrength;
     using cortext::operations::UpdateMood;
+    using cortext::operations::UpdateNeuromodulators;
     using cortext::operations::UpdatePrecisionDelta;
     using cortext::operations::UpdateRecentContext;
     using cortext::operations::UpdateRateState;
@@ -501,6 +546,7 @@ struct Cortext::Impl
     using cortext::operations::CheckSpikeBypass;
     using cortext::operations::ComputeWriteGate;
     using cortext::operations::ResetAccumulatorAfterFlush;
+    using cortext::operations::ApplySynapticTagging;
     // Phase 4: Knowledge Graph Enhancement
     using cortext::operations::PropagateEmotionalCascade;
 
@@ -527,6 +573,7 @@ struct Cortext::Impl
 
         std::make_unique<ComputeEffectiveFocus> (),
         std::make_unique<ComputeMetrics> (),
+        std::make_unique<UpdateNeuromodulators> (),
         std::make_unique<FitMetricWeightsRLS> (),
         std::make_unique<ComputeCompositeScore> (),
         std::make_unique<UpdateAccumulatorScores> (),
@@ -541,6 +588,7 @@ struct Cortext::Impl
         std::make_unique<CheckSpikeBypass> (),
         std::make_unique<ComputeWriteGate> (),
         std::make_unique<MemoryStorage> (),
+        std::make_unique<ApplySynapticTagging> (),
         std::make_unique<PersistSignalMetrics> (),
         std::make_unique<CheckStreamingPacing> (),
         std::make_unique<GraphAugmentedRetrieveCandidates> (),
@@ -585,7 +633,7 @@ struct Cortext::Impl
     pcfg.stability = cfg.stability;
     pcfg.encoder = encoder.get ();
 
-#if !defined(CORTEXT_DISABLE_OGA)
+#if !defined(CORTEXT_DISABLE_LITERT)
     pcfg.extractor = extractor_instance.get ();
     pcfg.summarizer = summarizer_instance.get ();
 #endif

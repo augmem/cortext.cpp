@@ -29,6 +29,8 @@ ComputeMetrics::Execute (OperationContext &context, Transaction &tx) const
   const double F = cfg.focus;
   const double S = cfg.sensitivity;
   const double T = cfg.stability;
+  const double F_eff = core::FocusBias (F);
+  const double S_eff = core::SensitivityBias (S);
 
   const int n_ctx_total
       = static_cast<int> (p_ctx.recent_context_embeddings.size ());
@@ -63,7 +65,7 @@ ComputeMetrics::Execute (OperationContext &context, Transaction &tx) const
       cos01 = core::Map01 (cos_mean);
     }
   const double relevance = core::Clamp (
-      cos01 * (constants::kOneHalf + constants::kOneHalf * F),
+      cos01 * (constants::kOneHalf + constants::kOneHalf * F_eff),
       constants::kNormalizedMin, constants::kNormalizedMax);
   context.SetMetric (operations::Metric::relevance, relevance);
 
@@ -89,7 +91,7 @@ ComputeMetrics::Execute (OperationContext &context, Transaction &tx) const
 
   // Mismatch: (1 − F) × S × novelty
   const double mismatch = core::Clamp (
-      (constants::kNormalizedMax - F) * S * novelty,
+      (constants::kNormalizedMax - F_eff) * S_eff * novelty,
       constants::kNormalizedMin, constants::kNormalizedMax);
   context.SetMetric (operations::Metric::mismatch, mismatch);
 
@@ -100,7 +102,7 @@ ComputeMetrics::Execute (OperationContext &context, Transaction &tx) const
       = context.GetMetric (operations::Metric::embedding_surprisal)
             .value_or (constants::kNormalizedMin);
   const double surprise = core::Clamp (
-      embedding_surprisal * S
+      embedding_surprisal * S_eff
           * (constants::kNormalizedMax - constants::kOneHalf * T),
       constants::kNormalizedMin, constants::kNormalizedMax);
   context.SetMetric (operations::Metric::surprise, surprise);
@@ -109,7 +111,7 @@ ComputeMetrics::Execute (OperationContext &context, Transaction &tx) const
   const double rarity
       = core::Clamp (
           rarity_base
-              * (constants::kOneHalf + constants::kOneHalf * F)
+              * (constants::kOneHalf + constants::kOneHalf * F_eff)
               * (constants::kNormalizedMax - constants::kRarityTCoeff * T),
           constants::kNormalizedMin, constants::kNormalizedMax);
   context.SetMetric (operations::Metric::rarity, rarity);
@@ -125,7 +127,7 @@ ComputeMetrics::Execute (OperationContext &context, Transaction &tx) const
 
   // Contradiction: max(0, S − F)
   const double contradiction
-      = std::max (constants::kNormalizedMin, S - F);
+      = std::max (constants::kNormalizedMin, S_eff - F_eff);
   context.SetMetric (operations::Metric::contradiction, contradiction);
 
   // Utility (ΔSSE): normalized improvement in prediction error
@@ -147,8 +149,9 @@ ComputeMetrics::Execute (OperationContext &context, Transaction &tx) const
     }
   const double utility
       = core::Clamp (delta_sse
-                         * (constants::kOneHalf + constants::kOneHalf * F)
-                         * (constants::kNormalizedMax - constants::kUtilitySCoeff * S),
+                         * (constants::kOneHalf + constants::kOneHalf * F_eff)
+                         * (constants::kNormalizedMax
+                            - constants::kUtilitySCoeff * S_eff),
                      constants::kNormalizedMin, constants::kNormalizedMax);
   context.SetMetric (operations::Metric::utility, utility);
 
@@ -160,7 +163,7 @@ ComputeMetrics::Execute (OperationContext &context, Transaction &tx) const
 
   // Coverage: ↑F; approximate as F × max(0, relevance − baseline).
   // No DB baseline available → baseline 0.0.
-  const double coverage = core::Clamp (F * relevance,
+  const double coverage = core::Clamp (F_eff * relevance,
                                        constants::kNormalizedMin,
                                        constants::kNormalizedMax);
   context.SetMetric (operations::Metric::coverage, coverage);
@@ -168,7 +171,7 @@ ComputeMetrics::Execute (OperationContext &context, Transaction &tx) const
   // Salience: (rarity_t + novelty_t)/2 × (F + S)/2
   const double salience
       = core::Clamp (constants::kOneHalf * (rarity_base + novelty)
-                         * constants::kOneHalf * (F + S),
+                         * constants::kOneHalf * (F_eff + S_eff),
                      constants::kNormalizedMin, constants::kNormalizedMax);
   context.SetMetric (operations::Metric::salience, salience);
 

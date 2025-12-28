@@ -57,12 +57,6 @@ DetectBoundary::Execute (OperationContext &context,
   // Update coherence_prev for next signal
   acc.coherence_prev = coherence;
 
-  // Boundary score (weighted combination)
-  const double w_gap = core::BoundaryWeightGap (config.stability);
-  const double w_drift
-      = core::BoundaryWeightDrift (config.stability) * (1.0 - w_gap);
-  const double w_coh = 1.0 - w_gap - w_drift;
-
   // Adaptive gap signal (soft influence only)
   const double signal_gap
       = static_cast<double> (signal.timestamp - acc.last_signal_ts) / 1000.0;
@@ -71,9 +65,32 @@ DetectBoundary::Execute (OperationContext &context,
   const double gap_z = (signal_gap - gap_ref_s) / std::max (gap_ref_s, kEpsilon);
   const double gap_score = core::Sigmoid (gap_z);
 
+  // Bayesian change-point inference for boundary probability
+  const double h_base = core::Lerp (0.02, 0.12, config.sensitivity)
+                        * core::Lerp (1.2, 0.8, config.stability);
+  const double h_t
+      = core::Clamp (h_base * (0.8 + 0.2 * (1.0 - config.focus)), 0.0, 0.5);
+
+  const double surprisal
+      = context.GetMetric (operations::Metric::embedding_surprisal)
+            .value_or (0.0);
+  const double w_s = 0.45 + 0.25 * config.sensitivity;
+  const double w_d = 0.25 + 0.10 * (1.0 - config.stability);
+  const double w_c = 0.20 + 0.10 * config.focus;
+  const double w_g = 0.10;
+  const double w_sum = std::max (kEpsilon, w_s + w_d + w_c + w_g);
+  const double z_t
+      = (w_s / w_sum) * (surprisal - 0.5)
+        + (w_d / w_sum) * (core::Sigmoid (drift_spike) - 0.5)
+        + (w_c / w_sum) * (coh_drop - 0.5)
+        + (w_g / w_sum) * (gap_score - 0.5);
+  const double k_cp
+      = core::Lerp (3.0, 9.0, config.sensitivity)
+        * core::Lerp (1.1, 0.9, config.stability);
+  const double likelihood = core::Sigmoid (k_cp * z_t);
   double boundary_score
-      = w_drift * core::Sigmoid (drift_spike) + w_coh * coh_drop
-        + w_gap * gap_score;
+      = (h_t * likelihood)
+        / std::max (kEpsilon, h_t * likelihood + (1.0 - h_t) * (1.0 - likelihood));
   boundary_score = core::Clamp (boundary_score, 0.0, 1.0);
 
   context.SetBoundaryScore (boundary_score);
@@ -176,9 +193,12 @@ DetectBoundary::Execute (OperationContext &context,
     telemetry::Attribute::Double ("d_step", d_step),
     telemetry::Attribute::Double ("eta_prev", eta_prev),
     telemetry::Attribute::Double ("drift_spike", drift_spike),
-    telemetry::Attribute::Double ("w_gap", w_gap),
-    telemetry::Attribute::Double ("w_drift", w_drift),
-    telemetry::Attribute::Double ("w_coh", w_coh),
+    telemetry::Attribute::Double ("hazard", h_t),
+    telemetry::Attribute::Double ("w_s", w_s),
+    telemetry::Attribute::Double ("w_d", w_d),
+    telemetry::Attribute::Double ("w_c", w_c),
+    telemetry::Attribute::Double ("w_g", w_g),
+    telemetry::Attribute::Double ("likelihood", likelihood),
     telemetry::Attribute::Double ("boundary_score", boundary_score),
     telemetry::Attribute::Double ("boundary_threshold", b_thresh),
     telemetry::Attribute::Double ("elapsed_time_ms", memory_elapsed),

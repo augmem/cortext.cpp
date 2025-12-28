@@ -4,6 +4,8 @@
 #include "cortext/processor/operation_context.hpp"
 #include "cortext/telemetry/telemetry.hpp"
 
+#include <string>
+
 namespace cortext::operations
 {
 
@@ -47,14 +49,36 @@ CheckSpikeBypass::Execute (OperationContext &context, Transaction &tx) const
 
   // Check for spike bypass
   const bool spike = score > spike_threshold;
+  const int max_signals
+      = core::MaxSignalsPerMemory (config.focus, config.sensitivity,
+                                   config.stability);
+  const bool max_signal_flush
+      = (max_signals > 0) && (n_signals >= max_signals);
 
   // If spike, force flush even for single-signal units.
   bool spike_bypass = false;
-  if (spike)
+  if (spike || max_signal_flush)
     {
       spike_bypass = true;
       context.SetFlushRequired (true);
-      telemetry::AddCounter ("cortext.accumulator.spike_bypass_total", 1);
+      context.SetAtBoundary (true);
+      if (max_signal_flush)
+        {
+          context.RequestFinalizeEpisode ();
+        }
+      if (!context.GetBoundaryType ().has_value ())
+        {
+          context.SetBoundaryType (
+              std::string (max_signal_flush ? "capacity" : "explicit"));
+        }
+      if (max_signal_flush)
+        {
+          telemetry::AddCounter ("cortext.accumulator.max_signal_flush_total", 1);
+        }
+      if (spike)
+        {
+          telemetry::AddCounter ("cortext.accumulator.spike_bypass_total", 1);
+        }
     }
 
   context.SetSpikeBypass (spike_bypass);
@@ -71,6 +95,9 @@ CheckSpikeBypass::Execute (OperationContext &context, Transaction &tx) const
     telemetry::Attribute::Double ("spike_margin_eff", spike_margin_eff),
     telemetry::Attribute::Double ("mem_maturity", mem_maturity),
     telemetry::Attribute::Double ("mem_tau", mem_tau),
+    telemetry::Attribute::Int64 ("n_signals", n_signals),
+    telemetry::Attribute::Int64 ("max_signals", max_signals),
+    telemetry::Attribute::Bool ("max_signal_flush", max_signal_flush),
     telemetry::Attribute::Double ("coherence", coherence),
     telemetry::Attribute::Double ("coherence_scale", coherence_scale),
     telemetry::Attribute::Double ("spike_threshold", spike_threshold),

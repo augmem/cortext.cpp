@@ -24,17 +24,18 @@ InitializeSensitivityPriors::Execute (OperationContext &context, Transaction &tx
       return;
     }
 
-  const double S = config.sensitivity;
+  const double S_raw = config.sensitivity;
+  const double S_eff = core::SensitivityBias (S_raw);
 
   // Priors per algorithms.md Algorithm 3
-  p_ctx.base_rate_prior = core::BaseRatePrior (S);
-  p_ctx.weight_novelty_prior = 0.3 + 0.7 * S;
-  p_ctx.weight_surprise_prior = 0.2 + 0.8 * S;
-  p_ctx.weight_valence_prior = 0.4 + 0.6 * S;
-  p_ctx.weight_arousal_prior = S;
-  p_ctx.weight_emotion_prior = 0.2 + 0.8 * S;
-  p_ctx.emotion_gain_prior = std::exp (1.5 * S);
-  p_ctx.score_gain_prior = std::exp (2.0 * S);
+  p_ctx.base_rate_prior = core::BaseRatePrior (S_raw);
+  p_ctx.weight_novelty_prior = 0.3 + 0.7 * S_eff;
+  p_ctx.weight_surprise_prior = 0.2 + 0.8 * S_eff;
+  p_ctx.weight_valence_prior = 0.4 + 0.6 * S_eff;
+  p_ctx.weight_arousal_prior = S_eff;
+  p_ctx.weight_emotion_prior = 0.2 + 0.8 * S_eff;
+  p_ctx.emotion_gain_prior = std::exp (1.5 * S_eff);
+  p_ctx.score_gain_prior = std::exp (2.0 * S_eff);
   p_ctx.rate_target_prior = p_ctx.base_rate_prior;
   // Initialize dynamic values from priors
   p_ctx.weight_novelty = p_ctx.weight_novelty_prior;
@@ -46,7 +47,8 @@ InitializeSensitivityPriors::Execute (OperationContext &context, Transaction &tx
   p_ctx.sensitivity_priors_initialized = true;
 
   telemetry::LogDebug("cortext.initialize_sensitivity_priors", {
-    telemetry::Attribute::Double("S", S),
+    telemetry::Attribute::Double("S", S_raw),
+    telemetry::Attribute::Double("S_eff", S_eff),
     telemetry::Attribute::Double("base_rate_prior", p_ctx.base_rate_prior),
     telemetry::Attribute::Double("weight_novelty_prior", p_ctx.weight_novelty_prior),
     telemetry::Attribute::Double("weight_surprise_prior", p_ctx.weight_surprise_prior)
@@ -106,7 +108,8 @@ UpdateSensitivity::Execute (OperationContext &context, Transaction &tx) const
   (void)tx;
   auto &p_ctx = context.GetProcessorContext ();
   const auto &cfg = context.GetConfig ();
-  const double S = cfg.sensitivity;
+  const double S_raw = cfg.sensitivity;
+  const double S_eff = core::SensitivityBias (S_raw);
 
   // --- Emotion projections if centroids provided ---
   double emotion_intensity = 0.0;
@@ -147,7 +150,7 @@ UpdateSensitivity::Execute (OperationContext &context, Transaction &tx) const
               v = std::max (0.0, v);
             }
           // softmax with β(S) = 4 + 8S
-          const double beta = 4.0 + 8.0 * S;
+          const double beta = 4.0 + 8.0 * S_eff;
           SoftmaxNormalize (raw_cos, beta);
 
           // Expose emotion probabilities for Algorithm 4b (UpdateMood)
@@ -188,7 +191,7 @@ UpdateSensitivity::Execute (OperationContext &context, Transaction &tx) const
 
   // Apply EWMA smoothing to emotion state for persistence
   // Higher Sensitivity = faster adaptation (α ∈ [0.05, 0.30])
-  const double alpha_emotion = core::Lerp (0.05, 0.30, S);
+  const double alpha_emotion = core::Lerp (0.05, 0.30, S_eff);
   p_ctx.emotion_intensity_ewma
       = core::Ewma (p_ctx.emotion_intensity_ewma, emotion_intensity, alpha_emotion);
   p_ctx.valence_ewma = core::Ewma (p_ctx.valence_ewma, valence, alpha_emotion);
@@ -202,7 +205,7 @@ UpdateSensitivity::Execute (OperationContext &context, Transaction &tx) const
   // --- ΔThreshold components ---
   // ΔT_emo = − κ_emo × emotion_intensity × (0.5 + 0.5 × arousal)
   const double kappa_base = constants::kGainMedium;
-  const double kappa_emo = kappa_base * S;
+  const double kappa_emo = kappa_base * S_eff;
   const double delta_T_emo
       = -kappa_emo * emotion_intensity
         * (constants::kOneHalf + constants::kOneHalf * arousal);
@@ -246,7 +249,7 @@ UpdateSensitivity::Execute (OperationContext &context, Transaction &tx) const
       = core::KappaSens (cfg.focus, cfg.sensitivity, cfg.stability);
   const double sigma_ref = core::SigmaRef (cfg.sensitivity, cfg.stability);
   double delta_T_sens = core::Clamp (
-      -kappa_sens * S * (sigma_scores - sigma_ref), -cap_sens, cap_sens);
+      -kappa_sens * S_eff * (sigma_scores - sigma_ref), -cap_sens, cap_sens);
   context.SetDeltaThresholdSensitivity (delta_T_sens);
 
   // rate_target is a knob-derived constant (base_rate(S))
@@ -274,14 +277,15 @@ UpdateMood::Execute (OperationContext &context, Transaction &tx) const
   (void)tx;
   auto &p_ctx = context.GetProcessorContext ();
   const auto &cfg = context.GetConfig ();
-  const double S = cfg.sensitivity;
+  const double S_raw = cfg.sensitivity;
+  const double S_eff = core::SensitivityBias (S_raw);
   const double T = cfg.stability;
 
   // Get instantaneous emotion probabilities from Algorithm 4
   const auto &p_c = context.GetEmotionProbabilities ();
 
   // Get mood dynamics parameters (Algorithm 4b)
-  const double alpha_mood = core::AlphaMood (S);
+  const double alpha_mood = core::AlphaMood (S_raw);
   const uint64_t now_ts = context.GetSignal ().timestamp;
   double delta_mood_s = 0.0;
   if (p_ctx.last_mood_ts > 0 && now_ts > p_ctx.last_mood_ts)
@@ -324,7 +328,7 @@ UpdateMood::Execute (OperationContext &context, Transaction &tx) const
   const double m_norm = core::Clamp (magnitude / std::sqrt (6.0), 0.0, 1.0);
 
   // Compute threshold delta: ΔT_mood = −κ_mood × clamp(m_norm, 0, 1)
-  const double kappa_mood = constants::kGainMedium * S;
+  const double kappa_mood = constants::kGainMedium * S_eff;
   const double delta_T_mood = -kappa_mood * m_norm;
   context.SetDeltaThresholdMood (delta_T_mood);
 

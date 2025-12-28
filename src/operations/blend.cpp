@@ -187,8 +187,10 @@ BootstrapWeightByIndex (size_t metric_index, double F, double S, double T)
     {
       return 0.5; // Fallback for unknown metrics
     }
-  const double z = kBootstrapCF[metric_index] * F
-                 + kBootstrapCS[metric_index] * S
+  const double f_eff = core::FocusBias (F);
+  const double s_eff = core::SensitivityBias (S);
+  const double z = kBootstrapCF[metric_index] * f_eff
+                 + kBootstrapCS[metric_index] * s_eff
                  + kBootstrapCT[metric_index] * T
                  + kBootstrapD[metric_index];
   return core::Clamp (core::Sigmoid (z),
@@ -378,9 +380,28 @@ FitMetricWeightsRLS::Execute (OperationContext &context, Transaction &tx) const
   const auto &names = SupportedMetrics ();
   const auto &metrics = context.GetAllMetrics ();
   std::vector<double> x = BuildMetricVector (names, metrics);
-  auto it = metrics.find (operations::Metric::relevance);
-  const double v = (it == metrics.end ()) ? 0.0 : it->second;
-  double y = NormTo01 (v);
+  const double o_use = core::Clamp (p_ctx.last_used_flag, 0.0, 1.0);
+  const double o_pred
+      = NormTo01 (
+          context.GetMetric (operations::Metric::utility).value_or (0.0));
+  const double o_unc = core::Clamp (1.0 - p_ctx.u_t, 0.0, 1.0);
+  const double o_user = 0.0;
+  const double f_eff = core::FocusBias (cfg.focus);
+  const double s_eff = core::SensitivityBias (cfg.sensitivity);
+  const double w_use = 0.4 + 0.2 * f_eff;
+  const double w_pred = 0.3 + 0.2 * s_eff;
+  const double w_unc = 0.2 + 0.2 * cfg.stability;
+  const double w_user = 0.1;
+  const double w_sum = std::max (kTiny, w_use + w_pred + w_unc + w_user);
+  const double outcome_t
+      = core::Clamp ((w_use * o_use + w_pred * o_pred + w_unc * o_unc
+                      + w_user * o_user)
+                         / w_sum,
+                     0.0, 1.0);
+  const double alpha_out = core::Lerp (0.12, 0.03, cfg.stability);
+  p_ctx.outcome_pred = core::Ewma (p_ctx.outcome_pred, outcome_t, alpha_out);
+  p_ctx.delta_reward = outcome_t - p_ctx.outcome_pred;
+  double y = outcome_t;
   std::vector<double> w = BuildWeightVector (names, p_ctx.blender_state);
   double y_hat = 0.0;
   for (std::size_t i = 0; i < names.size (); ++i)

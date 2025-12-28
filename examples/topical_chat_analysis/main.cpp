@@ -1,5 +1,9 @@
 #include <cortext/cortext.hpp>
 #include <cortext/telemetry/telemetry.hpp>
+#include <cortext/core/utils.hpp>
+#include <cortext/core/algorithms.hpp>
+#include <cortext/encoder/imagebind.hpp>
+#include <cortext/store/sqlite_store.hpp>
 
 #include <nlohmann/json.hpp>
 
@@ -13,6 +17,7 @@
 #include <opentelemetry/sdk/resource/resource.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cctype>
 #include <cstdlib>
@@ -35,12 +40,25 @@
 
 namespace {
 
+struct ConsolidationTelemetry {
+  std::atomic<int64_t> summary_count{0};
+  std::atomic<int64_t> extraction_jobs{0};
+  std::atomic<int64_t> summaries_with_summarizer{0};
+  std::atomic<int64_t> summaries_fallback{0};
+  std::atomic<int64_t> extraction_results{0};
+  std::atomic<int64_t> labels_seen{0};
+  std::atomic<int64_t> relations_seen{0};
+};
+
 class SimpleStdoutLogExporter final
     : public opentelemetry::sdk::logs::LogRecordExporter {
 public:
   SimpleStdoutLogExporter(const std::string &log_file_path,
-                          std::vector<std::string> filters)
-      : log_file_path_(log_file_path), filters_(std::move(filters)) {
+                          std::vector<std::string> filters,
+                          ConsolidationTelemetry *cons_metrics)
+      : log_file_path_(log_file_path),
+        filters_(std::move(filters)),
+        cons_metrics_(cons_metrics) {
     if (!log_file_path_.empty()) {
       log_file_.open(log_file_path_, std::ios::out | std::ios::trunc);
     }
@@ -70,6 +88,62 @@ public:
       const auto &body_val = log_record->GetBody();
       if (opentelemetry::nostd::holds_alternative<std::string>(body_val)) {
         body = opentelemetry::nostd::get<std::string>(body_val);
+      }
+
+      auto get_attr_i64 = [&](const std::string &key) -> std::optional<int64_t> {
+        for (const auto &kv : log_record->GetAttributes()) {
+          if (kv.first != key) {
+            continue;
+          }
+          std::optional<int64_t> out;
+          opentelemetry::nostd::visit(
+              [&out](auto &&v) {
+                using T = std::decay_t<decltype(v)>;
+                if constexpr (std::is_same_v<T, int64_t>) {
+                  out = static_cast<int64_t>(v);
+                } else if constexpr (std::is_same_v<T, int32_t>) {
+                  out = static_cast<int64_t>(v);
+                } else if constexpr (std::is_same_v<T, uint64_t>) {
+                  out = static_cast<int64_t>(v);
+                } else if constexpr (std::is_same_v<T, uint32_t>) {
+                  out = static_cast<int64_t>(v);
+                } else if constexpr (std::is_same_v<T, double>) {
+                  out = static_cast<int64_t>(v);
+                } else if constexpr (std::is_same_v<T, float>) {
+                  out = static_cast<int64_t>(v);
+                }
+              },
+              kv.second);
+          return out;
+        }
+        return std::nullopt;
+      };
+
+      if (cons_metrics_) {
+        if (body == "cortext.consolidation_summarize") {
+          if (auto v = get_attr_i64("summary_count")) {
+            cons_metrics_->summary_count.fetch_add(*v, std::memory_order_relaxed);
+          }
+          if (auto v = get_attr_i64("extraction_jobs_queued")) {
+            cons_metrics_->extraction_jobs.fetch_add(*v, std::memory_order_relaxed);
+          }
+          if (auto v = get_attr_i64("summaries_with_summarizer")) {
+            cons_metrics_->summaries_with_summarizer.fetch_add(*v, std::memory_order_relaxed);
+          }
+          if (auto v = get_attr_i64("summaries_fallback")) {
+            cons_metrics_->summaries_fallback.fetch_add(*v, std::memory_order_relaxed);
+          }
+        } else if (body == "cortext.process_extraction_results") {
+          if (auto v = get_attr_i64("results_processed")) {
+            cons_metrics_->extraction_results.fetch_add(*v, std::memory_order_relaxed);
+          }
+          if (auto v = get_attr_i64("labels_seen")) {
+            cons_metrics_->labels_seen.fetch_add(*v, std::memory_order_relaxed);
+          }
+          if (auto v = get_attr_i64("relations_seen")) {
+            cons_metrics_->relations_seen.fetch_add(*v, std::memory_order_relaxed);
+          }
+        }
       }
 
       std::ostringstream attrs;
@@ -154,15 +228,17 @@ private:
   std::string log_file_path_;
   std::ofstream log_file_;
   std::vector<std::string> filters_;
+  ConsolidationTelemetry *cons_metrics_ = nullptr;
 };
 
 void InstallOtelLogger(const std::string &log_path,
-                       std::vector<std::string> filters) {
+                       std::vector<std::string> filters,
+                       ConsolidationTelemetry *cons_metrics) {
   namespace logs_sdk = opentelemetry::sdk::logs;
   namespace resource_sdk = opentelemetry::sdk::resource;
   auto resource = resource_sdk::Resource::Create({{"service.name", "cortext_topical_chat_analysis"}});
   auto exporter = std::unique_ptr<logs_sdk::LogRecordExporter>(
-      new SimpleStdoutLogExporter(log_path, std::move(filters)));
+      new SimpleStdoutLogExporter(log_path, std::move(filters), cons_metrics));
   auto processor =
       logs_sdk::SimpleLogRecordProcessorFactory::Create(std::move(exporter));
   auto provider = opentelemetry::nostd::shared_ptr<opentelemetry::logs::LoggerProvider>(
@@ -173,6 +249,7 @@ void InstallOtelLogger(const std::string &log_path,
 struct AnalysisConfig {
   std::string dataset_path;
   std::string models_dir = "models";
+  std::string db_path = ":memory:";
   std::string otel_log_path;
   std::vector<std::string> otel_filters = {
       "cortext.boundary",
@@ -187,6 +264,7 @@ struct AnalysisConfig {
   int max_turns_per_conversation = 120;
   int max_total_turns = 240;
   bool reset_per_conversation = true;
+  int interleave = 1;
   bool cadence_enabled = true;
   double cadence_speed = 12.0; // >1.0 speeds up; 12x keeps runs reasonable
   double cadence_wpm = 150.0;
@@ -194,6 +272,9 @@ struct AnalysisConfig {
   int cadence_min_ms = 80;
   int cadence_max_ms = 1200;
   int context_window_turns = 4;
+  bool run_consolidation = false;
+  int consolidation_cycles = 1;
+  bool semantic_overlap = false;
   unsigned int seed = 1337;
   double focus = 0.3;
   double sensitivity = 0.6;
@@ -204,6 +285,16 @@ struct RetrievalExample {
   double overlap = 0.0;
   std::string turn_text;
   std::string memory_text;
+};
+
+struct Turn {
+  std::string agent;
+  std::string message;
+};
+
+struct Conversation {
+  std::string id;
+  std::vector<Turn> turns;
 };
 
 struct DistSummary {
@@ -218,10 +309,28 @@ struct Stats {
   int conversations = 0;
   int turns = 0;
   int writes = 0;
+  int consolidation_runs = 0;
+  int consolidation_failures = 0;
+  long long consolidation_association_created = 0;
+  long long consolidation_label_created = 0;
+  long long consolidation_baseline_association = 0;
+  long long consolidation_baseline_label = 0;
+  long long consolidation_final_association = 0;
+  long long consolidation_final_label = 0;
   int retrieval_turns = 0;
   int total_retrieved = 0;
+  int retrieval_association_candidates = 0;
+  int retrieval_label_candidates = 0;
+  int retrieval_other_candidates = 0;
+  int retrieval_turns_with_association = 0;
+  int retrieval_turns_with_label = 0;
   int interrupt_turns = 0;
   int interrupt_turns_with_retrieval = 0;
+  int interrupt_association_candidates = 0;
+  int interrupt_label_candidates = 0;
+  int interrupt_other_candidates = 0;
+  int interrupt_turns_with_association = 0;
+  int interrupt_turns_with_label = 0;
   int wm_samples = 0;
   int wm_total_slots = 0;
   int wm_max_slots = 0;
@@ -236,8 +345,12 @@ struct Stats {
   std::vector<double> surprise_values;
   std::vector<double> retrieval_overlap_values;
   std::vector<double> retrieval_context_overlap_values;
+  std::vector<double> retrieval_semantic_overlap_values;
+  std::vector<double> retrieval_context_semantic_overlap_values;
   std::vector<double> interrupt_overlap_values;
   std::vector<double> interrupt_context_overlap_values;
+  std::vector<double> interrupt_semantic_overlap_values;
+  std::vector<double> interrupt_context_semantic_overlap_values;
   std::vector<double> interrupt_novelty_values;
   std::vector<double> interrupt_relevance_values;
   std::vector<double> interrupt_surprise_values;
@@ -292,6 +405,72 @@ double Jaccard(const std::unordered_set<std::string> &a,
     return 0.0;
   }
   return static_cast<double>(intersect) / static_cast<double>(uni);
+}
+
+std::optional<std::vector<float>> DecodeFloatBlobDynamic(const std::any &v) {
+  const unsigned char *data = nullptr;
+  size_t len = 0;
+  if (!cortext::core::AnyToBytes(v, data, len) || len == 0) {
+    return std::nullopt;
+  }
+  if (len % sizeof(float) != 0) {
+    return std::nullopt;
+  }
+  const size_t dim = len / sizeof(float);
+  std::vector<float> out(dim);
+  std::memcpy(out.data(), data, len);
+  return out;
+}
+
+double CosineSimilarity(const std::vector<float> &a,
+                        const std::vector<float> &b) {
+  if (a.empty() || b.empty() || a.size() != b.size()) {
+    return 0.0;
+  }
+  double dot = 0.0;
+  double na = 0.0;
+  double nb = 0.0;
+  for (size_t i = 0; i < a.size(); ++i) {
+    const double av = static_cast<double>(a[i]);
+    const double bv = static_cast<double>(b[i]);
+    dot += av * bv;
+    na += av * av;
+    nb += bv * bv;
+  }
+  if (na <= 0.0 || nb <= 0.0) {
+    return 0.0;
+  }
+  return dot / (std::sqrt(na) * std::sqrt(nb));
+}
+
+std::vector<float> MeanEmbedding(
+    const std::deque<std::vector<float>> &window) {
+  if (window.empty()) {
+    return {};
+  }
+  size_t dim = window.front().size();
+  if (dim == 0) {
+    return {};
+  }
+  std::vector<float> mean(dim, 0.0f);
+  size_t count = 0;
+  for (const auto &emb : window) {
+    if (emb.size() != dim) {
+      continue;
+    }
+    for (size_t i = 0; i < dim; ++i) {
+      mean[i] += emb[i];
+    }
+    count++;
+  }
+  if (count == 0) {
+    return {};
+  }
+  const float inv = 1.0f / static_cast<float>(count);
+  for (size_t i = 0; i < dim; ++i) {
+    mean[i] *= inv;
+  }
+  return mean;
 }
 
 double Clamp01(double v) {
@@ -435,6 +614,62 @@ std::string MemoryToText(const cortext::Cortext::Context::Memory &mem) {
   return out.str();
 }
 
+std::optional<std::string> GetMemoryKind(
+    const std::shared_ptr<cortext::Store> &store,
+    std::unordered_map<long long, std::string> &cache,
+    long long memory_id) {
+  if (!store || memory_id <= 0) {
+    return std::nullopt;
+  }
+  auto it = cache.find(memory_id);
+  if (it != cache.end()) {
+    return it->second;
+  }
+  auto rows = store->Execute(
+      "SELECT kind FROM memories WHERE memory_id = ?",
+      {memory_id});
+  if (rows.empty()) {
+    return std::nullopt;
+  }
+  auto it_kind = rows[0].find("kind");
+  if (it_kind == rows[0].end()) {
+    return std::nullopt;
+  }
+  if (it_kind->second.type() != typeid(std::string)) {
+    return std::nullopt;
+  }
+  std::string kind = std::any_cast<std::string>(it_kind->second);
+  cache[memory_id] = kind;
+  return kind;
+}
+
+long long CountMemoriesByKind(const std::shared_ptr<cortext::Store> &store,
+                              const std::string &kind) {
+  if (!store) {
+    return 0;
+  }
+  auto rows = store->Execute(
+      "SELECT COUNT(*) AS c FROM memories WHERE kind = ?",
+      {kind});
+  if (rows.empty()) {
+    return 0;
+  }
+  auto it = rows[0].find("c");
+  if (it == rows[0].end()) {
+    return 0;
+  }
+  if (it->second.type() == typeid(long long)) {
+    return std::any_cast<long long>(it->second);
+  }
+  if (it->second.type() == typeid(int)) {
+    return static_cast<long long>(std::any_cast<int>(it->second));
+  }
+  if (it->second.type() == typeid(double)) {
+    return static_cast<long long>(std::any_cast<double>(it->second));
+  }
+  return 0;
+}
+
 void RecordRetrievalExample(Stats &stats, double overlap, const std::string &turn_text,
                             const std::string &memory_text) {
   RetrievalExample ex{overlap, turn_text, memory_text};
@@ -464,6 +699,8 @@ AnalysisConfig ParseArgs(int argc, char **argv) {
       cfg.dataset_path = *v;
     } else if (auto v = take("--models=")) {
       cfg.models_dir = *v;
+    } else if (auto v = take("--db=")) {
+      cfg.db_path = *v;
     } else if (auto v = take("--max-conversations=")) {
       cfg.max_conversations = std::stoi(*v);
     } else if (auto v = take("--max-turns=")) {
@@ -502,10 +739,30 @@ AnalysisConfig ParseArgs(int argc, char **argv) {
       cfg.cadence_max_ms = std::stoi(*v);
     } else if (auto v = take("--context-window=")) {
       cfg.context_window_turns = std::stoi(*v);
+    } else if (auto v = take("--interleave=")) {
+      cfg.interleave = std::max(1, std::stoi(*v));
+    } else if (auto v = take("--consolidate-cycles=")) {
+      cfg.consolidation_cycles = std::max(1, std::stoi(*v));
+    } else if (auto v = take("--consolidate-every=")) {
+      cfg.run_consolidation = true;
+      std::cerr << "Note: --consolidate-every is ignored; consolidation is "
+                   "external-only.\n";
     } else if (auto v = take("--seed=")) {
       cfg.seed = static_cast<unsigned int>(std::stoul(*v));
     } else if (arg == "--no-cadence") {
       cfg.cadence_enabled = false;
+    } else if (arg == "--consolidate") {
+      cfg.run_consolidation = true;
+    } else if (arg == "--consolidate-during") {
+      cfg.run_consolidation = true;
+      std::cerr << "Note: --consolidate-during is ignored; consolidation is "
+                   "external-only.\n";
+    } else if (arg == "--consolidate-idle") {
+      cfg.run_consolidation = true;
+      std::cerr << "Note: --consolidate-idle is ignored; consolidation is "
+                   "external-only.\n";
+    } else if (arg == "--semantic") {
+      cfg.semantic_overlap = true;
     } else if (arg == "--reuse") {
       cfg.reset_per_conversation = false;
     }
@@ -528,7 +785,8 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  InstallOtelLogger(cfg.otel_log_path, cfg.otel_filters);
+  ConsolidationTelemetry cons_metrics;
+  InstallOtelLogger(cfg.otel_log_path, cfg.otel_filters, &cons_metrics);
 
   std::ifstream in(cfg.dataset_path);
   if (!in) {
@@ -537,12 +795,101 @@ int main(int argc, char **argv) {
   }
 
   std::unique_ptr<cortext::Cortext> cortext;
+  std::unique_ptr<cortext::ImageBindEncoder> eval_encoder;
+  std::shared_ptr<cortext::Store> eval_store;
+  std::shared_ptr<cortext::Store> stats_store;
+  std::unordered_map<long long, std::vector<float>> embedding_cache;
+  std::unordered_map<long long, std::string> memory_kind_cache;
+  bool baseline_counts_set = false;
+  int consolidation_every_turns = 0;
 
   Stats stats;
-  std::deque<std::unordered_set<std::string>> recent_context_tokens;
   std::mt19937 rng(cfg.seed);
   std::uniform_real_distribution<double> jitter_dist(
       1.0 - cfg.cadence_jitter, 1.0 + cfg.cadence_jitter);
+  bool semantic_ready = cfg.semantic_overlap;
+  if (semantic_ready && cfg.db_path == ":memory:") {
+    std::cerr << "Semantic overlap requires --db pointing to a file; disabling.\n";
+    semantic_ready = false;
+  }
+
+  auto resolve_imagebind_dir = [](const std::string &models_dir) {
+    std::filesystem::path dir(models_dir);
+    if (std::filesystem::exists(dir / "text_encoder.onnx")
+        || std::filesystem::exists(dir / "text_encoder_int8.onnx")) {
+      return dir;
+    }
+    std::filesystem::path nested = dir / "imagebind";
+    if (std::filesystem::exists(nested / "text_encoder.onnx")
+        || std::filesystem::exists(nested / "text_encoder_int8.onnx")) {
+      return nested;
+    }
+    return dir;
+  };
+
+  auto ensure_eval_encoder = [&]() -> bool {
+    if (!semantic_ready) {
+      return false;
+    }
+    if (eval_encoder) {
+      return true;
+    }
+    try {
+      const auto dir = resolve_imagebind_dir(cfg.models_dir);
+      eval_encoder = std::make_unique<cortext::ImageBindEncoder>(dir.string());
+      return true;
+    } catch (const std::exception &e) {
+      std::cerr << "Semantic encoder init failed: " << e.what() << "\n";
+      semantic_ready = false;
+      return false;
+    }
+  };
+
+  auto ensure_stats_store = [&]() -> bool {
+    if (stats_store) {
+      return true;
+    }
+    if (cfg.db_path == ":memory:") {
+      return false;
+    }
+    auto uniq = cortext::SQLiteStore::Create(cfg.db_path.c_str());
+    if (!uniq) {
+      return false;
+    }
+    stats_store = std::shared_ptr<cortext::Store>(std::move(uniq));
+    return true;
+  };
+
+  auto get_memory_embedding =
+      [&](long long memory_id) -> std::optional<std::vector<float>> {
+    auto it = embedding_cache.find(memory_id);
+    if (it != embedding_cache.end()) {
+      return it->second;
+    }
+    if (!eval_store) {
+      return std::nullopt;
+    }
+    auto rows = eval_store->Execute(
+        "SELECT e.embedding FROM memories m "
+        "JOIN embeddings e ON m.embedding_id = e.embedding_id "
+        "WHERE m.memory_id = ?",
+        {memory_id});
+    if (rows.empty()) {
+      return std::nullopt;
+    }
+    auto it_emb = rows[0].find("embedding");
+    if (it_emb == rows[0].end()) {
+      return std::nullopt;
+    }
+    auto decoded = DecodeFloatBlobDynamic(it_emb->second);
+    if (!decoded) {
+      return std::nullopt;
+    }
+    embedding_cache[memory_id] = *decoded;
+    return decoded;
+  };
+
+  std::vector<Conversation> conversations;
   std::string line;
   while (std::getline(in, line)) {
     if (line.empty()) {
@@ -557,177 +904,362 @@ int main(int argc, char **argv) {
     if (!conv.contains("content") || !conv["content"].is_array()) {
       continue;
     }
+    Conversation c;
+    c.id = conv_id;
+    for (const auto &turn : conv["content"]) {
+      Turn t;
+      t.agent = turn.value("agent", "agent");
+      t.message = turn.value("message", "");
+      if (!t.message.empty()) {
+        c.turns.push_back(std::move(t));
+      }
+    }
+    if (!c.turns.empty()) {
+      conversations.push_back(std::move(c));
+    }
+    if (static_cast<int>(conversations.size()) >= cfg.max_conversations) {
+      break;
+    }
+  }
+
+  if (conversations.empty()) {
+    std::cerr << "No valid conversations found in dataset.\n";
+    return 1;
+  }
+
+  const int interleave = std::max(1, cfg.interleave);
+  size_t conv_index = 0;
+  while (conv_index < conversations.size()) {
+    const size_t batch_end =
+        std::min(conv_index + static_cast<size_t>(interleave),
+                 conversations.size());
+    const size_t batch_size = batch_end - conv_index;
 
     if (!cortext || cfg.reset_per_conversation) {
       cortext::Cortext::Config c;
       c.focus = cfg.focus;
       c.sensitivity = cfg.sensitivity;
       c.stability = cfg.stability;
-      cortext = cortext::Cortext::Create(c, ":memory:", cfg.models_dir);
+      cortext = cortext::Cortext::Create(c, cfg.db_path, cfg.models_dir);
+      embedding_cache.clear();
+      memory_kind_cache.clear();
+      eval_store.reset();
+      stats_store.reset();
+      if (semantic_ready) {
+        auto uniq = cortext::SQLiteStore::Create(cfg.db_path.c_str());
+        eval_store = std::shared_ptr<cortext::Store>(std::move(uniq));
+      }
+    }
+    if (cfg.run_consolidation) {
+      consolidation_every_turns = 0;
+    }
+    if (!baseline_counts_set && ensure_stats_store()) {
+      stats.consolidation_baseline_association =
+          CountMemoriesByKind(stats_store, "ASSOCIATION");
+      stats.consolidation_baseline_label =
+          CountMemoriesByKind(stats_store, "LABEL");
+      baseline_counts_set = true;
     }
 
-    std::cout << "\n=== Conversation " << conv_id << " ===\n";
-    stats.conversations++;
-    recent_context_tokens.clear();
-    int turn_idx = 0;
+    std::vector<std::deque<std::unordered_set<std::string>>> recent_context_tokens(
+        batch_size);
+    std::vector<std::deque<std::vector<float>>> recent_context_embeddings(
+        batch_size);
+    std::vector<size_t> turn_indices(batch_size, 0);
+
+    for (size_t i = 0; i < batch_size; ++i) {
+      std::cout << "\n=== Conversation " << conversations[conv_index + i].id
+                << " ===\n";
+      stats.conversations++;
+    }
+
     bool stop_all = false;
-    for (const auto &turn : conv["content"]) {
-      if (turn_idx >= cfg.max_turns_per_conversation) {
-        break;
-      }
-
-      std::string agent = turn.value("agent", "agent");
-      std::string message = turn.value("message", "");
-      const double wps = std::max(1e-3, cfg.cadence_wpm / 60.0);
-      const int target_words = std::max(
-          1, static_cast<int>(std::round(wps * 0.7)));
-      const auto chunks = ChunkMessage(message, target_words);
-
-      const std::string source_id = "chat/" + agent;
-      for (const auto &chunk : chunks) {
-        if (stats.turns >= cfg.max_total_turns) {
-          stop_all = true;
-          break;
-        }
-        if (chunk.empty()) {
+    bool any_progress = true;
+    while (any_progress && !stop_all) {
+      any_progress = false;
+      for (size_t i = 0; i < batch_size; ++i) {
+        auto &conv = conversations[conv_index + i];
+        if (turn_indices[i] >= conv.turns.size()
+            || static_cast<int>(turn_indices[i])
+                   >= cfg.max_turns_per_conversation) {
           continue;
         }
-        const auto turn_tokens = Tokenize(chunk);
-        const auto context_tokens = MergeTokenWindow(recent_context_tokens);
-        cortext::Cortext::Context ctx;
-        try {
-          ctx = cortext->ProcessText(chunk, source_id);
-        } catch (const std::exception &e) {
-          std::cerr << "ProcessText failed: " << e.what() << "\n";
-          return 1;
-        }
+        any_progress = true;
 
-        stats.turns++;
+        const auto &turn = conv.turns[turn_indices[i]];
+        std::string agent = turn.agent.empty() ? "agent" : turn.agent;
+        std::string message = turn.message;
+        const double wps = std::max(1e-3, cfg.cadence_wpm / 60.0);
+        const int target_words = std::max(
+            1, static_cast<int>(std::round(wps * 0.7)));
+        const auto chunks = ChunkMessage(message, target_words);
 
-        if (ctx.output.stored_embedding_id.has_value()) {
-          stats.writes++;
-          stats.signals_per_write.push_back(stats.signals_since_write + 1);
-          stats.signals_since_write = 0;
-        } else {
-          stats.signals_since_write++;
-        }
-
-        stats.wm_samples++;
-        stats.wm_total_slots += static_cast<int>(ctx.working_memory.size());
-        stats.wm_max_slots = std::max(stats.wm_max_slots,
-                                      static_cast<int>(ctx.working_memory.size()));
-
-        if (!ctx.working_memory.empty()) {
-          double best_overlap = 0.0;
-          for (const auto &mem : ctx.working_memory) {
-            const std::string mem_text = MemoryToText(mem);
-            const auto mem_tokens = Tokenize(mem_text);
-            best_overlap = std::max(best_overlap, Jaccard(turn_tokens, mem_tokens));
+        const std::string source_id = "chat/" + agent;
+        for (const auto &chunk : chunks) {
+          if (stats.turns >= cfg.max_total_turns) {
+            stop_all = true;
+            break;
           }
-          stats.wm_overlap_sum += best_overlap;
-          stats.wm_overlap_count++;
-        }
+          if (chunk.empty()) {
+            continue;
+          }
 
-        if (auto relevance = GetMetric(ctx, cortext::operations::Metric::relevance)) {
-          stats.relevance_values.push_back(*relevance);
+          const auto turn_tokens = Tokenize(chunk);
+          const auto context_tokens = MergeTokenWindow(recent_context_tokens[i]);
+
+          std::vector<float> turn_embedding;
+          std::vector<float> context_embedding;
+          if (semantic_ready && ensure_eval_encoder()) {
+            try {
+              eval_encoder->EncodeText(chunk, turn_embedding);
+            } catch (const std::exception &e) {
+              std::cerr << "Semantic encoding failed: " << e.what() << "\n";
+              semantic_ready = false;
+            }
+          }
+          if (semantic_ready && !recent_context_embeddings[i].empty()) {
+            context_embedding = MeanEmbedding(recent_context_embeddings[i]);
+          }
+
+          cortext::Cortext::Context ctx;
+          try {
+            ctx = cortext->ProcessText(chunk, source_id);
+          } catch (const std::exception &e) {
+            std::cerr << "ProcessText failed: " << e.what() << "\n";
+            return 1;
+          }
+
+          stats.turns++;
+          if (ctx.output.stored_embedding_id.has_value()) {
+            stats.writes++;
+            stats.signals_per_write.push_back(stats.signals_since_write + 1);
+            stats.signals_since_write = 0;
+          } else {
+            stats.signals_since_write++;
+          }
+
+          stats.wm_samples++;
+          stats.wm_total_slots += static_cast<int>(ctx.working_memory.size());
+          stats.wm_max_slots = std::max(stats.wm_max_slots,
+                                        static_cast<int>(ctx.working_memory.size()));
+
+          if (!ctx.working_memory.empty()) {
+            double best_overlap = 0.0;
+            for (const auto &mem : ctx.working_memory) {
+              const std::string mem_text = MemoryToText(mem);
+              const auto mem_tokens = Tokenize(mem_text);
+              best_overlap =
+                  std::max(best_overlap, Jaccard(turn_tokens, mem_tokens));
+            }
+            stats.wm_overlap_sum += best_overlap;
+            stats.wm_overlap_count++;
+          }
+
+          if (auto relevance =
+                  GetMetric(ctx, cortext::operations::Metric::relevance)) {
+            stats.relevance_values.push_back(*relevance);
+            if (ctx.should_interrupt) {
+              stats.interrupt_relevance_values.push_back(*relevance);
+            }
+          }
+          if (auto surprise =
+                  GetMetric(ctx, cortext::operations::Metric::surprise)) {
+            stats.surprise_values.push_back(*surprise);
+            if (ctx.should_interrupt) {
+              stats.interrupt_surprise_values.push_back(*surprise);
+            }
+          }
+          if (auto mismatch =
+                  GetMetric(ctx, cortext::operations::Metric::mismatch)) {
+            const double denom = (1.0 - cfg.focus) * cfg.sensitivity;
+            double novelty_est = denom > 1e-6 ? (*mismatch / denom) : *mismatch;
+            novelty_est = Clamp01(novelty_est);
+            stats.novelty_values.push_back(novelty_est);
+            if (ctx.should_interrupt) {
+              stats.interrupt_novelty_values.push_back(novelty_est);
+            }
+          }
+
           if (ctx.should_interrupt) {
-            stats.interrupt_relevance_values.push_back(*relevance);
+            stats.interrupt_turns++;
+            if (!ctx.retrieved_memory.empty()) {
+              stats.interrupt_turns_with_retrieval++;
+            }
           }
-        }
-        if (auto surprise = GetMetric(ctx, cortext::operations::Metric::surprise)) {
-          stats.surprise_values.push_back(*surprise);
-          if (ctx.should_interrupt) {
-            stats.interrupt_surprise_values.push_back(*surprise);
-          }
-        }
-        if (auto mismatch = GetMetric(ctx, cortext::operations::Metric::mismatch)) {
-          const double denom = (1.0 - cfg.focus) * cfg.sensitivity;
-          double novelty_est = denom > 1e-6 ? (*mismatch / denom) : *mismatch;
-          novelty_est = Clamp01(novelty_est);
-          stats.novelty_values.push_back(novelty_est);
-          if (ctx.should_interrupt) {
-            stats.interrupt_novelty_values.push_back(novelty_est);
-          }
-        }
 
-        if (ctx.should_interrupt) {
-          stats.interrupt_turns++;
           if (!ctx.retrieved_memory.empty()) {
-            stats.interrupt_turns_with_retrieval++;
-          }
-        }
+            stats.retrieval_turns++;
+            stats.total_retrieved +=
+                static_cast<int>(ctx.retrieved_memory.size());
+            double best_overlap = 0.0;
+            double best_context_overlap = 0.0;
+            double best_semantic = 0.0;
+            double best_context_semantic = 0.0;
+            bool has_semantic = false;
+            bool has_context_semantic = false;
+            std::string best_text;
+            bool turn_has_association = false;
+            bool turn_has_label = false;
+            for (const auto &mem : ctx.retrieved_memory) {
+              const std::string mem_text = MemoryToText(mem);
+              const auto mem_tokens = Tokenize(mem_text);
+              const double overlap = Jaccard(turn_tokens, mem_tokens);
+              if (overlap > best_overlap) {
+                best_overlap = overlap;
+                best_text = mem_text;
+              }
+              if (!context_tokens.empty()) {
+                const double ctx_overlap = Jaccard(context_tokens, mem_tokens);
+                best_context_overlap =
+                    std::max(best_context_overlap, ctx_overlap);
+              }
 
-        if (!ctx.retrieved_memory.empty()) {
-          stats.retrieval_turns++;
-          stats.total_retrieved += static_cast<int>(ctx.retrieved_memory.size());
-          double best_overlap = 0.0;
-          double best_context_overlap = 0.0;
-          std::string best_text;
-          for (const auto &mem : ctx.retrieved_memory) {
-            const std::string mem_text = MemoryToText(mem);
-            const auto mem_tokens = Tokenize(mem_text);
-            const double overlap = Jaccard(turn_tokens, mem_tokens);
-            if (overlap > best_overlap) {
-              best_overlap = overlap;
-              best_text = mem_text;
+              if (semantic_ready && !turn_embedding.empty()) {
+                auto emb_opt = get_memory_embedding(mem.id);
+                if (emb_opt) {
+                  const double sim = CosineSimilarity(turn_embedding, *emb_opt);
+                  if (!has_semantic || sim > best_semantic) {
+                    best_semantic = sim;
+                  }
+                  has_semantic = true;
+                  if (!context_embedding.empty()) {
+                    const double ctx_sim =
+                        CosineSimilarity(context_embedding, *emb_opt);
+                    if (!has_context_semantic || ctx_sim > best_context_semantic) {
+                      best_context_semantic = ctx_sim;
+                    }
+                    has_context_semantic = true;
+                  }
+                }
+              }
+
+              if (ensure_stats_store()) {
+                auto kind = GetMemoryKind(stats_store, memory_kind_cache, mem.id);
+                if (kind) {
+                  if (*kind == "ASSOCIATION") {
+                    stats.retrieval_association_candidates++;
+                    turn_has_association = true;
+                    if (ctx.should_interrupt) {
+                      stats.interrupt_association_candidates++;
+                    }
+                  } else if (*kind == "LABEL") {
+                    stats.retrieval_label_candidates++;
+                    turn_has_label = true;
+                    if (ctx.should_interrupt) {
+                      stats.interrupt_label_candidates++;
+                    }
+                  } else {
+                    stats.retrieval_other_candidates++;
+                    if (ctx.should_interrupt) {
+                      stats.interrupt_other_candidates++;
+                    }
+                  }
+                }
+              }
             }
+            stats.retrieval_overlap_sum += best_overlap;
+            stats.retrieval_overlap_count++;
+            stats.retrieval_overlap_values.push_back(best_overlap);
             if (!context_tokens.empty()) {
-              const double ctx_overlap = Jaccard(context_tokens, mem_tokens);
-              best_context_overlap = std::max(best_context_overlap, ctx_overlap);
+              stats.retrieval_context_overlap_values.push_back(
+                  best_context_overlap);
+            }
+            if (has_semantic) {
+              stats.retrieval_semantic_overlap_values.push_back(best_semantic);
+            }
+            if (has_context_semantic) {
+              stats.retrieval_context_semantic_overlap_values.push_back(
+                  best_context_semantic);
+            }
+            if (ctx.should_interrupt) {
+              stats.interrupt_overlap_values.push_back(best_overlap);
+              if (!context_tokens.empty()) {
+                stats.interrupt_context_overlap_values.push_back(
+                    best_context_overlap);
+              }
+              if (has_semantic) {
+                stats.interrupt_semantic_overlap_values.push_back(best_semantic);
+              }
+              if (has_context_semantic) {
+                stats.interrupt_context_semantic_overlap_values.push_back(
+                    best_context_semantic);
+              }
+            }
+            if (turn_has_association) {
+              stats.retrieval_turns_with_association++;
+              if (ctx.should_interrupt) {
+                stats.interrupt_turns_with_association++;
+              }
+            }
+            if (turn_has_label) {
+              stats.retrieval_turns_with_label++;
+              if (ctx.should_interrupt) {
+                stats.interrupt_turns_with_label++;
+              }
+            }
+            if (!best_text.empty()) {
+              RecordRetrievalExample(stats, best_overlap, chunk, best_text);
             }
           }
-          stats.retrieval_overlap_sum += best_overlap;
-          stats.retrieval_overlap_count++;
-          stats.retrieval_overlap_values.push_back(best_overlap);
-          if (!context_tokens.empty()) {
-            stats.retrieval_context_overlap_values.push_back(best_context_overlap);
+
+          if (stats.turns % 20 == 0) {
+            std::cout << "  signals=" << stats.turns
+                      << " writes=" << stats.writes
+                      << " wm_slots=" << ctx.working_memory.size()
+                      << " retrieved=" << ctx.retrieved_memory.size()
+                      << "\n";
           }
-          if (ctx.should_interrupt) {
-            stats.interrupt_overlap_values.push_back(best_overlap);
-            if (!context_tokens.empty()) {
-              stats.interrupt_context_overlap_values.push_back(best_context_overlap);
+
+          if (cfg.cadence_enabled) {
+            const int words = std::max(1, CountWords(chunk));
+            double delay_s = static_cast<double>(words) / wps;
+            delay_s += 0.1;
+            delay_s *= jitter_dist(rng);
+            if (cfg.cadence_speed > 0.0) {
+              delay_s /= cfg.cadence_speed;
+            }
+            int delay_ms = static_cast<int>(delay_s * 1000.0);
+            delay_ms = std::max(cfg.cadence_min_ms, delay_ms);
+            delay_ms = std::min(cfg.cadence_max_ms, delay_ms);
+            std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
+          }
+
+          if (cfg.context_window_turns > 0) {
+            recent_context_tokens[i].push_back(turn_tokens);
+            while (static_cast<int>(recent_context_tokens[i].size())
+                   > cfg.context_window_turns) {
+              recent_context_tokens[i].pop_front();
+            }
+            if (semantic_ready && !turn_embedding.empty()) {
+              recent_context_embeddings[i].push_back(turn_embedding);
+              while (static_cast<int>(recent_context_embeddings[i].size())
+                     > cfg.context_window_turns) {
+                recent_context_embeddings[i].pop_front();
+              }
             }
           }
-          if (!best_text.empty()) {
-            RecordRetrievalExample(stats, best_overlap, chunk, best_text);
-          }
         }
 
-
-        if (stats.turns % 20 == 0) {
-          std::cout << "  signals=" << stats.turns
-                    << " writes=" << stats.writes
-                    << " wm_slots=" << ctx.working_memory.size()
-                    << " retrieved=" << ctx.retrieved_memory.size()
-                    << "\n";
+        turn_indices[i]++;
+        if (stop_all) {
+          break;
         }
-
-        if (cfg.cadence_enabled) {
-          const int words = std::max(1, CountWords(chunk));
-          double delay_s = static_cast<double>(words) / wps;
-          delay_s += 0.1;
-          delay_s *= jitter_dist(rng);
-          if (cfg.cadence_speed > 0.0) {
-            delay_s /= cfg.cadence_speed;
-          }
-          int delay_ms = static_cast<int>(delay_s * 1000.0);
-          delay_ms = std::max(cfg.cadence_min_ms, delay_ms);
-          delay_ms = std::min(cfg.cadence_max_ms, delay_ms);
-          std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
-        }
-
-        if (cfg.context_window_turns > 0) {
-          recent_context_tokens.push_back(turn_tokens);
-          while (static_cast<int>(recent_context_tokens.size()) > cfg.context_window_turns) {
-            recent_context_tokens.pop_front();
-          }
-        }
-      }
-      turn_idx++;
-      if (stop_all) {
-        break;
       }
     }
+
+    if (cfg.run_consolidation && cortext) {
+      for (int i = 0; i < cfg.consolidation_cycles; ++i) {
+        try {
+          cortext->Consolidate();
+          stats.consolidation_runs++;
+        } catch (const std::exception &e) {
+          stats.consolidation_failures++;
+          std::cerr << "Consolidate failed: " << e.what() << "\n";
+          return 1;
+        }
+      }
+    }
+
     if (stop_all) {
       break;
     }
@@ -739,9 +1271,20 @@ int main(int argc, char **argv) {
       cortext->Flush();
     }
 
-    if (stats.conversations >= cfg.max_conversations) {
-      break;
-    }
+    conv_index = batch_end;
+  }
+
+  if (cfg.run_consolidation && baseline_counts_set && ensure_stats_store()) {
+    stats.consolidation_final_association =
+        CountMemoriesByKind(stats_store, "ASSOCIATION");
+    stats.consolidation_final_label =
+        CountMemoriesByKind(stats_store, "LABEL");
+    stats.consolidation_association_created =
+        std::max(0LL, stats.consolidation_final_association
+                           - stats.consolidation_baseline_association);
+    stats.consolidation_label_created =
+        std::max(0LL, stats.consolidation_final_label
+                           - stats.consolidation_baseline_label);
   }
 
   const double avg_signals_per_write =
@@ -781,6 +1324,60 @@ int main(int argc, char **argv) {
           ? 0.0
           : static_cast<double>(stats.interrupt_turns_with_retrieval)
                 / static_cast<double>(stats.interrupt_turns);
+  const double retrieval_association_candidate_rate =
+      stats.total_retrieved == 0
+          ? 0.0
+          : static_cast<double>(stats.retrieval_association_candidates)
+                / static_cast<double>(stats.total_retrieved);
+  const double retrieval_label_candidate_rate =
+      stats.total_retrieved == 0
+          ? 0.0
+          : static_cast<double>(stats.retrieval_label_candidates)
+                / static_cast<double>(stats.total_retrieved);
+  const double retrieval_association_turn_rate =
+      stats.retrieval_turns == 0
+          ? 0.0
+          : static_cast<double>(stats.retrieval_turns_with_association)
+                / static_cast<double>(stats.retrieval_turns);
+  const double retrieval_label_turn_rate =
+      stats.retrieval_turns == 0
+          ? 0.0
+          : static_cast<double>(stats.retrieval_turns_with_label)
+                / static_cast<double>(stats.retrieval_turns);
+  const int interrupt_candidate_total =
+      stats.interrupt_association_candidates + stats.interrupt_label_candidates
+      + stats.interrupt_other_candidates;
+  const double interrupt_association_candidate_rate =
+      interrupt_candidate_total == 0
+          ? 0.0
+          : static_cast<double>(stats.interrupt_association_candidates)
+                / static_cast<double>(interrupt_candidate_total);
+  const double interrupt_label_candidate_rate =
+      interrupt_candidate_total == 0
+          ? 0.0
+          : static_cast<double>(stats.interrupt_label_candidates)
+                / static_cast<double>(interrupt_candidate_total);
+  const double interrupt_association_turn_rate =
+      stats.interrupt_turns == 0
+          ? 0.0
+          : static_cast<double>(stats.interrupt_turns_with_association)
+                / static_cast<double>(stats.interrupt_turns);
+  const double interrupt_label_turn_rate =
+      stats.interrupt_turns == 0
+          ? 0.0
+          : static_cast<double>(stats.interrupt_turns_with_label)
+                / static_cast<double>(stats.interrupt_turns);
+
+  const int64_t cons_summary_count = cons_metrics.summary_count.load();
+  const int64_t cons_extraction_jobs = cons_metrics.extraction_jobs.load();
+  const int64_t cons_summaries_model =
+      cons_metrics.summaries_with_summarizer.load();
+  const int64_t cons_summaries_fallback =
+      cons_metrics.summaries_fallback.load();
+  const int64_t cons_extraction_results =
+      cons_metrics.extraction_results.load();
+  const int64_t cons_labels_seen = cons_metrics.labels_seen.load();
+  const int64_t cons_relations_seen = cons_metrics.relations_seen.load();
 
   const auto novelty_summary = Summarize(stats.novelty_values);
   const auto relevance_summary = Summarize(stats.relevance_values);
@@ -788,9 +1385,17 @@ int main(int argc, char **argv) {
   const auto retrieval_overlap_summary = Summarize(stats.retrieval_overlap_values);
   const auto retrieval_context_overlap_summary =
       Summarize(stats.retrieval_context_overlap_values);
+  const auto retrieval_semantic_summary =
+      Summarize(stats.retrieval_semantic_overlap_values);
+  const auto retrieval_context_semantic_summary =
+      Summarize(stats.retrieval_context_semantic_overlap_values);
   const auto interrupt_overlap_summary = Summarize(stats.interrupt_overlap_values);
   const auto interrupt_context_overlap_summary =
       Summarize(stats.interrupt_context_overlap_values);
+  const auto interrupt_semantic_summary =
+      Summarize(stats.interrupt_semantic_overlap_values);
+  const auto interrupt_context_semantic_summary =
+      Summarize(stats.interrupt_context_semantic_overlap_values);
   const auto interrupt_novelty_summary = Summarize(stats.interrupt_novelty_values);
   const auto interrupt_relevance_summary = Summarize(stats.interrupt_relevance_values);
   const auto interrupt_surprise_summary = Summarize(stats.interrupt_surprise_values);
@@ -799,15 +1404,52 @@ int main(int argc, char **argv) {
   std::cout << "conversations=" << stats.conversations << "\n";
   std::cout << "turns=" << stats.turns << "\n";
   std::cout << "writes=" << stats.writes << "\n";
+  if (cfg.run_consolidation) {
+    std::cout << "consolidation_runs=" << stats.consolidation_runs << "\n";
+    std::cout << "consolidation_failures=" << stats.consolidation_failures << "\n";
+    std::cout << "consolidation_every_turns=" << consolidation_every_turns << "\n";
+    std::cout << "consolidation_association_created="
+              << stats.consolidation_association_created << "\n";
+    std::cout << "consolidation_label_created="
+              << stats.consolidation_label_created << "\n";
+    std::cout << "consolidation_summary_count=" << cons_summary_count << "\n";
+    std::cout << "consolidation_summaries_with_model="
+              << cons_summaries_model << "\n";
+    std::cout << "consolidation_summaries_fallback="
+              << cons_summaries_fallback << "\n";
+    std::cout << "consolidation_extraction_jobs="
+              << cons_extraction_jobs << "\n";
+    std::cout << "consolidation_extraction_results="
+              << cons_extraction_results << "\n";
+    std::cout << "consolidation_labels_seen=" << cons_labels_seen << "\n";
+    std::cout << "consolidation_relations_seen="
+              << cons_relations_seen << "\n";
+  }
   std::cout << "avg_signals_per_write=" << avg_signals_per_write << "\n";
   std::cout << "wm_avg_slots=" << avg_wm_slots << "\n";
   std::cout << "wm_max_slots=" << stats.wm_max_slots << "\n";
   std::cout << "retrieval_turn_rate=" << retrieval_rate << "\n";
   std::cout << "retrieval_avg_candidates=" << avg_retrieval_count << "\n";
   std::cout << "retrieval_best_overlap=" << avg_retrieval_overlap << "\n";
+  std::cout << "retrieval_association_candidate_rate="
+            << retrieval_association_candidate_rate << "\n";
+  std::cout << "retrieval_label_candidate_rate="
+            << retrieval_label_candidate_rate << "\n";
+  std::cout << "retrieval_association_turn_rate="
+            << retrieval_association_turn_rate << "\n";
+  std::cout << "retrieval_label_turn_rate="
+            << retrieval_label_turn_rate << "\n";
   std::cout << "wm_best_overlap=" << avg_wm_overlap << "\n";
   std::cout << "interrupt_turn_rate=" << interrupt_rate << "\n";
   std::cout << "interrupt_with_retrieval_rate=" << interrupt_with_retrieval_rate << "\n";
+  std::cout << "interrupt_association_candidate_rate="
+            << interrupt_association_candidate_rate << "\n";
+  std::cout << "interrupt_label_candidate_rate="
+            << interrupt_label_candidate_rate << "\n";
+  std::cout << "interrupt_association_turn_rate="
+            << interrupt_association_turn_rate << "\n";
+  std::cout << "interrupt_label_turn_rate="
+            << interrupt_label_turn_rate << "\n";
 
   std::cout << "\n=== Distributions ===\n";
   std::cout << "novelty_mean=" << novelty_summary.mean
@@ -833,6 +1475,20 @@ int main(int argc, char **argv) {
               << " p50=" << retrieval_context_overlap_summary.p50
               << " p90=" << retrieval_context_overlap_summary.p90 << "\n";
   }
+  if (retrieval_semantic_summary.count > 0) {
+    std::cout << "retrieval_semantic_overlap_mean="
+              << retrieval_semantic_summary.mean
+              << " p10=" << retrieval_semantic_summary.p10
+              << " p50=" << retrieval_semantic_summary.p50
+              << " p90=" << retrieval_semantic_summary.p90 << "\n";
+  }
+  if (retrieval_context_semantic_summary.count > 0) {
+    std::cout << "retrieval_context_semantic_overlap_mean="
+              << retrieval_context_semantic_summary.mean
+              << " p10=" << retrieval_context_semantic_summary.p10
+              << " p50=" << retrieval_context_semantic_summary.p50
+              << " p90=" << retrieval_context_semantic_summary.p90 << "\n";
+  }
 
   if (interrupt_overlap_summary.count > 0) {
     std::cout << "\n=== Interrupt Quality ===\n";
@@ -846,6 +1502,20 @@ int main(int argc, char **argv) {
                 << " p10=" << interrupt_context_overlap_summary.p10
                 << " p50=" << interrupt_context_overlap_summary.p50
                 << " p90=" << interrupt_context_overlap_summary.p90 << "\n";
+    }
+    if (interrupt_semantic_summary.count > 0) {
+      std::cout << "interrupt_semantic_overlap_mean="
+                << interrupt_semantic_summary.mean
+                << " p10=" << interrupt_semantic_summary.p10
+                << " p50=" << interrupt_semantic_summary.p50
+                << " p90=" << interrupt_semantic_summary.p90 << "\n";
+    }
+    if (interrupt_context_semantic_summary.count > 0) {
+      std::cout << "interrupt_context_semantic_overlap_mean="
+                << interrupt_context_semantic_summary.mean
+                << " p10=" << interrupt_context_semantic_summary.p10
+                << " p50=" << interrupt_context_semantic_summary.p50
+                << " p90=" << interrupt_context_semantic_summary.p90 << "\n";
     }
     std::cout << "interrupt_novelty_mean=" << interrupt_novelty_summary.mean
               << " p10=" << interrupt_novelty_summary.p10

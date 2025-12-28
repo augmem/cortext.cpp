@@ -8,6 +8,7 @@
 #include "cortext/extractor/extractor.hpp"
 #include "cortext/operations/extraction.hpp"
 #include "cortext/processor/operation_context.hpp"
+#include "cortext/telemetry/telemetry.hpp"
 #include <algorithm>
 #include <any>
 #include <cctype>
@@ -275,6 +276,15 @@ ProcessExtractionResults::Execute (OperationContext &context, Transaction &tx) c
       return;
     }
 
+  int total_results = static_cast<int> (p_ctx.pending_extraction_results.size ());
+  int total_labels = 0;
+  int total_relations = 0;
+  for (const auto &pending : p_ctx.pending_extraction_results)
+    {
+      total_labels += static_cast<int> (pending.labels.size ());
+      total_relations += static_cast<int> (pending.relations.size ());
+    }
+
   const uint64_t now_ts = context.GetSignal ().timestamp;
   const int label_threshold
       = core::LabelFrequencyThreshold (context.GetConfig ().stability);
@@ -345,6 +355,95 @@ ProcessExtractionResults::Execute (OperationContext &context, Transaction &tx) c
 
       // Track label -> memory_id for relation linking
       std::unordered_map<std::string, long long> label_memory_ids;
+      bool inserted_any_label = false;
+      struct FallbackLabel
+      {
+        std::string label;
+        std::string label_key;
+        double salience = 0.0;
+      };
+      std::optional<FallbackLabel> fallback_label;
+
+      auto insert_label = [&](const std::string &label,
+                              const std::string &label_key,
+                              double salience) -> bool {
+        if (label.empty () || label_key.empty ())
+          {
+            return false;
+          }
+
+        // Use label text as source_id for uniqueness.
+        std::string source_id = label_key;
+
+        // Check if this label already exists
+        auto existing = tx.Execute (
+            "SELECT memory_id FROM memories WHERE source_id = ? AND kind = 'LABEL'",
+            { source_id });
+
+        long long label_memory_id = 0;
+        if (!existing.empty () && existing[0].count ("memory_id"))
+          {
+            // Label exists, get its memory_id
+            auto val = existing[0].at ("memory_id");
+            if (val.type () == typeid (long long))
+              {
+                label_memory_id = std::any_cast<long long> (val);
+              }
+            else if (val.type () == typeid (int))
+              {
+                label_memory_id = std::any_cast<int> (val);
+              }
+
+            // Update salience if higher
+            AddWrite (tx,
+                      "UPDATE memories SET s_max = MAX(s_max, ?) "
+                      "WHERE memory_id = ?",
+                      { salience, label_memory_id });
+          }
+        else
+          {
+            // Insert new label as MEMORIES row
+            AddWrite (tx,
+                      "INSERT INTO memories "
+                      "(source_id, kind, label, start_ts, s_max, created_at) "
+                      "VALUES (?, 'LABEL', ?, ?, ?, ?)",
+                      { source_id, label,
+                        static_cast<long long> (now_ts), salience,
+                        static_cast<long long> (now_ts) });
+
+            // Get the new memory_id
+            auto id_rows = tx.Execute ("SELECT last_insert_rowid() AS id", {});
+            if (!id_rows.empty () && id_rows[0].count ("id"))
+              {
+                auto val = id_rows[0].at ("id");
+                if (val.type () == typeid (long long))
+                  {
+                    label_memory_id = std::any_cast<long long> (val);
+                  }
+                else if (val.type () == typeid (int))
+                  {
+                    label_memory_id = std::any_cast<int> (val);
+                  }
+              }
+          }
+
+        // Attach label to summary (has_label) and track for relation linking
+        if (label_memory_id > 0)
+          {
+            label_memory_ids[label_key] = label_memory_id;
+            if (summary_memory_id > 0)
+              {
+                const double weight01 = core::Clamp (salience, 0.0, 1.0);
+                AddWrite (tx,
+                          "INSERT OR REPLACE INTO associations "
+                          "(source_memory_id, target_memory_id, edge_type, weight) "
+                          "VALUES (?, ?, 'has_label', ?)",
+                          { summary_memory_id, label_memory_id, weight01 });
+              }
+            return true;
+          }
+        return false;
+      };
 
       // 1. Insert labels into MEMORIES (kind='LABEL').
       for (const auto &label_entry : result.labels)
@@ -355,83 +454,31 @@ ProcessExtractionResults::Execute (OperationContext &context, Transaction &tx) c
             {
               continue;
             }
+          const double salience
+              = ComputeLabelSalience (label, summary_embedding, *encoder);
           if (label_threshold > 1
               && label_counts[label_key] < label_threshold)
             {
+              if (!fallback_label || salience > fallback_label->salience)
+                {
+                  fallback_label = FallbackLabel{ label, label_key, salience };
+                }
               continue;
             }
 
-          const double salience
-              = ComputeLabelSalience (label, summary_embedding, *encoder);
-
-          // Use label text as source_id for uniqueness.
-          std::string source_id = label_key;
-
-          // Check if this label already exists
-          auto existing = tx.Execute (
-              "SELECT memory_id FROM memories WHERE source_id = ? AND kind = 'LABEL'",
-              { source_id });
-
-          long long label_memory_id = 0;
-          if (!existing.empty () && existing[0].count ("memory_id"))
+          if (insert_label (label, label_key, salience))
             {
-              // Label exists, get its memory_id
-              auto val = existing[0].at ("memory_id");
-              if (val.type () == typeid (long long))
-                {
-                  label_memory_id = std::any_cast<long long> (val);
-                }
-              else if (val.type () == typeid (int))
-                {
-                  label_memory_id = std::any_cast<int> (val);
-                }
-
-              // Update salience if higher
-              AddWrite (tx,
-                        "UPDATE memories SET s_max = MAX(s_max, ?) "
-                        "WHERE memory_id = ?",
-                        { salience, label_memory_id });
+              inserted_any_label = true;
             }
-          else
-            {
-              // Insert new label as MEMORIES row
-              AddWrite (tx,
-                        "INSERT INTO memories "
-                        "(source_id, kind, label, start_ts, s_max, created_at) "
-                        "VALUES (?, 'LABEL', ?, ?, ?, ?)",
-                        { source_id, label,
-                          static_cast<long long> (now_ts), salience,
-                          static_cast<long long> (now_ts) });
+        }
 
-              // Get the new memory_id
-              auto id_rows = tx.Execute ("SELECT last_insert_rowid() AS id", {});
-              if (!id_rows.empty () && id_rows[0].count ("id"))
-                {
-                  auto val = id_rows[0].at ("id");
-                  if (val.type () == typeid (long long))
-                    {
-                      label_memory_id = std::any_cast<long long> (val);
-                    }
-                  else if (val.type () == typeid (int))
-                    {
-                      label_memory_id = std::any_cast<int> (val);
-                    }
-                }
-            }
-
-          // Attach label to summary (has_label) and track for relation linking
-          if (label_memory_id > 0)
+      if (!inserted_any_label && fallback_label.has_value ())
+        {
+          if (insert_label (fallback_label->label,
+                            fallback_label->label_key,
+                            fallback_label->salience))
             {
-              label_memory_ids[label_key] = label_memory_id;
-              if (summary_memory_id > 0)
-                {
-                  const double weight01 = core::Clamp (salience, 0.0, 1.0);
-                  AddWrite (tx,
-                            "INSERT OR REPLACE INTO associations "
-                            "(source_memory_id, target_memory_id, edge_type, weight) "
-                            "VALUES (?, ?, 'has_label', ?)",
-                            { summary_memory_id, label_memory_id, weight01 });
-                }
+              inserted_any_label = true;
             }
         }
 
@@ -474,6 +521,13 @@ ProcessExtractionResults::Execute (OperationContext &context, Transaction &tx) c
 
   // 4. Clear pending results.
   p_ctx.pending_extraction_results.clear ();
+
+  telemetry::LogInfo ("cortext.process_extraction_results", {
+    telemetry::Attribute::Int64 ("results_processed", total_results),
+    telemetry::Attribute::Int64 ("labels_seen", total_labels),
+    telemetry::Attribute::Int64 ("relations_seen", total_relations),
+    telemetry::Attribute::Int64 ("label_threshold", label_threshold)
+  });
 }
 
 } // namespace cortext::operations

@@ -2,18 +2,39 @@
 
 ## Memory Strength Model {#sec-memory-strength}
 
-Each memory m maintains a strength value updated through use-frequency tracking and exponential decay. The update uses a sensitivity-modulated learning rate and a binary usage indicator:
+Each memory maintains **multi-timescale traces** rather than a single leaky bucket. A mixture of fast/medium/slow/ultra-slow traces yields a power-law forgetting curve while preserving plasticity.
 
 ```
+N_traces(T) = 2 + round(2T)  # 2..4 coupled traces
+τ_fast  = 0.10 × half_life
+τ_med   = 0.50 × half_life
+τ_slow  = 2.00 × half_life
+τ_ultra = 8.00 × half_life
+τ_list = [τ_fast, τ_med, τ_slow, τ_ultra]
+
 α_min_S = 0.05; α_span_S = 0.35
 α_S(t) = α_min_S + S × α_span_S × u(t)
 used_flag(m) = 1 if m was retrieved and used in current step, else 0
+```
 
-use_frequency_t ← EWMA(use_frequency_{t−1},
-                       used_flag(m), α = α_S(t))
-λ_t ← ln(2) / half_life_t
-strength_t ← clamp(strength_{t−1} × exp(−λ_t × Δt) +
-                   S × use_frequency_t, 0, 1)
+Trace updates (for i in 1..N_traces):
+```
+λ_i ← ln(2) / τ_list[i]
+trace_i ← clamp(trace_i × exp(−λ_i × Δt) +
+                (α_S(t) × used_flag(m)) / N_traces, 0, 1)
+```
+
+Trace coupling encourages long-lived knowledge without freezing plasticity:
+```
+coupling = 0.05 + 0.10T
+trace_{i+1} ← clamp(trace_{i+1} + coupling × trace_i, 0, 1)
+```
+
+Combined strength uses a knob-shaped mixture that favors slow traces as Stability increases:
+```
+w_raw ← [0.55 − 0.20T, 0.25, 0.15 + 0.10T, 0.05 + 0.10T]
+w ← normalize(w_raw[1..N_traces])
+strength_t ← clamp(Σ_i w_i × trace_i, 0, 1)
 ```
 
 Δt is measured per memory using its last access timestamp:
@@ -69,8 +90,10 @@ When contextual gain signals are available, influence factors modulate reinforce
 ```
 influence_factor ← (used_count / max(retrieved_count, 1)) ×
                     clamp(contextual_gain(m), −1, +1)
-strength_t ← clamp(strength_{t−1} × exp(−λ_t × Δt) +
-                   S × use_frequency_t + F × influence_factor, 0, 1)
+boost ← clamp(S × used_flag(m) + F × influence_factor, 0, 1)
+trace_fast ← clamp(trace_fast + 0.6 × boost, 0, 1)
+trace_med  ← clamp(trace_med  + 0.3 × boost, 0, 1)
+trace_slow ← clamp(trace_slow + 0.1 × boost, 0, 1)
 ```
 
 ## Causal Feedback Loop {#sec-feedback}

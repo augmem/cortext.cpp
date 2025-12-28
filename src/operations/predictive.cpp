@@ -2,6 +2,7 @@
 
 #include "cortext/store/store.hpp"
 #include "cortext/core/algorithms.hpp"
+#include "cortext/core/knobs.hpp"
 #include "cortext/operations/constants.hpp"
 #include "cortext/processor/operation_context.hpp"
 #include "cortext/telemetry/telemetry.hpp"
@@ -31,16 +32,17 @@ PredictionHorizon (double F)
 {
   // prediction_horizon = round(lerp(2, 8, F))
   // Higher Focus = longer prediction horizon
+  const double f_eff = core::FocusBias (F);
   return std::max (1, static_cast<int> (
                           std::round (core::Lerp (kPredictionHorizonMin,
-                                                   kPredictionHorizonMax, F))));
+                                                   kPredictionHorizonMax, f_eff))));
 }
 
 inline double
 PredictionConfidenceThreshold (double F)
 {
   // prediction_conf_threshold = lerp(0.3, 0.7, F)
-  return core::Lerp (kConfMin, kConfMax, F);
+  return core::Lerp (kConfMin, kConfMax, core::FocusBias (F));
 }
 
 inline double
@@ -54,7 +56,7 @@ inline double
 SurpriseSensitivity (double S, double T)
 {
   // surprise_sensitivity = S × lerp(2.0, 0.5, T)
-  return S * core::Lerp (kSurpriseMax, kSurpriseMin, T);
+  return core::SensitivityBias (S) * core::Lerp (kSurpriseMax, kSurpriseMin, T);
 }
 
 inline Eigen::VectorXf
@@ -124,8 +126,9 @@ ApplyPredictivePreActivation::Execute (OperationContext &context, Transaction &t
   const double pad = PreActivationDecay (cfg.stability);
   // Base delta in ~[0.012, 0.02]
   const double base_delta = kBaseDeltaScale * (1.0 - (pad - kPadRef));
+  const double s_eff = core::SensitivityBias (cfg.sensitivity);
   const double update_rate_on_surprise
-      = core::Lerp (0.2, 0.02, cfg.stability) * cfg.sensitivity;
+      = core::Lerp (0.2, 0.02, cfg.stability) * s_eff;
   const double surp_sens
       = SurpriseSensitivity (cfg.sensitivity, cfg.stability);
 

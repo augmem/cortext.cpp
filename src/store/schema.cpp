@@ -139,11 +139,16 @@ GetCoreMigrations ()
               "  s_avg REAL NOT NULL DEFAULT 0.0,"
               "  s_emotion_max REAL NOT NULL DEFAULT 0.0,"
               "  s_arousal_avg REAL NOT NULL DEFAULT 0.0,"
+              "  boundary_score REAL NOT NULL DEFAULT 0.0,"
               // Emotion vectors (6d)
               "  emotion BLOB,"
               "  ambient_mood BLOB,"
               // Decay metrics (from embeddings v1)
               "  strength REAL NOT NULL DEFAULT 1.0,"
+              "  trace_fast REAL NOT NULL DEFAULT 0.0,"
+              "  trace_med REAL NOT NULL DEFAULT 0.0,"
+              "  trace_slow REAL NOT NULL DEFAULT 0.0,"
+              "  trace_ultra REAL NOT NULL DEFAULT 0.0,"
               "  use_frequency REAL NOT NULL DEFAULT 0.0,"
               "  stability REAL NOT NULL DEFAULT 1.0,"
               "  connectivity REAL NOT NULL DEFAULT 0.0,"
@@ -158,6 +163,7 @@ GetCoreMigrations ()
               "  cluster_id INTEGER,"
               "  last_access INTEGER,"
               "  created_at INTEGER NOT NULL,"
+              "  context BLOB,"
               // Memory feedback (from memory_feedback v1)
               "  retrieved_count INTEGER NOT NULL DEFAULT 0,"
               "  used_count INTEGER NOT NULL DEFAULT 0,"
@@ -170,6 +176,11 @@ GetCoreMigrations ()
               // RIF state (from rif_state v1)
               "  suppression REAL NOT NULL DEFAULT 0.0,"
               "  suppression_ts INTEGER,"
+              // Source monitoring
+              "  source_origin TEXT,"
+              "  source_reliability REAL NOT NULL DEFAULT 0.5,"
+              "  source_contradiction_count INTEGER NOT NULL DEFAULT 0,"
+              "  source_last_verified_ts INTEGER NOT NULL DEFAULT 0,"
               // Flashbulb (from emotional_tags v1)
               "  flashbulb INTEGER NOT NULL DEFAULT 0,"
               "  emotional_intensity REAL NOT NULL DEFAULT 0.0,"
@@ -177,7 +188,10 @@ GetCoreMigrations ()
               "  detail_suppression REAL NOT NULL DEFAULT 0.0,"
               "  gist_components INTEGER NOT NULL DEFAULT 0,"
               "  cascade_radius INTEGER NOT NULL DEFAULT 0,"
-              "  cascade_decay REAL NOT NULL DEFAULT 0.0"
+              "  cascade_decay REAL NOT NULL DEFAULT 0.0,"
+              // Synaptic tagging
+              "  tag_strength REAL NOT NULL DEFAULT 0.0,"
+              "  tag_expires_at INTEGER NOT NULL DEFAULT 0"
               ")",
 
               // ------------------------------------------------------------------
@@ -259,6 +273,7 @@ GetCoreMigrations ()
               "  drift_acc_pacing REAL NOT NULL DEFAULT 0.0,"
               "  x_last_check BLOB,"
               "  prev_x BLOB,"
+              "  c_t BLOB,"
               "  t_start INTEGER NOT NULL DEFAULT 0,"
               "  last_write_ts INTEGER NOT NULL DEFAULT 0,"
               "  last_signal_ts INTEGER NOT NULL DEFAULT 0,"
@@ -336,6 +351,12 @@ GetCoreMigrations ()
               "  last_interrupt_tick INTEGER NOT NULL DEFAULT 0,"
               "  last_signal_timestamp INTEGER NOT NULL DEFAULT 0,"
               "  updated_at INTEGER NOT NULL DEFAULT 0,"
+              // Outcome prediction + neuromodulators
+              "  outcome_pred REAL NOT NULL DEFAULT 0.0,"
+              "  neuromod_ach REAL NOT NULL DEFAULT 0.0,"
+              "  neuromod_ne REAL NOT NULL DEFAULT 0.0,"
+              "  neuromod_da REAL NOT NULL DEFAULT 0.0,"
+              "  osc_phase REAL NOT NULL DEFAULT 0.0,"
               // Write rate
               "  write_rate_timestamps BLOB,"
               // Blender weights (from blender_weights v1)

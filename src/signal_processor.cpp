@@ -442,6 +442,11 @@ LoadState (Store &store, ProcessorContext &ctx)
       ctx.signals_processed
           = static_cast<int> (ExtractInt64 (row, "signals_processed", 0));
       ctx.u_t = ExtractDouble (row, "u_uncertainty", 0.0);
+      ctx.outcome_pred = ExtractDouble (row, "outcome_pred", 0.0);
+      ctx.neuromod_ach = ExtractDouble (row, "neuromod_ach", 0.0);
+      ctx.neuromod_ne = ExtractDouble (row, "neuromod_ne", 0.0);
+      ctx.neuromod_da = ExtractDouble (row, "neuromod_da", 0.0);
+      ctx.osc_phase = ExtractDouble (row, "osc_phase", 0.0);
       ctx.weight_relevance = ExtractDouble (row, "weight_relevance", 0.5);
       ctx.attention_width = ExtractDouble (row, "attention_width", 1.57);
       ctx.coverage_gain_floor
@@ -892,6 +897,10 @@ LoadAccumulators (Store &store, ProcessorContext &ctx)
           if (mu_it != row.end () && mu_it->second.has_value ())
             state.mu_acc = BlobToEigen (mu_it->second);
 
+          auto c_it = row.find ("c_t");
+          if (c_it != row.end () && c_it->second.has_value ())
+            state.c_t = BlobToEigen (c_it->second);
+
           auto peak_it = row.find ("e_peak");
           if (peak_it != row.end () && peak_it->second.has_value ())
             state.e_peak = BlobToEigen (peak_it->second);
@@ -1029,6 +1038,8 @@ SignalProcessor::Process (const Signal &signal)
         {
           context_->write_rate_window_.Record (signal.timestamp);
         }
+
+      context_->last_signal_timestamp = signal.timestamp;
 
       span.SetAttribute ("cortext.at_boundary", op_context.GetAtBoundary ());
       span.SetAttribute ("cortext.interrupt_allowed",
@@ -1277,6 +1288,7 @@ SignalProcessor::PersistState (Transaction &tx)
       "m_rate, rho_hat_prev, dt_ema, rate_ticks, last_rate_timestamp, reliability, "
       // Uncertainty
       "u_uncertainty, "
+      "outcome_pred, neuromod_ach, neuromod_ne, neuromod_da, osc_phase, "
       // Embedding prediction
       "last_embedding, x_pred_ema, delta_half_life_adj, sustained_influence, "
       // Working memory
@@ -1301,7 +1313,7 @@ SignalProcessor::PersistState (Transaction &tx)
       "?, ?, ?, ?, ?, "  // Emotion
       "?, ?, ?, ?, ?, "  // Stability
       "?, ?, ?, ?, ?, ?, "  // Rate control
-      "?, "  // Uncertainty
+      "?, ?, ?, ?, ?, ?, "  // Uncertainty + modulators
       "?, ?, ?, ?, "  // Embedding prediction
       "?, ?, ?, ?, "  // Working memory
       "?, ?, ?, "  // Metacognition
@@ -1337,6 +1349,11 @@ SignalProcessor::PersistState (Transaction &tx)
         context_->reliability,
         // Uncertainty
         context_->u_t,
+        context_->outcome_pred,
+        context_->neuromod_ach,
+        context_->neuromod_ne,
+        context_->neuromod_da,
+        context_->osc_phase,
         // Embedding prediction
         context_->last_embedding.has_value ()
             ? std::any (ToFloatVector (*context_->last_embedding))
@@ -1494,6 +1511,10 @@ SignalProcessor::PersistAccumulators (Transaction &tx)
       if (state.e_peak.size () > 0)
         peak_blob = ToFloatVector (state.e_peak);
 
+      std::vector<float> ctx_blob;
+      if (state.c_t.size () > 0)
+        ctx_blob = ToFloatVector (state.c_t);
+
       std::vector<float> last_check_blob;
       if (state.x_last_check.size () > 0)
         last_check_blob = ToFloatVector (state.x_last_check);
@@ -1510,17 +1531,17 @@ SignalProcessor::PersistAccumulators (Transaction &tx)
 
       tx.Execute (
           "INSERT INTO accumulators "
-          "(source_id, episode_id, mu_acc, drift_acc, s_sum, s_max, n, "
+          "(source_id, episode_id, mu_acc, c_t, drift_acc, s_sum, s_max, n, "
           " e_peak, emo_max, arousal_sum, drift_accum, drift_at_last_interrupt, "
           " drift_acc_pacing, x_last_check, prev_x, acc_signals_window, "
           " t_start, last_write_ts, last_signal_ts, eta_acc, coherence_prev) "
           "VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, "
-          "?15, ?16, ?17, ?18, ?19, ?20, ?21)",
-          { source_id, state.episode_id, mu_blob, state.drift_acc, state.s_sum,
-            state.s_max, static_cast<long long> (state.n_signals), peak_blob,
-            state.s_emotion_max, state.s_arousal_sum, state.drift_accum,
-            state.drift_at_last_interrupt, state.drift_acc_pacing,
-            last_check_blob, prev_x_blob, window_blob,
+          "?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)",
+          { source_id, state.episode_id, mu_blob, ctx_blob, state.drift_acc,
+            state.s_sum, state.s_max, static_cast<long long> (state.n_signals),
+            peak_blob, state.s_emotion_max, state.s_arousal_sum,
+            state.drift_accum, state.drift_at_last_interrupt,
+            state.drift_acc_pacing, last_check_blob, prev_x_blob, window_blob,
             static_cast<long long> (state.t_start),
             static_cast<long long> (state.last_write_ts),
             static_cast<long long> (state.last_signal_ts), state.eta_acc,

@@ -2,6 +2,8 @@
 
 The interrupt gate controls when retrieved memories enter active context during streaming generation. The gate balances novelty value against disruption cost. The interrupt gate operates on memory-level context, using centroids (μ_acc) rather than individual signal embeddings for novelty and relevance computation. All thresholds and gains in this section are derived from the three knobs (F, S, T); no fixed behavioral constants are introduced.
 
+**Note:** As defined in Section 1, all knob symbols here use the midpoint‑biased values F̃ and S̃ (T is unmodified).
+
 ## Marginal Utility Computation
 
 Novelty thresholds scale with knobs and refractory state:
@@ -9,7 +11,7 @@ Novelty thresholds scale with knobs and refractory state:
 ```
 τ_novelty = lerp(0.10, 0.35, F) × (1 − 0.15S) × (1 + 0.3T)
 τ_mu = lerp(0.08, 0.18, F) × (1 − 0.4S) × (1 + 0.4T)
-retrieval_thresh(F) = lerp(0.25, 0.60, F)
+retrieval_thresh(F) = lerp(0.12, 0.45, F)
 ```
 
 Refractory dynamics suppress rapid successive interrupts:
@@ -80,7 +82,7 @@ With map01 applied, each MU term is in [0, 1], so μ is calibrated to the same r
 Duplicate suppression threshold:
 
 ```
-dup_thresh = lerp(0.96, 0.88, F) × (0.98 + 0.02T)
+dup_thresh = lerp(0.985, 0.95, F) × (0.98 + 0.02T)
 K = round(lerp(10, 6, F))  # candidates to evaluate
 ```
 
@@ -101,7 +103,7 @@ This filter is applied before novelty and marginal utility evaluation. All subse
 **Working memory exclusion (normative):** retrieval must also exclude candidates that overlap with active working‑memory slots. This keeps “what I just said” in working memory rather than re‑injecting it from long‑term memory. The exclusion uses the same duplication threshold as the gate:
 
 ```
-dup_thresh = lerp(0.96, 0.88, F) × (0.98 + 0.02T)
+dup_thresh = lerp(0.985, 0.95, F) × (0.98 + 0.02T)
 candidates_eligible ← {c ∈ candidates_eligible | max_{w∈WM} cos(c, w) < dup_thresh}
 ```
 
@@ -151,9 +153,9 @@ where cosine_dist(u, v) = 1 − cos(u, v).
 first_step ← (x_last_check is unset for this stream)  # MUST occur once per stream
 if first_step: x_last_check ← μ_acc; drift_acc_pacing ← 0
 drift_acc_pacing += cosine_dist(μ_acc, x_last_check)
-pacing_thresh(S) = lerp(0.5, 0.1, S)
-max_wait_drift(F) = lerp(2.0, 0.5, F)
-adjacent_window(F) = round(lerp(8, 1, F))
+pacing_thresh(S) = lerp(0.3, 0.05, S)
+max_wait_drift(F) = lerp(1.2, 0.30, F)
+adjacent_window(F) = round(lerp(6, 1, F))
 
 since_last_s ← if last_retrieval_ts == 0 then +∞ else (now_ms() − last_retrieval_ts) / 1000
 min_gap_s ← adjacent_window(F) × dt_ema

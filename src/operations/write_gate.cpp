@@ -70,7 +70,9 @@ ComputeWriteGate::Execute (OperationContext &context,
     }
 
   // Effective accumulator threshold
-  const double theta_accumulator = T_dynamic * M_write_refrac;
+  const double neuromod_ne = core::Clamp (p_ctx.neuromod_ne, 0.0, 1.0);
+  const double write_scale = 1.0 - 0.3 * neuromod_ne;
+  const double theta_accumulator = T_dynamic * M_write_refrac * write_scale;
 
   // Final write decision
   const bool force_write = spike_bypass;
@@ -155,6 +157,8 @@ ComputeWriteGate::Execute (OperationContext &context,
     telemetry::Attribute::Double ("k_refrac", k_refrac),
     telemetry::Attribute::Double ("dt_write", dt_write),
     telemetry::Attribute::Double ("refractory_mult", M_write_refrac),
+    telemetry::Attribute::Double ("neuromod_ne", neuromod_ne),
+    telemetry::Attribute::Double ("write_scale", write_scale),
     telemetry::Attribute::Double ("theta_accumulator", theta_accumulator),
     telemetry::Attribute::Double ("rho", rho),
     telemetry::Attribute::Bool ("force_write", force_write),

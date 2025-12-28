@@ -210,6 +210,16 @@ struct ProcessorContext
   // ======================================================================
   int signals_processed = 0;
   double u_t = 0.0;
+  double outcome_pred = 0.0;
+  double delta_reward = 0.0;
+  double neuromod_ach = 0.0;
+  double neuromod_ne = 0.0;
+  double neuromod_da = 0.0;
+  double encode_bias = 0.5;
+  double retrieval_bias = 0.5;
+  double osc_phase = 0.0;
+  double last_used_rate = 0.0;
+  double last_used_flag = 0.0;
   bool focus_priors_initialized = false;
   bool sensitivity_priors_initialized = false;
   bool stability_priors_initialized = false;
@@ -399,6 +409,13 @@ struct ProcessorContext
   /// to compute context centroid for novelty and marginal utility.
   /// ctx_window ← recent_memory_centroids (not individual signals)
   std::deque<Eigen::VectorXf> recent_memory_centroids;
+
+  // ======================================================================
+  // Index and Procedural Stores (CLS extensions)
+  // ======================================================================
+  std::unordered_map<std::string, std::vector<long long>> index_store;
+  std::unordered_map<long long, std::string> index_reverse;
+  std::unordered_map<std::string, std::unordered_map<long long, double>> procedural_store;
 
   // ======================================================================
   // LLM Components (OGA/Phi-4)

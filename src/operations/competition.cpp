@@ -2,6 +2,7 @@
 
 #include "cortext/store/store.hpp"
 #include "cortext/core/algorithms.hpp"
+#include "cortext/core/knobs.hpp"
 #include "cortext/operations/constants.hpp"
 #include "cortext/processor/operation_context.hpp"
 #include "cortext/telemetry/telemetry.hpp"
@@ -22,8 +23,9 @@ namespace
 inline int
 ComputeWinnersK (double F)
 {
+  const double f_eff = core::FocusBias (F);
   return static_cast<int> (std::round (
-      core::Lerp (constants::kWinnersKMax, constants::kWinnersKMin, F)));
+      core::Lerp (constants::kWinnersKMax, constants::kWinnersKMin, f_eff)));
 }
 
 /// @brief Computes inhibition radius based on Focus.
@@ -31,7 +33,7 @@ inline double
 InhibitionRadius (double F)
 {
   return core::Lerp (constants::kInhibitionRadiusMin,
-                     constants::kInhibitionRadiusMax, F);
+                     constants::kInhibitionRadiusMax, core::FocusBias (F));
 }
 
 /// @brief Computes suppression per retrieval based on Stability.

@@ -6,22 +6,22 @@ This appendix enumerates the state variables used by the specification and separ
 
 On cold start (no persisted state), initialize retained state as follows (unless otherwise specified by knob priors):
 
-* **Global defaults:** `signals_processed = 0`, `u_uncertainty = 0`, `mood_vector = 0_vector`, `last_mood_ts = now_ms()`, `theta_dynamic = theta_target = θ_prior(F,S,T)`, `hysteresis = lerp(0.02, 0.25, T)`, `half_life = base_half_life(T)`, `m_rate = 0`, `rho_hat_prev = 0`, `dt_ema = 0`, `rate_ticks = 0`, `reliability = 1`, `retention_ema = 0`, `last_rate_timestamp = now_ms()`, `last_retrieval_ts = 0`, `last_embedding = unset`, `x_pred_ema = unset`.
-* **Accumulator defaults (per stream):** `μ_acc = 0_vector`, `drift_acc = 0`, `s_sum = 0`, `s_max = 0`, `n = 0`, `e_peak = 0_vector`, `emo_max = 0`, `arousal_sum = 0`, `acc_signals_window = []`, `t_start = 0`, `last_signal_ts = 0`, `last_write_ts = 0`, `eta_acc = 0`, `coherence_prev = 0`, `drift_accum = 0`, `drift_at_last_interrupt = 0`, `drift_acc_pacing = 0`, `x_last_check = unset` (μ_acc), `prev_x = unset` (μ_acc).
-* **Per-memory defaults (on insert):** `strength = 1`, `use_frequency = 0`, `stability = 1`, `connectivity = 0`, `drift_mag = 0`, `influence = 0`, `sustained_influence = 0`, `contextual_gain = 0`, `redundancy = 0`, `pre_activation = 0`, `lability_state = 0`, `suppression_count = 0`, `suppression = 0`, `flashbulb = 0`, `s_emotion_max = 0`, `s_arousal_avg = 0`.
+* **Global defaults:** `signals_processed = 0`, `u_uncertainty = 0`, `mood_vector = 0_vector`, `last_mood_ts = now_ms()`, `theta_dynamic = theta_target = θ_prior(F,S,T)`, `hysteresis = lerp(0.02, 0.25, T)`, `half_life = base_half_life(T)`, `m_rate = 0`, `rho_hat_prev = 0`, `dt_ema = 0`, `rate_ticks = 0`, `reliability = 1`, `retention_ema = 0`, `last_rate_timestamp = now_ms()`, `last_retrieval_ts = 0`, `last_embedding = unset`, `x_pred_ema = unset`, `outcome_pred = 0`, `φ_t = 0`.
+* **Accumulator defaults (per stream):** `μ_acc = 0_vector`, `c_t = 0_vector`, `drift_acc = 0`, `s_sum = 0`, `s_max = 0`, `n = 0`, `e_peak = 0_vector`, `emo_max = 0`, `arousal_sum = 0`, `acc_signals_window = []`, `t_start = 0`, `last_signal_ts = 0`, `last_write_ts = 0`, `eta_acc = 0`, `coherence_prev = 0`, `drift_accum = 0`, `drift_at_last_interrupt = 0`, `drift_acc_pacing = 0`, `x_last_check = unset` (μ_acc), `prev_x = unset` (μ_acc).
+* **Per-memory defaults (on insert):** `strength = 1`, `trace_fast = 0`, `trace_med = 0`, `trace_slow = 0`, `trace_ultra = 0`, `use_frequency = 0`, `stability = 1`, `connectivity = 0`, `drift_mag = 0`, `influence = 0`, `sustained_influence = 0`, `contextual_gain = 0`, `redundancy = 0`, `pre_activation = 0`, `lability_state = 0`, `suppression_count = 0`, `suppression = 0`, `flashbulb = 0`, `s_emotion_max = 0`, `s_arousal_avg = 0`, `boundary_score = 0`, `tagged = false`, `tag_expires_at = 0`, `context = 0_vector`, `source_model = {origin: 'unknown', reliability: 0.5, contradiction_count: 0, last_verified_ts: 0}`, `versions = {evidence_packets: [], reconstructions: []}`.
 * **RLS defaults:** `w_* = w_bootstrap`, `P = diag(1000)`, `blender_ready = false`, `blender_update_count = 0`.
 * **Knob-derived control parameters (initialized from priors):** `weight_relevance`, `attention_width`, `coverage_gain_floor`, `mismatch_weight`, `weight_novelty`, `weight_surprise`, `weight_valence`, `weight_arousal`, `emotion_gain`, `score_gain`, `rate_target`, `rate_decay`, `periphery_half_life`, `salience_half_life`, `drift_weight`.
-* **Buffers:** `signal_stream` (μ_acc stream), `score_stream`, `memory_stream`, `recent_memory_centroids` start empty.
+* **Buffers:** `signal_stream` (μ_acc stream), `score_stream`, `memory_stream`, `recent_memory_centroids`, `index_store`, `procedural_store` start empty.
 * **Retention history:** `retention_history` starts empty (populated after the first signal step).
 
 * **Accumulator state (per stream; retained across timesteps):**
-  * `{μ_acc, drift_acc, s_sum, s_max, n, e_peak, emo_max, arousal_sum, eta_acc, coherence_prev, acc_signals_window, t_start, last_signal_ts, last_write_ts, drift_accum, drift_at_last_interrupt, drift_acc_pacing, x_last_check, prev_x}`
+  * `{μ_acc, c_t, drift_acc, s_sum, s_max, n, e_peak, emo_max, arousal_sum, eta_acc, coherence_prev, acc_signals_window, t_start, last_signal_ts, last_write_ts, drift_accum, drift_at_last_interrupt, drift_acc_pacing, x_last_check, prev_x}`
 
 * **Global state (retained across timesteps):**
-  * `{signals_processed, u_uncertainty, mood_vector, last_mood_ts, theta_dynamic, theta_target, hysteresis, half_life, m_rate, rho_hat_prev, dt_ema, rate_ticks, reliability, retention_ema, last_rate_timestamp, last_retrieval_ts, last_embedding, x_pred_ema, weight_relevance, attention_width, coverage_gain_floor, mismatch_weight, weight_novelty, weight_surprise, weight_valence, weight_arousal, emotion_gain, score_gain, rate_target, rate_decay, periphery_half_life, salience_half_life, drift_weight, blender_ready, blender_update_count, blender_P}`
+  * `{signals_processed, u_uncertainty, mood_vector, last_mood_ts, theta_dynamic, theta_target, hysteresis, half_life, m_rate, rho_hat_prev, dt_ema, rate_ticks, reliability, retention_ema, last_rate_timestamp, last_retrieval_ts, last_embedding, x_pred_ema, outcome_pred, φ_t, weight_relevance, attention_width, coverage_gain_floor, mismatch_weight, weight_novelty, weight_surprise, weight_valence, weight_arousal, emotion_gain, score_gain, rate_target, rate_decay, periphery_half_life, salience_half_life, drift_weight, blender_ready, blender_update_count, blender_P}`
 
 * **Buffers (retained across timesteps; bounded by window rules):**
-  * `{signal_stream, score_stream, memory_stream, recent_memory_centroids, retention_history}`
+  * `{signal_stream, score_stream, memory_stream, recent_memory_centroids, index_store, procedural_store, retention_history}`
 
 * **Recorded signal fields (per signal):**
   * `{coherence_struct_t → SIGNALS.coherence, focus_spread_t → SIGNALS.focus_spread}`
@@ -30,7 +30,7 @@ On cold start (no persisted state), initialize retained state as follows (unless
   * `{u(t) → STATE.u_uncertainty, M_t → STATE.mood_vector}`
 
 * **Per-step derived scalars/vectors (ephemeral; recomputed each step):**
-  * `{signal_gap_s, coherence_curr, s_avg, S_window, boundary_score, should_flush, write_memory, Δwrites, q_retrieval}`
+  * `{signal_gap_s, coherence_curr, s_avg, S_window, boundary_score, max_signals, max_signal_flush, should_flush, write_memory, Δwrites, q_retrieval, ACh_t, NE_t, DA_t}`
 
 # Appendix B. Derived Signals: Definitions and Bounds {#sec-app-derived .unnumbered}
 

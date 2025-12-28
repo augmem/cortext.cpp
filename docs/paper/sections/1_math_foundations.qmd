@@ -102,6 +102,18 @@ Cortext is governed by three continuous control parameters, each representing a 
 
 A central design principle is that knobs set rates rather than modes. Behavioral differences emerge continuously from parameter interactions; there are no hard-coded phase transitions or discrete operational states.
 
+### Midpoint-Biased Knob Mapping
+
+To make **F = S = T = 0.5** a neutral, all‑arounder operating point, we apply a midpoint bias to Focus and Sensitivity before deriving parameters. Endpoints remain fixed:
+
+```
+F̃ = clamp(F − β_F × 4F(1 − F), 0, 1)
+S̃ = clamp(S − β_S × 4S(1 − S), 0, 1)
+β_F = β_S = 0.10
+```
+
+Unless explicitly stated otherwise, all knob‑derived formulas use **F̃** and **S̃** in place of the raw UI knobs. Stability (T) is not biased.
+
 ## Knob-Derived Parameters
 
 Most system tunables derive from the three primary knobs. This section catalogs the key derivations; fixed invariants are explicitly labeled in their respective sections.

@@ -2,6 +2,8 @@
 
 This section presents algorithms modeling higher-order cognitive phenomena: working memory maintenance, metacognitive monitoring, reconsolidation dynamics, and serial position effects.
 
+**Knob note:** Unless explicitly stated otherwise, F and S in this section refer to midpoint‑biased values (F̃, S̃) defined in Section 1.
+
 ## Working Memory Gates
 
 Following @cowan2001magical capacity constraints, working memory maintains a limited number of active items. Working memory holds coherent memories as defined in @sec-write-pacing, preserving the full content and signal sequence:
@@ -23,11 +25,33 @@ memory.modality ← primary modality ('text', 'audio', 'image')
 memory.blob_ids ← [blob_1, blob_2, ..., blob_n]  # blob refs
 memory.embedding ← e_rep  # representative embedding (@sec-rep-embedding)
 memory.signals ← [x_1, x_2, ..., x_n]  # ordered signal embeddings
+memory.context ← c_t  # temporal context state (@sec-temporal-context)
+memory.source_model ← {origin, reliability, contradiction_count, last_verified_ts}
+memory.versions ← {evidence_packets, reconstructions}
 memory.metadata ← {n, s_max, s_avg, drift_acc, mem_elapsed,
                    s_emotion_max, s_arousal_avg}
 ```
 
 The emotional metrics (s_emotion_max, s_arousal_avg) are accumulated during memory formation for use by Emotional Consolidation (@sec-emotional-consolidation).
+
+## Temporal Context State (Time-Cells Analogue) {#sec-temporal-context}
+
+Beyond the accumulator centroid μ_acc, Cortext maintains a slowly drifting temporal context vector `c_t`. This provides ordered recall and reduces topic-collision errors by enabling **context reinstatement**.
+
+```
+α_c(T) = lerp(0.06, 0.01, T)  # slow drift at high Stability
+c_t ← l2_normalize((1 − α_c(T)) × c_{t−1} + α_c(T) × μ_acc + ξ_t)
+```
+
+where ξ_t is small isotropic noise (or a deterministic phase vector) to prevent collapse. Each memory stores `(e_rep, c_t)`. Retrieval combines content match and context match:
+
+```
+w_ctx(F,S,T) = lerp(0.15, 0.45, F) × lerp(1.0, 0.85, S)
+score_retrieval(m) ← (1 − w_ctx) × cos(q, m.embedding) +
+                      w_ctx × cos(c_t, m.context)
+```
+
+Reinstatement: retrieving a memory updates `c_t` toward `m.context`, improving ordered recall within the same episode.
 
 ### Maintenance Cost
 
@@ -131,6 +155,42 @@ Reconsolidation effects propagate to semantically related memories with decay:
 ripple_decay = lerp(0.5, 0.1, T)  # per semantic hop
 ```
 
+## Source Monitoring and Reality Constraints
+
+Each memory carries a provenance model that tracks its origin, reliability, and contradiction history. Retrieval returns **content + source confidence**, enabling downstream gating and auditability.
+
+```
+source_model = {origin, reliability, contradiction_count, last_verified_ts}
+source_prior(origin) = {'user': 0.8, 'assistant': 0.6, 'external': 0.7, 'system': 0.9}
+source_confidence(m) ← clamp(source_prior(m.origin) ×
+                             (1 − 0.15 × contradiction_count) ×
+                             (0.7 + 0.3 × freshness(m)), 0, 1)
+```
+
+Contradictions reduce `reliability`, and user corrections directly update `contradiction_count`. Source confidence gates injection into active context:
+
+```
+if source_confidence(m) < lerp(0.25, 0.55, T):
+    downrank_or_hold(m)
+```
+
+## Constructive Recall and Controlled Distortion
+
+Memories are stored as **evidence packets** plus **reconstructions**. Retrieval reconstructs a plausible memory instance, tracks uncertainty, and preserves edit history.
+
+```
+memory.versions.evidence_packets ← immutable observations
+memory.versions.reconstructions ← [{embedding, content, ts, uncertainty}]
+```
+
+During retrieval:
+```
+recon ← reconstruct(evidence_packets, current_context, uncertainty)
+append(reconstructions, recon)
+```
+
+Reconsolidation updates the latest reconstruction rather than overwriting evidence, enabling controlled distortion with an audit trail.
+
 ## Retrieval Competition
 
 Retrieved memories compete through lateral inhibition, modeling retrieval-induced forgetting [@anderson1994remembering]:
@@ -214,3 +274,41 @@ The emotional metrics (s_emotion_max, s_arousal_avg) are accumulated during memo
 cascade_radius = round(lerp(1, 5, S))
 cascade_decay = lerp(0.7, 0.3, S)
 ```
+
+## Synaptic Tagging and Capture
+
+Flashbulb events are extended with **synaptic tagging**: high surprise or arousal tags nearby memories for preferential consolidation later, even if they scored low at the time.
+
+```
+tag_trigger ← (surprisal_t > lerp(0.6, 0.4, S)) OR (arousal_t > lerp(0.7, 0.5, S))
+tag_window = round(lerp(2, 8, S))  # memories before/after current time
+tag_decay_s = lerp(300, 3600, T)   # tag lifetime (seconds)
+
+if tag_trigger:
+    for m in temporal_neighbors(now_s(), tag_window):
+        m.tagged ← true
+        m.tag_strength ← 1.0
+        m.tag_expires_at ← now_s() + tag_decay_s
+```
+
+Tagged memories receive a consolidation bonus:
+```
+if m.tagged and now_s() < m.tag_expires_at:
+    score_consolidate(m) += lerp(0.10, 0.25, S) × m.tag_strength
+```
+
+## Procedural Memory Lane (Habit/Skill Memory)
+
+In addition to declarative memory, Cortext maintains a procedural store for **what action to take in a context**, learned from repeated success.
+
+```
+proc_key ← sparse_key(μ_acc)  # same sparsification as @sec-pattern-separation
+Q(proc_key, action) ← habit value
+```
+
+Updates occur when an action leads to positive outcome signals:
+```
+Q ← Q + value_update_gain × δ_reward_t × (1 − Q)
+```
+
+Procedural retrieval runs in parallel with declarative retrieval; when confidence is high, it can pre-emptively suggest actions while remaining subject to the same interrupt gate.

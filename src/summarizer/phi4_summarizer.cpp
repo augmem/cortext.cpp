@@ -1,5 +1,6 @@
 #include "cortext/summarizer/phi4_summarizer.hpp"
 
+#include <algorithm>
 #include <sstream>
 #include <stdexcept>
 
@@ -11,6 +12,59 @@ namespace cortext
 {
 
 #if !defined(CORTEXT_DISABLE_OGA)
+
+namespace
+{
+
+std::string
+TrimToWordLimit (const std::string &text, int max_words)
+{
+  if (max_words <= 0)
+    {
+      return text;
+    }
+  std::ostringstream out;
+  int count = 0;
+  bool in_word = false;
+  for (size_t i = 0; i < text.size (); ++i)
+    {
+      const char c = text[i];
+      const bool is_space = (c == ' ' || c == '\n' || c == '\t' || c == '\r');
+      if (!is_space && !in_word)
+        {
+          in_word = true;
+          count++;
+          if (count > max_words)
+            {
+              break;
+            }
+        }
+      if (count <= max_words)
+        {
+          out << c;
+        }
+      if (is_space)
+        {
+          in_word = false;
+        }
+    }
+  return out.str ();
+}
+
+std::string
+BuildSummaryPrompt (const std::vector<std::string> &texts)
+{
+  std::ostringstream combined;
+  combined << "<|user|>Summarize the following texts into a concise summary:\n\n";
+  for (size_t i = 0; i < texts.size (); ++i)
+    {
+      combined << "Text " << (i + 1) << ":\n" << texts[i] << "\n\n";
+    }
+  combined << "<|end|><|assistant|>";
+  return combined.str ();
+}
+
+} // namespace
 
 struct Phi4Summarizer::Impl
 {
@@ -118,22 +172,25 @@ Phi4Summarizer::operator= (Phi4Summarizer &&) noexcept = default;
 std::string
 Phi4Summarizer::SummarizeTexts (const std::vector<std::string> &texts)
 {
+  return SummarizeTextsLimited (texts, 0);
+}
+
+std::string
+Phi4Summarizer::SummarizeTextsLimited (const std::vector<std::string> &texts,
+                                       int max_words)
+{
   if (texts.empty ())
     {
       return {};
     }
-
-  // Combine texts with separators
-  std::ostringstream combined;
-  combined << "<|user|>Summarize the following texts into a concise "
-              "summary:\n\n";
-  for (size_t i = 0; i < texts.size (); ++i)
+  const std::string prompt = BuildSummaryPrompt (texts);
+  int max_length = 256;
+  if (max_words > 0)
     {
-      combined << "Text " << (i + 1) << ":\n" << texts[i] << "\n\n";
+      max_length = std::clamp (max_words * 6, 64, 512);
     }
-  combined << "<|end|><|assistant|>";
-
-  return impl_->Generate (combined.str (), 256);
+  const std::string generated = impl_->Generate (prompt, max_length);
+  return TrimToWordLimit (generated, max_words);
 }
 
 std::string
@@ -194,6 +251,14 @@ Phi4Summarizer::operator= (Phi4Summarizer &&) noexcept = default;
 
 std::string
 Phi4Summarizer::SummarizeTexts (const std::vector<std::string> & /*texts*/)
+{
+  throw std::runtime_error (
+      "Phi4Summarizer: OGA disabled. Rebuild without CORTEXT_DISABLE_OGA");
+}
+
+std::string
+Phi4Summarizer::SummarizeTextsLimited (const std::vector<std::string> & /*texts*/,
+                                       int /*max_words*/)
 {
   throw std::runtime_error (
       "Phi4Summarizer: OGA disabled. Rebuild without CORTEXT_DISABLE_OGA");
