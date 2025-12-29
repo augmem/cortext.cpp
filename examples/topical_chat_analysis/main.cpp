@@ -324,6 +324,8 @@ struct Stats {
   int retrieval_other_candidates = 0;
   int retrieval_turns_with_association = 0;
   int retrieval_turns_with_label = 0;
+  int retrieval_summary_hit_turns = 0;
+  int retrieval_summary_only_turns = 0;
   int interrupt_turns = 0;
   int interrupt_turns_with_retrieval = 0;
   int interrupt_association_candidates = 0;
@@ -347,6 +349,7 @@ struct Stats {
   std::vector<double> retrieval_context_overlap_values;
   std::vector<double> retrieval_semantic_overlap_values;
   std::vector<double> retrieval_context_semantic_overlap_values;
+  std::vector<double> retrieval_summary_hit_overlap_values;
   std::vector<double> interrupt_overlap_values;
   std::vector<double> interrupt_context_overlap_values;
   std::vector<double> interrupt_semantic_overlap_values;
@@ -1097,6 +1100,10 @@ int main(int argc, char **argv) {
             double best_context_semantic = 0.0;
             bool has_semantic = false;
             bool has_context_semantic = false;
+            double best_summary_semantic = 0.0;
+            bool has_summary_semantic = false;
+            int summary_candidates = 0;
+            int non_summary_candidates = 0;
             std::string best_text;
             bool turn_has_association = false;
             bool turn_has_label = false;
@@ -1104,6 +1111,8 @@ int main(int argc, char **argv) {
               const std::string mem_text = MemoryToText(mem);
               const auto mem_tokens = Tokenize(mem_text);
               const double overlap = Jaccard(turn_tokens, mem_tokens);
+              double mem_semantic = 0.0;
+              bool has_mem_semantic = false;
               if (overlap > best_overlap) {
                 best_overlap = overlap;
                 best_text = mem_text;
@@ -1122,6 +1131,8 @@ int main(int argc, char **argv) {
                     best_semantic = sim;
                   }
                   has_semantic = true;
+                  mem_semantic = sim;
+                  has_mem_semantic = true;
                   if (!context_embedding.empty()) {
                     const double ctx_sim =
                         CosineSimilarity(context_embedding, *emb_opt);
@@ -1139,20 +1150,35 @@ int main(int argc, char **argv) {
                   if (*kind == "ASSOCIATION") {
                     stats.retrieval_association_candidates++;
                     turn_has_association = true;
+                    summary_candidates++;
                     if (ctx.should_interrupt) {
                       stats.interrupt_association_candidates++;
+                    }
+                    if (has_mem_semantic
+                        && (!has_summary_semantic
+                            || mem_semantic > best_summary_semantic)) {
+                      best_summary_semantic = mem_semantic;
+                      has_summary_semantic = true;
                     }
                   } else if (*kind == "LABEL") {
                     stats.retrieval_label_candidates++;
                     turn_has_label = true;
+                    non_summary_candidates++;
                     if (ctx.should_interrupt) {
                       stats.interrupt_label_candidates++;
                     }
                   } else {
                     stats.retrieval_other_candidates++;
+                    non_summary_candidates++;
                     if (ctx.should_interrupt) {
                       stats.interrupt_other_candidates++;
                     }
+                  }
+                } else {
+                  stats.retrieval_other_candidates++;
+                  non_summary_candidates++;
+                  if (ctx.should_interrupt) {
+                    stats.interrupt_other_candidates++;
                   }
                 }
               }
@@ -1170,6 +1196,16 @@ int main(int argc, char **argv) {
             if (has_context_semantic) {
               stats.retrieval_context_semantic_overlap_values.push_back(
                   best_context_semantic);
+            }
+            if (summary_candidates > 0) {
+              stats.retrieval_summary_hit_turns++;
+              if (has_summary_semantic) {
+                stats.retrieval_summary_hit_overlap_values.push_back(
+                    best_summary_semantic);
+              }
+              if (non_summary_candidates == 0) {
+                stats.retrieval_summary_only_turns++;
+              }
             }
             if (ctx.should_interrupt) {
               stats.interrupt_overlap_values.push_back(best_overlap);
@@ -1344,6 +1380,16 @@ int main(int argc, char **argv) {
           ? 0.0
           : static_cast<double>(stats.retrieval_turns_with_label)
                 / static_cast<double>(stats.retrieval_turns);
+  const double retrieval_summary_hit_rate =
+      stats.retrieval_turns == 0
+          ? 0.0
+          : static_cast<double>(stats.retrieval_summary_hit_turns)
+                / static_cast<double>(stats.retrieval_turns);
+  const double retrieval_summary_only_turn_rate =
+      stats.retrieval_turns == 0
+          ? 0.0
+          : static_cast<double>(stats.retrieval_summary_only_turns)
+                / static_cast<double>(stats.retrieval_turns);
   const int interrupt_candidate_total =
       stats.interrupt_association_candidates + stats.interrupt_label_candidates
       + stats.interrupt_other_candidates;
@@ -1389,6 +1435,8 @@ int main(int argc, char **argv) {
       Summarize(stats.retrieval_semantic_overlap_values);
   const auto retrieval_context_semantic_summary =
       Summarize(stats.retrieval_context_semantic_overlap_values);
+  const auto retrieval_summary_hit_overlap_summary =
+      Summarize(stats.retrieval_summary_hit_overlap_values);
   const auto interrupt_overlap_summary = Summarize(stats.interrupt_overlap_values);
   const auto interrupt_context_overlap_summary =
       Summarize(stats.interrupt_context_overlap_values);
@@ -1439,6 +1487,10 @@ int main(int argc, char **argv) {
             << retrieval_association_turn_rate << "\n";
   std::cout << "retrieval_label_turn_rate="
             << retrieval_label_turn_rate << "\n";
+  std::cout << "retrieval_summary_hit_rate="
+            << retrieval_summary_hit_rate << "\n";
+  std::cout << "retrieval_summary_only_turn_rate="
+            << retrieval_summary_only_turn_rate << "\n";
   std::cout << "wm_best_overlap=" << avg_wm_overlap << "\n";
   std::cout << "interrupt_turn_rate=" << interrupt_rate << "\n";
   std::cout << "interrupt_with_retrieval_rate=" << interrupt_with_retrieval_rate << "\n";
@@ -1488,6 +1540,13 @@ int main(int argc, char **argv) {
               << " p10=" << retrieval_context_semantic_summary.p10
               << " p50=" << retrieval_context_semantic_summary.p50
               << " p90=" << retrieval_context_semantic_summary.p90 << "\n";
+  }
+  if (retrieval_summary_hit_overlap_summary.count > 0) {
+    std::cout << "summary_hit_overlap_mean="
+              << retrieval_summary_hit_overlap_summary.mean
+              << " p10=" << retrieval_summary_hit_overlap_summary.p10
+              << " p50=" << retrieval_summary_hit_overlap_summary.p50
+              << " p90=" << retrieval_summary_hit_overlap_summary.p90 << "\n";
   }
 
   if (interrupt_overlap_summary.count > 0) {

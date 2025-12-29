@@ -2564,6 +2564,15 @@ retrieval and interrupt quality. A multi-participant harness
 (`scripts/run_memory_harness.py`) interleaves conversations to stress
 long-horizon recall under shared-memory load.
 
+To quantify consolidation utility, we also track:
+
+-   **retrieval_summary_hit_rate:** share of retrieval turns containing
+    consolidated summaries (ASSOCIATION nodes).
+-   **summary_hit_overlap_mean:** semantic overlap (ImageBind cosine) of
+    the best summary hit on those turns.
+-   **retrieval_summary_only_turn_rate:** share of retrieval turns where
+    summaries are the only retrieved candidates.
+
 ## Threshold Adaptation
 
 The dynamic threshold (θ_dynamic) successfully tracked score

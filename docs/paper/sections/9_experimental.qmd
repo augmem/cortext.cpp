@@ -4,6 +4,12 @@ We present preliminary experimental results collected from live chat sessions to
 
 All runs reported here are generated with the `examples/topical_chat_analysis` pipeline using ImageBind embeddings; consolidation summarization/labeling (when invoked) uses gemma-3n-e2b via `third_party/litert_lm`. Evaluation logs include lexical overlap (token Jaccard) and **semantic overlap** (ImageBind cosine) for retrieval and interrupt quality. A multi-participant harness (`scripts/run_memory_harness.py`) interleaves conversations to stress long-horizon recall under shared-memory load.
 
+To quantify consolidation utility, we also track:
+
+* **retrieval_summary_hit_rate:** share of retrieval turns containing consolidated summaries (ASSOCIATION nodes).
+* **summary_hit_overlap_mean:** semantic overlap (ImageBind cosine) of the best summary hit on those turns.
+* **retrieval_summary_only_turn_rate:** share of retrieval turns where summaries are the only retrieved candidates.
+
 ## Threshold Adaptation
 The dynamic threshold (θ_dynamic) successfully tracked score distributions. In high-volatility inputs (within-accumulator drift_acc > 1.0), thresholds relaxed to ~0.15, while stable contexts tightened to ~0.27.
 
