@@ -224,7 +224,7 @@ def main() -> int:
         "focus": 0.5,
         "sensitivity": 0.5,
         "stability": 0.5,
-        "max_conversations": 1,
+        "max_conversations": args.max_conversations,
         "max_turns": args.max_turns,
         "max_total": args.max_total,
         "interleave": 1,

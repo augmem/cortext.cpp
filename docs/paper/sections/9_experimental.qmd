@@ -12,3 +12,20 @@ Accumulator drift (drift_acc) aligned with semantic shifts. Conversation turns w
 
 ## Latency and Performance
 End-to-end processing per token averaged < 50ms. Graph expansion added < 10ms overhead due to efficient kNN (k=32) and limited expansion depth (d=2).
+
+## Long-Horizon Consolidation Ablation
+
+We ran a long-horizon stress test with **F=S=T=0.5**, `max_total=360`, `max_turns=360`, and `max_conversations=10` (single-stream, interleave=1) to isolate consolidation effects. Two conditions were compared:
+
+* **No consolidation** (`consolidate_cycles=0`)
+* **Consolidation on** (`consolidate_cycles=2`, yielding 4 consolidation runs; summaries produced by gemma-3n-e2b with no fallback)
+
+Key outcomes (Δ = consolidate − no-consolidate):
+
+* **Retrieval semantic overlap mean:** +0.0136 (0.4529 → 0.4666)
+* **Retrieval context-semantic overlap mean:** +0.0118 (0.6342 → 0.6460)
+* **Interrupt semantic overlap mean:** +0.0103 (0.4720 → 0.4823)
+* **Interrupt context-semantic overlap mean:** +0.0109 (0.6392 → 0.6501)
+* **Retrieval avg candidates:** +3.47 (23.23 → 26.70)
+
+Retrieval and interrupt rates were unchanged, indicating the gains arise from consolidation quality rather than more frequent retrievals.
