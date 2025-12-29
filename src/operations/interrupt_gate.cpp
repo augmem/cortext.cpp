@@ -413,6 +413,8 @@ ComputeMniGateDecision::Execute (OperationContext &context, Transaction &tx) con
       = cortext::core::Lerp (kBoundaryFMin, kBoundaryFMax, F)
         * cortext::core::Lerp (kBoundarySMin, kBoundarySMax, S)
         * cortext::core::Lerp (1.4, 0.6, T);
+  const double boundary_mult_eff
+      = boundary_mult * (1.0 - 0.20 * cortext::core::SensitivityBias (S));
   const bool at_boundary = context.GetAtBoundary ();
 
   // Limit candidates to top K by relevance (Section 8.3)
@@ -541,7 +543,7 @@ ComputeMniGateDecision::Execute (OperationContext &context, Transaction &tx) con
       = (rel_star >= retrieval_thresh)
         && ((novelty_star >= tau_novelty_eff) || (best_mu >= tau_m_eff))
         && (overlap_star < dup_thresh)
-        && (at_boundary || best_mu >= boundary_mult * tau_m_eff);
+        && (at_boundary || best_mu >= boundary_mult_eff * tau_m_eff);
 
   context.SetInterruptAllowed (allow_interrupt);
   context.SetSelectedCandidateId (allow_interrupt

@@ -13,6 +13,8 @@ Note: Consolidation is external-only; callers invoke `cortext.consolidate()`
 explicitly rather than scheduling it automatically.
 Note: Interrupt gating uses a sensitivity-relaxed retrieval threshold
 retrieval_thresh_interrupt(F,S) = retrieval_thresh(F) × (1 − 0.12S).
+Note: Non-boundary MU gating is relaxed by Sensitivity:
+boundary_mult_eff = boundary_mult × (1 − 0.20S).
 
 ```{mermaid}
 erDiagram

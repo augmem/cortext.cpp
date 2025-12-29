@@ -2397,6 +2397,7 @@ Interrupt state (per stream):
     τ_refrac = lerp(24, 96, T) × lerp(1.4, 1.0, S)
     k_refrac = lerp(0.20, 0.05, T) × lerp(0.8, 1.2, F)
     M_refrac = 1.0 + k_refrac × exp(−Δ / τ_refrac)
+    boundary_mult_eff = boundary_mult × (1 − 0.20S)
 
 On interrupt: set drift_at_last_interrupt ← drift_accum (resetting Δ to
 0 for subsequent signals).
@@ -2507,7 +2508,7 @@ The gate permits interrupt when:
             (rel_star ≥ retrieval_thresh_interrupt(F,S)) AND
             (novelty_star ≥ τ_novelty_eff OR mu_star ≥ τ_mu_eff) AND
             (overlap_star < dup_thresh) AND
-            (at_drift_boundary OR mu_star ≥ boundary_mult × τ_mu_eff)
+            (at_drift_boundary OR mu_star ≥ boundary_mult_eff × τ_mu_eff)
 
 This logic suppresses low-drift interrupts unless the marginal utility
 substantially exceeds threshold, while permitting normal-threshold
