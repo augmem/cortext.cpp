@@ -10,7 +10,7 @@ To quantify consolidation utility, we also track:
 * **summary_hit_overlap_mean:** semantic overlap (ImageBind cosine) of the best summary hit on those turns.
 * **retrieval_summary_only_turn_rate:** share of retrieval turns where summaries are the only retrieved candidates.
 
-For interrupt evaluation, we report precision/recall using the knob-derived retrieval threshold (`retrieval_thresh(F)`) applied to best semantic overlap:
+For interrupt evaluation, we report precision/recall using the knob-derived interrupt threshold (`retrieval_thresh_interrupt(F,S)`) applied to best semantic overlap:
 
 * **interrupt_precision / interrupt_recall**
 * **false-positive / false-negative rates**

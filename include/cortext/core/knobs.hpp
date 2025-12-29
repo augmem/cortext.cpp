@@ -988,6 +988,17 @@ RetrievalThreshold (double F)
   return Lerp (0.12, 0.45, FocusBias (F));
 }
 
+inline double
+RetrievalThresholdInterrupt (double F, double S)
+{
+  // retrieval_thresh_interrupt(F,S) = retrieval_thresh(F) * (1 - 0.12 * S̃)
+  // Sensitivity relaxes the interrupt gate to improve recall while preserving
+  // the Focus-defined baseline.
+  const double base = RetrievalThreshold (F);
+  const double relax = 1.0 - 0.12 * SensitivityBias (S);
+  return base * relax;
+}
+
 inline int
 InterruptCandidateCount (double F)
 {

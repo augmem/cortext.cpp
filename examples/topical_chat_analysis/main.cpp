@@ -818,7 +818,9 @@ int main(int argc, char **argv) {
   std::uniform_real_distribution<double> jitter_dist(
       1.0 - cfg.cadence_jitter, 1.0 + cfg.cadence_jitter);
   bool semantic_ready = cfg.semantic_overlap;
-  const double retrieval_thresh = cortext::core::RetrievalThreshold(cfg.focus);
+  const double retrieval_thresh
+      = cortext::core::RetrievalThresholdInterrupt(cfg.focus,
+                                                   cfg.sensitivity);
   if (semantic_ready && cfg.db_path == ":memory:") {
     std::cerr << "Semantic overlap requires --db pointing to a file; disabling.\n";
     semantic_ready = false;

@@ -360,7 +360,8 @@ ComputeMniGateDecision::Execute (OperationContext &context, Transaction &tx) con
   const double S_eff = cortext::core::SensitivityBias (S);
 
   // Retrieval threshold (Section 8.1)
-  const double retrieval_thresh = cortext::core::RetrievalThreshold (F);
+  const double retrieval_thresh
+      = cortext::core::RetrievalThresholdInterrupt (F, S);
 
   // Derived weights (raw)
   const double w_cov_raw = cortext::core::Lerp (kCovMin, kCovMax, F_eff);

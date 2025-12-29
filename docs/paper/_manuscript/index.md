@@ -2380,6 +2380,7 @@ Novelty thresholds scale with knobs and refractory state:
     τ_novelty = lerp(0.10, 0.35, F) × (1 − 0.15S) × (1 + 0.3T)
     τ_mu = lerp(0.08, 0.18, F) × (1 − 0.4S) × (1 + 0.4T)
     retrieval_thresh(F) = lerp(0.12, 0.45, F)
+    retrieval_thresh_interrupt(F,S) = retrieval_thresh(F) × (1 − 0.12S)
 
 Refractory dynamics suppress rapid successive interrupts:
 
@@ -2503,7 +2504,7 @@ The gate permits interrupt when:
             max_cos = max_{c ∈ ctx_window} cos(candidate_star, c)  # in [−1, 1]
             novelty_star = clamp((1 − max_cos) / 2, 0, 1)
         allow_interrupt =
-            (rel_star ≥ retrieval_thresh(F)) AND
+            (rel_star ≥ retrieval_thresh_interrupt(F,S)) AND
             (novelty_star ≥ τ_novelty_eff OR mu_star ≥ τ_mu_eff) AND
             (overlap_star < dup_thresh) AND
             (at_drift_boundary OR mu_star ≥ boundary_mult × τ_mu_eff)
@@ -2574,8 +2575,8 @@ To quantify consolidation utility, we also track:
     summaries are the only retrieved candidates.
 
 For interrupt evaluation, we report precision/recall using the
-knob-derived retrieval threshold (`retrieval_thresh(F)`) applied to best
-semantic overlap:
+knob-derived interrupt threshold (`retrieval_thresh_interrupt(F,S)`)
+applied to best semantic overlap:
 
 -   **interrupt_precision / interrupt_recall**
 -   **false-positive / false-negative rates**
