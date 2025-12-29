@@ -10,6 +10,12 @@ To quantify consolidation utility, we also track:
 * **summary_hit_overlap_mean:** semantic overlap (ImageBind cosine) of the best summary hit on those turns.
 * **retrieval_summary_only_turn_rate:** share of retrieval turns where summaries are the only retrieved candidates.
 
+For interrupt evaluation, we report precision/recall using the knob-derived retrieval threshold (`retrieval_thresh(F)`) applied to best semantic overlap:
+
+* **interrupt_precision / interrupt_recall**
+* **false-positive / false-negative rates**
+* **interrupt_semantic_delta:** mean semantic overlap on interrupt turns minus non-interrupt turns
+
 ## Threshold Adaptation
 The dynamic threshold (θ_dynamic) successfully tracked score distributions. In high-volatility inputs (within-accumulator drift_acc > 1.0), thresholds relaxed to ~0.15, while stable contexts tightened to ~0.27.
 
@@ -38,5 +44,13 @@ Consolidation contribution metrics confirm summaries are being used:
 * **retrieval_summary_hit_rate:** 0.552 (summaries appear in 55% of retrieval turns)
 * **summary_hit_overlap_mean:** 0.421 (semantic overlap of best summary hit)
 * **retrieval_association_turn_rate:** 0.552 (ASSOCIATION nodes present in 55% of retrieval turns)
+
+Interrupt decision quality (consolidate_cycles=2):
+
+* **interrupt_precision:** 0.994
+* **interrupt_recall:** 0.873 (false negative rate 0.127)
+* **interrupt_false_positive_rate:** 0.0058
+* **non_interrupt_semantic_overlap_mean vs interrupt_semantic_overlap_mean:** 0.405 → 0.544 (Δ +0.139)
+* **non_interrupt_context_semantic_overlap_mean vs interrupt_context_semantic_overlap_mean:** 0.693 → 0.727 (Δ +0.034)
 
 Retrieval and interrupt rates were unchanged, indicating the gains arise from consolidation quality rather than more frequent retrievals.

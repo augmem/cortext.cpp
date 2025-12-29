@@ -2197,7 +2197,7 @@ Summary nodes replace clusters:
     summary.metadata.sources = [m.id for m in cluster_i]
 
 To keep consolidation latency bounded, summarization input is capped by
-knob-derived limits. Source texts are ranked by similarity to the
+knob‑derived limits. Source texts are ranked by similarity to the
 cluster centroid and truncated:
 
     max_source_texts(F̃) = round(lerp(3, 8, F̃))
@@ -2573,6 +2573,15 @@ To quantify consolidation utility, we also track:
 -   **retrieval_summary_only_turn_rate:** share of retrieval turns where
     summaries are the only retrieved candidates.
 
+For interrupt evaluation, we report precision/recall using the
+knob-derived retrieval threshold (`retrieval_thresh(F)`) applied to best
+semantic overlap:
+
+-   **interrupt_precision / interrupt_recall**
+-   **false-positive / false-negative rates**
+-   **interrupt_semantic_delta:** mean semantic overlap on interrupt turns
+    minus non-interrupt turns
+
 ## Threshold Adaptation
 
 The dynamic threshold (θ_dynamic) successfully tracked score
@@ -2595,8 +2604,9 @@ End-to-end processing per token averaged \< 50ms. Graph expansion added
 ## Long-Horizon Consolidation Ablation
 
 We ran a long-horizon stress test with **F=S=T=0.5**, `max_total=360`,
-`max_turns=360`, and `max_conversations=10` (single-stream, interleave=1)
-to isolate consolidation effects. Two conditions were compared:
+`max_turns=360`, and `max_conversations=10` (single-stream,
+interleave=1) to isolate consolidation effects. Two conditions were
+compared:
 
 -   **No consolidation** (`consolidate_cycles=0`)
 -   **Consolidation on** (`consolidate_cycles=2`, yielding 4
@@ -2606,18 +2616,30 @@ to isolate consolidation effects. Two conditions were compared:
 Key outcomes (Δ = consolidate − no-consolidate):
 
 -   **Retrieval semantic overlap mean:** +0.0763 (0.4481 → 0.5244)
--   **Retrieval context-semantic overlap mean:** +0.0878 (0.6348 → 0.7227)
+-   **Retrieval context-semantic overlap mean:** +0.0878 (0.6348 →
+    0.7227)
 -   **Interrupt semantic overlap mean:** +0.0754 (0.4683 → 0.5438)
--   **Interrupt context-semantic overlap mean:** +0.0870 (0.6404 → 0.7274)
+-   **Interrupt context-semantic overlap mean:** +0.0870 (0.6404 →
+    0.7274)
 
 Consolidation contribution metrics confirm summaries are being used:
 
 -   **retrieval_summary_hit_rate:** 0.552 (summaries appear in 55% of
     retrieval turns)
--   **summary_hit_overlap_mean:** 0.421 (semantic overlap of best summary
-    hit)
--   **retrieval_association_turn_rate:** 0.552 (ASSOCIATION nodes present
-    in 55% of retrieval turns)
+-   **summary_hit_overlap_mean:** 0.421 (semantic overlap of best
+    summary hit)
+-   **retrieval_association_turn_rate:** 0.552 (ASSOCIATION nodes
+    present in 55% of retrieval turns)
+
+Interrupt decision quality (consolidate_cycles=2):
+
+-   **interrupt_precision:** 0.994
+-   **interrupt_recall:** 0.873 (false negative rate 0.127)
+-   **interrupt_false_positive_rate:** 0.0058
+-   **non_interrupt_semantic_overlap_mean vs
+    interrupt_semantic_overlap_mean:** 0.405 → 0.544 (Δ +0.139)
+-   **non_interrupt_context_semantic_overlap_mean vs
+    interrupt_context_semantic_overlap_mean:** 0.693 → 0.727 (Δ +0.034)
 
 Retrieval and interrupt rates were unchanged, indicating the gains arise
 from consolidation quality rather than more frequent retrievals.
@@ -2632,9 +2654,9 @@ content is used solely to generate embeddings; the live loop never
 re-enters token space. This preserves modality-agnostic behavior and
 prevents hidden heuristics from bypassing knob control.
 
-Retrieved memories are hydrated for inspection and evaluation only.
-When a memory has no signal-level blobs (e.g., consolidation summaries),
-the system loads the summary payload from `memories.blob_id` so summary
+Retrieved memories are hydrated for inspection and evaluation only. When
+a memory has no signal-level blobs (e.g., consolidation summaries), the
+system loads the summary payload from `memories.blob_id` so summary
 nodes can participate in analysis without affecting online computations.
 
 ## Model Stack (Local Inference)
@@ -2645,8 +2667,8 @@ nodes can participate in analysis without affecting online computations.
     **gemma-3n-e2b** via `third_party/litert_lm`. This is the only
     generative component and runs only during consolidation (default
     bundle: `models/gemma3n-e2b-litert/gemma-3n-E2B-it-int4.litertlm`,
-    with auto-selection among available `.litertlm` variants). There is
-    no extractive fallback; consolidation requires this model.
+    with auto-selection among available `.litertlm` variants).
+    Consolidation requires this model; there is no extractive fallback.
 
 No other model runtimes are required for the online loop; all
 operational decisions are embedding-space computations derived from

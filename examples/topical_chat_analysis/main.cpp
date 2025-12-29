@@ -2,6 +2,7 @@
 #include <cortext/telemetry/telemetry.hpp>
 #include <cortext/core/utils.hpp>
 #include <cortext/core/algorithms.hpp>
+#include <cortext/core/knobs.hpp>
 #include <cortext/encoder/imagebind.hpp>
 #include <cortext/store/sqlite_store.hpp>
 
@@ -326,6 +327,10 @@ struct Stats {
   int retrieval_turns_with_label = 0;
   int retrieval_summary_hit_turns = 0;
   int retrieval_summary_only_turns = 0;
+  int retrieval_semantic_positive_turns = 0;
+  int interrupt_semantic_true_positive = 0;
+  int interrupt_semantic_false_positive = 0;
+  int interrupt_semantic_false_negative = 0;
   int interrupt_turns = 0;
   int interrupt_turns_with_retrieval = 0;
   int interrupt_association_candidates = 0;
@@ -350,6 +355,8 @@ struct Stats {
   std::vector<double> retrieval_semantic_overlap_values;
   std::vector<double> retrieval_context_semantic_overlap_values;
   std::vector<double> retrieval_summary_hit_overlap_values;
+  std::vector<double> non_interrupt_semantic_overlap_values;
+  std::vector<double> non_interrupt_context_semantic_overlap_values;
   std::vector<double> interrupt_overlap_values;
   std::vector<double> interrupt_context_overlap_values;
   std::vector<double> interrupt_semantic_overlap_values;
@@ -811,6 +818,7 @@ int main(int argc, char **argv) {
   std::uniform_real_distribution<double> jitter_dist(
       1.0 - cfg.cadence_jitter, 1.0 + cfg.cadence_jitter);
   bool semantic_ready = cfg.semantic_overlap;
+  const double retrieval_thresh = cortext::core::RetrievalThreshold(cfg.focus);
   if (semantic_ready && cfg.db_path == ":memory:") {
     std::cerr << "Semantic overlap requires --db pointing to a file; disabling.\n";
     semantic_ready = false;
@@ -1197,6 +1205,28 @@ int main(int argc, char **argv) {
               stats.retrieval_context_semantic_overlap_values.push_back(
                   best_context_semantic);
             }
+            if (has_semantic) {
+              const bool semantic_positive = (best_semantic >= retrieval_thresh);
+              if (semantic_positive) {
+                stats.retrieval_semantic_positive_turns++;
+              }
+              if (ctx.should_interrupt) {
+                if (semantic_positive) {
+                  stats.interrupt_semantic_true_positive++;
+                } else {
+                  stats.interrupt_semantic_false_positive++;
+                }
+              } else {
+                if (semantic_positive) {
+                  stats.interrupt_semantic_false_negative++;
+                }
+                stats.non_interrupt_semantic_overlap_values.push_back(best_semantic);
+                if (has_context_semantic) {
+                  stats.non_interrupt_context_semantic_overlap_values.push_back(
+                      best_context_semantic);
+                }
+              }
+            }
             if (summary_candidates > 0) {
               stats.retrieval_summary_hit_turns++;
               if (has_summary_semantic) {
@@ -1413,6 +1443,28 @@ int main(int argc, char **argv) {
           ? 0.0
           : static_cast<double>(stats.interrupt_turns_with_label)
                 / static_cast<double>(stats.interrupt_turns);
+  const int interrupt_semantic_decisions =
+      stats.interrupt_semantic_true_positive + stats.interrupt_semantic_false_positive;
+  const double interrupt_precision =
+      interrupt_semantic_decisions == 0
+          ? 0.0
+          : static_cast<double>(stats.interrupt_semantic_true_positive)
+                / static_cast<double>(interrupt_semantic_decisions);
+  const double interrupt_recall =
+      stats.retrieval_semantic_positive_turns == 0
+          ? 0.0
+          : static_cast<double>(stats.interrupt_semantic_true_positive)
+                / static_cast<double>(stats.retrieval_semantic_positive_turns);
+  const double interrupt_false_positive_rate =
+      interrupt_semantic_decisions == 0
+          ? 0.0
+          : static_cast<double>(stats.interrupt_semantic_false_positive)
+                / static_cast<double>(interrupt_semantic_decisions);
+  const double interrupt_false_negative_rate =
+      stats.retrieval_semantic_positive_turns == 0
+          ? 0.0
+          : static_cast<double>(stats.interrupt_semantic_false_negative)
+                / static_cast<double>(stats.retrieval_semantic_positive_turns);
 
   const int64_t cons_summary_count = cons_metrics.summary_count.load();
   const int64_t cons_extraction_jobs = cons_metrics.extraction_jobs.load();
@@ -1437,6 +1489,10 @@ int main(int argc, char **argv) {
       Summarize(stats.retrieval_context_semantic_overlap_values);
   const auto retrieval_summary_hit_overlap_summary =
       Summarize(stats.retrieval_summary_hit_overlap_values);
+  const auto non_interrupt_semantic_summary =
+      Summarize(stats.non_interrupt_semantic_overlap_values);
+  const auto non_interrupt_context_semantic_summary =
+      Summarize(stats.non_interrupt_context_semantic_overlap_values);
   const auto interrupt_overlap_summary = Summarize(stats.interrupt_overlap_values);
   const auto interrupt_context_overlap_summary =
       Summarize(stats.interrupt_context_overlap_values);
@@ -1447,6 +1503,17 @@ int main(int argc, char **argv) {
   const auto interrupt_novelty_summary = Summarize(stats.interrupt_novelty_values);
   const auto interrupt_relevance_summary = Summarize(stats.interrupt_relevance_values);
   const auto interrupt_surprise_summary = Summarize(stats.interrupt_surprise_values);
+  const double interrupt_semantic_delta =
+      (interrupt_semantic_summary.count > 0
+       && non_interrupt_semantic_summary.count > 0)
+          ? (interrupt_semantic_summary.mean - non_interrupt_semantic_summary.mean)
+          : 0.0;
+  const double interrupt_context_semantic_delta =
+      (interrupt_context_semantic_summary.count > 0
+       && non_interrupt_context_semantic_summary.count > 0)
+          ? (interrupt_context_semantic_summary.mean
+             - non_interrupt_context_semantic_summary.mean)
+          : 0.0;
 
   std::cout << "\n=== Summary ===\n";
   std::cout << "conversations=" << stats.conversations << "\n";
@@ -1502,6 +1569,18 @@ int main(int argc, char **argv) {
             << interrupt_association_turn_rate << "\n";
   std::cout << "interrupt_label_turn_rate="
             << interrupt_label_turn_rate << "\n";
+  std::cout << "interrupt_precision=" << interrupt_precision << "\n";
+  std::cout << "interrupt_recall=" << interrupt_recall << "\n";
+  std::cout << "interrupt_false_positive_rate=" << interrupt_false_positive_rate
+            << "\n";
+  std::cout << "interrupt_false_negative_rate=" << interrupt_false_negative_rate
+            << "\n";
+  std::cout << "interrupt_true_positive=" << stats.interrupt_semantic_true_positive
+            << "\n";
+  std::cout << "interrupt_false_positive=" << stats.interrupt_semantic_false_positive
+            << "\n";
+  std::cout << "interrupt_false_negative=" << stats.interrupt_semantic_false_negative
+            << "\n";
 
   std::cout << "\n=== Distributions ===\n";
   std::cout << "novelty_mean=" << novelty_summary.mean
@@ -1576,6 +1655,23 @@ int main(int argc, char **argv) {
                 << " p50=" << interrupt_context_semantic_summary.p50
                 << " p90=" << interrupt_context_semantic_summary.p90 << "\n";
     }
+    if (non_interrupt_semantic_summary.count > 0) {
+      std::cout << "non_interrupt_semantic_overlap_mean="
+                << non_interrupt_semantic_summary.mean
+                << " p10=" << non_interrupt_semantic_summary.p10
+                << " p50=" << non_interrupt_semantic_summary.p50
+                << " p90=" << non_interrupt_semantic_summary.p90 << "\n";
+    }
+    if (non_interrupt_context_semantic_summary.count > 0) {
+      std::cout << "non_interrupt_context_semantic_overlap_mean="
+                << non_interrupt_context_semantic_summary.mean
+                << " p10=" << non_interrupt_context_semantic_summary.p10
+                << " p50=" << non_interrupt_context_semantic_summary.p50
+                << " p90=" << non_interrupt_context_semantic_summary.p90 << "\n";
+    }
+    std::cout << "interrupt_semantic_delta=" << interrupt_semantic_delta << "\n";
+    std::cout << "interrupt_context_semantic_delta="
+              << interrupt_context_semantic_delta << "\n";
     std::cout << "interrupt_novelty_mean=" << interrupt_novelty_summary.mean
               << " p10=" << interrupt_novelty_summary.p10
               << " p50=" << interrupt_novelty_summary.p50
