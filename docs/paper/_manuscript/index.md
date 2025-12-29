@@ -2624,6 +2624,11 @@ content is used solely to generate embeddings; the live loop never
 re-enters token space. This preserves modality-agnostic behavior and
 prevents hidden heuristics from bypassing knob control.
 
+Retrieved memories are hydrated for inspection and evaluation only.
+When a memory has no signal-level blobs (e.g., consolidation summaries),
+the system loads the summary payload from `memories.blob_id` so summary
+nodes can participate in analysis without affecting online computations.
+
 ## Model Stack (Local Inference)
 
 -   **ImageBind embeddings:** image/text/audio inputs are embedded via

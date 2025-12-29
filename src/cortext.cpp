@@ -215,6 +215,7 @@ HydrateMemory (Store *store, long long id, Cortext::Context::Memory &m)
           "SELECT "
           "  m.memory_id, m.modality, m.source_id, m.start_ts, m.end_ts, "
           "  m.n_signals, m.s_max, m.s_avg, "
+          "  m.blob_id, "
           "  COALESCE(m.retrieved_count, 0) AS retrieved_count, "
           "  COALESCE(m.used_count, 0) AS used_count, "
           "  (SELECT s.mime FROM signals s WHERE s.memory_id = m.memory_id "
@@ -271,6 +272,7 @@ HydrateMemory (Store *store, long long id, Cortext::Context::Memory &m)
 
           // v2: Populate from unified memories table
           const long long memory_id = get_ll ("memory_id");
+          m.id = memory_id;
           m.modality = get_s ("modality");
           m.mimetype = get_s ("signal_mime");  // Get from first signal
           m.source_id = get_s ("source_id");
@@ -278,6 +280,18 @@ HydrateMemory (Store *store, long long id, Cortext::Context::Memory &m)
 
           // v2: Load content blobs from signals table (ordered by serial_position)
           LoadSignalBlobs (store, memory_id, m.content);
+          if (m.content.empty ())
+            {
+              const auto blob_id = get_blob ("blob_id");
+              if (!blob_id.empty ())
+                {
+                  std::vector<unsigned char> payload;
+                  if (LoadObjstorePayload (store, blob_id, payload))
+                    {
+                      m.content.push_back (std::move (payload));
+                    }
+                }
+            }
 
           // v2: Counts are inline on memories table
           m.retrieved_count = get_ll ("retrieved_count");
