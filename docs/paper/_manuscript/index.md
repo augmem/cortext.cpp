@@ -2605,11 +2605,19 @@ to isolate consolidation effects. Two conditions were compared:
 
 Key outcomes (Δ = consolidate − no-consolidate):
 
--   **Retrieval semantic overlap mean:** +0.0136 (0.4529 → 0.4666)
--   **Retrieval context-semantic overlap mean:** +0.0118 (0.6342 → 0.6460)
--   **Interrupt semantic overlap mean:** +0.0103 (0.4720 → 0.4823)
--   **Interrupt context-semantic overlap mean:** +0.0109 (0.6392 → 0.6501)
--   **Retrieval avg candidates:** +3.47 (23.23 → 26.70)
+-   **Retrieval semantic overlap mean:** +0.0763 (0.4481 → 0.5244)
+-   **Retrieval context-semantic overlap mean:** +0.0878 (0.6348 → 0.7227)
+-   **Interrupt semantic overlap mean:** +0.0754 (0.4683 → 0.5438)
+-   **Interrupt context-semantic overlap mean:** +0.0870 (0.6404 → 0.7274)
+
+Consolidation contribution metrics confirm summaries are being used:
+
+-   **retrieval_summary_hit_rate:** 0.552 (summaries appear in 55% of
+    retrieval turns)
+-   **summary_hit_overlap_mean:** 0.421 (semantic overlap of best summary
+    hit)
+-   **retrieval_association_turn_rate:** 0.552 (ASSOCIATION nodes present
+    in 55% of retrieval turns)
 
 Retrieval and interrupt rates were unchanged, indicating the gains arise
 from consolidation quality rather than more frequent retrievals.
