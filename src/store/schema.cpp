@@ -344,6 +344,7 @@ GetCoreMigrations ()
               // Consolidation
               "  last_consolidation_ts INTEGER NOT NULL DEFAULT 0,"
               "  consolidation_count INTEGER NOT NULL DEFAULT 0,"
+              "  memories_since_consolidation INTEGER NOT NULL DEFAULT 0,"
               "  is_processing_signal INTEGER NOT NULL DEFAULT 0,"
               "  last_retrieval_ts INTEGER NOT NULL DEFAULT 0,"
               // Episode tracking

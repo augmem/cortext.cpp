@@ -30,6 +30,8 @@ EvaluateConsolidation::Execute (OperationContext &context, Transaction &tx) cons
 
   context.SetConsolidationShouldStart (true);
   p_ctx.last_consolidation_ts = now_ts;
+  p_ctx.consolidation_count += 1;
+  p_ctx.memories_since_consolidation = 0;
   telemetry::LogDebug ("cortext.evaluate_consolidation", {
     telemetry::Attribute::Bool ("consolidation_start", true),
     telemetry::Attribute::String ("mode", "forced")

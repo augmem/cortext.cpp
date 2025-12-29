@@ -15,6 +15,9 @@ For interrupt evaluation, we report precision/recall using the knob-derived inte
 * **interrupt_precision / interrupt_recall**
 * **false-positive / false-negative rates**
 * **interrupt_semantic_delta:** mean semantic overlap on interrupt turns minus non-interrupt turns
+* **interrupt_gate_fail_* rates:** per-gate failure rates among semantic-positive non-interrupt turns
+* **affect_drive_mean:** mean affect drive (arousal/emotion/salience composite)
+* **retrieval_emotion_bonus_mean:** mean emotion bonus applied during retrieval ranking
 
 ## Threshold Adaptation
 The dynamic threshold (θ_dynamic) successfully tracked score distributions. In high-volatility inputs (within-accumulator drift_acc > 1.0), thresholds relaxed to ~0.15, while stable contexts tightened to ~0.27.
@@ -54,3 +57,81 @@ Interrupt decision quality (consolidate_cycles=2):
 * **non_interrupt_context_semantic_overlap_mean vs interrupt_context_semantic_overlap_mean:** 0.693 → 0.727 (Δ +0.034)
 
 Retrieval and interrupt rates were unchanged, indicating the gains arise from consolidation quality rather than more frequent retrievals.
+
+## Affect Path Ablation (Long Horizon)
+
+We isolated affect usage in **interrupt gating** vs **retrieval ranking** by toggling the affect pathways while holding **F=S=T=0.5** and running **2 conversations × 360 turns** (`max_total=720`). Four modes were tested:
+
+* **all:** affect used in both interrupt gating and retrieval ranking
+* **interrupt:** affect used only in interrupt gating
+* **retrieval:** affect used only in retrieval ranking
+* **off:** affect disabled for both pathways
+
+| affect_mode | interrupt_turn_rate | precision | recall | fp_rate | fn_rate | retrieval_emotion_bonus_mean |
+|---:|---:|---:|---:|---:|---:|---:|
+| all | 0.483 | 0.995 | 0.879 | 0.0053 | 0.121 | 0.00349 |
+| interrupt | 0.483 | 0.995 | 0.879 | 0.0053 | 0.121 | 0 |
+| retrieval | 0.483 | 0.995 | 0.879 | 0.0053 | 0.121 | 0.00349 |
+| off | 0.483 | 0.995 | 0.879 | 0.0053 | 0.121 | 0 |
+
+**Observations:** At mid‑range knobs on this dataset, interrupt precision/recall are unchanged across affect modes; the measurable difference is the expected removal of the retrieval emotion bonus when retrieval affect is disabled. This suggests affect contributions emerge more strongly at higher Sensitivity or in more emotionally salient streams, which we test in the S‑sweep below.
+
+We further repeated the ablation at **S=0.0** and **S=1.0** (F=T=0.5) to test extremes:
+
+| S | affect_mode | interrupt_turn_rate | precision | recall | fn_rate | retrieval_emotion_bonus_mean |
+|---:|---:|---:|---:|---:|---:|---:|
+| 0.0 | all | 0.486 | 0.995 | 0.879 | 0.121 | 0 |
+| 0.0 | off | 0.486 | 0.995 | 0.879 | 0.121 | 0 |
+| 1.0 | all | 0.512 | 0.985 | 0.938 | 0.0619 | 0.0102 |
+| 1.0 | off | 0.491 | 0.984 | 0.900 | 0.100 | 0 |
+
+**Observations:** At **S=0.0**, affect has no measurable effect (as expected from the knob mapping). At **S=1.0**, enabling affect **raises interrupt recall** (FN rate drops from 0.100 → 0.0619) at the cost of a higher interrupt rate, confirming affect contributes primarily at high sensitivity.
+
+## EmpatheticDialogues Affect Check (Calibrated)
+
+To test a more emotionally charged corpus, we converted **EmpatheticDialogues (valid split)** into Cortext JSONL format and ran **F=0.5, T=0.5** with **6 conversations** and `max_total=360` (195 turns observed). We compared `affect_mode=all` vs `off` at **S=0.5** and **S=1.0** (with consolidation cycles enabled) after increasing affect gain and relax coefficients.
+
+| S | affect_mode | interrupt_turn_rate | precision | recall | fn_rate | retrieval_emotion_bonus_mean |
+|---:|---:|---:|---:|---:|---:|---:|
+| 0.5 | all | 0.472 | 0.989 | 0.978 | 0.0215 | 0.00856 |
+| 0.5 | off | 0.462 | 1.000 | 0.968 | 0.0323 | 0 |
+| 1.0 | all | 0.462 | 0.967 | 0.888 | 0.112 | 0.0237 |
+| 1.0 | off | 0.462 | 0.967 | 0.888 | 0.112 | 0 |
+
+**Observations:** At **S=0.5**, affect now shifts gate behavior: interrupt rate rises by ~1.0pp and recall improves by ~1.1pp, with a ~1.1pp precision trade‑off. The mean interrupt threshold drops from ~0.240 → 0.221 and boundary multiplier from ~1.52 → 1.40, confirming measurable gating relaxation. At **S=1.0**, thresholds are substantially relaxed but the interrupt decision remains saturated on this dataset; only the retrieval emotion bonus changes.
+
+## Affect-Gated Sensitivity Sweep (Long Horizon)
+
+We evaluated the affect-gated interrupt + retrieval coupling by sweeping Sensitivity while holding **F=0.5, T=0.5**, and running **2 conversations × 360 turns** (`max_total=720`, interleave=1). This isolates how the affect drive and emotion bonus influence interrupt quality.
+
+| S | interrupt_turn_rate | precision | recall | fp_rate | fn_rate | affect_drive_mean | retrieval_emotion_bonus_mean |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 0.0 | 0.486 | 0.995 | 0.879 | 0.0053 | 0.121 | 0.236 | 0.0578 |
+| 0.5 | 0.483 | 0.995 | 0.879 | 0.0053 | 0.121 | 0.246 | 0.0727 |
+| 1.0 | 0.512 | 0.985 | 0.938 | 0.0150 | 0.0619 | 0.262 | 0.0847 |
+
+**Observations:** Higher Sensitivity increases affect drive and the retrieval emotion bonus, improving interrupt recall (fewer false negatives) at the cost of a modest precision drop and higher interrupt rate. The mid-point (S=0.5) preserves precision while providing moderate affect influence.
+
+## Focus Sweep (Long Horizon)
+
+We swept Focus with **S=0.5, T=0.5**, using **2 conversations × 360 turns** (`max_total=720`). Focus primarily modulates retrieval breadth and duplicate suppression, so we report candidate counts and interrupt quality.
+
+| F | interrupt_turn_rate | precision | recall | fp_rate | fn_rate | retrieval_avg_candidates | retrieval_semantic_overlap_mean |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 0.3 | 0.481 | 1.000 | 0.984 | 0.000 | 0.0157 | 32.54 | 0.547 |
+| 0.5 | 0.483 | 0.995 | 0.879 | 0.0053 | 0.121 | 27.17 | 0.526 |
+| 0.7 | 0.483 | 0.968 | 0.640 | 0.0317 | 0.360 | 26.14 | 0.535 |
+
+**Observations:** Lower Focus (F=0.3) increases candidate breadth and improves interrupt recall/precision; higher Focus narrows candidate sets and increases misses (higher FN rate) despite slightly higher semantic overlap. This confirms Focus governs selectivity at the cost of interrupt coverage.
+
+## Stability Sweep (Long Horizon)
+
+We swept Stability with **F=0.5, S=0.5**, using **2 conversations × 360 turns** (`max_total=720`). Stability adjusts persistence and gating strictness, so we track interrupt behavior and candidate volume.
+
+| T | interrupt_turn_rate | precision | recall | fp_rate | fn_rate | retrieval_avg_candidates | retrieval_semantic_overlap_mean |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 0.3 | 0.483 | 0.995 | 0.870 | 0.0053 | 0.1296 | 31.20 | 0.528 |
+| 0.5 | 0.483 | 0.995 | 0.879 | 0.0053 | 0.1215 | 27.28 | 0.526 |
+| 0.7 | 0.455 | 0.994 | 0.823 | 0.0056 | 0.1767 | 29.35 | 0.527 |
+
+**Observations:** Higher Stability slightly reduces interrupt rate and recall (more false negatives), consistent with stricter gating; mid‑range T preserves recall while keeping precision stable. Candidate counts remain in the same band, indicating Stability primarily affects decision thresholds rather than retrieval breadth.

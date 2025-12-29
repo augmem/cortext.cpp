@@ -2111,6 +2111,20 @@ Definitions (knob-derived):
     consolidation_threshold(T) = n_ctx(T) × win_score(T)  # memory-count trigger
     merge_threshold(F) = lerp(0.85, 0.95, F)  # similarity required for clustering
 
+**Recommendation signal (external scheduling):** Each `Process*` call
+returns two flags that notify the caller when consolidation is
+**recommended** or **required** (without auto-triggering). These use the
+same knob-derived thresholds:
+
+    consolidation_recommended =
+      (elapsed_time ≥ consolidation_interval) OR
+      (memories_since_consolidation ≥ consolidation_threshold)
+    consolidation_required =
+      (elapsed_time ≥ consolidation_required_interval) OR
+      (memories_since_consolidation ≥ consolidation_required_threshold)
+    consolidation_required_interval(T) = consolidation_interval(T) × lerp(1.5, 2.5, T)
+    consolidation_required_threshold(T) = consolidation_threshold(T) × lerp(1.5, 2.5, T)
+
 The consolidation rate adapts to Stability and Sensitivity (write_rate
 tracks memory writes, not signal writes):
 
@@ -2338,13 +2352,21 @@ L2‑normalized for vector search.
     [w_rel, w_div] = normalize([w_rel_raw, w_div_raw])
     w_ctx = lerp(0.15, 0.35, F) × lerp(1.0, 0.85, S)
     w_proc = lerp(0.10, 0.25, S)
+    w_emotion = lerp(0.0, 0.12, S_affect)
+    affect_gain(S) = lerp(1.0, 2.4, S_affect)
+    weights_aff_raw = [lerp(0.30, 0.55, S_affect), lerp(0.30, 0.55, S_affect), lerp(0.10, 0.20, S_affect)]
+    [w_arousal, w_emotion_raw, w_salience] = normalize(weights_aff_raw)
+    affect_drive = clamp(affect_gain(S) × (w_arousal × arousal + w_emotion_raw × emotion_intensity + w_salience × salience), 0, 1)
+    weights_mem_raw = [lerp(0.60, 0.80, S), lerp(0.20, 0.40, S)]
+    [w_mem_emotion, w_mem_arousal] = normalize(weights_mem_raw)
 
     selected ← []
     while |selected| < k AND |eligible| > 0:
         m* ← argmax_{m ∈ eligible} [
                 w_rel × max(0, cos(q, m.embedding)) +
                 w_ctx × max(0, cos(q_ctx, m.context)) +
-                w_proc × max(0, proc_sim(m)) −
+                w_proc × max(0, proc_sim(m)) +
+                w_emotion × affect_drive × (w_mem_emotion × emotional_intensity(m) + w_mem_arousal × s_arousal_avg(m)) −
                 w_div × max_{s∈selected} max(0, cos(m.embedding, s.embedding))
              ]
         selected.append(m*)
@@ -2355,6 +2377,9 @@ Graph expansion uses recursive traversal with depth limits to find
 related context that pure vector search might miss. Using the memory
 centroid maintains consistency between vector search and graph expansion
 results.
+
+For affective gain in retrieval, we use a lighter bias (S\_{affect} =
+(S, -0.06)) to preserve mid‑range affect modulation.
 
 `proc_sim(m)` denotes procedural similarity (habit/skill match) when a
 procedural embedding is available; if no procedural cue is present,
@@ -2371,7 +2396,9 @@ section are derived from the three knobs (F, S, T); no fixed behavioral
 constants are introduced.
 
 **Note:** As defined in Section 1, all knob symbols here use the
-midpoint‑biased values F̃ and S̃ (T is unmodified).
+midpoint‑biased values F̃ and S̃ (T is unmodified). For affective gain, we
+use a lighter bias ( \_{affect} = (S, -0.06) ) to preserve mid‑range
+affect modulation.
 
 ## Marginal Utility Computation
 
@@ -2381,6 +2408,11 @@ Novelty thresholds scale with knobs and refractory state:
     τ_mu = lerp(0.08, 0.18, F) × (1 − 0.4S) × (1 + 0.4T)
     retrieval_thresh(F) = lerp(0.12, 0.45, F)
     retrieval_thresh_interrupt(F,S) = retrieval_thresh(F) × (1 − 0.12S)
+    affect_relax_coeff(S) = lerp(0.15, 0.55, S_affect)
+    affect_gain(S) = lerp(1.0, 2.4, S_affect)
+    weights_aff_raw = [lerp(0.30, 0.55, S_affect), lerp(0.30, 0.55, S_affect), lerp(0.10, 0.20, S_affect)]
+    [w_arousal, w_emotion, w_salience] = normalize(weights_aff_raw)
+    affect_drive = clamp(affect_gain(S) × (w_arousal × arousal + w_emotion × emotion_intensity + w_salience × salience), 0, 1)
 
 Refractory dynamics suppress rapid successive interrupts:
 
@@ -2397,7 +2429,7 @@ Interrupt state (per stream):
     τ_refrac = lerp(24, 96, T) × lerp(1.4, 1.0, S)
     k_refrac = lerp(0.20, 0.05, T) × lerp(0.8, 1.2, F)
     M_refrac = 1.0 + k_refrac × exp(−Δ / τ_refrac)
-    boundary_mult_eff = boundary_mult × (1 − 0.20S)
+    boundary_mult_eff = boundary_mult × (1 − 0.20S)  # relax non-boundary MU at higher S
 
 On interrupt: set drift_at_last_interrupt ← drift_accum (resetting Δ to
 0 for subsequent signals).
@@ -2407,6 +2439,8 @@ Effective thresholds incorporate refractory pressure:
     τ_novelty_eff = τ_novelty × M_refrac
     acc_maturity = clamp(n / win_coh(T), 0, 1)  # n = signals accumulated in current unit
     τ_mu_eff = τ_mu × M_refrac × (1 + (1 − acc_maturity) × lerp(0.4, 1.0, T))
+    retrieval_thresh_eff = retrieval_thresh_interrupt(F,S) × (1 − affect_relax_coeff(S) × affect_drive)
+    boundary_mult_eff = boundary_mult × (1 − 0.20S) × (1 − affect_relax_coeff(S) × affect_drive)
 
 ## Marginal Utility Score
 
@@ -2505,7 +2539,7 @@ The gate permits interrupt when:
             max_cos = max_{c ∈ ctx_window} cos(candidate_star, c)  # in [−1, 1]
             novelty_star = clamp((1 − max_cos) / 2, 0, 1)
         allow_interrupt =
-            (rel_star ≥ retrieval_thresh_interrupt(F,S)) AND
+            (rel_star ≥ retrieval_thresh_eff) AND
             (novelty_star ≥ τ_novelty_eff OR mu_star ≥ τ_mu_eff) AND
             (overlap_star < dup_thresh) AND
             (at_drift_boundary OR mu_star ≥ boundary_mult_eff × τ_mu_eff)
@@ -2581,8 +2615,14 @@ applied to best semantic overlap:
 
 -   **interrupt_precision / interrupt_recall**
 -   **false-positive / false-negative rates**
--   **interrupt_semantic_delta:** mean semantic overlap on interrupt turns
-    minus non-interrupt turns
+-   **interrupt_semantic_delta:** mean semantic overlap on interrupt
+    turns minus non-interrupt turns
+-   **interrupt_gate_fail\_\* rates:** per-gate failure rates among
+    semantic-positive non-interrupt turns
+-   **affect_drive_mean:** mean affect drive (arousal/emotion/salience
+    composite)
+-   **retrieval_emotion_bonus_mean:** mean emotion bonus applied during
+    retrieval ranking
 
 ## Threshold Adaptation
 
@@ -2645,6 +2685,444 @@ Interrupt decision quality (consolidate_cycles=2):
 
 Retrieval and interrupt rates were unchanged, indicating the gains arise
 from consolidation quality rather than more frequent retrievals.
+
+## Affect Path Ablation (Long Horizon)
+
+We isolated affect usage in **interrupt gating** vs **retrieval
+ranking** by toggling the affect pathways while holding **F=S=T=0.5**
+and running **2 conversations × 360 turns** (`max_total=720`). Four
+modes were tested:
+
+-   **all:** affect used in both interrupt gating and retrieval ranking
+-   **interrupt:** affect used only in interrupt gating
+-   **retrieval:** affect used only in retrieval ranking
+-   **off:** affect disabled for both pathways
+
+<table style="width:100%;">
+<colgroup>
+<col style="width: 14%" />
+<col style="width: 14%" />
+<col style="width: 14%" />
+<col style="width: 14%" />
+<col style="width: 14%" />
+<col style="width: 14%" />
+<col style="width: 14%" />
+</colgroup>
+<thead>
+<tr>
+<th style="text-align: right;">affect_mode</th>
+<th style="text-align: right;">interrupt_turn_rate</th>
+<th style="text-align: right;">precision</th>
+<th style="text-align: right;">recall</th>
+<th style="text-align: right;">fp_rate</th>
+<th style="text-align: right;">fn_rate</th>
+<th style="text-align: right;">retrieval_emotion_bonus_mean</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: right;">all</td>
+<td style="text-align: right;">0.483</td>
+<td style="text-align: right;">0.995</td>
+<td style="text-align: right;">0.879</td>
+<td style="text-align: right;">0.0053</td>
+<td style="text-align: right;">0.121</td>
+<td style="text-align: right;">0.00349</td>
+</tr>
+<tr>
+<td style="text-align: right;">interrupt</td>
+<td style="text-align: right;">0.483</td>
+<td style="text-align: right;">0.995</td>
+<td style="text-align: right;">0.879</td>
+<td style="text-align: right;">0.0053</td>
+<td style="text-align: right;">0.121</td>
+<td style="text-align: right;">0</td>
+</tr>
+<tr>
+<td style="text-align: right;">retrieval</td>
+<td style="text-align: right;">0.483</td>
+<td style="text-align: right;">0.995</td>
+<td style="text-align: right;">0.879</td>
+<td style="text-align: right;">0.0053</td>
+<td style="text-align: right;">0.121</td>
+<td style="text-align: right;">0.00349</td>
+</tr>
+<tr>
+<td style="text-align: right;">off</td>
+<td style="text-align: right;">0.483</td>
+<td style="text-align: right;">0.995</td>
+<td style="text-align: right;">0.879</td>
+<td style="text-align: right;">0.0053</td>
+<td style="text-align: right;">0.121</td>
+<td style="text-align: right;">0</td>
+</tr>
+</tbody>
+</table>
+
+**Observations:** At mid‑range knobs on this dataset, interrupt
+precision/recall are unchanged across affect modes; the measurable
+difference is the expected removal of the retrieval emotion bonus when
+retrieval affect is disabled. This suggests affect contributions emerge
+more strongly at higher Sensitivity or in more emotionally salient
+streams, which we test in the S‑sweep below.
+
+We further repeated the ablation at **S=0.0** and **S=1.0** (F=T=0.5) to
+test extremes:
+
+<table style="width:100%;">
+<colgroup>
+<col style="width: 14%" />
+<col style="width: 14%" />
+<col style="width: 14%" />
+<col style="width: 14%" />
+<col style="width: 14%" />
+<col style="width: 14%" />
+<col style="width: 14%" />
+</colgroup>
+<thead>
+<tr>
+<th style="text-align: right;">S</th>
+<th style="text-align: right;">affect_mode</th>
+<th style="text-align: right;">interrupt_turn_rate</th>
+<th style="text-align: right;">precision</th>
+<th style="text-align: right;">recall</th>
+<th style="text-align: right;">fn_rate</th>
+<th style="text-align: right;">retrieval_emotion_bonus_mean</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: right;">0.0</td>
+<td style="text-align: right;">all</td>
+<td style="text-align: right;">0.486</td>
+<td style="text-align: right;">0.995</td>
+<td style="text-align: right;">0.879</td>
+<td style="text-align: right;">0.121</td>
+<td style="text-align: right;">0</td>
+</tr>
+<tr>
+<td style="text-align: right;">0.0</td>
+<td style="text-align: right;">off</td>
+<td style="text-align: right;">0.486</td>
+<td style="text-align: right;">0.995</td>
+<td style="text-align: right;">0.879</td>
+<td style="text-align: right;">0.121</td>
+<td style="text-align: right;">0</td>
+</tr>
+<tr>
+<td style="text-align: right;">1.0</td>
+<td style="text-align: right;">all</td>
+<td style="text-align: right;">0.512</td>
+<td style="text-align: right;">0.985</td>
+<td style="text-align: right;">0.938</td>
+<td style="text-align: right;">0.0619</td>
+<td style="text-align: right;">0.0102</td>
+</tr>
+<tr>
+<td style="text-align: right;">1.0</td>
+<td style="text-align: right;">off</td>
+<td style="text-align: right;">0.491</td>
+<td style="text-align: right;">0.984</td>
+<td style="text-align: right;">0.900</td>
+<td style="text-align: right;">0.100</td>
+<td style="text-align: right;">0</td>
+</tr>
+</tbody>
+</table>
+
+**Observations:** At **S=0.0**, affect has no measurable effect (as
+expected from the knob mapping). At **S=1.0**, enabling affect **raises
+interrupt recall** (FN rate drops from 0.100 → 0.0619) at the cost of a
+higher interrupt rate, confirming affect contributes primarily at high
+sensitivity.
+
+## EmpatheticDialogues Affect Check (Calibrated)
+
+To test a more emotionally charged corpus, we converted
+**EmpatheticDialogues (valid split)** into Cortext JSONL format and ran
+**F=0.5, T=0.5** with **6 conversations** and `max_total=360` (195 turns
+observed). We compared `affect_mode=all` vs `off` at **S=0.5** and
+**S=1.0** (with consolidation cycles enabled) after increasing affect
+gain and relax coefficients.
+
+<table style="width:100%;">
+<colgroup>
+<col style="width: 14%" />
+<col style="width: 14%" />
+<col style="width: 14%" />
+<col style="width: 14%" />
+<col style="width: 14%" />
+<col style="width: 14%" />
+<col style="width: 14%" />
+</colgroup>
+<thead>
+<tr>
+<th style="text-align: right;">S</th>
+<th style="text-align: right;">affect_mode</th>
+<th style="text-align: right;">interrupt_turn_rate</th>
+<th style="text-align: right;">precision</th>
+<th style="text-align: right;">recall</th>
+<th style="text-align: right;">fn_rate</th>
+<th style="text-align: right;">retrieval_emotion_bonus_mean</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: right;">0.5</td>
+<td style="text-align: right;">all</td>
+<td style="text-align: right;">0.472</td>
+<td style="text-align: right;">0.989</td>
+<td style="text-align: right;">0.978</td>
+<td style="text-align: right;">0.0215</td>
+<td style="text-align: right;">0.00856</td>
+</tr>
+<tr>
+<td style="text-align: right;">0.5</td>
+<td style="text-align: right;">off</td>
+<td style="text-align: right;">0.462</td>
+<td style="text-align: right;">1.000</td>
+<td style="text-align: right;">0.968</td>
+<td style="text-align: right;">0.0323</td>
+<td style="text-align: right;">0</td>
+</tr>
+<tr>
+<td style="text-align: right;">1.0</td>
+<td style="text-align: right;">all</td>
+<td style="text-align: right;">0.462</td>
+<td style="text-align: right;">0.967</td>
+<td style="text-align: right;">0.888</td>
+<td style="text-align: right;">0.112</td>
+<td style="text-align: right;">0.0237</td>
+</tr>
+<tr>
+<td style="text-align: right;">1.0</td>
+<td style="text-align: right;">off</td>
+<td style="text-align: right;">0.462</td>
+<td style="text-align: right;">0.967</td>
+<td style="text-align: right;">0.888</td>
+<td style="text-align: right;">0.112</td>
+<td style="text-align: right;">0</td>
+</tr>
+</tbody>
+</table>
+
+**Observations:** At **S=0.5**, affect now shifts gate behavior:
+interrupt rate rises by ~1.0pp and recall improves by ~1.1pp, with a
+~1.1pp precision trade‑off. The mean interrupt threshold drops from
+~0.240 → 0.221 and boundary multiplier from ~1.52 → 1.40, confirming
+measurable gating relaxation. At **S=1.0**, thresholds are substantially
+relaxed but the interrupt decision remains saturated on this dataset;
+only the retrieval emotion bonus changes.
+
+## Affect-Gated Sensitivity Sweep (Long Horizon)
+
+We evaluated the affect-gated interrupt + retrieval coupling by sweeping
+Sensitivity while holding **F=0.5, T=0.5**, and running **2
+conversations × 360 turns** (`max_total=720`, interleave=1). This
+isolates how the affect drive and emotion bonus influence interrupt
+quality.
+
+<table>
+<colgroup>
+<col style="width: 12%" />
+<col style="width: 12%" />
+<col style="width: 12%" />
+<col style="width: 12%" />
+<col style="width: 12%" />
+<col style="width: 12%" />
+<col style="width: 12%" />
+<col style="width: 12%" />
+</colgroup>
+<thead>
+<tr>
+<th style="text-align: right;">S</th>
+<th style="text-align: right;">interrupt_turn_rate</th>
+<th style="text-align: right;">precision</th>
+<th style="text-align: right;">recall</th>
+<th style="text-align: right;">fp_rate</th>
+<th style="text-align: right;">fn_rate</th>
+<th style="text-align: right;">affect_drive_mean</th>
+<th style="text-align: right;">retrieval_emotion_bonus_mean</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: right;">0.0</td>
+<td style="text-align: right;">0.486</td>
+<td style="text-align: right;">0.995</td>
+<td style="text-align: right;">0.879</td>
+<td style="text-align: right;">0.0053</td>
+<td style="text-align: right;">0.121</td>
+<td style="text-align: right;">0.236</td>
+<td style="text-align: right;">0.0578</td>
+</tr>
+<tr>
+<td style="text-align: right;">0.5</td>
+<td style="text-align: right;">0.483</td>
+<td style="text-align: right;">0.995</td>
+<td style="text-align: right;">0.879</td>
+<td style="text-align: right;">0.0053</td>
+<td style="text-align: right;">0.121</td>
+<td style="text-align: right;">0.246</td>
+<td style="text-align: right;">0.0727</td>
+</tr>
+<tr>
+<td style="text-align: right;">1.0</td>
+<td style="text-align: right;">0.512</td>
+<td style="text-align: right;">0.985</td>
+<td style="text-align: right;">0.938</td>
+<td style="text-align: right;">0.0150</td>
+<td style="text-align: right;">0.0619</td>
+<td style="text-align: right;">0.262</td>
+<td style="text-align: right;">0.0847</td>
+</tr>
+</tbody>
+</table>
+
+**Observations:** Higher Sensitivity increases affect drive and the
+retrieval emotion bonus, improving interrupt recall (fewer false
+negatives) at the cost of a modest precision drop and higher interrupt
+rate. The mid-point (S=0.5) preserves precision while providing moderate
+affect influence.
+
+## Focus Sweep (Long Horizon)
+
+We swept Focus with **S=0.5, T=0.5**, using **2 conversations × 360
+turns** (`max_total=720`). Focus primarily modulates retrieval breadth
+and duplicate suppression, so we report candidate counts and interrupt
+quality.
+
+<table>
+<colgroup>
+<col style="width: 12%" />
+<col style="width: 12%" />
+<col style="width: 12%" />
+<col style="width: 12%" />
+<col style="width: 12%" />
+<col style="width: 12%" />
+<col style="width: 12%" />
+<col style="width: 12%" />
+</colgroup>
+<thead>
+<tr>
+<th style="text-align: right;">F</th>
+<th style="text-align: right;">interrupt_turn_rate</th>
+<th style="text-align: right;">precision</th>
+<th style="text-align: right;">recall</th>
+<th style="text-align: right;">fp_rate</th>
+<th style="text-align: right;">fn_rate</th>
+<th style="text-align: right;">retrieval_avg_candidates</th>
+<th style="text-align: right;">retrieval_semantic_overlap_mean</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: right;">0.3</td>
+<td style="text-align: right;">0.481</td>
+<td style="text-align: right;">1.000</td>
+<td style="text-align: right;">0.984</td>
+<td style="text-align: right;">0.000</td>
+<td style="text-align: right;">0.0157</td>
+<td style="text-align: right;">32.54</td>
+<td style="text-align: right;">0.547</td>
+</tr>
+<tr>
+<td style="text-align: right;">0.5</td>
+<td style="text-align: right;">0.483</td>
+<td style="text-align: right;">0.995</td>
+<td style="text-align: right;">0.879</td>
+<td style="text-align: right;">0.0053</td>
+<td style="text-align: right;">0.121</td>
+<td style="text-align: right;">27.17</td>
+<td style="text-align: right;">0.526</td>
+</tr>
+<tr>
+<td style="text-align: right;">0.7</td>
+<td style="text-align: right;">0.483</td>
+<td style="text-align: right;">0.968</td>
+<td style="text-align: right;">0.640</td>
+<td style="text-align: right;">0.0317</td>
+<td style="text-align: right;">0.360</td>
+<td style="text-align: right;">26.14</td>
+<td style="text-align: right;">0.535</td>
+</tr>
+</tbody>
+</table>
+
+**Observations:** Lower Focus (F=0.3) increases candidate breadth and
+improves interrupt recall/precision; higher Focus narrows candidate sets
+and increases misses (higher FN rate) despite slightly higher semantic
+overlap. This confirms Focus governs selectivity at the cost of
+interrupt coverage.
+
+## Stability Sweep (Long Horizon)
+
+We swept Stability with **F=0.5, S=0.5**, using **2 conversations × 360
+turns** (`max_total=720`). Stability adjusts persistence and gating
+strictness, so we track interrupt behavior and candidate volume.
+
+<table>
+<colgroup>
+<col style="width: 12%" />
+<col style="width: 12%" />
+<col style="width: 12%" />
+<col style="width: 12%" />
+<col style="width: 12%" />
+<col style="width: 12%" />
+<col style="width: 12%" />
+<col style="width: 12%" />
+</colgroup>
+<thead>
+<tr>
+<th style="text-align: right;">T</th>
+<th style="text-align: right;">interrupt_turn_rate</th>
+<th style="text-align: right;">precision</th>
+<th style="text-align: right;">recall</th>
+<th style="text-align: right;">fp_rate</th>
+<th style="text-align: right;">fn_rate</th>
+<th style="text-align: right;">retrieval_avg_candidates</th>
+<th style="text-align: right;">retrieval_semantic_overlap_mean</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: right;">0.3</td>
+<td style="text-align: right;">0.483</td>
+<td style="text-align: right;">0.995</td>
+<td style="text-align: right;">0.870</td>
+<td style="text-align: right;">0.0053</td>
+<td style="text-align: right;">0.1296</td>
+<td style="text-align: right;">31.20</td>
+<td style="text-align: right;">0.528</td>
+</tr>
+<tr>
+<td style="text-align: right;">0.5</td>
+<td style="text-align: right;">0.483</td>
+<td style="text-align: right;">0.995</td>
+<td style="text-align: right;">0.879</td>
+<td style="text-align: right;">0.0053</td>
+<td style="text-align: right;">0.1215</td>
+<td style="text-align: right;">27.28</td>
+<td style="text-align: right;">0.526</td>
+</tr>
+<tr>
+<td style="text-align: right;">0.7</td>
+<td style="text-align: right;">0.455</td>
+<td style="text-align: right;">0.994</td>
+<td style="text-align: right;">0.823</td>
+<td style="text-align: right;">0.0056</td>
+<td style="text-align: right;">0.1767</td>
+<td style="text-align: right;">29.35</td>
+<td style="text-align: right;">0.527</td>
+</tr>
+</tbody>
+</table>
+
+**Observations:** Higher Stability slightly reduces interrupt rate and
+recall (more false negatives), consistent with stricter gating;
+mid‑range T preserves recall while keeping precision stable. Candidate
+counts remain in the same band, indicating Stability primarily affects
+decision thresholds rather than retrieval breadth.
 
 # Implementation Considerations
 

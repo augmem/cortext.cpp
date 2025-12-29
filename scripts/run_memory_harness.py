@@ -100,6 +100,8 @@ def run_case(case: dict, args: argparse.Namespace, out_root: Path, summary_rows:
         cmd.append("--reuse")
     if case.get("interleave", 1) > 1:
         cmd.append(f"--interleave={case['interleave']}")
+    if case.get("affect_mode"):
+        cmd.append(f"--affect-mode={case['affect_mode']}")
     if args.consolidate_cycles > 0:
         cmd.append("--consolidate")
         cmd.append(f"--consolidate-cycles={args.consolidate_cycles}")
@@ -141,6 +143,7 @@ def run_case(case: dict, args: argparse.Namespace, out_root: Path, summary_rows:
     metrics = parse_metrics(log_path)
     row = {
         "name": case["name"],
+        "affect_mode": case.get("affect_mode", "all"),
         "focus": case["focus"],
         "sensitivity": case["sensitivity"],
         "stability": case["stability"],
@@ -173,6 +176,31 @@ def run_case(case: dict, args: argparse.Namespace, out_root: Path, summary_rows:
         "retrieval_summary_hit_rate": metrics.get("retrieval_summary_hit_rate", "0"),
         "retrieval_summary_only_turn_rate": metrics.get("retrieval_summary_only_turn_rate", "0"),
         "summary_hit_overlap_mean": metrics.get("summary_hit_overlap_mean", "0"),
+        "affect_drive_mean": metrics.get("affect_drive_mean", "0"),
+        "interrupt_affect_drive_mean": metrics.get("interrupt_affect_drive_mean", "0"),
+        "non_interrupt_affect_drive_mean": metrics.get("non_interrupt_affect_drive_mean", "0"),
+        "emotion_intensity_mean": metrics.get("emotion_intensity_mean", "0"),
+        "arousal_mean": metrics.get("arousal_mean", "0"),
+        "valence_mean": metrics.get("valence_mean", "0"),
+        "salience_mean": metrics.get("salience_mean", "0"),
+        "interrupt_gate_affect_drive_mean": metrics.get(
+            "interrupt_gate_affect_drive_mean", "0"
+        ),
+        "interrupt_gate_affect_drive_interrupt_mean": metrics.get(
+            "interrupt_gate_affect_drive_interrupt_mean", "0"
+        ),
+        "interrupt_gate_affect_drive_non_interrupt_mean": metrics.get(
+            "interrupt_gate_affect_drive_non_interrupt_mean", "0"
+        ),
+        "interrupt_gate_retrieval_thresh_mean": metrics.get(
+            "interrupt_gate_retrieval_thresh_mean", "0"
+        ),
+        "interrupt_gate_boundary_mult_eff_mean": metrics.get(
+            "interrupt_gate_boundary_mult_eff_mean", "0"
+        ),
+        "retrieval_emotion_bonus_mean": metrics.get("retrieval_emotion_bonus_mean", "0"),
+        "interrupt_retrieval_emotion_bonus_mean": metrics.get(
+            "interrupt_retrieval_emotion_bonus_mean", "0"),
         "interrupt_turn_rate": metrics.get("interrupt_turn_rate", "0"),
         "interrupt_precision": metrics.get("interrupt_precision", "0"),
         "interrupt_recall": metrics.get("interrupt_recall", "0"),
@@ -181,6 +209,22 @@ def run_case(case: dict, args: argparse.Namespace, out_root: Path, summary_rows:
         "interrupt_true_positive": metrics.get("interrupt_true_positive", "0"),
         "interrupt_false_positive": metrics.get("interrupt_false_positive", "0"),
         "interrupt_false_negative": metrics.get("interrupt_false_negative", "0"),
+        "interrupt_gate_fail_no_candidates": metrics.get("interrupt_gate_fail_no_candidates", "0"),
+        "interrupt_gate_fail_no_candidates_rate": metrics.get("interrupt_gate_fail_no_candidates_rate", "0"),
+        "interrupt_gate_fail_no_store": metrics.get("interrupt_gate_fail_no_store", "0"),
+        "interrupt_gate_fail_no_store_rate": metrics.get("interrupt_gate_fail_no_store_rate", "0"),
+        "interrupt_gate_fail_rel": metrics.get("interrupt_gate_fail_rel", "0"),
+        "interrupt_gate_fail_rel_rate": metrics.get("interrupt_gate_fail_rel_rate", "0"),
+        "interrupt_gate_fail_novelty": metrics.get("interrupt_gate_fail_novelty", "0"),
+        "interrupt_gate_fail_novelty_rate": metrics.get("interrupt_gate_fail_novelty_rate", "0"),
+        "interrupt_gate_fail_mu": metrics.get("interrupt_gate_fail_mu", "0"),
+        "interrupt_gate_fail_mu_rate": metrics.get("interrupt_gate_fail_mu_rate", "0"),
+        "interrupt_gate_fail_novelty_mu": metrics.get("interrupt_gate_fail_novelty_mu", "0"),
+        "interrupt_gate_fail_novelty_mu_rate": metrics.get("interrupt_gate_fail_novelty_mu_rate", "0"),
+        "interrupt_gate_fail_dup": metrics.get("interrupt_gate_fail_dup", "0"),
+        "interrupt_gate_fail_dup_rate": metrics.get("interrupt_gate_fail_dup_rate", "0"),
+        "interrupt_gate_fail_boundary_mu": metrics.get("interrupt_gate_fail_boundary_mu", "0"),
+        "interrupt_gate_fail_boundary_mu_rate": metrics.get("interrupt_gate_fail_boundary_mu_rate", "0"),
         "interrupt_semantic_overlap_mean": metrics.get("interrupt_semantic_overlap_mean", "0"),
         "interrupt_context_semantic_overlap_mean": metrics.get("interrupt_context_semantic_overlap_mean", "0"),
         "non_interrupt_semantic_overlap_mean": metrics.get("non_interrupt_semantic_overlap_mean", "0"),
@@ -217,6 +261,10 @@ def main() -> int:
     parser.add_argument("--multi-interleave", type=int, default=4)
     parser.add_argument("--multi-total", type=int, default=800)
     parser.add_argument("--consolidate-cycles", type=int, default=2)
+    parser.add_argument("--affect-mode", default="all")
+    parser.add_argument("--case-max-conversations", type=int, default=0)
+    parser.add_argument("--case-max-turns", type=int, default=0)
+    parser.add_argument("--case-max-total", type=int, default=0)
     parser.add_argument("--sweep", default="0.4,0.5,0.6")
     parser.add_argument("--focus-list", default="")
     parser.add_argument("--sensitivity-list", default="")
@@ -243,6 +291,7 @@ def main() -> int:
         "max_total": args.max_total,
         "interleave": 1,
         "reuse": True,
+        "affect_mode": args.affect_mode,
     }
     if not args.no_baseline:
         run_case(base_case, args, out_root, summary_rows)
@@ -262,6 +311,14 @@ def main() -> int:
 
     if not args.no_sweep:
         cases = []
+        case_max_conversations = (args.case_max_conversations
+                                  if args.case_max_conversations > 0 else 1)
+        case_max_turns = (args.case_max_turns
+                          if args.case_max_turns > 0
+                          else min(120, args.max_turns))
+        case_max_total = (args.case_max_total
+                          if args.case_max_total > 0
+                          else min(120, args.max_total))
         if args.cases:
             cases = parse_cases(args.cases)
         if cases:
@@ -272,9 +329,9 @@ def main() -> int:
                     "focus": f,
                     "sensitivity": s,
                     "stability": t,
-                    "max_conversations": 1,
-                    "max_turns": min(120, args.max_turns),
-                    "max_total": min(120, args.max_total),
+                    "max_conversations": case_max_conversations,
+                    "max_turns": case_max_turns,
+                    "max_total": case_max_total,
                     "interleave": 1,
                 })
                 run_case(case, args, out_root, summary_rows)
@@ -293,9 +350,9 @@ def main() -> int:
                             "focus": f,
                             "sensitivity": s,
                             "stability": t,
-                            "max_conversations": 1,
-                            "max_turns": min(120, args.max_turns),
-                            "max_total": min(120, args.max_total),
+                            "max_conversations": case_max_conversations,
+                            "max_turns": case_max_turns,
+                            "max_total": case_max_total,
                             "interleave": 1,
                         })
                         run_case(case, args, out_root, summary_rows)

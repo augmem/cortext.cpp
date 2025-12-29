@@ -30,6 +30,8 @@ public:
     double focus = 0.5;
     double sensitivity = 0.5;
     double stability = 0.5;
+    bool affect_interrupt = true;
+    bool affect_retrieval = true;
 
     // LLM components (extractor/summarizer may be null)
     Extractor *extractor = nullptr;
@@ -84,6 +86,20 @@ public:
     double mni_dup_thresh = 0.0;
     double mni_tau_jaccard_eff = 0.0;
     double mni_tau_mu_eff = 0.0;
+    bool interrupt_gate_has_candidates = false;
+    bool interrupt_gate_blocked_no_store = false;
+    bool interrupt_gate_rel_pass = false;
+    bool interrupt_gate_novelty_pass = false;
+    bool interrupt_gate_mu_pass = false;
+    bool interrupt_gate_novelty_mu_pass = false;
+    bool interrupt_gate_dup_pass = false;
+    bool interrupt_gate_boundary_mu_pass = false;
+    double interrupt_gate_rel_star = 0.0;
+    double interrupt_gate_retrieval_thresh = 0.0;
+    double interrupt_gate_boundary_mult_eff = 0.0;
+    double interrupt_gate_affect_drive = 0.0;
+    bool consolidation_recommended = false;
+    bool consolidation_required = false;
 
     // Composite score and serial-position application (if provided)
     std::optional<double> composite_score;

@@ -244,6 +244,127 @@ public:
   {
     return interrupt_allowed_;
   }
+
+  void
+  SetInterruptGateHasCandidates (bool v)
+  {
+    interrupt_gate_has_candidates_ = v;
+  }
+  bool
+  GetInterruptGateHasCandidates () const
+  {
+    return interrupt_gate_has_candidates_;
+  }
+  void
+  SetInterruptGateBlockedNoStore (bool v)
+  {
+    interrupt_gate_blocked_no_store_ = v;
+  }
+  bool
+  GetInterruptGateBlockedNoStore () const
+  {
+    return interrupt_gate_blocked_no_store_;
+  }
+  void
+  SetInterruptGateRelPass (bool v)
+  {
+    interrupt_gate_rel_pass_ = v;
+  }
+  bool
+  GetInterruptGateRelPass () const
+  {
+    return interrupt_gate_rel_pass_;
+  }
+  void
+  SetInterruptGateNoveltyPass (bool v)
+  {
+    interrupt_gate_novelty_pass_ = v;
+  }
+  bool
+  GetInterruptGateNoveltyPass () const
+  {
+    return interrupt_gate_novelty_pass_;
+  }
+  void
+  SetInterruptGateMuPass (bool v)
+  {
+    interrupt_gate_mu_pass_ = v;
+  }
+  bool
+  GetInterruptGateMuPass () const
+  {
+    return interrupt_gate_mu_pass_;
+  }
+  void
+  SetInterruptGateNoveltyMuPass (bool v)
+  {
+    interrupt_gate_novelty_mu_pass_ = v;
+  }
+  bool
+  GetInterruptGateNoveltyMuPass () const
+  {
+    return interrupt_gate_novelty_mu_pass_;
+  }
+  void
+  SetInterruptGateDupPass (bool v)
+  {
+    interrupt_gate_dup_pass_ = v;
+  }
+  bool
+  GetInterruptGateDupPass () const
+  {
+    return interrupt_gate_dup_pass_;
+  }
+  void
+  SetInterruptGateBoundaryMuPass (bool v)
+  {
+    interrupt_gate_boundary_mu_pass_ = v;
+  }
+  bool
+  GetInterruptGateBoundaryMuPass () const
+  {
+    return interrupt_gate_boundary_mu_pass_;
+  }
+  void
+  SetInterruptGateRelStar (double v)
+  {
+    interrupt_gate_rel_star_ = v;
+  }
+  double
+  GetInterruptGateRelStar () const
+  {
+    return interrupt_gate_rel_star_;
+  }
+  void
+  SetInterruptGateRetrievalThresh (double v)
+  {
+    interrupt_gate_retrieval_thresh_ = v;
+  }
+  double
+  GetInterruptGateRetrievalThresh () const
+  {
+    return interrupt_gate_retrieval_thresh_;
+  }
+  void
+  SetInterruptGateBoundaryMultEff (double v)
+  {
+    interrupt_gate_boundary_mult_eff_ = v;
+  }
+  double
+  GetInterruptGateBoundaryMultEff () const
+  {
+    return interrupt_gate_boundary_mult_eff_;
+  }
+  void
+  SetInterruptGateAffectDrive (double v)
+  {
+    interrupt_gate_affect_drive_ = v;
+  }
+  double
+  GetInterruptGateAffectDrive () const
+  {
+    return interrupt_gate_affect_drive_;
+  }
   // ======================================================================
   // Consolidation Triggers API (Algorithms 28, 28b)
   // ======================================================================
@@ -1045,6 +1166,18 @@ private:
   // Algorithm 27 fields
   bool at_boundary_ = false;
   bool interrupt_allowed_ = false;
+  bool interrupt_gate_has_candidates_ = false;
+  bool interrupt_gate_blocked_no_store_ = false;
+  bool interrupt_gate_rel_pass_ = false;
+  bool interrupt_gate_novelty_pass_ = false;
+  bool interrupt_gate_mu_pass_ = false;
+  bool interrupt_gate_novelty_mu_pass_ = false;
+  bool interrupt_gate_dup_pass_ = false;
+  bool interrupt_gate_boundary_mu_pass_ = false;
+  double interrupt_gate_rel_star_ = 0.0;
+  double interrupt_gate_retrieval_thresh_ = 0.0;
+  double interrupt_gate_boundary_mult_eff_ = 0.0;
+  double interrupt_gate_affect_drive_ = 0.0;
   double mni_jaccard_ = 0.0;
   double mni_best_mu_ = 0.0;
   double mni_dup_thresh_ = 0.0;

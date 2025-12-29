@@ -325,6 +325,7 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
 
       // Set stored_embedding_id in context for output
       context.SetStoredEmbeddingId (embedding_id);
+      p_ctx.memories_since_consolidation += 1;
       if (memory_id > 0 && embedding_to_store.size () > 0)
         {
           const int k_key = core::SparseKeySize (context.GetConfig ().focus);

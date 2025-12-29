@@ -645,6 +645,8 @@ struct Cortext::Impl
     pcfg.focus = cfg.focus;
     pcfg.sensitivity = cfg.sensitivity;
     pcfg.stability = cfg.stability;
+    pcfg.affect_interrupt = cfg.affect_interrupt;
+    pcfg.affect_retrieval = cfg.affect_retrieval;
     pcfg.encoder = encoder.get ();
 
 #if !defined(CORTEXT_DISABLE_LITERT)
@@ -672,6 +674,22 @@ struct Cortext::Impl
   {
     Cortext::Context result;
     result.should_interrupt = out.interrupt_allowed;
+    result.consolidation_recommended = out.consolidation_recommended;
+    result.consolidation_required = out.consolidation_required;
+    result.interrupt_gate_has_candidates = out.interrupt_gate_has_candidates;
+    result.interrupt_gate_blocked_no_store = out.interrupt_gate_blocked_no_store;
+    result.interrupt_gate_rel_pass = out.interrupt_gate_rel_pass;
+    result.interrupt_gate_novelty_pass = out.interrupt_gate_novelty_pass;
+    result.interrupt_gate_mu_pass = out.interrupt_gate_mu_pass;
+    result.interrupt_gate_novelty_mu_pass = out.interrupt_gate_novelty_mu_pass;
+    result.interrupt_gate_dup_pass = out.interrupt_gate_dup_pass;
+    result.interrupt_gate_boundary_mu_pass = out.interrupt_gate_boundary_mu_pass;
+    result.interrupt_gate_rel_star = out.interrupt_gate_rel_star;
+    result.interrupt_gate_retrieval_thresh =
+        out.interrupt_gate_retrieval_thresh;
+    result.interrupt_gate_boundary_mult_eff =
+        out.interrupt_gate_boundary_mult_eff;
+    result.interrupt_gate_affect_drive = out.interrupt_gate_affect_drive;
     
     // Populate output metrics
     result.output.composite_score = out.composite_score;

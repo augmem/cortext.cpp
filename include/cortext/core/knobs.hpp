@@ -17,6 +17,7 @@ namespace cortext::core
 // This keeps the UI knobs unchanged while centering the neutral sweet spot at 0.5.
 constexpr double kFocusMidBias = 0.10;
 constexpr double kSensitivityMidBias = 0.10;
+constexpr double kAffectMidBias = -0.06;
 
 inline double
 BiasMid (double x, double bias)
@@ -36,6 +37,14 @@ inline double
 SensitivityBias (double S)
 {
   return BiasMid (S, kSensitivityMidBias);
+}
+
+inline double
+AffectSensitivityBias (double S)
+{
+  // Affective gain uses a lighter (slightly lifted) midpoint bias to ensure
+  // mid-range Sensitivity still yields meaningful affect modulation.
+  return BiasMid (S, kAffectMidBias);
 }
 
 inline double
@@ -401,6 +410,23 @@ ConsolidationIntervalSeconds (double T)
   return static_cast<int> (std::round (Lerp (300.0, 3600.0, T)));
 }
 
+// Escalation multiplier for consolidation urgency — Algorithm 28b
+inline double
+ConsolidationEscalationMultiplier (double T)
+{
+  // escalates required thresholds with stability (1.5 → 2.5)
+  return Lerp (1.5, 2.5, Clamp (T, 0.0, 1.0));
+}
+
+// Required consolidation interval (seconds) — Algorithm 28b
+inline int
+ConsolidationRequiredIntervalSeconds (double T)
+{
+  return static_cast<int> (
+      std::round (ConsolidationIntervalSeconds (T)
+                  * ConsolidationEscalationMultiplier (T)));
+}
+
 // Consolidation rate (writes/min) — Section 7.1
 inline double
 ConsolidationRate (double T, double S)
@@ -449,6 +475,16 @@ ConsolidationThresholdCount (double T)
   const long long w = static_cast<long long> (WScore (Clamp (T, 0.0, 1.0)));
   const long long thr = n * w;
   return (thr < 1) ? 1 : thr;
+}
+
+// Required consolidation threshold — Algorithm 28b
+inline long long
+ConsolidationRequiredCount (double T)
+{
+  const double base
+      = static_cast<double> (ConsolidationThresholdCount (T));
+  const double scaled = base * ConsolidationEscalationMultiplier (T);
+  return static_cast<long long> (std::max (1.0, std::round (scaled)));
 }
 
 // Minimum cluster size for extraction — Algorithm 29c
@@ -997,6 +1033,27 @@ RetrievalThresholdInterrupt (double F, double S)
   const double base = RetrievalThreshold (F);
   const double relax = 1.0 - 0.12 * SensitivityBias (S);
   return base * relax;
+}
+
+inline double
+InterruptAffectRelaxCoeff (double S)
+{
+  // affect_relax_coeff(S) = lerp(0.15, 0.55, S̃_affect)
+  return Lerp (0.15, 0.55, AffectSensitivityBias (S));
+}
+
+inline double
+RetrievalEmotionWeight (double S)
+{
+  // w_emotion = lerp(0.0, 0.12, S̃_affect)
+  return Lerp (0.0, 0.12, AffectSensitivityBias (S));
+}
+
+inline double
+AffectGain (double S)
+{
+  // affect_gain(S) = lerp(1.0, 2.4, S̃_affect)
+  return Lerp (1.0, 2.4, AffectSensitivityBias (S));
 }
 
 inline int

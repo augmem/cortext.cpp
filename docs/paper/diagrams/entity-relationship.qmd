@@ -15,6 +15,9 @@ Note: Interrupt gating uses a sensitivity-relaxed retrieval threshold
 retrieval_thresh_interrupt(F,S) = retrieval_thresh(F) × (1 − 0.12S).
 Note: Non-boundary MU gating is relaxed by Sensitivity:
 boundary_mult_eff = boundary_mult × (1 − 0.20S).
+Note: Retrieval ranking adds an emotion bonus using memories.emotional_intensity
+and memories.s_arousal_avg, scaled by an affect_drive computed from current
+arousal/emotion/salience.
 
 ```{mermaid}
 erDiagram
@@ -295,6 +298,7 @@ erDiagram
         real metacognitive_confidence "Section 6.2"
         int last_consolidation_ts "Section 7.1"
         int consolidation_count "Section 7.1"
+        int memories_since_consolidation "Section 7.1"
         int is_processing_signal
         int last_retrieval_ts
         int episode_start_ts "Section 3.1.3"

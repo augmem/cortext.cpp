@@ -280,6 +280,9 @@ struct AnalysisConfig {
   double focus = 0.3;
   double sensitivity = 0.6;
   double stability = 0.5;
+  std::string affect_mode = "all";
+  bool affect_interrupt = true;
+  bool affect_retrieval = true;
 };
 
 struct RetrievalExample {
@@ -331,6 +334,14 @@ struct Stats {
   int interrupt_semantic_true_positive = 0;
   int interrupt_semantic_false_positive = 0;
   int interrupt_semantic_false_negative = 0;
+  int interrupt_gate_fail_no_candidates = 0;
+  int interrupt_gate_fail_no_store = 0;
+  int interrupt_gate_fail_rel = 0;
+  int interrupt_gate_fail_novelty = 0;
+  int interrupt_gate_fail_mu = 0;
+  int interrupt_gate_fail_novelty_mu = 0;
+  int interrupt_gate_fail_dup = 0;
+  int interrupt_gate_fail_boundary_mu = 0;
   int interrupt_turns = 0;
   int interrupt_turns_with_retrieval = 0;
   int interrupt_association_candidates = 0;
@@ -364,6 +375,20 @@ struct Stats {
   std::vector<double> interrupt_novelty_values;
   std::vector<double> interrupt_relevance_values;
   std::vector<double> interrupt_surprise_values;
+  std::vector<double> emotion_intensity_values;
+  std::vector<double> arousal_values;
+  std::vector<double> valence_values;
+  std::vector<double> salience_values;
+  std::vector<double> affect_drive_values;
+  std::vector<double> interrupt_affect_drive_values;
+  std::vector<double> non_interrupt_affect_drive_values;
+  std::vector<double> interrupt_gate_affect_drive_values;
+  std::vector<double> interrupt_gate_affect_drive_interrupt_values;
+  std::vector<double> interrupt_gate_affect_drive_non_interrupt_values;
+  std::vector<double> interrupt_gate_retrieval_thresh_values;
+  std::vector<double> interrupt_gate_boundary_mult_eff_values;
+  std::vector<double> retrieval_emotion_bonus_values;
+  std::vector<double> interrupt_retrieval_emotion_bonus_values;
   std::vector<RetrievalExample> low_overlap_examples;
 };
 
@@ -653,6 +678,54 @@ std::optional<std::string> GetMemoryKind(
   return kind;
 }
 
+struct MemoryEmotion {
+  double intensity = 0.0;
+  double arousal_avg = 0.0;
+};
+
+std::optional<MemoryEmotion> GetMemoryEmotion(
+    const std::shared_ptr<cortext::Store> &store,
+    std::unordered_map<long long, MemoryEmotion> &cache,
+    long long memory_id) {
+  if (!store || memory_id <= 0) {
+    return std::nullopt;
+  }
+  auto it = cache.find(memory_id);
+  if (it != cache.end()) {
+    return it->second;
+  }
+  auto rows = store->Execute(
+      "SELECT emotional_intensity, s_arousal_avg FROM memories WHERE memory_id = ?",
+      {memory_id});
+  if (rows.empty()) {
+    return std::nullopt;
+  }
+  auto get_dbl = [&rows](const char *k, double def) -> double {
+    auto itv = rows[0].find(k);
+    if (itv == rows[0].end() || !itv->second.has_value()) {
+      return def;
+    }
+    if (itv->second.type() == typeid(double)) {
+      return std::any_cast<double>(itv->second);
+    }
+    if (itv->second.type() == typeid(float)) {
+      return static_cast<double>(std::any_cast<float>(itv->second));
+    }
+    if (itv->second.type() == typeid(int)) {
+      return static_cast<double>(std::any_cast<int>(itv->second));
+    }
+    if (itv->second.type() == typeid(long long)) {
+      return static_cast<double>(std::any_cast<long long>(itv->second));
+    }
+    return def;
+  };
+  MemoryEmotion emotion;
+  emotion.intensity = cortext::core::Clamp(get_dbl("emotional_intensity", 0.0), 0.0, 1.0);
+  emotion.arousal_avg = cortext::core::Clamp(get_dbl("s_arousal_avg", 0.0), 0.0, 1.0);
+  cache[memory_id] = emotion;
+  return emotion;
+}
+
 long long CountMemoriesByKind(const std::shared_ptr<cortext::Store> &store,
                               const std::string &kind) {
   if (!store) {
@@ -691,6 +764,23 @@ void RecordRetrievalExample(Stats &stats, double overlap, const std::string &tur
   if (stats.low_overlap_examples.size() > 5) {
     stats.low_overlap_examples.resize(5);
   }
+}
+
+double ComputeAffectDrive(double sensitivity, double emotion_intensity,
+                          double arousal, double salience) {
+  const double s_affect = cortext::core::AffectSensitivityBias(sensitivity);
+  const double w_arousal_raw = cortext::core::Lerp(0.30, 0.55, s_affect);
+  const double w_emotion_raw = cortext::core::Lerp(0.30, 0.55, s_affect);
+  const double w_salience_raw = cortext::core::Lerp(0.10, 0.20, s_affect);
+  const double w_sum = std::max(1e-9, w_arousal_raw + w_emotion_raw + w_salience_raw);
+  const double w_arousal = w_arousal_raw / w_sum;
+  const double w_emotion = w_emotion_raw / w_sum;
+  const double w_salience = w_salience_raw / w_sum;
+  const double affect_gain = cortext::core::AffectGain(sensitivity);
+  const double drive = affect_gain
+                       * (w_arousal * arousal + w_emotion * emotion_intensity
+                          + w_salience * salience);
+  return cortext::core::Clamp(drive, 0.0, 1.0);
 }
 
 AnalysisConfig ParseArgs(int argc, char **argv) {
@@ -737,6 +827,27 @@ AnalysisConfig ParseArgs(int argc, char **argv) {
       cfg.sensitivity = std::stod(*v);
     } else if (auto v = take("--stability=")) {
       cfg.stability = std::stod(*v);
+    } else if (auto v = take("--affect-mode=")) {
+      cfg.affect_mode = *v;
+      if (*v == "all") {
+        cfg.affect_interrupt = true;
+        cfg.affect_retrieval = true;
+      } else if (*v == "interrupt") {
+        cfg.affect_interrupt = true;
+        cfg.affect_retrieval = false;
+      } else if (*v == "retrieval") {
+        cfg.affect_interrupt = false;
+        cfg.affect_retrieval = true;
+      } else if (*v == "off") {
+        cfg.affect_interrupt = false;
+        cfg.affect_retrieval = false;
+      } else {
+        std::cerr << "Unknown --affect-mode=" << *v
+                  << "; defaulting to 'all'.\n";
+        cfg.affect_mode = "all";
+        cfg.affect_interrupt = true;
+        cfg.affect_retrieval = true;
+      }
     } else if (auto v = take("--cadence-speed=")) {
       cfg.cadence_speed = std::stod(*v);
     } else if (auto v = take("--cadence-wpm=")) {
@@ -810,6 +921,7 @@ int main(int argc, char **argv) {
   std::shared_ptr<cortext::Store> stats_store;
   std::unordered_map<long long, std::vector<float>> embedding_cache;
   std::unordered_map<long long, std::string> memory_kind_cache;
+  std::unordered_map<long long, MemoryEmotion> memory_emotion_cache;
   bool baseline_counts_set = false;
   int consolidation_every_turns = 0;
 
@@ -953,9 +1065,12 @@ int main(int argc, char **argv) {
       c.focus = cfg.focus;
       c.sensitivity = cfg.sensitivity;
       c.stability = cfg.stability;
+      c.affect_interrupt = cfg.affect_interrupt;
+      c.affect_retrieval = cfg.affect_retrieval;
       cortext = cortext::Cortext::Create(c, cfg.db_path, cfg.models_dir);
       embedding_cache.clear();
       memory_kind_cache.clear();
+      memory_emotion_cache.clear();
       eval_store.reset();
       stats_store.reset();
       if (semantic_ready) {
@@ -1093,6 +1208,32 @@ int main(int argc, char **argv) {
             }
           }
 
+          const double salience_metric =
+              GetMetric(ctx, cortext::operations::Metric::salience).value_or(0.0);
+          stats.emotion_intensity_values.push_back(ctx.output.emotion_intensity);
+          stats.arousal_values.push_back(ctx.output.arousal);
+          stats.valence_values.push_back(ctx.output.valence);
+          stats.salience_values.push_back(salience_metric);
+          const double affect_drive = ComputeAffectDrive(
+              cfg.sensitivity, ctx.output.emotion_intensity, ctx.output.arousal,
+              salience_metric);
+          stats.affect_drive_values.push_back(affect_drive);
+          stats.interrupt_gate_affect_drive_values.push_back(
+              ctx.interrupt_gate_affect_drive);
+          stats.interrupt_gate_retrieval_thresh_values.push_back(
+              ctx.interrupt_gate_retrieval_thresh);
+          stats.interrupt_gate_boundary_mult_eff_values.push_back(
+              ctx.interrupt_gate_boundary_mult_eff);
+          if (ctx.should_interrupt) {
+            stats.interrupt_affect_drive_values.push_back(affect_drive);
+            stats.interrupt_gate_affect_drive_interrupt_values.push_back(
+                ctx.interrupt_gate_affect_drive);
+          } else {
+            stats.non_interrupt_affect_drive_values.push_back(affect_drive);
+            stats.interrupt_gate_affect_drive_non_interrupt_values.push_back(
+                ctx.interrupt_gate_affect_drive);
+          }
+
           if (ctx.should_interrupt) {
             stats.interrupt_turns++;
             if (!ctx.retrieved_memory.empty()) {
@@ -1117,6 +1258,19 @@ int main(int argc, char **argv) {
             std::string best_text;
             bool turn_has_association = false;
             bool turn_has_label = false;
+            double best_emotion_bonus = 0.0;
+            bool has_emotion_bonus = false;
+            const double s_eff = cortext::core::SensitivityBias(cfg.sensitivity);
+            const double w_emotion =
+                cfg.affect_retrieval
+                    ? cortext::core::RetrievalEmotionWeight(cfg.sensitivity)
+                    : 0.0;
+            const double w_mem_emotion_raw = cortext::core::Lerp(0.60, 0.80, s_eff);
+            const double w_mem_arousal_raw = cortext::core::Lerp(0.20, 0.40, s_eff);
+            const double w_mem_sum =
+                std::max(1e-9, w_mem_emotion_raw + w_mem_arousal_raw);
+            const double w_mem_emotion = w_mem_emotion_raw / w_mem_sum;
+            const double w_mem_arousal = w_mem_arousal_raw / w_mem_sum;
             for (const auto &mem : ctx.retrieved_memory) {
               const std::string mem_text = MemoryToText(mem);
               const auto mem_tokens = Tokenize(mem_text);
@@ -1192,6 +1346,21 @@ int main(int argc, char **argv) {
                   }
                 }
               }
+
+              if (stats_store) {
+                auto mem_emotion =
+                    GetMemoryEmotion(stats_store, memory_emotion_cache, mem.id);
+                if (mem_emotion) {
+                  const double memory_affect =
+                      w_mem_emotion * mem_emotion->intensity
+                      + w_mem_arousal * mem_emotion->arousal_avg;
+                  const double emotion_bonus = w_emotion * affect_drive * memory_affect;
+                  if (!has_emotion_bonus || emotion_bonus > best_emotion_bonus) {
+                    best_emotion_bonus = emotion_bonus;
+                    has_emotion_bonus = true;
+                  }
+                }
+              }
             }
             stats.retrieval_overlap_sum += best_overlap;
             stats.retrieval_overlap_count++;
@@ -1221,6 +1390,30 @@ int main(int argc, char **argv) {
               } else {
                 if (semantic_positive) {
                   stats.interrupt_semantic_false_negative++;
+                  if (!ctx.interrupt_gate_has_candidates) {
+                    stats.interrupt_gate_fail_no_candidates++;
+                  }
+                  if (ctx.interrupt_gate_blocked_no_store) {
+                    stats.interrupt_gate_fail_no_store++;
+                  }
+                  if (!ctx.interrupt_gate_rel_pass) {
+                    stats.interrupt_gate_fail_rel++;
+                  }
+                  if (!ctx.interrupt_gate_novelty_pass) {
+                    stats.interrupt_gate_fail_novelty++;
+                  }
+                  if (!ctx.interrupt_gate_mu_pass) {
+                    stats.interrupt_gate_fail_mu++;
+                  }
+                  if (!ctx.interrupt_gate_novelty_mu_pass) {
+                    stats.interrupt_gate_fail_novelty_mu++;
+                  }
+                  if (!ctx.interrupt_gate_dup_pass) {
+                    stats.interrupt_gate_fail_dup++;
+                  }
+                  if (!ctx.interrupt_gate_boundary_mu_pass) {
+                    stats.interrupt_gate_fail_boundary_mu++;
+                  }
                 }
                 stats.non_interrupt_semantic_overlap_values.push_back(best_semantic);
                 if (has_context_semantic) {
@@ -1237,6 +1430,13 @@ int main(int argc, char **argv) {
               }
               if (non_summary_candidates == 0) {
                 stats.retrieval_summary_only_turns++;
+              }
+            }
+            if (has_emotion_bonus) {
+              stats.retrieval_emotion_bonus_values.push_back(best_emotion_bonus);
+              if (ctx.should_interrupt) {
+                stats.interrupt_retrieval_emotion_bonus_values.push_back(
+                    best_emotion_bonus);
               }
             }
             if (ctx.should_interrupt) {
@@ -1467,6 +1667,47 @@ int main(int argc, char **argv) {
           ? 0.0
           : static_cast<double>(stats.interrupt_semantic_false_negative)
                 / static_cast<double>(stats.retrieval_semantic_positive_turns);
+  const int interrupt_false_negative_total = stats.interrupt_semantic_false_negative;
+  const double interrupt_gate_fail_no_candidates_rate =
+      interrupt_false_negative_total == 0
+          ? 0.0
+          : static_cast<double>(stats.interrupt_gate_fail_no_candidates)
+                / static_cast<double>(interrupt_false_negative_total);
+  const double interrupt_gate_fail_no_store_rate =
+      interrupt_false_negative_total == 0
+          ? 0.0
+          : static_cast<double>(stats.interrupt_gate_fail_no_store)
+                / static_cast<double>(interrupt_false_negative_total);
+  const double interrupt_gate_fail_rel_rate =
+      interrupt_false_negative_total == 0
+          ? 0.0
+          : static_cast<double>(stats.interrupt_gate_fail_rel)
+                / static_cast<double>(interrupt_false_negative_total);
+  const double interrupt_gate_fail_novelty_rate =
+      interrupt_false_negative_total == 0
+          ? 0.0
+          : static_cast<double>(stats.interrupt_gate_fail_novelty)
+                / static_cast<double>(interrupt_false_negative_total);
+  const double interrupt_gate_fail_mu_rate =
+      interrupt_false_negative_total == 0
+          ? 0.0
+          : static_cast<double>(stats.interrupt_gate_fail_mu)
+                / static_cast<double>(interrupt_false_negative_total);
+  const double interrupt_gate_fail_novelty_mu_rate =
+      interrupt_false_negative_total == 0
+          ? 0.0
+          : static_cast<double>(stats.interrupt_gate_fail_novelty_mu)
+                / static_cast<double>(interrupt_false_negative_total);
+  const double interrupt_gate_fail_dup_rate =
+      interrupt_false_negative_total == 0
+          ? 0.0
+          : static_cast<double>(stats.interrupt_gate_fail_dup)
+                / static_cast<double>(interrupt_false_negative_total);
+  const double interrupt_gate_fail_boundary_mu_rate =
+      interrupt_false_negative_total == 0
+          ? 0.0
+          : static_cast<double>(stats.interrupt_gate_fail_boundary_mu)
+                / static_cast<double>(interrupt_false_negative_total);
 
   const int64_t cons_summary_count = cons_metrics.summary_count.load();
   const int64_t cons_extraction_jobs = cons_metrics.extraction_jobs.load();
@@ -1505,6 +1746,30 @@ int main(int argc, char **argv) {
   const auto interrupt_novelty_summary = Summarize(stats.interrupt_novelty_values);
   const auto interrupt_relevance_summary = Summarize(stats.interrupt_relevance_values);
   const auto interrupt_surprise_summary = Summarize(stats.interrupt_surprise_values);
+  const auto emotion_intensity_summary =
+      Summarize(stats.emotion_intensity_values);
+  const auto arousal_summary = Summarize(stats.arousal_values);
+  const auto valence_summary = Summarize(stats.valence_values);
+  const auto salience_summary = Summarize(stats.salience_values);
+  const auto affect_summary = Summarize(stats.affect_drive_values);
+  const auto interrupt_affect_summary =
+      Summarize(stats.interrupt_affect_drive_values);
+  const auto non_interrupt_affect_summary =
+      Summarize(stats.non_interrupt_affect_drive_values);
+  const auto interrupt_gate_affect_summary =
+      Summarize(stats.interrupt_gate_affect_drive_values);
+  const auto interrupt_gate_affect_interrupt_summary =
+      Summarize(stats.interrupt_gate_affect_drive_interrupt_values);
+  const auto interrupt_gate_affect_non_interrupt_summary =
+      Summarize(stats.interrupt_gate_affect_drive_non_interrupt_values);
+  const auto interrupt_gate_retrieval_thresh_summary =
+      Summarize(stats.interrupt_gate_retrieval_thresh_values);
+  const auto interrupt_gate_boundary_mult_summary =
+      Summarize(stats.interrupt_gate_boundary_mult_eff_values);
+  const auto retrieval_emotion_bonus_summary =
+      Summarize(stats.retrieval_emotion_bonus_values);
+  const auto interrupt_retrieval_emotion_bonus_summary =
+      Summarize(stats.interrupt_retrieval_emotion_bonus_values);
   const double interrupt_semantic_delta =
       (interrupt_semantic_summary.count > 0
        && non_interrupt_semantic_summary.count > 0)
@@ -1583,6 +1848,38 @@ int main(int argc, char **argv) {
             << "\n";
   std::cout << "interrupt_false_negative=" << stats.interrupt_semantic_false_negative
             << "\n";
+  std::cout << "interrupt_gate_fail_no_candidates="
+            << stats.interrupt_gate_fail_no_candidates << "\n";
+  std::cout << "interrupt_gate_fail_no_candidates_rate="
+            << interrupt_gate_fail_no_candidates_rate << "\n";
+  std::cout << "interrupt_gate_fail_no_store="
+            << stats.interrupt_gate_fail_no_store << "\n";
+  std::cout << "interrupt_gate_fail_no_store_rate="
+            << interrupt_gate_fail_no_store_rate << "\n";
+  std::cout << "interrupt_gate_fail_rel="
+            << stats.interrupt_gate_fail_rel << "\n";
+  std::cout << "interrupt_gate_fail_rel_rate="
+            << interrupt_gate_fail_rel_rate << "\n";
+  std::cout << "interrupt_gate_fail_novelty="
+            << stats.interrupt_gate_fail_novelty << "\n";
+  std::cout << "interrupt_gate_fail_novelty_rate="
+            << interrupt_gate_fail_novelty_rate << "\n";
+  std::cout << "interrupt_gate_fail_mu="
+            << stats.interrupt_gate_fail_mu << "\n";
+  std::cout << "interrupt_gate_fail_mu_rate="
+            << interrupt_gate_fail_mu_rate << "\n";
+  std::cout << "interrupt_gate_fail_novelty_mu="
+            << stats.interrupt_gate_fail_novelty_mu << "\n";
+  std::cout << "interrupt_gate_fail_novelty_mu_rate="
+            << interrupt_gate_fail_novelty_mu_rate << "\n";
+  std::cout << "interrupt_gate_fail_dup="
+            << stats.interrupt_gate_fail_dup << "\n";
+  std::cout << "interrupt_gate_fail_dup_rate="
+            << interrupt_gate_fail_dup_rate << "\n";
+  std::cout << "interrupt_gate_fail_boundary_mu="
+            << stats.interrupt_gate_fail_boundary_mu << "\n";
+  std::cout << "interrupt_gate_fail_boundary_mu_rate="
+            << interrupt_gate_fail_boundary_mu_rate << "\n";
 
   std::cout << "\n=== Distributions ===\n";
   std::cout << "novelty_mean=" << novelty_summary.mean
@@ -1597,6 +1894,84 @@ int main(int argc, char **argv) {
             << " p10=" << surprise_summary.p10
             << " p50=" << surprise_summary.p50
             << " p90=" << surprise_summary.p90 << "\n";
+  if (emotion_intensity_summary.count > 0) {
+    std::cout << "emotion_intensity_mean=" << emotion_intensity_summary.mean
+              << " p10=" << emotion_intensity_summary.p10
+              << " p50=" << emotion_intensity_summary.p50
+              << " p90=" << emotion_intensity_summary.p90 << "\n";
+  }
+  if (arousal_summary.count > 0) {
+    std::cout << "arousal_mean=" << arousal_summary.mean
+              << " p10=" << arousal_summary.p10
+              << " p50=" << arousal_summary.p50
+              << " p90=" << arousal_summary.p90 << "\n";
+  }
+  if (valence_summary.count > 0) {
+    std::cout << "valence_mean=" << valence_summary.mean
+              << " p10=" << valence_summary.p10
+              << " p50=" << valence_summary.p50
+              << " p90=" << valence_summary.p90 << "\n";
+  }
+  if (salience_summary.count > 0) {
+    std::cout << "salience_mean=" << salience_summary.mean
+              << " p10=" << salience_summary.p10
+              << " p50=" << salience_summary.p50
+              << " p90=" << salience_summary.p90 << "\n";
+  }
+  if (affect_summary.count > 0) {
+    std::cout << "affect_drive_mean=" << affect_summary.mean
+              << " p10=" << affect_summary.p10
+              << " p50=" << affect_summary.p50
+              << " p90=" << affect_summary.p90 << "\n";
+  }
+  if (interrupt_affect_summary.count > 0) {
+    std::cout << "interrupt_affect_drive_mean=" << interrupt_affect_summary.mean
+              << " p10=" << interrupt_affect_summary.p10
+              << " p50=" << interrupt_affect_summary.p50
+              << " p90=" << interrupt_affect_summary.p90 << "\n";
+  }
+  if (non_interrupt_affect_summary.count > 0) {
+    std::cout << "non_interrupt_affect_drive_mean="
+              << non_interrupt_affect_summary.mean
+              << " p10=" << non_interrupt_affect_summary.p10
+              << " p50=" << non_interrupt_affect_summary.p50
+              << " p90=" << non_interrupt_affect_summary.p90 << "\n";
+  }
+  if (interrupt_gate_affect_summary.count > 0) {
+    std::cout << "interrupt_gate_affect_drive_mean="
+              << interrupt_gate_affect_summary.mean
+              << " p10=" << interrupt_gate_affect_summary.p10
+              << " p50=" << interrupt_gate_affect_summary.p50
+              << " p90=" << interrupt_gate_affect_summary.p90 << "\n";
+  }
+  if (interrupt_gate_affect_interrupt_summary.count > 0) {
+    std::cout << "interrupt_gate_affect_drive_interrupt_mean="
+              << interrupt_gate_affect_interrupt_summary.mean
+              << " p10=" << interrupt_gate_affect_interrupt_summary.p10
+              << " p50=" << interrupt_gate_affect_interrupt_summary.p50
+              << " p90=" << interrupt_gate_affect_interrupt_summary.p90 << "\n";
+  }
+  if (interrupt_gate_affect_non_interrupt_summary.count > 0) {
+    std::cout << "interrupt_gate_affect_drive_non_interrupt_mean="
+              << interrupt_gate_affect_non_interrupt_summary.mean
+              << " p10=" << interrupt_gate_affect_non_interrupt_summary.p10
+              << " p50=" << interrupt_gate_affect_non_interrupt_summary.p50
+              << " p90=" << interrupt_gate_affect_non_interrupt_summary.p90 << "\n";
+  }
+  if (interrupt_gate_retrieval_thresh_summary.count > 0) {
+    std::cout << "interrupt_gate_retrieval_thresh_mean="
+              << interrupt_gate_retrieval_thresh_summary.mean
+              << " p10=" << interrupt_gate_retrieval_thresh_summary.p10
+              << " p50=" << interrupt_gate_retrieval_thresh_summary.p50
+              << " p90=" << interrupt_gate_retrieval_thresh_summary.p90 << "\n";
+  }
+  if (interrupt_gate_boundary_mult_summary.count > 0) {
+    std::cout << "interrupt_gate_boundary_mult_eff_mean="
+              << interrupt_gate_boundary_mult_summary.mean
+              << " p10=" << interrupt_gate_boundary_mult_summary.p10
+              << " p50=" << interrupt_gate_boundary_mult_summary.p50
+              << " p90=" << interrupt_gate_boundary_mult_summary.p90 << "\n";
+  }
   std::cout << "retrieval_overlap_mean=" << retrieval_overlap_summary.mean
             << " p10=" << retrieval_overlap_summary.p10
             << " p50=" << retrieval_overlap_summary.p50
@@ -1628,6 +2003,20 @@ int main(int argc, char **argv) {
               << " p10=" << retrieval_summary_hit_overlap_summary.p10
               << " p50=" << retrieval_summary_hit_overlap_summary.p50
               << " p90=" << retrieval_summary_hit_overlap_summary.p90 << "\n";
+  }
+  if (retrieval_emotion_bonus_summary.count > 0) {
+    std::cout << "retrieval_emotion_bonus_mean="
+              << retrieval_emotion_bonus_summary.mean
+              << " p10=" << retrieval_emotion_bonus_summary.p10
+              << " p50=" << retrieval_emotion_bonus_summary.p50
+              << " p90=" << retrieval_emotion_bonus_summary.p90 << "\n";
+  }
+  if (interrupt_retrieval_emotion_bonus_summary.count > 0) {
+    std::cout << "interrupt_retrieval_emotion_bonus_mean="
+              << interrupt_retrieval_emotion_bonus_summary.mean
+              << " p10=" << interrupt_retrieval_emotion_bonus_summary.p10
+              << " p50=" << interrupt_retrieval_emotion_bonus_summary.p50
+              << " p90=" << interrupt_retrieval_emotion_bonus_summary.p90 << "\n";
   }
 
   if (interrupt_overlap_summary.count > 0) {

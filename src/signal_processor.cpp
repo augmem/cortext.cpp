@@ -57,10 +57,72 @@ AssembleOutputFields (const OperationContext &op_context,
   out.mni_dup_thresh = op_context.GetMniDupThresh ();
   out.mni_tau_jaccard_eff = op_context.GetMniTauJaccardEff ();
   out.mni_tau_mu_eff = op_context.GetMniTauMuEff ();
+  out.interrupt_gate_has_candidates
+      = op_context.GetInterruptGateHasCandidates ();
+  out.interrupt_gate_blocked_no_store
+      = op_context.GetInterruptGateBlockedNoStore ();
+  out.interrupt_gate_rel_pass = op_context.GetInterruptGateRelPass ();
+  out.interrupt_gate_novelty_pass = op_context.GetInterruptGateNoveltyPass ();
+  out.interrupt_gate_mu_pass = op_context.GetInterruptGateMuPass ();
+  out.interrupt_gate_novelty_mu_pass
+      = op_context.GetInterruptGateNoveltyMuPass ();
+  out.interrupt_gate_dup_pass = op_context.GetInterruptGateDupPass ();
+  out.interrupt_gate_boundary_mu_pass
+      = op_context.GetInterruptGateBoundaryMuPass ();
+  out.interrupt_gate_rel_star = op_context.GetInterruptGateRelStar ();
+  out.interrupt_gate_retrieval_thresh
+      = op_context.GetInterruptGateRetrievalThresh ();
+  out.interrupt_gate_boundary_mult_eff
+      = op_context.GetInterruptGateBoundaryMultEff ();
+  out.interrupt_gate_affect_drive = op_context.GetInterruptGateAffectDrive ();
   out.composite_score = op_context.GetCompositeScore ();
   out.serial_position_multiplier = op_context.GetSerialPositionMultiplier ();
   out.metrics = op_context.GetAllMetrics ();
   out.stored_embedding_id = op_context.GetStoredEmbeddingId ();
+}
+
+void
+ApplyConsolidationHint (const Signal &signal, const SignalProcessor::Config &cfg,
+                        const ProcessorContext &ctx,
+                        SignalProcessor::Output &out)
+{
+  if (signal.source_id == "cortext/consolidate")
+    {
+      out.consolidation_recommended = false;
+      out.consolidation_required = false;
+      return;
+    }
+  const uint64_t now_ts = signal.timestamp;
+  const uint64_t last_ts = ctx.last_consolidation_ts;
+  const uint64_t since_ms
+      = (last_ts > 0 && now_ts > last_ts) ? (now_ts - last_ts) : 0;
+
+  const uint64_t interval_ms
+      = static_cast<uint64_t> (
+            std::max (0, core::ConsolidationIntervalSeconds (cfg.stability)))
+        * 1000;
+  const uint64_t required_interval_ms
+      = static_cast<uint64_t> (
+            std::max (0, core::ConsolidationRequiredIntervalSeconds (cfg.stability)))
+        * 1000;
+
+  const bool time_recommended
+      = (interval_ms > 0) && (since_ms >= interval_ms);
+  const bool time_required
+      = (required_interval_ms > 0) && (since_ms >= required_interval_ms);
+
+  const long long count = std::max (0, ctx.memories_since_consolidation);
+  const long long count_threshold
+      = core::ConsolidationThresholdCount (cfg.stability);
+  const long long count_required
+      = core::ConsolidationRequiredCount (cfg.stability);
+  const bool count_recommended = count >= count_threshold;
+  const bool count_req = count >= count_required;
+
+  const bool required = time_required || count_req;
+  const bool recommended = required || time_recommended || count_recommended;
+  out.consolidation_recommended = recommended;
+  out.consolidation_required = required;
 }
 
 const char *
@@ -474,6 +536,9 @@ LoadState (Store &store, ProcessorContext &ctx)
           = static_cast<uint64_t> (ExtractInt64 (row, "last_consolidation_ts", 0));
       ctx.consolidation_count
           = static_cast<int> (ExtractInt64 (row, "consolidation_count", 0));
+      ctx.memories_since_consolidation
+          = static_cast<int> (
+              ExtractInt64 (row, "memories_since_consolidation", 0));
       ctx.is_processing_signal
           = ExtractInt64 (row, "is_processing_signal", 0) != 0;
 
@@ -1077,6 +1142,7 @@ SignalProcessor::Process (const Signal &signal)
   Output out;
   AssembleOutputMemories (op_context, out);
   AssembleOutputFields (op_context, out);
+  ApplyConsolidationHint (signal, config_, *context_, out);
   const auto t1 = std::chrono::steady_clock::now ();
   const double ms
       = std::chrono::duration_cast<std::chrono::duration<double, std::milli> > (
@@ -1296,7 +1362,7 @@ SignalProcessor::PersistState (Transaction &tx)
       // Metacognition
       "fok_state, retrieval_strength, metacognitive_confidence, "
       // Consolidation
-      "last_consolidation_ts, consolidation_count, is_processing_signal, last_retrieval_ts, "
+      "last_consolidation_ts, consolidation_count, memories_since_consolidation, is_processing_signal, last_retrieval_ts, "
       // Episode tracking
       "episode_start_ts, last_interrupt_tick, last_signal_timestamp, updated_at, "
       "write_rate_timestamps, "
@@ -1317,7 +1383,7 @@ SignalProcessor::PersistState (Transaction &tx)
       "?, ?, ?, ?, "  // Embedding prediction
       "?, ?, ?, ?, "  // Working memory
       "?, ?, ?, "  // Metacognition
-      "?, ?, ?, ?, "  // Consolidation
+      "?, ?, ?, ?, ?, "  // Consolidation
       "?, ?, ?, ?, ?, "  // Episode tracking + write_rate_timestamps
       "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "  // Blender weights (12)
       "?, ?, "  // Blender ready/count
@@ -1374,6 +1440,7 @@ SignalProcessor::PersistState (Transaction &tx)
         // Consolidation
         static_cast<long long> (context_->last_consolidation_ts),
         context_->consolidation_count,
+        context_->memories_since_consolidation,
         context_->is_processing_signal ? 1 : 0,
         static_cast<long long> (context_->last_retrieval_ts),
         // Episode tracking

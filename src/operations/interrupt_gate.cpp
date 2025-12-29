@@ -142,6 +142,39 @@ ComputeMniGateDecision::Execute (OperationContext &context, Transaction &tx) con
   const auto &signal = context.GetSignal ();
   context.SetSelectedCandidateId (std::nullopt);
 
+  const double F = cortext::core::Clamp<double> (cfg.focus,
+                                                 constants::kNormalizedMin,
+                                                 constants::kNormalizedMax);
+  const double S = cortext::core::Clamp<double> (cfg.sensitivity,
+                                                 constants::kNormalizedMin,
+                                                 constants::kNormalizedMax);
+  const double T = cortext::core::Clamp<double> (cfg.stability,
+                                                 constants::kNormalizedMin,
+                                                 constants::kNormalizedMax);
+  const double F_eff = cortext::core::FocusBias (F);
+  const double S_eff = cortext::core::SensitivityBias (S);
+  const double retrieval_thresh
+      = cortext::core::RetrievalThresholdInterrupt (F, S);
+  const double boundary_mult
+      = cortext::core::Lerp (kBoundaryFMin, kBoundaryFMax, F)
+        * cortext::core::Lerp (kBoundarySMin, kBoundarySMax, S)
+        * cortext::core::Lerp (1.4, 0.6, T);
+  const double boundary_mult_base
+      = boundary_mult * (1.0 - 0.20 * cortext::core::SensitivityBias (S));
+
+  context.SetInterruptGateHasCandidates (false);
+  context.SetInterruptGateBlockedNoStore (false);
+  context.SetInterruptGateRelPass (false);
+  context.SetInterruptGateNoveltyPass (false);
+  context.SetInterruptGateMuPass (false);
+  context.SetInterruptGateNoveltyMuPass (false);
+  context.SetInterruptGateDupPass (false);
+  context.SetInterruptGateBoundaryMuPass (false);
+  context.SetInterruptGateRelStar (constants::kNormalizedMin);
+  context.SetInterruptGateRetrievalThresh (retrieval_thresh);
+  context.SetInterruptGateBoundaryMultEff (boundary_mult_base);
+  context.SetInterruptGateAffectDrive (constants::kNormalizedMin);
+
   auto acc_it = p_ctx.accumulator_states.find (signal.source_id);
   if (acc_it == p_ctx.accumulator_states.end ())
     {
@@ -154,6 +187,7 @@ ComputeMniGateDecision::Execute (OperationContext &context, Transaction &tx) con
   const auto &raw_candidates = context.GetRetrievedMemoryEmbeddings ();
   if (raw_candidates.empty ())
     {
+      context.SetInterruptGateHasCandidates (false);
       context.SetInterruptAllowed (false);
       // Diagnostics defaults
       context.SetMniJaccard (constants::kNormalizedMax);
@@ -173,6 +207,8 @@ ComputeMniGateDecision::Execute (OperationContext &context, Transaction &tx) con
     {
       // No store available - cannot perform timestamp filtering.
       // Deny interrupt to prevent recursive interruptions.
+      context.SetInterruptGateHasCandidates (true);
+      context.SetInterruptGateBlockedNoStore (true);
       context.SetInterruptAllowed (false);
       context.SetMniJaccard (constants::kNormalizedMax);
       context.SetMniBestMu (constants::kNormalizedMin);
@@ -258,6 +294,7 @@ ComputeMniGateDecision::Execute (OperationContext &context, Transaction &tx) con
     catch (...)
       {
         // Query failed - deny interrupt to be safe
+        context.SetInterruptGateHasCandidates (true);
         context.SetInterruptAllowed (false);
         context.SetMniJaccard (constants::kNormalizedMax);
         context.SetMniBestMu (constants::kNormalizedMin);
@@ -272,6 +309,7 @@ ComputeMniGateDecision::Execute (OperationContext &context, Transaction &tx) con
   // If all candidates were filtered out, deny interrupt
   if (candidates.empty ())
     {
+      context.SetInterruptGateHasCandidates (false);
       context.SetInterruptAllowed (false);
       context.SetMniJaccard (constants::kNormalizedMax);
       context.SetMniBestMu (constants::kNormalizedMin);
@@ -281,6 +319,8 @@ ComputeMniGateDecision::Execute (OperationContext &context, Transaction &tx) con
       context.SetMniTauMuEff (constants::kNormalizedMin);
       return;
     }
+
+  context.SetInterruptGateHasCandidates (true);
 
   // Build WM set (used for duplicate suppression and overlap checks)
   std::vector<Eigen::VectorXf> wm_vecs;
@@ -345,24 +385,36 @@ ComputeMniGateDecision::Execute (OperationContext &context, Transaction &tx) con
   const double surprisal
       = Clamp01 (context.GetMetric (operations::Metric::embedding_surprisal)
                      .value_or (0.0));
+  const double salience
+      = Clamp01 (
+          context.GetMetric (operations::Metric::salience).value_or (0.0));
+  const double emotion_intensity
+      = Clamp01 (context.GetEmotionIntensity ());
+  const double arousal = Clamp01 (context.GetArousal ());
 
-  // Knob-derived parameters
-  const double F = cortext::core::Clamp<double> (cfg.focus,
-                                                 constants::kNormalizedMin,
-                                                 constants::kNormalizedMax);
-  const double S = cortext::core::Clamp<double> (cfg.sensitivity,
-                                                 constants::kNormalizedMin,
-                                                 constants::kNormalizedMax);
-  const double T = cortext::core::Clamp<double> (cfg.stability,
-                                                 constants::kNormalizedMin,
-                                                 constants::kNormalizedMax);
-  const double F_eff = cortext::core::FocusBias (F);
-  const double S_eff = cortext::core::SensitivityBias (S);
+  const double s_affect = cortext::core::AffectSensitivityBias (S);
+  const double w_arousal_raw = cortext::core::Lerp (0.30, 0.55, s_affect);
+  const double w_emotion_raw = cortext::core::Lerp (0.30, 0.55, s_affect);
+  const double w_salience_raw = cortext::core::Lerp (0.10, 0.20, s_affect);
+  const double w_sum = std::max (constants::kNormEpsilon,
+                                 w_arousal_raw + w_emotion_raw + w_salience_raw);
+  const double w_arousal = w_arousal_raw / w_sum;
+  const double w_emotion = w_emotion_raw / w_sum;
+  const double w_salience = w_salience_raw / w_sum;
+  const double affect_gain = cortext::core::AffectGain (S);
+  const double affect_drive = Clamp01 (
+      affect_gain
+      * (w_arousal * arousal + w_emotion * emotion_intensity
+         + w_salience * salience));
+  const bool affect_interrupt = context.GetConfig ().affect_interrupt;
+  const double affect_drive_used = affect_interrupt ? affect_drive : 0.0;
+  const double affect_relax
+      = 1.0 - cortext::core::InterruptAffectRelaxCoeff (S) * affect_drive_used;
+  const double retrieval_thresh_eff = retrieval_thresh * affect_relax;
+  const double boundary_mult_eff = boundary_mult_base * affect_relax;
 
-  // Retrieval threshold (Section 8.1)
-  const double retrieval_thresh
-      = cortext::core::RetrievalThresholdInterrupt (F, S);
-
+  // Knob-derived parameters (F/S/T, F_eff/S_eff, retrieval_thresh) are set
+  // at the start of this operation for diagnostics.
   // Derived weights (raw)
   const double w_cov_raw = cortext::core::Lerp (kCovMin, kCovMax, F_eff);
   const double w_rel_raw = cortext::core::Lerp (kRelMax, kRelMin, F_eff);
@@ -408,13 +460,7 @@ ComputeMniGateDecision::Execute (OperationContext &context, Transaction &tx) con
       = 1.0 + (1.0 - acc_maturity) * core::Lerp (0.4, 1.0, T);
   const double tau_m_eff = tau_mu * M_refrac * maturity_scale;
 
-  // Boundary multiplier
-  const double boundary_mult
-      = cortext::core::Lerp (kBoundaryFMin, kBoundaryFMax, F)
-        * cortext::core::Lerp (kBoundarySMin, kBoundarySMax, S)
-        * cortext::core::Lerp (1.4, 0.6, T);
-  const double boundary_mult_eff
-      = boundary_mult * (1.0 - 0.20 * cortext::core::SensitivityBias (S));
+  // Boundary multiplier (precomputed at start of operation)
   const bool at_boundary = context.GetAtBoundary ();
 
   // Limit candidates to top K by relevance (Section 8.3)
@@ -539,11 +585,26 @@ ComputeMniGateDecision::Execute (OperationContext &context, Transaction &tx) con
       A.push_back (kv.first);
     }
 
+  const bool rel_pass = (rel_star >= retrieval_thresh_eff);
+  const bool novelty_pass = (novelty_star >= tau_novelty_eff);
+  const bool mu_pass = (best_mu >= tau_m_eff);
+  const bool novelty_mu_pass = (novelty_pass || mu_pass);
+  const bool dup_pass = (overlap_star < dup_thresh);
+  const bool boundary_mu_pass
+      = (at_boundary || best_mu >= boundary_mult_eff * tau_m_eff);
   const bool allow_interrupt
-      = (rel_star >= retrieval_thresh)
-        && ((novelty_star >= tau_novelty_eff) || (best_mu >= tau_m_eff))
-        && (overlap_star < dup_thresh)
-        && (at_boundary || best_mu >= boundary_mult_eff * tau_m_eff);
+      = rel_pass && novelty_mu_pass && dup_pass && boundary_mu_pass;
+
+  context.SetInterruptGateRelPass (rel_pass);
+  context.SetInterruptGateNoveltyPass (novelty_pass);
+  context.SetInterruptGateMuPass (mu_pass);
+  context.SetInterruptGateNoveltyMuPass (novelty_mu_pass);
+  context.SetInterruptGateDupPass (dup_pass);
+  context.SetInterruptGateBoundaryMuPass (boundary_mu_pass);
+  context.SetInterruptGateRelStar (rel_star);
+  context.SetInterruptGateRetrievalThresh (retrieval_thresh_eff);
+  context.SetInterruptGateBoundaryMultEff (boundary_mult_eff);
+  context.SetInterruptGateAffectDrive (affect_drive_used);
 
   context.SetInterruptAllowed (allow_interrupt);
   context.SetSelectedCandidateId (allow_interrupt
@@ -594,6 +655,8 @@ ComputeMniGateDecision::Execute (OperationContext &context, Transaction &tx) con
     telemetry::Attribute::Double ("acc_maturity", acc_maturity),
     telemetry::Attribute::Double ("maturity_scale", maturity_scale),
     telemetry::Attribute::Double ("retrieval_thresh", retrieval_thresh),
+    telemetry::Attribute::Double ("retrieval_thresh_eff", retrieval_thresh_eff),
+    telemetry::Attribute::Double ("affect_drive", affect_drive_used),
     telemetry::Attribute::Double ("w_cov_raw", w_cov_raw),
     telemetry::Attribute::Double ("w_rel_raw", w_rel_raw),
     telemetry::Attribute::Double ("w_red_raw", w_red_raw),

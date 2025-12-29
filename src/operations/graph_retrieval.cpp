@@ -155,6 +155,8 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
     double source_confidence;
     double proc_score;
     int source_contradictions;
+    double emotion_intensity;
+    double arousal_avg;
     Eigen::VectorXf vec;
     Eigen::VectorXf ctx;
   };
@@ -220,7 +222,7 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
           created_at = std::any_cast<long long> (it_created->second);
         }
       seeds.push_back (Scored{ emb_id, mem_id, created_at, sim, 0.0, 1.0,
-                               0.0, 0, v, Eigen::VectorXf () });
+                               0.0, 0, 0.0, 0.0, v, Eigen::VectorXf () });
     }
 
   if (seeds.empty ())
@@ -256,6 +258,18 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
     }
 
   // Expand via ASSOCIATIONS graph traversal
+  auto get_double = [] (const std::any &v, double def) -> double {
+    if (v.type () == typeid (double))
+      return std::any_cast<double> (v);
+    if (v.type () == typeid (float))
+      return static_cast<double> (std::any_cast<float> (v));
+    if (v.type () == typeid (int))
+      return static_cast<double> (std::any_cast<int> (v));
+    if (v.type () == typeid (long long))
+      return static_cast<double> (std::any_cast<long long> (v));
+    return def;
+  };
+
   if (!expanded_memory_ids.empty ())
     {
       try
@@ -319,7 +333,8 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
           std::string sql = "SELECT m.memory_id, m.embedding_id, e.embedding, "
                             "COALESCE(m.created_at, e.created_at, 0) AS created_at, "
                             "m.context, m.source_origin, m.source_reliability, "
-                            "m.source_contradiction_count "
+                            "m.source_contradiction_count, m.emotional_intensity, "
+                            "m.s_arousal_avg "
                             "FROM memories m "
                             "JOIN embeddings e ON m.embedding_id = e.embedding_id "
                             "WHERE m.memory_id IN (";
@@ -346,6 +361,8 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
               auto it_origin = row.find ("source_origin");
               auto it_rel = row.find ("source_reliability");
               auto it_contra = row.find ("source_contradiction_count");
+              auto it_emotion = row.find ("emotional_intensity");
+              auto it_arousal = row.find ("s_arousal_avg");
               if (it_mem_id == row.end () || it_emb_id == row.end () || it_emb == row.end ())
                 continue;
               if (it_mem_id->second.type () != typeid (long long))
@@ -398,6 +415,19 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
                       = static_cast<int> (std::any_cast<long long> (it_contra->second));
                 }
 
+              double memory_emotion = 0.0;
+              if (it_emotion != row.end () && it_emotion->second.has_value ())
+                {
+                  memory_emotion
+                      = core::Clamp (get_double (it_emotion->second, 0.0), 0.0, 1.0);
+                }
+              double memory_arousal = 0.0;
+              if (it_arousal != row.end () && it_arousal->second.has_value ())
+                {
+                  memory_arousal
+                      = core::Clamp (get_double (it_arousal->second, 0.0), 0.0, 1.0);
+                }
+
               double age_s = 0.0;
               if (created_at > 0
                   && signal.timestamp > static_cast<uint64_t> (created_at))
@@ -426,7 +456,8 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
 
               scored.push_back (Scored{ emb_id, mem_id, created_at, sim,
                                         ctx_sim, source_conf, proc_score,
-                                        contradiction_count, v, ctx_vec });
+                                        contradiction_count, memory_emotion,
+                                        memory_arousal, v, ctx_vec });
               fetched_any = true;
             }
         }
@@ -469,6 +500,39 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
   const double w_ctx = core::Lerp (0.15, 0.35, f_eff)
                        * core::Lerp (1.0, 0.85, s_eff);
   const double w_proc = core::Lerp (0.10, 0.25, s_eff);
+  const double w_emotion
+      = cfg.affect_retrieval
+            ? core::RetrievalEmotionWeight (cfg.sensitivity)
+            : 0.0;
+
+  const double salience = core::Clamp (
+      context.GetMetric (operations::Metric::salience).value_or (0.0), 0.0, 1.0);
+  const double emotion_intensity
+      = core::Clamp (context.GetEmotionIntensity (), 0.0, 1.0);
+  const double arousal = core::Clamp (context.GetArousal (), 0.0, 1.0);
+  const double s_affect = core::AffectSensitivityBias (cfg.sensitivity);
+  const double w_arousal_raw = core::Lerp (0.30, 0.55, s_affect);
+  const double w_emotion_raw = core::Lerp (0.30, 0.55, s_affect);
+  const double w_salience_raw = core::Lerp (0.10, 0.20, s_affect);
+  const double w_aff_sum = std::max (constants::kNormEpsilon,
+                                     w_arousal_raw + w_emotion_raw
+                                       + w_salience_raw);
+  const double w_aff_arousal = w_arousal_raw / w_aff_sum;
+  const double w_aff_emotion = w_emotion_raw / w_aff_sum;
+  const double w_aff_salience = w_salience_raw / w_aff_sum;
+  const double affect_gain = core::AffectGain (cfg.sensitivity);
+  const double affect_drive
+      = core::Clamp (affect_gain
+                         * (w_aff_arousal * arousal
+                            + w_aff_emotion * emotion_intensity
+                            + w_aff_salience * salience),
+                     0.0, 1.0);
+  const double w_mem_emotion_raw = core::Lerp (0.60, 0.80, s_eff);
+  const double w_mem_arousal_raw = core::Lerp (0.20, 0.40, s_eff);
+  const double w_mem_sum = std::max (constants::kNormEpsilon,
+                                     w_mem_emotion_raw + w_mem_arousal_raw);
+  const double w_mem_emotion = w_mem_emotion_raw / w_mem_sum;
+  const double w_mem_arousal = w_mem_arousal_raw / w_mem_sum;
 
   const double source_thresh = core::Lerp (0.15, 0.45, cfg.stability);
   auto filter_candidates = [&] (const std::vector<Scored> &candidates) {
@@ -539,6 +603,10 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
             const double relevance = std::max (0.0, candidates[i].score);
             const double ctx_sim = std::max (0.0, candidates[i].ctx_score);
             const double proc_sim = std::max (0.0, candidates[i].proc_score);
+            const double memory_affect
+                = w_mem_emotion * candidates[i].emotion_intensity
+                  + w_mem_arousal * candidates[i].arousal_avg;
+            const double emotion_bonus = affect_drive * memory_affect;
             double max_redundancy = 0.0;
             for (const auto &sel : selected)
               {
@@ -548,7 +616,7 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
               }
             const double mmr
                 = w_rel * relevance + w_ctx * ctx_sim + w_proc * proc_sim
-                  - w_div * max_redundancy;
+                  + w_emotion * emotion_bonus - w_div * max_redundancy;
             if (mmr > best_score)
               {
                 best_score = mmr;

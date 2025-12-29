@@ -55,6 +55,19 @@ consolidation_threshold(T) = n_ctx(T) × win_score(T)  # memory-count trigger
 merge_threshold(F) = lerp(0.85, 0.95, F)  # similarity required for clustering
 ```
 
+**Recommendation signal (external scheduling):** Each `Process*` call returns two flags that notify the caller when consolidation is **recommended** or **required** (without auto-triggering). These use the same knob-derived thresholds:
+
+```
+consolidation_recommended =
+  (elapsed_time ≥ consolidation_interval) OR
+  (memories_since_consolidation ≥ consolidation_threshold)
+consolidation_required =
+  (elapsed_time ≥ consolidation_required_interval) OR
+  (memories_since_consolidation ≥ consolidation_required_threshold)
+consolidation_required_interval(T) = consolidation_interval(T) × lerp(1.5, 2.5, T)
+consolidation_required_threshold(T) = consolidation_threshold(T) × lerp(1.5, 2.5, T)
+```
+
 The consolidation rate adapts to Stability and Sensitivity (write_rate tracks memory writes, not signal writes):
 
 ```
@@ -269,13 +282,21 @@ w_div_raw = lerp(0.35, 0.06, F) × lerp(0.75, 1.15, S) × lerp(0.85, 0.65, T)
 [w_rel, w_div] = normalize([w_rel_raw, w_div_raw])
 w_ctx = lerp(0.15, 0.35, F) × lerp(1.0, 0.85, S)
 w_proc = lerp(0.10, 0.25, S)
+w_emotion = lerp(0.0, 0.12, S_affect)
+affect_gain(S) = lerp(1.0, 2.4, S_affect)
+weights_aff_raw = [lerp(0.30, 0.55, S_affect), lerp(0.30, 0.55, S_affect), lerp(0.10, 0.20, S_affect)]
+[w_arousal, w_emotion_raw, w_salience] = normalize(weights_aff_raw)
+affect_drive = clamp(affect_gain(S) × (w_arousal × arousal + w_emotion_raw × emotion_intensity + w_salience × salience), 0, 1)
+weights_mem_raw = [lerp(0.60, 0.80, S), lerp(0.20, 0.40, S)]
+[w_mem_emotion, w_mem_arousal] = normalize(weights_mem_raw)
 
 selected ← []
 while |selected| < k AND |eligible| > 0:
     m* ← argmax_{m ∈ eligible} [
             w_rel × max(0, cos(q, m.embedding)) +
             w_ctx × max(0, cos(q_ctx, m.context)) +
-            w_proc × max(0, proc_sim(m)) −
+            w_proc × max(0, proc_sim(m)) +
+            w_emotion × affect_drive × (w_mem_emotion × emotional_intensity(m) + w_mem_arousal × s_arousal_avg(m)) −
             w_div × max_{s∈selected} max(0, cos(m.embedding, s.embedding))
          ]
     selected.append(m*)
@@ -284,5 +305,7 @@ return selected
 ```
 
 Graph expansion uses recursive traversal with depth limits to find related context that pure vector search might miss. Using the memory centroid maintains consistency between vector search and graph expansion results.
+
+For affective gain in retrieval, we use a lighter bias \(S_{affect} = \mathrm{BiasMid}(S, -0.06)\) to preserve mid‑range affect modulation.
 
 `proc_sim(m)` denotes procedural similarity (habit/skill match) when a procedural embedding is available; if no procedural cue is present, treat it as 0 so retrieval remains purely declarative.

@@ -330,6 +330,7 @@ struct ProcessorContext
   uint64_t last_consolidation_ts = 0;
   uint64_t last_retrieval_ts = 0;
   int consolidation_count = 0;
+  int memories_since_consolidation = 0;
   bool is_processing_signal = false;
 
   // ======================================================================

@@ -2,7 +2,7 @@
 
 The interrupt gate controls when retrieved memories enter active context during streaming generation. The gate balances novelty value against disruption cost. The interrupt gate operates on memory-level context, using centroids (μ_acc) rather than individual signal embeddings for novelty and relevance computation. All thresholds and gains in this section are derived from the three knobs (F, S, T); no fixed behavioral constants are introduced.
 
-**Note:** As defined in Section 1, all knob symbols here use the midpoint‑biased values F̃ and S̃ (T is unmodified).
+**Note:** As defined in Section 1, all knob symbols here use the midpoint‑biased values F̃ and S̃ (T is unmodified). For affective gain, we use a lighter bias \( \tilde{S}_{affect} = \mathrm{BiasMid}(S, -0.06) \) to preserve mid‑range affect modulation.
 
 ## Marginal Utility Computation
 
@@ -13,6 +13,11 @@ Novelty thresholds scale with knobs and refractory state:
 τ_mu = lerp(0.08, 0.18, F) × (1 − 0.4S) × (1 + 0.4T)
 retrieval_thresh(F) = lerp(0.12, 0.45, F)
 retrieval_thresh_interrupt(F,S) = retrieval_thresh(F) × (1 − 0.12S)
+affect_relax_coeff(S) = lerp(0.15, 0.55, S_affect)
+affect_gain(S) = lerp(1.0, 2.4, S_affect)
+weights_aff_raw = [lerp(0.30, 0.55, S_affect), lerp(0.30, 0.55, S_affect), lerp(0.10, 0.20, S_affect)]
+[w_arousal, w_emotion, w_salience] = normalize(weights_aff_raw)
+affect_drive = clamp(affect_gain(S) × (w_arousal × arousal + w_emotion × emotion_intensity + w_salience × salience), 0, 1)
 ```
 
 Refractory dynamics suppress rapid successive interrupts:
@@ -40,6 +45,8 @@ Effective thresholds incorporate refractory pressure:
 τ_novelty_eff = τ_novelty × M_refrac
 acc_maturity = clamp(n / win_coh(T), 0, 1)  # n = signals accumulated in current unit
 τ_mu_eff = τ_mu × M_refrac × (1 + (1 − acc_maturity) × lerp(0.4, 1.0, T))
+retrieval_thresh_eff = retrieval_thresh_interrupt(F,S) × (1 − affect_relax_coeff(S) × affect_drive)
+boundary_mult_eff = boundary_mult × (1 − 0.20S) × (1 − affect_relax_coeff(S) × affect_drive)
 ```
 
 ## Marginal Utility Score
@@ -135,7 +142,7 @@ else:
         max_cos = max_{c ∈ ctx_window} cos(candidate_star, c)  # in [−1, 1]
         novelty_star = clamp((1 − max_cos) / 2, 0, 1)
     allow_interrupt =
-        (rel_star ≥ retrieval_thresh_interrupt(F,S)) AND
+        (rel_star ≥ retrieval_thresh_eff) AND
         (novelty_star ≥ τ_novelty_eff OR mu_star ≥ τ_mu_eff) AND
         (overlap_star < dup_thresh) AND
         (at_drift_boundary OR mu_star ≥ boundary_mult_eff × τ_mu_eff)

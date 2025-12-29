@@ -72,6 +72,20 @@ public:
     std::vector<Memory> working_memory;    ///< Active WM slots (conversation context)
     std::vector<Memory> retrieved_memory;  ///< Long-term retrieval results (injected context)
     bool should_interrupt = false;
+    bool consolidation_recommended = false;
+    bool consolidation_required = false;
+    bool interrupt_gate_has_candidates = false;
+    bool interrupt_gate_blocked_no_store = false;
+    bool interrupt_gate_rel_pass = false;
+    bool interrupt_gate_novelty_pass = false;
+    bool interrupt_gate_mu_pass = false;
+    bool interrupt_gate_novelty_mu_pass = false;
+    bool interrupt_gate_dup_pass = false;
+    bool interrupt_gate_boundary_mu_pass = false;
+    double interrupt_gate_rel_star = 0.0;
+    double interrupt_gate_retrieval_thresh = 0.0;
+    double interrupt_gate_boundary_mult_eff = 0.0;
+    double interrupt_gate_affect_drive = 0.0;
     ProcessorOutput output;
   };
 
@@ -81,6 +95,8 @@ public:
     double focus = 0.5;
     double sensitivity = 0.5;
     double stability = 0.5;
+    bool affect_interrupt = true;
+    bool affect_retrieval = true;
   };
 
   /// @brief Factory to create a Cortext instance.
