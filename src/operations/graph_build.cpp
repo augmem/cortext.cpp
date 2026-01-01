@@ -369,6 +369,10 @@ DecayReinforcementEdges (Transaction &tx, double decay_rate)
 void
 BuildGraphFromConsolidation::Execute (OperationContext &context, Transaction &tx) const
 {
+  if (!context.GetConsolidationShouldStart ())
+    {
+      return;
+    }
   Store *store = context.GetStore ();
   const auto &cfg = context.GetConfig ();
   const long long now_ts
@@ -406,11 +410,17 @@ BuildGraphFromConsolidation::Execute (OperationContext &context, Transaction &tx
       BuildContradictionEdges (tx, clusters, contradiction_threshold, now_ts);
 
       // 5) Sequential edges: preserve episode order
-      BuildSequentialEdges (tx, clusters, tau_seq, now_ts);
+      if (cfg.sequential_edges_enabled)
+        {
+          BuildSequentialEdges (tx, clusters, tau_seq, now_ts);
+        }
     }
 
   // 6) Decay reinforcement edges (created during retrieval)
-  DecayReinforcementEdges (tx, reinforcement_decay);
+  if (cfg.reinforcement_enabled)
+    {
+      DecayReinforcementEdges (tx, reinforcement_decay);
+    }
 
   // Count associations for logging
   long long edges_count = 0;

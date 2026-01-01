@@ -249,12 +249,17 @@ Note: coherence_mem is distinct from coherence_struct (@sec-struct-coherence). T
 
 ### Natural Boundary Detection (Bayesian Change-Point) {#sec-boundary}
 
-Segmentation is framed as online change-point inference. We compute a **calibrated boundary probability** rather than a hand-tuned score. The hazard is knob-controlled; the likelihood is driven by surprisal, cohesion drop, drift, and temporal gaps.
+Segmentation is framed as online change-point inference. We compute a **calibrated boundary probability** rather than a hand-tuned score. The hazard is knob-controlled; the likelihood is driven by surprisal, cohesion drop, drift, and temporal gaps, with a coherence/topic **support gate** to downweight isolated spikes.
 
 ```
-# Hazard (prior boundary probability)
-h_base(F,S,T) = lerp(0.02, 0.12, S) × lerp(1.2, 0.8, T)
-h_t ← clamp(h_base × (0.8 + 0.2(1 − F)), 0, 0.5)
+# Hazard (prior boundary probability, calibrated to target rate)
+h_base(F,S,T) = lerp(0.03, 0.18, S) × lerp(1.2, 0.8, T)
+h_t_base ← clamp(h_base × (0.8 + 0.2(1 − F)), 0, 0.5)
+target_rate(F,S,T) = clamp(lerp(0.12, 0.35, S) × lerp(1.1, 0.7, F) × lerp(1.0, 0.7, T), 0.05, 0.45)
+rate_gain(S,T) = clamp(lerp(0.4, 1.0, S) × lerp(1.1, 0.8, T), 0.2, 1.2)
+rate_mult ← clamp(1 + rate_gain × (target_rate − boundary_rate_ema), 0.5, 1.5)
+# support uses normalized coherence/topic signals (defined below)
+h_t ← clamp(h_t_base × rate_mult × lerp(0.8, 1.3, support), 0, 0.5)
 
 # Drift spike (same signal, now used for likelihood)
 ε0(T) = lerp(0.005, 0.02, 1 − T)  # cold-start guard for eta_prev
@@ -273,14 +278,34 @@ gap_ref_s ← gap_scale(T) × dt_ref
 gap_z ← (signal_gap_s − gap_ref_s) / max(gap_ref_s, ε)
 gap_score ← sigmoid(gap_z)
 
+# Local normalization (within-episode, contrast-boosted)
+ema_mean_x ← EWMA(ema_mean_x, x, α_local(T))
+ema_var_x  ← EWMA(ema_var_x, (x − ema_mean_x)^2, α_local(T))
+norm_gain(S,T) = clamp(lerp(1.6, 3.0, S) × lerp(1.05, 0.95, T), 1.0, 3.2)
+x̂ ← sigmoid(norm_gain × (x − ema_mean_x) / sqrt(ema_var_x + ε))  # warm-up uses raw x
+
+# Topic shift (embedding-only, temporal context anchor)
+topic_shift ← 1 − map01(cos(e_t, c_t))
+
 # Likelihood of a boundary given observations
-[w_s, w_d, w_c, w_g] ← normalize([0.45 + 0.25S, 0.25 + 0.10(1 − T), 0.20 + 0.10F, 0.10])
-z_t ← w_s×(surprisal_t − 0.5) +
-      w_d×(sigmoid(drift_spike) − 0.5) +
-      w_c×(coh_drop01 − 0.5) +
-      w_g×(gap_score − 0.5)
-k_cp(S,T) = lerp(3, 9, S) × lerp(1.1, 0.9, T)
-lik_boundary ← sigmoid(k_cp(S,T) × z_t)
+support ← clamp(0.5 × coĥ + 0.5 × topiĉ, 0, 1)
+support_gate ← lerp(0.45, 1.0, support)   # downweight isolated spikes
+gap_gate ← lerp(0.10, 0.50, support)
+support_boost ← lerp(1.0, 1.25, support)  # emphasize coherent/topic shifts
+[w_s, w_d, w_c, w_t, w_g] ← [0.34 + 0.14S, 0.18 + 0.05(1 − T),
+                            0.36 + 0.16F, 0.30 + 0.22S, 0.01]
+[w_s, w_d, w_c, w_t, w_g] ← normalize([w_s×support_gate, w_d×support_gate,
+                                      w_c×support_boost, w_t×support_boost, w_g×gap_gate])
+z_center(S,T) = clamp(lerp(0.44, 0.30, S) × lerp(1.05, 0.95, T), 0.26, 0.58)
+z_center_eff ← clamp(z_center × lerp(1.0, 0.75, support), 0.24, 0.58)
+z_t ← w_s×(surprisal̂ − z_center_eff) +
+      w_d×(drift̂ − z_center_eff) +
+      w_c×(coĥ − z_center_eff) +
+      w_t×(topiĉ − z_center_eff) +
+      w_g×(gap_score − z_center_eff)
+k_cp(S,T) = lerp(8, 22, S) × lerp(1.1, 0.9, T)
+k_cp_eff ← k_cp × lerp(0.9, 1.35, support)
+lik_boundary ← sigmoid(k_cp_eff × z_t)
 
 # Bayesian update for boundary posterior
 boundary_score ← (h_t × lik_boundary) /
@@ -292,7 +317,6 @@ Boundary threshold and limits:
 
 ```
 b_thresh(F, S) = lerp(0.48, 0.66, F) × lerp(1.1, 0.9, S)
-max_mem_time(T) = lerp(30, 120, T)  # seconds
 max_mem_drift(S) = lerp(0.8, 2.0, S)  # cumulative drift cap
 ```
 
@@ -310,11 +334,28 @@ pressure_score ← sigmoid((saturation_ratio − 1) × k_flush(S,T))
 Hard capacity ceiling (max signals per memory; knob-derived):
 
 ```
-base = lerp(1.5, 4.5, T)
-f_scale = lerp(1.00, 0.25, F)
-s_scale = lerp(1.00, 0.45, S)
-floor = round(lerp(1, 3, T))
+base = lerp(4.0, 12.0, T)
+f_scale = lerp(1.00, 0.35, F)
+s_scale = lerp(1.00, 0.55, S)
+floor = round(lerp(2, 3, T))
 max_signals(F,S,T) = max(floor, round(base × f_scale × s_scale))
+```
+
+Adaptive cadence:
+
+```
+dt_ref ← max(dt_ema, dt_floor(T))
+gap_ref_s ← gap_scale(T) × dt_ref
+max_mem_time(T) ← clamp(lerp(2.5, 5.5, T) × gap_ref_s,
+                        lerp(6, 20, T),
+                        lerp(60, 180, T))
+```
+
+Fallback boundary floor (applies to time/capacity/pressure only):
+
+```
+boundary_floor(F,S,T) = clamp(lerp(0.05, 0.15, S) × lerp(1.2, 0.8, F) × lerp(1.1, 0.9, T),
+                              0.02, 0.25)
 ```
 
 Trigger memory flush when:
@@ -322,12 +363,12 @@ Trigger memory flush when:
 ```
 mem_elapsed ← now_s() − to_s(t_start)
 should_flush = (boundary_score > b_thresh(F, S)) OR
-               (mem_elapsed > max_mem_time(T)) OR
-               (pressure_score > b_thresh(F, S)) OR
-               (n ≥ max_signals(F,S,T))
+               (mem_elapsed > max_mem_time(T) AND boundary_score ≥ boundary_floor(F,S,T)) OR
+               (pressure_score > b_thresh(F, S) AND boundary_score ≥ boundary_floor(F,S,T)) OR
+               (n ≥ max_signals(F,S,T) AND boundary_score ≥ boundary_floor(F,S,T))
 ```
 
-where signal_gap_s = now_s() − to_s(last_signal_ts) is computed at the start of signal processing (before last_signal_ts is updated). Gap timing influences boundary_score via gap_score rather than forcing an unconditional flush, which avoids splitting mid-thought when upstream processing introduces non-deterministic latency.
+where signal_gap_s = now_s() − to_s(last_signal_ts) is computed at the start of signal processing (before last_signal_ts is updated). Gap timing influences boundary_score via gap_score and sets the adaptive cadence used by max_mem_time, avoiding a fixed flush timer.
 
 **Boundary type note:** When the max-signals ceiling triggers a flush, set `boundary_type = "capacity"` for the enclosing episode. This is a hard safety boundary (not a heuristic score) and is still fully knob-derived.
 
@@ -394,6 +435,10 @@ Representative embedding blends accumulator mean with peak:
 ```
 ρ(F) = lerp(0.2, 0.6, F)  # mean vs peak blend
 e_rep ← l2_normalize(ρ(F) × μ_acc + (1 − ρ(F)) × e_peak)
+
+# Edge-case guard
+if |μ_acc| = 0: e_rep ← e_peak
+if |e_peak| = 0 OR dim(e_peak) ≠ dim(μ_acc): e_rep ← μ_acc
 ```
 
 On write: store e_rep with metadata {n, s_max, s_avg, drift_acc, mem_elapsed, s_emotion_max=emo_max, s_arousal_avg=arousal_sum / max(n, 1), boundary_score}. Store `c_t` as the temporal context for the memory. Append e_rep to memory_stream and l2_normalize(μ_acc) to recent_memory_centroids. Update `index_store` with the sparse key (@sec-pattern-separation). Reset accumulator for next unit.

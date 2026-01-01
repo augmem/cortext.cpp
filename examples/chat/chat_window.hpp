@@ -13,6 +13,11 @@
 
 namespace chat {
 
+struct ChatMessage {
+  std::string role;
+  std::string content;
+};
+
 // Memory event types
 enum class MemoryEventType {
   STORED,
@@ -70,6 +75,7 @@ public:
   struct State {
     std::mutex* mu = nullptr;
     std::vector<cortext::Cortext::Context::Memory>* working_memory = nullptr;
+    std::deque<ChatMessage>* chat_history = nullptr;
     std::deque<MemoryEvent>* memory_events = nullptr;
     std::shared_ptr<LastContext> context;
     std::shared_ptr<StatusBarState> status;

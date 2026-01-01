@@ -1,4 +1,5 @@
 #include "cortext/core/knobs.hpp"
+#include "cortext/consolidation_mode.hpp"
 #include "cortext/processor.hpp"
 #include "cortext/processor/operation_context.hpp"
 #include "cortext/store/store.hpp"
@@ -44,6 +45,7 @@ AssembleOutputFields (const OperationContext &op_context,
                       SignalProcessor::Output &out)
 {
   out.interrupt_allowed = op_context.GetInterruptAllowed ();
+  out.interrupt_aborted = op_context.GetInterruptAborted ();
   out.at_boundary = op_context.GetAtBoundary ();
   out.write_decision = op_context.GetWriteDecision ();
   out.threshold_T_dynamic = op_context.GetThresholdTDynamic ();
@@ -74,10 +76,12 @@ AssembleOutputFields (const OperationContext &op_context,
       = op_context.GetInterruptGateRetrievalThresh ();
   out.interrupt_gate_boundary_mult_eff
       = op_context.GetInterruptGateBoundaryMultEff ();
+  out.boundary_score = op_context.GetBoundaryScore ();
   out.interrupt_gate_affect_drive = op_context.GetInterruptGateAffectDrive ();
   out.composite_score = op_context.GetCompositeScore ();
   out.serial_position_multiplier = op_context.GetSerialPositionMultiplier ();
   out.metrics = op_context.GetAllMetrics ();
+  out.operation_ms = op_context.GetOperationTimings ();
   out.stored_embedding_id = op_context.GetStoredEmbeddingId ();
 }
 
@@ -86,7 +90,7 @@ ApplyConsolidationHint (const Signal &signal, const SignalProcessor::Config &cfg
                         const ProcessorContext &ctx,
                         SignalProcessor::Output &out)
 {
-  if (signal.source_id == "cortext/consolidate")
+  if (IsConsolidationSignal (signal.source_id))
     {
       out.consolidation_recommended = false;
       out.consolidation_required = false;
@@ -1093,6 +1097,7 @@ SignalProcessor::Process (const Signal &signal)
 
   try
     {
+      op_context.SetCurrentOperationType ("StartNewEpisode");
       StartNewEpisode (tx.get (), signal.timestamp);
       if (tx)
         {
@@ -1118,16 +1123,36 @@ SignalProcessor::Process (const Signal &signal)
 
       if (op_context.ShouldFinalizeEpisode ())
         {
+          op_context.SetCurrentOperationType ("FinalizeEpisode");
           FinalizeEpisode (tx.get (), &op_context);
         }
 
       // Persist state within the same transaction (v2 schema)
       if (tx)
         {
+          op_context.SetCurrentOperationType ("PersistState");
           PersistState (*tx);           // Unified state
+          op_context.SetCurrentOperationType ("PersistWorkingMemory");
           PersistWorkingMemory (*tx);   // To MEMORIES
           tx->Commit ();
         }
+    }
+  catch (const std::exception &e)
+    {
+      if (tx)
+        {
+          tx->Rollback ();
+        }
+      const std::string op_type = op_context.GetCurrentOperationType ();
+      const std::string msg
+          = "Process failed in " + op_type + ": " + e.what ();
+      telemetry::LogError (
+          "cortext.process_failed",
+          { telemetry::Attribute::String (
+                "cortext.operation_type",
+                op_type),
+            telemetry::Attribute::String ("cortext.error", e.what ()) });
+      throw std::runtime_error (msg);
     }
   catch (...)
     {
@@ -1135,7 +1160,16 @@ SignalProcessor::Process (const Signal &signal)
         {
           tx->Rollback ();
         }
-      throw;
+      const std::string op_type = op_context.GetCurrentOperationType ();
+      const std::string msg
+          = "Process failed in " + op_type + ": unknown error";
+      telemetry::LogError (
+          "cortext.process_failed",
+          { telemetry::Attribute::String (
+                "cortext.operation_type",
+                op_type),
+            telemetry::Attribute::String ("cortext.error", "unknown") });
+      throw std::runtime_error (msg);
     }
 
   context_->signals_processed += 1;

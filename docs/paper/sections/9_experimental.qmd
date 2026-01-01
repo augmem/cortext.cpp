@@ -4,6 +4,8 @@ We present preliminary experimental results collected from live chat sessions to
 
 All runs reported here are generated with the `examples/topical_chat_analysis` pipeline using ImageBind embeddings; consolidation summarization/labeling (when invoked) uses gemma-3n-e2b via `third_party/litert_lm`. Evaluation logs include lexical overlap (token Jaccard) and **semantic overlap** (ImageBind cosine) for retrieval and interrupt quality. A multi-participant harness (`scripts/run_memory_harness.py`) interleaves conversations to stress long-horizon recall under shared-memory load.
 
+For reproducibility, the analysis runner supports **deterministic synthetic timing** (`--deterministic`, `--seed`), which removes wall‑clock variance while preserving cadence‑derived timing for boundary and interrupt gating. Snapshot configs record the seed and synthetic clock parameters.
+
 To quantify consolidation utility, we also track:
 
 * **retrieval_summary_hit_rate:** share of retrieval turns containing consolidated summaries (ASSOCIATION nodes).
@@ -25,38 +27,268 @@ The dynamic threshold (θ_dynamic) successfully tracked score distributions. In 
 ## Boundary Detection
 Accumulator drift (drift_acc) aligned with semantic shifts. Conversation turns with distinct topics triggered flushes (boundary_score > 0.3) while coherent continuations remained accumulated.
 
+**Boundary calibration smoke (20 turns; F=S=T=0.5, consolidate=0):**
+
+Run: `logs/topical_chat_snapshots/20260101_090407`
+
+* boundary_score_mean: **0.321** (p90 **0.917**)
+* boundary_score_pass_rate: **0.30**
+* boundary_at_rate: **0.30**
+
+**Observation:** Increasing coherence/topic weighting further boosts natural boundary crossings without increasing the boundary rate in the short horizon. The long‑horizon run below will confirm whether capacity/time are now edge cases rather than primary segmenters.
+
+**Boundary tuning (long horizon; 156 turns, consolidate=0):**
+
+Run: `logs/topical_chat_snapshots/20260101_090516_boundary`
+
+* boundary_at_rate: **0.192**
+* boundary_score_pass_rate: **0.122**
+* boundary_score_mean: **0.177**
+
+Chunk‑level episode audit (first conversation, 2‑word cadence):
+
+* drift episodes: **19** (avg **4.42** chunks, p50 **3**, p90 **7**, range **3–8**)
+* capacity episodes: **10** (avg **6.00** chunks, p50 **5.5**, p90 **8**, range **5–8**)
+* timeout episodes: **1** (avg **7.00** chunks, p50 **7**, p90 **7**, range **7–7**)
+
+**Observation:** Natural boundaries now dominate (19 drift vs 10 capacity), while timeouts remain rare. This supports the coherence/topic‑weighted likelihood boost and pushes capacity/time toward edge‑case behavior.
+
+**Interrupt abort/resume check (long horizon; F=S=T=0.5, consolidate=0):**
+
+Run: `logs/topical_chat_snapshots/20260101_105426` (156 turns; dataset‑limited)
+
+* interrupt_abort_rate: **0.667** (36 / 54 interrupts)
+* interrupt_turn_rate: **0.346**
+* boundary_at_rate: **0.122**
+
+**Observation:** Pending aborts often resolve to a committed abort at this horizon, implying many interrupts land mid‑unit and the following signal diverges beyond τ_novelty. The mechanism preserves the ability to resume (when novelty is low) while avoiding partial‑thought persistence when the thread shifts.
+
 ## Latency and Performance
-End-to-end processing per token averaged < 50ms. Graph expansion added < 10ms overhead due to efficient kNN (k=32) and limited expansion depth (d=2).
+End-to-end processing per turn is dominated by embedding + retrieval rather than graph expansion. In the Dec 31, 2025 long-horizon sweep (156 turns, consolidation cycles=2), `perf_total_ms_mean` ranged **0.606–5.05s** depending on knob settings; the default **F=S=T=0.5** run averaged **0.97s/turn**, while **F=S=T=1.0** averaged **0.61s/turn**. Graph expansion remains a small fraction of total time after in-memory summary seeding.
 
-## Long-Horizon Consolidation Ablation
+## Long-Horizon Consolidation Ablation (720 Turns)
 
-We ran a long-horizon stress test with **F=S=T=0.5**, `max_total=360`, `max_turns=360`, and `max_conversations=10` (single-stream, interleave=1) to isolate consolidation effects. Two conditions were compared:
+We ran a long-horizon stress test with **F=S=T=0.5**, `max_total=720`, `max_turns=360`, and `max_conversations=10` (single-stream, interleave=1) to isolate consolidation effects. Two conditions were compared:
 
 * **No consolidation** (`consolidate_cycles=0`)
-* **Consolidation on** (`consolidate_cycles=2`, yielding 4 consolidation runs; summaries produced by gemma-3n-e2b with no fallback)
+* **Consolidation on** (`consolidate_cycles=2`, yielding 8 consolidation runs; summaries produced by gemma-3n-e2b with no fallback)
 
 Key outcomes (Δ = consolidate − no-consolidate):
 
-* **Retrieval semantic overlap mean:** +0.0763 (0.4481 → 0.5244)
-* **Retrieval context-semantic overlap mean:** +0.0878 (0.6348 → 0.7227)
-* **Interrupt semantic overlap mean:** +0.0754 (0.4683 → 0.5438)
-* **Interrupt context-semantic overlap mean:** +0.0870 (0.6404 → 0.7274)
+* **Retrieval semantic overlap mean:** +0.0154 (0.5647 → 0.5801)
+* **Retrieval overlap mean:** +0.0011 (0.2264 → 0.2275)
+* **Interrupt recall:** +0.0124 (0.9543 → 0.9668)
+* **Interrupt precision:** −0.0026 (0.9947 → 0.9921)
+* **Retrieval turn rate:** −0.0056 (0.5528 → 0.5472)
 
-Consolidation contribution metrics confirm summaries are being used:
+Consolidation contribution metrics confirm summaries are being used (but sparsely in this horizon):
 
-* **retrieval_summary_hit_rate:** 0.552 (summaries appear in 55% of retrieval turns)
-* **summary_hit_overlap_mean:** 0.421 (semantic overlap of best summary hit)
-* **retrieval_association_turn_rate:** 0.552 (ASSOCIATION nodes present in 55% of retrieval turns)
+* **retrieval_summary_hit_rate:** 0.0051 (0.51% of retrieval turns include summaries)
+* **summary_hit_overlap_mean:** 0.606 (semantic overlap of best summary hit)
+* **consolidation_summary_count:** 8 (all from gemma-3n-e2b; no fallback)
 
-Interrupt decision quality (consolidate_cycles=2):
+Additional signals:
 
-* **interrupt_precision:** 0.994
-* **interrupt_recall:** 0.873 (false negative rate 0.127)
-* **interrupt_false_positive_rate:** 0.0058
-* **non_interrupt_semantic_overlap_mean vs interrupt_semantic_overlap_mean:** 0.405 → 0.544 (Δ +0.139)
-* **non_interrupt_context_semantic_overlap_mean vs interrupt_context_semantic_overlap_mean:** 0.693 → 0.727 (Δ +0.034)
+* **memory_strength_mean:** 0.6800 → 0.6141 (Δ −0.066), suggesting consolidation redistributes strength across long-term entries rather than strictly amplifying it.
+* **retrieval_avg_candidates:** 55.17 → 55.67 (Δ +0.50), essentially unchanged.
 
-Retrieval and interrupt rates were unchanged, indicating the gains arise from consolidation quality rather than more frequent retrievals.
+Overall, consolidation increases semantic alignment and interrupt recall without materially changing retrieval cadence, but summary usage remains low at this horizon because only eight summaries were produced.
+
+## Extraction Pipeline Validation (CPU-Only, 720 Turns)
+
+We observed that LiteRT constrained decoding for extraction can fail on GPU due to non‑host tensor buffers, so we forced **CPU extraction** and re‑ran the **720‑turn** long‑horizon test (**F=S=T=0.5**, `max_total=720`, `max_turns=720`, `max_conversations=999`, `consolidate_cycles=4`). We compare against the same settings with consolidation off, and against an earlier run where extraction silently failed on GPU.
+
+| condition | consolidation_extraction_results | labels_seen | relations_seen | retrieval_summary_hit_rate | summary_hit_overlap_mean | retrieval_semantic_overlap_mean | interrupt_precision | interrupt_recall |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| no consolidation | 0 | 0 | 0 | 0.0000 | 0.000 | 0.56465 | 0.99471 | 0.95432 |
+| consolidation on (GPU extraction failed) | 0 | 0 | 0 | 0.0176 | 0.645 | 0.56480 | 0.99208 | 0.95674 |
+| consolidation on (CPU extraction) | 13 | 89 | 163 | 0.0427 | 0.585 | 0.56428 | 0.99474 | 0.95939 |
+
+**Observations:** CPU extraction restores label/relation persistence (89 labels, 163 relations) and increases summary presence in retrieval (~4.3% of retrieval turns) while keeping overall semantic alignment and interrupt quality stable. The remaining gap to higher summary usage appears driven by summary count and horizon length rather than extraction errors.
+
+## Association Boost Check (360 Turns)
+
+We added a small **association boost** in retrieval ranking (see @sec-advanced) and re‑ran the 360‑turn baseline with consolidation enabled (**F=S=T=0.5**, `max_total=360`, `max_turns=360`, `max_conversations=6`). We compare **before vs after** on identical settings:
+
+| variant | retrieval_summary_hit_rate | retrieval_association_turn_rate | summary_hit_overlap_mean |
+|---:|---:|---:|---:|
+| before (no boost) | 0.0103 | 0.0103 | 0.664 |
+| after (boost) | 0.0206 | 0.0206 | 0.644 |
+
+**Observations:** The boost roughly **doubles** summary presence in retrieval without affecting candidate volume (≈50 per turn). Summary overlap remains high, indicating the boost favors consolidated association nodes when they are relevant without degrading semantic quality. The absolute hit rate remains low in this short horizon because only four summaries were produced; longer horizons should show a larger effect.
+
+## Long-Horizon Knob Sweep (360 Max Turns)
+
+We ran a long-horizon sweep using `scripts/run_topical_chat_sweep.sh` with
+`max_turns=360`, `max_total=720`, and `consolidate_cycles=2` (no periodic
+consolidation; consolidation runs once at the end). Each run observed **156
+turns** (single conversation), yielding **2 consolidation runs** per config.
+The table reports retrieval/interrupt rates, label candidate rate, and per‑turn
+performance.
+
+Run metadata: **Dec 31, 2025** (`logs/topical_chat_runs/long_horizon_20251231_112600`,
+git rev `8ae72ef`). This run includes the **in‑memory summary cache** for
+retrieval seeding.
+
+| F | S | T | turns | cons_runs | retr_turn_rate | retr_avg_cands | label_rate | retr_sem_overlap | interrupt_rate | perf_ms | signals/sec |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 0 | 0 | 0 | 156 | 2 | 0.494 | 94.026 | 0.961 | 0.565 | 0.487 | 5050 | 0.133 |
+| 0.25 | 0.25 | 0.25 | 156 | 2 | 0.494 | 80.844 | 0.740 | 0.595 | 0.474 | 2101 | 0.355 |
+| 0.5 | 0.5 | 0.5 | 156 | 2 | 0.571 | 54.472 | 0.772 | 0.564 | 0.532 | 969 | 0.593 |
+| 0.75 | 0.75 | 0.75 | 156 | 2 | 0.654 | 31.500 | 0.813 | 0.575 | 0.596 | 697 | 0.706 |
+| 1 | 1 | 1 | 156 | 2 | 0.808 | 6.524 | 0.672 | 0.585 | 0.782 | 606 | 0.736 |
+| 0.15 | 0.9 | 0.5 | 156 | 2 | 0.506 | 86.886 | 0.929 | 0.598 | 0.500 | 2921 | 0.274 |
+
+**Observations:**
+
+* Higher **Focus/Sensitivity** compress candidate volume (**6.5** at F=1 vs
+  **86.9** at F=0.15,S=0.9), improving throughput (0.61s/turn at F=1 vs
+  2.92s/turn at F=0.15,S=0.9).
+* Retrieval semantic overlap stays stable (~0.56–0.60), indicating selectivity
+  gains do not degrade semantic alignment.
+* **Label candidate rate is high** (0.67–0.96) due to the label bank seeding,
+  while association candidates remain absent in this sweep because consolidation
+  only ran at the end (2 summaries total).
+
+## Short-Horizon Smoke Check (120 Turns)
+
+We ran a short smoke check at **F=S=T=0.5** with `max_turns=120`, `max_total=120`,
+and `consolidate_cycles=2` to validate end‑to‑end integration after the
+ASSOCIATION/LABEL retention fix. This produced **2 summaries** and **2 labels**,
+but summary/label candidates did not appear in retrieval within this short
+horizon:
+
+| turns | summaries | labels | retr_turn_rate | retr_avg_cands | assoc_rate | label_rate | interrupt_rate |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 120 | 2 | 2 | 0.4917 | 13.93 | 0.0000 | 0.0000 | 0.4333 |
+
+**Observation:** At 120 turns, summary/label production is too sparse to
+materially affect retrieval. Longer horizons (see above) show non‑zero
+association/label candidate rates once more summaries accumulate.
+
+## Short-Horizon Consolidation Mode Check (20 Turns)
+
+We ran a **20‑turn** sanity check at **F=S=T=0.5** to compare **baseline**, **shallow**, and **deep** consolidation modes using the topical‑chat pipeline (ImageBind embeddings; gemma‑3n‑e2b via LiteRT for deep summarization). Consolidation was triggered twice (`consolidate_every=20`, `consolidate_cycles=1`).
+
+Runs (Dec 31, 2025):
+
+* baseline: `logs/topical_chat_snapshots/20251231_000002_baseline_small`
+* shallow: `logs/topical_chat_snapshots/20251231_000003_shallow_small`
+* deep: `logs/topical_chat_snapshots/20251231_000001_deep_small`
+
+| mode | cons_runs | assoc_created | labels_created | summaries | retr_turn_rate | retr_avg_cands | assoc_rate | label_rate | interrupt_rate |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| baseline | 0 | 0 | 0 | 0 | 0.300 | 2.67 | 0.000 | 0.000 | 0.200 |
+| shallow | 2 | 2 | 0 | 0 | 0.300 | 2.67 | 0.000 | 0.000 | 0.200 |
+| deep | 2 | 2 | 2 | 2 | 0.300 | 2.67 | 0.000 | 0.000 | 0.200 |
+
+**Observations:** Both consolidation modes create association nodes (and deep additionally emits labels + summaries), but **20 turns is too short** for these nodes to enter retrieval. Association/label candidate rates remain **0**; longer horizons are required for retrieval to surface consolidated memory.
+
+## Verification Checks (Dec 31, 2025)
+
+We ran targeted verification checks at **F=S=T=0.5** to confirm end‑to‑end behavior after recent changes (summary cache, source monitoring, sequential edges).
+
+**Baseline vs idle consolidation (120 turns; consolidate_every=40, deep):**
+
+| condition | cons_runs | summaries | labels_created | retr_sem_overlap | retr_label_rate | interrupt_turn_rate | perf_total_ms |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| baseline | 8 | 8 | 6479 | 0.5703 | 0.790 | 0.542 | 915 |
+| idle‑during (consolidate_during=1, consolidate_idle=1) | 8 | 8 | 6479 | 0.5704 | 0.790 | 0.542 | 908 |
+
+**Observation:** Outputs are effectively identical, indicating the idle/defer flags do not change behavior when `consolidate_every` already governs consolidation timing.
+
+**Idle vs end‑only consolidation (120 turns; consolidate_cycles=1, no periodic consolidation):**
+
+| condition | cons_runs | summaries | labels_created | retr_sem_overlap | retr_label_rate | interrupt_turn_rate | perf_total_ms |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| end‑only | 1 | 1 | 6478 | 0.5602 | 0.830 | 0.525 | 917 |
+| idle‑during | 1 | 1 | 6478 | 0.5602 | 0.835 | 0.525 | 916 |
+
+**Observation:** With a single consolidation cycle, idle‑during matches end‑only within noise; any differences in summary/label retrieval would require longer horizons or more consolidation cycles.
+
+## Affect On/Off (Long Horizon, No Consolidation)
+
+We compared affect gating at **F=S=T=0.5** over **156 turns** (single conversation) with consolidation disabled to isolate interrupt gating + retrieval effects.
+
+| affect_mode | retr_turn_rate | retr_sem_overlap | interrupt_turn_rate | interrupt_sem_overlap | perf_total_ms |
+|---:|---:|---:|---:|---:|---:|
+| all | 0.571 | 0.5638 | 0.532 | 0.5702 | 961 |
+| off | 0.571 | 0.5649 | 0.487 | 0.5817 | 966 |
+
+**Observation:** With affect off, interrupt rate drops (~4.5pp) while semantic overlap stays within noise. At mid‑range knobs on this dataset, affect primarily shifts interrupt gating frequency rather than semantic match quality.
+
+## EmpatheticDialogues Affect On/Off (No Consolidation)
+
+We repeated the affect toggle on **EmpatheticDialogues (valid)** with consolidation disabled to isolate gating effects on a more emotional corpus. Settings: **F=S=T=0.5**, `max_turns=360`, `max_total=720`, `max_conversations=6` (195 turns observed).
+
+| affect_mode | retr_turn_rate | retr_sem_overlap | interrupt_turn_rate | interrupt_sem_overlap | perf_total_ms |
+|---:|---:|---:|---:|---:|---:|
+| all | 0.518 | 0.5959 | 0.487 | 0.6026 | 1163 |
+| off | 0.518 | 0.5959 | 0.482 | 0.6045 | 1156 |
+
+**Observation:** On EmpatheticDialogues without consolidation, affect has a small but consistent effect on interrupt frequency (~0.5pp) while semantic overlap remains essentially unchanged. The gating effect is visible but modest at mid‑range knobs.
+
+## Source-Confidence Gating Check
+
+We validated source-monitoring gating by computing the **source_confidence** used during retrieval (from `source_reliability`, contradiction count, and freshness) and comparing it to the threshold \( \theta_{src} = \mathrm{lerp}(0.15, 0.45, T) \). At **T=0.5** (\(\theta_{src}=0.30\)) on the EmpatheticDialogues run above, none of the memories present in `recent_retrievals` fall below the threshold (**0 / 128 violations**), indicating that low‑confidence memories are being filtered from injection as intended.
+
+## Procedural + Sequential Link Ablation
+
+We added toggles to disable the **procedural store** and **sequential edges** and re‑ran a 156‑turn topical‑chat run with consolidation enabled (`consolidate_every=40`, 4 runs). Settings were **F=S=T=0.5**.
+
+| variant | retr_sem_overlap | retr_assoc_rate | interrupt_turn_rate | perf_total_ms |
+|---:|---:|---:|---:|---:|
+| baseline (procedural+sequential on) | 0.5689 | 0.0241 | 0.5449 | 946 |
+| ablation (both off) | 0.5688 | 0.0241 | 0.5449 | 954 |
+
+**Observation:** At this horizon and dataset, disabling procedural/sequence contributions does **not** materially change retrieval or interrupt quality (Δ semantic overlap ≈ −0.00009). This suggests either the effect is subtle at short horizons or the current metrics are not sensitive to these pathways; longer horizons or targeted tasks may be required to surface their impact.
+
+We extended the comparison to a longer consolidation cadence (156 turns observed, `consolidate_every=60`) with identical knobs:
+
+| variant | retr_sem_overlap | retr_assoc_rate | interrupt_turn_rate | perf_total_ms |
+|---:|---:|---:|---:|---:|
+| baseline (procedural+sequential on) | 0.5707 | 0.0156 | 0.5385 | 971 |
+| ablation (both off) | 0.5704 | 0.0156 | 0.5385 | 969 |
+
+**Observation:** Even with a longer cadence, deltas remain negligible (Δ semantic overlap ≈ −0.00035). This further supports the need for longer horizons or targeted sequential‑recall tasks to surface procedural/sequence benefits.
+
+**Affect on/off sanity (20 turns; deep, consolidate_every=20):**
+
+| affect_mode | retr_turn_rate | interrupt_turn_rate | interrupt_precision | interrupt_recall | retrieval_emotion_bonus_mean | interrupt_gate_retrieval_thresh_mean |
+|---:|---:|---:|---:|---:|---:|---:|
+| all | 0.50 | 0.40 | 1.00 | 0.80 | 0.00185 | 0.223 |
+| off | 0.50 | 0.40 | 1.00 | 0.80 | 0.00000 | 0.240 |
+
+**Observation:** Affect pathways are active (bonus and lower interrupt threshold when enabled) but do not materially change interrupt precision/recall at this short horizon.
+
+**Source monitoring + sequential edges (baseline DB):** 64 memories store non‑default source metadata and sequential edges are present (`next_in_episode`, `prev_in_episode`, `within_same_event`, 19 each), confirming provenance tagging and ordered links are persisted during consolidation.
+
+## Long-Horizon Consolidation Mode Check (156 Turns)
+
+We ran a **156‑turn** comparison at **F=S=T=0.5** to evaluate **baseline**, **shallow**, and **deep** consolidation in the topical‑chat pipeline. Consolidation ran **8 times** (`consolidate_every=40`, `consolidate_cycles=2`), and deep used gemma‑3n‑e2b via LiteRT for summarization/labeling. Runs are from **Dec 30, 2025**:
+
+* baseline: `logs/topical_chat_snapshots/20251230_202959_long_horizon/baseline`
+* shallow: `logs/topical_chat_snapshots/20251230_202959_long_horizon/shallow`
+* deep: `logs/topical_chat_snapshots/20251230_202959_long_horizon/deep`
+
+| mode | cons_runs | assoc_created | labels_created | summaries | retr_turn_rate | retr_avg_cands | retr_sem_overlap | assoc_rate | label_rate | assoc_turn_rate | label_turn_rate | interrupt_rate |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| baseline | 0 | 0 | 0 | 0 | 0.500 | 18.54 | 0.4746 | 0.0000 | 0.0000 | 0.0000 | 0.0000 | 0.4487 |
+| shallow | 8 | 8 | 0 | 0 | 0.526 | 25.18 | 0.4853 | 0.1269 | 0.0000 | 0.8293 | 0.0000 | 0.4808 |
+| deep | 8 | 8 | 5 | 8 | 0.526 | 27.70 | 0.4868 | 0.1154 | 0.0766 | 0.8293 | 0.8293 | 0.4808 |
+
+**Observations:** Shallow consolidation alone increases association hits and retrieval breadth (candidate count) while slightly improving semantic overlap. Deep consolidation adds labels and summaries that are actively retrieved (label rate **~7.7%**, label turn rate **~83%**) without degrading interrupt precision. This indicates deep consolidation contributes structured semantic signals beyond shallow associations.
+
+## Reinforcement Ablation (Long Horizon)
+
+We evaluated reinforcement edges by comparing **reinforcement on vs off** at **F=S=T=0.5**, `max_total=360`, `max_turns=360`, `max_conversations=6` (single stream, interleave=1). Consolidation was invoked externally (`consolidate_cycles=2`).
+
+| reinforcement_mode | reinforcement_edge_count | retrieval_avg_candidates | retrieval_semantic_overlap_mean | interrupt_precision | interrupt_recall | interrupt_fn_rate | memory_retrieved_count_mean |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| on | 9542 | 50.19 | 0.568 | 0.989 | 0.958 | 0.0417 | 54.33 |
+| off | 0 | 33.28 | 0.567 | 0.984 | 0.948 | 0.0524 | 35.71 |
+
+**Observations:** Reinforcement substantially increases candidate breadth (+16.9 candidates/turn) and retrieved-count mean (+18.6), while **semantic overlap is stable** (Δ ≈ +0.0006). Interrupt recall improves by ~1.1pp (FN rate drops from 0.052 → 0.042) with a small precision lift. This indicates reinforcement primarily broadens the retrieval field and modestly strengthens interrupt coverage without degrading semantic quality.
 
 ## Affect Path Ablation (Long Horizon)
 
@@ -99,6 +331,17 @@ To test a more emotionally charged corpus, we converted **EmpatheticDialogues (v
 | 1.0 | off | 0.462 | 0.967 | 0.888 | 0.112 | 0 |
 
 **Observations:** At **S=0.5**, affect now shifts gate behavior: interrupt rate rises by ~1.0pp and recall improves by ~1.1pp, with a ~1.1pp precision trade‑off. The mean interrupt threshold drops from ~0.240 → 0.221 and boundary multiplier from ~1.52 → 1.40, confirming measurable gating relaxation. At **S=1.0**, thresholds are substantially relaxed but the interrupt decision remains saturated on this dataset; only the retrieval emotion bonus changes.
+
+## EmpatheticDialogues Affect Check (Long Horizon)
+
+We repeated the EmpatheticDialogues check at longer horizon with **10 conversations** and `max_total=720` (371 turns observed), holding **F=0.5, S=0.5, T=0.5** and comparing `affect_mode=all` vs `off`. Consolidation ran **20** times with zero failures.
+
+| affect_mode | interrupt_turn_rate | precision | recall | fn_rate | retrieval_emotion_bonus_mean | retrieval_thresh_mean | boundary_mult_eff_mean |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| all | 0.493 | 0.989 | 0.978 | 0.0216 | 0.00841 | 0.220 | 1.394 |
+| off | 0.477 | 0.994 | 0.951 | 0.0486 | 0 | 0.240 | 1.518 |
+
+**Observations:** Over a longer horizon, affect increases interrupt rate by ~1.6pp and improves recall by ~2.7pp, with a ~0.5pp precision trade‑off. The interrupt threshold and boundary multiplier relax (0.240 → 0.220; 1.52 → 1.39), confirming affect contributes to gating and not just retrieval ranking.
 
 ## Affect-Gated Sensitivity Sweep (Long Horizon)
 

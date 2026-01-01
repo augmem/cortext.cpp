@@ -119,7 +119,40 @@ Low-scoring memories are marked for merging.
 
 Consolidation proceeds via **generative replay** rather than one-shot merges. Representative episodes are re-encoded and used to update semantic structures, reducing drift and preserving detail.
 
-**Summarization + labeling engine:** Consolidation is the only stage that invokes a generative model. Summaries and labels are produced by **gemma-3n-e2b** running through `third_party/litert_lm`. All other operations remain embedding-only. **There is no extractive fallback**: if Gemma is unavailable or summarization fails, consolidation raises an error rather than silently degrading.
+**Summarization + labeling engine (deep mode):** Consolidation is the only stage that invokes a generative model. Summaries and labels are produced by **gemma-3n-e2b** running through `third_party/litert_lm`. All other operations remain embedding-only. **There is no extractive fallback**: if Gemma is unavailable or summarization fails, deep consolidation raises an error rather than silently degrading.
+
+## Shallow Consolidation (Embedding‑Only)
+
+Shallow consolidation is an explicit, embedding‑only phase for fast labeling and graph priming. It skips summarization/extraction and instead:
+
+1. Creates a centroid **ASSOCIATION** node per cluster (no summary blob).
+2. Updates `cluster_id` for source memories and emits `derived_from` edges.
+3. Attaches existing **LABEL** nodes by embedding similarity.
+
+Shallow labeling uses knob‑derived limits and thresholds:
+
+```
+max_labels_per_cluster = round(lerp(2, 6, S̃) × lerp(1.0, 0.7, F̃))
+label_attach_threshold = clamp(lerp(0.30, 0.60, F̃) × lerp(1.0, 1.1, T), 0.15, 0.95)
+```
+
+For each cluster centroid, we compute cosine similarity to existing label embeddings,
+retain candidates above the threshold, and attach the top‑K labels by similarity.
+
+To avoid a cold start, we optionally seed a **label bank** at initialization: a static list of high‑frequency labels (objects, sounds, relations, names) **pre‑embedded** with ImageBind and stored as **LABEL** memories. Seeded labels receive a knob‑derived baseline salience:
+
+```
+salience_seed = clamp(lerp(0.35, 0.65, 0.5(F̃+S̃)) × lerp(1.0, 0.9, T), 0, 1)
+```
+
+This provides shallow consolidation with immediate label candidates without invoking any generative model.
+
+Label bank embeddings are generated offline (dataset → embeddings) and saved as
+`data/label_bank/labels.jsonl` with a `metadata.json` manifest; seeding reads the
+precomputed vectors and does not re‑encode at runtime. We build the label list
+from **Hugging Face datasets** (FSD50K for sounds, ConceptNet for common terms,
+and Gender‑by‑Name for names) using `tools/label_bank_builder/build_label_bank.py`,
+then embed with `tools/label_bank_generator`.
 
 Replay batch:
 ```
@@ -158,7 +191,7 @@ constrain decoder to max_summary_words (streaming cancel)
 
 ## Semantic Extraction
 
-For sufficiently large clusters, semantic extraction identifies labels and relations:
+For sufficiently large clusters, semantic extraction identifies labels and relations (deep mode only):
 
 ```
 extraction_batch_size = round(lerp(8, 32, T))
@@ -168,7 +201,7 @@ extraction_interval = lerp(300, 3600, T)  # 5 min → 1 hour
 max_extractions_per_cycle = round(lerp(20, 5, T))
 ```
 
-Extraction uses structured prompting to identify labels/tags (people, places, organizations, concepts) and relationships (co-occurrence, implication, contradiction). Labels are stored as surface strings only (no type/category field).
+Extraction uses structured prompting to identify labels/tags (people, places, organizations, concepts) and relationships (co-occurrence, implication, contradiction). Labels are stored as surface strings (no type/category field) **and** persisted with their own embeddings so they can participate in retrieval and graph expansion.
 
 Label salience is derived from embeddings rather than model guesses:
 
@@ -176,6 +209,11 @@ Label salience is derived from embeddings rather than model guesses:
 e_label = encode(label_text)
 salience(label) = clamp((cos(e_label, summary.embedding) + 1) / 2, 0, 1)
 ```
+
+Label embeddings are cached by normalized label key. If a label already exists
+in the store (or is present in the in-memory cache), its embedding is reused
+instead of re-encoding, reducing consolidation latency without changing
+salience computation.
 
 If a label already exists, its stored salience is updated with `s_max = max(s_max, salience(label))`.
 
@@ -259,8 +297,10 @@ if |memory_stream| == 0:
 kNN_size(F) = round(lerp(96, 8, F))
 results_vec ← topK(vector_search(q, k=kNN_size(F)))
 seed_vec ← [r.id for r in results_vec]
+summary_k(F̃,S̃,T) = round(lerp(2, 6, S̃) × lerp(1.0, 0.75, F̃) × lerp(1.0, 0.85, T))
+summary_seeds ← topK(summary_cache, k=summary_k)  # in‑memory label/association cache
 seed_idx ← index_store.lookup(sparse_key(q), radius = lerp(1, 3, S))
-seed_nodes ← union(seed_vec, seed_idx)
+seed_nodes ← union(seed_vec, summary_seeds, seed_idx)
 
 if |seed_nodes| == 0 OR graph is empty:
     return results_vec  # deterministic fallback, skip expansion
@@ -270,6 +310,12 @@ expanded_nodes ← graph.traverse(seed_nodes,
                                 min_edge_weight=min_edge_weight(F),
                                 edge_types={'semantic','next_in_episode','prev_in_episode','within_same_event'})
 combined ← union(seed_nodes, expanded_nodes)
+min_assoc(F̃,T) = round(lerp(3, 1, F̃) × lerp(1.0, 0.85, T))
+min_label(F̃,S̃) = round(lerp(0, 3, S̃) × lerp(1.0, 0.85, F̃))
+if min_assoc > 0:
+    combined ← combined ∪ {assoc | edge_type='derived_from' AND target∈combined}
+if min_label > 0:
+    combined ← combined ∪ {label | edge_type='has_label' AND source∈combined}
 min_edge_weight(F) = lerp(0.08, 0.40, F)
 dup_thresh = lerp(0.985, 0.95, F) × (0.98 + 0.02T)
 eligible ← {m ∈ combined | m.created_at < write_exclusion_ts}
@@ -305,6 +351,8 @@ return selected
 ```
 
 Graph expansion uses recursive traversal with depth limits to find related context that pure vector search might miss. Using the memory centroid maintains consistency between vector search and graph expansion results.
+
+`summary_cache` is an in‑memory list of LABEL/ASSOCIATION embeddings seeded from the label bank and updated on consolidation. This avoids a second sqlite‑vec pass while preserving embedding‑only retrieval.
 
 For affective gain in retrieval, we use a lighter bias \(S_{affect} = \mathrm{BiasMid}(S, -0.06)\) to preserve mid‑range affect modulation.
 

@@ -64,6 +64,47 @@ BuildSummaryPrompt (const std::vector<std::string> &texts)
   return combined.str ();
 }
 
+bool
+TryCreateEngine (const std::string &model_path, litert::lm::Backend backend,
+                 std::unique_ptr<litert::lm::Engine> &engine_out)
+{
+  auto model_assets = litert::lm::ModelAssets::Create (model_path);
+  if (!model_assets.ok ())
+    {
+      return false;
+    }
+
+  auto settings = litert::lm::EngineSettings::CreateDefault (
+      *std::move (model_assets), backend);
+  if (!settings.ok ())
+    {
+      return false;
+    }
+
+  if (backend == litert::lm::Backend::CPU)
+    {
+      auto &executor_settings = settings->GetMutableMainExecutorSettings ();
+      auto cpu_config_result
+          = executor_settings.MutableBackendConfig<litert::lm::CpuConfig> ();
+      if (cpu_config_result.ok ())
+        {
+          litert::lm::CpuConfig cpu_config = *cpu_config_result;
+          cpu_config.number_of_threads = core::GetInferThreadCount ();
+          executor_settings.SetBackendConfig (cpu_config);
+        }
+    }
+
+  auto engine_result
+      = litert::lm::Engine::CreateEngine (*std::move (settings));
+  if (!engine_result.ok ())
+    {
+      return false;
+    }
+
+  engine_out = std::move (*engine_result);
+  return true;
+}
+
 } // namespace
 
 struct GemmaSummarizer::Impl
@@ -114,46 +155,13 @@ struct GemmaSummarizer::Impl
   {
     try
       {
-        // Load model assets
-        auto model_assets = litert::lm::ModelAssets::Create (model_path);
-        if (!model_assets.ok ())
+        if (TryCreateEngine (model_path, litert::lm::Backend::GPU, engine)
+            || TryCreateEngine (model_path, litert::lm::Backend::CPU, engine))
           {
-            available = false;
+            available = true;
             return;
           }
-
-        // Create engine settings with CPU backend
-        auto settings = litert::lm::EngineSettings::CreateDefault (
-            *std::move (model_assets), litert::lm::Backend::CPU);
-        if (!settings.ok ())
-          {
-            available = false;
-            return;
-          }
-
-        // Configure thread count from environment variable
-        auto &executor_settings = settings->GetMutableMainExecutorSettings ();
-        auto cpu_config_result
-            = executor_settings
-                  .MutableBackendConfig<litert::lm::CpuConfig> ();
-        if (cpu_config_result.ok ())
-          {
-            litert::lm::CpuConfig cpu_config = *cpu_config_result;
-            cpu_config.number_of_threads = core::GetInferThreadCount ();
-            executor_settings.SetBackendConfig (cpu_config);
-          }
-
-        // Create engine
-        auto engine_result
-            = litert::lm::Engine::CreateEngine (*std::move (settings));
-        if (!engine_result.ok ())
-          {
-            available = false;
-            return;
-          }
-
-        engine = std::move (*engine_result);
-        available = true;
+        available = false;
       }
     catch (const std::exception &)
       {
@@ -171,6 +179,9 @@ struct GemmaSummarizer::Impl
 
     litert::lm::SessionConfig session_config
         = litert::lm::SessionConfig::CreateDefault ();
+#if defined(__APPLE__)
+    session_config.SetSamplerBackend (litert::lm::Backend::CPU);
+#endif
     auto session_result = engine->CreateSession (session_config);
     if (!session_result.ok ())
       {
@@ -287,6 +298,9 @@ struct GemmaSummarizer::Impl
     litert::lm::SessionConfig session_config
         = litert::lm::SessionConfig::CreateDefault ();
     session_config.SetAudioModalityEnabled (true);
+#if defined(__APPLE__)
+    session_config.SetSamplerBackend (litert::lm::Backend::CPU);
+#endif
 
     auto config_result = litert::lm::ConversationConfig::CreateFromSessionConfig (
         *engine, session_config);

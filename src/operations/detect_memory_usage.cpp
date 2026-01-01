@@ -5,14 +5,48 @@
 #include "cortext/core/sparse.hpp"
 #include "cortext/telemetry/telemetry.hpp"
 #include "cortext/store/store.hpp"
+#include "cortext/store/utils.hpp"
 
 namespace cortext::operations
 {
 
+namespace
+{
+/// @brief Creates reinforcement edges for co-retrieved memories.
+void
+CreateReinforcementEdges (Transaction &tx,
+                          const std::vector<long long> &retrieved_ids,
+                          long long now_ts)
+{
+  if (retrieved_ids.size () < 2)
+    {
+      return;
+    }
+
+  for (size_t i = 0; i < retrieved_ids.size (); ++i)
+    {
+      for (size_t j = i + 1; j < retrieved_ids.size (); ++j)
+        {
+          constexpr double kReinforcementStep = 0.1;
+          long long id1 = std::min (retrieved_ids[i], retrieved_ids[j]);
+          long long id2 = std::max (retrieved_ids[i], retrieved_ids[j]);
+
+          tx.Execute (
+              "INSERT INTO associations "
+              "(source_memory_id, target_memory_id, edge_type, weight, last_reinforced) "
+              "VALUES (?1, ?2, 'reinforces', ?3, ?4) "
+              "ON CONFLICT (source_memory_id, target_memory_id, edge_type) DO UPDATE "
+              "SET weight = MIN(weight + excluded.weight, 1.0), "
+              "    last_reinforced = excluded.last_reinforced",
+              { id1, id2, kReinforcementStep, now_ts });
+        }
+    }
+}
+} // namespace
+
 void
 DetectMemoryUsage::Execute (OperationContext &context, Transaction &tx) const
 {
-  (void)tx;
   const auto &signal = context.GetSignal ();
   auto &p_ctx = context.GetProcessorContext ();
   const Eigen::VectorXf *x_ptr = &signal.embedding;
@@ -24,6 +58,8 @@ DetectMemoryUsage::Execute (OperationContext &context, Transaction &tx) const
     }
 
   const auto &retrieved = context.GetRetrievedMemoryEmbeddings ();
+  const auto &cfg = context.GetConfig ();
+  Store *store = context.GetStore ();
   const bool interrupt_allowed = context.GetInterruptAllowed ();
   const auto selected_id = context.GetSelectedCandidateId ();
 
@@ -69,6 +105,45 @@ DetectMemoryUsage::Execute (OperationContext &context, Transaction &tx) const
   // Set events in context for downstream feedback operations
   context.SetMemoryUsageEvents (std::move (events));
 
+  int64_t reinforcement_candidate_count = 0;
+  if (cfg.reinforcement_enabled && store)
+    {
+      std::vector<long long> retrieved_memory_ids;
+      retrieved_memory_ids.reserve (retrieved.size ());
+      for (const auto &kv : retrieved)
+        {
+          const long long embedding_id = kv.first;
+          long long memory_id = 0;
+          auto rows = store->Execute (
+              "SELECT memory_id FROM memories WHERE embedding_id = ?",
+              { embedding_id });
+          if (!rows.empty () && rows[0].count ("memory_id") == 1)
+            {
+              memory_id = store::AnyToLongLong (rows[0].at ("memory_id"))
+                              .value_or (0);
+            }
+          if (memory_id == 0)
+            {
+              auto sig_rows = store->Execute (
+                  "SELECT memory_id FROM signals WHERE embedding_id = ? LIMIT 1",
+                  { embedding_id });
+              if (!sig_rows.empty () && sig_rows[0].count ("memory_id") == 1)
+                {
+                  memory_id = store::AnyToLongLong (sig_rows[0].at ("memory_id"))
+                                  .value_or (0);
+                }
+            }
+          if (memory_id > 0)
+            {
+              retrieved_memory_ids.push_back (memory_id);
+            }
+        }
+      reinforcement_candidate_count
+          = static_cast<int64_t> (retrieved_memory_ids.size ());
+      CreateReinforcementEdges (tx, retrieved_memory_ids,
+                                static_cast<long long> (signal.timestamp));
+    }
+
   const double usage_rate
       = (total_checked > 0)
             ? static_cast<double> (used_count) / static_cast<double> (total_checked)
@@ -77,7 +152,7 @@ DetectMemoryUsage::Execute (OperationContext &context, Transaction &tx) const
   p_ctx.last_used_flag = used_count > 0 ? 1.0 : 0.0;
 
   // Update procedural store for successful usage
-  if (used_count > 0 && x_ptr->size () > 0)
+  if (cfg.procedural_enabled && used_count > 0 && x_ptr->size () > 0)
     {
       const int k_key = core::SparseKeySize (context.GetConfig ().focus);
       const std::string key = core::SparseKey (*x_ptr, k_key);
@@ -92,17 +167,27 @@ DetectMemoryUsage::Execute (OperationContext &context, Transaction &tx) const
               if (!used)
                 continue;
               // Map embedding_id -> memory_id for procedural store
-              Store *store = context.GetStore ();
               long long memory_id = 0;
               if (store)
                 {
                   auto rows = store->Execute (
                       "SELECT memory_id FROM memories WHERE embedding_id = ?",
                       { embedding_id });
-                  if (!rows.empty () && rows[0].count ("memory_id") == 1
-                      && rows[0].at ("memory_id").type () == typeid (long long))
+                  if (!rows.empty () && rows[0].count ("memory_id") == 1)
                     {
-                      memory_id = std::any_cast<long long> (rows[0].at ("memory_id"));
+                      memory_id = store::AnyToLongLong (rows[0].at ("memory_id"))
+                                      .value_or (0);
+                    }
+                  if (memory_id == 0)
+                    {
+                      auto sig_rows = store->Execute (
+                          "SELECT memory_id FROM signals WHERE embedding_id = ? LIMIT 1",
+                          { embedding_id });
+                      if (!sig_rows.empty () && sig_rows[0].count ("memory_id") == 1)
+                        {
+                          memory_id = store::AnyToLongLong (sig_rows[0].at ("memory_id"))
+                                          .value_or (0);
+                        }
                     }
                 }
               if (memory_id > 0)
@@ -133,7 +218,9 @@ DetectMemoryUsage::Execute (OperationContext &context, Transaction &tx) const
   telemetry::LogDebug ("cortext.detect_memory_usage", {
     telemetry::Attribute::Int64 ("candidate_count", static_cast<int64_t> (retrieved.size ())),
     telemetry::Attribute::Bool ("interrupt_allowed", interrupt_allowed),
-    telemetry::Attribute::Int64 ("usage_count", static_cast<int64_t> (used_count))
+    telemetry::Attribute::Int64 ("usage_count", static_cast<int64_t> (used_count)),
+    telemetry::Attribute::Int64 ("reinforcement_candidate_count",
+                                 reinforcement_candidate_count)
   });
 }
 

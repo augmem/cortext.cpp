@@ -611,7 +611,7 @@ Compute z-score relative to recent retention history:
 
 The target half-life incorporates feedback adjustment from the stability
 feedback mechanism
-(<a href="#sec-feedback" class="quarto-xref">Section 7.4</a>):
+(<a href="#sec-feedback" class="quarto-xref">Section 7.5</a>):
 
     stability_adj ← ΔHalfLife_adj_t if provided else 0
     target_half_life_t ← clamp(base_half_life(T) ×
@@ -1392,11 +1392,17 @@ captures within-memory similarity degradation.
 Segmentation is framed as online change-point inference. We compute a
 **calibrated boundary probability** rather than a hand-tuned score. The
 hazard is knob-controlled; the likelihood is driven by surprisal,
-cohesion drop, drift, and temporal gaps.
+cohesion drop, drift, and temporal gaps, with a coherence/topic
+**support gate** to downweight isolated spikes.
 
-    # Hazard (prior boundary probability)
-    h_base(F,S,T) = lerp(0.02, 0.12, S) × lerp(1.2, 0.8, T)
-    h_t ← clamp(h_base × (0.8 + 0.2(1 − F)), 0, 0.5)
+    # Hazard (prior boundary probability, calibrated to target rate)
+    h_base(F,S,T) = lerp(0.03, 0.18, S) × lerp(1.2, 0.8, T)
+    h_t_base ← clamp(h_base × (0.8 + 0.2(1 − F)), 0, 0.5)
+    target_rate(F,S,T) = clamp(lerp(0.12, 0.35, S) × lerp(1.1, 0.7, F) × lerp(1.0, 0.7, T), 0.05, 0.45)
+    rate_gain(S,T) = clamp(lerp(0.4, 1.0, S) × lerp(1.1, 0.8, T), 0.2, 1.2)
+    rate_mult ← clamp(1 + rate_gain × (target_rate − boundary_rate_ema), 0.5, 1.5)
+    # support uses normalized coherence/topic signals (defined below)
+    h_t ← clamp(h_t_base × rate_mult × lerp(0.8, 1.3, support), 0, 0.5)
 
     # Drift spike (same signal, now used for likelihood)
     ε0(T) = lerp(0.005, 0.02, 1 − T)  # cold-start guard for eta_prev
@@ -1415,14 +1421,34 @@ cohesion drop, drift, and temporal gaps.
     gap_z ← (signal_gap_s − gap_ref_s) / max(gap_ref_s, ε)
     gap_score ← sigmoid(gap_z)
 
+    # Local normalization (within-episode, contrast-boosted)
+    ema_mean_x ← EWMA(ema_mean_x, x, α_local(T))
+    ema_var_x  ← EWMA(ema_var_x, (x − ema_mean_x)^2, α_local(T))
+    norm_gain(S,T) = clamp(lerp(1.6, 3.0, S) × lerp(1.05, 0.95, T), 1.0, 3.2)
+    x̂ ← sigmoid(norm_gain × (x − ema_mean_x) / sqrt(ema_var_x + ε))  # warm-up uses raw x
+
+    # Topic shift (embedding-only, temporal context anchor)
+    topic_shift ← 1 − map01(cos(e_t, c_t))
+
     # Likelihood of a boundary given observations
-    [w_s, w_d, w_c, w_g] ← normalize([0.45 + 0.25S, 0.25 + 0.10(1 − T), 0.20 + 0.10F, 0.10])
-    z_t ← w_s×(surprisal_t − 0.5) +
-          w_d×(sigmoid(drift_spike) − 0.5) +
-          w_c×(coh_drop01 − 0.5) +
-          w_g×(gap_score − 0.5)
-    k_cp(S,T) = lerp(3, 9, S) × lerp(1.1, 0.9, T)
-    lik_boundary ← sigmoid(k_cp(S,T) × z_t)
+    support ← clamp(0.5 × coĥ + 0.5 × topiĉ, 0, 1)
+    support_gate ← lerp(0.45, 1.0, support)   # downweight isolated spikes
+    gap_gate ← lerp(0.10, 0.50, support)
+    support_boost ← lerp(1.0, 1.25, support)  # emphasize coherent/topic shifts
+    [w_s, w_d, w_c, w_t, w_g] ← [0.34 + 0.14S, 0.18 + 0.05(1 − T),
+                                0.36 + 0.16F, 0.30 + 0.22S, 0.01]
+    [w_s, w_d, w_c, w_t, w_g] ← normalize([w_s×support_gate, w_d×support_gate,
+                                          w_c×support_boost, w_t×support_boost, w_g×gap_gate])
+    z_center(S,T) = clamp(lerp(0.44, 0.30, S) × lerp(1.05, 0.95, T), 0.26, 0.58)
+    z_center_eff ← clamp(z_center × lerp(1.0, 0.75, support), 0.24, 0.58)
+    z_t ← w_s×(surprisal̂ − z_center_eff) +
+          w_d×(drift̂ − z_center_eff) +
+          w_c×(coĥ − z_center_eff) +
+          w_t×(topiĉ − z_center_eff) +
+          w_g×(gap_score − z_center_eff)
+    k_cp(S,T) = lerp(8, 22, S) × lerp(1.1, 0.9, T)
+    k_cp_eff ← k_cp × lerp(0.9, 1.35, support)
+    lik_boundary ← sigmoid(k_cp_eff × z_t)
 
     # Bayesian update for boundary posterior
     boundary_score ← (h_t × lik_boundary) /
@@ -1432,7 +1458,6 @@ cohesion drop, drift, and temporal gaps.
 Boundary threshold and limits:
 
     b_thresh(F, S) = lerp(0.48, 0.66, F) × lerp(1.1, 0.9, S)
-    max_mem_time(T) = lerp(30, 120, T)  # seconds
     max_mem_drift(S) = lerp(0.8, 2.0, S)  # cumulative drift cap
 
 Pressure-capacity ratio (continuous flush trigger derived from knobs):
@@ -1446,25 +1471,37 @@ Pressure-capacity ratio (continuous flush trigger derived from knobs):
 
 Hard capacity ceiling (max signals per memory; knob-derived):
 
-    base = lerp(1.5, 4.5, T)
-    f_scale = lerp(1.00, 0.25, F)
-    s_scale = lerp(1.00, 0.45, S)
-    floor = round(lerp(1, 3, T))
+    base = lerp(4.0, 12.0, T)
+    f_scale = lerp(1.00, 0.35, F)
+    s_scale = lerp(1.00, 0.55, S)
+    floor = round(lerp(2, 3, T))
     max_signals(F,S,T) = max(floor, round(base × f_scale × s_scale))
+
+Adaptive cadence:
+
+    dt_ref ← max(dt_ema, dt_floor(T))
+    gap_ref_s ← gap_scale(T) × dt_ref
+    max_mem_time(T) ← clamp(lerp(2.5, 5.5, T) × gap_ref_s,
+                            lerp(6, 20, T),
+                            lerp(60, 180, T))
+
+Fallback boundary floor (applies to time/capacity/pressure only):
+
+    boundary_floor(F,S,T) = clamp(lerp(0.05, 0.15, S) × lerp(1.2, 0.8, F) × lerp(1.1, 0.9, T),
+                                  0.02, 0.25)
 
 Trigger memory flush when:
 
     mem_elapsed ← now_s() − to_s(t_start)
     should_flush = (boundary_score > b_thresh(F, S)) OR
-                   (mem_elapsed > max_mem_time(T)) OR
-                   (pressure_score > b_thresh(F, S)) OR
-                   (n ≥ max_signals(F,S,T))
+                   (mem_elapsed > max_mem_time(T) AND boundary_score ≥ boundary_floor(F,S,T)) OR
+                   (pressure_score > b_thresh(F, S) AND boundary_score ≥ boundary_floor(F,S,T)) OR
+                   (n ≥ max_signals(F,S,T) AND boundary_score ≥ boundary_floor(F,S,T))
 
 where signal_gap_s = now_s() − to_s(last_signal_ts) is computed at the
 start of signal processing (before last_signal_ts is updated). Gap
-timing influences boundary_score via gap_score rather than forcing an
-unconditional flush, which avoids splitting mid-thought when upstream
-processing introduces non-deterministic latency.
+timing influences boundary_score via gap_score and sets the adaptive
+cadence used by max_mem_time, avoiding a fixed flush timer.
 
 **Boundary type note:** When the max-signals ceiling triggers a flush,
 set `boundary_type = "capacity"` for the enclosing episode. This is a
@@ -1536,6 +1573,10 @@ Representative embedding blends accumulator mean with peak:
     ρ(F) = lerp(0.2, 0.6, F)  # mean vs peak blend
     e_rep ← l2_normalize(ρ(F) × μ_acc + (1 − ρ(F)) × e_peak)
 
+    # Edge-case guard
+    if |μ_acc| = 0: e_rep ← e_peak
+    if |e_peak| = 0 OR dim(e_peak) ≠ dim(μ_acc): e_rep ← μ_acc
+
 On write: store e_rep with metadata {n, s_max, s_avg, drift_acc,
 mem_elapsed, s_emotion_max=emo_max, s_arousal_avg=arousal_sum / max(n,
 1), boundary_score}. Store `c_t` as the temporal context for the memory.
@@ -1586,10 +1627,13 @@ Stability increases:
 
     Δt(m) ← now_s() − to_s(m.last_access); if last_access is unset, use created_at
 
-Memories falling below the periphery cutoff are candidates for eviction:
+Memories falling below the periphery cutoff are candidates for eviction.
+**Only LONG_TERM memories are evicted**; ASSOCIATION and LABEL nodes are
+retained to stabilize summary/label retrieval and are pruned during
+explicit consolidation.
 
     periphery_cutoff(T) = lerp(0.05, 0.25, T)
-    if strength_t < periphery_cutoff(T): evict(m)
+    if m.kind == LONG_TERM AND strength_t < periphery_cutoff(T): evict(m)
 
 ## Contextual Gain and Per-Memory Stability (Definitions)
 
@@ -1629,6 +1673,16 @@ reinforcement:
     trace_fast ← clamp(trace_fast + 0.6 × boost, 0, 1)
     trace_med  ← clamp(trace_med  + 0.3 × boost, 0, 1)
     trace_slow ← clamp(trace_slow + 0.1 × boost, 0, 1)
+
+## Reinforcement Graph Maintenance
+
+Co-retrieved memories also form *reinforces* edges in the ASSOCIATIONS
+graph. These edges are strengthened during retrieval/use and **only
+decayed during explicit consolidation cycles** (triggered externally via
+`cortext.consolidate()`), matching the system’s “idle-time
+consolidation” policy. This prevents per-turn decay from erasing fresh
+reinforcement and keeps runtime retrieval updates stable while still
+allowing long-term pruning during consolidation.
 
 ## Causal Feedback Loop
 
@@ -1781,8 +1835,10 @@ prevent collapse. Each memory stores `(e_rep, c_t)`. Retrieval combines
 content match and context match:
 
     w_ctx(F,S,T) = lerp(0.15, 0.45, F) × lerp(1.0, 0.85, S)
+    association_boost(F,S,T) = lerp(0.015, 0.06, S) × lerp(1.0, 0.7, F) × lerp(1.0, 0.9, T)
     score_retrieval(m) ← (1 − w_ctx) × cos(q, m.embedding) +
-                          w_ctx × cos(c_t, m.context)
+                          w_ctx × cos(c_t, m.context) +
+                          association_boost(F,S,T) × I[m.kind = ASSOCIATION]
 
 Reinstatement: retrieving a memory updates `c_t` toward `m.context`,
 improving ordered recall within the same episode.
@@ -1810,7 +1866,8 @@ Gating thresholds determine entry and chunking:
 Working memory gating evaluates coherent memories at accumulation
 boundaries
 (<a href="#sec-boundary" class="quarto-xref">Section 6.4.3</a>), not
-individual signals:
+individual signals. The WM update occurs **before** accumulator reset so
+each slot preserves ordered signal blobs for content hydration:
 
     on_memory_boundary:
         [α, β, γ] ← normalize([lerp(0.55, 0.70, F),   # window score weight
@@ -2184,12 +2241,52 @@ Consolidation proceeds via **generative replay** rather than one-shot
 merges. Representative episodes are re-encoded and used to update
 semantic structures, reducing drift and preserving detail.
 
-**Summarization + labeling engine:** Consolidation is the only stage
-that invokes a generative model. Summaries and labels are produced by
-**gemma-3n-e2b** running through `third_party/litert_lm`. All other
-operations remain embedding-only. **There is no extractive fallback**:
-if Gemma is unavailable or summarization fails, consolidation raises an
-error rather than silently degrading.
+**Summarization + labeling engine (deep mode):** Consolidation is the
+only stage that invokes a generative model. Summaries and labels are
+produced by **gemma-3n-e2b** running through `third_party/litert_lm`.
+All other operations remain embedding-only. **There is no extractive
+fallback**: if Gemma is unavailable or summarization fails, deep
+consolidation raises an error rather than silently degrading.
+
+## Shallow Consolidation (Embedding‑Only)
+
+Shallow consolidation is an explicit, embedding‑only phase for fast
+labeling and graph priming. It skips summarization/extraction and
+instead:
+
+1.  Creates a centroid **ASSOCIATION** node per cluster (no summary
+    blob).
+2.  Updates `cluster_id` for source memories and emits `derived_from`
+    edges.
+3.  Attaches existing **LABEL** nodes by embedding similarity.
+
+Shallow labeling uses knob‑derived limits and thresholds:
+
+    max_labels_per_cluster = round(lerp(2, 6, S̃) × lerp(1.0, 0.7, F̃))
+    label_attach_threshold = clamp(lerp(0.30, 0.60, F̃) × lerp(1.0, 1.1, T), 0.15, 0.95)
+
+For each cluster centroid, we compute cosine similarity to existing
+label embeddings, retain candidates above the threshold, and attach the
+top‑K labels by similarity.
+
+To avoid a cold start, we optionally seed a **label bank** at
+initialization: a static list of high‑frequency labels (objects, sounds,
+relations, names) **pre‑embedded** with ImageBind and stored as
+**LABEL** memories. Seeded labels receive a knob‑derived baseline
+salience:
+
+    salience_seed = clamp(lerp(0.35, 0.65, 0.5(F̃+S̃)) × lerp(1.0, 0.9, T), 0, 1)
+
+This provides shallow consolidation with immediate label candidates
+without invoking any generative model.
+
+Label bank embeddings are generated offline (dataset → embeddings) and
+saved as `data/label_bank/labels.jsonl` with a `metadata.json` manifest;
+seeding reads the precomputed vectors and does not re‑encode at runtime.
+We build the label list from **Hugging Face datasets** (FSD50K for
+sounds, ConceptNet for common terms, and Gender‑by‑Name for names) using
+`tools/label_bank_builder/build_label_bank.py`, then embed with
+`tools/label_bank_generator`.
 
 Replay batch:
 
@@ -2225,7 +2322,7 @@ cluster centroid and truncated:
 ## Semantic Extraction
 
 For sufficiently large clusters, semantic extraction identifies labels
-and relations:
+and relations (deep mode only):
 
     extraction_batch_size = round(lerp(8, 32, T))
     min_cluster_size = round(lerp(3, 10, F))
@@ -2235,13 +2332,19 @@ and relations:
 
 Extraction uses structured prompting to identify labels/tags (people,
 places, organizations, concepts) and relationships (co-occurrence,
-implication, contradiction). Labels are stored as surface strings only
-(no type/category field).
+implication, contradiction). Labels are stored as surface strings (no
+type/category field) **and** persisted with their own embeddings so they
+can participate in retrieval and graph expansion.
 
 Label salience is derived from embeddings rather than model guesses:
 
     e_label = encode(label_text)
     salience(label) = clamp((cos(e_label, summary.embedding) + 1) / 2, 0, 1)
+
+Label embeddings are cached by normalized label key. If a label already
+exists in the store (or is present in the in-memory cache), its
+embedding is reused instead of re-encoding, reducing consolidation
+latency without changing salience computation.
 
 If a label already exists, its stored salience is updated with
 `s_max = max(s_max, salience(label))`.
@@ -2329,8 +2432,10 @@ L2‑normalized for vector search.
     kNN_size(F) = round(lerp(96, 8, F))
     results_vec ← topK(vector_search(q, k=kNN_size(F)))
     seed_vec ← [r.id for r in results_vec]
+    summary_k(F̃,S̃,T) = round(lerp(2, 6, S̃) × lerp(1.0, 0.75, F̃) × lerp(1.0, 0.85, T))
+    summary_seeds ← topK(summary_cache, k=summary_k)  # in‑memory label/association cache
     seed_idx ← index_store.lookup(sparse_key(q), radius = lerp(1, 3, S))
-    seed_nodes ← union(seed_vec, seed_idx)
+    seed_nodes ← union(seed_vec, summary_seeds, seed_idx)
 
     if |seed_nodes| == 0 OR graph is empty:
         return results_vec  # deterministic fallback, skip expansion
@@ -2340,6 +2445,12 @@ L2‑normalized for vector search.
                                     min_edge_weight=min_edge_weight(F),
                                     edge_types={'semantic','next_in_episode','prev_in_episode','within_same_event'})
     combined ← union(seed_nodes, expanded_nodes)
+    min_assoc(F̃,T) = round(lerp(3, 1, F̃) × lerp(1.0, 0.85, T))
+    min_label(F̃,S̃) = round(lerp(0, 3, S̃) × lerp(1.0, 0.85, F̃))
+    if min_assoc > 0:
+        combined ← combined ∪ {assoc | edge_type='derived_from' AND target∈combined}
+    if min_label > 0:
+        combined ← combined ∪ {label | edge_type='has_label' AND source∈combined}
     min_edge_weight(F) = lerp(0.08, 0.40, F)
     dup_thresh = lerp(0.985, 0.95, F) × (0.98 + 0.02T)
     eligible ← {m ∈ combined | m.created_at < write_exclusion_ts}
@@ -2377,6 +2488,10 @@ Graph expansion uses recursive traversal with depth limits to find
 related context that pure vector search might miss. Using the memory
 centroid maintains consistency between vector search and graph expansion
 results.
+
+`summary_cache` is an in‑memory list of LABEL/ASSOCIATION embeddings
+seeded from the label bank and updated on consolidation. This avoids a
+second sqlite‑vec pass while preserving embedding‑only retrieval.
 
 For affective gain in retrieval, we use a lighter bias (S\_{affect} =
 (S, -0.06)) to preserve mid‑range affect modulation.
@@ -2548,6 +2663,28 @@ This logic suppresses low-drift interrupts unless the marginal utility
 substantially exceeds threshold, while permitting normal-threshold
 interrupts at natural transition points.
 
+## Interrupt-triggered Accumulator Abort
+
+When the interrupt gate allows a retrieval outside a flush/spike event,
+we mark a **pending abort** for the current accumulator to avoid
+persisting partial thoughts. If the next signal continues the same
+thought (low novelty relative to the current centroid), we **resume**
+the accumulator; otherwise we **drop** the partial unit. This prevents
+“half‑utterances” from being stored when a memory whisper redirects
+attention, while still allowing the speaker to ignore the interrupt and
+continue seamlessly. Because the resume test reuses the knob‑derived
+novelty threshold, no new fixed constants are introduced.
+
+    if allow_interrupt AND NOT should_flush AND NOT spike_bypass:
+        pending_abort ← true
+
+    if pending_abort:
+        novelty = clamp((1 − cos(x_t, μ_acc)) / 2, 0, 1)
+        if novelty < τ_novelty(F,S,T):   # same thought → resume
+            pending_abort ← false
+        else:                            # new thought → drop partial unit
+            reset_accumulator(); pending_abort ← false
+
 ## Streaming Pacing
 
 Streaming retrieval is gated by cumulative drift rate within the
@@ -2600,6 +2737,12 @@ retrieval and interrupt quality. A multi-participant harness
 (`scripts/run_memory_harness.py`) interleaves conversations to stress
 long-horizon recall under shared-memory load.
 
+For reproducibility, the analysis runner supports **deterministic
+synthetic timing** (`--deterministic`, `--seed`), which removes
+wall‑clock variance while preserving cadence‑derived timing for boundary
+and interrupt gating. Snapshot configs record the seed and synthetic
+clock parameters.
+
 To quantify consolidation utility, we also track:
 
 -   **retrieval_summary_hit_rate:** share of retrieval turns containing
@@ -2637,54 +2780,1057 @@ Accumulator drift (drift_acc) aligned with semantic shifts. Conversation
 turns with distinct topics triggered flushes (boundary_score \> 0.3)
 while coherent continuations remained accumulated.
 
+**Boundary calibration smoke (20 turns; F=S=T=0.5, consolidate=0):**
+
+Run: `logs/topical_chat_snapshots/20260101_090407`
+
+-   boundary_score_mean: **0.321** (p90 **0.917**)
+-   boundary_score_pass_rate: **0.30**
+-   boundary_at_rate: **0.30**
+
+**Observation:** Increasing coherence/topic weighting further boosts
+natural boundary crossings without increasing the boundary rate in the
+short horizon. The long‑horizon run below will confirm whether
+capacity/time are now edge cases rather than primary segmenters.
+
+**Boundary tuning (long horizon; 156 turns, consolidate=0):**
+
+Run: `logs/topical_chat_snapshots/20260101_090516_boundary`
+
+-   boundary_at_rate: **0.192**
+-   boundary_score_pass_rate: **0.122**
+-   boundary_score_mean: **0.177**
+
+Chunk‑level episode audit (first conversation, 2‑word cadence):
+
+-   drift episodes: **19** (avg **4.42** chunks, p50 **3**, p90 **7**,
+    range **3–8**)
+-   capacity episodes: **10** (avg **6.00** chunks, p50 **5.5**, p90
+    **8**, range **5–8**)
+-   timeout episodes: **1** (avg **7.00** chunks, p50 **7**, p90 **7**,
+    range **7–7**)
+
+**Observation:** Natural boundaries now dominate (19 drift vs 10
+capacity), while timeouts remain rare. This supports the
+coherence/topic‑weighted likelihood boost and pushes capacity/time
+toward edge‑case behavior.
+
+**Interrupt abort/resume check (long horizon; F=S=T=0.5,
+consolidate=0):**
+
+Run: `logs/topical_chat_snapshots/20260101_105426` (156 turns;
+dataset‑limited)
+
+-   interrupt_abort_rate: **0.667** (36 / 54 interrupts)
+-   interrupt_turn_rate: **0.346**
+-   boundary_at_rate: **0.122**
+
+**Observation:** Pending aborts often resolve to a committed abort at
+this horizon, implying many interrupts land mid‑unit and the following
+signal diverges beyond τ_novelty. The mechanism preserves the ability to
+resume (when novelty is low) while avoiding partial‑thought persistence
+when the thread shifts.
+
 ## Latency and Performance
 
-End-to-end processing per token averaged \< 50ms. Graph expansion added
-\< 10ms overhead due to efficient kNN (k=32) and limited expansion depth
-(d=2).
+End-to-end processing per turn is dominated by embedding + retrieval
+rather than graph expansion. In the Dec 31, 2025 long-horizon sweep (156
+turns, consolidation cycles=2), `perf_total_ms_mean` ranged
+**0.606–5.05s** depending on knob settings; the default **F=S=T=0.5**
+run averaged **0.97s/turn**, while **F=S=T=1.0** averaged
+**0.61s/turn**. Graph expansion remains a small fraction of total time
+after in-memory summary seeding.
 
-## Long-Horizon Consolidation Ablation
+## Long-Horizon Consolidation Ablation (720 Turns)
 
-We ran a long-horizon stress test with **F=S=T=0.5**, `max_total=360`,
+We ran a long-horizon stress test with **F=S=T=0.5**, `max_total=720`,
 `max_turns=360`, and `max_conversations=10` (single-stream,
 interleave=1) to isolate consolidation effects. Two conditions were
 compared:
 
 -   **No consolidation** (`consolidate_cycles=0`)
--   **Consolidation on** (`consolidate_cycles=2`, yielding 4
+-   **Consolidation on** (`consolidate_cycles=2`, yielding 8
     consolidation runs; summaries produced by gemma-3n-e2b with no
     fallback)
 
 Key outcomes (Δ = consolidate − no-consolidate):
 
--   **Retrieval semantic overlap mean:** +0.0763 (0.4481 → 0.5244)
--   **Retrieval context-semantic overlap mean:** +0.0878 (0.6348 →
-    0.7227)
--   **Interrupt semantic overlap mean:** +0.0754 (0.4683 → 0.5438)
--   **Interrupt context-semantic overlap mean:** +0.0870 (0.6404 →
-    0.7274)
+-   **Retrieval semantic overlap mean:** +0.0154 (0.5647 → 0.5801)
+-   **Retrieval overlap mean:** +0.0011 (0.2264 → 0.2275)
+-   **Interrupt recall:** +0.0124 (0.9543 → 0.9668)
+-   **Interrupt precision:** −0.0026 (0.9947 → 0.9921)
+-   **Retrieval turn rate:** −0.0056 (0.5528 → 0.5472)
 
-Consolidation contribution metrics confirm summaries are being used:
+Consolidation contribution metrics confirm summaries are being used (but
+sparsely in this horizon):
 
--   **retrieval_summary_hit_rate:** 0.552 (summaries appear in 55% of
-    retrieval turns)
--   **summary_hit_overlap_mean:** 0.421 (semantic overlap of best
+-   **retrieval_summary_hit_rate:** 0.0051 (0.51% of retrieval turns
+    include summaries)
+-   **summary_hit_overlap_mean:** 0.606 (semantic overlap of best
     summary hit)
--   **retrieval_association_turn_rate:** 0.552 (ASSOCIATION nodes
-    present in 55% of retrieval turns)
+-   **consolidation_summary_count:** 8 (all from gemma-3n-e2b; no
+    fallback)
 
-Interrupt decision quality (consolidate_cycles=2):
+Additional signals:
 
--   **interrupt_precision:** 0.994
--   **interrupt_recall:** 0.873 (false negative rate 0.127)
--   **interrupt_false_positive_rate:** 0.0058
--   **non_interrupt_semantic_overlap_mean vs
-    interrupt_semantic_overlap_mean:** 0.405 → 0.544 (Δ +0.139)
--   **non_interrupt_context_semantic_overlap_mean vs
-    interrupt_context_semantic_overlap_mean:** 0.693 → 0.727 (Δ +0.034)
+-   **memory_strength_mean:** 0.6800 → 0.6141 (Δ −0.066), suggesting
+    consolidation redistributes strength across long-term entries rather
+    than strictly amplifying it.
+-   **retrieval_avg_candidates:** 55.17 → 55.67 (Δ +0.50), essentially
+    unchanged.
 
-Retrieval and interrupt rates were unchanged, indicating the gains arise
-from consolidation quality rather than more frequent retrievals.
+Overall, consolidation increases semantic alignment and interrupt recall
+without materially changing retrieval cadence, but summary usage remains
+low at this horizon because only eight summaries were produced.
+
+## Extraction Pipeline Validation (CPU-Only, 720 Turns)
+
+We observed that LiteRT constrained decoding for extraction can fail on
+GPU due to non‑host tensor buffers, so we forced **CPU extraction** and
+re‑ran the **720‑turn** long‑horizon test (**F=S=T=0.5**,
+`max_total=720`, `max_turns=720`, `max_conversations=999`,
+`consolidate_cycles=4`). We compare against the same settings with
+consolidation off, and against an earlier run where extraction silently
+failed on GPU.
+
+<table style="width:100%;">
+<colgroup>
+<col style="width: 11%" />
+<col style="width: 11%" />
+<col style="width: 11%" />
+<col style="width: 11%" />
+<col style="width: 11%" />
+<col style="width: 11%" />
+<col style="width: 11%" />
+<col style="width: 11%" />
+<col style="width: 11%" />
+</colgroup>
+<thead>
+<tr>
+<th style="text-align: right;">condition</th>
+<th style="text-align: right;">consolidation_extraction_results</th>
+<th style="text-align: right;">labels_seen</th>
+<th style="text-align: right;">relations_seen</th>
+<th style="text-align: right;">retrieval_summary_hit_rate</th>
+<th style="text-align: right;">summary_hit_overlap_mean</th>
+<th style="text-align: right;">retrieval_semantic_overlap_mean</th>
+<th style="text-align: right;">interrupt_precision</th>
+<th style="text-align: right;">interrupt_recall</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: right;">no consolidation</td>
+<td style="text-align: right;">0</td>
+<td style="text-align: right;">0</td>
+<td style="text-align: right;">0</td>
+<td style="text-align: right;">0.0000</td>
+<td style="text-align: right;">0.000</td>
+<td style="text-align: right;">0.56465</td>
+<td style="text-align: right;">0.99471</td>
+<td style="text-align: right;">0.95432</td>
+</tr>
+<tr>
+<td style="text-align: right;">consolidation on (GPU extraction
+failed)</td>
+<td style="text-align: right;">0</td>
+<td style="text-align: right;">0</td>
+<td style="text-align: right;">0</td>
+<td style="text-align: right;">0.0176</td>
+<td style="text-align: right;">0.645</td>
+<td style="text-align: right;">0.56480</td>
+<td style="text-align: right;">0.99208</td>
+<td style="text-align: right;">0.95674</td>
+</tr>
+<tr>
+<td style="text-align: right;">consolidation on (CPU extraction)</td>
+<td style="text-align: right;">13</td>
+<td style="text-align: right;">89</td>
+<td style="text-align: right;">163</td>
+<td style="text-align: right;">0.0427</td>
+<td style="text-align: right;">0.585</td>
+<td style="text-align: right;">0.56428</td>
+<td style="text-align: right;">0.99474</td>
+<td style="text-align: right;">0.95939</td>
+</tr>
+</tbody>
+</table>
+
+**Observations:** CPU extraction restores label/relation persistence (89
+labels, 163 relations) and increases summary presence in retrieval
+(~4.3% of retrieval turns) while keeping overall semantic alignment and
+interrupt quality stable. The remaining gap to higher summary usage
+appears driven by summary count and horizon length rather than
+extraction errors.
+
+## Association Boost Check (360 Turns)
+
+We added a small **association boost** in retrieval ranking (see
+<a href="#sec-advanced" class="quarto-xref">Section 8</a>) and re‑ran
+the 360‑turn baseline with consolidation enabled (**F=S=T=0.5**,
+`max_total=360`, `max_turns=360`, `max_conversations=6`). We compare
+**before vs after** on identical settings:
+
+<table>
+<colgroup>
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+</colgroup>
+<thead>
+<tr>
+<th style="text-align: right;">variant</th>
+<th style="text-align: right;">retrieval_summary_hit_rate</th>
+<th style="text-align: right;">retrieval_association_turn_rate</th>
+<th style="text-align: right;">summary_hit_overlap_mean</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: right;">before (no boost)</td>
+<td style="text-align: right;">0.0103</td>
+<td style="text-align: right;">0.0103</td>
+<td style="text-align: right;">0.664</td>
+</tr>
+<tr>
+<td style="text-align: right;">after (boost)</td>
+<td style="text-align: right;">0.0206</td>
+<td style="text-align: right;">0.0206</td>
+<td style="text-align: right;">0.644</td>
+</tr>
+</tbody>
+</table>
+
+**Observations:** The boost roughly **doubles** summary presence in
+retrieval without affecting candidate volume (≈50 per turn). Summary
+overlap remains high, indicating the boost favors consolidated
+association nodes when they are relevant without degrading semantic
+quality. The absolute hit rate remains low in this short horizon because
+only four summaries were produced; longer horizons should show a larger
+effect.
+
+## Long-Horizon Knob Sweep (360 Max Turns)
+
+We ran a long-horizon sweep using `scripts/run_topical_chat_sweep.sh`
+with `max_turns=360`, `max_total=720`, and `consolidate_cycles=2` (no
+periodic consolidation; consolidation runs once at the end). Each run
+observed **156 turns** (single conversation), yielding **2 consolidation
+runs** per config. The table reports retrieval/interrupt rates, label
+candidate rate, and per‑turn performance.
+
+Run metadata: **Dec 31, 2025**
+(`logs/topical_chat_runs/long_horizon_20251231_112600`, git rev
+`8ae72ef`). This run includes the **in‑memory summary cache** for
+retrieval seeding.
+
+<table>
+<colgroup>
+<col style="width: 8%" />
+<col style="width: 8%" />
+<col style="width: 8%" />
+<col style="width: 8%" />
+<col style="width: 8%" />
+<col style="width: 8%" />
+<col style="width: 8%" />
+<col style="width: 8%" />
+<col style="width: 8%" />
+<col style="width: 8%" />
+<col style="width: 8%" />
+<col style="width: 8%" />
+</colgroup>
+<thead>
+<tr>
+<th style="text-align: right;">F</th>
+<th style="text-align: right;">S</th>
+<th style="text-align: right;">T</th>
+<th style="text-align: right;">turns</th>
+<th style="text-align: right;">cons_runs</th>
+<th style="text-align: right;">retr_turn_rate</th>
+<th style="text-align: right;">retr_avg_cands</th>
+<th style="text-align: right;">label_rate</th>
+<th style="text-align: right;">retr_sem_overlap</th>
+<th style="text-align: right;">interrupt_rate</th>
+<th style="text-align: right;">perf_ms</th>
+<th style="text-align: right;">signals/sec</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: right;">0</td>
+<td style="text-align: right;">0</td>
+<td style="text-align: right;">0</td>
+<td style="text-align: right;">156</td>
+<td style="text-align: right;">2</td>
+<td style="text-align: right;">0.494</td>
+<td style="text-align: right;">94.026</td>
+<td style="text-align: right;">0.961</td>
+<td style="text-align: right;">0.565</td>
+<td style="text-align: right;">0.487</td>
+<td style="text-align: right;">5050</td>
+<td style="text-align: right;">0.133</td>
+</tr>
+<tr>
+<td style="text-align: right;">0.25</td>
+<td style="text-align: right;">0.25</td>
+<td style="text-align: right;">0.25</td>
+<td style="text-align: right;">156</td>
+<td style="text-align: right;">2</td>
+<td style="text-align: right;">0.494</td>
+<td style="text-align: right;">80.844</td>
+<td style="text-align: right;">0.740</td>
+<td style="text-align: right;">0.595</td>
+<td style="text-align: right;">0.474</td>
+<td style="text-align: right;">2101</td>
+<td style="text-align: right;">0.355</td>
+</tr>
+<tr>
+<td style="text-align: right;">0.5</td>
+<td style="text-align: right;">0.5</td>
+<td style="text-align: right;">0.5</td>
+<td style="text-align: right;">156</td>
+<td style="text-align: right;">2</td>
+<td style="text-align: right;">0.571</td>
+<td style="text-align: right;">54.472</td>
+<td style="text-align: right;">0.772</td>
+<td style="text-align: right;">0.564</td>
+<td style="text-align: right;">0.532</td>
+<td style="text-align: right;">969</td>
+<td style="text-align: right;">0.593</td>
+</tr>
+<tr>
+<td style="text-align: right;">0.75</td>
+<td style="text-align: right;">0.75</td>
+<td style="text-align: right;">0.75</td>
+<td style="text-align: right;">156</td>
+<td style="text-align: right;">2</td>
+<td style="text-align: right;">0.654</td>
+<td style="text-align: right;">31.500</td>
+<td style="text-align: right;">0.813</td>
+<td style="text-align: right;">0.575</td>
+<td style="text-align: right;">0.596</td>
+<td style="text-align: right;">697</td>
+<td style="text-align: right;">0.706</td>
+</tr>
+<tr>
+<td style="text-align: right;">1</td>
+<td style="text-align: right;">1</td>
+<td style="text-align: right;">1</td>
+<td style="text-align: right;">156</td>
+<td style="text-align: right;">2</td>
+<td style="text-align: right;">0.808</td>
+<td style="text-align: right;">6.524</td>
+<td style="text-align: right;">0.672</td>
+<td style="text-align: right;">0.585</td>
+<td style="text-align: right;">0.782</td>
+<td style="text-align: right;">606</td>
+<td style="text-align: right;">0.736</td>
+</tr>
+<tr>
+<td style="text-align: right;">0.15</td>
+<td style="text-align: right;">0.9</td>
+<td style="text-align: right;">0.5</td>
+<td style="text-align: right;">156</td>
+<td style="text-align: right;">2</td>
+<td style="text-align: right;">0.506</td>
+<td style="text-align: right;">86.886</td>
+<td style="text-align: right;">0.929</td>
+<td style="text-align: right;">0.598</td>
+<td style="text-align: right;">0.500</td>
+<td style="text-align: right;">2921</td>
+<td style="text-align: right;">0.274</td>
+</tr>
+</tbody>
+</table>
+
+**Observations:**
+
+-   Higher **Focus/Sensitivity** compress candidate volume (**6.5** at
+    F=1 vs **86.9** at F=0.15,S=0.9), improving throughput (0.61s/turn
+    at F=1 vs 2.92s/turn at F=0.15,S=0.9).
+-   Retrieval semantic overlap stays stable (~0.56–0.60), indicating
+    selectivity gains do not degrade semantic alignment.
+-   **Label candidate rate is high** (0.67–0.96) due to the label bank
+    seeding, while association candidates remain absent in this sweep
+    because consolidation only ran at the end (2 summaries total).
+
+## Short-Horizon Smoke Check (120 Turns)
+
+We ran a short smoke check at **F=S=T=0.5** with `max_turns=120`,
+`max_total=120`, and `consolidate_cycles=2` to validate end‑to‑end
+integration after the ASSOCIATION/LABEL retention fix. This produced **2
+summaries** and **2 labels**, but summary/label candidates did not
+appear in retrieval within this short horizon:
+
+<table>
+<colgroup>
+<col style="width: 12%" />
+<col style="width: 12%" />
+<col style="width: 12%" />
+<col style="width: 12%" />
+<col style="width: 12%" />
+<col style="width: 12%" />
+<col style="width: 12%" />
+<col style="width: 12%" />
+</colgroup>
+<thead>
+<tr>
+<th style="text-align: right;">turns</th>
+<th style="text-align: right;">summaries</th>
+<th style="text-align: right;">labels</th>
+<th style="text-align: right;">retr_turn_rate</th>
+<th style="text-align: right;">retr_avg_cands</th>
+<th style="text-align: right;">assoc_rate</th>
+<th style="text-align: right;">label_rate</th>
+<th style="text-align: right;">interrupt_rate</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: right;">120</td>
+<td style="text-align: right;">2</td>
+<td style="text-align: right;">2</td>
+<td style="text-align: right;">0.4917</td>
+<td style="text-align: right;">13.93</td>
+<td style="text-align: right;">0.0000</td>
+<td style="text-align: right;">0.0000</td>
+<td style="text-align: right;">0.4333</td>
+</tr>
+</tbody>
+</table>
+
+**Observation:** At 120 turns, summary/label production is too sparse to
+materially affect retrieval. Longer horizons (see above) show non‑zero
+association/label candidate rates once more summaries accumulate.
+
+## Short-Horizon Consolidation Mode Check (20 Turns)
+
+We ran a **20‑turn** sanity check at **F=S=T=0.5** to compare
+**baseline**, **shallow**, and **deep** consolidation modes using the
+topical‑chat pipeline (ImageBind embeddings; gemma‑3n‑e2b via LiteRT for
+deep summarization). Consolidation was triggered twice
+(`consolidate_every=20`, `consolidate_cycles=1`).
+
+Runs (Dec 31, 2025):
+
+-   baseline:
+    `logs/topical_chat_snapshots/20251231_000002_baseline_small`
+-   shallow: `logs/topical_chat_snapshots/20251231_000003_shallow_small`
+-   deep: `logs/topical_chat_snapshots/20251231_000001_deep_small`
+
+<table style="width:100%;">
+<colgroup>
+<col style="width: 10%" />
+<col style="width: 10%" />
+<col style="width: 10%" />
+<col style="width: 10%" />
+<col style="width: 10%" />
+<col style="width: 10%" />
+<col style="width: 10%" />
+<col style="width: 10%" />
+<col style="width: 10%" />
+<col style="width: 10%" />
+</colgroup>
+<thead>
+<tr>
+<th style="text-align: right;">mode</th>
+<th style="text-align: right;">cons_runs</th>
+<th style="text-align: right;">assoc_created</th>
+<th style="text-align: right;">labels_created</th>
+<th style="text-align: right;">summaries</th>
+<th style="text-align: right;">retr_turn_rate</th>
+<th style="text-align: right;">retr_avg_cands</th>
+<th style="text-align: right;">assoc_rate</th>
+<th style="text-align: right;">label_rate</th>
+<th style="text-align: right;">interrupt_rate</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: right;">baseline</td>
+<td style="text-align: right;">0</td>
+<td style="text-align: right;">0</td>
+<td style="text-align: right;">0</td>
+<td style="text-align: right;">0</td>
+<td style="text-align: right;">0.300</td>
+<td style="text-align: right;">2.67</td>
+<td style="text-align: right;">0.000</td>
+<td style="text-align: right;">0.000</td>
+<td style="text-align: right;">0.200</td>
+</tr>
+<tr>
+<td style="text-align: right;">shallow</td>
+<td style="text-align: right;">2</td>
+<td style="text-align: right;">2</td>
+<td style="text-align: right;">0</td>
+<td style="text-align: right;">0</td>
+<td style="text-align: right;">0.300</td>
+<td style="text-align: right;">2.67</td>
+<td style="text-align: right;">0.000</td>
+<td style="text-align: right;">0.000</td>
+<td style="text-align: right;">0.200</td>
+</tr>
+<tr>
+<td style="text-align: right;">deep</td>
+<td style="text-align: right;">2</td>
+<td style="text-align: right;">2</td>
+<td style="text-align: right;">2</td>
+<td style="text-align: right;">2</td>
+<td style="text-align: right;">0.300</td>
+<td style="text-align: right;">2.67</td>
+<td style="text-align: right;">0.000</td>
+<td style="text-align: right;">0.000</td>
+<td style="text-align: right;">0.200</td>
+</tr>
+</tbody>
+</table>
+
+**Observations:** Both consolidation modes create association nodes (and
+deep additionally emits labels + summaries), but **20 turns is too
+short** for these nodes to enter retrieval. Association/label candidate
+rates remain **0**; longer horizons are required for retrieval to
+surface consolidated memory.
+
+## Verification Checks (Dec 31, 2025)
+
+We ran targeted verification checks at **F=S=T=0.5** to confirm
+end‑to‑end behavior after recent changes (summary cache, source
+monitoring, sequential edges).
+
+**Baseline vs idle consolidation (120 turns; consolidate_every=40,
+deep):**
+
+<table>
+<colgroup>
+<col style="width: 12%" />
+<col style="width: 12%" />
+<col style="width: 12%" />
+<col style="width: 12%" />
+<col style="width: 12%" />
+<col style="width: 12%" />
+<col style="width: 12%" />
+<col style="width: 12%" />
+</colgroup>
+<thead>
+<tr>
+<th style="text-align: right;">condition</th>
+<th style="text-align: right;">cons_runs</th>
+<th style="text-align: right;">summaries</th>
+<th style="text-align: right;">labels_created</th>
+<th style="text-align: right;">retr_sem_overlap</th>
+<th style="text-align: right;">retr_label_rate</th>
+<th style="text-align: right;">interrupt_turn_rate</th>
+<th style="text-align: right;">perf_total_ms</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: right;">baseline</td>
+<td style="text-align: right;">8</td>
+<td style="text-align: right;">8</td>
+<td style="text-align: right;">6479</td>
+<td style="text-align: right;">0.5703</td>
+<td style="text-align: right;">0.790</td>
+<td style="text-align: right;">0.542</td>
+<td style="text-align: right;">915</td>
+</tr>
+<tr>
+<td style="text-align: right;">idle‑during (consolidate_during=1,
+consolidate_idle=1)</td>
+<td style="text-align: right;">8</td>
+<td style="text-align: right;">8</td>
+<td style="text-align: right;">6479</td>
+<td style="text-align: right;">0.5704</td>
+<td style="text-align: right;">0.790</td>
+<td style="text-align: right;">0.542</td>
+<td style="text-align: right;">908</td>
+</tr>
+</tbody>
+</table>
+
+**Observation:** Outputs are effectively identical, indicating the
+idle/defer flags do not change behavior when `consolidate_every` already
+governs consolidation timing.
+
+**Idle vs end‑only consolidation (120 turns; consolidate_cycles=1, no
+periodic consolidation):**
+
+<table>
+<colgroup>
+<col style="width: 12%" />
+<col style="width: 12%" />
+<col style="width: 12%" />
+<col style="width: 12%" />
+<col style="width: 12%" />
+<col style="width: 12%" />
+<col style="width: 12%" />
+<col style="width: 12%" />
+</colgroup>
+<thead>
+<tr>
+<th style="text-align: right;">condition</th>
+<th style="text-align: right;">cons_runs</th>
+<th style="text-align: right;">summaries</th>
+<th style="text-align: right;">labels_created</th>
+<th style="text-align: right;">retr_sem_overlap</th>
+<th style="text-align: right;">retr_label_rate</th>
+<th style="text-align: right;">interrupt_turn_rate</th>
+<th style="text-align: right;">perf_total_ms</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: right;">end‑only</td>
+<td style="text-align: right;">1</td>
+<td style="text-align: right;">1</td>
+<td style="text-align: right;">6478</td>
+<td style="text-align: right;">0.5602</td>
+<td style="text-align: right;">0.830</td>
+<td style="text-align: right;">0.525</td>
+<td style="text-align: right;">917</td>
+</tr>
+<tr>
+<td style="text-align: right;">idle‑during</td>
+<td style="text-align: right;">1</td>
+<td style="text-align: right;">1</td>
+<td style="text-align: right;">6478</td>
+<td style="text-align: right;">0.5602</td>
+<td style="text-align: right;">0.835</td>
+<td style="text-align: right;">0.525</td>
+<td style="text-align: right;">916</td>
+</tr>
+</tbody>
+</table>
+
+**Observation:** With a single consolidation cycle, idle‑during matches
+end‑only within noise; any differences in summary/label retrieval would
+require longer horizons or more consolidation cycles.
+
+## Affect On/Off (Long Horizon, No Consolidation)
+
+We compared affect gating at **F=S=T=0.5** over **156 turns** (single
+conversation) with consolidation disabled to isolate interrupt gating +
+retrieval effects.
+
+<table style="width:100%;">
+<colgroup>
+<col style="width: 16%" />
+<col style="width: 16%" />
+<col style="width: 16%" />
+<col style="width: 16%" />
+<col style="width: 16%" />
+<col style="width: 16%" />
+</colgroup>
+<thead>
+<tr>
+<th style="text-align: right;">affect_mode</th>
+<th style="text-align: right;">retr_turn_rate</th>
+<th style="text-align: right;">retr_sem_overlap</th>
+<th style="text-align: right;">interrupt_turn_rate</th>
+<th style="text-align: right;">interrupt_sem_overlap</th>
+<th style="text-align: right;">perf_total_ms</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: right;">all</td>
+<td style="text-align: right;">0.571</td>
+<td style="text-align: right;">0.5638</td>
+<td style="text-align: right;">0.532</td>
+<td style="text-align: right;">0.5702</td>
+<td style="text-align: right;">961</td>
+</tr>
+<tr>
+<td style="text-align: right;">off</td>
+<td style="text-align: right;">0.571</td>
+<td style="text-align: right;">0.5649</td>
+<td style="text-align: right;">0.487</td>
+<td style="text-align: right;">0.5817</td>
+<td style="text-align: right;">966</td>
+</tr>
+</tbody>
+</table>
+
+**Observation:** With affect off, interrupt rate drops (~4.5pp) while
+semantic overlap stays within noise. At mid‑range knobs on this dataset,
+affect primarily shifts interrupt gating frequency rather than semantic
+match quality.
+
+## EmpatheticDialogues Affect On/Off (No Consolidation)
+
+We repeated the affect toggle on **EmpatheticDialogues (valid)** with
+consolidation disabled to isolate gating effects on a more emotional
+corpus. Settings: **F=S=T=0.5**, `max_turns=360`, `max_total=720`,
+`max_conversations=6` (195 turns observed).
+
+<table style="width:100%;">
+<colgroup>
+<col style="width: 16%" />
+<col style="width: 16%" />
+<col style="width: 16%" />
+<col style="width: 16%" />
+<col style="width: 16%" />
+<col style="width: 16%" />
+</colgroup>
+<thead>
+<tr>
+<th style="text-align: right;">affect_mode</th>
+<th style="text-align: right;">retr_turn_rate</th>
+<th style="text-align: right;">retr_sem_overlap</th>
+<th style="text-align: right;">interrupt_turn_rate</th>
+<th style="text-align: right;">interrupt_sem_overlap</th>
+<th style="text-align: right;">perf_total_ms</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: right;">all</td>
+<td style="text-align: right;">0.518</td>
+<td style="text-align: right;">0.5959</td>
+<td style="text-align: right;">0.487</td>
+<td style="text-align: right;">0.6026</td>
+<td style="text-align: right;">1163</td>
+</tr>
+<tr>
+<td style="text-align: right;">off</td>
+<td style="text-align: right;">0.518</td>
+<td style="text-align: right;">0.5959</td>
+<td style="text-align: right;">0.482</td>
+<td style="text-align: right;">0.6045</td>
+<td style="text-align: right;">1156</td>
+</tr>
+</tbody>
+</table>
+
+**Observation:** On EmpatheticDialogues without consolidation, affect
+has a small but consistent effect on interrupt frequency (~0.5pp) while
+semantic overlap remains essentially unchanged. The gating effect is
+visible but modest at mid‑range knobs.
+
+## Source-Confidence Gating Check
+
+We validated source-monitoring gating by computing the
+**source_confidence** used during retrieval (from `source_reliability`,
+contradiction count, and freshness) and comparing it to the threshold (
+*{src} = (0.15, 0.45, T) ). At **T=0.5** ((*{src}=0.30)) on the
+EmpatheticDialogues run above, none of the memories present in
+`recent_retrievals` fall below the threshold (**0 / 128 violations**),
+indicating that low‑confidence memories are being filtered from
+injection as intended.
+
+## Procedural + Sequential Link Ablation
+
+We added toggles to disable the **procedural store** and **sequential
+edges** and re‑ran a 156‑turn topical‑chat run with consolidation
+enabled (`consolidate_every=40`, 4 runs). Settings were **F=S=T=0.5**.
+
+<table>
+<colgroup>
+<col style="width: 20%" />
+<col style="width: 20%" />
+<col style="width: 20%" />
+<col style="width: 20%" />
+<col style="width: 20%" />
+</colgroup>
+<thead>
+<tr>
+<th style="text-align: right;">variant</th>
+<th style="text-align: right;">retr_sem_overlap</th>
+<th style="text-align: right;">retr_assoc_rate</th>
+<th style="text-align: right;">interrupt_turn_rate</th>
+<th style="text-align: right;">perf_total_ms</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: right;">baseline (procedural+sequential on)</td>
+<td style="text-align: right;">0.5689</td>
+<td style="text-align: right;">0.0241</td>
+<td style="text-align: right;">0.5449</td>
+<td style="text-align: right;">946</td>
+</tr>
+<tr>
+<td style="text-align: right;">ablation (both off)</td>
+<td style="text-align: right;">0.5688</td>
+<td style="text-align: right;">0.0241</td>
+<td style="text-align: right;">0.5449</td>
+<td style="text-align: right;">954</td>
+</tr>
+</tbody>
+</table>
+
+**Observation:** At this horizon and dataset, disabling
+procedural/sequence contributions does **not** materially change
+retrieval or interrupt quality (Δ semantic overlap ≈ −0.00009). This
+suggests either the effect is subtle at short horizons or the current
+metrics are not sensitive to these pathways; longer horizons or targeted
+tasks may be required to surface their impact.
+
+We extended the comparison to a longer consolidation cadence (156 turns
+observed, `consolidate_every=60`) with identical knobs:
+
+<table>
+<colgroup>
+<col style="width: 20%" />
+<col style="width: 20%" />
+<col style="width: 20%" />
+<col style="width: 20%" />
+<col style="width: 20%" />
+</colgroup>
+<thead>
+<tr>
+<th style="text-align: right;">variant</th>
+<th style="text-align: right;">retr_sem_overlap</th>
+<th style="text-align: right;">retr_assoc_rate</th>
+<th style="text-align: right;">interrupt_turn_rate</th>
+<th style="text-align: right;">perf_total_ms</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: right;">baseline (procedural+sequential on)</td>
+<td style="text-align: right;">0.5707</td>
+<td style="text-align: right;">0.0156</td>
+<td style="text-align: right;">0.5385</td>
+<td style="text-align: right;">971</td>
+</tr>
+<tr>
+<td style="text-align: right;">ablation (both off)</td>
+<td style="text-align: right;">0.5704</td>
+<td style="text-align: right;">0.0156</td>
+<td style="text-align: right;">0.5385</td>
+<td style="text-align: right;">969</td>
+</tr>
+</tbody>
+</table>
+
+**Observation:** Even with a longer cadence, deltas remain negligible (Δ
+semantic overlap ≈ −0.00035). This further supports the need for longer
+horizons or targeted sequential‑recall tasks to surface
+procedural/sequence benefits.
+
+**Affect on/off sanity (20 turns; deep, consolidate_every=20):**
+
+<table style="width:100%;">
+<colgroup>
+<col style="width: 14%" />
+<col style="width: 14%" />
+<col style="width: 14%" />
+<col style="width: 14%" />
+<col style="width: 14%" />
+<col style="width: 14%" />
+<col style="width: 14%" />
+</colgroup>
+<thead>
+<tr>
+<th style="text-align: right;">affect_mode</th>
+<th style="text-align: right;">retr_turn_rate</th>
+<th style="text-align: right;">interrupt_turn_rate</th>
+<th style="text-align: right;">interrupt_precision</th>
+<th style="text-align: right;">interrupt_recall</th>
+<th style="text-align: right;">retrieval_emotion_bonus_mean</th>
+<th style="text-align: right;">interrupt_gate_retrieval_thresh_mean</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: right;">all</td>
+<td style="text-align: right;">0.50</td>
+<td style="text-align: right;">0.40</td>
+<td style="text-align: right;">1.00</td>
+<td style="text-align: right;">0.80</td>
+<td style="text-align: right;">0.00185</td>
+<td style="text-align: right;">0.223</td>
+</tr>
+<tr>
+<td style="text-align: right;">off</td>
+<td style="text-align: right;">0.50</td>
+<td style="text-align: right;">0.40</td>
+<td style="text-align: right;">1.00</td>
+<td style="text-align: right;">0.80</td>
+<td style="text-align: right;">0.00000</td>
+<td style="text-align: right;">0.240</td>
+</tr>
+</tbody>
+</table>
+
+**Observation:** Affect pathways are active (bonus and lower interrupt
+threshold when enabled) but do not materially change interrupt
+precision/recall at this short horizon.
+
+**Source monitoring + sequential edges (baseline DB):** 64 memories
+store non‑default source metadata and sequential edges are present
+(`next_in_episode`, `prev_in_episode`, `within_same_event`, 19 each),
+confirming provenance tagging and ordered links are persisted during
+consolidation.
+
+## Long-Horizon Consolidation Mode Check (156 Turns)
+
+We ran a **156‑turn** comparison at **F=S=T=0.5** to evaluate
+**baseline**, **shallow**, and **deep** consolidation in the
+topical‑chat pipeline. Consolidation ran **8 times**
+(`consolidate_every=40`, `consolidate_cycles=2`), and deep used
+gemma‑3n‑e2b via LiteRT for summarization/labeling. Runs are from **Dec
+30, 2025**:
+
+-   baseline:
+    `logs/topical_chat_snapshots/20251230_202959_long_horizon/baseline`
+-   shallow:
+    `logs/topical_chat_snapshots/20251230_202959_long_horizon/shallow`
+-   deep:
+    `logs/topical_chat_snapshots/20251230_202959_long_horizon/deep`
+
+<table style="width:100%;">
+<colgroup>
+<col style="width: 7%" />
+<col style="width: 7%" />
+<col style="width: 7%" />
+<col style="width: 7%" />
+<col style="width: 7%" />
+<col style="width: 7%" />
+<col style="width: 7%" />
+<col style="width: 7%" />
+<col style="width: 7%" />
+<col style="width: 7%" />
+<col style="width: 7%" />
+<col style="width: 7%" />
+<col style="width: 7%" />
+</colgroup>
+<thead>
+<tr>
+<th style="text-align: right;">mode</th>
+<th style="text-align: right;">cons_runs</th>
+<th style="text-align: right;">assoc_created</th>
+<th style="text-align: right;">labels_created</th>
+<th style="text-align: right;">summaries</th>
+<th style="text-align: right;">retr_turn_rate</th>
+<th style="text-align: right;">retr_avg_cands</th>
+<th style="text-align: right;">retr_sem_overlap</th>
+<th style="text-align: right;">assoc_rate</th>
+<th style="text-align: right;">label_rate</th>
+<th style="text-align: right;">assoc_turn_rate</th>
+<th style="text-align: right;">label_turn_rate</th>
+<th style="text-align: right;">interrupt_rate</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: right;">baseline</td>
+<td style="text-align: right;">0</td>
+<td style="text-align: right;">0</td>
+<td style="text-align: right;">0</td>
+<td style="text-align: right;">0</td>
+<td style="text-align: right;">0.500</td>
+<td style="text-align: right;">18.54</td>
+<td style="text-align: right;">0.4746</td>
+<td style="text-align: right;">0.0000</td>
+<td style="text-align: right;">0.0000</td>
+<td style="text-align: right;">0.0000</td>
+<td style="text-align: right;">0.0000</td>
+<td style="text-align: right;">0.4487</td>
+</tr>
+<tr>
+<td style="text-align: right;">shallow</td>
+<td style="text-align: right;">8</td>
+<td style="text-align: right;">8</td>
+<td style="text-align: right;">0</td>
+<td style="text-align: right;">0</td>
+<td style="text-align: right;">0.526</td>
+<td style="text-align: right;">25.18</td>
+<td style="text-align: right;">0.4853</td>
+<td style="text-align: right;">0.1269</td>
+<td style="text-align: right;">0.0000</td>
+<td style="text-align: right;">0.8293</td>
+<td style="text-align: right;">0.0000</td>
+<td style="text-align: right;">0.4808</td>
+</tr>
+<tr>
+<td style="text-align: right;">deep</td>
+<td style="text-align: right;">8</td>
+<td style="text-align: right;">8</td>
+<td style="text-align: right;">5</td>
+<td style="text-align: right;">8</td>
+<td style="text-align: right;">0.526</td>
+<td style="text-align: right;">27.70</td>
+<td style="text-align: right;">0.4868</td>
+<td style="text-align: right;">0.1154</td>
+<td style="text-align: right;">0.0766</td>
+<td style="text-align: right;">0.8293</td>
+<td style="text-align: right;">0.8293</td>
+<td style="text-align: right;">0.4808</td>
+</tr>
+</tbody>
+</table>
+
+**Observations:** Shallow consolidation alone increases association hits
+and retrieval breadth (candidate count) while slightly improving
+semantic overlap. Deep consolidation adds labels and summaries that are
+actively retrieved (label rate
+**<sub>7.7%**,\ label\ turn\ rate\ **</sub>83%**) without degrading
+interrupt precision. This indicates deep consolidation contributes
+structured semantic signals beyond shallow associations.
+
+## Reinforcement Ablation (Long Horizon)
+
+We evaluated reinforcement edges by comparing **reinforcement on vs
+off** at **F=S=T=0.5**, `max_total=360`, `max_turns=360`,
+`max_conversations=6` (single stream, interleave=1). Consolidation was
+invoked externally (`consolidate_cycles=2`).
+
+<table>
+<colgroup>
+<col style="width: 12%" />
+<col style="width: 12%" />
+<col style="width: 12%" />
+<col style="width: 12%" />
+<col style="width: 12%" />
+<col style="width: 12%" />
+<col style="width: 12%" />
+<col style="width: 12%" />
+</colgroup>
+<thead>
+<tr>
+<th style="text-align: right;">reinforcement_mode</th>
+<th style="text-align: right;">reinforcement_edge_count</th>
+<th style="text-align: right;">retrieval_avg_candidates</th>
+<th style="text-align: right;">retrieval_semantic_overlap_mean</th>
+<th style="text-align: right;">interrupt_precision</th>
+<th style="text-align: right;">interrupt_recall</th>
+<th style="text-align: right;">interrupt_fn_rate</th>
+<th style="text-align: right;">memory_retrieved_count_mean</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: right;">on</td>
+<td style="text-align: right;">9542</td>
+<td style="text-align: right;">50.19</td>
+<td style="text-align: right;">0.568</td>
+<td style="text-align: right;">0.989</td>
+<td style="text-align: right;">0.958</td>
+<td style="text-align: right;">0.0417</td>
+<td style="text-align: right;">54.33</td>
+</tr>
+<tr>
+<td style="text-align: right;">off</td>
+<td style="text-align: right;">0</td>
+<td style="text-align: right;">33.28</td>
+<td style="text-align: right;">0.567</td>
+<td style="text-align: right;">0.984</td>
+<td style="text-align: right;">0.948</td>
+<td style="text-align: right;">0.0524</td>
+<td style="text-align: right;">35.71</td>
+</tr>
+</tbody>
+</table>
+
+**Observations:** Reinforcement substantially increases candidate
+breadth (+16.9 candidates/turn) and retrieved-count mean (+18.6), while
+**semantic overlap is stable** (Δ ≈ +0.0006). Interrupt recall improves
+by ~1.1pp (FN rate drops from 0.052 → 0.042) with a small precision
+lift. This indicates reinforcement primarily broadens the retrieval
+field and modestly strengthens interrupt coverage without degrading
+semantic quality.
 
 ## Affect Path Ablation (Long Horizon)
 
@@ -2913,6 +4059,66 @@ interrupt rate rises by ~1.0pp and recall improves by ~1.1pp, with a
 measurable gating relaxation. At **S=1.0**, thresholds are substantially
 relaxed but the interrupt decision remains saturated on this dataset;
 only the retrieval emotion bonus changes.
+
+## EmpatheticDialogues Affect Check (Long Horizon)
+
+We repeated the EmpatheticDialogues check at longer horizon with **10
+conversations** and `max_total=720` (371 turns observed), holding
+**F=0.5, S=0.5, T=0.5** and comparing `affect_mode=all` vs `off`.
+Consolidation ran **20** times with zero failures.
+
+<table>
+<colgroup>
+<col style="width: 12%" />
+<col style="width: 12%" />
+<col style="width: 12%" />
+<col style="width: 12%" />
+<col style="width: 12%" />
+<col style="width: 12%" />
+<col style="width: 12%" />
+<col style="width: 12%" />
+</colgroup>
+<thead>
+<tr>
+<th style="text-align: right;">affect_mode</th>
+<th style="text-align: right;">interrupt_turn_rate</th>
+<th style="text-align: right;">precision</th>
+<th style="text-align: right;">recall</th>
+<th style="text-align: right;">fn_rate</th>
+<th style="text-align: right;">retrieval_emotion_bonus_mean</th>
+<th style="text-align: right;">retrieval_thresh_mean</th>
+<th style="text-align: right;">boundary_mult_eff_mean</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: right;">all</td>
+<td style="text-align: right;">0.493</td>
+<td style="text-align: right;">0.989</td>
+<td style="text-align: right;">0.978</td>
+<td style="text-align: right;">0.0216</td>
+<td style="text-align: right;">0.00841</td>
+<td style="text-align: right;">0.220</td>
+<td style="text-align: right;">1.394</td>
+</tr>
+<tr>
+<td style="text-align: right;">off</td>
+<td style="text-align: right;">0.477</td>
+<td style="text-align: right;">0.994</td>
+<td style="text-align: right;">0.951</td>
+<td style="text-align: right;">0.0486</td>
+<td style="text-align: right;">0</td>
+<td style="text-align: right;">0.240</td>
+<td style="text-align: right;">1.518</td>
+</tr>
+</tbody>
+</table>
+
+**Observations:** Over a longer horizon, affect increases interrupt rate
+by ~1.6pp and improves recall by ~2.7pp, with a ~0.5pp precision
+trade‑off. The interrupt threshold and boundary multiplier relax (0.240
+→ 0.220; 1.52 → 1.39), confirming affect contributes to gating and not
+just retrieval ranking.
 
 ## Affect-Gated Sensitivity Sweep (Long Horizon)
 
@@ -3160,6 +4366,10 @@ The primary per-stimulus cost is the k-nearest-neighbors (kNN) search
 for metrics and retrieval. With `N` stored memories, naive search is
 `O(N)`. We recommend maintaining an HNSW index (Malkov and Yashunin
 2018) to achieve `O(log N)` retrieval.
+
+Label/association seeds are selected from an in‑memory summary cache
+(populated by the label bank and consolidation) to avoid an additional
+vector search pass while keeping retrieval fully embedding‑based.
 
 Recursive graph expansion adds overhead but is bounded by `depth` and
 `branching_factor`, effectively constant-time relative to `N`. Total
@@ -3499,6 +4709,16 @@ Canonical single-step pseudocode (timestep t):
 
     # Interrupt gate (consumes retrieved candidates)
     interrupt_gate_check()
+    if allow_interrupt and not should_flush and not spike_bypass:
+        pending_abort ← true
+
+    # Next signal: resume if novelty is low, else drop partial unit.
+    if pending_abort:
+        novelty ← clamp((1 − cos(x_t, μ_acc)) / 2, 0, 1)
+        if novelty < τ_novelty(F,S,T):
+            pending_abort ← false  # resume accumulation
+        else:
+            reset_accumulator(); pending_abort ← false
 
 The normative execution order for a single timestep t:
 
@@ -3545,6 +4765,10 @@ The normative execution order for a single timestep t:
 11. **Run Interrupt Gate:** Check for streaming interrupt using
     retrieved candidates (already filtered by write‑exclusion and WM
     overlap during retrieval).
+12. **Interrupt Abort (if allowed):** Mark a pending abort when an
+    interrupt is permitted outside a flush/spike event. On the next
+    signal, resume the accumulator if novelty \< τ_novelty(F,S,T);
+    otherwise reset to drop partial utterances.
 
 Timing notes: \* `now_s()` is captured at step 1 and reused for all Δt
 computations in this timestep. \* Threshold updates in step 7 use the

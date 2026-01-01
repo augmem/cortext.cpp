@@ -150,6 +150,22 @@ else:
 
 This logic suppresses low-drift interrupts unless the marginal utility substantially exceeds threshold, while permitting normal-threshold interrupts at natural transition points.
 
+## Interrupt-triggered Accumulator Abort
+
+When the interrupt gate allows a retrieval outside a flush/spike event, we mark a **pending abort** for the current accumulator to avoid persisting partial thoughts. If the next signal continues the same thought (low novelty relative to the current centroid), we **resume** the accumulator; otherwise we **drop** the partial unit. This prevents “half‑utterances” from being stored when a memory whisper redirects attention, while still allowing the speaker to ignore the interrupt and continue seamlessly. Because the resume test reuses the knob‑derived novelty threshold, no new fixed constants are introduced.
+
+```
+if allow_interrupt AND NOT should_flush AND NOT spike_bypass:
+    pending_abort ← true
+
+if pending_abort:
+    novelty = clamp((1 − cos(x_t, μ_acc)) / 2, 0, 1)
+    if novelty < τ_novelty(F,S,T):   # same thought → resume
+        pending_abort ← false
+    else:                            # new thought → drop partial unit
+        reset_accumulator(); pending_abort ← false
+```
+
 ## Streaming Pacing
 
 Streaming retrieval is gated by cumulative drift rate within the accumulation unit. Retrieval checks trigger when drift exceeds threshold or at boundaries. Retrieval uses q_retrieval (the accumulator centroid) captured before any accumulator reset for this step. Retrieval returns a candidate pool already filtered by write‑exclusion and WM‑overlap rules and diversified (MMR‑style); the interrupt gate then applies novelty/utility thresholds and redundancy penalties.

@@ -43,11 +43,13 @@ strength_t ← clamp(Σ_i w_i × trace_i, 0, 1)
 Δt(m) ← now_s() − to_s(m.last_access); if last_access is unset, use created_at
 ```
 
-Memories falling below the periphery cutoff are candidates for eviction:
+Memories falling below the periphery cutoff are candidates for eviction. **Only
+LONG_TERM memories are evicted**; ASSOCIATION and LABEL nodes are retained to
+stabilize summary/label retrieval and are pruned during explicit consolidation.
 
 ```
 periphery_cutoff(T) = lerp(0.05, 0.25, T)
-if strength_t < periphery_cutoff(T): evict(m)
+if m.kind == LONG_TERM AND strength_t < periphery_cutoff(T): evict(m)
 ```
 
 ## Contextual Gain and Per-Memory Stability (Definitions)
@@ -95,6 +97,15 @@ trace_fast ← clamp(trace_fast + 0.6 × boost, 0, 1)
 trace_med  ← clamp(trace_med  + 0.3 × boost, 0, 1)
 trace_slow ← clamp(trace_slow + 0.1 × boost, 0, 1)
 ```
+
+## Reinforcement Graph Maintenance
+
+Co-retrieved memories also form *reinforces* edges in the ASSOCIATIONS graph.
+These edges are strengthened during retrieval/use and **only decayed during
+explicit consolidation cycles** (triggered externally via `cortext.consolidate()`),
+matching the system’s “idle-time consolidation” policy. This prevents per-turn
+decay from erasing fresh reinforcement and keeps runtime retrieval updates
+stable while still allowing long-term pruning during consolidation.
 
 ## Causal Feedback Loop {#sec-feedback}
 

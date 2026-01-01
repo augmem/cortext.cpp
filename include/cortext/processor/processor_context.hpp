@@ -223,6 +223,7 @@ struct ProcessorContext
   bool focus_priors_initialized = false;
   bool sensitivity_priors_initialized = false;
   bool stability_priors_initialized = false;
+  bool label_bank_seeded = false;
   int last_interrupt_tick = -1000000;
   int blender_update_count = 0;
   WriteRateWindow write_rate_window_;
@@ -315,6 +316,7 @@ struct ProcessorContext
   int rate_ticks = 0;
   uint64_t last_rate_timestamp = 0;
   double reliability = 1.0;  // ESS-based reliability measure
+  double boundary_rate_ema = 0.0;
 
   // ======================================================================
   // Metric Weight Blending State (Algorithm 7)
@@ -414,9 +416,59 @@ struct ProcessorContext
   // ======================================================================
   // Index and Procedural Stores (CLS extensions)
   // ======================================================================
+  struct SummaryCacheEntry
+  {
+    long long memory_id = 0;
+    long long embedding_id = 0;
+    Eigen::VectorXf embedding;
+    float embedding_norm = 0.0f;
+    bool is_association = false;
+    bool is_label = false;
+  };
+
+  void
+  UpsertSummaryCache (long long memory_id, long long embedding_id,
+                      const Eigen::VectorXf &embedding,
+                      bool is_association, bool is_label)
+  {
+    if (memory_id <= 0 || embedding_id <= 0 || embedding.size () == 0)
+      {
+        return;
+      }
+    const float norm = embedding.norm ();
+    if (norm <= 1e-9f)
+      {
+        return;
+      }
+    auto it = summary_cache_index.find (memory_id);
+    if (it != summary_cache_index.end ())
+      {
+        auto &entry = summary_cache[it->second];
+        entry.embedding_id = embedding_id;
+        entry.embedding = embedding;
+        entry.embedding_norm = norm;
+        entry.is_association = is_association;
+        entry.is_label = is_label;
+        return;
+      }
+    SummaryCacheEntry entry;
+    entry.memory_id = memory_id;
+    entry.embedding_id = embedding_id;
+    entry.embedding = embedding;
+    entry.embedding_norm = norm;
+    entry.is_association = is_association;
+    entry.is_label = is_label;
+    summary_cache_index[memory_id] = summary_cache.size ();
+    summary_cache.push_back (std::move (entry));
+  }
+
   std::unordered_map<std::string, std::vector<long long>> index_store;
   std::unordered_map<long long, std::string> index_reverse;
   std::unordered_map<std::string, std::unordered_map<long long, double>> procedural_store;
+  // Cache label embeddings by normalized label key to avoid re-encoding.
+  std::unordered_map<std::string, std::vector<float>> label_embedding_cache;
+  std::vector<SummaryCacheEntry> summary_cache;
+  std::unordered_map<long long, size_t> summary_cache_index;
 
   // ======================================================================
   // LLM Components (OGA/Phi-4)

@@ -36,6 +36,7 @@ struct Signal
   // Audio-specific metadata (when modality == "audio").
   int sample_rate = 0;
   std::size_t num_samples = 0;
+
 };
 
 } // namespace cortext

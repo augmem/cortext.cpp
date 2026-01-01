@@ -62,6 +62,40 @@ std::string RoleFromSourceId(const std::string& source_id) {
   return {};
 }
 
+struct UiMessage {
+  std::string role;
+  std::string content;
+};
+
+std::vector<UiMessage> BuildMessagesFromWorkingMemory(
+    const std::vector<cortext::Cortext::Context::Memory>& working_memory) {
+  std::vector<const cortext::Cortext::Context::Memory*> ordered;
+  ordered.reserve(working_memory.size());
+  for (const auto& mem : working_memory) {
+    ordered.push_back(&mem);
+  }
+  std::sort(ordered.begin(), ordered.end(),
+            [](const auto* a, const auto* b) {
+              if (a->timestamp == b->timestamp) return a->id < b->id;
+              return a->timestamp < b->timestamp;
+            });
+
+  std::vector<UiMessage> messages;
+  messages.reserve(ordered.size());
+  for (const auto* mem : ordered) {
+    const std::string role = RoleFromSourceId(mem->source_id);
+    if (role.empty()) {
+      continue;
+    }
+    std::string content = ExtractTextFromBlobs(mem->content);
+    if (content.empty()) {
+      content = "(empty)";
+    }
+    messages.push_back({role, std::move(content)});
+  }
+  return messages;
+}
+
 }  // namespace
 
 ChatWindow::ChatWindow(const State& state) : state_(state) {}
@@ -130,34 +164,17 @@ void ChatWindow::RenderTabBar() {
 }
 
 void ChatWindow::RenderChatTab() {
-  if (!state_.mu || !state_.working_memory) return;
+  if (!state_.mu) return;
 
   std::lock_guard<std::mutex> lock(*state_.mu);
 
-  std::vector<const cortext::Cortext::Context::Memory*> ordered;
-  ordered.reserve(state_.working_memory->size());
-  for (const auto& mem : *state_.working_memory) {
-    ordered.push_back(&mem);
-  }
-  std::sort(ordered.begin(), ordered.end(),
-            [](const auto* a, const auto* b) {
-              if (a->timestamp == b->timestamp) return a->id < b->id;
-              return a->timestamp < b->timestamp;
-            });
-
-  for (const auto* mem : ordered) {
-    const std::string role = RoleFromSourceId(mem->source_id);
-    if (role.empty()) {
-      continue;
+  if (state_.chat_history) {
+    for (const auto& msg : *state_.chat_history) {
+      ImGui::TextColored(RoleColor(msg.role), "%s:", RolePrefix(msg.role).c_str());
+      ImGui::SameLine();
+      ImGui::TextWrapped("%s", msg.content.c_str());
+      ImGui::Separator();
     }
-    std::string content = ExtractTextFromBlobs(mem->content);
-    if (content.empty()) {
-      content = "(empty)";
-    }
-    ImGui::TextColored(RoleColor(role), "%s:", RolePrefix(role).c_str());
-    ImGui::SameLine();
-    ImGui::TextWrapped("%s", content.c_str());
-    ImGui::Separator();
   }
 
   if (state_.generating && *state_.generating) {
@@ -256,10 +273,9 @@ void ChatWindow::RenderMemoryTab() {
 }
 
 void ChatWindow::RenderContextTab() {
-  if (!state_.context) return;
+  if (!state_.context || !state_.working_memory) return;
 
   std::lock_guard<std::mutex> lock(state_.context->mu);
-
   if (!state_.context->has_data) {
     ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "(no context data yet - send a message first)");
     return;
@@ -276,23 +292,17 @@ void ChatWindow::RenderContextTab() {
     ImGui::EndChild();
   }
 
-  // Messages Section
-  if (ImGui::CollapsingHeader("Messages Array", ImGuiTreeNodeFlags_DefaultOpen)) {
+  // Messages Section (derived from working memory; no local history)
+  if (ImGui::CollapsingHeader("Messages (Working Memory)", ImGuiTreeNodeFlags_DefaultOpen)) {
     ImGui::BeginChild("Messages", ImVec2(0, 300), true);
-    for (size_t i = 0; i < state_.context->messages.size(); ++i) {
-      const auto& msg = state_.context->messages[i];
+    const auto messages = BuildMessagesFromWorkingMemory(*state_.working_memory);
+    for (size_t i = 0; i < messages.size(); ++i) {
+      const auto& msg = messages[i];
       ImGui::TextColored(RoleColor(msg.role), "[%zu] %s:", i, RolePrefix(msg.role).c_str());
       std::string content = Truncate(msg.content, 500);
       ImGui::TextWrapped("%s", content.c_str());
       ImGui::Separator();
     }
-    ImGui::EndChild();
-  }
-
-  // Raw JSON Section
-  if (ImGui::CollapsingHeader("Raw JSON Request")) {
-    ImGui::BeginChild("RawJSON", ImVec2(0, 300), true);
-    ImGui::TextColored(ImVec4(1.0f, 0.5f, 1.0f, 1.0f), "%s", state_.context->raw_json.c_str());
     ImGui::EndChild();
   }
 }

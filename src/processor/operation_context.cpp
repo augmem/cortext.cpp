@@ -31,6 +31,17 @@ OperationContext::GetMemoryUsageEvents () const
   return memory_usage_events_;
 }
 
+void
+OperationContext::AddOperationTiming (std::string_view op_type, double ms)
+{
+  if (op_type.empty ())
+    {
+      return;
+    }
+  const std::string key (op_type);
+  operation_timings_ms_[key] += ms;
+}
+
 // Note: Getters/Setters for new fields are inline in the header.
 
 } // namespace cortext

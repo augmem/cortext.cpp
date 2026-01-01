@@ -11,6 +11,31 @@ namespace cortext::operations
 namespace
 {
 constexpr double kEpsilon = 1e-9;
+constexpr double kBoundaryVarFloor = 0.0025;
+constexpr int kBoundaryWarmupSignals = 3;
+
+double
+NormalizeLocal (double raw, double alpha, double min_var, double gain,
+                double &mean, double &var, bool use_norm)
+{
+  if (!std::isfinite (raw))
+    {
+      raw = 0.0;
+    }
+  const double mean_old = (var <= 0.0 && mean == 0.0) ? raw : mean;
+  const double var_old = (var <= 0.0) ? min_var : var;
+  const double denom = std::sqrt (var_old + kEpsilon);
+  const double z = (raw - mean_old) / denom;
+  const double norm = use_norm ? core::Sigmoid (z * gain) : raw;
+  const double delta = raw - mean_old;
+  mean = mean_old + alpha * delta;
+  var = (1.0 - alpha) * var_old + alpha * delta * delta;
+  if (var < min_var)
+    {
+      var = min_var;
+    }
+  return norm;
+}
 }  // namespace
 
 void
@@ -66,28 +91,112 @@ DetectBoundary::Execute (OperationContext &context,
   const double gap_score = core::Sigmoid (gap_z);
 
   // Bayesian change-point inference for boundary probability
-  const double h_base = core::Lerp (0.02, 0.12, config.sensitivity)
+  const double h_base = core::Lerp (0.03, 0.18, config.sensitivity)
                         * core::Lerp (1.2, 0.8, config.stability);
-  const double h_t
+  const double h_t_base
       = core::Clamp (h_base * (0.8 + 0.2 * (1.0 - config.focus)), 0.0, 0.5);
 
-  const double surprisal
+  const double surprisal_raw
       = context.GetMetric (operations::Metric::embedding_surprisal)
             .value_or (0.0);
-  const double w_s = 0.45 + 0.25 * config.sensitivity;
-  const double w_d = 0.25 + 0.10 * (1.0 - config.stability);
-  const double w_c = 0.20 + 0.10 * config.focus;
-  const double w_g = 0.10;
-  const double w_sum = std::max (kEpsilon, w_s + w_d + w_c + w_g);
+  const double drift_raw = core::Sigmoid (drift_spike);
+  const double coh_raw = coh_drop;
+  double topic_raw = 0.0;
+  if (signal.embedding.size () > 0)
+    {
+      const Eigen::VectorXf *anchor = nullptr;
+      if (acc.c_t.size () == signal.embedding.size () && acc.c_t.size () > 0)
+        {
+          anchor = &acc.c_t;
+        }
+      else if (acc.e_peak.size () == signal.embedding.size ()
+               && acc.e_peak.size () > 0)
+        {
+          anchor = &acc.e_peak;
+        }
+      else if (acc.mu_acc.size () == signal.embedding.size ()
+               && acc.mu_acc.size () > 0)
+        {
+          anchor = &acc.mu_acc;
+        }
+      if (anchor)
+        {
+          const double cos = core::CosineSimilarity (signal.embedding, *anchor);
+          topic_raw = 1.0 - core::Map01 (cos);
+        }
+    }
+
+  const bool use_local = acc.n_signals >= kBoundaryWarmupSignals;
+  const double alpha_local = core::Lerp (0.35, 0.15, config.stability);
+  const double norm_gain
+      = core::Clamp (core::Lerp (1.6, 3.0, config.sensitivity)
+                         * core::Lerp (1.05, 0.95, config.stability),
+                     1.0, 3.2);
+  const double surprisal_norm
+      = NormalizeLocal (surprisal_raw, alpha_local, kBoundaryVarFloor, norm_gain,
+                        acc.boundary_surprisal_mean,
+                        acc.boundary_surprisal_var, use_local);
+  const double drift_norm
+      = NormalizeLocal (drift_raw, alpha_local, kBoundaryVarFloor, norm_gain,
+                        acc.boundary_drift_spike_mean,
+                        acc.boundary_drift_spike_var, use_local);
+  const double coh_norm
+      = NormalizeLocal (coh_raw, alpha_local, kBoundaryVarFloor, norm_gain,
+                        acc.boundary_coh_drop_mean,
+                        acc.boundary_coh_drop_var, use_local);
+  const double topic_norm
+      = NormalizeLocal (topic_raw, alpha_local, kBoundaryVarFloor, norm_gain,
+                        acc.boundary_topic_shift_mean,
+                        acc.boundary_topic_shift_var, use_local);
+
+  const double w_s = 0.34 + 0.14 * config.sensitivity;
+  const double w_d = 0.18 + 0.05 * (1.0 - config.stability);
+  const double w_c = 0.36 + 0.16 * config.focus;
+  const double w_t = 0.30 + 0.22 * config.sensitivity;
+  const double w_g = 0.01;
+
+  // Natural-indicator gate: emphasize coherence/topic shifts over isolated spikes.
+  const double support = core::Clamp (0.5 * coh_norm + 0.5 * topic_norm, 0.0, 1.0);
+  const double support_gate = core::Lerp (0.45, 1.0, support);
+  const double gap_gate = core::Lerp (0.10, 0.50, support);
+  const double support_boost = core::Lerp (1.0, 1.25, support);
+
+  const double w_s_eff = w_s * support_gate;
+  const double w_d_eff = w_d * support_gate;
+  const double w_c_eff = w_c * support_boost;
+  const double w_t_eff = w_t * support_boost;
+  const double w_g_eff = w_g * gap_gate;
+  const double w_sum
+      = std::max (kEpsilon,
+                  w_s_eff + w_d_eff + w_c_eff + w_t_eff + w_g_eff);
+  const double z_center
+      = core::Clamp (core::Lerp (0.44, 0.30, config.sensitivity)
+                         * core::Lerp (1.05, 0.95, config.stability),
+                     0.26, 0.58);
+  const double z_center_eff
+      = core::Clamp (z_center * core::Lerp (1.0, 0.75, support), 0.24, 0.58);
   const double z_t
-      = (w_s / w_sum) * (surprisal - 0.5)
-        + (w_d / w_sum) * (core::Sigmoid (drift_spike) - 0.5)
-        + (w_c / w_sum) * (coh_drop - 0.5)
-        + (w_g / w_sum) * (gap_score - 0.5);
+      = (w_s_eff / w_sum) * (surprisal_norm - z_center_eff)
+        + (w_d_eff / w_sum) * (drift_norm - z_center_eff)
+        + (w_c_eff / w_sum) * (coh_norm - z_center_eff)
+        + (w_t_eff / w_sum) * (topic_norm - z_center_eff)
+        + (w_g_eff / w_sum) * (gap_score - z_center_eff);
   const double k_cp
-      = core::Lerp (3.0, 9.0, config.sensitivity)
+      = core::Lerp (8.0, 22.0, config.sensitivity)
         * core::Lerp (1.1, 0.9, config.stability);
-  const double likelihood = core::Sigmoid (k_cp * z_t);
+  const double k_cp_eff = k_cp * core::Lerp (0.9, 1.35, support);
+  const double likelihood = core::Sigmoid (k_cp_eff * z_t);
+  const double target_rate
+      = core::BoundaryTargetRate (config.focus, config.sensitivity,
+                                  config.stability);
+  const double rate_gain
+      = core::BoundaryRateGain (config.sensitivity, config.stability);
+  const double rate_mult
+      = core::Clamp (1.0 + rate_gain * (target_rate - p_ctx.boundary_rate_ema),
+                     0.5, 1.5);
+  const double h_t
+      = core::Clamp (h_t_base * rate_mult * core::Lerp (0.8, 1.3, support),
+                     0.0, 0.5);
   double boundary_score
       = (h_t * likelihood)
         / std::max (kEpsilon, h_t * likelihood + (1.0 - h_t) * (1.0 - likelihood));
@@ -104,18 +213,28 @@ DetectBoundary::Execute (OperationContext &context,
   // 1. Boundary score exceeds threshold
   const double b_thresh
       = core::BoundaryThreshold (config.focus, config.sensitivity);
-  if (boundary_score > b_thresh)
+  const double boundary_floor
+      = core::BoundaryFallbackFloor (config.focus, config.sensitivity,
+                                     config.stability);
+  const bool boundary_hit = boundary_score > b_thresh;
+  if (boundary_hit)
     {
       flush = true;
       drift_trigger = true;
       telemetry::AddCounter ("cortext.accumulator.flush_boundary_score", 1);
     }
+  const double rate_alpha
+      = core::BoundaryRateAlpha (config.sensitivity, config.stability);
+  p_ctx.boundary_rate_ema
+      = core::Ewma (p_ctx.boundary_rate_ema,
+                    boundary_hit ? 1.0 : 0.0, rate_alpha);
 
-  // 2. Memory elapsed time exceeds max
-  const double max_time = core::MaxMemoryTime (config.stability);
+  // 2. Memory elapsed time exceeds adaptive cadence
+  const double max_time
+      = core::AdaptiveMaxMemoryTime (config.stability, gap_ref_s);
   const double memory_elapsed
       = static_cast<double> (signal.timestamp - acc.t_start) / 1000.0;
-  if (memory_elapsed > max_time)
+  if (memory_elapsed > max_time && boundary_score >= boundary_floor)
     {
       flush = true;
       timeout_trigger = true;
@@ -133,7 +252,7 @@ DetectBoundary::Execute (OperationContext &context,
       = core::SurpriseGain (config.sensitivity, config.stability);
   const double pressure_score
       = core::Sigmoid ((saturation_ratio - 1.0) * k_flush);
-  if (pressure_score > b_thresh)
+  if (pressure_score > b_thresh && boundary_score >= boundary_floor)
     {
       flush = true;
       pressure_trigger = true;
@@ -193,13 +312,36 @@ DetectBoundary::Execute (OperationContext &context,
     telemetry::Attribute::Double ("d_step", d_step),
     telemetry::Attribute::Double ("eta_prev", eta_prev),
     telemetry::Attribute::Double ("drift_spike", drift_spike),
+    telemetry::Attribute::Double ("surprisal_raw", surprisal_raw),
+    telemetry::Attribute::Double ("surprisal_norm", surprisal_norm),
+    telemetry::Attribute::Double ("coh_drop_norm", coh_norm),
+    telemetry::Attribute::Double ("drift_norm", drift_norm),
+    telemetry::Attribute::Double ("topic_shift", topic_raw),
+    telemetry::Attribute::Double ("topic_norm", topic_norm),
+    telemetry::Attribute::Double ("norm_gain", norm_gain),
+    telemetry::Attribute::Double ("support", support),
+    telemetry::Attribute::Double ("support_gate", support_gate),
+    telemetry::Attribute::Double ("gap_gate", gap_gate),
     telemetry::Attribute::Double ("hazard", h_t),
+    telemetry::Attribute::Double ("hazard_base", h_t_base),
+    telemetry::Attribute::Double ("boundary_rate_target", target_rate),
+    telemetry::Attribute::Double ("boundary_rate_ema", p_ctx.boundary_rate_ema),
+    telemetry::Attribute::Double ("boundary_rate_mult", rate_mult),
     telemetry::Attribute::Double ("w_s", w_s),
     telemetry::Attribute::Double ("w_d", w_d),
     telemetry::Attribute::Double ("w_c", w_c),
     telemetry::Attribute::Double ("w_g", w_g),
+    telemetry::Attribute::Double ("w_s_eff", w_s_eff),
+    telemetry::Attribute::Double ("w_d_eff", w_d_eff),
+    telemetry::Attribute::Double ("w_c_eff", w_c_eff),
+    telemetry::Attribute::Double ("w_t_eff", w_t_eff),
+    telemetry::Attribute::Double ("w_g_eff", w_g_eff),
+    telemetry::Attribute::Double ("z_center", z_center),
+    telemetry::Attribute::Double ("z_center_eff", z_center_eff),
+    telemetry::Attribute::Double ("k_cp_eff", k_cp_eff),
     telemetry::Attribute::Double ("likelihood", likelihood),
     telemetry::Attribute::Double ("boundary_score", boundary_score),
+    telemetry::Attribute::Double ("boundary_floor", boundary_floor),
     telemetry::Attribute::Double ("boundary_threshold", b_thresh),
     telemetry::Attribute::Double ("elapsed_time_ms", memory_elapsed),
     telemetry::Attribute::Double ("max_time_s", max_time),

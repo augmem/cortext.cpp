@@ -7,6 +7,17 @@
 
 namespace chat {
 
+namespace {
+
+std::string TruncateForError(const std::string& value, size_t max_len) {
+  if (value.size() <= max_len) {
+    return value;
+  }
+  return value.substr(0, max_len) + "...";
+}
+
+}  // namespace
+
 StreamingChatClient::StreamingChatClient(const std::string& api_key,
                                          const std::string& base_url)
     : api_key_(api_key), base_url_(base_url) {
@@ -27,6 +38,7 @@ size_t StreamingChatClient::WriteCallback(void* contents, size_t size,
   }
 
   // Append received data to buffer
+  ctx->raw_body.append(static_cast<char*>(contents), real_size);
   ctx->buffer.append(static_cast<char*>(contents), real_size);
 
   // Process complete lines (SSE format: lines ending with \n)
@@ -188,6 +200,8 @@ StreamingResult StreamingChatClient::Stream(const StreamingRequest& request,
     result.error = "HTTP error: " + std::to_string(http_code);
     if (ctx.error.has_value()) {
       result.error = *result.error + " - " + *ctx.error;
+    } else if (!ctx.raw_body.empty()) {
+      result.error = *result.error + " - " + TruncateForError(ctx.raw_body, 2000);
     }
   }
 

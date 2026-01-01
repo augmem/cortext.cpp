@@ -8,10 +8,12 @@
 namespace cortext
 {
 
-/// @brief ImageBind encoder backed by ONNX Runtime sessions (host-only).
+/// @brief ImageBind encoder backed by ONNX Runtime sessions (GPU-first, CPU fallback).
 ///
 /// This encoder requires ONNX Runtime and filesystem access for loading
-/// BPE vocabulary and model files. It is NOT available in WASM builds.
+/// BPE vocabulary and model files. On Apple platforms it will attempt CoreML
+/// first, then fall back to CPU; other platforms attempt CUDA then fall back
+/// to CPU. It is NOT available in WASM builds.
 /// When CORTEXT_ENABLE_IMAGEBIND_ORT is disabled, all methods throw
 /// std::runtime_error.
 class ImageBindEncoder : public Encoder

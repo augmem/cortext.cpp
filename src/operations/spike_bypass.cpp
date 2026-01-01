@@ -49,11 +49,17 @@ CheckSpikeBypass::Execute (OperationContext &context, Transaction &tx) const
 
   // Check for spike bypass
   const bool spike = score > spike_threshold;
+  const double boundary_score
+      = context.GetBoundaryScore ().value_or (0.0);
+  const double boundary_floor
+      = core::BoundaryFallbackFloor (config.focus, config.sensitivity,
+                                     config.stability);
   const int max_signals
       = core::MaxSignalsPerMemory (config.focus, config.sensitivity,
                                    config.stability);
   const bool max_signal_flush
-      = (max_signals > 0) && (n_signals >= max_signals);
+      = (max_signals > 0) && (n_signals >= max_signals)
+        && (boundary_score >= boundary_floor);
 
   // If spike, force flush even for single-signal units.
   bool spike_bypass = false;
@@ -101,6 +107,8 @@ CheckSpikeBypass::Execute (OperationContext &context, Transaction &tx) const
     telemetry::Attribute::Double ("coherence", coherence),
     telemetry::Attribute::Double ("coherence_scale", coherence_scale),
     telemetry::Attribute::Double ("spike_threshold", spike_threshold),
+    telemetry::Attribute::Double ("boundary_score", boundary_score),
+    telemetry::Attribute::Double ("boundary_floor", boundary_floor),
     telemetry::Attribute::Bool ("spike_bypass", spike_bypass)
   });
 }

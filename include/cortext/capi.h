@@ -51,6 +51,14 @@ extern "C"
   /// This handle must be freed with cortext_free() when no longer needed.
   typedef void *cortext_handle;
 
+  /// @brief Consolidation mode for cortext_consolidate_mode.
+  typedef enum cortext_consolidation_mode
+  {
+    CORTEXT_CONSOLIDATE_SHALLOW = 0,
+    CORTEXT_CONSOLIDATE_DEEP = 1,
+    CORTEXT_CONSOLIDATE_BOTH = 2
+  } cortext_consolidation_mode;
+
   /// @brief Creates a Cortext instance with default models directory.
   /// @param focus Focus knob value in [0.0, 1.0].
   /// @param sensitivity Sensitivity knob value in [0.0, 1.0].
@@ -132,6 +140,15 @@ extern "C"
   /// This evaluates whether background consolidation should start based on
   /// system conditions. Changes are buffered until cortext_flush().
   CORTEXT_EXPORT int cortext_consolidate (cortext_handle h);
+
+  /// @brief Triggers consolidation with explicit mode.
+  /// @param h Handle to a Cortext instance.
+  /// @param mode Consolidation mode (shallow, deep, or both).
+  /// @return 0 on success, 1 if invalid handle, 2 on internal error.
+  ///
+  /// Shallow runs embedding-only labeling/graphing; deep runs Gemma-backed
+  /// summarization and extraction. Both defaults to the full deep path.
+  CORTEXT_EXPORT int cortext_consolidate_mode (cortext_handle h, int mode);
 
   /// @brief Commits all buffered database writes.
   /// @param h Handle to a Cortext instance.

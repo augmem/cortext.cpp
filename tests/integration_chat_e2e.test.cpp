@@ -10,6 +10,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -112,6 +113,25 @@ Normalize (Eigen::VectorXf v)
       v /= norm;
     }
   return v;
+}
+
+std::unordered_map<std::string, int>
+CountCandidateKinds (Store &store, const std::vector<long long> &ids)
+{
+  std::unordered_map<std::string, int> counts;
+  for (const long long id : ids)
+    {
+      auto rows = store.Execute (
+          "SELECT kind FROM memories WHERE memory_id = ?", { id });
+      if (rows.empty ())
+        continue;
+      auto it = rows[0].find ("kind");
+      if (it == rows[0].end () || it->second.type () != typeid (std::string))
+        continue;
+      const std::string kind = std::any_cast<std::string> (it->second);
+      counts[kind]++;
+    }
+  return counts;
 }
 
 class KeywordEncoder final : public Encoder
@@ -720,6 +740,16 @@ TEST_CASE ("Integration: chat memories consolidate and retrieve", "[integration]
       out2.candidate_memory_ids.begin (), out2.candidate_memory_ids.end ());
 
   REQUIRE (!actual_ids.empty ());
+
+  std::unordered_set<long long> combined_ids (out1.candidate_memory_ids.begin (),
+                                              out1.candidate_memory_ids.end ());
+  combined_ids.insert (out2.candidate_memory_ids.begin (),
+                       out2.candidate_memory_ids.end ());
+  std::vector<long long> combined_list (combined_ids.begin (),
+                                        combined_ids.end ());
+  const auto kind_counts = CountCandidateKinds (*store, combined_list);
+  REQUIRE (kind_counts.count ("ASSOCIATION") > 0);
+  REQUIRE (kind_counts.count ("LABEL") > 0);
 
   std::unordered_map<long long, Eigen::VectorXf> embedding_map;
   embedding_map.reserve (embeddings.size ());

@@ -1,5 +1,5 @@
 /// @file
-/// @brief ImageBind encoder implementation (HOST-ONLY, excluded from WASM builds).
+/// @brief ImageBind encoder implementation (tries GPU, falls back to CPU).
 ///
 /// This module requires ONNX Runtime, filesystem I/O for loading BPE vocabulary
 /// and model files, and zlib for decompressing the vocabulary. It is completely
@@ -28,9 +28,13 @@
 
 #if defined(CORTEXT_ENABLE_IMAGEBIND_ORT)
 #include <onnxruntime/onnxruntime_cxx_api.h>
+#if defined(__APPLE__)
+#include <onnxruntime/coreml_provider_factory.h>
+#endif
 #include <zlib.h>
 
 #include "cortext/core/thread_config.hpp"
+
 #endif
 
 namespace cortext
@@ -895,7 +899,6 @@ struct ImageBindEncoder::Impl
 
 #if defined(CORTEXT_ENABLE_IMAGEBIND_ORT)
   Ort::Env env{ ORT_LOGGING_LEVEL_WARNING, "cortext-imagebind" };
-  Ort::SessionOptions opts;
   std::unique_ptr<Ort::Session> text_session;
   std::unique_ptr<Ort::Session> audio_session;
   std::unique_ptr<Ort::Session> vision_session;
@@ -905,6 +908,132 @@ struct ImageBindEncoder::Impl
   bool init_attempted = false;
   bool init_ok = false;
   std::string init_error;
+
+  static void
+  ConfigureSessionOptions (Ort::SessionOptions &opts)
+  {
+    auto threads = static_cast<int> (core::GetEmbedThreadCount ());
+    opts.SetIntraOpNumThreads (threads);
+    opts.SetInterOpNumThreads (threads);
+    opts.SetGraphOptimizationLevel (GraphOptimizationLevel::ORT_ENABLE_BASIC);
+  }
+
+  enum class Provider
+  {
+    CoreML,
+    Cuda,
+    Cpu
+  };
+
+  static const char *
+  ProviderName (Provider provider)
+  {
+    switch (provider)
+      {
+      case Provider::CoreML:
+        return "CoreML";
+      case Provider::Cuda:
+        return "CUDA";
+      case Provider::Cpu:
+        return "CPU";
+      }
+    return "Unknown";
+  }
+
+  static bool
+  TryAppendCoreMLProvider (Ort::SessionOptions &opts, std::string *error_out)
+  {
+#if defined(__APPLE__)
+    OrtStatus *status = OrtSessionOptionsAppendExecutionProvider_CoreML (
+        opts, 0 /* default: allow ANE/CPU/GPU */);
+    if (status != nullptr)
+      {
+        if (error_out != nullptr)
+          {
+            *error_out = Ort::GetApi ().GetErrorMessage (status);
+          }
+        Ort::GetApi ().ReleaseStatus (status);
+        return false;
+      }
+    return true;
+#else
+    if (error_out != nullptr)
+      {
+        *error_out = "CoreML execution provider only available on Apple platforms";
+      }
+    return false;
+#endif
+  }
+
+  static bool
+  TryAppendCudaProvider (Ort::SessionOptions &opts, std::string *error_out)
+  {
+    OrtCUDAProviderOptions cuda_options{};
+    OrtStatus *status
+        = Ort::GetApi ().SessionOptionsAppendExecutionProvider_CUDA (
+            opts, &cuda_options);
+    if (status != nullptr)
+      {
+        if (error_out != nullptr)
+          {
+            *error_out = Ort::GetApi ().GetErrorMessage (status);
+          }
+        Ort::GetApi ().ReleaseStatus (status);
+        return false;
+      }
+    return true;
+  }
+
+  bool
+  TryCreateSessions (Provider provider,
+                     const std::filesystem::path &text_model_path,
+                     const std::filesystem::path &audio_model_path,
+                     const std::filesystem::path &vision_model_path,
+                     const std::filesystem::path &bpe_path,
+                     std::string *error_out)
+  {
+    try
+      {
+        Ort::SessionOptions opts;
+        ConfigureSessionOptions (opts);
+        if (provider == Provider::CoreML)
+          {
+            if (!TryAppendCoreMLProvider (opts, error_out))
+              {
+                return false;
+              }
+          }
+        else if (provider == Provider::Cuda)
+          {
+            if (!TryAppendCudaProvider (opts, error_out))
+              {
+                return false;
+              }
+          }
+
+        auto text = std::make_unique<Ort::Session> (
+            env, text_model_path.c_str (), opts);
+        auto audio = std::make_unique<Ort::Session> (
+            env, audio_model_path.c_str (), opts);
+        auto vision = std::make_unique<Ort::Session> (
+            env, vision_model_path.c_str (), opts);
+        auto tok = std::make_unique<SimpleTokenizer> (bpe_path, 77);
+
+        text_session = std::move (text);
+        audio_session = std::move (audio);
+        vision_session = std::move (vision);
+        tokenizer = std::move (tok);
+        return true;
+      }
+    catch (const std::exception &e)
+      {
+        if (error_out != nullptr)
+          {
+            *error_out = e.what ();
+          }
+        return false;
+      }
+  }
 
   void
   EnsureInitialized ()
@@ -924,17 +1053,33 @@ struct ImageBindEncoder::Impl
             = FindModel (md, "audio_encoder");
         const std::filesystem::path vision_model_path
             = FindModel (md, "vision_encoder");
+        const std::filesystem::path bpe_path = FindBpePath (md);
 
-        text_session = std::make_unique<Ort::Session> (env, text_model_path.c_str (),
-                                                      opts);
-        audio_session = std::make_unique<Ort::Session> (env, audio_model_path.c_str (),
-                                                       opts);
-        vision_session = std::make_unique<Ort::Session> (env,
-                                                        vision_model_path.c_str (),
-                                                        opts);
-
-        tokenizer = std::make_unique<SimpleTokenizer> (FindBpePath (md), 77);
-        init_ok = true;
+        std::string error;
+#if defined(__APPLE__)
+        const Provider providers[] = { Provider::CoreML, Provider::Cpu };
+#else
+        const Provider providers[] = { Provider::Cuda, Provider::Cpu };
+#endif
+        for (Provider provider : providers)
+          {
+            if (TryCreateSessions (provider, text_model_path, audio_model_path,
+                                   vision_model_path, bpe_path, &error))
+              {
+                init_ok = true;
+                return;
+              }
+            if (!error.empty ())
+              {
+                init_error = std::string ("ImageBindEncoder init failed on ")
+                             + ProviderName (provider) + ": " + error;
+              }
+          }
+        if (init_error.empty ())
+          {
+            init_error = "ImageBindEncoder init failed: unknown error";
+          }
+        throw std::runtime_error (init_error);
       }
     catch (const std::exception &e)
       {
@@ -948,13 +1093,6 @@ struct ImageBindEncoder::Impl
 ImageBindEncoder::ImageBindEncoder (std::string models_dir)
     : impl_ (std::make_unique<Impl> (std::move (models_dir)))
 {
-#if defined(CORTEXT_ENABLE_IMAGEBIND_ORT)
-  auto threads = static_cast<int> (core::GetEmbedThreadCount ());
-  impl_->opts.SetIntraOpNumThreads (threads);
-  impl_->opts.SetInterOpNumThreads (threads);
-  impl_->opts.SetGraphOptimizationLevel (
-      GraphOptimizationLevel::ORT_ENABLE_BASIC);
-#endif
 }
 
 ImageBindEncoder::~ImageBindEncoder () = default;

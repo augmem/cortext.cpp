@@ -47,6 +47,7 @@
 #include <atomic>
 #include <algorithm>
 #include <chrono>
+#include <cctype>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -419,6 +420,18 @@ double GetEnvDouble(const char* name, double fallback) {
   }
 }
 
+bool GetEnvBool(const char* name, bool fallback) {
+  const std::string s = GetEnv(name);
+  if (s.empty()) return fallback;
+  std::string lower = s;
+  std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) {
+    return static_cast<char>(std::tolower(c));
+  });
+  if (lower == "1" || lower == "true" || lower == "yes" || lower == "on") return true;
+  if (lower == "0" || lower == "false" || lower == "no" || lower == "off") return false;
+  return fallback;
+}
+
 uint64_t NowUnixMillis() {
   using namespace std::chrono;
   return static_cast<uint64_t>(duration_cast<milliseconds>(system_clock::now().time_since_epoch()).count());
@@ -513,13 +526,14 @@ std::string FormatMemoriesForSystemPrompt(
 
 template <typename Json>
 Json BuildOpenAIMessages(const std::vector<cortext::Cortext::Context::Memory>& working_memory,
-                         const std::string& injected_system) {
+                         const std::string& injected_system,
+                         const std::string& latest_user_input) {
   Json messages = Json::array();
   if (!injected_system.empty()) {
     messages.push_back({{"role", "system"}, {"content", injected_system}});
   }
 
-  // Build from working memory ordered by timestamp.
+  // Build assistant-only history from working memory ordered by timestamp.
   std::vector<const cortext::Cortext::Context::Memory*> ordered;
   ordered.reserve(working_memory.size());
   for (const auto& m : working_memory) {
@@ -531,16 +545,14 @@ Json BuildOpenAIMessages(const std::vector<cortext::Cortext::Context::Memory>& w
               return a->timestamp < b->timestamp;
             });
   for (const auto* m : ordered) {
-    std::string role;
-    if (m->source_id == "chat/user") {
-      role = "user";
-    } else if (m->source_id == "chat/assistant") {
-      role = "assistant";
-    } else {
-      continue;  // Skip unknown sources
+    if (m->source_id != "chat/assistant") {
+      continue;
     }
     std::string text_content = ExtractTextFromBlobs(m->content);
-    messages.push_back({{"role", role}, {"content", text_content}});
+    messages.push_back({{"role", "assistant"}, {"content", text_content}});
+  }
+  if (!latest_user_input.empty()) {
+    messages.push_back({{"role", "user"}, {"content", latest_user_input}});
   }
   return messages;
 }
@@ -684,6 +696,7 @@ int main(int argc, char** argv) {
   const double focus = GetEnvDouble("CORTEXT_FOCUS", 0.5);
   const double sensitivity = GetEnvDouble("CORTEXT_SENSITIVITY", 0.5);
   const double stability = GetEnvDouble("CORTEXT_STABILITY", 0.5);
+  const bool stream_interrupts = GetEnvBool("CORTEXT_CHAT_STREAM_INTERRUPTS", true);
 
   openai::start(api_key, openai_org);
   if (!openai_base_url.empty()) {
@@ -733,6 +746,7 @@ int main(int argc, char** argv) {
   bool generating = false;
   std::string input;
   static constexpr size_t kMaxMemoryEvents = 50;
+  std::deque<chat::ChatMessage> chat_history;
 
   StreamingState streaming_state;
   std::string partial_response;
@@ -761,6 +775,7 @@ int main(int argc, char** argv) {
   chat::ChatWindow::State window_state;
   window_state.mu = &mu;
   window_state.working_memory = &working_memory;
+  window_state.chat_history = &chat_history;
   window_state.memory_events = &memory_events;
   window_state.context = last_context;
   window_state.status = status_state;
@@ -818,6 +833,7 @@ int main(int argc, char** argv) {
           partial_response.clear();
           generation_restarts = 0;
           streaming_state.Reset();
+          chat_history.push_back({"user", text});
         } else {
           text.clear();
         }
@@ -906,19 +922,11 @@ int main(int argc, char** argv) {
             }
 
             using Json = openai::Json;
-            Json messages = BuildOpenAIMessages<Json>(retrieved.working_memory, injected_system);
+            Json messages = BuildOpenAIMessages<Json>(retrieved.working_memory, injected_system, text);
 
             {
               std::lock_guard<std::mutex> lock(last_context->mu);
               last_context->system_prompt = injected_system;
-              last_context->messages.clear();
-              for (const auto& m : messages) {
-                last_context->messages.push_back({m["role"].get<std::string>(), m["content"].get<std::string>()});
-              }
-              Json req_json;
-              req_json["model"] = model_copy;
-              req_json["messages"] = messages;
-              last_context->raw_json = req_json.dump(2);
               last_context->has_data = true;
             }
 
@@ -958,6 +966,10 @@ int main(int argc, char** argv) {
                 cortext::telemetry::Attribute::String("accumulated", accumulated.size() <= 100 ? accumulated : accumulated.substr(0, 100) + "...")
               });
 
+              if (!stream_interrupts) {
+                return;
+              }
+
               try {
                 cortext::Cortext::Context ctx;
                 {
@@ -965,7 +977,13 @@ int main(int argc, char** argv) {
                   ctx = cortext_ctx->ProcessText(accumulated, "chat/assistant");
                 }
 
-                if (ctx.should_interrupt && local_restarts < StreamingState::kMaxRestarts) {
+                const double boundary_thresh = cortext::core::BoundaryThreshold(focus, sensitivity);
+                const bool boundary_score_pass
+                    = ctx.boundary_score.has_value()
+                      && *ctx.boundary_score >= boundary_thresh;
+
+                if (ctx.at_boundary && boundary_score_pass && ctx.should_interrupt
+                    && local_restarts < StreamingState::kMaxRestarts) {
                   cortext::telemetry::LogInfo("chat.phase2.interrupt", {
                     cortext::telemetry::Attribute::Int64("new_memories", static_cast<int64_t>(ctx.retrieved_memory.size())),
                     cortext::telemetry::Attribute::Int64("restart", static_cast<int64_t>(local_restarts)),
@@ -1079,6 +1097,9 @@ int main(int argc, char** argv) {
                 cortext::telemetry::Attribute::Int64("working_memory_size", static_cast<int64_t>(working_memory.size())),
                 cortext::telemetry::Attribute::Int64("memories_used", static_cast<int64_t>(last_memories.size()))
               });
+            }
+            if (!assistant_reply.empty()) {
+              chat_history.push_back({"assistant", assistant_reply});
             }
             generating = false;
             partial_response.clear();

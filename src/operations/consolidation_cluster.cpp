@@ -3,6 +3,7 @@
 #include "cortext/core/algorithms.hpp"
 #include "cortext/core/knobs.hpp"
 #include "cortext/core/utils.hpp"
+#include "cortext/consolidation_mode.hpp"
 #include "cortext/processor/operation_context.hpp"
 #include "cortext/store/store.hpp"
 #include "cortext/telemetry/telemetry.hpp"
@@ -45,7 +46,7 @@ ConsolidationCluster::Execute (OperationContext &context, Transaction &tx) const
   auto params = ConsolidationClusterParams::FromKnobs (cfg.focus, cfg.sensitivity,
                                                        cfg.stability);
   const bool force_consolidation
-      = (context.GetSignal ().source_id == "cortext/consolidate");
+      = IsConsolidationSignal (context.GetSignal ().source_id);
 
   // v2: Load candidates from context (in-memory passing)
   const auto &input_candidates = context.GetConsolidationCandidates ();

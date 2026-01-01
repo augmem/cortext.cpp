@@ -17,6 +17,8 @@ No other model runtimes are required for the online loop; all operational decisi
 
 The primary per-stimulus cost is the k-nearest-neighbors (kNN) search for metrics and retrieval. With `N` stored memories, naive search is `O(N)`. We recommend maintaining an HNSW index [@malkov2018efficient] to achieve `O(log N)` retrieval.
 
+Label/association seeds are selected from an in‑memory summary cache (populated by the label bank and consolidation) to avoid an additional vector search pass while keeping retrieval fully embedding‑based.
+
 Recursive graph expansion adds overhead but is bounded by `depth` and `branching_factor`, effectively constant-time relative to `N`. Total complexity per stimulus is `O(log N)` with indexing.
 
 ## Memory Footprint

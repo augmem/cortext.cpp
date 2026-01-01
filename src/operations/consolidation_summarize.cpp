@@ -7,6 +7,7 @@
 #include "cortext/processor/operation_context.hpp"
 #include "cortext/store/store.hpp"
 #include "cortext/summarizer/summarizer.hpp"
+#include "cortext/consolidation_mode.hpp"
 #include "cortext/telemetry/telemetry.hpp"
 #include <algorithm>
 #include <any>
@@ -107,6 +108,11 @@ void
 ConsolidationSummarize::Execute (OperationContext &context, Transaction &tx) const
 {
   if (!context.GetConsolidationShouldStart ())
+    {
+      return;
+    }
+  const auto mode = ParseConsolidationMode (context.GetSignal ().source_id);
+  if (mode == ConsolidationMode::Shallow)
     {
       return;
     }
@@ -358,6 +364,20 @@ ConsolidationSummarize::Execute (OperationContext &context, Transaction &tx) con
             {
               centroid_memory_id = std::any_cast<int> (val);
             }
+        }
+
+      if (centroid_memory_id > 0 && centroid_embedding_id > 0
+          && !cluster.centroid.empty ())
+        {
+          Eigen::VectorXf centroid_vec (
+              static_cast<Eigen::Index> (cluster.centroid.size ()));
+          for (size_t i = 0; i < cluster.centroid.size (); ++i)
+            {
+              centroid_vec (static_cast<Eigen::Index> (i))
+                  = cluster.centroid[i];
+            }
+          context.GetProcessorContext ().UpsertSummaryCache (
+              centroid_memory_id, centroid_embedding_id, centroid_vec, true, false);
         }
 
       // 6. Update cluster_id in memories for source embeddings and create

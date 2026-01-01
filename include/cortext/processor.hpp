@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -32,6 +33,10 @@ public:
     double stability = 0.5;
     bool affect_interrupt = true;
     bool affect_retrieval = true;
+    bool reinforcement_enabled = true;
+    bool procedural_enabled = true;
+    bool sequential_edges_enabled = true;
+    std::string label_bank_path;
 
     // LLM components (extractor/summarizer may be null)
     Extractor *extractor = nullptr;
@@ -66,6 +71,7 @@ public:
     bool interrupt_allowed = false;  // Algorithm 27
     bool at_boundary = false;        // Algorithm 12
     bool write_decision = false;     // Algorithm 7+8: score > (T - hysteresis)
+    bool interrupt_aborted = false;  // Interrupt-triggered accumulator abort
 
     // Storage output (MemoryStorage operation)
     std::optional<long long> stored_embedding_id;  // Set if stored to memory
@@ -98,6 +104,7 @@ public:
     double interrupt_gate_retrieval_thresh = 0.0;
     double interrupt_gate_boundary_mult_eff = 0.0;
     double interrupt_gate_affect_drive = 0.0;
+    std::optional<double> boundary_score;
     bool consolidation_recommended = false;
     bool consolidation_required = false;
 
@@ -107,6 +114,9 @@ public:
 
     // Metrics (Algorithm 7 inputs) in normalized domains
     std::unordered_map<operations::Metric, double> metrics;
+
+    // Per-operation timings (ms) for this signal
+    std::unordered_map<std::string, double> operation_ms;
 
   };
 

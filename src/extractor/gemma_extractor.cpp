@@ -13,6 +13,7 @@
 #include "cortext/audio/gemma_audio.hpp"
 #include "cortext/core/thread_config.hpp"
 #include "cortext/extractor/json_schema_constraint.hpp"
+#include "cortext/telemetry/telemetry.hpp"
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wgcc-compat"
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
@@ -82,6 +83,47 @@ BuildAudioPrompt ()
       "Always return at least one label; if nothing is obvious, choose the "
       "single most salient term from the audio.\n"
       "<start_of_audio>");
+}
+
+bool
+TryCreateEngine (const std::string &model_path, litert::lm::Backend backend,
+                 std::unique_ptr<litert::lm::Engine> &engine_out)
+{
+  auto model_assets = litert::lm::ModelAssets::Create (model_path);
+  if (!model_assets.ok ())
+    {
+      return false;
+    }
+
+  auto settings = litert::lm::EngineSettings::CreateDefault (
+      *std::move (model_assets), backend);
+  if (!settings.ok ())
+    {
+      return false;
+    }
+
+  if (backend == litert::lm::Backend::CPU)
+    {
+      auto &executor_settings = settings->GetMutableMainExecutorSettings ();
+      auto cpu_config_result
+          = executor_settings.MutableBackendConfig<litert::lm::CpuConfig> ();
+      if (cpu_config_result.ok ())
+        {
+          litert::lm::CpuConfig cpu_config = *cpu_config_result;
+          cpu_config.number_of_threads = core::GetInferThreadCount ();
+          executor_settings.SetBackendConfig (cpu_config);
+        }
+    }
+
+  auto engine_result
+      = litert::lm::Engine::CreateEngine (*std::move (settings));
+  if (!engine_result.ok ())
+    {
+      return false;
+    }
+
+  engine_out = std::move (*engine_result);
+  return true;
 }
 
 litert::TensorBuffer
@@ -197,51 +239,19 @@ struct GemmaExtractor::Impl
 {
   std::unique_ptr<litert::lm::Engine> engine;
   bool available = false;
+  std::string backend;
 
   explicit Impl (const std::string &model_path)
   {
     try
       {
-        // Load model assets
-        auto model_assets = litert::lm::ModelAssets::Create (model_path);
-        if (!model_assets.ok ())
+        if (TryCreateEngine (model_path, litert::lm::Backend::CPU, engine))
           {
-            available = false;
+            backend = "cpu";
+            available = true;
             return;
           }
-
-        // Create engine settings with CPU backend
-        auto settings = litert::lm::EngineSettings::CreateDefault (
-            *std::move (model_assets), litert::lm::Backend::CPU);
-        if (!settings.ok ())
-          {
-            available = false;
-            return;
-          }
-
-        // Configure thread count from environment variable
-        auto &executor_settings = settings->GetMutableMainExecutorSettings ();
-        auto cpu_config_result
-            = executor_settings
-                  .MutableBackendConfig<litert::lm::CpuConfig> ();
-        if (cpu_config_result.ok ())
-          {
-            litert::lm::CpuConfig cpu_config = *cpu_config_result;
-            cpu_config.number_of_threads = core::GetInferThreadCount ();
-            executor_settings.SetBackendConfig (cpu_config);
-          }
-
-        // Create engine
-        auto engine_result
-            = litert::lm::Engine::CreateEngine (*std::move (settings));
-        if (!engine_result.ok ())
-          {
-            available = false;
-            return;
-          }
-
-        engine = std::move (*engine_result);
-        available = true;
+        available = false;
       }
     catch (const std::exception &)
       {
@@ -265,6 +275,9 @@ struct GemmaExtractor::Impl
       {
         litert::lm::SessionConfig session_config
             = litert::lm::SessionConfig::CreateDefault ();
+#if defined(__APPLE__)
+        session_config.SetSamplerBackend (litert::lm::Backend::CPU);
+#endif
 
         auto session_result = engine->CreateSession (session_config);
         if (!session_result.ok ())
@@ -285,6 +298,17 @@ struct GemmaExtractor::Impl
           {
             if (attempt + 1 >= kMaxAttempts)
               {
+                const std::string err = prefill_status.ToString ();
+                telemetry::LogWarn (
+                    "cortext.extractor_prefill_failed",
+                    { telemetry::Attribute::String ("backend", backend),
+                      telemetry::Attribute::Int64 ("attempt", attempt + 1),
+                      telemetry::Attribute::String ("error", err) });
+                if (std::getenv ("CORTEXT_EXTRACTOR_DEBUG") != nullptr)
+                  {
+                    std::cerr << "GemmaExtractor prefill failed (backend="
+                              << backend << "): " << err << std::endl;
+                  }
                 throw std::runtime_error ("GemmaExtractor: Prefill failed");
               }
             continue;
@@ -303,6 +327,17 @@ struct GemmaExtractor::Impl
           {
             if (attempt + 1 >= kMaxAttempts)
               {
+                const std::string err = response.status ().ToString ();
+                telemetry::LogWarn (
+                    "cortext.extractor_decode_failed",
+                    { telemetry::Attribute::String ("backend", backend),
+                      telemetry::Attribute::Int64 ("attempt", attempt + 1),
+                      telemetry::Attribute::String ("error", err) });
+                if (std::getenv ("CORTEXT_EXTRACTOR_DEBUG") != nullptr)
+                  {
+                    std::cerr << "GemmaExtractor decode failed (backend="
+                              << backend << "): " << err << std::endl;
+                  }
                 throw std::runtime_error ("GemmaExtractor: Decode failed");
               }
             continue;
@@ -313,6 +348,15 @@ struct GemmaExtractor::Impl
           {
             if (attempt + 1 >= kMaxAttempts)
               {
+                telemetry::LogWarn (
+                    "cortext.extractor_empty_output",
+                    { telemetry::Attribute::String ("backend", backend),
+                      telemetry::Attribute::Int64 ("attempt", attempt + 1) });
+                if (std::getenv ("CORTEXT_EXTRACTOR_DEBUG") != nullptr)
+                  {
+                    std::cerr << "GemmaExtractor empty decode output (backend="
+                              << backend << ")" << std::endl;
+                  }
                 throw std::runtime_error ("GemmaExtractor: Empty decode output");
               }
             continue;
@@ -331,6 +375,14 @@ struct GemmaExtractor::Impl
           }
       }
 
+    telemetry::LogWarn (
+        "cortext.extractor_invalid_output",
+        { telemetry::Attribute::String ("backend", backend) });
+    if (std::getenv ("CORTEXT_EXTRACTOR_DEBUG") != nullptr)
+      {
+        std::cerr << "GemmaExtractor invalid constrained labels (backend="
+                  << backend << ")" << std::endl;
+      }
     throw std::runtime_error (
         "GemmaExtractor: Failed to produce valid constrained labels");
   }
@@ -356,6 +408,9 @@ struct GemmaExtractor::Impl
         litert::lm::SessionConfig session_config
             = litert::lm::SessionConfig::CreateDefault ();
         session_config.SetAudioModalityEnabled (true);
+#if defined(__APPLE__)
+        session_config.SetSamplerBackend (litert::lm::Backend::CPU);
+#endif
 
         auto session_result = engine->CreateSession (session_config);
         if (!session_result.ok ())
@@ -380,6 +435,17 @@ struct GemmaExtractor::Impl
           {
             if (attempt + 1 >= kMaxAttempts)
               {
+                const std::string err = prefill_status.ToString ();
+                telemetry::LogWarn (
+                    "cortext.extractor_prefill_failed",
+                    { telemetry::Attribute::String ("backend", backend),
+                      telemetry::Attribute::Int64 ("attempt", attempt + 1),
+                      telemetry::Attribute::String ("error", err) });
+                if (std::getenv ("CORTEXT_EXTRACTOR_DEBUG") != nullptr)
+                  {
+                    std::cerr << "GemmaExtractor audio prefill failed (backend="
+                              << backend << "): " << err << std::endl;
+                  }
                 throw std::runtime_error (
                     "GemmaExtractor: Audio prefill failed");
               }
@@ -399,6 +465,17 @@ struct GemmaExtractor::Impl
           {
             if (attempt + 1 >= kMaxAttempts)
               {
+                const std::string err = response.status ().ToString ();
+                telemetry::LogWarn (
+                    "cortext.extractor_decode_failed",
+                    { telemetry::Attribute::String ("backend", backend),
+                      telemetry::Attribute::Int64 ("attempt", attempt + 1),
+                      telemetry::Attribute::String ("error", err) });
+                if (std::getenv ("CORTEXT_EXTRACTOR_DEBUG") != nullptr)
+                  {
+                    std::cerr << "GemmaExtractor audio decode failed (backend="
+                              << backend << "): " << err << std::endl;
+                  }
                 throw std::runtime_error (
                     "GemmaExtractor: Audio decode failed");
               }
@@ -410,6 +487,16 @@ struct GemmaExtractor::Impl
           {
             if (attempt + 1 >= kMaxAttempts)
               {
+                telemetry::LogWarn (
+                    "cortext.extractor_empty_output",
+                    { telemetry::Attribute::String ("backend", backend),
+                      telemetry::Attribute::Int64 ("attempt", attempt + 1) });
+                if (std::getenv ("CORTEXT_EXTRACTOR_DEBUG") != nullptr)
+                  {
+                    std::cerr << "GemmaExtractor empty audio decode output "
+                                 "(backend="
+                              << backend << ")" << std::endl;
+                  }
                 throw std::runtime_error (
                     "GemmaExtractor: Empty audio decode output");
               }
@@ -429,6 +516,14 @@ struct GemmaExtractor::Impl
           }
       }
 
+    telemetry::LogWarn (
+        "cortext.extractor_invalid_output",
+        { telemetry::Attribute::String ("backend", backend) });
+    if (std::getenv ("CORTEXT_EXTRACTOR_DEBUG") != nullptr)
+      {
+        std::cerr << "GemmaExtractor invalid constrained labels (backend="
+                  << backend << ")" << std::endl;
+      }
     throw std::runtime_error (
         "GemmaExtractor: Failed to produce valid constrained labels");
   }

@@ -7,11 +7,11 @@
 #include "cortext/encoder/encoder.hpp"
 #include "cortext/extractor/extractor.hpp"
 #include "cortext/operations/extraction.hpp"
+#include "cortext/operations/label_utils.hpp"
 #include "cortext/processor/operation_context.hpp"
 #include "cortext/telemetry/telemetry.hpp"
 #include <algorithm>
 #include <any>
-#include <cctype>
 #include <optional>
 #include <nlohmann/json.hpp>
 #include <string>
@@ -61,41 +61,6 @@ const nlohmann::json kExtractionSchema = nlohmann::json::parse (R"({
 
 constexpr int kEmbeddingDim = 256;
 
-std::string
-TrimLabel (const std::string &label)
-{
-  auto start = label.begin ();
-  auto end = label.end ();
-  while (start != end && std::isspace (static_cast<unsigned char> (*start)))
-    {
-      ++start;
-    }
-  while (end != start)
-    {
-      auto prev = end;
-      --prev;
-      if (!std::isspace (static_cast<unsigned char> (*prev)))
-        {
-          break;
-        }
-      end = prev;
-    }
-  return std::string (start, end);
-}
-
-std::string
-NormalizeLabelKey (const std::string &label)
-{
-  std::string trimmed = TrimLabel (label);
-  std::string out;
-  out.reserve (trimmed.size ());
-  for (unsigned char c : trimmed)
-    {
-      out.push_back (static_cast<char> (std::tolower (c)));
-    }
-  return out;
-}
-
 std::optional<Eigen::VectorXf>
 LoadEmbedding (Transaction &tx, long long embedding_id,
                int expected_dim = kEmbeddingDim)
@@ -122,35 +87,60 @@ LoadEmbedding (Transaction &tx, long long embedding_id,
   return out;
 }
 
-double
-ComputeLabelSalience (const std::string &label,
-                      const std::optional<Eigen::VectorXf> &summary_embedding,
-                      Encoder &encoder)
+std::optional<std::vector<float>>
+LoadEmbeddingVector (Transaction &tx, long long embedding_id,
+                     int expected_dim = kEmbeddingDim)
 {
-  if (!summary_embedding.has_value () || summary_embedding->size () == 0)
+  auto emb = LoadEmbedding (tx, embedding_id, expected_dim);
+  if (!emb.has_value ())
+    {
+      return std::nullopt;
+    }
+  std::vector<float> out (static_cast<size_t> (emb->size ()));
+  Eigen::Map<Eigen::VectorXf> out_vec (out.data (),
+                                       static_cast<int> (out.size ()));
+  out_vec = *emb;
+  return out;
+}
+
+double
+ComputeLabelSalience (const std::vector<float> *label_embedding,
+                      const std::optional<Eigen::VectorXf> &summary_embedding)
+{
+  if (!summary_embedding.has_value () || summary_embedding->size () == 0
+      || label_embedding == nullptr || label_embedding->empty ())
     {
       return 0.5;
     }
-
-  std::vector<float> label_embedding;
-  try
-    {
-      encoder.EncodeText (label, label_embedding);
-    }
-  catch (const std::exception &)
-    {
-      return 0.5;
-    }
-
-  if (label_embedding.empty ())
+  if (static_cast<int> (label_embedding->size ()) != summary_embedding->size ())
     {
       return 0.5;
     }
 
   Eigen::Map<const Eigen::VectorXf> label_vec (
-      label_embedding.data (), static_cast<int> (label_embedding.size ()));
+      label_embedding->data (),
+      static_cast<int> (label_embedding->size ()));
   const double cos = core::CosineSimilarity (label_vec, *summary_embedding);
   return core::Map01 (cos);
+}
+
+std::optional<std::vector<float>>
+EncodeLabelEmbedding (const std::string &label, Encoder &encoder)
+{
+  std::vector<float> embedding;
+  try
+    {
+      encoder.EncodeText (label, embedding);
+    }
+  catch (const std::exception &)
+    {
+      return std::nullopt;
+    }
+  if (embedding.empty () || embedding.size () != kEmbeddingDim)
+    {
+      return std::nullopt;
+    }
+  return embedding;
 }
 
 std::string
@@ -254,8 +244,15 @@ ProcessExtractionResults::Execute (OperationContext &context, Transaction &tx) c
               // Add to pending results for processing
               p_ctx.pending_extraction_results.push_back (std::move (result));
             }
-          catch (const std::exception &)
+          catch (const std::exception &e)
             {
+              telemetry::LogWarn (
+                  "cortext.extraction_failed",
+                  { telemetry::Attribute::String ("summary_id",
+                                                  req.summary_id),
+                    telemetry::Attribute::Int64 ("cluster_size",
+                                                 req.cluster_size),
+                    telemetry::Attribute::String ("error", e.what ()) });
               // Skip failed extractions
             }
         }
@@ -302,6 +299,75 @@ ProcessExtractionResults::Execute (OperationContext &context, Transaction &tx) c
           label_counts[label_key] += 1;
         }
     }
+
+  struct ExistingLabel
+  {
+    long long memory_id = 0;
+    long long embedding_id = 0;
+    bool loaded = false;
+  };
+
+      auto &label_cache = p_ctx.label_embedding_cache;
+      auto upsert_summary_cache = [&](long long memory_id,
+                                      long long embedding_id,
+                                      const std::vector<float> *embedding) {
+        if (!embedding || embedding->empty ())
+          {
+            return;
+          }
+        Eigen::VectorXf vec (
+            static_cast<Eigen::Index> (embedding->size ()));
+        for (size_t i = 0; i < embedding->size (); ++i)
+          {
+            vec (static_cast<Eigen::Index> (i)) = (*embedding)[i];
+          }
+        p_ctx.UpsertSummaryCache (memory_id, embedding_id, vec, false, true);
+      };
+  std::unordered_map<std::string, ExistingLabel> existing_labels;
+  auto get_existing = [&](const std::string &label_key) -> ExistingLabel & {
+    auto it = existing_labels.find (label_key);
+    if (it != existing_labels.end ())
+      {
+        return it->second;
+      }
+    ExistingLabel entry;
+    auto rows = tx.Execute (
+        "SELECT memory_id, embedding_id FROM memories "
+        "WHERE source_id = ? AND kind = 'LABEL'",
+        { label_key });
+    if (!rows.empty ())
+      {
+        const auto &row = rows[0];
+        auto mem_it = row.find ("memory_id");
+        if (mem_it != row.end ())
+          {
+            if (mem_it->second.type () == typeid (long long))
+              {
+                entry.memory_id = std::any_cast<long long> (mem_it->second);
+              }
+            else if (mem_it->second.type () == typeid (int))
+              {
+                entry.memory_id = std::any_cast<int> (mem_it->second);
+              }
+          }
+        auto emb_it = row.find ("embedding_id");
+        if (emb_it != row.end ())
+          {
+            if (emb_it->second.type () == typeid (long long))
+              {
+                entry.embedding_id
+                    = std::any_cast<long long> (emb_it->second);
+              }
+            else if (emb_it->second.type () == typeid (int))
+              {
+                entry.embedding_id = std::any_cast<int> (emb_it->second);
+              }
+          }
+      }
+    entry.loaded = true;
+    auto [ins_it, _] = existing_labels.emplace (label_key, entry);
+    return ins_it->second;
+  };
 
   for (const auto &result : p_ctx.pending_extraction_results)
     {
@@ -361,12 +427,16 @@ ProcessExtractionResults::Execute (OperationContext &context, Transaction &tx) c
         std::string label;
         std::string label_key;
         double salience = 0.0;
+        std::vector<float> embedding;
+        bool has_embedding = false;
       };
       std::optional<FallbackLabel> fallback_label;
 
       auto insert_label = [&](const std::string &label,
                               const std::string &label_key,
-                              double salience) -> bool {
+                              double salience,
+                              const std::vector<float> *label_embedding,
+                              ExistingLabel &existing) -> bool {
         if (label.empty () || label_key.empty ())
           {
             return false;
@@ -375,25 +445,11 @@ ProcessExtractionResults::Execute (OperationContext &context, Transaction &tx) c
         // Use label text as source_id for uniqueness.
         std::string source_id = label_key;
 
-        // Check if this label already exists
-        auto existing = tx.Execute (
-            "SELECT memory_id FROM memories WHERE source_id = ? AND kind = 'LABEL'",
-            { source_id });
+        long long label_memory_id = existing.memory_id;
+        long long existing_embedding_id = existing.embedding_id;
 
-        long long label_memory_id = 0;
-        if (!existing.empty () && existing[0].count ("memory_id"))
+        if (label_memory_id > 0)
           {
-            // Label exists, get its memory_id
-            auto val = existing[0].at ("memory_id");
-            if (val.type () == typeid (long long))
-              {
-                label_memory_id = std::any_cast<long long> (val);
-              }
-            else if (val.type () == typeid (int))
-              {
-                label_memory_id = std::any_cast<int> (val);
-              }
-
             // Update salience if higher
             AddWrite (tx,
                       "UPDATE memories SET s_max = MAX(s_max, ?) "
@@ -402,12 +458,38 @@ ProcessExtractionResults::Execute (OperationContext &context, Transaction &tx) c
           }
         else
           {
+            long long embedding_id = 0;
+            if (label_embedding != nullptr && !label_embedding->empty ())
+              {
+                AddWrite (tx,
+                          "INSERT INTO embeddings (embedding, created_at) "
+                          "VALUES (?, ?)",
+                          { *label_embedding,
+                            static_cast<long long> (now_ts) });
+                auto emb_rows
+                    = tx.Execute ("SELECT last_insert_rowid() AS id", {});
+                if (!emb_rows.empty () && emb_rows[0].count ("id"))
+                  {
+                    auto emb_val = emb_rows[0].at ("id");
+                    if (emb_val.type () == typeid (long long))
+                      {
+                        embedding_id
+                            = std::any_cast<long long> (emb_val);
+                      }
+                    else if (emb_val.type () == typeid (int))
+                      {
+                        embedding_id = std::any_cast<int> (emb_val);
+                      }
+                  }
+              }
             // Insert new label as MEMORIES row
             AddWrite (tx,
                       "INSERT INTO memories "
-                      "(source_id, kind, label, start_ts, s_max, created_at) "
-                      "VALUES (?, 'LABEL', ?, ?, ?, ?)",
-                      { source_id, label,
+                      "(embedding_id, source_id, kind, label, start_ts, "
+                      "s_max, created_at) "
+                      "VALUES (?, ?, 'LABEL', ?, ?, ?, ?)",
+                      { embedding_id > 0 ? std::any (embedding_id) : std::any (),
+                        source_id, label,
                         static_cast<long long> (now_ts), salience,
                         static_cast<long long> (now_ts) });
 
@@ -425,12 +507,55 @@ ProcessExtractionResults::Execute (OperationContext &context, Transaction &tx) c
                     label_memory_id = std::any_cast<int> (val);
                   }
               }
+            existing.memory_id = label_memory_id;
+            existing.embedding_id = embedding_id;
+            existing_embedding_id = embedding_id;
+          }
+
+        if (label_memory_id > 0 && existing_embedding_id == 0
+            && label_embedding != nullptr && !label_embedding->empty ())
+          {
+            AddWrite (tx,
+                      "INSERT INTO embeddings (embedding, created_at) "
+                      "VALUES (?, ?)",
+                      { *label_embedding,
+                        static_cast<long long> (now_ts) });
+            auto emb_rows
+                = tx.Execute ("SELECT last_insert_rowid() AS id", {});
+            long long embedding_id = 0;
+            if (!emb_rows.empty () && emb_rows[0].count ("id"))
+              {
+                auto emb_val = emb_rows[0].at ("id");
+                if (emb_val.type () == typeid (long long))
+                  {
+                    embedding_id = std::any_cast<long long> (emb_val);
+                  }
+                else if (emb_val.type () == typeid (int))
+                  {
+                    embedding_id = std::any_cast<int> (emb_val);
+                  }
+              }
+            if (embedding_id > 0)
+              {
+                AddWrite (tx,
+                          "UPDATE memories SET embedding_id = ? "
+                          "WHERE memory_id = ?",
+                          { embedding_id, label_memory_id });
+                existing.embedding_id = embedding_id;
+                upsert_summary_cache (label_memory_id, embedding_id,
+                                      label_embedding);
+              }
           }
 
         // Attach label to summary (has_label) and track for relation linking
         if (label_memory_id > 0)
           {
             label_memory_ids[label_key] = label_memory_id;
+            if (existing.embedding_id > 0)
+              {
+                upsert_summary_cache (label_memory_id, existing.embedding_id,
+                                      label_embedding);
+              }
             if (summary_memory_id > 0)
               {
                 const double weight01 = core::Clamp (salience, 0.0, 1.0);
@@ -454,19 +579,56 @@ ProcessExtractionResults::Execute (OperationContext &context, Transaction &tx) c
             {
               continue;
             }
+          auto &existing = get_existing (label_key);
+          const std::vector<float> *label_embedding_ptr = nullptr;
+          auto cached_it = label_cache.find (label_key);
+          if (cached_it != label_cache.end ())
+            {
+              label_embedding_ptr = &cached_it->second;
+            }
+          else if (existing.embedding_id > 0)
+            {
+              auto loaded = LoadEmbeddingVector (tx, existing.embedding_id);
+              if (loaded.has_value ())
+                {
+                  auto [it, _] = label_cache.emplace (label_key,
+                                                      std::move (*loaded));
+                  label_embedding_ptr = &it->second;
+                }
+            }
+          if (!label_embedding_ptr)
+            {
+              auto encoded = EncodeLabelEmbedding (label, *encoder);
+              if (encoded.has_value ())
+                {
+                  auto [it, _] = label_cache.emplace (label_key,
+                                                      std::move (*encoded));
+                  label_embedding_ptr = &it->second;
+                }
+            }
           const double salience
-              = ComputeLabelSalience (label, summary_embedding, *encoder);
+              = ComputeLabelSalience (label_embedding_ptr, summary_embedding);
           if (label_threshold > 1
               && label_counts[label_key] < label_threshold)
             {
               if (!fallback_label || salience > fallback_label->salience)
                 {
-                  fallback_label = FallbackLabel{ label, label_key, salience };
+                  FallbackLabel candidate;
+                  candidate.label = label;
+                  candidate.label_key = label_key;
+                  candidate.salience = salience;
+                  if (label_embedding_ptr && !label_embedding_ptr->empty ())
+                    {
+                      candidate.embedding = *label_embedding_ptr;
+                      candidate.has_embedding = true;
+                    }
+                  fallback_label = std::move (candidate);
                 }
               continue;
             }
 
-          if (insert_label (label, label_key, salience))
+          if (insert_label (label, label_key, salience, label_embedding_ptr,
+                            existing))
             {
               inserted_any_label = true;
             }
@@ -474,9 +636,15 @@ ProcessExtractionResults::Execute (OperationContext &context, Transaction &tx) c
 
       if (!inserted_any_label && fallback_label.has_value ())
         {
+          const std::vector<float> *fallback_embedding
+              = fallback_label->has_embedding
+                    ? &fallback_label->embedding
+                    : nullptr;
           if (insert_label (fallback_label->label,
                             fallback_label->label_key,
-                            fallback_label->salience))
+                            fallback_label->salience,
+                            fallback_embedding,
+                            get_existing (fallback_label->label_key)))
             {
               inserted_any_label = true;
             }

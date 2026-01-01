@@ -232,10 +232,12 @@ UpdateMemoryStrength::Execute (OperationContext &context, Transaction &tx) const
   // Also delete corresponding embeddings.
   tx.Execute (
       "DELETE FROM embeddings WHERE embedding_id IN "
-      "(SELECT embedding_id FROM memories WHERE strength < ?)",
+      "(SELECT embedding_id FROM memories "
+      " WHERE strength < ? AND kind = 'LONG_TERM')",
       { cutoff });
-  auto eviction_result
-      = tx.Execute ("DELETE FROM memories WHERE strength < ?", { cutoff });
+  auto eviction_result = tx.Execute (
+      "DELETE FROM memories WHERE strength < ? AND kind = 'LONG_TERM'",
+      { cutoff });
   const int64_t eviction_count = eviction_result.size ();
 
   telemetry::LogDebug ("cortext.memory_strength",

@@ -47,8 +47,10 @@ where ξ_t is small isotropic noise (or a deterministic phase vector) to prevent
 
 ```
 w_ctx(F,S,T) = lerp(0.15, 0.45, F) × lerp(1.0, 0.85, S)
+association_boost(F,S,T) = lerp(0.015, 0.06, S) × lerp(1.0, 0.7, F) × lerp(1.0, 0.9, T)
 score_retrieval(m) ← (1 − w_ctx) × cos(q, m.embedding) +
-                      w_ctx × cos(c_t, m.context)
+                      w_ctx × cos(c_t, m.context) +
+                      association_boost(F,S,T) × I[m.kind = ASSOCIATION]
 ```
 
 Reinstatement: retrieving a memory updates `c_t` toward `m.context`, improving ordered recall within the same episode.
@@ -75,7 +77,7 @@ rehearsal_rate = lerp(0.5, 2.0, S)
 memory_dedication_strength = lerp(0.3, 0.9, T)
 ```
 
-Working memory gating evaluates coherent memories at accumulation boundaries (@sec-boundary), not individual signals:
+Working memory gating evaluates coherent memories at accumulation boundaries (@sec-boundary), not individual signals. The WM update occurs **before** accumulator reset so each slot preserves ordered signal blobs for content hydration:
 
 ```
 on_memory_boundary:

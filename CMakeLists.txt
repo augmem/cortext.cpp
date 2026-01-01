@@ -29,6 +29,12 @@ option(CORTEXT_ENABLE_ASAN "Enable AddressSanitizer" OFF)
 option(CORTEXT_ENABLE_UBSAN "Enable UndefinedBehaviorSanitizer" OFF)
 option(CORTEXT_ENABLE_MSAN "Enable MemorySanitizer (Clang only)" OFF)
 
+if(APPLE)
+  set(CORTEXT_ENABLE_ORT_COREML ON CACHE BOOL "Enable CoreML EP in ONNX Runtime build" FORCE)
+else()
+  set(CORTEXT_ENABLE_ORT_COREML OFF CACHE BOOL "Enable CoreML EP in ONNX Runtime build" FORCE)
+endif()
+
 if(EMSCRIPTEN AND BUILD_TESTING)
   message(STATUS "Disabling tests for WebAssembly builds (not supported).")
   set(BUILD_TESTING OFF CACHE BOOL "Build tests" FORCE)
@@ -140,6 +146,8 @@ add_library(cortext
     src/operations/consolidation.cpp
     src/operations/consolidation_cluster.cpp
     src/operations/consolidation_gate.cpp
+  src/operations/consolidation_shallow.cpp
+  src/operations/label_bank.cpp
     src/operations/consolidation_summarize.cpp
     src/operations/process_extraction_results.cpp
     src/operations/embedding_prediction_error.cpp
@@ -366,6 +374,11 @@ if(NOT CORTEXT_DISABLE_IMAGEBIND_ORT AND NOT EMSCRIPTEN)
   set(CORTEXT_ORT_LIB_PATH
       "${CORTEXT_ORT_INSTALL_DIR}/lib/${CMAKE_SHARED_LIBRARY_PREFIX}onnxruntime${CMAKE_SHARED_LIBRARY_SUFFIX}")
 
+  set(CORTEXT_ORT_USE_COREML OFF)
+  if(APPLE AND CORTEXT_ENABLE_ORT_COREML)
+    set(CORTEXT_ORT_USE_COREML ON)
+  endif()
+
   # Use headers from the ORT install tree.
   target_include_directories(cortext PRIVATE
     ${CORTEXT_ORT_INSTALL_DIR}/include
@@ -382,6 +395,7 @@ if(NOT CORTEXT_DISABLE_IMAGEBIND_ORT AND NOT EMSCRIPTEN)
         -DCMAKE_BUILD_TYPE=${CORTEXT_ORT_BUILD_TYPE}
         -DCMAKE_INSTALL_PREFIX=${CORTEXT_ORT_INSTALL_DIR}
         -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+        -DCMAKE_POLICY_VERSION_MINIMUM=3.5
         # Prevent ORT from picking up Homebrew/system Protobuf configs,
         # which can reference Abseil targets we aren't providing here.
         -DCMAKE_DISABLE_FIND_PACKAGE_Protobuf=ON
@@ -390,9 +404,15 @@ if(NOT CORTEXT_DISABLE_IMAGEBIND_ORT AND NOT EMSCRIPTEN)
         # pull in system Protobuf transitively.
         -DCMAKE_DISABLE_FIND_PACKAGE_ONNX=ON
         -DCMAKE_DISABLE_FIND_PACKAGE_onnx=ON
+        # Force ORT to use its bundled flatbuffers instead of system/homebrew.
+        -DCMAKE_DISABLE_FIND_PACKAGE_Flatbuffers=ON
+        -DCMAKE_DISABLE_FIND_PACKAGE_flatbuffers=ON
         -Donnxruntime_BUILD_SHARED_LIB=ON
         -Donnxruntime_BUILD_UNIT_TESTS=OFF
         -Donnxruntime_ENABLE_PYTHON=OFF
+        -Donnxruntime_USE_COREML=${CORTEXT_ORT_USE_COREML}
+        -DFETCHCONTENT_TRY_FIND_PACKAGE_MODE=NEVER
+      BUILD_COMMAND ${CMAKE_COMMAND} --build <BINARY_DIR> --config ${CORTEXT_ORT_BUILD_TYPE} -- -j8
       BUILD_BYPRODUCTS "${CORTEXT_ORT_LIB_PATH}"
       USES_TERMINAL_CONFIGURE TRUE
       USES_TERMINAL_BUILD TRUE
@@ -408,6 +428,13 @@ if(NOT CORTEXT_DISABLE_IMAGEBIND_ORT AND NOT EMSCRIPTEN)
 
   target_link_libraries(cortext PRIVATE onnxruntime ZLIB::ZLIB)
   add_dependencies(cortext onnxruntime_ep)
+  if(APPLE AND CORTEXT_ENABLE_ORT_COREML)
+    set(CORTEXT_ORT_COREML_PROVIDER_LIB
+        "${CORTEXT_ORT_BINARY_DIR}/lib/libonnxruntime_providers_coreml.a")
+    if(EXISTS "${CORTEXT_ORT_COREML_PROVIDER_LIB}")
+      target_link_libraries(cortext PRIVATE "${CORTEXT_ORT_COREML_PROVIDER_LIB}")
+    endif()
+  endif()
 endif()
 
 # Optional ONNX Runtime integration for Gemma text generator
@@ -431,6 +458,11 @@ if(CORTEXT_ENABLE_GEMMA_ORT)
     set(CORTEXT_ORT_LIB_PATH
         "${CORTEXT_ORT_INSTALL_DIR}/lib/${CMAKE_SHARED_LIBRARY_PREFIX}onnxruntime${CMAKE_SHARED_LIBRARY_SUFFIX}")
 
+    set(CORTEXT_ORT_USE_COREML OFF)
+    if(APPLE AND CORTEXT_ENABLE_ORT_COREML)
+      set(CORTEXT_ORT_USE_COREML ON)
+    endif()
+
     target_include_directories(cortext PRIVATE
       ${CORTEXT_ORT_INSTALL_DIR}/include
     )
@@ -444,13 +476,19 @@ if(CORTEXT_ENABLE_GEMMA_ORT)
           -DCMAKE_BUILD_TYPE=${CORTEXT_ORT_BUILD_TYPE}
           -DCMAKE_INSTALL_PREFIX=${CORTEXT_ORT_INSTALL_DIR}
           -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+          -DCMAKE_POLICY_VERSION_MINIMUM=3.5
           -DCMAKE_DISABLE_FIND_PACKAGE_Protobuf=ON
           -DCMAKE_DISABLE_FIND_PACKAGE_protobuf=ON
           -DCMAKE_DISABLE_FIND_PACKAGE_ONNX=ON
           -DCMAKE_DISABLE_FIND_PACKAGE_onnx=ON
+          -DCMAKE_DISABLE_FIND_PACKAGE_Flatbuffers=ON
+          -DCMAKE_DISABLE_FIND_PACKAGE_flatbuffers=ON
           -Donnxruntime_BUILD_SHARED_LIB=ON
           -Donnxruntime_BUILD_UNIT_TESTS=OFF
           -Donnxruntime_ENABLE_PYTHON=OFF
+          -Donnxruntime_USE_COREML=${CORTEXT_ORT_USE_COREML}
+          -DFETCHCONTENT_TRY_FIND_PACKAGE_MODE=NEVER
+        BUILD_COMMAND ${CMAKE_COMMAND} --build <BINARY_DIR> --config ${CORTEXT_ORT_BUILD_TYPE} -- -j8
         BUILD_BYPRODUCTS "${CORTEXT_ORT_LIB_PATH}"
         USES_TERMINAL_CONFIGURE TRUE
         USES_TERMINAL_BUILD TRUE
@@ -466,6 +504,13 @@ if(CORTEXT_ENABLE_GEMMA_ORT)
 
     target_link_libraries(cortext PRIVATE onnxruntime ZLIB::ZLIB)
     add_dependencies(cortext onnxruntime_ep)
+    if(APPLE AND CORTEXT_ENABLE_ORT_COREML)
+      set(CORTEXT_ORT_COREML_PROVIDER_LIB
+          "${CORTEXT_ORT_BINARY_DIR}/lib/libonnxruntime_providers_coreml.a")
+      if(EXISTS "${CORTEXT_ORT_COREML_PROVIDER_LIB}")
+        target_link_libraries(cortext PRIVATE "${CORTEXT_ORT_COREML_PROVIDER_LIB}")
+      endif()
+    endif()
   endif()
 endif()
 
@@ -646,12 +691,13 @@ if(NOT CORTEXT_DISABLE_LITERT AND NOT EMSCRIPTEN)
         ${CMAKE_COMMAND} -DLITERT_CUSTOM_BUILD=${LITERT_CUSTOM_BUILD}
           -DLITERT_ROOT_BUILD=${LITERT_ROOT_BUILD}
           -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/litert_append_build.cmake
-      BUILD_COMMAND ${BAZEL_EXECUTABLE} build //:liblitert_lm_cpp.so
+      BUILD_COMMAND ${BAZEL_EXECUTABLE}
+        --output_base=${CMAKE_BINARY_DIR}/bazel-output
+        build //:liblitert_lm_cpp.so
         //runtime/engine:litert_lm_shared
         --config=${LITERT_BAZEL_CONFIG}
         --compilation_mode=opt
         --verbose_failures
-        --output_base=${CMAKE_BINARY_DIR}/bazel-output
       BUILD_IN_SOURCE TRUE
       INSTALL_COMMAND ${CMAKE_COMMAND}
         -DLITERT_SOURCE_DIR=${LITERT_SOURCE_DIR}
@@ -678,10 +724,44 @@ if(NOT CORTEXT_DISABLE_LITERT AND NOT EMSCRIPTEN)
     set_property(TARGET cortext APPEND PROPERTY BUILD_RPATH
       "@loader_path/../third_party/litert-lm-install/lib"
     )
+    list(APPEND CMAKE_BUILD_RPATH "${LITERT_INSTALL_DIR}/lib")
   elseif(UNIX)
     set_property(TARGET cortext APPEND PROPERTY BUILD_RPATH
       "$ORIGIN/../third_party/litert-lm-install/lib"
     )
+  endif()
+
+  # Ensure LiteRT accelerator dylibs are present in the install lib dir on macOS.
+  if(APPLE)
+    if(CMAKE_SYSTEM_PROCESSOR STREQUAL "arm64")
+      set(LITERT_ACCEL_DIR "${LITERT_SOURCE_DIR}/prebuilt/macos_arm64")
+    else()
+      set(LITERT_ACCEL_DIR "${LITERT_SOURCE_DIR}/prebuilt/macos_x86_64")
+    endif()
+    file(GLOB LITERT_ACCEL_LIBS "${LITERT_ACCEL_DIR}/*.dylib")
+    if(NOT EMSCRIPTEN)
+      list(FILTER LITERT_ACCEL_LIBS EXCLUDE REGEX "WebGpuAccelerator")
+    endif()
+    set(LITERT_ACCEL_CLEANUP_COMMANDS "")
+    if(NOT EMSCRIPTEN)
+      list(APPEND LITERT_ACCEL_CLEANUP_COMMANDS
+        COMMAND ${CMAKE_COMMAND} -E rm -f
+          "${LITERT_INSTALL_DIR}/lib/libLiteRtWebGpuAccelerator.dylib"
+      )
+    endif()
+    if(LITERT_ACCEL_LIBS)
+      set(LITERT_ACCEL_SENTINEL "${LITERT_INSTALL_DIR}/lib/.litert_accel_copied")
+      add_custom_command(
+        OUTPUT "${LITERT_ACCEL_SENTINEL}"
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${LITERT_INSTALL_DIR}/lib"
+        ${LITERT_ACCEL_CLEANUP_COMMANDS}
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different ${LITERT_ACCEL_LIBS} "${LITERT_INSTALL_DIR}/lib/"
+        COMMAND ${CMAKE_COMMAND} -E touch "${LITERT_ACCEL_SENTINEL}"
+        DEPENDS ${LITERT_ACCEL_LIBS}
+      )
+      add_custom_target(litert_accel ALL DEPENDS "${LITERT_ACCEL_SENTINEL}")
+      add_dependencies(cortext litert_accel)
+    endif()
   endif()
 endif()
 
@@ -762,4 +842,5 @@ endif()
 
 if(CORTEXT_BUILD_EXAMPLES AND NOT EMSCRIPTEN)
   add_subdirectory(examples)
+  add_subdirectory(tools)
 endif()

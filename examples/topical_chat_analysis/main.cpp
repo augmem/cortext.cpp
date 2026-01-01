@@ -251,6 +251,7 @@ struct AnalysisConfig {
   std::string dataset_path;
   std::string models_dir = "models";
   std::string db_path = ":memory:";
+  std::string label_bank_path;
   std::string otel_log_path;
   std::vector<std::string> otel_filters = {
       "cortext.boundary",
@@ -274,15 +275,24 @@ struct AnalysisConfig {
   int cadence_max_ms = 1200;
   int context_window_turns = 4;
   bool run_consolidation = false;
+  std::string consolidate_mode = "both";
   int consolidation_cycles = 1;
+  int consolidation_every_turns = 0;
+  bool consolidate_during = false;
+  bool consolidate_idle = false;
   bool semantic_overlap = false;
   unsigned int seed = 1337;
+  bool deterministic = false;
+  std::uint64_t synthetic_start_ms = 1700000000000ULL;
   double focus = 0.3;
   double sensitivity = 0.6;
   double stability = 0.5;
   std::string affect_mode = "all";
   bool affect_interrupt = true;
   bool affect_retrieval = true;
+  bool reinforcement_enabled = true;
+  bool procedural_enabled = true;
+  bool sequential_edges_enabled = true;
 };
 
 struct RetrievalExample {
@@ -309,6 +319,17 @@ struct DistSummary {
   double p90 = 0.0;
 };
 
+cortext::ConsolidationMode
+GetConsolidationMode(const AnalysisConfig &cfg) {
+  if (cfg.consolidate_mode == "shallow") {
+    return cortext::ConsolidationMode::Shallow;
+  }
+  if (cfg.consolidate_mode == "deep") {
+    return cortext::ConsolidationMode::Deep;
+  }
+  return cortext::ConsolidationMode::Both;
+}
+
 struct Stats {
   int conversations = 0;
   int turns = 0;
@@ -321,6 +342,12 @@ struct Stats {
   long long consolidation_baseline_label = 0;
   long long consolidation_final_association = 0;
   long long consolidation_final_label = 0;
+  long long reinforcement_edge_count = 0;
+  double reinforcement_weight_mean = 0.0;
+  long long memory_long_term_count = 0;
+  double memory_strength_mean = 0.0;
+  double memory_used_count_mean = 0.0;
+  double memory_retrieved_count_mean = 0.0;
   int retrieval_turns = 0;
   int total_retrieved = 0;
   int retrieval_association_candidates = 0;
@@ -342,6 +369,8 @@ struct Stats {
   int interrupt_gate_fail_novelty_mu = 0;
   int interrupt_gate_fail_dup = 0;
   int interrupt_gate_fail_boundary_mu = 0;
+  int boundary_at_count = 0;
+  int boundary_score_pass_count = 0;
   int interrupt_turns = 0;
   int interrupt_turns_with_retrieval = 0;
   int interrupt_association_candidates = 0;
@@ -349,6 +378,7 @@ struct Stats {
   int interrupt_other_candidates = 0;
   int interrupt_turns_with_association = 0;
   int interrupt_turns_with_label = 0;
+  int interrupt_abort_count = 0;
   int wm_samples = 0;
   int wm_total_slots = 0;
   int wm_max_slots = 0;
@@ -387,8 +417,15 @@ struct Stats {
   std::vector<double> interrupt_gate_affect_drive_non_interrupt_values;
   std::vector<double> interrupt_gate_retrieval_thresh_values;
   std::vector<double> interrupt_gate_boundary_mult_eff_values;
+  std::vector<double> boundary_score_values;
   std::vector<double> retrieval_emotion_bonus_values;
   std::vector<double> interrupt_retrieval_emotion_bonus_values;
+  std::vector<double> encode_ms_values;
+  std::vector<double> process_ms_values;
+  std::vector<double> hydrate_ms_values;
+  std::vector<double> total_ms_values;
+  std::unordered_map<std::string, double> operation_time_sum;
+  std::unordered_map<std::string, int> operation_time_count;
   std::vector<RetrievalExample> low_overlap_examples;
 };
 
@@ -753,6 +790,115 @@ long long CountMemoriesByKind(const std::shared_ptr<cortext::Store> &store,
   return 0;
 }
 
+struct AssociationStats {
+  long long count = 0;
+  double weight_mean = 0.0;
+};
+
+AssociationStats GetAssociationStats(const std::shared_ptr<cortext::Store> &store,
+                                     const std::string &edge_type) {
+  AssociationStats stats;
+  if (!store) {
+    return stats;
+  }
+  auto rows = store->Execute(
+      "SELECT COUNT(*) AS c, AVG(weight) AS avg_w FROM associations "
+      "WHERE edge_type = ?",
+      {edge_type});
+  if (rows.empty()) {
+    return stats;
+  }
+  auto get_dbl = [&rows](const char *k, double def) -> double {
+    auto it = rows[0].find(k);
+    if (it == rows[0].end() || !it->second.has_value()) {
+      return def;
+    }
+    if (it->second.type() == typeid(double)) {
+      return std::any_cast<double>(it->second);
+    }
+    if (it->second.type() == typeid(float)) {
+      return static_cast<double>(std::any_cast<float>(it->second));
+    }
+    if (it->second.type() == typeid(int)) {
+      return static_cast<double>(std::any_cast<int>(it->second));
+    }
+    if (it->second.type() == typeid(long long)) {
+      return static_cast<double>(std::any_cast<long long>(it->second));
+    }
+    return def;
+  };
+  auto it = rows[0].find("c");
+  if (it != rows[0].end()) {
+    if (it->second.type() == typeid(long long)) {
+      stats.count = std::any_cast<long long>(it->second);
+    } else if (it->second.type() == typeid(int)) {
+      stats.count = static_cast<long long>(std::any_cast<int>(it->second));
+    } else if (it->second.type() == typeid(double)) {
+      stats.count = static_cast<long long>(std::any_cast<double>(it->second));
+    }
+  }
+  stats.weight_mean = get_dbl("avg_w", 0.0);
+  return stats;
+}
+
+struct MemoryStats {
+  long long count = 0;
+  double strength_mean = 0.0;
+  double used_count_mean = 0.0;
+  double retrieved_count_mean = 0.0;
+};
+
+MemoryStats GetMemoryStats(const std::shared_ptr<cortext::Store> &store,
+                           const std::string &kind) {
+  MemoryStats stats;
+  if (!store) {
+    return stats;
+  }
+  auto rows = store->Execute(
+      "SELECT COUNT(*) AS c, "
+      "AVG(strength) AS strength_mean, "
+      "AVG(used_count) AS used_mean, "
+      "AVG(retrieved_count) AS retrieved_mean "
+      "FROM memories WHERE kind = ?",
+      {kind});
+  if (rows.empty()) {
+    return stats;
+  }
+  auto get_dbl = [&rows](const char *k, double def) -> double {
+    auto it = rows[0].find(k);
+    if (it == rows[0].end() || !it->second.has_value()) {
+      return def;
+    }
+    if (it->second.type() == typeid(double)) {
+      return std::any_cast<double>(it->second);
+    }
+    if (it->second.type() == typeid(float)) {
+      return static_cast<double>(std::any_cast<float>(it->second));
+    }
+    if (it->second.type() == typeid(int)) {
+      return static_cast<double>(std::any_cast<int>(it->second));
+    }
+    if (it->second.type() == typeid(long long)) {
+      return static_cast<double>(std::any_cast<long long>(it->second));
+    }
+    return def;
+  };
+  auto it = rows[0].find("c");
+  if (it != rows[0].end()) {
+    if (it->second.type() == typeid(long long)) {
+      stats.count = std::any_cast<long long>(it->second);
+    } else if (it->second.type() == typeid(int)) {
+      stats.count = static_cast<long long>(std::any_cast<int>(it->second));
+    } else if (it->second.type() == typeid(double)) {
+      stats.count = static_cast<long long>(std::any_cast<double>(it->second));
+    }
+  }
+  stats.strength_mean = get_dbl("strength_mean", 0.0);
+  stats.used_count_mean = get_dbl("used_mean", 0.0);
+  stats.retrieved_count_mean = get_dbl("retrieved_mean", 0.0);
+  return stats;
+}
+
 void RecordRetrievalExample(Stats &stats, double overlap, const std::string &turn_text,
                             const std::string &memory_text) {
   RetrievalExample ex{overlap, turn_text, memory_text};
@@ -801,6 +947,8 @@ AnalysisConfig ParseArgs(int argc, char **argv) {
       cfg.models_dir = *v;
     } else if (auto v = take("--db=")) {
       cfg.db_path = *v;
+    } else if (auto v = take("--label-bank=")) {
+      cfg.label_bank_path = *v;
     } else if (auto v = take("--max-conversations=")) {
       cfg.max_conversations = std::stoi(*v);
     } else if (auto v = take("--max-turns=")) {
@@ -848,6 +996,16 @@ AnalysisConfig ParseArgs(int argc, char **argv) {
         cfg.affect_interrupt = true;
         cfg.affect_retrieval = true;
       }
+    } else if (auto v = take("--reinforcement-mode=")) {
+      if (*v == "on") {
+        cfg.reinforcement_enabled = true;
+      } else if (*v == "off") {
+        cfg.reinforcement_enabled = false;
+      } else {
+        std::cerr << "Unknown --reinforcement-mode=" << *v
+                  << "; defaulting to 'on'.\n";
+        cfg.reinforcement_enabled = true;
+      }
     } else if (auto v = take("--cadence-speed=")) {
       cfg.cadence_speed = std::stod(*v);
     } else if (auto v = take("--cadence-wpm=")) {
@@ -864,28 +1022,47 @@ AnalysisConfig ParseArgs(int argc, char **argv) {
       cfg.interleave = std::max(1, std::stoi(*v));
     } else if (auto v = take("--consolidate-cycles=")) {
       cfg.consolidation_cycles = std::max(1, std::stoi(*v));
+    } else if (auto v = take("--consolidate-mode=")) {
+      cfg.consolidate_mode = *v;
+      if (cfg.consolidate_mode != "shallow"
+          && cfg.consolidate_mode != "deep"
+          && cfg.consolidate_mode != "both") {
+        std::cerr << "Unknown --consolidate-mode=" << cfg.consolidate_mode
+                  << "; defaulting to 'both'.\n";
+        cfg.consolidate_mode = "both";
+      }
     } else if (auto v = take("--consolidate-every=")) {
       cfg.run_consolidation = true;
-      std::cerr << "Note: --consolidate-every is ignored; consolidation is "
-                   "external-only.\n";
+      cfg.consolidation_every_turns = std::max(1, std::stoi(*v));
     } else if (auto v = take("--seed=")) {
       cfg.seed = static_cast<unsigned int>(std::stoul(*v));
+    } else if (auto v = take("--synthetic-start-ms=")) {
+      cfg.synthetic_start_ms = static_cast<std::uint64_t>(std::stoull(*v));
+    } else if (auto v = take("--deterministic=")) {
+      const std::string val = *v;
+      cfg.deterministic =
+          (val == "1" || val == "true" || val == "yes" || val == "on");
     } else if (arg == "--no-cadence") {
       cfg.cadence_enabled = false;
+    } else if (arg == "--deterministic") {
+      cfg.deterministic = true;
     } else if (arg == "--consolidate") {
       cfg.run_consolidation = true;
     } else if (arg == "--consolidate-during") {
       cfg.run_consolidation = true;
-      std::cerr << "Note: --consolidate-during is ignored; consolidation is "
-                   "external-only.\n";
+      cfg.consolidate_during = true;
     } else if (arg == "--consolidate-idle") {
       cfg.run_consolidation = true;
-      std::cerr << "Note: --consolidate-idle is ignored; consolidation is "
-                   "external-only.\n";
+      cfg.consolidate_during = true;
+      cfg.consolidate_idle = true;
     } else if (arg == "--semantic") {
       cfg.semantic_overlap = true;
     } else if (arg == "--reuse") {
       cfg.reset_per_conversation = false;
+    } else if (arg == "--no-procedural") {
+      cfg.procedural_enabled = false;
+    } else if (arg == "--no-sequential-edges") {
+      cfg.sequential_edges_enabled = false;
     }
   }
   if (!std::filesystem::exists(cfg.dataset_path)) {
@@ -901,6 +1078,14 @@ AnalysisConfig ParseArgs(int argc, char **argv) {
 
 int main(int argc, char **argv) {
   AnalysisConfig cfg = ParseArgs(argc, argv);
+  if (cfg.deterministic) {
+    if (std::getenv("CORTEXT_EMBED_THREADS") == nullptr) {
+      setenv("CORTEXT_EMBED_THREADS", "1", 0);
+    }
+    if (std::getenv("CORTEXT_INFER_THREADS") == nullptr) {
+      setenv("CORTEXT_INFER_THREADS", "1", 0);
+    }
+  }
   if (!std::filesystem::exists(cfg.dataset_path)) {
     std::cerr << "Dataset not found at: " << cfg.dataset_path << "\n";
     return 1;
@@ -924,11 +1109,13 @@ int main(int argc, char **argv) {
   std::unordered_map<long long, MemoryEmotion> memory_emotion_cache;
   bool baseline_counts_set = false;
   int consolidation_every_turns = 0;
+  int last_consolidation_turn = -1;
 
   Stats stats;
   std::mt19937 rng(cfg.seed);
   std::uniform_real_distribution<double> jitter_dist(
       1.0 - cfg.cadence_jitter, 1.0 + cfg.cadence_jitter);
+  std::uint64_t synthetic_ts = cfg.synthetic_start_ms;
   bool semantic_ready = cfg.semantic_overlap;
   const double retrieval_thresh
       = cortext::core::RetrievalThresholdInterrupt(cfg.focus,
@@ -1067,6 +1254,10 @@ int main(int argc, char **argv) {
       c.stability = cfg.stability;
       c.affect_interrupt = cfg.affect_interrupt;
       c.affect_retrieval = cfg.affect_retrieval;
+      c.reinforcement_enabled = cfg.reinforcement_enabled;
+      c.procedural_enabled = cfg.procedural_enabled;
+      c.sequential_edges_enabled = cfg.sequential_edges_enabled;
+      c.label_bank_path = cfg.label_bank_path;
       cortext = cortext::Cortext::Create(c, cfg.db_path, cfg.models_dir);
       embedding_cache.clear();
       memory_kind_cache.clear();
@@ -1079,7 +1270,7 @@ int main(int argc, char **argv) {
       }
     }
     if (cfg.run_consolidation) {
-      consolidation_every_turns = 0;
+      consolidation_every_turns = cfg.consolidation_every_turns;
     }
     if (!baseline_counts_set && ensure_stats_store()) {
       stats.consolidation_baseline_association =
@@ -1132,6 +1323,26 @@ int main(int argc, char **argv) {
             continue;
           }
 
+          int delay_ms = 0;
+          const bool use_synthetic_cadence
+              = cfg.cadence_enabled || cfg.deterministic;
+          if (use_synthetic_cadence) {
+            const int words = std::max(1, CountWords(chunk));
+            double delay_s = static_cast<double>(words) / wps;
+            delay_s += 0.1;
+            delay_s *= jitter_dist(rng);
+            if (cfg.cadence_speed > 0.0) {
+              delay_s /= cfg.cadence_speed;
+            }
+            delay_ms = static_cast<int>(delay_s * 1000.0);
+            delay_ms = std::max(cfg.cadence_min_ms, delay_ms);
+            delay_ms = std::min(cfg.cadence_max_ms, delay_ms);
+          }
+          const int synthetic_step_ms =
+              std::max(1, delay_ms);
+          const std::uint64_t signal_ts =
+              cfg.deterministic ? synthetic_ts : 0;
+
           const auto turn_tokens = Tokenize(chunk);
           const auto context_tokens = MergeTokenWindow(recent_context_tokens[i]);
 
@@ -1151,10 +1362,15 @@ int main(int argc, char **argv) {
 
           cortext::Cortext::Context ctx;
           try {
-            ctx = cortext->ProcessText(chunk, source_id);
+            ctx = cfg.deterministic
+                      ? cortext->ProcessTextAt(chunk, source_id, signal_ts)
+                      : cortext->ProcessText(chunk, source_id);
           } catch (const std::exception &e) {
             std::cerr << "ProcessText failed: " << e.what() << "\n";
             return 1;
+          }
+          if (cfg.deterministic) {
+            synthetic_ts += static_cast<std::uint64_t>(synthetic_step_ms);
           }
 
           stats.turns++;
@@ -1170,6 +1386,14 @@ int main(int argc, char **argv) {
           stats.wm_total_slots += static_cast<int>(ctx.working_memory.size());
           stats.wm_max_slots = std::max(stats.wm_max_slots,
                                         static_cast<int>(ctx.working_memory.size()));
+          stats.encode_ms_values.push_back(ctx.encode_ms);
+          stats.process_ms_values.push_back(ctx.process_ms);
+          stats.hydrate_ms_values.push_back(ctx.hydrate_ms);
+          stats.total_ms_values.push_back(ctx.total_ms);
+          for (const auto &kv : ctx.output.operation_ms) {
+            stats.operation_time_sum[kv.first] += kv.second;
+            stats.operation_time_count[kv.first] += 1;
+          }
 
           if (!ctx.working_memory.empty()) {
             double best_overlap = 0.0;
@@ -1224,6 +1448,17 @@ int main(int argc, char **argv) {
               ctx.interrupt_gate_retrieval_thresh);
           stats.interrupt_gate_boundary_mult_eff_values.push_back(
               ctx.interrupt_gate_boundary_mult_eff);
+          if (ctx.boundary_score.has_value()) {
+            stats.boundary_score_values.push_back(*ctx.boundary_score);
+            const double boundary_thresh =
+                cortext::core::BoundaryThreshold(cfg.focus, cfg.sensitivity);
+            if (*ctx.boundary_score >= boundary_thresh) {
+              stats.boundary_score_pass_count++;
+            }
+          }
+          if (ctx.at_boundary) {
+            stats.boundary_at_count++;
+          }
           if (ctx.should_interrupt) {
             stats.interrupt_affect_drive_values.push_back(affect_drive);
             stats.interrupt_gate_affect_drive_interrupt_values.push_back(
@@ -1239,6 +1474,9 @@ int main(int argc, char **argv) {
             if (!ctx.retrieved_memory.empty()) {
               stats.interrupt_turns_with_retrieval++;
             }
+          }
+          if (ctx.interrupt_aborted) {
+            stats.interrupt_abort_count++;
           }
 
           if (!ctx.retrieved_memory.empty()) {
@@ -1478,17 +1716,7 @@ int main(int argc, char **argv) {
                       << "\n";
           }
 
-          if (cfg.cadence_enabled) {
-            const int words = std::max(1, CountWords(chunk));
-            double delay_s = static_cast<double>(words) / wps;
-            delay_s += 0.1;
-            delay_s *= jitter_dist(rng);
-            if (cfg.cadence_speed > 0.0) {
-              delay_s /= cfg.cadence_speed;
-            }
-            int delay_ms = static_cast<int>(delay_s * 1000.0);
-            delay_ms = std::max(cfg.cadence_min_ms, delay_ms);
-            delay_ms = std::min(cfg.cadence_max_ms, delay_ms);
+          if (cfg.cadence_enabled && !cfg.deterministic) {
             std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
           }
 
@@ -1506,6 +1734,35 @@ int main(int argc, char **argv) {
               }
             }
           }
+
+          if (cfg.run_consolidation
+              && (cfg.consolidation_every_turns > 0 || cfg.consolidate_during)) {
+            bool should_consolidate = false;
+            if (cfg.consolidation_every_turns > 0
+                && stats.turns % cfg.consolidation_every_turns == 0) {
+              should_consolidate = true;
+            }
+            if (cfg.consolidate_during
+                && (ctx.consolidation_recommended
+                    || ctx.consolidation_required)) {
+              if (!cfg.consolidate_idle || ctx.at_boundary) {
+                should_consolidate = true;
+              }
+            }
+            if (should_consolidate && last_consolidation_turn != stats.turns) {
+              for (int cycle = 0; cycle < cfg.consolidation_cycles; ++cycle) {
+                try {
+                  cortext->Consolidate(GetConsolidationMode(cfg));
+                  stats.consolidation_runs++;
+                } catch (const std::exception &e) {
+                  stats.consolidation_failures++;
+                  std::cerr << "Consolidate failed: " << e.what() << "\n";
+                  return 1;
+                }
+              }
+              last_consolidation_turn = stats.turns;
+            }
+          }
         }
 
         turn_indices[i]++;
@@ -1518,7 +1775,7 @@ int main(int argc, char **argv) {
     if (cfg.run_consolidation && cortext) {
       for (int i = 0; i < cfg.consolidation_cycles; ++i) {
         try {
-          cortext->Consolidate();
+          cortext->Consolidate(GetConsolidationMode(cfg));
           stats.consolidation_runs++;
         } catch (const std::exception &e) {
           stats.consolidation_failures++;
@@ -1553,6 +1810,16 @@ int main(int argc, char **argv) {
     stats.consolidation_label_created =
         std::max(0LL, stats.consolidation_final_label
                            - stats.consolidation_baseline_label);
+  }
+  if (ensure_stats_store()) {
+    const auto assoc_stats = GetAssociationStats(stats_store, "reinforces");
+    stats.reinforcement_edge_count = assoc_stats.count;
+    stats.reinforcement_weight_mean = assoc_stats.weight_mean;
+    const auto mem_stats = GetMemoryStats(stats_store, "LONG_TERM");
+    stats.memory_long_term_count = mem_stats.count;
+    stats.memory_strength_mean = mem_stats.strength_mean;
+    stats.memory_used_count_mean = mem_stats.used_count_mean;
+    stats.memory_retrieved_count_mean = mem_stats.retrieved_count_mean;
   }
 
   const double avg_signals_per_write =
@@ -1766,10 +2033,25 @@ int main(int argc, char **argv) {
       Summarize(stats.interrupt_gate_retrieval_thresh_values);
   const auto interrupt_gate_boundary_mult_summary =
       Summarize(stats.interrupt_gate_boundary_mult_eff_values);
+  const auto boundary_score_summary = Summarize(stats.boundary_score_values);
   const auto retrieval_emotion_bonus_summary =
       Summarize(stats.retrieval_emotion_bonus_values);
   const auto interrupt_retrieval_emotion_bonus_summary =
       Summarize(stats.interrupt_retrieval_emotion_bonus_values);
+  const auto encode_ms_summary = Summarize(stats.encode_ms_values);
+  const auto process_ms_summary = Summarize(stats.process_ms_values);
+  const auto hydrate_ms_summary = Summarize(stats.hydrate_ms_values);
+  const auto total_ms_summary = Summarize(stats.total_ms_values);
+  std::vector<std::pair<std::string, double>> op_time_means;
+  op_time_means.reserve(stats.operation_time_sum.size());
+  for (const auto &kv : stats.operation_time_sum) {
+    const int count = stats.operation_time_count[kv.first];
+    if (count > 0) {
+      op_time_means.emplace_back(kv.first, kv.second / static_cast<double>(count));
+    }
+  }
+  std::sort(op_time_means.begin(), op_time_means.end(),
+            [](const auto &a, const auto &b) { return a.second > b.second; });
   const double interrupt_semantic_delta =
       (interrupt_semantic_summary.count > 0
        && non_interrupt_semantic_summary.count > 0)
@@ -1781,11 +2063,26 @@ int main(int argc, char **argv) {
           ? (interrupt_context_semantic_summary.mean
              - non_interrupt_context_semantic_summary.mean)
           : 0.0;
+  const double boundary_at_rate =
+      stats.turns == 0 ? 0.0
+                       : static_cast<double>(stats.boundary_at_count)
+                             / static_cast<double>(stats.turns);
+  const double boundary_score_pass_rate =
+      stats.turns == 0 ? 0.0
+                       : static_cast<double>(stats.boundary_score_pass_count)
+                             / static_cast<double>(stats.turns);
+  const double interrupt_abort_rate =
+      stats.interrupt_turns == 0
+          ? 0.0
+          : static_cast<double>(stats.interrupt_abort_count)
+                / static_cast<double>(stats.interrupt_turns);
 
   std::cout << "\n=== Summary ===\n";
   std::cout << "conversations=" << stats.conversations << "\n";
   std::cout << "turns=" << stats.turns << "\n";
   std::cout << "writes=" << stats.writes << "\n";
+  std::cout << "reinforcement_mode=" << (cfg.reinforcement_enabled ? "on" : "off")
+            << "\n";
   if (cfg.run_consolidation) {
     std::cout << "consolidation_runs=" << stats.consolidation_runs << "\n";
     std::cout << "consolidation_failures=" << stats.consolidation_failures << "\n";
@@ -1807,9 +2104,21 @@ int main(int argc, char **argv) {
     std::cout << "consolidation_relations_seen="
               << cons_relations_seen << "\n";
   }
+  std::cout << "reinforcement_edge_count=" << stats.reinforcement_edge_count << "\n";
+  std::cout << "reinforcement_weight_mean=" << stats.reinforcement_weight_mean
+            << "\n";
+  std::cout << "memory_long_term_count=" << stats.memory_long_term_count << "\n";
+  std::cout << "memory_strength_mean=" << stats.memory_strength_mean << "\n";
+  std::cout << "memory_used_count_mean=" << stats.memory_used_count_mean << "\n";
+  std::cout << "memory_retrieved_count_mean=" << stats.memory_retrieved_count_mean
+            << "\n";
   std::cout << "avg_signals_per_write=" << avg_signals_per_write << "\n";
   std::cout << "wm_avg_slots=" << avg_wm_slots << "\n";
   std::cout << "wm_max_slots=" << stats.wm_max_slots << "\n";
+  std::cout << "perf_encode_ms_mean=" << encode_ms_summary.mean << "\n";
+  std::cout << "perf_process_ms_mean=" << process_ms_summary.mean << "\n";
+  std::cout << "perf_hydrate_ms_mean=" << hydrate_ms_summary.mean << "\n";
+  std::cout << "perf_total_ms_mean=" << total_ms_summary.mean << "\n";
   std::cout << "retrieval_turn_rate=" << retrieval_rate << "\n";
   std::cout << "retrieval_avg_candidates=" << avg_retrieval_count << "\n";
   std::cout << "retrieval_best_overlap=" << avg_retrieval_overlap << "\n";
@@ -1848,6 +2157,10 @@ int main(int argc, char **argv) {
             << "\n";
   std::cout << "interrupt_false_negative=" << stats.interrupt_semantic_false_negative
             << "\n";
+  std::cout << "interrupt_abort_count=" << stats.interrupt_abort_count << "\n";
+  std::cout << "interrupt_abort_rate=" << interrupt_abort_rate << "\n";
+  std::cout << "boundary_at_rate=" << boundary_at_rate << "\n";
+  std::cout << "boundary_score_pass_rate=" << boundary_score_pass_rate << "\n";
   std::cout << "interrupt_gate_fail_no_candidates="
             << stats.interrupt_gate_fail_no_candidates << "\n";
   std::cout << "interrupt_gate_fail_no_candidates_rate="
@@ -1880,6 +2193,15 @@ int main(int argc, char **argv) {
             << stats.interrupt_gate_fail_boundary_mu << "\n";
   std::cout << "interrupt_gate_fail_boundary_mu_rate="
             << interrupt_gate_fail_boundary_mu_rate << "\n";
+
+  if (!op_time_means.empty()) {
+    std::cout << "\n=== Operation Timings (mean ms) ===\n";
+    const size_t max_ops = std::min<size_t>(15, op_time_means.size());
+    for (size_t i = 0; i < max_ops; ++i) {
+      std::cout << "op_time_mean[" << op_time_means[i].first << "]="
+                << op_time_means[i].second << "\n";
+    }
+  }
 
   std::cout << "\n=== Distributions ===\n";
   std::cout << "novelty_mean=" << novelty_summary.mean
@@ -1971,6 +2293,12 @@ int main(int argc, char **argv) {
               << " p10=" << interrupt_gate_boundary_mult_summary.p10
               << " p50=" << interrupt_gate_boundary_mult_summary.p50
               << " p90=" << interrupt_gate_boundary_mult_summary.p90 << "\n";
+  }
+  if (boundary_score_summary.count > 0) {
+    std::cout << "boundary_score_mean=" << boundary_score_summary.mean
+              << " p10=" << boundary_score_summary.p10
+              << " p50=" << boundary_score_summary.p50
+              << " p90=" << boundary_score_summary.p90 << "\n";
   }
   std::cout << "retrieval_overlap_mean=" << retrieval_overlap_summary.mean
             << " p10=" << retrieval_overlap_summary.p10

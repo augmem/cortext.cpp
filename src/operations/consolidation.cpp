@@ -4,6 +4,7 @@
 #include "cortext/operations/constants.hpp"
 #include "cortext/operations/extraction.hpp"
 #include "cortext/core/utils.hpp"
+#include "cortext/consolidation_mode.hpp"
 #include "cortext/processor/operation_context.hpp"
 #include "cortext/telemetry/telemetry.hpp"
 #include <algorithm>
@@ -21,7 +22,7 @@ EvaluateConsolidation::Execute (OperationContext &context, Transaction &tx) cons
   auto &p_ctx = context.GetProcessorContext ();
   const uint64_t now_ts = context.GetSignal ().timestamp;
   const bool force_consolidation
-      = (context.GetSignal ().source_id == "cortext/consolidate");
+      = IsConsolidationSignal (context.GetSignal ().source_id);
 
   if (!force_consolidation)
     {
@@ -32,9 +33,10 @@ EvaluateConsolidation::Execute (OperationContext &context, Transaction &tx) cons
   p_ctx.last_consolidation_ts = now_ts;
   p_ctx.consolidation_count += 1;
   p_ctx.memories_since_consolidation = 0;
+  const auto mode = ParseConsolidationMode (context.GetSignal ().source_id);
   telemetry::LogDebug ("cortext.evaluate_consolidation", {
     telemetry::Attribute::Bool ("consolidation_start", true),
-    telemetry::Attribute::String ("mode", "forced")
+    telemetry::Attribute::String ("mode", ConsolidationModeLabel (mode))
   });
 }
 
@@ -43,6 +45,11 @@ EnqueueExtractionJobs::Execute (OperationContext &context, Transaction &tx) cons
 {
   (void)tx;
   if (!context.GetConsolidationShouldStart ())
+    {
+      return;
+    }
+  const auto mode = ParseConsolidationMode (context.GetSignal ().source_id);
+  if (mode == ConsolidationMode::Shallow)
     {
       return;
     }
@@ -102,7 +109,9 @@ ScoreConsolidation::Execute (OperationContext &context, Transaction &tx) const
   const uint64_t now_ts = context.GetSignal ().timestamp;
   (void)now_ts;
   const bool force_consolidation
-      = (context.GetSignal ().source_id == "cortext/consolidate");
+      = IsConsolidationSignal (context.GetSignal ().source_id);
+  const auto mode = ParseConsolidationMode (context.GetSignal ().source_id);
+  const bool deep_mode = (mode != ConsolidationMode::Shallow);
 
   // Floor derived from knobs (no magic numbers).
   const double floor_cutoff = core::PeripheryCutoff (T);
@@ -132,7 +141,9 @@ ScoreConsolidation::Execute (OperationContext &context, Transaction &tx) const
   // score = T*strength - F*redundancy + S*connectivity + T*stability
   // Uses unified memories table which contains per-memory state.
   const double tag_weight = core::Lerp (0.10, 0.25, S_eff);
-  auto rows = tx.Execute (
+  const std::string blob_filter
+      = deep_mode ? " AND m.blob_id IS NOT NULL " : " ";
+  const std::string query = std::string (
       "SELECT m.embedding_id, "
       "       ((?1 * COALESCE(m.strength, 1.0)) "
       "        - (?2 * COALESCE(m.redundancy, 0.0)) "
@@ -144,21 +155,23 @@ ScoreConsolidation::Execute (OperationContext &context, Transaction &tx) const
       "       e.embedding "
       "FROM memories m "
       "JOIN embeddings e ON m.embedding_id = e.embedding_id "
-      "WHERE m.kind IN ('LONG_TERM', 'ASSOCIATION') "
-      "  AND m.blob_id IS NOT NULL "
-      "  AND ((?1 * COALESCE(m.strength, 1.0)) "
-      "       - (?2 * COALESCE(m.redundancy, 0.0)) "
-      "       + (?3 * COALESCE(m.connectivity, 0.0)) "
-      "       + (?4 * COALESCE(m.stability, 0.0)) "
-      "       + (?5 * CASE WHEN m.tag_expires_at > ?6 "
-      "               THEN COALESCE(m.tag_strength, 0.0) ELSE 0.0 END)) < ?7 "
-      "ORDER BY computed_score ASC;",
+      "WHERE m.kind IN ('LONG_TERM', 'ASSOCIATION') ")
+      + blob_filter
+      + "  AND ((?1 * COALESCE(m.strength, 1.0)) "
+        "       - (?2 * COALESCE(m.redundancy, 0.0)) "
+        "       + (?3 * COALESCE(m.connectivity, 0.0)) "
+        "       + (?4 * COALESCE(m.stability, 0.0)) "
+        "       + (?5 * CASE WHEN m.tag_expires_at > ?6 "
+        "               THEN COALESCE(m.tag_strength, 0.0) ELSE 0.0 END)) < ?7 "
+        "ORDER BY computed_score ASC;";
+  auto rows = tx.Execute (
+      query,
       { T, F_eff, S_eff, T, tag_weight, static_cast<long long> (now_ts),
         floor_cutoff });
   if (rows.empty () && force_consolidation)
     {
       const int fallback_limit = std::max (core::WRet (T), 1);
-      rows = tx.Execute (
+      const std::string fallback_query = std::string (
           "SELECT m.embedding_id, "
           "       ((?1 * COALESCE(m.strength, 1.0)) "
           "        - (?2 * COALESCE(m.redundancy, 0.0)) "
@@ -170,9 +183,11 @@ ScoreConsolidation::Execute (OperationContext &context, Transaction &tx) const
           "       e.embedding "
           "FROM memories m "
           "JOIN embeddings e ON m.embedding_id = e.embedding_id "
-          "WHERE m.kind IN ('LONG_TERM', 'ASSOCIATION') "
-          "  AND m.blob_id IS NOT NULL "
-          "ORDER BY computed_score ASC LIMIT ?7;",
+          "WHERE m.kind IN ('LONG_TERM', 'ASSOCIATION') ")
+          + blob_filter
+          + "ORDER BY computed_score ASC LIMIT ?7;";
+      rows = tx.Execute (
+          fallback_query,
           { T, F_eff, S_eff, T, tag_weight, static_cast<long long> (now_ts),
             fallback_limit });
     }

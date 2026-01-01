@@ -192,6 +192,8 @@ private:
   bool in_transaction_;
   std::vector<SQLiteTransaction *> transaction_stack_;
 
+  bool IsDbInTransaction () const;
+
   // Execute a query directly on the connection.
   std::vector<std::map<std::string, std::any> >
   ExecuteDirect (const std::string &query,

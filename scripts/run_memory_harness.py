@@ -96,12 +96,16 @@ def run_case(case: dict, args: argparse.Namespace, out_root: Path, summary_rows:
         "--no-cadence",
         "--semantic",
     ]
+    if args.label_bank:
+        cmd.append(f"--label-bank={args.label_bank}")
     if case.get("reuse", True):
         cmd.append("--reuse")
     if case.get("interleave", 1) > 1:
         cmd.append(f"--interleave={case['interleave']}")
     if case.get("affect_mode"):
         cmd.append(f"--affect-mode={case['affect_mode']}")
+    if case.get("reinforcement_mode"):
+        cmd.append(f"--reinforcement-mode={case['reinforcement_mode']}")
     if args.consolidate_cycles > 0:
         cmd.append("--consolidate")
         cmd.append(f"--consolidate-cycles={args.consolidate_cycles}")
@@ -112,9 +116,20 @@ def run_case(case: dict, args: argparse.Namespace, out_root: Path, summary_rows:
     write_status(run_dir, "starting", {"cmd": cmd})
     start_time = time.time()
     returncode = 1
+    env = os.environ.copy()
+    if sys.platform == "darwin":
+        litert_lib = (Path("build") / "third_party" / "litert-lm-install" / "lib").resolve()
+        if litert_lib.exists():
+            dyld_path = env.get("DYLD_LIBRARY_PATH", "")
+            if str(litert_lib) not in dyld_path.split(":"):
+                env["DYLD_LIBRARY_PATH"] = (
+                    f"{litert_lib}:{dyld_path}" if dyld_path else str(litert_lib)
+                )
     try:
         with log_path.open("w", encoding="utf-8") as log_file:
-            proc = subprocess.Popen(cmd, stdout=log_file, stderr=subprocess.STDOUT)
+            proc = subprocess.Popen(
+                cmd, stdout=log_file, stderr=subprocess.STDOUT, env=env
+            )
             write_status(run_dir, "running", {"pid": proc.pid})
             last_heartbeat = time.time()
             while True:
@@ -144,6 +159,7 @@ def run_case(case: dict, args: argparse.Namespace, out_root: Path, summary_rows:
     row = {
         "name": case["name"],
         "affect_mode": case.get("affect_mode", "all"),
+        "reinforcement_mode": case.get("reinforcement_mode", "on"),
         "focus": case["focus"],
         "sensitivity": case["sensitivity"],
         "stability": case["stability"],
@@ -161,6 +177,12 @@ def run_case(case: dict, args: argparse.Namespace, out_root: Path, summary_rows:
         "consolidation_extraction_results": metrics.get("consolidation_extraction_results", "0"),
         "consolidation_labels_seen": metrics.get("consolidation_labels_seen", "0"),
         "consolidation_relations_seen": metrics.get("consolidation_relations_seen", "0"),
+        "reinforcement_edge_count": metrics.get("reinforcement_edge_count", "0"),
+        "reinforcement_weight_mean": metrics.get("reinforcement_weight_mean", "0"),
+        "memory_long_term_count": metrics.get("memory_long_term_count", "0"),
+        "memory_strength_mean": metrics.get("memory_strength_mean", "0"),
+        "memory_used_count_mean": metrics.get("memory_used_count_mean", "0"),
+        "memory_retrieved_count_mean": metrics.get("memory_retrieved_count_mean", "0"),
         "returncode": str(returncode),
         "duration_s": f"{duration_s:.2f}",
         "retrieval_turn_rate": metrics.get("retrieval_turn_rate", "0"),
@@ -254,6 +276,7 @@ def main() -> int:
     parser.add_argument("--binary", default="build/examples/topical_chat_analysis/cortext_topical_chat_analysis")
     parser.add_argument("--data", default="data/topical_chat/valid_freq.jsonl")
     parser.add_argument("--models", default="models")
+    parser.add_argument("--label-bank", default="")
     parser.add_argument("--out", default="")
     parser.add_argument("--max-conversations", type=int, default=4)
     parser.add_argument("--max-turns", type=int, default=200)
@@ -262,6 +285,7 @@ def main() -> int:
     parser.add_argument("--multi-total", type=int, default=800)
     parser.add_argument("--consolidate-cycles", type=int, default=2)
     parser.add_argument("--affect-mode", default="all")
+    parser.add_argument("--reinforcement-mode", default="on")
     parser.add_argument("--case-max-conversations", type=int, default=0)
     parser.add_argument("--case-max-turns", type=int, default=0)
     parser.add_argument("--case-max-total", type=int, default=0)
@@ -292,6 +316,7 @@ def main() -> int:
         "interleave": 1,
         "reuse": True,
         "affect_mode": args.affect_mode,
+        "reinforcement_mode": args.reinforcement_mode,
     }
     if not args.no_baseline:
         run_case(base_case, args, out_root, summary_rows)

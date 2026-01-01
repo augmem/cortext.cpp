@@ -210,7 +210,7 @@ WriteNeighborUpdates (Transaction &tx, long long embedding_id,
   // Update lability_state and lability_ts in memories table (v2: merged from
   // memory_feedback)
   tx.Execute ("UPDATE memories "
-              "SET lability_state = ?, lability_ts = ? "
+              "SET lability_state = COALESCE(?, 0.0), lability_ts = ? "
               "WHERE embedding_id = ?",
               { lability, timestamp, embedding_id });
 
@@ -350,7 +350,7 @@ ApplyReconsolidation::Execute (OperationContext &context, Transaction &tx) const
       // v2: Update lability_state, original_centroid, and lability_ts in
       // memories table (merged from memory_feedback)
       tx.Execute ("UPDATE memories "
-                  "SET lability_state = ?, "
+                  "SET lability_state = COALESCE(?, 0.0), "
                   "    original_centroid = COALESCE(original_centroid, ?), "
                   "    lability_ts = ? "
                   "WHERE embedding_id = ?",

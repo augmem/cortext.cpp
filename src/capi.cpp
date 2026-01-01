@@ -148,6 +148,38 @@ extern "C"
   }
 
   int
+  cortext_consolidate_mode (cortext_handle h, int mode)
+  {
+    auto *p = cast_handle (h);
+    if (!p)
+      {
+        return 1;
+      }
+    try
+      {
+        auto m = cortext::ConsolidationMode::Both;
+        if (mode == CORTEXT_CONSOLIDATE_SHALLOW)
+          {
+            m = cortext::ConsolidationMode::Shallow;
+          }
+        else if (mode == CORTEXT_CONSOLIDATE_DEEP)
+          {
+            m = cortext::ConsolidationMode::Deep;
+          }
+        else if (mode == CORTEXT_CONSOLIDATE_BOTH)
+          {
+            m = cortext::ConsolidationMode::Both;
+          }
+        (void)p->Consolidate (m);
+        return 0;
+      }
+    catch (...)
+      {
+        return 2;
+      }
+  }
+
+  int
   cortext_flush (cortext_handle h)
   {
     auto *p = cast_handle (h);

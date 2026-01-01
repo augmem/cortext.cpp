@@ -51,6 +51,7 @@ UpdateAccumulator::Execute (OperationContext &context,
       = (p_ctx.episode_start_ts > 0)
             ? static_cast<int64_t> (p_ctx.episode_start_ts)
             : 0;
+  context.SetInterruptAborted (false);
 
   // Use drift step for accumulation (Section 4.4.2)
   const double drift_step = context.GetAccumulatorDriftStep ();
@@ -112,6 +113,32 @@ UpdateAccumulator::Execute (OperationContext &context,
 
   // Existing source - accumulate
   auto &acc = it->second;
+
+  if (acc.pending_interrupt_abort)
+    {
+      bool resume = true;
+      if (acc.mu_acc.size () > 0 && signal.embedding.size () == acc.mu_acc.size ())
+        {
+          const double cos = core::CosineSimilarity (signal.embedding, acc.mu_acc);
+          const double novelty
+              = core::Clamp ((1.0 - cos) * 0.5, 0.0, 1.0);
+          const double tau_resume
+              = core::TauNovelty (config.focus, config.sensitivity, config.stability);
+          resume = (novelty < tau_resume);
+        }
+
+      if (!resume)
+        {
+          acc.ResetForNextUnit (signal.timestamp);
+          context.SetInterruptAborted (true);
+          telemetry::AddCounter ("cortext.accumulator.interrupt_abort_total", 1);
+        }
+      else
+        {
+          telemetry::AddCounter ("cortext.accumulator.interrupt_resume_total", 1);
+        }
+      acc.pending_interrupt_abort = false;
+    }
 
   // Check if this is first signal after reset (n_signals == 0 means post-reset)
   if (acc.n_signals == 0)

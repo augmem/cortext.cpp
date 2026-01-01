@@ -74,7 +74,9 @@
 
 #include "cortext/operations/consolidation_cluster.hpp"
 #include "cortext/operations/consolidation_gate.hpp"
+#include "cortext/operations/consolidation_shallow.hpp"
 #include "cortext/operations/consolidation_summarize.hpp"
+#include "cortext/operations/label_bank.hpp"
 #include "cortext/operations/process_extraction_results.hpp"
 // Phase 4: Knowledge Graph Enhancement
 #include "cortext/operations/emotion_cascade.hpp"
@@ -105,6 +107,14 @@ ToEigen (const std::vector<float> &v)
 {
   return Eigen::Map<const Eigen::VectorXf> (v.data (),
                                             static_cast<int> (v.size ()));
+}
+
+inline double
+ToMillis (std::chrono::steady_clock::duration duration)
+{
+  return std::chrono::duration_cast<std::chrono::duration<double, std::milli>> (
+             duration)
+      .count ();
 }
 
 
@@ -221,7 +231,7 @@ HydrateMemory (Store *store, long long id, Cortext::Context::Memory &m)
           "  (SELECT s.mime FROM signals s WHERE s.memory_id = m.memory_id "
           "   ORDER BY s.serial_position LIMIT 1) AS signal_mime "
           "FROM memories m "
-          "WHERE m.embedding_id = ?",
+          "WHERE m.memory_id = ?",
           { id });
 
       if (!rows.empty ())
@@ -320,7 +330,7 @@ HydrateMemory (Store *store, long long id, Cortext::Context::Memory &m)
       telemetry::LogWarn (
           "Failed to hydrate memory",
           { telemetry::Attribute::String ("component", "cortext"),
-            telemetry::Attribute::Int64 ("embedding_id", id),
+            telemetry::Attribute::Int64 ("memory_id", id),
             telemetry::Attribute::String ("error", e.what ()) });
     }
   catch (...)
@@ -328,7 +338,7 @@ HydrateMemory (Store *store, long long id, Cortext::Context::Memory &m)
       telemetry::LogWarn (
           "Failed to hydrate memory (unknown error)",
           { telemetry::Attribute::String ("component", "cortext"),
-            telemetry::Attribute::Int64 ("embedding_id", id) });
+            telemetry::Attribute::Int64 ("memory_id", id) });
     }
 }
 
@@ -532,6 +542,7 @@ struct Cortext::Impl
     using cortext::operations::ApplyStabilityFeedback;
     using cortext::operations::BuildGraphFromConsolidation;
     using cortext::operations::ComputeMetrics;
+    using cortext::operations::SeedLabelBank;
 
     using cortext::operations::MetacognitiveMonitoring;
     using cortext::operations::UpdateFocus;
@@ -560,14 +571,15 @@ struct Cortext::Impl
     using cortext::operations::CheckSpikeBypass;
     using cortext::operations::ComputeWriteGate;
     using cortext::operations::ResetAccumulatorAfterFlush;
+    using cortext::operations::ResetAccumulatorOnInterrupt;
     using cortext::operations::ApplySynapticTagging;
     // Phase 4: Knowledge Graph Enhancement
     using cortext::operations::PropagateEmotionalCascade;
 
     pipeline_root = std::make_unique<OperationSet> (
 
-
         std::make_unique<InitializeEmbeddedCentroids> (),
+        std::make_unique<SeedLabelBank> (),
 
         std::make_unique<InitializeFocusPriors> (),
         std::make_unique<InitializeSensitivityPriors> (),
@@ -607,7 +619,6 @@ struct Cortext::Impl
         std::make_unique<CheckStreamingPacing> (),
         std::make_unique<GraphAugmentedRetrieveCandidates> (),
         std::make_unique<UpdateRateState> (),
-        std::make_unique<ResetAccumulatorAfterFlush> (),
 
         std::make_unique<ComputeMniGateDecision> (),
 
@@ -629,12 +640,15 @@ struct Cortext::Impl
         std::make_unique<UpdateMemoryStrength> (),
         std::make_unique<ApplyEmotionalConsolidation> (),
         std::make_unique<WorkingMemory> (),
+        std::make_unique<ResetAccumulatorAfterFlush> (),
+        std::make_unique<ResetAccumulatorOnInterrupt> (),
         std::make_unique<MetacognitiveMonitoring> (),
 
         std::make_unique<EvaluateConsolidation> (),
         std::make_unique<ConsolidationGate> (),
         // Phase 3: Consolidation pipeline
         std::make_unique<ConsolidationCluster> (),
+        std::make_unique<operations::ConsolidationShallow> (),
         std::make_unique<ConsolidationSummarize> (),
         std::make_unique<EnqueueExtractionJobs> (),
         std::make_unique<ProcessExtractionResults> (),
@@ -647,6 +661,10 @@ struct Cortext::Impl
     pcfg.stability = cfg.stability;
     pcfg.affect_interrupt = cfg.affect_interrupt;
     pcfg.affect_retrieval = cfg.affect_retrieval;
+    pcfg.reinforcement_enabled = cfg.reinforcement_enabled;
+    pcfg.procedural_enabled = cfg.procedural_enabled;
+    pcfg.sequential_edges_enabled = cfg.sequential_edges_enabled;
+    pcfg.label_bank_path = cfg.label_bank_path;
     pcfg.encoder = encoder.get ();
 
 #if !defined(CORTEXT_DISABLE_LITERT)
@@ -674,6 +692,8 @@ struct Cortext::Impl
   {
     Cortext::Context result;
     result.should_interrupt = out.interrupt_allowed;
+    result.interrupt_aborted = out.interrupt_aborted;
+    result.at_boundary = out.at_boundary;
     result.consolidation_recommended = out.consolidation_recommended;
     result.consolidation_required = out.consolidation_required;
     result.interrupt_gate_has_candidates = out.interrupt_gate_has_candidates;
@@ -690,6 +710,7 @@ struct Cortext::Impl
     result.interrupt_gate_boundary_mult_eff =
         out.interrupt_gate_boundary_mult_eff;
     result.interrupt_gate_affect_drive = out.interrupt_gate_affect_drive;
+    result.boundary_score = out.boundary_score;
     
     // Populate output metrics
     result.output.composite_score = out.composite_score;
@@ -700,6 +721,7 @@ struct Cortext::Impl
     result.output.emotion_intensity = out.emotion_intensity;
     result.output.valence = out.valence;
     result.output.arousal = out.arousal;
+    result.output.operation_ms = out.operation_ms;
     
     // Convert metrics map (enum -> int)
     for (const auto& [metric_enum, value] : out.metrics) {
@@ -718,11 +740,43 @@ struct Cortext::Impl
     HydrateWorkingMemoryFromDB (store.get (), result.working_memory);
 
     // Hydrate retrieved memory (long-term retrieval results)
-    for (const long long id : out.candidate_memory_ids)
+    auto lookup_memory_id = [&](long long embedding_id) -> long long {
+      long long memory_id = 0;
+      auto rows = store->Execute (
+          "SELECT memory_id FROM memories WHERE embedding_id = ?",
+          { embedding_id });
+      if (!rows.empty () && rows[0].count ("memory_id") == 1)
+        {
+          memory_id = cortext::store::AnyToLongLong (rows[0].at ("memory_id"))
+                          .value_or (0);
+        }
+      if (memory_id == 0)
+        {
+          auto sig_rows = store->Execute (
+              "SELECT memory_id FROM signals WHERE embedding_id = ? LIMIT 1",
+              { embedding_id });
+          if (!sig_rows.empty () && sig_rows[0].count ("memory_id") == 1)
+            {
+              memory_id = cortext::store::AnyToLongLong (
+                              sig_rows[0].at ("memory_id"))
+                              .value_or (0);
+            }
+        }
+      return memory_id;
+    };
+
+    std::unordered_set<long long> seen_memory_ids;
+    seen_memory_ids.reserve (out.candidate_memory_ids.size ());
+    for (const long long embedding_id : out.candidate_memory_ids)
       {
+        const long long memory_id = lookup_memory_id (embedding_id);
+        if (memory_id <= 0 || !seen_memory_ids.insert (memory_id).second)
+          {
+            continue;
+          }
         Cortext::Context::Memory m;
-        m.id = id;
-        HydrateMemory (store.get (), id, m);
+        m.id = memory_id;
+        HydrateMemory (store.get (), memory_id, m);
         result.retrieved_memory.push_back (std::move (m));
       }
     return result;
@@ -752,12 +806,15 @@ Cortext::ProcessText (const std::string &text, const std::string &source_id)
       throw std::runtime_error ("Cortext not initialized");
     }
   telemetry::ScopedSpan span ("cortext.api.process_text");
+  const auto total_start = std::chrono::steady_clock::now ();
   std::vector<float> v;
   telemetry::ScopedSpan encode_span ("cortext.encode");
   impl_->encoder->EncodeText (text, v);
   encode_span.SetStatusOk ();
+  const auto encode_end = std::chrono::steady_clock::now ();
 
   // Build signal with payload for MemoryStorage
+  const auto process_start = std::chrono::steady_clock::now ();
   cortext::Signal s;
   s.embedding = ToEigen (v);
   s.timestamp = NowMillis ();
@@ -767,14 +824,66 @@ Cortext::ProcessText (const std::string &text, const std::string &source_id)
   s.mimetype = "text/plain";
 
   auto out = impl_->processor->Process (s);
+  const auto process_end = std::chrono::steady_clock::now ();
   span.SetAttribute ("cortext.candidate_memory_count",
                      static_cast<std::int64_t> (out.candidate_memory_ids.size ()));
   span.SetAttribute ("cortext.used_memory_count",
                      static_cast<std::int64_t> (out.used_memory_ids.size ()));
   span.SetStatusOk ();
   telemetry::ScopedSpan hydrate_span ("cortext.hydrate");
+  const auto hydrate_start = std::chrono::steady_clock::now ();
   Cortext::Context result = impl_->HydrateContext (out);
+  const auto hydrate_end = std::chrono::steady_clock::now ();
   hydrate_span.SetStatusOk ();
+  result.encode_ms = ToMillis (encode_end - total_start);
+  result.process_ms = ToMillis (process_end - process_start);
+  result.hydrate_ms = ToMillis (hydrate_end - hydrate_start);
+  result.total_ms = ToMillis (hydrate_end - total_start);
+  return result;
+}
+
+Cortext::Context
+Cortext::ProcessTextAt (const std::string &text, const std::string &source_id,
+                        std::uint64_t timestamp)
+{
+  if (!impl_)
+    {
+      throw std::runtime_error ("Cortext not initialized");
+    }
+  telemetry::ScopedSpan span ("cortext.api.process_text");
+  const auto total_start = std::chrono::steady_clock::now ();
+  std::vector<float> v;
+  telemetry::ScopedSpan encode_span ("cortext.encode");
+  impl_->encoder->EncodeText (text, v);
+  encode_span.SetStatusOk ();
+  const auto encode_end = std::chrono::steady_clock::now ();
+
+  // Build signal with payload for MemoryStorage
+  const auto process_start = std::chrono::steady_clock::now ();
+  cortext::Signal s;
+  s.embedding = ToEigen (v);
+  s.timestamp = timestamp;
+  s.source_id = source_id;
+  s.payload = std::vector<unsigned char> (text.begin (), text.end ());
+  s.modality = "text";
+  s.mimetype = "text/plain";
+
+  auto out = impl_->processor->Process (s);
+  const auto process_end = std::chrono::steady_clock::now ();
+  span.SetAttribute ("cortext.candidate_memory_count",
+                     static_cast<std::int64_t> (out.candidate_memory_ids.size ()));
+  span.SetAttribute ("cortext.used_memory_count",
+                     static_cast<std::int64_t> (out.used_memory_ids.size ()));
+  span.SetStatusOk ();
+  telemetry::ScopedSpan hydrate_span ("cortext.hydrate");
+  const auto hydrate_start = std::chrono::steady_clock::now ();
+  Cortext::Context result = impl_->HydrateContext (out);
+  const auto hydrate_end = std::chrono::steady_clock::now ();
+  hydrate_span.SetStatusOk ();
+  result.encode_ms = ToMillis (encode_end - total_start);
+  result.process_ms = ToMillis (process_end - process_start);
+  result.hydrate_ms = ToMillis (hydrate_end - hydrate_start);
+  result.total_ms = ToMillis (hydrate_end - total_start);
   return result;
 }
 
@@ -787,12 +896,15 @@ Cortext::ProcessAudio (const float *pcm, std::size_t num_samples,
       throw std::runtime_error ("Cortext not initialized");
     }
   telemetry::ScopedSpan span ("cortext.api.process_audio");
+  const auto total_start = std::chrono::steady_clock::now ();
   std::vector<float> v;
   telemetry::ScopedSpan encode_span ("cortext.encode");
   impl_->encoder->EncodeAudio (pcm, num_samples, v);
   encode_span.SetStatusOk ();
+  const auto encode_end = std::chrono::steady_clock::now ();
 
   // Build signal with payload for MemoryStorage
+  const auto process_start = std::chrono::steady_clock::now ();
   cortext::Signal s;
   s.embedding = ToEigen (v);
   s.timestamp = NowMillis ();
@@ -807,14 +919,21 @@ Cortext::ProcessAudio (const float *pcm, std::size_t num_samples,
   s.num_samples = num_samples;
 
   auto out = impl_->processor->Process (s);
+  const auto process_end = std::chrono::steady_clock::now ();
   span.SetAttribute ("cortext.candidate_memory_count",
                      static_cast<std::int64_t> (out.candidate_memory_ids.size ()));
   span.SetAttribute ("cortext.used_memory_count",
                      static_cast<std::int64_t> (out.used_memory_ids.size ()));
   span.SetStatusOk ();
   telemetry::ScopedSpan hydrate_span ("cortext.hydrate");
+  const auto hydrate_start = std::chrono::steady_clock::now ();
   Cortext::Context result = impl_->HydrateContext (out);
+  const auto hydrate_end = std::chrono::steady_clock::now ();
   hydrate_span.SetStatusOk ();
+  result.encode_ms = ToMillis (encode_end - total_start);
+  result.process_ms = ToMillis (process_end - process_start);
+  result.hydrate_ms = ToMillis (hydrate_end - hydrate_start);
+  result.total_ms = ToMillis (hydrate_end - total_start);
   return result;
 }
 
@@ -827,12 +946,15 @@ Cortext::ProcessImage (const std::uint8_t *data, int width, int height,
       throw std::runtime_error ("Cortext not initialized");
     }
   telemetry::ScopedSpan span ("cortext.api.process_image");
+  const auto total_start = std::chrono::steady_clock::now ();
   std::vector<float> v;
   telemetry::ScopedSpan encode_span ("cortext.encode");
   impl_->encoder->EncodeImage (data, width, height, channels, v);
   encode_span.SetStatusOk ();
+  const auto encode_end = std::chrono::steady_clock::now ();
 
   // Build signal with payload for MemoryStorage
+  const auto process_start = std::chrono::steady_clock::now ();
   cortext::Signal s;
   s.embedding = ToEigen (v);
   s.timestamp = NowMillis ();
@@ -850,41 +972,59 @@ Cortext::ProcessImage (const std::uint8_t *data, int width, int height,
   s.channels = channels;
 
   auto out = impl_->processor->Process (s);
+  const auto process_end = std::chrono::steady_clock::now ();
   span.SetAttribute ("cortext.candidate_memory_count",
                      static_cast<std::int64_t> (out.candidate_memory_ids.size ()));
   span.SetAttribute ("cortext.used_memory_count",
                      static_cast<std::int64_t> (out.used_memory_ids.size ()));
   span.SetStatusOk ();
   telemetry::ScopedSpan hydrate_span ("cortext.hydrate");
+  const auto hydrate_start = std::chrono::steady_clock::now ();
   Cortext::Context result = impl_->HydrateContext (out);
+  const auto hydrate_end = std::chrono::steady_clock::now ();
   hydrate_span.SetStatusOk ();
+  result.encode_ms = ToMillis (encode_end - total_start);
+  result.process_ms = ToMillis (process_end - process_start);
+  result.hydrate_ms = ToMillis (hydrate_end - hydrate_start);
+  result.total_ms = ToMillis (hydrate_end - total_start);
   return result;
 }
 
 Cortext::Context
-Cortext::Consolidate ()
+Cortext::Consolidate (ConsolidationMode mode)
 {
   if (!impl_)
     {
       throw std::runtime_error ("Cortext not initialized");
     }
   telemetry::ScopedSpan span ("cortext.api.consolidate");
+  const auto total_start = std::chrono::steady_clock::now ();
   // Drive the pipeline to allow EvaluateConsolidation to emit events
   // and ConsolidationGate to run scoring/jobs when start is signaled.
   std::vector<float> v;
   telemetry::ScopedSpan encode_span ("cortext.encode");
   impl_->encoder->EncodeText (std::string (), v);
   encode_span.SetStatusOk ();
+  const auto encode_end = std::chrono::steady_clock::now ();
+  const std::string source_id = ConsolidationSourceId (mode);
+  const auto process_start = std::chrono::steady_clock::now ();
   auto out = impl_->ProcessEmbedding (ToEigen (v), NowMillis (),
-                                      "cortext/consolidate");
+                                      source_id);
+  const auto process_end = std::chrono::steady_clock::now ();
   span.SetAttribute ("cortext.candidate_memory_count",
                      static_cast<std::int64_t> (out.candidate_memory_ids.size ()));
   span.SetAttribute ("cortext.used_memory_count",
                      static_cast<std::int64_t> (out.used_memory_ids.size ()));
   span.SetStatusOk ();
   telemetry::ScopedSpan hydrate_span ("cortext.hydrate");
+  const auto hydrate_start = std::chrono::steady_clock::now ();
   Cortext::Context result = impl_->HydrateContext (out);
+  const auto hydrate_end = std::chrono::steady_clock::now ();
   hydrate_span.SetStatusOk ();
+  result.encode_ms = ToMillis (encode_end - total_start);
+  result.process_ms = ToMillis (process_end - process_start);
+  result.hydrate_ms = ToMillis (hydrate_end - hydrate_start);
+  result.total_ms = ToMillis (hydrate_end - total_start);
   return result;
 }
 

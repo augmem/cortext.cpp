@@ -11,13 +11,31 @@ Note: Summarization output length is enforced by streaming decode cancel at
 max_summary_words, not prompt instructions.
 Note: Consolidation is external-only; callers invoke `cortext.consolidate()`
 explicitly rather than scheduling it automatically.
+Note: Consolidation supports shallow (embedding-only) and deep (Gemma-backed)
+phases; shallow creates ASSOCIATION centroids without blobs and attaches
+existing LABEL nodes by embedding similarity.
+Note: Extraction uses constrained decoding and currently runs on CPU to ensure
+host-memory logits for label/relation parsing; this does not change the schema.
+Note: Label embeddings are cached by normalized label key; cache hits reuse
+stored embeddings rather than re-encoding (schema unchanged).
+Note: Optional label-bank seeding inserts LABEL memories from a precomputed
+Hugging Face label dataset (metadata.json + labels.jsonl) at initialization,
+using ImageBind embeddings and a knob-derived baseline salience; this
+pre-seeds shallow consolidation without touching the schema.
 Note: Interrupt gating uses a sensitivity-relaxed retrieval threshold
 retrieval_thresh_interrupt(F,S) = retrieval_thresh(F) × (1 − 0.12S).
 Note: Non-boundary MU gating is relaxed by Sensitivity:
 boundary_mult_eff = boundary_mult × (1 − 0.20S).
+Note: Allowed interrupts outside flush/spike events mark a pending abort; the
+next signal either resumes (low novelty) or drops the partial unit. This is an
+operational behavior only and does not alter the schema.
 Note: Retrieval ranking adds an emotion bonus using memories.emotional_intensity
 and memories.s_arousal_avg, scaled by an affect_drive computed from current
 arousal/emotion/salience.
+Note: Strength-based eviction only applies to LONG_TERM memories; ASSOCIATION
+and LABEL nodes are retained unless explicitly pruned.
+Note: Retrieval seeding includes a summary/label kNN pass and graph expansion
+follows derived_from/has_label edges to surface consolidated nodes.
 
 ```{mermaid}
 erDiagram

@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "cortext/export.hpp"
+#include "cortext/consolidation_mode.hpp"
 
 namespace cortext
 {
@@ -34,6 +35,7 @@ public:
     double valence = 0.5;
     double arousal = 0.0;
     std::unordered_map<int, double> metrics; // Metric enum cast to int -> value
+    std::unordered_map<std::string, double> operation_ms;
     std::optional<long long> stored_embedding_id;  // Set if stored to memory
   };
   
@@ -72,6 +74,8 @@ public:
     std::vector<Memory> working_memory;    ///< Active WM slots (conversation context)
     std::vector<Memory> retrieved_memory;  ///< Long-term retrieval results (injected context)
     bool should_interrupt = false;
+    bool interrupt_aborted = false;
+    bool at_boundary = false;
     bool consolidation_recommended = false;
     bool consolidation_required = false;
     bool interrupt_gate_has_candidates = false;
@@ -86,7 +90,12 @@ public:
     double interrupt_gate_retrieval_thresh = 0.0;
     double interrupt_gate_boundary_mult_eff = 0.0;
     double interrupt_gate_affect_drive = 0.0;
+    std::optional<double> boundary_score;
     ProcessorOutput output;
+    double encode_ms = 0.0;
+    double process_ms = 0.0;
+    double hydrate_ms = 0.0;
+    double total_ms = 0.0;
   };
 
   /// @brief Three-knob configuration preserved across the system.
@@ -97,6 +106,10 @@ public:
     double stability = 0.5;
     bool affect_interrupt = true;
     bool affect_retrieval = true;
+    bool reinforcement_enabled = true;
+    bool procedural_enabled = true;
+    bool sequential_edges_enabled = true;
+    std::string label_bank_path;
   };
 
   /// @brief Factory to create a Cortext instance.
@@ -113,6 +126,15 @@ public:
   /// @param source_id Identifier for the signal source (e.g., "chat/user").
   /// @return Context with retrieved memories and processing output.
   Context ProcessText (const std::string &text, const std::string &source_id);
+
+  /// @brief Process text input with an explicit timestamp (ms since epoch).
+  /// @param text The text content to process.
+  /// @param source_id Identifier for the signal source (e.g., "chat/user").
+  /// @param timestamp Milliseconds since Unix epoch (must be monotonic).
+  /// @return Context with retrieved memories and processing output.
+  Context ProcessTextAt (const std::string &text, const std::string &source_id,
+                         std::uint64_t timestamp);
+
 
   /// @brief Process audio PCM input.
   /// @param pcm Pointer to PCM float samples (16kHz mono expected).
@@ -133,7 +155,8 @@ public:
                         int channels, const std::string &source_id);
 
   /// @brief Attempt to trigger consolidation if conditions allow.
-  Context Consolidate ();
+  /// @param mode Shallow (embedding-only), deep (Gemma summary/labels), or both.
+  Context Consolidate (ConsolidationMode mode = ConsolidationMode::Both);
 
   /// @brief Flush/commit any pending episode writes.
   void Flush ();

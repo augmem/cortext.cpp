@@ -185,6 +185,28 @@ RetrievalDiversificationWeights (double F, double S, double T)
   return { w_rel_raw / sum, w_div_raw / sum };
 }
 
+// Small boost for consolidated association memories during retrieval ranking.
+inline double
+AssociationBoost (double F, double S, double T)
+{
+  const double f = FocusBias (F);
+  const double s = SensitivityBias (S);
+  const double t = Clamp (T, 0.0, 1.0);
+  // 0.015..0.06 scaled by Sensitivity; higher Focus reduces extra breadth.
+  return Lerp (0.015, 0.06, s) * Lerp (1.0, 0.7, f) * Lerp (1.0, 0.9, t);
+}
+
+// Baseline salience for seeded label-bank entries.
+inline double
+LabelBankSalience (double F, double S, double T)
+{
+  const double f = FocusBias (F);
+  const double s = SensitivityBias (S);
+  const double t = Clamp (T, 0.0, 1.0);
+  const double mix = 0.5 * f + 0.5 * s;
+  return Clamp (Lerp (0.35, 0.65, mix) * Lerp (1.0, 0.9, t), 0.0, 1.0);
+}
+
 inline int
 PriorMass (double T)
 {
@@ -1127,13 +1149,54 @@ BoundaryThreshold (double F, double S)
        * Lerp (1.1, 0.9, SensitivityBias (S));
 }
 
-// Section 4.4.3 - Maximum memory time (seconds)
+// Section 4.4.3 - Fallback boundary floor (timeout/capacity/pressure)
 inline double
-MaxMemoryTime (double T)
+BoundaryFallbackFloor (double F, double S, double T)
 {
-  // max_mem_time(T) = lerp(30, 120, T) seconds
-  // Higher stability = longer memories allowed
-  return Lerp (30.0, 120.0, Clamp (T, 0.0, 1.0));
+  const double base = Lerp (0.05, 0.15, SensitivityBias (S));
+  const double f_scale = Lerp (1.2, 0.8, FocusBias (F));
+  const double t_scale = Lerp (1.1, 0.9, Clamp (T, 0.0, 1.0));
+  return Clamp (base * f_scale * t_scale, 0.02, 0.25);
+}
+
+// Section 4.4.3 - Target boundary rate (calibration)
+inline double
+BoundaryTargetRate (double F, double S, double T)
+{
+  const double base = Lerp (0.12, 0.35, SensitivityBias (S));
+  const double f_scale = Lerp (1.10, 0.70, FocusBias (F));
+  const double t_scale = Lerp (1.00, 0.70, Clamp (T, 0.0, 1.0));
+  return Clamp (base * f_scale * t_scale, 0.05, 0.45);
+}
+
+// Section 4.4.3 - Boundary rate calibration gain
+inline double
+BoundaryRateGain (double S, double T)
+{
+  const double s_scale = Lerp (0.4, 1.0, SensitivityBias (S));
+  const double t_scale = Lerp (1.1, 0.8, Clamp (T, 0.0, 1.0));
+  return Clamp (s_scale * t_scale, 0.2, 1.2);
+}
+
+// Section 4.4.3 - Boundary rate EMA alpha
+inline double
+BoundaryRateAlpha (double S, double T)
+{
+  const double s_scale = Lerp (0.06, 0.16, SensitivityBias (S));
+  const double t_scale = Lerp (1.1, 0.8, Clamp (T, 0.0, 1.0));
+  return Clamp (s_scale * t_scale, 0.04, 0.2);
+}
+
+// Section 4.4.3 - Adaptive memory time (seconds) from recent gap cadence
+inline double
+AdaptiveMaxMemoryTime (double T, double gap_ref_s)
+{
+  const double t = Clamp (T, 0.0, 1.0);
+  const double scale = Lerp (2.5, 5.5, t);
+  const double min_time = Lerp (6.0, 20.0, t);
+  const double max_time = Lerp (60.0, 180.0, t);
+  const double cadence = std::max (gap_ref_s, 0.001);
+  return Clamp (scale * cadence, min_time, max_time);
 }
 
 // Section 4.4.3 - Maximum cumulative drift before flush
@@ -1149,11 +1212,11 @@ MaxMemoryDrift (double S)
 inline int
 MaxSignalsPerMemory (double F, double S, double T)
 {
-  const double base = Lerp (1.5, 4.5, Clamp (T, 0.0, 1.0));
-  const double f_scale = Lerp (1.00, 0.25, FocusBias (F));
-  const double s_scale = Lerp (1.00, 0.45, SensitivityBias (S));
+  const double base = Lerp (4.0, 12.0, Clamp (T, 0.0, 1.0));
+  const double f_scale = Lerp (1.00, 0.35, FocusBias (F));
+  const double s_scale = Lerp (1.00, 0.55, SensitivityBias (S));
   const int capped = static_cast<int> (std::round (base * f_scale * s_scale));
-  const int floor = static_cast<int> (std::round (Lerp (1.0, 3.0, Clamp (T, 0.0, 1.0))));
+  const int floor = static_cast<int> (std::round (Lerp (2.0, 3.0, Clamp (T, 0.0, 1.0))));
   return std::max (floor, capped);
 }
 

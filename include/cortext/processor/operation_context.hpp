@@ -9,6 +9,7 @@
 #include <array>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 #include <utility>
@@ -106,6 +107,29 @@ public:
     return store_;
   }
 
+  /// @brief Sets the current operation type (for error attribution).
+  void
+  SetCurrentOperationType (std::string_view op_type)
+  {
+    current_operation_type_.assign (op_type.data (), op_type.size ());
+  }
+
+  /// @brief Gets the current operation type.
+  const std::string &
+  GetCurrentOperationType () const
+  {
+    return current_operation_type_;
+  }
+
+  // ======================================================================
+  // Operation Timing API (per-operation latency per signal)
+  // ======================================================================
+  void AddOperationTiming (std::string_view op_type, double ms);
+  const std::unordered_map<std::string, double> &
+  GetOperationTimings () const
+  {
+    return operation_timings_ms_;
+  }
 
   // ======================================================================
   // Memory Usage Events API (Algorithms 14, 18 inputs)
@@ -243,6 +267,17 @@ public:
   GetInterruptAllowed () const
   {
     return interrupt_allowed_;
+  }
+
+  void
+  SetInterruptAborted (bool v)
+  {
+    interrupt_aborted_ = v;
+  }
+  bool
+  GetInterruptAborted () const
+  {
+    return interrupt_aborted_;
   }
 
   void
@@ -1100,6 +1135,8 @@ private:
   ProcessorContext &context_;
   const SignalProcessor::Config &config_;
   Store *store_ = nullptr;
+  std::string current_operation_type_ = "unknown";
+  std::unordered_map<std::string, double> operation_timings_ms_;
 
   // Typed scratch fields
   std::optional<double> composite_score_;
@@ -1166,6 +1203,7 @@ private:
   // Algorithm 27 fields
   bool at_boundary_ = false;
   bool interrupt_allowed_ = false;
+  bool interrupt_aborted_ = false;
   bool interrupt_gate_has_candidates_ = false;
   bool interrupt_gate_blocked_no_store_ = false;
   bool interrupt_gate_rel_pass_ = false;

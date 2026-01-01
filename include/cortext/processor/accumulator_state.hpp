@@ -47,6 +47,16 @@ struct AccumulatorState
   double coherence_prev = 0.0;  ///< Previous coherence value
   std::vector<Eigen::VectorXf> acc_signals_window;  ///< Coherence ring buffer
 
+  // Boundary calibration (local normalization within episode)
+  double boundary_surprisal_mean = 0.0;
+  double boundary_surprisal_var = 0.0;
+  double boundary_drift_spike_mean = 0.0;
+  double boundary_drift_spike_var = 0.0;
+  double boundary_coh_drop_mean = 0.0;
+  double boundary_coh_drop_var = 0.0;
+  double boundary_topic_shift_mean = 0.0;
+  double boundary_topic_shift_var = 0.0;
+
   // Emotional metadata (Section 6.1.1)
   double s_emotion_max = 0.0;   ///< Peak emotion intensity in memory
   double s_arousal_sum = 0.0;   ///< Sum of arousal values (for computing avg)
@@ -64,6 +74,7 @@ struct AccumulatorState
   double drift_accum = 0.0;         ///< Cumulative drift since last interrupt
   double drift_at_last_interrupt = 0.0;  ///< Snapshot for refractory delta
   double drift_acc_pacing = 0.0;    ///< Drift accumulator for pacing gate
+  bool pending_interrupt_abort = false;  ///< Pending interrupt-induced abort
 
   /**
    * @brief Reset accumulator for new memory accumulation
@@ -84,6 +95,14 @@ struct AccumulatorState
     last_signal_ts = timestamp;
     eta_acc = 0.0;
     coherence_prev = 0.0;
+    boundary_surprisal_mean = 0.0;
+    boundary_surprisal_var = 0.0;
+    boundary_drift_spike_mean = 0.0;
+    boundary_drift_spike_var = 0.0;
+    boundary_coh_drop_mean = 0.0;
+    boundary_coh_drop_var = 0.0;
+    boundary_topic_shift_mean = 0.0;
+    boundary_topic_shift_var = 0.0;
     // Reset emotional metadata
     s_emotion_max = 0.0;
     s_arousal_sum = 0.0;
@@ -93,6 +112,7 @@ struct AccumulatorState
     blob_ids.clear ();
     primary_modality.clear ();
     acc_signals_window.clear ();
+    pending_interrupt_abort = false;
     // Note: last_write_ts is preserved across accumulations
   }
 
@@ -113,12 +133,21 @@ struct AccumulatorState
     last_signal_ts = timestamp;
     eta_acc = 0.0;
     coherence_prev = 0.0;
+    boundary_surprisal_mean = 0.0;
+    boundary_surprisal_var = 0.0;
+    boundary_drift_spike_mean = 0.0;
+    boundary_drift_spike_var = 0.0;
+    boundary_coh_drop_mean = 0.0;
+    boundary_coh_drop_var = 0.0;
+    boundary_topic_shift_mean = 0.0;
+    boundary_topic_shift_var = 0.0;
     s_emotion_max = 0.0;
     s_arousal_sum = 0.0;
     signals.clear ();
     blob_ids.clear ();
     primary_modality.clear ();
     acc_signals_window.clear ();
+    pending_interrupt_abort = false;
   }
 
   /**

@@ -81,6 +81,11 @@ BindParameters (sqlite3_stmt *stmt, const std::vector<std::any> &params)
               sqlite3_bind_double (stmt, param_index,
                                    std::any_cast<double> (param));
             }
+          else if (param.type () == typeid (float))
+            {
+              sqlite3_bind_double (stmt, param_index,
+                                   static_cast<double> (std::any_cast<float> (param)));
+            }
           else if (param.type () == typeid (std::string))
             {
               const std::string &str = std::any_cast<std::string> (param);
@@ -282,7 +287,10 @@ SQLiteTransaction::~SQLiteTransaction ()
           // For root transactions, rollback the entire transaction
           else if (store_->in_transaction_)
             {
-              store_->ExecuteDirect ("ROLLBACK");
+              if (store_->IsDbInTransaction ())
+                {
+                  store_->ExecuteDirect ("ROLLBACK");
+                }
               store_->in_transaction_ = false;
             }
         }
@@ -410,6 +418,12 @@ SQLiteStore::SQLiteStore (std::unique_ptr<SQLiteConnection> connection)
 #endif
 }
 
+bool
+SQLiteStore::IsDbInTransaction () const
+{
+  return sqlite3_get_autocommit (connection_->GetConnection ()) == 0;
+}
+
 std::vector<std::map<std::string, std::any> >
 SQLiteStore::Execute (const std::string &query,
                       const std::vector<std::any> &params)
@@ -439,7 +453,10 @@ SQLiteStore::Begin ()
   // If this is a root transaction, start the database transaction
   if (parent == nullptr && !in_transaction_)
     {
-      ExecuteDirect ("BEGIN");
+      if (!IsDbInTransaction ())
+        {
+          ExecuteDirect ("BEGIN");
+        }
       in_transaction_ = true;
     }
 
@@ -464,7 +481,10 @@ SQLiteStore::Commit ()
     {
       if (in_transaction_)
         {
-          ExecuteDirect ("COMMIT");
+          if (IsDbInTransaction ())
+            {
+              ExecuteDirect ("COMMIT");
+            }
           in_transaction_ = false;
         }
     }
@@ -488,7 +508,10 @@ SQLiteStore::Rollback ()
     {
       if (in_transaction_)
         {
-          ExecuteDirect ("ROLLBACK");
+          if (IsDbInTransaction ())
+            {
+              ExecuteDirect ("ROLLBACK");
+            }
           in_transaction_ = false;
         }
     }
@@ -511,7 +534,10 @@ SQLiteStore::CommitRootTransaction (SQLiteTransaction *transaction)
     {
       if (in_transaction_)
         {
-          ExecuteDirect ("COMMIT");
+          if (IsDbInTransaction ())
+            {
+              ExecuteDirect ("COMMIT");
+            }
           in_transaction_ = false;
         }
     }
@@ -534,7 +560,10 @@ SQLiteStore::RollbackRootTransaction (SQLiteTransaction *transaction)
     {
       if (in_transaction_)
         {
-          ExecuteDirect ("ROLLBACK");
+          if (IsDbInTransaction ())
+            {
+              ExecuteDirect ("ROLLBACK");
+            }
           in_transaction_ = false;
         }
     }

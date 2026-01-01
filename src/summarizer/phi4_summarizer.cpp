@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <sstream>
 #include <stdexcept>
+#include <string>
 
 #if !defined(CORTEXT_DISABLE_OGA)
 #include <ort_genai.h>
@@ -64,6 +65,40 @@ BuildSummaryPrompt (const std::vector<std::string> &texts)
   return combined.str ();
 }
 
+bool
+TryCreateModelWithProvider (
+    const std::string &model_path, const char *provider,
+    std::unique_ptr<OgaModel> &model, std::unique_ptr<OgaTokenizer> &tokenizer,
+    std::unique_ptr<OgaMultiModalProcessor> &processor,
+    std::string *error_out)
+{
+  try
+    {
+      auto config = OgaConfig::Create (model_path.c_str ());
+      config->ClearProviders ();
+      if (provider != nullptr && provider[0] != '\0')
+        {
+          config->AppendProvider (provider);
+          if (std::string (provider) == "cuda")
+            {
+              config->SetProviderOption (provider, "enable_cuda_graph", "0");
+            }
+        }
+      model = OgaModel::Create (*config);
+      tokenizer = OgaTokenizer::Create (*model);
+      processor = OgaMultiModalProcessor::Create (*model);
+      return true;
+    }
+  catch (const std::exception &e)
+    {
+      if (error_out != nullptr)
+        {
+          *error_out = e.what ();
+        }
+      return false;
+    }
+}
+
 } // namespace
 
 struct Phi4Summarizer::Impl
@@ -77,10 +112,26 @@ struct Phi4Summarizer::Impl
   {
     try
       {
-        model = OgaModel::Create (model_path.c_str ());
-        tokenizer = OgaTokenizer::Create (*model);
-        processor = OgaMultiModalProcessor::Create (*model);
-        available = true;
+        std::string error;
+        const char *kGpuProviders[] = { "cuda", "dml", "rocm", "webgpu",
+                                        "openvino", "qnn", "nvtensorrtrtx" };
+        for (const char *provider : kGpuProviders)
+          {
+            if (TryCreateModelWithProvider (model_path, provider, model,
+                                            tokenizer, processor, &error))
+              {
+                available = true;
+                return;
+              }
+          }
+        error.clear ();
+        if (TryCreateModelWithProvider (model_path, nullptr, model, tokenizer,
+                                        processor, &error))
+          {
+            available = true;
+            return;
+          }
+        available = false;
       }
     catch (const std::exception &)
       {

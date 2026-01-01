@@ -1,12 +1,12 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-- `src/` and `include/`: C++17 core library and public headers (main Cortext engine).
-- `tests/`: Catch2-based unit/integration tests (target: `cortext_tests`).
+- `src/` + `include/`: C++ core engine and public headers.
+- `tests/`: Catch2 unit/integration tests (`cortext_tests` target).
 - `examples/`: runnable demos and analysis tooling (e.g., `examples/topical_chat_analysis`).
-- `scripts/`: experiment harnesses and utilities (e.g., `scripts/run_memory_harness.py`).
-- `docs/paper/`: manuscript source in `sections/` and generated output in `_manuscript/`.
-- `models/`, `third_party/`: runtime assets (ImageBind, LiteRT, sqlite extensions).
+- `scripts/` + `tools/`: experiment harnesses and generators (e.g., `scripts/run_memory_harness.py`).
+- `docs/paper/sections/`: manuscript source; `docs/paper/_manuscript/` is generated output.
+- `models/` + `third_party/`: runtime assets (ImageBind/ONNX, LiteRT, sqlite extensions).
 
 ## Build, Test, and Development Commands
 - Configure/build:
@@ -14,7 +14,7 @@
   cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
   cmake --build build -j
   ```
-- Run tests (project suite only):
+- Run tests:
   ```bash
   ctest --test-dir build -R cortext_tests --output-on-failure
   ```
@@ -22,32 +22,37 @@
   ```bash
   ./build/examples/topical_chat_analysis/cortext_topical_chat_analysis --help
   ```
-- Run harness (long horizon example):
+- Long-horizon harness example:
   ```bash
   python scripts/run_memory_harness.py --max-conversations 2 --max-turns 360 --max-total 720 --no-multi
   ```
 
 ## Coding Style & Naming Conventions
-- Follow existing C++ style: 2‑space indentation, braces on new lines, and whitespace around parentheses (see `src/operations/*.cpp`).
-- Use existing naming patterns within the file you modify (PascalCase for helpers, lower_snake for locals).
-- Avoid introducing unused or deprecated code — this repo is pre‑release and prefers breaking changes without regressions.
+- Match local style in the file you touch (e.g., 2-space indentation, braces on new lines).
+- Prefer existing naming patterns (PascalCase helpers, lower_snake locals) over introducing new conventions.
+- Pre-release rule: breaking changes are fine, but do not leave unused/deprecated code behind.
 
 ## Testing Guidelines
-- Tests use Catch2 via the `cortext_tests` target.
-- Add/extend tests when changing algorithms or thresholds, especially for interrupts and retrieval.
-- Validate end‑to‑end behavior with `examples/topical_chat_analysis` before large sweeps.
+- Add tests when changing algorithms or thresholds (interrupts, retrieval, consolidation).
+- Use `examples/topical_chat_analysis` for end-to-end validation before large sweeps.
+- Keep outputs deterministic where possible; prefer fixed seeds when adding new metrics.
+- Run long sweeps with `nohup` (or equivalent) so they survive terminal/session disconnects.
+- Do not use `sleep` to wait/poll background commands; use `scripts/notify-codex.sh` instead.
+- For long-running scripts, append `&& scripts/notify-codex.sh cortext {{what to do next when the command finishes}}` to send a completion ping. Use an action-oriented message (e.g., “... done — review boundary alignment and update docs”), not just “done”.
 
 ## Docs & Experiment Reporting
-- When algorithms change or new results are produced, update `docs/paper/sections/*` and regenerate:
+- Always update `docs/paper/sections/` when algorithms change or experiment results are produced.
+- Regenerate the manuscript:
   ```bash
   QUARTO_DISABLE_GIT=1 QUARTO_DISABLE_GITHUB=1 quarto render docs/paper
   ```
-- The manuscript source of truth is `docs/paper/_manuscript/index.md` (generated from sections).
+- `docs/paper/_manuscript/index.md` is the generated source of truth for the compiled paper.
 
 ## Commit & Pull Request Guidelines
 - Commit messages are short, imperative, and descriptive (e.g., “Add interrupt precision/recall metrics”).
-- PRs should include: summary, test commands run, and any updated experiment outputs/log paths.
+- PRs should include a brief summary, test commands run, and any updated experiment logs/paths.
 
-## Agent-Specific Notes
-- All behavior should derive from the three knobs where possible.
-- Consolidation/labeling must use gemma-3n-e2b via LiteRT; embeddings use ImageBind/ONNX.
+## Repository-Specific Notes
+- Behavior should derive from the three knobs (F/S/T) wherever possible.
+- Consolidation/labeling uses gemma-3n-e2b via LiteRT; embeddings use ImageBind/ONNX.
+- Do not modify the public API surface (public headers in `include/`, C API) without explicit approval.

@@ -42,6 +42,7 @@ private:
     const TokenCallback* callback;
     std::atomic<bool>* cancel_flag;
     std::string buffer;  // Accumulates partial SSE data
+    std::string raw_body;
     std::string full_content;
     bool done = false;
     std::optional<std::string> error;

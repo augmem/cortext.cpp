@@ -86,7 +86,23 @@ ComputeWriteGate::Execute (OperationContext &context,
   if (write_accumulator)
     {
       // Compute representative embedding (Section 4.4.5)
-      Eigen::VectorXf e_rep = rho * acc.mu_acc + (1.0 - rho) * acc.e_peak;
+      Eigen::VectorXf e_rep;
+      if (acc.mu_acc.size () == 0 && acc.e_peak.size () == 0)
+        {
+          e_rep = acc.mu_acc;
+        }
+      else if (acc.mu_acc.size () == 0)
+        {
+          e_rep = acc.e_peak;
+        }
+      else if (acc.e_peak.size () == 0 || acc.e_peak.size () != acc.mu_acc.size ())
+        {
+          e_rep = acc.mu_acc;
+        }
+      else
+        {
+          e_rep = rho * acc.mu_acc + (1.0 - rho) * acc.e_peak;
+        }
 
       // Normalize
       const float norm = e_rep.norm ();
@@ -123,16 +139,14 @@ ComputeWriteGate::Execute (OperationContext &context,
             }
         }
 
-      // Update last_write_ts and reset accumulator
+      // Update last_write_ts; accumulator reset happens after persistence.
       acc.last_write_ts = signal.timestamp;
-      acc.n_signals = 0;  // Mark for reset on next signal
 
       telemetry::AddCounter ("cortext.accumulator.write_accept_total", 1);
     }
   else
     {
-      // Reset accumulator but don't write
-      acc.n_signals = 0;
+      // No write; accumulator reset happens after persistence.
       telemetry::AddCounter ("cortext.accumulator.write_reject_total", 1);
     }
 
