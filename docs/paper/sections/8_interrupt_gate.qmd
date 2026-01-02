@@ -152,18 +152,19 @@ This logic suppresses low-drift interrupts unless the marginal utility substanti
 
 ## Interrupt-triggered Accumulator Abort
 
-When the interrupt gate allows a retrieval outside a flush/spike event, we mark a **pending abort** for the current accumulator to avoid persisting partial thoughts. If the next signal continues the same thought (low novelty relative to the current centroid), we **resume** the accumulator; otherwise we **drop** the partial unit. This prevents “half‑utterances” from being stored when a memory whisper redirects attention, while still allowing the speaker to ignore the interrupt and continue seamlessly. Because the resume test reuses the knob‑derived novelty threshold, no new fixed constants are introduced.
+When the interrupt gate allows a retrieval outside a flush/spike event, we mark a **pending abort** for the current accumulator to avoid persisting partial thoughts. On the next signal, we compare similarity to the selected memory versus the current accumulator centroid. If the new signal aligns more with the selected memory, we treat the interrupt as **accepted** and drop the partial unit; otherwise we **resume** the accumulator. This prevents “half‑utterances” from being stored when a memory whisper redirects attention, while still allowing the speaker to ignore the interrupt and continue seamlessly. This uses only embeddings already present in the system (no new constants).
 
 ```
 if allow_interrupt AND NOT should_flush AND NOT spike_bypass:
     pending_abort ← true
+    pending_mem ← selected_candidate_embedding
 
 if pending_abort:
-    novelty = clamp((1 − cos(x_t, μ_acc)) / 2, 0, 1)
-    if novelty < τ_novelty(F,S,T):   # same thought → resume
-        pending_abort ← false
-    else:                            # new thought → drop partial unit
-        reset_accumulator(); pending_abort ← false
+    sim_mem = cos(x_t, pending_mem)
+    sim_acc = cos(x_t, μ_acc)
+    if sim_mem > sim_acc:        # accepted → drop partial unit
+        reset_accumulator()
+    pending_abort ← false
 ```
 
 ## Streaming Pacing

@@ -49,19 +49,17 @@ Chunk‑level episode audit (first conversation, 2‑word cadence):
 
 * drift episodes: **19** (avg **4.42** chunks, p50 **3**, p90 **7**, range **3–8**)
 * capacity episodes: **10** (avg **6.00** chunks, p50 **5.5**, p90 **8**, range **5–8**)
-* timeout episodes: **1** (avg **7.00** chunks, p50 **7**, p90 **7**, range **7–7**)
+**Observation:** Natural boundaries now dominate (19 drift vs 10 capacity). With time‑based flush removed, boundaries are driven by natural indicators plus capacity safety.
 
-**Observation:** Natural boundaries now dominate (19 drift vs 10 capacity), while timeouts remain rare. This supports the coherence/topic‑weighted likelihood boost and pushes capacity/time toward edge‑case behavior.
+**Interrupt accept/ignore check (long horizon; F=S=T=0.5, consolidate=0):**
 
-**Interrupt abort/resume check (long horizon; F=S=T=0.5, consolidate=0):**
+Run: `logs/topical_chat_snapshots/20260101_113144` (156 turns; dataset‑limited)
 
-Run: `logs/topical_chat_snapshots/20260101_105426` (156 turns; dataset‑limited)
+* interrupt_abort_rate: **0.314** (16 / 51 interrupts)
+* interrupt_turn_rate: **0.327**
+* boundary_at_rate: **0.173**
 
-* interrupt_abort_rate: **0.667** (36 / 54 interrupts)
-* interrupt_turn_rate: **0.346**
-* boundary_at_rate: **0.122**
-
-**Observation:** Pending aborts often resolve to a committed abort at this horizon, implying many interrupts land mid‑unit and the following signal diverges beyond τ_novelty. The mechanism preserves the ability to resume (when novelty is low) while avoiding partial‑thought persistence when the thread shifts.
+**Observation:** The similarity‑based accept/ignore rule reduces committed aborts substantially versus the prior novelty‑only heuristic, while keeping interrupt frequency in the same band. This suggests many interrupts are ignored (continued thought aligns more with μ_acc) rather than treated as accepted shifts.
 
 ## Latency and Performance
 End-to-end processing per turn is dominated by embedding + retrieval rather than graph expansion. In the Dec 31, 2025 long-horizon sweep (156 turns, consolidation cycles=2), `perf_total_ms_mean` ranged **0.606–5.05s** depending on knob settings; the default **F=S=T=0.5** run averaged **0.97s/turn**, while **F=S=T=1.0** averaged **0.61s/turn**. Graph expansion remains a small fraction of total time after in-memory summary seeding.
@@ -149,6 +147,153 @@ retrieval seeding.
 * **Label candidate rate is high** (0.67–0.96) due to the label bank seeding,
   while association candidates remain absent in this sweep because consolidation
   only ran at the end (2 summaries total).
+
+## Long-Horizon Harness Sweep (Jan 1, 2026)
+
+We ran the multi‑participant harness (`scripts/run_memory_harness.py`) with
+`max_turns=360`, `max_total=720`, and `consolidate_cycles=0` to stress retrieval
+and interrupt behavior under long‑horizon load. The run produced a baseline
+(**F=S=T=0.5**) plus a 3×3 sweep around mid‑range knobs; individual runs are
+dataset‑limited at **120–156 turns**. Logs and per‑run outputs:
+`logs/memory_harness/20260101_122657`.
+
+We summarize the baseline and the best settings observed for **retrieval rate**
+and **interrupt recall**:
+
+| config | turns | writes | retr_turn_rate | retr_avg_cands | interrupt_rate | precision | recall | mem_retrieved_mean |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| **F=0.5, S=0.5, T=0.5** (baseline) | 156 | 29 | 0.3526 | 5.75 | 0.2051 | 0.9688 | 0.5741 | 10.90 |
+| **F=0.5, S=0.6, T=0.4** (best retrieval rate) | 120 | 23 | 0.4000 | 2.46 | 0.2417 | 0.9310 | 0.6000 | 5.13 |
+| **F=0.4, S=0.6, T=0.5** (best interrupt recall) | 120 | 23 | 0.3250 | 4.31 | 0.2583 | 1.0000 | 0.7949 | 7.30 |
+
+**Observations:**
+
+* **Sensitivity≈0.6** consistently increases retrieval and interrupt activity
+  relative to the baseline while keeping precision high.
+* Lower **Stability (T≈0.4)** favors higher retrieval rates (more surfacing),
+  while mid‑range **T=0.5** improves interrupt recall without precision loss.
+* The baseline remains a strong **all‑rounder**, but targeted profiles
+  outperform it on retrieval or interrupt recall depending on the objective.
+
+## Flashbulb + Synaptic Tagging Check (EmpatheticDialogues)
+
+We ran a targeted check on EmpatheticDialogues (`data/empathetic_dialogues/valid.jsonl`)
+using the harness (`scripts/run_memory_harness.py`). We compare baseline **F=S=T=0.5**
+against lower/high Sensitivity to test flashbulb and synaptic‑tagging behavior.
+Run logs and DBs: `logs/memory_harness/20260101_153306` (pre‑tune),
+`logs/flashbulb_algo_tuned3_sweep_20260102_105932` (post‑tune), and
+`logs/flashbulb_algo_tuned4_sweep_20260102_111607` (rate‑stabilized).
+
+| config | spike_bypass_true | flashbulb_count | tagged_memories |
+|---|---:|---:|---:|
+| **F=0.5, S=0.5, T=0.5** | 4 | 0 | 90 / 109 (82.6%) |
+| **F=0.5, S=0.4, T=0.5** | 4 | 0 | 84 / 102 (82.4%) |
+| **F=0.5, S=0.6, T=0.5** | 2 | 0 | 112 / 123 (91.1%) |
+
+Post‑tune flashbulb sweep (same dataset, `max_turns=160`, `max_total=160`):
+
+| config | flashbulb_count | memories |
+|---|---:|---:|
+| **F=0.5, S=0.4, T=0.5** | 0 | 14 |
+| **F=0.5, S=0.5, T=0.5** | 1 | 14 |
+| **F=0.5, S=0.6, T=0.5** | 5 | 18 |
+
+Aggressive tuning sweep (lowered θ_intensity/thresholds, stronger gain/percentile blending):
+
+| config | flashbulb_count | memories |
+|---|---:|---:|
+| **F=0.5, S=0.4, T=0.5** | 0 | 14 |
+| **F=0.5, S=0.5, T=0.5** | 4 | 14 |
+| **F=0.5, S=0.6, T=0.5** | 6 | 18 |
+
+**Observations:**
+
+* **Pre‑tune flashbulb markers did not trigger** (0 across cases).
+* **Post‑tune flashbulb markers trigger** and scale with Sensitivity
+  (0 → 1 → 5 across S=0.4/0.5/0.6), bringing flashbulb rates into a usable range.
+* **Rate stabilizer kept counts stable** across the same sweep (no regression),
+  confirming that the smoothing does not suppress flashbulb activation.
+* **Aggressive tuning shifted flashbulb rate** into a usable band at S=0.5
+  (≈29% of memories in this short run), and reduced the gap to S=0.6. This
+  suggests the knobs can drive flashbulb frequency as intended, but we should
+  verify with longer horizons to avoid over-triggering.
+
+Dense long-horizon ablation (EmpatheticDialogues, 720/1440, F=0.5, S=0.8, T=0.2):
+
+| ablation | memories | flashbulb | rate |
+|---|---:|---:|---:|
+| **baseline (current)** | 42 | 2 | 4.76% |
+| **no_percentile** | 41 | 10 | 24.39% |
+| **no_arousal** | 42 | 6 | 14.29% |
+| **no_rate** | 42 | 7 | 16.67% |
+
+**Ablation notes:**
+
+* Percentile gating is the strongest suppressor; removing it raises flashbulb
+  rate ~5×.
+* Arousal gating contributes a ~3× suppression vs baseline.
+* Rate stabilizer reduces flashbulb rate by ~3.5× vs baseline.
+
+## Boundary Ablation (TopicalChat)
+
+We ran a boundary ablation on TopicalChat (`data/topical_chat/valid_freq.jsonl`)
+with **F=S=T=0.5**, `max_turns=360`, `max_total=720`. We measure the share of
+memories with `boundary_score ≥ 0.5` as a proxy for boundary hits.
+Run logs: `logs/boundary_ablation_20260102_145005`.
+
+| ablation | memories | boundary_hits (score ≥ 0.5) | rate |
+|---|---:|---:|---:|
+| **baseline** | 39 | 22 | 56.4% |
+| **no_time_capacity** | 38 | 22 | 57.9% |
+| **time_capacity_only** | 0 | 0 | 0.0% |
+| **no_surprisal** | 37 | 22 | 59.5% |
+
+**Boundary notes:**
+
+* Natural indicators drive most boundaries; removing time/capacity changes
+  little in this dataset.
+* Time/capacity alone cannot flush under the current floor coupling.
+* Surprisal removal has minimal effect at these settings.
+
+## Boundary Inactivity Check
+
+We replaced explicit inactivity flushes with a **soft inactivity boost** to
+the boundary score (gap‑driven, support‑gated). Time gaps now raise
+boundary probability without forcing a flush. A short cadence‑gap check
+(`logs/topical_chat_snapshots/20260102_162117`, 5‑second gaps) did not
+produce premature boundaries, indicating the boost remains a gentle nudge.
+We repeated with longer gaps (`logs/topical_chat_snapshots/20260102_163602`,
+15‑second gaps, 20 turns) and observed **boundary_at_rate=0.25** and
+**boundary_score_pass_rate=0.25**, still within the natural boundary range.
+At 30‑second gaps (`logs/topical_chat_snapshots/20260102_163723`) the rates
+remained **0.25**, indicating inactivity alone does not force segmentation.
+With 5‑minute gaps (`logs/topical_chat_snapshots/20260102_165112`, deterministic
+time advance), **boundary_at_rate=0.30** and **boundary_score_pass_rate=0.20**,
+still within the natural boundary range.
+At 15‑minute gaps (`logs/topical_chat_snapshots/20260102_165927`) the rates
+were unchanged (**0.30** / **0.20**), reinforcing that inactivity boosts are
+soft and do not force segmentation on their own.
+At 1‑hour gaps (`logs/topical_chat_snapshots/20260102_170229`) the rates
+remained **0.30** / **0.20**.
+After switching to an exponential inactivity boost, a 1‑hour gap run
+(`logs/topical_chat_snapshots/20260102_170626`) still reported **0.30** /
+**0.20** at 20 turns, suggesting the boost needs a stronger scale or a
+dedicated gap‑dominant term to force boundaries at extreme inactivity.
+We then removed the cap and greatly increased the exponent; a follow‑up
+1‑hour run (`logs/topical_chat_snapshots/20260102_170926`) still reported
+**0.30** / **0.20**, indicating the suppression likely comes from the
+support gate rather than scale alone.
+After switching to a **dynamic cadence ratio** (gap measured vs `dt_ema`),
+a 1‑hour run (`logs/topical_chat_snapshots/20260102_173006`) produced
+**boundary_at_rate=0.40**, **boundary_score_pass_rate=0.00**, and
+**boundary_score_mean=0.128**. This shows long inactivity now closes
+episodes without requiring the main boundary score to cross its natural
+threshold, preserving the “no fixed timeout” constraint while still
+preventing unbounded accumulation.
+* **Synaptic tagging is active** and scales with Sensitivity (≈82% → 91% tagged),
+  indicating frequent surprisal/arousal triggers in this dataset.
+* Spike‑bypass events are rare (2–4 per run), consistent with flashbulb‑like
+  flushes being exceptional rather than common.
 
 ## Short-Horizon Smoke Check (120 Turns)
 

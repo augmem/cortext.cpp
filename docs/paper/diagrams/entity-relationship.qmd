@@ -27,8 +27,9 @@ retrieval_thresh_interrupt(F,S) = retrieval_thresh(F) × (1 − 0.12S).
 Note: Non-boundary MU gating is relaxed by Sensitivity:
 boundary_mult_eff = boundary_mult × (1 − 0.20S).
 Note: Allowed interrupts outside flush/spike events mark a pending abort; the
-next signal either resumes (low novelty) or drops the partial unit. This is an
-operational behavior only and does not alter the schema.
+next signal drops the partial unit only if it aligns more with the selected
+memory than with the current accumulator centroid. This is operational only
+and does not alter the schema.
 Note: Retrieval ranking adds an emotion bonus using memories.emotional_intensity
 and memories.s_arousal_avg, scaled by an affect_drive computed from current
 arousal/emotion/salience.
@@ -291,6 +292,7 @@ erDiagram
         real arousal "Section 2.2.2"
         blob mood_vector "6d vector"
         int last_mood_ts "timestamp (ms) for mood decay"
+        real flashbulb_rate "flashbulb rate EWMA"
         real rate_decay "Section 2.3"
         real periphery_half_life "Section 2.3"
         real salience_half_life "Section 2.3"

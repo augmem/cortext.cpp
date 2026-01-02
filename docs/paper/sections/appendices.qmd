@@ -150,14 +150,13 @@ if should_flush: reset_accumulator()  # regardless of write outcome
 interrupt_gate_check()
 if allow_interrupt and not should_flush and not spike_bypass:
     pending_abort ← true
+    pending_mem ← selected_candidate_embedding
 
-# Next signal: resume if novelty is low, else drop partial unit.
+# Next signal: accept if closer to selected memory, else resume.
 if pending_abort:
-    novelty ← clamp((1 − cos(x_t, μ_acc)) / 2, 0, 1)
-    if novelty < τ_novelty(F,S,T):
-        pending_abort ← false  # resume accumulation
-    else:
-        reset_accumulator(); pending_abort ← false
+    if cos(x_t, pending_mem) > cos(x_t, μ_acc):
+        reset_accumulator()
+    pending_abort ← false
 ```
 
 The normative execution order for a single timestep t:
@@ -195,7 +194,7 @@ The normative execution order for a single timestep t:
     *   Update `rate_state` (homeostatic controller).
     *   If `should_flush` (regardless of write): Call `reset_accumulator()`.
 11. **Run Interrupt Gate:** Check for streaming interrupt using retrieved candidates (already filtered by write‑exclusion and WM overlap during retrieval).
-12. **Interrupt Abort (if allowed):** Mark a pending abort when an interrupt is permitted outside a flush/spike event. On the next signal, resume the accumulator if novelty < τ_novelty(F,S,T); otherwise reset to drop partial utterances.
+12. **Interrupt Abort (if allowed):** Mark a pending abort when an interrupt is permitted outside a flush/spike event. On the next signal, compare similarity to the selected memory vs current μ_acc; if the new signal aligns more with the selected memory, reset to drop partial utterances, otherwise resume.
 
 Timing notes:
 *   `now_s()` is captured at step 1 and reused for all Δt computations in this timestep.

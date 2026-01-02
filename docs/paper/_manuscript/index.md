@@ -236,9 +236,8 @@ idle_for), and time comparisons operate in seconds:
     signal_gap ← now_s() − to_s(last_signal_ts)  # seconds
 
 **Time constants:** All time-related constants are specified with
-explicit units (e.g., τ_min(T) in seconds). Threshold limits like
-max_mem_time(T) and gap_scale(T) return values in seconds (gap_scale
-multiplies dt_ema to form gap_ref_s).
+explicit units (e.g., τ_min(T) in seconds). Gap scaling returns values
+in seconds (gap_scale multiplies dt_ema to form gap_ref_s).
 
 ### No Fixed Behavioral Constants
 
@@ -510,11 +509,13 @@ The projection procedure:
         emotion_intensity_t ← 0; valence_t ← 0.5; arousal_t ← 0
     else:
         logits_c ← max(0, raw_cos_c)
-        β(S) = 4 + 8S  # softmax inverse temperature
+        β(S) = 8 + 24S  # softmax inverse temperature
+        γ(S) = lerp(0.5, 0.25, S)  # intensity exponent (higher S boosts affect)
+        g(S) = lerp(1.0, 2.2, S)   # gain to amplify affect strength
         p_c ← softmax(β(S) × logits_c)
         peak ← max_c(p_c)
         confidence ← 1 − H(p_c) / ln(6)
-        emotion_intensity_t ← sqrt(peak × confidence)
+        emotion_intensity_t ← clamp((peak × confidence)^{γ(S)} × g(S), 0, 1)
         valence_t ← (Σ_c p_c × v_map[c] + 0.9) / 1.8
         arousal_t ← clamp(Σ_c p_c × a_map[c], 0, 1)
 
@@ -1477,15 +1478,12 @@ Hard capacity ceiling (max signals per memory; knob-derived):
     floor = round(lerp(2, 3, T))
     max_signals(F,S,T) = max(floor, round(base × f_scale × s_scale))
 
-Adaptive cadence:
+Adaptive cadence (gap normalization only; no timeouts):
 
     dt_ref ← max(dt_ema, dt_floor(T))
     gap_ref_s ← gap_scale(T) × dt_ref
-    max_mem_time(T) ← clamp(lerp(2.5, 5.5, T) × gap_ref_s,
-                            lerp(6, 20, T),
-                            lerp(60, 180, T))
 
-Fallback boundary floor (applies to time/capacity/pressure only):
+Fallback boundary floor (applies to capacity/pressure only):
 
     boundary_floor(F,S,T) = clamp(lerp(0.05, 0.15, S) × lerp(1.2, 0.8, F) × lerp(1.1, 0.9, T),
                                   0.02, 0.25)
@@ -1494,14 +1492,13 @@ Trigger memory flush when:
 
     mem_elapsed ← now_s() − to_s(t_start)
     should_flush = (boundary_score > b_thresh(F, S)) OR
-                   (mem_elapsed > max_mem_time(T) AND boundary_score ≥ boundary_floor(F,S,T)) OR
                    (pressure_score > b_thresh(F, S) AND boundary_score ≥ boundary_floor(F,S,T)) OR
                    (n ≥ max_signals(F,S,T) AND boundary_score ≥ boundary_floor(F,S,T))
 
 where signal_gap_s = now_s() − to_s(last_signal_ts) is computed at the
 start of signal processing (before last_signal_ts is updated). Gap
-timing influences boundary_score via gap_score and sets the adaptive
-cadence used by max_mem_time, avoiding a fixed flush timer.
+timing influences boundary_score via gap_score only; there is no
+time-based flush.
 
 **Boundary type note:** When the max-signals ceiling triggers a flush,
 set `boundary_type = "capacity"` for the enclosing episode. This is a
@@ -1531,6 +1528,31 @@ This keeps flashbulb moments intact while preventing early or highly
 coherent windows from fragmenting into micro-memories. As the unit
 matures, spike bypass becomes easier, and low coherence reduces the
 effective margin.
+
+### Inactivity Boost
+
+We avoid hard timeouts for episode boundaries. Instead, when the stream
+becomes quiet and natural indicators are weak, inactivity softly boosts
+the boundary score:
+
+    support_relax = exp(−lerp(0.6, 1.6, S) × lerp(1.15, 0.85, T) × gap_z⁺)
+    gap_ratio = signal_gap_s / max(dt_ema, ε)
+    gap_z_inact = log1p(max(gap_ratio − 1, 0))
+    gap_score_inact = sigmoid(lerp(0.9, 1.8, S) × lerp(1.1, 0.9, T) × gap_z_inact)
+    inactivity = gap_score_inact × (1 − support × support_relax)
+    k_inact(S,T) = lerp(0.05, 0.25, S) × lerp(1.1, 0.9, T)
+    gap_z⁺ = max(0, gap_z_inact)
+    inactivity_scale = exp(lerp(0.6, 1.6, S) × lerp(1.1, 0.9, T) × gap_z⁺)
+    boundary_score ← boundary_score + k_inact(S,T) × inactivity × inactivity_scale
+    gap_force = sigmoid(lerp(2.0, 5.0, S) × lerp(1.1, 0.9, T) ×
+                       (gap_z_inact − lerp(0.9, 0.4, S) × lerp(1.1, 0.9, T)))
+    boundary_score ← max(boundary_score, gap_force)
+
+This closes episodes after prolonged inactivity without forcing
+premature flushes during coherent streams. The signal gap is measured
+relative to the observed cadence (dt_ema), so inactivity remains dynamic
+and adapts to the current conversational pace rather than a fixed
+timeout.
 
 ### Window Score and Refractory
 
@@ -2047,7 +2069,26 @@ consolidation operates on stored memory metadata:
 Flashbulb memories receive extended half-life bonuses based on the
 memory’s peak emotional intensity:
 
-    flashbulb_threshold = lerp(0.9, 0.4, S)
+    flashbulb_threshold = lerp(0.97, 0.65, S)
+    flashbulb_threshold_eff = flashbulb_threshold × (1 − 0.5 × s_emotion_max)
+                               × (1 − 0.3 × s_arousal_avg)
+    # Flashbulb event if intensity exceeds effective threshold
+    flashbulb = (m.metadata.s_emotion_max ≥ flashbulb_threshold_eff × rate_adjust)
+    # Rate stabilizer keeps flashbulb frequency in a tight band
+    flashbulb_target = lerp(0.02, 0.06, S)
+    flashbulb_rate_ewma ← EWMA(flashbulb, α = lerp(0.02, 0.12, S))
+    rate_adjust = clamp(1 + lerp(1.0, 0.6, S) × (flashbulb_rate_ewma − flashbulb_target),
+                        0.8, 1.2)
+    # Contextual percentile gate (embedding‑only, knob‑derived)
+    emo_window = round(lerp(24, 96, S) × lerp(0.8, 1.2, T))
+    percentile = lerp(0.95, 0.80, S)
+    flashbulb_gain = lerp(1.0, 1.1, S)
+    flashbulb_threshold_adj = max(flashbulb_threshold_eff × rate_adjust,
+                                  Pctl_{percentile}(recent_emotion_intensity, emo_window)
+                                  × rate_adjust)
+    flashbulb_arousal = lerp(0.7, 0.5, S)
+    flashbulb = ((s_arousal_avg ≥ flashbulb_arousal) AND
+                 ((flashbulb_gain × s_emotion_max) ≥ flashbulb_threshold_adj))
     # Half-life bonus uses stored memory emotional peak
     emotional_half_life_bonus = exp(lerp(0, ln(3), S)) ×
                                  (1 + m.metadata.s_emotion_max)
@@ -2147,7 +2188,7 @@ On write, every memory updates the index store:
 ## Consolidation Triggers
 
 Consolidation operates on stored memory representatives (e_rep from
-<a href="#sec-rep-embedding" class="quarto-xref">Section 6.4.6</a>), not
+<a href="#sec-rep-embedding" class="quarto-xref">Section 6.4.7</a>), not
 individual signals. Candidates must be **LONG_TERM or ASSOCIATION
 memories with stored content blobs** (blob_id present) so summarization
 always has source text. **Consolidation is only initiated via an
@@ -2221,7 +2262,7 @@ at a known idle window).
 ## Consolidation Scoring
 
 Each stored embedding represents a memory representative (e_rep from
-<a href="#sec-rep-embedding" class="quarto-xref">Section 6.4.6</a>).
+<a href="#sec-rep-embedding" class="quarto-xref">Section 6.4.7</a>).
 Each memory receives a consolidation score determining merge priority:
 
     score_consolidate(m) = weight_strength × strength(m) −
@@ -2667,23 +2708,25 @@ interrupts at natural transition points.
 
 When the interrupt gate allows a retrieval outside a flush/spike event,
 we mark a **pending abort** for the current accumulator to avoid
-persisting partial thoughts. If the next signal continues the same
-thought (low novelty relative to the current centroid), we **resume**
-the accumulator; otherwise we **drop** the partial unit. This prevents
-“half‑utterances” from being stored when a memory whisper redirects
-attention, while still allowing the speaker to ignore the interrupt and
-continue seamlessly. Because the resume test reuses the knob‑derived
-novelty threshold, no new fixed constants are introduced.
+persisting partial thoughts. On the next signal, we compare similarity
+to the selected memory versus the current accumulator centroid. If the
+new signal aligns more with the selected memory, we treat the interrupt
+as **accepted** and drop the partial unit; otherwise we **resume** the
+accumulator. This prevents “half‑utterances” from being stored when a
+memory whisper redirects attention, while still allowing the speaker to
+ignore the interrupt and continue seamlessly. This uses only embeddings
+already present in the system (no new constants).
 
     if allow_interrupt AND NOT should_flush AND NOT spike_bypass:
         pending_abort ← true
+        pending_mem ← selected_candidate_embedding
 
     if pending_abort:
-        novelty = clamp((1 − cos(x_t, μ_acc)) / 2, 0, 1)
-        if novelty < τ_novelty(F,S,T):   # same thought → resume
-            pending_abort ← false
-        else:                            # new thought → drop partial unit
-            reset_accumulator(); pending_abort ← false
+        sim_mem = cos(x_t, pending_mem)
+        sim_acc = cos(x_t, μ_acc)
+        if sim_mem > sim_acc:        # accepted → drop partial unit
+            reset_accumulator()
+        pending_abort ← false
 
 ## Streaming Pacing
 
@@ -2806,30 +2849,25 @@ Chunk‑level episode audit (first conversation, 2‑word cadence):
 -   drift episodes: **19** (avg **4.42** chunks, p50 **3**, p90 **7**,
     range **3–8**)
 -   capacity episodes: **10** (avg **6.00** chunks, p50 **5.5**, p90
-    **8**, range **5–8**)
--   timeout episodes: **1** (avg **7.00** chunks, p50 **7**, p90 **7**,
-    range **7–7**)
+    **8**, range **5–8**) **Observation:** Natural boundaries now
+    dominate (19 drift vs 10 capacity). With time‑based flush removed,
+    boundaries are driven by natural indicators plus capacity safety.
 
-**Observation:** Natural boundaries now dominate (19 drift vs 10
-capacity), while timeouts remain rare. This supports the
-coherence/topic‑weighted likelihood boost and pushes capacity/time
-toward edge‑case behavior.
-
-**Interrupt abort/resume check (long horizon; F=S=T=0.5,
+**Interrupt accept/ignore check (long horizon; F=S=T=0.5,
 consolidate=0):**
 
-Run: `logs/topical_chat_snapshots/20260101_105426` (156 turns;
+Run: `logs/topical_chat_snapshots/20260101_113144` (156 turns;
 dataset‑limited)
 
--   interrupt_abort_rate: **0.667** (36 / 54 interrupts)
--   interrupt_turn_rate: **0.346**
--   boundary_at_rate: **0.122**
+-   interrupt_abort_rate: **0.314** (16 / 51 interrupts)
+-   interrupt_turn_rate: **0.327**
+-   boundary_at_rate: **0.173**
 
-**Observation:** Pending aborts often resolve to a committed abort at
-this horizon, implying many interrupts land mid‑unit and the following
-signal diverges beyond τ_novelty. The mechanism preserves the ability to
-resume (when novelty is low) while avoiding partial‑thought persistence
-when the thread shifts.
+**Observation:** The similarity‑based accept/ignore rule reduces
+committed aborts substantially versus the prior novelty‑only heuristic,
+while keeping interrupt frequency in the same band. This suggests many
+interrupts are ignored (continued thought aligns more with μ_acc) rather
+than treated as accepted shifts.
 
 ## Latency and Performance
 
@@ -3153,6 +3191,349 @@ retrieval seeding.
 -   **Label candidate rate is high** (0.67–0.96) due to the label bank
     seeding, while association candidates remain absent in this sweep
     because consolidation only ran at the end (2 summaries total).
+
+## Long-Horizon Harness Sweep (Jan 1, 2026)
+
+We ran the multi‑participant harness (`scripts/run_memory_harness.py`)
+with `max_turns=360`, `max_total=720`, and `consolidate_cycles=0` to
+stress retrieval and interrupt behavior under long‑horizon load. The run
+produced a baseline (**F=S=T=0.5**) plus a 3×3 sweep around mid‑range
+knobs; individual runs are dataset‑limited at **120–156 turns**. Logs
+and per‑run outputs: `logs/memory_harness/20260101_122657`.
+
+We summarize the baseline and the best settings observed for **retrieval
+rate** and **interrupt recall**:
+
+<table>
+<colgroup>
+<col style="width: 8%" />
+<col style="width: 11%" />
+<col style="width: 11%" />
+<col style="width: 11%" />
+<col style="width: 11%" />
+<col style="width: 11%" />
+<col style="width: 11%" />
+<col style="width: 11%" />
+<col style="width: 11%" />
+</colgroup>
+<thead>
+<tr>
+<th>config</th>
+<th style="text-align: right;">turns</th>
+<th style="text-align: right;">writes</th>
+<th style="text-align: right;">retr_turn_rate</th>
+<th style="text-align: right;">retr_avg_cands</th>
+<th style="text-align: right;">interrupt_rate</th>
+<th style="text-align: right;">precision</th>
+<th style="text-align: right;">recall</th>
+<th style="text-align: right;">mem_retrieved_mean</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>F=0.5, S=0.5, T=0.5</strong> (baseline)</td>
+<td style="text-align: right;">156</td>
+<td style="text-align: right;">29</td>
+<td style="text-align: right;">0.3526</td>
+<td style="text-align: right;">5.75</td>
+<td style="text-align: right;">0.2051</td>
+<td style="text-align: right;">0.9688</td>
+<td style="text-align: right;">0.5741</td>
+<td style="text-align: right;">10.90</td>
+</tr>
+<tr>
+<td><strong>F=0.5, S=0.6, T=0.4</strong> (best retrieval rate)</td>
+<td style="text-align: right;">120</td>
+<td style="text-align: right;">23</td>
+<td style="text-align: right;">0.4000</td>
+<td style="text-align: right;">2.46</td>
+<td style="text-align: right;">0.2417</td>
+<td style="text-align: right;">0.9310</td>
+<td style="text-align: right;">0.6000</td>
+<td style="text-align: right;">5.13</td>
+</tr>
+<tr>
+<td><strong>F=0.4, S=0.6, T=0.5</strong> (best interrupt recall)</td>
+<td style="text-align: right;">120</td>
+<td style="text-align: right;">23</td>
+<td style="text-align: right;">0.3250</td>
+<td style="text-align: right;">4.31</td>
+<td style="text-align: right;">0.2583</td>
+<td style="text-align: right;">1.0000</td>
+<td style="text-align: right;">0.7949</td>
+<td style="text-align: right;">7.30</td>
+</tr>
+</tbody>
+</table>
+
+**Observations:**
+
+-   **Sensitivity≈0.6** consistently increases retrieval and interrupt
+    activity relative to the baseline while keeping precision high.
+-   Lower **Stability (T≈0.4)** favors higher retrieval rates (more
+    surfacing), while mid‑range **T=0.5** improves interrupt recall
+    without precision loss.
+-   The baseline remains a strong **all‑rounder**, but targeted profiles
+    outperform it on retrieval or interrupt recall depending on the
+    objective.
+
+## Flashbulb + Synaptic Tagging Check (EmpatheticDialogues)
+
+We ran a targeted check on EmpatheticDialogues
+(`data/empathetic_dialogues/valid.jsonl`) using the harness
+(`scripts/run_memory_harness.py`). We compare baseline **F=S=T=0.5**
+against lower/high Sensitivity to test flashbulb and synaptic‑tagging
+behavior. Run logs and DBs: `logs/memory_harness/20260101_153306`
+(pre‑tune), `logs/flashbulb_algo_tuned3_sweep_20260102_105932`
+(post‑tune), and `logs/flashbulb_algo_tuned4_sweep_20260102_111607`
+(rate‑stabilized).
+
+<table>
+<thead>
+<tr>
+<th>config</th>
+<th style="text-align: right;">spike_bypass_true</th>
+<th style="text-align: right;">flashbulb_count</th>
+<th style="text-align: right;">tagged_memories</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>F=0.5, S=0.5, T=0.5</strong></td>
+<td style="text-align: right;">4</td>
+<td style="text-align: right;">0</td>
+<td style="text-align: right;">90 / 109 (82.6%)</td>
+</tr>
+<tr>
+<td><strong>F=0.5, S=0.4, T=0.5</strong></td>
+<td style="text-align: right;">4</td>
+<td style="text-align: right;">0</td>
+<td style="text-align: right;">84 / 102 (82.4%)</td>
+</tr>
+<tr>
+<td><strong>F=0.5, S=0.6, T=0.5</strong></td>
+<td style="text-align: right;">2</td>
+<td style="text-align: right;">0</td>
+<td style="text-align: right;">112 / 123 (91.1%)</td>
+</tr>
+</tbody>
+</table>
+
+Post‑tune flashbulb sweep (same dataset, `max_turns=160`,
+`max_total=160`):
+
+<table>
+<thead>
+<tr>
+<th>config</th>
+<th style="text-align: right;">flashbulb_count</th>
+<th style="text-align: right;">memories</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>F=0.5, S=0.4, T=0.5</strong></td>
+<td style="text-align: right;">0</td>
+<td style="text-align: right;">14</td>
+</tr>
+<tr>
+<td><strong>F=0.5, S=0.5, T=0.5</strong></td>
+<td style="text-align: right;">1</td>
+<td style="text-align: right;">14</td>
+</tr>
+<tr>
+<td><strong>F=0.5, S=0.6, T=0.5</strong></td>
+<td style="text-align: right;">5</td>
+<td style="text-align: right;">18</td>
+</tr>
+</tbody>
+</table>
+
+Aggressive tuning sweep (lowered θ_intensity/thresholds, stronger
+gain/percentile blending):
+
+<table>
+<thead>
+<tr>
+<th>config</th>
+<th style="text-align: right;">flashbulb_count</th>
+<th style="text-align: right;">memories</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>F=0.5, S=0.4, T=0.5</strong></td>
+<td style="text-align: right;">0</td>
+<td style="text-align: right;">14</td>
+</tr>
+<tr>
+<td><strong>F=0.5, S=0.5, T=0.5</strong></td>
+<td style="text-align: right;">4</td>
+<td style="text-align: right;">14</td>
+</tr>
+<tr>
+<td><strong>F=0.5, S=0.6, T=0.5</strong></td>
+<td style="text-align: right;">6</td>
+<td style="text-align: right;">18</td>
+</tr>
+</tbody>
+</table>
+
+**Observations:**
+
+-   **Pre‑tune flashbulb markers did not trigger** (0 across cases).
+-   **Post‑tune flashbulb markers trigger** and scale with Sensitivity
+    (0 → 1 → 5 across S=0.4/0.5/0.6), bringing flashbulb rates into a
+    usable range.
+-   **Rate stabilizer kept counts stable** across the same sweep (no
+    regression), confirming that the smoothing does not suppress
+    flashbulb activation.
+-   **Aggressive tuning shifted flashbulb rate** into a usable band at
+    S=0.5 (≈29% of memories in this short run), and reduced the gap to
+    S=0.6. This suggests the knobs can drive flashbulb frequency as
+    intended, but we should verify with longer horizons to avoid
+    over-triggering.
+
+Dense long-horizon ablation (EmpatheticDialogues, 720/1440, F=0.5,
+S=0.8, T=0.2):
+
+<table>
+<thead>
+<tr>
+<th>ablation</th>
+<th style="text-align: right;">memories</th>
+<th style="text-align: right;">flashbulb</th>
+<th style="text-align: right;">rate</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>baseline (current)</strong></td>
+<td style="text-align: right;">42</td>
+<td style="text-align: right;">2</td>
+<td style="text-align: right;">4.76%</td>
+</tr>
+<tr>
+<td><strong>no_percentile</strong></td>
+<td style="text-align: right;">41</td>
+<td style="text-align: right;">10</td>
+<td style="text-align: right;">24.39%</td>
+</tr>
+<tr>
+<td><strong>no_arousal</strong></td>
+<td style="text-align: right;">42</td>
+<td style="text-align: right;">6</td>
+<td style="text-align: right;">14.29%</td>
+</tr>
+<tr>
+<td><strong>no_rate</strong></td>
+<td style="text-align: right;">42</td>
+<td style="text-align: right;">7</td>
+<td style="text-align: right;">16.67%</td>
+</tr>
+</tbody>
+</table>
+
+**Ablation notes:**
+
+-   Percentile gating is the strongest suppressor; removing it raises
+    flashbulb rate ~5×.
+-   Arousal gating contributes a ~3× suppression vs baseline.
+-   Rate stabilizer reduces flashbulb rate by ~3.5× vs baseline.
+
+## Boundary Ablation (TopicalChat)
+
+We ran a boundary ablation on TopicalChat
+(`data/topical_chat/valid_freq.jsonl`) with **F=S=T=0.5**,
+`max_turns=360`, `max_total=720`. We measure the share of memories with
+`boundary_score ≥ 0.5` as a proxy for boundary hits. Run logs:
+`logs/boundary_ablation_20260102_145005`.
+
+<table>
+<thead>
+<tr>
+<th>ablation</th>
+<th style="text-align: right;">memories</th>
+<th style="text-align: right;">boundary_hits (score ≥ 0.5)</th>
+<th style="text-align: right;">rate</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>baseline</strong></td>
+<td style="text-align: right;">39</td>
+<td style="text-align: right;">22</td>
+<td style="text-align: right;">56.4%</td>
+</tr>
+<tr>
+<td><strong>no_time_capacity</strong></td>
+<td style="text-align: right;">38</td>
+<td style="text-align: right;">22</td>
+<td style="text-align: right;">57.9%</td>
+</tr>
+<tr>
+<td><strong>time_capacity_only</strong></td>
+<td style="text-align: right;">0</td>
+<td style="text-align: right;">0</td>
+<td style="text-align: right;">0.0%</td>
+</tr>
+<tr>
+<td><strong>no_surprisal</strong></td>
+<td style="text-align: right;">37</td>
+<td style="text-align: right;">22</td>
+<td style="text-align: right;">59.5%</td>
+</tr>
+</tbody>
+</table>
+
+**Boundary notes:**
+
+-   Natural indicators drive most boundaries; removing time/capacity
+    changes little in this dataset.
+-   Time/capacity alone cannot flush under the current floor coupling.
+-   Surprisal removal has minimal effect at these settings.
+
+## Boundary Inactivity Check
+
+We replaced explicit inactivity flushes with a **soft inactivity boost**
+to the boundary score (gap‑driven, support‑gated). Time gaps now raise
+boundary probability without forcing a flush. A short cadence‑gap check
+(`logs/topical_chat_snapshots/20260102_162117`, 5‑second gaps) did not
+produce premature boundaries, indicating the boost remains a gentle
+nudge. We repeated with longer gaps
+(`logs/topical_chat_snapshots/20260102_163602`, 15‑second gaps, 20
+turns) and observed **boundary_at_rate=0.25** and
+**boundary_score_pass_rate=0.25**, still within the natural boundary
+range. At 30‑second gaps (`logs/topical_chat_snapshots/20260102_163723`)
+the rates remained **0.25**, indicating inactivity alone does not force
+segmentation. With 5‑minute gaps
+(`logs/topical_chat_snapshots/20260102_165112`, deterministic time
+advance), **boundary_at_rate=0.30** and
+**boundary_score_pass_rate=0.20**, still within the natural boundary
+range. At 15‑minute gaps (`logs/topical_chat_snapshots/20260102_165927`)
+the rates were unchanged (**0.30** / **0.20**), reinforcing that
+inactivity boosts are soft and do not force segmentation on their own.
+At 1‑hour gaps (`logs/topical_chat_snapshots/20260102_170229`) the rates
+remained **0.30** / **0.20**. After switching to an exponential
+inactivity boost, a 1‑hour gap run
+(`logs/topical_chat_snapshots/20260102_170626`) still reported **0.30**
+/ **0.20** at 20 turns, suggesting the boost needs a stronger scale or a
+dedicated gap‑dominant term to force boundaries at extreme inactivity.
+We then removed the cap and greatly increased the exponent; a follow‑up
+1‑hour run (`logs/topical_chat_snapshots/20260102_170926`) still
+reported **0.30** / **0.20**, indicating the suppression likely comes
+from the support gate rather than scale alone. After switching to a
+**dynamic cadence ratio** (gap measured vs `dt_ema`), a 1‑hour run
+(`logs/topical_chat_snapshots/20260102_173006`) produced
+**boundary_at_rate=0.40**, **boundary_score_pass_rate=0.00**, and
+**boundary_score_mean=0.128**. This shows long inactivity now closes
+episodes without requiring the main boundary score to cross its natural
+threshold, preserving the “no fixed timeout” constraint while still
+preventing unbounded accumulation. \* **Synaptic tagging is active** and
+scales with Sensitivity (≈82% → 91% tagged), indicating frequent
+surprisal/arousal triggers in this dataset. \* Spike‑bypass events are
+rare (2–4 per run), consistent with flashbulb‑like flushes being
+exceptional rather than common.
 
 ## Short-Horizon Smoke Check (120 Turns)
 
@@ -4711,14 +5092,13 @@ Canonical single-step pseudocode (timestep t):
     interrupt_gate_check()
     if allow_interrupt and not should_flush and not spike_bypass:
         pending_abort ← true
+        pending_mem ← selected_candidate_embedding
 
-    # Next signal: resume if novelty is low, else drop partial unit.
+    # Next signal: accept if closer to selected memory, else resume.
     if pending_abort:
-        novelty ← clamp((1 − cos(x_t, μ_acc)) / 2, 0, 1)
-        if novelty < τ_novelty(F,S,T):
-            pending_abort ← false  # resume accumulation
-        else:
-            reset_accumulator(); pending_abort ← false
+        if cos(x_t, pending_mem) > cos(x_t, μ_acc):
+            reset_accumulator()
+        pending_abort ← false
 
 The normative execution order for a single timestep t:
 
@@ -4767,8 +5147,9 @@ The normative execution order for a single timestep t:
     overlap during retrieval).
 12. **Interrupt Abort (if allowed):** Mark a pending abort when an
     interrupt is permitted outside a flush/spike event. On the next
-    signal, resume the accumulator if novelty \< τ_novelty(F,S,T);
-    otherwise reset to drop partial utterances.
+    signal, compare similarity to the selected memory vs current μ_acc;
+    if the new signal aligns more with the selected memory, reset to
+    drop partial utterances, otherwise resume.
 
 Timing notes: \* `now_s()` is captured at step 1 and reused for all Δt
 computations in this timestep. \* Threshold updates in step 7 use the

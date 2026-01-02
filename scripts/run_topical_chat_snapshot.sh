@@ -13,6 +13,7 @@ STABILITY="${STABILITY:-0.5}"
 SEED="${SEED:-1337}"
 DETERMINISTIC="${DETERMINISTIC:-1}"
 SYNTHETIC_START_MS="${SYNTHETIC_START_MS:-1700000000000}"
+CADENCE_ENABLED="${CADENCE_ENABLED:-0}"
 LABEL_BANK="${LABEL_BANK:-data/label_bank/metadata.json}"
 CONSOLIDATE="${CONSOLIDATE:-1}"
 CONSOLIDATE_CYCLES="${CONSOLIDATE_CYCLES:-2}"
@@ -141,7 +142,7 @@ set +e
   --stability="$STABILITY" \
   --reuse \
   --otel-filter=none \
-  --no-cadence \
+  $( [[ "$CADENCE_ENABLED" == "1" ]] && echo "--cadence-speed=1" || echo "--no-cadence" ) \
   --semantic \
   "${extra_args[@]:-}" 2>&1 | tee "$log"
 run_exit=${PIPESTATUS[0]}

@@ -264,7 +264,26 @@ trigger = (m.metadata.s_emotion_max ≥ θ_intensity) AND
 Flashbulb memories receive extended half-life bonuses based on the memory's peak emotional intensity:
 
 ```
-flashbulb_threshold = lerp(0.9, 0.4, S)
+flashbulb_threshold = lerp(0.97, 0.65, S)
+flashbulb_threshold_eff = flashbulb_threshold × (1 − 0.5 × s_emotion_max)
+                           × (1 − 0.3 × s_arousal_avg)
+# Flashbulb event if intensity exceeds effective threshold
+flashbulb = (m.metadata.s_emotion_max ≥ flashbulb_threshold_eff × rate_adjust)
+# Rate stabilizer keeps flashbulb frequency in a tight band
+flashbulb_target = lerp(0.02, 0.06, S)
+flashbulb_rate_ewma ← EWMA(flashbulb, α = lerp(0.02, 0.12, S))
+rate_adjust = clamp(1 + lerp(1.0, 0.6, S) × (flashbulb_rate_ewma − flashbulb_target),
+                    0.8, 1.2)
+# Contextual percentile gate (embedding‑only, knob‑derived)
+emo_window = round(lerp(24, 96, S) × lerp(0.8, 1.2, T))
+percentile = lerp(0.95, 0.80, S)
+flashbulb_gain = lerp(1.0, 1.1, S)
+flashbulb_threshold_adj = max(flashbulb_threshold_eff × rate_adjust,
+                              Pctl_{percentile}(recent_emotion_intensity, emo_window)
+                              × rate_adjust)
+flashbulb_arousal = lerp(0.7, 0.5, S)
+flashbulb = ((s_arousal_avg ≥ flashbulb_arousal) AND
+             ((flashbulb_gain × s_emotion_max) ≥ flashbulb_threshold_adj))
 # Half-life bonus uses stored memory emotional peak
 emotional_half_life_bonus = exp(lerp(0, ln(3), S)) ×
                              (1 + m.metadata.s_emotion_max)

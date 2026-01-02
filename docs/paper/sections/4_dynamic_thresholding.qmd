@@ -341,17 +341,14 @@ floor = round(lerp(2, 3, T))
 max_signals(F,S,T) = max(floor, round(base × f_scale × s_scale))
 ```
 
-Adaptive cadence:
+Adaptive cadence (gap normalization only; no timeouts):
 
 ```
 dt_ref ← max(dt_ema, dt_floor(T))
 gap_ref_s ← gap_scale(T) × dt_ref
-max_mem_time(T) ← clamp(lerp(2.5, 5.5, T) × gap_ref_s,
-                        lerp(6, 20, T),
-                        lerp(60, 180, T))
 ```
 
-Fallback boundary floor (applies to time/capacity/pressure only):
+Fallback boundary floor (applies to capacity/pressure only):
 
 ```
 boundary_floor(F,S,T) = clamp(lerp(0.05, 0.15, S) × lerp(1.2, 0.8, F) × lerp(1.1, 0.9, T),
@@ -363,12 +360,11 @@ Trigger memory flush when:
 ```
 mem_elapsed ← now_s() − to_s(t_start)
 should_flush = (boundary_score > b_thresh(F, S)) OR
-               (mem_elapsed > max_mem_time(T) AND boundary_score ≥ boundary_floor(F,S,T)) OR
                (pressure_score > b_thresh(F, S) AND boundary_score ≥ boundary_floor(F,S,T)) OR
                (n ≥ max_signals(F,S,T) AND boundary_score ≥ boundary_floor(F,S,T))
 ```
 
-where signal_gap_s = now_s() − to_s(last_signal_ts) is computed at the start of signal processing (before last_signal_ts is updated). Gap timing influences boundary_score via gap_score and sets the adaptive cadence used by max_mem_time, avoiding a fixed flush timer.
+where signal_gap_s = now_s() − to_s(last_signal_ts) is computed at the start of signal processing (before last_signal_ts is updated). Gap timing influences boundary_score via gap_score only; there is no time-based flush.
 
 **Boundary type note:** When the max-signals ceiling triggers a flush, set `boundary_type = "capacity"` for the enclosing episode. This is a hard safety boundary (not a heuristic score) and is still fully knob-derived.
 
@@ -394,7 +390,32 @@ if spike_bypass:
     force_write = true   # bypass S_window > θ_memory
 ```
 
-This keeps flashbulb moments intact while preventing early or highly coherent windows from fragmenting into micro-memories. As the unit matures, spike bypass becomes easier, and low coherence reduces the effective margin.
+  This keeps flashbulb moments intact while preventing early or highly coherent windows from fragmenting into micro-memories. As the unit matures, spike bypass becomes easier, and low coherence reduces the effective margin.
+
+### Inactivity Boost
+
+We avoid hard timeouts for episode boundaries. Instead, when the stream becomes
+quiet and natural indicators are weak, inactivity softly boosts the boundary score:
+
+```
+support_relax = exp(−lerp(0.6, 1.6, S) × lerp(1.15, 0.85, T) × gap_z⁺)
+gap_ratio = signal_gap_s / max(dt_ema, ε)
+gap_z_inact = log1p(max(gap_ratio − 1, 0))
+gap_score_inact = sigmoid(lerp(0.9, 1.8, S) × lerp(1.1, 0.9, T) × gap_z_inact)
+inactivity = gap_score_inact × (1 − support × support_relax)
+k_inact(S,T) = lerp(0.05, 0.25, S) × lerp(1.1, 0.9, T)
+gap_z⁺ = max(0, gap_z_inact)
+inactivity_scale = exp(lerp(0.6, 1.6, S) × lerp(1.1, 0.9, T) × gap_z⁺)
+boundary_score ← boundary_score + k_inact(S,T) × inactivity × inactivity_scale
+gap_force = sigmoid(lerp(2.0, 5.0, S) × lerp(1.1, 0.9, T) ×
+                   (gap_z_inact − lerp(0.9, 0.4, S) × lerp(1.1, 0.9, T)))
+boundary_score ← max(boundary_score, gap_force)
+```
+
+This closes episodes after prolonged inactivity without forcing premature
+flushes during coherent streams. The signal gap is measured relative to the
+observed cadence (dt_ema), so inactivity remains dynamic and adapts to the
+current conversational pace rather than a fixed timeout.
 
 ### Window Score and Refractory
 

@@ -4,6 +4,10 @@
 #include "cortext/core/knobs.hpp"
 #include "cortext/processor/operation_context.hpp"
 #include "cortext/telemetry/telemetry.hpp"
+#include <cctype>
+#include <cmath>
+#include <cstdlib>
+#include <string>
 
 namespace cortext::operations
 {
@@ -13,6 +17,20 @@ namespace
 constexpr double kEpsilon = 1e-9;
 constexpr double kBoundaryVarFloor = 0.0025;
 constexpr int kBoundaryWarmupSignals = 3;
+
+bool
+EnvFlag (const char *name)
+{
+  const char *value = std::getenv (name);
+  if (!value)
+    {
+      return false;
+    }
+  std::string s (value);
+  std::transform (s.begin (), s.end (), s.begin (),
+                  [] (unsigned char c) { return static_cast<char> (std::tolower (c)); });
+  return s == "1" || s == "true" || s == "yes" || s == "on";
+}
 
 double
 NormalizeLocal (double raw, double alpha, double min_var, double gain,
@@ -42,6 +60,14 @@ void
 DetectBoundary::Execute (OperationContext &context,
                          Transaction & /*tx*/) const
 {
+  static const bool disable_time = EnvFlag ("CORTEXT_BOUNDARY_DISABLE_TIME");
+  static const bool disable_pressure
+      = EnvFlag ("CORTEXT_BOUNDARY_DISABLE_PRESSURE");
+  static const bool disable_surprisal
+      = EnvFlag ("CORTEXT_BOUNDARY_DISABLE_SURPRISAL");
+  static const bool disable_natural
+      = EnvFlag ("CORTEXT_BOUNDARY_DISABLE_NATURAL");
+
   const auto &signal = context.GetSignal ();
   auto &p_ctx = context.GetProcessorContext ();
   const auto &config = context.GetConfig ();
@@ -85,10 +111,28 @@ DetectBoundary::Execute (OperationContext &context,
   // Adaptive gap signal (soft influence only)
   const double signal_gap
       = static_cast<double> (signal.timestamp - acc.last_signal_ts) / 1000.0;
-  const double dt_ref = std::max (p_ctx.dt_ema, core::DtFloor (config.stability));
-  const double gap_ref_s = core::GapScale (config.stability) * dt_ref;
+  const double dt_ref = (p_ctx.dt_ema > 0.0) ? p_ctx.dt_ema : signal_gap;
+  const double gap_ref_s = core::GapScale (config.stability)
+                           * std::max (dt_ref, kEpsilon);
   const double gap_z = (signal_gap - gap_ref_s) / std::max (gap_ref_s, kEpsilon);
   const double gap_score = core::Sigmoid (gap_z);
+  const bool gap_has_history = p_ctx.dt_ema > 0.0;
+  const double gap_ratio
+      = gap_has_history ? (signal_gap / std::max (p_ctx.dt_ema, kEpsilon))
+                        : 1.0;
+  const double gap_z_inact
+      = std::log1p (std::max (0.0, gap_ratio - 1.0));
+  const double gap_score_inact
+      = core::Sigmoid (core::Lerp (0.9, 1.8, config.sensitivity)
+                       * core::Lerp (1.1, 0.9, config.stability) * gap_z_inact);
+  const double gap_force_center
+      = core::Lerp (0.9, 0.4, config.sensitivity)
+        * core::Lerp (1.1, 0.9, config.stability);
+  const double gap_force_k
+      = core::Lerp (2.0, 5.0, config.sensitivity)
+        * core::Lerp (1.1, 0.9, config.stability);
+  const double gap_force
+      = core::Sigmoid (gap_force_k * (gap_z_inact - gap_force_center));
 
   // Bayesian change-point inference for boundary probability
   const double h_base = core::Lerp (0.03, 0.18, config.sensitivity)
@@ -96,9 +140,13 @@ DetectBoundary::Execute (OperationContext &context,
   const double h_t_base
       = core::Clamp (h_base * (0.8 + 0.2 * (1.0 - config.focus)), 0.0, 0.5);
 
-  const double surprisal_raw
+  double surprisal_raw
       = context.GetMetric (operations::Metric::embedding_surprisal)
             .value_or (0.0);
+  if (disable_surprisal)
+    {
+      surprisal_raw = 0.0;
+    }
   const double drift_raw = core::Sigmoid (drift_spike);
   const double coh_raw = coh_drop;
   double topic_raw = 0.0;
@@ -160,6 +208,22 @@ DetectBoundary::Execute (OperationContext &context,
   const double support_gate = core::Lerp (0.45, 1.0, support);
   const double gap_gate = core::Lerp (0.10, 0.50, support);
   const double support_boost = core::Lerp (1.0, 1.25, support);
+  const double support_relax_rate
+      = core::Lerp (0.6, 1.6, config.sensitivity)
+        * core::Lerp (1.15, 0.85, config.stability);
+  const double gap_z_inact_pos = std::max (0.0, gap_z_inact);
+  const double support_relax
+      = std::exp (-support_relax_rate * gap_z_inact_pos);
+  const double inactivity
+      = core::Clamp (gap_score_inact * (1.0 - support * support_relax), 0.0, 1.0);
+  const double k_inact
+      = core::Lerp (0.05, 0.25, config.sensitivity)
+        * core::Lerp (1.1, 0.9, config.stability);
+  const double inactivity_exp_rate
+      = core::Lerp (0.6, 1.6, config.sensitivity)
+        * core::Lerp (1.1, 0.9, config.stability);
+  const double inactivity_scale
+      = std::exp (inactivity_exp_rate * gap_z_inact_pos);
 
   const double w_s_eff = w_s * support_gate;
   const double w_d_eff = w_d * support_gate;
@@ -201,6 +265,17 @@ DetectBoundary::Execute (OperationContext &context,
       = (h_t * likelihood)
         / std::max (kEpsilon, h_t * likelihood + (1.0 - h_t) * (1.0 - likelihood));
   boundary_score = core::Clamp (boundary_score, 0.0, 1.0);
+  if (disable_natural)
+    {
+      boundary_score = 0.0;
+    }
+  else if (inactivity > 0.0)
+    {
+      boundary_score
+          = core::Clamp (boundary_score + k_inact * inactivity * inactivity_scale,
+                         0.0, 1.0);
+    }
+  boundary_score = std::max (boundary_score, gap_force);
 
   context.SetBoundaryScore (boundary_score);
 
@@ -234,12 +309,7 @@ DetectBoundary::Execute (OperationContext &context,
       = core::AdaptiveMaxMemoryTime (config.stability, gap_ref_s);
   const double memory_elapsed
       = static_cast<double> (signal.timestamp - acc.t_start) / 1000.0;
-  if (memory_elapsed > max_time && boundary_score >= boundary_floor)
-    {
-      flush = true;
-      timeout_trigger = true;
-      telemetry::AddCounter ("cortext.accumulator.flush_max_time", 1);
-    }
+  // 2. No hard timeouts; inactivity only boosts boundary score.
 
   // 3. Pressure vs capacity (dynamic flush probability)
   const double base_capacity = core::MaxMemoryDrift (config.sensitivity);
@@ -252,7 +322,8 @@ DetectBoundary::Execute (OperationContext &context,
       = core::SurpriseGain (config.sensitivity, config.stability);
   const double pressure_score
       = core::Sigmoid ((saturation_ratio - 1.0) * k_flush);
-  if (pressure_score > b_thresh && boundary_score >= boundary_floor)
+  if (!disable_pressure && pressure_score > b_thresh
+      && boundary_score >= boundary_floor)
     {
       flush = true;
       pressure_trigger = true;
@@ -357,6 +428,9 @@ DetectBoundary::Execute (OperationContext &context,
     telemetry::Attribute::Double ("gap_ref_s", gap_ref_s),
     telemetry::Attribute::Double ("gap_z", gap_z),
     telemetry::Attribute::Double ("gap_score", gap_score),
+    telemetry::Attribute::Double ("inactivity", inactivity),
+    telemetry::Attribute::Double ("inactivity_gain", k_inact),
+    telemetry::Attribute::Double ("inactivity_scale", inactivity_scale),
     telemetry::Attribute::Bool ("trigger_drift", drift_trigger),
     telemetry::Attribute::Bool ("trigger_timeout", timeout_trigger),
     telemetry::Attribute::Bool ("trigger_pressure", pressure_trigger),

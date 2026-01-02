@@ -66,7 +66,7 @@ mem_elapsed ← now_s() − to_s(t_start)     # seconds
 signal_gap ← now_s() − to_s(last_signal_ts)  # seconds
 ```
 
-**Time constants:** All time-related constants are specified with explicit units (e.g., τ_min(T) in seconds). Threshold limits like max_mem_time(T) and gap_scale(T) return values in seconds (gap_scale multiplies dt_ema to form gap_ref_s).
+**Time constants:** All time-related constants are specified with explicit units (e.g., τ_min(T) in seconds). Gap scaling returns values in seconds (gap_scale multiplies dt_ema to form gap_ref_s).
 
 ### No Fixed Behavioral Constants
 
