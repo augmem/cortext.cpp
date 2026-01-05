@@ -274,7 +274,6 @@ ComputeMniGateDecision::Execute (OperationContext &context, Transaction &tx) con
                 created_at
                     = static_cast<uint64_t> (std::any_cast<long long> (it_ts->second));
               }
-
             // Include only if created_at < write_exclusion_ts
             if (created_at < write_exclusion_ts)
               {
@@ -410,7 +409,7 @@ ComputeMniGateDecision::Execute (OperationContext &context, Transaction &tx) con
   const double affect_drive_used = affect_interrupt ? affect_drive : 0.0;
   const double affect_relax
       = 1.0 - cortext::core::InterruptAffectRelaxCoeff (S) * affect_drive_used;
-  const double retrieval_thresh_eff = retrieval_thresh * affect_relax;
+  double retrieval_thresh_eff = retrieval_thresh * affect_relax;
   const double boundary_mult_eff = boundary_mult_base * affect_relax;
 
   // Knob-derived parameters (F/S/T, F_eff/S_eff, retrieval_thresh) are set

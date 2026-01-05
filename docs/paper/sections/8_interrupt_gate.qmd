@@ -49,6 +49,10 @@ retrieval_thresh_eff = retrieval_thresh_interrupt(F,S) × (1 − affect_relax_co
 boundary_mult_eff = boundary_mult × (1 − 0.20S) × (1 − affect_relax_coeff(S) × affect_drive)
 ```
 
+We experimented with scaling the interrupt threshold based on candidate
+diversity, but it regressed abort rates on noisy chat and was removed. The
+current gate relies on the affect‑relaxed threshold above.
+
 ## Marginal Utility Score
 
 The marginal utility (MU) of a candidate memory combines five factors. Context comparisons use memory centroids rather than individual signal embeddings:

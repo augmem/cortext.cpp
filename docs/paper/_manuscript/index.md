@@ -2598,6 +2598,10 @@ Effective thresholds incorporate refractory pressure:
     retrieval_thresh_eff = retrieval_thresh_interrupt(F,S) × (1 − affect_relax_coeff(S) × affect_drive)
     boundary_mult_eff = boundary_mult × (1 − 0.20S) × (1 − affect_relax_coeff(S) × affect_drive)
 
+We experimented with scaling the interrupt threshold based on candidate
+diversity, but it regressed abort rates on noisy chat and was removed.
+The current gate relies on the affect‑relaxed threshold above.
+
 ## Marginal Utility Score
 
 The marginal utility (MU) of a candidate memory combines five factors.
@@ -4860,6 +4864,43 @@ high‑novelty signals), which regressed abort rate:
 
 **Observations:** The novelty‑weighted margin increases abort rate on
 Ubuntu, so we keep the fixed small margin.
+
+We then tested **candidate diversity gating** (raising the interrupt
+threshold when top‑K candidates were label‑only). This also regressed
+abort rate:
+
+-   diversity gating: `logs/topical_chat_snapshots/20260105_001810`
+
+<table>
+<colgroup>
+<col style="width: 20%" />
+<col style="width: 20%" />
+<col style="width: 20%" />
+<col style="width: 20%" />
+<col style="width: 20%" />
+</colgroup>
+<thead>
+<tr>
+<th>mode</th>
+<th>interrupt_turn_rate</th>
+<th>interrupt_abort_rate</th>
+<th>interrupt_semantic_overlap_mean</th>
+<th>boundary_at_rate</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>diversity_gate</td>
+<td>0.488</td>
+<td>0.675</td>
+<td>0.553</td>
+<td>0.094</td>
+</tr>
+</tbody>
+</table>
+
+**Observations:** Diversity‑gated thresholds increased aborts and
+slightly reduced interrupt rate on Ubuntu, so we removed this mechanism.
 
 ## Affect-Gated Sensitivity Sweep (Long Horizon)
 
