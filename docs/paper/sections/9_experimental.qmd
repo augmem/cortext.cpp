@@ -602,6 +602,18 @@ lowering interrupt rate, while the context‑aware comparator increases aborts a
 is a regression. We keep the simple μ_acc comparator with a small knob‑derived
 margin.
 
+We also tested a **novelty‑weighted margin** (more permissive on high‑novelty
+signals), which regressed abort rate:
+
+* novelty‑weighted margin: `logs/topical_chat_snapshots/20260104_203047`
+
+| mode | interrupt_turn_rate | interrupt_abort_rate | interrupt_semantic_overlap_mean | boundary_at_rate |
+| --- | --- | --- | --- | --- |
+| novelty_margin | 0.504 | 0.634 | 0.553 | 0.100 |
+
+**Observations:** The novelty‑weighted margin increases abort rate on Ubuntu,
+so we keep the fixed small margin.
+
 ## Affect-Gated Sensitivity Sweep (Long Horizon)
 
 We evaluated the affect-gated interrupt + retrieval coupling by sweeping Sensitivity while holding **F=0.5, T=0.5**, and running **2 conversations × 360 turns** (`max_total=720`, interleave=1). This isolates how the affect drive and emotion bonus influence interrupt quality.
