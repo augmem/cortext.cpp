@@ -8,12 +8,28 @@
 #include "cortext/telemetry/telemetry.hpp"
 
 #include <algorithm>
+#include <cctype>
+#include <string>
 
 namespace cortext::operations
 {
 
 namespace
 {
+bool
+EnvFlag (const char *name)
+{
+  const char *value = std::getenv (name);
+  if (!value)
+    {
+      return false;
+    }
+  std::string s (value);
+  std::transform (s.begin (), s.end (), s.begin (),
+                  [] (unsigned char c) { return static_cast<char> (std::tolower (c)); });
+  return s == "1" || s == "true" || s == "yes" || s == "on";
+}
+
 /// @brief Create a SignalRecord from the current signal and context
 SignalRecord
 CreateSignalRecord (const Signal &signal, double score, int serial_position,
@@ -116,18 +132,28 @@ UpdateAccumulator::Execute (OperationContext &context,
 
   if (acc.pending_interrupt_abort)
     {
-      bool resume = true;
-      if (acc.mu_acc.size () > 0 && signal.embedding.size () == acc.mu_acc.size ())
+      const bool disable_accept = EnvFlag ("CORTEXT_DISABLE_INTERRUPT_ACCEPT");
+      bool accept = false;
+      const bool can_compare
+          = (acc.pending_interrupt_embedding.size () > 0
+             && acc.pending_interrupt_embedding.size ()
+                    == signal.embedding.size ()
+             && acc.mu_acc.size () == signal.embedding.size ()
+             && acc.mu_acc.size () > 0);
+      if (!disable_accept && can_compare)
         {
-          const double cos = core::CosineSimilarity (signal.embedding, acc.mu_acc);
-          const double novelty
-              = core::Clamp ((1.0 - cos) * 0.5, 0.0, 1.0);
-          const double tau_resume
-              = core::TauNovelty (config.focus, config.sensitivity, config.stability);
-          resume = (novelty < tau_resume);
+          const double sim_selected
+              = core::CosineSimilarity (signal.embedding,
+                                        acc.pending_interrupt_embedding);
+          const double sim_mu
+              = core::CosineSimilarity (signal.embedding, acc.mu_acc);
+          const double margin_base
+              = core::Lerp (0.01, 0.04, config.sensitivity)
+                * core::Lerp (1.1, 0.9, config.stability);
+          accept = (sim_selected > (sim_mu + margin_base));
         }
 
-      if (!resume)
+      if (accept)
         {
           acc.ResetForNextUnit (signal.timestamp);
           context.SetInterruptAborted (true);
@@ -138,6 +164,7 @@ UpdateAccumulator::Execute (OperationContext &context,
           telemetry::AddCounter ("cortext.accumulator.interrupt_resume_total", 1);
         }
       acc.pending_interrupt_abort = false;
+      acc.pending_interrupt_embedding = Eigen::VectorXf ();
     }
 
   // Check if this is first signal after reset (n_signals == 0 means post-reset)

@@ -20,9 +20,28 @@
 #include <unordered_set>
 #include <utility>
 #include <vector>
+#include <cctype>
+#include <cstdlib>
 
 namespace cortext::operations
 {
+
+namespace
+{
+bool
+EnvFlag (const char *name)
+{
+  const char *value = std::getenv (name);
+  if (!value)
+    {
+      return false;
+    }
+  std::string s (value);
+  std::transform (s.begin (), s.end (), s.begin (),
+                  [] (unsigned char c) { return static_cast<char> (std::tolower (c)); });
+  return s == "1" || s == "true" || s == "yes" || s == "on";
+}
+} // namespace
 
 void
 GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transaction &tx) const
@@ -748,6 +767,8 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
   const double w_mem_arousal = w_mem_arousal_raw / w_mem_sum;
 
   const double source_thresh = core::Lerp (0.15, 0.45, cfg.stability);
+  static const bool disable_source_conf
+      = EnvFlag ("CORTEXT_DISABLE_SOURCE_CONF");
   struct FilterStats
   {
     int64_t total = 0;
@@ -802,7 +823,8 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
               }
             continue;
           }
-        if (enforce_source_conf && s.source_confidence < source_thresh)
+        if (!disable_source_conf && enforce_source_conf
+            && s.source_confidence < source_thresh)
           {
             if (stats)
               {

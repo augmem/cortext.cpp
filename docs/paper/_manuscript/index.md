@@ -4501,6 +4501,329 @@ trade‑off. The interrupt threshold and boundary multiplier relax (0.240
 → 0.220; 1.52 → 1.39), confirming affect contributes to gating and not
 just retrieval ranking.
 
+### Interrupt Ablation (Affect Modes, Short Horizon)
+
+We ran a 120‑turn interrupt ablation with `affect_mode` toggles (no
+consolidation). Runs:
+
+-   all: `logs/topical_chat_snapshots/20260102_175025`
+-   interrupt‑only: `logs/topical_chat_snapshots/20260102_180301`
+-   retrieval‑only: `logs/topical_chat_snapshots/20260102_203459`
+-   none: `logs/topical_chat_snapshots/20260102_203514`
+
+<table style="width:100%;">
+<colgroup>
+<col style="width: 16%" />
+<col style="width: 16%" />
+<col style="width: 16%" />
+<col style="width: 16%" />
+<col style="width: 16%" />
+<col style="width: 16%" />
+</colgroup>
+<thead>
+<tr>
+<th>affect_mode</th>
+<th>interrupt_turn_rate</th>
+<th>interrupt_abort_rate</th>
+<th>interrupt_semantic_overlap_mean</th>
+<th>interrupt_context_semantic_overlap_mean</th>
+<th>boundary_at_rate</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>all</td>
+<td>0.475</td>
+<td>0.474</td>
+<td>0.541</td>
+<td>0.658</td>
+<td>0.150</td>
+</tr>
+<tr>
+<td>interrupt</td>
+<td>0.458</td>
+<td>0.400</td>
+<td>0.534</td>
+<td>0.661</td>
+<td>0.158</td>
+</tr>
+<tr>
+<td>retrieval</td>
+<td>0.175</td>
+<td>0.000</td>
+<td>0.496</td>
+<td>0.661</td>
+<td>0.200</td>
+</tr>
+<tr>
+<td>none</td>
+<td>0.458</td>
+<td>0.364</td>
+<td>0.534</td>
+<td>0.657</td>
+<td>0.167</td>
+</tr>
+</tbody>
+</table>
+
+**Observations:** At **S=0.5**, affect‑only interrupts suppress gate
+firing dramatically and eliminate aborts, but reduce interrupt rate.
+Affect‑off mirrors baseline, indicating that non‑affect gating dominates
+interrupt decisions in this dataset. This suggests affect modulation
+primarily acts as a gain on the interrupt gate rather than a precision
+enhancer at mid‑sensitivity.
+
+### Procedural/Sequential Interrupt Ablation
+
+We ablated procedural retrieval and sequential edges (no consolidation,
+120 turns). Runs:
+
+-   no‑procedural: `logs/topical_chat_snapshots/20260103_002742`
+-   no‑sequential: `logs/topical_chat_snapshots/20260103_085920`
+-   no‑procedural + no‑sequential:
+    `logs/topical_chat_snapshots/20260103_092405`
+
+<table style="width:100%;">
+<colgroup>
+<col style="width: 16%" />
+<col style="width: 16%" />
+<col style="width: 16%" />
+<col style="width: 16%" />
+<col style="width: 16%" />
+<col style="width: 16%" />
+</colgroup>
+<thead>
+<tr>
+<th>ablation</th>
+<th>interrupt_turn_rate</th>
+<th>interrupt_abort_rate</th>
+<th>interrupt_semantic_overlap_mean</th>
+<th>interrupt_context_semantic_overlap_mean</th>
+<th>boundary_at_rate</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>no‑procedural</td>
+<td>0.442</td>
+<td>0.358</td>
+<td>0.534</td>
+<td>0.665</td>
+<td>0.158</td>
+</tr>
+<tr>
+<td>no‑sequential</td>
+<td>0.442</td>
+<td>0.358</td>
+<td>0.534</td>
+<td>0.665</td>
+<td>0.158</td>
+</tr>
+<tr>
+<td>both off</td>
+<td>0.442</td>
+<td>0.358</td>
+<td>0.534</td>
+<td>0.665</td>
+<td>0.158</td>
+</tr>
+</tbody>
+</table>
+
+**Observations:** On this dataset, disabling procedural retrieval and
+sequential edges has **no measurable effect** on interrupt behavior at
+120 turns. This suggests the interrupt gate is dominated by
+semantic/label candidates in TopicalChat; procedural/sequence pathways
+likely require tasks with action repetition or stronger temporal
+dependencies to show impact.
+
+### Source-Confidence Gating Ablation
+
+We toggled source‑confidence filtering in graph retrieval using an
+experiment‑only env flag (`CORTEXT_DISABLE_SOURCE_CONF=1`) to compare
+strict vs disabled gating over 120 turns (no consolidation). Runs:
+
+-   baseline (on): `logs/topical_chat_snapshots/20260103_102041`
+-   disabled: `logs/topical_chat_snapshots/20260103_102058`
+
+<table style="width:100%;">
+<colgroup>
+<col style="width: 16%" />
+<col style="width: 16%" />
+<col style="width: 16%" />
+<col style="width: 16%" />
+<col style="width: 16%" />
+<col style="width: 16%" />
+</colgroup>
+<thead>
+<tr>
+<th>source_conf</th>
+<th>interrupt_turn_rate</th>
+<th>interrupt_abort_rate</th>
+<th>interrupt_semantic_overlap_mean</th>
+<th>interrupt_context_semantic_overlap_mean</th>
+<th>boundary_at_rate</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>on</td>
+<td>0.458</td>
+<td>0.400</td>
+<td>0.534</td>
+<td>0.661</td>
+<td>0.158</td>
+</tr>
+<tr>
+<td>off</td>
+<td>0.458</td>
+<td>0.400</td>
+<td>0.534</td>
+<td>0.661</td>
+<td>0.158</td>
+</tr>
+</tbody>
+</table>
+
+**Observations:** For TopicalChat at mid‑knob settings, disabling
+source‑confidence gating has **no measurable effect** on interrupts or
+overlap quality. This likely reflects high source reliability in the
+dataset; a mixed‑provenance or contradiction‑heavy corpus is needed to
+expose the benefit of source monitoring.
+
+### Messy Chat Baseline (Ubuntu Dialogue Corpus)
+
+We ran a long‑horizon baseline on the **Ubuntu Dialogue Corpus
+(validation)** to stress the system with noisy, real IRC chat.
+Configuration: `max_total=720`, `max_conversations=200`, **no
+consolidation**, F=S=T=0.5.
+
+Run: `logs/topical_chat_snapshots/20260103_114812`
+
+-   interrupt_turn_rate: **0.503**
+-   interrupt_abort_rate: **0.622**
+-   interrupt_semantic_overlap_mean: **0.555**
+-   interrupt_context_semantic_overlap_mean: **0.660**
+-   boundary_at_rate: **0.103**
+
+**Observations:** Compared to TopicalChat, Ubuntu’s noisy turns yield a
+higher interrupt rate and substantially higher abort rate, indicating
+the interrupt gate fires often but the acceptance/continuation logic
+struggles with messy streams. This dataset is a better stress test for
+interrupt gating and should be used for future robustness tuning.
+
+### Ubuntu Interrupt Accept/Ignore Ablation
+
+We disabled the interrupt accept/ignore comparator to test whether it
+reduces abort churn on noisy chat. Configuration matches the Ubuntu
+baseline above.
+
+-   baseline: `logs/topical_chat_snapshots/20260103_114812`
+-   accept/ignore disabled (`CORTEXT_DISABLE_INTERRUPT_ACCEPT=1`):
+    `logs/topical_chat_snapshots/20260103_162953`
+
+<table>
+<colgroup>
+<col style="width: 20%" />
+<col style="width: 20%" />
+<col style="width: 20%" />
+<col style="width: 20%" />
+<col style="width: 20%" />
+</colgroup>
+<thead>
+<tr>
+<th>mode</th>
+<th>interrupt_turn_rate</th>
+<th>interrupt_abort_rate</th>
+<th>interrupt_semantic_overlap_mean</th>
+<th>boundary_at_rate</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>baseline</td>
+<td>0.503</td>
+<td>0.622</td>
+<td>0.555</td>
+<td>0.103</td>
+</tr>
+<tr>
+<td>accept_off</td>
+<td>0.511</td>
+<td>0.649</td>
+<td>0.557</td>
+<td>0.094</td>
+</tr>
+</tbody>
+</table>
+
+**Observations:** Disabling accept/ignore **increases** abort rate on
+Ubuntu, indicating the comparator helps stabilize interruption handling
+under noisy conditions. The next step is to tune the acceptance margin
+rather than remove the mechanism.
+
+We then added a **knob‑derived acceptance margin** (requiring the next
+signal to be closer to the selected memory by a small margin).
+Configuration matches the Ubuntu baseline above.
+
+-   margin tuned: `logs/topical_chat_snapshots/20260103_201348`
+-   context‑aware comparator (regression):
+    `logs/topical_chat_snapshots/20260104_182951`
+
+<table>
+<colgroup>
+<col style="width: 20%" />
+<col style="width: 20%" />
+<col style="width: 20%" />
+<col style="width: 20%" />
+<col style="width: 20%" />
+</colgroup>
+<thead>
+<tr>
+<th>mode</th>
+<th>interrupt_turn_rate</th>
+<th>interrupt_abort_rate</th>
+<th>interrupt_semantic_overlap_mean</th>
+<th>boundary_at_rate</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>baseline</td>
+<td>0.503</td>
+<td>0.622</td>
+<td>0.555</td>
+<td>0.103</td>
+</tr>
+<tr>
+<td>accept_off</td>
+<td>0.511</td>
+<td>0.649</td>
+<td>0.557</td>
+<td>0.094</td>
+</tr>
+<tr>
+<td>margin_tuned</td>
+<td>0.507</td>
+<td>0.611</td>
+<td>0.551</td>
+<td>0.107</td>
+</tr>
+<tr>
+<td>context_aware</td>
+<td>0.513</td>
+<td>0.688</td>
+<td>0.555</td>
+<td>0.085</td>
+</tr>
+</tbody>
+</table>
+
+**Observations:** The margin reduces aborts (~1.1pp vs baseline) without
+lowering interrupt rate, while the context‑aware comparator increases
+aborts and is a regression. We keep the simple μ_acc comparator with a
+small knob‑derived margin.
+
 ## Affect-Gated Sensitivity Sweep (Long Horizon)
 
 We evaluated the affect-gated interrupt + retrieval coupling by sweeping

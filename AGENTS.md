@@ -37,7 +37,8 @@
 - Use `examples/topical_chat_analysis` for end-to-end validation before large sweeps.
 - Keep outputs deterministic where possible; prefer fixed seeds when adding new metrics.
 - Run long sweeps with `nohup` (or equivalent) so they survive terminal/session disconnects.
-- Do not use `sleep` to wait/poll background commands; use `scripts/notify-codex.sh` instead.
+- Use `scripts/notify-codex.sh` only for long-running scripts; for short runs, watch the output directly.
+- Do not use `sleep` to wait/poll background commands; prefer `scripts/notify-codex.sh` for long runs or manual tailing for short runs.
 - For long-running scripts, append `&& scripts/notify-codex.sh cortext {{what to do next when the command finishes}}` to send a completion ping. Use an action-oriented message (e.g., “... done — review boundary alignment and update docs”), not just “done”.
 
 ## Docs & Experiment Reporting
