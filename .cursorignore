@@ -1,0 +1,6 @@
+!poc/memstream/examples/
+!poc/ImageBind/
+!models/imagebind/
+!models/
+!third_party/onnxruntime/
+!third_party/onnxruntime/cmake/

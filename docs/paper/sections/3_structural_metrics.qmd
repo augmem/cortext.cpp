@@ -1,0 +1,254 @@
+# Structural Metrics and Composite Scoring {#sec-structural-metrics}
+
+Context definitions (used throughout Table 1 and structural metrics):
+```
+recent_context ← tail(signal_stream, n_ctx(T))  # signal_stream stores μ_acc
+if |recent_context| == 0:
+    μ_ctx ← 0_vector  # define cos(μ_acc, μ_ctx)=0 so map01(cos)=0.5
+else:
+    μ_ctx ← mean(recent_context)
+```
+
+## Embedding-Derived Metrics
+
+### Structural Coherence {#sec-struct-coherence}
+Structural coherence (coherence_struct) measures integration of the current accumulator centroid with the broader context window. This metric is distinct from memory coherence (coherence_mem, defined in @sec-drift-coherence) which tracks within-memory similarity:
+
+```
+coh_neutral(T) = lerp(0.45, 0.55, T)
+if |recent_context| < 2:
+    coherence_struct_t ← coh_neutral(T)  # neutral, stability-derived
+else:
+    raw ← var([cos(μ_acc, c) for c in recent_context])
+    coherence_struct_t ← 1 − clamp(raw, 0, 1)  # range [0, 1]
+```
+
+High structural coherence (low variance in similarities) indicates the current accumulator centroid fits consistently with context. The effective Focus is modulated: F_eff = F × (0.5 + 0.5 × coherence_struct_t).
+
+**Effective Focus usage:** F_eff is a diagnostic modulation of Focus. Unless a formula explicitly references F_eff, the specification uses the midpoint‑biased knobs F̃ and S̃ (see Section 1) for all knob‑derived controls and Table 1 metric formulas.
+
+### Focus Spread {#sec-focus-spread}
+
+Focus spread quantifies the entropy of attention over nearest neighbors:
+
+```
+k ← k_neighbors(T) = round(lerp(8, 32, T))
+```
+Normative note (MUST): kNN_similarities MUST be computed by querying memory_stream with q = μ_acc and k = k_neighbors(T) (not recent_context).
+```
+if |memory_stream| == 0:
+    focus_spread_t ← 0  # cold-start fallback
+else:
+    k_eff ← min(k, |memory_stream|)
+    if k_eff < 2:
+        focus_spread_t ← 0  # avoid degenerate entropy
+    else:
+        kNN_similarities ← topK(vector_search(μ_acc, k=k_eff))
+        # attention_width sharpens or flattens similarities
+        kNN_similarities ← clamp(kNN_similarities × (π / attention_width), −1, 1)
+        p ← softmax(kNN_similarities)
+        focus_spread_t ← H(p) / ln(k_eff)
+```
+
+Values near 1 indicate diffuse attention; values near 0 indicate concentrated attention. The effective Focus is further modulated: F_eff ← F_eff × (1 − focus_spread_t).
+
+### Instantaneous Drift
+
+Drift measures the instantaneous step between consecutive accumulator centroids rather than a smoothed centroid lag:
+
+```
+if x_{t−1} is unset:
+    drift_step_t ← 0
+else:
+    drift_step_t ← cosine_dist(μ_acc_t, μ_acc_{t−1})  # 1 − cos(·), range [0, 2]
+drift_mag_t ← drift_step_t
+```
+
+This uses the current centroid velocity in embedding space, ensuring drift responds immediately to context shifts. A threshold defines an informational drift-boundary signal:
+
+```
+drift_threshold ← lerp(0.10, 0.35, T)
+drift_boundary_t ← (drift_mag_t > drift_threshold)
+```
+Normative note (MUST): drift_boundary_t is informational and MUST NOT trigger a memory flush on its own. Memory flush decisions are defined by should_flush in @sec-boundary.
+
+The instantaneous drift_step_t also informs boundary pressure and focus-width feedback.
+All other composite metrics in this section use the accumulator centroid μ_acc as the effective signal representation.
+
+### Real-Time Prediction Error (EMA)
+
+We model real-time expectation using an exponential moving average (EMA) of the accumulator centroid stream. The predictor state `x_pred_ema` represents the current expectation; low Stability (T) adapts quickly, high Stability adapts slowly.
+
+We treat orthogonal or anti-correlated vectors (cos ≤ 0) as maximum surprise.
+
+```
+β_pred(T) = lerp(0.25, 0.02, T)
+err_ref(S) = lerp(0.25, 0.05, S)
+k_surprise(S,T) = lerp(6, 14, S) × lerp(1.1, 0.9, T)
+
+if x_pred_ema is unset:
+    x_pred_ema ← μ_acc  # initialize expectation
+    surprisal_t ← 0
+else:
+    prediction_error_t ← 1 − max(0, cos(μ_acc, x_pred_ema))
+    surprisal_t ← sigmoid((prediction_error_t − err_ref(S)) * k_surprise(S,T))
+    x_pred_ema ← l2_normalize((1 − β_pred(T)) × x_pred_ema +
+                               β_pred(T) × μ_acc)
+```
+
+This formulation captures prediction failure directly from the stream, without requiring an explicit kinematic trend model.
+
+## Composite Score Computation
+
+The system computes 12 metrics that blend into a composite write score:
+
+| Metric | Knob | Expression |
+| :--- | :--- | :--- |
+| Relevance | ↑F | `relevance_t = clamp(map01(cos(μ_acc, μ_ctx)) × (0.5 + 0.5F), 0, 1)` |
+| Mismatch | ↓F, ↑S | `(1 − F) × S × novelty_t` |
+| Surprise | ↑S, ↓T | `surprisal_t × S × (1 − 0.5T)` |
+| Rarity | ↑F, ↓T | `rarity_t × (0.5 + 0.5F) × (1 − 0.2T)` |
+| Drift | ↓T | `(drift_mag_t / 2) × (1 − T)` |
+| Utility | ↑F, ↓S | `ΔSSE × (0.5 + 0.5F) × (1 − 0.3S)` |
+| Salience | F, S | `(rarity_t + novelty_t) / 2 × (F + S) / 2` |
+| Valence | S, ↓T | `valence_t` |
+| Arousal | S, ↓T | `arousal_t` |
+| Contradiction | ↑S, ↓F | `max(0, S − F)` |
+| Periphery | ↑T | `(1 − relevance_t) × T` |
+| Coverage | ↑F | `F × relevance_t` |
+
+*Table 1: Metric definitions and knob dependencies. Arrows indicate direction of influence.*
+
+## Metric Weight Blending
+
+Metric weights adapt online using recursive least squares (RLS) to minimize prediction error between composite scores and **downstream utility outcomes**. This avoids circular fitting to relevance and turns the blender into an adaptive cognitive policy. Initial weights derive from bootstrap coefficients:
+
+Blender weights are maintained as variables w_* (do not confuse these with control weights like weight_relevance or mismatch_weight). We denote the 12-element blender weight vector as:
+```
+W_blend = [w_relevance, w_mismatch, w_surprise, w_rarity, w_drift,
+          w_utility, w_salience, w_valence, w_arousal, w_contradiction,
+          w_periphery, w_coverage]
+```
+The index i used below (e.g., w_bootstrap[i], w_rls[i]) follows this ordering.
+
+```
+w_bootstrap[i] ← sigmoid(c_F[i]×F + c_S[i]×S + c_T[i]×T + d_i)
+```
+
+Before normalization, control weights modulate the blender weights:
+
+```
+w_relevance ← w_relevance × weight_relevance
+w_mismatch  ← w_mismatch  × mismatch_weight
+w_surprise  ← w_surprise  × weight_surprise
+w_valence   ← w_valence   × weight_valence × emotion_gain
+w_arousal   ← w_arousal   × weight_arousal × emotion_gain
+w_coverage  ← w_coverage  × coverage_gain_floor
+```
+
+Composite score scaling applies after weight normalization:
+
+```
+score_t ← clamp(score_raw × score_gain, 0, 1)
+```
+
+Bootstrap coefficient defaults (canonical; used for initialization):
+
+| Metric | c_F | c_S | c_T | d |
+| --- | --- | --- | --- | --- |
+| relevance | 1.4 | 0.0 | 0.4 | −1.0 |
+| mismatch | −1.0 | 1.0 | 0.0 | −0.5 |
+| surprise | 0.0 | 1.5 | −0.5 | −0.75 |
+| rarity | 0.9 | 0.0 | −0.3 | 0.05 |
+| drift | 0.0 | 0.0 | −1.0 | 0.0 |
+| utility | 0.85 | −0.45 | 0.0 | 0.075 |
+| salience | 1.0 | 1.0 | 0.0 | −1.0 |
+| valence | 0.0 | 1.02 | −0.42 | −0.11 |
+| arousal | 0.0 | 1.8 | −0.2 | −0.9 |
+| contradiction | −2.0 | 2.0 | 0.0 | −1.0 |
+| periphery | 0.0 | 0.0 | 1.0 | −1.0 |
+| coverage | 2.0 | 0.0 | 0.0 | −1.0 |
+
+These coefficients define a canonical initialization map from the three knobs; they do not introduce additional runtime thresholds and may be refit from human data without changing the rest of the system.
+
+### RLS Weight Adaptation (Canonical)
+
+RLS fits the blender weights directly in **weight-space**, using the current metrics as predictors and an observed **outcome signal** as the target. State is retained as a weight vector `w` and covariance matrix `P`.
+
+Target and predictor:
+```
+x_t ← [metric_i] (each metric clamped to [0,1])
+y_t ← outcome_t  # observed downstream utility (in [0,1])
+```
+
+Outcome definition (utility target; normalized to [0,1]):
+```
+o_use ← 1 if a retrieved memory was injected into context and used, else 0
+o_pred ← ΔSSE  # prediction-error reduction proxy (Appendix B)
+o_unc ← clamp(1 − u_uncertainty, 0, 1)
+o_user ← user_accept_t  # explicit accept/correct signal if available, else 0
+
+[w_use, w_pred, w_unc, w_user] ← normalize([0.4 + 0.2F, 0.3 + 0.2S, 0.2 + 0.2T, 0.1])
+outcome_t ← clamp(w_use×o_use + w_pred×o_pred + w_unc×o_unc + w_user×o_user, 0, 1)
+
+α_out(T) = lerp(0.12, 0.03, T)
+outcome_pred_t ← EWMA(outcome_pred_{t−1}, outcome_t, α_out(T))
+δ_reward_t ← outcome_t − outcome_pred_t  # reward prediction error for DA-like modulation
+```
+
+Update cadence and forgetting:
+```
+k_update = round(lerp(1, 8, T))  # update every k_update signals
+λ(T) = 0.90 + 0.09T              # forgetting factor
+```
+
+RLS update (performed when step % k_update == 0):
+```
+y_hat ← wᵀ x_t
+e_t ← y_t − y_hat
+K ← (P x_t) / (λ + x_tᵀ P x_t)
+w ← clamp(w + K × e_t, 0, 1)
+P ← (I − K x_tᵀ) P / λ
+```
+
+Note: RLS fits **unnormalized** weights `w`; normalization happens later in composite score computation.
+
+Initialization:
+```
+w_0 ← w_bootstrap   # from the coefficient table above
+P_init(T) = lerp(500, 2000, 1 − T)
+P_0 ← diag(P_init(T))
+```
+
+Interpretation-only window size:
+```
+N ← round(lerp(64, 512, T))  # effective fitting window (interpretation only)
+```
+
+The fitted weights blend with bootstrap weights based on RLS confidence:
+
+```
+τ_rls ← lerp(20.0, 80.0, T)
+t ← signals_processed  # global step count (maturity)
+confidence_rls ← 1 − exp(−t / τ_rls)
+w_rls01[i] ← clamp(w[i], 0, 1)  # constrain fitted weights to mixture range
+weight_i(t) ← clamp((1 − confidence_rls) × w_bootstrap[i] +
+                      confidence_rls × w_rls01[i], 0, 1)
+```
+
+### Score Normalization
+
+Composite score computation requires careful normalization:
+
+```
+for each metric i:
+    m01[i] = clamp(metric[i], 0, 1)
+weight_sum ← Σ weights[i]
+if weight_sum < ε: return 0
+weights_norm[i] ← weights[i] / weight_sum
+score ← clamp(Σ weights_norm[i] × m01[i], 0, 1)
+```
+
+Invariant (MUST): all 12 Table 1 metric values are defined on [0, 1].
+
+Weight normalization is critical: with 12 metrics and raw weights averaging ~0.6, the sum approaches 7.2. Without normalization, weighted sums would saturate and collapse variance.

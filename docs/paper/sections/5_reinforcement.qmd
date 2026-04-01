@@ -1,0 +1,203 @@
+# Reinforcement and Decay Dynamics {#sec-reinforcement}
+
+## Memory Strength Model {#sec-memory-strength}
+
+Each memory maintains **multi-timescale traces** rather than a single leaky bucket. A mixture of fast/medium/slow/ultra-slow traces yields a power-law forgetting curve while preserving plasticity.
+
+```
+N_traces(T) = 2 + round(2T)  # 2..4 coupled traces
+τ_fast  = 0.10 × half_life
+τ_med   = 0.50 × half_life
+τ_slow  = 2.00 × half_life
+τ_ultra = 8.00 × half_life
+τ_list = [τ_fast, τ_med, τ_slow, τ_ultra]
+
+α_min_S = 0.05; α_span_S = 0.35
+α_S(t) = α_min_S + S × α_span_S × u(t)
+used_flag(m) = 1 if m was retrieved and used in current step, else 0
+```
+
+Trace updates (for i in 1..N_traces):
+```
+λ_i ← ln(2) / τ_list[i]
+trace_i ← clamp(trace_i × exp(−λ_i × Δt) +
+                (α_S(t) × used_flag(m)) / N_traces, 0, 1)
+```
+
+Trace coupling encourages long-lived knowledge without freezing plasticity:
+```
+coupling = 0.05 + 0.10T
+trace_{i+1} ← clamp(trace_{i+1} + coupling × trace_i, 0, 1)
+```
+
+Combined strength uses a knob-shaped mixture that favors slow traces as Stability increases:
+```
+w_raw ← [0.55 − 0.20T, 0.25, 0.15 + 0.10T, 0.05 + 0.10T]
+w ← normalize(w_raw[1..N_traces])
+strength_t ← clamp(Σ_i w_i × trace_i, 0, 1)
+```
+
+Δt is measured per memory using its last access timestamp:
+
+```
+Δt(m) ← now_s() − to_s(m.last_access); if last_access is unset, use created_at
+```
+
+Memories falling below the periphery cutoff are candidates for eviction. **Only
+LONG_TERM memories are evicted**; ASSOCIATION and LABEL nodes are retained to
+stabilize summary/label retrieval and are pruned during explicit consolidation.
+
+```
+periphery_cutoff(T) = lerp(0.05, 0.25, T)
+if m.kind == LONG_TERM AND strength_t < periphery_cutoff(T): evict(m)
+```
+
+## Contextual Gain and Per-Memory Stability (Definitions)
+
+Contextual gain is a per-retrieval signal used by multiple feedback loops:
+
+```
+contextual_gain_t(m) ← cos(μ_acc, m.embedding)    # if m was retrieved and used (range [−1, 1])
+contextual_gain_t(m) ← undefined                # otherwise
+```
+
+When undefined, treat contextual_gain_t(m) as 0 in downstream updates. Persisted per-memory gain is tracked as a smoothed value:
+
+```
+L_cg = round(lerp(8, 32, T))
+α_cg = 2 / (L_cg + 1)
+contextual_gain(m) ← EWMA(contextual_gain(m), contextual_gain_t(m), α_cg)
+```
+
+Per-memory stability initializes at creation and is bounded:
+
+```
+stability(m)_init = 1.0
+stability(m) ← clamp(stability(m), 0.0, 2.0)
+```
+
+Retrieved vs used:
+
+```
+retrieved(m) = memory returned by retrieval (vector or graph expansion)
+used(m) = retrieved(m) AND injected into active context after gate decisions
+```
+
+Contextual gain is only measured for used memories.
+
+## Influence-Weighted Updates
+
+When contextual gain signals are available, influence factors modulate reinforcement:
+
+```
+influence_factor ← (used_count / max(retrieved_count, 1)) ×
+                    clamp(contextual_gain(m), −1, +1)
+boost ← clamp(S × used_flag(m) + F × influence_factor, 0, 1)
+trace_fast ← clamp(trace_fast + 0.6 × boost, 0, 1)
+trace_med  ← clamp(trace_med  + 0.3 × boost, 0, 1)
+trace_slow ← clamp(trace_slow + 0.1 × boost, 0, 1)
+```
+
+## Reinforcement Graph Maintenance
+
+Co-retrieved memories also form *reinforces* edges in the ASSOCIATIONS graph.
+These edges are strengthened during retrieval/use and **only decayed during
+explicit consolidation cycles** (triggered externally via `cortext.consolidate()`),
+matching the system’s “idle-time consolidation” policy. This prevents per-turn
+decay from erasing fresh reinforcement and keeps runtime retrieval updates
+stable while still allowing long-term pruning during consolidation.
+
+## Causal Feedback Loop {#sec-feedback}
+
+The system tracks causal influence of retrieved memories on generation quality through contextual gain—the semantic alignment (cosine similarity) between the current signal embedding and the retrieved memory embedding.
+
+### Focus Feedback
+
+```
+αF_base = 0.10; βF_base = 0.05
+weight_relevance_t ← weight_relevance
+attention_width_t ← attention_width
+for each used memory m:
+    if contextual_gain(m) > 0:
+        weight_relevance_t += αF_base × contextual_gain(m)
+        attention_width_t *= (1 − βF_base)
+    else:
+        attention_width_t *= (1 + βF_base)
+# Drift-responsive dilation + restorative pull to prior
+dilation_force ← S × (1 − T) × drift_step_t
+restoring_force ← F × (attention_width_prior − attention_width_t)
+attention_width_t ← attention_width_t + dilation_force + restoring_force
+weight_relevance ← clamp(weight_relevance_t, 0, 1)
+attention_width_t ← clamp(attention_width_t,
+                          attention_width_min, attention_width_max)
+attention_width ← attention_width_t
+```
+
+Positive contextual gain narrows attention and boosts relevance weighting; negative gain widens attention to explore alternatives.
+The drift_step_t term is the instantaneous drift signal from @sec-structural-metrics.
+
+### Sensitivity Feedback
+
+```
+η_base = 0.10
+weight_novelty_t ← weight_novelty
+for each used memory m:
+    novelty_reward ← 1 − sim(m.embedding, recent_context)
+    weight_novelty_t += η_base × (novelty_reward ×
+                         contextual_gain(m) −
+                         redundancy(m, recent_context))
+weight_novelty_t ← clamp(weight_novelty_t, 0, 1)
+weight_novelty ← weight_novelty_t
+```
+
+This rewards novelty that proves useful while penalizing redundant retrievals.
+
+### Stability Feedback
+
+```
+γT_base = 0.05
+for each used memory m:
+    if contextual_gain(m) > 0:
+        stability_t(m) ← stability(m) + γT_base
+    else:
+        stability_t(m) ← stability(m) × (1 − γT_base)
+    stability(m) ← clamp(stability_t(m), 0.0, 2.0)
+```
+
+The mean stability of used memories provides adjustment to the half-life target:
+
+```
+adj ← clamp(mean(stability(m_used)) − 1.0, −0.25, +0.25)
+ΔHalfLife_adj_t ← adj
+```
+
+This factor is consumed by the Stability update (@sec-stability-update), avoiding conflicting adjustments between feedback mechanisms.
+
+## Generation Influence Tracking
+
+When generation embeddings are available, influence incorporates output trajectory:
+
+```
+Δḡ ← l2_normalize(ḡ_t) − l2_normalize(ḡ_{t−1})
+drift_mag_gen ← ‖Δḡ‖
+drift_contribution(m) ← (drift_mag_gen / 2) ×
+                         max(0, cos(m.embedding, l2_normalize(Δḡ)))
+```
+
+Total influence blends contextual gain, generation similarity, and drift contribution:
+
+```
+λ₁ = 0.5; λ₂ = 0.4; λ₃ = 0.3
+influence(m) ← λ₁ × contextual_gain(m) +
+                λ₂ × cos(m.embedding, ḡ_t) −
+                λ₃ × drift_contribution(m)
+```
+
+Sustained influence accumulates over a stability-dependent horizon:
+
+```
+L_sustain(T) = round(lerp(3, 5, T))
+sustained_influence ← EWMA(sustained_influence,
+                           influence(m),
+                           α = 2 / (L_sustain(T) + 1))
+```

@@ -1,0 +1,207 @@
+# Appendix A. State Variables Map {#sec-app-state .unnumbered}
+
+This appendix enumerates the state variables used by the specification and separates retained state (carried across timesteps) from per-step derived quantities. The canonical source for section references is `docs/paper/sections/*.qmd`; anchors in these files are authoritative when resolving cross-reference drift.
+
+## State + Initialization (Canonical) {#sec-state-init .unnumbered}
+
+On cold start (no persisted state), initialize retained state as follows (unless otherwise specified by knob priors):
+
+* **Global defaults:** `signals_processed = 0`, `u_uncertainty = 0`, `mood_vector = 0_vector`, `last_mood_ts = now_ms()`, `theta_dynamic = theta_target = θ_prior(F,S,T)`, `hysteresis = lerp(0.02, 0.25, T)`, `half_life = base_half_life(T)`, `m_rate = 0`, `rho_hat_prev = 0`, `dt_ema = 0`, `rate_ticks = 0`, `reliability = 1`, `retention_ema = 0`, `last_rate_timestamp = now_ms()`, `last_retrieval_ts = 0`, `last_embedding = unset`, `x_pred_ema = unset`, `outcome_pred = 0`, `φ_t = 0`.
+* **Accumulator defaults (per stream):** `μ_acc = 0_vector`, `c_t = 0_vector`, `drift_acc = 0`, `s_sum = 0`, `s_max = 0`, `n = 0`, `e_peak = 0_vector`, `emo_max = 0`, `arousal_sum = 0`, `acc_signals_window = []`, `t_start = 0`, `last_signal_ts = 0`, `last_write_ts = 0`, `eta_acc = 0`, `coherence_prev = 0`, `drift_accum = 0`, `drift_at_last_interrupt = 0`, `drift_acc_pacing = 0`, `x_last_check = unset` (μ_acc), `prev_x = unset` (μ_acc).
+* **Per-memory defaults (on insert):** `strength = 1`, `trace_fast = 0`, `trace_med = 0`, `trace_slow = 0`, `trace_ultra = 0`, `use_frequency = 0`, `stability = 1`, `connectivity = 0`, `drift_mag = 0`, `influence = 0`, `sustained_influence = 0`, `contextual_gain = 0`, `redundancy = 0`, `pre_activation = 0`, `lability_state = 0`, `suppression_count = 0`, `suppression = 0`, `flashbulb = 0`, `s_emotion_max = 0`, `s_arousal_avg = 0`, `boundary_score = 0`, `tagged = false`, `tag_expires_at = 0`, `context = 0_vector`, `source_model = {origin: 'unknown', reliability: 0.5, contradiction_count: 0, last_verified_ts: 0}`, `versions = {evidence_packets: [], reconstructions: []}`.
+* **RLS defaults:** `w_* = w_bootstrap`, `P = diag(1000)`, `blender_ready = false`, `blender_update_count = 0`.
+* **Knob-derived control parameters (initialized from priors):** `weight_relevance`, `attention_width`, `coverage_gain_floor`, `mismatch_weight`, `weight_novelty`, `weight_surprise`, `weight_valence`, `weight_arousal`, `emotion_gain`, `score_gain`, `rate_target`, `rate_decay`, `periphery_half_life`, `salience_half_life`, `drift_weight`.
+* **Buffers:** `signal_stream` (μ_acc stream), `score_stream`, `memory_stream`, `recent_memory_centroids`, `index_store`, `procedural_store` start empty.
+* **Retention history:** `retention_history` starts empty (populated after the first signal step).
+
+* **Accumulator state (per stream; retained across timesteps):**
+  * `{μ_acc, c_t, drift_acc, s_sum, s_max, n, e_peak, emo_max, arousal_sum, eta_acc, coherence_prev, acc_signals_window, t_start, last_signal_ts, last_write_ts, drift_accum, drift_at_last_interrupt, drift_acc_pacing, x_last_check, prev_x}`
+
+* **Global state (retained across timesteps):**
+  * `{signals_processed, u_uncertainty, mood_vector, last_mood_ts, theta_dynamic, theta_target, hysteresis, half_life, m_rate, rho_hat_prev, dt_ema, rate_ticks, reliability, retention_ema, last_rate_timestamp, last_retrieval_ts, last_embedding, x_pred_ema, outcome_pred, φ_t, weight_relevance, attention_width, coverage_gain_floor, mismatch_weight, weight_novelty, weight_surprise, weight_valence, weight_arousal, emotion_gain, score_gain, rate_target, rate_decay, periphery_half_life, salience_half_life, drift_weight, blender_ready, blender_update_count, blender_P}`
+
+* **Buffers (retained across timesteps; bounded by window rules):**
+  * `{signal_stream, score_stream, memory_stream, recent_memory_centroids, index_store, procedural_store, retention_history}`
+
+* **Recorded signal fields (per signal):**
+  * `{coherence_struct_t → SIGNALS.coherence, focus_spread_t → SIGNALS.focus_spread}`
+
+* **Recorded global fields:**
+  * `{u(t) → STATE.u_uncertainty, M_t → STATE.mood_vector}`
+
+* **Per-step derived scalars/vectors (ephemeral; recomputed each step):**
+  * `{signal_gap_s, coherence_curr, s_avg, S_window, boundary_score, max_signals, max_signal_flush, should_flush, write_memory, Δwrites, q_retrieval, ACh_t, NE_t, DA_t}`
+
+# Appendix B. Derived Signals: Definitions and Bounds {#sec-app-derived .unnumbered}
+
+This appendix defines non-trivial derived signals used throughout the specification. Unless otherwise stated, all derived scalars are clamped to [0, 1].
+
+**novelty:** A normalized dissimilarity-to-context signal computed on the accumulator centroid.
+```
+max_cos ← max_{c ∈ recent_context} cos(μ_acc, c)  # in [−1, 1]
+novelty_t ← clamp((1 − max_cos) / 2, 0, 1)
+```
+Fallback: if recent_context is empty, set novelty_t ← 1.
+
+**μ_sim:** A normalized mean similarity to context.
+```
+mean_cos ← mean_{c ∈ recent_context} cos(μ_acc, c)
+μ_sim ← clamp((mean_cos + 1) / 2, 0, 1)
+```
+Fallback: if recent_context is empty, set μ_sim ← 0.5.
+
+**rarity_t:** A normalized rarity signal defined as dissimilarity-to-context mean.
+```
+rarity_t ← clamp(1 − μ_sim, 0, 1)
+```
+Fallback: inherits μ_sim fallback, so rarity_t defaults to 0.5 when recent_context is empty.
+
+**relevance_to_task(q, task_ctx):** A normalized relevance of embedding q to a task context set.
+```
+if |task_ctx| == 0: return 0.5
+return clamp((cos(q, mean(task_ctx)) + 1) / 2, 0, 1)
+```
+
+**novelty_to_set(q, S_set_embeddings):** A normalized novelty of q relative to a set of embeddings.
+```
+novelty_to_set(q, S_set_embeddings) ← 1 − redundancy(q, S_set_embeddings)
+```
+
+**ΔSSE:** A normalized improvement in reconstruction/prediction error (utility proxy).
+```
+ΔSSE ← clamp((SSE_prev − SSE_curr) / max(SSE_prev, ε), 0, 1)
+```
+Definitions:
+```
+SSE_curr ← ‖μ_acc − x_pred_t‖^2          # prediction error at t (x_pred_t = x_pred_ema for EMA predictor)
+SSE_prev ← previous SSE_curr (t−1)     # or EWMA if smoothing is used
+```
+Fallback: if no prediction model is available, or if dimensions mismatch, set ΔSSE ← 0.
+
+**redundancy(a, S_set):** A normalized redundancy of item a w.r.t. a set S_set.
+```
+redundancy(a, S_set) ← max_{s ∈ S_set} clamp((cos(a, s) + 1) / 2, 0, 1)
+```
+Fallback: if S_set is empty, redundancy(a, S_set) ← 0.
+
+**coverage_gain(candidate | included_set):** Incremental coverage contribution of adding candidate.
+```
+coverage_gain(candidate | included_set) ← 1 − redundancy(candidate, included_set)
+```
+
+# Appendix C. Edge Case Rules {#sec-app-edge .unnumbered}
+
+These rules resolve empty-store and small-store cases to preserve causality and avoid undefined metrics.
+
+* **memory_stream empty:** kNN returns empty; retrieval returns no candidates; graph traversal is skipped. Set `focus_spread_t = 0`.
+* **memory_stream small:** use `k_eff = min(k_neighbors(T), |memory_stream|)`. If `k_eff < 2`, set `focus_spread_t = 0`.
+* **graph absent or empty:** skip graph traversal; use vector search only.
+* **recent_context empty:** apply fallbacks defined in Appendix B (e.g., `novelty_t = 1`, `μ_sim = 0.5`, `rarity_t = 0.5`, `μ_ctx = 0_vector` so `map01(cos)=0.5`).
+* **recent_scores empty:** set `observed_p90 ← θ_prior` in threshold updates.
+
+# Appendix D. Main Loop Execution Order and Normative Invariants {#sec-app-loop .unnumbered}
+
+This ordering is canonical and supersedes any other sequence described elsewhere in the document.
+
+Canonical single-step pseudocode (timestep t):
+
+```
+# Main loop (single timestep t)
+now_s, now_ms, x_t ← read_inputs()
+update_accumulator_embedding(x_t)  # updates μ_acc for current unit
+recent_context ← tail(signal_stream, n_ctx(T))  # signal_stream stores prior μ_acc
+
+# Structural metrics + uncertainty
+coherence_struct_t, focus_spread_t, drift_mag_t, surprisal_t ← compute_structural_metrics(μ_acc)
+x_pred_ema ← update_prediction_ema(x_pred_ema, μ_acc, T)  # after surprisal_t
+u_t ← update_uncertainty(...)
+
+# Adaptation + scoring
+update_control_parameters(...)
+score_t ← compute_composite_score(...)
+score_stream.append(score_t)
+update_accumulator_scores(score_t, μ_acc)
+signal_stream.append(μ_acc)
+
+# Threshold updates
+θ_target ← prior_evidence_blend(...)
+Δθ_* ← compute_threshold_deltas(...)
+θ_dynamic ← update_theta_dynamic(...)
+hysteresis ← update_hysteresis(...)
+
+# Accumulator + boundary
+update_accumulator(...)
+boundary_score ← compute_boundary_score(...)
+spike_bypass ← check_spike_bypass(score_t, θ_dynamic, mem_maturity, coherence_t)
+should_flush ← boundary_decision(boundary_score, time_caps, spike_bypass)
+θ_memory ← θ_dynamic × M_write_refrac
+write_memory ← force_write OR (should_flush AND (S_window > θ_memory))
+Δwrites ← 1 if write_memory else 0  # computed immediately after write decision
+
+# Post-write and retrieval (q_retrieval captured before any reset)
+if write_memory: commit_memory_unit(); last_write_ts ← now_ms()
+q_retrieval ← l2_normalize(μ_acc)  # cache current-unit query
+streaming_pacing_check()
+graph_retrieval(q_retrieval)
+update_rate_state(Δwrites)
+if should_flush: reset_accumulator()  # regardless of write outcome
+
+# Interrupt gate (consumes retrieved candidates)
+interrupt_gate_check()
+if allow_interrupt and not should_flush and not spike_bypass:
+    pending_abort ← true
+    pending_mem ← selected_candidate_embedding
+
+# Next signal: accept if closer to selected memory, else resume.
+if pending_abort:
+    if cos(x_t, pending_mem) > cos(x_t, μ_acc):
+        reset_accumulator()
+    pending_abort ← false
+```
+
+The normative execution order for a single timestep t:
+
+1.  **Read Inputs:** `x_t`, `now_s()`, `system_time_ms`.
+2.  **Update Accumulator (Embedding):** Update `μ_acc` with `x_t` (no score aggregation yet).
+3.  **Prepare Context:** Retrieve `recent_context ← tail(signal_stream, n_ctx(T))` (prior μ_acc values only).
+4.  **Compute Structural Metrics:** `coherence_struct`, `focus_spread`, `drift`, `surprisal` using `μ_acc`, then update `x_pred_ema` for the next step.
+5.  **Update Uncertainty:** `u(t)`.
+6.  **Compute Adaptation Dynamics:**
+    *   Update `α_F(t)`, `α_T(t)`.
+    *   Update `weight_relevance`, `half_life`.
+    *   Update `emotion` and `mood` state.
+7.  **Compute Composite Score:**
+    *   Compute all 12 metrics.
+    *   Update RLS weights `W_blend`.
+    *   Compute `score_t`. Append to `score_stream`.
+    *   Update accumulator score aggregates (`s_sum`, `s_max`, `e_peak`) using `score_t`.
+    *   Append `μ_acc` to `signal_stream`.
+8.  **Update Thresholds:**
+    *   Compute `θ_target` (prior/evidence).
+    *   Compute `Δθ` terms (homeo, sens, prec, emo, mood).
+    *   Update `θ_dynamic`. Update `hysteresis`.
+9.  **Execute Memory Accumulation:**
+    *   Accumulator now holds `μ_acc`, `drift_acc`, `s_max`, etc.
+    *   Compute `boundary_score` and `should_flush`.
+    *   Check `spike_bypass` using the effective spike margin scaled by
+        `mem_maturity` and `coherence_t`.
+    *   Compute `S_window` and `θ_memory`.
+    *   Decide `write_memory`.
+10. **Post-Write Updates and Retrieval:**
+    *   If `write_memory`: Write to `memory_stream`. Update `last_write_ts`.
+    *   Cache `q_retrieval ← μ_acc` before any accumulator reset.
+    *   Run streaming pacing and retrieval using `q_retrieval`.
+    *   Update `rate_state` (homeostatic controller).
+    *   If `should_flush` (regardless of write): Call `reset_accumulator()`.
+11. **Run Interrupt Gate:** Check for streaming interrupt using retrieved candidates (already filtered by write‑exclusion and WM overlap during retrieval).
+12. **Interrupt Abort (if allowed):** Mark a pending abort when an interrupt is permitted outside a flush/spike event. On the next signal, compare similarity to the selected memory vs current μ_acc; if the new signal aligns more with the selected memory, reset to drop partial utterances, otherwise resume.
+
+Timing notes:
+*   `now_s()` is captured at step 1 and reused for all Δt computations in this timestep.
+*   Threshold updates in step 7 use the score computed in step 6.
+*   Rate updates in step 9 use Δwrites from the current step’s `write_memory` decision.
+
+**Normative Invariants:**
+*   **Causality:** Step `k` uses only values computed in steps `1` through `k` or retained from `t-1`.
+*   **Write Atomicity:** A "write" is an atomic commit of a `should_flush` unit. Partial units are never written.
+*   **Gap Consistency:** `now_s()` is fixed at step 1. All `Δt` calculations use this fixed value.

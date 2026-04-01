@@ -1,0 +1,202 @@
+# Interrupt Gate and Streaming Integration {#sec-interrupt}
+
+The interrupt gate controls when retrieved memories enter active context during streaming generation. The gate balances novelty value against disruption cost. The interrupt gate operates on memory-level context, using centroids (μ_acc) rather than individual signal embeddings for novelty and relevance computation. All thresholds and gains in this section are derived from the three knobs (F, S, T); no fixed behavioral constants are introduced.
+
+**Note:** As defined in Section 1, all knob symbols here use the midpoint‑biased values F̃ and S̃ (T is unmodified). For affective gain, we use a lighter bias \( \tilde{S}_{affect} = \mathrm{BiasMid}(S, -0.06) \) to preserve mid‑range affect modulation.
+
+## Marginal Utility Computation
+
+Novelty thresholds scale with knobs and refractory state:
+
+```
+τ_novelty = lerp(0.10, 0.35, F) × (1 − 0.15S) × (1 + 0.3T)
+τ_mu = lerp(0.08, 0.18, F) × (1 − 0.4S) × (1 + 0.4T)
+retrieval_thresh(F) = lerp(0.12, 0.45, F)
+retrieval_thresh_interrupt(F,S) = retrieval_thresh(F) × (1 − 0.12S)
+affect_relax_coeff(S) = lerp(0.15, 0.55, S_affect)
+affect_gain(S) = lerp(1.0, 2.4, S_affect)
+weights_aff_raw = [lerp(0.30, 0.55, S_affect), lerp(0.30, 0.55, S_affect), lerp(0.10, 0.20, S_affect)]
+[w_arousal, w_emotion, w_salience] = normalize(weights_aff_raw)
+affect_drive = clamp(affect_gain(S) × (w_arousal × arousal + w_emotion × emotion_intensity + w_salience × salience), 0, 1)
+```
+
+Refractory dynamics suppress rapid successive interrupts:
+
+Interrupt state (per stream):
+```
+prev_x is unset on the first signal of a stream; set prev_x ← μ_acc after processing each signal
+first_step ← (prev_x is unset for this stream)
+if first_step:
+    # cold start: do not update drift_accum
+    drift_accum ← drift_accum
+else:
+    drift_accum ← drift_accum + cosine_dist(μ_acc, prev_x)  # cumulative drift
+Δ ← drift_accum − drift_at_last_interrupt  # cumulative drift since last interrupt
+τ_refrac = lerp(24, 96, T) × lerp(1.4, 1.0, S)
+k_refrac = lerp(0.20, 0.05, T) × lerp(0.8, 1.2, F)
+M_refrac = 1.0 + k_refrac × exp(−Δ / τ_refrac)
+boundary_mult_eff = boundary_mult × (1 − 0.20S)  # relax non-boundary MU at higher S
+```
+On interrupt: set drift_at_last_interrupt ← drift_accum (resetting Δ to 0 for subsequent signals).
+
+Effective thresholds incorporate refractory pressure:
+
+```
+τ_novelty_eff = τ_novelty × M_refrac
+acc_maturity = clamp(n / win_coh(T), 0, 1)  # n = signals accumulated in current unit
+τ_mu_eff = τ_mu × M_refrac × (1 + (1 − acc_maturity) × lerp(0.4, 1.0, T))
+retrieval_thresh_eff = retrieval_thresh_interrupt(F,S) × (1 − affect_relax_coeff(S) × affect_drive)
+boundary_mult_eff = boundary_mult × (1 − 0.20S) × (1 − affect_relax_coeff(S) × affect_drive)
+```
+
+We experimented with scaling the interrupt threshold based on candidate
+diversity, but it regressed abort rates on noisy chat and was removed. The
+current gate relies on the affect‑relaxed threshold above.
+
+## Marginal Utility Score
+
+The marginal utility (MU) of a candidate memory combines five factors. Context comparisons use memory centroids rather than individual signal embeddings:
+
+```
+# Context window contains recent memory centroids, not individual signals
+ctx_window ← recent_memory_centroids  # bounded deque of recent memory centroids (μ_acc)
+q_retrieval ← l2_normalize(μ_acc)  # accumulator centroid query
+wm_set ← {embedding(w) | w ∈ working_memory}
+included_set ← wm_set ∪ ctx_window  # context inclusion set for redundancy/coverage
+```
+Fallback: if included_set is empty, treat redundancy(·, included_set) = 0. If wm_set is empty, set overlap_star = −1.
+```
+if |ctx_window| == 0:
+    ctx_centroid ← q_retrieval  # fallback: use current unit centroid
+else:
+    ctx_centroid ← mean(ctx_window)  # centroid of recent memory centroids
+
+weights_mu_raw = [lerp(0.40, 0.60, F),   # coverage gain
+         lerp(0.35, 0.25, F),   # relevance
+         lerp(0.15, 0.25, S),   # redundancy penalty
+         lerp(0.15, 0.25, S),   # incoherence penalty
+         lerp(0.20, 0.50, S)]   # surprise bonus
+[weight_cov, weight_rel, weight_red, weight_incoh, weight_surp] = normalize(weights_mu_raw)
+
+novelty_ctx = 1.0 if |ctx_window| == 0 else clamp((1 − max_{c ∈ ctx_window} cos(candidate, c)) / 2, 0, 1)
+surprise_bonus = surprisal_t × novelty_ctx × acc_maturity
+
+mu = weight_cov × coverage_gain(candidate | included_set) +
+      weight_rel × map01(cos(candidate, ctx_centroid)) −
+      weight_red × redundancy(candidate, included_set) −
+      weight_incoh × (1 − coherence_struct_t) +
+      weight_surp × surprise_bonus
+```
+
+With map01 applied, each MU term is in [0, 1], so μ is calibrated to the same range as τ_mu.
+
+## Gate Decision Logic
+
+Duplicate suppression threshold:
+
+```
+dup_thresh = lerp(0.985, 0.95, F) × (0.98 + 0.02T)
+K = round(lerp(10, 6, F))  # candidates to evaluate
+```
+
+Higher Focus lowers `dup_thresh`, making duplicate suppression stricter.
+
+### Write Exclusion Filter
+
+Memories stored during the current accumulation unit are excluded from interrupt consideration to prevent self-triggering. Using the accumulation start timestamp ensures all memories written within the current unit are excluded:
+
+```
+# Exclude memories written during current accumulation to prevent self-triggering
+    write_exclusion_ts ← t_start  # start timestamp from Accumulator State section
+candidates_eligible ← {c ∈ candidates | c.created_at < write_exclusion_ts}
+```
+
+This filter is applied before novelty and marginal utility evaluation. All subsequent gate logic operates on candidates_eligible rather than the raw candidate set, preventing recursive triggering within a coherent thought unit.
+
+**Working memory exclusion (normative):** retrieval must also exclude candidates that overlap with active working‑memory slots. This keeps “what I just said” in working memory rather than re‑injecting it from long‑term memory. The exclusion uses the same duplication threshold as the gate:
+
+```
+dup_thresh = lerp(0.985, 0.95, F) × (0.98 + 0.02T)
+candidates_eligible ← {c ∈ candidates_eligible | max_{w∈WM} cos(c, w) < dup_thresh}
+```
+
+Boundary-aware override permits lower-threshold interrupts at natural boundaries:
+
+```
+boundary_mult = lerp(1.3, 2.0, F) × lerp(1.1, 0.9, S) × lerp(1.4, 0.6, T)
+```
+
+The gate permits interrupt when:
+
+```
+at_drift_boundary = should_flush  # boundary signal from the current accumulator
+if |candidates_eligible| == 0:
+    allow_interrupt = false  # cold-start / empty-store fallback
+else:
+    candidate_star = argmax_{c ∈ candidates_eligible} mu(c)
+    mu_star = mu(candidate_star)
+    rel_star = map01(cos(candidate_star, ctx_centroid))
+    if |wm_set| == 0:
+        overlap_star = −1.0
+    else:
+        overlap_star = max_{y ∈ wm_set} cos(candidate_star, y)
+    if |ctx_window| == 0:
+        novelty_star = 1.0
+    else:
+        max_cos = max_{c ∈ ctx_window} cos(candidate_star, c)  # in [−1, 1]
+        novelty_star = clamp((1 − max_cos) / 2, 0, 1)
+    allow_interrupt =
+        (rel_star ≥ retrieval_thresh_eff) AND
+        (novelty_star ≥ τ_novelty_eff OR mu_star ≥ τ_mu_eff) AND
+        (overlap_star < dup_thresh) AND
+        (at_drift_boundary OR mu_star ≥ boundary_mult_eff × τ_mu_eff)
+```
+
+This logic suppresses low-drift interrupts unless the marginal utility substantially exceeds threshold, while permitting normal-threshold interrupts at natural transition points.
+
+## Interrupt-triggered Accumulator Abort
+
+When the interrupt gate allows a retrieval outside a flush/spike event, we mark a **pending abort** for the current accumulator to avoid persisting partial thoughts. On the next signal, we compare similarity to the selected memory versus the current accumulator centroid. If the new signal aligns more with the selected memory, we treat the interrupt as **accepted** and drop the partial unit; otherwise we **resume** the accumulator. This prevents “half‑utterances” from being stored when a memory whisper redirects attention, while still allowing the speaker to ignore the interrupt and continue seamlessly. This uses only embeddings already present in the system (no new constants).
+
+```
+if allow_interrupt AND NOT should_flush AND NOT spike_bypass:
+    pending_abort ← true
+    pending_mem ← selected_candidate_embedding
+
+if pending_abort:
+    sim_mem = cos(x_t, pending_mem)
+    sim_acc = cos(x_t, μ_acc)
+    if sim_mem > sim_acc:        # accepted → drop partial unit
+        reset_accumulator()
+    pending_abort ← false
+```
+
+## Streaming Pacing
+
+Streaming retrieval is gated by cumulative drift rate within the accumulation unit. Retrieval checks trigger when drift exceeds threshold or at boundaries. Retrieval uses q_retrieval (the accumulator centroid) captured before any accumulator reset for this step. Retrieval returns a candidate pool already filtered by write‑exclusion and WM‑overlap rules and diversified (MMR‑style); the interrupt gate then applies novelty/utility thresholds and redundancy penalties.
+
+```
+# Pacing tracks drift within current memory formation
+```
+where cosine_dist(u, v) = 1 − cos(u, v).
+```
+first_step ← (x_last_check is unset for this stream)  # MUST occur once per stream
+if first_step: x_last_check ← μ_acc; drift_acc_pacing ← 0
+drift_acc_pacing += cosine_dist(μ_acc, x_last_check)
+pacing_thresh(S) = lerp(0.3, 0.05, S)
+max_wait_drift(F) = lerp(1.2, 0.30, F)
+adjacent_window(F) = round(lerp(6, 1, F))
+
+since_last_s ← if last_retrieval_ts == 0 then +∞ else (now_ms() − last_retrieval_ts) / 1000
+min_gap_s ← adjacent_window(F) × dt_ema
+adjacent_ok ← (since_last_s ≥ min_gap_s)
+force_check ← (drift_acc_pacing > max_wait_drift(F))
+
+# Retrieval triggered when drift exceeds threshold, at memory boundary, or when drift exceeds max_wait_drift.
+# Adjacent-window throttling is bypassed on boundaries and force_check.
+if (drift_acc_pacing > pacing_thresh(S) OR should_flush OR force_check) AND
+   (adjacent_ok OR should_flush OR force_check):
+    trigger_check(); x_last_check ← μ_acc; drift_acc_pacing ← 0; last_retrieval_ts ← now_ms()
+```
+
+High Sensitivity produces frequent checks triggered by small content shifts; high Focus enforces strict drift limits. Memory boundaries (@sec-boundary) also trigger retrieval checks to ensure context updates align with natural thought transitions.

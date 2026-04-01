@@ -1,0 +1,234 @@
+#pragma once
+
+#include "cortext/store/schema.hpp"
+#include "cortext/store/store.hpp"
+#include "cortext/processor.hpp"
+#include "cortext/encoder/encoder.hpp"
+#include <Eigen/Dense>
+#include <any>
+#include <chrono>
+#include <map>
+#include <memory>
+#include <string>
+#include <vector>
+
+namespace cortext::testing
+{
+
+class TestEncoder : public Encoder
+{
+public:
+  void
+  EncodeText (const std::string & /*text*/,
+              std::vector<float> &out_embedding) override
+  {
+    out_embedding.assign (256, 0.0f);
+    out_embedding[0] = 1.0f;
+  }
+
+  void
+  EncodeAudio (const float * /*pcm*/, std::size_t /*num_samples*/,
+               std::vector<float> &out_embedding) override
+  {
+    out_embedding.assign (256, 0.0f);
+    out_embedding[0] = 1.0f;
+  }
+
+  void
+  EncodeImage (const std::uint8_t * /*data*/, int /*width*/, int /*height*/,
+               int /*channels*/, std::vector<float> &out_embedding) override
+  {
+    out_embedding.assign (256, 0.0f);
+    out_embedding[0] = 1.0f;
+  }
+};
+
+inline Encoder &
+GetTestEncoder ()
+{
+  static TestEncoder encoder;
+  return encoder;
+}
+
+inline void
+RequireEncoder (SignalProcessor::Config &cfg)
+{
+  cfg.encoder = &GetTestEncoder ();
+}
+
+// ============================================================================
+// Data extraction helpers
+// ============================================================================
+
+/// @brief Extract long long value from a query result row.
+inline long long
+GetInt64 (const std::map<std::string, std::any> &row, const std::string &key)
+{
+  auto it = row.find (key);
+  if (it == row.end ())
+    return 0;
+  if (it->second.type () == typeid (long long))
+    return std::any_cast<long long> (it->second);
+  if (it->second.type () == typeid (int))
+    return static_cast<long long> (std::any_cast<int> (it->second));
+  return 0;
+}
+
+/// @brief Extract double value from a query result row.
+inline double
+GetDouble (const std::map<std::string, std::any> &row, const std::string &key)
+{
+  auto it = row.find (key);
+  if (it == row.end ())
+    return 0.0;
+  if (it->second.type () == typeid (double))
+    return std::any_cast<double> (it->second);
+  if (it->second.type () == typeid (float))
+    return static_cast<double> (std::any_cast<float> (it->second));
+  return 0.0;
+}
+
+// ============================================================================
+// v2 Schema seeding helpers
+// ============================================================================
+
+/// @brief Get current timestamp in milliseconds.
+inline long long
+NowMs ()
+{
+  return std::chrono::duration_cast<std::chrono::milliseconds> (
+             std::chrono::system_clock::now ().time_since_epoch ())
+      .count ();
+}
+
+/// @brief Seed an embedding into the v2 embeddings table (minimal vec0 table).
+/// @param store The store to seed into.
+/// @param id The embedding_id.
+/// @param emb The embedding vector.
+/// @param created_at Optional timestamp (defaults to current time).
+inline void
+SeedEmbeddingV2 (Store &store, long long id, const std::vector<float> &emb,
+                 long long created_at = 0)
+{
+  if (created_at == 0)
+    created_at = NowMs ();
+  store.Execute (
+      "INSERT OR REPLACE INTO embeddings(embedding_id, embedding, created_at) "
+      "VALUES(?, ?, ?)",
+      { id, emb, created_at });
+}
+
+/// @brief Seed an embedding into the v2 embeddings table from Eigen vector.
+inline void
+SeedEmbeddingV2 (Store &store, long long id, const Eigen::VectorXf &emb,
+                 long long created_at = 0)
+{
+  std::vector<float> vec (emb.data (), emb.data () + emb.size ());
+  SeedEmbeddingV2 (store, id, vec, created_at);
+}
+
+/// @brief Seed a memory into the v2 memories table with comprehensive metadata.
+/// @param store The store to seed into.
+/// @param memory_id The memory_id (primary key).
+/// @param embedding_id The embedding_id (foreign key to embeddings).
+/// @param source_id The source identifier.
+/// @param kind Memory kind: 'LONG_TERM', 'WORKING', 'ASSOCIATION', 'LABEL'.
+/// @param strength Memory strength (default 1.0).
+/// @param start_ts Start timestamp in milliseconds.
+inline void
+SeedMemoryV2 (Store &store, long long memory_id, long long embedding_id,
+              const std::string &source_id, const std::string &kind = "LONG_TERM",
+              double strength = 1.0, long long start_ts = 0)
+{
+  if (start_ts == 0)
+    start_ts = NowMs ();
+  store.Execute (
+      "INSERT OR REPLACE INTO memories("
+      "memory_id, embedding_id, source_id, kind, start_ts, n_signals, modality, "
+      "s_max, s_avg, strength, created_at) "
+      "VALUES(?, ?, ?, ?, ?, 1, 'text', 0.5, 0.5, ?, ?)",
+      { memory_id, embedding_id, source_id, kind, start_ts, strength, start_ts });
+}
+
+/// @brief Seed a memory with extended metadata fields.
+inline void
+SeedMemoryV2Extended (Store &store, long long memory_id, long long embedding_id,
+                      const std::string &source_id, double strength = 1.0,
+                      double redundancy = 0.0, double connectivity = 0.0,
+                      double stability = 1.0, long long start_ts = 0)
+{
+  if (start_ts == 0)
+    start_ts = NowMs ();
+  store.Execute (
+      "INSERT OR REPLACE INTO memories("
+      "memory_id, embedding_id, source_id, kind, start_ts, n_signals, modality, "
+      "s_max, s_avg, strength, redundancy, connectivity, stability, created_at) "
+      "VALUES(?, ?, ?, 'LONG_TERM', ?, 1, 'text', 0.5, 0.5, ?, ?, ?, ?, ?)",
+      { memory_id, embedding_id, source_id, start_ts, strength, redundancy,
+        connectivity, stability, start_ts });
+}
+
+/// @brief Seed a signal into the v2 signals table with inline metrics.
+/// @param store The store to seed into.
+/// @param signal_id The signal_id (primary key).
+/// @param embedding_id The embedding_id (foreign key to embeddings).
+/// @param source_id The source identifier.
+/// @param timestamp Signal timestamp in milliseconds.
+/// @param score Optional composite score.
+inline void
+SeedSignalV2 (Store &store, long long signal_id, long long embedding_id,
+              const std::string &source_id, long long timestamp,
+              double score = 0.0)
+{
+  store.Execute (
+      "INSERT OR REPLACE INTO signals("
+      "signal_id, embedding_id, source_id, timestamp, modality, score, created_at) "
+      "VALUES(?, ?, ?, ?, 'text', ?, ?)",
+      { signal_id, embedding_id, source_id, timestamp, score, timestamp });
+}
+
+/// @brief Initialize the core schema on a store using ApplyMigrations.
+/// This ensures tests use the same schema as production code.
+inline void
+InitializeCoreSchema (Store &store)
+{
+  cortext::store::ApplyMigrations (store);
+}
+
+/// @brief A no-op transaction for tests that don't need actual database writes.
+class NullTransaction : public Transaction
+{
+public:
+  std::unique_ptr<Transaction>
+  Begin () override
+  {
+    return std::make_unique<NullTransaction> ();
+  }
+
+  std::vector<std::map<std::string, std::any>>
+  Execute (const std::string & /*query*/,
+           const std::vector<std::any> & /*params*/ = {}) override
+  {
+    return {};
+  }
+
+  void
+  Commit () override
+  {
+  }
+
+  void
+  Rollback () override
+  {
+  }
+};
+
+/// @brief Get a global NullTransaction instance for tests.
+inline Transaction &
+GetNullTransaction ()
+{
+  static NullTransaction null_tx;
+  return null_tx;
+}
+
+} // namespace cortext::testing

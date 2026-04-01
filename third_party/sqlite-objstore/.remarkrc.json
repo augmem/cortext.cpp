@@ -1,0 +1,13 @@
+{
+    "plugins": [
+        "remark-lint",
+        "remark-frontmatter",
+        "remark-gfm",
+        [
+            "remark-validate-links",
+            {
+                "repository": false
+            }
+        ]
+    ]
+}

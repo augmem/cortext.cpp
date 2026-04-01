@@ -1,0 +1,465 @@
+# Dynamic Thresholding and Homeostatic Control {#sec-thresholding}
+
+The write gate compares composite scores against an adaptive threshold θ_dynamic (written as theta_dynamic when referring to the recorded variable). This section details the threshold evolution algorithm incorporating Bayesian prior-evidence blending and homeostatic rate control.
+
+**Knob note:** F and S here refer to midpoint‑biased values (F̃, S̃) from Section 1.
+
+## Prior-Evidence Blending
+
+The threshold prior derives from knob settings:
+
+```
+θ_prior(F, S, T) = lerp(0.10, 0.30, T) × (1 − 0.3S)
+```
+
+Observed evidence comes from the 90th percentile of recent scores:
+
+```
+recent_scores ← tail(score_stream, win_score(T))
+if |recent_scores| == 0:
+    observed_p90 ← θ_prior  # no evidence yet
+else:
+    observed_p90 ← percentile(recent_scores, 90)
+```
+
+Prior and evidence masses weight the blend:
+
+```
+ρ_prior ← prior_mass(T) = round(lerp(2, 32, T))
+ρ_obs ← u(t) × |recent_scores|
+```
+
+The target threshold blends prior and evidence:
+
+```
+θ_target ← (ρ_prior × θ_prior + ρ_obs × observed_p90) /
+            max(ε, ρ_prior + ρ_obs)
+```
+
+High Stability increases prior mass, making the system more resistant to observed deviations. High uncertainty increases evidence mass, allowing faster adaptation to volatile conditions.
+
+## Homeostatic Rate Control
+
+The controller maintains write rates near the target setpoint through continuous-time estimation with effective sample size (ESS) reliability weighting.
+
+### Rate Estimation
+
+```
+Δt ← now_s() − to_s(last_rate_timestamp)
+dt_min(T) = 10^(−4 + 2T)  # stability-derived minimum Δt (seconds)
+Δt ← max(Δt, dt_min(T))
+τ_dt(T) = lerp(0.5, 2.0, T)
+α_dt ← 1 − exp(−Δt / τ_dt(T))
+dt_ema ← (1 − α_dt) × dt_ema + α_dt × Δt
+dt_floor(T) = lerp(0.1, 0.5, T)  # stability-derived minimum cadence
+dt_base ← max(dt_ema, dt_floor(T))
+```
+
+The rate time constant scales with Stability:
+
+```
+τ_rate ← max(2^(3T) × dt_base, dt_floor(T))
+α ← 1 − exp(−Δt / τ_rate)
+```
+
+Instantaneous rate estimation with bias correction. Δwrites is the binary indicator (0 or 1) of whether a write occurred during the current timestep:
+
+```
+Δwrites ← 1 if write_memory else 0  # binary write event
+```
+Normative note (MUST): Δwrites is computed from the current step's write_memory decision. Rate state updates occur after the write decision and affect subsequent timesteps.
+```
+ρ_inst ← (Δwrites / Δt) × 60  # writes per minute
+m_rate_t ← (1 − α) × m_rate + α × ρ_inst
+denom ← max(1 − (1 − α)^(rate_ticks + 1), ε)
+ρ_hat_t ← m_rate_t / denom  # bias-corrected estimate for next step
+m_rate ← m_rate_t
+rho_hat_prev ← ρ_hat_t
+rate_ticks ← rate_ticks + 1
+last_rate_timestamp ← now_ms()  # update after rate computation
+```
+
+### Effective Sample Size
+
+ESS estimates the effective number of independent samples in the EMA, using a heuristic inspired by @liu1998sequential:
+
+```
+β ← max(0, 1 − α)
+ESS_cap(T) = lerp(30, 120, T)
+ESS ← min((1 + β) / max(1 − β, ε), ESS_cap(T))
+reliability ← 1 − exp(−ESS × (1 − T))
+```
+
+High Stability dampens reliability, preventing aggressive corrections in conservative regimes.
+
+### Homeostatic Correction
+
+The rate error drives threshold adjustment. The κ_* gains are derived from the knobs to avoid fixed behavioral constants:
+
+Normative note (MUST): rho_hat_prev is stored state entering the timestep. After the write decision, the rate-state update computes ρ_hat_t; the assignment rho_hat_prev ← ρ_hat_t occurs at end of step (see Appendix D).
+
+```
+rate_error ← tanh((rho_hat_prev − rate_target) /
+                  max(rate_target, ε))
+κ_r(F,S,T) = lerp(0.06, 0.14, S) × lerp(1.1, 0.9, T)
+cap_homeo(F,S,T) = lerp(0.35, 0.15, T) × lerp(0.8, 1.2, S) × hysteresis
+Δθ_homeo ← clamp(reliability × κ_r(F,S,T) × (1 − T) ×
+                  (1 − maturity(t)) × rate_error,
+                  −cap_homeo(F,S,T), +cap_homeo(F,S,T))
+```
+
+The correction scales with reliability and is attenuated by both Stability and maturity, ensuring conservative, mature systems make minimal homeostatic adjustments.
+
+### Sensitivity-Based Threshold Adjustment
+
+Sensitivity modulates threshold based on recent score volatility:
+
+```
+recent_scores ← tail(score_stream, win_score(T))
+if |recent_scores| < 2:
+    σ_scores ← 0
+else:
+    σ_scores ← std(recent_scores)
+κ_sens(F,S,T) = lerp(0.04, 0.12, S) × lerp(1.1, 0.9, T)
+cap_sens(F,S,T) = lerp(0.30, 0.10, T) × lerp(0.9, 1.1, S) × hysteresis
+σ_ref(S,T) = lerp(0.08, 0.14, S) × lerp(1.1, 0.9, T)
+Δθ_sens ← clamp(−κ_sens(F,S,T) × S × (σ_scores − σ_ref(S,T)),
+                −cap_sens(F,S,T), +cap_sens(F,S,T))
+```
+
+High score variance with high Sensitivity lowers threshold, capturing more volatile signals.
+
+### Precision-Based Threshold Adjustment
+
+Focus-driven precision tightens threshold when structural coherence is high:
+
+```
+κ_prec(F,S,T) = lerp(0.04, 0.10, F) × lerp(1.1, 0.9, T)
+cap_prec(F,S,T) = lerp(0.25, 0.08, T) × lerp(0.9, 1.1, F) × hysteresis
+Δθ_prec ← clamp(κ_prec(F,S,T) × F × (coherence_struct_t − 0.5),
+                −cap_prec(F,S,T), +cap_prec(F,S,T))
+```
+
+High structural coherence with high Focus raises threshold, enforcing stricter relevance filtering.
+
+## Threshold Integration
+
+All threshold deltas combine and pass through safety limiting. The emotion and mood deltas from @sec-emotional-threshold and @sec-mood are denoted Δθ_emo = ΔThreshold_emotion_t and Δθ_mood = ΔThreshold_mood_t:
+
+```
+Δθ_total ← Δθ_sens + Δθ_homeo + Δθ_prec + Δθ_emo + Δθ_mood
+cap_total ← max_ΔT_per_min(t) × (Δt / 60.0)
+Δθ_limited ← clamp(Δθ_total, −cap_total, +cap_total)
+θ_dynamic_t ← clamp(EWMA(θ_dynamic_{t−1}, θ_target,
+                        α = α_T(t)) + Δθ_limited,
+                    T_min(t), T_max(t))
+theta_dynamic ← θ_dynamic_t
+```
+
+Hysteresis evolves toward the stability-derived base:
+
+```
+hysteresis_t ← clamp(EWMA(hysteresis,
+                     base_band(T), α = α_T(t)),
+                band_min, band_max)
+hysteresis ← hysteresis_t
+```
+
+## Write Pacing and Memory Accumulation {#sec-write-pacing}
+
+The write gate operates per step, but coherent "thoughts" often span multiple signals. Composite scoring is computed on the current accumulator centroid (μ_acc), so write decisions are driven by the accumulated group rather than any single raw signal. This section introduces memory-level accumulation that groups signals into natural units before storage decisions, inspired by Event Segmentation Theory (Zacks & Swallow, 2007).
+
+This approach draws from EM-LLM (Fountas et al., 2024), which segments token sequences into episodic events using surprise-based boundary detection refined by graph-theoretic cohesion metrics. Their work shows that combining prediction error signals with within-segment coherence produces boundaries strongly correlated with human event perception. Our adaptation uses EMA prediction error (surprisal_t) for surprise and cosine similarity for cohesion, while drift provides auxiliary boundary pressure, enabling modality-agnostic operation across text tokens, audio chunks, video frames, or any signal stream.
+
+### Memory Accumulator State {#sec-accumulator}
+
+Each source stream maintains accumulator state:
+
+```
+μ_acc ← 256d running mean embedding
+c_t ← temporal context vector (slow drift; @sec-temporal-context)
+drift_acc ← accumulated drift within memory
+s_sum ← sum of accumulator scores in memory
+s_max ← max accumulator score in memory
+n ← count of signals in memory
+e_peak ← accumulator centroid at highest score
+emo_max ← 0  # max emotion_intensity_t within the unit
+arousal_sum ← 0  # sum of arousal_t within the unit (for avg)
+t_start ← now_ms()  # timestamp of accumulation start (ms since epoch)
+last_signal_ts ← now_ms()  # timestamp of previous signal (ms, for gap detection)
+last_write_ts ← 0  # ms; 0 means "no prior write" for refractory
+eta_acc ← 0  # drift EWMA state
+coherence_prev ← 0  # previous coherence (initialize to 0)
+acc_signals_window ← []  # ring buffer of recent embeddings for coherence
+```
+
+Reset behavior: reset_accumulator() clears μ_acc, drift_acc, s_sum, s_max, n, e_peak, emo_max, arousal_sum, eta_acc, coherence_prev, and sets acc_signals_window ← [] (and refreshes t_start/last_signal_ts for the next unit), but retains last_write_ts so the refractory term remains well-defined across boundaries.
+
+```
+reset_accumulator(): acc_signals_window ← []  # MUST clear coherence window at boundaries
+```
+
+On each signal, update running statistics (note: n is the count before this signal):
+
+```
+signal_gap_s ← now_s() − to_s(last_signal_ts)  # compute BEFORE updating last_signal_ts
+
+win_coh(T) = round(lerp(8, 32, T))  # coherence window size
+acc_signals_window ← tail(acc_signals_window, win_coh(T))
+
+μ_acc ← (n × μ_acc + x_t) / (n + 1)
+n ← n + 1
+drift_acc ← drift_acc + (drift_mag_t / 2)  # accumulate normalized instantaneous drift (drift_mag_t ∈ [0,2])
+emo_max ← max(emo_max, emotion_intensity_t)
+arousal_sum ← arousal_sum + arousal_t
+last_signal_ts ← now_ms()  # update timestamp for next gap calculation (ms)
+
+# After composite scoring on μ_acc:
+s_sum ← s_sum + score_t
+if score_t > s_max:
+    s_max ← score_t; e_peak ← μ_acc
+```
+
+### Hybrid Drift and Coherence Tracking {#sec-drift-coherence}
+
+Boundary detection combines instantaneous drift with within-memory coherence tied to the evolving centroid μ_acc:
+
+```
+ε_noise(T) = lerp(0.01, 0.05, 1 − T)  # stability-derived noise floor
+# Use instantaneous drift_step_t for boundary velocity
+d_step ← max(drift_step_t − ε_noise(T), 0)
+eta_prev ← eta_acc  # baseline before updating EWMA
+```
+
+Memory coherence tracks similarity within the current memory accumulation window (range [−1, 1] from mean cosine):
+
+```
+mu_curr ← μ_acc  # current accumulator centroid
+current_window ← acc_signals_window  # embeddings from the current unit before mu_curr
+if |current_window| == 0:
+    coherence_curr ← 1.0  # empty-window fallback
+else:
+    coherence_curr ← mean([cos(mu_curr, x_i) for x_i in current_window])
+# After computing coherence_curr, append mu_curr for the next step
+acc_signals_window.append(mu_curr); acc_signals_window ← tail(acc_signals_window, win_coh(T))
+# coherence_prev is the stored coherence value from the previous step
+```
+
+Note: coherence_mem is distinct from coherence_struct (@sec-struct-coherence). The former tracks within-memory similarity using raw mean cosine, while the latter measures variance-based integration with broader context. This dual-signal approach mirrors EM-LLM's boundary detection mechanism. In their formulation, boundaries occur where surprise (token-level prediction error) exceeds a threshold and segment cohesion drops. In Cortext, surprisal_t provides the prediction-error signal, while drift spike provides auxiliary boundary pressure and coherence_mem drop captures within-memory similarity degradation.
+
+### Natural Boundary Detection (Bayesian Change-Point) {#sec-boundary}
+
+Segmentation is framed as online change-point inference. We compute a **calibrated boundary probability** rather than a hand-tuned score. The hazard is knob-controlled; the likelihood is driven by surprisal, cohesion drop, drift, and temporal gaps, with a coherence/topic **support gate** to downweight isolated spikes.
+
+```
+# Hazard (prior boundary probability, calibrated to target rate)
+h_base(F,S,T) = lerp(0.03, 0.18, S) × lerp(1.2, 0.8, T)
+h_t_base ← clamp(h_base × (0.8 + 0.2(1 − F)), 0, 0.5)
+target_rate(F,S,T) = clamp(lerp(0.12, 0.35, S) × lerp(1.1, 0.7, F) × lerp(1.0, 0.7, T), 0.05, 0.45)
+rate_gain(S,T) = clamp(lerp(0.4, 1.0, S) × lerp(1.1, 0.8, T), 0.2, 1.2)
+rate_mult ← clamp(1 + rate_gain × (target_rate − boundary_rate_ema), 0.5, 1.5)
+# support uses normalized coherence/topic signals (defined below)
+h_t ← clamp(h_t_base × rate_mult × lerp(0.8, 1.3, support), 0, 0.5)
+
+# Drift spike (same signal, now used for likelihood)
+ε0(T) = lerp(0.005, 0.02, 1 − T)  # cold-start guard for eta_prev
+if eta_prev < ε0(T):
+    drift_spike ← 0
+else:
+    drift_spike ← (d_step − eta_prev) / max(eta_prev, ε)
+eta_acc ← EWMA(eta_prev, d_step, α = lerp(0.3, 0.1, T))
+coh_drop01 ← clamp((coherence_prev − coherence_curr) / 2, 0, 1)
+coherence_prev ← coherence_curr  # update for next step
+
+# Adaptive gap signal (dynamic, not a hard trigger)
+dt_ref ← max(dt_ema, dt_floor(T))  # EWMA of inter-arrival Δt in seconds (robust to jitter)
+gap_scale(T) = lerp(3.0, 8.0, T)  # expected pause multiplier
+gap_ref_s ← gap_scale(T) × dt_ref
+gap_z ← (signal_gap_s − gap_ref_s) / max(gap_ref_s, ε)
+gap_score ← sigmoid(gap_z)
+
+# Local normalization (within-episode, contrast-boosted)
+ema_mean_x ← EWMA(ema_mean_x, x, α_local(T))
+ema_var_x  ← EWMA(ema_var_x, (x − ema_mean_x)^2, α_local(T))
+norm_gain(S,T) = clamp(lerp(1.6, 3.0, S) × lerp(1.05, 0.95, T), 1.0, 3.2)
+x̂ ← sigmoid(norm_gain × (x − ema_mean_x) / sqrt(ema_var_x + ε))  # warm-up uses raw x
+
+# Topic shift (embedding-only, temporal context anchor)
+topic_shift ← 1 − map01(cos(e_t, c_t))
+
+# Likelihood of a boundary given observations
+support ← clamp(0.5 × coĥ + 0.5 × topiĉ, 0, 1)
+support_gate ← lerp(0.45, 1.0, support)   # downweight isolated spikes
+gap_gate ← lerp(0.10, 0.50, support)
+support_boost ← lerp(1.0, 1.25, support)  # emphasize coherent/topic shifts
+[w_s, w_d, w_c, w_t, w_g] ← [0.34 + 0.14S, 0.18 + 0.05(1 − T),
+                            0.36 + 0.16F, 0.30 + 0.22S, 0.01]
+[w_s, w_d, w_c, w_t, w_g] ← normalize([w_s×support_gate, w_d×support_gate,
+                                      w_c×support_boost, w_t×support_boost, w_g×gap_gate])
+z_center(S,T) = clamp(lerp(0.44, 0.30, S) × lerp(1.05, 0.95, T), 0.26, 0.58)
+z_center_eff ← clamp(z_center × lerp(1.0, 0.75, support), 0.24, 0.58)
+z_t ← w_s×(surprisal̂ − z_center_eff) +
+      w_d×(drift̂ − z_center_eff) +
+      w_c×(coĥ − z_center_eff) +
+      w_t×(topiĉ − z_center_eff) +
+      w_g×(gap_score − z_center_eff)
+k_cp(S,T) = lerp(8, 22, S) × lerp(1.1, 0.9, T)
+k_cp_eff ← k_cp × lerp(0.9, 1.35, support)
+lik_boundary ← sigmoid(k_cp_eff × z_t)
+
+# Bayesian update for boundary posterior
+boundary_score ← (h_t × lik_boundary) /
+                  max(ε, h_t × lik_boundary + (1 − h_t) × (1 − lik_boundary))
+boundary_score ← clamp(boundary_score, 0, 1)
+```
+
+Boundary threshold and limits:
+
+```
+b_thresh(F, S) = lerp(0.48, 0.66, F) × lerp(1.1, 0.9, S)
+max_mem_drift(S) = lerp(0.8, 2.0, S)  # cumulative drift cap
+```
+
+Pressure-capacity ratio (continuous flush trigger derived from knobs):
+
+```
+capacity_scale(T) = (1 + T)^2  # higher stability = larger capacity
+capacity ← max_mem_drift(S) × capacity_scale(T)
+pressure ← drift_acc × (1 + S)
+saturation_ratio ← pressure / max(capacity, ε)
+k_flush(S,T) = k_surprise(S,T)
+pressure_score ← sigmoid((saturation_ratio − 1) × k_flush(S,T))
+```
+
+Hard capacity ceiling (max signals per memory; knob-derived):
+
+```
+base = lerp(4.0, 12.0, T)
+f_scale = lerp(1.00, 0.35, F)
+s_scale = lerp(1.00, 0.55, S)
+floor = round(lerp(2, 3, T))
+max_signals(F,S,T) = max(floor, round(base × f_scale × s_scale))
+```
+
+Adaptive cadence (gap normalization only; no timeouts):
+
+```
+dt_ref ← max(dt_ema, dt_floor(T))
+gap_ref_s ← gap_scale(T) × dt_ref
+```
+
+Fallback boundary floor (applies to capacity/pressure only):
+
+```
+boundary_floor(F,S,T) = clamp(lerp(0.05, 0.15, S) × lerp(1.2, 0.8, F) × lerp(1.1, 0.9, T),
+                              0.02, 0.25)
+```
+
+Trigger memory flush when:
+
+```
+mem_elapsed ← now_s() − to_s(t_start)
+should_flush = (boundary_score > b_thresh(F, S)) OR
+               (pressure_score > b_thresh(F, S) AND boundary_score ≥ boundary_floor(F,S,T)) OR
+               (n ≥ max_signals(F,S,T) AND boundary_score ≥ boundary_floor(F,S,T))
+```
+
+where signal_gap_s = now_s() − to_s(last_signal_ts) is computed at the start of signal processing (before last_signal_ts is updated). Gap timing influences boundary_score via gap_score only; there is no time-based flush.
+
+**Boundary type note:** When the max-signals ceiling triggers a flush, set `boundary_type = "capacity"` for the enclosing episode. This is a hard safety boundary (not a heuristic score) and is still fully knob-derived.
+
+### Spike Bypass (Flashbulb Flush)
+
+High-salience signals bypass accumulation and flush immediately, capturing preceding context as a coherent memory unit:
+
+```
+spike_margin(S,T) = lerp(0.2, 0.5, T) × lerp(1.2, 0.8, S)  # above θ_dynamic
+mem_tau(T) = win_mem_ctx(T)
+mem_maturity ← 1 − exp(−n / max(mem_tau(T), 1))  # n = signals in current unit
+coherence_scale ← 1 + (1 − T) × clamp(coherence_t, 0, 1)
+spike_margin_eff ← spike_margin(S,T) × (1 + (1 − mem_maturity)) × coherence_scale
+spike_bypass = score_t > (θ_dynamic + spike_margin_eff)
+force_write ← false
+```
+
+When spike_bypass triggers:
+
+```
+if spike_bypass:
+    should_flush = true   # force a boundary
+    force_write = true   # bypass S_window > θ_memory
+```
+
+  This keeps flashbulb moments intact while preventing early or highly coherent windows from fragmenting into micro-memories. As the unit matures, spike bypass becomes easier, and low coherence reduces the effective margin.
+
+### Inactivity Boost
+
+We avoid hard timeouts for episode boundaries. Instead, when the stream becomes
+quiet and natural indicators are weak, inactivity softly boosts the boundary score:
+
+```
+support_relax = exp(−lerp(0.6, 1.6, S) × lerp(1.15, 0.85, T) × gap_z⁺)
+gap_ratio = signal_gap_s / max(dt_ema, ε)
+gap_z_inact = log1p(max(gap_ratio − 1, 0))
+gap_score_inact = sigmoid(lerp(0.9, 1.8, S) × lerp(1.1, 0.9, T) × gap_z_inact)
+inactivity = gap_score_inact × (1 − support × support_relax)
+k_inact(S,T) = lerp(0.05, 0.25, S) × lerp(1.1, 0.9, T)
+gap_z⁺ = max(0, gap_z_inact)
+inactivity_scale = exp(lerp(0.6, 1.6, S) × lerp(1.1, 0.9, T) × gap_z⁺)
+boundary_score ← boundary_score + k_inact(S,T) × inactivity × inactivity_scale
+gap_force = sigmoid(lerp(2.0, 5.0, S) × lerp(1.1, 0.9, T) ×
+                   (gap_z_inact − lerp(0.9, 0.4, S) × lerp(1.1, 0.9, T)))
+boundary_score ← max(boundary_score, gap_force)
+```
+
+This closes episodes after prolonged inactivity without forcing premature
+flushes during coherent streams. The signal gap is measured relative to the
+observed cadence (dt_ema), so inactivity remains dynamic and adapts to the
+current conversational pace rather than a fixed timeout.
+
+### Window Score and Refractory
+
+Memory-level score combines peak and average with coverage bonus:
+
+```
+s_avg ← s_sum / max(n, 1)
+α(F) = lerp(0.3, 0.7, F)  # peak vs avg weight
+coverage ← min(n / n_ctx(T), 1.0)  # memory completeness
+β(S) = lerp(0.05, 0.15, S)  # coverage weight
+S_window ← α(F) × s_max + (1 − α(F)) × s_avg + β(S) × coverage
+```
+
+Write refractory suppresses rapid successive writes:
+
+```
+τ_write_refrac(T) = lerp(5, 30, T)  # seconds
+k_write_refrac = lerp(0.3, 0.1, T)
+Δt_write ← now_s() − to_s(last_write_ts)
+M_write_refrac ← 1.0 + k_write_refrac × exp(−Δt_write / τ_write_refrac(T))
+```
+
+Final write decision:
+
+```
+θ_memory ← θ_dynamic × M_write_refrac
+write_memory = force_write OR (should_flush AND (S_window > θ_memory))
+if write_memory: last_write_ts ← now_ms()  # update refractory timestamp (ms)
+```
+Normative rule (MUST): if should_flush is true, the current unit must be finalized. If write_memory is false, discard the unit and reset_accumulator() anyway (do not update last_write_ts). This prevents perpetual should_flush states (time cap / drift cap / gap cap) while never resetting.
+
+Trace note: if a run trace reports both write_decision and stored, interpret write_decision as the boolean gate outcome at the boundary (the write_memory predicate above). Interpret stored as the eventual recording outcome (after any final safety checks).
+
+Representative embedding blends accumulator mean with peak:
+
+### Representative Embedding {#sec-rep-embedding}
+
+```
+ρ(F) = lerp(0.2, 0.6, F)  # mean vs peak blend
+e_rep ← l2_normalize(ρ(F) × μ_acc + (1 − ρ(F)) × e_peak)
+
+# Edge-case guard
+if |μ_acc| = 0: e_rep ← e_peak
+if |e_peak| = 0 OR dim(e_peak) ≠ dim(μ_acc): e_rep ← μ_acc
+```
+
+On write: store e_rep with metadata {n, s_max, s_avg, drift_acc, mem_elapsed, s_emotion_max=emo_max, s_arousal_avg=arousal_sum / max(n, 1), boundary_score}. Store `c_t` as the temporal context for the memory. Append e_rep to memory_stream and l2_normalize(μ_acc) to recent_memory_centroids. Update `index_store` with the sparse key (@sec-pattern-separation). Reset accumulator for next unit.

@@ -1,0 +1,36 @@
+# Implementation Considerations {#sec-implementation}
+
+## Embedding-Only Operations
+
+All online operations (scoring, boundary detection, retrieval, gating, graph updates) operate **only** on embeddings. Raw text/audio/image content is used solely to generate embeddings; the live loop never re-enters token space. This preserves modality-agnostic behavior and prevents hidden heuristics from bypassing knob control.
+
+Retrieved memories are hydrated for inspection and evaluation only. When a memory has no signal-level blobs (e.g., consolidation summaries), the system loads the summary payload from `memories.blob_id` so summary nodes can participate in analysis without affecting online computations.
+
+## Model Stack (Local Inference)
+
+* **ImageBind embeddings:** image/text/audio inputs are embedded via ImageBind executed through ONNX (default path: `models/imagebind/`).
+* **Consolidation LLM:** summarization and labeling are the only generative steps and run only during consolidation. Cortext resolves a local backend internally: **gemma-3n-e2b** via `third_party/litert_lm`, **LFM2/LFM2.5** via `llama.cpp` GGUFs, or a **mixed** Gemma+Liquid path. The Gemma path auto-selects among available `.litertlm` variants under `models/gemma3n-e2b-litert/`. The Liquid path now prefers `LFM2.5-350M-GGUF` for both summarization and extraction, preferring `Q4_K_M` when present and otherwise accepting other shipped GGUF quantizations; env overrides still take precedence for exact paths. If the `LFM2.5-350M-GGUF` asset is absent, Cortext falls back to the older `LFM2-2.6B-Transcript-Q4_K_M.gguf` summarizer and `LFM2-1.2B-Extract-Q4_K_M.gguf` extractor. The mixed path uses Gemma for summarization and the preferred Liquid extractor path for labeling, and auto resolution now prefers that split when both assets are present. If no deep backend is available, deep consolidation raises an error rather than silently degrading. The summarization prompt remains role-aware for chat sources, favors direct fact-oriented memory notes over dialogue recaps, explicitly preserves named people, projects, and technologies, discourages speaker-role phrasing such as "the user" or "the assistant", and preserves chronological ordering when selected chat excerpts are passed to the model. The Liquid GGUF path is text-only; audio-specific summarization/extraction methods remain unsupported there.
+
+No other model runtimes are required for the online loop; all operational decisions are embedding-space computations derived from F/S/T.
+
+## Computational Complexity
+
+The primary per-stimulus cost is the k-nearest-neighbors (kNN) search for metrics and retrieval. With `N` stored memories, naive search is `O(N)`. We recommend maintaining an HNSW index [@malkov2018efficient] to achieve `O(log N)` retrieval.
+
+Label/association seeds are selected from an in‑memory summary cache (populated by the label bank and consolidation) to avoid an additional vector search pass while keeping retrieval fully embedding‑based.
+
+Recursive graph expansion adds overhead but is bounded by `depth` and `branching_factor`, effectively constant-time relative to `N`. Total complexity per stimulus is `O(log N)` with indexing.
+
+## Memory Footprint
+
+The system stores:
+*   `signal_stream`: `n_ctx` accumulator centroids (256d float32 = 1KB each).
+*   `score_stream`: Scalar history.
+*   `memory_stream`: `N` stored memories (embedding + metadata).
+*   `graph`: Adjacency lists for graph edges.
+
+For long-running instances, `memory_stream` and `graph` dominate. Pruning low-strength memories (@sec-memory-strength) is essential for bounding growth.
+
+## Numerical Stability
+
+Exponential decays and probability computations can suffer from underflow. We use `log-space` arithmetic where appropriate and clamp all potentially divergent values (e.g., division by small sums) with ε = 10⁻⁶.

@@ -1,0 +1,152 @@
+# Build directories
+build/
+build-wasm/
+cmake-build-*/
+out/
+bin/
+Debug/
+Release/
+x64/
+x86/
+# poc/
+# CMake generated files
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+CTestTestfile.cmake
+CTestCustom.cmake
+DartConfiguration.tcl
+Makefile
+compile_commands.json
+*.cmake
+.ninja
+*.ninja
+
+# Compiled binaries and libraries
+*.a
+*.so
+*.dylib
+*.dll
+*.exe
+*.out
+*.o
+*.obj
+*.pdb
+*.ilk
+*.manifest
+*.wasm
+*.js
+
+# Test executables and data
+*_tests
+tests/*_tests
+*.db
+*.db-*
+*.lmdb
+.lmdb/
+*memory*.lmdb/
+*cortext_test_stub*.lmdb/
+!tests/CMakeLists.txt
+!tests/*.test.cpp
+!docs/**/*.js 
+# IDE files
+.vscode/
+.cursor/
+.agent/
+.aiassistant/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Rust artifacts (this is a C++ project)
+Cargo.lock
+
+# Dart/Flutter files (this is a C++ project)
+analysis_options.yaml
+
+# Temporary files
+*.tmp
+*.temp
+*.log
+*.cache
+__pycache__/
+*.pyc
+nohup.out
+imgui.ini
+examples/chat/logs.txt
+tmp/
+Testing/Temporary/
+
+# Coverage reports
+*.gcda
+*.gcno
+*.gcov
+coverage/
+*.profraw
+*.profdata
+lcov.info
+coverage.info
+
+# Package files
+*.deb
+*.rpm
+*.tar.gz
+*.zip
+
+# Generated data files
+objects/
+data/
+models/
+*.dat
+*.npy
+
+# Third-party build artifacts (if building locally)
+third_party/*/build/
+third_party/*build/
+build-ort/
+third_party/*/.git/
+poc/
+# env.sh
+build-otel/
+build-*/
+.venv*/
+venv/
+**/node_modules/
+cache_dir/
+
+# Benchmark artifacts
+examples/benchmark/__pycache__/
+examples/benchmark/audio_cache/
+examples/benchmark/results/
+examples/benchmark/mteb_imagebind_tmp/
+examples/benchmark/mteb_imagebind_tmp.json
+examples/benchmark/mteb_results*.json
+examples/benchmark/mteb_results*/
+logs/
+
+# Paper build outputs
+docs/paper/_manuscript/_tex/
+docs/paper/_manuscript/index.pdf
+docs/paper/index.tex
+
+# Local environment helpers
+env.sh
+conformance.report.md
+compliance.report.md
+update.md
+validation.md
+algorithms.docx
+.cmake_targets.txt
+.output.txt
+index_headers.txt
+0

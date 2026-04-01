@@ -1,0 +1,1 @@
+<|system|>I am The System!<|end|><|user|>I need help<|end|><|assistant|>Hi, what can I do for you?<|end|><|user|>Write a poem about a cat<|end|><|assistant|>

@@ -1,0 +1,129 @@
+﻿<Project Sdk="MSBuild.Sdk.Extras/3.0.22">
+  <PropertyGroup>
+    <IncludeMobileTargets>false</IncludeMobileTargets>
+    <BaseTargets>net8.0;netstandard2.0;</BaseTargets>
+    <MobileTargets></MobileTargets>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(IncludeMobileTargets)' == 'true'">
+    <MobileTargets>net9.0-android;net9.0-ios;net9.0-maccatalyst</MobileTargets>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <TargetFrameworks>$(BaseTargets);$(MobileTargets)</TargetFrameworks>
+    <Platforms>AnyCPU</Platforms>
+    <LangVersion>latest</LangVersion>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <SignAssembly>true</SignAssembly>
+    <AssemblyOriginatorKeyFile>onnxruntime-genai.snk</AssemblyOriginatorKeyFile>
+    <IsAotCompatible Condition="$([MSBuild]::IsTargetFrameworkCompatible('$(TargetFramework)', 'net8.0'))">true</IsAotCompatible>
+
+    <!--internal build related properties-->
+    <SrcRoot>$(ProjectDir)..\..\src</SrcRoot>
+    <CsharpSrcRoot>$(SrcRoot)\csharp</CsharpSrcRoot>
+
+    <RootNamespace>Microsoft.ML.OnnxRuntimeGenAI</RootNamespace>
+    <AssemblyName>Microsoft.ML.OnnxRuntimeGenAI</AssemblyName>
+    <EnableDefaultItems>false</EnableDefaultItems>
+
+    <GenerateTargetFrameworkAttribute>false</GenerateTargetFrameworkAttribute>
+    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+    <Configurations>Debug;RelWithDebInfo;Release</Configurations>
+
+    <IsLinuxBuild Condition="'$([System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform($([System.Runtime.InteropServices.OSPlatform]::Linux)))' == 'true'">true</IsLinuxBuild>
+    <IsWindowsBuild Condition="'$([System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform($([System.Runtime.InteropServices.OSPlatform]::Windows)))' == 'true'">true</IsWindowsBuild>
+    <IsMacOSBuild Condition="'$([System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform($([System.Runtime.InteropServices.OSPlatform]::OSX)))' == 'true'">true</IsMacOSBuild>
+
+    <!-- $([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) gives better results than
+         $(TargetPlatformIdentifier). See https://github.com/dotnet/msbuild/issues/7359
+         Note there are slight differences in casing (e.g. macos vs macOS), so if we ever
+         change to use $(TargetPlatformIdentifier) we need to adjust for that.
+    -->
+    <IsAndroidTarget Condition="$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'android'">true</IsAndroidTarget>
+    <IsIOSTarget Condition="$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'ios' OR
+                            $([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'maccatalyst'">true</IsIOSTarget>
+    <IsMacTarget Condition="$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'macos'">true</IsMacTarget>
+  </PropertyGroup>
+
+
+  <PropertyGroup>
+      <OnnxRuntimeGenAIBuildDirectory>$(CsharpSrcRoot)\..\..\build</OnnxRuntimeGenAIBuildDirectory>
+      <NativeBuildOutputDir>$(OnnxRuntimeGenAIBuildDirectory)\$(Configuration)\</NativeBuildOutputDir>
+      <OrtLibDir></OrtLibDir>
+      <VersionInfoFile>$(CsharpSrcRoot)\..\..\VERSION_INFO</VersionInfoFile>
+  </PropertyGroup>
+
+  <Target Name="ReadVersionFromFile" BeforeTargets="CoreCompile" DependsOnTargets="PrepareForBuild">
+    <ReadLinesFromFile File="$(VersionInfoFile)">
+      <Output TaskParameter="Lines" PropertyName="VersionInfoStr" />
+    </ReadLinesFromFile>
+
+    <PropertyGroup Condition=" '$(VersionInfoStr.Contains(-))' == 'true' ">
+      <VersionInfo>$(VersionInfoStr.Split(-)[0])</VersionInfo>
+      <VersionSuffix>$(VersionInfoStr.Split(-)[1])</VersionSuffix>
+    </PropertyGroup>
+
+    <PropertyGroup Condition=" '$(VersionInfoStr.Contains(-))' == 'false' ">
+      <VersionInfo>$(VersionInfoStr)</VersionInfo>
+      <VersionSuffix></VersionSuffix>
+    </PropertyGroup>
+  </Target>
+
+  <Target Name="WriteAssemblyInfo" BeforeTargets="CoreCompile" DependsOnTargets="PrepareForBuild;ReadVersionFromFile">
+    <ItemGroup>
+      <AssemblyInfoLines Include="// Copyright (c) Microsoft Corporation. All rights reserved." />
+      <AssemblyInfoLines Include="// Licensed under the MIT License." />
+      <AssemblyInfoLines Include="using System.Reflection%3B;" />
+      <AssemblyInfoLines Include="[assembly: AssemblyTitle(&quot;ONNX Runtime GenAI&quot;)]" />
+      <AssemblyInfoLines Include="[assembly: AssemblyProduct(&quot;ONNX Runtime GenAI&quot;)]" />
+      <AssemblyInfoLines Include="[assembly: AssemblyCompany(&quot;Microsoft Corporation&quot;)]" />
+      <AssemblyInfoLines Include="[assembly: AssemblyVersion(&quot;0.4.0&quot;)]" />
+      <AssemblyInfoLines Include="[assembly: AssemblyFileVersion(&quot;0.4.0&quot;)]" />
+      <AssemblyInfoLines Include="[assembly: AssemblyCopyright(&quot;© Microsoft Corporation. All rights reserved.&quot;)]" />
+    </ItemGroup>
+
+    <WriteLinesToFile
+      File="AssemblyInfo.cs"
+      Lines="@(AssemblyInfoLines)"
+      Overwrite="true">
+    </WriteLinesToFile>
+  </Target>
+
+  <PropertyGroup Condition="'$(IsIOSTarget)'=='true' OR '$(IsAndroidTarget)'=='true'">
+    <OrtConstants>$(OrtConstants);__MOBILE__</OrtConstants>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(IsAndroidTarget)'=='true'">
+    <OrtConstants>$(OrtConstants);__ANDROID__</OrtConstants>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(IsIOSTarget)'=='true'">
+    <OrtConstants>$(OrtConstants);__IOS__</OrtConstants>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <DefineConstants>$(DefineConstants);$(OrtConstants)</DefineConstants>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="$(NativeBuildOutputDir)\onnxruntime-genai.lib" Condition="Exists('$(NativeBuildOutputDir)\onnxruntime-genai.lib')" PackagePath="" Pack="false" CopyToOutputDirectory="Never" Visible="false" />
+    <None Include="$(NativeBuildOutputDir)\onnxruntime-genai.dll" Condition="Exists('$(NativeBuildOutputDir)\onnxruntime-genai.dll')" PackagePath="" Pack="false" CopyToOutputDirectory="PreserveNewest" Visible="false" />
+    <None Include="$(OrtLibDir)\onnxruntime.dll" Condition="Exists('$(OrtLibDir)\onnxruntime.dll')" PackagePath="" Pack="false" CopyToOutputDirectory="PreserveNewest" Visible="false" />
+    <None Include="$(CsharpSrcRoot)\..\..\LICENSE" PackagePath="" Pack="true" Visible="false" CopyToOutputDirectory="PreserveNewest" />
+    <None Condition="Exists('$(OrtLibDir)\onnxruntime_providers_shared.dll')" Include="$(OrtLibDir)\onnxruntime_providers_shared.dll" CopyToOutputDirectory="Never" Visible="false" />
+    <None Condition="Exists('$(OrtLibDir)\onnxruntime_providers_cuda.dll')" Include="$(OrtLibDir)\onnxruntime_providers_cuda.dll" CopyToOutputDirectory="Never" Visible="false" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="**\*.cs" Link="%(Filename)%(Extension)" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(TargetFramework)'=='netstandard2.0'">
+    <PackageReference Include="System.Memory" Version="4.5.5" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.AI.Abstractions" Version="9.8.0" />
+  </ItemGroup>
+
+</Project>

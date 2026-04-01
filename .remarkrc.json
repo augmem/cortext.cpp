@@ -1,0 +1,17 @@
+{
+    "settings": {
+        "emphasis": "*",
+        "strong": "**"
+    },
+    "plugins": [
+        "remark-frontmatter",
+        "remark-gfm",
+        "remark-lint",
+        [
+            "remark-validate-links",
+            {
+                "repository": false
+            }
+        ]
+    ]
+}

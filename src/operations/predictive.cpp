@@ -1,0 +1,198 @@
+#include "cortext/operations/predictive.hpp"
+
+#include "cortext/store/store.hpp"
+#include "cortext/core/algorithms.hpp"
+#include "cortext/core/knobs.hpp"
+#include "cortext/operations/constants.hpp"
+#include "cortext/processor/operation_context.hpp"
+#include "cortext/telemetry/telemetry.hpp"
+#include <Eigen/Dense>
+#include <algorithm>
+#include <vector>
+
+namespace cortext::operations
+{
+
+namespace
+{
+// Prediction horizon: higher Focus yields longer horizon (more samples)
+// Paper Section 8.5: prediction_horizon = round(lerp(2, 8, F))
+constexpr double kPredictionHorizonMin = 2.0;
+constexpr double kPredictionHorizonMax = 8.0;
+constexpr double kConfMin = 0.3;
+constexpr double kConfMax = 0.7;
+constexpr double kDecayMax = 0.7;
+constexpr double kDecayMin = 0.3;
+constexpr double kSurpriseMax = 2.0;
+constexpr double kSurpriseMin = 0.5;
+constexpr double kBaseDeltaScale = 0.02;
+constexpr double kPadRef = 0.3;
+inline int
+PredictionHorizon (double F)
+{
+  // prediction_horizon = round(lerp(2, 8, F))
+  // Higher Focus = longer prediction horizon
+  const double f_eff = core::FocusBias (F);
+  return std::max (1, static_cast<int> (
+                          std::round (core::Lerp (kPredictionHorizonMin,
+                                                   kPredictionHorizonMax, f_eff))));
+}
+
+inline double
+PredictionConfidenceThreshold (double F)
+{
+  // prediction_conf_threshold = lerp(0.3, 0.7, F)
+  return core::Lerp (kConfMin, kConfMax, core::FocusBias (F));
+}
+
+inline double
+PreActivationDecay (double T)
+{
+  // pre_activation_decay = lerp(0.7, 0.3, T)
+  return core::Lerp (kDecayMax, kDecayMin, T);
+}
+
+inline double
+SurpriseSensitivity (double S, double T)
+{
+  // surprise_sensitivity = S × lerp(2.0, 0.5, T)
+  return core::SensitivityBias (S) * core::Lerp (kSurpriseMax, kSurpriseMin, T);
+}
+
+inline Eigen::VectorXf
+Unit (const Eigen::VectorXf &v)
+{
+  const double n = v.norm ();
+  if (n <= constants::kNormEpsilon)
+    {
+      return v;
+    }
+  return v / static_cast<float> (n);
+}
+
+inline double
+Clamp01 (double v)
+{
+  if (v < constants::kNormalizedMin)
+    return constants::kNormalizedMin;
+  if (v > constants::kNormalizedMax)
+    return constants::kNormalizedMax;
+  return v;
+}
+
+} // namespace
+
+void
+ApplyPredictivePreActivation::Execute (OperationContext &context, Transaction &tx) const
+{
+  auto &p_ctx = context.GetProcessorContext ();
+  const auto &cfg = context.GetConfig ();
+
+  // Need some recent context to estimate a trajectory.
+  if (p_ctx.recent_context_embeddings.empty ())
+    {
+      return;
+    }
+  const int available
+      = static_cast<int> (p_ctx.recent_context_embeddings.size ());
+  const int want = PredictionHorizon (cfg.focus);
+  const int take = std::max (1, std::min (available, want));
+
+  // Predicted direction: mean of last `take` embeddings, then normalized.
+  Eigen::VectorXf pred = Eigen::VectorXf::Zero (
+      p_ctx.recent_context_embeddings.back ().size ());
+  for (int i = available - take; i < available; ++i)
+    {
+      pred += p_ctx.recent_context_embeddings[static_cast<size_t> (i)];
+    }
+  if (pred.size () == 0)
+    {
+      return;
+    }
+  pred = Unit (pred);
+  // Fallback to last context if degenerate.
+  if (pred.norm () <= 1e-9f)
+    {
+      pred = Unit (p_ctx.recent_context_embeddings.back ());
+    }
+
+  const auto &retrieved = context.GetRetrievedMemoryEmbeddings ();
+  if (retrieved.empty ())
+    {
+      return;
+    }
+
+  const double conf_thresh = PredictionConfidenceThreshold (cfg.focus);
+  const double pad = PreActivationDecay (cfg.stability);
+  // Base delta in ~[0.012, 0.02]
+  const double base_delta = kBaseDeltaScale * (1.0 - (pad - kPadRef));
+  const double s_eff = core::SensitivityBias (cfg.sensitivity);
+  const double update_rate_on_surprise
+      = core::Lerp (0.2, 0.02, cfg.stability) * s_eff;
+  const double surp_sens
+      = SurpriseSensitivity (cfg.sensitivity, cfg.stability);
+
+  // Optional surprise modulation from metrics (map to [0,1]).
+  double surprise_01 = constants::kNormalizedMin;
+  if (auto m = context.GetMetric (operations::Metric::surprise))
+    {
+      double v = *m;
+      if (std::isnan (v) || std::isinf (v))
+        {
+          v = constants::kNormalizedMin;
+        }
+      if (v < constants::kNormalizedMin)
+        {
+          surprise_01 = Clamp01 (
+              (v + constants::kNormalizedMax) / constants::kTwo);
+        }
+      else
+        {
+          surprise_01 = Clamp01 (v);
+        }
+    }
+
+  int boost_count = 0;
+  for (const auto &kv : retrieved)
+    {
+      const long long id = kv.first;
+      const Eigen::VectorXf &vec = kv.second;
+      if (vec.size () == 0 || vec.size () != pred.size ())
+        {
+          continue;
+        }
+      double sim_pred = core::CosineSimilarity (pred, vec);
+      sim_pred = Clamp01 (sim_pred);
+      if (sim_pred < conf_thresh)
+        {
+          continue;
+        }
+
+      // Compute modulated delta; keep safe bounds.
+      double delta = base_delta * (1.0 + constants::kQuarter * surp_sens
+                                              * surprise_01);
+      delta += update_rate_on_surprise * surprise_01;
+      delta = core::Clamp (delta, 0.0, 0.2);
+
+      // v2: Update memories pre_activation (row exists from storage)
+      tx.Execute ("UPDATE memories "
+                  "SET pre_activation = MIN(?, COALESCE(pre_activation, 0.0) * ? + ?) "
+                  "WHERE embedding_id = ?;",
+                  { 1.0, pad, delta, id });
+      ++boost_count;
+    }
+
+  // Debug logging
+  telemetry::LogDebug ("cortext.predictive", {
+    telemetry::Attribute::Double ("conf_thresh", conf_thresh),
+    telemetry::Attribute::Double ("pad", pad),
+    telemetry::Attribute::Double ("base_delta", base_delta),
+    telemetry::Attribute::Double ("update_rate_on_surprise", update_rate_on_surprise),
+    telemetry::Attribute::Double ("surp_sens", surp_sens),
+    telemetry::Attribute::Double ("surprise_01", surprise_01),
+    telemetry::Attribute::Double ("prediction_norm", static_cast<double> (pred.norm ())),
+    telemetry::Attribute::Int64 ("boost_count", static_cast<int64_t> (boost_count))
+  });
+}
+
+} // namespace cortext::operations

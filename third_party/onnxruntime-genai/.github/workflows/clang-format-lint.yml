@@ -1,0 +1,33 @@
+name: Clang Format Lint
+
+on:
+  push:
+    branches:
+      - main
+      - rel-*
+  pull_request:
+    branches:
+      - main
+      - rel-*
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  cancel-in-progress: true
+
+jobs:
+  lint-cpp:
+    runs-on:
+      - self-hosted
+      - "1ES.Pool=onnxruntime-genai-Ubuntu2204-AMD-CPU"
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+        with:
+          submodules: 'false'
+
+      - name: Check format
+        uses: microsoft/onnxruntime-github-actions/format-lint-check@v0.0.6
+        with:
+          llvm-version: '20.1.0'
+          llvm-sha256-hash: '954ac51498519f6ed9540714fb04bc401f70039b296a8160dd1559be380788d7'

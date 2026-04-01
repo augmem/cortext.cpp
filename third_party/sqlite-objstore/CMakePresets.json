@@ -1,0 +1,195 @@
+{
+  "version": 5,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 28,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+      }
+    },
+    {
+      "name": "full-debug",
+      "displayName": "Full (Debug)",
+      "inherits": "base",
+      "binaryDir": "${sourceDir}/build/full-debug",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "OBJSTORE_ENABLE_WARNINGS_AS_ERRORS": "ON",
+        "OBJSTORE_ENABLE_ASAN": "OFF",
+        "OBJSTORE_ENABLE_UBSAN": "OFF",
+        "OBJSTORE_BUILD_SHARED": "ON",
+        "OBJSTORE_BUILD_STATIC": "ON",
+        "OBJSTORE_BACKEND_FILE": "ON",
+        "OBJSTORE_BACKEND_SQLITE": "ON",
+        "OBJSTORE_BACKEND_OPFS": "ON",
+        "OBJSTORE_BACKEND_VFS": "ON",
+        "OBJSTORE_BUILD_BENCHMARKS": "ON",
+        "BUILD_TESTING": "ON"
+      }
+    },
+    {
+      "name": "full-release",
+      "displayName": "Full (Release)",
+      "inherits": "base",
+      "binaryDir": "${sourceDir}/build/full-release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "OBJSTORE_ENABLE_WARNINGS_AS_ERRORS": "ON",
+        "OBJSTORE_BUILD_SHARED": "ON",
+        "OBJSTORE_BUILD_STATIC": "ON",
+        "OBJSTORE_BACKEND_FILE": "ON",
+        "OBJSTORE_BACKEND_SQLITE": "ON",
+        "OBJSTORE_BACKEND_OPFS": "ON",
+        "OBJSTORE_BACKEND_VFS": "ON",
+        "OBJSTORE_BUILD_BENCHMARKS": "ON",
+        "BUILD_TESTING": "ON"
+      }
+    },
+    {
+      "name": "full-asan",
+      "displayName": "Full (ASan/UBSan)",
+      "inherits": "base",
+      "binaryDir": "${sourceDir}/build/full-asan",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "OBJSTORE_ENABLE_WARNINGS_AS_ERRORS": "ON",
+        "OBJSTORE_ENABLE_ASAN": "ON",
+        "OBJSTORE_ENABLE_UBSAN": "ON",
+        "OBJSTORE_BUILD_SHARED": "ON",
+        "OBJSTORE_BUILD_STATIC": "ON",
+        "OBJSTORE_BACKEND_FILE": "ON",
+        "OBJSTORE_BACKEND_SQLITE": "ON",
+        "OBJSTORE_BACKEND_OPFS": "ON",
+        "OBJSTORE_BACKEND_VFS": "ON",
+        "OBJSTORE_BUILD_BENCHMARKS": "ON",
+        "BUILD_TESTING": "ON"
+      }
+    },
+    {
+      "name": "wasi-release",
+      "displayName": "WASI (VFS) Release",
+      "inherits": "base",
+      "binaryDir": "${sourceDir}/build/wasi-release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/cmake/toolchains/wasi.cmake",
+        "OBJSTORE_ENABLE_WARNINGS_AS_ERRORS": "OFF",
+        "OBJSTORE_BUILD_SHARED": "OFF",
+        "OBJSTORE_BUILD_STATIC": "ON",
+        "OBJSTORE_BACKEND_FILE": "OFF",
+        "OBJSTORE_BACKEND_SQLITE": "ON",
+        "OBJSTORE_BACKEND_VFS": "ON",
+        "OBJSTORE_BACKEND_OPFS": "OFF",
+        "OBJSTORE_BUILD_BENCHMARKS": "OFF",
+        "BUILD_TESTING": "ON"
+      }
+    },
+    {
+      "name": "wasm-release",
+      "displayName": "WASM/OPFS Release",
+      "inherits": "base",
+      "binaryDir": "${sourceDir}/build/wasm-release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/cmake/toolchains/emscripten.cmake",
+        "OBJSTORE_ENABLE_WARNINGS_AS_ERRORS": "OFF",
+        "OBJSTORE_BUILD_SHARED": "OFF",
+        "OBJSTORE_BUILD_STATIC": "ON",
+        "OBJSTORE_BACKEND_FILE": "OFF",
+        "OBJSTORE_BACKEND_SQLITE": "ON",
+        "OBJSTORE_BACKEND_VFS": "ON",
+        "OBJSTORE_BACKEND_OPFS": "ON",
+        "OBJSTORE_BUILD_BENCHMARKS": "OFF",
+        "BUILD_TESTING": "ON"
+      }
+    },
+    {
+      "name": "embedded-release",
+      "displayName": "Embedded Release",
+      "inherits": "base",
+      "binaryDir": "${sourceDir}/build/embedded-release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "OBJSTORE_ENABLE_WARNINGS_AS_ERRORS": "ON",
+        "OBJSTORE_BUILD_SHARED": "OFF",
+        "OBJSTORE_BUILD_STATIC": "ON",
+        "OBJSTORE_BACKEND_FILE": "ON",
+        "OBJSTORE_BACKEND_SQLITE": "ON",
+        "OBJSTORE_BACKEND_VFS": "ON",
+        "OBJSTORE_BACKEND_OPFS": "OFF",
+        "OBJSTORE_BUILD_BENCHMARKS": "OFF",
+        "BUILD_TESTING": "OFF"
+      }
+    },
+    {
+      "name": "minimal-release",
+      "displayName": "Minimal SQLite-only Release",
+      "inherits": "base",
+      "binaryDir": "${sourceDir}/build/minimal-release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "OBJSTORE_ENABLE_WARNINGS_AS_ERRORS": "OFF",
+        "OBJSTORE_BUILD_SHARED": "OFF",
+        "OBJSTORE_BUILD_STATIC": "ON",
+        "OBJSTORE_BACKEND_FILE": "OFF",
+        "OBJSTORE_BACKEND_SQLITE": "ON",
+        "OBJSTORE_BACKEND_VFS": "OFF",
+        "OBJSTORE_BACKEND_OPFS": "OFF",
+        "OBJSTORE_BUILD_BENCHMARKS": "OFF",
+        "BUILD_TESTING": "OFF"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "full-debug",
+      "configurePreset": "full-debug"
+    },
+    {
+      "name": "full-release",
+      "configurePreset": "full-release"
+    },
+    {
+      "name": "full-asan",
+      "configurePreset": "full-asan"
+    },
+    {
+      "name": "wasi-release",
+      "configurePreset": "wasi-release"
+    },
+    {
+      "name": "wasm-release",
+      "configurePreset": "wasm-release"
+    },
+    {
+      "name": "embedded-release",
+      "configurePreset": "embedded-release"
+    },
+    {
+      "name": "minimal-release",
+      "configurePreset": "minimal-release"
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "full-debug",
+      "configurePreset": "full-debug"
+    },
+    {
+      "name": "full-asan",
+      "configurePreset": "full-asan"
+    },
+    {
+      "name": "wasi-release",
+      "configurePreset": "wasi-release"
+    }
+  ]
+}
