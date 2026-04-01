@@ -19,6 +19,3 @@
 [submodule "third_party/sherpa-onnx"]
 	path = third_party/sherpa-onnx
 	url = https://github.com/k2-fsa/sherpa-onnx.git
-[submodule "third_party/executorch"]
-	path = third_party/executorch
-	url = https://github.com/pytorch/executorch.git

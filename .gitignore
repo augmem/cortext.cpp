@@ -113,6 +113,7 @@ models/
 # Third-party build artifacts (if building locally)
 third_party/*/build/
 third_party/*build/
+third_party/litert-lm-build/
 build-ort/
 third_party/*/.git/
 poc/
