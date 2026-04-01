@@ -247,6 +247,51 @@ for numerical stability floors (e.g., ε(F, S, T)) and unit conversions.
 This keeps the system’s qualitative behavior entirely governed by the
 three knobs, consistent with the human-memory objective.
 
+## Temporal Semantics for Structured Facts
+
+Cortext currently treats raw memories primarily as **event-time
+observations**: a memory is written when a coherent unit is detected,
+and its stored timestamp records when that unit was observed. For
+structured facts extracted during consolidation, a future extension can
+benefit from distinguishing three related but non-identical temporal
+notions:
+
+-   **Event time:** when the source experience was observed by the
+    system.
+-   **Valid time:** when an extracted fact was true in the world.
+-   **Transaction time:** when Cortext learned, inserted, corrected, or
+    superseded that fact.
+
+For an episodic memory `m_i`, we define the event timestamp:
+
+    t_event(m_i) = created_at(m_i)
+
+For a structured fact assertion `f_j = (subject, predicate, object)`, we
+define two half-open intervals:
+
+    valid(f_j) = [t_v_start(f_j), t_v_end(f_j))
+    tx(f_j)    = [t_tx_start(f_j), t_tx_end(f_j))
+
+The valid interval models when the assertion held in the world. The
+transaction interval models when the system regarded that assertion as
+active knowledge.
+
+This distinction supports three different query semantics:
+
+    true_at(f_j, τ)     = 1 if τ ∈ valid(f_j), else 0
+    known_at(f_j, τ)    = 1 if τ ∈ tx(f_j), else 0
+    current(f_j, now)   = true_at(f_j, now) ∧ known_at(f_j, now)
+
+This is the core of **bitemporal modeling**: the system can separately
+answer “what was true then?” and “what did the system believe then?”
+without collapsing historical corrections into a single timeless
+statement.
+
+In the current alpha, Cortext’s temporality is primarily event-driven
+and recency-weighted. The bitemporal formulation above is best
+understood as an additive structured-fact layer for evolving personal
+knowledge rather than as a replacement for the episodic memory stream.
+
 ### Buffers
 
 The specification uses distinct streaming buffers:
@@ -2297,14 +2342,18 @@ semantic structures, reducing drift and preserving detail.
 **Summarization + labeling engine (deep mode):** Consolidation is the
 only stage that invokes a generative model. Deep mode resolves a local
 backend internally: **gemma-3n-e2b** through `third_party/litert_lm`,
-**LFM2** through `llama.cpp` GGUFs (`LFM2-2.6B-Transcript-Q4_K_M.gguf`
-for summarization and `LFM2-1.2B-Extract-Q4_K_M.gguf` for extraction),
-or a **mixed** path that uses Gemma for summarization and LFM2 for
-extraction. Auto resolution prefers the mixed path when both assets are
-present. All other operations remain embedding-only. **There is no
-extractive fallback**: if no deep backend is available, or summarization
-fails, deep consolidation raises an error rather than silently
-degrading.
+**LFM2/LFM2.5** through `llama.cpp` GGUFs, or a **mixed** path that uses
+Gemma for summarization and a Liquid GGUF for extraction. The Liquid
+resolver now prefers `LFM2.5-350M-GGUF` for both summarization and
+extraction, defaulting to the local `Q4_K_M` checkpoint when present and
+accepting other bundled GGUF quantizations as fallbacks; if that asset
+is absent, it falls back to the older pinned
+`LFM2-2.6B-Transcript-Q4_K_M.gguf` summarizer and
+`LFM2-1.2B-Extract-Q4_K_M.gguf` extractor. Auto resolution prefers the
+mixed path when both assets are present. All other operations remain
+embedding-only. **There is no extractive fallback**: if no deep backend
+is available, or summarization fails, deep consolidation raises an error
+rather than silently degrading.
 
 ## Shallow Consolidation (Embedding‑Only)
 
@@ -2419,6 +2468,59 @@ If a label already exists, its stored salience is updated with
 To guarantee that labeling remains informative even for small clusters,
 if the frequency filter would remove all labels for a summary, the
 highest-salience label is retained as a fallback.
+
+## Temporal Consolidation of Changing Facts
+
+For long-horizon personal memory support, consolidation must avoid
+flattening changing facts into one timeless summary. Living
+arrangements, caregivers, appointments, medications, projects, and
+routines can all change over time. A memory system that simply
+overwrites older facts loses exactly the temporal nuance that matters
+most in care-oriented settings.
+
+A natural extension is to let deep extraction emit **fact assertions
+with temporal semantics** in addition to labels and relations:
+
+    fact_assertion_j = (
+      subject,
+      predicate,
+      object,
+      valid = [t_v_start, t_v_end),
+      tx    = [t_tx_start, t_tx_end),
+      provenance = {source_memory_ids, source_summary_ids},
+      confidence
+    )
+
+Under this model, consolidation remains **append-only** at the fact
+layer. New evidence does not erase prior assertions. Instead:
+
+1.  A new assertion is inserted with its own valid and transaction
+    interval.
+2.  If it conflicts with an earlier open-ended assertion on the same
+    subject/predicate, the earlier assertion can be closed or
+    superseded.
+3.  Both the earlier and later assertions remain queryable through their
+    intervals and provenance.
+
+This yields a cleaner separation between:
+
+-   what was true in the world at a given time,
+-   when Cortext learned that truth,
+-   and when Cortext later revised its belief.
+
+For example, “caregiver = Sarah” may be valid through March, while
+“caregiver = Emily” becomes valid in April but is only learned in May.
+Bitemporal consolidation preserves both the world timeline and the
+system-learning timeline, preventing late-arriving information from
+rewriting the past.
+
+This temporal structure is especially important for dementia-support
+scenarios. Gentle reminders should be able to express not only the
+current state (“Emily is your caregiver now”) but also historical
+context (“Sarah used to visit on Tuesdays”) and uncertainty about when a
+change was learned (“as of the latest update”). In practice, this means
+summarization should verbalize temporal transitions rather than compress
+them away.
 
 ## Knowledge Graph Construction
 
@@ -5633,11 +5735,12 @@ decision thresholds rather than retrieval breadth.
 
 ## Embedding-Only Operations
 
-All online operations (scoring, boundary detection, retrieval, gating,
-graph updates) operate **only** on embeddings. Raw text/audio/image
-content is used solely to generate embeddings; the live loop never
-re-enters token space. This preserves modality-agnostic behavior and
-prevents hidden heuristics from bypassing knob control.
+In the current alpha, all online operations (scoring, boundary
+detection, retrieval, gating, graph updates) operate **only** on
+embeddings. Raw text/audio/image content is used solely to generate
+embeddings; the live loop never re-enters token space. This preserves
+modality-agnostic behavior and prevents hidden heuristics from bypassing
+knob control.
 
 Retrieved memories are hydrated for inspection and evaluation only. When
 a memory has no signal-level blobs (e.g., consolidation summaries), the
@@ -5651,27 +5754,81 @@ nodes can participate in analysis without affecting online computations.
 -   **Consolidation LLM:** summarization and labeling are the only
     generative steps and run only during consolidation. Cortext resolves
     a local backend internally: **gemma-3n-e2b** via
-    `third_party/litert_lm`, **LFM2** via `llama.cpp` GGUFs, or a
-    **mixed** Gemma+LFM2 path. The Gemma path auto-selects among
+    `third_party/litert_lm`, **LFM2/LFM2.5** via `llama.cpp` GGUFs, or a
+    **mixed** Gemma+Liquid path. The Gemma path auto-selects among
     available `.litertlm` variants under `models/gemma3n-e2b-litert/`.
-    The LFM2 path is pinned to `LFM2-2.6B-Transcript-Q4_K_M.gguf` for
-    summarization and `LFM2-1.2B-Extract-Q4_K_M.gguf` for extraction,
-    with env overrides for exact paths. The mixed path uses Gemma for
-    summarization and the pinned LFM2 extract model for labeling, and
-    auto resolution now prefers that split when both assets are present.
-    If no deep backend is available, deep consolidation raises an error
-    rather than silently degrading. The summarization prompt remains
-    role-aware for chat sources, favors direct fact-oriented memory
-    notes over dialogue recaps, explicitly preserves named people,
-    projects, and technologies, discourages speaker-role phrasing such
-    as “the user” or “the assistant”, and preserves chronological
-    ordering when selected chat excerpts are passed to the model. The
-    LFM2 path is text-only; audio-specific summarization/extraction
-    methods remain unsupported there.
+    The Liquid path now prefers `LFM2.5-350M-GGUF` for both
+    summarization and extraction, preferring `Q4_K_M` when present and
+    otherwise accepting other shipped GGUF quantizations; env overrides
+    still take precedence for exact paths. If the `LFM2.5-350M-GGUF`
+    asset is absent, Cortext falls back to the older
+    `LFM2-2.6B-Transcript-Q4_K_M.gguf` summarizer and
+    `LFM2-1.2B-Extract-Q4_K_M.gguf` extractor. The mixed path uses Gemma
+    for summarization and the preferred Liquid extractor path for
+    labeling, and auto resolution now prefers that split when both
+    assets are present. If no deep backend is available, deep
+    consolidation raises an error rather than silently degrading. The
+    summarization prompt remains role-aware for chat sources, favors
+    direct fact-oriented memory notes over dialogue recaps, explicitly
+    preserves named people, projects, and technologies, discourages
+    speaker-role phrasing such as “the user” or “the assistant”, and
+    preserves chronological ordering when selected chat excerpts are
+    passed to the model. The Liquid GGUF path is text-only;
+    audio-specific summarization/extraction methods remain unsupported
+    there.
 
 No other model runtimes are required for the online loop; all
 operational decisions are embedding-space computations derived from
 F/S/T.
+
+## Alpha Scope and v1 Structured-Fact Direction
+
+The current alpha stores temporality primarily at the episodic level:
+
+-   episodic memories have event timestamps,
+-   retrieval and decay are recency-aware,
+-   consolidation produces summaries, labels, and graph structure.
+
+This is sufficient for long-horizon continuity, but it does not yet
+provide a first-class store for changing structured facts such as
+residence, caregiver, routine, diagnosis, medication, or appointment
+state.
+
+A planned `v1` extension is an additive **bitemporal structured-fact
+layer** populated during consolidation rather than during the live loop.
+A minimal fact record would include:
+
+    fact_id
+    subject
+    predicate
+    object_or_value
+    valid_start, valid_end
+    recorded_at, superseded_at
+    confidence
+    source_memory_ids
+    source_summary_ids
+
+This layer is additive, not a replacement for the existing episodic
+graph. The intended division of responsibility is:
+
+-   **episodic memories:** preserve raw experience and provenance,
+-   **summaries and graph nodes:** provide semantic compression and
+    associative retrieval,
+-   **bitemporal facts:** answer changing factual questions with
+    explicit world-time and system-time semantics.
+
+Under this design, deep extraction in consolidation can emit assertions
+with valid-time and transaction-time boundaries. Retrieval and answer
+construction can then distinguish among three query modes:
+
+-   current truth (`what is true now?`)
+-   historical truth (`what was true at world time τ?`)
+-   historical belief
+    (`what would Cortext have answered at system time τ?`)
+
+Crucially, this preserves the alpha architecture: the live control loop
+remains embedding-only, while structured temporal reasoning is added as
+a higher-level memory product derived from consolidation outputs.
 
 ## Computational Complexity
 
