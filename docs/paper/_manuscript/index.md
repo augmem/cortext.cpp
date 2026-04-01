@@ -1926,6 +1926,14 @@ same source:
     if |similar_memories| > 0:
         merge_into_chunk(similar_memories, memory)
 
+**Implementation note (chat applications):** turn-structured chat
+sources (`chat/user`, `chat/assistant`) bypass same-source chunk merging
+and generic WM rejection so the active working-memory window remains a
+FIFO sequence of recent turns for prompt reconstruction. Prompt
+hydration must order active slots by insertion/start time rather than
+`last_access`; otherwise rehearsal or retrieval touches can scramble the
+conversational sequence even when the underlying memories are correct.
+
 ## Metacognitive Monitoring
 
 The system implements feeling-of-knowing (FOK) and tip-of-tongue (TOT)
@@ -1982,7 +1990,7 @@ Contradictions reduce `reliability`, and user corrections directly
 update `contradiction_count`. Source confidence gates injection into
 active context:
 
-    if source_confidence(m) < lerp(0.25, 0.55, T):
+    if source_confidence(m) < lerp(0.15, 0.45, T):
         downrank_or_hold(m)
 
 ## Constructive Recall and Controlled Distortion
@@ -2189,9 +2197,13 @@ On write, every memory updates the index store:
 
 Consolidation operates on stored memory representatives (e_rep from
 <a href="#sec-rep-embedding" class="quarto-xref">Section 6.4.7</a>), not
-individual signals. Candidates must be **LONG_TERM or ASSOCIATION
-memories with stored content blobs** (blob_id present) so summarization
-always has source text. **Consolidation is only initiated via an
+individual signals. Candidates are restricted to **unclustered LONG_TERM
+memories**, and deep mode additionally requires stored content blobs
+(`blob_id` present) so summarization always has raw source text.
+Previously generated **ASSOCIATION** summaries are treated as sealed
+semantic products at the same consolidation level: they remain available
+for retrieval and graph expansion, but they are not fed back into later
+same-level deep summarization. **Consolidation is only initiated via an
 explicit API call (`Consolidate()`).** The core runtime does not
 auto-trigger consolidation.
 
@@ -2283,11 +2295,16 @@ merges. Representative episodes are re-encoded and used to update
 semantic structures, reducing drift and preserving detail.
 
 **Summarization + labeling engine (deep mode):** Consolidation is the
-only stage that invokes a generative model. Summaries and labels are
-produced by **gemma-3n-e2b** running through `third_party/litert_lm`.
-All other operations remain embedding-only. **There is no extractive
-fallback**: if Gemma is unavailable or summarization fails, deep
-consolidation raises an error rather than silently degrading.
+only stage that invokes a generative model. Deep mode resolves a local
+backend internally: **gemma-3n-e2b** through `third_party/litert_lm`,
+**LFM2** through `llama.cpp` GGUFs (`LFM2-2.6B-Transcript-Q4_K_M.gguf`
+for summarization and `LFM2-1.2B-Extract-Q4_K_M.gguf` for extraction),
+or a **mixed** path that uses Gemma for summarization and LFM2 for
+extraction. Auto resolution prefers the mixed path when both assets are
+present. All other operations remain embedding-only. **There is no
+extractive fallback**: if no deep backend is available, or summarization
+fails, deep consolidation raises an error rather than silently
+degrading.
 
 ## Shallow Consolidation (Embedding‑Only)
 
@@ -2345,8 +2362,17 @@ methods (e.g., DBSCAN) or k-means using embedding similarity:
 Summary nodes replace clusters:
 
     summary.embedding = μ_i
-    summary.blob = summarize(fetch_blobs(cluster_i))  # gemma-3n-e2b via litert_lm (required)
+    summary.blob = summarize(fetch_blobs(cluster_i))  # deep local LLM backend (Gemma/LiteRT-LM or LFM2/llama.cpp)
     summary.metadata.sources = [m.id for m in cluster_i]
+
+**Current implementation note:** same-level deep summarization now
+replays only raw episodic `LONG_TERM` memories that have not yet been
+assigned to a consolidation cluster. This prevents repeated
+summary-of-summary compression in long chat sessions while still
+allowing later raw evidence to form new sibling summaries. Higher-level
+semantic summarization, if desired, should be modeled as an explicit
+separate layer rather than by recursively feeding first-level summary
+blobs back into the same consolidation path.
 
 To keep consolidation latency bounded, summarization input is capped by
 knob‑derived limits. Source texts are ranked by similarity to the
@@ -2776,11 +2802,13 @@ We present preliminary experimental results collected from live chat
 sessions to validate the adaptive mechanisms.
 
 All runs reported here are generated with the
-`examples/topical_chat_analysis` pipeline using ImageBind embeddings;
-consolidation summarization/labeling (when invoked) uses gemma-3n-e2b
-via `third_party/litert_lm`. Evaluation logs include lexical overlap
-(token Jaccard) and **semantic overlap** (ImageBind cosine) for
-retrieval and interrupt quality. A multi-participant harness
+`examples/topical_chat_analysis` pipeline using ImageBind embeddings. At
+the time of these reported experiments, deep consolidation
+summarization/labeling used the Gemma LiteRT path (`gemma-3n-e2b` via
+`third_party/litert_lm`). The current implementation also supports an
+LFM2 `llama.cpp` path for deep consolidation. Evaluation logs include
+lexical overlap (token Jaccard) and **semantic overlap** (ImageBind
+cosine) for retrieval and interrupt quality. A multi-participant harness
 (`scripts/run_memory_harness.py`) interleaves conversations to stress
 long-horizon recall under shared-memory load.
 
@@ -2892,8 +2920,7 @@ compared:
 
 -   **No consolidation** (`consolidate_cycles=0`)
 -   **Consolidation on** (`consolidate_cycles=2`, yielding 8
-    consolidation runs; summaries produced by gemma-3n-e2b with no
-    fallback)
+    consolidation runs; these historical runs used gemma-3n-e2b)
 
 Key outcomes (Δ = consolidate − no-consolidate):
 
@@ -2910,8 +2937,8 @@ sparsely in this horizon):
     include summaries)
 -   **summary_hit_overlap_mean:** 0.606 (semantic overlap of best
     summary hit)
--   **consolidation_summary_count:** 8 (all from gemma-3n-e2b; no
-    fallback)
+-   **consolidation_summary_count:** 8 (all from gemma-3n-e2b in this
+    run)
 
 Additional signals:
 
@@ -3051,6 +3078,66 @@ association nodes when they are relevant without degrading semantic
 quality. The absolute hit rate remains low in this short horizon because
 only four summaries were produced; longer horizons should show a larger
 effect.
+
+**Current-branch rerun (Mar 28, 2026; nondeterministic; stronger boost
+probe):**
+
+Runs:
+
+-   current branch baseline:
+    `logs/topical_chat_snapshots/assocboost_base_20260328`
+-   stronger association boost (`0.015..0.06` → `0.025..0.09`):
+    `logs/topical_chat_snapshots/assocboost_boosted_20260328`
+
+<table style="width:100%;">
+<colgroup>
+<col style="width: 16%" />
+<col style="width: 16%" />
+<col style="width: 16%" />
+<col style="width: 16%" />
+<col style="width: 16%" />
+<col style="width: 16%" />
+</colgroup>
+<thead>
+<tr>
+<th style="text-align: right;">variant</th>
+<th style="text-align: right;">retrieval_summary_hit_rate</th>
+<th style="text-align: right;">retrieval_association_turn_rate</th>
+<th style="text-align: right;">summary_hit_overlap_mean</th>
+<th style="text-align: right;">retrieval_semantic_overlap_mean</th>
+<th style="text-align: right;">perf_total_ms_mean</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: right;">current branch baseline</td>
+<td style="text-align: right;">0.5648</td>
+<td style="text-align: right;">0.5648</td>
+<td style="text-align: right;">0.450</td>
+<td style="text-align: right;">0.56297</td>
+<td style="text-align: right;">946.12</td>
+</tr>
+<tr>
+<td style="text-align: right;">stronger boost</td>
+<td style="text-align: right;">0.5619</td>
+<td style="text-align: right;">0.5619</td>
+<td style="text-align: right;">0.458</td>
+<td style="text-align: right;">0.56304</td>
+<td style="text-align: right;">928.58</td>
+</tr>
+</tbody>
+</table>
+
+**Observations:** On the current branch, summary hits are already very
+common (about **56%** of retrieval turns), far above the December
+baseline that motivated the original boost. Pushing the association
+bonus higher did **not** increase summary-hit rate; it stayed
+flat-to-slightly-lower (`0.5648` → `0.5619`). The stronger boost
+produced only tiny secondary differences: slightly higher summary-hit
+overlap (`0.450` → `0.458`), negligible semantic-overlap change
+(`0.56297` → `0.56304`), and about **1.9%** lower mean total time. This
+does not justify further increasing the association bonus on the current
+branch.
 
 ## Long-Horizon Knob Sweep (360 Max Turns)
 
@@ -3791,6 +3878,79 @@ periodic consolidation):**
 end‑only within noise; any differences in summary/label retrieval would
 require longer horizons or more consolidation cycles.
 
+**Current-branch rerun (Mar 28, 2026; 120 turns; nondeterministic;
+consolidate_every=60):**
+
+Runs:
+
+-   end-only: `logs/topical_chat_snapshots/idle_endonly_nondet_20260328`
+-   idle-during: `logs/topical_chat_snapshots/idle_idle_nondet_20260328`
+
+<table>
+<colgroup>
+<col style="width: 9%" />
+<col style="width: 9%" />
+<col style="width: 9%" />
+<col style="width: 9%" />
+<col style="width: 9%" />
+<col style="width: 9%" />
+<col style="width: 9%" />
+<col style="width: 9%" />
+<col style="width: 9%" />
+<col style="width: 9%" />
+<col style="width: 9%" />
+</colgroup>
+<thead>
+<tr>
+<th style="text-align: right;">condition</th>
+<th style="text-align: right;">cons_runs</th>
+<th style="text-align: right;">summaries</th>
+<th style="text-align: right;">labels_seen</th>
+<th style="text-align: right;">relations_seen</th>
+<th style="text-align: right;">retr_turn_rate</th>
+<th style="text-align: right;">retr_avg_cands</th>
+<th style="text-align: right;">retr_sem_overlap</th>
+<th style="text-align: right;">interrupt_turn_rate</th>
+<th style="text-align: right;">interrupt_abort_rate</th>
+<th style="text-align: right;">perf_total_ms</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: right;">end-only</td>
+<td style="text-align: right;">3</td>
+<td style="text-align: right;">3</td>
+<td style="text-align: right;">17</td>
+<td style="text-align: right;">22</td>
+<td style="text-align: right;">0.475</td>
+<td style="text-align: right;">53.68</td>
+<td style="text-align: right;">0.55472</td>
+<td style="text-align: right;">0.4667</td>
+<td style="text-align: right;">0.4107</td>
+<td style="text-align: right;">842.76</td>
+</tr>
+<tr>
+<td style="text-align: right;">idle-during</td>
+<td style="text-align: right;">3</td>
+<td style="text-align: right;">3</td>
+<td style="text-align: right;">17</td>
+<td style="text-align: right;">22</td>
+<td style="text-align: right;">0.475</td>
+<td style="text-align: right;">53.63</td>
+<td style="text-align: right;">0.55472</td>
+<td style="text-align: right;">0.4667</td>
+<td style="text-align: right;">0.4107</td>
+<td style="text-align: right;">805.75</td>
+</tr>
+</tbody>
+</table>
+
+**Observation:** The rerun reproduces the earlier conclusion: at this
+horizon, idle consolidation is behaviorally indistinguishable from
+end-only. The only measurable delta is wall-clock cost, with idle-during
+about **4.4% faster** (`842.76ms` → `805.75ms` mean total time), which
+is too small to claim a retrieval-quality benefit.
+
 ## Affect On/Off (Long Horizon, No Consolidation)
 
 We compared affect gating at **F=S=T=0.5** over **156 turns** (single
@@ -3840,6 +4000,167 @@ retrieval effects.
 semantic overlap stays within noise. At mid‑range knobs on this dataset,
 affect primarily shifts interrupt gating frequency rather than semantic
 match quality.
+
+**Current-branch rerun (Mar 28, 2026; nondeterministic; no
+consolidation):**
+
+Runs:
+
+-   affect `all`:
+    `logs/topical_chat_snapshots/affect_all_nondet_20260328`
+-   affect `off`:
+    `logs/topical_chat_snapshots/affect_off_nondet_20260328`
+
+<table style="width:100%;">
+<colgroup>
+<col style="width: 10%" />
+<col style="width: 10%" />
+<col style="width: 10%" />
+<col style="width: 10%" />
+<col style="width: 10%" />
+<col style="width: 10%" />
+<col style="width: 10%" />
+<col style="width: 10%" />
+<col style="width: 10%" />
+<col style="width: 10%" />
+</colgroup>
+<thead>
+<tr>
+<th style="text-align: right;">affect_mode</th>
+<th style="text-align: right;">retr_turn_rate</th>
+<th style="text-align: right;">retr_sem_overlap</th>
+<th style="text-align: right;">interrupt_turn_rate</th>
+<th style="text-align: right;">interrupt_abort_rate</th>
+<th style="text-align: right;">interrupt_sem_overlap</th>
+<th style="text-align: right;">retrieval_thresh_mean</th>
+<th style="text-align: right;">boundary_mult_eff_mean</th>
+<th style="text-align: right;">retrieval_emotion_bonus_mean</th>
+<th style="text-align: right;">perf_total_ms</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: right;">all</td>
+<td style="text-align: right;">0.5256</td>
+<td style="text-align: right;">0.56282</td>
+<td style="text-align: right;">0.5128</td>
+<td style="text-align: right;">0.4000</td>
+<td style="text-align: right;">0.56167</td>
+<td style="text-align: right;">0.19781</td>
+<td style="text-align: right;">1.25165</td>
+<td style="text-align: right;">0.01087</td>
+<td style="text-align: right;">869.96</td>
+</tr>
+<tr>
+<td style="text-align: right;">off</td>
+<td style="text-align: right;">0.5128</td>
+<td style="text-align: right;">0.57689</td>
+<td style="text-align: right;">0.2564</td>
+<td style="text-align: right;">0.0000</td>
+<td style="text-align: right;">0.58511</td>
+<td style="text-align: right;">0.23990</td>
+<td style="text-align: right;">1.51800</td>
+<td style="text-align: right;">0.00000</td>
+<td style="text-align: right;">788.92</td>
+</tr>
+</tbody>
+</table>
+
+**Observation:** On the current branch, affect now has a **large**
+mixed-content gating effect. Compared with `off`, `affect_mode=all`
+lowers the interrupt retrieval threshold (`0.23990` → `0.19781`) and
+boundary multiplier (`1.518` → `1.252`), roughly **doubling interrupt
+rate** (`0.2564` → `0.5128`) and reintroducing interrupt aborts
+(`0.0000` → `0.4000`). Semantic quality also shifts: retrieval semantic
+overlap drops by about **0.014** (`0.57689` → `0.56282`) and interrupt
+semantic overlap drops by about **0.023** (`0.58511` → `0.56167`). This
+is stronger than the earlier December result and suggests later affect /
+interrupt-gate tuning made affect a dominant gating relaxer on this
+benchmark rather than a small frequency nudge.
+
+**Post-retune probe (Mar 28, 2026; lower interrupt affect relax
+coefficient):**
+
+To keep affect as a modulation term rather than a dominant gate relaxer,
+we reduced `InterruptAffectRelaxCoeff(S)` from
+`lerp(0.15, 0.55, S̃_affect)` to `lerp(0.08, 0.28, S̃_affect)` and reran
+`affect_mode=all` on the same benchmark:
+
+-   retuned affect `all`:
+    `logs/topical_chat_snapshots/affect_all_relaxed_20260328`
+
+<table style="width:100%;">
+<colgroup>
+<col style="width: 11%" />
+<col style="width: 11%" />
+<col style="width: 11%" />
+<col style="width: 11%" />
+<col style="width: 11%" />
+<col style="width: 11%" />
+<col style="width: 11%" />
+<col style="width: 11%" />
+<col style="width: 11%" />
+</colgroup>
+<thead>
+<tr>
+<th style="text-align: right;">affect_mode</th>
+<th style="text-align: right;">retr_turn_rate</th>
+<th style="text-align: right;">retr_sem_overlap</th>
+<th style="text-align: right;">interrupt_turn_rate</th>
+<th style="text-align: right;">interrupt_abort_rate</th>
+<th style="text-align: right;">interrupt_sem_overlap</th>
+<th style="text-align: right;">retrieval_thresh_mean</th>
+<th style="text-align: right;">boundary_mult_eff_mean</th>
+<th style="text-align: right;">perf_total_ms</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: right;">all (pre-retune)</td>
+<td style="text-align: right;">0.5256</td>
+<td style="text-align: right;">0.56282</td>
+<td style="text-align: right;">0.5128</td>
+<td style="text-align: right;">0.4000</td>
+<td style="text-align: right;">0.56167</td>
+<td style="text-align: right;">0.19781</td>
+<td style="text-align: right;">1.25165</td>
+<td style="text-align: right;">869.96</td>
+</tr>
+<tr>
+<td style="text-align: right;">all (retuned)</td>
+<td style="text-align: right;">0.5000</td>
+<td style="text-align: right;">0.58003</td>
+<td style="text-align: right;">0.3397</td>
+<td style="text-align: right;">0.2264</td>
+<td style="text-align: right;">0.58000</td>
+<td style="text-align: right;">0.21970</td>
+<td style="text-align: right;">1.39018</td>
+<td style="text-align: right;">843.03</td>
+</tr>
+<tr>
+<td style="text-align: right;">off</td>
+<td style="text-align: right;">0.5128</td>
+<td style="text-align: right;">0.57689</td>
+<td style="text-align: right;">0.2564</td>
+<td style="text-align: right;">0.0000</td>
+<td style="text-align: right;">0.58511</td>
+<td style="text-align: right;">0.23990</td>
+<td style="text-align: right;">1.51800</td>
+<td style="text-align: right;">788.92</td>
+</tr>
+</tbody>
+</table>
+
+**Observation:** The reduced relax coefficient pulls affect much closer
+to the non-affect baseline. Compared with the pre-retune `all` run,
+interrupt rate drops from `0.5128` to `0.3397`, abort rate falls from
+`0.4000` to `0.2264`, and the effective thresholds move back toward
+`off` (`0.19781` → `0.21970`, `1.25165` → `1.39018`). Retrieval semantic
+overlap also recovers (`0.56282` → `0.58003`), landing slightly above
+the `off` run in this sample, while interrupt semantic overlap nearly
+matches `off` (`0.58000` vs `0.58511`). This retune makes affect look
+more like a bounded modulation layer again rather than a dominant
+mixed-content interrupt trigger.
 
 ## EmpatheticDialogues Affect On/Off (No Consolidation)
 
@@ -3894,14 +4215,156 @@ visible but modest at mid‑range knobs.
 
 ## Source-Confidence Gating Check
 
-We validated source-monitoring gating by computing the
-**source_confidence** used during retrieval (from `source_reliability`,
-contradiction count, and freshness) and comparing it to the threshold (
-*{src} = (0.15, 0.45, T) ). At **T=0.5** ((*{src}=0.30)) on the
-EmpatheticDialogues run above, none of the memories present in
-`recent_retrievals` fall below the threshold (**0 / 128 violations**),
-indicating that low‑confidence memories are being filtered from
-injection as intended.
+Natural-corpus reruns remained inconclusive because the usual
+TopicalChat / EmpatheticDialogues / Ubuntu snapshots rarely surface
+memories whose computed `source_confidence` falls below the active
+threshold. To verify that source monitoring is actually gating retrieval
+end to end, we ran a **controlled probe** on the current branch:
+
+-   start from the current Ubuntu validation DB at **F=S=0.5, T=1.0**
+    (`theta_src = 0.45`)
+-   copy the DB twice and clear `last_access`
+-   downgrade the 128 previously retrieved memories to
+    `source_reliability=0.2`, `source_contradiction_count=3`,
+    `source_origin='external'`
+-   with stale verification timestamps, these probe memories land at
+    `source_confidence ≈ 0.077`
+-   replay the same 80-turn Ubuntu slice once with gating enabled and
+    once with `CORTEXT_DISABLE_SOURCE_CONF=1`
+
+Runs:
+
+-   strict probe:
+    `logs/topical_chat_snapshots/sourceconf_probe_on_20260328`
+-   disabled probe:
+    `logs/topical_chat_snapshots/sourceconf_probe_off_20260328`
+
+<table style="width:100%;">
+<colgroup>
+<col style="width: 14%" />
+<col style="width: 14%" />
+<col style="width: 14%" />
+<col style="width: 14%" />
+<col style="width: 14%" />
+<col style="width: 14%" />
+<col style="width: 14%" />
+</colgroup>
+<thead>
+<tr>
+<th style="text-align: right;">source_conf</th>
+<th style="text-align: right;">downgraded_probe_reaccessed</th>
+<th style="text-align: right;">low_conf_recent_count</th>
+<th style="text-align: right;">retr_avg_candidates</th>
+<th style="text-align: right;">retr_sem_overlap</th>
+<th style="text-align: right;">interrupt_turn_rate</th>
+<th style="text-align: right;">perf_total_ms</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: right;">on</td>
+<td style="text-align: right;">0 / 128</td>
+<td style="text-align: right;">71</td>
+<td style="text-align: right;">16.95</td>
+<td style="text-align: right;">0.58276</td>
+<td style="text-align: right;">0.0375</td>
+<td style="text-align: right;">710.87</td>
+</tr>
+<tr>
+<td style="text-align: right;">off</td>
+<td style="text-align: right;">113 / 128</td>
+<td style="text-align: right;">183</td>
+<td style="text-align: right;">56.90</td>
+<td style="text-align: right;">0.69039</td>
+<td style="text-align: right;">0.0500</td>
+<td style="text-align: right;">1042.75</td>
+</tr>
+</tbody>
+</table>
+
+**Observation:** This controlled probe finally exposes the intended
+behavior. With source-confidence gating enabled, **none** of the
+deliberately downgraded memories are reaccessed. Disabling the gate
+causes **113 / 128** of them to reappear. Candidate volume also jumps
+sharply (`16.95` → `56.90`), which is consistent with the strict filter
+removing a large low-confidence cohort before diversification. Some
+low-confidence memories still appear in `recent_retrievals` even with
+gating enabled (`71` rows below threshold), because graph retrieval
+falls back to a relaxed pass when the strict filtered set is empty; the
+important result is that the deliberately poisoned cohort stays out when
+the strict gate is active.
+
+## Scripted Chat Working-Memory Validation
+
+The broad topical-chat ablations above do not exercise the exact
+prompt-reconstruction path used by the interactive chat application. To
+check whether working memory still behaves like recent chat history
+under long runs, we added a **scripted 100-turn integration test** that
+alternates user and assistant turns through the real high-level chat
+processing path:
+
+-   user turns commit through `ProcessTextAt(..., "chat/user", ...)`
+-   assistant turns stream through the non-durable probe path, then
+    finalize once as `chat/assistant`
+-   after each user turn, prompt reconstruction is compared against the
+    exact recent conversational tail
+-   at the end of the run, the active working-memory rows and the final
+    prompt are inspected directly
+
+The initial failure looked like an algorithmic recall problem, but it
+was not: late-run prompts drifted into malformed histories such as
+`assistant 82, user 83, assistant 84, assistant 100`, even though the
+intended recent tail was still alternating. Root cause analysis showed
+two chat-specific policy bugs:
+
+1.  full `chat/user` / `chat/assistant` turns were still passing through
+    the generic working-memory admission and eviction logic rather than
+    being preserved as prompt-bearing dialogue turns;
+2.  prompt hydration was ordering active working-memory slots by
+    `last_access`, so rehearsal or retrieval touches could reorder the
+    visible chat history.
+
+After fixing both issues, the same 100-turn scripted run again produced
+the exact last four turns in order and the backing store ended with
+exactly four active `WORKING` rows (`end_ts IS NULL`), each with
+`n_signals = 1`.
+
+**Observation:** This does **not** warrant a new topical-chat ablation.
+The failure was not a missing long-horizon memory effect; it was a
+product-path regression in chat-turn preservation and prompt ordering.
+The correct follow-up is the scripted integration guard, not another
+broad retrieval sweep.
+
+## Recursive Summary Replay Revision
+
+During live chat inspection on **Mar 30, 2026**, we observed that the
+injected `<memories>` block could accumulate multiple near-duplicate
+summary memories whose text had clearly been abstracted from earlier
+summaries rather than directly from raw episodic turns. This looked like
+repeated “summary of summaries” compression rather than fresh replay of
+the original conversation evidence.
+
+Root cause analysis showed that the previous policy admitted both
+`LONG_TERM` and blob-backed `ASSOCIATION` memories into deep
+consolidation. Because deep summaries are themselves stored as
+`ASSOCIATION` memories with blobs, later consolidation cycles could
+summarize prior summaries again.
+
+We revised this policy on the current branch:
+
+-   same-level consolidation candidates are now restricted to
+    **unclustered `LONG_TERM` memories**;
+-   existing `ASSOCIATION` summaries remain retrievable semantic
+    products but are **sealed** with respect to same-level deep replay;
+-   repeated deep consolidation with **no new raw evidence** should
+    therefore create **no new summary nodes**.
+
+This change preserves the ability to form additional sibling summaries
+when fresh raw memories accumulate, while preventing repeated
+summary-of-summary compression in the injected memory block. The correct
+validation for this behavior is a focused chat-style E2E that repeats
+deep consolidation on the same DB, not another broad topical-chat
+retrieval ablation.
 
 ## Procedural + Sequential Link Ablation
 
@@ -4695,6 +5158,60 @@ overlap quality. This likely reflects high source reliability in the
 dataset; a mixed‑provenance or contradiction‑heavy corpus is needed to
 expose the benefit of source monitoring.
 
+**Current-branch controlled probe (Mar 28, 2026):** We created exactly
+that contradiction-heavy condition by downgrading a previously retrieved
+Ubuntu-memory cohort to `source_confidence ≈ 0.077` at **T=1.0** and
+replaying the same slice with gating on/off.
+
+<table style="width:100%;">
+<colgroup>
+<col style="width: 14%" />
+<col style="width: 14%" />
+<col style="width: 14%" />
+<col style="width: 14%" />
+<col style="width: 14%" />
+<col style="width: 14%" />
+<col style="width: 14%" />
+</colgroup>
+<thead>
+<tr>
+<th>source_conf</th>
+<th>downgraded_probe_reaccessed</th>
+<th>low_conf_recent_count</th>
+<th>retr_avg_candidates</th>
+<th>retr_sem_overlap</th>
+<th>interrupt_turn_rate</th>
+<th>perf_total_ms</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>on</td>
+<td>0 / 128</td>
+<td>71</td>
+<td>16.95</td>
+<td>0.58276</td>
+<td>0.0375</td>
+<td>710.87</td>
+</tr>
+<tr>
+<td>off</td>
+<td>113 / 128</td>
+<td>183</td>
+<td>56.90</td>
+<td>0.69039</td>
+<td>0.0500</td>
+<td>1042.75</td>
+</tr>
+</tbody>
+</table>
+
+**Observations:** The old TopicalChat no-op result was a dataset
+problem, not a dead feature. On the controlled Ubuntu probe,
+source-confidence gating clearly blocks the poisoned cohort: **0 / 128**
+downgraded memories are reaccessed with the gate on, versus **113 /
+128** with the gate disabled.
+
 ### Messy Chat Baseline (Ubuntu Dialogue Corpus)
 
 We ran a long‑horizon baseline on the **Ubuntu Dialogue Corpus
@@ -5131,12 +5648,26 @@ nodes can participate in analysis without affecting online computations.
 
 -   **ImageBind embeddings:** image/text/audio inputs are embedded via
     ImageBind executed through ONNX (default path: `models/imagebind/`).
--   **Consolidation LLM:** summarization and labeling use
-    **gemma-3n-e2b** via `third_party/litert_lm`. This is the only
-    generative component and runs only during consolidation (default
-    bundle: `models/gemma3n-e2b-litert/gemma-3n-E2B-it-int4.litertlm`,
-    with auto-selection among available `.litertlm` variants).
-    Consolidation requires this model; there is no extractive fallback.
+-   **Consolidation LLM:** summarization and labeling are the only
+    generative steps and run only during consolidation. Cortext resolves
+    a local backend internally: **gemma-3n-e2b** via
+    `third_party/litert_lm`, **LFM2** via `llama.cpp` GGUFs, or a
+    **mixed** Gemma+LFM2 path. The Gemma path auto-selects among
+    available `.litertlm` variants under `models/gemma3n-e2b-litert/`.
+    The LFM2 path is pinned to `LFM2-2.6B-Transcript-Q4_K_M.gguf` for
+    summarization and `LFM2-1.2B-Extract-Q4_K_M.gguf` for extraction,
+    with env overrides for exact paths. The mixed path uses Gemma for
+    summarization and the pinned LFM2 extract model for labeling, and
+    auto resolution now prefers that split when both assets are present.
+    If no deep backend is available, deep consolidation raises an error
+    rather than silently degrading. The summarization prompt remains
+    role-aware for chat sources, favors direct fact-oriented memory
+    notes over dialogue recaps, explicitly preserves named people,
+    projects, and technologies, discourages speaker-role phrasing such
+    as “the user” or “the assistant”, and preserves chronological
+    ordering when selected chat excerpts are passed to the model. The
+    LFM2 path is text-only; audio-specific summarization/extraction
+    methods remain unsupported there.
 
 No other model runtimes are required for the online loop; all
 operational decisions are embedding-space computations derived from

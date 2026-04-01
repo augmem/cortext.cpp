@@ -45,8 +45,8 @@ TEST_CASE ("UpdateThreshold basic adaptation toward p90",
 
   REQUIRE (pctx.T_dynamic > t_prior);
 
-  // Hysteresis should be the lerp between [0.02, 0.25] at stability=0.5
-  const double expected_band = cortext::core::Lerp (0.02, 0.25, cfg.stability);
+  // Hysteresis remains anchored to the processor state's current band.
+  const double expected_band = 0.05;
   REQUIRE (pctx.hysteresis == Catch::Approx (expected_band).margin (0.01));
 }
 

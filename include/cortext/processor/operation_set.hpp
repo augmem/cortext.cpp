@@ -1,5 +1,6 @@
 #pragma once
 
+#include "cortext/internal/cancellation.hpp"
 #include "cortext/processor/operation.hpp"
 #include "cortext/processor/operation_context.hpp"
 #include "cortext/telemetry/telemetry.hpp"
@@ -60,6 +61,12 @@ public:
     (operations_.push_back (std::move (ops)), ...);
   }
 
+  void
+  Add (std::unique_ptr<IOperation> op)
+  {
+    operations_.push_back (std::move (op));
+  }
+
   /// @brief Executes each contained operation in sequence.
   /// @param context The context to pass to each operation.
   /// @param tx The active database transaction for this signal.
@@ -68,6 +75,7 @@ public:
   {
     for (const auto &op : operations_)
       {
+        internal::ThrowIfStopRequested ();
         const IOperation *op_ptr = op.get ();
         const char *op_type = op_ptr ? typeid (*op_ptr).name () : "unknown";
         const std::string op_type_name = DemangleOpType (op_type);
@@ -83,6 +91,7 @@ public:
             std::chrono::duration<double, std::milli> > (op_end - op_start)
                               .count ();
         context.AddOperationTiming (op_type_name, ms);
+        internal::ThrowIfStopRequested ();
       }
   }
 

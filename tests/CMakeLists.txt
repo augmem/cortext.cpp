@@ -26,7 +26,6 @@ add_executable(cortext_tests
   operations_centroids.test.cpp
   store.test.cpp
   store_extensions.test.cpp
-  graph.test.cpp
   core_algorithms.test.cpp
   core_knobs.test.cpp
   thread_config.test.cpp
@@ -85,12 +84,16 @@ add_executable(cortext_tests
   gemma_extractor.test.cpp
   gemma_summarizer.test.cpp
   json_schema_constraint.test.cpp
+  deep_llm_factory.test.cpp
   # Phase 5: Testing and Validation
   formula_validation.test.cpp
   integration_consolidation.test.cpp
   integration_chat_e2e.test.cpp
   integration_working_memory_manual.test.cpp
   regression_behavior.test.cpp
+  chat_chunk_diagnostics.test.cpp
+  chat_metrics_state.test.cpp
+  chat_stream_usage.test.cpp
 )
 
 target_link_libraries(cortext_tests PRIVATE cortext Catch2::Catch2WithMain nlohmann_json::nlohmann_json)

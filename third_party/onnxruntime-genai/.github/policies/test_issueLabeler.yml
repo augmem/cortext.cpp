@@ -1,0 +1,21 @@
+id:
+name: Issue Triage
+description: Assign label to issues
+owner:
+resource: repository
+where:
+configuration:
+  resourceManagementConfiguration:
+    eventResponderTasks:
+      - description: Add ep:CUDA label to new issues
+        if:
+          - payloadType: Issues
+          - isOpen
+          - titleContains:
+              pattern: (?i)\bcuda\b
+              isRegex: True
+        then:
+          - addLabel:
+              label: ep:CUDA 
+onFailure:
+onSuccess:

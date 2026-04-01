@@ -650,8 +650,8 @@ ThetaArousal (double S)
 inline double
 FlashbulbThreshold (double S)
 {
-  // flashbulb_threshold = lerp(0.9, 0.4, S)
-  return Lerp (0.9, 0.4, SensitivityBias (S));
+  // flashbulb_threshold = lerp(0.97, 0.65, S)
+  return Lerp (0.97, 0.65, SensitivityBias (S));
 }
 
 inline int
@@ -695,10 +695,35 @@ GistComponents (double F)
 inline double
 FlashbulbThresholdEff (double S, double emotion_intensity, double arousal)
 {
-  // flashbulb_threshold_eff = flashbulb_threshold × (1 − 0.5 × intensity) × (1
-  // − 0.3 × arousal)
+  // flashbulb_threshold_eff = flashbulb_threshold × (1 − 0.5 × intensity)
+  //                           × (1 − 0.3 × arousal)^{p(S)}
   const double base = FlashbulbThreshold (S);
-  return base * (1.0 - 0.5 * emotion_intensity) * (1.0 - 0.3 * arousal);
+  const double p = Lerp (1.25, 0.85, SensitivityBias (S));
+  return base * (1.0 - 0.5 * emotion_intensity)
+         * std::pow (1.0 - 0.3 * arousal, p);
+}
+
+inline int
+EmotionHistoryWindow (double S, double T)
+{
+  const double s = SensitivityBias (S);
+  const double t = Clamp (T, 0.0, 1.0);
+  const double base = Lerp (24.0, 96.0, s) * Lerp (0.8, 1.2, t);
+  return static_cast<int> (std::round (Clamp (base, 16.0, 160.0)));
+}
+
+inline double
+FlashbulbPercentile (double S)
+{
+  const double s = SensitivityBias (S);
+  return Lerp (0.95, 0.80, s);
+}
+
+inline double
+FlashbulbGain (double S)
+{
+  const double s = SensitivityBias (S);
+  return Lerp (1.0, 1.1, s);
 }
 
 // --- Algorithm 4b (Mood Integrator) Helpers ---
@@ -1060,8 +1085,10 @@ RetrievalThresholdInterrupt (double F, double S)
 inline double
 InterruptAffectRelaxCoeff (double S)
 {
-  // affect_relax_coeff(S) = lerp(0.15, 0.55, S̃_affect)
-  return Lerp (0.15, 0.55, AffectSensitivityBias (S));
+  // affect_relax_coeff(S) = lerp(0.08, 0.28, S̃_affect)
+  // Keep affect as a modulation term for interrupt gating rather than a
+  // dominant relaxer on mixed-content streams.
+  return Lerp (0.08, 0.28, AffectSensitivityBias (S));
 }
 
 inline double

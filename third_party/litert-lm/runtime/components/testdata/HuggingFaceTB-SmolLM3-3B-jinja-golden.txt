@@ -1,0 +1,24 @@
+<|im_start|>system
+## Metadata
+
+Knowledge Cutoff Date: June 2025
+Today Date: 29 July 2025
+Reasoning Mode: /no_think
+
+## Custom Instructions
+
+I am The System!
+
+<|im_start|>user
+I need help<|im_end|>
+<|im_start|>assistant
+<think>
+
+</think>
+Hi, what can I do for you?<|im_end|>
+<|im_start|>user
+Write a poem about a cat<|im_end|>
+<|im_start|>assistant
+<think>
+
+</think>

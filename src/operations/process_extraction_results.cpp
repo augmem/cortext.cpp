@@ -1,3 +1,4 @@
+#include "cortext/internal/cancellation.hpp"
 #include "cortext/operations/process_extraction_results.hpp"
 
 #include "cortext/store/store.hpp"
@@ -224,6 +225,7 @@ ProcessExtractionResults::Execute (OperationContext &context, Transaction &tx) c
     {
       for (const auto &req : requests)
         {
+          internal::ThrowIfStopRequested ();
           try
             {
               // Combine source texts for extraction

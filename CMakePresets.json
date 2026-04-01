@@ -52,6 +52,30 @@
             }
         },
         {
+            "name": "ffi-release",
+            "displayName": "FFI Release",
+            "description": "Release shared-library build for Python, Go, and JS/TS bindings",
+            "inherits": "host-base",
+            "binaryDir": "${sourceDir}/build/ffi-release",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "BUILD_TESTING": "OFF",
+                "BUILD_SHARED_LIBS": "ON",
+                "CORTEXT_DISABLE_OGA": "ON",
+                "CORTEXT_DISABLE_LITERT": "ON",
+                "CORTEXT_DISABLE_SHERPA_ONNX": "ON"
+            }
+        },
+        {
+            "name": "ffi-release-node",
+            "displayName": "FFI Release (Node.js)",
+            "description": "Release shared-library build including the Node.js addon",
+            "inherits": "ffi-release",
+            "cacheVariables": {
+                "CORTEXT_BUILD_NODE_BINDINGS": "ON"
+            }
+        },
+        {
             "name": "host-relwithdebinfo",
             "displayName": "Host RelWithDebInfo",
             "description": "Release build with debug symbols for profiling",
@@ -87,6 +111,14 @@
         {
             "name": "host-release",
             "configurePreset": "host-release"
+        },
+        {
+            "name": "ffi-release",
+            "configurePreset": "ffi-release"
+        },
+        {
+            "name": "ffi-release-node",
+            "configurePreset": "ffi-release-node"
         },
         {
             "name": "host-relwithdebinfo",

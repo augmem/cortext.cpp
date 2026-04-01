@@ -11,6 +11,22 @@
 namespace cortext
 {
 
+namespace internal
+{
+
+bool
+SQLiteStoreQueryInterrupter::Interrupt (SQLiteStore &store)
+{
+  if (!store.connection_ || !store.connection_->IsValid ())
+    {
+      return false;
+    }
+  sqlite3_interrupt (store.connection_->GetConnection ());
+  return true;
+}
+
+} // namespace internal
+
 namespace
 {
 

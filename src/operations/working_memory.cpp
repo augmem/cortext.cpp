@@ -82,6 +82,12 @@ RelevanceToTask (const Eigen::VectorXf &q,
   return core::Clamp ((cos + 1.0) * 0.5, 0.0, 1.0);
 }
 
+inline bool
+PreserveChatTurns (const std::string &source_id)
+{
+  return source_id == "chat/user" || source_id == "chat/assistant";
+}
+
 } // namespace
 
 void
@@ -91,6 +97,7 @@ WorkingMemory::Execute (OperationContext &context, Transaction &tx) const
   auto &p_ctx = context.GetProcessorContext ();
   const auto &cfg = context.GetConfig ();
   const auto &signal = context.GetSignal ();
+  const bool preserve_chat_turns = PreserveChatTurns (signal.source_id);
 
   // Maintenance: decay strengths based on elapsed time.
   // NOTE: We do NOT evict slots during passive decay. Slots should only be
@@ -213,7 +220,7 @@ WorkingMemory::Execute (OperationContext &context, Transaction &tx) const
         * capacity_pressure;
   const double cost_total = raw_cost / (1.0 + raw_cost);
 
-  if (margin < cost_total)
+  if (!preserve_chat_turns && margin < cost_total)
     {
       // Reject
       telemetry::LogDebug ("cortext.working_memory", {
@@ -240,7 +247,7 @@ WorkingMemory::Execute (OperationContext &context, Transaction &tx) const
   // Section 6.1.4: Try to chunk into best-matching slot using e_rep.
   int best_idx = -1;
   double best_sim = -1.0;
-  for (int i = 0; i < static_cast<int> (p_ctx.wm_slots.size ()); ++i)
+  for (int i = 0; !preserve_chat_turns && i < static_cast<int> (p_ctx.wm_slots.size ()); ++i)
     {
       const auto &slot = p_ctx.wm_slots[static_cast<size_t> (i)];
       // v2: Only chunk into same-source slots (working-memory.plan.md)
@@ -366,7 +373,7 @@ WorkingMemory::Execute (OperationContext &context, Transaction &tx) const
   // Slots with similarity in [rehearsal_threshold, chunk_threshold)
   // get a strength boost but embedding is NOT merged.
   const double rehearsal_threshold = core::WMRehearsalThreshold (cfg.focus);
-  if (best_idx >= 0 && best_sim >= rehearsal_threshold)
+  if (!preserve_chat_turns && best_idx >= 0 && best_sim >= rehearsal_threshold)
     {
       auto &slot = p_ctx.wm_slots[static_cast<size_t> (best_idx)];
       const double rehearsal_rate = core::WMRehearsalRate (cfg.sensitivity);
@@ -410,32 +417,56 @@ WorkingMemory::Execute (OperationContext &context, Transaction &tx) const
       = std::max (1, core::WMBaseCapacity (cfg.sensitivity, cfg.focus));
   if (static_cast<int> (p_ctx.wm_slots.size ()) >= capacity)
     {
-      const double dedication_strength
-          = core::WMSlotDedicationStrength (cfg.stability);
       int evict_idx = -1;
-      double max_eviction_score = -std::numeric_limits<double>::infinity ();
-
-      for (int i = 0; i < static_cast<int> (p_ctx.wm_slots.size ()); ++i)
+      if (preserve_chat_turns)
         {
-          const auto &slot = p_ctx.wm_slots[static_cast<size_t> (i)];
-
-          // Dedication: higher strength + higher T = more dedicated
-          const double dedication = std::clamp (
-              slot.strength * dedication_strength / constants::kStrengthMax,
-              0.0, 1.0);
-
-          // Recency: recent access = lower eviction priority
-          const double elapsed = std::max (0.0, now_s - slot.last_ts);
-          const double recency
-              = std::exp (-elapsed / constants::kWMRecencyTauSeconds);
-
-          // Eviction score: high = weak + old = evict first
-          const double eviction_score = (1.0 - dedication) * (1.0 - recency);
-
-          if (eviction_score > max_eviction_score)
+          int64_t oldest_start_ts = std::numeric_limits<int64_t>::max ();
+          double oldest_last_ts = std::numeric_limits<double>::max ();
+          for (int i = 0; i < static_cast<int> (p_ctx.wm_slots.size ()); ++i)
             {
-              max_eviction_score = eviction_score;
-              evict_idx = i;
+              const auto &slot = p_ctx.wm_slots[static_cast<size_t> (i)];
+              const int64_t start_ts
+                  = slot.start_ts > 0
+                        ? slot.start_ts
+                        : static_cast<int64_t> (slot.last_ts * 1000.0);
+              if (start_ts < oldest_start_ts
+                  || (start_ts == oldest_start_ts
+                      && slot.last_ts < oldest_last_ts))
+                {
+                  oldest_start_ts = start_ts;
+                  oldest_last_ts = slot.last_ts;
+                  evict_idx = i;
+                }
+            }
+        }
+      else
+        {
+          const double dedication_strength
+              = core::WMSlotDedicationStrength (cfg.stability);
+          double max_eviction_score = -std::numeric_limits<double>::infinity ();
+
+          for (int i = 0; i < static_cast<int> (p_ctx.wm_slots.size ()); ++i)
+            {
+              const auto &slot = p_ctx.wm_slots[static_cast<size_t> (i)];
+
+              // Dedication: higher strength + higher T = more dedicated
+              const double dedication = std::clamp (
+                  slot.strength * dedication_strength / constants::kStrengthMax,
+                  0.0, 1.0);
+
+              // Recency: recent access = lower eviction priority
+              const double elapsed = std::max (0.0, now_s - slot.last_ts);
+              const double recency
+                  = std::exp (-elapsed / constants::kWMRecencyTauSeconds);
+
+              // Eviction score: high = weak + old = evict first
+              const double eviction_score = (1.0 - dedication) * (1.0 - recency);
+
+              if (eviction_score > max_eviction_score)
+                {
+                  max_eviction_score = eviction_score;
+                  evict_idx = i;
+                }
             }
         }
 

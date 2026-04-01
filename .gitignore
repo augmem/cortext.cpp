@@ -52,6 +52,8 @@ tests/*_tests
 # IDE files
 .vscode/
 .cursor/
+.agent/
+.aiassistant/
 .idea/
 *.swp
 *.swo
@@ -77,6 +79,13 @@ analysis_options.yaml
 *.temp
 *.log
 *.cache
+__pycache__/
+*.pyc
+nohup.out
+imgui.ini
+examples/chat/logs.txt
+tmp/
+Testing/Temporary/
 
 # Coverage reports
 *.gcda
@@ -123,11 +132,21 @@ examples/benchmark/mteb_imagebind_tmp/
 examples/benchmark/mteb_imagebind_tmp.json
 examples/benchmark/mteb_results*.json
 examples/benchmark/mteb_results*/
+logs/
 
 # Paper build outputs
 docs/paper/_manuscript/_tex/
 docs/paper/_manuscript/index.pdf
+docs/paper/index.tex
 
 # Local environment helpers
 env.sh
 conformance.report.md
+compliance.report.md
+update.md
+validation.md
+algorithms.docx
+.cmake_targets.txt
+.output.txt
+index_headers.txt
+0

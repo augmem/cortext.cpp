@@ -2,7 +2,7 @@
 
 We present preliminary experimental results collected from live chat sessions to validate the adaptive mechanisms.
 
-All runs reported here are generated with the `examples/topical_chat_analysis` pipeline using ImageBind embeddings; consolidation summarization/labeling (when invoked) uses gemma-3n-e2b via `third_party/litert_lm`. Evaluation logs include lexical overlap (token Jaccard) and **semantic overlap** (ImageBind cosine) for retrieval and interrupt quality. A multi-participant harness (`scripts/run_memory_harness.py`) interleaves conversations to stress long-horizon recall under shared-memory load.
+All runs reported here are generated with the `examples/topical_chat_analysis` pipeline using ImageBind embeddings. At the time of these reported experiments, deep consolidation summarization/labeling used the Gemma LiteRT path (`gemma-3n-e2b` via `third_party/litert_lm`). The current implementation also supports an LFM2 `llama.cpp` path for deep consolidation. Evaluation logs include lexical overlap (token Jaccard) and **semantic overlap** (ImageBind cosine) for retrieval and interrupt quality. A multi-participant harness (`scripts/run_memory_harness.py`) interleaves conversations to stress long-horizon recall under shared-memory load.
 
 For reproducibility, the analysis runner supports **deterministic synthetic timing** (`--deterministic`, `--seed`), which removes wall‑clock variance while preserving cadence‑derived timing for boundary and interrupt gating. Snapshot configs record the seed and synthetic clock parameters.
 
@@ -69,7 +69,7 @@ End-to-end processing per turn is dominated by embedding + retrieval rather than
 We ran a long-horizon stress test with **F=S=T=0.5**, `max_total=720`, `max_turns=360`, and `max_conversations=10` (single-stream, interleave=1) to isolate consolidation effects. Two conditions were compared:
 
 * **No consolidation** (`consolidate_cycles=0`)
-* **Consolidation on** (`consolidate_cycles=2`, yielding 8 consolidation runs; summaries produced by gemma-3n-e2b with no fallback)
+* **Consolidation on** (`consolidate_cycles=2`, yielding 8 consolidation runs; these historical runs used gemma-3n-e2b)
 
 Key outcomes (Δ = consolidate − no-consolidate):
 
@@ -83,7 +83,7 @@ Consolidation contribution metrics confirm summaries are being used (but sparsel
 
 * **retrieval_summary_hit_rate:** 0.0051 (0.51% of retrieval turns include summaries)
 * **summary_hit_overlap_mean:** 0.606 (semantic overlap of best summary hit)
-* **consolidation_summary_count:** 8 (all from gemma-3n-e2b; no fallback)
+* **consolidation_summary_count:** 8 (all from gemma-3n-e2b in this run)
 
 Additional signals:
 
@@ -114,6 +114,20 @@ We added a small **association boost** in retrieval ranking (see @sec-advanced) 
 | after (boost) | 0.0206 | 0.0206 | 0.644 |
 
 **Observations:** The boost roughly **doubles** summary presence in retrieval without affecting candidate volume (≈50 per turn). Summary overlap remains high, indicating the boost favors consolidated association nodes when they are relevant without degrading semantic quality. The absolute hit rate remains low in this short horizon because only four summaries were produced; longer horizons should show a larger effect.
+
+**Current-branch rerun (Mar 28, 2026; nondeterministic; stronger boost probe):**
+
+Runs:
+
+* current branch baseline: `logs/topical_chat_snapshots/assocboost_base_20260328`
+* stronger association boost (`0.015..0.06` → `0.025..0.09`): `logs/topical_chat_snapshots/assocboost_boosted_20260328`
+
+| variant | retrieval_summary_hit_rate | retrieval_association_turn_rate | summary_hit_overlap_mean | retrieval_semantic_overlap_mean | perf_total_ms_mean |
+|---:|---:|---:|---:|---:|---:|
+| current branch baseline | 0.5648 | 0.5648 | 0.450 | 0.56297 | 946.12 |
+| stronger boost | 0.5619 | 0.5619 | 0.458 | 0.56304 | 928.58 |
+
+**Observations:** On the current branch, summary hits are already very common (about **56%** of retrieval turns), far above the December baseline that motivated the original boost. Pushing the association bonus higher did **not** increase summary-hit rate; it stayed flat-to-slightly-lower (`0.5648` → `0.5619`). The stronger boost produced only tiny secondary differences: slightly higher summary-hit overlap (`0.450` → `0.458`), negligible semantic-overlap change (`0.56297` → `0.56304`), and about **1.9%** lower mean total time. This does not justify further increasing the association bonus on the current branch.
 
 ## Long-Horizon Knob Sweep (360 Max Turns)
 
@@ -351,6 +365,20 @@ We ran targeted verification checks at **F=S=T=0.5** to confirm end‑to‑end b
 
 **Observation:** With a single consolidation cycle, idle‑during matches end‑only within noise; any differences in summary/label retrieval would require longer horizons or more consolidation cycles.
 
+**Current-branch rerun (Mar 28, 2026; 120 turns; nondeterministic; consolidate_every=60):**
+
+Runs:
+
+* end-only: `logs/topical_chat_snapshots/idle_endonly_nondet_20260328`
+* idle-during: `logs/topical_chat_snapshots/idle_idle_nondet_20260328`
+
+| condition | cons_runs | summaries | labels_seen | relations_seen | retr_turn_rate | retr_avg_cands | retr_sem_overlap | interrupt_turn_rate | interrupt_abort_rate | perf_total_ms |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| end-only | 3 | 3 | 17 | 22 | 0.475 | 53.68 | 0.55472 | 0.4667 | 0.4107 | 842.76 |
+| idle-during | 3 | 3 | 17 | 22 | 0.475 | 53.63 | 0.55472 | 0.4667 | 0.4107 | 805.75 |
+
+**Observation:** The rerun reproduces the earlier conclusion: at this horizon, idle consolidation is behaviorally indistinguishable from end-only. The only measurable delta is wall-clock cost, with idle-during about **4.4% faster** (`842.76ms` → `805.75ms` mean total time), which is too small to claim a retrieval-quality benefit.
+
 ## Affect On/Off (Long Horizon, No Consolidation)
 
 We compared affect gating at **F=S=T=0.5** over **156 turns** (single conversation) with consolidation disabled to isolate interrupt gating + retrieval effects.
@@ -361,6 +389,34 @@ We compared affect gating at **F=S=T=0.5** over **156 turns** (single conversati
 | off | 0.571 | 0.5649 | 0.487 | 0.5817 | 966 |
 
 **Observation:** With affect off, interrupt rate drops (~4.5pp) while semantic overlap stays within noise. At mid‑range knobs on this dataset, affect primarily shifts interrupt gating frequency rather than semantic match quality.
+
+**Current-branch rerun (Mar 28, 2026; nondeterministic; no consolidation):**
+
+Runs:
+
+* affect `all`: `logs/topical_chat_snapshots/affect_all_nondet_20260328`
+* affect `off`: `logs/topical_chat_snapshots/affect_off_nondet_20260328`
+
+| affect_mode | retr_turn_rate | retr_sem_overlap | interrupt_turn_rate | interrupt_abort_rate | interrupt_sem_overlap | retrieval_thresh_mean | boundary_mult_eff_mean | retrieval_emotion_bonus_mean | perf_total_ms |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| all | 0.5256 | 0.56282 | 0.5128 | 0.4000 | 0.56167 | 0.19781 | 1.25165 | 0.01087 | 869.96 |
+| off | 0.5128 | 0.57689 | 0.2564 | 0.0000 | 0.58511 | 0.23990 | 1.51800 | 0.00000 | 788.92 |
+
+**Observation:** On the current branch, affect now has a **large** mixed-content gating effect. Compared with `off`, `affect_mode=all` lowers the interrupt retrieval threshold (`0.23990` → `0.19781`) and boundary multiplier (`1.518` → `1.252`), roughly **doubling interrupt rate** (`0.2564` → `0.5128`) and reintroducing interrupt aborts (`0.0000` → `0.4000`). Semantic quality also shifts: retrieval semantic overlap drops by about **0.014** (`0.57689` → `0.56282`) and interrupt semantic overlap drops by about **0.023** (`0.58511` → `0.56167`). This is stronger than the earlier December result and suggests later affect / interrupt-gate tuning made affect a dominant gating relaxer on this benchmark rather than a small frequency nudge.
+
+**Post-retune probe (Mar 28, 2026; lower interrupt affect relax coefficient):**
+
+To keep affect as a modulation term rather than a dominant gate relaxer, we reduced `InterruptAffectRelaxCoeff(S)` from `lerp(0.15, 0.55, S̃_affect)` to `lerp(0.08, 0.28, S̃_affect)` and reran `affect_mode=all` on the same benchmark:
+
+* retuned affect `all`: `logs/topical_chat_snapshots/affect_all_relaxed_20260328`
+
+| affect_mode | retr_turn_rate | retr_sem_overlap | interrupt_turn_rate | interrupt_abort_rate | interrupt_sem_overlap | retrieval_thresh_mean | boundary_mult_eff_mean | perf_total_ms |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| all (pre-retune) | 0.5256 | 0.56282 | 0.5128 | 0.4000 | 0.56167 | 0.19781 | 1.25165 | 869.96 |
+| all (retuned) | 0.5000 | 0.58003 | 0.3397 | 0.2264 | 0.58000 | 0.21970 | 1.39018 | 843.03 |
+| off | 0.5128 | 0.57689 | 0.2564 | 0.0000 | 0.58511 | 0.23990 | 1.51800 | 788.92 |
+
+**Observation:** The reduced relax coefficient pulls affect much closer to the non-affect baseline. Compared with the pre-retune `all` run, interrupt rate drops from `0.5128` to `0.3397`, abort rate falls from `0.4000` to `0.2264`, and the effective thresholds move back toward `off` (`0.19781` → `0.21970`, `1.25165` → `1.39018`). Retrieval semantic overlap also recovers (`0.56282` → `0.58003`), landing slightly above the `off` run in this sample, while interrupt semantic overlap nearly matches `off` (`0.58000` vs `0.58511`). This retune makes affect look more like a bounded modulation layer again rather than a dominant mixed-content interrupt trigger.
 
 ## EmpatheticDialogues Affect On/Off (No Consolidation)
 
@@ -375,7 +431,58 @@ We repeated the affect toggle on **EmpatheticDialogues (valid)** with consolidat
 
 ## Source-Confidence Gating Check
 
-We validated source-monitoring gating by computing the **source_confidence** used during retrieval (from `source_reliability`, contradiction count, and freshness) and comparing it to the threshold \( \theta_{src} = \mathrm{lerp}(0.15, 0.45, T) \). At **T=0.5** (\(\theta_{src}=0.30\)) on the EmpatheticDialogues run above, none of the memories present in `recent_retrievals` fall below the threshold (**0 / 128 violations**), indicating that low‑confidence memories are being filtered from injection as intended.
+Natural-corpus reruns remained inconclusive because the usual TopicalChat / EmpatheticDialogues / Ubuntu snapshots rarely surface memories whose computed
+`source_confidence` falls below the active threshold. To verify that source monitoring is actually gating retrieval end to end, we ran a **controlled probe** on the current branch:
+
+* start from the current Ubuntu validation DB at **F=S=0.5, T=1.0** (`theta_src = 0.45`)
+* copy the DB twice and clear `last_access`
+* downgrade the 128 previously retrieved memories to `source_reliability=0.2`, `source_contradiction_count=3`, `source_origin='external'`
+* with stale verification timestamps, these probe memories land at `source_confidence ≈ 0.077`
+* replay the same 80-turn Ubuntu slice once with gating enabled and once with `CORTEXT_DISABLE_SOURCE_CONF=1`
+
+Runs:
+
+* strict probe: `logs/topical_chat_snapshots/sourceconf_probe_on_20260328`
+* disabled probe: `logs/topical_chat_snapshots/sourceconf_probe_off_20260328`
+
+| source_conf | downgraded_probe_reaccessed | low_conf_recent_count | retr_avg_candidates | retr_sem_overlap | interrupt_turn_rate | perf_total_ms |
+|---:|---:|---:|---:|---:|---:|---:|
+| on | 0 / 128 | 71 | 16.95 | 0.58276 | 0.0375 | 710.87 |
+| off | 113 / 128 | 183 | 56.90 | 0.69039 | 0.0500 | 1042.75 |
+
+**Observation:** This controlled probe finally exposes the intended behavior. With source-confidence gating enabled, **none** of the deliberately downgraded memories are reaccessed. Disabling the gate causes **113 / 128** of them to reappear. Candidate volume also jumps sharply (`16.95` → `56.90`), which is consistent with the strict filter removing a large low-confidence cohort before diversification. Some low-confidence memories still appear in `recent_retrievals` even with gating enabled (`71` rows below threshold), because graph retrieval falls back to a relaxed pass when the strict filtered set is empty; the important result is that the deliberately poisoned cohort stays out when the strict gate is active.
+
+## Scripted Chat Working-Memory Validation
+
+The broad topical-chat ablations above do not exercise the exact prompt-reconstruction path used by the interactive chat application. To check whether working memory still behaves like recent chat history under long runs, we added a **scripted 100-turn integration test** that alternates user and assistant turns through the real high-level chat processing path:
+
+* user turns commit through `ProcessTextAt(..., "chat/user", ...)`
+* assistant turns stream through the non-durable probe path, then finalize once as `chat/assistant`
+* after each user turn, prompt reconstruction is compared against the exact recent conversational tail
+* at the end of the run, the active working-memory rows and the final prompt are inspected directly
+
+The initial failure looked like an algorithmic recall problem, but it was not: late-run prompts drifted into malformed histories such as `assistant 82, user 83, assistant 84, assistant 100`, even though the intended recent tail was still alternating. Root cause analysis showed two chat-specific policy bugs:
+
+1. full `chat/user` / `chat/assistant` turns were still passing through the generic working-memory admission and eviction logic rather than being preserved as prompt-bearing dialogue turns;
+2. prompt hydration was ordering active working-memory slots by `last_access`, so rehearsal or retrieval touches could reorder the visible chat history.
+
+After fixing both issues, the same 100-turn scripted run again produced the exact last four turns in order and the backing store ended with exactly four active `WORKING` rows (`end_ts IS NULL`), each with `n_signals = 1`.
+
+**Observation:** This does **not** warrant a new topical-chat ablation. The failure was not a missing long-horizon memory effect; it was a product-path regression in chat-turn preservation and prompt ordering. The correct follow-up is the scripted integration guard, not another broad retrieval sweep.
+
+## Recursive Summary Replay Revision
+
+During live chat inspection on **Mar 30, 2026**, we observed that the injected `<memories>` block could accumulate multiple near-duplicate summary memories whose text had clearly been abstracted from earlier summaries rather than directly from raw episodic turns. This looked like repeated "summary of summaries" compression rather than fresh replay of the original conversation evidence.
+
+Root cause analysis showed that the previous policy admitted both `LONG_TERM` and blob-backed `ASSOCIATION` memories into deep consolidation. Because deep summaries are themselves stored as `ASSOCIATION` memories with blobs, later consolidation cycles could summarize prior summaries again.
+
+We revised this policy on the current branch:
+
+* same-level consolidation candidates are now restricted to **unclustered `LONG_TERM` memories**;
+* existing `ASSOCIATION` summaries remain retrievable semantic products but are **sealed** with respect to same-level deep replay;
+* repeated deep consolidation with **no new raw evidence** should therefore create **no new summary nodes**.
+
+This change preserves the ability to form additional sibling summaries when fresh raw memories accumulate, while preventing repeated summary-of-summary compression in the injected memory block. The correct validation for this behavior is a focused chat-style E2E that repeats deep consolidation on the same DB, not another broad topical-chat retrieval ablation.
 
 ## Procedural + Sequential Link Ablation
 
@@ -543,6 +650,15 @@ Runs:
 gating has **no measurable effect** on interrupts or overlap quality. This likely
 reflects high source reliability in the dataset; a mixed‑provenance or
 contradiction‑heavy corpus is needed to expose the benefit of source monitoring.
+
+**Current-branch controlled probe (Mar 28, 2026):** We created exactly that contradiction-heavy condition by downgrading a previously retrieved Ubuntu-memory cohort to `source_confidence ≈ 0.077` at **T=1.0** and replaying the same slice with gating on/off.
+
+| source_conf | downgraded_probe_reaccessed | low_conf_recent_count | retr_avg_candidates | retr_sem_overlap | interrupt_turn_rate | perf_total_ms |
+| --- | --- | --- | --- | --- | --- | --- |
+| on | 0 / 128 | 71 | 16.95 | 0.58276 | 0.0375 | 710.87 |
+| off | 113 / 128 | 183 | 56.90 | 0.69039 | 0.0500 | 1042.75 |
+
+**Observations:** The old TopicalChat no-op result was a dataset problem, not a dead feature. On the controlled Ubuntu probe, source-confidence gating clearly blocks the poisoned cohort: **0 / 128** downgraded memories are reaccessed with the gate on, versus **113 / 128** with the gate disabled.
 
 ### Messy Chat Baseline (Ubuntu Dialogue Corpus)
 

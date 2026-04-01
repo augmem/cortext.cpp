@@ -68,6 +68,9 @@ public:
       {
         p_ctx.memory_stream.push_back (ctx.GetSignal ().embedding);
       }
+    auto &acc = p_ctx.accumulator_states[ctx.GetSignal ().source_id];
+    acc.mu_acc = ctx.GetSignal ().embedding;
+    acc.c_t = ctx.GetSignal ().embedding;
   }
 };
 } // namespace

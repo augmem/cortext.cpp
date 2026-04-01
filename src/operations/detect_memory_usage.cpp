@@ -7,6 +7,8 @@
 #include "cortext/store/store.hpp"
 #include "cortext/store/utils.hpp"
 
+#include <unordered_set>
+
 namespace cortext::operations
 {
 
@@ -110,6 +112,8 @@ DetectMemoryUsage::Execute (OperationContext &context, Transaction &tx) const
     {
       std::vector<long long> retrieved_memory_ids;
       retrieved_memory_ids.reserve (retrieved.size ());
+      std::unordered_set<long long> seen_memory_ids;
+      seen_memory_ids.reserve (retrieved.size ());
       for (const auto &kv : retrieved)
         {
           const long long embedding_id = kv.first;
@@ -135,7 +139,14 @@ DetectMemoryUsage::Execute (OperationContext &context, Transaction &tx) const
             }
           if (memory_id > 0)
             {
-              retrieved_memory_ids.push_back (memory_id);
+              auto mem_exists = store->Execute (
+                  "SELECT 1 AS present FROM memories WHERE memory_id = ? LIMIT 1",
+                  { memory_id });
+              if (!mem_exists.empty ()
+                  && seen_memory_ids.insert (memory_id).second)
+                {
+                  retrieved_memory_ids.push_back (memory_id);
+                }
             }
         }
       reinforcement_candidate_count

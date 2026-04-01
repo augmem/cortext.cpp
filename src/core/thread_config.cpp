@@ -16,7 +16,7 @@ DefaultThreadCount ()
     {
       cores = 1; // Fallback if detection fails
     }
-  return std::max (1u, std::min (8u, cores));
+  return std::max (1u, cores / 3);
 }
 
 uint32_t
@@ -39,12 +39,7 @@ GetEmbedThreadCount ()
         }
     }
 
-  unsigned int cores = std::thread::hardware_concurrency ();
-  if (cores == 0)
-    {
-      cores = 1;
-    }
-  return std::max (1u, cores / 3);
+  return DefaultThreadCount ();
 }
 
 uint32_t
@@ -67,12 +62,7 @@ GetInferThreadCount ()
         }
     }
 
-  unsigned int cores = std::thread::hardware_concurrency ();
-  if (cores == 0)
-    {
-      cores = 1;
-    }
-  return std::max (1u, cores / 3);
+  return DefaultThreadCount ();
 }
 
 } // namespace cortext::core

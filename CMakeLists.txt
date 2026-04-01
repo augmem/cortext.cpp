@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(cortext LANGUAGES C CXX)
+project(cortext VERSION 0.1.0 LANGUAGES C CXX)
 
 if(NOT DEFINED CMAKE_CXX_STANDARD OR CMAKE_CXX_STANDARD STREQUAL "")
   set(CMAKE_CXX_STANDARD 20)
@@ -11,10 +11,10 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 option(BUILD_TESTING "Build tests" ON)
 option(CORTEXT_WARNINGS_AS_ERRORS "Treat warnings as errors" ON)
 option(CORTEXT_BUILD_EXAMPLES "Build examples" OFF)
+option(CORTEXT_BUILD_NODE_BINDINGS "Build Node.js addon bindings" OFF)
 option(BUILD_WASM "Build WebAssembly version" OFF)
 option(CORTEXT_WASM_EXPORT_ALL "Export all functions in WASM build" ON)
 option(CORTEXT_EMBED_VEC "Embed sqlite-vec extension" ON)
-option(CORTEXT_EMBED_GRAPH "Embed sqlite-graph extension" ON)
 option(CORTEXT_EMBED_OBJSTORE "Embed sqlite-objstore extension" ON)
 option(CORTEXT_ENABLE_DYNAMIC_EXTENSIONS "Enable dynamic extension loading fallback" ON)
 option(CORTEXT_DISABLE_IMAGEBIND_ORT "Disable ONNX Runtime for ImageBind embedder" OFF)
@@ -28,6 +28,9 @@ option(CORTEXT_ENABLE_EMBEDDINGGEMMA "Build EmbeddingGemma encoder" OFF)
 option(CORTEXT_ENABLE_ASAN "Enable AddressSanitizer" OFF)
 option(CORTEXT_ENABLE_UBSAN "Enable UndefinedBehaviorSanitizer" OFF)
 option(CORTEXT_ENABLE_MSAN "Enable MemorySanitizer (Clang only)" OFF)
+
+set(CORTEXT_NODE_EXECUTABLE "" CACHE FILEPATH "Path to the node executable used for Node.js addon builds")
+set(CORTEXT_NODE_INCLUDE_DIR "" CACHE PATH "Path to Node.js headers used for Node.js addon builds")
 
 if(APPLE)
   set(CORTEXT_ENABLE_ORT_COREML ON CACHE BOOL "Enable CoreML EP in ONNX Runtime build" FORCE)
@@ -172,18 +175,64 @@ add_library(cortext
     # Extractor component
     src/extractor/phi4_extractor.cpp
     src/extractor/gemma_extractor.cpp
-    src/extractor/json_schema_constraint.cpp
     # Summarizer component
     src/summarizer/phi4_summarizer.cpp
     src/summarizer/gemma_summarizer.cpp
+    # Deep consolidation LLM backends
+    src/deep_llm/deep_llm_factory.cpp
+    src/deep_llm/lfm2_llama_backend.cpp
     # JSON schema parser for constrained decoding
     src/generator/json_decoder.cpp
     # Audio preprocessing
     src/audio/gemma_audio.cpp
 )
 
+set(CORTEXT_LLAMA_CPP_AVAILABLE OFF)
+if(NOT EMSCRIPTEN)
+  find_path(CORTEXT_LLAMA_INCLUDE_DIR
+    NAMES llama.h
+    PATHS /opt/homebrew/include /usr/local/include
+  )
+  find_library(CORTEXT_LLAMA_LIBRARY
+    NAMES llama libllama
+    PATHS /opt/homebrew/lib /usr/local/lib
+  )
+  find_library(CORTEXT_GGML_LIBRARY
+    NAMES ggml libggml
+    PATHS /opt/homebrew/lib /usr/local/lib
+  )
+  find_library(CORTEXT_GGML_BASE_LIBRARY
+    NAMES ggml-base libggml-base
+    PATHS /opt/homebrew/lib /usr/local/lib
+  )
+
+  if(CORTEXT_LLAMA_INCLUDE_DIR AND CORTEXT_LLAMA_LIBRARY)
+    set(CORTEXT_LLAMA_CPP_AVAILABLE ON)
+    target_compile_definitions(cortext PRIVATE
+      CORTEXT_ENABLE_LLAMA_CPP=1
+      CORTEXT_GGML_BACKEND_HEADER_PATH=\"${CORTEXT_LLAMA_INCLUDE_DIR}/ggml-backend.h\"
+      CORTEXT_LLAMA_HEADER_PATH=\"${CORTEXT_LLAMA_INCLUDE_DIR}/llama.h\"
+    )
+    target_link_libraries(cortext PRIVATE ${CORTEXT_LLAMA_LIBRARY})
+    if(CORTEXT_GGML_LIBRARY)
+      target_link_libraries(cortext PRIVATE ${CORTEXT_GGML_LIBRARY})
+    endif()
+    if(CORTEXT_GGML_BASE_LIBRARY)
+      target_link_libraries(cortext PRIVATE ${CORTEXT_GGML_BASE_LIBRARY})
+    endif()
+  else()
+    message(STATUS "llama.cpp library not found; GGUF generation backends disabled")
+  endif()
+endif()
+
 if(CORTEXT_ENABLE_EMBEDDINGGEMMA)
+  target_compile_definitions(cortext PUBLIC CORTEXT_ENABLE_EMBEDDINGGEMMA=1)
   target_sources(cortext PRIVATE src/encoder/embeddinggemma.cpp)
+  if(CORTEXT_LLAMA_CPP_AVAILABLE)
+    target_compile_definitions(cortext PRIVATE CORTEXT_ENABLE_EMBEDDINGGEMMA_LLAMA_CPP=1)
+  else()
+    message(STATUS "llama.cpp library not found; EmbeddingGemma llama.cpp backend disabled")
+  endif()
 else()
   set(CORTEXT_DISABLE_SHERPA_ONNX ON CACHE BOOL "" FORCE)
 endif()
@@ -202,7 +251,7 @@ target_include_directories(cortext
     ${CMAKE_CURRENT_SOURCE_DIR}/third_party/sqlite/src
 )
 
-# Embed sqlite-vec/sqlite-graph sources when enabled
+# Embed sqlite-vec sources when enabled
 set(CORTEXT_EMBED_SOURCES "")
 if(CORTEXT_EMBED_VEC)
   list(APPEND CORTEXT_EMBED_SOURCES
@@ -234,25 +283,6 @@ if(CORTEXT_EMBED_VEC)
   endif()
 endif()
 
-# (Removed) augmem text-sample sources are no longer built.
-if(CORTEXT_EMBED_GRAPH)
-  file(GLOB CORTEXT_GRAPH_SRCS
-    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/sqlite-graph/src/*.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/sqlite-graph/src/cypher/*.c
-  )
-  list(APPEND CORTEXT_EMBED_SOURCES ${CORTEXT_GRAPH_SRCS})
-  target_include_directories(cortext PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/sqlite-graph/include
-    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/sqlite-graph/src
-  )
-  target_compile_definitions(cortext PRIVATE CORTEXT_EMBED_GRAPH=1)
-  if(CMAKE_C_COMPILER_ID MATCHES "Clang|AppleClang|GNU")
-    set_source_files_properties(
-      ${CORTEXT_GRAPH_SRCS}
-      PROPERTIES COMPILE_OPTIONS "-w"
-    )
-  endif()
-endif()
 if(CORTEXT_EMBED_SOURCES)
   target_sources(cortext PRIVATE ${CORTEXT_EMBED_SOURCES})
 endif()
@@ -516,10 +546,43 @@ endif()
 
 # EmbeddingGemma ONNX encoder (uses ORT + SentencePiece from LiteRT-LM)
 if(CORTEXT_ENABLE_EMBEDDINGGEMMA)
-  if((NOT CORTEXT_DISABLE_IMAGEBIND_ORT AND NOT EMSCRIPTEN) OR CORTEXT_ENABLE_GEMMA_ORT)
-    if(NOT CORTEXT_DISABLE_LITERT AND NOT EMSCRIPTEN)
-      target_compile_definitions(cortext PUBLIC CORTEXT_ENABLE_EMBEDDINGGEMMA_ORT=1)
+  set(CORTEXT_SENTENCEPIECE_INCLUDE_DIR "${CMAKE_BINARY_DIR}/bazel-output/external/sentencepiece")
+  set(CORTEXT_SENTENCEPIECE_PROTO_DIR "${CORTEXT_SENTENCEPIECE_INCLUDE_DIR}/builtin_pb")
+  set(CORTEXT_SENTENCEPIECE_LIB_DIR "${CMAKE_BINARY_DIR}/bazel-output/execroot/litert_lm/bazel-out/darwin_arm64-opt/bin/external/sentencepiece")
+  set(CORTEXT_SENTENCEPIECE_PROCESSOR_LIB "${CORTEXT_SENTENCEPIECE_LIB_DIR}/libsentencepiece_processor.a")
+  set(CORTEXT_SENTENCEPIECE_MODEL_PROTO_LIB "${CORTEXT_SENTENCEPIECE_LIB_DIR}/libsentencepiece_model_proto.a")
+  set(CORTEXT_SENTENCEPIECE_PROTO_LIB "${CORTEXT_SENTENCEPIECE_LIB_DIR}/libsentencepiece_proto.a")
+
+  foreach(sp_path
+      "${CORTEXT_SENTENCEPIECE_INCLUDE_DIR}"
+      "${CORTEXT_SENTENCEPIECE_PROTO_DIR}"
+      "${CORTEXT_SENTENCEPIECE_PROCESSOR_LIB}"
+      "${CORTEXT_SENTENCEPIECE_MODEL_PROTO_LIB}"
+      "${CORTEXT_SENTENCEPIECE_PROTO_LIB}")
+    if(NOT EXISTS "${sp_path}")
+      message(FATAL_ERROR "EmbeddingGemma requires SentencePiece artifact: ${sp_path}")
     endif()
+  endforeach()
+
+  target_include_directories(cortext PRIVATE
+    "${CORTEXT_SENTENCEPIECE_INCLUDE_DIR}"
+    "${CORTEXT_SENTENCEPIECE_PROTO_DIR}"
+  )
+  target_link_libraries(cortext PRIVATE
+    "${CORTEXT_SENTENCEPIECE_PROCESSOR_LIB}"
+    "${CORTEXT_SENTENCEPIECE_MODEL_PROTO_LIB}"
+    "${CORTEXT_SENTENCEPIECE_PROTO_LIB}"
+    protobuf::libprotobuf
+  )
+  if(TARGET absl::status)
+    target_link_libraries(cortext PRIVATE absl::status)
+  endif()
+  if(TARGET absl::statusor)
+    target_link_libraries(cortext PRIVATE absl::statusor)
+  endif()
+
+  if((NOT CORTEXT_DISABLE_IMAGEBIND_ORT AND NOT EMSCRIPTEN) OR CORTEXT_ENABLE_GEMMA_ORT)
+    target_compile_definitions(cortext PUBLIC CORTEXT_ENABLE_EMBEDDINGGEMMA_ORT=1)
   endif()
 endif()
 
@@ -653,6 +716,10 @@ endif()
 if(NOT CORTEXT_DISABLE_LITERT AND NOT EMSCRIPTEN)
   include(ExternalProject)
 
+  target_sources(cortext PRIVATE
+    src/extractor/json_schema_constraint.cpp
+  )
+
   # Detect platform for Bazel config
   if(APPLE)
     if(CMAKE_SYSTEM_PROCESSOR STREQUAL "arm64")
@@ -767,6 +834,7 @@ endif()
 
 # Use C++20 features
 target_compile_features(cortext PUBLIC cxx_std_20)
+target_compile_definitions(cortext PUBLIC CORTEXT_VERSION="${PROJECT_VERSION}")
 
 # Set hidden visibility by default to avoid symbol collisions with dependencies
 # (e.g., protobuf from LiteRT-LM vs OpenTelemetry). Only symbols marked with
@@ -828,11 +896,66 @@ include(GNUInstallDirs)
 
 if(NOT EMSCRIPTEN)
   install(TARGETS cortext
-    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
-    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
-    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR} COMPONENT cortext
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR} COMPONENT cortext
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR} COMPONENT cortext
+    INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
   )
-  install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+  install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+    COMPONENT cortext
+  )
+endif()
+
+if(CORTEXT_BUILD_NODE_BINDINGS AND NOT EMSCRIPTEN)
+  if(NOT CORTEXT_NODE_EXECUTABLE)
+    find_program(_cortext_node_executable NAMES node REQUIRED)
+    set(CORTEXT_NODE_EXECUTABLE "${_cortext_node_executable}" CACHE FILEPATH
+      "Path to the node executable used for Node.js addon builds" FORCE
+    )
+  endif()
+
+  if(NOT CORTEXT_NODE_INCLUDE_DIR)
+    execute_process(
+      COMMAND "${CORTEXT_NODE_EXECUTABLE}" -p "require('path').dirname(require('path').dirname(process.execPath))"
+      OUTPUT_VARIABLE CORTEXT_NODE_PREFIX
+      OUTPUT_STRIP_TRAILING_WHITESPACE
+      COMMAND_ERROR_IS_FATAL ANY
+    )
+    set(CORTEXT_NODE_INCLUDE_DIR "${CORTEXT_NODE_PREFIX}/include/node")
+  endif()
+
+  if(NOT EXISTS "${CORTEXT_NODE_INCLUDE_DIR}/node_api.h")
+    message(FATAL_ERROR "Node.js headers not found under ${CORTEXT_NODE_INCLUDE_DIR}")
+  endif()
+
+  add_library(cortext_node MODULE
+    bindings/javascript/src/addon.cpp
+  )
+  target_compile_features(cortext_node PRIVATE cxx_std_20)
+  target_include_directories(cortext_node PRIVATE
+    "${CORTEXT_NODE_INCLUDE_DIR}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/include"
+  )
+  target_link_libraries(cortext_node PRIVATE cortext)
+  target_compile_definitions(cortext_node PRIVATE NAPI_VERSION=8)
+  set_target_properties(cortext_node PROPERTIES
+    PREFIX ""
+    OUTPUT_NAME "cortext"
+    SUFFIX ".node"
+    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bindings/javascript"
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bindings/javascript"
+  )
+
+  if(APPLE)
+    target_link_options(cortext_node PRIVATE "-undefined" "dynamic_lookup")
+    set_property(TARGET cortext_node APPEND PROPERTY BUILD_RPATH
+      "@loader_path/../.."
+    )
+  elseif(UNIX)
+    set_property(TARGET cortext_node APPEND PROPERTY BUILD_RPATH
+      "$ORIGIN/../.."
+    )
+  endif()
 endif()
 
 include(CTest)

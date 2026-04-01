@@ -59,7 +59,20 @@ ResetAccumulatorOnInterrupt::Execute (OperationContext &context,
       return;
     }
 
+  const auto selected_id = context.GetSelectedCandidateId ();
+  if (!selected_id.has_value ())
+    {
+      return;
+    }
+  const auto &candidates = context.GetRetrievedMemoryEmbeddings ();
+  auto cand_it = candidates.find (*selected_id);
+  if (cand_it == candidates.end () || cand_it->second.size () == 0)
+    {
+      return;
+    }
+
   it->second.pending_interrupt_abort = true;
+  it->second.pending_interrupt_embedding = cand_it->second;
   telemetry::AddCounter ("cortext.accumulator.interrupt_pending_total", 1);
   telemetry::LogDebug ("cortext.accumulator.interrupt_pending", {
     telemetry::Attribute::String ("source_id", signal.source_id),

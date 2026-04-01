@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cstring>
 #include <filesystem>
+#include <nlohmann/json.hpp>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -106,6 +107,14 @@ ImageBindAssetsPresent (const std::string &models_dir)
                                       "bpe_simple_vocab_16e6.txt.gz");
   return has_text && has_audio && has_vision && has_bpe;
 }
+
+std::string
+RepoModelsImageBindDir ()
+{
+  namespace fs = std::filesystem;
+  const fs::path root = fs::path (__FILE__).parent_path ().parent_path ();
+  return (root / "models" / "imagebind").string ();
+}
 } // namespace
 
 TEST_CASE ("Cortext C++ stub can be created and used", "[cortext][stub]")
@@ -113,7 +122,7 @@ TEST_CASE ("Cortext C++ stub can be created and used", "[cortext][stub]")
   ScopedTempDb temp_db;
   cortext::Cortext::Config cfg;
   const std::string &db_path = temp_db.path ();
-  const std::string models_dir = "models/imagebind";
+  const std::string models_dir = RepoModelsImageBindDir ();
 
   std::unique_ptr<cortext::Cortext> ctx;
   REQUIRE_NOTHROW (ctx = cortext::Cortext::Create (cfg, db_path, models_dir));
@@ -124,7 +133,7 @@ TEST_CASE ("Cortext C++ stub can be created and used", "[cortext][stub]")
   //   succeed.
   // - Otherwise: encoding should fail fast by throwing (but construction should
   //   still succeed).
-#if defined(CORTEXT_ENABLE_IMAGEBIND_ORT)
+#if defined(CORTEXT_ENABLE_IMAGEBIND_ORT) || defined(CORTEXT_ENABLE_EMBEDDINGGEMMA)
   const bool expect_encode_ok = ImageBindAssetsPresent (models_dir);
 #else
   const bool expect_encode_ok = false;
@@ -133,12 +142,19 @@ TEST_CASE ("Cortext C++ stub can be created and used", "[cortext][stub]")
   if (expect_encode_ok)
     {
       REQUIRE_NOTHROW ([&] {
-        // Smoke test: verify each API can be called successfully.
-        // Note: should_interrupt is an algorithm decision that depends on
-        // retrieval results and signal metrics; we only verify no crashes.
+        // Smoke test: verify the default text path and consolidation work.
+        // Audio/image may be unsupported when EmbeddingGemma is the preferred
+        // encoder, so only text is required here.
         auto out_text = ctx->ProcessText ("hello world", "test");
         (void)out_text.should_interrupt; // Algorithm-dependent, not asserted
 
+        auto out_cons = ctx->Consolidate ();
+        (void)out_cons.should_interrupt;
+        ctx->Flush ();
+      }());
+
+#if defined(CORTEXT_ENABLE_IMAGEBIND_ORT) && !defined(CORTEXT_ENABLE_EMBEDDINGGEMMA)
+      REQUIRE_NOTHROW ([&] {
         const float pcm[4] = { 0.0f, 0.1f, -0.1f, 0.0f };
         auto out_audio = ctx->ProcessAudio (pcm, 4, "test");
         (void)out_audio.should_interrupt;
@@ -146,15 +162,12 @@ TEST_CASE ("Cortext C++ stub can be created and used", "[cortext][stub]")
         const std::uint8_t px[4] = { 0, 0, 0, 0 };
         auto out_image = ctx->ProcessImage (px, 1, 1, 4, "test");
         (void)out_image.should_interrupt;
-
-        auto out_cons = ctx->Consolidate ();
-        (void)out_cons.should_interrupt;
-        ctx->Flush ();
       }());
+#endif
     }
   else
     {
-      REQUIRE_THROWS (ctx->ProcessText ("hello world", "test"));
+      REQUIRE_NOTHROW (ctx->ProcessText ("hello world", "test"));
     }
 
   // DB assertion: open the same DB and execute a trivial query successfully.
@@ -169,29 +182,43 @@ TEST_CASE ("Cortext::Create succeeds even when models dir is missing",
 {
   cortext::Cortext::Config cfg;
   std::unique_ptr<cortext::Cortext> ctx;
+#if defined(CORTEXT_DISABLE_LITERT)
   REQUIRE_NOTHROW (
       ctx = cortext::Cortext::Create (cfg, ":memory:", "models/does-not-exist"));
   REQUIRE (ctx != nullptr);
   REQUIRE_THROWS (ctx->ProcessText ("hello", "test"));
+#else
+  REQUIRE_THROWS (
+      ctx = cortext::Cortext::Create (cfg, ":memory:", "models/does-not-exist"));
+#endif
 }
 
 TEST_CASE ("Cortext C ABI stubs return success", "[cortext][capi][stub]")
 {
+  const std::string models_dir = RepoModelsImageBindDir ();
   cortext_handle h = cortext_create_with_models (
-      0.5, 0.5, 0.5, ":memory:", "models/imagebind");
+      0.5, 0.5, 0.5, ":memory:", models_dir.c_str ());
   REQUIRE (h != nullptr);
 
   const int text_rc = cortext_process_text (h, "hello", "test");
   if (text_rc == 0)
     {
       const float pcm[2] = { 0.0f, 0.0f };
-      REQUIRE (cortext_process_audio (h, pcm, 2, "test") == 0);
+      const int audio_rc = cortext_process_audio (h, pcm, 2, "test");
 
       const std::uint8_t px[3] = { 0, 0, 0 };
-      REQUIRE (cortext_process_image (h, px, 1, 1, 3, "test") == 0);
+      const int image_rc = cortext_process_image (h, px, 1, 1, 3, "test");
 
       REQUIRE (cortext_consolidate (h) == 0);
       REQUIRE (cortext_flush (h) == 0);
+
+#if defined(CORTEXT_ENABLE_IMAGEBIND_ORT) && !defined(CORTEXT_ENABLE_EMBEDDINGGEMMA)
+      REQUIRE (audio_rc == 0);
+      REQUIRE (image_rc == 0);
+#else
+      REQUIRE ((audio_rc == 0 || audio_rc == 2));
+      REQUIRE ((image_rc == 0 || image_rc == 2));
+#endif
     }
   else
     {
@@ -277,7 +304,7 @@ TEST_CASE ("Cortext hydrates sqlite-objstore payloads",
     }
 
   cortext::Cortext::Config cfg;
-  auto ctx = cortext::Cortext::Create (cfg, db_path, "models/imagebind");
+  auto ctx = cortext::Cortext::Create (cfg, db_path, RepoModelsImageBindDir ());
   REQUIRE (ctx != nullptr);
 
   std::vector<long long> candidate_ids;
@@ -300,6 +327,13 @@ TEST_CASE ("Cortext hydrates sqlite-objstore payloads",
 
 TEST_CASE ("C API handles NULL inputs correctly", "[cortext][capi][safety]")
 {
+  SECTION ("cortext_version returns a non-empty string")
+  {
+    const char *version = cortext_version ();
+    REQUIRE (version != nullptr);
+    REQUIRE (std::strlen (version) > 0);
+  }
+
   SECTION ("cortext_free accepts NULL handle")
   {
     REQUIRE_NOTHROW (cortext_free (nullptr));
@@ -308,51 +342,119 @@ TEST_CASE ("C API handles NULL inputs correctly", "[cortext][capi][safety]")
   SECTION ("cortext_process_text returns 1 for NULL handle")
   {
     CHECK (cortext_process_text (nullptr, "text", "src") == 1);
+    REQUIRE (std::string (cortext_last_error ())
+             == "handle, text, and source_id must all be non-NULL");
   }
 
   SECTION ("cortext_process_text returns 1 for NULL text")
   {
     ScopedTempDb temp_db;
-    auto h = cortext_create (0.5, 0.5, 0.5, temp_db.path ().c_str ());
+    const auto models_dir = RepoModelsImageBindDir ();
+    auto h = cortext_create_with_models (0.5, 0.5, 0.5, temp_db.path ().c_str (),
+                                         models_dir.c_str ());
     REQUIRE (h != nullptr);
     CHECK (cortext_process_text (h, nullptr, "src") == 1);
+    REQUIRE (std::string (cortext_last_error ())
+             == "handle, text, and source_id must all be non-NULL");
     cortext_free (h);
   }
 
   SECTION ("cortext_process_text returns 1 for NULL source_id")
   {
     ScopedTempDb temp_db;
-    auto h = cortext_create (0.5, 0.5, 0.5, temp_db.path ().c_str ());
+    const auto models_dir = RepoModelsImageBindDir ();
+    auto h = cortext_create_with_models (0.5, 0.5, 0.5, temp_db.path ().c_str (),
+                                         models_dir.c_str ());
     REQUIRE (h != nullptr);
     CHECK (cortext_process_text (h, "text", nullptr) == 1);
+    REQUIRE (std::string (cortext_last_error ())
+             == "handle, text, and source_id must all be non-NULL");
     cortext_free (h);
   }
 
   SECTION ("cortext_process_audio returns 1 for NULL pcm")
   {
     ScopedTempDb temp_db;
-    auto h = cortext_create (0.5, 0.5, 0.5, temp_db.path ().c_str ());
+    const auto models_dir = RepoModelsImageBindDir ();
+    auto h = cortext_create_with_models (0.5, 0.5, 0.5, temp_db.path ().c_str (),
+                                         models_dir.c_str ());
     REQUIRE (h != nullptr);
     CHECK (cortext_process_audio (h, nullptr, 100, "src") == 1);
+    REQUIRE (std::string (cortext_last_error ())
+             == "handle, pcm, and source_id must all be non-NULL");
     cortext_free (h);
   }
 
   SECTION ("cortext_process_image returns 1 for NULL data")
   {
     ScopedTempDb temp_db;
-    auto h = cortext_create (0.5, 0.5, 0.5, temp_db.path ().c_str ());
+    const auto models_dir = RepoModelsImageBindDir ();
+    auto h = cortext_create_with_models (0.5, 0.5, 0.5, temp_db.path ().c_str (),
+                                         models_dir.c_str ());
     REQUIRE (h != nullptr);
     CHECK (cortext_process_image (h, nullptr, 10, 10, 3, "src") == 1);
+    REQUIRE (std::string (cortext_last_error ())
+             == "handle, data, and source_id must all be non-NULL");
     cortext_free (h);
   }
 
   SECTION ("cortext_consolidate returns 1 for NULL handle")
   {
     CHECK (cortext_consolidate (nullptr) == 1);
+    REQUIRE (std::string (cortext_last_error ()) == "handle must not be NULL");
   }
 
   SECTION ("cortext_flush returns 1 for NULL handle")
   {
     CHECK (cortext_flush (nullptr) == 1);
+    REQUIRE (std::string (cortext_last_error ()) == "handle must not be NULL");
+  }
+
+  SECTION ("cortext_config_init populates defaults and create_with_config works")
+  {
+    ScopedTempDb temp_db;
+    cortext_config cfg{};
+    cortext_config_init (&cfg);
+    REQUIRE (cfg.struct_size == sizeof (cortext_config));
+    cfg.focus = 0.7;
+    cfg.sensitivity = 0.4;
+    cfg.stability = 0.9;
+
+    const auto models_dir = RepoModelsImageBindDir ();
+    auto h = cortext_create_with_config (&cfg, temp_db.path ().c_str (),
+                                         models_dir.c_str ());
+    REQUIRE (h != nullptr);
+    cortext_free (h);
+  }
+
+  SECTION ("JSON C API returns parseable context")
+  {
+    ScopedTempDb temp_db;
+    const auto models_dir = RepoModelsImageBindDir ();
+    auto h = cortext_create_with_models (0.5, 0.5, 0.5, temp_db.path ().c_str (),
+                                         models_dir.c_str ());
+    REQUIRE (h != nullptr);
+
+    char *json_ptr
+        = cortext_consolidate_mode_json (h, CORTEXT_CONSOLIDATE_SHALLOW);
+    REQUIRE (json_ptr != nullptr);
+
+    const auto parsed = nlohmann::json::parse (json_ptr);
+    REQUIRE (parsed.contains ("working_memory"));
+    REQUIRE (parsed.contains ("retrieved_memory"));
+    REQUIRE (parsed.contains ("output"));
+    REQUIRE (parsed.at ("working_memory").is_array ());
+    REQUIRE (parsed.at ("retrieved_memory").is_array ());
+
+    cortext_string_free (json_ptr);
+    cortext_free (h);
+  }
+
+  SECTION ("JSON C API reports errors through cortext_last_error")
+  {
+    char *json_ptr = cortext_process_text_json (nullptr, "hello", "src");
+    REQUIRE (json_ptr == nullptr);
+    REQUIRE (std::string (cortext_last_error ())
+             == "handle, text, and source_id must all be non-NULL");
   }
 }

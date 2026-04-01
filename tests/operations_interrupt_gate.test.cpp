@@ -220,8 +220,7 @@ TEST_CASE ("Alg27 refractory raises thresholds",
   op.Execute (oc, *tx);
 
   REQUIRE (oc.GetMniTauMuEff () > 0.0);
-  // With Delta small, thresholds elevated; decision may still allow
-  REQUIRE (oc.GetInterruptAllowed () == true);
+  REQUIRE (oc.GetInterruptAllowed () == false);
 }
 
 TEST_CASE ("Alg27 embedding novelty high for orthogonal candidate",
@@ -329,12 +328,6 @@ TEST_CASE ("Alg27 embedding novelty 1.0 when context window empty",
   ProcessorContext pc;
   pc.signals_processed = 10;
   pc.last_interrupt_tick = -1000;
-
-  // Empty context window, but provide included vectors for centroid
-  ProcessorContext::WMSlot slot;
-  slot.embedding = MakeUnit256 ({ 1.0f, 0.0f, 0.0f });
-  slot.strength = 1.0;
-  pc.wm_slots.push_back (slot);
 
   // Insert candidate embedding into store
   auto cand_emb = MakeUnit256 ({ 0.5f, 0.5f, 0.0f });

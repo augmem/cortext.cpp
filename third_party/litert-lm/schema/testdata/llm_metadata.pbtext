@@ -1,0 +1,11 @@
+# proto-file: third_party/odml/litert_lm/runtime/proto/llm_metadata.proto
+# proto-message: LlmMetadata
+start_token: {
+  token_str: "<bos>"
+}
+stop_tokens: {
+  token_str: "<eos>"
+}
+stop_tokens: {
+  token_str: "<end_of_turn>"
+}

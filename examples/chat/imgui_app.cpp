@@ -3,6 +3,7 @@
 #include <imgui.h>
 #include <imgui_impl_glfw.h>
 #include <imgui_impl_opengl3.h>
+#include <implot.h>
 
 #include <GLFW/glfw3.h>
 
@@ -57,6 +58,7 @@ ImGuiApp::ImGuiApp(const ImGuiAppConfig& config) : impl_(std::make_unique<Impl>(
   // Initialize ImGui
   IMGUI_CHECKVERSION();
   ImGui::CreateContext();
+  ImPlot::CreateContext();
   ImGuiIO& io = ImGui::GetIO();
   io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
   io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
@@ -101,6 +103,7 @@ ImGuiApp::~ImGuiApp() {
   if (impl_->window) {
     ImGui_ImplOpenGL3_Shutdown();
     ImGui_ImplGlfw_Shutdown();
+    ImPlot::DestroyContext();
     ImGui::DestroyContext();
     glfwDestroyWindow(impl_->window);
     glfwTerminate();

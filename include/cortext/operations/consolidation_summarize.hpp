@@ -21,7 +21,7 @@ struct ConsolidationSummarizeParams
 ///
 /// For each valid cluster from ConsolidationCluster:
 /// - Generates unique summary_id
-/// - Fetches its text from objstore as summary_text (Gemma LiteRT-LM required)
+/// - Fetches its text from objstore as summary_text (deep LLM backend required)
 /// - Creates MEMORIES entry (kind='ASSOCIATION') with centroid embedding
 /// - Creates ASSOCIATIONS edges (edge_type='derived_from') linking centroid to sources
 /// - Queues ExtractionRequest for clusters meeting MinClusterSizeForExtraction

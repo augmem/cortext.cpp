@@ -18,9 +18,6 @@ extern "C"
 #if defined(CORTEXT_EMBED_VEC)
   int sqlite3_vec_init (sqlite3 *, char **, const sqlite3_api_routines *);
 #endif
-#if defined(CORTEXT_EMBED_GRAPH)
-  int sqlite3_graph_init (sqlite3 *, char **, const sqlite3_api_routines *);
-#endif
 }
 
 /// @brief Registers statically linked SQLite extensions for process-wide use.
@@ -29,8 +26,8 @@ extern "C"
 /// - **Apple platforms**: sqlite3_auto_extension() is deprecated, so this only
 ///   initializes SQLite. Actual extension registration happens per-connection
 ///   via RegisterBuiltInExtensionsOnDb().
-/// - **Other platforms**: Uses sqlite3_auto_extension() to register vec/graph
-///   globally so all new connections inherit them.
+/// - **Other platforms**: Uses sqlite3_auto_extension() to register built-in
+///   extensions globally so all new connections inherit them.
 /// - **WASM**: Handled separately in src/wasm/auto_extensions.cpp via constructor
 ///   attribute.
 ///
@@ -47,9 +44,6 @@ RegisterBuiltInExtensions ()
 #else
 #if defined(CORTEXT_EMBED_VEC)
     sqlite3_auto_extension ((void (*) (void))sqlite3_vec_init);
-#endif
-#if defined(CORTEXT_EMBED_GRAPH)
-    sqlite3_auto_extension ((void (*) (void))sqlite3_graph_init);
 #endif
 #endif
   });
@@ -109,8 +103,6 @@ TryLoadDynamicExtensions (sqlite3 *db)
 
   // Environment overrides
   const char *vecEnv = std::getenv ("SQLITE_VEC_PATH");
-  const char *graphEnv = std::getenv ("SQLITE_GRAPH_PATH");
-
   if (vecEnv && *vecEnv)
     {
       tryLoad (db, std::string (vecEnv), "sqlite3_vec_init");
@@ -140,32 +132,6 @@ TryLoadDynamicExtensions (sqlite3 *db)
         }
     }
 
-  if (graphEnv && *graphEnv)
-    {
-      tryLoad (db, std::string (graphEnv), "sqlite3_graph_init");
-    }
-  else
-    {
-      // Common relative locations
-#if defined(__APPLE__)
-      const std::vector<std::string> graphCandidates = {
-        "third_party/sqlite-graph/build/libgraph.dylib",
-      };
-#elif defined(_WIN32)
-      const std::vector<std::string> graphCandidates = {
-        "third_party/sqlite-graph/build/libgraph.dll",
-      };
-#else
-      const std::vector<std::string> graphCandidates = {
-        "third_party/sqlite-graph/build/libgraph.so",
-      };
-#endif
-      for (const auto &p : graphCandidates)
-        {
-          tryLoad (db, p, "sqlite3_graph_init");
-        }
-    }
-
   enableLoadExtension (db, 0);
 #endif // CORTEXT_ENABLE_DYNAMIC_EXTENSIONS
 #endif // __EMSCRIPTEN__
@@ -178,9 +144,6 @@ RegisterBuiltInExtensionsOnDb (sqlite3 *db)
     return;
 #if defined(CORTEXT_EMBED_VEC)
   (void)sqlite3_vec_init (db, nullptr, nullptr);
-#endif
-#if defined(CORTEXT_EMBED_GRAPH)
-  (void)sqlite3_graph_init (db, nullptr, nullptr);
 #endif
 #if defined(CORTEXT_EMBED_OBJSTORE)
   objstore_config cfg{};

@@ -85,39 +85,33 @@ void StreamingChatClient::ProcessSSELine(const std::string& line,
 
   // Check for end of stream
   if (data == "[DONE]") {
-    ctx.done = true;
-    if (ctx.callback) {
+    if (!ctx.done && ctx.callback) {
       (*ctx.callback)("", true);
     }
+    ctx.done = true;
     return;
   }
 
   // Parse JSON
   try {
     auto json = openai::Json::parse(data);
+    if (auto usage = ParseStreamingUsageJson(json)) {
+      ctx.usage = *usage;
+    }
 
-    // Extract content from delta
-    // Format: {"choices":[{"delta":{"content":"token"},...},...]}
-    if (json.contains("choices") && !json["choices"].empty()) {
-      const auto& choice = json["choices"][0];
-      if (choice.contains("delta") && choice["delta"].contains("content")) {
-        std::string content = choice["delta"]["content"].get<std::string>();
-        if (!content.empty()) {
-          ctx.full_content += content;
-          if (ctx.callback) {
-            (*ctx.callback)(content, false);
-          }
-        }
+    const std::string content = ExtractStreamingDeltaText(json);
+    if (!content.empty()) {
+      ctx.full_content += content;
+      if (ctx.callback) {
+        (*ctx.callback)(content, false);
       }
+    }
 
-      // Check for finish_reason
-      if (choice.contains("finish_reason") &&
-          !choice["finish_reason"].is_null()) {
-        ctx.done = true;
-        if (ctx.callback) {
-          (*ctx.callback)("", true);
-        }
+    if (HasStreamingFinishReason(json)) {
+      if (!ctx.done && ctx.callback) {
+        (*ctx.callback)("", true);
       }
+      ctx.done = true;
     }
 
     // Check for errors in response
@@ -149,6 +143,7 @@ StreamingResult StreamingChatClient::Stream(const StreamingRequest& request,
   req_json["messages"] = request.messages;
   req_json["temperature"] = request.temperature;
   req_json["stream"] = true;
+  req_json["stream_options"] = {{"include_usage", true}};
 
   std::string req_body = req_json.dump();
   std::string url = base_url_ + "chat/completions";
@@ -212,6 +207,7 @@ StreamingResult StreamingChatClient::Stream(const StreamingRequest& request,
 
   // Set full content
   result.full_content = std::move(ctx.full_content);
+  result.usage = ctx.usage;
 
   // Cleanup
   curl_slist_free_all(headers);

@@ -312,6 +312,7 @@ GetCoreMigrations ()
               "  arousal REAL NOT NULL DEFAULT 0.0,"
               "  mood_vector BLOB,"
               "  last_mood_ts INTEGER NOT NULL DEFAULT 0,"
+              "  flashbulb_rate REAL NOT NULL DEFAULT 0.0,"
               // Stability state
               "  rate_decay REAL NOT NULL DEFAULT 0.60,"
               "  periphery_half_life REAL NOT NULL DEFAULT 120.0,"

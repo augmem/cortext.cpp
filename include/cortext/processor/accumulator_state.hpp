@@ -75,6 +75,7 @@ struct AccumulatorState
   double drift_at_last_interrupt = 0.0;  ///< Snapshot for refractory delta
   double drift_acc_pacing = 0.0;    ///< Drift accumulator for pacing gate
   bool pending_interrupt_abort = false;  ///< Pending interrupt-induced abort
+  Eigen::VectorXf pending_interrupt_embedding; ///< Selected interrupt memory
 
   /**
    * @brief Reset accumulator for new memory accumulation
@@ -113,6 +114,7 @@ struct AccumulatorState
     primary_modality.clear ();
     acc_signals_window.clear ();
     pending_interrupt_abort = false;
+    pending_interrupt_embedding = Eigen::VectorXf ();
     // Note: last_write_ts is preserved across accumulations
   }
 
@@ -148,6 +150,7 @@ struct AccumulatorState
     primary_modality.clear ();
     acc_signals_window.clear ();
     pending_interrupt_abort = false;
+    pending_interrupt_embedding = Eigen::VectorXf ();
   }
 
   /**

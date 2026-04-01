@@ -9,8 +9,11 @@
 /// WASM builds should not link this module or should use stub encoders instead.
 #include "cortext/encoder/imagebind.hpp"
 
+#include "imagebind_profile.hpp"
+
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
@@ -44,6 +47,44 @@ namespace
 {
 
 #if defined(CORTEXT_ENABLE_IMAGEBIND_ORT)
+
+using Clock = std::chrono::steady_clock;
+
+double
+ElapsedMillis (Clock::time_point start, Clock::time_point end)
+{
+  return std::chrono::duration<double, std::milli> (end - start).count ();
+}
+
+struct ImageBindTextEncodeProfileState
+{
+  std::mutex mu;
+  cortext::internal::ImageBindTextEncodeProfileSnapshot snapshot;
+};
+
+ImageBindTextEncodeProfileState &
+GetImageBindTextEncodeProfileState ()
+{
+  static ImageBindTextEncodeProfileState state;
+  return state;
+}
+
+void
+RecordImageBindTextEncodeProfile (
+    double ensure_initialized_ms, double tokenize_ms, double tensor_create_ms,
+    double run_ms, double copy_ms, double normalize_ms)
+{
+  auto &state = GetImageBindTextEncodeProfileState ();
+  std::lock_guard<std::mutex> lock (state.mu);
+  auto &snapshot = state.snapshot;
+  ++snapshot.calls;
+  snapshot.ensure_initialized_ms += ensure_initialized_ms;
+  snapshot.tokenize_ms += tokenize_ms;
+  snapshot.tensor_create_ms += tensor_create_ms;
+  snapshot.run_ms += run_ms;
+  snapshot.copy_ms += copy_ms;
+  snapshot.normalize_ms += normalize_ms;
+}
 
 constexpr float kPi = 3.14159265358979323846f;
 
@@ -1109,26 +1150,35 @@ ImageBindEncoder::EncodeText (const std::string &text,
 #else
   if (!impl_)
     throw std::runtime_error ("ImageBindEncoder not initialized");
+  const auto t_ensure_start = Clock::now ();
   impl_->EnsureInitialized ();
+  const auto t_ensure_end = Clock::now ();
   if (!impl_->text_session || !impl_->tokenizer)
     throw std::runtime_error ("ImageBindEncoder not initialized");
 
+  const auto t_tokenize_start = Clock::now ();
   const auto tokens = impl_->tokenizer->Tokenize (text);
+  const auto t_tokenize_end = Clock::now ();
   std::vector<int64_t> shape{ 1, static_cast<int64_t> (tokens.size ()) };
 
+  const auto t_tensor_start = Clock::now ();
   Ort::MemoryInfo mem_info
       = Ort::MemoryInfo::CreateCpu (OrtDeviceAllocator, OrtMemTypeCPU);
   Ort::Value input = Ort::Value::CreateTensor<int64_t> (
       mem_info, const_cast<int64_t *> (tokens.data ()),
       static_cast<std::size_t> (tokens.size ()), shape.data (), shape.size ());
+  const auto t_tensor_end = Clock::now ();
 
   const char *in_names[] = { "text_tokens" };
   const char *out_names[] = { "text_embedding" };
+  const auto t_run_start = Clock::now ();
   auto outputs = impl_->text_session->Run (Ort::RunOptions{ nullptr }, in_names,
                                           &input, 1, out_names, 1);
+  const auto t_run_end = Clock::now ();
   if (outputs.size () != 1 || !outputs[0].IsTensor ())
     throw std::runtime_error ("text_encoder produced no tensor output");
 
+  const auto t_copy_start = Clock::now ();
   auto type_info = outputs[0].GetTensorTypeAndShapeInfo ();
   const auto out_shape = type_info.GetShape ();
   std::size_t out_size = 1;
@@ -1139,8 +1189,18 @@ ImageBindEncoder::EncodeText (const std::string &text,
     throw std::runtime_error ("text_encoder output is empty");
 
   out_embedding.assign (out, out + out_size);
+  const auto t_copy_end = Clock::now ();
+  const auto t_normalize_start = Clock::now ();
   StandardizeEmbeddingDim (out_embedding, static_cast<std::size_t> (kDim));
   L2NormalizeInPlace (out_embedding);
+  const auto t_normalize_end = Clock::now ();
+  RecordImageBindTextEncodeProfile (
+      ElapsedMillis (t_ensure_start, t_ensure_end),
+      ElapsedMillis (t_tokenize_start, t_tokenize_end),
+      ElapsedMillis (t_tensor_start, t_tensor_end),
+      ElapsedMillis (t_run_start, t_run_end),
+      ElapsedMillis (t_copy_start, t_copy_end),
+      ElapsedMillis (t_normalize_start, t_normalize_end));
 #endif
 }
 
@@ -1390,5 +1450,32 @@ ImageBindEncoder::EncodeImage (const std::uint8_t *data, int width, int height,
   L2NormalizeInPlace (out_embedding);
 #endif
 }
+
+namespace internal
+{
+
+void
+ResetImageBindTextEncodeProfile ()
+{
+#if defined(CORTEXT_ENABLE_IMAGEBIND_ORT)
+  auto &state = GetImageBindTextEncodeProfileState ();
+  std::lock_guard<std::mutex> lock (state.mu);
+  state.snapshot = {};
+#endif
+}
+
+ImageBindTextEncodeProfileSnapshot
+GetImageBindTextEncodeProfileSnapshot ()
+{
+#if defined(CORTEXT_ENABLE_IMAGEBIND_ORT)
+  auto &state = GetImageBindTextEncodeProfileState ();
+  std::lock_guard<std::mutex> lock (state.mu);
+  return state.snapshot;
+#else
+  return {};
+#endif
+}
+
+} // namespace internal
 
 } // namespace cortext

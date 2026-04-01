@@ -60,7 +60,6 @@ void
 DetectBoundary::Execute (OperationContext &context,
                          Transaction & /*tx*/) const
 {
-  static const bool disable_time = EnvFlag ("CORTEXT_BOUNDARY_DISABLE_TIME");
   static const bool disable_pressure
       = EnvFlag ("CORTEXT_BOUNDARY_DISABLE_PRESSURE");
   static const bool disable_surprisal
@@ -72,6 +71,15 @@ DetectBoundary::Execute (OperationContext &context,
   auto &p_ctx = context.GetProcessorContext ();
   const auto &config = context.GetConfig ();
   const std::string &source_id = signal.source_id;
+
+  if (signal.force_boundary)
+    {
+      context.SetFlushRequired (true);
+      context.SetAtBoundary (true);
+      context.SetBoundaryScore (1.0);
+      context.SetBoundaryType (std::string ("explicit_turn"));
+      return;
+    }
 
   // Get accumulator state
   auto it = p_ctx.accumulator_states.find (source_id);

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "stream_usage.hpp"
+
 #include <openai/openai.hpp>
 
 #include <atomic>
@@ -19,6 +21,7 @@ struct StreamingRequest {
 struct StreamingResult {
   std::string full_content;
   bool was_cancelled = false;
+  std::optional<StreamingUsage> usage;
   std::optional<std::string> error;
 };
 
@@ -45,6 +48,7 @@ private:
     std::string raw_body;
     std::string full_content;
     bool done = false;
+    std::optional<StreamingUsage> usage;
     std::optional<std::string> error;
   };
 

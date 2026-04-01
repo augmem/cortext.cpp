@@ -1,3 +1,4 @@
+#include "cortext/internal/cancellation.hpp"
 #include "cortext/operations/consolidation.hpp"
 #include "cortext/store/store.hpp"
 #include "cortext/core/knobs.hpp"
@@ -143,6 +144,9 @@ ScoreConsolidation::Execute (OperationContext &context, Transaction &tx) const
   const double tag_weight = core::Lerp (0.10, 0.25, S_eff);
   const std::string blob_filter
       = deep_mode ? " AND m.blob_id IS NOT NULL " : " ";
+  const std::string candidate_scope
+      = "WHERE m.kind = 'LONG_TERM' "
+        "  AND m.cluster_id IS NULL ";
   const std::string query = std::string (
       "SELECT m.embedding_id, "
       "       ((?1 * COALESCE(m.strength, 1.0)) "
@@ -155,7 +159,8 @@ ScoreConsolidation::Execute (OperationContext &context, Transaction &tx) const
       "       e.embedding "
       "FROM memories m "
       "JOIN embeddings e ON m.embedding_id = e.embedding_id "
-      "WHERE m.kind IN ('LONG_TERM', 'ASSOCIATION') ")
+      )
+      + candidate_scope
       + blob_filter
       + "  AND ((?1 * COALESCE(m.strength, 1.0)) "
         "       - (?2 * COALESCE(m.redundancy, 0.0)) "
@@ -168,6 +173,7 @@ ScoreConsolidation::Execute (OperationContext &context, Transaction &tx) const
       query,
       { T, F_eff, S_eff, T, tag_weight, static_cast<long long> (now_ts),
         floor_cutoff });
+  internal::ThrowIfStopRequested ();
   if (rows.empty () && force_consolidation)
     {
       const int fallback_limit = std::max (core::WRet (T), 1);
@@ -183,13 +189,15 @@ ScoreConsolidation::Execute (OperationContext &context, Transaction &tx) const
           "       e.embedding "
           "FROM memories m "
           "JOIN embeddings e ON m.embedding_id = e.embedding_id "
-          "WHERE m.kind IN ('LONG_TERM', 'ASSOCIATION') ")
+          )
+          + candidate_scope
           + blob_filter
           + "ORDER BY computed_score ASC LIMIT ?7;";
       rows = tx.Execute (
           fallback_query,
           { T, F_eff, S_eff, T, tag_weight, static_cast<long long> (now_ts),
             fallback_limit });
+      internal::ThrowIfStopRequested ();
     }
 
   std::vector<ConsolidationCandidate> candidates;
@@ -200,6 +208,7 @@ ScoreConsolidation::Execute (OperationContext &context, Transaction &tx) const
 
       for (const auto &row : rows)
         {
+          internal::ThrowIfStopRequested ();
           auto it_id = row.find ("embedding_id");
           auto it_score = row.find ("computed_score");
           auto it_emb = row.find ("embedding");

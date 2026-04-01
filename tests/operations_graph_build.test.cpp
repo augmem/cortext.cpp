@@ -6,7 +6,9 @@
 #include <cmath>
 #include <vector>
 
+#include <cortext/consolidation_mode.hpp>
 #include <cortext/core/knobs.hpp>
+#include <cortext/operations/consolidation.hpp>
 #include <cortext/operations/graph_build.hpp>
 
 #include <cortext/processor.hpp>
@@ -14,6 +16,7 @@
 #include <cortext/store/sqlite_store.hpp>
 
 using namespace cortext;
+using cortext::operations::EvaluateConsolidation;
 using cortext::operations::BuildGraphFromConsolidation;
 
 
@@ -27,7 +30,7 @@ MakeSignal (uint64_t ts)
   Signal s;
   s.embedding = Eigen::VectorXf::Ones (kEmbeddingDim);
   s.timestamp = ts;
-  s.source_id = "test";
+  s.source_id = ConsolidationSourceId (ConsolidationMode::Both);
   return s;
 }
 
@@ -82,6 +85,7 @@ TEST_CASE ("V2: GraphBuild creates co-occurrence edges for similar memories in s
   cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.0; // Low focus = threshold 0.85
   auto ops = std::make_unique<OperationSet> (
+      std::make_unique<EvaluateConsolidation> (),
       std::make_unique<BuildGraphFromConsolidation> ());
   SignalProcessor processor (cfg, store, std::move (ops));
 
@@ -140,6 +144,7 @@ TEST_CASE ("V2: GraphBuild creates causal edges for temporal drift within cluste
   cortext::testing::RequireEncoder (cfg);
   cfg.stability = 0.0; // Low stability = threshold 0.15
   auto ops = std::make_unique<OperationSet> (
+      std::make_unique<EvaluateConsolidation> (),
       std::make_unique<BuildGraphFromConsolidation> ());
   SignalProcessor processor (cfg, store, std::move (ops));
 
@@ -194,6 +199,7 @@ TEST_CASE ("V2: GraphBuild creates contradiction edges for opposing semantics",
 
   cortext::testing::RequireEncoder (cfg);
   auto ops = std::make_unique<OperationSet> (
+      std::make_unique<EvaluateConsolidation> (),
       std::make_unique<BuildGraphFromConsolidation> ());
   SignalProcessor processor (cfg, store, std::move (ops));
 
@@ -250,6 +256,7 @@ TEST_CASE ("V2: GraphBuild does not create edges across different clusters",
   cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.0;
   auto ops = std::make_unique<OperationSet> (
+      std::make_unique<EvaluateConsolidation> (),
       std::make_unique<BuildGraphFromConsolidation> ());
   SignalProcessor processor (cfg, store, std::move (ops));
 
@@ -311,6 +318,7 @@ TEST_CASE ("V2: GraphBuild decays reinforcement edges",
   cortext::testing::RequireEncoder (cfg);
   cfg.stability = 0.0; // decay = 0.9
   auto ops = std::make_unique<OperationSet> (
+      std::make_unique<EvaluateConsolidation> (),
       std::make_unique<BuildGraphFromConsolidation> ());
   SignalProcessor processor (cfg, store, std::move (ops));
 
@@ -349,6 +357,7 @@ TEST_CASE ("V2: GraphBuild removes weak reinforcement edges",
   cortext::testing::RequireEncoder (cfg);
   cfg.stability = 0.0; // decay = 0.9
   auto ops = std::make_unique<OperationSet> (
+      std::make_unique<EvaluateConsolidation> (),
       std::make_unique<BuildGraphFromConsolidation> ());
   SignalProcessor processor (cfg, store, std::move (ops));
 

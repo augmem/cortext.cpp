@@ -9,6 +9,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <cortext/core/algorithms.hpp>
 #include <cortext/core/knobs.hpp>
+#include <cortext/consolidation_mode.hpp>
 #include <cortext/operations/consolidation.hpp>
 #include <cortext/operations/consolidation_cluster.hpp>
 #include <cortext/operations/consolidation_summarize.hpp>
@@ -25,6 +26,7 @@
 #include <cortext/processor/operation_set.hpp>
 #include <cortext/store/sqlite_store.hpp>
 #include <cortext/store/utils.hpp>
+#include <cortext/summarizer/summarizer.hpp>
 #include <string>
 #include <vector>
 
@@ -160,6 +162,45 @@ GetDouble (const std::map<std::string, std::any> &row, const std::string &key,
     return static_cast<double> (std::any_cast<int> (it->second));
   return fallback;
 }
+
+class CapturingSummarizer final : public Summarizer
+{
+public:
+  std::string
+  SummarizeTexts (const std::vector<std::string> &texts) override
+  {
+    captured_texts = texts;
+    return "captured summary";
+  }
+
+  std::string
+  SummarizeTextsLimited (const std::vector<std::string> &texts,
+                         int /*max_words*/) override
+  {
+    captured_texts = texts;
+    return "captured summary";
+  }
+
+  std::string
+  SummarizeAudio (const float * /*pcm*/, size_t /*num_samples*/) override
+  {
+    return {};
+  }
+
+  std::string
+  SummarizeAudioSegments (const std::vector<AudioSegment> & /*segments*/) override
+  {
+    return {};
+  }
+
+  bool
+  IsAvailable () const override
+  {
+    return true;
+  }
+
+  std::vector<std::string> captured_texts;
+};
 
 // Helper op to setup consolidation trigger conditions
 struct SetupConsolidationTriggerOp : IOperation
@@ -320,7 +361,7 @@ struct SeedGraphDataOp : IOperation
 // 5.2.1 Full Consolidation Pipeline Test
 // =============================================================================
 
-TEST_CASE ("Consolidation pipeline triggers on rate condition",
+TEST_CASE ("Consolidation pipeline triggers on explicit consolidation signal",
            "[integration][consolidation]")
 {
   auto unique_store = SQLiteStore::Create (":memory:");
@@ -344,7 +385,9 @@ TEST_CASE ("Consolidation pipeline triggers on rate condition",
                                               std::move (assert_op));
 
   SignalProcessor processor (cfg, store, std::move (ops));
-  processor.Process (MakeSignal (now_ts));
+  Signal s = MakeSignal (now_ts);
+  s.source_id = ConsolidationSourceId (ConsolidationMode::Both);
+  processor.Process (s);
   processor.Flush ();
 }
 
@@ -455,6 +498,61 @@ TEST_CASE ("Summarization creates summary records",
   // Verify extraction requests were queued (cluster size 4 >= min for extraction)
   auto requests = ctx.GetExtractionRequests ();
   INFO ("Extraction request count: " << requests.size ());
+}
+
+TEST_CASE ("Summarization labels chat excerpts before prompting",
+           "[integration][consolidation][summarize]")
+{
+  auto unique_store = SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<Store> (std::move (unique_store));
+
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  cfg.focus = 0.0;
+  cfg.sensitivity = 0.5;
+  cfg.stability = 0.5;
+
+  CapturingSummarizer summarizer;
+
+  auto init_ops = std::make_unique<OperationSet> ();
+  SignalProcessor init_processor (cfg, store, std::move (init_ops));
+  init_processor.Process (MakeSignal (1));
+  init_processor.Flush ();
+
+  ProcessorContext pctx;
+  pctx.summarizer = &summarizer;
+  Signal s = MakeSignal (3000);
+  s.source_id = ConsolidationSourceId (ConsolidationMode::Both);
+  OperationContext ctx (s, pctx, cfg, store.get ());
+  ctx.SetConsolidationShouldStart (true);
+
+  Eigen::VectorXf emb = Eigen::VectorXf::Constant (256, 0.5f);
+  emb[0] = 1.0f;
+  SeedEmbedding (store.get (), 1, emb);
+  SeedEmbedding (store.get (), 2, emb);
+  SeedMemory (store.get (), 1, "My name is Gabe and I am testing memory.", 1000);
+  SeedMemory (store.get (), 2, "I will remember that you are Gabe.", 2000);
+  store->Execute ("UPDATE memories SET source_id = 'chat/user' WHERE memory_id = 1",
+                  {});
+  store->Execute (
+      "UPDATE memories SET source_id = 'chat/assistant' WHERE memory_id = 2",
+      {});
+
+  ClusterInfo cluster;
+  cluster.cluster_id = 7;
+  cluster.embedding_ids = { 1, 2 };
+  cluster.centroid = std::vector<float> (256, 0.5f);
+  cluster.avg_score = 0.3;
+  ctx.SetConsolidationClusters ({ cluster });
+
+  ConsolidationSummarize summarize_op;
+  auto tx = store->Begin ();
+  summarize_op.Execute (ctx, *tx);
+  tx->Commit ();
+
+  REQUIRE (summarizer.captured_texts.size () == 2);
+  REQUIRE (summarizer.captured_texts[0].rfind ("User:", 0) == 0);
+  REQUIRE (summarizer.captured_texts[1].rfind ("Assistant:", 0) == 0);
 }
 
 // =============================================================================

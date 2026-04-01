@@ -149,8 +149,8 @@ UpdateSensitivity::Execute (OperationContext &context, Transaction &tx) const
             {
               v = std::max (0.0, v);
             }
-          // softmax with β(S) = 4 + 8S
-          const double beta = 4.0 + 8.0 * S_eff;
+          // softmax with β(S) = 8 + 24S (higher sensitivity sharpens affect)
+          const double beta = 8.0 + 24.0 * S_eff;
           SoftmaxNormalize (raw_cos, beta);
 
           // Expose emotion probabilities for Algorithm 4b (UpdateMood)
@@ -166,7 +166,11 @@ UpdateSensitivity::Execute (OperationContext &context, Transaction &tx) const
               = 1.0
                 - Entropy (raw_cos)
                       / std::log (static_cast<double> (kNumEmotions));
-          emotion_intensity = std::sqrt (std::max (0.0, peak * conf));
+          const double intensity_base = std::max (0.0, peak * conf);
+          const double gamma = core::Lerp (0.5, 0.25, S_eff);
+          const double gain = core::Lerp (1.0, 2.2, S_eff);
+          emotion_intensity = core::Clamp (
+              std::pow (intensity_base, gamma) * gain, 0.0, 1.0);
           // valence, arousal
           double v_sum = 0.0;
           double a_sum = 0.0;
@@ -201,6 +205,15 @@ UpdateSensitivity::Execute (OperationContext &context, Transaction &tx) const
   context.SetEmotionIntensity (emotion_intensity);
   context.SetValence (valence);
   context.SetArousal (arousal);
+
+  // Track recent emotion intensity for percentile-based flashbulb gating.
+  const int emo_window = core::EmotionHistoryWindow (S_raw, cfg.stability);
+  auto &emo_hist = p_ctx.recent_emotion_intensities;
+  emo_hist.push_back (emotion_intensity);
+  while (static_cast<int> (emo_hist.size ()) > emo_window)
+    {
+      emo_hist.pop_front ();
+    }
 
   // --- ΔThreshold components ---
   // ΔT_emo = − κ_emo × emotion_intensity × (0.5 + 0.5 × arousal)

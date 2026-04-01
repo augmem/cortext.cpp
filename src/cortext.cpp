@@ -1,5 +1,7 @@
 #include "cortext/cortext.hpp"
-#include "cortext/encoder/imagebind.hpp"
+#include "cortext/internal/cancellation.hpp"
+#include "encoder/text_encoder_factory.hpp"
+#include "streaming_text_probe.hpp"
 
 #include "cortext/processor.hpp"
 #include "cortext/processor/operation_set.hpp"
@@ -23,9 +25,11 @@
 
 #include <Eigen/Dense>
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cstring>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <string>
 #include <utility>
@@ -82,8 +86,7 @@
 #include "cortext/operations/emotion_cascade.hpp"
 #include "cortext/telemetry/telemetry.hpp"
 
-#include "cortext/extractor/gemma_extractor.hpp"
-#include "cortext/summarizer/gemma_summarizer.hpp"
+#include "deep_llm/deep_llm_factory.hpp"
 
 namespace cortext
 {
@@ -115,6 +118,12 @@ ToMillis (std::chrono::steady_clock::duration duration)
   return std::chrono::duration_cast<std::chrono::duration<double, std::milli>> (
              duration)
       .count ();
+}
+
+inline bool
+ShouldForceChatTurnStorage (const std::string &source_id)
+{
+  return source_id == "chat/user" || source_id == "chat/assistant";
 }
 
 
@@ -408,7 +417,10 @@ HydrateWorkingMemoryFromDB (Store *store,
           m.source_id = get_s ("source_id");
           m.modality = get_s ("modality");
           m.mimetype = get_s ("signal_mime");
-          m.timestamp = static_cast<std::uint64_t> (get_ll ("last_access"));
+          // Preserve conversational/order semantics using the slot start time.
+          // last_access can move when rehearsal/access updates touch a slot,
+          // which should not reorder working-memory prompt reconstruction.
+          m.timestamp = static_cast<std::uint64_t> (get_ll ("start_ts"));
 
           // Map WM metrics to Memory struct
           m.composite_score = get_dbl ("s_avg", 0.0);
@@ -437,6 +449,150 @@ HydrateWorkingMemoryFromDB (Store *store,
 
 } // namespace
 
+std::unique_ptr<IOperation>
+BuildPipelineRoot (bool probe_mode)
+{
+  using cortext::OperationSet;
+  using cortext::operations::ApplyEmotionalConsolidation;
+  using cortext::operations::ApplyFocusFeedback;
+  using cortext::operations::ApplyInfluenceFeedback;
+  using cortext::operations::ApplyPredictivePreActivation;
+  using cortext::operations::ApplyReconsolidation;
+  using cortext::operations::ApplyRetrievalCompetition;
+  using cortext::operations::ApplySensitivityFeedback;
+  using cortext::operations::ApplySerialPositionEffects;
+  using cortext::operations::ApplySerialPositionMultiplier;
+  using cortext::operations::ApplyStabilityFeedback;
+  using cortext::operations::ApplySynapticTagging;
+  using cortext::operations::BuildGraphFromConsolidation;
+  using cortext::operations::CheckSpikeBypass;
+  using cortext::operations::CheckStreamingPacing;
+  using cortext::operations::ComputeCoherence;
+  using cortext::operations::ComputeCompositeScore;
+  using cortext::operations::ComputeEffectiveFocus;
+  using cortext::operations::ComputeFocusSpread;
+  using cortext::operations::ComputeMetrics;
+  using cortext::operations::ComputeMniGateDecision;
+  using cortext::operations::ComputeWriteGate;
+  using cortext::operations::ConsolidationCluster;
+  using cortext::operations::ConsolidationGate;
+  using cortext::operations::ConsolidationSummarize;
+  using cortext::operations::DetectBoundary;
+  using cortext::operations::DetectMemoryUsage;
+  using cortext::operations::EnqueueExtractionJobs;
+  using cortext::operations::EvaluateConsolidation;
+  using cortext::operations::FitMetricWeightsRLS;
+  using cortext::operations::GraphAugmentedRetrieveCandidates;
+  using cortext::operations::InitializeEmbeddedCentroids;
+  using cortext::operations::InitializeFocusPriors;
+  using cortext::operations::InitializeSensitivityPriors;
+  using cortext::operations::InitializeStabilityPriors;
+  using cortext::operations::MemoryStorage;
+  using cortext::operations::MetacognitiveMonitoring;
+  using cortext::operations::PersistSignalMetrics;
+  using cortext::operations::ProcessExtractionResults;
+  using cortext::operations::PropagateEmotionalCascade;
+  using cortext::operations::ResetAccumulatorAfterFlush;
+  using cortext::operations::ResetAccumulatorOnInterrupt;
+  using cortext::operations::SeedLabelBank;
+  using cortext::operations::UpdateAccumulator;
+  using cortext::operations::UpdateAccumulatorScores;
+  using cortext::operations::UpdateDriftAccumulation;
+  using cortext::operations::UpdateEmbeddingPredictionError;
+  using cortext::operations::UpdateFocus;
+  using cortext::operations::UpdateMemoryStrength;
+  using cortext::operations::UpdateMood;
+  using cortext::operations::UpdateNeuromodulators;
+  using cortext::operations::UpdatePrecisionDelta;
+  using cortext::operations::UpdateRateState;
+  using cortext::operations::UpdateRecentContext;
+  using cortext::operations::UpdateSensitivity;
+  using cortext::operations::UpdateStability;
+  using cortext::operations::UpdateThreshold;
+  using cortext::operations::UpdateUncertainty;
+  using cortext::operations::WorkingMemory;
+
+  auto pipeline = std::make_unique<OperationSet> (
+      std::make_unique<InitializeEmbeddedCentroids> (),
+      std::make_unique<SeedLabelBank> (),
+
+      std::make_unique<InitializeFocusPriors> (),
+      std::make_unique<InitializeSensitivityPriors> (),
+      std::make_unique<InitializeStabilityPriors> (),
+
+      std::make_unique<ComputeCoherence> (),
+      std::make_unique<UpdateAccumulator> (),
+      std::make_unique<UpdateDriftAccumulation> (),
+      std::make_unique<ComputeFocusSpread> (),
+      std::make_unique<UpdateEmbeddingPredictionError> (),
+      std::make_unique<UpdateUncertainty> (),
+
+      std::make_unique<UpdateFocus> (),
+      std::make_unique<UpdateSensitivity> (),
+      std::make_unique<UpdateMood> (),
+
+      std::make_unique<ComputeEffectiveFocus> (),
+      std::make_unique<ComputeMetrics> (),
+      std::make_unique<UpdateNeuromodulators> (),
+      std::make_unique<FitMetricWeightsRLS> (),
+      std::make_unique<ComputeCompositeScore> (),
+      std::make_unique<UpdateAccumulatorScores> (),
+
+      std::make_unique<UpdatePrecisionDelta> (),
+      std::make_unique<UpdateThreshold> (),
+      std::make_unique<UpdateRecentContext> (),
+
+      std::make_unique<DetectBoundary> (),
+      std::make_unique<CheckSpikeBypass> (),
+      std::make_unique<ComputeWriteGate> ());
+
+  if (!probe_mode)
+    {
+      pipeline->Add (std::make_unique<MemoryStorage> ());
+      pipeline->Add (std::make_unique<ApplySynapticTagging> ());
+      pipeline->Add (std::make_unique<PersistSignalMetrics> ());
+    }
+
+  pipeline->Add (std::make_unique<CheckStreamingPacing> ());
+  pipeline->Add (std::make_unique<GraphAugmentedRetrieveCandidates> ());
+  pipeline->Add (std::make_unique<UpdateRateState> ());
+  pipeline->Add (std::make_unique<ComputeMniGateDecision> ());
+  pipeline->Add (std::make_unique<DetectMemoryUsage> ());
+
+  if (probe_mode)
+    {
+      return pipeline;
+    }
+
+  pipeline->Add (std::make_unique<ApplyRetrievalCompetition> ());
+  pipeline->Add (std::make_unique<ApplyPredictivePreActivation> ());
+  pipeline->Add (std::make_unique<ApplyReconsolidation> ());
+  pipeline->Add (std::make_unique<ApplyFocusFeedback> ());
+  pipeline->Add (std::make_unique<ApplySensitivityFeedback> ());
+  pipeline->Add (std::make_unique<ApplyStabilityFeedback> ());
+  pipeline->Add (std::make_unique<UpdateStability> ());
+  pipeline->Add (std::make_unique<ApplyInfluenceFeedback> ());
+  pipeline->Add (std::make_unique<ApplySerialPositionEffects> ());
+  pipeline->Add (std::make_unique<ApplySerialPositionMultiplier> ());
+  pipeline->Add (std::make_unique<UpdateMemoryStrength> ());
+  pipeline->Add (std::make_unique<ApplyEmotionalConsolidation> ());
+  pipeline->Add (std::make_unique<WorkingMemory> ());
+  pipeline->Add (std::make_unique<ResetAccumulatorAfterFlush> ());
+  pipeline->Add (std::make_unique<ResetAccumulatorOnInterrupt> ());
+  pipeline->Add (std::make_unique<MetacognitiveMonitoring> ());
+  pipeline->Add (std::make_unique<EvaluateConsolidation> ());
+  pipeline->Add (std::make_unique<ConsolidationGate> ());
+  pipeline->Add (std::make_unique<ConsolidationCluster> ());
+  pipeline->Add (
+      std::make_unique<cortext::operations::ConsolidationShallow> ());
+  pipeline->Add (std::make_unique<ConsolidationSummarize> ());
+  pipeline->Add (std::make_unique<EnqueueExtractionJobs> ());
+  pipeline->Add (std::make_unique<ProcessExtractionResults> ());
+  pipeline->Add (std::make_unique<BuildGraphFromConsolidation> ());
+  pipeline->Add (std::make_unique<PropagateEmotionalCascade> ());
+  return pipeline;
+}
+
 struct Cortext::Impl
 {
   Config cfg;
@@ -448,11 +604,9 @@ struct Cortext::Impl
   std::unique_ptr<cortext::IOperation> pipeline_root;
   std::unique_ptr<cortext::SignalProcessor> processor;
 
-#if !defined(CORTEXT_DISABLE_LITERT)
-  // LiteRT-LM components (Gemma extractor and summarizer)
-  std::unique_ptr<GemmaExtractor> extractor_instance;
-  std::unique_ptr<GemmaSummarizer> summarizer_instance;
-#endif
+  std::unique_ptr<Extractor> extractor_instance;
+  std::unique_ptr<Summarizer> summarizer_instance;
+  std::string deep_llm_backend_name;
 
   Impl (const Config &c, std::string db, std::string models)
       : cfg (c), db_path (std::move (db)), models_dir (std::move (models))
@@ -461,200 +615,22 @@ struct Cortext::Impl
     auto uniq = cortext::SQLiteStore::Create (db_path.c_str ());
     store = std::shared_ptr<cortext::Store> (std::move (uniq));
 
-    // Encoder (ImageBind-oriented)
-    std::filesystem::path imagebind_dir = models_dir;
-    const auto has_imagebind = [] (const std::filesystem::path &dir) {
-      return std::filesystem::exists (dir / "text_encoder.onnx")
-             || std::filesystem::exists (dir / "text_encoder_int8.onnx");
-    };
-    if (!has_imagebind (imagebind_dir)
-        && has_imagebind (imagebind_dir / "imagebind"))
-      {
-        imagebind_dir /= "imagebind";
-      }
-    encoder = std::make_unique<ImageBindEncoder> (imagebind_dir.string ());
+    auto text_encoder = internal::CreatePreferredTextEncoder (models_dir);
+    encoder = std::move (text_encoder.encoder);
 
-#if !defined(CORTEXT_DISABLE_LITERT)
-    // Create Gemma extractor and summarizer (LiteRT-LM)
-    std::filesystem::path gemma_root = models_dir;
-    if (!std::filesystem::exists (gemma_root / "gemma3n-e2b-litert")
-        && gemma_root.filename () == "imagebind")
-      {
-        gemma_root = gemma_root.parent_path ();
-      }
-    gemma_root /= "gemma3n-e2b-litert";
-    std::string gemma_path = gemma_root.string ();
-    if (std::filesystem::is_directory (gemma_root))
-      {
-        const std::vector<std::string> candidates = {
-          "gemma-3n-E2B-it-int4.litertlm",
-          "gemma-3n-E2B-it-int4-Web.litertlm",
-          "gemma-3n-E2B-it-int4.mediatek.mt6993.litertlm"
-        };
-        for (const auto &candidate : candidates)
-          {
-            const std::filesystem::path p = gemma_root / candidate;
-            if (std::filesystem::exists (p))
-              {
-                gemma_path = p.string ();
-                break;
-              }
-          }
-      }
-    extractor_instance = std::make_unique<GemmaExtractor> (gemma_path);
-    summarizer_instance = std::make_unique<GemmaSummarizer> (gemma_path);
-    if (!extractor_instance->IsAvailable () || !summarizer_instance->IsAvailable ())
-      {
-        throw std::runtime_error (
-            "Gemma LiteRT-LM model not available at " + gemma_path);
-      }
-#endif
+    auto deep_llm = internal::CreateDeepLlmSelection (models_dir);
+    deep_llm_backend_name = deep_llm.backend_name;
+    extractor_instance = std::move (deep_llm.extractor);
+    summarizer_instance = std::move (deep_llm.summarizer);
 
-    // Default pipeline: full per-signal processing chain.
-    using cortext::OperationSet;
-    using cortext::operations::ConsolidationCluster;
-    using cortext::operations::ConsolidationGate;
-    using cortext::operations::ConsolidationSummarize;
-    using cortext::operations::EnqueueExtractionJobs;
-    using cortext::operations::EvaluateConsolidation;
-    using cortext::operations::ProcessExtractionResults;
-    using cortext::operations::FitMetricWeightsRLS;
-    using cortext::operations::GraphAugmentedRetrieveCandidates;
-    using cortext::operations::InitializeEmbeddedCentroids;
+    pipeline_root = BuildPipelineRoot (false);
+    processor = std::make_unique<cortext::SignalProcessor> (
+        MakeProcessorConfig (), store, std::move (pipeline_root));
+  }
 
-    using cortext::operations::ComputeCompositeScore;
-    using cortext::operations::ComputeCoherence;
-    using cortext::operations::ComputeEffectiveFocus;
-    using cortext::operations::ComputeFocusSpread;
-    using cortext::operations::ComputeMniGateDecision;
-    using cortext::operations::InitializeFocusPriors;
-    using cortext::operations::InitializeSensitivityPriors;
-    using cortext::operations::InitializeStabilityPriors;
-    using cortext::operations::ApplyEmotionalConsolidation;
-    using cortext::operations::ApplyFocusFeedback;
-    using cortext::operations::ApplyInfluenceFeedback;
-    using cortext::operations::ApplyPredictivePreActivation;
-    using cortext::operations::ApplyReconsolidation;
-    using cortext::operations::ApplyRetrievalCompetition;
-    using cortext::operations::ApplySensitivityFeedback;
-    using cortext::operations::ApplySerialPositionEffects;
-    using cortext::operations::ApplySerialPositionMultiplier;
-    using cortext::operations::ApplyStabilityFeedback;
-    using cortext::operations::BuildGraphFromConsolidation;
-    using cortext::operations::ComputeMetrics;
-    using cortext::operations::SeedLabelBank;
-
-    using cortext::operations::MetacognitiveMonitoring;
-    using cortext::operations::UpdateFocus;
-    using cortext::operations::UpdateEmbeddingPredictionError;
-    using cortext::operations::UpdateMemoryStrength;
-    using cortext::operations::UpdateMood;
-    using cortext::operations::UpdateNeuromodulators;
-    using cortext::operations::UpdatePrecisionDelta;
-    using cortext::operations::UpdateRecentContext;
-    using cortext::operations::UpdateRateState;
-    using cortext::operations::UpdateSensitivity;
-    using cortext::operations::UpdateStability;
-    using cortext::operations::UpdateThreshold;
-    using cortext::operations::UpdateUncertainty;
-    using cortext::operations::WorkingMemory;
-    using cortext::operations::PersistSignalMetrics;
-    using cortext::operations::MemoryStorage;
-    using cortext::operations::DetectMemoryUsage;
-    using cortext::operations::UpdateDriftAccumulation;
-    using cortext::operations::CheckStreamingPacing;
-    // Section 4.4: Memory Accumulation
-    using cortext::operations::UpdateAccumulator;
-    using cortext::operations::UpdateAccumulatorScores;
-    using cortext::operations::ComputeCoherence;
-    using cortext::operations::DetectBoundary;
-    using cortext::operations::CheckSpikeBypass;
-    using cortext::operations::ComputeWriteGate;
-    using cortext::operations::ResetAccumulatorAfterFlush;
-    using cortext::operations::ResetAccumulatorOnInterrupt;
-    using cortext::operations::ApplySynapticTagging;
-    // Phase 4: Knowledge Graph Enhancement
-    using cortext::operations::PropagateEmotionalCascade;
-
-    pipeline_root = std::make_unique<OperationSet> (
-
-        std::make_unique<InitializeEmbeddedCentroids> (),
-        std::make_unique<SeedLabelBank> (),
-
-        std::make_unique<InitializeFocusPriors> (),
-        std::make_unique<InitializeSensitivityPriors> (),
-        std::make_unique<InitializeStabilityPriors> (),
-
-        std::make_unique<ComputeCoherence> (),
-        // Update accumulator embedding/state before metric computation.
-        std::make_unique<UpdateAccumulator> (),
-        std::make_unique<UpdateDriftAccumulation> (),
-        std::make_unique<ComputeFocusSpread> (),
-        std::make_unique<UpdateEmbeddingPredictionError> (),
-        std::make_unique<UpdateUncertainty> (),
-
-        std::make_unique<UpdateFocus> (),
-        std::make_unique<UpdateSensitivity> (),
-        std::make_unique<UpdateMood> (),
-
-        std::make_unique<ComputeEffectiveFocus> (),
-        std::make_unique<ComputeMetrics> (),
-        std::make_unique<UpdateNeuromodulators> (),
-        std::make_unique<FitMetricWeightsRLS> (),
-        std::make_unique<ComputeCompositeScore> (),
-        std::make_unique<UpdateAccumulatorScores> (),
-
-        std::make_unique<UpdatePrecisionDelta> (),
-        std::make_unique<UpdateThreshold> (),
-        // Append accumulator centroid to recent context after scoring.
-        std::make_unique<UpdateRecentContext> (),
-
-        // Section 4.4: Memory Accumulation (before write gate)
-        std::make_unique<DetectBoundary> (),
-        std::make_unique<CheckSpikeBypass> (),
-        std::make_unique<ComputeWriteGate> (),
-        std::make_unique<MemoryStorage> (),
-        std::make_unique<ApplySynapticTagging> (),
-        std::make_unique<PersistSignalMetrics> (),
-        std::make_unique<CheckStreamingPacing> (),
-        std::make_unique<GraphAugmentedRetrieveCandidates> (),
-        std::make_unique<UpdateRateState> (),
-
-        std::make_unique<ComputeMniGateDecision> (),
-
-        // Derive retrieved/used events after the interrupt gate decision.
-        std::make_unique<DetectMemoryUsage> (),
-
-        std::make_unique<ApplyRetrievalCompetition> (),
-        std::make_unique<ApplyPredictivePreActivation> (),
-        std::make_unique<ApplyReconsolidation> (),
-
-        std::make_unique<ApplyFocusFeedback> (),
-        std::make_unique<ApplySensitivityFeedback> (),
-        std::make_unique<ApplyStabilityFeedback> (),
-        std::make_unique<UpdateStability> (),
-        std::make_unique<ApplyInfluenceFeedback> (),
-
-        std::make_unique<ApplySerialPositionEffects> (),
-        std::make_unique<ApplySerialPositionMultiplier> (),
-        std::make_unique<UpdateMemoryStrength> (),
-        std::make_unique<ApplyEmotionalConsolidation> (),
-        std::make_unique<WorkingMemory> (),
-        std::make_unique<ResetAccumulatorAfterFlush> (),
-        std::make_unique<ResetAccumulatorOnInterrupt> (),
-        std::make_unique<MetacognitiveMonitoring> (),
-
-        std::make_unique<EvaluateConsolidation> (),
-        std::make_unique<ConsolidationGate> (),
-        // Phase 3: Consolidation pipeline
-        std::make_unique<ConsolidationCluster> (),
-        std::make_unique<operations::ConsolidationShallow> (),
-        std::make_unique<ConsolidationSummarize> (),
-        std::make_unique<EnqueueExtractionJobs> (),
-        std::make_unique<ProcessExtractionResults> (),
-        std::make_unique<BuildGraphFromConsolidation> (),
-        std::make_unique<PropagateEmotionalCascade> ());
-
+  cortext::SignalProcessor::Config
+  MakeProcessorConfig () const
+  {
     cortext::SignalProcessor::Config pcfg;
     pcfg.focus = cfg.focus;
     pcfg.sensitivity = cfg.sensitivity;
@@ -667,13 +643,57 @@ struct Cortext::Impl
     pcfg.label_bank_path = cfg.label_bank_path;
     pcfg.encoder = encoder.get ();
 
-#if !defined(CORTEXT_DISABLE_LITERT)
     pcfg.extractor = extractor_instance.get ();
     pcfg.summarizer = summarizer_instance.get ();
-#endif
+    return pcfg;
+  }
 
-    processor = std::make_unique<cortext::SignalProcessor> (
-        pcfg, store, std::move (pipeline_root));
+  std::unique_ptr<cortext::SignalProcessor>
+  MakeProbeProcessor () const
+  {
+    return std::make_unique<cortext::SignalProcessor> (
+        MakeProcessorConfig (), store, BuildPipelineRoot (true));
+  }
+
+  Cortext::Context
+  ProcessTextEmbeddingAt (const Eigen::VectorXf &embedding,
+                          std::uint64_t timestamp,
+                          const std::string &source_id,
+                          const std::string &text)
+  {
+    telemetry::ScopedSpan span ("cortext.api.process_text_cached");
+    const auto total_start = std::chrono::steady_clock::now ();
+    const auto process_start = total_start;
+
+    cortext::Signal s;
+    s.embedding = embedding;
+    s.timestamp = timestamp != 0 ? timestamp : NowMillis ();
+    s.source_id = source_id;
+    s.force_boundary = ShouldForceChatTurnStorage (source_id);
+    s.force_write = ShouldForceChatTurnStorage (source_id);
+    s.payload = std::vector<unsigned char> (text.begin (), text.end ());
+    s.modality = "text";
+    s.mimetype = "text/plain";
+
+    auto out = processor->Process (s);
+    const auto process_end = std::chrono::steady_clock::now ();
+    span.SetAttribute (
+        "cortext.candidate_memory_count",
+        static_cast<std::int64_t> (out.candidate_memory_ids.size ()));
+    span.SetAttribute (
+        "cortext.used_memory_count",
+        static_cast<std::int64_t> (out.used_memory_ids.size ()));
+    span.SetStatusOk ();
+    telemetry::ScopedSpan hydrate_span ("cortext.hydrate");
+    const auto hydrate_start = std::chrono::steady_clock::now ();
+    Cortext::Context result = HydrateContext (out);
+    const auto hydrate_end = std::chrono::steady_clock::now ();
+    hydrate_span.SetStatusOk ();
+    result.encode_ms = 0.0;
+    result.process_ms = ToMillis (process_end - process_start);
+    result.hydrate_ms = ToMillis (hydrate_end - hydrate_start);
+    result.total_ms = ToMillis (hydrate_end - total_start);
+    return result;
   }
 
   cortext::SignalProcessor::Output
@@ -688,7 +708,8 @@ struct Cortext::Impl
   }
 
   Cortext::Context
-  HydrateContext (const cortext::SignalProcessor::Output &out)
+  HydrateContext (const cortext::SignalProcessor::Output &out,
+                  bool hydrate_working_memory = true)
   {
     Cortext::Context result;
     result.should_interrupt = out.interrupt_allowed;
@@ -736,8 +757,10 @@ struct Cortext::Impl
         return result;
       }
 
-    // Hydrate working memory from database (active WM slots)
-    HydrateWorkingMemoryFromDB (store.get (), result.working_memory);
+    if (hydrate_working_memory)
+      {
+        HydrateWorkingMemoryFromDB (store.get (), result.working_memory);
+      }
 
     // Hydrate retrieved memory (long-term retrieval results)
     auto lookup_memory_id = [&](long long embedding_id) -> long long {
@@ -819,6 +842,8 @@ Cortext::ProcessText (const std::string &text, const std::string &source_id)
   s.embedding = ToEigen (v);
   s.timestamp = NowMillis ();
   s.source_id = source_id;
+  s.force_boundary = ShouldForceChatTurnStorage (source_id);
+  s.force_write = ShouldForceChatTurnStorage (source_id);
   s.payload = std::vector<unsigned char> (text.begin (), text.end ());
   s.modality = "text";
   s.mimetype = "text/plain";
@@ -864,6 +889,8 @@ Cortext::ProcessTextAt (const std::string &text, const std::string &source_id,
   s.embedding = ToEigen (v);
   s.timestamp = timestamp;
   s.source_id = source_id;
+  s.force_boundary = ShouldForceChatTurnStorage (source_id);
+  s.force_write = ShouldForceChatTurnStorage (source_id);
   s.payload = std::vector<unsigned char> (text.begin (), text.end ());
   s.modality = "text";
   s.mimetype = "text/plain";
@@ -993,10 +1020,28 @@ Cortext::ProcessImage (const std::uint8_t *data, int width, int height,
 Cortext::Context
 Cortext::Consolidate (ConsolidationMode mode)
 {
+  return Consolidate (StopToken {}, mode);
+}
+
+Cortext::Context
+Cortext::Consolidate (StopToken stop_token, ConsolidationMode mode)
+{
   if (!impl_)
     {
       throw std::runtime_error ("Cortext not initialized");
     }
+  internal::ScopedStopToken scoped_stop (stop_token);
+  auto *sqlite_store = dynamic_cast<SQLiteStore *> (impl_->store.get ());
+  std::unique_ptr<StopCallback<std::function<void ()>>> stop_callback;
+  if (sqlite_store && stop_token.stop_possible ())
+    {
+      stop_callback
+          = std::make_unique<StopCallback<std::function<void ()>>> (
+              stop_token, [sqlite_store] {
+                internal::SQLiteStoreQueryInterrupter::Interrupt (*sqlite_store);
+              });
+    }
+  internal::ThrowIfStopRequested ();
   telemetry::ScopedSpan span ("cortext.api.consolidate");
   const auto total_start = std::chrono::steady_clock::now ();
   // Drive the pipeline to allow EvaluateConsolidation to emit events
@@ -1006,6 +1051,7 @@ Cortext::Consolidate (ConsolidationMode mode)
   impl_->encoder->EncodeText (std::string (), v);
   encode_span.SetStatusOk ();
   const auto encode_end = std::chrono::steady_clock::now ();
+  internal::ThrowIfStopRequested ();
   const std::string source_id = ConsolidationSourceId (mode);
   const auto process_start = std::chrono::steady_clock::now ();
   auto out = impl_->ProcessEmbedding (ToEigen (v), NowMillis (),
@@ -1061,6 +1107,249 @@ Cortext::MakeImageMimePng ()
 {
   return "image/png";
 }
+
+namespace internal
+{
+namespace
+{
+
+inline std::uint64_t
+ProbeNowMillis ()
+{
+  return static_cast<std::uint64_t> (
+      std::chrono::duration_cast<std::chrono::milliseconds> (
+          std::chrono::system_clock::now ().time_since_epoch ())
+          .count ());
+}
+
+inline Eigen::VectorXf
+NormalizeProbeEmbedding (const Eigen::VectorXf &embedding)
+{
+  if (embedding.size () == 0)
+    {
+      return embedding;
+    }
+  const float norm = embedding.norm ();
+  if (norm > 0.0f)
+    {
+      return embedding / norm;
+    }
+  return embedding;
+}
+
+inline float
+ProbeChunkWeight (const std::string &text)
+{
+  std::size_t count = 0;
+  for (const char ch : text)
+    {
+      if (!std::isspace (static_cast<unsigned char> (ch)))
+        {
+          ++count;
+        }
+    }
+  return static_cast<float> (std::max<std::size_t> (1, count));
+}
+
+} // namespace
+
+struct StreamingTextProbeSession::Impl
+{
+  Cortext *cortext = nullptr;
+  std::string source_id;
+  std::unique_ptr<SignalProcessor> processor;
+  Eigen::VectorXf aggregate_embedding_sum;
+  bool has_cached_embedding = false;
+
+  Impl (Cortext &ctx, std::string source)
+      : cortext (&ctx), source_id (std::move (source))
+  {
+    Reset ();
+  }
+
+  Cortext::Context
+  EncodeChunk (const std::string &text, std::uint64_t timestamp,
+               bool run_probe)
+  {
+    if (!cortext || !cortext->impl_)
+      {
+        throw std::runtime_error ("Cortext not initialized");
+      }
+    if (!processor)
+      {
+        Reset ();
+      }
+    if (text.empty ())
+      {
+        return {};
+      }
+
+    const auto total_start = std::chrono::steady_clock::now ();
+    std::vector<float> embedding;
+    cortext->impl_->encoder->EncodeText (text, embedding);
+    const auto encode_end = std::chrono::steady_clock::now ();
+    const Eigen::VectorXf eigen_embedding = ToEigen (embedding);
+    AccumulateFinalEmbedding (eigen_embedding, text);
+
+    if (!run_probe)
+      {
+        Cortext::Context result;
+        result.encode_ms = ToMillis (encode_end - total_start);
+        result.process_ms = 0.0;
+        result.hydrate_ms = 0.0;
+        result.total_ms = result.encode_ms;
+        return result;
+      }
+
+    cortext::Signal signal;
+    signal.embedding = eigen_embedding;
+    signal.timestamp = timestamp != 0 ? timestamp : ProbeNowMillis ();
+    signal.source_id = source_id;
+    signal.payload = std::vector<unsigned char> (text.begin (), text.end ());
+    signal.modality = "text";
+    signal.mimetype = "text/plain";
+
+    const auto process_start = std::chrono::steady_clock::now ();
+    auto out = processor->Process (signal);
+    const auto process_end = std::chrono::steady_clock::now ();
+
+    const auto hydrate_start = std::chrono::steady_clock::now ();
+    Cortext::Context result
+        = cortext->impl_->HydrateContext (out, false);
+    const auto hydrate_end = std::chrono::steady_clock::now ();
+
+    result.encode_ms = ToMillis (encode_end - total_start);
+    result.process_ms = ToMillis (process_end - process_start);
+    result.hydrate_ms = ToMillis (hydrate_end - hydrate_start);
+    result.total_ms = ToMillis (hydrate_end - total_start);
+    return result;
+  }
+
+  Cortext::Context
+  AppendTextChunkAt (const std::string &text, std::uint64_t timestamp)
+  {
+    return EncodeChunk (text, timestamp, true);
+  }
+
+  Cortext::Context
+  CacheTextChunkAt (const std::string &text, std::uint64_t timestamp)
+  {
+    return EncodeChunk (text, timestamp, false);
+  }
+
+  Cortext::Context
+  FinalizeTextAt (const std::string &text, std::uint64_t timestamp)
+  {
+    if (!cortext || !cortext->impl_)
+      {
+        throw std::runtime_error ("Cortext not initialized");
+      }
+    if (text.empty () || !has_cached_embedding
+        || aggregate_embedding_sum.size () == 0)
+      {
+        return timestamp != 0 ? cortext->ProcessTextAt (text, source_id, timestamp)
+                              : cortext->ProcessText (text, source_id);
+      }
+    const Eigen::VectorXf final_embedding
+        = NormalizeProbeEmbedding (aggregate_embedding_sum);
+    return cortext->impl_->ProcessTextEmbeddingAt (
+        final_embedding, timestamp, source_id, text);
+  }
+
+  void
+  AccumulateFinalEmbedding (const Eigen::VectorXf &embedding,
+                            const std::string &text)
+  {
+    if (embedding.size () == 0)
+      {
+        return;
+      }
+    const Eigen::VectorXf weighted
+        = NormalizeProbeEmbedding (embedding) * ProbeChunkWeight (text);
+    if (!has_cached_embedding
+        || aggregate_embedding_sum.size () != weighted.size ())
+      {
+        aggregate_embedding_sum = Eigen::VectorXf::Zero (weighted.size ());
+        has_cached_embedding = true;
+      }
+    aggregate_embedding_sum += weighted;
+  }
+
+  void
+  Reset ()
+  {
+    if (!cortext || !cortext->impl_)
+      {
+        throw std::runtime_error ("Cortext not initialized");
+      }
+    processor = cortext->impl_->MakeProbeProcessor ();
+    aggregate_embedding_sum = Eigen::VectorXf ();
+    has_cached_embedding = false;
+  }
+};
+
+StreamingTextProbeSession::StreamingTextProbeSession (Cortext &cortext,
+                                                      std::string source_id)
+    : impl_ (std::make_unique<Impl> (cortext, std::move (source_id)))
+{
+}
+
+StreamingTextProbeSession::~StreamingTextProbeSession () = default;
+
+StreamingTextProbeSession::StreamingTextProbeSession (
+    StreamingTextProbeSession &&) noexcept
+    = default;
+
+StreamingTextProbeSession &
+StreamingTextProbeSession::operator= (StreamingTextProbeSession &&) noexcept
+    = default;
+
+Cortext::Context
+StreamingTextProbeSession::AppendTextChunk (const std::string &text)
+{
+  return AppendTextChunkAt (text, 0);
+}
+
+Cortext::Context
+StreamingTextProbeSession::AppendTextChunkAt (const std::string &text,
+                                              std::uint64_t timestamp)
+{
+  return impl_->AppendTextChunkAt (text, timestamp);
+}
+
+Cortext::Context
+StreamingTextProbeSession::CacheTextChunk (const std::string &text)
+{
+  return CacheTextChunkAt (text, 0);
+}
+
+Cortext::Context
+StreamingTextProbeSession::CacheTextChunkAt (const std::string &text,
+                                             std::uint64_t timestamp)
+{
+  return impl_->CacheTextChunkAt (text, timestamp);
+}
+
+Cortext::Context
+StreamingTextProbeSession::FinalizeText (const std::string &text)
+{
+  return FinalizeTextAt (text, 0);
+}
+
+Cortext::Context
+StreamingTextProbeSession::FinalizeTextAt (const std::string &text,
+                                           std::uint64_t timestamp)
+{
+  return impl_->FinalizeTextAt (text, timestamp);
+}
+
+void
+StreamingTextProbeSession::Reset ()
+{
+  impl_->Reset ();
+}
+
+} // namespace internal
 
 #if defined(CORTEXT_TESTING)
 Cortext::Context

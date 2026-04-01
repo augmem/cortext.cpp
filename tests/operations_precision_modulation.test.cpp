@@ -27,8 +27,6 @@ MakeSignal ()
   return s;
 }
 
-constexpr double kKappaPrec = 0.06;
-constexpr double kCapPrecCoeff = 0.15;
 } // namespace
 
 TEST_CASE ("§4.2.5 sets positive Δ when structural coherence above 0.5",
@@ -48,10 +46,12 @@ TEST_CASE ("§4.2.5 sets positive Δ when structural coherence above 0.5",
   // Set high structural coherence (default is 1.0, but be explicit)
   ctx.SetStructuralCoherence (0.8);
 
-  // Expected: Δθ_prec = clamp(0.06 × 1.0 × (0.8 − 0.5), −0.015, +0.015)
-  //                   = clamp(0.06 × 0.3, −0.015, +0.015)
-  //                   = clamp(0.018, −0.015, +0.015) = 0.015 (capped)
-  const double expected = 0.015;
+  const double cap = cortext::core::CapPrec (cfg.focus, cfg.sensitivity,
+                                             cfg.stability, pc.hysteresis);
+  const double expected = cortext::core::Clamp (
+      cortext::core::KappaPrec (cfg.focus, cfg.sensitivity, cfg.stability)
+          * cortext::core::FocusBias (cfg.focus) * (0.8 - 0.5),
+      -cap, cap);
 
   UpdatePrecisionDelta op;
   op.Execute (ctx, cortext::testing::GetNullTransaction ());
@@ -79,10 +79,12 @@ TEST_CASE ("§4.2.5 sets negative Δ when structural coherence below 0.5",
   // Set low structural coherence
   ctx.SetStructuralCoherence (0.2);
 
-  // Expected: Δθ_prec = clamp(0.06 × 1.0 × (0.2 − 0.5), −0.015, +0.015)
-  //                   = clamp(0.06 × (−0.3), −0.015, +0.015)
-  //                   = clamp(−0.018, −0.015, +0.015) = −0.015 (capped)
-  const double expected = -0.015;
+  const double cap = cortext::core::CapPrec (cfg.focus, cfg.sensitivity,
+                                             cfg.stability, pc.hysteresis);
+  const double expected = cortext::core::Clamp (
+      cortext::core::KappaPrec (cfg.focus, cfg.sensitivity, cfg.stability)
+          * cortext::core::FocusBias (cfg.focus) * (0.2 - 0.5),
+      -cap, cap);
 
   UpdatePrecisionDelta op;
   op.Execute (ctx, cortext::testing::GetNullTransaction ());
@@ -158,8 +160,13 @@ TEST_CASE ("§4.2.5 Δ scales with Focus knob",
   // Both should be positive (coherence > 0.5)
   REQUIRE (delta_high > 0.0);
   REQUIRE (delta_low > 0.0);
-  // High focus should give ~5x larger delta
+  const double expected_ratio
+      = (cortext::core::KappaPrec (cfg_high.focus, cfg_high.sensitivity,
+                                   cfg_high.stability)
+         * cortext::core::FocusBias (cfg_high.focus))
+        / (cortext::core::KappaPrec (cfg_low.focus, cfg_low.sensitivity,
+                                     cfg_low.stability)
+           * cortext::core::FocusBias (cfg_low.focus));
   REQUIRE (delta_high > delta_low);
-  REQUIRE (delta_high / delta_low == Catch::Approx (5.0).epsilon (0.01));
+  REQUIRE (delta_high / delta_low == Catch::Approx (expected_ratio).epsilon (0.01));
 }
-

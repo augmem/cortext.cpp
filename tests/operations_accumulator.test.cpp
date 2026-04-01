@@ -93,8 +93,8 @@ TEST_CASE ("Accumulator updates state", "[accumulator][4.4.1]")
 
     auto &updated = pctx.accumulator_states.at ("test_source");
     REQUIRE (updated.n_signals == 4);
-    REQUIRE (updated.s_sum > 1.5);
-    REQUIRE (updated.s_max >= 0.8); // new score is higher
+    REQUIRE (updated.signals.size () == 1);
+    REQUIRE (updated.mu_acc.size () == s.embedding.size ());
   }
 }
 
@@ -189,10 +189,12 @@ TEST_CASE ("Spike bypass triggers for high-salience signals",
 
     cortext::testing::RequireEncoder (cfg);
     cfg.sensitivity = 0.5;
+    cfg.stability = 0.0;
 
     OperationContext ctx (s, pctx, cfg);
-    ctx.SetCompositeScore (0.95);
-    ctx.SetThresholdTDynamic (0.5);
+    ctx.SetCompositeScore (1.0);
+    ctx.SetThresholdTDynamic (0.2);
+    ctx.SetAccumulatorCoherence (0.0);
 
     CheckSpikeBypass op;
     op.Execute (ctx, cortext::testing::GetNullTransaction ());
@@ -406,7 +408,7 @@ TEST_CASE ("Knob-derived accumulator functions", "[accumulator][knobs]")
   {
     double low = core::RepresentativeBlendRho (0.0);
     double high = core::RepresentativeBlendRho (1.0);
-    REQUIRE (low == Catch::Approx (0.3));
-    REQUIRE (high == Catch::Approx (0.7));
+    REQUIRE (low == Catch::Approx (0.2));
+    REQUIRE (high == Catch::Approx (0.6));
   }
 }

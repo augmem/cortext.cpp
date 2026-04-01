@@ -229,7 +229,21 @@ UpdateMemoryStrength::Execute (OperationContext &context, Transaction &tx) const
     }
 
   // Evict weak memories below periphery cutoff (v2: memories table)
-  // Also delete corresponding embeddings.
+  // Also delete corresponding signals, graph edges, and embeddings.
+  tx.Execute (
+      "DELETE FROM associations "
+      "WHERE source_memory_id IN "
+      "(SELECT memory_id FROM memories "
+      " WHERE strength < ? AND kind = 'LONG_TERM') "
+      "   OR target_memory_id IN "
+      "(SELECT memory_id FROM memories "
+      " WHERE strength < ? AND kind = 'LONG_TERM')",
+      { cutoff, cutoff });
+  tx.Execute (
+      "DELETE FROM signals WHERE memory_id IN "
+      "(SELECT memory_id FROM memories "
+      " WHERE strength < ? AND kind = 'LONG_TERM')",
+      { cutoff });
   tx.Execute (
       "DELETE FROM embeddings WHERE embedding_id IN "
       "(SELECT embedding_id FROM memories "

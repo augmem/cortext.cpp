@@ -277,8 +277,10 @@ struct ProcessorContext
 
   // Emotion state (Algorithm 4, persisted EWMA values)
   double emotion_intensity_ewma = 0.0;
+  double flashbulb_rate_ewma = 0.0;
   double valence_ewma = 0.5;
   double arousal_ewma = 0.0;
+  std::deque<double> recent_emotion_intensities;
 
   // Mood state (Algorithm 4b, persisted tonic state)
   // Order: [anger, fear, joy, love, sadness, surprise]

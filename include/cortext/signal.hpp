@@ -22,6 +22,8 @@ struct Signal
   // Core metadata.
   uint64_t timestamp = 0;
   std::string source_id;
+  bool force_boundary = false;
+  bool force_write = false;
 
   // Payload for storage (persisted to objstore when write gate passes).
   std::optional<std::vector<unsigned char>> payload;

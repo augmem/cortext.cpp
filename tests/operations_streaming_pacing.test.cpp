@@ -96,7 +96,9 @@ TEST_CASE ("UpdateDriftAccumulation handles empty embedding",
   UpdateDriftAccumulation op;
   op.Execute (ctx, cortext::testing::GetNullTransaction ());
 
-  REQUIRE (pctx.accumulator_states.empty ());
+  REQUIRE (pctx.accumulator_states.count ("test") == 1);
+  REQUIRE (pctx.accumulator_states.at ("test").prev_x.size () == 0);
+  REQUIRE (pctx.accumulator_states.at ("test").drift_accum == 0.0);
 }
 
 TEST_CASE ("UpdateDriftAccumulation handles dimension mismatch",

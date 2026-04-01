@@ -112,6 +112,8 @@ if |similar_memories| > 0:
     merge_into_chunk(similar_memories, memory)
 ```
 
+**Implementation note (chat applications):** turn-structured chat sources (`chat/user`, `chat/assistant`) bypass same-source chunk merging and generic WM rejection so the active working-memory window remains a FIFO sequence of recent turns for prompt reconstruction. Prompt hydration must order active slots by insertion/start time rather than `last_access`; otherwise rehearsal or retrieval touches can scramble the conversational sequence even when the underlying memories are correct.
+
 ## Metacognitive Monitoring
 
 The system implements feeling-of-knowing (FOK) and tip-of-tongue (TOT) detection following @hart1965memory framework:
@@ -172,7 +174,7 @@ source_confidence(m) ← clamp(source_prior(m.origin) ×
 Contradictions reduce `reliability`, and user corrections directly update `contradiction_count`. Source confidence gates injection into active context:
 
 ```
-if source_confidence(m) < lerp(0.25, 0.55, T):
+if source_confidence(m) < lerp(0.15, 0.45, T):
     downrank_or_hold(m)
 ```
 

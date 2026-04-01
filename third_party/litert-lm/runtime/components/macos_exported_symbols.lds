@@ -1,0 +1,3 @@
+_LiteRtTopKWebGpuSampler_Create
+_LiteRtTopKWebGpuSampler_Destroy
+_LiteRtTopKWebGpuSampler_SampleToIdAndScoreBuffer

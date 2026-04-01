@@ -37,7 +37,7 @@ index_store[key].append(memory_id)
 
 ## Consolidation Triggers {#sec-consolidation-triggers}
 
-Consolidation operates on stored memory representatives (e_rep from @sec-rep-embedding), not individual signals. Candidates must be **LONG_TERM or ASSOCIATION memories with stored content blobs** (blob_id present) so summarization always has source text. **Consolidation is only initiated via an explicit API call (`Consolidate()`).** The core runtime does not auto-trigger consolidation.
+Consolidation operates on stored memory representatives (e_rep from @sec-rep-embedding), not individual signals. Candidates are restricted to **unclustered LONG_TERM memories**, and deep mode additionally requires stored content blobs (`blob_id` present) so summarization always has raw source text. Previously generated **ASSOCIATION** summaries are treated as sealed semantic products at the same consolidation level: they remain available for retrieval and graph expansion, but they are not fed back into later same-level deep summarization. **Consolidation is only initiated via an explicit API call (`Consolidate()`).** The core runtime does not auto-trigger consolidation.
 
 External schedulers can still **derive a trigger policy** from the knobs. One recommended heuristic is:
 
@@ -119,7 +119,7 @@ Low-scoring memories are marked for merging.
 
 Consolidation proceeds via **generative replay** rather than one-shot merges. Representative episodes are re-encoded and used to update semantic structures, reducing drift and preserving detail.
 
-**Summarization + labeling engine (deep mode):** Consolidation is the only stage that invokes a generative model. Summaries and labels are produced by **gemma-3n-e2b** running through `third_party/litert_lm`. All other operations remain embedding-only. **There is no extractive fallback**: if Gemma is unavailable or summarization fails, deep consolidation raises an error rather than silently degrading.
+**Summarization + labeling engine (deep mode):** Consolidation is the only stage that invokes a generative model. Deep mode resolves a local backend internally: **gemma-3n-e2b** through `third_party/litert_lm`, **LFM2/LFM2.5** through `llama.cpp` GGUFs, or a **mixed** path that uses Gemma for summarization and a Liquid GGUF for extraction. The Liquid resolver now prefers `LFM2.5-350M-GGUF` for both summarization and extraction, defaulting to the local `Q4_K_M` checkpoint when present and accepting other bundled GGUF quantizations as fallbacks; if that asset is absent, it falls back to the older pinned `LFM2-2.6B-Transcript-Q4_K_M.gguf` summarizer and `LFM2-1.2B-Extract-Q4_K_M.gguf` extractor. Auto resolution prefers the mixed path when both assets are present. All other operations remain embedding-only. **There is no extractive fallback**: if no deep backend is available, or summarization fails, deep consolidation raises an error rather than silently degrading.
 
 ## Shallow Consolidation (Embedding‑Only)
 
@@ -173,9 +173,11 @@ Summary nodes replace clusters:
 
 ```
 summary.embedding = μ_i
-summary.blob = summarize(fetch_blobs(cluster_i))  # gemma-3n-e2b via litert_lm (required)
+summary.blob = summarize(fetch_blobs(cluster_i))  # deep local LLM backend (Gemma/LiteRT-LM or LFM2/llama.cpp)
 summary.metadata.sources = [m.id for m in cluster_i]
 ```
+
+**Current implementation note:** same-level deep summarization now replays only raw episodic `LONG_TERM` memories that have not yet been assigned to a consolidation cluster. This prevents repeated summary-of-summary compression in long chat sessions while still allowing later raw evidence to form new sibling summaries. Higher-level semantic summarization, if desired, should be modeled as an explicit separate layer rather than by recursively feeding first-level summary blobs back into the same consolidation path.
 
 To keep consolidation latency bounded, summarization input is capped by knob‑derived limits. Source texts are ranked by similarity to the cluster centroid and truncated:
 

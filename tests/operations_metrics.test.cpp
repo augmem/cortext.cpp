@@ -1,6 +1,7 @@
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 #include "test_helpers.hpp"
+#include <cortext/core/knobs.hpp>
 #include <cortext/operations/effective_focus.hpp>
 #include <cortext/operations/metrics.hpp>
 #include <cortext/processor.hpp>
@@ -81,11 +82,12 @@ TEST_CASE (
   ComputeMetrics op;
   op.Execute (ctx, cortext::testing::GetNullTransaction ());
 
-  // Verify surprise uses the formula: surprisal × S × (1 − 0.5T)
-  // = 0.6 × 0.8 × (1 − 0.1) = 0.6 × 0.8 × 0.9 = 0.432
+  const double s_eff = cortext::core::SensitivityBias (cfg.sensitivity);
+  const double expected
+      = known_surprisal * s_eff * (1.0 - 0.5 * cfg.stability);
   auto surprise = ctx.GetMetric (operations::Metric::surprise);
   REQUIRE (surprise.has_value ());
-  REQUIRE (*surprise == Catch::Approx (0.432).epsilon (0.001));
+  REQUIRE (*surprise == Catch::Approx (expected).epsilon (0.001));
 }
 
 TEST_CASE (
@@ -155,10 +157,11 @@ TEST_CASE ("ComputeMetrics uses ΔSSE for utility when available",
 
   auto utility = ctx.GetMetric (operations::Metric::utility);
   REQUIRE (utility.has_value ());
-  // ΔSSE = (2 - 1) / 2 = 0.5
-  // utility = ΔSSE × (0.5 + 0.5F) × (1 - 0.3S)
-  // = 0.5 × 0.75 × 1.0 = 0.375
-  REQUIRE (*utility == Catch::Approx (0.375).epsilon (1e-6));
+  const double f_eff = cortext::core::FocusBias (cfg.focus);
+  const double s_eff = cortext::core::SensitivityBias (cfg.sensitivity);
+  const double expected
+      = 0.5 * (0.5 + 0.5 * f_eff) * (1.0 - 0.3 * s_eff);
+  REQUIRE (*utility == Catch::Approx (expected).epsilon (1e-6));
 }
 
 TEST_CASE ("ComputeMetrics relevance fallback uses 0.5 baseline with empty context",
@@ -181,6 +184,7 @@ TEST_CASE ("ComputeMetrics relevance fallback uses 0.5 baseline with empty conte
 
   auto relevance = ctx.GetMetric (operations::Metric::relevance);
   REQUIRE (relevance.has_value ());
-  const double expected = 0.5 * (0.5 + 0.5 * cfg.focus);
+  const double expected
+      = 0.5 * (0.5 + 0.5 * cortext::core::FocusBias (cfg.focus));
   REQUIRE (*relevance == Catch::Approx (expected).epsilon (1e-6));
 }

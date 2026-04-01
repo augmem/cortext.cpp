@@ -17,10 +17,12 @@ struct EmbeddingGemmaConfig
   int num_threads = 1;
 };
 
-/// @brief EmbeddingGemma text encoder backed by ONNX Runtime.
+/// @brief EmbeddingGemma text encoder with pluggable local backends.
 ///
-/// This encoder depends on ONNX Runtime and the SentencePiece tokenizer from
-/// the LiteRT-LM bundle. When unavailable, all methods throw std::runtime_error.
+/// Backend selection is internal and derived from the configured model artifact
+/// or local override. Supported artifact types currently include ONNX, GGUF via
+/// llama.cpp, and LiteRT/TFLite. When the selected runtime is unavailable, all
+/// methods throw std::runtime_error.
 class EmbeddingGemmaEncoder : public Encoder
 {
 public:

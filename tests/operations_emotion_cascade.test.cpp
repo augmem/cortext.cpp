@@ -54,7 +54,11 @@ TEST_CASE ("CascadeRadius and CascadeDecay knob values",
 
   // CascadeDecay
   REQUIRE (core::CascadeDecay (0.0) == Catch::Approx (0.7).margin (1e-6));
-  REQUIRE (core::CascadeDecay (0.5) == Catch::Approx (0.5).margin (1e-6));
+  REQUIRE (
+      core::CascadeDecay (0.5)
+      == Catch::Approx (
+             core::Lerp (0.7, 0.3, core::SensitivityBias (0.5)))
+             .margin (1e-6));
   REQUIRE (core::CascadeDecay (1.0) == Catch::Approx (0.3).margin (1e-6));
 }
 

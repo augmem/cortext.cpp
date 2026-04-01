@@ -1,3 +1,4 @@
+#include "cortext/internal/cancellation.hpp"
 #include "cortext/operations/consolidation_gate.hpp"
 #include "cortext/operations/consolidation.hpp"
 #include "cortext/processor/operation_context.hpp"
@@ -17,10 +18,12 @@ ConsolidationGate::Execute (OperationContext &context, Transaction &tx) const
       });
       return;
     }
+  internal::ThrowIfStopRequested ();
   // Run scoring and enqueue extraction jobs when start signal is present.
   ScoreConsolidation scorer;
   scorer.Execute (context, tx);
 
+  internal::ThrowIfStopRequested ();
   EnqueueExtractionJobs jobs;
   jobs.Execute (context, tx);
 

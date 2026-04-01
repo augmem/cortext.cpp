@@ -1,0 +1,9 @@
+<start_of_turn>user
+I am The System!
+
+I need help<end_of_turn>
+<start_of_turn>model
+Hi, what can I do for you?<end_of_turn>
+<start_of_turn>user
+Write a poem about a cat<end_of_turn>
+<start_of_turn>model

@@ -47,34 +47,10 @@ SampleMp4Bytes ()
 
 } // namespace
 
-TEST_CASE ("Extensions: sqlite-graph and sqlite-vec are available",
+TEST_CASE ("Extensions: sqlite-vec and sqlite-objstore are available",
            "[extensions]")
 {
   auto store = cortext::SQLiteStore::Create (":memory:");
-
-  // sqlite-graph: create vtable and basic functions
-  SECTION ("sqlite-graph virtual table and functions")
-  {
-    // Create virtual table
-    store->Execute ("CREATE VIRTUAL TABLE graph USING graph()", {});
-
-    // Basic function exists
-    auto res = store->Execute ("SELECT graph_count_nodes() AS c", {});
-    REQUIRE (res.size () == 1);
-    REQUIRE (res[0].count ("c") == 1);
-    // Count is 0 on empty graph
-    REQUIRE (std::any_cast<long long> (res[0].at ("c")) == 0LL);
-
-    // Minimal cypher: create and match
-    store->Execute ("SELECT cypher_execute('CREATE (p:Person {name: \"A\"})')",
-                    {});
-    auto match = store->Execute (
-        "SELECT cypher_execute('MATCH (n:Person) RETURN n') AS r", {});
-    REQUIRE (match.size () == 1);
-    REQUIRE (match[0].count ("r") == 1);
-    // JSON result should be non-empty
-    REQUIRE (std::any_cast<std::string> (match[0].at ("r")).size () > 0);
-  }
 
   // sqlite-vec: version function present
   SECTION ("sqlite-vec version function")

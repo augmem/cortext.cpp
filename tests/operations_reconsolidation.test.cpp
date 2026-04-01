@@ -228,17 +228,25 @@ TEST_CASE ("Alg20 bumps uncertainty with positive drift",
   const Eigen::VectorXf cur = MakeUnitVec256 (0);
   const Eigen::VectorXf mem = MakeUnitVec256 (0);
 
+  auto seed = std::make_unique<SeedEmbeddingsOp> (
+      std::unordered_map<long long, Eigen::VectorXf>{ { 3LL, mem } });
   auto setup = std::make_unique<SetupReconInputsOp> (
       cur, std::unordered_map<long long, Eigen::VectorXf>{ { 3LL, mem } });
   auto apply = std::make_unique<ApplyReconsolidation> ();
-  auto assert_u = std::make_unique<AssertUncertaintyIncreasedOp> ();
   auto ops = std::make_unique<cortext::OperationSet> (
-      std::move (setup), std::move (apply), std::move (assert_u));
+      std::move (seed), std::move (setup), std::move (apply));
 
   cortext::SignalProcessor processor (cfg, store, std::move (ops));
   auto s = MakeSignal (cur, /*ts=*/7);
   processor.Process (s);
   processor.Flush ();
+
+  auto rows = store->Execute (
+      "SELECT lability_state, lability_ts FROM memories WHERE embedding_id = ?",
+      { 3LL });
+  REQUIRE (rows.size () == 1);
+  REQUIRE (std::any_cast<double> (rows[0].at ("lability_state")) > 0.0);
+  REQUIRE (std::any_cast<long long> (rows[0].at ("lability_ts")) == 7LL);
 }
 
 // --- Ripple Effect Tests ---

@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "fixtures": [
+    {
+      "id": "crud-basic",
+      "path": "sql/matrix/crud_basic.sql",
+      "tags": ["crud", "exists", "delete"]
+    },
+    {
+      "id": "streaming-large",
+      "path": "sql/matrix/streaming_large.sql",
+      "tags": ["streaming", "large-object"]
+    },
+    {
+      "id": "txn-commit-rollback",
+      "path": "sql/matrix/txn_commit_rollback.sql",
+      "tags": ["transaction", "rollback", "commit"]
+    },
+    {
+      "id": "idempotent-put",
+      "path": "sql/matrix/idempotent_put.sql",
+      "tags": ["scalar", "idempotent"]
+    }
+  ]
+}

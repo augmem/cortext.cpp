@@ -8,13 +8,34 @@ add_executable(cortext_benchmark
   src/gemma3n_audio.cpp
 )
 
+add_executable(cortext_text_encoder_bench
+  text_encoder_bench.cpp
+)
+
+add_executable(cortext_deep_llm_bench
+  deep_llm_bench.cpp
+)
+
 # Include directories for local headers
 target_include_directories(cortext_benchmark PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}
+)
+target_include_directories(cortext_text_encoder_bench PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}
+)
+target_include_directories(cortext_deep_llm_bench PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
 # Link dependencies
 target_link_libraries(cortext_benchmark PRIVATE
+  cortext
+  nlohmann_json::nlohmann_json
+)
+target_link_libraries(cortext_text_encoder_bench PRIVATE
+  cortext
+)
+target_link_libraries(cortext_deep_llm_bench PRIVATE
   cortext
   nlohmann_json::nlohmann_json
 )

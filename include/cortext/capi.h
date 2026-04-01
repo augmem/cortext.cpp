@@ -51,6 +51,21 @@ extern "C"
   /// This handle must be freed with cortext_free() when no longer needed.
   typedef void *cortext_handle;
 
+  /// @brief Binding-friendly configuration for cortext_create_with_config.
+  typedef struct cortext_config
+  {
+    size_t struct_size;
+    double focus;
+    double sensitivity;
+    double stability;
+    int affect_interrupt;
+    int affect_retrieval;
+    int reinforcement_enabled;
+    int procedural_enabled;
+    int sequential_edges_enabled;
+    const char *label_bank_path;
+  } cortext_config;
+
   /// @brief Consolidation mode for cortext_consolidate_mode.
   typedef enum cortext_consolidation_mode
   {
@@ -71,6 +86,17 @@ extern "C"
   CORTEXT_EXPORT cortext_handle cortext_create (double focus, double sensitivity,
                                                 double stability,
                                                 const char *db_path);
+
+  /// @brief Initializes a cortext_config struct with the library defaults.
+  CORTEXT_EXPORT void cortext_config_init (cortext_config *cfg);
+
+  /// @brief Creates a Cortext instance from a binding-friendly config struct.
+  /// @param cfg Optional configuration. NULL uses the library defaults.
+  /// @param db_path Path to SQLite database file.
+  /// @param models_dir Optional path to model assets. NULL uses the default.
+  CORTEXT_EXPORT cortext_handle
+  cortext_create_with_config (const cortext_config *cfg, const char *db_path,
+                              const char *models_dir);
 
   /// @brief Creates a Cortext instance with custom models directory.
   /// @param focus Focus knob value in [0.0, 1.0].
@@ -146,8 +172,9 @@ extern "C"
   /// @param mode Consolidation mode (shallow, deep, or both).
   /// @return 0 on success, 1 if invalid handle, 2 on internal error.
   ///
-  /// Shallow runs embedding-only labeling/graphing; deep runs Gemma-backed
-  /// summarization and extraction. Both defaults to the full deep path.
+  /// Shallow runs embedding-only labeling/graphing; deep runs the configured
+  /// local summarization/extraction backend (Gemma/LiteRT-LM, LFM2/llama.cpp,
+  /// or the mixed Gemma+LFM2 path). Both defaults to the full deep path.
   CORTEXT_EXPORT int cortext_consolidate_mode (cortext_handle h, int mode);
 
   /// @brief Commits all buffered database writes.
@@ -157,6 +184,40 @@ extern "C"
   /// This commits the current episode transaction and starts a new episode.
   /// Call after processing a batch of signals or before querying results.
   CORTEXT_EXPORT int cortext_flush (cortext_handle h);
+
+  /// @brief Returns the Cortext library version string.
+  CORTEXT_EXPORT const char *cortext_version (void);
+
+  /// @brief Returns the last error produced by this thread's C API calls.
+  CORTEXT_EXPORT const char *cortext_last_error (void);
+
+  /// @brief Frees strings returned by JSON-returning C API helpers.
+  CORTEXT_EXPORT void cortext_string_free (char *value);
+
+  /// @brief Processes text input and returns the resulting Context as JSON.
+  CORTEXT_EXPORT char *cortext_process_text_json (cortext_handle h,
+                                                  const char *text,
+                                                  const char *source_id);
+
+  /// @brief Processes audio input and returns the resulting Context as JSON.
+  CORTEXT_EXPORT char *cortext_process_audio_json (cortext_handle h,
+                                                   const float *pcm,
+                                                   size_t num_samples,
+                                                   const char *source_id);
+
+  /// @brief Processes image input and returns the resulting Context as JSON.
+  CORTEXT_EXPORT char *cortext_process_image_json (cortext_handle h,
+                                                   const uint8_t *data,
+                                                   int width, int height,
+                                                   int channels,
+                                                   const char *source_id);
+
+  /// @brief Triggers consolidation and returns the resulting Context as JSON.
+  CORTEXT_EXPORT char *cortext_consolidate_json (cortext_handle h);
+
+  /// @brief Triggers consolidation with explicit mode and returns JSON.
+  CORTEXT_EXPORT char *cortext_consolidate_mode_json (cortext_handle h,
+                                                      int mode);
 
 #ifdef __cplusplus
 }

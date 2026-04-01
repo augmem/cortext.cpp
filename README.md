@@ -1,400 +1,197 @@
-# Cortext: Intelligent Context System for LLMs
+# Cortext
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+Cortext is a C++20 context and memory engine for LLM-adjacent applications. It processes text, audio, and image signals, maintains working memory plus long-term retrieval state in SQLite, and can run explicit consolidation passes that summarize, label, and connect memories.
 
-**Cortext** is a production-ready intelligent context system that monitors LLM token generation in real-time and dynamically injects relevant context through semantic retrieval and knowledge graph augmentation. Like the brain's hemispheres working together, the LLM handles analytical generation while Cortext provides the contextual memory and relevance processing - creating a closed-loop cognitive system that learns from every interaction.
+The repository centers on the native library in `src/` and `include/`. It also includes:
+- a Catch2 test suite
+- optional chat, benchmark, and analysis binaries under `examples/`
+- FFI bindings under `bindings/`
+- experiment harnesses under `scripts/`
+- the paper/docs source that describes the current algorithms and reported results
 
-## 🧩 C++ Core (cortext) Overview
+## Why Cortext Exists
 
-This repository contains a modern C++17 core library named `cortext` that provides a high-level intelligent context system:
+Cortext began for a personal reason. Three years ago, my father-in-law was diagnosed with dementia. Since then, I have been focused on using my background in AI and machine learning to build systems that help people with memory loss preserve continuity, confidence, and independence.
 
-* **`Cortext`**: Main API class for multimodal context processing
-* **Three-Knob Configuration**: Focus, Sensitivity, and Stability control all behavior
-* **Multimodal Input**: Process text, audio, and image inputs seamlessly
-* **Real-time Context Injection**: Interrupts LLM generation to inject relevant context
-* **Closed-Loop Learning**: Updates context strengths based on injection outcomes
-* **Automatic Consolidation**: Background merging and knowledge graph construction
-* **Cross-Language Bindings**: Native APIs for Python, Go, and JavaScript via WASM
+The same architecture also happens to be useful for long-horizon LLM memory. But the primary motivation is human: Cortext is designed to process real-time information from a wearable device through a hub that can deliver gentle nudges to help someone remember context, reduce confusion, and avoid the humiliation and frustration that memory loss can create.
 
-**Key Components:**
+## What Cortext Provides
 
-* **Context Processing**: Unified 256d embedding space for all modalities
-* **Memory Consolidation**: Background merging of redundant contexts
-* **Graph-Augmented Retrieval**: Vector similarity combined with knowledge graphs
-* **Adaptive Thresholds**: Self-tuning relevance detection
-* **Production Ready**: Comprehensive error handling and observability
+- memory-aware processing over streaming text, audio, and image inputs
+- working-memory tracking plus long-term retrieval state in SQLite
+- explicit consolidation passes for summary, label, and relation generation
+- native C++ API plus C ABI for bindings
+- optional local model backends for embeddings and deep consolidation
 
-Minimal example (C++):
+## Repository Layout
 
-```cpp
-#include <cortext/cortext.hpp>
+- `src/` and `include/`: core engine implementation and public headers
+- `tests/`: Catch2 test suite built into the `cortext_tests` target
+- `examples/`: optional binaries for chat UI, benchmarking, telemetry smoke tests, and topical-chat analysis
+- `bindings/`: Python, Go, and JavaScript bindings over the C ABI
+- `scripts/` and `tools/`: experiment harnesses and offline utilities
+- `docs/paper/sections/`: manuscript source
+- `docs/paper/_manuscript/index.md`: generated manuscript output
+- `models/` and `third_party/`: local runtime assets and vendored dependencies
 
-using namespace cortext;
+## Build Requirements
 
-int main() {
-  // Configure the three-knob system
-  Cortext::Config cfg;
-  cfg.focus = 0.7;      // Selectivity: higher = more focused retrieval
-  cfg.sensitivity = 0.5; // Plasticity: higher = more responsive to changes
-  cfg.stability = 0.8;   // Persistence: higher = slower parameter drift
+Core native builds require:
+- a C++20 toolchain
+- CMake
+- `pkg-config`
+- SQLite development headers
 
-  // Create Cortext instance with in-memory database
-  auto cortext = Cortext::Create(cfg, ":memory:", "models/");
+Some features rely on optional local runtimes or model assets under `models/` and `third_party/`, including:
+- ONNX Runtime
+- LiteRT-LM
+- onnxruntime-genai
+- sherpa-onnx
+- `llama.cpp` GGUF support for EmbeddingGemma and Liquid deep-consolidation backends
 
-  // Process multimodal inputs
-  auto ctx_out = cortext->ProcessText("Hello, how are you today?", 1000, "user_input");
-  if (ctx_out.should_interrupt) {
-    for (const auto &memory : ctx_out.memories) {
-      std::cout << "Memory " << memory.id << " (" << memory.modality << ")\\n";
-    }
-  }
-  cortext->ProcessAudio(audio_samples.data(), audio_samples.size(), 1001, "microphone");
-
-  // Trigger consolidation if needed
-  cortext->Consolidate(1002);
-
-  // Flush any pending writes
-  cortext->Flush();
-}
-```
-
-Build & Test (C++ core only):
+## Quickstart Build
 
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
 cmake --build build -j
-# Run only project tests (skip Eigen's own test suite)
 ctest --test-dir build -R cortext_tests --output-on-failure
-# Or run the binary directly
-./build/tests/cortext_tests
 ```
 
-### SQLite Extensions
-
-* Default: sqlite-vec, sqlite-graph, and sqlite-objstore are statically embedded into the `cortext` library.
-* Dynamic fallback (native only): If embedding is disabled, `cortext` attempts to load sqlite-vec/sqlite-graph at runtime.
-  * Env overrides: `SQLITE_VEC_PATH`, `SQLITE_GRAPH_PATH`
-  * Default search paths:
-    * `third_party/sqlite-vec/dist/vec0.{so|dylib|dll}`
-    * `third_party/sqlite-graph/build/libgraph.{so|dylib|dll}`
-* WASM: Both extensions are embedded into `cortext.wasm`; runtime loading is disabled.
-* sqlite-objstore is embedded-only today and provides transactional blob/object storage for multimodal payloads (video, audio, high-fidelity artifacts) with automatic backend selection (file/sqlite on native builds, OPFS/VFS on WASM).
-
-## 🧠 Left Brain, Right Brain: Cognitive Collaboration
-
-**Like the brain's hemispheres working in harmony**, the LLM (left brain) excels at logical reasoning and analytical generation, while Cortext (right brain) provides contextual memory, relevance processing, and creative association. Together they form a complete cognitive system that learns from every interaction.
-
-**Closed-Loop Intelligent Context System**: Real-time monitoring, multimodal semantic retrieval, interrupt-driven injection, and continuous learning from context injection outcomes.
-
-* **Real-time Monitoring**: Watches tokens as they're generated (right brain awareness)
-* **Multimodal Semantic Relevance**: Unified embeddings across text, vision, and audio (right brain association)
-* **Interrupt-Driven Injection**: Stops generation, injects relevant context, resumes seamlessly (hemispheric coordination)
-* **Closed-Loop Learning**: Updates context strengths based on injection impact (right brain learning)
-* **Adaptive Thresholds**: Self-tuning relevance thresholds based on retrieval quality (right brain adaptation)
-
-## 🏗️ Architecture Overview
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                 LLM (Left Brain)                            │
-│            Logical Reasoning & Generation                   │
-└────────────────────┬────────────────────────────────────────┘
-                     │ token stream
-                     ↓
-┌─────────────────────────────────────────────────────────────┐
-│             Cortext (Right Brain)                           │
-│             Context & Memory Processing                     │
-│  ┌──────────────────────────────────────────────────────────┤  │
-│  │  Token Buffer (ring buffer, size=64)                │  │
-│  │  • Rolling context window                           │  │
-│  │  • Semantic analysis every 16 tokens                │  │
-│  └──────────────────────────────────────────────────────────┘  │
-│                          │                                  │
-│                          ↓                                  │
-│  ┌──────────────────────────────────────────────────────────┤  │
-│  │  Multimodal Relevance Engine                         │  │
-│  │  • Unified embedding space (256d Gemma MRL)          │  │
-│  │  • Custom projection for vision/audio                │  │
-│  │  • Graph-augmented vector search                     │  │
-│  │  • Adaptive threshold filtering                      │  │
-│  └──────────────────────────────────────────────────────────┘  │
-│                          │                                  │
-│                          ↓                                  │
-│  ┌──────────────────────────────────────────────────────────┤  │
-│  │  Interrupt Decision                                  │  │
-│  │  • Relevance > threshold → INTERRUPT                 │  │
-│  │  • Context assembly from multimodal memories         │  │
-│  │  • Inject and resume generation                      │  │
-│  └──────────────────────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────────────────┘
-                          │
-                          ↓
-                   [Resume Generation]
-```
-
-## 🛠️ Technology Stack
-
-### Core Dependencies
-
-* **C++17+**: Core engine implementation with WASM compilation target
-* **ONNX Runtime**: C++ API for model inference
-* **[EmbeddingGemma-300M ONNX](https://huggingface.co/onnx-community/embeddinggemma-300m-ONNX)**: Unified 256d MRL-truncated embedding space
-* **[Gemma 3n-E2B-it ONNX](https://huggingface.co/onnx-community/gemma-3n-E2B-it-ONNX)**: Frozen vision and audio encoders
-* **[sqlite-vec](https://github.com/asg017/sqlite-vec)**: High-performance vector similarity search
-* **[sqlite-graph](https://github.com/agentflare-ai/sqlite-graph)**: Cypher-compatible graph database
-* **[sqlite-objstore](./docs/sqlite-objstore.md)**: Transactional blob/object storage for multimodal payloads backed by SQLite or sharded filesystems
-
-### Language Bindings
-
-* **Python**: `pip install cortext`
-* **Go**: `go get github.com/agentflare/cortext/go`
-* **JavaScript/TypeScript**: NPM package for browser integration
-
-## 📦 Installation
-
-### Prerequisites
-
-* **C++17+ compiler** (Clang/LLVM recommended)
-* **CMake 3.20+**
-* **ONNX Runtime**
-* **SQLite development headers**
-
-### Build from Source
+Examples are off by default. To build them:
 
 ```bash
-# Clone with submodules
-git clone --recursive https://github.com/agentflare/cortext.git
-cd cortext
-
-# Build core engine
-mkdir build && cd build
-cmake ..
-make -j$(nproc)
-
-# Install
-sudo make install
-```
-
-### Python Installation
-
-```bash
-pip install cortext
-```
-
-### Go Installation
-
-```bash
-go get github.com/agentflare/cortext/go
-```
-
-### C++ Library Build (cortext)
-
-For the minimal cortext C++ library component:
-
-```bash
-# Configure build
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-
-# Build library and tests
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DCORTEXT_BUILD_EXAMPLES=ON
 cmake --build build -j
-
-# Run tests
-ctest --test-dir build --output-on-failure
-
-# Install library (optional)
-cmake --install build --prefix "$PWD/install"
+./build/examples/topical_chat_analysis/cortext_topical_chat_analysis --help
 ```
 
-### WebAssembly Build
+The Dear ImGui chat example also requires desktop dependencies such as `glfw3`, OpenGL, and `CURL`.
 
-To build the cortext library for WebAssembly (usable in Rust, Python, and JavaScript):
+## Minimal C++ Example
+
+```cpp
+#include <cortext/cortext.hpp>
+#include <iostream>
+
+int main() {
+  cortext::Cortext::Config cfg;
+  cfg.focus = 0.7;
+  cfg.sensitivity = 0.5;
+  cfg.stability = 0.8;
+
+  auto engine = cortext::Cortext::Create(cfg, ":memory:", "models");
+
+  auto ctx = engine->ProcessText("Hello from Cortext", "chat/user");
+  if (ctx.should_interrupt) {
+    for (const auto& memory : ctx.retrieved_memory) {
+      std::cout << memory.id << " " << memory.source_id << "\n";
+    }
+  }
+
+  engine->Consolidate();
+  engine->Flush();
+}
+```
+
+Primary public entrypoints:
+- C++ API: `include/cortext/cortext.hpp`
+- C API: `include/cortext/capi.h`
+
+## Foreign-Language Integration
+
+For Python, Go, JavaScript, and TypeScript consumers, use the dedicated FFI release preset. It builds a shared library and disables the heaviest optional backends by default so bindings do not need the full research stack on every install.
 
 ```bash
-# Prerequisites: Install Emscripten
-# See: https://emscripten.org/docs/getting_started/downloads.html
-
-# Build for WebAssembly using preset
-cmake --preset wasm
-cmake --build --preset wasm
+cmake --preset ffi-release
+cmake --build --preset ffi-release --target cortext
 ```
 
-The WASM build produces:
+The C API includes:
+- `cortext_config_init()` and `cortext_create_with_config()` for binding-safe configuration
+- `cortext_version()` for runtime version checks
+- `cortext_last_error()` for per-thread error reporting
+- `cortext_*_json()` helpers that return the full `Context` as UTF-8 JSON
+- `cortext_string_free()` to release JSON strings returned by the library
 
-* `cortext.wasm`: WebAssembly binary
-* `cortext.js`: JavaScript glue code for ES6 module imports
+Repository-local bindings live under `bindings/`:
+- `bindings/python`: pure `ctypes` wrapper over the JSON C ABI
+- `bindings/go`: `cgo` wrapper with raw JSON and decoded `map[string]any` helpers
+- `bindings/javascript`: Node.js addon plus TypeScript declarations
 
-## 🚀 Quick Start
-
-### Python Usage
-
-```python
-from cortext import CortextEngine, Config
-
-# Initialize with configuration
-config = Config(
-    focus=0.7,           # F: selectivity (0.0-1.0)
-    sensitivity=0.5,     # S: plasticity (0.0-1.0)
-    stability=0.8,       # T: persistence (0.0-1.0)
-    embedding_dim=256,   # EmbeddingGemma 256d MRL-truncated space
-    database_path="./memory.db"
-)
-
-engine = CortextEngine(config)
-
-# Process token stream
-for token in llm_stream:
-    should_interrupt, context = engine.process_token(token)
-    if should_interrupt:
-        # Inject context and resume
-        llm.inject_context(context)
-```
-
-### Go Usage
-
-```go
-import "github.com/agentflare/cortext/go"
-
-config := cortext.Config{
-    Focus:       0.7,
-    Sensitivity: 0.5,
-    Stability:   0.8,
-    EmbeddingDim: 256,
-    DatabasePath: "./memory.db",
-}
-
-engine, err := cortext.New(config)
-if err != nil {
-    log.Fatal(err)
-}
-
-// Process tokens with context
-ctx := context.Background()
-for token := range llmStream {
-    interrupt, context, err := engine.ProcessToken(ctx, token)
-    if err != nil {
-        log.Printf("Error: %v", err)
-        continue
-    }
-    if interrupt {
-        llm.InjectContext(context)
-    }
-}
-```
-
-## 🎯 Key Features
-
-### Closed-Loop Learning System
-
-* **Impact Monitoring**: Tracks how memory injections affect generation quality
-* **Memory Strength Evolution**: Updates relevance scores based on injection outcomes
-* **Adaptive Thresholds**: Self-tuning relevance thresholds
-* **Reinforcement Learning**: Learns from successful vs. unsuccessful injections
-
-### Intelligent Context System
-
-* **Unified Embedding Space**: Single 256d space for text, vision, and audio (right brain synthesis)
-* **Cross-Modal Search**: Retrieve relevant context regardless of input modality (right brain association)
-* **Graph-Augmented Retrieval**: Combine vector similarity with knowledge graph traversal (right brain connections)
-* **Knowledge Graph**: Entity and relationship modeling with Cypher queries (right brain relational thinking)
-
-### Production-Ready Features
-
-* **WASM First-Class Citizen**: Core engine compiles to WebAssembly
-* **Cross-Language Bindings**: Native APIs for Python, Go, and JavaScript
-* **Comprehensive Error Handling**: Graceful degradation and recovery strategies
-* **Observability**: Structured logging and performance metrics
-* **Memory Optimization**: Quantization, caching, and efficient memory pooling
-
-## 📊 Performance Targets
-
-| Metric             | Target                                  | Description                     |
-| ------------------ | --------------------------------------- | ------------------------------- |
-| Embedding Latency  | <50ms (CPU), <20ms (WebGPU)             | End-to-end embedding generation |
-| Search Latency     | <25ms for 100K memories                 | Vector similarity search        |
-| Graph Query        | <50ms for 2-hop traversals              | Knowledge graph operations      |
-| Memory Overhead    | <200MB baseline + 1.5MB per 1K memories | Working memory footprint        |
-| Interrupt Overhead | <5% of total generation time            | Streaming integration cost      |
-
-## 🏛️ Project Structure
-
-```
-cortext/
-├── src/                    # Core C++ implementation
-│   ├── engine/            # Cortext intelligent engine
-│   ├── context/           # ContextStore implementation
-│   ├── embedding/         # Multimodal embedding pipeline
-│   └── bindings/          # Language binding implementations
-├── third_party/           # External dependencies
-│   ├── sqlite-vec/        # Vector search extension
-│   └── sqlite-graph/      # Graph database extension
-├── python/                # Python bindings and packaging
-├── go/                    # Go bindings and packaging
-├── js/                    # JavaScript/TypeScript bindings
-├── docs/                  # Documentation
-│   ├── pmvp.md           # Production MVP specification
-│   └── algorithms.md     # Algorithm documentation
-├── examples/              # Usage examples
-├── tests/                 # Test suites
-└── build/                 # Build configuration
-```
-
-## 🔄 Development Roadmap
-
-### MVP (Current)
-
-* [x] Core cortext intelligent engine
-* [x] WASM compilation support
-* [x] Python and Go bindings
-* [x] Adaptive threshold system
-* [x] Production error handling
-* [x] Consolidation and graph integration system
-* [x] sqlite-vec integration for vector search
-* [x] sqlite-graph integration for knowledge graphs
-* [x] EmbeddingGemma ONNX deployment
-
-### Future Releases
-
-* **v1.1**: Enhanced consolidation algorithms and graph reasoning
-* **v1.2**: Additional multimodal encoders (video, documents)
-* **v1.3**: Distributed memory for multi-user scenarios
-* **v2.0**: Full 27-algorithm suite from research prototype
-
-## 🤝 Contributing
-
-We welcome contributions! Please see our [Contributing Guide](CONTRIBUTING.md) for details.
-
-### Development Setup
+After building with `ffi-release`, quick smoke commands are:
 
 ```bash
-# Clone with submodules
-git clone --recursive https://github.com/agentflare/cortext.git
-cd cortext
-
-# Install development dependencies
-pip install -r requirements-dev.txt
-
-# Build and test
-mkdir build && cd build
-cmake -DCMAKE_BUILD_TYPE=Debug ..
-make -j$(nproc)
-ctest
+PYTHONPATH=bindings/python python3 -c "import cortext; print(cortext.version())"
+(cd bindings/go && go test .)
+(cd bindings/javascript && npm run build && node -e "const { version } = require('./'); console.log(version())")
 ```
 
-## 📄 License
+## Important CMake Options
 
-MIT License - See [LICENSE](LICENSE) file for details.
+- `BUILD_TESTING=ON|OFF`: build the Catch2 suite
+- `CORTEXT_BUILD_EXAMPLES=ON|OFF`: build binaries under `examples/`
+- `CORTEXT_BUILD_NODE_BINDINGS=ON|OFF`: build the Node.js addon under `bindings/javascript`
+- `BUILD_WASM=ON|OFF`: configure the WebAssembly build
+- `CORTEXT_ENABLE_EMBEDDINGGEMMA=ON|OFF`: enable the EmbeddingGemma encoder path
+- `CORTEXT_DISABLE_LITERT=ON|OFF`: disable LiteRT-LM-backed extractor/summarizer paths
+- `CORTEXT_DISABLE_OGA=ON|OFF`: disable onnxruntime-genai-backed Phi-4 paths
+- `CORTEXT_DISABLE_SHERPA_ONNX=ON|OFF`: disable sherpa-onnx audio integration
 
-## 📚 Documentation
+## Deep Consolidation Backends
 
-* **[Production MVP Specification](docs/pmvp.md)**: Complete technical specification
-* **[Algorithm Documentation](docs/algorithms.md)**: Memory algorithms and research
-* **[API Reference](docs/api/)**: Language-specific API documentation
-* **[Examples](examples/)**: Usage examples and tutorials
+Deep consolidation backend selection stays internal, but you can override it with environment variables:
 
-## 🙏 Acknowledgments
+- `CORTEXT_DEEP_LLM_BACKEND=auto|gemma|lfm2|mixed`
+- `CORTEXT_LFM2_SUMMARIZER_MODEL=/abs/path/LFM2.5-350M-Q4_K_M.gguf`
+- `CORTEXT_LFM2_EXTRACT_MODEL=/abs/path/LFM2.5-350M-Q4_K_M.gguf`
+- `CORTEXT_LLAMA_CPP_LOG_LEVEL=none|error|warn|info|debug`
 
-Built on groundbreaking research in intelligent context systems and real-time AI augmentation. Special thanks to the teams behind EmbeddingGemma, Gemma 3n, sqlite-vec, and sqlite-graph for their excellent foundational work.
+Current behavior:
+- `auto` prefers the mixed path when both stacks are available
+- the Liquid `llama.cpp` path now prefers `LFM2.5-350M-GGUF`
+- if `LFM2.5-350M-GGUF` is not present, the resolver falls back to the older pinned `LFM2-2.6B-Transcript` summarizer and `LFM2-1.2B-Extract` extractor
+- the mixed path uses Gemma/LiteRT-LM for summarization and Liquid/`llama.cpp` for extraction
 
-***
+## Experiments And Docs
 
-**Cortext** - The right brain for your LLM's left brain. Intelligent context that learns and adapts in real-time.
+Run the long-horizon harness with:
+
+```bash
+python scripts/run_memory_harness.py --max-conversations 2 --max-turns 360 --max-total 720 --no-multi
+```
+
+When algorithms or results change, update the paper sources under `docs/paper/sections/` and regenerate the manuscript:
+
+```bash
+QUARTO_DISABLE_GIT=1 QUARTO_DISABLE_GITHUB=1 quarto render docs/paper
+```
+
+`docs/paper/_manuscript/index.md` is the generated manuscript source of truth used by the paper build.
+
+## Release Status
+
+Cortext is currently released as an `alpha`.
+
+The current alpha is focused on proving the core long-horizon memory architecture, retrieval behavior, consolidation pipeline, and local inference stack well enough to ship publicly and iterate with users.
+
+## v1 Direction
+
+The planned `v1` direction is to harden the runtime and inference stack in two specific ways:
+
+- move the event-driven system to `stateforward/sml.cpp`
+- use that transition to improve runtime structure and memory safety
+- move inference onto `stateforward/emel.cpp` when that library is complete and ready for production use
+
+Those changes are intentionally deferred until `v1`. The current alpha remains focused on shipping, stabilizing behavior, and collecting real-world feedback before making that architectural transition.
+
+## License
+
+Cortext is licensed under the Apache License, Version 2.0. See `LICENSE`.
+
+## Third-Party Licensing
+
+This repository includes or depends on third-party code, model assets, and runtime components that may be licensed under terms other than Apache-2.0.
+
+The Apache-2.0 license applies to Cortext source code in this repository unless otherwise noted. Third-party components retain their own licenses, including material under `third_party/`, `models/`, and any bundled external assets.
+
+Before redistributing binaries, model bundles, or packaged releases, verify the license terms for every included dependency and model artifact.

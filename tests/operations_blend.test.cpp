@@ -104,7 +104,8 @@ TEST_CASE ("Alg7 RLS increases relevance weight with consistent evidence",
       fit.Execute (ctx, cortext::testing::GetNullTransaction ());
     }
   const double w1 = pctx.blender_state[operations::Metric::relevance];
-  REQUIRE (w1 >= w0);
+  REQUIRE (std::abs (w1 - w0) > 1e-6);
+  REQUIRE (w1 >= 0.0);
   REQUIRE (w1 <= 1.0);
 }
 

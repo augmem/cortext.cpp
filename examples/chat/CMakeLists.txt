@@ -10,6 +10,14 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(imgui)
 
+# ImPlot (pairs with Dear ImGui; sources added directly)
+FetchContent_Declare(
+  implot
+  GIT_REPOSITORY https://github.com/epezent/implot.git
+  GIT_TAG 4707b24
+)
+FetchContent_Populate(implot)
+
 # GLFW for windowing
 find_package(glfw3 3.3 REQUIRED)
 
@@ -36,6 +44,10 @@ add_executable(cortext_chat
   chat_window.cpp
 )
 
+add_executable(cortext_chat_profile
+  profile.cpp
+)
+
 # Add ImGui sources (Dear ImGui is not a CMake project)
 target_sources(cortext_chat PRIVATE
   ${imgui_SOURCE_DIR}/imgui.cpp
@@ -45,12 +57,16 @@ target_sources(cortext_chat PRIVATE
   ${imgui_SOURCE_DIR}/imgui_widgets.cpp
   ${imgui_SOURCE_DIR}/backends/imgui_impl_glfw.cpp
   ${imgui_SOURCE_DIR}/backends/imgui_impl_opengl3.cpp
+  ${implot_SOURCE_DIR}/implot.cpp
+  ${implot_SOURCE_DIR}/implot_items.cpp
 )
 
 target_include_directories(cortext_chat PRIVATE
   ${openai_cpp_SOURCE_DIR}/include
   ${imgui_SOURCE_DIR}
   ${imgui_SOURCE_DIR}/backends
+  ${implot_SOURCE_DIR}
+  ${CMAKE_SOURCE_DIR}/src
 )
 
 target_link_libraries(cortext_chat PRIVATE
@@ -68,13 +84,25 @@ target_link_libraries(cortext_chat PRIVATE
   opentelemetry-cpp::otlp_grpc_log_record_exporter
 )
 
+target_link_libraries(cortext_chat_profile PRIVATE
+  cortext::cortext
+)
+
 target_compile_features(cortext_chat PRIVATE cxx_std_20)
+target_compile_features(cortext_chat_profile PRIVATE cxx_std_20)
+
+target_include_directories(cortext_chat_profile PRIVATE
+  ${CMAKE_SOURCE_DIR}/src
+)
 
 # Ensure the runtime loader can find vendored dylibs on macOS.
 if(APPLE)
   set(ORT_LIB_DIR "${CMAKE_BINARY_DIR}/third_party/onnxruntime-install/lib")
   set(LITERT_LIB_DIR "${CMAKE_BINARY_DIR}/third_party/litert-lm-install/lib")
   set_target_properties(cortext_chat PROPERTIES
+    BUILD_RPATH "${ORT_LIB_DIR};${LITERT_LIB_DIR}"
+  )
+  set_target_properties(cortext_chat_profile PROPERTIES
     BUILD_RPATH "${ORT_LIB_DIR};${LITERT_LIB_DIR}"
   )
   # macOS frameworks needed by GLFW
@@ -91,8 +119,10 @@ endif()
 # Keep warnings reasonable for an example.
 if(MSVC)
   target_compile_options(cortext_chat PRIVATE /W4)
+  target_compile_options(cortext_chat_profile PRIVATE /W4)
 else()
   target_compile_options(cortext_chat PRIVATE -Wall -Wextra -Wpedantic)
+  target_compile_options(cortext_chat_profile PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
 # Suppress warnings in ImGui source files
@@ -104,5 +134,7 @@ set_source_files_properties(
   ${imgui_SOURCE_DIR}/imgui_widgets.cpp
   ${imgui_SOURCE_DIR}/backends/imgui_impl_glfw.cpp
   ${imgui_SOURCE_DIR}/backends/imgui_impl_opengl3.cpp
+  ${implot_SOURCE_DIR}/implot.cpp
+  ${implot_SOURCE_DIR}/implot_items.cpp
   PROPERTIES COMPILE_OPTIONS "-w"
 )

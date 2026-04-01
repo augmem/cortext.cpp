@@ -1,11 +1,15 @@
 #include "chat_window.hpp"
+#include "chunk_diagnostics.hpp"
 #include "context_tab.hpp"
+#include "encoder/text_encoder_factory.hpp"
 #include "imgui_app.hpp"
+#include "metrics_state.hpp"
 #include "streaming_client.hpp"
+#include "streaming_text_probe.hpp"
 
 #include <cortext/cortext.hpp>
 #include <cortext/core/knobs.hpp>
-#include <cortext/encoder/imagebind.hpp>
+#include <cortext/internal/cancellation.hpp>
 #include <cortext/operations/metrics.hpp>
 #include <cortext/store/sqlite_store.hpp>
 #include <cortext/telemetry/telemetry.hpp>
@@ -307,11 +311,75 @@ struct IdleTracker {
     return std::chrono::duration_cast<std::chrono::seconds>(idle).count() >= idle_required;
   }
 
+  std::optional<int> RemainingSeconds(double stability) const {
+    std::lock_guard<std::mutex> lock(mu);
+    if (!consolidation_pending) return std::nullopt;
+    const int idle_required = cortext::core::IdleRequiredSeconds(stability);
+    const auto idle = std::chrono::steady_clock::now() - last_activity;
+    const int idle_seconds
+        = static_cast<int>(std::chrono::duration_cast<std::chrono::seconds>(idle).count());
+    return std::max(0, idle_required - idle_seconds);
+  }
+
   void MarkConsolidated() {
     std::lock_guard<std::mutex> lock(mu);
     consolidation_pending = false;
   }
 };
+
+constexpr std::size_t kStreamingProbeMinChars = 32;
+constexpr std::size_t kStreamingProbeMaxChars = 128;
+
+std::size_t TrimmedProbeLength(const std::string& text) {
+  std::size_t end = text.size();
+  while (end > 0
+         && std::isspace(static_cast<unsigned char>(text[end - 1]))
+         && text[end - 1] != '\n') {
+    --end;
+  }
+  return end;
+}
+
+bool HasProbeBoundary(const std::string& text) {
+  if (text.empty()) return false;
+  const char tail = text.back();
+  if (tail == '\n') return true;
+
+  std::size_t idx = text.size();
+  while (idx > 0 && std::isspace(static_cast<unsigned char>(text[idx - 1]))) {
+    --idx;
+  }
+  if (idx == 0) return false;
+
+  switch (text[idx - 1]) {
+    case '.':
+    case '!':
+    case '?':
+    case ':':
+    case ';':
+      return true;
+    default:
+      return false;
+  }
+}
+
+bool ShouldRunStreamingProbe(const std::string& text, bool force_flush = false) {
+  const std::size_t trimmed = TrimmedProbeLength(text);
+  if (trimmed == 0) return false;
+  if (force_flush) return true;
+  if (trimmed >= kStreamingProbeMaxChars) return true;
+  if (trimmed < kStreamingProbeMinChars) return false;
+  return HasProbeBoundary(text);
+}
+
+bool IsCancelledConsolidationError(const std::exception& ex) {
+  const std::string_view msg(ex.what());
+  return msg.find("cancelled") != std::string_view::npos
+      || msg.find("interrupted") != std::string_view::npos
+      || msg.find("SQLITE_INTERRUPT") != std::string_view::npos;
+}
+
+uint64_t NowUnixMillis();
 
 /// @brief Extract text content from binary blobs (concatenated UTF-8).
 /// @param blobs Vector of binary blobs (one per signal).
@@ -325,6 +393,11 @@ std::string ExtractTextFromBlobs(const std::vector<std::vector<unsigned char>>& 
     }
   }
   return result;
+}
+
+std::string TruncatePreview(const std::string& text, std::size_t max_len = 160) {
+  if (text.size() <= max_len) return text;
+  return text.substr(0, max_len) + "...";
 }
 
 chat::MemoryEvent
@@ -356,6 +429,120 @@ CreateMemoryEvent(chat::MemoryEventType type,
   evt.threshold_t = mem.threshold_t;
 
   return evt;
+}
+
+chat::ChunkRetrievedMemory CreateRetrievedMemoryPreview(
+    const cortext::Cortext::Context::Memory& mem) {
+  chat::ChunkRetrievedMemory preview;
+  preview.memory_id = mem.id;
+  preview.source_id = mem.source_id;
+  preview.preview = TruncatePreview(ExtractTextFromBlobs(mem.content));
+  preview.relevance = mem.relevance;
+  preview.composite_score = mem.composite_score;
+  return preview;
+}
+
+chat::ChunkProbeEvent BeginChunkProbeEvent(
+    chat::ChunkDiagnosticsState& diagnostics,
+    const std::string& chunk_text,
+    int restart_index,
+    std::size_t tokens_so_far) {
+  chat::ChunkProbeEvent event;
+  {
+    std::lock_guard<std::mutex> lock(diagnostics.mu);
+    event.event_id = diagnostics.next_event_id++;
+    diagnostics.active_probe.reset();
+  }
+  event.started_at_ms = NowUnixMillis();
+  event.in_progress = true;
+  event.chunk_text = chunk_text;
+  event.chunk_char_count = chunk_text.size();
+  event.restart_index = restart_index;
+  event.tokens_so_far = tokens_so_far;
+  return event;
+}
+
+void PublishActiveChunkProbe(chat::ChunkDiagnosticsState& diagnostics,
+                             const chat::ChunkProbeEvent& event) {
+  std::lock_guard<std::mutex> lock(diagnostics.mu);
+  diagnostics.active_probe = event;
+}
+
+void FinalizeChunkProbeSuccess(chat::ChunkProbeEvent& event,
+                               const cortext::Cortext::Context& ctx,
+                               double boundary_threshold,
+                               bool boundary_score_pass,
+                               int new_memory_count) {
+  event.in_progress = false;
+  event.completed_at_ms = NowUnixMillis();
+  event.encode_ms = ctx.encode_ms;
+  event.process_ms = ctx.process_ms;
+  event.hydrate_ms = ctx.hydrate_ms;
+  event.total_ms = ctx.total_ms;
+  event.at_boundary = ctx.at_boundary;
+  event.boundary_score = ctx.boundary_score;
+  event.boundary_threshold = boundary_threshold;
+  event.boundary_score_pass = boundary_score_pass;
+  event.should_interrupt = ctx.should_interrupt;
+  event.new_memory_count = new_memory_count;
+  event.raw_retrieved_count = ctx.retrieved_memory.size();
+  event.interrupt_gate_has_candidates = ctx.interrupt_gate_has_candidates;
+  event.interrupt_gate_blocked_no_store = ctx.interrupt_gate_blocked_no_store;
+  event.interrupt_gate_rel_pass = ctx.interrupt_gate_rel_pass;
+  event.interrupt_gate_novelty_pass = ctx.interrupt_gate_novelty_pass;
+  event.interrupt_gate_mu_pass = ctx.interrupt_gate_mu_pass;
+  event.interrupt_gate_novelty_mu_pass = ctx.interrupt_gate_novelty_mu_pass;
+  event.interrupt_gate_dup_pass = ctx.interrupt_gate_dup_pass;
+  event.interrupt_gate_boundary_mu_pass = ctx.interrupt_gate_boundary_mu_pass;
+  event.interrupt_gate_rel_star = ctx.interrupt_gate_rel_star;
+  event.interrupt_gate_retrieval_thresh = ctx.interrupt_gate_retrieval_thresh;
+  event.interrupt_gate_boundary_mult_eff = ctx.interrupt_gate_boundary_mult_eff;
+  event.interrupt_gate_affect_drive = ctx.interrupt_gate_affect_drive;
+  for (const auto& mem : ctx.retrieved_memory) {
+    event.retrieved_memories.push_back(CreateRetrievedMemoryPreview(mem));
+  }
+  event.reason = chat::ClassifyChunkProbeReason({
+      .should_interrupt = ctx.should_interrupt,
+      .new_memory_count = new_memory_count,
+      .at_boundary = ctx.at_boundary,
+      .boundary_score_pass = boundary_score_pass,
+      .interrupt_gate_has_candidates = ctx.interrupt_gate_has_candidates,
+      .interrupt_gate_blocked_no_store = ctx.interrupt_gate_blocked_no_store,
+      .interrupt_gate_rel_pass = ctx.interrupt_gate_rel_pass,
+      .interrupt_gate_novelty_mu_pass = ctx.interrupt_gate_novelty_mu_pass,
+      .interrupt_gate_dup_pass = ctx.interrupt_gate_dup_pass,
+      .interrupt_gate_boundary_mu_pass = ctx.interrupt_gate_boundary_mu_pass,
+  });
+}
+
+void FinalizeChunkProbeError(chat::ChunkProbeEvent& event,
+                             const std::string& error_message) {
+  event.in_progress = false;
+  event.had_error = true;
+  event.error_message = error_message;
+  event.completed_at_ms = NowUnixMillis();
+  event.reason = "error";
+}
+
+void CommitChunkProbeEvent(chat::ChunkDiagnosticsState& diagnostics,
+                           chat::ChunkProbeEvent event,
+                           std::size_t max_events) {
+  std::lock_guard<std::mutex> lock(diagnostics.mu);
+  diagnostics.active_probe.reset();
+  diagnostics.recent_probes.push_back(std::move(event));
+  while (diagnostics.recent_probes.size() > max_events) {
+    diagnostics.recent_probes.pop_front();
+  }
+  diagnostics.total_probes++;
+  const auto& latest = diagnostics.recent_probes.back();
+  if (latest.reason == "interrupt_triggered") {
+    diagnostics.interrupts++;
+  } else if (latest.reason == "interrupt_suppressed_no_new_memories") {
+    diagnostics.suppressed++;
+  }
+  if (latest.had_error) {
+    diagnostics.errors++;
+  }
 }
 
 chat::MemoryEvent
@@ -393,6 +580,221 @@ CreateStoredEvent(long long embedding_id, const std::string &content,
   evt.threshold_t = output.threshold.value_or(0.0);
 
   return evt;
+}
+
+long long GetAnyInt64(const std::map<std::string, std::any>& row,
+                     const std::string& key,
+                     long long fallback = 0) {
+  auto it = row.find(key);
+  if (it == row.end() || !it->second.has_value()) return fallback;
+  if (it->second.type() == typeid(long long)) {
+    return std::any_cast<long long>(it->second);
+  }
+  if (it->second.type() == typeid(int)) {
+    return static_cast<long long>(std::any_cast<int>(it->second));
+  }
+  if (it->second.type() == typeid(double)) {
+    return static_cast<long long>(std::any_cast<double>(it->second));
+  }
+  return fallback;
+}
+
+double GetAnyDouble(const std::map<std::string, std::any>& row,
+                    const std::string& key,
+                    double fallback = 0.0) {
+  auto it = row.find(key);
+  if (it == row.end() || !it->second.has_value()) return fallback;
+  if (it->second.type() == typeid(double)) {
+    return std::any_cast<double>(it->second);
+  }
+  if (it->second.type() == typeid(long long)) {
+    return static_cast<double>(std::any_cast<long long>(it->second));
+  }
+  if (it->second.type() == typeid(int)) {
+    return static_cast<double>(std::any_cast<int>(it->second));
+  }
+  return fallback;
+}
+
+std::string GetAnyString(const std::map<std::string, std::any>& row,
+                         const std::string& key,
+                         const std::string& fallback = {}) {
+  auto it = row.find(key);
+  if (it == row.end() || !it->second.has_value()) return fallback;
+  if (it->second.type() == typeid(std::string)) {
+    return std::any_cast<std::string>(it->second);
+  }
+  if (it->second.type() == typeid(const char*)) {
+    return std::string(std::any_cast<const char*>(it->second));
+  }
+  return fallback;
+}
+
+uint64_t NowUnixMillis();
+
+void RefreshDatabaseExplorer(chat::DatabaseExplorerState& state,
+                             const std::string& db_path) {
+  auto store = cortext::SQLiteStore::Create(db_path);
+
+  const auto mem_count = store->Execute("SELECT COUNT(*) AS cnt FROM memories", {});
+  const auto sig_count = store->Execute("SELECT COUNT(*) AS cnt FROM signals", {});
+  const auto assoc_count = store->Execute("SELECT COUNT(*) AS cnt FROM associations", {});
+  const auto ep_count = store->Execute("SELECT COUNT(*) AS cnt FROM episodes", {});
+
+  const auto memory_rows = store->Execute(
+      "SELECT memory_id, COALESCE(episode_id, 0) AS episode_id, "
+      "       COALESCE(embedding_id, 0) AS embedding_id, kind, source_id, "
+      "       COALESCE(label, '') AS label, start_ts, COALESCE(end_ts, 0) AS end_ts, "
+      "       n_signals, strength, connectivity, source_reliability, "
+      "       retrieved_count, used_count "
+      "FROM memories "
+      "ORDER BY created_at DESC, memory_id DESC "
+      "LIMIT 80",
+      {});
+
+  const auto signal_rows = store->Execute(
+      "SELECT signal_id, COALESCE(memory_id, 0) AS memory_id, embedding_id, "
+      "       source_id, modality, COALESCE(mime, '') AS mime, timestamp, "
+      "       serial_position, score, COALESCE(salience, 0.0) AS salience, "
+      "       COALESCE(threshold_t, 0.0) AS threshold_t "
+      "FROM signals "
+      "ORDER BY timestamp DESC, signal_id DESC "
+      "LIMIT 80",
+      {});
+
+  const auto association_rows = store->Execute(
+      "SELECT a.source_memory_id, a.target_memory_id, a.edge_type, a.weight, "
+      "       COALESCE(a.decay_rate, 0.0) AS decay_rate, "
+      "       COALESCE(a.last_reinforced, 0) AS last_reinforced, "
+      "       COALESCE(sm.kind, '') AS source_kind, "
+      "       COALESCE(sm.label, '') AS source_label, "
+      "       COALESCE(sm.source_id, '') AS source_source_id, "
+      "       COALESCE(tm.kind, '') AS target_kind, "
+      "       COALESCE(tm.label, '') AS target_label, "
+      "       COALESCE(tm.source_id, '') AS target_source_id "
+      "FROM associations a "
+      "LEFT JOIN memories sm ON sm.memory_id = a.source_memory_id "
+      "LEFT JOIN memories tm ON tm.memory_id = a.target_memory_id "
+      "ORDER BY a.weight DESC, a.last_reinforced DESC, a.source_memory_id DESC "
+      "LIMIT 120",
+      {});
+
+  const auto episode_rows = store->Execute(
+      "SELECT episode_id, start_ts, COALESCE(end_ts, 0) AS end_ts, "
+      "       COALESCE(boundary_type, '') AS boundary_type, created_at "
+      "FROM episodes "
+      "ORDER BY start_ts DESC, episode_id DESC "
+      "LIMIT 40",
+      {});
+
+  std::vector<chat::DatabaseMemoryRow> memories;
+  memories.reserve(memory_rows.size());
+  for (const auto& row : memory_rows) {
+    chat::DatabaseMemoryRow item;
+    item.memory_id = GetAnyInt64(row, "memory_id");
+    item.episode_id = GetAnyInt64(row, "episode_id");
+    item.embedding_id = GetAnyInt64(row, "embedding_id");
+    item.kind = GetAnyString(row, "kind");
+    item.source_id = GetAnyString(row, "source_id");
+    item.label = GetAnyString(row, "label");
+    item.start_ts = static_cast<uint64_t>(GetAnyInt64(row, "start_ts"));
+    item.end_ts = static_cast<uint64_t>(GetAnyInt64(row, "end_ts"));
+    item.n_signals = GetAnyInt64(row, "n_signals");
+    item.strength = GetAnyDouble(row, "strength");
+    item.connectivity = GetAnyDouble(row, "connectivity");
+    item.source_reliability = GetAnyDouble(row, "source_reliability");
+    item.retrieved_count = GetAnyInt64(row, "retrieved_count");
+    item.used_count = GetAnyInt64(row, "used_count");
+    memories.push_back(std::move(item));
+  }
+
+  std::vector<chat::DatabaseSignalRow> signals;
+  signals.reserve(signal_rows.size());
+  for (const auto& row : signal_rows) {
+    chat::DatabaseSignalRow item;
+    item.signal_id = GetAnyInt64(row, "signal_id");
+    item.memory_id = GetAnyInt64(row, "memory_id");
+    item.embedding_id = GetAnyInt64(row, "embedding_id");
+    item.source_id = GetAnyString(row, "source_id");
+    item.modality = GetAnyString(row, "modality");
+    item.mime = GetAnyString(row, "mime");
+    item.timestamp = static_cast<uint64_t>(GetAnyInt64(row, "timestamp"));
+    item.serial_position = GetAnyInt64(row, "serial_position");
+    item.score = GetAnyDouble(row, "score");
+    item.salience = GetAnyDouble(row, "salience");
+    item.threshold_t = GetAnyDouble(row, "threshold_t");
+    signals.push_back(std::move(item));
+  }
+
+  std::vector<chat::DatabaseAssociationRow> associations;
+  associations.reserve(association_rows.size());
+  for (const auto& row : association_rows) {
+    chat::DatabaseAssociationRow item;
+    item.source_memory_id = GetAnyInt64(row, "source_memory_id");
+    item.target_memory_id = GetAnyInt64(row, "target_memory_id");
+    item.edge_type = GetAnyString(row, "edge_type");
+    item.weight = GetAnyDouble(row, "weight");
+    item.decay_rate = GetAnyDouble(row, "decay_rate");
+    item.last_reinforced = static_cast<uint64_t>(GetAnyInt64(row, "last_reinforced"));
+    item.source_kind = GetAnyString(row, "source_kind");
+    item.source_label = GetAnyString(row, "source_label");
+    item.source_source_id = GetAnyString(row, "source_source_id");
+    item.target_kind = GetAnyString(row, "target_kind");
+    item.target_label = GetAnyString(row, "target_label");
+    item.target_source_id = GetAnyString(row, "target_source_id");
+    associations.push_back(std::move(item));
+  }
+
+  std::vector<chat::DatabaseEpisodeRow> episodes;
+  episodes.reserve(episode_rows.size());
+  for (const auto& row : episode_rows) {
+    chat::DatabaseEpisodeRow item;
+    item.episode_id = GetAnyInt64(row, "episode_id");
+    item.start_ts = static_cast<uint64_t>(GetAnyInt64(row, "start_ts"));
+    item.end_ts = static_cast<uint64_t>(GetAnyInt64(row, "end_ts"));
+    item.boundary_type = GetAnyString(row, "boundary_type");
+    item.created_at = static_cast<uint64_t>(GetAnyInt64(row, "created_at"));
+    episodes.push_back(std::move(item));
+  }
+
+  std::lock_guard<std::mutex> lock(state.mu);
+  state.memories = std::move(memories);
+  state.signals = std::move(signals);
+  state.associations = std::move(associations);
+  state.episodes = std::move(episodes);
+  state.total_memories = mem_count.empty() ? 0 : GetAnyInt64(mem_count.front(), "cnt");
+  state.total_signals = sig_count.empty() ? 0 : GetAnyInt64(sig_count.front(), "cnt");
+  state.total_associations = assoc_count.empty() ? 0 : GetAnyInt64(assoc_count.front(), "cnt");
+  state.total_episodes = ep_count.empty() ? 0 : GetAnyInt64(ep_count.front(), "cnt");
+  state.refreshed_at = NowUnixMillis();
+  state.refresh_requested = false;
+  state.last_refresh_status =
+      "Loaded " + std::to_string(state.memories.size()) + " memories, "
+      + std::to_string(state.associations.size()) + " relationships, "
+      + std::to_string(state.signals.size()) + " signals.";
+}
+
+void ResetChatDatabase(cortext::Cortext::Config cfg,
+                       std::unique_ptr<cortext::Cortext>& cortext_ctx,
+                       const std::filesystem::path& db_path,
+                       const std::filesystem::path& models_dir,
+                       chat::DatabaseExplorerState& db_state,
+                       std::mutex& db_write_mu) {
+  std::lock_guard<std::mutex> lock(db_write_mu);
+  if (cortext_ctx) {
+    cortext_ctx->Flush();
+    cortext_ctx.reset();
+  }
+
+  if (db_path != std::filesystem::path(":memory:")) {
+    std::error_code ec;
+    std::filesystem::remove(db_path, ec);
+    std::filesystem::remove(db_path.string() + "-wal", ec);
+    std::filesystem::remove(db_path.string() + "-shm", ec);
+  }
+
+  cortext_ctx = cortext::Cortext::Create(cfg, db_path.string(), models_dir.string());
+  RefreshDatabaseExplorer(db_state, db_path.string());
 }
 
 std::string GetEnv(const char* name, const std::string& fallback = {}) {
@@ -494,7 +896,14 @@ std::string FormatMemoriesForSystemPrompt(
   if (memories.empty()) return {};
 
   std::ostringstream oss;
-  oss << "<memories>\n";
+  const std::string generated_at = FormatTimestampRfc2822(NowUnixMillis());
+  oss << "<memories";
+  if (!generated_at.empty()) {
+    oss << " date=\"" << XmlEscape(generated_at) << "\"";
+  }
+  oss << ">\n";
+  oss << "<!-- Use these memories if they help answer the current turn, but "
+         "only when they are relevant to the response. -->\n";
   for (const auto& m : memories) {
     std::string source = "unknown";
     if (m.source_id.find("user") != std::string::npos) {
@@ -524,6 +933,43 @@ std::string FormatMemoriesForSystemPrompt(
   return oss.str();
 }
 
+std::vector<cortext::Cortext::Context::Memory> FilterInjectedMemories(
+    const std::vector<cortext::Cortext::Context::Memory>& retrieved_memories,
+    const std::vector<cortext::Cortext::Context::Memory>& working_memory) {
+  std::unordered_set<std::string> blocked_keys;
+  blocked_keys.reserve(working_memory.size() + retrieved_memories.size());
+
+  for (const auto& mem : working_memory) {
+    const std::string text = ExtractTextFromBlobs(mem.content);
+    if (text.empty()) {
+      continue;
+    }
+    blocked_keys.insert(mem.source_id + "\n" + text);
+  }
+
+  std::vector<cortext::Cortext::Context::Memory> filtered;
+  filtered.reserve(retrieved_memories.size());
+  for (const auto& mem : retrieved_memories) {
+    const std::string text = ExtractTextFromBlobs(mem.content);
+    if (text.empty()) {
+      continue;
+    }
+    const std::string key = mem.source_id + "\n" + text;
+    if (blocked_keys.find(key) != blocked_keys.end()) {
+      continue;
+    }
+    blocked_keys.insert(key);
+    filtered.push_back(mem);
+  }
+  return filtered;
+}
+
+std::string RoleFromSourceId(const std::string& source_id) {
+  if (source_id == "chat/user") return "user";
+  if (source_id == "chat/assistant") return "assistant";
+  return {};
+}
+
 template <typename Json>
 Json BuildOpenAIMessages(const std::vector<cortext::Cortext::Context::Memory>& working_memory,
                          const std::string& injected_system,
@@ -533,7 +979,6 @@ Json BuildOpenAIMessages(const std::vector<cortext::Cortext::Context::Memory>& w
     messages.push_back({{"role", "system"}, {"content", injected_system}});
   }
 
-  // Build assistant-only history from working memory ordered by timestamp.
   std::vector<const cortext::Cortext::Context::Memory*> ordered;
   ordered.reserve(working_memory.size());
   for (const auto& m : working_memory) {
@@ -545,16 +990,108 @@ Json BuildOpenAIMessages(const std::vector<cortext::Cortext::Context::Memory>& w
               return a->timestamp < b->timestamp;
             });
   for (const auto* m : ordered) {
-    if (m->source_id != "chat/assistant") {
+    const std::string role = RoleFromSourceId(m->source_id);
+    if (role.empty()) {
       continue;
     }
     std::string text_content = ExtractTextFromBlobs(m->content);
-    messages.push_back({{"role", "assistant"}, {"content", text_content}});
+    if (text_content.empty()) {
+      continue;
+    }
+    if (role == "user" && !latest_user_input.empty()
+        && text_content == latest_user_input) {
+      continue;
+    }
+    messages.push_back({{"role", role}, {"content", text_content}});
   }
   if (!latest_user_input.empty()) {
     messages.push_back({{"role", "user"}, {"content", latest_user_input}});
   }
   return messages;
+}
+
+std::size_t CountOpenAIContentChars(const openai::Json& content) {
+  if (content.is_string()) {
+    return content.get_ref<const std::string&>().size();
+  }
+  if (!content.is_array()) {
+    return 0;
+  }
+
+  std::size_t chars = 0;
+  for (const auto& item : content) {
+    if (item.is_string()) {
+      chars += item.get_ref<const std::string&>().size();
+      continue;
+    }
+    if (!item.is_object()) {
+      continue;
+    }
+    if (item.contains("text") && item["text"].is_string()) {
+      chars += item["text"].get_ref<const std::string&>().size();
+    }
+  }
+  return chars;
+}
+
+std::size_t CountOpenAIMessageChars(const openai::Json& messages) {
+  if (!messages.is_array()) {
+    return 0;
+  }
+
+  std::size_t chars = 0;
+  for (const auto& message : messages) {
+    if (!message.is_object()) {
+      continue;
+    }
+    if (message.contains("role") && message["role"].is_string()) {
+      chars += message["role"].get_ref<const std::string&>().size();
+    }
+    if (message.contains("content")) {
+      chars += CountOpenAIContentChars(message["content"]);
+    }
+  }
+  return chars;
+}
+
+struct ChunkDiagnosticsCounters {
+  std::size_t total_probes = 0;
+  std::size_t interrupts = 0;
+  std::size_t errors = 0;
+};
+
+ChunkDiagnosticsCounters SnapshotChunkDiagnostics(
+    const chat::ChunkDiagnosticsState& diagnostics) {
+  std::lock_guard<std::mutex> lock(diagnostics.mu);
+  return {
+      .total_probes = diagnostics.total_probes,
+      .interrupts = diagnostics.interrupts,
+      .errors = diagnostics.errors,
+  };
+}
+
+void RecordResponseMetrics(chat::MetricsState& metrics,
+                           chat::ResponseMetricsSample sample,
+                           std::size_t max_samples) {
+  std::lock_guard<std::mutex> lock(metrics.mu);
+  metrics.latest_response = sample;
+  metrics.response_history.push_back(std::move(sample));
+  while (metrics.response_history.size() > max_samples) {
+    metrics.response_history.pop_front();
+  }
+  metrics.total_responses++;
+}
+
+void RecordConsolidationMetrics(chat::MetricsState& metrics,
+                                chat::ConsolidationMetricsSample sample,
+                                std::size_t max_samples) {
+  std::lock_guard<std::mutex> lock(metrics.mu);
+  metrics.latest_consolidation = sample;
+  metrics.consolidation_history.push_back(std::move(sample));
+  while (metrics.consolidation_history.size() > max_samples) {
+    metrics.consolidation_history.pop_front();
+  }
+  metrics.total_consolidations++;
 }
 
 } // namespace
@@ -575,7 +1112,7 @@ int main(int argc, char** argv) {
   const auto repo_root = FindRepoRootFromExe((argc > 0) ? argv[0] : nullptr);
   const std::string model = GetEnv("OPENAI_MODEL", "gpt-4o-mini");
   std::filesystem::path db_path = GetEnv("CORTEXT_CHAT_DB", "examples/chat/chat_memory.db");
-  std::filesystem::path models_dir = GetEnv("CORTEXT_MODELS_DIR", "models/imagebind");
+  std::filesystem::path models_dir = GetEnv("CORTEXT_MODELS_DIR", "models");
 
   if (!has_models_env && models_dir.is_relative() && repo_root.has_value()) {
     models_dir = *repo_root / models_dir;
@@ -596,6 +1133,7 @@ int main(int argc, char** argv) {
   }
 
   auto status_state = std::make_shared<chat::StatusBarState>();
+  auto metrics_state = std::make_shared<chat::MetricsState>();
   auto retrieval_latency_state = std::make_shared<RetrievalLatencyState>();
   auto last_tokens_used = std::make_shared<std::atomic<std::int64_t>>(0);
   auto last_context = std::make_shared<chat::LastContext>();
@@ -697,24 +1235,21 @@ int main(int argc, char** argv) {
   const double sensitivity = GetEnvDouble("CORTEXT_SENSITIVITY", 0.5);
   const double stability = GetEnvDouble("CORTEXT_STABILITY", 0.5);
   const bool stream_interrupts = GetEnvBool("CORTEXT_CHAT_STREAM_INTERRUPTS", true);
+  auto settings_state = std::make_shared<chat::SettingsState>();
+  auto db_explorer_state = std::make_shared<chat::DatabaseExplorerState>();
+  {
+    std::lock_guard<std::mutex> lock(settings_state->mu);
+    settings_state->active_focus = focus;
+    settings_state->active_sensitivity = sensitivity;
+    settings_state->active_stability = stability;
+    settings_state->draft_focus = focus;
+    settings_state->draft_sensitivity = sensitivity;
+    settings_state->draft_stability = stability;
+  }
 
   openai::start(api_key, openai_org);
   if (!openai_base_url.empty()) {
     openai::instance().setBaseUrl(EnsureTrailingSlash(openai_base_url));
-  }
-
-  cortext::ImageBindEncoder encoder(models_dir.string());
-  try {
-    std::vector<float> probe;
-    encoder.EncodeText("probe", probe);
-    if (probe.size() != 256) {
-      throw std::runtime_error("unexpected embedding dim (expected 256)");
-    }
-  } catch (const std::exception& e) {
-    std::cerr << "ImageBind encoder unavailable: " << e.what() << "\n";
-    std::cerr << "Hint: build with -DCORTEXT_ENABLE_IMAGEBIND_ORT=ON and ensure models exist under "
-              << models_dir.string() << "\n";
-    return 1;
   }
 
   cortext::Cortext::Config cfg;
@@ -726,6 +1261,12 @@ int main(int argc, char** argv) {
     cortext_ctx = cortext::Cortext::Create(cfg, db_path.string(), models_dir.string());
   } catch (const std::exception& e) {
     std::cerr << "Failed to create cortext instance: " << e.what() << "\n";
+    try {
+      const auto resolved = cortext::internal::CreatePreferredTextEncoder(models_dir.string());
+      std::cerr << "Resolved text encoder: " << resolved.backend_name
+                << " (" << resolved.resolved_path.string() << ")\n";
+    } catch (...) {
+    }
     std::cerr << "Hint: set CORTEXT_CHAT_DB to an absolute writable path, e.g.\n";
     std::cerr << "  export CORTEXT_CHAT_DB=\"$HOME/.cortext/chat_memory.db\"\n";
     return 1;
@@ -741,17 +1282,39 @@ int main(int argc, char** argv) {
   std::vector<cortext::Cortext::Context::Memory> working_memory;
   std::vector<cortext::Cortext::Context::Memory> last_memories;
   std::deque<chat::MemoryEvent> memory_events;
+  auto chunk_diagnostics_state = std::make_shared<chat::ChunkDiagnosticsState>();
   bool last_should_interrupt = false;
   std::optional<std::string> last_error;
   bool generating = false;
   std::string input;
   static constexpr size_t kMaxMemoryEvents = 50;
+  static constexpr size_t kMaxChunkProbeEvents = 100;
+  static constexpr size_t kMaxResponseMetricsSamples = 100;
+  static constexpr size_t kMaxConsolidationMetricsSamples = 50;
   std::deque<chat::ChatMessage> chat_history;
+
+  auto refresh_db_explorer = [&]() {
+    try {
+      std::lock_guard<std::mutex> lock(db_write_mu);
+      RefreshDatabaseExplorer(*db_explorer_state, db_path.string());
+    } catch (const std::exception& ex) {
+      std::lock_guard<std::mutex> lock(db_explorer_state->mu);
+      db_explorer_state->refresh_requested = false;
+      db_explorer_state->last_refresh_status = std::string("DB refresh failed: ") + ex.what();
+    }
+  };
+  refresh_db_explorer();
 
   StreamingState streaming_state;
   std::string partial_response;
   int generation_restarts = 0;
   IdleTracker idle_tracker;
+  std::atomic<bool> typing_interrupt_requested{false};
+  std::atomic<bool> input_activity_requested{false};
+  std::atomic<bool> has_input_draft{false};
+  std::atomic<bool> idle_consolidating{false};
+  std::mutex idle_consolidation_stop_mu;
+  std::optional<cortext::StopSource> idle_consolidation_stop_source;
 
   // Track streaming thread to ensure proper cleanup before exit
   std::thread streaming_thread;
@@ -778,13 +1341,21 @@ int main(int argc, char** argv) {
   window_state.chat_history = &chat_history;
   window_state.memory_events = &memory_events;
   window_state.context = last_context;
+  window_state.chunk_diagnostics = chunk_diagnostics_state;
+  window_state.metrics = metrics_state;
   window_state.status = status_state;
+  window_state.settings = settings_state;
+  window_state.db_explorer = db_explorer_state;
   window_state.input = &input;
   window_state.generating = &generating;
   window_state.partial_response = &partial_response;
   window_state.generation_restarts = &generation_restarts;
   window_state.last_should_interrupt = &last_should_interrupt;
   window_state.last_error = &last_error;
+  window_state.typing_interrupt_requested = &typing_interrupt_requested;
+  window_state.input_activity_requested = &input_activity_requested;
+  window_state.has_input_draft = &has_input_draft;
+  window_state.idle_consolidating = &idle_consolidating;
   window_state.otlp_enabled = otlp_grpc_enabled;
 
   chat::ChatWindow window(window_state);
@@ -796,22 +1367,97 @@ int main(int argc, char** argv) {
       std::this_thread::sleep_for(std::chrono::seconds(2));
 
       bool is_generating = false;
+      bool has_draft = has_input_draft.load();
+      bool is_consolidating = idle_consolidating.load();
       {
         std::lock_guard<std::mutex> lock(mu);
         is_generating = generating;
       }
 
-      // Consolidation disabled for debugging
-      // if (!is_generating && idle_tracker.ShouldConsolidate(stability)) {
-      //   try {
-      //     std::lock_guard<std::mutex> lock(db_write_mu);
-      //     cortext_ctx->Consolidate();
-      //     idle_tracker.MarkConsolidated();
-      //   } catch (const std::exception& ex) {
-      //     std::lock_guard<std::mutex> lock(mu);
-      //     last_error = std::string("idle consolidation: ") + ex.what();
-      //   }
-      // }
+      double consolidation_stability = stability;
+      {
+        std::lock_guard<std::mutex> settings_lock(settings_state->mu);
+        consolidation_stability = settings_state->active_stability;
+      }
+
+      if (!is_generating && !has_draft && !is_consolidating
+          && idle_tracker.ShouldConsolidate(consolidation_stability)) {
+        idle_consolidating.store(true);
+        const auto consolidation_started_at = std::chrono::steady_clock::now();
+        cortext::StopSource stop_source;
+        {
+          std::lock_guard<std::mutex> stop_lock(idle_consolidation_stop_mu);
+          idle_consolidation_stop_source = stop_source;
+        }
+        const cortext::StopToken stop_token = stop_source.get_token();
+        try {
+          cortext::Cortext::Context cons_ctx;
+          {
+            std::lock_guard<std::mutex> lock(db_write_mu);
+            cons_ctx = cortext_ctx->Consolidate(
+                stop_token, cortext::ConsolidationMode::Both);
+          }
+          chat::ConsolidationMetricsSample metrics_sample;
+          metrics_sample.timestamp_ms = NowUnixMillis();
+          metrics_sample.duration_ms
+              = std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(
+                    std::chrono::steady_clock::now() - consolidation_started_at)
+                    .count();
+          if (stop_token.stop_requested()) {
+            metrics_sample.cancelled = true;
+            cortext::telemetry::LogInfo("chat.idle_consolidation.interrupted", {
+              cortext::telemetry::Attribute::String("reason", "user_typing")
+            });
+          } else {
+            {
+              std::lock_guard<std::mutex> lock(mu);
+              working_memory = cons_ctx.working_memory;
+            }
+            idle_tracker.MarkConsolidated();
+            metrics_sample.completed = true;
+            metrics_sample.working_memory_size
+                = static_cast<int>(cons_ctx.working_memory.size());
+            cortext::telemetry::LogInfo("chat.idle_consolidation.complete", {
+              cortext::telemetry::Attribute::Int64("working_memory_size", static_cast<int64_t>(cons_ctx.working_memory.size()))
+            });
+            refresh_db_explorer();
+          }
+          RecordConsolidationMetrics(
+              *metrics_state, std::move(metrics_sample),
+              kMaxConsolidationMetricsSamples);
+        } catch (const std::exception& ex) {
+          chat::ConsolidationMetricsSample metrics_sample;
+          metrics_sample.timestamp_ms = NowUnixMillis();
+          metrics_sample.duration_ms
+              = std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(
+                    std::chrono::steady_clock::now() - consolidation_started_at)
+                    .count();
+          if (stop_token.stop_requested() && IsCancelledConsolidationError(ex)) {
+            metrics_sample.cancelled = true;
+            metrics_sample.error_message = ex.what();
+            cortext::telemetry::LogInfo("chat.idle_consolidation.interrupted", {
+              cortext::telemetry::Attribute::String("reason", "user_typing"),
+              cortext::telemetry::Attribute::String("error", ex.what())
+            });
+          } else {
+            metrics_sample.had_error = true;
+            metrics_sample.error_message = ex.what();
+            std::lock_guard<std::mutex> lock(mu);
+            last_error = std::string("idle consolidation: ") + ex.what();
+            cortext::telemetry::LogError("chat.idle_consolidation.error", {
+              cortext::telemetry::Attribute::String("error", ex.what())
+            });
+          }
+          RecordConsolidationMetrics(
+              *metrics_state, std::move(metrics_sample),
+              kMaxConsolidationMetricsSamples);
+        }
+        {
+          std::lock_guard<std::mutex> stop_lock(idle_consolidation_stop_mu);
+          idle_consolidation_stop_source.reset();
+        }
+        idle_consolidating.store(false);
+      }
     }
   });
 
@@ -820,6 +1466,166 @@ int main(int argc, char** argv) {
   // Main render loop
   app.Run([&] {
     window.Render();
+
+    {
+      double idle_stability = stability;
+      bool is_generating = false;
+      {
+        std::lock_guard<std::mutex> settings_lock(settings_state->mu);
+        idle_stability = settings_state->active_stability;
+      }
+      {
+        std::lock_guard<std::mutex> lock(mu);
+        is_generating = generating;
+      }
+      const std::optional<int> idle_remaining
+          = is_generating ? std::nullopt
+                          : idle_tracker.RemainingSeconds(idle_stability);
+      if (status_state) {
+        std::lock_guard<std::mutex> lock(status_state->mu);
+        status_state->idle_pending = !is_generating && idle_remaining.has_value();
+        status_state->idle_seconds_remaining = idle_remaining;
+      }
+    }
+
+    if (input_activity_requested.exchange(false)) {
+      idle_tracker.RecordActivity();
+    }
+
+    if (typing_interrupt_requested.exchange(false)) {
+      if (idle_consolidating.load()) {
+        bool stop_requested = false;
+        {
+          std::lock_guard<std::mutex> stop_lock(idle_consolidation_stop_mu);
+          if (idle_consolidation_stop_source.has_value()) {
+            stop_requested = idle_consolidation_stop_source->request_stop();
+          }
+        }
+        cortext::telemetry::LogInfo("chat.user_typing_interrupt", {
+          cortext::telemetry::Attribute::Bool("idle_consolidating", true),
+          cortext::telemetry::Attribute::Bool("stop_requested", stop_requested)
+        });
+      }
+    }
+
+    bool requested_db_refresh = false;
+    bool requested_db_clear = false;
+    {
+      std::lock_guard<std::mutex> lock(db_explorer_state->mu);
+      requested_db_refresh = db_explorer_state->refresh_requested && !generating;
+      requested_db_clear = db_explorer_state->clear_requested && !generating;
+    }
+    if (requested_db_clear) {
+      try {
+        ResetChatDatabase(cfg, cortext_ctx, db_path, models_dir, *db_explorer_state, db_write_mu);
+        {
+          std::lock_guard<std::mutex> lock(mu);
+          working_memory.clear();
+          last_memories.clear();
+          memory_events.clear();
+          chat_history.clear();
+          partial_response.clear();
+          generation_restarts = 0;
+          last_should_interrupt = false;
+          last_error.reset();
+        }
+        {
+          std::lock_guard<std::mutex> lock(last_context->mu);
+          last_context->system_prompt.clear();
+          last_context->has_data = false;
+          last_context->scroll_position = 0.0f;
+        }
+        {
+          std::lock_guard<std::mutex> lock(chunk_diagnostics_state->mu);
+          chunk_diagnostics_state->active_probe.reset();
+          chunk_diagnostics_state->recent_probes.clear();
+          chunk_diagnostics_state->next_event_id = 1;
+          chunk_diagnostics_state->total_probes = 0;
+          chunk_diagnostics_state->interrupts = 0;
+          chunk_diagnostics_state->suppressed = 0;
+          chunk_diagnostics_state->errors = 0;
+        }
+        {
+          std::lock_guard<std::mutex> lock(metrics_state->mu);
+          metrics_state->response_history.clear();
+          metrics_state->consolidation_history.clear();
+          metrics_state->latest_response.reset();
+          metrics_state->latest_consolidation.reset();
+          metrics_state->total_responses = 0;
+          metrics_state->total_consolidations = 0;
+        }
+        last_tokens_used->store(0);
+        {
+          std::lock_guard<std::mutex> lock(status_state->mu);
+          status_state->tokens_used = 0;
+        }
+        {
+          std::lock_guard<std::mutex> lock(db_explorer_state->mu);
+          db_explorer_state->clear_requested = false;
+          db_explorer_state->last_refresh_status = "Chat database cleared.";
+        }
+      } catch (const std::exception& ex) {
+        std::lock_guard<std::mutex> lock(db_explorer_state->mu);
+        db_explorer_state->clear_requested = false;
+        db_explorer_state->last_refresh_status = std::string("Clear failed: ") + ex.what();
+      }
+    }
+    if (requested_db_refresh) {
+      refresh_db_explorer();
+    }
+
+    bool requested_apply = false;
+    double new_focus = 0.5;
+    double new_sensitivity = 0.5;
+    double new_stability = 0.5;
+    {
+      std::lock_guard<std::mutex> lock(settings_state->mu);
+      if (settings_state->apply_requested && !generating) {
+        requested_apply = true;
+        new_focus = settings_state->draft_focus;
+        new_sensitivity = settings_state->draft_sensitivity;
+        new_stability = settings_state->draft_stability;
+        settings_state->apply_requested = false;
+      }
+    }
+    if (requested_apply) {
+      try {
+        cortext::Cortext::Config next_cfg;
+        next_cfg.focus = new_focus;
+        next_cfg.sensitivity = new_sensitivity;
+        next_cfg.stability = new_stability;
+        next_cfg.affect_interrupt = cfg.affect_interrupt;
+        next_cfg.affect_retrieval = cfg.affect_retrieval;
+        next_cfg.reinforcement_enabled = cfg.reinforcement_enabled;
+        next_cfg.procedural_enabled = cfg.procedural_enabled;
+        next_cfg.sequential_edges_enabled = cfg.sequential_edges_enabled;
+        next_cfg.label_bank_path = cfg.label_bank_path;
+
+        std::unique_ptr<cortext::Cortext> next_ctx;
+        {
+          std::lock_guard<std::mutex> lock(db_write_mu);
+          if (cortext_ctx) {
+            cortext_ctx->Flush();
+          }
+          next_ctx = cortext::Cortext::Create(next_cfg, db_path.string(), models_dir.string());
+          cortext_ctx = std::move(next_ctx);
+        }
+        cfg = next_cfg;
+        {
+          std::lock_guard<std::mutex> lock(settings_state->mu);
+          settings_state->active_focus = new_focus;
+          settings_state->active_sensitivity = new_sensitivity;
+          settings_state->active_stability = new_stability;
+          settings_state->last_apply_status =
+              "Applied: F=" + std::to_string(new_focus)
+              + " S=" + std::to_string(new_sensitivity)
+              + " T=" + std::to_string(new_stability);
+        }
+      } catch (const std::exception& ex) {
+        std::lock_guard<std::mutex> lock(settings_state->mu);
+        settings_state->last_apply_status = std::string("Apply failed: ") + ex.what();
+      }
+    }
 
     // Check for pending message from input
     if (window.HasPendingMessage()) {
@@ -854,6 +1660,16 @@ int main(int argc, char** argv) {
         // Launch background job for streaming
         streaming_thread_active.store(true);
         streaming_thread = std::thread([&, text, model_copy = model] {
+          const auto chunk_counters_before
+              = SnapshotChunkDiagnostics(*chunk_diagnostics_state);
+          double focus_value = 0.5;
+          double sensitivity_value = 0.5;
+          {
+            std::lock_guard<std::mutex> lock(settings_state->mu);
+            focus_value = settings_state->active_focus;
+            sensitivity_value = settings_state->active_sensitivity;
+          }
+
           // Phase 1: Process user input through Cortext
           cortext::telemetry::LogDebug("chat.phase1.start", {
             cortext::telemetry::Attribute::String("source", "chat/user"),
@@ -861,9 +1677,14 @@ int main(int argc, char** argv) {
           });
 
           cortext::Cortext::Context retrieved;
+          double phase1_total_ms = 0.0;
+          double retrieval_latency_ms = 0.0;
+          double processing_latency_ms = 0.0;
           try {
             std::lock_guard<std::mutex> lock(db_write_mu);
             retrieved = cortext_ctx->ProcessText(text, "chat/user");
+            phase1_total_ms = retrieved.total_ms;
+            processing_latency_ms = retrieved.process_ms;
           } catch (const std::exception& ex) {
             std::lock_guard<std::mutex> lock(mu);
             last_error = std::string("cortext user: ") + ex.what();
@@ -877,8 +1698,9 @@ int main(int argc, char** argv) {
             working_memory = retrieved.working_memory;
             // Only inject memories if the interrupt gate approved them
             if (retrieved.should_interrupt) {
-              streaming_state.current_memories = retrieved.retrieved_memory;
-              for (const auto& mem : retrieved.retrieved_memory) {
+              streaming_state.current_memories = FilterInjectedMemories(
+                  retrieved.retrieved_memory, retrieved.working_memory);
+              for (const auto& mem : streaming_state.current_memories) {
                 memory_events.push_back(CreateMemoryEvent(chat::MemoryEventType::RETRIEVED, mem));
                 if (memory_events.size() > kMaxMemoryEvents) {
                   memory_events.pop_front();
@@ -904,6 +1726,16 @@ int main(int argc, char** argv) {
             cortext::telemetry::Attribute::Double("threshold", retrieved.output.threshold.value_or(0.0)),
             cortext::telemetry::Attribute::Bool("write_decision", retrieved.output.decision.value_or(false))
           });
+          if (retrieval_latency_state->retrieval_latency_ms.has_value()) {
+            retrieval_latency_ms = *retrieval_latency_state->retrieval_latency_ms;
+          }
+          {
+            std::lock_guard<std::mutex> lock(status_state->mu);
+            if (status_state->processing_latency_ms.has_value()) {
+              processing_latency_ms = *status_state->processing_latency_ms;
+            }
+          }
+          refresh_db_explorer();
 
           // Phase 2: Streaming generation with interrupt checking
           cortext::telemetry::LogDebug("chat.phase2.start", {
@@ -913,8 +1745,16 @@ int main(int argc, char** argv) {
 
           std::string assistant_reply;
           int local_restarts = 0;
+          chat::UsageAccumulator usage_accumulator;
+          bool had_stream_error = false;
+          std::string stream_error_message;
+          std::unique_ptr<cortext::internal::StreamingTextProbeSession> final_probe_session;
+          const auto response_started_at = std::chrono::steady_clock::now();
 
           while (local_restarts < StreamingState::kMaxRestarts) {
+            final_probe_session = std::make_unique<cortext::internal::StreamingTextProbeSession>(
+                *cortext_ctx, "chat/assistant");
+            std::string probe_buffer;
             std::string injected_system;
             {
               std::lock_guard<std::mutex> lock(mu);
@@ -923,6 +1763,7 @@ int main(int argc, char** argv) {
 
             using Json = openai::Json;
             Json messages = BuildOpenAIMessages<Json>(retrieved.working_memory, injected_system, text);
+            const std::size_t prompt_chars = CountOpenAIMessageChars(messages);
 
             {
               std::lock_guard<std::mutex> lock(last_context->mu);
@@ -960,6 +1801,7 @@ int main(int argc, char** argv) {
                 accumulated = streaming_state.accumulated_tokens;
                 partial_response = accumulated;
               }
+              probe_buffer += token;
 
               cortext::telemetry::LogDebug("chat.phase2.token", {
                 cortext::telemetry::Attribute::Int64("accumulated_length", static_cast<int64_t>(accumulated.size())),
@@ -969,51 +1811,91 @@ int main(int argc, char** argv) {
               if (!stream_interrupts) {
                 return;
               }
+              if (!ShouldRunStreamingProbe(probe_buffer)) {
+                return;
+              }
+
+              const std::string probe_chunk = std::move(probe_buffer);
+              probe_buffer.clear();
+              auto probe_event = BeginChunkProbeEvent(
+                  *chunk_diagnostics_state, probe_chunk, local_restarts, accumulated.size());
+              PublishActiveChunkProbe(*chunk_diagnostics_state, probe_event);
 
               try {
-                cortext::Cortext::Context ctx;
-                {
-                  std::lock_guard<std::mutex> lock(db_write_mu);
-                  ctx = cortext_ctx->ProcessText(accumulated, "chat/assistant");
-                }
+                cortext::Cortext::Context ctx = final_probe_session->AppendTextChunk(probe_chunk);
 
-                const double boundary_thresh = cortext::core::BoundaryThreshold(focus, sensitivity);
+                const double boundary_thresh =
+                    cortext::core::BoundaryThreshold(focus_value, sensitivity_value);
                 const bool boundary_score_pass
                     = ctx.boundary_score.has_value()
                       && *ctx.boundary_score >= boundary_thresh;
 
+                int new_memory_count = 0;
                 if (ctx.at_boundary && boundary_score_pass && ctx.should_interrupt
                     && local_restarts < StreamingState::kMaxRestarts) {
-                  cortext::telemetry::LogInfo("chat.phase2.interrupt", {
-                    cortext::telemetry::Attribute::Int64("new_memories", static_cast<int64_t>(ctx.retrieved_memory.size())),
-                    cortext::telemetry::Attribute::Int64("restart", static_cast<int64_t>(local_restarts)),
-                    cortext::telemetry::Attribute::Int64("tokens_so_far", static_cast<int64_t>(accumulated.size()))
-                  });
                   {
                     std::lock_guard<std::mutex> lock(mu);
+                    const auto filtered_retrieved = FilterInjectedMemories(
+                        ctx.retrieved_memory, working_memory);
                     std::unordered_set<long long> existing_ids;
                     for (const auto& m : streaming_state.current_memories) {
                       existing_ids.insert(m.id);
                     }
-                    for (const auto& m : ctx.retrieved_memory) {
+                    for (const auto& m : filtered_retrieved) {
                       if (existing_ids.find(m.id) == existing_ids.end()) {
                         streaming_state.current_memories.push_back(m);
                         memory_events.push_back(CreateMemoryEvent(chat::MemoryEventType::RETRIEVED, m));
                         if (memory_events.size() > kMaxMemoryEvents) {
                           memory_events.pop_front();
                         }
+                        ++new_memory_count;
                       }
                     }
-                    last_should_interrupt = true;
+                    last_should_interrupt = (new_memory_count > 0);
                   }
-                  streaming_state.cancel_requested.store(true);
-                  interrupted = true;
+                  if (new_memory_count > 0) {
+                    cortext::telemetry::LogInfo("chat.phase2.interrupt", {
+                      cortext::telemetry::Attribute::Int64("new_memories", static_cast<int64_t>(new_memory_count)),
+                      cortext::telemetry::Attribute::Int64("restart", static_cast<int64_t>(local_restarts)),
+                      cortext::telemetry::Attribute::Int64("tokens_so_far", static_cast<int64_t>(accumulated.size()))
+                    });
+                    streaming_state.cancel_requested.store(true);
+                    interrupted = true;
+                  } else {
+                    cortext::telemetry::LogDebug("chat.phase2.interrupt_suppressed", {
+                      cortext::telemetry::Attribute::Int64("raw_retrieved", static_cast<int64_t>(ctx.retrieved_memory.size())),
+                      cortext::telemetry::Attribute::Int64("restart", static_cast<int64_t>(local_restarts)),
+                      cortext::telemetry::Attribute::Int64("tokens_so_far", static_cast<int64_t>(accumulated.size()))
+                    });
+                  }
                 }
+
+                FinalizeChunkProbeSuccess(
+                    probe_event, ctx, boundary_thresh, boundary_score_pass, new_memory_count);
+                CommitChunkProbeEvent(
+                    *chunk_diagnostics_state, std::move(probe_event), kMaxChunkProbeEvents);
               } catch (const std::exception& ex) {
+                FinalizeChunkProbeError(probe_event, ex.what());
+                CommitChunkProbeEvent(
+                    *chunk_diagnostics_state, std::move(probe_event), kMaxChunkProbeEvents);
                 std::lock_guard<std::mutex> lock(mu);
                 last_error = std::string("cortext streaming: ") + ex.what();
               }
             });
+
+            chat::AccumulateUsage(
+                usage_accumulator, result.usage, prompt_chars,
+                result.full_content.size());
+
+            if (!result.was_cancelled && !probe_buffer.empty()) {
+              try {
+                (void)final_probe_session->CacheTextChunk(probe_buffer);
+                probe_buffer.clear();
+              } catch (const std::exception& ex) {
+                std::lock_guard<std::mutex> lock(mu);
+                last_error = std::string("cortext streaming tail: ") + ex.what();
+              }
+            }
 
             if (result.was_cancelled && interrupted && local_restarts < StreamingState::kMaxRestarts) {
               local_restarts++;
@@ -1025,6 +1907,8 @@ int main(int argc, char** argv) {
             }
 
             if (result.error.has_value()) {
+              had_stream_error = true;
+              stream_error_message = *result.error;
               cortext::telemetry::LogError("chat.phase2.stream_error", {
                 cortext::telemetry::Attribute::String("error", *result.error)
               });
@@ -1042,18 +1926,26 @@ int main(int argc, char** argv) {
             break;
           }
 
-          // Phase 3: Process final assistant reply through Cortext
+          // Phase 3: Commit final assistant reply through Cortext
           cortext::telemetry::LogDebug("chat.phase3.start", {
             cortext::telemetry::Attribute::Int64("reply_length", static_cast<int64_t>(assistant_reply.size())),
             cortext::telemetry::Attribute::String("source", "chat/assistant"),
             cortext::telemetry::Attribute::String("reply_content", assistant_reply.size() <= 200 ? assistant_reply : assistant_reply.substr(0, 200) + "...")
           });
 
+          double phase3_total_ms = 0.0;
+          bool phase3_failed = false;
+          std::string phase3_error_message;
           try {
             cortext::Cortext::Context asst_ctx;
             {
               std::lock_guard<std::mutex> lock(db_write_mu);
-              asst_ctx = cortext_ctx->ProcessText(assistant_reply, "chat/assistant");
+              if (final_probe_session) {
+                asst_ctx = final_probe_session->FinalizeText(assistant_reply);
+              } else {
+                asst_ctx = cortext_ctx->ProcessText(assistant_reply, "chat/assistant");
+              }
+              phase3_total_ms = asst_ctx.total_ms;
             }
 
             cortext::telemetry::LogDebug("chat.phase3.complete", {
@@ -1079,12 +1971,55 @@ int main(int argc, char** argv) {
               }
             }
           } catch (const std::exception& ex) {
+            phase3_failed = true;
+            phase3_error_message = ex.what();
             cortext::telemetry::LogError("chat.phase3.error", {
               cortext::telemetry::Attribute::String("error", ex.what())
             });
             std::lock_guard<std::mutex> lock(mu);
             last_error = std::string("cortext assistant: ") + ex.what();
           }
+
+          const auto chunk_counters_after
+              = SnapshotChunkDiagnostics(*chunk_diagnostics_state);
+          chat::ResponseMetricsSample response_sample;
+          response_sample.timestamp_ms = NowUnixMillis();
+          response_sample.usage.prompt_tokens = usage_accumulator.prompt_tokens;
+          response_sample.usage.completion_tokens = usage_accumulator.completion_tokens;
+          response_sample.usage.total_tokens = usage_accumulator.total_tokens;
+          response_sample.usage_accuracy
+              = chat::GetUsageAccuracy(usage_accumulator);
+          response_sample.response_wall_ms
+              = std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(
+                    std::chrono::steady_clock::now() - response_started_at)
+                    .count();
+          response_sample.phase1_total_ms = phase1_total_ms;
+          response_sample.phase3_total_ms = phase3_total_ms;
+          response_sample.retrieval_latency_ms = retrieval_latency_ms;
+          response_sample.processing_latency_ms = processing_latency_ms;
+          response_sample.restart_count = local_restarts;
+          response_sample.probe_count = static_cast<int>(
+              chunk_counters_after.total_probes - chunk_counters_before.total_probes);
+          response_sample.interrupt_count = static_cast<int>(
+              chunk_counters_after.interrupts - chunk_counters_before.interrupts);
+          response_sample.interrupt_rate = chat::ComputeInterruptRate(
+              response_sample.probe_count, response_sample.interrupt_count);
+          response_sample.had_stream_error = had_stream_error || phase3_failed;
+          response_sample.error_message = stream_error_message;
+          if (phase3_failed) {
+            if (!response_sample.error_message.empty()) {
+              response_sample.error_message += " | ";
+            }
+            response_sample.error_message += "phase3: " + phase3_error_message;
+          }
+          RecordResponseMetrics(
+              *metrics_state, response_sample, kMaxResponseMetricsSamples);
+          last_tokens_used->store(response_sample.usage.total_tokens);
+          {
+            std::lock_guard<std::mutex> lock(status_state->mu);
+            status_state->tokens_used = response_sample.usage.total_tokens;
+          }
+          refresh_db_explorer();
 
           idle_tracker.RecordActivity();
 

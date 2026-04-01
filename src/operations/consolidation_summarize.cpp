@@ -1,3 +1,4 @@
+#include "cortext/internal/cancellation.hpp"
 #include "cortext/operations/consolidation_summarize.hpp"
 
 #include "cortext/core/algorithms.hpp"
@@ -11,6 +12,7 @@
 #include "cortext/telemetry/telemetry.hpp"
 #include <algorithm>
 #include <any>
+#include <cctype>
 #include <ctime>
 #include <stdexcept>
 #include <sstream>
@@ -84,6 +86,64 @@ StringToBlob (const std::string &text)
   return std::vector<unsigned char> (text.begin (), text.end ());
 }
 
+std::string
+TrimAsciiWhitespace (const std::string &text)
+{
+  std::size_t start = 0;
+  while (start < text.size ()
+         && std::isspace (static_cast<unsigned char> (text[start])))
+    {
+      ++start;
+    }
+
+  std::size_t end = text.size ();
+  while (end > start
+         && std::isspace (static_cast<unsigned char> (text[end - 1])))
+    {
+      --end;
+    }
+
+  return text.substr (start, end - start);
+}
+
+bool
+StartsWithAscii (const std::string &text, const std::string &prefix)
+{
+  return text.size () >= prefix.size ()
+         && std::equal (prefix.begin (), prefix.end (), text.begin ());
+}
+
+std::string
+FormatSourceTextForSummary (const std::string &source_id,
+                            const std::string &raw_text)
+{
+  std::string text = TrimAsciiWhitespace (raw_text);
+  if (text.empty ())
+    {
+      return {};
+    }
+
+  if (source_id == "chat/user")
+    {
+      if (StartsWithAscii (text, "User:"))
+        {
+          return text;
+        }
+      return "User: " + text;
+    }
+
+  if (source_id == "chat/assistant")
+    {
+      if (StartsWithAscii (text, "Assistant:"))
+        {
+          return text;
+        }
+      return "Assistant: " + text;
+    }
+
+  return text;
+}
+
 } // namespace
 
 ConsolidationSummarizeParams
@@ -138,16 +198,17 @@ ConsolidationSummarize::Execute (OperationContext &context, Transaction &tx) con
   int summary_counter = 0;
   int summaries_with_summarizer = 0;
 
-  // Get summarizer (may be null if OGA disabled)
+  // Get deep summarizer backend selected during Cortext construction.
   Summarizer *summarizer = context.GetSummarizer ();
   if (!summarizer || !summarizer->IsAvailable ())
     {
       throw std::runtime_error (
-          "Consolidation summarizer unavailable: Gemma LiteRT-LM is required");
+          "Consolidation summarizer unavailable: no deep LLM backend is ready");
     }
 
   for (const auto &cluster : clusters)
     {
+      internal::ThrowIfStopRequested ();
       std::string summary_id = GenerateSummaryId (now_ts, summary_counter++);
 
       // Collect all source texts and find most representative memory
@@ -155,6 +216,8 @@ ConsolidationSummarize::Execute (OperationContext &context, Transaction &tx) con
       {
         std::string text;
         double sim;
+        long long start_ts;
+        bool chat_source;
       };
       std::vector<SourceItem> source_items;
       source_items.reserve (cluster.embedding_ids.size ());
@@ -170,9 +233,10 @@ ConsolidationSummarize::Execute (OperationContext &context, Transaction &tx) con
 
       for (long long emb_id : cluster.embedding_ids)
         {
-          // Query embedding and blob_id for this memory.
+          internal::ThrowIfStopRequested ();
+          // Query embedding, blob_id, source_id, and start_ts for this memory.
           auto rows = tx.Execute (
-              "SELECT e.embedding, m.blob_id "
+              "SELECT e.embedding, m.blob_id, m.source_id, m.start_ts "
               "FROM embeddings e "
               "LEFT JOIN memories m ON e.embedding_id = m.embedding_id "
               "WHERE e.embedding_id = ?",
@@ -218,24 +282,65 @@ ConsolidationSummarize::Execute (OperationContext &context, Transaction &tx) con
                 }
             }
 
+          std::string source_id;
+          auto it_source = row.find ("source_id");
+          if (it_source != row.end ()
+              && it_source->second.type () == typeid (std::string))
+            {
+              source_id = std::any_cast<std::string> (it_source->second);
+            }
+
+          long long start_ts = 0;
+          auto it_start_ts = row.find ("start_ts");
+          if (it_start_ts != row.end ())
+            {
+              if (it_start_ts->second.type () == typeid (long long))
+                {
+                  start_ts = std::any_cast<long long> (it_start_ts->second);
+                }
+              else if (it_start_ts->second.type () == typeid (int))
+                {
+                  start_ts = std::any_cast<int> (it_start_ts->second);
+                }
+            }
+
+          text = FormatSourceTextForSummary (source_id, text);
+
           // Collect text for summarizer
           if (!text.empty ())
             {
-              source_items.push_back (SourceItem{ std::move (text), sim });
+              const bool chat_source
+                  = (source_id == "chat/user" || source_id == "chat/assistant");
+              source_items.push_back (SourceItem{ std::move (text), sim,
+                                                  start_ts, chat_source });
             }
         }
 
       if (!source_items.empty ())
         {
+          internal::ThrowIfStopRequested ();
+          const int chat_source_count = static_cast<int> (
+              std::count_if (source_items.begin (), source_items.end (),
+                             [] (const SourceItem &item) {
+                               return item.chat_source;
+                             }));
+          const int effective_max_source_texts
+              = (chat_source_count >= 4)
+                    ? std::max (params.max_source_texts, 6)
+                    : params.max_source_texts;
           std::sort (source_items.begin (), source_items.end (),
                      [] (const SourceItem &a, const SourceItem &b) {
                        return a.sim > b.sim;
                      });
+          std::vector<SourceItem> selected_items;
+          selected_items.reserve (
+              static_cast<size_t> (effective_max_source_texts));
           int total_chars = 0;
           for (const auto &item : source_items)
             {
-              if (static_cast<int> (source_texts.size ())
-                  >= params.max_source_texts)
+              internal::ThrowIfStopRequested ();
+              if (static_cast<int> (selected_items.size ())
+                  >= effective_max_source_texts)
                 {
                   break;
                 }
@@ -267,7 +372,22 @@ ConsolidationSummarize::Execute (OperationContext &context, Transaction &tx) con
                   break;
                 }
               total_chars += static_cast<int> (trimmed.size ());
-              source_texts.push_back (std::move (trimmed));
+              SourceItem selected = item;
+              selected.text = std::move (trimmed);
+              selected_items.push_back (std::move (selected));
+            }
+
+          std::sort (selected_items.begin (), selected_items.end (),
+                     [] (const SourceItem &a, const SourceItem &b) {
+                       if (a.start_ts == b.start_ts)
+                         {
+                           return a.sim > b.sim;
+                         }
+                       return a.start_ts < b.start_ts;
+                     });
+          for (auto &item : selected_items)
+            {
+              source_texts.push_back (std::move (item.text));
             }
         }
 
@@ -278,10 +398,11 @@ ConsolidationSummarize::Execute (OperationContext &context, Transaction &tx) con
               + summary_id);
         }
 
-      // Use abstractive summarizer (LiteRT-LM Gemma required)
+      // Use the configured abstractive summarizer backend.
       std::string summary_text;
       try
         {
+          internal::ThrowIfStopRequested ();
           summary_text = summarizer->SummarizeTextsLimited (
               source_texts, params.max_summary_words);
         }
@@ -384,6 +505,7 @@ ConsolidationSummarize::Execute (OperationContext &context, Transaction &tx) con
       // ASSOCIATIONS (derived_from edges).
       for (long long emb_id : cluster.embedding_ids)
         {
+          internal::ThrowIfStopRequested ();
           // Update cluster_id
           AddWrite (tx,
                     "UPDATE memories SET cluster_id = ? "

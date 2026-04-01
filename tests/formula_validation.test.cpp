@@ -9,6 +9,35 @@
 
 using namespace cortext::core;
 
+namespace
+{
+
+double
+FocusExpected (double lo, double hi, double F)
+{
+  return Lerp (lo, hi, FocusBias (F));
+}
+
+double
+SensitivityExpected (double lo, double hi, double S)
+{
+  return Lerp (lo, hi, SensitivityBias (S));
+}
+
+int
+FocusExpectedRound (double lo, double hi, double F)
+{
+  return static_cast<int> (std::round (FocusExpected (lo, hi, F)));
+}
+
+int
+SensitivityExpectedRound (double lo, double hi, double S)
+{
+  return static_cast<int> (std::round (SensitivityExpected (lo, hi, S)));
+}
+
+} // namespace
+
 // =============================================================================
 // 5.1.1 Context Windows & Temporal Scales (6 functions)
 // =============================================================================
@@ -60,26 +89,26 @@ TEST_CASE ("RLSWindowN follows spec: lerp(64, 512, T)",
   REQUIRE (RLSWindowN (0.3) < RLSWindowN (0.7));
 }
 
-TEST_CASE ("MaxResults follows spec: lerp(64, 4, F)",
+TEST_CASE ("MaxResults follows spec: lerp(96, 8, FocusBias(F))",
            "[formula][knobs][temporal]")
 {
-  // MaxResults = round(lerp(64, 4, F))
+  // MaxResults = round(lerp(96, 8, FocusBias(F)))
   // Higher focus = fewer results (more selective)
-  REQUIRE (MaxResults (0.0) == 64);
-  REQUIRE (MaxResults (1.0) == 4);
-  REQUIRE (MaxResults (0.5) == 34);
+  REQUIRE (MaxResults (0.0) == 96);
+  REQUIRE (MaxResults (1.0) == 8);
+  REQUIRE (MaxResults (0.5) == FocusExpectedRound (96.0, 8.0, 0.5));
 
   // Monotonic: higher F means fewer results
   REQUIRE (MaxResults (0.3) > MaxResults (0.7));
 }
 
-TEST_CASE ("AdjacentWindow follows spec: lerp(8, 1, F)",
+TEST_CASE ("AdjacentWindow follows spec: lerp(6, 1, FocusBias(F))",
            "[formula][knobs][temporal]")
 {
-  // AdjacentWindow = round(lerp(8, 1, F))
-  REQUIRE (AdjacentWindow (0.0) == 8);
+  // AdjacentWindow = round(lerp(6, 1, FocusBias(F)))
+  REQUIRE (AdjacentWindow (0.0) == 6);
   REQUIRE (AdjacentWindow (1.0) == 1);
-  REQUIRE (AdjacentWindow (0.5) == 5); // round(4.5) = 5 (rounds up)
+  REQUIRE (AdjacentWindow (0.5) == FocusExpectedRound (6.0, 1.0, 0.5));
 
   // Monotonic: higher F means smaller window
   REQUIRE (AdjacentWindow (0.3) > AdjacentWindow (0.7));
@@ -91,7 +120,7 @@ TEST_CASE ("MaxWaitTokens follows spec: lerp(128, 16, F)",
   // MaxWaitTokens = round(lerp(128, 16, F))
   REQUIRE (MaxWaitTokens (0.0) == 128);
   REQUIRE (MaxWaitTokens (1.0) == 16);
-  REQUIRE (MaxWaitTokens (0.5) == 72);
+  REQUIRE (MaxWaitTokens (0.5) == FocusExpectedRound (128.0, 16.0, 0.5));
 
   // Monotonic: higher F means fewer wait tokens
   REQUIRE (MaxWaitTokens (0.3) > MaxWaitTokens (0.7));
@@ -107,7 +136,8 @@ TEST_CASE ("CheckIntervalTokens follows spec: lerp(64, 8, S)",
   // CheckIntervalTokens = round(lerp(64, 8, S))
   REQUIRE (CheckIntervalTokens (0.0) == 64);
   REQUIRE (CheckIntervalTokens (1.0) == 8);
-  REQUIRE (CheckIntervalTokens (0.5) == 36);
+  REQUIRE (CheckIntervalTokens (0.5)
+           == SensitivityExpectedRound (64.0, 8.0, 0.5));
 
   // Monotonic: higher S means more frequent checks (fewer tokens)
   REQUIRE (CheckIntervalTokens (0.3) > CheckIntervalTokens (0.7));
@@ -227,7 +257,8 @@ TEST_CASE ("AlphaMood follows spec: lerp(0.01, 0.20, S)",
   // AlphaMood = lerp(0.01, 0.20, S)
   REQUIRE (AlphaMood (0.0) == Catch::Approx (0.01));
   REQUIRE (AlphaMood (1.0) == Catch::Approx (0.20));
-  REQUIRE (AlphaMood (0.5) == Catch::Approx (0.105));
+  REQUIRE (AlphaMood (0.5)
+           == Catch::Approx (SensitivityExpected (0.01, 0.20, 0.5)));
 
   // Monotonic: higher S means faster mood reactivity
   REQUIRE (AlphaMood (0.3) < AlphaMood (0.7));
@@ -475,7 +506,8 @@ TEST_CASE ("WMMaintenanceCostPerSlot follows spec: lerp(0.05, 0.15, S)",
   // WMMaintenanceCostPerSlot = lerp(0.05, 0.15, S)
   REQUIRE (WMMaintenanceCostPerSlot (0.0) == Catch::Approx (0.05));
   REQUIRE (WMMaintenanceCostPerSlot (1.0) == Catch::Approx (0.15));
-  REQUIRE (WMMaintenanceCostPerSlot (0.5) == Catch::Approx (0.10));
+  REQUIRE (WMMaintenanceCostPerSlot (0.5)
+           == Catch::Approx (SensitivityExpected (0.05, 0.15, 0.5)));
 
   // Monotonic
   REQUIRE (WMMaintenanceCostPerSlot (0.3) < WMMaintenanceCostPerSlot (0.7));
@@ -487,7 +519,8 @@ TEST_CASE ("WMChunkingThreshold follows spec: lerp(0.7, 0.9, F)",
   // WMChunkingThreshold = lerp(0.7, 0.9, F)
   REQUIRE (WMChunkingThreshold (0.0) == Catch::Approx (0.7));
   REQUIRE (WMChunkingThreshold (1.0) == Catch::Approx (0.9));
-  REQUIRE (WMChunkingThreshold (0.5) == Catch::Approx (0.8));
+  REQUIRE (WMChunkingThreshold (0.5)
+           == Catch::Approx (FocusExpected (0.7, 0.9, 0.5)));
 
   // Monotonic
   REQUIRE (WMChunkingThreshold (0.3) < WMChunkingThreshold (0.7));
@@ -499,7 +532,8 @@ TEST_CASE ("WMComplexityScale follows spec: lerp(0.5, 1.5, S)",
   // WMComplexityScale = lerp(0.5, 1.5, S)
   REQUIRE (WMComplexityScale (0.0) == Catch::Approx (0.5));
   REQUIRE (WMComplexityScale (1.0) == Catch::Approx (1.5));
-  REQUIRE (WMComplexityScale (0.5) == Catch::Approx (1.0));
+  REQUIRE (WMComplexityScale (0.5)
+           == Catch::Approx (SensitivityExpected (0.5, 1.5, 0.5)));
 
   // Monotonic
   REQUIRE (WMComplexityScale (0.3) < WMComplexityScale (0.7));
@@ -511,7 +545,8 @@ TEST_CASE ("StrategySwitchLatencyMs follows spec: lerp(500, 100, S)",
   // StrategySwitchLatencyMs = round(lerp(500, 100, S))
   REQUIRE (StrategySwitchLatencyMs (0.0) == 500);
   REQUIRE (StrategySwitchLatencyMs (1.0) == 100);
-  REQUIRE (StrategySwitchLatencyMs (0.5) == 300);
+  REQUIRE (StrategySwitchLatencyMs (0.5)
+           == SensitivityExpectedRound (500.0, 100.0, 0.5));
 
   // Monotonic: higher S means faster switching (lower latency)
   REQUIRE (StrategySwitchLatencyMs (0.3) > StrategySwitchLatencyMs (0.7));
@@ -527,7 +562,8 @@ TEST_CASE ("BaseRatePrior follows spec: lerp(0.2, 5.0, S)",
   // BaseRatePrior = lerp(0.2, 5.0, S)
   REQUIRE (BaseRatePrior (0.0) == Catch::Approx (0.2));
   REQUIRE (BaseRatePrior (1.0) == Catch::Approx (5.0));
-  REQUIRE (BaseRatePrior (0.5) == Catch::Approx (2.6));
+  REQUIRE (BaseRatePrior (0.5)
+           == Catch::Approx (SensitivityExpected (0.2, 5.0, 0.5)));
 
   // Monotonic
   REQUIRE (BaseRatePrior (0.3) < BaseRatePrior (0.7));
@@ -551,7 +587,8 @@ TEST_CASE ("MergeThreshold follows spec: lerp(0.85, 0.95, F)",
   // MergeThreshold = lerp(0.85, 0.95, F)
   REQUIRE (MergeThreshold (0.0) == Catch::Approx (0.85));
   REQUIRE (MergeThreshold (1.0) == Catch::Approx (0.95));
-  REQUIRE (MergeThreshold (0.5) == Catch::Approx (0.90));
+  REQUIRE (MergeThreshold (0.5)
+           == Catch::Approx (FocusExpected (0.85, 0.95, 0.5)));
 
   // Monotonic: higher focus = stricter merging
   REQUIRE (MergeThreshold (0.3) < MergeThreshold (0.7));
@@ -563,7 +600,7 @@ TEST_CASE ("MinClusterSize follows spec: lerp(3, 10, F)",
   // MinClusterSize = round(lerp(3, 10, F))
   REQUIRE (MinClusterSize (0.0) == 3);
   REQUIRE (MinClusterSize (1.0) == 10);
-  REQUIRE (MinClusterSize (0.5) == 7); // round(6.5) = 7 (rounds up)
+  REQUIRE (MinClusterSize (0.5) == FocusExpectedRound (3.0, 10.0, 0.5));
 
   // Monotonic
   REQUIRE (MinClusterSize (0.3) < MinClusterSize (0.7));
@@ -620,13 +657,13 @@ TEST_CASE ("WRet follows spec: lerp(10, 50, T)",
   REQUIRE (WRet (0.3) < WRet (0.7));
 }
 
-TEST_CASE ("PeripheryCutoff follows spec: lerp(0.05, 0.25, T)",
+TEST_CASE ("PeripheryCutoff follows spec: lerp(0.03, 0.20, T)",
            "[formula][knobs][consolidation]")
 {
-  // PeripheryCutoff = lerp(0.05, 0.25, T)
-  REQUIRE (PeripheryCutoff (0.0) == Catch::Approx (0.05));
-  REQUIRE (PeripheryCutoff (1.0) == Catch::Approx (0.25));
-  REQUIRE (PeripheryCutoff (0.5) == Catch::Approx (0.15));
+  // PeripheryCutoff = lerp(0.03, 0.20, T)
+  REQUIRE (PeripheryCutoff (0.0) == Catch::Approx (0.03));
+  REQUIRE (PeripheryCutoff (1.0) == Catch::Approx (0.20));
+  REQUIRE (PeripheryCutoff (0.5) == Catch::Approx (0.115));
 
   // Monotonic
   REQUIRE (PeripheryCutoff (0.3) < PeripheryCutoff (0.7));
@@ -653,7 +690,8 @@ TEST_CASE ("FOKThreshold follows spec: lerp(0.2, 0.5, F)",
   // FOKThreshold = lerp(0.2, 0.5, F)
   REQUIRE (FOKThreshold (0.0) == Catch::Approx (0.2));
   REQUIRE (FOKThreshold (1.0) == Catch::Approx (0.5));
-  REQUIRE (FOKThreshold (0.5) == Catch::Approx (0.35));
+  REQUIRE (FOKThreshold (0.5)
+           == Catch::Approx (FocusExpected (0.2, 0.5, 0.5)));
 
   // Monotonic
   REQUIRE (FOKThreshold (0.3) < FOKThreshold (0.7));
@@ -665,7 +703,8 @@ TEST_CASE ("TOTFokCutoff follows spec: lerp(0.5, 0.8, F)",
   // TOTFokCutoff = lerp(0.5, 0.8, F)
   REQUIRE (TOTFokCutoff (0.0) == Catch::Approx (0.5));
   REQUIRE (TOTFokCutoff (1.0) == Catch::Approx (0.8));
-  REQUIRE (TOTFokCutoff (0.5) == Catch::Approx (0.65));
+  REQUIRE (TOTFokCutoff (0.5)
+           == Catch::Approx (FocusExpected (0.5, 0.8, 0.5)));
 
   // Monotonic
   REQUIRE (TOTFokCutoff (0.3) < TOTFokCutoff (0.7));
@@ -677,7 +716,8 @@ TEST_CASE ("TOTRetrievalCutoff follows spec: lerp(0.4, 0.2, F)",
   // TOTRetrievalCutoff = lerp(0.4, 0.2, F)
   REQUIRE (TOTRetrievalCutoff (0.0) == Catch::Approx (0.4));
   REQUIRE (TOTRetrievalCutoff (1.0) == Catch::Approx (0.2));
-  REQUIRE (TOTRetrievalCutoff (0.5) == Catch::Approx (0.3));
+  REQUIRE (TOTRetrievalCutoff (0.5)
+           == Catch::Approx (FocusExpected (0.4, 0.2, 0.5)));
 
   // Monotonic: higher F means lower cutoff
   REQUIRE (TOTRetrievalCutoff (0.3) > TOTRetrievalCutoff (0.7));
@@ -689,7 +729,8 @@ TEST_CASE ("UnknownThreshold follows spec: lerp(0.3, 0.1, F)",
   // UnknownThreshold = lerp(0.3, 0.1, F)
   REQUIRE (UnknownThreshold (0.0) == Catch::Approx (0.3));
   REQUIRE (UnknownThreshold (1.0) == Catch::Approx (0.1));
-  REQUIRE (UnknownThreshold (0.5) == Catch::Approx (0.2));
+  REQUIRE (UnknownThreshold (0.5)
+           == Catch::Approx (FocusExpected (0.3, 0.1, 0.5)));
 
   // Monotonic: higher F means lower threshold
   REQUIRE (UnknownThreshold (0.3) > UnknownThreshold (0.7));
@@ -722,8 +763,9 @@ TEST_CASE ("MetacognitiveSensitivity follows spec: F * (1 + 0.5 * S)",
   // At F=1, S=1: 1 * 1.5 = 1.5
   REQUIRE (MetacognitiveSensitivity (1.0, 1.0) == Catch::Approx (1.5));
 
-  // At F=0.5, S=0.5: 0.5 * 1.25 = 0.625
-  REQUIRE (MetacognitiveSensitivity (0.5, 0.5) == Catch::Approx (0.625));
+  REQUIRE (MetacognitiveSensitivity (0.5, 0.5)
+           == Catch::Approx (FocusBias (0.5)
+                             * (1.0 + 0.5 * SensitivityBias (0.5))));
 }
 
 // =============================================================================
@@ -760,7 +802,8 @@ TEST_CASE ("SerialPrimacyBonus follows spec: lerp(1.2, 2.0, S)",
   // SerialPrimacyBonus = lerp(1.2, 2.0, S)
   REQUIRE (SerialPrimacyBonus (0.0) == Catch::Approx (1.2));
   REQUIRE (SerialPrimacyBonus (1.0) == Catch::Approx (2.0));
-  REQUIRE (SerialPrimacyBonus (0.5) == Catch::Approx (1.6));
+  REQUIRE (SerialPrimacyBonus (0.5)
+           == Catch::Approx (SensitivityExpected (1.2, 2.0, 0.5)));
 
   // Monotonic
   REQUIRE (SerialPrimacyBonus (0.3) < SerialPrimacyBonus (0.7));
@@ -772,7 +815,8 @@ TEST_CASE ("SerialRehearsalCurveDepth follows spec: lerp(0.2, 0.6, S)",
   // SerialRehearsalCurveDepth = lerp(0.2, 0.6, S)
   REQUIRE (SerialRehearsalCurveDepth (0.0) == Catch::Approx (0.2));
   REQUIRE (SerialRehearsalCurveDepth (1.0) == Catch::Approx (0.6));
-  REQUIRE (SerialRehearsalCurveDepth (0.5) == Catch::Approx (0.4));
+  REQUIRE (SerialRehearsalCurveDepth (0.5)
+           == Catch::Approx (SensitivityExpected (0.2, 0.6, 0.5)));
 
   // Monotonic
   REQUIRE (SerialRehearsalCurveDepth (0.3) < SerialRehearsalCurveDepth (0.7));
@@ -784,7 +828,8 @@ TEST_CASE ("SerialDistinctivenessThreshold follows spec: lerp(0.6, 0.8, F)",
   // SerialDistinctivenessThreshold = lerp(0.6, 0.8, F)
   REQUIRE (SerialDistinctivenessThreshold (0.0) == Catch::Approx (0.6));
   REQUIRE (SerialDistinctivenessThreshold (1.0) == Catch::Approx (0.8));
-  REQUIRE (SerialDistinctivenessThreshold (0.5) == Catch::Approx (0.7));
+  REQUIRE (SerialDistinctivenessThreshold (0.5)
+           == Catch::Approx (FocusExpected (0.6, 0.8, 0.5)));
 
   // Monotonic
   REQUIRE (SerialDistinctivenessThreshold (0.3)
@@ -797,7 +842,8 @@ TEST_CASE ("SerialVonRestorffMultiplier follows spec: lerp(1.5, 3.0, S)",
   // SerialVonRestorffMultiplier = lerp(1.5, 3.0, S)
   REQUIRE (SerialVonRestorffMultiplier (0.0) == Catch::Approx (1.5));
   REQUIRE (SerialVonRestorffMultiplier (1.0) == Catch::Approx (3.0));
-  REQUIRE (SerialVonRestorffMultiplier (0.5) == Catch::Approx (2.25));
+  REQUIRE (SerialVonRestorffMultiplier (0.5)
+           == Catch::Approx (SensitivityExpected (1.5, 3.0, 0.5)));
 
   // Monotonic
   REQUIRE (SerialVonRestorffMultiplier (0.3)
@@ -821,8 +867,9 @@ TEST_CASE ("SerialMiddleSuppression follows spec: lerp(0.8, 0.5, S) * (1 - F)",
   // At S=1, F=1: 0.5 * 0 = 0
   REQUIRE (SerialMiddleSuppression (1.0, 1.0) == Catch::Approx (0.0));
 
-  // At S=0.5, F=0.5: 0.65 * 0.5 = 0.325
-  REQUIRE (SerialMiddleSuppression (0.5, 0.5) == Catch::Approx (0.325));
+  REQUIRE (SerialMiddleSuppression (0.5, 0.5)
+           == Catch::Approx (SensitivityExpected (0.8, 0.5, 0.5)
+                             * (1.0 - FocusBias (0.5))));
 }
 
 TEST_CASE ("GistComponents follows spec: lerp(5, 2, F)",
@@ -850,7 +897,8 @@ TEST_CASE ("ThetaIntensity follows spec: lerp(0.6, 0.8, 1 - S)",
   // At S=1: lerp(0.6, 0.8, 0) = 0.6
   REQUIRE (ThetaIntensity (1.0) == Catch::Approx (0.6));
   // At S=0.5: lerp(0.6, 0.8, 0.5) = 0.7
-  REQUIRE (ThetaIntensity (0.5) == Catch::Approx (0.7));
+  REQUIRE (ThetaIntensity (0.5)
+           == Catch::Approx (Lerp (0.6, 0.8, 1.0 - SensitivityBias (0.5))));
 
   // Monotonic: higher S means lower threshold
   REQUIRE (ThetaIntensity (0.3) > ThetaIntensity (0.7));
@@ -862,19 +910,20 @@ TEST_CASE ("ThetaArousal follows spec: lerp(0.4, 0.2, S)",
   // ThetaArousal = lerp(0.4, 0.2, S)
   REQUIRE (ThetaArousal (0.0) == Catch::Approx (0.4));
   REQUIRE (ThetaArousal (1.0) == Catch::Approx (0.2));
-  REQUIRE (ThetaArousal (0.5) == Catch::Approx (0.3));
+  REQUIRE (ThetaArousal (0.5)
+           == Catch::Approx (SensitivityExpected (0.4, 0.2, 0.5)));
 
   // Monotonic: higher S means lower threshold
   REQUIRE (ThetaArousal (0.3) > ThetaArousal (0.7));
 }
 
-TEST_CASE ("FlashbulbThreshold follows spec: lerp(0.9, 0.4, S)",
+TEST_CASE ("FlashbulbThreshold follows spec: lerp(0.97, 0.65, SensitivityBias(S))",
            "[formula][knobs][emotional]")
 {
-  // FlashbulbThreshold = lerp(0.9, 0.4, S)
-  REQUIRE (FlashbulbThreshold (0.0) == Catch::Approx (0.9));
-  REQUIRE (FlashbulbThreshold (1.0) == Catch::Approx (0.4));
-  REQUIRE (FlashbulbThreshold (0.5) == Catch::Approx (0.65));
+  REQUIRE (FlashbulbThreshold (0.0) == Catch::Approx (0.97));
+  REQUIRE (FlashbulbThreshold (1.0) == Catch::Approx (0.65));
+  REQUIRE (FlashbulbThreshold (0.5)
+           == Catch::Approx (SensitivityExpected (0.97, 0.65, 0.5)));
 
   // Monotonic: higher S means lower threshold
   REQUIRE (FlashbulbThreshold (0.3) > FlashbulbThreshold (0.7));
@@ -883,20 +932,16 @@ TEST_CASE ("FlashbulbThreshold follows spec: lerp(0.9, 0.4, S)",
 TEST_CASE ("FlashbulbThresholdEff follows spec",
            "[formula][knobs][emotional]")
 {
-  // FlashbulbThresholdEff = flashbulb_threshold * (1 - 0.5*intensity) * (1 -
-  // 0.3*arousal)
-
-  // At S=0.5, intensity=0, arousal=0: 0.65 * 1 * 1 = 0.65
-  REQUIRE (FlashbulbThresholdEff (0.5, 0.0, 0.0) == Catch::Approx (0.65));
-
-  // At S=0.5, intensity=1, arousal=0: 0.65 * 0.5 * 1 = 0.325
-  REQUIRE (FlashbulbThresholdEff (0.5, 1.0, 0.0) == Catch::Approx (0.325));
-
-  // At S=0.5, intensity=0, arousal=1: 0.65 * 1 * 0.7 = 0.455
-  REQUIRE (FlashbulbThresholdEff (0.5, 0.0, 1.0) == Catch::Approx (0.455));
-
-  // At S=0.5, intensity=1, arousal=1: 0.65 * 0.5 * 0.7 = 0.2275
-  REQUIRE (FlashbulbThresholdEff (0.5, 1.0, 1.0) == Catch::Approx (0.2275));
+  const double base = FlashbulbThreshold (0.5);
+  const double p = Lerp (1.25, 0.85, SensitivityBias (0.5));
+  REQUIRE (FlashbulbThresholdEff (0.5, 0.0, 0.0)
+           == Catch::Approx (base));
+  REQUIRE (FlashbulbThresholdEff (0.5, 1.0, 0.0)
+           == Catch::Approx (base * 0.5));
+  REQUIRE (FlashbulbThresholdEff (0.5, 0.0, 1.0)
+           == Catch::Approx (base * std::pow (0.7, p)));
+  REQUIRE (FlashbulbThresholdEff (0.5, 1.0, 1.0)
+           == Catch::Approx (base * 0.5 * std::pow (0.7, p)));
 }
 
 TEST_CASE ("CascadeRadius follows spec: lerp(1, 5, S)",
@@ -917,7 +962,8 @@ TEST_CASE ("CascadeDecay follows spec: lerp(0.7, 0.3, S)",
   // CascadeDecay = lerp(0.7, 0.3, S)
   REQUIRE (CascadeDecay (0.0) == Catch::Approx (0.7));
   REQUIRE (CascadeDecay (1.0) == Catch::Approx (0.3));
-  REQUIRE (CascadeDecay (0.5) == Catch::Approx (0.5));
+  REQUIRE (CascadeDecay (0.5)
+           == Catch::Approx (SensitivityExpected (0.7, 0.3, 0.5)));
 
   // Monotonic: higher S means faster decay
   REQUIRE (CascadeDecay (0.3) > CascadeDecay (0.7));
@@ -938,8 +984,9 @@ TEST_CASE ("DetailSuppression follows spec: S * (1 - F) * 0.5",
   // At S=1, F=0: 1 * 1 * 0.5 = 0.5 (max suppression)
   REQUIRE (DetailSuppression (1.0, 0.0) == Catch::Approx (0.5));
 
-  // At S=0.5, F=0.5: 0.5 * 0.5 * 0.5 = 0.125
-  REQUIRE (DetailSuppression (0.5, 0.5) == Catch::Approx (0.125));
+  REQUIRE (DetailSuppression (0.5, 0.5)
+           == Catch::Approx (SensitivityBias (0.5)
+                             * (1.0 - FocusBias (0.5)) * 0.5));
 }
 
 TEST_CASE ("LabilitySusceptibility follows spec: (1 - T) * (0.5 + 0.5 * S)",
@@ -957,8 +1004,9 @@ TEST_CASE ("LabilitySusceptibility follows spec: (1 - T) * (0.5 + 0.5 * S)",
   // At T=0, S=1: 1 * 1.0 = 1.0
   REQUIRE (LabilitySusceptibility (1.0, 0.0) == Catch::Approx (1.0));
 
-  // At T=0.5, S=0.5: 0.5 * 0.75 = 0.375
-  REQUIRE (LabilitySusceptibility (0.5, 0.5) == Catch::Approx (0.375));
+  REQUIRE (LabilitySusceptibility (0.5, 0.5)
+           == Catch::Approx ((1.0 - 0.5)
+                             * (0.5 + 0.5 * SensitivityBias (0.5))));
 }
 
 // =============================================================================
@@ -1017,8 +1065,9 @@ TEST_CASE ("TPrior follows spec: lerp(0.10, 0.30, T) * (1 - 0.3 * S)",
   // At T=1, S=1: 0.30 * 0.7 = 0.21
   REQUIRE (TPrior (0.5, 1.0, 1.0) == Catch::Approx (0.21));
 
-  // At T=0.5, S=0.5: 0.20 * 0.85 = 0.17
-  REQUIRE (TPrior (0.5, 0.5, 0.5) == Catch::Approx (0.17));
+  REQUIRE (TPrior (0.5, 0.5, 0.5)
+           == Catch::Approx (Lerp (0.10, 0.30, 0.5)
+                             * (1.0 - 0.3 * SensitivityBias (0.5))));
 }
 
 TEST_CASE ("TargetPrecision follows spec: CertaintyRequirement(T) * (0.5 + "
@@ -1033,15 +1082,17 @@ TEST_CASE ("TargetPrecision follows spec: CertaintyRequirement(T) * (0.5 + "
   // At T=1, F=1: 0.9 * 1.0 = 0.9
   REQUIRE (TargetPrecision (1.0, 1.0) == Catch::Approx (0.9));
 
-  // At T=0.5, F=0.5: 0.75 * 0.75 = 0.5625
-  REQUIRE (TargetPrecision (0.5, 0.5) == Catch::Approx (0.5625));
+  REQUIRE (TargetPrecision (0.5, 0.5)
+           == Catch::Approx (CertaintyRequirement (0.5)
+                             * (0.5 + 0.5 * FocusBias (0.5))));
 
   // Verify it uses CertaintyRequirement
   for (double T : { 0.0, 0.5, 1.0 })
     {
       for (double F : { 0.0, 0.5, 1.0 })
         {
-          double expected = CertaintyRequirement (T) * (0.5 + 0.5 * F);
+          double expected
+              = CertaintyRequirement (T) * (0.5 + 0.5 * FocusBias (F));
           REQUIRE (TargetPrecision (F, T) == Catch::Approx (expected));
         }
     }
@@ -1059,20 +1110,20 @@ TEST_CASE ("PriorMass follows spec: lerp(2, 32, T)",
   REQUIRE (PriorMass (0.3) < PriorMass (0.7));
 }
 
-TEST_CASE ("GraphDepth follows spec: lerp(2.0, 1.0, F)",
+TEST_CASE ("GraphDepth follows spec: lerp(3.0, 2.0, T)",
            "[formula][knobs][multi]")
 {
-  // GraphDepth = round(lerp(2.0, 1.0, F))
-  REQUIRE (GraphDepth (0.0) == 2);
-  REQUIRE (GraphDepth (1.0) == 1);
-  REQUIRE (GraphDepth (0.5) == 2); // round(1.5)
+  // GraphDepth = round(lerp(3.0, 2.0, T))
+  REQUIRE (GraphDepth (0.0) == 3);
+  REQUIRE (GraphDepth (1.0) == 2);
+  REQUIRE (GraphDepth (0.5) == 3);
 
   // Range check
   for (double F : { 0.0, 0.25, 0.5, 0.75, 1.0 })
     {
       int depth = GraphDepth (F);
-      REQUIRE (depth >= 1);
-      REQUIRE (depth <= 2);
+      REQUIRE (depth >= 2);
+      REQUIRE (depth <= 3);
     }
 }
 
@@ -1082,7 +1133,8 @@ TEST_CASE ("MemoryUsageThreshold follows spec: lerp(0.5, 0.8, F)",
   // MemoryUsageThreshold = lerp(0.5, 0.8, F)
   REQUIRE (MemoryUsageThreshold (0.0) == Catch::Approx (0.5));
   REQUIRE (MemoryUsageThreshold (1.0) == Catch::Approx (0.8));
-  REQUIRE (MemoryUsageThreshold (0.5) == Catch::Approx (0.65));
+  REQUIRE (MemoryUsageThreshold (0.5)
+           == Catch::Approx (FocusExpected (0.5, 0.8, 0.5)));
 
   // Monotonic
   REQUIRE (MemoryUsageThreshold (0.3) < MemoryUsageThreshold (0.7));
@@ -1145,13 +1197,13 @@ TEST_CASE ("High Focus + Low Sensitivity interactions",
   double T = 0.5;
 
   // High F: fewer results, stricter thresholds
-  REQUIRE (MaxResults (F) <= 10);
+  REQUIRE (MaxResults (F) <= 24);
   REQUIRE (MergeThreshold (F) >= 0.93);
-  REQUIRE (WMGateThreshold (F) >= 0.37);
+  REQUIRE (WMGateThreshold (F) >= 0.35);
 
   // Low S: slower mood, lower learning rates
   REQUIRE (AlphaMood (S) < 0.03);
-  REQUIRE (StreamingPacingThreshold (S) > 0.4);
+  REQUIRE (StreamingPacingThreshold (S) > 0.25);
 
   // Multi-parameter: high F mitigates S
   REQUIRE (MetacognitiveSensitivity (F, S) > 0.8);

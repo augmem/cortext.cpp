@@ -56,10 +56,39 @@ std::string
 BuildSummaryPrompt (const std::vector<std::string> &texts)
 {
   std::ostringstream combined;
-  combined << "Summarize the following texts into a concise summary:\n\n";
+  combined
+      << "You are writing a durable memory note from conversation excerpts.\n"
+      << "Write a concise factual summary in 1-3 sentences.\n"
+      << "Return only the summary text.\n"
+      << "Treat lines labeled 'User:' as a human user and lines labeled "
+         "'Assistant:' as the assistant.\n"
+      << "Summarize the underlying facts and topics, not the mechanics of the "
+         "conversation.\n"
+      << "Prioritize durable facts about people, events, names, preferences, "
+         "plans, and outcomes over banter, greetings, or rhetorical "
+         "questions.\n"
+      << "Include all major durable facts that fit, especially named people, "
+         "projects, technologies, and goals.\n"
+      << "If the excerpts contain multiple topics, list them as separate facts "
+         "instead of implying they caused each other.\n"
+      << "If both user and assistant excerpts restate the same fact, prefer "
+         "the underlying fact itself instead of narrating who said it.\n"
+      << "Do not repeat the same fact from different perspectives.\n"
+      << "State facts directly when possible. Prefer direct factual sentences "
+         "over wording like 'The user...' or 'The assistant...'.\n"
+      << "Do not use speaker-role subjects or second-person phrasing in the "
+         "summary. Avoid 'the user', 'the assistant', 'you', and 'your' when "
+         "a concrete named subject or neutral phrasing is available.\n"
+      << "Do not write phrases like 'the user said', 'the assistant asked', "
+         "'in a conversation', 'they discussed', or 'this occurred after' "
+         "unless that wording is necessary for clarity.\n"
+      << "Do not infer causality, chronology, identity, or shared beliefs "
+         "beyond the text.\n"
+      << "Avoid speculation, role confusion, and meta commentary.\n\n"
+      << "Conversation excerpts:\n\n";
   for (size_t i = 0; i < texts.size (); ++i)
     {
-      combined << "Text " << (i + 1) << ":\n" << texts[i] << "\n\n";
+      combined << "Excerpt " << (i + 1) << ":\n" << texts[i] << "\n\n";
     }
   return combined.str ();
 }
@@ -444,6 +473,14 @@ GemmaSummarizer::operator= (GemmaSummarizer &&) noexcept = default;
 
 std::string
 GemmaSummarizer::SummarizeTexts (const std::vector<std::string> & /*texts*/)
+{
+  throw std::runtime_error (
+      "GemmaSummarizer: LiteRT-LM disabled. Rebuild without CORTEXT_DISABLE_LITERT");
+}
+
+std::string
+GemmaSummarizer::SummarizeTextsLimited (
+    const std::vector<std::string> & /*texts*/, int /*max_words*/)
 {
   throw std::runtime_error (
       "GemmaSummarizer: LiteRT-LM disabled. Rebuild without CORTEXT_DISABLE_LITERT");

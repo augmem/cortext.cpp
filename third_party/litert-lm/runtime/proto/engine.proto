@@ -1,0 +1,29 @@
+// Copyright 2025 The ODML Authors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+syntax = "proto3";
+
+package litert.lm.proto;
+
+// Parameters used to configure the benchmarking process.
+message BenchmarkParams {
+  // The number of tokens to be used for prefilling during the benchmark. The
+  // input prompt will be truncated or padded to this length.
+  int32 num_prefill_tokens = 1;
+
+  // The number of tokens to be used for decoding during the benchmark. The
+  // output will be truncated (or continued even when the stop token is reached)
+  // to this length.
+  int32 num_decode_tokens = 2;
+}

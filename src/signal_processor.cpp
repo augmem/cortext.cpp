@@ -598,6 +598,8 @@ LoadState (Store &store, ProcessorContext &ctx)
           = ExtractDouble (row, "emotion_intensity", 0.0);
       ctx.valence_ewma = ExtractDouble (row, "valence", 0.5);
       ctx.arousal_ewma = ExtractDouble (row, "arousal", 0.0);
+      ctx.flashbulb_rate_ewma
+          = ExtractDouble (row, "flashbulb_rate", 0.0);
 
       // Mood state (Algorithm 4b) - stored as BLOB (48 bytes = 6 doubles)
       auto mood_it = row.find ("mood_vector");
@@ -1382,6 +1384,7 @@ SignalProcessor::PersistState (Transaction &tx)
       "emotion_gain, score_gain, rate_target, "
       // Emotion state
       "emotion_intensity, valence, arousal, mood_vector, last_mood_ts, "
+      "flashbulb_rate, "
       // Stability state
       "rate_decay, periphery_half_life, salience_half_life, drift_weight, retention_ema, "
       // Rate control
@@ -1410,7 +1413,7 @@ SignalProcessor::PersistState (Transaction &tx)
       "?, ?, ?, ?, "  // Threshold
       "?, ?, ?, ?, "  // Focus
       "?, ?, ?, ?, ?, ?, ?, "  // Sensitivity
-      "?, ?, ?, ?, ?, "  // Emotion
+      "?, ?, ?, ?, ?, ?, "  // Emotion
       "?, ?, ?, ?, ?, "  // Stability
       "?, ?, ?, ?, ?, ?, "  // Rate control
       "?, ?, ?, ?, ?, ?, "  // Uncertainty + modulators
@@ -1438,6 +1441,7 @@ SignalProcessor::PersistState (Transaction &tx)
         context_->emotion_intensity_ewma, context_->valence_ewma,
         context_->arousal_ewma, mood_blob,
         static_cast<long long> (context_->last_mood_ts),
+        context_->flashbulb_rate_ewma,
         // Stability state
         context_->rate_decay, context_->periphery_half_life,
         context_->salience_half_life, context_->drift_weight,
@@ -1504,18 +1508,67 @@ SignalProcessor::PersistWorkingMemory (Transaction &tx)
                           std::chrono::system_clock::now ().time_since_epoch ())
                           .count ();
 
-  // Mark existing WM slots as ended (soft delete)
-  tx.Execute (
-      "UPDATE memories SET end_ts = ? WHERE kind = 'WORKING' AND end_ts IS NULL",
-      { now_ms });
-
-  // Insert current slots as MEMORIES with kind='WORKING'
+  // Close any stale WM rows not represented by active slots.
+  std::vector<long long> active_ids;
+  active_ids.reserve (context_->wm_slots.size ());
   for (const auto &slot : context_->wm_slots)
     {
+      if (slot.strength <= 0.0 || slot.embedding.size () == 0)
+        {
+          continue;
+        }
+      if (slot.memory_id > 0)
+        {
+          active_ids.push_back (slot.memory_id);
+        }
+    }
+
+  if (active_ids.empty ())
+    {
+      tx.Execute (
+          "UPDATE memories SET end_ts = ? WHERE kind = 'WORKING' AND end_ts IS NULL",
+          { now_ms });
+    }
+  else
+    {
+      std::string placeholders;
+      placeholders.reserve (active_ids.size () * 2);
+      for (size_t i = 0; i < active_ids.size (); ++i)
+        {
+          if (i > 0)
+            {
+              placeholders += ", ";
+            }
+          placeholders += "?";
+        }
+      std::string query
+          = "UPDATE memories SET end_ts = ? "
+            "WHERE kind = 'WORKING' AND end_ts IS NULL "
+            "AND memory_id NOT IN ("
+            + placeholders + ")";
+      std::vector<std::any> params;
+      params.reserve (1 + active_ids.size ());
+      params.push_back (now_ms);
+      for (const auto id : active_ids)
+        {
+          params.push_back (id);
+        }
+      tx.Execute (query, params);
+    }
+
+  // Upsert current slots as MEMORIES with kind='WORKING'
+  for (auto &slot : context_->wm_slots)
+    {
       if (slot.strength <= 0.0)
-        continue;
+        {
+          slot.memory_id = 0;
+          continue;
+        }
       if (slot.embedding.size () == 0)
-        continue;
+        {
+          slot.memory_id = 0;
+          continue;
+        }
 
       const auto ts_ms = static_cast<int64_t> (slot.last_ts * 1000.0);
 
@@ -1532,25 +1585,49 @@ SignalProcessor::PersistWorkingMemory (Transaction &tx)
           continue;
         }
 
-      tx.Execute (
-          "INSERT INTO memories "
-          "(embedding_id, source_id, kind, modality, start_ts, n_signals, "
-          " s_max, s_avg, s_emotion_max, s_arousal_avg, drift_mag, "
-          " strength, last_access, created_at) "
-          "VALUES (?, ?, 'WORKING', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-          { embedding_id,
-            slot.source_id.empty () ? std::string ("unknown") : slot.source_id,
-            slot.modality, slot.start_ts, slot.n_signals, slot.s_max, slot.s_avg,
-            slot.s_emotion_max, slot.s_arousal_avg, slot.drift_acc,
-            slot.strength, ts_ms, now_ms });
-
-      auto mem_rows = tx.Execute ("SELECT last_insert_rowid() AS id", {});
-      const long long memory_id
-          = mem_rows.empty () ? 0 : ExtractInt64 (mem_rows[0], "id", 0);
-      if (memory_id == 0)
+      long long memory_id = slot.memory_id;
+      if (memory_id > 0)
         {
-          continue;
+          tx.Execute (
+              "UPDATE memories SET "
+              "embedding_id = ?, source_id = ?, modality = ?, start_ts = ?, "
+              "n_signals = ?, s_max = ?, s_avg = ?, s_emotion_max = ?, "
+              "s_arousal_avg = ?, drift_mag = ?, strength = ?, "
+              "last_access = ?, end_ts = NULL "
+              "WHERE memory_id = ? AND kind = 'WORKING'",
+              { embedding_id,
+                slot.source_id.empty () ? std::string ("unknown") : slot.source_id,
+                slot.modality, slot.start_ts, slot.n_signals, slot.s_max,
+                slot.s_avg, slot.s_emotion_max, slot.s_arousal_avg,
+                slot.drift_acc, slot.strength, ts_ms, memory_id });
         }
+      else
+        {
+          tx.Execute (
+              "INSERT INTO memories "
+              "(embedding_id, source_id, kind, modality, start_ts, n_signals, "
+              " s_max, s_avg, s_emotion_max, s_arousal_avg, drift_mag, "
+              " strength, last_access, created_at) "
+              "VALUES (?, ?, 'WORKING', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+              { embedding_id,
+                slot.source_id.empty () ? std::string ("unknown")
+                                        : slot.source_id,
+                slot.modality, slot.start_ts, slot.n_signals, slot.s_max,
+                slot.s_avg, slot.s_emotion_max, slot.s_arousal_avg,
+                slot.drift_acc, slot.strength, ts_ms, now_ms });
+
+          auto mem_rows = tx.Execute ("SELECT last_insert_rowid() AS id", {});
+          memory_id
+              = mem_rows.empty () ? 0 : ExtractInt64 (mem_rows[0], "id", 0);
+          if (memory_id == 0)
+            {
+              continue;
+            }
+          slot.memory_id = memory_id;
+        }
+
+      // Keep per-slot signals in sync with the current slot state.
+      tx.Execute ("DELETE FROM signals WHERE memory_id = ?", { memory_id });
 
       for (const auto &rec : slot.signal_records)
         {

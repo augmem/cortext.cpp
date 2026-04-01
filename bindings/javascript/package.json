@@ -1,0 +1,11 @@
+{
+  "name": "cortext-js",
+  "version": "0.1.0",
+  "description": "JavaScript and TypeScript bindings for the Cortext native library",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "scripts": {
+    "build": "cmake --preset ffi-release-node && cmake --build --preset ffi-release-node --target cortext cortext_node"
+  }
+}
+

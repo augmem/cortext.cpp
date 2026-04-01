@@ -7,16 +7,24 @@
 #include <unordered_map>
 #include <vector>
 
-#include "cortext/export.hpp"
 #include "cortext/consolidation_mode.hpp"
+#include "cortext/export.hpp"
+#include "cortext/stop_token.hpp"
 
 namespace cortext
 {
+
+class Cortext;
 
 // Forward declaration for ProcessorOutput fields
 namespace operations
 {
 enum class Metric;
+}
+
+namespace internal
+{
+class StreamingTextProbeSession;
 }
 
 /// @brief High-level entrypoint for Cortext with tri-modal process stubs.
@@ -155,8 +163,11 @@ public:
                         int channels, const std::string &source_id);
 
   /// @brief Attempt to trigger consolidation if conditions allow.
-  /// @param mode Shallow (embedding-only), deep (Gemma summary/labels), or both.
+  /// @param mode Shallow (embedding-only), deep (local summary/labels backend),
+  /// or both.
   Context Consolidate (ConsolidationMode mode = ConsolidationMode::Both);
+  Context Consolidate (StopToken stop_token,
+                       ConsolidationMode mode = ConsolidationMode::Both);
 
   /// @brief Flush/commit any pending episode writes.
   void Flush ();
@@ -183,6 +194,7 @@ public:
   Cortext &operator= (Cortext &&) = delete;
 
 private:
+  friend class internal::StreamingTextProbeSession;
   struct Impl;
   explicit Cortext (const Config &cfg, const std::string &db_path,
                     const std::string &models_dir);

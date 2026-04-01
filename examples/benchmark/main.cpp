@@ -43,7 +43,7 @@ RunPythonTool (const std::string &script, int argc, char *argv[], int start_idx)
 void
 PrintLfm2CpuRequirements ()
 {
-  std::cout << "\nLFM2 CPU prerequisites (from docs/research/lfm2.md):\n";
+  std::cout << "\nLFM2 CPU prerequisites:\n";
   std::cout << "  Runtime:\n";
   std::cout << "    - ExecuTorch C++ runtime with XNNPACK delegate\n";
   std::cout << "    - Build flags: -O3 -mcpu=cortex-a76 (or equivalent)\n";

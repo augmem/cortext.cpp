@@ -1,10 +1,11 @@
-Notes
+# Notes
 
-- Push summary relevance further: add a small boost for ASSOCIATION nodes in retrieval ranking and re-run the 360-turn ablation.
+## Closed Ablations
+- Summary relevance / association boost rerun (Mar 28, 2026; `assocboost_base_20260328` vs `assocboost_boosted_20260328`) showed the current branch is already summary-heavy (`retrieval_summary_hit_rate` ≈ `0.56`), and a stronger ASSOCIATION bonus did not increase summary-hit rate. Treat this as closed unless summary usage regresses again.
+- Idle vs end-only rerun (Mar 28, 2026; `idle_endonly_nondet_20260328` vs `idle_idle_nondet_20260328`) again showed no retrieval-quality difference at 120 turns; idle was only ~4.4% faster. Revisit only with a longer horizon or more consolidation cycles.
+- Mixed-content affect rerun (Mar 28, 2026; `affect_all_nondet_20260328` vs `affect_off_nondet_20260328`) showed affect had become too strong on the current branch. After lowering `InterruptAffectRelaxCoeff`, `affect_all_relaxed_20260328` pulled interrupt behavior much closer to `off` (`interrupt_turn_rate 0.3397` vs `0.2564`, down from `0.5128`) while recovering retrieval overlap. Revalidate only if affect tuning changes again.
+- Source-confidence controlled probe (Mar 28, 2026; `sourceconf_probe_on_20260328` vs `sourceconf_probe_off_20260328`) confirmed the gate works end to end once the dataset actually contains low-confidence candidates. With the gate on, `0/128` deliberately downgraded probe memories were reaccessed; with `CORTEXT_DISABLE_SOURCE_CONF=1`, `113/128` were reaccessed. Treat this as closed unless the retrieval fallback path changes.
+- Scripted 100-turn chat working-memory validation (Mar 30, 2026; integration E2E) exposed a chat-path regression rather than a missing long-horizon ablation. The failure mode was that `chat/user` and `chat/assistant` turns were still going through the generic working-memory admission/eviction path, and prompt hydration ordered slots by `last_access` rather than insertion order. After forcing full chat turns to preserve turn-shaped slots and hydrating prompt order from `start_ts`, the final working-memory prompt again matched the exact last four conversational turns. Treat this as closed unless working-memory policy or prompt reconstruction changes again.
 
-Verification TODO
-- Compare consolidation during idle vs end-only and measure association/summary retrieval impact.
-- Validate interrupt gating under mixed content with affect on/off (longer horizon).
-- Confirm source monitoring confidence is surfaced and gates injection as intended.
-- Validate procedural store + sequential links influence retrieval (ablation/metrics).
-  - Deferred: add a targeted sequential‑recall benchmark to surface procedural/sequence effects.
+## Open Follow-up
+- Validate whether procedural store + sequential links materially influence retrieval with a targeted sequential-recall benchmark. The generic topical-chat ablations were not sensitive enough to settle that question.

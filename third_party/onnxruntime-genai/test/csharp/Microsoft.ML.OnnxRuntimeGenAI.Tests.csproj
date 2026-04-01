@@ -1,0 +1,100 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFrameworks>net8.0</TargetFrameworks>
+    <IsPackable>false</IsPackable>
+    <Platforms>AnyCPU</Platforms>
+    <IsTestProject>true</IsTestProject>
+
+    <TestsSrcRoot>$(ProjectDir)..\..\test</TestsSrcRoot>
+    <CsharpTestsSrcRoot>$(TestsSrcRoot)\csharp</CsharpTestsSrcRoot>
+
+    <LangVersion>latest</LangVersion>
+    <AllowUnsafeBlocks>True</AllowUnsafeBlocks>
+    <Configurations>Debug;RelWithDebInfo;Release</Configurations>
+    <RestoreAdditionalProjectSources>https://api.nuget.org/v3/index.json</RestoreAdditionalProjectSources>
+    <RestoreSources>$(RestoreAdditionalProjectSources);$(RestoreSources)</RestoreSources>
+    <RootNamespace>Microsoft.ML.OnnxRuntimeGenAI.Tests</RootNamespace>
+    <AssemblyName>Microsoft.ML.OnnxRuntimeGenAI.Tests</AssemblyName>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <!--internal build related properties for Windows -->
+    <OnnxRuntimeGenAIBuildDirectory>$(TestsSrcRoot)\..\build</OnnxRuntimeGenAIBuildDirectory>
+    <NativeBuildOutputDir>$(OnnxRuntimeGenAIBuildDirectory)\$(Configuration)</NativeBuildOutputDir>
+    <OrtLibDir></OrtLibDir>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Windows -->
+    <None Condition="Exists('$(NativeBuildOutputDir)\onnxruntime-genai.dll')" Include="$(NativeBuildOutputDir)\onnxruntime-genai.dll">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Visible>false</Visible>
+    </None>
+    <None Condition="Exists('$(NativeBuildOutputDir)\onnxruntime-genai-cuda.dll')" Include="$(NativeBuildOutputDir)\onnxruntime-genai-cuda.dll">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Visible>false</Visible>
+    </None>
+    <None Condition="Exists('$(OrtLibDir)\onnxruntime.dll')" Include="$(OrtLibDir)\onnxruntime.dll">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Visible>false</Visible>
+    </None>
+    <None Condition="Exists('$(OrtLibDir)\onnxruntime_providers_shared.dll')" Include="$(OrtLibDir)\onnxruntime_providers_shared.dll">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Visible>false</Visible>
+    </None>
+    <None Condition="Exists('$(OrtLibDir)\onnxruntime_providers_cuda.dll')" Include="$(OrtLibDir)\onnxruntime_providers_cuda.dll">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Visible>false</Visible>
+    </None>
+
+    <!-- Linux -->
+    <None Condition="Exists('$(NativeBuildOutputDir)\libonnxruntime-genai.so')" Include="$(NativeBuildOutputDir)\libonnxruntime-genai.so">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Visible>false</Visible>
+    </None>
+    <None Condition="Exists('$(NativeBuildOutputDir)\libonnxruntime-genai-cuda.so')" Include="$(NativeBuildOutputDir)\libonnxruntime-genai-cuda.so">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Visible>false</Visible>
+    </None>
+    <None Condition="Exists('$(NativeBuildOutputDir)\libonnxruntime.so')" Include="$(NativeBuildOutputDir)\libonnxruntime.so">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Visible>false</Visible>
+    </None>
+    <None Condition="Exists('$(OrtLibDir)\libonnxruntime_providers_shared.so')" Include="$(OrtLibDir)\libonnxruntime_providers_shared.so">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Visible>false</Visible>
+    </None>
+    <None Condition="Exists('$(OrtLibDir)\libonnxruntime_providers_cuda.so')" Include="$(OrtLibDir)\libonnxruntime_providers_cuda.so">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Visible>false</Visible>
+    </None>
+
+    <!-- macOS -->
+    <None Condition="Exists('$(NativeBuildOutputDir)\libonnxruntime-genai.dylib')" Include="$(NativeBuildOutputDir)\libonnxruntime-genai.dylib">
+        <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+        <Visible>false</Visible>
+    </None>
+    <None Condition="Exists('$(OrtLibDir)\libonnxruntime.dylib')" Include="$(OrtLibDir)\libonnxruntime.dylib">
+        <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+        <Visible>false</Visible>
+    </None>
+
+    <None Include="$(TestsSrcRoot)\test_models\**">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Visible>false</Visible>
+      <LinkBase>"test_models\"</LinkBase>
+    </None>
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.5.0" />
+    <PackageReference Include="xunit" Version="2.4.1" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.4.3" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="$(TestsSrcRoot)\..\src\csharp\Microsoft.ML.OnnxRuntimeGenAI.csproj" />
+  </ItemGroup>
+
+</Project>

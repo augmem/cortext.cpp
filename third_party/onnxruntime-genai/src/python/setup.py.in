@@ -1,0 +1,74 @@
+from setuptools import setup, find_packages
+from setuptools.dist import Distribution
+import sys
+import os
+from os import path
+
+if sys.version_info < (3, 0):
+    sys.exit('Sorry, Python < 3.0 is not supported')
+
+class BinaryDistribution(Distribution):
+    """Distribution which always forces a binary package with platform name"""
+    def has_ext_modules(foo):
+        return True
+
+long_description_file = './package_description.md'
+
+if not path.exists(long_description_file):
+    raise FileNotFoundError(f'Unable to find {long_description_file} file')
+with open(long_description_file, encoding="utf-8") as fdesc:
+    long_description = fdesc.read()
+
+extras = ["ThirdPartyNotices.txt", "LICENSE"]
+package_name = '@TARGET_NAME@'
+
+
+def _onnxruntime_dependency() -> str:
+    dependency = None
+    # Use stable version as default
+    ort_version = os.environ.get("ONNXRUNTIME_VERSION", "1.20.1")
+
+    if package_name == "onnxruntime-genai":
+        dependency = "onnxruntime"
+
+        import platform
+        # win arm64 whls are only available in onnxruntime-qnn
+        if platform.machine() == "ARM64" and sys.platform.startswith("win"):
+            dependency = "onnxruntime-qnn"
+    elif package_name == "onnxruntime-genai-cuda":
+        dependency = "onnxruntime-gpu"
+    elif package_name == "onnxruntime-genai-trt-rtx":
+        dependency = "onnxruntime-trt-rtx"
+        ort_version = os.environ.get('ONNXRUNTIME_VERSION', '1.23.0')
+    elif package_name == "onnxruntime-genai-directml":
+        dependency = "onnxruntime-directml"
+    elif package_name == "onnxruntime-genai-rocm":
+        dependency = "onnxruntime-rocm"
+    else:
+        raise ValueError(f'Unable to determine the onnxruntime dependency for {package_name}.')
+    
+    return dependency if not ort_version else dependency + ">=" + ort_version
+
+def _get_install_requires():
+    install_requires = [
+        'numpy>=1.21.6',
+    ]
+    if package_name != "onnxruntime-genai-winml":
+        install_requires.append(_onnxruntime_dependency())
+    return install_requires
+
+setup(
+    name=package_name,
+    version='@VERSION_INFO@',
+    description='ONNX Runtime GenAI',
+    long_description=long_description,
+    long_description_content_type='text/markdown',
+    packages=['onnxruntime_genai', 'onnxruntime_genai.models', 'onnxruntime_genai.models.builders'],
+    include_package_data=True,
+    package_data={'': ['*.pyd', '*.dll', '*.so*', '*.dylib'] + extras},
+    install_requires=_get_install_requires(),
+    distclass=BinaryDistribution,
+    author="Microsoft Corporation",
+    author_email="onnxruntime-genai@microsoft.com",
+    license="MIT License",
+)

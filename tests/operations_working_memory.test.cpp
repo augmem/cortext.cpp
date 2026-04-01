@@ -157,7 +157,9 @@ TEST_CASE ("Alg24 maintenance decays slots but preserves them with floor",
 
   // Slot preserved with floor strength (0.01), not removed
   REQUIRE (pctx.wm_slots.size () == 1);
-  REQUIRE (pctx.wm_slots.front ().strength == Catch::Approx (0.01));
+  const double expected
+      = std::max (0.01, 1.0 - core::WMMaintenanceCostPerSlot (cfg.sensitivity) * 10.0);
+  REQUIRE (pctx.wm_slots.front ().strength == Catch::Approx (expected));
   REQUIRE (pctx.wm_last_accepted == false);
   REQUIRE (pctx.wm_last_chunked == false);
 }
@@ -194,7 +196,8 @@ TEST_CASE ("Alg24 maintenance reduces strength without removal when dt small",
   op.Execute (ctx, cortext::testing::GetNullTransaction ());
 
   REQUIRE (pctx.wm_slots.size () == 1);
-  const double expected = 1.0 - 0.10 * 5.0;
+  const double expected
+      = std::max (0.01, 1.0 - core::WMMaintenanceCostPerSlot (cfg.sensitivity) * 5.0);
   REQUIRE (pctx.wm_slots.front ().strength == Catch::Approx (expected));
   // last_ts is NOT updated during passive decay - only when slot is accessed
   // Original last_ts (0.0) should be preserved

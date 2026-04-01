@@ -1,9 +1,6 @@
 [submodule "third_party/sqlite-vec"]
 	path = third_party/sqlite-vec
 	url = https://github.com/asg017/sqlite-vec
-[submodule "third_party/sqlite-graph"]
-	path = third_party/sqlite-graph
-	url = https://github.com/agentflare-ai/sqlite-graph
 [submodule "third_party/onnxruntime"]
 	path = third_party/onnxruntime
 	url = https://github.com/microsoft/onnxruntime
@@ -12,7 +9,7 @@
 	url = https://github.com/sqlite/sqlite.git
 [submodule "third_party/sqlite-objstore"]
 	path = third_party/sqlite-objstore
-	url = file:///Users/gabrielwillen/VSCode/sqlite-objstore
+	url = https://github.com/gabewillen/sqlite-objstore
 [submodule "third_party/onnxruntime-genai"]
 	path = third_party/onnxruntime-genai
 	url = https://github.com/microsoft/onnxruntime-genai.git

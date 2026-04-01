@@ -13,6 +13,17 @@
 namespace cortext
 {
 
+class SQLiteStore;
+
+namespace internal
+{
+class SQLiteStoreQueryInterrupter
+{
+public:
+  static bool Interrupt (SQLiteStore &store);
+};
+}
+
 /// @brief Configuration options for SQLite connection.
 struct SQLiteConfig
 {
@@ -22,9 +33,6 @@ struct SQLiteConfig
   int synchronous = 1;              ///< NORMAL (1), FULL (2), OFF (0)
   int cache_size_kb = 2048;         ///< Cache size in KB (negative for KB)
 };
-
-// Forward declaration
-class SQLiteStore;
 
 /// @brief SQLite transaction with savepoint support for nested transactions.
 class SQLiteTransaction : public Transaction
@@ -206,6 +214,7 @@ private:
   void RollbackRootTransaction (SQLiteTransaction *transaction);
 
   friend class SQLiteTransaction;
+  friend class internal::SQLiteStoreQueryInterrupter;
 };
 
 } // namespace cortext

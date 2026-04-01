@@ -175,8 +175,9 @@ TEST_CASE ("WM gate threshold follows spec: lerp(0.1, 0.4, F)",
 
   SECTION ("Gate threshold increases with focus")
   {
-    for (double F = 0.0; F < 1.0; F += 0.1)
+    for (int step = 0; step < 10; ++step)
       {
+        const double F = static_cast<double> (step) / 10.0;
         REQUIRE (WMGateThreshold (F) < WMGateThreshold (F + 0.1));
       }
   }
@@ -344,17 +345,17 @@ TEST_CASE ("Prediction horizon increases with Focus",
 TEST_CASE ("Streaming pacing threshold decreases with Sensitivity",
            "[regression][streaming]")
 {
-  // pacing_thresh(S) = lerp(0.5, 0.1, S)
+  // pacing_thresh(S) = lerp(0.3, 0.05, S)
   // Higher sensitivity = lower threshold = more frequent checks
 
-  SECTION ("Low sensitivity is conservative (0.5)")
+  SECTION ("Low sensitivity is conservative (0.3)")
   {
-    REQUIRE (StreamingPacingThreshold (0.0) == Catch::Approx (0.5));
+    REQUIRE (StreamingPacingThreshold (0.0) == Catch::Approx (0.3));
   }
 
-  SECTION ("High sensitivity is aggressive (0.1)")
+  SECTION ("High sensitivity is aggressive (0.05)")
   {
-    REQUIRE (StreamingPacingThreshold (1.0) == Catch::Approx (0.1));
+    REQUIRE (StreamingPacingThreshold (1.0) == Catch::Approx (0.05));
   }
 
   SECTION ("Threshold decreases monotonically")
@@ -370,17 +371,17 @@ TEST_CASE ("Streaming pacing threshold decreases with Sensitivity",
 TEST_CASE ("Max wait drift decreases with Focus",
            "[regression][streaming]")
 {
-  // max_wait_drift(F) = lerp(2.0, 0.5, F)
+  // max_wait_drift(F) = lerp(1.2, 0.30, F)
   // Higher focus = lower max drift = more aggressive forced checks
 
-  SECTION ("Low focus is lenient (2.0)")
+  SECTION ("Low focus is lenient (1.2)")
   {
-    REQUIRE (MaxWaitDrift (0.0) == Catch::Approx (2.0));
+    REQUIRE (MaxWaitDrift (0.0) == Catch::Approx (1.2));
   }
 
-  SECTION ("High focus is strict (0.5)")
+  SECTION ("High focus is strict (0.3)")
   {
-    REQUIRE (MaxWaitDrift (1.0) == Catch::Approx (0.5));
+    REQUIRE (MaxWaitDrift (1.0) == Catch::Approx (0.3));
   }
 
   SECTION ("Max wait decreases monotonically")
@@ -564,7 +565,7 @@ TEST_CASE ("High Focus affects all selectivity parameters consistently",
   double F = 0.9;
 
   // All should be "stricter" / more selective
-  REQUIRE (MaxResults (F) <= 10);               // Fewer results (10 at F=0.9)
+  REQUIRE (MaxResults (F) <= 24);               // Fewer results, but no longer single digits
   REQUIRE (MergeThreshold (F) > 0.93);          // Stricter merging
   REQUIRE (WMGateThreshold (F) > 0.35);         // Stricter WM entry
   REQUIRE (FOKThreshold (F) > 0.45);            // Stricter FOK
@@ -581,7 +582,7 @@ TEST_CASE ("High Sensitivity affects all plasticity parameters consistently",
   REQUIRE (AlphaMood (S) > 0.17);                // Faster mood update
   REQUIRE (StreamingPacingThreshold (S) < 0.15); // More frequent checks
   REQUIRE (CascadeRadius (S) >= 4);              // Wider emotional cascade
-  REQUIRE (FlashbulbThreshold (S) < 0.5);        // Lower flashbulb trigger
+  REQUIRE (FlashbulbThreshold (S) < 0.75);       // Lower flashbulb trigger
 }
 
 TEST_CASE ("High Stability affects all persistence parameters consistently",

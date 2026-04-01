@@ -1,8 +1,9 @@
 Note: All knob-derived parameters in online operations use the midpoint‑biased
 knobs F̃ and S̃ defined in Section 1. This does not change the schema, but it
 does affect the interpretation of threshold- and gate-related fields.
-Note: Consolidation summaries require Gemma (LiteRT-LM); there is no extractive
-fallback when the model is unavailable.
+Note: Deep consolidation requires a local summarization/extraction backend:
+Gemma via LiteRT-LM or pinned LFM2 Q4_K_M GGUFs via llama.cpp. There is no
+embedding-only extractive fallback when no deep backend is available.
 Note: Consolidation candidates are limited to LONG_TERM/ASSOCIATION memories
 with non-null blob_id so summarization always has source text.
 Note: Summarization input is capped by knob-derived limits (max texts and
@@ -11,9 +12,10 @@ Note: Summarization output length is enforced by streaming decode cancel at
 max_summary_words, not prompt instructions.
 Note: Consolidation is external-only; callers invoke `cortext.consolidate()`
 explicitly rather than scheduling it automatically.
-Note: Consolidation supports shallow (embedding-only) and deep (Gemma-backed)
-phases; shallow creates ASSOCIATION centroids without blobs and attaches
-existing LABEL nodes by embedding similarity.
+Note: Consolidation supports shallow (embedding-only) and deep
+(Gemma/LiteRT-LM or LFM2/llama.cpp-backed) phases; shallow creates
+ASSOCIATION centroids without blobs and attaches existing LABEL nodes by
+embedding similarity.
 Note: Extraction uses constrained decoding and currently runs on CPU to ensure
 host-memory logits for label/relation parsing; this does not change the schema.
 Note: Label embeddings are cached by normalized label key; cache hits reuse
@@ -46,9 +48,9 @@ erDiagram
     %% CORE HIERARCHY: EPISODES → MEMORIES → SIGNALS → (EMBEDDINGS, BLOBS)
     %% =======================================================================
 
-    %% INDEX NOTATION (from docs/research/database.md)
+    %% INDEX NOTATION
     %% IDX = simple index | IDX with X = composite index | IDX partial Y = partial index with WHERE Y | IDX DESC = descending index
-    %% TABLE INDEXES (from docs/research/database.md)
+    %% TABLE INDEXES
     %% EPISODES: end_ts (partial NULL)
     %% MEMORIES: episode_id + start_ts, kind, end_ts (partial WORKING), strength + last_access, cluster_id (partial NOT NULL)
     %% SIGNALS: memory_id + serial_position, source_id (partial NULL memory_id), timestamp (DESC)

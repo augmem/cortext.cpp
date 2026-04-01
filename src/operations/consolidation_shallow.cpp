@@ -1,3 +1,4 @@
+#include "cortext/internal/cancellation.hpp"
 #include "cortext/operations/consolidation_shallow.hpp"
 
 #include "cortext/consolidation_mode.hpp"
@@ -126,6 +127,7 @@ ConsolidationShallow::Execute (OperationContext &context, Transaction &tx) const
 
   for (const auto &cluster : clusters)
     {
+      internal::ThrowIfStopRequested ();
       if (cluster.centroid.empty ())
         {
           continue;
@@ -200,6 +202,7 @@ ConsolidationShallow::Execute (OperationContext &context, Transaction &tx) const
       // Update cluster_id and derived_from edges.
       for (long long emb_id : cluster.embedding_ids)
         {
+          internal::ThrowIfStopRequested ();
           AddWrite (tx,
                     "UPDATE memories SET cluster_id = ? "
                     "WHERE embedding_id = ?",
