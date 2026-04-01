@@ -221,6 +221,40 @@ If a label already exists, its stored salience is updated with `s_max = max(s_ma
 
 To guarantee that labeling remains informative even for small clusters, if the frequency filter would remove all labels for a summary, the highest-salience label is retained as a fallback.
 
+## Temporal Consolidation of Changing Facts
+
+For long-horizon personal memory support, consolidation must avoid flattening changing facts into one timeless summary. Living arrangements, caregivers, appointments, medications, projects, and routines can all change over time. A memory system that simply overwrites older facts loses exactly the temporal nuance that matters most in care-oriented settings.
+
+A natural extension is to let deep extraction emit **fact assertions with temporal semantics** in addition to labels and relations:
+
+```
+fact_assertion_j = (
+  subject,
+  predicate,
+  object,
+  valid = [t_v_start, t_v_end),
+  tx    = [t_tx_start, t_tx_end),
+  provenance = {source_memory_ids, source_summary_ids},
+  confidence
+)
+```
+
+Under this model, consolidation remains **append-only** at the fact layer. New evidence does not erase prior assertions. Instead:
+
+1. A new assertion is inserted with its own valid and transaction interval.
+2. If it conflicts with an earlier open-ended assertion on the same subject/predicate, the earlier assertion can be closed or superseded.
+3. Both the earlier and later assertions remain queryable through their intervals and provenance.
+
+This yields a cleaner separation between:
+
+* what was true in the world at a given time,
+* when Cortext learned that truth,
+* and when Cortext later revised its belief.
+
+For example, "caregiver = Sarah" may be valid through March, while "caregiver = Emily" becomes valid in April but is only learned in May. Bitemporal consolidation preserves both the world timeline and the system-learning timeline, preventing late-arriving information from rewriting the past.
+
+This temporal structure is especially important for dementia-support scenarios. Gentle reminders should be able to express not only the current state ("Emily is your caregiver now") but also historical context ("Sarah used to visit on Tuesdays") and uncertainty about when a change was learned ("as of the latest update"). In practice, this means summarization should verbalize temporal transitions rather than compress them away.
+
 ## Knowledge Graph Construction
 
 The graph comprises two node types:
