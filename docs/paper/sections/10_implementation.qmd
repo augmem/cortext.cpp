@@ -2,7 +2,7 @@
 
 ## Embedding-Only Operations
 
-All online operations (scoring, boundary detection, retrieval, gating, graph updates) operate **only** on embeddings. Raw text/audio/image content is used solely to generate embeddings; the live loop never re-enters token space. This preserves modality-agnostic behavior and prevents hidden heuristics from bypassing knob control.
+In the current alpha, all online operations (scoring, boundary detection, retrieval, gating, graph updates) operate **only** on embeddings. Raw text/audio/image content is used solely to generate embeddings; the live loop never re-enters token space. This preserves modality-agnostic behavior and prevents hidden heuristics from bypassing knob control.
 
 Retrieved memories are hydrated for inspection and evaluation only. When a memory has no signal-level blobs (e.g., consolidation summaries), the system loads the summary payload from `memories.blob_id` so summary nodes can participate in analysis without affecting online computations.
 
@@ -12,6 +12,44 @@ Retrieved memories are hydrated for inspection and evaluation only. When a memor
 * **Consolidation LLM:** summarization and labeling are the only generative steps and run only during consolidation. Cortext resolves a local backend internally: **gemma-3n-e2b** via `third_party/litert_lm`, **LFM2/LFM2.5** via `llama.cpp` GGUFs, or a **mixed** Gemma+Liquid path. The Gemma path auto-selects among available `.litertlm` variants under `models/gemma3n-e2b-litert/`. The Liquid path now prefers `LFM2.5-350M-GGUF` for both summarization and extraction, preferring `Q4_K_M` when present and otherwise accepting other shipped GGUF quantizations; env overrides still take precedence for exact paths. If the `LFM2.5-350M-GGUF` asset is absent, Cortext falls back to the older `LFM2-2.6B-Transcript-Q4_K_M.gguf` summarizer and `LFM2-1.2B-Extract-Q4_K_M.gguf` extractor. The mixed path uses Gemma for summarization and the preferred Liquid extractor path for labeling, and auto resolution now prefers that split when both assets are present. If no deep backend is available, deep consolidation raises an error rather than silently degrading. The summarization prompt remains role-aware for chat sources, favors direct fact-oriented memory notes over dialogue recaps, explicitly preserves named people, projects, and technologies, discourages speaker-role phrasing such as "the user" or "the assistant", and preserves chronological ordering when selected chat excerpts are passed to the model. The Liquid GGUF path is text-only; audio-specific summarization/extraction methods remain unsupported there.
 
 No other model runtimes are required for the online loop; all operational decisions are embedding-space computations derived from F/S/T.
+
+## Alpha Scope and v1 Structured-Fact Direction
+
+The current alpha stores temporality primarily at the episodic level:
+
+* episodic memories have event timestamps,
+* retrieval and decay are recency-aware,
+* consolidation produces summaries, labels, and graph structure.
+
+This is sufficient for long-horizon continuity, but it does not yet provide a first-class store for changing structured facts such as residence, caregiver, routine, diagnosis, medication, or appointment state.
+
+A planned `v1` extension is an additive **bitemporal structured-fact layer** populated during consolidation rather than during the live loop. A minimal fact record would include:
+
+```
+fact_id
+subject
+predicate
+object_or_value
+valid_start, valid_end
+recorded_at, superseded_at
+confidence
+source_memory_ids
+source_summary_ids
+```
+
+This layer is additive, not a replacement for the existing episodic graph. The intended division of responsibility is:
+
+* **episodic memories:** preserve raw experience and provenance,
+* **summaries and graph nodes:** provide semantic compression and associative retrieval,
+* **bitemporal facts:** answer changing factual questions with explicit world-time and system-time semantics.
+
+Under this design, deep extraction in consolidation can emit assertions with valid-time and transaction-time boundaries. Retrieval and answer construction can then distinguish among three query modes:
+
+* current truth (`what is true now?`)
+* historical truth (`what was true at world time τ?`)
+* historical belief (`what would Cortext have answered at system time τ?`)
+
+Crucially, this preserves the alpha architecture: the live control loop remains embedding-only, while structured temporal reasoning is added as a higher-level memory product derived from consolidation outputs.
 
 ## Computational Complexity
 
