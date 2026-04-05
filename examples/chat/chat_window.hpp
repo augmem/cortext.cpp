@@ -5,12 +5,15 @@
 #include "metrics_state.hpp"
 #include "cortext/cortext.hpp"
 
+#include <imgui.h>
+
 #include <atomic>
 #include <deque>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace chat {
@@ -69,9 +72,21 @@ struct SettingsState {
   double active_focus = 0.5;
   double active_sensitivity = 0.5;
   double active_stability = 0.5;
+  int active_idle_consolidation_seconds = 0;
   double draft_focus = 0.5;
   double draft_sensitivity = 0.5;
   double draft_stability = 0.5;
+  int draft_idle_consolidation_seconds = 0;
+  int default_idle_consolidation_seconds = 0;
+  std::string active_model;
+  std::string draft_model;
+  std::string default_model;
+  std::string active_memory_prompt_prefix;
+  std::string draft_memory_prompt_prefix;
+  std::string default_memory_prompt_prefix;
+  std::string active_memory_prompt_suffix;
+  std::string draft_memory_prompt_suffix;
+  std::string default_memory_prompt_suffix;
   bool apply_requested = false;
   std::optional<std::string> last_apply_status;
 };
@@ -130,16 +145,57 @@ struct DatabaseEpisodeRow {
   uint64_t created_at = 0;
 };
 
+struct DatabaseFactRow {
+  long long fact_id = 0;
+  std::string subject;
+  std::string predicate;
+  std::string object;
+  uint64_t valid_start_ts = 0;
+  uint64_t valid_end_ts = 0;
+  uint64_t recorded_at_ts = 0;
+  uint64_t superseded_at_ts = 0;
+  double confidence = 0.0;
+  long long summary_memory_id = 0;
+  std::string lifecycle_state;
+  std::string severity_class;
+};
+
+struct DatabaseEvictionRow {
+  long long eviction_id = 0;
+  long long memory_id = 0;
+  long long embedding_id = 0;
+  std::string source_id;
+  std::string kind;
+  std::string label;
+  uint64_t start_ts = 0;
+  uint64_t end_ts = 0;
+  uint64_t created_at = 0;
+  uint64_t last_access = 0;
+  uint64_t evicted_at = 0;
+  double strength = 0.0;
+  double use_frequency = 0.0;
+  double contextual_gain = 0.0;
+  long long retrieved_count = 0;
+  long long used_count = 0;
+  long long n_signals = 0;
+  std::string modality;
+  std::string eviction_reason;
+};
+
 struct DatabaseExplorerState {
   mutable std::mutex mu;
   std::vector<DatabaseMemoryRow> memories;
   std::vector<DatabaseSignalRow> signals;
   std::vector<DatabaseAssociationRow> associations;
   std::vector<DatabaseEpisodeRow> episodes;
+  std::vector<DatabaseFactRow> facts;
+  std::vector<DatabaseEvictionRow> evictions;
   long long total_memories = 0;
   long long total_signals = 0;
   long long total_associations = 0;
   long long total_episodes = 0;
+  long long total_facts = 0;
+  long long total_evictions = 0;
   uint64_t refreshed_at = 0;
   bool refresh_requested = true;
   bool clear_requested = false;
@@ -200,6 +256,7 @@ private:
   void RenderWorkingMemoryTab();
   void RenderSettingsTab();
   void RenderDatabaseTab();
+  void RenderGraphTab();
   void RenderContextTab();
   void RenderLogsTab();
   void RenderStatusBar();
@@ -211,10 +268,20 @@ private:
   State state_;
   int selected_tab_ = 0;
   bool scroll_chat_to_bottom_ = true;
+  std::size_t last_chat_message_count_ = 0;
+  std::size_t last_partial_response_size_ = 0;
+  bool last_generating_ = false;
   bool scroll_memory_to_top_ = true;
+  bool refocus_input_next_frame_ = true;
   std::string pending_message_;
   char input_buffer_[4096] = {0};
   bool show_clear_db_confirm_ = false;
+  int db_memory_kind_filter_ = 0;
+  ImVec2 graph_pan_offset_ = ImVec2(80.0f, 80.0f);
+  std::unordered_map<long long, ImVec2> graph_node_positions_;
+  std::size_t graph_layout_signature_ = 0;
+  bool graph_layout_dirty_ = true;
+  long long graph_dragging_node_id_ = 0;
 
   // Log buffer for parsed logs
   std::deque<LogEntry> parsed_logs_;

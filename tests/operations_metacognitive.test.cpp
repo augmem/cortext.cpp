@@ -103,3 +103,156 @@ TEST_CASE ("Alg25 exposes parameter derivations per algorithms.md",
   REQUIRE (ctx.GetMetacogSensitivity ()
            == Catch::Approx (expected_meta_sens).epsilon (1e-9));
 }
+
+TEST_CASE ("Metacognitive TOT arms next-turn recovery mode",
+           "[operations][metacognitive][state]")
+{
+  Signal s;
+  s.embedding = Eigen::VectorXf::Zero (3);
+  s.timestamp = 1000;
+  ProcessorContext pctx;
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  cfg.focus = 0.5;
+  cfg.sensitivity = 0.4;
+  cfg.stability = 0.6;
+
+  MetacognitiveMonitoring op;
+  OperationContext ctx (s, pctx, cfg);
+  ctx.SetFeelingOfKnowing (1.0);
+  ctx.SetMemoryUsageEvents ({ { 1LL, true, -1.0 } });
+  op.Execute (ctx, cortext::testing::GetNullTransaction ());
+
+  REQUIRE (ctx.GetMetacogTOTDetected ());
+  REQUIRE (pctx.metacognitive_mode
+           == ProcessorContext::MetacognitiveMode::TotRecovery);
+  REQUIRE (pctx.metacognitive_mode_expires_at
+           == s.timestamp
+                  + static_cast<std::uint64_t> (
+                      cortext::core::StrategySwitchLatencyMs (
+                          cfg.sensitivity)));
+  REQUIRE (pctx.metacognitive_tot_trigger_count == 1);
+}
+
+TEST_CASE ("Metacognitive confidence decays across delayed signals",
+           "[operations][metacognitive][confidence]")
+{
+  Signal s;
+  s.embedding = Eigen::VectorXf::Zero (3);
+  s.timestamp = 11000;
+  ProcessorContext pctx;
+  pctx.metacognitive_confidence = 1.0;
+  pctx.last_signal_timestamp = 1000;
+
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  cfg.focus = 0.5;
+  cfg.sensitivity = 0.5;
+  cfg.stability = 0.0;
+
+  MetacognitiveMonitoring op;
+  OperationContext ctx (s, pctx, cfg);
+  ctx.SetFeelingOfKnowing (0.2);
+  ctx.SetMemoryUsageEvents ({ { 1LL, true, -1.0 } });
+  op.Execute (ctx, cortext::testing::GetNullTransaction ());
+
+  REQUIRE (ctx.GetMetacogConfidenceDecayRate ()
+           == Catch::Approx (cortext::core::ConfidenceDecayRate (cfg.stability)));
+  REQUIRE (pctx.metacognitive_confidence < 1.0);
+  REQUIRE (pctx.metacognitive_confidence > 0.2);
+}
+
+TEST_CASE ("Disabling metacognitive confidence decay preserves prior confidence",
+           "[operations][metacognitive][confidence]")
+{
+  cortext::testing::ScopedEnvVar disable (
+      "CORTEXT_DISABLE_METACOG_CONFIDENCE_DECAY", "1");
+
+  Signal s;
+  s.embedding = Eigen::VectorXf::Zero (3);
+  s.timestamp = 11000;
+  ProcessorContext pctx;
+  pctx.metacognitive_confidence = 1.0;
+  pctx.last_signal_timestamp = 1000;
+
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  cfg.focus = 0.5;
+  cfg.sensitivity = 0.5;
+  cfg.stability = 0.0;
+
+  MetacognitiveMonitoring op;
+  OperationContext ctx (s, pctx, cfg);
+  ctx.SetFeelingOfKnowing (0.2);
+  ctx.SetMemoryUsageEvents ({ { 1LL, true, -1.0 } });
+  op.Execute (ctx, cortext::testing::GetNullTransaction ());
+
+  const double expected_alpha = cortext::core::Clamp (
+      0.15 + 0.20
+                  * cortext::core::MetacognitiveSensitivity (cfg.focus,
+                                                            cfg.sensitivity),
+      0.15, 0.55);
+  const double expected_confidence
+      = std::max (0.2, cortext::core::Ewma (1.0, 0.2, expected_alpha));
+  REQUIRE (pctx.metacognitive_confidence
+           == Catch::Approx (expected_confidence).margin (1e-6));
+}
+
+TEST_CASE ("Metacognitive unknown mode clears after certainty is satisfied",
+           "[operations][metacognitive][state]")
+{
+  Signal s;
+  s.embedding = Eigen::VectorXf::Zero (3);
+  s.timestamp = 2000;
+  ProcessorContext pctx;
+  pctx.metacognitive_mode
+      = ProcessorContext::MetacognitiveMode::UnknownCaution;
+  pctx.metacognitive_mode_expires_at = 3000;
+  pctx.metacognitive_certainty_satisfied = true;
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  cfg.focus = 0.5;
+  cfg.sensitivity = 0.5;
+  cfg.stability = 0.7;
+
+  MetacognitiveMonitoring op;
+  OperationContext ctx (s, pctx, cfg);
+  ctx.SetFeelingOfKnowing (0.2);
+  ctx.SetMemoryUsageEvents ({ { 1LL, true, 1.0 } });
+  op.Execute (ctx, cortext::testing::GetNullTransaction ());
+
+  REQUIRE_FALSE (ctx.GetMetacogUnknownDetected ());
+  REQUIRE (pctx.metacognitive_mode
+           == ProcessorContext::MetacognitiveMode::Normal);
+  REQUIRE (pctx.metacognitive_mode_expires_at == 0);
+  REQUIRE_FALSE (pctx.metacognitive_certainty_satisfied);
+}
+
+TEST_CASE ("Expired metacognitive mode is cleared before new decisions",
+           "[operations][metacognitive][state]")
+{
+  Signal s;
+  s.embedding = Eigen::VectorXf::Zero (3);
+  s.timestamp = 5000;
+  ProcessorContext pctx;
+  pctx.metacognitive_mode
+      = ProcessorContext::MetacognitiveMode::TotRecovery;
+  pctx.metacognitive_mode_expires_at = 4000;
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  cfg.focus = 0.5;
+  cfg.sensitivity = 0.5;
+  cfg.stability = 0.5;
+
+  MetacognitiveMonitoring op;
+  OperationContext ctx (s, pctx, cfg);
+  ctx.SetFeelingOfKnowing (0.1);
+  ctx.SetMemoryUsageEvents ({ { 1LL, true, 1.0 } });
+  op.Execute (ctx, cortext::testing::GetNullTransaction ());
+
+  REQUIRE_FALSE (ctx.GetMetacogTOTDetected ());
+  REQUIRE_FALSE (ctx.GetMetacogUnknownDetected ());
+  REQUIRE (pctx.metacognitive_mode
+           == ProcessorContext::MetacognitiveMode::Normal);
+  REQUIRE (pctx.metacognitive_mode_expires_at == 0);
+}

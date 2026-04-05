@@ -1,5 +1,6 @@
 #include "lfm2_llama_backend.hpp"
 
+#include "cortext/internal/cancellation.hpp"
 #include "cortext/core/thread_config.hpp"
 #include "llama_cpp_support.hpp"
 
@@ -116,6 +117,25 @@ TrimAsciiWhitespace (std::string value)
   return value;
 }
 
+int
+ComputeSummaryMaxTokens (const std::vector<std::string> &texts, int max_words)
+{
+  if (max_words > 0)
+    {
+      return std::clamp (max_words * 8, 64, 1024);
+    }
+
+  std::size_t total_chars = 0;
+  for (const auto &text : texts)
+    {
+      total_chars += text.size ();
+    }
+
+  const int approx_input_tokens
+      = static_cast<int> (std::max<std::size_t> (1, total_chars / 4));
+  return std::clamp (approx_input_tokens, 256, 1024);
+}
+
 std::string
 BuildSummarySystemPrompt ()
 {
@@ -164,16 +184,21 @@ BuildSummaryUserPrompt (const std::vector<std::string> &texts)
 std::string
 BuildExtractionSystemPrompt ()
 {
-  return "Extract labels and relations from the provided text.\n"
-         "Return only a single JSON object with keys \"labels\" and "
-         "\"relations\".\n"
+  return "Extract labels, relations, and durable facts from the provided "
+         "text.\n"
+         "Return only a single JSON object with keys \"labels\", "
+         "\"relations\", and optional \"facts\".\n"
          "Prefer recall over compression: include all salient labels and "
          "relations that are directly supported by the text.\n"
          "\"labels\" must be an array of non-empty strings copied from the "
          "text.\n"
          "Each relation must include non-empty \"subject\", \"predicate\", "
          "and \"object\" strings taken from the text.\n"
+         "Each fact must include non-empty \"subject\", \"predicate\", and "
+         "\"object\" strings taken from the text.\n"
          "If confidence is present, it must be a JSON number.\n"
+         "If valid_start_ts or valid_end_ts are present for facts, they must "
+         "be JSON integers in milliseconds.\n"
          "Always return at least one label; if nothing is obvious, choose the "
          "single most salient term from the text.\n"
          "Do not emit any explanation outside the JSON object.";
@@ -292,6 +317,30 @@ ParseExtractionResponse (const std::string &content)
         }
     }
 
+  if (json_output.contains ("facts"))
+    {
+      for (const auto &fact : json_output["facts"])
+        {
+          operations::ExtractedFact f;
+          f.subject = TrimAsciiWhitespace (fact.value ("subject", ""));
+          f.predicate = TrimAsciiWhitespace (fact.value ("predicate", ""));
+          f.object = TrimAsciiWhitespace (fact.value ("object", ""));
+          f.confidence = fact.value ("confidence", 0.5);
+          if (fact.contains ("valid_start_ts") && fact["valid_start_ts"].is_number ())
+            {
+              f.valid_start_ts = fact["valid_start_ts"].get<std::uint64_t> ();
+            }
+          if (fact.contains ("valid_end_ts") && fact["valid_end_ts"].is_number ())
+            {
+              f.valid_end_ts = fact["valid_end_ts"].get<std::uint64_t> ();
+            }
+          if (!f.subject.empty () && !f.predicate.empty () && !f.object.empty ())
+            {
+              result.facts.push_back (std::move (f));
+            }
+        }
+    }
+
   return result;
 }
 
@@ -404,6 +453,54 @@ ValidateSchemaSubset (const nlohmann::json &schema)
         }
     }
 
+  if (properties.contains ("facts"))
+    {
+      const auto &facts = properties["facts"];
+      RequireBoolean (facts.is_object () && facts.value ("type", "") == "array",
+                      "LFM2 extractor schema facts must be an array");
+      RequireBoolean (facts.contains ("items") && facts["items"].is_object (),
+                      "LFM2 extractor schema facts items must be objects");
+      const auto &items = facts["items"];
+      RequireBoolean (items.value ("type", "") == "object",
+                      "LFM2 extractor schema fact items must have type=object");
+      RequireBoolean (items.contains ("properties")
+                          && items["properties"].is_object (),
+                      "LFM2 extractor schema fact items must define properties");
+      const auto &fact_props = items["properties"];
+      for (const char *key : { "subject", "predicate", "object" })
+        {
+          RequireBoolean (
+              fact_props.contains (key)
+                  && fact_props[key].is_object ()
+                  && fact_props[key].value ("type", "") == "string",
+              std::string ("LFM2 extractor schema fact property ") + key
+                  + " must be a string");
+        }
+      if (fact_props.contains ("confidence"))
+        {
+          RequireBoolean (fact_props["confidence"].is_object (),
+                          "LFM2 extractor schema fact confidence must be an object");
+          const std::string confidence_type
+              = fact_props["confidence"].value ("type", "");
+          RequireBoolean (confidence_type == "number"
+                              || confidence_type == "integer",
+                          "LFM2 extractor schema fact confidence must be numeric");
+        }
+      for (const char *key : { "valid_start_ts", "valid_end_ts" })
+        {
+          if (fact_props.contains (key))
+            {
+              RequireBoolean (fact_props[key].is_object (),
+                              std::string ("LFM2 extractor schema ") + key
+                                  + " must be an object");
+              const std::string ts_type = fact_props[key].value ("type", "");
+              RequireBoolean (ts_type == "integer" || ts_type == "number",
+                              std::string ("LFM2 extractor schema ") + key
+                                  + " must be numeric");
+            }
+        }
+    }
+
   if (schema.contains ("required"))
     {
       RequireBoolean (schema["required"].is_array (),
@@ -413,8 +510,9 @@ ValidateSchemaSubset (const nlohmann::json &schema)
           RequireBoolean (required.is_string (),
                           "LFM2 extractor schema required entries must be strings");
           const std::string key = required.get<std::string> ();
-          RequireBoolean (key == "labels" || key == "relations",
-                          "LFM2 extractor schema only supports labels/relations in required");
+          RequireBoolean (key == "labels" || key == "relations"
+                              || key == "facts",
+                          "LFM2 extractor schema only supports labels/relations/facts in required");
         }
       bool labels_required = false;
       for (const auto &required : schema["required"])
@@ -463,8 +561,13 @@ BuildLfm2ExtractionGrammar (const nlohmann::json &schema)
   const auto &labels = properties["labels"];
   const bool labels_nonempty = labels.value ("minItems", 0) > 0;
   const bool has_relations = properties.contains ("relations");
+  const bool has_facts = properties.contains ("facts");
   bool relations_required = false;
+  bool facts_required = false;
   bool confidence_supported = false;
+  bool fact_confidence_supported = false;
+  bool valid_start_supported = false;
+  bool valid_end_supported = false;
   if (schema.contains ("required"))
     {
       for (const auto &required : schema["required"])
@@ -473,6 +576,10 @@ BuildLfm2ExtractionGrammar (const nlohmann::json &schema)
             {
               relations_required = true;
             }
+          if (required.is_string () && required.get<std::string> () == "facts")
+            {
+              facts_required = true;
+            }
         }
     }
   if (has_relations)
@@ -480,18 +587,62 @@ BuildLfm2ExtractionGrammar (const nlohmann::json &schema)
       const auto &relation_props = properties["relations"]["items"]["properties"];
       confidence_supported = relation_props.contains ("confidence");
     }
+  if (has_facts)
+    {
+      const auto &fact_props = properties["facts"]["items"]["properties"];
+      fact_confidence_supported = fact_props.contains ("confidence");
+      valid_start_supported = fact_props.contains ("valid_start_ts");
+      valid_end_supported = fact_props.contains ("valid_end_ts");
+    }
 
   std::ostringstream grammar;
-  if (has_relations)
+  if (has_relations || has_facts)
     {
       grammar << "root ::= \"{\" space labels-kv";
-      if (relations_required)
+      if (has_relations && has_facts)
         {
-          grammar << " \",\" space relations-kv";
+          if (relations_required)
+            {
+              grammar << " \",\" space relations-kv";
+              if (facts_required)
+                {
+                  grammar << " \",\" space facts-kv";
+                }
+              else
+                {
+                  grammar << " ( \",\" space facts-kv )?";
+                }
+            }
+          else if (facts_required)
+            {
+              grammar << " \",\" space facts-kv";
+            }
+          else
+            {
+              grammar << " ( \",\" space ( relations-kv ( \",\" space facts-kv )? | facts-kv ) )?";
+            }
+        }
+      else if (has_relations)
+        {
+          if (relations_required)
+            {
+              grammar << " \",\" space relations-kv";
+            }
+          else
+            {
+              grammar << " ( \",\" space ( relations-kv ) )?";
+            }
         }
       else
         {
-          grammar << " ( \",\" space ( relations-kv ) )?";
+          if (facts_required)
+            {
+              grammar << " \",\" space facts-kv";
+            }
+          else
+            {
+              grammar << " ( \",\" space ( facts-kv ) )?";
+            }
         }
       grammar << " \"}\" space\n";
     }
@@ -536,6 +687,48 @@ BuildLfm2ExtractionGrammar (const nlohmann::json &schema)
         }
       grammar << "relations-kv ::= \"\\\"relations\\\"\" space \":\" space "
                  "relations\n";
+    }
+  if (has_facts)
+    {
+      grammar << "facts ::= \"[\" space (facts-item (\",\" space facts-item)*)? \"]\" space\n";
+      grammar << "facts-item ::= \"{\" space facts-item-subject-kv "
+                 "\",\" space facts-item-predicate-kv \",\" space "
+                 "facts-item-object-kv";
+      if (fact_confidence_supported)
+        {
+          grammar << " ( \",\" space ( facts-item-confidence-kv ) )?";
+        }
+      if (valid_start_supported)
+        {
+          grammar << " ( \",\" space ( facts-item-valid-start-kv ) )?";
+        }
+      if (valid_end_supported)
+        {
+          grammar << " ( \",\" space ( facts-item-valid-end-kv ) )?";
+        }
+      grammar << " \"}\" space\n";
+      grammar << "facts-item-subject-kv ::= \"\\\"subject\\\"\" space "
+                 "\":\" space nonempty-string\n";
+      grammar << "facts-item-predicate-kv ::= \"\\\"predicate\\\"\" space "
+                 "\":\" space nonempty-string\n";
+      grammar << "facts-item-object-kv ::= \"\\\"object\\\"\" space "
+                 "\":\" space nonempty-string\n";
+      if (fact_confidence_supported)
+        {
+          grammar << "facts-item-confidence-kv ::= \"\\\"confidence\\\"\" "
+                     "space \":\" space number\n";
+        }
+      if (valid_start_supported)
+        {
+          grammar << "facts-item-valid-start-kv ::= \"\\\"valid_start_ts\\\"\" "
+                     "space \":\" space number\n";
+        }
+      if (valid_end_supported)
+        {
+          grammar << "facts-item-valid-end-kv ::= \"\\\"valid_end_ts\\\"\" "
+                     "space \":\" space number\n";
+        }
+      grammar << "facts-kv ::= \"\\\"facts\\\"\" space \":\" space facts\n";
     }
   grammar << BuildStringGrammar ();
   grammar << BuildNumberGrammar ();
@@ -684,6 +877,7 @@ public:
         throw std::runtime_error (component_name_
                                   + ": llama.cpp context has no memory");
       }
+    internal::ThrowIfStopRequested ();
     llama_memory_clear (memory, false);
 
     const std::string prompt = ApplyChatTemplate (messages);
@@ -727,6 +921,7 @@ public:
                                   + ": llama.cpp prompt decode failed: "
                                   + std::to_string (prompt_rc));
       }
+    internal::ThrowIfStopRequested ();
 
     std::unique_ptr<llama_sampler, void (*) (llama_sampler *)> sampler (
         BuildGenerationSampler (vocab_, config), llama_sampler_free);
@@ -741,6 +936,7 @@ public:
 
     for (int produced = 0; produced < config.max_tokens; ++produced)
       {
+        internal::ThrowIfStopRequested ();
         const llama_token token = llama_sampler_sample (sampler.get (), ctx_, -1);
         if (token == LLAMA_TOKEN_NULL || llama_vocab_is_eog (vocab_, token))
           {
@@ -757,6 +953,7 @@ public:
                                       + ": llama.cpp token decode failed: "
                                       + std::to_string (decode_rc));
           }
+        internal::ThrowIfStopRequested ();
       }
 
     return Detokenize (output_tokens);
@@ -990,7 +1187,7 @@ Lfm2LlamaSummarizer::SummarizeTextsLimited (
     }
 
   GenerationConfig config;
-  config.max_tokens = std::clamp ((max_words > 0 ? max_words * 8 : 256), 64, 512);
+  config.max_tokens = ComputeSummaryMaxTokens (texts, max_words);
   config.temperature = 0.3f;
   config.min_p = 0.15f;
   config.repetition_penalty = 1.05f;

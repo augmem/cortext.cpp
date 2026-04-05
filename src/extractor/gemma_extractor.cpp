@@ -58,12 +58,16 @@ std::string
 BuildTextPrompt (const std::string &text)
 {
   return std::string (
-      "Extract labels and relations from the text below. "
-      "Return only a single JSON object with keys \"labels\" and \"relations\". "
+      "Extract labels, relations, and durable facts from the text below. "
+      "Return only a single JSON object with keys \"labels\", \"relations\", and optional \"facts\". "
       "\"labels\" must be an array of non-empty strings copied from the text "
       "(no placeholders, no objects, no types/categories). "
       "Each relation must include non-empty \"subject\", \"predicate\", and "
       "\"object\" strings taken from the text. "
+      "Each fact must include non-empty \"subject\", \"predicate\", and "
+      "\"object\" strings taken from the text. "
+      "If available, facts may also include integer millisecond "
+      "\"valid_start_ts\" and \"valid_end_ts\" fields. "
       "Always return at least one label; if nothing is obvious, choose the "
       "single most salient term from the text.\n"
       "Text:\n")
@@ -74,12 +78,16 @@ std::string
 BuildAudioPrompt ()
 {
   return std::string (
-      "Extract labels and relations from the audio. "
-      "Return only a single JSON object with keys \"labels\" and \"relations\". "
+      "Extract labels, relations, and durable facts from the audio. "
+      "Return only a single JSON object with keys \"labels\", \"relations\", and optional \"facts\". "
       "\"labels\" must be an array of non-empty strings drawn "
       "from the audio content (no placeholders, no objects, no types/categories). "
       "Each relation must include non-empty \"subject\", \"predicate\", and "
       "\"object\" strings drawn from the audio content. "
+      "Each fact must include non-empty \"subject\", \"predicate\", and "
+      "\"object\" strings drawn from the audio content. "
+      "If available, facts may also include integer millisecond "
+      "\"valid_start_ts\" and \"valid_end_ts\" fields. "
       "Always return at least one label; if nothing is obvious, choose the "
       "single most salient term from the audio.\n"
       "<start_of_audio>");
@@ -215,6 +223,30 @@ ParseExtractionResponse (const std::string &content)
           r.object = relation.value ("object", "");
           r.confidence = relation.value ("confidence", 0.5);
           result.relations.push_back (std::move (r));
+        }
+    }
+
+  if (json_output.contains ("facts"))
+    {
+      for (const auto &fact : json_output["facts"])
+        {
+          operations::ExtractedFact f;
+          f.subject = fact.value ("subject", "");
+          f.predicate = fact.value ("predicate", "");
+          f.object = fact.value ("object", "");
+          f.confidence = fact.value ("confidence", 0.5);
+          if (fact.contains ("valid_start_ts") && fact["valid_start_ts"].is_number ())
+            {
+              f.valid_start_ts = fact["valid_start_ts"].get<std::uint64_t> ();
+            }
+          if (fact.contains ("valid_end_ts") && fact["valid_end_ts"].is_number ())
+            {
+              f.valid_end_ts = fact["valid_end_ts"].get<std::uint64_t> ();
+            }
+          if (!f.subject.empty () && !f.predicate.empty () && !f.object.empty ())
+            {
+              result.facts.push_back (std::move (f));
+            }
         }
     }
 

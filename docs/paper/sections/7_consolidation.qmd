@@ -119,7 +119,7 @@ Low-scoring memories are marked for merging.
 
 Consolidation proceeds via **generative replay** rather than one-shot merges. Representative episodes are re-encoded and used to update semantic structures, reducing drift and preserving detail.
 
-**Summarization + labeling engine (deep mode):** Consolidation is the only stage that invokes a generative model. Deep mode resolves a local backend internally: **gemma-3n-e2b** through `third_party/litert_lm`, **LFM2/LFM2.5** through `llama.cpp` GGUFs, or a **mixed** path that uses Gemma for summarization and a Liquid GGUF for extraction. The Liquid resolver now prefers `LFM2.5-350M-GGUF` for both summarization and extraction, defaulting to the local `Q4_K_M` checkpoint when present and accepting other bundled GGUF quantizations as fallbacks; if that asset is absent, it falls back to the older pinned `LFM2-2.6B-Transcript-Q4_K_M.gguf` summarizer and `LFM2-1.2B-Extract-Q4_K_M.gguf` extractor. Auto resolution prefers the mixed path when both assets are present. All other operations remain embedding-only. **There is no extractive fallback**: if no deep backend is available, or summarization fails, deep consolidation raises an error rather than silently degrading.
+**Summarization + labeling engine (deep mode):** Consolidation is the only stage that invokes a generative model. Deep mode resolves a local backend internally: **gemma-3n-e2b** through `third_party/litert_lm`, **LFM2/LFM2.5** through `llama.cpp` GGUFs, or a **mixed** path that uses Gemma for summarization and a Liquid GGUF for extraction. The Liquid resolver now prefers `LFM2.5-350M-GGUF` for both summarization and extraction, defaulting to the local `Q4_K_M` checkpoint when present and accepting other bundled GGUF quantizations as fallbacks; if that asset is absent, it falls back to the older pinned `LFM2-2.6B-Transcript-Q4_K_M.gguf` summarizer and `LFM2-1.2B-Extract-Q4_K_M.gguf` extractor. Auto resolution now prefers the pure Liquid `LFM2.5/llama.cpp` path when those assets are present; the mixed path and Gemma path are fallbacks. All other operations remain embedding-only. **There is no extractive fallback**: if no deep backend is available, or summarization fails, deep consolidation raises an error rather than silently degrading.
 
 ## Shallow Consolidation (Embedding‑Only)
 
@@ -185,10 +185,9 @@ To keep consolidation latency bounded, summarization input is capped by knob‑d
 max_source_texts(F̃) = round(lerp(3, 8, F̃))
 max_text_chars(F̃)  = round(lerp(300, 900, F̃))
 max_total_chars(T)  = round(lerp(1200, 3600, T))
-max_summary_words(T) = round(lerp(24, 96, T))
 source_texts = topk_by_cosine(cluster_texts, k=max_source_texts)
 truncate each text to max_text_chars and total to max_total_chars
-constrain decoder to max_summary_words (streaming cancel)
+size decoder budget from capped input length; do not hard-trim stored summary text
 ```
 
 ## Semantic Extraction
@@ -204,6 +203,19 @@ max_extractions_per_cycle = round(lerp(20, 5, T))
 ```
 
 Extraction uses structured prompting to identify labels/tags (people, places, organizations, concepts) and relationships (co-occurrence, implication, contradiction). Labels are stored as surface strings (no type/category field) **and** persisted with their own embeddings so they can participate in retrieval and graph expansion.
+
+**Current implementation note:** the deployed runtime still promotes extracted labels with a knob-derived repetition gate
+
+```
+label_frequency_threshold = round(lerp(5, 15, T))
+```
+
+plus a single fallback highest-salience label when the filter would otherwise erase the cluster. This keeps the online path simple, but it also makes durable label formation too dependent on exact repeated strings. To test a more memory-like alternative without changing the runtime, we added an **offline semantic label-classifier prototype** in `scripts/build_wordnet_label_index.py`, `scripts/build_name_priors.py`, `scripts/build_label_training_data.py`, `scripts/train_label_classifier.py`, and `scripts/eval_label_classifier.py`. That prototype trains two small models over candidate spans:
+
+* a **span typing** head (`identity`, `person_entity`, `place`, `org_project`, `topic`, `state`, `none`), and
+* a **promotion** head (`durable`, `provisional`, `ignore`)
+
+using WordNet-derived concept priors, multilingual given-name/surname priors, sentence context, and optional external text embeddings. The current study build sources those priors from the multilingual `data/surnames` tables plus U.S. Census surnames. It is currently an offline study artifact rather than part of the deployed consolidation path.
 
 Label salience is derived from embeddings rather than model guesses:
 
@@ -225,7 +237,7 @@ To guarantee that labeling remains informative even for small clusters, if the f
 
 For long-horizon personal memory support, consolidation must avoid flattening changing facts into one timeless summary. Living arrangements, caregivers, appointments, medications, projects, and routines can all change over time. A memory system that simply overwrites older facts loses exactly the temporal nuance that matters most in care-oriented settings.
 
-A natural extension is to let deep extraction emit **fact assertions with temporal semantics** in addition to labels and relations:
+Phase 1 adds **fact assertions with temporal semantics** as a consolidation product alongside labels and relations:
 
 ```
 fact_assertion_j = (
@@ -253,7 +265,9 @@ This yields a cleaner separation between:
 
 For example, "caregiver = Sarah" may be valid through March, while "caregiver = Emily" becomes valid in April but is only learned in May. Bitemporal consolidation preserves both the world timeline and the system-learning timeline, preventing late-arriving information from rewriting the past.
 
-This temporal structure is especially important for dementia-support scenarios. Gentle reminders should be able to express not only the current state ("Emily is your caregiver now") but also historical context ("Sarah used to visit on Tuesdays") and uncertainty about when a change was learned ("as of the latest update"). In practice, this means summarization should verbalize temporal transitions rather than compress them away.
+This temporal structure is especially important for dementia-support scenarios. Gentle reminders should be able to express not only the current state ("Emily is your caregiver now") but also historical context ("Sarah used to visit on Tuesdays") and uncertainty about when a change was learned ("as of the latest update"). In practice, this means summarization should verbalize temporal transitions rather than compress them away. Retrieval-time use of these facts is a later phase; the current phase is about preserving the right temporal ground truth and provenance.
+
+The next core requirement is lifecycle maintenance. Facts should remain more durable than raw episodes, but they should not become an unbounded append-only residue. The current implementation therefore treats repeated confirmations as support updates rather than new open assertions, tracks contradiction pressure and source diversity, decays unsupported facts toward `weak` or `archived`, and only physically deletes low-severity archived facts after an additional retention gate. High-severity historical facts remain archived rather than deleted so temporal reconstruction is preserved.
 
 ## Knowledge Graph Construction
 

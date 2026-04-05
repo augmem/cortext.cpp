@@ -170,14 +170,16 @@ public:
   SummarizeTexts (const std::vector<std::string> &texts) override
   {
     captured_texts = texts;
+    last_max_words = -1;
     return "captured summary";
   }
 
   std::string
   SummarizeTextsLimited (const std::vector<std::string> &texts,
-                         int /*max_words*/) override
+                         int max_words) override
   {
     captured_texts = texts;
+    last_max_words = max_words;
     return "captured summary";
   }
 
@@ -200,6 +202,7 @@ public:
   }
 
   std::vector<std::string> captured_texts;
+  int last_max_words = -1;
 };
 
 // Helper op to setup consolidation trigger conditions
@@ -553,6 +556,7 @@ TEST_CASE ("Summarization labels chat excerpts before prompting",
   REQUIRE (summarizer.captured_texts.size () == 2);
   REQUIRE (summarizer.captured_texts[0].rfind ("User:", 0) == 0);
   REQUIRE (summarizer.captured_texts[1].rfind ("Assistant:", 0) == 0);
+  REQUIRE (summarizer.last_max_words == 0);
 }
 
 // =============================================================================

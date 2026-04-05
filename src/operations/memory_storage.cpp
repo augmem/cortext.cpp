@@ -1,4 +1,5 @@
 #include "cortext/operations/memory_storage.hpp"
+#include "constructive_recall_internal.hpp"
 #include "cortext/processor/accumulator_state.hpp"
 #include "cortext/processor/operation_context.hpp"
 #include "cortext/signal.hpp"
@@ -319,6 +320,12 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
         }
 
       // 10. Leave signal tracking until accumulator resets (used by WM gating)
+      if (!constructive_recall::Disabled () && memory_id > 0)
+        {
+          constructive_recall::AppendReconstructionWithEmbeddingId (
+              *savepoint, memory_id, embedding_id, content_blob_id,
+              static_cast<long long> (end_ts), 0.0, "initial", 1.0, 1.0);
+        }
 
       // Commit the savepoint
       savepoint->Commit ();

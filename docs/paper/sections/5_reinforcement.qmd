@@ -13,16 +13,21 @@ N_traces(T) = 2 + round(2T)  # 2..4 coupled traces
 τ_list = [τ_fast, τ_med, τ_slow, τ_ultra]
 
 α_min_S = 0.05; α_span_S = 0.35
-α_S(t) = α_min_S + S × α_span_S × u(t)
+α_S(t) = α_min_S + SensitivityBias(S) × α_span_S × u(t)
 used_flag(m) = 1 if m was retrieved and used in current step, else 0
 ```
 
-Trace updates (for i in 1..N_traces):
+Trace updates combine exponential decay, EWMA learning, and knob-scaled reinforcement (for i in 1..N_traces):
 ```
 λ_i ← ln(2) / τ_list[i]
-trace_i ← clamp(trace_i × exp(−λ_i × Δt) +
-                (α_S(t) × used_flag(m)) / N_traces, 0, 1)
+reinforcement ← clamp(S_eff × used_flag(m) +
+                       F_eff × clamp(influence_factor, 0, 1), 0, 1)
+                × serial_position_mult
+increment_i ← (α_S(t) × used_flag(m) + reinforcement) / N_traces
+trace_i ← clamp(trace_i × exp(−λ_i × Δt) + increment_i, 0, 1)
 ```
+
+The reinforcement term distributes S- and F-scaled retrieval feedback uniformly across all active traces. This avoids front-loading reinforcement into the fast trace (which decays quickly) and instead strengthens the entire trace ensemble when a memory is retrieved and used.
 
 Trace coupling encourages long-lived knowledge without freezing plasticity:
 ```
@@ -32,7 +37,7 @@ trace_{i+1} ← clamp(trace_{i+1} + coupling × trace_i, 0, 1)
 
 Combined strength uses a knob-shaped mixture that favors slow traces as Stability increases:
 ```
-w_raw ← [0.55 − 0.20T, 0.25, 0.15 + 0.10T, 0.05 + 0.10T]
+w_raw ← [0.40 − 0.25T, 0.25, 0.20 + 0.15T, 0.15 + 0.10T]
 w ← normalize(w_raw[1..N_traces])
 strength_t ← clamp(Σ_i w_i × trace_i, 0, 1)
 ```
@@ -48,9 +53,19 @@ LONG_TERM memories are evicted**; ASSOCIATION and LABEL nodes are retained to
 stabilize summary/label retrieval and are pruned during explicit consolidation.
 
 ```
-periphery_cutoff(T) = lerp(0.05, 0.25, T)
-if m.kind == LONG_TERM AND strength_t < periphery_cutoff(T): evict(m)
+periphery_cutoff(T) = lerp(0.03, 0.20, T)
+fact_floor(T) = lerp(0, periphery_cutoff(T), T)
+has_fact_support(m) = evidence_count(m, active_facts) > 0
+
+if m.kind == LONG_TERM
+   AND strength_t < periphery_cutoff(T)
+   AND (NOT has_fact_support(m) OR strength_t < fact_floor(T)):
+     evict(m)
 ```
+
+The fact-evidence floor protects episodic memories that serve as evidence for active (non-archived) structured facts. At low Stability, the floor is zero and fact-linked memories receive no special treatment. At high Stability, the floor approaches the periphery cutoff itself, making fact-backed evidence nearly immune to eviction. This ensures that the episodic substrate supporting durable semantic knowledge is not discarded before the knowledge itself.
+
+Ablation studies in @sec-experimental confirm that each component of this model contributes to selective eviction behavior. Disabling coupling or reducing to a single trace collapses the power-law forgetting curve into rapid indiscriminate eviction, flashbulb bonuses provide the expected protective effect, the fact-evidence floor prevents loss of active fact support, and uniform reinforcement distribution makes S and F visibly effective in the eviction dynamics.
 
 ## Contextual Gain and Per-Memory Stability (Definitions)
 
@@ -87,16 +102,17 @@ Contextual gain is only measured for used memories.
 
 ## Influence-Weighted Updates
 
-When contextual gain signals are available, influence factors modulate reinforcement:
+When contextual gain signals are available, influence factors enter the reinforcement term that is distributed uniformly across traces (see trace update above):
 
 ```
 influence_factor ← (used_count / max(retrieved_count, 1)) ×
                     clamp(contextual_gain(m), −1, +1)
-boost ← clamp(S × used_flag(m) + F × influence_factor, 0, 1)
-trace_fast ← clamp(trace_fast + 0.6 × boost, 0, 1)
-trace_med  ← clamp(trace_med  + 0.3 × boost, 0, 1)
-trace_slow ← clamp(trace_slow + 0.1 × boost, 0, 1)
+reinforcement ← clamp(S_eff × used_flag(m) +
+                       F_eff × clamp(influence_factor, 0, 1), 0, 1)
+                × serial_position_mult
 ```
+
+This replaces the earlier front-loaded boost that applied 60%/30%/10% to fast/med/slow traces. Ablation studies showed the front-loaded distribution had no measurable effect on eviction dynamics because its contribution was absorbed by trace clamping. Uniform distribution ensures all active traces receive meaningful reinforcement, improving long-term retention for used memories.
 
 ## Reinforcement Graph Maintenance
 

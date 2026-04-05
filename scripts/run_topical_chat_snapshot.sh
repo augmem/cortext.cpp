@@ -4,6 +4,7 @@ set -euo pipefail
 BIN="${BIN:-build/examples/topical_chat_analysis/cortext_topical_chat_analysis}"
 DATA="${DATA:-data/topical_chat/valid_freq.jsonl}"
 MODELS="${MODELS:-models}"
+PYTHON_BIN="${PYTHON_BIN:-}"
 MAX_TURNS="${MAX_TURNS:-120}"
 MAX_TOTAL="${MAX_TOTAL:-120}"
 MAX_CONVERSATIONS="${MAX_CONVERSATIONS:-1}"
@@ -36,6 +37,17 @@ fi
 
 mkdir -p "$OUT_DIR"
 
+if [[ -z "$PYTHON_BIN" ]]; then
+  if command -v python3 >/dev/null 2>&1; then
+    PYTHON_BIN="$(command -v python3)"
+  elif command -v python >/dev/null 2>&1; then
+    PYTHON_BIN="$(command -v python)"
+  else
+    echo "scripts/run_topical_chat_snapshot.sh requires python3 or python" >&2
+    exit 1
+  fi
+fi
+
 log="$OUT_DIR/run.log"
 summary="$OUT_DIR/summary.csv"
 config="$OUT_DIR/config.json"
@@ -44,7 +56,7 @@ git_status="$OUT_DIR/git_status.txt"
 git_diff="$OUT_DIR/git_diff.patch"
 
 if [[ "$CONSOLIDATE" == "1" && "$CONSOLIDATE_EVERY" == "0" && "$CONSOLIDATE_EVERY_AUTO" == "1" ]]; then
-  CONSOLIDATE_EVERY="$(python - <<PY
+  CONSOLIDATE_EVERY="$("$PYTHON_BIN" - <<PY
 import math
 stability=float("$STABILITY")
 max_turns=int("$MAX_TURNS")
@@ -215,7 +227,7 @@ export PERF_TOTAL_MS_MEAN="$perf_total_ms_mean"
 export PERF_INFER_THREADS="${CORTEXT_INFER_THREADS:-}"
 export PERF_EMBED_THREADS="${CORTEXT_EMBED_THREADS:-}"
 
-python - <<'PY'
+"$PYTHON_BIN" - <<'PY'
 import json
 import os
 

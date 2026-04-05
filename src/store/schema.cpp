@@ -447,6 +447,174 @@ GetCoreMigrations ()
               "LIMIT 128",
           },
       },
+      {
+          1,
+          "Bitemporal fact assertions and retrieval cache",
+          {
+              "CREATE TABLE IF NOT EXISTS fact_assertions ("
+              "  fact_id INTEGER PRIMARY KEY,"
+              "  subject TEXT NOT NULL,"
+              "  predicate TEXT NOT NULL,"
+              "  object TEXT NOT NULL,"
+              "  canonical_subject TEXT NOT NULL,"
+              "  canonical_predicate TEXT NOT NULL,"
+              "  canonical_object TEXT NOT NULL,"
+              "  valid_start_ts INTEGER,"
+              "  valid_end_ts INTEGER,"
+              "  recorded_at_ts INTEGER NOT NULL,"
+              "  superseded_at_ts INTEGER,"
+              "  confidence REAL NOT NULL DEFAULT 0.5,"
+              "  summary_memory_id INTEGER NOT NULL,"
+              "  created_at INTEGER NOT NULL"
+              ")",
+
+              "CREATE TABLE IF NOT EXISTS fact_evidence ("
+              "  fact_id INTEGER NOT NULL,"
+              "  source_memory_id INTEGER NOT NULL,"
+              "  evidence_type TEXT NOT NULL,"
+              "  support_weight REAL NOT NULL DEFAULT 1.0,"
+              "  PRIMARY KEY (fact_id, source_memory_id, evidence_type)"
+              ")",
+
+              "CREATE TABLE IF NOT EXISTS fact_cache ("
+              "  fact_id INTEGER PRIMARY KEY,"
+              "  embedding_id INTEGER,"
+              "  fact_text TEXT NOT NULL,"
+              "  is_current INTEGER NOT NULL DEFAULT 0,"
+              "  valid_start_ts INTEGER,"
+              "  valid_end_ts INTEGER,"
+              "  recorded_at_ts INTEGER NOT NULL,"
+              "  superseded_at_ts INTEGER,"
+              "  updated_at INTEGER NOT NULL"
+              ")",
+
+              "CREATE INDEX IF NOT EXISTS idx_fact_assertions_canonical "
+              "ON fact_assertions(canonical_subject, canonical_predicate, canonical_object)",
+              "CREATE INDEX IF NOT EXISTS idx_fact_assertions_open "
+              "ON fact_assertions(canonical_subject, canonical_predicate, superseded_at_ts, valid_end_ts)",
+              "CREATE INDEX IF NOT EXISTS idx_fact_assertions_valid "
+              "ON fact_assertions(valid_start_ts, valid_end_ts)",
+              "CREATE INDEX IF NOT EXISTS idx_fact_assertions_recorded "
+              "ON fact_assertions(recorded_at_ts, superseded_at_ts)",
+              "CREATE INDEX IF NOT EXISTS idx_fact_assertions_summary "
+              "ON fact_assertions(summary_memory_id)",
+              "CREATE INDEX IF NOT EXISTS idx_fact_evidence_source "
+              "ON fact_evidence(source_memory_id, evidence_type)",
+              "CREATE INDEX IF NOT EXISTS idx_fact_cache_current "
+              "ON fact_cache(is_current, recorded_at_ts)",
+          },
+      },
+      {
+          2,
+          "Fact lifecycle support, archival, and bounded retention",
+          {
+              "ALTER TABLE fact_assertions "
+              "ADD COLUMN support_mass REAL NOT NULL DEFAULT 0.0",
+              "ALTER TABLE fact_assertions "
+              "ADD COLUMN source_diversity INTEGER NOT NULL DEFAULT 0",
+              "ALTER TABLE fact_assertions "
+              "ADD COLUMN contradiction_mass REAL NOT NULL DEFAULT 0.0",
+              "ALTER TABLE fact_assertions "
+              "ADD COLUMN confirmation_count INTEGER NOT NULL DEFAULT 0",
+              "ALTER TABLE fact_assertions "
+              "ADD COLUMN challenge_count INTEGER NOT NULL DEFAULT 0",
+              "ALTER TABLE fact_assertions "
+              "ADD COLUMN compressed_support_count INTEGER NOT NULL DEFAULT 0",
+              "ALTER TABLE fact_assertions "
+              "ADD COLUMN last_confirmation_ts INTEGER NOT NULL DEFAULT 0",
+              "ALTER TABLE fact_assertions "
+              "ADD COLUMN last_challenge_ts INTEGER",
+              "ALTER TABLE fact_assertions "
+              "ADD COLUMN severity_class TEXT NOT NULL DEFAULT 'medium'",
+              "ALTER TABLE fact_assertions "
+              "ADD COLUMN lifecycle_state TEXT NOT NULL DEFAULT 'active'",
+              "ALTER TABLE fact_assertions "
+              "ADD COLUMN archived_at INTEGER",
+              "ALTER TABLE fact_assertions "
+              "ADD COLUMN last_maintenance_ts INTEGER NOT NULL DEFAULT 0",
+              "ALTER TABLE fact_cache "
+              "ADD COLUMN lifecycle_state TEXT NOT NULL DEFAULT 'active'",
+              "ALTER TABLE fact_cache "
+              "ADD COLUMN support_mass REAL NOT NULL DEFAULT 0.0",
+              "CREATE INDEX IF NOT EXISTS idx_fact_assertions_lifecycle "
+              "ON fact_assertions(lifecycle_state, severity_class, archived_at)",
+              "CREATE INDEX IF NOT EXISTS idx_fact_assertions_maintenance "
+              "ON fact_assertions(last_maintenance_ts, recorded_at_ts)",
+              "CREATE INDEX IF NOT EXISTS idx_fact_cache_lifecycle "
+              "ON fact_cache(lifecycle_state, is_current, updated_at)",
+          },
+      },
+      {
+          3,
+          "Long-term memory eviction audit log",
+          {
+              "CREATE TABLE IF NOT EXISTS memory_evictions ("
+              "  eviction_id INTEGER PRIMARY KEY,"
+              "  memory_id INTEGER NOT NULL,"
+              "  embedding_id INTEGER,"
+              "  source_id TEXT NOT NULL,"
+              "  kind TEXT NOT NULL,"
+              "  label TEXT,"
+              "  start_ts INTEGER NOT NULL,"
+              "  end_ts INTEGER,"
+              "  created_at INTEGER NOT NULL,"
+              "  last_access INTEGER,"
+              "  strength REAL NOT NULL DEFAULT 0.0,"
+              "  use_frequency REAL NOT NULL DEFAULT 0.0,"
+              "  contextual_gain REAL NOT NULL DEFAULT 0.0,"
+              "  retrieved_count INTEGER NOT NULL DEFAULT 0,"
+              "  used_count INTEGER NOT NULL DEFAULT 0,"
+              "  n_signals INTEGER NOT NULL DEFAULT 0,"
+              "  modality TEXT NOT NULL DEFAULT 'text',"
+              "  eviction_reason TEXT NOT NULL,"
+              "  evicted_at INTEGER NOT NULL"
+              ")",
+              "CREATE INDEX IF NOT EXISTS idx_memory_evictions_time "
+              "ON memory_evictions(evicted_at DESC, eviction_id DESC)",
+              "CREATE INDEX IF NOT EXISTS idx_memory_evictions_memory "
+              "ON memory_evictions(memory_id)",
+              "CREATE INDEX IF NOT EXISTS idx_memory_evictions_reason "
+              "ON memory_evictions(eviction_reason, kind)",
+          },
+      },
+      {
+          4,
+          "Constructive recall reconstruction ledger",
+          {
+              "CREATE TABLE IF NOT EXISTS memory_reconstructions ("
+              "  reconstruction_id INTEGER PRIMARY KEY,"
+              "  memory_id INTEGER NOT NULL,"
+              "  embedding_id INTEGER NOT NULL,"
+              "  blob_id BLOB,"
+              "  created_at INTEGER NOT NULL,"
+              "  uncertainty REAL NOT NULL DEFAULT 0.0,"
+              "  trigger TEXT NOT NULL DEFAULT 'retrieval',"
+              "  source_confidence REAL NOT NULL DEFAULT 1.0,"
+              "  context_similarity REAL NOT NULL DEFAULT 0.0"
+              ")",
+              "CREATE INDEX IF NOT EXISTS idx_memory_reconstructions_memory "
+              "ON memory_reconstructions(memory_id, reconstruction_id DESC)",
+              "CREATE INDEX IF NOT EXISTS idx_memory_reconstructions_embedding "
+              "ON memory_reconstructions(embedding_id)",
+          },
+      },
+      {
+          5,
+          "Meta-learning coefficient store",
+          {
+              "CREATE TABLE IF NOT EXISTS meta_learning_coeffs ("
+              "  family TEXT PRIMARY KEY,"
+              "  alpha_f REAL NOT NULL,"
+              "  alpha_s REAL NOT NULL,"
+              "  alpha_t REAL NOT NULL,"
+              "  beta REAL NOT NULL,"
+              "  a REAL NOT NULL,"
+              "  b REAL NOT NULL,"
+              "  update_count INTEGER NOT NULL DEFAULT 0,"
+              "  updated_at INTEGER NOT NULL DEFAULT 0"
+              ")",
+          },
+      },
   };
 }
 

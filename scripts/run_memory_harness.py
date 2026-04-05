@@ -3,6 +3,7 @@ import argparse
 import csv
 import json
 import os
+import shlex
 import subprocess
 import sys
 import time
@@ -109,6 +110,8 @@ def run_case(case: dict, args: argparse.Namespace, out_root: Path, summary_rows:
     if args.consolidate_cycles > 0:
         cmd.append("--consolidate")
         cmd.append(f"--consolidate-cycles={args.consolidate_cycles}")
+    if args.extra_args:
+        cmd.extend(shlex.split(args.extra_args))
 
     config_path = run_dir / "config.json"
     config_path.write_text(json.dumps(case, indent=2), encoding="utf-8")
@@ -224,6 +227,7 @@ def run_case(case: dict, args: argparse.Namespace, out_root: Path, summary_rows:
         "interrupt_retrieval_emotion_bonus_mean": metrics.get(
             "interrupt_retrieval_emotion_bonus_mean", "0"),
         "interrupt_turn_rate": metrics.get("interrupt_turn_rate", "0"),
+        "interrupt_abort_rate": metrics.get("interrupt_abort_rate", "0"),
         "interrupt_precision": metrics.get("interrupt_precision", "0"),
         "interrupt_recall": metrics.get("interrupt_recall", "0"),
         "interrupt_false_positive_rate": metrics.get("interrupt_false_positive_rate", "0"),
@@ -277,6 +281,7 @@ def main() -> int:
     parser.add_argument("--data", default="data/topical_chat/valid_freq.jsonl")
     parser.add_argument("--models", default="models")
     parser.add_argument("--label-bank", default="")
+    parser.add_argument("--extra-args", default="")
     parser.add_argument("--out", default="")
     parser.add_argument("--max-conversations", type=int, default=4)
     parser.add_argument("--max-turns", type=int, default=200)

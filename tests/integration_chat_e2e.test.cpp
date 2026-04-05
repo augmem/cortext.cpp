@@ -2,18 +2,22 @@
 
 #include <catch2/catch_test_macros.hpp>
 #include <Eigen/Dense>
+#include <atomic>
 #include <any>
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <condition_variable>
 #include <cmath>
 #include <filesystem>
 #include <iostream>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -22,6 +26,7 @@
 #include <cortext/core/algorithms.hpp>
 #include <cortext/core/knobs.hpp>
 #include <cortext/core/utils.hpp>
+#include <cortext/internal/cancellation.hpp>
 #include <cortext/encoder/encoder.hpp>
 #include <cortext/extractor/extractor.hpp>
 #include <cortext/operations/accumulator.hpp>
@@ -76,6 +81,7 @@
 #include <cortext/store/utils.hpp>
 #include <cortext/summarizer/summarizer.hpp>
 
+#include "../src/deep_llm/lfm2_llama_backend.hpp"
 #include "../src/streaming_text_probe.hpp"
 
 using namespace cortext;
@@ -532,6 +538,75 @@ public:
   }
 };
 
+class BlockingCancelAwareSummarizer final : public Summarizer
+{
+public:
+  std::string
+  SummarizeTexts (const std::vector<std::string> &texts) override
+  {
+    return SummarizeTextsLimited (texts, 0);
+  }
+
+  std::string
+  SummarizeTextsLimited (const std::vector<std::string> &texts,
+                         int /*max_words*/) override
+  {
+    {
+      std::lock_guard<std::mutex> lock (mu_);
+      entered_ = true;
+      captured_texts_ = texts;
+    }
+    cv_.notify_all ();
+
+    for (;;)
+      {
+        if (cortext::internal::StopRequested ())
+          {
+            cortext::internal::ThrowIfStopRequested ();
+          }
+        std::this_thread::sleep_for (std::chrono::milliseconds (2));
+      }
+  }
+
+  std::string
+  SummarizeAudio (const float * /*pcm*/, size_t /*num_samples*/) override
+  {
+    return {};
+  }
+
+  std::string
+  SummarizeAudioSegments (const std::vector<AudioSegment> & /*segments*/) override
+  {
+    return {};
+  }
+
+  bool
+  IsAvailable () const override
+  {
+    return true;
+  }
+
+  bool
+  WaitUntilEntered (std::chrono::milliseconds timeout)
+  {
+    std::unique_lock<std::mutex> lock (mu_);
+    return cv_.wait_for (lock, timeout, [&] { return entered_; });
+  }
+
+  std::size_t
+  CapturedTextCount () const
+  {
+    std::lock_guard<std::mutex> lock (mu_);
+    return captured_texts_.size ();
+  }
+
+private:
+  mutable std::mutex mu_;
+  std::condition_variable cv_;
+  bool entered_ = false;
+  std::vector<std::string> captured_texts_;
+};
+
 class KeywordExtractor final : public Extractor
 {
 public:
@@ -798,6 +873,17 @@ MakeTextSignal (KeywordEncoder &encoder, const std::string &text,
   s.payload = std::vector<unsigned char> (text.begin (), text.end ());
   s.modality = "text";
   s.mimetype = "text/plain";
+  return s;
+}
+
+Signal
+MakeConsolidationSignal (uint64_t ts,
+                         ConsolidationMode mode = ConsolidationMode::Both)
+{
+  Signal s;
+  s.embedding = Eigen::VectorXf::Ones (kEmbeddingDim);
+  s.timestamp = ts;
+  s.source_id = ConsolidationSourceId (mode);
   return s;
 }
 
@@ -1116,6 +1202,201 @@ TEST_CASE ("Integration: chat memories consolidate and retrieve", "[integration]
     }
   REQUIRE (saw_non_last);
   REQUIRE (actual_ids != expected_last);
+}
+
+TEST_CASE ("Integration: deep consolidation reuses source sets and keeps cluster ids unique",
+           "[integration][e2e][consolidation][dedupe]")
+{
+  auto unique_store = SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<Store> (std::move (unique_store));
+  cortext::testing::InitializeCoreSchema (*store);
+
+  std::vector<TopicSpec> topics = {
+    { "nisc", "interview", 0 },
+  };
+
+  KeywordEncoder encoder (topics);
+  StubSummarizer summarizer;
+  KeywordExtractor extractor (topics);
+
+  SignalProcessor::Config cfg;
+  cfg.focus = 0.0;
+  cfg.sensitivity = 0.5;
+  cfg.stability = 0.0;
+  cfg.encoder = &encoder;
+  cfg.summarizer = &summarizer;
+  cfg.extractor = &extractor;
+
+  auto pipeline = BuildFullPipeline ();
+  SignalProcessor processor (cfg, store, std::move (pipeline));
+
+  const int min_cluster_size = core::MinClusterSize (cfg.focus);
+  const int units_per_batch = min_cluster_size + 1;
+  uint64_t ts = 500000;
+  const uint64_t gap_ms = 40000;
+
+  auto write_batch = [&] (int batch_index) {
+    for (int unit = 0; unit < units_per_batch; ++unit)
+      {
+        const std::string text1
+            = "User: NISC interview prep batch "
+              + std::to_string (batch_index)
+              + " unit " + std::to_string (unit);
+        processor.Process (MakeTextSignal (encoder, text1, ts, "chat"));
+        ts += 1000;
+
+        const std::string text2
+            = "Assistant: details for NISC interview batch "
+              + std::to_string (batch_index)
+              + " unit " + std::to_string (unit);
+        processor.Process (MakeTextSignal (encoder, text2, ts, "chat"));
+        ts += gap_ms;
+
+        const std::string boundary
+            = "User: (pause) NISC batch " + std::to_string (batch_index);
+        processor.Process (MakeTextSignal (encoder, boundary, ts, "chat"));
+        ts += 1000;
+      }
+  };
+
+  write_batch (0);
+  processor.Process (MakeConsolidationSignal (ts++, ConsolidationMode::Deep));
+
+  auto first_summary_rows = store->Execute (
+      "SELECT COUNT(*) AS c FROM memories "
+      "WHERE kind = 'ASSOCIATION' AND source_id LIKE 'summary_%'",
+      {});
+  REQUIRE_FALSE (first_summary_rows.empty ());
+  REQUIRE (cortext::testing::GetInt64 (first_summary_rows[0], "c") == 1);
+
+  write_batch (1);
+  processor.Process (MakeConsolidationSignal (ts++, ConsolidationMode::Deep));
+
+  auto second_summary_rows = store->Execute (
+      "SELECT COUNT(*) AS c FROM memories "
+      "WHERE kind = 'ASSOCIATION' AND source_id LIKE 'summary_%'",
+      {});
+  REQUIRE_FALSE (second_summary_rows.empty ());
+  REQUIRE (cortext::testing::GetInt64 (second_summary_rows[0], "c") == 2);
+
+  auto cluster_rows = store->Execute (
+      "SELECT COUNT(DISTINCT cluster_id) AS c "
+      "FROM memories WHERE kind = 'LONG_TERM' AND cluster_id IS NOT NULL",
+      {});
+  REQUIRE_FALSE (cluster_rows.empty ());
+  REQUIRE (cortext::testing::GetInt64 (cluster_rows[0], "c") == 2);
+
+  processor.Process (MakeConsolidationSignal (ts++, ConsolidationMode::Deep));
+
+  auto final_summary_rows = store->Execute (
+      "SELECT COUNT(*) AS c FROM memories "
+      "WHERE kind = 'ASSOCIATION' AND source_id LIKE 'summary_%'",
+      {});
+  REQUIRE_FALSE (final_summary_rows.empty ());
+  REQUIRE (cortext::testing::GetInt64 (final_summary_rows[0], "c") == 2);
+}
+
+TEST_CASE ("Integration: cancel during deep consolidation aborts without committing summaries",
+           "[integration][e2e][consolidation][cancel]")
+{
+  auto unique_store = SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<Store> (std::move (unique_store));
+  cortext::testing::InitializeCoreSchema (*store);
+
+  std::vector<TopicSpec> topics = {
+    { "nisc", "interview", 0 },
+  };
+
+  KeywordEncoder encoder (topics);
+  BlockingCancelAwareSummarizer summarizer;
+  KeywordExtractor extractor (topics);
+
+  SignalProcessor::Config cfg;
+  cfg.focus = 0.0;
+  cfg.sensitivity = 0.5;
+  cfg.stability = 0.0;
+  cfg.encoder = &encoder;
+  cfg.summarizer = &summarizer;
+  cfg.extractor = &extractor;
+
+  auto pipeline = BuildFullPipeline ();
+  SignalProcessor processor (cfg, store, std::move (pipeline));
+
+  const int min_cluster_size = core::MinClusterSize (cfg.focus);
+  const int units_per_batch = min_cluster_size + 1;
+  uint64_t ts = 700000;
+  const uint64_t gap_ms = 40000;
+
+  for (int unit = 0; unit < units_per_batch; ++unit)
+    {
+      processor.Process (
+          MakeTextSignal (encoder,
+                          "User: NISC interview prep cancel test unit "
+                              + std::to_string (unit),
+                          ts, "chat"));
+      ts += 1000;
+
+      processor.Process (
+          MakeTextSignal (encoder,
+                          "Assistant: NISC interview cancel test details "
+                              + std::to_string (unit),
+                          ts, "chat"));
+      ts += gap_ms;
+
+      processor.Process (
+          MakeTextSignal (encoder,
+                          "User: pause marker " + std::to_string (unit),
+                          ts, "chat"));
+      ts += 1000;
+    }
+
+  cortext::StopSource stop_source;
+  std::atomic<bool> cancelled { false };
+  std::optional<std::string> thread_error;
+
+  std::thread worker ([&] {
+    try
+      {
+        cortext::internal::ScopedStopToken scoped (stop_source.get_token ());
+        (void)processor.Process (
+            MakeConsolidationSignal (ts, ConsolidationMode::Deep));
+      }
+    catch (const cortext::internal::CancellationError &)
+      {
+        cancelled.store (true);
+      }
+    catch (const std::exception &ex)
+      {
+        thread_error = ex.what ();
+      }
+  });
+
+  REQUIRE (summarizer.WaitUntilEntered (std::chrono::seconds (5)));
+  REQUIRE (summarizer.CapturedTextCount () > 0);
+  REQUIRE (stop_source.request_stop ());
+  worker.join ();
+
+  INFO ("thread_error="
+        << (thread_error.has_value () ? *thread_error : std::string ("<none>")));
+  REQUIRE_FALSE (thread_error.has_value ());
+  REQUIRE (cancelled.load ());
+
+  const auto summary_rows = store->Execute (
+      "SELECT COUNT(*) AS c FROM memories "
+      "WHERE kind = 'ASSOCIATION' AND source_id LIKE 'summary_%'",
+      {});
+  REQUIRE_FALSE (summary_rows.empty ());
+  REQUIRE (cortext::testing::GetInt64 (summary_rows[0], "c") == 0);
+
+  const auto state_rows = store->Execute (
+      "SELECT last_consolidation_ts, consolidation_count "
+      "FROM state WHERE rowid = 1",
+      {});
+  REQUIRE_FALSE (state_rows.empty ());
+  REQUIRE (cortext::testing::GetInt64 (state_rows[0], "last_consolidation_ts")
+           == 0);
+  REQUIRE (cortext::testing::GetInt64 (state_rows[0], "consolidation_count")
+           == 0);
 }
 
 TEST_CASE ("Integration: scripted chat preserves turn-shaped working memory",
@@ -1638,6 +1919,68 @@ TEST_CASE (
       {});
   REQUIRE_FALSE (invalid_label_edges.empty ());
   REQUIRE (cortext::testing::GetInt64 (invalid_label_edges[0], "c") == 0);
+}
+
+TEST_CASE ("Integration: LFM2 summarizer honors stop token during generation",
+           "[integration][e2e][lfm2][cancel]")
+{
+#if !defined(CORTEXT_ENABLE_LLAMA_CPP)
+  SKIP ("llama.cpp backend not enabled in this test build");
+#else
+  namespace fs = std::filesystem;
+  const fs::path model_path
+      = fs::path (RepoModelsDir ()) / "LFM2.5-350M-GGUF"
+        / "LFM2.5-350M-Q4_K_M.gguf";
+  if (!fs::exists (model_path))
+    {
+      SKIP ("LFM2.5-350M model not present");
+    }
+
+  cortext::Lfm2LlamaSummarizer summarizer (model_path.string ());
+  if (!summarizer.IsAvailable ())
+    {
+      SKIP ("LFM2 summarizer unavailable in this test environment");
+    }
+
+  std::vector<std::string> texts;
+  texts.reserve (12);
+  for (int i = 0; i < 12; ++i)
+    {
+      texts.push_back (
+          "User: I am testing cancellation during deep consolidation and need "
+          "the summarizer to keep generating long enough to interrupt. Topic "
+          "block " + std::to_string (i)
+          + " mentions NISC, enterprise identity governance, pizza, and "
+            "bitemporal memory facts in a verbose repeated way.");
+    }
+
+  cortext::StopSource stop_source;
+  std::atomic<bool> cancelled { false };
+  std::optional<std::string> thread_error;
+
+  std::thread worker ([&] {
+    try
+      {
+        cortext::internal::ScopedStopToken scoped (stop_source.get_token ());
+        (void)summarizer.SummarizeTextsLimited (texts, 0);
+      }
+    catch (const cortext::internal::CancellationError &)
+      {
+        cancelled.store (true);
+      }
+    catch (const std::exception &ex)
+      {
+        thread_error = ex.what ();
+      }
+  });
+
+  std::this_thread::sleep_for (std::chrono::milliseconds (50));
+  (void)stop_source.request_stop ();
+  worker.join ();
+
+  REQUIRE_FALSE (thread_error.has_value ());
+  REQUIRE (cancelled.load ());
+#endif
 }
 
 TEST_CASE (

@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <iomanip>
 #include <sstream>
+#include <unordered_set>
 
 namespace chat {
 
@@ -55,6 +56,30 @@ std::string FormatPercent(double v) {
 
 bool NearlyEqual(double a, double b) {
   return std::abs(a - b) < 1e-6;
+}
+
+bool EditMultilineString(const char* label,
+                         std::string& value,
+                         const ImVec2& size = ImVec2(0, 0)) {
+  const std::size_t buffer_size = std::max<std::size_t>(8192, value.size() + 1024);
+  std::vector<char> buffer(buffer_size, '\0');
+  std::snprintf(buffer.data(), buffer.size(), "%s", value.c_str());
+  if (!ImGui::InputTextMultiline(label, buffer.data(), buffer.size(), size)) {
+    return false;
+  }
+  value = buffer.data();
+  return true;
+}
+
+bool EditSingleLineString(const char* label, std::string& value) {
+  const std::size_t buffer_size = std::max<std::size_t>(512, value.size() + 128);
+  std::vector<char> buffer(buffer_size, '\0');
+  std::snprintf(buffer.data(), buffer.size(), "%s", value.c_str());
+  if (!ImGui::InputText(label, buffer.data(), buffer.size())) {
+    return false;
+  }
+  value = buffer.data();
+  return true;
 }
 
 std::string FormatTimestamp(uint64_t timestamp_ms) {
@@ -141,6 +166,90 @@ std::string FormatAssociationNode(const std::string& kind,
     return kind + " " + source_id + " (#" + std::to_string(memory_id) + ")";
   }
   return "#" + std::to_string(memory_id);
+}
+
+ImU32 NodeFillColor(const std::string& kind) {
+  if (kind == "WORKING") return IM_COL32(40, 130, 180, 220);
+  if (kind == "LONG_TERM") return IM_COL32(60, 160, 90, 220);
+  if (kind == "LABEL") return IM_COL32(160, 120, 40, 220);
+  if (kind == "ASSOCIATION") return IM_COL32(130, 80, 160, 220);
+  return IM_COL32(90, 90, 90, 220);
+}
+
+ImU32 EdgeColor(const std::string& edge_type) {
+  if (edge_type == "derived_from") return IM_COL32(255, 180, 80, 220);
+  if (edge_type == "has_label") return IM_COL32(140, 210, 100, 220);
+  if (edge_type == "references") return IM_COL32(90, 180, 255, 220);
+  return IM_COL32(190, 190, 190, 180);
+}
+
+std::string GraphNodeTitle(const std::string& kind,
+                           const std::string& label,
+                           const std::string& source_id,
+                           long long memory_id) {
+  if (!label.empty()) {
+    return Truncate(label, 40);
+  }
+  if (!source_id.empty()) {
+    return source_id;
+  }
+  if (!kind.empty()) {
+    return kind + " #" + std::to_string(memory_id);
+  }
+  return "#" + std::to_string(memory_id);
+}
+
+enum class DatabaseExplorerFilter {
+  All = 0,
+  Associations,
+  Labels,
+  LongTerm,
+  Working,
+  Temporal,
+};
+
+const char* const kDatabaseExplorerFilterLabels[] = {
+    "All",
+    "Associations",
+    "Labels",
+    "Long-Term",
+    "Working",
+    "Temporal",
+};
+
+bool MatchesDatabaseExplorerFilter(const DatabaseMemoryRow& row,
+                                   DatabaseExplorerFilter filter) {
+  switch (filter) {
+    case DatabaseExplorerFilter::All:
+      return true;
+    case DatabaseExplorerFilter::Labels:
+      return row.kind == "LABEL";
+    case DatabaseExplorerFilter::LongTerm:
+      return row.kind == "LONG_TERM";
+    case DatabaseExplorerFilter::Working:
+      return row.kind == "WORKING";
+    case DatabaseExplorerFilter::Associations:
+    case DatabaseExplorerFilter::Temporal:
+      return false;
+  }
+  return true;
+}
+
+std::string FormatFactTitle(const DatabaseFactRow& row) {
+  return "#" + std::to_string(row.fact_id) + " "
+         + row.subject + " " + row.predicate + " " + row.object;
+}
+
+std::string FormatEvictionTitle(const DatabaseEvictionRow& row) {
+  std::string title = "#" + std::to_string(row.memory_id) + " ";
+  if (!row.label.empty()) {
+    title += Truncate(row.label, 56);
+  } else if (!row.source_id.empty()) {
+    title += row.source_id;
+  } else {
+    title += row.kind;
+  }
+  return title;
 }
 
 template <typename Getter>
@@ -235,9 +344,12 @@ void ChatWindow::Render() {
       RenderDatabaseTab();
       break;
     case 7:
-      RenderContextTab();
+      RenderGraphTab();
       break;
     case 8:
+      RenderContextTab();
+      break;
+    case 9:
       RenderLogsTab();
       break;
   }
@@ -279,12 +391,16 @@ void ChatWindow::RenderTabBar() {
       selected_tab_ = 6;
       ImGui::EndTabItem();
     }
-    if (ImGui::BeginTabItem("Context")) {
+    if (ImGui::BeginTabItem("Graph")) {
       selected_tab_ = 7;
       ImGui::EndTabItem();
     }
-    if (ImGui::BeginTabItem("Logs")) {
+    if (ImGui::BeginTabItem("Context")) {
       selected_tab_ = 8;
+      ImGui::EndTabItem();
+    }
+    if (ImGui::BeginTabItem("Logs")) {
+      selected_tab_ = 9;
       ImGui::EndTabItem();
     }
     ImGui::EndTabBar();
@@ -294,31 +410,63 @@ void ChatWindow::RenderTabBar() {
 void ChatWindow::RenderChatTab() {
   if (!state_.mu) return;
 
-  std::lock_guard<std::mutex> lock(*state_.mu);
+  ImGui::BeginChild("ChatScroll", ImVec2(0, 0), false);
 
-  if (state_.chat_history) {
-    for (const auto& msg : *state_.chat_history) {
-      ImGui::TextColored(RoleColor(msg.role), "%s:", RolePrefix(msg.role).c_str());
-      ImGui::SameLine();
-      ImGui::TextWrapped("%s", msg.content.c_str());
-      ImGui::Separator();
+  constexpr float kScrollBottomSlack = 24.0f;
+  const bool was_near_bottom
+      = (ImGui::GetScrollMaxY() - ImGui::GetScrollY()) <= kScrollBottomSlack;
+
+  std::size_t chat_message_count = 0;
+  std::size_t partial_response_size = 0;
+  bool generating = false;
+  int generation_restarts = 0;
+
+  {
+    std::lock_guard<std::mutex> lock(*state_.mu);
+
+    if (state_.chat_history) {
+      chat_message_count = state_.chat_history->size();
+      for (const auto& msg : *state_.chat_history) {
+        ImGui::TextColored(RoleColor(msg.role), "%s:", RolePrefix(msg.role).c_str());
+        ImGui::SameLine();
+        ImGui::TextWrapped("%s", msg.content.c_str());
+        ImGui::Separator();
+      }
+    }
+
+    if (state_.partial_response) {
+      partial_response_size = state_.partial_response->size();
+    }
+
+    generating = state_.generating && *state_.generating;
+    if (generating) {
+      int dots = (static_cast<int>(ImGui::GetTime() / 0.4) % 3) + 1;
+      std::string status = "generating" + std::string(dots, '.');
+      if (state_.generation_restarts && *state_.generation_restarts > 0) {
+        generation_restarts = *state_.generation_restarts;
+        status += " (restarted " + std::to_string(generation_restarts) +
+                  "x with new context)";
+      }
+      ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.3f, 1.0f), "%s", status.c_str());
     }
   }
 
-  if (state_.generating && *state_.generating) {
-    int dots = (static_cast<int>(ImGui::GetTime() / 0.4) % 3) + 1;
-    std::string status = "generating" + std::string(dots, '.');
-    if (state_.generation_restarts && *state_.generation_restarts > 0) {
-      status += " (restarted " + std::to_string(*state_.generation_restarts) +
-                "x with new context)";
-    }
-    ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.3f, 1.0f), "%s", status.c_str());
-  }
-
-  // Auto-scroll to bottom when new messages arrive
-  if (scroll_chat_to_bottom_) {
+  const bool content_changed
+      = chat_message_count != last_chat_message_count_
+        || partial_response_size != last_partial_response_size_
+        || generating != last_generating_;
+  const bool should_auto_scroll
+      = content_changed && (scroll_chat_to_bottom_ || was_near_bottom);
+  if (should_auto_scroll) {
     ImGui::SetScrollHereY(1.0f);
   }
+
+  last_chat_message_count_ = chat_message_count;
+  last_partial_response_size_ = partial_response_size;
+  last_generating_ = generating;
+  scroll_chat_to_bottom_ = false;
+
+  ImGui::EndChild();
 }
 
 void ChatWindow::RenderChunksTab() {
@@ -876,32 +1024,18 @@ void ChatWindow::RenderWorkingMemoryTab() {
                          FormatTimestamp(mem->timestamp).c_str());
 
       ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.3f, 1.0f),
-                         "score=%s salience=%s retrieved=%lld used=%lld",
+                         "score=%s salience=%s signals=%zu retrieved=%lld used=%lld",
                          FormatDouble(mem->composite_score).c_str(),
                          FormatDouble(mem->salience).c_str(),
+                         mem->content.size(),
                          mem->retrieved_count,
                          mem->used_count);
 
-      ImGui::TextColored(ImVec4(0.3f, 1.0f, 1.0f, 1.0f),
-                         "rel=%s mis=%s sur=%s rar=%s",
-                         FormatDouble(mem->relevance).c_str(),
-                         FormatDouble(mem->mismatch).c_str(),
-                         FormatDouble(mem->surprise).c_str(),
-                         FormatDouble(mem->rarity).c_str());
-
-      ImGui::TextColored(ImVec4(1.0f, 0.5f, 1.0f, 1.0f),
-                         "drf=%s con=%s utl=%s per=%s",
-                         FormatDouble(mem->drift).c_str(),
-                         FormatDouble(mem->contradiction).c_str(),
-                         FormatDouble(mem->utility).c_str(),
-                         FormatDouble(mem->periphery).c_str());
-
-      ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.3f, 1.0f),
-                         "cov=%s val=%s aro=%s thresh=%s",
-                         FormatDouble(mem->coverage).c_str(),
-                         FormatDouble(mem->valence).c_str(),
-                         FormatDouble(mem->arousal).c_str(),
-                         FormatDouble(mem->threshold_t).c_str());
+      ImGui::TextColored(
+          ImVec4(0.6f, 0.9f, 0.9f, 1.0f),
+          "slot-level metrics only: avg score, max salience, avg arousal, usage counts");
+      ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.3f, 1.0f), "aro_avg=%s",
+                         FormatDouble(mem->arousal).c_str());
 
       const std::string text = ExtractTextFromBlobs(mem->content);
       ImGui::BeginChild(("wm-content-" + std::to_string(mem->id)).c_str(),
@@ -922,9 +1056,21 @@ void ChatWindow::RenderSettingsTab() {
   double active_focus = 0.5;
   double active_sensitivity = 0.5;
   double active_stability = 0.5;
+  int active_idle_consolidation_seconds = 0;
   double draft_focus = 0.5;
   double draft_sensitivity = 0.5;
   double draft_stability = 0.5;
+  int draft_idle_consolidation_seconds = 0;
+  int default_idle_consolidation_seconds = 0;
+  std::string active_model;
+  std::string draft_model;
+  std::string default_model;
+  std::string active_memory_prompt_prefix;
+  std::string draft_memory_prompt_prefix;
+  std::string default_memory_prompt_prefix;
+  std::string active_memory_prompt_suffix;
+  std::string draft_memory_prompt_suffix;
+  std::string default_memory_prompt_suffix;
   bool apply_requested = false;
   std::optional<std::string> last_status;
   {
@@ -932,25 +1078,58 @@ void ChatWindow::RenderSettingsTab() {
     active_focus = state_.settings->active_focus;
     active_sensitivity = state_.settings->active_sensitivity;
     active_stability = state_.settings->active_stability;
+    active_idle_consolidation_seconds
+        = state_.settings->active_idle_consolidation_seconds;
     draft_focus = state_.settings->draft_focus;
     draft_sensitivity = state_.settings->draft_sensitivity;
     draft_stability = state_.settings->draft_stability;
+    draft_idle_consolidation_seconds
+        = state_.settings->draft_idle_consolidation_seconds;
+    default_idle_consolidation_seconds
+        = state_.settings->default_idle_consolidation_seconds;
+    active_model = state_.settings->active_model;
+    draft_model = state_.settings->draft_model;
+    default_model = state_.settings->default_model;
+    active_memory_prompt_prefix = state_.settings->active_memory_prompt_prefix;
+    draft_memory_prompt_prefix = state_.settings->draft_memory_prompt_prefix;
+    default_memory_prompt_prefix = state_.settings->default_memory_prompt_prefix;
+    active_memory_prompt_suffix = state_.settings->active_memory_prompt_suffix;
+    draft_memory_prompt_suffix = state_.settings->draft_memory_prompt_suffix;
+    default_memory_prompt_suffix = state_.settings->default_memory_prompt_suffix;
     apply_requested = state_.settings->apply_requested;
     last_status = state_.settings->last_apply_status;
   }
 
   ImGui::TextColored(ImVec4(0.8f, 0.8f, 1.0f, 1.0f), "SETTINGS");
   ImGui::Separator();
+  ImGui::TextWrapped(
+      "Applied settings are saved and restored on the next app launch.");
 
   ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f),
                      "Active: F=%s  S=%s  T=%s",
                      FormatDouble(active_focus).c_str(),
                      FormatDouble(active_sensitivity).c_str(),
                      FormatDouble(active_stability).c_str());
+  if (!active_model.empty()) {
+    ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f),
+                       "Model: %s", active_model.c_str());
+  }
+  const std::string idle_label
+      = active_idle_consolidation_seconds > 0
+            ? std::to_string(active_idle_consolidation_seconds) + "s"
+            : "auto";
+  ImGui::TextColored(
+      ImVec4(0.7f, 0.7f, 0.7f, 1.0f),
+      "Idle consolidation: %s", idle_label.c_str());
 
   const bool dirty = !NearlyEqual(active_focus, draft_focus)
                      || !NearlyEqual(active_sensitivity, draft_sensitivity)
-                     || !NearlyEqual(active_stability, draft_stability);
+                     || !NearlyEqual(active_stability, draft_stability)
+                     || active_idle_consolidation_seconds
+                            != draft_idle_consolidation_seconds
+                     || active_model != draft_model
+                     || active_memory_prompt_prefix != draft_memory_prompt_prefix
+                     || active_memory_prompt_suffix != draft_memory_prompt_suffix;
   ImGui::TextColored(dirty ? ImVec4(1.0f, 1.0f, 0.3f, 1.0f)
                            : ImVec4(0.3f, 1.0f, 0.3f, 1.0f),
                      dirty ? "Draft differs from active config"
@@ -982,20 +1161,115 @@ void ChatWindow::RenderSettingsTab() {
     state_.settings->draft_stability = draft_stability;
   }
 
+  int idle_seconds_input = draft_idle_consolidation_seconds;
+  if (ImGui::InputInt("Idle consolidation seconds", &idle_seconds_input)) {
+    idle_seconds_input = std::max(0, idle_seconds_input);
+    std::lock_guard<std::mutex> lock(state_.settings->mu);
+    state_.settings->draft_idle_consolidation_seconds = idle_seconds_input;
+    draft_idle_consolidation_seconds = idle_seconds_input;
+  }
+  ImGui::TextWrapped(
+      "Use 0 to keep the stability-derived idle timer. Any positive value overrides it.");
+  if (ImGui::Button("Reset Idle Timer")) {
+    std::lock_guard<std::mutex> lock(state_.settings->mu);
+    state_.settings->draft_idle_consolidation_seconds
+        = state_.settings->default_idle_consolidation_seconds;
+    draft_idle_consolidation_seconds
+        = state_.settings->default_idle_consolidation_seconds;
+  }
+  if (default_idle_consolidation_seconds == 0) {
+    ImGui::SameLine();
+    ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f),
+                       "Default uses stability.");
+  }
+
+  ImGui::Separator();
+  ImGui::TextColored(ImVec4(0.8f, 0.8f, 1.0f, 1.0f), "Model");
+  ImGui::TextWrapped(
+      "This model name is sent directly to the OpenAI-compatible API for new generations.");
+  if (EditSingleLineString("##model", draft_model)) {
+    std::lock_guard<std::mutex> lock(state_.settings->mu);
+    state_.settings->draft_model = draft_model;
+  }
+  if (ImGui::Button("Reset Model")) {
+    std::lock_guard<std::mutex> lock(state_.settings->mu);
+    state_.settings->draft_model = state_.settings->default_model;
+  }
+  if (!default_model.empty()) {
+    ImGui::SameLine();
+    ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f),
+                       "Startup default: %s", default_model.c_str());
+  }
+  if (draft_model.empty()) {
+    ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f),
+                       "Model cannot be empty.");
+  }
+
+  ImGui::Separator();
+  ImGui::TextColored(ImVec4(0.8f, 0.8f, 1.0f, 1.0f), "Memory Prompt Prefix");
+  ImGui::TextWrapped(
+      "This text is inserted inside the <snapshot> block immediately above "
+      "the <memories> XML block. Edit the draft here, then use Apply to make "
+      "it active.");
+
+  if (EditMultilineString("##memory_prompt_prefix",
+                          draft_memory_prompt_prefix,
+                          ImVec2(-1.0f, 140.0f))) {
+    std::lock_guard<std::mutex> lock(state_.settings->mu);
+    state_.settings->draft_memory_prompt_prefix = draft_memory_prompt_prefix;
+  }
+
+  if (ImGui::Button("Reset Memory Prompt")) {
+    std::lock_guard<std::mutex> lock(state_.settings->mu);
+    state_.settings->draft_memory_prompt_prefix
+        = state_.settings->default_memory_prompt_prefix;
+  }
+  if (!default_memory_prompt_prefix.empty()) {
+    ImGui::SameLine();
+    ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f),
+                       "Restores the default instruction text.");
+  }
+
+  ImGui::Separator();
+  ImGui::TextColored(ImVec4(0.8f, 0.8f, 1.0f, 1.0f), "Memory Prompt Suffix");
+  ImGui::TextWrapped(
+      "This text is inserted inside the <snapshot> block immediately below "
+      "the </memories> XML block. Use it if you want the main instruction "
+      "block to appear after the memories.");
+
+  if (EditMultilineString("##memory_prompt_suffix",
+                          draft_memory_prompt_suffix,
+                          ImVec2(-1.0f, 120.0f))) {
+    std::lock_guard<std::mutex> lock(state_.settings->mu);
+    state_.settings->draft_memory_prompt_suffix = draft_memory_prompt_suffix;
+  }
+
+  if (ImGui::Button("Reset Memory Suffix")) {
+    std::lock_guard<std::mutex> lock(state_.settings->mu);
+    state_.settings->draft_memory_prompt_suffix
+        = state_.settings->default_memory_prompt_suffix;
+  }
+  if (default_memory_prompt_suffix.empty()) {
+    ImGui::SameLine();
+    ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f),
+                       "Default is empty.");
+  }
+
   const bool generating = state_.generating && *state_.generating;
   if (generating) {
     ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.3f, 1.0f),
                        "Wait for the current generation to finish before applying.");
   }
 
-  const bool can_apply = dirty && !apply_requested && !generating;
+  const bool can_apply = dirty && !apply_requested && !generating
+                         && !draft_model.empty();
   if (!can_apply) {
     ImGui::BeginDisabled();
   }
   if (ImGui::Button("Apply")) {
     std::lock_guard<std::mutex> lock(state_.settings->mu);
     state_.settings->apply_requested = true;
-    state_.settings->last_apply_status = "Applying updated knobs...";
+    state_.settings->last_apply_status = "Applying updated settings...";
   }
   if (!can_apply) {
     ImGui::EndDisabled();
@@ -1007,6 +1281,13 @@ void ChatWindow::RenderSettingsTab() {
     state_.settings->draft_focus = state_.settings->active_focus;
     state_.settings->draft_sensitivity = state_.settings->active_sensitivity;
     state_.settings->draft_stability = state_.settings->active_stability;
+    state_.settings->draft_idle_consolidation_seconds
+        = state_.settings->active_idle_consolidation_seconds;
+    state_.settings->draft_model = state_.settings->active_model;
+    state_.settings->draft_memory_prompt_prefix
+        = state_.settings->active_memory_prompt_prefix;
+    state_.settings->draft_memory_prompt_suffix
+        = state_.settings->active_memory_prompt_suffix;
   }
 
   ImGui::Separator();
@@ -1023,10 +1304,14 @@ void ChatWindow::RenderDatabaseTab() {
   std::vector<DatabaseSignalRow> signals;
   std::vector<DatabaseAssociationRow> associations;
   std::vector<DatabaseEpisodeRow> episodes;
+  std::vector<DatabaseFactRow> facts;
+  std::vector<DatabaseEvictionRow> evictions;
   long long total_memories = 0;
   long long total_signals = 0;
   long long total_associations = 0;
   long long total_episodes = 0;
+  long long total_facts = 0;
+  long long total_evictions = 0;
   uint64_t refreshed_at = 0;
   std::optional<std::string> last_status;
   {
@@ -1035,13 +1320,36 @@ void ChatWindow::RenderDatabaseTab() {
     signals = state_.db_explorer->signals;
     associations = state_.db_explorer->associations;
     episodes = state_.db_explorer->episodes;
+    facts = state_.db_explorer->facts;
+    evictions = state_.db_explorer->evictions;
     total_memories = state_.db_explorer->total_memories;
     total_signals = state_.db_explorer->total_signals;
     total_associations = state_.db_explorer->total_associations;
     total_episodes = state_.db_explorer->total_episodes;
+    total_facts = state_.db_explorer->total_facts;
+    total_evictions = state_.db_explorer->total_evictions;
     refreshed_at = state_.db_explorer->refreshed_at;
     last_status = state_.db_explorer->last_refresh_status;
   }
+
+  const auto filter = static_cast<DatabaseExplorerFilter>(db_memory_kind_filter_);
+  std::vector<DatabaseMemoryRow> filtered_memories;
+  filtered_memories.reserve(memories.size());
+  for (const auto& row : memories) {
+    if (MatchesDatabaseExplorerFilter(row, filter)) {
+      filtered_memories.push_back(row);
+    }
+  }
+
+  const bool show_associations = filter == DatabaseExplorerFilter::All
+                                 || filter == DatabaseExplorerFilter::Associations;
+  const bool show_memories = filter == DatabaseExplorerFilter::All
+                             || filter == DatabaseExplorerFilter::Labels
+                             || filter == DatabaseExplorerFilter::LongTerm
+                             || filter == DatabaseExplorerFilter::Working;
+  const bool show_temporal = filter == DatabaseExplorerFilter::All
+                             || filter == DatabaseExplorerFilter::Temporal;
+  const bool show_supporting_sections = filter == DatabaseExplorerFilter::All;
 
   ImGui::TextColored(ImVec4(0.8f, 0.8f, 1.0f, 1.0f), "DATABASE EXPLORER");
   ImGui::SameLine();
@@ -1062,16 +1370,21 @@ void ChatWindow::RenderDatabaseTab() {
   ImGui::Separator();
 
   ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f),
-                     "Totals: memories=%lld signals=%lld associations=%lld episodes=%lld",
+                     "Totals: memories=%lld signals=%lld associations=%lld episodes=%lld facts=%lld evictions=%lld",
                      total_memories,
                      total_signals,
                      total_associations,
-                     total_episodes);
+                     total_episodes,
+                     total_facts,
+                     total_evictions);
   ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "Last refresh: %s",
                      NullOrValue(refreshed_at).c_str());
   if (last_status.has_value()) {
     ImGui::TextWrapped("%s", last_status->c_str());
   }
+  ImGui::SetNextItemWidth(220.0f);
+  ImGui::Combo("View", &db_memory_kind_filter_, kDatabaseExplorerFilterLabels,
+               IM_ARRAYSIZE(kDatabaseExplorerFilterLabels));
 
   if (show_clear_db_confirm_) {
     ImGui::SetNextWindowSize(ImVec2(460.0f, 0.0f), ImGuiCond_Appearing);
@@ -1106,7 +1419,8 @@ void ChatWindow::RenderDatabaseTab() {
 
   ImGui::Separator();
 
-  if (ImGui::CollapsingHeader("Relationships", ImGuiTreeNodeFlags_DefaultOpen)) {
+  if (show_associations
+      && ImGui::CollapsingHeader("Relationships", ImGuiTreeNodeFlags_DefaultOpen)) {
     ImGui::BeginChild("DbAssociations", ImVec2(0, 220), true);
     if (associations.empty()) {
       ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "(no associations)");
@@ -1130,12 +1444,13 @@ void ChatWindow::RenderDatabaseTab() {
     ImGui::EndChild();
   }
 
-  if (ImGui::CollapsingHeader("Memories", ImGuiTreeNodeFlags_DefaultOpen)) {
+  if (show_memories
+      && ImGui::CollapsingHeader("Memories", ImGuiTreeNodeFlags_DefaultOpen)) {
     ImGui::BeginChild("DbMemories", ImVec2(0, 220), true);
-    if (memories.empty()) {
+    if (filtered_memories.empty()) {
       ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "(no memories)");
     } else {
-      for (const auto& row : memories) {
+      for (const auto& row : filtered_memories) {
         if (ImGui::CollapsingHeader(FormatMemoryTitle(row).c_str())) {
           ImGui::TextColored(ImVec4(0.3f, 1.0f, 1.0f, 1.0f),
                              "episode=%lld embedding=%lld source=%s",
@@ -1163,7 +1478,35 @@ void ChatWindow::RenderDatabaseTab() {
     ImGui::EndChild();
   }
 
-  if (ImGui::CollapsingHeader("Signals")) {
+  if (show_temporal
+      && ImGui::CollapsingHeader("Temporal Facts", ImGuiTreeNodeFlags_DefaultOpen)) {
+    ImGui::BeginChild("DbFacts", ImVec2(0, 220), true);
+    if (facts.empty()) {
+      ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "(no temporal facts)");
+    } else {
+      for (const auto& row : facts) {
+        if (ImGui::CollapsingHeader(FormatFactTitle(row).c_str())) {
+          ImGui::TextColored(ImVec4(0.3f, 1.0f, 1.0f, 1.0f),
+                             "summary=#%lld lifecycle=%s severity=%s",
+                             row.summary_memory_id,
+                             row.lifecycle_state.c_str(),
+                             row.severity_class.c_str());
+          ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.3f, 1.0f),
+                             "confidence=%s recorded=%s superseded=%s",
+                             FormatDouble(row.confidence).c_str(),
+                             NullOrValue(row.recorded_at_ts).c_str(),
+                             NullOrValue(row.superseded_at_ts).c_str());
+          ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f),
+                             "valid_start=%s valid_end=%s",
+                             NullOrValue(row.valid_start_ts).c_str(),
+                             NullOrValue(row.valid_end_ts).c_str());
+        }
+      }
+    }
+    ImGui::EndChild();
+  }
+
+  if (show_supporting_sections && ImGui::CollapsingHeader("Signals")) {
     ImGui::BeginChild("DbSignals", ImVec2(0, 180), true);
     if (signals.empty()) {
       ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "(no signals)");
@@ -1191,7 +1534,7 @@ void ChatWindow::RenderDatabaseTab() {
     ImGui::EndChild();
   }
 
-  if (ImGui::CollapsingHeader("Episodes")) {
+  if (show_supporting_sections && ImGui::CollapsingHeader("Episodes")) {
     ImGui::BeginChild("DbEpisodes", ImVec2(0, 140), true);
     if (episodes.empty()) {
       ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "(no episodes)");
@@ -1210,6 +1553,287 @@ void ChatWindow::RenderDatabaseTab() {
     }
     ImGui::EndChild();
   }
+
+  if (ImGui::CollapsingHeader("Evictions")) {
+    ImGui::BeginChild("DbEvictions", ImVec2(0, 180), true);
+    if (evictions.empty()) {
+      ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "(no eviction records)");
+    } else {
+      for (const auto& row : evictions) {
+        if (ImGui::CollapsingHeader(FormatEvictionTitle(row).c_str())) {
+          ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.5f, 1.0f),
+                             "reason=%s evicted_at=%s",
+                             row.eviction_reason.c_str(),
+                             NullOrValue(row.evicted_at).c_str());
+          ImGui::TextColored(ImVec4(0.3f, 1.0f, 1.0f, 1.0f),
+                             "kind=%s source=%s embedding=%lld modality=%s",
+                             row.kind.c_str(),
+                             row.source_id.c_str(),
+                             row.embedding_id,
+                             row.modality.empty() ? "-" : row.modality.c_str());
+          ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.3f, 1.0f),
+                             "strength=%s use_freq=%s contextual_gain=%s signals=%lld",
+                             FormatDouble(row.strength).c_str(),
+                             FormatDouble(row.use_frequency).c_str(),
+                             FormatDouble(row.contextual_gain).c_str(),
+                             row.n_signals);
+          ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f),
+                             "retrieved=%lld used=%lld start=%s end=%s last_access=%s created=%s",
+                             row.retrieved_count,
+                             row.used_count,
+                             NullOrValue(row.start_ts).c_str(),
+                             NullOrValue(row.end_ts).c_str(),
+                             NullOrValue(row.last_access).c_str(),
+                             NullOrValue(row.created_at).c_str());
+          if (!row.label.empty()) {
+            ImGui::TextWrapped("%s", row.label.c_str());
+          }
+        }
+      }
+    }
+    ImGui::EndChild();
+  }
+}
+
+void ChatWindow::RenderGraphTab() {
+  if (!state_.db_explorer) return;
+
+  std::vector<DatabaseAssociationRow> associations;
+  {
+    std::lock_guard<std::mutex> lock(state_.db_explorer->mu);
+    associations = state_.db_explorer->associations;
+  }
+
+  ImGui::TextColored(ImVec4(0.8f, 0.8f, 1.0f, 1.0f), "RELATIONSHIP GRAPH");
+  ImGui::SameLine();
+  if (ImGui::Button("Reset Layout")) {
+    graph_pan_offset_ = ImVec2(80.0f, 80.0f);
+    graph_node_positions_.clear();
+    graph_layout_dirty_ = true;
+    graph_dragging_node_id_ = 0;
+  }
+  ImGui::TextWrapped(
+      "Drag nodes with the left mouse button. Drag empty space with the right mouse button to pan.");
+  ImGui::Separator();
+
+  if (associations.empty()) {
+    ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "(no relationships to graph)");
+    return;
+  }
+
+  struct GraphNode {
+    long long memory_id = 0;
+    std::string kind;
+    std::string label;
+    std::string source_id;
+  };
+
+  std::vector<GraphNode> nodes;
+  nodes.reserve(associations.size() * 2);
+  for (const auto& row : associations) {
+    const auto append_node = [&nodes](long long memory_id,
+                                      const std::string& kind,
+                                      const std::string& label,
+                                      const std::string& source_id) {
+      auto it = std::find_if(nodes.begin(), nodes.end(),
+                             [memory_id](const GraphNode& node) {
+                               return node.memory_id == memory_id;
+                             });
+      if (it == nodes.end()) {
+        nodes.push_back(GraphNode{memory_id, kind, label, source_id});
+      }
+    };
+    append_node(row.source_memory_id, row.source_kind, row.source_label, row.source_source_id);
+    append_node(row.target_memory_id, row.target_kind, row.target_label, row.target_source_id);
+  }
+
+  std::sort(nodes.begin(), nodes.end(), [](const GraphNode& a, const GraphNode& b) {
+    return a.memory_id < b.memory_id;
+  });
+
+  std::size_t layout_signature = nodes.size();
+  for (const auto& node : nodes) {
+    layout_signature ^= std::hash<long long>{}(node.memory_id)
+                        + 0x9e3779b97f4a7c15ULL
+                        + (layout_signature << 6)
+                        + (layout_signature >> 2);
+  }
+  for (const auto& row : associations) {
+    std::size_t edge_hash = std::hash<long long>{}(row.source_memory_id);
+    edge_hash ^= std::hash<long long>{}(row.target_memory_id)
+                 + 0x9e3779b97f4a7c15ULL
+                 + (edge_hash << 6)
+                 + (edge_hash >> 2);
+    edge_hash ^= std::hash<std::string>{}(row.edge_type)
+                 + 0x9e3779b97f4a7c15ULL
+                 + (edge_hash << 6)
+                 + (edge_hash >> 2);
+    layout_signature ^= edge_hash + 0x9e3779b97f4a7c15ULL
+                        + (layout_signature << 6)
+                        + (layout_signature >> 2);
+  }
+  if (layout_signature != graph_layout_signature_) {
+    graph_layout_signature_ = layout_signature;
+    graph_layout_dirty_ = true;
+  }
+
+  const ImVec2 canvas_size = ImGui::GetContentRegionAvail();
+  const ImVec2 canvas_pos = ImGui::GetCursorScreenPos();
+  const float canvas_width = std::max(canvas_size.x, 300.0f);
+  const float canvas_height = std::max(canvas_size.y, 260.0f);
+  const ImVec2 actual_canvas_size(canvas_width, canvas_height);
+
+  ImGui::InvisibleButton("GraphCanvas", actual_canvas_size,
+                         ImGuiButtonFlags_MouseButtonRight
+                             | ImGuiButtonFlags_MouseButtonMiddle);
+  const bool canvas_hovered = ImGui::IsItemHovered();
+  if (canvas_hovered && (ImGui::IsMouseDragging(ImGuiMouseButton_Right)
+                         || ImGui::IsMouseDragging(ImGuiMouseButton_Middle))) {
+    graph_pan_offset_.x += ImGui::GetIO().MouseDelta.x;
+    graph_pan_offset_.y += ImGui::GetIO().MouseDelta.y;
+  }
+
+  ImDrawList* draw_list = ImGui::GetWindowDrawList();
+  const ImVec2 canvas_max(canvas_pos.x + actual_canvas_size.x,
+                          canvas_pos.y + actual_canvas_size.y);
+  draw_list->AddRectFilled(canvas_pos, canvas_max, IM_COL32(18, 18, 22, 255), 6.0f);
+  draw_list->AddRect(canvas_pos, canvas_max, IM_COL32(70, 70, 78, 255), 6.0f);
+  draw_list->PushClipRect(canvas_pos, canvas_max, true);
+
+  const float node_width = 180.0f;
+  const float node_height = 56.0f;
+  const float horizontal_spacing = 56.0f;
+  const float vertical_spacing = 34.0f;
+  const float layout_width = std::max(actual_canvas_size.x - node_width - 40.0f,
+                                      3.0f * (node_width + horizontal_spacing));
+  const ImVec2 center(layout_width * 0.5f, 0.0f);
+
+  std::unordered_set<long long> live_ids;
+  live_ids.reserve(nodes.size());
+  for (const auto& node : nodes) {
+    live_ids.insert(node.memory_id);
+  }
+  for (auto it = graph_node_positions_.begin(); it != graph_node_positions_.end();) {
+    if (!live_ids.count(it->first)) {
+      it = graph_node_positions_.erase(it);
+    } else {
+      ++it;
+    }
+  }
+
+  for (std::size_t i = 0; i < nodes.size(); ++i) {
+    auto pos_it = graph_node_positions_.find(nodes[i].memory_id);
+    if (pos_it == graph_node_positions_.end()) {
+      graph_node_positions_[nodes[i].memory_id] = ImVec2(0.0f, 0.0f);
+    }
+  }
+
+  if (graph_layout_dirty_) {
+    std::unordered_map<long long, int> degrees;
+    degrees.reserve(nodes.size());
+    for (const auto& row : associations) {
+      degrees[row.source_memory_id] += 1;
+      degrees[row.target_memory_id] += 1;
+    }
+
+    std::vector<GraphNode> layout_nodes = nodes;
+    std::stable_sort(layout_nodes.begin(), layout_nodes.end(),
+                     [&degrees](const GraphNode& a, const GraphNode& b) {
+                       const int degree_a = degrees[a.memory_id];
+                       const int degree_b = degrees[b.memory_id];
+                       if (degree_a != degree_b) return degree_a > degree_b;
+                       if (a.kind != b.kind) return a.kind < b.kind;
+                       return a.memory_id < b.memory_id;
+                     });
+
+    const int columns = std::max(
+        3,
+        static_cast<int>(std::ceil(std::sqrt(static_cast<float>(layout_nodes.size())))));
+    const float x_step = node_width + horizontal_spacing;
+    const float y_step = node_height + vertical_spacing;
+    const float total_width = (static_cast<float>(columns - 1) * x_step);
+    const float x_origin = std::max(20.0f, center.x - total_width * 0.5f);
+
+    for (std::size_t i = 0; i < layout_nodes.size(); ++i) {
+      const int row = static_cast<int>(i / static_cast<std::size_t>(columns));
+      const int col = static_cast<int>(i % static_cast<std::size_t>(columns));
+      const float stagger = (row % 2 == 0) ? 0.0f : x_step * 0.25f;
+      graph_node_positions_[layout_nodes[i].memory_id]
+          = ImVec2(x_origin + static_cast<float>(col) * x_step + stagger,
+                   24.0f + static_cast<float>(row) * y_step);
+    }
+    graph_layout_dirty_ = false;
+  }
+
+  for (const auto& row : associations) {
+    const ImVec2 source_pos = graph_node_positions_[row.source_memory_id];
+    const ImVec2 target_pos = graph_node_positions_[row.target_memory_id];
+    const ImVec2 p1(canvas_pos.x + graph_pan_offset_.x + source_pos.x + node_width * 0.5f,
+                    canvas_pos.y + graph_pan_offset_.y + source_pos.y + node_height * 0.5f);
+    const ImVec2 p2(canvas_pos.x + graph_pan_offset_.x + target_pos.x + node_width * 0.5f,
+                    canvas_pos.y + graph_pan_offset_.y + target_pos.y + node_height * 0.5f);
+    const ImVec2 cp1(p1.x + 50.0f, p1.y);
+    const ImVec2 cp2(p2.x - 50.0f, p2.y);
+    draw_list->AddBezierCubic(p1, cp1, cp2, p2, EdgeColor(row.edge_type), 2.0f);
+
+    const ImVec2 mid((p1.x + p2.x) * 0.5f, (p1.y + p2.y) * 0.5f);
+    draw_list->AddText(ImVec2(mid.x + 6.0f, mid.y - 10.0f),
+                       IM_COL32(220, 220, 220, 180),
+                       row.edge_type.c_str());
+  }
+
+  for (const auto& node : nodes) {
+    ImVec2& local_pos = graph_node_positions_[node.memory_id];
+    const ImVec2 node_min(canvas_pos.x + graph_pan_offset_.x + local_pos.x,
+                          canvas_pos.y + graph_pan_offset_.y + local_pos.y);
+    const ImVec2 node_max(node_min.x + node_width, node_min.y + node_height);
+
+    ImGui::SetCursorScreenPos(node_min);
+    ImGui::InvisibleButton(("graph-node-" + std::to_string(node.memory_id)).c_str(),
+                           ImVec2(node_width, node_height));
+    const bool hovered = ImGui::IsItemHovered();
+    if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+      graph_dragging_node_id_ = node.memory_id;
+    }
+    if (graph_dragging_node_id_ == node.memory_id && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+      local_pos.x += ImGui::GetIO().MouseDelta.x;
+      local_pos.y += ImGui::GetIO().MouseDelta.y;
+    }
+    if (graph_dragging_node_id_ == node.memory_id && !ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+      graph_dragging_node_id_ = 0;
+    }
+
+    const ImU32 fill = NodeFillColor(node.kind);
+    const bool dragging = graph_dragging_node_id_ == node.memory_id;
+    const ImU32 border = (hovered || dragging) ? IM_COL32(255, 255, 255, 220)
+                                               : IM_COL32(40, 40, 40, 255);
+    draw_list->AddRectFilled(node_min, node_max, fill, 8.0f);
+    draw_list->AddRect(node_min, node_max, border, 8.0f, 0, hovered ? 2.0f : 1.0f);
+    draw_list->AddText(ImVec2(node_min.x + 10.0f, node_min.y + 8.0f),
+                       IM_COL32(255, 255, 255, 255),
+                       GraphNodeTitle(node.kind, node.label, node.source_id, node.memory_id).c_str());
+    draw_list->AddText(ImVec2(node_min.x + 10.0f, node_min.y + 30.0f),
+                       IM_COL32(230, 230, 230, 200),
+                       (node.kind + " #" + std::to_string(node.memory_id)).c_str());
+
+    if (hovered) {
+      ImGui::BeginTooltip();
+      ImGui::Text("#%lld", node.memory_id);
+      if (!node.kind.empty()) {
+        ImGui::Text("kind: %s", node.kind.c_str());
+      }
+      if (!node.source_id.empty()) {
+        ImGui::Text("source: %s", node.source_id.c_str());
+      }
+      if (!node.label.empty()) {
+        ImGui::Separator();
+        ImGui::TextWrapped("%s", node.label.c_str());
+      }
+      ImGui::EndTooltip();
+    }
+  }
+
+  draw_list->PopClipRect();
 }
 
 void ChatWindow::RenderContextTab() {
@@ -1341,12 +1965,16 @@ void ChatWindow::RenderInputBox() {
   ImGui::Text(">");
   ImGui::SameLine();
 
-  // Check if we should focus the input
   bool generating = state_.generating && *state_.generating;
   const std::string before_input = input_buffer_;
 
   ImGui::PushItemWidth(-1);
   ImGuiInputTextFlags flags = ImGuiInputTextFlags_EnterReturnsTrue;
+
+  if (refocus_input_next_frame_ || ImGui::IsWindowAppearing()) {
+    ImGui::SetKeyboardFocusHere();
+    refocus_input_next_frame_ = false;
+  }
 
   bool submitted = ImGui::InputText("##input", input_buffer_, sizeof(input_buffer_), flags);
   const std::string after_input = input_buffer_;
@@ -1365,6 +1993,7 @@ void ChatWindow::RenderInputBox() {
     pending_message_ = input_buffer_;
     input_buffer_[0] = '\0';
     scroll_chat_to_bottom_ = true;
+    refocus_input_next_frame_ = true;
   }
 
   if (state_.has_input_draft) {
@@ -1372,11 +2001,6 @@ void ChatWindow::RenderInputBox() {
   }
 
   ImGui::PopItemWidth();
-
-  // Focus input on first frame
-  if (ImGui::IsWindowAppearing()) {
-    ImGui::SetKeyboardFocusHere(-1);
-  }
 }
 
 bool ChatWindow::HasPendingMessage() const {

@@ -74,7 +74,7 @@ All behavioral thresholds, gains, and caps are derived from the three knobs (F, 
 
 ## Temporal Semantics for Structured Facts
 
-Cortext currently treats raw memories primarily as **event-time observations**: a memory is written when a coherent unit is detected, and its stored timestamp records when that unit was observed. For structured facts extracted during consolidation, a future extension can benefit from distinguishing three related but non-identical temporal notions:
+Cortext currently treats raw memories primarily as **event-time observations**: a memory is written when a coherent unit is detected, and its stored timestamp records when that unit was observed. The phase-1 bitemporal fact layer adds a structured consolidation product that distinguishes three related but non-identical temporal notions:
 
 * **Event time:** when the source experience was observed by the system.
 * **Valid time:** when an extracted fact was true in the world.
@@ -105,7 +105,7 @@ current(f_j, now)   = true_at(f_j, now) ∧ known_at(f_j, now)
 
 This is the core of **bitemporal modeling**: the system can separately answer "what was true then?" and "what did the system believe then?" without collapsing historical corrections into a single timeless statement.
 
-In the current alpha, Cortext's temporality is primarily event-driven and recency-weighted. The bitemporal formulation above is best understood as an additive structured-fact layer for evolving personal knowledge rather than as a replacement for the episodic memory stream.
+In the current alpha, Cortext's live behavior remains primarily event-driven and recency-weighted. The bitemporal formulation above is an additive structured-fact layer for evolving personal knowledge rather than a replacement for the episodic memory stream.
 
 ### Buffers {#sec-buffers}
 

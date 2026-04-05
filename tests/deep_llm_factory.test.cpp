@@ -371,7 +371,7 @@ TEST_CASE ("Mixed backend selection integration", "[deep_llm][integration]")
   const std::string gemma_model = FindModelPath (
       "models/gemma3n-e2b-litert/gemma-3n-E2B-it-int4.litertlm");
   const std::string extract_model = FindModelPath (
-      "models/LFM2-1.2B-Extract-GGUF/LFM2-1.2B-Extract-Q4_K_M.gguf");
+      "models/lfm2.5-350m-gguf/LFM2.5-350M-Q4_K_M.gguf");
 
   if (!std::filesystem::exists (gemma_model)
       || !std::filesystem::exists (extract_model))
@@ -385,21 +385,21 @@ TEST_CASE ("Mixed backend selection integration", "[deep_llm][integration]")
           FindModelPath ("models"), cortext::internal::DeepLlmBackend::Mixed,
           nullptr);
   REQUIRE (selection.has_value ());
-  CHECK (selection->backend_name == "Gemma+LFM2");
+  CHECK (selection->backend_name == "Gemma+LFM2.5");
   CHECK (selection->summarizer_model_path.filename ()
          == std::filesystem::path ("gemma-3n-E2B-it-int4.litertlm"));
   CHECK (selection->extractor_model_path.filename ()
-         == std::filesystem::path ("LFM2-1.2B-Extract-Q4_K_M.gguf"));
+         == std::filesystem::path ("LFM2.5-350M-Q4_K_M.gguf"));
 }
 
-TEST_CASE ("Auto deep backend prefers mixed selection", "[deep_llm][integration]")
+TEST_CASE ("Auto deep backend prefers LFM2.5 selection", "[deep_llm][integration]")
 {
   ScopedEnvVar clear_backend ("CORTEXT_DEEP_LLM_BACKEND");
 
   const std::string gemma_model = FindModelPath (
       "models/gemma3n-e2b-litert/gemma-3n-E2B-it-int4.litertlm");
   const std::string extract_model = FindModelPath (
-      "models/LFM2-1.2B-Extract-GGUF/LFM2-1.2B-Extract-Q4_K_M.gguf");
+      "models/lfm2.5-350m-gguf/LFM2.5-350M-Q4_K_M.gguf");
 
   if (!std::filesystem::exists (gemma_model)
       || !std::filesystem::exists (extract_model))
@@ -412,5 +412,5 @@ TEST_CASE ("Auto deep backend prefers mixed selection", "[deep_llm][integration]
       FindModelPath ("models"), cortext::internal::DeepLlmBackend::Auto,
       nullptr);
   REQUIRE (selection.has_value ());
-  CHECK (selection->backend_name == "Gemma+LFM2");
+  CHECK (selection->backend_name == "LFM2.5/llama.cpp");
 }
