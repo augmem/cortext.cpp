@@ -1,8 +1,11 @@
-#include <cortext/encoder/imagebind.hpp>
+#include "encoder/text_encoder_factory.hpp"
 
 #include <nlohmann/json.hpp>
 
 #include <chrono>
+#include <cctype>
+#include <ctime>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -32,24 +35,6 @@ TimestampUtc ()
   return std::string (buf);
 }
 
-fs::path
-ResolveImageBindDir (const fs::path &models_dir)
-{
-  const fs::path direct = models_dir;
-  if (fs::exists (direct / "text_encoder.onnx")
-      || fs::exists (direct / "text_encoder_int8.onnx"))
-    {
-      return direct;
-    }
-  const fs::path nested = models_dir / "imagebind";
-  if (fs::exists (nested / "text_encoder.onnx")
-      || fs::exists (nested / "text_encoder_int8.onnx"))
-    {
-      return nested;
-    }
-  throw std::runtime_error ("ImageBind text encoder not found in models dir");
-}
-
 std::string
 TrimLine (std::string s)
 {
@@ -69,6 +54,7 @@ main (int argc, char **argv)
   fs::path input_path;
   fs::path models_dir = "models";
   fs::path out_path;
+  std::optional<std::string> backend_override;
 
   for (int i = 1; i < argc; ++i)
     {
@@ -93,12 +79,16 @@ main (int argc, char **argv)
         {
           out_path = *v;
         }
+      else if (auto v = take ("--backend="))
+        {
+          backend_override = *v;
+        }
     }
 
   if (input_path.empty () || out_path.empty ())
     {
       std::cerr << "Usage: cortext_text_embedder --input=FILE --out=FILE "
-                   "[--models=DIR]\n";
+                   "[--models=DIR] [--backend=llama.cpp|litert|onnx]\n";
       return 1;
     }
   if (!fs::exists (input_path))
@@ -107,8 +97,18 @@ main (int argc, char **argv)
       return 1;
     }
 
-  const fs::path imagebind_dir = ResolveImageBindDir (models_dir);
-  cortext::ImageBindEncoder encoder (imagebind_dir.string ());
+  if (backend_override.has_value ())
+    {
+#if defined(_WIN32)
+      _putenv_s ("CORTEXT_EMBEDDINGGEMMA_BACKEND", backend_override->c_str ());
+#else
+      setenv ("CORTEXT_EMBEDDINGGEMMA_BACKEND", backend_override->c_str (), 1);
+#endif
+    }
+
+  auto selection = cortext::internal::CreatePreferredTextEncoder (
+      models_dir.string ());
+  auto &encoder = *selection.encoder;
 
   std::ifstream in (input_path);
   if (!in.is_open ())
@@ -149,9 +149,29 @@ main (int argc, char **argv)
   nlohmann::json meta;
   meta["generated_by"] = "cortext/tools/text_embedder";
   meta["timestamp"] = TimestampUtc ();
-  meta["embedding_dim"] = 256;
   meta["input"] = input_path.string ();
   meta["count"] = written;
+  meta["backend"] = selection.backend_name;
+  meta["resolved_path"] = selection.resolved_path.string ();
+
+  if (written > 0)
+    {
+      std::ifstream verify_in (out_path);
+      std::string verify_line;
+      if (std::getline (verify_in, verify_line))
+        {
+          auto payload = nlohmann::json::parse (verify_line, nullptr, false);
+          if (!payload.is_discarded () && payload.contains ("embedding")
+              && payload["embedding"].is_array ())
+            {
+              meta["embedding_dim"] = payload["embedding"].size ();
+            }
+        }
+    }
+  else
+    {
+      meta["embedding_dim"] = 0;
+    }
 
   const fs::path meta_out = out_path.parent_path () / "metadata.json";
   std::ofstream meta_file (meta_out);
@@ -159,5 +179,7 @@ main (int argc, char **argv)
 
   std::cout << "Wrote " << written << " embeddings to " << out_path << "\n";
   std::cout << "Metadata: " << meta_out << "\n";
+  std::cout << "Backend: " << selection.backend_name << " ("
+            << selection.resolved_path.string () << ")\n";
   return 0;
 }

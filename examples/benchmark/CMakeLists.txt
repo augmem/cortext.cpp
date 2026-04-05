@@ -16,6 +16,78 @@ add_executable(cortext_deep_llm_bench
   deep_llm_bench.cpp
 )
 
+add_executable(cortext_fact_store_bench
+  fact_store_bench.cpp
+)
+
+add_executable(cortext_bitemporal_retrieval_bench
+  bitemporal_retrieval_bench.cpp
+)
+
+add_executable(cortext_bitemporal_robustness_bench
+  bitemporal_robustness_bench.cpp
+)
+
+add_executable(cortext_bitemporal_ablation_bench
+  bitemporal_ablation_bench.cpp
+)
+
+add_executable(cortext_bitemporal_lifecycle_bench
+  bitemporal_lifecycle_bench.cpp
+)
+
+add_executable(cortext_eviction_ablation_bench
+  eviction_ablation_bench.cpp
+)
+
+add_executable(cortext_memory_system_ablation_bench
+  memory_system_ablation_bench.cpp
+)
+
+add_executable(cortext_predictive_ablation_bench
+  predictive_ablation_bench.cpp
+)
+
+add_executable(cortext_metacognitive_ablation_bench
+  metacognitive_ablation_bench.cpp
+)
+
+add_executable(cortext_constructive_recall_ablation_bench
+  constructive_recall_ablation_bench.cpp
+)
+
+add_executable(cortext_neuromodulator_ablation_bench
+  neuromodulator_ablation_bench.cpp
+)
+
+add_executable(cortext_procedural_ablation_bench
+  procedural_ablation_bench.cpp
+)
+
+add_executable(cortext_meta_learning_ablation_bench
+  meta_learning_ablation_bench.cpp
+)
+
+add_executable(cortext_full_operation_ablation_bench
+  full_operation_ablation_bench.cpp
+)
+
+add_executable(cortext_full_unit_ablation_bench
+  full_unit_ablation_bench.cpp
+)
+
+add_executable(cortext_boundary_fact_extension_ablation_bench
+  boundary_fact_extension_ablation_bench.cpp
+)
+
+add_executable(cortext_full_boundary_fact_unit_ablation_bench
+  full_boundary_fact_unit_ablation_bench.cpp
+)
+
+add_executable(cortext_subcomponent_matrix_bench
+  subcomponent_matrix_bench.cpp
+)
+
 # Include directories for local headers
 target_include_directories(cortext_benchmark PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}
@@ -24,6 +96,60 @@ target_include_directories(cortext_text_encoder_bench PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}
 )
 target_include_directories(cortext_deep_llm_bench PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}
+)
+target_include_directories(cortext_fact_store_bench PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}
+)
+target_include_directories(cortext_bitemporal_retrieval_bench PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}
+)
+target_include_directories(cortext_bitemporal_robustness_bench PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}
+)
+target_include_directories(cortext_bitemporal_ablation_bench PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}
+)
+target_include_directories(cortext_bitemporal_lifecycle_bench PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}
+)
+target_include_directories(cortext_eviction_ablation_bench PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}
+)
+target_include_directories(cortext_memory_system_ablation_bench PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}
+)
+target_include_directories(cortext_predictive_ablation_bench PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}
+)
+target_include_directories(cortext_metacognitive_ablation_bench PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}
+)
+target_include_directories(cortext_constructive_recall_ablation_bench PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}
+)
+target_include_directories(cortext_neuromodulator_ablation_bench PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}
+)
+target_include_directories(cortext_procedural_ablation_bench PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}
+)
+target_include_directories(cortext_meta_learning_ablation_bench PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}
+)
+target_include_directories(cortext_full_operation_ablation_bench PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}
+)
+target_include_directories(cortext_full_unit_ablation_bench PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}
+)
+target_include_directories(cortext_boundary_fact_extension_ablation_bench PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}
+)
+target_include_directories(cortext_full_boundary_fact_unit_ablation_bench PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}
+)
+target_include_directories(cortext_subcomponent_matrix_bench PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
@@ -38,6 +164,60 @@ target_link_libraries(cortext_text_encoder_bench PRIVATE
 target_link_libraries(cortext_deep_llm_bench PRIVATE
   cortext
   nlohmann_json::nlohmann_json
+)
+target_link_libraries(cortext_fact_store_bench PRIVATE
+  cortext
+)
+target_link_libraries(cortext_bitemporal_retrieval_bench PRIVATE
+  cortext
+)
+target_link_libraries(cortext_bitemporal_robustness_bench PRIVATE
+  cortext
+)
+target_link_libraries(cortext_bitemporal_ablation_bench PRIVATE
+  cortext
+)
+target_link_libraries(cortext_bitemporal_lifecycle_bench PRIVATE
+  cortext
+)
+target_link_libraries(cortext_eviction_ablation_bench PRIVATE
+  cortext
+)
+target_link_libraries(cortext_memory_system_ablation_bench PRIVATE
+  cortext
+)
+target_link_libraries(cortext_predictive_ablation_bench PRIVATE
+  cortext
+)
+target_link_libraries(cortext_metacognitive_ablation_bench PRIVATE
+  cortext
+)
+target_link_libraries(cortext_constructive_recall_ablation_bench PRIVATE
+  cortext
+)
+target_link_libraries(cortext_neuromodulator_ablation_bench PRIVATE
+  cortext
+)
+target_link_libraries(cortext_procedural_ablation_bench PRIVATE
+  cortext
+)
+target_link_libraries(cortext_meta_learning_ablation_bench PRIVATE
+  cortext
+)
+target_link_libraries(cortext_full_operation_ablation_bench PRIVATE
+  cortext
+)
+target_link_libraries(cortext_full_unit_ablation_bench PRIVATE
+  cortext
+)
+target_link_libraries(cortext_boundary_fact_extension_ablation_bench PRIVATE
+  cortext
+)
+target_link_libraries(cortext_full_boundary_fact_unit_ablation_bench PRIVATE
+  cortext
+)
+target_link_libraries(cortext_subcomponent_matrix_bench PRIVATE
+  cortext
 )
 
 # Add OGA include directories and link (needed for oga_runner.cpp)

@@ -27,7 +27,8 @@ memory.embedding ← e_rep  # representative embedding (@sec-rep-embedding)
 memory.signals ← [x_1, x_2, ..., x_n]  # ordered signal embeddings
 memory.context ← c_t  # temporal context state (@sec-temporal-context)
 memory.source_model ← {origin, reliability, contradiction_count, last_verified_ts}
-memory.versions ← {evidence_packets, reconstructions}
+memory.evidence_packets ← ordered immutable signal rows
+memory.current_view ← latest reconstruction blob if present, else concatenated signal blobs
 memory.metadata ← {n, s_max, s_avg, drift_acc, mem_elapsed,
                    s_emotion_max, s_arousal_avg}
 ```
@@ -136,6 +137,23 @@ certainty_requirement = lerp(0.6, 0.9, T)
 metacognitive_sensitivity = F × (1 + 0.5 × S)
 ```
 
+Current implementation note: these metacognitive states are no longer diagnostic-only. The branch now maintains a persistent metacognitive confidence state that decays between signals:
+
+```
+Δt_meta = now_s − last_signal_s
+confidence_retained = confidence_{t−1} × exp(−confidence_decay_rate × Δt_meta)
+confidence_t = max(FOK_t, EWMA(confidence_retained, FOK_t, α_meta))
+```
+
+where `α_meta` is a bounded function of `metacognitive_sensitivity`.
+
+That decayed confidence now affects two downstream policies:
+
+* a detected **TOT** state still arms a **next-turn retrieval recovery mode**, but the extra graph depth, candidate budget, and diversification relaxation are scaled by the retained confidence instead of being an all-or-nothing switch
+* a detected **unknown** state still arms a **next-turn caution mode**, and lower retained confidence makes the certainty cutoff stricter before a candidate can be returned
+
+The switch duration still follows `strategy_switch_latency`, but the behavioral effect is now a bounded retrieval-policy change rather than a same-turn retry loop, and `confidence_decay_rate` is part of that behavior rather than a paper-only parameter.
+
 ## Memory Reconsolidation
 
 Following @nader2000fear, retrieved memories enter a labile state permitting modification:
@@ -180,20 +198,35 @@ if source_confidence(m) < lerp(0.15, 0.45, T):
 
 ## Constructive Recall and Controlled Distortion
 
-Memories are stored as **evidence packets** plus **reconstructions**. Retrieval reconstructs a plausible memory instance, tracks uncertainty, and preserves edit history.
+Constructive recall is now implemented as a two-layer memory view:
+
+* **Evidence packets** remain the immutable ordered `signals` rows attached to a memory.
+* **Reconstructions** are versioned rows in `memory_reconstructions`, each carrying `{embedding_id, blob_id, ts, uncertainty, trigger}`.
 
 ```
-memory.versions.evidence_packets ← immutable observations
-memory.versions.reconstructions ← [{embedding, content, ts, uncertainty}]
+on_memory_write:
+    append(memory_reconstructions,
+           {embedding_id = e_rep,
+            blob_id = current_blob,
+            ts = now,
+            uncertainty = 0,
+            trigger = 'initial'})
 ```
 
 During retrieval:
 ```
-recon ← reconstruct(evidence_packets, current_context, uncertainty)
-append(reconstructions, recon)
+current_embedding ← latest(reconstruction.embedding, fallback = memory.embedding)
+score_retrieval(current_embedding, current_context)
+recon ← bounded_blend(current_embedding, query, temporal_context)
+append(memory_reconstructions,
+       {embedding_id = recon.embedding,
+        blob_id = current_blob,
+        ts = now,
+        uncertainty = inferred_retrieval_uncertainty,
+        trigger = 'retrieval'})
 ```
 
-Reconsolidation updates the latest reconstruction rather than overwriting evidence, enabling controlled distortion with an audit trail.
+Hydration resolves `memory.current_view` from the latest reconstruction blob when one exists; otherwise it falls back to the immutable evidence packets. Reconsolidation follows the same audit-trail rule: it appends a new `trigger='reconsolidation'` reconstruction instead of overwriting the evidence embedding stored on the base memory row. This gives the current branch the controlled-distortion property the earlier draft claimed, while preserving the original evidence vector for inspection and replay.
 
 ## Retrieval Competition
 
@@ -225,6 +258,15 @@ When predictions fail (high surprise), the system increases the refresh rate of 
 ```
 update_rate_on_surprise = lerp(0.2, 0.02, T) × S
 ```
+
+Current implementation note: predictive pre-activation is now consumed directly by retrieval rather than only being written to the database. `pre_activation` decays every turn via `pre_activation_decay(T)` and contributes a bounded retrieval prior,
+
+```
+predictive_weight(F,T) = lerp(0.05, 0.20, FocusBias(F)) × lerp(1.0, 0.85, T)
+predictive_bonus = predictive_weight × pre_activation
+```
+
+which is added to the normal retrieval score. High-surprise updates therefore both refresh the latent predictive state and make that state behaviorally visible at the next retrieval.
 
 ## Serial Position Effects
 
@@ -269,20 +311,18 @@ Flashbulb memories receive extended half-life bonuses based on the memory's peak
 flashbulb_threshold = lerp(0.97, 0.65, S)
 flashbulb_threshold_eff = flashbulb_threshold × (1 − 0.5 × s_emotion_max)
                            × (1 − 0.3 × s_arousal_avg)
-# Flashbulb event if intensity exceeds effective threshold
-flashbulb = (m.metadata.s_emotion_max ≥ flashbulb_threshold_eff × rate_adjust)
-# Rate stabilizer keeps flashbulb frequency in a tight band
+# Rate stabilizer only suppresses over-frequent flashbulbs; it does not lower
+# thresholds when the recent flashbulb rate is already below target.
 flashbulb_target = lerp(0.02, 0.06, S)
 flashbulb_rate_ewma ← EWMA(flashbulb, α = lerp(0.02, 0.12, S))
-rate_adjust = clamp(1 + lerp(1.0, 0.6, S) × (flashbulb_rate_ewma − flashbulb_target),
-                    0.8, 1.2)
+rate_adjust = clamp(1 + lerp(1.0, 0.6, S) × max(0, flashbulb_rate_ewma − flashbulb_target),
+                    1.0, 1.2)
 # Contextual percentile gate (embedding‑only, knob‑derived)
 emo_window = round(lerp(24, 96, S) × lerp(0.8, 1.2, T))
 percentile = lerp(0.95, 0.80, S)
 flashbulb_gain = lerp(1.0, 1.1, S)
 flashbulb_threshold_adj = max(flashbulb_threshold_eff × rate_adjust,
-                              Pctl_{percentile}(recent_emotion_intensity, emo_window)
-                              × rate_adjust)
+                              Pctl_{percentile}(recent_emotion_intensity, emo_window))
 flashbulb_arousal = lerp(0.7, 0.5, S)
 flashbulb = ((s_arousal_avg ≥ flashbulb_arousal) AND
              ((flashbulb_gain × s_emotion_max) ≥ flashbulb_threshold_adj))
@@ -322,16 +362,16 @@ if m.tagged and now_s() < m.tag_expires_at:
 
 ## Procedural Memory Lane (Habit/Skill Memory)
 
-In addition to declarative memory, Cortext maintains a procedural store for **what action to take in a context**, learned from repeated success.
+In addition to declarative memory, Cortext maintains a procedural store for **which previously successful routine memory to surface in a context**, learned from repeated successful use.
 
 ```
 proc_key ← sparse_key(μ_acc)  # same sparsification as @sec-pattern-separation
-Q(proc_key, action) ← habit value
+Q(proc_key, memory_id) ← routine value
 ```
 
-Updates occur when an action leads to positive outcome signals:
+Updates occur when a retrieved memory is used successfully and downstream outcome signals are positive:
 ```
 Q ← Q + value_update_gain × δ_reward_t × (1 − Q)
 ```
 
-Procedural retrieval runs in parallel with declarative retrieval; when confidence is high, it can pre-emptively suggest actions while remaining subject to the same interrupt gate.
+Procedural retrieval runs in parallel with declarative retrieval. In the current implementation, high-confidence routine memories are added as **proactive retrieval seeds** for the current sparse context even before a strong semantic match would have selected them; they still pass through the same interrupt gate and final retrieval ranking. This is intentionally narrower than a free-standing action policy: the procedural lane surfaces likely next-step routines as memories, not separate action tokens.

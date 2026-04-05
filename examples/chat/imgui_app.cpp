@@ -14,6 +14,21 @@
 
 namespace chat {
 
+namespace {
+
+const ImWchar* ChatGlyphRanges() {
+  // Include general punctuation so streamed model output renders curly quotes,
+  // dashes, ellipses, and narrow/non-breaking spaces instead of '?'.
+  static const ImWchar ranges[] = {
+      0x0020, 0x00FF,
+      0x2000, 0x206F,
+      0,
+  };
+  return ranges;
+}
+
+}  // namespace
+
 struct ImGuiApp::Impl {
   GLFWwindow* window = nullptr;
   std::atomic<bool> exit_requested{false};
@@ -78,11 +93,13 @@ ImGuiApp::ImGuiApp(const ImGuiAppConfig& config) : impl_(std::make_unique<Impl>(
   // Fallback to default if not found
   const char* font_path = "/System/Library/Fonts/Menlo.ttc";
   const float font_size = 16.0f;
+  ImFontConfig font_config;
   
   // Use std::filesystem to check existence (C++17)
   bool font_loaded = false;
   if (std::filesystem::exists(font_path)) {
-    ImFont* font = io.Fonts->AddFontFromFileTTF(font_path, font_size);
+    ImFont* font = io.Fonts->AddFontFromFileTTF(
+        font_path, font_size, &font_config, ChatGlyphRanges());
     if (font) {
       font_loaded = true;
       std::cout << "Loaded font: " << font_path << " (" << font_size << "px)" << std::endl;
@@ -91,9 +108,7 @@ ImGuiApp::ImGuiApp(const ImGuiAppConfig& config) : impl_(std::make_unique<Impl>(
 
   if (!font_loaded) {
     std::cout << "Using default font (could not load " << font_path << ")" << std::endl;
-    // Load default font but scale it if possible? Default is bitmap, scaling looks bad.
-    // Just add it as is.
-    io.Fonts->AddFontDefault();
+    io.Fonts->AddFontDefault(&font_config);
   }
 
   std::cout << "ImGui application initialized: " << config.width << "x" << config.height << std::endl;

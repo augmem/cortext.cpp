@@ -3,8 +3,9 @@
 #include <cortext/core/utils.hpp>
 #include <cortext/core/algorithms.hpp>
 #include <cortext/core/knobs.hpp>
-#include <cortext/encoder/imagebind.hpp>
+#include <cortext/encoder/encoder.hpp>
 #include <cortext/store/sqlite_store.hpp>
+#include "encoder/text_encoder_factory.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -1101,12 +1102,14 @@ int main(int argc, char **argv) {
   }
 
   std::unique_ptr<cortext::Cortext> cortext;
-  std::unique_ptr<cortext::ImageBindEncoder> eval_encoder;
+  std::unique_ptr<cortext::Encoder> eval_encoder;
   std::shared_ptr<cortext::Store> eval_store;
   std::shared_ptr<cortext::Store> stats_store;
   std::unordered_map<long long, std::vector<float>> embedding_cache;
   std::unordered_map<long long, std::string> memory_kind_cache;
   std::unordered_map<long long, MemoryEmotion> memory_emotion_cache;
+  std::string text_encoder_backend = "unresolved";
+  std::string text_encoder_path;
   bool baseline_counts_set = false;
   int consolidation_every_turns = 0;
   int last_consolidation_turn = -1;
@@ -1125,20 +1128,6 @@ int main(int argc, char **argv) {
     semantic_ready = false;
   }
 
-  auto resolve_imagebind_dir = [](const std::string &models_dir) {
-    std::filesystem::path dir(models_dir);
-    if (std::filesystem::exists(dir / "text_encoder.onnx")
-        || std::filesystem::exists(dir / "text_encoder_int8.onnx")) {
-      return dir;
-    }
-    std::filesystem::path nested = dir / "imagebind";
-    if (std::filesystem::exists(nested / "text_encoder.onnx")
-        || std::filesystem::exists(nested / "text_encoder_int8.onnx")) {
-      return nested;
-    }
-    return dir;
-  };
-
   auto ensure_eval_encoder = [&]() -> bool {
     if (!semantic_ready) {
       return false;
@@ -1147,8 +1136,11 @@ int main(int argc, char **argv) {
       return true;
     }
     try {
-      const auto dir = resolve_imagebind_dir(cfg.models_dir);
-      eval_encoder = std::make_unique<cortext::ImageBindEncoder>(dir.string());
+      auto resolved
+          = cortext::internal::CreatePreferredTextEncoder(cfg.models_dir);
+      text_encoder_backend = resolved.backend_name;
+      text_encoder_path = resolved.resolved_path.string();
+      eval_encoder = std::move(resolved.encoder);
       return true;
     } catch (const std::exception &e) {
       std::cerr << "Semantic encoder init failed: " << e.what() << "\n";
@@ -1237,6 +1229,13 @@ int main(int argc, char **argv) {
   if (conversations.empty()) {
     std::cerr << "No valid conversations found in dataset.\n";
     return 1;
+  }
+
+  if (semantic_ready && ensure_eval_encoder()) {
+    std::cout << "text_encoder_backend=" << text_encoder_backend << "\n";
+    if (!text_encoder_path.empty()) {
+      std::cout << "text_encoder_path=" << text_encoder_path << "\n";
+    }
   }
 
   const int interleave = std::max(1, cfg.interleave);

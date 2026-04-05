@@ -174,6 +174,35 @@ struct Phi4Extractor::Impl
                 result.relations.push_back (std::move (r));
               }
           }
+
+        if (json_output.contains ("facts"))
+          {
+            for (const auto &fact : json_output["facts"])
+              {
+                operations::ExtractedFact f;
+                f.subject = fact.value ("subject", "");
+                f.predicate = fact.value ("predicate", "");
+                f.object = fact.value ("object", "");
+                f.confidence = fact.value ("confidence", 0.5);
+                if (fact.contains ("valid_start_ts")
+                    && fact["valid_start_ts"].is_number ())
+                  {
+                    f.valid_start_ts
+                        = fact["valid_start_ts"].get<std::uint64_t> ();
+                  }
+                if (fact.contains ("valid_end_ts")
+                    && fact["valid_end_ts"].is_number ())
+                  {
+                    f.valid_end_ts
+                        = fact["valid_end_ts"].get<std::uint64_t> ();
+                  }
+                if (!f.subject.empty () && !f.predicate.empty ()
+                    && !f.object.empty ())
+                  {
+                    result.facts.push_back (std::move (f));
+                  }
+              }
+          }
       }
     catch (const nlohmann::json::exception &)
       {
@@ -213,10 +242,13 @@ struct Phi4Extractor::Impl
     auto audios = OgaAudios::Load (audio_data, audio_sizes, 1);
 
     // Build prompt with audio
-    std::string prompt = "<|audio|>Extract labels and relations from this "
-                         "audio. Return JSON with \"labels\" as an array of "
-                         "strings and \"relations\" as objects with "
-                         "subject/predicate/object. Always return at least "
+    std::string prompt = "<|audio|>Extract labels, relations, and durable "
+                         "facts from this audio. Return JSON with \"labels\" "
+                         "as an array of strings, \"relations\" as objects "
+                         "with subject/predicate/object, and optional "
+                         "\"facts\" as objects with subject/predicate/object "
+                         "plus optional valid_start_ts/valid_end_ts integers. "
+                         "Always return at least "
                          "one label; if nothing is obvious, choose the "
                          "single most salient term.<|end|><|assistant|>";
     auto inputs = processor->ProcessAudios (prompt.c_str (), audios.get ());
@@ -277,6 +309,35 @@ struct Phi4Extractor::Impl
                 result.relations.push_back (std::move (r));
               }
           }
+
+        if (json_output.contains ("facts"))
+          {
+            for (const auto &fact : json_output["facts"])
+              {
+                operations::ExtractedFact f;
+                f.subject = fact.value ("subject", "");
+                f.predicate = fact.value ("predicate", "");
+                f.object = fact.value ("object", "");
+                f.confidence = fact.value ("confidence", 0.5);
+                if (fact.contains ("valid_start_ts")
+                    && fact["valid_start_ts"].is_number ())
+                  {
+                    f.valid_start_ts
+                        = fact["valid_start_ts"].get<std::uint64_t> ();
+                  }
+                if (fact.contains ("valid_end_ts")
+                    && fact["valid_end_ts"].is_number ())
+                  {
+                    f.valid_end_ts
+                        = fact["valid_end_ts"].get<std::uint64_t> ();
+                  }
+                if (!f.subject.empty () && !f.predicate.empty ()
+                    && !f.object.empty ())
+                  {
+                    result.facts.push_back (std::move (f));
+                  }
+              }
+          }
       }
     catch (const nlohmann::json::exception &)
       {
@@ -303,9 +364,11 @@ Phi4Extractor::ExtractFromText (const std::string &text,
                                 const nlohmann::json &schema)
 {
   std::string prompt
-      = "<|user|>Extract labels and relations from: " + text
-        + " Return JSON with \"labels\" as an array of strings and "
-          "\"relations\" as objects with subject/predicate/object. "
+      = "<|user|>Extract labels, relations, and durable facts from: " + text
+        + " Return JSON with \"labels\" as an array of strings, "
+          "\"relations\" as objects with subject/predicate/object, and "
+          "optional \"facts\" as objects with subject/predicate/object plus "
+          "optional valid_start_ts/valid_end_ts integers. "
           "Always return at least one label; if nothing is obvious, choose "
           "the single most salient term."
         + "<|end|><|assistant|>";

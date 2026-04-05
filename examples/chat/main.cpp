@@ -15,6 +15,7 @@
 #include <cortext/telemetry/telemetry.hpp>
 
 #include <openai/openai.hpp>
+#include <nlohmann/json.hpp>
 
 #include <opentelemetry/metrics/provider.h>
 #include <opentelemetry/nostd/shared_ptr.h>
@@ -34,14 +35,17 @@
 #include <opentelemetry/sdk/trace/tracer_provider.h>
 #include <opentelemetry/sdk/trace/batch_span_processor.h>
 
+#if CORTEXT_CHAT_ENABLE_OTLP_GRPC
 #include <opentelemetry/exporters/otlp/otlp_grpc_exporter.h>
 #include <opentelemetry/exporters/otlp/otlp_grpc_exporter_options.h>
 #include <opentelemetry/exporters/otlp/otlp_grpc_metric_exporter.h>
 #include <opentelemetry/exporters/otlp/otlp_grpc_metric_exporter_options.h>
 #include <opentelemetry/exporters/otlp/otlp_grpc_log_record_exporter_factory.h>
 #include <opentelemetry/exporters/otlp/otlp_grpc_log_record_exporter_options.h>
+#endif
 
 #include <opentelemetry/sdk/logs/read_write_log_record.h>
+#include <opentelemetry/sdk/logs/exporter.h>
 
 #include <opentelemetry/logs/provider.h>
 #include <opentelemetry/sdk/logs/logger_provider_factory.h>
@@ -55,6 +59,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <deque>
 #include <exception>
 #include <filesystem>
@@ -64,6 +69,7 @@
 #include <mutex>
 #include <optional>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <unordered_set>
@@ -286,6 +292,7 @@ struct StreamingState {
   void Reset() {
     cancel_requested.store(false);
     accumulated_tokens.clear();
+    current_memories.clear();
     restart_count = 0;
   }
 };
@@ -303,22 +310,21 @@ struct IdleTracker {
     consolidation_pending = true;
   }
 
-  bool ShouldConsolidate(double stability) {
+  bool ShouldConsolidate(int idle_required_seconds) {
     std::lock_guard<std::mutex> lock(mu);
     if (!consolidation_pending) return false;
-    int idle_required = cortext::core::IdleRequiredSeconds(stability);
     auto idle = std::chrono::steady_clock::now() - last_activity;
-    return std::chrono::duration_cast<std::chrono::seconds>(idle).count() >= idle_required;
+    return std::chrono::duration_cast<std::chrono::seconds>(idle).count()
+           >= idle_required_seconds;
   }
 
-  std::optional<int> RemainingSeconds(double stability) const {
+  std::optional<int> RemainingSeconds(int idle_required_seconds) const {
     std::lock_guard<std::mutex> lock(mu);
     if (!consolidation_pending) return std::nullopt;
-    const int idle_required = cortext::core::IdleRequiredSeconds(stability);
     const auto idle = std::chrono::steady_clock::now() - last_activity;
     const int idle_seconds
         = static_cast<int>(std::chrono::duration_cast<std::chrono::seconds>(idle).count());
-    return std::max(0, idle_required - idle_seconds);
+    return std::max(0, idle_required_seconds - idle_seconds);
   }
 
   void MarkConsolidated() {
@@ -326,6 +332,13 @@ struct IdleTracker {
     consolidation_pending = false;
   }
 };
+
+int IdleConsolidationSeconds(double stability, int override_seconds) {
+  if (override_seconds > 0) {
+    return override_seconds;
+  }
+  return cortext::core::IdleRequiredSeconds(stability);
+}
 
 constexpr std::size_t kStreamingProbeMinChars = 32;
 constexpr std::size_t kStreamingProbeMaxChars = 128;
@@ -640,6 +653,8 @@ void RefreshDatabaseExplorer(chat::DatabaseExplorerState& state,
   const auto sig_count = store->Execute("SELECT COUNT(*) AS cnt FROM signals", {});
   const auto assoc_count = store->Execute("SELECT COUNT(*) AS cnt FROM associations", {});
   const auto ep_count = store->Execute("SELECT COUNT(*) AS cnt FROM episodes", {});
+  const auto fact_count = store->Execute("SELECT COUNT(*) AS cnt FROM fact_assertions", {});
+  const auto eviction_count = store->Execute("SELECT COUNT(*) AS cnt FROM memory_evictions", {});
 
   const auto memory_rows = store->Execute(
       "SELECT memory_id, COALESCE(episode_id, 0) AS episode_id, "
@@ -685,6 +700,34 @@ void RefreshDatabaseExplorer(chat::DatabaseExplorerState& state,
       "FROM episodes "
       "ORDER BY start_ts DESC, episode_id DESC "
       "LIMIT 40",
+      {});
+
+  const auto fact_rows = store->Execute(
+      "SELECT fact_id, subject, predicate, object, "
+      "       COALESCE(valid_start_ts, 0) AS valid_start_ts, "
+      "       COALESCE(valid_end_ts, 0) AS valid_end_ts, "
+      "       recorded_at_ts, "
+      "       COALESCE(superseded_at_ts, 0) AS superseded_at_ts, "
+      "       confidence, summary_memory_id, "
+      "       COALESCE(lifecycle_state, '') AS lifecycle_state, "
+      "       COALESCE(severity_class, '') AS severity_class "
+      "FROM fact_assertions "
+      "ORDER BY recorded_at_ts DESC, fact_id DESC "
+      "LIMIT 80",
+      {});
+
+  const auto eviction_rows = store->Execute(
+      "SELECT eviction_id, memory_id, COALESCE(embedding_id, 0) AS embedding_id, "
+      "       source_id, kind, COALESCE(label, '') AS label, start_ts, "
+      "       COALESCE(end_ts, 0) AS end_ts, created_at, "
+      "       COALESCE(last_access, 0) AS last_access, "
+      "       evicted_at, strength, use_frequency, contextual_gain, "
+      "       retrieved_count, used_count, n_signals, "
+      "       COALESCE(modality, '') AS modality, "
+      "       COALESCE(eviction_reason, '') AS eviction_reason "
+      "FROM memory_evictions "
+      "ORDER BY evicted_at DESC, eviction_id DESC "
+      "LIMIT 80",
       {});
 
   std::vector<chat::DatabaseMemoryRow> memories;
@@ -757,21 +800,72 @@ void RefreshDatabaseExplorer(chat::DatabaseExplorerState& state,
     episodes.push_back(std::move(item));
   }
 
+  std::vector<chat::DatabaseFactRow> facts;
+  facts.reserve(fact_rows.size());
+  for (const auto& row : fact_rows) {
+    chat::DatabaseFactRow item;
+    item.fact_id = GetAnyInt64(row, "fact_id");
+    item.subject = GetAnyString(row, "subject");
+    item.predicate = GetAnyString(row, "predicate");
+    item.object = GetAnyString(row, "object");
+    item.valid_start_ts = static_cast<uint64_t>(GetAnyInt64(row, "valid_start_ts"));
+    item.valid_end_ts = static_cast<uint64_t>(GetAnyInt64(row, "valid_end_ts"));
+    item.recorded_at_ts = static_cast<uint64_t>(GetAnyInt64(row, "recorded_at_ts"));
+    item.superseded_at_ts = static_cast<uint64_t>(GetAnyInt64(row, "superseded_at_ts"));
+    item.confidence = GetAnyDouble(row, "confidence");
+    item.summary_memory_id = GetAnyInt64(row, "summary_memory_id");
+    item.lifecycle_state = GetAnyString(row, "lifecycle_state");
+    item.severity_class = GetAnyString(row, "severity_class");
+    facts.push_back(std::move(item));
+  }
+
+  std::vector<chat::DatabaseEvictionRow> evictions;
+  evictions.reserve(eviction_rows.size());
+  for (const auto& row : eviction_rows) {
+    chat::DatabaseEvictionRow item;
+    item.eviction_id = GetAnyInt64(row, "eviction_id");
+    item.memory_id = GetAnyInt64(row, "memory_id");
+    item.embedding_id = GetAnyInt64(row, "embedding_id");
+    item.source_id = GetAnyString(row, "source_id");
+    item.kind = GetAnyString(row, "kind");
+    item.label = GetAnyString(row, "label");
+    item.start_ts = static_cast<uint64_t>(GetAnyInt64(row, "start_ts"));
+    item.end_ts = static_cast<uint64_t>(GetAnyInt64(row, "end_ts"));
+    item.created_at = static_cast<uint64_t>(GetAnyInt64(row, "created_at"));
+    item.last_access = static_cast<uint64_t>(GetAnyInt64(row, "last_access"));
+    item.evicted_at = static_cast<uint64_t>(GetAnyInt64(row, "evicted_at"));
+    item.strength = GetAnyDouble(row, "strength");
+    item.use_frequency = GetAnyDouble(row, "use_frequency");
+    item.contextual_gain = GetAnyDouble(row, "contextual_gain");
+    item.retrieved_count = GetAnyInt64(row, "retrieved_count");
+    item.used_count = GetAnyInt64(row, "used_count");
+    item.n_signals = GetAnyInt64(row, "n_signals");
+    item.modality = GetAnyString(row, "modality");
+    item.eviction_reason = GetAnyString(row, "eviction_reason");
+    evictions.push_back(std::move(item));
+  }
+
   std::lock_guard<std::mutex> lock(state.mu);
   state.memories = std::move(memories);
   state.signals = std::move(signals);
   state.associations = std::move(associations);
   state.episodes = std::move(episodes);
+  state.facts = std::move(facts);
+  state.evictions = std::move(evictions);
   state.total_memories = mem_count.empty() ? 0 : GetAnyInt64(mem_count.front(), "cnt");
   state.total_signals = sig_count.empty() ? 0 : GetAnyInt64(sig_count.front(), "cnt");
   state.total_associations = assoc_count.empty() ? 0 : GetAnyInt64(assoc_count.front(), "cnt");
   state.total_episodes = ep_count.empty() ? 0 : GetAnyInt64(ep_count.front(), "cnt");
+  state.total_facts = fact_count.empty() ? 0 : GetAnyInt64(fact_count.front(), "cnt");
+  state.total_evictions = eviction_count.empty() ? 0 : GetAnyInt64(eviction_count.front(), "cnt");
   state.refreshed_at = NowUnixMillis();
   state.refresh_requested = false;
   state.last_refresh_status =
       "Loaded " + std::to_string(state.memories.size()) + " memories, "
       + std::to_string(state.associations.size()) + " relationships, "
-      + std::to_string(state.signals.size()) + " signals.";
+      + std::to_string(state.signals.size()) + " signals, "
+      + std::to_string(state.facts.size()) + " temporal facts, "
+      + std::to_string(state.evictions.size()) + " evictions.";
 }
 
 void ResetChatDatabase(cortext::Cortext::Config cfg,
@@ -863,74 +957,119 @@ std::optional<std::filesystem::path> FindRepoRootFromExe(const char* argv0) {
   return std::nullopt;
 }
 
-std::string FormatTimestampRfc2822(std::uint64_t timestamp_ms) {
-  if (timestamp_ms == 0) return "";
-  // Convert milliseconds to seconds for time_t
-  std::time_t t = static_cast<std::time_t>(timestamp_ms / 1000);
-  std::tm tm_buf;
-  std::tm* tm_ptr = localtime_r(&t, &tm_buf);
-  if (!tm_ptr) return "";
-  char buf[64];
-  std::strftime(buf, sizeof(buf), "%a, %d %b %Y %H:%M:%S %z", tm_ptr);
-  return std::string(buf);
+struct PersistedChatSettings {
+  std::optional<double> focus;
+  std::optional<double> sensitivity;
+  std::optional<double> stability;
+  std::optional<int> idle_consolidation_seconds;
+  std::optional<std::string> model;
+  std::optional<std::string> memory_prompt_prefix;
+  std::optional<std::string> memory_prompt_suffix;
+};
+
+std::filesystem::path DefaultChatSettingsPath(
+    const std::filesystem::path& db_path,
+    const std::optional<std::filesystem::path>& repo_root) {
+  namespace fs = std::filesystem;
+  if (!db_path.empty() && db_path != fs::path(":memory:")) {
+    fs::path settings_path = db_path;
+    if (settings_path.has_extension()) {
+      settings_path.replace_extension(".settings.json");
+    } else {
+      settings_path += ".settings.json";
+    }
+    return settings_path;
+  }
+  if (repo_root.has_value()) {
+    return *repo_root / "examples/chat/chat_settings.json";
+  }
+  return "chat_settings.json";
 }
 
-std::string XmlEscape(const std::string& s) {
-  std::string out;
-  out.reserve(s.size());
-  for (char c : s) {
-    switch (c) {
-      case '&': out += "&amp;"; break;
-      case '<': out += "&lt;"; break;
-      case '>': out += "&gt;"; break;
-      case '"': out += "&quot;"; break;
-      case '\'': out += "&apos;"; break;
-      default: out += c; break;
-    }
+std::optional<PersistedChatSettings> TryLoadPersistedChatSettings(
+    const std::filesystem::path& settings_path,
+    std::string* error_message = nullptr) {
+  std::ifstream in(settings_path);
+  if (!in) {
+    return std::nullopt;
   }
-  return out;
+
+  try {
+    const nlohmann::json json = nlohmann::json::parse(in);
+    PersistedChatSettings settings;
+    if (json.contains("focus") && json["focus"].is_number()) {
+      settings.focus = json["focus"].get<double>();
+    }
+    if (json.contains("sensitivity") && json["sensitivity"].is_number()) {
+      settings.sensitivity = json["sensitivity"].get<double>();
+    }
+    if (json.contains("stability") && json["stability"].is_number()) {
+      settings.stability = json["stability"].get<double>();
+    }
+    if (json.contains("idle_consolidation_seconds")
+        && json["idle_consolidation_seconds"].is_number_integer()) {
+      settings.idle_consolidation_seconds
+          = std::max(0, json["idle_consolidation_seconds"].get<int>());
+    }
+    if (json.contains("model") && json["model"].is_string()) {
+      const std::string model = json["model"].get<std::string>();
+      if (!model.empty()) {
+        settings.model = model;
+      }
+    }
+    if (json.contains("memory_prompt_prefix")
+        && json["memory_prompt_prefix"].is_string()) {
+      settings.memory_prompt_prefix
+          = json["memory_prompt_prefix"].get<std::string>();
+    }
+    if (json.contains("memory_prompt_suffix")
+        && json["memory_prompt_suffix"].is_string()) {
+      settings.memory_prompt_suffix
+          = json["memory_prompt_suffix"].get<std::string>();
+    }
+    return settings;
+  } catch (const std::exception& ex) {
+    if (error_message) {
+      *error_message = ex.what();
+    }
+    return std::nullopt;
+  }
 }
 
-std::string FormatMemoriesForSystemPrompt(
-    const std::vector<cortext::Cortext::Context::Memory>& memories) {
-  if (memories.empty()) return {};
+void SavePersistedChatSettings(const std::filesystem::path& settings_path,
+                               double focus,
+                               double sensitivity,
+                               double stability,
+                               int idle_consolidation_seconds,
+                               const std::string& model,
+                               const std::string& memory_prompt_prefix,
+                               const std::string& memory_prompt_suffix) {
+  nlohmann::json json = {
+      {"focus", focus},
+      {"sensitivity", sensitivity},
+      {"stability", stability},
+      {"idle_consolidation_seconds", std::max(0, idle_consolidation_seconds)},
+      {"model", model},
+      {"memory_prompt_prefix", memory_prompt_prefix},
+      {"memory_prompt_suffix", memory_prompt_suffix},
+  };
 
-  std::ostringstream oss;
-  const std::string generated_at = FormatTimestampRfc2822(NowUnixMillis());
-  oss << "<memories";
-  if (!generated_at.empty()) {
-    oss << " date=\"" << XmlEscape(generated_at) << "\"";
+  std::error_code ec;
+  const auto parent = settings_path.parent_path();
+  if (!parent.empty()) {
+    std::filesystem::create_directories(parent, ec);
   }
-  oss << ">\n";
-  oss << "<!-- Use these memories if they help answer the current turn, but "
-         "only when they are relevant to the response. -->\n";
-  for (const auto& m : memories) {
-    std::string source = "unknown";
-    if (m.source_id.find("user") != std::string::npos) {
-      source = "user";
-    } else if (m.source_id.find("assistant") != std::string::npos) {
-      source = "assistant";
-    } else if (!m.source_id.empty()) {
-      source = m.source_id;
-    }
 
-    std::string date = FormatTimestampRfc2822(m.timestamp);
-    std::string modality = m.modality.empty() ? "text" : m.modality;
-
-    oss << "<memory source=\"" << XmlEscape(source) << "\"";
-    if (!date.empty()) {
-      oss << " date=\"" << XmlEscape(date) << "\"";
-    }
-    oss << " modality=\"" << XmlEscape(modality) << "\">";
-
-    std::string c = ExtractTextFromBlobs(m.content);
-    if (c.size() > 800) c = c.substr(0, 800) + "...";
-    oss << XmlEscape(c);
-
-    oss << "</memory>\n";
+  std::ofstream out(settings_path, std::ios::out | std::ios::trunc);
+  if (!out) {
+    throw std::runtime_error("unable to open settings file: "
+                             + settings_path.string());
   }
-  oss << "</memories>";
-  return oss.str();
+  out << json.dump(2) << '\n';
+  if (!out) {
+    throw std::runtime_error("failed to write settings file: "
+                             + settings_path.string());
+  }
 }
 
 std::vector<cortext::Cortext::Context::Memory> FilterInjectedMemories(
@@ -962,6 +1101,127 @@ std::vector<cortext::Cortext::Context::Memory> FilterInjectedMemories(
     filtered.push_back(mem);
   }
   return filtered;
+}
+
+std::string FormatLocalDateTime(
+    const std::chrono::system_clock::time_point& time_point) {
+  const std::time_t now_time = std::chrono::system_clock::to_time_t(time_point);
+  std::tm local_tm{};
+#if defined(_WIN32)
+  localtime_s(&local_tm, &now_time);
+#else
+  localtime_r(&now_time, &local_tm);
+#endif
+
+  std::ostringstream oss;
+  oss << std::put_time(&local_tm, "%Y-%m-%dT%H:%M:%S%z");
+  return oss.str();
+}
+
+struct SnapshotClock {
+  std::string date;
+  std::string time;
+  std::string timezone;
+};
+
+SnapshotClock SnapshotClockNow() {
+  const auto now = std::chrono::system_clock::now();
+  const std::time_t now_time = std::chrono::system_clock::to_time_t(now);
+  std::tm local_tm{};
+#if defined(_WIN32)
+  localtime_s(&local_tm, &now_time);
+#else
+  localtime_r(&now_time, &local_tm);
+#endif
+
+  SnapshotClock clock;
+  {
+    std::ostringstream oss;
+    oss << std::put_time(&local_tm, "%Y-%m-%d");
+    clock.date = oss.str();
+  }
+  {
+    std::ostringstream oss;
+    oss << std::put_time(&local_tm, "%H:%M:%S");
+    clock.time = oss.str();
+  }
+  {
+    std::ostringstream oss;
+    oss << std::put_time(&local_tm, "%Z");
+    clock.timezone = oss.str();
+  }
+  return clock;
+}
+
+std::string FormatMemoryDateTime(std::uint64_t timestamp_ms) {
+  const auto time_point = std::chrono::system_clock::time_point(
+      std::chrono::milliseconds(timestamp_ms));
+  return FormatLocalDateTime(time_point);
+}
+
+std::string BuildInjectedSystemPrompt(
+    const std::vector<cortext::Cortext::Context::Memory>& injected_memories,
+    const std::string& prefix,
+    const std::string& suffix) {
+  auto EscapeXml = [](const std::string& value) {
+    std::string escaped;
+    escaped.reserve(value.size());
+    for (char ch : value) {
+      switch (ch) {
+        case '&': escaped += "&amp;"; break;
+        case '<': escaped += "&lt;"; break;
+        case '>': escaped += "&gt;"; break;
+        case '"': escaped += "&quot;"; break;
+        case '\'': escaped += "&apos;"; break;
+        default: escaped.push_back(ch); break;
+      }
+    }
+    return escaped;
+  };
+
+  const SnapshotClock clock = SnapshotClockNow();
+  std::ostringstream oss;
+  oss << "<snapshot>\n";
+  oss << "<clock date=\"" << EscapeXml(clock.date)
+      << "\" time=\"" << EscapeXml(clock.time)
+      << "\" timezone=\"" << EscapeXml(clock.timezone) << "\"/>\n";
+  if (!prefix.empty()) {
+    oss << prefix << "\n\n";
+  }
+  oss << "<memories>\n";
+  for (const auto& mem : injected_memories) {
+    const std::string text = ExtractTextFromBlobs(mem.content);
+    if (text.empty()) {
+      continue;
+    }
+    oss << "  <memory source_id=\"" << EscapeXml(mem.source_id)
+        << "\" datetime=\"" << EscapeXml(FormatMemoryDateTime(mem.timestamp))
+        << "\" memory_id=\"" << mem.id << "\">"
+        << EscapeXml(text) << "</memory>\n";
+  }
+  oss << "</memories>";
+  if (!suffix.empty()) {
+    oss << "\n\n" << suffix;
+  }
+  oss << "\n</snapshot>";
+  return oss.str();
+}
+
+std::string DefaultMemoryPromptPrefix() {
+  return "The XML snapshot below represents the current chat turn. Treat the "
+         "<clock> element as the current local time for temporal references "
+         "like now, today, tomorrow, and deadlines. The snapshot may contain "
+         "retrieved memories from earlier interaction with this same user. "
+         "Treat any memories in it as facts about the current user unless a "
+         "memory clearly refers to someone else or quotes someone else. Use "
+         "them as supporting context when they are relevant to the user's "
+         "current message. Prefer these memories over guesses, but do not "
+         "mention memory IDs, the XML format, or that you were given "
+         "retrieved memories.";
+}
+
+std::string DefaultMemoryPromptSuffix() {
+  return "";
 }
 
 std::string RoleFromSourceId(const std::string& source_id) {
@@ -1099,6 +1359,7 @@ void RecordConsolidationMetrics(chat::MetricsState& metrics,
 int main(int argc, char** argv) {
   const bool has_models_env = HasEnv("CORTEXT_MODELS_DIR");
   const bool has_db_env = HasEnv("CORTEXT_CHAT_DB");
+  const bool has_settings_env = HasEnv("CORTEXT_CHAT_SETTINGS");
 
   const std::string api_key = GetEnv("OPENAI_API_KEY");
   if (api_key.empty()) {
@@ -1110,15 +1371,22 @@ int main(int argc, char** argv) {
   const std::string openai_base_url = GetEnv("OPENAI_BASE_URL");
 
   const auto repo_root = FindRepoRootFromExe((argc > 0) ? argv[0] : nullptr);
-  const std::string model = GetEnv("OPENAI_MODEL", "gpt-4o-mini");
+  const std::string model = GetEnv("OPENAI_MODEL", "gpt-5.4-mini-2026-03-17");
   std::filesystem::path db_path = GetEnv("CORTEXT_CHAT_DB", "examples/chat/chat_memory.db");
   std::filesystem::path models_dir = GetEnv("CORTEXT_MODELS_DIR", "models");
+  std::filesystem::path settings_path = GetEnv("CORTEXT_CHAT_SETTINGS");
 
   if (!has_models_env && models_dir.is_relative() && repo_root.has_value()) {
     models_dir = *repo_root / models_dir;
   }
   if (!has_db_env && db_path.is_relative() && repo_root.has_value()) {
     db_path = *repo_root / db_path;
+  }
+  if (settings_path.empty()) {
+    settings_path = DefaultChatSettingsPath(db_path, repo_root);
+  } else if (!has_settings_env && settings_path.is_relative()
+             && repo_root.has_value()) {
+    settings_path = *repo_root / settings_path;
   }
 
   try {
@@ -1139,13 +1407,15 @@ int main(int argc, char** argv) {
   auto last_context = std::make_shared<chat::LastContext>();
 
   // OpenTelemetry setup
-  // OTLP gRPC exporters auto-read from OTEL_EXPORTER_OTLP_* environment variables:
-  //   OTEL_EXPORTER_OTLP_ENDPOINT, OTEL_EXPORTER_OTLP_HEADERS, OTEL_EXPORTER_OTLP_COMPRESSION
+  // Local telemetry is always enabled. OTLP gRPC exporters are optional and
+  // compile-time gated so the chat example can build without the gRPC stack.
   {
     namespace trace_sdk = opentelemetry::sdk::trace;
     namespace metrics_sdk = opentelemetry::sdk::metrics;
     namespace resource_sdk = opentelemetry::sdk::resource;
+#if CORTEXT_CHAT_ENABLE_OTLP_GRPC
     namespace otlp = opentelemetry::exporter::otlp;
+#endif
     auto resource = resource_sdk::Resource::Create({{"service.name", "cortext_chat"}});
 
     auto in_memory_span_exporter = std::unique_ptr<trace_sdk::SpanExporter>(new InMemorySpanExporter(retrieval_latency_state));
@@ -1153,6 +1423,7 @@ int main(int argc, char** argv) {
     auto* sdk_tracer_provider = new trace_sdk::TracerProvider(std::move(in_memory_processor), resource);
 
     // OTLP gRPC trace exporter (reads config from env vars)
+#if CORTEXT_CHAT_ENABLE_OTLP_GRPC
     {
       otlp::OtlpGrpcExporterOptions trace_opts;
       auto otlp_exporter = std::unique_ptr<trace_sdk::SpanExporter>(new otlp::OtlpGrpcExporter(trace_opts));
@@ -1162,6 +1433,7 @@ int main(int argc, char** argv) {
       auto otlp_processor = std::unique_ptr<trace_sdk::SpanProcessor>(new trace_sdk::BatchSpanProcessor(std::move(otlp_exporter), batch_opts));
       sdk_tracer_provider->AddProcessor(std::move(otlp_processor));
     }
+#endif
 
     auto tracer_provider = opentelemetry::nostd::shared_ptr<opentelemetry::trace::TracerProvider>(sdk_tracer_provider);
     opentelemetry::trace::Provider::SetTracerProvider(tracer_provider);
@@ -1181,6 +1453,7 @@ int main(int argc, char** argv) {
     }
 
     // OTLP gRPC metric exporter (reads config from env vars)
+#if CORTEXT_CHAT_ENABLE_OTLP_GRPC
     {
       otlp::OtlpGrpcMetricExporterOptions metric_opts;
       auto otlp_metric_exporter = std::unique_ptr<metrics_sdk::PushMetricExporter>(new otlp::OtlpGrpcMetricExporter(metric_opts));
@@ -1190,6 +1463,7 @@ int main(int argc, char** argv) {
       std::unique_ptr<metrics_sdk::MetricReader> reader(new metrics_sdk::PeriodicExportingMetricReader(std::move(otlp_metric_exporter), reader_options));
       static_cast<metrics_sdk::MeterProvider*>(raw_meter_provider)->AddMetricReader(std::move(reader));
     }
+#endif
 
     opentelemetry::metrics::Provider::SetMeterProvider(meter_provider);
     auto meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("chat");
@@ -1201,7 +1475,7 @@ int main(int argc, char** argv) {
     };
     tokens_gauge->AddCallback(observe_tokens, last_tokens_used.get());
 
-    // Log exporters: stdout (simple pretty format) + OTLP gRPC
+    // Log exporters: stdout (simple pretty format) plus optional OTLP gRPC
     {
       namespace logs_sdk = opentelemetry::sdk::logs;
 
@@ -1215,10 +1489,12 @@ int main(int argc, char** argv) {
       auto logger_provider = logs_sdk::LoggerProviderFactory::Create(std::move(stdout_processor), resource);
 
       // Add OTLP gRPC log exporter as additional processor
+#if CORTEXT_CHAT_ENABLE_OTLP_GRPC
       otlp::OtlpGrpcLogRecordExporterOptions log_opts;
       auto otlp_exporter = otlp::OtlpGrpcLogRecordExporterFactory::Create(log_opts);
       auto otlp_processor = logs_sdk::SimpleLogRecordProcessorFactory::Create(std::move(otlp_exporter));
       static_cast<logs_sdk::LoggerProvider*>(logger_provider.get())->AddProcessor(std::move(otlp_processor));
+#endif
 
       opentelemetry::logs::Provider::SetLoggerProvider(
           opentelemetry::nostd::shared_ptr<opentelemetry::logs::LoggerProvider>(logger_provider.release()));
@@ -1235,16 +1511,53 @@ int main(int argc, char** argv) {
   const double sensitivity = GetEnvDouble("CORTEXT_SENSITIVITY", 0.5);
   const double stability = GetEnvDouble("CORTEXT_STABILITY", 0.5);
   const bool stream_interrupts = GetEnvBool("CORTEXT_CHAT_STREAM_INTERRUPTS", true);
+  PersistedChatSettings persisted_settings;
+  std::string persisted_settings_error;
+  if (auto loaded = TryLoadPersistedChatSettings(settings_path,
+                                                 &persisted_settings_error)) {
+    persisted_settings = *loaded;
+  } else if (!persisted_settings_error.empty()) {
+    std::cerr << "Failed to load chat settings from "
+              << settings_path << ": " << persisted_settings_error << "\n";
+  }
   auto settings_state = std::make_shared<chat::SettingsState>();
   auto db_explorer_state = std::make_shared<chat::DatabaseExplorerState>();
   {
     std::lock_guard<std::mutex> lock(settings_state->mu);
-    settings_state->active_focus = focus;
-    settings_state->active_sensitivity = sensitivity;
-    settings_state->active_stability = stability;
-    settings_state->draft_focus = focus;
-    settings_state->draft_sensitivity = sensitivity;
-    settings_state->draft_stability = stability;
+    settings_state->active_focus
+        = persisted_settings.focus.value_or(focus);
+    settings_state->active_sensitivity
+        = persisted_settings.sensitivity.value_or(sensitivity);
+    settings_state->active_stability
+        = persisted_settings.stability.value_or(stability);
+    settings_state->default_idle_consolidation_seconds = 0;
+    settings_state->active_idle_consolidation_seconds
+        = persisted_settings.idle_consolidation_seconds.value_or(0);
+    settings_state->draft_focus = settings_state->active_focus;
+    settings_state->draft_sensitivity = settings_state->active_sensitivity;
+    settings_state->draft_stability = settings_state->active_stability;
+    settings_state->draft_idle_consolidation_seconds
+        = settings_state->active_idle_consolidation_seconds;
+    settings_state->default_model = model;
+    settings_state->active_model
+        = persisted_settings.model.value_or(model);
+    settings_state->draft_model = settings_state->active_model;
+    settings_state->default_memory_prompt_prefix = DefaultMemoryPromptPrefix();
+    settings_state->default_memory_prompt_suffix = DefaultMemoryPromptSuffix();
+    settings_state->active_memory_prompt_prefix =
+        persisted_settings.memory_prompt_prefix.value_or(
+            settings_state->default_memory_prompt_prefix);
+    settings_state->draft_memory_prompt_prefix
+        = settings_state->active_memory_prompt_prefix;
+    settings_state->active_memory_prompt_suffix =
+        persisted_settings.memory_prompt_suffix.value_or(
+            settings_state->default_memory_prompt_suffix);
+    settings_state->draft_memory_prompt_suffix
+        = settings_state->active_memory_prompt_suffix;
+    if (!persisted_settings_error.empty()) {
+      settings_state->last_apply_status
+          = "Settings load failed; using defaults for this run.";
+    }
   }
 
   openai::start(api_key, openai_org);
@@ -1252,10 +1565,20 @@ int main(int argc, char** argv) {
     openai::instance().setBaseUrl(EnsureTrailingSlash(openai_base_url));
   }
 
+  double initial_focus = focus;
+  double initial_sensitivity = sensitivity;
+  double initial_stability = stability;
+  {
+    std::lock_guard<std::mutex> lock(settings_state->mu);
+    initial_focus = settings_state->active_focus;
+    initial_sensitivity = settings_state->active_sensitivity;
+    initial_stability = settings_state->active_stability;
+  }
+
   cortext::Cortext::Config cfg;
-  cfg.focus = focus;
-  cfg.sensitivity = sensitivity;
-  cfg.stability = stability;
+  cfg.focus = initial_focus;
+  cfg.sensitivity = initial_sensitivity;
+  cfg.stability = initial_stability;
   std::unique_ptr<cortext::Cortext> cortext_ctx;
   try {
     cortext_ctx = cortext::Cortext::Create(cfg, db_path.string(), models_dir.string());
@@ -1324,7 +1647,11 @@ int main(int argc, char** argv) {
       ? "https://api.openai.com/v1/"
       : openai_base_url);
 
+#if CORTEXT_CHAT_ENABLE_OTLP_GRPC
   const bool otlp_grpc_enabled = HasEnv("OTEL_EXPORTER_OTLP_ENDPOINT") || HasEnv("OTEL_EXPORTER_OTLP_HEADERS");
+#else
+  const bool otlp_grpc_enabled = false;
+#endif
 
   // Create ImGui application
   chat::ImGuiAppConfig app_config;
@@ -1369,19 +1696,21 @@ int main(int argc, char** argv) {
       bool is_generating = false;
       bool has_draft = has_input_draft.load();
       bool is_consolidating = idle_consolidating.load();
+      int consolidation_idle_seconds = IdleConsolidationSeconds(stability, 0);
       {
         std::lock_guard<std::mutex> lock(mu);
         is_generating = generating;
       }
 
-      double consolidation_stability = stability;
       {
         std::lock_guard<std::mutex> settings_lock(settings_state->mu);
-        consolidation_stability = settings_state->active_stability;
+        consolidation_idle_seconds = IdleConsolidationSeconds(
+            settings_state->active_stability,
+            settings_state->active_idle_consolidation_seconds);
       }
 
       if (!is_generating && !has_draft && !is_consolidating
-          && idle_tracker.ShouldConsolidate(consolidation_stability)) {
+          && idle_tracker.ShouldConsolidate(consolidation_idle_seconds)) {
         idle_consolidating.store(true);
         const auto consolidation_started_at = std::chrono::steady_clock::now();
         cortext::StopSource stop_source;
@@ -1468,11 +1797,13 @@ int main(int argc, char** argv) {
     window.Render();
 
     {
-      double idle_stability = stability;
+      int idle_required_seconds = IdleConsolidationSeconds(stability, 0);
       bool is_generating = false;
       {
         std::lock_guard<std::mutex> settings_lock(settings_state->mu);
-        idle_stability = settings_state->active_stability;
+        idle_required_seconds = IdleConsolidationSeconds(
+            settings_state->active_stability,
+            settings_state->active_idle_consolidation_seconds);
       }
       {
         std::lock_guard<std::mutex> lock(mu);
@@ -1480,7 +1811,7 @@ int main(int argc, char** argv) {
       }
       const std::optional<int> idle_remaining
           = is_generating ? std::nullopt
-                          : idle_tracker.RemainingSeconds(idle_stability);
+                          : idle_tracker.RemainingSeconds(idle_required_seconds);
       if (status_state) {
         std::lock_guard<std::mutex> lock(status_state->mu);
         status_state->idle_pending = !is_generating && idle_remaining.has_value();
@@ -1578,6 +1909,10 @@ int main(int argc, char** argv) {
     double new_focus = 0.5;
     double new_sensitivity = 0.5;
     double new_stability = 0.5;
+    int new_idle_consolidation_seconds = 0;
+    std::string new_model;
+    std::string new_memory_prompt_prefix;
+    std::string new_memory_prompt_suffix;
     {
       std::lock_guard<std::mutex> lock(settings_state->mu);
       if (settings_state->apply_requested && !generating) {
@@ -1585,45 +1920,82 @@ int main(int argc, char** argv) {
         new_focus = settings_state->draft_focus;
         new_sensitivity = settings_state->draft_sensitivity;
         new_stability = settings_state->draft_stability;
+        new_idle_consolidation_seconds
+            = settings_state->draft_idle_consolidation_seconds;
+        new_model = settings_state->draft_model;
+        new_memory_prompt_prefix = settings_state->draft_memory_prompt_prefix;
+        new_memory_prompt_suffix = settings_state->draft_memory_prompt_suffix;
         settings_state->apply_requested = false;
       }
     }
     if (requested_apply) {
-      try {
-        cortext::Cortext::Config next_cfg;
-        next_cfg.focus = new_focus;
-        next_cfg.sensitivity = new_sensitivity;
-        next_cfg.stability = new_stability;
-        next_cfg.affect_interrupt = cfg.affect_interrupt;
-        next_cfg.affect_retrieval = cfg.affect_retrieval;
-        next_cfg.reinforcement_enabled = cfg.reinforcement_enabled;
-        next_cfg.procedural_enabled = cfg.procedural_enabled;
-        next_cfg.sequential_edges_enabled = cfg.sequential_edges_enabled;
-        next_cfg.label_bank_path = cfg.label_bank_path;
-
-        std::unique_ptr<cortext::Cortext> next_ctx;
-        {
-          std::lock_guard<std::mutex> lock(db_write_mu);
-          if (cortext_ctx) {
-            cortext_ctx->Flush();
-          }
-          next_ctx = cortext::Cortext::Create(next_cfg, db_path.string(), models_dir.string());
-          cortext_ctx = std::move(next_ctx);
-        }
-        cfg = next_cfg;
-        {
-          std::lock_guard<std::mutex> lock(settings_state->mu);
-          settings_state->active_focus = new_focus;
-          settings_state->active_sensitivity = new_sensitivity;
-          settings_state->active_stability = new_stability;
-          settings_state->last_apply_status =
-              "Applied: F=" + std::to_string(new_focus)
-              + " S=" + std::to_string(new_sensitivity)
-              + " T=" + std::to_string(new_stability);
-        }
-      } catch (const std::exception& ex) {
+      if (new_model.empty()) {
         std::lock_guard<std::mutex> lock(settings_state->mu);
-        settings_state->last_apply_status = std::string("Apply failed: ") + ex.what();
+        settings_state->last_apply_status = "Apply failed: model cannot be empty.";
+      } else {
+        try {
+          cortext::Cortext::Config next_cfg;
+          next_cfg.focus = new_focus;
+          next_cfg.sensitivity = new_sensitivity;
+          next_cfg.stability = new_stability;
+          next_cfg.affect_interrupt = cfg.affect_interrupt;
+          next_cfg.affect_retrieval = cfg.affect_retrieval;
+          next_cfg.reinforcement_enabled = cfg.reinforcement_enabled;
+          next_cfg.procedural_enabled = cfg.procedural_enabled;
+          next_cfg.sequential_edges_enabled = cfg.sequential_edges_enabled;
+          next_cfg.label_bank_path = cfg.label_bank_path;
+
+          std::unique_ptr<cortext::Cortext> next_ctx;
+          {
+            std::lock_guard<std::mutex> lock(db_write_mu);
+            if (cortext_ctx) {
+              cortext_ctx->Flush();
+            }
+            next_ctx = cortext::Cortext::Create(next_cfg, db_path.string(), models_dir.string());
+            cortext_ctx = std::move(next_ctx);
+          }
+          cfg = next_cfg;
+
+          std::string apply_status =
+              "Applied and saved: model=" + new_model
+              + " F=" + std::to_string(new_focus)
+              + " S=" + std::to_string(new_sensitivity)
+              + " T=" + std::to_string(new_stability)
+              + " idle="
+              + (new_idle_consolidation_seconds > 0
+                     ? std::to_string(new_idle_consolidation_seconds) + "s"
+                     : std::string("auto"));
+          try {
+            SavePersistedChatSettings(settings_path,
+                                      new_focus,
+                                      new_sensitivity,
+                                      new_stability,
+                                      new_idle_consolidation_seconds,
+                                      new_model,
+                                      new_memory_prompt_prefix,
+                                      new_memory_prompt_suffix);
+          } catch (const std::exception& ex) {
+            apply_status =
+                "Applied for this session, but failed to save settings: "
+                + std::string(ex.what());
+          }
+
+          {
+            std::lock_guard<std::mutex> lock(settings_state->mu);
+            settings_state->active_focus = new_focus;
+            settings_state->active_sensitivity = new_sensitivity;
+            settings_state->active_stability = new_stability;
+            settings_state->active_idle_consolidation_seconds
+                = new_idle_consolidation_seconds;
+            settings_state->active_model = new_model;
+            settings_state->active_memory_prompt_prefix = new_memory_prompt_prefix;
+            settings_state->active_memory_prompt_suffix = new_memory_prompt_suffix;
+            settings_state->last_apply_status = apply_status;
+          }
+        } catch (const std::exception& ex) {
+          std::lock_guard<std::mutex> lock(settings_state->mu);
+          settings_state->last_apply_status = std::string("Apply failed: ") + ex.what();
+        }
       }
     }
 
@@ -1659,15 +2031,17 @@ int main(int argc, char** argv) {
 
         // Launch background job for streaming
         streaming_thread_active.store(true);
-        streaming_thread = std::thread([&, text, model_copy = model] {
+        streaming_thread = std::thread([&, text] {
           const auto chunk_counters_before
               = SnapshotChunkDiagnostics(*chunk_diagnostics_state);
           double focus_value = 0.5;
           double sensitivity_value = 0.5;
+          std::string active_model;
           {
             std::lock_guard<std::mutex> lock(settings_state->mu);
             focus_value = settings_state->active_focus;
             sensitivity_value = settings_state->active_sensitivity;
+            active_model = settings_state->active_model;
           }
 
           // Phase 1: Process user input through Cortext
@@ -1696,18 +2070,13 @@ int main(int argc, char** argv) {
           {
             std::lock_guard<std::mutex> lock(mu);
             working_memory = retrieved.working_memory;
-            // Only inject memories if the interrupt gate approved them
-            if (retrieved.should_interrupt) {
-              streaming_state.current_memories = FilterInjectedMemories(
-                  retrieved.retrieved_memory, retrieved.working_memory);
-              for (const auto& mem : streaming_state.current_memories) {
-                memory_events.push_back(CreateMemoryEvent(chat::MemoryEventType::RETRIEVED, mem));
-                if (memory_events.size() > kMaxMemoryEvents) {
-                  memory_events.pop_front();
-                }
+            streaming_state.current_memories = FilterInjectedMemories(
+                retrieved.retrieved_memory, retrieved.working_memory);
+            for (const auto& mem : streaming_state.current_memories) {
+              memory_events.push_back(CreateMemoryEvent(chat::MemoryEventType::RETRIEVED, mem));
+              if (memory_events.size() > kMaxMemoryEvents) {
+                memory_events.pop_front();
               }
-            } else {
-              streaming_state.current_memories.clear();
             }
             if (retrieved.output.stored_embedding_id.has_value()) {
               memory_events.push_back(CreateStoredEvent(
@@ -1740,7 +2109,7 @@ int main(int argc, char** argv) {
           // Phase 2: Streaming generation with interrupt checking
           cortext::telemetry::LogDebug("chat.phase2.start", {
             cortext::telemetry::Attribute::Int64("memories_injected", static_cast<int64_t>(streaming_state.current_memories.size())),
-            cortext::telemetry::Attribute::String("model", model_copy)
+            cortext::telemetry::Attribute::String("model", active_model)
           });
 
           std::string assistant_reply;
@@ -1755,11 +2124,17 @@ int main(int argc, char** argv) {
             final_probe_session = std::make_unique<cortext::internal::StreamingTextProbeSession>(
                 *cortext_ctx, "chat/assistant");
             std::string probe_buffer;
-            std::string injected_system;
+            std::string memory_prompt_prefix;
+            std::string memory_prompt_suffix;
             {
-              std::lock_guard<std::mutex> lock(mu);
-              injected_system = FormatMemoriesForSystemPrompt(streaming_state.current_memories);
+              std::lock_guard<std::mutex> lock(settings_state->mu);
+              memory_prompt_prefix = settings_state->active_memory_prompt_prefix;
+              memory_prompt_suffix = settings_state->active_memory_prompt_suffix;
             }
+            const std::string injected_system
+                = BuildInjectedSystemPrompt(streaming_state.current_memories,
+                                            memory_prompt_prefix,
+                                            memory_prompt_suffix);
 
             using Json = openai::Json;
             Json messages = BuildOpenAIMessages<Json>(retrieved.working_memory, injected_system, text);
@@ -1779,7 +2154,7 @@ int main(int argc, char** argv) {
             }
 
             chat::StreamingRequest request;
-            request.model = model_copy;
+            request.model = active_model;
             request.messages = messages;
             request.temperature = 0.7;
             request.cancel_flag = &streaming_state.cancel_requested;
@@ -1822,7 +2197,8 @@ int main(int argc, char** argv) {
               PublishActiveChunkProbe(*chunk_diagnostics_state, probe_event);
 
               try {
-                cortext::Cortext::Context ctx = final_probe_session->AppendTextChunk(probe_chunk);
+                cortext::Cortext::Context ctx
+                    = final_probe_session->AppendTextChunk(probe_chunk);
 
                 const double boundary_thresh =
                     cortext::core::BoundaryThreshold(focus_value, sensitivity_value);
@@ -1936,13 +2312,13 @@ int main(int argc, char** argv) {
           double phase3_total_ms = 0.0;
           bool phase3_failed = false;
           std::string phase3_error_message;
-          try {
-            cortext::Cortext::Context asst_ctx;
-            {
-              std::lock_guard<std::mutex> lock(db_write_mu);
-              if (final_probe_session) {
-                asst_ctx = final_probe_session->FinalizeText(assistant_reply);
-              } else {
+            try {
+              cortext::Cortext::Context asst_ctx;
+              {
+                std::lock_guard<std::mutex> lock(db_write_mu);
+                if (final_probe_session) {
+                  asst_ctx = final_probe_session->FinalizeText(assistant_reply);
+                } else {
                 asst_ctx = cortext_ctx->ProcessText(assistant_reply, "chat/assistant");
               }
               phase3_total_ms = asst_ctx.total_ms;

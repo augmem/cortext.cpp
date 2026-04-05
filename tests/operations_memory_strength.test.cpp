@@ -1,5 +1,6 @@
 // tests/operations_memory_strength.test.cpp
 #include "test_helpers.hpp"
+#include "../src/operations/eviction_ablation.hpp"
 #include <catch2/catch_test_macros.hpp>
 #include <cortext/operations/memory_strength.hpp>
 #include <cortext/processor.hpp>
@@ -172,6 +173,10 @@ TEST_CASE ("Algorithm 14 decays and evicts below cutoff", "[op14]")
       std::move (set_events), std::move (update_strength));
 
   cortext::SignalProcessor processor (cfg, store, std::move (ops));
+  cortext::operations::eviction::EvictionAblationOverride override;
+  override.consolidation_gate_enabled = false;
+  cortext::operations::eviction::ScopedEvictionAblationOverride gate_override (
+      override);
 
   // Process multiple signals to ensure decay crosses cutoff.
   for (int i = 0; i < 240; ++i)
@@ -236,6 +241,59 @@ TEST_CASE (
   REQUIRE (used == 1LL);
   REQUIRE (strength > 0.2); // should increase from baseline with influence
   REQUIRE (strength <= 1.0);
+}
+
+TEST_CASE ("Algorithm 18 writes an eviction audit row before deleting long-term memory",
+           "[op18][memory_strength][eviction_audit]")
+{
+  auto unique_store = cortext::SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<cortext::Store> (std::move (unique_store));
+  cortext::testing::InitializeCoreSchema (*store);
+
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  cfg.focus = 0.5;
+  cfg.sensitivity = 0.0;
+  cfg.stability = 0.0;
+
+  {
+    SeedEmbeddingsOp seed ({ 77LL }, /*strength=*/0.1);
+    Signal seed_signal = MakeSignal (4, 0);
+    cortext::ProcessorContext seed_ctx_state;
+    OperationContext seed_ctx (seed_signal, seed_ctx_state, cfg, store.get ());
+    seed.Execute (seed_ctx, cortext::testing::GetNullTransaction ());
+  }
+
+  auto set_events = std::make_unique<SetUsageEventsOp> (
+      std::vector<OperationContext::MemoryUsageEvent>{ { 77LL, false } });
+  auto update_strength
+      = std::make_unique<cortext::operations::UpdateMemoryStrength> ();
+  auto ops = std::make_unique<cortext::OperationSet> (
+      std::move (set_events), std::move (update_strength));
+
+  cortext::SignalProcessor processor (cfg, store, std::move (ops));
+  cortext::operations::eviction::EvictionAblationOverride override;
+  override.consolidation_gate_enabled = false;
+  cortext::operations::eviction::ScopedEvictionAblationOverride gate_override (
+      override);
+  for (int i = 0; i < 240; ++i)
+    {
+      auto sig = MakeSignal (4, static_cast<uint64_t> ((i + 1) * 1000));
+      processor.Process (sig);
+    }
+  processor.Flush ();
+
+  auto rows = store->Execute (
+      "SELECT memory_id, kind, source_id, eviction_reason, evicted_at "
+      "FROM memory_evictions WHERE memory_id = ?",
+      { 77LL });
+  REQUIRE (rows.size () == 1);
+  REQUIRE (std::any_cast<long long> (rows[0].at ("memory_id")) == 77LL);
+  REQUIRE (std::any_cast<std::string> (rows[0].at ("kind")) == "LONG_TERM");
+  REQUIRE (std::any_cast<std::string> (rows[0].at ("source_id")) == "test");
+  REQUIRE (std::any_cast<std::string> (rows[0].at ("eviction_reason"))
+           == "periphery_cutoff");
+  REQUIRE (std::any_cast<long long> (rows[0].at ("evicted_at")) > 0LL);
 }
 
 TEST_CASE (

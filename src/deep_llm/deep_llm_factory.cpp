@@ -424,6 +424,13 @@ TryCreateDeepLlmSelection (const std::filesystem::path &models_dir,
     }
 
   std::string mixed_error;
+  std::string lfm2_error;
+  if (auto selection
+      = TryCreateLfm2Selection (models_dir, &lfm2_error))
+    {
+      return selection;
+    }
+
   if (auto selection
       = TryCreateMixedSelection (models_dir, &mixed_error))
     {
@@ -433,13 +440,6 @@ TryCreateDeepLlmSelection (const std::filesystem::path &models_dir,
   std::string gemma_error;
   if (auto selection
       = TryCreateGemmaSelection (models_dir, &gemma_error))
-    {
-      return selection;
-    }
-
-  std::string lfm2_error;
-  if (auto selection
-      = TryCreateLfm2Selection (models_dir, &lfm2_error))
     {
       return selection;
     }

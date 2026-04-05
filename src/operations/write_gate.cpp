@@ -1,5 +1,6 @@
 #include "cortext/operations/write_gate.hpp"
 
+#include "neuromodulator_internal.hpp"
 #include "cortext/core/algorithms.hpp"
 #include "cortext/core/knobs.hpp"
 #include "cortext/processor/operation_context.hpp"
@@ -71,7 +72,7 @@ ComputeWriteGate::Execute (OperationContext &context,
 
   // Effective accumulator threshold
   const double neuromod_ne = core::Clamp (p_ctx.neuromod_ne, 0.0, 1.0);
-  const double write_scale = 1.0 - 0.3 * neuromod_ne;
+  const double write_scale = neuromodulation::WriteThresholdScale (neuromod_ne);
   const double theta_accumulator = T_dynamic * M_write_refrac * write_scale;
 
   // Final write decision

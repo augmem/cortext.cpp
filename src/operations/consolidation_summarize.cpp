@@ -14,9 +14,11 @@
 #include <any>
 #include <cctype>
 #include <ctime>
+#include <optional>
 #include <stdexcept>
 #include <sstream>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 namespace cortext::operations
@@ -86,6 +88,20 @@ StringToBlob (const std::string &text)
   return std::vector<unsigned char> (text.begin (), text.end ());
 }
 
+long long
+AnyToInt64 (const std::any &val)
+{
+  if (val.type () == typeid (long long))
+    {
+      return std::any_cast<long long> (val);
+    }
+  if (val.type () == typeid (int))
+    {
+      return static_cast<long long> (std::any_cast<int> (val));
+    }
+  return 0;
+}
+
 std::string
 TrimAsciiWhitespace (const std::string &text)
 {
@@ -144,6 +160,101 @@ FormatSourceTextForSummary (const std::string &source_id,
   return text;
 }
 
+long long
+FindExistingDeepSummaryForSources (Transaction &tx,
+                                   const std::vector<long long> &source_memory_ids)
+{
+  if (source_memory_ids.empty ())
+    {
+      return 0;
+    }
+
+  std::string sql =
+      "SELECT s.memory_id "
+      "FROM memories s "
+      "JOIN associations a ON a.source_memory_id = s.memory_id "
+      "WHERE s.kind = 'ASSOCIATION' "
+      "  AND s.source_id LIKE 'summary_%' "
+      "  AND a.edge_type = 'derived_from' "
+      "GROUP BY s.memory_id "
+      "HAVING COUNT(*) = ? "
+      "   AND SUM(CASE WHEN a.target_memory_id IN (";
+  std::vector<std::any> params;
+  params.reserve (source_memory_ids.size () + 2);
+  params.push_back (static_cast<long long> (source_memory_ids.size ()));
+  for (size_t i = 0; i < source_memory_ids.size (); ++i)
+    {
+      if (i > 0)
+        {
+          sql += ",";
+        }
+      sql += "?";
+      params.push_back (source_memory_ids[i]);
+    }
+  sql += ") THEN 1 ELSE 0 END) = ? "
+         "ORDER BY s.memory_id DESC LIMIT 1";
+  params.push_back (static_cast<long long> (source_memory_ids.size ()));
+
+  auto rows = tx.Execute (sql, params);
+  if (rows.empty ())
+    {
+      return 0;
+    }
+
+  auto it = rows[0].find ("memory_id");
+  if (it == rows[0].end ())
+    {
+      return 0;
+    }
+  return AnyToInt64 (it->second);
+}
+
+struct SummaryRecord
+{
+  long long memory_id = 0;
+  long long embedding_id = 0;
+  Eigen::VectorXf embedding;
+};
+
+std::optional<SummaryRecord>
+LoadSummaryRecord (Transaction &tx, long long memory_id, int expected_dim)
+{
+  auto rows = tx.Execute (
+      "SELECT m.memory_id, m.embedding_id, e.embedding "
+      "FROM memories m "
+      "JOIN embeddings e ON e.embedding_id = m.embedding_id "
+      "WHERE m.memory_id = ?",
+      { memory_id });
+  if (rows.empty ())
+    {
+      return std::nullopt;
+    }
+
+  const auto &row = rows[0];
+  auto it_memory = row.find ("memory_id");
+  auto it_embedding_id = row.find ("embedding_id");
+  auto it_embedding = row.find ("embedding");
+  if (it_memory == row.end () || it_embedding_id == row.end ()
+      || it_embedding == row.end ())
+    {
+      return std::nullopt;
+    }
+
+  SummaryRecord record;
+  record.memory_id = AnyToInt64 (it_memory->second);
+  record.embedding_id = AnyToInt64 (it_embedding_id->second);
+  if (record.memory_id <= 0 || record.embedding_id <= 0)
+    {
+      return std::nullopt;
+    }
+  if (!core::DecodeFloatBlob (it_embedding->second, expected_dim,
+                              record.embedding))
+    {
+      return std::nullopt;
+    }
+  return record;
+}
+
 } // namespace
 
 ConsolidationSummarizeParams
@@ -159,8 +270,7 @@ ConsolidationSummarizeParams::FromKnobs (double F, double /*S*/, double T)
       = static_cast<int> (std::round (core::Lerp (1200.0, 3600.0, T_eff)));
   p.max_text_chars
       = static_cast<int> (std::round (core::Lerp (300.0, 900.0, F_eff)));
-  p.max_summary_words
-      = static_cast<int> (std::round (core::Lerp (24.0, 96.0, T_eff)));
+  p.max_summary_words = 0;
   return p;
 }
 
@@ -195,7 +305,8 @@ ConsolidationSummarize::Execute (OperationContext &context, Transaction &tx) con
   const uint64_t now_ts = context.GetSignal ().timestamp;
 
   std::vector<ExtractionRequest> extraction_requests;
-  int summary_counter = 0;
+  int summary_sequence = 0;
+  int summary_count = 0;
   int summaries_with_summarizer = 0;
 
   // Get deep summarizer backend selected during Cortext construction.
@@ -209,7 +320,6 @@ ConsolidationSummarize::Execute (OperationContext &context, Transaction &tx) con
   for (const auto &cluster : clusters)
     {
       internal::ThrowIfStopRequested ();
-      std::string summary_id = GenerateSummaryId (now_ts, summary_counter++);
 
       // Collect all source texts and find most representative memory
       struct SourceItem
@@ -222,6 +332,11 @@ ConsolidationSummarize::Execute (OperationContext &context, Transaction &tx) con
       std::vector<SourceItem> source_items;
       source_items.reserve (cluster.embedding_ids.size ());
       std::vector<std::string> source_texts;
+      std::vector<std::pair<long long, long long>> source_links;
+      source_links.reserve (cluster.embedding_ids.size ());
+      std::vector<long long> source_memory_ids;
+      source_memory_ids.reserve (cluster.embedding_ids.size ());
+      std::unordered_set<long long> seen_source_memory_ids;
 
       // Convert cluster centroid to Eigen for comparison.
       Eigen::VectorXf centroid_eigen (
@@ -234,9 +349,9 @@ ConsolidationSummarize::Execute (OperationContext &context, Transaction &tx) con
       for (long long emb_id : cluster.embedding_ids)
         {
           internal::ThrowIfStopRequested ();
-          // Query embedding, blob_id, source_id, and start_ts for this memory.
+          // Query embedding, memory row, blob_id, source_id, and start_ts.
           auto rows = tx.Execute (
-              "SELECT e.embedding, m.blob_id, m.source_id, m.start_ts "
+              "SELECT e.embedding, m.memory_id, m.blob_id, m.source_id, m.start_ts "
               "FROM embeddings e "
               "LEFT JOIN memories m ON e.embedding_id = m.embedding_id "
               "WHERE e.embedding_id = ?",
@@ -288,6 +403,21 @@ ConsolidationSummarize::Execute (OperationContext &context, Transaction &tx) con
               && it_source->second.type () == typeid (std::string))
             {
               source_id = std::any_cast<std::string> (it_source->second);
+            }
+
+          long long memory_id = 0;
+          auto it_memory_id = row.find ("memory_id");
+          if (it_memory_id != row.end ())
+            {
+              memory_id = AnyToInt64 (it_memory_id->second);
+            }
+          if (memory_id > 0)
+            {
+              source_links.emplace_back (emb_id, memory_id);
+              if (seen_source_memory_ids.insert (memory_id).second)
+                {
+                  source_memory_ids.push_back (memory_id);
+                }
             }
 
           long long start_ts = 0;
@@ -395,8 +525,43 @@ ConsolidationSummarize::Execute (OperationContext &context, Transaction &tx) con
         {
           throw std::runtime_error (
               "Consolidation summarization requires source text for "
-              + summary_id);
+              + std::to_string (cluster.cluster_id));
         }
+
+      long long centroid_memory_id = FindExistingDeepSummaryForSources (
+          tx, source_memory_ids);
+      if (centroid_memory_id > 0)
+        {
+          if (auto existing_summary = LoadSummaryRecord (
+                  tx, centroid_memory_id,
+                  static_cast<int> (cluster.centroid.size ()));
+              existing_summary.has_value ())
+            {
+              context.GetProcessorContext ().UpsertSummaryCache (
+                  existing_summary->memory_id,
+                  existing_summary->embedding_id,
+                  existing_summary->embedding,
+                  true,
+                  false);
+            }
+
+          for (const auto &[emb_id, src_memory_id] : source_links)
+            {
+              internal::ThrowIfStopRequested ();
+              AddWrite (tx,
+                        "UPDATE memories SET cluster_id = ? "
+                        "WHERE embedding_id = ?",
+                        { cluster.cluster_id, emb_id });
+              AddWrite (tx,
+                        "INSERT OR IGNORE INTO associations "
+                        "(source_memory_id, target_memory_id, edge_type, weight) "
+                        "VALUES (?, ?, 'derived_from', 1.0)",
+                        { centroid_memory_id, src_memory_id });
+            }
+          continue;
+        }
+
+      std::string summary_id = GenerateSummaryId (now_ts, summary_sequence++);
 
       // Use the configured abstractive summarizer backend.
       std::string summary_text;
@@ -405,6 +570,10 @@ ConsolidationSummarize::Execute (OperationContext &context, Transaction &tx) con
           internal::ThrowIfStopRequested ();
           summary_text = summarizer->SummarizeTextsLimited (
               source_texts, params.max_summary_words);
+        }
+      catch (const internal::CancellationError &)
+        {
+          throw;
         }
       catch (const std::exception &e)
         {
@@ -418,6 +587,7 @@ ConsolidationSummarize::Execute (OperationContext &context, Transaction &tx) con
               "Consolidation summarization returned empty text for "
               + summary_id);
         }
+      summary_count++;
       summaries_with_summarizer++;
 
       // 2. Store summary text as blob for downstream consolidation.
@@ -473,7 +643,7 @@ ConsolidationSummarize::Execute (OperationContext &context, Transaction &tx) con
 
       // Get the memory_id for the centroid memory
       auto mem_id_rows = tx.Execute ("SELECT last_insert_rowid() AS id", {});
-      long long centroid_memory_id = 0;
+      centroid_memory_id = 0;
       if (!mem_id_rows.empty () && mem_id_rows[0].count ("id"))
         {
           auto val = mem_id_rows[0].at ("id");
@@ -503,7 +673,7 @@ ConsolidationSummarize::Execute (OperationContext &context, Transaction &tx) con
 
       // 6. Update cluster_id in memories for source embeddings and create
       // ASSOCIATIONS (derived_from edges).
-      for (long long emb_id : cluster.embedding_ids)
+      for (const auto &[emb_id, src_memory_id] : source_links)
         {
           internal::ThrowIfStopRequested ();
           // Update cluster_id
@@ -512,32 +682,14 @@ ConsolidationSummarize::Execute (OperationContext &context, Transaction &tx) con
                     "WHERE embedding_id = ?",
                     { cluster.cluster_id, emb_id });
 
-          // Get source memory_id for this embedding
-          auto src_rows = tx.Execute (
-              "SELECT memory_id FROM memories WHERE embedding_id = ?",
-              { emb_id });
-          if (!src_rows.empty () && src_rows[0].count ("memory_id"))
+          // Create derived_from edge: centroid <- source
+          if (src_memory_id > 0 && centroid_memory_id > 0)
             {
-              auto val = src_rows[0].at ("memory_id");
-              long long src_memory_id = 0;
-              if (val.type () == typeid (long long))
-                {
-                  src_memory_id = std::any_cast<long long> (val);
-                }
-              else if (val.type () == typeid (int))
-                {
-                  src_memory_id = std::any_cast<int> (val);
-                }
-
-              // Create derived_from edge: centroid <- source
-              if (src_memory_id > 0 && centroid_memory_id > 0)
-                {
-                  AddWrite (tx,
-                            "INSERT OR IGNORE INTO associations "
-                            "(source_memory_id, target_memory_id, edge_type, weight) "
-                            "VALUES (?, ?, 'derived_from', 1.0)",
-                            { centroid_memory_id, src_memory_id });
-                }
+              AddWrite (tx,
+                        "INSERT OR IGNORE INTO associations "
+                        "(source_memory_id, target_memory_id, edge_type, weight) "
+                        "VALUES (?, ?, 'derived_from', 1.0)",
+                        { centroid_memory_id, src_memory_id });
             }
         }
 
@@ -560,7 +712,7 @@ ConsolidationSummarize::Execute (OperationContext &context, Transaction &tx) con
   context.SetExtractionRequests (std::move (extraction_requests));
 
   telemetry::LogInfo("cortext.consolidation_summarize", {
-    telemetry::Attribute::Int64("summary_count", summary_counter),
+    telemetry::Attribute::Int64("summary_count", summary_count),
     telemetry::Attribute::Int64("extraction_jobs_queued", jobs_queued),
     telemetry::Attribute::Int64("summaries_with_summarizer", summaries_with_summarizer),
     telemetry::Attribute::Int64("summaries_fallback", 0)

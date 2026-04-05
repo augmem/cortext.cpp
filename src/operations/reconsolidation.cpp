@@ -1,11 +1,14 @@
 #include "cortext/operations/reconsolidation.hpp"
 
+#include "constructive_recall_internal.hpp"
+#include "neuromodulator_internal.hpp"
 #include "cortext/core/algorithms.hpp"
 #include "cortext/core/knobs.hpp"
 #include "cortext/core/utils.hpp"
 #include "cortext/operations/constants.hpp"
 #include "cortext/processor/operation_context.hpp"
 #include "cortext/store/store.hpp"
+#include "cortext/telemetry/telemetry.hpp"
 #include <Eigen/Dense>
 #include <algorithm>
 #include <cmath>
@@ -52,6 +55,7 @@ ToFloatVector (const Eigen::VectorXf &v)
 /// @brief Neighbor info returned from graph traversal.
 struct NeighborInfo
 {
+  long long memory_id;
   long long embedding_id;
   int depth;
 };
@@ -158,7 +162,9 @@ QueryGraphNeighbors (Store *store, long long embedding_id, int max_depth)
                   && emb_it->second.type () == typeid (long long))
                 {
                   neighbors.push_back (
-                      { std::any_cast<long long> (emb_it->second), neighbor_depth });
+                      { neighbor_mem_id,
+                        std::any_cast<long long> (emb_it->second),
+                        neighbor_depth });
                 }
             }
         }
@@ -167,63 +173,33 @@ QueryGraphNeighbors (Store *store, long long embedding_id, int max_depth)
   return neighbors;
 }
 
-/// @brief Loads an embedding from embeddings by ID.
-inline std::optional<Eigen::VectorXf>
-LoadEmbedding (Store *store, long long embedding_id, int expected_dim = 256)
-{
-  if (!store)
-    {
-      return std::nullopt;
-    }
-
-  auto rows = store->Execute (
-      "SELECT embedding FROM embeddings WHERE embedding_id = ?",
-      { embedding_id });
-
-  if (rows.empty ())
-    {
-      return std::nullopt;
-    }
-
-  auto it = rows[0].find ("embedding");
-  if (it == rows[0].end ())
-    {
-      return std::nullopt;
-    }
-
-  // Use DecodeFloatBlob to handle blob data from sqlite-vec
-  Eigen::VectorXf result;
-  if (core::DecodeFloatBlob (it->second, expected_dim, result))
-    {
-      return result;
-    }
-
-  return std::nullopt;
-}
-
 /// @brief Writes ripple updates for a neighbor embedding (v2 schema).
 inline void
 WriteNeighborUpdates (Transaction &tx, long long embedding_id,
-                      double lability, long long timestamp,
+                      long long memory_id, double lability, long long timestamp,
                       const Eigen::VectorXf &blended)
 {
   // Update lability_state and lability_ts in memories table (v2: merged from
   // memory_feedback)
   tx.Execute ("UPDATE memories "
               "SET lability_state = COALESCE(?, 0.0), lability_ts = ? "
-              "WHERE embedding_id = ?",
-              { lability, timestamp, embedding_id });
+              "WHERE memory_id = ?",
+              { lability, timestamp, memory_id });
 
-  // Update embeddings with blended embedding
-  // Note: sqlite-vec virtual tables don't support UPDATE on vector columns,
-  // so we use DELETE + INSERT instead
-  tx.Execute ("DELETE FROM embeddings WHERE embedding_id = ?",
-              { embedding_id });
+  if (constructive_recall::Disabled ())
+    {
+      tx.Execute ("DELETE FROM embeddings WHERE embedding_id = ?",
+                  { embedding_id });
+      tx.Execute ("INSERT INTO embeddings (embedding_id, embedding, created_at) "
+                  "VALUES (?, ?, ?)",
+                  { embedding_id, ToFloatVector (blended), timestamp });
+      return;
+    }
 
-  // v2: Minimal embeddings table (embedding_id, embedding, created_at)
-  tx.Execute ("INSERT INTO embeddings (embedding_id, embedding, created_at) "
-              "VALUES (?, ?, ?)",
-              { embedding_id, ToFloatVector (blended), timestamp });
+  const auto blob_id = constructive_recall::LoadCurrentBlobId (tx, memory_id);
+  constructive_recall::AppendReconstructionWithEmbedding (
+      tx, memory_id, blended, blob_id, timestamp, std::min (1.0, lability),
+      "reconsolidation", 1.0, 1.0);
 }
 
 } // namespace
@@ -252,6 +228,8 @@ ApplyReconsolidation::Execute (OperationContext &context, Transaction &tx) const
   const double S = cfg.sensitivity;
   const double T = cfg.stability;
   const double recon_gain = core::ReconsolidationGain (T);
+  const double recon_mod_scale
+      = neuromodulation::ReconsolidationScale (p_ctx.neuromod_ach);
   const double ripple_decay = core::RippleDecay (T);
   const int ripple_depth = core::RippleDepth (T);
   const double tau_labile = core::TauLabile (T);
@@ -273,6 +251,30 @@ ApplyReconsolidation::Execute (OperationContext &context, Transaction &tx) const
           continue;
         }
 
+      long long memory_id = 0;
+      auto mem_rows = tx.Execute (
+          "SELECT memory_id FROM memories WHERE embedding_id = ?",
+          { embedding_id });
+      if (!mem_rows.empty ())
+        {
+          auto it_mem = mem_rows[0].find ("memory_id");
+          if (it_mem != mem_rows[0].end ())
+            {
+              if (it_mem->second.type () == typeid (long long))
+                {
+                  memory_id = std::any_cast<long long> (it_mem->second);
+                }
+              else if (it_mem->second.type () == typeid (int))
+                {
+                  memory_id = static_cast<long long> (std::any_cast<int> (it_mem->second));
+                }
+            }
+        }
+      if (memory_id <= 0)
+        {
+          continue;
+        }
+
       // Mark as processed to avoid duplicate ripple
       processed_ids.insert (embedding_id);
 
@@ -288,8 +290,8 @@ ApplyReconsolidation::Execute (OperationContext &context, Transaction &tx) const
       double stored_lability = 0.0;
       long long lability_ts = 0;
       auto lability_rows = tx.Execute (
-          "SELECT lability_state, lability_ts FROM memories WHERE embedding_id = ?",
-          { embedding_id });
+          "SELECT lability_state, lability_ts FROM memories WHERE memory_id = ?",
+          { memory_id });
       if (!lability_rows.empty ())
         {
           const auto &lab_row = lability_rows[0];
@@ -339,7 +341,7 @@ ApplyReconsolidation::Execute (OperationContext &context, Transaction &tx) const
 
       double drift_mag
           = (1.0 - T) * S * current_lability * contextual_relevance;
-      drift_mag *= recon_gain;
+      drift_mag *= recon_gain * recon_mod_scale;
       // Safety clamp
       drift_mag = std::min (kDriftClampMax,
                             std::max (constants::kNormalizedMin, drift_mag));
@@ -353,9 +355,9 @@ ApplyReconsolidation::Execute (OperationContext &context, Transaction &tx) const
                   "SET lability_state = COALESCE(?, 0.0), "
                   "    original_centroid = COALESCE(original_centroid, ?), "
                   "    lability_ts = ? "
-                  "WHERE embedding_id = ?",
+                  "WHERE memory_id = ?",
                   { current_lability, ToFloatVector (u_m), now_ts,
-                    embedding_id });
+                    memory_id });
 
       if (drift_mag < kDriftSkipEpsilon)
         {
@@ -367,16 +369,26 @@ ApplyReconsolidation::Execute (OperationContext &context, Transaction &tx) const
                                 + static_cast<float> (drift_mag) * u_cur;
       blended = Unit (blended);
 
-      // Update embeddings with blended embedding
-      // Note: sqlite-vec virtual tables don't support UPDATE on vector columns,
-      // so we use DELETE + INSERT instead
-      tx.Execute ("DELETE FROM embeddings WHERE embedding_id = ?",
-                  { embedding_id });
-
-      // v2: Minimal embeddings table (embedding_id, embedding, created_at)
-      tx.Execute ("INSERT INTO embeddings (embedding_id, embedding, created_at) "
-                  "VALUES (?, ?, ?)",
-                  { embedding_id, ToFloatVector (blended), now_ts });
+      if (constructive_recall::Disabled ())
+        {
+          tx.Execute ("DELETE FROM embeddings WHERE embedding_id = ?",
+                      { embedding_id });
+          tx.Execute (
+              "INSERT INTO embeddings (embedding_id, embedding, created_at) "
+              "VALUES (?, ?, ?)",
+              { embedding_id, ToFloatVector (blended), now_ts });
+        }
+      else
+        {
+          const auto blob_id
+              = constructive_recall::LoadCurrentBlobId (tx, memory_id);
+          const double uncertainty
+              = core::Clamp (current_lability * (1.0 - 0.5 * contextual_relevance),
+                             0.0, 1.0);
+          constructive_recall::AppendReconstructionWithEmbedding (
+              tx, memory_id, blended, blob_id, now_ts, uncertainty,
+              "reconsolidation", 1.0, contextual_relevance);
+        }
 
       // --- BEGIN RIPPLE PROPAGATION ---
       // Only propagate ripple if store is available and primary drift occurred
@@ -410,7 +422,8 @@ ApplyReconsolidation::Execute (OperationContext &context, Transaction &tx) const
             }
 
           // Load neighbor embedding
-          auto neighbor_emb = LoadEmbedding (store, neighbor.embedding_id);
+          auto neighbor_emb = constructive_recall::LoadCurrentEmbedding (
+              tx, neighbor.memory_id, neighbor.embedding_id, u_cur.size ());
           if (!neighbor_emb)
             {
               continue;
@@ -435,13 +448,20 @@ ApplyReconsolidation::Execute (OperationContext &context, Transaction &tx) const
           neighbor_blended = Unit (neighbor_blended);
 
           // Write updates for this neighbor
-          WriteNeighborUpdates (tx, neighbor.embedding_id, neighbor_lability,
-                                now_ts, neighbor_blended);
+          WriteNeighborUpdates (tx, neighbor.embedding_id, neighbor.memory_id,
+                                neighbor_lability, now_ts,
+                                neighbor_blended);
         }
       // --- END RIPPLE PROPAGATION ---
     }
 
   (void)max_drift;
+
+  telemetry::LogDebug ("cortext.reconsolidation", {
+    telemetry::Attribute::Double ("recon_gain", recon_gain),
+    telemetry::Attribute::Double ("recon_mod_scale", recon_mod_scale),
+    telemetry::Attribute::Double ("max_drift", max_drift)
+  });
 }
 
 } // namespace cortext::operations

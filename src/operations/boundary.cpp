@@ -60,11 +60,11 @@ void
 DetectBoundary::Execute (OperationContext &context,
                          Transaction & /*tx*/) const
 {
-  static const bool disable_pressure
+  const bool disable_pressure
       = EnvFlag ("CORTEXT_BOUNDARY_DISABLE_PRESSURE");
-  static const bool disable_surprisal
+  const bool disable_surprisal
       = EnvFlag ("CORTEXT_BOUNDARY_DISABLE_SURPRISAL");
-  static const bool disable_natural
+  const bool disable_natural
       = EnvFlag ("CORTEXT_BOUNDARY_DISABLE_NATURAL");
 
   const auto &signal = context.GetSignal ();
