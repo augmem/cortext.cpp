@@ -15,6 +15,7 @@
 #include <cctype>
 #include <ctime>
 #include <optional>
+#include <regex>
 #include <stdexcept>
 #include <sstream>
 #include <string>
@@ -120,6 +121,41 @@ TrimAsciiWhitespace (const std::string &text)
     }
 
   return text.substr (start, end - start);
+}
+
+std::string
+SanitizeSummaryText (std::string summary)
+{
+  if (summary.empty ())
+    {
+      return summary;
+    }
+
+  summary = std::regex_replace (
+      summary, std::regex (R"(Excerpt\s+\d+\s+(mentions|indicates)\s+)",
+                           std::regex_constants::icase),
+      "");
+  summary = std::regex_replace (
+      summary,
+      std::regex (R"(,\s*which is a user\b)", std::regex_constants::icase), "");
+  summary = std::regex_replace (
+      summary,
+      std::regex (R"(\bthe user is focusing on\b)",
+                  std::regex_constants::icase),
+      "focuses on");
+  summary = std::regex_replace (
+      summary, std::regex (R"(\bthe user is\b)", std::regex_constants::icase),
+      "");
+  summary = std::regex_replace (
+      summary, std::regex (R"(\bthe user\b)", std::regex_constants::icase),
+      "");
+  summary = std::regex_replace (
+      summary,
+      std::regex (R"(\bthe assistant\b)", std::regex_constants::icase), "");
+  summary = std::regex_replace (summary, std::regex (R"([ \t]+)"), " ");
+  summary = std::regex_replace (summary, std::regex (R"(\s+\.)"), ".");
+  summary = std::regex_replace (summary, std::regex (R"(\n{3,})"), "\n\n");
+  return TrimAsciiWhitespace (summary);
 }
 
 bool
@@ -570,6 +606,7 @@ ConsolidationSummarize::Execute (OperationContext &context, Transaction &tx) con
           internal::ThrowIfStopRequested ();
           summary_text = summarizer->SummarizeTextsLimited (
               source_texts, params.max_summary_words);
+          summary_text = SanitizeSummaryText (summary_text);
         }
       catch (const internal::CancellationError &)
         {

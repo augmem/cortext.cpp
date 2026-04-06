@@ -296,6 +296,109 @@ TEST_CASE ("Algorithm 18 writes an eviction audit row before deleting long-term 
   REQUIRE (std::any_cast<long long> (rows[0].at ("evicted_at")) > 0LL);
 }
 
+TEST_CASE ("Algorithm 18 does not evict before storage budget is reached",
+           "[op18][memory_strength][storage_gate]")
+{
+  auto unique_store = cortext::SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<cortext::Store> (std::move (unique_store));
+  cortext::testing::InitializeCoreSchema (*store);
+
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  cfg.focus = 0.5;
+  cfg.sensitivity = 0.0;
+  cfg.stability = 0.0;
+
+  {
+    SeedEmbeddingsOp seed ({ 88LL }, /*strength=*/0.1);
+    Signal seed_signal = MakeSignal (4, 0);
+    cortext::ProcessorContext seed_ctx_state;
+    OperationContext seed_ctx (seed_signal, seed_ctx_state, cfg, store.get ());
+    seed.Execute (seed_ctx, cortext::testing::GetNullTransaction ());
+  }
+
+  auto set_events = std::make_unique<SetUsageEventsOp> (
+      std::vector<OperationContext::MemoryUsageEvent>{ { 88LL, false } });
+  auto update_strength
+      = std::make_unique<cortext::operations::UpdateMemoryStrength> ();
+  auto ops = std::make_unique<cortext::OperationSet> (
+      std::move (set_events), std::move (update_strength));
+
+  cortext::SignalProcessor processor (cfg, store, std::move (ops));
+  cortext::operations::eviction::EvictionAblationOverride override;
+  override.consolidation_gate_enabled = false;
+  override.storage_gate_enabled = true;
+  override.min_storage_bytes = 1LL << 30;
+  cortext::operations::eviction::ScopedEvictionAblationOverride storage_override (
+      override);
+
+  for (int i = 0; i < 240; ++i)
+    {
+      auto sig = MakeSignal (4, static_cast<uint64_t> ((i + 1) * 1000));
+      processor.Process (sig);
+    }
+  processor.Flush ();
+
+  auto rows = store->Execute (
+      "SELECT COUNT(*) AS cnt FROM memories WHERE memory_id = ?",
+      { 88LL });
+  REQUIRE (std::any_cast<long long> (rows[0].at ("cnt")) == 1LL);
+
+  auto eviction_rows = store->Execute (
+      "SELECT COUNT(*) AS cnt FROM memory_evictions WHERE memory_id = ?",
+      { 88LL });
+  REQUIRE (std::any_cast<long long> (eviction_rows[0].at ("cnt")) == 0LL);
+}
+
+TEST_CASE ("Algorithm 18 evicts once storage budget is below threshold",
+           "[op18][memory_strength][storage_gate]")
+{
+  auto unique_store = cortext::SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<cortext::Store> (std::move (unique_store));
+  cortext::testing::InitializeCoreSchema (*store);
+
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  cfg.focus = 0.5;
+  cfg.sensitivity = 0.0;
+  cfg.stability = 0.0;
+
+  {
+    SeedEmbeddingsOp seed ({ 89LL }, /*strength=*/0.1);
+    Signal seed_signal = MakeSignal (4, 0);
+    cortext::ProcessorContext seed_ctx_state;
+    OperationContext seed_ctx (seed_signal, seed_ctx_state, cfg, store.get ());
+    seed.Execute (seed_ctx, cortext::testing::GetNullTransaction ());
+  }
+
+  auto set_events = std::make_unique<SetUsageEventsOp> (
+      std::vector<OperationContext::MemoryUsageEvent>{ { 89LL, false } });
+  auto update_strength
+      = std::make_unique<cortext::operations::UpdateMemoryStrength> ();
+  auto ops = std::make_unique<cortext::OperationSet> (
+      std::move (set_events), std::move (update_strength));
+
+  cortext::SignalProcessor processor (cfg, store, std::move (ops));
+  cortext::operations::eviction::EvictionAblationOverride override;
+  override.consolidation_gate_enabled = false;
+  override.storage_gate_enabled = true;
+  override.min_storage_bytes = 0;
+  cortext::operations::eviction::ScopedEvictionAblationOverride storage_override (
+      override);
+
+  for (int i = 0; i < 240; ++i)
+    {
+      auto sig = MakeSignal (4, static_cast<uint64_t> ((i + 1) * 1000));
+      processor.Process (sig);
+    }
+  processor.Flush ();
+
+  auto rows = store->Execute (
+      "SELECT COUNT(*) AS cnt FROM memories WHERE memory_id = ?",
+      { 89LL });
+  REQUIRE (std::any_cast<long long> (rows[0].at ("cnt")) == 0LL);
+}
+
 TEST_CASE (
     "Algorithm 18 negative gain yields small increase, counts increment",
     "[op18][memory_strength]")

@@ -14,6 +14,7 @@
 #include "cortext/telemetry/telemetry.hpp"
 #include <algorithm>
 #include <any>
+#include <cstdlib>
 #include <optional>
 #include <nlohmann/json.hpp>
 #include <string>
@@ -75,6 +76,13 @@ const nlohmann::json kExtractionSchema = nlohmann::json::parse (R"({
   },
   "required": ["labels"]
 })");
+
+bool
+UseLegacyLabelFrequencyGate ()
+{
+  const char *value = std::getenv ("CORTEXT_ABLATE_LEGACY_LABEL_GATE");
+  return value != nullptr && std::string (value) == "1";
+}
 
 constexpr int kEmbeddingDim = 256;
 
@@ -392,22 +400,28 @@ ProcessExtractionResults::Execute (OperationContext &context, Transaction &tx) c
 
   const uint64_t now_ts = context.GetSignal ().timestamp;
   Encoder *lifecycle_encoder = context.GetConfig ().encoder;
-  const int label_threshold = core::LabelFrequencyThreshold (cfg.stability);
+  const bool use_legacy_label_gate = UseLegacyLabelFrequencyGate ();
+  const int label_threshold
+      = use_legacy_label_gate
+            ? core::LabelFrequencyThreshold (cfg.stability)
+            : 0;
   std::unordered_map<std::string, int> label_counts;
-  for (const auto &pending : p_ctx.pending_extraction_results)
+  if (use_legacy_label_gate)
     {
-      for (const auto &label_entry : pending.labels)
+      for (const auto &pending : p_ctx.pending_extraction_results)
         {
-          const std::string label_key
-              = NormalizeLabelKey (label_entry.label);
-          if (label_key.empty ())
+          for (const auto &label_entry : pending.labels)
             {
-              continue;
+              const std::string label_key
+                  = NormalizeLabelKey (label_entry.label);
+              if (label_key.empty ())
+                {
+                  continue;
+                }
+              label_counts[label_key] += 1;
             }
-          label_counts[label_key] += 1;
         }
     }
-
   struct ExistingLabel
   {
     long long memory_id = 0;
@@ -518,6 +532,7 @@ ProcessExtractionResults::Execute (OperationContext &context, Transaction &tx) c
         bool has_embedding = false;
       };
       std::optional<FallbackLabel> fallback_label;
+      std::unordered_set<std::string> inserted_label_keys;
 
       auto insert_label = [&](const std::string &label,
                               const std::string &label_key,
@@ -666,6 +681,10 @@ ProcessExtractionResults::Execute (OperationContext &context, Transaction &tx) c
             {
               continue;
             }
+          if (!inserted_label_keys.insert (label_key).second)
+            {
+              continue;
+            }
           auto &existing = get_existing (label_key);
           const std::vector<float> *label_embedding_ptr = nullptr;
           auto cached_it = label_cache.find (label_key);
@@ -695,7 +714,7 @@ ProcessExtractionResults::Execute (OperationContext &context, Transaction &tx) c
             }
           const double salience
               = ComputeLabelSalience (label_embedding_ptr, summary_embedding);
-          if (label_threshold > 1
+          if (use_legacy_label_gate && label_threshold > 1
               && label_counts[label_key] < label_threshold)
             {
               if (!fallback_label || salience > fallback_label->salience)
@@ -721,20 +740,18 @@ ProcessExtractionResults::Execute (OperationContext &context, Transaction &tx) c
             }
         }
 
-      if (!inserted_any_label && fallback_label.has_value ())
+      if (use_legacy_label_gate && !inserted_any_label
+          && fallback_label.has_value ())
         {
           const std::vector<float> *fallback_embedding
               = fallback_label->has_embedding
                     ? &fallback_label->embedding
                     : nullptr;
-          if (insert_label (fallback_label->label,
-                            fallback_label->label_key,
-                            fallback_label->salience,
-                            fallback_embedding,
-                            get_existing (fallback_label->label_key)))
-            {
-              inserted_any_label = true;
-            }
+          insert_label (fallback_label->label,
+                        fallback_label->label_key,
+                        fallback_label->salience,
+                        fallback_embedding,
+                        get_existing (fallback_label->label_key));
         }
 
       // 2. Insert relations into ASSOCIATIONS.

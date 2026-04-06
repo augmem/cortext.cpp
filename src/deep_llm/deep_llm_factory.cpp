@@ -347,6 +347,22 @@ ResolveLfm2SummarizerModelPath (const std::filesystem::path &models_dir)
   if (auto preferred = FindFirstExistingModel (
           roots,
           { std::filesystem::path (),
+            std::filesystem::path ("lfm2.5-1.2b-instruct-gguf"),
+            std::filesystem::path ("LFM2.5-1.2B-Instruct-GGUF") },
+          { std::filesystem::path ("LFM2.5-1.2B-Instruct-Q4_K_M.gguf"),
+            std::filesystem::path ("LFM2.5-1.2B-Instruct-Q8_0.gguf"),
+            std::filesystem::path ("LFM2.5-1.2B-Instruct-Q5_K_M.gguf"),
+            std::filesystem::path ("LFM2.5-1.2B-Instruct-Q6_K.gguf"),
+            std::filesystem::path ("LFM2.5-1.2B-Instruct-Q4_0.gguf"),
+            std::filesystem::path ("LFM2.5-1.2B-Instruct-BF16.gguf"),
+            std::filesystem::path ("LFM2.5-1.2B-Instruct-F16.gguf") }))
+    {
+      return preferred;
+    }
+
+  if (auto preferred = FindFirstExistingModel (
+          roots,
+          { std::filesystem::path (),
             std::filesystem::path ("lfm2.5-350m-gguf"),
             std::filesystem::path ("LFM2.5-350M-GGUF") },
           { std::filesystem::path ("LFM2.5-350M-Q4_K_M.gguf"),

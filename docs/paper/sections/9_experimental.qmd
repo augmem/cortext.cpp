@@ -1389,7 +1389,7 @@ The learned rows after the `on` run show where adaptation actually concentrated:
 
 ### Offline Semantic Label Classifier Prototype
 
-The current runtime still forms durable labels with the hard repetition gate from [Section 7](#sec-consolidation). To test whether a more semantic, memory-like label pathway is viable before changing the deployed path, we implemented an **offline prototype** that trains two small classifiers over candidate spans:
+Before the runtime labeling corrections below, the branch relied on an overly aggressive repetition-gated label path. To test whether a more semantic, memory-like label pathway is viable before fully replacing the deployed path, we implemented an **offline prototype** that trains two small classifiers over candidate spans:
 
 * **span typing:** `identity`, `person_entity`, `place`, `org_project`, `topic`, `state`, `none`
 * **promotion:** `durable`, `provisional`, `ignore`
@@ -1433,6 +1433,248 @@ To preserve one small full-taxonomy check, we also evaluated the same trained mo
 | promotion | **0.439** | **0.439** | **0.633** | **1.000** |
 
 **Observations:** The prototype has moved from “toy feasibility” to a real offline experiment. On the held-out `WNUT17` test split, span typing reaches `0.528` supported macro F1 and promotion reaches `0.730`, with candidate recall still at `0.971`. That is strong enough to justify replacing the current exact-string repetition story at the research level. The curated smoke is now more useful as a failure probe than as a headline metric: the same model underperforms on `state` and `topic`, which tells us the current training mix is still too entity-heavy. So the bottleneck is no longer whether a semantic label classifier can train; it is whether we can broaden the real conversational supervision enough to cover non-entity concepts before runtime integration.
+
+### Online Label Persistence Ablation (Apr 5, 2026)
+
+We also corrected the **deployed** label path itself. The previous runtime policy applied a batch-level repetition threshold and, when labels were too sparse to clear it, collapsed each extraction result to a single highest-salience fallback label. This was the direct cause of pathological under-labeling in long chats, including name loss and label graphs with implausibly few nodes.
+
+The current runtime now persists extracted labels directly from each extraction result, deduped by normalized key within the result and reused by key across the store. To measure the impact cleanly, we added a deterministic ablation bench that re-enables the legacy gate through an internal study-only toggle:
+
+**Deterministic label-persistence ablation:** `./build/examples/benchmark/cortext_label_persistence_ablation_bench`
+
+| scenario | legacy gate | current runtime | result |
+|---|---:|---:|---|
+| sparse three-label extraction | `1` label / `1` `has_label` edge | `3` labels / `3` `has_label` edges | current preserves all extracted labels |
+| repeated single-label extraction | `1` label | `1` label | dedupe remains stable |
+
+Recorded metrics:
+
+* `label_sparse_legacy_count = 1`
+* `label_sparse_current_count = 3`
+* `label_sparse_legacy_edges = 1`
+* `label_sparse_current_edges = 3`
+* `label_repeated_legacy_count = 1`
+* `label_repeated_current_count = 1`
+
+**Targeted test coverage:** `./build/tests/cortext_tests "[operations][extraction][labels]"` passed with **8 assertions in 2 test cases**.
+
+**Observation:** This change is not about adding more decorative labels. It removes a lossy gate that was erasing semantically important one-shot entities before they could ever become part of the graph. The ablation shows the intended behavior clearly: sparse extractions now survive intact, while repeated identical labels still collapse to one durable node as before.
+
+### LFM2.5-350M Extractor Prompt Ablation {#sec-extractor-prompt-ablation}
+
+Once sparse labels were allowed through, the next failure mode was obvious in the live chat DB: the fast local extractor was emitting junk labels like `user`, `assistant`, `support`, `documents`, and even schema-style tokens in contexts where the desired durable nodes were things like `Gabriel`, `Chicago`, `SQLite migration`, `Cortext`, `Sarah`, or `housing application`. Before paying the latency cost of a larger extraction model, we first tested whether prompt technique alone could recover better labels from the small `LFM2.5-350M` GGUF.
+
+We compared five prompt styles on the live local extractor:
+
+* `baseline`: original recall-heavy zero-shot prompt
+* `durable`: zero-shot durable-node wording
+* `precision`: zero-shot precision-first wording
+* `fewshot_durable`: durable-node wording plus short conversational examples
+* `fewshot_precision`: precision-first wording plus short conversational examples
+
+The benchmark uses three short multi-turn fixtures that mirror the failure cases we saw in the chat DB:
+
+* interview-prep noise (`interview`, `confidence`)
+* identity plus work context (`Gabriel`, `Chicago`, `SQLite migration`, `Cortext`)
+* neighbor plus housing context (`Sarah`, `housing application`, `Logan Square`)
+
+Each style is scored by desired-label hits, banned-label leakage, total emitted labels, overflow beyond a compact durable-label budget, and wall-clock latency.
+
+**Deterministic prompt-technique ablation:** `./build/examples/benchmark/cortext_extractor_prompt_ablation_bench`
+
+Run log: `logs/extractor_prompt_ablation_20260406/extractor_prompt_ablation.log`
+
+| prompt style | desired hits | banned hits | labels emitted | latency (ms) | score |
+|---|---:|---:|---:|---:|---:|
+| `baseline` | `6` | `2` | `13` | `3116` | `14` |
+| `durable` | `8` | `7` | `86` | `9794` | `-52` |
+| `precision` | `7` | `1` | `46` | `4898` | `-3` |
+| `fewshot_durable` | `8` | `4` | `16` | `3856` | **`16`** |
+| `fewshot_precision` | `5` | `2` | `8` | `3073` | `11` |
+
+Representative outputs:
+
+* `baseline` interview fixture: `confidence, prep, support, interview, user, assistant`
+* `fewshot_durable` identity/work fixture: `Gabriel, Chicago, SQLite migration, Cortext`
+* `fewshot_precision` neighbor/housing fixture: `Sarah, housing application, Logan Square`
+
+**Observation:** The zero-shot rewrites alone were not enough. `durable` and `precision` both leaked their own instruction vocabulary back into the labels, including prompt words like `schema`, `timestamps`, `people`, and `projects`. The few-shot variants changed the behavior qualitatively. `fewshot_durable` was the best overall compromise: it recovered all four identity/work labels in the hardest fixture, preserved the full `Sarah` / `housing application` / `Logan Square` trio, and did so with only a modest latency increase over the old baseline (`3856 ms` vs `3116 ms` across the full three-fixture run). `fewshot_precision` was the leanest style, but it under-recalled the identity/work fixture too aggressively. Based on this ablation, the current branch now uses the **few-shot durable prompt as the deployed default** for the local `LFM2.5-350M` extraction path, while still allowing overrides through `CORTEXT_LFM2_EXTRACT_PROMPT_STYLE` for further study.
+
+### LFM2.5-350M Summarizer Prompt Ablation {#sec-summarizer-prompt-ablation}
+
+Once extraction quality improved, the next weak point was the **summarizer**: the fast local `LFM2.5-350M` summarization path was still vulnerable to prompt echo, speaker-role leakage, and a strong bias toward the **last excerpt** in a cluster. That showed up directly in earlier deep-consolidation failures: summaries would sometimes repeat prompt language, narrate the conversation mechanics, or ignore early identity facts like `Gabriel` / `Chicago` in favor of the final turn.
+
+Before paying the cost of a larger summarizer, we ran a prompt-technique ablation on the live local `LFM2.5-350M` GGUF. We compared six prompt styles:
+
+* `baseline`: original excerpt-based zero-shot prompt
+* `durable`: excerpt-based zero-shot durable-memory wording
+* `precision`: excerpt-based zero-shot precision-first wording
+* `fewshot_durable`: excerpt-based few-shot durable wording
+* `fewshot_precision`: excerpt-based few-shot precision wording
+* `transcript_fewshot`: few-shot prompt plus a **chat transcript** input format instead of numbered excerpts
+
+The benchmark uses three short conversational fixtures that stress the failure modes we care about:
+
+* identity plus work context (`Gabriel`, `Chicago`, `SQLite migration`, `Cortext`, `demo`)
+* project plus operations context (`Alice`, `Acme pilot`, `Seattle`, `SSO`, `audit exports`, `June`, `renewal forecast`)
+* neighbor plus housing context (`Sarah`, `housing application`, `Logan Square`, `pay stubs`, `Tuesday`)
+
+Each style is scored by desired-fact hits, banned meta leakage (`User:`, `Assistant:`, `Excerpt`, `Final summary`, prompt echo), and wall-clock latency.
+
+**Deterministic prompt-technique ablation:** `./build/examples/benchmark/cortext_summarizer_prompt_ablation_bench`
+
+Run log: `logs/summarizer_prompt_ablation_20260406/summarizer_prompt_ablation.log`
+
+| prompt style | desired hits | banned hits | latency (ms) | score |
+|---|---:|---:|---:|---:|
+| `baseline` | `7` | `4` | `2404` | `2` |
+| `durable` | `1` | `3` | `1358` | `-7` |
+| `precision` | `5` | `2` | `1216` | `4` |
+| `fewshot_durable` | `1` | `3` | `2033` | `-7` |
+| `fewshot_precision` | `6` | `0` | `1739` | `12` |
+| `transcript_fewshot` | **`15`** | **`0`** | `1850` | **`30`** |
+
+Representative outputs:
+
+* `baseline` identity/work fixture: `User: I am debugging a SQLite migration for Cortext before the demo. Assistant: The migration is progressing well...`
+* `fewshot_precision` identity/work fixture: `Debugging a SQLite migration for Cortext before the demo.`
+* `transcript_fewshot` identity/work fixture: `Gabriel lives in Chicago and is debugging a SQLite migration for Cortext before the demo.`
+* `transcript_fewshot` project/ops fixture: `Alice is leading the Acme pilot in Seattle, and the customer needs SSO and audit exports before June.`
+
+**Observation:** The biggest win did **not** come from adding more wording. It came from changing the input shape. The excerpt-based prompts remained last-turn-biased: even the better few-shot excerpt styles still dropped early facts like `Gabriel` and `Chicago`, or collapsed the whole cluster to the last blocker sentence. The transcript-style prompt changed the behavior qualitatively. On the live local `LFM2.5-350M` summarizer it recovered all five desired identity/work facts, six of seven project/ops facts, and four of five neighbor/housing facts, with **zero** banned meta hits and only a moderate latency cost relative to the leanest zero-shot style (`1850 ms` vs `1216 ms` across the three-fixture run). Based on this ablation, the current branch now uses the **transcript few-shot prompt as the deployed default** for the local `LFM2.5-350M` summarization path, while still allowing overrides through `CORTEXT_LFM2_SUMMARY_PROMPT_STYLE` for further study.
+
+### Storage-Gated Eviction Ablation (Apr 5, 2026)
+
+We also corrected a practical failure mode in the deployed eviction policy. The previous runtime would evict weak `LONG_TERM` memories as soon as they fell below `periphery_cutoff(T)`, even when the backing chat database was still trivially small. In long user conversations this produced premature forgetting: names and low-frequency autobiographical details could decay out of the active store long before disk pressure justified any deletion.
+
+The current runtime now applies a storage gate before the usual strength-based eviction query. For file-backed stores, eviction is blocked until the database footprint reaches a configurable floor. The floor can be a fixed byte budget, a percentage of currently available disk space, or both; the active threshold is the maximum of those values. The default deployed fixed floor is `500 MB`.
+
+**Deterministic storage-budget ablation:** `./build/examples/benchmark/cortext_storage_eviction_budget_bench`
+
+| scenario | storage gate floor | surviving weak memory count | result |
+|---|---:|---:|---|
+| high budget guard | `1 GiB` | `1` | weak memory is retained because storage budget is not yet full |
+| zero budget | `0` | `0` | the same weak memory is evicted once the storage gate is removed |
+
+Recorded metrics:
+
+* `storage_gate_high_budget_count = 1`
+* `storage_gate_blocks_early_eviction = 1`
+* `storage_gate_zero_budget_count = 0`
+* `storage_gate_allows_eviction_after_limit = 1`
+
+**Targeted test coverage:** `./build/tests/cortext_tests "[op18][memory_strength][storage_gate]"` passed with **3 assertions in 2 test cases**.
+
+**Observation:** This is a policy correction, not an attempt to make eviction disappear. Strength and fact-floor rules still determine *which* memories are eligible once storage pressure is real. The storage gate simply prevents the engine from acting like a tiny chat database is already full.
+
+We then added a second deterministic sweep to answer the practical sizing question: **how much storage budget is actually enough to delay forgetting?** This sweep uses a file-backed SQLite store, grows the database by `5 MB` per simulated step, and records both the storage-threshold crossing step and the eventual eviction step for the same weak memory.
+
+**Deterministic storage-threshold survival sweep:** `./build/examples/benchmark/cortext_storage_eviction_sweep_bench`
+
+| fixed storage floor | threshold-cross step | eviction step | result |
+|---|---:|---:|---|
+| `0 MB` | `1` | `62` | pure decay-limited baseline |
+| `64 MB` | `13` | `62` | no practical delay vs baseline |
+| `128 MB` | `26` | `62` | still decay-limited |
+| `256 MB` | `51` | `62` | still decay-limited |
+| `500 MB` | `100` | `100` | first storage-limited regime |
+| `1 GB` | `200` | `200` | larger-device storage-limited regime |
+| `2 GB` | `400` | `400` | very large-device storage-limited regime |
+
+Recorded metrics:
+
+* `storage_sweep_0mb_eviction_step = 62`
+* `storage_sweep_64mb_eviction_step = 62`
+* `storage_sweep_128mb_eviction_step = 62`
+* `storage_sweep_256mb_eviction_step = 62`
+* `storage_sweep_500mb_eviction_step = 100`
+* `storage_sweep_500mb_cross_bytes = 501829632`
+* `storage_sweep_default_500mb_delays_vs_64mb = 1`
+* `storage_sweep_1gb_eviction_step = 200`
+* `storage_sweep_2gb_eviction_step = 400`
+* `storage_sweep_1gb_delays_vs_500mb = 1`
+* `storage_sweep_2gb_delays_vs_1gb = 1`
+
+**Observation:** The useful takeaway is not that “more storage is always better.” It is that there is a real **decay-limited regime** and a real **storage-limited regime**. In this workload, any budget up to `256 MB` still lets the memory die on its normal decay curve at step `62`, because the database reaches those thresholds before the memory becomes too weak. `500 MB` is the first tested budget that pushes the system into the storage-limited regime, delaying eviction to step `100`; `1 GB` and `2 GB` extend that same pattern to steps `200` and `400`. That is why the default floor was raised well above the earlier `64 MiB` setting: the smaller floor looked safer on paper than it actually was in practice.
+
+We then extended the study into an end-to-end steady-state chat regime, where the relevant question is not just when a weak memory dies, but whether it survives long enough for the next label-producing consolidation window to fire. This benchmark uses the same file-backed `5 MB/step` growth profile, keeps the memory in the post-initial-consolidation pool, and measures whether a three-label extraction (`Gabriel`, `Chicago`, `Cortext`) is created before the raw memory is evicted.
+
+**Deterministic storage × consolidation end-to-end ablation:** `./build/examples/benchmark/cortext_storage_consolidation_e2e_bench`
+
+| fixed storage floor | raw-memory eviction step | every `30` steps | every `60` steps | every `90` steps | every `120` steps | every `150` steps |
+|---|---:|---:|---:|---:|---:|---:|
+| `0 MB` | `62` | `3` labels retained | `3` labels retained | `0` labels | `0` labels | `0` labels |
+| `64 MB` | `62` | `3` labels retained | `3` labels retained | `0` labels | `0` labels | `0` labels |
+| `128 MB` | `62` | `3` labels retained | `3` labels retained | `0` labels | `0` labels | `0` labels |
+| `256 MB` | `62` | `3` labels retained | `3` labels retained | `0` labels | `0` labels | `0` labels |
+| `500 MB` | `100` | `3` labels retained | `3` labels retained | `3` labels retained | `0` labels | `0` labels |
+| `1 GB` | `200` | `3` labels retained | `3` labels retained | `3` labels retained | `3` labels retained | `3` labels retained |
+| `2 GB` | `400` | `3` labels retained | `3` labels retained | `3` labels retained | `3` labels retained | `3` labels retained |
+
+Recorded checks:
+
+* `storage_cons_no_consolidation_creates_no_labels = 1`
+* `storage_cons_64mb_interval60_captures_labels = 1`
+* `storage_cons_64mb_interval90_misses_labels = 1`
+* `storage_cons_500mb_interval90_captures_labels = 1`
+* `storage_cons_500mb_interval90_delays_vs_64mb = 1`
+* `storage_cons_500mb_interval120_misses_labels = 1`
+* `storage_cons_1gb_interval120_captures_labels = 1`
+* `storage_cons_1gb_interval150_captures_labels = 1`
+* `storage_cons_2gb_interval150_captures_labels = 1`
+* `storage_cons_1gb_interval150_delays_vs_500mb = 1`
+
+**Observation:** This is the strongest practical justification for the higher default and for device-class scaling above it. Under small storage budgets, the system still has enough time to consolidate on short cadences (`30` or `60` steps), but it misses slower label-formation windows because the raw memory is gone by step `62`. With a `500 MB` floor, the same memory survives to step `100`, which is enough for a `90`-step consolidation interval to capture and persist the labels before the episodic trace is evicted. With `1 GB`, the survival window extends to step `200`, which is enough for both `120`- and `150`-step consolidation intervals. `2 GB` does not add new label-capture wins on this task beyond `1 GB`; it extends the safety margin further. So the current evidence suggests a useful plateau structure: `500 MB` is a good default for ordinary chat retention, while `1 GB` is the first meaningful “slow consolidation / large-memory” tier.
+
+We then replaced the abstract fixed-step consolidation cadence with a synthetic human sleep clock derived from representative age-group sleep patterns. Each profile uses one consolidation opportunity per sleep bout, where the number of bouts per 24 hours is `1 + naps/day`. The benchmark uses a `24 h` episodic half-life, a synthetic file-backed storage growth rate of `12 MB/hour`, and asks a more human-like question: **does a weak autobiographical trace survive long enough to be consolidated during the next realistic sleep cycle?**
+
+**Deterministic storage × human sleep consolidation ablation:** `./build/examples/benchmark/cortext_storage_human_sleep_consolidation_bench`
+
+| age group | sleep pattern used in the synthetic clock | effective consolidation cadence | `0 MB` floor | `256 MB` floor | `500 MB` floor | `1 GB` floor |
+|---|---|---:|---:|---:|---:|---:|
+| newborn | `14–17 h`, `4–6` naps/day | every `4 h` | `3` labels | `3` labels | `3` labels | `3` labels |
+| infant | `12–16 h`, `2–3` naps/day | every `7 h` | `0` labels | `3` labels | `3` labels | `3` labels |
+| toddler | `11–14 h`, `1–2` naps/day | every `10 h` | `0` labels | `3` labels | `3` labels | `3` labels |
+| preschool | `10–13 h`, `0–1` naps/day | every `16 h` | `0` labels | `3` labels | `3` labels | `3` labels |
+| school-age | `9–12 h`, `0` naps/day | every `24 h` | `0` labels | `0` labels | `3` labels | `3` labels |
+| teen | `8–10 h`, `0` naps/day | every `24 h` | `0` labels | `0` labels | `3` labels | `3` labels |
+| adult | `7–9 h`, optional naps | every `24 h` | `0` labels | `0` labels | `3` labels | `3` labels |
+| older adult | `7–8 h`, optional naps | every `24 h` | `0` labels | `0` labels | `3` labels | `3` labels |
+
+Recorded checks:
+
+* `human_sleep_newborn_zero_budget_captures = 1`
+* `human_sleep_adult_zero_budget_misses = 1`
+* `human_sleep_adult_256mb_misses = 1`
+* `human_sleep_adult_500mb_captures = 1`
+* `human_sleep_adult_1gb_matches_500mb = 1`
+* `human_sleep_older_adult_500mb_captures = 1`
+
+**Observation:** This synthetic-clock view is more interpretable than the earlier abstract interval sweep. It shows that frequent sleep in early life behaves like a natural consolidation rescue mechanism: newborn-style sleep is frequent enough that even a zero storage floor still captures the labels before the trace dies, while infant/toddler/preschool profiles already benefit from modest storage budgets such as `256 MB`. The adult-side boundary is sharper and more important for real chat systems: once consolidation becomes essentially once-per-day, `256 MB` is no longer enough, and `500 MB` is the first tested floor that reliably keeps the trace alive until the nightly consolidation window. `1 GB` still helps, but in this human-like benchmark it acts as safety margin rather than unlocking a new retention class. That is the clearest current justification for the deployed `500 MB` default.
+
+We also added a matching **estimated token-cost ablation** over the same synthetic sleep schedules. This study uses the repository's existing character-to-token heuristic (`ceil(chars / 4)`) to estimate the prompt and completion budget for each consolidation session over a `72 h` synthetic clock with one autobiographical trace arriving per hour. It is intentionally a cost proxy, not a billing measurement: the goal is to compare how much more summarization/extraction budget frequent sleep-style consolidation would consume relative to nightly consolidation.
+
+**Deterministic storage × human sleep token-cost ablation:** `./build/examples/benchmark/cortext_storage_human_sleep_token_bench`
+
+| age group | effective consolidation cadence | storage floor | consolidation events over `72 h` | estimated total tokens |
+|---|---:|---:|---:|---:|
+| newborn | every `4 h` | `500 MB` | `18` | `7090` |
+| infant | every `7 h` | `500 MB` | `10` | `5199` |
+| toddler | every `10 h` | `500 MB` | `7` | `4520` |
+| preschool | every `16 h` | `500 MB` | `4` | `3590` |
+| adult | every `24 h` | `0 MB` | `3` | `3700` |
+| adult | every `24 h` | `500 MB` | `3` | `3700` |
+| adult | every `24 h` | `1 GB` | `3` | `3700` |
+
+Recorded checks:
+
+* `human_sleep_tokens_newborn_cost_exceeds_adult_500mb = 1`
+* `human_sleep_tokens_newborn_events_exceed_adult_500mb = 1`
+* `human_sleep_tokens_adult_500mb_cost_matches_0mb = 1`
+* `human_sleep_tokens_adult_1gb_matches_500mb_retention = 1`
+* `human_sleep_tokens_adult_1gb_matches_500mb_cost = 1`
+
+**Observation:** In this steady hourly-trace workload, token cost is dominated by **consolidation frequency**, not by the storage floor. Newborn-style frequent sleep performs roughly `1.9×` the estimated token work of adult nightly consolidation over the same `72 h` horizon (`7090` vs `3700` tokens), because it runs far more consolidation sessions even though each session is smaller. By contrast, once the workload is already surviving into the nightly consolidation loop, raising the storage floor from `0 MB` to `500 MB` or `1 GB` does not materially change the estimated token budget in this proxy study. That does **not** mean storage is irrelevant; the human-retention ablation above showed that storage floor is still decisive for whether fragile traces survive long enough to reach a nightly consolidation window at all. The joint takeaway is that cadence drives cost, while storage floor determines whether slower cadences remain viable.
 
 ### Messy Chat Baseline (Ubuntu Dialogue Corpus)
 

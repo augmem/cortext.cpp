@@ -119,7 +119,7 @@ Low-scoring memories are marked for merging.
 
 Consolidation proceeds via **generative replay** rather than one-shot merges. Representative episodes are re-encoded and used to update semantic structures, reducing drift and preserving detail.
 
-**Summarization + labeling engine (deep mode):** Consolidation is the only stage that invokes a generative model. Deep mode resolves a local backend internally: **gemma-3n-e2b** through `third_party/litert_lm`, **LFM2/LFM2.5** through `llama.cpp` GGUFs, or a **mixed** path that uses Gemma for summarization and a Liquid GGUF for extraction. The Liquid resolver now prefers `LFM2.5-350M-GGUF` for both summarization and extraction, defaulting to the local `Q4_K_M` checkpoint when present and accepting other bundled GGUF quantizations as fallbacks; if that asset is absent, it falls back to the older pinned `LFM2-2.6B-Transcript-Q4_K_M.gguf` summarizer and `LFM2-1.2B-Extract-Q4_K_M.gguf` extractor. Auto resolution now prefers the pure Liquid `LFM2.5/llama.cpp` path when those assets are present; the mixed path and Gemma path are fallbacks. All other operations remain embedding-only. **There is no extractive fallback**: if no deep backend is available, or summarization fails, deep consolidation raises an error rather than silently degrading.
+**Summarization + labeling engine (deep mode):** Consolidation is the only stage that invokes a generative model. Deep mode resolves a local backend internally: **gemma-3n-e2b** through `third_party/litert_lm`, **LFM2/LFM2.5** through `llama.cpp` GGUFs, or a **mixed** path that uses Gemma for summarization and a Liquid GGUF for extraction. The Liquid resolver now prefers `LFM2.5-350M-GGUF` for both summarization and extraction, defaulting to the local `Q4_K_M` checkpoint when present and accepting other bundled GGUF quantizations as fallbacks; if that asset is absent, it falls back to the older pinned `LFM2-2.6B-Transcript-Q4_K_M.gguf` summarizer and `LFM2-1.2B-Extract-Q4_K_M.gguf` extractor. Auto resolution now prefers the pure Liquid `LFM2.5/llama.cpp` path when those assets are present; the mixed path and Gemma path are fallbacks. All other operations remain embedding-only. **There is no extractive fallback**: if no deep backend is available, or summarization fails, deep consolidation raises an error rather than silently degrading. After the prompt-technique ablations in [Section 9](#sec-extractor-prompt-ablation) and [Section 9](#sec-summarizer-prompt-ablation), the default local Liquid extraction prompt is now a short **few-shot durable** prompt, and the default local Liquid summarization prompt is now a **transcript few-shot** prompt that feeds the small `LFM2.5-350M` model a chat transcript instead of numbered excerpts. That combination keeps the local path fast while materially reducing schema/meta leakage and last-excerpt bias.
 
 ## Shallow Consolidation (Embedding‑Only)
 
@@ -204,13 +204,7 @@ max_extractions_per_cycle = round(lerp(20, 5, T))
 
 Extraction uses structured prompting to identify labels/tags (people, places, organizations, concepts) and relationships (co-occurrence, implication, contradiction). Labels are stored as surface strings (no type/category field) **and** persisted with their own embeddings so they can participate in retrieval and graph expansion.
 
-**Current implementation note:** the deployed runtime still promotes extracted labels with a knob-derived repetition gate
-
-```
-label_frequency_threshold = round(lerp(5, 15, T))
-```
-
-plus a single fallback highest-salience label when the filter would otherwise erase the cluster. This keeps the online path simple, but it also makes durable label formation too dependent on exact repeated strings. To test a more memory-like alternative without changing the runtime, we added an **offline semantic label-classifier prototype** in `scripts/build_wordnet_label_index.py`, `scripts/build_name_priors.py`, `scripts/build_label_training_data.py`, `scripts/train_label_classifier.py`, and `scripts/eval_label_classifier.py`. That prototype trains two small models over candidate spans:
+**Current implementation note:** the deployed runtime now persists extracted labels directly from each extraction result, deduped by normalized label key within the result and reused by key across the store. The old knob-derived repetition gate and single-label fallback were removed because they made durable label formation too dependent on exact repeated strings and caused obvious chat failures like identity/name loss and severe label undercounting. The online path is still simple: label strings are inserted as `LABEL` memories, salience is embedding-derived, and repeated mentions update `s_max` on the existing label node. In parallel, we continue to study a more semantic alternative through the **offline semantic label-classifier prototype** in `scripts/build_wordnet_label_index.py`, `scripts/build_name_priors.py`, `scripts/build_label_training_data.py`, `scripts/train_label_classifier.py`, and `scripts/eval_label_classifier.py`. That prototype trains two small models over candidate spans:
 
 * a **span typing** head (`identity`, `person_entity`, `place`, `org_project`, `topic`, `state`, `none`), and
 * a **promotion** head (`durable`, `provisional`, `ignore`)
@@ -230,8 +224,6 @@ instead of re-encoding, reducing consolidation latency without changing
 salience computation.
 
 If a label already exists, its stored salience is updated with `s_max = max(s_max, salience(label))`.
-
-To guarantee that labeling remains informative even for small clusters, if the frequency filter would remove all labels for a summary, the highest-salience label is retained as a fallback.
 
 ## Temporal Consolidation of Changing Facts
 

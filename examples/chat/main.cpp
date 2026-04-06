@@ -79,11 +79,29 @@
 
 namespace {
 
+template <typename Value>
+std::string FormatOwnedTelemetryValue(const Value &value) {
+  std::ostringstream oss;
+  opentelemetry::nostd::visit([&oss](auto &&v) {
+    using T = std::decay_t<decltype(v)>;
+    if constexpr (std::is_same_v<T, bool>) { oss << (v ? "true" : "false"); }
+    else if constexpr (std::is_same_v<T, int32_t>) { oss << v; }
+    else if constexpr (std::is_same_v<T, int64_t>) { oss << v; }
+    else if constexpr (std::is_same_v<T, uint32_t>) { oss << v; }
+    else if constexpr (std::is_same_v<T, uint64_t>) { oss << v; }
+    else if constexpr (std::is_same_v<T, double>) { oss << v; }
+    else if constexpr (std::is_same_v<T, std::string>) { oss << v; }
+    else { oss << "?"; }
+  }, value);
+  return oss.str();
+}
+
 // Simple log exporter with pretty one-line format to stdout and file
 class SimpleStdoutLogExporter final : public opentelemetry::sdk::logs::LogRecordExporter {
 public:
-  explicit SimpleStdoutLogExporter(const std::string& log_file_path = "")
-      : log_file_path_(log_file_path) {
+  explicit SimpleStdoutLogExporter(const std::string& log_file_path = "",
+                                   std::shared_ptr<chat::OTelState> otel_state = nullptr)
+      : log_file_path_(log_file_path), otel_state_(std::move(otel_state)) {
     if (!log_file_path_.empty()) {
       log_file_.open(log_file_path_, std::ios::out | std::ios::trunc);
     }
@@ -128,18 +146,7 @@ public:
         if (!first) attrs << ", ";
         first = false;
         attrs << kv.first << "=";
-        // Use OwnedAttributeValue visitor
-        opentelemetry::nostd::visit([&attrs](auto&& v) {
-          using T = std::decay_t<decltype(v)>;
-          if constexpr (std::is_same_v<T, bool>) { attrs << (v ? "true" : "false"); }
-          else if constexpr (std::is_same_v<T, int32_t>) { attrs << v; }
-          else if constexpr (std::is_same_v<T, int64_t>) { attrs << v; }
-          else if constexpr (std::is_same_v<T, uint32_t>) { attrs << v; }
-          else if constexpr (std::is_same_v<T, uint64_t>) { attrs << v; }
-          else if constexpr (std::is_same_v<T, double>) { attrs << v; }
-          else if constexpr (std::is_same_v<T, std::string>) { attrs << v; }
-          else { attrs << "?"; }
-        }, kv.second);
+        attrs << FormatOwnedTelemetryValue(kv.second);
       }
 
       // Format: [SEVERITY] body {attrs}
@@ -156,6 +163,23 @@ public:
       if (log_file_.is_open()) {
         log_file_ << line.str();
         log_file_.flush();
+      }
+
+      if (otel_state_) {
+        std::lock_guard<std::mutex> lock(otel_state_->mu);
+        static uint64_t next_log_id = 1;
+        chat::LogEntry entry;
+        entry.id = next_log_id++;
+        entry.raw = line.str();
+        entry.severity = severity_text;
+        entry.body = body;
+        for (const auto& kv : log_record->GetAttributes()) {
+          entry.attributes.emplace_back(kv.first, FormatOwnedTelemetryValue(kv.second));
+        }
+        otel_state_->logs.push_back(std::move(entry));
+        while (otel_state_->logs.size() > 400) {
+          otel_state_->logs.pop_front();
+        }
       }
     }
     return opentelemetry::sdk::common::ExportResult::kSuccess;
@@ -179,6 +203,7 @@ public:
 private:
   std::string log_file_path_;
   std::ofstream log_file_;
+  std::shared_ptr<chat::OTelState> otel_state_;
 };
 
 struct RetrievalLatencyState {
@@ -188,15 +213,17 @@ struct RetrievalLatencyState {
 
 class InMemorySpanExporter final : public opentelemetry::sdk::trace::SpanExporter {
 public:
-  explicit InMemorySpanExporter(std::shared_ptr<RetrievalLatencyState> retrieval_state)
-      : retrieval_state_(std::move(retrieval_state)) {}
+  explicit InMemorySpanExporter(std::shared_ptr<RetrievalLatencyState> retrieval_state,
+                                std::shared_ptr<chat::OTelState> otel_state)
+      : retrieval_state_(std::move(retrieval_state)),
+        otel_state_(std::move(otel_state)) {}
   std::unique_ptr<opentelemetry::sdk::trace::Recordable> MakeRecordable() noexcept override {
     return std::unique_ptr<opentelemetry::sdk::trace::Recordable>(new opentelemetry::sdk::trace::SpanData());
   }
   opentelemetry::sdk::common::ExportResult Export(const opentelemetry::nostd::span<std::unique_ptr<opentelemetry::sdk::trace::Recordable>> &spans) noexcept override {
     for (const auto &span : spans) {
       if (!span) { continue; }
-      auto *span_data = static_cast<opentelemetry::sdk::trace::SpanData *>(*span);
+      auto *span_data = static_cast<opentelemetry::sdk::trace::SpanData *>(span.get());
       if (!span_data) { continue; }
       const std::string name = std::string(span_data->GetName());
       const double duration_ms = std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(span_data->GetDuration()).count();
@@ -216,10 +243,40 @@ public:
           retrieval_state_->encoder_latency_ms = retrieval_last_encode_ms_;
           if (retrieval_last_hydrate_ms_.has_value()) { retrieval_state_->retrieval_latency_ms = retrieval_db_select_ms_ + *retrieval_last_hydrate_ms_; }
         }
+      }
+
+      if (otel_state_) {
+        std::lock_guard<std::mutex> lock(otel_state_->mu);
+        static uint64_t next_trace_id = 1;
+        chat::TraceEntry entry;
+        entry.id = next_trace_id++;
+        entry.name = name;
+        entry.duration_ms = duration_ms;
+        const auto status = span_data->GetStatus();
+        switch (status) {
+          case opentelemetry::trace::StatusCode::kOk:
+            entry.status = "ok";
+            break;
+          case opentelemetry::trace::StatusCode::kError:
+            entry.status = "error";
+            break;
+          default:
+            entry.status = "unset";
+            break;
+        }
+        for (const auto &kv : span_data->GetAttributes()) {
+          entry.attributes.emplace_back(kv.first, FormatOwnedTelemetryValue(kv.second));
+        }
+        otel_state_->traces.push_back(std::move(entry));
+        while (otel_state_->traces.size() > 300) {
+          otel_state_->traces.pop_front();
+        }
+      }
+
+      if (name == "cortext.api.process_text") {
         retrieval_active_ = false;
         retrieval_last_encode_ms_.reset();
         retrieval_last_hydrate_ms_.reset();
-        continue;
       }
     }
     return opentelemetry::sdk::common::ExportResult::kSuccess;
@@ -228,6 +285,7 @@ public:
   bool Shutdown(std::chrono::microseconds) noexcept override { return true; }
 private:
   std::shared_ptr<RetrievalLatencyState> retrieval_state_;
+  std::shared_ptr<chat::OTelState> otel_state_;
   thread_local static bool retrieval_active_;
   thread_local static double retrieval_db_select_ms_;
   thread_local static std::optional<double> retrieval_last_encode_ms_;
@@ -485,7 +543,8 @@ void FinalizeChunkProbeSuccess(chat::ChunkProbeEvent& event,
                                const cortext::Cortext::Context& ctx,
                                double boundary_threshold,
                                bool boundary_score_pass,
-                               int new_memory_count) {
+                               int new_memory_count,
+                               bool interrupt_ignored_restart_cap) {
   event.in_progress = false;
   event.completed_at_ms = NowUnixMillis();
   event.encode_ms = ctx.encode_ms;
@@ -498,6 +557,7 @@ void FinalizeChunkProbeSuccess(chat::ChunkProbeEvent& event,
   event.boundary_score_pass = boundary_score_pass;
   event.should_interrupt = ctx.should_interrupt;
   event.new_memory_count = new_memory_count;
+  event.interrupt_ignored_restart_cap = interrupt_ignored_restart_cap;
   event.raw_retrieved_count = ctx.retrieved_memory.size();
   event.interrupt_gate_has_candidates = ctx.interrupt_gate_has_candidates;
   event.interrupt_gate_blocked_no_store = ctx.interrupt_gate_blocked_no_store;
@@ -517,6 +577,7 @@ void FinalizeChunkProbeSuccess(chat::ChunkProbeEvent& event,
   event.reason = chat::ClassifyChunkProbeReason({
       .should_interrupt = ctx.should_interrupt,
       .new_memory_count = new_memory_count,
+      .interrupt_ignored_restart_cap = interrupt_ignored_restart_cap,
       .at_boundary = ctx.at_boundary,
       .boundary_score_pass = boundary_score_pass,
       .interrupt_gate_has_candidates = ctx.interrupt_gate_has_candidates,
@@ -550,7 +611,8 @@ void CommitChunkProbeEvent(chat::ChunkDiagnosticsState& diagnostics,
   const auto& latest = diagnostics.recent_probes.back();
   if (latest.reason == "interrupt_triggered") {
     diagnostics.interrupts++;
-  } else if (latest.reason == "interrupt_suppressed_no_new_memories") {
+  } else if (latest.reason == "interrupt_suppressed_no_new_memories"
+             || latest.reason == "interrupt_ignored_restart_cap") {
     diagnostics.suppressed++;
   }
   if (latest.had_error) {
@@ -1402,6 +1464,7 @@ int main(int argc, char** argv) {
 
   auto status_state = std::make_shared<chat::StatusBarState>();
   auto metrics_state = std::make_shared<chat::MetricsState>();
+  auto otel_state = std::make_shared<chat::OTelState>();
   auto retrieval_latency_state = std::make_shared<RetrievalLatencyState>();
   auto last_tokens_used = std::make_shared<std::atomic<std::int64_t>>(0);
   auto last_context = std::make_shared<chat::LastContext>();
@@ -1418,7 +1481,8 @@ int main(int argc, char** argv) {
 #endif
     auto resource = resource_sdk::Resource::Create({{"service.name", "cortext_chat"}});
 
-    auto in_memory_span_exporter = std::unique_ptr<trace_sdk::SpanExporter>(new InMemorySpanExporter(retrieval_latency_state));
+    auto in_memory_span_exporter = std::unique_ptr<trace_sdk::SpanExporter>(
+        new InMemorySpanExporter(retrieval_latency_state, otel_state));
     auto in_memory_processor = std::unique_ptr<trace_sdk::SpanProcessor>(new trace_sdk::SimpleSpanProcessor(std::move(in_memory_span_exporter)));
     auto* sdk_tracer_provider = new trace_sdk::TracerProvider(std::move(in_memory_processor), resource);
 
@@ -1484,7 +1548,8 @@ int main(int argc, char** argv) {
       if (repo_root.has_value()) {
         log_file_path = (*repo_root / "examples/chat/logs.txt").string();
       }
-      auto stdout_exporter = std::unique_ptr<logs_sdk::LogRecordExporter>(new SimpleStdoutLogExporter(log_file_path));
+      auto stdout_exporter = std::unique_ptr<logs_sdk::LogRecordExporter>(
+          new SimpleStdoutLogExporter(log_file_path, otel_state));
       auto stdout_processor = logs_sdk::SimpleLogRecordProcessorFactory::Create(std::move(stdout_exporter));
       auto logger_provider = logs_sdk::LoggerProviderFactory::Create(std::move(stdout_processor), resource);
 
@@ -1673,6 +1738,7 @@ int main(int argc, char** argv) {
   window_state.status = status_state;
   window_state.settings = settings_state;
   window_state.db_explorer = db_explorer_state;
+  window_state.otel = otel_state;
   window_state.input = &input;
   window_state.generating = &generating;
   window_state.partial_response = &partial_response;
@@ -2120,7 +2186,7 @@ int main(int argc, char** argv) {
           std::unique_ptr<cortext::internal::StreamingTextProbeSession> final_probe_session;
           const auto response_started_at = std::chrono::steady_clock::now();
 
-          while (local_restarts < StreamingState::kMaxRestarts) {
+          while (local_restarts <= StreamingState::kMaxRestarts) {
             final_probe_session = std::make_unique<cortext::internal::StreamingTextProbeSession>(
                 *cortext_ctx, "chat/assistant");
             std::string probe_buffer;
@@ -2207,29 +2273,42 @@ int main(int argc, char** argv) {
                       && *ctx.boundary_score >= boundary_thresh;
 
                 int new_memory_count = 0;
-                if (ctx.at_boundary && boundary_score_pass && ctx.should_interrupt
-                    && local_restarts < StreamingState::kMaxRestarts) {
+                bool interrupt_ignored_restart_cap = false;
+                const bool restart_budget_available
+                    = local_restarts < StreamingState::kMaxRestarts;
+                if (ctx.at_boundary && boundary_score_pass
+                    && ctx.should_interrupt) {
                   {
-                    std::lock_guard<std::mutex> lock(mu);
                     const auto filtered_retrieved = FilterInjectedMemories(
                         ctx.retrieved_memory, working_memory);
-                    std::unordered_set<long long> existing_ids;
-                    for (const auto& m : streaming_state.current_memories) {
-                      existing_ids.insert(m.id);
-                    }
-                    for (const auto& m : filtered_retrieved) {
-                      if (existing_ids.find(m.id) == existing_ids.end()) {
-                        streaming_state.current_memories.push_back(m);
-                        memory_events.push_back(CreateMemoryEvent(chat::MemoryEventType::RETRIEVED, m));
-                        if (memory_events.size() > kMaxMemoryEvents) {
-                          memory_events.pop_front();
+                    if (restart_budget_available) {
+                      std::lock_guard<std::mutex> lock(mu);
+                      std::unordered_set<long long> existing_ids;
+                      for (const auto& m : streaming_state.current_memories) {
+                        existing_ids.insert(m.id);
+                      }
+                      for (const auto& m : filtered_retrieved) {
+                        if (existing_ids.find(m.id) == existing_ids.end()) {
+                          streaming_state.current_memories.push_back(m);
+                          memory_events.push_back(CreateMemoryEvent(chat::MemoryEventType::RETRIEVED, m));
+                          if (memory_events.size() > kMaxMemoryEvents) {
+                            memory_events.pop_front();
+                          }
+                          ++new_memory_count;
                         }
+                      }
+                      last_should_interrupt = (new_memory_count > 0);
+                    } else {
+                      for (const auto& m : filtered_retrieved) {
+                        (void)m;
                         ++new_memory_count;
                       }
+                      interrupt_ignored_restart_cap = (new_memory_count > 0);
+                      std::lock_guard<std::mutex> lock(mu);
+                      last_should_interrupt = false;
                     }
-                    last_should_interrupt = (new_memory_count > 0);
                   }
-                  if (new_memory_count > 0) {
+                  if (new_memory_count > 0 && restart_budget_available) {
                     cortext::telemetry::LogInfo("chat.phase2.interrupt", {
                       cortext::telemetry::Attribute::Int64("new_memories", static_cast<int64_t>(new_memory_count)),
                       cortext::telemetry::Attribute::Int64("restart", static_cast<int64_t>(local_restarts)),
@@ -2237,6 +2316,13 @@ int main(int argc, char** argv) {
                     });
                     streaming_state.cancel_requested.store(true);
                     interrupted = true;
+                  } else if (interrupt_ignored_restart_cap) {
+                    cortext::telemetry::LogInfo("chat.phase2.interrupt_ignored_restart_cap", {
+                      cortext::telemetry::Attribute::Int64("new_memories", static_cast<int64_t>(new_memory_count)),
+                      cortext::telemetry::Attribute::Int64("restart", static_cast<int64_t>(local_restarts)),
+                      cortext::telemetry::Attribute::Int64("restart_cap", static_cast<int64_t>(StreamingState::kMaxRestarts)),
+                      cortext::telemetry::Attribute::Int64("tokens_so_far", static_cast<int64_t>(accumulated.size()))
+                    });
                   } else {
                     cortext::telemetry::LogDebug("chat.phase2.interrupt_suppressed", {
                       cortext::telemetry::Attribute::Int64("raw_retrieved", static_cast<int64_t>(ctx.retrieved_memory.size())),
@@ -2247,7 +2333,8 @@ int main(int argc, char** argv) {
                 }
 
                 FinalizeChunkProbeSuccess(
-                    probe_event, ctx, boundary_thresh, boundary_score_pass, new_memory_count);
+                    probe_event, ctx, boundary_thresh, boundary_score_pass,
+                    new_memory_count, interrupt_ignored_restart_cap);
                 CommitChunkProbeEvent(
                     *chunk_diagnostics_state, std::move(probe_event), kMaxChunkProbeEvents);
               } catch (const std::exception& ex) {

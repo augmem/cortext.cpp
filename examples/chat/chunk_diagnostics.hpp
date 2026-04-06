@@ -12,6 +12,7 @@ namespace chat {
 struct ChunkProbeReasonInputs {
   bool should_interrupt = false;
   int new_memory_count = 0;
+  bool interrupt_ignored_restart_cap = false;
   bool at_boundary = false;
   bool boundary_score_pass = false;
   bool interrupt_gate_has_candidates = false;
@@ -23,6 +24,9 @@ struct ChunkProbeReasonInputs {
 };
 
 inline std::string ClassifyChunkProbeReason(const ChunkProbeReasonInputs& inputs) {
+  if (inputs.should_interrupt && inputs.interrupt_ignored_restart_cap) {
+    return "interrupt_ignored_restart_cap";
+  }
   if (inputs.should_interrupt && inputs.new_memory_count > 0) {
     return "interrupt_triggered";
   }
@@ -89,6 +93,7 @@ struct ChunkProbeEvent {
 
   bool should_interrupt = false;
   int new_memory_count = 0;
+  bool interrupt_ignored_restart_cap = false;
   std::size_t raw_retrieved_count = 0;
   std::string reason;
 

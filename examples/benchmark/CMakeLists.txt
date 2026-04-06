@@ -88,6 +88,42 @@ add_executable(cortext_subcomponent_matrix_bench
   subcomponent_matrix_bench.cpp
 )
 
+add_executable(cortext_label_persistence_ablation_bench
+  label_persistence_ablation_bench.cpp
+)
+
+add_executable(cortext_storage_eviction_budget_bench
+  storage_eviction_budget_bench.cpp
+)
+
+add_executable(cortext_storage_eviction_sweep_bench
+  storage_eviction_sweep_bench.cpp
+)
+
+add_executable(cortext_storage_consolidation_e2e_bench
+  storage_consolidation_e2e_bench.cpp
+)
+
+add_executable(cortext_storage_human_sleep_consolidation_bench
+  storage_human_sleep_consolidation_bench.cpp
+)
+
+add_executable(cortext_storage_human_sleep_token_bench
+  storage_human_sleep_token_bench.cpp
+)
+
+add_executable(cortext_extractor_prompt_ablation_bench
+  extractor_prompt_ablation_bench.cpp
+)
+
+add_executable(cortext_summarizer_prompt_ablation_bench
+  summarizer_prompt_ablation_bench.cpp
+)
+
+add_executable(cortext_summarizer_structured_ablation_bench
+  summarizer_structured_ablation_bench.cpp
+)
+
 # Include directories for local headers
 target_include_directories(cortext_benchmark PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}
@@ -150,6 +186,33 @@ target_include_directories(cortext_full_boundary_fact_unit_ablation_bench PRIVAT
   ${CMAKE_CURRENT_SOURCE_DIR}
 )
 target_include_directories(cortext_subcomponent_matrix_bench PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}
+)
+target_include_directories(cortext_label_persistence_ablation_bench PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}
+)
+target_include_directories(cortext_storage_eviction_budget_bench PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}
+)
+target_include_directories(cortext_storage_eviction_sweep_bench PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}
+)
+target_include_directories(cortext_storage_consolidation_e2e_bench PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}
+)
+target_include_directories(cortext_storage_human_sleep_consolidation_bench PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}
+)
+target_include_directories(cortext_storage_human_sleep_token_bench PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}
+)
+target_include_directories(cortext_extractor_prompt_ablation_bench PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}
+)
+target_include_directories(cortext_summarizer_prompt_ablation_bench PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}
+)
+target_include_directories(cortext_summarizer_structured_ablation_bench PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
@@ -218,6 +281,36 @@ target_link_libraries(cortext_full_boundary_fact_unit_ablation_bench PRIVATE
 )
 target_link_libraries(cortext_subcomponent_matrix_bench PRIVATE
   cortext
+)
+target_link_libraries(cortext_label_persistence_ablation_bench PRIVATE
+  cortext
+)
+target_link_libraries(cortext_storage_eviction_budget_bench PRIVATE
+  cortext
+)
+target_link_libraries(cortext_storage_eviction_sweep_bench PRIVATE
+  cortext
+)
+target_link_libraries(cortext_storage_consolidation_e2e_bench PRIVATE
+  cortext
+)
+target_link_libraries(cortext_storage_human_sleep_consolidation_bench PRIVATE
+  cortext
+)
+target_link_libraries(cortext_storage_human_sleep_token_bench PRIVATE
+  cortext
+)
+target_link_libraries(cortext_extractor_prompt_ablation_bench PRIVATE
+  cortext
+  nlohmann_json::nlohmann_json
+)
+target_link_libraries(cortext_summarizer_prompt_ablation_bench PRIVATE
+  cortext
+  nlohmann_json::nlohmann_json
+)
+target_link_libraries(cortext_summarizer_structured_ablation_bench PRIVATE
+  cortext
+  nlohmann_json::nlohmann_json
 )
 
 # Add OGA include directories and link (needed for oga_runner.cpp)
