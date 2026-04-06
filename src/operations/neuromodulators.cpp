@@ -1,5 +1,7 @@
 #include "cortext/operations/neuromodulators.hpp"
 
+#include "neuromodulator_internal.hpp"
+
 #include "cortext/core/algorithms.hpp"
 #include "cortext/core/knobs.hpp"
 #include "cortext/processor/operation_context.hpp"
@@ -67,6 +69,14 @@ UpdateNeuromodulators::Execute (OperationContext &context, Transaction &tx) cons
   p_ctx.encode_bias = encode_bias * (0.6 + 0.4 * osc_t);
   p_ctx.encode_bias = core::Clamp (p_ctx.encode_bias, 0.0, 1.0);
   p_ctx.retrieval_bias = core::Clamp (1.0 - p_ctx.encode_bias, 0.0, 1.0);
+  const double write_threshold_scale
+      = neuromodulation::WriteThresholdScale (p_ctx.neuromod_ne);
+  const double reconsolidation_scale
+      = neuromodulation::ReconsolidationScale (p_ctx.neuromod_ach);
+  const double retrieval_competition_scale
+      = neuromodulation::RetrievalCompetitionScale (p_ctx.neuromod_ne);
+  const double value_update_gain
+      = neuromodulation::ValueUpdateGain (p_ctx.neuromod_da);
 
   telemetry::LogDebug ("cortext.neuromodulators", {
     telemetry::Attribute::Double ("ACh", p_ctx.neuromod_ach),
@@ -74,6 +84,13 @@ UpdateNeuromodulators::Execute (OperationContext &context, Transaction &tx) cons
     telemetry::Attribute::Double ("DA", p_ctx.neuromod_da),
     telemetry::Attribute::Double ("encode_bias", p_ctx.encode_bias),
     telemetry::Attribute::Double ("retrieval_bias", p_ctx.retrieval_bias),
+    telemetry::Attribute::Double ("write_threshold_scale",
+                                  write_threshold_scale),
+    telemetry::Attribute::Double ("reconsolidation_scale",
+                                  reconsolidation_scale),
+    telemetry::Attribute::Double ("retrieval_competition_scale",
+                                  retrieval_competition_scale),
+    telemetry::Attribute::Double ("value_update_gain", value_update_gain),
     telemetry::Attribute::Double ("osc_phase", p_ctx.osc_phase)
   });
 }

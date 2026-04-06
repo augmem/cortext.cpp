@@ -72,6 +72,41 @@ signal_gap ← now_s() − to_s(last_signal_ts)  # seconds
 
 All behavioral thresholds, gains, and caps are derived from the three knobs (F, S, T) and/or state. Fixed numeric values are permitted only for numerical stability floors (e.g., ε(F, S, T)) and unit conversions. This keeps the system’s qualitative behavior entirely governed by the three knobs, consistent with the human-memory objective.
 
+## Temporal Semantics for Structured Facts
+
+Cortext currently treats raw memories primarily as **event-time observations**: a memory is written when a coherent unit is detected, and its stored timestamp records when that unit was observed. The phase-1 bitemporal fact layer adds a structured consolidation product that distinguishes three related but non-identical temporal notions:
+
+* **Event time:** when the source experience was observed by the system.
+* **Valid time:** when an extracted fact was true in the world.
+* **Transaction time:** when Cortext learned, inserted, corrected, or superseded that fact.
+
+For an episodic memory `m_i`, we define the event timestamp:
+
+```
+t_event(m_i) = created_at(m_i)
+```
+
+For a structured fact assertion `f_j = (subject, predicate, object)`, we define two half-open intervals:
+
+```
+valid(f_j) = [t_v_start(f_j), t_v_end(f_j))
+tx(f_j)    = [t_tx_start(f_j), t_tx_end(f_j))
+```
+
+The valid interval models when the assertion held in the world. The transaction interval models when the system regarded that assertion as active knowledge.
+
+This distinction supports three different query semantics:
+
+```
+true_at(f_j, τ)     = 1 if τ ∈ valid(f_j), else 0
+known_at(f_j, τ)    = 1 if τ ∈ tx(f_j), else 0
+current(f_j, now)   = true_at(f_j, now) ∧ known_at(f_j, now)
+```
+
+This is the core of **bitemporal modeling**: the system can separately answer "what was true then?" and "what did the system believe then?" without collapsing historical corrections into a single timeless statement.
+
+In the current alpha, Cortext's live behavior remains primarily event-driven and recency-weighted. The bitemporal formulation above is an additive structured-fact layer for evolving personal knowledge rather than a replacement for the episodic memory stream.
+
 ### Buffers {#sec-buffers}
 
 The specification uses distinct streaming buffers:

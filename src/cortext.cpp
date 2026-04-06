@@ -1,6 +1,8 @@
 #include "cortext/cortext.hpp"
 #include "cortext/internal/cancellation.hpp"
 #include "encoder/text_encoder_factory.hpp"
+#include "operations/constructive_recall_internal.hpp"
+#include "operations/meta_learning_internal.hpp"
 #include "streaming_text_probe.hpp"
 
 #include "cortext/processor.hpp"
@@ -233,6 +235,7 @@ HydrateMemory (Store *store, long long id, Cortext::Context::Memory &m)
       auto rows = store->Execute (
           "SELECT "
           "  m.memory_id, m.modality, m.source_id, m.start_ts, m.end_ts, "
+          "  m.created_at, "
           "  m.n_signals, m.s_max, m.s_avg, "
           "  m.blob_id, "
           "  COALESCE(m.retrieved_count, 0) AS retrieved_count, "
@@ -295,19 +298,40 @@ HydrateMemory (Store *store, long long id, Cortext::Context::Memory &m)
           m.modality = get_s ("modality");
           m.mimetype = get_s ("signal_mime");  // Get from first signal
           m.source_id = get_s ("source_id");
-          m.timestamp = static_cast<std::uint64_t> (get_ll ("end_ts"));
+          const long long end_ts = get_ll ("end_ts");
+          const long long start_ts = get_ll ("start_ts");
+          const long long created_at = get_ll ("created_at");
+          const long long timestamp
+              = end_ts > 0 ? end_ts
+                           : (start_ts > 0 ? start_ts : created_at);
+          m.timestamp = static_cast<std::uint64_t> (timestamp);
 
-          // v2: Load content blobs from signals table (ordered by serial_position)
-          LoadSignalBlobs (store, memory_id, m.content);
+          const auto reconstruction
+              = operations::constructive_recall::LoadLatestReconstruction (
+                  store, memory_id);
+          if (reconstruction.has_value () && !reconstruction->blob_id.empty ())
+            {
+              std::vector<unsigned char> payload;
+              if (LoadObjstorePayload (store, reconstruction->blob_id, payload))
+                {
+                  m.content.push_back (std::move (payload));
+                }
+            }
+
           if (m.content.empty ())
             {
-              const auto blob_id = get_blob ("blob_id");
-              if (!blob_id.empty ())
+              // v2: Load content blobs from signals table (ordered by serial_position)
+              LoadSignalBlobs (store, memory_id, m.content);
+              if (m.content.empty ())
                 {
-                  std::vector<unsigned char> payload;
-                  if (LoadObjstorePayload (store, blob_id, payload))
+                  const auto blob_id = get_blob ("blob_id");
+                  if (!blob_id.empty ())
                     {
-                      m.content.push_back (std::move (payload));
+                      std::vector<unsigned char> payload;
+                      if (LoadObjstorePayload (store, blob_id, payload))
+                        {
+                          m.content.push_back (std::move (payload));
+                        }
                     }
                 }
             }
@@ -365,7 +389,8 @@ HydrateWorkingMemoryFromDB (Store *store,
       auto rows = store->Execute (
           "SELECT m.memory_id, m.source_id, m.modality, m.start_ts, "
           "       m.strength, m.last_access, m.n_signals, "
-          "       m.s_max, m.s_avg, "
+          "       m.s_max, m.s_avg, m.s_arousal_avg, "
+          "       m.retrieved_count, m.used_count, "
           "       (SELECT s.mime FROM signals s WHERE s.memory_id = m.memory_id "
           "        ORDER BY s.serial_position LIMIT 1) AS signal_mime "
           "FROM memories m "
@@ -425,6 +450,9 @@ HydrateWorkingMemoryFromDB (Store *store,
           // Map WM metrics to Memory struct
           m.composite_score = get_dbl ("s_avg", 0.0);
           m.salience = get_dbl ("s_max", 0.0);
+          m.arousal = get_dbl ("s_arousal_avg", 0.0);
+          m.retrieved_count = get_ll ("retrieved_count");
+          m.used_count = get_ll ("used_count");
 
           // v2: Load content blobs from signals table (ordered by serial_position)
           LoadSignalBlobs (store, m.id, m.content);
@@ -488,6 +516,7 @@ BuildPipelineRoot (bool probe_mode)
   using cortext::operations::InitializeSensitivityPriors;
   using cortext::operations::InitializeStabilityPriors;
   using cortext::operations::MemoryStorage;
+  using cortext::operations::ApplyMetaLearning;
   using cortext::operations::MetacognitiveMonitoring;
   using cortext::operations::PersistSignalMetrics;
   using cortext::operations::ProcessExtractionResults;
@@ -590,6 +619,7 @@ BuildPipelineRoot (bool probe_mode)
   pipeline->Add (std::make_unique<ProcessExtractionResults> ());
   pipeline->Add (std::make_unique<BuildGraphFromConsolidation> ());
   pipeline->Add (std::make_unique<PropagateEmotionalCascade> ());
+  pipeline->Add (std::make_unique<ApplyMetaLearning> ());
   return pipeline;
 }
 

@@ -2,6 +2,8 @@
 #include <Eigen/Dense>
 #include "test_helpers.hpp"
 #include <catch2/catch_test_macros.hpp>
+#include <cortext/core/algorithms.hpp>
+#include <cortext/core/utils.hpp>
 #include <cortext/operations/reconsolidation.hpp>
 #include <cortext/processor.hpp>
 #include <cortext/processor/operation_context.hpp>
@@ -77,6 +79,21 @@ public:
 private:
   Eigen::VectorXf cur_;
   std::unordered_map<long long, Eigen::VectorXf> retrieved_;
+};
+
+class SetNeuromodAchOp : public IOperation
+{
+public:
+  explicit SetNeuromodAchOp (double ach) : ach_ (ach) {}
+
+  void
+  Execute (OperationContext &ctx, Transaction & /*tx*/) const override
+  {
+    ctx.GetProcessorContext ().neuromod_ach = ach_;
+  }
+
+private:
+  double ach_ = 0.0;
 };
 
 // Assert u_t increased from baseline 0.
@@ -247,6 +264,62 @@ TEST_CASE ("Alg20 bumps uncertainty with positive drift",
   REQUIRE (rows.size () == 1);
   REQUIRE (std::any_cast<double> (rows[0].at ("lability_state")) > 0.0);
   REQUIRE (std::any_cast<long long> (rows[0].at ("lability_ts")) == 7LL);
+}
+
+TEST_CASE ("High ACh increases reconsolidation drift",
+           "[operations][recon][neuromod]")
+{
+  auto run_case = [] (bool disable_scale) {
+    auto unique_store = cortext::SQLiteStore::Create (":memory:");
+    auto store = std::shared_ptr<cortext::Store> (std::move (unique_store));
+
+    SignalProcessor::Config cfg;
+    cortext::testing::RequireEncoder (cfg);
+    cfg.focus = 0.5;
+    cfg.sensitivity = 1.0;
+    cfg.stability = 0.0;
+
+    Eigen::VectorXf current = MakeUnitVec256 (0);
+    current[1] = 0.9f;
+    current.normalize ();
+    const Eigen::VectorXf mem = MakeUnitVec256 (0);
+
+    auto seed = std::make_unique<SeedEmbeddingsOp> (
+        std::unordered_map<long long, Eigen::VectorXf>{ { 9LL, mem } });
+    auto setup = std::make_unique<SetupReconInputsOp> (
+        current, std::unordered_map<long long, Eigen::VectorXf>{ { 9LL, mem } });
+    auto set_ach = std::make_unique<SetNeuromodAchOp> (1.0);
+    auto apply = std::make_unique<ApplyReconsolidation> ();
+    auto ops = std::make_unique<cortext::OperationSet> (
+        std::move (seed), std::move (setup), std::move (set_ach),
+        std::move (apply));
+
+    cortext::SignalProcessor processor (cfg, store, std::move (ops));
+    cortext::testing::ScopedEnvVar disable_constructive (
+        "CORTEXT_DISABLE_CONSTRUCTIVE_RECALL", "1");
+    std::optional<cortext::testing::ScopedEnvVar> disable_scale_guard;
+    if (disable_scale)
+      {
+        disable_scale_guard.emplace (
+            "CORTEXT_DISABLE_NEUROMOD_RECONSOLIDATION_SCALE", "1");
+      }
+    processor.Process (MakeSignal (current, 100));
+    processor.Flush ();
+
+    auto rows = store->Execute (
+        "SELECT embedding FROM embeddings WHERE embedding_id = ?",
+        { 9LL });
+    REQUIRE (rows.size () == 1);
+    Eigen::VectorXf updated;
+    const bool decoded = cortext::core::DecodeFloatBlob (
+        rows[0].at ("embedding"), kEmbeddingDim, updated);
+    REQUIRE (decoded);
+    return core::CosineSimilarity (updated, current);
+  };
+
+  const double sim_scaled = run_case (false);
+  const double sim_unscaled = run_case (true);
+  REQUIRE (sim_scaled > sim_unscaled);
 }
 
 // --- Ripple Effect Tests ---

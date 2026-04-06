@@ -7,6 +7,7 @@
 #include <Eigen/Dense>
 #include <any>
 #include <chrono>
+#include <cstdlib>
 #include <map>
 #include <memory>
 #include <string>
@@ -14,6 +15,44 @@
 
 namespace cortext::testing
 {
+
+class ScopedEnvVar
+{
+public:
+  explicit ScopedEnvVar (const char *name) : name_ (name)
+  {
+    const char *existing = std::getenv (name);
+    if (existing != nullptr)
+      {
+        had_value_ = true;
+        old_value_ = existing;
+      }
+    unsetenv (name_);
+  }
+
+  ScopedEnvVar (const char *name, const std::string &value)
+      : ScopedEnvVar (name)
+  {
+    setenv (name_, value.c_str (), 1);
+  }
+
+  ~ScopedEnvVar ()
+  {
+    if (had_value_)
+      {
+        setenv (name_, old_value_.c_str (), 1);
+      }
+    else
+      {
+        unsetenv (name_);
+      }
+  }
+
+private:
+  const char *name_;
+  bool had_value_ = false;
+  std::string old_value_;
+};
 
 class TestEncoder : public Encoder
 {

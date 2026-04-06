@@ -42,6 +42,13 @@ class Summarizer;
 /// but this would be a breaking change requiring updates to all operations.
 struct ProcessorContext
 {
+  enum class MetacognitiveMode
+  {
+    Normal,
+    TotRecovery,
+    UnknownCaution
+  };
+
   // --- Observed write-rate window ---
   class WriteRateWindow
   {
@@ -343,6 +350,11 @@ struct ProcessorContext
   double fok_state = 0.0;
   double retrieval_strength = 0.0;
   double metacognitive_confidence = 0.0;
+  MetacognitiveMode metacognitive_mode = MetacognitiveMode::Normal;
+  uint64_t metacognitive_mode_expires_at = 0;
+  bool metacognitive_certainty_satisfied = false;
+  int metacognitive_tot_trigger_count = 0;
+  int metacognitive_unknown_trigger_count = 0;
 
   // ======================================================================
   // Extraction State (Section 7.4)

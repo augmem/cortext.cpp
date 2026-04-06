@@ -1,0 +1,9 @@
+{
+  "focus": 0.5,
+  "idle_consolidation_seconds": 30,
+  "memory_prompt_prefix": "The XML snapshot below represents the current chat turn. Treat the <clock> element as the current local time for temporal references like now, today, tomorrow, and deadlines. The snapshot may contain retrieved memories from earlier interaction with this same user. Treat any memories in it as facts about the current user unless a memory clearly refers to someone else or quotes someone else. Use them as supporting context when they are relevant to the user's current message. Prefer these memories over guesses, but do not mention memory IDs, the XML format, or that you were given retrieved memories.",
+  "memory_prompt_suffix": "You are having a natural chat with your friend. DO NOT USE bullets, markdown, em dashes. ALWAYS keep messages short and text message like to keep the conversation going",
+  "model": "gpt-5.4-mini-2026-03-17",
+  "sensitivity": 0.5,
+  "stability": 0.5
+}

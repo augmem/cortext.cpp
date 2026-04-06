@@ -33,10 +33,10 @@ EnvFlag (const char *name)
 void
 ApplyEmotionalConsolidation::Execute (OperationContext &context, Transaction &tx) const
 {
-  static const bool disable_percentile
+  const bool disable_percentile
       = EnvFlag ("CORTEXT_FLASHBULB_DISABLE_PERCENTILE");
-  static const bool disable_rate = EnvFlag ("CORTEXT_FLASHBULB_DISABLE_RATE");
-  static const bool disable_arousal
+  const bool disable_rate = EnvFlag ("CORTEXT_FLASHBULB_DISABLE_RATE");
+  const bool disable_arousal
       = EnvFlag ("CORTEXT_FLASHBULB_DISABLE_AROUSAL");
 
   const auto &cfg = context.GetConfig ();
@@ -89,14 +89,15 @@ ApplyEmotionalConsolidation::Execute (OperationContext &context, Transaction &tx
       = core::FlashbulbThresholdEff (S, mem_emotion_adj, mem_arousal);
   auto &p_ctx = context.GetProcessorContext ();
   const double flashbulb_target = core::Lerp (0.02, 0.06, S_eff);
-  const double flashbulb_gain = core::Lerp (1.0, 0.6, S_eff);
-  const double rate_adjust = disable_rate
-                                 ? 1.0
-                                 : core::Clamp (
-                                       1.0 + flashbulb_gain
-                                                  * (p_ctx.flashbulb_rate_ewma
-                                                     - flashbulb_target),
-                                       0.8, 1.2);
+  const double rate_gain = core::Lerp (1.0, 0.6, S_eff);
+  // The rate controller is intentionally one-sided: it only suppresses
+  // over-frequent flashbulbs and must not weaken the percentile exception gate.
+  const double flashbulb_rate_excess
+      = disable_rate
+            ? 0.0
+            : std::max (0.0, p_ctx.flashbulb_rate_ewma - flashbulb_target);
+  const double rate_adjust
+      = core::Clamp (1.0 + rate_gain * flashbulb_rate_excess, 1.0, 1.2);
   double flashbulb_threshold_adj = flashbulb_threshold * rate_adjust;
   const double percentile = core::FlashbulbPercentile (S);
   const auto &emo_hist = p_ctx.recent_emotion_intensities;
@@ -106,7 +107,7 @@ ApplyEmotionalConsolidation::Execute (OperationContext &context, Transaction &tx
       const size_t idx = static_cast<size_t> (
           std::round (percentile * (sorted.size () - 1)));
       std::nth_element (sorted.begin (), sorted.begin () + idx, sorted.end ());
-      const double percentile_threshold = sorted[idx] * rate_adjust;
+      const double percentile_threshold = sorted[idx];
       flashbulb_threshold_adj
           = std::max (flashbulb_threshold_adj, percentile_threshold);
     }

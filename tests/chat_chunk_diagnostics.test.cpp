@@ -21,6 +21,21 @@ TEST_CASE("Chunk probe reason classifier follows streaming debug priority",
     }) == "interrupt_triggered");
   }
 
+  SECTION("restart-cap ignore is reported before trigger classification") {
+    REQUIRE(ClassifyChunkProbeReason({
+        .should_interrupt = true,
+        .new_memory_count = 2,
+        .interrupt_ignored_restart_cap = true,
+        .at_boundary = true,
+        .boundary_score_pass = true,
+        .interrupt_gate_has_candidates = true,
+        .interrupt_gate_rel_pass = true,
+        .interrupt_gate_novelty_mu_pass = true,
+        .interrupt_gate_dup_pass = true,
+        .interrupt_gate_boundary_mu_pass = true,
+    }) == "interrupt_ignored_restart_cap");
+  }
+
   SECTION("suppressed interrupt wins before gate failure reasons") {
     REQUIRE(ClassifyChunkProbeReason({
         .should_interrupt = true,

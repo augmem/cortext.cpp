@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -22,6 +23,17 @@ struct ExtractedRelation
   std::string predicate; ///< "works_at", "is_a", "causes", etc.
   std::string object;
   double confidence;     ///< [0,1] extraction confidence
+};
+
+/// @brief Fact assertion extracted from consolidated text.
+struct ExtractedFact
+{
+  std::string subject;
+  std::string predicate;
+  std::string object;
+  double confidence = 0.5; ///< [0,1] extraction confidence
+  std::optional<std::uint64_t> valid_start_ts;
+  std::optional<std::uint64_t> valid_end_ts;
 };
 
 /// @brief Request for external LLM extraction.
@@ -46,6 +58,7 @@ struct ExtractionResult
   std::string summary_id;
   std::vector<ExtractedLabel> labels;
   std::vector<ExtractedRelation> relations;
+  std::vector<ExtractedFact> facts;
 };
 
 /// @brief Callback type for extraction requests.

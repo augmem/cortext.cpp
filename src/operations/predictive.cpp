@@ -87,6 +87,16 @@ ApplyPredictivePreActivation::Execute (OperationContext &context, Transaction &t
 {
   auto &p_ctx = context.GetProcessorContext ();
   const auto &cfg = context.GetConfig ();
+  const double pad = PreActivationDecay (cfg.stability);
+
+  // Keep predictive state transient by decaying prior pre-activation every turn.
+  tx.Execute ("UPDATE memories "
+              "SET pre_activation = CASE "
+              "  WHEN COALESCE(pre_activation, 0.0) <= 1e-6 THEN 0.0 "
+              "  ELSE COALESCE(pre_activation, 0.0) * ? "
+              "END "
+              "WHERE COALESCE(pre_activation, 0.0) > 0.0;",
+              { pad });
 
   // Need some recent context to estimate a trajectory.
   if (p_ctx.recent_context_embeddings.empty ())
@@ -123,7 +133,6 @@ ApplyPredictivePreActivation::Execute (OperationContext &context, Transaction &t
     }
 
   const double conf_thresh = PredictionConfidenceThreshold (cfg.focus);
-  const double pad = PreActivationDecay (cfg.stability);
   // Base delta in ~[0.012, 0.02]
   const double base_delta = kBaseDeltaScale * (1.0 - (pad - kPadRef));
   const double s_eff = core::SensitivityBias (cfg.sensitivity);

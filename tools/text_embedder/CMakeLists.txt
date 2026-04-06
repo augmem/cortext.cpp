@@ -4,6 +4,7 @@ add_executable(cortext_text_embedder
 
 target_link_libraries(cortext_text_embedder PRIVATE cortext nlohmann_json::nlohmann_json)
 target_compile_features(cortext_text_embedder PRIVATE cxx_std_20)
+target_include_directories(cortext_text_embedder PRIVATE ${CMAKE_SOURCE_DIR}/src)
 
 if (MSVC)
   target_compile_options(cortext_text_embedder PRIVATE /W4)

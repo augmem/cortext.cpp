@@ -215,3 +215,44 @@ TEST_CASE ("ComputeWriteGate populates recent_memory_centroids on accept",
   // Section 8.2: recent_memory_centroids should be populated
   REQUIRE (pctx.recent_memory_centroids.size () == before_size + 1);
 }
+
+TEST_CASE ("ComputeWriteGate lowers threshold under high NE",
+           "[operations][write_gate][neuromod]")
+{
+  Signal s;
+  s.embedding = Eigen::VectorXf::Ones (kEmbeddingDim);
+  s.embedding.normalize ();
+  s.timestamp = 100000;
+  s.source_id = "test";
+
+  ProcessorContext pctx;
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  cfg.focus = 0.5;
+  cfg.sensitivity = 0.5;
+  cfg.stability = 0.5;
+
+  SetupAccumulatorState (pctx, s, 0.5, 1.0, 2);
+  pctx.neuromod_ne = 1.0;
+
+  OperationContext ctx (s, pctx, cfg);
+  ctx.SetFlushRequired (true);
+  ctx.SetThresholdTDynamic (0.6);
+
+  ComputeWriteGate op;
+  op.Execute (ctx, cortext::testing::GetNullTransaction ());
+  REQUIRE (ctx.GetAccumulatorWriteDecision () == true);
+
+  {
+    cortext::testing::ScopedEnvVar disable (
+        "CORTEXT_DISABLE_NEUROMOD_WRITE_SCALE", "1");
+    ProcessorContext baseline_pctx;
+    SetupAccumulatorState (baseline_pctx, s, 0.5, 1.0, 2);
+    baseline_pctx.neuromod_ne = 1.0;
+    OperationContext baseline_ctx (s, baseline_pctx, cfg);
+    baseline_ctx.SetFlushRequired (true);
+    baseline_ctx.SetThresholdTDynamic (0.6);
+    op.Execute (baseline_ctx, cortext::testing::GetNullTransaction ());
+    REQUIRE (baseline_ctx.GetAccumulatorWriteDecision () == false);
+  }
+}
