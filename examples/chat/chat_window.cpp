@@ -54,6 +54,25 @@ std::string FormatPercent(double v) {
   return ss.str();
 }
 
+std::string FormatPromptRatio(std::int64_t baseline, std::int64_t current) {
+  if (baseline <= 0 || current <= 0) {
+    return "-";
+  }
+  std::ostringstream ss;
+  if (current < baseline) {
+    ss << std::fixed << std::setprecision(1)
+       << (static_cast<double>(baseline) / static_cast<double>(current))
+       << "x smaller";
+  } else if (current > baseline) {
+    ss << std::fixed << std::setprecision(1)
+       << (static_cast<double>(current) / static_cast<double>(baseline))
+       << "x larger";
+  } else {
+    ss << "same";
+  }
+  return ss.str();
+}
+
 bool NearlyEqual(double a, double b) {
   return std::abs(a - b) < 1e-6;
 }
@@ -326,27 +345,24 @@ void ChatWindow::Render() {
       RenderChatTab();
       break;
     case 1:
-      RenderChunksTab();
+      RenderEventsTab();
       break;
     case 2:
       RenderMetricsTab();
       break;
     case 3:
-      RenderMemoryTab();
-      break;
-    case 4:
       RenderSettingsTab();
       break;
-    case 5:
+    case 4:
       RenderDatabaseTab();
       break;
-    case 6:
+    case 5:
       RenderGraphTab();
       break;
-    case 7:
+    case 6:
       RenderContextTab();
       break;
-    case 8:
+    case 7:
       RenderLogsTab();
       break;
   }
@@ -364,7 +380,7 @@ void ChatWindow::RenderTabBar() {
       selected_tab_ = 0;
       ImGui::EndTabItem();
     }
-    if (ImGui::BeginTabItem("Stream")) {
+    if (ImGui::BeginTabItem("Events")) {
       selected_tab_ = 1;
       ImGui::EndTabItem();
     }
@@ -372,32 +388,35 @@ void ChatWindow::RenderTabBar() {
       selected_tab_ = 2;
       ImGui::EndTabItem();
     }
-    if (ImGui::BeginTabItem("Memory")) {
+    if (ImGui::BeginTabItem("Settings")) {
       selected_tab_ = 3;
       ImGui::EndTabItem();
     }
-    if (ImGui::BeginTabItem("Settings")) {
+    if (ImGui::BeginTabItem("DB")) {
       selected_tab_ = 4;
       ImGui::EndTabItem();
     }
-    if (ImGui::BeginTabItem("DB")) {
+    if (ImGui::BeginTabItem("Graph")) {
       selected_tab_ = 5;
       ImGui::EndTabItem();
     }
-    if (ImGui::BeginTabItem("Graph")) {
+    if (ImGui::BeginTabItem("Context")) {
       selected_tab_ = 6;
       ImGui::EndTabItem();
     }
-    if (ImGui::BeginTabItem("Context")) {
-      selected_tab_ = 7;
-      ImGui::EndTabItem();
-    }
     if (ImGui::BeginTabItem("Telemetry")) {
-      selected_tab_ = 8;
+      selected_tab_ = 7;
       ImGui::EndTabItem();
     }
     ImGui::EndTabBar();
   }
+}
+
+void ChatWindow::RenderEventsTab() {
+  RenderChunksTab();
+  ImGui::Separator();
+  ImGui::Spacing();
+  RenderMemoryTab();
 }
 
 void ChatWindow::RenderChatTab() {
@@ -669,6 +688,19 @@ void ChatWindow::RenderMetricsTab() {
       ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "%s",
                          sample.error_message.c_str());
     }
+    ImGui::TextColored(
+        ImVec4(0.8f, 0.8f, 1.0f, 1.0f),
+        "prompt compare: full-history=%lld simple-rag=%lld cortext=%lld",
+        static_cast<long long>(sample.full_history_prompt_tokens),
+        static_cast<long long>(sample.rag_prompt_tokens),
+        static_cast<long long>(sample.cortext_prompt_tokens));
+    ImGui::TextColored(
+        ImVec4(0.7f, 0.7f, 0.7f, 1.0f),
+        "full-history vs cortext: %s | simple-rag vs cortext: %s",
+        FormatPromptRatio(sample.full_history_prompt_tokens,
+                          sample.cortext_prompt_tokens).c_str(),
+        FormatPromptRatio(sample.rag_prompt_tokens,
+                          sample.cortext_prompt_tokens).c_str());
   } else {
     ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f),
                        "(no response metrics yet)");
@@ -717,6 +749,15 @@ void ChatWindow::RenderMetricsTab() {
     const auto total_tokens = BuildPlotValues(response_history, [](const auto& s) {
       return s.usage.total_tokens;
     });
+    const auto cortext_prompt_compare = BuildPlotValues(response_history, [](const auto& s) {
+      return s.cortext_prompt_tokens;
+    });
+    const auto rag_prompt_compare = BuildPlotValues(response_history, [](const auto& s) {
+      return s.rag_prompt_tokens;
+    });
+    const auto full_history_prompt_compare = BuildPlotValues(response_history, [](const auto& s) {
+      return s.full_history_prompt_tokens;
+    });
     const auto prompt_tokens = BuildPlotValues(response_history, [](const auto& s) {
       return s.usage.prompt_tokens;
     });
@@ -757,6 +798,15 @@ void ChatWindow::RenderMetricsTab() {
       PlotSeriesIfAvailable("total", response_xs, total_tokens);
       PlotSeriesIfAvailable("prompt", response_xs, prompt_tokens);
       PlotSeriesIfAvailable("completion", response_xs, completion_tokens);
+      ImPlot::EndPlot();
+    }
+
+    if (ImPlot::BeginPlot("Prompt strategy comparison", ImVec2(-1, 220))) {
+      SetupHistoryAxes("est. prompt tokens");
+      ImPlot::SetupLegend(ImPlotLocation_NorthWest, ImPlotLegendFlags_None);
+      PlotSeriesIfAvailable("full history", response_xs, full_history_prompt_compare);
+      PlotSeriesIfAvailable("simple rag", response_xs, rag_prompt_compare);
+      PlotSeriesIfAvailable("cortext", response_xs, cortext_prompt_compare);
       ImPlot::EndPlot();
     }
 
@@ -809,7 +859,7 @@ void ChatWindow::RenderMetricsTab() {
   ImGui::TextColored(ImVec4(0.8f, 0.8f, 1.0f, 1.0f), "Recent responses");
   if (response_history.empty()) {
     ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "(no responses yet)");
-  } else if (ImGui::BeginTable("MetricsResponses", 8,
+  } else if (ImGui::BeginTable("MetricsResponses", 9,
                                ImGuiTableFlags_Borders
                                    | ImGuiTableFlags_RowBg
                                    | ImGuiTableFlags_ScrollY,
@@ -820,6 +870,7 @@ void ChatWindow::RenderMetricsTab() {
     ImGui::TableSetupColumn("wall");
     ImGui::TableSetupColumn("phase1");
     ImGui::TableSetupColumn("phase3");
+    ImGui::TableSetupColumn("compare");
     ImGui::TableSetupColumn("interrupts");
     ImGui::TableSetupColumn("notes");
     ImGui::TableHeadersRow();
@@ -841,6 +892,11 @@ void ChatWindow::RenderMetricsTab() {
       ImGui::Text("%s", FormatDouble(sample.phase1_total_ms).c_str());
       ImGui::TableNextColumn();
       ImGui::Text("%s", FormatDouble(sample.phase3_total_ms).c_str());
+      ImGui::TableNextColumn();
+      ImGui::Text("fh=%lld rag=%lld ctx=%lld",
+                  static_cast<long long>(sample.full_history_prompt_tokens),
+                  static_cast<long long>(sample.rag_prompt_tokens),
+                  static_cast<long long>(sample.cortext_prompt_tokens));
       ImGui::TableNextColumn();
       ImGui::Text("%d/%d (%s)", sample.interrupt_count, sample.probe_count,
                   FormatPercent(sample.interrupt_rate).c_str());
@@ -1851,15 +1907,18 @@ void ChatWindow::RenderContextTab() {
   }
 
   // Messages Section (derived from working memory; no local history)
-  if (ImGui::CollapsingHeader("Messages (Working Memory)", ImGuiTreeNodeFlags_DefaultOpen)) {
+  if (ImGui::CollapsingHeader("Provider Messages", ImGuiTreeNodeFlags_DefaultOpen)) {
     ImGui::BeginChild("Messages", ImVec2(0, 300), true);
-    const auto messages = BuildMessagesFromWorkingMemory(*state_.working_memory);
+    const auto& messages = state_.context->provider_messages;
     for (size_t i = 0; i < messages.size(); ++i) {
       const auto& msg = messages[i];
       ImGui::TextColored(RoleColor(msg.role), "[%zu] %s:", i, RolePrefix(msg.role).c_str());
       std::string content = Truncate(msg.content, 500);
       ImGui::TextWrapped("%s", content.c_str());
       ImGui::Separator();
+    }
+    if (messages.empty()) {
+      ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "(no provider messages captured)");
     }
     ImGui::EndChild();
   }

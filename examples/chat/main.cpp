@@ -1176,7 +1176,7 @@ std::string FormatLocalDateTime(
 #endif
 
   std::ostringstream oss;
-  oss << std::put_time(&local_tm, "%Y-%m-%dT%H:%M:%S%z");
+  oss << std::put_time(&local_tm, "%A, %B %d, %Y at %I:%M:%S %p %Z");
   return oss.str();
 }
 
@@ -1199,7 +1199,7 @@ SnapshotClock SnapshotClockNow() {
   SnapshotClock clock;
   {
     std::ostringstream oss;
-    oss << std::put_time(&local_tm, "%Y-%m-%d");
+    oss << std::put_time(&local_tm, "%A, %B %d, %Y");
     clock.date = oss.str();
   }
   {
@@ -1332,6 +1332,55 @@ Json BuildOpenAIMessages(const std::vector<cortext::Cortext::Context::Memory>& w
   return messages;
 }
 
+template <typename Json>
+Json BuildFullHistoryMessages(const std::deque<chat::ChatMessage>& chat_history) {
+  Json messages = Json::array();
+  for (const auto& msg : chat_history) {
+    if (msg.role.empty() || msg.content.empty()) {
+      continue;
+    }
+    messages.push_back({{"role", msg.role}, {"content", msg.content}});
+  }
+  return messages;
+}
+
+std::string BuildSimpleRagSystemPrompt(
+    const std::vector<cortext::Cortext::Context::Memory>& retrieved_memories,
+    std::size_t max_memories = 5) {
+  std::ostringstream oss;
+  oss << "Relevant notes from prior conversation. Use them when helpful, but answer the current user directly.\n";
+  std::size_t emitted = 0;
+  for (const auto& mem : retrieved_memories) {
+    if (emitted >= max_memories) {
+      break;
+    }
+    const std::string text = ExtractTextFromBlobs(mem.content);
+    if (text.empty()) {
+      continue;
+    }
+    oss << "- " << text << "\n";
+    ++emitted;
+  }
+  return oss.str();
+}
+
+template <typename Json>
+Json BuildSimpleRagMessages(
+    const std::vector<cortext::Cortext::Context::Memory>& retrieved_memories,
+    const std::string& latest_user_input,
+    std::size_t max_memories = 5) {
+  Json messages = Json::array();
+  const std::string system_prompt
+      = BuildSimpleRagSystemPrompt(retrieved_memories, max_memories);
+  if (!system_prompt.empty()) {
+    messages.push_back({{"role", "system"}, {"content", system_prompt}});
+  }
+  if (!latest_user_input.empty()) {
+    messages.push_back({{"role", "user"}, {"content", latest_user_input}});
+  }
+  return messages;
+}
+
 std::size_t CountOpenAIContentChars(const openai::Json& content) {
   if (content.is_string()) {
     return content.get_ref<const std::string&>().size();
@@ -1374,6 +1423,47 @@ std::size_t CountOpenAIMessageChars(const openai::Json& messages) {
     }
   }
   return chars;
+}
+
+std::vector<chat::ProviderMessageSnapshot>
+BuildProviderMessageSnapshot(const openai::Json& messages) {
+  std::vector<chat::ProviderMessageSnapshot> out;
+  if (!messages.is_array()) {
+    return out;
+  }
+  out.reserve(messages.size());
+  for (const auto& message : messages) {
+    if (!message.is_object()) {
+      continue;
+    }
+    chat::ProviderMessageSnapshot snapshot;
+    if (message.contains("role") && message["role"].is_string()) {
+      snapshot.role = message["role"].get<std::string>();
+    }
+    if (snapshot.role == "system") {
+      continue;
+    }
+    if (message.contains("content")) {
+      if (message["content"].is_string()) {
+        snapshot.content = message["content"].get<std::string>();
+      } else if (message["content"].is_array()) {
+        for (const auto& item : message["content"]) {
+          if (item.is_string()) {
+            snapshot.content += item.get<std::string>();
+          } else if (item.is_object()
+                     && item.contains("text")
+                     && item["text"].is_string()) {
+            if (!snapshot.content.empty()) {
+              snapshot.content += "\n";
+            }
+            snapshot.content += item["text"].get<std::string>();
+          }
+        }
+      }
+    }
+    out.push_back(std::move(snapshot));
+  }
+  return out;
 }
 
 struct ChunkDiagnosticsCounters {
@@ -2183,6 +2273,12 @@ int main(int argc, char** argv) {
           chat::UsageAccumulator usage_accumulator;
           bool had_stream_error = false;
           std::string stream_error_message;
+          std::int64_t current_turn_cortext_prompt_tokens = 0;
+          std::int64_t current_turn_rag_prompt_tokens = 0;
+          std::int64_t current_turn_full_history_prompt_tokens = 0;
+          std::size_t current_turn_cortext_prompt_chars = 0;
+          std::size_t current_turn_rag_prompt_chars = 0;
+          std::size_t current_turn_full_history_prompt_chars = 0;
           std::unique_ptr<cortext::internal::StreamingTextProbeSession> final_probe_session;
           const auto response_started_at = std::chrono::steady_clock::now();
 
@@ -2192,10 +2288,15 @@ int main(int argc, char** argv) {
             std::string probe_buffer;
             std::string memory_prompt_prefix;
             std::string memory_prompt_suffix;
+            std::deque<chat::ChatMessage> chat_history_snapshot;
             {
               std::lock_guard<std::mutex> lock(settings_state->mu);
               memory_prompt_prefix = settings_state->active_memory_prompt_prefix;
               memory_prompt_suffix = settings_state->active_memory_prompt_suffix;
+            }
+            {
+              std::lock_guard<std::mutex> lock(mu);
+              chat_history_snapshot = chat_history;
             }
             const std::string injected_system
                 = BuildInjectedSystemPrompt(streaming_state.current_memories,
@@ -2204,11 +2305,43 @@ int main(int argc, char** argv) {
 
             using Json = openai::Json;
             Json messages = BuildOpenAIMessages<Json>(retrieved.working_memory, injected_system, text);
+            Json full_history_messages = BuildFullHistoryMessages<Json>(chat_history_snapshot);
+            Json rag_messages = BuildSimpleRagMessages<Json>(streaming_state.current_memories, text);
             const std::size_t prompt_chars = CountOpenAIMessageChars(messages);
+            const std::size_t full_history_prompt_chars
+                = CountOpenAIMessageChars(full_history_messages);
+            const std::size_t rag_prompt_chars = CountOpenAIMessageChars(rag_messages);
+            current_turn_cortext_prompt_chars = prompt_chars;
+            current_turn_rag_prompt_chars = rag_prompt_chars;
+            current_turn_full_history_prompt_chars = full_history_prompt_chars;
+            current_turn_cortext_prompt_tokens
+                = chat::EstimateTokenCountFromChars(prompt_chars);
+            current_turn_rag_prompt_tokens
+                = chat::EstimateTokenCountFromChars(rag_prompt_chars);
+            current_turn_full_history_prompt_tokens
+                = chat::EstimateTokenCountFromChars(full_history_prompt_chars);
 
             {
               std::lock_guard<std::mutex> lock(last_context->mu);
               last_context->system_prompt = injected_system;
+              last_context->provider_messages
+                  = BuildProviderMessageSnapshot(messages);
+              last_context->prompt_costs.cortext_prompt_chars = prompt_chars;
+              last_context->prompt_costs.rag_prompt_chars = rag_prompt_chars;
+              last_context->prompt_costs.full_history_prompt_chars
+                  = full_history_prompt_chars;
+              last_context->prompt_costs.cortext_prompt_tokens
+                  = chat::EstimateTokenCountFromChars(prompt_chars);
+              last_context->prompt_costs.rag_prompt_tokens
+                  = chat::EstimateTokenCountFromChars(rag_prompt_chars);
+              last_context->prompt_costs.full_history_prompt_tokens
+                  = chat::EstimateTokenCountFromChars(full_history_prompt_chars);
+              last_context->prompt_costs.rag_memory_count
+                  = streaming_state.current_memories.size();
+              last_context->prompt_costs.working_memory_message_count
+                  = retrieved.working_memory.size();
+              last_context->prompt_costs.full_history_message_count
+                  = chat_history_snapshot.size();
               last_context->has_data = true;
             }
 
@@ -2452,6 +2585,14 @@ int main(int argc, char** argv) {
           response_sample.usage.total_tokens = usage_accumulator.total_tokens;
           response_sample.usage_accuracy
               = chat::GetUsageAccuracy(usage_accumulator);
+          response_sample.cortext_prompt_tokens = current_turn_cortext_prompt_tokens;
+          response_sample.rag_prompt_tokens = current_turn_rag_prompt_tokens;
+          response_sample.full_history_prompt_tokens
+              = current_turn_full_history_prompt_tokens;
+          response_sample.cortext_prompt_chars = current_turn_cortext_prompt_chars;
+          response_sample.rag_prompt_chars = current_turn_rag_prompt_chars;
+          response_sample.full_history_prompt_chars
+              = current_turn_full_history_prompt_chars;
           response_sample.response_wall_ms
               = std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(
                     std::chrono::steady_clock::now() - response_started_at)
