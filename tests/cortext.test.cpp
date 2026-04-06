@@ -103,7 +103,7 @@ ImageBindAssetsPresent (const std::string &models_dir)
                           || fs::exists (md / "vision_encoder.onnx");
   const bool has_bpe = fs::exists (md / "bpe" / "bpe_simple_vocab_16e6.txt.gz")
                        || fs::exists (md / "bpe_simple_vocab_16e6.txt.gz")
-                       || fs::exists ("poc/ImageBind/imagebind/bpe/"
+                       || fs::exists ("third_party/imagebind_assets/bpe/"
                                       "bpe_simple_vocab_16e6.txt.gz");
   return has_text && has_audio && has_vision && has_bpe;
 }

@@ -206,6 +206,8 @@ FindBpePath (const std::filesystem::path &models_dir)
   const std::vector<fs::path> direct = {
     models_dir / "bpe" / "bpe_simple_vocab_16e6.txt.gz",
     models_dir / "bpe_simple_vocab_16e6.txt.gz",
+    fs::path ("third_party") / "imagebind_assets" / "bpe"
+        / "bpe_simple_vocab_16e6.txt.gz",
   };
   for (const auto &p : direct)
     {
@@ -213,26 +215,11 @@ FindBpePath (const std::filesystem::path &models_dir)
         return p;
     }
 
-  fs::path cur = fs::absolute (models_dir);
-  while (!cur.empty ())
-    {
-      fs::path cand
-          = cur / "poc" / "ImageBind" / "imagebind" / "bpe"
-            / "bpe_simple_vocab_16e6.txt.gz";
-      if (fs::exists (cand))
-        return cand;
-      const fs::path parent = cur.parent_path ();
-      if (parent == cur)
-        break;
-      cur = parent;
-    }
-
   throw std::runtime_error (
       "ImageBind BPE merges not found. Expected one of: "
       + (models_dir / "bpe" / "bpe_simple_vocab_16e6.txt.gz").string ()
       + " or " + (models_dir / "bpe_simple_vocab_16e6.txt.gz").string ()
-      + " or a repo checkout containing "
-        "poc/ImageBind/imagebind/bpe/bpe_simple_vocab_16e6.txt.gz");
+      + " or third_party/imagebind_assets/bpe/bpe_simple_vocab_16e6.txt.gz");
 }
 
 struct PairHash
