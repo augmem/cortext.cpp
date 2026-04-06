@@ -95,6 +95,12 @@ struct ResponseMetricsSample {
   std::uint64_t timestamp_ms = 0;
   StreamingUsage usage;
   UsageAccuracy usage_accuracy = UsageAccuracy::Missing;
+  std::int64_t cortext_prompt_tokens = 0;
+  std::int64_t rag_prompt_tokens = 0;
+  std::int64_t full_history_prompt_tokens = 0;
+  std::size_t cortext_prompt_chars = 0;
+  std::size_t rag_prompt_chars = 0;
+  std::size_t full_history_prompt_chars = 0;
   double response_wall_ms = 0.0;
   double phase1_total_ms = 0.0;
   double phase3_total_ms = 0.0;
