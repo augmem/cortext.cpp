@@ -265,6 +265,7 @@ public:
 private:
   void RenderTabBar();
   void RenderChatTab();
+  void RenderEventsTab();
   void RenderChunksTab();
   void RenderMetricsTab();
   void RenderMemoryTab();
