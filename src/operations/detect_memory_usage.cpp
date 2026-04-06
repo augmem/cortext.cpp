@@ -1,5 +1,6 @@
 #include "cortext/operations/detect_memory_usage.hpp"
 
+#include "neuromodulator_internal.hpp"
 #include "cortext/core/algorithms.hpp"
 #include "cortext/processor/operation_context.hpp"
 #include "cortext/core/sparse.hpp"
@@ -203,7 +204,8 @@ DetectMemoryUsage::Execute (OperationContext &context, Transaction &tx) const
                 }
               if (memory_id > 0)
                 {
-                  const double gain = 0.5 + 0.5 * p_ctx.neuromod_da;
+                  const double gain
+                      = neuromodulation::ValueUpdateGain (p_ctx.neuromod_da);
                   double &q = p_ctx.procedural_store[key][memory_id];
                   q = core::Clamp (q + gain * std::max (0.0, p_ctx.delta_reward),
                                    0.0, 1.0);

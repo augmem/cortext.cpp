@@ -1,5 +1,9 @@
 include(FetchContent)
 
+option(CORTEXT_CHAT_ENABLE_OTLP_GRPC
+  "Enable OTLP gRPC exporters for the chat example"
+  OFF)
+
 # --- Dependencies ---
 
 # Dear ImGui (not a CMake project - we'll add sources directly)
@@ -79,10 +83,15 @@ target_link_libraries(cortext_chat PRIVATE
   opentelemetry-cpp::trace
   opentelemetry-cpp::metrics
   opentelemetry-cpp::logs
-  opentelemetry-cpp::otlp_grpc_exporter
-  opentelemetry-cpp::otlp_grpc_metrics_exporter
-  opentelemetry-cpp::otlp_grpc_log_record_exporter
 )
+
+if(CORTEXT_CHAT_ENABLE_OTLP_GRPC)
+  target_link_libraries(cortext_chat PRIVATE
+    opentelemetry-cpp::otlp_grpc_exporter
+    opentelemetry-cpp::otlp_grpc_metrics_exporter
+    opentelemetry-cpp::otlp_grpc_log_record_exporter
+  )
+endif()
 
 target_link_libraries(cortext_chat_profile PRIVATE
   cortext::cortext
@@ -90,6 +99,9 @@ target_link_libraries(cortext_chat_profile PRIVATE
 
 target_compile_features(cortext_chat PRIVATE cxx_std_20)
 target_compile_features(cortext_chat_profile PRIVATE cxx_std_20)
+target_compile_definitions(cortext_chat PRIVATE
+  CORTEXT_CHAT_ENABLE_OTLP_GRPC=$<BOOL:${CORTEXT_CHAT_ENABLE_OTLP_GRPC}>
+)
 
 target_include_directories(cortext_chat_profile PRIVATE
   ${CMAKE_SOURCE_DIR}/src

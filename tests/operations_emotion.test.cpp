@@ -25,8 +25,11 @@ constexpr int kEmbeddingDim = 256;
 class SetupEmotionInputsOp : public IOperation
 {
 public:
-  explicit SetupEmotionInputsOp (std::optional<long long> stored_id)
-      : stored_id_ (stored_id)
+  explicit SetupEmotionInputsOp (std::optional<long long> stored_id,
+                                 std::vector<double> emotion_history = {},
+                                 double flashbulb_rate_ewma = 0.0)
+      : stored_id_ (stored_id), emotion_history_ (std::move (emotion_history)),
+        flashbulb_rate_ewma_ (flashbulb_rate_ewma)
   {
   }
 
@@ -34,10 +37,16 @@ public:
   Execute (OperationContext &ctx, Transaction & /*tx*/) const override
   {
     ctx.SetStoredEmbeddingId (stored_id_);
+    auto &pctx = ctx.GetProcessorContext ();
+    pctx.recent_emotion_intensities.assign (emotion_history_.begin (),
+                                            emotion_history_.end ());
+    pctx.flashbulb_rate_ewma = flashbulb_rate_ewma_;
   }
 
 private:
   std::optional<long long> stored_id_;
+  std::vector<double> emotion_history_;
+  double flashbulb_rate_ewma_ = 0.0;
 };
 
 static Signal
@@ -48,6 +57,15 @@ MakeSignal (uint64_t ts = 1)
   s.timestamp = ts;
   s.source_id = "test";
   return s;
+}
+
+static long long
+ReadFlashbulb (Store &store, long long embedding_id)
+{
+  auto rows = store.Execute ("SELECT flashbulb FROM memories WHERE embedding_id = ?",
+                             { embedding_id });
+  REQUIRE (rows.size () == 1);
+  return std::any_cast<long long> (rows[0].at ("flashbulb"));
 }
 
 } // namespace
@@ -184,4 +202,99 @@ TEST_CASE ("Alg23 below thresholds performs no-op", "[operations][emotion]")
     REQUIRE (rows.size () == 1);
     REQUIRE (std::any_cast<long long> (rows[0].at ("c")) == 0LL);
   }
+}
+
+TEST_CASE ("Flashbulb rate no longer weakens percentile gate below target",
+           "[operations][emotion]")
+{
+  auto make_store = [] () {
+    auto unique_store = SQLiteStore::Create (":memory:");
+    auto store = std::shared_ptr<Store> (std::move (unique_store));
+    cortext::testing::InitializeCoreSchema (*store);
+    std::vector<float> emb (kEmbeddingDim, 0.0f);
+    emb[0] = 1.0f;
+    cortext::testing::SeedEmbeddingV2 (*store, 301LL, emb);
+    cortext::testing::SeedMemoryV2 (*store, 301LL, 301LL, "test");
+    store->Execute (
+        "UPDATE memories SET s_emotion_max = ?, s_arousal_avg = ? "
+        "WHERE embedding_id = ?",
+        { 0.90, 0.90, 301LL });
+    return store;
+  };
+
+  auto run_case = [] (const std::shared_ptr<Store> &store, bool disable_percentile) {
+    SignalProcessor::Config cfg;
+    cortext::testing::RequireEncoder (cfg);
+    cfg.focus = 0.4;
+    cfg.sensitivity = 0.8;
+    cfg.stability = 0.5;
+
+    std::unique_ptr<cortext::testing::ScopedEnvVar> percentile_guard;
+    if (disable_percentile)
+      {
+        percentile_guard = std::make_unique<cortext::testing::ScopedEnvVar> (
+            "CORTEXT_FLASHBULB_DISABLE_PERCENTILE", "1");
+      }
+
+    auto setup = std::make_unique<SetupEmotionInputsOp> (
+        301LL, std::vector<double> (16, 0.98), 0.0);
+    auto apply = std::make_unique<ApplyEmotionalConsolidation> ();
+    auto ops = std::make_unique<OperationSet> (std::move (setup),
+                                               std::move (apply));
+    SignalProcessor processor (cfg, store, std::move (ops));
+    processor.Process (MakeSignal (123));
+    processor.Flush ();
+    return ReadFlashbulb (*store, 301LL);
+  };
+
+  REQUIRE (run_case (make_store (), false) == 0LL);
+  REQUIRE (run_case (make_store (), true) == 1LL);
+}
+
+TEST_CASE ("Flashbulb rate is neutral below target when percentile is absent",
+           "[operations][emotion]")
+{
+  auto make_store = [] () {
+    auto unique_store = SQLiteStore::Create (":memory:");
+    auto store = std::shared_ptr<Store> (std::move (unique_store));
+    cortext::testing::InitializeCoreSchema (*store);
+    std::vector<float> emb (kEmbeddingDim, 0.0f);
+    emb[0] = 1.0f;
+    cortext::testing::SeedEmbeddingV2 (*store, 401LL, emb);
+    cortext::testing::SeedMemoryV2 (*store, 401LL, 401LL, "test");
+    store->Execute (
+        "UPDATE memories SET s_emotion_max = ?, s_arousal_avg = ? "
+        "WHERE embedding_id = ?",
+        { 0.76, 0.88, 401LL });
+    return store;
+  };
+
+  auto run_case = [] (const std::shared_ptr<Store> &store, bool disable_rate) {
+    SignalProcessor::Config cfg;
+    cortext::testing::RequireEncoder (cfg);
+    cfg.focus = 0.4;
+    cfg.sensitivity = 0.8;
+    cfg.stability = 0.5;
+
+    std::unique_ptr<cortext::testing::ScopedEnvVar> rate_guard;
+    if (disable_rate)
+      {
+        rate_guard = std::make_unique<cortext::testing::ScopedEnvVar> (
+            "CORTEXT_FLASHBULB_DISABLE_RATE", "1");
+      }
+
+    auto setup = std::make_unique<SetupEmotionInputsOp> (401LL,
+                                                         std::vector<double> (),
+                                                         0.0);
+    auto apply = std::make_unique<ApplyEmotionalConsolidation> ();
+    auto ops = std::make_unique<OperationSet> (std::move (setup),
+                                               std::move (apply));
+    SignalProcessor processor (cfg, store, std::move (ops));
+    processor.Process (MakeSignal (456));
+    processor.Flush ();
+    return ReadFlashbulb (*store, 401LL);
+  };
+
+  REQUIRE (run_case (make_store (), false) == 1LL);
+  REQUIRE (run_case (make_store (), true) == 1LL);
 }

@@ -1,5 +1,6 @@
 #include "lfm2_llama_backend.hpp"
 
+#include "cortext/internal/cancellation.hpp"
 #include "cortext/core/thread_config.hpp"
 #include "llama_cpp_support.hpp"
 
@@ -9,6 +10,7 @@
 #include <filesystem>
 #include <memory>
 #include <mutex>
+#include <regex>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -48,6 +50,31 @@ GetEnvInt (const char *name, int fallback)
     {
       return fallback;
     }
+}
+
+bool
+GetEnvBool (const char *name, bool fallback)
+{
+  const std::string value = GetEnvOrDefault (name);
+  if (value.empty ())
+    {
+      return fallback;
+    }
+
+  std::string normalized = value;
+  std::transform (normalized.begin (), normalized.end (), normalized.begin (),
+                  [] (unsigned char c) { return static_cast<char> (std::tolower (c)); });
+  if (normalized == "1" || normalized == "true" || normalized == "yes"
+      || normalized == "on")
+    {
+      return true;
+    }
+  if (normalized == "0" || normalized == "false" || normalized == "no"
+      || normalized == "off")
+    {
+      return false;
+    }
+  return fallback;
 }
 
 std::string
@@ -117,46 +144,279 @@ TrimAsciiWhitespace (std::string value)
 }
 
 std::string
+SanitizeSummaryText (std::string summary)
+{
+  if (summary.empty ())
+    {
+      return summary;
+    }
+
+  summary = std::regex_replace (
+      summary,
+      std::regex (R"(^\s*(Final summary|Output summary|Summary)\s*:\s*)",
+                  std::regex_constants::icase),
+      "");
+  summary = std::regex_replace (
+      summary,
+      std::regex (R"(\b(Final summary|Output summary|Summary)\s*:\s*)",
+                  std::regex_constants::icase),
+      "");
+  summary = std::regex_replace (
+      summary, std::regex (R"(Excerpt\s+\d+\s+(mentions|indicates)\s+)",
+                           std::regex_constants::icase),
+      "");
+  summary = std::regex_replace (
+      summary,
+      std::regex (R"(,\s*which is a user\b)", std::regex_constants::icase), "");
+  summary = std::regex_replace (
+      summary,
+      std::regex (R"(\bthe user is focusing on\b)",
+                  std::regex_constants::icase),
+      "focuses on");
+  summary = std::regex_replace (
+      summary, std::regex (R"(\bthe user is\b)", std::regex_constants::icase),
+      "");
+  summary = std::regex_replace (
+      summary, std::regex (R"(\bthe user\b)", std::regex_constants::icase),
+      "");
+  summary = std::regex_replace (
+      summary,
+      std::regex (R"(\bthe assistant\b)", std::regex_constants::icase), "");
+  summary = std::regex_replace (summary, std::regex (R"([ \t]+)"), " ");
+  summary = std::regex_replace (summary, std::regex (R"(\s+\.)"), ".");
+  summary = std::regex_replace (summary, std::regex (R"(\n{3,})"), "\n\n");
+  return TrimAsciiWhitespace (summary);
+}
+
+bool
+UseStructuredSummaryOutput ()
+{
+  return GetEnvBool ("CORTEXT_LFM2_SUMMARY_STRUCTURED", true);
+}
+
+std::string
+BuildSummaryFormatInstruction ()
+{
+  if (UseStructuredSummaryOutput ())
+    {
+      return "Return only a single JSON object of the form "
+             "{\"summary\":\"...\"}.\n";
+    }
+  return "Return only the summary text.\n";
+}
+
+int
+ComputeSummaryMaxTokens (const std::vector<std::string> &texts, int max_words)
+{
+  if (max_words > 0)
+    {
+      return std::clamp (max_words * 8, 64, 1024);
+    }
+
+  std::size_t total_chars = 0;
+  for (const auto &text : texts)
+    {
+      total_chars += text.size ();
+    }
+
+  const int approx_input_tokens
+      = static_cast<int> (std::max<std::size_t> (1, total_chars / 4));
+  return std::clamp (approx_input_tokens, 256, 1024);
+}
+
+std::string
 BuildSummarySystemPrompt ()
 {
-  return "You are writing a durable memory note from conversation excerpts.\n"
-         "Write a concise factual summary in 1-3 sentences.\n"
-         "Return only the summary text.\n"
-         "Treat lines labeled 'User:' as a human user and lines labeled "
-         "'Assistant:' as the assistant.\n"
-         "Summarize the underlying facts and topics, not the mechanics of the "
-         "conversation.\n"
-         "Prioritize durable facts about people, events, names, preferences, "
-         "plans, and outcomes over banter, greetings, or rhetorical "
-         "questions.\n"
-         "Include all major durable facts that fit, especially named people, "
-         "projects, technologies, and goals.\n"
-         "If the excerpts contain multiple topics, list them as separate facts "
-         "instead of implying they caused each other.\n"
-         "If both user and assistant excerpts restate the same fact, prefer "
-         "the underlying fact itself instead of narrating who said it.\n"
-         "Do not repeat the same fact from different perspectives.\n"
-         "State facts directly when possible. Prefer direct factual sentences "
-         "over wording like 'The user...' or 'The assistant...'.\n"
-         "Do not use speaker-role subjects or second-person phrasing in the "
-         "summary. Avoid 'the user', 'the assistant', 'you', and 'your' when "
-         "a concrete named subject or neutral phrasing is available.\n"
-         "Do not write phrases like 'the user said', 'the assistant asked', "
-         "'in a conversation', 'they discussed', or 'this occurred after' "
-         "unless that wording is necessary for clarity.\n"
-         "Do not infer causality, chronology, identity, or shared beliefs "
-         "beyond the text.\n"
-         "Avoid speculation, role confusion, and meta commentary.";
+  const std::string style
+      = GetEnvOrDefault ("CORTEXT_LFM2_SUMMARY_PROMPT_STYLE",
+                         "transcript_fewshot");
+  const std::string format = BuildSummaryFormatInstruction ();
+  const std::string example_one_summary
+      = UseStructuredSummaryOutput ()
+            ? "{\"summary\":\"Gabriel lives in Chicago and is debugging a SQLite migration for Cortext before a demo.\"}"
+            : "Gabriel lives in Chicago and is debugging a SQLite migration for Cortext before a demo.";
+  const std::string example_two_summary
+      = UseStructuredSummaryOutput ()
+            ? "{\"summary\":\"Sarah is helping with a housing application in Logan Square, and missing pay stubs are delaying the submission.\"}"
+            : "Sarah is helping with a housing application in Logan Square, and missing pay stubs are delaying the submission.";
+  const std::string example_precision_one_summary
+      = UseStructuredSummaryOutput ()
+            ? "{\"summary\":\"Alice is leading the Acme pilot in Seattle, and the customer needs SSO and audit exports before June.\"}"
+            : "Alice is leading the Acme pilot in Seattle, and the customer needs SSO and audit exports before June.";
+  const std::string example_precision_two_summary
+      = UseStructuredSummaryOutput ()
+            ? "{\"summary\":\"Finance is revising the renewal forecast this week.\"}"
+            : "Finance is revising the renewal forecast this week.";
+  const std::string example_transcript_two_summary
+      = UseStructuredSummaryOutput ()
+            ? "{\"summary\":\"Alice is leading the Acme pilot in Seattle, the customer needs SSO and audit exports before June, and Finance is revising the renewal forecast this week.\"}"
+            : "Alice is leading the Acme pilot in Seattle, the customer needs SSO and audit exports before June, and Finance is revising the renewal forecast this week.";
+
+  if (style == "durable")
+    {
+      return std::string (
+                 "You are writing a durable memory note from conversation excerpts.\n"
+                 "Write a concise factual summary in 1-3 sentences.\n")
+             + format
+             + "Preserve durable facts about names, places, projects, goals, preferences, plans, blockers, and outcomes.\n"
+               "State the facts directly instead of describing who said them.\n"
+               "Prefer concrete named subjects and specific noun phrases.\n"
+               "If the excerpts contain multiple topics, keep them separate instead of implying they caused each other.\n"
+               "Do not use speaker-role subjects or second-person phrasing. Avoid 'the user', 'the assistant', 'you', and 'your'.\n"
+               "Do not write meta narration like 'in a conversation', 'they discussed', 'the user said', or 'the assistant asked'.\n"
+               "Start directly with the summary sentence. Do not write 'Summary:', 'Final summary:', 'Output summary:', or any example headers.\n"
+               "Do not speculate beyond the text.";
+    }
+
+  if (style == "precision")
+    {
+      return std::string (
+                 "Write a compact durable summary from the conversation excerpts.\n")
+             + format
+             + "Use 1-2 sentences.\n"
+               "Keep only concrete durable facts that are directly supported by the text.\n"
+               "Prefer names, places, projects, deadlines, blockers, and outcomes.\n"
+               "Omit banter, greetings, rhetorical questions, and anything uncertain.\n"
+               "Start directly with the summary sentence. Do not write 'Summary:', 'Final summary:', 'Output summary:', or any example headers.\n"
+               "Do not use speaker-role language, second-person phrasing, or meta commentary.\n"
+               "Avoid 'the user', 'the assistant', 'you', 'your', 'in a conversation', 'discussed', 'said', and 'asked'.";
+    }
+
+  if (style == "fewshot_durable")
+    {
+      return std::string (
+                 "You are writing a durable memory note from conversation excerpts.\n"
+                 "Write a concise factual summary in 1-3 sentences.\n")
+             + format
+             + "Preserve durable facts about names, places, projects, goals, preferences, plans, blockers, and outcomes.\n"
+               "State facts directly instead of describing who said them.\n"
+               "Do not use speaker-role subjects or second-person phrasing. Avoid 'the user', 'the assistant', 'you', and 'your'.\n"
+               "Do not write meta narration like 'in a conversation', 'they discussed', 'the user said', or 'the assistant asked'.\n"
+               "When answering the real task, start directly with the summary sentence. Do not write 'Summary:', 'Final summary:', 'Output summary:', or copy example headers.\n"
+               "Do not speculate beyond the text.\n"
+               "\n"
+               "Example 1\n"
+               "Input excerpts:\n"
+               "Excerpt 1:\n"
+               "User: My name is Gabriel and I live in Chicago.\n"
+               "Excerpt 2:\n"
+               "Assistant: Noted.\n"
+               "Excerpt 3:\n"
+               "User: I am debugging a SQLite migration for Cortext before the demo.\n"
+               "Output summary:\n"
+             + example_one_summary
+             + "\n\n"
+               "Example 2\n"
+               "Input excerpts:\n"
+               "Excerpt 1:\n"
+               "User: My neighbor Sarah is helping with a housing application in Logan Square.\n"
+               "Excerpt 2:\n"
+               "Assistant: Missing pay stubs are delaying the submission.\n"
+               "Output summary:\n"
+             + example_two_summary;
+    }
+
+  if (style == "fewshot_precision")
+    {
+      return std::string (
+                 "Write a compact durable summary from the conversation excerpts.\n")
+             + format
+             + "Use 1-2 sentences.\n"
+               "Keep only concrete durable facts directly supported by the text.\n"
+               "Prefer names, places, projects, deadlines, blockers, and outcomes.\n"
+               "Omit banter, greetings, rhetorical questions, and uncertain details.\n"
+               "Do not use speaker-role language, second-person phrasing, or meta commentary.\n"
+               "When answering the real task, start directly with the summary sentence. Do not write 'Summary:', 'Final summary:', 'Output summary:', or copy example headers.\n"
+               "\n"
+               "Example 1\n"
+               "Input excerpts:\n"
+               "Excerpt 1:\n"
+               "User: Alice is leading the Acme pilot in Seattle.\n"
+               "Excerpt 2:\n"
+               "Assistant: The customer needs SSO and audit exports before June.\n"
+               "Output summary:\n"
+             + example_precision_one_summary
+             + "\n\n"
+               "Example 2\n"
+               "Input excerpts:\n"
+               "Excerpt 1:\n"
+               "User: Finance is revising the renewal forecast this week.\n"
+               "Excerpt 2:\n"
+               "Assistant: Noted.\n"
+               "Output summary:\n"
+             + example_precision_two_summary;
+    }
+
+  if (style == "transcript_fewshot")
+    {
+      return std::string ("Write a compact durable summary from a chat transcript.\n")
+             + format
+             + "Use 1-2 sentences.\n"
+               "Capture the durable facts across the whole transcript, not just the last turn.\n"
+               "Prefer names, places, projects, deadlines, blockers, and outcomes.\n"
+               "Use direct factual sentences.\n"
+               "Do not use speaker-role language or prompt headers. Avoid 'User:', 'Assistant:', 'Summary:', 'Final summary:', 'the user', 'the assistant', and meta narration.\n"
+               "\n"
+               "Example 1 transcript:\n"
+               "User: My name is Gabriel and I live in Chicago.\n"
+               "Assistant: Noted.\n"
+               "User: I am debugging a SQLite migration for Cortext before the demo.\n"
+               "Example 1 summary:\n"
+             + example_one_summary
+             + "\n\n"
+               "Example 2 transcript:\n"
+               "User: Alice is leading the Acme pilot in Seattle.\n"
+               "Assistant: The customer needs SSO and audit exports before June.\n"
+               "User: Finance is revising the renewal forecast this week.\n"
+               "Example 2 summary:\n"
+             + example_transcript_two_summary;
+    }
+
+  return std::string (
+             "You are writing a durable memory note from conversation excerpts.\n"
+             "Write a concise factual summary in 1-3 sentences.\n")
+         + format
+         + "Treat lines labeled 'User:' as a human user and lines labeled 'Assistant:' as the assistant.\n"
+           "Summarize the underlying facts and topics, not the mechanics of the conversation.\n"
+           "Prioritize durable facts about people, events, names, preferences, plans, and outcomes over banter, greetings, or rhetorical questions.\n"
+           "Include all major durable facts that fit, especially named people, projects, technologies, and goals.\n"
+           "If the excerpts contain multiple topics, list them as separate facts instead of implying they caused each other.\n"
+           "If both user and assistant excerpts restate the same fact, prefer the underlying fact itself instead of narrating who said it.\n"
+           "Do not repeat the same fact from different perspectives.\n"
+           "State facts directly when possible. Prefer direct factual sentences over wording like 'The user...' or 'The assistant...'.\n"
+           "Do not use speaker-role subjects or second-person phrasing in the summary. Avoid 'the user', 'the assistant', 'you', and 'your' when a concrete named subject or neutral phrasing is available.\n"
+           "Do not write phrases like 'the user said', 'the assistant asked', 'in a conversation', 'they discussed', or 'this occurred after' unless that wording is necessary for clarity.\n"
+           "Do not infer causality, chronology, identity, or shared beliefs beyond the text.\n"
+           "Avoid speculation, role confusion, and meta commentary.";
 }
 
 std::string
 BuildSummaryUserPrompt (const std::vector<std::string> &texts)
 {
+  const std::string style
+      = GetEnvOrDefault ("CORTEXT_LFM2_SUMMARY_PROMPT_STYLE",
+                         "transcript_fewshot");
+  const bool structured = UseStructuredSummaryOutput ();
   std::ostringstream combined;
+  if (style == "transcript_fewshot")
+    {
+      combined << "Chat transcript:\n";
+      for (size_t i = 0; i < texts.size (); ++i)
+        {
+          combined << texts[i] << "\n";
+        }
+      combined << "\n" << (structured ? "JSON response:\n" : "Summary:\n");
+      return combined.str ();
+    }
+
   combined << "Conversation excerpts:\n\n";
   for (size_t i = 0; i < texts.size (); ++i)
     {
       combined << "Excerpt " << (i + 1) << ":\n" << texts[i] << "\n\n";
+    }
+  if (style != "baseline")
+    {
+      combined << (structured ? "JSON response:\n" : "Final summary:\n");
     }
   return combined.str ();
 }
@@ -164,16 +424,172 @@ BuildSummaryUserPrompt (const std::vector<std::string> &texts)
 std::string
 BuildExtractionSystemPrompt ()
 {
-  return "Extract labels and relations from the provided text.\n"
-         "Return only a single JSON object with keys \"labels\" and "
-         "\"relations\".\n"
+  const std::string style
+      = GetEnvOrDefault ("CORTEXT_LFM2_EXTRACT_PROMPT_STYLE",
+                         "fewshot_durable");
+
+  if (style == "durable")
+    {
+      return "Extract labels, relations, and durable facts from the provided "
+             "text.\n"
+             "Return only a single JSON object with keys \"labels\", "
+             "\"relations\", and optional \"facts\".\n"
+             "Labels are durable graph nodes, not every salient word.\n"
+             "Prefer precise durable entities and concepts over exhaustive "
+             "recall.\n"
+             "Choose concrete people, places, organizations, projects, tools, "
+             "named goals, and stable topics directly supported by the text.\n"
+             "Prefer multi-word noun phrases when they are more specific than "
+             "single tokens.\n"
+             "Do not output generic verbs, helper words, schema keys, JSON "
+             "field names, timestamps, or meta terms like valid_start_ts, "
+             "valid_end_ts, explanation, support, salient, get, or ready "
+             "unless they are literally the main subject of the text.\n"
+             "Avoid labels that are only function words, modifiers, or broad "
+             "process words.\n"
+             "\"labels\" must be an array of non-empty strings copied from the "
+             "text.\n"
+             "Return between 1 and 8 labels.\n"
+             "Each relation must include non-empty \"subject\", \"predicate\", "
+             "and \"object\" strings taken from the text.\n"
+             "Each fact must include non-empty \"subject\", \"predicate\", and "
+             "\"object\" strings taken from the text.\n"
+             "If confidence is present, it must be a JSON number.\n"
+             "If valid_start_ts or valid_end_ts are present for facts, they "
+             "must be JSON integers in milliseconds.\n"
+             "Do not emit any explanation outside the JSON object.";
+    }
+
+  if (style == "precision")
+    {
+      return "Extract labels, relations, and durable facts from the provided "
+             "text.\n"
+             "Return only a single JSON object with keys \"labels\", "
+             "\"relations\", and optional \"facts\".\n"
+             "Optimize for label precision, not recall.\n"
+             "Labels should be the few memory-worthy nodes a long-term memory "
+             "graph should keep: people, places, projects, organizations, "
+             "tools, conditions, and durable topics directly supported by the "
+             "text.\n"
+             "Prefer named entities and concrete noun phrases.\n"
+             "Only use a state or activity label if it is clearly enduring or "
+             "central to the text.\n"
+             "Do not output schema terms, meta words, field names, bare "
+             "generic verbs, or filler tokens.\n"
+             "\"labels\" must be an array of non-empty strings copied from the "
+             "text.\n"
+             "Return between 1 and 6 labels.\n"
+             "Each relation must include non-empty \"subject\", \"predicate\", "
+             "and \"object\" strings taken from the text.\n"
+             "Each fact must include non-empty \"subject\", \"predicate\", and "
+             "\"object\" strings taken from the text.\n"
+             "If confidence is present, it must be a JSON number.\n"
+             "If valid_start_ts or valid_end_ts are present for facts, they "
+             "must be JSON integers in milliseconds.\n"
+             "Do not emit any explanation outside the JSON object.";
+    }
+
+  if (style == "fewshot_durable")
+    {
+      return "Extract labels, relations, and durable facts from the provided "
+             "text.\n"
+             "Return only a single JSON object with keys \"labels\", "
+             "\"relations\", and optional \"facts\".\n"
+             "Labels are durable graph nodes, not every salient word.\n"
+             "Choose concrete people, places, organizations, projects, tools, "
+             "named goals, stable conditions, and enduring topics directly "
+             "supported by the text.\n"
+             "Prefer multi-word noun phrases when they are more specific than "
+             "single tokens.\n"
+             "Do not output schema keys, JSON field names, timestamps, helper "
+             "words, generic verbs, or meta terms like valid_start_ts, "
+             "valid_end_ts, explanation, support, salient, get, or ready "
+             "unless they are literally the main subject of the text.\n"
+             "\"labels\" must be an array of non-empty strings copied from the "
+             "text.\n"
+             "Return between 1 and 8 labels.\n"
+             "Each relation must include non-empty \"subject\", \"predicate\", "
+             "and \"object\" strings taken from the text.\n"
+             "Each fact must include non-empty \"subject\", \"predicate\", and "
+             "\"object\" strings taken from the text.\n"
+             "If confidence is present, it must be a JSON number.\n"
+             "If valid_start_ts or valid_end_ts are present for facts, they "
+             "must be JSON integers in milliseconds.\n"
+             "Examples:\n"
+             "Text:\n"
+             "User: My name is Gabriel. I live in Chicago.\n"
+             "Assistant: Noted. You are debugging a SQLite migration for "
+             "Cortext.\n"
+             "{\"labels\":[\"Gabriel\",\"Chicago\",\"SQLite migration\","
+             "\"Cortext\"],\"relations\":[],\"facts\":[{\"subject\":"
+             "\"Gabriel\",\"predicate\":\"lives in\",\"object\":\"Chicago\"}]"
+             "}\n"
+             "Text:\n"
+             "User: I need help getting ready for an interview tomorrow. I "
+             "want more confidence and a clear explanation.\n"
+             "Assistant: We can prep the interview.\n"
+             "{\"labels\":[\"interview\",\"confidence\"],\"relations\":[],"
+             "\"facts\":[]}\n"
+             "Do not emit any explanation outside the JSON object.";
+    }
+
+  if (style == "fewshot_precision")
+    {
+      return "Extract labels, relations, and durable facts from the provided "
+             "text.\n"
+             "Return only a single JSON object with keys \"labels\", "
+             "\"relations\", and optional \"facts\".\n"
+             "Optimize for label precision.\n"
+             "Labels should be the few memory-worthy nodes a long-term memory "
+             "graph should keep: people, places, projects, organizations, "
+             "tools, conditions, and durable topics directly supported by the "
+             "text.\n"
+             "Prefer named entities and concrete noun phrases.\n"
+             "Only use a state or activity label if it is clearly enduring or "
+             "central to the text.\n"
+             "Do not output schema terms, field names, timestamps, generic "
+             "verbs, helper words, or filler tokens.\n"
+             "\"labels\" must be an array of non-empty strings copied from the "
+             "text.\n"
+             "Return between 1 and 6 labels.\n"
+             "Each relation must include non-empty \"subject\", \"predicate\", "
+             "and \"object\" strings taken from the text.\n"
+             "Each fact must include non-empty \"subject\", \"predicate\", and "
+             "\"object\" strings taken from the text.\n"
+             "If confidence is present, it must be a JSON number.\n"
+             "If valid_start_ts or valid_end_ts are present for facts, they "
+             "must be JSON integers in milliseconds.\n"
+             "Examples:\n"
+             "Text:\n"
+             "User: My neighbor Sarah is helping me prepare documents for a "
+             "housing application in Logan Square.\n"
+             "Assistant: We can organize the paperwork.\n"
+             "{\"labels\":[\"Sarah\",\"housing application\",\"Logan Square\"],"
+             "\"relations\":[],\"facts\":[]}\n"
+             "Text:\n"
+             "User: The explanation and support were useful, but my goal is a "
+             "better interview plan.\n"
+             "Assistant: We'll focus on the interview plan.\n"
+             "{\"labels\":[\"interview plan\"],\"relations\":[],\"facts\":[]}"
+             "\n"
+             "Do not emit any explanation outside the JSON object.";
+    }
+
+  return "Extract labels, relations, and durable facts from the provided "
+         "text.\n"
+         "Return only a single JSON object with keys \"labels\", "
+         "\"relations\", and optional \"facts\".\n"
          "Prefer recall over compression: include all salient labels and "
          "relations that are directly supported by the text.\n"
          "\"labels\" must be an array of non-empty strings copied from the "
          "text.\n"
          "Each relation must include non-empty \"subject\", \"predicate\", "
          "and \"object\" strings taken from the text.\n"
+         "Each fact must include non-empty \"subject\", \"predicate\", and "
+         "\"object\" strings taken from the text.\n"
          "If confidence is present, it must be a JSON number.\n"
+         "If valid_start_ts or valid_end_ts are present for facts, they must "
+         "be JSON integers in milliseconds.\n"
          "Always return at least one label; if nothing is obvious, choose the "
          "single most salient term from the text.\n"
          "Do not emit any explanation outside the JSON object.";
@@ -182,6 +598,95 @@ BuildExtractionSystemPrompt ()
 std::string
 BuildLabelOnlyExtractionSystemPrompt ()
 {
+  const std::string style
+      = GetEnvOrDefault ("CORTEXT_LFM2_EXTRACT_PROMPT_STYLE",
+                         "fewshot_durable");
+
+  if (style == "durable")
+    {
+      return "Extract durable graph labels from the provided text.\n"
+             "Return only a single JSON object with the key \"labels\".\n"
+             "Labels are durable graph nodes, not every salient word.\n"
+             "Prefer people, places, organizations, projects, tools, stable "
+             "conditions, and enduring topics directly supported by the "
+             "text.\n"
+             "Prefer multi-word noun phrases when they are more specific.\n"
+             "Do not output helper words, generic verbs, schema terms, JSON "
+             "field names, timestamps, or meta labels.\n"
+             "\"labels\" must be an array of non-empty strings copied from the "
+             "text.\n"
+             "Return between 1 and 8 labels.\n"
+             "Do not emit any explanation outside the JSON object.";
+    }
+
+  if (style == "precision")
+    {
+      return "Extract only the highest-value labels from the provided text.\n"
+             "Return only a single JSON object with the key \"labels\".\n"
+             "Optimize for label precision.\n"
+             "Prefer named entities and concrete noun phrases that should be "
+             "remembered later.\n"
+             "Do not output schema terms, field names, generic verbs, helper "
+             "words, or filler labels.\n"
+             "\"labels\" must be an array of non-empty strings copied from the "
+             "text.\n"
+             "Return between 1 and 6 labels.\n"
+             "Do not emit any explanation outside the JSON object.";
+    }
+
+  if (style == "fewshot_durable")
+    {
+      return "Extract durable graph labels from the provided text.\n"
+             "Return only a single JSON object with the key \"labels\".\n"
+             "Labels are durable graph nodes, not every salient word.\n"
+             "Prefer people, places, organizations, projects, tools, stable "
+             "conditions, and enduring topics directly supported by the "
+             "text.\n"
+             "Prefer multi-word noun phrases when they are more specific.\n"
+             "Do not output helper words, generic verbs, schema terms, JSON "
+             "field names, timestamps, or meta labels.\n"
+             "\"labels\" must be an array of non-empty strings copied from the "
+             "text.\n"
+             "Return between 1 and 8 labels.\n"
+             "Examples:\n"
+             "Text:\n"
+             "User: My name is Gabriel. I live in Chicago.\n"
+             "Assistant: You are debugging a SQLite migration for Cortext.\n"
+             "{\"labels\":[\"Gabriel\",\"Chicago\",\"SQLite migration\","
+             "\"Cortext\"]}\n"
+             "Text:\n"
+             "User: I need help getting ready for an interview tomorrow. I "
+             "want more confidence.\n"
+             "Assistant: We can prep the interview.\n"
+             "{\"labels\":[\"interview\",\"confidence\"]}\n"
+             "Do not emit any explanation outside the JSON object.";
+    }
+
+  if (style == "fewshot_precision")
+    {
+      return "Extract only the highest-value labels from the provided text.\n"
+             "Return only a single JSON object with the key \"labels\".\n"
+             "Optimize for label precision.\n"
+             "Prefer named entities and concrete noun phrases that should be "
+             "remembered later.\n"
+             "Do not output schema terms, field names, generic verbs, helper "
+             "words, or filler labels.\n"
+             "\"labels\" must be an array of non-empty strings copied from the "
+             "text.\n"
+             "Return between 1 and 6 labels.\n"
+             "Examples:\n"
+             "Text:\n"
+             "User: My neighbor Sarah is helping me prepare documents for a "
+             "housing application in Logan Square.\n"
+             "{\"labels\":[\"Sarah\",\"housing application\",\"Logan Square\"]}"
+             "\n"
+             "Text:\n"
+             "User: The explanation and support were useful, but my goal is a "
+             "better interview plan.\n"
+             "{\"labels\":[\"interview plan\"]}\n"
+             "Do not emit any explanation outside the JSON object.";
+    }
+
   return "Extract labels from the provided text.\n"
          "Return only a single JSON object with the key \"labels\".\n"
          "Prefer recall over compression: include all salient labels that are "
@@ -292,7 +797,49 @@ ParseExtractionResponse (const std::string &content)
         }
     }
 
+  if (json_output.contains ("facts"))
+    {
+      for (const auto &fact : json_output["facts"])
+        {
+          operations::ExtractedFact f;
+          f.subject = TrimAsciiWhitespace (fact.value ("subject", ""));
+          f.predicate = TrimAsciiWhitespace (fact.value ("predicate", ""));
+          f.object = TrimAsciiWhitespace (fact.value ("object", ""));
+          f.confidence = fact.value ("confidence", 0.5);
+          if (fact.contains ("valid_start_ts") && fact["valid_start_ts"].is_number ())
+            {
+              f.valid_start_ts = fact["valid_start_ts"].get<std::uint64_t> ();
+            }
+          if (fact.contains ("valid_end_ts") && fact["valid_end_ts"].is_number ())
+            {
+              f.valid_end_ts = fact["valid_end_ts"].get<std::uint64_t> ();
+            }
+          if (!f.subject.empty () && !f.predicate.empty () && !f.object.empty ())
+            {
+              result.facts.push_back (std::move (f));
+            }
+        }
+    }
+
   return result;
+}
+
+std::string
+ParseSummaryResponse (const std::string &content)
+{
+  const auto json_opt = TryParseJsonObject (content);
+  if (!json_opt)
+    {
+      return {};
+    }
+
+  const auto &json_output = *json_opt;
+  if (!json_output.contains ("summary") || !json_output["summary"].is_string ())
+    {
+      return {};
+    }
+
+  return TrimAsciiWhitespace (json_output["summary"].get<std::string> ());
 }
 
 bool
@@ -404,6 +951,54 @@ ValidateSchemaSubset (const nlohmann::json &schema)
         }
     }
 
+  if (properties.contains ("facts"))
+    {
+      const auto &facts = properties["facts"];
+      RequireBoolean (facts.is_object () && facts.value ("type", "") == "array",
+                      "LFM2 extractor schema facts must be an array");
+      RequireBoolean (facts.contains ("items") && facts["items"].is_object (),
+                      "LFM2 extractor schema facts items must be objects");
+      const auto &items = facts["items"];
+      RequireBoolean (items.value ("type", "") == "object",
+                      "LFM2 extractor schema fact items must have type=object");
+      RequireBoolean (items.contains ("properties")
+                          && items["properties"].is_object (),
+                      "LFM2 extractor schema fact items must define properties");
+      const auto &fact_props = items["properties"];
+      for (const char *key : { "subject", "predicate", "object" })
+        {
+          RequireBoolean (
+              fact_props.contains (key)
+                  && fact_props[key].is_object ()
+                  && fact_props[key].value ("type", "") == "string",
+              std::string ("LFM2 extractor schema fact property ") + key
+                  + " must be a string");
+        }
+      if (fact_props.contains ("confidence"))
+        {
+          RequireBoolean (fact_props["confidence"].is_object (),
+                          "LFM2 extractor schema fact confidence must be an object");
+          const std::string confidence_type
+              = fact_props["confidence"].value ("type", "");
+          RequireBoolean (confidence_type == "number"
+                              || confidence_type == "integer",
+                          "LFM2 extractor schema fact confidence must be numeric");
+        }
+      for (const char *key : { "valid_start_ts", "valid_end_ts" })
+        {
+          if (fact_props.contains (key))
+            {
+              RequireBoolean (fact_props[key].is_object (),
+                              std::string ("LFM2 extractor schema ") + key
+                                  + " must be an object");
+              const std::string ts_type = fact_props[key].value ("type", "");
+              RequireBoolean (ts_type == "integer" || ts_type == "number",
+                              std::string ("LFM2 extractor schema ") + key
+                                  + " must be numeric");
+            }
+        }
+    }
+
   if (schema.contains ("required"))
     {
       RequireBoolean (schema["required"].is_array (),
@@ -413,8 +1008,9 @@ ValidateSchemaSubset (const nlohmann::json &schema)
           RequireBoolean (required.is_string (),
                           "LFM2 extractor schema required entries must be strings");
           const std::string key = required.get<std::string> ();
-          RequireBoolean (key == "labels" || key == "relations",
-                          "LFM2 extractor schema only supports labels/relations in required");
+          RequireBoolean (key == "labels" || key == "relations"
+                              || key == "facts",
+                          "LFM2 extractor schema only supports labels/relations/facts in required");
         }
       bool labels_required = false;
       for (const auto &required : schema["required"])
@@ -455,6 +1051,17 @@ namespace internal
 {
 
 std::string
+BuildLfm2SummaryGrammar ()
+{
+  std::ostringstream grammar;
+  grammar << "root ::= \"{\" space summary-kv \"}\" space\n";
+  grammar << "summary-kv ::= \"\\\"summary\\\"\" space \":\" space nonempty-string\n";
+  grammar << BuildStringGrammar ();
+  grammar << "space ::= | \" \" | \"\\n\"{1,2} [ \\t]{0,20}\n";
+  return grammar.str ();
+}
+
+std::string
 BuildLfm2ExtractionGrammar (const nlohmann::json &schema)
 {
   ValidateSchemaSubset (schema);
@@ -463,8 +1070,13 @@ BuildLfm2ExtractionGrammar (const nlohmann::json &schema)
   const auto &labels = properties["labels"];
   const bool labels_nonempty = labels.value ("minItems", 0) > 0;
   const bool has_relations = properties.contains ("relations");
+  const bool has_facts = properties.contains ("facts");
   bool relations_required = false;
+  bool facts_required = false;
   bool confidence_supported = false;
+  bool fact_confidence_supported = false;
+  bool valid_start_supported = false;
+  bool valid_end_supported = false;
   if (schema.contains ("required"))
     {
       for (const auto &required : schema["required"])
@@ -473,6 +1085,10 @@ BuildLfm2ExtractionGrammar (const nlohmann::json &schema)
             {
               relations_required = true;
             }
+          if (required.is_string () && required.get<std::string> () == "facts")
+            {
+              facts_required = true;
+            }
         }
     }
   if (has_relations)
@@ -480,18 +1096,62 @@ BuildLfm2ExtractionGrammar (const nlohmann::json &schema)
       const auto &relation_props = properties["relations"]["items"]["properties"];
       confidence_supported = relation_props.contains ("confidence");
     }
+  if (has_facts)
+    {
+      const auto &fact_props = properties["facts"]["items"]["properties"];
+      fact_confidence_supported = fact_props.contains ("confidence");
+      valid_start_supported = fact_props.contains ("valid_start_ts");
+      valid_end_supported = fact_props.contains ("valid_end_ts");
+    }
 
   std::ostringstream grammar;
-  if (has_relations)
+  if (has_relations || has_facts)
     {
       grammar << "root ::= \"{\" space labels-kv";
-      if (relations_required)
+      if (has_relations && has_facts)
         {
-          grammar << " \",\" space relations-kv";
+          if (relations_required)
+            {
+              grammar << " \",\" space relations-kv";
+              if (facts_required)
+                {
+                  grammar << " \",\" space facts-kv";
+                }
+              else
+                {
+                  grammar << " ( \",\" space facts-kv )?";
+                }
+            }
+          else if (facts_required)
+            {
+              grammar << " \",\" space facts-kv";
+            }
+          else
+            {
+              grammar << " ( \",\" space ( relations-kv ( \",\" space facts-kv )? | facts-kv ) )?";
+            }
+        }
+      else if (has_relations)
+        {
+          if (relations_required)
+            {
+              grammar << " \",\" space relations-kv";
+            }
+          else
+            {
+              grammar << " ( \",\" space ( relations-kv ) )?";
+            }
         }
       else
         {
-          grammar << " ( \",\" space ( relations-kv ) )?";
+          if (facts_required)
+            {
+              grammar << " \",\" space facts-kv";
+            }
+          else
+            {
+              grammar << " ( \",\" space ( facts-kv ) )?";
+            }
         }
       grammar << " \"}\" space\n";
     }
@@ -536,6 +1196,48 @@ BuildLfm2ExtractionGrammar (const nlohmann::json &schema)
         }
       grammar << "relations-kv ::= \"\\\"relations\\\"\" space \":\" space "
                  "relations\n";
+    }
+  if (has_facts)
+    {
+      grammar << "facts ::= \"[\" space (facts-item (\",\" space facts-item)*)? \"]\" space\n";
+      grammar << "facts-item ::= \"{\" space facts-item-subject-kv "
+                 "\",\" space facts-item-predicate-kv \",\" space "
+                 "facts-item-object-kv";
+      if (fact_confidence_supported)
+        {
+          grammar << " ( \",\" space ( facts-item-confidence-kv ) )?";
+        }
+      if (valid_start_supported)
+        {
+          grammar << " ( \",\" space ( facts-item-valid-start-kv ) )?";
+        }
+      if (valid_end_supported)
+        {
+          grammar << " ( \",\" space ( facts-item-valid-end-kv ) )?";
+        }
+      grammar << " \"}\" space\n";
+      grammar << "facts-item-subject-kv ::= \"\\\"subject\\\"\" space "
+                 "\":\" space nonempty-string\n";
+      grammar << "facts-item-predicate-kv ::= \"\\\"predicate\\\"\" space "
+                 "\":\" space nonempty-string\n";
+      grammar << "facts-item-object-kv ::= \"\\\"object\\\"\" space "
+                 "\":\" space nonempty-string\n";
+      if (fact_confidence_supported)
+        {
+          grammar << "facts-item-confidence-kv ::= \"\\\"confidence\\\"\" "
+                     "space \":\" space number\n";
+        }
+      if (valid_start_supported)
+        {
+          grammar << "facts-item-valid-start-kv ::= \"\\\"valid_start_ts\\\"\" "
+                     "space \":\" space number\n";
+        }
+      if (valid_end_supported)
+        {
+          grammar << "facts-item-valid-end-kv ::= \"\\\"valid_end_ts\\\"\" "
+                     "space \":\" space number\n";
+        }
+      grammar << "facts-kv ::= \"\\\"facts\\\"\" space \":\" space facts\n";
     }
   grammar << BuildStringGrammar ();
   grammar << BuildNumberGrammar ();
@@ -684,6 +1386,7 @@ public:
         throw std::runtime_error (component_name_
                                   + ": llama.cpp context has no memory");
       }
+    internal::ThrowIfStopRequested ();
     llama_memory_clear (memory, false);
 
     const std::string prompt = ApplyChatTemplate (messages);
@@ -727,6 +1430,7 @@ public:
                                   + ": llama.cpp prompt decode failed: "
                                   + std::to_string (prompt_rc));
       }
+    internal::ThrowIfStopRequested ();
 
     std::unique_ptr<llama_sampler, void (*) (llama_sampler *)> sampler (
         BuildGenerationSampler (vocab_, config), llama_sampler_free);
@@ -741,6 +1445,7 @@ public:
 
     for (int produced = 0; produced < config.max_tokens; ++produced)
       {
+        internal::ThrowIfStopRequested ();
         const llama_token token = llama_sampler_sample (sampler.get (), ctx_, -1);
         if (token == LLAMA_TOKEN_NULL || llama_vocab_is_eog (vocab_, token))
           {
@@ -757,6 +1462,7 @@ public:
                                       + ": llama.cpp token decode failed: "
                                       + std::to_string (decode_rc));
           }
+        internal::ThrowIfStopRequested ();
       }
 
     return Detokenize (output_tokens);
@@ -990,16 +1696,42 @@ Lfm2LlamaSummarizer::SummarizeTextsLimited (
     }
 
   GenerationConfig config;
-  config.max_tokens = std::clamp ((max_words > 0 ? max_words * 8 : 256), 64, 512);
+  config.max_tokens = ComputeSummaryMaxTokens (texts, max_words);
   config.temperature = 0.3f;
   config.min_p = 0.15f;
   config.repetition_penalty = 1.05f;
   config.greedy = false;
+  if (UseStructuredSummaryOutput ())
+    {
+      config.grammar = internal::BuildLfm2SummaryGrammar ();
+      config.greedy = true;
+      config.temperature = 0.0f;
+      config.min_p = 0.0f;
+    }
 
   std::vector<std::pair<std::string, std::string>> messages;
   messages.emplace_back ("system", BuildSummarySystemPrompt ());
   messages.emplace_back ("user", BuildSummaryUserPrompt (texts));
-  return TrimToWordLimit (impl_->model.Generate (messages, config), max_words);
+  const std::string response = impl_->model.Generate (messages, config);
+
+  std::string summary;
+  if (UseStructuredSummaryOutput ())
+    {
+      summary = ParseSummaryResponse (response);
+      if (summary.empty ())
+        {
+          GenerationConfig fallback_config = config;
+          fallback_config.grammar.clear ();
+          summary = SanitizeSummaryText (
+              impl_->model.Generate (messages, fallback_config));
+        }
+    }
+  else
+    {
+      summary = SanitizeSummaryText (response);
+    }
+
+  return TrimToWordLimit (SanitizeSummaryText (summary), max_words);
 }
 
 std::string

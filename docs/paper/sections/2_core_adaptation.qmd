@@ -238,6 +238,13 @@ retrieval_competition_scale ← 1 + 0.5 × NE_t
 value_update_gain ← 0.5 + 0.5 × DA_t
 ```
 
+In the current implementation, these latent scales are applied at four concrete downstream sites rather than introduced as separate runtime controls:
+
+* `write_threshold_scale` multiplies the accumulator write-gate threshold, so high `NE_t` lowers the barrier for committing a boundary candidate.
+* `reconsolidation_scale` multiplies reconsolidation drift magnitude, so high `ACh_t` strengthens context-driven reconstruction updates.
+* `retrieval_competition_scale` multiplies lateral inhibition during retrieval competition, so high `NE_t` sharpens suppression among near-duplicate candidates.
+* `value_update_gain` scales procedural-store reward updates, so high `DA_t` increases reinforcement of recently used routines.
+
 ## Oscillatory Gating (No Discrete Modes)
 
 To reduce interference without introducing hard modes, Cortext adds a continuous oscillatory gate that gently alternates encode- vs retrieve-bias over time.
@@ -263,3 +270,27 @@ p(F,S,T) = lerp(a, b, κ(F,S,T))
 ```
 
 The coefficients `{α_F, α_S, α_T, β, a, b}` are updated from observed outcomes (acceptance, uncertainty reduction, task reward), while the UI still exposes only F/S/T. This preserves simplicity while allowing the system to adapt its parameterization over time.
+
+In the current branch, this generic learner is instantiated for three live priors that already shape runtime behavior:
+
+* `attention_width_prior` (Focus family)
+* `rate_target_prior` / `base_rate_prior` (Sensitivity family)
+* `hysteresis_band_prior` (Stability family)
+
+The implementation keeps the historical closed-form priors as the exact cold-start species priors. When no learned row exists, Cortext uses the legacy formulas directly. Once informative outcomes arrive, it seeds a narrow learnable band around that legacy value in an internal `meta_learning_coeffs` table and then updates:
+
+```
+success_t = 0.30 × write_accept_t
+          + 0.30 × retrieval_use_t
+          + 0.25 × (1 − u_t)
+          + 0.15 × clamp(0.5 + 0.5δ_reward_t, 0, 1)
+direction_t = 2 × success_t − 1
+```
+
+Only informative turns (`write_accept_t`, `retrieval_use_t`, or non-zero reward error) trigger updates. The learner then nudges `{α_F, α_S, α_T, β, a, b}` toward or away from the currently successful dynamic state:
+
+* Focus observes the current `attention_width_t`
+* Sensitivity observes the realized write-rate estimate `ρ̂_t`
+* Stability observes the current hysteresis band
+
+This makes the meta-learning claim operational without adding any new public controls or changing the public API surface.

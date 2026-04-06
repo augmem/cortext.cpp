@@ -571,6 +571,15 @@ PeripheryCutoff (double T)
   return Lerp (0.03, 0.20, T);
 }
 
+// Fact-evidence eviction floor — memories supporting active facts are protected
+// proportionally to Stability. At T=0 no protection; at T=1 floor reaches
+// the periphery cutoff itself (near-immune).
+inline double
+FactEvictionFloor (double T)
+{
+  return Lerp (0.0, PeripheryCutoff (T), T);
+}
+
 // --- Stability prior helpers (Algorithm 5) ---
 inline double
 BaseBandPrior (double T)

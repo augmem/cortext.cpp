@@ -22,7 +22,7 @@ option(CORTEXT_ENABLE_GEMMA_ORT "Enable ONNX Runtime for Gemma text generator" O
 option(CORTEXT_DISABLE_OGA "Disable onnxruntime-genai for Phi-4 Extractor/Summarizer" OFF)
 option(CORTEXT_DISABLE_LITERT "Disable LiteRT-LM for Gemma Extractor/Summarizer" OFF)
 option(CORTEXT_DISABLE_SHERPA_ONNX "Disable sherpa-onnx ASR/TTS integration" OFF)
-option(CORTEXT_ENABLE_EMBEDDINGGEMMA "Build EmbeddingGemma encoder" OFF)
+option(CORTEXT_ENABLE_EMBEDDINGGEMMA "Build EmbeddingGemma encoder" ON)
 
 # Sanitizer options for catching memory bugs during development
 option(CORTEXT_ENABLE_ASAN "Enable AddressSanitizer" OFF)
@@ -110,6 +110,7 @@ add_library(cortext
     src/store.cpp
     src/store/extension_loader.cpp
     src/store/schema.cpp
+    src/store/facts.cpp
     src/processor/operation_context.cpp
     src/signal_processor.cpp
     src/cortext.cpp
@@ -155,8 +156,13 @@ add_library(cortext
     src/operations/process_extraction_results.cpp
     src/operations/embedding_prediction_error.cpp
     src/operations/precision.cpp
+    src/operations/constructive_recall_internal.cpp
+    src/operations/meta_learning_internal.cpp
     src/operations/graph_build.cpp
     src/operations/graph_retrieval.cpp
+    src/operations/temporal_retrieval.cpp
+    src/operations/eviction_ablation.cpp
+    src/operations/retrieval_debug_state.cpp
     src/operations/neuromodulators.cpp
     # Phase 4: Knowledge Graph Enhancement
     src/operations/emotion_cascade.cpp

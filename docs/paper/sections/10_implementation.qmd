@@ -2,16 +2,71 @@
 
 ## Embedding-Only Operations
 
-All online operations (scoring, boundary detection, retrieval, gating, graph updates) operate **only** on embeddings. Raw text/audio/image content is used solely to generate embeddings; the live loop never re-enters token space. This preserves modality-agnostic behavior and prevents hidden heuristics from bypassing knob control.
+In the current alpha, all online operations (scoring, boundary detection, retrieval, gating, graph updates) operate **only** on embeddings. Raw text/audio/image content is used solely to generate embeddings; the live loop never re-enters token space. This preserves modality-agnostic behavior and prevents hidden heuristics from bypassing knob control.
 
 Retrieved memories are hydrated for inspection and evaluation only. When a memory has no signal-level blobs (e.g., consolidation summaries), the system loads the summary payload from `memories.blob_id` so summary nodes can participate in analysis without affecting online computations.
 
 ## Model Stack (Local Inference)
 
 * **ImageBind embeddings:** image/text/audio inputs are embedded via ImageBind executed through ONNX (default path: `models/imagebind/`).
-* **Consolidation LLM:** summarization and labeling are the only generative steps and run only during consolidation. Cortext resolves a local backend internally: **gemma-3n-e2b** via `third_party/litert_lm`, **LFM2/LFM2.5** via `llama.cpp` GGUFs, or a **mixed** Gemma+Liquid path. The Gemma path auto-selects among available `.litertlm` variants under `models/gemma3n-e2b-litert/`. The Liquid path now prefers `LFM2.5-350M-GGUF` for both summarization and extraction, preferring `Q4_K_M` when present and otherwise accepting other shipped GGUF quantizations; env overrides still take precedence for exact paths. If the `LFM2.5-350M-GGUF` asset is absent, Cortext falls back to the older `LFM2-2.6B-Transcript-Q4_K_M.gguf` summarizer and `LFM2-1.2B-Extract-Q4_K_M.gguf` extractor. The mixed path uses Gemma for summarization and the preferred Liquid extractor path for labeling, and auto resolution now prefers that split when both assets are present. If no deep backend is available, deep consolidation raises an error rather than silently degrading. The summarization prompt remains role-aware for chat sources, favors direct fact-oriented memory notes over dialogue recaps, explicitly preserves named people, projects, and technologies, discourages speaker-role phrasing such as "the user" or "the assistant", and preserves chronological ordering when selected chat excerpts are passed to the model. The Liquid GGUF path is text-only; audio-specific summarization/extraction methods remain unsupported there.
+* **Consolidation LLM:** summarization and labeling are the only generative steps and run only during consolidation. Cortext resolves a local backend internally: **gemma-3n-e2b** via `third_party/litert_lm`, **LFM2/LFM2.5** via `llama.cpp` GGUFs, or a **mixed** Gemma+Liquid path. The Gemma path auto-selects among available `.litertlm` variants under `models/gemma3n-e2b-litert/`. The Liquid path now prefers `LFM2.5-350M-GGUF` for both summarization and extraction, preferring `Q4_K_M` when present and otherwise accepting other shipped GGUF quantizations; env overrides still take precedence for exact paths. If the `LFM2.5-350M-GGUF` asset is absent, Cortext falls back to the older `LFM2-2.6B-Transcript-Q4_K_M.gguf` summarizer and `LFM2-1.2B-Extract-Q4_K_M.gguf` extractor. The mixed path uses Gemma for summarization and the preferred Liquid extractor path for labeling, but auto resolution now prefers the pure `LFM2.5/llama.cpp` path when the Liquid assets are present; mixed and Gemma are fallbacks. If no deep backend is available, deep consolidation raises an error rather than silently degrading. The summarization prompt remains role-aware for chat sources, favors direct fact-oriented memory notes over dialogue recaps, explicitly preserves named people, projects, and technologies, discourages speaker-role phrasing such as "the user" or "the assistant", and preserves chronological ordering when selected chat excerpts are passed to the model. The Liquid GGUF path is text-only; audio-specific summarization/extraction methods remain unsupported there.
+* **Offline label-classifier prototype:** we now also ship a research-only Python pipeline that trains span typing / promotion models from WordNet, multilingual name priors, and sentence context. The current study path builds those priors from `data/surnames/{forenames,surnames}.csv` plus U.S. Census surnames. When external embeddings are enabled, the prototype reuses the repo's preferred text encoder through the rebuilt `cortext_text_embedder`, so offline studies can run on `EmbeddingGemma/llama.cpp` without changing the online runtime path.
 
 No other model runtimes are required for the online loop; all operational decisions are embedding-space computations derived from F/S/T.
+
+## Alpha Scope and Structured-Fact Foundation
+
+The current alpha stores temporality primarily at the episodic level:
+
+* episodic memories have event timestamps,
+* retrieval and decay are recency-aware,
+* consolidation produces summaries, labels, and graph structure.
+
+This is sufficient for long-horizon continuity, but it is not enough on its own for changing structured facts such as residence, caregiver, routine, diagnosis, medication, or appointment state.
+
+The current phase adds an additive **bitemporal structured-fact layer** populated during consolidation rather than during the live loop. A minimal fact record includes:
+
+```
+fact_id
+subject
+predicate
+object_or_value
+valid_start, valid_end
+recorded_at, superseded_at
+confidence
+source_memory_ids
+source_summary_ids
+```
+
+This layer is additive, not a replacement for the existing episodic graph. The division of responsibility is:
+
+* **episodic memories:** preserve raw experience and provenance,
+* **summaries and graph nodes:** provide semantic compression and associative retrieval,
+* **bitemporal facts:** answer changing factual questions with explicit world-time and system-time semantics.
+
+Under this design, deep extraction in consolidation emits assertions with valid-time and transaction-time boundaries. The fact store supports three query modes:
+
+* current truth (`what is true now?`)
+* historical truth (`what was true at world time τ?`)
+* historical belief (`what would Cortext have answered at system time τ?`)
+
+Crucially, this preserves the alpha architecture: the live control loop remains embedding-only, while structured temporal reasoning is added as a higher-level memory product derived from consolidation outputs. The current branch uses those facts in the core retrieval and lifecycle path rather than exposing a separate fact payload in the chat example.
+
+The three user-facing knobs still shape the core behavior:
+
+* **Focus** increases fact-linked retrieval influence and strengthens stale-conflict suppression during ranking.
+* **Sensitivity** increases preference for newly confirmed caregiver, location, and schedule changes when current evidence conflicts with older routine summaries.
+* **Stability** contributes a lighter routine-preservation bias in the core retrieval path and broader memory dynamics.
+
+Phase 6 hardens the **core** bitemporal layer before any additional chat integration. Two changes were necessary in the retrieval pipeline. First, current-mode ranking now penalizes stale same-pair evidence even when an older fact has the same object string as the current winner (for example, `Austin -> Denver -> Austin` no longer lets the old `Austin` memory outrank the current one merely because it is semantically closer to the query vector). Second, fact seeding now over-fetches from the shared embedding table before temporal filtering so that current fact embeddings are not crowded out by nearby non-fact memory embeddings. On the ingestion side, conflicting low-confidence assertions are no longer allowed to supersede stronger current facts; they are stored as immediately superseded evidence until a sufficiently strong correction arrives.
+
+Phase 7 adds a second internal experiment layer on top of that hardened core: a thread-local **retrieval ablation override** used only by deterministic tests and benchmarks. It can disable the fact layer entirely, collapse historical queries to current-only behavior, scale fact boosts and stale penalties, relax provenance from direct evidence links to unrestricted semantic fact matches, and apply a routine-versus-recency preset in the core scoring path. Phase 8 extends that layer with a broader deterministic matrix: explicit `current` / `valid_at` / `known_at` reporting, a wider predicate/severity scenario set, and a representative `3 x 3 x 3` F/S/T sweep. The key implementation constraint remains unchanged: the override changes only internal core behavior; no public headers, C API surfaces, or chat-path controls are introduced.
+
+Phase 9 adds the missing **fact lifecycle** layer. Fact assertions now persist internal support traces such as support mass, source diversity, contradiction mass, confirmation count, severity class, and lifecycle state (`active`, `weak`, `archived`). Consolidation still inserts or supersedes fact assertions, but it now also updates those support traces and then runs a bounded lifecycle maintenance sweep. That sweep decays unsupported facts, compresses repeated confirmations into support statistics, archives low-support facts, and physically deletes only low-severity archived facts by default. High-severity historical facts are retained even after evidence loss so that deterministic `valid_at` and `known_at` queries remain correct.
+
+This leaves the architecture in the intended order: the fact store, temporal queries, fact-aware retrieval, and lifecycle maintenance are now benchmark-gated at the core level and causally ablated there, while the chat example remains a consumer of the normal memory-return surface rather than a separate fact-grounding path.
+
+Lower-level temporal retrieval modes (`current`, `valid_at`, `known_at`) remain implemented for deterministic tests and benchmarks. Explicit user-facing temporal controls and any future chat-specific grounding or reply templating remain later work.
 
 ## Computational Complexity
 

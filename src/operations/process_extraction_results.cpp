@@ -1,6 +1,7 @@
 #include "cortext/internal/cancellation.hpp"
 #include "cortext/operations/process_extraction_results.hpp"
 
+#include "../store/facts.hpp"
 #include "cortext/store/store.hpp"
 #include "cortext/core/algorithms.hpp"
 #include "cortext/core/knobs.hpp"
@@ -13,6 +14,7 @@
 #include "cortext/telemetry/telemetry.hpp"
 #include <algorithm>
 #include <any>
+#include <cstdlib>
 #include <optional>
 #include <nlohmann/json.hpp>
 #include <string>
@@ -55,10 +57,32 @@ const nlohmann::json kExtractionSchema = nlohmann::json::parse (R"({
         },
         "required": ["subject", "predicate", "object"]
       }
+    },
+    "facts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "subject": {"type": "string"},
+          "predicate": {"type": "string"},
+          "object": {"type": "string"},
+          "confidence": {"type": "number"},
+          "valid_start_ts": {"type": "integer"},
+          "valid_end_ts": {"type": "integer"}
+        },
+        "required": ["subject", "predicate", "object"]
+      }
     }
   },
   "required": ["labels"]
 })");
+
+bool
+UseLegacyLabelFrequencyGate ()
+{
+  const char *value = std::getenv ("CORTEXT_ABLATE_LEGACY_LABEL_GATE");
+  return value != nullptr && std::string (value) == "1";
+}
 
 constexpr int kEmbeddingDim = 256;
 
@@ -209,12 +233,91 @@ MapEdgeType (const std::string &predicate)
   return {};
 }
 
+std::optional<long long>
+OptionalI64 (std::uint64_t value)
+{
+  return static_cast<long long> (value);
+}
+
+std::any
+NullableAny (const std::optional<long long> &value)
+{
+  if (value.has_value ())
+    {
+      return std::any (*value);
+    }
+  return std::any ();
+}
+
+long long
+ExtractInt64Field (const std::map<std::string, std::any> &row,
+                   const char *field)
+{
+  auto it = row.find (field);
+  if (it == row.end () || !it->second.has_value ())
+    {
+      return 0;
+    }
+  if (it->second.type () == typeid (long long))
+    {
+      return std::any_cast<long long> (it->second);
+    }
+  if (it->second.type () == typeid (int))
+    {
+      return std::any_cast<int> (it->second);
+    }
+  return 0;
+}
+
+double
+RequiredSupersessionConfidence (double existing_confidence, double sensitivity,
+                                double stability)
+{
+  const double s = core::SensitivityBias (sensitivity);
+  const double t = core::Clamp (stability, 0.0, 1.0);
+  const double margin = core::Lerp (0.18, 0.03, s)
+                        * core::Lerp (1.10, 0.90, t);
+  return core::Clamp (
+      existing_confidence
+          + margin * (1.0 - core::Clamp (existing_confidence, 0.0, 1.0)),
+      0.0, 1.0);
+}
+
+double
+ExtractDoubleField (const std::map<std::string, std::any> &row,
+                    const char *field, double fallback = 0.0)
+{
+  auto it = row.find (field);
+  if (it == row.end () || !it->second.has_value ())
+    {
+      return fallback;
+    }
+  if (it->second.type () == typeid (double))
+    {
+      return std::any_cast<double> (it->second);
+    }
+  if (it->second.type () == typeid (float))
+    {
+      return static_cast<double> (std::any_cast<float> (it->second));
+    }
+  if (it->second.type () == typeid (int))
+    {
+      return static_cast<double> (std::any_cast<int> (it->second));
+    }
+  if (it->second.type () == typeid (long long))
+    {
+      return static_cast<double> (std::any_cast<long long> (it->second));
+    }
+  return fallback;
+}
+
 } // namespace
 
 void
 ProcessExtractionResults::Execute (OperationContext &context, Transaction &tx) const
 {
   auto &p_ctx = context.GetProcessorContext ();
+  const auto &cfg = context.GetConfig ();
 
   // Get extractor (may be null if OGA disabled)
   Extractor *extractor = context.GetExtractor ();
@@ -228,15 +331,23 @@ ProcessExtractionResults::Execute (OperationContext &context, Transaction &tx) c
           internal::ThrowIfStopRequested ();
           try
             {
-              // Combine source texts for extraction
-              std::string combined_text = req.summary_text;
+              // Extract from raw episodic source texts (not the compressed
+              // summary). The summary serves as a retrieval node but
+              // extraction works on the original evidence to avoid lossy
+              // compression hiding extractable facts.
+              std::string combined_text;
               if (!req.source_texts.empty ())
                 {
-                  combined_text += "\n\nSource texts:\n";
                   for (const auto &txt : req.source_texts)
                     {
-                      combined_text += txt + "\n---\n";
+                      if (!combined_text.empty ())
+                        combined_text += "\n---\n";
+                      combined_text += txt;
                     }
+                }
+              else
+                {
+                  combined_text = req.summary_text;
                 }
 
               auto result
@@ -278,30 +389,39 @@ ProcessExtractionResults::Execute (OperationContext &context, Transaction &tx) c
   int total_results = static_cast<int> (p_ctx.pending_extraction_results.size ());
   int total_labels = 0;
   int total_relations = 0;
+  int total_facts = 0;
+  std::vector<long long> touched_fact_ids;
   for (const auto &pending : p_ctx.pending_extraction_results)
     {
       total_labels += static_cast<int> (pending.labels.size ());
       total_relations += static_cast<int> (pending.relations.size ());
+      total_facts += static_cast<int> (pending.facts.size ());
     }
 
   const uint64_t now_ts = context.GetSignal ().timestamp;
+  Encoder *lifecycle_encoder = context.GetConfig ().encoder;
+  const bool use_legacy_label_gate = UseLegacyLabelFrequencyGate ();
   const int label_threshold
-      = core::LabelFrequencyThreshold (context.GetConfig ().stability);
+      = use_legacy_label_gate
+            ? core::LabelFrequencyThreshold (cfg.stability)
+            : 0;
   std::unordered_map<std::string, int> label_counts;
-  for (const auto &pending : p_ctx.pending_extraction_results)
+  if (use_legacy_label_gate)
     {
-      for (const auto &label_entry : pending.labels)
+      for (const auto &pending : p_ctx.pending_extraction_results)
         {
-          const std::string label_key
-              = NormalizeLabelKey (label_entry.label);
-          if (label_key.empty ())
+          for (const auto &label_entry : pending.labels)
             {
-              continue;
+              const std::string label_key
+                  = NormalizeLabelKey (label_entry.label);
+              if (label_key.empty ())
+                {
+                  continue;
+                }
+              label_counts[label_key] += 1;
             }
-          label_counts[label_key] += 1;
         }
     }
-
   struct ExistingLabel
   {
     long long memory_id = 0;
@@ -376,38 +496,17 @@ ProcessExtractionResults::Execute (OperationContext &context, Transaction &tx) c
       // Find summary memory for has_label edges.
       long long summary_memory_id = 0;
       long long summary_embedding_id = 0;
+      long long summary_start_ts = 0;
       auto summary_rows = tx.Execute (
-          "SELECT memory_id, embedding_id FROM memories "
+          "SELECT memory_id, embedding_id, start_ts FROM memories "
           "WHERE source_id = ? AND kind = 'ASSOCIATION'",
           { result.summary_id });
       if (!summary_rows.empty ())
         {
           const auto &row = summary_rows[0];
-          auto mem_it = row.find ("memory_id");
-          if (mem_it != row.end ())
-            {
-              if (mem_it->second.type () == typeid (long long))
-                {
-                  summary_memory_id = std::any_cast<long long> (mem_it->second);
-                }
-              else if (mem_it->second.type () == typeid (int))
-                {
-                  summary_memory_id = std::any_cast<int> (mem_it->second);
-                }
-            }
-          auto emb_it = row.find ("embedding_id");
-          if (emb_it != row.end ())
-            {
-              if (emb_it->second.type () == typeid (long long))
-                {
-                  summary_embedding_id
-                      = std::any_cast<long long> (emb_it->second);
-                }
-              else if (emb_it->second.type () == typeid (int))
-                {
-                  summary_embedding_id = std::any_cast<int> (emb_it->second);
-                }
-            }
+          summary_memory_id = ExtractInt64Field (row, "memory_id");
+          summary_embedding_id = ExtractInt64Field (row, "embedding_id");
+          summary_start_ts = ExtractInt64Field (row, "start_ts");
         }
 
       const auto summary_embedding
@@ -433,6 +532,7 @@ ProcessExtractionResults::Execute (OperationContext &context, Transaction &tx) c
         bool has_embedding = false;
       };
       std::optional<FallbackLabel> fallback_label;
+      std::unordered_set<std::string> inserted_label_keys;
 
       auto insert_label = [&](const std::string &label,
                               const std::string &label_key,
@@ -581,6 +681,10 @@ ProcessExtractionResults::Execute (OperationContext &context, Transaction &tx) c
             {
               continue;
             }
+          if (!inserted_label_keys.insert (label_key).second)
+            {
+              continue;
+            }
           auto &existing = get_existing (label_key);
           const std::vector<float> *label_embedding_ptr = nullptr;
           auto cached_it = label_cache.find (label_key);
@@ -610,7 +714,7 @@ ProcessExtractionResults::Execute (OperationContext &context, Transaction &tx) c
             }
           const double salience
               = ComputeLabelSalience (label_embedding_ptr, summary_embedding);
-          if (label_threshold > 1
+          if (use_legacy_label_gate && label_threshold > 1
               && label_counts[label_key] < label_threshold)
             {
               if (!fallback_label || salience > fallback_label->salience)
@@ -636,20 +740,18 @@ ProcessExtractionResults::Execute (OperationContext &context, Transaction &tx) c
             }
         }
 
-      if (!inserted_any_label && fallback_label.has_value ())
+      if (use_legacy_label_gate && !inserted_any_label
+          && fallback_label.has_value ())
         {
           const std::vector<float> *fallback_embedding
               = fallback_label->has_embedding
                     ? &fallback_label->embedding
                     : nullptr;
-          if (insert_label (fallback_label->label,
-                            fallback_label->label_key,
-                            fallback_label->salience,
-                            fallback_embedding,
-                            get_existing (fallback_label->label_key)))
-            {
-              inserted_any_label = true;
-            }
+          insert_label (fallback_label->label,
+                        fallback_label->label_key,
+                        fallback_label->salience,
+                        fallback_embedding,
+                        get_existing (fallback_label->label_key));
         }
 
       // 2. Insert relations into ASSOCIATIONS.
@@ -687,6 +789,270 @@ ProcessExtractionResults::Execute (OperationContext &context, Transaction &tx) c
                         { subject_id, object_id, edge_type, weight01 });
             }
         }
+
+      // 3. Insert fact assertions and evidence.
+      std::vector<long long> evidence_memory_ids;
+      if (summary_memory_id > 0)
+        {
+          evidence_memory_ids.push_back (summary_memory_id);
+          auto evidence_rows = tx.Execute (
+              "SELECT target_memory_id FROM associations "
+              "WHERE source_memory_id = ? AND edge_type = 'derived_from'",
+              { summary_memory_id });
+          for (const auto &row : evidence_rows)
+            {
+              const long long source_memory_id
+                  = ExtractInt64Field (row, "target_memory_id");
+              if (source_memory_id > 0)
+                {
+                  evidence_memory_ids.push_back (source_memory_id);
+                }
+            }
+        }
+
+      for (const auto &fact : result.facts)
+        {
+          const std::string canonical_subject
+              = store::NormalizeFactTerm (fact.subject);
+          const std::string canonical_predicate
+              = store::NormalizeFactPredicate (fact.predicate);
+          const std::string canonical_object
+              = store::NormalizeFactTerm (fact.object);
+          if (canonical_subject.empty () || canonical_predicate.empty ()
+              || canonical_object.empty () || summary_memory_id <= 0)
+            {
+              continue;
+            }
+
+          const std::optional<long long> valid_start_ts
+              = fact.valid_start_ts.has_value ()
+                    ? OptionalI64 (*fact.valid_start_ts)
+                    : (summary_start_ts > 0
+                           ? std::optional<long long> (summary_start_ts)
+                           : std::nullopt);
+          const std::optional<long long> valid_end_ts
+              = fact.valid_end_ts.has_value ()
+                    ? OptionalI64 (*fact.valid_end_ts)
+                    : std::nullopt;
+          const bool explicit_valid_start = fact.valid_start_ts.has_value ();
+          const bool explicit_valid_end = fact.valid_end_ts.has_value ();
+          const double confidence = core::Clamp (fact.confidence, 0.0, 1.0);
+
+          long long fact_id = 0;
+          const auto duplicate_rows
+              = (!explicit_valid_start && !explicit_valid_end)
+                    ? tx.Execute (
+                          "SELECT fact_id, confidence FROM fact_assertions "
+                          "WHERE canonical_subject = ? "
+                          "  AND canonical_predicate = ? "
+                          "  AND canonical_object = ? "
+                          "  AND (superseded_at_ts IS NULL OR superseded_at_ts > ?) "
+                          "ORDER BY recorded_at_ts DESC LIMIT 1",
+                          { canonical_subject, canonical_predicate,
+                            canonical_object,
+                            static_cast<long long> (now_ts) })
+                    : tx.Execute (
+                          "SELECT fact_id, confidence FROM fact_assertions "
+                          "WHERE canonical_subject = ? "
+                          "  AND canonical_predicate = ? "
+                          "  AND canonical_object = ? "
+                          "  AND ((valid_start_ts IS NULL AND ? IS NULL) OR valid_start_ts = ?) "
+                          "  AND ((valid_end_ts IS NULL AND ? IS NULL) OR valid_end_ts = ?) "
+                          "  AND (superseded_at_ts IS NULL OR superseded_at_ts > ?) "
+                          "ORDER BY recorded_at_ts DESC LIMIT 1",
+                          { canonical_subject, canonical_predicate,
+                            canonical_object,
+                            NullableAny (valid_start_ts),
+                            NullableAny (valid_start_ts),
+                            NullableAny (valid_end_ts),
+                            NullableAny (valid_end_ts),
+                            static_cast<long long> (now_ts) });
+          if (!duplicate_rows.empty ())
+            {
+              fact_id = ExtractInt64Field (duplicate_rows[0], "fact_id");
+              const double merged_confidence
+                  = std::max (confidence,
+                              ExtractDoubleField (duplicate_rows[0],
+                                                  "confidence", confidence));
+              if (fact_id > 0)
+                {
+                  if (!explicit_valid_start && valid_start_ts.has_value ())
+                    {
+                      AddWrite (
+                          tx,
+                          "UPDATE fact_assertions "
+                          "SET confidence = ?, "
+                          "    confirmation_count = confirmation_count + 1, "
+                          "    compressed_support_count = compressed_support_count + 1, "
+                          "    last_confirmation_ts = ?, "
+                          "    lifecycle_state = 'active', "
+                          "    archived_at = NULL, "
+                          "    valid_start_ts = CASE "
+                          "      WHEN valid_start_ts IS NULL OR valid_start_ts > ? THEN ? "
+                          "      ELSE valid_start_ts END "
+                          "WHERE fact_id = ?",
+                          { merged_confidence,
+                            static_cast<long long> (now_ts),
+                            *valid_start_ts,
+                            *valid_start_ts,
+                            fact_id });
+                    }
+                  else
+                    {
+                      AddWrite (tx,
+                                "UPDATE fact_assertions "
+                                "SET confidence = ?, "
+                                "    confirmation_count = confirmation_count + 1, "
+                                "    compressed_support_count = compressed_support_count + 1, "
+                                "    last_confirmation_ts = ?, "
+                                "    lifecycle_state = 'active', "
+                                "    archived_at = NULL "
+                                "WHERE fact_id = ?",
+                                { merged_confidence,
+                                  static_cast<long long> (now_ts), fact_id });
+                    }
+                }
+            }
+          else
+            {
+              auto conflicting_rows = tx.Execute (
+                  "SELECT fact_id, confidence FROM fact_assertions "
+                  "WHERE canonical_subject = ? "
+                  "  AND canonical_predicate = ? "
+                  "  AND canonical_object <> ? "
+                  "  AND (superseded_at_ts IS NULL OR superseded_at_ts > ?) "
+                  "  AND (valid_end_ts IS NULL OR valid_end_ts > ?)",
+                  { canonical_subject, canonical_predicate, canonical_object,
+                    static_cast<long long> (now_ts),
+                    NullableAny (valid_start_ts) });
+
+              double strongest_conflicting_confidence = 0.0;
+              for (const auto &row : conflicting_rows)
+                {
+                  strongest_conflicting_confidence = std::max (
+                      strongest_conflicting_confidence,
+                      ExtractDoubleField (row, "confidence", 0.0));
+                }
+              const bool accept_conflicting_update
+                  = conflicting_rows.empty ()
+                    || confidence
+                           >= RequiredSupersessionConfidence (
+                               strongest_conflicting_confidence,
+                               cfg.sensitivity, cfg.stability);
+
+              for (const auto &row : conflicting_rows)
+                {
+                  const long long conflicting_fact_id
+                      = ExtractInt64Field (row, "fact_id");
+                  if (conflicting_fact_id <= 0)
+                    {
+                      continue;
+                    }
+                  if (!accept_conflicting_update)
+                    {
+                      continue;
+                    }
+                  AddWrite (
+                      tx,
+                      "UPDATE fact_assertions "
+                      "SET valid_end_ts = CASE "
+                      "      WHEN ? IS NULL THEN valid_end_ts "
+                      "      WHEN valid_end_ts IS NULL OR valid_end_ts > ? THEN ? "
+                      "      ELSE valid_end_ts END, "
+                      "    superseded_at_ts = ?, "
+                      "    challenge_count = challenge_count + 1, "
+                      "    last_challenge_ts = ? "
+                      "WHERE fact_id = ?",
+                      { NullableAny (valid_start_ts), NullableAny (valid_start_ts),
+                        NullableAny (valid_start_ts),
+                        static_cast<long long> (now_ts),
+                        static_cast<long long> (now_ts), conflicting_fact_id });
+                  touched_fact_ids.push_back (conflicting_fact_id);
+                  store::RefreshFactCache (tx, encoder, conflicting_fact_id,
+                                           now_ts);
+                }
+
+              AddWrite (tx,
+                        "INSERT INTO fact_assertions "
+                        "(subject, predicate, object, canonical_subject, "
+                        " canonical_predicate, canonical_object, valid_start_ts, "
+                        " valid_end_ts, recorded_at_ts, superseded_at_ts, "
+                        " confidence, summary_memory_id, created_at, "
+                        " support_mass, source_diversity, contradiction_mass, "
+                        " confirmation_count, challenge_count, "
+                        " compressed_support_count, last_confirmation_ts, "
+                        " last_challenge_ts, severity_class, lifecycle_state, "
+                        " archived_at, last_maintenance_ts) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
+                        "        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        { fact.subject, fact.predicate, fact.object,
+                          canonical_subject, canonical_predicate, canonical_object,
+                          NullableAny (valid_start_ts),
+                          NullableAny (valid_end_ts),
+                          static_cast<long long> (now_ts),
+                          accept_conflicting_update ? std::any ()
+                                                    : std::any (
+                                                          static_cast<long long> (
+                                                              now_ts)),
+                          confidence, summary_memory_id,
+                          static_cast<long long> (now_ts),
+                          0.0,
+                          0LL,
+                          strongest_conflicting_confidence,
+                          1LL,
+                          0LL,
+                          0LL,
+                          static_cast<long long> (now_ts),
+                          std::any (),
+                          store::PredicateSeverityClass (canonical_predicate),
+                          accept_conflicting_update
+                              ? std::any (std::string ("active"))
+                              : std::any (std::string ("archived")),
+                          accept_conflicting_update ? std::any ()
+                                                    : std::any (
+                                                          static_cast<long long> (
+                                                              now_ts)),
+                          0LL });
+              auto fact_rows
+                  = tx.Execute ("SELECT last_insert_rowid() AS id", {});
+              if (!fact_rows.empty () && fact_rows[0].count ("id"))
+                {
+                  fact_id = ExtractInt64Field (fact_rows[0], "id");
+                }
+            }
+
+          if (fact_id <= 0)
+            {
+              continue;
+            }
+          touched_fact_ids.push_back (fact_id);
+
+          for (size_t i = 0; i < evidence_memory_ids.size (); ++i)
+            {
+              const long long evidence_memory_id = evidence_memory_ids[i];
+              if (evidence_memory_id <= 0)
+                {
+                  continue;
+                }
+              const std::string evidence_type
+                  = i == 0 ? "summary" : "episodic";
+              const double support_weight = i == 0 ? 1.0 : 0.75;
+              AddWrite (tx,
+                        "INSERT OR IGNORE INTO fact_evidence "
+                        "(fact_id, source_memory_id, evidence_type, support_weight) "
+                        "VALUES (?, ?, ?, ?)",
+                        { fact_id, evidence_memory_id, evidence_type,
+                          support_weight });
+            }
+
+          store::RefreshFactCache (tx, encoder, fact_id, now_ts);
+        }
+    }
+
+  if (!touched_fact_ids.empty ())
+    {
+      store::MaintainFactLifecycle (tx, lifecycle_encoder, now_ts,
+                                    touched_fact_ids);
     }
 
   // 4. Clear pending results.
@@ -696,6 +1062,7 @@ ProcessExtractionResults::Execute (OperationContext &context, Transaction &tx) c
     telemetry::Attribute::Int64 ("results_processed", total_results),
     telemetry::Attribute::Int64 ("labels_seen", total_labels),
     telemetry::Attribute::Int64 ("relations_seen", total_relations),
+    telemetry::Attribute::Int64 ("facts_seen", total_facts),
     telemetry::Attribute::Int64 ("label_threshold", label_threshold)
   });
 }

@@ -6,19 +6,182 @@
 #include "cortext/core/knobs.hpp"
 #include "cortext/processor/operation_context.hpp"
 #include "cortext/telemetry/telemetry.hpp"
+#include "eviction_ablation.hpp"
 #include <cmath>
+#include <cstdlib>
+#include <filesystem>
 #include <string>
+#include <system_error>
 #include <typeinfo>
 #include <vector>
 
 namespace cortext::operations
 {
 
+namespace
+{
+
+constexpr long long kDefaultEvictionMinBytes = 500LL * 1000LL * 1000LL;
+
+long long
+GetAnyInt64 (const std::map<std::string, std::any> &row, const std::string &key,
+             long long fallback = 0)
+{
+  auto it = row.find (key);
+  if (it == row.end () || !it->second.has_value ())
+    return fallback;
+  if (it->second.type () == typeid (long long))
+    return std::any_cast<long long> (it->second);
+  if (it->second.type () == typeid (int))
+    return static_cast<long long> (std::any_cast<int> (it->second));
+  if (it->second.type () == typeid (double))
+    return static_cast<long long> (std::any_cast<double> (it->second));
+  return fallback;
+}
+
+double
+ParseEnvDouble (const char *name, double fallback)
+{
+  const char *raw = std::getenv (name);
+  if (!raw || !*raw)
+    return fallback;
+  char *end = nullptr;
+  const double value = std::strtod (raw, &end);
+  if (end == raw)
+    return fallback;
+  return value;
+}
+
+long long
+ParseEnvInt64 (const char *name, long long fallback)
+{
+  const char *raw = std::getenv (name);
+  if (!raw || !*raw)
+    return fallback;
+  char *end = nullptr;
+  const long long value = std::strtoll (raw, &end, 10);
+  if (end == raw)
+    return fallback;
+  return value;
+}
+
+std::string
+ResolveMainDbPath (Transaction &tx)
+{
+  auto rows = tx.Execute ("PRAGMA database_list", {});
+  for (const auto &row : rows)
+    {
+      auto it_name = row.find ("name");
+      auto it_file = row.find ("file");
+      if (it_name == row.end () || it_file == row.end ()
+          || !it_name->second.has_value () || !it_file->second.has_value ())
+        {
+          continue;
+        }
+      if (it_name->second.type () == typeid (std::string)
+          && std::any_cast<std::string> (it_name->second) == "main"
+          && it_file->second.type () == typeid (std::string))
+        {
+          return std::any_cast<std::string> (it_file->second);
+        }
+    }
+  return {};
+}
+
+long long
+QueryPragmaInt64 (Transaction &tx, const std::string &pragma_name)
+{
+  auto rows = tx.Execute ("PRAGMA " + pragma_name, {});
+  if (rows.empty ())
+    return 0;
+  auto it = rows[0].find (pragma_name);
+  if (it != rows[0].end ())
+    return GetAnyInt64 (rows[0], pragma_name, 0);
+  if (!rows[0].empty ())
+    return GetAnyInt64 (rows[0], rows[0].begin ()->first, 0);
+  return 0;
+}
+
+struct StorageGateInfo
+{
+  bool active = false;
+  long long used_bytes = 0;
+  long long threshold_bytes = 0;
+};
+
+StorageGateInfo
+ComputeStorageGateInfo (Transaction &tx,
+                        const eviction::EvictionAblationOverride &override)
+{
+  StorageGateInfo info;
+
+  const std::string db_path = ResolveMainDbPath (tx);
+  const bool file_backed = !db_path.empty ();
+  info.active = override.storage_gate_enabled.value_or (file_backed);
+  if (!info.active)
+    return info;
+
+  long long used_bytes = 0;
+  if (override.used_storage_bytes.has_value ())
+    {
+      used_bytes = std::max<long long> (*override.used_storage_bytes, 0);
+    }
+  else if (file_backed)
+    {
+      std::error_code ec;
+      const auto main_size = std::filesystem::file_size (db_path, ec);
+      if (!ec)
+        used_bytes += static_cast<long long> (main_size);
+      const auto wal_path = db_path + "-wal";
+      const auto wal_size = std::filesystem::file_size (wal_path, ec);
+      if (!ec)
+        used_bytes += static_cast<long long> (wal_size);
+    }
+
+  if (used_bytes <= 0)
+    {
+      const long long page_count = QueryPragmaInt64 (tx, "page_count");
+      const long long page_size = QueryPragmaInt64 (tx, "page_size");
+      used_bytes = page_count * page_size;
+    }
+  info.used_bytes = std::max<long long> (used_bytes, 0);
+
+  const long long fixed_floor = override.min_storage_bytes.value_or (
+      ParseEnvInt64 ("CORTEXT_EVICTION_MIN_DB_BYTES",
+                     kDefaultEvictionMinBytes));
+  const double fraction_floor
+      = override.min_storage_fraction_of_available.value_or (
+          ParseEnvDouble ("CORTEXT_EVICTION_MIN_DB_AVAIL_PCT", 0.0));
+  long long threshold_bytes = std::max<long long> (fixed_floor, 0);
+  if (file_backed && fraction_floor > 0.0)
+    {
+      std::error_code ec;
+      const auto db_parent = std::filesystem::path (db_path).parent_path ();
+      const auto space = std::filesystem::space (
+          db_parent.empty () ? std::filesystem::current_path () : db_parent,
+          ec);
+      if (!ec)
+        {
+          const long long from_fraction = static_cast<long long> (
+              std::floor (fraction_floor
+                          * static_cast<double> (space.available)));
+          threshold_bytes = std::max (threshold_bytes,
+                                      std::max<long long> (from_fraction, 0));
+        }
+    }
+  info.threshold_bytes = threshold_bytes;
+  return info;
+}
+
+} // namespace
+
 void
 UpdateMemoryStrength::Execute (OperationContext &context, Transaction &tx) const
 {
   const auto &cfg = context.GetConfig ();
   auto &p_ctx = context.GetProcessorContext ();
+
+  const auto eviction_override = eviction::GetEvictionAblationOverride ();
 
   const double F_raw = cfg.focus;
   const double S_raw = cfg.sensitivity;
@@ -27,10 +190,14 @@ UpdateMemoryStrength::Execute (OperationContext &context, Transaction &tx) const
   const double S_eff = core::SensitivityBias (S_raw);
   const double alpha = core::AlphaS (S_raw, p_ctx.u_t);
   const double half_life
-      = (p_ctx.half_life > constants::kNormEpsilon)
-            ? p_ctx.half_life
-            : core::BaseHalfLifePrior (T);
-  const double cutoff = core::PeripheryCutoff (T);
+      = eviction_override.half_life.has_value ()
+            ? *eviction_override.half_life
+            : ((p_ctx.half_life > constants::kNormEpsilon)
+                   ? p_ctx.half_life
+                   : core::BaseHalfLifePrior (T));
+  const double cutoff
+      = eviction_override.periphery_cutoff.value_or (
+          core::PeripheryCutoff (T));
   const double L_cg = std::round (core::Lerp (8.0, 32.0, T));
   const double alpha_cg
       = (L_cg > 0.0) ? (constants::kTwo / (L_cg + 1.0)) : 1.0;
@@ -115,8 +282,11 @@ UpdateMemoryStrength::Execute (OperationContext &context, Transaction &tx) const
           = has_last_access ? last_access_prev : created_at;
       const double delta_seconds = std::max (
           0.0, static_cast<double> (ts - access_base) / 1000.0);
+      const bool flashbulb_active
+          = eviction_override.flashbulb_enabled.value_or (true)
+            && (flashbulb != 0);
       const double half_life_bonus
-          = (flashbulb != 0)
+          = flashbulb_active
                 ? std::max (1.0, half_life_bonus_raw)
                 : 1.0;
       const double memory_half_life
@@ -139,7 +309,10 @@ UpdateMemoryStrength::Execute (OperationContext &context, Transaction &tx) const
                       * contextual_gain
                 : 0.0;
 
-      const int n_traces = 2 + static_cast<int> (std::round (2.0 * T));
+      const int n_traces
+          = eviction_override.trace_count.has_value ()
+                ? core::Clamp (*eviction_override.trace_count, 1, 4)
+                : 2 + static_cast<int> (std::round (2.0 * T));
       const double tau_fast = 0.10 * memory_half_life;
       const double tau_med = 0.50 * memory_half_life;
       const double tau_slow = 2.00 * memory_half_life;
@@ -148,6 +321,33 @@ UpdateMemoryStrength::Execute (OperationContext &context, Transaction &tx) const
       double traces[4] = { trace_fast_prev, trace_med_prev,
                            trace_slow_prev, trace_ultra_prev };
 
+      // Reinforcement: S and F drive a per-trace injection that is
+      // distributed uniformly across active traces (not front-loaded).
+      // The alpha EWMA increment handles gradual learning; the
+      // reinforcement injection handles immediate retrieval-use feedback.
+      const double reinf_scale
+          = eviction_override.reinforcement.has_value ()
+                ? (*eviction_override.reinforcement
+                           == eviction::ReinforcementStrength::Off
+                       ? 0.0
+                       : (*eviction_override.reinforcement
+                                  == eviction::ReinforcementStrength::Weak
+                              ? 0.5
+                              : 1.0))
+                : 1.0;
+      const double reinforcement
+          = core::Clamp (
+                reinf_scale
+                    * (S_eff * used_flag
+                       + F_eff
+                             * core::Clamp (influence_factor,
+                                            constants::kNormalizedMin,
+                                            constants::kNormalizedMax))
+                    * serial_mult,
+                constants::kNormalizedMin, constants::kNormalizedMax);
+      const double reinf_per_trace
+          = reinforcement / std::max (1, n_traces);
+
       for (int i = 0; i < 4; ++i)
         {
           const double tau = std::max (taus[i], constants::kNormEpsilon);
@@ -155,12 +355,17 @@ UpdateMemoryStrength::Execute (OperationContext &context, Transaction &tx) const
               = std::exp (-std::log (constants::kTwo) / tau
                           * std::max (0.0, delta_seconds));
           const double increment = (alpha * used_flag) / std::max (1, n_traces);
-          traces[i] = core::Clamp (traces[i] * decay_i + increment,
-                                   constants::kNormalizedMin,
-                                   constants::kNormalizedMax);
+          traces[i] = core::Clamp (
+              traces[i] * decay_i + increment + reinf_per_trace,
+              constants::kNormalizedMin, constants::kNormalizedMax);
         }
 
-      const double coupling = 0.05 + 0.10 * T;
+      const double coupling
+          = eviction_override.coupling_enabled.has_value ()
+                    && !*eviction_override.coupling_enabled
+                ? 0.0
+                : eviction_override.coupling_strength.value_or (
+                    0.05 + 0.10 * T);
       traces[1] = core::Clamp (traces[1] + coupling * traces[0],
                                constants::kNormalizedMin,
                                constants::kNormalizedMax);
@@ -171,22 +376,25 @@ UpdateMemoryStrength::Execute (OperationContext &context, Transaction &tx) const
                                constants::kNormalizedMin,
                                constants::kNormalizedMax);
 
-      const double boost
-          = core::Clamp ((S_eff * used_flag + F_eff * influence_factor) * serial_mult,
-                         constants::kNormalizedMin,
-                         constants::kNormalizedMax);
-      traces[0] = core::Clamp (traces[0] + 0.6 * boost,
-                               constants::kNormalizedMin,
-                               constants::kNormalizedMax);
-      traces[1] = core::Clamp (traces[1] + 0.3 * boost,
-                               constants::kNormalizedMin,
-                               constants::kNormalizedMax);
-      traces[2] = core::Clamp (traces[2] + 0.1 * boost,
-                               constants::kNormalizedMin,
-                               constants::kNormalizedMax);
-
-      const double w_raw[4] = { 0.55 - 0.20 * T, 0.25,
-                                0.15 + 0.10 * T, 0.05 + 0.10 * T };
+      const bool equal_weights
+          = eviction_override.weights.has_value ()
+            && *eviction_override.weights
+                   == eviction::WeightDistribution::Equal;
+      double w_raw[4];
+      if (equal_weights)
+        {
+          w_raw[0] = 0.25;
+          w_raw[1] = 0.25;
+          w_raw[2] = 0.25;
+          w_raw[3] = 0.25;
+        }
+      else
+        {
+          w_raw[0] = 0.40 - 0.25 * T;
+          w_raw[1] = 0.25;
+          w_raw[2] = 0.20 + 0.15 * T;
+          w_raw[3] = 0.15 + 0.10 * T;
+        }
       double w_sum = 0.0;
       for (int i = 0; i < 4; ++i)
         {
@@ -230,35 +438,129 @@ UpdateMemoryStrength::Execute (OperationContext &context, Transaction &tx) const
 
   // Evict weak memories below periphery cutoff (v2: memories table)
   // Also delete corresponding signals, graph edges, and embeddings.
+  // Fact-evidence floor: memories supporting active facts are protected
+  // when their strength >= fact_floor(T), scaled by Stability.
+  const long long evicted_at
+      = static_cast<long long> (context.GetSignal ().timestamp);
+  const bool fact_floor_active
+      = eviction_override.fact_floor_enabled.value_or (true);
+  const double fact_floor
+      = fact_floor_active ? core::FactEvictionFloor (T) : 0.0;
+  const StorageGateInfo storage_gate
+      = ComputeStorageGateInfo (tx, eviction_override);
+
+  // Eviction condition: strength < cutoff AND either (a) not fact-linked
+  // or (b) strength < fact_floor. Expressed in SQL as a LEFT JOIN that
+  // excludes protected memories.
+  // Consolidation gate: no memory is evicted until it has existed through
+  // at least one consolidation cycle (created_at < last_consolidation_ts).
+  // When last_consolidation_ts == 0, no memories are evictable.
+  const bool consolidation_gate_active
+      = eviction_override.consolidation_gate_enabled.value_or (true);
+  const long long consolidation_ts
+      = static_cast<long long> (p_ctx.last_consolidation_ts);
+  const std::string consolidation_gate
+      = consolidation_gate_active ? " AND m.created_at < ?" : "";
+  const std::string eviction_where
+      = fact_floor_active
+            ? "WHERE m.strength < ? AND m.kind = 'LONG_TERM'"
+              " AND (fe_active.source_memory_id IS NULL"
+              "      OR m.strength < ?)"
+              + consolidation_gate
+            : "WHERE m.strength < ? AND m.kind = 'LONG_TERM'"
+              + consolidation_gate;
+  const std::string fact_join
+      = fact_floor_active
+            ? " LEFT JOIN ("
+              "   SELECT DISTINCT fe.source_memory_id"
+              "   FROM fact_evidence fe"
+              "   JOIN fact_assertions fa ON fe.fact_id = fa.fact_id"
+              "   WHERE fa.lifecycle_state != 'archived'"
+              " ) fe_active ON fe_active.source_memory_id = m.memory_id"
+            : "";
+  const std::vector<std::any> eviction_params
+      = [&] {
+          std::vector<std::any> p = { evicted_at, cutoff };
+          if (fact_floor_active)
+            p.push_back (fact_floor);
+          if (consolidation_gate_active)
+            p.push_back (consolidation_ts);
+          return p;
+        }();
+  const std::vector<std::any> delete_params
+      = [&] {
+          std::vector<std::any> p = { cutoff };
+          if (fact_floor_active)
+            p.push_back (fact_floor);
+          if (consolidation_gate_active)
+            p.push_back (consolidation_ts);
+          return p;
+        }();
+
+  if (storage_gate.active
+      && storage_gate.used_bytes < storage_gate.threshold_bytes)
+    {
+      telemetry::LogDebug (
+          "cortext.memory_strength",
+          { telemetry::Attribute::Int64 ("update_count", update_count),
+            telemetry::Attribute::Int64 ("eviction_count", 0),
+            telemetry::Attribute::Int64 ("storage_used_bytes",
+                                         storage_gate.used_bytes),
+            telemetry::Attribute::Int64 ("storage_threshold_bytes",
+                                         storage_gate.threshold_bytes) });
+      return;
+    }
+
+  tx.Execute (
+      "INSERT INTO memory_evictions ("
+      "  memory_id, embedding_id, source_id, kind, label, start_ts, end_ts, "
+      "  created_at, last_access, strength, use_frequency, contextual_gain, "
+      "  retrieved_count, used_count, n_signals, modality, eviction_reason, "
+      "  evicted_at"
+      ") "
+      "SELECT m.memory_id, m.embedding_id, m.source_id, m.kind, "
+      "       COALESCE(m.label, ''), m.start_ts, m.end_ts, m.created_at, "
+      "       m.last_access, m.strength, m.use_frequency, m.contextual_gain, "
+      "       m.retrieved_count, m.used_count, m.n_signals, m.modality, "
+      "       'periphery_cutoff', ? "
+      "FROM memories m" + fact_join + " " + eviction_where,
+      eviction_params);
+
+  // Build subquery for evictable memory_ids
+  const std::string evictable_ids
+      = "SELECT m.memory_id FROM memories m" + fact_join + " " + eviction_where;
+
   tx.Execute (
       "DELETE FROM associations "
-      "WHERE source_memory_id IN "
-      "(SELECT memory_id FROM memories "
-      " WHERE strength < ? AND kind = 'LONG_TERM') "
-      "   OR target_memory_id IN "
-      "(SELECT memory_id FROM memories "
-      " WHERE strength < ? AND kind = 'LONG_TERM')",
-      { cutoff, cutoff });
+      "WHERE source_memory_id IN (" + evictable_ids + ") "
+      "   OR target_memory_id IN (" + evictable_ids + ")",
+      [&] {
+        auto p = delete_params;
+        p.insert (p.end (), delete_params.begin (), delete_params.end ());
+        return p;
+      }());
   tx.Execute (
-      "DELETE FROM signals WHERE memory_id IN "
-      "(SELECT memory_id FROM memories "
-      " WHERE strength < ? AND kind = 'LONG_TERM')",
-      { cutoff });
+      "DELETE FROM signals WHERE memory_id IN (" + evictable_ids + ")",
+      delete_params);
   tx.Execute (
       "DELETE FROM embeddings WHERE embedding_id IN "
-      "(SELECT embedding_id FROM memories "
-      " WHERE strength < ? AND kind = 'LONG_TERM')",
-      { cutoff });
+      "(SELECT m.embedding_id FROM memories m" + fact_join + " "
+          + eviction_where + ")",
+      delete_params);
   auto eviction_result = tx.Execute (
-      "DELETE FROM memories WHERE strength < ? AND kind = 'LONG_TERM'",
-      { cutoff });
+      "DELETE FROM memories WHERE memory_id IN (" + evictable_ids + ")",
+      delete_params);
   const int64_t eviction_count = eviction_result.size ();
 
   telemetry::LogDebug ("cortext.memory_strength",
                        { telemetry::Attribute::Int64 ("update_count",
                                                       update_count),
                          telemetry::Attribute::Int64 ("eviction_count",
-                                                      eviction_count) });
+                                                      eviction_count),
+                         telemetry::Attribute::Int64 ("storage_used_bytes",
+                                                      storage_gate.used_bytes),
+                         telemetry::Attribute::Int64 ("storage_threshold_bytes",
+                                                      storage_gate.threshold_bytes) });
 }
 
 } // namespace cortext::operations

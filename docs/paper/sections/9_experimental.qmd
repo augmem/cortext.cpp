@@ -2,14 +2,32 @@
 
 We present preliminary experimental results collected from live chat sessions to validate the adaptive mechanisms.
 
-All runs reported here are generated with the `examples/topical_chat_analysis` pipeline using ImageBind embeddings. At the time of these reported experiments, deep consolidation summarization/labeling used the Gemma LiteRT path (`gemma-3n-e2b` via `third_party/litert_lm`). The current implementation also supports an LFM2 `llama.cpp` path for deep consolidation. Evaluation logs include lexical overlap (token Jaccard) and **semantic overlap** (ImageBind cosine) for retrieval and interrupt quality. A multi-participant harness (`scripts/run_memory_harness.py`) interleaves conversations to stress long-horizon recall under shared-memory load.
+This section mixes two experiment families:
+
+* **deterministic core benchmarks** in `examples/benchmark`, which are now reported from real `EmbeddingGemma/llama.cpp` reruns where noted; and
+* **topical-chat / corpus harness runs** in `examples/topical_chat_analysis`, where older historical logs used the then-active semantic encoder path and newer reruns explicitly record the resolved backend in `run.log`.
+
+Going forward, rebuilt corpus ablations are being normalized onto a study-only dataset stack that does **not** change the Cortext runtime API or production config surface. The prep and scorer scripts live under `scripts/` and keep the existing JSONL conversation contract unchanged:
+
+* `scripts/prepare_msc.py` for multi-session continuity and consolidation studies
+* `scripts/prepare_taskmaster.py` for procedural and sequential studies
+* `scripts/prepare_longmemeval.py` plus `scripts/score_longmemeval.py` for held-out long-memory QA
+* `scripts/generate_mechanism_eval_pack.py` plus `scripts/score_mechanism_eval.py` for contradiction-heavy synthetic mechanism probes
+
+Wrapper scripts (`scripts/run_msc_study.sh`, `scripts/run_taskmaster_study.sh`, `scripts/run_longmemeval_study.sh`, and `scripts/run_mechanism_eval.sh`) call the existing harness with explicit turn limits and existing experiment-only toggles. They do not introduce new public runtime flags; their purpose is to keep future rebuilt ablations reproducible and clearly separated from the historical TopicalChat-era tables below.
+
+For the topical-chat family, treat any subsection explicitly labeled with an **Apr 4, 2026** EmbeddingGemma rerun note as the current source of record. Unlabeled corpus tables remain historical results from earlier encoder configurations.
+
+An additional **Apr 4, 2026 EmbeddingGemma + default LFM2.5 addendum** later in this section reports completed quick reruns on the rebuilt branch where embeddings resolve to `EmbeddingGemma/llama.cpp` and auto deep-backend selection now prefers `LFM2.5/llama.cpp`. Those addendum tables are the current short-horizon reference points for the rebuilt default stack.
+
+At the time of the historical topical-chat runs, deep consolidation summarization/labeling used the Gemma LiteRT path (`gemma-3n-e2b` via `third_party/litert_lm`). The current implementation also supports an LFM2 `llama.cpp` path for deep consolidation. Evaluation logs include lexical overlap (token Jaccard) and **semantic overlap** (cosine under the active text encoder backend) for retrieval and interrupt quality. A multi-participant harness (`scripts/run_memory_harness.py`) interleaves conversations to stress long-horizon recall under shared-memory load.
 
 For reproducibility, the analysis runner supports **deterministic synthetic timing** (`--deterministic`, `--seed`), which removes wall‑clock variance while preserving cadence‑derived timing for boundary and interrupt gating. Snapshot configs record the seed and synthetic clock parameters.
 
 To quantify consolidation utility, we also track:
 
 * **retrieval_summary_hit_rate:** share of retrieval turns containing consolidated summaries (ASSOCIATION nodes).
-* **summary_hit_overlap_mean:** semantic overlap (ImageBind cosine) of the best summary hit on those turns.
+* **summary_hit_overlap_mean:** semantic overlap (backend cosine) of the best summary hit on those turns.
 * **retrieval_summary_only_turn_rate:** share of retrieval turns where summaries are the only retrieved candidates.
 
 For interrupt evaluation, we report precision/recall using the knob-derived interrupt threshold (`retrieval_thresh_interrupt(F,S)`) applied to best semantic overlap:
@@ -20,6 +38,517 @@ For interrupt evaluation, we report precision/recall using the knob-derived inte
 * **interrupt_gate_fail_* rates:** per-gate failure rates among semantic-positive non-interrupt turns
 * **affect_drive_mean:** mean affect drive (arousal/emotion/salience composite)
 * **retrieval_emotion_bonus_mean:** mean emotion bonus applied during retrieval ranking
+
+## Bitemporal Fact Evaluation
+
+The current branch now evaluates the bitemporal fact layer **core-first**. The source of record is the deterministic fact-store and retrieval harnesses that measure whether Cortext preserves temporal truth, temporal belief, support quality, and bounded retention under delayed, conflicting, noisy, and repeated evidence traces. The chat example is not treated as a separate fact-grounding surface; correctness is established in the core before any downstream presentation layer is considered.
+
+The important distinction is that these are **assistive retrieval and recall metrics**, not merely database-correctness checks. The goal is to measure whether temporal fact modeling helps Cortext surface the right current information, preserve older truths for reminiscence, and avoid stale-fact intrusions when the user implicitly means "now."
+
+The relevant metrics are:
+
+* **current fact accuracy:** whether current-oriented retrieval surfaces the correct present-world fact
+* **historical fact accuracy:** whether `valid_at(t)` recovers what was true at world time `t` in internal deterministic evaluation
+* **belief-at-time accuracy:** whether `known_at(t)` reconstructs what Cortext would have believed at system time `t` in internal deterministic evaluation
+* **stale fact intrusion rate:** how often superseded facts appear first on present-oriented tasks
+* **retrieval precision/recall under temporal change:** whether fact-aware retrieval improves the supporting evidence surfaced around changing routines, caregivers, locations, and schedules
+* **routine continuity rate:** whether stable routine context remains available as background support when `Stability` is high
+* **provenance-grounded retrieval rate:** whether the top retrieved evidence remains directly linked to the matched fact rather than an unlinked semantic guess
+
+These metrics should be reported with **severity weighting** rather than uniform averaging. Mistakes about medication, caregiver, location, schedule, and safety matter more than mistakes about preferences or incidental details. Longitudinal reporting should also include stability measures such as fact flip rate, stale resurfacing rate, and time-to-correct after delayed evidence.
+
+The recommended evaluation scenarios are controlled temporal-change tasks: caregiver transitions, same-day schedule changes, location changes, repeated routines with one-off exceptions, and old-home versus current-home questions. Internal evaluation should still support three query families: present-oriented (`current`), historical (`valid_at(t)`), and historical-belief (`known_at(t)`). The primary validation path is therefore the deterministic core harnesses rather than prompt formatting or live-LLM output.
+
+The companion retrieval benchmark remained green on the same branch:
+
+* benchmark: `examples/benchmark/cortext_bitemporal_retrieval_bench`
+* scenarios: current caregiver, `valid_at` location, `known_at` delayed move, provenance-linked schedule
+* result: **4 / 4 passed** (`accuracy = 1.0`)
+
+**Deterministic phase-6 core robustness gates (Apr 1, 2026):**
+
+* benchmark: `examples/benchmark/cortext_bitemporal_robustness_bench`
+* scenario families: delayed evidence, conflicting low-confidence noise, delayed-plus-conflicting correction, repeated legitimate changes, repeated routine confirmations, routine exception and return
+* reported gates: weighted current accuracy, weighted historical accuracy, weighted belief-at-time accuracy, stale-fact intrusion rate, erroneous supersession count, unexpected flip count, time-to-correct, retrieval latency overhead
+* result: **6 / 6 passed**
+* aggregate: `weighted_current_accuracy = 1.0`, `weighted_historical_accuracy = 1.0`, `weighted_belief_accuracy = 1.0`, `weighted_stale_intrusion_rate = 0.0`, `erroneous_supersession_count = 0`, `unexpected_flip_count = 0`, `mean_time_to_correct_updates = 0.0`, `mean_retrieval_ms = 0.995`
+
+These gates are intentionally core-only. They validate fact ingestion, supersession policy, temporal querying, and fact-aware retrieval directly, without depending on live chat prompting. This is the point at which the branch can reasonably claim that current, historical, and belief-at-time fact handling are stable enough for later ablation and chat-facing integration work.
+
+**Deterministic phase-8 expanded core ablation matrix (Apr 1, 2026):**
+
+* benchmark: `examples/benchmark/cortext_bitemporal_ablation_bench`
+* scenario families: caregiver transition, delayed location knowledge, conflicting caregiver noise, provenance-linked schedule retrieval, repeated legitimate location changes, routine exception, old-home vs current-home, updated preference, medication change, and a weak today-vs-usual schedule change
+* ablations: fact layer off, current-only collapse, explicit `current` / `valid_at` / `known_at` reporting, fact boost off/weak/strong, stale penalty off/moderate/strong, provenance any-fact-match, routine-biased vs recency-biased presets, and a full `3 x 3 x 3` F/S/T sweep on a representative subset
+* default result: **10 / 10 passed**, with `query_mode_current_accuracy = 1.0`, `query_mode_valid_at_accuracy = 1.0`, `query_mode_known_at_accuracy = 1.0`, `weighted_current_accuracy = 1.0`, `weighted_historical_accuracy = 1.0`, `weighted_belief_accuracy = 1.0`, `current_vs_usual_clarification_rate = 1.0`, `erroneous_supersession_count = 0`, and `unexpected_flip_count = 0`
+* key deltas:
+  * fact layer off dropped weighted current accuracy to **0.323** and raised weighted stale intrusion to **0.548**
+  * current-only collapse dropped weighted historical accuracy to **0.0** and weighted belief-at-time accuracy to **0.318**
+  * provenance relaxation (`any_fact_match`) raised unsupported top hits from **0.065** to **0.161**
+  * stale penalty off raised weighted stale intrusion from **0.065** to **0.161**
+  * strong fact boost outperformed boost-off on weighted current accuracy (`1.0` vs `0.710`)
+  * the routine-vs-recency probe separated as intended: routine-biased scoring preferred the stable routine, while recency-biased scoring and retrieval flipped to the current exception (`top_memory 100 -> 101`)
+
+These expanded ablations matter because they move the claim from "the default core works" to "the default core remains best under a broader causal matrix." The branch can now point to a deterministic core result: bitemporal history is required for historical and belief-at-time behavior, direct provenance links matter for support quality, stale penalties materially reduce present-oriented intrusion, and the routine-versus-recency tradeoff is now exposed explicitly in the scoring path rather than left implicit in chat behavior.
+
+**EmbeddingGemma rerun audit (Apr 4, 2026):**
+
+* log: `logs/embeddinggemma_ablations_20260404_015235/bitemporal_ablation.log`
+* encoder: `EmbeddingGemma/llama.cpp` via `models/llama_cpp/embeddinggemma-300M-Q8_0.gguf`
+* default result still passed **10 / 10** scenarios with `query_mode_current_accuracy = 1.0`, `query_mode_valid_at_accuracy = 1.0`, `query_mode_known_at_accuracy = 1.0`, and `unexpected_flip_count = 0`
+* however, several ablation-separation checks that were previously reported as causal deltas collapsed to **0** under real embeddings: provenance relaxation no longer raises unsupported top hits, stale-off vs stale-strong no longer separates stale intrusions, and the routine-vs-recency retrieval probe no longer flips top memory even though the score-gap signs still separate. Treat the older synthetic-encoder delta claims as superseded until those scenarios are retuned against the real encoder path.
+
+**Deterministic phase-9 fact lifecycle gates (Apr 1, 2026):**
+
+* benchmark: `examples/benchmark/cortext_bitemporal_lifecycle_bench`
+* scenario families: support decay, archive-vs-delete, repeated-confirmation compression, evidence-loss resilience, severity-aware retention
+* default policy: archive-first; unsupported low-severity facts can be deleted after archival, while high-severity historical facts are retained
+* result: **5 / 5 passed** (`accuracy = 1.0`)
+
+Phase 9 closes the remaining gap between the bitemporal fact layer and the rest of Cortext's self-maintaining memory system. Facts are still more durable than individual episodic traces, but they no longer behave as an unbounded append-only log. Repeated confirmations are compressed into support statistics, unsupported facts decay to `weak` or `archived`, and only low-severity archived facts are physically deleted by default. The corresponding negative controls show why the default matters: turning off support decay preserves stale low-value facts too aggressively, disabling deletion prevents storage from shrinking, disabling compression inflates support from repeated confirmations, and disabling high-severity historical preservation breaks historical recovery after evidence loss.
+
+**Deterministic eviction ablation gates (Apr 3, 2026):**
+
+* benchmark: `examples/benchmark/cortext_eviction_ablation_bench`
+* scenario families: pure decay, selective reinforcement, flashbulb protection, recovery from near-eviction, long-horizon simulation (7 days), fact-linked eviction, strength distribution, crowding pressure
+* ablations: trace count (1/2/3/4), coupling off/strong, reinforcement off/weak/strong, periphery cutoff low/high, half-life short/long, flashbulb off, equal weights, fact-evidence floor off, and a full `3 × 3 × 3` F/S/T sweep on a representative subset
+* default result (F=S=T=0.5): `mean_eviction_step = 220`, `selectivity_ratio = 100.0`, `flashbulb_advantage = 1.0`, `recovery_success_rate = 1.0`, `steady_state_count = 35`, `eviction_rate_per_hour = 0.79`, `fact_linked_eviction_rate = 0.0`
+* key deltas:
+  * single-trace collapsed mean eviction step from **220** to **12** (18× faster eviction, no power-law tail)
+  * coupling-off reduced mean eviction step from **220** to **27** and destroyed selectivity (used memories evicted alongside unused)
+  * four-trace extended mean eviction step to **500** with zero eviction over 500 simulated minutes
+  * half-life short (60 s) caused immediate eviction at step 1; half-life long (7200 s) prevented any eviction over the full run
+  * cutoff-high (0.20) reduced mean eviction step to **158**; cutoff-low (0.03) extended it to **368** with full recovery support
+  * flashbulb-off removed the survival advantage for emotionally marked memories (advantage dropped from **1.0** to **0.0**)
+  * equal weights produced mean eviction step **217**, close to default (**220**), confirming the retuned weight range now provides appropriate T-dependent balance
+  * fact-evidence floor off raised `fact_linked_eviction_rate` from **0.0** to **1.0** — without the floor, all fact-supporting episodic memories are evicted; with it, fact-linked memories survive as long as the supporting fact remains active
+  * F/S/T sweep: T dominates eviction dynamics — low T (0.2) causes eviction within 7–30 steps while high T (0.9) prevents eviction entirely; S and F have secondary effects through reinforcement scaling
+
+**EmbeddingGemma rerun status (Apr 4, 2026):**
+
+* log: `logs/embeddinggemma_ablations_20260404_014916/eviction_ablation.log`
+* encoder: `EmbeddingGemma/llama.cpp` via `models/llama_cpp/embeddinggemma-300M-Q8_0.gguf`
+* status at write time: rerun started and confirmed to be on the real encoder path, but the full long-horizon matrix was still executing when this note was written because the benchmark spends most of its time in the seven-day decay / crowding loops rather than in embedding generation.
+
+Three ablation-driven improvements were applied based on the initial gate results:
+
+1. **Fact-evidence floor** (`fact_floor(T) = lerp(0, periphery_cutoff(T), T)`): Memories linked to active facts via `fact_evidence` are protected from eviction when their strength remains above the T-scaled floor. This closes the episodic-evidence gap where the eviction system would discard memories that serve as provenance for active structured facts. The `fact_floor_off` negative control confirms the protection is necessary: without it, fact-supporting evidence is evicted identically to unlinked noise.
+
+2. **Uniform reinforcement distribution**: The original front-loaded boost (60%/30%/10% to fast/med/slow traces) was replaced with uniform per-trace injection (`reinforcement / N_traces`). The original boost had no measurable effect on eviction dynamics because its contribution was absorbed by trace clamping at 1.0. Uniform distribution ensures all active traces receive meaningful S- and F-scaled reinforcement, improving long-term retention for used memories.
+
+3. **Widened T weight range** (`w_fast: 0.40−0.25T` replacing `0.55−0.20T`): The original weights gave the fast trace 50% of normalized weight at T=0.5, meaning half the strength score came from a trace that decays in minutes. The retuned range shifts from episodic-dominant (fast=40% at T=0) to semantic-dominant (fast=15% at T=1) with a balanced midpoint. Mean eviction step increased from 172 to 220 at T=0.5.
+
+**Deterministic memory system integration ablation gates (Apr 4, 2026):**
+
+* benchmark: `examples/benchmark/cortext_memory_system_ablation_bench`
+* studies: consolidation-eviction race, end-to-end fact emergence, memory-fact co-decay, retrieval-reinforcement feedback, cross-consolidation fact inheritance
+* result: **5 / 5 passed**
+* key findings:
+  * **Consolidation-eviction race**: Early consolidation (step 50) successfully extracts facts from all 30 candidate memories. Late consolidation (step 250) finds zero candidates — all evidence has already been evicted. This confirms that consolidation timing must outpace the decay cycle or facts will never emerge from episodic evidence.
+  * **End-to-end fact emergence**: The full pipeline (consolidation → clustering → extraction) produced **3 facts** across **3 distinct predicates** (caregiver, location, medication) from **4 clusters** of 20 seeded memories. Disabling extraction yielded 0 facts with 4 summaries; disabling consolidation yielded 0 of both. Each layer is strictly necessary.
+  * **Memory-fact co-decay**: With the fact floor active, fact-linked memories survive at **100%** while unlinked controls evict to **0%** after 250 decay steps. Archiving the linked fact drops the floor: the memory then evicts in the next phase (**0%** survival). Without the floor, fact-linked and unlinked memories evict identically. This confirms the co-decay coupling: fact lifecycle governs evidence retention.
+  * **Retrieval-reinforcement feedback**: With fact boost, fact-linked memories accumulate a strength gap of **+0.30** over unlinked memories and dominate the top-5 retrieval positions (**100%**). Disabling the fact layer **reverses** the gap to **−0.30** (unlinked now dominate). This confirms the feedback loop is controlled by the fact layer, not runaway — toggling the fact layer flips the outcome completely.
+  * **Cross-consolidation fact inheritance**: Re-extracting the same fact (alice/caregiver/emily) from a new summary correctly merges into the existing fact with `confirmation_count` incrementing from 1 to **2** and zero duplicate facts. Extracting a conflicting fact (emily vs sarah) correctly supersedes the prior assertion. The fact deduplication and supersession logic handles re-consolidation without evidence inflation.
+
+**EmbeddingGemma rerun audit (Apr 4, 2026):**
+
+* log: `logs/embeddinggemma_ablations_20260404_015134/memory_system_ablation.log`
+* encoder: `EmbeddingGemma/llama.cpp` via `models/llama_cpp/embeddinggemma-300M-Q8_0.gguf`
+* result: **5 / 5 passed**
+* the retrieval-reinforcement study still separates cleanly under the real encoder path: `strength_gap = +0.2996` with facts enabled and `strength_gap = -0.2996` with the fact layer disabled, with top-5 fact fraction flipping from **1.0** to **0.0**.
+
+## Exhaustive Operation-Family Ablation Matrix (Apr 4, 2026)
+
+To answer the stricter removal question, we added a separate **operation-family matrix** in `docs/operation-matrix.md` and ran its full power set rather than pretending the atomic metric-site power set was tractable. The matrix defines **12 independently removable non-fact families**:
+
+* source confidence
+* predictive retrieval
+* constructive recall
+* procedural memory
+* metacognitive control
+* affect interrupt
+* affect retrieval
+* flashbulb consolidation
+* neuromodulation
+* meta-learning
+* reinforcement edges
+* sequential edges
+
+This yields an exhaustive deterministic sweep of **`2^12 = 4096` combinations**. The benchmark is `examples/benchmark/cortext_full_operation_ablation_bench`, and the recorded run is:
+
+* log: `logs/full_operation_ablation_20260404/full_operation_ablation.log`
+
+The result is useful because it is not purely “everything on wins.” The full mask and the best mask tie at **10.0 / 12.0**, and the smallest best mask has **11** families enabled:
+
+* minimal best mask disabled only: `affect_interrupt`
+* therefore, on this deterministic claim-audit suite, **`affect_interrupt` is the first deterministic pruning candidate**
+
+The marginal table from the exhaustive sweep was:
+
+| family | mean marginal contribution | max score without family | essential for best score | verdict |
+|---|---:|---:|---:|---|
+| `source_confidence` | 0.1667 | 9.6667 | 1 | narrow but required |
+| `predictive_retrieval` | 1.0000 | 9.0000 | 1 | core |
+| `constructive_recall` | 1.0000 | 9.0000 | 1 | core |
+| `procedural_memory` | 1.0000 | 9.0000 | 1 | core |
+| `metacognitive_control` | 0.5000 | 9.3333 | 1 | narrow but required |
+| `affect_interrupt` | 0.0000 | 10.0000 | 0 | cut candidate |
+| `affect_retrieval` | 1.0000 | 9.0000 | 1 | core |
+| `flashbulb_consolidation` | 1.0000 | 9.0000 | 1 | core |
+| `neuromodulation` | 1.0000 | 9.0000 | 1 | core |
+| `meta_learning` | 1.0000 | 9.0000 | 1 | core |
+| `reinforcement_edges` | 1.0000 | 9.0000 | 1 | core |
+| `sequential_edges` | 1.0000 | 9.0000 | 1 | core |
+
+Two points matter.
+
+First, the system no longer looks like arbitrary gears bolted together. In this deterministic removal sweep, **11 of the 12 families were necessary to preserve the best suite score**. Predictive retrieval, constructive recall, procedural memory, affect retrieval, flashbulb consolidation, neuromodulation, meta-learning, reinforcement edges, and sequential edges all behaved like hard dependencies for at least one claimed behavior in the suite.
+
+Second, the sweep also found a real deterministic reduction candidate. `affect_interrupt` was the **only** family with `max_score_without_family == full_mask_score`. That does **not** prove it never matters in live chat; the live-model confirmation pass later in this section shows that the interrupt-only affect path still improves recall on the rebuilt stack. So the correct interpretation is narrower: on the current deterministic claim-audit suite, `affect_interrupt` is removable without losing the best suite score, but it is **not** yet a safe global deletion candidate.
+
+The two narrow families were `source_confidence` and `metacognitive_control`. `source_confidence` is the interesting case: its standalone full-mask component stayed weak in this suite, but its marginal contribution remained positive because it helps the **metacognitive caution** pathway avoid weak unsupported returns. In other words, it is currently an interaction-dependent mechanism rather than a broad direct win.
+
+### Boundary + Fact Extension Matrix (Apr 4, 2026)
+
+The 4096-combination family sweep above intentionally excluded the previously
+separate **boundary** and **bitemporal fact** subfamilies. We therefore ran a
+second deterministic extension sweep over:
+
+* `boundary_surprisal`
+* `boundary_natural`
+* `fact_layer`
+* `fact_history`
+* `fact_stale_penalty`
+* `fact_provenance`
+
+Extension matrix definition: `docs/operation-matrix.md`  
+Extension log: `logs/boundary_fact_extension_ablation_20260404/boundary_fact_extension_ablation.log`
+
+This second sweep covers the full `2^6 = 64` power set for those omitted
+families.
+
+| family | mean marginal | max score without | essential for best |
+|---|---:|---:|---:|
+| `boundary_surprisal` | 0.000000 | 6.000000 | 0 |
+| `boundary_natural` | 2.000000 | 4.000000 | 1 |
+| `fact_layer` | 1.000000 | 5.000000 | 1 |
+| `fact_history` | 1.000000 | 5.000000 | 1 |
+| `fact_stale_penalty` | 1.000000 | 5.000000 | 1 |
+| `fact_provenance` | 1.000000 | 5.000000 | 1 |
+
+Best masks:
+
+| rank | score | bits_on | enabled | disabled |
+|---|---:|---:|---|---|
+| 1 | 6.000000 | 5 | `boundary_natural,fact_layer,fact_history,fact_stale_penalty,fact_provenance` | `boundary_surprisal` |
+| 2 | 6.000000 | 6 | `boundary_surprisal,boundary_natural,fact_layer,fact_history,fact_stale_penalty,fact_provenance` | `none` |
+
+**Observations:** The extension sweep says the **fact layer is not decorative**. Direct fact lifting, historical retrieval, stale-fact suppression, and strict provenance all remain load-bearing in this deterministic extension suite; disabling any one of those four lowers the best achievable score from **6/6** to **5/6**. `boundary_natural` is also clearly required, dropping the best score to **4/6** when removed.
+
+`boundary_surprisal` is the only removable family inside this narrow extension suite. That should not be over-read as a global deletion verdict. The longer-horizon EmbeddingGemma boundary rerun reported later in this section still shows a material `no_surprisal` change in boundary-hit share, so the conservative reading is that surprisal is redundant in this micro-suite but still active on naturalistic boundary workloads.
+
+### Live-Model Confirmation of Cut Candidates (Apr 4, 2026)
+
+The deterministic family sweeps above identify **candidate** reductions, not safe deletions. We therefore ran a compact live-model confirmation pass on the rebuilt `EmbeddingGemma/llama.cpp` + default `LFM2.5/llama.cpp` stack before treating any family as removable.
+
+Runs:
+
+* TopicalChat interrupt-only affect: `logs/live_cut_confirmation_20260404/topical_affect_interrupt`
+* TopicalChat affect off: `logs/live_cut_confirmation_20260404/topical_affect_off`
+* EmpatheticDialogues interrupt-only affect: `logs/live_cut_confirmation_20260404/empathetic_affect_interrupt`
+* EmpatheticDialogues affect off: `logs/live_cut_confirmation_20260404/empathetic_affect_off`
+* TopicalChat boundary default: `logs/live_cut_confirmation_20260404/topical_boundary_default`
+* TopicalChat boundary no-surprisal: `logs/live_cut_confirmation_20260404/topical_boundary_no_surprisal`
+
+**Affect interrupt confirmation**
+
+| dataset | mode | interrupt_turn_rate | precision | recall | fn_rate | retrieval_thresh_mean | boundary_mult_eff_mean | interrupt_semantic_overlap_mean |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| TopicalChat 120 turns | `interrupt` | 0.1583 | 1.000 | 0.950 | 0.050 | 0.23397 | 1.48048 | 0.79170 |
+| TopicalChat 120 turns | `off` | 0.1417 | 1.000 | 0.850 | 0.150 | 0.23990 | 1.51800 | 0.78417 |
+| EmpatheticDialogues 360 turns | `interrupt` | 0.1471 | 1.000 | 1.000 | 0.000 | 0.23514 | 1.48785 | 0.82955 |
+| EmpatheticDialogues 360 turns | `off` | 0.1471 | 1.000 | 1.000 | 0.000 | 0.23990 | 1.51800 | 0.82490 |
+
+**Observations:** `affect_interrupt` is **not** safe to remove. On TopicalChat it raises interrupt recall by **10 points** (`0.85` → `0.95`) while leaving precision unchanged, and it does so exactly through the intended gate-relax path: the effective retrieval threshold and boundary multiplier both fall. On EmpatheticDialogues the decision surface is already saturated, but the same threshold relaxation remains visible and semantic overlap is slightly higher with interrupt-only affect enabled. The deterministic sweep was therefore correctly identifying a **micro-suite pruning candidate**, not a live-stack deletion candidate.
+
+**Boundary surprisal confirmation**
+
+For the boundary candidate we used the same proxy as the main boundary study in this paper: the share of stored memories with `boundary_score >= 0.5`, measured directly from each run DB.
+
+| condition | memories | boundary_hits (score >= 0.5) | rate | boundary_score_mean | interrupt_turn_rate | interrupt_recall |
+|---|---:|---:|---:|---:|---:|---:|
+| default | 32 | 27 | 84.38% | 0.2963 | 0.1833 | 0.9565 |
+| `CORTEXT_BOUNDARY_DISABLE_SURPRISAL=1` | 40 | 37 | 92.50% | 0.3519 | 0.2333 | 1.0000 |
+
+**Observations:** `boundary_surprisal` is also **not** a safe global cut. Disabling surprisal materially raises boundary-hit share on this compact live run (**84.38%** → **92.50%**) and increases interrupt frequency, which is directionally consistent with the longer-horizon EmbeddingGemma boundary rerun reported elsewhere in this section. So the deterministic extension sweep again identified a narrow micro-suite redundancy, not a universal deletion candidate.
+
+**Current pruning guidance:** the family sweeps remain valuable for finding where to look first, but the live confirmation pass shows that neither `affect_interrupt` nor `boundary_surprisal` is ready for outright removal on the current rebuilt stack. The stronger current conclusion is that the branch is more organic than decorative, and that apparent deterministic redundancies must still survive a live-model confirmation pass before any operation family is cut.
+
+### Subcomponent Completion Matrix (Apr 4, 2026)
+
+To close the matrix at the next level down, we ran a separate deterministic
+subcomponent sweep over the currently separable multi-toggle families:
+
+* boundary: `pressure`, `surprisal`, `natural`
+* flashbulb: `percentile`, `rate`, `arousal`
+* metacognitive control: `tot_recovery`, `unknown_caution`, `confidence_decay`
+* affect: `interrupt_path`, `retrieval_path`
+* neuromodulation: `write_scale`, `competition_scale`,
+  `reconsolidation_scale`, `value_gain`
+
+Benchmark: `examples/benchmark/cortext_subcomponent_matrix_bench`  
+Log: `logs/flashbulb_rate_rewrite_20260404/subcomponent_matrix.log`
+
+#### Boundary subcomponents
+
+| subcomponent | mean marginal | max score without | essential for best | verdict |
+|---|---:|---:|---:|---|
+| `pressure` | 0.000000 | 3.000000 | 0 | micro-suite redundant |
+| `surprisal` | 0.000000 | 3.000000 | 0 | micro-suite redundant |
+| `natural` | 3.000000 | 0.000000 | 1 | core |
+
+Best masks:
+
+| rank | score | enabled | disabled |
+|---|---:|---|---|
+| 1 | 3.000000 | `natural` | `pressure,surprisal` |
+| 2 | 3.000000 | `pressure,natural` | `surprisal` |
+| 3 | 3.000000 | `surprisal,natural` | `pressure` |
+| 4 | 3.000000 | `pressure,surprisal,natural` | `none` |
+
+**Observations:** In the local calibration suite, `natural` is the only truly
+load-bearing boundary subcomponent. Both `pressure` and `surprisal` are
+redundant there. That still does **not** make either one a safe global cut.
+`boundary_surprisal` already failed live-model deletion confirmation above, and
+`boundary_pressure` has not yet been subjected to the same live follow-up.
+
+#### Flashbulb subcomponents
+
+| subcomponent | mean marginal | max score without | essential for best | verdict |
+|---|---:|---:|---:|---|
+| `percentile` | 1.000000 | 1.000000 | 1 | required |
+| `rate` | 0.000000 | 2.000000 | 0 | neutral stabilizer |
+| `arousal` | 1.000000 | 1.000000 | 1 | required |
+
+Best masks:
+
+| rank | score | enabled | disabled |
+|---|---:|---|---|
+| 1 | 2.000000 | `percentile,arousal` | `rate` |
+| 2 | 2.000000 | `percentile,rate,arousal` | `none` |
+| 3 | 1.000000 | `percentile` | `rate,arousal` |
+
+**Observations:** After the flashbulb-rate rewrite, `percentile` and `arousal`
+remain the load-bearing flashbulb paths in the deterministic suite, while
+`rate` is now neutral instead of antagonistic. Keeping it no longer hurts the
+best achievable score, but removing it still does not improve anything. That
+matches the post-rewrite live EmbeddingGemma flashbulb rerun later in this
+section, where baseline and `no_rate` became identical on the current
+workload.
+
+#### Metacognitive subcomponents
+
+| subcomponent | mean marginal | max score without | essential for best | verdict |
+|---|---:|---:|---:|---|
+| `tot_recovery` | 0.500000 | 2.000000 | 1 | required |
+| `unknown_caution` | 1.000000 | 2.000000 | 1 | required |
+| `confidence_decay` | 0.500000 | 2.000000 | 1 | required |
+
+**Observations:** The metacognitive family remains internally coherent. All
+three subpaths are required to preserve the best score in the dedicated suite,
+with `unknown_caution` showing the strongest marginal contribution.
+
+#### Affect subcomponents
+
+| subcomponent | mean marginal | max score without | essential for best | verdict |
+|---|---:|---:|---:|---|
+| `interrupt_path` | 0.000000 | 1.000000 | 0 | micro-suite redundant |
+| `retrieval_path` | 1.000000 | 0.000000 | 1 | required |
+
+**Observations:** The local deterministic probe says `retrieval_path` is the
+load-bearing affect subcomponent and `interrupt_path` is redundant there. But
+the live-model confirmation above already showed `affect_interrupt` improving
+interrupt recall on TopicalChat, so this again has to be read as a micro-suite
+redundancy rather than a real deletion verdict.
+
+#### Neuromodulator subcomponents
+
+| subcomponent | mean marginal | max score without | essential for best | verdict |
+|---|---:|---:|---:|---|
+| `write_scale` | 1.000000 | 3.000000 | 1 | required |
+| `competition_scale` | 1.000000 | 3.000000 | 1 | required |
+| `reconsolidation_scale` | 1.000000 | 3.000000 | 1 | required |
+| `value_gain` | 1.000000 | 3.000000 | 1 | required |
+
+**Observations:** Neuromodulation also remains internally coherent. All four
+downstream scales are independently load-bearing in the deterministic audit, so
+there is no evidence here for pruning any neuromodulator subpath.
+
+**Updated removal guidance:** after the family sweep, boundary/fact extension,
+live-model confirmation, subcomponent completion pass, and the flashbulb-rate
+rewrite, the branch still looks substantially organic. `flashbulb_rate` is no
+longer behaving like a harmful term; it now looks like a neutral stabilizer on
+the current deterministic and live probes. The strongest “looks redundant
+locally but not yet safe to delete globally” candidates are
+`affect_interrupt`, `boundary_surprisal`, and possibly `boundary_pressure`
+pending a live-model follow-up.
+
+### Full Separable-Unit Matrix (Apr 4, 2026)
+
+To finish the matrix before any surgery, we closed the audit at the
+**separable-unit** level rather than stopping at operation families.
+
+The current branch exposes **26 independently removable units** that matter for
+this question:
+
+* **19 non-boundary/fact units**
+* **7 boundary/fact units**
+
+A literal monolithic power set would be `2^26 = 67,108,864` combinations. We
+did not materialize that as one giant benchmark because the deterministic audit
+graph factors cleanly into a **non-boundary/fact unit cluster** and a
+**boundary/fact unit cluster**. We therefore ran both clusters exhaustively:
+
+* non-boundary/fact units: `logs/flashbulb_rate_rewrite_20260404/full_unit_ablation.log`
+  * benchmark: `examples/benchmark/cortext_full_unit_ablation_bench`
+  * exhaustive unit universe: `2^19 = 524,288`
+* boundary/fact units: `logs/full_boundary_fact_unit_ablation_20260404/full_boundary_fact_unit_ablation.log`
+  * benchmark: `examples/benchmark/cortext_full_boundary_fact_unit_ablation_bench`
+  * exhaustive unit universe: `2^7 = 128`
+
+This is the completion criterion for the current matrix: every **separable**
+unit is now covered by an exhaustive deterministic matrix in its actual
+dependency cluster.
+
+#### Non-boundary/fact 19-unit sweep
+
+The 19-unit sweep covered:
+
+* `source_confidence`
+* `predictive_retrieval`
+* `constructive_recall`
+* `procedural_proactive`
+* `metacog_tot_recovery`
+* `metacog_unknown_caution`
+* `metacog_confidence_decay`
+* `affect_interrupt`
+* `affect_retrieval`
+* `flashbulb_percentile`
+* `flashbulb_rate`
+* `flashbulb_arousal`
+* `neuromod_write_scale`
+* `neuromod_competition_scale`
+* `neuromod_reconsolidation_scale`
+* `neuromod_value_gain`
+* `meta_learning`
+* `reinforcement_edges`
+* `sequential_edges`
+
+Headline result:
+
+| metric | value |
+|---|---:|
+| unit count | 19 |
+| combinations | 524288 |
+| full-mask score | 15 |
+| best score | 16 |
+| minimal best bits on | 16 |
+
+Minimal best disabled set:
+
+* `source_confidence`
+* `affect_interrupt`
+* `flashbulb_rate`
+
+Per-unit summary:
+
+| unit | mean marginal | max score without | essential for best |
+|---|---:|---:|---:|
+| `source_confidence` | 0.000000 | 16.000000 | 0 |
+| `predictive_retrieval` | 1.000000 | 15.000000 | 1 |
+| `constructive_recall` | 1.000000 | 15.000000 | 1 |
+| `procedural_proactive` | 1.000000 | 15.000000 | 1 |
+| `metacog_tot_recovery` | 0.500000 | 15.000000 | 1 |
+| `metacog_unknown_caution` | 1.000000 | 15.000000 | 1 |
+| `metacog_confidence_decay` | 0.500000 | 15.000000 | 1 |
+| `affect_interrupt` | 0.000000 | 16.000000 | 0 |
+| `affect_retrieval` | 1.000000 | 15.000000 | 1 |
+| `flashbulb_percentile` | 1.000000 | 15.000000 | 1 |
+| `flashbulb_rate` | 0.000000 | 16.000000 | 0 |
+| `flashbulb_arousal` | 1.000000 | 15.000000 | 1 |
+| `neuromod_write_scale` | 1.000000 | 15.000000 | 1 |
+| `neuromod_competition_scale` | 1.000000 | 15.000000 | 1 |
+| `neuromod_reconsolidation_scale` | 1.000000 | 15.000000 | 1 |
+| `neuromod_value_gain` | 1.000000 | 15.000000 | 1 |
+| `meta_learning` | 1.000000 | 15.000000 | 1 |
+| `reinforcement_edges` | 1.000000 | 15.000000 | 1 |
+| `sequential_edges` | 1.000000 | 15.000000 | 1 |
+
+**Observations:** This completion sweep tightened the removal story. The older
+family-level uncertainty around `meta_learning`, `reinforcement_edges`, and
+`sequential_edges` is gone in the deterministic unit suite: all three are
+load-bearing once we stop hiding them inside larger family masks. The
+flashbulb-rate rewrite also changed the unit-level readout: `flashbulb_rate` is
+still non-essential for the best score, but it is now neutral instead of
+negative. `affect_interrupt` and `source_confidence` are also non-essential for
+the best score in this clean unit suite, but both have stronger external
+evidence elsewhere in the paper: `affect_interrupt` failed live deletion
+confirmation, and `source_confidence` still blocks poisoned low-confidence
+memories in the contradiction-heavy Ubuntu probe.
+
+#### Boundary/fact 7-unit sweep
+
+The final missing cluster adds `boundary_pressure` to the earlier boundary/fact
+extension, yielding the full 7-unit boundary/fact unit universe:
+
+* `boundary_pressure`
+* `boundary_surprisal`
+* `boundary_natural`
+* `fact_layer`
+* `fact_history`
+* `fact_stale_penalty`
+* `fact_provenance`
+
+Headline result:
+
+| metric | value |
+|---|---:|
+| unit count | 7 |
+| combinations | 128 |
+| full-mask score | 7 |
+| best score | 7 |
+| full-mask is best | 1 |
+
+Minimal best disabled set:
+
+* `boundary_pressure`
+* `boundary_surprisal`
+
+Per-unit summary:
+
+| unit | mean marginal | max score without | essential for best |
+|---|---:|---:|---:|
+| `boundary_pressure` | 0.000000 | 7.000000 | 0 |
+| `boundary_surprisal` | 0.000000 | 7.000000 | 0 |
+| `boundary_natural` | 3.000000 | 4.000000 | 1 |
+| `fact_layer` | 1.000000 | 6.000000 | 1 |
+| `fact_history` | 1.000000 | 6.000000 | 1 |
+| `fact_stale_penalty` | 1.000000 | 6.000000 | 1 |
+| `fact_provenance` | 1.000000 | 6.000000 | 1 |
+
+**Observations:** The fact sublayer remains fully load-bearing at the unit
+level. The only local redundancies are `boundary_pressure` and
+`boundary_surprisal`, with `boundary_natural` doing the real work in this
+deterministic boundary suite. As above, this is not enough by itself to justify
+deletion: `boundary_surprisal` already failed live-model deletion confirmation,
+so only `boundary_pressure` remains a plausible boundary-side cut candidate.
+
+**Final matrix reading:** the branch looks more organic than decorative even at
+the completed separable-unit level. After the flashbulb-rate rewrite,
+`flashbulb_rate` no longer looks harmful; it is simply low-evidence on the
+current probes. The next plausible but still unconfirmed target is
+`boundary_pressure`. Everything else either remained load-bearing in the unit
+matrix or already survived a stronger live-model confirmation pass.
 
 ## Threshold Adaptation
 The dynamic threshold (θ_dynamic) successfully tracked score distributions. In high-volatility inputs (within-accumulator drift_acc > 1.0), thresholds relaxed to ~0.15, while stable contexts tightened to ~0.27.
@@ -232,42 +761,48 @@ Aggressive tuning sweep (lowered θ_intensity/thresholds, stronger gain/percenti
   suggests the knobs can drive flashbulb frequency as intended, but we should
   verify with longer horizons to avoid over-triggering.
 
-Dense long-horizon ablation (EmpatheticDialogues, 720/1440, F=0.5, S=0.8, T=0.2):
+Post-rewrite long-horizon ablation rerun (EmpatheticDialogues, Apr 4, 2026;
+`EmbeddingGemma/llama.cpp`, 720/1440, F=0.5, S=0.8, T=0.2). Rerun roots:
+
+* baseline: `logs/flashbulb_rate_rewrite_20260404/live_baseline`
+* `no_percentile`: `logs/flashbulb_rate_rewrite_20260404/live_no_percentile`
+* `no_rate`: `logs/flashbulb_rate_rewrite_20260404/live_no_rate`
+* `no_arousal`: `logs/flashbulb_rate_rewrite_20260404/live_no_arousal`
 
 | ablation | memories | flashbulb | rate |
 |---|---:|---:|---:|
-| **baseline (current)** | 42 | 2 | 4.76% |
-| **no_percentile** | 41 | 10 | 24.39% |
-| **no_arousal** | 42 | 6 | 14.29% |
-| **no_rate** | 42 | 7 | 16.67% |
+| **baseline (rewritten rate controller)** | 19 | 1 | 5.26% |
+| **no_percentile** | 18 | 8 | 44.44% |
+| **no_arousal** | 18 | 4 | 22.22% |
+| **no_rate** | 19 | 1 | 5.26% |
 
 **Ablation notes:**
 
-* Percentile gating is the strongest suppressor; removing it raises flashbulb
-  rate ~5×.
-* Arousal gating contributes a ~3× suppression vs baseline.
-* Rate stabilizer reduces flashbulb rate by ~3.5× vs baseline.
+* Percentile gating remains the dominant suppressor under the real encoder; removing it raises flashbulb rate from **5.26%** to **44.44%**.
+* Arousal gating is still materially causal after the rewrite; removing it raises flashbulb rate to **22.22%**.
+* The rewritten rate controller is now behaviorally neutral on this live workload: baseline and `no_rate` are identical at **1/19** flashbulbs.
+* Treat the earlier pre-rewrite `EmbeddingGemma` flashbulb table as superseded. The old rate term was partly fighting the exception gate; after the rewrite, `rate` no longer suppresses percentile-qualified events, but it also does not add measurable lift on this corpus slice.
 
 ## Boundary Ablation (TopicalChat)
 
-We ran a boundary ablation on TopicalChat (`data/topical_chat/valid_freq.jsonl`)
-with **F=S=T=0.5**, `max_turns=360`, `max_total=720`. We measure the share of
-memories with `boundary_score ≥ 0.5` as a proxy for boundary hits.
-Run logs: `logs/boundary_ablation_20260102_145005`.
+We reran the boundary ablation on TopicalChat (`data/topical_chat/valid_freq.jsonl`)
+on **Apr 4, 2026** with **F=S=T=0.5**, `max_turns=360`, `max_total=720`, using
+`EmbeddingGemma/llama.cpp` (confirmed in `run.log` as `text_encoder_backend=EmbeddingGemma/llama.cpp`).
+We measure the share of memories with `boundary_score ≥ 0.5` as a proxy for
+boundary hits. Rerun root: `logs/embeddinggemma_paper_boundary_20260404_seq`.
 
 | ablation | memories | boundary_hits (score ≥ 0.5) | rate |
 |---|---:|---:|---:|
-| **baseline** | 39 | 22 | 56.4% |
-| **no_time_capacity** | 38 | 22 | 57.9% |
-| **time_capacity_only** | 0 | 0 | 0.0% |
-| **no_surprisal** | 37 | 22 | 59.5% |
+| **baseline (EmbeddingGemma)** | 45 | 28 | 62.22% |
+| **no_time_capacity** | 46 | 31 | 67.39% |
+| **time_capacity_only** | 21 | 9 | 42.86% |
+| **no_surprisal** | 53 | 43 | 81.13% |
 
 **Boundary notes:**
 
-* Natural indicators drive most boundaries; removing time/capacity changes
-  little in this dataset.
-* Time/capacity alone cannot flush under the current floor coupling.
-* Surprisal removal has minimal effect at these settings.
+* The older ImageBind-era `time_capacity_only = 0 / 0` result was not stable. Under EmbeddingGemma, time/capacity-only still produces nonzero flushes (**9 / 21**, **42.86%**).
+* Removing time/capacity does not reduce the boundary-hit share in this rerun; it rises slightly (**62.22%** → **67.39%**), so the earlier "changes little" conclusion still broadly holds, but with a higher baseline rate.
+* `no_surprisal` is no longer a minimal-delta ablation. Under the real encoder, the boundary-hit share rises materially to **81.13%**, so the older `37 / 22` claim should be treated as superseded.
 
 ## Boundary Inactivity Check
 
@@ -533,18 +1068,18 @@ We ran a **156‑turn** comparison at **F=S=T=0.5** to evaluate **baseline**, **
 
 ## Reinforcement Ablation (Long Horizon)
 
-We evaluated reinforcement edges by comparing **reinforcement on vs off** at **F=S=T=0.5**, `max_total=360`, `max_turns=360`, `max_conversations=6` (single stream, interleave=1). Consolidation was invoked externally (`consolidate_cycles=2`).
+We reran the reinforcement ablation on **Apr 4, 2026** under `EmbeddingGemma/llama.cpp` by comparing **reinforcement on vs off** at **F=S=T=0.5**, `max_total=360`, `max_turns=360`, `max_conversations=6` (single stream, interleave=1). Consolidation was invoked externally (`consolidate_cycles=2`). Rerun root: `logs/embeddinggemma_paper_harness_ablation_fast_20260404`.
 
 | reinforcement_mode | reinforcement_edge_count | retrieval_avg_candidates | retrieval_semantic_overlap_mean | interrupt_precision | interrupt_recall | interrupt_fn_rate | memory_retrieved_count_mean |
 |---:|---:|---:|---:|---:|---:|---:|---:|
-| on | 9542 | 50.19 | 0.568 | 0.989 | 0.958 | 0.0417 | 54.33 |
-| off | 0 | 33.28 | 0.567 | 0.984 | 0.948 | 0.0524 | 35.71 |
+| on | 780 | 33.36 | 0.8351 | 1.000 | 0.8983 | 0.1017 | 21.52 |
+| off | 0 | 32.26 | 0.8367 | 1.000 | 0.9138 | 0.0862 | 20.35 |
 
-**Observations:** Reinforcement substantially increases candidate breadth (+16.9 candidates/turn) and retrieved-count mean (+18.6), while **semantic overlap is stable** (Δ ≈ +0.0006). Interrupt recall improves by ~1.1pp (FN rate drops from 0.052 → 0.042) with a small precision lift. This indicates reinforcement primarily broadens the retrieval field and modestly strengthens interrupt coverage without degrading semantic quality.
+**Observations:** The older ImageBind-era reinforcement claim does **not** reproduce on the real encoder path. Under EmbeddingGemma, reinforcement changes candidate breadth only slightly (+1.10 candidates/turn) and does **not** improve interrupt quality: `off` is marginally higher on both recall (**0.9138** vs **0.8983**) and semantic overlap (**0.8367** vs **0.8351**). Treat the earlier “substantially increases breadth and modestly improves recall” conclusion as superseded for this benchmark.
 
 ## Affect Path Ablation (Long Horizon)
 
-We isolated affect usage in **interrupt gating** vs **retrieval ranking** by toggling the affect pathways while holding **F=S=T=0.5** and running **2 conversations × 360 turns** (`max_total=720`). Four modes were tested:
+We reran the affect-path ablation on **Apr 4, 2026** under `EmbeddingGemma/llama.cpp` by toggling affect usage in **interrupt gating** vs **retrieval ranking** while holding **F=S=T=0.5** and running **2 conversations × 360 turns** (`max_total=720`). Rerun root: `logs/embeddinggemma_paper_harness_ablation_fast_20260404`. Four modes were tested:
 
 * **all:** affect used in both interrupt gating and retrieval ranking
 * **interrupt:** affect used only in interrupt gating
@@ -553,12 +1088,12 @@ We isolated affect usage in **interrupt gating** vs **retrieval ranking** by tog
 
 | affect_mode | interrupt_turn_rate | precision | recall | fp_rate | fn_rate | retrieval_emotion_bonus_mean |
 |---:|---:|---:|---:|---:|---:|---:|
-| all | 0.483 | 0.995 | 0.879 | 0.0053 | 0.121 | 0.00349 |
-| interrupt | 0.483 | 0.995 | 0.879 | 0.0053 | 0.121 | 0 |
-| retrieval | 0.483 | 0.995 | 0.879 | 0.0053 | 0.121 | 0.00349 |
-| off | 0.483 | 0.995 | 0.879 | 0.0053 | 0.121 | 0 |
+| all | 0.151 | 1.000 | 0.908 | 0.0000 | 0.0923 | 0.00921 |
+| interrupt | 0.151 | 1.000 | 0.894 | 0.0000 | 0.1061 | 0 |
+| retrieval | 0.153 | 1.000 | 0.882 | 0.0000 | 0.1176 | 0.00924 |
+| off | 0.153 | 1.000 | 0.882 | 0.0000 | 0.1176 | 0 |
 
-**Observations:** At mid‑range knobs on this dataset, interrupt precision/recall are unchanged across affect modes; the measurable difference is the expected removal of the retrieval emotion bonus when retrieval affect is disabled. This suggests affect contributions emerge more strongly at higher Sensitivity or in more emotionally salient streams, which we test in the S‑sweep below.
+**Observations:** The older flat ImageBind-era table is superseded. Under EmbeddingGemma, affect does produce a measurable but modest interrupt-path effect at mid-range knobs: `all` improves recall over `off` (**0.9077** vs **0.8824**) while keeping precision at **1.0** and slightly lowering interrupt rate (**0.1509** vs **0.1535**). `retrieval` matches `off` on interrupt metrics and differs only in the expected emotion bonus, while `interrupt` sits between `all` and `off`. That pattern indicates the gain comes primarily from affect in the interrupt gate rather than from retrieval ranking alone.
 
 We further repeated the ablation at **S=0.0** and **S=1.0** (F=T=0.5) to test extremes:
 
@@ -659,6 +1194,487 @@ contradiction‑heavy corpus is needed to expose the benefit of source monitorin
 | off | 113 / 128 | 183 | 56.90 | 0.69039 | 0.0500 | 1042.75 |
 
 **Observations:** The old TopicalChat no-op result was a dataset problem, not a dead feature. On the controlled Ubuntu probe, source-confidence gating clearly blocks the poisoned cohort: **0 / 128** downgraded memories are reaccessed with the gate on, versus **113 / 128** with the gate disabled.
+
+## Apr 4, 2026 EmbeddingGemma + Default-LFM2.5 Addendum
+
+We reran a compact topical-chat ablation batch on the rebuilt branch where corpus `run.log` files now record `text_encoder_backend=EmbeddingGemma/llama.cpp` and the rebuilt integration tests validate auto deep-backend selection to `LFM2.5/llama.cpp`. Rerun root: `logs/embeddinggemma_remaining_historical_ablations_lfm25_default_20260404_final`.
+
+Unless noted otherwise, these addendum checks use a **single 120-turn TopicalChat slice** at **F=S=T=0.5**. They are intended as current-model reference points for the rebuilt default stack, not as replacements for the longer historical horizon sweeps above.
+
+### Consolidation Quick Check (120 Turns)
+
+| condition | turns | cons_runs | summaries | extraction_results | labels_seen | retrieval_semantic_overlap_mean | interrupt_precision | interrupt_recall | retrieval_summary_hit_rate |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| off | 120 | 0 | 0 | 0 | 0 | 0.7791 | 1.000 | 0.750 | 0.0000 |
+| on | 120 | 2 | 1 | 1 | 12 | 0.7742 | 1.000 | 0.750 | 0.0000 |
+
+**Observation:** On this short slice, consolidation does produce a real summary/extraction event, but it does **not** surface into retrieval often enough to move interrupt quality. The historical longer-horizon consolidation gains should therefore be read as horizon-sensitive rather than assumed at short horizons on the rebuilt stack.
+
+### Affect Modes (120 Turns, No Consolidation)
+
+| affect_mode | interrupt_turn_rate | interrupt_abort_rate | interrupt_semantic_overlap_mean | interrupt_context_semantic_overlap_mean | retrieval_thresh_mean | boundary_mult_eff_mean | retrieval_emotion_bonus_mean |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| all | 0.0500 | 0.0000 | 0.7750 | 0.9082 | 0.2380 | 1.5057 | 0.00833 |
+| interrupt | 0.0500 | 0.0000 | 0.7750 | 0.9082 | 0.2380 | 1.5057 | 0.00000 |
+| retrieval | 0.0500 | 0.0000 | 0.7682 | 0.9081 | 0.2399 | 1.5180 | 0.00829 |
+| off | 0.0500 | 0.0000 | 0.7682 | 0.9081 | 0.2399 | 1.5180 | 0.00000 |
+
+**Observation:** On the rebuilt default stack, the short-horizon affect ablation collapses into two pairs. `all` matches `interrupt` on gate outcomes, and `retrieval` matches `off`, with only the expected path-local threshold shift / emotion bonus differences. That is a much weaker result than the older large ImageBind-era gap.
+
+### Procedural + Sequential Quick Check (Consolidation Cadence)
+
+These quick reruns use one TopicalChat conversation with consolidation enabled and explicit cadence overrides.
+
+| variant | consolidate_every | retrieval_avg_candidates | retrieval_association_candidate_rate | retrieval_semantic_overlap_mean | interrupt_turn_rate |
+|---:|---:|---:|---:|---:|---:|
+| baseline | 40 | 11.75 | 0.0993 | 0.8001 | 0.1000 |
+| both off | 40 | 11.79 | 0.0989 | 0.8017 | 0.0917 |
+| baseline | 60 | 10.10 | 0.0660 | 0.8023 | 0.1000 |
+| both off | 60 | 10.14 | 0.0657 | 0.8042 | 0.1000 |
+
+**Observation:** The rebuilt-stack quick reruns again show no material degradation from disabling procedural storage and sequential edges. If anything, the tiny deltas slightly favor the ablation. The correct interpretation remains that this pathway needs a stronger sequential task to demonstrate value.
+
+### Source-Confidence Quick Check (120 Turns)
+
+| source_conf | retrieval_avg_candidates | retrieval_semantic_overlap_mean | interrupt_turn_rate | interrupt_abort_rate | interrupt_semantic_overlap_mean |
+|---:|---:|---:|---:|---:|---:|
+| on | 1.3750 | 0.7742 | 0.0500 | 0.0000 | 0.7682 |
+| off | 1.4286 | 0.7842 | 0.0417 | 0.0000 | 0.7811 |
+
+**Observation:** The clean TopicalChat slice still does not stress source monitoring enough to produce a strong causal delta. The contradiction-heavy Ubuntu controlled probe above remains the better evidence that source-confidence filtering is functionally active.
+
+### Synthetic Mechanism-Pack Smoke (Apr 4, 2026)
+
+We also generated a small deterministic synthetic mechanism pack (`data/mechanism_eval/valid.jsonl`) containing delayed corrections, mixed provenance, conflicting low-confidence claims, routine exceptions, current-vs-historical questions, and resumable routines. The corresponding quick harness smoke lives under `logs/mechanism_eval_20260404`.
+
+| source_conf | turns | retrieval_avg_candidates | retrieval_semantic_overlap_mean | interrupt_turn_rate | duration_s |
+|---:|---:|---:|---:|---:|---:|
+| on | 19 | 1.0000 | 0.7853 | 0.0526 | 2.52 |
+| off | 19 | 1.0000 | 0.7853 | 0.0526 | 2.02 |
+
+**Observation:** Raw harness aggregates remain flat on this tiny pack. That is expected: the pack is intended to be scored against explicit answer keys (current, historical, belief-at-time, stale-first, provenance class) using the external study scripts, not interpreted only through interrupt/retrieval averages. The important implementation result is that the rebuilt branch now has a reproducible contradiction-heavy mechanism dataset and scorer path without changing the public runtime API.
+
+### Predictive + Metacognitive Activation Audit (Apr 4, 2026)
+
+Two mechanisms were previously present in state but not convincingly behavior-active in retrieval: predictive pre-activation and metacognitive TOT/FOK control. We activated both without changing the public API, then added deterministic on/off benches in `examples/benchmark` plus targeted operation tests. A final paper-only cleanup pass also made the previously paper-only `confidence_decay_rate` behaviorally real: retained metacognitive confidence now decays between signals, scales the strength of next-window TOT recovery, and tightens unknown-caution cutoff behavior as confidence falls.
+
+**Predictive deterministic ablation:** `./build/examples/benchmark/cortext_predictive_ablation_bench`
+
+| study | on/off result | key metric |
+|---|---:|---:|
+| predictive ranking | on beats off | `predictive_target_top1_on = 1`, `predictive_target_top1_off = 0` |
+| transient decay | pass | `preactivation_after_decay = 0.4` |
+| surprise refresh | pass | `surprise_refresh_low = 0.0144`, `surprise_refresh_high = 0.125963` |
+
+**Metacognitive deterministic ablation:** `./build/examples/benchmark/cortext_metacognitive_ablation_bench`
+
+| study | on/off result | key metric |
+|---|---:|---:|
+| TOT recovery | on beats off | `tot_recovery_hits_on = 1`, `tot_recovery_hits_off = 0` |
+| unknown caution | on beats off | `unknown_empty_on = 1`, `unknown_empty_off = 0` |
+| confidence decay | on beats off | `confidence_decay_on = 0.326581`, `confidence_decay_off = 0.8032` |
+| decayed TOT reach | decay suppresses stale deep recovery | `tot_decay_hit_on = 0`, `tot_decay_hit_off = 1` |
+| mode expiry | pass | `mode_expiry_ok = 1` |
+
+**Short live-model confidence-decay ablation:** `scripts/run_memory_harness.py` on a 120-turn `TopicalChat` slice with `EmbeddingGemma/llama.cpp`
+
+| decay | retrieval_avg_candidates | retrieval_semantic_overlap_mean | interrupt_semantic_overlap_mean | interrupt_context_semantic_overlap_mean | memory_retrieved_count_mean | interrupt_recall |
+|---|---:|---:|---:|---:|---:|---:|
+| on | 1.6875 | 0.772989 | 0.772989 | 0.903594 | 0.900000 | 1.0 |
+| off (`CORTEXT_DISABLE_METACOG_CONFIDENCE_DECAY=1`) | 1.6250 | 0.769673 | 0.769673 | 0.901935 | 0.866667 | 1.0 |
+
+Logs:
+
+* `logs/metacog_conf_decay_on_20260404`
+* `logs/metacog_conf_decay_off_20260404`
+
+**Targeted test coverage:** `./build/tests/cortext_tests "[operations][predictive]"` passed with **21 assertions in 5 test cases**; `./build/tests/cortext_tests "[operations][metacognitive]"` passed with **31 assertions in 11 test cases**; and the retrieval-side metacognitive integration slice `./build/tests/cortext_tests "[operations][graph][metacognitive]"` passed with **6 assertions in 3 test cases**.
+
+**Observation:** These results are intentionally narrower than the corpus reruns above. They do not claim that predictive pre-activation or metacognition produce large gains on every naturalistic dataset. They do establish the more basic scientific point that these gears are now real causal parts of the retrieval system: predictive state can change ranking, TOT can extend recovery reach on the next retrieval window, unknown-caution can suppress low-confidence fallback into an empty return when certainty is not met, and confidence decay now prevents stale high-confidence states from overdriving recovery after long delays. On a short clean `TopicalChat` slice the live-model effect is modest but directionally positive.
+
+### Constructive Recall Activation Audit (Apr 4, 2026)
+
+Constructive recall had been one of the last places where the paper was ahead of the branch: the manuscript described an evidence-plus-reconstruction ledger, but the earlier implementation still behaved like a single mutable embedding. We corrected that by adding a versioned `memory_reconstructions` ledger, seeding an initial reconstruction on write, making retrieval score against the latest reconstruction when present, and making reconsolidation append a new reconstruction instead of overwriting the base evidence embedding.
+
+**Deterministic constructive-recall ablation:** `./build/examples/benchmark/cortext_constructive_recall_ablation_bench`
+
+| study | result | key metric |
+|---|---:|---:|
+| initial ledger seeding | pass | `constructive_initial_seeded = 1` |
+| retrieval reconstruction affects rank | on beats off | `constructive_target_top1_on = 1`, `constructive_target_top1_off = 0` |
+| retrieval appends uncertainty-tracked version | pass | `constructive_recon_rows_on = 2`, `constructive_recon_rows_off = 1`, `constructive_latest_uncertainty = 0.425` |
+| reconsolidation preserves evidence row | pass | `constructive_recon_preserves_evidence = 1`, `constructive_recon_versions = 2` |
+| reconsolidation moves current view toward context | pass | `constructive_recon_current_sim = 0.469205`, `constructive_evidence_current_sim = 0.400006` |
+
+**Targeted test coverage:** `./build/tests/cortext_tests "[operations][constructive_recall]"` passed with **29 assertions in 3 test cases**. Adjacent storage and migration regression slices also remained green: `./build/tests/cortext_tests "[operations][memory_storage]"` passed with **33 assertions in 4 test cases**, and `./build/tests/cortext_tests "[schema][migration]"` passed with **11 assertions in 3 test cases**.
+
+**Observation:** This is the constructive-recall equivalent of the predictive/TOT activation audit above. The result is not a claim of dramatic corpus-level gains; it is a claim that the branch now actually implements the algorithm the paper describes. The current memory view can diverge from the original evidence through an uncertainty-tracked reconstruction ledger, retrieval can prefer that reconstructed view when it is more relevant, and reconsolidation no longer destroys the base evidence embedding in place.
+
+### Neuromodulator Downstream Activation Audit (Apr 4, 2026)
+
+The neuromodulator layer had been partly real and partly aspirational: `ACh`, `NE`, and `DA` already drove encode/retrieve bias, but the paper also claimed four downstream effects that were not all behaviorally wired. We closed that gap without changing the public API by applying the latent neuromodulator scales inside the existing write-gate, retrieval-competition, reconsolidation, and procedural-value-update operations.
+
+**Deterministic neuromodulator ablation:** `./build/examples/benchmark/cortext_neuromodulator_ablation_bench`
+
+| pathway | result | key metric |
+|---|---:|---:|
+| NE write-threshold scaling | on beats off | `neuromod_write_accept_on = 1`, `neuromod_write_accept_off = 0` |
+| NE competition scaling | on beats off | `neuromod_competition_loser_strength_on = 0.998705`, `neuromod_competition_loser_strength_off = 0.999136` |
+| ACh reconsolidation scaling | on beats off | `neuromod_recon_similarity_on = 0.832729`, `neuromod_recon_similarity_off = 0.808152` |
+| DA value-update scaling | high beats low | `neuromod_value_update_high_da = 0.8`, `neuromod_value_update_low_da = 0.4`, `neuromod_value_update_disabled = 0.8` |
+
+The benchmark passed end to end: `neuromodulator_bench_passed = 1`.
+
+**Targeted test coverage:** the downstream slices each have a direct operation-level check. `./build/tests/cortext_tests "[operations][write_gate][neuromod]"`, `./build/tests/cortext_tests "[operations][competition][neuromod]"`, `./build/tests/cortext_tests "[operations][recon][neuromod]"`, and `./build/tests/cortext_tests "[operations][detect_memory_usage][neuromod]"` all passed on the rebuilt branch.
+
+**Observation:** This is an activation audit, not a broad corpus-performance claim. The important scientific correction is narrower: the paper can now honestly say that the latent neuromodulator layer does more than set encode/retrieve bias. High `NE` now lowers the write threshold and sharpens lateral inhibition, high `ACh` increases reconstruction drift toward current context, and high `DA` strengthens procedural reward updates.
+
+### Procedural Retrieval Activation Audit (Apr 4, 2026)
+
+The earlier manuscript language overclaimed the procedural lane as a direct `Q(proc_key, action)` policy. The actual branch stores `Q(proc_key, memory_id)`, so we tightened the implementation and the wording together: procedural memory now acts as a **proactive retrieval lane** that can surface a previously successful routine memory even when it falls outside the normal semantic KNN seed set.
+
+**Deterministic procedural ablation:** `./build/examples/benchmark/cortext_procedural_ablation_bench`
+
+| pathway | result | key metric |
+|---|---:|---:|
+| proactive routine surfacing | on beats off | `procedural_target_selected_on = 1`, `procedural_target_selected_off = 0` |
+| routine ranking after surfacing | on beats off | `procedural_target_top1_on = 1`, `procedural_target_top1_off = 0` |
+| learned habit signal preserved | pass | `procedural_target_proc_score_on = 1.0` |
+
+The benchmark passed end to end: `procedural_bench_passed = 1`.
+
+**Targeted test coverage:** the retrieval-side activation is covered by `./build/tests/cortext_tests "[operations][graph][procedural]"`, and the reward-update side remains covered by `./build/tests/cortext_tests "[operations][detect_memory_usage][neuromod]"`.
+
+**Observation:** This result explains why the older TopicalChat procedural ablations above were hard to interpret. On generic chat slices, the old pathway was mostly just a mild reranking term attached to already-selected semantic candidates. The current branch now has a true causal procedural lane: a strong learned routine can enter retrieval proactively for the same sparse context and then compete normally with other candidates. That is still narrower than a standalone action policy, so the paper now describes it that way.
+
+### Meta-Learning Activation Audit (Apr 4, 2026)
+
+The paper had claimed that the knob-to-parameter maps were learnable, but the branch still treated the relevant priors as fixed formulas. We closed that gap by adding an internal `meta_learning_coeffs` table and an end-of-turn learner that updates the generic sigmoid-plus-lerp map for three live prior families:
+
+* Focus `attention_width_prior`
+* Sensitivity `rate_target_prior`
+* Stability `hysteresis_band_prior`
+
+The implementation keeps the old formulas as exact cold-start priors and only begins learning once real write/retrieval/reward outcomes exist.
+
+**Deterministic meta-learning ablation:** `./build/examples/benchmark/cortext_meta_learning_ablation_bench`
+
+| pathway | result | key metric |
+|---|---:|---:|
+| focus prior consolidation | on narrows vs off | `meta_learning_attention_width_prior_on = 1.59894`, `meta_learning_attention_width_prior_off = 1.72788` |
+| sensitivity rate-target learning | on raises vs off | `meta_learning_rate_target_prior_on = 2.36446`, `meta_learning_rate_target_prior_off = 2.12` |
+| stability hysteresis learning | on raises vs off | `meta_learning_hysteresis_band_prior_on = 0.142751`, `meta_learning_hysteresis_band_prior_off = 0.135` |
+| coefficient persistence | on writes rows, off does not | `meta_learning_update_count_on = 24`, `meta_learning_update_count_off = 0` |
+
+**Targeted test coverage:** `./build/tests/cortext_tests "[operations][meta_learning]"` passed with **16 assertions in 3 test cases**.
+
+**Live-model short ablation:** `logs/meta_learning_live_on_20260404_v3` vs `logs/meta_learning_live_off_20260404_v3`
+
+These runs use the rebuilt `topical_chat_analysis` binary, a single **120-turn** TopicalChat slice at **F=S=T=0.5**, and `EmbeddingGemma/llama.cpp` as recorded in `run.log`.
+
+| meta_learning | retrieval_avg_candidates | retrieval_semantic_overlap_mean | interrupt_semantic_overlap_mean | interrupt_context_semantic_overlap_mean | memory_retrieved_count_mean | interrupt_recall |
+|---|---:|---:|---:|---:|---:|---:|
+| on | 1.8000 | 0.796255 | 0.791804 | 0.902245 | 0.900000 | 0.933333 |
+| off | 1.7333 | 0.792718 | 0.788015 | 0.900349 | 0.866667 | 0.933333 |
+
+The learned rows after the `on` run show where adaptation actually concentrated:
+
+| family | learned row snapshot | update_count |
+|---|---|---:|
+| focus | `alpha_f=5.99997`, `beta=-3.00007`, `a=1.70857`, `b=1.73685` | 119 |
+| sensitivity | `alpha_s=6.00342`, `beta=-2.99316`, `a=2.59891`, `b=2.64975` | 119 |
+| stability | `alpha_t=6.0`, `beta=-3.0`, `a=0.13385`, `b=0.13615` | 119 |
+
+**Observation:** The honest live-model result is modest, not dramatic. On this short topical-chat slice, meta-learning nudges retrieval quality in the expected direction and slightly increases candidate recovery, but it does not change headline interrupt precision/recall. Most of the short-horizon adaptation lands in the Sensitivity family (`rate_target_prior` shifting upward from the legacy `2.12` baseline toward `≈2.62`), while Focus narrows only slightly and Stability barely moves. That is still a meaningful correction to the earlier paper claim: the maps are now truly learnable and behaviorally active, but their short-horizon impact is limited on clean chat data.
+
+### Offline Semantic Label Classifier Prototype
+
+Before the runtime labeling corrections below, the branch relied on an overly aggressive repetition-gated label path. To test whether a more semantic, memory-like label pathway is viable before fully replacing the deployed path, we implemented an **offline prototype** that trains two small classifiers over candidate spans:
+
+* **span typing:** `identity`, `person_entity`, `place`, `org_project`, `topic`, `state`, `none`
+* **promotion:** `durable`, `provisional`, `ignore`
+
+The prototype uses:
+
+* `english-wordnet-2025.xml` for concept priors
+* multilingual given-name and surname priors built from `data/surnames/{forenames,surnames}.csv` plus U.S. Census surnames through `scripts/build_name_priors.py`
+* sentence/lexical context features
+* optional external text embeddings through the rebuilt `cortext_text_embedder`, which now resolves the repo's preferred text encoder (`EmbeddingGemma/llama.cpp` on this machine)
+
+#### Real-data study with multilingual priors (Apr 5, 2026)
+
+Run root: `logs/label_classifier_realdata_20260405`
+
+Training data:
+
+* multilingual name priors from the Kaggle `data/surnames/{forenames,surnames}.csv` tables, supplemented with U.S. Census surnames
+* real labeled entity spans from `WNUT17` (`train/dev/test`)
+* weakly labeled sentences mined from prepared `TopicalChat`, `EmpatheticDialogues`, and `Ubuntu Dialogue` exports
+* real encoder features via the rebuilt `cortext_text_embedder` on `EmbeddingGemma/llama.cpp`
+
+The resulting multilingual prior file is large (`≈383 MB`) because this run keeps the full aggregated name tables instead of pruning to a tiny seed list. The train/validation split contained `16,284` / `3,815` examples after mixing `WNUT17` with weak Cortext-style chat spans.
+
+| head | macro_f1 | supported_macro_f1 | accuracy | candidate_recall |
+| --- | ---: | ---: | ---: | ---: |
+| span typing | **0.302** | **0.528** | **0.724** | **0.971** |
+| promotion | **0.487** | **0.730** | **0.776** | **0.971** |
+
+The distinction between `macro_f1` and `supported_macro_f1` matters here: `WNUT17` only labels entity-like spans plus negatives, so `identity`, `topic`, and `state` have zero support in the held-out test split. The supported score is therefore the honest headline metric for the real-dataset run.
+
+#### Secondary curated smoke (Apr 5, 2026)
+
+Run root: `logs/label_classifier_realdata_20260405/eval_curated`
+
+To preserve one small full-taxonomy check, we also evaluated the same trained model on the curated span fixture in `data/label_classifier/gold.jsonl`. This is no longer the source-of-record experiment; it is a compact smoke that highlights coverage gaps outside the WNUT entity taxonomy.
+
+| head | macro_f1 | supported_macro_f1 | accuracy | candidate_recall |
+| --- | ---: | ---: | ---: | ---: |
+| span typing | **0.341** | **0.341** | **0.433** | **1.000** |
+| promotion | **0.439** | **0.439** | **0.633** | **1.000** |
+
+**Observations:** The prototype has moved from “toy feasibility” to a real offline experiment. On the held-out `WNUT17` test split, span typing reaches `0.528` supported macro F1 and promotion reaches `0.730`, with candidate recall still at `0.971`. That is strong enough to justify replacing the current exact-string repetition story at the research level. The curated smoke is now more useful as a failure probe than as a headline metric: the same model underperforms on `state` and `topic`, which tells us the current training mix is still too entity-heavy. So the bottleneck is no longer whether a semantic label classifier can train; it is whether we can broaden the real conversational supervision enough to cover non-entity concepts before runtime integration.
+
+### Online Label Persistence Ablation (Apr 5, 2026)
+
+We also corrected the **deployed** label path itself. The previous runtime policy applied a batch-level repetition threshold and, when labels were too sparse to clear it, collapsed each extraction result to a single highest-salience fallback label. This was the direct cause of pathological under-labeling in long chats, including name loss and label graphs with implausibly few nodes.
+
+The current runtime now persists extracted labels directly from each extraction result, deduped by normalized key within the result and reused by key across the store. To measure the impact cleanly, we added a deterministic ablation bench that re-enables the legacy gate through an internal study-only toggle:
+
+**Deterministic label-persistence ablation:** `./build/examples/benchmark/cortext_label_persistence_ablation_bench`
+
+| scenario | legacy gate | current runtime | result |
+|---|---:|---:|---|
+| sparse three-label extraction | `1` label / `1` `has_label` edge | `3` labels / `3` `has_label` edges | current preserves all extracted labels |
+| repeated single-label extraction | `1` label | `1` label | dedupe remains stable |
+
+Recorded metrics:
+
+* `label_sparse_legacy_count = 1`
+* `label_sparse_current_count = 3`
+* `label_sparse_legacy_edges = 1`
+* `label_sparse_current_edges = 3`
+* `label_repeated_legacy_count = 1`
+* `label_repeated_current_count = 1`
+
+**Targeted test coverage:** `./build/tests/cortext_tests "[operations][extraction][labels]"` passed with **8 assertions in 2 test cases**.
+
+**Observation:** This change is not about adding more decorative labels. It removes a lossy gate that was erasing semantically important one-shot entities before they could ever become part of the graph. The ablation shows the intended behavior clearly: sparse extractions now survive intact, while repeated identical labels still collapse to one durable node as before.
+
+### LFM2.5-350M Extractor Prompt Ablation {#sec-extractor-prompt-ablation}
+
+Once sparse labels were allowed through, the next failure mode was obvious in the live chat DB: the fast local extractor was emitting junk labels like `user`, `assistant`, `support`, `documents`, and even schema-style tokens in contexts where the desired durable nodes were things like `Gabriel`, `Chicago`, `SQLite migration`, `Cortext`, `Sarah`, or `housing application`. Before paying the latency cost of a larger extraction model, we first tested whether prompt technique alone could recover better labels from the small `LFM2.5-350M` GGUF.
+
+We compared five prompt styles on the live local extractor:
+
+* `baseline`: original recall-heavy zero-shot prompt
+* `durable`: zero-shot durable-node wording
+* `precision`: zero-shot precision-first wording
+* `fewshot_durable`: durable-node wording plus short conversational examples
+* `fewshot_precision`: precision-first wording plus short conversational examples
+
+The benchmark uses three short multi-turn fixtures that mirror the failure cases we saw in the chat DB:
+
+* interview-prep noise (`interview`, `confidence`)
+* identity plus work context (`Gabriel`, `Chicago`, `SQLite migration`, `Cortext`)
+* neighbor plus housing context (`Sarah`, `housing application`, `Logan Square`)
+
+Each style is scored by desired-label hits, banned-label leakage, total emitted labels, overflow beyond a compact durable-label budget, and wall-clock latency.
+
+**Deterministic prompt-technique ablation:** `./build/examples/benchmark/cortext_extractor_prompt_ablation_bench`
+
+Run log: `logs/extractor_prompt_ablation_20260406/extractor_prompt_ablation.log`
+
+| prompt style | desired hits | banned hits | labels emitted | latency (ms) | score |
+|---|---:|---:|---:|---:|---:|
+| `baseline` | `6` | `2` | `13` | `3116` | `14` |
+| `durable` | `8` | `7` | `86` | `9794` | `-52` |
+| `precision` | `7` | `1` | `46` | `4898` | `-3` |
+| `fewshot_durable` | `8` | `4` | `16` | `3856` | **`16`** |
+| `fewshot_precision` | `5` | `2` | `8` | `3073` | `11` |
+
+Representative outputs:
+
+* `baseline` interview fixture: `confidence, prep, support, interview, user, assistant`
+* `fewshot_durable` identity/work fixture: `Gabriel, Chicago, SQLite migration, Cortext`
+* `fewshot_precision` neighbor/housing fixture: `Sarah, housing application, Logan Square`
+
+**Observation:** The zero-shot rewrites alone were not enough. `durable` and `precision` both leaked their own instruction vocabulary back into the labels, including prompt words like `schema`, `timestamps`, `people`, and `projects`. The few-shot variants changed the behavior qualitatively. `fewshot_durable` was the best overall compromise: it recovered all four identity/work labels in the hardest fixture, preserved the full `Sarah` / `housing application` / `Logan Square` trio, and did so with only a modest latency increase over the old baseline (`3856 ms` vs `3116 ms` across the full three-fixture run). `fewshot_precision` was the leanest style, but it under-recalled the identity/work fixture too aggressively. Based on this ablation, the current branch now uses the **few-shot durable prompt as the deployed default** for the local `LFM2.5-350M` extraction path, while still allowing overrides through `CORTEXT_LFM2_EXTRACT_PROMPT_STYLE` for further study.
+
+### LFM2.5-350M Summarizer Prompt Ablation {#sec-summarizer-prompt-ablation}
+
+Once extraction quality improved, the next weak point was the **summarizer**: the fast local `LFM2.5-350M` summarization path was still vulnerable to prompt echo, speaker-role leakage, and a strong bias toward the **last excerpt** in a cluster. That showed up directly in earlier deep-consolidation failures: summaries would sometimes repeat prompt language, narrate the conversation mechanics, or ignore early identity facts like `Gabriel` / `Chicago` in favor of the final turn.
+
+Before paying the cost of a larger summarizer, we ran a prompt-technique ablation on the live local `LFM2.5-350M` GGUF. We compared six prompt styles:
+
+* `baseline`: original excerpt-based zero-shot prompt
+* `durable`: excerpt-based zero-shot durable-memory wording
+* `precision`: excerpt-based zero-shot precision-first wording
+* `fewshot_durable`: excerpt-based few-shot durable wording
+* `fewshot_precision`: excerpt-based few-shot precision wording
+* `transcript_fewshot`: few-shot prompt plus a **chat transcript** input format instead of numbered excerpts
+
+The benchmark uses three short conversational fixtures that stress the failure modes we care about:
+
+* identity plus work context (`Gabriel`, `Chicago`, `SQLite migration`, `Cortext`, `demo`)
+* project plus operations context (`Alice`, `Acme pilot`, `Seattle`, `SSO`, `audit exports`, `June`, `renewal forecast`)
+* neighbor plus housing context (`Sarah`, `housing application`, `Logan Square`, `pay stubs`, `Tuesday`)
+
+Each style is scored by desired-fact hits, banned meta leakage (`User:`, `Assistant:`, `Excerpt`, `Final summary`, prompt echo), and wall-clock latency.
+
+**Deterministic prompt-technique ablation:** `./build/examples/benchmark/cortext_summarizer_prompt_ablation_bench`
+
+Run log: `logs/summarizer_prompt_ablation_20260406/summarizer_prompt_ablation.log`
+
+| prompt style | desired hits | banned hits | latency (ms) | score |
+|---|---:|---:|---:|---:|
+| `baseline` | `7` | `4` | `2404` | `2` |
+| `durable` | `1` | `3` | `1358` | `-7` |
+| `precision` | `5` | `2` | `1216` | `4` |
+| `fewshot_durable` | `1` | `3` | `2033` | `-7` |
+| `fewshot_precision` | `6` | `0` | `1739` | `12` |
+| `transcript_fewshot` | **`15`** | **`0`** | `1850` | **`30`** |
+
+Representative outputs:
+
+* `baseline` identity/work fixture: `User: I am debugging a SQLite migration for Cortext before the demo. Assistant: The migration is progressing well...`
+* `fewshot_precision` identity/work fixture: `Debugging a SQLite migration for Cortext before the demo.`
+* `transcript_fewshot` identity/work fixture: `Gabriel lives in Chicago and is debugging a SQLite migration for Cortext before the demo.`
+* `transcript_fewshot` project/ops fixture: `Alice is leading the Acme pilot in Seattle, and the customer needs SSO and audit exports before June.`
+
+**Observation:** The biggest win did **not** come from adding more wording. It came from changing the input shape. The excerpt-based prompts remained last-turn-biased: even the better few-shot excerpt styles still dropped early facts like `Gabriel` and `Chicago`, or collapsed the whole cluster to the last blocker sentence. The transcript-style prompt changed the behavior qualitatively. On the live local `LFM2.5-350M` summarizer it recovered all five desired identity/work facts, six of seven project/ops facts, and four of five neighbor/housing facts, with **zero** banned meta hits and only a moderate latency cost relative to the leanest zero-shot style (`1850 ms` vs `1216 ms` across the three-fixture run). Based on this ablation, the current branch now uses the **transcript few-shot prompt as the deployed default** for the local `LFM2.5-350M` summarization path, while still allowing overrides through `CORTEXT_LFM2_SUMMARY_PROMPT_STYLE` for further study.
+
+### Storage-Gated Eviction Ablation (Apr 5, 2026)
+
+We also corrected a practical failure mode in the deployed eviction policy. The previous runtime would evict weak `LONG_TERM` memories as soon as they fell below `periphery_cutoff(T)`, even when the backing chat database was still trivially small. In long user conversations this produced premature forgetting: names and low-frequency autobiographical details could decay out of the active store long before disk pressure justified any deletion.
+
+The current runtime now applies a storage gate before the usual strength-based eviction query. For file-backed stores, eviction is blocked until the database footprint reaches a configurable floor. The floor can be a fixed byte budget, a percentage of currently available disk space, or both; the active threshold is the maximum of those values. The default deployed fixed floor is `500 MB`.
+
+**Deterministic storage-budget ablation:** `./build/examples/benchmark/cortext_storage_eviction_budget_bench`
+
+| scenario | storage gate floor | surviving weak memory count | result |
+|---|---:|---:|---|
+| high budget guard | `1 GiB` | `1` | weak memory is retained because storage budget is not yet full |
+| zero budget | `0` | `0` | the same weak memory is evicted once the storage gate is removed |
+
+Recorded metrics:
+
+* `storage_gate_high_budget_count = 1`
+* `storage_gate_blocks_early_eviction = 1`
+* `storage_gate_zero_budget_count = 0`
+* `storage_gate_allows_eviction_after_limit = 1`
+
+**Targeted test coverage:** `./build/tests/cortext_tests "[op18][memory_strength][storage_gate]"` passed with **3 assertions in 2 test cases**.
+
+**Observation:** This is a policy correction, not an attempt to make eviction disappear. Strength and fact-floor rules still determine *which* memories are eligible once storage pressure is real. The storage gate simply prevents the engine from acting like a tiny chat database is already full.
+
+We then added a second deterministic sweep to answer the practical sizing question: **how much storage budget is actually enough to delay forgetting?** This sweep uses a file-backed SQLite store, grows the database by `5 MB` per simulated step, and records both the storage-threshold crossing step and the eventual eviction step for the same weak memory.
+
+**Deterministic storage-threshold survival sweep:** `./build/examples/benchmark/cortext_storage_eviction_sweep_bench`
+
+| fixed storage floor | threshold-cross step | eviction step | result |
+|---|---:|---:|---|
+| `0 MB` | `1` | `62` | pure decay-limited baseline |
+| `64 MB` | `13` | `62` | no practical delay vs baseline |
+| `128 MB` | `26` | `62` | still decay-limited |
+| `256 MB` | `51` | `62` | still decay-limited |
+| `500 MB` | `100` | `100` | first storage-limited regime |
+| `1 GB` | `200` | `200` | larger-device storage-limited regime |
+| `2 GB` | `400` | `400` | very large-device storage-limited regime |
+
+Recorded metrics:
+
+* `storage_sweep_0mb_eviction_step = 62`
+* `storage_sweep_64mb_eviction_step = 62`
+* `storage_sweep_128mb_eviction_step = 62`
+* `storage_sweep_256mb_eviction_step = 62`
+* `storage_sweep_500mb_eviction_step = 100`
+* `storage_sweep_500mb_cross_bytes = 501829632`
+* `storage_sweep_default_500mb_delays_vs_64mb = 1`
+* `storage_sweep_1gb_eviction_step = 200`
+* `storage_sweep_2gb_eviction_step = 400`
+* `storage_sweep_1gb_delays_vs_500mb = 1`
+* `storage_sweep_2gb_delays_vs_1gb = 1`
+
+**Observation:** The useful takeaway is not that “more storage is always better.” It is that there is a real **decay-limited regime** and a real **storage-limited regime**. In this workload, any budget up to `256 MB` still lets the memory die on its normal decay curve at step `62`, because the database reaches those thresholds before the memory becomes too weak. `500 MB` is the first tested budget that pushes the system into the storage-limited regime, delaying eviction to step `100`; `1 GB` and `2 GB` extend that same pattern to steps `200` and `400`. That is why the default floor was raised well above the earlier `64 MiB` setting: the smaller floor looked safer on paper than it actually was in practice.
+
+We then extended the study into an end-to-end steady-state chat regime, where the relevant question is not just when a weak memory dies, but whether it survives long enough for the next label-producing consolidation window to fire. This benchmark uses the same file-backed `5 MB/step` growth profile, keeps the memory in the post-initial-consolidation pool, and measures whether a three-label extraction (`Gabriel`, `Chicago`, `Cortext`) is created before the raw memory is evicted.
+
+**Deterministic storage × consolidation end-to-end ablation:** `./build/examples/benchmark/cortext_storage_consolidation_e2e_bench`
+
+| fixed storage floor | raw-memory eviction step | every `30` steps | every `60` steps | every `90` steps | every `120` steps | every `150` steps |
+|---|---:|---:|---:|---:|---:|---:|
+| `0 MB` | `62` | `3` labels retained | `3` labels retained | `0` labels | `0` labels | `0` labels |
+| `64 MB` | `62` | `3` labels retained | `3` labels retained | `0` labels | `0` labels | `0` labels |
+| `128 MB` | `62` | `3` labels retained | `3` labels retained | `0` labels | `0` labels | `0` labels |
+| `256 MB` | `62` | `3` labels retained | `3` labels retained | `0` labels | `0` labels | `0` labels |
+| `500 MB` | `100` | `3` labels retained | `3` labels retained | `3` labels retained | `0` labels | `0` labels |
+| `1 GB` | `200` | `3` labels retained | `3` labels retained | `3` labels retained | `3` labels retained | `3` labels retained |
+| `2 GB` | `400` | `3` labels retained | `3` labels retained | `3` labels retained | `3` labels retained | `3` labels retained |
+
+Recorded checks:
+
+* `storage_cons_no_consolidation_creates_no_labels = 1`
+* `storage_cons_64mb_interval60_captures_labels = 1`
+* `storage_cons_64mb_interval90_misses_labels = 1`
+* `storage_cons_500mb_interval90_captures_labels = 1`
+* `storage_cons_500mb_interval90_delays_vs_64mb = 1`
+* `storage_cons_500mb_interval120_misses_labels = 1`
+* `storage_cons_1gb_interval120_captures_labels = 1`
+* `storage_cons_1gb_interval150_captures_labels = 1`
+* `storage_cons_2gb_interval150_captures_labels = 1`
+* `storage_cons_1gb_interval150_delays_vs_500mb = 1`
+
+**Observation:** This is the strongest practical justification for the higher default and for device-class scaling above it. Under small storage budgets, the system still has enough time to consolidate on short cadences (`30` or `60` steps), but it misses slower label-formation windows because the raw memory is gone by step `62`. With a `500 MB` floor, the same memory survives to step `100`, which is enough for a `90`-step consolidation interval to capture and persist the labels before the episodic trace is evicted. With `1 GB`, the survival window extends to step `200`, which is enough for both `120`- and `150`-step consolidation intervals. `2 GB` does not add new label-capture wins on this task beyond `1 GB`; it extends the safety margin further. So the current evidence suggests a useful plateau structure: `500 MB` is a good default for ordinary chat retention, while `1 GB` is the first meaningful “slow consolidation / large-memory” tier.
+
+We then replaced the abstract fixed-step consolidation cadence with a synthetic human sleep clock derived from representative age-group sleep patterns. Each profile uses one consolidation opportunity per sleep bout, where the number of bouts per 24 hours is `1 + naps/day`. The benchmark uses a `24 h` episodic half-life, a synthetic file-backed storage growth rate of `12 MB/hour`, and asks a more human-like question: **does a weak autobiographical trace survive long enough to be consolidated during the next realistic sleep cycle?**
+
+**Deterministic storage × human sleep consolidation ablation:** `./build/examples/benchmark/cortext_storage_human_sleep_consolidation_bench`
+
+| age group | sleep pattern used in the synthetic clock | effective consolidation cadence | `0 MB` floor | `256 MB` floor | `500 MB` floor | `1 GB` floor |
+|---|---|---:|---:|---:|---:|---:|
+| newborn | `14–17 h`, `4–6` naps/day | every `4 h` | `3` labels | `3` labels | `3` labels | `3` labels |
+| infant | `12–16 h`, `2–3` naps/day | every `7 h` | `0` labels | `3` labels | `3` labels | `3` labels |
+| toddler | `11–14 h`, `1–2` naps/day | every `10 h` | `0` labels | `3` labels | `3` labels | `3` labels |
+| preschool | `10–13 h`, `0–1` naps/day | every `16 h` | `0` labels | `3` labels | `3` labels | `3` labels |
+| school-age | `9–12 h`, `0` naps/day | every `24 h` | `0` labels | `0` labels | `3` labels | `3` labels |
+| teen | `8–10 h`, `0` naps/day | every `24 h` | `0` labels | `0` labels | `3` labels | `3` labels |
+| adult | `7–9 h`, optional naps | every `24 h` | `0` labels | `0` labels | `3` labels | `3` labels |
+| older adult | `7–8 h`, optional naps | every `24 h` | `0` labels | `0` labels | `3` labels | `3` labels |
+
+Recorded checks:
+
+* `human_sleep_newborn_zero_budget_captures = 1`
+* `human_sleep_adult_zero_budget_misses = 1`
+* `human_sleep_adult_256mb_misses = 1`
+* `human_sleep_adult_500mb_captures = 1`
+* `human_sleep_adult_1gb_matches_500mb = 1`
+* `human_sleep_older_adult_500mb_captures = 1`
+
+**Observation:** This synthetic-clock view is more interpretable than the earlier abstract interval sweep. It shows that frequent sleep in early life behaves like a natural consolidation rescue mechanism: newborn-style sleep is frequent enough that even a zero storage floor still captures the labels before the trace dies, while infant/toddler/preschool profiles already benefit from modest storage budgets such as `256 MB`. The adult-side boundary is sharper and more important for real chat systems: once consolidation becomes essentially once-per-day, `256 MB` is no longer enough, and `500 MB` is the first tested floor that reliably keeps the trace alive until the nightly consolidation window. `1 GB` still helps, but in this human-like benchmark it acts as safety margin rather than unlocking a new retention class. That is the clearest current justification for the deployed `500 MB` default.
+
+We also added a matching **estimated token-cost ablation** over the same synthetic sleep schedules. This study uses the repository's existing character-to-token heuristic (`ceil(chars / 4)`) to estimate the prompt and completion budget for each consolidation session over a `72 h` synthetic clock with one autobiographical trace arriving per hour. It is intentionally a cost proxy, not a billing measurement: the goal is to compare how much more summarization/extraction budget frequent sleep-style consolidation would consume relative to nightly consolidation.
+
+**Deterministic storage × human sleep token-cost ablation:** `./build/examples/benchmark/cortext_storage_human_sleep_token_bench`
+
+| age group | effective consolidation cadence | storage floor | consolidation events over `72 h` | estimated total tokens |
+|---|---:|---:|---:|---:|
+| newborn | every `4 h` | `500 MB` | `18` | `7090` |
+| infant | every `7 h` | `500 MB` | `10` | `5199` |
+| toddler | every `10 h` | `500 MB` | `7` | `4520` |
+| preschool | every `16 h` | `500 MB` | `4` | `3590` |
+| adult | every `24 h` | `0 MB` | `3` | `3700` |
+| adult | every `24 h` | `500 MB` | `3` | `3700` |
+| adult | every `24 h` | `1 GB` | `3` | `3700` |
+
+Recorded checks:
+
+* `human_sleep_tokens_newborn_cost_exceeds_adult_500mb = 1`
+* `human_sleep_tokens_newborn_events_exceed_adult_500mb = 1`
+* `human_sleep_tokens_adult_500mb_cost_matches_0mb = 1`
+* `human_sleep_tokens_adult_1gb_matches_500mb_retention = 1`
+* `human_sleep_tokens_adult_1gb_matches_500mb_cost = 1`
+
+**Observation:** In this steady hourly-trace workload, token cost is dominated by **consolidation frequency**, not by the storage floor. Newborn-style frequent sleep performs roughly `1.9×` the estimated token work of adult nightly consolidation over the same `72 h` horizon (`7090` vs `3700` tokens), because it runs far more consolidation sessions even though each session is smaller. By contrast, once the workload is already surviving into the nightly consolidation loop, raising the storage floor from `0 MB` to `500 MB` or `1 GB` does not materially change the estimated token budget in this proxy study. That does **not** mean storage is irrelevant; the human-retention ablation above showed that storage floor is still decisive for whether fragile traces survive long enough to reach a nightly consolidation window at all. The joint takeaway is that cadence drives cost, while storage floor determines whether slower cadences remain viable.
 
 ### Messy Chat Baseline (Ubuntu Dialogue Corpus)
 

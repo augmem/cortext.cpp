@@ -333,3 +333,37 @@ TEST_CASE ("Prediction horizon increases with Focus",
     REQUIRE (pre > 0.0);
   }
 }
+
+TEST_CASE ("Predictive pre-activation decays even without new aligned retrieval",
+           "[operations][predictive][decay]")
+{
+  auto unique_store = cortext::SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<cortext::Store> (std::move (unique_store));
+  cortext::testing::InitializeCoreSchema (*store);
+
+  const Eigen::VectorXf aligned = Make256DEmb ({ { 0, 1.0f } });
+  cortext::testing::SeedEmbeddingV2 (*store, 404LL, aligned, 1);
+  cortext::testing::SeedMemoryV2 (*store, 404LL, 404LL, "test", "LONG_TERM",
+                                  1.0, 1);
+  store->Execute ("UPDATE memories SET pre_activation = ? WHERE memory_id = ?",
+                  { 0.8, 404LL });
+
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  cfg.focus = 0.5;
+  cfg.sensitivity = 0.5;
+  cfg.stability = 0.5;
+
+  auto pipeline
+      = std::make_unique<OperationSet> (std::make_unique<ApplyPredictivePreActivation> ());
+  SignalProcessor processor (cfg, store, std::move (pipeline));
+  processor.Process (MakeSignal (aligned, /*ts=*/999));
+  processor.Flush ();
+
+  auto rows = store->Execute (
+      "SELECT pre_activation FROM memories WHERE memory_id = ?",
+      { 404LL });
+  REQUIRE (rows.size () == 1);
+  const double pre = std::any_cast<double> (rows[0].at ("pre_activation"));
+  REQUIRE (pre == Catch::Approx (0.4).margin (1e-6));
+}

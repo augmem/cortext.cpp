@@ -1,5 +1,6 @@
 #include "cortext/operations/competition.hpp"
 
+#include "neuromodulator_internal.hpp"
 #include "cortext/store/store.hpp"
 #include "cortext/core/algorithms.hpp"
 #include "cortext/core/knobs.hpp"
@@ -135,7 +136,8 @@ ScoreCandidates (const std::unordered_map<long long, Eigen::VectorXf> &retrieved
 void
 ApplyLateralInhibition (const std::vector<Candidate> &winners,
                         const std::vector<Candidate> &losers, double radius,
-                        double stability, long long now_ts, Transaction &tx,
+                        double stability, double competition_scale,
+                        long long now_ts, Transaction &tx,
                         int &suppressed_count)
 {
   for (const auto &loser : losers)
@@ -151,7 +153,7 @@ ApplyLateralInhibition (const std::vector<Candidate> &winners,
             }
           const double spr
               = SuppressionPerRetrieval (stability, winner.activation);
-          total_supp += spr;
+          total_supp += spr * competition_scale;
         }
       if (total_supp <= std::numeric_limits<double>::epsilon ())
         {
@@ -191,6 +193,8 @@ ApplyRetrievalCompetition::Execute (OperationContext &context,
       = static_cast<long long> (context.GetSignal ().timestamp);
   const double recovery_time = RecoveryTimeSeconds (cfg.stability);
   ApplyRIFRecovery (tx, now_ts, recovery_time);
+  const double competition_scale
+      = neuromodulation::RetrievalCompetitionScale (p_ctx.neuromod_ne);
 
   std::vector<Candidate> cands = ScoreCandidates (retrieved, x_ctx);
   if (cands.empty ())
@@ -207,13 +211,14 @@ ApplyRetrievalCompetition::Execute (OperationContext &context,
       return;
     }
   int suppressed_count = 0;
-  ApplyLateralInhibition (winners, losers, radius, cfg.stability, now_ts, tx,
-                          suppressed_count);
+  ApplyLateralInhibition (winners, losers, radius, cfg.stability,
+                          competition_scale, now_ts, tx, suppressed_count);
 
   // Debug logging
   telemetry::LogDebug ("cortext.competition", {
     telemetry::Attribute::Int64 ("winner_count", static_cast<int64_t> (k)),
     telemetry::Attribute::Double ("inhibition_radius", radius),
+    telemetry::Attribute::Double ("competition_scale", competition_scale),
     telemetry::Attribute::Int64 ("suppressed_count", static_cast<int64_t> (suppressed_count))
   });
 }

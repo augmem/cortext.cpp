@@ -1,4 +1,5 @@
 #include "cortext/operations/sensitivity.hpp"
+#include "meta_learning_internal.hpp"
 #include "cortext/core/knobs.hpp"
 #include "cortext/operations/constants.hpp"
 #include "cortext/processor/operation_context.hpp"
@@ -28,7 +29,7 @@ InitializeSensitivityPriors::Execute (OperationContext &context, Transaction &tx
   const double S_eff = core::SensitivityBias (S_raw);
 
   // Priors per algorithms.md Algorithm 3
-  p_ctx.base_rate_prior = core::BaseRatePrior (S_raw);
+  p_ctx.base_rate_prior = meta_learning::ResolveRateTargetPrior (tx, config);
   p_ctx.weight_novelty_prior = 0.3 + 0.7 * S_eff;
   p_ctx.weight_surprise_prior = 0.2 + 0.8 * S_eff;
   p_ctx.weight_valence_prior = 0.4 + 0.6 * S_eff;
@@ -44,6 +45,7 @@ InitializeSensitivityPriors::Execute (OperationContext &context, Transaction &tx
   p_ctx.weight_arousal = p_ctx.weight_arousal_prior;
   p_ctx.emotion_gain = p_ctx.emotion_gain_prior;
   p_ctx.score_gain = p_ctx.score_gain_prior;
+  p_ctx.rate_target = p_ctx.rate_target_prior;
   p_ctx.sensitivity_priors_initialized = true;
 
   telemetry::LogDebug("cortext.initialize_sensitivity_priors", {

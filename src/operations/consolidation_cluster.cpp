@@ -88,6 +88,28 @@ ConsolidationCluster::Execute (OperationContext &context, Transaction &tx) const
   std::vector<int> cluster_labels (n, -1);
   std::vector<bool> visited (n, false);
   int next_cluster_id = 0;
+  {
+    auto rows = tx.Execute (
+        "SELECT COALESCE(MAX(cluster_id), -1) + 1 AS next_cluster_id "
+        "FROM memories WHERE cluster_id IS NOT NULL",
+        {});
+    if (!rows.empty ())
+      {
+        auto it = rows[0].find ("next_cluster_id");
+        if (it != rows[0].end ())
+          {
+            if (it->second.type () == typeid (long long))
+              {
+                next_cluster_id
+                    = static_cast<int> (std::any_cast<long long> (it->second));
+              }
+            else if (it->second.type () == typeid (int))
+              {
+                next_cluster_id = std::any_cast<int> (it->second);
+              }
+          }
+      }
+  }
   std::vector<ClusterInfo> clusters;
 
   auto neighbors_of = [&](int idx) {
@@ -251,7 +273,7 @@ ConsolidationCluster::Execute (OperationContext &context, Transaction &tx) const
 
       const int k = std::min (min_pts, static_cast<int> (sims.size ()));
       ClusterInfo cluster;
-      cluster.cluster_id = 0;
+      cluster.cluster_id = next_cluster_id++;
       cluster.avg_score = 0.0;
       Eigen::VectorXf centroid;
       bool centroid_init = false;

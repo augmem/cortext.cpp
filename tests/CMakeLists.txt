@@ -46,6 +46,8 @@ add_executable(cortext_tests
   operations_reconsolidation.test.cpp
   operations_competition.test.cpp
   operations_predictive.test.cpp
+  operations_meta_learning.test.cpp
+  operations_constructive_recall.test.cpp
   operations_emotion.test.cpp
   operations_mood.test.cpp
   operations_sensitivity.test.cpp
@@ -61,13 +63,16 @@ add_executable(cortext_tests
 
   operations_graph_build.test.cpp
   operations_graph_retrieval.test.cpp
+  operations_graph_retrieval_bitemporal.test.cpp
   operations_emotion_cascade.test.cpp
 
   operations_consolidation.test.cpp
   operations_consolidation_cluster.test.cpp
   operations_extraction.test.cpp
+  operations_bitemporal_facts.test.cpp
   operations_write_gate.test.cpp
   operations_memory_storage.test.cpp
+  operations_detect_memory_usage.test.cpp
   operations_streaming_pacing.test.cpp
   operations_accumulator.test.cpp
   migration_core.test.cpp

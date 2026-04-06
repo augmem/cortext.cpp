@@ -247,6 +247,50 @@ for numerical stability floors (e.g., ε(F, S, T)) and unit conversions.
 This keeps the system’s qualitative behavior entirely governed by the
 three knobs, consistent with the human-memory objective.
 
+## Temporal Semantics for Structured Facts
+
+Cortext currently treats raw memories primarily as **event-time
+observations**: a memory is written when a coherent unit is detected,
+and its stored timestamp records when that unit was observed. The
+phase-1 bitemporal fact layer adds a structured consolidation product
+that distinguishes three related but non-identical temporal notions:
+
+-   **Event time:** when the source experience was observed by the
+    system.
+-   **Valid time:** when an extracted fact was true in the world.
+-   **Transaction time:** when Cortext learned, inserted, corrected, or
+    superseded that fact.
+
+For an episodic memory `m_i`, we define the event timestamp:
+
+    t_event(m_i) = created_at(m_i)
+
+For a structured fact assertion `f_j = (subject, predicate, object)`, we
+define two half-open intervals:
+
+    valid(f_j) = [t_v_start(f_j), t_v_end(f_j))
+    tx(f_j)    = [t_tx_start(f_j), t_tx_end(f_j))
+
+The valid interval models when the assertion held in the world. The
+transaction interval models when the system regarded that assertion as
+active knowledge.
+
+This distinction supports three different query semantics:
+
+    true_at(f_j, τ)     = 1 if τ ∈ valid(f_j), else 0
+    known_at(f_j, τ)    = 1 if τ ∈ tx(f_j), else 0
+    current(f_j, now)   = true_at(f_j, now) ∧ known_at(f_j, now)
+
+This is the core of **bitemporal modeling**: the system can separately
+answer “what was true then?” and “what did the system believe then?”
+without collapsing historical corrections into a single timeless
+statement.
+
+In the current alpha, Cortext’s live behavior remains primarily
+event-driven and recency-weighted. The bitemporal formulation above is
+an additive structured-fact layer for evolving personal knowledge rather
+than a replacement for the episodic memory stream.
+
 ### Buffers
 
 The specification uses distinct streaming buffers:
@@ -662,6 +706,21 @@ user-facing parameters:
     retrieval_competition_scale ← 1 + 0.5 × NE_t
     value_update_gain ← 0.5 + 0.5 × DA_t
 
+In the current implementation, these latent scales are applied at four
+concrete downstream sites rather than introduced as separate runtime
+controls:
+
+-   `write_threshold_scale` multiplies the accumulator write-gate
+    threshold, so high `NE_t` lowers the barrier for committing a
+    boundary candidate.
+-   `reconsolidation_scale` multiplies reconsolidation drift magnitude,
+    so high `ACh_t` strengthens context-driven reconstruction updates.
+-   `retrieval_competition_scale` multiplies lateral inhibition during
+    retrieval competition, so high `NE_t` sharpens suppression among
+    near-duplicate candidates.
+-   `value_update_gain` scales procedural-store reward updates, so high
+    `DA_t` increases reinforcement of recently used routines.
+
 ## Oscillatory Gating (No Discrete Modes)
 
 To reduce interference without introducing hard modes, Cortext adds a
@@ -693,6 +752,37 @@ The coefficients `{α_F, α_S, α_T, β, a, b}` are updated from observed
 outcomes (acceptance, uncertainty reduction, task reward), while the UI
 still exposes only F/S/T. This preserves simplicity while allowing the
 system to adapt its parameterization over time.
+
+In the current branch, this generic learner is instantiated for three
+live priors that already shape runtime behavior:
+
+-   `attention_width_prior` (Focus family)
+-   `rate_target_prior` / `base_rate_prior` (Sensitivity family)
+-   `hysteresis_band_prior` (Stability family)
+
+The implementation keeps the historical closed-form priors as the exact
+cold-start species priors. When no learned row exists, Cortext uses the
+legacy formulas directly. Once informative outcomes arrive, it seeds a
+narrow learnable band around that legacy value in an internal
+`meta_learning_coeffs` table and then updates:
+
+    success_t = 0.30 × write_accept_t
+              + 0.30 × retrieval_use_t
+              + 0.25 × (1 − u_t)
+              + 0.15 × clamp(0.5 + 0.5δ_reward_t, 0, 1)
+    direction_t = 2 × success_t − 1
+
+Only informative turns (`write_accept_t`, `retrieval_use_t`, or non-zero
+reward error) trigger updates. The learner then nudges
+`{α_F, α_S, α_T, β, a, b}` toward or away from the currently successful
+dynamic state:
+
+-   Focus observes the current `attention_width_t`
+-   Sensitivity observes the realized write-rate estimate `ρ̂_t`
+-   Stability observes the current hysteresis band
+
+This makes the meta-learning claim operational without adding any new
+public controls or changing the public API surface.
 
 # Structural Metrics and Composite Scoring
 
@@ -1623,14 +1713,24 @@ power-law forgetting curve while preserving plasticity.
     τ_list = [τ_fast, τ_med, τ_slow, τ_ultra]
 
     α_min_S = 0.05; α_span_S = 0.35
-    α_S(t) = α_min_S + S × α_span_S × u(t)
+    α_S(t) = α_min_S + SensitivityBias(S) × α_span_S × u(t)
     used_flag(m) = 1 if m was retrieved and used in current step, else 0
 
-Trace updates (for i in 1..N_traces):
+Trace updates combine exponential decay, EWMA learning, and knob-scaled
+reinforcement (for i in 1..N_traces):
 
     λ_i ← ln(2) / τ_list[i]
-    trace_i ← clamp(trace_i × exp(−λ_i × Δt) +
-                    (α_S(t) × used_flag(m)) / N_traces, 0, 1)
+    reinforcement ← clamp(S_eff × used_flag(m) +
+                           F_eff × clamp(influence_factor, 0, 1), 0, 1)
+                    × serial_position_mult
+    increment_i ← (α_S(t) × used_flag(m) + reinforcement) / N_traces
+    trace_i ← clamp(trace_i × exp(−λ_i × Δt) + increment_i, 0, 1)
+
+The reinforcement term distributes S- and F-scaled retrieval feedback
+uniformly across all active traces. This avoids front-loading
+reinforcement into the fast trace (which decays quickly) and instead
+strengthens the entire trace ensemble when a memory is retrieved and
+used.
 
 Trace coupling encourages long-lived knowledge without freezing
 plasticity:
@@ -1641,7 +1741,7 @@ plasticity:
 Combined strength uses a knob-shaped mixture that favors slow traces as
 Stability increases:
 
-    w_raw ← [0.55 − 0.20T, 0.25, 0.15 + 0.10T, 0.05 + 0.10T]
+    w_raw ← [0.40 − 0.25T, 0.25, 0.20 + 0.15T, 0.15 + 0.10T]
     w ← normalize(w_raw[1..N_traces])
     strength_t ← clamp(Σ_i w_i × trace_i, 0, 1)
 
@@ -1654,8 +1754,59 @@ Memories falling below the periphery cutoff are candidates for eviction.
 retained to stabilize summary/label retrieval and are pruned during
 explicit consolidation.
 
-    periphery_cutoff(T) = lerp(0.05, 0.25, T)
-    if m.kind == LONG_TERM AND strength_t < periphery_cutoff(T): evict(m)
+    periphery_cutoff(T) = lerp(0.03, 0.20, T)
+    fact_floor(T) = lerp(0, periphery_cutoff(T), T)
+    has_fact_support(m) = evidence_count(m, active_facts) > 0
+    storage_budget_floor = max(
+      min_db_bytes,
+      db_avail_fraction × available_disk_bytes
+    )
+
+    if m.kind == LONG_TERM
+       AND db_used_bytes ≥ storage_budget_floor
+       AND strength_t < periphery_cutoff(T)
+       AND (NOT has_fact_support(m) OR strength_t < fact_floor(T)):
+         evict(m)
+
+The fact-evidence floor protects episodic memories that serve as
+evidence for active (non-archived) structured facts. At low Stability,
+the floor is zero and fact-linked memories receive no special treatment.
+At high Stability, the floor approaches the periphery cutoff itself,
+making fact-backed evidence nearly immune to eviction. This ensures that
+the episodic substrate supporting durable semantic knowledge is not
+discarded before the knowledge itself.
+
+**Current implementation note:** the runtime now includes a storage gate
+ahead of the usual strength-based eviction test. For file-backed stores,
+eviction is skipped entirely until the on-disk database footprint
+reaches a configurable floor. The default fixed floor is `500 MB`, and
+an internal percentage-of-available-space floor can also be applied; the
+active threshold is the maximum of the two. This keeps long chat
+sessions from prematurely evicting weak but still useful traces simply
+because they have decayed below `periphery_cutoff(T)` while the database
+is still tiny. Deterministic file-backed sweeps in
+<a href="#sec-experimental" class="quarto-xref">Section 11</a> showed
+three useful regimes. Under the raw storage-growth sweep, budgets up to
+`256 MB` still behaved like ordinary decay, `500 MB` was the first
+tested budget that materially delayed eviction, and `1 GB` extended that
+delay further. Under the synthetic human-sleep clock, that translated
+into an interpretable retention boundary: `256 MB` was enough for
+infant/toddler/preschool-style frequent consolidation, but it still
+missed school-age, teen, adult, and older-adult nightly consolidation.
+`500 MB` was the first tested floor that reliably preserved labels for
+once-per-day adult-style consolidation, while `1 GB` added safety margin
+rather than a new qualitative retention regime. In-memory stores keep
+the historical behavior unless the gate is explicitly forced on for
+studies.
+
+Ablation studies in
+<a href="#sec-experimental" class="quarto-xref">Section 11</a> confirm
+that each component of this model contributes to selective eviction
+behavior. Disabling coupling or reducing to a single trace collapses the
+power-law forgetting curve into rapid indiscriminate eviction, flashbulb
+bonuses provide the expected protective effect, the fact-evidence floor
+prevents loss of active fact support, and uniform reinforcement
+distribution makes S and F visibly effective in the eviction dynamics.
 
 ## Contextual Gain and Per-Memory Stability (Definitions)
 
@@ -1686,15 +1837,22 @@ Contextual gain is only measured for used memories.
 
 ## Influence-Weighted Updates
 
-When contextual gain signals are available, influence factors modulate
-reinforcement:
+When contextual gain signals are available, influence factors enter the
+reinforcement term that is distributed uniformly across traces (see
+trace update above):
 
     influence_factor ← (used_count / max(retrieved_count, 1)) ×
                         clamp(contextual_gain(m), −1, +1)
-    boost ← clamp(S × used_flag(m) + F × influence_factor, 0, 1)
-    trace_fast ← clamp(trace_fast + 0.6 × boost, 0, 1)
-    trace_med  ← clamp(trace_med  + 0.3 × boost, 0, 1)
-    trace_slow ← clamp(trace_slow + 0.1 × boost, 0, 1)
+    reinforcement ← clamp(S_eff × used_flag(m) +
+                           F_eff × clamp(influence_factor, 0, 1), 0, 1)
+                    × serial_position_mult
+
+This replaces the earlier front-loaded boost that applied 60%/30%/10% to
+fast/med/slow traces. Ablation studies showed the front-loaded
+distribution had no measurable effect on eviction dynamics because its
+contribution was absorbed by trace clamping. Uniform distribution
+ensures all active traces receive meaningful reinforcement, improving
+long-term retention for used memories.
 
 ## Reinforcement Graph Maintenance
 
@@ -1834,7 +1992,8 @@ metadata:
     memory.signals ← [x_1, x_2, ..., x_n]  # ordered signal embeddings
     memory.context ← c_t  # temporal context state (@sec-temporal-context)
     memory.source_model ← {origin, reliability, contradiction_count, last_verified_ts}
-    memory.versions ← {evidence_packets, reconstructions}
+    memory.evidence_packets ← ordered immutable signal rows
+    memory.current_view ← latest reconstruction blob if present, else concatenated signal blobs
     memory.metadata ← {n, s_max, s_avg, drift_acc, mem_elapsed,
                        s_emotion_max, s_arousal_avg}
 
@@ -1955,6 +2114,31 @@ Additional metacognitive parameters:
     certainty_requirement = lerp(0.6, 0.9, T)
     metacognitive_sensitivity = F × (1 + 0.5 × S)
 
+Current implementation note: these metacognitive states are no longer
+diagnostic-only. The branch now maintains a persistent metacognitive
+confidence state that decays between signals:
+
+    Δt_meta = now_s − last_signal_s
+    confidence_retained = confidence_{t−1} × exp(−confidence_decay_rate × Δt_meta)
+    confidence_t = max(FOK_t, EWMA(confidence_retained, FOK_t, α_meta))
+
+where `α_meta` is a bounded function of `metacognitive_sensitivity`.
+
+That decayed confidence now affects two downstream policies:
+
+-   a detected **TOT** state still arms a **next-turn retrieval recovery
+    mode**, but the extra graph depth, candidate budget, and
+    diversification relaxation are scaled by the retained confidence
+    instead of being an all-or-nothing switch
+-   a detected **unknown** state still arms a **next-turn caution
+    mode**, and lower retained confidence makes the certainty cutoff
+    stricter before a candidate can be returned
+
+The switch duration still follows `strategy_switch_latency`, but the
+behavioral effect is now a bounded retrieval-policy change rather than a
+same-turn retry loop, and `confidence_decay_rate` is part of that
+behavior rather than a paper-only parameter.
+
 ## Memory Reconsolidation
 
 Following Nader, Schafe, and Le Doux (2000), retrieved memories enter a
@@ -1995,21 +2179,43 @@ active context:
 
 ## Constructive Recall and Controlled Distortion
 
-Memories are stored as **evidence packets** plus **reconstructions**.
-Retrieval reconstructs a plausible memory instance, tracks uncertainty,
-and preserves edit history.
+Constructive recall is now implemented as a two-layer memory view:
 
-    memory.versions.evidence_packets ← immutable observations
-    memory.versions.reconstructions ← [{embedding, content, ts, uncertainty}]
+-   **Evidence packets** remain the immutable ordered `signals` rows
+    attached to a memory.
+-   **Reconstructions** are versioned rows in `memory_reconstructions`,
+    each carrying `{embedding_id, blob_id, ts, uncertainty, trigger}`.
+
+<!-- -->
+
+    on_memory_write:
+        append(memory_reconstructions,
+               {embedding_id = e_rep,
+                blob_id = current_blob,
+                ts = now,
+                uncertainty = 0,
+                trigger = 'initial'})
 
 During retrieval:
 
-    recon ← reconstruct(evidence_packets, current_context, uncertainty)
-    append(reconstructions, recon)
+    current_embedding ← latest(reconstruction.embedding, fallback = memory.embedding)
+    score_retrieval(current_embedding, current_context)
+    recon ← bounded_blend(current_embedding, query, temporal_context)
+    append(memory_reconstructions,
+           {embedding_id = recon.embedding,
+            blob_id = current_blob,
+            ts = now,
+            uncertainty = inferred_retrieval_uncertainty,
+            trigger = 'retrieval'})
 
-Reconsolidation updates the latest reconstruction rather than
-overwriting evidence, enabling controlled distortion with an audit
-trail.
+Hydration resolves `memory.current_view` from the latest reconstruction
+blob when one exists; otherwise it falls back to the immutable evidence
+packets. Reconsolidation follows the same audit-trail rule: it appends a
+new `trigger='reconsolidation'` reconstruction instead of overwriting
+the evidence embedding stored on the base memory row. This gives the
+current branch the controlled-distortion property the earlier draft
+claimed, while preserving the original evidence vector for inspection
+and replay.
 
 ## Retrieval Competition
 
@@ -2039,6 +2245,18 @@ When predictions fail (high surprise), the system increases the refresh
 rate of pre-activation:
 
     update_rate_on_surprise = lerp(0.2, 0.02, T) × S
+
+Current implementation note: predictive pre-activation is now consumed
+directly by retrieval rather than only being written to the database.
+`pre_activation` decays every turn via `pre_activation_decay(T)` and
+contributes a bounded retrieval prior,
+
+    predictive_weight(F,T) = lerp(0.05, 0.20, FocusBias(F)) × lerp(1.0, 0.85, T)
+    predictive_bonus = predictive_weight × pre_activation
+
+which is added to the normal retrieval score. High-surprise updates
+therefore both refresh the latent predictive state and make that state
+behaviorally visible at the next retrieval.
 
 ## Serial Position Effects
 
@@ -2080,20 +2298,18 @@ memory’s peak emotional intensity:
     flashbulb_threshold = lerp(0.97, 0.65, S)
     flashbulb_threshold_eff = flashbulb_threshold × (1 − 0.5 × s_emotion_max)
                                × (1 − 0.3 × s_arousal_avg)
-    # Flashbulb event if intensity exceeds effective threshold
-    flashbulb = (m.metadata.s_emotion_max ≥ flashbulb_threshold_eff × rate_adjust)
-    # Rate stabilizer keeps flashbulb frequency in a tight band
+    # Rate stabilizer only suppresses over-frequent flashbulbs; it does not lower
+    # thresholds when the recent flashbulb rate is already below target.
     flashbulb_target = lerp(0.02, 0.06, S)
     flashbulb_rate_ewma ← EWMA(flashbulb, α = lerp(0.02, 0.12, S))
-    rate_adjust = clamp(1 + lerp(1.0, 0.6, S) × (flashbulb_rate_ewma − flashbulb_target),
-                        0.8, 1.2)
+    rate_adjust = clamp(1 + lerp(1.0, 0.6, S) × max(0, flashbulb_rate_ewma − flashbulb_target),
+                        1.0, 1.2)
     # Contextual percentile gate (embedding‑only, knob‑derived)
     emo_window = round(lerp(24, 96, S) × lerp(0.8, 1.2, T))
     percentile = lerp(0.95, 0.80, S)
     flashbulb_gain = lerp(1.0, 1.1, S)
     flashbulb_threshold_adj = max(flashbulb_threshold_eff × rate_adjust,
-                                  Pctl_{percentile}(recent_emotion_intensity, emo_window)
-                                  × rate_adjust)
+                                  Pctl_{percentile}(recent_emotion_intensity, emo_window))
     flashbulb_arousal = lerp(0.7, 0.5, S)
     flashbulb = ((s_arousal_avg ≥ flashbulb_arousal) AND
                  ((flashbulb_gain × s_emotion_max) ≥ flashbulb_threshold_adj))
@@ -2132,18 +2348,25 @@ Tagged memories receive a consolidation bonus:
 ## Procedural Memory Lane (Habit/Skill Memory)
 
 In addition to declarative memory, Cortext maintains a procedural store
-for **what action to take in a context**, learned from repeated success.
+for **which previously successful routine memory to surface in a
+context**, learned from repeated successful use.
 
     proc_key ← sparse_key(μ_acc)  # same sparsification as @sec-pattern-separation
-    Q(proc_key, action) ← habit value
+    Q(proc_key, memory_id) ← routine value
 
-Updates occur when an action leads to positive outcome signals:
+Updates occur when a retrieved memory is used successfully and
+downstream outcome signals are positive:
 
     Q ← Q + value_update_gain × δ_reward_t × (1 − Q)
 
-Procedural retrieval runs in parallel with declarative retrieval; when
-confidence is high, it can pre-emptively suggest actions while remaining
-subject to the same interrupt gate.
+Procedural retrieval runs in parallel with declarative retrieval. In the
+current implementation, high-confidence routine memories are added as
+**proactive retrieval seeds** for the current sparse context even before
+a strong semantic match would have selected them; they still pass
+through the same interrupt gate and final retrieval ranking. This is
+intentionally narrower than a free-standing action policy: the
+procedural lane surfaces likely next-step routines as memories, not
+separate action tokens.
 
 # Consolidation and Graph Integration
 
@@ -2297,14 +2520,26 @@ semantic structures, reducing drift and preserving detail.
 **Summarization + labeling engine (deep mode):** Consolidation is the
 only stage that invokes a generative model. Deep mode resolves a local
 backend internally: **gemma-3n-e2b** through `third_party/litert_lm`,
-**LFM2** through `llama.cpp` GGUFs (`LFM2-2.6B-Transcript-Q4_K_M.gguf`
-for summarization and `LFM2-1.2B-Extract-Q4_K_M.gguf` for extraction),
-or a **mixed** path that uses Gemma for summarization and LFM2 for
-extraction. Auto resolution prefers the mixed path when both assets are
-present. All other operations remain embedding-only. **There is no
-extractive fallback**: if no deep backend is available, or summarization
-fails, deep consolidation raises an error rather than silently
-degrading.
+**LFM2/LFM2.5** through `llama.cpp` GGUFs, or a **mixed** path that uses
+Gemma for summarization and a Liquid GGUF for extraction. The Liquid
+resolver now prefers `LFM2.5-350M-GGUF` for both summarization and
+extraction, defaulting to the local `Q4_K_M` checkpoint when present and
+accepting other bundled GGUF quantizations as fallbacks; if that asset
+is absent, it falls back to the older pinned
+`LFM2-2.6B-Transcript-Q4_K_M.gguf` summarizer and
+`LFM2-1.2B-Extract-Q4_K_M.gguf` extractor. Auto resolution now prefers
+the pure Liquid `LFM2.5/llama.cpp` path when those assets are present;
+the mixed path and Gemma path are fallbacks. All other operations remain
+embedding-only. **There is no extractive fallback**: if no deep backend
+is available, or summarization fails, deep consolidation raises an error
+rather than silently degrading. After the prompt-technique ablations in
+[Section 9](#sec-extractor-prompt-ablation) and [Section
+9](#sec-summarizer-prompt-ablation), the default local Liquid extraction
+prompt is now a short **few-shot durable** prompt, and the default local
+Liquid summarization prompt is now a **transcript few-shot** prompt that
+feeds the small `LFM2.5-350M` model a chat transcript instead of
+numbered excerpts. That combination keeps the local path fast while
+materially reducing schema/meta leakage and last-excerpt bias.
 
 ## Shallow Consolidation (Embedding‑Only)
 
@@ -2381,10 +2616,9 @@ cluster centroid and truncated:
     max_source_texts(F̃) = round(lerp(3, 8, F̃))
     max_text_chars(F̃)  = round(lerp(300, 900, F̃))
     max_total_chars(T)  = round(lerp(1200, 3600, T))
-    max_summary_words(T) = round(lerp(24, 96, T))
     source_texts = topk_by_cosine(cluster_texts, k=max_source_texts)
     truncate each text to max_text_chars and total to max_total_chars
-    constrain decoder to max_summary_words (streaming cancel)
+    size decoder budget from capped input length; do not hard-trim stored summary text
 
 ## Semantic Extraction
 
@@ -2403,6 +2637,34 @@ implication, contradiction). Labels are stored as surface strings (no
 type/category field) **and** persisted with their own embeddings so they
 can participate in retrieval and graph expansion.
 
+**Current implementation note:** the deployed runtime now persists
+extracted labels directly from each extraction result, deduped by
+normalized label key within the result and reused by key across the
+store. The old knob-derived repetition gate and single-label fallback
+were removed because they made durable label formation too dependent on
+exact repeated strings and caused obvious chat failures like
+identity/name loss and severe label undercounting. The online path is
+still simple: label strings are inserted as `LABEL` memories, salience
+is embedding-derived, and repeated mentions update `s_max` on the
+existing label node. In parallel, we continue to study a more semantic
+alternative through the **offline semantic label-classifier prototype**
+in `scripts/build_wordnet_label_index.py`,
+`scripts/build_name_priors.py`, `scripts/build_label_training_data.py`,
+`scripts/train_label_classifier.py`, and
+`scripts/eval_label_classifier.py`. That prototype trains two small
+models over candidate spans:
+
+-   a **span typing** head (`identity`, `person_entity`, `place`,
+    `org_project`, `topic`, `state`, `none`), and
+-   a **promotion** head (`durable`, `provisional`, `ignore`)
+
+using WordNet-derived concept priors, multilingual given-name/surname
+priors, sentence context, and optional external text embeddings. The
+current study build sources those priors from the multilingual
+`data/surnames` tables plus U.S. Census surnames. It is currently an
+offline study artifact rather than part of the deployed consolidation
+path.
+
 Label salience is derived from embeddings rather than model guesses:
 
     e_label = encode(label_text)
@@ -2416,9 +2678,70 @@ latency without changing salience computation.
 If a label already exists, its stored salience is updated with
 `s_max = max(s_max, salience(label))`.
 
-To guarantee that labeling remains informative even for small clusters,
-if the frequency filter would remove all labels for a summary, the
-highest-salience label is retained as a fallback.
+## Temporal Consolidation of Changing Facts
+
+For long-horizon personal memory support, consolidation must avoid
+flattening changing facts into one timeless summary. Living
+arrangements, caregivers, appointments, medications, projects, and
+routines can all change over time. A memory system that simply
+overwrites older facts loses exactly the temporal nuance that matters
+most in care-oriented settings.
+
+Phase 1 adds **fact assertions with temporal semantics** as a
+consolidation product alongside labels and relations:
+
+    fact_assertion_j = (
+      subject,
+      predicate,
+      object,
+      valid = [t_v_start, t_v_end),
+      tx    = [t_tx_start, t_tx_end),
+      provenance = {source_memory_ids, source_summary_ids},
+      confidence
+    )
+
+Under this model, consolidation remains **append-only** at the fact
+layer. New evidence does not erase prior assertions. Instead:
+
+1.  A new assertion is inserted with its own valid and transaction
+    interval.
+2.  If it conflicts with an earlier open-ended assertion on the same
+    subject/predicate, the earlier assertion can be closed or
+    superseded.
+3.  Both the earlier and later assertions remain queryable through their
+    intervals and provenance.
+
+This yields a cleaner separation between:
+
+-   what was true in the world at a given time,
+-   when Cortext learned that truth,
+-   and when Cortext later revised its belief.
+
+For example, “caregiver = Sarah” may be valid through March, while
+“caregiver = Emily” becomes valid in April but is only learned in May.
+Bitemporal consolidation preserves both the world timeline and the
+system-learning timeline, preventing late-arriving information from
+rewriting the past.
+
+This temporal structure is especially important for dementia-support
+scenarios. Gentle reminders should be able to express not only the
+current state (“Emily is your caregiver now”) but also historical
+context (“Sarah used to visit on Tuesdays”) and uncertainty about when a
+change was learned (“as of the latest update”). In practice, this means
+summarization should verbalize temporal transitions rather than compress
+them away. Retrieval-time use of these facts is a later phase; the
+current phase is about preserving the right temporal ground truth and
+provenance.
+
+The next core requirement is lifecycle maintenance. Facts should remain
+more durable than raw episodes, but they should not become an unbounded
+append-only residue. The current implementation therefore treats
+repeated confirmations as support updates rather than new open
+assertions, tracks contradiction pressure and source diversity, decays
+unsupported facts toward `weak` or `archived`, and only physically
+deletes low-severity archived facts after an additional retention gate.
+High-severity historical facts remain archived rather than deleted so
+temporal reconstruction is preserved.
 
 ## Knowledge Graph Construction
 
@@ -2801,16 +3124,59 @@ thought transitions.
 We present preliminary experimental results collected from live chat
 sessions to validate the adaptive mechanisms.
 
-All runs reported here are generated with the
-`examples/topical_chat_analysis` pipeline using ImageBind embeddings. At
-the time of these reported experiments, deep consolidation
+This section mixes two experiment families:
+
+-   **deterministic core benchmarks** in `examples/benchmark`, which are
+    now reported from real `EmbeddingGemma/llama.cpp` reruns where
+    noted; and
+-   **topical-chat / corpus harness runs** in
+    `examples/topical_chat_analysis`, where older historical logs used
+    the then-active semantic encoder path and newer reruns explicitly
+    record the resolved backend in `run.log`.
+
+Going forward, rebuilt corpus ablations are being normalized onto a
+study-only dataset stack that does **not** change the Cortext runtime
+API or production config surface. The prep and scorer scripts live under
+`scripts/` and keep the existing JSONL conversation contract unchanged:
+
+-   `scripts/prepare_msc.py` for multi-session continuity and
+    consolidation studies
+-   `scripts/prepare_taskmaster.py` for procedural and sequential
+    studies
+-   `scripts/prepare_longmemeval.py` plus `scripts/score_longmemeval.py`
+    for held-out long-memory QA
+-   `scripts/generate_mechanism_eval_pack.py` plus
+    `scripts/score_mechanism_eval.py` for contradiction-heavy synthetic
+    mechanism probes
+
+Wrapper scripts (`scripts/run_msc_study.sh`,
+`scripts/run_taskmaster_study.sh`, `scripts/run_longmemeval_study.sh`,
+and `scripts/run_mechanism_eval.sh`) call the existing harness with
+explicit turn limits and existing experiment-only toggles. They do not
+introduce new public runtime flags; their purpose is to keep future
+rebuilt ablations reproducible and clearly separated from the historical
+TopicalChat-era tables below.
+
+For the topical-chat family, treat any subsection explicitly labeled
+with an **Apr 4, 2026** EmbeddingGemma rerun note as the current source
+of record. Unlabeled corpus tables remain historical results from
+earlier encoder configurations.
+
+An additional **Apr 4, 2026 EmbeddingGemma + default LFM2.5 addendum**
+later in this section reports completed quick reruns on the rebuilt
+branch where embeddings resolve to `EmbeddingGemma/llama.cpp` and auto
+deep-backend selection now prefers `LFM2.5/llama.cpp`. Those addendum
+tables are the current short-horizon reference points for the rebuilt
+default stack.
+
+At the time of the historical topical-chat runs, deep consolidation
 summarization/labeling used the Gemma LiteRT path (`gemma-3n-e2b` via
 `third_party/litert_lm`). The current implementation also supports an
 LFM2 `llama.cpp` path for deep consolidation. Evaluation logs include
-lexical overlap (token Jaccard) and **semantic overlap** (ImageBind
-cosine) for retrieval and interrupt quality. A multi-participant harness
-(`scripts/run_memory_harness.py`) interleaves conversations to stress
-long-horizon recall under shared-memory load.
+lexical overlap (token Jaccard) and **semantic overlap** (cosine under
+the active text encoder backend) for retrieval and interrupt quality. A
+multi-participant harness (`scripts/run_memory_harness.py`) interleaves
+conversations to stress long-horizon recall under shared-memory load.
 
 For reproducibility, the analysis runner supports **deterministic
 synthetic timing** (`--deterministic`, `--seed`), which removes
@@ -2822,7 +3188,7 @@ To quantify consolidation utility, we also track:
 
 -   **retrieval_summary_hit_rate:** share of retrieval turns containing
     consolidated summaries (ASSOCIATION nodes).
--   **summary_hit_overlap_mean:** semantic overlap (ImageBind cosine) of
+-   **summary_hit_overlap_mean:** semantic overlap (backend cosine) of
     the best summary hit on those turns.
 -   **retrieval_summary_only_turn_rate:** share of retrieval turns where
     summaries are the only retrieved candidates.
@@ -2841,6 +3207,1500 @@ applied to best semantic overlap:
     composite)
 -   **retrieval_emotion_bonus_mean:** mean emotion bonus applied during
     retrieval ranking
+
+## Bitemporal Fact Evaluation
+
+The current branch now evaluates the bitemporal fact layer
+**core-first**. The source of record is the deterministic fact-store and
+retrieval harnesses that measure whether Cortext preserves temporal
+truth, temporal belief, support quality, and bounded retention under
+delayed, conflicting, noisy, and repeated evidence traces. The chat
+example is not treated as a separate fact-grounding surface; correctness
+is established in the core before any downstream presentation layer is
+considered.
+
+The important distinction is that these are **assistive retrieval and
+recall metrics**, not merely database-correctness checks. The goal is to
+measure whether temporal fact modeling helps Cortext surface the right
+current information, preserve older truths for reminiscence, and avoid
+stale-fact intrusions when the user implicitly means “now.”
+
+The relevant metrics are:
+
+-   **current fact accuracy:** whether current-oriented retrieval
+    surfaces the correct present-world fact
+-   **historical fact accuracy:** whether `valid_at(t)` recovers what
+    was true at world time `t` in internal deterministic evaluation
+-   **belief-at-time accuracy:** whether `known_at(t)` reconstructs what
+    Cortext would have believed at system time `t` in internal
+    deterministic evaluation
+-   **stale fact intrusion rate:** how often superseded facts appear
+    first on present-oriented tasks
+-   **retrieval precision/recall under temporal change:** whether
+    fact-aware retrieval improves the supporting evidence surfaced
+    around changing routines, caregivers, locations, and schedules
+-   **routine continuity rate:** whether stable routine context remains
+    available as background support when `Stability` is high
+-   **provenance-grounded retrieval rate:** whether the top retrieved
+    evidence remains directly linked to the matched fact rather than an
+    unlinked semantic guess
+
+These metrics should be reported with **severity weighting** rather than
+uniform averaging. Mistakes about medication, caregiver, location,
+schedule, and safety matter more than mistakes about preferences or
+incidental details. Longitudinal reporting should also include stability
+measures such as fact flip rate, stale resurfacing rate, and
+time-to-correct after delayed evidence.
+
+The recommended evaluation scenarios are controlled temporal-change
+tasks: caregiver transitions, same-day schedule changes, location
+changes, repeated routines with one-off exceptions, and old-home versus
+current-home questions. Internal evaluation should still support three
+query families: present-oriented (`current`), historical
+(`valid_at(t)`), and historical-belief (`known_at(t)`). The primary
+validation path is therefore the deterministic core harnesses rather
+than prompt formatting or live-LLM output.
+
+The companion retrieval benchmark remained green on the same branch:
+
+-   benchmark: `examples/benchmark/cortext_bitemporal_retrieval_bench`
+-   scenarios: current caregiver, `valid_at` location, `known_at`
+    delayed move, provenance-linked schedule
+-   result: **4 / 4 passed** (`accuracy = 1.0`)
+
+**Deterministic phase-6 core robustness gates (Apr 1, 2026):**
+
+-   benchmark: `examples/benchmark/cortext_bitemporal_robustness_bench`
+-   scenario families: delayed evidence, conflicting low-confidence
+    noise, delayed-plus-conflicting correction, repeated legitimate
+    changes, repeated routine confirmations, routine exception and
+    return
+-   reported gates: weighted current accuracy, weighted historical
+    accuracy, weighted belief-at-time accuracy, stale-fact intrusion
+    rate, erroneous supersession count, unexpected flip count,
+    time-to-correct, retrieval latency overhead
+-   result: **6 / 6 passed**
+-   aggregate: `weighted_current_accuracy = 1.0`,
+    `weighted_historical_accuracy = 1.0`,
+    `weighted_belief_accuracy = 1.0`,
+    `weighted_stale_intrusion_rate = 0.0`,
+    `erroneous_supersession_count = 0`, `unexpected_flip_count = 0`,
+    `mean_time_to_correct_updates = 0.0`, `mean_retrieval_ms = 0.995`
+
+These gates are intentionally core-only. They validate fact ingestion,
+supersession policy, temporal querying, and fact-aware retrieval
+directly, without depending on live chat prompting. This is the point at
+which the branch can reasonably claim that current, historical, and
+belief-at-time fact handling are stable enough for later ablation and
+chat-facing integration work.
+
+**Deterministic phase-8 expanded core ablation matrix (Apr 1, 2026):**
+
+-   benchmark: `examples/benchmark/cortext_bitemporal_ablation_bench`
+-   scenario families: caregiver transition, delayed location knowledge,
+    conflicting caregiver noise, provenance-linked schedule retrieval,
+    repeated legitimate location changes, routine exception, old-home vs
+    current-home, updated preference, medication change, and a weak
+    today-vs-usual schedule change
+-   ablations: fact layer off, current-only collapse, explicit `current`
+    / `valid_at` / `known_at` reporting, fact boost off/weak/strong,
+    stale penalty off/moderate/strong, provenance any-fact-match,
+    routine-biased vs recency-biased presets, and a full `3 x 3 x 3`
+    F/S/T sweep on a representative subset
+-   default result: **10 / 10 passed**, with
+    `query_mode_current_accuracy = 1.0`,
+    `query_mode_valid_at_accuracy = 1.0`,
+    `query_mode_known_at_accuracy = 1.0`,
+    `weighted_current_accuracy = 1.0`,
+    `weighted_historical_accuracy = 1.0`,
+    `weighted_belief_accuracy = 1.0`,
+    `current_vs_usual_clarification_rate = 1.0`,
+    `erroneous_supersession_count = 0`, and `unexpected_flip_count = 0`
+-   key deltas:
+    -   fact layer off dropped weighted current accuracy to **0.323**
+        and raised weighted stale intrusion to **0.548**
+    -   current-only collapse dropped weighted historical accuracy to
+        **0.0** and weighted belief-at-time accuracy to **0.318**
+    -   provenance relaxation (`any_fact_match`) raised unsupported top
+        hits from **0.065** to **0.161**
+    -   stale penalty off raised weighted stale intrusion from **0.065**
+        to **0.161**
+    -   strong fact boost outperformed boost-off on weighted current
+        accuracy (`1.0` vs `0.710`)
+    -   the routine-vs-recency probe separated as intended:
+        routine-biased scoring preferred the stable routine, while
+        recency-biased scoring and retrieval flipped to the current
+        exception (`top_memory 100 -> 101`)
+
+These expanded ablations matter because they move the claim from “the
+default core works” to “the default core remains best under a broader
+causal matrix.” The branch can now point to a deterministic core result:
+bitemporal history is required for historical and belief-at-time
+behavior, direct provenance links matter for support quality, stale
+penalties materially reduce present-oriented intrusion, and the
+routine-versus-recency tradeoff is now exposed explicitly in the scoring
+path rather than left implicit in chat behavior.
+
+**EmbeddingGemma rerun audit (Apr 4, 2026):**
+
+-   log:
+    `logs/embeddinggemma_ablations_20260404_015235/bitemporal_ablation.log`
+-   encoder: `EmbeddingGemma/llama.cpp` via
+    `models/llama_cpp/embeddinggemma-300M-Q8_0.gguf`
+-   default result still passed **10 / 10** scenarios with
+    `query_mode_current_accuracy = 1.0`,
+    `query_mode_valid_at_accuracy = 1.0`,
+    `query_mode_known_at_accuracy = 1.0`, and
+    `unexpected_flip_count = 0`
+-   however, several ablation-separation checks that were previously
+    reported as causal deltas collapsed to **0** under real embeddings:
+    provenance relaxation no longer raises unsupported top hits,
+    stale-off vs stale-strong no longer separates stale intrusions, and
+    the routine-vs-recency retrieval probe no longer flips top memory
+    even though the score-gap signs still separate. Treat the older
+    synthetic-encoder delta claims as superseded until those scenarios
+    are retuned against the real encoder path.
+
+**Deterministic phase-9 fact lifecycle gates (Apr 1, 2026):**
+
+-   benchmark: `examples/benchmark/cortext_bitemporal_lifecycle_bench`
+-   scenario families: support decay, archive-vs-delete,
+    repeated-confirmation compression, evidence-loss resilience,
+    severity-aware retention
+-   default policy: archive-first; unsupported low-severity facts can be
+    deleted after archival, while high-severity historical facts are
+    retained
+-   result: **5 / 5 passed** (`accuracy = 1.0`)
+
+Phase 9 closes the remaining gap between the bitemporal fact layer and
+the rest of Cortext’s self-maintaining memory system. Facts are still
+more durable than individual episodic traces, but they no longer behave
+as an unbounded append-only log. Repeated confirmations are compressed
+into support statistics, unsupported facts decay to `weak` or
+`archived`, and only low-severity archived facts are physically deleted
+by default. The corresponding negative controls show why the default
+matters: turning off support decay preserves stale low-value facts too
+aggressively, disabling deletion prevents storage from shrinking,
+disabling compression inflates support from repeated confirmations, and
+disabling high-severity historical preservation breaks historical
+recovery after evidence loss.
+
+**Deterministic eviction ablation gates (Apr 3, 2026):**
+
+-   benchmark: `examples/benchmark/cortext_eviction_ablation_bench`
+-   scenario families: pure decay, selective reinforcement, flashbulb
+    protection, recovery from near-eviction, long-horizon simulation (7
+    days), fact-linked eviction, strength distribution, crowding
+    pressure
+-   ablations: trace count (1/2/3/4), coupling off/strong, reinforcement
+    off/weak/strong, periphery cutoff low/high, half-life short/long,
+    flashbulb off, equal weights, fact-evidence floor off, and a full
+    `3 × 3 × 3` F/S/T sweep on a representative subset
+-   default result (F=S=T=0.5): `mean_eviction_step = 220`,
+    `selectivity_ratio = 100.0`, `flashbulb_advantage = 1.0`,
+    `recovery_success_rate = 1.0`, `steady_state_count = 35`,
+    `eviction_rate_per_hour = 0.79`, `fact_linked_eviction_rate = 0.0`
+-   key deltas:
+    -   single-trace collapsed mean eviction step from **220** to **12**
+        (18× faster eviction, no power-law tail)
+    -   coupling-off reduced mean eviction step from **220** to **27**
+        and destroyed selectivity (used memories evicted alongside
+        unused)
+    -   four-trace extended mean eviction step to **500** with zero
+        eviction over 500 simulated minutes
+    -   half-life short (60 s) caused immediate eviction at step 1;
+        half-life long (7200 s) prevented any eviction over the full run
+    -   cutoff-high (0.20) reduced mean eviction step to **158**;
+        cutoff-low (0.03) extended it to **368** with full recovery
+        support
+    -   flashbulb-off removed the survival advantage for emotionally
+        marked memories (advantage dropped from **1.0** to **0.0**)
+    -   equal weights produced mean eviction step **217**, close to
+        default (**220**), confirming the retuned weight range now
+        provides appropriate T-dependent balance
+    -   fact-evidence floor off raised `fact_linked_eviction_rate` from
+        **0.0** to **1.0** — without the floor, all fact-supporting
+        episodic memories are evicted; with it, fact-linked memories
+        survive as long as the supporting fact remains active
+    -   F/S/T sweep: T dominates eviction dynamics — low T (0.2) causes
+        eviction within 7–30 steps while high T (0.9) prevents eviction
+        entirely; S and F have secondary effects through reinforcement
+        scaling
+
+**EmbeddingGemma rerun status (Apr 4, 2026):**
+
+-   log:
+    `logs/embeddinggemma_ablations_20260404_014916/eviction_ablation.log`
+-   encoder: `EmbeddingGemma/llama.cpp` via
+    `models/llama_cpp/embeddinggemma-300M-Q8_0.gguf`
+-   status at write time: rerun started and confirmed to be on the real
+    encoder path, but the full long-horizon matrix was still executing
+    when this note was written because the benchmark spends most of its
+    time in the seven-day decay / crowding loops rather than in
+    embedding generation.
+
+Three ablation-driven improvements were applied based on the initial
+gate results:
+
+1.  **Fact-evidence floor**
+    (`fact_floor(T) = lerp(0, periphery_cutoff(T), T)`): Memories linked
+    to active facts via `fact_evidence` are protected from eviction when
+    their strength remains above the T-scaled floor. This closes the
+    episodic-evidence gap where the eviction system would discard
+    memories that serve as provenance for active structured facts. The
+    `fact_floor_off` negative control confirms the protection is
+    necessary: without it, fact-supporting evidence is evicted
+    identically to unlinked noise.
+
+2.  **Uniform reinforcement distribution**: The original front-loaded
+    boost (60%/30%/10% to fast/med/slow traces) was replaced with
+    uniform per-trace injection (`reinforcement / N_traces`). The
+    original boost had no measurable effect on eviction dynamics because
+    its contribution was absorbed by trace clamping at 1.0. Uniform
+    distribution ensures all active traces receive meaningful S- and
+    F-scaled reinforcement, improving long-term retention for used
+    memories.
+
+3.  **Widened T weight range** (`w_fast: 0.40−0.25T` replacing
+    `0.55−0.20T`): The original weights gave the fast trace 50% of
+    normalized weight at T=0.5, meaning half the strength score came
+    from a trace that decays in minutes. The retuned range shifts from
+    episodic-dominant (fast=40% at T=0) to semantic-dominant (fast=15%
+    at T=1) with a balanced midpoint. Mean eviction step increased from
+    172 to 220 at T=0.5.
+
+**Deterministic memory system integration ablation gates (Apr 4,
+2026):**
+
+-   benchmark: `examples/benchmark/cortext_memory_system_ablation_bench`
+-   studies: consolidation-eviction race, end-to-end fact emergence,
+    memory-fact co-decay, retrieval-reinforcement feedback,
+    cross-consolidation fact inheritance
+-   result: **5 / 5 passed**
+-   key findings:
+    -   **Consolidation-eviction race**: Early consolidation (step 50)
+        successfully extracts facts from all 30 candidate memories. Late
+        consolidation (step 250) finds zero candidates — all evidence
+        has already been evicted. This confirms that consolidation
+        timing must outpace the decay cycle or facts will never emerge
+        from episodic evidence.
+    -   **End-to-end fact emergence**: The full pipeline (consolidation
+        → clustering → extraction) produced **3 facts** across **3
+        distinct predicates** (caregiver, location, medication) from **4
+        clusters** of 20 seeded memories. Disabling extraction yielded 0
+        facts with 4 summaries; disabling consolidation yielded 0 of
+        both. Each layer is strictly necessary.
+    -   **Memory-fact co-decay**: With the fact floor active,
+        fact-linked memories survive at **100%** while unlinked controls
+        evict to **0%** after 250 decay steps. Archiving the linked fact
+        drops the floor: the memory then evicts in the next phase
+        (**0%** survival). Without the floor, fact-linked and unlinked
+        memories evict identically. This confirms the co-decay coupling:
+        fact lifecycle governs evidence retention.
+    -   **Retrieval-reinforcement feedback**: With fact boost,
+        fact-linked memories accumulate a strength gap of **+0.30** over
+        unlinked memories and dominate the top-5 retrieval positions
+        (**100%**). Disabling the fact layer **reverses** the gap to
+        **−0.30** (unlinked now dominate). This confirms the feedback
+        loop is controlled by the fact layer, not runaway — toggling the
+        fact layer flips the outcome completely.
+    -   **Cross-consolidation fact inheritance**: Re-extracting the same
+        fact (alice/caregiver/emily) from a new summary correctly merges
+        into the existing fact with `confirmation_count` incrementing
+        from 1 to **2** and zero duplicate facts. Extracting a
+        conflicting fact (emily vs sarah) correctly supersedes the prior
+        assertion. The fact deduplication and supersession logic handles
+        re-consolidation without evidence inflation.
+
+**EmbeddingGemma rerun audit (Apr 4, 2026):**
+
+-   log:
+    `logs/embeddinggemma_ablations_20260404_015134/memory_system_ablation.log`
+-   encoder: `EmbeddingGemma/llama.cpp` via
+    `models/llama_cpp/embeddinggemma-300M-Q8_0.gguf`
+-   result: **5 / 5 passed**
+-   the retrieval-reinforcement study still separates cleanly under the
+    real encoder path: `strength_gap = +0.2996` with facts enabled and
+    `strength_gap = -0.2996` with the fact layer disabled, with top-5
+    fact fraction flipping from **1.0** to **0.0**.
+
+## Exhaustive Operation-Family Ablation Matrix (Apr 4, 2026)
+
+To answer the stricter removal question, we added a separate
+**operation-family matrix** in `docs/operation-matrix.md` and ran its
+full power set rather than pretending the atomic metric-site power set
+was tractable. The matrix defines **12 independently removable non-fact
+families**:
+
+-   source confidence
+-   predictive retrieval
+-   constructive recall
+-   procedural memory
+-   metacognitive control
+-   affect interrupt
+-   affect retrieval
+-   flashbulb consolidation
+-   neuromodulation
+-   meta-learning
+-   reinforcement edges
+-   sequential edges
+
+This yields an exhaustive deterministic sweep of **`2^12 = 4096`
+combinations**. The benchmark is
+`examples/benchmark/cortext_full_operation_ablation_bench`, and the
+recorded run is:
+
+-   log:
+    `logs/full_operation_ablation_20260404/full_operation_ablation.log`
+
+The result is useful because it is not purely “everything on wins.” The
+full mask and the best mask tie at **10.0 / 12.0**, and the smallest
+best mask has **11** families enabled:
+
+-   minimal best mask disabled only: `affect_interrupt`
+-   therefore, on this deterministic claim-audit suite,
+    **`affect_interrupt` is the first deterministic pruning candidate**
+
+The marginal table from the exhaustive sweep was:
+
+<table style="width:100%;">
+<colgroup>
+<col style="width: 16%" />
+<col style="width: 22%" />
+<col style="width: 22%" />
+<col style="width: 22%" />
+<col style="width: 16%" />
+</colgroup>
+<thead>
+<tr>
+<th>family</th>
+<th style="text-align: right;">mean marginal contribution</th>
+<th style="text-align: right;">max score without family</th>
+<th style="text-align: right;">essential for best score</th>
+<th>verdict</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>source_confidence</code></td>
+<td style="text-align: right;">0.1667</td>
+<td style="text-align: right;">9.6667</td>
+<td style="text-align: right;">1</td>
+<td>narrow but required</td>
+</tr>
+<tr>
+<td><code>predictive_retrieval</code></td>
+<td style="text-align: right;">1.0000</td>
+<td style="text-align: right;">9.0000</td>
+<td style="text-align: right;">1</td>
+<td>core</td>
+</tr>
+<tr>
+<td><code>constructive_recall</code></td>
+<td style="text-align: right;">1.0000</td>
+<td style="text-align: right;">9.0000</td>
+<td style="text-align: right;">1</td>
+<td>core</td>
+</tr>
+<tr>
+<td><code>procedural_memory</code></td>
+<td style="text-align: right;">1.0000</td>
+<td style="text-align: right;">9.0000</td>
+<td style="text-align: right;">1</td>
+<td>core</td>
+</tr>
+<tr>
+<td><code>metacognitive_control</code></td>
+<td style="text-align: right;">0.5000</td>
+<td style="text-align: right;">9.3333</td>
+<td style="text-align: right;">1</td>
+<td>narrow but required</td>
+</tr>
+<tr>
+<td><code>affect_interrupt</code></td>
+<td style="text-align: right;">0.0000</td>
+<td style="text-align: right;">10.0000</td>
+<td style="text-align: right;">0</td>
+<td>cut candidate</td>
+</tr>
+<tr>
+<td><code>affect_retrieval</code></td>
+<td style="text-align: right;">1.0000</td>
+<td style="text-align: right;">9.0000</td>
+<td style="text-align: right;">1</td>
+<td>core</td>
+</tr>
+<tr>
+<td><code>flashbulb_consolidation</code></td>
+<td style="text-align: right;">1.0000</td>
+<td style="text-align: right;">9.0000</td>
+<td style="text-align: right;">1</td>
+<td>core</td>
+</tr>
+<tr>
+<td><code>neuromodulation</code></td>
+<td style="text-align: right;">1.0000</td>
+<td style="text-align: right;">9.0000</td>
+<td style="text-align: right;">1</td>
+<td>core</td>
+</tr>
+<tr>
+<td><code>meta_learning</code></td>
+<td style="text-align: right;">1.0000</td>
+<td style="text-align: right;">9.0000</td>
+<td style="text-align: right;">1</td>
+<td>core</td>
+</tr>
+<tr>
+<td><code>reinforcement_edges</code></td>
+<td style="text-align: right;">1.0000</td>
+<td style="text-align: right;">9.0000</td>
+<td style="text-align: right;">1</td>
+<td>core</td>
+</tr>
+<tr>
+<td><code>sequential_edges</code></td>
+<td style="text-align: right;">1.0000</td>
+<td style="text-align: right;">9.0000</td>
+<td style="text-align: right;">1</td>
+<td>core</td>
+</tr>
+</tbody>
+</table>
+
+Two points matter.
+
+First, the system no longer looks like arbitrary gears bolted together.
+In this deterministic removal sweep, **11 of the 12 families were
+necessary to preserve the best suite score**. Predictive retrieval,
+constructive recall, procedural memory, affect retrieval, flashbulb
+consolidation, neuromodulation, meta-learning, reinforcement edges, and
+sequential edges all behaved like hard dependencies for at least one
+claimed behavior in the suite.
+
+Second, the sweep also found a real deterministic reduction candidate.
+`affect_interrupt` was the **only** family with
+`max_score_without_family == full_mask_score`. That does **not** prove
+it never matters in live chat; the live-model confirmation pass later in
+this section shows that the interrupt-only affect path still improves
+recall on the rebuilt stack. So the correct interpretation is narrower:
+on the current deterministic claim-audit suite, `affect_interrupt` is
+removable without losing the best suite score, but it is **not** yet a
+safe global deletion candidate.
+
+The two narrow families were `source_confidence` and
+`metacognitive_control`. `source_confidence` is the interesting case:
+its standalone full-mask component stayed weak in this suite, but its
+marginal contribution remained positive because it helps the
+**metacognitive caution** pathway avoid weak unsupported returns. In
+other words, it is currently an interaction-dependent mechanism rather
+than a broad direct win.
+
+### Boundary + Fact Extension Matrix (Apr 4, 2026)
+
+The 4096-combination family sweep above intentionally excluded the
+previously separate **boundary** and **bitemporal fact** subfamilies. We
+therefore ran a second deterministic extension sweep over:
+
+-   `boundary_surprisal`
+-   `boundary_natural`
+-   `fact_layer`
+-   `fact_history`
+-   `fact_stale_penalty`
+-   `fact_provenance`
+
+Extension matrix definition: `docs/operation-matrix.md`  
+Extension log:
+`logs/boundary_fact_extension_ablation_20260404/boundary_fact_extension_ablation.log`
+
+This second sweep covers the full `2^6 = 64` power set for those omitted
+families.
+
+<table>
+<thead>
+<tr>
+<th>family</th>
+<th style="text-align: right;">mean marginal</th>
+<th style="text-align: right;">max score without</th>
+<th style="text-align: right;">essential for best</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>boundary_surprisal</code></td>
+<td style="text-align: right;">0.000000</td>
+<td style="text-align: right;">6.000000</td>
+<td style="text-align: right;">0</td>
+</tr>
+<tr>
+<td><code>boundary_natural</code></td>
+<td style="text-align: right;">2.000000</td>
+<td style="text-align: right;">4.000000</td>
+<td style="text-align: right;">1</td>
+</tr>
+<tr>
+<td><code>fact_layer</code></td>
+<td style="text-align: right;">1.000000</td>
+<td style="text-align: right;">5.000000</td>
+<td style="text-align: right;">1</td>
+</tr>
+<tr>
+<td><code>fact_history</code></td>
+<td style="text-align: right;">1.000000</td>
+<td style="text-align: right;">5.000000</td>
+<td style="text-align: right;">1</td>
+</tr>
+<tr>
+<td><code>fact_stale_penalty</code></td>
+<td style="text-align: right;">1.000000</td>
+<td style="text-align: right;">5.000000</td>
+<td style="text-align: right;">1</td>
+</tr>
+<tr>
+<td><code>fact_provenance</code></td>
+<td style="text-align: right;">1.000000</td>
+<td style="text-align: right;">5.000000</td>
+<td style="text-align: right;">1</td>
+</tr>
+</tbody>
+</table>
+
+Best masks:
+
+<table>
+<colgroup>
+<col style="width: 17%" />
+<col style="width: 23%" />
+<col style="width: 23%" />
+<col style="width: 17%" />
+<col style="width: 17%" />
+</colgroup>
+<thead>
+<tr>
+<th>rank</th>
+<th style="text-align: right;">score</th>
+<th style="text-align: right;">bits_on</th>
+<th>enabled</th>
+<th>disabled</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td style="text-align: right;">6.000000</td>
+<td style="text-align: right;">5</td>
+<td><code>boundary_natural,fact_layer,fact_history,fact_stale_penalty,fact_provenance</code></td>
+<td><code>boundary_surprisal</code></td>
+</tr>
+<tr>
+<td>2</td>
+<td style="text-align: right;">6.000000</td>
+<td style="text-align: right;">6</td>
+<td><code>boundary_surprisal,boundary_natural,fact_layer,fact_history,fact_stale_penalty,fact_provenance</code></td>
+<td><code>none</code></td>
+</tr>
+</tbody>
+</table>
+
+**Observations:** The extension sweep says the **fact layer is not
+decorative**. Direct fact lifting, historical retrieval, stale-fact
+suppression, and strict provenance all remain load-bearing in this
+deterministic extension suite; disabling any one of those four lowers
+the best achievable score from **6/6** to **5/6**. `boundary_natural` is
+also clearly required, dropping the best score to **4/6** when removed.
+
+`boundary_surprisal` is the only removable family inside this narrow
+extension suite. That should not be over-read as a global deletion
+verdict. The longer-horizon EmbeddingGemma boundary rerun reported later
+in this section still shows a material `no_surprisal` change in
+boundary-hit share, so the conservative reading is that surprisal is
+redundant in this micro-suite but still active on naturalistic boundary
+workloads.
+
+### Live-Model Confirmation of Cut Candidates (Apr 4, 2026)
+
+The deterministic family sweeps above identify **candidate** reductions,
+not safe deletions. We therefore ran a compact live-model confirmation
+pass on the rebuilt `EmbeddingGemma/llama.cpp` + default
+`LFM2.5/llama.cpp` stack before treating any family as removable.
+
+Runs:
+
+-   TopicalChat interrupt-only affect:
+    `logs/live_cut_confirmation_20260404/topical_affect_interrupt`
+-   TopicalChat affect off:
+    `logs/live_cut_confirmation_20260404/topical_affect_off`
+-   EmpatheticDialogues interrupt-only affect:
+    `logs/live_cut_confirmation_20260404/empathetic_affect_interrupt`
+-   EmpatheticDialogues affect off:
+    `logs/live_cut_confirmation_20260404/empathetic_affect_off`
+-   TopicalChat boundary default:
+    `logs/live_cut_confirmation_20260404/topical_boundary_default`
+-   TopicalChat boundary no-surprisal:
+    `logs/live_cut_confirmation_20260404/topical_boundary_no_surprisal`
+
+**Affect interrupt confirmation**
+
+<table>
+<colgroup>
+<col style="width: 8%" />
+<col style="width: 8%" />
+<col style="width: 11%" />
+<col style="width: 11%" />
+<col style="width: 11%" />
+<col style="width: 11%" />
+<col style="width: 11%" />
+<col style="width: 11%" />
+<col style="width: 11%" />
+</colgroup>
+<thead>
+<tr>
+<th>dataset</th>
+<th>mode</th>
+<th style="text-align: right;">interrupt_turn_rate</th>
+<th style="text-align: right;">precision</th>
+<th style="text-align: right;">recall</th>
+<th style="text-align: right;">fn_rate</th>
+<th style="text-align: right;">retrieval_thresh_mean</th>
+<th style="text-align: right;">boundary_mult_eff_mean</th>
+<th style="text-align: right;">interrupt_semantic_overlap_mean</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>TopicalChat 120 turns</td>
+<td><code>interrupt</code></td>
+<td style="text-align: right;">0.1583</td>
+<td style="text-align: right;">1.000</td>
+<td style="text-align: right;">0.950</td>
+<td style="text-align: right;">0.050</td>
+<td style="text-align: right;">0.23397</td>
+<td style="text-align: right;">1.48048</td>
+<td style="text-align: right;">0.79170</td>
+</tr>
+<tr>
+<td>TopicalChat 120 turns</td>
+<td><code>off</code></td>
+<td style="text-align: right;">0.1417</td>
+<td style="text-align: right;">1.000</td>
+<td style="text-align: right;">0.850</td>
+<td style="text-align: right;">0.150</td>
+<td style="text-align: right;">0.23990</td>
+<td style="text-align: right;">1.51800</td>
+<td style="text-align: right;">0.78417</td>
+</tr>
+<tr>
+<td>EmpatheticDialogues 360 turns</td>
+<td><code>interrupt</code></td>
+<td style="text-align: right;">0.1471</td>
+<td style="text-align: right;">1.000</td>
+<td style="text-align: right;">1.000</td>
+<td style="text-align: right;">0.000</td>
+<td style="text-align: right;">0.23514</td>
+<td style="text-align: right;">1.48785</td>
+<td style="text-align: right;">0.82955</td>
+</tr>
+<tr>
+<td>EmpatheticDialogues 360 turns</td>
+<td><code>off</code></td>
+<td style="text-align: right;">0.1471</td>
+<td style="text-align: right;">1.000</td>
+<td style="text-align: right;">1.000</td>
+<td style="text-align: right;">0.000</td>
+<td style="text-align: right;">0.23990</td>
+<td style="text-align: right;">1.51800</td>
+<td style="text-align: right;">0.82490</td>
+</tr>
+</tbody>
+</table>
+
+**Observations:** `affect_interrupt` is **not** safe to remove. On
+TopicalChat it raises interrupt recall by **10 points** (`0.85` →
+`0.95`) while leaving precision unchanged, and it does so exactly
+through the intended gate-relax path: the effective retrieval threshold
+and boundary multiplier both fall. On EmpatheticDialogues the decision
+surface is already saturated, but the same threshold relaxation remains
+visible and semantic overlap is slightly higher with interrupt-only
+affect enabled. The deterministic sweep was therefore correctly
+identifying a **micro-suite pruning candidate**, not a live-stack
+deletion candidate.
+
+**Boundary surprisal confirmation**
+
+For the boundary candidate we used the same proxy as the main boundary
+study in this paper: the share of stored memories with
+`boundary_score >= 0.5`, measured directly from each run DB.
+
+<table>
+<colgroup>
+<col style="width: 11%" />
+<col style="width: 14%" />
+<col style="width: 14%" />
+<col style="width: 14%" />
+<col style="width: 14%" />
+<col style="width: 14%" />
+<col style="width: 14%" />
+</colgroup>
+<thead>
+<tr>
+<th>condition</th>
+<th style="text-align: right;">memories</th>
+<th style="text-align: right;">boundary_hits (score &gt;= 0.5)</th>
+<th style="text-align: right;">rate</th>
+<th style="text-align: right;">boundary_score_mean</th>
+<th style="text-align: right;">interrupt_turn_rate</th>
+<th style="text-align: right;">interrupt_recall</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>default</td>
+<td style="text-align: right;">32</td>
+<td style="text-align: right;">27</td>
+<td style="text-align: right;">84.38%</td>
+<td style="text-align: right;">0.2963</td>
+<td style="text-align: right;">0.1833</td>
+<td style="text-align: right;">0.9565</td>
+</tr>
+<tr>
+<td><code>CORTEXT_BOUNDARY_DISABLE_SURPRISAL=1</code></td>
+<td style="text-align: right;">40</td>
+<td style="text-align: right;">37</td>
+<td style="text-align: right;">92.50%</td>
+<td style="text-align: right;">0.3519</td>
+<td style="text-align: right;">0.2333</td>
+<td style="text-align: right;">1.0000</td>
+</tr>
+</tbody>
+</table>
+
+**Observations:** `boundary_surprisal` is also **not** a safe global
+cut. Disabling surprisal materially raises boundary-hit share on this
+compact live run (**84.38%** → **92.50%**) and increases interrupt
+frequency, which is directionally consistent with the longer-horizon
+EmbeddingGemma boundary rerun reported elsewhere in this section. So the
+deterministic extension sweep again identified a narrow micro-suite
+redundancy, not a universal deletion candidate.
+
+**Current pruning guidance:** the family sweeps remain valuable for
+finding where to look first, but the live confirmation pass shows that
+neither `affect_interrupt` nor `boundary_surprisal` is ready for
+outright removal on the current rebuilt stack. The stronger current
+conclusion is that the branch is more organic than decorative, and that
+apparent deterministic redundancies must still survive a live-model
+confirmation pass before any operation family is cut.
+
+### Subcomponent Completion Matrix (Apr 4, 2026)
+
+To close the matrix at the next level down, we ran a separate
+deterministic subcomponent sweep over the currently separable
+multi-toggle families:
+
+-   boundary: `pressure`, `surprisal`, `natural`
+-   flashbulb: `percentile`, `rate`, `arousal`
+-   metacognitive control: `tot_recovery`, `unknown_caution`,
+    `confidence_decay`
+-   affect: `interrupt_path`, `retrieval_path`
+-   neuromodulation: `write_scale`, `competition_scale`,
+    `reconsolidation_scale`, `value_gain`
+
+Benchmark: `examples/benchmark/cortext_subcomponent_matrix_bench`  
+Log: `logs/flashbulb_rate_rewrite_20260404/subcomponent_matrix.log`
+
+#### Boundary subcomponents
+
+<table style="width:100%;">
+<colgroup>
+<col style="width: 16%" />
+<col style="width: 22%" />
+<col style="width: 22%" />
+<col style="width: 22%" />
+<col style="width: 16%" />
+</colgroup>
+<thead>
+<tr>
+<th>subcomponent</th>
+<th style="text-align: right;">mean marginal</th>
+<th style="text-align: right;">max score without</th>
+<th style="text-align: right;">essential for best</th>
+<th>verdict</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>pressure</code></td>
+<td style="text-align: right;">0.000000</td>
+<td style="text-align: right;">3.000000</td>
+<td style="text-align: right;">0</td>
+<td>micro-suite redundant</td>
+</tr>
+<tr>
+<td><code>surprisal</code></td>
+<td style="text-align: right;">0.000000</td>
+<td style="text-align: right;">3.000000</td>
+<td style="text-align: right;">0</td>
+<td>micro-suite redundant</td>
+</tr>
+<tr>
+<td><code>natural</code></td>
+<td style="text-align: right;">3.000000</td>
+<td style="text-align: right;">0.000000</td>
+<td style="text-align: right;">1</td>
+<td>core</td>
+</tr>
+</tbody>
+</table>
+
+Best masks:
+
+<table>
+<thead>
+<tr>
+<th>rank</th>
+<th style="text-align: right;">score</th>
+<th>enabled</th>
+<th>disabled</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td style="text-align: right;">3.000000</td>
+<td><code>natural</code></td>
+<td><code>pressure,surprisal</code></td>
+</tr>
+<tr>
+<td>2</td>
+<td style="text-align: right;">3.000000</td>
+<td><code>pressure,natural</code></td>
+<td><code>surprisal</code></td>
+</tr>
+<tr>
+<td>3</td>
+<td style="text-align: right;">3.000000</td>
+<td><code>surprisal,natural</code></td>
+<td><code>pressure</code></td>
+</tr>
+<tr>
+<td>4</td>
+<td style="text-align: right;">3.000000</td>
+<td><code>pressure,surprisal,natural</code></td>
+<td><code>none</code></td>
+</tr>
+</tbody>
+</table>
+
+**Observations:** In the local calibration suite, `natural` is the only
+truly load-bearing boundary subcomponent. Both `pressure` and
+`surprisal` are redundant there. That still does **not** make either one
+a safe global cut. `boundary_surprisal` already failed live-model
+deletion confirmation above, and `boundary_pressure` has not yet been
+subjected to the same live follow-up.
+
+#### Flashbulb subcomponents
+
+<table style="width:100%;">
+<colgroup>
+<col style="width: 16%" />
+<col style="width: 22%" />
+<col style="width: 22%" />
+<col style="width: 22%" />
+<col style="width: 16%" />
+</colgroup>
+<thead>
+<tr>
+<th>subcomponent</th>
+<th style="text-align: right;">mean marginal</th>
+<th style="text-align: right;">max score without</th>
+<th style="text-align: right;">essential for best</th>
+<th>verdict</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>percentile</code></td>
+<td style="text-align: right;">1.000000</td>
+<td style="text-align: right;">1.000000</td>
+<td style="text-align: right;">1</td>
+<td>required</td>
+</tr>
+<tr>
+<td><code>rate</code></td>
+<td style="text-align: right;">0.000000</td>
+<td style="text-align: right;">2.000000</td>
+<td style="text-align: right;">0</td>
+<td>neutral stabilizer</td>
+</tr>
+<tr>
+<td><code>arousal</code></td>
+<td style="text-align: right;">1.000000</td>
+<td style="text-align: right;">1.000000</td>
+<td style="text-align: right;">1</td>
+<td>required</td>
+</tr>
+</tbody>
+</table>
+
+Best masks:
+
+<table>
+<thead>
+<tr>
+<th>rank</th>
+<th style="text-align: right;">score</th>
+<th>enabled</th>
+<th>disabled</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td style="text-align: right;">2.000000</td>
+<td><code>percentile,arousal</code></td>
+<td><code>rate</code></td>
+</tr>
+<tr>
+<td>2</td>
+<td style="text-align: right;">2.000000</td>
+<td><code>percentile,rate,arousal</code></td>
+<td><code>none</code></td>
+</tr>
+<tr>
+<td>3</td>
+<td style="text-align: right;">1.000000</td>
+<td><code>percentile</code></td>
+<td><code>rate,arousal</code></td>
+</tr>
+</tbody>
+</table>
+
+**Observations:** After the flashbulb-rate rewrite, `percentile` and
+`arousal` remain the load-bearing flashbulb paths in the deterministic
+suite, while `rate` is now neutral instead of antagonistic. Keeping it
+no longer hurts the best achievable score, but removing it still does
+not improve anything. That matches the post-rewrite live EmbeddingGemma
+flashbulb rerun later in this section, where baseline and `no_rate`
+became identical on the current workload.
+
+#### Metacognitive subcomponents
+
+<table style="width:100%;">
+<colgroup>
+<col style="width: 16%" />
+<col style="width: 22%" />
+<col style="width: 22%" />
+<col style="width: 22%" />
+<col style="width: 16%" />
+</colgroup>
+<thead>
+<tr>
+<th>subcomponent</th>
+<th style="text-align: right;">mean marginal</th>
+<th style="text-align: right;">max score without</th>
+<th style="text-align: right;">essential for best</th>
+<th>verdict</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>tot_recovery</code></td>
+<td style="text-align: right;">0.500000</td>
+<td style="text-align: right;">2.000000</td>
+<td style="text-align: right;">1</td>
+<td>required</td>
+</tr>
+<tr>
+<td><code>unknown_caution</code></td>
+<td style="text-align: right;">1.000000</td>
+<td style="text-align: right;">2.000000</td>
+<td style="text-align: right;">1</td>
+<td>required</td>
+</tr>
+<tr>
+<td><code>confidence_decay</code></td>
+<td style="text-align: right;">0.500000</td>
+<td style="text-align: right;">2.000000</td>
+<td style="text-align: right;">1</td>
+<td>required</td>
+</tr>
+</tbody>
+</table>
+
+**Observations:** The metacognitive family remains internally coherent.
+All three subpaths are required to preserve the best score in the
+dedicated suite, with `unknown_caution` showing the strongest marginal
+contribution.
+
+#### Affect subcomponents
+
+<table style="width:100%;">
+<colgroup>
+<col style="width: 16%" />
+<col style="width: 22%" />
+<col style="width: 22%" />
+<col style="width: 22%" />
+<col style="width: 16%" />
+</colgroup>
+<thead>
+<tr>
+<th>subcomponent</th>
+<th style="text-align: right;">mean marginal</th>
+<th style="text-align: right;">max score without</th>
+<th style="text-align: right;">essential for best</th>
+<th>verdict</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>interrupt_path</code></td>
+<td style="text-align: right;">0.000000</td>
+<td style="text-align: right;">1.000000</td>
+<td style="text-align: right;">0</td>
+<td>micro-suite redundant</td>
+</tr>
+<tr>
+<td><code>retrieval_path</code></td>
+<td style="text-align: right;">1.000000</td>
+<td style="text-align: right;">0.000000</td>
+<td style="text-align: right;">1</td>
+<td>required</td>
+</tr>
+</tbody>
+</table>
+
+**Observations:** The local deterministic probe says `retrieval_path` is
+the load-bearing affect subcomponent and `interrupt_path` is redundant
+there. But the live-model confirmation above already showed
+`affect_interrupt` improving interrupt recall on TopicalChat, so this
+again has to be read as a micro-suite redundancy rather than a real
+deletion verdict.
+
+#### Neuromodulator subcomponents
+
+<table style="width:100%;">
+<colgroup>
+<col style="width: 16%" />
+<col style="width: 22%" />
+<col style="width: 22%" />
+<col style="width: 22%" />
+<col style="width: 16%" />
+</colgroup>
+<thead>
+<tr>
+<th>subcomponent</th>
+<th style="text-align: right;">mean marginal</th>
+<th style="text-align: right;">max score without</th>
+<th style="text-align: right;">essential for best</th>
+<th>verdict</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>write_scale</code></td>
+<td style="text-align: right;">1.000000</td>
+<td style="text-align: right;">3.000000</td>
+<td style="text-align: right;">1</td>
+<td>required</td>
+</tr>
+<tr>
+<td><code>competition_scale</code></td>
+<td style="text-align: right;">1.000000</td>
+<td style="text-align: right;">3.000000</td>
+<td style="text-align: right;">1</td>
+<td>required</td>
+</tr>
+<tr>
+<td><code>reconsolidation_scale</code></td>
+<td style="text-align: right;">1.000000</td>
+<td style="text-align: right;">3.000000</td>
+<td style="text-align: right;">1</td>
+<td>required</td>
+</tr>
+<tr>
+<td><code>value_gain</code></td>
+<td style="text-align: right;">1.000000</td>
+<td style="text-align: right;">3.000000</td>
+<td style="text-align: right;">1</td>
+<td>required</td>
+</tr>
+</tbody>
+</table>
+
+**Observations:** Neuromodulation also remains internally coherent. All
+four downstream scales are independently load-bearing in the
+deterministic audit, so there is no evidence here for pruning any
+neuromodulator subpath.
+
+**Updated removal guidance:** after the family sweep, boundary/fact
+extension, live-model confirmation, subcomponent completion pass, and
+the flashbulb-rate rewrite, the branch still looks substantially
+organic. `flashbulb_rate` is no longer behaving like a harmful term; it
+now looks like a neutral stabilizer on the current deterministic and
+live probes. The strongest “looks redundant locally but not yet safe to
+delete globally” candidates are `affect_interrupt`,
+`boundary_surprisal`, and possibly `boundary_pressure` pending a
+live-model follow-up.
+
+### Full Separable-Unit Matrix (Apr 4, 2026)
+
+To finish the matrix before any surgery, we closed the audit at the
+**separable-unit** level rather than stopping at operation families.
+
+The current branch exposes **26 independently removable units** that
+matter for this question:
+
+-   **19 non-boundary/fact units**
+-   **7 boundary/fact units**
+
+A literal monolithic power set would be `2^26 = 67,108,864`
+combinations. We did not materialize that as one giant benchmark because
+the deterministic audit graph factors cleanly into a **non-boundary/fact
+unit cluster** and a **boundary/fact unit cluster**. We therefore ran
+both clusters exhaustively:
+
+-   non-boundary/fact units:
+    `logs/flashbulb_rate_rewrite_20260404/full_unit_ablation.log`
+    -   benchmark: `examples/benchmark/cortext_full_unit_ablation_bench`
+    -   exhaustive unit universe: `2^19 = 524,288`
+-   boundary/fact units:
+    `logs/full_boundary_fact_unit_ablation_20260404/full_boundary_fact_unit_ablation.log`
+    -   benchmark:
+        `examples/benchmark/cortext_full_boundary_fact_unit_ablation_bench`
+    -   exhaustive unit universe: `2^7 = 128`
+
+This is the completion criterion for the current matrix: every
+**separable** unit is now covered by an exhaustive deterministic matrix
+in its actual dependency cluster.
+
+#### Non-boundary/fact 19-unit sweep
+
+The 19-unit sweep covered:
+
+-   `source_confidence`
+-   `predictive_retrieval`
+-   `constructive_recall`
+-   `procedural_proactive`
+-   `metacog_tot_recovery`
+-   `metacog_unknown_caution`
+-   `metacog_confidence_decay`
+-   `affect_interrupt`
+-   `affect_retrieval`
+-   `flashbulb_percentile`
+-   `flashbulb_rate`
+-   `flashbulb_arousal`
+-   `neuromod_write_scale`
+-   `neuromod_competition_scale`
+-   `neuromod_reconsolidation_scale`
+-   `neuromod_value_gain`
+-   `meta_learning`
+-   `reinforcement_edges`
+-   `sequential_edges`
+
+Headline result:
+
+<table>
+<thead>
+<tr>
+<th>metric</th>
+<th style="text-align: right;">value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>unit count</td>
+<td style="text-align: right;">19</td>
+</tr>
+<tr>
+<td>combinations</td>
+<td style="text-align: right;">524288</td>
+</tr>
+<tr>
+<td>full-mask score</td>
+<td style="text-align: right;">15</td>
+</tr>
+<tr>
+<td>best score</td>
+<td style="text-align: right;">16</td>
+</tr>
+<tr>
+<td>minimal best bits on</td>
+<td style="text-align: right;">16</td>
+</tr>
+</tbody>
+</table>
+
+Minimal best disabled set:
+
+-   `source_confidence`
+-   `affect_interrupt`
+-   `flashbulb_rate`
+
+Per-unit summary:
+
+<table>
+<thead>
+<tr>
+<th>unit</th>
+<th style="text-align: right;">mean marginal</th>
+<th style="text-align: right;">max score without</th>
+<th style="text-align: right;">essential for best</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>source_confidence</code></td>
+<td style="text-align: right;">0.000000</td>
+<td style="text-align: right;">16.000000</td>
+<td style="text-align: right;">0</td>
+</tr>
+<tr>
+<td><code>predictive_retrieval</code></td>
+<td style="text-align: right;">1.000000</td>
+<td style="text-align: right;">15.000000</td>
+<td style="text-align: right;">1</td>
+</tr>
+<tr>
+<td><code>constructive_recall</code></td>
+<td style="text-align: right;">1.000000</td>
+<td style="text-align: right;">15.000000</td>
+<td style="text-align: right;">1</td>
+</tr>
+<tr>
+<td><code>procedural_proactive</code></td>
+<td style="text-align: right;">1.000000</td>
+<td style="text-align: right;">15.000000</td>
+<td style="text-align: right;">1</td>
+</tr>
+<tr>
+<td><code>metacog_tot_recovery</code></td>
+<td style="text-align: right;">0.500000</td>
+<td style="text-align: right;">15.000000</td>
+<td style="text-align: right;">1</td>
+</tr>
+<tr>
+<td><code>metacog_unknown_caution</code></td>
+<td style="text-align: right;">1.000000</td>
+<td style="text-align: right;">15.000000</td>
+<td style="text-align: right;">1</td>
+</tr>
+<tr>
+<td><code>metacog_confidence_decay</code></td>
+<td style="text-align: right;">0.500000</td>
+<td style="text-align: right;">15.000000</td>
+<td style="text-align: right;">1</td>
+</tr>
+<tr>
+<td><code>affect_interrupt</code></td>
+<td style="text-align: right;">0.000000</td>
+<td style="text-align: right;">16.000000</td>
+<td style="text-align: right;">0</td>
+</tr>
+<tr>
+<td><code>affect_retrieval</code></td>
+<td style="text-align: right;">1.000000</td>
+<td style="text-align: right;">15.000000</td>
+<td style="text-align: right;">1</td>
+</tr>
+<tr>
+<td><code>flashbulb_percentile</code></td>
+<td style="text-align: right;">1.000000</td>
+<td style="text-align: right;">15.000000</td>
+<td style="text-align: right;">1</td>
+</tr>
+<tr>
+<td><code>flashbulb_rate</code></td>
+<td style="text-align: right;">0.000000</td>
+<td style="text-align: right;">16.000000</td>
+<td style="text-align: right;">0</td>
+</tr>
+<tr>
+<td><code>flashbulb_arousal</code></td>
+<td style="text-align: right;">1.000000</td>
+<td style="text-align: right;">15.000000</td>
+<td style="text-align: right;">1</td>
+</tr>
+<tr>
+<td><code>neuromod_write_scale</code></td>
+<td style="text-align: right;">1.000000</td>
+<td style="text-align: right;">15.000000</td>
+<td style="text-align: right;">1</td>
+</tr>
+<tr>
+<td><code>neuromod_competition_scale</code></td>
+<td style="text-align: right;">1.000000</td>
+<td style="text-align: right;">15.000000</td>
+<td style="text-align: right;">1</td>
+</tr>
+<tr>
+<td><code>neuromod_reconsolidation_scale</code></td>
+<td style="text-align: right;">1.000000</td>
+<td style="text-align: right;">15.000000</td>
+<td style="text-align: right;">1</td>
+</tr>
+<tr>
+<td><code>neuromod_value_gain</code></td>
+<td style="text-align: right;">1.000000</td>
+<td style="text-align: right;">15.000000</td>
+<td style="text-align: right;">1</td>
+</tr>
+<tr>
+<td><code>meta_learning</code></td>
+<td style="text-align: right;">1.000000</td>
+<td style="text-align: right;">15.000000</td>
+<td style="text-align: right;">1</td>
+</tr>
+<tr>
+<td><code>reinforcement_edges</code></td>
+<td style="text-align: right;">1.000000</td>
+<td style="text-align: right;">15.000000</td>
+<td style="text-align: right;">1</td>
+</tr>
+<tr>
+<td><code>sequential_edges</code></td>
+<td style="text-align: right;">1.000000</td>
+<td style="text-align: right;">15.000000</td>
+<td style="text-align: right;">1</td>
+</tr>
+</tbody>
+</table>
+
+**Observations:** This completion sweep tightened the removal story. The
+older family-level uncertainty around `meta_learning`,
+`reinforcement_edges`, and `sequential_edges` is gone in the
+deterministic unit suite: all three are load-bearing once we stop hiding
+them inside larger family masks. The flashbulb-rate rewrite also changed
+the unit-level readout: `flashbulb_rate` is still non-essential for the
+best score, but it is now neutral instead of negative.
+`affect_interrupt` and `source_confidence` are also non-essential for
+the best score in this clean unit suite, but both have stronger external
+evidence elsewhere in the paper: `affect_interrupt` failed live deletion
+confirmation, and `source_confidence` still blocks poisoned
+low-confidence memories in the contradiction-heavy Ubuntu probe.
+
+#### Boundary/fact 7-unit sweep
+
+The final missing cluster adds `boundary_pressure` to the earlier
+boundary/fact extension, yielding the full 7-unit boundary/fact unit
+universe:
+
+-   `boundary_pressure`
+-   `boundary_surprisal`
+-   `boundary_natural`
+-   `fact_layer`
+-   `fact_history`
+-   `fact_stale_penalty`
+-   `fact_provenance`
+
+Headline result:
+
+<table>
+<thead>
+<tr>
+<th>metric</th>
+<th style="text-align: right;">value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>unit count</td>
+<td style="text-align: right;">7</td>
+</tr>
+<tr>
+<td>combinations</td>
+<td style="text-align: right;">128</td>
+</tr>
+<tr>
+<td>full-mask score</td>
+<td style="text-align: right;">7</td>
+</tr>
+<tr>
+<td>best score</td>
+<td style="text-align: right;">7</td>
+</tr>
+<tr>
+<td>full-mask is best</td>
+<td style="text-align: right;">1</td>
+</tr>
+</tbody>
+</table>
+
+Minimal best disabled set:
+
+-   `boundary_pressure`
+-   `boundary_surprisal`
+
+Per-unit summary:
+
+<table>
+<thead>
+<tr>
+<th>unit</th>
+<th style="text-align: right;">mean marginal</th>
+<th style="text-align: right;">max score without</th>
+<th style="text-align: right;">essential for best</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>boundary_pressure</code></td>
+<td style="text-align: right;">0.000000</td>
+<td style="text-align: right;">7.000000</td>
+<td style="text-align: right;">0</td>
+</tr>
+<tr>
+<td><code>boundary_surprisal</code></td>
+<td style="text-align: right;">0.000000</td>
+<td style="text-align: right;">7.000000</td>
+<td style="text-align: right;">0</td>
+</tr>
+<tr>
+<td><code>boundary_natural</code></td>
+<td style="text-align: right;">3.000000</td>
+<td style="text-align: right;">4.000000</td>
+<td style="text-align: right;">1</td>
+</tr>
+<tr>
+<td><code>fact_layer</code></td>
+<td style="text-align: right;">1.000000</td>
+<td style="text-align: right;">6.000000</td>
+<td style="text-align: right;">1</td>
+</tr>
+<tr>
+<td><code>fact_history</code></td>
+<td style="text-align: right;">1.000000</td>
+<td style="text-align: right;">6.000000</td>
+<td style="text-align: right;">1</td>
+</tr>
+<tr>
+<td><code>fact_stale_penalty</code></td>
+<td style="text-align: right;">1.000000</td>
+<td style="text-align: right;">6.000000</td>
+<td style="text-align: right;">1</td>
+</tr>
+<tr>
+<td><code>fact_provenance</code></td>
+<td style="text-align: right;">1.000000</td>
+<td style="text-align: right;">6.000000</td>
+<td style="text-align: right;">1</td>
+</tr>
+</tbody>
+</table>
+
+**Observations:** The fact sublayer remains fully load-bearing at the
+unit level. The only local redundancies are `boundary_pressure` and
+`boundary_surprisal`, with `boundary_natural` doing the real work in
+this deterministic boundary suite. As above, this is not enough by
+itself to justify deletion: `boundary_surprisal` already failed
+live-model deletion confirmation, so only `boundary_pressure` remains a
+plausible boundary-side cut candidate.
+
+**Final matrix reading:** the branch looks more organic than decorative
+even at the completed separable-unit level. After the flashbulb-rate
+rewrite, `flashbulb_rate` no longer looks harmful; it is simply
+low-evidence on the current probes. The next plausible but still
+unconfirmed target is `boundary_pressure`. Everything else either
+remained load-bearing in the unit matrix or already survived a stronger
+live-model confirmation pass.
 
 ## Threshold Adaptation
 
@@ -3485,8 +5345,15 @@ gain/percentile blending):
     intended, but we should verify with longer horizons to avoid
     over-triggering.
 
-Dense long-horizon ablation (EmpatheticDialogues, 720/1440, F=0.5,
-S=0.8, T=0.2):
+Post-rewrite long-horizon ablation rerun (EmpatheticDialogues, Apr 4,
+2026; `EmbeddingGemma/llama.cpp`, 720/1440, F=0.5, S=0.8, T=0.2). Rerun
+roots:
+
+-   baseline: `logs/flashbulb_rate_rewrite_20260404/live_baseline`
+-   `no_percentile`:
+    `logs/flashbulb_rate_rewrite_20260404/live_no_percentile`
+-   `no_rate`: `logs/flashbulb_rate_rewrite_20260404/live_no_rate`
+-   `no_arousal`: `logs/flashbulb_rate_rewrite_20260404/live_no_arousal`
 
 <table>
 <thead>
@@ -3499,46 +5366,57 @@ S=0.8, T=0.2):
 </thead>
 <tbody>
 <tr>
-<td><strong>baseline (current)</strong></td>
-<td style="text-align: right;">42</td>
-<td style="text-align: right;">2</td>
-<td style="text-align: right;">4.76%</td>
+<td><strong>baseline (rewritten rate controller)</strong></td>
+<td style="text-align: right;">19</td>
+<td style="text-align: right;">1</td>
+<td style="text-align: right;">5.26%</td>
 </tr>
 <tr>
 <td><strong>no_percentile</strong></td>
-<td style="text-align: right;">41</td>
-<td style="text-align: right;">10</td>
-<td style="text-align: right;">24.39%</td>
+<td style="text-align: right;">18</td>
+<td style="text-align: right;">8</td>
+<td style="text-align: right;">44.44%</td>
 </tr>
 <tr>
 <td><strong>no_arousal</strong></td>
-<td style="text-align: right;">42</td>
-<td style="text-align: right;">6</td>
-<td style="text-align: right;">14.29%</td>
+<td style="text-align: right;">18</td>
+<td style="text-align: right;">4</td>
+<td style="text-align: right;">22.22%</td>
 </tr>
 <tr>
 <td><strong>no_rate</strong></td>
-<td style="text-align: right;">42</td>
-<td style="text-align: right;">7</td>
-<td style="text-align: right;">16.67%</td>
+<td style="text-align: right;">19</td>
+<td style="text-align: right;">1</td>
+<td style="text-align: right;">5.26%</td>
 </tr>
 </tbody>
 </table>
 
 **Ablation notes:**
 
--   Percentile gating is the strongest suppressor; removing it raises
-    flashbulb rate ~5×.
--   Arousal gating contributes a ~3× suppression vs baseline.
--   Rate stabilizer reduces flashbulb rate by ~3.5× vs baseline.
+-   Percentile gating remains the dominant suppressor under the real
+    encoder; removing it raises flashbulb rate from **5.26%** to
+    **44.44%**.
+-   Arousal gating is still materially causal after the rewrite;
+    removing it raises flashbulb rate to **22.22%**.
+-   The rewritten rate controller is now behaviorally neutral on this
+    live workload: baseline and `no_rate` are identical at **1/19**
+    flashbulbs.
+-   Treat the earlier pre-rewrite `EmbeddingGemma` flashbulb table as
+    superseded. The old rate term was partly fighting the exception
+    gate; after the rewrite, `rate` no longer suppresses
+    percentile-qualified events, but it also does not add measurable
+    lift on this corpus slice.
 
 ## Boundary Ablation (TopicalChat)
 
-We ran a boundary ablation on TopicalChat
-(`data/topical_chat/valid_freq.jsonl`) with **F=S=T=0.5**,
-`max_turns=360`, `max_total=720`. We measure the share of memories with
-`boundary_score ≥ 0.5` as a proxy for boundary hits. Run logs:
-`logs/boundary_ablation_20260102_145005`.
+We reran the boundary ablation on TopicalChat
+(`data/topical_chat/valid_freq.jsonl`) on **Apr 4, 2026** with
+**F=S=T=0.5**, `max_turns=360`, `max_total=720`, using
+`EmbeddingGemma/llama.cpp` (confirmed in `run.log` as
+`text_encoder_backend=EmbeddingGemma/llama.cpp`). We measure the share
+of memories with `boundary_score ≥ 0.5` as a proxy for boundary hits.
+Rerun root: `logs/embeddinggemma_paper_boundary_20260404_seq`.
 
 <table>
 <thead>
@@ -3551,38 +5429,44 @@ We ran a boundary ablation on TopicalChat
 </thead>
 <tbody>
 <tr>
-<td><strong>baseline</strong></td>
-<td style="text-align: right;">39</td>
-<td style="text-align: right;">22</td>
-<td style="text-align: right;">56.4%</td>
+<td><strong>baseline (EmbeddingGemma)</strong></td>
+<td style="text-align: right;">45</td>
+<td style="text-align: right;">28</td>
+<td style="text-align: right;">62.22%</td>
 </tr>
 <tr>
 <td><strong>no_time_capacity</strong></td>
-<td style="text-align: right;">38</td>
-<td style="text-align: right;">22</td>
-<td style="text-align: right;">57.9%</td>
+<td style="text-align: right;">46</td>
+<td style="text-align: right;">31</td>
+<td style="text-align: right;">67.39%</td>
 </tr>
 <tr>
 <td><strong>time_capacity_only</strong></td>
-<td style="text-align: right;">0</td>
-<td style="text-align: right;">0</td>
-<td style="text-align: right;">0.0%</td>
+<td style="text-align: right;">21</td>
+<td style="text-align: right;">9</td>
+<td style="text-align: right;">42.86%</td>
 </tr>
 <tr>
 <td><strong>no_surprisal</strong></td>
-<td style="text-align: right;">37</td>
-<td style="text-align: right;">22</td>
-<td style="text-align: right;">59.5%</td>
+<td style="text-align: right;">53</td>
+<td style="text-align: right;">43</td>
+<td style="text-align: right;">81.13%</td>
 </tr>
 </tbody>
 </table>
 
 **Boundary notes:**
 
--   Natural indicators drive most boundaries; removing time/capacity
-    changes little in this dataset.
--   Time/capacity alone cannot flush under the current floor coupling.
--   Surprisal removal has minimal effect at these settings.
+-   The older ImageBind-era `time_capacity_only = 0 / 0` result was not
+    stable. Under EmbeddingGemma, time/capacity-only still produces
+    nonzero flushes (**9 / 21**, **42.86%**).
+-   Removing time/capacity does not reduce the boundary-hit share in
+    this rerun; it rises slightly (**62.22%** → **67.39%**), so the
+    earlier “changes little” conclusion still broadly holds, but with a
+    higher baseline rate.
+-   `no_surprisal` is no longer a minimal-delta ablation. Under the real
+    encoder, the boundary-hit share rises materially to **81.13%**, so
+    the older `37 / 22` claim should be treated as superseded.
 
 ## Boundary Inactivity Check
 
@@ -4620,10 +6504,12 @@ structured semantic signals beyond shallow associations.
 
 ## Reinforcement Ablation (Long Horizon)
 
-We evaluated reinforcement edges by comparing **reinforcement on vs
-off** at **F=S=T=0.5**, `max_total=360`, `max_turns=360`,
-`max_conversations=6` (single stream, interleave=1). Consolidation was
-invoked externally (`consolidate_cycles=2`).
+We reran the reinforcement ablation on **Apr 4, 2026** under
+`EmbeddingGemma/llama.cpp` by comparing **reinforcement on vs off** at
+**F=S=T=0.5**, `max_total=360`, `max_turns=360`, `max_conversations=6`
+(single stream, interleave=1). Consolidation was invoked externally
+(`consolidate_cycles=2`). Rerun root:
+`logs/embeddinggemma_paper_harness_ablation_fast_20260404`.
 
 <table>
 <colgroup>
@@ -4651,41 +6537,44 @@ invoked externally (`consolidate_cycles=2`).
 <tbody>
 <tr>
 <td style="text-align: right;">on</td>
-<td style="text-align: right;">9542</td>
-<td style="text-align: right;">50.19</td>
-<td style="text-align: right;">0.568</td>
-<td style="text-align: right;">0.989</td>
-<td style="text-align: right;">0.958</td>
-<td style="text-align: right;">0.0417</td>
-<td style="text-align: right;">54.33</td>
+<td style="text-align: right;">780</td>
+<td style="text-align: right;">33.36</td>
+<td style="text-align: right;">0.8351</td>
+<td style="text-align: right;">1.000</td>
+<td style="text-align: right;">0.8983</td>
+<td style="text-align: right;">0.1017</td>
+<td style="text-align: right;">21.52</td>
 </tr>
 <tr>
 <td style="text-align: right;">off</td>
 <td style="text-align: right;">0</td>
-<td style="text-align: right;">33.28</td>
-<td style="text-align: right;">0.567</td>
-<td style="text-align: right;">0.984</td>
-<td style="text-align: right;">0.948</td>
-<td style="text-align: right;">0.0524</td>
-<td style="text-align: right;">35.71</td>
+<td style="text-align: right;">32.26</td>
+<td style="text-align: right;">0.8367</td>
+<td style="text-align: right;">1.000</td>
+<td style="text-align: right;">0.9138</td>
+<td style="text-align: right;">0.0862</td>
+<td style="text-align: right;">20.35</td>
 </tr>
 </tbody>
 </table>
 
-**Observations:** Reinforcement substantially increases candidate
-breadth (+16.9 candidates/turn) and retrieved-count mean (+18.6), while
-**semantic overlap is stable** (Δ ≈ +0.0006). Interrupt recall improves
-by ~1.1pp (FN rate drops from 0.052 → 0.042) with a small precision
-lift. This indicates reinforcement primarily broadens the retrieval
-field and modestly strengthens interrupt coverage without degrading
-semantic quality.
+**Observations:** The older ImageBind-era reinforcement claim does
+**not** reproduce on the real encoder path. Under EmbeddingGemma,
+reinforcement changes candidate breadth only slightly (+1.10
+candidates/turn) and does **not** improve interrupt quality: `off` is
+marginally higher on both recall (**0.9138** vs **0.8983**) and semantic
+overlap (**0.8367** vs **0.8351**). Treat the earlier “substantially
+increases breadth and modestly improves recall” conclusion as superseded
+for this benchmark.
 
 ## Affect Path Ablation (Long Horizon)
 
-We isolated affect usage in **interrupt gating** vs **retrieval
-ranking** by toggling the affect pathways while holding **F=S=T=0.5**
-and running **2 conversations × 360 turns** (`max_total=720`). Four
-modes were tested:
+We reran the affect-path ablation on **Apr 4, 2026** under
+`EmbeddingGemma/llama.cpp` by toggling affect usage in **interrupt
+gating** vs **retrieval ranking** while holding **F=S=T=0.5** and
+running **2 conversations × 360 turns** (`max_total=720`). Rerun root:
+`logs/embeddinggemma_paper_harness_ablation_fast_20260404`. Four modes
+were tested:
 
 -   **all:** affect used in both interrupt gating and retrieval ranking
 -   **interrupt:** affect used only in interrupt gating
@@ -4716,49 +6605,52 @@ modes were tested:
 <tbody>
 <tr>
 <td style="text-align: right;">all</td>
-<td style="text-align: right;">0.483</td>
-<td style="text-align: right;">0.995</td>
-<td style="text-align: right;">0.879</td>
-<td style="text-align: right;">0.0053</td>
-<td style="text-align: right;">0.121</td>
-<td style="text-align: right;">0.00349</td>
+<td style="text-align: right;">0.151</td>
+<td style="text-align: right;">1.000</td>
+<td style="text-align: right;">0.908</td>
+<td style="text-align: right;">0.0000</td>
+<td style="text-align: right;">0.0923</td>
+<td style="text-align: right;">0.00921</td>
 </tr>
 <tr>
 <td style="text-align: right;">interrupt</td>
-<td style="text-align: right;">0.483</td>
-<td style="text-align: right;">0.995</td>
-<td style="text-align: right;">0.879</td>
-<td style="text-align: right;">0.0053</td>
-<td style="text-align: right;">0.121</td>
+<td style="text-align: right;">0.151</td>
+<td style="text-align: right;">1.000</td>
+<td style="text-align: right;">0.894</td>
+<td style="text-align: right;">0.0000</td>
+<td style="text-align: right;">0.1061</td>
 <td style="text-align: right;">0</td>
 </tr>
 <tr>
 <td style="text-align: right;">retrieval</td>
-<td style="text-align: right;">0.483</td>
-<td style="text-align: right;">0.995</td>
-<td style="text-align: right;">0.879</td>
-<td style="text-align: right;">0.0053</td>
-<td style="text-align: right;">0.121</td>
-<td style="text-align: right;">0.00349</td>
+<td style="text-align: right;">0.153</td>
+<td style="text-align: right;">1.000</td>
+<td style="text-align: right;">0.882</td>
+<td style="text-align: right;">0.0000</td>
+<td style="text-align: right;">0.1176</td>
+<td style="text-align: right;">0.00924</td>
 </tr>
 <tr>
 <td style="text-align: right;">off</td>
-<td style="text-align: right;">0.483</td>
-<td style="text-align: right;">0.995</td>
-<td style="text-align: right;">0.879</td>
-<td style="text-align: right;">0.0053</td>
-<td style="text-align: right;">0.121</td>
+<td style="text-align: right;">0.153</td>
+<td style="text-align: right;">1.000</td>
+<td style="text-align: right;">0.882</td>
+<td style="text-align: right;">0.0000</td>
+<td style="text-align: right;">0.1176</td>
 <td style="text-align: right;">0</td>
 </tr>
 </tbody>
 </table>
 
-**Observations:** At mid‑range knobs on this dataset, interrupt
-precision/recall are unchanged across affect modes; the measurable
-difference is the expected removal of the retrieval emotion bonus when
-retrieval affect is disabled. This suggests affect contributions emerge
-more strongly at higher Sensitivity or in more emotionally salient
-streams, which we test in the S‑sweep below.
+**Observations:** The older flat ImageBind-era table is superseded.
+Under EmbeddingGemma, affect does produce a measurable but modest
+interrupt-path effect at mid-range knobs: `all` improves recall over
+`off` (**0.9077** vs **0.8824**) while keeping precision at **1.0** and
+slightly lowering interrupt rate (**0.1509** vs **0.1535**). `retrieval`
+matches `off` on interrupt metrics and differs only in the expected
+emotion bonus, while `interrupt` sits between `all` and `off`. That
+pattern indicates the gain comes primarily from affect in the interrupt
+gate rather than from retrieval ranking alone.
 
 We further repeated the ablation at **S=0.0** and **S=1.0** (F=T=0.5) to
 test extremes:
@@ -5212,6 +7104,1876 @@ source-confidence gating clearly blocks the poisoned cohort: **0 / 128**
 downgraded memories are reaccessed with the gate on, versus **113 /
 128** with the gate disabled.
 
+## Apr 4, 2026 EmbeddingGemma + Default-LFM2.5 Addendum
+
+We reran a compact topical-chat ablation batch on the rebuilt branch
+where corpus `run.log` files now record
+`text_encoder_backend=EmbeddingGemma/llama.cpp` and the rebuilt
+integration tests validate auto deep-backend selection to
+`LFM2.5/llama.cpp`. Rerun root:
+`logs/embeddinggemma_remaining_historical_ablations_lfm25_default_20260404_final`.
+
+Unless noted otherwise, these addendum checks use a **single 120-turn
+TopicalChat slice** at **F=S=T=0.5**. They are intended as current-model
+reference points for the rebuilt default stack, not as replacements for
+the longer historical horizon sweeps above.
+
+### Consolidation Quick Check (120 Turns)
+
+<table style="width:100%;">
+<colgroup>
+<col style="width: 10%" />
+<col style="width: 10%" />
+<col style="width: 10%" />
+<col style="width: 10%" />
+<col style="width: 10%" />
+<col style="width: 10%" />
+<col style="width: 10%" />
+<col style="width: 10%" />
+<col style="width: 10%" />
+<col style="width: 10%" />
+</colgroup>
+<thead>
+<tr>
+<th style="text-align: right;">condition</th>
+<th style="text-align: right;">turns</th>
+<th style="text-align: right;">cons_runs</th>
+<th style="text-align: right;">summaries</th>
+<th style="text-align: right;">extraction_results</th>
+<th style="text-align: right;">labels_seen</th>
+<th style="text-align: right;">retrieval_semantic_overlap_mean</th>
+<th style="text-align: right;">interrupt_precision</th>
+<th style="text-align: right;">interrupt_recall</th>
+<th style="text-align: right;">retrieval_summary_hit_rate</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: right;">off</td>
+<td style="text-align: right;">120</td>
+<td style="text-align: right;">0</td>
+<td style="text-align: right;">0</td>
+<td style="text-align: right;">0</td>
+<td style="text-align: right;">0</td>
+<td style="text-align: right;">0.7791</td>
+<td style="text-align: right;">1.000</td>
+<td style="text-align: right;">0.750</td>
+<td style="text-align: right;">0.0000</td>
+</tr>
+<tr>
+<td style="text-align: right;">on</td>
+<td style="text-align: right;">120</td>
+<td style="text-align: right;">2</td>
+<td style="text-align: right;">1</td>
+<td style="text-align: right;">1</td>
+<td style="text-align: right;">12</td>
+<td style="text-align: right;">0.7742</td>
+<td style="text-align: right;">1.000</td>
+<td style="text-align: right;">0.750</td>
+<td style="text-align: right;">0.0000</td>
+</tr>
+</tbody>
+</table>
+
+**Observation:** On this short slice, consolidation does produce a real
+summary/extraction event, but it does **not** surface into retrieval
+often enough to move interrupt quality. The historical longer-horizon
+consolidation gains should therefore be read as horizon-sensitive rather
+than assumed at short horizons on the rebuilt stack.
+
+### Affect Modes (120 Turns, No Consolidation)
+
+<table>
+<colgroup>
+<col style="width: 12%" />
+<col style="width: 12%" />
+<col style="width: 12%" />
+<col style="width: 12%" />
+<col style="width: 12%" />
+<col style="width: 12%" />
+<col style="width: 12%" />
+<col style="width: 12%" />
+</colgroup>
+<thead>
+<tr>
+<th style="text-align: right;">affect_mode</th>
+<th style="text-align: right;">interrupt_turn_rate</th>
+<th style="text-align: right;">interrupt_abort_rate</th>
+<th style="text-align: right;">interrupt_semantic_overlap_mean</th>
+<th
+style="text-align: right;">interrupt_context_semantic_overlap_mean</th>
+<th style="text-align: right;">retrieval_thresh_mean</th>
+<th style="text-align: right;">boundary_mult_eff_mean</th>
+<th style="text-align: right;">retrieval_emotion_bonus_mean</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: right;">all</td>
+<td style="text-align: right;">0.0500</td>
+<td style="text-align: right;">0.0000</td>
+<td style="text-align: right;">0.7750</td>
+<td style="text-align: right;">0.9082</td>
+<td style="text-align: right;">0.2380</td>
+<td style="text-align: right;">1.5057</td>
+<td style="text-align: right;">0.00833</td>
+</tr>
+<tr>
+<td style="text-align: right;">interrupt</td>
+<td style="text-align: right;">0.0500</td>
+<td style="text-align: right;">0.0000</td>
+<td style="text-align: right;">0.7750</td>
+<td style="text-align: right;">0.9082</td>
+<td style="text-align: right;">0.2380</td>
+<td style="text-align: right;">1.5057</td>
+<td style="text-align: right;">0.00000</td>
+</tr>
+<tr>
+<td style="text-align: right;">retrieval</td>
+<td style="text-align: right;">0.0500</td>
+<td style="text-align: right;">0.0000</td>
+<td style="text-align: right;">0.7682</td>
+<td style="text-align: right;">0.9081</td>
+<td style="text-align: right;">0.2399</td>
+<td style="text-align: right;">1.5180</td>
+<td style="text-align: right;">0.00829</td>
+</tr>
+<tr>
+<td style="text-align: right;">off</td>
+<td style="text-align: right;">0.0500</td>
+<td style="text-align: right;">0.0000</td>
+<td style="text-align: right;">0.7682</td>
+<td style="text-align: right;">0.9081</td>
+<td style="text-align: right;">0.2399</td>
+<td style="text-align: right;">1.5180</td>
+<td style="text-align: right;">0.00000</td>
+</tr>
+</tbody>
+</table>
+
+**Observation:** On the rebuilt default stack, the short-horizon affect
+ablation collapses into two pairs. `all` matches `interrupt` on gate
+outcomes, and `retrieval` matches `off`, with only the expected
+path-local threshold shift / emotion bonus differences. That is a much
+weaker result than the older large ImageBind-era gap.
+
+### Procedural + Sequential Quick Check (Consolidation Cadence)
+
+These quick reruns use one TopicalChat conversation with consolidation
+enabled and explicit cadence overrides.
+
+<table style="width:100%;">
+<colgroup>
+<col style="width: 16%" />
+<col style="width: 16%" />
+<col style="width: 16%" />
+<col style="width: 16%" />
+<col style="width: 16%" />
+<col style="width: 16%" />
+</colgroup>
+<thead>
+<tr>
+<th style="text-align: right;">variant</th>
+<th style="text-align: right;">consolidate_every</th>
+<th style="text-align: right;">retrieval_avg_candidates</th>
+<th style="text-align: right;">retrieval_association_candidate_rate</th>
+<th style="text-align: right;">retrieval_semantic_overlap_mean</th>
+<th style="text-align: right;">interrupt_turn_rate</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: right;">baseline</td>
+<td style="text-align: right;">40</td>
+<td style="text-align: right;">11.75</td>
+<td style="text-align: right;">0.0993</td>
+<td style="text-align: right;">0.8001</td>
+<td style="text-align: right;">0.1000</td>
+</tr>
+<tr>
+<td style="text-align: right;">both off</td>
+<td style="text-align: right;">40</td>
+<td style="text-align: right;">11.79</td>
+<td style="text-align: right;">0.0989</td>
+<td style="text-align: right;">0.8017</td>
+<td style="text-align: right;">0.0917</td>
+</tr>
+<tr>
+<td style="text-align: right;">baseline</td>
+<td style="text-align: right;">60</td>
+<td style="text-align: right;">10.10</td>
+<td style="text-align: right;">0.0660</td>
+<td style="text-align: right;">0.8023</td>
+<td style="text-align: right;">0.1000</td>
+</tr>
+<tr>
+<td style="text-align: right;">both off</td>
+<td style="text-align: right;">60</td>
+<td style="text-align: right;">10.14</td>
+<td style="text-align: right;">0.0657</td>
+<td style="text-align: right;">0.8042</td>
+<td style="text-align: right;">0.1000</td>
+</tr>
+</tbody>
+</table>
+
+**Observation:** The rebuilt-stack quick reruns again show no material
+degradation from disabling procedural storage and sequential edges. If
+anything, the tiny deltas slightly favor the ablation. The correct
+interpretation remains that this pathway needs a stronger sequential
+task to demonstrate value.
+
+### Source-Confidence Quick Check (120 Turns)
+
+<table style="width:100%;">
+<colgroup>
+<col style="width: 16%" />
+<col style="width: 16%" />
+<col style="width: 16%" />
+<col style="width: 16%" />
+<col style="width: 16%" />
+<col style="width: 16%" />
+</colgroup>
+<thead>
+<tr>
+<th style="text-align: right;">source_conf</th>
+<th style="text-align: right;">retrieval_avg_candidates</th>
+<th style="text-align: right;">retrieval_semantic_overlap_mean</th>
+<th style="text-align: right;">interrupt_turn_rate</th>
+<th style="text-align: right;">interrupt_abort_rate</th>
+<th style="text-align: right;">interrupt_semantic_overlap_mean</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: right;">on</td>
+<td style="text-align: right;">1.3750</td>
+<td style="text-align: right;">0.7742</td>
+<td style="text-align: right;">0.0500</td>
+<td style="text-align: right;">0.0000</td>
+<td style="text-align: right;">0.7682</td>
+</tr>
+<tr>
+<td style="text-align: right;">off</td>
+<td style="text-align: right;">1.4286</td>
+<td style="text-align: right;">0.7842</td>
+<td style="text-align: right;">0.0417</td>
+<td style="text-align: right;">0.0000</td>
+<td style="text-align: right;">0.7811</td>
+</tr>
+</tbody>
+</table>
+
+**Observation:** The clean TopicalChat slice still does not stress
+source monitoring enough to produce a strong causal delta. The
+contradiction-heavy Ubuntu controlled probe above remains the better
+evidence that source-confidence filtering is functionally active.
+
+### Synthetic Mechanism-Pack Smoke (Apr 4, 2026)
+
+We also generated a small deterministic synthetic mechanism pack
+(`data/mechanism_eval/valid.jsonl`) containing delayed corrections,
+mixed provenance, conflicting low-confidence claims, routine exceptions,
+current-vs-historical questions, and resumable routines. The
+corresponding quick harness smoke lives under
+`logs/mechanism_eval_20260404`.
+
+<table style="width:100%;">
+<colgroup>
+<col style="width: 16%" />
+<col style="width: 16%" />
+<col style="width: 16%" />
+<col style="width: 16%" />
+<col style="width: 16%" />
+<col style="width: 16%" />
+</colgroup>
+<thead>
+<tr>
+<th style="text-align: right;">source_conf</th>
+<th style="text-align: right;">turns</th>
+<th style="text-align: right;">retrieval_avg_candidates</th>
+<th style="text-align: right;">retrieval_semantic_overlap_mean</th>
+<th style="text-align: right;">interrupt_turn_rate</th>
+<th style="text-align: right;">duration_s</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: right;">on</td>
+<td style="text-align: right;">19</td>
+<td style="text-align: right;">1.0000</td>
+<td style="text-align: right;">0.7853</td>
+<td style="text-align: right;">0.0526</td>
+<td style="text-align: right;">2.52</td>
+</tr>
+<tr>
+<td style="text-align: right;">off</td>
+<td style="text-align: right;">19</td>
+<td style="text-align: right;">1.0000</td>
+<td style="text-align: right;">0.7853</td>
+<td style="text-align: right;">0.0526</td>
+<td style="text-align: right;">2.02</td>
+</tr>
+</tbody>
+</table>
+
+**Observation:** Raw harness aggregates remain flat on this tiny pack.
+That is expected: the pack is intended to be scored against explicit
+answer keys (current, historical, belief-at-time, stale-first,
+provenance class) using the external study scripts, not interpreted only
+through interrupt/retrieval averages. The important implementation
+result is that the rebuilt branch now has a reproducible
+contradiction-heavy mechanism dataset and scorer path without changing
+the public runtime API.
+
+### Predictive + Metacognitive Activation Audit (Apr 4, 2026)
+
+Two mechanisms were previously present in state but not convincingly
+behavior-active in retrieval: predictive pre-activation and
+metacognitive TOT/FOK control. We activated both without changing the
+public API, then added deterministic on/off benches in
+`examples/benchmark` plus targeted operation tests. A final paper-only
+cleanup pass also made the previously paper-only `confidence_decay_rate`
+behaviorally real: retained metacognitive confidence now decays between
+signals, scales the strength of next-window TOT recovery, and tightens
+unknown-caution cutoff behavior as confidence falls.
+
+**Predictive deterministic ablation:**
+`./build/examples/benchmark/cortext_predictive_ablation_bench`
+
+<table>
+<colgroup>
+<col style="width: 27%" />
+<col style="width: 36%" />
+<col style="width: 36%" />
+</colgroup>
+<thead>
+<tr>
+<th>study</th>
+<th style="text-align: right;">on/off result</th>
+<th style="text-align: right;">key metric</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>predictive ranking</td>
+<td style="text-align: right;">on beats off</td>
+<td
+style="text-align: right;"><code>predictive_target_top1_on = 1</code>,
+<code>predictive_target_top1_off = 0</code></td>
+</tr>
+<tr>
+<td>transient decay</td>
+<td style="text-align: right;">pass</td>
+<td
+style="text-align: right;"><code>preactivation_after_decay = 0.4</code></td>
+</tr>
+<tr>
+<td>surprise refresh</td>
+<td style="text-align: right;">pass</td>
+<td
+style="text-align: right;"><code>surprise_refresh_low = 0.0144</code>,
+<code>surprise_refresh_high = 0.125963</code></td>
+</tr>
+</tbody>
+</table>
+
+**Metacognitive deterministic ablation:**
+`./build/examples/benchmark/cortext_metacognitive_ablation_bench`
+
+<table>
+<colgroup>
+<col style="width: 27%" />
+<col style="width: 36%" />
+<col style="width: 36%" />
+</colgroup>
+<thead>
+<tr>
+<th>study</th>
+<th style="text-align: right;">on/off result</th>
+<th style="text-align: right;">key metric</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>TOT recovery</td>
+<td style="text-align: right;">on beats off</td>
+<td style="text-align: right;"><code>tot_recovery_hits_on = 1</code>,
+<code>tot_recovery_hits_off = 0</code></td>
+</tr>
+<tr>
+<td>unknown caution</td>
+<td style="text-align: right;">on beats off</td>
+<td style="text-align: right;"><code>unknown_empty_on = 1</code>,
+<code>unknown_empty_off = 0</code></td>
+</tr>
+<tr>
+<td>confidence decay</td>
+<td style="text-align: right;">on beats off</td>
+<td
+style="text-align: right;"><code>confidence_decay_on = 0.326581</code>,
+<code>confidence_decay_off = 0.8032</code></td>
+</tr>
+<tr>
+<td>decayed TOT reach</td>
+<td style="text-align: right;">decay suppresses stale deep recovery</td>
+<td style="text-align: right;"><code>tot_decay_hit_on = 0</code>,
+<code>tot_decay_hit_off = 1</code></td>
+</tr>
+<tr>
+<td>mode expiry</td>
+<td style="text-align: right;">pass</td>
+<td style="text-align: right;"><code>mode_expiry_ok = 1</code></td>
+</tr>
+</tbody>
+</table>
+
+**Short live-model confidence-decay ablation:**
+`scripts/run_memory_harness.py` on a 120-turn `TopicalChat` slice with
+`EmbeddingGemma/llama.cpp`
+
+<table>
+<colgroup>
+<col style="width: 11%" />
+<col style="width: 14%" />
+<col style="width: 14%" />
+<col style="width: 14%" />
+<col style="width: 14%" />
+<col style="width: 14%" />
+<col style="width: 14%" />
+</colgroup>
+<thead>
+<tr>
+<th>decay</th>
+<th style="text-align: right;">retrieval_avg_candidates</th>
+<th style="text-align: right;">retrieval_semantic_overlap_mean</th>
+<th style="text-align: right;">interrupt_semantic_overlap_mean</th>
+<th
+style="text-align: right;">interrupt_context_semantic_overlap_mean</th>
+<th style="text-align: right;">memory_retrieved_count_mean</th>
+<th style="text-align: right;">interrupt_recall</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>on</td>
+<td style="text-align: right;">1.6875</td>
+<td style="text-align: right;">0.772989</td>
+<td style="text-align: right;">0.772989</td>
+<td style="text-align: right;">0.903594</td>
+<td style="text-align: right;">0.900000</td>
+<td style="text-align: right;">1.0</td>
+</tr>
+<tr>
+<td>off (<code>CORTEXT_DISABLE_METACOG_CONFIDENCE_DECAY=1</code>)</td>
+<td style="text-align: right;">1.6250</td>
+<td style="text-align: right;">0.769673</td>
+<td style="text-align: right;">0.769673</td>
+<td style="text-align: right;">0.901935</td>
+<td style="text-align: right;">0.866667</td>
+<td style="text-align: right;">1.0</td>
+</tr>
+</tbody>
+</table>
+
+Logs:
+
+-   `logs/metacog_conf_decay_on_20260404`
+-   `logs/metacog_conf_decay_off_20260404`
+
+**Targeted test coverage:**
+`./build/tests/cortext_tests "[operations][predictive]"` passed with
+**21 assertions in 5 test cases**;
+`./build/tests/cortext_tests "[operations][metacognitive]"` passed with
+**31 assertions in 11 test cases**; and the retrieval-side metacognitive
+integration slice
+`./build/tests/cortext_tests "[operations][graph][metacognitive]"`
+passed with **6 assertions in 3 test cases**.
+
+**Observation:** These results are intentionally narrower than the
+corpus reruns above. They do not claim that predictive pre-activation or
+metacognition produce large gains on every naturalistic dataset. They do
+establish the more basic scientific point that these gears are now real
+causal parts of the retrieval system: predictive state can change
+ranking, TOT can extend recovery reach on the next retrieval window,
+unknown-caution can suppress low-confidence fallback into an empty
+return when certainty is not met, and confidence decay now prevents
+stale high-confidence states from overdriving recovery after long
+delays. On a short clean `TopicalChat` slice the live-model effect is
+modest but directionally positive.
+
+### Constructive Recall Activation Audit (Apr 4, 2026)
+
+Constructive recall had been one of the last places where the paper was
+ahead of the branch: the manuscript described an
+evidence-plus-reconstruction ledger, but the earlier implementation
+still behaved like a single mutable embedding. We corrected that by
+adding a versioned `memory_reconstructions` ledger, seeding an initial
+reconstruction on write, making retrieval score against the latest
+reconstruction when present, and making reconsolidation append a new
+reconstruction instead of overwriting the base evidence embedding.
+
+**Deterministic constructive-recall ablation:**
+`./build/examples/benchmark/cortext_constructive_recall_ablation_bench`
+
+<table>
+<colgroup>
+<col style="width: 27%" />
+<col style="width: 36%" />
+<col style="width: 36%" />
+</colgroup>
+<thead>
+<tr>
+<th>study</th>
+<th style="text-align: right;">result</th>
+<th style="text-align: right;">key metric</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>initial ledger seeding</td>
+<td style="text-align: right;">pass</td>
+<td
+style="text-align: right;"><code>constructive_initial_seeded = 1</code></td>
+</tr>
+<tr>
+<td>retrieval reconstruction affects rank</td>
+<td style="text-align: right;">on beats off</td>
+<td
+style="text-align: right;"><code>constructive_target_top1_on = 1</code>,
+<code>constructive_target_top1_off = 0</code></td>
+</tr>
+<tr>
+<td>retrieval appends uncertainty-tracked version</td>
+<td style="text-align: right;">pass</td>
+<td
+style="text-align: right;"><code>constructive_recon_rows_on = 2</code>,
+<code>constructive_recon_rows_off = 1</code>,
+<code>constructive_latest_uncertainty = 0.425</code></td>
+</tr>
+<tr>
+<td>reconsolidation preserves evidence row</td>
+<td style="text-align: right;">pass</td>
+<td
+style="text-align: right;"><code>constructive_recon_preserves_evidence = 1</code>,
+<code>constructive_recon_versions = 2</code></td>
+</tr>
+<tr>
+<td>reconsolidation moves current view toward context</td>
+<td style="text-align: right;">pass</td>
+<td
+style="text-align: right;"><code>constructive_recon_current_sim = 0.469205</code>,
+<code>constructive_evidence_current_sim = 0.400006</code></td>
+</tr>
+</tbody>
+</table>
+
+**Targeted test coverage:**
+`./build/tests/cortext_tests "[operations][constructive_recall]"` passed
+with **29 assertions in 3 test cases**. Adjacent storage and migration
+regression slices also remained green:
+`./build/tests/cortext_tests "[operations][memory_storage]"` passed with
+**33 assertions in 4 test cases**, and
+`./build/tests/cortext_tests "[schema][migration]"` passed with **11
+assertions in 3 test cases**.
+
+**Observation:** This is the constructive-recall equivalent of the
+predictive/TOT activation audit above. The result is not a claim of
+dramatic corpus-level gains; it is a claim that the branch now actually
+implements the algorithm the paper describes. The current memory view
+can diverge from the original evidence through an uncertainty-tracked
+reconstruction ledger, retrieval can prefer that reconstructed view when
+it is more relevant, and reconsolidation no longer destroys the base
+evidence embedding in place.
+
+### Neuromodulator Downstream Activation Audit (Apr 4, 2026)
+
+The neuromodulator layer had been partly real and partly aspirational:
+`ACh`, `NE`, and `DA` already drove encode/retrieve bias, but the paper
+also claimed four downstream effects that were not all behaviorally
+wired. We closed that gap without changing the public API by applying
+the latent neuromodulator scales inside the existing write-gate,
+retrieval-competition, reconsolidation, and procedural-value-update
+operations.
+
+**Deterministic neuromodulator ablation:**
+`./build/examples/benchmark/cortext_neuromodulator_ablation_bench`
+
+<table>
+<colgroup>
+<col style="width: 27%" />
+<col style="width: 36%" />
+<col style="width: 36%" />
+</colgroup>
+<thead>
+<tr>
+<th>pathway</th>
+<th style="text-align: right;">result</th>
+<th style="text-align: right;">key metric</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>NE write-threshold scaling</td>
+<td style="text-align: right;">on beats off</td>
+<td
+style="text-align: right;"><code>neuromod_write_accept_on = 1</code>,
+<code>neuromod_write_accept_off = 0</code></td>
+</tr>
+<tr>
+<td>NE competition scaling</td>
+<td style="text-align: right;">on beats off</td>
+<td
+style="text-align: right;"><code>neuromod_competition_loser_strength_on = 0.998705</code>,
+<code>neuromod_competition_loser_strength_off = 0.999136</code></td>
+</tr>
+<tr>
+<td>ACh reconsolidation scaling</td>
+<td style="text-align: right;">on beats off</td>
+<td
+style="text-align: right;"><code>neuromod_recon_similarity_on = 0.832729</code>,
+<code>neuromod_recon_similarity_off = 0.808152</code></td>
+</tr>
+<tr>
+<td>DA value-update scaling</td>
+<td style="text-align: right;">high beats low</td>
+<td
+style="text-align: right;"><code>neuromod_value_update_high_da = 0.8</code>,
+<code>neuromod_value_update_low_da = 0.4</code>,
+<code>neuromod_value_update_disabled = 0.8</code></td>
+</tr>
+</tbody>
+</table>
+
+The benchmark passed end to end: `neuromodulator_bench_passed = 1`.
+
+**Targeted test coverage:** the downstream slices each have a direct
+operation-level check.
+`./build/tests/cortext_tests "[operations][write_gate][neuromod]"`,
+`./build/tests/cortext_tests "[operations][competition][neuromod]"`,
+`./build/tests/cortext_tests "[operations][recon][neuromod]"`, and
+`./build/tests/cortext_tests "[operations][detect_memory_usage][neuromod]"`
+all passed on the rebuilt branch.
+
+**Observation:** This is an activation audit, not a broad
+corpus-performance claim. The important scientific correction is
+narrower: the paper can now honestly say that the latent neuromodulator
+layer does more than set encode/retrieve bias. High `NE` now lowers the
+write threshold and sharpens lateral inhibition, high `ACh` increases
+reconstruction drift toward current context, and high `DA` strengthens
+procedural reward updates.
+
+### Procedural Retrieval Activation Audit (Apr 4, 2026)
+
+The earlier manuscript language overclaimed the procedural lane as a
+direct `Q(proc_key, action)` policy. The actual branch stores
+`Q(proc_key, memory_id)`, so we tightened the implementation and the
+wording together: procedural memory now acts as a **proactive retrieval
+lane** that can surface a previously successful routine memory even when
+it falls outside the normal semantic KNN seed set.
+
+**Deterministic procedural ablation:**
+`./build/examples/benchmark/cortext_procedural_ablation_bench`
+
+<table>
+<colgroup>
+<col style="width: 27%" />
+<col style="width: 36%" />
+<col style="width: 36%" />
+</colgroup>
+<thead>
+<tr>
+<th>pathway</th>
+<th style="text-align: right;">result</th>
+<th style="text-align: right;">key metric</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>proactive routine surfacing</td>
+<td style="text-align: right;">on beats off</td>
+<td
+style="text-align: right;"><code>procedural_target_selected_on = 1</code>,
+<code>procedural_target_selected_off = 0</code></td>
+</tr>
+<tr>
+<td>routine ranking after surfacing</td>
+<td style="text-align: right;">on beats off</td>
+<td
+style="text-align: right;"><code>procedural_target_top1_on = 1</code>,
+<code>procedural_target_top1_off = 0</code></td>
+</tr>
+<tr>
+<td>learned habit signal preserved</td>
+<td style="text-align: right;">pass</td>
+<td
+style="text-align: right;"><code>procedural_target_proc_score_on = 1.0</code></td>
+</tr>
+</tbody>
+</table>
+
+The benchmark passed end to end: `procedural_bench_passed = 1`.
+
+**Targeted test coverage:** the retrieval-side activation is covered by
+`./build/tests/cortext_tests "[operations][graph][procedural]"`, and the
+reward-update side remains covered by
+`./build/tests/cortext_tests "[operations][detect_memory_usage][neuromod]"`.
+
+**Observation:** This result explains why the older TopicalChat
+procedural ablations above were hard to interpret. On generic chat
+slices, the old pathway was mostly just a mild reranking term attached
+to already-selected semantic candidates. The current branch now has a
+true causal procedural lane: a strong learned routine can enter
+retrieval proactively for the same sparse context and then compete
+normally with other candidates. That is still narrower than a standalone
+action policy, so the paper now describes it that way.
+
+### Meta-Learning Activation Audit (Apr 4, 2026)
+
+The paper had claimed that the knob-to-parameter maps were learnable,
+but the branch still treated the relevant priors as fixed formulas. We
+closed that gap by adding an internal `meta_learning_coeffs` table and
+an end-of-turn learner that updates the generic sigmoid-plus-lerp map
+for three live prior families:
+
+-   Focus `attention_width_prior`
+-   Sensitivity `rate_target_prior`
+-   Stability `hysteresis_band_prior`
+
+The implementation keeps the old formulas as exact cold-start priors and
+only begins learning once real write/retrieval/reward outcomes exist.
+
+**Deterministic meta-learning ablation:**
+`./build/examples/benchmark/cortext_meta_learning_ablation_bench`
+
+<table>
+<colgroup>
+<col style="width: 27%" />
+<col style="width: 36%" />
+<col style="width: 36%" />
+</colgroup>
+<thead>
+<tr>
+<th>pathway</th>
+<th style="text-align: right;">result</th>
+<th style="text-align: right;">key metric</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>focus prior consolidation</td>
+<td style="text-align: right;">on narrows vs off</td>
+<td
+style="text-align: right;"><code>meta_learning_attention_width_prior_on = 1.59894</code>,
+<code>meta_learning_attention_width_prior_off = 1.72788</code></td>
+</tr>
+<tr>
+<td>sensitivity rate-target learning</td>
+<td style="text-align: right;">on raises vs off</td>
+<td
+style="text-align: right;"><code>meta_learning_rate_target_prior_on = 2.36446</code>,
+<code>meta_learning_rate_target_prior_off = 2.12</code></td>
+</tr>
+<tr>
+<td>stability hysteresis learning</td>
+<td style="text-align: right;">on raises vs off</td>
+<td
+style="text-align: right;"><code>meta_learning_hysteresis_band_prior_on = 0.142751</code>,
+<code>meta_learning_hysteresis_band_prior_off = 0.135</code></td>
+</tr>
+<tr>
+<td>coefficient persistence</td>
+<td style="text-align: right;">on writes rows, off does not</td>
+<td
+style="text-align: right;"><code>meta_learning_update_count_on = 24</code>,
+<code>meta_learning_update_count_off = 0</code></td>
+</tr>
+</tbody>
+</table>
+
+**Targeted test coverage:**
+`./build/tests/cortext_tests "[operations][meta_learning]"` passed with
+**16 assertions in 3 test cases**.
+
+**Live-model short ablation:** `logs/meta_learning_live_on_20260404_v3`
+vs `logs/meta_learning_live_off_20260404_v3`
+
+These runs use the rebuilt `topical_chat_analysis` binary, a single
+**120-turn** TopicalChat slice at **F=S=T=0.5**, and
+`EmbeddingGemma/llama.cpp` as recorded in `run.log`.
+
+<table>
+<colgroup>
+<col style="width: 11%" />
+<col style="width: 14%" />
+<col style="width: 14%" />
+<col style="width: 14%" />
+<col style="width: 14%" />
+<col style="width: 14%" />
+<col style="width: 14%" />
+</colgroup>
+<thead>
+<tr>
+<th>meta_learning</th>
+<th style="text-align: right;">retrieval_avg_candidates</th>
+<th style="text-align: right;">retrieval_semantic_overlap_mean</th>
+<th style="text-align: right;">interrupt_semantic_overlap_mean</th>
+<th
+style="text-align: right;">interrupt_context_semantic_overlap_mean</th>
+<th style="text-align: right;">memory_retrieved_count_mean</th>
+<th style="text-align: right;">interrupt_recall</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>on</td>
+<td style="text-align: right;">1.8000</td>
+<td style="text-align: right;">0.796255</td>
+<td style="text-align: right;">0.791804</td>
+<td style="text-align: right;">0.902245</td>
+<td style="text-align: right;">0.900000</td>
+<td style="text-align: right;">0.933333</td>
+</tr>
+<tr>
+<td>off</td>
+<td style="text-align: right;">1.7333</td>
+<td style="text-align: right;">0.792718</td>
+<td style="text-align: right;">0.788015</td>
+<td style="text-align: right;">0.900349</td>
+<td style="text-align: right;">0.866667</td>
+<td style="text-align: right;">0.933333</td>
+</tr>
+</tbody>
+</table>
+
+The learned rows after the `on` run show where adaptation actually
+concentrated:
+
+<table>
+<colgroup>
+<col style="width: 30%" />
+<col style="width: 30%" />
+<col style="width: 40%" />
+</colgroup>
+<thead>
+<tr>
+<th>family</th>
+<th>learned row snapshot</th>
+<th style="text-align: right;">update_count</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>focus</td>
+<td><code>alpha_f=5.99997</code>, <code>beta=-3.00007</code>,
+<code>a=1.70857</code>, <code>b=1.73685</code></td>
+<td style="text-align: right;">119</td>
+</tr>
+<tr>
+<td>sensitivity</td>
+<td><code>alpha_s=6.00342</code>, <code>beta=-2.99316</code>,
+<code>a=2.59891</code>, <code>b=2.64975</code></td>
+<td style="text-align: right;">119</td>
+</tr>
+<tr>
+<td>stability</td>
+<td><code>alpha_t=6.0</code>, <code>beta=-3.0</code>,
+<code>a=0.13385</code>, <code>b=0.13615</code></td>
+<td style="text-align: right;">119</td>
+</tr>
+</tbody>
+</table>
+
+**Observation:** The honest live-model result is modest, not dramatic.
+On this short topical-chat slice, meta-learning nudges retrieval quality
+in the expected direction and slightly increases candidate recovery, but
+it does not change headline interrupt precision/recall. Most of the
+short-horizon adaptation lands in the Sensitivity family
+(`rate_target_prior` shifting upward from the legacy `2.12` baseline
+toward `≈2.62`), while Focus narrows only slightly and Stability barely
+moves. That is still a meaningful correction to the earlier paper claim:
+the maps are now truly learnable and behaviorally active, but their
+short-horizon impact is limited on clean chat data.
+
+### Offline Semantic Label Classifier Prototype
+
+Before the runtime labeling corrections below, the branch relied on an
+overly aggressive repetition-gated label path. To test whether a more
+semantic, memory-like label pathway is viable before fully replacing the
+deployed path, we implemented an **offline prototype** that trains two
+small classifiers over candidate spans:
+
+-   **span typing:** `identity`, `person_entity`, `place`,
+    `org_project`, `topic`, `state`, `none`
+-   **promotion:** `durable`, `provisional`, `ignore`
+
+The prototype uses:
+
+-   `english-wordnet-2025.xml` for concept priors
+-   multilingual given-name and surname priors built from
+    `data/surnames/{forenames,surnames}.csv` plus U.S. Census surnames
+    through `scripts/build_name_priors.py`
+-   sentence/lexical context features
+-   optional external text embeddings through the rebuilt
+    `cortext_text_embedder`, which now resolves the repo’s preferred
+    text encoder (`EmbeddingGemma/llama.cpp` on this machine)
+
+#### Real-data study with multilingual priors (Apr 5, 2026)
+
+Run root: `logs/label_classifier_realdata_20260405`
+
+Training data:
+
+-   multilingual name priors from the Kaggle
+    `data/surnames/{forenames,surnames}.csv` tables, supplemented with
+    U.S. Census surnames
+-   real labeled entity spans from `WNUT17` (`train/dev/test`)
+-   weakly labeled sentences mined from prepared `TopicalChat`,
+    `EmpatheticDialogues`, and `Ubuntu Dialogue` exports
+-   real encoder features via the rebuilt `cortext_text_embedder` on
+    `EmbeddingGemma/llama.cpp`
+
+The resulting multilingual prior file is large (`≈383 MB`) because this
+run keeps the full aggregated name tables instead of pruning to a tiny
+seed list. The train/validation split contained `16,284` / `3,815`
+examples after mixing `WNUT17` with weak Cortext-style chat spans.
+
+<table>
+<thead>
+<tr>
+<th>head</th>
+<th style="text-align: right;">macro_f1</th>
+<th style="text-align: right;">supported_macro_f1</th>
+<th style="text-align: right;">accuracy</th>
+<th style="text-align: right;">candidate_recall</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>span typing</td>
+<td style="text-align: right;"><strong>0.302</strong></td>
+<td style="text-align: right;"><strong>0.528</strong></td>
+<td style="text-align: right;"><strong>0.724</strong></td>
+<td style="text-align: right;"><strong>0.971</strong></td>
+</tr>
+<tr>
+<td>promotion</td>
+<td style="text-align: right;"><strong>0.487</strong></td>
+<td style="text-align: right;"><strong>0.730</strong></td>
+<td style="text-align: right;"><strong>0.776</strong></td>
+<td style="text-align: right;"><strong>0.971</strong></td>
+</tr>
+</tbody>
+</table>
+
+The distinction between `macro_f1` and `supported_macro_f1` matters
+here: `WNUT17` only labels entity-like spans plus negatives, so
+`identity`, `topic`, and `state` have zero support in the held-out test
+split. The supported score is therefore the honest headline metric for
+the real-dataset run.
+
+#### Secondary curated smoke (Apr 5, 2026)
+
+Run root: `logs/label_classifier_realdata_20260405/eval_curated`
+
+To preserve one small full-taxonomy check, we also evaluated the same
+trained model on the curated span fixture in
+`data/label_classifier/gold.jsonl`. This is no longer the
+source-of-record experiment; it is a compact smoke that highlights
+coverage gaps outside the WNUT entity taxonomy.
+
+<table>
+<thead>
+<tr>
+<th>head</th>
+<th style="text-align: right;">macro_f1</th>
+<th style="text-align: right;">supported_macro_f1</th>
+<th style="text-align: right;">accuracy</th>
+<th style="text-align: right;">candidate_recall</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>span typing</td>
+<td style="text-align: right;"><strong>0.341</strong></td>
+<td style="text-align: right;"><strong>0.341</strong></td>
+<td style="text-align: right;"><strong>0.433</strong></td>
+<td style="text-align: right;"><strong>1.000</strong></td>
+</tr>
+<tr>
+<td>promotion</td>
+<td style="text-align: right;"><strong>0.439</strong></td>
+<td style="text-align: right;"><strong>0.439</strong></td>
+<td style="text-align: right;"><strong>0.633</strong></td>
+<td style="text-align: right;"><strong>1.000</strong></td>
+</tr>
+</tbody>
+</table>
+
+**Observations:** The prototype has moved from “toy feasibility” to a
+real offline experiment. On the held-out `WNUT17` test split, span
+typing reaches `0.528` supported macro F1 and promotion reaches `0.730`,
+with candidate recall still at `0.971`. That is strong enough to justify
+replacing the current exact-string repetition story at the research
+level. The curated smoke is now more useful as a failure probe than as a
+headline metric: the same model underperforms on `state` and `topic`,
+which tells us the current training mix is still too entity-heavy. So
+the bottleneck is no longer whether a semantic label classifier can
+train; it is whether we can broaden the real conversational supervision
+enough to cover non-entity concepts before runtime integration.
+
+### Online Label Persistence Ablation (Apr 5, 2026)
+
+We also corrected the **deployed** label path itself. The previous
+runtime policy applied a batch-level repetition threshold and, when
+labels were too sparse to clear it, collapsed each extraction result to
+a single highest-salience fallback label. This was the direct cause of
+pathological under-labeling in long chats, including name loss and label
+graphs with implausibly few nodes.
+
+The current runtime now persists extracted labels directly from each
+extraction result, deduped by normalized key within the result and
+reused by key across the store. To measure the impact cleanly, we added
+a deterministic ablation bench that re-enables the legacy gate through
+an internal study-only toggle:
+
+**Deterministic label-persistence ablation:**
+`./build/examples/benchmark/cortext_label_persistence_ablation_bench`
+
+<table>
+<colgroup>
+<col style="width: 21%" />
+<col style="width: 28%" />
+<col style="width: 28%" />
+<col style="width: 21%" />
+</colgroup>
+<thead>
+<tr>
+<th>scenario</th>
+<th style="text-align: right;">legacy gate</th>
+<th style="text-align: right;">current runtime</th>
+<th>result</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>sparse three-label extraction</td>
+<td style="text-align: right;"><code>1</code> label / <code>1</code>
+<code>has_label</code> edge</td>
+<td style="text-align: right;"><code>3</code> labels / <code>3</code>
+<code>has_label</code> edges</td>
+<td>current preserves all extracted labels</td>
+</tr>
+<tr>
+<td>repeated single-label extraction</td>
+<td style="text-align: right;"><code>1</code> label</td>
+<td style="text-align: right;"><code>1</code> label</td>
+<td>dedupe remains stable</td>
+</tr>
+</tbody>
+</table>
+
+Recorded metrics:
+
+-   `label_sparse_legacy_count = 1`
+-   `label_sparse_current_count = 3`
+-   `label_sparse_legacy_edges = 1`
+-   `label_sparse_current_edges = 3`
+-   `label_repeated_legacy_count = 1`
+-   `label_repeated_current_count = 1`
+
+**Targeted test coverage:**
+`./build/tests/cortext_tests "[operations][extraction][labels]"` passed
+with **8 assertions in 2 test cases**.
+
+**Observation:** This change is not about adding more decorative labels.
+It removes a lossy gate that was erasing semantically important one-shot
+entities before they could ever become part of the graph. The ablation
+shows the intended behavior clearly: sparse extractions now survive
+intact, while repeated identical labels still collapse to one durable
+node as before.
+
+### LFM2.5-350M Extractor Prompt Ablation
+
+Once sparse labels were allowed through, the next failure mode was
+obvious in the live chat DB: the fast local extractor was emitting junk
+labels like `user`, `assistant`, `support`, `documents`, and even
+schema-style tokens in contexts where the desired durable nodes were
+things like `Gabriel`, `Chicago`, `SQLite migration`, `Cortext`,
+`Sarah`, or `housing application`. Before paying the latency cost of a
+larger extraction model, we first tested whether prompt technique alone
+could recover better labels from the small `LFM2.5-350M` GGUF.
+
+We compared five prompt styles on the live local extractor:
+
+-   `baseline`: original recall-heavy zero-shot prompt
+-   `durable`: zero-shot durable-node wording
+-   `precision`: zero-shot precision-first wording
+-   `fewshot_durable`: durable-node wording plus short conversational
+    examples
+-   `fewshot_precision`: precision-first wording plus short
+    conversational examples
+
+The benchmark uses three short multi-turn fixtures that mirror the
+failure cases we saw in the chat DB:
+
+-   interview-prep noise (`interview`, `confidence`)
+-   identity plus work context (`Gabriel`, `Chicago`,
+    `SQLite migration`, `Cortext`)
+-   neighbor plus housing context (`Sarah`, `housing application`,
+    `Logan Square`)
+
+Each style is scored by desired-label hits, banned-label leakage, total
+emitted labels, overflow beyond a compact durable-label budget, and
+wall-clock latency.
+
+**Deterministic prompt-technique ablation:**
+`./build/examples/benchmark/cortext_extractor_prompt_ablation_bench`
+
+Run log:
+`logs/extractor_prompt_ablation_20260406/extractor_prompt_ablation.log`
+
+<table>
+<colgroup>
+<col style="width: 13%" />
+<col style="width: 17%" />
+<col style="width: 17%" />
+<col style="width: 17%" />
+<col style="width: 17%" />
+<col style="width: 17%" />
+</colgroup>
+<thead>
+<tr>
+<th>prompt style</th>
+<th style="text-align: right;">desired hits</th>
+<th style="text-align: right;">banned hits</th>
+<th style="text-align: right;">labels emitted</th>
+<th style="text-align: right;">latency (ms)</th>
+<th style="text-align: right;">score</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>baseline</code></td>
+<td style="text-align: right;"><code>6</code></td>
+<td style="text-align: right;"><code>2</code></td>
+<td style="text-align: right;"><code>13</code></td>
+<td style="text-align: right;"><code>3116</code></td>
+<td style="text-align: right;"><code>14</code></td>
+</tr>
+<tr>
+<td><code>durable</code></td>
+<td style="text-align: right;"><code>8</code></td>
+<td style="text-align: right;"><code>7</code></td>
+<td style="text-align: right;"><code>86</code></td>
+<td style="text-align: right;"><code>9794</code></td>
+<td style="text-align: right;"><code>-52</code></td>
+</tr>
+<tr>
+<td><code>precision</code></td>
+<td style="text-align: right;"><code>7</code></td>
+<td style="text-align: right;"><code>1</code></td>
+<td style="text-align: right;"><code>46</code></td>
+<td style="text-align: right;"><code>4898</code></td>
+<td style="text-align: right;"><code>-3</code></td>
+</tr>
+<tr>
+<td><code>fewshot_durable</code></td>
+<td style="text-align: right;"><code>8</code></td>
+<td style="text-align: right;"><code>4</code></td>
+<td style="text-align: right;"><code>16</code></td>
+<td style="text-align: right;"><code>3856</code></td>
+<td style="text-align: right;"><strong><code>16</code></strong></td>
+</tr>
+<tr>
+<td><code>fewshot_precision</code></td>
+<td style="text-align: right;"><code>5</code></td>
+<td style="text-align: right;"><code>2</code></td>
+<td style="text-align: right;"><code>8</code></td>
+<td style="text-align: right;"><code>3073</code></td>
+<td style="text-align: right;"><code>11</code></td>
+</tr>
+</tbody>
+</table>
+
+Representative outputs:
+
+-   `baseline` interview fixture:
+    `confidence, prep, support, interview, user, assistant`
+-   `fewshot_durable` identity/work fixture:
+    `Gabriel, Chicago, SQLite migration, Cortext`
+-   `fewshot_precision` neighbor/housing fixture:
+    `Sarah, housing application, Logan Square`
+
+**Observation:** The zero-shot rewrites alone were not enough. `durable`
+and `precision` both leaked their own instruction vocabulary back into
+the labels, including prompt words like `schema`, `timestamps`,
+`people`, and `projects`. The few-shot variants changed the behavior
+qualitatively. `fewshot_durable` was the best overall compromise: it
+recovered all four identity/work labels in the hardest fixture,
+preserved the full `Sarah` / `housing application` / `Logan Square`
+trio, and did so with only a modest latency increase over the old
+baseline (`3856 ms` vs `3116 ms` across the full three-fixture run).
+`fewshot_precision` was the leanest style, but it under-recalled the
+identity/work fixture too aggressively. Based on this ablation, the
+current branch now uses the **few-shot durable prompt as the deployed
+default** for the local `LFM2.5-350M` extraction path, while still
+allowing overrides through `CORTEXT_LFM2_EXTRACT_PROMPT_STYLE` for
+further study.
+
+### LFM2.5-350M Summarizer Prompt Ablation
+
+Once extraction quality improved, the next weak point was the
+**summarizer**: the fast local `LFM2.5-350M` summarization path was
+still vulnerable to prompt echo, speaker-role leakage, and a strong bias
+toward the **last excerpt** in a cluster. That showed up directly in
+earlier deep-consolidation failures: summaries would sometimes repeat
+prompt language, narrate the conversation mechanics, or ignore early
+identity facts like `Gabriel` / `Chicago` in favor of the final turn.
+
+Before paying the cost of a larger summarizer, we ran a prompt-technique
+ablation on the live local `LFM2.5-350M` GGUF. We compared six prompt
+styles:
+
+-   `baseline`: original excerpt-based zero-shot prompt
+-   `durable`: excerpt-based zero-shot durable-memory wording
+-   `precision`: excerpt-based zero-shot precision-first wording
+-   `fewshot_durable`: excerpt-based few-shot durable wording
+-   `fewshot_precision`: excerpt-based few-shot precision wording
+-   `transcript_fewshot`: few-shot prompt plus a **chat transcript**
+    input format instead of numbered excerpts
+
+The benchmark uses three short conversational fixtures that stress the
+failure modes we care about:
+
+-   identity plus work context (`Gabriel`, `Chicago`,
+    `SQLite migration`, `Cortext`, `demo`)
+-   project plus operations context (`Alice`, `Acme pilot`, `Seattle`,
+    `SSO`, `audit exports`, `June`, `renewal forecast`)
+-   neighbor plus housing context (`Sarah`, `housing application`,
+    `Logan Square`, `pay stubs`, `Tuesday`)
+
+Each style is scored by desired-fact hits, banned meta leakage (`User:`,
+`Assistant:`, `Excerpt`, `Final summary`, prompt echo), and wall-clock
+latency.
+
+**Deterministic prompt-technique ablation:**
+`./build/examples/benchmark/cortext_summarizer_prompt_ablation_bench`
+
+Run log:
+`logs/summarizer_prompt_ablation_20260406/summarizer_prompt_ablation.log`
+
+<table>
+<thead>
+<tr>
+<th>prompt style</th>
+<th style="text-align: right;">desired hits</th>
+<th style="text-align: right;">banned hits</th>
+<th style="text-align: right;">latency (ms)</th>
+<th style="text-align: right;">score</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>baseline</code></td>
+<td style="text-align: right;"><code>7</code></td>
+<td style="text-align: right;"><code>4</code></td>
+<td style="text-align: right;"><code>2404</code></td>
+<td style="text-align: right;"><code>2</code></td>
+</tr>
+<tr>
+<td><code>durable</code></td>
+<td style="text-align: right;"><code>1</code></td>
+<td style="text-align: right;"><code>3</code></td>
+<td style="text-align: right;"><code>1358</code></td>
+<td style="text-align: right;"><code>-7</code></td>
+</tr>
+<tr>
+<td><code>precision</code></td>
+<td style="text-align: right;"><code>5</code></td>
+<td style="text-align: right;"><code>2</code></td>
+<td style="text-align: right;"><code>1216</code></td>
+<td style="text-align: right;"><code>4</code></td>
+</tr>
+<tr>
+<td><code>fewshot_durable</code></td>
+<td style="text-align: right;"><code>1</code></td>
+<td style="text-align: right;"><code>3</code></td>
+<td style="text-align: right;"><code>2033</code></td>
+<td style="text-align: right;"><code>-7</code></td>
+</tr>
+<tr>
+<td><code>fewshot_precision</code></td>
+<td style="text-align: right;"><code>6</code></td>
+<td style="text-align: right;"><code>0</code></td>
+<td style="text-align: right;"><code>1739</code></td>
+<td style="text-align: right;"><code>12</code></td>
+</tr>
+<tr>
+<td><code>transcript_fewshot</code></td>
+<td style="text-align: right;"><strong><code>15</code></strong></td>
+<td style="text-align: right;"><strong><code>0</code></strong></td>
+<td style="text-align: right;"><code>1850</code></td>
+<td style="text-align: right;"><strong><code>30</code></strong></td>
+</tr>
+</tbody>
+</table>
+
+Representative outputs:
+
+-   `baseline` identity/work fixture:
+    `User: I am debugging a SQLite migration for Cortext before the demo. Assistant: The migration is progressing well...`
+-   `fewshot_precision` identity/work fixture:
+    `Debugging a SQLite migration for Cortext before the demo.`
+-   `transcript_fewshot` identity/work fixture:
+    `Gabriel lives in Chicago and is debugging a SQLite migration for Cortext before the demo.`
+-   `transcript_fewshot` project/ops fixture:
+    `Alice is leading the Acme pilot in Seattle, and the customer needs SSO and audit exports before June.`
+
+**Observation:** The biggest win did **not** come from adding more
+wording. It came from changing the input shape. The excerpt-based
+prompts remained last-turn-biased: even the better few-shot excerpt
+styles still dropped early facts like `Gabriel` and `Chicago`, or
+collapsed the whole cluster to the last blocker sentence. The
+transcript-style prompt changed the behavior qualitatively. On the live
+local `LFM2.5-350M` summarizer it recovered all five desired
+identity/work facts, six of seven project/ops facts, and four of five
+neighbor/housing facts, with **zero** banned meta hits and only a
+moderate latency cost relative to the leanest zero-shot style (`1850 ms`
+vs `1216 ms` across the three-fixture run). Based on this ablation, the
+current branch now uses the **transcript few-shot prompt as the deployed
+default** for the local `LFM2.5-350M` summarization path, while still
+allowing overrides through `CORTEXT_LFM2_SUMMARY_PROMPT_STYLE` for
+further study.
+
+### Storage-Gated Eviction Ablation (Apr 5, 2026)
+
+We also corrected a practical failure mode in the deployed eviction
+policy. The previous runtime would evict weak `LONG_TERM` memories as
+soon as they fell below `periphery_cutoff(T)`, even when the backing
+chat database was still trivially small. In long user conversations this
+produced premature forgetting: names and low-frequency autobiographical
+details could decay out of the active store long before disk pressure
+justified any deletion.
+
+The current runtime now applies a storage gate before the usual
+strength-based eviction query. For file-backed stores, eviction is
+blocked until the database footprint reaches a configurable floor. The
+floor can be a fixed byte budget, a percentage of currently available
+disk space, or both; the active threshold is the maximum of those
+values. The default deployed fixed floor is `500 MB`.
+
+**Deterministic storage-budget ablation:**
+`./build/examples/benchmark/cortext_storage_eviction_budget_bench`
+
+<table>
+<colgroup>
+<col style="width: 21%" />
+<col style="width: 28%" />
+<col style="width: 28%" />
+<col style="width: 21%" />
+</colgroup>
+<thead>
+<tr>
+<th>scenario</th>
+<th style="text-align: right;">storage gate floor</th>
+<th style="text-align: right;">surviving weak memory count</th>
+<th>result</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>high budget guard</td>
+<td style="text-align: right;"><code>1 GiB</code></td>
+<td style="text-align: right;"><code>1</code></td>
+<td>weak memory is retained because storage budget is not yet full</td>
+</tr>
+<tr>
+<td>zero budget</td>
+<td style="text-align: right;"><code>0</code></td>
+<td style="text-align: right;"><code>0</code></td>
+<td>the same weak memory is evicted once the storage gate is
+removed</td>
+</tr>
+</tbody>
+</table>
+
+Recorded metrics:
+
+-   `storage_gate_high_budget_count = 1`
+-   `storage_gate_blocks_early_eviction = 1`
+-   `storage_gate_zero_budget_count = 0`
+-   `storage_gate_allows_eviction_after_limit = 1`
+
+**Targeted test coverage:**
+`./build/tests/cortext_tests "[op18][memory_strength][storage_gate]"`
+passed with **3 assertions in 2 test cases**.
+
+**Observation:** This is a policy correction, not an attempt to make
+eviction disappear. Strength and fact-floor rules still determine
+*which* memories are eligible once storage pressure is real. The storage
+gate simply prevents the engine from acting like a tiny chat database is
+already full.
+
+We then added a second deterministic sweep to answer the practical
+sizing question: **how much storage budget is actually enough to delay
+forgetting?** This sweep uses a file-backed SQLite store, grows the
+database by `5 MB` per simulated step, and records both the
+storage-threshold crossing step and the eventual eviction step for the
+same weak memory.
+
+**Deterministic storage-threshold survival sweep:**
+`./build/examples/benchmark/cortext_storage_eviction_sweep_bench`
+
+<table>
+<thead>
+<tr>
+<th>fixed storage floor</th>
+<th style="text-align: right;">threshold-cross step</th>
+<th style="text-align: right;">eviction step</th>
+<th>result</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>0 MB</code></td>
+<td style="text-align: right;"><code>1</code></td>
+<td style="text-align: right;"><code>62</code></td>
+<td>pure decay-limited baseline</td>
+</tr>
+<tr>
+<td><code>64 MB</code></td>
+<td style="text-align: right;"><code>13</code></td>
+<td style="text-align: right;"><code>62</code></td>
+<td>no practical delay vs baseline</td>
+</tr>
+<tr>
+<td><code>128 MB</code></td>
+<td style="text-align: right;"><code>26</code></td>
+<td style="text-align: right;"><code>62</code></td>
+<td>still decay-limited</td>
+</tr>
+<tr>
+<td><code>256 MB</code></td>
+<td style="text-align: right;"><code>51</code></td>
+<td style="text-align: right;"><code>62</code></td>
+<td>still decay-limited</td>
+</tr>
+<tr>
+<td><code>500 MB</code></td>
+<td style="text-align: right;"><code>100</code></td>
+<td style="text-align: right;"><code>100</code></td>
+<td>first storage-limited regime</td>
+</tr>
+<tr>
+<td><code>1 GB</code></td>
+<td style="text-align: right;"><code>200</code></td>
+<td style="text-align: right;"><code>200</code></td>
+<td>larger-device storage-limited regime</td>
+</tr>
+<tr>
+<td><code>2 GB</code></td>
+<td style="text-align: right;"><code>400</code></td>
+<td style="text-align: right;"><code>400</code></td>
+<td>very large-device storage-limited regime</td>
+</tr>
+</tbody>
+</table>
+
+Recorded metrics:
+
+-   `storage_sweep_0mb_eviction_step = 62`
+-   `storage_sweep_64mb_eviction_step = 62`
+-   `storage_sweep_128mb_eviction_step = 62`
+-   `storage_sweep_256mb_eviction_step = 62`
+-   `storage_sweep_500mb_eviction_step = 100`
+-   `storage_sweep_500mb_cross_bytes = 501829632`
+-   `storage_sweep_default_500mb_delays_vs_64mb = 1`
+-   `storage_sweep_1gb_eviction_step = 200`
+-   `storage_sweep_2gb_eviction_step = 400`
+-   `storage_sweep_1gb_delays_vs_500mb = 1`
+-   `storage_sweep_2gb_delays_vs_1gb = 1`
+
+**Observation:** The useful takeaway is not that “more storage is always
+better.” It is that there is a real **decay-limited regime** and a real
+**storage-limited regime**. In this workload, any budget up to `256 MB`
+still lets the memory die on its normal decay curve at step `62`,
+because the database reaches those thresholds before the memory becomes
+too weak. `500 MB` is the first tested budget that pushes the system
+into the storage-limited regime, delaying eviction to step `100`; `1 GB`
+and `2 GB` extend that same pattern to steps `200` and `400`. That is
+why the default floor was raised well above the earlier `64 MiB`
+setting: the smaller floor looked safer on paper than it actually was in
+practice.
+
+We then extended the study into an end-to-end steady-state chat regime,
+where the relevant question is not just when a weak memory dies, but
+whether it survives long enough for the next label-producing
+consolidation window to fire. This benchmark uses the same file-backed
+`5 MB/step` growth profile, keeps the memory in the
+post-initial-consolidation pool, and measures whether a three-label
+extraction (`Gabriel`, `Chicago`, `Cortext`) is created before the raw
+memory is evicted.
+
+**Deterministic storage × consolidation end-to-end ablation:**
+`./build/examples/benchmark/cortext_storage_consolidation_e2e_bench`
+
+<table>
+<colgroup>
+<col style="width: 11%" />
+<col style="width: 14%" />
+<col style="width: 14%" />
+<col style="width: 14%" />
+<col style="width: 14%" />
+<col style="width: 14%" />
+<col style="width: 14%" />
+</colgroup>
+<thead>
+<tr>
+<th>fixed storage floor</th>
+<th style="text-align: right;">raw-memory eviction step</th>
+<th style="text-align: right;">every <code>30</code> steps</th>
+<th style="text-align: right;">every <code>60</code> steps</th>
+<th style="text-align: right;">every <code>90</code> steps</th>
+<th style="text-align: right;">every <code>120</code> steps</th>
+<th style="text-align: right;">every <code>150</code> steps</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>0 MB</code></td>
+<td style="text-align: right;"><code>62</code></td>
+<td style="text-align: right;"><code>3</code> labels retained</td>
+<td style="text-align: right;"><code>3</code> labels retained</td>
+<td style="text-align: right;"><code>0</code> labels</td>
+<td style="text-align: right;"><code>0</code> labels</td>
+<td style="text-align: right;"><code>0</code> labels</td>
+</tr>
+<tr>
+<td><code>64 MB</code></td>
+<td style="text-align: right;"><code>62</code></td>
+<td style="text-align: right;"><code>3</code> labels retained</td>
+<td style="text-align: right;"><code>3</code> labels retained</td>
+<td style="text-align: right;"><code>0</code> labels</td>
+<td style="text-align: right;"><code>0</code> labels</td>
+<td style="text-align: right;"><code>0</code> labels</td>
+</tr>
+<tr>
+<td><code>128 MB</code></td>
+<td style="text-align: right;"><code>62</code></td>
+<td style="text-align: right;"><code>3</code> labels retained</td>
+<td style="text-align: right;"><code>3</code> labels retained</td>
+<td style="text-align: right;"><code>0</code> labels</td>
+<td style="text-align: right;"><code>0</code> labels</td>
+<td style="text-align: right;"><code>0</code> labels</td>
+</tr>
+<tr>
+<td><code>256 MB</code></td>
+<td style="text-align: right;"><code>62</code></td>
+<td style="text-align: right;"><code>3</code> labels retained</td>
+<td style="text-align: right;"><code>3</code> labels retained</td>
+<td style="text-align: right;"><code>0</code> labels</td>
+<td style="text-align: right;"><code>0</code> labels</td>
+<td style="text-align: right;"><code>0</code> labels</td>
+</tr>
+<tr>
+<td><code>500 MB</code></td>
+<td style="text-align: right;"><code>100</code></td>
+<td style="text-align: right;"><code>3</code> labels retained</td>
+<td style="text-align: right;"><code>3</code> labels retained</td>
+<td style="text-align: right;"><code>3</code> labels retained</td>
+<td style="text-align: right;"><code>0</code> labels</td>
+<td style="text-align: right;"><code>0</code> labels</td>
+</tr>
+<tr>
+<td><code>1 GB</code></td>
+<td style="text-align: right;"><code>200</code></td>
+<td style="text-align: right;"><code>3</code> labels retained</td>
+<td style="text-align: right;"><code>3</code> labels retained</td>
+<td style="text-align: right;"><code>3</code> labels retained</td>
+<td style="text-align: right;"><code>3</code> labels retained</td>
+<td style="text-align: right;"><code>3</code> labels retained</td>
+</tr>
+<tr>
+<td><code>2 GB</code></td>
+<td style="text-align: right;"><code>400</code></td>
+<td style="text-align: right;"><code>3</code> labels retained</td>
+<td style="text-align: right;"><code>3</code> labels retained</td>
+<td style="text-align: right;"><code>3</code> labels retained</td>
+<td style="text-align: right;"><code>3</code> labels retained</td>
+<td style="text-align: right;"><code>3</code> labels retained</td>
+</tr>
+</tbody>
+</table>
+
+Recorded checks:
+
+-   `storage_cons_no_consolidation_creates_no_labels = 1`
+-   `storage_cons_64mb_interval60_captures_labels = 1`
+-   `storage_cons_64mb_interval90_misses_labels = 1`
+-   `storage_cons_500mb_interval90_captures_labels = 1`
+-   `storage_cons_500mb_interval90_delays_vs_64mb = 1`
+-   `storage_cons_500mb_interval120_misses_labels = 1`
+-   `storage_cons_1gb_interval120_captures_labels = 1`
+-   `storage_cons_1gb_interval150_captures_labels = 1`
+-   `storage_cons_2gb_interval150_captures_labels = 1`
+-   `storage_cons_1gb_interval150_delays_vs_500mb = 1`
+
+**Observation:** This is the strongest practical justification for the
+higher default and for device-class scaling above it. Under small
+storage budgets, the system still has enough time to consolidate on
+short cadences (`30` or `60` steps), but it misses slower
+label-formation windows because the raw memory is gone by step `62`.
+With a `500 MB` floor, the same memory survives to step `100`, which is
+enough for a `90`-step consolidation interval to capture and persist the
+labels before the episodic trace is evicted. With `1 GB`, the survival
+window extends to step `200`, which is enough for both `120`- and
+`150`-step consolidation intervals. `2 GB` does not add new
+label-capture wins on this task beyond `1 GB`; it extends the safety
+margin further. So the current evidence suggests a useful plateau
+structure: `500 MB` is a good default for ordinary chat retention, while
+`1 GB` is the first meaningful “slow consolidation / large-memory” tier.
+
+We then replaced the abstract fixed-step consolidation cadence with a
+synthetic human sleep clock derived from representative age-group sleep
+patterns. Each profile uses one consolidation opportunity per sleep
+bout, where the number of bouts per 24 hours is `1 + naps/day`. The
+benchmark uses a `24 h` episodic half-life, a synthetic file-backed
+storage growth rate of `12 MB/hour`, and asks a more human-like
+question: **does a weak autobiographical trace survive long enough to be
+consolidated during the next realistic sleep cycle?**
+
+**Deterministic storage × human sleep consolidation ablation:**
+`./build/examples/benchmark/cortext_storage_human_sleep_consolidation_bench`
+
+<table>
+<colgroup>
+<col style="width: 11%" />
+<col style="width: 11%" />
+<col style="width: 15%" />
+<col style="width: 15%" />
+<col style="width: 15%" />
+<col style="width: 15%" />
+<col style="width: 15%" />
+</colgroup>
+<thead>
+<tr>
+<th>age group</th>
+<th>sleep pattern used in the synthetic clock</th>
+<th style="text-align: right;">effective consolidation cadence</th>
+<th style="text-align: right;"><code>0 MB</code> floor</th>
+<th style="text-align: right;"><code>256 MB</code> floor</th>
+<th style="text-align: right;"><code>500 MB</code> floor</th>
+<th style="text-align: right;"><code>1 GB</code> floor</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>newborn</td>
+<td><code>14–17 h</code>, <code>4–6</code> naps/day</td>
+<td style="text-align: right;">every <code>4 h</code></td>
+<td style="text-align: right;"><code>3</code> labels</td>
+<td style="text-align: right;"><code>3</code> labels</td>
+<td style="text-align: right;"><code>3</code> labels</td>
+<td style="text-align: right;"><code>3</code> labels</td>
+</tr>
+<tr>
+<td>infant</td>
+<td><code>12–16 h</code>, <code>2–3</code> naps/day</td>
+<td style="text-align: right;">every <code>7 h</code></td>
+<td style="text-align: right;"><code>0</code> labels</td>
+<td style="text-align: right;"><code>3</code> labels</td>
+<td style="text-align: right;"><code>3</code> labels</td>
+<td style="text-align: right;"><code>3</code> labels</td>
+</tr>
+<tr>
+<td>toddler</td>
+<td><code>11–14 h</code>, <code>1–2</code> naps/day</td>
+<td style="text-align: right;">every <code>10 h</code></td>
+<td style="text-align: right;"><code>0</code> labels</td>
+<td style="text-align: right;"><code>3</code> labels</td>
+<td style="text-align: right;"><code>3</code> labels</td>
+<td style="text-align: right;"><code>3</code> labels</td>
+</tr>
+<tr>
+<td>preschool</td>
+<td><code>10–13 h</code>, <code>0–1</code> naps/day</td>
+<td style="text-align: right;">every <code>16 h</code></td>
+<td style="text-align: right;"><code>0</code> labels</td>
+<td style="text-align: right;"><code>3</code> labels</td>
+<td style="text-align: right;"><code>3</code> labels</td>
+<td style="text-align: right;"><code>3</code> labels</td>
+</tr>
+<tr>
+<td>school-age</td>
+<td><code>9–12 h</code>, <code>0</code> naps/day</td>
+<td style="text-align: right;">every <code>24 h</code></td>
+<td style="text-align: right;"><code>0</code> labels</td>
+<td style="text-align: right;"><code>0</code> labels</td>
+<td style="text-align: right;"><code>3</code> labels</td>
+<td style="text-align: right;"><code>3</code> labels</td>
+</tr>
+<tr>
+<td>teen</td>
+<td><code>8–10 h</code>, <code>0</code> naps/day</td>
+<td style="text-align: right;">every <code>24 h</code></td>
+<td style="text-align: right;"><code>0</code> labels</td>
+<td style="text-align: right;"><code>0</code> labels</td>
+<td style="text-align: right;"><code>3</code> labels</td>
+<td style="text-align: right;"><code>3</code> labels</td>
+</tr>
+<tr>
+<td>adult</td>
+<td><code>7–9 h</code>, optional naps</td>
+<td style="text-align: right;">every <code>24 h</code></td>
+<td style="text-align: right;"><code>0</code> labels</td>
+<td style="text-align: right;"><code>0</code> labels</td>
+<td style="text-align: right;"><code>3</code> labels</td>
+<td style="text-align: right;"><code>3</code> labels</td>
+</tr>
+<tr>
+<td>older adult</td>
+<td><code>7–8 h</code>, optional naps</td>
+<td style="text-align: right;">every <code>24 h</code></td>
+<td style="text-align: right;"><code>0</code> labels</td>
+<td style="text-align: right;"><code>0</code> labels</td>
+<td style="text-align: right;"><code>3</code> labels</td>
+<td style="text-align: right;"><code>3</code> labels</td>
+</tr>
+</tbody>
+</table>
+
+Recorded checks:
+
+-   `human_sleep_newborn_zero_budget_captures = 1`
+-   `human_sleep_adult_zero_budget_misses = 1`
+-   `human_sleep_adult_256mb_misses = 1`
+-   `human_sleep_adult_500mb_captures = 1`
+-   `human_sleep_adult_1gb_matches_500mb = 1`
+-   `human_sleep_older_adult_500mb_captures = 1`
+
+**Observation:** This synthetic-clock view is more interpretable than
+the earlier abstract interval sweep. It shows that frequent sleep in
+early life behaves like a natural consolidation rescue mechanism:
+newborn-style sleep is frequent enough that even a zero storage floor
+still captures the labels before the trace dies, while
+infant/toddler/preschool profiles already benefit from modest storage
+budgets such as `256 MB`. The adult-side boundary is sharper and more
+important for real chat systems: once consolidation becomes essentially
+once-per-day, `256 MB` is no longer enough, and `500 MB` is the first
+tested floor that reliably keeps the trace alive until the nightly
+consolidation window. `1 GB` still helps, but in this human-like
+benchmark it acts as safety margin rather than unlocking a new retention
+class. That is the clearest current justification for the deployed
+`500 MB` default.
+
+We also added a matching **estimated token-cost ablation** over the same
+synthetic sleep schedules. This study uses the repository’s existing
+character-to-token heuristic (`ceil(chars / 4)`) to estimate the prompt
+and completion budget for each consolidation session over a `72 h`
+synthetic clock with one autobiographical trace arriving per hour. It is
+intentionally a cost proxy, not a billing measurement: the goal is to
+compare how much more summarization/extraction budget frequent
+sleep-style consolidation would consume relative to nightly
+consolidation.
+
+**Deterministic storage × human sleep token-cost ablation:**
+`./build/examples/benchmark/cortext_storage_human_sleep_token_bench`
+
+<table>
+<colgroup>
+<col style="width: 15%" />
+<col style="width: 21%" />
+<col style="width: 21%" />
+<col style="width: 21%" />
+<col style="width: 21%" />
+</colgroup>
+<thead>
+<tr>
+<th>age group</th>
+<th style="text-align: right;">effective consolidation cadence</th>
+<th style="text-align: right;">storage floor</th>
+<th style="text-align: right;">consolidation events over
+<code>72 h</code></th>
+<th style="text-align: right;">estimated total tokens</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>newborn</td>
+<td style="text-align: right;">every <code>4 h</code></td>
+<td style="text-align: right;"><code>500 MB</code></td>
+<td style="text-align: right;"><code>18</code></td>
+<td style="text-align: right;"><code>7090</code></td>
+</tr>
+<tr>
+<td>infant</td>
+<td style="text-align: right;">every <code>7 h</code></td>
+<td style="text-align: right;"><code>500 MB</code></td>
+<td style="text-align: right;"><code>10</code></td>
+<td style="text-align: right;"><code>5199</code></td>
+</tr>
+<tr>
+<td>toddler</td>
+<td style="text-align: right;">every <code>10 h</code></td>
+<td style="text-align: right;"><code>500 MB</code></td>
+<td style="text-align: right;"><code>7</code></td>
+<td style="text-align: right;"><code>4520</code></td>
+</tr>
+<tr>
+<td>preschool</td>
+<td style="text-align: right;">every <code>16 h</code></td>
+<td style="text-align: right;"><code>500 MB</code></td>
+<td style="text-align: right;"><code>4</code></td>
+<td style="text-align: right;"><code>3590</code></td>
+</tr>
+<tr>
+<td>adult</td>
+<td style="text-align: right;">every <code>24 h</code></td>
+<td style="text-align: right;"><code>0 MB</code></td>
+<td style="text-align: right;"><code>3</code></td>
+<td style="text-align: right;"><code>3700</code></td>
+</tr>
+<tr>
+<td>adult</td>
+<td style="text-align: right;">every <code>24 h</code></td>
+<td style="text-align: right;"><code>500 MB</code></td>
+<td style="text-align: right;"><code>3</code></td>
+<td style="text-align: right;"><code>3700</code></td>
+</tr>
+<tr>
+<td>adult</td>
+<td style="text-align: right;">every <code>24 h</code></td>
+<td style="text-align: right;"><code>1 GB</code></td>
+<td style="text-align: right;"><code>3</code></td>
+<td style="text-align: right;"><code>3700</code></td>
+</tr>
+</tbody>
+</table>
+
+Recorded checks:
+
+-   `human_sleep_tokens_newborn_cost_exceeds_adult_500mb = 1`
+-   `human_sleep_tokens_newborn_events_exceed_adult_500mb = 1`
+-   `human_sleep_tokens_adult_500mb_cost_matches_0mb = 1`
+-   `human_sleep_tokens_adult_1gb_matches_500mb_retention = 1`
+-   `human_sleep_tokens_adult_1gb_matches_500mb_cost = 1`
+
+**Observation:** In this steady hourly-trace workload, token cost is
+dominated by **consolidation frequency**, not by the storage floor.
+Newborn-style frequent sleep performs roughly `1.9×` the estimated token
+work of adult nightly consolidation over the same `72 h` horizon (`7090`
+vs `3700` tokens), because it runs far more consolidation sessions even
+though each session is smaller. By contrast, once the workload is
+already surviving into the nightly consolidation loop, raising the
+storage floor from `0 MB` to `500 MB` or `1 GB` does not materially
+change the estimated token budget in this proxy study. That does **not**
+mean storage is irrelevant; the human-retention ablation above showed
+that storage floor is still decisive for whether fragile traces survive
+long enough to reach a nightly consolidation window at all. The joint
+takeaway is that cadence drives cost, while storage floor determines
+whether slower cadences remain viable.
+
 ### Messy Chat Baseline (Ubuntu Dialogue Corpus)
 
 We ran a long‑horizon baseline on the **Ubuntu Dialogue Corpus
@@ -5633,11 +9395,12 @@ decision thresholds rather than retrieval breadth.
 
 ## Embedding-Only Operations
 
-All online operations (scoring, boundary detection, retrieval, gating,
-graph updates) operate **only** on embeddings. Raw text/audio/image
-content is used solely to generate embeddings; the live loop never
-re-enters token space. This preserves modality-agnostic behavior and
-prevents hidden heuristics from bypassing knob control.
+In the current alpha, all online operations (scoring, boundary
+detection, retrieval, gating, graph updates) operate **only** on
+embeddings. Raw text/audio/image content is used solely to generate
+embeddings; the live loop never re-enters token space. This preserves
+modality-agnostic behavior and prevents hidden heuristics from bypassing
+knob control.
 
 Retrieved memories are hydrated for inspection and evaluation only. When
 a memory has no signal-level blobs (e.g., consolidation summaries), the
@@ -5651,27 +9414,153 @@ nodes can participate in analysis without affecting online computations.
 -   **Consolidation LLM:** summarization and labeling are the only
     generative steps and run only during consolidation. Cortext resolves
     a local backend internally: **gemma-3n-e2b** via
-    `third_party/litert_lm`, **LFM2** via `llama.cpp` GGUFs, or a
-    **mixed** Gemma+LFM2 path. The Gemma path auto-selects among
+    `third_party/litert_lm`, **LFM2/LFM2.5** via `llama.cpp` GGUFs, or a
+    **mixed** Gemma+Liquid path. The Gemma path auto-selects among
     available `.litertlm` variants under `models/gemma3n-e2b-litert/`.
-    The LFM2 path is pinned to `LFM2-2.6B-Transcript-Q4_K_M.gguf` for
-    summarization and `LFM2-1.2B-Extract-Q4_K_M.gguf` for extraction,
-    with env overrides for exact paths. The mixed path uses Gemma for
-    summarization and the pinned LFM2 extract model for labeling, and
-    auto resolution now prefers that split when both assets are present.
-    If no deep backend is available, deep consolidation raises an error
-    rather than silently degrading. The summarization prompt remains
-    role-aware for chat sources, favors direct fact-oriented memory
-    notes over dialogue recaps, explicitly preserves named people,
-    projects, and technologies, discourages speaker-role phrasing such
-    as “the user” or “the assistant”, and preserves chronological
-    ordering when selected chat excerpts are passed to the model. The
-    LFM2 path is text-only; audio-specific summarization/extraction
-    methods remain unsupported there.
+    The Liquid path now prefers `LFM2.5-350M-GGUF` for both
+    summarization and extraction, preferring `Q4_K_M` when present and
+    otherwise accepting other shipped GGUF quantizations; env overrides
+    still take precedence for exact paths. If the `LFM2.5-350M-GGUF`
+    asset is absent, Cortext falls back to the older
+    `LFM2-2.6B-Transcript-Q4_K_M.gguf` summarizer and
+    `LFM2-1.2B-Extract-Q4_K_M.gguf` extractor. The mixed path uses Gemma
+    for summarization and the preferred Liquid extractor path for
+    labeling, but auto resolution now prefers the pure
+    `LFM2.5/llama.cpp` path when the Liquid assets are present; mixed
+    and Gemma are fallbacks. If no deep backend is available, deep
+    consolidation raises an error rather than silently degrading. The
+    summarization prompt remains role-aware for chat sources, favors
+    direct fact-oriented memory notes over dialogue recaps, explicitly
+    preserves named people, projects, and technologies, discourages
+    speaker-role phrasing such as “the user” or “the assistant”, and
+    preserves chronological ordering when selected chat excerpts are
+    passed to the model. The Liquid GGUF path is text-only;
+    audio-specific summarization/extraction methods remain unsupported
+    there.
+-   **Offline label-classifier prototype:** we now also ship a
+    research-only Python pipeline that trains span typing / promotion
+    models from WordNet, multilingual name priors, and sentence context.
+    The current study path builds those priors from
+    `data/surnames/{forenames,surnames}.csv` plus U.S. Census surnames.
+    When external embeddings are enabled, the prototype reuses the
+    repo’s preferred text encoder through the rebuilt
+    `cortext_text_embedder`, so offline studies can run on
+    `EmbeddingGemma/llama.cpp` without changing the online runtime path.
 
 No other model runtimes are required for the online loop; all
 operational decisions are embedding-space computations derived from
 F/S/T.
+
+## Alpha Scope and Structured-Fact Foundation
+
+The current alpha stores temporality primarily at the episodic level:
+
+-   episodic memories have event timestamps,
+-   retrieval and decay are recency-aware,
+-   consolidation produces summaries, labels, and graph structure.
+
+This is sufficient for long-horizon continuity, but it is not enough on
+its own for changing structured facts such as residence, caregiver,
+routine, diagnosis, medication, or appointment state.
+
+The current phase adds an additive **bitemporal structured-fact layer**
+populated during consolidation rather than during the live loop. A
+minimal fact record includes:
+
+    fact_id
+    subject
+    predicate
+    object_or_value
+    valid_start, valid_end
+    recorded_at, superseded_at
+    confidence
+    source_memory_ids
+    source_summary_ids
+
+This layer is additive, not a replacement for the existing episodic
+graph. The division of responsibility is:
+
+-   **episodic memories:** preserve raw experience and provenance,
+-   **summaries and graph nodes:** provide semantic compression and
+    associative retrieval,
+-   **bitemporal facts:** answer changing factual questions with
+    explicit world-time and system-time semantics.
+
+Under this design, deep extraction in consolidation emits assertions
+with valid-time and transaction-time boundaries. The fact store supports
+three query modes:
+
+-   current truth (`what is true now?`)
+-   historical truth (`what was true at world time τ?`)
+-   historical belief
+    (`what would Cortext have answered at system time τ?`)
+
+Crucially, this preserves the alpha architecture: the live control loop
+remains embedding-only, while structured temporal reasoning is added as
+a higher-level memory product derived from consolidation outputs. The
+current branch uses those facts in the core retrieval and lifecycle path
+rather than exposing a separate fact payload in the chat example.
+
+The three user-facing knobs still shape the core behavior:
+
+-   **Focus** increases fact-linked retrieval influence and strengthens
+    stale-conflict suppression during ranking.
+-   **Sensitivity** increases preference for newly confirmed caregiver,
+    location, and schedule changes when current evidence conflicts with
+    older routine summaries.
+-   **Stability** contributes a lighter routine-preservation bias in the
+    core retrieval path and broader memory dynamics.
+
+Phase 6 hardens the **core** bitemporal layer before any additional chat
+integration. Two changes were necessary in the retrieval pipeline.
+First, current-mode ranking now penalizes stale same-pair evidence even
+when an older fact has the same object string as the current winner (for
+example, `Austin -> Denver -> Austin` no longer lets the old `Austin`
+memory outrank the current one merely because it is semantically closer
+to the query vector). Second, fact seeding now over-fetches from the
+shared embedding table before temporal filtering so that current fact
+embeddings are not crowded out by nearby non-fact memory embeddings. On
+the ingestion side, conflicting low-confidence assertions are no longer
+allowed to supersede stronger current facts; they are stored as
+immediately superseded evidence until a sufficiently strong correction
+arrives.
+
+Phase 7 adds a second internal experiment layer on top of that hardened
+core: a thread-local **retrieval ablation override** used only by
+deterministic tests and benchmarks. It can disable the fact layer
+entirely, collapse historical queries to current-only behavior, scale
+fact boosts and stale penalties, relax provenance from direct evidence
+links to unrestricted semantic fact matches, and apply a
+routine-versus-recency preset in the core scoring path. Phase 8 extends
+that layer with a broader deterministic matrix: explicit `current` /
+`valid_at` / `known_at` reporting, a wider predicate/severity scenario
+set, and a representative `3 x 3 x 3` F/S/T sweep. The key
+implementation constraint remains unchanged: the override changes only
+internal core behavior; no public headers, C API surfaces, or chat-path
+controls are introduced.
+
+Phase 9 adds the missing **fact lifecycle** layer. Fact assertions now
+persist internal support traces such as support mass, source diversity,
+contradiction mass, confirmation count, severity class, and lifecycle
+state (`active`, `weak`, `archived`). Consolidation still inserts or
+supersedes fact assertions, but it now also updates those support traces
+and then runs a bounded lifecycle maintenance sweep. That sweep decays
+unsupported facts, compresses repeated confirmations into support
+statistics, archives low-support facts, and physically deletes only
+low-severity archived facts by default. High-severity historical facts
+are retained even after evidence loss so that deterministic `valid_at`
+and `known_at` queries remain correct.
+
+This leaves the architecture in the intended order: the fact store,
+temporal queries, fact-aware retrieval, and lifecycle maintenance are
+now benchmark-gated at the core level and causally ablated there, while
+the chat example remains a consumer of the normal memory-return surface
+rather than a separate fact-grounding path.
+
+Lower-level temporal retrieval modes (`current`, `valid_at`, `known_at`)
+remain implemented for deterministic tests and benchmarks. Explicit
+user-facing temporal controls and any future chat-specific grounding or
+reply templating remain later work.
 
 ## Computational Complexity
 
@@ -5845,8 +9734,10 @@ On cold start (no persisted state), initialize retained state as follows
     `suppression = 0`, `flashbulb = 0`, `s_emotion_max = 0`,
     `s_arousal_avg = 0`, `boundary_score = 0`, `tagged = false`,
     `tag_expires_at = 0`, `context = 0_vector`,
-    `source_model = {origin: 'unknown', reliability: 0.5, contradiction_count: 0, last_verified_ts: 0}`,
-    `versions = {evidence_packets: [], reconstructions: []}`.
+    `source_model = {origin: 'unknown', reliability: 0.5, contradiction_count: 0, last_verified_ts: 0}`.
+    Evidence packets live in ordered `signals` rows, and the
+    constructive-recall ledger starts empty until the initial
+    reconstruction row is appended in `memory_reconstructions`.
 
 -   **RLS defaults:** `w_* = w_bootstrap`, `P = diag(1000)`,
     `blender_ready = false`, `blender_update_count = 0`.

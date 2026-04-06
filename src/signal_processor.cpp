@@ -1,5 +1,6 @@
 #include "cortext/core/knobs.hpp"
 #include "cortext/consolidation_mode.hpp"
+#include "cortext/internal/cancellation.hpp"
 #include "cortext/processor.hpp"
 #include "cortext/processor/operation_context.hpp"
 #include "cortext/store/store.hpp"
@@ -1094,6 +1095,7 @@ SignalProcessor::Process (const Signal &signal)
 
   // Create transaction for this signal processing
   auto tx = store_ ? store_->Begin () : nullptr;
+  const ProcessorContext context_snapshot = *context_;
 
   OperationContext op_context (signal, *context_, config_, store_.get ());
 
@@ -1139,12 +1141,22 @@ SignalProcessor::Process (const Signal &signal)
           tx->Commit ();
         }
     }
+  catch (const internal::CancellationError &)
+    {
+      if (tx)
+        {
+          tx->Rollback ();
+        }
+      *context_ = context_snapshot;
+      throw;
+    }
   catch (const std::exception &e)
     {
       if (tx)
         {
           tx->Rollback ();
         }
+      *context_ = context_snapshot;
       const std::string op_type = op_context.GetCurrentOperationType ();
       const std::string msg
           = "Process failed in " + op_type + ": " + e.what ();
@@ -1162,6 +1174,7 @@ SignalProcessor::Process (const Signal &signal)
         {
           tx->Rollback ();
         }
+      *context_ = context_snapshot;
       const std::string op_type = op_context.GetCurrentOperationType ();
       const std::string msg
           = "Process failed in " + op_type + ": unknown error";
@@ -1559,6 +1572,7 @@ SignalProcessor::PersistWorkingMemory (Transaction &tx)
   // Upsert current slots as MEMORIES with kind='WORKING'
   for (auto &slot : context_->wm_slots)
     {
+      std::string failure_stage = "slot_precheck";
       if (slot.strength <= 0.0)
         {
           slot.memory_id = 0;
@@ -1570,96 +1584,140 @@ SignalProcessor::PersistWorkingMemory (Transaction &tx)
           continue;
         }
 
-      const auto ts_ms = static_cast<int64_t> (slot.last_ts * 1000.0);
-
-      const std::vector<float> emb_vec = ToFloatVector (slot.embedding);
-      tx.Execute (
-          "INSERT INTO embeddings (embedding, created_at) VALUES (?, ?)",
-          { emb_vec, now_ms });
-      auto emb_rows
-          = tx.Execute ("SELECT last_insert_rowid() AS id", {});
-      const long long embedding_id
-          = emb_rows.empty () ? 0 : ExtractInt64 (emb_rows[0], "id", 0);
-      if (embedding_id == 0)
+      try
         {
-          continue;
-        }
+          const auto ts_ms = static_cast<int64_t> (slot.last_ts * 1000.0);
 
-      long long memory_id = slot.memory_id;
-      if (memory_id > 0)
-        {
+          failure_stage = "insert_slot_embedding";
+          const std::vector<float> emb_vec = ToFloatVector (slot.embedding);
           tx.Execute (
-              "UPDATE memories SET "
-              "embedding_id = ?, source_id = ?, modality = ?, start_ts = ?, "
-              "n_signals = ?, s_max = ?, s_avg = ?, s_emotion_max = ?, "
-              "s_arousal_avg = ?, drift_mag = ?, strength = ?, "
-              "last_access = ?, end_ts = NULL "
-              "WHERE memory_id = ? AND kind = 'WORKING'",
-              { embedding_id,
-                slot.source_id.empty () ? std::string ("unknown") : slot.source_id,
-                slot.modality, slot.start_ts, slot.n_signals, slot.s_max,
-                slot.s_avg, slot.s_emotion_max, slot.s_arousal_avg,
-                slot.drift_acc, slot.strength, ts_ms, memory_id });
-        }
-      else
-        {
-          tx.Execute (
-              "INSERT INTO memories "
-              "(embedding_id, source_id, kind, modality, start_ts, n_signals, "
-              " s_max, s_avg, s_emotion_max, s_arousal_avg, drift_mag, "
-              " strength, last_access, created_at) "
-              "VALUES (?, ?, 'WORKING', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-              { embedding_id,
-                slot.source_id.empty () ? std::string ("unknown")
-                                        : slot.source_id,
-                slot.modality, slot.start_ts, slot.n_signals, slot.s_max,
-                slot.s_avg, slot.s_emotion_max, slot.s_arousal_avg,
-                slot.drift_acc, slot.strength, ts_ms, now_ms });
-
-          auto mem_rows = tx.Execute ("SELECT last_insert_rowid() AS id", {});
-          memory_id
-              = mem_rows.empty () ? 0 : ExtractInt64 (mem_rows[0], "id", 0);
-          if (memory_id == 0)
+              "INSERT INTO embeddings (embedding, created_at) VALUES (?, ?)",
+              { emb_vec, now_ms });
+          auto emb_rows
+              = tx.Execute ("SELECT last_insert_rowid() AS id", {});
+          const long long embedding_id
+              = emb_rows.empty () ? 0 : ExtractInt64 (emb_rows[0], "id", 0);
+          if (embedding_id == 0)
             {
               continue;
             }
-          slot.memory_id = memory_id;
-        }
 
-      // Keep per-slot signals in sync with the current slot state.
-      tx.Execute ("DELETE FROM signals WHERE memory_id = ?", { memory_id });
-
-      for (const auto &rec : slot.signal_records)
-        {
-          long long signal_embedding_id = embedding_id;
-          if (rec.embedding.size () > 0)
+          long long memory_id = slot.memory_id;
+          if (memory_id > 0)
             {
-              const std::vector<float> sig_vec = ToFloatVector (rec.embedding);
+              failure_stage = "update_slot_memory";
               tx.Execute (
-                  "INSERT INTO embeddings (embedding, created_at) VALUES (?, ?)",
-                  { sig_vec, static_cast<long long> (rec.timestamp) });
-              auto sig_rows
-                  = tx.Execute ("SELECT last_insert_rowid() AS id", {});
-              if (!sig_rows.empty ())
+                  "UPDATE memories SET "
+                  "embedding_id = ?, source_id = ?, modality = ?, start_ts = ?, "
+                  "n_signals = ?, s_max = ?, s_avg = ?, s_emotion_max = ?, "
+                  "s_arousal_avg = ?, drift_mag = ?, strength = ?, "
+                  "last_access = ?, end_ts = NULL "
+                  "WHERE memory_id = ? AND kind = 'WORKING'",
+                  { embedding_id,
+                    slot.source_id.empty () ? std::string ("unknown")
+                                            : slot.source_id,
+                    slot.modality, slot.start_ts, slot.n_signals, slot.s_max,
+                    slot.s_avg, slot.s_emotion_max, slot.s_arousal_avg,
+                    slot.drift_acc, slot.strength, ts_ms, memory_id });
+            }
+          else
+            {
+              failure_stage = "insert_slot_memory";
+              tx.Execute (
+                  "INSERT INTO memories "
+                  "(embedding_id, source_id, kind, modality, start_ts, n_signals, "
+                  " s_max, s_avg, s_emotion_max, s_arousal_avg, drift_mag, "
+                  " strength, last_access, created_at) "
+                  "VALUES (?, ?, 'WORKING', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                  { embedding_id,
+                    slot.source_id.empty () ? std::string ("unknown")
+                                            : slot.source_id,
+                    slot.modality, slot.start_ts, slot.n_signals, slot.s_max,
+                    slot.s_avg, slot.s_emotion_max, slot.s_arousal_avg,
+                    slot.drift_acc, slot.strength, ts_ms, now_ms });
+
+              auto mem_rows = tx.Execute ("SELECT last_insert_rowid() AS id", {});
+              memory_id
+                  = mem_rows.empty () ? 0 : ExtractInt64 (mem_rows[0], "id", 0);
+              if (memory_id == 0)
                 {
-                  signal_embedding_id = ExtractInt64 (sig_rows[0], "id",
-                                                      embedding_id);
+                  continue;
                 }
+              slot.memory_id = memory_id;
             }
 
-          tx.Execute (
-              "INSERT INTO signals "
-              "(memory_id, source_id, embedding_id, timestamp, modality, "
-              " mime, blob_id, serial_position, score, created_at) "
-              "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-              { memory_id,
-                slot.source_id.empty () ? std::string ("unknown") : slot.source_id,
-                signal_embedding_id,
-                static_cast<long long> (rec.timestamp), rec.modality, rec.mime,
-                rec.blob_id.empty () ? std::any ()
-                                     : std::any (rec.blob_id),
-                static_cast<long long> (rec.serial_position), rec.score,
-                static_cast<long long> (rec.timestamp) });
+          // Keep per-slot signals in sync with the current slot state.
+          failure_stage = "clear_slot_signals";
+          tx.Execute ("DELETE FROM signals WHERE memory_id = ?", { memory_id });
+
+          for (const auto &rec : slot.signal_records)
+            {
+              try
+                {
+                  long long signal_embedding_id = embedding_id;
+                  if (rec.embedding.size () > 0
+                      && rec.embedding.size () == slot.embedding.size ())
+                    {
+                      failure_stage = "insert_signal_embedding";
+                      const std::vector<float> sig_vec
+                          = ToFloatVector (rec.embedding);
+                      tx.Execute (
+                          "INSERT INTO embeddings (embedding, created_at) VALUES (?, ?)",
+                          { sig_vec, static_cast<long long> (rec.timestamp) });
+                      auto sig_rows
+                          = tx.Execute ("SELECT last_insert_rowid() AS id", {});
+                      if (!sig_rows.empty ())
+                        {
+                          signal_embedding_id = ExtractInt64 (sig_rows[0], "id",
+                                                              embedding_id);
+                        }
+                    }
+
+                  failure_stage = "insert_signal_row";
+                  tx.Execute (
+                      "INSERT INTO signals "
+                      "(memory_id, source_id, embedding_id, timestamp, modality, "
+                      " mime, blob_id, serial_position, score, created_at) "
+                      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                      { memory_id,
+                        slot.source_id.empty () ? std::string ("unknown")
+                                                : slot.source_id,
+                        signal_embedding_id,
+                        static_cast<long long> (rec.timestamp), rec.modality,
+                        rec.mime,
+                        rec.blob_id.empty () ? std::any ()
+                                             : std::any (rec.blob_id),
+                        static_cast<long long> (rec.serial_position), rec.score,
+                        static_cast<long long> (rec.timestamp) });
+                }
+              catch (const std::exception &)
+                {
+                  // Working-memory signal rows are auxiliary. If one record is
+                  // malformed, preserve the slot itself and continue.
+                  continue;
+                }
+            }
+        }
+      catch (const std::exception &e)
+        {
+          telemetry::LogWarn (
+              "Failed to persist working-memory slot",
+              { telemetry::Attribute::String ("component", "signal_processor"),
+                telemetry::Attribute::String ("stage", failure_stage),
+                telemetry::Attribute::String (
+                    "source_id",
+                    slot.source_id.empty () ? std::string ("unknown")
+                                            : slot.source_id),
+                telemetry::Attribute::Int64 (
+                    "memory_id", static_cast<std::int64_t> (slot.memory_id)),
+                telemetry::Attribute::Int64 (
+                    "slot_embedding_dim",
+                    static_cast<std::int64_t> (slot.embedding.size ())),
+                telemetry::Attribute::Int64 (
+                    "signal_record_count",
+                    static_cast<std::int64_t> (slot.signal_records.size ())),
+                telemetry::Attribute::String ("error", e.what ()) });
+          continue;
         }
     }
 }

@@ -12,7 +12,7 @@ struct ConsolidationSummarizeParams
   int max_source_texts;                ///< Max number of source texts per summary
   int max_total_chars;                 ///< Max total chars across source texts
   int max_text_chars;                  ///< Max chars per source text
-  int max_summary_words;               ///< Max summary words (<=0 means uncapped)
+  int max_summary_words;               ///< Hard summary word cap (0 disables clipping)
 
   static ConsolidationSummarizeParams FromKnobs (double F, double S, double T);
 };

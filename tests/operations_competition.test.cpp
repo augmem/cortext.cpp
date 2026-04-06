@@ -104,6 +104,21 @@ private:
   std::unordered_map<long long, Eigen::VectorXf> retrieved_;
 };
 
+class SetNeuromodOp : public IOperation
+{
+public:
+  explicit SetNeuromodOp (double ne) : ne_ (ne) {}
+
+  void
+  Execute (OperationContext &ctx, Transaction & /*tx*/) const override
+  {
+    ctx.GetProcessorContext ().neuromod_ne = ne_;
+  }
+
+private:
+  double ne_ = 0.0;
+};
+
 static Signal
 MakeSignal (const Eigen::VectorXf &emb, uint64_t ts)
 {
@@ -321,4 +336,60 @@ TEST_CASE ("Alg21 recovery restores strength over time",
     REQUIRE (strength_after_recovery > strength_after_supp);
     REQUIRE (strength_after_recovery <= 1.0);
   }
+}
+
+TEST_CASE ("High NE increases retrieval competition suppression",
+           "[operations][competition][neuromod]")
+{
+  auto run_case = [] (bool disable_scale) {
+    auto unique_store = cortext::SQLiteStore::Create (":memory:");
+    auto store = std::shared_ptr<cortext::Store> (std::move (unique_store));
+
+    SignalProcessor::Config cfg;
+    cortext::testing::RequireEncoder (cfg);
+    cfg.focus = 1.0;
+    cfg.sensitivity = 1.0;
+    cfg.stability = 0.0;
+
+    const Eigen::VectorXf ctx = Make256DEmb ({ { 0, 1.0f } });
+    const Eigen::VectorXf w1 = Make256DEmb ({ { 0, 0.99f }, { 1, 0.05f } });
+    const Eigen::VectorXf w2 = Make256DEmb ({ { 0, 0.98f }, { 1, 0.06f } });
+    const Eigen::VectorXf w3 = Make256DEmb ({ { 0, 0.95f }, { 1, 0.10f } });
+    const Eigen::VectorXf loser = Make256DEmb ({ { 0, 0.88f }, { 1, 0.47f } });
+
+    std::unordered_map<long long, Eigen::VectorXf> retrieved{
+      { 10LL, w1 }, { 11LL, w2 }, { 12LL, w3 }, { 13LL, loser }
+    };
+
+    auto seed = std::make_unique<SeedEmbeddingsOp> (retrieved);
+    auto setup = std::make_unique<SetupCompetitionInputsOp> (ctx, retrieved);
+    auto set_ne = std::make_unique<SetNeuromodOp> (1.0);
+    auto apply = std::make_unique<ApplyRetrievalCompetition> ();
+    auto pipeline = std::make_unique<OperationSet> (
+        std::move (seed), std::move (setup), std::move (set_ne),
+        std::move (apply));
+
+    cortext::SignalProcessor processor (cfg, store, std::move (pipeline));
+    if (disable_scale)
+      {
+        cortext::testing::ScopedEnvVar disable (
+            "CORTEXT_DISABLE_NEUROMOD_COMPETITION_SCALE", "1");
+        processor.Process (MakeSignal (ctx, 100));
+      }
+    else
+      {
+        processor.Process (MakeSignal (ctx, 100));
+      }
+    processor.Flush ();
+
+    auto rows = store->Execute (
+        "SELECT strength FROM memories WHERE memory_id = ?",
+        { 13LL });
+    REQUIRE (rows.size () == 1);
+    return std::any_cast<double> (rows[0].at ("strength"));
+  };
+
+  const double strength_scaled = run_case (false);
+  const double strength_unscaled = run_case (true);
+  REQUIRE (strength_scaled < strength_unscaled);
 }

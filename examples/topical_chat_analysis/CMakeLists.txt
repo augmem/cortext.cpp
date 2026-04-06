@@ -12,6 +12,9 @@ target_link_libraries(cortext_topical_chat_analysis PRIVATE
 )
 
 target_compile_features(cortext_topical_chat_analysis PRIVATE cxx_std_20)
+target_include_directories(cortext_topical_chat_analysis PRIVATE
+  ${PROJECT_SOURCE_DIR}/src
+)
 
 if(APPLE)
   set(ORT_LIB_DIR "${CMAKE_BINARY_DIR}/third_party/onnxruntime-install/lib")
