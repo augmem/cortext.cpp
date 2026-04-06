@@ -328,3 +328,56 @@ TEST_CASE ("ProcessExtractionResults computes label salience from embeddings",
   const double s_max = cortext::testing::GetDouble (rows[0], "s_max");
   REQUIRE (s_max == Catch::Approx (1.0));
 }
+
+TEST_CASE ("ProcessExtractionResults preserves multiple distinct labels from one extraction result",
+           "[operations][extraction][labels]")
+{
+  auto unique_store = SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<Store> (std::move (unique_store));
+  cortext::testing::InitializeCoreSchema (*store);
+
+  std::vector<float> unit_embedding (kEmbeddingDim, 0.0f);
+  unit_embedding[0] = 1.0f;
+
+  cortext::testing::SeedEmbeddingV2 (*store, 10LL, unit_embedding, 1000LL);
+  cortext::testing::SeedMemoryV2 (*store, 20LL, 10LL, "summary-1",
+                                 "ASSOCIATION", 1.0, 1000LL);
+
+  FixedEncoder encoder (unit_embedding);
+
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  cfg.focus = 0.5;
+  cfg.sensitivity = 0.5;
+  cfg.stability = 1.0;
+  cfg.encoder = &encoder;
+
+  ProcessorContext pctx;
+  Signal s = MakeSignal (2000ULL);
+  OperationContext ctx (s, pctx, cfg, store.get ());
+
+  operations::ExtractionResult extraction;
+  extraction.summary_id = "summary-1";
+  extraction.labels.push_back ({ "Gabriel", 0.0 });
+  extraction.labels.push_back ({ "Chicago", 0.0 });
+  extraction.labels.push_back ({ "Cortext", 0.0 });
+  pctx.pending_extraction_results.push_back (std::move (extraction));
+
+  operations::ProcessExtractionResults op;
+  auto tx = store->Begin ();
+  op.Execute (ctx, *tx);
+  tx->Commit ();
+
+  auto label_rows = store->Execute (
+      "SELECT source_id, label FROM memories WHERE kind = 'LABEL' ORDER BY source_id",
+      {});
+  REQUIRE (label_rows.size () == 3);
+  REQUIRE (std::any_cast<std::string> (label_rows[0].at ("source_id")) == "chicago");
+  REQUIRE (std::any_cast<std::string> (label_rows[1].at ("source_id")) == "cortext");
+  REQUIRE (std::any_cast<std::string> (label_rows[2].at ("source_id")) == "gabriel");
+
+  auto edge_rows = store->Execute (
+      "SELECT COUNT(*) AS c FROM associations WHERE edge_type = 'has_label'",
+      {});
+  REQUIRE (cortext::testing::GetInt64 (edge_rows[0], "c") == 3);
+}

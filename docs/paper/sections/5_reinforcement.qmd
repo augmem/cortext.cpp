@@ -56,14 +56,21 @@ stabilize summary/label retrieval and are pruned during explicit consolidation.
 periphery_cutoff(T) = lerp(0.03, 0.20, T)
 fact_floor(T) = lerp(0, periphery_cutoff(T), T)
 has_fact_support(m) = evidence_count(m, active_facts) > 0
+storage_budget_floor = max(
+  min_db_bytes,
+  db_avail_fraction × available_disk_bytes
+)
 
 if m.kind == LONG_TERM
+   AND db_used_bytes ≥ storage_budget_floor
    AND strength_t < periphery_cutoff(T)
    AND (NOT has_fact_support(m) OR strength_t < fact_floor(T)):
      evict(m)
 ```
 
 The fact-evidence floor protects episodic memories that serve as evidence for active (non-archived) structured facts. At low Stability, the floor is zero and fact-linked memories receive no special treatment. At high Stability, the floor approaches the periphery cutoff itself, making fact-backed evidence nearly immune to eviction. This ensures that the episodic substrate supporting durable semantic knowledge is not discarded before the knowledge itself.
+
+**Current implementation note:** the runtime now includes a storage gate ahead of the usual strength-based eviction test. For file-backed stores, eviction is skipped entirely until the on-disk database footprint reaches a configurable floor. The default fixed floor is `500 MB`, and an internal percentage-of-available-space floor can also be applied; the active threshold is the maximum of the two. This keeps long chat sessions from prematurely evicting weak but still useful traces simply because they have decayed below `periphery_cutoff(T)` while the database is still tiny. Deterministic file-backed sweeps in @sec-experimental showed three useful regimes. Under the raw storage-growth sweep, budgets up to `256 MB` still behaved like ordinary decay, `500 MB` was the first tested budget that materially delayed eviction, and `1 GB` extended that delay further. Under the synthetic human-sleep clock, that translated into an interpretable retention boundary: `256 MB` was enough for infant/toddler/preschool-style frequent consolidation, but it still missed school-age, teen, adult, and older-adult nightly consolidation. `500 MB` was the first tested floor that reliably preserved labels for once-per-day adult-style consolidation, while `1 GB` added safety margin rather than a new qualitative retention regime. In-memory stores keep the historical behavior unless the gate is explicitly forced on for studies.
 
 Ablation studies in @sec-experimental confirm that each component of this model contributes to selective eviction behavior. Disabling coupling or reducing to a single trace collapses the power-law forgetting curve into rapid indiscriminate eviction, flashbulb bonuses provide the expected protective effect, the fact-evidence floor prevents loss of active fact support, and uniform reinforcement distribution makes S and F visibly effective in the eviction dynamics.
 

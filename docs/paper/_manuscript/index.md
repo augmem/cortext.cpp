@@ -1757,8 +1757,13 @@ explicit consolidation.
     periphery_cutoff(T) = lerp(0.03, 0.20, T)
     fact_floor(T) = lerp(0, periphery_cutoff(T), T)
     has_fact_support(m) = evidence_count(m, active_facts) > 0
+    storage_budget_floor = max(
+      min_db_bytes,
+      db_avail_fraction × available_disk_bytes
+    )
 
     if m.kind == LONG_TERM
+       AND db_used_bytes ≥ storage_budget_floor
        AND strength_t < periphery_cutoff(T)
        AND (NOT has_fact_support(m) OR strength_t < fact_floor(T)):
          evict(m)
@@ -1770,6 +1775,29 @@ At high Stability, the floor approaches the periphery cutoff itself,
 making fact-backed evidence nearly immune to eviction. This ensures that
 the episodic substrate supporting durable semantic knowledge is not
 discarded before the knowledge itself.
+
+**Current implementation note:** the runtime now includes a storage gate
+ahead of the usual strength-based eviction test. For file-backed stores,
+eviction is skipped entirely until the on-disk database footprint
+reaches a configurable floor. The default fixed floor is `500 MB`, and
+an internal percentage-of-available-space floor can also be applied; the
+active threshold is the maximum of the two. This keeps long chat
+sessions from prematurely evicting weak but still useful traces simply
+because they have decayed below `periphery_cutoff(T)` while the database
+is still tiny. Deterministic file-backed sweeps in
+<a href="#sec-experimental" class="quarto-xref">Section 11</a> showed
+three useful regimes. Under the raw storage-growth sweep, budgets up to
+`256 MB` still behaved like ordinary decay, `500 MB` was the first
+tested budget that materially delayed eviction, and `1 GB` extended that
+delay further. Under the synthetic human-sleep clock, that translated
+into an interpretable retention boundary: `256 MB` was enough for
+infant/toddler/preschool-style frequent consolidation, but it still
+missed school-age, teen, adult, and older-adult nightly consolidation.
+`500 MB` was the first tested floor that reliably preserved labels for
+once-per-day adult-style consolidation, while `1 GB` added safety margin
+rather than a new qualitative retention regime. In-memory stores keep
+the historical behavior unless the gate is explicitly forced on for
+studies.
 
 Ablation studies in
 <a href="#sec-experimental" class="quarto-xref">Section 11</a> confirm
@@ -2504,7 +2532,14 @@ the pure Liquid `LFM2.5/llama.cpp` path when those assets are present;
 the mixed path and Gemma path are fallbacks. All other operations remain
 embedding-only. **There is no extractive fallback**: if no deep backend
 is available, or summarization fails, deep consolidation raises an error
-rather than silently degrading.
+rather than silently degrading. After the prompt-technique ablations in
+[Section 9](#sec-extractor-prompt-ablation) and [Section
+9](#sec-summarizer-prompt-ablation), the default local Liquid extraction
+prompt is now a short **few-shot durable** prompt, and the default local
+Liquid summarization prompt is now a **transcript few-shot** prompt that
+feeds the small `LFM2.5-350M` model a chat transcript instead of
+numbered excerpts. That combination keeps the local path fast while
+materially reducing schema/meta leakage and last-excerpt bias.
 
 ## Shallow Consolidation (Embedding‑Only)
 
@@ -2602,18 +2637,19 @@ implication, contradiction). Labels are stored as surface strings (no
 type/category field) **and** persisted with their own embeddings so they
 can participate in retrieval and graph expansion.
 
-**Current implementation note:** the deployed runtime still promotes
-extracted labels with a knob-derived repetition gate
-
-    label_frequency_threshold = round(lerp(5, 15, T))
-
-plus a single fallback highest-salience label when the filter would
-otherwise erase the cluster. This keeps the online path simple, but it
-also makes durable label formation too dependent on exact repeated
-strings. To test a more memory-like alternative without changing the
-runtime, we added an **offline semantic label-classifier prototype** in
-`scripts/build_wordnet_label_index.py`, `scripts/build_name_priors.py`,
-`scripts/build_label_training_data.py`,
+**Current implementation note:** the deployed runtime now persists
+extracted labels directly from each extraction result, deduped by
+normalized label key within the result and reused by key across the
+store. The old knob-derived repetition gate and single-label fallback
+were removed because they made durable label formation too dependent on
+exact repeated strings and caused obvious chat failures like
+identity/name loss and severe label undercounting. The online path is
+still simple: label strings are inserted as `LABEL` memories, salience
+is embedding-derived, and repeated mentions update `s_max` on the
+existing label node. In parallel, we continue to study a more semantic
+alternative through the **offline semantic label-classifier prototype**
+in `scripts/build_wordnet_label_index.py`,
+`scripts/build_name_priors.py`, `scripts/build_label_training_data.py`,
 `scripts/train_label_classifier.py`, and
 `scripts/eval_label_classifier.py`. That prototype trains two small
 models over candidate spans:
@@ -2641,10 +2677,6 @@ latency without changing salience computation.
 
 If a label already exists, its stored salience is updated with
 `s_max = max(s_max, salience(label))`.
-
-To guarantee that labeling remains informative even for small clusters,
-if the frequency filter would remove all labels for a summary, the
-highest-salience label is retained as a fallback.
 
 ## Temporal Consolidation of Changing Facts
 
@@ -7965,9 +7997,9 @@ short-horizon impact is limited on clean chat data.
 
 ### Offline Semantic Label Classifier Prototype
 
-The current runtime still forms durable labels with the hard repetition
-gate from [Section 7](#sec-consolidation). To test whether a more
-semantic, memory-like label pathway is viable before changing the
+Before the runtime labeling corrections below, the branch relied on an
+overly aggressive repetition-gated label path. To test whether a more
+semantic, memory-like label pathway is viable before fully replacing the
 deployed path, we implemented an **offline prototype** that trains two
 small classifiers over candidate spans:
 
@@ -8089,6 +8121,858 @@ which tells us the current training mix is still too entity-heavy. So
 the bottleneck is no longer whether a semantic label classifier can
 train; it is whether we can broaden the real conversational supervision
 enough to cover non-entity concepts before runtime integration.
+
+### Online Label Persistence Ablation (Apr 5, 2026)
+
+We also corrected the **deployed** label path itself. The previous
+runtime policy applied a batch-level repetition threshold and, when
+labels were too sparse to clear it, collapsed each extraction result to
+a single highest-salience fallback label. This was the direct cause of
+pathological under-labeling in long chats, including name loss and label
+graphs with implausibly few nodes.
+
+The current runtime now persists extracted labels directly from each
+extraction result, deduped by normalized key within the result and
+reused by key across the store. To measure the impact cleanly, we added
+a deterministic ablation bench that re-enables the legacy gate through
+an internal study-only toggle:
+
+**Deterministic label-persistence ablation:**
+`./build/examples/benchmark/cortext_label_persistence_ablation_bench`
+
+<table>
+<colgroup>
+<col style="width: 21%" />
+<col style="width: 28%" />
+<col style="width: 28%" />
+<col style="width: 21%" />
+</colgroup>
+<thead>
+<tr>
+<th>scenario</th>
+<th style="text-align: right;">legacy gate</th>
+<th style="text-align: right;">current runtime</th>
+<th>result</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>sparse three-label extraction</td>
+<td style="text-align: right;"><code>1</code> label / <code>1</code>
+<code>has_label</code> edge</td>
+<td style="text-align: right;"><code>3</code> labels / <code>3</code>
+<code>has_label</code> edges</td>
+<td>current preserves all extracted labels</td>
+</tr>
+<tr>
+<td>repeated single-label extraction</td>
+<td style="text-align: right;"><code>1</code> label</td>
+<td style="text-align: right;"><code>1</code> label</td>
+<td>dedupe remains stable</td>
+</tr>
+</tbody>
+</table>
+
+Recorded metrics:
+
+-   `label_sparse_legacy_count = 1`
+-   `label_sparse_current_count = 3`
+-   `label_sparse_legacy_edges = 1`
+-   `label_sparse_current_edges = 3`
+-   `label_repeated_legacy_count = 1`
+-   `label_repeated_current_count = 1`
+
+**Targeted test coverage:**
+`./build/tests/cortext_tests "[operations][extraction][labels]"` passed
+with **8 assertions in 2 test cases**.
+
+**Observation:** This change is not about adding more decorative labels.
+It removes a lossy gate that was erasing semantically important one-shot
+entities before they could ever become part of the graph. The ablation
+shows the intended behavior clearly: sparse extractions now survive
+intact, while repeated identical labels still collapse to one durable
+node as before.
+
+### LFM2.5-350M Extractor Prompt Ablation
+
+Once sparse labels were allowed through, the next failure mode was
+obvious in the live chat DB: the fast local extractor was emitting junk
+labels like `user`, `assistant`, `support`, `documents`, and even
+schema-style tokens in contexts where the desired durable nodes were
+things like `Gabriel`, `Chicago`, `SQLite migration`, `Cortext`,
+`Sarah`, or `housing application`. Before paying the latency cost of a
+larger extraction model, we first tested whether prompt technique alone
+could recover better labels from the small `LFM2.5-350M` GGUF.
+
+We compared five prompt styles on the live local extractor:
+
+-   `baseline`: original recall-heavy zero-shot prompt
+-   `durable`: zero-shot durable-node wording
+-   `precision`: zero-shot precision-first wording
+-   `fewshot_durable`: durable-node wording plus short conversational
+    examples
+-   `fewshot_precision`: precision-first wording plus short
+    conversational examples
+
+The benchmark uses three short multi-turn fixtures that mirror the
+failure cases we saw in the chat DB:
+
+-   interview-prep noise (`interview`, `confidence`)
+-   identity plus work context (`Gabriel`, `Chicago`,
+    `SQLite migration`, `Cortext`)
+-   neighbor plus housing context (`Sarah`, `housing application`,
+    `Logan Square`)
+
+Each style is scored by desired-label hits, banned-label leakage, total
+emitted labels, overflow beyond a compact durable-label budget, and
+wall-clock latency.
+
+**Deterministic prompt-technique ablation:**
+`./build/examples/benchmark/cortext_extractor_prompt_ablation_bench`
+
+Run log:
+`logs/extractor_prompt_ablation_20260406/extractor_prompt_ablation.log`
+
+<table>
+<colgroup>
+<col style="width: 13%" />
+<col style="width: 17%" />
+<col style="width: 17%" />
+<col style="width: 17%" />
+<col style="width: 17%" />
+<col style="width: 17%" />
+</colgroup>
+<thead>
+<tr>
+<th>prompt style</th>
+<th style="text-align: right;">desired hits</th>
+<th style="text-align: right;">banned hits</th>
+<th style="text-align: right;">labels emitted</th>
+<th style="text-align: right;">latency (ms)</th>
+<th style="text-align: right;">score</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>baseline</code></td>
+<td style="text-align: right;"><code>6</code></td>
+<td style="text-align: right;"><code>2</code></td>
+<td style="text-align: right;"><code>13</code></td>
+<td style="text-align: right;"><code>3116</code></td>
+<td style="text-align: right;"><code>14</code></td>
+</tr>
+<tr>
+<td><code>durable</code></td>
+<td style="text-align: right;"><code>8</code></td>
+<td style="text-align: right;"><code>7</code></td>
+<td style="text-align: right;"><code>86</code></td>
+<td style="text-align: right;"><code>9794</code></td>
+<td style="text-align: right;"><code>-52</code></td>
+</tr>
+<tr>
+<td><code>precision</code></td>
+<td style="text-align: right;"><code>7</code></td>
+<td style="text-align: right;"><code>1</code></td>
+<td style="text-align: right;"><code>46</code></td>
+<td style="text-align: right;"><code>4898</code></td>
+<td style="text-align: right;"><code>-3</code></td>
+</tr>
+<tr>
+<td><code>fewshot_durable</code></td>
+<td style="text-align: right;"><code>8</code></td>
+<td style="text-align: right;"><code>4</code></td>
+<td style="text-align: right;"><code>16</code></td>
+<td style="text-align: right;"><code>3856</code></td>
+<td style="text-align: right;"><strong><code>16</code></strong></td>
+</tr>
+<tr>
+<td><code>fewshot_precision</code></td>
+<td style="text-align: right;"><code>5</code></td>
+<td style="text-align: right;"><code>2</code></td>
+<td style="text-align: right;"><code>8</code></td>
+<td style="text-align: right;"><code>3073</code></td>
+<td style="text-align: right;"><code>11</code></td>
+</tr>
+</tbody>
+</table>
+
+Representative outputs:
+
+-   `baseline` interview fixture:
+    `confidence, prep, support, interview, user, assistant`
+-   `fewshot_durable` identity/work fixture:
+    `Gabriel, Chicago, SQLite migration, Cortext`
+-   `fewshot_precision` neighbor/housing fixture:
+    `Sarah, housing application, Logan Square`
+
+**Observation:** The zero-shot rewrites alone were not enough. `durable`
+and `precision` both leaked their own instruction vocabulary back into
+the labels, including prompt words like `schema`, `timestamps`,
+`people`, and `projects`. The few-shot variants changed the behavior
+qualitatively. `fewshot_durable` was the best overall compromise: it
+recovered all four identity/work labels in the hardest fixture,
+preserved the full `Sarah` / `housing application` / `Logan Square`
+trio, and did so with only a modest latency increase over the old
+baseline (`3856 ms` vs `3116 ms` across the full three-fixture run).
+`fewshot_precision` was the leanest style, but it under-recalled the
+identity/work fixture too aggressively. Based on this ablation, the
+current branch now uses the **few-shot durable prompt as the deployed
+default** for the local `LFM2.5-350M` extraction path, while still
+allowing overrides through `CORTEXT_LFM2_EXTRACT_PROMPT_STYLE` for
+further study.
+
+### LFM2.5-350M Summarizer Prompt Ablation
+
+Once extraction quality improved, the next weak point was the
+**summarizer**: the fast local `LFM2.5-350M` summarization path was
+still vulnerable to prompt echo, speaker-role leakage, and a strong bias
+toward the **last excerpt** in a cluster. That showed up directly in
+earlier deep-consolidation failures: summaries would sometimes repeat
+prompt language, narrate the conversation mechanics, or ignore early
+identity facts like `Gabriel` / `Chicago` in favor of the final turn.
+
+Before paying the cost of a larger summarizer, we ran a prompt-technique
+ablation on the live local `LFM2.5-350M` GGUF. We compared six prompt
+styles:
+
+-   `baseline`: original excerpt-based zero-shot prompt
+-   `durable`: excerpt-based zero-shot durable-memory wording
+-   `precision`: excerpt-based zero-shot precision-first wording
+-   `fewshot_durable`: excerpt-based few-shot durable wording
+-   `fewshot_precision`: excerpt-based few-shot precision wording
+-   `transcript_fewshot`: few-shot prompt plus a **chat transcript**
+    input format instead of numbered excerpts
+
+The benchmark uses three short conversational fixtures that stress the
+failure modes we care about:
+
+-   identity plus work context (`Gabriel`, `Chicago`,
+    `SQLite migration`, `Cortext`, `demo`)
+-   project plus operations context (`Alice`, `Acme pilot`, `Seattle`,
+    `SSO`, `audit exports`, `June`, `renewal forecast`)
+-   neighbor plus housing context (`Sarah`, `housing application`,
+    `Logan Square`, `pay stubs`, `Tuesday`)
+
+Each style is scored by desired-fact hits, banned meta leakage (`User:`,
+`Assistant:`, `Excerpt`, `Final summary`, prompt echo), and wall-clock
+latency.
+
+**Deterministic prompt-technique ablation:**
+`./build/examples/benchmark/cortext_summarizer_prompt_ablation_bench`
+
+Run log:
+`logs/summarizer_prompt_ablation_20260406/summarizer_prompt_ablation.log`
+
+<table>
+<thead>
+<tr>
+<th>prompt style</th>
+<th style="text-align: right;">desired hits</th>
+<th style="text-align: right;">banned hits</th>
+<th style="text-align: right;">latency (ms)</th>
+<th style="text-align: right;">score</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>baseline</code></td>
+<td style="text-align: right;"><code>7</code></td>
+<td style="text-align: right;"><code>4</code></td>
+<td style="text-align: right;"><code>2404</code></td>
+<td style="text-align: right;"><code>2</code></td>
+</tr>
+<tr>
+<td><code>durable</code></td>
+<td style="text-align: right;"><code>1</code></td>
+<td style="text-align: right;"><code>3</code></td>
+<td style="text-align: right;"><code>1358</code></td>
+<td style="text-align: right;"><code>-7</code></td>
+</tr>
+<tr>
+<td><code>precision</code></td>
+<td style="text-align: right;"><code>5</code></td>
+<td style="text-align: right;"><code>2</code></td>
+<td style="text-align: right;"><code>1216</code></td>
+<td style="text-align: right;"><code>4</code></td>
+</tr>
+<tr>
+<td><code>fewshot_durable</code></td>
+<td style="text-align: right;"><code>1</code></td>
+<td style="text-align: right;"><code>3</code></td>
+<td style="text-align: right;"><code>2033</code></td>
+<td style="text-align: right;"><code>-7</code></td>
+</tr>
+<tr>
+<td><code>fewshot_precision</code></td>
+<td style="text-align: right;"><code>6</code></td>
+<td style="text-align: right;"><code>0</code></td>
+<td style="text-align: right;"><code>1739</code></td>
+<td style="text-align: right;"><code>12</code></td>
+</tr>
+<tr>
+<td><code>transcript_fewshot</code></td>
+<td style="text-align: right;"><strong><code>15</code></strong></td>
+<td style="text-align: right;"><strong><code>0</code></strong></td>
+<td style="text-align: right;"><code>1850</code></td>
+<td style="text-align: right;"><strong><code>30</code></strong></td>
+</tr>
+</tbody>
+</table>
+
+Representative outputs:
+
+-   `baseline` identity/work fixture:
+    `User: I am debugging a SQLite migration for Cortext before the demo. Assistant: The migration is progressing well...`
+-   `fewshot_precision` identity/work fixture:
+    `Debugging a SQLite migration for Cortext before the demo.`
+-   `transcript_fewshot` identity/work fixture:
+    `Gabriel lives in Chicago and is debugging a SQLite migration for Cortext before the demo.`
+-   `transcript_fewshot` project/ops fixture:
+    `Alice is leading the Acme pilot in Seattle, and the customer needs SSO and audit exports before June.`
+
+**Observation:** The biggest win did **not** come from adding more
+wording. It came from changing the input shape. The excerpt-based
+prompts remained last-turn-biased: even the better few-shot excerpt
+styles still dropped early facts like `Gabriel` and `Chicago`, or
+collapsed the whole cluster to the last blocker sentence. The
+transcript-style prompt changed the behavior qualitatively. On the live
+local `LFM2.5-350M` summarizer it recovered all five desired
+identity/work facts, six of seven project/ops facts, and four of five
+neighbor/housing facts, with **zero** banned meta hits and only a
+moderate latency cost relative to the leanest zero-shot style (`1850 ms`
+vs `1216 ms` across the three-fixture run). Based on this ablation, the
+current branch now uses the **transcript few-shot prompt as the deployed
+default** for the local `LFM2.5-350M` summarization path, while still
+allowing overrides through `CORTEXT_LFM2_SUMMARY_PROMPT_STYLE` for
+further study.
+
+### Storage-Gated Eviction Ablation (Apr 5, 2026)
+
+We also corrected a practical failure mode in the deployed eviction
+policy. The previous runtime would evict weak `LONG_TERM` memories as
+soon as they fell below `periphery_cutoff(T)`, even when the backing
+chat database was still trivially small. In long user conversations this
+produced premature forgetting: names and low-frequency autobiographical
+details could decay out of the active store long before disk pressure
+justified any deletion.
+
+The current runtime now applies a storage gate before the usual
+strength-based eviction query. For file-backed stores, eviction is
+blocked until the database footprint reaches a configurable floor. The
+floor can be a fixed byte budget, a percentage of currently available
+disk space, or both; the active threshold is the maximum of those
+values. The default deployed fixed floor is `500 MB`.
+
+**Deterministic storage-budget ablation:**
+`./build/examples/benchmark/cortext_storage_eviction_budget_bench`
+
+<table>
+<colgroup>
+<col style="width: 21%" />
+<col style="width: 28%" />
+<col style="width: 28%" />
+<col style="width: 21%" />
+</colgroup>
+<thead>
+<tr>
+<th>scenario</th>
+<th style="text-align: right;">storage gate floor</th>
+<th style="text-align: right;">surviving weak memory count</th>
+<th>result</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>high budget guard</td>
+<td style="text-align: right;"><code>1 GiB</code></td>
+<td style="text-align: right;"><code>1</code></td>
+<td>weak memory is retained because storage budget is not yet full</td>
+</tr>
+<tr>
+<td>zero budget</td>
+<td style="text-align: right;"><code>0</code></td>
+<td style="text-align: right;"><code>0</code></td>
+<td>the same weak memory is evicted once the storage gate is
+removed</td>
+</tr>
+</tbody>
+</table>
+
+Recorded metrics:
+
+-   `storage_gate_high_budget_count = 1`
+-   `storage_gate_blocks_early_eviction = 1`
+-   `storage_gate_zero_budget_count = 0`
+-   `storage_gate_allows_eviction_after_limit = 1`
+
+**Targeted test coverage:**
+`./build/tests/cortext_tests "[op18][memory_strength][storage_gate]"`
+passed with **3 assertions in 2 test cases**.
+
+**Observation:** This is a policy correction, not an attempt to make
+eviction disappear. Strength and fact-floor rules still determine
+*which* memories are eligible once storage pressure is real. The storage
+gate simply prevents the engine from acting like a tiny chat database is
+already full.
+
+We then added a second deterministic sweep to answer the practical
+sizing question: **how much storage budget is actually enough to delay
+forgetting?** This sweep uses a file-backed SQLite store, grows the
+database by `5 MB` per simulated step, and records both the
+storage-threshold crossing step and the eventual eviction step for the
+same weak memory.
+
+**Deterministic storage-threshold survival sweep:**
+`./build/examples/benchmark/cortext_storage_eviction_sweep_bench`
+
+<table>
+<thead>
+<tr>
+<th>fixed storage floor</th>
+<th style="text-align: right;">threshold-cross step</th>
+<th style="text-align: right;">eviction step</th>
+<th>result</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>0 MB</code></td>
+<td style="text-align: right;"><code>1</code></td>
+<td style="text-align: right;"><code>62</code></td>
+<td>pure decay-limited baseline</td>
+</tr>
+<tr>
+<td><code>64 MB</code></td>
+<td style="text-align: right;"><code>13</code></td>
+<td style="text-align: right;"><code>62</code></td>
+<td>no practical delay vs baseline</td>
+</tr>
+<tr>
+<td><code>128 MB</code></td>
+<td style="text-align: right;"><code>26</code></td>
+<td style="text-align: right;"><code>62</code></td>
+<td>still decay-limited</td>
+</tr>
+<tr>
+<td><code>256 MB</code></td>
+<td style="text-align: right;"><code>51</code></td>
+<td style="text-align: right;"><code>62</code></td>
+<td>still decay-limited</td>
+</tr>
+<tr>
+<td><code>500 MB</code></td>
+<td style="text-align: right;"><code>100</code></td>
+<td style="text-align: right;"><code>100</code></td>
+<td>first storage-limited regime</td>
+</tr>
+<tr>
+<td><code>1 GB</code></td>
+<td style="text-align: right;"><code>200</code></td>
+<td style="text-align: right;"><code>200</code></td>
+<td>larger-device storage-limited regime</td>
+</tr>
+<tr>
+<td><code>2 GB</code></td>
+<td style="text-align: right;"><code>400</code></td>
+<td style="text-align: right;"><code>400</code></td>
+<td>very large-device storage-limited regime</td>
+</tr>
+</tbody>
+</table>
+
+Recorded metrics:
+
+-   `storage_sweep_0mb_eviction_step = 62`
+-   `storage_sweep_64mb_eviction_step = 62`
+-   `storage_sweep_128mb_eviction_step = 62`
+-   `storage_sweep_256mb_eviction_step = 62`
+-   `storage_sweep_500mb_eviction_step = 100`
+-   `storage_sweep_500mb_cross_bytes = 501829632`
+-   `storage_sweep_default_500mb_delays_vs_64mb = 1`
+-   `storage_sweep_1gb_eviction_step = 200`
+-   `storage_sweep_2gb_eviction_step = 400`
+-   `storage_sweep_1gb_delays_vs_500mb = 1`
+-   `storage_sweep_2gb_delays_vs_1gb = 1`
+
+**Observation:** The useful takeaway is not that “more storage is always
+better.” It is that there is a real **decay-limited regime** and a real
+**storage-limited regime**. In this workload, any budget up to `256 MB`
+still lets the memory die on its normal decay curve at step `62`,
+because the database reaches those thresholds before the memory becomes
+too weak. `500 MB` is the first tested budget that pushes the system
+into the storage-limited regime, delaying eviction to step `100`; `1 GB`
+and `2 GB` extend that same pattern to steps `200` and `400`. That is
+why the default floor was raised well above the earlier `64 MiB`
+setting: the smaller floor looked safer on paper than it actually was in
+practice.
+
+We then extended the study into an end-to-end steady-state chat regime,
+where the relevant question is not just when a weak memory dies, but
+whether it survives long enough for the next label-producing
+consolidation window to fire. This benchmark uses the same file-backed
+`5 MB/step` growth profile, keeps the memory in the
+post-initial-consolidation pool, and measures whether a three-label
+extraction (`Gabriel`, `Chicago`, `Cortext`) is created before the raw
+memory is evicted.
+
+**Deterministic storage × consolidation end-to-end ablation:**
+`./build/examples/benchmark/cortext_storage_consolidation_e2e_bench`
+
+<table>
+<colgroup>
+<col style="width: 11%" />
+<col style="width: 14%" />
+<col style="width: 14%" />
+<col style="width: 14%" />
+<col style="width: 14%" />
+<col style="width: 14%" />
+<col style="width: 14%" />
+</colgroup>
+<thead>
+<tr>
+<th>fixed storage floor</th>
+<th style="text-align: right;">raw-memory eviction step</th>
+<th style="text-align: right;">every <code>30</code> steps</th>
+<th style="text-align: right;">every <code>60</code> steps</th>
+<th style="text-align: right;">every <code>90</code> steps</th>
+<th style="text-align: right;">every <code>120</code> steps</th>
+<th style="text-align: right;">every <code>150</code> steps</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>0 MB</code></td>
+<td style="text-align: right;"><code>62</code></td>
+<td style="text-align: right;"><code>3</code> labels retained</td>
+<td style="text-align: right;"><code>3</code> labels retained</td>
+<td style="text-align: right;"><code>0</code> labels</td>
+<td style="text-align: right;"><code>0</code> labels</td>
+<td style="text-align: right;"><code>0</code> labels</td>
+</tr>
+<tr>
+<td><code>64 MB</code></td>
+<td style="text-align: right;"><code>62</code></td>
+<td style="text-align: right;"><code>3</code> labels retained</td>
+<td style="text-align: right;"><code>3</code> labels retained</td>
+<td style="text-align: right;"><code>0</code> labels</td>
+<td style="text-align: right;"><code>0</code> labels</td>
+<td style="text-align: right;"><code>0</code> labels</td>
+</tr>
+<tr>
+<td><code>128 MB</code></td>
+<td style="text-align: right;"><code>62</code></td>
+<td style="text-align: right;"><code>3</code> labels retained</td>
+<td style="text-align: right;"><code>3</code> labels retained</td>
+<td style="text-align: right;"><code>0</code> labels</td>
+<td style="text-align: right;"><code>0</code> labels</td>
+<td style="text-align: right;"><code>0</code> labels</td>
+</tr>
+<tr>
+<td><code>256 MB</code></td>
+<td style="text-align: right;"><code>62</code></td>
+<td style="text-align: right;"><code>3</code> labels retained</td>
+<td style="text-align: right;"><code>3</code> labels retained</td>
+<td style="text-align: right;"><code>0</code> labels</td>
+<td style="text-align: right;"><code>0</code> labels</td>
+<td style="text-align: right;"><code>0</code> labels</td>
+</tr>
+<tr>
+<td><code>500 MB</code></td>
+<td style="text-align: right;"><code>100</code></td>
+<td style="text-align: right;"><code>3</code> labels retained</td>
+<td style="text-align: right;"><code>3</code> labels retained</td>
+<td style="text-align: right;"><code>3</code> labels retained</td>
+<td style="text-align: right;"><code>0</code> labels</td>
+<td style="text-align: right;"><code>0</code> labels</td>
+</tr>
+<tr>
+<td><code>1 GB</code></td>
+<td style="text-align: right;"><code>200</code></td>
+<td style="text-align: right;"><code>3</code> labels retained</td>
+<td style="text-align: right;"><code>3</code> labels retained</td>
+<td style="text-align: right;"><code>3</code> labels retained</td>
+<td style="text-align: right;"><code>3</code> labels retained</td>
+<td style="text-align: right;"><code>3</code> labels retained</td>
+</tr>
+<tr>
+<td><code>2 GB</code></td>
+<td style="text-align: right;"><code>400</code></td>
+<td style="text-align: right;"><code>3</code> labels retained</td>
+<td style="text-align: right;"><code>3</code> labels retained</td>
+<td style="text-align: right;"><code>3</code> labels retained</td>
+<td style="text-align: right;"><code>3</code> labels retained</td>
+<td style="text-align: right;"><code>3</code> labels retained</td>
+</tr>
+</tbody>
+</table>
+
+Recorded checks:
+
+-   `storage_cons_no_consolidation_creates_no_labels = 1`
+-   `storage_cons_64mb_interval60_captures_labels = 1`
+-   `storage_cons_64mb_interval90_misses_labels = 1`
+-   `storage_cons_500mb_interval90_captures_labels = 1`
+-   `storage_cons_500mb_interval90_delays_vs_64mb = 1`
+-   `storage_cons_500mb_interval120_misses_labels = 1`
+-   `storage_cons_1gb_interval120_captures_labels = 1`
+-   `storage_cons_1gb_interval150_captures_labels = 1`
+-   `storage_cons_2gb_interval150_captures_labels = 1`
+-   `storage_cons_1gb_interval150_delays_vs_500mb = 1`
+
+**Observation:** This is the strongest practical justification for the
+higher default and for device-class scaling above it. Under small
+storage budgets, the system still has enough time to consolidate on
+short cadences (`30` or `60` steps), but it misses slower
+label-formation windows because the raw memory is gone by step `62`.
+With a `500 MB` floor, the same memory survives to step `100`, which is
+enough for a `90`-step consolidation interval to capture and persist the
+labels before the episodic trace is evicted. With `1 GB`, the survival
+window extends to step `200`, which is enough for both `120`- and
+`150`-step consolidation intervals. `2 GB` does not add new
+label-capture wins on this task beyond `1 GB`; it extends the safety
+margin further. So the current evidence suggests a useful plateau
+structure: `500 MB` is a good default for ordinary chat retention, while
+`1 GB` is the first meaningful “slow consolidation / large-memory” tier.
+
+We then replaced the abstract fixed-step consolidation cadence with a
+synthetic human sleep clock derived from representative age-group sleep
+patterns. Each profile uses one consolidation opportunity per sleep
+bout, where the number of bouts per 24 hours is `1 + naps/day`. The
+benchmark uses a `24 h` episodic half-life, a synthetic file-backed
+storage growth rate of `12 MB/hour`, and asks a more human-like
+question: **does a weak autobiographical trace survive long enough to be
+consolidated during the next realistic sleep cycle?**
+
+**Deterministic storage × human sleep consolidation ablation:**
+`./build/examples/benchmark/cortext_storage_human_sleep_consolidation_bench`
+
+<table>
+<colgroup>
+<col style="width: 11%" />
+<col style="width: 11%" />
+<col style="width: 15%" />
+<col style="width: 15%" />
+<col style="width: 15%" />
+<col style="width: 15%" />
+<col style="width: 15%" />
+</colgroup>
+<thead>
+<tr>
+<th>age group</th>
+<th>sleep pattern used in the synthetic clock</th>
+<th style="text-align: right;">effective consolidation cadence</th>
+<th style="text-align: right;"><code>0 MB</code> floor</th>
+<th style="text-align: right;"><code>256 MB</code> floor</th>
+<th style="text-align: right;"><code>500 MB</code> floor</th>
+<th style="text-align: right;"><code>1 GB</code> floor</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>newborn</td>
+<td><code>14–17 h</code>, <code>4–6</code> naps/day</td>
+<td style="text-align: right;">every <code>4 h</code></td>
+<td style="text-align: right;"><code>3</code> labels</td>
+<td style="text-align: right;"><code>3</code> labels</td>
+<td style="text-align: right;"><code>3</code> labels</td>
+<td style="text-align: right;"><code>3</code> labels</td>
+</tr>
+<tr>
+<td>infant</td>
+<td><code>12–16 h</code>, <code>2–3</code> naps/day</td>
+<td style="text-align: right;">every <code>7 h</code></td>
+<td style="text-align: right;"><code>0</code> labels</td>
+<td style="text-align: right;"><code>3</code> labels</td>
+<td style="text-align: right;"><code>3</code> labels</td>
+<td style="text-align: right;"><code>3</code> labels</td>
+</tr>
+<tr>
+<td>toddler</td>
+<td><code>11–14 h</code>, <code>1–2</code> naps/day</td>
+<td style="text-align: right;">every <code>10 h</code></td>
+<td style="text-align: right;"><code>0</code> labels</td>
+<td style="text-align: right;"><code>3</code> labels</td>
+<td style="text-align: right;"><code>3</code> labels</td>
+<td style="text-align: right;"><code>3</code> labels</td>
+</tr>
+<tr>
+<td>preschool</td>
+<td><code>10–13 h</code>, <code>0–1</code> naps/day</td>
+<td style="text-align: right;">every <code>16 h</code></td>
+<td style="text-align: right;"><code>0</code> labels</td>
+<td style="text-align: right;"><code>3</code> labels</td>
+<td style="text-align: right;"><code>3</code> labels</td>
+<td style="text-align: right;"><code>3</code> labels</td>
+</tr>
+<tr>
+<td>school-age</td>
+<td><code>9–12 h</code>, <code>0</code> naps/day</td>
+<td style="text-align: right;">every <code>24 h</code></td>
+<td style="text-align: right;"><code>0</code> labels</td>
+<td style="text-align: right;"><code>0</code> labels</td>
+<td style="text-align: right;"><code>3</code> labels</td>
+<td style="text-align: right;"><code>3</code> labels</td>
+</tr>
+<tr>
+<td>teen</td>
+<td><code>8–10 h</code>, <code>0</code> naps/day</td>
+<td style="text-align: right;">every <code>24 h</code></td>
+<td style="text-align: right;"><code>0</code> labels</td>
+<td style="text-align: right;"><code>0</code> labels</td>
+<td style="text-align: right;"><code>3</code> labels</td>
+<td style="text-align: right;"><code>3</code> labels</td>
+</tr>
+<tr>
+<td>adult</td>
+<td><code>7–9 h</code>, optional naps</td>
+<td style="text-align: right;">every <code>24 h</code></td>
+<td style="text-align: right;"><code>0</code> labels</td>
+<td style="text-align: right;"><code>0</code> labels</td>
+<td style="text-align: right;"><code>3</code> labels</td>
+<td style="text-align: right;"><code>3</code> labels</td>
+</tr>
+<tr>
+<td>older adult</td>
+<td><code>7–8 h</code>, optional naps</td>
+<td style="text-align: right;">every <code>24 h</code></td>
+<td style="text-align: right;"><code>0</code> labels</td>
+<td style="text-align: right;"><code>0</code> labels</td>
+<td style="text-align: right;"><code>3</code> labels</td>
+<td style="text-align: right;"><code>3</code> labels</td>
+</tr>
+</tbody>
+</table>
+
+Recorded checks:
+
+-   `human_sleep_newborn_zero_budget_captures = 1`
+-   `human_sleep_adult_zero_budget_misses = 1`
+-   `human_sleep_adult_256mb_misses = 1`
+-   `human_sleep_adult_500mb_captures = 1`
+-   `human_sleep_adult_1gb_matches_500mb = 1`
+-   `human_sleep_older_adult_500mb_captures = 1`
+
+**Observation:** This synthetic-clock view is more interpretable than
+the earlier abstract interval sweep. It shows that frequent sleep in
+early life behaves like a natural consolidation rescue mechanism:
+newborn-style sleep is frequent enough that even a zero storage floor
+still captures the labels before the trace dies, while
+infant/toddler/preschool profiles already benefit from modest storage
+budgets such as `256 MB`. The adult-side boundary is sharper and more
+important for real chat systems: once consolidation becomes essentially
+once-per-day, `256 MB` is no longer enough, and `500 MB` is the first
+tested floor that reliably keeps the trace alive until the nightly
+consolidation window. `1 GB` still helps, but in this human-like
+benchmark it acts as safety margin rather than unlocking a new retention
+class. That is the clearest current justification for the deployed
+`500 MB` default.
+
+We also added a matching **estimated token-cost ablation** over the same
+synthetic sleep schedules. This study uses the repository’s existing
+character-to-token heuristic (`ceil(chars / 4)`) to estimate the prompt
+and completion budget for each consolidation session over a `72 h`
+synthetic clock with one autobiographical trace arriving per hour. It is
+intentionally a cost proxy, not a billing measurement: the goal is to
+compare how much more summarization/extraction budget frequent
+sleep-style consolidation would consume relative to nightly
+consolidation.
+
+**Deterministic storage × human sleep token-cost ablation:**
+`./build/examples/benchmark/cortext_storage_human_sleep_token_bench`
+
+<table>
+<colgroup>
+<col style="width: 15%" />
+<col style="width: 21%" />
+<col style="width: 21%" />
+<col style="width: 21%" />
+<col style="width: 21%" />
+</colgroup>
+<thead>
+<tr>
+<th>age group</th>
+<th style="text-align: right;">effective consolidation cadence</th>
+<th style="text-align: right;">storage floor</th>
+<th style="text-align: right;">consolidation events over
+<code>72 h</code></th>
+<th style="text-align: right;">estimated total tokens</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>newborn</td>
+<td style="text-align: right;">every <code>4 h</code></td>
+<td style="text-align: right;"><code>500 MB</code></td>
+<td style="text-align: right;"><code>18</code></td>
+<td style="text-align: right;"><code>7090</code></td>
+</tr>
+<tr>
+<td>infant</td>
+<td style="text-align: right;">every <code>7 h</code></td>
+<td style="text-align: right;"><code>500 MB</code></td>
+<td style="text-align: right;"><code>10</code></td>
+<td style="text-align: right;"><code>5199</code></td>
+</tr>
+<tr>
+<td>toddler</td>
+<td style="text-align: right;">every <code>10 h</code></td>
+<td style="text-align: right;"><code>500 MB</code></td>
+<td style="text-align: right;"><code>7</code></td>
+<td style="text-align: right;"><code>4520</code></td>
+</tr>
+<tr>
+<td>preschool</td>
+<td style="text-align: right;">every <code>16 h</code></td>
+<td style="text-align: right;"><code>500 MB</code></td>
+<td style="text-align: right;"><code>4</code></td>
+<td style="text-align: right;"><code>3590</code></td>
+</tr>
+<tr>
+<td>adult</td>
+<td style="text-align: right;">every <code>24 h</code></td>
+<td style="text-align: right;"><code>0 MB</code></td>
+<td style="text-align: right;"><code>3</code></td>
+<td style="text-align: right;"><code>3700</code></td>
+</tr>
+<tr>
+<td>adult</td>
+<td style="text-align: right;">every <code>24 h</code></td>
+<td style="text-align: right;"><code>500 MB</code></td>
+<td style="text-align: right;"><code>3</code></td>
+<td style="text-align: right;"><code>3700</code></td>
+</tr>
+<tr>
+<td>adult</td>
+<td style="text-align: right;">every <code>24 h</code></td>
+<td style="text-align: right;"><code>1 GB</code></td>
+<td style="text-align: right;"><code>3</code></td>
+<td style="text-align: right;"><code>3700</code></td>
+</tr>
+</tbody>
+</table>
+
+Recorded checks:
+
+-   `human_sleep_tokens_newborn_cost_exceeds_adult_500mb = 1`
+-   `human_sleep_tokens_newborn_events_exceed_adult_500mb = 1`
+-   `human_sleep_tokens_adult_500mb_cost_matches_0mb = 1`
+-   `human_sleep_tokens_adult_1gb_matches_500mb_retention = 1`
+-   `human_sleep_tokens_adult_1gb_matches_500mb_cost = 1`
+
+**Observation:** In this steady hourly-trace workload, token cost is
+dominated by **consolidation frequency**, not by the storage floor.
+Newborn-style frequent sleep performs roughly `1.9×` the estimated token
+work of adult nightly consolidation over the same `72 h` horizon (`7090`
+vs `3700` tokens), because it runs far more consolidation sessions even
+though each session is smaller. By contrast, once the workload is
+already surviving into the nightly consolidation loop, raising the
+storage floor from `0 MB` to `500 MB` or `1 GB` does not materially
+change the estimated token budget in this proxy study. That does **not**
+mean storage is irrelevant; the human-retention ablation above showed
+that storage floor is still decisive for whether fragile traces survive
+long enough to reach a nightly consolidation window at all. The joint
+takeaway is that cadence drives cost, while storage floor determines
+whether slower cadences remain viable.
 
 ### Messy Chat Baseline (Ubuntu Dialogue Corpus)
 

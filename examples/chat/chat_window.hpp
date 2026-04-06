@@ -211,6 +211,20 @@ struct LogEntry {
   std::vector<std::pair<std::string, std::string>> attributes;
 };
 
+struct TraceEntry {
+  uint64_t id = 0;
+  std::string name;
+  double duration_ms = 0.0;
+  std::string status;
+  std::vector<std::pair<std::string, std::string>> attributes;
+};
+
+struct OTelState {
+  mutable std::mutex mu;
+  std::deque<LogEntry> logs;
+  std::deque<TraceEntry> traces;
+};
+
 // Main chat window that renders all tabs
 class ChatWindow {
 public:
@@ -225,6 +239,7 @@ public:
     std::shared_ptr<StatusBarState> status;
     std::shared_ptr<SettingsState> settings;
     std::shared_ptr<DatabaseExplorerState> db_explorer;
+    std::shared_ptr<OTelState> otel;
     std::string* input = nullptr;
     bool* generating = nullptr;
     std::string* partial_response = nullptr;
@@ -282,10 +297,6 @@ private:
   std::size_t graph_layout_signature_ = 0;
   bool graph_layout_dirty_ = true;
   long long graph_dragging_node_id_ = 0;
-
-  // Log buffer for parsed logs
-  std::deque<LogEntry> parsed_logs_;
-  uint64_t last_log_id_ = 0;
 };
 
 }  // namespace chat

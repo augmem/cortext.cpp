@@ -1,7 +1,10 @@
 #include "cortext/summarizer/gemma_summarizer.hpp"
 
+#include <algorithm>
+#include <cctype>
 #include <condition_variable>
 #include <mutex>
+#include <regex>
 #include <sstream>
 #include <stdexcept>
 
@@ -84,13 +87,79 @@ BuildSummaryPrompt (const std::vector<std::string> &texts)
          "unless that wording is necessary for clarity.\n"
       << "Do not infer causality, chronology, identity, or shared beliefs "
          "beyond the text.\n"
-      << "Avoid speculation, role confusion, and meta commentary.\n\n"
+      << "Avoid speculation, role confusion, and meta commentary.\n"
+      << "Examples:\n"
+      << "Bad: The user is building Cortext and the assistant says it is a "
+         "memory system.\n"
+      << "Good: Cortext is a C plus plus memory system for AI assistants.\n"
+      << "Bad: Excerpt 2 indicates the user is focusing on consolidation "
+         "quality.\n"
+      << "Good: Consolidation quality is the next focus for the Cortext chat "
+         "application.\n"
+      << "Bad: In a conversation, Emily put the tooth under her pillow.\n"
+      << "Good: Emily put her lost tooth under her pillow for the tooth "
+         "fairy after celebrating with vanilla ice cream.\n\n"
       << "Conversation excerpts:\n\n";
   for (size_t i = 0; i < texts.size (); ++i)
     {
       combined << "Excerpt " << (i + 1) << ":\n" << texts[i] << "\n\n";
     }
   return combined.str ();
+}
+
+std::string
+TrimAsciiWhitespace (std::string value)
+{
+  auto is_space = [] (unsigned char c) { return std::isspace (c) != 0; };
+  value.erase (
+      value.begin (),
+      std::find_if (value.begin (), value.end (),
+                    [&] (unsigned char c) { return !is_space (c); }));
+  value.erase (
+      std::find_if (value.rbegin (), value.rend (),
+                    [&] (unsigned char c) { return !is_space (c); })
+          .base (),
+      value.end ());
+  return value;
+}
+
+std::string
+SanitizeSummaryText (std::string summary)
+{
+  if (summary.empty ())
+    {
+      return summary;
+    }
+
+  summary = std::regex_replace (
+      summary, std::regex (R"(Excerpt\s+\d+\s+(mentions|indicates)\s+)",
+                           std::regex_constants::icase),
+      "");
+  summary = std::regex_replace (
+      summary,
+      std::regex (R"(,\s*which is a user\b)", std::regex_constants::icase), "");
+  summary = std::regex_replace (
+      summary,
+      std::regex (R"(\bthe user is focusing on\b)",
+                  std::regex_constants::icase),
+      "focuses on");
+  summary = std::regex_replace (
+      summary, std::regex (R"(\bthe user is\b)", std::regex_constants::icase),
+      "");
+  summary = std::regex_replace (
+      summary, std::regex (R"(\bthe user\b)", std::regex_constants::icase),
+      "");
+  summary = std::regex_replace (
+      summary,
+      std::regex (R"(\bthe assistant\b)", std::regex_constants::icase), "");
+  summary = std::regex_replace (
+      summary,
+      std::regex (R"([ \t]+)", std::regex_constants::icase), " ");
+  summary = std::regex_replace (
+      summary, std::regex (R"(\s+\.)", std::regex_constants::icase), ".");
+  summary = std::regex_replace (
+      summary, std::regex (R"(\n{3,})", std::regex_constants::icase), "\n\n");
+  return TrimAsciiWhitespace (summary);
 }
 
 bool
@@ -412,7 +481,7 @@ GemmaSummarizer::SummarizeTextsLimited (const std::vector<std::string> &texts,
       return {};
     }
   const std::string prompt = BuildSummaryPrompt (texts);
-  return impl_->Generate (prompt, max_words);
+  return SanitizeSummaryText (impl_->Generate (prompt, max_words));
 }
 
 std::string

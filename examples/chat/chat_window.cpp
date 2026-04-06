@@ -335,21 +335,18 @@ void ChatWindow::Render() {
       RenderMemoryTab();
       break;
     case 4:
-      RenderWorkingMemoryTab();
-      break;
-    case 5:
       RenderSettingsTab();
       break;
-    case 6:
+    case 5:
       RenderDatabaseTab();
       break;
-    case 7:
+    case 6:
       RenderGraphTab();
       break;
-    case 8:
+    case 7:
       RenderContextTab();
       break;
-    case 9:
+    case 8:
       RenderLogsTab();
       break;
   }
@@ -367,7 +364,7 @@ void ChatWindow::RenderTabBar() {
       selected_tab_ = 0;
       ImGui::EndTabItem();
     }
-    if (ImGui::BeginTabItem("Chunks")) {
+    if (ImGui::BeginTabItem("Stream")) {
       selected_tab_ = 1;
       ImGui::EndTabItem();
     }
@@ -379,28 +376,24 @@ void ChatWindow::RenderTabBar() {
       selected_tab_ = 3;
       ImGui::EndTabItem();
     }
-    if (ImGui::BeginTabItem("Working Memory")) {
+    if (ImGui::BeginTabItem("Settings")) {
       selected_tab_ = 4;
       ImGui::EndTabItem();
     }
-    if (ImGui::BeginTabItem("Settings")) {
+    if (ImGui::BeginTabItem("DB")) {
       selected_tab_ = 5;
       ImGui::EndTabItem();
     }
-    if (ImGui::BeginTabItem("DB")) {
+    if (ImGui::BeginTabItem("Graph")) {
       selected_tab_ = 6;
       ImGui::EndTabItem();
     }
-    if (ImGui::BeginTabItem("Graph")) {
+    if (ImGui::BeginTabItem("Context")) {
       selected_tab_ = 7;
       ImGui::EndTabItem();
     }
-    if (ImGui::BeginTabItem("Context")) {
+    if (ImGui::BeginTabItem("Telemetry")) {
       selected_tab_ = 8;
-      ImGui::EndTabItem();
-    }
-    if (ImGui::BeginTabItem("Logs")) {
-      selected_tab_ = 9;
       ImGui::EndTabItem();
     }
     ImGui::EndTabBar();
@@ -561,8 +554,9 @@ void ChatWindow::RenderChunksTab() {
                          FormatDouble(probe.boundary_threshold).c_str(),
                          probe.boundary_score_pass ? "true" : "false");
       ImGui::TextColored(ImVec4(1.0f, 0.5f, 1.0f, 1.0f),
-                         "interrupt=%s new_memories=%d retrieved=%zu",
+                         "interrupt=%s cap_ignored=%s new_memories=%d retrieved=%zu",
                          probe.should_interrupt ? "true" : "false",
+                         probe.interrupt_ignored_restart_cap ? "true" : "false",
                          probe.new_memory_count,
                          probe.raw_retrieved_count);
       ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.8f, 1.0f),
@@ -1872,45 +1866,82 @@ void ChatWindow::RenderContextTab() {
 }
 
 void ChatWindow::RenderLogsTab() {
-  ImGui::TextColored(ImVec4(0.8f, 0.8f, 1.0f, 1.0f), "System Logs (OpenTelemetry)");
+  ImGui::TextColored(ImVec4(0.8f, 0.8f, 1.0f, 1.0f), "OpenTelemetry");
   ImGui::Separator();
 
-  if (parsed_logs_.empty()) {
+  std::vector<LogEntry> logs;
+  std::vector<TraceEntry> traces;
+  if (state_.otel) {
+    std::lock_guard<std::mutex> lock(state_.otel->mu);
+    logs.assign(state_.otel->logs.begin(), state_.otel->logs.end());
+    traces.assign(state_.otel->traces.begin(), state_.otel->traces.end());
+  }
+
+  if (logs.empty() && traces.empty()) {
     if (state_.otlp_enabled) {
       ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.3f, 1.0f), "OTLP gRPC enabled");
-      ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "Traces and metrics sent to Uptrace");
+      ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "Traces, logs, and metrics are exported");
       ImGui::Text("");
       ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "Telemetry active for:");
-      ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "  - Uptrace (traces + metrics)");
+      ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "  - Uptrace (traces + logs + metrics)");
       ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "  - Status bar metrics");
-      ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "  - Retrieval latency tracking");
+      ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "  - In-memory trace/log viewer");
     } else {
       ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.3f, 1.0f), "OTLP gRPC not configured");
       ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "Set UPTRACE_DSN to enable Uptrace export");
       ImGui::Text("");
       ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "In-memory telemetry active for:");
+      ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "  - Recent traces");
+      ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "  - Recent logs");
       ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "  - Status bar metrics");
-      ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "  - Retrieval latency tracking");
     }
   } else {
-    // Show most recent logs first
-    for (auto it = parsed_logs_.rbegin(); it != parsed_logs_.rend(); ++it) {
-      const auto& log = *it;
-      std::string header = log.body;
-      if (!log.severity.empty()) {
-        header = "[" + log.severity + "] " + header;
-      }
-      header = Truncate(header, 100);
-      ImGui::TextColored(SeverityColor(log.severity), "%s", header.c_str());
+    ImGui::Text("traces=%zu logs=%zu", traces.size(), logs.size());
+    ImGui::Separator();
 
-      // Show attributes
-      for (const auto& [k, v] : log.attributes) {
-        ImGui::TextColored(ImVec4(0.3f, 1.0f, 1.0f, 1.0f), "  %s:", k.c_str());
-        ImGui::SameLine();
-        ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.3f, 1.0f), "%s", Truncate(v, 80).c_str());
+    if (ImGui::CollapsingHeader("Traces", ImGuiTreeNodeFlags_DefaultOpen)) {
+      ImGui::BeginChild("OTelTraces", ImVec2(0, 240), true);
+      for (auto it = traces.rbegin(); it != traces.rend(); ++it) {
+        const auto& trace = *it;
+        std::ostringstream header;
+        header << trace.name << " | " << std::fixed << std::setprecision(2)
+               << trace.duration_ms << "ms";
+        if (!trace.status.empty()) {
+          header << " | " << trace.status;
+        }
+        ImGui::TextColored(ImVec4(0.9f, 0.8f, 0.3f, 1.0f), "%s",
+                           header.str().c_str());
+        for (const auto& [k, v] : trace.attributes) {
+          ImGui::TextColored(ImVec4(0.3f, 1.0f, 1.0f, 1.0f), "  %s:", k.c_str());
+          ImGui::SameLine();
+          ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.3f, 1.0f), "%s",
+                             Truncate(v, 96).c_str());
+        }
+        ImGui::Separator();
       }
+      ImGui::EndChild();
+    }
 
-      ImGui::Separator();
+    if (ImGui::CollapsingHeader("Logs", ImGuiTreeNodeFlags_DefaultOpen)) {
+      ImGui::BeginChild("OTelLogs", ImVec2(0, 0), true);
+      for (auto it = logs.rbegin(); it != logs.rend(); ++it) {
+        const auto& log = *it;
+        std::string header = log.body;
+        if (!log.severity.empty()) {
+          header = "[" + log.severity + "] " + header;
+        }
+        header = Truncate(header, 100);
+        ImGui::TextColored(SeverityColor(log.severity), "%s", header.c_str());
+
+        for (const auto& [k, v] : log.attributes) {
+          ImGui::TextColored(ImVec4(0.3f, 1.0f, 1.0f, 1.0f), "  %s:", k.c_str());
+          ImGui::SameLine();
+          ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.3f, 1.0f), "%s",
+                             Truncate(v, 80).c_str());
+        }
+        ImGui::Separator();
+      }
+      ImGui::EndChild();
     }
   }
 }

@@ -7,6 +7,13 @@ MODELS_DIR="${MODELS_DIR:-models}"
 EMBEDDER_BIN="${EMBEDDER_BIN:-./build/tools/text_embedder/cortext_text_embedder}"
 EMBEDDER_BACKEND="${EMBEDDER_BACKEND:-llama.cpp}"
 NAME_PRIORS_PATH="${NAME_PRIORS_PATH:-}"
+OPENAI_LABEL_MODEL="${OPENAI_LABEL_MODEL:-gpt-5.4-mini-2026-03-17}"
+OPENAI_LABEL_SENTENCES="${OPENAI_LABEL_SENTENCES:-120}"
+
+if [[ -f "env.sh" ]]; then
+  # shellcheck disable=SC1091
+  source env.sh
+fi
 
 mkdir -p "${ROOT}"
 
@@ -171,6 +178,24 @@ if [[ -f "data/personachat/train.jsonl" ]]; then
     --label-cap place=10
   cat "${ROOT}/personachat_training/train.sampled.jsonl" >> "${ROOT}/training/train.jsonl"
   cat "${ROOT}/personachat_training/valid.sampled.jsonl" >> "${ROOT}/training/valid.jsonl"
+fi
+
+if [[ -n "${OPENAI_API_KEY:-}" ]]; then
+  "${PYTHON_BIN}" scripts/generate_openai_label_data.py \
+    --dataset data/personachat/train.jsonl \
+    --dataset data/taskmaster/train.jsonl \
+    --dataset data/meld/train.jsonl \
+    --dataset data/goemotions/train.jsonl \
+    --dataset data/topical_chat/train.jsonl \
+    --wordnet-index "${ROOT}/wordnet_index.json" \
+    --name-priors "${ROOT}/name_priors.json" \
+    --out-dir "${ROOT}/openai_labels" \
+    --env-file env.sh \
+    --model "${OPENAI_LABEL_MODEL}" \
+    --max-sentences "${OPENAI_LABEL_SENTENCES}" \
+    > "${ROOT}/openai_label_generation.log"
+  cat "${ROOT}/openai_labels/train.jsonl" >> "${ROOT}/training/train.jsonl"
+  cat "${ROOT}/openai_labels/valid.jsonl" >> "${ROOT}/training/valid.jsonl"
 fi
 
 TRAIN_ARGS=(

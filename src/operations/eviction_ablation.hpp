@@ -30,6 +30,10 @@ struct EvictionAblationOverride
   std::optional<WeightDistribution> weights;
   std::optional<bool> fact_floor_enabled;
   std::optional<bool> consolidation_gate_enabled;
+  std::optional<bool> storage_gate_enabled;
+  std::optional<long long> min_storage_bytes;
+  std::optional<double> min_storage_fraction_of_available;
+  std::optional<long long> used_storage_bytes;
 };
 
 class ScopedEvictionAblationOverride
