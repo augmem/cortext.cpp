@@ -34,6 +34,9 @@ The same architecture also happens to be useful for long-horizon LLM memory. But
 - `docs/paper/_manuscript/index.md`: generated manuscript output
 - `models/` and `third_party/`: local runtime assets and vendored dependencies
 
+The rendered manuscript source of truth is here:
+- [docs/paper/_manuscript/index.md](docs/paper/_manuscript/index.md)
+
 ## Build Requirements
 
 Core native builds require:
@@ -142,14 +145,15 @@ PYTHONPATH=bindings/python python3 -c "import cortext; print(cortext.version())"
 Deep consolidation backend selection stays internal, but you can override it with environment variables:
 
 - `CORTEXT_DEEP_LLM_BACKEND=auto|gemma|lfm2|mixed`
-- `CORTEXT_LFM2_SUMMARIZER_MODEL=/abs/path/LFM2.5-350M-Q4_K_M.gguf`
+- `CORTEXT_LFM2_SUMMARIZER_MODEL=/abs/path/LFM2.5-1.2B-Instruct-Q4_K_M.gguf`
 - `CORTEXT_LFM2_EXTRACT_MODEL=/abs/path/LFM2.5-350M-Q4_K_M.gguf`
 - `CORTEXT_LLAMA_CPP_LOG_LEVEL=none|error|warn|info|debug`
 
 Current behavior:
 - `auto` prefers the mixed path when both stacks are available
-- the Liquid `llama.cpp` path now prefers `LFM2.5-350M-GGUF`
-- if `LFM2.5-350M-GGUF` is not present, the resolver falls back to the older pinned `LFM2-2.6B-Transcript` summarizer and `LFM2-1.2B-Extract` extractor
+- the Liquid `llama.cpp` summarizer path now prefers `LFM2.5-1.2B-Instruct-GGUF`
+- the Liquid extractor path continues to prefer `LFM2.5-350M-GGUF`
+- if the preferred Liquid summarizer is not present, the resolver falls back to `LFM2.5-350M-GGUF`, then the older pinned `LFM2-2.6B-Transcript` summarizer
 - the mixed path uses Gemma/LiteRT-LM for summarization and Liquid/`llama.cpp` for extraction
 
 ## Experiments And Docs

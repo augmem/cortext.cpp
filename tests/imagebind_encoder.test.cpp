@@ -41,10 +41,10 @@ ModelsPresent ()
                          || fs::exists (md / "audio_encoder.onnx");
   const bool has_vision = fs::exists (md / "vision_encoder_int8.onnx")
                           || fs::exists (md / "vision_encoder.onnx");
-  // BPE may be found in models/ or in poc/ (encoder searches for it).
+  // BPE may be found in models/ or in third_party/.
   const bool has_bpe = fs::exists (md / "bpe" / "bpe_simple_vocab_16e6.txt.gz")
                        || fs::exists (md / "bpe_simple_vocab_16e6.txt.gz")
-                       || fs::exists ("poc/ImageBind/imagebind/bpe/"
+                       || fs::exists ("third_party/imagebind_assets/bpe/"
                                       "bpe_simple_vocab_16e6.txt.gz");
   return has_text && has_audio && has_vision && has_bpe;
 }
@@ -135,4 +135,3 @@ TEST_CASE ("ImageBindEncoder produces embeddings for all three modalities",
   }
 #endif
 }
-
