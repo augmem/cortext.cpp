@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 01-05-PLAN.md
-last_updated: "2026-04-07T21:03:54Z"
+stopped_at: Completed 01-02-PLAN.md
+last_updated: "2026-04-07T21:12:17.080Z"
 last_activity: 2026-04-07
 progress:
   total_phases: 5
   completed_phases: 0
   total_plans: 7
-  completed_plans: 3
-  percent: 43
+  completed_plans: 4
+  percent: 57
 ---
 
 # Project State
@@ -26,36 +26,37 @@ See: .planning/PROJECT.md (updated 2026-04-07)
 ## Current Position
 
 Phase: 01 (audio-front-end-boundary-runtime-foundation) — EXECUTING
-Plan: 3 of 7 (plans 03 and 05 completed out of order; 02 and 04 remain pending)
+Plan: 4 of 7 (plans 03 and 05 completed out of order; 04 is the next pending plan in sequence)
 Status: Ready to execute
 Last activity: 2026-04-07
 Primary repo: `planum.cpp`
 Secondary repo: `cortext`
 
-Progress: [████░░░░░░] 43%
+Progress: [██████░░░░] 57%
 
 ## Performance Metrics
 
 **Velocity:**
 
-- Total plans completed: 3
-- Average duration: 3.7 min
-- Total execution time: 0.2 hours
+- Total plans completed: 4
+- Average duration: 4.5 min
+- Total execution time: 0.3 hours
 
 **By Phase:**
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
-| 01 | 3 | 7 | 3.7 min |
+| 01 | 4 | 18 | 4.5 min |
 
 **Recent Trend:**
 
-- Last 5 plans: 01-01, 01-03, 01-05
+- Last 5 plans: 01-01, 01-03, 01-05, 01-02
 - Trend: Stable
 
 | Phase 01 P01 | 4min | 2 tasks | 6 files |
 | Phase 01 P03 | 4min | 2 tasks | 10 files |
 | Phase 01 P05 | 3min | 2 tasks | 7 files |
+| Phase 01-audio-front-end-boundary-runtime-foundation P02 | 7min | 2 tasks | 8 files |
 
 ## Accumulated Context
 
@@ -75,6 +76,8 @@ Recent decisions affecting current work:
 - [Phase 01]: Leave child-actor model types as explicit placeholders until later plans install bounded SML transition tables.
 - [Phase 01]: Normalize the `planum.cpp -> cortext` seam around non-owning perception facts (`PerceptionEvent`) rather than example callbacks or backend-specific structs.
 - [Phase 01]: Use dedicated contract tests to reject retention, backend, and callback drift at the front-end boundary.
+- [Phase 01-audio-front-end-boundary-runtime-foundation]: Wrap the session co_sm in a non-movable actor class that owns its injected context so SML dependency references stay stable.
+- [Phase 01-audio-front-end-boundary-runtime-foundation]: Model unexpected control probes with explicit unexpected_event<unexpected_probe> self-transitions per locked state instead of introducing queue-like fallback behavior.
 
 ### Pending Todos
 
@@ -86,6 +89,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-04-07T21:03:54Z
-Stopped at: Completed 01-05-PLAN.md
+Last session: 2026-04-07T21:12:17.077Z
+Stopped at: Completed 01-02-PLAN.md
 Resume file: None

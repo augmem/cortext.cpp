@@ -117,7 +117,7 @@ Plans:
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Audio Front-End Scaffolding & Boundary Contract | 3/7 | In progress | 01, 03, 05 |
+| 1. Audio Front-End Scaffolding & Boundary Contract | 4/7 | In progress | 01, 02, 03, 05 |
 | 2. GGML Speech Front-End | 0/3 | Not started | - |
 | 3. Audio Memory Ingestion & Safety | 0/2 | Not started | - |
 | 4. OmniEmbed Multimodal Integration | 0/3 | Not started | - |
