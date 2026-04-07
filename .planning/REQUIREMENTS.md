@@ -7,9 +7,9 @@
 
 ### Audio Pipeline
 
-- [ ] **AUD-00**: Cortext remains audio-engine agnostic and accepts normalized audio inputs plus metadata rather than speech-runtime-specific implementation types
+- [x] **AUD-00**: Cortext remains audio-engine agnostic and accepts normalized audio inputs plus metadata rather than speech-runtime-specific implementation types
 - [x] **AUD-01**: Engine can ingest live audio through a low-latency on-device pipeline suitable for realtime memory augmentation
-- [ ] **AUD-02**: Audio pipeline supports partials, endpointing, and finalized utterance boundaries without requiring cloud services
+- [x] **AUD-02**: Audio pipeline supports partials, endpointing, and finalized utterance boundaries without requiring cloud services
 - [ ] **AUD-03**: Audio-derived memory can retrieve against current context without durably retaining the heard utterance
 - [ ] **AUD-04**: Audio pipeline can safely emit durable writes only when modality- and speaker-confidence thresholds are satisfied
 
@@ -61,9 +61,9 @@
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| AUD-00 | Phase 1 | Pending |
+| AUD-00 | Phase 1 | Complete |
 | AUD-01 | Phase 1 | Complete |
-| AUD-02 | Phase 1 | Pending |
+| AUD-02 | Phase 1 | Complete |
 | AUD-03 | Phase 3 | Pending |
 | AUD-04 | Phase 3 | Pending |
 | SPK-00 | Phase 2 | Pending |
