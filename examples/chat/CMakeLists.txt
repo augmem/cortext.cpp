@@ -36,6 +36,19 @@ FetchContent_Declare(
 )
 FetchContent_Populate(openai_cpp)
 
+FetchContent_Declare(
+  whisper_cpp
+  GIT_REPOSITORY https://github.com/ggml-org/whisper.cpp.git
+  GIT_TAG v1.8.4
+)
+
+set(WHISPER_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(WHISPER_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(WHISPER_BUILD_SERVER OFF CACHE BOOL "" FORCE)
+set(WHISPER_CURL OFF CACHE BOOL "" FORCE)
+set(WHISPER_SDL2 OFF CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(whisper_cpp)
+
 find_package(CURL REQUIRED)
 
 # --- Target ---
@@ -50,6 +63,15 @@ add_executable(cortext_chat
 
 add_executable(cortext_chat_profile
   profile.cpp
+)
+
+add_executable(cortext_voice_backend_bench
+  voice_backend_bench.cpp
+)
+
+add_executable(cortext_planum_bridge_smoke
+  planum_bridge_smoke.cpp
+  ${CMAKE_SOURCE_DIR}/src/audio/planum_bridge.cpp
 )
 
 # Add ImGui sources (Dear ImGui is not a CMake project)
@@ -97,11 +119,48 @@ target_link_libraries(cortext_chat_profile PRIVATE
   cortext::cortext
 )
 
+target_include_directories(cortext_planum_bridge_smoke PRIVATE
+  ${CMAKE_SOURCE_DIR}/src
+  ${CMAKE_SOURCE_DIR}/third_party/planum.cpp/include
+)
+target_link_libraries(cortext_planum_bridge_smoke PRIVATE
+  cortext::cortext
+)
+
+target_compile_features(cortext_voice_backend_bench PRIVATE cxx_std_20)
+target_compile_features(cortext_planum_bridge_smoke PRIVATE cxx_std_20)
+target_include_directories(cortext_voice_backend_bench PRIVATE
+  ${CMAKE_SOURCE_DIR}/third_party/sherpa-onnx
+  ${whisper_cpp_SOURCE_DIR}/include
+)
+target_link_libraries(cortext_voice_backend_bench PRIVATE
+  sherpa-onnx-cxx-api
+  whisper
+)
+
 target_compile_features(cortext_chat PRIVATE cxx_std_20)
 target_compile_features(cortext_chat_profile PRIVATE cxx_std_20)
 target_compile_definitions(cortext_chat PRIVATE
   CORTEXT_CHAT_ENABLE_OTLP_GRPC=$<BOOL:${CORTEXT_CHAT_ENABLE_OTLP_GRPC}>
 )
+
+if(APPLE AND NOT CORTEXT_DISABLE_SHERPA_ONNX)
+  target_sources(cortext_chat PRIVATE
+    voice_session.mm
+  )
+  target_include_directories(cortext_chat PRIVATE
+    ${CMAKE_SOURCE_DIR}/third_party/sherpa-onnx
+    ${whisper_cpp_SOURCE_DIR}/include
+  )
+  target_link_libraries(cortext_chat PRIVATE
+    sherpa-onnx-cxx-api
+    whisper
+  )
+else()
+  target_sources(cortext_chat PRIVATE
+    voice_session.cpp
+  )
+endif()
 
 target_include_directories(cortext_chat_profile PRIVATE
   ${CMAKE_SOURCE_DIR}/src
@@ -117,12 +176,22 @@ if(APPLE)
   set_target_properties(cortext_chat_profile PROPERTIES
     BUILD_RPATH "${ORT_LIB_DIR};${LITERT_LIB_DIR}"
   )
+  set_target_properties(cortext_voice_backend_bench PROPERTIES
+    BUILD_RPATH "${ORT_LIB_DIR};${LITERT_LIB_DIR}"
+  )
+  set_target_properties(cortext_planum_bridge_smoke PROPERTIES
+    BUILD_RPATH "${ORT_LIB_DIR};${LITERT_LIB_DIR}"
+  )
   # macOS frameworks needed by GLFW
   find_library(COCOA_LIBRARY Cocoa REQUIRED)
+  find_library(FOUNDATION_LIBRARY Foundation REQUIRED)
+  find_library(AVFOUNDATION_LIBRARY AVFoundation REQUIRED)
   find_library(IOKIT_LIBRARY IOKit REQUIRED)
   find_library(COREVIDEO_LIBRARY CoreVideo REQUIRED)
   target_link_libraries(cortext_chat PRIVATE
     ${COCOA_LIBRARY}
+    ${FOUNDATION_LIBRARY}
+    ${AVFOUNDATION_LIBRARY}
     ${IOKIT_LIBRARY}
     ${COREVIDEO_LIBRARY}
   )
@@ -132,9 +201,12 @@ endif()
 if(MSVC)
   target_compile_options(cortext_chat PRIVATE /W4)
   target_compile_options(cortext_chat_profile PRIVATE /W4)
+  target_compile_options(cortext_voice_backend_bench PRIVATE /W4)
 else()
   target_compile_options(cortext_chat PRIVATE -Wall -Wextra -Wpedantic)
   target_compile_options(cortext_chat_profile PRIVATE -Wall -Wextra -Wpedantic)
+  target_compile_options(cortext_voice_backend_bench PRIVATE -Wall -Wextra -Wpedantic)
+  target_compile_options(cortext_planum_bridge_smoke PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
 # Suppress warnings in ImGui source files
