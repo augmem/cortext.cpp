@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 01-04-PLAN.md
-last_updated: "2026-04-07T21:20:12.812Z"
+stopped_at: Completed 01-07-PLAN.md
+last_updated: "2026-04-07T21:24:04.906Z"
 last_activity: 2026-04-07
 progress:
   total_phases: 5
   completed_phases: 0
   total_plans: 7
-  completed_plans: 5
-  percent: 71
+  completed_plans: 6
+  percent: 86
 ---
 
 # Project State
@@ -26,7 +26,7 @@ See: .planning/PROJECT.md (updated 2026-04-07)
 ## Current Position
 
 Phase: 01 (audio-front-end-boundary-runtime-foundation) — EXECUTING
-Plan: 5 of 7 (plans 03 and 05 completed out of order; 06 is the next pending plan in sequence)
+Plan: 6 of 7 (plans 03 and 05 completed out of order; 06 is the next pending plan in sequence)
 Status: Ready to execute
 Last activity: 2026-04-07
 Primary repo: `planum.cpp`
@@ -58,6 +58,7 @@ Progress: [███████░░░] 71%
 | Phase 01 P05 | 3min | 2 tasks | 7 files |
 | Phase 01-audio-front-end-boundary-runtime-foundation P02 | 7min | 2 tasks | 8 files |
 | Phase 01 P04 | 12min | 2 tasks | 8 files |
+| Phase 01-audio-front-end-boundary-runtime-foundation P07 | 10min | 2 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -81,6 +82,9 @@ Recent decisions affecting current work:
 - [Phase 01-audio-front-end-boundary-runtime-foundation]: Model unexpected control probes with explicit unexpected_event<unexpected_probe> self-transitions per locked state instead of introducing queue-like fallback behavior.
 - [Phase 01]: Keep signaling scaffold-only in Phase 1 so ownership lands without introducing transport, callback, or queue semantics.
 - [Phase 01]: Expose RUN-03 lifecycle inspection through a standalone synthetic benchmark probe instead of backend hooks.
+- [Phase 01-audio-front-end-boundary-runtime-foundation]: Keep the planum bridge private to src/audio and compile it directly into white-box/example targets instead of widening the public API.
+- [Phase 01-audio-front-end-boundary-runtime-foundation]: Route only final_transcript events with transcript payloads through Cortext::ProcessTextAt(); all non-final planum events remain explicit no-write in Phase 1.
+- [Phase 01-audio-front-end-boundary-runtime-foundation]: Derive deterministic bridge source ids as planum/<stream>/<speaker> rather than example callback identifiers.
 
 ### Pending Todos
 
@@ -92,6 +96,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-04-07T21:20:12.810Z
-Stopped at: Completed 01-04-PLAN.md
+Last session: 2026-04-07T21:24:04.904Z
+Stopped at: Completed 01-07-PLAN.md
 Resume file: None
