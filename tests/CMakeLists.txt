@@ -99,10 +99,13 @@ add_executable(cortext_tests
   chat_chunk_diagnostics.test.cpp
   chat_metrics_state.test.cpp
   chat_stream_usage.test.cpp
+  audio_planum_bridge.test.cpp
+  ${CMAKE_SOURCE_DIR}/src/audio/planum_bridge.cpp
 )
 
 target_link_libraries(cortext_tests PRIVATE cortext Catch2::Catch2WithMain nlohmann_json::nlohmann_json)
 target_compile_definitions(cortext_tests PRIVATE CORTEXT_TESTING=1)
+target_include_directories(cortext_tests PRIVATE ${CMAKE_SOURCE_DIR}/third_party/planum.cpp/include)
 
 if(NOT CORTEXT_DISABLE_LITERT)
   target_include_directories(cortext_tests PRIVATE ${LITERT_INSTALL_DIR}/include)
