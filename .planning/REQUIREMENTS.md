@@ -24,7 +24,7 @@
 ### Runtime & Orchestration
 
 - [x] **RUN-01**: New multimodal realtime features use `stateforward/sml.cpp` state machines for orchestration
-- [ ] **RUN-02**: New audio/speaker components integrate into the existing engine without breaking the public C++ or C APIs
+- [x] **RUN-02**: New audio/speaker components integrate into the existing engine without breaking the public C++ or C APIs
 - [x] **RUN-03**: Realtime modality features expose explicit lifecycle states that can be inspected and debugged in examples and benchmarks
 
 ### Multimodal Expansion
@@ -72,7 +72,7 @@
 | SPK-03 | Phase 2 | Pending |
 | SPK-04 | Phase 2 | Pending |
 | RUN-01 | Phase 1 | Complete |
-| RUN-02 | Phase 1 | Pending |
+| RUN-02 | Phase 1 | Complete |
 | RUN-03 | Phase 1 | Complete |
 | MM-01 | Phase 4 | Pending |
 | MM-02 | Phase 4 | Pending |
