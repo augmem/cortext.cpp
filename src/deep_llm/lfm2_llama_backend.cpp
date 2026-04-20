@@ -17,6 +17,12 @@
 #include <utility>
 #include <vector>
 
+#if !defined(CORTEXT_ENABLE_LLAMA_CPP)
+using llama_sampler = cortext::internal::llama_sampler;
+using llama_vocab = cortext::internal::llama_vocab;
+using llama_token = cortext::internal::llama_token;
+#endif
+
 namespace cortext
 {
 

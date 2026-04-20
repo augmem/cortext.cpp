@@ -322,3 +322,24 @@ Do not make direct repo edits outside a GSD workflow unless the user explicitly 
 - Behavior should derive from the three knobs (F/S/T) wherever possible.
 - Consolidation/labeling uses gemma-3n-e2b via LiteRT; embeddings use ImageBind/ONNX.
 - Do not modify the public API surface (public headers in `include/`, C API) without explicit approval.
+
+## SML / stateforward Rules
+- For new realtime orchestration work, treat `docs/rules/sml.rules.md` as binding.
+- Follow the RTC actor model and no-queue invariant. Do not use `sml::process_queue`, `sml::defer_queue`, mailboxes, or post-for-later mechanisms.
+- Keep dispatch run-to-completion, deterministic, single-writer per actor, allocation-free during dispatch, and provably bounded.
+- Do not call an actor's own `process_event` from guards, actions, or entry/exit handlers.
+- Model internal multi-step flows with `sml::completion<TEvent>`, anonymous transitions, and/or entry actions. Keep anonymous/completion chains acyclic or statically bounded.
+- Treat transient handoff data as event payload, not context. Use explicit events and `sml::completion<TEvent>` for per-dispatch or cross-state handoff data; reserve context for persistent actor-owned runtime state only.
+- Do not use completion transitions or anonymous transitions as data-plane iteration loops. Bulk numeric/data iteration belongs in bounded allocation-free kernels inside a single transition phase.
+- Keep guards pure predicates of `(event, context)` with no side effects.
+- Keep actions bounded, non-blocking, and allocation-free during dispatch.
+- Do not put runtime branching (`if`, `else`, `switch`, `?:`) in actions or in functions called from actions. Express runtime control flow with explicit guards, choice states, and transitions.
+- Do not emulate branching with loop constructs, handler tables, or runtime-indexed dispatch arrays.
+- Inject time through event payloads; do not read wall-clock time in guards or actions.
+- Keep publicly exposed events small and immutable. Internal-only synchronous handoff events may carry mutable references/pointers only within the same RTC chain and must never escape via public APIs.
+- Use constructor dependency injection with a component-local context aggregate.
+- Use `visit_current_states` or `is(...)` for state inspection.
+- Define explicit behavior for unexpected events and use `sml::unexpected_event` rather than silent drops.
+- Keep tracing deterministic, bounded, and allocation-free.
+- Reproduce reported SML bugs with a failing unit test before fixing them.
+- `planum.cpp` should follow the same rules; its local copy lives at `third_party/planum.cpp/docs/sml.rules.md`.

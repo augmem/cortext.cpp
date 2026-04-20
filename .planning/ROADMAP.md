@@ -59,7 +59,7 @@ Plans:
 - [ ] `01-07-PLAN.md` — Add the private Cortext bridge and a deterministic Cortext-side smoke hook
 
 ### Phase 2: GGML Speech Front-End
-**Goal**: A separate `ggml` speech front-end/submodule can provide stable anonymous speakers and related realtime audio intelligence in a way that composes cleanly with Cortext.
+**Goal**: A separate `ggml` speech front-end/submodule can provide stable anonymous speakers and related realtime audio intelligence in a way that composes cleanly with Cortext, while converging the scaffold naming onto domain-first `planum::*` actors such as `processor`, `audio`, `segmentation`, and `signaling`.
 **Depends on**: Phase 1
 **Primary repo**: `planum.cpp`
 **Secondary repo**: None
@@ -68,13 +68,15 @@ Plans:
 **Success Criteria** (what must be TRUE):
   1. A separate speech front-end module exists in front of Cortext and can emit speaker metadata without leaking front-end implementation details into Cortext public APIs.
   2. The speech front-end can attribute room audio to stable anonymous speaker streams such as `speaker:1`, `speaker:2`, and `speaker:3` on device.
-  3. The new `ggml`-based speaker stack is benchmarked against the current Sherpa/Sortformer/whisper-based baselines and demonstrates a better fit for the target on-device performance constraints.
-  4. Applications can resolve anonymous speaker streams into semantic roles such as self, assistant, or other without rewriting the Cortext core pipeline.
-  5. Low-confidence speaker attribution fails safely and is visible to applications and benchmarks.
+  3. The top-level Phase 1 scaffold naming is normalized to `planum::processor` and sibling domain namespaces rather than `session` or `planum::runtime::*`.
+  4. Transient speaker/segmentation/STT handoff data moves through explicit events / `sml::completion<TEvent>` rather than being mirrored into actor context.
+  5. The new `ggml`-based speaker stack is benchmarked against the current Sherpa/Sortformer/whisper-based baselines and demonstrates a better fit for the target on-device performance constraints.
+  6. Applications can resolve anonymous speaker streams into semantic roles such as self, assistant, or other without rewriting the Cortext core pipeline.
+  7. Low-confidence speaker attribution fails safely and is visible to applications and benchmarks.
 **Plans**: 3 plans
 
 ### Phase 3: Audio Memory Ingestion & Safety
-**Goal**: Audio and speaker outputs feed the memory engine in a way that supports live retrieval, optional retention, and safe durable writes.
+**Goal**: Audio and speaker outputs feed the memory engine in a way that supports live retrieval, optional retention, and safe durable writes, while preserving the domain-first `planum::*` actor boundary established going into Phase 2.
 **Depends on**: Phase 2
 **Primary repo**: Shared (`planum.cpp` + `cortext`)
 **Secondary repo**: None
@@ -83,7 +85,8 @@ Plans:
 **Success Criteria** (what must be TRUE):
   1. Audio interactions can retrieve memory context live without necessarily storing the heard utterance durably.
   2. Durable audio-derived memory writes are gated on modality and speaker confidence rather than happening blindly.
-  3. Live audio memory flows can distinguish retrieval-only behavior from durable retention behavior in examples and benchmarks.
+  3. Audio-to-memory handoff semantics preserve the event-owned vs actor-owned state boundary established in `planum.cpp`; Cortext consumes finalized outputs rather than planum actor scratch state.
+  4. Live audio memory flows can distinguish retrieval-only behavior from durable retention behavior in examples and benchmarks.
 **Plans**: 2 plans
 
 ### Phase 4: OmniEmbed Multimodal Integration

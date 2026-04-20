@@ -1593,7 +1593,8 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
               const long long mem_id = std::any_cast<long long> (it_mem_id->second);
               const long long emb_id = std::any_cast<long long> (it_emb_id->second);
               Eigen::VectorXf v;
-              if (!core::DecodeFloatBlob (it_emb->second, q.size (), v))
+              if (!core::DecodeFloatBlob (
+                      it_emb->second, static_cast<int> (q.size ()), v))
                 continue;
               const double sim = core::CosineSimilarity (q, v);
               long long created_at = 0;
@@ -1604,7 +1605,8 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
               Eigen::VectorXf ctx_vec;
               if (it_ctx != row.end () && it_ctx->second.has_value ())
                 {
-                  core::DecodeFloatBlob (it_ctx->second, q_ctx.size (), ctx_vec);
+                  core::DecodeFloatBlob (
+                      it_ctx->second, static_cast<int> (q_ctx.size ()), ctx_vec);
                 }
               const double ctx_sim
                   = (ctx_vec.size () == q_ctx.size () && q_ctx.size () > 0)
@@ -2148,7 +2150,8 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
           for (auto &s : seeds)
             {
               const auto current = constructive_recall::LoadCurrentEmbedding (
-                  tx, s.memory_id, s.embedding_id, q.size ());
+                  tx, s.memory_id, s.embedding_id,
+                  static_cast<int> (q.size ()));
               if (!current.has_value ())
                 {
                   continue;

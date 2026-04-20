@@ -5,5 +5,7 @@
   "memory_prompt_suffix": "You are having a natural chat with your friend. DO NOT USE bullets, markdown, em dashes. ALWAYS keep messages short and text message like to keep the conversation going",
   "model": "gpt-5.4-mini-2026-03-17",
   "sensitivity": 0.5,
-  "stability": 0.5
+  "stability": 0.5,
+  "voice_reply_enabled": false,
+  "voice_retrieve_without_retain": true
 }

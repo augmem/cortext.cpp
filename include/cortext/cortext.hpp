@@ -123,7 +123,7 @@ public:
   /// @brief Factory to create a Cortext instance.
   /// @param cfg Three-knob configuration.
   /// @param db_path SQLite database path (e.g. ":memory:" or a file path).
-  /// @param models_dir Models directory (e.g. "models/imagebind").
+  /// @param models_dir Models directory root (e.g. "models").
   /// @return A unique_ptr to a Cortext instance.
   static std::unique_ptr<Cortext> Create (const Config &cfg,
                                           const std::string &db_path,

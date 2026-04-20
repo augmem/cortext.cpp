@@ -313,7 +313,7 @@ extern "C"
     cfg.focus = focus;
     cfg.sensitivity = sensitivity;
     cfg.stability = stability;
-    return cortext_create_with_config (&cfg, db_path, "models/imagebind");
+    return cortext_create_with_config (&cfg, db_path, "models");
   }
 
   void
@@ -353,7 +353,7 @@ extern "C"
       {
         auto inst = cortext::Cortext::Create (
             config_from_c (cfg), std::string (db_path),
-            std::string (models_dir ? models_dir : "models/imagebind"));
+            std::string (models_dir ? models_dir : "models"));
         clear_last_error ();
         return reinterpret_cast<cortext_handle> (inst.release ());
       }

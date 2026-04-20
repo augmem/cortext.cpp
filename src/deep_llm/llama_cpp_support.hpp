@@ -26,6 +26,12 @@
 namespace cortext::internal
 {
 
+#if !defined(CORTEXT_ENABLE_LLAMA_CPP)
+using llama_sampler = void;
+struct llama_vocab;
+using llama_token = int32_t;
+#endif
+
 #if defined(CORTEXT_ENABLE_LLAMA_CPP)
 
 struct LlamaCppLogState

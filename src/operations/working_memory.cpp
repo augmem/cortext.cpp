@@ -85,7 +85,8 @@ RelevanceToTask (const Eigen::VectorXf &q,
 inline bool
 PreserveChatTurns (const std::string &source_id)
 {
-  return source_id == "chat/user" || source_id == "chat/assistant";
+  return source_id.rfind ("chat/user", 0) == 0
+         || source_id.rfind ("chat/assistant", 0) == 0;
 }
 
 } // namespace

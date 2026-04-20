@@ -1676,6 +1676,51 @@ Recorded checks:
 
 **Observation:** In this steady hourly-trace workload, token cost is dominated by **consolidation frequency**, not by the storage floor. Newborn-style frequent sleep performs roughly `1.9×` the estimated token work of adult nightly consolidation over the same `72 h` horizon (`7090` vs `3700` tokens), because it runs far more consolidation sessions even though each session is smaller. By contrast, once the workload is already surviving into the nightly consolidation loop, raising the storage floor from `0 MB` to `500 MB` or `1 GB` does not materially change the estimated token budget in this proxy study. That does **not** mean storage is irrelevant; the human-retention ablation above showed that storage floor is still decisive for whether fragile traces survive long enough to reach a nightly consolidation window at all. The joint takeaway is that cadence drives cost, while storage floor determines whether slower cadences remain viable.
 
+### Cross-Session Surfacing vs Strength-Only Decay Ablation (Apr 6, 2026)
+
+The remaining practical question was narrower than the storage-gate policy itself: **if a memory is still physically present, does per-memory strength decay by itself make Cortext stop surfacing it between sessions?** The existing eviction studies did not answer that directly, because they treated surfacing failure and physical deletion as the same outcome. We therefore added a deterministic retrieval ablation that holds the retrieval fixture constant while independently toggling (a) whether strength decays and (b) whether eviction is allowed to delete the trace.
+
+**Deterministic cross-session surfacing ablation:** `./build/examples/benchmark/cortext_decay_surface_ablation_bench`
+
+Setup:
+
+* one target autobiographical episodic memory
+* one semantically nearby distractor and one irrelevant memory
+* two query forms: an exact-near query and a paraphrase-near query
+* three conditions:
+  * `decay_eviction_allowed`: effective half-life forced to `24 h`, storage floor `0`
+  * `decay_eviction_blocked`: same `24 h` half-life, but storage floor forced high enough to block deletion
+  * `frozen_eviction_blocked`: effectively frozen half-life (`3650` days), same blocked-eviction setting
+* fixed retrieval config: `F=S=T=0.5`
+
+Key results:
+
+| condition | target exists at `24 h` | target strength at `24 h` | exact top-1 at `24 h` | paraphrase top-1 at `24 h` | target exists at `168 h` | target strength at `168 h` | exact top-1 at `168 h` | paraphrase top-1 at `168 h` |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| `decay_eviction_allowed` | `0` | `0.000000` | `0` | `0` | `0` | `0.000000` | `0` | `0` |
+| `decay_eviction_blocked` | `1` | `0.092343` | `101` | `101` | `1` | `0.006087` | `101` | `101` |
+| `frozen_eviction_blocked` | `1` | `0.619835` | `101` | `101` | `1` | `0.615121` | `101` | `101` |
+
+Full benchmark sweep (selected checkpoints):
+
+* `decay_eviction_allowed`: target still existed and surfaced at `6 h` (`strength=0.252589`, exact/paraphrase top-1=`101`), but was already gone by `24 h`
+* `decay_eviction_blocked`: target strength fell from `0.620625` at `0 h` to `0.006087` at `168 h`, while exact and paraphrase retrieval both remained top-1=`101` at every tested gap (`0, 1, 6, 24, 72, 168 h`)
+* `frozen_eviction_blocked`: target strength stayed effectively flat (`0.620625 -> 0.615121`) and produced the same top-1 retrieval order as the decaying-but-non-evicted condition
+
+Recorded checks:
+
+* `surfacing_blocked_decay_exact_top1_all = 1`
+* `surfacing_blocked_decay_paraphrase_top1_all = 1`
+* `surfacing_frozen_exact_top1_all = 1`
+* `surfacing_frozen_paraphrase_top1_all = 1`
+* `surfacing_blocked_decay_matches_frozen_all = 1`
+* `surfacing_blocked_decay_strength_lt_frozen_168h = 1`
+* `surfacing_eviction_allowed_exists_at_6h = 1`
+* `surfacing_eviction_allowed_missing_at_24h = 1`
+* `surfacing_eviction_allowed_missing_at_168h = 1`
+
+**Observation:** In the current retrieval stack, **strength-only decay did not change surfacing once the raw trace was prevented from being evicted**. The decaying-but-retained condition lost roughly `99%` of its effective strength over `168 h` (`0.620625 -> 0.006087`), yet exact and paraphrase queries returned the same top-1 target at every tested gap, and the selected retrieval order matched the frozen-strength control exactly. The only condition that stopped surfacing the target was the control where eviction remained allowed, and there the failure mode was physical disappearance by `24 h`, not retrieval demotion while still present. This strongly suggests that the practical “old memory did not come back” complaint should currently be investigated first as **eviction, missing consolidation products, retrieval ranking, or query mismatch**, not as a direct effect of retained-memory strength decay inside `GraphAugmentedRetrieveCandidates`.
+
 ### Messy Chat Baseline (Ubuntu Dialogue Corpus)
 
 We ran a long‑horizon baseline on the **Ubuntu Dialogue Corpus (validation)** to

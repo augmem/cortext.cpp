@@ -6,6 +6,7 @@
 #include "metrics_state.hpp"
 #include "streaming_client.hpp"
 #include "streaming_text_probe.hpp"
+#include "voice_session.hpp"
 
 #include <cortext/cortext.hpp>
 #include <cortext/core/knobs.hpp>
@@ -355,6 +356,69 @@ struct StreamingState {
   }
 };
 
+struct PendingUserTurn {
+  std::string text;
+  std::string source_id = "chat/user";
+  std::string speaker_id;
+  bool request_reply = true;
+  bool retain_input = true;
+  bool voice_origin = false;
+};
+
+std::string TrimUserText(const std::string& text) {
+  const auto start = text.find_first_not_of(" \t\r\n");
+  if (start == std::string::npos) {
+    return {};
+  }
+  const auto end = text.find_last_not_of(" \t\r\n");
+  return text.substr(start, end - start + 1);
+}
+
+bool IsSentenceBoundary(char c) {
+  switch (c) {
+    case '.':
+    case '!':
+    case '?':
+    case '\n':
+      return true;
+    default:
+      return false;
+  }
+}
+
+std::vector<std::string> DrainCompletedSentences(std::string* buffer,
+                                                 bool flush = false) {
+  std::vector<std::string> out;
+  if (buffer == nullptr || buffer->empty()) {
+    return out;
+  }
+
+  std::size_t consumed = 0;
+  for (std::size_t i = 0; i < buffer->size(); ++i) {
+    if (!IsSentenceBoundary((*buffer)[i])) {
+      continue;
+    }
+    const std::string sentence = TrimUserText(
+        buffer->substr(consumed, i - consumed + 1));
+    if (!sentence.empty()) {
+      out.push_back(sentence);
+    }
+    consumed = i + 1;
+  }
+
+  if (consumed > 0) {
+    buffer->erase(0, consumed);
+  }
+  if (flush && !buffer->empty()) {
+    const std::string tail = TrimUserText(*buffer);
+    if (!tail.empty()) {
+      out.push_back(tail);
+    }
+    buffer->clear();
+  }
+  return out;
+}
+
 struct IdleTracker {
   mutable std::mutex mu;
   std::chrono::steady_clock::time_point last_activity;
@@ -471,6 +535,44 @@ std::string TruncatePreview(const std::string& text, std::size_t max_len = 160) 
   return text.substr(0, max_len) + "...";
 }
 
+std::string CreateVoiceSurfacedMemoryPreview(
+    const cortext::Cortext::Context::Memory& mem) {
+  std::string preview = TruncatePreview(ExtractTextFromBlobs(mem.content), 120);
+  if (!preview.empty()) {
+    return preview;
+  }
+  if (!mem.source_id.empty()) {
+    return mem.source_id;
+  }
+  return "memory #" + std::to_string(mem.id);
+}
+
+void UpdateVoiceSpeakerPreview(chat::VoiceState& voice_state,
+                               const std::string& speaker_id,
+                               const std::string& utterance) {
+  if (speaker_id.empty()) {
+    return;
+  }
+  auto it = std::find_if(voice_state.speakers.begin(),
+                         voice_state.speakers.end(),
+                         [&](const chat::VoiceSpeakerPreview& item) {
+                           return item.speaker_id == speaker_id;
+                         });
+  if (it == voice_state.speakers.end()) {
+    chat::VoiceSpeakerPreview preview;
+    preview.speaker_id = speaker_id;
+    preview.last_utterance = TruncatePreview(utterance, 96);
+    preview.utterance_count = 1;
+    voice_state.speakers.insert(voice_state.speakers.begin(), std::move(preview));
+    return;
+  }
+  it->last_utterance = TruncatePreview(utterance, 96);
+  it->utterance_count += 1;
+  chat::VoiceSpeakerPreview updated = *it;
+  voice_state.speakers.erase(it);
+  voice_state.speakers.insert(voice_state.speakers.begin(), std::move(updated));
+}
+
 chat::MemoryEvent
 CreateMemoryEvent(chat::MemoryEventType type,
                   const cortext::Cortext::Context::Memory &mem)
@@ -500,6 +602,23 @@ CreateMemoryEvent(chat::MemoryEventType type,
   evt.threshold_t = mem.threshold_t;
 
   return evt;
+}
+
+chat::MemoryEvent CreateDroppedMemoryEvent(
+    const cortext::Cortext::Context::Memory& mem,
+    const std::string& reason) {
+  auto evt = CreateMemoryEvent(chat::MemoryEventType::DROPPED, mem);
+  evt.filter_reason = reason;
+  return evt;
+}
+
+void PushMemoryEvent(std::deque<chat::MemoryEvent>& memory_events,
+                     chat::MemoryEvent event,
+                     std::size_t max_events) {
+  memory_events.push_back(std::move(event));
+  while (memory_events.size() > max_events) {
+    memory_events.pop_front();
+  }
 }
 
 chat::ChunkRetrievedMemory CreateRetrievedMemoryPreview(
@@ -1027,6 +1146,9 @@ struct PersistedChatSettings {
   std::optional<std::string> model;
   std::optional<std::string> memory_prompt_prefix;
   std::optional<std::string> memory_prompt_suffix;
+  std::optional<std::string> voice_backend;
+  std::optional<bool> voice_reply_enabled;
+  std::optional<bool> voice_retrieve_without_retain;
 };
 
 std::filesystem::path DefaultChatSettingsPath(
@@ -1089,6 +1211,22 @@ std::optional<PersistedChatSettings> TryLoadPersistedChatSettings(
       settings.memory_prompt_suffix
           = json["memory_prompt_suffix"].get<std::string>();
     }
+    if (json.contains("voice_backend") && json["voice_backend"].is_string()) {
+      const std::string backend = json["voice_backend"].get<std::string>();
+      if (backend == "sherpa" || backend == "whisper") {
+        settings.voice_backend = backend;
+      }
+    }
+    if (json.contains("voice_reply_enabled")
+        && json["voice_reply_enabled"].is_boolean()) {
+      settings.voice_reply_enabled
+          = json["voice_reply_enabled"].get<bool>();
+    }
+    if (json.contains("voice_retrieve_without_retain")
+        && json["voice_retrieve_without_retain"].is_boolean()) {
+      settings.voice_retrieve_without_retain
+          = json["voice_retrieve_without_retain"].get<bool>();
+    }
     return settings;
   } catch (const std::exception& ex) {
     if (error_message) {
@@ -1105,7 +1243,10 @@ void SavePersistedChatSettings(const std::filesystem::path& settings_path,
                                int idle_consolidation_seconds,
                                const std::string& model,
                                const std::string& memory_prompt_prefix,
-                               const std::string& memory_prompt_suffix) {
+                               const std::string& memory_prompt_suffix,
+                               const std::string& voice_backend,
+                               bool voice_reply_enabled,
+                               bool voice_retrieve_without_retain) {
   nlohmann::json json = {
       {"focus", focus},
       {"sensitivity", sensitivity},
@@ -1114,6 +1255,9 @@ void SavePersistedChatSettings(const std::filesystem::path& settings_path,
       {"model", model},
       {"memory_prompt_prefix", memory_prompt_prefix},
       {"memory_prompt_suffix", memory_prompt_suffix},
+      {"voice_backend", voice_backend},
+      {"voice_reply_enabled", voice_reply_enabled},
+      {"voice_retrieve_without_retain", voice_retrieve_without_retain},
   };
 
   std::error_code ec;
@@ -1134,35 +1278,50 @@ void SavePersistedChatSettings(const std::filesystem::path& settings_path,
   }
 }
 
-std::vector<cortext::Cortext::Context::Memory> FilterInjectedMemories(
+struct FilterInjectedMemoriesResult {
+  std::vector<cortext::Cortext::Context::Memory> injected;
+  std::vector<cortext::Cortext::Context::Memory> dropped_empty_text;
+  std::vector<cortext::Cortext::Context::Memory> dropped_working_memory_duplicate;
+  std::vector<cortext::Cortext::Context::Memory> dropped_retrieved_duplicate;
+};
+
+FilterInjectedMemoriesResult FilterInjectedMemories(
     const std::vector<cortext::Cortext::Context::Memory>& retrieved_memories,
     const std::vector<cortext::Cortext::Context::Memory>& working_memory) {
-  std::unordered_set<std::string> blocked_keys;
-  blocked_keys.reserve(working_memory.size() + retrieved_memories.size());
+  std::unordered_set<std::string> working_memory_keys;
+  working_memory_keys.reserve(working_memory.size());
+  std::unordered_set<std::string> injected_keys;
+  injected_keys.reserve(retrieved_memories.size());
+  FilterInjectedMemoriesResult result;
+  result.injected.reserve(retrieved_memories.size());
 
   for (const auto& mem : working_memory) {
     const std::string text = ExtractTextFromBlobs(mem.content);
     if (text.empty()) {
       continue;
     }
-    blocked_keys.insert(mem.source_id + "\n" + text);
+    working_memory_keys.insert(mem.source_id + "\n" + text);
   }
 
-  std::vector<cortext::Cortext::Context::Memory> filtered;
-  filtered.reserve(retrieved_memories.size());
   for (const auto& mem : retrieved_memories) {
     const std::string text = ExtractTextFromBlobs(mem.content);
     if (text.empty()) {
+      result.dropped_empty_text.push_back(mem);
       continue;
     }
     const std::string key = mem.source_id + "\n" + text;
-    if (blocked_keys.find(key) != blocked_keys.end()) {
+    if (working_memory_keys.find(key) != working_memory_keys.end()) {
+      result.dropped_working_memory_duplicate.push_back(mem);
       continue;
     }
-    blocked_keys.insert(key);
-    filtered.push_back(mem);
+    if (injected_keys.find(key) != injected_keys.end()) {
+      result.dropped_retrieved_duplicate.push_back(mem);
+      continue;
+    }
+    injected_keys.insert(key);
+    result.injected.push_back(mem);
   }
-  return filtered;
+  return result;
 }
 
 std::string FormatLocalDateTime(
@@ -1287,8 +1446,8 @@ std::string DefaultMemoryPromptSuffix() {
 }
 
 std::string RoleFromSourceId(const std::string& source_id) {
-  if (source_id == "chat/user") return "user";
-  if (source_id == "chat/assistant") return "assistant";
+  if (source_id.rfind("chat/user", 0) == 0) return "user";
+  if (source_id.rfind("chat/assistant", 0) == 0) return "assistant";
   return {};
 }
 
@@ -1676,6 +1835,7 @@ int main(int argc, char** argv) {
               << settings_path << ": " << persisted_settings_error << "\n";
   }
   auto settings_state = std::make_shared<chat::SettingsState>();
+  auto voice_state = std::make_shared<chat::VoiceState>();
   auto db_explorer_state = std::make_shared<chat::DatabaseExplorerState>();
   {
     std::lock_guard<std::mutex> lock(settings_state->mu);
@@ -1713,6 +1873,15 @@ int main(int argc, char** argv) {
       settings_state->last_apply_status
           = "Settings load failed; using defaults for this run.";
     }
+  }
+  {
+    std::lock_guard<std::mutex> lock(voice_state->mu);
+    voice_state->backend
+        = persisted_settings.voice_backend.value_or("sherpa");
+    voice_state->reply_enabled
+        = persisted_settings.voice_reply_enabled.value_or(true);
+    voice_state->retrieve_without_retain
+        = persisted_settings.voice_retrieve_without_retain.value_or(false);
   }
 
   openai::start(api_key, openai_org);
@@ -1770,6 +1939,8 @@ int main(int argc, char** argv) {
   static constexpr size_t kMaxResponseMetricsSamples = 100;
   static constexpr size_t kMaxConsolidationMetricsSamples = 50;
   std::deque<chat::ChatMessage> chat_history;
+  std::mutex pending_turns_mu;
+  std::deque<PendingUserTurn> pending_user_turns;
 
   auto refresh_db_explorer = [&]() {
     try {
@@ -1787,6 +1958,7 @@ int main(int argc, char** argv) {
   std::string partial_response;
   int generation_restarts = 0;
   IdleTracker idle_tracker;
+  std::atomic<bool> voice_barge_in_requested{false};
   std::atomic<bool> typing_interrupt_requested{false};
   std::atomic<bool> input_activity_requested{false};
   std::atomic<bool> has_input_draft{false};
@@ -1801,6 +1973,173 @@ int main(int argc, char** argv) {
   chat::StreamingChatClient streaming_client(api_key, openai_base_url.empty()
       ? "https://api.openai.com/v1/"
       : openai_base_url);
+  std::unique_ptr<chat::VoiceSession> voice_session;
+  std::string active_voice_backend;
+  auto build_voice_session = [&](const std::string& backend) {
+    chat::VoiceSessionConfig voice_config;
+    const auto sherpa_dir = models_dir / "sherpa-onnx";
+    const auto asr_dir = sherpa_dir / "sherpa-onnx-whisper-tiny.en";
+    const auto tts_dir = sherpa_dir / "kitten-nano-en-v0_1-fp16";
+    const auto whisper_dir = models_dir / "whisper.cpp";
+    voice_config.backend = backend;
+    voice_config.asr_encoder = asr_dir / "tiny.en-encoder.int8.onnx";
+    voice_config.asr_decoder = asr_dir / "tiny.en-decoder.int8.onnx";
+    voice_config.asr_joiner.clear();
+    voice_config.asr_tokens = asr_dir / "tiny.en-tokens.txt";
+    voice_config.whisper_model = whisper_dir / "ggml-small.en-tdrz.bin";
+    voice_config.tts_model = tts_dir / "model.fp16.onnx";
+    voice_config.tts_tokens = tts_dir / "tokens.txt";
+    voice_config.tts_voices = tts_dir / "voices.bin";
+    voice_config.tts_data_dir = tts_dir / "espeak-ng-data";
+    voice_config.speaker_embedding_model
+        = sherpa_dir / "nemo_en_titanet_small.onnx";
+    voice_config.speaker_segmentation_model
+        = sherpa_dir / "sherpa-onnx-pyannote-segmentation-3-0" / "model.int8.onnx";
+    if (const char* speaker_model = std::getenv("CORTEXT_CHAT_SPEAKER_EMBEDDING_MODEL")) {
+      if (*speaker_model != '\0') {
+        voice_config.speaker_embedding_model = speaker_model;
+      }
+    }
+    if (const char* segmentation_model = std::getenv("CORTEXT_CHAT_SPEAKER_SEGMENTATION_MODEL")) {
+      if (*segmentation_model != '\0') {
+        voice_config.speaker_segmentation_model = segmentation_model;
+      }
+    }
+    if (const char* whisper_model = std::getenv("CORTEXT_CHAT_WHISPER_MODEL")) {
+      if (*whisper_model != '\0') {
+        voice_config.whisper_model = whisper_model;
+      }
+    }
+    voice_config.on_partial_transcript = [voice_state](const std::string& partial) {
+      std::lock_guard<std::mutex> lock(voice_state->mu);
+      voice_state->live_transcript = partial;
+    };
+    voice_config.on_final_transcript = [voice_state, &pending_turns_mu,
+                                        &pending_user_turns](const chat::VoiceFinalTranscript& transcript) {
+      const std::string trimmed = TrimUserText(transcript.text);
+      if (trimmed.empty()) {
+        return;
+      }
+      bool reply_enabled = true;
+      bool retain_input = true;
+      std::string speaker_id = transcript.speaker_id.empty()
+                                   ? std::string("speaker:unknown")
+                                   : transcript.speaker_id;
+      std::string source_id = "chat/user/" + speaker_id;
+      {
+        std::lock_guard<std::mutex> lock(voice_state->mu);
+        reply_enabled = voice_state->reply_enabled;
+        retain_input = !voice_state->retrieve_without_retain;
+        if (voice_state->self_speaker_id.has_value()
+            && *voice_state->self_speaker_id == speaker_id) {
+          source_id = "chat/user/self/" + speaker_id;
+        }
+        voice_state->live_transcript.clear();
+        voice_state->last_utterance = trimmed;
+        voice_state->last_speaker_id = speaker_id;
+        voice_state->surfaced_memories.clear();
+        if (voice_state->last_segments.size() > 12) {
+          voice_state->last_segments.erase(
+              voice_state->last_segments.begin(),
+              voice_state->last_segments.end() - 12);
+        }
+        UpdateVoiceSpeakerPreview(*voice_state, speaker_id, trimmed);
+      }
+      std::lock_guard<std::mutex> lock(pending_turns_mu);
+      pending_user_turns.push_back(
+          {trimmed, source_id, speaker_id, reply_enabled, retain_input, true});
+    };
+    voice_config.on_segment_debug = [voice_state](float start_s,
+                                                  float end_s,
+                                                  int diarizer_speaker,
+                                                  const std::string& speaker_id,
+                                                  const std::string& text) {
+      std::lock_guard<std::mutex> lock(voice_state->mu);
+      chat::VoiceSegmentDebug segment;
+      segment.start_s = start_s;
+      segment.end_s = end_s;
+      segment.diarizer_speaker = diarizer_speaker;
+      segment.speaker_id = speaker_id;
+      segment.text = text;
+      voice_state->last_segments.push_back(std::move(segment));
+      while (voice_state->last_segments.size() > 24) {
+        voice_state->last_segments.erase(voice_state->last_segments.begin());
+      }
+    };
+    voice_config.on_user_speech_start = [&voice_barge_in_requested] {
+      voice_barge_in_requested.store(true);
+    };
+    voice_config.on_error = [voice_state](const std::string& error) {
+      std::lock_guard<std::mutex> lock(voice_state->mu);
+      voice_state->last_error = error;
+    };
+    voice_config.on_listening_changed = [voice_state](bool listening) {
+      std::lock_guard<std::mutex> lock(voice_state->mu);
+      voice_state->listening = listening;
+      if (!listening) {
+        voice_state->live_transcript.clear();
+      }
+    };
+    voice_config.on_playback_changed = [voice_state](bool speaking) {
+      std::lock_guard<std::mutex> lock(voice_state->mu);
+      voice_state->assistant_speaking = speaking;
+    };
+    auto session = std::make_unique<chat::VoiceSession>(std::move(voice_config));
+    {
+      std::lock_guard<std::mutex> lock(voice_state->mu);
+      voice_state->backend = backend;
+      voice_state->supported = session->IsSupported();
+      voice_state->available = session->IsAvailable();
+      voice_state->speaker_attribution_available
+          = session->HasSpeakerAttribution();
+    }
+    return session;
+  };
+  {
+    std::lock_guard<std::mutex> lock(voice_state->mu);
+    active_voice_backend = voice_state->backend;
+  }
+  voice_session = build_voice_session(active_voice_backend);
+
+  auto persist_runtime_settings = [&]() {
+    double save_focus = 0.5;
+    double save_sensitivity = 0.5;
+    double save_stability = 0.5;
+    int save_idle = 0;
+    std::string save_model;
+    std::string save_prefix;
+    std::string save_suffix;
+    std::string save_voice_backend = "sherpa";
+    bool save_voice_reply_enabled = true;
+    bool save_voice_retrieve_without_retain = false;
+    {
+      std::lock_guard<std::mutex> lock(settings_state->mu);
+      save_focus = settings_state->active_focus;
+      save_sensitivity = settings_state->active_sensitivity;
+      save_stability = settings_state->active_stability;
+      save_idle = settings_state->active_idle_consolidation_seconds;
+      save_model = settings_state->active_model;
+      save_prefix = settings_state->active_memory_prompt_prefix;
+      save_suffix = settings_state->active_memory_prompt_suffix;
+    }
+    {
+      std::lock_guard<std::mutex> lock(voice_state->mu);
+      save_voice_backend = voice_state->backend;
+      save_voice_reply_enabled = voice_state->reply_enabled;
+      save_voice_retrieve_without_retain = voice_state->retrieve_without_retain;
+    }
+    SavePersistedChatSettings(settings_path,
+                              save_focus,
+                              save_sensitivity,
+                              save_stability,
+                              save_idle,
+                              save_model,
+                              save_prefix,
+                              save_suffix,
+                              save_voice_backend,
+                              save_voice_reply_enabled,
+                              save_voice_retrieve_without_retain);
+  };
 
 #if CORTEXT_CHAT_ENABLE_OTLP_GRPC
   const bool otlp_grpc_enabled = HasEnv("OTEL_EXPORTER_OTLP_ENDPOINT") || HasEnv("OTEL_EXPORTER_OTLP_HEADERS");
@@ -1827,6 +2166,7 @@ int main(int argc, char** argv) {
   window_state.metrics = metrics_state;
   window_state.status = status_state;
   window_state.settings = settings_state;
+  window_state.voice = voice_state;
   window_state.db_explorer = db_explorer_state;
   window_state.otel = otel_state;
   window_state.input = &input;
@@ -1979,6 +2319,21 @@ int main(int argc, char** argv) {
       idle_tracker.RecordActivity();
     }
 
+    if (voice_barge_in_requested.exchange(false)) {
+      bool is_generating = false;
+      {
+        std::lock_guard<std::mutex> lock(mu);
+        is_generating = generating;
+      }
+      if (voice_session) {
+        voice_session->CancelAssistantReply();
+      }
+      if (is_generating) {
+        streaming_state.cancel_requested.store(true);
+      }
+      input_activity_requested.store(true);
+    }
+
     if (typing_interrupt_requested.exchange(false)) {
       if (idle_consolidating.load()) {
         bool stop_requested = false;
@@ -2045,6 +2400,16 @@ int main(int argc, char** argv) {
         {
           std::lock_guard<std::mutex> lock(status_state->mu);
           status_state->tokens_used = 0;
+        }
+        {
+          std::lock_guard<std::mutex> lock(voice_state->mu);
+          voice_state->live_transcript.clear();
+          voice_state->last_utterance.clear();
+          voice_state->last_speaker_id.clear();
+          voice_state->speakers.clear();
+          voice_state->last_segments.clear();
+          voice_state->surfaced_memories.clear();
+          voice_state->last_error.reset();
         }
         {
           std::lock_guard<std::mutex> lock(db_explorer_state->mu);
@@ -2121,21 +2486,6 @@ int main(int argc, char** argv) {
               + (new_idle_consolidation_seconds > 0
                      ? std::to_string(new_idle_consolidation_seconds) + "s"
                      : std::string("auto"));
-          try {
-            SavePersistedChatSettings(settings_path,
-                                      new_focus,
-                                      new_sensitivity,
-                                      new_stability,
-                                      new_idle_consolidation_seconds,
-                                      new_model,
-                                      new_memory_prompt_prefix,
-                                      new_memory_prompt_suffix);
-          } catch (const std::exception& ex) {
-            apply_status =
-                "Applied for this session, but failed to save settings: "
-                + std::string(ex.what());
-          }
-
           {
             std::lock_guard<std::mutex> lock(settings_state->mu);
             settings_state->active_focus = new_focus;
@@ -2148,6 +2498,15 @@ int main(int argc, char** argv) {
             settings_state->active_memory_prompt_suffix = new_memory_prompt_suffix;
             settings_state->last_apply_status = apply_status;
           }
+          try {
+            persist_runtime_settings();
+          } catch (const std::exception& ex) {
+            apply_status =
+                "Applied for this session, but failed to save settings: "
+                + std::string(ex.what());
+            std::lock_guard<std::mutex> lock(settings_state->mu);
+            settings_state->last_apply_status = apply_status;
+          }
         } catch (const std::exception& ex) {
           std::lock_guard<std::mutex> lock(settings_state->mu);
           settings_state->last_apply_status = std::string("Apply failed: ") + ex.what();
@@ -2155,39 +2514,120 @@ int main(int argc, char** argv) {
       }
     }
 
-    // Check for pending message from input
-    if (window.HasPendingMessage()) {
-      std::string text = window.TakePendingMessage();
+    bool voice_start_requested = false;
+    bool voice_stop_requested = false;
+    bool voice_reply_toggle_dirty = false;
+    std::string requested_voice_backend;
+    bool voice_was_listening = false;
+    {
+      std::lock_guard<std::mutex> lock(voice_state->mu);
+      voice_start_requested = voice_state->start_requested;
+      voice_stop_requested = voice_state->stop_requested;
+      voice_reply_toggle_dirty = voice_state->reply_toggle_dirty;
+      requested_voice_backend = voice_state->backend;
+      voice_was_listening = voice_state->listening;
+      voice_state->start_requested = false;
+      voice_state->stop_requested = false;
+      voice_state->reply_toggle_dirty = false;
+    }
+    if (requested_voice_backend != active_voice_backend) {
+      if (voice_session) {
+        voice_session->Stop();
+      }
+      voice_session = build_voice_session(requested_voice_backend);
+      active_voice_backend = requested_voice_backend;
+      if (voice_was_listening && voice_session) {
+        const bool started = voice_session->Start();
+        std::lock_guard<std::mutex> lock(voice_state->mu);
+        voice_state->available = voice_session->IsAvailable();
+        voice_state->speaker_attribution_available
+            = voice_session->HasSpeakerAttribution();
+        if (!started && !voice_state->last_error.has_value()) {
+          voice_state->last_error = "Failed to start voice capture.";
+        }
+      }
+    }
+    if (voice_start_requested && voice_session) {
+      const bool started = voice_session->Start();
+      std::lock_guard<std::mutex> lock(voice_state->mu);
+      voice_state->available = voice_session->IsAvailable();
+      voice_state->speaker_attribution_available
+          = voice_session->HasSpeakerAttribution();
+      if (!started && !voice_state->last_error.has_value()) {
+        voice_state->last_error = "Failed to start voice capture.";
+      }
+    }
+    if (voice_stop_requested && voice_session) {
+      voice_session->Stop();
+    }
+    if (voice_reply_toggle_dirty) {
+      try {
+        persist_runtime_settings();
+      } catch (const std::exception& ex) {
+        std::lock_guard<std::mutex> lock(voice_state->mu);
+        voice_state->last_error
+            = std::string("Failed to save voice preference: ") + ex.what();
+      }
+    }
 
+    if (window.HasPendingMessage()) {
+      const std::string text = TrimUserText(window.TakePendingMessage());
+      if (!text.empty()) {
+        std::lock_guard<std::mutex> lock(pending_turns_mu);
+        pending_user_turns.push_back({text, "chat/user", {}, true, true, false});
+      }
+    }
+
+    std::optional<PendingUserTurn> next_turn;
+    {
+      bool is_generating = false;
       {
         std::lock_guard<std::mutex> lock(mu);
-        if (!generating && !text.empty()) {
+        is_generating = generating;
+      }
+      if (!is_generating) {
+        std::lock_guard<std::mutex> lock(pending_turns_mu);
+        if (!pending_user_turns.empty()) {
+          next_turn = std::move(pending_user_turns.front());
+          pending_user_turns.pop_front();
+        }
+      }
+    }
+
+    if (next_turn.has_value()) {
+      std::string text = next_turn->text;
+      const std::string source_id = next_turn->source_id.empty()
+                                        ? std::string("chat/user")
+                                        : next_turn->source_id;
+      const bool retain_input = next_turn->retain_input;
+      if (next_turn->request_reply) {
+        {
+          std::lock_guard<std::mutex> lock(mu);
           generating = true;
           last_error.reset();
           partial_response.clear();
           generation_restarts = 0;
           streaming_state.Reset();
           chat_history.push_back({"user", text});
-        } else {
-          text.clear();
         }
-      }
 
-      if (!text.empty()) {
         idle_tracker.RecordActivity();
 
         cortext::telemetry::LogInfo("chat.user_message", {
           cortext::telemetry::Attribute::Int64("text_length", static_cast<int64_t>(text.size()))
         });
 
-        // Wait for any previous streaming thread to complete before starting new one
         if (streaming_thread.joinable()) {
           streaming_thread.join();
         }
+        if (next_turn->voice_origin && voice_session) {
+          voice_session->CancelAssistantReply();
+        }
 
-        // Launch background job for streaming
         streaming_thread_active.store(true);
-        streaming_thread = std::thread([&, text] {
+        streaming_thread = std::thread([&, text, source_id,
+                                        speak_reply = next_turn->voice_origin && voice_session
+                                                      && voice_session->IsAvailable()] {
           const auto chunk_counters_before
               = SnapshotChunkDiagnostics(*chunk_diagnostics_state);
           double focus_value = 0.5;
@@ -2202,7 +2642,7 @@ int main(int argc, char** argv) {
 
           // Phase 1: Process user input through Cortext
           cortext::telemetry::LogDebug("chat.phase1.start", {
-            cortext::telemetry::Attribute::String("source", "chat/user"),
+            cortext::telemetry::Attribute::String("source", source_id),
             cortext::telemetry::Attribute::Int64("text_length", static_cast<int64_t>(text.size()))
           });
 
@@ -2212,7 +2652,13 @@ int main(int argc, char** argv) {
           double processing_latency_ms = 0.0;
           try {
             std::lock_guard<std::mutex> lock(db_write_mu);
-            retrieved = cortext_ctx->ProcessText(text, "chat/user");
+            if (retain_input) {
+              retrieved = cortext_ctx->ProcessText(text, source_id);
+            } else {
+              cortext::internal::StreamingTextProbeSession probe_session(
+                  *cortext_ctx, source_id);
+              retrieved = probe_session.FinalizeText(text);
+            }
             phase1_total_ms = retrieved.total_ms;
             processing_latency_ms = retrieved.process_ms;
           } catch (const std::exception& ex) {
@@ -2226,20 +2672,44 @@ int main(int argc, char** argv) {
           {
             std::lock_guard<std::mutex> lock(mu);
             working_memory = retrieved.working_memory;
-            streaming_state.current_memories = FilterInjectedMemories(
+            const auto filtered_memories = FilterInjectedMemories(
                 retrieved.retrieved_memory, retrieved.working_memory);
+            streaming_state.current_memories = filtered_memories.injected;
+            for (const auto& mem : retrieved.retrieved_memory) {
+              PushMemoryEvent(
+                  memory_events,
+                  CreateMemoryEvent(chat::MemoryEventType::RETRIEVED_RAW, mem),
+                  kMaxMemoryEvents);
+            }
             for (const auto& mem : streaming_state.current_memories) {
-              memory_events.push_back(CreateMemoryEvent(chat::MemoryEventType::RETRIEVED, mem));
-              if (memory_events.size() > kMaxMemoryEvents) {
-                memory_events.pop_front();
-              }
+              PushMemoryEvent(
+                  memory_events,
+                  CreateMemoryEvent(chat::MemoryEventType::INJECTED, mem),
+                  kMaxMemoryEvents);
+            }
+            for (const auto& mem : filtered_memories.dropped_empty_text) {
+              PushMemoryEvent(memory_events,
+                              CreateDroppedMemoryEvent(mem, "empty_text"),
+                              kMaxMemoryEvents);
+            }
+            for (const auto& mem : filtered_memories.dropped_working_memory_duplicate) {
+              PushMemoryEvent(memory_events,
+                              CreateDroppedMemoryEvent(mem, "duplicate_of_working_memory"),
+                              kMaxMemoryEvents);
+            }
+            for (const auto& mem : filtered_memories.dropped_retrieved_duplicate) {
+              PushMemoryEvent(memory_events,
+                              CreateDroppedMemoryEvent(mem, "duplicate_of_retrieved"),
+                              kMaxMemoryEvents);
             }
             if (retrieved.output.stored_embedding_id.has_value()) {
-              memory_events.push_back(CreateStoredEvent(
-                  *retrieved.output.stored_embedding_id, text, "chat/user", NowUnixMillis(), retrieved.output));
-              if (memory_events.size() > kMaxMemoryEvents) {
-                memory_events.pop_front();
-              }
+              PushMemoryEvent(memory_events,
+                              CreateStoredEvent(*retrieved.output.stored_embedding_id,
+                                                text,
+                                                source_id,
+                                                NowUnixMillis(),
+                                                retrieved.output),
+                              kMaxMemoryEvents);
             }
           }
 
@@ -2273,6 +2743,8 @@ int main(int argc, char** argv) {
           chat::UsageAccumulator usage_accumulator;
           bool had_stream_error = false;
           std::string stream_error_message;
+          bool cancelled_by_voice = false;
+          std::string tts_sentence_buffer;
           std::int64_t current_turn_cortext_prompt_tokens = 0;
           std::int64_t current_turn_rag_prompt_tokens = 0;
           std::int64_t current_turn_full_history_prompt_tokens = 0;
@@ -2375,6 +2847,13 @@ int main(int argc, char** argv) {
                 accumulated = streaming_state.accumulated_tokens;
                 partial_response = accumulated;
               }
+              if (speak_reply && voice_session) {
+                tts_sentence_buffer += token;
+                for (const auto& sentence
+                     : DrainCompletedSentences(&tts_sentence_buffer, false)) {
+                  voice_session->QueueAssistantText(sentence);
+                }
+              }
               probe_buffer += token;
 
               cortext::telemetry::LogDebug("chat.phase2.token", {
@@ -2420,22 +2899,40 @@ int main(int argc, char** argv) {
                       for (const auto& m : streaming_state.current_memories) {
                         existing_ids.insert(m.id);
                       }
-                      for (const auto& m : filtered_retrieved) {
+                      for (const auto& m : ctx.retrieved_memory) {
+                        PushMemoryEvent(
+                            memory_events,
+                            CreateMemoryEvent(chat::MemoryEventType::RETRIEVED_RAW, m),
+                            kMaxMemoryEvents);
+                      }
+                      for (const auto& m : filtered_retrieved.dropped_empty_text) {
+                        PushMemoryEvent(memory_events,
+                                        CreateDroppedMemoryEvent(m, "empty_text"),
+                                        kMaxMemoryEvents);
+                      }
+                      for (const auto& m : filtered_retrieved.dropped_working_memory_duplicate) {
+                        PushMemoryEvent(memory_events,
+                                        CreateDroppedMemoryEvent(m, "duplicate_of_working_memory"),
+                                        kMaxMemoryEvents);
+                      }
+                      for (const auto& m : filtered_retrieved.dropped_retrieved_duplicate) {
+                        PushMemoryEvent(memory_events,
+                                        CreateDroppedMemoryEvent(m, "duplicate_of_retrieved"),
+                                        kMaxMemoryEvents);
+                      }
+                      for (const auto& m : filtered_retrieved.injected) {
                         if (existing_ids.find(m.id) == existing_ids.end()) {
                           streaming_state.current_memories.push_back(m);
-                          memory_events.push_back(CreateMemoryEvent(chat::MemoryEventType::RETRIEVED, m));
-                          if (memory_events.size() > kMaxMemoryEvents) {
-                            memory_events.pop_front();
-                          }
+                          PushMemoryEvent(
+                              memory_events,
+                              CreateMemoryEvent(chat::MemoryEventType::INJECTED, m),
+                              kMaxMemoryEvents);
                           ++new_memory_count;
                         }
                       }
                       last_should_interrupt = (new_memory_count > 0);
                     } else {
-                      for (const auto& m : filtered_retrieved) {
-                        (void)m;
-                        ++new_memory_count;
-                      }
+                      new_memory_count += filtered_retrieved.injected.size();
                       interrupt_ignored_restart_cap = (new_memory_count > 0);
                       std::lock_guard<std::mutex> lock(mu);
                       last_should_interrupt = false;
@@ -2494,12 +2991,24 @@ int main(int argc, char** argv) {
             }
 
             if (result.was_cancelled && interrupted && local_restarts < StreamingState::kMaxRestarts) {
+              if (speak_reply && voice_session) {
+                voice_session->CancelAssistantReply();
+                tts_sentence_buffer.clear();
+              }
               local_restarts++;
               {
                 std::lock_guard<std::mutex> lock(mu);
                 generation_restarts = local_restarts;
               }
               continue;
+            }
+            if (result.was_cancelled && !interrupted) {
+              cancelled_by_voice = true;
+              assistant_reply.clear();
+              if (speak_reply && voice_session) {
+                voice_session->CancelAssistantReply();
+              }
+              break;
             }
 
             if (result.error.has_value()) {
@@ -2521,17 +3030,26 @@ int main(int argc, char** argv) {
             }
             break;
           }
-
-          // Phase 3: Commit final assistant reply through Cortext
-          cortext::telemetry::LogDebug("chat.phase3.start", {
-            cortext::telemetry::Attribute::Int64("reply_length", static_cast<int64_t>(assistant_reply.size())),
-            cortext::telemetry::Attribute::String("source", "chat/assistant"),
-            cortext::telemetry::Attribute::String("reply_content", assistant_reply.size() <= 200 ? assistant_reply : assistant_reply.substr(0, 200) + "...")
-          });
+          if (speak_reply && voice_session) {
+            if (cancelled_by_voice || had_stream_error) {
+              voice_session->CancelAssistantReply();
+            } else {
+              for (const auto& sentence
+                   : DrainCompletedSentences(&tts_sentence_buffer, true)) {
+                voice_session->QueueAssistantText(sentence);
+              }
+            }
+          }
 
           double phase3_total_ms = 0.0;
           bool phase3_failed = false;
           std::string phase3_error_message;
+          if (!assistant_reply.empty() && !cancelled_by_voice) {
+            cortext::telemetry::LogDebug("chat.phase3.start", {
+              cortext::telemetry::Attribute::Int64("reply_length", static_cast<int64_t>(assistant_reply.size())),
+              cortext::telemetry::Attribute::String("source", "chat/assistant"),
+              cortext::telemetry::Attribute::String("reply_content", assistant_reply.size() <= 200 ? assistant_reply : assistant_reply.substr(0, 200) + "...")
+            });
             try {
               cortext::Cortext::Context asst_ctx;
               {
@@ -2574,6 +3092,9 @@ int main(int argc, char** argv) {
             });
             std::lock_guard<std::mutex> lock(mu);
             last_error = std::string("cortext assistant: ") + ex.what();
+          }
+          } else if (cancelled_by_voice) {
+            cortext::telemetry::LogInfo("chat.voice_barge_in_cancelled_reply");
           }
 
           const auto chunk_counters_after
@@ -2649,6 +3170,101 @@ int main(int argc, char** argv) {
           });
           streaming_thread_active.store(false);
         });
+      } else {
+        {
+          std::lock_guard<std::mutex> lock(mu);
+          last_error.reset();
+          partial_response.clear();
+          generation_restarts = 0;
+          chat_history.push_back({"user", text});
+        }
+        idle_tracker.RecordActivity();
+        cortext::telemetry::LogInfo("chat.voice_ingress_only", {
+          cortext::telemetry::Attribute::Int64("text_length",
+                                               static_cast<int64_t>(text.size()))
+        });
+        try {
+          cortext::Cortext::Context retrieved;
+          {
+            std::lock_guard<std::mutex> lock(db_write_mu);
+            if (retain_input) {
+              retrieved = cortext_ctx->ProcessText(text, source_id);
+            } else {
+              cortext::internal::StreamingTextProbeSession probe_session(
+                  *cortext_ctx, source_id);
+              retrieved = probe_session.FinalizeText(text);
+            }
+          }
+          {
+            std::lock_guard<std::mutex> lock(mu);
+            working_memory = retrieved.working_memory;
+            last_should_interrupt = retrieved.should_interrupt;
+            const auto filtered_memories = FilterInjectedMemories(
+                retrieved.retrieved_memory, retrieved.working_memory);
+            streaming_state.current_memories = filtered_memories.injected;
+            for (const auto& mem : retrieved.retrieved_memory) {
+              PushMemoryEvent(
+                  memory_events,
+                  CreateMemoryEvent(chat::MemoryEventType::RETRIEVED_RAW, mem),
+                  kMaxMemoryEvents);
+            }
+            for (const auto& mem : streaming_state.current_memories) {
+              PushMemoryEvent(
+                  memory_events,
+                  CreateMemoryEvent(chat::MemoryEventType::INJECTED, mem),
+                  kMaxMemoryEvents);
+            }
+            for (const auto& mem : filtered_memories.dropped_empty_text) {
+              PushMemoryEvent(memory_events,
+                              CreateDroppedMemoryEvent(mem, "empty_text"),
+                              kMaxMemoryEvents);
+            }
+            for (const auto& mem : filtered_memories.dropped_working_memory_duplicate) {
+              PushMemoryEvent(memory_events,
+                              CreateDroppedMemoryEvent(mem, "duplicate_of_working_memory"),
+                              kMaxMemoryEvents);
+            }
+            for (const auto& mem : filtered_memories.dropped_retrieved_duplicate) {
+              PushMemoryEvent(memory_events,
+                              CreateDroppedMemoryEvent(mem, "duplicate_of_retrieved"),
+                              kMaxMemoryEvents);
+            }
+            if (retrieved.output.stored_embedding_id.has_value()) {
+              PushMemoryEvent(memory_events,
+                              CreateStoredEvent(*retrieved.output.stored_embedding_id,
+                                                text,
+                                                source_id,
+                                                NowUnixMillis(),
+                                                retrieved.output),
+                              kMaxMemoryEvents);
+            }
+          }
+          {
+            std::vector<std::string> surfaced_memories;
+            surfaced_memories.reserve(
+                std::min<std::size_t>(streaming_state.current_memories.size(), 5));
+            std::unordered_set<std::string> seen_previews;
+            for (const auto& mem : streaming_state.current_memories) {
+              std::string preview = CreateVoiceSurfacedMemoryPreview(mem);
+              if (preview.empty()) {
+                continue;
+              }
+              if (!seen_previews.insert(preview).second) {
+                continue;
+              }
+              surfaced_memories.push_back(std::move(preview));
+              if (surfaced_memories.size() >= 5) {
+                break;
+              }
+            }
+            std::lock_guard<std::mutex> lock(voice_state->mu);
+            voice_state->surfaced_memories = std::move(surfaced_memories);
+          }
+          refresh_db_explorer();
+        } catch (const std::exception& ex) {
+          std::lock_guard<std::mutex> lock(mu);
+          last_error = std::string("voice ingress: ") + ex.what();
+        }
       }
     }
   });
@@ -2659,10 +3275,16 @@ int main(int argc, char** argv) {
   if (streaming_thread_active.load()) {
     streaming_state.cancel_requested.store(true);
   }
+  if (voice_session) {
+    voice_session->CancelAssistantReply();
+  }
 
   // Wait for threads to complete before cleanup
   if (streaming_thread.joinable()) {
     streaming_thread.join();
+  }
+  if (voice_session) {
+    voice_session->Stop();
   }
   if (refresh_thread.joinable()) {
     refresh_thread.join();

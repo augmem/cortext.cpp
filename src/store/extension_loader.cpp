@@ -49,7 +49,7 @@ RegisterBuiltInExtensions ()
   });
 }
 
-static void
+[[maybe_unused]] static void
 enableLoadExtension (sqlite3 *db, int onOff)
 {
   if (!db)
@@ -59,7 +59,7 @@ enableLoadExtension (sqlite3 *db, int onOff)
                      nullptr);
 }
 
-static void
+[[maybe_unused]] static void
 tryLoad (sqlite3 *db, const std::string &path, const char *entry)
 {
   if (!db || path.empty ())

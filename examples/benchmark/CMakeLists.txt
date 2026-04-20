@@ -112,6 +112,10 @@ add_executable(cortext_storage_human_sleep_token_bench
   storage_human_sleep_token_bench.cpp
 )
 
+add_executable(cortext_decay_surface_ablation_bench
+  decay_surface_ablation_bench.cpp
+)
+
 add_executable(cortext_extractor_prompt_ablation_bench
   extractor_prompt_ablation_bench.cpp
 )
@@ -206,6 +210,9 @@ target_include_directories(cortext_storage_human_sleep_consolidation_bench PRIVA
 target_include_directories(cortext_storage_human_sleep_token_bench PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}
 )
+target_include_directories(cortext_decay_surface_ablation_bench PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}
+)
 target_include_directories(cortext_extractor_prompt_ablation_bench PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}
 )
@@ -298,6 +305,9 @@ target_link_libraries(cortext_storage_human_sleep_consolidation_bench PRIVATE
   cortext
 )
 target_link_libraries(cortext_storage_human_sleep_token_bench PRIVATE
+  cortext
+)
+target_link_libraries(cortext_decay_surface_ablation_bench PRIVATE
   cortext
 )
 target_link_libraries(cortext_extractor_prompt_ablation_bench PRIVATE

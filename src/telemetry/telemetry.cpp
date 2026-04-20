@@ -11,7 +11,11 @@
 #include <utility>
 #include <vector>
 
-#if defined(__EMSCRIPTEN__)
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif
+
+#if defined(__EMSCRIPTEN__) || defined(CORTEXT_DISABLE_OPENTELEMETRY) || (defined(__APPLE__) && defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE)
 
 namespace cortext::telemetry
 {
@@ -540,5 +544,3 @@ LogTrace (std::string_view message, std::initializer_list<Attribute> attrs)
 } // namespace cortext::telemetry
 
 #endif
-
-

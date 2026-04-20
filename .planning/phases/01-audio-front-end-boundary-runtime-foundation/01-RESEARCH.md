@@ -371,17 +371,15 @@ This is the minimum useful bridge because `ProcessTextAt(...)` already exists, a
 |---|-------|---------|---------------|
 | A1 | Audio runtime work will tempt developers toward async buffering and callback-style re-entry if the scaffold is not kept strict. | Common Pitfalls | Medium — it affects how aggressively the plan should front-load guardrails and tests. |
 
-## Open Questions
+## Open Questions (RESOLVED)
 
-1. **Should Phase 3’s private Cortext bridge land in `src/` only, or also have a small non-public header for example/tool reuse?**
-   - What we know: Public headers and the C API should not change in Phase 1, and the example currently wires voice events straight into application code. [VERIFIED: local codebase grep]
-   - What's unclear: Whether the future bridge will be reused by multiple examples/tools soon enough to justify a shared non-public header.
-   - Recommendation: Keep it `src/`-private in Phase 1 unless a second consumer appears immediately. [VERIFIED: local codebase grep]
+1. **Where should the private Cortext bridge live in Phase 1?**
+   - Resolution: Land the bridge as `src/audio/planum_bridge.hpp` and `src/audio/planum_bridge.cpp`, which keeps it private to Cortext source paths while still allowing white-box tests and source-level smoke targets to include it. Public headers and the C API remain unchanged. [VERIFIED: local codebase grep]
+   - Planning impact: Phase 1 bridge work stays in `src/` and `examples/chat/` only; no files under `include/cortext/` or `include/cortext/capi.h` are touched. [VERIFIED: local codebase grep]
 
-2. **Should partial transcript events ever reach Cortext in Phase 1, or should they remain front-end/UI-only?**
-   - What we know: The contract should represent partials, but the phase is scaffolding-first and should not add new memory semantics. [VERIFIED: local codebase grep]
-   - What's unclear: Whether later retrieval-only behavior for live partials should be prototyped before Phase 3.
-   - Recommendation: Define partial events in the contract now, but keep the private bridge as a no-op for them in Phase 1. [VERIFIED: local codebase grep]
+2. **How should partial transcript events behave in Phase 1?**
+   - Resolution: Partial events are represented in `planum.cpp` contract types and may be emitted through synthetic sink/example/benchmark scaffolds, but the Phase 1 Cortext bridge treats them as explicit no-write events. They do not call `ProcessTextAt(...)`, do not call `ProcessAudio(...)`, and do not introduce retrieval-only memory semantics ahead of Phase 3. [VERIFIED: local codebase grep]
+   - Planning impact: Phase 1 proves contract shape and observability for partials without changing Cortext memory behavior. [VERIFIED: local codebase grep]
 
 ## Environment Availability
 

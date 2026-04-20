@@ -351,7 +351,8 @@ struct StreamingJSONParser::Impl
         preferred_branch_index = best_idx;
 
         // Check for tie (union mode)
-        int tie_count = std::count (metrics.begin (), metrics.end (), best_key);
+        int tie_count = static_cast<int> (
+            std::count (metrics.begin (), metrics.end (), best_key));
         oneof_union_mode = (tie_count >= 2);
 
         // Precompute preferred fields pre-lock

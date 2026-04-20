@@ -93,7 +93,8 @@ extern "C"
   /// @brief Creates a Cortext instance from a binding-friendly config struct.
   /// @param cfg Optional configuration. NULL uses the library defaults.
   /// @param db_path Path to SQLite database file.
-  /// @param models_dir Optional path to model assets. NULL uses the default.
+  /// @param models_dir Optional path to model assets. NULL uses the default
+  ///   model root.
   CORTEXT_EXPORT cortext_handle
   cortext_create_with_config (const cortext_config *cfg, const char *db_path,
                               const char *models_dir);
@@ -103,7 +104,7 @@ extern "C"
   /// @param sensitivity Sensitivity knob value in [0.0, 1.0].
   /// @param stability Stability knob value in [0.0, 1.0].
   /// @param db_path Path to SQLite database file (e.g., "memory.db" or ":memory:").
-  /// @param models_dir Path to directory containing ImageBind ONNX models.
+  /// @param models_dir Path to the local model root directory.
   /// @return Handle to the created instance, or NULL on failure.
   ///
   /// The returned handle must be freed with cortext_free().

@@ -37,6 +37,18 @@ std::string RolePrefix(const std::string& role) {
   return role;
 }
 
+std::string VoiceSpeakerDisplayName(
+    const std::string& speaker_id,
+    const std::optional<std::string>& self_speaker_id) {
+  if (self_speaker_id.has_value() && *self_speaker_id == speaker_id) {
+    return "Me";
+  }
+  if (!speaker_id.empty()) {
+    return speaker_id;
+  }
+  return "speaker:unknown";
+}
+
 std::string FormatDouble(double v) {
   std::ostringstream ss;
   ss << std::fixed << std::setprecision(2) << v;
@@ -125,8 +137,8 @@ std::string ExtractTextFromBlobs(const std::vector<std::vector<unsigned char>>& 
 }
 
 std::string RoleFromSourceId(const std::string& source_id) {
-  if (source_id == "chat/user") return "user";
-  if (source_id == "chat/assistant") return "assistant";
+  if (source_id.rfind("chat/user", 0) == 0) return "user";
+  if (source_id.rfind("chat/assistant", 0) == 0) return "assistant";
   return {};
 }
 
@@ -345,24 +357,27 @@ void ChatWindow::Render() {
       RenderChatTab();
       break;
     case 1:
-      RenderEventsTab();
+      RenderVoiceTab();
       break;
     case 2:
-      RenderMetricsTab();
+      RenderEventsTab();
       break;
     case 3:
-      RenderSettingsTab();
+      RenderMetricsTab();
       break;
     case 4:
-      RenderDatabaseTab();
+      RenderSettingsTab();
       break;
     case 5:
-      RenderGraphTab();
+      RenderDatabaseTab();
       break;
     case 6:
-      RenderContextTab();
+      RenderGraphTab();
       break;
     case 7:
+      RenderContextTab();
+      break;
+    case 8:
       RenderLogsTab();
       break;
   }
@@ -380,32 +395,36 @@ void ChatWindow::RenderTabBar() {
       selected_tab_ = 0;
       ImGui::EndTabItem();
     }
-    if (ImGui::BeginTabItem("Events")) {
+    if (ImGui::BeginTabItem("Voice")) {
       selected_tab_ = 1;
       ImGui::EndTabItem();
     }
-    if (ImGui::BeginTabItem("Metrics")) {
+    if (ImGui::BeginTabItem("Events")) {
       selected_tab_ = 2;
       ImGui::EndTabItem();
     }
-    if (ImGui::BeginTabItem("Settings")) {
+    if (ImGui::BeginTabItem("Metrics")) {
       selected_tab_ = 3;
       ImGui::EndTabItem();
     }
-    if (ImGui::BeginTabItem("DB")) {
+    if (ImGui::BeginTabItem("Settings")) {
       selected_tab_ = 4;
       ImGui::EndTabItem();
     }
-    if (ImGui::BeginTabItem("Graph")) {
+    if (ImGui::BeginTabItem("DB")) {
       selected_tab_ = 5;
       ImGui::EndTabItem();
     }
-    if (ImGui::BeginTabItem("Context")) {
+    if (ImGui::BeginTabItem("Graph")) {
       selected_tab_ = 6;
       ImGui::EndTabItem();
     }
-    if (ImGui::BeginTabItem("Telemetry")) {
+    if (ImGui::BeginTabItem("Context")) {
       selected_tab_ = 7;
+      ImGui::EndTabItem();
+    }
+    if (ImGui::BeginTabItem("Telemetry")) {
+      selected_tab_ = 8;
       ImGui::EndTabItem();
     }
     ImGui::EndTabBar();
@@ -620,6 +639,244 @@ void ChatWindow::RenderChunksTab() {
       }
     }
   }
+}
+
+void ChatWindow::RenderVoiceTab() {
+  if (!state_.voice) {
+    ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "Voice state is unavailable.");
+    return;
+  }
+
+  bool supported = false;
+  bool available = false;
+  bool speaker_attribution_available = false;
+  std::string backend = "sherpa";
+  bool listening = false;
+  bool reply_enabled = true;
+  bool retrieve_without_retain = false;
+  bool assistant_speaking = false;
+  std::string live_transcript;
+  std::string last_utterance;
+  std::string last_speaker_id;
+  std::optional<std::string> self_speaker_id;
+  std::vector<VoiceSpeakerPreview> speakers;
+  std::vector<VoiceSegmentDebug> last_segments;
+  std::vector<std::string> surfaced_memories;
+  std::optional<std::string> last_error;
+  {
+    std::lock_guard<std::mutex> lock(state_.voice->mu);
+    supported = state_.voice->supported;
+    available = state_.voice->available;
+    speaker_attribution_available = state_.voice->speaker_attribution_available;
+    backend = state_.voice->backend;
+    listening = state_.voice->listening;
+    reply_enabled = state_.voice->reply_enabled;
+    retrieve_without_retain = state_.voice->retrieve_without_retain;
+    assistant_speaking = state_.voice->assistant_speaking;
+    live_transcript = state_.voice->live_transcript;
+    last_utterance = state_.voice->last_utterance;
+    last_speaker_id = state_.voice->last_speaker_id;
+    self_speaker_id = state_.voice->self_speaker_id;
+    speakers = state_.voice->speakers;
+    last_segments = state_.voice->last_segments;
+    surfaced_memories = state_.voice->surfaced_memories;
+    last_error = state_.voice->last_error;
+  }
+
+  std::deque<ChatMessage> chat_history;
+  if (state_.mu && state_.chat_history) {
+    std::lock_guard<std::mutex> lock(*state_.mu);
+    chat_history = *state_.chat_history;
+  }
+
+  ImGui::TextColored(ImVec4(0.8f, 0.8f, 1.0f, 1.0f), "VOICE");
+  if (!supported) {
+    ImGui::TextWrapped("Voice chat is only available on macOS builds.");
+    return;
+  }
+
+  if (listening) {
+    if (ImGui::Button("Stop Listening")) {
+      std::lock_guard<std::mutex> lock(state_.voice->mu);
+      state_.voice->stop_requested = true;
+    }
+  } else {
+    if (ImGui::Button("Start Listening")) {
+      std::lock_guard<std::mutex> lock(state_.voice->mu);
+      state_.voice->start_requested = true;
+    }
+  }
+
+  ImGui::SameLine();
+  int backend_index = backend == "whisper" ? 1 : 0;
+  if (ImGui::BeginCombo("Backend", backend_index == 1
+                                       ? "Whisper.cpp tinydiarize"
+                                       : "Sherpa diarization")) {
+    if (ImGui::Selectable("Sherpa diarization", backend_index == 0)) {
+      std::lock_guard<std::mutex> lock(state_.voice->mu);
+      state_.voice->backend = "sherpa";
+      state_.voice->reply_toggle_dirty = true;
+    }
+    if (ImGui::Selectable("Whisper.cpp tinydiarize", backend_index == 1)) {
+      std::lock_guard<std::mutex> lock(state_.voice->mu);
+      state_.voice->backend = "whisper";
+      state_.voice->reply_toggle_dirty = true;
+    }
+    ImGui::EndCombo();
+  }
+
+  bool next_reply_enabled = reply_enabled;
+  if (ImGui::Checkbox("Reply enabled", &next_reply_enabled)) {
+    std::lock_guard<std::mutex> lock(state_.voice->mu);
+    state_.voice->reply_enabled = next_reply_enabled;
+    state_.voice->reply_toggle_dirty = true;
+  }
+
+  bool next_retrieve_without_retain = retrieve_without_retain;
+  if (ImGui::Checkbox("Retrieve without retain", &next_retrieve_without_retain)) {
+    std::lock_guard<std::mutex> lock(state_.voice->mu);
+    state_.voice->retrieve_without_retain = next_retrieve_without_retain;
+    state_.voice->reply_toggle_dirty = true;
+  }
+
+  ImGui::TextColored(listening ? ImVec4(0.3f, 1.0f, 0.3f, 1.0f)
+                               : ImVec4(1.0f, 0.8f, 0.2f, 1.0f),
+                     listening ? "Mic: live" : "Mic: stopped");
+  ImGui::SameLine();
+  ImGui::TextColored(assistant_speaking ? ImVec4(0.3f, 1.0f, 1.0f, 1.0f)
+                                        : ImVec4(0.6f, 0.6f, 0.6f, 1.0f),
+                     assistant_speaking ? "Assistant audio: speaking"
+                                        : "Assistant audio: idle");
+  if (!available) {
+    ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f),
+                       "Voice backend is unavailable. Check the active backend models and microphone permissions.");
+  }
+  const bool whisper_backend = backend == "whisper";
+  ImGui::TextColored(speaker_attribution_available ? ImVec4(0.4f, 1.0f, 0.8f, 1.0f)
+                                                   : ImVec4(0.8f, 0.6f, 0.2f, 1.0f),
+                     whisper_backend
+                         ? (speaker_attribution_available
+                                ? "Speaker turns: tinydiarize active (turn boundaries only)"
+                                : "Speaker turns: unavailable (check the whisper tinydiarize model)")
+                         : (speaker_attribution_available
+                                ? "Speaker streams: diarization active"
+                                : "Speaker streams: unavailable (check the sherpa diarization models)"));
+  if (last_error.has_value()) {
+    ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "%s", last_error->c_str());
+  }
+
+  ImGui::Separator();
+  ImGui::TextColored(ImVec4(0.8f, 0.8f, 1.0f, 1.0f), "Live transcript");
+  if (live_transcript.empty()) {
+    ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f),
+                       listening ? "(waiting for speech...)" : "(voice input stopped)");
+  } else {
+    ImGui::TextWrapped("%s", live_transcript.c_str());
+  }
+  if (!last_utterance.empty()) {
+    ImGui::Spacing();
+    ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "Last finalized utterance");
+    if (!last_speaker_id.empty()) {
+      ImGui::TextColored(ImVec4(0.7f, 0.9f, 1.0f, 1.0f),
+                         "Speaker: %s",
+                         VoiceSpeakerDisplayName(last_speaker_id, self_speaker_id).c_str());
+    }
+    ImGui::TextWrapped("%s", last_utterance.c_str());
+  }
+
+  if (speaker_attribution_available || !speakers.empty()) {
+    ImGui::Separator();
+    ImGui::TextColored(ImVec4(0.8f, 0.8f, 1.0f, 1.0f), "Speakers");
+    if (speakers.empty()) {
+      ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f),
+                         "(no speaker-attributed utterances yet)");
+    } else {
+      for (const auto& speaker : speakers) {
+        const std::string display_name
+            = VoiceSpeakerDisplayName(speaker.speaker_id, self_speaker_id);
+        ImGui::TextColored(ImVec4(0.7f, 0.9f, 1.0f, 1.0f),
+                           "%s",
+                           display_name.c_str());
+        ImGui::SameLine();
+        if (!self_speaker_id.has_value() || *self_speaker_id != speaker.speaker_id) {
+          if (ImGui::SmallButton(("This is me##" + speaker.speaker_id).c_str())) {
+            std::lock_guard<std::mutex> lock(state_.voice->mu);
+            state_.voice->self_speaker_id = speaker.speaker_id;
+          }
+        } else if (ImGui::SmallButton(("Clear me tag##" + speaker.speaker_id).c_str())) {
+          std::lock_guard<std::mutex> lock(state_.voice->mu);
+          state_.voice->self_speaker_id.reset();
+        }
+        ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f),
+                           "utterances: %zu",
+                           speaker.utterance_count);
+        if (!speaker.last_utterance.empty()) {
+          ImGui::PushTextWrapPos();
+          ImGui::BulletText("%s", speaker.last_utterance.c_str());
+          ImGui::PopTextWrapPos();
+        }
+        ImGui::Spacing();
+      }
+    }
+  }
+
+  if (!last_segments.empty()) {
+    ImGui::Separator();
+    ImGui::TextColored(ImVec4(0.8f, 0.8f, 1.0f, 1.0f), "Diarization segments");
+    for (const auto& segment : last_segments) {
+      ImGui::TextColored(ImVec4(0.7f, 0.9f, 1.0f, 1.0f),
+                         "[%.2fs - %.2fs] diarizer=%d mapped=%s",
+                         segment.start_s,
+                         segment.end_s,
+                         segment.diarizer_speaker,
+                         segment.speaker_id.c_str());
+      if (!segment.text.empty()) {
+        ImGui::PushTextWrapPos();
+        ImGui::BulletText("%s", segment.text.c_str());
+        ImGui::PopTextWrapPos();
+      }
+      ImGui::Spacing();
+    }
+  }
+
+  if (!reply_enabled || !surfaced_memories.empty()) {
+    ImGui::Separator();
+    ImGui::TextColored(ImVec4(0.8f, 0.8f, 1.0f, 1.0f), "Surfaced memories");
+    if (surfaced_memories.empty()) {
+      ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f),
+                         reply_enabled
+                             ? "(memory cues only appear in reply-disabled voice mode)"
+                             : "(no memory cues surfaced for the latest utterance)");
+    } else {
+      for (const auto& memory : surfaced_memories) {
+        ImGui::PushTextWrapPos();
+        ImGui::BulletText("%s", memory.c_str());
+        ImGui::PopTextWrapPos();
+      }
+    }
+  }
+
+  ImGui::Separator();
+  ImGui::TextColored(ImVec4(0.8f, 0.8f, 1.0f, 1.0f), "Conversation");
+  ImGui::BeginChild("VoiceConversation", ImVec2(0, 0), false);
+  if (chat_history.empty()) {
+    ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f),
+                       "(no conversation yet)");
+  } else {
+    const std::size_t start = chat_history.size() > 12
+                                  ? chat_history.size() - 12
+                                  : 0;
+    for (std::size_t i = start; i < chat_history.size(); ++i) {
+      const auto& msg = chat_history[i];
+      ImGui::PushTextWrapPos();
+      ImGui::TextColored(RoleColor(msg.role), "%s:", RolePrefix(msg.role).c_str());
+      ImGui::SameLine();
+      ImGui::TextWrapped("%s", msg.content.c_str());
+      ImGui::PopTextWrapPos();
+      ImGui::Spacing();
+    }
+  }
+  ImGui::EndChild();
 }
 
 void ChatWindow::RenderMetricsTab() {
@@ -962,6 +1219,9 @@ void ChatWindow::RenderMemoryTab() {
   std::lock_guard<std::mutex> lock(*state_.mu);
 
   ImGui::TextColored(ImVec4(0.8f, 0.8f, 1.0f, 1.0f), "MEMORY EVENTS (Real-time)");
+  ImGui::TextColored(
+      ImVec4(0.6f, 0.6f, 0.6f, 1.0f),
+      "Raw retrieved vs injected into prompt vs dropped by chat-side filtering.");
   ImGui::Separator();
 
   // Interrupt status
@@ -986,9 +1246,26 @@ void ChatWindow::RenderMemoryTab() {
       const auto& evt = *it;
 
       // Header with type indicator
-      const char* type_icon = (evt.type == MemoryEventType::STORED) ? "STORED" : "RETRIEVED";
-      ImVec4 type_color = (evt.type == MemoryEventType::STORED) ? ImVec4(0.3f, 1.0f, 0.3f, 1.0f)
-                                                                 : ImVec4(0.3f, 0.6f, 1.0f, 1.0f);
+      const char* type_icon = "UNKNOWN";
+      ImVec4 type_color = ImVec4(0.8f, 0.8f, 0.8f, 1.0f);
+      switch (evt.type) {
+        case MemoryEventType::STORED:
+          type_icon = "STORED";
+          type_color = ImVec4(0.3f, 1.0f, 0.3f, 1.0f);
+          break;
+        case MemoryEventType::RETRIEVED_RAW:
+          type_icon = "RETRIEVED";
+          type_color = ImVec4(0.3f, 0.6f, 1.0f, 1.0f);
+          break;
+        case MemoryEventType::INJECTED:
+          type_icon = "INJECTED";
+          type_color = ImVec4(0.9f, 0.8f, 0.3f, 1.0f);
+          break;
+        case MemoryEventType::DROPPED:
+          type_icon = "DROPPED";
+          type_color = ImVec4(1.0f, 0.45f, 0.45f, 1.0f);
+          break;
+      }
 
       ImGui::TextColored(type_color, "%s #%d", type_icon, evt.memory_id);
 
@@ -999,6 +1276,11 @@ void ChatWindow::RenderMemoryTab() {
       // Feedback counts
       ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "  retrieved: %lld | used: %lld",
                          evt.retrieved_count, evt.used_count);
+
+      if (!evt.filter_reason.empty()) {
+        ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.4f, 1.0f), "  filter: %s",
+                           evt.filter_reason.c_str());
+      }
 
       // Score and threshold
       ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.3f, 1.0f), "  score=%s thresh=%s",
