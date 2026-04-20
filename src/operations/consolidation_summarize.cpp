@@ -175,7 +175,7 @@ FormatSourceTextForSummary (const std::string &source_id,
       return {};
     }
 
-  if (source_id == "chat/user")
+  if (source_id.rfind ("chat/user", 0) == 0)
     {
       if (StartsWithAscii (text, "User:"))
         {
@@ -184,7 +184,7 @@ FormatSourceTextForSummary (const std::string &source_id,
       return "User: " + text;
     }
 
-  if (source_id == "chat/assistant")
+  if (source_id.rfind ("chat/assistant", 0) == 0)
     {
       if (StartsWithAscii (text, "Assistant:"))
         {
@@ -476,7 +476,8 @@ ConsolidationSummarize::Execute (OperationContext &context, Transaction &tx) con
           if (!text.empty ())
             {
               const bool chat_source
-                  = (source_id == "chat/user" || source_id == "chat/assistant");
+                  = (source_id.rfind ("chat/user", 0) == 0
+                     || source_id.rfind ("chat/assistant", 0) == 0);
               source_items.push_back (SourceItem{ std::move (text), sim,
                                                   start_ts, chat_source });
             }

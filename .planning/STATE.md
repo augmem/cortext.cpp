@@ -89,6 +89,7 @@ Recent decisions affecting current work:
 - [Phase 01-audio-front-end-boundary-runtime-foundation]: Keep session sink ownership external by storing only a non-owning contract sink pointer in the actor context.
 - [Phase 01-audio-front-end-boundary-runtime-foundation]: Emit normalized synthetic PerceptionEvents from explicit bounded SML actions instead of callbacks or deferred dispatch.
 - [Phase 01-audio-front-end-boundary-runtime-foundation]: Pin the runtime_smoke example output path to the plan verification path so automation can execute the seam directly.
+- [Post-Phase 01] Before Phase 02, normalize scaffold naming toward `planum::processor` and sibling domain namespaces, and remove the redundant `runtime` namespace from future work.
 
 ### Pending Todos
 

@@ -97,7 +97,7 @@ enum class EmbeddingGemmaBackendKind
   LiteRt
 };
 
-double
+[[maybe_unused]] double
 ElapsedMillis (Clock::time_point start, Clock::time_point end)
 {
   return std::chrono::duration<double, std::milli> (end - start).count ();
@@ -212,7 +212,7 @@ FinalizeEmbedding (std::vector<float> &values)
   L2NormalizeInPlace (values);
 }
 
-std::vector<int>
+[[maybe_unused]] std::vector<int>
 PadTokensInt (std::vector<int> ids, int max_length, int bos_id, int eos_id,
               int pad_id)
 {
@@ -285,7 +285,7 @@ GetEmbeddingGemmaTextEncodeProfileState ()
   return state;
 }
 
-void
+[[maybe_unused]] void
 RecordEmbeddingGemmaTextEncodeProfile (
     double ensure_initialized_ms, double tokenize_ms, double tensor_create_ms,
     double run_ms, double copy_ms, double normalize_ms)
@@ -1311,6 +1311,7 @@ EmbeddingGemmaEncoder::EncodeImage (const std::uint8_t *data, int width,
 namespace internal
 {
 
+#if defined(CORTEXT_ENABLE_EMBEDDINGGEMMA_ORT)
 void
 ResetEmbeddingGemmaTextEncodeProfile ()
 {
@@ -1326,6 +1327,7 @@ GetEmbeddingGemmaTextEncodeProfileSnapshot ()
   std::lock_guard<std::mutex> lock (state.mu);
   return state.snapshot;
 }
+#endif
 
 } // namespace internal
 

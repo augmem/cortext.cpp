@@ -1,0 +1,23 @@
+name: CortextBindings
+description: Generated bindings for the Cortext C API.
+output: lib/src/cortext_bindings.dart
+exclude-all-by-default: true
+headers:
+  entry-points:
+    - ../../include/cortext/capi.h
+compiler-opts:
+  - -I../../include
+comments:
+  style: any
+functions:
+  include:
+    - cortext_.*
+structs:
+  include:
+    - cortext_config
+typedefs:
+  include:
+    - cortext_handle
+enums:
+  include:
+    - cortext_consolidation_mode

@@ -153,9 +153,15 @@ ResolveEmbeddingGemmaConfig (const std::filesystem::path &models_dir)
       return ResolveEmbeddingGemmaConfigForBackend (models_dir, backend_override);
     }
 
-  for (const std::string &backend : { std::string ("llama.cpp"),
-                                      std::string ("litert"),
-                                      std::string ("onnx") })
+  std::vector<std::string> backends = { "llama.cpp" };
+#if !defined(CORTEXT_DISABLE_LITERT)
+  backends.push_back ("litert");
+#endif
+#if defined(CORTEXT_ENABLE_EMBEDDINGGEMMA_ORT)
+  backends.push_back ("onnx");
+#endif
+
+  for (const auto &backend : backends)
     {
       if (auto cfg = ResolveEmbeddingGemmaConfigForBackend (models_dir, backend))
         {
@@ -211,6 +217,7 @@ CreatePreferredTextEncoder (const std::string &models_dir)
     }
 #endif
 
+#if defined(CORTEXT_ENABLE_IMAGEBIND_ORT)
   if (auto imagebind = ResolveImageBindDir (root))
     {
       TextEncoderSelection selection;
@@ -219,10 +226,10 @@ CreatePreferredTextEncoder (const std::string &models_dir)
       selection.encoder = std::make_unique<ImageBindEncoder> (imagebind->string ());
       return selection;
     }
+#endif
 
   throw std::runtime_error (
-      "No supported text encoder models found under " + root.string ()
-      + ". Expected EmbeddingGemma or ImageBind assets.");
+      "No supported text encoder models found under " + root.string () + ".");
 }
 
 } // namespace cortext::internal

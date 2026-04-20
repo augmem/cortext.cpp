@@ -102,7 +102,7 @@ Primary public entrypoints:
 
 ## Foreign-Language Integration
 
-For Python, Go, JavaScript, and TypeScript consumers, use the dedicated FFI release preset. It builds a shared library and disables the heaviest optional backends by default so bindings do not need the full research stack on every install.
+For Python, Go, JavaScript, TypeScript, and Dart consumers, use the dedicated FFI release preset. It builds a shared library and disables the heaviest optional backends by default so bindings do not need the full research stack on every install.
 
 ```bash
 cmake --preset ffi-release
@@ -120,6 +120,7 @@ Repository-local bindings live under `bindings/`:
 - `bindings/python`: pure `ctypes` wrapper over the JSON C ABI
 - `bindings/go`: `cgo` wrapper with raw JSON and decoded `map[string]any` helpers
 - `bindings/javascript`: Node.js addon plus TypeScript declarations
+- `bindings/dart`: `dart:ffi` wrapper with generated bindings and JSON helpers
 
 After building with `ffi-release`, quick smoke commands are:
 
@@ -127,6 +128,7 @@ After building with `ffi-release`, quick smoke commands are:
 PYTHONPATH=bindings/python python3 -c "import cortext; print(cortext.version())"
 (cd bindings/go && go test .)
 (cd bindings/javascript && npm run build && node -e "const { version } = require('./'); console.log(version())")
+(cd bindings/dart && dart pub get && dart test)
 ```
 
 ## Important CMake Options

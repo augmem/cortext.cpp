@@ -4,7 +4,7 @@
 #include <string>
 
 #include "audio/planum_bridge.hpp"
-#include "planum/contract/perception_event.hpp"
+#include "planum/perception_event.hpp"
 
 namespace
 {
@@ -40,21 +40,20 @@ public:
   std::uint64_t last_timestamp = 0;
 };
 
-planum::contract::PerceptionEvent
-MakeEvent (planum::contract::EventKind kind)
+planum::PerceptionEvent
+MakeEvent (planum::EventKind kind)
 {
-  planum::contract::PerceptionEvent event;
+  planum::PerceptionEvent event;
   event.kind = kind;
-  event.runtime_state = planum::contract::RuntimeState::listening;
   event.emitted_at_ms = 2400;
   event.segment_started_at_ms = 2200;
   event.segment_ended_at_ms = 2300;
-  event.stream_id = planum::contract::StreamId{ "smoke-stream" };
-  event.segment_id = planum::contract::SegmentId{ "segment-1" };
-  event.turn_id = planum::contract::TurnId{ "turn-1" };
+  event.stream_id = planum::StreamId{ "smoke-stream" };
+  event.segment_id = planum::SegmentId{ "segment-1" };
+  event.turn_id = planum::TurnId{ "turn-1" };
   event.transcript.text = "smoke final transcript";
   event.transcript.confidence = 0.99f;
-  event.speaker.id = planum::contract::SpeakerId{ "speaker-a" };
+  event.speaker.id = planum::SpeakerId{ "speaker-a" };
   event.speaker.confidence = 0.81f;
   return event;
 }
@@ -75,9 +74,9 @@ main ()
   cortext::audio::PlanumBridge bridge (target);
 
   const auto final_result = bridge.Accept (
-      MakeEvent (planum::contract::EventKind::final_transcript));
+      MakeEvent (planum::EventKind::final_transcript));
   const auto partial_result = bridge.Accept (
-      MakeEvent (planum::contract::EventKind::partial_transcript));
+      MakeEvent (planum::EventKind::partial_transcript));
 
   if (!final_result.has_value ())
     {

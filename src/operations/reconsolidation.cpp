@@ -423,7 +423,8 @@ ApplyReconsolidation::Execute (OperationContext &context, Transaction &tx) const
 
           // Load neighbor embedding
           auto neighbor_emb = constructive_recall::LoadCurrentEmbedding (
-              tx, neighbor.memory_id, neighbor.embedding_id, u_cur.size ());
+              tx, neighbor.memory_id, neighbor.embedding_id,
+              static_cast<int> (u_cur.size ()));
           if (!neighbor_emb)
             {
               continue;

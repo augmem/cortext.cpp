@@ -1,6 +1,20 @@
 cmake_minimum_required(VERSION 3.16)
 project(cortext VERSION 0.1.0 LANGUAGES C CXX)
 
+set(CORTEXT_TARGET_IOS OFF)
+if(IOS OR CMAKE_SYSTEM_NAME STREQUAL "iOS" OR CMAKE_OSX_SYSROOT MATCHES "iphone")
+  set(CORTEXT_TARGET_IOS ON)
+endif()
+
+set(CORTEXT_TARGET_AARCH64 OFF)
+if(CMAKE_OSX_ARCHITECTURES MATCHES "(^|;)arm64($|;)")
+  set(CORTEXT_TARGET_AARCH64 ON)
+elseif(CMAKE_OSX_ARCHITECTURES)
+  set(CORTEXT_TARGET_AARCH64 OFF)
+elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64")
+  set(CORTEXT_TARGET_AARCH64 ON)
+endif()
+
 if(NOT DEFINED CMAKE_CXX_STANDARD OR CMAKE_CXX_STANDARD STREQUAL "")
   set(CMAKE_CXX_STANDARD 20)
 endif()
@@ -17,6 +31,7 @@ option(CORTEXT_WASM_EXPORT_ALL "Export all functions in WASM build" ON)
 option(CORTEXT_EMBED_VEC "Embed sqlite-vec extension" ON)
 option(CORTEXT_EMBED_OBJSTORE "Embed sqlite-objstore extension" ON)
 option(CORTEXT_ENABLE_DYNAMIC_EXTENSIONS "Enable dynamic extension loading fallback" ON)
+option(CORTEXT_DISABLE_OPENTELEMETRY "Disable OpenTelemetry integration" OFF)
 option(CORTEXT_DISABLE_IMAGEBIND_ORT "Disable ONNX Runtime for ImageBind embedder" OFF)
 option(CORTEXT_ENABLE_GEMMA_ORT "Enable ONNX Runtime for Gemma text generator" OFF)
 option(CORTEXT_DISABLE_OGA "Disable onnxruntime-genai for Phi-4 Extractor/Summarizer" OFF)
@@ -51,6 +66,12 @@ block(SCOPE_FOR VARIABLES)
   set(BUILD_TESTING OFF)
   set(EIGEN_BUILD_TESTING OFF)
   set(EIGEN_TESTING OFF)
+  if(DEFINED CMAKE_Fortran_COMPILER)
+    set(_cortext_saved_fortran_compiler "${CMAKE_Fortran_COMPILER}")
+  else()
+    set(_cortext_saved_fortran_compiler "__UNSET__")
+  endif()
+  set(CMAKE_Fortran_COMPILER "NOTFOUND" CACHE FILEPATH "Disable Fortran while configuring Eigen" FORCE)
   
   FetchContent_Declare(
     eigen
@@ -58,6 +79,11 @@ block(SCOPE_FOR VARIABLES)
     GIT_TAG 3.4.0
   )
   FetchContent_MakeAvailable(eigen)
+  if(_cortext_saved_fortran_compiler STREQUAL "__UNSET__")
+    unset(CMAKE_Fortran_COMPILER CACHE)
+  else()
+    set(CMAKE_Fortran_COMPILER "${_cortext_saved_fortran_compiler}" CACHE FILEPATH "Fortran compiler" FORCE)
+  endif()
 
   # nlohmann/json for generator JSON schema handling
   # Note: v3.12.0 required to match LiteRT-LM's nlohmann/json version
@@ -75,7 +101,7 @@ endblock()
 # cortext links against the OpenTelemetry API only. Applications are responsible
 # for installing SDK providers/exporters as needed.
 #
-if(NOT EMSCRIPTEN)
+if(NOT EMSCRIPTEN AND NOT CORTEXT_DISABLE_OPENTELEMETRY AND NOT CORTEXT_TARGET_IOS)
   # Temporarily disable BUILD_TESTING while configuring the dependency to avoid
   # adding its tests into this build, then restore.
   set(_cortext_saved_build_testing "${BUILD_TESTING}")
@@ -101,9 +127,11 @@ if(NOT EMSCRIPTEN)
 endif()
 
 
-if(NOT EMSCRIPTEN)
+if(NOT EMSCRIPTEN AND NOT CORTEXT_TARGET_IOS)
   find_package(PkgConfig REQUIRED)
   pkg_check_modules(SQLITE3 REQUIRED sqlite3)
+elseif(CORTEXT_TARGET_IOS)
+  find_library(SQLITE3_IOS_LIB sqlite3 REQUIRED)
 endif()
 
 add_library(cortext
@@ -195,8 +223,26 @@ add_library(cortext
 
 set(CORTEXT_LLAMA_CPP_AVAILABLE OFF)
 if(NOT EMSCRIPTEN)
+  set(CORTEXT_LLAMA_INCLUDE_DIR "${CORTEXT_LLAMA_INCLUDE_DIR}" CACHE PATH
+      "Path to the directory containing llama.h")
+  set(CORTEXT_GGML_INCLUDE_DIR "${CORTEXT_GGML_INCLUDE_DIR}" CACHE PATH
+      "Path to the directory containing ggml-backend.h")
+  set(CORTEXT_LLAMA_LIBRARY "${CORTEXT_LLAMA_LIBRARY}" CACHE FILEPATH
+      "Path to libllama")
+  set(CORTEXT_GGML_LIBRARY "${CORTEXT_GGML_LIBRARY}" CACHE FILEPATH
+      "Path to libggml")
+  set(CORTEXT_GGML_BASE_LIBRARY "${CORTEXT_GGML_BASE_LIBRARY}" CACHE FILEPATH
+      "Path to libggml-base")
+  set(CORTEXT_GGML_CPU_LIBRARY "${CORTEXT_GGML_CPU_LIBRARY}" CACHE FILEPATH
+      "Path to libggml-cpu")
+  set(CORTEXT_GGML_BLAS_LIBRARY "${CORTEXT_GGML_BLAS_LIBRARY}" CACHE FILEPATH
+      "Path to libggml-blas")
   find_path(CORTEXT_LLAMA_INCLUDE_DIR
     NAMES llama.h
+    PATHS /opt/homebrew/include /usr/local/include
+  )
+  find_path(CORTEXT_GGML_INCLUDE_DIR
+    NAMES ggml-backend.h
     PATHS /opt/homebrew/include /usr/local/include
   )
   find_library(CORTEXT_LLAMA_LIBRARY
@@ -211,12 +257,28 @@ if(NOT EMSCRIPTEN)
     NAMES ggml-base libggml-base
     PATHS /opt/homebrew/lib /usr/local/lib
   )
+  find_library(CORTEXT_GGML_CPU_LIBRARY
+    NAMES ggml-cpu libggml-cpu
+    PATHS /opt/homebrew/lib /usr/local/lib
+  )
+  find_library(CORTEXT_GGML_BLAS_LIBRARY
+    NAMES ggml-blas libggml-blas
+    PATHS /opt/homebrew/lib /usr/local/lib
+  )
+
+  if(NOT CORTEXT_GGML_INCLUDE_DIR)
+    set(CORTEXT_GGML_INCLUDE_DIR "${CORTEXT_LLAMA_INCLUDE_DIR}")
+  endif()
 
   if(CORTEXT_LLAMA_INCLUDE_DIR AND CORTEXT_LLAMA_LIBRARY)
     set(CORTEXT_LLAMA_CPP_AVAILABLE ON)
+    target_include_directories(cortext PRIVATE
+      "${CORTEXT_LLAMA_INCLUDE_DIR}"
+      "${CORTEXT_GGML_INCLUDE_DIR}"
+    )
     target_compile_definitions(cortext PRIVATE
       CORTEXT_ENABLE_LLAMA_CPP=1
-      CORTEXT_GGML_BACKEND_HEADER_PATH=\"${CORTEXT_LLAMA_INCLUDE_DIR}/ggml-backend.h\"
+      CORTEXT_GGML_BACKEND_HEADER_PATH=\"${CORTEXT_GGML_INCLUDE_DIR}/ggml-backend.h\"
       CORTEXT_LLAMA_HEADER_PATH=\"${CORTEXT_LLAMA_INCLUDE_DIR}/llama.h\"
     )
     target_link_libraries(cortext PRIVATE ${CORTEXT_LLAMA_LIBRARY})
@@ -225,6 +287,16 @@ if(NOT EMSCRIPTEN)
     endif()
     if(CORTEXT_GGML_BASE_LIBRARY)
       target_link_libraries(cortext PRIVATE ${CORTEXT_GGML_BASE_LIBRARY})
+    endif()
+    if(CORTEXT_GGML_CPU_LIBRARY)
+      target_link_libraries(cortext PRIVATE ${CORTEXT_GGML_CPU_LIBRARY})
+    endif()
+    if(CORTEXT_GGML_BLAS_LIBRARY)
+      target_link_libraries(cortext PRIVATE ${CORTEXT_GGML_BLAS_LIBRARY})
+    endif()
+    if(APPLE AND CORTEXT_GGML_BLAS_LIBRARY)
+      find_library(ACCELERATE_FRAMEWORK Accelerate REQUIRED)
+      target_link_libraries(cortext PRIVATE ${ACCELERATE_FRAMEWORK})
     endif()
   else()
     message(STATUS "llama.cpp library not found; GGUF generation backends disabled")
@@ -239,14 +311,22 @@ if(CORTEXT_ENABLE_EMBEDDINGGEMMA)
   else()
     message(STATUS "llama.cpp library not found; EmbeddingGemma llama.cpp backend disabled")
   endif()
-else()
-  set(CORTEXT_DISABLE_SHERPA_ONNX ON CACHE BOOL "" FORCE)
 endif()
 
 if(NOT CORTEXT_DISABLE_SHERPA_ONNX)
   target_sources(cortext PRIVATE src/audio/sherpa_onnx.cpp)
 endif()
 add_library(cortext::cortext ALIAS cortext)
+
+if(CORTEXT_TARGET_IOS AND CORTEXT_DISABLE_IMAGEBIND_ORT AND CORTEXT_DISABLE_LITERT AND CORTEXT_DISABLE_OGA)
+  set_source_files_properties(
+    src/encoder/imagebind.cpp
+    src/extractor/gemma_extractor.cpp
+    src/summarizer/gemma_summarizer.cpp
+    src/audio/gemma_audio.cpp
+    PROPERTIES HEADER_FILE_ONLY ON
+  )
+endif()
 
 # Public include dirs
 target_include_directories(cortext
@@ -317,7 +397,7 @@ if(CORTEXT_EMBED_OBJSTORE)
       ${CMAKE_CURRENT_SOURCE_DIR}/third_party/sqlite-objstore/src/backend_sqlite.c
     )
   endif()
-  if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64")
+  if(CORTEXT_TARGET_AARCH64)
     list(APPEND CORTEXT_OBJSTORE_SRCS
       ${CMAKE_CURRENT_SOURCE_DIR}/third_party/sqlite-objstore/third_party/blake3/blake3_neon.c
     )
@@ -362,6 +442,9 @@ if(EMSCRIPTEN)
   target_link_libraries(cortext PRIVATE sqlite3)
   target_compile_definitions(cortext PRIVATE SQLITE_OMIT_LOAD_EXTENSION=1)
   target_sources(cortext PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/wasm/auto_extensions.cpp)
+elseif(CORTEXT_TARGET_IOS)
+  target_link_libraries(cortext PRIVATE ${SQLITE3_IOS_LIB})
+  target_compile_definitions(cortext PRIVATE SQLITE_OMIT_LOAD_EXTENSION=1)
 else()
   target_include_directories(cortext PRIVATE ${SQLITE3_INCLUDE_DIRS})
   target_link_libraries(cortext PRIVATE ${SQLITE3_LIBRARIES})
@@ -370,7 +453,7 @@ endif()
 #
 # OpenTelemetry linkage (native only): API-only.
 #
-if(NOT EMSCRIPTEN)
+if(NOT EMSCRIPTEN AND NOT CORTEXT_DISABLE_OPENTELEMETRY AND NOT CORTEXT_TARGET_IOS)
   # opentelemetry-cpp headers can emit some warnings on AppleClang/Clang.
   # When CORTEXT_WARNINGS_AS_ERRORS=ON, those become hard errors. Suppress only
   # for the translation unit that includes OTel headers.
@@ -388,6 +471,8 @@ if(NOT EMSCRIPTEN)
     )
   endif()
   target_link_libraries(cortext PRIVATE opentelemetry-cpp::api)
+else()
+  target_compile_definitions(cortext PRIVATE CORTEXT_DISABLE_OPENTELEMETRY=1)
 endif()
 
 # Optional ONNX Runtime integration for ImageBind embedder
@@ -550,8 +635,9 @@ if(CORTEXT_ENABLE_GEMMA_ORT)
   endif()
 endif()
 
-# EmbeddingGemma ONNX encoder (uses ORT + SentencePiece from LiteRT-LM)
-if(CORTEXT_ENABLE_EMBEDDINGGEMMA)
+# EmbeddingGemma ONNX/LiteRT tokenizers need SentencePiece. The llama.cpp
+# backend uses the model vocabulary directly and does not depend on it.
+if(CORTEXT_ENABLE_EMBEDDINGGEMMA AND ((NOT CORTEXT_DISABLE_IMAGEBIND_ORT AND NOT EMSCRIPTEN) OR CORTEXT_ENABLE_GEMMA_ORT OR NOT CORTEXT_DISABLE_LITERT))
   set(CORTEXT_SENTENCEPIECE_INCLUDE_DIR "${CMAKE_BINARY_DIR}/bazel-output/external/sentencepiece")
   set(CORTEXT_SENTENCEPIECE_PROTO_DIR "${CORTEXT_SENTENCEPIECE_INCLUDE_DIR}/builtin_pb")
   set(CORTEXT_SENTENCEPIECE_LIB_DIR "${CMAKE_BINARY_DIR}/bazel-output/execroot/litert_lm/bazel-out/darwin_arm64-opt/bin/external/sentencepiece")
@@ -586,10 +672,10 @@ if(CORTEXT_ENABLE_EMBEDDINGGEMMA)
   if(TARGET absl::statusor)
     target_link_libraries(cortext PRIVATE absl::statusor)
   endif()
+endif()
 
-  if((NOT CORTEXT_DISABLE_IMAGEBIND_ORT AND NOT EMSCRIPTEN) OR CORTEXT_ENABLE_GEMMA_ORT)
-    target_compile_definitions(cortext PUBLIC CORTEXT_ENABLE_EMBEDDINGGEMMA_ORT=1)
-  endif()
+if(CORTEXT_ENABLE_EMBEDDINGGEMMA AND ((NOT CORTEXT_DISABLE_IMAGEBIND_ORT AND NOT EMSCRIPTEN) OR CORTEXT_ENABLE_GEMMA_ORT))
+  target_compile_definitions(cortext PUBLIC CORTEXT_ENABLE_EMBEDDINGGEMMA_ORT=1)
 endif()
 
 # Optional onnxruntime-genai (OGA) integration for Phi-4 Extractor/Summarizer
@@ -695,7 +781,7 @@ if(NOT CORTEXT_DISABLE_SHERPA_ONNX AND NOT EMSCRIPTEN)
   set(SHERPA_ONNX_ENABLE_PORTAUDIO OFF CACHE BOOL "" FORCE)
   set(SHERPA_ONNX_ENABLE_BINARY OFF CACHE BOOL "" FORCE)
   set(SHERPA_ONNX_ENABLE_TTS ON CACHE BOOL "" FORCE)
-  set(SHERPA_ONNX_ENABLE_SPEAKER_DIARIZATION OFF CACHE BOOL "" FORCE)
+  set(SHERPA_ONNX_ENABLE_SPEAKER_DIARIZATION ON CACHE BOOL "" FORCE)
   set(SHERPA_ONNX_ENABLE_C_API ON CACHE BOOL "" FORCE)
 
   # Prefer sherpa-onnx to download its own ORT if our build isn't ready yet.

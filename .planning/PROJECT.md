@@ -2,55 +2,67 @@
 
 ## What This Is
 
-cortext is the memory engine powering augmem.ai for augmenting human and LLM memory. It is a brownfield C++ system that ingests multimodal signals, persists durable memory traces, and resurfaces relevant context for applications, agents, analyses, and realtime chat experiences.
+cortext is a biologically inspired memory augmentation engine powering augmem.ai. It is a high-performance, realtime, on-device system that helps humans and LLMs form, retain, and resurface context across text, audio, and image modalities.
 
 ## Core Value
 
-Important context should resurface at the right time for humans and models without requiring manual memory management.
+Relevant memory should be formed and resurfaced on device, in realtime, and in a way that feels biologically plausible rather than manually scripted.
 
 ## Requirements
 
 ### Validated
 
-- ✓ Process text, audio, and image signals into persisted memories with contextual retrieval — existing
-- ✓ Run a configurable F/S/T-driven memory pipeline with working-memory hydration and SQLite-backed persistence — existing
-- ✓ Support multiple local model backends and runtime paths for encoding, extraction, and summarization — existing
-- ✓ Expose the engine through native APIs, bindings, examples, and benchmark tooling — existing
+- ✓ Process text signals into durable memory with retrieval, consolidation, and working-memory behavior — existing
+- ✓ Run the core memory engine locally with SQLite-backed persistence and F/S/T-driven behavior — existing
+- ✓ Support multimodal engine surfaces and local model backends across examples, benchmarks, and integrations — existing
+- ✓ Provide experimental and paper-backed evaluation flows for text-centric memory behavior — existing
 
 ### Active
 
-- [ ] Improve realtime memory augmentation for both human conversation and LLM/agent workflows
-- [ ] Make retrieval surfacing more explainable, inspectable, and tunable in live applications
-- [ ] Build a higher-performance on-device speech stack for voice memory capture, speaker separation, and assistant interaction
+- [ ] Define a clean front-end boundary so speech/audio runtime logic lives outside Cortext core
+- [ ] Build a high-performance audio processing pipeline as the first multimodal milestone
+- [ ] Add a custom on-device `ggml` speaker/diarization stack in a separate speech front-end submodule suitable for realtime room audio
+- [ ] Use `stateforward/sml.cpp` to orchestrate new realtime modality features with explicit state machines
+- [ ] Integrate low-latency multimodal embeddings so text, audio, and image memory can share a unified augmentation path
+- [ ] Expand memory augmentation quality and observability beyond text-first workflows
 
 ### Out of Scope
 
-- Managed cloud memory service as the primary product surface — this repo remains engine-first and local-first
-- Broad augmem.ai application features that do not improve the core memory engine — they belong above the engine boundary
-- Public API churn without explicit approval — the engine must stay usable by existing native and binding consumers
+- Managed cloud memory service as the primary architecture — cortext remains local-first and engine-first
+- Generic augmem.ai product/UI work that does not improve the engine itself — that belongs above the engine boundary
+- Breaking the public C++ headers or C API without explicit approval — existing consumers depend on them
 
 ## Context
 
-- The repository already contains a substantial brownfield codebase with a public C++ API, C API, multiple bindings, examples, benchmarks, and a paper/experiment workflow.
-- The engine is centered on memory formation, retrieval, consolidation, and working-memory behavior controlled by the three knobs F, S, and T.
-- Local model execution already spans ONNX Runtime, LiteRT-LM, GGUF/llama.cpp-style assets, sherpa-onnx, and whisper.cpp, but realtime voice performance and speaker handling remain active areas of churn.
-- The immediate product framing is that cortext is the engine behind augmem.ai, so engine quality, observability, and on-device behavior matter more than standalone demo polish.
+- cortext is already strong on the text-memory side. The next milestone is not proving text memory again; it is moving the memory engine into the other supported modalities.
+- The repository already contains local model runtimes, voice experiments, multimodal ingestion paths, benchmarks, and paper infrastructure. The bottleneck is now modality expansion and realtime on-device behavior, especially for audio.
+- cortext should remain audio-engine agnostic. Speaker attribution, diarization, VAD, endpointing, and realtime audio control should sit in a front-end layer before Cortext rather than inside its public API surface.
+- The likely shape is a separate speech front-end submodule that produces normalized audio events, speaker metadata, confidence, and retention policy inputs for Cortext.
+- New feature work should use `stateforward/sml.cpp` for explicit state-machine-driven orchestration rather than ad hoc control flow.
+- In the `stateforward/sml.cpp` actor model, transient orchestration and handoff data should move through explicit events / `sml::completion<TEvent>` rather than being mirrored into actor context.
+- Future `planum.cpp` naming should be domain-first: prefer `planum::processor`, `planum::audio`, `planum::segmentation`, and `planum::signaling` over `session` terminology or a redundant `runtime` namespace.
+- The desired direction is a cohesive on-device stack: biologically inspired memory behavior, low-latency multimodal inference, and safe realtime augmentation for both humans and LLMs.
 
 ## Constraints
 
-- **Tech stack**: C++20 with CMake, SQLite, and local model runtimes — the current engine architecture is already in production use and should be evolved, not replaced casually
-- **API stability**: Public headers in `include/` and the C API require explicit approval before breaking changes — bindings and examples depend on them
-- **Research traceability**: Algorithm and experiment changes must be reflected in `docs/paper/sections/` and the generated manuscript — this repo treats paper evidence as part of the product record
-- **Performance**: On-device latency matters, especially for speech and realtime interaction paths — augmem.ai needs memory augmentation that feels live, not batch-oriented
+- **Tech stack**: C++20, CMake, SQLite, and local model runtimes remain the core substrate — the engine should evolve from the existing codebase, not restart elsewhere
+- **Realtime performance**: New modality work must target low-latency on-device execution, especially in the audio path
+- **Engine boundary**: Cortext should consume normalized modality inputs and metadata, not own speech-runtime-specific implementation details
+- **State orchestration**: New realtime feature flows should leverage `stateforward/sml.cpp` for explicit lifecycle/state transitions
+- **API stability**: Public headers in `include/` and the C API require explicit approval before breaking changes
+- **Research traceability**: Algorithm and experiment changes must continue to update `docs/paper/sections/` and the generated manuscript
 
 ## Key Decisions
 
 | Decision | Rationale | Outcome |
 |----------|-----------|---------|
-| Keep cortext as a brownfield engine rather than restart from scratch | The repo already contains the core memory pipeline, persistence layer, bindings, experiments, and demos needed to power augmem.ai | — Pending |
-| Treat local-first multimodal memory as the product center | The engine must work for both humans and LLMs without depending on a hosted memory backend | — Pending |
-| Preserve F/S/T as the main behavioral control surface | Repository guidance and current algorithms already organize behavior around these knobs | — Pending |
-| Track planning artifacts in git | This project uses docs, experiments, and roadmap artifacts as durable engineering state | — Pending |
+| Treat cortext as a biologically inspired memory augmentation engine, not just a text-memory library | The product scope is broader than text and should cover human and LLM memory across modalities | — Pending |
+| Make the first milestone audio-first | Text experiments are already mature enough that the highest-value next step is the audio pipeline | — Pending |
+| Keep Cortext audio-engine agnostic | Speech runtime details should sit in front of the memory engine, not inside its public boundary | — Pending |
+| Build the custom speaker/diarization stack around `ggml` in a separate speech front-end submodule | Current local diarization options are too slow or fragmented for the desired on-device realtime path, and the speech stack should be replaceable without reshaping Cortext | — Pending |
+| Use `stateforward/sml.cpp` for new feature orchestration | Realtime multimodal flows need explicit and debuggable state transitions | — Pending |
+| Use domain-first names in `planum.cpp` (`processor`, `audio`, `segmentation`, `signaling`) | `session` is product-ambiguous and `runtime` is redundant under the `planum` namespace | — Pending |
+| Preserve F/S/T as the main behavioral control surface | The engine remains biologically inspired and those knobs continue to define behavior | — Pending |
 
 ## Evolution
 
@@ -70,4 +82,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-04-07 after initialization*
+*Last updated: 2026-04-07 after audio-front-end boundary refinement*

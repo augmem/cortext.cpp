@@ -23,10 +23,26 @@ struct ChatMessage {
   std::string content;
 };
 
+struct VoiceSpeakerPreview {
+  std::string speaker_id;
+  std::string last_utterance;
+  std::size_t utterance_count = 0;
+};
+
+struct VoiceSegmentDebug {
+  float start_s = 0.0f;
+  float end_s = 0.0f;
+  int diarizer_speaker = -1;
+  std::string speaker_id;
+  std::string text;
+};
+
 // Memory event types
 enum class MemoryEventType {
   STORED,
-  RETRIEVED,
+  RETRIEVED_RAW,
+  INJECTED,
+  DROPPED,
 };
 
 // Memory event with all metrics
@@ -56,6 +72,7 @@ struct MemoryEvent {
   double arousal = 0.0;
   double composite_score = 0.0;
   double threshold_t = 0.0;
+  std::string filter_reason;
 };
 
 // Status bar telemetry state
@@ -89,6 +106,29 @@ struct SettingsState {
   std::string default_memory_prompt_suffix;
   bool apply_requested = false;
   std::optional<std::string> last_apply_status;
+};
+
+struct VoiceState {
+  mutable std::mutex mu;
+  bool supported = false;
+  bool available = false;
+  bool speaker_attribution_available = false;
+  std::string backend = "sherpa";
+  bool listening = false;
+  bool reply_enabled = true;
+  bool retrieve_without_retain = false;
+  bool reply_toggle_dirty = false;
+  bool start_requested = false;
+  bool stop_requested = false;
+  bool assistant_speaking = false;
+  std::string live_transcript;
+  std::string last_utterance;
+  std::string last_speaker_id;
+  std::optional<std::string> self_speaker_id;
+  std::vector<VoiceSpeakerPreview> speakers;
+  std::vector<VoiceSegmentDebug> last_segments;
+  std::vector<std::string> surfaced_memories;
+  std::optional<std::string> last_error;
 };
 
 struct DatabaseMemoryRow {
@@ -238,6 +278,7 @@ public:
     std::shared_ptr<MetricsState> metrics;
     std::shared_ptr<StatusBarState> status;
     std::shared_ptr<SettingsState> settings;
+    std::shared_ptr<VoiceState> voice;
     std::shared_ptr<DatabaseExplorerState> db_explorer;
     std::shared_ptr<OTelState> otel;
     std::string* input = nullptr;
@@ -265,6 +306,7 @@ public:
 private:
   void RenderTabBar();
   void RenderChatTab();
+  void RenderVoiceTab();
   void RenderEventsTab();
   void RenderChunksTab();
   void RenderMetricsTab();
