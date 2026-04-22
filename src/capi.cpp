@@ -7,12 +7,18 @@
 ///   2 = internal error (exception caught during processing)
 #include "cortext/capi.h"
 #include "cortext/cortext.hpp"
+#include "cortext/store/object_store.hpp"
+#include "cortext/store/store.hpp"
 
+#include <any>
 #include <cstdlib>
 #include <cstring>
 #include <exception>
+#include <map>
 #include <memory>
 #include <new>
+#include <optional>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -64,6 +70,604 @@ config_from_c (const cortext_config *cfg)
   cpp_cfg.sequential_edges_enabled = cfg->sequential_edges_enabled != 0;
   cpp_cfg.label_bank_path = cfg->label_bank_path ? cfg->label_bank_path : "";
   return cpp_cfg;
+}
+
+std::any
+value_to_any (const cortext_db_value &value)
+{
+  switch (value.type)
+    {
+    case CORTEXT_DB_VALUE_INT64:
+      return static_cast<long long> (value.int64_value);
+    case CORTEXT_DB_VALUE_DOUBLE:
+      return value.double_value;
+    case CORTEXT_DB_VALUE_TEXT:
+      return std::string (value.text_value ? value.text_value : "");
+    case CORTEXT_DB_VALUE_BLOB:
+      {
+        const auto *begin = value.blob_data;
+        if (!begin || value.blob_size == 0)
+          {
+            return std::vector<unsigned char>{};
+          }
+        return std::vector<unsigned char> (begin, begin + value.blob_size);
+      }
+    case CORTEXT_DB_VALUE_NULL:
+    default:
+      return nullptr;
+    }
+}
+
+struct CallbackParam
+{
+  cortext_db_value value{};
+  std::string text;
+  std::vector<unsigned char> blob;
+};
+
+std::vector<cortext_db_value>
+params_to_values (const std::vector<std::any> &params,
+                  std::vector<CallbackParam> &storage)
+{
+  storage.clear ();
+  storage.reserve (params.size ());
+
+  for (const auto &param : params)
+    {
+      CallbackParam entry;
+      if (param.type () == typeid (int))
+        {
+          entry.value.type = CORTEXT_DB_VALUE_INT64;
+          entry.value.int64_value = std::any_cast<int> (param);
+        }
+      else if (param.type () == typeid (long))
+        {
+          entry.value.type = CORTEXT_DB_VALUE_INT64;
+          entry.value.int64_value = std::any_cast<long> (param);
+        }
+      else if (param.type () == typeid (long long))
+        {
+          entry.value.type = CORTEXT_DB_VALUE_INT64;
+          entry.value.int64_value = std::any_cast<long long> (param);
+        }
+      else if (param.type () == typeid (double))
+        {
+          entry.value.type = CORTEXT_DB_VALUE_DOUBLE;
+          entry.value.double_value = std::any_cast<double> (param);
+        }
+      else if (param.type () == typeid (float))
+        {
+          entry.value.type = CORTEXT_DB_VALUE_DOUBLE;
+          entry.value.double_value
+              = static_cast<double> (std::any_cast<float> (param));
+        }
+      else if (param.type () == typeid (std::string))
+        {
+          entry.text = std::any_cast<std::string> (param);
+          entry.value.type = CORTEXT_DB_VALUE_TEXT;
+        }
+      else if (param.type () == typeid (const char *))
+        {
+          entry.text = std::any_cast<const char *> (param);
+          entry.value.type = CORTEXT_DB_VALUE_TEXT;
+        }
+      else if (param.type () == typeid (std::vector<char>))
+        {
+          const auto &bytes = std::any_cast<const std::vector<char> &> (param);
+          entry.blob.assign (bytes.begin (), bytes.end ());
+          entry.value.type = CORTEXT_DB_VALUE_BLOB;
+          entry.value.blob_size = entry.blob.size ();
+        }
+      else if (param.type () == typeid (std::vector<unsigned char>))
+        {
+          entry.blob
+              = std::any_cast<const std::vector<unsigned char> &> (param);
+          entry.value.type = CORTEXT_DB_VALUE_BLOB;
+          entry.value.blob_size = entry.blob.size ();
+        }
+      else if (param.type () == typeid (std::vector<float>))
+        {
+          const auto &floats
+              = std::any_cast<const std::vector<float> &> (param);
+          if (!floats.empty ())
+            {
+              const auto *raw
+                  = reinterpret_cast<const unsigned char *> (floats.data ());
+              entry.blob.assign (raw, raw + floats.size () * sizeof (float));
+            }
+          entry.value.type = CORTEXT_DB_VALUE_BLOB;
+          entry.value.blob_size = entry.blob.size ();
+        }
+      else
+        {
+          entry.value.type = CORTEXT_DB_VALUE_NULL;
+        }
+      storage.push_back (std::move (entry));
+    }
+
+  for (auto &entry : storage)
+    {
+      if (entry.value.type == CORTEXT_DB_VALUE_TEXT)
+        {
+          entry.value.text_value = entry.text.c_str ();
+        }
+      else if (entry.value.type == CORTEXT_DB_VALUE_BLOB)
+        {
+          entry.value.blob_data = entry.blob.empty () ? nullptr
+                                                      : entry.blob.data ();
+        }
+    }
+
+  std::vector<cortext_db_value> values;
+  values.reserve (storage.size ());
+  for (const auto &entry : storage)
+    {
+      values.push_back (entry.value);
+    }
+  return values;
+}
+
+class CallbackStore;
+
+class CallbackTransaction final : public cortext::Transaction
+{
+public:
+  CallbackTransaction (CallbackStore *store, void *transaction) noexcept
+      : store_ (store), transaction_ (transaction)
+  {
+  }
+
+  ~CallbackTransaction () override;
+
+  std::unique_ptr<cortext::Transaction> Begin () override;
+
+  std::vector<std::map<std::string, std::any> >
+  Execute (const std::string &query,
+           const std::vector<std::any> &params = {}) override;
+
+  void Commit () override;
+  void Rollback () override;
+
+private:
+  CallbackStore *store_ = nullptr;
+  void *transaction_ = nullptr;
+  bool finished_ = false;
+};
+
+class CallbackStore final : public cortext::Store
+{
+public:
+  CallbackStore (cortext_db_callbacks callbacks, void *user_data)
+      : callbacks_ (callbacks), user_data_ (user_data)
+  {
+    if (!callbacks_.execute || !callbacks_.begin || !callbacks_.commit
+        || !callbacks_.rollback || !callbacks_.release_transaction
+        || !callbacks_.release_result)
+      {
+        throw cortext::StoreError ("DB callbacks must all be non-null");
+      }
+  }
+
+  std::vector<std::map<std::string, std::any> >
+  Execute (const std::string &query,
+           const std::vector<std::any> &params = {}) override
+  {
+    return ExecuteInTransaction (nullptr, query, params);
+  }
+
+  std::unique_ptr<cortext::Transaction> Begin () override
+  {
+    return BeginNested (nullptr);
+  }
+
+  void Commit () override
+  {
+    throw cortext::NoActiveTransactionError (
+        "Cannot commit external callback store without a transaction");
+  }
+
+  void Rollback () override
+  {
+    throw cortext::NoActiveTransactionError (
+        "Cannot rollback external callback store without a transaction");
+  }
+
+  void Close () override {}
+
+  std::unique_ptr<cortext::Transaction> BeginNested (void *parent)
+  {
+    void *transaction = nullptr;
+    const char *error = nullptr;
+    const int rc
+        = callbacks_.begin (user_data_, parent, &transaction, &error);
+    if (rc != 0 || !transaction)
+      {
+        ThrowCallbackError ("begin transaction failed", error);
+      }
+    return std::make_unique<CallbackTransaction> (this, transaction);
+  }
+
+  std::vector<std::map<std::string, std::any> >
+  ExecuteInTransaction (void *transaction, const std::string &query,
+                        const std::vector<std::any> &params)
+  {
+    std::vector<CallbackParam> param_storage;
+    const auto param_values = params_to_values (params, param_storage);
+
+    cortext_db_result result{};
+    const char *error = nullptr;
+    const int rc = callbacks_.execute (
+        user_data_, transaction, query.c_str (),
+        param_values.empty () ? nullptr : param_values.data (),
+        param_values.size (), &result, &error);
+    if (rc != 0)
+      {
+        callbacks_.release_result (user_data_, &result);
+        ThrowCallbackError ("execute failed", error);
+      }
+
+    std::vector<std::map<std::string, std::any> > rows;
+    rows.reserve (result.row_count);
+    for (size_t i = 0; i < result.row_count; ++i)
+      {
+        std::map<std::string, std::any> row;
+        const cortext_db_row &source_row = result.rows[i];
+        for (size_t j = 0; j < source_row.cell_count; ++j)
+          {
+            const cortext_db_cell &cell = source_row.cells[j];
+            if (cell.column_name)
+              {
+                row.emplace (cell.column_name, value_to_any (cell.value));
+              }
+          }
+        rows.push_back (std::move (row));
+      }
+
+    callbacks_.release_result (user_data_, &result);
+    return rows;
+  }
+
+  void CommitTransaction (void *transaction)
+  {
+    const char *error = nullptr;
+    const int rc = callbacks_.commit (user_data_, transaction, &error);
+    if (rc != 0)
+      {
+        ThrowCallbackError ("commit failed", error);
+      }
+  }
+
+  void RollbackTransaction (void *transaction)
+  {
+    const char *error = nullptr;
+    const int rc = callbacks_.rollback (user_data_, transaction, &error);
+    if (rc != 0)
+      {
+        ThrowCallbackError ("rollback failed", error);
+      }
+  }
+
+  void ReleaseTransaction (void *transaction) noexcept
+  {
+    callbacks_.release_transaction (user_data_, transaction);
+  }
+
+private:
+  [[noreturn]] void ThrowCallbackError (const char *prefix,
+                                        const char *error) const
+  {
+    std::string message = prefix;
+    if (error && error[0] != '\0')
+      {
+        message += ": ";
+        message += error;
+      }
+    throw cortext::StoreError (message);
+  }
+
+  cortext_db_callbacks callbacks_{};
+  void *user_data_ = nullptr;
+};
+
+CallbackTransaction::~CallbackTransaction ()
+{
+  if (store_ && transaction_)
+    {
+      if (!finished_)
+        {
+          try
+            {
+              store_->RollbackTransaction (transaction_);
+            }
+          catch (...)
+            {
+            }
+        }
+      store_->ReleaseTransaction (transaction_);
+    }
+}
+
+std::unique_ptr<cortext::Transaction>
+CallbackTransaction::Begin ()
+{
+  return store_->BeginNested (transaction_);
+}
+
+std::vector<std::map<std::string, std::any> >
+CallbackTransaction::Execute (const std::string &query,
+                              const std::vector<std::any> &params)
+{
+  return store_->ExecuteInTransaction (transaction_, query, params);
+}
+
+void
+CallbackTransaction::Commit ()
+{
+  if (finished_)
+    {
+      throw cortext::TransactionAlreadyFinishedError (
+          "External callback transaction is already finished");
+    }
+  store_->CommitTransaction (transaction_);
+  finished_ = true;
+}
+
+void
+CallbackTransaction::Rollback ()
+{
+  if (finished_)
+    {
+      throw cortext::TransactionAlreadyFinishedError (
+          "External callback transaction is already finished");
+    }
+  store_->RollbackTransaction (transaction_);
+  finished_ = true;
+}
+
+class CallbackObjectStore;
+
+class CallbackObjectTransaction final : public cortext::ObjectTransaction
+{
+public:
+  CallbackObjectTransaction (CallbackObjectStore *store, void *transaction)
+      : store_ (store), transaction_ (transaction)
+  {
+  }
+
+  ~CallbackObjectTransaction () override;
+
+  std::unique_ptr<cortext::ObjectTransaction> Begin () override;
+  cortext::ObjectId Put (const std::vector<unsigned char> &data) override;
+  std::optional<std::vector<unsigned char>>
+  Get (const cortext::ObjectId &id) override;
+  bool Exists (const cortext::ObjectId &id) override;
+  bool Delete (const cortext::ObjectId &id) override;
+  void Commit () override;
+  void Rollback () override;
+
+private:
+  CallbackObjectStore *store_ = nullptr;
+  void *transaction_ = nullptr;
+  bool finished_ = false;
+};
+
+class CallbackObjectStore final : public cortext::ObjectStore
+{
+public:
+  CallbackObjectStore (cortext_object_callbacks callbacks, void *user_data)
+      : callbacks_ (callbacks), user_data_ (user_data)
+  {
+    if (!callbacks_.begin || !callbacks_.put || !callbacks_.get
+        || !callbacks_.exists || !callbacks_.delete_object
+        || !callbacks_.commit || !callbacks_.rollback
+        || !callbacks_.release_transaction || !callbacks_.release_blob)
+      {
+        throw cortext::StoreError ("Object callbacks must all be non-null");
+      }
+  }
+
+  std::unique_ptr<cortext::ObjectTransaction> Begin () override
+  {
+    return BeginNested (nullptr);
+  }
+
+  void Close () override {}
+
+  std::unique_ptr<cortext::ObjectTransaction> BeginNested (void *parent)
+  {
+    void *transaction = nullptr;
+    const char *error = nullptr;
+    const int rc
+        = callbacks_.begin (user_data_, parent, &transaction, &error);
+    if (rc != 0 || !transaction)
+      {
+        ThrowCallbackError ("object begin failed", error);
+      }
+    return std::make_unique<CallbackObjectTransaction> (this, transaction);
+  }
+
+  void PutObject (void *transaction, const cortext::ObjectId &id,
+                  const std::vector<unsigned char> &data)
+  {
+    const char *error = nullptr;
+    const int rc = callbacks_.put (
+        user_data_, transaction, id.empty () ? nullptr : id.data (),
+        id.size (), data.empty () ? nullptr : data.data (), data.size (),
+        &error);
+    if (rc != 0)
+      {
+        ThrowCallbackError ("object put failed", error);
+      }
+  }
+
+  std::optional<std::vector<unsigned char>>
+  GetObject (void *transaction, const cortext::ObjectId &id)
+  {
+    const uint8_t *data = nullptr;
+    size_t data_size = 0;
+    const char *error = nullptr;
+    const int rc = callbacks_.get (
+        user_data_, transaction, id.empty () ? nullptr : id.data (), id.size (),
+        &data, &data_size, &error);
+    if (rc != 0)
+      {
+        ThrowCallbackError ("object get failed", error);
+      }
+    if (!data && data_size == 0)
+      {
+        return std::nullopt;
+      }
+    std::vector<unsigned char> out;
+    if (data && data_size > 0)
+      {
+        out.assign (data, data + data_size);
+      }
+    callbacks_.release_blob (user_data_, data, data_size);
+    return out;
+  }
+
+  bool ExistsObject (void *transaction, const cortext::ObjectId &id)
+  {
+    int exists = 0;
+    const char *error = nullptr;
+    const int rc = callbacks_.exists (
+        user_data_, transaction, id.empty () ? nullptr : id.data (), id.size (),
+        &exists, &error);
+    if (rc != 0)
+      {
+        ThrowCallbackError ("object exists failed", error);
+      }
+    return exists != 0;
+  }
+
+  bool DeleteObject (void *transaction, const cortext::ObjectId &id)
+  {
+    int deleted = 0;
+    const char *error = nullptr;
+    const int rc = callbacks_.delete_object (
+        user_data_, transaction, id.empty () ? nullptr : id.data (), id.size (),
+        &deleted, &error);
+    if (rc != 0)
+      {
+        ThrowCallbackError ("object delete failed", error);
+      }
+    return deleted != 0;
+  }
+
+  void CommitTransaction (void *transaction)
+  {
+    const char *error = nullptr;
+    const int rc = callbacks_.commit (user_data_, transaction, &error);
+    if (rc != 0)
+      {
+        ThrowCallbackError ("object commit failed", error);
+      }
+  }
+
+  void RollbackTransaction (void *transaction)
+  {
+    const char *error = nullptr;
+    const int rc = callbacks_.rollback (user_data_, transaction, &error);
+    if (rc != 0)
+      {
+        ThrowCallbackError ("object rollback failed", error);
+      }
+  }
+
+  void ReleaseTransaction (void *transaction) noexcept
+  {
+    callbacks_.release_transaction (user_data_, transaction);
+  }
+
+private:
+  [[noreturn]] void ThrowCallbackError (const char *prefix,
+                                        const char *error) const
+  {
+    std::string message = prefix;
+    if (error && error[0] != '\0')
+      {
+        message += ": ";
+        message += error;
+      }
+    throw cortext::StoreError (message);
+  }
+
+  cortext_object_callbacks callbacks_{};
+  void *user_data_ = nullptr;
+};
+
+CallbackObjectTransaction::~CallbackObjectTransaction ()
+{
+  if (store_ && transaction_)
+    {
+      if (!finished_)
+        {
+          try
+            {
+              store_->RollbackTransaction (transaction_);
+            }
+          catch (...)
+            {
+            }
+        }
+      store_->ReleaseTransaction (transaction_);
+    }
+}
+
+std::unique_ptr<cortext::ObjectTransaction>
+CallbackObjectTransaction::Begin ()
+{
+  return store_->BeginNested (transaction_);
+}
+
+cortext::ObjectId
+CallbackObjectTransaction::Put (const std::vector<unsigned char> &data)
+{
+  auto id = cortext::ComputeObjectId (data);
+  store_->PutObject (transaction_, id, data);
+  return id;
+}
+
+std::optional<std::vector<unsigned char>>
+CallbackObjectTransaction::Get (const cortext::ObjectId &id)
+{
+  return store_->GetObject (transaction_, id);
+}
+
+bool
+CallbackObjectTransaction::Exists (const cortext::ObjectId &id)
+{
+  return store_->ExistsObject (transaction_, id);
+}
+
+bool
+CallbackObjectTransaction::Delete (const cortext::ObjectId &id)
+{
+  return store_->DeleteObject (transaction_, id);
+}
+
+void
+CallbackObjectTransaction::Commit ()
+{
+  if (finished_)
+    {
+      throw cortext::TransactionAlreadyFinishedError (
+          "External object transaction is already finished");
+    }
+  store_->CommitTransaction (transaction_);
+  finished_ = true;
+}
+
+void
+CallbackObjectTransaction::Rollback ()
+{
+  if (finished_)
+    {
+      throw cortext::TransactionAlreadyFinishedError (
+          "External object transaction is already finished");
+    }
+  store_->RollbackTransaction (transaction_);
+  finished_ = true;
 }
 
 char *
@@ -353,6 +957,140 @@ extern "C"
       {
         auto inst = cortext::Cortext::Create (
             config_from_c (cfg), std::string (db_path),
+            std::string (models_dir ? models_dir : "models"));
+        clear_last_error ();
+        return reinterpret_cast<cortext_handle> (inst.release ());
+      }
+    catch (const std::exception &ex)
+      {
+        set_last_error (ex.what ());
+        return nullptr;
+      }
+    catch (...)
+      {
+        set_last_error ("internal error");
+        return nullptr;
+      }
+  }
+
+  cortext_handle
+  cortext_create_with_store_callbacks (
+      const cortext_config *cfg, const cortext_db_callbacks *callbacks,
+      void *user_data, const char *models_dir)
+  {
+    if (!callbacks)
+      {
+        set_last_error ("callbacks must not be NULL");
+        return nullptr;
+      }
+
+    if (callbacks->struct_size < sizeof (cortext_db_callbacks))
+      {
+        set_last_error ("callbacks struct_size is invalid");
+        return nullptr;
+      }
+
+    try
+      {
+        auto store = std::make_shared<CallbackStore> (*callbacks, user_data);
+        auto inst = cortext::Cortext::Create (
+            config_from_c (cfg), std::move (store),
+            std::string (models_dir ? models_dir : "models"));
+        clear_last_error ();
+        return reinterpret_cast<cortext_handle> (inst.release ());
+      }
+    catch (const std::exception &ex)
+      {
+        set_last_error (ex.what ());
+        return nullptr;
+      }
+    catch (...)
+      {
+        set_last_error ("internal error");
+        return nullptr;
+      }
+  }
+
+  cortext_handle
+  cortext_create_with_store_and_object_callbacks (
+      const cortext_config *cfg, const cortext_db_callbacks *db_callbacks,
+      void *db_user_data, const cortext_object_callbacks *object_callbacks,
+      void *object_user_data, const char *models_dir)
+  {
+    if (!db_callbacks)
+      {
+        set_last_error ("db_callbacks must not be NULL");
+        return nullptr;
+      }
+    if (!object_callbacks)
+      {
+        set_last_error ("object_callbacks must not be NULL");
+        return nullptr;
+      }
+    if (db_callbacks->struct_size < sizeof (cortext_db_callbacks))
+      {
+        set_last_error ("db_callbacks struct_size is invalid");
+        return nullptr;
+      }
+    if (object_callbacks->struct_size < sizeof (cortext_object_callbacks))
+      {
+        set_last_error ("object_callbacks struct_size is invalid");
+        return nullptr;
+      }
+
+    try
+      {
+        auto store
+            = std::make_shared<CallbackStore> (*db_callbacks, db_user_data);
+        auto object_store = std::make_shared<CallbackObjectStore> (
+            *object_callbacks, object_user_data);
+        auto inst = cortext::Cortext::Create (
+            config_from_c (cfg), std::move (store), std::move (object_store),
+            std::string (models_dir ? models_dir : "models"));
+        clear_last_error ();
+        return reinterpret_cast<cortext_handle> (inst.release ());
+      }
+    catch (const std::exception &ex)
+      {
+        set_last_error (ex.what ());
+        return nullptr;
+      }
+    catch (...)
+      {
+        set_last_error ("internal error");
+        return nullptr;
+      }
+  }
+
+  cortext_handle
+  cortext_create_with_config_and_object_callbacks (
+      const cortext_config *cfg, const char *db_path,
+      const cortext_object_callbacks *object_callbacks, void *object_user_data,
+      const char *models_dir)
+  {
+    if (!db_path)
+      {
+        set_last_error ("db_path must not be NULL");
+        return nullptr;
+      }
+    if (!object_callbacks)
+      {
+        set_last_error ("object_callbacks must not be NULL");
+        return nullptr;
+      }
+    if (object_callbacks->struct_size < sizeof (cortext_object_callbacks))
+      {
+        set_last_error ("object_callbacks struct_size is invalid");
+        return nullptr;
+      }
+
+    try
+      {
+        auto object_store = std::make_shared<CallbackObjectStore> (
+            *object_callbacks, object_user_data);
+        auto inst = cortext::Cortext::Create (
+            config_from_c (cfg), std::string (db_path),
+            std::move (object_store),
             std::string (models_dir ? models_dir : "models"));
         clear_last_error ();
         return reinterpret_cast<cortext_handle> (inst.release ());

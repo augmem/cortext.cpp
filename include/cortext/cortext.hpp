@@ -15,6 +15,8 @@ namespace cortext
 {
 
 class Cortext;
+class ObjectStore;
+class Store;
 
 // Forward declaration for ProcessorOutput fields
 namespace operations
@@ -129,6 +131,31 @@ public:
                                           const std::string &db_path,
                                           const std::string &models_dir);
 
+  /// @brief Factory using SQLite for metadata and caller-supplied object store.
+  static std::unique_ptr<Cortext> Create (
+      const Config &cfg, const std::string &db_path,
+      std::shared_ptr<ObjectStore> object_store, const std::string &models_dir);
+
+  /// @brief Factory to create a Cortext instance using a caller-supplied store.
+  /// @param cfg Three-knob configuration.
+  /// @param store Caller-owned database store. Cortext keeps a shared reference
+  /// and does not close externally supplied stores.
+  /// @param models_dir Models directory root (e.g. "models").
+  /// @return A unique_ptr to a Cortext instance.
+  static std::unique_ptr<Cortext> Create (const Config &cfg,
+                                          std::shared_ptr<Store> store,
+                                          const std::string &models_dir);
+
+  /// @brief Factory with caller-supplied database and object stores.
+  /// @param cfg Three-knob configuration.
+  /// @param store Caller-owned database store.
+  /// @param object_store Caller-owned content-addressed object store.
+  /// @param models_dir Models directory root (e.g. "models").
+  /// @return A unique_ptr to a Cortext instance.
+  static std::unique_ptr<Cortext> Create (
+      const Config &cfg, std::shared_ptr<Store> store,
+      std::shared_ptr<ObjectStore> object_store, const std::string &models_dir);
+
   /// @brief Process text input.
   /// @param text The text content to process.
   /// @param source_id Identifier for the signal source (e.g., "chat/user").
@@ -197,6 +224,14 @@ private:
   friend class internal::StreamingTextProbeSession;
   struct Impl;
   explicit Cortext (const Config &cfg, const std::string &db_path,
+                    const std::string &models_dir);
+  explicit Cortext (const Config &cfg, const std::string &db_path,
+                    std::shared_ptr<ObjectStore> object_store,
+                    const std::string &models_dir);
+  explicit Cortext (const Config &cfg, std::shared_ptr<Store> store,
+                    const std::string &models_dir);
+  explicit Cortext (const Config &cfg, std::shared_ptr<Store> store,
+                    std::shared_ptr<ObjectStore> object_store,
                     const std::string &models_dir);
   std::unique_ptr<Impl> impl_;
 };

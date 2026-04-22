@@ -14,7 +14,17 @@ OperationContext::OperationContext (const Signal &signal,
                                     ProcessorContext &context,
                                     const SignalProcessor::Config &config,
                                     Store *store)
-    : signal_ (signal), context_ (context), config_ (config), store_ (store)
+    : OperationContext (signal, context, config, store, nullptr)
+{
+}
+
+OperationContext::OperationContext (const Signal &signal,
+                                    ProcessorContext &context,
+                                    const SignalProcessor::Config &config,
+                                    Store *store,
+                                    ObjectTransaction *object_tx)
+    : signal_ (signal), context_ (context), config_ (config), store_ (store),
+      object_tx_ (object_tx)
 {
 }
 

@@ -1030,8 +1030,10 @@ LoadAccumulators (Store &store, ProcessorContext &ctx)
 
 SignalProcessor::SignalProcessor (const Config &config,
                                   std::shared_ptr<Store> store,
-                                  std::unique_ptr<IOperation> root_operation)
+                                  std::unique_ptr<IOperation> root_operation,
+                                  std::shared_ptr<ObjectStore> object_store)
     : config_ (config), store_ (std::move (store)),
+      object_store_ (std::move (object_store)),
       root_operation_ (std::move (root_operation)),
       context_ (std::make_unique<ProcessorContext> ())
 {
@@ -1057,6 +1059,10 @@ SignalProcessor::SignalProcessor (const Config &config,
   if (store_)
     {
       cortext::store::ApplyMigrations (*store_);
+      if (!object_store_)
+        {
+          object_store_ = std::make_shared<SqlObjectStore> (store_);
+        }
 
       // Load persisted state for algorithm resumption (v2 schema)
       loaded_state = LoadState (*store_, *context_);               // Unified state
@@ -1095,9 +1101,35 @@ SignalProcessor::Process (const Signal &signal)
 
   // Create transaction for this signal processing
   auto tx = store_ ? store_->Begin () : nullptr;
+  std::unique_ptr<ObjectTransaction> object_tx;
+  if (object_store_ && tx)
+    {
+      if (auto *sql_object_store
+          = dynamic_cast<SqlObjectStore *> (object_store_.get ()))
+        {
+          object_tx = sql_object_store->Attach (*tx);
+        }
+      else
+        {
+          object_tx = object_store_->Begin ();
+        }
+    }
   const ProcessorContext context_snapshot = *context_;
 
-  OperationContext op_context (signal, *context_, config_, store_.get ());
+  OperationContext op_context (signal, *context_, config_, store_.get (),
+                               object_tx.get ());
+  auto rollback_object_tx = [&object_tx] {
+    if (object_tx)
+      {
+        try
+          {
+            object_tx->Rollback ();
+          }
+        catch (...)
+          {
+          }
+      }
+  };
 
   try
     {
@@ -1138,6 +1170,11 @@ SignalProcessor::Process (const Signal &signal)
           PersistState (*tx);           // Unified state
           op_context.SetCurrentOperationType ("PersistWorkingMemory");
           PersistWorkingMemory (*tx);   // To MEMORIES
+          if (object_tx)
+            {
+              op_context.SetCurrentOperationType ("PersistObjects");
+              object_tx->Commit ();
+            }
           tx->Commit ();
         }
     }
@@ -1145,6 +1182,7 @@ SignalProcessor::Process (const Signal &signal)
     {
       if (tx)
         {
+          rollback_object_tx ();
           tx->Rollback ();
         }
       *context_ = context_snapshot;
@@ -1154,6 +1192,7 @@ SignalProcessor::Process (const Signal &signal)
     {
       if (tx)
         {
+          rollback_object_tx ();
           tx->Rollback ();
         }
       *context_ = context_snapshot;
@@ -1172,6 +1211,7 @@ SignalProcessor::Process (const Signal &signal)
     {
       if (tx)
         {
+          rollback_object_tx ();
           tx->Rollback ();
         }
       *context_ = context_snapshot;
@@ -1219,8 +1259,21 @@ SignalProcessor::Flush ()
   if (!store_)
     {
       return;
-    }
+  }
   auto tx = store_->Begin ();
+  std::unique_ptr<ObjectTransaction> object_tx;
+  if (object_store_)
+    {
+      if (auto *sql_object_store
+          = dynamic_cast<SqlObjectStore *> (object_store_.get ()))
+        {
+          object_tx = sql_object_store->Attach (*tx);
+        }
+      else
+        {
+          object_tx = object_store_->Begin ();
+        }
+    }
   FinalizeEpisode (tx.get (), nullptr);
   PersistState (*tx);           // v2: Unified state
   PersistWorkingMemory (*tx);   // v2: To MEMORIES
@@ -1230,6 +1283,10 @@ SignalProcessor::Flush ()
             std::chrono::system_clock::now ().time_since_epoch ())
             .count ();
   StartNewEpisode (tx.get (), static_cast<uint64_t> (now_ms));
+  if (object_tx)
+    {
+      object_tx->Commit ();
+    }
   tx->Commit ();
 }
 

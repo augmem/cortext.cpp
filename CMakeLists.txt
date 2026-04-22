@@ -137,6 +137,7 @@ endif()
 add_library(cortext
     src/store.cpp
     src/store/extension_loader.cpp
+    src/store/object_store.cpp
     src/store/schema.cpp
     src/store/facts.cpp
     src/processor/operation_context.cpp
@@ -433,6 +434,10 @@ target_compile_definitions(cortext PRIVATE SQLITE_CORE=1)
 # Link dependencies (SQLite handling differs per target)
 target_link_libraries(cortext PUBLIC Eigen3::Eigen)
 target_link_libraries(cortext PRIVATE nlohmann_json::nlohmann_json)
+get_target_property(CORTEXT_NLOHMANN_INCLUDE_DIRS nlohmann_json::nlohmann_json INTERFACE_INCLUDE_DIRECTORIES)
+if(CORTEXT_NLOHMANN_INCLUDE_DIRS)
+  target_include_directories(cortext BEFORE PRIVATE ${CORTEXT_NLOHMANN_INCLUDE_DIRS})
+endif()
 if(EMSCRIPTEN)
   # Use a block to prevent SQLite tests from being added to ctest
   block(SCOPE_FOR VARIABLES)
@@ -666,6 +671,16 @@ if(CORTEXT_ENABLE_EMBEDDINGGEMMA AND ((NOT CORTEXT_DISABLE_IMAGEBIND_ORT AND NOT
     "${CORTEXT_SENTENCEPIECE_PROTO_LIB}"
     protobuf::libprotobuf
   )
+  get_target_property(CORTEXT_PROTOBUF_INCLUDE_DIRS protobuf::libprotobuf INTERFACE_INCLUDE_DIRECTORIES)
+  if(CORTEXT_PROTOBUF_INCLUDE_DIRS)
+    target_include_directories(cortext BEFORE PRIVATE ${CORTEXT_PROTOBUF_INCLUDE_DIRS})
+  endif()
+  if(TARGET absl::status)
+    get_target_property(CORTEXT_ABSL_INCLUDE_DIRS absl::status INTERFACE_INCLUDE_DIRECTORIES)
+    if(CORTEXT_ABSL_INCLUDE_DIRS)
+      target_include_directories(cortext BEFORE PRIVATE ${CORTEXT_ABSL_INCLUDE_DIRS})
+    endif()
+  endif()
   if(TARGET absl::status)
     target_link_libraries(cortext PRIVATE absl::status)
   endif()
@@ -793,7 +808,14 @@ if(NOT CORTEXT_DISABLE_SHERPA_ONNX AND NOT EMSCRIPTEN)
     set(SHERPA_ONNX_USE_PRE_INSTALLED_ONNXRUNTIME_IF_AVAILABLE OFF CACHE BOOL "" FORCE)
   endif()
 
+  # sherpa-onnx transitively builds openfst/simple-sentencepiece code that is
+  # not C++20-clean yet; keep the vendored subproject on C++17 while cortext
+  # itself remains C++20.
+  set(_cortext_saved_cxx_standard "${CMAKE_CXX_STANDARD}")
+  set(CMAKE_CXX_STANDARD 17)
   add_subdirectory(third_party/sherpa-onnx EXCLUDE_FROM_ALL)
+  set(CMAKE_CXX_STANDARD "${_cortext_saved_cxx_standard}")
+  unset(_cortext_saved_cxx_standard)
   target_include_directories(cortext PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/third_party/sherpa-onnx)
   target_link_libraries(cortext PRIVATE sherpa-onnx-cxx-api)
   target_compile_definitions(cortext PUBLIC CORTEXT_ENABLE_SHERPA_ONNX=1)

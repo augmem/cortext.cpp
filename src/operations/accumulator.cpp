@@ -3,8 +3,8 @@
 #include "cortext/core/knobs.hpp"
 #include "cortext/processor/accumulator_state.hpp"
 #include "cortext/processor/operation_context.hpp"
+#include "cortext/store/object_store.hpp"
 #include "cortext/signal.hpp"
-#include "cortext/store/utils.hpp"
 #include "cortext/telemetry/telemetry.hpp"
 
 #include <algorithm>
@@ -33,7 +33,7 @@ EnvFlag (const char *name)
 /// @brief Create a SignalRecord from the current signal and context
 SignalRecord
 CreateSignalRecord (const Signal &signal, double score, int serial_position,
-                    Transaction *tx)
+                    OperationContext &context, Transaction &tx)
 {
   SignalRecord rec;
   rec.embedding = signal.embedding;
@@ -42,14 +42,10 @@ CreateSignalRecord (const Signal &signal, double score, int serial_position,
   rec.mime = signal.mimetype;
   rec.score = score;
   rec.serial_position = serial_position;
-  if (tx && signal.payload && !signal.payload->empty ())
+  if (signal.payload && !signal.payload->empty ())
     {
-      auto blob_rows = tx->Execute ("SELECT objstore_put(?1) AS id",
-                                    { *signal.payload });
-      if (!blob_rows.empty () && blob_rows[0].count ("id") != 0)
-        {
-          rec.blob_id = store::BlobFromAny (blob_rows[0].at ("id"));
-        }
+      rec.blob_id
+          = PutObject (context.GetObjectTransaction (), tx, *signal.payload);
     }
   return rec;
 }
@@ -100,7 +96,8 @@ UpdateAccumulator::Execute (OperationContext &context,
       state.s_arousal_sum = arousal;
 
       // Track first signal for SIGNALS table (Section 4.4)
-      state.signals.push_back (CreateSignalRecord (signal, 0.0, 0, &tx));
+      state.signals.push_back (
+          CreateSignalRecord (signal, 0.0, 0, context, tx));
 
       // Track primary modality (v2: first modality wins)
       state.primary_modality = signal.modality;
@@ -194,7 +191,8 @@ UpdateAccumulator::Execute (OperationContext &context,
       acc.s_arousal_sum = arousal;
 
       // Track first signal for SIGNALS table (Section 4.4)
-      acc.signals.push_back (CreateSignalRecord (signal, 0.0, 0, &tx));
+      acc.signals.push_back (
+          CreateSignalRecord (signal, 0.0, 0, context, tx));
 
       // Track primary modality (v2: first modality wins)
       acc.primary_modality = signal.modality;
@@ -247,7 +245,7 @@ UpdateAccumulator::Execute (OperationContext &context,
   // Serial position is the current signal count before accumulation
   const int serial_pos = static_cast<int> (acc.signals.size ());
   acc.signals.push_back (
-      CreateSignalRecord (signal, 0.0, serial_pos, &tx));
+      CreateSignalRecord (signal, 0.0, serial_pos, context, tx));
 
   // Track primary modality (v2: first modality wins)
   if (acc.primary_modality.empty ())

@@ -4,6 +4,7 @@
 #include "cortext/processor/operation_context.hpp"
 #include "cortext/signal.hpp"
 #include "cortext/core/sparse.hpp"
+#include "cortext/store/object_store.hpp"
 #include "cortext/store/schema_helpers.hpp"
 #include "cortext/store/store.hpp"
 #include "cortext/store/utils.hpp"
@@ -117,6 +118,22 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
 
   // Use nested transaction for atomicity - all writes succeed or none
   auto savepoint = tx.Begin ();
+  auto object_savepoint = context.GetObjectTransaction ()
+                              ? context.GetObjectTransaction ()->Begin ()
+                              : nullptr;
+  auto rollback_savepoints = [&] {
+    if (object_savepoint)
+      {
+        try
+          {
+            object_savepoint->Rollback ();
+          }
+        catch (...)
+          {
+          }
+      }
+    savepoint->Rollback ();
+  };
 
   try
     {
@@ -161,7 +178,7 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
       // 4. Require tracked per-signal records for persistence.
       if (acc.signals.empty ())
         {
-          savepoint->Rollback ();
+          rollback_savepoints ();
           telemetry::AddCounter (
               "cortext.memory_storage.missing_signals_total", 1);
           return;
@@ -186,11 +203,11 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
             {
               continue;
             }
-          auto blob_rows = savepoint->Execute (
-              "SELECT objstore_get(?1) AS data", { rec->blob_id });
-          if (!blob_rows.empty () && blob_rows[0].count ("data") != 0)
+          auto bytes_opt = GetObject (object_savepoint.get (), *savepoint,
+                                      rec->blob_id);
+          if (bytes_opt)
             {
-              auto bytes = BlobFromAny (blob_rows[0].at ("data"));
+              const auto &bytes = *bytes_opt;
               if (!bytes.empty ())
                 {
                   if (text_mode && !content_payload.empty ())
@@ -210,12 +227,9 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
       std::vector<unsigned char> content_blob_id;
       if (!content_payload.empty ())
         {
-          auto blob_rows = savepoint->Execute ("SELECT objstore_put(?1) AS id",
-                                               { content_payload });
-          if (!blob_rows.empty () && blob_rows[0].count ("id") != 0)
-            {
-              content_blob_id = BlobFromAny (blob_rows[0].at ("id"));
-            }
+          content_blob_id
+              = PutObject (object_savepoint.get (), *savepoint,
+                           content_payload);
         }
 
       // 6. Insert memory embedding (v2: minimal sqlite-vec table)
@@ -229,7 +243,7 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
       auto id_rows = savepoint->Execute ("SELECT last_insert_rowid() AS id", {});
       if (id_rows.empty () || id_rows[0].count ("id") == 0)
         {
-          savepoint->Rollback ();
+          rollback_savepoints ();
           telemetry::AddCounter (
               "cortext.memory_storage.embedding_error_total", 1);
           return;
@@ -237,7 +251,7 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
       const auto id_opt = AnyToLongLong (id_rows[0].at ("id"));
       if (!id_opt)
         {
-          savepoint->Rollback ();
+          rollback_savepoints ();
           telemetry::AddCounter (
               "cortext.memory_storage.embedding_error_total", 1);
           return;
@@ -328,6 +342,10 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
         }
 
       // Commit the savepoint
+      if (object_savepoint)
+        {
+          object_savepoint->Commit ();
+        }
       savepoint->Commit ();
 
       // Set stored_embedding_id in context for output
@@ -359,7 +377,7 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
     }
   catch (const std::exception &e)
     {
-      savepoint->Rollback ();
+      rollback_savepoints ();
       telemetry::AddCounter ("cortext.memory_storage.error_total", 1);
       telemetry::LogError (
           "MemoryStorage failed",

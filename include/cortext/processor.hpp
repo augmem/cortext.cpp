@@ -3,6 +3,7 @@
 #include "cortext/operations/metrics.hpp"
 #include "cortext/processor/operation.hpp"
 #include "cortext/processor/processor_context.hpp"
+#include "cortext/store/object_store.hpp"
 #include "cortext/store/store.hpp"
 #include <cstdint>
 #include <memory>
@@ -49,7 +50,8 @@ public:
   /// @param store A shared pointer to the underlying database store.
   /// @param root_operation The root of the operation tree to execute.
   SignalProcessor (const Config &config, std::shared_ptr<Store> store,
-                   std::unique_ptr<IOperation> root_operation);
+                   std::unique_ptr<IOperation> root_operation,
+                   std::shared_ptr<ObjectStore> object_store = nullptr);
 
   ~SignalProcessor ();
 
@@ -139,6 +141,7 @@ private:
 
   Config config_;
   std::shared_ptr<Store> store_;
+  std::shared_ptr<ObjectStore> object_store_;
   std::unique_ptr<IOperation> root_operation_;
 
   std::unique_ptr<ProcessorContext> context_;

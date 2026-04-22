@@ -193,6 +193,29 @@ TEST_CASE ("Cortext::Create succeeds even when models dir is missing",
 #endif
 }
 
+TEST_CASE ("Cortext can initialize with caller supplied store",
+           "[cortext][store]")
+{
+#if defined(CORTEXT_DISABLE_LITERT)
+  auto unique_store = cortext::SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<cortext::Store> (std::move (unique_store));
+
+  cortext::Cortext::Config cfg;
+  std::unique_ptr<cortext::Cortext> ctx;
+  REQUIRE_NOTHROW (
+      ctx = cortext::Cortext::Create (cfg, store, "models/does-not-exist"));
+  REQUIRE (ctx != nullptr);
+
+  auto rows = store->Execute (
+      "SELECT name FROM sqlite_master WHERE type='table' AND name='state'",
+      {});
+  REQUIRE (rows.size () == 1);
+#else
+  SKIP ("Injected-store construction without local models is covered in "
+        "CORTEXT_DISABLE_LITERT builds");
+#endif
+}
+
 TEST_CASE ("Cortext C ABI stubs return success", "[cortext][capi][stub]")
 {
   const std::string models_dir = RepoModelsImageBindDir ();
@@ -228,6 +251,22 @@ TEST_CASE ("Cortext C ABI stubs return success", "[cortext][capi][stub]")
     }
 
   cortext_free (h);
+}
+
+TEST_CASE ("Cortext C ABI rejects invalid store callbacks",
+           "[cortext][capi][store]")
+{
+  cortext_config cfg{};
+  cortext_config_init (&cfg);
+  REQUIRE (cortext_create_with_store_callbacks (
+               &cfg, nullptr, nullptr, "models/does-not-exist")
+           == nullptr);
+
+  cortext_db_callbacks callbacks{};
+  callbacks.struct_size = sizeof (callbacks);
+  REQUIRE (cortext_create_with_store_callbacks (
+               &cfg, &callbacks, nullptr, "models/does-not-exist")
+           == nullptr);
 }
 
 TEST_CASE ("Cortext hydrates sqlite-objstore payloads",
