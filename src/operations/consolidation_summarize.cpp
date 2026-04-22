@@ -6,6 +6,7 @@
 #include "cortext/core/utils.hpp"
 #include "cortext/operations/extraction.hpp"
 #include "cortext/processor/operation_context.hpp"
+#include "cortext/store/object_store.hpp"
 #include "cortext/store/store.hpp"
 #include "cortext/summarizer/summarizer.hpp"
 #include "cortext/consolidation_mode.hpp"
@@ -43,27 +44,6 @@ AddWrite (Transaction &tx, const std::string &q,
           const std::vector<std::any> &p = {})
 {
   tx.Execute (q, p);
-}
-
-/// @brief Decode blob to string if possible.
-std::string
-BlobToString (const std::any &val)
-{
-  if (val.type () == typeid (std::vector<unsigned char>))
-    {
-      const auto &blob = std::any_cast<std::vector<unsigned char>> (val);
-      return std::string (blob.begin (), blob.end ());
-    }
-  if (val.type () == typeid (std::vector<char>))
-    {
-      const auto &blob = std::any_cast<std::vector<char>> (val);
-      return std::string (blob.begin (), blob.end ());
-    }
-  if (val.type () == typeid (std::string))
-    {
-      return std::any_cast<std::string> (val);
-    }
-  return {};
 }
 
 /// @brief Extract blob bytes from any.
@@ -420,15 +400,11 @@ ConsolidationSummarize::Execute (OperationContext &context, Transaction &tx) con
               auto blob_id = GetBlobBytes (it_blob->second);
               if (!blob_id.empty ())
                 {
-                  auto data_rows = tx.Execute (
-                      "SELECT objstore_get(?1) AS data", { blob_id });
-                  if (!data_rows.empty ())
+                  auto data = GetObject (context.GetObjectTransaction (), tx,
+                                         blob_id);
+                  if (data)
                     {
-                      auto it_data = data_rows[0].find ("data");
-                      if (it_data != data_rows[0].end ())
-                        {
-                          text = BlobToString (it_data->second);
-                        }
+                      text.assign (data->begin (), data->end ());
                     }
                 }
             }
@@ -630,13 +606,8 @@ ConsolidationSummarize::Execute (OperationContext &context, Transaction &tx) con
 
       // 2. Store summary text as blob for downstream consolidation.
       std::vector<unsigned char> summary_blob_id;
-      auto blob_rows
-          = tx.Execute ("SELECT objstore_put(?1) AS id",
-                        { StringToBlob (summary_text) });
-      if (!blob_rows.empty () && blob_rows[0].count ("id") != 0)
-        {
-          summary_blob_id = GetBlobBytes (blob_rows[0].at ("id"));
-        }
+      summary_blob_id = PutObject (context.GetObjectTransaction (), tx,
+                                   StringToBlob (summary_text));
       if (summary_blob_id.empty ())
         {
           throw std::runtime_error (

@@ -51,6 +51,128 @@ extern "C"
   /// This handle must be freed with cortext_free() when no longer needed.
   typedef void *cortext_handle;
 
+  /// @brief Value types used by external DB provider callbacks.
+  typedef enum cortext_db_value_type
+  {
+    CORTEXT_DB_VALUE_NULL = 0,
+    CORTEXT_DB_VALUE_INT64 = 1,
+    CORTEXT_DB_VALUE_DOUBLE = 2,
+    CORTEXT_DB_VALUE_TEXT = 3,
+    CORTEXT_DB_VALUE_BLOB = 4
+  } cortext_db_value_type;
+
+  /// @brief Typed SQL value passed between Cortext and external DB providers.
+  typedef struct cortext_db_value
+  {
+    int type;
+    int64_t int64_value;
+    double double_value;
+    const char *text_value;
+    const uint8_t *blob_data;
+    size_t blob_size;
+  } cortext_db_value;
+
+  /// @brief One named result cell returned by external DB providers.
+  typedef struct cortext_db_cell
+  {
+    const char *column_name;
+    cortext_db_value value;
+  } cortext_db_cell;
+
+  /// @brief One result row returned by external DB providers.
+  typedef struct cortext_db_row
+  {
+    const cortext_db_cell *cells;
+    size_t cell_count;
+  } cortext_db_row;
+
+  /// @brief Full result set returned by external DB providers.
+  typedef struct cortext_db_result
+  {
+    const cortext_db_row *rows;
+    size_t row_count;
+  } cortext_db_result;
+
+  typedef int (*cortext_db_execute_fn) (
+      void *user_data, void *transaction, const char *query,
+      const cortext_db_value *params, size_t param_count,
+      cortext_db_result *out_result, const char **out_error);
+
+  typedef int (*cortext_db_begin_fn) (void *user_data,
+                                      void *parent_transaction,
+                                      void **out_transaction,
+                                      const char **out_error);
+
+  typedef int (*cortext_db_transaction_fn) (void *user_data,
+                                            void *transaction,
+                                            const char **out_error);
+
+  typedef void (*cortext_db_release_transaction_fn) (void *user_data,
+                                                     void *transaction);
+
+  typedef void (*cortext_db_release_result_fn) (void *user_data,
+                                                cortext_db_result *result);
+
+  /// @brief Synchronous SQL callback table for externally owned DB providers.
+  typedef struct cortext_db_callbacks
+  {
+    size_t struct_size;
+    cortext_db_execute_fn execute;
+    cortext_db_begin_fn begin;
+    cortext_db_transaction_fn commit;
+    cortext_db_transaction_fn rollback;
+    cortext_db_release_transaction_fn release_transaction;
+    cortext_db_release_result_fn release_result;
+  } cortext_db_callbacks;
+
+  typedef int (*cortext_object_begin_fn) (void *user_data,
+                                          void *parent_transaction,
+                                          void **out_transaction,
+                                          const char **out_error);
+
+  typedef int (*cortext_object_put_fn) (
+      void *user_data, void *transaction, const uint8_t *id, size_t id_size,
+      const uint8_t *data, size_t data_size, const char **out_error);
+
+  typedef int (*cortext_object_get_fn) (
+      void *user_data, void *transaction, const uint8_t *id, size_t id_size,
+      const uint8_t **out_data, size_t *out_data_size,
+      const char **out_error);
+
+  typedef int (*cortext_object_exists_fn) (
+      void *user_data, void *transaction, const uint8_t *id, size_t id_size,
+      int *out_exists, const char **out_error);
+
+  typedef int (*cortext_object_delete_fn) (
+      void *user_data, void *transaction, const uint8_t *id, size_t id_size,
+      int *out_deleted, const char **out_error);
+
+  typedef int (*cortext_object_transaction_fn) (void *user_data,
+                                                void *transaction,
+                                                const char **out_error);
+
+  typedef void (*cortext_object_release_transaction_fn) (void *user_data,
+                                                        void *transaction);
+
+  typedef void (*cortext_object_release_blob_fn) (void *user_data,
+                                                 const uint8_t *data,
+                                                 size_t data_size);
+
+  /// @brief Synchronous object storage callback table for external providers.
+  typedef struct cortext_object_callbacks
+  {
+    size_t struct_size;
+    cortext_object_begin_fn begin;
+    cortext_object_put_fn put;
+    cortext_object_get_fn get;
+    cortext_object_exists_fn exists;
+    cortext_object_delete_fn delete_object;
+    cortext_object_transaction_fn commit;
+    cortext_object_transaction_fn rollback;
+    cortext_object_release_transaction_fn release_transaction;
+    cortext_object_release_blob_fn release_blob;
+  } cortext_object_callbacks;
+
   /// @brief Binding-friendly configuration for cortext_create_with_config.
   typedef struct cortext_config
   {
@@ -98,6 +220,36 @@ extern "C"
   CORTEXT_EXPORT cortext_handle
   cortext_create_with_config (const cortext_config *cfg, const char *db_path,
                               const char *models_dir);
+
+  /// @brief Creates a Cortext instance using an externally owned DB provider.
+  /// @param cfg Optional configuration. NULL uses the library defaults.
+  /// @param callbacks Required synchronous DB callback table.
+  /// @param user_data Opaque pointer passed to every callback.
+  /// @param models_dir Optional path to model assets. NULL uses the default
+  ///   model root.
+  /// @return Handle to the created instance, or NULL on failure.
+  ///
+  /// Cortext does not close the provider or take ownership of user_data. The
+  /// provider must stay alive until cortext_free() returns. Until object
+  /// storage is extracted into its own interface, providers must support the
+  /// same SQL-level blob functions Cortext currently uses for payload storage.
+  CORTEXT_EXPORT cortext_handle cortext_create_with_store_callbacks (
+      const cortext_config *cfg, const cortext_db_callbacks *callbacks,
+      void *user_data, const char *models_dir);
+
+  /// @brief Creates a Cortext instance using external DB and object providers.
+  CORTEXT_EXPORT cortext_handle
+  cortext_create_with_store_and_object_callbacks (
+      const cortext_config *cfg, const cortext_db_callbacks *db_callbacks,
+      void *db_user_data, const cortext_object_callbacks *object_callbacks,
+      void *object_user_data, const char *models_dir);
+
+  /// @brief Creates a Cortext instance with SQLite DB and external object store.
+  CORTEXT_EXPORT cortext_handle
+  cortext_create_with_config_and_object_callbacks (
+      const cortext_config *cfg, const char *db_path,
+      const cortext_object_callbacks *object_callbacks, void *object_user_data,
+      const char *models_dir);
 
   /// @brief Creates a Cortext instance with custom models directory.
   /// @param focus Focus knob value in [0.0, 1.0].

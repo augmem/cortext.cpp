@@ -26,6 +26,7 @@ add_executable(cortext_tests
   operations_centroids.test.cpp
   store.test.cpp
   store_extensions.test.cpp
+  object_store.test.cpp
   core_algorithms.test.cpp
   core_knobs.test.cpp
   thread_config.test.cpp

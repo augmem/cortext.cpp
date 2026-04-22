@@ -18,6 +18,7 @@ namespace cortext
 {
 
 class Store;
+class ObjectTransaction;
 
 /// @brief Information about a cluster of memories from consolidation.
 ///
@@ -70,6 +71,13 @@ public:
   OperationContext (const Signal &signal, ProcessorContext &context,
                     const SignalProcessor::Config &config, Store *store);
 
+  /// @brief Constructs an OperationContext with attached Store/Object tx.
+  ///
+  /// Both pointers are non-owning and may be null.
+  OperationContext (const Signal &signal, ProcessorContext &context,
+                    const SignalProcessor::Config &config, Store *store,
+                    ObjectTransaction *object_tx);
+
   // --- Accessors ---
 
   /// @brief Gets the input signal.
@@ -105,6 +113,13 @@ public:
   GetStore () const
   {
     return store_;
+  }
+
+  /// @brief Gets the current object transaction (may be null).
+  ObjectTransaction *
+  GetObjectTransaction () const
+  {
+    return object_tx_;
   }
 
   /// @brief Sets the current operation type (for error attribution).
@@ -1135,6 +1150,7 @@ private:
   ProcessorContext &context_;
   const SignalProcessor::Config &config_;
   Store *store_ = nullptr;
+  ObjectTransaction *object_tx_ = nullptr;
   std::string current_operation_type_ = "unknown";
   std::unordered_map<std::string, double> operation_timings_ms_;
 

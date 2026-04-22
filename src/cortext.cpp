@@ -8,6 +8,7 @@
 #include "cortext/processor.hpp"
 #include "cortext/processor/operation_set.hpp"
 #include "cortext/signal.hpp"
+#include "cortext/store/object_store.hpp"
 #include "cortext/store/sqlite_store.hpp"
 #include "cortext/store/utils.hpp"
 #include "cortext/telemetry/telemetry.hpp"
@@ -131,24 +132,36 @@ ShouldForceChatTurnStorage (const std::string &source_id)
 
 
 bool
-LoadObjstorePayload (Store *store, const std::vector<unsigned char> &blob_id,
-                     std::vector<unsigned char> &out)
+LoadObjectPayload (Store *store, ObjectStore *object_store,
+                   const std::vector<unsigned char> &blob_id,
+                   std::vector<unsigned char> &out)
 {
-  if (blob_id.empty () || !store)
+  if (blob_id.empty ())
     {
       return false;
     }
   try
     {
-      auto rows
-          = store->Execute ("SELECT objstore_get(?1) AS data", { blob_id });
-      if (!rows.empty ())
+      if (object_store)
         {
-          const auto it = rows[0].find ("data");
-          if (it != rows[0].end ())
+          auto tx = object_store->Begin ();
+          auto payload = tx->Get (blob_id);
+          tx->Commit ();
+          if (payload && !payload->empty ())
             {
-              out = store::BlobFromAny (it->second);
-              return !out.empty ();
+              out = std::move (*payload);
+              return true;
+            }
+        }
+      else if (store)
+        {
+          auto tx = store->Begin ();
+          auto payload = GetObject (nullptr, *tx, blob_id);
+          tx->Commit ();
+          if (payload && !payload->empty ())
+            {
+              out = std::move (*payload);
+              return true;
             }
         }
     }
@@ -175,6 +188,7 @@ LoadObjstorePayload (Store *store, const std::vector<unsigned char> &blob_id,
 /// @return true if any blobs were loaded.
 bool
 LoadSignalBlobs (Store *store, long long memory_id,
+                 ObjectStore *object_store,
                  std::vector<std::vector<unsigned char>> &out)
 {
   if (!store || memory_id <= 0)
@@ -197,7 +211,7 @@ LoadSignalBlobs (Store *store, long long memory_id,
               if (!blob_id.empty ())
                 {
                   std::vector<unsigned char> payload;
-                  if (LoadObjstorePayload (store, blob_id, payload))
+                  if (LoadObjectPayload (store, object_store, blob_id, payload))
                     {
                       out.push_back (std::move (payload));
                     }
@@ -225,7 +239,8 @@ LoadSignalBlobs (Store *store, long long memory_id,
 }
 
 void
-HydrateMemory (Store *store, long long id, Cortext::Context::Memory &m)
+HydrateMemory (Store *store, ObjectStore *object_store, long long id,
+               Cortext::Context::Memory &m)
 {
   if (!store)
     return;
@@ -313,7 +328,8 @@ HydrateMemory (Store *store, long long id, Cortext::Context::Memory &m)
           if (reconstruction.has_value () && !reconstruction->blob_id.empty ())
             {
               std::vector<unsigned char> payload;
-              if (LoadObjstorePayload (store, reconstruction->blob_id, payload))
+              if (LoadObjectPayload (store, object_store,
+                                     reconstruction->blob_id, payload))
                 {
                   m.content.push_back (std::move (payload));
                 }
@@ -322,14 +338,15 @@ HydrateMemory (Store *store, long long id, Cortext::Context::Memory &m)
           if (m.content.empty ())
             {
               // v2: Load content blobs from signals table (ordered by serial_position)
-              LoadSignalBlobs (store, memory_id, m.content);
+              LoadSignalBlobs (store, memory_id, object_store, m.content);
               if (m.content.empty ())
                 {
                   const auto blob_id = get_blob ("blob_id");
                   if (!blob_id.empty ())
                     {
                       std::vector<unsigned char> payload;
-                      if (LoadObjstorePayload (store, blob_id, payload))
+                      if (LoadObjectPayload (store, object_store, blob_id,
+                                             payload))
                         {
                           m.content.push_back (std::move (payload));
                         }
@@ -377,7 +394,7 @@ HydrateMemory (Store *store, long long id, Cortext::Context::Memory &m)
 }
 
 void
-HydrateWorkingMemoryFromDB (Store *store,
+HydrateWorkingMemoryFromDB (Store *store, ObjectStore *object_store,
                             std::vector<Cortext::Context::Memory> &out)
 {
   if (!store)
@@ -456,7 +473,7 @@ HydrateWorkingMemoryFromDB (Store *store,
           m.used_count = get_ll ("used_count");
 
           // v2: Load content blobs from signals table (ordered by serial_position)
-          LoadSignalBlobs (store, m.id, m.content);
+          LoadSignalBlobs (store, m.id, object_store, m.content);
 
           out.push_back (std::move (m));
         }
@@ -632,6 +649,7 @@ struct Cortext::Impl
 
   std::unique_ptr<Encoder> encoder;
   std::shared_ptr<cortext::Store> store;
+  std::shared_ptr<cortext::ObjectStore> object_store;
   std::unique_ptr<cortext::IOperation> pipeline_root;
   std::unique_ptr<cortext::SignalProcessor> processor;
 
@@ -639,12 +657,21 @@ struct Cortext::Impl
   std::unique_ptr<Summarizer> summarizer_instance;
   std::string deep_llm_backend_name;
 
-  Impl (const Config &c, std::string db, std::string models)
-      : cfg (c), db_path (std::move (db)), models_dir (std::move (models))
+  Impl (const Config &c, std::shared_ptr<cortext::Store> supplied_store,
+        std::shared_ptr<cortext::ObjectStore> supplied_object_store,
+        std::string models)
+      : cfg (c), models_dir (std::move (models)),
+        store (std::move (supplied_store)),
+        object_store (std::move (supplied_object_store))
   {
-    // Store
-    auto uniq = cortext::SQLiteStore::Create (db_path.c_str ());
-    store = std::shared_ptr<cortext::Store> (std::move (uniq));
+    if (!store)
+      {
+        throw std::invalid_argument ("Cortext requires a non-null Store");
+      }
+    if (!object_store)
+      {
+        object_store = std::make_shared<cortext::SqlObjectStore> (store);
+      }
 
     auto text_encoder = internal::CreatePreferredTextEncoder (models_dir);
     encoder = std::move (text_encoder.encoder);
@@ -656,7 +683,17 @@ struct Cortext::Impl
 
     pipeline_root = BuildPipelineRoot (false);
     processor = std::make_unique<cortext::SignalProcessor> (
-        MakeProcessorConfig (), store, std::move (pipeline_root));
+        MakeProcessorConfig (), store, std::move (pipeline_root),
+        object_store);
+  }
+
+  Impl (const Config &c, std::string db, std::string models)
+      : Impl (c, std::shared_ptr<cortext::Store> (
+                     cortext::SQLiteStore::Create (db.c_str ())),
+              nullptr,
+              std::move (models))
+  {
+    db_path = std::move (db);
   }
 
   cortext::SignalProcessor::Config
@@ -683,7 +720,8 @@ struct Cortext::Impl
   MakeProbeProcessor () const
   {
     return std::make_unique<cortext::SignalProcessor> (
-        MakeProcessorConfig (), store, BuildPipelineRoot (true));
+        MakeProcessorConfig (), store, BuildPipelineRoot (true),
+        object_store);
   }
 
   Cortext::Context
@@ -790,7 +828,8 @@ struct Cortext::Impl
 
     if (hydrate_working_memory)
       {
-        HydrateWorkingMemoryFromDB (store.get (), result.working_memory);
+        HydrateWorkingMemoryFromDB (store.get (), object_store.get (),
+                                    result.working_memory);
       }
 
     // Hydrate retrieved memory (long-term retrieval results)
@@ -830,7 +869,7 @@ struct Cortext::Impl
           }
         Cortext::Context::Memory m;
         m.id = memory_id;
-        HydrateMemory (store.get (), memory_id, m);
+        HydrateMemory (store.get (), object_store.get (), memory_id, m);
         result.retrieved_memory.push_back (std::move (m));
       }
     return result;
@@ -844,9 +883,62 @@ Cortext::Create (const Config &cfg, const std::string &db_path,
   return std::unique_ptr<Cortext> (new Cortext (cfg, db_path, models_dir));
 }
 
+std::unique_ptr<Cortext>
+Cortext::Create (const Config &cfg, const std::string &db_path,
+                 std::shared_ptr<ObjectStore> object_store,
+                 const std::string &models_dir)
+{
+  return std::unique_ptr<Cortext> (
+      new Cortext (cfg, db_path, std::move (object_store), models_dir));
+}
+
+std::unique_ptr<Cortext>
+Cortext::Create (const Config &cfg, std::shared_ptr<Store> store,
+                 const std::string &models_dir)
+{
+  return std::unique_ptr<Cortext> (
+      new Cortext (cfg, std::move (store), models_dir));
+}
+
+std::unique_ptr<Cortext>
+Cortext::Create (const Config &cfg, std::shared_ptr<Store> store,
+                 std::shared_ptr<ObjectStore> object_store,
+                 const std::string &models_dir)
+{
+  return std::unique_ptr<Cortext> (
+      new Cortext (cfg, std::move (store), std::move (object_store),
+                   models_dir));
+}
+
 Cortext::Cortext (const Config &cfg, const std::string &db_path,
                   const std::string &models_dir)
     : impl_ (std::make_unique<Impl> (cfg, db_path, models_dir))
+{
+}
+
+Cortext::Cortext (const Config &cfg, const std::string &db_path,
+                  std::shared_ptr<ObjectStore> object_store,
+                  const std::string &models_dir)
+    : impl_ (std::make_unique<Impl> (
+          cfg,
+          std::shared_ptr<cortext::Store> (
+              cortext::SQLiteStore::Create (db_path.c_str ())),
+          std::move (object_store), models_dir))
+{
+}
+
+Cortext::Cortext (const Config &cfg, std::shared_ptr<Store> store,
+                  const std::string &models_dir)
+    : impl_ (std::make_unique<Impl> (cfg, std::move (store), nullptr,
+                                     models_dir))
+{
+}
+
+Cortext::Cortext (const Config &cfg, std::shared_ptr<Store> store,
+                  std::shared_ptr<ObjectStore> object_store,
+                  const std::string &models_dir)
+    : impl_ (std::make_unique<Impl> (cfg, std::move (store),
+                                     std::move (object_store), models_dir))
 {
 }
 
