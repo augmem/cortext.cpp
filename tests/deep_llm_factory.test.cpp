@@ -241,6 +241,18 @@ TEST_CASE ("LFM2 extraction grammar supports current schema subset",
          != std::string::npos);
 }
 
+TEST_CASE ("LFM2 extraction grammar permits empty labels when schema allows it",
+           "[deep_llm][grammar]")
+{
+  auto schema = BuildSupportedSchema ();
+  schema["properties"]["labels"]["minItems"] = 0;
+  const std::string grammar
+      = cortext::internal::BuildLfm2ExtractionGrammar (schema);
+  CHECK (grammar.find (
+             "(nonempty-string (\",\" space nonempty-string)*)?")
+         != std::string::npos);
+}
+
 TEST_CASE ("LFM2 extraction grammar rejects unsupported schema",
            "[deep_llm][grammar]")
 {
@@ -306,7 +318,7 @@ TEST_CASE ("LFM2 summarizer integration", "[deep_llm][lfm2][integration]")
 TEST_CASE ("LFM2 extractor integration", "[deep_llm][lfm2][integration]")
 {
   const std::string model_path = FindModelPath (
-      "models/LFM2-1.2B-Extract-GGUF/LFM2-1.2B-Extract-Q4_K_M.gguf");
+      "models/LFM2.5-350M-GGUF/LFM2.5-350M-Q4_K_M.gguf");
   if (!std::filesystem::exists (model_path))
     {
       SUCCEED ("Skipping - model not found at " << model_path);

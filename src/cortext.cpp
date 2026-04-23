@@ -35,6 +35,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -391,6 +392,91 @@ HydrateMemory (Store *store, ObjectStore *object_store, long long id,
           { telemetry::Attribute::String ("component", "cortext"),
             telemetry::Attribute::Int64 ("memory_id", id) });
     }
+}
+
+bool
+HasHydratedContent (const Cortext::Context::Memory &memory)
+{
+  for (const auto &blob : memory.content)
+    {
+      if (!blob.empty ())
+        {
+          return true;
+        }
+    }
+  return false;
+}
+
+std::vector<long long>
+ResolveDisplayMemoryIdsForEmptyRetrieval (Store *store, long long memory_id)
+{
+  if (!store || memory_id <= 0)
+    {
+      return {};
+    }
+
+  constexpr int kMaxLinkedHydrationCandidates = 12;
+  try
+    {
+      auto rows = store->Execute (
+          "SELECT linked.memory_id "
+          "FROM ("
+          "  SELECT a.target_memory_id AS memory_id, 0 AS rel_rank, "
+          "         a.weight AS weight "
+          "  FROM associations a "
+          "  WHERE a.source_memory_id = ? AND a.edge_type = 'derived_from' "
+          "  UNION ALL "
+          "  SELECT a.source_memory_id AS memory_id, 1 AS rel_rank, "
+          "         a.weight AS weight "
+          "  FROM associations a "
+          "  WHERE a.target_memory_id = ? "
+          "    AND a.edge_type IN ('reinforces', 'derived_from') "
+          ") linked "
+          "JOIN memories m ON m.memory_id = linked.memory_id "
+          "WHERE m.memory_id != ? "
+          "  AND m.kind NOT IN ('WORKING', 'LABEL', 'ASSOCIATION') "
+          "ORDER BY linked.rel_rank ASC, linked.weight DESC, "
+          "         COALESCE(m.last_access, 0) DESC, m.created_at DESC "
+          "LIMIT ?",
+          { memory_id, memory_id, memory_id,
+            static_cast<long long> (kMaxLinkedHydrationCandidates) });
+
+      std::vector<long long> out;
+      out.reserve (rows.size ());
+      std::unordered_set<long long> seen;
+      seen.reserve (rows.size ());
+      for (const auto &row : rows)
+        {
+          auto it = row.find ("memory_id");
+          if (it == row.end ())
+            {
+              continue;
+            }
+          const long long linked_id
+              = cortext::store::AnyToLongLong (it->second).value_or (0);
+          if (linked_id > 0 && seen.insert (linked_id).second)
+            {
+              out.push_back (linked_id);
+            }
+        }
+      return out;
+    }
+  catch (const std::exception &e)
+    {
+      telemetry::LogWarn (
+          "Failed to resolve display memories for retrieval node",
+          { telemetry::Attribute::String ("component", "cortext"),
+            telemetry::Attribute::Int64 ("memory_id", memory_id),
+            telemetry::Attribute::String ("error", e.what ()) });
+    }
+  catch (...)
+    {
+      telemetry::LogWarn (
+          "Failed to resolve display memories for retrieval node (unknown error)",
+          { telemetry::Attribute::String ("component", "cortext"),
+            telemetry::Attribute::Int64 ("memory_id", memory_id) });
+    }
+  return {};
 }
 
 void
@@ -858,19 +944,64 @@ struct Cortext::Impl
       return memory_id;
     };
 
-    std::unordered_set<long long> seen_memory_ids;
-    seen_memory_ids.reserve (out.candidate_memory_ids.size ());
+    constexpr int kMaxExpandedDisplayMemoriesPerNode = 4;
+    std::unordered_set<long long> seen_candidate_memory_ids;
+    seen_candidate_memory_ids.reserve (out.candidate_memory_ids.size ());
+    std::unordered_set<long long> seen_output_memory_ids;
+    seen_output_memory_ids.reserve (out.candidate_memory_ids.size ());
+
+    auto append_hydrated_memory = [&](long long memory_id,
+                                      bool require_content) -> bool {
+      if (memory_id <= 0 || !seen_output_memory_ids.insert (memory_id).second)
+        {
+          return false;
+        }
+      Cortext::Context::Memory m;
+      m.id = memory_id;
+      HydrateMemory (store.get (), object_store.get (), memory_id, m);
+      if (require_content && !HasHydratedContent (m))
+        {
+          seen_output_memory_ids.erase (memory_id);
+          return false;
+        }
+      result.retrieved_memory.push_back (std::move (m));
+      return true;
+    };
+
     for (const long long embedding_id : out.candidate_memory_ids)
       {
         const long long memory_id = lookup_memory_id (embedding_id);
-        if (memory_id <= 0 || !seen_memory_ids.insert (memory_id).second)
+        if (memory_id <= 0
+            || !seen_candidate_memory_ids.insert (memory_id).second)
           {
             continue;
           }
         Cortext::Context::Memory m;
         m.id = memory_id;
         HydrateMemory (store.get (), object_store.get (), memory_id, m);
-        result.retrieved_memory.push_back (std::move (m));
+        if (HasHydratedContent (m))
+          {
+            if (seen_output_memory_ids.insert (memory_id).second)
+              {
+                result.retrieved_memory.push_back (std::move (m));
+              }
+            continue;
+          }
+
+        int expanded_count = 0;
+        for (const long long linked_memory_id :
+             ResolveDisplayMemoryIdsForEmptyRetrieval (store.get (),
+                                                       memory_id))
+          {
+            if (append_hydrated_memory (linked_memory_id, true))
+              {
+                ++expanded_count;
+                if (expanded_count >= kMaxExpandedDisplayMemoriesPerNode)
+                  {
+                    break;
+                  }
+              }
+          }
       }
     return result;
   }

@@ -7,7 +7,13 @@ The repository now ships thin wrappers over the C ABI for:
 - `bindings/javascript`: Node.js plus TypeScript declarations
 - `bindings/dart`: Dart via `dart:ffi`
 
-All four assume the shared library is built with the repository-local FFI preset:
+All four can load the shared library from the Zig output directory:
+
+```bash
+zig build -Dshared=true -Dllama=false
+```
+
+The existing repository-local CMake FFI preset remains supported:
 
 ```bash
 cmake --preset ffi-release

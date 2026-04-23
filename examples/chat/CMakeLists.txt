@@ -101,13 +101,18 @@ target_link_libraries(cortext_chat PRIVATE
   nlohmann_json::nlohmann_json
   glfw
   OpenGL::GL
-  opentelemetry-cpp::api
-  opentelemetry-cpp::trace
-  opentelemetry-cpp::metrics
-  opentelemetry-cpp::logs
 )
 
-if(CORTEXT_CHAT_ENABLE_OTLP_GRPC)
+if(NOT CORTEXT_DISABLE_OPENTELEMETRY)
+  target_link_libraries(cortext_chat PRIVATE
+    opentelemetry-cpp::api
+    opentelemetry-cpp::trace
+    opentelemetry-cpp::metrics
+    opentelemetry-cpp::logs
+  )
+endif()
+
+if(CORTEXT_CHAT_ENABLE_OTLP_GRPC AND NOT CORTEXT_DISABLE_OPENTELEMETRY)
   target_link_libraries(cortext_chat PRIVATE
     opentelemetry-cpp::otlp_grpc_exporter
     opentelemetry-cpp::otlp_grpc_metrics_exporter

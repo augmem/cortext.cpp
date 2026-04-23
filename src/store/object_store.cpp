@@ -3,6 +3,7 @@
 #include "cortext/store/utils.hpp"
 
 #include <any>
+#include <set>
 #include <stdexcept>
 #include <utility>
 
@@ -56,15 +57,26 @@ public:
         throw StoreError ("Cannot put object without DB tx");
       }
     ObjectId id = ComputeObjectId (data);
+    if (put_ids_.find (id) != put_ids_.end ())
+      {
+        return id;
+      }
+    if (Exists (id))
+      {
+        put_ids_.insert (id);
+        return id;
+      }
     auto rows = tx_->Execute ("SELECT objstore_put(?1) AS id", { data });
     if (!rows.empty () && rows[0].count ("id") != 0)
       {
         auto stored_id = store::BlobFromAny (rows[0].at ("id"));
         if (!stored_id.empty ())
           {
+            put_ids_.insert (stored_id);
             return stored_id;
           }
       }
+    put_ids_.insert (id);
     return id;
   }
 
@@ -152,6 +164,7 @@ public:
 private:
   Transaction *tx_ = nullptr;
   std::unique_ptr<Transaction> owned_tx_;
+  std::set<ObjectId> put_ids_;
   bool finished_ = false;
 };
 

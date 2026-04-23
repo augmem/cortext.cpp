@@ -73,6 +73,19 @@ ClearRetrievalAblationOverride ()
   g_ablation_override = {};
 }
 
+ResurfacingDecayMode
+DefaultResurfacingDecayMode ()
+{
+  return ResurfacingDecayMode::PressureRamp;
+}
+
+ResurfacingDecayMode
+ResolveResurfacingDecayMode (const RetrievalAblationOverride &override)
+{
+  return override.resurfacing_decay_mode.value_or (
+      DefaultResurfacingDecayMode ());
+}
+
 RetrievalMode
 ResolveRetrievalMode (RetrievalMode requested)
 {
@@ -216,6 +229,21 @@ ToString (RoutineRecencyMode mode)
       return "recency_biased";
     }
   return "balanced";
+}
+
+const char *
+ToString (ResurfacingDecayMode mode)
+{
+  switch (mode)
+    {
+    case ResurfacingDecayMode::TimeOnly:
+      return "time_only";
+    case ResurfacingDecayMode::PressureGate:
+      return "pressure_gate";
+    case ResurfacingDecayMode::PressureRamp:
+      return "pressure_ramp";
+    }
+  return "time_only";
 }
 
 } // namespace cortext::operations::temporal

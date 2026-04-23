@@ -5,13 +5,11 @@
 #include "cortext/operations/constants.hpp"
 #include "cortext/core/knobs.hpp"
 #include "cortext/processor/operation_context.hpp"
+#include "cortext/summarizer/summarizer.hpp"
 #include "cortext/telemetry/telemetry.hpp"
 #include "eviction_ablation.hpp"
+#include "eviction_policy.hpp"
 #include <cmath>
-#include <cstdlib>
-#include <filesystem>
-#include <string>
-#include <system_error>
 #include <typeinfo>
 #include <vector>
 
@@ -20,159 +18,6 @@ namespace cortext::operations
 
 namespace
 {
-
-constexpr long long kDefaultEvictionMinBytes = 500LL * 1000LL * 1000LL;
-
-long long
-GetAnyInt64 (const std::map<std::string, std::any> &row, const std::string &key,
-             long long fallback = 0)
-{
-  auto it = row.find (key);
-  if (it == row.end () || !it->second.has_value ())
-    return fallback;
-  if (it->second.type () == typeid (long long))
-    return std::any_cast<long long> (it->second);
-  if (it->second.type () == typeid (int))
-    return static_cast<long long> (std::any_cast<int> (it->second));
-  if (it->second.type () == typeid (double))
-    return static_cast<long long> (std::any_cast<double> (it->second));
-  return fallback;
-}
-
-double
-ParseEnvDouble (const char *name, double fallback)
-{
-  const char *raw = std::getenv (name);
-  if (!raw || !*raw)
-    return fallback;
-  char *end = nullptr;
-  const double value = std::strtod (raw, &end);
-  if (end == raw)
-    return fallback;
-  return value;
-}
-
-long long
-ParseEnvInt64 (const char *name, long long fallback)
-{
-  const char *raw = std::getenv (name);
-  if (!raw || !*raw)
-    return fallback;
-  char *end = nullptr;
-  const long long value = std::strtoll (raw, &end, 10);
-  if (end == raw)
-    return fallback;
-  return value;
-}
-
-std::string
-ResolveMainDbPath (Transaction &tx)
-{
-  auto rows = tx.Execute ("PRAGMA database_list", {});
-  for (const auto &row : rows)
-    {
-      auto it_name = row.find ("name");
-      auto it_file = row.find ("file");
-      if (it_name == row.end () || it_file == row.end ()
-          || !it_name->second.has_value () || !it_file->second.has_value ())
-        {
-          continue;
-        }
-      if (it_name->second.type () == typeid (std::string)
-          && std::any_cast<std::string> (it_name->second) == "main"
-          && it_file->second.type () == typeid (std::string))
-        {
-          return std::any_cast<std::string> (it_file->second);
-        }
-    }
-  return {};
-}
-
-long long
-QueryPragmaInt64 (Transaction &tx, const std::string &pragma_name)
-{
-  auto rows = tx.Execute ("PRAGMA " + pragma_name, {});
-  if (rows.empty ())
-    return 0;
-  auto it = rows[0].find (pragma_name);
-  if (it != rows[0].end ())
-    return GetAnyInt64 (rows[0], pragma_name, 0);
-  if (!rows[0].empty ())
-    return GetAnyInt64 (rows[0], rows[0].begin ()->first, 0);
-  return 0;
-}
-
-struct StorageGateInfo
-{
-  bool active = false;
-  long long used_bytes = 0;
-  long long threshold_bytes = 0;
-};
-
-StorageGateInfo
-ComputeStorageGateInfo (Transaction &tx,
-                        const eviction::EvictionAblationOverride &override)
-{
-  StorageGateInfo info;
-
-  const std::string db_path = ResolveMainDbPath (tx);
-  const bool file_backed = !db_path.empty ();
-  info.active = override.storage_gate_enabled.value_or (file_backed);
-  if (!info.active)
-    return info;
-
-  long long used_bytes = 0;
-  if (override.used_storage_bytes.has_value ())
-    {
-      used_bytes = std::max<long long> (*override.used_storage_bytes, 0);
-    }
-  else if (file_backed)
-    {
-      std::error_code ec;
-      const auto main_size = std::filesystem::file_size (db_path, ec);
-      if (!ec)
-        used_bytes += static_cast<long long> (main_size);
-      const auto wal_path = db_path + "-wal";
-      const auto wal_size = std::filesystem::file_size (wal_path, ec);
-      if (!ec)
-        used_bytes += static_cast<long long> (wal_size);
-    }
-
-  if (used_bytes <= 0)
-    {
-      const long long page_count = QueryPragmaInt64 (tx, "page_count");
-      const long long page_size = QueryPragmaInt64 (tx, "page_size");
-      used_bytes = page_count * page_size;
-    }
-  info.used_bytes = std::max<long long> (used_bytes, 0);
-
-  const long long fixed_floor = override.min_storage_bytes.value_or (
-      ParseEnvInt64 ("CORTEXT_EVICTION_MIN_DB_BYTES",
-                     kDefaultEvictionMinBytes));
-  const double fraction_floor
-      = override.min_storage_fraction_of_available.value_or (
-          ParseEnvDouble ("CORTEXT_EVICTION_MIN_DB_AVAIL_PCT", 0.0));
-  long long threshold_bytes = std::max<long long> (fixed_floor, 0);
-  if (file_backed && fraction_floor > 0.0)
-    {
-      std::error_code ec;
-      const auto db_parent = std::filesystem::path (db_path).parent_path ();
-      const auto space = std::filesystem::space (
-          db_parent.empty () ? std::filesystem::current_path () : db_parent,
-          ec);
-      if (!ec)
-        {
-          const long long from_fraction = static_cast<long long> (
-              std::floor (fraction_floor
-                          * static_cast<double> (space.available)));
-          threshold_bytes = std::max (threshold_bytes,
-                                      std::max<long long> (from_fraction, 0));
-        }
-    }
-  info.threshold_bytes = threshold_bytes;
-  return info;
-}
-
 } // namespace
 
 void
@@ -195,9 +40,6 @@ UpdateMemoryStrength::Execute (OperationContext &context, Transaction &tx) const
             : ((p_ctx.half_life > constants::kNormEpsilon)
                    ? p_ctx.half_life
                    : core::BaseHalfLifePrior (T));
-  const double cutoff
-      = eviction_override.periphery_cutoff.value_or (
-          core::PeripheryCutoff (T));
   const double L_cg = std::round (core::Lerp (8.0, 32.0, T));
   const double alpha_cg
       = (L_cg > 0.0) ? (constants::kTwo / (L_cg + 1.0)) : 1.0;
@@ -442,12 +284,9 @@ UpdateMemoryStrength::Execute (OperationContext &context, Transaction &tx) const
   // when their strength >= fact_floor(T), scaled by Stability.
   const long long evicted_at
       = static_cast<long long> (context.GetSignal ().timestamp);
-  const bool fact_floor_active
-      = eviction_override.fact_floor_enabled.value_or (true);
-  const double fact_floor
-      = fact_floor_active ? core::FactEvictionFloor (T) : 0.0;
-  const StorageGateInfo storage_gate
-      = ComputeStorageGateInfo (tx, eviction_override);
+  const auto frontier = eviction_policy::ResolveEvictionFrontier (
+      tx, T, static_cast<long long> (p_ctx.last_consolidation_ts),
+      eviction_override);
 
   // Eviction condition: strength < cutoff AND either (a) not fact-linked
   // or (b) strength < fact_floor. Expressed in SQL as a LEFT JOIN that
@@ -455,59 +294,41 @@ UpdateMemoryStrength::Execute (OperationContext &context, Transaction &tx) const
   // Consolidation gate: no memory is evicted until it has existed through
   // at least one consolidation cycle (created_at < last_consolidation_ts).
   // When last_consolidation_ts == 0, no memories are evictable.
-  const bool consolidation_gate_active
-      = eviction_override.consolidation_gate_enabled.value_or (true);
-  const long long consolidation_ts
-      = static_cast<long long> (p_ctx.last_consolidation_ts);
-  const std::string consolidation_gate
-      = consolidation_gate_active ? " AND m.created_at < ?" : "";
-  const std::string eviction_where
-      = fact_floor_active
-            ? "WHERE m.strength < ? AND m.kind = 'LONG_TERM'"
-              " AND (fe_active.source_memory_id IS NULL"
-              "      OR m.strength < ?)"
-              + consolidation_gate
-            : "WHERE m.strength < ? AND m.kind = 'LONG_TERM'"
-              + consolidation_gate;
+  std::string eviction_where
+      = eviction_policy::EvictionWhereClause (frontier);
+  const bool summary_guard_active
+      = context.GetSummarizer () && context.GetSummarizer ()->IsAvailable ();
+  if (summary_guard_active)
+    {
+      eviction_where +=
+          " AND EXISTS ("
+          "   SELECT 1 FROM associations summary_edge"
+          "   JOIN memories summary_memory"
+          "     ON summary_memory.memory_id = summary_edge.source_memory_id"
+          "   WHERE summary_edge.target_memory_id = m.memory_id"
+          "     AND summary_edge.edge_type = 'derived_from'"
+          "     AND summary_memory.kind = 'ASSOCIATION'"
+          "     AND summary_memory.source_id LIKE 'summary_%'"
+          " )";
+    }
   const std::string fact_join
-      = fact_floor_active
-            ? " LEFT JOIN ("
-              "   SELECT DISTINCT fe.source_memory_id"
-              "   FROM fact_evidence fe"
-              "   JOIN fact_assertions fa ON fe.fact_id = fa.fact_id"
-              "   WHERE fa.lifecycle_state != 'archived'"
-              " ) fe_active ON fe_active.source_memory_id = m.memory_id"
-            : "";
+      = eviction_policy::ActiveFactEvidenceJoin (
+          frontier.fact_floor_active);
   const std::vector<std::any> eviction_params
-      = [&] {
-          std::vector<std::any> p = { evicted_at, cutoff };
-          if (fact_floor_active)
-            p.push_back (fact_floor);
-          if (consolidation_gate_active)
-            p.push_back (consolidation_ts);
-          return p;
-        }();
+      = eviction_policy::EvictionInsertParams (evicted_at, frontier);
   const std::vector<std::any> delete_params
-      = [&] {
-          std::vector<std::any> p = { cutoff };
-          if (fact_floor_active)
-            p.push_back (fact_floor);
-          if (consolidation_gate_active)
-            p.push_back (consolidation_ts);
-          return p;
-        }();
+      = eviction_policy::EvictionWhereParams (frontier);
 
-  if (storage_gate.active
-      && storage_gate.used_bytes < storage_gate.threshold_bytes)
+  if (!frontier.storage_allows_eviction)
     {
       telemetry::LogDebug (
           "cortext.memory_strength",
           { telemetry::Attribute::Int64 ("update_count", update_count),
             telemetry::Attribute::Int64 ("eviction_count", 0),
             telemetry::Attribute::Int64 ("storage_used_bytes",
-                                         storage_gate.used_bytes),
+                                         frontier.storage_used_bytes),
             telemetry::Attribute::Int64 ("storage_threshold_bytes",
-                                         storage_gate.threshold_bytes) });
+                                         frontier.storage_threshold_bytes) });
       return;
     }
 
@@ -558,9 +379,9 @@ UpdateMemoryStrength::Execute (OperationContext &context, Transaction &tx) const
                          telemetry::Attribute::Int64 ("eviction_count",
                                                       eviction_count),
                          telemetry::Attribute::Int64 ("storage_used_bytes",
-                                                      storage_gate.used_bytes),
+                                                      frontier.storage_used_bytes),
                          telemetry::Attribute::Int64 ("storage_threshold_bytes",
-                                                      storage_gate.threshold_bytes) });
+                                                      frontier.storage_threshold_bytes) });
 }
 
 } // namespace cortext::operations

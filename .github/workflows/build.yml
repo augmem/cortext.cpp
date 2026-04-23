@@ -24,7 +24,33 @@ jobs:
       run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 
     - name: Build
-      run: cmake --build build -j $(nproc)
+      run: cmake --build build -j8
 
     - name: Test
       run: ctest --test-dir build -R cortext_tests --output-on-failure
+
+  zig-smoke:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        submodules: recursive
+
+    - uses: mlugg/setup-zig@v2
+      with:
+        version: 0.15.2
+
+    - name: Install host dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libsqlite3-dev
+
+    - name: Fetch Zig dependencies
+      run: zig build --fetch -Dshared=true -Dllama=false
+
+    - name: Build Zig host FFI library
+      run: zig build -Dshared=true -Dllama=false
+
+    - name: Cross-build Zig FFI library
+      run: zig build -Dtarget=x86_64-linux-gnu -Dshared=true -Dllama=false

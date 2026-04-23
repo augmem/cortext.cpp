@@ -455,7 +455,8 @@ BuildExtractionSystemPrompt ()
              "process words.\n"
              "\"labels\" must be an array of non-empty strings copied from the "
              "text.\n"
-             "Return between 1 and 8 labels.\n"
+             "Return between 0 and 8 labels; use [] when no durable label is "
+             "present.\n"
              "Each relation must include non-empty \"subject\", \"predicate\", "
              "and \"object\" strings taken from the text.\n"
              "Each fact must include non-empty \"subject\", \"predicate\", and "
@@ -484,7 +485,8 @@ BuildExtractionSystemPrompt ()
              "generic verbs, or filler tokens.\n"
              "\"labels\" must be an array of non-empty strings copied from the "
              "text.\n"
-             "Return between 1 and 6 labels.\n"
+             "Return between 0 and 6 labels; use [] when no durable label is "
+             "present.\n"
              "Each relation must include non-empty \"subject\", \"predicate\", "
              "and \"object\" strings taken from the text.\n"
              "Each fact must include non-empty \"subject\", \"predicate\", and "
@@ -513,7 +515,8 @@ BuildExtractionSystemPrompt ()
              "unless they are literally the main subject of the text.\n"
              "\"labels\" must be an array of non-empty strings copied from the "
              "text.\n"
-             "Return between 1 and 8 labels.\n"
+             "Return between 0 and 8 labels; use [] when no durable label is "
+             "present.\n"
              "Each relation must include non-empty \"subject\", \"predicate\", "
              "and \"object\" strings taken from the text.\n"
              "Each fact must include non-empty \"subject\", \"predicate\", and "
@@ -557,7 +560,8 @@ BuildExtractionSystemPrompt ()
              "verbs, helper words, or filler tokens.\n"
              "\"labels\" must be an array of non-empty strings copied from the "
              "text.\n"
-             "Return between 1 and 6 labels.\n"
+             "Return between 0 and 6 labels; use [] when no durable label is "
+             "present.\n"
              "Each relation must include non-empty \"subject\", \"predicate\", "
              "and \"object\" strings taken from the text.\n"
              "Each fact must include non-empty \"subject\", \"predicate\", and "
@@ -596,8 +600,7 @@ BuildExtractionSystemPrompt ()
          "If confidence is present, it must be a JSON number.\n"
          "If valid_start_ts or valid_end_ts are present for facts, they must "
          "be JSON integers in milliseconds.\n"
-         "Always return at least one label; if nothing is obvious, choose the "
-         "single most salient term from the text.\n"
+         "Return an empty labels array when the text has no durable label.\n"
          "Do not emit any explanation outside the JSON object.";
 }
 
@@ -621,7 +624,8 @@ BuildLabelOnlyExtractionSystemPrompt ()
              "field names, timestamps, or meta labels.\n"
              "\"labels\" must be an array of non-empty strings copied from the "
              "text.\n"
-             "Return between 1 and 8 labels.\n"
+             "Return between 0 and 8 labels; use [] when no durable label is "
+             "present.\n"
              "Do not emit any explanation outside the JSON object.";
     }
 
@@ -636,7 +640,8 @@ BuildLabelOnlyExtractionSystemPrompt ()
              "words, or filler labels.\n"
              "\"labels\" must be an array of non-empty strings copied from the "
              "text.\n"
-             "Return between 1 and 6 labels.\n"
+             "Return between 0 and 6 labels; use [] when no durable label is "
+             "present.\n"
              "Do not emit any explanation outside the JSON object.";
     }
 
@@ -653,7 +658,8 @@ BuildLabelOnlyExtractionSystemPrompt ()
              "field names, timestamps, or meta labels.\n"
              "\"labels\" must be an array of non-empty strings copied from the "
              "text.\n"
-             "Return between 1 and 8 labels.\n"
+             "Return between 0 and 8 labels; use [] when no durable label is "
+             "present.\n"
              "Examples:\n"
              "Text:\n"
              "User: My name is Gabriel. I live in Chicago.\n"
@@ -679,7 +685,8 @@ BuildLabelOnlyExtractionSystemPrompt ()
              "words, or filler labels.\n"
              "\"labels\" must be an array of non-empty strings copied from the "
              "text.\n"
-             "Return between 1 and 6 labels.\n"
+             "Return between 0 and 6 labels; use [] when no durable label is "
+             "present.\n"
              "Examples:\n"
              "Text:\n"
              "User: My neighbor Sarah is helping me prepare documents for a "
@@ -699,8 +706,7 @@ BuildLabelOnlyExtractionSystemPrompt ()
          "directly supported by the text.\n"
          "\"labels\" must be an array of non-empty strings copied from the "
          "text.\n"
-         "Always return at least one label; if nothing is obvious, choose the "
-         "single most salient term from the text.\n"
+         "Return an empty labels array when the text has no durable label.\n"
          "Do not emit any explanation outside the JSON object.";
 }
 
@@ -855,6 +861,21 @@ HasNonEmptyLabel (const operations::ExtractionResult &result)
                       [] (const auto &label) {
                         return !label.label.empty ();
                       });
+}
+
+bool
+SchemaAllowsEmptyLabels (const nlohmann::json &schema)
+{
+  if (!schema.contains ("properties") || !schema["properties"].is_object ())
+    {
+      return false;
+    }
+  const auto &properties = schema["properties"];
+  if (!properties.contains ("labels") || !properties["labels"].is_object ())
+    {
+      return false;
+    }
+  return properties["labels"].value ("minItems", 0) == 0;
 }
 
 bool
@@ -1805,6 +1826,10 @@ Lfm2LlamaExtractor::ExtractFromText (const std::string &text,
   const auto parsed = ParseExtractionResponse (response);
   if (!HasNonEmptyLabel (parsed))
     {
+      if (SchemaAllowsEmptyLabels (schema))
+        {
+          return parsed;
+        }
       if (!SchemaRequiresRelations (schema))
         {
           GenerationConfig fallback_config;

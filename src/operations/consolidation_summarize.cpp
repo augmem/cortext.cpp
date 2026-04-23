@@ -11,10 +11,13 @@
 #include "cortext/summarizer/summarizer.hpp"
 #include "cortext/consolidation_mode.hpp"
 #include "cortext/telemetry/telemetry.hpp"
+#include "eviction_ablation.hpp"
+#include "eviction_policy.hpp"
 #include <algorithm>
 #include <any>
 #include <cctype>
 #include <ctime>
+#include <cmath>
 #include <optional>
 #include <regex>
 #include <stdexcept>
@@ -35,6 +38,14 @@ GenerateSummaryId (uint64_t ts, int counter)
 {
   std::ostringstream ss;
   ss << "summary_" << ts << "_" << counter;
+  return ss.str ();
+}
+
+std::string
+GenerateAssociativeCueId (uint64_t ts, int counter)
+{
+  std::ostringstream ss;
+  ss << "associative_cue_" << ts << "_" << counter;
   return ss.str ();
 }
 
@@ -225,10 +236,60 @@ FindExistingDeepSummaryForSources (Transaction &tx,
   return AnyToInt64 (it->second);
 }
 
+long long
+FindExistingAssociativeCueForSources (
+    Transaction &tx, const std::vector<long long> &source_memory_ids)
+{
+  if (source_memory_ids.empty ())
+    {
+      return 0;
+    }
+
+  std::string sql =
+      "SELECT s.memory_id "
+      "FROM memories s "
+      "JOIN associations a ON a.source_memory_id = s.memory_id "
+      "WHERE s.kind = 'ASSOCIATION' "
+      "  AND s.source_id LIKE 'associative_cue_%' "
+      "  AND a.edge_type = 'derived_from' "
+      "GROUP BY s.memory_id "
+      "HAVING COUNT(*) = ? "
+      "   AND SUM(CASE WHEN a.target_memory_id IN (";
+  std::vector<std::any> params;
+  params.reserve (source_memory_ids.size () + 2);
+  params.push_back (static_cast<long long> (source_memory_ids.size ()));
+  for (size_t i = 0; i < source_memory_ids.size (); ++i)
+    {
+      if (i > 0)
+        {
+          sql += ",";
+        }
+      sql += "?";
+      params.push_back (source_memory_ids[i]);
+    }
+  sql += ") THEN 1 ELSE 0 END) = ? "
+         "ORDER BY s.memory_id DESC LIMIT 1";
+  params.push_back (static_cast<long long> (source_memory_ids.size ()));
+
+  auto rows = tx.Execute (sql, params);
+  if (rows.empty ())
+    {
+      return 0;
+    }
+
+  auto it = rows[0].find ("memory_id");
+  if (it == rows[0].end ())
+    {
+      return 0;
+    }
+  return AnyToInt64 (it->second);
+}
+
 struct SummaryRecord
 {
   long long memory_id = 0;
   long long embedding_id = 0;
+  std::string source_id;
   Eigen::VectorXf embedding;
 };
 
@@ -236,7 +297,7 @@ std::optional<SummaryRecord>
 LoadSummaryRecord (Transaction &tx, long long memory_id, int expected_dim)
 {
   auto rows = tx.Execute (
-      "SELECT m.memory_id, m.embedding_id, e.embedding "
+      "SELECT m.memory_id, m.embedding_id, m.source_id, e.embedding "
       "FROM memories m "
       "JOIN embeddings e ON e.embedding_id = m.embedding_id "
       "WHERE m.memory_id = ?",
@@ -249,6 +310,7 @@ LoadSummaryRecord (Transaction &tx, long long memory_id, int expected_dim)
   const auto &row = rows[0];
   auto it_memory = row.find ("memory_id");
   auto it_embedding_id = row.find ("embedding_id");
+  auto it_source_id = row.find ("source_id");
   auto it_embedding = row.find ("embedding");
   if (it_memory == row.end () || it_embedding_id == row.end ()
       || it_embedding == row.end ())
@@ -259,6 +321,11 @@ LoadSummaryRecord (Transaction &tx, long long memory_id, int expected_dim)
   SummaryRecord record;
   record.memory_id = AnyToInt64 (it_memory->second);
   record.embedding_id = AnyToInt64 (it_embedding_id->second);
+  if (it_source_id != row.end ()
+      && it_source_id->second.type () == typeid (std::string))
+    {
+      record.source_id = std::any_cast<std::string> (it_source_id->second);
+    }
   if (record.memory_id <= 0 || record.embedding_id <= 0)
     {
       return std::nullopt;
@@ -271,11 +338,127 @@ LoadSummaryRecord (Transaction &tx, long long memory_id, int expected_dim)
   return record;
 }
 
+bool
+HasLabelEdges (Transaction &tx, long long association_memory_id)
+{
+  if (association_memory_id <= 0)
+    {
+      return false;
+    }
+  auto rows = tx.Execute (
+      "SELECT 1 AS present FROM associations "
+      "WHERE source_memory_id = ? AND edge_type = 'has_label' LIMIT 1",
+      { association_memory_id });
+  return !rows.empty ();
+}
+
+long long
+InsertAssociativeCue (OperationContext &context, Transaction &tx,
+                      const ClusterInfo &cluster, const std::string &cue_id,
+                      uint64_t now_ts)
+{
+  AddWrite (tx,
+            "INSERT INTO embeddings (embedding, created_at) VALUES (?, ?)",
+            { cluster.centroid, static_cast<long long> (now_ts) });
+
+  auto id_rows = tx.Execute ("SELECT last_insert_rowid() AS id", {});
+  long long centroid_embedding_id = 0;
+  if (!id_rows.empty () && id_rows[0].count ("id"))
+    {
+      centroid_embedding_id = AnyToInt64 (id_rows[0].at ("id"));
+    }
+  if (centroid_embedding_id <= 0)
+    {
+      return 0;
+    }
+
+  const std::string label
+      = "associative cue " + std::to_string (cluster.cluster_id);
+  AddWrite (tx,
+            "INSERT INTO memories "
+            "(embedding_id, source_id, kind, label, start_ts, n_signals, created_at) "
+            "VALUES (?, ?, 'ASSOCIATION', ?, ?, ?, ?)",
+            { centroid_embedding_id, cue_id, label,
+              static_cast<long long> (now_ts),
+              static_cast<long long> (cluster.embedding_ids.size ()),
+              static_cast<long long> (now_ts) });
+
+  auto mem_id_rows = tx.Execute ("SELECT last_insert_rowid() AS id", {});
+  long long centroid_memory_id = 0;
+  if (!mem_id_rows.empty () && mem_id_rows[0].count ("id"))
+    {
+      centroid_memory_id = AnyToInt64 (mem_id_rows[0].at ("id"));
+    }
+  if (centroid_memory_id <= 0)
+    {
+      return 0;
+    }
+
+  Eigen::VectorXf centroid_vec (
+      static_cast<Eigen::Index> (cluster.centroid.size ()));
+  for (size_t i = 0; i < cluster.centroid.size (); ++i)
+    {
+      centroid_vec (static_cast<Eigen::Index> (i)) = cluster.centroid[i];
+    }
+  context.GetProcessorContext ().UpsertSummaryCache (
+      centroid_memory_id, centroid_embedding_id, centroid_vec, true, false);
+  return centroid_memory_id;
+}
+
+void
+AttachClusterSources (Transaction &tx, long long association_memory_id,
+                      int cluster_id,
+                      const std::vector<std::pair<long long, long long>> &source_links)
+{
+  for (const auto &[emb_id, src_memory_id] : source_links)
+    {
+      internal::ThrowIfStopRequested ();
+      AddWrite (tx,
+                "UPDATE memories SET cluster_id = ? "
+                "WHERE embedding_id = ?",
+                { cluster_id, emb_id });
+
+      if (src_memory_id > 0 && association_memory_id > 0)
+        {
+          AddWrite (tx,
+                    "INSERT OR IGNORE INTO associations "
+                    "(source_memory_id, target_memory_id, edge_type, weight) "
+                    "VALUES (?, ?, 'derived_from', 1.0)",
+                    { association_memory_id, src_memory_id });
+        }
+    }
+}
+
+void
+QueueExtractionIfNeeded (std::vector<ExtractionRequest> &requests,
+                         const ConsolidationSummarizeParams &params,
+                         const ClusterInfo &cluster,
+                         const std::string &association_source_id,
+                         const std::string &summary_text,
+                         const std::vector<std::string> &source_texts,
+                         uint64_t now_ts)
+{
+  if (static_cast<int> (cluster.embedding_ids.size ())
+      < params.min_cluster_size_for_extraction)
+    {
+      return;
+    }
+
+  ExtractionRequest req;
+  req.summary_id = association_source_id;
+  req.summary_text = summary_text;
+  req.cluster_size = static_cast<int> (cluster.embedding_ids.size ());
+  req.created_at = now_ts;
+  req.source_texts = source_texts;
+  requests.push_back (std::move (req));
+}
+
 } // namespace
 
 ConsolidationSummarizeParams
-ConsolidationSummarizeParams::FromKnobs (double F, double /*S*/, double T)
+ConsolidationSummarizeParams::FromKnobs (double F, double S, double T)
 {
+  (void)S;
   ConsolidationSummarizeParams p;
   p.min_cluster_size_for_extraction = core::MinClusterSizeForExtraction (F);
   const double F_eff = core::FocusBias (F);
@@ -318,20 +501,41 @@ ConsolidationSummarize::Execute (OperationContext &context, Transaction &tx) con
   auto params
       = ConsolidationSummarizeParams::FromKnobs (cfg.focus, cfg.sensitivity,
                                                   cfg.stability);
+  auto &p_ctx = context.GetProcessorContext ();
   const uint64_t now_ts = context.GetSignal ().timestamp;
+
+  const auto eviction_override = eviction::GetEvictionAblationOverride ();
+  const auto eviction_frontier = eviction_policy::ResolveEvictionFrontier (
+      tx, cfg.stability, static_cast<long long> (p_ctx.last_consolidation_ts),
+      eviction_override);
+  const bool compression_allowed = eviction_frontier.storage_gate_active
+                                   && eviction_frontier.storage_allows_eviction;
+  if (!compression_allowed)
+    {
+      telemetry::LogInfo (
+          "cortext.consolidation_summarize.skipped_storage_pressure",
+          { telemetry::Attribute::Bool (
+                "storage_pressure_active",
+                eviction_frontier.storage_gate_active),
+            telemetry::Attribute::Int64 (
+                "storage_used_bytes",
+                eviction_frontier.storage_used_bytes),
+            telemetry::Attribute::Int64 (
+                "storage_threshold_bytes",
+                eviction_frontier.storage_threshold_bytes) });
+    }
 
   std::vector<ExtractionRequest> extraction_requests;
   int summary_sequence = 0;
+  int cue_sequence = 0;
   int summary_count = 0;
   int summaries_with_summarizer = 0;
+  int associative_cues = 0;
+  int clusters_skipped_eviction_frontier = 0;
+  int clusters_skipped_summarizer_unavailable = 0;
 
   // Get deep summarizer backend selected during Cortext construction.
   Summarizer *summarizer = context.GetSummarizer ();
-  if (!summarizer || !summarizer->IsAvailable ())
-    {
-      throw std::runtime_error (
-          "Consolidation summarizer unavailable: no deep LLM backend is ready");
-    }
 
   for (const auto &cluster : clusters)
     {
@@ -352,7 +556,10 @@ ConsolidationSummarize::Execute (OperationContext &context, Transaction &tx) con
       source_links.reserve (cluster.embedding_ids.size ());
       std::vector<long long> source_memory_ids;
       source_memory_ids.reserve (cluster.embedding_ids.size ());
+      std::vector<long long> eviction_source_memory_ids;
+      eviction_source_memory_ids.reserve (cluster.embedding_ids.size ());
       std::unordered_set<long long> seen_source_memory_ids;
+      std::unordered_set<long long> seen_eviction_source_memory_ids;
 
       // Convert cluster centroid to Eigen for comparison.
       Eigen::VectorXf centroid_eigen (
@@ -367,7 +574,8 @@ ConsolidationSummarize::Execute (OperationContext &context, Transaction &tx) con
           internal::ThrowIfStopRequested ();
           // Query embedding, memory row, blob_id, source_id, and start_ts.
           auto rows = tx.Execute (
-              "SELECT e.embedding, m.memory_id, m.blob_id, m.source_id, m.start_ts "
+              "SELECT e.embedding, m.memory_id, m.blob_id, m.source_id, "
+              "m.start_ts, m.kind "
               "FROM embeddings e "
               "LEFT JOIN memories m ON e.embedding_id = m.embedding_id "
               "WHERE e.embedding_id = ?",
@@ -417,6 +625,14 @@ ConsolidationSummarize::Execute (OperationContext &context, Transaction &tx) con
               source_id = std::any_cast<std::string> (it_source->second);
             }
 
+          std::string memory_kind;
+          auto it_kind = row.find ("kind");
+          if (it_kind != row.end ()
+              && it_kind->second.type () == typeid (std::string))
+            {
+              memory_kind = std::any_cast<std::string> (it_kind->second);
+            }
+
           long long memory_id = 0;
           auto it_memory_id = row.find ("memory_id");
           if (it_memory_id != row.end ())
@@ -429,6 +645,11 @@ ConsolidationSummarize::Execute (OperationContext &context, Transaction &tx) con
               if (seen_source_memory_ids.insert (memory_id).second)
                 {
                   source_memory_ids.push_back (memory_id);
+                }
+              if (memory_kind == "LONG_TERM"
+                  && seen_eviction_source_memory_ids.insert (memory_id).second)
+                {
+                  eviction_source_memory_ids.push_back (memory_id);
                 }
             }
 
@@ -537,8 +758,71 @@ ConsolidationSummarize::Execute (OperationContext &context, Transaction &tx) con
       if (source_texts.empty ())
         {
           throw std::runtime_error (
-              "Consolidation summarization requires source text for "
+              "Consolidation label routing requires source text for "
               + std::to_string (cluster.cluster_id));
+        }
+
+      long long cue_memory_id = FindExistingAssociativeCueForSources (
+          tx, source_memory_ids);
+      std::string cue_id;
+      if (cue_memory_id > 0)
+        {
+          auto existing_cue = LoadSummaryRecord (
+              tx, cue_memory_id,
+              static_cast<int> (cluster.centroid.size ()));
+          if (existing_cue.has_value ())
+            {
+              cue_id = existing_cue->source_id;
+              context.GetProcessorContext ().UpsertSummaryCache (
+                  existing_cue->memory_id,
+                  existing_cue->embedding_id,
+                  existing_cue->embedding,
+                  true,
+                  false);
+            }
+        }
+
+      if (cue_memory_id <= 0 || cue_id.empty ())
+        {
+          cue_id = GenerateAssociativeCueId (now_ts, cue_sequence++);
+          cue_memory_id = InsertAssociativeCue (context, tx, cluster,
+                                                cue_id, now_ts);
+          if (cue_memory_id > 0)
+            {
+              ++associative_cues;
+            }
+        }
+
+      AttachClusterSources (tx, cue_memory_id, cluster.cluster_id,
+                            source_links);
+      if (cue_memory_id > 0 && !HasLabelEdges (tx, cue_memory_id))
+        {
+          QueueExtractionIfNeeded (extraction_requests, params, cluster,
+                                   cue_id, "", source_texts, now_ts);
+        }
+
+      bool cluster_compression_allowed = compression_allowed;
+      if (cluster_compression_allowed)
+        {
+          const auto evictable_source_ids
+              = eviction_policy::LoadEvictableMemoryIds (
+                  tx, eviction_frontier, eviction_source_memory_ids);
+          cluster_compression_allowed
+              = !eviction_source_memory_ids.empty ()
+                && evictable_source_ids.size ()
+                       >= eviction_source_memory_ids.size ();
+        }
+      if (cluster_compression_allowed
+          && (!summarizer || !summarizer->IsAvailable ()))
+        {
+          ++clusters_skipped_summarizer_unavailable;
+          cluster_compression_allowed = false;
+        }
+
+      if (!cluster_compression_allowed)
+        {
+          ++clusters_skipped_eviction_frontier;
+          continue;
         }
 
       long long centroid_memory_id = FindExistingDeepSummaryForSources (
@@ -702,30 +986,29 @@ ConsolidationSummarize::Execute (OperationContext &context, Transaction &tx) con
             }
         }
 
-      // 8. Queue extraction if cluster is large enough.
-      if (static_cast<int> (cluster.embedding_ids.size ())
-          >= params.min_cluster_size_for_extraction)
-        {
-          ExtractionRequest req;
-          req.summary_id = summary_id;
-          req.summary_text = summary_text;
-          req.cluster_size = static_cast<int> (cluster.embedding_ids.size ());
-          req.created_at = now_ts;
-          req.source_texts = source_texts;  // Reuse already collected texts
-          extraction_requests.push_back (std::move (req));
-        }
     }
 
   // 9. Pass extraction requests to next operation.
-  const int jobs_queued = static_cast<int>(extraction_requests.size());
+  const int jobs_queued = static_cast<int> (extraction_requests.size ());
   context.SetExtractionRequests (std::move (extraction_requests));
 
-  telemetry::LogInfo("cortext.consolidation_summarize", {
-    telemetry::Attribute::Int64("summary_count", summary_count),
-    telemetry::Attribute::Int64("extraction_jobs_queued", jobs_queued),
-    telemetry::Attribute::Int64("summaries_with_summarizer", summaries_with_summarizer),
-    telemetry::Attribute::Int64("summaries_fallback", 0)
-  });
+  telemetry::LogInfo (
+      "cortext.consolidation_summarize",
+      { telemetry::Attribute::Int64 ("summary_count", summary_count),
+        telemetry::Attribute::Int64 ("extraction_jobs_queued", jobs_queued),
+        telemetry::Attribute::Int64 ("summaries_with_summarizer",
+                                     summaries_with_summarizer),
+        telemetry::Attribute::Int64 ("summaries_fallback", 0),
+        telemetry::Attribute::Int64 ("associative_cues", associative_cues),
+        telemetry::Attribute::Int64 ("clusters_skipped_eviction_frontier",
+                                     clusters_skipped_eviction_frontier),
+        telemetry::Attribute::Int64 (
+            "clusters_skipped_summarizer_unavailable",
+            clusters_skipped_summarizer_unavailable),
+        telemetry::Attribute::Int64 ("storage_used_bytes",
+                                     eviction_frontier.storage_used_bytes),
+        telemetry::Attribute::Int64 ("storage_threshold_bytes",
+                                     eviction_frontier.storage_threshold_bytes) });
 }
 
 } // namespace cortext::operations

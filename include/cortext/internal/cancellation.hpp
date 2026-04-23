@@ -16,7 +16,7 @@ public:
 
 namespace detail
 {
-inline thread_local std::vector<cortext::StopToken> stop_token_stack;
+extern thread_local std::vector<cortext::StopToken> stop_token_stack;
 }
 
 class ScopedStopToken

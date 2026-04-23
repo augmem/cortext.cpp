@@ -4,9 +4,15 @@ import 'package:cortext/cortext.dart';
 import 'package:test/test.dart';
 
 void main() {
-  test('candidate library paths include ffi-release output directory', () {
+  test('candidate library paths include Zig and ffi-release output directories', () {
     final paths = CortextLibrary.candidateLibraryPaths(
       repoRoot: '/tmp/cortext',
+    );
+    expect(
+      paths,
+      contains(
+        '/tmp/cortext${Platform.pathSeparator}zig-out${Platform.pathSeparator}lib${Platform.pathSeparator}${_expectedLibraryName()}',
+      ),
     );
     expect(
       paths,

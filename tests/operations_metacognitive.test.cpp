@@ -4,11 +4,19 @@
 #include <cortext/core/algorithms.hpp>
 #include <cortext/core/knobs.hpp>
 #include <cortext/operations/metacognitive.hpp>
+#include <cortext/store/sqlite_store.hpp>
 #include <cortext/processor.hpp>
 #include <cortext/processor/operation_context.hpp>
 
+#include <optional>
+
+#include "../src/operations/eviction_ablation.hpp"
+#include "../src/operations/temporal_retrieval.hpp"
+
 using namespace cortext;
 using cortext::operations::MetacognitiveMonitoring;
+namespace temporal = cortext::operations::temporal;
+namespace eviction = cortext::operations::eviction;
 
 TEST_CASE ("Alg25 detects TOT when FOK high and retrieval low",
            "[operations][metacognitive][tot]")
@@ -94,7 +102,7 @@ TEST_CASE ("Alg25 exposes parameter derivations per algorithms.md",
   REQUIRE (ctx.GetMetacogStrategySwitchLatencyMs () == expected_latency);
 
   const double expected_cert
-      = cortext::core::CertaintyRequirement (cfg.stability);
+      = cortext::core::CertaintyRequirement (1.0);
   REQUIRE (ctx.GetMetacogCertaintyRequirement ()
            == Catch::Approx (expected_cert).epsilon (1e-9));
 
@@ -160,6 +168,176 @@ TEST_CASE ("Metacognitive confidence decays across delayed signals",
            == Catch::Approx (cortext::core::ConfidenceDecayRate (cfg.stability)));
   REQUIRE (pctx.metacognitive_confidence < 1.0);
   REQUIRE (pctx.metacognitive_confidence > 0.2);
+}
+
+TEST_CASE ("Pressure-weighted idle decay preserves more confidence at low storage pressure",
+           "[operations][metacognitive][confidence][ablation]")
+{
+  auto unique_store = SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<Store> (std::move (unique_store));
+  cortext::testing::InitializeCoreSchema (*store);
+
+  Signal s;
+  s.embedding = Eigen::VectorXf::Zero (3);
+  s.timestamp = 121000;
+
+  ProcessorContext time_only_ctx;
+  time_only_ctx.metacognitive_confidence = 1.0;
+  time_only_ctx.last_signal_timestamp = 1000;
+
+  ProcessorContext pressure_ctx = time_only_ctx;
+
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  cfg.focus = 0.5;
+  cfg.sensitivity = 0.5;
+  cfg.stability = 0.5;
+
+  MetacognitiveMonitoring op;
+
+  auto run = [&] (ProcessorContext &pctx,
+                  std::optional<temporal::ResurfacingDecayMode> decay_mode) {
+    temporal::RetrievalAblationOverride retrieval_override;
+    retrieval_override.resurfacing_decay_mode = decay_mode;
+    temporal::ScopedRetrievalAblationOverride retrieval_guard (
+        retrieval_override);
+
+    eviction::EvictionAblationOverride eviction_override;
+    eviction_override.storage_gate_enabled = true;
+    eviction_override.min_storage_bytes = 1000;
+    eviction_override.used_storage_bytes = 100;
+    eviction::ScopedEvictionAblationOverride eviction_guard (
+        eviction_override);
+
+    OperationContext ctx (s, pctx, cfg);
+    ctx.SetFeelingOfKnowing (0.2);
+    ctx.SetMemoryUsageEvents ({ { 1LL, true, -1.0 } });
+    auto tx = store->Begin ();
+    op.Execute (ctx, *tx);
+    tx->Commit ();
+    return pctx.metacognitive_confidence;
+  };
+
+  ProcessorContext default_ctx = time_only_ctx;
+  const double time_only_confidence
+      = run (time_only_ctx, temporal::ResurfacingDecayMode::TimeOnly);
+  const double default_confidence = run (default_ctx, std::nullopt);
+  const double pressure_weighted_confidence
+      = run (pressure_ctx, temporal::ResurfacingDecayMode::PressureRamp);
+
+  REQUIRE (default_confidence
+           == Catch::Approx (pressure_weighted_confidence).margin (1e-6));
+  REQUIRE (pressure_weighted_confidence > time_only_confidence);
+  REQUIRE (pressure_weighted_confidence > 0.2);
+}
+
+TEST_CASE ("Pressure-weighted certainty requirement is independent of stability",
+           "[operations][metacognitive][certainty][ablation]")
+{
+  auto unique_store = SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<Store> (std::move (unique_store));
+  cortext::testing::InitializeCoreSchema (*store);
+
+  Signal s;
+  s.embedding = Eigen::VectorXf::Zero (3);
+  s.timestamp = 1000;
+
+  auto run = [&] (double stability) {
+    ProcessorContext pctx;
+    SignalProcessor::Config cfg;
+    cortext::testing::RequireEncoder (cfg);
+    cfg.focus = 0.5;
+    cfg.sensitivity = 0.5;
+    cfg.stability = stability;
+
+    temporal::RetrievalAblationOverride retrieval_override;
+    retrieval_override.resurfacing_decay_mode
+        = temporal::ResurfacingDecayMode::PressureRamp;
+    temporal::ScopedRetrievalAblationOverride retrieval_guard (
+        retrieval_override);
+
+    eviction::EvictionAblationOverride eviction_override;
+    eviction_override.storage_gate_enabled = true;
+    eviction_override.min_storage_bytes = 1000;
+    eviction_override.used_storage_bytes = 100;
+    eviction::ScopedEvictionAblationOverride eviction_guard (
+        eviction_override);
+
+    MetacognitiveMonitoring op;
+    OperationContext ctx (s, pctx, cfg);
+    ctx.SetFeelingOfKnowing (0.4);
+    ctx.SetCompositeScore (0.7);
+    auto tx = store->Begin ();
+    op.Execute (ctx, *tx);
+    tx->Commit ();
+    return ctx.GetMetacogCertaintyRequirement ();
+  };
+
+  const double low_t = run (0.2);
+  const double high_t = run (0.9);
+
+  REQUIRE (low_t == Catch::Approx (high_t).margin (1e-6));
+}
+
+TEST_CASE ("Pressure-weighted idle decay converges to time-only under high storage pressure",
+           "[operations][metacognitive][confidence][ablation]")
+{
+  auto unique_store = SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<Store> (std::move (unique_store));
+  cortext::testing::InitializeCoreSchema (*store);
+
+  Signal s;
+  s.embedding = Eigen::VectorXf::Zero (3);
+  s.timestamp = 121000;
+
+  ProcessorContext time_only_ctx;
+  time_only_ctx.metacognitive_confidence = 1.0;
+  time_only_ctx.last_signal_timestamp = 1000;
+
+  ProcessorContext pressure_ctx = time_only_ctx;
+
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  cfg.focus = 0.5;
+  cfg.sensitivity = 0.5;
+  cfg.stability = 0.5;
+
+  MetacognitiveMonitoring op;
+
+  auto run = [&] (ProcessorContext &pctx,
+                  std::optional<temporal::ResurfacingDecayMode> decay_mode) {
+    temporal::RetrievalAblationOverride retrieval_override;
+    retrieval_override.resurfacing_decay_mode = decay_mode;
+    temporal::ScopedRetrievalAblationOverride retrieval_guard (
+        retrieval_override);
+
+    eviction::EvictionAblationOverride eviction_override;
+    eviction_override.storage_gate_enabled = true;
+    eviction_override.min_storage_bytes = 1000;
+    eviction_override.used_storage_bytes = 1000;
+    eviction::ScopedEvictionAblationOverride eviction_guard (
+        eviction_override);
+
+    OperationContext ctx (s, pctx, cfg);
+    ctx.SetFeelingOfKnowing (0.2);
+    ctx.SetMemoryUsageEvents ({ { 1LL, true, -1.0 } });
+    auto tx = store->Begin ();
+    op.Execute (ctx, *tx);
+    tx->Commit ();
+    return pctx.metacognitive_confidence;
+  };
+
+  ProcessorContext default_ctx = time_only_ctx;
+  const double time_only_confidence
+      = run (time_only_ctx, temporal::ResurfacingDecayMode::TimeOnly);
+  const double default_confidence = run (default_ctx, std::nullopt);
+  const double pressure_weighted_confidence
+      = run (pressure_ctx, temporal::ResurfacingDecayMode::PressureRamp);
+
+  REQUIRE (default_confidence
+           == Catch::Approx (pressure_weighted_confidence).margin (1e-6));
+  REQUIRE (pressure_weighted_confidence
+           == Catch::Approx (time_only_confidence).margin (1e-6));
 }
 
 TEST_CASE ("Disabling metacognitive confidence decay preserves prior confidence",

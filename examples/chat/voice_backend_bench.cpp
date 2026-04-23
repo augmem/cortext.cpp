@@ -1,8 +1,10 @@
 #include "sherpa-onnx/c-api/c-api.h"
 #include "sherpa-onnx/c-api/cxx-api.h"
+#include "sherpa-onnx/csrc/offline-speaker-segmentation-pyannote-model.h"
 #include "whisper.h"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -161,6 +163,76 @@ double MeasureMs(Fn&& fn) {
   fn();
   const auto end = std::chrono::steady_clock::now();
   return std::chrono::duration<double, std::milli>(end - start).count();
+}
+
+BackendStats RunSherpaSegmentationBench(const std::filesystem::path& repo_root,
+                                        const AudioBuffer& audio,
+                                        int num_threads) {
+  const auto seg_model = repo_root / "models/sherpa-onnx"
+                         / "sherpa-onnx-pyannote-segmentation-3-0"
+                         / "model.int8.onnx";
+
+  sherpa_onnx::OfflineSpeakerSegmentationModelConfig config;
+  config.pyannote.model = seg_model.string();
+  config.num_threads = num_threads;
+  config.provider = "cpu";
+
+  sherpa_onnx::OfflineSpeakerSegmentationPyannoteModel model(config);
+  const auto& meta = model.GetModelMetaData();
+  if (meta.sample_rate != audio.sample_rate) {
+    throw std::runtime_error("Segmentation model sample rate mismatch");
+  }
+
+  BackendStats stats;
+  stats.name = "Sherpa pyannote segmentation";
+  Ort::MemoryInfo memory_info = Ort::MemoryInfo::CreateCpu(
+      OrtArenaAllocator, OrtMemTypeDefault);
+
+  stats.total_ms = MeasureMs([&] {
+    const int32_t batch_size = 32;
+    const int64_t window_size = meta.window_size;
+    const int64_t window_shift = meta.window_shift;
+    const int64_t total_samples = static_cast<int64_t>(audio.samples.size());
+    const int64_t regular_chunks
+        = total_samples >= window_size
+              ? ((total_samples - window_size) / window_shift) + 1
+              : 0;
+    const bool has_last_chunk
+        = total_samples < window_size
+          || ((total_samples - window_size) % window_shift) > 0;
+    const int64_t total_chunks = regular_chunks + (has_last_chunk ? 1 : 0);
+
+    std::vector<float> batch;
+    batch.reserve(static_cast<std::size_t>(batch_size * window_size));
+
+    for (int64_t chunk = 0; chunk < total_chunks; chunk += batch_size) {
+      const int64_t current_batch
+          = std::min<int64_t>(batch_size, total_chunks - chunk);
+      batch.assign(static_cast<std::size_t>(current_batch * window_size), 0.0f);
+
+      for (int64_t item = 0; item < current_batch; ++item) {
+        const int64_t chunk_index = chunk + item;
+        const int64_t start = chunk_index < regular_chunks
+                                  ? chunk_index * window_shift
+                                  : regular_chunks * window_shift;
+        const int64_t available = std::max<int64_t>(
+            0, std::min<int64_t>(window_size, total_samples - start));
+        if (available > 0) {
+          std::copy_n(audio.samples.data() + start,
+                      static_cast<std::size_t>(available),
+                      batch.data() + item * window_size);
+        }
+      }
+
+      std::array<int64_t, 3> shape{current_batch, 1, window_size};
+      Ort::Value input = Ort::Value::CreateTensor<float>(
+          memory_info, batch.data(), batch.size(), shape.data(), shape.size());
+      Ort::Value output = model.Forward(std::move(input));
+      (void)output;
+      stats.segments += static_cast<int>(current_batch);
+    }
+  });
+  return stats;
 }
 
 BackendStats RunSherpaBench(const std::filesystem::path& repo_root,
@@ -348,9 +420,13 @@ int main(int argc, char** argv) {
               << audio_seconds << '\n'
               << "threads: " << num_threads << "\n\n";
 
+    const BackendStats segmentation
+        = RunSherpaSegmentationBench(repo_root, audio, num_threads);
     const BackendStats sherpa = RunSherpaBench(repo_root, audio, num_threads);
     const BackendStats whisper = RunWhisperBench(repo_root, audio, num_threads);
 
+    PrintStats(segmentation, audio_seconds);
+    std::cout << '\n';
     PrintStats(sherpa, audio_seconds);
     std::cout << '\n';
     PrintStats(whisper, audio_seconds);

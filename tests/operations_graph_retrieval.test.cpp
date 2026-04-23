@@ -1,6 +1,8 @@
 // tests/operations_graph_retrieval.test.cpp
 #include "test_helpers.hpp"
+#include "../src/operations/eviction_ablation.hpp"
 #include "../src/operations/retrieval_debug_state.hpp"
+#include "../src/operations/temporal_retrieval.hpp"
 #include <any>
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
@@ -12,9 +14,12 @@
 #include <cortext/store/sqlite_store.hpp>
 
 #include <cmath>
+#include <optional>
 
 using namespace cortext;
 using cortext::operations::GraphAugmentedRetrieveCandidates;
+namespace temporal = cortext::operations::temporal;
+namespace eviction = cortext::operations::eviction;
 
 namespace
 {
@@ -514,4 +519,168 @@ TEST_CASE ("Unknown caution suppresses relaxed fallback retrieval",
     const auto ids = run ();
     REQUIRE (ids.empty ());
   }
+}
+
+TEST_CASE ("Pressure-weighted resurfacing preserves old but relevant memories at low pressure",
+           "[operations][graph][ablation][resurfacing]")
+{
+  auto unique_store = SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<Store> (std::move (unique_store));
+  cortext::testing::InitializeCoreSchema (*store);
+
+  const Eigen::VectorXf query = UnitVec256 (1.0f);
+  cortext::testing::SeedEmbeddingV2 (*store, 77LL, query, 1);
+  cortext::testing::SeedMemoryV2 (*store, 77LL, 77LL, "test", "LONG_TERM", 1.0,
+                                  1);
+  SetMemorySourceMetadata (*store, 77LL, "external", 0.44, 2);
+
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  cfg.focus = 0.5;
+  cfg.sensitivity = 0.5;
+  cfg.stability = 0.5;
+
+  auto run = [&] (std::optional<temporal::ResurfacingDecayMode> decay_mode,
+                  long long used_storage_bytes) {
+    temporal::RetrievalAblationOverride retrieval_override;
+    retrieval_override.resurfacing_decay_mode = decay_mode;
+    temporal::ScopedRetrievalAblationOverride retrieval_guard (
+        retrieval_override);
+
+    eviction::EvictionAblationOverride eviction_override;
+    eviction_override.storage_gate_enabled = true;
+    eviction_override.min_storage_bytes = 1000;
+    eviction_override.used_storage_bytes = used_storage_bytes;
+    eviction::ScopedEvictionAblationOverride eviction_guard (
+        eviction_override);
+
+    auto ops = std::make_unique<OperationSet> (
+        std::make_unique<ForceRetrievalGateOp> (
+            ProcessorContext::MetacognitiveMode::UnknownCaution, 0.0),
+        std::make_unique<GraphAugmentedRetrieveCandidates> ());
+    SignalProcessor processor (cfg, store, std::move (ops));
+    auto out = processor.Process (
+        MakeSignal (query, 168ULL * 60ULL * 60ULL * 1000ULL + 1000ULL));
+    processor.Flush ();
+    return out.candidate_memory_ids;
+  };
+
+  const auto default_ids = run (std::nullopt, 100);
+  const auto time_only_ids
+      = run (temporal::ResurfacingDecayMode::TimeOnly, 100);
+  const auto pressure_weighted_ids
+      = run (temporal::ResurfacingDecayMode::PressureRamp, 100);
+
+  REQUIRE (default_ids == pressure_weighted_ids);
+  REQUIRE (time_only_ids.empty ());
+  REQUIRE (std::find (pressure_weighted_ids.begin (),
+                      pressure_weighted_ids.end (),
+                      77LL)
+           != pressure_weighted_ids.end ());
+}
+
+TEST_CASE ("Pressure-weighted resurfacing converges to time-only under high pressure",
+           "[operations][graph][ablation][resurfacing]")
+{
+  auto unique_store = SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<Store> (std::move (unique_store));
+  cortext::testing::InitializeCoreSchema (*store);
+
+  const Eigen::VectorXf query = UnitVec256 (1.0f);
+  cortext::testing::SeedEmbeddingV2 (*store, 88LL, query, 1);
+  cortext::testing::SeedMemoryV2 (*store, 88LL, 88LL, "test", "LONG_TERM", 1.0,
+                                  1);
+  SetMemorySourceMetadata (*store, 88LL, "external", 0.44, 2);
+
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  cfg.focus = 0.5;
+  cfg.sensitivity = 0.5;
+  cfg.stability = 0.5;
+
+  auto run = [&] (std::optional<temporal::ResurfacingDecayMode> decay_mode) {
+    temporal::RetrievalAblationOverride retrieval_override;
+    retrieval_override.resurfacing_decay_mode = decay_mode;
+    temporal::ScopedRetrievalAblationOverride retrieval_guard (
+        retrieval_override);
+
+    eviction::EvictionAblationOverride eviction_override;
+    eviction_override.storage_gate_enabled = true;
+    eviction_override.min_storage_bytes = 1000;
+    eviction_override.used_storage_bytes = 1000;
+    eviction::ScopedEvictionAblationOverride eviction_guard (
+        eviction_override);
+
+    auto ops = std::make_unique<OperationSet> (
+        std::make_unique<ForceRetrievalGateOp> (
+            ProcessorContext::MetacognitiveMode::UnknownCaution, 0.0),
+        std::make_unique<GraphAugmentedRetrieveCandidates> ());
+    SignalProcessor processor (cfg, store, std::move (ops));
+    auto out = processor.Process (
+        MakeSignal (query, 168ULL * 60ULL * 60ULL * 1000ULL + 1000ULL));
+    processor.Flush ();
+    return out.candidate_memory_ids;
+  };
+
+  const auto default_ids = run (std::nullopt);
+  const auto time_only_ids
+      = run (temporal::ResurfacingDecayMode::TimeOnly);
+  const auto pressure_weighted_ids
+      = run (temporal::ResurfacingDecayMode::PressureRamp);
+
+  REQUIRE (default_ids == pressure_weighted_ids);
+  REQUIRE (time_only_ids.empty ());
+  REQUIRE (pressure_weighted_ids.empty ());
+}
+
+TEST_CASE ("Pressure-weighted resurfacing under low pressure is independent of stability",
+           "[operations][graph][ablation][resurfacing]")
+{
+  auto unique_store = SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<Store> (std::move (unique_store));
+  cortext::testing::InitializeCoreSchema (*store);
+
+  const Eigen::VectorXf query = UnitVec256 (1.0f);
+  cortext::testing::SeedEmbeddingV2 (*store, 99LL, query, 1);
+  cortext::testing::SeedMemoryV2 (*store, 99LL, 99LL, "test", "LONG_TERM", 1.0,
+                                  1);
+  SetMemorySourceMetadata (*store, 99LL, "external", 0.46, 2);
+
+  auto run = [&] (double stability) {
+    SignalProcessor::Config cfg;
+    cortext::testing::RequireEncoder (cfg);
+    cfg.focus = 0.5;
+    cfg.sensitivity = 0.5;
+    cfg.stability = stability;
+
+    temporal::RetrievalAblationOverride retrieval_override;
+    retrieval_override.resurfacing_decay_mode
+        = temporal::ResurfacingDecayMode::PressureRamp;
+    temporal::ScopedRetrievalAblationOverride retrieval_guard (
+        retrieval_override);
+
+    eviction::EvictionAblationOverride eviction_override;
+    eviction_override.storage_gate_enabled = true;
+    eviction_override.min_storage_bytes = 1000;
+    eviction_override.used_storage_bytes = 100;
+    eviction::ScopedEvictionAblationOverride eviction_guard (
+        eviction_override);
+
+    auto ops = std::make_unique<OperationSet> (
+        std::make_unique<ForceRetrievalGateOp> (
+            ProcessorContext::MetacognitiveMode::UnknownCaution, 0.0),
+        std::make_unique<GraphAugmentedRetrieveCandidates> ());
+    SignalProcessor processor (cfg, store, std::move (ops));
+    auto out = processor.Process (
+        MakeSignal (query, 168ULL * 60ULL * 60ULL * 1000ULL + 1000ULL));
+    processor.Flush ();
+    return out.candidate_memory_ids;
+  };
+
+  const auto low_t_ids = run (0.2);
+  const auto high_t_ids = run (0.9);
+
+  REQUIRE (low_t_ids == high_t_ids);
+  REQUIRE (std::find (low_t_ids.begin (), low_t_ids.end (), 99LL)
+           != low_t_ids.end ());
 }

@@ -7,9 +7,14 @@ add_executable(cortext_topical_chat_analysis
 target_link_libraries(cortext_topical_chat_analysis PRIVATE
   cortext::cortext
   nlohmann_json::nlohmann_json
-  opentelemetry-cpp::api
-  opentelemetry-cpp::logs
 )
+
+if(NOT CORTEXT_DISABLE_OPENTELEMETRY)
+  target_link_libraries(cortext_topical_chat_analysis PRIVATE
+    opentelemetry-cpp::api
+    opentelemetry-cpp::logs
+  )
+endif()
 
 target_compile_features(cortext_topical_chat_analysis PRIVATE cxx_std_20)
 target_include_directories(cortext_topical_chat_analysis PRIVATE

@@ -85,8 +85,8 @@ final class CortextLibrary {
 
     throw CortextError(
       'Could not locate the Cortext shared library. '
-      'Build it with `cmake --preset ffi-release` and '
-      '`cmake --build --preset ffi-release --target cortext`, '
+      'Build it with `zig build -Dshared=true -Dllama=false` or '
+      '`cmake --preset ffi-release && cmake --build --preset ffi-release --target cortext`, '
       'or set CORTEXT_LIBRARY_PATH.',
     );
   }
@@ -109,6 +109,7 @@ final class CortextLibrary {
     return <String>[
       for (final root in roots)
         for (final directory in <String>[
+          '$root/zig-out/lib',
           '$root/build/ffi-release',
           '$root/build/ffi-release/lib',
           '$root/install/lib',

@@ -140,6 +140,7 @@ add_library(cortext
     src/store/object_store.cpp
     src/store/schema.cpp
     src/store/facts.cpp
+    src/internal/cancellation.cpp
     src/processor/operation_context.cpp
     src/signal_processor.cpp
     src/cortext.cpp
@@ -191,6 +192,7 @@ add_library(cortext
     src/operations/graph_retrieval.cpp
     src/operations/temporal_retrieval.cpp
     src/operations/eviction_ablation.cpp
+    src/operations/storage_pressure.cpp
     src/operations/retrieval_debug_state.cpp
     src/operations/neuromodulators.cpp
     # Phase 4: Knowledge Graph Enhancement

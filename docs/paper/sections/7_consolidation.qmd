@@ -119,7 +119,7 @@ Low-scoring memories are marked for merging.
 
 Consolidation proceeds via **generative replay** rather than one-shot merges. Representative episodes are re-encoded and used to update semantic structures, reducing drift and preserving detail.
 
-**Summarization + labeling engine (deep mode):** Consolidation is the only stage that invokes a generative model. Deep mode resolves a local backend internally: **gemma-3n-e2b** through `third_party/litert_lm`, **LFM2/LFM2.5** through `llama.cpp` GGUFs, or a **mixed** path that uses Gemma for summarization and a Liquid GGUF for extraction. The Liquid resolver now prefers `LFM2.5-350M-GGUF` for both summarization and extraction, defaulting to the local `Q4_K_M` checkpoint when present and accepting other bundled GGUF quantizations as fallbacks; if that asset is absent, it falls back to the older pinned `LFM2-2.6B-Transcript-Q4_K_M.gguf` summarizer and `LFM2-1.2B-Extract-Q4_K_M.gguf` extractor. Auto resolution now prefers the pure Liquid `LFM2.5/llama.cpp` path when those assets are present; the mixed path and Gemma path are fallbacks. All other operations remain embedding-only. **There is no extractive fallback**: if no deep backend is available, or summarization fails, deep consolidation raises an error rather than silently degrading. After the prompt-technique ablations in [Section 9](#sec-extractor-prompt-ablation) and [Section 9](#sec-summarizer-prompt-ablation), the default local Liquid extraction prompt is now a short **few-shot durable** prompt, and the default local Liquid summarization prompt is now a **transcript few-shot** prompt that feeds the small `LFM2.5-350M` model a chat transcript instead of numbered excerpts. That combination keeps the local path fast while materially reducing schema/meta leakage and last-excerpt bias.
+**Summarization + labeling engine (deep mode):** Consolidation is the only stage that invokes a generative model. Deep mode resolves a local backend internally: **gemma-3n-e2b** through `third_party/litert_lm`, **LFM2/LFM2.5** through `llama.cpp` GGUFs, or a **mixed** path that uses Gemma for summarization and a Liquid GGUF for extraction. The Liquid resolver now prefers `LFM2.5-350M-GGUF` for extraction and `LFM2.5-1.2B-Instruct-GGUF` for summarization when present, defaulting to the local `Q4_K_M` checkpoints and accepting other bundled GGUF quantizations as fallbacks. Auto resolution now prefers the pure Liquid `LFM2.5/llama.cpp` path when those assets are present; the mixed path and Gemma path are fallbacks. All other operations remain embedding-only. **There is no extractive fallback**: if no deep backend is available, deep consolidation raises an error rather than silently degrading. Summarization failure affects only optional compression, not label extraction from the underlying memory cluster. After the prompt-technique ablations in [Section 9](#sec-extractor-prompt-ablation) and [Section 9](#sec-summarizer-prompt-ablation), the default local Liquid extraction prompt is now a short **few-shot durable** prompt, and the default local Liquid summarization prompt is now a **transcript few-shot** prompt. That combination keeps the local path fast while materially reducing schema/meta leakage and last-excerpt bias.
 
 ## Shallow Consolidation (Embedding‑Only)
 
@@ -169,7 +169,19 @@ cluster_i = {m_j | cos(m_j, μ_i) > merge_threshold}
 μ_i = centroid(cluster_i)
 ```
 
-Summary nodes replace clusters:
+Deep consolidation first creates a non-lossy associative cue node. This node is
+the stable graph anchor for labels and retrieval; it does not replace the raw
+episodic memories and does not count as compression:
+
+```
+cue.embedding = μ_i
+cue.source_id = "associative_cue_*"
+cue.metadata.sources = [m.id for m in cluster_i]
+emit edge(cue, m, type="derived_from") for m in cluster_i
+```
+
+Only when the storage-pressure/ejection frontier permits lossy compression does
+the runtime create a separate summary node:
 
 ```
 summary.embedding = μ_i
@@ -177,7 +189,7 @@ summary.blob = summarize(fetch_blobs(cluster_i))  # deep local LLM backend (Gemm
 summary.metadata.sources = [m.id for m in cluster_i]
 ```
 
-**Current implementation note:** same-level deep summarization now replays only raw episodic `LONG_TERM` memories that have not yet been assigned to a consolidation cluster. This prevents repeated summary-of-summary compression in long chat sessions while still allowing later raw evidence to form new sibling summaries. Higher-level semantic summarization, if desired, should be modeled as an explicit separate layer rather than by recursively feeding first-level summary blobs back into the same consolidation path.
+**Current implementation note:** same-level deep summarization now replays only raw episodic `LONG_TERM` memories that have not yet been assigned to a consolidation cluster. This prevents repeated summary-of-summary compression in long chat sessions while still allowing later raw evidence to form new sibling summaries. Higher-level semantic summarization, if desired, should be modeled as an explicit separate layer rather than by recursively feeding first-level summary blobs back into the same consolidation path. Associative cue nodes are reusable graph anchors for a source set; summary nodes are optional compression artifacts and are the only association nodes that satisfy the destructive deletion guard for "compressed before delete."
 
 To keep consolidation latency bounded, summarization input is capped by knob‑derived limits. Source texts are ranked by similarity to the cluster centroid and truncated:
 
@@ -202,9 +214,28 @@ extraction_interval = lerp(300, 3600, T)  # 5 min → 1 hour
 max_extractions_per_cycle = round(lerp(20, 5, T))
 ```
 
-Extraction uses structured prompting to identify labels/tags (people, places, organizations, concepts) and relationships (co-occurrence, implication, contradiction). Labels are stored as surface strings (no type/category field) **and** persisted with their own embeddings so they can participate in retrieval and graph expansion.
+Extraction uses structured prompting over raw source texts from the memory
+cluster, not over the summary text. Labels attach to the associative cue node with
+`has_label` edges:
 
-**Current implementation note:** the deployed runtime now persists extracted labels directly from each extraction result, deduped by normalized label key within the result and reused by key across the store. The old knob-derived repetition gate and single-label fallback were removed because they made durable label formation too dependent on exact repeated strings and caused obvious chat failures like identity/name loss and severe label undercounting. The online path is still simple: label strings are inserted as `LABEL` memories, salience is embedding-derived, and repeated mentions update `s_max` on the existing label node. In parallel, we continue to study a more semantic alternative through the **offline semantic label-classifier prototype** in `scripts/build_wordnet_label_index.py`, `scripts/build_name_priors.py`, `scripts/build_label_training_data.py`, `scripts/train_label_classifier.py`, and `scripts/eval_label_classifier.py`. That prototype trains two small models over candidate spans:
+```
+request.texts = fetch_blobs(cluster_i)
+request.anchor = cue.source_id
+labels, relations, facts = extract(request.texts)
+emit edge(cue, label, type="has_label")
+```
+
+This makes label formation a consolidation behavior, independent of storage
+pressure and independent of whether a lossy summary is created. The label array
+is allowed to be empty: filler-only or banter-only clusters should produce no
+`LABEL` node rather than forcing the model to choose a token. Extracted
+labels/tags (people, places, organizations, concepts) and relationships
+(co-occurrence, implication, contradiction) are stored as graph products.
+Labels are stored as surface strings (no type/category field) **and** persisted
+with their own embeddings so they can participate in retrieval and graph
+expansion.
+
+**Current implementation note:** the deployed runtime now persists extracted labels directly from each extraction result, deduped by normalized label key within the result and reused by key across the store. The old knob-derived repetition gate and single-label fallback were removed because they made durable label formation too dependent on exact repeated strings and caused obvious chat failures like identity/name loss and severe label undercounting. The current runtime also applies deterministic quality gates before persistence: transcript fillers, helper tokens, and speaker-role terms such as `ya`, `know`, `you know`, `um`, `uh`, `ok`, `okay`, `user`, and `assistant` are not durable graph labels even if a model emits them; when raw cue evidence is available, candidate labels must also appear in the source memory text after simple canonicalization. This rejects prompt/example leakage such as `confidence` or `interview` in banter-only clusters without globally banning those words when they are actually present. The online path is still simple: accepted label strings are inserted as `LABEL` memories, salience is embedding-derived, and repeated mentions update `s_max` on the existing label node. In parallel, we continue to study a more semantic alternative through the **offline semantic label-classifier prototype** in `scripts/build_wordnet_label_index.py`, `scripts/build_name_priors.py`, `scripts/build_label_training_data.py`, `scripts/train_label_classifier.py`, and `scripts/eval_label_classifier.py`. That prototype trains two small models over candidate spans:
 
 * a **span typing** head (`identity`, `person_entity`, `place`, `org_project`, `topic`, `state`, `none`), and
 * a **promotion** head (`durable`, `provisional`, `ignore`)
@@ -215,7 +246,7 @@ Label salience is derived from embeddings rather than model guesses:
 
 ```
 e_label = encode(label_text)
-salience(label) = clamp((cos(e_label, summary.embedding) + 1) / 2, 0, 1)
+salience(label) = clamp((cos(e_label, cue.embedding) + 1) / 2, 0, 1)
 ```
 
 Label embeddings are cached by normalized label key. If a label already exists
@@ -238,7 +269,7 @@ fact_assertion_j = (
   object,
   valid = [t_v_start, t_v_end),
   tx    = [t_tx_start, t_tx_end),
-  provenance = {source_memory_ids, source_summary_ids},
+  provenance = {source_memory_ids, source_associative_cue_ids, source_summary_ids},
   confidence
 )
 ```

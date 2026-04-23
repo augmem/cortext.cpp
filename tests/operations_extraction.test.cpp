@@ -381,3 +381,55 @@ TEST_CASE ("ProcessExtractionResults preserves multiple distinct labels from one
       {});
   REQUIRE (cortext::testing::GetInt64 (edge_rows[0], "c") == 3);
 }
+
+TEST_CASE ("ProcessExtractionResults rejects transcript filler labels",
+           "[operations][extraction][labels]")
+{
+  auto unique_store = SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<Store> (std::move (unique_store));
+  cortext::testing::InitializeCoreSchema (*store);
+
+  std::vector<float> unit_embedding (kEmbeddingDim, 0.0f);
+  unit_embedding[0] = 1.0f;
+
+  cortext::testing::SeedEmbeddingV2 (*store, 10LL, unit_embedding, 1000LL);
+  cortext::testing::SeedMemoryV2 (*store, 20LL, 10LL, "associative_cue_1",
+                                 "ASSOCIATION", 1.0, 1000LL);
+
+  FixedEncoder encoder (unit_embedding);
+
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  cfg.encoder = &encoder;
+
+  ProcessorContext pctx;
+  Signal s = MakeSignal (2000ULL);
+  OperationContext ctx (s, pctx, cfg, store.get ());
+
+  operations::ExtractionResult extraction;
+  extraction.summary_id = "associative_cue_1";
+  extraction.labels.push_back ({ "ya", 0.0 });
+  extraction.labels.push_back ({ "know", 0.0 });
+  extraction.labels.push_back ({ "User", 0.0 });
+  extraction.labels.push_back ({ "Assistant", 0.0 });
+  extraction.labels.push_back ({ "thanks", 0.0 });
+  extraction.labels.push_back ({ "Gabriel", 0.0 });
+  pctx.pending_extraction_results.push_back (std::move (extraction));
+
+  operations::ProcessExtractionResults op;
+  auto tx = store->Begin ();
+  op.Execute (ctx, *tx);
+  tx->Commit ();
+
+  auto label_rows = store->Execute (
+      "SELECT source_id, label FROM memories WHERE kind = 'LABEL'",
+      {});
+  REQUIRE (label_rows.size () == 1);
+  REQUIRE (std::any_cast<std::string> (label_rows[0].at ("source_id"))
+           == "gabriel");
+
+  auto edge_rows = store->Execute (
+      "SELECT COUNT(*) AS c FROM associations WHERE edge_type = 'has_label'",
+      {});
+  REQUIRE (cortext::testing::GetInt64 (edge_rows[0], "c") == 1);
+}

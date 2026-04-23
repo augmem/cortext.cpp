@@ -2522,24 +2522,23 @@ only stage that invokes a generative model. Deep mode resolves a local
 backend internally: **gemma-3n-e2b** through `third_party/litert_lm`,
 **LFM2/LFM2.5** through `llama.cpp` GGUFs, or a **mixed** path that uses
 Gemma for summarization and a Liquid GGUF for extraction. The Liquid
-resolver now prefers `LFM2.5-350M-GGUF` for both summarization and
-extraction, defaulting to the local `Q4_K_M` checkpoint when present and
-accepting other bundled GGUF quantizations as fallbacks; if that asset
-is absent, it falls back to the older pinned
-`LFM2-2.6B-Transcript-Q4_K_M.gguf` summarizer and
-`LFM2-1.2B-Extract-Q4_K_M.gguf` extractor. Auto resolution now prefers
-the pure Liquid `LFM2.5/llama.cpp` path when those assets are present;
-the mixed path and Gemma path are fallbacks. All other operations remain
+resolver now prefers `LFM2.5-350M-GGUF` for extraction and
+`LFM2.5-1.2B-Instruct-GGUF` for summarization when present, defaulting
+to the local `Q4_K_M` checkpoints and accepting other bundled GGUF
+quantizations as fallbacks. Auto resolution now prefers the pure Liquid
+`LFM2.5/llama.cpp` path when those assets are present; the mixed path
+and Gemma path are fallbacks. All other operations remain
 embedding-only. **There is no extractive fallback**: if no deep backend
-is available, or summarization fails, deep consolidation raises an error
-rather than silently degrading. After the prompt-technique ablations in
-[Section 9](#sec-extractor-prompt-ablation) and [Section
+is available, deep consolidation raises an error rather than silently
+degrading. Summarization failure affects only optional compression, not
+label extraction from the underlying memory cluster. After the
+prompt-technique ablations in [Section
+9](#sec-extractor-prompt-ablation) and [Section
 9](#sec-summarizer-prompt-ablation), the default local Liquid extraction
 prompt is now a short **few-shot durable** prompt, and the default local
-Liquid summarization prompt is now a **transcript few-shot** prompt that
-feeds the small `LFM2.5-350M` model a chat transcript instead of
-numbered excerpts. That combination keeps the local path fast while
-materially reducing schema/meta leakage and last-excerpt bias.
+Liquid summarization prompt is now a **transcript few-shot** prompt.
+That combination keeps the local path fast while materially reducing
+schema/meta leakage and last-excerpt bias.
 
 ## Shallow Consolidation (Embedding‑Only)
 
@@ -2594,7 +2593,17 @@ methods (e.g., DBSCAN) or k-means using embedding similarity:
     cluster_i = {m_j | cos(m_j, μ_i) > merge_threshold}
     μ_i = centroid(cluster_i)
 
-Summary nodes replace clusters:
+Deep consolidation first creates a non-lossy associative cue node. This
+node is the stable graph anchor for labels and retrieval; it does not
+replace the raw episodic memories and does not count as compression:
+
+    cue.embedding = μ_i
+    cue.source_id = "associative_cue_*"
+    cue.metadata.sources = [m.id for m in cluster_i]
+    emit edge(cue, m, type="derived_from") for m in cluster_i
+
+Only when the storage-pressure/ejection frontier permits lossy
+compression does the runtime create a separate summary node:
 
     summary.embedding = μ_i
     summary.blob = summarize(fetch_blobs(cluster_i))  # deep local LLM backend (Gemma/LiteRT-LM or LFM2/llama.cpp)
@@ -2607,7 +2616,10 @@ summary-of-summary compression in long chat sessions while still
 allowing later raw evidence to form new sibling summaries. Higher-level
 semantic summarization, if desired, should be modeled as an explicit
 separate layer rather than by recursively feeding first-level summary
-blobs back into the same consolidation path.
+blobs back into the same consolidation path. Associative cue nodes are
+reusable graph anchors for a source set; summary nodes are optional
+compression artifacts and are the only association nodes that satisfy
+the destructive deletion guard for “compressed before delete.”
 
 To keep consolidation latency bounded, summarization input is capped by
 knob‑derived limits. Source texts are ranked by similarity to the
@@ -2631,9 +2643,22 @@ and relations (deep mode only):
     extraction_interval = lerp(300, 3600, T)  # 5 min → 1 hour
     max_extractions_per_cycle = round(lerp(20, 5, T))
 
-Extraction uses structured prompting to identify labels/tags (people,
-places, organizations, concepts) and relationships (co-occurrence,
-implication, contradiction). Labels are stored as surface strings (no
+Extraction uses structured prompting over raw source texts from the
+memory cluster, not over the summary text. Labels attach to the
+associative cue node with `has_label` edges:
+
+    request.texts = fetch_blobs(cluster_i)
+    request.anchor = cue.source_id
+    labels, relations, facts = extract(request.texts)
+    emit edge(cue, label, type="has_label")
+
+This makes label formation a consolidation behavior, independent of
+storage pressure and independent of whether a lossy summary is created.
+The label array is allowed to be empty: filler-only or banter-only
+clusters should produce no `LABEL` node rather than forcing the model to
+choose a token. Extracted labels/tags (people, places, organizations,
+concepts) and relationships (co-occurrence, implication, contradiction)
+are stored as graph products. Labels are stored as surface strings (no
 type/category field) **and** persisted with their own embeddings so they
 can participate in retrieval and graph expansion.
 
@@ -2643,12 +2668,20 @@ normalized label key within the result and reused by key across the
 store. The old knob-derived repetition gate and single-label fallback
 were removed because they made durable label formation too dependent on
 exact repeated strings and caused obvious chat failures like
-identity/name loss and severe label undercounting. The online path is
-still simple: label strings are inserted as `LABEL` memories, salience
-is embedding-derived, and repeated mentions update `s_max` on the
-existing label node. In parallel, we continue to study a more semantic
-alternative through the **offline semantic label-classifier prototype**
-in `scripts/build_wordnet_label_index.py`,
+identity/name loss and severe label undercounting. The current runtime
+also applies deterministic quality gates before persistence: transcript
+fillers, helper tokens, and speaker-role terms such as `ya`, `know`,
+`you know`, `um`, `uh`, `ok`, `okay`, `user`, and `assistant` are not
+durable graph labels even if a model emits them; when raw cue evidence
+is available, candidate labels must also appear in the source memory
+text after simple canonicalization. This rejects prompt/example leakage
+such as `confidence` or `interview` in banter-only clusters without
+globally banning those words when they are actually present. The online
+path is still simple: accepted label strings are inserted as `LABEL`
+memories, salience is embedding-derived, and repeated mentions update
+`s_max` on the existing label node. In parallel, we continue to study a
+more semantic alternative through the **offline semantic
+label-classifier prototype** in `scripts/build_wordnet_label_index.py`,
 `scripts/build_name_priors.py`, `scripts/build_label_training_data.py`,
 `scripts/train_label_classifier.py`, and
 `scripts/eval_label_classifier.py`. That prototype trains two small
@@ -2668,7 +2701,7 @@ path.
 Label salience is derived from embeddings rather than model guesses:
 
     e_label = encode(label_text)
-    salience(label) = clamp((cos(e_label, summary.embedding) + 1) / 2, 0, 1)
+    salience(label) = clamp((cos(e_label, cue.embedding) + 1) / 2, 0, 1)
 
 Label embeddings are cached by normalized label key. If a label already
 exists in the store (or is present in the in-memory cache), its
@@ -2696,7 +2729,7 @@ consolidation product alongside labels and relations:
       object,
       valid = [t_v_start, t_v_end),
       tx    = [t_tx_start, t_tx_end),
-      provenance = {source_memory_ids, source_summary_ids},
+      provenance = {source_memory_ids, source_associative_cue_ids, source_summary_ids},
       confidence
     )
 
@@ -8446,6 +8479,266 @@ default** for the local `LFM2.5-350M` summarization path, while still
 allowing overrides through `CORTEXT_LFM2_SUMMARY_PROMPT_STYLE` for
 further study.
 
+### Summarization Retrieval Ablation
+
+Prompt-level summary quality does not answer the product question by
+itself. For chat memory, the load-bearing question is whether summary
+nodes improve or degrade later retrieval of the original episodic
+details. We therefore added a targeted retrieval ablation around a
+repeated personal-event fact: `Maya` is an `11-year-old`; she gave a
+`pitch` `this weekend`; the detail was mentioned `three times`.
+
+The benchmark seeds the same event trace plus distractors under three
+conditions, then asks a recall query and scores whether retrieved raw
+memories or retrieved summary nodes contain the five details (`Maya`,
+age, pitch, weekend, repetition):
+
+-   no consolidation
+-   shallow consolidation
+-   deep consolidation with the configured LFM2.5 summarizer/extractor
+    path
+
+**Deterministic retrieval ablation:**
+`./build/examples/benchmark/cortext_summarization_retrieval_ablation_bench`
+
+Run log:
+`logs/summarization_retrieval_ablation_20260422/summarization_retrieval_ablation.log`
+
+<table>
+<colgroup>
+<col style="width: 13%" />
+<col style="width: 17%" />
+<col style="width: 17%" />
+<col style="width: 17%" />
+<col style="width: 17%" />
+<col style="width: 17%" />
+</colgroup>
+<thead>
+<tr>
+<th>condition</th>
+<th style="text-align: right;">retrieved candidates</th>
+<th style="text-align: right;">raw detail hits</th>
+<th style="text-align: right;">summary detail hits</th>
+<th style="text-align: right;">raw hits</th>
+<th style="text-align: right;">summary hits</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>no consolidation</td>
+<td style="text-align: right;"><code>4</code></td>
+<td style="text-align: right;"><strong><code>5 / 5</code></strong></td>
+<td style="text-align: right;"><code>0 / 5</code></td>
+<td style="text-align: right;"><code>4</code></td>
+<td style="text-align: right;"><code>0</code></td>
+</tr>
+<tr>
+<td>shallow consolidation</td>
+<td style="text-align: right;"><code>8</code></td>
+<td style="text-align: right;"><strong><code>5 / 5</code></strong></td>
+<td style="text-align: right;"><code>0 / 5</code></td>
+<td style="text-align: right;"><code>4</code></td>
+<td style="text-align: right;"><code>0</code></td>
+</tr>
+<tr>
+<td>deep consolidation</td>
+<td style="text-align: right;"><code>12</code></td>
+<td style="text-align: right;"><strong><code>5 / 5</code></strong></td>
+<td style="text-align: right;"><code>0 / 5</code></td>
+<td style="text-align: right;"><code>4</code></td>
+<td style="text-align: right;"><code>0</code></td>
+</tr>
+</tbody>
+</table>
+
+Per-detail raw recall was complete in all three conditions (`age=1`,
+`pitch=1`, `weekend=1`, `repetition=1`, plus the named subject). Deep
+consolidation increased candidate breadth, but the exact
+autobiographical details still came from raw episodic memories rather
+than summary nodes.
+
+**Observation:** This supports a more conservative interpretation of
+summarization in Cortext. For exact chat recall, summary nodes are not
+currently necessary when the raw memory engine has preserved the source
+traces. The safe role for summarization is routing, clustering, and
+optional compression, not replacement of canonical evidence. Retrieval
+should continue to hydrate and rank source memories behind any retrieved
+summary; otherwise lossy summaries can erase details that the base
+engine already retained.
+
+### Storage-Pressure Summary Gate
+
+The retrieval ablation above motivated a policy change: abstractive
+summaries should not be emitted merely because a consolidation cadence
+fired. Raw episodic memories are canonical while storage is cheap; lossy
+summary nodes become useful only when they are acting as compression
+under real storage pressure.
+
+The deployed gate now reuses the exact eviction frontier instead of
+maintaining a second summarization-specific ejection policy:
+
+``` text
+storage_allows_ejection =
+  !storage_gate_active || used_bytes >= storage_threshold_bytes
+
+summary_compression_enabled =
+  storage_gate_active && storage_allows_ejection
+
+eviction_frontier(memory) =
+  storage_allows_ejection
+  && memory.kind == LONG_TERM
+  && memory.strength < periphery_cutoff(T)
+  && (!active_fact_evidence(memory)
+      || memory.strength < fact_eviction_floor(T))
+  && (!consolidation_gate_active
+      || memory.created_at < last_consolidation_ts)
+```
+
+A cluster is summarized only when an explicit storage gate is active and
+all raw `LONG_TERM` source memories in that cluster are already
+eviction-frontier candidates. This keeps the `LFM2.5-1.2B` summarizer
+off the hot path when the database is below pressure or no storage
+budget has been configured, and it prevents lossy compression from
+inventing a retention rule that disagrees with memory ejection.
+Fact-backed memories are protected by the same `fact_eviction_floor(T)`
+used by deletion.
+
+Label extraction is intentionally independent of this compression gate.
+Every eligible consolidation cluster first receives a lightweight
+`associative_cue_*` ASSOCIATION node with `derived_from` edges back to
+the raw memories, then extraction runs on the raw source texts.
+Extracted `LABEL` nodes attach to that cue through `has_label` edges.
+Summary nodes are optional second-stage compression artifacts;
+summarizer availability or failure cannot decide whether labels are
+extracted from the underlying memories. Empty label arrays are valid for
+filler-only clusters, and the persistence path rejects common transcript
+fillers and speaker-role terms such as `ya`, `know`, `you know`, `user`,
+and `assistant` before creating `LABEL` nodes. A second evidence-support
+gate rejects labels that do not appear in the raw cue evidence when that
+evidence is available, preventing few-shot prompt leakage from becoming
+durable memory.
+
+Destructive deletion is sequenced after compression when a summarizer is
+available: a weak frontier memory is not physically deleted until a
+summary memory has a `derived_from` edge back to that raw source. This
+avoids a race where `UpdateMemoryStrength` removes the evidence before
+`ConsolidationSummarize` can create the compression artifact, while
+preserving the same frontier predicate for deciding which raw memories
+are eligible.
+
+**Live-model consolidation label-pressure ablation:**
+`./build/examples/benchmark/cortext_consolidation_label_pressure_ablation_bench`
+
+Runtime stack:
+
+-   encoder: `EmbeddingGemma/llama.cpp`
+-   extractor/summarizer backend: `LFM2.5/llama.cpp`
+-   extractor model: `models/lfm2.5-350m-gguf/LFM2.5-350M-Q4_K_M.gguf`
+-   summarizer model:
+    `models/lfm2.5-1.2b-instruct-gguf/LFM2.5-1.2B-Instruct-Q4_K_M.gguf`
+
+<table>
+<colgroup>
+<col style="width: 11%" />
+<col style="width: 15%" />
+<col style="width: 15%" />
+<col style="width: 15%" />
+<col style="width: 15%" />
+<col style="width: 15%" />
+<col style="width: 11%" />
+</colgroup>
+<thead>
+<tr>
+<th>scenario</th>
+<th style="text-align: right;">extraction requests</th>
+<th style="text-align: right;">summary nodes</th>
+<th style="text-align: right;">associative cue nodes</th>
+<th style="text-align: right;">label nodes</th>
+<th style="text-align: right;"><code>has_label</code> edges</th>
+<th>result</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>low pressure</td>
+<td style="text-align: right;"><code>1</code></td>
+<td style="text-align: right;"><code>0</code></td>
+<td style="text-align: right;"><code>1</code></td>
+<td style="text-align: right;"><code>2</code></td>
+<td style="text-align: right;"><code>2</code></td>
+<td>storage threshold blocks summarization but labels still
+materialize</td>
+</tr>
+<tr>
+<td>high pressure, compressible</td>
+<td style="text-align: right;"><code>1</code></td>
+<td style="text-align: right;"><code>1</code></td>
+<td style="text-align: right;"><code>1</code></td>
+<td style="text-align: right;"><code>2</code></td>
+<td style="text-align: right;"><code>2</code></td>
+<td>compression runs after cue-attached extraction</td>
+</tr>
+<tr>
+<td>high pressure, protected evidence</td>
+<td style="text-align: right;"><code>1</code></td>
+<td style="text-align: right;"><code>0</code></td>
+<td style="text-align: right;"><code>1</code></td>
+<td style="text-align: right;"><code>2</code></td>
+<td style="text-align: right;"><code>2</code></td>
+<td>fact evidence remains outside the eviction frontier but labels still
+materialize</td>
+</tr>
+<tr>
+<td>filler only</td>
+<td style="text-align: right;"><code>1</code></td>
+<td style="text-align: right;"><code>0</code></td>
+<td style="text-align: right;"><code>1</code></td>
+<td style="text-align: right;"><code>0</code></td>
+<td style="text-align: right;"><code>0</code></td>
+<td>empty/filler extraction creates a cue but no durable label
+nodes</td>
+</tr>
+<tr>
+<td>banter only</td>
+<td style="text-align: right;"><code>1</code></td>
+<td style="text-align: right;"><code>0</code></td>
+<td style="text-align: right;"><code>1</code></td>
+<td style="text-align: right;"><code>0</code></td>
+<td style="text-align: right;"><code>0</code></td>
+<td>hallucinated few-shot labels are rejected because they are
+unsupported by evidence</td>
+</tr>
+<tr>
+<td>mixed durable + filler</td>
+<td style="text-align: right;"><code>1</code></td>
+<td style="text-align: right;"><code>0</code></td>
+<td style="text-align: right;"><code>1</code></td>
+<td style="text-align: right;"><code>2</code></td>
+<td style="text-align: right;"><code>2</code></td>
+<td>durable source labels survive while filler is filtered</td>
+</tr>
+</tbody>
+</table>
+
+Recorded metric: `consolidation_label_pressure_ablation_ok = 1`.
+
+**Targeted test coverage:**
+`./build/tests/cortext_tests "[summarize][storage_pressure]"` passed
+with **9 assertions in 2 test cases**. The chat E2E slice
+`./build/tests/cortext_tests "Integration: chat memories consolidate and retrieve"`
+also passed with **21 assertions**, covering cue-attached `LABEL`
+creation, `has_label` edges, and repeated content-addressed object
+writes during summary/cue consolidation.
+
+**Observation:** Summarization is now an eviction-frontier behavior
+rather than an arbitrary consolidation side effect. Consolidation can
+still update clusters and graph metadata, and label extraction still
+runs from raw evidence through associative cue nodes. Abstractive
+compression waits until the same storage budget and retention rules that
+would permit deleting raw memories say the lossy artifact is justified;
+associative cue nodes alone do not satisfy the destructive deletion
+guard.
+
 ### Storage-Gated Eviction Ablation (Apr 5, 2026)
 
 We also corrected a practical failure mode in the deployed eviction
@@ -9110,6 +9403,529 @@ come back” complaint should currently be investigated first as
 mismatch**, not as a direct effect of retained-memory strength decay
 inside `GraphAugmentedRetrieveCandidates`.
 
+We reran that same `decay_surface` benchmark after promoting the
+low-pressure ramp into the runtime default, and the result did **not**
+change: `surfacing_blocked_decay_matches_frozen_all` remained `1`, while
+the eviction-allowed control still lost the target by `24 h`. So the
+default resurfacing-policy change does not alter the earlier conclusion
+that retained-memory strength decay alone was not the practical cause of
+cross-session non-resurfacing in that fixture.
+
+That result ruled out the simplest hypothesis, but it did not answer the
+policy question we actually care about for human-like memory: **should
+cross-session resurfacing suppression depend on elapsed time alone, or
+on elapsed time plus storage pressure?** Human memory clearly changes
+with wall-clock time, but the system does not behave as if every idle
+gap is a hard capacity event. We therefore added a second deterministic
+ablation that leaves wall-clock time intact and modulates only the
+*aggressiveness* of retrieval-side age penalties and metacognitive
+confidence decay. After the initial ablation, the low-pressure ramp
+policy was promoted into the default runtime behavior, and the same
+benchmarks were rerun with both explicit override conditions and a
+no-override baseline.
+
+**Pressure-modulated resurfacing ablation:**
+`./build/examples/benchmark/cortext_resurfacing_pressure_ablation_bench`
+
+Setup:
+
+-   one semantically exact long-term memory with deliberately borderline
+    provenance (`source_reliability=0.46`,
+    `source_contradiction_count=2`) so age-sensitive source confidence
+    matters
+-   one `120 s` idle gap for metacognitive confidence and one `168 h`
+    retrieval gap for resurfacing
+-   fixed retrieval context `F=S=T=0.5`
+-   retrieval forced into `UnknownCaution` so the benchmark measures the
+    strict resurfacing path rather than relaxed fallback retrieval
+-   storage threshold fixed at `1000 B`
+-   six conditions:
+    -   `default_low_pressure`: runtime default with no resurfacing
+        override, used storage `100 B`
+    -   `default_high_pressure`: runtime default with no resurfacing
+        override, used storage `1000 B`
+    -   `time_only_low_pressure`: explicit time-only wall-clock aging
+        ablation, used storage `100 B`
+    -   `time_plus_pressure_gate_low`: wall-clock aging scaled by a
+        low-pressure gate, used storage `100 B`
+    -   `time_plus_pressure_ramp_low`: wall-clock aging scaled by a
+        low-pressure ramp, used storage `100 B`
+    -   `time_plus_pressure_ramp_high`: same ramp, but at threshold
+        (`1000 B`) so behavior collapses back to the aggressive
+        time-only behavior
+
+Key results:
+
+<table>
+<colgroup>
+<col style="width: 15%" />
+<col style="width: 21%" />
+<col style="width: 21%" />
+<col style="width: 21%" />
+<col style="width: 21%" />
+</colgroup>
+<thead>
+<tr>
+<th>scenario</th>
+<th style="text-align: right;">confidence after <code>120 s</code>
+idle</th>
+<th style="text-align: right;">unknown detected</th>
+<th style="text-align: right;">resurfaces at <code>168 h</code></th>
+<th style="text-align: right;">top-1</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>default_low_pressure</code></td>
+<td style="text-align: right;"><code>0.264362</code></td>
+<td style="text-align: right;"><code>1</code></td>
+<td style="text-align: right;"><code>1</code></td>
+<td style="text-align: right;"><code>77</code></td>
+</tr>
+<tr>
+<td><code>default_high_pressure</code></td>
+<td style="text-align: right;"><code>0.200000</code></td>
+<td style="text-align: right;"><code>1</code></td>
+<td style="text-align: right;"><code>0</code></td>
+<td style="text-align: right;"><code>0</code></td>
+</tr>
+<tr>
+<td><code>time_only_low_pressure</code></td>
+<td style="text-align: right;"><code>0.200000</code></td>
+<td style="text-align: right;"><code>1</code></td>
+<td style="text-align: right;"><code>0</code></td>
+<td style="text-align: right;"><code>0</code></td>
+</tr>
+<tr>
+<td><code>time_plus_pressure_gate_low</code></td>
+<td style="text-align: right;"><code>0.250620</code></td>
+<td style="text-align: right;"><code>1</code></td>
+<td style="text-align: right;"><code>1</code></td>
+<td style="text-align: right;"><code>77</code></td>
+</tr>
+<tr>
+<td><code>time_plus_pressure_ramp_low</code></td>
+<td style="text-align: right;"><code>0.264362</code></td>
+<td style="text-align: right;"><code>1</code></td>
+<td style="text-align: right;"><code>1</code></td>
+<td style="text-align: right;"><code>77</code></td>
+</tr>
+<tr>
+<td><code>time_plus_pressure_ramp_high</code></td>
+<td style="text-align: right;"><code>0.200000</code></td>
+<td style="text-align: right;"><code>1</code></td>
+<td style="text-align: right;"><code>0</code></td>
+<td style="text-align: right;"><code>0</code></td>
+</tr>
+</tbody>
+</table>
+
+Recorded checks:
+
+-   `default_low_matches_pressure_ramp_low_confidence = 1`
+-   `default_low_surfaces_target = 1`
+-   `default_high_matches_pressure_ramp_high_confidence = 1`
+-   `default_high_suppresses_target = 1`
+-   `pressure_gate_low_confidence_gt_time_only = 1`
+-   `pressure_ramp_low_confidence_gt_time_only = 1`
+-   `pressure_gate_low_surfaces_target = 1`
+-   `pressure_ramp_low_surfaces_target = 1`
+-   `time_only_low_pressure_suppresses_target = 1`
+-   `pressure_ramp_high_matches_time_only_confidence = 1`
+-   `pressure_ramp_high_suppresses_target = 1`
+
+**Observation:** This ablation supports the `time + storage pressure`
+policy, and the rerun confirms that the runtime default now implements
+it. Pure wall-clock aging suppressed the memory even when the synthetic
+store was only at `10%` of its storage threshold. Once the same
+wall-clock penalties were made pressure-sensitive, the old but still
+relevant memory resurfaced again, and metacognitive confidence stayed
+above the `time_only` floor. The new `default_low_pressure` row matches
+`time_plus_pressure_ramp_low` exactly, while `default_high_pressure`
+matches `time_plus_pressure_ramp_high`, so the no-override runtime now
+behaves like a low-pressure ramp by default but still collapses back to
+the aggressive path when the store approaches capacity. Among the tested
+variants, the ramp condition remains the better human-memory analogue
+because it preserves a mild time effect at low pressure while recovering
+the full aggressive behavior when the store approaches capacity.
+
+We then ran a denser simulated-time sweep to locate the actual decay
+boundary:
+
+**Simulated resurfacing horizon sweep:**
+`./build/examples/benchmark/cortext_resurfacing_horizon_bench`
+
+Setup:
+
+-   same borderline-provenance retrieval fixture as the
+    pressure-modulated resurfacing ablation
+-   synthetic idle/retrieval gaps: `1 m`, `5 m`, `15 m`, `30 m`, `2 h`,
+    `6 h`, `24 h`, `3 d`, `7 d`, `30 d`
+-   same six conditions:
+    -   `default_low_pressure`
+    -   `default_high_pressure`
+    -   `time_only_low_pressure`
+    -   `time_plus_pressure_gate_low`
+    -   `time_plus_pressure_ramp_low`
+    -   `time_plus_pressure_ramp_high`
+
+Key sweep results:
+
+<table>
+<colgroup>
+<col style="width: 20%" />
+<col style="width: 26%" />
+<col style="width: 26%" />
+<col style="width: 26%" />
+</colgroup>
+<thead>
+<tr>
+<th>scenario</th>
+<th style="text-align: right;">first confidence floor gap</th>
+<th style="text-align: right;">first surfacing failure gap</th>
+<th style="text-align: right;">last surfaced gap in sweep</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>default_low_pressure</code></td>
+<td style="text-align: right;"><code>5 m</code></td>
+<td style="text-align: right;"><code>never</code></td>
+<td style="text-align: right;"><code>3650 d</code></td>
+</tr>
+<tr>
+<td><code>default_high_pressure</code></td>
+<td style="text-align: right;"><code>1 m</code></td>
+<td style="text-align: right;"><code>1 m</code></td>
+<td style="text-align: right;"><code>never</code></td>
+</tr>
+<tr>
+<td><code>time_only_low_pressure</code></td>
+<td style="text-align: right;"><code>1 m</code></td>
+<td style="text-align: right;"><code>1 m</code></td>
+<td style="text-align: right;"><code>never</code></td>
+</tr>
+<tr>
+<td><code>time_plus_pressure_gate_low</code></td>
+<td style="text-align: right;"><code>5 m</code></td>
+<td style="text-align: right;"><code>never</code></td>
+<td style="text-align: right;"><code>3650 d</code></td>
+</tr>
+<tr>
+<td><code>time_plus_pressure_ramp_low</code></td>
+<td style="text-align: right;"><code>5 m</code></td>
+<td style="text-align: right;"><code>never</code></td>
+<td style="text-align: right;"><code>3650 d</code></td>
+</tr>
+<tr>
+<td><code>time_plus_pressure_ramp_high</code></td>
+<td style="text-align: right;"><code>1 m</code></td>
+<td style="text-align: right;"><code>1 m</code></td>
+<td style="text-align: right;"><code>never</code></td>
+</tr>
+</tbody>
+</table>
+
+Selected raw checkpoints:
+
+<table>
+<thead>
+<tr>
+<th>scenario</th>
+<th style="text-align: right;"><code>1 m</code> confidence</th>
+<th style="text-align: right;"><code>30 m</code> surfaced</th>
+<th style="text-align: right;"><code>3650 d</code> surfaced</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>default_low_pressure</code></td>
+<td style="text-align: right;"><code>0.451981</code></td>
+<td style="text-align: right;"><code>1</code></td>
+<td style="text-align: right;"><code>1</code></td>
+</tr>
+<tr>
+<td><code>default_high_pressure</code></td>
+<td style="text-align: right;"><code>0.200000</code></td>
+<td style="text-align: right;"><code>0</code></td>
+<td style="text-align: right;"><code>0</code></td>
+</tr>
+<tr>
+<td><code>time_only_low_pressure</code></td>
+<td style="text-align: right;"><code>0.200000</code></td>
+<td style="text-align: right;"><code>0</code></td>
+<td style="text-align: right;"><code>0</code></td>
+</tr>
+<tr>
+<td><code>time_plus_pressure_gate_low</code></td>
+<td style="text-align: right;"><code>0.438906</code></td>
+<td style="text-align: right;"><code>1</code></td>
+<td style="text-align: right;"><code>1</code></td>
+</tr>
+<tr>
+<td><code>time_plus_pressure_ramp_low</code></td>
+<td style="text-align: right;"><code>0.451981</code></td>
+<td style="text-align: right;"><code>1</code></td>
+<td style="text-align: right;"><code>1</code></td>
+</tr>
+<tr>
+<td><code>time_plus_pressure_ramp_high</code></td>
+<td style="text-align: right;"><code>0.200000</code></td>
+<td style="text-align: right;"><code>0</code></td>
+<td style="text-align: right;"><code>0</code></td>
+</tr>
+</tbody>
+</table>
+
+Recorded checks:
+
+-   `default_low_matches_pressure_ramp_low_suppression = 1`
+-   `default_low_surfaces_through_3650d = 1`
+-   `default_high_matches_pressure_ramp_high_suppression = 1`
+-   `time_only_reaches_confidence_floor_by_1m = 1`
+-   `time_only_first_suppression_by_1m = 1`
+-   `pressure_gate_surfaces_through_3650d = 1`
+-   `pressure_ramp_low_surfaces_through_3650d = 1`
+-   `pressure_ramp_high_matches_time_only_suppression = 1`
+
+**Observation:** The explicit `time_only` wall-clock policy is even
+steeper than the first pass suggested. On the current branch it bottoms
+metacognitive confidence by `1 minute` and, after the retrieval-side `T`
+decoupling described below, stops resurfacing this borderline memory
+immediately at the first tested gap (`1 minute`), even though the
+synthetic store is still at only `10%` of its storage threshold. The
+no-override runtime still follows the low-pressure ramp instead:
+`default_low_pressure` matches `time_plus_pressure_ramp_low`, while
+`default_high_pressure` matches the high-pressure ramp and therefore
+also fails immediately under full pressure. Pressure-aware resurfacing
+still eliminates the low-pressure cliff, but the extended sweep also
+still shows the second edge case: for this particular borderline
+fixture, both low-pressure variants remained retrievable through the
+entire `3650 d` (`10 year`) horizon. So the ablations support two
+conclusions at once:
+
+-   surfacing should depend on **time + storage pressure**, not time
+    alone
+-   human-like long-horizon fading will still require **slower absolute
+    confidence/aging constants** than the current defaults, plus
+    calibration so low-pressure resurfacing does not become effectively
+    permanent for memories near the source-confidence boundary
+
+In other words, storage-aware resurfacing fixes the conditionality of
+forgetting, but not yet the biological timescale, and the present
+low-pressure fixture may now be too durable.
+
+We then swept the three exposed knobs directly to see whether
+resurfacing behavior on this new policy is actually distributed across
+`F`, `S`, and `T`, or whether one knob dominates:
+
+**Deterministic resurfacing knob sweep (`3 × 3 × 3`):**
+`./build/examples/benchmark/cortext_resurfacing_knob_sweep_bench`
+
+Setup:
+
+-   same borderline-provenance resurfacing fixture and simulated gap
+    ladder as the horizon sweep above
+-   full `F,S,T ∈ {0.2, 0.5, 0.9}` grid (`27` combinations)
+-   three resurfacing-policy conditions:
+    -   `default_low_pressure`
+    -   `default_high_pressure`
+    -   `time_only_low_pressure`
+-   for each combination we record the first confidence-floor gap, first
+    surfacing-failure gap, and last surfaced gap
+
+Key result by stability level (`9` combinations per `T` level):
+
+<table>
+<colgroup>
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+</colgroup>
+<thead>
+<tr>
+<th>scenario</th>
+<th><code>T=0.2</code></th>
+<th><code>T=0.5</code></th>
+<th><code>T=0.9</code></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>default_low_pressure</code></td>
+<td>floor <code>5 m</code>, suppress <code>never</code>, last
+<code>3650 d</code></td>
+<td>floor <code>5 m</code>, suppress <code>never</code>, last
+<code>3650 d</code></td>
+<td>floor <code>15 m</code>, suppress <code>never</code>, last
+<code>3650 d</code></td>
+</tr>
+<tr>
+<td><code>default_high_pressure</code></td>
+<td>floor <code>1 m</code>, suppress <code>1 m</code>, last
+<code>never</code></td>
+<td>floor <code>1 m</code>, suppress <code>1 m</code>, last
+<code>never</code></td>
+<td>floor <code>5 m</code>, suppress <code>1 m</code>, last
+<code>never</code></td>
+</tr>
+<tr>
+<td><code>time_only_low_pressure</code></td>
+<td>floor <code>1 m</code>, suppress <code>1 m</code>, last
+<code>never</code></td>
+<td>floor <code>1 m</code>, suppress <code>1 m</code>, last
+<code>never</code></td>
+<td>floor <code>5 m</code>, suppress <code>1 m</code>, last
+<code>never</code></td>
+</tr>
+</tbody>
+</table>
+
+Marginal sweep summary:
+
+-   `focus` had **no effect** on the recorded breakpoints in this
+    fixture; the marginal averages were identical for `F=0.2`, `0.5`,
+    and `0.9`
+-   `sensitivity` also had **no effect** on the recorded breakpoints in
+    this fixture; its marginal averages were identical across all three
+    levels
+-   `stability` no longer changes the **surfacing-failure breakpoint**
+    once retrieval-side conservatism is decoupled from raw `T`:
+    -   under `default_low_pressure`, all three `T` levels preserved
+        resurfacing through the full `3650 d` horizon
+    -   under `default_high_pressure` and `time_only_low_pressure`, all
+        three `T` levels failed immediately at the first tested gap
+        (`1 m`)
+    -   `T` still affects the **confidence-floor breakpoint** (`5 m` at
+        `T=0.2/0.5` vs `15 m` at `T=0.9` under `default_low_pressure`;
+        `1 m` vs `5 m` under the aggressive regimes), but it no longer
+        decides whether retrieval itself suppresses the memory
+
+Recorded checks:
+
+-   `knob_sweep_default_low_no_worse_than_time_only = 1`
+-   `knob_sweep_default_high_matches_time_only = 1`
+-   `knob_sweep_mid_default_low_survives_horizon = 1`
+-   `knob_sweep_mid_default_high_suppresses_at_1m = 1`
+-   `knob_sweep_mid_time_only_suppresses_at_1m = 1`
+
+**Observation:** After decoupling retrieval-side conservatism from raw
+`T`, the knob story is cleaner. `F` and `S` remain effectively inert on
+this fixture, but `T` no longer decides whether retrieval suppresses the
+memory. It now changes only the confidence-floor timescale, while
+retrieval suppression follows pressure policy alone: low-pressure
+default keeps the memory alive across the full horizon, and aggressive
+regimes suppress it immediately. That is a better semantics split. `T`
+is still affecting metacognitive confidence persistence, but not direct
+retrieval skepticism, which is the behavior we wanted.
+
+We then turned to a different forgetting question: not whether a memory
+fades away while idle, but whether later contradictory experience can
+**revise** an existing memory in a human-like way. The motivating
+example here is preference reversal: a person may prefer pizza for
+years, then after a strong aversive episode stop wanting it and develop
+a different current preference while still retaining the historical fact
+that pizza *used to be* the favorite.
+
+**Deterministic preference-update ablation:**
+`./build/examples/benchmark/cortext_preference_update_ablation_bench`
+
+Setup:
+
+-   one initial fact: `Alice favorite_food Pizza` with confidence `0.90`
+-   one or more later contradictory extractions proposing `Soup` as the
+    new favorite
+-   `F=0.5`, `S=0.5`, `T=0.5`, so the supersession gate requires roughly
+    `0.912` confidence to displace the incumbent fact
+-   we query both the **current** favorite and the **historical**
+    favorite before the contradiction window
+
+Results:
+
+<table style="width:100%;">
+<colgroup>
+<col style="width: 12%" />
+<col style="width: 12%" />
+<col style="width: 12%" />
+<col style="width: 12%" />
+<col style="width: 16%" />
+<col style="width: 16%" />
+<col style="width: 16%" />
+</colgroup>
+<thead>
+<tr>
+<th>scenario</th>
+<th>contradictory evidence</th>
+<th>current favorite</th>
+<th>historical favorite</th>
+<th style="text-align: right;">pizza superseded</th>
+<th style="text-align: right;">open soup fact</th>
+<th style="text-align: right;">archived soup facts</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>single_weak_contradiction</code></td>
+<td>one <code>Soup</code> update at <code>0.55</code></td>
+<td><code>Pizza</code></td>
+<td><code>Pizza</code></td>
+<td style="text-align: right;">0</td>
+<td style="text-align: right;">0</td>
+<td style="text-align: right;">1</td>
+</tr>
+<tr>
+<td><code>single_strong_contradiction</code></td>
+<td>one <code>Soup</code> update at <code>0.96</code></td>
+<td><code>Soup</code></td>
+<td><code>Pizza</code></td>
+<td style="text-align: right;">1</td>
+<td style="text-align: right;">1</td>
+<td style="text-align: right;">0</td>
+</tr>
+<tr>
+<td><code>strong_contradiction_plus_confirmation</code></td>
+<td><code>Soup</code> at <code>0.96</code>, then confirming
+<code>Soup</code> at <code>0.88</code></td>
+<td><code>Soup</code></td>
+<td><code>Pizza</code></td>
+<td style="text-align: right;">1</td>
+<td style="text-align: right;">1</td>
+<td style="text-align: right;">0</td>
+</tr>
+<tr>
+<td><code>repeated_moderate_contradictions</code></td>
+<td>three <code>Soup</code> updates at <code>0.72</code></td>
+<td><code>Pizza</code></td>
+<td><code>Pizza</code></td>
+<td style="text-align: right;">0</td>
+<td style="text-align: right;">0</td>
+<td style="text-align: right;">3</td>
+</tr>
+</tbody>
+</table>
+
+Additional recorded check:
+
+-   after `strong_contradiction_plus_confirmation`, the surviving `Soup`
+    fact reached `confirmation_count = 2`
+
+**Observation:** The current system already supports a sensible
+**branch-and-supersede** preference update when a later contradictory
+episode is strong enough: the new preference becomes current, the old
+preference remains valid for earlier timestamps, and later confirmations
+reinforce the new fact rather than duplicating it. That is close to the
+intended human-memory behavior for abrupt reversals.
+
+The main limitation is what happens below the supersession threshold.
+Repeated moderate contradictory episodes do **not** accumulate into a
+later revision. Instead, each challenger is inserted as an immediately
+archived conflicting fact, so the incumbent `Pizza` preference survives
+indefinitely unless one later update crosses the supersession threshold
+on its own. For human-like memory revision, that is probably too
+brittle: repeated aversive episodes should eventually tip the current
+preference even when no single episode is overwhelmingly decisive.
+
 ### Messy Chat Baseline (Ubuntu Dialogue Corpus)
 
 We ran a long‑horizon baseline on the **Ubuntu Dialogue Corpus
@@ -9542,6 +10358,11 @@ Retrieved memories are hydrated for inspection and evaluation only. When
 a memory has no signal-level blobs (e.g., consolidation summaries), the
 system loads the summary payload from `memories.blob_id` so summary
 nodes can participate in analysis without affecting online computations.
+Internal retrieval nodes that are intentionally non-renderable, such as
+`LABEL` nodes and associative cue anchors, remain graph-routing
+products: when one is selected for the public retrieval surface,
+hydration resolves a bounded set of linked source memories with actual
+payloads instead of exposing empty label/cue records to applications.
 
 ## Model Stack (Local Inference)
 
@@ -9553,18 +10374,20 @@ nodes can participate in analysis without affecting online computations.
     `third_party/litert_lm`, **LFM2/LFM2.5** via `llama.cpp` GGUFs, or a
     **mixed** Gemma+Liquid path. The Gemma path auto-selects among
     available `.litertlm` variants under `models/gemma3n-e2b-litert/`.
-    The Liquid path now prefers `LFM2.5-350M-GGUF` for both
-    summarization and extraction, preferring `Q4_K_M` when present and
-    otherwise accepting other shipped GGUF quantizations; env overrides
-    still take precedence for exact paths. If the `LFM2.5-350M-GGUF`
-    asset is absent, Cortext falls back to the older
-    `LFM2-2.6B-Transcript-Q4_K_M.gguf` summarizer and
-    `LFM2-1.2B-Extract-Q4_K_M.gguf` extractor. The mixed path uses Gemma
-    for summarization and the preferred Liquid extractor path for
-    labeling, but auto resolution now prefers the pure
-    `LFM2.5/llama.cpp` path when the Liquid assets are present; mixed
-    and Gemma are fallbacks. If no deep backend is available, deep
-    consolidation raises an error rather than silently degrading. The
+    The Liquid path now prefers `LFM2.5-350M-GGUF` for extraction and
+    `LFM2.5-1.2B-Instruct-GGUF` for summarization, preferring `Q4_K_M`
+    when present and otherwise accepting other shipped GGUF
+    quantizations; env overrides still take precedence for exact paths.
+    The mixed path uses Gemma for summarization and the preferred Liquid
+    extractor path for labeling, but auto resolution now prefers the
+    pure `LFM2.5/llama.cpp` path when the Liquid assets are present;
+    mixed and Gemma are fallbacks. If no deep backend is available, deep
+    consolidation raises an error rather than silently degrading. Label
+    extraction is anchored on `associative_cue_*` association nodes and
+    runs from raw source memory text; optional summary nodes are
+    storage-pressure-gated compression artifacts. Empty label arrays are
+    valid, transcript filler labels are rejected before persistence, and
+    cue-backed labels must be supported by raw source evidence. The
     summarization prompt remains role-aware for chat sources, favors
     direct fact-oriented memory notes over dialogue recaps, explicitly
     preserves named people, projects, and technologies, discourages
@@ -9611,14 +10434,17 @@ minimal fact record includes:
     recorded_at, superseded_at
     confidence
     source_memory_ids
+    source_associative_cue_ids
     source_summary_ids
 
 This layer is additive, not a replacement for the existing episodic
 graph. The division of responsibility is:
 
 -   **episodic memories:** preserve raw experience and provenance,
--   **summaries and graph nodes:** provide semantic compression and
-    associative retrieval,
+-   **associative cue nodes:** anchor labels and associative retrieval
+    for raw memory clusters,
+-   **summaries:** provide optional semantic compression when storage
+    pressure justifies it,
 -   **bitemporal facts:** answer changing factual questions with
     explicit world-time and system-time semantics.
 

@@ -69,7 +69,7 @@ if [[ "${fresh_db}" == "1" ]]; then
 fi
 
 cmake -S "${repo_root}" -B "${build_dir}" -DCMAKE_BUILD_TYPE=Debug
-cmake --build "${build_dir}" -j --target cortext_chat
+cmake --build "${build_dir}" -j8 --target cortext_chat
 
 echo "Launching cortext_chat with:"
 echo "  CORTEXT_CHAT_DB=${CORTEXT_CHAT_DB}"

@@ -42,6 +42,13 @@ enum class RoutineRecencyMode
   RecencyBiased
 };
 
+enum class ResurfacingDecayMode
+{
+  TimeOnly,
+  PressureGate,
+  PressureRamp
+};
+
 struct RetrievalOverride
 {
   std::optional<RetrievalMode> mode;
@@ -56,6 +63,7 @@ struct RetrievalAblationOverride
   std::optional<StalePenaltyStrength> stale_penalty_strength;
   std::optional<ProvenanceMode> provenance_mode;
   std::optional<RoutineRecencyMode> routine_recency_mode;
+  std::optional<ResurfacingDecayMode> resurfacing_decay_mode;
 };
 
 class ScopedRetrievalOverride
@@ -96,6 +104,9 @@ void ClearRetrievalOverride ();
 RetrievalAblationOverride GetRetrievalAblationOverride ();
 void SetRetrievalAblationOverride (const RetrievalAblationOverride &override);
 void ClearRetrievalAblationOverride ();
+ResurfacingDecayMode DefaultResurfacingDecayMode ();
+ResurfacingDecayMode ResolveResurfacingDecayMode (
+    const RetrievalAblationOverride &override);
 RetrievalMode ResolveRetrievalMode (RetrievalMode requested);
 std::uint64_t ResolveRetrievalTimestamp (
     RetrievalMode requested, std::optional<std::uint64_t> requested_timestamp,
@@ -111,5 +122,6 @@ const char *ToString (FactBoostStrength strength);
 const char *ToString (StalePenaltyStrength strength);
 const char *ToString (ProvenanceMode mode);
 const char *ToString (RoutineRecencyMode mode);
+const char *ToString (ResurfacingDecayMode mode);
 
 } // namespace cortext::operations::temporal

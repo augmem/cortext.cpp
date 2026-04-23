@@ -20,3 +20,11 @@ node -e "const { version } = require('./bindings/javascript'); console.log(versi
 
 Set `CORTEXT_NODE_ADDON_PATH` if you want to point at a different `.node` file.
 
+The core shared library can also be built with Zig for FFI consumers:
+
+```bash
+npm run build:zig
+```
+
+That produces `zig-out/lib/libcortext.*`. The Node addon itself still uses the
+CMake build path in this phase.

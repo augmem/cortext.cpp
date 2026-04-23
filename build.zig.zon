@@ -1,0 +1,25 @@
+.{
+    .name = .cortext,
+    .version = "0.1.0",
+    .fingerprint = 0x474dfffd9e64ddfb, // Changing this has security and trust implications.
+    .minimum_zig_version = "0.15.2",
+    .dependencies = .{
+        .nlohmann_json = .{
+            .url = "https://github.com/nlohmann/json/releases/download/v3.12.0/json.tar.xz",
+            .hash = "N-V-__8AAImsHQDIQKPdZk62S0Uw1LBnNocME6eTKyhglSmW",
+        },
+        .eigen = .{
+            .url = "https://gitlab.com/libeigen/eigen/-/archive/3.4.0/eigen-3.4.0.tar.gz",
+            .hash = "N-V-__8AABPI6wAbBLaww8cKO-HchZ0ft-BxUOEOyQtTSccD",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "include",
+        "src",
+        "third_party/sqlite-objstore",
+        "third_party/sqlite-vec",
+        "README.md",
+    },
+}

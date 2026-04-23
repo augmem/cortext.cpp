@@ -21,17 +21,16 @@ public:
   explicit EmbeddingGemmaBenchEncoder (std::string models_dir = "models")
       : models_dir_ (std::move (models_dir))
   {
-    const auto config
-        = internal::ResolveEmbeddingGemmaConfig (std::filesystem::path (models_dir_));
-    if (!config.has_value ())
+    auto selection = internal::CreatePreferredTextEncoder (models_dir_);
+    backend_name_ = selection.backend_name;
+    resolved_model_path_ = selection.resolved_path;
+    encoder_ = std::move (selection.encoder);
+    if (!encoder_)
       {
         throw std::runtime_error (
-            "EmbeddingGemma benchmark assets not found under " + models_dir_);
+            "Preferred benchmark text encoder could not be constructed under "
+            + models_dir_);
       }
-    resolved_model_path_ = config->model_path;
-    backend_name_
-        = internal::DescribeEmbeddingGemmaBackend (resolved_model_path_);
-    encoder_ = std::make_unique<EmbeddingGemmaEncoder> (std::move (*config));
   }
 
   void
@@ -103,7 +102,8 @@ private:
     encoder_->EncodeText (text, embedding);
     if (embedding.empty ())
       {
-        throw std::runtime_error ("EmbeddingGemma produced an empty embedding for benchmark text");
+        throw std::runtime_error (
+            "Benchmark text encoder produced an empty embedding");
       }
 
     auto inserted = cache_.emplace (text, std::move (embedding));

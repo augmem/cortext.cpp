@@ -5,7 +5,7 @@
   "main": "index.js",
   "types": "index.d.ts",
   "scripts": {
-    "build": "cmake --preset ffi-release-node && cmake --build --preset ffi-release-node --target cortext cortext_node"
+    "build": "cmake --preset ffi-release-node && cmake --build --preset ffi-release-node --target cortext cortext_node",
+    "build:zig": "cd ../.. && zig build -Dshared=true -Dllama=false"
   }
 }
-
