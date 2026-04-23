@@ -11,6 +11,7 @@
 #include "cortext/operations/extraction.hpp"
 #include "cortext/operations/label_utils.hpp"
 #include "cortext/processor/operation_context.hpp"
+#include "cortext/store/utils.hpp"
 #include "cortext/telemetry/telemetry.hpp"
 #include <algorithm>
 #include <any>
@@ -42,7 +43,7 @@ const nlohmann::json kExtractionSchema = nlohmann::json::parse (R"({
   "properties": {
     "labels": {
       "type": "array",
-      "minItems": 1,
+      "minItems": 0,
       "items": {"type": "string"}
     },
     "relations": {
@@ -311,6 +312,101 @@ ExtractDoubleField (const std::map<std::string, std::any> &row,
   return fallback;
 }
 
+std::string
+CanonicalEvidenceText (const std::string &text)
+{
+  std::string out;
+  out.reserve (text.size ());
+  bool previous_space = false;
+  for (unsigned char c : text)
+    {
+      if (std::isalnum (c) != 0)
+        {
+          out.push_back (static_cast<char> (std::tolower (c)));
+          previous_space = false;
+        }
+      else if (!out.empty () && !previous_space)
+        {
+          out.push_back (' ');
+          previous_space = true;
+        }
+    }
+  if (!out.empty () && out.back () == ' ')
+    {
+      out.pop_back ();
+    }
+  return out;
+}
+
+bool
+LabelAppearsInEvidence (const std::string &label_key,
+                        const std::string &evidence_text)
+{
+  if (evidence_text.empty ())
+    {
+      return true;
+    }
+
+  const std::string label = CanonicalLabelTokenKey (label_key);
+  if (label.empty ())
+    {
+      return false;
+    }
+
+  const std::string haystack = " " + CanonicalEvidenceText (evidence_text) + " ";
+  const std::string needle = " " + label + " ";
+  return haystack.find (needle) != std::string::npos;
+}
+
+std::string
+LoadDerivedEvidenceText (Transaction &tx, long long association_memory_id)
+{
+  if (association_memory_id <= 0)
+    {
+      return {};
+    }
+
+  auto rows = tx.Execute (
+      "SELECT m.blob_id FROM associations a "
+      "JOIN memories m ON m.memory_id = a.target_memory_id "
+      "WHERE a.source_memory_id = ? AND a.edge_type = 'derived_from' "
+      "AND m.blob_id IS NOT NULL",
+      { association_memory_id });
+
+  std::string text;
+  for (const auto &row : rows)
+    {
+      auto it = row.find ("blob_id");
+      if (it == row.end ())
+        {
+          continue;
+        }
+      const auto blob_id = store::BlobFromAny (it->second);
+      if (blob_id.empty ())
+        {
+          continue;
+        }
+      auto payload_rows
+          = tx.Execute ("SELECT objstore_get(?1) AS payload", { blob_id });
+      if (payload_rows.empty () || payload_rows[0].count ("payload") == 0)
+        {
+          continue;
+        }
+      const auto payload = store::BlobFromAny (payload_rows[0].at ("payload"));
+      if (payload.empty ())
+        {
+          continue;
+        }
+      if (!text.empty ())
+        {
+          text += "\n---\n";
+        }
+      text.append (reinterpret_cast<const char *> (payload.data ()),
+                   payload.size ());
+    }
+  return text;
+}
+
 } // namespace
 
 void
@@ -324,6 +420,7 @@ ProcessExtractionResults::Execute (OperationContext &context, Transaction &tx) c
 
   // Process extraction requests using in-process extractor if available
   const auto &requests = context.GetExtractionRequests ();
+  std::unordered_map<std::string, std::string> request_evidence_text;
   if (extractor && extractor->IsAvailable () && !requests.empty ())
     {
       for (const auto &req : requests)
@@ -349,6 +446,7 @@ ProcessExtractionResults::Execute (OperationContext &context, Transaction &tx) c
                 {
                   combined_text = req.summary_text;
                 }
+              request_evidence_text[req.summary_id] = combined_text;
 
               auto result
                   = extractor->ExtractFromText (combined_text, kExtractionSchema);
@@ -513,6 +611,11 @@ ProcessExtractionResults::Execute (OperationContext &context, Transaction &tx) c
           = summary_embedding_id > 0
                 ? LoadEmbedding (tx, summary_embedding_id)
                 : std::optional<Eigen::VectorXf> ();
+      const auto evidence_it = request_evidence_text.find (result.summary_id);
+      const std::string evidence_text
+          = evidence_it != request_evidence_text.end ()
+                ? evidence_it->second
+                : LoadDerivedEvidenceText (tx, summary_memory_id);
       Encoder *encoder = context.GetConfig ().encoder;
       if (!encoder)
         {
@@ -677,7 +780,11 @@ ProcessExtractionResults::Execute (OperationContext &context, Transaction &tx) c
         {
           const std::string label = TrimLabel (label_entry.label);
           const std::string label_key = NormalizeLabelKey (label_entry.label);
-          if (label.empty () || label_key.empty ())
+          if (!IsDurableLabelCandidate (label, label_key))
+            {
+              continue;
+            }
+          if (!LabelAppearsInEvidence (label_key, evidence_text))
             {
               continue;
             }

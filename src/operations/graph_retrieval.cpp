@@ -2,7 +2,9 @@
 
 #include "constructive_recall_internal.hpp"
 #include "../store/facts.hpp"
+#include "eviction_ablation.hpp"
 #include "retrieval_debug_state.hpp"
+#include "storage_pressure.hpp"
 #include "temporal_retrieval.hpp"
 #include "cortext/store/store.hpp"
 #include "cortext/store/utils.hpp"
@@ -132,6 +134,38 @@ MetacognitiveModeLabel (ProcessorContext::MetacognitiveMode mode)
       return "unknown_caution";
     }
   return "normal";
+}
+
+double
+ResolveResurfacingDecayScale (
+    Transaction &tx,
+    const temporal::RetrievalAblationOverride &retrieval_override)
+{
+  const auto mode = temporal::ResolveResurfacingDecayMode (retrieval_override);
+  if (mode == temporal::ResurfacingDecayMode::TimeOnly)
+    {
+      return 1.0;
+    }
+
+  const auto eviction_override = eviction::GetEvictionAblationOverride ();
+  const auto pressure_state
+      = pressure::ComputeStoragePressureState (tx, eviction_override);
+  switch (mode)
+    {
+    case temporal::ResurfacingDecayMode::PressureGate:
+      return pressure::GateScale (pressure_state, 0.2);
+    case temporal::ResurfacingDecayMode::PressureRamp:
+      return pressure::RampScale (pressure_state, 0.1);
+    case temporal::ResurfacingDecayMode::TimeOnly:
+      break;
+    }
+  return 1.0;
+}
+
+double
+ApplyFreshnessPenaltyScale (double freshness, double penalty_scale)
+{
+  return core::Clamp (1.0 - penalty_scale * (1.0 - freshness), 0.0, 1.0);
 }
 
 store::FactRecord
@@ -593,12 +627,16 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
   const auto requested_retrieval_mode
       = retrieval_override.mode.value_or (temporal::RetrievalMode::Current);
   const auto ablation_override = temporal::GetRetrievalAblationOverride ();
+  const auto resurfacing_decay_mode
+      = temporal::ResolveResurfacingDecayMode (ablation_override);
   const auto retrieval_mode
       = temporal::ResolveRetrievalMode (requested_retrieval_mode);
   const std::uint64_t retrieval_ts
       = temporal::ResolveRetrievalTimestamp (requested_retrieval_mode,
                                             retrieval_override.timestamp,
                                             signal.timestamp);
+  const double resurfacing_decay_scale
+      = ResolveResurfacingDecayScale (tx, ablation_override);
   const auto fact_query_mode = temporal::ResolveFactQueryMode (
       temporal::ToFactQueryMode (retrieval_mode));
   const bool fact_layer_enabled = temporal::IsFactLayerEnabled ();
@@ -1667,9 +1705,12 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
                   age_s = static_cast<double> (signal.timestamp - created_at) / 1000.0;
                 }
               const double freshness = std::exp (-age_s / 3600.0);
+              const double effective_freshness
+                  = ApplyFreshnessPenaltyScale (freshness,
+                                               resurfacing_decay_scale);
               const double source_conf
                   = core::Clamp (base_rel * (1.0 - 0.15 * contradiction_count)
-                                     * (0.7 + 0.3 * freshness),
+                                     * (0.7 + 0.3 * effective_freshness),
                                  0.0, 1.0);
 
               double proc_score = 0.0;
@@ -1794,7 +1835,10 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
   const double w_mem_emotion = w_mem_emotion_raw / w_mem_sum;
   const double w_mem_arousal = w_mem_arousal_raw / w_mem_sum;
 
-  const double source_thresh = core::Lerp (0.15, 0.45, cfg.stability);
+  const double source_thresh
+      = core::Lerp (0.15, 0.45, resurfacing_decay_scale);
+  const double certainty_requirement
+      = core::CertaintyRequirement (resurfacing_decay_scale);
   struct FilterStats
   {
     int64_t total = 0;
@@ -1962,7 +2006,7 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
         return;
       }
     const double cutoff
-        = core::CertaintyRequirement (cfg.stability) * best_score
+        = certainty_requirement * best_score
           * core::Lerp (1.0, 1.15, unknown_caution_scale);
     selected.erase (
         std::remove_if (selected.begin (), selected.end (),
@@ -2484,6 +2528,11 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
     telemetry::Attribute::Bool (
         "history_enabled",
         ablation_override.history_enabled.value_or (true)),
+    telemetry::Attribute::String (
+        "resurfacing_decay_mode",
+        temporal::ToString (resurfacing_decay_mode)),
+    telemetry::Attribute::Double ("resurfacing_decay_scale",
+                                  resurfacing_decay_scale),
     telemetry::Attribute::String (
         "fact_boost_mode",
         FactBoostModeLabel (ablation_override)),

@@ -116,6 +116,22 @@ add_executable(cortext_decay_surface_ablation_bench
   decay_surface_ablation_bench.cpp
 )
 
+add_executable(cortext_resurfacing_pressure_ablation_bench
+  resurfacing_pressure_ablation_bench.cpp
+)
+
+add_executable(cortext_resurfacing_horizon_bench
+  resurfacing_horizon_bench.cpp
+)
+
+add_executable(cortext_resurfacing_knob_sweep_bench
+  resurfacing_knob_sweep_bench.cpp
+)
+
+add_executable(cortext_preference_update_ablation_bench
+  preference_update_ablation_bench.cpp
+)
+
 add_executable(cortext_extractor_prompt_ablation_bench
   extractor_prompt_ablation_bench.cpp
 )
@@ -126,6 +142,18 @@ add_executable(cortext_summarizer_prompt_ablation_bench
 
 add_executable(cortext_summarizer_structured_ablation_bench
   summarizer_structured_ablation_bench.cpp
+)
+
+add_executable(cortext_summarization_retrieval_ablation_bench
+  summarization_retrieval_ablation_bench.cpp
+)
+
+add_executable(cortext_summarization_storage_pressure_ablation_bench
+  summarization_storage_pressure_ablation_bench.cpp
+)
+
+add_executable(cortext_consolidation_label_pressure_ablation_bench
+  summarization_storage_pressure_ablation_bench.cpp
 )
 
 # Include directories for local headers
@@ -213,6 +241,18 @@ target_include_directories(cortext_storage_human_sleep_token_bench PRIVATE
 target_include_directories(cortext_decay_surface_ablation_bench PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}
 )
+target_include_directories(cortext_resurfacing_pressure_ablation_bench PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}
+)
+target_include_directories(cortext_resurfacing_horizon_bench PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}
+)
+target_include_directories(cortext_resurfacing_knob_sweep_bench PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}
+)
+target_include_directories(cortext_preference_update_ablation_bench PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}
+)
 target_include_directories(cortext_extractor_prompt_ablation_bench PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}
 )
@@ -220,6 +260,15 @@ target_include_directories(cortext_summarizer_prompt_ablation_bench PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}
 )
 target_include_directories(cortext_summarizer_structured_ablation_bench PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}
+)
+target_include_directories(cortext_summarization_retrieval_ablation_bench PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}
+)
+target_include_directories(cortext_summarization_storage_pressure_ablation_bench PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}
+)
+target_include_directories(cortext_consolidation_label_pressure_ablation_bench PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
@@ -310,6 +359,18 @@ target_link_libraries(cortext_storage_human_sleep_token_bench PRIVATE
 target_link_libraries(cortext_decay_surface_ablation_bench PRIVATE
   cortext
 )
+target_link_libraries(cortext_resurfacing_pressure_ablation_bench PRIVATE
+  cortext
+)
+target_link_libraries(cortext_resurfacing_horizon_bench PRIVATE
+  cortext
+)
+target_link_libraries(cortext_resurfacing_knob_sweep_bench PRIVATE
+  cortext
+)
+target_link_libraries(cortext_preference_update_ablation_bench PRIVATE
+  cortext
+)
 target_link_libraries(cortext_extractor_prompt_ablation_bench PRIVATE
   cortext
   nlohmann_json::nlohmann_json
@@ -319,6 +380,17 @@ target_link_libraries(cortext_summarizer_prompt_ablation_bench PRIVATE
   nlohmann_json::nlohmann_json
 )
 target_link_libraries(cortext_summarizer_structured_ablation_bench PRIVATE
+  cortext
+  nlohmann_json::nlohmann_json
+)
+target_link_libraries(cortext_summarization_retrieval_ablation_bench PRIVATE
+  cortext
+)
+target_link_libraries(cortext_summarization_storage_pressure_ablation_bench PRIVATE
+  cortext
+  nlohmann_json::nlohmann_json
+)
+target_link_libraries(cortext_consolidation_label_pressure_ablation_bench PRIVATE
   cortext
   nlohmann_json::nlohmann_json
 )

@@ -38,8 +38,10 @@ struct ExtractedFact
 
 /// @brief Request for external LLM extraction.
 ///
-/// Created by ConsolidationSummarize for clusters meeting
-/// MinClusterSizeForExtraction threshold.
+/// Created from clustered source memories for clusters meeting
+/// MinClusterSizeForExtraction threshold. `summary_id` is the source_id of the
+/// graph association receiving extracted labels; it may identify an associative
+/// cue node, not necessarily an abstractive summary.
 struct ExtractionRequest
 {
   std::string summary_id;

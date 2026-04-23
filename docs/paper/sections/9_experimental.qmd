@@ -1543,6 +1543,135 @@ Representative outputs:
 
 **Observation:** The biggest win did **not** come from adding more wording. It came from changing the input shape. The excerpt-based prompts remained last-turn-biased: even the better few-shot excerpt styles still dropped early facts like `Gabriel` and `Chicago`, or collapsed the whole cluster to the last blocker sentence. The transcript-style prompt changed the behavior qualitatively. On the live local `LFM2.5-350M` summarizer it recovered all five desired identity/work facts, six of seven project/ops facts, and four of five neighbor/housing facts, with **zero** banned meta hits and only a moderate latency cost relative to the leanest zero-shot style (`1850 ms` vs `1216 ms` across the three-fixture run). Based on this ablation, the current branch now uses the **transcript few-shot prompt as the deployed default** for the local `LFM2.5-350M` summarization path, while still allowing overrides through `CORTEXT_LFM2_SUMMARY_PROMPT_STYLE` for further study.
 
+### Summarization Retrieval Ablation {#sec-summarization-retrieval-ablation}
+
+Prompt-level summary quality does not answer the product question by itself.
+For chat memory, the load-bearing question is whether summary nodes improve or
+degrade later retrieval of the original episodic details. We therefore added a
+targeted retrieval ablation around a repeated personal-event fact: `Maya` is an
+`11-year-old`; she gave a `pitch` `this weekend`; the detail was mentioned
+`three times`.
+
+The benchmark seeds the same event trace plus distractors under three
+conditions, then asks a recall query and scores whether retrieved raw memories
+or retrieved summary nodes contain the five details (`Maya`, age, pitch,
+weekend, repetition):
+
+* no consolidation
+* shallow consolidation
+* deep consolidation with the configured LFM2.5 summarizer/extractor path
+
+**Deterministic retrieval ablation:** `./build/examples/benchmark/cortext_summarization_retrieval_ablation_bench`
+
+Run log: `logs/summarization_retrieval_ablation_20260422/summarization_retrieval_ablation.log`
+
+| condition | retrieved candidates | raw detail hits | summary detail hits | raw hits | summary hits |
+|---|---:|---:|---:|---:|---:|
+| no consolidation | `4` | **`5 / 5`** | `0 / 5` | `4` | `0` |
+| shallow consolidation | `8` | **`5 / 5`** | `0 / 5` | `4` | `0` |
+| deep consolidation | `12` | **`5 / 5`** | `0 / 5` | `4` | `0` |
+
+Per-detail raw recall was complete in all three conditions (`age=1`,
+`pitch=1`, `weekend=1`, `repetition=1`, plus the named subject). Deep
+consolidation increased candidate breadth, but the exact autobiographical
+details still came from raw episodic memories rather than summary nodes.
+
+**Observation:** This supports a more conservative interpretation of
+summarization in Cortext. For exact chat recall, summary nodes are not currently
+necessary when the raw memory engine has preserved the source traces. The safe
+role for summarization is routing, clustering, and optional compression, not
+replacement of canonical evidence. Retrieval should continue to hydrate and rank
+source memories behind any retrieved summary; otherwise lossy summaries can
+erase details that the base engine already retained.
+
+### Storage-Pressure Summary Gate {#sec-storage-pressure-summary-gate}
+
+The retrieval ablation above motivated a policy change: abstractive summaries
+should not be emitted merely because a consolidation cadence fired. Raw episodic
+memories are canonical while storage is cheap; lossy summary nodes become useful
+only when they are acting as compression under real storage pressure.
+
+The deployed gate now reuses the exact eviction frontier instead of maintaining
+a second summarization-specific ejection policy:
+
+```text
+storage_allows_ejection =
+  !storage_gate_active || used_bytes >= storage_threshold_bytes
+
+summary_compression_enabled =
+  storage_gate_active && storage_allows_ejection
+
+eviction_frontier(memory) =
+  storage_allows_ejection
+  && memory.kind == LONG_TERM
+  && memory.strength < periphery_cutoff(T)
+  && (!active_fact_evidence(memory)
+      || memory.strength < fact_eviction_floor(T))
+  && (!consolidation_gate_active
+      || memory.created_at < last_consolidation_ts)
+```
+
+A cluster is summarized only when an explicit storage gate is active and all raw
+`LONG_TERM` source memories in that cluster are already eviction-frontier
+candidates. This keeps the `LFM2.5-1.2B` summarizer off the hot path when the
+database is below pressure or no storage budget has been configured, and it
+prevents lossy compression from inventing a retention rule that disagrees with
+memory ejection. Fact-backed memories are protected by the same
+`fact_eviction_floor(T)` used by deletion.
+
+Label extraction is intentionally independent of this compression gate. Every
+eligible consolidation cluster first receives a lightweight `associative_cue_*`
+ASSOCIATION node with `derived_from` edges back to the raw memories, then
+extraction runs on the raw source texts. Extracted `LABEL` nodes attach to that
+cue through `has_label` edges. Summary nodes are optional second-stage
+compression artifacts; summarizer availability or failure cannot decide whether
+labels are extracted from the underlying memories. Empty label arrays are valid
+for filler-only clusters, and the persistence path rejects common transcript
+fillers and speaker-role terms such as `ya`, `know`, `you know`, `user`, and
+`assistant` before creating `LABEL` nodes. A second evidence-support gate rejects
+labels that do not appear in the raw cue evidence when that evidence is
+available, preventing few-shot prompt leakage from becoming durable memory.
+
+Destructive deletion is sequenced after compression when a summarizer is
+available: a weak frontier memory is not physically deleted until a summary
+memory has a `derived_from` edge back to that raw source. This avoids a race
+where `UpdateMemoryStrength` removes the evidence before
+`ConsolidationSummarize` can create the compression artifact, while preserving
+the same frontier predicate for deciding which raw memories are eligible.
+
+**Live-model consolidation label-pressure ablation:** `./build/examples/benchmark/cortext_consolidation_label_pressure_ablation_bench`
+
+Runtime stack:
+
+* encoder: `EmbeddingGemma/llama.cpp`
+* extractor/summarizer backend: `LFM2.5/llama.cpp`
+* extractor model: `models/lfm2.5-350m-gguf/LFM2.5-350M-Q4_K_M.gguf`
+* summarizer model: `models/lfm2.5-1.2b-instruct-gguf/LFM2.5-1.2B-Instruct-Q4_K_M.gguf`
+
+| scenario | extraction requests | summary nodes | associative cue nodes | label nodes | `has_label` edges | result |
+|---|---:|---:|---:|---:|---:|---|
+| low pressure | `1` | `0` | `1` | `2` | `2` | storage threshold blocks summarization but labels still materialize |
+| high pressure, compressible | `1` | `1` | `1` | `2` | `2` | compression runs after cue-attached extraction |
+| high pressure, protected evidence | `1` | `0` | `1` | `2` | `2` | fact evidence remains outside the eviction frontier but labels still materialize |
+| filler only | `1` | `0` | `1` | `0` | `0` | empty/filler extraction creates a cue but no durable label nodes |
+| banter only | `1` | `0` | `1` | `0` | `0` | hallucinated few-shot labels are rejected because they are unsupported by evidence |
+| mixed durable + filler | `1` | `0` | `1` | `2` | `2` | durable source labels survive while filler is filtered |
+
+Recorded metric: `consolidation_label_pressure_ablation_ok = 1`.
+
+**Targeted test coverage:** `./build/tests/cortext_tests "[summarize][storage_pressure]"` passed with **9 assertions in 2 test cases**.
+The chat E2E slice `./build/tests/cortext_tests "Integration: chat memories consolidate and retrieve"`
+also passed with **21 assertions**, covering cue-attached `LABEL` creation,
+`has_label` edges, and repeated content-addressed object writes during
+summary/cue consolidation.
+
+**Observation:** Summarization is now an eviction-frontier behavior rather than
+an arbitrary consolidation side effect. Consolidation can still update clusters
+and graph metadata, and label extraction still runs from raw evidence through
+associative cue nodes. Abstractive compression waits until the same storage budget and
+retention rules that would permit deleting raw memories say the lossy artifact
+is justified; associative cue nodes alone do not satisfy the destructive deletion guard.
+
 ### Storage-Gated Eviction Ablation (Apr 5, 2026)
 
 We also corrected a practical failure mode in the deployed eviction policy. The previous runtime would evict weak `LONG_TERM` memories as soon as they fell below `periphery_cutoff(T)`, even when the backing chat database was still trivially small. In long user conversations this produced premature forgetting: names and low-frequency autobiographical details could decay out of the active store long before disk pressure justified any deletion.
@@ -1720,6 +1849,179 @@ Recorded checks:
 * `surfacing_eviction_allowed_missing_at_168h = 1`
 
 **Observation:** In the current retrieval stack, **strength-only decay did not change surfacing once the raw trace was prevented from being evicted**. The decaying-but-retained condition lost roughly `99%` of its effective strength over `168 h` (`0.620625 -> 0.006087`), yet exact and paraphrase queries returned the same top-1 target at every tested gap, and the selected retrieval order matched the frozen-strength control exactly. The only condition that stopped surfacing the target was the control where eviction remained allowed, and there the failure mode was physical disappearance by `24 h`, not retrieval demotion while still present. This strongly suggests that the practical “old memory did not come back” complaint should currently be investigated first as **eviction, missing consolidation products, retrieval ranking, or query mismatch**, not as a direct effect of retained-memory strength decay inside `GraphAugmentedRetrieveCandidates`.
+
+We reran that same `decay_surface` benchmark after promoting the low-pressure ramp into the runtime default, and the result did **not** change: `surfacing_blocked_decay_matches_frozen_all` remained `1`, while the eviction-allowed control still lost the target by `24 h`. So the default resurfacing-policy change does not alter the earlier conclusion that retained-memory strength decay alone was not the practical cause of cross-session non-resurfacing in that fixture.
+
+That result ruled out the simplest hypothesis, but it did not answer the policy question we actually care about for human-like memory: **should cross-session resurfacing suppression depend on elapsed time alone, or on elapsed time plus storage pressure?** Human memory clearly changes with wall-clock time, but the system does not behave as if every idle gap is a hard capacity event. We therefore added a second deterministic ablation that leaves wall-clock time intact and modulates only the *aggressiveness* of retrieval-side age penalties and metacognitive confidence decay. After the initial ablation, the low-pressure ramp policy was promoted into the default runtime behavior, and the same benchmarks were rerun with both explicit override conditions and a no-override baseline.
+
+**Pressure-modulated resurfacing ablation:** `./build/examples/benchmark/cortext_resurfacing_pressure_ablation_bench`
+
+Setup:
+
+* one semantically exact long-term memory with deliberately borderline provenance (`source_reliability=0.46`, `source_contradiction_count=2`) so age-sensitive source confidence matters
+* one `120 s` idle gap for metacognitive confidence and one `168 h` retrieval gap for resurfacing
+* fixed retrieval context `F=S=T=0.5`
+* retrieval forced into `UnknownCaution` so the benchmark measures the strict resurfacing path rather than relaxed fallback retrieval
+* storage threshold fixed at `1000 B`
+* six conditions:
+  * `default_low_pressure`: runtime default with no resurfacing override, used storage `100 B`
+  * `default_high_pressure`: runtime default with no resurfacing override, used storage `1000 B`
+  * `time_only_low_pressure`: explicit time-only wall-clock aging ablation, used storage `100 B`
+  * `time_plus_pressure_gate_low`: wall-clock aging scaled by a low-pressure gate, used storage `100 B`
+  * `time_plus_pressure_ramp_low`: wall-clock aging scaled by a low-pressure ramp, used storage `100 B`
+  * `time_plus_pressure_ramp_high`: same ramp, but at threshold (`1000 B`) so behavior collapses back to the aggressive time-only behavior
+
+Key results:
+
+| scenario | confidence after `120 s` idle | unknown detected | resurfaces at `168 h` | top-1 |
+|---|---:|---:|---:|---:|
+| `default_low_pressure` | `0.264362` | `1` | `1` | `77` |
+| `default_high_pressure` | `0.200000` | `1` | `0` | `0` |
+| `time_only_low_pressure` | `0.200000` | `1` | `0` | `0` |
+| `time_plus_pressure_gate_low` | `0.250620` | `1` | `1` | `77` |
+| `time_plus_pressure_ramp_low` | `0.264362` | `1` | `1` | `77` |
+| `time_plus_pressure_ramp_high` | `0.200000` | `1` | `0` | `0` |
+
+Recorded checks:
+
+* `default_low_matches_pressure_ramp_low_confidence = 1`
+* `default_low_surfaces_target = 1`
+* `default_high_matches_pressure_ramp_high_confidence = 1`
+* `default_high_suppresses_target = 1`
+* `pressure_gate_low_confidence_gt_time_only = 1`
+* `pressure_ramp_low_confidence_gt_time_only = 1`
+* `pressure_gate_low_surfaces_target = 1`
+* `pressure_ramp_low_surfaces_target = 1`
+* `time_only_low_pressure_suppresses_target = 1`
+* `pressure_ramp_high_matches_time_only_confidence = 1`
+* `pressure_ramp_high_suppresses_target = 1`
+
+**Observation:** This ablation supports the `time + storage pressure` policy, and the rerun confirms that the runtime default now implements it. Pure wall-clock aging suppressed the memory even when the synthetic store was only at `10%` of its storage threshold. Once the same wall-clock penalties were made pressure-sensitive, the old but still relevant memory resurfaced again, and metacognitive confidence stayed above the `time_only` floor. The new `default_low_pressure` row matches `time_plus_pressure_ramp_low` exactly, while `default_high_pressure` matches `time_plus_pressure_ramp_high`, so the no-override runtime now behaves like a low-pressure ramp by default but still collapses back to the aggressive path when the store approaches capacity. Among the tested variants, the ramp condition remains the better human-memory analogue because it preserves a mild time effect at low pressure while recovering the full aggressive behavior when the store approaches capacity.
+
+We then ran a denser simulated-time sweep to locate the actual decay boundary:
+
+**Simulated resurfacing horizon sweep:** `./build/examples/benchmark/cortext_resurfacing_horizon_bench`
+
+Setup:
+
+* same borderline-provenance retrieval fixture as the pressure-modulated resurfacing ablation
+* synthetic idle/retrieval gaps: `1 m`, `5 m`, `15 m`, `30 m`, `2 h`, `6 h`, `24 h`, `3 d`, `7 d`, `30 d`
+* same six conditions:
+  * `default_low_pressure`
+  * `default_high_pressure`
+  * `time_only_low_pressure`
+  * `time_plus_pressure_gate_low`
+  * `time_plus_pressure_ramp_low`
+  * `time_plus_pressure_ramp_high`
+
+Key sweep results:
+
+| scenario | first confidence floor gap | first surfacing failure gap | last surfaced gap in sweep |
+|---|---:|---:|---:|
+| `default_low_pressure` | `5 m` | `never` | `3650 d` |
+| `default_high_pressure` | `1 m` | `1 m` | `never` |
+| `time_only_low_pressure` | `1 m` | `1 m` | `never` |
+| `time_plus_pressure_gate_low` | `5 m` | `never` | `3650 d` |
+| `time_plus_pressure_ramp_low` | `5 m` | `never` | `3650 d` |
+| `time_plus_pressure_ramp_high` | `1 m` | `1 m` | `never` |
+
+Selected raw checkpoints:
+
+| scenario | `1 m` confidence | `30 m` surfaced | `3650 d` surfaced |
+|---|---:|---:|---:|
+| `default_low_pressure` | `0.451981` | `1` | `1` |
+| `default_high_pressure` | `0.200000` | `0` | `0` |
+| `time_only_low_pressure` | `0.200000` | `0` | `0` |
+| `time_plus_pressure_gate_low` | `0.438906` | `1` | `1` |
+| `time_plus_pressure_ramp_low` | `0.451981` | `1` | `1` |
+| `time_plus_pressure_ramp_high` | `0.200000` | `0` | `0` |
+
+Recorded checks:
+
+* `default_low_matches_pressure_ramp_low_suppression = 1`
+* `default_low_surfaces_through_3650d = 1`
+* `default_high_matches_pressure_ramp_high_suppression = 1`
+* `time_only_reaches_confidence_floor_by_1m = 1`
+* `time_only_first_suppression_by_1m = 1`
+* `pressure_gate_surfaces_through_3650d = 1`
+* `pressure_ramp_low_surfaces_through_3650d = 1`
+* `pressure_ramp_high_matches_time_only_suppression = 1`
+
+**Observation:** The explicit `time_only` wall-clock policy is even steeper than the first pass suggested. On the current branch it bottoms metacognitive confidence by `1 minute` and, after the retrieval-side `T` decoupling described below, stops resurfacing this borderline memory immediately at the first tested gap (`1 minute`), even though the synthetic store is still at only `10%` of its storage threshold. The no-override runtime still follows the low-pressure ramp instead: `default_low_pressure` matches `time_plus_pressure_ramp_low`, while `default_high_pressure` matches the high-pressure ramp and therefore also fails immediately under full pressure. Pressure-aware resurfacing still eliminates the low-pressure cliff, but the extended sweep also still shows the second edge case: for this particular borderline fixture, both low-pressure variants remained retrievable through the entire `3650 d` (`10 year`) horizon. So the ablations support two conclusions at once:
+
+* surfacing should depend on **time + storage pressure**, not time alone
+* human-like long-horizon fading will still require **slower absolute confidence/aging constants** than the current defaults, plus calibration so low-pressure resurfacing does not become effectively permanent for memories near the source-confidence boundary
+
+In other words, storage-aware resurfacing fixes the conditionality of forgetting, but not yet the biological timescale, and the present low-pressure fixture may now be too durable.
+
+We then swept the three exposed knobs directly to see whether resurfacing behavior on this new policy is actually distributed across `F`, `S`, and `T`, or whether one knob dominates:
+
+**Deterministic resurfacing knob sweep (`3 × 3 × 3`):** `./build/examples/benchmark/cortext_resurfacing_knob_sweep_bench`
+
+Setup:
+
+* same borderline-provenance resurfacing fixture and simulated gap ladder as the horizon sweep above
+* full `F,S,T ∈ {0.2, 0.5, 0.9}` grid (`27` combinations)
+* three resurfacing-policy conditions:
+  * `default_low_pressure`
+  * `default_high_pressure`
+  * `time_only_low_pressure`
+* for each combination we record the first confidence-floor gap, first surfacing-failure gap, and last surfaced gap
+
+Key result by stability level (`9` combinations per `T` level):
+
+| scenario | `T=0.2` | `T=0.5` | `T=0.9` |
+|---|---|---|---|
+| `default_low_pressure` | floor `5 m`, suppress `never`, last `3650 d` | floor `5 m`, suppress `never`, last `3650 d` | floor `15 m`, suppress `never`, last `3650 d` |
+| `default_high_pressure` | floor `1 m`, suppress `1 m`, last `never` | floor `1 m`, suppress `1 m`, last `never` | floor `5 m`, suppress `1 m`, last `never` |
+| `time_only_low_pressure` | floor `1 m`, suppress `1 m`, last `never` | floor `1 m`, suppress `1 m`, last `never` | floor `5 m`, suppress `1 m`, last `never` |
+
+Marginal sweep summary:
+
+* `focus` had **no effect** on the recorded breakpoints in this fixture; the marginal averages were identical for `F=0.2`, `0.5`, and `0.9`
+* `sensitivity` also had **no effect** on the recorded breakpoints in this fixture; its marginal averages were identical across all three levels
+* `stability` no longer changes the **surfacing-failure breakpoint** once retrieval-side conservatism is decoupled from raw `T`:
+  * under `default_low_pressure`, all three `T` levels preserved resurfacing through the full `3650 d` horizon
+  * under `default_high_pressure` and `time_only_low_pressure`, all three `T` levels failed immediately at the first tested gap (`1 m`)
+  * `T` still affects the **confidence-floor breakpoint** (`5 m` at `T=0.2/0.5` vs `15 m` at `T=0.9` under `default_low_pressure`; `1 m` vs `5 m` under the aggressive regimes), but it no longer decides whether retrieval itself suppresses the memory
+
+Recorded checks:
+
+* `knob_sweep_default_low_no_worse_than_time_only = 1`
+* `knob_sweep_default_high_matches_time_only = 1`
+* `knob_sweep_mid_default_low_survives_horizon = 1`
+* `knob_sweep_mid_default_high_suppresses_at_1m = 1`
+* `knob_sweep_mid_time_only_suppresses_at_1m = 1`
+
+**Observation:** After decoupling retrieval-side conservatism from raw `T`, the knob story is cleaner. `F` and `S` remain effectively inert on this fixture, but `T` no longer decides whether retrieval suppresses the memory. It now changes only the confidence-floor timescale, while retrieval suppression follows pressure policy alone: low-pressure default keeps the memory alive across the full horizon, and aggressive regimes suppress it immediately. That is a better semantics split. `T` is still affecting metacognitive confidence persistence, but not direct retrieval skepticism, which is the behavior we wanted.
+
+We then turned to a different forgetting question: not whether a memory fades away while idle, but whether later contradictory experience can **revise** an existing memory in a human-like way. The motivating example here is preference reversal: a person may prefer pizza for years, then after a strong aversive episode stop wanting it and develop a different current preference while still retaining the historical fact that pizza *used to be* the favorite.
+
+**Deterministic preference-update ablation:** `./build/examples/benchmark/cortext_preference_update_ablation_bench`
+
+Setup:
+
+* one initial fact: `Alice favorite_food Pizza` with confidence `0.90`
+* one or more later contradictory extractions proposing `Soup` as the new favorite
+* `F=0.5`, `S=0.5`, `T=0.5`, so the supersession gate requires roughly `0.912` confidence to displace the incumbent fact
+* we query both the **current** favorite and the **historical** favorite before the contradiction window
+
+Results:
+
+| scenario | contradictory evidence | current favorite | historical favorite | pizza superseded | open soup fact | archived soup facts |
+|---|---|---|---|---:|---:|---:|
+| `single_weak_contradiction` | one `Soup` update at `0.55` | `Pizza` | `Pizza` | 0 | 0 | 1 |
+| `single_strong_contradiction` | one `Soup` update at `0.96` | `Soup` | `Pizza` | 1 | 1 | 0 |
+| `strong_contradiction_plus_confirmation` | `Soup` at `0.96`, then confirming `Soup` at `0.88` | `Soup` | `Pizza` | 1 | 1 | 0 |
+| `repeated_moderate_contradictions` | three `Soup` updates at `0.72` | `Pizza` | `Pizza` | 0 | 0 | 3 |
+
+Additional recorded check:
+
+* after `strong_contradiction_plus_confirmation`, the surviving `Soup` fact reached `confirmation_count = 2`
+
+**Observation:** The current system already supports a sensible **branch-and-supersede** preference update when a later contradictory episode is strong enough: the new preference becomes current, the old preference remains valid for earlier timestamps, and later confirmations reinforce the new fact rather than duplicating it. That is close to the intended human-memory behavior for abrupt reversals.
+
+The main limitation is what happens below the supersession threshold. Repeated moderate contradictory episodes do **not** accumulate into a later revision. Instead, each challenger is inserted as an immediately archived conflicting fact, so the incumbent `Pizza` preference survives indefinitely unless one later update crosses the supersession threshold on its own. For human-like memory revision, that is probably too brittle: repeated aversive episodes should eventually tip the current preference even when no single episode is overwhelmingly decisive.
 
 ### Messy Chat Baseline (Ubuntu Dialogue Corpus)
 

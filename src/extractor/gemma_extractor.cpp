@@ -68,8 +68,7 @@ BuildTextPrompt (const std::string &text)
       "\"object\" strings taken from the text. "
       "If available, facts may also include integer millisecond "
       "\"valid_start_ts\" and \"valid_end_ts\" fields. "
-      "Always return at least one label; if nothing is obvious, choose the "
-      "single most salient term from the text.\n"
+      "Return an empty labels array when the text has no durable label.\n"
       "Text:\n")
       + text;
 }
@@ -88,8 +87,7 @@ BuildAudioPrompt ()
       "\"object\" strings drawn from the audio content. "
       "If available, facts may also include integer millisecond "
       "\"valid_start_ts\" and \"valid_end_ts\" fields. "
-      "Always return at least one label; if nothing is obvious, choose the "
-      "single most salient term from the audio.\n"
+      "Return an empty labels array when the audio has no durable label.\n"
       "<start_of_audio>");
 }
 
@@ -265,6 +263,21 @@ HasNonEmptyLabel (const operations::ExtractionResult &result)
     }
   return false;
 }
+
+bool
+SchemaAllowsEmptyLabels (const nlohmann::json &schema)
+{
+  if (!schema.contains ("properties") || !schema["properties"].is_object ())
+    {
+      return false;
+    }
+  const auto &properties = schema["properties"];
+  if (!properties.contains ("labels") || !properties["labels"].is_object ())
+    {
+      return false;
+    }
+  return properties["labels"].value ("minItems", 0) == 0;
+}
 } // namespace
 
 struct GemmaExtractor::Impl
@@ -401,7 +414,7 @@ struct GemmaExtractor::Impl
           }
 
         auto parsed = ParseExtractionResponse (texts.front ());
-        if (HasNonEmptyLabel (parsed))
+        if (HasNonEmptyLabel (parsed) || SchemaAllowsEmptyLabels (schema))
           {
             return parsed;
           }
@@ -542,7 +555,7 @@ struct GemmaExtractor::Impl
           }
 
         auto parsed = ParseExtractionResponse (texts.front ());
-        if (HasNonEmptyLabel (parsed))
+        if (HasNonEmptyLabel (parsed) || SchemaAllowsEmptyLabels (schema))
           {
             return parsed;
           }

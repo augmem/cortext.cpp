@@ -4,6 +4,9 @@
 #include "cortext/core/utils.hpp"
 #include "cortext/processor/operation_context.hpp"
 #include "cortext/telemetry/telemetry.hpp"
+#include "eviction_ablation.hpp"
+#include "storage_pressure.hpp"
+#include "temporal_retrieval.hpp"
 #include <algorithm>
 #include <cstdint>
 #include <cmath>
@@ -28,12 +31,37 @@ EnvFlag (const char *name)
                   [] (unsigned char c) { return static_cast<char> (std::tolower (c)); });
   return s == "1" || s == "true" || s == "yes" || s == "on";
 }
+
+double
+ResolveResurfacingDecayScale (
+    Transaction &tx,
+    const temporal::RetrievalAblationOverride &retrieval_override)
+{
+  const auto mode = temporal::ResolveResurfacingDecayMode (retrieval_override);
+  if (mode == temporal::ResurfacingDecayMode::TimeOnly)
+    {
+      return 1.0;
+    }
+
+  const auto eviction_override = eviction::GetEvictionAblationOverride ();
+  const auto pressure_state
+      = pressure::ComputeStoragePressureState (tx, eviction_override);
+  switch (mode)
+    {
+    case temporal::ResurfacingDecayMode::PressureGate:
+      return pressure::GateScale (pressure_state, 0.2);
+    case temporal::ResurfacingDecayMode::PressureRamp:
+      return pressure::RampScale (pressure_state, 0.1);
+    case temporal::ResurfacingDecayMode::TimeOnly:
+      break;
+    }
+  return 1.0;
+}
 } // namespace
 
 void
 MetacognitiveMonitoring::Execute (OperationContext &context, Transaction &tx) const
 {
-  (void)tx;
   auto &p_ctx = context.GetProcessorContext ();
   const auto &cfg = context.GetConfig ();
   const double F = core::Clamp01 (cfg.focus);
@@ -63,19 +91,26 @@ MetacognitiveMonitoring::Execute (OperationContext &context, Transaction &tx) co
   const double unknown_cut = core::UnknownThreshold (F);
   const double conf_decay = core::ConfidenceDecayRate (T);
   const int switch_latency_ms = core::StrategySwitchLatencyMs (S);
-  const double certainty_req = core::CertaintyRequirement (T);
   const double meta_sens = core::MetacognitiveSensitivity (F, S);
   const std::uint64_t now_ts = context.GetSignal ().timestamp;
   const bool disable_conf_decay
       = EnvFlag ("CORTEXT_DISABLE_METACOG_CONFIDENCE_DECAY");
+  const auto retrieval_override = temporal::GetRetrievalAblationOverride ();
+  const auto resurfacing_decay_mode
+      = temporal::ResolveResurfacingDecayMode (retrieval_override);
+  const double resurfacing_decay_scale
+      = ResolveResurfacingDecayScale (tx, retrieval_override);
+  const double certainty_req
+      = core::CertaintyRequirement (resurfacing_decay_scale);
   double delta_t_s = 0.0;
   if (p_ctx.last_signal_timestamp > 0 && now_ts > p_ctx.last_signal_timestamp)
     {
       delta_t_s
           = static_cast<double> (now_ts - p_ctx.last_signal_timestamp) / 1000.0;
     }
+  const double effective_delta_t_s = delta_t_s * resurfacing_decay_scale;
   const double decay_factor
-      = disable_conf_decay ? 1.0 : std::exp (-conf_decay * delta_t_s);
+      = disable_conf_decay ? 1.0 : std::exp (-conf_decay * effective_delta_t_s);
   const double retained_confidence
       = core::Clamp01 (p_ctx.metacognitive_confidence * decay_factor);
   const double confidence_alpha
@@ -163,6 +198,14 @@ MetacognitiveMonitoring::Execute (OperationContext &context, Transaction &tx) co
                          telemetry::Attribute::Double ("confidence_decay_factor",
                                                       decay_factor),
                          telemetry::Attribute::Double ("delta_t_s", delta_t_s),
+                         telemetry::Attribute::Double (
+                             "effective_delta_t_s", effective_delta_t_s),
+                         telemetry::Attribute::String (
+                             "resurfacing_decay_mode",
+                             temporal::ToString (resurfacing_decay_mode)),
+                         telemetry::Attribute::Double (
+                             "resurfacing_decay_scale",
+                             resurfacing_decay_scale),
                          telemetry::Attribute::Double ("retrieval_strength",
                                                       retrieval),
                          telemetry::Attribute::Bool ("tot_state", tot_detected),

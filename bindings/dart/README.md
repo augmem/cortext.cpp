@@ -3,6 +3,9 @@
 Build the shared library from the repository root:
 
 ```bash
+zig build -Dshared=true -Dllama=false
+
+# or the legacy CMake path:
 cmake --preset ffi-release
 cmake --build --preset ffi-release --target cortext
 ```
@@ -18,6 +21,7 @@ dart test
 By default the package looks for the shared library in:
 
 - `CORTEXT_LIBRARY_PATH`
+- `zig-out/lib/`
 - `build/ffi-release/`
 - `build/ffi-release/lib/`
 - `install/lib/`

@@ -282,6 +282,7 @@ def _candidate_library_paths() -> list[Path]:
         candidates.append(Path(env_path).expanduser())
 
     for directory in (
+        root / "zig-out" / "lib",
         root / "build" / "ffi-release",
         root / "build" / "ffi-release" / "lib",
         root / "install" / "lib",
@@ -393,8 +394,8 @@ def load_library(path: str | os.PathLike[str] | None = None) -> ctypes.CDLL:
     searched = "\n".join(str(candidate) for candidate in _candidate_library_paths())
     raise CortextError(
         "Could not locate the Cortext shared library. "
-        "Build it with `cmake --preset ffi-release` and "
-        "`cmake --build --preset ffi-release --target cortext`, "
+        "Build it with `zig build -Dshared=true -Dllama=false` or "
+        "`cmake --preset ffi-release && cmake --build --preset ffi-release --target cortext`, "
         "or set CORTEXT_LIBRARY_PATH.\n"
         f"Searched:\n{searched}"
     )

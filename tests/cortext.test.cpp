@@ -51,6 +51,18 @@ BlobFromAny (const std::any &value)
   return {};
 }
 
+std::string
+TextFromMemory (const cortext::Cortext::Context::Memory &memory)
+{
+  std::string text;
+  for (const auto &blob : memory.content)
+    {
+      text.append (reinterpret_cast<const char *> (blob.data ()),
+                   blob.size ());
+    }
+  return text;
+}
+
 class ScopedTempDb
 {
 public:
@@ -362,6 +374,109 @@ TEST_CASE ("Cortext hydrates sqlite-objstore payloads",
       REQUIRE (memory.content[0] == expected_payloads.at (memory.id));
       REQUIRE (memory.mimetype == expected_mimes.at (memory.id));
     }
+}
+
+TEST_CASE ("Cortext expands internal retrieval nodes to linked text memories",
+           "[cortext][hydration][retrieval]")
+{
+  ScopedTempDb temp_db;
+  const auto &db_path = temp_db.path ();
+  auto store = cortext::SQLiteStore::Create (db_path);
+  cortext::testing::InitializeCoreSchema (*store);
+
+  constexpr int kEmbeddingDim = 256;
+  std::vector<float> embedding (kEmbeddingDim, 0.0f);
+  embedding[0] = 1.0f;
+
+  const std::string source_text = "I am thinking about messaging Jared.";
+  const std::vector<unsigned char> payload (source_text.begin (),
+                                            source_text.end ());
+  auto blob_rows = store->Execute ("SELECT objstore_put(?1) AS id",
+                                   { payload });
+  REQUIRE (blob_rows.size () == 1);
+  const auto blob_id = BlobFromAny (blob_rows[0].at ("id"));
+  REQUIRE (!blob_id.empty ());
+
+  store->Execute (
+      "INSERT INTO embeddings (embedding_id, embedding, created_at) "
+      "VALUES (?, ?, ?), (?, ?, ?), (?, ?, ?)",
+      { 100LL, embedding, 1000LL, 200LL, embedding, 1000LL, 300LL,
+        embedding, 1000LL });
+  store->Execute (
+      "INSERT INTO memories (memory_id, embedding_id, source_id, kind, blob_id, "
+      "start_ts, end_ts, n_signals, modality, s_max, s_avg, strength, created_at) "
+      "VALUES (?, ?, 'chat/user', 'LONG_TERM', ?, 1000, 1000, 1, 'text', "
+      "0.5, 0.5, 1.0, 1000)",
+      { 100LL, 100LL, blob_id });
+  store->Execute (
+      "INSERT INTO signals (memory_id, embedding_id, source_id, timestamp, "
+      "modality, mime, blob_id, serial_position, created_at) "
+      "VALUES (?, ?, 'chat/user', 1000, 'text', 'text/plain', ?, 0, 1000)",
+      { 100LL, 100LL, blob_id });
+  store->Execute (
+      "INSERT INTO memories (memory_id, embedding_id, source_id, kind, label, "
+      "start_ts, n_signals, modality, s_max, s_avg, strength, created_at) "
+      "VALUES (?, ?, 'associative_cue_test', 'ASSOCIATION', "
+      "'associative cue test', 1000, 1, 'text', 0.5, 0.5, 1.0, 1000), "
+      "(?, ?, 'jared', 'LABEL', 'Jared', 1000, 1, 'text', 0.5, 0.5, 1.0, 1000)",
+      { 200LL, 200LL, 300LL, 300LL });
+  store->Execute (
+      "INSERT INTO associations(source_memory_id, target_memory_id, edge_type, weight) "
+      "VALUES (?, ?, 'derived_from', 1.0), (?, ?, 'reinforces', 1.0)",
+      { 200LL, 100LL, 100LL, 300LL });
+
+  cortext::Cortext::Config cfg;
+  auto ctx = cortext::Cortext::Create (cfg, db_path, RepoModelsImageBindDir ());
+  REQUIRE (ctx != nullptr);
+
+  auto cue_hydrated = ctx->DebugHydrateForTest ({ 200LL }, {});
+  REQUIRE (cue_hydrated.retrieved_memory.size () == 1);
+  REQUIRE (cue_hydrated.retrieved_memory[0].id == 100LL);
+  REQUIRE (TextFromMemory (cue_hydrated.retrieved_memory[0]) == source_text);
+
+  auto label_hydrated = ctx->DebugHydrateForTest ({ 300LL }, {});
+  REQUIRE (label_hydrated.retrieved_memory.size () == 1);
+  REQUIRE (label_hydrated.retrieved_memory[0].id == 100LL);
+  REQUIRE (TextFromMemory (label_hydrated.retrieved_memory[0]) == source_text);
+}
+
+TEST_CASE ("Cortext hides unresolved internal retrieval nodes",
+           "[cortext][hydration][retrieval]")
+{
+  ScopedTempDb temp_db;
+  const auto &db_path = temp_db.path ();
+  auto store = cortext::SQLiteStore::Create (db_path);
+  cortext::testing::InitializeCoreSchema (*store);
+
+  constexpr int kEmbeddingDim = 256;
+  std::vector<float> embedding (kEmbeddingDim, 0.0f);
+  embedding[0] = 1.0f;
+
+  store->Execute (
+      "INSERT INTO embeddings (embedding_id, embedding, created_at) "
+      "VALUES (?, ?, ?), (?, ?, ?)",
+      { 200LL, embedding, 1000LL, 300LL, embedding, 1000LL });
+  store->Execute (
+      "INSERT INTO memories (memory_id, embedding_id, source_id, kind, label, "
+      "start_ts, n_signals, modality, s_max, s_avg, strength, created_at) "
+      "VALUES (?, ?, 'associative_cue_test', 'ASSOCIATION', "
+      "'associative cue test', 1000, 1, 'text', 0.5, 0.5, 1.0, 1000), "
+      "(?, ?, 'jared', 'LABEL', 'Jared', 1000, 1, 'text', 0.5, 0.5, 1.0, 1000)",
+      { 200LL, 200LL, 300LL, 300LL });
+  store->Execute (
+      "INSERT INTO associations(source_memory_id, target_memory_id, edge_type, weight) "
+      "VALUES (?, ?, 'has_label', 1.0)",
+      { 200LL, 300LL });
+
+  cortext::Cortext::Config cfg;
+  auto ctx = cortext::Cortext::Create (cfg, db_path, RepoModelsImageBindDir ());
+  REQUIRE (ctx != nullptr);
+
+  auto cue_hydrated = ctx->DebugHydrateForTest ({ 200LL }, {});
+  REQUIRE (cue_hydrated.retrieved_memory.empty ());
+
+  auto label_hydrated = ctx->DebugHydrateForTest ({ 300LL }, {});
+  REQUIRE (label_hydrated.retrieved_memory.empty ());
 }
 
 TEST_CASE ("C API handles NULL inputs correctly", "[cortext][capi][safety]")

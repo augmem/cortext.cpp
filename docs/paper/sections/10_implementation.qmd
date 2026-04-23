@@ -4,12 +4,12 @@
 
 In the current alpha, all online operations (scoring, boundary detection, retrieval, gating, graph updates) operate **only** on embeddings. Raw text/audio/image content is used solely to generate embeddings; the live loop never re-enters token space. This preserves modality-agnostic behavior and prevents hidden heuristics from bypassing knob control.
 
-Retrieved memories are hydrated for inspection and evaluation only. When a memory has no signal-level blobs (e.g., consolidation summaries), the system loads the summary payload from `memories.blob_id` so summary nodes can participate in analysis without affecting online computations.
+Retrieved memories are hydrated for inspection and evaluation only. When a memory has no signal-level blobs (e.g., consolidation summaries), the system loads the summary payload from `memories.blob_id` so summary nodes can participate in analysis without affecting online computations. Internal retrieval nodes that are intentionally non-renderable, such as `LABEL` nodes and associative cue anchors, remain graph-routing products: when one is selected for the public retrieval surface, hydration resolves a bounded set of linked source memories with actual payloads instead of exposing empty label/cue records to applications.
 
 ## Model Stack (Local Inference)
 
 * **ImageBind embeddings:** image/text/audio inputs are embedded via ImageBind executed through ONNX (default path: `models/imagebind/`).
-* **Consolidation LLM:** summarization and labeling are the only generative steps and run only during consolidation. Cortext resolves a local backend internally: **gemma-3n-e2b** via `third_party/litert_lm`, **LFM2/LFM2.5** via `llama.cpp` GGUFs, or a **mixed** Gemma+Liquid path. The Gemma path auto-selects among available `.litertlm` variants under `models/gemma3n-e2b-litert/`. The Liquid path now prefers `LFM2.5-350M-GGUF` for both summarization and extraction, preferring `Q4_K_M` when present and otherwise accepting other shipped GGUF quantizations; env overrides still take precedence for exact paths. If the `LFM2.5-350M-GGUF` asset is absent, Cortext falls back to the older `LFM2-2.6B-Transcript-Q4_K_M.gguf` summarizer and `LFM2-1.2B-Extract-Q4_K_M.gguf` extractor. The mixed path uses Gemma for summarization and the preferred Liquid extractor path for labeling, but auto resolution now prefers the pure `LFM2.5/llama.cpp` path when the Liquid assets are present; mixed and Gemma are fallbacks. If no deep backend is available, deep consolidation raises an error rather than silently degrading. The summarization prompt remains role-aware for chat sources, favors direct fact-oriented memory notes over dialogue recaps, explicitly preserves named people, projects, and technologies, discourages speaker-role phrasing such as "the user" or "the assistant", and preserves chronological ordering when selected chat excerpts are passed to the model. The Liquid GGUF path is text-only; audio-specific summarization/extraction methods remain unsupported there.
+* **Consolidation LLM:** summarization and labeling are the only generative steps and run only during consolidation. Cortext resolves a local backend internally: **gemma-3n-e2b** via `third_party/litert_lm`, **LFM2/LFM2.5** via `llama.cpp` GGUFs, or a **mixed** Gemma+Liquid path. The Gemma path auto-selects among available `.litertlm` variants under `models/gemma3n-e2b-litert/`. The Liquid path now prefers `LFM2.5-350M-GGUF` for extraction and `LFM2.5-1.2B-Instruct-GGUF` for summarization, preferring `Q4_K_M` when present and otherwise accepting other shipped GGUF quantizations; env overrides still take precedence for exact paths. The mixed path uses Gemma for summarization and the preferred Liquid extractor path for labeling, but auto resolution now prefers the pure `LFM2.5/llama.cpp` path when the Liquid assets are present; mixed and Gemma are fallbacks. If no deep backend is available, deep consolidation raises an error rather than silently degrading. Label extraction is anchored on `associative_cue_*` association nodes and runs from raw source memory text; optional summary nodes are storage-pressure-gated compression artifacts. Empty label arrays are valid, transcript filler labels are rejected before persistence, and cue-backed labels must be supported by raw source evidence. The summarization prompt remains role-aware for chat sources, favors direct fact-oriented memory notes over dialogue recaps, explicitly preserves named people, projects, and technologies, discourages speaker-role phrasing such as "the user" or "the assistant", and preserves chronological ordering when selected chat excerpts are passed to the model. The Liquid GGUF path is text-only; audio-specific summarization/extraction methods remain unsupported there.
 * **Offline label-classifier prototype:** we now also ship a research-only Python pipeline that trains span typing / promotion models from WordNet, multilingual name priors, and sentence context. The current study path builds those priors from `data/surnames/{forenames,surnames}.csv` plus U.S. Census surnames. When external embeddings are enabled, the prototype reuses the repo's preferred text encoder through the rebuilt `cortext_text_embedder`, so offline studies can run on `EmbeddingGemma/llama.cpp` without changing the online runtime path.
 
 No other model runtimes are required for the online loop; all operational decisions are embedding-space computations derived from F/S/T.
@@ -35,13 +35,15 @@ valid_start, valid_end
 recorded_at, superseded_at
 confidence
 source_memory_ids
+source_associative_cue_ids
 source_summary_ids
 ```
 
 This layer is additive, not a replacement for the existing episodic graph. The division of responsibility is:
 
 * **episodic memories:** preserve raw experience and provenance,
-* **summaries and graph nodes:** provide semantic compression and associative retrieval,
+* **associative cue nodes:** anchor labels and associative retrieval for raw memory clusters,
+* **summaries:** provide optional semantic compression when storage pressure justifies it,
 * **bitemporal facts:** answer changing factual questions with explicit world-time and system-time semantics.
 
 Under this design, deep extraction in consolidation emits assertions with valid-time and transaction-time boundaries. The fact store supports three query modes:

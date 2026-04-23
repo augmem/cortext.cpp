@@ -2,8 +2,8 @@ package cortext
 
 /*
 #cgo CFLAGS: -I${SRCDIR}/../../include
-#cgo darwin LDFLAGS: -L${SRCDIR}/../../build/ffi-release -lcortext -Wl,-rpath,${SRCDIR}/../../build/ffi-release
-#cgo linux LDFLAGS: -L${SRCDIR}/../../build/ffi-release -lcortext -Wl,-rpath,${SRCDIR}/../../build/ffi-release
+#cgo darwin LDFLAGS: -L${SRCDIR}/../../zig-out/lib -L${SRCDIR}/../../build/ffi-release -lcortext -Wl,-rpath,${SRCDIR}/../../zig-out/lib -Wl,-rpath,${SRCDIR}/../../build/ffi-release
+#cgo linux LDFLAGS: -L${SRCDIR}/../../zig-out/lib -L${SRCDIR}/../../build/ffi-release -lcortext -Wl,-rpath,${SRCDIR}/../../zig-out/lib -Wl,-rpath,${SRCDIR}/../../build/ffi-release
 #include <stdlib.h>
 #include "cortext/capi.h"
 */

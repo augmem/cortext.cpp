@@ -3,11 +3,15 @@
 Build the native shared library first:
 
 ```bash
+zig build -Dshared=true -Dllama=false
+
+# or the legacy CMake path:
 cmake --preset ffi-release
 cmake --build --preset ffi-release --target cortext
 ```
 
-Then the package can link against `build/ffi-release/libcortext.*` directly:
+Then the package can link against `zig-out/lib/libcortext.*` or
+`build/ffi-release/libcortext.*` directly:
 
 ```bash
 cd bindings/go

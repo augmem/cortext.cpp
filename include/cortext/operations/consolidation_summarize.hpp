@@ -20,11 +20,10 @@ struct ConsolidationSummarizeParams
 /// @brief Algorithm 29c: Create summaries from clusters.
 ///
 /// For each valid cluster from ConsolidationCluster:
-/// - Generates unique summary_id
-/// - Fetches its text from objstore as summary_text (deep LLM backend required)
-/// - Creates MEMORIES entry (kind='ASSOCIATION') with centroid embedding
-/// - Creates ASSOCIATIONS edges (edge_type='derived_from') linking centroid to sources
-/// - Queues ExtractionRequest for clusters meeting MinClusterSizeForExtraction
+/// - Creates a centroid associative cue node for graph labeling/retrieval
+/// - Queues ExtractionRequest from raw source memories, attached to that cue
+/// - Uses the deep LLM summarizer only when storage pressure permits compression
+/// - Creates ASSOCIATIONS edges (edge_type='derived_from') linking cues/summaries to sources
 ///
 /// Input:
 /// - context.GetConsolidationClusters() (from ConsolidationCluster)
@@ -32,7 +31,8 @@ struct ConsolidationSummarizeParams
 /// - objstore (for fetching payload text)
 ///
 /// Output:
-/// - MEMORIES entry for each cluster centroid (kind='ASSOCIATION')
+/// - MEMORIES entry for each summarized cluster or associative cue centroid
+///   (kind='ASSOCIATION')
 /// - ASSOCIATIONS edges linking centroid to source memories
 /// - embeddings entry for each cluster centroid
 /// - context.SetExtractionRequests(requests) for EnqueueExtractionJobs

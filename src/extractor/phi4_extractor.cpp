@@ -248,9 +248,8 @@ struct Phi4Extractor::Impl
                          "with subject/predicate/object, and optional "
                          "\"facts\" as objects with subject/predicate/object "
                          "plus optional valid_start_ts/valid_end_ts integers. "
-                         "Always return at least "
-                         "one label; if nothing is obvious, choose the "
-                         "single most salient term.<|end|><|assistant|>";
+                         "Return an empty labels array when the audio has no "
+                         "durable label.<|end|><|assistant|>";
     auto inputs = processor->ProcessAudios (prompt.c_str (), audios.get ());
 
     // Generate
@@ -369,8 +368,7 @@ Phi4Extractor::ExtractFromText (const std::string &text,
           "\"relations\" as objects with subject/predicate/object, and "
           "optional \"facts\" as objects with subject/predicate/object plus "
           "optional valid_start_ts/valid_end_ts integers. "
-          "Always return at least one label; if nothing is obvious, choose "
-          "the single most salient term."
+          "Return an empty labels array when the text has no durable label."
         + "<|end|><|assistant|>";
   return impl_->ExtractWithSchema (prompt, schema);
 }
