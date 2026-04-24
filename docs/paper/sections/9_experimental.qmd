@@ -550,6 +550,55 @@ current probes. The next plausible but still unconfirmed target is
 `boundary_pressure`. Everything else either remained load-bearing in the unit
 matrix or already survived a stronger live-model confirmation pass.
 
+## Rejected Referent-Activation Probe (Apr 23, 2026)
+
+We evaluated a proposed short-horizon referent-activation path before deciding
+not to retain it. The probe reused `memories.pre_activation` to refresh
+label/cue/source neighborhoods after retrieval, then compared that path against
+a study-only disable flag (`CORTEXT_DISABLE_REFERENT_ACTIVATION=1`). The
+benchmark built three scenario-specific SQLite bases once using the live
+consolidation stack (`Consolidate(Both)` on the shipped local models) so that
+associative cues and labels existed before the knob sweep began.
+
+Scenario families:
+
+* local pronoun continuity after a named `Jared` memory cluster
+* cross-source resurfacing with `Jared/Chicago/couch` versus `Liam/Boston`
+  distractors
+* topic-shift release from `Jared` onto `Maya/demo`
+
+Recorded probe log:
+
+* `logs/referent_activation_ablation_20260423.log`
+
+Reported metrics:
+
+* `local_top1_rate`
+* `pronoun_resolution_rate`
+* `cross_source_resolution_rate`
+* `remote_intrusion_rate`
+* `topic_shift_release_rate`
+* `avg_retrieved`
+
+Aggregate `3 x 3 x 3` sweep means:
+
+| mode | local_top1 | pronoun_resolution | cross_source_resolution | remote_intrusion | topic_shift_release | avg_retrieved |
+|---|---:|---:|---:|---:|---:|---:|
+| referent activation off | 0.6667 | 0.7778 | 0.6667 | 0.4321 | 0.3333 | 3.7407 |
+| referent activation on | 0.6667 | 0.7778 | 0.6667 | 0.4321 | 0.3333 | 3.7407 |
+
+Result: **rejected**. The first broad version could hurt precision by making
+ordinary retrieved source memories sticky. After tightening the probe to only
+refresh structured referent neighborhoods and to exclude the freshly stored
+ambiguous utterance, the precision regression disappeared, but the aggregate
+live-model sweep remained exactly neutral. A follow-up prototype that allowed
+`pre_activation` to seed retrieval also failed to produce any marginal
+referent-activation delta: the remaining continuity was already explained by
+the existing accumulator, recent-context blend, retrieval ranking, predictive
+pre-activation, and consolidation graph. Since the mechanism did not show a
+measurable marginal gain, it was removed rather than retained as extra online
+complexity.
+
 ## Threshold Adaptation
 The dynamic threshold (θ_dynamic) successfully tracked score distributions. In high-volatility inputs (within-accumulator drift_acc > 1.0), thresholds relaxed to ~0.15, while stable contexts tightened to ~0.27.
 

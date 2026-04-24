@@ -4735,6 +4735,95 @@ unconfirmed target is `boundary_pressure`. Everything else either
 remained load-bearing in the unit matrix or already survived a stronger
 live-model confirmation pass.
 
+## Rejected Referent-Activation Probe (Apr 23, 2026)
+
+We evaluated a proposed short-horizon referent-activation path before
+deciding not to retain it. The probe reused `memories.pre_activation` to
+refresh label/cue/source neighborhoods after retrieval, then compared
+that path against a study-only disable flag
+(`CORTEXT_DISABLE_REFERENT_ACTIVATION=1`). The benchmark built three
+scenario-specific SQLite bases once using the live consolidation stack
+(`Consolidate(Both)` on the shipped local models) so that associative
+cues and labels existed before the knob sweep began.
+
+Scenario families:
+
+-   local pronoun continuity after a named `Jared` memory cluster
+-   cross-source resurfacing with `Jared/Chicago/couch` versus
+    `Liam/Boston` distractors
+-   topic-shift release from `Jared` onto `Maya/demo`
+
+Recorded probe log:
+
+-   `logs/referent_activation_ablation_20260423.log`
+
+Reported metrics:
+
+-   `local_top1_rate`
+-   `pronoun_resolution_rate`
+-   `cross_source_resolution_rate`
+-   `remote_intrusion_rate`
+-   `topic_shift_release_rate`
+-   `avg_retrieved`
+
+Aggregate `3 x 3 x 3` sweep means:
+
+<table>
+<colgroup>
+<col style="width: 11%" />
+<col style="width: 14%" />
+<col style="width: 14%" />
+<col style="width: 14%" />
+<col style="width: 14%" />
+<col style="width: 14%" />
+<col style="width: 14%" />
+</colgroup>
+<thead>
+<tr>
+<th>mode</th>
+<th style="text-align: right;">local_top1</th>
+<th style="text-align: right;">pronoun_resolution</th>
+<th style="text-align: right;">cross_source_resolution</th>
+<th style="text-align: right;">remote_intrusion</th>
+<th style="text-align: right;">topic_shift_release</th>
+<th style="text-align: right;">avg_retrieved</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>referent activation off</td>
+<td style="text-align: right;">0.6667</td>
+<td style="text-align: right;">0.7778</td>
+<td style="text-align: right;">0.6667</td>
+<td style="text-align: right;">0.4321</td>
+<td style="text-align: right;">0.3333</td>
+<td style="text-align: right;">3.7407</td>
+</tr>
+<tr>
+<td>referent activation on</td>
+<td style="text-align: right;">0.6667</td>
+<td style="text-align: right;">0.7778</td>
+<td style="text-align: right;">0.6667</td>
+<td style="text-align: right;">0.4321</td>
+<td style="text-align: right;">0.3333</td>
+<td style="text-align: right;">3.7407</td>
+</tr>
+</tbody>
+</table>
+
+Result: **rejected**. The first broad version could hurt precision by
+making ordinary retrieved source memories sticky. After tightening the
+probe to only refresh structured referent neighborhoods and to exclude
+the freshly stored ambiguous utterance, the precision regression
+disappeared, but the aggregate live-model sweep remained exactly
+neutral. A follow-up prototype that allowed `pre_activation` to seed
+retrieval also failed to produce any marginal referent-activation delta:
+the remaining continuity was already explained by the existing
+accumulator, recent-context blend, retrieval ranking, predictive
+pre-activation, and consolidation graph. Since the mechanism did not
+show a measurable marginal gain, it was removed rather than retained as
+extra online complexity.
+
 ## Threshold Adaptation
 
 The dynamic threshold (θ_dynamic) successfully tracked score
