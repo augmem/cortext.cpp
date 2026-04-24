@@ -39,6 +39,31 @@ For interrupt evaluation, we report precision/recall using the knob-derived inte
 * **affect_drive_mean:** mean affect drive (arousal/emotion/salience composite)
 * **retrieval_emotion_bonus_mean:** mean emotion bonus applied during retrieval ranking
 
+## Rejected Pre-Consolidation Attentional Frame Probe
+
+As of **Apr 24, 2026**, the pre-consolidation attentional frame probe has been removed from the engine. The proposed mechanism was a bounded in-memory frame with recent centroid slots and memory-id seeds for low-information referential retrieval. It did not write labels and did not add a modality-specific extraction path, but the real-corpus evidence did not justify keeping the runtime path.
+
+The initial hand-authored real-encoder gate showed a strong referential benefit, but that result was not accepted as sufficient evidence. A stricter corpus-derived gate was then run with `EmbeddingGemma/llama.cpp` over real dialogue turns from PersonaChat, TopicalChat, and Taskmaster. The ablation compared the same pipeline with and without the frame operation; no runtime environment flag was used.
+
+The corpus gate results were:
+
+* encoder: `EmbeddingGemma/llama.cpp` via `models/llama_cpp/embeddinggemma-300M-Q8_0.gguf`
+* scenarios: **96** real-corpus scenarios evaluated over five F/S/T profiles, yielding **240** reference cases and **240** intrusion cases
+* reference hit rate: frame **0.8042**, baseline **0.7625**
+* intrusion rate: frame **0.5708**, baseline **0.5708**
+* mean retrieved count: frame **15.6312**, baseline **16.3708**
+* mean graph retrieval timing: frame **42.1493 ms**, baseline **43.0260 ms** in this debug build
+* mean frame update timing: **0.0288 ms**
+* result: **rejected** because the reference lift was only **+0.0417**, below the **+0.05** retention threshold
+
+A principled fix was tested after the first corpus run: frame-seeded memories were allowed to bypass the working-memory overlap filter only for underspecified referential grounding. That did not improve the corpus result. Because the benefit remained small and narrow, the runtime mechanism was removed rather than left as dangling experimental engine code. The record remains here only as a rejected probe.
+
+## Rejected Text-Only Reference Query Probe
+
+After the attentional-frame rejection, a smaller low-information reference query was tested on **Apr 24, 2026**. It detected short text turns containing pronoun/deictic tokens and lightly blended the current accumulator query with prior recent-context embeddings. The real-corpus gate looked promising on text dialogue: over `PersonaChat`, `TopicalChat`, and `Taskmaster` with `EmbeddingGemma/llama.cpp`, reference hit rate improved from **0.8833** to **1.0000**, remote-intrusion rate stayed flat at **0.7750**, mean retrieved count fell from **12.6333** to **11.7271**, and mean graph retrieval time stayed within the debug-build gate.
+
+Despite that text-corpus result, the mechanism was rejected and removed from the engine. The reason is architectural rather than metric-based: the online predicate was text-only and therefore did not advance Cortext's core modality-agnostic goal. Once audio, image, video, or other signals have become embeddings, retrieval should not depend on lexical pronoun checks that only text payloads can satisfy. Future work on ambiguous-reference grounding must use modality-general signals already present in the engine, such as embedding uncertainty, accumulator/context geometry, source continuity, episode structure, and retrieved-memory competition, and must be validated across non-text modalities before promotion.
+
 ## Bitemporal Fact Evaluation
 
 The current branch now evaluates the bitemporal fact layer **core-first**. The source of record is the deterministic fact-store and retrieval harnesses that measure whether Cortext preserves temporal truth, temporal belief, support quality, and bounded retention under delayed, conflicting, noisy, and repeated evidence traces. The chat example is not treated as a separate fact-grounding surface; correctness is established in the core before any downstream presentation layer is considered.
