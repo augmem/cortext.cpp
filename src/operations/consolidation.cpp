@@ -174,9 +174,12 @@ ScoreConsolidation::Execute (OperationContext &context, Transaction &tx) const
       { T, F_eff, S_eff, T, tag_weight, static_cast<long long> (now_ts),
         floor_cutoff });
   internal::ThrowIfStopRequested ();
-  if (rows.empty () && force_consolidation)
+  const int min_cluster_size = core::MinClusterSize (F_raw);
+  if (force_consolidation
+      && static_cast<int> (rows.size ()) < min_cluster_size)
     {
-      const int fallback_limit = std::max (core::WRet (T), 1);
+      const int fallback_limit
+          = std::max ({ core::WRet (T), min_cluster_size, 1 });
       const std::string fallback_query = std::string (
           "SELECT m.embedding_id, "
           "       ((?1 * COALESCE(m.strength, 1.0)) "

@@ -75,6 +75,20 @@ def candidate_pool(
             score = 2.0 + 1.0 / max(1, rank)
             candidates.setdefault(doc_index, (score, set()))[1].add("normal_rag_top_k")
 
+    recent_media_added = 0
+    for doc in reversed(timeline[:event_index]):
+        if doc.index not in doc_to_memory or doc.modality not in {"audio", "image", "video"}:
+            continue
+        score = 2.75 + 0.25 / math.sqrt(max(1, event_index - doc.index))
+        old = candidates.get(doc.index)
+        if old is None:
+            candidates[doc.index] = (score, {"recent_media_prior"})
+        else:
+            candidates[doc.index] = (max(old[0], score), old[1] | {"recent_media_prior"})
+        recent_media_added += 1
+        if recent_media_added >= 3:
+            break
+
     overlap_targets = label_targets(
         timeline,
         doc_to_memory,
@@ -107,8 +121,21 @@ def candidate_pool(
             candidates[doc.index] = (score, {"token_overlap_scan"})
 
     ranked = sorted(candidates.items(), key=lambda row: (-row[1][0], -timeline[row[0]].timestamp))
+    selected_ranked = ranked[:max_candidates]
+    if (
+        max_candidates > 0
+        and not any(timeline[doc_index].modality in {"audio", "image", "video"} for doc_index, _ in selected_ranked)
+    ):
+        for item in ranked:
+            doc_index = item[0]
+            if timeline[doc_index].modality in {"audio", "image", "video"}:
+                if len(selected_ranked) < max_candidates:
+                    selected_ranked.append(item)
+                else:
+                    selected_ranked[-1] = item
+                break
     out = []
-    for doc_index, (score, sources) in ranked[:max_candidates]:
+    for doc_index, (score, sources) in selected_ranked:
         doc = timeline[doc_index]
         out.append({
             "candidate_id": f"e{event_index}_c{doc_index}",
@@ -141,10 +168,9 @@ def build_sample(args: argparse.Namespace) -> int:
     rng = random.Random(args.seed)
     if args.shuffle_probes:
         rng.shuffle(probes)
-    selected = probes[: args.max_probes]
 
-    tasks = []
-    for probe in selected:
+    candidate_tasks = []
+    for probe in probes:
         event_index = int(probe["event_index"])
         if event_index >= len(timeline):
             continue
@@ -156,8 +182,10 @@ def build_sample(args: argparse.Namespace) -> int:
             max_candidates=args.max_candidates,
             min_overlap=args.min_overlap,
         )
+        if not candidates:
+            continue
         rng.shuffle(candidates)
-        tasks.append({
+        candidate_tasks.append({
             "probe_id": f"probe_{event_index}",
             "event_index": event_index,
             "query": {
@@ -172,6 +200,45 @@ def build_sample(args: argparse.Namespace) -> int:
             "labels": {},
             "notes": "",
         })
+
+    def has_candidate_source(task: dict, source: str) -> bool:
+        return any(
+            source in cand.get("candidate_sources", [])
+            for cand in task.get("candidates", [])
+        )
+
+    def has_media_candidate(task: dict) -> bool:
+        return any(
+            cand.get("modality") in {"audio", "image", "video"}
+            for cand in task.get("candidates", [])
+        )
+
+    selected_tasks = []
+    selected_probe_ids = set()
+
+    def add_task(task: dict) -> None:
+        if len(selected_tasks) >= args.max_probes:
+            return
+        probe_id = task.get("probe_id")
+        if probe_id in selected_probe_ids:
+            return
+        selected_tasks.append(task)
+        selected_probe_ids.add(probe_id)
+
+    def add_first_matching(predicate) -> None:
+        for task in candidate_tasks:
+            if predicate(task):
+                add_task(task)
+                return
+
+    if any(has_candidate_source(task, "cortext_active_packet") for task in candidate_tasks):
+        add_first_matching(lambda task: has_candidate_source(task, "cortext_active_packet"))
+    if any(has_media_candidate(task) for task in candidate_tasks):
+        add_first_matching(has_media_candidate)
+    for task in candidate_tasks:
+        add_task(task)
+
+    tasks = selected_tasks
 
     candidate_source_counts = Counter()
     candidate_modality_counts = Counter()
@@ -202,7 +269,23 @@ def build_sample(args: argparse.Namespace) -> int:
             "Label each candidate independently from 0 to 3.",
             "Use 2 or 3 when the candidate should surface in the bounded active packet for the query.",
             "Candidate order is randomized; do not infer rank from display order.",
+            "Use only the current turn and prior conversation context; do not use future turns.",
         ],
+        "labeling_context_policy": {
+            "query_context": "current_turn_plus_prior_context_only",
+            "candidate_context": "candidate_neighborhood_capped_before_query",
+            "future_turns_visible": False,
+        },
+        "sample_selection_policy": {
+            "probe_order": "seeded_shuffle" if args.shuffle_probes else "frozen_summary_order",
+            "required_candidate_coverage": [
+                "cortext_active_packet",
+                "audio_or_image_or_video",
+            ],
+            "coverage_applied_before_filling_remaining_probe_slots": True,
+            "available_probe_count": len(candidate_tasks),
+            "selected_probe_count": len(tasks),
+        },
         "sample_composition": {
             "query_modality_counts": dict(query_modality_counts),
             "candidate_modality_counts": dict(candidate_modality_counts),
@@ -462,7 +545,12 @@ def launch(args: argparse.Namespace) -> int:
                 cand["text"],
             ])
         query = task["query"]["text"]
-        query_context = context_html(int(task["event_index"]), before=24, after=8)
+        query_context = context_html(
+            int(task["event_index"]),
+            before=32,
+            after=0,
+            max_index=int(task["event_index"]),
+        )
         status = (
             f"Probe {task_index + 1}/{len(tasks)}  "
             f"Candidate {candidate_index + 1 if candidates else 0}/{task_total}  "
@@ -742,22 +830,31 @@ def score(args: argparse.Namespace) -> int:
         all_events = sorted(set(human_targets_by_probe) | set(judge_by_probe))
         intersections = [len(human_targets_by_probe.get(e, set()) & judge_by_probe.get(e, set())) for e in all_events]
         unions = [len(human_targets_by_probe.get(e, set()) | judge_by_probe.get(e, set())) for e in all_events]
-        all_candidate_events = sorted({
-            int(c["event_index"])
+        all_candidate_pairs = sorted({
+            (int(task["event_index"]), int(c["event_index"]))
             for task in sample.get("tasks", [])
             for c in task.get("candidates", [])
         })
+        human_positive_pairs = {
+            (probe_event, target_event)
+            for probe_event, target_events in human_targets_by_probe.items()
+            for target_event in target_events
+        }
+        judge_positive_pairs = {
+            (probe_event, target_event)
+            for probe_event, target_events in judge_by_probe.items()
+            for target_event in target_events
+        }
         human_binary = []
         judge_binary = []
-        human_all = set().union(*human_targets_by_probe.values()) if human_targets_by_probe else set()
-        judge_all = set().union(*judge_by_probe.values()) if judge_by_probe else set()
-        for event_index in all_candidate_events:
-            human_binary.append(1 if event_index in human_all else 0)
-            judge_binary.append(1 if event_index in judge_all else 0)
+        for pair in all_candidate_pairs:
+            human_binary.append(1 if pair in human_positive_pairs else 0)
+            judge_binary.append(1 if pair in judge_positive_pairs else 0)
         agreement = {
             "judge_frozen": str(args.judge_frozen),
             "probe_event_jaccard": sum(intersections) / sum(unions) if sum(unions) else 0.0,
             "cohen_kappa_binary_target_membership": cohen_kappa(human_binary, judge_binary),
+            "candidate_pair_count": len(all_candidate_pairs),
             "shared_probe_events": len(set(human_targets_by_probe) & set(judge_by_probe)),
             "human_probe_count": len(human_targets_by_probe),
             "judge_probe_count": len(judge_by_probe),

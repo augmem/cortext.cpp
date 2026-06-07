@@ -12,7 +12,6 @@ import argparse
 import hashlib
 import json
 import math
-import mimetypes
 import os
 import pathlib
 import re
@@ -41,6 +40,9 @@ LOCAL_JUDGE_HOSTS = {"localhost", "127.0.0.1", "::1", "0.0.0.0"}
 DEFAULT_LOCAL_JUDGE_BASE_URL = "http://127.0.0.1:8000/v1"
 DEFAULT_OLLAMA_BASE_URL = "http://127.0.0.1:11434"
 DEFAULT_OLLAMA_MODEL = "gemma4:12b-it-qat"
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".heic", ".gif", ".tiff"}
+VIDEO_EXTENSIONS = {".mov", ".mp4", ".3gp"}
+AUDIO_EXTENSIONS = {".m4a", ".wav", ".mp3"}
 
 
 @dataclass(frozen=True)
@@ -132,20 +134,19 @@ def source_for_message(message: dict) -> str:
 
 
 def media_kind(path: pathlib.Path) -> str:
-    mime = mimetypes.guess_type(path.name)[0] or ""
     ext = path.suffix.lower()
-    if mime.startswith("image/") or ext in {".jpg", ".jpeg", ".png", ".gif", ".heic"}:
+    if ext in IMAGE_EXTENSIONS:
         return "image"
-    if mime.startswith("video/") or ext in {".mov", ".mp4", ".m4v", ".3gp"}:
+    if ext in VIDEO_EXTENSIONS:
         return "video"
-    if mime.startswith("audio/") or ext in {".m4a", ".mp3", ".wav", ".flac", ".aac"}:
+    if ext in AUDIO_EXTENSIONS:
         return "audio"
     return "other"
 
 
-def media_source_id(path: pathlib.Path) -> str:
+def media_source_id(path: pathlib.Path, kind: str) -> str:
     name = path.name.lower()
-    if "_self" in name or " self " in name:
+    if kind == "audio" and ("_self" in name or " self " in name):
         return "chat/user"
     return "chat/assistant"
 
@@ -163,9 +164,8 @@ def build_timeline(input_dir: pathlib.Path, max_messages: int, media_limit: int)
         if kind not in {"audio", "image", "video"}:
             continue
         timestamp = parse_timestamp(path.name)
-        if timestamp is None:
-            continue
-        media.append((path, timestamp, kind))
+        media.append((path, int(timestamp or 0), kind))
+    media.sort(key=lambda item: (item[1], str(item[0])))
 
     events: list[tuple[int, int, bool, int]] = []
     for i, message in enumerate(messages):
@@ -192,13 +192,17 @@ def build_timeline(input_dir: pathlib.Path, max_messages: int, media_limit: int)
         media_attempted += 1
         path, timestamp, kind = media[idx]
         modality = "image" if kind == "video" else kind
+        try:
+            source_blob = str(path.relative_to(input_dir))
+        except ValueError:
+            source_blob = path.name
         out.append(Doc(
             index=len(out),
             timestamp=int(timestamp),
-            source_id=media_source_id(path),
+            source_id=media_source_id(path, kind),
             modality=modality,
             text=f"[{kind} source blob: {path.name}]",
-            source_blob=path.name,
+            source_blob=source_blob,
         ))
     return out
 
@@ -452,11 +456,55 @@ def judge_candidate_targets(
         return []
     query_doc = timeline[event_index]
     query_tokens = set(tokens(query_doc.text))
-    candidates: dict[int, tuple[float, str]] = {}
+    memory_to_doc = {
+        memory_id: doc_index for doc_index, memory_id in doc_to_memory.items()
+    }
+    candidates: dict[int, tuple[float, set[str]]] = {}
+
+    def add_candidate(score: float, doc_index: int, source: str) -> None:
+        old = candidates.get(doc_index)
+        if old is None:
+            candidates[doc_index] = (score, {source})
+            return
+        old_score, sources = old
+        sources.add(source)
+        candidates[doc_index] = (max(old_score, score), sources)
+
+    active_memory_ids = []
+    for field in ("cortext_working_memory_ids", "cortext_retrieved_memory_ids"):
+        active_memory_ids.extend(
+            int(mid) for mid in probe.get(field, []) if mid is not None
+        )
+    for rank, memory_id in enumerate(dict.fromkeys(active_memory_ids), start=1):
+        doc_index = memory_to_doc.get(memory_id)
+        if doc_index is None or doc_index >= event_index:
+            continue
+        add_candidate(
+            3.0 + 1.0 / max(1, rank),
+            doc_index,
+            "active_packet_prior_memory",
+        )
 
     for rank, doc_index in enumerate(probe.get("rag_top_k_indices", []), start=1):
         if isinstance(doc_index, int) and 0 <= doc_index < event_index and doc_index in doc_to_memory:
-            candidates[doc_index] = (2.0 + 1.0 / max(1, rank), "normal_rag_lexical_top_k")
+            add_candidate(
+                2.0 + 1.0 / max(1, rank),
+                doc_index,
+                "normal_rag_lexical_top_k",
+            )
+
+    recent_media_added = 0
+    for doc in reversed(timeline[:event_index]):
+        if doc.index not in doc_to_memory or doc.modality not in {"audio", "image", "video"}:
+            continue
+        add_candidate(
+            2.75 + 0.25 / math.sqrt(max(1, event_index - doc.index)),
+            doc.index,
+            "recent_media_prior",
+        )
+        recent_media_added += 1
+        if recent_media_added >= 3:
+            break
 
     for doc in timeline[:event_index]:
         if doc.index not in doc_to_memory or doc.modality != "text":
@@ -468,20 +516,32 @@ def judge_candidate_targets(
         if overlap < min_overlap:
             continue
         score = overlap + 0.25 / math.sqrt(max(1, event_index - doc.index))
-        old = candidates.get(doc.index)
-        if old is None or score > old[0]:
-            candidates[doc.index] = (score, "token_overlap_recency")
+        add_candidate(score, doc.index, "token_overlap_recency")
 
-    ranked = sorted(candidates.items(), key=lambda row: (-row[1][0], -timeline[row[0]].timestamp))[:max_candidates]
-    if not ranked:
+    ranked = sorted(candidates.items(), key=lambda row: (-row[1][0], -timeline[row[0]].timestamp))
+    selected_ranked = ranked[:max_candidates]
+    if (
+        max_candidates > 0
+        and not any(timeline[doc_index].modality in {"audio", "image", "video"} for doc_index, _ in selected_ranked)
+    ):
+        for item in ranked:
+            doc_index = item[0]
+            if timeline[doc_index].modality in {"audio", "image", "video"}:
+                if len(selected_ranked) < max_candidates:
+                    selected_ranked.append(item)
+                else:
+                    selected_ranked[-1] = item
+                break
+    if not selected_ranked:
         return []
 
     candidate_lines = []
-    for rank, (doc_index, (score, source)) in enumerate(ranked, start=1):
+    for rank, (doc_index, (score, sources)) in enumerate(selected_ranked, start=1):
         doc = timeline[doc_index]
         candidate_lines.append(
             f"C{rank}: event_index={doc.index} source_id={doc.source_id} "
-            f"modality={doc.modality} timestamp={doc.timestamp} heuristic={source} "
+            f"modality={doc.modality} timestamp={doc.timestamp} "
+            f"heuristic={','.join(sorted(sources))} "
             f"score={score:.3f}\nTEXT: {doc.text}"
         )
 
@@ -501,7 +561,7 @@ def judge_candidate_targets(
         prompt,
         900,
     )
-    by_candidate = {f"C{i}": doc_index for i, (doc_index, _) in enumerate(ranked, start=1)}
+    by_candidate = {f"C{i}": doc_index for i, (doc_index, _) in enumerate(selected_ranked, start=1)}
     targets = []
     seen: set[int] = set()
     for item in judged.get("targets", []):
@@ -753,13 +813,13 @@ def freeze(args: argparse.Namespace) -> int:
             "sources": sorted(label_sources),
             "source_definitions": {
                 "overlap": "prior text memory with query-token overlap above threshold plus recency/source bonus",
-                "rag": "normal chat+lexical RAG top-k document indices from the frozen benchmark summary, mapped back to persisted Cortext memory IDs",
+                "rag": "normal chat+vector/text RAG top-k document indices from the frozen benchmark summary, mapped back to persisted Cortext memory IDs",
             },
             "max_targets": args.max_targets,
             "min_query_token_overlap": args.min_overlap,
             "limitations": [
                 "self-labeled relevance, not independent human annotation",
-                "token-overlap and lexical RAG labels underlabel paraphrase, relationship context, and media-only relevance",
+                "token-overlap and vector/text RAG labels underlabel paraphrase, relationship context, and media-only relevance",
                 "RAG-derived labels are useful for regression pressure but are not independent of the baseline retrieval policy",
                 "single corpus, single relationship, single writing style",
             ],
@@ -843,22 +903,25 @@ def judge_freeze(args: argparse.Namespace) -> int:
         "db_path": str(db_path),
         "input_dir": str(input_dir),
         "labeling": {
-            "method": "judge-assisted frozen target selection from pre-retrieval candidate prior messages",
+            "method": "judge-assisted frozen target selection from a prior-message candidate pool",
             "judge_provider": judge_provider_label,
             "judge_model": judge_model,
             "judge_base_url": judge_base_url,
             "remote_provider_allowed": False,
             "candidate_sources": [
-                "normal chat+lexical RAG top-k document indices from the frozen benchmark summary",
+                "active packet prior-memory candidates from the frozen summary",
+                "normal chat+vector/text RAG top-k document indices from the frozen benchmark summary",
                 "prior text memories with query-token overlap above threshold plus recency",
+                "recent prior audio/image/video source-blob memories",
             ],
-            "selection_rule": "judge keeps candidates with relevance >= 2 on a 0-3 scale before any retrieval evaluation",
+            "selection_rule": "judge keeps prior-message candidates with relevance >= 2 on a 0-3 scale before any scoring evaluation",
             "max_targets": args.max_targets,
             "min_query_token_overlap": args.min_overlap,
             "max_candidates_per_probe": args.max_candidates,
             "limitations": [
                 "judge-assisted relevance, not independent human annotation",
                 "candidate generation can underlabel paraphrase, relationship context, and media-only relevance",
+                "media target freezing includes source-blob markers but does not attach raw media bytes in this helper",
                 "RAG-derived candidates are useful for regression pressure but are not independent of the baseline retrieval policy",
                 "single corpus, single relationship, single writing style",
                 "private source text was sent only to the configured loopback judge endpoint during label freezing",
@@ -1038,7 +1101,16 @@ def evaluate(args: argparse.Namespace) -> int:
         ctoks = int(probe.get("cortext_context_tokens", 0) or 0)
         if ctoks == 0:
             ctoks = int(probe.get("cortext_working_tokens", 0) or 0) + int(probe.get("cortext_retrieved_tokens", 0) or 0)
-        rtoks = int(probe.get("normal_rag_active_history_tokens", probe.get("rolling_history_tokens", 0)) or 0)
+        rtoks = int(
+            probe.get(
+                "normal_rag_context_tokens",
+                probe.get(
+                    "normal_rag_active_history_tokens",
+                    probe.get("rolling_history_tokens", 0),
+                ),
+            )
+            or 0
+        )
         judged_probe = judge_by_event.get(int(fp["event_index"]), {})
         if ctoks == 0 and judged_probe:
             ctoks = int(judged_probe.get("cortext_context_tokens", 0) or 0)

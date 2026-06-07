@@ -107,8 +107,10 @@ struct EventDoc
 struct CompactedHistory
 {
   std::vector<EventDoc> raw_docs;
+  std::string summary_text;
   int compaction_events = 0;
   int compacted_items = 0;
+  int compacted_summary_items = 0;
   int raw_items = 0;
   int raw_tokens = 0;
   int compacted_original_tokens = 0;
@@ -392,6 +394,44 @@ EstimateMemoryPacketTokens (
 }
 
 nlohmann::json
+MemoryPacketJson (
+    const std::vector<cortext::Cortext::Context::Memory> &memories)
+{
+  nlohmann::json out = nlohmann::json::array ();
+  int rank = 0;
+  for (const auto &memory : memories)
+    {
+      std::string text;
+      if (memory.modality == "text" || memory.mimetype == "text/plain")
+        {
+          bool first = true;
+          for (const auto &blob : memory.content)
+            {
+              if (!first)
+                text += "\n";
+              text.append (blob.begin (), blob.end ());
+              first = false;
+            }
+        }
+
+      out.push_back ({
+        { "rank", rank++ },
+        { "memory_id", memory.id },
+        { "kind", "probe_time_context_memory" },
+        { "source_id", memory.source_id },
+        { "modality", memory.modality },
+        { "mimetype", memory.mimetype },
+        { "start_ts", memory.timestamp },
+        { "timestamp", memory.timestamp },
+        { "tokens", EstimateMemoryTokens (memory) },
+        { "content_text", text },
+        { "content_blob_count", memory.content.size () },
+      });
+    }
+  return out;
+}
+
+nlohmann::json
 WorkingSetCurveRow (int event_index,
                     const EventDoc &doc,
                     const cortext::Cortext::Context &ctx)
@@ -495,14 +535,104 @@ RagContextTokens (const CompactedHistory &history,
   return tokens;
 }
 
-int
-CompactionSummaryTokens (int compacted_items, int compacted_original_tokens)
+std::string
+SpeakerLabel (const std::string &source_id)
 {
+  if (source_id == "chat/user")
+    return "Gabe";
+  if (source_id == "chat/assistant")
+    return "Julie";
+  return source_id;
+}
+
+std::string
+CompactOneLine (std::string text)
+{
+  for (char &c : text)
+    {
+      if (c == '\n' || c == '\r' || c == '\t')
+        c = ' ';
+    }
+  return Trim (text);
+}
+
+std::string
+TruncateForTokenBudget (const std::string &text, int token_budget)
+{
+  if (token_budget <= 0 || EstimateTokens (text) <= token_budget)
+    return text;
+  const std::size_t char_budget = static_cast<std::size_t> (
+      std::max (16, token_budget * 4 - 3));
+  if (text.size () <= char_budget)
+    return text;
+  return text.substr (0, char_budget) + "...";
+}
+
+int
+CompactionSummaryTokenBudget (int active_history_token_budget,
+                              int compacted_original_tokens)
+{
+  if (active_history_token_budget <= 0)
+    return std::max (256, compacted_original_tokens / 8);
+  const int budget_cap = std::max (1, active_history_token_budget);
+  return std::max (
+      1,
+      std::min ({ 1024, budget_cap,
+                  std::max (32, active_history_token_budget / 8),
+                  std::max (32, compacted_original_tokens / 6) }));
+}
+
+std::string
+BuildExtractiveCompactionSummary (const std::vector<EventDoc> &prior_docs,
+                                  int compacted_items,
+                                  int compacted_original_tokens,
+                                  int active_history_token_budget,
+                                  int &selected_items)
+{
+  selected_items = 0;
+  if (compacted_items <= 0)
+    return {};
+
+  const int summary_budget = CompactionSummaryTokenBudget (
+      active_history_token_budget, compacted_original_tokens);
+  const int prefix_items = std::min<int> (compacted_items, prior_docs.size ());
+  std::vector<std::string> selected;
+  int used = EstimateTokens ("Compacted prior chat summary:");
+
+  for (int i = prefix_items - 1; i >= 0; --i)
+    {
+      const auto &doc = prior_docs[static_cast<std::size_t> (i)];
+      std::ostringstream line;
+      line << "- timestamp=" << doc.timestamp << " "
+           << SpeakerLabel (doc.source_id) << ": "
+           << CompactOneLine (doc.text);
+      std::string text = line.str ();
+      int cost = EstimateTokens (text);
+      const int remaining = summary_budget - used;
+      if (remaining <= 8)
+        break;
+      if (cost > remaining)
+        {
+          text = TruncateForTokenBudget (text, remaining);
+          cost = EstimateTokens (text);
+        }
+      if (cost > remaining)
+        break;
+      selected.push_back (std::move (text));
+      used += cost;
+      ++selected_items;
+    }
+
+  std::reverse (selected.begin (), selected.end ());
   std::ostringstream out;
-  out << "[compacted_history messages=" << compacted_items
-      << " original_tokens=" << compacted_original_tokens
-      << " note=\"older rolling chat compressed before this turn\"]";
-  return EstimateTokens (out.str ());
+  out << "Compacted prior chat summary: " << compacted_items
+      << " older messages, " << compacted_original_tokens
+      << " original estimated tokens. Deterministic extractive excerpts:\n";
+  for (const auto &line : selected)
+    out << line << "\n";
+  if (selected.empty ())
+    out << "- <no excerpt fit within summary budget>\n";
+  return Trim (out.str ());
 }
 
 CompactedHistory
@@ -528,10 +658,18 @@ CompactRollingHistoryDocs (const std::vector<EventDoc> &prior_docs,
   if (result.compacted_items <= 0)
     return result;
 
-  for (int i = 0; i < result.compacted_items; ++i)
-    result.compacted_original_tokens += DocTokenCost (prior_docs[i]);
-  result.compacted_summary_tokens = CompactionSummaryTokens (
-      result.compacted_items, result.compacted_original_tokens);
+  auto update_summary = [&] {
+    result.compacted_original_tokens = 0;
+    for (int i = 0; i < result.compacted_items; ++i)
+      result.compacted_original_tokens += DocTokenCost (prior_docs[i]);
+    result.summary_text = BuildExtractiveCompactionSummary (
+        prior_docs, result.compacted_items, result.compacted_original_tokens,
+        token_budget, result.compacted_summary_items);
+    result.compacted_summary_tokens = result.summary_text.empty ()
+                                          ? 0
+                                          : EstimateTokens (result.summary_text);
+  };
+  update_summary ();
   result.compaction_events = 1;
 
   while (!result.raw_docs.empty () && token_budget > 0
@@ -541,14 +679,8 @@ CompactRollingHistoryDocs (const std::vector<EventDoc> &prior_docs,
       result.raw_tokens -= DocTokenCost (result.raw_docs.front ());
       result.raw_docs.erase (result.raw_docs.begin ());
       ++result.compacted_items;
-    }
-  if (result.compacted_items > 0)
-    {
-      result.compacted_original_tokens = 0;
-      for (int i = 0; i < result.compacted_items; ++i)
-        result.compacted_original_tokens += DocTokenCost (prior_docs[i]);
-      result.compacted_summary_tokens = CompactionSummaryTokens (
-          result.compacted_items, result.compacted_original_tokens);
+      result.raw_items = static_cast<int> (result.raw_docs.size ());
+      update_summary ();
     }
   return result;
 }
@@ -789,6 +921,70 @@ TopOperationTimingsJson (const std::unordered_map<std::string, double> &timings,
 }
 
 std::string
+DumpJsonArtifact (const nlohmann::json &out)
+{
+  return out.dump (2, ' ', false, nlohmann::json::error_handler_t::replace);
+}
+
+void
+WriteJsonArtifact (const fs::path &path, const nlohmann::json &out)
+{
+  const std::string payload = DumpJsonArtifact (out) + "\n";
+  fs::path tmp = path;
+  tmp += ".tmp";
+  {
+    std::ofstream stream (tmp, std::ios::binary | std::ios::trunc);
+    if (!stream)
+      {
+        throw std::runtime_error ("failed to open summary artifact: "
+                                  + tmp.string ());
+      }
+    stream << payload;
+    if (!stream)
+      {
+        throw std::runtime_error ("failed to write summary artifact: "
+                                  + tmp.string ());
+      }
+  }
+  fs::rename (tmp, path);
+}
+
+fs::path
+ProbeStreamPath (const fs::path &summary_path)
+{
+  fs::path path = summary_path;
+  path += ".probes.jsonl";
+  return path;
+}
+
+void
+ResetProbeStream (const fs::path &path)
+{
+  if (!path.parent_path ().empty ())
+    fs::create_directories (path.parent_path ());
+  fs::remove (path);
+}
+
+void
+AppendProbeStream (const fs::path &path, const nlohmann::json &probe)
+{
+  std::ofstream stream (path, std::ios::binary | std::ios::app);
+  if (!stream)
+    {
+      throw std::runtime_error ("failed to open probe stream artifact: "
+                                + path.string ());
+    }
+  stream << probe.dump (-1, ' ', false,
+                        nlohmann::json::error_handler_t::replace)
+         << "\n";
+  if (!stream)
+    {
+      throw std::runtime_error ("failed to write probe stream artifact: "
+                                + path.string ());
+    }
+}
+
+std::string
 MediaSourceId (const MediaItem &item)
 {
   const std::string name = Lower (item.path.filename ().string ());
@@ -983,6 +1179,8 @@ main (int argc, char **argv)
         fs::create_directories (cfg.db_path.parent_path ());
       if (!cfg.output_path.parent_path ().empty ())
         fs::create_directories (cfg.output_path.parent_path ());
+      const fs::path probe_stream_path = ProbeStreamPath (cfg.output_path);
+      ResetProbeStream (probe_stream_path);
       if (!cfg.append)
         {
           fs::remove (cfg.db_path);
@@ -1250,6 +1448,12 @@ main (int argc, char **argv)
                               probe_ctx.retrieved_memory);
                       probe["cortext_working_memory_ids"]
                           = ContextMemoryIdsJson (probe_ctx.working_memory);
+                      probe["cortext_frozen_retrieved_memory"]
+                          = MemoryPacketJson (probe_ctx.retrieved_memory);
+                      probe["cortext_frozen_working_memory"]
+                          = MemoryPacketJson (probe_ctx.working_memory);
+                      probe["cortext_frozen_packet_policy"]
+                          = "probe_time_hydrated_context_snapshot";
                       probe["cortext_retrieved_items"]
                           = probe_ctx.retrieved_memory.size ();
                       probe["cortext_working_items"]
@@ -1292,6 +1496,8 @@ main (int argc, char **argv)
                           = compacted_history.compaction_events;
                       probe["normal_rag_compacted_history_items"]
                           = compacted_history.compacted_items;
+                      probe["normal_rag_compacted_summary_items"]
+                          = compacted_history.compacted_summary_items;
                       probe["normal_rag_raw_history_items"]
                           = compacted_history.raw_items;
                       probe["normal_rag_raw_history_tokens"]
@@ -1300,6 +1506,10 @@ main (int argc, char **argv)
                           = compacted_history.compacted_original_tokens;
                       probe["normal_rag_compacted_summary_tokens"]
                           = compacted_history.compacted_summary_tokens;
+                      probe["normal_rag_compacted_summary"]
+                          = compacted_history.summary_text;
+                      probe["normal_rag_compaction_summary_policy"]
+                          = "deterministic_extractive_prior_chat";
                       probe["normal_rag_active_history_tokens"]
                           = compacted_history.raw_tokens
                             + compacted_history.compacted_summary_tokens;
@@ -1326,6 +1536,7 @@ main (int argc, char **argv)
                       probe["full_history_tokens"]
                           = DocPacketTokens (checkpoint_prior_text_docs);
 
+                      AppendProbeStream (probe_stream_path, probe);
                       checkpoint_probes.push_back (std::move (probe));
                       ++checkpoint_future_turns_probed;
                       ++checkpoint_probes_by_day[query_day];
@@ -1421,6 +1632,10 @@ main (int argc, char **argv)
           out["probe_stride"] = cfg.probe_stride;
           out["probe_count"] = checkpoint_probes.size ();
           out["probes"] = checkpoint_probes;
+          out["probe_stream_path"] = probe_stream_path.string ();
+          out["probe_stream_policy"]
+              = "native probe rows appended as compact JSONL immediately "
+                "after each probe is constructed";
           out["rag_top_k"] = cfg.rag_top_k;
           out["normal_rag_retrieval"] = "raw_chat_vector";
           out["normal_rag_baseline_modality"] = "text_only";
@@ -1432,6 +1647,8 @@ main (int argc, char **argv)
           out["normal_rag_context_token_policy"]
               = "text rolling chat after compaction plus unique text vector "
                 "RAG hits outside the active rolling window";
+          out["normal_rag_compaction_summary_policy"]
+              = "deterministic_extractive_prior_chat";
           out["active_history_token_budget"]
               = cfg.active_history_token_budget;
           out["knobs"] = {
@@ -1508,12 +1725,13 @@ main (int argc, char **argv)
                 "existing replay DB plus ephemeral future-turn probes. It is "
                 "not a corpus replay and does not ingest future media.";
           out["privacy_note"]
-              = "Aggregate counters only; message text and media content are "
-                "not written to this summary.";
+              = "Private benchmark artifact: probe rows include deterministic "
+                "extractive compacted-history summaries for the RAG baseline; "
+                "the public release report excludes message text and media "
+                "content.";
 
-          std::ofstream summary (cfg.output_path);
-          summary << out.dump (2) << "\n";
-          std::cout << out.dump (2) << "\n";
+          WriteJsonArtifact (cfg.output_path, out);
+          std::cout << DumpJsonArtifact (out) << "\n";
           return 0;
         }
 
@@ -1569,6 +1787,12 @@ main (int argc, char **argv)
                       = probe_ctx.working_memory.size ();
                   probe["cortext_retrieved_memory_ids"]
                       = ContextMemoryIdsJson (probe_ctx.retrieved_memory);
+                  probe["cortext_frozen_retrieved_memory"]
+                      = MemoryPacketJson (probe_ctx.retrieved_memory);
+                  probe["cortext_frozen_working_memory"]
+                      = MemoryPacketJson (probe_ctx.working_memory);
+                  probe["cortext_frozen_packet_policy"]
+                      = "probe_time_hydrated_context_snapshot";
                   probe["cortext_probe_policy"]
                       = "single_durable_chat_turn_profile_probe";
                   probe["cortext_working_memory_ids"]
@@ -1624,6 +1848,7 @@ main (int argc, char **argv)
                   probe["full_history_items"] = profile_prior_docs.size ();
                   probe["full_history_tokens"]
                       = DocPacketTokens (profile_prior_docs);
+                  AppendProbeStream (probe_stream_path, probe);
                   profile_probes.push_back (std::move (probe));
                 }
               profile_prior_docs.push_back (doc);
@@ -1642,6 +1867,10 @@ main (int argc, char **argv)
           out["probe_stride"] = cfg.probe_stride;
           out["probe_count"] = profile_probes.size ();
           out["probes"] = profile_probes;
+          out["probe_stream_path"] = probe_stream_path.string ();
+          out["probe_stream_policy"]
+              = "native probe rows appended as compact JSONL immediately "
+                "after each probe is constructed";
           out["rag_top_k"] = cfg.rag_top_k;
           out["normal_rag_retrieval"] = "raw_chat_vector";
           out["normal_rag_baseline_modality"] = "text_only";
@@ -1668,9 +1897,8 @@ main (int argc, char **argv)
                     profile_ended - profile_started)
                     .count ();
           out["peak_rss_mb"] = PeakRssMb ();
-          std::ofstream profile_out (cfg.output_path);
-          profile_out << out.dump (2) << "\n";
-          std::cout << out.dump (2) << "\n";
+          WriteJsonArtifact (cfg.output_path, out);
+          std::cout << DumpJsonArtifact (out) << "\n";
           return 0;
         }
 
@@ -1793,6 +2021,12 @@ main (int argc, char **argv)
                       = ContextMemoryIdsJson (probe_ctx.retrieved_memory);
                   probe["cortext_working_memory_ids"]
                       = ContextMemoryIdsJson (probe_ctx.working_memory);
+                  probe["cortext_frozen_retrieved_memory"]
+                      = MemoryPacketJson (probe_ctx.retrieved_memory);
+                  probe["cortext_frozen_working_memory"]
+                      = MemoryPacketJson (probe_ctx.working_memory);
+                  probe["cortext_frozen_packet_policy"]
+                      = "probe_time_hydrated_context_snapshot";
                   probe["cortext_retrieved_items"]
                       = probe_ctx.retrieved_memory.size ();
                   probe["cortext_working_items"]
@@ -1833,6 +2067,8 @@ main (int argc, char **argv)
                       = compacted_history.compaction_events;
                   probe["normal_rag_compacted_history_items"]
                       = compacted_history.compacted_items;
+                  probe["normal_rag_compacted_summary_items"]
+                      = compacted_history.compacted_summary_items;
                   probe["normal_rag_raw_history_items"]
                       = compacted_history.raw_items;
                   probe["normal_rag_raw_history_tokens"]
@@ -1841,6 +2077,10 @@ main (int argc, char **argv)
                       = compacted_history.compacted_original_tokens;
                   probe["normal_rag_compacted_summary_tokens"]
                       = compacted_history.compacted_summary_tokens;
+                  probe["normal_rag_compacted_summary"]
+                      = compacted_history.summary_text;
+                  probe["normal_rag_compaction_summary_policy"]
+                      = "deterministic_extractive_prior_chat";
                   probe["normal_rag_active_history_tokens"]
                       = compacted_history.raw_tokens
                         + compacted_history.compacted_summary_tokens;
@@ -1865,6 +2105,7 @@ main (int argc, char **argv)
                   probe["full_history_items"] = prior_text_docs.size ();
                   probe["full_history_tokens"]
                       = DocPacketTokens (prior_text_docs);
+                  AppendProbeStream (probe_stream_path, probe);
                   probes.push_back (std::move (probe));
                 }
               working_set_curve.push_back (
@@ -2064,6 +2305,10 @@ main (int argc, char **argv)
       out["probe_stride"] = cfg.probe_stride;
       out["probe_count"] = probes.size ();
       out["probes"] = probes;
+      out["probe_stream_path"] = probe_stream_path.string ();
+      out["probe_stream_policy"]
+          = "native probe rows appended as compact JSONL immediately after "
+            "each probe is constructed";
       out["working_set_curve_policy"]
           = "one row per successfully ingested timeline event after the "
             "durable public Cortext processing call";
@@ -2079,6 +2324,8 @@ main (int argc, char **argv)
       out["normal_rag_context_token_policy"]
           = "text rolling chat after compaction plus unique text vector RAG "
             "hits outside the active rolling window";
+      out["normal_rag_compaction_summary_policy"]
+          = "deterministic_extractive_prior_chat";
       out["active_history_token_budget"] = cfg.active_history_token_budget;
       out["knobs"] = {
         { "focus", cfg.focus },
@@ -2153,12 +2400,13 @@ main (int argc, char **argv)
             "for media and consolidation; no custom retrieval or scoring is "
             "used.";
       out["privacy_note"]
-          = "Aggregate counters only; message text and media content are not "
-            "written to this summary.";
+          = "Private benchmark artifact: probe rows include deterministic "
+            "extractive compacted-history summaries for the RAG baseline; "
+            "the public release report excludes message text and media "
+            "content.";
 
-      std::ofstream summary (cfg.output_path);
-      summary << out.dump (2) << "\n";
-      std::cout << out.dump (2) << "\n";
+      WriteJsonArtifact (cfg.output_path, out);
+      std::cout << DumpJsonArtifact (out) << "\n";
       return 0;
     }
   catch (const std::exception &e)

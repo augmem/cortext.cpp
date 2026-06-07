@@ -98,9 +98,11 @@ public:
   explicit ForceRetrievalGateOp (
       std::optional<ProcessorContext::MetacognitiveMode> metacognitive_mode
           = std::nullopt,
-      std::optional<double> metacognitive_confidence = std::nullopt)
+      std::optional<double> metacognitive_confidence = std::nullopt,
+      bool seed_memory_stream = true)
       : metacognitive_mode_ (metacognitive_mode),
-        metacognitive_confidence_ (metacognitive_confidence)
+        metacognitive_confidence_ (metacognitive_confidence),
+        seed_memory_stream_ (seed_memory_stream)
   {
   }
 
@@ -109,7 +111,7 @@ public:
   {
     ctx.SetShouldCheckRetrieval (true);
     auto &p_ctx = ctx.GetProcessorContext ();
-    if (p_ctx.memory_stream.empty ())
+    if (seed_memory_stream_ && p_ctx.memory_stream.empty ())
       {
         p_ctx.memory_stream.push_back (ctx.GetSignal ().embedding);
       }
@@ -131,6 +133,7 @@ public:
 private:
   std::optional<ProcessorContext::MetacognitiveMode> metacognitive_mode_;
   std::optional<double> metacognitive_confidence_;
+  bool seed_memory_stream_ = true;
 };
 
 class SeedProceduralStoreOp : public IOperation
@@ -266,6 +269,53 @@ TEST_CASE ("V2: Alg31 expands vector seeds via ASSOCIATIONS and returns expanded
     }
   REQUIRE (has1);
   REQUIRE (has2);
+}
+
+TEST_CASE ("Graph retrieval uses durable DB seeds after process restart",
+           "[operations][graph][restart]")
+{
+  auto unique_store = SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<Store> (std::move (unique_store));
+  cortext::testing::InitializeCoreSchema (*store);
+
+  const Eigen::VectorXf query = UnitVec256 (1.0f);
+  const Eigen::VectorXf other = UnitVec256Second (1.0f);
+  store->Execute (
+      "INSERT INTO embeddings(embedding_id, embedding, created_at) "
+      "VALUES (?, ?, ?)",
+      { 1LL, ToFloatVec (query), 0LL });
+  store->Execute (
+      "INSERT INTO embeddings(embedding_id, embedding, created_at) "
+      "VALUES (?, ?, ?)",
+      { 2LL, ToFloatVec (other), 0LL });
+  store->Execute (
+      "INSERT INTO memories(memory_id, embedding_id, source_id, kind, "
+      "start_ts, n_signals, modality, s_max, s_avg, strength, created_at) "
+      "VALUES (?, ?, 'test', 'LONG_TERM', 0, 1, 'text', 0.5, 0.5, 1.0, 0)",
+      { 1LL, 1LL });
+  store->Execute (
+      "INSERT INTO memories(memory_id, embedding_id, source_id, kind, "
+      "start_ts, n_signals, modality, s_max, s_avg, strength, created_at) "
+      "VALUES (?, ?, 'test', 'LONG_TERM', 0, 1, 'text', 0.5, 0.5, 1.0, 0)",
+      { 2LL, 2LL });
+
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  cfg.focus = 0.5;
+  cfg.sensitivity = 0.5;
+  cfg.stability = 0.5;
+
+  auto ops = std::make_unique<OperationSet> (
+      std::make_unique<ForceRetrievalGateOp> (std::nullopt, std::nullopt,
+                                              false),
+      std::make_unique<GraphAugmentedRetrieveCandidates> ());
+  SignalProcessor processor (cfg, store, std::move (ops));
+
+  auto out = processor.Process (MakeSignal (query, 10));
+
+  REQUIRE (std::find (out.candidate_memory_ids.begin (),
+                      out.candidate_memory_ids.end (),
+                      1LL) != out.candidate_memory_ids.end ());
 }
 
 TEST_CASE ("Predictive pre-activation changes retrieval ranking",

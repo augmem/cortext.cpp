@@ -764,11 +764,6 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
   auto &p_ctx = context.GetProcessorContext ();
   const auto &signal = context.GetSignal ();
 
-  if (p_ctx.memory_stream.empty ())
-    {
-      return;
-    }
-
   // Section 7.6: Use the current accumulator centroid (μ_acc) as query.
   // Cache prior to any accumulator reset to keep retrieval grounded in the
   // current unit's evolving context.

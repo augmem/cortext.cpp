@@ -22,6 +22,7 @@ import sqlite3
 import subprocess
 import tempfile
 import urllib.parse
+import urllib.request
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -45,6 +46,18 @@ FIELDS = [
     "modality_grounding",
 ]
 PACKET_ALIASES = ["A", "B", "C"]
+BLIND_FORBIDDEN_TERMS = {
+    "cortext",
+    "cortext_native",
+    "traditional_chat_rag",
+    "chat+rag",
+    "normal-rag",
+    "normal_rag",
+    "full_history",
+    "full history",
+    "upper_bound",
+    "upper bound",
+}
 SYSTEM_FAILURE_REASONS = {
     "missing_source_link",
     "temporal_drift",
@@ -65,6 +78,10 @@ BLIND_FAILURE_REASONS = {
     "winner_best_context",
     "tie_or_unclear",
 }
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".heic", ".gif", ".tiff"}
+VIDEO_EXTENSIONS = {".mov", ".mp4", ".3gp"}
+AUDIO_EXTENSIONS = {".m4a", ".wav", ".mp3"}
+PACKET_SURFACE = "structurally_normalized_event_evidence_v1"
 
 
 class JudgeCallTimeout(TimeoutError):
@@ -90,6 +107,19 @@ def estimate_tokens(text: str) -> int:
     return max(1, (len(text) + 3) // 4)
 
 
+def estimate_content_tokens(content: str | list[dict]) -> int:
+    if isinstance(content, str):
+        return estimate_tokens(content)
+    total = 0
+    for part in content:
+        part_type = part.get("type")
+        if part_type == "text":
+            total += estimate_tokens(str(part.get("text", "")))
+        elif part_type in {"image_url", "input_audio"}:
+            total += estimate_tokens(f"[attached {part_type} evidence]")
+    return max(1, total)
+
+
 def sum_doc_tokens(docs: list[TimelineDoc]) -> int:
     return sum(estimate_tokens(doc.text) for doc in docs)
 
@@ -100,11 +130,11 @@ def source_for_message(message: dict) -> str:
 
 def media_kind(path: pathlib.Path) -> str:
     ext = path.suffix.lower()
-    if ext in {".jpg", ".jpeg", ".png", ".gif", ".heic"}:
+    if ext in IMAGE_EXTENSIONS:
         return "image"
-    if ext in {".mov", ".mp4", ".m4v"}:
+    if ext in VIDEO_EXTENSIONS:
         return "video"
-    if ext in {".m4a", ".mp3", ".wav", ".flac", ".aac"}:
+    if ext in AUDIO_EXTENSIONS:
         return "audio"
     return "other"
 
@@ -113,7 +143,13 @@ def media_path(input_dir: pathlib.Path, doc: TimelineDoc) -> pathlib.Path | None
     if not doc.source_blob:
         return None
     path = input_dir / doc.source_blob
-    return path if path.exists() else None
+    if path.exists():
+        return path
+    matches = sorted(input_dir.rglob(path.name), key=lambda item: str(item))
+    for match in matches:
+        if match.is_file():
+            return match
+    return None
 
 
 def media_mime(path: pathlib.Path, fallback: str) -> str:
@@ -235,6 +271,84 @@ def local_ollama_base_url(cli_base_url: str | None) -> str:
     )
 
 
+def ollama_model_capabilities(base_url: str, model: str) -> dict:
+    out = {
+        "source": "ollama_api_show",
+        "model": model,
+        "available": False,
+        "capabilities": [],
+        "text": True,
+        "image": False,
+        "audio": False,
+        "error": "",
+    }
+    try:
+        body = json.dumps({"model": model}).encode("utf-8")
+        request = urllib.request.Request(
+            f"{base_url}/api/show",
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=10) as response:
+            payload = json.load(response)
+        caps = [str(capability) for capability in payload.get("capabilities", []) or []]
+        out["available"] = True
+        out["capabilities"] = caps
+        out["image"] = "vision" in caps or "image" in caps
+        out["audio"] = "audio" in caps
+        details = payload.get("details")
+        if isinstance(details, dict):
+            out["details"] = {
+                key: details.get(key)
+                for key in (
+                    "family",
+                    "parameter_size",
+                    "quantization_level",
+                )
+            }
+        model_info = payload.get("model_info")
+        if isinstance(model_info, dict):
+            context_length = (
+                model_info.get("general.context_length")
+                or model_info.get("gemma4.context_length")
+            )
+            if context_length is not None:
+                out.setdefault("details", {})["context_length"] = context_length
+        return out
+    except Exception as exc:
+        out["show_error"] = exc.__class__.__name__
+
+    out["source"] = "ollama_api_tags"
+    try:
+        with urllib.request.urlopen(f"{base_url}/api/tags", timeout=5) as response:
+            payload = json.load(response)
+    except Exception as exc:
+        out["error"] = exc.__class__.__name__
+        return out
+    for item in payload.get("models", []):
+        if item.get("name") != model and item.get("model") != model:
+            continue
+        caps = [str(capability) for capability in item.get("capabilities", []) or []]
+        out["available"] = True
+        out["capabilities"] = caps
+        out["image"] = "vision" in caps or "image" in caps
+        out["audio"] = "audio" in caps
+        details = item.get("details")
+        if isinstance(details, dict):
+            out["details"] = {
+                key: details.get(key)
+                for key in (
+                    "family",
+                    "parameter_size",
+                    "quantization_level",
+                    "context_length",
+                )
+            }
+        return out
+    return out
+
+
 def resolve_judge_model(provider: str, model: str | None) -> str:
     if model:
         return model
@@ -293,9 +407,9 @@ def convert_audio_for_judge(source: pathlib.Path, work_dir: pathlib.Path, stem: 
     return out if out.exists() and out.stat().st_size > 0 else None
 
 
-def media_source_id(path: pathlib.Path) -> str:
+def media_source_id(path: pathlib.Path, kind: str) -> str:
     name = path.name.lower()
-    if "_self" in name or " generated self " in name:
+    if kind == "audio" and ("_self" in name or " self " in name):
         return "chat/user"
     return "chat/assistant"
 
@@ -313,9 +427,8 @@ def build_timeline(input_dir: pathlib.Path, max_messages: int, media_limit: int)
         if kind not in {"audio", "image", "video"}:
             continue
         timestamp = parse_timestamp(path.name)
-        if timestamp is None:
-            continue
-        media.append((path, timestamp, kind))
+        media.append((path, int(timestamp or 0), kind))
+    media.sort(key=lambda item: (item[1], str(item[0])))
 
     events: list[tuple[int, int, bool, int]] = []
     for i, message in enumerate(messages):
@@ -345,14 +458,18 @@ def build_timeline(input_dir: pathlib.Path, max_messages: int, media_limit: int)
         media_attempted += 1
         path, timestamp, kind = media[idx]
         modality = "image" if kind == "video" else kind
+        try:
+            source_blob = str(path.relative_to(input_dir))
+        except ValueError:
+            source_blob = path.name
         out.append(
             TimelineDoc(
                 index=len(out),
                 timestamp=int(timestamp),
-                source_id=media_source_id(path),
+                source_id=media_source_id(path, kind),
                 modality=modality,
                 text=f"[{kind} source blob: {path.name}]",
-                source_blob=path.name,
+                source_blob=source_blob,
                 media_attempt=media_attempted,
             )
         )
@@ -443,14 +560,63 @@ def load_memory_rows(conn: sqlite3.Connection, memory_ids: list[int]) -> list[sq
     return [by_id[mid] for mid in memory_ids if mid in by_id]
 
 
+def row_get(row, key: str, default=None):
+    if isinstance(row, dict):
+        return row.get(key, default)
+    try:
+        value = row[key]
+    except Exception:
+        return default
+    return default if value is None else value
+
+
+def frozen_memory_rows(probe: dict, field: str) -> list[dict]:
+    rows = []
+    for row in probe.get(field, []) or []:
+        if not isinstance(row, dict):
+            continue
+        item = dict(row)
+        try:
+            item["memory_id"] = int(item.get("memory_id", 0) or 0)
+        except Exception:
+            item["memory_id"] = 0
+        try:
+            item["start_ts"] = int(item.get("start_ts", item.get("timestamp", 0)) or 0)
+        except Exception:
+            item["start_ts"] = 0
+        try:
+            item["tokens"] = int(item.get("tokens", 0) or 0)
+        except Exception:
+            item["tokens"] = 0
+        item.setdefault("kind", "probe_time_context_memory")
+        item.setdefault("source_id", "")
+        item.setdefault("modality", "")
+        item.setdefault("content_text", "")
+        rows.append(item)
+    return rows
+
+
+def unique_memory_rows(rows: list) -> list:
+    out = []
+    seen = set()
+    for row in rows:
+        memory_id = int(row_get(row, "memory_id", 0) or 0)
+        key = memory_id if memory_id > 0 else id(row)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(row)
+    return out
+
+
 def map_memory_to_docs(
-    row: sqlite3.Row,
+    row,
     timeline: list[TimelineDoc],
     media_memory_map: dict[tuple[str, str, int], list[TimelineDoc]],
 ) -> list[TimelineDoc]:
-    modality = row["modality"]
-    source_id = row["source_id"]
-    start_ts = int(row["start_ts"] or 0)
+    modality = row_get(row, "modality", "")
+    source_id = row_get(row, "source_id", "")
+    start_ts = int(row_get(row, "start_ts", 0) or 0)
     if modality == "text":
         for doc in timeline:
             if doc.modality == "text" and doc.source_id == source_id and doc.timestamp == start_ts:
@@ -460,7 +626,7 @@ def map_memory_to_docs(
 
 
 def map_memory_to_doc(
-    row: sqlite3.Row,
+    row,
     timeline: list[TimelineDoc],
     media_memory_map: dict[tuple[str, str, int], list[TimelineDoc]],
 ) -> TimelineDoc | None:
@@ -480,16 +646,38 @@ def select_packet_docs(docs: list[TimelineDoc], limit: int) -> list[TimelineDoc]
     return [doc for doc in docs if id(doc) in selected]
 
 
+def evidence_text_for_doc(doc: TimelineDoc) -> str:
+    text = doc.text
+    if doc.modality != "text":
+        text = f"{text} source_blob=true transcript_not_available_to_packet=true"
+    return text
+
+
+def evidence_line(
+    event_index: str | int,
+    modality: str,
+    source_id: str,
+    timestamp: int,
+    text: str,
+) -> str:
+    return (
+        f"- event_index={event_index} modality={modality} "
+        f"source_id={source_id} timestamp={timestamp}: {text}"
+    )
+
+
 def packet_from_docs(name: str, docs: list[TimelineDoc], limit: int) -> str:
     lines = [f"{name}:"]
     selected = select_packet_docs(docs, limit)
     for doc in selected:
-        text = doc.text
-        if doc.modality != "text":
-            text = f"{text} source_blob=true transcript_not_available_to_cortext=true"
         lines.append(
-            f"- event_index={doc.index} modality={doc.modality} source_id={doc.source_id} "
-            f"timestamp={doc.timestamp}: {text}"
+            evidence_line(
+                doc.index,
+                doc.modality,
+                doc.source_id,
+                doc.timestamp,
+                evidence_text_for_doc(doc),
+            )
         )
     if len(lines) == 1:
         lines.append("- <empty>")
@@ -503,22 +691,34 @@ def compaction_doc(probe: dict, query_doc: TimelineDoc) -> TimelineDoc | None:
         return None
     original_tokens = int(probe.get("normal_rag_compacted_original_tokens", 0) or 0)
     summary_tokens = int(probe.get("normal_rag_compacted_summary_tokens", 0) or 0)
+    summary_text = str(probe.get("normal_rag_compacted_summary", "")).strip()
+    if not summary_text:
+        summary_text = (
+            f"[compacted_history messages={items} original_tokens={original_tokens} "
+            f"summary_tokens={summary_tokens} "
+            'note="older rolling chat compressed before this turn"]'
+        )
     return TimelineDoc(
         index=-1,
         timestamp=query_doc.timestamp,
         source_id="chat/summary",
         modality="text",
-        text=(
-            f"[compacted_history messages={items} original_tokens={original_tokens} "
-            f"summary_tokens={summary_tokens} "
-            'note="older rolling chat compressed before this turn"]'
-        ),
+        text=summary_text,
     )
+
+
+def compaction_summary_has_content(probe: dict) -> bool:
+    text = str(probe.get("normal_rag_compacted_summary", "")).strip()
+    if not text:
+        return False
+    if text.startswith("[compacted_history "):
+        return False
+    return "Deterministic extractive excerpts:" in text
 
 
 def packet_from_memories(
     name: str,
-    rows: list[sqlite3.Row],
+    rows: list,
     timeline: list[TimelineDoc],
     media_memory_map: dict[tuple[str, str, int], list[TimelineDoc]],
     limit: int,
@@ -527,26 +727,38 @@ def packet_from_memories(
     selected = rows if limit < 0 else rows[:limit]
     for row in selected:
         docs = map_memory_to_docs(row, timeline, media_memory_map)
+        snapshot_text = str(row_get(row, "content_text", "") or "").strip()
         if docs and docs[0].modality == "text":
-            content = docs[0].text
+            content = snapshot_text or docs[0].text
             event_index = docs[0].index
+            modality = docs[0].modality
+            source_id = docs[0].source_id
+            timestamp = docs[0].timestamp
         elif docs:
             content = " ".join(
                 (
                     f"[{doc.modality} source blob: {doc.source_blob or 'unknown'}] "
-                    "source_blob=true transcript_not_available_to_cortext=true"
+                    "source_blob=true transcript_not_available_to_packet=true"
                 )
                 for doc in docs
             )
             event_index = ",".join(str(doc.index) for doc in docs)
+            modality = str(row_get(row, "modality", docs[0].modality) or docs[0].modality)
+            source_id = str(row_get(row, "source_id", docs[0].source_id) or docs[0].source_id)
+            timestamp = int(row_get(row, "start_ts", docs[0].timestamp) or docs[0].timestamp)
+        elif snapshot_text:
+            content = snapshot_text
+            event_index = "snapshot"
+            modality = str(row_get(row, "modality", "") or "")
+            source_id = str(row_get(row, "source_id", "") or "")
+            timestamp = int(row_get(row, "start_ts", 0) or 0)
         else:
             content = "[source-backed memory; content not text-hydrated for judge]"
             event_index = "unknown"
-        lines.append(
-            f"- memory_id={row['memory_id']} kind={row['kind']} event_index={event_index} "
-            f"modality={row['modality']} source_id={row['source_id']} "
-            f"start_ts={row['start_ts']}: {content}"
-        )
+            modality = str(row_get(row, "modality", "") or "")
+            source_id = str(row_get(row, "source_id", "") or "")
+            timestamp = int(row_get(row, "start_ts", 0) or 0)
+        lines.append(evidence_line(event_index, modality, source_id, timestamp, content))
     if len(lines) == 1:
         lines.append("- <empty>")
     return "\n".join(lines)
@@ -567,7 +779,7 @@ def unique_media_docs(docs: list[TimelineDoc]) -> list[TimelineDoc]:
 
 
 def memory_docs(
-    rows: list[sqlite3.Row],
+    rows: list,
     timeline: list[TimelineDoc],
     media_memory_map: dict[tuple[str, str, int], list[TimelineDoc]],
 ) -> list[TimelineDoc]:
@@ -578,12 +790,15 @@ def memory_docs(
 
 
 def memory_doc_tokens(
-    rows: list[sqlite3.Row],
+    rows: list,
     timeline: list[TimelineDoc],
     media_memory_map: dict[tuple[str, str, int], list[TimelineDoc]],
     limit: int,
 ) -> int:
-    docs = memory_docs(rows if limit < 0 else rows[:limit], timeline, media_memory_map)
+    selected = rows if limit < 0 else rows[:limit]
+    if any(row_get(row, "tokens") is not None for row in selected):
+        return sum(int(row_get(row, "tokens", 0) or 0) for row in selected)
+    docs = memory_docs(selected, timeline, media_memory_map)
     return sum_doc_tokens(docs)
 
 
@@ -596,7 +811,7 @@ def prior_context_docs(docs: list[TimelineDoc], event_index: int) -> list[Timeli
 
 
 def exclude_current_memory_rows(
-    rows: list[sqlite3.Row],
+    rows: list,
     timeline: list[TimelineDoc],
     media_memory_map: dict[tuple[str, str, int], list[TimelineDoc]],
     event_index: int,
@@ -606,7 +821,7 @@ def exclude_current_memory_rows(
     for row in rows:
         docs = map_memory_to_docs(row, timeline, media_memory_map)
         if any(doc.index == event_index for doc in docs):
-            excluded.append(int(row["memory_id"]))
+            excluded.append(int(row_get(row, "memory_id", 0) or 0))
             continue
         kept.append(row)
     return kept, excluded
@@ -800,6 +1015,7 @@ def call_ollama_judge(
     content: str | list[dict],
     max_tokens: int,
     timeout_s: int,
+    context_window_tokens: int,
 ) -> dict:
     body = {
         "model": model,
@@ -819,6 +1035,7 @@ def call_ollama_judge(
         "options": {
             "temperature": 0,
             "num_predict": max_tokens,
+            "num_ctx": context_window_tokens,
         },
     }
     payload = post_json_local(f"{base_url}/api/chat", body, timeout_s)
@@ -833,11 +1050,19 @@ def call_judge(
     content: str | list[dict],
     max_tokens: int,
     timeout_s: int,
+    context_window_tokens: int,
 ) -> dict:
     if provider == "ollama":
         if base_url is None:
             raise RuntimeError("Ollama judge base URL was not resolved")
-        return call_ollama_judge(model, base_url, content, max_tokens, timeout_s)
+        return call_ollama_judge(
+            model,
+            base_url,
+            content,
+            max_tokens,
+            timeout_s,
+            context_window_tokens,
+        )
     return call_nemotron_judge(model, content, max_tokens, timeout_s)
 
 
@@ -1033,6 +1258,15 @@ def main() -> int:
         help="HTTP timeout per local judge call.",
     )
     parser.add_argument(
+        "--judge-context-window-tokens",
+        type=int,
+        default=262144,
+        help=(
+            "Judge context window to request from the local backend and to use "
+            "for prompt-fit checks."
+        ),
+    )
+    parser.add_argument(
         "--context-limit",
         type=int,
         default=-1,
@@ -1057,18 +1291,38 @@ def main() -> int:
         raise RuntimeError("--bootstrap-samples must be >= 0")
     if args.judge_timeout_s < 1:
         raise RuntimeError("--judge-timeout-s must be >= 1")
+    if args.judge_context_window_tokens < 1:
+        raise RuntimeError("--judge-context-window-tokens must be >= 1")
     judge_model = resolve_judge_model(args.judge_provider, args.model)
     judge_base_url = (
         local_ollama_base_url(args.ollama_base_url)
         if args.judge_provider == "ollama"
         else local_judge_base_url()
     )
+    judge_media_capabilities = (
+        ollama_model_capabilities(judge_base_url, judge_model)
+        if args.judge_provider == "ollama"
+        else {
+            "source": "manual_nemotron_assumption",
+            "model": judge_model,
+            "available": True,
+            "capabilities": ["text"],
+            "text": True,
+            "image": False,
+            "audio": False,
+            "error": "",
+        }
+    )
 
     summary = json.loads(args.summary.read_text())
     input_dir = pathlib.Path(summary["input_dir"])
     db_path = args.db or pathlib.Path(summary["db_path"])
-    max_messages = int(summary.get("processed_text_messages", -1))
-    media_limit = int(summary.get("media_attempted", -1))
+    max_messages = int(
+        summary.get("timeline_max_messages", summary.get("processed_text_messages", -1))
+    )
+    media_limit = int(
+        summary.get("timeline_media_limit", summary.get("media_attempted", -1))
+    )
     timeline = build_timeline(input_dir, max_messages, media_limit)
     by_index = docs_by_index(timeline)
     conn = connect_db(db_path)
@@ -1089,6 +1343,7 @@ def main() -> int:
         "traditional_chat_rag": Counter(),
         "full_history_upper_bound": Counter(),
     }
+    cortext_packet_source = Counter()
 
     checkpoint_rows = args.checkpoint_rows or args.out.with_name(args.out.name + ".rows.jsonl")
     checkpoint_rows.parent.mkdir(parents=True, exist_ok=True)
@@ -1105,14 +1360,37 @@ def main() -> int:
             if not query_doc:
                 continue
             probes_seen += 1
-            working_memory_ids = [int(mid) for mid in probe.get("cortext_working_memory_ids", [])]
-            retrieved_memory_ids = [
-                int(mid) for mid in probe.get("cortext_retrieved_memory_ids", [])
-            ]
-            memory_ids = list(dict.fromkeys(working_memory_ids + retrieved_memory_ids))
-            raw_memory_rows = load_memory_rows(conn, memory_ids)
-            raw_working_rows = load_memory_rows(conn, working_memory_ids)
-            raw_retrieved_rows = load_memory_rows(conn, retrieved_memory_ids)
+            frozen_working_rows = frozen_memory_rows(probe, "cortext_frozen_working_memory")
+            frozen_retrieved_rows = frozen_memory_rows(
+                probe, "cortext_frozen_retrieved_memory"
+            )
+            use_frozen_cortext_packet = bool(frozen_working_rows or frozen_retrieved_rows)
+            if use_frozen_cortext_packet:
+                raw_working_rows = frozen_working_rows
+                raw_retrieved_rows = frozen_retrieved_rows
+                raw_memory_rows = unique_memory_rows(raw_working_rows + raw_retrieved_rows)
+                working_memory_ids = [
+                    int(row_get(row, "memory_id", 0) or 0)
+                    for row in raw_working_rows
+                ]
+                retrieved_memory_ids = [
+                    int(row_get(row, "memory_id", 0) or 0)
+                    for row in raw_retrieved_rows
+                ]
+                memory_ids = list(dict.fromkeys(working_memory_ids + retrieved_memory_ids))
+                cortext_packet_source["probe_time_summary_snapshot"] += 1
+            else:
+                working_memory_ids = [
+                    int(mid) for mid in probe.get("cortext_working_memory_ids", [])
+                ]
+                retrieved_memory_ids = [
+                    int(mid) for mid in probe.get("cortext_retrieved_memory_ids", [])
+                ]
+                memory_ids = list(dict.fromkeys(working_memory_ids + retrieved_memory_ids))
+                raw_memory_rows = load_memory_rows(conn, memory_ids)
+                raw_working_rows = load_memory_rows(conn, working_memory_ids)
+                raw_retrieved_rows = load_memory_rows(conn, retrieved_memory_ids)
+                cortext_packet_source["final_db_rehydration_fallback"] += 1
             event_index = int(probe["event_index"])
             memory_rows, excluded_current_memory_ids = exclude_current_memory_rows(
                 raw_memory_rows,
@@ -1158,6 +1436,11 @@ def main() -> int:
             ]
             compacted = compaction_doc(probe, query_doc)
             if compacted is not None:
+                fairness_checks["traditional_chat_rag_compaction_events"] += 1
+                if compaction_summary_has_content(probe):
+                    fairness_checks["traditional_chat_rag_contentful_compaction"] += 1
+                else:
+                    fairness_checks["traditional_chat_rag_marker_only_compaction"] += 1
                 rolling_docs = [compacted] + rolling_docs
             rag_docs = [
                 by_index[row["index"]]
@@ -1194,6 +1477,15 @@ def main() -> int:
                 "traditional_chat_rag": rag_packet_docs,
                 "full_history_upper_bound": full_docs,
             }
+            for row in memory_rows:
+                docs = map_memory_to_docs(row, timeline, media_memory_map)
+                if docs:
+                    continue
+                start_ts = int(row_get(row, "start_ts", 0) or 0)
+                if start_ts > query_doc.timestamp:
+                    fairness_checks["cortext_native_unmapped_future_timestamp_rows"] += 1
+                elif start_ts == query_doc.timestamp:
+                    fairness_checks["cortext_native_unmapped_current_timestamp_rows"] += 1
             for system, docs in packet_docs_by_system.items():
                 future = [
                     doc.index
@@ -1247,13 +1539,13 @@ def main() -> int:
                 packet_key_list = ", ".join(real_to_label[system] for system in ordered_systems)
                 if args.blind_packets:
                     prompt_rules = [
-                        "Score each anonymized memory/context packet for the current conversation turn.",
-                        "Packet identities and generation methods are hidden. Judge only the evidence shown in each packet and any media attachments explicitly labeled for that packet.",
+                        "Score each anonymized evidence packet for the current conversation turn.",
+                        "Packet identities and generation methods are hidden. Judge only the structurally normalized event evidence shown in each packet and any media attachments explicitly labeled for that packet.",
                         "Some packets may include attached image/audio source evidence. Media attachments are judge-only evidence and were not transcribed or captioned back into the packet text.",
                         "Use the full 0-5 range for numeric scores: 0 absent, 1 weak, 2 partial, 3 useful, 4 strong, 5 excellent. noise is reverse-coded where 0 is clean and 5 is very noisy. modality_grounding rewards appropriate use of attached image/audio source evidence.",
                         "If a packet has no attached image/audio evidence, its modality_grounding must be 0. Do not award modality_grounding for text history alone.",
                         f"Return strict JSON with top-level keys {packet_key_list}, winner, failure_reason, and winner_reason. winner must be one of {packet_key_list} or tie_or_unclear. Each packet key must map to an object, never a scalar. Each packet object must contain numeric keys relevance, sufficiency, noise, temporal_correctness, source_grounding, modality_grounding, plus a short reason string explaining the score pattern.",
-                        "Reason strings may mention only structural evidence: text history, graph memory, source blob, image/audio evidence, source_id alignment, temporal alignment, missing source link, missing media, or noise. Do not quote, paraphrase, summarize, name, or restate private conversation content.",
+                        "Reason strings may mention only structural evidence: text history, source-backed evidence, source blob, image/audio evidence, source_id alignment, temporal alignment, missing source link, missing media, or noise. Do not quote, paraphrase, summarize, name, or restate private conversation content.",
                         "Allowed failure_reason values: missing_source_link, temporal_drift, insufficient_context, unrelated_retrieval, modality_blindness, winner_best_context, tie_or_unclear. Use winner_best_context only when the selected packet is simply the best context.",
                     ]
                 else:
@@ -1278,11 +1570,9 @@ def main() -> int:
                 )
                 if args.blind_packets:
                     prompt_lower = prompt.lower()
-                    hidden_mentions = [
-                        system
-                        for system in systems
-                        if system.lower() in prompt_lower
-                    ]
+                    hidden_mentions = sorted(
+                        term for term in BLIND_FORBIDDEN_TERMS if term in prompt_lower
+                    )
                     if hidden_mentions:
                         fairness_checks["blind_prompt_hidden_system_label_mentions"] += 1
                 packet_media_docs = [
@@ -1296,6 +1586,32 @@ def main() -> int:
                     args.max_media_per_system,
                     work_dir,
                 )
+                if (
+                    media_stats.get("enabled")
+                    and any(
+                        int(media_stats.get(system, {}).get("audio", 0) or 0) > 0
+                        for system in systems
+                    )
+                    and not judge_media_capabilities.get("audio")
+                ):
+                    fairness_checks["audio_attached_but_judge_audio_unsupported"] += 1
+                if (
+                    media_stats.get("enabled")
+                    and any(
+                        int(media_stats.get(system, {}).get("image", 0) or 0) > 0
+                        for system in systems
+                    )
+                    and not judge_media_capabilities.get("image")
+                ):
+                    fairness_checks["image_attached_but_judge_image_unsupported"] += 1
+                judge_prompt_tokens_estimate = estimate_content_tokens(content)
+                token_totals["judge_prompt_tokens_estimated"] += judge_prompt_tokens_estimate
+                token_totals["max_judge_prompt_tokens_estimated"] = max(
+                    token_totals["max_judge_prompt_tokens_estimated"],
+                    judge_prompt_tokens_estimate,
+                )
+                if judge_prompt_tokens_estimate > args.judge_context_window_tokens:
+                    fairness_checks["judge_prompt_context_window_exceeded"] += 1
                 for system in systems:
                     for key, value in media_stats.get(system, {}).items():
                         media_attachment_totals[system][key] += int(value)
@@ -1315,6 +1631,7 @@ def main() -> int:
                         content,
                         1300,
                         args.judge_timeout_s,
+                        args.judge_context_window_tokens,
                     )
                 )
                 for packet_label in label_to_real:
@@ -1384,7 +1701,15 @@ def main() -> int:
                     },
                     "systems": {},
                     "cortext_memory_ids": memory_ids,
-                    "cortext_judged_memory_ids": [int(row["memory_id"]) for row in memory_rows],
+                    "cortext_packet_source": (
+                        "probe_time_summary_snapshot"
+                        if use_frozen_cortext_packet
+                        else "final_db_rehydration_fallback"
+                    ),
+                    "cortext_judged_memory_ids": [
+                        int(row_get(row, "memory_id", 0) or 0)
+                        for row in memory_rows
+                    ],
                     "cortext_current_turn_memory_ids_excluded": excluded_current_memory_ids,
                     "cortext_current_turn_working_ids_excluded": excluded_current_working_ids,
                     "cortext_current_turn_retrieved_ids_excluded": excluded_current_retrieved_ids,
@@ -1402,6 +1727,7 @@ def main() -> int:
                     "cortext_context_tokens": cortext_context_tokens,
                     "traditional_chat_rag_tokens": rag_context_tokens,
                     "cortext_latency_ms": probe.get("cortext_latency_ms", 0.0),
+                    "judge_prompt_tokens_estimate": judge_prompt_tokens_estimate,
                     "media_attachments": media_stats,
                     "judge_adjustments": [],
                 }
@@ -1461,7 +1787,7 @@ def main() -> int:
     )
 
     output = {
-        "schema": "julie_live_run_multimodal_judge_v6",
+        "schema": "julie_live_run_multimodal_judge_v8",
         "summary_path": str(args.summary),
         "db_path": str(db_path),
         "input_dir": str(input_dir),
@@ -1470,6 +1796,7 @@ def main() -> int:
             "local_ollama" if args.judge_provider == "ollama" else "local_nemotron_vllm_mlx"
         ),
         "judge_base_url": judge_base_url,
+        "judge_media_capabilities": judge_media_capabilities,
         "remote_provider_allowed": False,
         "native_cortext_only": True,
         "multimodal_judge": args.max_media_per_system != 0,
@@ -1479,16 +1806,23 @@ def main() -> int:
             "judge_repetitions": args.judge_repetitions,
             "judge_seed": args.judge_seed,
             "judge_timeout_s": args.judge_timeout_s,
+            "judge_context_window_tokens": args.judge_context_window_tokens,
             "bootstrap_samples": args.bootstrap_samples,
             "bootstrap_unit": "probe",
+            "packet_surface": PACKET_SURFACE,
             "systems": systems,
             "score_fields": fields,
+            "cortext_packet_source": dict(cortext_packet_source),
             "normal_rag_baseline": (
                 "rolling text chat history until compaction plus text RAG hits"
+            ),
+            "traditional_chat_rag_compaction_summary_policy": summary.get(
+                "normal_rag_compaction_summary_policy"
             ),
             "full_history_upper_bound": "prior text history only",
             "daily_consolidation_required_for_release": True,
             "default_knobs_required_for_release": [0.5, 0.5, 0.5],
+            "judge_media_capabilities": judge_media_capabilities,
         },
         "cortext_audio_image_transcript_shortcuts": False,
         "output_contains_private_text": True,
@@ -1526,6 +1860,13 @@ def main() -> int:
             "mean_traditional_chat_rag_tokens": mean_traditional_chat_rag_tokens,
             "mean_cortext_token_savings_vs_traditional_chat_rag": (
                 token_savings_vs_traditional_chat_rag
+            ),
+            "judge_context_window_tokens": args.judge_context_window_tokens,
+            "mean_judge_prompt_tokens_estimate": (
+                token_totals["judge_prompt_tokens_estimated"] / max(1, len(judged))
+            ),
+            "max_judge_prompt_tokens_estimate": int(
+                token_totals["max_judge_prompt_tokens_estimated"]
             ),
         },
         "normal_rag_compaction": summary.get("normal_rag_compaction", {}),
@@ -1571,13 +1912,45 @@ def main() -> int:
             "no_future_context_violations": not any(
                 key.endswith("_future_context_violations") and value > 0
                 for key, value in fairness_checks.items()
-            ),
+            )
+            and fairness_checks.get("cortext_native_unmapped_future_timestamp_rows", 0)
+            == 0,
             "no_current_turn_context_inclusions": not any(
                 key.endswith("_current_turn_context_inclusions") and value > 0
                 for key, value in fairness_checks.items()
-            ),
+            )
+            and fairness_checks.get("cortext_native_unmapped_current_timestamp_rows", 0)
+            == 0,
             "blind_prompt_hidden_labels_absent": (
                 fairness_checks.get("blind_prompt_hidden_system_label_mentions", 0) == 0
+            ),
+            "traditional_chat_rag_contentful_compaction": (
+                fairness_checks.get("traditional_chat_rag_compaction_events", 0) == 0
+                or (
+                    fairness_checks.get("traditional_chat_rag_contentful_compaction", 0)
+                    == fairness_checks.get("traditional_chat_rag_compaction_events", 0)
+                    and fairness_checks.get("traditional_chat_rag_marker_only_compaction", 0) == 0
+                )
+            ),
+            "judge_prompt_fits_context_window": (
+                fairness_checks.get("judge_prompt_context_window_exceeded", 0) == 0
+            ),
+            "full_history_prompt_fits_judge_context": (
+                fairness_checks.get("judge_prompt_context_window_exceeded", 0) == 0
+            ),
+            "judge_supports_attached_audio": bool(
+                judge_media_capabilities.get("audio")
+            ),
+            "judge_supports_attached_images": bool(
+                judge_media_capabilities.get("image")
+            ),
+            "attached_audio_judged_when_present": (
+                fairness_checks.get("audio_attached_but_judge_audio_unsupported", 0)
+                == 0
+            ),
+            "attached_images_judged_when_present": (
+                fairness_checks.get("image_attached_but_judge_image_unsupported", 0)
+                == 0
             ),
             "counters": dict(fairness_checks),
         },
