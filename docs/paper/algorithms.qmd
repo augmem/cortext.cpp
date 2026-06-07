@@ -6,7 +6,12 @@ bibliography: references.bib
 
 # Abstract {.unnumbered}
 
-This document details the complete algorithmic specification for Cortext, a biologically-inspired adaptive memory system. It serves as a technical reference for implementation, focusing purely on mathematical definitions, signal processing flows, and adaptive control logic governed by the three primary parameters: Focus (F), Sensitivity (S), and Stability (T).
+This document details the complete algorithmic specification for Cortext, a
+biologically-inspired adaptive memory system. It serves as a technical
+reference for implementation, focusing purely on mathematical definitions,
+signal processing flows, Soft Anchor formation, and adaptive control logic
+governed by the three primary parameters: Focus (F), Sensitivity (S), and
+Stability (T).
 
 {{< include sections/1_math_foundations.qmd >}}
 

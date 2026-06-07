@@ -5,6 +5,7 @@
 #include "cortext/core/knobs.hpp"
 #include "cortext/core/utils.hpp"
 #include "cortext/operations/extraction.hpp"
+#include "cortext/operations/label_utils.hpp"
 #include "cortext/processor/operation_context.hpp"
 #include "cortext/store/object_store.hpp"
 #include "cortext/store/store.hpp"
@@ -16,6 +17,7 @@
 #include <algorithm>
 #include <any>
 #include <cctype>
+#include <cstdlib>
 #include <ctime>
 #include <cmath>
 #include <optional>
@@ -114,6 +116,147 @@ TrimAsciiWhitespace (const std::string &text)
   return text.substr (start, end - start);
 }
 
+bool
+EnvBool (const char *name, bool fallback = false)
+{
+  const char *value = std::getenv (name);
+  if (value == nullptr)
+    {
+      return fallback;
+    }
+  std::string text (value);
+  std::transform (text.begin (), text.end (), text.begin (),
+                  [] (unsigned char c) {
+                    return static_cast<char> (std::tolower (c));
+                  });
+  return text == "1" || text == "true" || text == "yes" || text == "on";
+}
+
+bool
+StmLtmAuditEnabled ()
+{
+  return EnvBool ("CORTEXT_STM_LTM_AUDIT", false);
+}
+
+std::string
+AuditJoinStrings (const std::vector<std::string> &values)
+{
+  std::string out;
+  for (const auto &value : values)
+    {
+      if (!out.empty ())
+        {
+          out += "\n";
+        }
+      out += value;
+    }
+  return out;
+}
+
+std::string
+AuditJoinInt64s (const std::vector<long long> &values)
+{
+  std::string out;
+  for (long long value : values)
+    {
+      if (!out.empty ())
+        {
+          out += ",";
+        }
+      out += std::to_string (value);
+    }
+  return out;
+}
+
+void
+EnsureStmLtmAuditTable (Transaction &tx)
+{
+  AddWrite (
+      tx,
+      "CREATE TABLE IF NOT EXISTS stm_ltm_relabel_audit ("
+      "  summary_id TEXT PRIMARY KEY,"
+      "  created_at INTEGER,"
+      "  cluster_size INTEGER,"
+      "  source_memory_count INTEGER,"
+      "  source_text_count INTEGER,"
+      "  source_blob_count INTEGER,"
+      "  source_memory_ids TEXT,"
+      "  stm_graph_count INTEGER,"
+      "  stm_item_count INTEGER,"
+      "  stm_label_edge_count INTEGER,"
+      "  current_label_count INTEGER,"
+      "  current_labels TEXT,"
+      "  refined_label_count INTEGER DEFAULT 0,"
+      "  refined_labels TEXT DEFAULT '',"
+      "  kept_label_count INTEGER DEFAULT 0,"
+      "  added_label_count INTEGER DEFAULT 0,"
+      "  removed_label_count INTEGER DEFAULT 0,"
+      "  removed_labels TEXT DEFAULT '',"
+      "  has_label_edges_after INTEGER DEFAULT 0,"
+      "  derived_from_edges INTEGER DEFAULT 0,"
+      "  relation_count INTEGER DEFAULT 0,"
+      "  relation_edges_created INTEGER DEFAULT 0,"
+      "  relation_edges_skipped_non_durable_endpoint INTEGER DEFAULT 0,"
+      "  relation_edges_skipped_missing_endpoint INTEGER DEFAULT 0,"
+      "  relation_edges_skipped_unsupported_predicate INTEGER DEFAULT 0,"
+      "  relation_endpoint_direct_hits INTEGER DEFAULT 0,"
+      "  relation_endpoint_repair_hits INTEGER DEFAULT 0,"
+      "  relation_endpoint_created_labels INTEGER DEFAULT 0,"
+      "  relation_endpoint_relation_backed_labels INTEGER DEFAULT 0,"
+      "  relation_endpoint_rejected_count INTEGER DEFAULT 0,"
+      "  relation_endpoint_rejected_non_durable INTEGER DEFAULT 0,"
+      "  relation_endpoint_rejected_ungrounded INTEGER DEFAULT 0,"
+      "  fact_assertions_touched INTEGER DEFAULT 0,"
+      "  source_memories_with_content INTEGER DEFAULT 0"
+      ")");
+}
+
+void
+AuditQueuedRelabelRequest (
+    Transaction &tx, const ProcessorContext &p_ctx,
+    const std::string &association_source_id, uint64_t now_ts,
+    const ClusterInfo &cluster, const std::vector<long long> &source_memory_ids,
+    const std::vector<std::string> &source_texts,
+    const std::vector<ExtractionSourceBlob> &source_blobs,
+    const std::vector<std::string> &current_labels)
+{
+  if (!StmLtmAuditEnabled ())
+    {
+      return;
+    }
+
+  int stm_item_count = 0;
+  int stm_label_edge_count = 0;
+  for (const auto &[source_id, graph] : p_ctx.short_term_graphs)
+    {
+      (void)source_id;
+      stm_item_count += static_cast<int> (graph.items.size ());
+      stm_label_edge_count += static_cast<int> (graph.label_edges.size ());
+    }
+
+  EnsureStmLtmAuditTable (tx);
+  AddWrite (
+      tx,
+      "INSERT OR REPLACE INTO stm_ltm_relabel_audit ("
+      "summary_id, created_at, cluster_size, source_memory_count, "
+      "source_text_count, source_blob_count, source_memory_ids, "
+      "stm_graph_count, stm_item_count, stm_label_edge_count, "
+      "current_label_count, current_labels) "
+      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      { association_source_id,
+        static_cast<long long> (now_ts),
+        static_cast<long long> (cluster.embedding_ids.size ()),
+        static_cast<long long> (source_memory_ids.size ()),
+        static_cast<long long> (source_texts.size ()),
+        static_cast<long long> (source_blobs.size ()),
+        AuditJoinInt64s (source_memory_ids),
+        static_cast<long long> (p_ctx.short_term_graphs.size ()),
+        static_cast<long long> (stm_item_count),
+        static_cast<long long> (stm_label_edge_count),
+        static_cast<long long> (current_labels.size ()),
+        AuditJoinStrings (current_labels) });
+}
+
 std::string
 SanitizeSummaryText (std::string summary)
 {
@@ -185,6 +328,114 @@ FormatSourceTextForSummary (const std::string &source_id,
     }
 
   return text;
+}
+
+std::string
+CanonicalEvidenceText (const std::string &text)
+{
+  std::string out;
+  out.reserve (text.size ());
+  bool previous_space = false;
+  for (unsigned char c : text)
+    {
+      if (std::isalnum (c) != 0)
+        {
+          out.push_back (static_cast<char> (std::tolower (c)));
+          previous_space = false;
+        }
+      else
+        {
+          if (!out.empty () && !previous_space)
+            {
+              out.push_back (' ');
+              previous_space = true;
+            }
+        }
+    }
+  if (!out.empty () && out.back () == ' ')
+    {
+      out.pop_back ();
+    }
+  return out;
+}
+
+std::vector<std::string>
+SplitCanonicalTokens (const std::string &tokens)
+{
+  std::vector<std::string> out;
+  std::string current;
+  for (char c : tokens)
+    {
+      if (std::isspace (static_cast<unsigned char> (c)) != 0)
+        {
+          if (!current.empty ())
+            {
+              out.push_back (current);
+              current.clear ();
+            }
+          continue;
+        }
+      current.push_back (c);
+    }
+  if (!current.empty ())
+    {
+      out.push_back (current);
+    }
+  return out;
+}
+
+bool
+LabelAppearsInSourceTexts (const std::string &label_key,
+                           const std::string &canonical_source_text)
+{
+  if (canonical_source_text.empty ())
+    {
+      return true;
+    }
+  const std::string label = CanonicalLabelTokenKey (label_key);
+  if (label.empty ())
+    {
+      return false;
+    }
+  const std::string haystack = " " + canonical_source_text + " ";
+  const std::string needle = " " + label + " ";
+  if (haystack.find (needle) != std::string::npos)
+    {
+      return true;
+    }
+
+  const auto label_parts = SplitCanonicalTokens (label);
+  if (label_parts.size () < 2)
+    {
+      return false;
+    }
+  for (const auto &part : label_parts)
+    {
+      if (haystack.find (" " + part + " ") == std::string::npos)
+        {
+          return false;
+        }
+    }
+  return true;
+}
+
+std::string
+JoinCanonicalSourceTexts (const std::vector<std::string> &source_texts)
+{
+  std::string combined;
+  for (const auto &text : source_texts)
+    {
+      if (text.empty ())
+        {
+          continue;
+        }
+      if (!combined.empty ())
+        {
+          combined += " ";
+        }
+      combined += text;
+    }
+  return CanonicalEvidenceText (combined);
 }
 
 long long
@@ -338,18 +589,150 @@ LoadSummaryRecord (Transaction &tx, long long memory_id, int expected_dim)
   return record;
 }
 
-bool
-HasLabelEdges (Transaction &tx, long long association_memory_id)
+std::vector<std::string>
+LoadCurrentLabels (Transaction &tx, long long association_memory_id)
 {
   if (association_memory_id <= 0)
     {
-      return false;
+      return {};
     }
   auto rows = tx.Execute (
-      "SELECT 1 AS present FROM associations "
-      "WHERE source_memory_id = ? AND edge_type = 'has_label' LIMIT 1",
+      "SELECT l.label FROM associations a "
+      "JOIN memories l ON l.memory_id = a.target_memory_id "
+      "WHERE a.source_memory_id = ? AND a.edge_type = 'has_label' "
+      "  AND l.kind = 'LABEL' "
+      "ORDER BY a.weight DESC, l.label ASC",
       { association_memory_id });
-  return !rows.empty ();
+  std::vector<std::string> labels;
+  labels.reserve (rows.size ());
+  for (const auto &row : rows)
+    {
+      auto it = row.find ("label");
+      if (it != row.end () && it->second.type () == typeid (std::string))
+        {
+          labels.push_back (std::any_cast<std::string> (it->second));
+        }
+    }
+  return labels;
+}
+
+std::vector<std::string>
+MergeShadowCurrentLabels (
+    const ProcessorContext &p_ctx, const SignalProcessor::Config &cfg,
+    std::vector<std::string> current_labels,
+    const std::vector<Eigen::VectorXf> &source_embeddings,
+    const std::vector<std::string> &source_texts)
+{
+  if (source_embeddings.empty () || p_ctx.short_term_graphs.empty ())
+    {
+      return current_labels;
+    }
+
+  std::unordered_set<std::string> seen;
+  seen.reserve (current_labels.size ());
+  for (const auto &label : current_labels)
+    {
+      const std::string key = NormalizeLabelKey (label);
+      if (!key.empty ())
+        {
+          seen.insert (key);
+        }
+    }
+
+  const double min_match = core::STMLabelConsolidationMinSimilarity (
+      cfg.focus, cfg.sensitivity, cfg.stability);
+  const int max_shadow_labels = std::max (
+      1, core::STMLabelConsolidationMaxLabels (cfg.focus, cfg.stability));
+  const int max_ungrounded_labels = std::max (
+      0, core::STMLabelConsolidationMaxUngrounded (
+             cfg.focus, cfg.sensitivity, cfg.stability));
+  const std::string canonical_source_text = JoinCanonicalSourceTexts (
+      source_texts);
+  struct RankedLabel
+  {
+    double score = 0.0;
+    std::string label;
+    bool grounded = false;
+  };
+  std::vector<RankedLabel> ranked;
+
+  for (const auto &[source_id, short_term_graph] : p_ctx.short_term_graphs)
+    {
+      (void)source_id;
+      for (const auto &edge : short_term_graph.label_edges)
+        {
+          if (edge.label.empty () || edge.signal_embedding.size () == 0)
+            {
+              continue;
+            }
+          double best_sim = -1.0;
+          for (const auto &source_embedding : source_embeddings)
+            {
+              if (source_embedding.size () != edge.signal_embedding.size ())
+                {
+                  continue;
+                }
+              best_sim = std::max (
+                  best_sim,
+                  core::CosineSimilarity (source_embedding,
+                                          edge.signal_embedding));
+            }
+          if (best_sim < min_match)
+            {
+              continue;
+            }
+          const std::string key = NormalizeLabelKey (edge.label);
+          if (key.empty () || seen.find (key) != seen.end ())
+            {
+              continue;
+            }
+          const bool grounded = LabelAppearsInSourceTexts (
+              key, canonical_source_text);
+          if (!grounded && max_ungrounded_labels <= 0)
+            {
+              continue;
+            }
+          RankedLabel candidate;
+          candidate.score = best_sim * core::Clamp (edge.weight, 0.0, 1.0);
+          candidate.label = edge.label;
+          candidate.grounded = grounded;
+          ranked.push_back (std::move (candidate));
+          seen.insert (key);
+        }
+    }
+
+  if (ranked.empty ())
+    {
+      return current_labels;
+    }
+  std::stable_sort (ranked.begin (), ranked.end (),
+                    [] (const RankedLabel &a, const RankedLabel &b) {
+                      if (a.grounded != b.grounded)
+                        {
+                          return a.grounded;
+                        }
+                      return a.score > b.score;
+                    });
+  int added = 0;
+  int ungrounded_added = 0;
+  for (const auto &candidate : ranked)
+    {
+      if (added >= max_shadow_labels)
+        {
+          break;
+        }
+      if (!candidate.grounded)
+        {
+          if (ungrounded_added >= max_ungrounded_labels)
+            {
+              continue;
+            }
+          ++ungrounded_added;
+        }
+      current_labels.push_back (candidate.label);
+      ++added;
+    }
+  return current_labels;
 }
 
 long long
@@ -436,6 +819,8 @@ QueueExtractionIfNeeded (std::vector<ExtractionRequest> &requests,
                          const std::string &association_source_id,
                          const std::string &summary_text,
                          const std::vector<std::string> &source_texts,
+                         const std::vector<ExtractionSourceBlob> &source_blobs,
+                         const std::vector<std::string> &current_labels,
                          uint64_t now_ts)
 {
   if (static_cast<int> (cluster.embedding_ids.size ())
@@ -450,6 +835,8 @@ QueueExtractionIfNeeded (std::vector<ExtractionRequest> &requests,
   req.cluster_size = static_cast<int> (cluster.embedding_ids.size ());
   req.created_at = now_ts;
   req.source_texts = source_texts;
+  req.source_blobs = source_blobs;
+  req.current_labels = current_labels;
   requests.push_back (std::move (req));
 }
 
@@ -508,12 +895,13 @@ ConsolidationSummarize::Execute (OperationContext &context, Transaction &tx) con
   const auto eviction_frontier = eviction_policy::ResolveEvictionFrontier (
       tx, cfg.stability, static_cast<long long> (p_ctx.last_consolidation_ts),
       eviction_override);
-  const bool compression_allowed = eviction_frontier.storage_gate_active
-                                   && eviction_frontier.storage_allows_eviction;
-  if (!compression_allowed)
+  const bool storage_compression_allowed
+      = eviction_frontier.storage_gate_active
+        && eviction_frontier.storage_allows_eviction;
+  if (!storage_compression_allowed)
     {
       telemetry::LogInfo (
-          "cortext.consolidation_summarize.skipped_storage_pressure",
+          "cortext.consolidation_summarize.storage_pressure_status",
           { telemetry::Attribute::Bool (
                 "storage_pressure_active",
                 eviction_frontier.storage_gate_active),
@@ -531,7 +919,6 @@ ConsolidationSummarize::Execute (OperationContext &context, Transaction &tx) con
   int summary_count = 0;
   int summaries_with_summarizer = 0;
   int associative_cues = 0;
-  int clusters_skipped_eviction_frontier = 0;
   int clusters_skipped_summarizer_unavailable = 0;
 
   // Get deep summarizer backend selected during Cortext construction.
@@ -552,14 +939,16 @@ ConsolidationSummarize::Execute (OperationContext &context, Transaction &tx) con
       std::vector<SourceItem> source_items;
       source_items.reserve (cluster.embedding_ids.size ());
       std::vector<std::string> source_texts;
+      std::vector<ExtractionSourceBlob> source_blobs;
+      std::vector<Eigen::VectorXf> source_embeddings;
       std::vector<std::pair<long long, long long>> source_links;
       source_links.reserve (cluster.embedding_ids.size ());
       std::vector<long long> source_memory_ids;
       source_memory_ids.reserve (cluster.embedding_ids.size ());
-      std::vector<long long> eviction_source_memory_ids;
-      eviction_source_memory_ids.reserve (cluster.embedding_ids.size ());
       std::unordered_set<long long> seen_source_memory_ids;
-      std::unordered_set<long long> seen_eviction_source_memory_ids;
+      long long latest_source_ts = 0;
+      const bool source_blobs_enabled
+          = !EnvBool ("CORTEXT_DISABLE_SOURCE_BLOBS", false);
 
       // Convert cluster centroid to Eigen for comparison.
       Eigen::VectorXf centroid_eigen (
@@ -575,7 +964,9 @@ ConsolidationSummarize::Execute (OperationContext &context, Transaction &tx) con
           // Query embedding, memory row, blob_id, source_id, and start_ts.
           auto rows = tx.Execute (
               "SELECT e.embedding, m.memory_id, m.blob_id, m.source_id, "
-              "m.start_ts, m.kind "
+              "m.start_ts, m.kind, m.modality, "
+              "(SELECT s.mime FROM signals s WHERE s.memory_id = m.memory_id "
+              " ORDER BY s.serial_position ASC LIMIT 1) AS mime "
               "FROM embeddings e "
               "LEFT JOIN memories m ON e.embedding_id = m.embedding_id "
               "WHERE e.embedding_id = ?",
@@ -597,11 +988,13 @@ ConsolidationSummarize::Execute (OperationContext &context, Transaction &tx) con
                       static_cast<int> (cluster.centroid.size ()), emb))
                 {
                   sim = core::CosineSimilarity (centroid_eigen, emb);
+                  source_embeddings.push_back (std::move (emb));
                 }
             }
 
           // Try to fetch text from objstore.
           std::string text;
+          std::vector<unsigned char> payload_bytes;
           auto it_blob = row.find ("blob_id");
           if (it_blob != row.end ())
             {
@@ -612,6 +1005,7 @@ ConsolidationSummarize::Execute (OperationContext &context, Transaction &tx) con
                                          blob_id);
                   if (data)
                     {
+                      payload_bytes = *data;
                       text.assign (data->begin (), data->end ());
                     }
                 }
@@ -625,12 +1019,25 @@ ConsolidationSummarize::Execute (OperationContext &context, Transaction &tx) con
               source_id = std::any_cast<std::string> (it_source->second);
             }
 
-          std::string memory_kind;
-          auto it_kind = row.find ("kind");
-          if (it_kind != row.end ()
-              && it_kind->second.type () == typeid (std::string))
+          std::string modality;
+          auto it_modality = row.find ("modality");
+          if (it_modality != row.end ()
+              && it_modality->second.type () == typeid (std::string))
             {
-              memory_kind = std::any_cast<std::string> (it_kind->second);
+              modality = std::any_cast<std::string> (it_modality->second);
+            }
+
+          std::string mime;
+          auto it_mime = row.find ("mime");
+          if (it_mime != row.end ()
+              && it_mime->second.type () == typeid (std::string))
+            {
+              mime = std::any_cast<std::string> (it_mime->second);
+            }
+          if (!source_blobs_enabled && modality != "text")
+            {
+              payload_bytes.clear ();
+              text.clear ();
             }
 
           long long memory_id = 0;
@@ -645,11 +1052,6 @@ ConsolidationSummarize::Execute (OperationContext &context, Transaction &tx) con
               if (seen_source_memory_ids.insert (memory_id).second)
                 {
                   source_memory_ids.push_back (memory_id);
-                }
-              if (memory_kind == "LONG_TERM"
-                  && seen_eviction_source_memory_ids.insert (memory_id).second)
-                {
-                  eviction_source_memory_ids.push_back (memory_id);
                 }
             }
 
@@ -666,8 +1068,25 @@ ConsolidationSummarize::Execute (OperationContext &context, Transaction &tx) con
                   start_ts = std::any_cast<int> (it_start_ts->second);
                 }
             }
+          latest_source_ts = std::max (latest_source_ts, start_ts);
 
           text = FormatSourceTextForSummary (source_id, text);
+
+          if (source_blobs_enabled && !payload_bytes.empty ()
+              && !modality.empty ())
+            {
+              ExtractionSourceBlob source_blob;
+              source_blob.bytes = std::move (payload_bytes);
+              source_blob.modality = modality;
+              source_blob.mime = mime;
+              if (modality == "audio")
+                {
+                  source_blob.sample_rate = 16000;
+                  source_blob.num_samples = source_blob.bytes.size ()
+                                            / sizeof (float);
+                }
+              source_blobs.push_back (std::move (source_blob));
+            }
 
           // Collect text for summarizer
           if (!text.empty ())
@@ -755,12 +1174,15 @@ ConsolidationSummarize::Execute (OperationContext &context, Transaction &tx) con
             }
         }
 
-      if (source_texts.empty ())
+      if (source_texts.empty () && source_blobs.empty ())
         {
           throw std::runtime_error (
-              "Consolidation label routing requires source text for "
+              "Consolidation label routing requires source evidence for "
               + std::to_string (cluster.cluster_id));
         }
+      const uint64_t evidence_ts
+          = latest_source_ts > 0 ? static_cast<uint64_t> (latest_source_ts)
+                                 : now_ts;
 
       long long cue_memory_id = FindExistingAssociativeCueForSources (
           tx, source_memory_ids);
@@ -784,9 +1206,9 @@ ConsolidationSummarize::Execute (OperationContext &context, Transaction &tx) con
 
       if (cue_memory_id <= 0 || cue_id.empty ())
         {
-          cue_id = GenerateAssociativeCueId (now_ts, cue_sequence++);
+          cue_id = GenerateAssociativeCueId (evidence_ts, cue_sequence++);
           cue_memory_id = InsertAssociativeCue (context, tx, cluster,
-                                                cue_id, now_ts);
+                                                cue_id, evidence_ts);
           if (cue_memory_id > 0)
             {
               ++associative_cues;
@@ -795,33 +1217,34 @@ ConsolidationSummarize::Execute (OperationContext &context, Transaction &tx) con
 
       AttachClusterSources (tx, cue_memory_id, cluster.cluster_id,
                             source_links);
-      if (cue_memory_id > 0 && !HasLabelEdges (tx, cue_memory_id))
+      if (cue_memory_id > 0)
         {
+          const bool stm_label_handoff_enabled
+              = !EnvBool ("CORTEXT_DISABLE_STM_LABEL_HANDOFF", false);
+          const auto current_labels
+              = stm_label_handoff_enabled
+                    ? MergeShadowCurrentLabels (
+                        p_ctx, context.GetConfig (),
+                        LoadCurrentLabels (tx, cue_memory_id), source_embeddings,
+                        source_texts)
+                    : LoadCurrentLabels (tx, cue_memory_id);
+          AuditQueuedRelabelRequest (
+              tx, p_ctx, cue_id, evidence_ts, cluster, source_memory_ids,
+              source_texts, source_blobs, current_labels);
           QueueExtractionIfNeeded (extraction_requests, params, cluster,
-                                   cue_id, "", source_texts, now_ts);
+                                   cue_id, "", source_texts, source_blobs,
+                                   current_labels, evidence_ts);
         }
 
-      bool cluster_compression_allowed = compression_allowed;
-      if (cluster_compression_allowed)
-        {
-          const auto evictable_source_ids
-              = eviction_policy::LoadEvictableMemoryIds (
-                  tx, eviction_frontier, eviction_source_memory_ids);
-          cluster_compression_allowed
-              = !eviction_source_memory_ids.empty ()
-                && evictable_source_ids.size ()
-                       >= eviction_source_memory_ids.size ();
-        }
-      if (cluster_compression_allowed
-          && (!summarizer || !summarizer->IsAvailable ()))
+      if (source_texts.empty ())
         {
           ++clusters_skipped_summarizer_unavailable;
-          cluster_compression_allowed = false;
+          continue;
         }
 
-      if (!cluster_compression_allowed)
+      if (!summarizer || !summarizer->IsAvailable ())
         {
-          ++clusters_skipped_eviction_frontier;
+          ++clusters_skipped_summarizer_unavailable;
           continue;
         }
 
@@ -1000,8 +1423,8 @@ ConsolidationSummarize::Execute (OperationContext &context, Transaction &tx) con
                                      summaries_with_summarizer),
         telemetry::Attribute::Int64 ("summaries_fallback", 0),
         telemetry::Attribute::Int64 ("associative_cues", associative_cues),
-        telemetry::Attribute::Int64 ("clusters_skipped_eviction_frontier",
-                                     clusters_skipped_eviction_frontier),
+        telemetry::Attribute::Bool ("storage_compression_allowed",
+                                    storage_compression_allowed),
         telemetry::Attribute::Int64 (
             "clusters_skipped_summarizer_unavailable",
             clusters_skipped_summarizer_unavailable),

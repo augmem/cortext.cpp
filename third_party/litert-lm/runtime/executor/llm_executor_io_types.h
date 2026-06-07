@@ -16,15 +16,148 @@
 #define THIRD_PARTY_ODML_LITERT_LM_RUNTIME_EXECUTOR_LLM_EXECUTOR_IO_TYPES_H_
 
 #include <atomic>
+#include <cstdint>
+#include <memory>
 #include <optional>
 #include <ostream>
+#include <random>
+#include <utility>
 
 #include "absl/base/nullability.h"  // from @com_google_absl
 #include "absl/status/statusor.h"  // from @com_google_absl
 #include "litert/cc/litert_tensor_buffer.h"  // from @litert
 #include "runtime/components/constrained_decoding/constrained_decoder.h"
+#include "runtime/executor/llm_executor_processed_tokens.h"
+#include "runtime/executor/llm_executor_settings.h"
 
 namespace litert::lm {
+
+// KVCache direct related context container.
+class ProcessedContext {
+ public:
+  virtual ~ProcessedContext() = default;
+
+  // Gets the LoRA id.
+  virtual std::optional<uint32_t> lora_id() const = 0;
+
+  // Sets the LoRA id.
+  virtual void set_lora_id(std::optional<uint32_t> lora_id) = 0;
+
+  // Gets the processed tokens.
+  virtual ProcessedTokens& processed_tokens() = 0;
+
+ protected:
+  ProcessedContext() = default;
+  ProcessedContext(const ProcessedContext&) = default;
+  ProcessedContext(ProcessedContext&&) noexcept = default;
+  ProcessedContext& operator=(const ProcessedContext&) = default;
+  ProcessedContext& operator=(ProcessedContext&&) noexcept = default;
+};
+
+// Context for the audio executor.
+class AudioContext {
+ public:
+  virtual ~AudioContext() = default;
+
+  // Clones the audio context for stateful models. Notice the operation deep
+  // copy the underlying data, and expect it might be expensive.
+  virtual absl::StatusOr<std::unique_ptr<AudioContext>> Clone() const = 0;
+
+ protected:
+  AudioContext() = default;
+  AudioContext(const AudioContext&) = default;
+  AudioContext(AudioContext&&) noexcept = default;
+  AudioContext& operator=(const AudioContext&) = default;
+  AudioContext& operator=(AudioContext&&) noexcept = default;
+};
+
+// Struct to host the internal state for the executor.
+// State will be changed by the executor while executing task.
+// Noticed: The states here are all the internal states excluded those that are
+// directly related to the KVCache.
+struct RuntimeState {
+  // The current time step.
+  int current_step = 0;
+
+  // Random generator for sampling step.
+  std::shared_ptr<std::default_random_engine> rand_gen;
+
+  // Whether decode has been run ever after prefill.
+  // This is only used by the compiled model executor to determine whether
+  // KVCache preparation for prefill or decode should be done.
+  bool ran_decode = false;
+};
+
+// A resource interface to hold the llm context.
+class LlmContext {
+ public:
+  explicit LlmContext(std::unique_ptr<ProcessedContext> processed_context,
+                      std::unique_ptr<RuntimeConfig> runtime_config,
+                      std::unique_ptr<RuntimeState> runtime_state)
+      : processed_context_(std::move(processed_context)),
+        runtime_config_(std::move(runtime_config)),
+        runtime_state_(std::move(runtime_state)) {};
+
+  ~LlmContext() = default;
+
+  // Gets the processed context.
+  ProcessedContext& processed_context() { return *processed_context_; };
+
+  // Gets the process state.
+  RuntimeConfig& runtime_config() { return *runtime_config_; };
+
+  // Gets the runtime state.
+  RuntimeState& runtime_state() { return *runtime_state_; };
+
+  // Gets the audio processed context.
+  AudioContext* audio_processed_context() {
+    return audio_processed_context_.get();
+  };
+
+  // Retrieves the processed context, the caller will take the ownership of the
+  // returned processed context and it will no longer be available in the
+  // LlmContext. This is useful for non-duplicating the processed context while
+  // extracting it.
+  absl::StatusOr<std::unique_ptr<ProcessedContext>> RetrieveProcessedContext() {
+    return std::move(processed_context_);
+  };
+
+  // Retrieves the runtime state, the caller will take the ownership of the
+  // returned runtime state and it will no longer be available in the
+  // LlmContext. This is useful for non-duplicating the runtime state while
+  // extracting it.
+  absl::StatusOr<std::unique_ptr<RuntimeState>> RetrieveRuntimeState() {
+    return std::move(runtime_state_);
+  };
+
+  // Retrieves the runtime config, the caller will take the ownership of the
+  // returned runtime config and it will no longer be available in the
+  // LlmContext. This is useful for non-duplicating the runtime config while
+  // extracting it.
+  absl::StatusOr<std::unique_ptr<RuntimeConfig>> RetrieveRuntimeConfig() {
+    return std::move(runtime_config_);
+  };
+
+  // Retrieves the audio processed context, the caller will take the ownership
+  // of the returned audio processed context and it will no longer be available
+  // in the LlmContext. This is useful for non-duplicating the audio processed
+  // context while extracting it.
+  absl::StatusOr<std::unique_ptr<AudioContext>>
+  RetrieveAudioProcessedContext() {
+    return std::move(audio_processed_context_);
+  };
+
+ private:
+  std::unique_ptr<ProcessedContext> processed_context_;
+  std::unique_ptr<RuntimeConfig> runtime_config_;
+  std::unique_ptr<RuntimeState> runtime_state_;
+  std::unique_ptr<AudioContext> audio_processed_context_;
+
+ protected:
+  LlmContext() = default;
+  LlmContext(LlmContext&&) noexcept = default;
+  LlmContext& operator=(LlmContext&&) noexcept = default;
+};
 
 // Note: Use the operator << to print values only for debugging purposes. It may
 // create a copy of the underlying TensorBuffer and make the memory consumption
@@ -86,6 +219,9 @@ class ExecutorVisionData {
   // input.
   static constexpr int kSpecialToken = -1;
 
+  // Special token for the end of image.
+  static constexpr int kEndToken = -3;
+
   ExecutorVisionData() = default;
 
   // Constructor that moves optional TensorBuffers. Note that the embeddings are
@@ -111,6 +247,11 @@ class ExecutorVisionData {
   void SetEmbeddings(std::optional<::litert::TensorBuffer>&& embeddings);
   void SetPerLayerEmbeddings(
       std::optional<::litert::TensorBuffer>&& per_layer_embeddings);
+
+  // Duplicates the ExecutorVisionData. This method relies on the
+  // TensorBuffer::Duplicate method to duplicate the underlying TensorBuffers.
+  // As such, the underlying buffers are shallow copied.
+  absl::StatusOr<ExecutorVisionData> Duplicate() const;
 
  private:
   std::optional<::litert::TensorBuffer> embeddings_;
@@ -168,6 +309,11 @@ class ExecutorAudioData {
   void SetPerLayerEmbeddings(
       std::optional<::litert::TensorBuffer>&& per_layer_embeddings);
   void SetValidTokens(int valid_tokens);
+
+  // Duplicates the ExecutorAudioData. This method relies on the
+  // TensorBuffer::Duplicate method to duplicate the underlying TensorBuffers.
+  // As such, the underlying buffers are shallow copied.
+  absl::StatusOr<ExecutorAudioData> Duplicate() const;
 
  private:
   std::optional<::litert::TensorBuffer> embeddings_;

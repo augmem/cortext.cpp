@@ -8,6 +8,7 @@ namespace
 
 thread_local std::vector<long long> g_last_selected_embedding_order;
 thread_local std::vector<RankedCandidate> g_last_ranked_candidates;
+thread_local RetrievalSummary g_last_retrieval_summary;
 
 } // namespace
 
@@ -45,6 +46,24 @@ const std::vector<RankedCandidate> &
 GetLastRankedCandidates ()
 {
   return g_last_ranked_candidates;
+}
+
+void
+ClearLastRetrievalSummary ()
+{
+  g_last_retrieval_summary = {};
+}
+
+void
+SetLastRetrievalSummary (const RetrievalSummary &summary)
+{
+  g_last_retrieval_summary = summary;
+}
+
+RetrievalSummary
+GetLastRetrievalSummary ()
+{
+  return g_last_retrieval_summary;
 }
 
 } // namespace cortext::operations::retrieval_debug

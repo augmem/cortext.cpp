@@ -36,7 +36,7 @@ class HuggingFaceTokenizer : public Tokenizer {
 
   // Creates a HuggingFaceTokenizer from a JSON string.
   static absl::StatusOr<std::unique_ptr<HuggingFaceTokenizer>> CreateFromJson(
-      std::string json);
+      const std::string& json);
 
   TokenizerType GetTokenizerType() const override {
     return TokenizerType::kHuggingFace;
@@ -53,6 +53,8 @@ class HuggingFaceTokenizer : public Tokenizer {
   // BPE sequence.
   absl::StatusOr<std::string> TokenIdsToText(
       const std::vector<int>& token_ids) override;
+
+  std::vector<std::string> GetTokens() const override;
 
  private:
   // Constructor.

@@ -761,6 +761,7 @@ public:
   }
 
 private:
+#if defined(CORTEXT_ENABLE_EMBEDDINGGEMMA_LLAMA_CPP)
   static enum llama_pooling_type
   ResolvePoolingType ()
   {
@@ -797,10 +798,6 @@ private:
   std::vector<llama_token>
   Tokenize (const std::string &text) const
   {
-#if !defined(CORTEXT_ENABLE_EMBEDDINGGEMMA_LLAMA_CPP)
-    (void)text;
-    return {};
-#else
     const bool add_special
         = vocab_ != nullptr && llama_vocab_get_add_bos (vocab_);
     const int32_t needed = llama_tokenize (
@@ -823,8 +820,8 @@ private:
       }
     tokens.resize (static_cast<std::size_t> (actual));
     return tokens;
-#endif
   }
+#endif
 
   void EnsureInitialized ()
   {
@@ -846,12 +843,12 @@ private:
         throw std::runtime_error (
             "EmbeddingGemma llama.cpp backend unavailable: link libllama");
 #else
-        static std::once_flag backend_once;
-        std::call_once (backend_once, [] () {
-          internal::InstallLlamaCppLogFilter ();
-          ggml_backend_load_all ();
-          llama_backend_init ();
-        });
+	        static std::once_flag backend_once;
+	        std::call_once (backend_once, [] () {
+	          internal::InstallLlamaCppLogFilter ();
+	          internal::LoadGgmlBackendsOnce ();
+	          llama_backend_init ();
+	        });
 
         llama_model_params mparams = llama_model_default_params ();
         mparams.n_gpu_layers = 0;

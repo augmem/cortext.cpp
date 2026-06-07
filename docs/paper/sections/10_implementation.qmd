@@ -4,17 +4,25 @@
 
 In the current alpha, all online operations (scoring, boundary detection, retrieval, gating, graph updates) operate **only** on embeddings. Raw text/audio/image content is used solely to generate embeddings; the live loop never re-enters token space. This preserves modality-agnostic behavior and prevents hidden heuristics from bypassing knob control.
 
-Retrieved memories are hydrated for inspection and evaluation only. When a memory has no signal-level blobs (e.g., consolidation summaries), the system loads the summary payload from `memories.blob_id` so summary nodes can participate in analysis without affecting online computations. Internal retrieval nodes that are intentionally non-renderable, such as `LABEL` nodes and associative cue anchors, remain graph-routing products: when one is selected for the public retrieval surface, hydration resolves a bounded set of linked source memories with actual payloads instead of exposing empty label/cue records to applications.
+Retrieved memories are hydrated only after core online scoring has completed. Hydration is used for inspection, evaluation, and application prompt surfaces such as the chat demo; it does not feed back into embedding-space scoring. When a memory has no signal-level blobs (e.g., consolidation summaries), the system loads the summary payload from `memories.blob_id` so summary nodes can participate in analysis without affecting online computations. Internal retrieval nodes that are intentionally non-renderable, such as `LABEL` nodes and associative cue anchors, remain graph-routing products: when one is selected for the public retrieval surface, hydration resolves a bounded set of linked source memories with actual payloads instead of exposing empty label/cue records to applications.
 
 ## Model Stack (Local Inference)
 
-* **ImageBind embeddings:** image/text/audio inputs are embedded via ImageBind executed through ONNX (default path: `models/imagebind/`).
-* **Consolidation LLM:** summarization and labeling are the only generative steps and run only during consolidation. Cortext resolves a local backend internally: **gemma-3n-e2b** via `third_party/litert_lm`, **LFM2/LFM2.5** via `llama.cpp` GGUFs, or a **mixed** Gemma+Liquid path. The Gemma path auto-selects among available `.litertlm` variants under `models/gemma3n-e2b-litert/`. The Liquid path now prefers `LFM2.5-350M-GGUF` for extraction and `LFM2.5-1.2B-Instruct-GGUF` for summarization, preferring `Q4_K_M` when present and otherwise accepting other shipped GGUF quantizations; env overrides still take precedence for exact paths. The mixed path uses Gemma for summarization and the preferred Liquid extractor path for labeling, but auto resolution now prefers the pure `LFM2.5/llama.cpp` path when the Liquid assets are present; mixed and Gemma are fallbacks. If no deep backend is available, deep consolidation raises an error rather than silently degrading. Label extraction is anchored on `associative_cue_*` association nodes and runs from raw source memory text; optional summary nodes are storage-pressure-gated compression artifacts. Empty label arrays are valid, transcript filler labels are rejected before persistence, and cue-backed labels must be supported by raw source evidence. The summarization prompt remains role-aware for chat sources, favors direct fact-oriented memory notes over dialogue recaps, explicitly preserves named people, projects, and technologies, discourages speaker-role phrasing such as "the user" or "the assistant", and preserves chronological ordering when selected chat excerpts are passed to the model. The Liquid GGUF path is text-only; audio-specific summarization/extraction methods remain unsupported there.
+* **Embedding resolution:** text encoder resolution currently prefers the AAIT/ES-AIST GGUF path when enabled, then EmbeddingGemma where available. Embedding-only online operations consume the resolved vectors rather than raw payloads.
+* **Consolidation LLM:** summarization and labeling are the only generative steps and run only during consolidation. Cortext resolves a local backend internally: **Gemma 4 E2B** via `third_party/litert_lm`, **LFM2/LFM2.5** via `llama.cpp` GGUFs, or a **mixed** Gemma+Liquid path. Auto resolution now requires `models/gemma4-e2b-litert/gemma-4-E2B-it.litertlm`; it does not silently fall back to older Gemma variants because multimodal label refinement and summarization require the Gemma 4 path. The Liquid path remains available by explicit override and prefers `LFM2.5-350M-GGUF` for extraction and `LFM2.5-1.2B-Instruct-GGUF` for summarization, preferring `Q4_K_M` when present and otherwise accepting other shipped GGUF quantizations. The mixed path uses Gemma 4 for summarization and the preferred Liquid extractor path for labeling. If no deep backend is available, deep consolidation raises an error rather than silently degrading. Label extraction is anchored on `associative_cue_*` association nodes and now carries the current cue labels plus source payload descriptors into the extraction request. For Gemma 4, consolidation can refine labels from source text, float32 PCM audio blobs, or image blobs; the model output is interpreted as the replacement label set for that cue, so missing labels are inserted and stale `has_label` edges are pruned from the long-term graph. Summary nodes are compact retrieval artifacts created during deep consolidation when the summarizer is available; destructive eviction remains separately storage-gated. Empty label arrays are valid, transcript filler labels are rejected before persistence, and cue-backed labels must be supported by source evidence. The summarization prompt remains role-aware for chat sources, favors direct fact-oriented memory notes over dialogue recaps, explicitly preserves named people, projects, and technologies, discourages speaker-role phrasing such as "the user" or "the assistant", and preserves chronological ordering when selected chat excerpts are passed to the model. The Liquid GGUF path is text-only; audio/image label refinement is Gemma-only.
 * **Offline label-classifier prototype:** we now also ship a research-only Python pipeline that trains span typing / promotion models from WordNet, multilingual name priors, and sentence context. The current study path builds those priors from `data/surnames/{forenames,surnames}.csv` plus U.S. Census surnames. When external embeddings are enabled, the prototype reuses the repo's preferred text encoder through the rebuilt `cortext_text_embedder`, so offline studies can run on `EmbeddingGemma/llama.cpp` without changing the online runtime path.
 
 No other model runtimes are required for the online loop; all operational decisions are embedding-space computations derived from F/S/T.
 
 ## Alpha Scope and Structured-Fact Foundation
+
+The current alpha organizes live and durable memory as a three-tier graph surface:
+
+* **Working memory:** active coherent memories used for immediate chat/prompt state and overlap suppression.
+* **Short-term graph memory:** a bounded processor-local STM graph over recent signal embeddings and provisional clustered label edges.
+* **Long-term graph memory:** the persisted SQLite graph of memory nodes, associative cue nodes, label nodes, relations, facts, and consolidation products. Long-term memory is this graph: `memories` stores durable nodes, `associations` stores durable edges, and fact tables store bitemporal structured claims.
+
+Only LTM graph memory is durable. STM graph labels are treated as proposals carried into consolidation as `current_labels`; consolidation then confirms, removes, or adds durable `has_label` edges from source evidence. The current production prompt surface uses WM directly and LTM retrieval directly; STM remains a bounded proposal/read substrate unless a downstream consumer passes the experimental transfer gates. This preserves the core online invariant: the live loop remains embedding-based, while durable semantic edits happen at consolidation boundaries.
 
 The current alpha stores temporality primarily at the episodic level:
 
@@ -70,11 +78,90 @@ This leaves the architecture in the intended order: the fact store, temporal que
 
 Lower-level temporal retrieval modes (`current`, `valid_at`, `known_at`) remain implemented for deterministic tests and benchmarks. Explicit user-facing temporal controls and any future chat-specific grounding or reply templating remain later work.
 
+## Soft Anchor Implementation Status
+
+Soft Anchor (@sec-soft-anchor) is now wired into the engine as an always-on
+ingress formation path. Production retrieval is unchanged: online retrieval
+still consumes the normal memory-return surface and does not create or promote
+anchors from retrieved candidates. The operation runs after `MemoryStorage`,
+consumes the stored memory id and current representative embedding, and compares
+the current signal only against prior `SoftAnchorState` objects.
+
+Schema migration 6 adds two optional tables:
+
+```text
+soft_anchors(anchor_id, status, semantic_centroid, entity_centroid,
+             full_centroid, semantic_radius, entity_radius, full_radius,
+             source_id, first_step, last_step, last_boundary_id,
+             first_ts, last_ts, anchor_strength, support_count,
+             contradiction_count, recent_memory_ids, updated_at)
+
+soft_anchor_links(memory_id, anchor_id, anchor_strength, anchor_label,
+                  evidence_kind, memory_tier, score, margin, entropy,
+                  support_count, contradiction_count, created_step,
+                  updated_step, created_at)
+```
+
+These tables store the formed soft-anchor state. Retrieval does not read them
+for ranking in the current branch. The public memory-return surface now exposes
+them as optional memory metadata: `Context::Memory::soft_anchors` contains up to
+three `SoftAnchor` entries, and the C API JSON mirrors those entries under each
+memory's `soft_anchors` field. The fields are `id`, `strength`, `likelihood`,
+`label`, `tier`, `score`, `margin`, and `entropy`.
+The demo chat mirrors the same metadata in memory events and emits nested
+`<soft_anchor>` elements under retrieved memories in the prompt snapshot.
+
+The benchmark implementation still writes the richer audit artifacts:
+
+```
+ingress_adaptive_anchor_cases.csv
+ingress_adaptive_anchor_candidates.csv
+ingress_adaptive_anchor_links.csv
+ingress_adaptive_anchor_soft_links.csv
+ingress_adaptive_anchor_states.csv
+```
+
+The production line is intentionally split. Soft Anchor formation is in the
+engine and hydrated memories carry optional SoftAnchor context. The engine still
+does not use those links for ranking, hard referent binding, or durable fact
+formation.
+
+The implementation target is a bounded state update at ingestion:
+
+```
+cost_soft_anchor = O(K_state × d_view)
+```
+
+where `K_state` is the bounded number of prior non-rejected soft-anchor states
+held in processor context and `d_view` is the sum of the active signal-view
+dimensions. This cost is separate from retrieval and should remain lower than
+the retrieval path before any production use.
+
+Current implementation verification:
+
+```bash
+cmake --build build -j 8 --target cortext
+cmake --build build -j 8 --target cortext_tests
+cmake --build build -j 8 --target cortext_chat
+./build/tests/cortext_tests "[cortext][hydration][soft_anchor]"
+./build/tests/cortext_tests "[operations][soft_anchor]"
+```
+
+The focused Soft Anchor operation tests cover default formation, first ES-style
+signal creation, continued-link update, hydration, and chat-surface metadata.
+Broader tag-level test slices can include unrelated experimental failures during
+active development, so this section reports focused verification rather than
+claiming the entire `[operations]` slice as a Soft Anchor gate.
+
 ## Computational Complexity
 
 The primary per-stimulus cost is the k-nearest-neighbors (kNN) search for metrics and retrieval. With `N` stored memories, naive search is `O(N)`. We recommend maintaining an HNSW index [@malkov2018efficient] to achieve `O(log N)` retrieval.
 
-Label/association seeds are selected from an in‑memory summary cache (populated by the label bank and consolidation) to avoid an additional vector search pass while keeping retrieval fully embedding‑based.
+Production retrieval now separates candidate discovery from prompt breadth. The first pass retrieves a broad source/blob seed set with `RetrievalMaxResults(F)` so concrete source memories remain reachable even when consolidated summaries are present. Those seeds are then expanded and scored through existing durable graph structure: `derived_from` source links, durable `has_label` labels, label relation/co-occurrence edges, bitemporal fact evidence, temporal neighbors, recency, affect, procedural priors, and ordinary embedding/context similarity. Retrieval and STM-label routing use retrieval-specific midpoint biases derived from the mixed-media knob matrix: neutral `F=0.50` maps to the previously best effective high-Focus retrieval point, neutral `S=0.50` maps to the previously best low-Sensitivity retrieval point, and neutral `T=0.50` maps to the previously best higher-Stability compact retrieval point, while the public knobs and endpoints remain unchanged. The final selected output is compacted by `RetrievalGraphExpandedRagMaxItems(F,T)`, currently `round(lerp(20, 8, RetrievalFocusBias(F)) * lerp(1.08, 0.92, RetrievalStabilityBias(T)))`. This gives Cortext a RAG-style narrowing path inside the production operation: broad source/blob seeds first, graph/fact/temporal expansion second, compact source-backed output last.
+
+Label/association seeds are selected from an in-memory summary cache (populated by the label bank and consolidation) to avoid an additional vector search pass while keeping retrieval fully embedding-based. The retrieval scorer also consumes preconsolidated labels as a bounded soft graph signal by default: the current query is projected into cached `LABEL` nodes, candidate memories receive a knob-derived boost when their `has_label` links overlap those query labels, and the boost is combined with ordinary embedding, context, recency, affect, procedural, fact, durable-source, and graph-expansion scores. This path does not persist new labels and does not treat provisional labels as truth. It can be disabled for regression isolation with `CORTEXT_DISABLE_PRECONSOLIDATED_LABEL_GRAPH=1`; otherwise its weights, admission floors, label breadth, source-seed breadth, and degree damping derive from F/S/T. Retrieval rank is preserved through hydration so chat applications can consume the production-ranked compact LTM surface.
+
+The live short-term graph memory surface mirrors the same separation between proposal and commitment. On ingress, STM is one bounded per-source graph: recent signal embeddings are graph nodes, and clustered label matches are provisional edges. The label edges are built by clustering cached label embeddings, selecting the nearest label clusters, and taking the top labels from each selected cluster. These STM label edges remain processor-local. During consolidation, source embeddings in each cluster are matched back to the STM graph, and matching labels are passed as `current_labels` to the multimodal refinement request. Gemma then confirms, removes, or adds labels from raw text/audio/image evidence before durable `has_label` edges are written to LTM graph memory. Thus the realtime clustered label graph narrows the candidate set, while consolidation remains the pruning and commitment stage. Current STM cost measurements keep the substrate inside the realtime budget: TTL12/cap24 reached p95 size **13** and p95 update **9.75 µs**, while TTL16/cap64 reached p95 size **17** and p95 update **10.208 µs**. Those numbers justify preserving STM as a small ordered substrate, but STM readout does not currently change production retrieval ranking.
 
 Recursive graph expansion adds overhead but is bounded by `depth` and `branching_factor`, effectively constant-time relative to `N`. Total complexity per stimulus is `O(log N)` with indexing.
 
@@ -83,10 +170,10 @@ Recursive graph expansion adds overhead but is bounded by `depth` and `branching
 The system stores:
 *   `signal_stream`: `n_ctx` accumulator centroids (256d float32 = 1KB each).
 *   `score_stream`: Scalar history.
-*   `memory_stream`: `N` stored memories (embedding + metadata).
-*   `graph`: Adjacency lists for graph edges.
+*   `short_term_graphs`: bounded processor-local STM nodes and provisional edges.
+*   `ltm_graph`: persisted `memories` nodes, `associations` edges, and fact claims.
 
-For long-running instances, `memory_stream` and `graph` dominate. Pruning low-strength memories (@sec-memory-strength) is essential for bounding growth.
+For long-running instances, the persisted LTM graph dominates. Pruning low-strength memories and their associated edges (@sec-memory-strength) is essential for bounding growth.
 
 ## Numerical Stability
 

@@ -30,7 +30,8 @@ using ::nlohmann::ordered_json;
 absl::StatusOr<std::unique_ptr<MemoryMappedFile>> LoadItemData(
     const ordered_json& item) {
   if (!item.contains("type")) {
-    return absl::InvalidArgumentError("Item must contain a type.");
+    // If `item` doesn't contain a type, it won't be loaded.
+    return nullptr;
   }
   if (item["type"] == "text") {
     return InMemoryFile::Create(item["text"]);

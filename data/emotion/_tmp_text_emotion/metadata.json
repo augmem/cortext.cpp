@@ -1,0 +1,7 @@
+{
+  "count": 2716,
+  "embedding_dim": 256,
+  "generated_by": "cortext/tools/text_embedder",
+  "input": "data/emotion/_tmp_text_emotion/surprise.txt",
+  "timestamp": "2026-01-02T09:16:43Z"
+}

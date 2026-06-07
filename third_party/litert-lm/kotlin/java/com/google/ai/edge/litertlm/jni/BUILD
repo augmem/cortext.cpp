@@ -25,24 +25,38 @@ cc_binary(
     linkshared = 1,
     deps = [
         "@com_google_absl//absl/base:log_severity",
+        "@com_google_absl//absl/container:flat_hash_map",
         "@com_google_absl//absl/functional:any_invocable",
         "@com_google_absl//absl/log:absl_log",
         "@com_google_absl//absl/log:globals",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/time",
         "@nlohmann_json//:json",
         "@litert//litert/c/internal:litert_logging",
+        "//runtime/components:model_resources",
+        "//runtime/components:prompt_template",
         "//runtime/conversation",
         "//runtime/conversation:io_types",
-        "//runtime/core:engine_impl",  # buildcleaner: keep
+        "//runtime/engine:engine_factory",
         "//runtime/engine:engine_interface",
         "//runtime/engine:engine_settings",
         "//runtime/engine:io_types",
         "//runtime/executor:executor_settings_base",
+        "//runtime/executor:llm_executor_settings",
         "//runtime/proto:sampler_params_cc_proto",
+        "//runtime/util:file_util",
+        "//runtime/util:litert_lm_loader",
+        "//runtime/util:logging",
+        "//schema/capabilities:capabilities_c",
+        "//schema/core:litertlm_header_schema",
         "@litert//tflite:minimal_logging",
     ] + select({
         "@platforms//os:android": [],
-        "//conditions:default": ["@rules_java//toolchains:jni"],
-    }),
+        "//conditions:default": [
+            "@rules_java//toolchains:jni"
+        ],
+    }) + [
+        "//runtime/core:engine_impl",  # buildcleaner: keep
+    ],
 )

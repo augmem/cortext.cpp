@@ -32,10 +32,14 @@
 #include "nlohmann/json_fwd.hpp"  // from @nlohmann_json
 #include "litert/cc/litert_layout.h"  // from @litert
 #include "runtime/components/constrained_decoding/constraint.h"
+#if !defined(LITERT_LM_FST_CONSTRAINTS_DISABLED)
+#include "runtime/components/constrained_decoding/gemma_model_constraint_provider.h"
+#endif
 #include "runtime/components/preprocessor/audio_preprocessor.h"
 #include "runtime/components/preprocessor/audio_preprocessor_miniaudio.h"
 #include "runtime/components/preprocessor/image_preprocessor.h"
 #include "runtime/components/preprocessor/stb_image_preprocessor.h"
+#include "runtime/components/prompt_template.h"
 #include "runtime/components/sentencepiece_tokenizer.h"
 #include "runtime/components/tokenizer.h"
 #include "runtime/components/tool_use/parser_utils.h"
@@ -43,6 +47,8 @@
 #include "runtime/conversation/io_types.h"
 #include "runtime/conversation/model_data_processor/data_utils.h"
 #include "runtime/conversation/model_data_processor/gemma3_data_processor_config.h"
+#include "runtime/conversation/model_data_processor/model_data_processor.h"
+#include "runtime/conversation/prompt_utils.h"
 #include "runtime/engine/io_types.h"
 #include "runtime/util/memory_mapped_file.h"
 #include "runtime/util/status_macros.h"
@@ -116,12 +122,58 @@ Gemma3DataProcessor::Create(Gemma3DataProcessorConfig config,
                             const Tokenizer* tokenizer,
                             const std::vector<std::vector<int>>& stop_token_ids,
                             bool enable_constrained_decoding) {
+#if defined(LITERT_LM_FST_CONSTRAINTS_DISABLED)
+  if (enable_constrained_decoding) {
+    return absl::FailedPreconditionError(
+        "Constrained decoding was disabled at build time.");
+  }
   ASSIGN_OR_RETURN(auto audio_preprocessor,
                    AudioPreprocessorMiniAudio::Create(
                        AudioPreprocessorConfig::CreateDefaultUsmConfig()));
   return absl::WrapUnique(new Gemma3DataProcessor(
       config, preface, std::make_unique<StbImagePreprocessor>(),
       std::move(audio_preprocessor)));
+#else
+  std::unique_ptr<LiteRtLmGemmaModelConstraintProvider,
+                  decltype(&LiteRtLmGemmaModelConstraintProvider_Destroy)>
+      constraint_provider(nullptr,
+                          &LiteRtLmGemmaModelConstraintProvider_Destroy);
+  if (enable_constrained_decoding) {
+    std::vector<const int*> stop_token_ids_ptrs;
+    std::vector<size_t> stop_token_lengths;
+    stop_token_ids_ptrs.reserve(stop_token_ids.size());
+    stop_token_lengths.reserve(stop_token_ids.size());
+    for (const auto& stop_tokens : stop_token_ids) {
+      stop_token_ids_ptrs.push_back(stop_tokens.data());
+      stop_token_lengths.push_back(stop_tokens.size());
+    }
+    if (tokenizer->GetTokenizerType() != TokenizerType::kSentencePiece) {
+      return absl::InvalidArgumentError(
+          "Constrained decoding is only supported for SentencePiece "
+          "tokenizer.");
+    }
+    auto sp_tokenizer =
+        reinterpret_cast<const SentencePieceTokenizer*>(tokenizer);
+    auto serialized_model_proto =
+        sp_tokenizer->GetProcessor().model_proto().SerializeAsString();
+    LiteRtLmGemmaModelConstraintProvider* provider =
+        LiteRtLmGemmaModelConstraintProvider_Create(
+            serialized_model_proto.data(), serialized_model_proto.size(),
+            stop_token_ids_ptrs.data(), stop_token_lengths.data(),
+            stop_token_ids.size());
+    if (provider == nullptr) {
+      return absl::InternalError(
+          "Failed to create GemmaModelConstraintProvider.");
+    }
+    constraint_provider.reset(provider);
+  }
+  ASSIGN_OR_RETURN(auto audio_preprocessor,
+                   AudioPreprocessorMiniAudio::Create(
+                       AudioPreprocessorConfig::CreateDefaultUsmConfig()));
+  return absl::WrapUnique(new Gemma3DataProcessor(
+      std::move(constraint_provider), config, preface,
+      std::make_unique<StbImagePreprocessor>(), std::move(audio_preprocessor)));
+#endif
 }
 
 absl::StatusOr<ordered_json> Gemma3DataProcessor::MessageToTemplateInput(
@@ -290,6 +342,100 @@ Gemma3DataProcessor::ToInputDataVectorImpl(
   return input_data;
 }
 
+absl::StatusOr<ModelDataProcessor::SingleTurnTemplateRenderResult>
+Gemma3DataProcessor::RenderSingleTurnTemplate(
+    std::vector<Message>& history, const Preface& preface,
+    const Message& message, const PromptTemplate& prompt_template,
+    bool current_is_appending_message, bool append_message,
+    std::optional<nlohmann::ordered_json> extra_context) const {
+  const auto& json_preface = std::get<JsonPreface>(preface);
+  std::string prefill_text = "";
+  bool is_first_part = false;
+  bool is_last_part = false;
+
+  if (!current_is_appending_message) {
+    is_first_part = true;
+  }
+  if (!append_message) {
+    is_last_part = true;
+  }
+
+  bool new_is_appending_message = current_is_appending_message;
+  if (is_first_part) {
+    new_is_appending_message = true;
+  }
+  if (is_last_part) {
+    new_is_appending_message = false;
+  }
+
+  bool is_role_changed = false;
+  if (!history.empty()) {
+    const auto& last_message = history.back();
+    // If the last message is in appending state and the current message is
+    // different role, then we need to add a closing message to the prefill.
+    if (current_is_appending_message &&
+        (last_message["role"] != message["role"] &&
+         last_message["role"] != "system")) {
+      is_role_changed = true;
+      PromptTemplateInput closing_tmpl_input;
+      nlohmann::ordered_json closing_message = {
+          {"role", last_message["role"]},
+          {"content", ""},
+      };
+      ASSIGN_OR_RETURN(nlohmann::ordered_json message_tmpl_input,
+                       MessageToTemplateInput(closing_message));
+      closing_tmpl_input.extra_context["message"] = message_tmpl_input;
+      closing_tmpl_input.extra_context["is_appending_to_prefill"] = true;
+      closing_tmpl_input.extra_context["is_first_part"] = false;
+      closing_tmpl_input.extra_context["is_last_part"] = true;
+      closing_tmpl_input.add_generation_prompt = false;
+      ASSIGN_OR_RETURN(std::string closing_text,
+                       prompt_template.Apply(closing_tmpl_input));
+      prefill_text += closing_text;
+    }
+  } else {
+    PromptTemplateInput preface_tmpl_input;
+    RETURN_IF_ERROR(FillPrefaceForPromptTemplateInput(json_preface, this,
+                                                      preface_tmpl_input));
+    if (!json_preface.messages.empty() || !json_preface.tools.empty() ||
+        !json_preface.extra_context.is_null()) {
+      preface_tmpl_input.messages.push_back(
+          Message{{"role", "user"}, {"content", ""}});
+      preface_tmpl_input.add_generation_prompt = false;
+
+      if (extra_context.has_value()) {
+        for (const auto& [key, value] : extra_context.value().items()) {
+          preface_tmpl_input.extra_context[key] = value;
+        }
+      }
+
+      ASSIGN_OR_RETURN(std::string preface_text,
+                       prompt_template.Apply(preface_tmpl_input));
+      prefill_text += preface_text;
+    }
+  }
+  if (message.is_object()) {
+    PromptTemplateInput tmpl_input;
+    ASSIGN_OR_RETURN(tmpl_input.extra_context["message"],
+                     MessageToTemplateInput(message));
+    tmpl_input.extra_context["is_appending_to_prefill"] = true;
+    tmpl_input.extra_context["is_first_part"] =
+        is_first_part || is_role_changed;
+    tmpl_input.extra_context["is_last_part"] = is_last_part;
+    tmpl_input.add_generation_prompt = !new_is_appending_message;
+
+    if (extra_context.has_value()) {
+      for (const auto& [key, value] : extra_context.value().items()) {
+        tmpl_input.extra_context[key] = value;
+      }
+    }
+
+    ASSIGN_OR_RETURN(std::string new_text, prompt_template.Apply(tmpl_input));
+    prefill_text += new_text;
+  }
+  return SingleTurnTemplateRenderResult{prefill_text, new_is_appending_message};
+}
+
 absl::StatusOr<Message> Gemma3DataProcessor::ToMessageImpl(
     const Responses& responses,
     const Gemma3DataProcessorArguments& args) const {
@@ -332,7 +478,41 @@ absl::StatusOr<ordered_json> Gemma3DataProcessor::FormatTools(
 absl::StatusOr<std::unique_ptr<Constraint>>
 Gemma3DataProcessor::CreateConstraint(
     const nlohmann::ordered_json& tools) const {
-  return nullptr;
+#if defined(LITERT_LM_FST_CONSTRAINTS_DISABLED)
+  return absl::FailedPreconditionError(
+      "Constrained decoding is disabled at build time, but it was requested "
+      "for inference.");
+#else
+  if (constraint_provider_c_ == nullptr) {
+    return nullptr;
+  }
+  if (!tools.is_array()) {
+    return absl::InvalidArgumentError("Tools must be an array.");
+  }
+  nlohmann::ordered_json functions = nlohmann::ordered_json::array();
+  for (const auto& tool : tools) {
+    if (tool.contains("function")) {
+      functions.push_back(tool["function"]);
+    } else {
+      functions.push_back(tool);
+    }
+  }
+  LiteRtLmGemmaModelConstraintOptions gemma_options = {
+      .funcall_format = kLiteRtLmGemmaFuncallFormatPythonStyle,
+      .code_fence_start = config_.code_fence_start.c_str(),
+      .code_fence_end = config_.code_fence_end.c_str(),
+      .open_quote = nullptr,
+      .close_quote = nullptr,
+      .function_response_start = nullptr};
+  std::string functions_str = functions.dump();
+  LiteRtLmConstraint* constraint =
+      LiteRtLmGemmaModelConstraintProvider_CreateConstraintFromTools(
+          constraint_provider_c_.get(), functions_str.c_str(), &gemma_options);
+  if (constraint == nullptr) {
+    return absl::InternalError("Failed to create constraint with tools.");
+  }
+  return absl::WrapUnique(reinterpret_cast<Constraint*>(constraint));
+#endif
 }
 
 absl::string_view Gemma3DataProcessor::CodeFenceStart() const {
@@ -341,6 +521,24 @@ absl::string_view Gemma3DataProcessor::CodeFenceStart() const {
 
 absl::string_view Gemma3DataProcessor::CodeFenceEnd() const {
   return config_.code_fence_end;
+}
+
+absl::Status Gemma3DataProcessor::CloneStateImpl(
+    const TypeSafeModelDataProcessor<Gemma3DataProcessorConfig,
+                                     Gemma3DataProcessorArguments>& other) {
+  const Gemma3DataProcessor& other_gemma3_data_processor =
+      static_cast<const Gemma3DataProcessor&>(other);
+  if (other_gemma3_data_processor.audio_preprocessor_ != nullptr) {
+    if (audio_preprocessor_ == nullptr) {
+      ASSIGN_OR_RETURN(audio_preprocessor_,
+                       AudioPreprocessorMiniAudio::Create(
+                           AudioPreprocessorConfig::CreateDefaultUsmConfig()));
+    }
+    *static_cast<AudioPreprocessorMiniAudio*>(audio_preprocessor_.get()) =
+        *static_cast<AudioPreprocessorMiniAudio*>(
+            other_gemma3_data_processor.audio_preprocessor_.get());
+  }
+  return absl::OkStatus();
 }
 
 }  // namespace litert::lm

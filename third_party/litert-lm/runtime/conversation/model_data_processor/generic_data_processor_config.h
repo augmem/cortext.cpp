@@ -21,6 +21,9 @@ namespace litert::lm {
 
 struct GenericDataProcessorConfig {
   std::string model_role = "assistant";
+  // If true, force the content from the model to be a string instead of an
+  // array. Some legacy templates only support string content.
+  bool force_string_content = false;
 };
 
 struct GenericDataProcessorArguments {};

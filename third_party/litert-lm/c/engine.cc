@@ -15,9 +15,9 @@
 #include "c/engine.h"
 
 #include <cstddef>
+#include <cstring>
 #include <memory>
 #include <optional>
-#include <cstring>
 #include <string>
 #include <utility>
 #include <variant>
@@ -28,15 +28,20 @@
 #include "absl/status/status.h"  // from @com_google_absl
 #include "absl/status/statusor.h"  // from @com_google_absl
 #include "absl/strings/string_view.h"  // from @com_google_absl
+#include "absl/time/time.h"  // from @com_google_absl
 #include "nlohmann/json.hpp"  // from @nlohmann_json
 #include "runtime/conversation/conversation.h"
 #include "runtime/conversation/io_types.h"
 #include "runtime/engine/engine.h"
+#include "runtime/engine/engine_factory.h"
 #include "runtime/engine/engine_settings.h"
 #include "runtime/engine/io_types.h"
 #include "runtime/executor/executor_settings_base.h"
 #include "runtime/executor/llm_executor_settings.h"
+#include "runtime/proto/llm_metadata.pb.h"
 #include "runtime/proto/sampler_params.pb.h"
+#include "runtime/proto/token.pb.h"
+#include "runtime/util/logging.h"
 
 namespace {
 
@@ -73,19 +78,54 @@ CreateConversationCallback(LiteRtLmStreamCallback callback, void* user_data) {
       callback(user_data, nullptr, true, const_cast<char*>(error_str.c_str()));
       return;
     }
-    if (auto* json_msg = std::get_if<litert::lm::JsonMessage>(&*message)) {
-      if (json_msg->is_null()) {  // End of stream marker
-        callback(user_data, nullptr, true, nullptr);
-      } else {
-        std::string json_str = json_msg->dump();
-        callback(user_data, const_cast<char*>(json_str.c_str()), false,
-                 nullptr);
-      }
+    if (message->empty()) {  // End of stream marker
+      callback(user_data, nullptr, true, nullptr);
     } else {
-      std::string error_str = "Unsupported message type";
-      callback(user_data, nullptr, true, const_cast<char*>(error_str.c_str()));
+      std::string json_str = message->dump();
+      callback(user_data, const_cast<char*>(json_str.c_str()), false, nullptr);
     }
   };
+}
+
+litert::lm::OptionalArgs CreateOptionalArgs(const char* extra_context) {
+  litert::lm::OptionalArgs optional_args;
+  if (extra_context) {
+    auto extra_context_json =
+        nlohmann::ordered_json::parse(extra_context, nullptr, false);
+    if (!extra_context_json.is_null() && !extra_context_json.empty()) {
+      optional_args.extra_context = extra_context_json;
+    }
+  }
+  return optional_args;
+}
+
+std::vector<litert::lm::InputData> ToEngineInputData(
+    const LiteRtLmInputData* inputs, size_t num_inputs) {
+  std::vector<litert::lm::InputData> engine_inputs;
+  engine_inputs.reserve(num_inputs);
+  for (size_t i = 0; i < num_inputs; ++i) {
+    switch (inputs[i].type) {
+      case kLiteRtLmInputDataTypeText:
+        engine_inputs.emplace_back(litert::lm::InputText(std::string(
+            static_cast<const char*>(inputs[i].data), inputs[i].size)));
+        break;
+      case kLiteRtLmInputDataTypeImage:
+        engine_inputs.emplace_back(litert::lm::InputImage(std::string(
+            static_cast<const char*>(inputs[i].data), inputs[i].size)));
+        break;
+      case kLiteRtLmInputDataTypeImageEnd:
+        engine_inputs.emplace_back(litert::lm::InputImageEnd());
+        break;
+      case kLiteRtLmInputDataTypeAudio:
+        engine_inputs.emplace_back(litert::lm::InputAudio(std::string(
+            static_cast<const char*>(inputs[i].data), inputs[i].size)));
+        break;
+      case kLiteRtLmInputDataTypeAudioEnd:
+        engine_inputs.emplace_back(litert::lm::InputAudioEnd());
+        break;
+    }
+  }
+  return engine_inputs;
 }
 
 }  // namespace
@@ -93,9 +133,10 @@ CreateConversationCallback(LiteRtLmStreamCallback callback, void* user_data) {
 using ::litert::lm::Conversation;
 using ::litert::lm::ConversationConfig;
 using ::litert::lm::Engine;
+using ::litert::lm::EngineFactory;
 using ::litert::lm::EngineSettings;
 using ::litert::lm::InputText;
-using ::litert::lm::JsonMessage;
+
 using ::litert::lm::Message;
 using ::litert::lm::ModelAssets;
 using ::litert::lm::Responses;
@@ -124,43 +165,96 @@ struct LiteRtLmBenchmarkInfo {
 
 struct LiteRtLmConversation {
   std::unique_ptr<Conversation> conversation;
+  // This field stores the result of the last call to
+  // `litert_lm_conversation_render_message_to_string`. This ties the lifetime
+  // of the returned `const char*` to the `LiteRtLmConversation` object,
+  // ensuring memory safety for the C API caller without requiring explicit
+  // per-call deallocation.
+  std::string last_rendered_message;
 };
 
 struct LiteRtLmJsonResponse {
   std::string json_string;
 };
 
+// TODO: b/483172229 - Migrate to use SessionConfig instead of unique_ptr to
+// SessionConfig for consistency and efficiency.
 struct LiteRtLmSessionConfig {
   std::unique_ptr<SessionConfig> config;
 };
 
 struct LiteRtLmConversationConfig {
-  std::unique_ptr<ConversationConfig> config;
+  std::optional<SessionConfig> session_config;
+  std::string system_message_json;
+  std::string tools_json;
+  std::string messages_json;
+  std::string extra_context_json;
+  bool enable_constrained_decoding = false;
+  bool filter_channel_content_from_kv_cache = false;
+};
+
+struct LiteRtLmDetokenizeResult {
+  std::string text;
+};
+
+struct LiteRtLmTokenizeResult {
+  std::vector<int> tokens;
+};
+
+struct LiteRtLmTokenUnion {
+  litert::lm::proto::TokenUnion token_union;
+};
+
+struct LiteRtLmTokenUnions {
+  std::vector<litert::lm::proto::TokenUnion> tokens;
 };
 
 extern "C" {
 
-SamplerParameters::Type ToSamplerParametersType(Type type) {
+void litert_lm_set_min_log_level(int level) {
+  litert::lm::SetMinLogSeverity(static_cast<litert::lm::LogSeverity>(level));
+}
+
+SamplerParameters::Type ToSamplerParametersType(LiteRtLmSamplerType type) {
   switch (type) {
-    case kTypeUnspecified:
+    case kLiteRtLmSamplerTypeUnspecified:
       return SamplerParameters::TYPE_UNSPECIFIED;
-    case kTopK:
+    case kLiteRtLmSamplerTypeTopK:
       return SamplerParameters::TOP_K;
-    case kTopP:
+    case kLiteRtLmSamplerTypeTopP:
       return SamplerParameters::TOP_P;
-    case kGreedy:
+    case kLiteRtLmSamplerTypeGreedy:
       return SamplerParameters::GREEDY;
   }
   return SamplerParameters::TYPE_UNSPECIFIED;
 }
 
-LiteRtLmSessionConfig* litert_lm_session_config_create(
-    const LiteRtLmSamplerParams* sampler_params) {
+LiteRtLmSessionConfig* litert_lm_session_config_create() {
   auto* c_config = new LiteRtLmSessionConfig;
   c_config->config =
       std::make_unique<SessionConfig>(SessionConfig::CreateDefault());
-  if (sampler_params) {
-    SamplerParameters& params = c_config->config->GetMutableSamplerParams();
+  return c_config;
+}
+
+void litert_lm_session_config_set_max_output_tokens(
+    LiteRtLmSessionConfig* config, int max_output_tokens) {
+  if (config && config->config) {
+    config->config->SetMaxOutputTokens(max_output_tokens);
+  }
+}
+
+void litert_lm_session_config_set_apply_prompt_template(
+    LiteRtLmSessionConfig* config, bool apply_prompt_template) {
+  if (config && config->config) {
+    config->config->SetApplyPromptTemplateInSession(apply_prompt_template);
+  }
+}
+
+void litert_lm_session_config_set_sampler_params(
+    LiteRtLmSessionConfig* config,
+    const LiteRtLmSamplerParams* sampler_params) {
+  if (config && config->config && sampler_params) {
+    SamplerParameters& params = config->config->GetMutableSamplerParams();
 
     params.set_type(ToSamplerParametersType(sampler_params->type));
 
@@ -169,62 +263,66 @@ LiteRtLmSessionConfig* litert_lm_session_config_create(
     params.set_temperature(sampler_params->temperature);
     params.set_seed(sampler_params->seed);
   }
-  return c_config;
 }
 
 void litert_lm_session_config_delete(LiteRtLmSessionConfig* config) {
   delete config;
 }
 
-LiteRtLmConversationConfig*
-litert_lm_conversation_config_create(
-    LiteRtLmEngine* engine, const LiteRtLmSamplerParams* sampler_params,
-    const char* system_message_json) {
-  if (!engine || !engine->engine) {
-    return nullptr;
+LiteRtLmConversationConfig* litert_lm_conversation_config_create() {
+  return new LiteRtLmConversationConfig;
+}
+
+void litert_lm_conversation_config_set_session_config(
+    LiteRtLmConversationConfig* config,
+    const LiteRtLmSessionConfig* session_config) {
+  if (config && session_config && session_config->config) {
+    config->session_config = *session_config->config;
   }
+}
 
-  SessionConfig session_config = SessionConfig::CreateDefault();
-  if (sampler_params) {
-    SamplerParameters& params = session_config.GetMutableSamplerParams();
-    params.set_type(ToSamplerParametersType(sampler_params->type));
-    params.set_k(sampler_params->top_k);
-    params.set_p(sampler_params->top_p);
-    params.set_temperature(sampler_params->temperature);
-    params.set_seed(sampler_params->seed);
+void litert_lm_conversation_config_set_system_message(
+    LiteRtLmConversationConfig* config, const char* system_message_json) {
+  if (config && system_message_json) {
+    config->system_message_json = system_message_json;
   }
+}
 
-  litert::lm::JsonPreface json_preface;
-  if (system_message_json) {
-    nlohmann::ordered_json system_message;
-    system_message["role"] = "system";
-    auto content =
-        nlohmann::ordered_json::parse(system_message_json, nullptr, false);
-    if (content.is_discarded()) {
-      // If JSON parsing fails, assume it's a plain string.
-      system_message["content"] = system_message_json;
-    } else {
-      system_message["content"] = content;
-    }
-    json_preface.messages = nlohmann::ordered_json::array({system_message});
+void litert_lm_conversation_config_set_tools(LiteRtLmConversationConfig* config,
+                                             const char* tools_json) {
+  if (config && tools_json) {
+    config->tools_json = tools_json;
   }
+}
 
-  auto conversation_config =
-      litert::lm::ConversationConfig::CreateFromSessionConfig(
-          *engine->engine, session_config, json_preface,
-          /*overwrite_processor_config=*/std::nullopt,
-          /*enable_constrained_decoding=*/false);
-
-  if (!conversation_config.ok()) {
-    ABSL_LOG(ERROR) << "Failed to create conversation config: "
-                    << conversation_config.status();
-    return nullptr;
+void litert_lm_conversation_config_set_messages(
+    LiteRtLmConversationConfig* config, const char* messages_json) {
+  if (config && messages_json) {
+    config->messages_json = messages_json;
   }
+}
 
-  auto* c_config = new LiteRtLmConversationConfig;
-  c_config->config =
-      std::make_unique<ConversationConfig>(*std::move(conversation_config));
-  return c_config;
+void litert_lm_conversation_config_set_extra_context(
+    LiteRtLmConversationConfig* config, const char* extra_context_json) {
+  if (config && extra_context_json) {
+    config->extra_context_json = extra_context_json;
+  }
+}
+
+void litert_lm_conversation_config_set_enable_constrained_decoding(
+    LiteRtLmConversationConfig* config, bool enable_constrained_decoding) {
+  if (config) {
+    config->enable_constrained_decoding = enable_constrained_decoding;
+  }
+}
+
+void litert_lm_conversation_config_set_filter_channel_content_from_kv_cache(
+    LiteRtLmConversationConfig* config,
+    bool filter_channel_content_from_kv_cache) {
+  if (config) {
+    config->filter_channel_content_from_kv_cache =
+        filter_channel_content_from_kv_cache;
+  }
 }
 
 void litert_lm_conversation_config_delete(LiteRtLmConversationConfig* config) {
@@ -274,6 +372,13 @@ LiteRtLmEngineSettings* litert_lm_engine_settings_create(
     return nullptr;
   }
 
+  if (*backend == litert::lm::Backend::GPU) {
+    // Enforce floating point precision for better quality.
+    auto& executor_settings = engine_settings->GetMutableMainExecutorSettings();
+    executor_settings.SetActivationDataType(
+        litert::lm::ActivationDataType::FLOAT32);
+  }
+
   auto* c_settings = new LiteRtLmEngineSettings;
   c_settings->settings =
       std::make_unique<EngineSettings>(*std::move(engine_settings));
@@ -291,9 +396,16 @@ void litert_lm_engine_settings_set_max_num_tokens(
         max_num_tokens);
   }
 }
+void litert_lm_engine_settings_set_parallel_file_section_loading(
+    LiteRtLmEngineSettings* settings, bool parallel_file_section_loading) {
+  if (settings && settings->settings) {
+    settings->settings->SetParallelFileSectionLoading(
+        parallel_file_section_loading);
+  }
+}
 
-void litert_lm_engine_settings_set_cache_dir(
-    LiteRtLmEngineSettings* settings, const char* cache_dir) {
+void litert_lm_engine_settings_set_cache_dir(LiteRtLmEngineSettings* settings,
+                                             const char* cache_dir) {
   if (settings && settings->settings) {
     settings->settings->GetMutableMainExecutorSettings().SetCacheDir(cache_dir);
   }
@@ -306,19 +418,53 @@ void litert_lm_engine_settings_enable_benchmark(
   }
 }
 
-void litert_lm_engine_settings_set_num_cpu_threads(
-    LiteRtLmEngineSettings* settings, int num_threads) {
+void litert_lm_engine_settings_set_num_prefill_tokens(
+    LiteRtLmEngineSettings* settings, int num_prefill_tokens) {
   if (settings && settings->settings) {
-    auto& executor_settings =
-        settings->settings->GetMutableMainExecutorSettings();
-    auto cpu_config_result =
-        executor_settings.MutableBackendConfig<litert::lm::CpuConfig>();
-    if (cpu_config_result.ok()) {
-      litert::lm::CpuConfig cpu_config = *cpu_config_result;
-      cpu_config.number_of_threads =
-          num_threads > 0 ? static_cast<uint32_t>(num_threads) : 4;
-      executor_settings.SetBackendConfig(cpu_config);
+    settings->settings->GetMutableBenchmarkParams().set_num_prefill_tokens(
+        num_prefill_tokens);
+  }
+}
+
+void litert_lm_engine_settings_set_num_decode_tokens(
+    LiteRtLmEngineSettings* settings, int num_decode_tokens) {
+  if (settings && settings->settings) {
+    settings->settings->GetMutableBenchmarkParams().set_num_decode_tokens(
+        num_decode_tokens);
+  }
+}
+
+void litert_lm_engine_settings_set_enable_speculative_decoding(
+    LiteRtLmEngineSettings* settings, bool enable_speculative_decoding) {
+  if (settings && settings->settings) {
+    auto& main_settings = settings->settings->GetMutableMainExecutorSettings();
+    auto advanced_settings = main_settings.GetAdvancedSettings().value_or(
+        litert::lm::AdvancedSettings());
+    advanced_settings.enable_speculative_decoding = enable_speculative_decoding;
+    main_settings.SetAdvancedSettings(advanced_settings);
+  }
+}
+
+void litert_lm_engine_settings_set_activation_data_type(
+    LiteRtLmEngineSettings* settings, int activation_data_type_int) {
+  if (settings && settings->settings) {
+    settings->settings->GetMutableMainExecutorSettings().SetActivationDataType(
+        static_cast<litert::lm::ActivationDataType>(activation_data_type_int));
+  }
+}
+
+void litert_lm_engine_settings_set_prefill_chunk_size(
+    LiteRtLmEngineSettings* settings, int prefill_chunk_size) {
+  if (settings && settings->settings) {
+    auto& main_settings = settings->settings->GetMutableMainExecutorSettings();
+    auto config = main_settings.MutableBackendConfig<litert::lm::CpuConfig>();
+    if (!config.ok()) {
+      ABSL_LOG(WARNING) << "Failed to get CpuConfig to set prefill chunk size: "
+                        << config.status();
+      return;
     }
+    config->prefill_chunk_size = prefill_chunk_size;
+    main_settings.SetBackendConfig(*config);
   }
 }
 
@@ -328,7 +474,9 @@ LiteRtLmEngine* litert_lm_engine_create(
     return nullptr;
   }
 
-  auto engine = Engine::CreateEngine(*settings->settings);
+  absl::StatusOr<std::unique_ptr<Engine>> engine =
+      EngineFactory::CreateDefault(*settings->settings);
+
   if (!engine.ok()) {
     ABSL_LOG(ERROR) << "Failed to create engine: " << engine.status();
     return nullptr;
@@ -338,13 +486,20 @@ LiteRtLmEngine* litert_lm_engine_create(
   c_engine->engine = *std::move(engine);
   return c_engine;
 }
+
 void litert_lm_engine_delete(LiteRtLmEngine* engine) { delete engine; }
 
-LiteRtLmSession* litert_lm_engine_create_session(LiteRtLmEngine* engine) {
+LiteRtLmSession* litert_lm_engine_create_session(
+    LiteRtLmEngine* engine, LiteRtLmSessionConfig* config) {
   if (!engine || !engine->engine) {
     return nullptr;
   }
-  auto session = engine->engine->CreateSession(SessionConfig::CreateDefault());
+  absl::StatusOr<std::unique_ptr<Engine::Session>> session;
+  if (config && config->config) {
+    session = engine->engine->CreateSession(*config->config);
+  } else {
+    session = engine->engine->CreateSession(SessionConfig::CreateDefault());
+  }
   if (!session.ok()) {
     ABSL_LOG(ERROR) << "Failed to create session: " << session.status();
     return nullptr;
@@ -357,35 +512,89 @@ LiteRtLmSession* litert_lm_engine_create_session(LiteRtLmEngine* engine) {
 
 void litert_lm_session_delete(LiteRtLmSession* session) { delete session; }
 
-LiteRtLmResponses* litert_lm_session_generate_content(LiteRtLmSession* session,
-                                                      const InputData* inputs,
-                                                      size_t num_inputs) {
+void litert_lm_session_cancel_process(LiteRtLmSession* session) {
+  if (session && session->session) {
+    session->session->CancelProcess();
+  }
+}
+
+LiteRtLmResponses* litert_lm_session_run_text_scoring(
+    LiteRtLmSession* session, const char** target_text, size_t num_targets,
+    bool store_token_lengths) {
+  if (!session || !session->session || !target_text || num_targets <= 0) {
+    return nullptr;
+  }
+  std::vector<absl::string_view> target_text_views;
+  target_text_views.reserve(num_targets);
+  for (size_t i = 0; i < num_targets; ++i) {
+    target_text_views.push_back(target_text[i]);
+  }
+  auto responses =
+      session->session->RunTextScoring(target_text_views, store_token_lengths);
+  if (!responses.ok()) {
+    ABSL_LOG(ERROR) << "Failed to run text scoring: " << responses.status();
+    return nullptr;
+  }
+  auto* c_responses = new LiteRtLmResponses{std::move(*responses)};
+  if (c_responses->responses.GetTexts().empty()) {
+    auto& mutable_texts = c_responses->responses.GetMutableTexts();
+    mutable_texts.reserve(num_targets);
+    for (size_t i = 0; i < num_targets; ++i) {
+      mutable_texts.emplace_back(target_text[i]);
+    }
+  }
+  return c_responses;
+}
+
+int litert_lm_session_run_prefill(LiteRtLmSession* session,
+                                  const LiteRtLmInputData* inputs,
+                                  size_t num_inputs) {
+  if (!session || !session->session || !inputs || num_inputs <= 0) {
+    return -1;
+  }
+  auto engine_inputs = ToEngineInputData(inputs, num_inputs);
+  auto status = session->session->RunPrefill(engine_inputs);
+  if (!status.ok()) {
+    ABSL_LOG(ERROR) << "Failed to run prefill: " << status;
+    return -1;
+  }
+  return 0;
+}
+
+LiteRtLmResponses* litert_lm_session_run_decode(LiteRtLmSession* session) {
   if (!session || !session->session) {
     return nullptr;
   }
-  std::vector<std::variant<litert::lm::InputText, litert::lm::InputImage,
-                           litert::lm::InputAudio, litert::lm::InputAudioEnd>>
-      engine_inputs;
-  engine_inputs.reserve(num_inputs);
-  for (size_t i = 0; i < num_inputs; ++i) {
-    switch (inputs[i].type) {
-      case kInputText:
-        engine_inputs.emplace_back(InputText(std::string(
-            static_cast<const char*>(inputs[i].data), inputs[i].size)));
-        break;
-      case kInputImage:
-        engine_inputs.emplace_back(litert::lm::InputImage(std::string(
-            static_cast<const char*>(inputs[i].data), inputs[i].size)));
-        break;
-      case kInputAudio:
-        engine_inputs.emplace_back(litert::lm::InputAudio(std::string(
-            static_cast<const char*>(inputs[i].data), inputs[i].size)));
-        break;
-      case kInputAudioEnd:
-        engine_inputs.emplace_back(litert::lm::InputAudioEnd());
-        break;
-    }
+  auto responses = session->session->RunDecode();
+  if (!responses.ok()) {
+    ABSL_LOG(ERROR) << "Failed to run decode: " << responses.status();
+    return nullptr;
   }
+  return new LiteRtLmResponses{std::move(*responses)};
+}
+
+int litert_lm_session_run_decode_async(LiteRtLmSession* session,
+                                       LiteRtLmStreamCallback callback,
+                                       void* callback_data) {
+  if (!session || !session->session) {
+    return -1;
+  }
+  auto status =
+      session->session->RunDecodeAsync(CreateCallback(callback, callback_data));
+  if (!status.ok()) {
+    ABSL_LOG(ERROR) << "Failed to start decode stream: " << status.status();
+    return static_cast<int>(status.status().code());
+  }
+  return 0;
+}
+
+LiteRtLmResponses* litert_lm_session_generate_content(
+    LiteRtLmSession* session, const LiteRtLmInputData* inputs,
+    size_t num_inputs) {
+  if (!session || !session->session) {
+    return nullptr;
+  }
+  auto engine_inputs = ToEngineInputData(inputs, num_inputs);
   auto responses = session->session->GenerateContent(std::move(engine_inputs));
   if (!responses.ok()) {
     ABSL_LOG(ERROR) << "Failed to generate content: " << responses.status();
@@ -397,36 +606,14 @@ LiteRtLmResponses* litert_lm_session_generate_content(LiteRtLmSession* session,
 }
 
 int litert_lm_session_generate_content_stream(LiteRtLmSession* session,
-                                              const InputData* inputs,
+                                              const LiteRtLmInputData* inputs,
                                               size_t num_inputs,
                                               LiteRtLmStreamCallback callback,
                                               void* callback_data) {
   if (!session || !session->session) {
     return -1;
   }
-  std::vector<std::variant<litert::lm::InputText, litert::lm::InputImage,
-                           litert::lm::InputAudio, litert::lm::InputAudioEnd>>
-      engine_inputs;
-  engine_inputs.reserve(num_inputs);
-  for (size_t i = 0; i < num_inputs; ++i) {
-    switch (inputs[i].type) {
-      case kInputText:
-        engine_inputs.emplace_back(InputText(std::string(
-            static_cast<const char*>(inputs[i].data), inputs[i].size)));
-        break;
-      case kInputImage:
-        engine_inputs.emplace_back(litert::lm::InputImage(std::string(
-            static_cast<const char*>(inputs[i].data), inputs[i].size)));
-        break;
-      case kInputAudio:
-        engine_inputs.emplace_back(litert::lm::InputAudio(std::string(
-            static_cast<const char*>(inputs[i].data), inputs[i].size)));
-        break;
-      case kInputAudioEnd:
-        engine_inputs.emplace_back(litert::lm::InputAudioEnd());
-        break;
-    }
-  }
+  auto engine_inputs = ToEngineInputData(inputs, num_inputs);
 
   absl::Status status = session->session->GenerateContentStream(
       std::move(engine_inputs), CreateCallback(callback, callback_data));
@@ -447,20 +634,85 @@ int litert_lm_responses_get_num_candidates(const LiteRtLmResponses* responses) {
   if (!responses) {
     return 0;
   }
-  return responses->responses.GetTexts().size();
+  const auto& r = responses->responses;
+  size_t num_candidates = r.GetTexts().size();
+  if (num_candidates == 0) {
+    num_candidates = r.GetScores().size();
+  }
+  if (num_candidates == 0 && r.GetTokenLengths().has_value()) {
+    num_candidates = r.GetTokenLengths()->size();
+  }
+  return static_cast<int>(num_candidates);
 }
 
 const char* litert_lm_responses_get_response_text_at(
     const LiteRtLmResponses* responses, int index) {
-  if (!responses) {
-    return nullptr;
-  }
-  if (index < 0 || index >= responses->responses.GetTexts().size()) {
+  if (!responses || index < 0 ||
+      index >= responses->responses.GetTexts().size()) {
     return nullptr;
   }
 
   // The string_view's data is valid as long as the responses object is alive.
   return responses->responses.GetTexts()[index].data();
+}
+
+bool litert_lm_responses_has_score_at(const LiteRtLmResponses* responses,
+                                      int index) {
+  if (!responses || index < 0 ||
+      index >= responses->responses.GetScores().size()) {
+    return false;
+  }
+  return true;
+}
+
+float litert_lm_responses_get_score_at(const LiteRtLmResponses* responses,
+                                       int index) {
+  if (!litert_lm_responses_has_score_at(responses, index)) {
+    return 0.0f;
+  }
+  return responses->responses.GetScores()[index];
+}
+
+bool litert_lm_responses_has_token_length_at(const LiteRtLmResponses* responses,
+                                             int index) {
+  if (!responses || !responses->responses.GetTokenLengths().has_value() ||
+      index < 0 || index >= responses->responses.GetTokenLengths()->size()) {
+    return false;
+  }
+  return true;
+}
+
+int litert_lm_responses_get_token_length_at(const LiteRtLmResponses* responses,
+                                            int index) {
+  if (!litert_lm_responses_has_token_length_at(responses, index)) {
+    return 0;
+  }
+  return (*responses->responses.GetTokenLengths())[index];
+}
+
+bool litert_lm_responses_has_token_scores_at(const LiteRtLmResponses* responses,
+                                             int index) {
+  if (!responses || !responses->responses.GetTokenScores().has_value() ||
+      index < 0 || index >= responses->responses.GetTokenScores()->size()) {
+    return false;
+  }
+  return true;
+}
+
+int litert_lm_responses_get_num_token_scores_at(
+    const LiteRtLmResponses* responses, int index) {
+  if (!litert_lm_responses_has_token_scores_at(responses, index)) {
+    return 0;
+  }
+  return (*responses->responses.GetTokenScores())[index].size();
+}
+
+const float* litert_lm_responses_get_token_scores_at(
+    const LiteRtLmResponses* responses, int index) {
+  if (!litert_lm_responses_has_token_scores_at(responses, index)) {
+    return nullptr;
+  }
+  return (*responses->responses.GetTokenScores())[index].data();
 }
 
 LiteRtLmBenchmarkInfo* litert_lm_session_get_benchmark_info(
@@ -489,6 +741,18 @@ double litert_lm_benchmark_info_get_time_to_first_token(
   return benchmark_info->benchmark_info.GetTimeToFirstToken();
 }
 
+double litert_lm_benchmark_info_get_total_init_time_in_second(
+    const LiteRtLmBenchmarkInfo* benchmark_info) {
+  if (!benchmark_info) {
+    return 0.0;
+  }
+  double total_init_time_ms = 0.0;
+  for (const auto& phase : benchmark_info->benchmark_info.GetInitPhases()) {
+    total_init_time_ms += absl::ToDoubleMilliseconds(phase.second);
+  }
+  return total_init_time_ms / 1000.0;
+}
+
 int litert_lm_benchmark_info_get_num_prefill_turns(
     const LiteRtLmBenchmarkInfo* benchmark_info) {
   if (!benchmark_info) {
@@ -503,6 +767,30 @@ int litert_lm_benchmark_info_get_num_decode_turns(
     return 0;
   }
   return benchmark_info->benchmark_info.GetTotalDecodeTurns();
+}
+
+int litert_lm_benchmark_info_get_prefill_token_count_at(
+    const LiteRtLmBenchmarkInfo* benchmark_info, int index) {
+  if (!benchmark_info) {
+    return 0;
+  }
+  auto turn = benchmark_info->benchmark_info.GetPrefillTurn(index);
+  if (!turn.ok()) {
+    return 0;
+  }
+  return static_cast<int>(turn->num_tokens);
+}
+
+int litert_lm_benchmark_info_get_decode_token_count_at(
+    const LiteRtLmBenchmarkInfo* benchmark_info, int index) {
+  if (!benchmark_info) {
+    return 0;
+  }
+  auto turn = benchmark_info->benchmark_info.GetDecodeTurn(index);
+  if (!turn.ok()) {
+    return 0;
+  }
+  return static_cast<int>(turn->num_tokens);
 }
 
 double litert_lm_benchmark_info_get_prefill_tokens_per_sec_at(
@@ -522,15 +810,84 @@ double litert_lm_benchmark_info_get_decode_tokens_per_sec_at(
 }
 
 LiteRtLmConversation* litert_lm_conversation_create(
-    LiteRtLmEngine* engine, LiteRtLmConversationConfig* conversation_config) {
+    LiteRtLmEngine* engine, LiteRtLmConversationConfig* c_config) {
   if (!engine || !engine->engine) {
     return nullptr;
   }
 
   absl::StatusOr<std::unique_ptr<Conversation>> conversation;
-  if (conversation_config && conversation_config->config) {
-    conversation = Conversation::Create(*engine->engine,
-                                        *conversation_config->config);
+  if (c_config) {
+    litert::lm::JsonPreface json_preface;
+    if (!c_config->system_message_json.empty()) {
+      nlohmann::ordered_json system_message;
+      system_message["role"] = "system";
+      auto content = nlohmann::ordered_json::parse(
+          c_config->system_message_json, nullptr, false);
+      if (content.is_discarded()) {
+        system_message["content"] = c_config->system_message_json;
+      } else {
+        system_message["content"] = content;
+      }
+      json_preface.messages = nlohmann::ordered_json::array({system_message});
+    }
+
+    if (!c_config->messages_json.empty()) {
+      auto messages = nlohmann::ordered_json::parse(c_config->messages_json,
+                                                    nullptr, false);
+      if (messages.is_discarded()) {
+        ABSL_LOG(ERROR) << "Failed to parse messages JSON.";
+      } else if (!messages.is_array()) {
+        ABSL_LOG(ERROR) << "Messages JSON is not an array.";
+      } else {
+        if (json_preface.messages.is_array()) {
+          json_preface.messages.insert(json_preface.messages.end(),
+                                       messages.begin(), messages.end());
+        } else {
+          json_preface.messages = std::move(messages);
+        }
+      }
+    }
+
+    if (!c_config->tools_json.empty()) {
+      auto tool_json_parsed =
+          nlohmann::ordered_json::parse(c_config->tools_json, nullptr, false);
+      if (!tool_json_parsed.is_discarded() && tool_json_parsed.is_array()) {
+        json_preface.tools = tool_json_parsed;
+      } else {
+        ABSL_LOG(ERROR) << "Failed to parse tools JSON or not an array: "
+                        << c_config->tools_json;
+      }
+    }
+
+    if (!c_config->extra_context_json.empty()) {
+      auto extra_context_parsed = nlohmann::ordered_json::parse(
+          c_config->extra_context_json, nullptr, false);
+      if (!extra_context_parsed.is_discarded() &&
+          extra_context_parsed.is_object()) {
+        json_preface.extra_context = std::move(extra_context_parsed);
+      } else {
+        ABSL_LOG(ERROR)
+            << "Failed to parse extra context JSON or not an object: "
+            << c_config->extra_context_json;
+      }
+    }
+
+    auto builder = litert::lm::ConversationConfig::Builder();
+    if (c_config->session_config) {
+      builder.SetSessionConfig(*c_config->session_config);
+    }
+    builder.SetPreface(json_preface);
+    builder.SetEnableConstrainedDecoding(c_config->enable_constrained_decoding);
+    builder.SetFilterChannelContentFromKvCache(
+        c_config->filter_channel_content_from_kv_cache);
+    auto config = builder.Build(*engine->engine);
+
+    if (!config.ok()) {
+      ABSL_LOG(ERROR) << "Failed to create conversation config: "
+                      << config.status();
+      return nullptr;
+    }
+    conversation = Conversation::Create(*engine->engine, *config);
   } else {
     auto default_conversation_config =
         ConversationConfig::CreateDefault(*engine->engine);
@@ -558,7 +915,8 @@ void litert_lm_conversation_delete(LiteRtLmConversation* conversation) {
 }
 
 LiteRtLmJsonResponse* litert_lm_conversation_send_message(
-    LiteRtLmConversation* conversation, const char* message_json) {
+    LiteRtLmConversation* conversation, const char* message_json,
+    const char* extra_context) {
   if (!conversation || !conversation->conversation) {
     return nullptr;
   }
@@ -569,18 +927,17 @@ LiteRtLmJsonResponse* litert_lm_conversation_send_message(
     ABSL_LOG(ERROR) << "Failed to parse message JSON.";
     return nullptr;
   }
-  auto response = conversation->conversation->SendMessage(json_message);
+
+  litert::lm::OptionalArgs optional_args = CreateOptionalArgs(extra_context);
+
+  auto response = conversation->conversation->SendMessage(
+      json_message, std::move(optional_args));
   if (!response.ok()) {
     ABSL_LOG(ERROR) << "Failed to send message: " << response.status();
     return nullptr;
   }
-  auto* json_response = std::get_if<JsonMessage>(&*response);
-  if (!json_response) {
-    ABSL_LOG(ERROR) << "Response is not a JSON message.";
-    return nullptr;
-  }
   auto* c_response = new LiteRtLmJsonResponse;
-  c_response->json_string = json_response->dump();
+  c_response->json_string = response->dump();
   return c_response;
 }
 
@@ -598,7 +955,8 @@ const char* litert_lm_json_response_get_string(
 
 int litert_lm_conversation_send_message_stream(
     LiteRtLmConversation* conversation, const char* message_json,
-    LiteRtLmStreamCallback callback, void* callback_data) {
+    const char* extra_context, LiteRtLmStreamCallback callback,
+    void* callback_data) {
   if (!conversation || !conversation->conversation) {
     return -1;
   }
@@ -610,14 +968,40 @@ int litert_lm_conversation_send_message_stream(
     return -1;
   }
 
+  litert::lm::OptionalArgs optional_args = CreateOptionalArgs(extra_context);
+
   absl::Status status = conversation->conversation->SendMessageAsync(
-      json_message, CreateConversationCallback(callback, callback_data));
+      json_message, CreateConversationCallback(callback, callback_data),
+      std::move(optional_args));
 
   if (!status.ok()) {
     ABSL_LOG(ERROR) << "Failed to start message stream: " << status;
     return static_cast<int>(status.code());
   }
   return 0;
+}
+
+const char* litert_lm_conversation_render_message_to_string(
+    LiteRtLmConversation* conversation, const char* message_json) {
+  if (!conversation || !conversation->conversation || !message_json) {
+    return nullptr;
+  }
+  nlohmann::json json_message =
+      nlohmann::json::parse(message_json, /*cb=*/nullptr,
+                            /*allow_exceptions=*/false);
+  if (json_message.is_discarded()) {
+    ABSL_LOG(ERROR) << "Failed to parse message JSON.";
+    return nullptr;
+  }
+
+  auto rendered = conversation->conversation->RenderMessageIntoString(
+      json_message, litert::lm::OptionalArgs());
+  if (!rendered.ok()) {
+    ABSL_LOG(ERROR) << "Failed to render message: " << rendered.status();
+    return nullptr;
+  }
+  conversation->last_rendered_message = std::move(*rendered);
+  return conversation->last_rendered_message.c_str();
 }
 
 void litert_lm_conversation_cancel_process(LiteRtLmConversation* conversation) {
@@ -639,6 +1023,149 @@ LiteRtLmBenchmarkInfo* litert_lm_conversation_get_benchmark_info(
     return nullptr;
   }
   return new LiteRtLmBenchmarkInfo{std::move(*benchmark_info)};
+}
+
+LiteRtLmTokenizeResult* litert_lm_engine_tokenize(LiteRtLmEngine* engine,
+                                                  const char* text) {
+  if (!engine || !engine->engine || !text) {
+    return nullptr;
+  }
+  const auto& tokenizer = engine->engine->GetTokenizer();
+  auto token_ids =
+      const_cast<litert::lm::Tokenizer&>(tokenizer).TextToTokenIds(text);
+  if (!token_ids.ok()) {
+    ABSL_LOG(ERROR) << "Failed to tokenize: " << token_ids.status();
+    return nullptr;
+  }
+  return new LiteRtLmTokenizeResult{std::move(*token_ids)};
+}
+
+void litert_lm_tokenize_result_delete(LiteRtLmTokenizeResult* result) {
+  delete result;
+}
+
+const int* litert_lm_tokenize_result_get_tokens(
+    const LiteRtLmTokenizeResult* result) {
+  if (!result) {
+    return nullptr;
+  }
+  return result->tokens.data();
+}
+
+size_t litert_lm_tokenize_result_get_num_tokens(
+    const LiteRtLmTokenizeResult* result) {
+  if (!result) {
+    return 0;
+  }
+  return result->tokens.size();
+}
+
+LiteRtLmDetokenizeResult* litert_lm_engine_detokenize(LiteRtLmEngine* engine,
+                                                      const int* tokens,
+                                                      size_t num_tokens) {
+  if (!engine || !engine->engine || !tokens) {
+    return nullptr;
+  }
+  const auto& tokenizer = engine->engine->GetTokenizer();
+  std::vector<int> token_ids(tokens, tokens + num_tokens);
+  auto text =
+      const_cast<litert::lm::Tokenizer&>(tokenizer).TokenIdsToText(token_ids);
+  if (!text.ok()) {
+    ABSL_LOG(ERROR) << "Failed to detokenize: " << text.status();
+    return nullptr;
+  }
+  return new LiteRtLmDetokenizeResult{std::move(*text)};
+}
+
+void litert_lm_detokenize_result_delete(LiteRtLmDetokenizeResult* result) {
+  delete result;
+}
+
+const char* litert_lm_detokenize_result_get_string(
+    const LiteRtLmDetokenizeResult* result) {
+  if (!result) {
+    return nullptr;
+  }
+  return result->text.c_str();
+}
+
+void litert_lm_token_union_delete(LiteRtLmTokenUnion* token_union) {
+  delete token_union;
+}
+
+LiteRtLmTokenUnionType litert_lm_token_union_get_type(
+    const LiteRtLmTokenUnion* token_union) {
+  if (token_union && token_union->token_union.has_token_str()) {
+    return kLiteRtLmTokenUnionTypeString;
+  }
+  return kLiteRtLmTokenUnionTypeIds;
+}
+
+const char* litert_lm_token_union_get_string(
+    const LiteRtLmTokenUnion* token_union) {
+  if (token_union && token_union->token_union.has_token_str()) {
+    return token_union->token_union.token_str().c_str();
+  }
+  return nullptr;
+}
+
+int litert_lm_token_union_get_ids(const LiteRtLmTokenUnion* token_union,
+                                  const int** out_tokens,
+                                  size_t* out_num_tokens) {
+  if (!token_union || !token_union->token_union.has_token_ids() ||
+      !out_tokens || !out_num_tokens) {
+    return -1;
+  }
+  *out_tokens = token_union->token_union.token_ids().ids().data();
+  *out_num_tokens = token_union->token_union.token_ids().ids_size();
+  return 0;
+}
+
+void litert_lm_token_unions_delete(LiteRtLmTokenUnions* tokens) {
+  delete tokens;
+}
+
+size_t litert_lm_token_unions_get_num_tokens(
+    const LiteRtLmTokenUnions* tokens) {
+  if (!tokens) {
+    return 0;
+  }
+  return tokens->tokens.size();
+}
+
+LiteRtLmTokenUnion* litert_lm_token_unions_get_token_at(
+    const LiteRtLmTokenUnions* tokens, size_t index) {
+  if (!tokens || index >= tokens->tokens.size()) {
+    return nullptr;
+  }
+  auto* result = new LiteRtLmTokenUnion();
+  result->token_union = tokens->tokens[index];
+  return result;
+}
+
+LiteRtLmTokenUnion* litert_lm_engine_get_start_token(LiteRtLmEngine* engine) {
+  if (!engine || !engine->engine) {
+    return nullptr;
+  }
+  const auto& metadata = engine->engine->GetEngineSettings().GetLlmMetadata();
+  if (!metadata.has_value() || !metadata->has_start_token()) {
+    return nullptr;
+  }
+  return new LiteRtLmTokenUnion{metadata->start_token()};
+}
+
+LiteRtLmTokenUnions* litert_lm_engine_get_stop_tokens(LiteRtLmEngine* engine) {
+  if (!engine || !engine->engine) {
+    return nullptr;
+  }
+  const auto& metadata = engine->engine->GetEngineSettings().GetLlmMetadata();
+  if (!metadata.has_value() || metadata->stop_tokens_size() == 0) {
+    return nullptr;
+  }
+  auto* c_tokens = new LiteRtLmTokenUnions;
+  c_tokens->tokens.assign(metadata->stop_tokens().begin(),
+                          metadata->stop_tokens().end());
+  return c_tokens;
 }
 
 }  // extern "C"

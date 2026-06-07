@@ -29,7 +29,8 @@ public:
   /// @param out_embedding Output embedding vector (cleared and resized by implementation).
   ///
   /// Throws std::runtime_error on encoding failure (e.g., unsupported sample rate).
-  /// Expected format is 16kHz mono float32 PCM for ImageBind-based encoders.
+  /// Expected format is encoder-specific; audio-capable encoders generally use
+  /// mono float32 PCM.
   virtual void EncodeAudio (const float *pcm, std::size_t num_samples,
                             std::vector<float> &out_embedding)
       = 0;

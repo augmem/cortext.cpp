@@ -1,0 +1,10 @@
+[package]
+name = "antlr_python_tool_call_parser"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+antlr4rust = "0.5"
+
+[lib]
+path = "../../../runtime/components/tool_use/antlr/generated/mod.rs"

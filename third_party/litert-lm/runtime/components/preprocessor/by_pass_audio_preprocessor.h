@@ -15,6 +15,7 @@
 #ifndef THIRD_PARTY_ODML_LITERT_LM_RUNTIME_COMPONENTS_PREPROCESSOR_BY_PASS_AUDIO_PREPROCESSOR_H_
 #define THIRD_PARTY_ODML_LITERT_LM_RUNTIME_COMPONENTS_PREPROCESSOR_BY_PASS_AUDIO_PREPROCESSOR_H_
 
+#include <memory>
 #include <utility>
 
 #include "absl/status/status.h"  // from @com_google_absl
@@ -30,6 +31,11 @@ namespace litert::lm {
 // the input audio directly.
 class ByPassAudioPreprocessor : public AudioPreprocessor {
  public:
+  static absl::StatusOr<std::unique_ptr<ByPassAudioPreprocessor>> Create(
+      const AudioPreprocessorConfig& config) {
+    return std::make_unique<ByPassAudioPreprocessor>();
+  }
+
   absl::StatusOr<InputAudio> Preprocess(
       const InputAudio& input_audio) override {
     if (input_audio.IsTensorBuffer()) {

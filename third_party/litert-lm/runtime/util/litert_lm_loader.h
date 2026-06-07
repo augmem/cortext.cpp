@@ -26,10 +26,10 @@
 #include <utility>
 #include <variant>
 
-#include "absl/log/absl_check.h"  // from @com_google_absl
 #include "absl/log/absl_log.h"  // from @com_google_absl
 #include "absl/status/status.h"  // from @com_google_absl
 #include "absl/status/statusor.h"  // from @com_google_absl
+#include "absl/synchronization/mutex.h"  // from @com_google_absl
 #include "litert/cc/litert_buffer_ref.h"  // from @litert
 #include "runtime/components/model_resources.h"
 #include "runtime/util/memory_mapped_file.h"
@@ -38,6 +38,8 @@
 #include "schema/core/litertlm_read.h"
 
 namespace litert::lm {
+
+inline constexpr uint64_t kLitertLmHeaderMaxSize = 16 * 1024;
 
 // Each buffer is keyed by the data type as the major key and the model type
 // as the optional secondary key when the data type is TFLiteModel or
@@ -55,10 +57,11 @@ struct BufferKey {
   // Constructor for TFLiteModel or TFLiteWeights case
   explicit BufferKey(schema::AnySectionDataType type, ModelType model_type)
       : data_type(type), model_type(model_type) {
-    ABSL_CHECK(
-        (type == schema::AnySectionDataType_TFLiteModel ||
-         type == schema::AnySectionDataType_TFLiteWeights) &&
-        "ModelType should only be provided for TFLiteModel or TFLiteWeights");
+    if (type != schema::AnySectionDataType_TFLiteModel &&
+        type != schema::AnySectionDataType_TFLiteWeights) {
+      ABSL_LOG(ERROR) << "ModelType should only be provided for TFLiteModel or "
+                         "TFLiteWeights";
+    }
   }
 
   // Equality operator (REQUIRED for std::unordered_map, good for std::map)
@@ -66,6 +69,17 @@ struct BufferKey {
     return data_type == other.data_type && model_type == other.model_type;
   }
 };
+
+// The hint for the TfLite models, that is used to validate the model settings
+// and choose the appropriate backend and activation type.
+struct TfLiteSectionHint {
+  std::optional<std::string> backend_constraint = std::nullopt;
+  std::optional<std::string> prefer_activation_type = std::nullopt;
+};
+
+// Extracts the BufferKey and backend constraint from the section metadata.
+absl::StatusOr<std::pair<BufferKey, TfLiteSectionHint>>
+ExtractBufferKeyAndTfLiteSectionHint(const schema::SectionObject* section);
 
 // Hash function for BufferKey
 struct BufferKeyHash {
@@ -87,14 +101,12 @@ class LitertLmLoader {
  public:
   // Creates a LitertLmLoader from the model file. The loader will read the
   // model header from and map the sections to the section buffers.
-  explicit LitertLmLoader(ScopedFile model_file)
-      : model_source_(std::move(model_file)) {
-    ABSL_CHECK_OK(Initialize());
-  }
+  static absl::StatusOr<std::unique_ptr<LitertLmLoader>> Create(
+      ScopedFile model_file);
 
   // Creates a LitertLmLoader from an already memory-mapped model file.
   // This is useful when the file is managed externally.
-  explicit LitertLmLoader(
+  static absl::StatusOr<std::unique_ptr<LitertLmLoader>> Create(
       std::shared_ptr<MemoryMappedFile> memory_mapped_model_file);
 
   // Returns the tokenizer section buffer for the SentencePiece tokenizer.
@@ -132,16 +144,39 @@ class LitertLmLoader {
     return litert::BufferRef<uint8_t>();
   };
 
-  // Returns the TFLite model section buffer.
+  // Returns the TFLite model backend constraint.
+  // If not found, returns std::nullopt.
   std::optional<std::string> GetTFLiteModelBackendConstraint(
       ModelType model_type) {
-    if (section_backend_constraint_.contains(
+    if (section_hints_map_.contains(
             BufferKey(schema::AnySectionDataType_TFLiteModel, model_type))) {
-      return section_backend_constraint_[BufferKey(
-          schema::AnySectionDataType_TFLiteModel, model_type)];
+      return section_hints_map_[BufferKey(
+                                    schema::AnySectionDataType_TFLiteModel,
+                                    model_type)]
+          .backend_constraint;
     }
     ABSL_LOG(WARNING) << "TFLite model type: " << ModelTypeToString(model_type)
                       << " not found for backend constraints. Skipping.";
+    return std::nullopt;
+  };
+
+  // Returns the TFLite model section buffer's prefer activation type.
+  // If not found, returns std::nullopt.
+  std::optional<std::string> GetTFLiteModelPreferActivationType(
+      ModelType model_type) {
+    if (section_hints_map_.contains(
+            BufferKey(schema::AnySectionDataType_TFLiteModel, model_type))) {
+      return section_hints_map_[BufferKey(
+                                    schema::AnySectionDataType_TFLiteModel,
+                                    model_type)]
+          .prefer_activation_type;
+    }
+    ABSL_LOG(WARNING)
+        << "TFLite model type: " << ModelTypeToString(model_type)
+        << " not found for prefer activation type. Use system's "
+           "default backend activation type. System's default activation "
+           "type for Text decoder is fp16. Vision encoder and audio encoder "
+           "default is fp32.";
     return std::nullopt;
   };
 
@@ -158,15 +193,22 @@ class LitertLmLoader {
   absl::StatusOr<std::reference_wrapper<ScopedFile>> GetScopedFile();
 
  private:
+  explicit LitertLmLoader(ScopedFile model_file)
+      : model_source_(std::move(model_file)) {}
+
+  explicit LitertLmLoader(
+      std::shared_ptr<MemoryMappedFile> memory_mapped_model_file)
+      : model_source_(std::move(memory_mapped_model_file)) {}
   // Initializes the LitertLmLoader. Includes reading the model header and
   // recording the section locations for on-demand loading later.
   absl::Status Initialize();
   absl::Status MapSection(BufferKey buffer_key, uint64_t begin_offset,
-                          uint64_t end_offset);
+                          uint64_t end_offset)
+      ABSL_EXCLUSIVE_LOCKS_REQUIRED(section_buffers_mutex_);
   // Returns the section buffer for the given buffer key. Will map the section
   // if it has not been mapped yet. If not found, returns std::nullopt.
   std::optional<litert::BufferRef<uint8_t>> GetSectionBuffer(
-      BufferKey buffer_key);
+      BufferKey buffer_key) ABSL_LOCKS_EXCLUDED(section_buffers_mutex_);
 
   // The model file to be loaded, can be either a ScopedFile or a
   // memory-mapped file.
@@ -183,22 +225,23 @@ class LitertLmLoader {
       BufferKey, std::pair</*begin_offset*/ uint64_t, /*end_offset=*/uint64_t>,
       BufferKeyHash>
       section_locations_;
+
+  absl::Mutex section_buffers_mutex_;
   // The section memory mapped files - stored here to ensure they are not
   // unmapped while in use. On Windows, these MemoryMappedFiles may contain more
   // than the current section's data because Windows has a data alignment of
   // 64KB but the LiteRT LM file has a 16KB alignment.
   ::std::unordered_map<BufferKey, std::unique_ptr<MemoryMappedFile>,
                        BufferKeyHash>
-      section_memory_mapped_files_;
+      section_memory_mapped_files_ ABSL_GUARDED_BY(section_buffers_mutex_);
   // The section buffers. Unlike the section_memory_mapped_files_, these
   // buffers point to only the data of the each section, even on Windows.
   ::std::unordered_map<BufferKey, litert::BufferRef<uint8_t>, BufferKeyHash>
-      section_buffers_;
+      section_buffers_ ABSL_GUARDED_BY(section_buffers_mutex_);
 
-  // Map of all the sections' metadata, for now, focusing on the backend
-  // constraints
-  ::std::unordered_map<BufferKey, std::string, BufferKeyHash>
-      section_backend_constraint_;
+  // Map of all the sections' section info.
+  ::std::unordered_map<BufferKey, TfLiteSectionHint, BufferKeyHash>
+      section_hints_map_;
 };
 
 }  // namespace litert::lm

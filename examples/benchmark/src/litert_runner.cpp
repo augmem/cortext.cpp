@@ -7,6 +7,7 @@
 
 #if defined(BENCHMARK_ENABLE_LITERT)
 #include "runtime/engine/engine.h"
+#include "runtime/engine/engine_factory.h"
 #include "runtime/engine/engine_settings.h"
 #include "runtime/engine/io_types.h"
 #include "runtime/executor/llm_executor_settings.h"
@@ -21,6 +22,7 @@ namespace benchmark
 using LiteRtBackend = litert::lm::Backend;
 using litert::lm::CpuConfig;
 using litert::lm::Engine;
+using litert::lm::EngineFactory;
 using litert::lm::EngineSettings;
 using litert::lm::InputAudio;
 using litert::lm::InputText;
@@ -72,7 +74,7 @@ struct LiteRTRunner::Impl
         settings_result->GetMutableBenchmarkParams ();
 
         // Create engine
-        auto engine_result = Engine::CreateEngine (*settings_result);
+        auto engine_result = EngineFactory::CreateDefault (*settings_result);
         if (!engine_result.ok ())
           {
             std::cerr << "LiteRTRunner: Failed to create engine: "

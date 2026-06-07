@@ -30,6 +30,7 @@
 #include "absl/status/statusor.h"  // from @com_google_absl
 #include "absl/strings/str_join.h"  // from @com_google_absl
 #include "absl/strings/string_view.h"  // from @com_google_absl
+#include "litert/cc/litert_tensor_buffer.h"  // from @litert
 #include "litert/test/matchers.h"  // from @litert
 #include "runtime/components/sentencepiece_tokenizer.h"
 #include "runtime/components/tokenizer.h"
@@ -37,9 +38,8 @@
 #include "runtime/engine/io_types.h"
 #include "runtime/proto/sampler_params.pb.h"
 #include "runtime/util/convert_tensor_buffer.h"
-#include "runtime/util/status_macros.h"  // NOLINT
-#include "runtime/util/tensor_buffer_util.h"
-#include "runtime/util/test_utils.h"  // NOLINT
+#include "runtime/util/status_macros.h"
+#include "runtime/util/test_utils.h"  // IWYU pragma: keep
 
 namespace litert::lm {
 namespace {
@@ -113,6 +113,10 @@ class ExtendedTokenizer : public Tokenizer {
     return tokenizer_->GetTokenizerType();
   }
 
+  std::vector<std::string> GetTokens() const override {
+    return tokenizer_->GetTokens();
+  }
+
  private:
   explicit ExtendedTokenizer(std::unique_ptr<SentencePieceTokenizer> tokenizer)
       : tokenizer_(std::move(tokenizer)) {};
@@ -165,27 +169,40 @@ TEST_F(SessionUtilsTest, StringToProcessedInputText) {
 TEST_F(SessionUtilsTest, ApplyPromptTemplatesFails) {
   SessionConfig session_config = SessionConfig::CreateDefault();
   session_config.SetStartTokenId(2);  // Corresponds to "</s>"
-  bool is_first_turn = true;
 
-  // Test Case 1: Input text starts with the BOS token string.
   std::vector<InputData> inputs_with_bos;
   inputs_with_bos.emplace_back(InputText("</s>Hello World!"));
   EXPECT_THAT(
-      ApplyPromptTemplates(inputs_with_bos, session_config, *tokenizer_,
-                           is_first_turn),
+      ApplyPromptTemplates(inputs_with_bos, ContentType::kFirst, session_config,
+                           *tokenizer_, /*is_first_turn=*/true),
       testing::status::StatusIs(absl::StatusCode::kInvalidArgument,
                                 "Input contains bos control token. Control "
                                 "token should not be included in the input."));
+}
 
-  // Test Case 2: Empty input. ApplyPromptTemplates returns an empty vector,
-  // which is not an error at this stage. The error for empty content is
-  // handled in ProcessAndCombineContents.
-  std::vector<InputData> empty_inputs;
-  is_first_turn = true;
-  ASSERT_OK_AND_ASSIGN(auto templated_empty,
-                       ApplyPromptTemplates(empty_inputs, session_config,
-                                            *tokenizer_, is_first_turn));
-  EXPECT_TRUE(templated_empty.empty());
+TEST_F(SessionUtilsTest, ApplyPromptTemplatesCanHandleEmptyContent) {
+  SessionConfig session_config = SessionConfig::CreateDefault();
+  session_config.SetStartTokenId(2);  // Corresponds to "</s>"
+  {
+    std::vector<InputData> empty_inputs;
+    ASSERT_OK_AND_ASSIGN(
+        auto templated_single,
+        ApplyPromptTemplates(empty_inputs, ContentType::kFirst, session_config,
+                             *tokenizer_, /*is_first_turn=*/true));
+    ASSERT_EQ(templated_single.size(), 1);
+    EXPECT_THAT(std::get<InputText>(templated_single[0]).GetRawTextString(),
+                testing::status::IsOkAndHolds("</s>"));
+  }
+
+  for (const auto& content_type :
+       {ContentType::kFirst, ContentType::kLast, ContentType::kMiddle}) {
+    std::vector<InputData> empty_inputs;
+    ASSERT_OK_AND_ASSIGN(
+        auto templated_empty,
+        ApplyPromptTemplates(empty_inputs, content_type, session_config,
+                             *tokenizer_, /*is_first_turn=*/false));
+    EXPECT_TRUE(templated_empty.empty());
+  }
 }
 
 TEST_F(SessionUtilsTest, ApplyPromptTemplatesWithSingleTextChunk) {
@@ -197,18 +214,42 @@ TEST_F(SessionUtilsTest, ApplyPromptTemplatesWithSingleTextChunk) {
       "<end>\n");
   session_config.GetMutablePromptTemplates().mutable_model()->set_prefix(
       "<test>Model\n");
-  bool is_first_turn = true;
 
-  // Single text chunk. (is_first_chunk=true, is_last_chunk=true)
-  std::vector<InputData> single_chunk;
-  single_chunk.emplace_back(InputText("Hello World!"));
-  ASSERT_OK_AND_ASSIGN(auto templated_single,
-                       ApplyPromptTemplates(single_chunk, session_config,
-                                            *tokenizer_, is_first_turn));
-  ASSERT_EQ(templated_single.size(), 1);
-  EXPECT_THAT(std::get<InputText>(templated_single[0]).GetRawTextString(),
-              testing::status::IsOkAndHolds(
-                  "</s><test>User\nHello World!<end>\n<test>Model\n"));
+  {
+    std::vector<InputData> single_chunk;
+    single_chunk.emplace_back(InputText("Hello "));
+    ASSERT_OK_AND_ASSIGN(
+        auto templated_single,
+        ApplyPromptTemplates(single_chunk, ContentType::kFirst, session_config,
+                             *tokenizer_, /*is_first_turn=*/true));
+    ASSERT_EQ(templated_single.size(), 2);
+    EXPECT_THAT(std::get<InputText>(templated_single[0]).GetRawTextString(),
+                testing::status::IsOkAndHolds("</s>"));
+    EXPECT_THAT(std::get<InputText>(templated_single[1]).GetRawTextString(),
+                testing::status::IsOkAndHolds("<test>User\nHello "));
+  }
+  {
+    std::vector<InputData> single_chunk;
+    single_chunk.emplace_back(InputText("world!"));
+    ASSERT_OK_AND_ASSIGN(
+        auto templated_single,
+        ApplyPromptTemplates(single_chunk, ContentType::kMiddle, session_config,
+                             *tokenizer_, /*is_first_turn=*/false));
+    ASSERT_EQ(templated_single.size(), 1);
+    EXPECT_THAT(std::get<InputText>(templated_single[0]).GetRawTextString(),
+                testing::status::IsOkAndHolds("world!"));
+  }
+  {
+    std::vector<InputData> single_chunk;
+    single_chunk.emplace_back(InputText(""));
+    ASSERT_OK_AND_ASSIGN(
+        auto templated_single,
+        ApplyPromptTemplates(single_chunk, ContentType::kLast, session_config,
+                             *tokenizer_, /*is_first_turn=*/false));
+    ASSERT_EQ(templated_single.size(), 1);
+    EXPECT_THAT(std::get<InputText>(templated_single[0]).GetRawTextString(),
+                testing::status::IsOkAndHolds("<end>\n<test>Model\n"));
+  }
 }
 
 TEST_F(SessionUtilsTest, ApplyPromptTemplatesDisabled) {
@@ -221,14 +262,14 @@ TEST_F(SessionUtilsTest, ApplyPromptTemplatesDisabled) {
   session_config.GetMutablePromptTemplates().mutable_model()->set_prefix(
       "<test>Model\n");
   session_config.SetApplyPromptTemplateInSession(false);
-  bool is_first_turn = true;
 
   // Single text chunk. (is_first_chunk=true, is_last_chunk=true)
   std::vector<InputData> single_chunk;
   single_chunk.emplace_back(InputText("Hello World!"));
-  ASSERT_OK_AND_ASSIGN(auto templated_single,
-                       ApplyPromptTemplates(single_chunk, session_config,
-                                            *tokenizer_, is_first_turn));
+  ASSERT_OK_AND_ASSIGN(
+      auto templated_single,
+      ApplyPromptTemplates(single_chunk, ContentType::kNA, session_config,
+                           *tokenizer_, /*is_first_turn=*/true));
   ASSERT_EQ(templated_single.size(), 2);
   EXPECT_THAT(std::get<InputText>(templated_single[0]).GetRawTextString(),
               testing::status::IsOkAndHolds("</s>"));
@@ -245,21 +286,21 @@ TEST_F(SessionUtilsTest, ApplyPromptTemplatesWithTwoTextChunks) {
       "<end>\n");
   session_config.GetMutablePromptTemplates().mutable_model()->set_prefix(
       "<test>Model\n");
-  bool is_first_turn = true;
 
-  // Two text chunks. (First chunk: is_first=true, is_last=false;
-  // Second chunk: is_first=false, is_last=true)
   std::vector<InputData> two_chunks;
   two_chunks.emplace_back(InputText("First"));
   two_chunks.emplace_back(InputText("Second"));
-  ASSERT_OK_AND_ASSIGN(auto templated_two,
-                       ApplyPromptTemplates(two_chunks, session_config,
-                                            *tokenizer_, is_first_turn));
-  ASSERT_EQ(templated_two.size(), 2);
+  ASSERT_OK_AND_ASSIGN(
+      auto templated_two,
+      ApplyPromptTemplates(two_chunks, ContentType::kFirst, session_config,
+                           *tokenizer_, /*is_first_turn=*/true));
+  ASSERT_EQ(templated_two.size(), 3);
   EXPECT_THAT(std::get<InputText>(templated_two[0]).GetRawTextString(),
-              testing::status::IsOkAndHolds("</s><test>User\nFirst"));
+              testing::status::IsOkAndHolds("</s>"));
   EXPECT_THAT(std::get<InputText>(templated_two[1]).GetRawTextString(),
-              testing::status::IsOkAndHolds("Second<end>\n<test>Model\n"));
+              testing::status::IsOkAndHolds("<test>User\nFirst"));
+  EXPECT_THAT(std::get<InputText>(templated_two[2]).GetRawTextString(),
+              testing::status::IsOkAndHolds("Second"));
 }
 
 TEST_F(SessionUtilsTest, ApplyPromptTemplatesDisabledWithTwoTextChunks) {
@@ -272,16 +313,16 @@ TEST_F(SessionUtilsTest, ApplyPromptTemplatesDisabledWithTwoTextChunks) {
   session_config.GetMutablePromptTemplates().mutable_model()->set_prefix(
       "<test>Model\n");
   session_config.SetApplyPromptTemplateInSession(false);
-  bool is_first_turn = true;
 
   // Two text chunks. (First chunk: is_first=true, is_last=false;
   // Second chunk: is_first=false, is_last=true)
   std::vector<InputData> two_chunks;
   two_chunks.emplace_back(InputText("First"));
   two_chunks.emplace_back(InputText("Second"));
-  ASSERT_OK_AND_ASSIGN(auto templated_two,
-                       ApplyPromptTemplates(two_chunks, session_config,
-                                            *tokenizer_, is_first_turn));
+  ASSERT_OK_AND_ASSIGN(
+      auto templated_two,
+      ApplyPromptTemplates(two_chunks, ContentType::kNA, session_config,
+                           *tokenizer_, /*is_first_turn=*/true));
   ASSERT_EQ(templated_two.size(), 3);
   EXPECT_THAT(std::get<InputText>(templated_two[0]).GetRawTextString(),
               testing::status::IsOkAndHolds("</s>"));
@@ -300,7 +341,6 @@ TEST_F(SessionUtilsTest, ApplyPromptTemplatesWithThreeTextChunks) {
       "<end>\n");
   session_config.GetMutablePromptTemplates().mutable_model()->set_prefix(
       "<test>Model\n");
-  bool is_first_turn = true;
 
   // Three text chunks. (Middle chunk: is_first=false, is_last=false)
   std::vector<InputData> three_chunks;
@@ -308,15 +348,18 @@ TEST_F(SessionUtilsTest, ApplyPromptTemplatesWithThreeTextChunks) {
   three_chunks.emplace_back(InputText("Middle"));
   three_chunks.emplace_back(InputText("Last"));
   ASSERT_OK_AND_ASSIGN(auto templated_three,
-                       ApplyPromptTemplates(three_chunks, session_config,
-                                            *tokenizer_, is_first_turn));
-  ASSERT_EQ(templated_three.size(), 3);
+                       ApplyPromptTemplates(three_chunks, ContentType::kFirst,
+                                            session_config, *tokenizer_,
+                                            /*is_first_turn=*/true));
+  ASSERT_EQ(templated_three.size(), 4);
   EXPECT_THAT(std::get<InputText>(templated_three[0]).GetRawTextString(),
-              testing::status::IsOkAndHolds("</s><test>User\nFirst"));
+              testing::status::IsOkAndHolds("</s>"));
   EXPECT_THAT(std::get<InputText>(templated_three[1]).GetRawTextString(),
-              testing::status::IsOkAndHolds("Middle"));
+              testing::status::IsOkAndHolds("<test>User\nFirst"));
   EXPECT_THAT(std::get<InputText>(templated_three[2]).GetRawTextString(),
-              testing::status::IsOkAndHolds("Last<end>\n<test>Model\n"));
+              testing::status::IsOkAndHolds("Middle"));
+  EXPECT_THAT(std::get<InputText>(templated_three[3]).GetRawTextString(),
+              testing::status::IsOkAndHolds("Last"));
 }
 
 TEST_F(SessionUtilsTest, ApplyPromptTemplatesWithMixedChunksTextAndImage) {
@@ -328,22 +371,24 @@ TEST_F(SessionUtilsTest, ApplyPromptTemplatesWithMixedChunksTextAndImage) {
       "<end>\n");
   session_config.GetMutablePromptTemplates().mutable_model()->set_prefix(
       "<test>Model\n");
-  bool is_first_turn = true;
 
   // Mixed chunks - text and image. Non-text inputs are passed through.
   std::vector<InputData> mixed_chunks;
   mixed_chunks.emplace_back(InputText("Text1"));
   mixed_chunks.emplace_back(InputImage("123"));
   mixed_chunks.emplace_back(InputText("Text2"));
-  ASSERT_OK_AND_ASSIGN(auto templated_mixed,
-                       ApplyPromptTemplates(mixed_chunks, session_config,
-                                            *tokenizer_, is_first_turn));
-  ASSERT_EQ(templated_mixed.size(), 3);
+  ASSERT_OK_AND_ASSIGN(
+      auto templated_mixed,
+      ApplyPromptTemplates(mixed_chunks, ContentType::kFirst, session_config,
+                           *tokenizer_, /*is_first_turn=*/true));
+  ASSERT_EQ(templated_mixed.size(), 4);
   EXPECT_THAT(std::get<InputText>(templated_mixed[0]).GetRawTextString(),
-              testing::status::IsOkAndHolds("</s><test>User\nText1"));
-  EXPECT_TRUE(std::holds_alternative<InputImage>(templated_mixed[1]));
-  EXPECT_THAT(std::get<InputText>(templated_mixed[2]).GetRawTextString(),
-              testing::status::IsOkAndHolds("Text2<end>\n<test>Model\n"));
+              testing::status::IsOkAndHolds("</s>"));
+  EXPECT_THAT(std::get<InputText>(templated_mixed[1]).GetRawTextString(),
+              testing::status::IsOkAndHolds("<test>User\nText1"));
+  EXPECT_TRUE(std::holds_alternative<InputImage>(templated_mixed[2]));
+  EXPECT_THAT(std::get<InputText>(templated_mixed[3]).GetRawTextString(),
+              testing::status::IsOkAndHolds("Text2"));
 }
 
 TEST_F(SessionUtilsTest, ApplyPromptTemplatesWithSubsequentTurn) {
@@ -355,27 +400,28 @@ TEST_F(SessionUtilsTest, ApplyPromptTemplatesWithSubsequentTurn) {
       "<end>\n");
   session_config.GetMutablePromptTemplates().mutable_model()->set_prefix(
       "<test>Model\n");
-  bool is_first_turn = true;
 
-  // First turn is false (subsequent call).
-  // The first call to ApplyPromptTemplates sets is_first_turn to false.
   std::vector<InputData> single_chunk_again;
   single_chunk_again.emplace_back(InputText("Another turn"));
-  ASSERT_OK_AND_ASSIGN(auto templated_first_turn,
-                       ApplyPromptTemplates(single_chunk_again, session_config,
-                                            *tokenizer_, is_first_turn));
-  ASSERT_EQ(templated_first_turn.size(), 1);
+  ASSERT_OK_AND_ASSIGN(
+      auto templated_first_turn,
+      ApplyPromptTemplates(single_chunk_again, ContentType::kFirst,
+                           session_config, *tokenizer_,
+                           /*is_first_turn=*/true));
+  ASSERT_EQ(templated_first_turn.size(), 2);
   EXPECT_THAT(std::get<InputText>(templated_first_turn[0]).GetRawTextString(),
-              testing::status::IsOkAndHolds(
-                  "</s><test>User\nAnother turn<end>\n<test>Model\n"));
-  ASSERT_FALSE(is_first_turn);
-  ASSERT_OK_AND_ASSIGN(auto templated_again,
-                       ApplyPromptTemplates(single_chunk_again, session_config,
-                                            *tokenizer_, is_first_turn));
+              testing::status::IsOkAndHolds("</s>"));
+  EXPECT_THAT(std::get<InputText>(templated_first_turn[1]).GetRawTextString(),
+              testing::status::IsOkAndHolds("<test>User\nAnother turn"));
+
+  ASSERT_OK_AND_ASSIGN(
+      auto templated_again,
+      ApplyPromptTemplates(single_chunk_again, ContentType::kFirst,
+                           session_config, *tokenizer_,
+                           /*is_first_turn=*/false));
   ASSERT_EQ(templated_again.size(), 1);
   EXPECT_THAT(std::get<InputText>(templated_again[0]).GetRawTextString(),
-              testing::status::IsOkAndHolds(
-                  "\n<test>User\nAnother turn<end>\n<test>Model\n"));
+              testing::status::IsOkAndHolds("<test>User\nAnother turn"));
 }
 
 TEST_F(SessionUtilsTest, ApplyPromptTemplatesWithSingleImageInput) {
@@ -387,7 +433,6 @@ TEST_F(SessionUtilsTest, ApplyPromptTemplatesWithSingleImageInput) {
       "<end>\n");
   session_config.GetMutablePromptTemplates().mutable_model()->set_prefix(
       "<test>Model\n");
-  bool is_first_turn = true;
 
   // Single image input. Templates are applied to the first and
   // last chunks. In this case, the image input is both the first and last
@@ -395,15 +440,16 @@ TEST_F(SessionUtilsTest, ApplyPromptTemplatesWithSingleImageInput) {
   // the image.
   std::vector<InputData> single_image;
   single_image.emplace_back(InputImage("456"));
-  ASSERT_OK_AND_ASSIGN(auto templated_image,
-                       ApplyPromptTemplates(single_image, session_config,
-                                            *tokenizer_, is_first_turn));
+  ASSERT_OK_AND_ASSIGN(
+      auto templated_image,
+      ApplyPromptTemplates(single_image, ContentType::kFirst, session_config,
+                           *tokenizer_, /*is_first_turn=*/true));
   ASSERT_EQ(templated_image.size(), 3);
   EXPECT_THAT(std::get<InputText>(templated_image[0]).GetRawTextString(),
-              testing::status::IsOkAndHolds("</s><test>User\n"));
-  EXPECT_TRUE(std::holds_alternative<InputImage>(templated_image[1]));
-  EXPECT_THAT(std::get<InputText>(templated_image[2]).GetRawTextString(),
-              testing::status::IsOkAndHolds("<end>\n<test>Model\n"));
+              testing::status::IsOkAndHolds("</s>"));
+  EXPECT_THAT(std::get<InputText>(templated_image[1]).GetRawTextString(),
+              testing::status::IsOkAndHolds("<test>User\n"));
+  EXPECT_TRUE(std::holds_alternative<InputImage>(templated_image[2]));
 }
 
 TEST_F(SessionUtilsTest, PreprocessContents) {
@@ -425,6 +471,97 @@ TEST_F(SessionUtilsTest, PreprocessContents) {
                               ReferTensorBufferAsSpan<int>(*text_tensor));
   EXPECT_THAT(std::vector<int>(token_ids_span.begin(), token_ids_span.end()),
               testing::ElementsAre(2, 90, 547, 58, 735, 210, 466, 2294));
+}
+
+TEST_F(SessionUtilsTest, PreprocessContentsMultimodal) {
+  SessionConfig session_config = SessionConfig::CreateDefault();
+  session_config.SetStartTokenId(2);
+  std::vector<InputData> contents;
+  contents.emplace_back(InputText("</s>Hello World!"));
+
+  std::vector<float> dummy_image_data = {0.1f, 0.2f, 0.3f};
+  LITERT_ASSERT_OK_AND_ASSIGN(
+      auto image_tensor,
+      CopyToTensorBuffer<float>(dummy_image_data, {1, 1, 1, 3}));
+  contents.emplace_back(InputImage(std::move(image_tensor)));
+  contents.emplace_back(InputImageEnd());
+
+  absl::flat_hash_map<std::string, litert::TensorBuffer> tensor_map;
+  std::vector<float> map_data = {0.7f, 0.8f};
+  LITERT_ASSERT_OK_AND_ASSIGN(auto map_tensor,
+                              CopyToTensorBuffer<float>(map_data, {1, 2}));
+  tensor_map["key1"] = std::move(map_tensor);
+  contents.emplace_back(InputImage(std::move(tensor_map)));
+  contents.emplace_back(InputImageEnd());
+
+  std::vector<float> dummy_audio_data = {0.4f, 0.5f, 0.6f};
+  LITERT_ASSERT_OK_AND_ASSIGN(
+      auto audio_tensor,
+      CopyToTensorBuffer<float>(dummy_audio_data, {1, 3, 1}));
+  contents.emplace_back(InputAudio(std::move(audio_tensor)));
+  contents.emplace_back(InputAudioEnd());
+
+  std::optional<BenchmarkInfo> benchmark_info;
+  ASSERT_OK_AND_ASSIGN(auto preprocessed_contents,
+                       PreprocessContents(contents, session_config, *tokenizer_,
+                                          benchmark_info));
+  ASSERT_EQ(preprocessed_contents.size(), 7);
+  ASSERT_TRUE(std::holds_alternative<InputText>(preprocessed_contents[0]));
+  const auto& text_data = std::get<InputText>(preprocessed_contents[0]);
+  ASSERT_TRUE(text_data.IsTensorBuffer());
+  ASSERT_OK_AND_ASSIGN(auto text_tensor, text_data.GetPreprocessedTextTensor());
+  ASSERT_NE(text_tensor, nullptr);
+  LITERT_ASSERT_OK_AND_ASSIGN(auto token_ids_span,
+                              ReferTensorBufferAsSpan<int>(*text_tensor));
+  EXPECT_THAT(std::vector<int>(token_ids_span.begin(), token_ids_span.end()),
+              testing::ElementsAre(2, 90, 547, 58, 735, 210, 466, 2294));
+
+  ASSERT_TRUE(std::holds_alternative<InputImage>(preprocessed_contents[1]));
+  const auto& image_data = std::get<InputImage>(preprocessed_contents[1]);
+  ASSERT_TRUE(image_data.IsTensorBuffer());
+  ASSERT_OK_AND_ASSIGN(auto img_tensor_out,
+                       image_data.GetPreprocessedImageTensor());
+  LITERT_ASSERT_OK_AND_ASSIGN(auto img_span,
+                              ReferTensorBufferAsSpan<float>(*img_tensor_out));
+  EXPECT_THAT(std::vector<float>(img_span.begin(), img_span.end()),
+              testing::ElementsAre(0.1f, 0.2f, 0.3f));
+
+  ASSERT_TRUE(std::holds_alternative<InputImageEnd>(preprocessed_contents[2]));
+
+  ASSERT_TRUE(std::holds_alternative<InputImage>(preprocessed_contents[3]));
+  const auto& image_map_data = std::get<InputImage>(preprocessed_contents[3]);
+  ASSERT_TRUE(image_map_data.IsTensorBufferMap());
+  ASSERT_OK_AND_ASSIGN(auto img_map_out,
+                       image_map_data.GetPreprocessedImageTensorMap());
+  ASSERT_TRUE(img_map_out->contains("key1"));
+  LITERT_ASSERT_OK_AND_ASSIGN(
+      auto map_span, ReferTensorBufferAsSpan<float>(img_map_out->at("key1")));
+  EXPECT_THAT(std::vector<float>(map_span.begin(), map_span.end()),
+              testing::ElementsAre(0.7f, 0.8f));
+
+  ASSERT_TRUE(std::holds_alternative<InputImageEnd>(preprocessed_contents[4]));
+
+  ASSERT_TRUE(std::holds_alternative<InputAudio>(preprocessed_contents[5]));
+  const auto& audio_data = std::get<InputAudio>(preprocessed_contents[5]);
+  ASSERT_TRUE(audio_data.IsTensorBuffer());
+  ASSERT_OK_AND_ASSIGN(auto audio_tensor_out,
+                       audio_data.GetPreprocessedAudioTensor());
+  LITERT_ASSERT_OK_AND_ASSIGN(
+      auto audio_span, ReferTensorBufferAsSpan<float>(*audio_tensor_out));
+  EXPECT_THAT(std::vector<float>(audio_span.begin(), audio_span.end()),
+              testing::ElementsAre(0.4f, 0.5f, 0.6f));
+
+  ASSERT_TRUE(std::holds_alternative<InputAudioEnd>(preprocessed_contents[6]));
+}
+
+TEST_F(SessionUtilsTest, PreprocessContentsWithEmptyInputText) {
+  SessionConfig session_config = SessionConfig::CreateDefault();
+  std::vector<InputData> contents;
+  contents.emplace_back(InputText(""));
+  ASSERT_OK_AND_ASSIGN(auto preprocessed_contents,
+                       PreprocessContents(contents, session_config, *tokenizer_,
+                                          /*benchmark_info=*/std::nullopt));
+  EXPECT_TRUE(preprocessed_contents.empty());
 }
 
 }  // namespace

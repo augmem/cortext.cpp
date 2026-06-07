@@ -27,6 +27,17 @@ namespace litert::lm {
 // Configuration for audio preprocessing.
 class AudioPreprocessorConfig {
  public:
+  // The padding type of for FFT bins.
+  enum FftPaddingType {
+    // Right padding. The resulted FFT frame will be right padding with zeros or
+    // truncated to the given FFT frame length.
+    kRight = 0,
+    // Center padding. The results FFT frame will be left and right padding with
+    // zeros with same amount, or truncated with same amount on left and right,
+    // to the given FFT frame length.
+    kCenter = 1
+  };
+
   // Creates Google's Universal Speech Model (USM) audio preprocessing
   // configuration.
   static AudioPreprocessorConfig CreateDefaultUsmConfig() {
@@ -41,7 +52,43 @@ class AudioPreprocessorConfig {
         /* num_mel_bins= */ 128,
         /* mel_low_hz= */ 125.0,
         /* mel_high_hz= */ 7500.0,
-        /* mel_floor= */ 1e-6);
+        /* mel_floor= */ 1e-6,
+        /* normalize_mel= */ true,
+        /* add_floor_to_mel_before_log= */ false,
+        /* semicausal_padding= */ false, /* non_zero_hanning= */ true,
+        /* periodic_hanning= */ true,
+        /* fft_padding_type= */ FftPaddingType::kRight);
+  }
+
+  static AudioPreprocessorConfig Create(
+      int sample_rate_hz, int num_channels, int frame_length, int hop_length,
+      int fft_length, float input_scale, float pre_emphasis_factor,
+      int num_mel_bins, float mel_low_hz, float mel_high_hz, float mel_floor,
+      bool normalize_mel, bool add_floor_to_mel_before_log,
+      bool semicausal_padding, bool non_zero_hanning, bool periodic_hanning,
+      FftPaddingType fft_padding_type) {
+    return AudioPreprocessorConfig(
+        sample_rate_hz, num_channels, frame_length, hop_length, fft_length,
+        input_scale, pre_emphasis_factor, num_mel_bins, mel_low_hz, mel_high_hz,
+        mel_floor, normalize_mel, add_floor_to_mel_before_log,
+        semicausal_padding, non_zero_hanning, periodic_hanning,
+        fft_padding_type);
+  }
+
+  friend std::ostream& operator<<(std::ostream& os,
+                                  const FftPaddingType& padding_type) {
+    switch (padding_type) {
+      case FftPaddingType::kRight:
+        os << "right";
+        break;
+      case FftPaddingType::kCenter:
+        os << "center";
+        break;
+      default:
+        os << "unknown";
+        break;
+    }
+    return os;
   }
 
   // Allows logging of the config.
@@ -60,6 +107,13 @@ class AudioPreprocessorConfig {
     os << "  mel_low_hz: " << config.GetMelLowHz() << "\n";
     os << "  mel_high_hz: " << config.GetMelHighHz() << "\n";
     os << "  mel_floor: " << config.GetMelFloor() << "\n";
+    os << "  normalize_mel: " << config.GetNormalizeMel() << "\n";
+    os << "  add_floor_to_mel_before_log: "
+       << config.GetAddFloorToMelBeforeLog() << "\n";
+    os << "  semicausal_padding: " << config.GetSemicausalPadding() << "\n";
+    os << "  non_zero_hanning: " << config.GetNonZeroHanning() << "\n";
+    os << "  periodic_hanning: " << config.GetPeriodicHanning() << "\n";
+    os << "  fft_padding_type: " << config.GetFftPaddingType() << "\n";
     os << "}";
     return os;
   }
@@ -97,6 +151,22 @@ class AudioPreprocessorConfig {
   float GetMelHighHz() const { return mel_high_hz_; }
   // The floor value of the Mel spectrogram.
   float GetMelFloor() const { return mel_floor_; }
+  // Whether to normalize the Mel spectrogram with precalculated mean and std
+  // dev.
+  bool GetNormalizeMel() const { return normalize_mel_; }
+  // Whether to add the floor value to the Mel spectrogram before taking the
+  // logarithm.
+  bool GetAddFloorToMelBeforeLog() const {
+    return add_floor_to_mel_before_log_;
+  }
+  // Whether to use semicausal padding for the audio frames.
+  bool GetSemicausalPadding() const { return semicausal_padding_; }
+  // Whether to use non-zero Hanning window for FFT.
+  bool GetNonZeroHanning() const { return non_zero_hanning_; }
+  // Whether to use the periodic Hanning window for FFT.
+  bool GetPeriodicHanning() const { return periodic_hanning_; }
+  // The padding type used for FFT.
+  FftPaddingType GetFftPaddingType() const { return fft_padding_type_; }
 
   // Setter APIs.
   void SetSampleRateHz(int sample_rate_hz) { sample_rate_hz_ = sample_rate_hz; }
@@ -117,6 +187,22 @@ class AudioPreprocessorConfig {
   void SetMelLowHz(float mel_low_hz) { mel_low_hz_ = mel_low_hz; }
   void SetMelHighHz(float mel_high_hz) { mel_high_hz_ = mel_high_hz; }
   void SetMelFloor(float mel_floor) { mel_floor_ = mel_floor; }
+  void SetNormalizeMel(bool normalize_mel) { normalize_mel_ = normalize_mel; }
+  void SetAddFloorToMelBeforeLog(bool add_floor_to_mel_before_log) {
+    add_floor_to_mel_before_log_ = add_floor_to_mel_before_log;
+  }
+  void SetSemicausalPadding(bool semicausal_padding) {
+    semicausal_padding_ = semicausal_padding;
+  }
+  void SetNonZeroHanning(bool non_zero_hanning) {
+    non_zero_hanning_ = non_zero_hanning;
+  }
+  void SetPeriodicHanning(bool periodic_hanning) {
+    periodic_hanning_ = periodic_hanning;
+  }
+  void SetFftPaddingType(FftPaddingType fft_padding_type) {
+    fft_padding_type_ = fft_padding_type;
+  }
 
   // The Mel Spectrogram means used for Universal Speech Model (USM) during
   // preprocessing.
@@ -222,7 +308,10 @@ class AudioPreprocessorConfig {
       int frame_length, int hop_length, int fft_length, float input_scale,
       float pre_emphasis_factor,
       // Mel spectrogram parameters.
-      int num_mel_bins, float mel_low_hz, float mel_high_hz, float mel_floor)
+      int num_mel_bins, float mel_low_hz, float mel_high_hz, float mel_floor,
+      bool normalize_mel, bool add_floor_to_mel_before_log,
+      bool semicausal_padding, bool non_zero_hanning, bool periodic_hanning,
+      FftPaddingType fft_padding_type)
       : sample_rate_hz_(sample_rate_hz),
         num_channels_(num_channels),
         fft_length_(fft_length),
@@ -234,7 +323,13 @@ class AudioPreprocessorConfig {
         mel_high_hz_(mel_high_hz),
         mel_floor_(mel_floor),
         input_scale_(input_scale),
-        pre_emphasis_factor_(pre_emphasis_factor) {}
+        pre_emphasis_factor_(pre_emphasis_factor),
+        normalize_mel_(normalize_mel),
+        add_floor_to_mel_before_log_(add_floor_to_mel_before_log),
+        semicausal_padding_(semicausal_padding),
+        non_zero_hanning_(non_zero_hanning),
+        periodic_hanning_(periodic_hanning),
+        fft_padding_type_(fft_padding_type) {}
   int sample_rate_hz_;
   int num_channels_;
   int fft_length_;
@@ -247,6 +342,12 @@ class AudioPreprocessorConfig {
   float mel_floor_;
   float input_scale_;
   float pre_emphasis_factor_;
+  bool normalize_mel_;
+  bool add_floor_to_mel_before_log_;
+  bool semicausal_padding_;
+  bool non_zero_hanning_;
+  bool periodic_hanning_;
+  FftPaddingType fft_padding_type_;
 };
 
 // Interface for audio preprocessing.
@@ -261,6 +362,10 @@ class AudioPreprocessor {
   // Reset the audio preprocessor to the initial state.
   virtual void Reset() = 0;
 };
+
+std::ostream& operator<<(
+    std::ostream& os,
+    const AudioPreprocessorConfig::FftPaddingType& padding_type);
 
 }  // namespace litert::lm
 

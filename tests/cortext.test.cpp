@@ -9,8 +9,10 @@
 #include <unordered_map>
 #include <vector>
 
+#include <cortext/clock.hpp>
 #include <cortext/capi.h>
 #include <cortext/cortext.hpp>
+#include <cortext/internal/replay_ingress.hpp>
 #include <cortext/store/sqlite_store.hpp>
 
 namespace
@@ -63,6 +65,16 @@ TextFromMemory (const cortext::Cortext::Context::Memory &memory)
   return text;
 }
 
+long long
+AnyToLongLong (const std::any &value)
+{
+  if (value.type () == typeid (long long))
+    return std::any_cast<long long> (value);
+  if (value.type () == typeid (int))
+    return static_cast<long long> (std::any_cast<int> (value));
+  return 0;
+}
+
 class ScopedTempDb
 {
 public:
@@ -102,30 +114,12 @@ SampleMp4Bytes ()
   return std::vector<unsigned char> (std::begin (kData), std::end (kData));
 }
 
-bool
-ImageBindAssetsPresent (const std::string &models_dir)
-{
-  namespace fs = std::filesystem;
-  const fs::path md (models_dir);
-  const bool has_text = fs::exists (md / "text_encoder_int8.onnx")
-                        || fs::exists (md / "text_encoder.onnx");
-  const bool has_audio = fs::exists (md / "audio_encoder_int8.onnx")
-                         || fs::exists (md / "audio_encoder.onnx");
-  const bool has_vision = fs::exists (md / "vision_encoder_int8.onnx")
-                          || fs::exists (md / "vision_encoder.onnx");
-  const bool has_bpe = fs::exists (md / "bpe" / "bpe_simple_vocab_16e6.txt.gz")
-                       || fs::exists (md / "bpe_simple_vocab_16e6.txt.gz")
-                       || fs::exists ("third_party/imagebind_assets/bpe/"
-                                      "bpe_simple_vocab_16e6.txt.gz");
-  return has_text && has_audio && has_vision && has_bpe;
-}
-
 std::string
-RepoModelsImageBindDir ()
+RepoModelsDir ()
 {
   namespace fs = std::filesystem;
   const fs::path root = fs::path (__FILE__).parent_path ().parent_path ();
-  return (root / "models" / "imagebind").string ();
+  return (root / "models").string ();
 }
 } // namespace
 
@@ -134,59 +128,166 @@ TEST_CASE ("Cortext C++ stub can be created and used", "[cortext][stub]")
   ScopedTempDb temp_db;
   cortext::Cortext::Config cfg;
   const std::string &db_path = temp_db.path ();
-  const std::string models_dir = RepoModelsImageBindDir ();
+  const std::string models_dir = RepoModelsDir ();
 
   std::unique_ptr<cortext::Cortext> ctx;
   REQUIRE_NOTHROW (ctx = cortext::Cortext::Create (cfg, db_path, models_dir));
   REQUIRE (ctx != nullptr);
 
-  // Encoding behavior depends on build flags and local environment:
-  // - If ORT is enabled AND models/tokenizer assets are present: encoding should
-  //   succeed.
-  // - Otherwise: encoding should fail fast by throwing (but construction should
-  //   still succeed).
-#if defined(CORTEXT_ENABLE_IMAGEBIND_ORT) || defined(CORTEXT_ENABLE_EMBEDDINGGEMMA)
-  const bool expect_encode_ok = ImageBindAssetsPresent (models_dir);
-#else
-  const bool expect_encode_ok = false;
-#endif
+  REQUIRE_NOTHROW ([&] {
+    auto out_text = ctx->ProcessText ("hello world", "test");
+    (void)out_text.should_interrupt; // Algorithm-dependent, not asserted
 
-  if (expect_encode_ok)
-    {
-      REQUIRE_NOTHROW ([&] {
-        // Smoke test: verify the default text path and consolidation work.
-        // Audio/image may be unsupported when EmbeddingGemma is the preferred
-        // encoder, so only text is required here.
-        auto out_text = ctx->ProcessText ("hello world", "test");
-        (void)out_text.should_interrupt; // Algorithm-dependent, not asserted
-
-        auto out_cons = ctx->Consolidate ();
-        (void)out_cons.should_interrupt;
-        ctx->Flush ();
-      }());
-
-#if defined(CORTEXT_ENABLE_IMAGEBIND_ORT) && !defined(CORTEXT_ENABLE_EMBEDDINGGEMMA)
-      REQUIRE_NOTHROW ([&] {
-        const float pcm[4] = { 0.0f, 0.1f, -0.1f, 0.0f };
-        auto out_audio = ctx->ProcessAudio (pcm, 4, "test");
-        (void)out_audio.should_interrupt;
-
-        const std::uint8_t px[4] = { 0, 0, 0, 0 };
-        auto out_image = ctx->ProcessImage (px, 1, 1, 4, "test");
-        (void)out_image.should_interrupt;
-      }());
-#endif
-    }
-  else
-    {
-      REQUIRE_NOTHROW (ctx->ProcessText ("hello world", "test"));
-    }
+    auto out_cons = ctx->Consolidate ();
+    (void)out_cons.should_interrupt;
+    ctx->Flush ();
+  }());
 
   // DB assertion: open the same DB and execute a trivial query successfully.
   auto uniq = cortext::SQLiteStore::Create (db_path.c_str ());
   auto store = std::shared_ptr<cortext::Store> (std::move (uniq));
   auto rows = store->Execute ("SELECT 1 AS ok");
   REQUIRE (rows.size () == 1);
+}
+
+TEST_CASE ("internal replay ingress preserves media event timestamps",
+           "[cortext][replay][media]")
+{
+  ScopedTempDb temp_db;
+  cortext::Cortext::Config cfg;
+  cfg.signal_filter_audio_enabled = false;
+  const std::string &db_path = temp_db.path ();
+  const std::string models_dir = RepoModelsDir ();
+
+  std::unique_ptr<cortext::Cortext> ctx;
+  REQUIRE_NOTHROW (ctx = cortext::Cortext::Create (cfg, db_path, models_dir));
+  REQUIRE (ctx != nullptr);
+
+  const std::uint64_t replay_ts = 1573184762000ULL;
+  std::vector<float> pcm (16000, 0.01f);
+
+  REQUIRE_NOTHROW (
+      cortext::internal::ReplayIngress::ProcessAudioAt (
+          *ctx, pcm.data (), pcm.size (), "chat/assistant", replay_ts));
+  ctx->Flush ();
+
+  auto unique_store = cortext::SQLiteStore::Create (db_path.c_str ());
+  auto store = std::shared_ptr<cortext::Store> (std::move (unique_store));
+  auto rows = store->Execute (
+      "SELECT timestamp, source_id, modality FROM signals "
+      "WHERE modality = 'audio' ORDER BY signal_id DESC LIMIT 1");
+  REQUIRE (rows.size () == 1);
+  REQUIRE (AnyToLongLong (rows[0].at ("timestamp"))
+           == static_cast<long long> (replay_ts));
+  REQUIRE (std::any_cast<std::string> (rows[0].at ("source_id"))
+           == "chat/assistant");
+  REQUIRE (std::any_cast<std::string> (rows[0].at ("modality")) == "audio");
+}
+
+TEST_CASE ("timestamped replay persists working memory source timestamps",
+           "[cortext][replay][working_memory]")
+{
+  ScopedTempDb temp_db;
+  cortext::Cortext::Config cfg;
+  const std::string &db_path = temp_db.path ();
+  const std::string models_dir = RepoModelsDir ();
+
+  std::unique_ptr<cortext::Cortext> ctx;
+  REQUIRE_NOTHROW (ctx = cortext::Cortext::Create (cfg, db_path, models_dir));
+  REQUIRE (ctx != nullptr);
+
+  const std::uint64_t replay_ts = 1573184762000ULL;
+  REQUIRE_NOTHROW (
+      ctx->ProcessTextAt ("timestamped working memory replay", "chat/user",
+                          replay_ts));
+  ctx->Flush ();
+
+  auto unique_store = cortext::SQLiteStore::Create (db_path.c_str ());
+  auto store = std::shared_ptr<cortext::Store> (std::move (unique_store));
+  auto rows = store->Execute (
+      "SELECT start_ts, created_at, last_access, kind FROM memories "
+      "WHERE kind = 'WORKING' ORDER BY memory_id DESC LIMIT 1");
+  REQUIRE (rows.size () == 1);
+  REQUIRE (AnyToLongLong (rows[0].at ("start_ts"))
+           == static_cast<long long> (replay_ts));
+  REQUIRE (AnyToLongLong (rows[0].at ("created_at"))
+           == static_cast<long long> (replay_ts));
+  REQUIRE (AnyToLongLong (rows[0].at ("last_access"))
+           == static_cast<long long> (replay_ts));
+  REQUIRE (std::any_cast<std::string> (rows[0].at ("kind")) == "WORKING");
+}
+
+TEST_CASE ("replay clock override preserves working memory on reopen",
+           "[cortext][replay][clock][working_memory]")
+{
+  ScopedTempDb temp_db;
+  cortext::Cortext::Config cfg;
+  const std::string &db_path = temp_db.path ();
+  const std::string models_dir = RepoModelsDir ();
+  const std::uint64_t replay_ts = 1573184762000ULL;
+
+  {
+    auto clock = std::make_shared<cortext::FixedClock> (replay_ts);
+    auto ctx = cortext::Cortext::Create (cfg, db_path, models_dir, clock);
+    REQUIRE (ctx != nullptr);
+    REQUIRE_NOTHROW (ctx->ProcessTextAt (
+        "timestamped working memory replay survives reopen", "chat/user",
+        replay_ts));
+    ctx->Flush ();
+  }
+
+  {
+    auto clock = std::make_shared<cortext::FixedClock> (replay_ts + 1000ULL);
+    auto reopened = cortext::Cortext::Create (cfg, db_path, models_dir,
+                                              clock);
+    REQUIRE (reopened != nullptr);
+    auto probe = reopened->ProcessTextAt (
+        "follow up for the replay working memory", "chat/user",
+        replay_ts + 2000ULL, cortext::Retention::Ephemeral);
+    REQUIRE_FALSE (probe.working_memory.empty ());
+  }
+}
+
+TEST_CASE ("internal replay ingress preserves consolidation event timestamps",
+           "[cortext][replay][consolidation]")
+{
+  ScopedTempDb temp_db;
+  cortext::Cortext::Config cfg;
+  const std::string &db_path = temp_db.path ();
+  const std::string models_dir = RepoModelsDir ();
+
+  std::unique_ptr<cortext::Cortext> ctx;
+  REQUIRE_NOTHROW (ctx = cortext::Cortext::Create (cfg, db_path, models_dir));
+  REQUIRE (ctx != nullptr);
+
+  const std::uint64_t source_ts = 1573184762000ULL;
+  for (int i = 0; i < 24; ++i)
+    {
+      REQUIRE_NOTHROW (ctx->ProcessTextAt (
+          "shared replay consolidation topic package pickup dinner logistics",
+          "chat/user", source_ts + static_cast<std::uint64_t> (i) * 1000ULL));
+    }
+  ctx->Flush ();
+
+  const std::uint64_t consolidation_ts = source_ts + 86400000ULL;
+  REQUIRE_NOTHROW (
+      cortext::internal::ReplayIngress::ConsolidateAt (
+          *ctx, consolidation_ts, cortext::ConsolidationMode::Shallow));
+  ctx->Flush ();
+
+  auto unique_store = cortext::SQLiteStore::Create (db_path.c_str ());
+  auto store = std::shared_ptr<cortext::Store> (std::move (unique_store));
+  auto rows = store->Execute (
+      "SELECT start_ts, created_at, source_id, kind FROM memories "
+      "WHERE kind = 'ASSOCIATION' AND source_id LIKE 'shallow_%' "
+      "ORDER BY memory_id DESC LIMIT 1");
+  REQUIRE (rows.size () == 1);
+  REQUIRE (AnyToLongLong (rows[0].at ("start_ts"))
+           == static_cast<long long> (consolidation_ts));
+  REQUIRE (AnyToLongLong (rows[0].at ("created_at"))
+           == static_cast<long long> (consolidation_ts));
+  REQUIRE (std::any_cast<std::string> (rows[0].at ("kind"))
+           == "ASSOCIATION");
 }
 
 TEST_CASE ("Cortext::Create succeeds even when models dir is missing",
@@ -230,7 +331,7 @@ TEST_CASE ("Cortext can initialize with caller supplied store",
 
 TEST_CASE ("Cortext C ABI stubs return success", "[cortext][capi][stub]")
 {
-  const std::string models_dir = RepoModelsImageBindDir ();
+  const std::string models_dir = RepoModelsDir ();
   cortext_handle h = cortext_create_with_models (
       0.5, 0.5, 0.5, ":memory:", models_dir.c_str ());
   REQUIRE (h != nullptr);
@@ -247,13 +348,8 @@ TEST_CASE ("Cortext C ABI stubs return success", "[cortext][capi][stub]")
       REQUIRE (cortext_consolidate (h) == 0);
       REQUIRE (cortext_flush (h) == 0);
 
-#if defined(CORTEXT_ENABLE_IMAGEBIND_ORT) && !defined(CORTEXT_ENABLE_EMBEDDINGGEMMA)
-      REQUIRE (audio_rc == 0);
-      REQUIRE (image_rc == 0);
-#else
       REQUIRE ((audio_rc == 0 || audio_rc == 2));
       REQUIRE ((image_rc == 0 || image_rc == 2));
-#endif
     }
   else
     {
@@ -355,7 +451,7 @@ TEST_CASE ("Cortext hydrates sqlite-objstore payloads",
     }
 
   cortext::Cortext::Config cfg;
-  auto ctx = cortext::Cortext::Create (cfg, db_path, RepoModelsImageBindDir ());
+  auto ctx = cortext::Cortext::Create (cfg, db_path, RepoModelsDir ());
   REQUIRE (ctx != nullptr);
 
   std::vector<long long> candidate_ids;
@@ -374,6 +470,96 @@ TEST_CASE ("Cortext hydrates sqlite-objstore payloads",
       REQUIRE (memory.content[0] == expected_payloads.at (memory.id));
       REQUIRE (memory.mimetype == expected_mimes.at (memory.id));
     }
+
+  {
+    cortext::testing::ScopedEnvVar disable_source_blobs (
+        "CORTEXT_DISABLE_SOURCE_BLOBS", "1");
+    auto stripped = ctx->DebugHydrateForTest (candidate_ids, {});
+    REQUIRE (stripped.retrieved_memory.size () == samples.size ());
+    for (const auto &memory : stripped.retrieved_memory)
+      {
+        REQUIRE (expected_payloads.count (memory.id) == 1);
+        REQUIRE (expected_mimes.count (memory.id) == 1);
+        REQUIRE (memory.content.empty ());
+        REQUIRE (memory.mimetype == expected_mimes.at (memory.id));
+      }
+  }
+}
+
+TEST_CASE ("Cortext hydrates SoftAnchor metadata with retrieved memories",
+           "[cortext][hydration][soft_anchor]")
+{
+  ScopedTempDb temp_db;
+  const auto &db_path = temp_db.path ();
+  auto store = cortext::SQLiteStore::Create (db_path);
+  cortext::testing::InitializeCoreSchema (*store);
+
+  constexpr int kEmbeddingDim = 256;
+  std::vector<float> embedding (kEmbeddingDim, 0.0f);
+  embedding[0] = 1.0f;
+
+  const std::string source_text = "I went to Jared's house yesterday.";
+  const std::vector<unsigned char> payload (source_text.begin (),
+                                            source_text.end ());
+  auto blob_rows = store->Execute ("SELECT objstore_put(?1) AS id",
+                                   { payload });
+  REQUIRE (blob_rows.size () == 1);
+  const auto blob_id = BlobFromAny (blob_rows[0].at ("id"));
+  REQUIRE (!blob_id.empty ());
+
+  store->Execute (
+      "INSERT INTO embeddings (embedding_id, embedding, created_at) "
+      "VALUES (?, ?, ?)",
+      { 501LL, embedding, 1000LL });
+  store->Execute (
+      "INSERT INTO memories (memory_id, embedding_id, source_id, kind, blob_id, "
+      "start_ts, end_ts, n_signals, modality, s_max, s_avg, strength, created_at) "
+      "VALUES (?, ?, 'chat/user', 'LONG_TERM', ?, 1000, 1000, 1, 'text', "
+      "0.5, 0.5, 1.0, 1000)",
+      { 501LL, 501LL, blob_id });
+  store->Execute (
+      "INSERT INTO signals (memory_id, embedding_id, source_id, timestamp, "
+      "modality, mime, blob_id, serial_position, created_at) "
+      "VALUES (?, ?, 'chat/user', 1000, 'text', 'text/plain', ?, 0, 1000)",
+      { 501LL, 501LL, blob_id });
+
+  store->Execute (
+      "INSERT INTO soft_anchor_links "
+      "(memory_id, anchor_id, anchor_strength, anchor_label, memory_tier, "
+      " score, margin, entropy, support_count, contradiction_count, "
+      " created_step, updated_step, created_at) "
+      "VALUES "
+      "(501, 'anchor-low', 0.20, 'tentative', 'STM', 0.30, 0.04, 0.70, "
+      " 1, 0, 1, 1, 1000),"
+      "(501, 'anchor-top', 1.20, 'durable', 'WM', -0.40, 0.22, 1.80, "
+      " 3, 0, 1, 3, 1000),"
+      "(501, 'anchor-mid', 0.73, 'ambiguous', 'STM', 0.64, 0.02, 0.51, "
+      " 2, 0, 1, 2, 1000),"
+      "(501, 'anchor-third', 0.42, 'tentative', 'LTM', 0.44, 0.01, 0.62, "
+      " 1, 0, 1, 2, 1000),"
+      "(501, 'anchor-rejected', 0.99, 'rejected', 'WM', 0.99, 0.60, 0.10, "
+      " 1, 1, 1, 4, 1000)");
+
+  cortext::Cortext::Config cfg;
+  auto ctx = cortext::Cortext::Create (cfg, db_path, RepoModelsDir ());
+  REQUIRE (ctx != nullptr);
+
+  auto hydrated = ctx->DebugHydrateForTest ({ 501LL }, {});
+  REQUIRE (hydrated.retrieved_memory.size () == 1);
+  const auto &memory = hydrated.retrieved_memory.front ();
+  REQUIRE (TextFromMemory (memory) == source_text);
+  REQUIRE (memory.soft_anchors.size () == 3);
+
+  REQUIRE (memory.soft_anchors[0].id == "anchor-top");
+  REQUIRE (memory.soft_anchors[0].strength == 1.0);
+  REQUIRE (memory.soft_anchors[0].likelihood == 1.0);
+  REQUIRE (memory.soft_anchors[0].label == "durable");
+  REQUIRE (memory.soft_anchors[0].tier == "WM");
+  REQUIRE (memory.soft_anchors[0].score == 0.0);
+  REQUIRE (memory.soft_anchors[0].entropy == 1.0);
+
+  REQUIRE (memory.soft_anchors[1].id == "anchor-mid");
+  REQUIRE (memory.soft_anchors[2].id == "anchor-third");
 }
 
 TEST_CASE ("Cortext expands internal retrieval nodes to linked text memories",
@@ -426,7 +612,7 @@ TEST_CASE ("Cortext expands internal retrieval nodes to linked text memories",
       { 200LL, 100LL, 100LL, 300LL });
 
   cortext::Cortext::Config cfg;
-  auto ctx = cortext::Cortext::Create (cfg, db_path, RepoModelsImageBindDir ());
+  auto ctx = cortext::Cortext::Create (cfg, db_path, RepoModelsDir ());
   REQUIRE (ctx != nullptr);
 
   auto cue_hydrated = ctx->DebugHydrateForTest ({ 200LL }, {});
@@ -438,6 +624,216 @@ TEST_CASE ("Cortext expands internal retrieval nodes to linked text memories",
   REQUIRE (label_hydrated.retrieved_memory.size () == 1);
   REQUIRE (label_hydrated.retrieved_memory[0].id == 100LL);
   REQUIRE (TextFromMemory (label_hydrated.retrieved_memory[0]) == source_text);
+}
+
+TEST_CASE ("Cortext expands durable association retrieval nodes even when the cue has text",
+           "[cortext][hydration][retrieval]")
+{
+  ScopedTempDb temp_db;
+  const auto &db_path = temp_db.path ();
+  auto store = cortext::SQLiteStore::Create (db_path);
+  cortext::testing::InitializeCoreSchema (*store);
+
+  constexpr int kEmbeddingDim = 256;
+  std::vector<float> embedding (kEmbeddingDim, 0.0f);
+  embedding[0] = 1.0f;
+
+  const std::string source_text = "Julie mentioned the art show downtown.";
+  const std::string cue_text = "durable cue about art";
+  const std::vector<unsigned char> source_payload (source_text.begin (),
+                                                   source_text.end ());
+  const std::vector<unsigned char> cue_payload (cue_text.begin (),
+                                                cue_text.end ());
+  auto source_blob_rows = store->Execute ("SELECT objstore_put(?1) AS id",
+                                          { source_payload });
+  auto cue_blob_rows = store->Execute ("SELECT objstore_put(?1) AS id",
+                                       { cue_payload });
+  REQUIRE (source_blob_rows.size () == 1);
+  REQUIRE (cue_blob_rows.size () == 1);
+  const auto source_blob_id = BlobFromAny (source_blob_rows[0].at ("id"));
+  const auto cue_blob_id = BlobFromAny (cue_blob_rows[0].at ("id"));
+  REQUIRE (!source_blob_id.empty ());
+  REQUIRE (!cue_blob_id.empty ());
+
+  store->Execute (
+      "INSERT INTO embeddings (embedding_id, embedding, created_at) "
+      "VALUES (?, ?, ?), (?, ?, ?)",
+      { 100LL, embedding, 1000LL, 200LL, embedding, 1000LL });
+  store->Execute (
+      "INSERT INTO memories (memory_id, embedding_id, source_id, kind, blob_id, "
+      "start_ts, end_ts, n_signals, modality, s_max, s_avg, strength, created_at) "
+      "VALUES (?, ?, 'chat/user', 'LONG_TERM', ?, 1000, 1000, 1, 'text', "
+      "0.5, 0.5, 1.0, 1000), "
+      "(?, ?, 'associative_cue_test', 'ASSOCIATION', ?, 1000, 1000, 1, "
+      "'text', 0.5, 0.5, 1.0, 1000)",
+      { 100LL, 100LL, source_blob_id, 200LL, 200LL, cue_blob_id });
+  store->Execute (
+      "INSERT INTO signals (memory_id, embedding_id, source_id, timestamp, "
+      "modality, mime, blob_id, serial_position, created_at) "
+      "VALUES (?, ?, 'chat/user', 1000, 'text', 'text/plain', ?, 0, 1000), "
+      "(?, ?, 'associative_cue_test', 1000, 'text', 'text/plain', ?, 0, 1000)",
+      { 100LL, 100LL, source_blob_id, 200LL, 200LL, cue_blob_id });
+  store->Execute (
+      "INSERT INTO associations(source_memory_id, target_memory_id, edge_type, weight) "
+      "VALUES (?, ?, 'derived_from', 1.0)",
+      { 200LL, 100LL });
+
+  cortext::Cortext::Config cfg;
+  auto ctx = cortext::Cortext::Create (cfg, db_path, RepoModelsDir ());
+  REQUIRE (ctx != nullptr);
+
+  auto cue_hydrated = ctx->DebugHydrateForTest ({ 200LL }, {});
+  REQUIRE (cue_hydrated.retrieved_memory.size () == 1);
+  REQUIRE (cue_hydrated.retrieved_memory[0].id == 100LL);
+  REQUIRE (TextFromMemory (cue_hydrated.retrieved_memory[0]) == source_text);
+}
+
+TEST_CASE ("Cortext expands durable label retrieval nodes through association sources",
+           "[cortext][hydration][retrieval]")
+{
+  ScopedTempDb temp_db;
+  const auto &db_path = temp_db.path ();
+  auto store = cortext::SQLiteStore::Create (db_path);
+  cortext::testing::InitializeCoreSchema (*store);
+
+  constexpr int kEmbeddingDim = 256;
+  std::vector<float> embedding (kEmbeddingDim, 0.0f);
+  embedding[0] = 1.0f;
+
+  const std::string source_text = "Julie talked about the gallery opening.";
+  const std::vector<unsigned char> source_payload (source_text.begin (),
+                                                   source_text.end ());
+  auto source_blob_rows = store->Execute ("SELECT objstore_put(?1) AS id",
+                                          { source_payload });
+  REQUIRE (source_blob_rows.size () == 1);
+  const auto source_blob_id = BlobFromAny (source_blob_rows[0].at ("id"));
+  REQUIRE (!source_blob_id.empty ());
+
+  store->Execute (
+      "INSERT INTO embeddings (embedding_id, embedding, created_at) "
+      "VALUES (?, ?, ?), (?, ?, ?), (?, ?, ?)",
+      { 100LL, embedding, 1000LL, 200LL, embedding, 1000LL, 300LL,
+        embedding, 1000LL });
+  store->Execute (
+      "INSERT INTO memories (memory_id, embedding_id, source_id, kind, blob_id, "
+      "start_ts, end_ts, n_signals, modality, s_max, s_avg, strength, created_at) "
+      "VALUES (?, ?, 'chat/user', 'LONG_TERM', ?, 1000, 1000, 1, 'text', "
+      "0.5, 0.5, 1.0, 1000)",
+      { 100LL, 100LL, source_blob_id });
+  store->Execute (
+      "INSERT INTO signals (memory_id, embedding_id, source_id, timestamp, "
+      "modality, mime, blob_id, serial_position, created_at) "
+      "VALUES (?, ?, 'chat/user', 1000, 'text', 'text/plain', ?, 0, 1000)",
+      { 100LL, 100LL, source_blob_id });
+  store->Execute (
+      "INSERT INTO memories (memory_id, embedding_id, source_id, kind, label, "
+      "start_ts, n_signals, modality, s_max, s_avg, strength, created_at) "
+      "VALUES (?, ?, 'associative_cue_test', 'ASSOCIATION', "
+      "'associative cue test', 1000, 1, 'text', 0.5, 0.5, 1.0, 1000), "
+      "(?, ?, 'gallery', 'LABEL', 'gallery', 1000, 1, 'text', 0.5, 0.5, "
+      "1.0, 1000)",
+      { 200LL, 200LL, 300LL, 300LL });
+  store->Execute (
+      "INSERT INTO associations(source_memory_id, target_memory_id, edge_type, weight) "
+      "VALUES (?, ?, 'derived_from', 1.0), (?, ?, 'has_label', 1.0)",
+      { 200LL, 100LL, 200LL, 300LL });
+
+  cortext::Cortext::Config cfg;
+  auto ctx = cortext::Cortext::Create (cfg, db_path, RepoModelsDir ());
+  REQUIRE (ctx != nullptr);
+
+  auto label_hydrated = ctx->DebugHydrateForTest ({ 300LL }, {});
+  REQUIRE (label_hydrated.retrieved_memory.size () == 1);
+  REQUIRE (label_hydrated.retrieved_memory[0].id == 100LL);
+  REQUIRE (TextFromMemory (label_hydrated.retrieved_memory[0]) == source_text);
+}
+
+TEST_CASE ("Cortext orders durable label source hydration by query similarity",
+           "[cortext][hydration][retrieval]")
+{
+  ScopedTempDb temp_db;
+  const auto &db_path = temp_db.path ();
+  auto store = cortext::SQLiteStore::Create (db_path);
+  cortext::testing::InitializeCoreSchema (*store);
+
+  constexpr int kEmbeddingDim = 256;
+  std::vector<float> query_embedding (kEmbeddingDim, 0.0f);
+  query_embedding[0] = 1.0f;
+  std::vector<float> unrelated_embedding (kEmbeddingDim, 0.0f);
+  unrelated_embedding[1] = 1.0f;
+
+  const std::string relevant_text = "Julie talked about noodles at Moon Plaza.";
+  const std::string recent_text = "Julie mentioned a different errand.";
+  const std::vector<unsigned char> relevant_payload (relevant_text.begin (),
+                                                     relevant_text.end ());
+  const std::vector<unsigned char> recent_payload (recent_text.begin (),
+                                                   recent_text.end ());
+  auto relevant_blob_rows = store->Execute ("SELECT objstore_put(?1) AS id",
+                                            { relevant_payload });
+  auto recent_blob_rows = store->Execute ("SELECT objstore_put(?1) AS id",
+                                          { recent_payload });
+  REQUIRE (relevant_blob_rows.size () == 1);
+  REQUIRE (recent_blob_rows.size () == 1);
+  const auto relevant_blob_id = BlobFromAny (relevant_blob_rows[0].at ("id"));
+  const auto recent_blob_id = BlobFromAny (recent_blob_rows[0].at ("id"));
+  REQUIRE (!relevant_blob_id.empty ());
+  REQUIRE (!recent_blob_id.empty ());
+
+  store->Execute (
+      "INSERT INTO embeddings (embedding_id, embedding, created_at) "
+      "VALUES (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?)",
+      { 100LL, query_embedding, 1000LL, 101LL, unrelated_embedding, 2000LL,
+        200LL, unrelated_embedding, 2000LL, 300LL, unrelated_embedding,
+        2000LL });
+  store->Execute (
+      "INSERT INTO memories (memory_id, embedding_id, source_id, kind, blob_id, "
+      "start_ts, end_ts, n_signals, modality, s_max, s_avg, strength, created_at) "
+      "VALUES (?, ?, 'chat/user', 'LONG_TERM', ?, 1000, 1000, 1, 'text', "
+      "0.5, 0.5, 1.0, 1000), "
+      "(?, ?, 'chat/user', 'LONG_TERM', ?, 2000, 2000, 1, 'text', "
+      "0.5, 0.5, 1.0, 2000)",
+      { 100LL, 100LL, relevant_blob_id, 101LL, 101LL, recent_blob_id });
+  store->Execute (
+      "INSERT INTO signals (memory_id, embedding_id, source_id, timestamp, "
+      "modality, mime, blob_id, serial_position, created_at) "
+      "VALUES (?, ?, 'chat/user', 1000, 'text', 'text/plain', ?, 0, 1000), "
+      "(?, ?, 'chat/user', 2000, 'text', 'text/plain', ?, 0, 2000)",
+      { 100LL, 100LL, relevant_blob_id, 101LL, 101LL, recent_blob_id });
+  store->Execute (
+      "INSERT INTO memories (memory_id, embedding_id, source_id, kind, label, "
+      "start_ts, n_signals, modality, s_max, s_avg, strength, created_at) "
+      "VALUES (?, ?, 'associative_cue_test', 'ASSOCIATION', "
+      "'associative cue test', 2000, 1, 'text', 0.5, 0.5, 1.0, 2000), "
+      "(?, ?, 'dinner errand', 'LABEL', 'dinner errand', 2000, 1, 'text', "
+      "0.5, 0.5, 1.0, 2000)",
+      { 200LL, 200LL, 300LL, 300LL });
+  store->Execute (
+      "INSERT INTO associations(source_memory_id, target_memory_id, edge_type, weight) "
+      "VALUES (?, ?, 'derived_from', 1.0), (?, ?, 'derived_from', 1.0), "
+      "       (?, ?, 'has_label', 1.0)",
+      { 200LL, 100LL, 200LL, 101LL, 200LL, 300LL });
+
+  cortext::Cortext::Config cfg;
+  auto ctx = cortext::Cortext::Create (cfg, db_path, RepoModelsDir ());
+  REQUIRE (ctx != nullptr);
+
+  {
+    cortext::testing::ScopedEnvVar enabled (
+        "CORTEXT_QUERY_AWARE_LINKED_SOURCE_HYDRATION", "1");
+    auto label_hydrated = ctx->DebugHydrateForTest ({ 300LL }, {},
+                                                    query_embedding);
+    REQUIRE (label_hydrated.retrieved_memory.size () >= 2);
+    REQUIRE (label_hydrated.retrieved_memory[0].id == 100LL);
+    REQUIRE (TextFromMemory (label_hydrated.retrieved_memory[0])
+             == relevant_text);
+  }
+
+  {
+    auto recency_hydrated = ctx->DebugHydrateForTest ({ 300LL }, {},
+                                                      query_embedding);
+    REQUIRE (recency_hydrated.retrieved_memory.size () >= 2);
+    REQUIRE (recency_hydrated.retrieved_memory[0].id == 101LL);
+  }
 }
 
 TEST_CASE ("Cortext hides unresolved internal retrieval nodes",
@@ -469,7 +865,7 @@ TEST_CASE ("Cortext hides unresolved internal retrieval nodes",
       { 200LL, 300LL });
 
   cortext::Cortext::Config cfg;
-  auto ctx = cortext::Cortext::Create (cfg, db_path, RepoModelsImageBindDir ());
+  auto ctx = cortext::Cortext::Create (cfg, db_path, RepoModelsDir ());
   REQUIRE (ctx != nullptr);
 
   auto cue_hydrated = ctx->DebugHydrateForTest ({ 200LL }, {});
@@ -503,7 +899,7 @@ TEST_CASE ("C API handles NULL inputs correctly", "[cortext][capi][safety]")
   SECTION ("cortext_process_text returns 1 for NULL text")
   {
     ScopedTempDb temp_db;
-    const auto models_dir = RepoModelsImageBindDir ();
+    const auto models_dir = RepoModelsDir ();
     auto h = cortext_create_with_models (0.5, 0.5, 0.5, temp_db.path ().c_str (),
                                          models_dir.c_str ());
     REQUIRE (h != nullptr);
@@ -516,7 +912,7 @@ TEST_CASE ("C API handles NULL inputs correctly", "[cortext][capi][safety]")
   SECTION ("cortext_process_text returns 1 for NULL source_id")
   {
     ScopedTempDb temp_db;
-    const auto models_dir = RepoModelsImageBindDir ();
+    const auto models_dir = RepoModelsDir ();
     auto h = cortext_create_with_models (0.5, 0.5, 0.5, temp_db.path ().c_str (),
                                          models_dir.c_str ());
     REQUIRE (h != nullptr);
@@ -529,7 +925,7 @@ TEST_CASE ("C API handles NULL inputs correctly", "[cortext][capi][safety]")
   SECTION ("cortext_process_audio returns 1 for NULL pcm")
   {
     ScopedTempDb temp_db;
-    const auto models_dir = RepoModelsImageBindDir ();
+    const auto models_dir = RepoModelsDir ();
     auto h = cortext_create_with_models (0.5, 0.5, 0.5, temp_db.path ().c_str (),
                                          models_dir.c_str ());
     REQUIRE (h != nullptr);
@@ -542,7 +938,7 @@ TEST_CASE ("C API handles NULL inputs correctly", "[cortext][capi][safety]")
   SECTION ("cortext_process_image returns 1 for NULL data")
   {
     ScopedTempDb temp_db;
-    const auto models_dir = RepoModelsImageBindDir ();
+    const auto models_dir = RepoModelsDir ();
     auto h = cortext_create_with_models (0.5, 0.5, 0.5, temp_db.path ().c_str (),
                                          models_dir.c_str ());
     REQUIRE (h != nullptr);
@@ -574,7 +970,7 @@ TEST_CASE ("C API handles NULL inputs correctly", "[cortext][capi][safety]")
     cfg.sensitivity = 0.4;
     cfg.stability = 0.9;
 
-    const auto models_dir = RepoModelsImageBindDir ();
+    const auto models_dir = RepoModelsDir ();
     auto h = cortext_create_with_config (&cfg, temp_db.path ().c_str (),
                                          models_dir.c_str ());
     REQUIRE (h != nullptr);
@@ -584,7 +980,7 @@ TEST_CASE ("C API handles NULL inputs correctly", "[cortext][capi][safety]")
   SECTION ("JSON C API returns parseable context")
   {
     ScopedTempDb temp_db;
-    const auto models_dir = RepoModelsImageBindDir ();
+    const auto models_dir = RepoModelsDir ();
     auto h = cortext_create_with_models (0.5, 0.5, 0.5, temp_db.path ().c_str (),
                                          models_dir.c_str ());
     REQUIRE (h != nullptr);

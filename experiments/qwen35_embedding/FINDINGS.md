@@ -80,6 +80,6 @@ Use **both models** in a complementary configuration:
 
 ### Integration Path
 
-- Replace ImageBind with Qwen3.5-0.8B hidden states (better image+text alignment, smaller)
+- Replace the legacy multimodal encoder with Qwen3.5-0.8B hidden states (better image+text alignment, smaller)
 - Add PE-AV audio encoder alongside (or keep sherpa-onnx ASR → text → Qwen3.5 embed pipeline)
 - Both models can run on MPS with float16

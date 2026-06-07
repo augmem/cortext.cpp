@@ -1,0 +1,53 @@
+{
+  "embedding_dim": 256,
+  "encoder": "AIST/ES-AIST via cortext_text_embedder",
+  "generated_by": "tools/centroid_vectors/build_aist_sliced_centroids.py",
+  "labels": {
+    "aro_high": {
+      "contrast_against": "aro_low",
+      "count": 403,
+      "file": "aro_high_256.npy"
+    },
+    "aro_low": {
+      "contrast_against": "aro_high",
+      "count": 352,
+      "file": "aro_low_256.npy"
+    },
+    "goal_aligned": {
+      "contrast_against": "goal_unaligned",
+      "count": 8,
+      "file": "goal_aligned_256.npy"
+    },
+    "goal_unaligned": {
+      "contrast_against": "goal_aligned",
+      "count": 8,
+      "file": "goal_unaligned_256.npy"
+    },
+    "val_neg": {
+      "contrast_against": "val_pos",
+      "count": 458,
+      "file": "val_neg_256.npy"
+    },
+    "val_pos": {
+      "contrast_against": "val_neg",
+      "count": 344,
+      "file": "val_pos_256.npy"
+    },
+    "violation_high": {
+      "contrast_against": "violation_low",
+      "count": 8,
+      "file": "violation_high_256.npy"
+    },
+    "violation_low": {
+      "contrast_against": "violation_high",
+      "count": 8,
+      "file": "violation_low_256.npy"
+    }
+  },
+  "slice": [
+    0,
+    256
+  ],
+  "text_emotion_source": "data/emotion/_tmp_text_emotion",
+  "timestamp": "2026-05-05T02:48:19Z"
+}

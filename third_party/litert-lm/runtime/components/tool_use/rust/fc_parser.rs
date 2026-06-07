@@ -24,42 +24,13 @@ use antlrfcparser::{
     ObjectContextAttrs, PairContextAttrs, ValueContext, ValueContextAttrs,
 };
 use antlrfcparserlistener::AntlrFcParserListener;
-use protobuf::{prelude::*, proto};
+use serde_json::{json, Map, Value};
 use std::collections::HashSet;
-use tool_call_rust_proto::{Field, ListValue, NullValue, Struct, ToolCall, ToolCalls, Value};
-
-#[cxx::bridge(namespace = "litert::lm")]
-pub mod ffi {
-    struct ToolCallResult {
-        serialized_tool_calls: Vec<u8>,
-        is_ok: bool,
-        error: String,
-    }
-
-    extern "Rust" {
-        fn parse_fc_expression(text: &str) -> ToolCallResult;
-    }
-}
-
-impl ffi::ToolCallResult {
-    pub fn with_tool_calls(tool_calls: Vec<u8>) -> Self {
-        Self { serialized_tool_calls: tool_calls, is_ok: true, error: String::new() }
-    }
-
-    pub fn with_error(error: String) -> Self {
-        Self { serialized_tool_calls: Vec::new(), is_ok: false, error: error }
-    }
-}
-
-impl Default for ffi::ToolCallResult {
-    fn default() -> Self {
-        Self { serialized_tool_calls: Vec::new(), is_ok: true, error: String::new() }
-    }
-}
 
 fn strip_escape_tokens(text: &str) -> &str {
-    const ESCAPE: &str = "<escape>";
     let mut s = text;
+
+    const ESCAPE: &str = "<escape>";
     if s.starts_with(ESCAPE) {
         s = &s[ESCAPE.len()..];
     }
@@ -71,42 +42,38 @@ fn strip_escape_tokens(text: &str) -> &str {
 
 fn parse_value(value_ctx: &ValueContext) -> Result<Value, String> {
     if let Some(escaped_string_ctx) = value_ctx.ESCAPED_STRING() {
-        Ok(proto!(Value {
-            string_value: strip_escape_tokens(&escaped_string_ctx.get_text()).to_string()
-        }))
+        Ok(json!(strip_escape_tokens(&escaped_string_ctx.get_text())))
     } else if let Some(number_ctx) = value_ctx.NUMBER() {
         let text = number_ctx.get_text();
         if let Ok(double_val) = text.parse::<f64>() {
-            Ok(proto!(Value { number_value: double_val }))
+            Ok(json!(double_val))
         } else {
             Err(format!("Failed to parse number: {}", text))
         }
     } else if let Some(object_ctx) = value_ctx.object() {
-        let s = parse_object(&object_ctx)?;
-        Ok(proto!(Value { struct_value: s }))
+        parse_object(&object_ctx)
     } else if let Some(array_ctx) = value_ctx.array() {
-        let l = parse_array(&array_ctx)?;
-        Ok(proto!(Value { list_value: l }))
+        parse_array(&array_ctx)
     } else if let Some(boolean_ctx) = value_ctx.BOOLEAN() {
-        Ok(proto!(Value { bool_value: boolean_ctx.get_text() == "true" }))
+        Ok(json!(boolean_ctx.get_text() == "true"))
     } else if let Some(_null_literal_ctx) = value_ctx.NULL_LITERAL() {
-        Ok(proto!(Value { null_value: NullValue::default() }))
+        Ok(Value::Null)
     } else {
         Err(format!("Unhandled value type: {}", value_ctx.get_text()))
     }
 }
 
-fn parse_array(array_ctx: &ArrayContext) -> Result<ListValue, String> {
-    let mut list_value = ListValue::new();
+fn parse_array(array_ctx: &ArrayContext) -> Result<Value, String> {
+    let mut list = vec![];
     for value in array_ctx.value_all() {
         let parsed_value = parse_value(&value)?;
-        list_value.values_mut().push(parsed_value);
+        list.push(parsed_value);
     }
-    Ok(list_value)
+    Ok(Value::Array(list))
 }
 
-fn parse_object(object_ctx: &ObjectContext) -> Result<Struct, String> {
-    let mut object = Struct::new();
+fn parse_object(object_ctx: &ObjectContext) -> Result<Value, String> {
+    let mut map = Map::new();
     let mut seen_keys = HashSet::new();
 
     for pair_ctx in object_ctx.pair_all() {
@@ -130,24 +97,21 @@ fn parse_object(object_ctx: &ObjectContext) -> Result<Struct, String> {
         let parsed_value = parse_value(&value_ctx)
             .map_err(|e| format!("Error parsing value for key '{}': {}", key, e))?;
 
-        let mut field = Field::new();
-        field.set_name(key);
-        field.set_value(parsed_value);
-        object.fields_mut().push(field);
+        map.insert(key, parsed_value);
     }
-    Ok(object)
+    Ok(Value::Object(map))
 }
 
 struct FcListener {
-    tool_calls: Result<ToolCalls, String>,
+    tool_calls: Result<Vec<Value>, String>,
 }
 
 impl FcListener {
     fn new() -> Self {
-        FcListener { tool_calls: Ok(ToolCalls::default()) }
+        FcListener { tool_calls: Ok(Vec::new()) }
     }
 
-    fn tool_calls(self) -> Result<ToolCalls, String> {
+    fn tool_calls(self) -> Result<Vec<Value>, String> {
         self.tool_calls
     }
 }
@@ -156,32 +120,35 @@ impl<'input> ParseTreeListener<'input, AntlrFcParserContextType> for FcListener 
 
 impl<'input> AntlrFcParserListener<'input> for FcListener {
     fn enter_functionCall(&mut self, ctx: &FunctionCallContext<'input>) {
-        println!("enter_functionCall: {:?}", ctx);
         if let Ok(tool_calls) = &mut self.tool_calls {
-            let mut tool_call = ToolCall::new();
             let name =
                 if let Some(id_token) = ctx.ID() { id_token.get_text() } else { "".to_string() };
-            tool_call.set_name(name);
+
+            let mut tool_call_map = Map::new();
+            tool_call_map.insert("name".to_string(), json!(name));
 
             if let Some(object_ctx) = ctx.object() {
                 match parse_object(&object_ctx) {
-                    Ok(args) => tool_call.set_arguments(args),
+                    Ok(args) => {
+                        tool_call_map.insert("arguments".to_string(), args);
+                    }
                     Err(e) => {
                         self.tool_calls = Err(e);
                         return;
                     }
                 }
+            } else {
+                tool_call_map.insert("arguments".to_string(), json!({}));
             }
 
-            println!("Parsed tool_call: {:?}", tool_call);
-            tool_calls.tool_calls_mut().push(tool_call);
+            tool_calls.push(Value::Object(tool_call_map));
         }
     }
 }
 
-pub fn parse_fc_expression(text: &str) -> ffi::ToolCallResult {
+pub fn parse_fc_expression(text: &str) -> Result<Vec<Value>, String> {
     if text.len() == 0 {
-        return ffi::ToolCallResult::default();
+        return Ok(Vec::new());
     }
     let lexer = AntlrFcLexer::new(InputStream::new(text));
     let mut parser = AntlrFcParser::with_strategy(
@@ -190,18 +157,10 @@ pub fn parse_fc_expression(text: &str) -> ffi::ToolCallResult {
     );
     let start = match parser.start() {
         Ok(start) => start,
-        Err(e) => return ffi::ToolCallResult::with_error(e.to_string()),
+        Err(e) => return Err(e.to_string()),
     };
     match AntlrFcParserTreeWalker::walk(Box::new(FcListener::new()), start.as_ref()) {
-        Ok(listener) => match listener.tool_calls() {
-            Ok(tool_calls) => match tool_calls.serialize() {
-                Ok(serialized_tool_calls) => {
-                    ffi::ToolCallResult::with_tool_calls(serialized_tool_calls)
-                }
-                Err(e) => ffi::ToolCallResult::with_error(e.to_string()),
-            },
-            Err(e) => ffi::ToolCallResult::with_error(e.to_string()),
-        },
-        Err(e) => ffi::ToolCallResult::with_error(e.to_string()),
+        Ok(listener) => listener.tool_calls(),
+        Err(e) => Err(e.to_string()),
     }
 }

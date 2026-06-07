@@ -107,6 +107,6 @@ table LiteRTLMMetaData {
 
 root_type LiteRTLMMetaData;
 
-//  //depot/google3/third_party/odml/litert_lm/schema/core/litertlm_header.h,
-//  //depot/google3/third_party/odml/litert/litert/python/internal/litertlm_header_schema.fbs,
+//  //schema/core/litertlm_header.h,
+//  //third_party/odml/litert/litert/python/internal/litertlm_header_schema.fbs,
 //)

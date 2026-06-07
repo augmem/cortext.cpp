@@ -2,10 +2,17 @@ Note: All knob-derived parameters in online operations use the midpoint‑biased
 knobs F̃ and S̃ defined in Section 1. This does not change the schema, but it
 does affect the interpretation of threshold- and gate-related fields.
 Note: Deep consolidation requires a local summarization/extraction backend:
-Gemma via LiteRT-LM or pinned LFM2 Q4_K_M GGUFs via llama.cpp. There is no
-embedding-only extractive fallback when no deep backend is available.
-Note: Consolidation candidates are limited to LONG_TERM/ASSOCIATION memories
-with non-null blob_id so summarization always has source text.
+Gemma 4 E2B via LiteRT-LM by default, or explicit LFM2/LFM2.5 GGUF overrides
+via llama.cpp. The LFM2 resolver prefers Q4_K_M when present but accepts other
+bundled quantizations. There is no embedding-only extractive fallback when no
+deep backend is available.
+Note: Deep consolidation candidates are limited to LONG_TERM memories with
+non-null blob_id so summarization always has source text. Shallow consolidation
+creates ASSOCIATION centroids without blobs.
+Note: This diagram emphasizes the core memory/signal/association schema. Later
+migrations also add fact assertion/evidence/cache tables, memory eviction and
+reconstruction tables, meta-learning coefficients, and soft-anchor state/link
+tables.
 Note: Summarization input is capped by knob-derived limits (max texts and
 total chars) to bound consolidation latency.
 Note: Summarization output length is enforced by streaming decode cancel at
@@ -22,7 +29,7 @@ Note: Label embeddings are cached by normalized label key; cache hits reuse
 stored embeddings rather than re-encoding (schema unchanged).
 Note: Optional label-bank seeding inserts LABEL memories from a precomputed
 Hugging Face label dataset (metadata.json + labels.jsonl) at initialization,
-using ImageBind embeddings and a knob-derived baseline salience; this
+using configured text embeddings and a knob-derived baseline salience; this
 pre-seeds shallow consolidation without touching the schema.
 Note: Interrupt gating uses a sensitivity-relaxed retrieval threshold
 retrieval_thresh_interrupt(F,S) = retrieval_thresh(F) × (1 − 0.12S).

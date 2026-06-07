@@ -15,10 +15,16 @@
 #include "runtime/executor/audio_executor_settings.h"
 
 #include <ostream>
+#include <string>
+#include <variant>
+#include <memory>
 
 #include "absl/status/status.h"  // from @com_google_absl
 #include "absl/status/statusor.h"  // from @com_google_absl
+#include "absl/strings/string_view.h"  // from @com_google_absl
+#include "absl/strings/match.h"  // from @com_google_absl
 #include "runtime/executor/executor_settings_base.h"
+#include "runtime/util/scoped_file.h"
 #include "runtime/util/status_macros.h"
 
 namespace litert::lm {
@@ -31,13 +37,15 @@ std::ostream& operator<<(std::ostream& os,
   os << "Backend: " << settings.GetBackend() << std::endl;
   os << "BundledWithMainModel: " << settings.GetBundledWithMainModel()
      << std::endl;
+  os << "NumThreads(CPU only): " << settings.GetNumThreads() << std::endl;
   return os;
 }
 
 absl::StatusOr<AudioExecutorSettings> AudioExecutorSettings::CreateDefault(
     const ModelAssets& model_assets, int max_sequence_length, Backend backend,
     bool bundled_with_main_model) {
-  AudioExecutorSettings settings(model_assets, max_sequence_length);
+  AudioExecutorSettings settings(model_assets, max_sequence_length,
+                                 /*num_threads=*/4);
   RETURN_IF_ERROR(settings.SetBackend(backend));
   settings.SetBundledWithMainModel(bundled_with_main_model);
   return settings;
@@ -68,6 +76,35 @@ bool AudioExecutorSettings::GetBundledWithMainModel() const {
 void AudioExecutorSettings::SetBundledWithMainModel(
     bool bundled_with_main_model) {
   bundled_with_main_model_ = bundled_with_main_model;
+}
+
+absl::StatusOr<
+    std::variant<std::string, std::shared_ptr<litert::lm::ScopedFile>>>
+AudioExecutorSettings::GetWeightCacheFile(absl::string_view suffix,
+                                          bool check_and_clean) const {
+  if (absl::StrContains(suffix, kAdapterName) && GetScopedAdapterCacheFile()) {
+    return GetScopedAdapterCacheFile();
+  } else if (absl::StrContains(suffix, kEncoderName) &&
+             GetScopedEncoderCacheFile()) {
+    return GetScopedEncoderCacheFile();
+  }
+
+  return ExecutorSettingsBase::GetWeightCacheFile(suffix, check_and_clean);
+}
+
+absl::StatusOr<
+    std::variant<std::string, std::shared_ptr<litert::lm::ScopedFile>>>
+AudioExecutorSettings::GetProgramCacheFile(absl::string_view suffix,
+                                           bool check_and_clean) const {
+  if (absl::StrContains(suffix, kAdapterName) &&
+      GetScopedAdapterProgramCacheFile()) {
+    return GetScopedAdapterProgramCacheFile();
+  } else if (absl::StrContains(suffix, kEncoderName) &&
+             GetScopedEncoderProgramCacheFile()) {
+    return GetScopedEncoderProgramCacheFile();
+  }
+
+  return ExecutorSettingsBase::GetProgramCacheFile(suffix, check_and_clean);
 }
 
 }  // namespace litert::lm

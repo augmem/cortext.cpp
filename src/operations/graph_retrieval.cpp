@@ -28,7 +28,10 @@
 #include <vector>
 #include <cctype>
 #include <cstdlib>
+#include <limits>
 #include <sstream>
+#include <map>
+#include <set>
 
 namespace cortext::operations
 {
@@ -47,6 +50,202 @@ EnvFlag (const char *name)
   std::transform (s.begin (), s.end (), s.begin (),
                   [] (unsigned char c) { return static_cast<char> (std::tolower (c)); });
   return s == "1" || s == "true" || s == "yes" || s == "on";
+}
+
+std::string
+CanonicalQueryText (const std::string &text)
+{
+  std::string out;
+  out.reserve (text.size ());
+  bool previous_space = false;
+  for (unsigned char c : text)
+    {
+      if (std::isalnum (c) != 0)
+        {
+          out.push_back (static_cast<char> (std::tolower (c)));
+          previous_space = false;
+        }
+      else if (!out.empty () && !previous_space)
+        {
+          out.push_back (' ');
+          previous_space = true;
+        }
+    }
+  if (!out.empty () && out.back () == ' ')
+    {
+      out.pop_back ();
+    }
+  return out;
+}
+
+bool
+CanonicalPhraseAppears (const std::string &canonical_query,
+                        const std::string &canonical_label)
+{
+  if (canonical_query.empty () || canonical_label.empty ())
+    {
+      return false;
+    }
+  return (" " + canonical_query + " ")
+             .find (" " + canonical_label + " ")
+         != std::string::npos;
+}
+
+bool
+IsRouteStopword (const std::string &token)
+{
+  static const std::set<std::string> stopwords = {
+    "a", "an", "and", "are", "as", "at", "be", "but", "by", "can",
+    "did", "do", "does", "for", "from", "had", "has", "have", "he",
+    "her", "hers", "him", "his", "how", "i", "if", "in", "is", "it",
+    "its", "me", "my", "of", "on", "or", "our", "she", "so", "that",
+    "the", "their", "them", "then", "there", "they", "this", "to",
+    "was", "we", "were", "what", "when", "where", "which", "who",
+    "why", "with", "you", "your"
+  };
+  return stopwords.count (token) > 0;
+}
+
+std::vector<std::string>
+RouteTokens (const std::string &text)
+{
+  std::vector<std::string> tokens;
+  std::istringstream in (CanonicalQueryText (text));
+  std::string token;
+  while (in >> token)
+    {
+      if (token.size () < 3 || IsRouteStopword (token))
+        {
+          continue;
+        }
+      tokens.push_back (token);
+    }
+  std::sort (tokens.begin (), tokens.end ());
+  tokens.erase (std::unique (tokens.begin (), tokens.end ()), tokens.end ());
+  return tokens;
+}
+
+double
+RouteTokenOverlapScore (const std::vector<std::string> &query_tokens,
+                        const std::string &text)
+{
+  if (query_tokens.empty () || text.empty ())
+    {
+      return 0.0;
+    }
+  const auto text_tokens = RouteTokens (text);
+  if (text_tokens.empty ())
+    {
+      return 0.0;
+    }
+  int overlap = 0;
+  for (const auto &token : query_tokens)
+    {
+      if (std::binary_search (text_tokens.begin (), text_tokens.end (),
+                              token))
+        {
+          ++overlap;
+        }
+    }
+  if (overlap == 0)
+    {
+      return 0.0;
+    }
+  const double query_coverage
+      = static_cast<double> (overlap)
+        / static_cast<double> (query_tokens.size ());
+  const double source_coverage
+      = static_cast<double> (overlap)
+        / static_cast<double> (std::min (query_tokens.size (),
+                                         text_tokens.size ()));
+  return core::Clamp (0.70 * query_coverage + 0.30 * source_coverage, 0.0,
+                      1.0);
+}
+
+std::string
+SignalTextPayload (const Signal &signal)
+{
+  if (!signal.payload.has_value () || signal.payload->empty ())
+    {
+      return {};
+    }
+  if (signal.modality != "text" && signal.mimetype != "text/plain")
+    {
+      return {};
+    }
+  return std::string (signal.payload->begin (), signal.payload->end ());
+}
+
+std::string
+BuildWorkingMemoryTextPayload (Store &store, const ProcessorContext &p_ctx,
+                               int max_slots, int max_chars)
+{
+  if (max_slots <= 0 || max_chars <= 0 || p_ctx.wm_slots.empty ())
+    {
+      return {};
+    }
+
+  std::string out;
+  int slots_seen = 0;
+  for (auto slot_it = p_ctx.wm_slots.rbegin ();
+       slot_it != p_ctx.wm_slots.rend () && slots_seen < max_slots;
+       ++slot_it)
+    {
+      bool added_slot_text = false;
+      for (auto rec_it = slot_it->signal_records.rbegin ();
+           rec_it != slot_it->signal_records.rend (); ++rec_it)
+        {
+          if (rec_it->blob_id.empty ())
+            {
+              continue;
+            }
+          if (!rec_it->modality.empty () && rec_it->modality != "text"
+              && rec_it->mime != "text/plain")
+            {
+              continue;
+            }
+          try
+            {
+              auto rows = store.Execute ("SELECT objstore_get(?1) AS payload",
+                                         { rec_it->blob_id });
+              if (rows.empty () || rows[0].count ("payload") == 0)
+                {
+                  continue;
+                }
+              const auto payload = store::BlobFromAny (rows[0].at ("payload"));
+              if (payload.empty ())
+                {
+                  continue;
+                }
+              if (!out.empty ())
+                {
+                  out.push_back ('\n');
+                }
+              const int remaining = max_chars - static_cast<int> (out.size ());
+              if (remaining <= 0)
+                {
+                  return out;
+                }
+              const int take = std::min<int> (
+                  remaining, static_cast<int> (payload.size ()));
+              out.append (reinterpret_cast<const char *> (payload.data ()),
+                          static_cast<size_t> (take));
+              added_slot_text = true;
+              if (static_cast<int> (out.size ()) >= max_chars)
+                {
+                  return out;
+                }
+            }
+          catch (...)
+            {
+            }
+        }
+      if (added_slot_text)
+        {
+          ++slots_seen;
+        }
+    }
+  return out;
 }
 
 long long
@@ -470,7 +669,7 @@ ScoreCandidateFacts (const std::vector<LinkedFactEvidence> &links,
       return out;
     }
 
-  const double f_eff = core::FocusBias (focus);
+  const double f_eff = core::RetrievalFocusBias (focus);
   const double s_eff = core::SensitivityBias (sensitivity);
   const double t_eff = core::Clamp (stability, 0.0, 1.0);
   const double fact_weight = core::Lerp (0.08, 0.28, f_eff)
@@ -534,6 +733,7 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
   (void)tx;
   retrieval_debug::ClearLastSelectedEmbeddingOrder ();
   retrieval_debug::ClearLastRankedCandidates ();
+  retrieval_debug::ClearLastRetrievalSummary ();
   auto elapsed_ms = [] (const std::chrono::steady_clock::time_point &start,
                         const std::chrono::steady_clock::time_point &end) {
     return std::chrono::duration_cast<
@@ -550,6 +750,13 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
   Store *store = context.GetStore ();
   if (!store)
     {
+      return;
+    }
+
+  if (EnvFlag ("CORTEXT_ABLATION_DISABLE_LTM_RETRIEVAL"))
+    {
+      context.AddOperationTiming (
+          "GraphRetrieve.ablation_disable_ltm_retrieval", 0.0);
       return;
     }
 
@@ -615,10 +822,12 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
         }
     }
 
-  const double f_eff = core::FocusBias (cfg.focus);
-  const double s_eff = core::SensitivityBias (cfg.sensitivity);
-  const int base_k = std::max (1, core::MaxResults (cfg.focus));
-  const int base_depth = std::max (1, core::GraphDepth (cfg.stability));
+  const double f_eff = core::RetrievalFocusBias (cfg.focus);
+  const double s_eff = core::RetrievalSensitivityBias (cfg.sensitivity);
+  const int base_seed_k = std::max (1, core::RetrievalMaxResults (cfg.focus));
+  const int base_k = std::max (
+      1, core::RetrievalGraphExpandedRagMaxItems (cfg.focus, cfg.stability));
+  const int base_depth = std::max (1, core::RetrievalGraphDepth (cfg.stability));
   const double min_edge_weight = core::MinEdgeWeight (cfg.focus);
   const int k_key = core::SparseKeySize (cfg.focus);
   const std::string sparse_key = core::SparseKey (q, k_key);
@@ -639,7 +848,8 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
       = ResolveResurfacingDecayScale (tx, ablation_override);
   const auto fact_query_mode = temporal::ResolveFactQueryMode (
       temporal::ToFactQueryMode (retrieval_mode));
-  const bool fact_layer_enabled = temporal::IsFactLayerEnabled ();
+  const bool fact_layer_enabled
+      = temporal::IsFactLayerEnabled () && !EnvFlag ("CORTEXT_DISABLE_FACTS");
   const bool disable_source_conf = EnvFlag ("CORTEXT_DISABLE_SOURCE_CONF");
   const bool disable_predictive_bonus
       = EnvFlag ("CORTEXT_DISABLE_PREDICTIVE_RETRIEVAL_BONUS");
@@ -683,10 +893,15 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
       metacognitive_mode = ProcessorContext::MetacognitiveMode::Normal;
     }
 
+  int seed_k = base_seed_k;
   int k = base_k;
   int depth = base_depth;
   if (metacognitive_mode == ProcessorContext::MetacognitiveMode::TotRecovery)
     {
+      seed_k = std::max (
+          base_seed_k,
+          static_cast<int> (
+              std::ceil ((1.15 + 0.35 * tot_confidence_scale) * base_seed_k)));
       k = std::max (
           base_k,
           static_cast<int> (
@@ -698,6 +913,89 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
             ? 0.0
             : core::Lerp (0.05, 0.20, f_eff)
                   * core::Lerp (1.0, 0.85, cfg.stability);
+  const bool preconsolidated_label_graph_enabled
+      = !EnvFlag ("CORTEXT_DISABLE_PRECONSOLIDATED_LABEL_GRAPH");
+  const double label_graph_weight
+      = preconsolidated_label_graph_enabled
+            ? core::RetrievalPreconsolidatedLabelGraphWeight (
+                cfg.focus, cfg.sensitivity, cfg.stability)
+            : 0.0;
+  const int label_graph_top_labels = std::max (
+      1, core::RetrievalPreconsolidatedLabelGraphTopLabels (cfg.focus,
+                                                            cfg.stability));
+  const double label_graph_min_query_score
+      = core::RetrievalPreconsolidatedLabelGraphMinQueryScore (
+          cfg.focus, cfg.sensitivity, cfg.stability);
+  const double label_graph_relation_weight
+      = core::RetrievalPreconsolidatedLabelRelationWeight (
+          cfg.focus, cfg.sensitivity, cfg.stability);
+  const double label_graph_degree_damping
+      = core::RetrievalPreconsolidatedLabelGraphDegreeDamping (
+          cfg.focus, cfg.sensitivity, cfg.stability);
+  const int label_graph_seed_sources = std::max (
+      0, core::RetrievalPreconsolidatedLabelGraphSeedSources (cfg.focus,
+                                                             cfg.stability));
+  const int durable_source_text_seed_sources = std::max (
+      0, core::RetrievalDurableSourceTextSeedSources (cfg.focus,
+                                                     cfg.stability));
+  const double durable_source_text_min_score
+      = core::RetrievalDurableSourceTextMinScore (
+          cfg.focus, cfg.sensitivity, cfg.stability);
+  const int fact_text_seed_count = std::max (
+      0, core::RetrievalFactTextSeedCount (cfg.focus, cfg.stability));
+  const double fact_text_seed_min_score
+      = core::RetrievalFactTextSeedMinScore (
+          cfg.focus, cfg.sensitivity, cfg.stability);
+  const bool source_seed_graph_expansion_enabled
+      = !EnvFlag ("CORTEXT_DISABLE_SOURCE_SEED_GRAPH_EXPANSION");
+  const bool temporal_retrieval_enabled
+      = !EnvFlag ("CORTEXT_DISABLE_TEMPORAL_RETRIEVAL");
+  const int graph_expanded_temporal_window
+      = temporal_retrieval_enabled
+            ? std::max (0, core::RetrievalGraphExpandedRagTemporalWindow (
+                               cfg.focus, cfg.stability))
+            : 0;
+  const double graph_expanded_graph_weight
+      = core::RetrievalGraphExpandedRagGraphWeight (
+          cfg.focus, cfg.sensitivity, cfg.stability);
+  const double graph_expanded_relation_weight
+      = core::RetrievalGraphExpandedRagRelationWeight (
+          cfg.focus, cfg.sensitivity, cfg.stability);
+  const double graph_expanded_temporal_weight
+      = temporal_retrieval_enabled
+            ? core::RetrievalGraphExpandedRagTemporalWeight (
+                cfg.focus, cfg.sensitivity, cfg.stability)
+            : 0.0;
+  const double graph_expanded_fact_weight
+      = core::RetrievalGraphExpandedRagFactWeight (
+          cfg.focus, cfg.sensitivity, cfg.stability);
+  const int text_query_wm_slots
+      = std::max (0, core::RetrievalTextQueryWMSlots (cfg.focus,
+                                                      cfg.stability));
+  const int text_query_wm_chars
+      = std::max (0, core::RetrievalTextQueryWMChars (cfg.focus,
+                                                     cfg.stability));
+  const bool label_token_text_route_enabled = EnvFlag (
+      "CORTEXT_ENABLE_LABEL_TOKEN_TEXT_ROUTE");
+  std::string query_text_payload = SignalTextPayload (signal);
+  int appended_wm_chars = 0;
+  int query_text_token_count = 0;
+  if (text_query_wm_slots > 0 && text_query_wm_chars > 0)
+    {
+      const std::string wm_text = BuildWorkingMemoryTextPayload (
+          *store, p_ctx, text_query_wm_slots, text_query_wm_chars);
+      if (!wm_text.empty ())
+        {
+          if (!query_text_payload.empty ())
+            {
+              query_text_payload.push_back ('\n');
+            }
+          query_text_payload += wm_text;
+          appended_wm_chars = static_cast<int> (wm_text.size ());
+        }
+    }
+  query_text_token_count
+      = static_cast<int> (RouteTokens (query_text_payload).size ());
 
   // Seed vector retrieval via sqlite-vec KNN query.
   struct Scored
@@ -717,14 +1015,20 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
     double fact_boost;
     double fact_stale_penalty;
     int linked_fact_count;
+    double label_graph_boost;
+    int label_match_count;
+    double durable_source_boost;
+    int durable_source_count;
     bool is_association;
     bool is_label;
     Eigen::VectorXf vec;
     Eigen::VectorXf ctx;
   };
   std::vector<Scored> seeds;
-  seeds.reserve (static_cast<size_t> (k));
+  seeds.reserve (static_cast<size_t> (seed_k));
+  std::unordered_map<long long, double> durable_source_text_seed_scores;
   int64_t procedural_seed_count = 0;
+  int64_t hierarchical_label_seed_count = 0;
 
   const std::string latest_reconstruction_join
       = disable_constructive_recall
@@ -746,7 +1050,7 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
   std::vector<float> q_vec (q.data (), q.data () + q.size ());
 
   std::unordered_set<long long> seen_seed_embeddings;
-
+  const auto &summary_cache = p_ctx.summary_cache;
   auto append_seeds = [&] (const std::string &sql,
                            const std::vector<std::any> &params,
                            const char *timing_key) {
@@ -841,12 +1145,16 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
                                  0,
                                  0.0,
                                  0.0,
-                                 0.0,
-                                 0.0,
-                                 0,
-                                 is_association,
-                                 is_label,
-                                 Eigen::VectorXf (),
+	                                 0.0,
+	                                 0.0,
+	                                 0,
+	                                 0.0,
+	                                 0,
+	                                 0.0,
+	                                 0,
+	                                 is_association,
+	                                 is_label,
+	                                 Eigen::VectorXf (),
                                  Eigen::VectorXf () });
       }
   };
@@ -861,13 +1169,14 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
         + "JOIN embeddings e ON e.embedding_id = "
         + current_embedding_expr
         + " "
-          "WHERE e.embedding MATCH ? AND k = ? "
-          "AND m.kind != 'WORKING' "
-          "AND (m.kind != 'ASSOCIATION' OR EXISTS ("
+	          "WHERE e.embedding MATCH ? AND k = ? "
+	          "AND m.kind != 'WORKING' "
+	          "AND m.kind != 'LABEL' "
+	          "AND (m.kind != 'ASSOCIATION' OR EXISTS ("
           "  SELECT 1 FROM associations a "
           "  WHERE a.source_memory_id = m.memory_id "
           "    AND a.edge_type = 'derived_from'))";
-  append_seeds (seed_sql, { q_vec, static_cast<long long> (k) },
+  append_seeds (seed_sql, { q_vec, static_cast<long long> (seed_k) },
                 "GraphRetrieve.seed_sql");
 
   const double k_summary_raw
@@ -875,7 +1184,169 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
         * core::Lerp (1.0, 0.85, cfg.stability);
   const int k_summary
       = std::max (1, static_cast<int> (std::round (k_summary_raw)));
-  const auto &summary_cache = p_ctx.summary_cache;
+  auto build_ranked_query_label_ids = [&] {
+    std::map<long long, double> query_label_scores;
+    if (!preconsolidated_label_graph_enabled || label_graph_weight <= 0.0)
+      {
+        return std::vector<std::pair<double, long long>> {};
+      }
+    auto add_dynamic_label_by_key = [&] (const std::string &label_key,
+                                         double query_score) {
+      if (label_key.empty () || query_score <= 0.0)
+        {
+          return;
+        }
+      try
+        {
+          auto rows = store->Execute (
+              "SELECT memory_id FROM memories "
+              "WHERE kind = 'LABEL' AND source_id = ? LIMIT 1",
+              { label_key });
+          if (rows.empty ())
+            {
+              return;
+            }
+          const long long label_id = AnyToInt64 (rows[0].at ("memory_id"));
+          if (label_id <= 0)
+            {
+              return;
+            }
+          auto &score = query_label_scores[label_id];
+          score = std::max (score, query_score);
+        }
+      catch (...)
+        {
+        }
+    };
+    try
+      {
+        bool label_bank_attached = false;
+        auto dbs = store->Execute ("PRAGMA database_list", {});
+        for (const auto &row : dbs)
+          {
+            auto it = row.find ("name");
+            if (it != row.end () && it->second.type () == typeid (std::string)
+                && std::any_cast<std::string> (it->second)
+                       == "cortext_label_bank")
+              {
+                label_bank_attached = true;
+                break;
+              }
+          }
+        if (label_bank_attached)
+          {
+            const int static_label_k = std::max (label_graph_top_labels * 2, 8);
+            auto rows = store->Execute (
+                "SELECT key, distance "
+                "FROM cortext_label_bank.label_bank_vec "
+                "WHERE embedding MATCH ? AND k = ? "
+                "ORDER BY distance",
+                { q_vec, static_cast<long long> (static_label_k) });
+            for (const auto &row : rows)
+              {
+                auto key_it = row.find ("key");
+                if (key_it == row.end ()
+                    || key_it->second.type () != typeid (std::string))
+                  {
+                    continue;
+                  }
+                const double distance
+                    = row.count ("distance")
+                              && row.at ("distance").type () == typeid (double)
+                          ? std::any_cast<double> (row.at ("distance"))
+                          : 0.0;
+                const double query_score = core::Clamp (
+                    1.0 / (1.0 + distance), 0.0, 1.0);
+                if (query_score >= label_graph_min_query_score)
+                  {
+                    add_dynamic_label_by_key (
+                        std::any_cast<std::string> (key_it->second),
+                        query_score);
+                  }
+              }
+          }
+      }
+    catch (...)
+      {
+      }
+    for (const auto &entry : summary_cache)
+      {
+        if (!entry.is_label || entry.embedding.size () != q.size ()
+            || entry.embedding_norm <= 1e-9f)
+          {
+            continue;
+          }
+        const double sim
+            = static_cast<double> (entry.embedding.dot (q))
+              / static_cast<double> (entry.embedding_norm);
+        const double query_score = core::Clamp (std::max (0.0, sim), 0.0, 1.0);
+        if (query_score < label_graph_min_query_score)
+          {
+            continue;
+          }
+        auto &score = query_label_scores[entry.memory_id];
+        score = std::max (score, query_score);
+      }
+
+    const std::string query_text = CanonicalQueryText (query_text_payload);
+      if (!query_text.empty ())
+        {
+          try
+            {
+              auto rows = store->Execute (
+                "SELECT memory_id, COALESCE(label, source_id, '') AS label_text "
+                "FROM memories WHERE kind = 'LABEL'",
+                {});
+            for (const auto &row : rows)
+              {
+                const long long label_id = AnyToInt64 (row.at ("memory_id"));
+                const std::string label_text = AnyToString (
+                    row.at ("label_text"));
+                if (label_id <= 0 || label_text.empty ())
+                  {
+                    continue;
+                  }
+                const std::string label_query_text = CanonicalQueryText (
+                    label_text);
+                double text_score = 0.0;
+                if (CanonicalPhraseAppears (query_text, label_query_text))
+                  {
+                    text_score = 1.0;
+                  }
+                else if (label_token_text_route_enabled)
+                  {
+                    text_score = RouteTokenOverlapScore (
+                        RouteTokens (query_text), label_text);
+                  }
+                if (text_score <= 0.0)
+                  {
+                    continue;
+                  }
+                auto &score = query_label_scores[label_id];
+                score = std::max (score, text_score);
+              }
+          }
+        catch (...)
+          {
+          }
+      }
+
+    std::vector<std::pair<double, long long>> ranked_query_labels;
+    ranked_query_labels.reserve (query_label_scores.size ());
+    for (const auto &[label_id, score] : query_label_scores)
+      {
+        ranked_query_labels.emplace_back (score, label_id);
+      }
+    std::sort (ranked_query_labels.begin (), ranked_query_labels.end (),
+               [] (const auto &a, const auto &b) { return a.first > b.first; });
+    if (static_cast<int> (ranked_query_labels.size ()) > label_graph_top_labels)
+      {
+        ranked_query_labels.resize (
+            static_cast<size_t> (label_graph_top_labels));
+      }
+    return ranked_query_labels;
+  };
+  auto ranked_query_label_ids = build_ranked_query_label_ids;
   if (k_summary > 0 && !summary_cache.empty ())
     {
       const auto t_start = std::chrono::steady_clock::now ();
@@ -883,10 +1354,14 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
       ranked.reserve (summary_cache.size ());
       for (size_t i = 0; i < summary_cache.size (); ++i)
         {
-          const auto &entry = summary_cache[i];
-          if (entry.embedding.size () != q.size ())
-            {
-              continue;
+	          const auto &entry = summary_cache[i];
+	          if (entry.is_label)
+	            {
+	              continue;
+	            }
+	          if (entry.embedding.size () != q.size ())
+	            {
+	              continue;
             }
           if (entry.embedding_norm <= 1e-9f)
             {
@@ -927,17 +1402,201 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
                   0,
                   0.0,
                   0.0,
-                  0.0,
-                  0.0,
-                  0,
-                  entry.is_association,
-                  entry.is_label,
-                  entry.embedding,
+	                  0.0,
+	                  0.0,
+	                  0,
+	                  0.0,
+	                  0,
+	                  0.0,
+	                  0,
+	                  entry.is_association,
+	                  entry.is_label,
+	                  entry.embedding,
                   Eigen::VectorXf () });
             }
         }
       const auto t_end = std::chrono::steady_clock::now ();
       context.AddOperationTiming ("GraphRetrieve.summary_cache",
+                                  elapsed_ms (t_start, t_end));
+    }
+
+  if (EnvFlag ("CORTEXT_EXPERIMENTAL_CLUSTER_LABEL_RETRIEVAL")
+      && !summary_cache.empty ())
+    {
+      const auto t_start = std::chrono::steady_clock::now ();
+      const int requested_clusters = std::max (
+          1, core::RetrievalClusterLabelK (cfg.focus, cfg.stability));
+      const int cluster_take = std::max (
+          1, core::RetrievalClusterLabelM (cfg.focus, cfg.stability));
+      const int labels_per_cluster = std::max (
+          1, core::RetrievalClusterLabelN (cfg.focus, cfg.sensitivity,
+                                           cfg.stability));
+
+      std::vector<size_t> label_indices;
+      label_indices.reserve (summary_cache.size ());
+      for (size_t i = 0; i < summary_cache.size (); ++i)
+        {
+          const auto &entry = summary_cache[i];
+          if (!entry.is_label || entry.embedding.size () != q.size ()
+              || entry.embedding_norm <= 1e-9f)
+            {
+              continue;
+            }
+          label_indices.push_back (i);
+        }
+
+      const int label_count = static_cast<int> (label_indices.size ());
+      if (label_count > 0)
+        {
+          const int cluster_count = std::min (requested_clusters, label_count);
+          std::vector<Eigen::VectorXf> centroids;
+          centroids.reserve (static_cast<size_t> (cluster_count));
+          for (int c = 0; c < cluster_count; ++c)
+            {
+              const int idx = (c * label_count) / cluster_count;
+              centroids.push_back (
+                  summary_cache[label_indices[static_cast<size_t> (idx)]].embedding);
+            }
+
+          std::vector<int> assignments (static_cast<size_t> (label_count), 0);
+          for (int iter = 0; iter < 25; ++iter)
+            {
+              bool changed = false;
+              for (int i = 0; i < label_count; ++i)
+                {
+                  const auto &v
+                      = summary_cache[label_indices[static_cast<size_t> (i)]].embedding;
+                  int best_cluster = 0;
+                  double best_dist = std::numeric_limits<double>::max ();
+                  for (int c = 0; c < cluster_count; ++c)
+                    {
+                      const double dist = static_cast<double> (
+                          (v - centroids[static_cast<size_t> (c)]).squaredNorm ());
+                      if (dist < best_dist)
+                        {
+                          best_dist = dist;
+                          best_cluster = c;
+                        }
+                    }
+                  if (assignments[static_cast<size_t> (i)] != best_cluster)
+                    {
+                      assignments[static_cast<size_t> (i)] = best_cluster;
+                      changed = true;
+                    }
+                }
+
+              std::vector<Eigen::VectorXf> next;
+              std::vector<int> counts (static_cast<size_t> (cluster_count), 0);
+              next.reserve (static_cast<size_t> (cluster_count));
+              for (int c = 0; c < cluster_count; ++c)
+                {
+                  next.push_back (Eigen::VectorXf::Zero (q.size ()));
+                }
+              for (int i = 0; i < label_count; ++i)
+                {
+                  const int c = assignments[static_cast<size_t> (i)];
+                  next[static_cast<size_t> (c)]
+                      += summary_cache[label_indices[static_cast<size_t> (i)]].embedding;
+                  counts[static_cast<size_t> (c)]++;
+                }
+              for (int c = 0; c < cluster_count; ++c)
+                {
+                  if (counts[static_cast<size_t> (c)] > 0)
+                    {
+                      next[static_cast<size_t> (c)]
+                          /= static_cast<float> (counts[static_cast<size_t> (c)]);
+                    }
+                  else
+                    {
+                      next[static_cast<size_t> (c)] = centroids[static_cast<size_t> (c)];
+                    }
+                }
+              centroids = std::move (next);
+              if (!changed)
+                {
+                  break;
+                }
+            }
+
+          std::vector<std::pair<double, int>> ranked_clusters;
+          ranked_clusters.reserve (static_cast<size_t> (cluster_count));
+          for (int c = 0; c < cluster_count; ++c)
+            {
+              ranked_clusters.emplace_back (
+                  static_cast<double> ((centroids[static_cast<size_t> (c)] - q)
+                                           .squaredNorm ()),
+                  c);
+            }
+          std::sort (ranked_clusters.begin (), ranked_clusters.end (),
+                     [] (const auto &a, const auto &b) {
+                       return a.first < b.first;
+                     });
+
+          const int take_clusters
+              = std::min (cluster_take, static_cast<int> (ranked_clusters.size ()));
+          for (int rank = 0; rank < take_clusters; ++rank)
+            {
+              const int cluster_id = ranked_clusters[static_cast<size_t> (rank)].second;
+              std::vector<std::pair<double, size_t>> ranked_labels;
+              for (int i = 0; i < label_count; ++i)
+                {
+                  if (assignments[static_cast<size_t> (i)] != cluster_id)
+                    {
+                      continue;
+                    }
+                  const size_t cache_idx = label_indices[static_cast<size_t> (i)];
+                  const auto &entry = summary_cache[cache_idx];
+                  const double sim
+                      = static_cast<double> (entry.embedding.dot (q))
+                        / static_cast<double> (entry.embedding_norm);
+                  ranked_labels.emplace_back (sim, cache_idx);
+                }
+              std::sort (ranked_labels.begin (), ranked_labels.end (),
+                         [] (const auto &a, const auto &b) {
+                           return a.first > b.first;
+                         });
+              const int take_labels
+                  = std::min (labels_per_cluster,
+                              static_cast<int> (ranked_labels.size ()));
+              for (int i = 0; i < take_labels; ++i)
+                {
+                  const auto &[sim, cache_idx] = ranked_labels[static_cast<size_t> (i)];
+                  const auto &entry = summary_cache[cache_idx];
+                  if (!seen_seed_embeddings.insert (entry.embedding_id).second)
+                    {
+                      continue;
+                    }
+                  seeds.push_back (Scored{
+                      entry.embedding_id,
+                      entry.memory_id,
+                      0,
+                      sim,
+                      0.0,
+                      1.0,
+                      0.0,
+                      0.0,
+                      0.0,
+                      0,
+                      0.0,
+                      0.0,
+	                      0.0,
+	                      0.0,
+	                      0,
+	                      0.0,
+	                      0,
+	                      0.0,
+	                      0,
+	                      false,
+	                      true,
+	                      entry.embedding,
+                      Eigen::VectorXf () });
+                  hierarchical_label_seed_count++;
+                }
+            }
+        }
+
+      const auto t_end = std::chrono::steady_clock::now ();
+      context.AddOperationTiming ("GraphRetrieve.cluster_label_cache",
                                   elapsed_ms (t_start, t_end));
     }
 
@@ -1047,12 +1706,16 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
                                            0,
                                            0.0,
                                            0.0,
-                                           0.0,
-                                           0.0,
-                                           0,
-                                           is_association,
-                                           is_label,
-                                           Eigen::VectorXf (),
+	                                           0.0,
+	                                           0.0,
+	                                           0,
+	                                           0.0,
+	                                           0,
+	                                           0.0,
+	                                           0,
+	                                           is_association,
+	                                           is_label,
+	                                           Eigen::VectorXf (),
                                            Eigen::VectorXf () });
                   ++procedural_seed_count;
                 }
@@ -1071,6 +1734,39 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
       candidate_fact_links;
   std::unordered_map<std::string, double> current_pair_similarity;
   std::unordered_map<std::string, std::string> current_pair_object;
+  std::unordered_set<long long> seen_fact_ids;
+  int fact_text_candidate_count = 0;
+  int fact_text_rejected_low_score_count = 0;
+  int fact_text_match_count = 0;
+  double fact_text_best_score = 0.0;
+
+  auto add_matched_fact = [&] (const store::FactRecord &record,
+                               double query_similarity) {
+    if (record.fact_id <= 0 || !seen_fact_ids.insert (record.fact_id).second)
+      {
+        return;
+      }
+    matched_facts.push_back (
+        { record, store::ScoreFactRecord (record, fact_query_mode,
+                                          retrieval_ts),
+          query_similarity });
+    if (retrieval_mode == temporal::RetrievalMode::Current)
+      {
+        const std::string key
+            = FactPairKey (record.canonical_subject,
+                           record.canonical_predicate);
+        auto it = current_pair_similarity.find (key);
+        if (it == current_pair_similarity.end ())
+          {
+            current_pair_similarity.emplace (key, query_similarity);
+          }
+        else
+          {
+            it->second = std::max (it->second, query_similarity);
+          }
+        current_pair_object[key] = record.canonical_object;
+      }
+  };
 
   const int k_fact = std::max (
       2, static_cast<int> (std::round (core::Lerp (12.0, 3.0, f_eff)
@@ -1153,42 +1849,141 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
     context.AddOperationTiming ("GraphRetrieve.fact_seed_sql",
                                 elapsed_ms (t_start, t_end));
 
-    std::unordered_set<long long> seen_fact_ids;
     for (const auto &row : rows)
       {
         const store::FactRecord record = BuildFactRecord (row);
-        if (record.fact_id <= 0 || !seen_fact_ids.insert (record.fact_id).second)
-          {
-            continue;
-          }
         const auto it_dist = row.find ("distance");
         const double query_similarity
             = 1.0
               / (1.0
                  + (it_dist != row.end () ? AnyToDouble (it_dist->second, 0.0)
                                           : 0.0));
-        matched_facts.push_back (
-            { record, store::ScoreFactRecord (record, fact_query_mode,
-                                              retrieval_ts),
-              query_similarity });
-        if (retrieval_mode == temporal::RetrievalMode::Current)
-          {
-            const std::string key
-                = FactPairKey (record.canonical_subject,
-                               record.canonical_predicate);
-            auto it = current_pair_similarity.find (key);
-            if (it == current_pair_similarity.end ())
-              {
-                current_pair_similarity.emplace (key, query_similarity);
-              }
-            else
-              {
-                it->second = std::max (it->second, query_similarity);
-              }
-            current_pair_object[key] = record.canonical_object;
-          }
+        add_matched_fact (record, query_similarity);
       }
   }
+
+  if (fact_layer_enabled && fact_text_seed_count > 0
+      && fact_text_seed_min_score > 0.0 && !query_text_payload.empty ())
+    {
+      const auto query_tokens = RouteTokens (query_text_payload);
+      if (!query_tokens.empty ())
+        {
+          std::ostringstream sql;
+          sql << "SELECT fa.fact_id, fa.subject, fa.predicate, fa.object, "
+                 "fa.canonical_subject, fa.canonical_predicate, "
+                 "fa.canonical_object, fa.valid_start_ts, fa.valid_end_ts, "
+                 "fa.recorded_at_ts, fa.superseded_at_ts, fa.confidence, "
+                 "fa.summary_memory_id, COALESCE(fc.embedding_id, 0) AS embedding_id, "
+                 "COALESCE(fc.fact_text, fa.subject || ' ' || fa.predicate || ' ' || fa.object) "
+                 "AS fact_text, COALESCE(fc.is_current, 0) AS is_current, "
+                 "COALESCE(fa.support_mass, 0.0) AS support_mass, "
+                 "COALESCE(fa.source_diversity, 0) AS source_diversity, "
+                 "COALESCE(fa.contradiction_mass, 0.0) AS contradiction_mass, "
+                 "COALESCE(fa.confirmation_count, 0) AS confirmation_count, "
+                 "COALESCE(fa.challenge_count, 0) AS challenge_count, "
+                 "COALESCE(fa.compressed_support_count, 0) AS compressed_support_count, "
+                 "COALESCE(fa.last_confirmation_ts, 0) AS last_confirmation_ts, "
+                 "fa.last_challenge_ts, "
+                 "COALESCE(fa.severity_class, 'medium') AS severity_class, "
+                 "COALESCE(fa.lifecycle_state, 'active') AS lifecycle_state, "
+                 "fa.archived_at, "
+                 "COALESCE(fa.last_maintenance_ts, 0) AS last_maintenance_ts, "
+                 "(SELECT COUNT(*) FROM fact_evidence fe "
+                 " LEFT JOIN memories m ON m.memory_id = fe.source_memory_id "
+                 " WHERE fe.fact_id = fa.fact_id AND m.memory_id IS NOT NULL) "
+                 "AS evidence_count "
+                 "FROM fact_assertions fa "
+                 "LEFT JOIN fact_cache fc ON fc.fact_id = fa.fact_id "
+                 "WHERE EXISTS (SELECT 1 FROM fact_evidence fe "
+                 "              JOIN memories m ON m.memory_id = fe.source_memory_id "
+                 "              WHERE fe.fact_id = fa.fact_id) ";
+          switch (retrieval_mode)
+            {
+            case temporal::RetrievalMode::Current:
+              sql << "AND COALESCE(fa.lifecycle_state, 'active') != 'archived' "
+                     "AND (fa.valid_start_ts IS NULL OR fa.valid_start_ts <= ?) "
+                     "AND (fa.valid_end_ts IS NULL OR fa.valid_end_ts > ?) "
+                     "AND fa.recorded_at_ts <= ? "
+                     "AND (fa.superseded_at_ts IS NULL OR fa.superseded_at_ts > ?) ";
+              break;
+            case temporal::RetrievalMode::ValidAt:
+              sql << "AND (fa.valid_start_ts IS NULL OR fa.valid_start_ts <= ?) "
+                     "AND (fa.valid_end_ts IS NULL OR fa.valid_end_ts > ?) ";
+              break;
+            case temporal::RetrievalMode::KnownAt:
+              sql << "AND fa.recorded_at_ts <= ? "
+                     "AND (fa.superseded_at_ts IS NULL OR fa.superseded_at_ts > ?) ";
+              break;
+            }
+
+          std::vector<std::any> params;
+          switch (retrieval_mode)
+            {
+            case temporal::RetrievalMode::Current:
+              params.push_back (static_cast<long long> (retrieval_ts));
+              params.push_back (static_cast<long long> (retrieval_ts));
+              params.push_back (static_cast<long long> (retrieval_ts));
+              params.push_back (static_cast<long long> (retrieval_ts));
+              break;
+            case temporal::RetrievalMode::ValidAt:
+              params.push_back (static_cast<long long> (retrieval_ts));
+              params.push_back (static_cast<long long> (retrieval_ts));
+              break;
+            case temporal::RetrievalMode::KnownAt:
+              params.push_back (static_cast<long long> (retrieval_ts));
+              params.push_back (static_cast<long long> (retrieval_ts));
+              break;
+            }
+
+          const auto t_start = std::chrono::steady_clock::now ();
+          auto rows = store->Execute (sql.str (), params);
+          const auto t_end = std::chrono::steady_clock::now ();
+          context.AddOperationTiming ("GraphRetrieve.fact_text_seed_sql",
+                                      elapsed_ms (t_start, t_end));
+          fact_text_candidate_count = static_cast<int> (rows.size ());
+
+          struct TextMatchedFact
+          {
+            store::FactRecord record;
+            double score = 0.0;
+          };
+          std::vector<TextMatchedFact> text_matches;
+          text_matches.reserve (rows.size ());
+          for (const auto &row : rows)
+            {
+              const auto record = BuildFactRecord (row);
+              const double score = RouteTokenOverlapScore (
+                  query_tokens, record.fact_text);
+              fact_text_best_score = std::max (fact_text_best_score, score);
+              if (score < fact_text_seed_min_score)
+                {
+                  ++fact_text_rejected_low_score_count;
+                  continue;
+                }
+              text_matches.push_back ({ record, score });
+            }
+          std::sort (text_matches.begin (), text_matches.end (),
+                     [] (const TextMatchedFact &a,
+                         const TextMatchedFact &b) {
+                       if (a.score != b.score)
+                         {
+                           return a.score > b.score;
+                         }
+                       return a.record.fact_id > b.record.fact_id;
+                     });
+          if (text_matches.size ()
+              > static_cast<size_t> (fact_text_seed_count))
+            {
+              text_matches.resize (
+                  static_cast<size_t> (fact_text_seed_count));
+            }
+          fact_text_match_count = static_cast<int> (text_matches.size ());
+          for (const auto &match : text_matches)
+            {
+              add_matched_fact (match.record, match.score);
+            }
+        }
+    }
 
   if (fact_layer_enabled && !matched_facts.empty ())
     {
@@ -1350,11 +2145,19 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
 
   // V2: Graph expansion from seed memory IDs using ASSOCIATIONS table.
   std::unordered_set<long long> expanded_memory_ids;
+  std::vector<long long> source_seed_memory_ids;
+  std::unordered_set<long long> seen_source_seed_memory_ids;
+  std::unordered_map<long long, double> source_seed_expansion_scores;
   for (const auto &s : seeds)
     {
       if (s.memory_id > 0)
         {
           expanded_memory_ids.insert (s.memory_id);
+          if (!s.is_association && !s.is_label
+              && seen_source_seed_memory_ids.insert (s.memory_id).second)
+            {
+              source_seed_memory_ids.push_back (s.memory_id);
+            }
         }
     }
   for (const auto &[memory_id, links] : candidate_fact_links)
@@ -1362,6 +2165,234 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
       if (!links.empty () && memory_id > 0)
         {
           expanded_memory_ids.insert (memory_id);
+        }
+    }
+
+  if (source_seed_graph_expansion_enabled && !source_seed_memory_ids.empty ())
+    {
+      try
+        {
+          const auto t_start = std::chrono::steady_clock::now ();
+          std::string seed_sql
+              = "SELECT memory_id, source_id, start_ts FROM memories "
+                "WHERE memory_id IN (";
+          std::vector<std::any> seed_params;
+          seed_params.reserve (source_seed_memory_ids.size ());
+          for (size_t i = 0; i < source_seed_memory_ids.size (); ++i)
+            {
+              if (i > 0)
+                seed_sql += ",";
+              seed_sql += "?";
+              seed_params.push_back (source_seed_memory_ids[i]);
+            }
+          seed_sql += ") AND kind NOT IN ('WORKING', 'LABEL', 'ASSOCIATION')";
+          const auto seed_rows = store->Execute (seed_sql, seed_params);
+          if (graph_expanded_temporal_window > 0)
+            {
+              for (const auto &seed_row : seed_rows)
+                {
+                  const long long seed_id
+                      = AnyToInt64 (seed_row.at ("memory_id"));
+                  const std::string source_id
+                      = AnyToString (seed_row.at ("source_id"));
+                  const long long start_ts
+                      = AnyToInt64 (seed_row.at ("start_ts"));
+                  if (seed_id <= 0 || source_id.empty () || start_ts <= 0)
+                    continue;
+                  auto rows = store->Execute (
+                      "SELECT memory_id, ABS(start_ts - ?) AS distance "
+                      "FROM memories "
+                      "WHERE source_id = ? "
+                      "  AND memory_id != ? "
+                      "  AND kind NOT IN ('WORKING', 'LABEL', 'ASSOCIATION') "
+                      "ORDER BY distance ASC, start_ts DESC "
+                      "LIMIT ?",
+                      { start_ts, source_id, seed_id,
+                        static_cast<long long> (
+                            graph_expanded_temporal_window) });
+                  int rank = 0;
+                  for (const auto &row : rows)
+                    {
+                      const long long memory_id
+                          = AnyToInt64 (row.at ("memory_id"));
+                      if (memory_id <= 0)
+                        continue;
+                      expanded_memory_ids.insert (memory_id);
+                      auto &score = source_seed_expansion_scores[memory_id];
+                      score = std::max (
+                          score, graph_expanded_temporal_weight
+                                     / static_cast<double> (rank + 2));
+                      ++rank;
+                    }
+                }
+            }
+          const auto t_end = std::chrono::steady_clock::now ();
+          context.AddOperationTiming (
+              "GraphRetrieve.source_seed_temporal_expansion",
+              elapsed_ms (t_start, t_end));
+        }
+      catch (...)
+        {
+        }
+
+      if (graph_expanded_graph_weight > 0.0)
+        {
+          try
+            {
+              const auto t_start = std::chrono::steady_clock::now ();
+              std::string sql = "WITH seed(id) AS (VALUES ";
+              std::vector<std::any> params;
+              params.reserve (source_seed_memory_ids.size () + 4);
+              for (size_t i = 0; i < source_seed_memory_ids.size (); ++i)
+                {
+                  if (i > 0)
+                    sql += ",";
+                  sql += "(?)";
+                  params.push_back (source_seed_memory_ids[i]);
+                }
+              params.push_back (graph_expanded_relation_weight);
+              params.push_back (graph_expanded_relation_weight);
+              sql += "), seed_cue AS ("
+                     "  SELECT df.source_memory_id AS cue_id, seed.id AS seed_id, "
+                     "         MAX(df.weight) AS score "
+                     "  FROM seed "
+                     "  JOIN associations df ON df.target_memory_id = seed.id "
+                     "    AND df.edge_type = 'derived_from' "
+                     "  JOIN memories cm ON cm.memory_id = df.source_memory_id "
+                     "    AND cm.kind = 'ASSOCIATION' "
+                     "  GROUP BY df.source_memory_id, seed.id "
+                     "), seed_label AS ("
+                     "  SELECT hl.target_memory_id AS label_id, "
+                     "         MAX(sc.score * hl.weight) AS score "
+                     "  FROM seed_cue sc "
+                     "  JOIN associations hl ON hl.source_memory_id = sc.cue_id "
+                     "    AND hl.edge_type = 'has_label' "
+                     "  JOIN memories lm ON lm.memory_id = hl.target_memory_id "
+                     "    AND lm.kind = 'LABEL' "
+                     "  GROUP BY hl.target_memory_id "
+                     "), related_label AS ("
+                     "  SELECT r.target_memory_id AS label_id, "
+                     "         MAX(sl.score * ? * r.weight) AS score "
+                     "  FROM seed_label sl "
+                     "  JOIN associations r ON r.source_memory_id = sl.label_id "
+                     "    AND r.edge_type IN ('co_occurs', 'implies', "
+                     "                        'contradicts', 'reinforces', "
+                     "                        'causes', 'similar_to') "
+                     "  JOIN memories lm ON lm.memory_id = r.target_memory_id "
+                     "    AND lm.kind = 'LABEL' "
+                     "  GROUP BY r.target_memory_id "
+                     "  UNION ALL "
+                     "  SELECT r.source_memory_id AS label_id, "
+                     "         MAX(sl.score * ? * r.weight) AS score "
+                     "  FROM seed_label sl "
+                     "  JOIN associations r ON r.target_memory_id = sl.label_id "
+                     "    AND r.edge_type IN ('co_occurs', 'implies', "
+                     "                        'contradicts', 'reinforces', "
+                     "                        'causes', 'similar_to') "
+                     "  JOIN memories lm ON lm.memory_id = r.source_memory_id "
+                     "    AND lm.kind = 'LABEL' "
+                     "  GROUP BY r.source_memory_id "
+                     "), routed_label AS ("
+                     "  SELECT label_id, score FROM seed_label "
+                     "  UNION ALL "
+                     "  SELECT label_id, score FROM related_label "
+                     "), routed_cue AS ("
+                     "  SELECT hl.source_memory_id AS cue_id, "
+                     "         MAX(rl.score * hl.weight) AS score "
+                     "  FROM routed_label rl "
+                     "  JOIN associations hl ON hl.target_memory_id = rl.label_id "
+                     "    AND hl.edge_type = 'has_label' "
+                     "  JOIN memories cm ON cm.memory_id = hl.source_memory_id "
+                     "    AND cm.kind = 'ASSOCIATION' "
+                     "  GROUP BY hl.source_memory_id "
+                     ") "
+                     "SELECT df.target_memory_id AS source_memory_id, "
+                     "       rc.cue_id AS cue_id, "
+                     "       MAX(rc.score * df.weight) AS score "
+                     "FROM routed_cue rc "
+                     "JOIN associations df ON df.source_memory_id = rc.cue_id "
+                     "  AND df.edge_type = 'derived_from' "
+                     "JOIN memories sm ON sm.memory_id = df.target_memory_id "
+                     "WHERE sm.kind NOT IN ('WORKING', 'LABEL', 'ASSOCIATION') "
+                     "GROUP BY df.target_memory_id, rc.cue_id";
+              auto rows = store->Execute (sql, params);
+              for (const auto &row : rows)
+                {
+                  const long long memory_id
+                      = AnyToInt64 (row.at ("source_memory_id"));
+                  const long long cue_id = AnyToInt64 (row.at ("cue_id"));
+                  const double score = AnyToDouble (row.at ("score"), 0.0);
+                  if (memory_id > 0 && score > 0.0)
+                    {
+                      expanded_memory_ids.insert (memory_id);
+                      auto &slot = source_seed_expansion_scores[memory_id];
+                      slot = std::max (
+                          slot, graph_expanded_graph_weight
+                                    * core::Clamp (score, 0.0, 1.0));
+                    }
+                  if (cue_id > 0)
+                    {
+                      expanded_memory_ids.insert (cue_id);
+                    }
+                }
+              const auto t_end = std::chrono::steady_clock::now ();
+              context.AddOperationTiming (
+                  "GraphRetrieve.source_seed_label_relation_expansion",
+                  elapsed_ms (t_start, t_end));
+            }
+          catch (...)
+            {
+            }
+        }
+
+      if (fact_layer_enabled && graph_expanded_fact_weight > 0.0)
+        {
+          try
+            {
+              const auto t_start = std::chrono::steady_clock::now ();
+              std::string sql = "WITH seed(id) AS (VALUES ";
+              std::vector<std::any> params;
+              params.reserve (source_seed_memory_ids.size ());
+              for (size_t i = 0; i < source_seed_memory_ids.size (); ++i)
+                {
+                  if (i > 0)
+                    sql += ",";
+                  sql += "(?)";
+                  params.push_back (source_seed_memory_ids[i]);
+                }
+              sql += ") "
+                     "SELECT fe2.source_memory_id AS source_memory_id, "
+                     "       MAX(fe.support_weight * fe2.support_weight) AS score "
+                     "FROM seed "
+                     "JOIN fact_evidence fe ON fe.source_memory_id = seed.id "
+                     "JOIN fact_assertions fa ON fa.fact_id = fe.fact_id "
+                     "JOIN fact_evidence fe2 ON fe2.fact_id = fe.fact_id "
+                     "JOIN memories m ON m.memory_id = fe2.source_memory_id "
+                     "WHERE COALESCE(fa.lifecycle_state, 'active') = 'active' "
+                     "  AND m.kind NOT IN ('WORKING', 'LABEL', 'ASSOCIATION') "
+                     "GROUP BY fe2.source_memory_id";
+              auto rows = store->Execute (sql, params);
+              for (const auto &row : rows)
+                {
+                  const long long memory_id
+                      = AnyToInt64 (row.at ("source_memory_id"));
+                  const double score = AnyToDouble (row.at ("score"), 0.0);
+                  if (memory_id <= 0 || score <= 0.0)
+                    continue;
+                  expanded_memory_ids.insert (memory_id);
+                  auto &slot = source_seed_expansion_scores[memory_id];
+                  slot = std::max (
+                      slot, graph_expanded_fact_weight
+                                * core::Clamp (score, 0.0, 1.0));
+                }
+              const auto t_end = std::chrono::steady_clock::now ();
+              context.AddOperationTiming (
+                  "GraphRetrieve.source_seed_fact_expansion",
+                  elapsed_ms (t_start, t_end));
+            }
+          catch (...)
+            {
+            }
         }
     }
 
@@ -1375,6 +2406,246 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
             {
               if (mem_id > 0)
                 expanded_memory_ids.insert (mem_id);
+            }
+        }
+    }
+
+  if (preconsolidated_label_graph_enabled && label_graph_weight > 0.0
+      && label_graph_seed_sources > 0)
+    {
+      const auto query_labels = ranked_query_label_ids ();
+      if (!query_labels.empty ())
+        {
+          try
+            {
+              const auto t_start = std::chrono::steady_clock::now ();
+              std::string sql
+                  = "WITH query_labels(id, qscore) AS (VALUES ";
+              std::vector<std::any> params;
+              params.reserve (query_labels.size () * 2 + 3);
+              for (size_t i = 0; i < query_labels.size (); ++i)
+                {
+                  if (i > 0)
+                    {
+                      sql += ",";
+                    }
+                  sql += "(?, ?)";
+                  params.push_back (query_labels[i].second);
+                  params.push_back (query_labels[i].first);
+                }
+              params.push_back (label_graph_relation_weight);
+              params.push_back (label_graph_relation_weight);
+              params.push_back (static_cast<long long> (label_graph_seed_sources));
+              sql += "), direct_cue AS ("
+                     "  SELECT hl.source_memory_id AS cue_id, "
+                     "         q.qscore AS score "
+                     "  FROM query_labels q "
+                     "  JOIN associations hl ON hl.target_memory_id = q.id "
+                     "    AND hl.edge_type = 'has_label' "
+                     "), related_label AS ("
+                     "  SELECT r.target_memory_id AS label_id, "
+                     "         q.qscore * ? * r.weight AS score "
+                     "  FROM query_labels q "
+                     "  JOIN associations r ON r.source_memory_id = q.id "
+                     "    AND r.edge_type IN ('co_occurs', 'implies', "
+                     "                        'contradicts', 'reinforces', "
+                     "                        'causes', 'similar_to') "
+                     "  UNION ALL "
+                     "  SELECT r.source_memory_id AS label_id, "
+                     "         q.qscore * ? * r.weight AS score "
+                     "  FROM query_labels q "
+                     "  JOIN associations r ON r.target_memory_id = q.id "
+                     "    AND r.edge_type IN ('co_occurs', 'implies', "
+                     "                        'contradicts', 'reinforces', "
+                     "                        'causes', 'similar_to') "
+                     "), related_cue AS ("
+                     "  SELECT hl.source_memory_id AS cue_id, "
+                     "         rl.score AS score "
+                     "  FROM related_label rl "
+                     "  JOIN memories lm ON lm.memory_id = rl.label_id "
+                     "    AND lm.kind = 'LABEL' "
+                     "  JOIN associations hl ON hl.target_memory_id = rl.label_id "
+                     "    AND hl.edge_type = 'has_label' "
+                     "), cue AS ("
+                     "  SELECT cue_id, MAX(score) AS score "
+                     "  FROM ("
+                     "    SELECT cue_id, score FROM direct_cue "
+                     "    UNION ALL "
+                     "    SELECT cue_id, score FROM related_cue "
+                     "  ) "
+                     "  GROUP BY cue_id "
+                     ") "
+                     "SELECT cue.cue_id AS cue_id, "
+                     "       df.target_memory_id AS source_id "
+                     "FROM cue "
+                     "JOIN memories cm ON cm.memory_id = cue.cue_id "
+                     "  AND cm.kind = 'ASSOCIATION' "
+                     "JOIN associations df ON df.source_memory_id = cue.cue_id "
+                     "  AND df.edge_type = 'derived_from' "
+                     "ORDER BY cue.score DESC, cm.created_at DESC "
+                     "LIMIT ?";
+
+              auto rows = store->Execute (sql, params);
+              const auto t_end = std::chrono::steady_clock::now ();
+              context.AddOperationTiming (
+                  "GraphRetrieve.label_graph_seed_sources",
+                  elapsed_ms (t_start, t_end));
+              for (const auto &row : rows)
+                {
+                  const long long cue_id = store::AnyToLongLong (
+                      row.at ("cue_id")).value_or (0);
+                  const long long source_id = store::AnyToLongLong (
+                      row.at ("source_id")).value_or (0);
+                  if (cue_id > 0)
+                    {
+                      expanded_memory_ids.insert (cue_id);
+                    }
+                  if (source_id > 0)
+                    {
+                      expanded_memory_ids.insert (source_id);
+                    }
+                }
+            }
+          catch (...)
+            {
+            }
+        }
+    }
+
+  if (preconsolidated_label_graph_enabled && label_graph_weight > 0.0
+      && durable_source_text_seed_sources > 0 && !query_text_payload.empty ())
+    {
+      const auto query_tokens = RouteTokens (query_text_payload);
+      if (!query_tokens.empty ())
+        {
+          try
+            {
+              const auto t_start = std::chrono::steady_clock::now ();
+              auto rows = store->Execute (
+                  "SELECT DISTINCT df.target_memory_id AS source_id, "
+                  "       cue.memory_id AS cue_id, "
+                  "       lm.memory_id AS label_id, "
+                  "       sm.blob_id AS blob_id, "
+                  "       COUNT(DISTINCT hl.target_memory_id) AS label_count "
+                  "FROM associations df "
+                  "JOIN memories cue ON cue.memory_id = df.source_memory_id "
+                  "  AND cue.kind = 'ASSOCIATION' "
+                  "JOIN associations hl ON hl.source_memory_id = cue.memory_id "
+                  "  AND hl.edge_type = 'has_label' "
+                  "JOIN memories lm ON lm.memory_id = hl.target_memory_id "
+                  "  AND lm.kind = 'LABEL' "
+                  "JOIN memories sm ON sm.memory_id = df.target_memory_id "
+                  "WHERE df.edge_type = 'derived_from' "
+                  "  AND sm.kind NOT IN ('WORKING', 'LABEL', 'ASSOCIATION') "
+                  "  AND sm.blob_id IS NOT NULL "
+                  "GROUP BY df.target_memory_id, cue.memory_id, "
+                  "         lm.memory_id, sm.blob_id",
+                  {});
+              struct TextSeed
+              {
+                double score = 0.0;
+                long long source_id = 0;
+                long long cue_id = 0;
+                long long label_id = 0;
+              };
+              std::vector<TextSeed> ranked_sources;
+              ranked_sources.reserve (rows.size ());
+              for (const auto &row : rows)
+                {
+                  const long long source_id
+                      = store::AnyToLongLong (row.at ("source_id")).value_or (0);
+                  if (source_id <= 0)
+                    {
+                      continue;
+                    }
+                  const auto blob_id = store::BlobFromAny (row.at ("blob_id"));
+                  if (blob_id.empty ())
+                    {
+                      continue;
+                    }
+                  auto payload_rows = store->Execute (
+                      "SELECT objstore_get(?1) AS payload", { blob_id });
+                  if (payload_rows.empty ()
+                      || payload_rows[0].count ("payload") == 0)
+                    {
+                      continue;
+                    }
+                  const auto payload
+                      = store::BlobFromAny (payload_rows[0].at ("payload"));
+                  if (payload.empty ())
+                    {
+                      continue;
+                    }
+                  const std::string source_text (
+                      reinterpret_cast<const char *> (payload.data ()),
+                      payload.size ());
+                  double score
+                      = RouteTokenOverlapScore (query_tokens, source_text);
+                  const int label_count = static_cast<int> (
+                      store::AnyToLongLong (row.at ("label_count"))
+                          .value_or (1));
+                  const double label_support = core::Clamp (
+                      std::log1p (static_cast<double> (label_count))
+                          / std::log (5.0),
+                      0.0, 1.0);
+                  score = core::Clamp (
+                      score * (0.80 + 0.20 * label_support), 0.0, 1.0);
+                  if (score < durable_source_text_min_score)
+                    {
+                      continue;
+                    }
+                  const long long cue_id
+                      = store::AnyToLongLong (row.at ("cue_id")).value_or (0);
+                  const long long label_id
+                      = store::AnyToLongLong (row.at ("label_id")).value_or (0);
+                  ranked_sources.push_back ({ score, source_id, cue_id,
+                                               label_id });
+                }
+              std::sort (
+                  ranked_sources.begin (), ranked_sources.end (),
+                  [] (const auto &a, const auto &b) {
+                    if (a.score == b.score)
+                      {
+                        return a.source_id < b.source_id;
+                      }
+                    return a.score > b.score;
+                  });
+              if (static_cast<int> (ranked_sources.size ())
+                  > durable_source_text_seed_sources)
+                {
+                  ranked_sources.resize (
+                      static_cast<size_t> (durable_source_text_seed_sources));
+                }
+              for (const auto &seed : ranked_sources)
+                {
+                  if (seed.source_id > 0)
+                    {
+                      expanded_memory_ids.insert (seed.source_id);
+                      auto &slot
+                          = durable_source_text_seed_scores[seed.source_id];
+                      slot = std::max (slot, seed.score);
+                    }
+                  if (seed.cue_id > 0)
+                    {
+                      expanded_memory_ids.insert (seed.cue_id);
+                      auto &slot = durable_source_text_seed_scores[seed.cue_id];
+                      slot = std::max (slot, seed.score);
+                    }
+                  if (seed.label_id > 0)
+                    {
+                      expanded_memory_ids.insert (seed.label_id);
+                      auto &slot
+                          = durable_source_text_seed_scores[seed.label_id];
+                      slot = std::max (slot, seed.score);
+                    }
+                }
+              const auto t_end = std::chrono::steady_clock::now ();
+              context.AddOperationTiming (
+                  "GraphRetrieve.durable_source_text_seed",
+                  elapsed_ms (t_start, t_end));
+            }
+          catch (...)
+            {
             }
         }
     }
@@ -1714,7 +2985,8 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
                                  0.0, 1.0);
 
               double proc_score = 0.0;
-              if (cfg.procedural_enabled && !sparse_key.empty ())
+              if (cfg.procedural_enabled && !disable_procedural_proactive
+                  && !sparse_key.empty ())
                 {
                   auto pit = p_ctx.procedural_store.find (sparse_key);
                   if (pit != p_ctx.procedural_store.end ())
@@ -1744,18 +3016,57 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
                                         contradiction_count,
                                         memory_emotion,
                                         memory_arousal,
-                                        0.0,
-                                        0.0,
-                                        0,
-                                        is_association,
-                                        is_label,
-                                        v,
+	                                        0.0,
+	                                        0.0,
+	                                        0,
+	                                        0.0,
+	                                        0,
+	                                        0.0,
+	                                        0,
+	                                        is_association,
+	                                        is_label,
+	                                        v,
                                         ctx_vec });
               fetched_any = true;
             }
         }
       catch (...)
         {
+        }
+    }
+
+  if (!durable_source_text_seed_scores.empty ())
+    {
+      for (auto &candidate : scored)
+        {
+          auto it = durable_source_text_seed_scores.find (candidate.memory_id);
+          if (it == durable_source_text_seed_scores.end ())
+            {
+              continue;
+            }
+          candidate.label_graph_boost
+              = std::max (candidate.label_graph_boost, it->second);
+          candidate.label_match_count
+              = std::max (candidate.label_match_count, 1);
+          candidate.durable_source_count
+              = std::max (candidate.durable_source_count, 1);
+        }
+    }
+
+  if (!source_seed_expansion_scores.empty ())
+    {
+      for (auto &candidate : scored)
+        {
+          auto it = source_seed_expansion_scores.find (candidate.memory_id);
+          if (it == source_seed_expansion_scores.end ())
+            {
+              continue;
+            }
+          candidate.durable_source_boost
+              = std::max (candidate.durable_source_boost,
+                          core::Clamp (it->second, 0.0, 1.0));
+          candidate.durable_source_count
+              = std::max (candidate.durable_source_count, 1);
         }
     }
 
@@ -1805,6 +3116,18 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
   const double assoc_boost
       = core::AssociationBoost (cfg.focus, cfg.sensitivity, cfg.stability);
   const double label_boost = core::Lerp (0.05, 0.18, s_eff);
+  const bool durable_source_scoring_enabled
+      = !EnvFlag ("CORTEXT_DISABLE_DURABLE_SOURCE_SET_RETRIEVAL");
+  const double durable_source_weight
+      = durable_source_scoring_enabled
+            ? core::RetrievalDurableSourceSetWeight (
+                cfg.focus, cfg.sensitivity, cfg.stability)
+            : 0.0;
+  const double durable_source_min_score
+      = core::RetrievalDurableSourceSetMinScore (
+          cfg.focus, cfg.sensitivity, cfg.stability);
+  const int durable_source_min_topk = std::max (
+      0, core::RetrievalDurableSourceMinTopK (cfg.focus, cfg.stability));
 
   const double salience = core::Clamp (
       context.GetMetric (operations::Metric::salience).value_or (0.0), 0.0, 1.0);
@@ -1893,8 +3216,11 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
               }
             continue;
           }
+        const bool source_backed_by_graph
+            = s.durable_source_boost > 0.0
+              || (s.durable_source_count > 0 && s.label_graph_boost > 0.0);
         if (!disable_source_conf && enforce_source_conf
-            && s.source_confidence < source_thresh)
+            && !source_backed_by_graph && s.source_confidence < source_thresh)
           {
             if (stats)
               {
@@ -1969,6 +3295,373 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
       }
   };
 
+  auto apply_label_graph_scores = [&] (std::vector<Scored> &candidates) {
+    if (!preconsolidated_label_graph_enabled || label_graph_weight <= 0.0
+        || candidates.empty ())
+      {
+        return;
+      }
+
+    const auto t_start = std::chrono::steady_clock::now ();
+    std::vector<std::pair<double, long long>> ranked_query_labels
+        = build_ranked_query_label_ids ();
+    if (ranked_query_labels.empty ())
+      {
+        return;
+      }
+
+    double query_score_sum = 0.0;
+    std::vector<long long> candidate_memory_ids;
+    candidate_memory_ids.reserve (candidates.size ());
+    std::unordered_set<long long> seen_candidate_memory_ids;
+    for (const auto &[score, label_memory_id] : ranked_query_labels)
+      {
+        (void)label_memory_id;
+        query_score_sum += score;
+      }
+    for (const auto &candidate : candidates)
+      {
+        if (candidate.memory_id <= 0 || candidate.is_label)
+          {
+            continue;
+          }
+        if (seen_candidate_memory_ids.insert (candidate.memory_id).second)
+          {
+            candidate_memory_ids.push_back (candidate.memory_id);
+          }
+      }
+    if (candidate_memory_ids.empty () || query_score_sum <= 1e-9)
+      {
+        return;
+      }
+
+    try
+      {
+        std::string sql
+            = "WITH query_labels(id, qscore) AS (VALUES ";
+        std::vector<std::any> params;
+        params.reserve (ranked_query_labels.size () * 2
+                        + candidate_memory_ids.size () + 3);
+        for (size_t i = 0; i < ranked_query_labels.size (); ++i)
+          {
+            if (i > 0)
+              {
+                sql += ",";
+              }
+            sql += "(?, ?)";
+            params.push_back (ranked_query_labels[i].second);
+            params.push_back (ranked_query_labels[i].first);
+          }
+        sql += "), candidate(id) AS (VALUES ";
+        for (size_t i = 0; i < candidate_memory_ids.size (); ++i)
+          {
+            if (i > 0)
+              {
+                sql += ",";
+              }
+            sql += "(?)";
+            params.push_back (candidate_memory_ids[i]);
+          }
+        params.push_back (label_graph_degree_damping);
+        params.push_back (label_graph_relation_weight);
+        params.push_back (label_graph_relation_weight);
+        sql += "), candidate_labels AS ("
+               "  SELECT c.id AS candidate_memory_id, "
+               "         a.target_memory_id AS label_memory_id, "
+               "         MAX(a.weight) AS label_weight "
+               "  FROM candidate c "
+               "  JOIN associations a ON a.source_memory_id = c.id "
+               "    AND a.edge_type = 'has_label' "
+               "  GROUP BY c.id, a.target_memory_id "
+               "  UNION ALL "
+               "  SELECT c.id AS candidate_memory_id, "
+               "         hl.target_memory_id AS label_memory_id, "
+               "         MAX(dl.weight * hl.weight) AS label_weight "
+               "  FROM candidate c "
+               "  JOIN associations dl ON dl.target_memory_id = c.id "
+               "    AND dl.edge_type = 'derived_from' "
+               "  JOIN associations hl ON hl.source_memory_id = dl.source_memory_id "
+               "    AND hl.edge_type = 'has_label' "
+               "  GROUP BY c.id, hl.target_memory_id "
+               "), label_degree AS ("
+               "  SELECT label_id, SUM(degree) AS degree "
+               "  FROM ("
+               "    SELECT target_memory_id AS label_id, COUNT(*) AS degree "
+               "    FROM associations "
+               "    WHERE edge_type = 'has_label' "
+               "    GROUP BY target_memory_id "
+               "    UNION ALL "
+               "    SELECT source_memory_id AS label_id, COUNT(*) AS degree "
+               "    FROM associations "
+               "    WHERE edge_type IN ('co_occurs', 'implies', 'contradicts', "
+               "                        'reinforces', 'causes', 'similar_to') "
+               "    GROUP BY source_memory_id "
+               "    UNION ALL "
+               "    SELECT target_memory_id AS label_id, COUNT(*) AS degree "
+               "    FROM associations "
+               "    WHERE edge_type IN ('co_occurs', 'implies', 'contradicts', "
+               "                        'reinforces', 'causes', 'similar_to') "
+               "    GROUP BY target_memory_id "
+               "  ) "
+               "  GROUP BY label_id "
+               "), label_specificity AS ("
+               "  SELECT m.memory_id AS label_id, "
+               "         1.0 / (1.0 + ? * COALESCE(ld.degree, 0)) AS specificity "
+               "  FROM memories m "
+               "  LEFT JOIN label_degree ld ON ld.label_id = m.memory_id "
+               "  WHERE m.kind = 'LABEL' "
+               "), relation_labels AS ("
+               "  SELECT cl.candidate_memory_id, "
+               "         r.target_memory_id AS label_memory_id, "
+               "         MAX(? * cl.label_weight * r.weight) AS label_weight "
+               "  FROM candidate_labels cl "
+               "  JOIN memories src_label ON src_label.memory_id = cl.label_memory_id "
+               "    AND src_label.kind = 'LABEL' "
+               "  JOIN associations r ON r.source_memory_id = cl.label_memory_id "
+               "    AND r.edge_type IN ('co_occurs', 'implies', 'contradicts', "
+               "                        'reinforces', 'causes', 'similar_to') "
+               "  JOIN memories target_label ON target_label.memory_id = r.target_memory_id "
+               "    AND target_label.kind = 'LABEL' "
+               "  GROUP BY cl.candidate_memory_id, r.target_memory_id "
+               "  UNION ALL "
+               "  SELECT cl.candidate_memory_id, "
+               "         r.source_memory_id AS label_memory_id, "
+               "         MAX(? * cl.label_weight * r.weight) AS label_weight "
+               "  FROM candidate_labels cl "
+               "  JOIN memories target_label ON target_label.memory_id = cl.label_memory_id "
+               "    AND target_label.kind = 'LABEL' "
+               "  JOIN associations r ON r.target_memory_id = cl.label_memory_id "
+               "    AND r.edge_type IN ('co_occurs', 'implies', 'contradicts', "
+               "                        'reinforces', 'causes', 'similar_to') "
+               "  JOIN memories src_label ON src_label.memory_id = r.source_memory_id "
+               "    AND src_label.kind = 'LABEL' "
+               "  GROUP BY cl.candidate_memory_id, r.source_memory_id "
+               "), matched AS ("
+               "  SELECT candidate_memory_id, label_memory_id, "
+               "         MAX(label_weight) AS label_weight "
+               "  FROM ("
+               "    SELECT candidate_memory_id, label_memory_id, label_weight "
+               "    FROM candidate_labels "
+               "    UNION ALL "
+               "    SELECT candidate_memory_id, label_memory_id, label_weight "
+               "    FROM relation_labels "
+               "  ) "
+               "  GROUP BY candidate_memory_id, label_memory_id "
+               ") "
+               "SELECT m.candidate_memory_id AS memory_id, "
+               "       SUM(q.qscore * m.label_weight "
+               "           * COALESCE(ls.specificity, 1.0)) AS raw_boost, "
+               "       COUNT(*) AS label_match_count "
+               "FROM matched m "
+               "JOIN query_labels q ON q.id = m.label_memory_id "
+               "LEFT JOIN label_specificity ls ON ls.label_id = m.label_memory_id "
+               "GROUP BY m.candidate_memory_id";
+
+        auto rows = store->Execute (sql, params);
+        std::unordered_map<long long, double> boosts;
+        std::unordered_map<long long, int> label_matches;
+        boosts.reserve (rows.size ());
+        label_matches.reserve (rows.size ());
+        for (const auto &row : rows)
+          {
+            const auto it_memory = row.find ("memory_id");
+            const auto it_raw = row.find ("raw_boost");
+            if (it_memory == row.end () || it_raw == row.end ())
+              {
+                continue;
+              }
+            const long long memory_id = AnyToInt64 (it_memory->second);
+            if (memory_id <= 0)
+              {
+                continue;
+              }
+            const double raw_boost = AnyToDouble (it_raw->second, 0.0);
+            boosts[memory_id]
+                = core::Clamp (raw_boost / query_score_sum, 0.0, 1.0);
+            const auto it_match_count = row.find ("label_match_count");
+            if (it_match_count != row.end ())
+              {
+                label_matches[memory_id]
+                    = static_cast<int> (AnyToInt64 (it_match_count->second));
+              }
+          }
+        for (auto &candidate : candidates)
+          {
+            auto it = boosts.find (candidate.memory_id);
+            if (it != boosts.end ())
+              {
+                candidate.label_graph_boost
+                    = std::max (candidate.label_graph_boost, it->second);
+                auto match_it = label_matches.find (candidate.memory_id);
+                if (match_it != label_matches.end ())
+                  {
+                    candidate.label_match_count
+                        = std::max (candidate.label_match_count,
+                                    match_it->second);
+                  }
+              }
+          }
+      }
+    catch (...)
+      {
+      }
+    const auto t_end = std::chrono::steady_clock::now ();
+    context.AddOperationTiming ("GraphRetrieve.preconsolidated_label_graph",
+                                elapsed_ms (t_start, t_end));
+  };
+
+  auto apply_durable_source_scores = [&] (std::vector<Scored> &candidates) {
+    if (!durable_source_scoring_enabled || durable_source_weight <= 0.0
+        || candidates.empty ())
+      {
+        return;
+      }
+
+    std::vector<long long> candidate_memory_ids;
+    candidate_memory_ids.reserve (candidates.size ());
+    std::unordered_set<long long> seen_candidate_memory_ids;
+    for (const auto &candidate : candidates)
+      {
+        if (candidate.memory_id <= 0
+            || !(candidate.is_association || candidate.is_label))
+          {
+            continue;
+          }
+        if (seen_candidate_memory_ids.insert (candidate.memory_id).second)
+          {
+            candidate_memory_ids.push_back (candidate.memory_id);
+          }
+      }
+    if (candidate_memory_ids.empty ())
+      {
+        return;
+      }
+
+    const auto t_start = std::chrono::steady_clock::now ();
+    try
+      {
+        std::string sql = "WITH candidate(id) AS (VALUES ";
+        std::vector<std::any> params;
+        params.reserve (candidate_memory_ids.size ());
+        for (size_t i = 0; i < candidate_memory_ids.size (); ++i)
+          {
+            if (i > 0)
+              {
+                sql += ",";
+              }
+            sql += "(?)";
+            params.push_back (candidate_memory_ids[i]);
+          }
+        sql += "), source_links AS ("
+               "  SELECT c.id AS candidate_memory_id, "
+               "         df.target_memory_id AS source_memory_id, "
+               "         MAX(df.weight) AS link_weight "
+               "  FROM candidate c "
+               "  JOIN memories cm ON cm.memory_id = c.id "
+               "  JOIN associations df ON df.source_memory_id = c.id "
+               "    AND df.edge_type = 'derived_from' "
+               "  WHERE cm.kind = 'ASSOCIATION' "
+               "  GROUP BY c.id, df.target_memory_id "
+               "  UNION ALL "
+               "  SELECT c.id AS candidate_memory_id, "
+               "         df.target_memory_id AS source_memory_id, "
+               "         MAX(hl.weight * df.weight) AS link_weight "
+               "  FROM candidate c "
+               "  JOIN memories cm ON cm.memory_id = c.id "
+               "  JOIN associations hl ON hl.target_memory_id = c.id "
+               "    AND hl.edge_type = 'has_label' "
+               "  JOIN associations df ON df.source_memory_id = hl.source_memory_id "
+               "    AND df.edge_type = 'derived_from' "
+               "  WHERE cm.kind = 'LABEL' "
+               "  GROUP BY c.id, df.target_memory_id "
+               ") "
+               "SELECT sl.candidate_memory_id, sl.source_memory_id, "
+               "       MAX(sl.link_weight) AS link_weight, e.embedding "
+               "FROM source_links sl "
+               "JOIN memories sm ON sm.memory_id = sl.source_memory_id "
+               "JOIN embeddings e ON e.embedding_id = sm.embedding_id "
+               "WHERE sm.kind NOT IN ('WORKING', 'LABEL', 'ASSOCIATION') "
+               "GROUP BY sl.candidate_memory_id, sl.source_memory_id";
+
+        auto rows = store->Execute (sql, params);
+        std::unordered_map<long long, double> max_source_score;
+        std::unordered_map<long long, int> source_counts;
+        max_source_score.reserve (candidate_memory_ids.size ());
+        source_counts.reserve (candidate_memory_ids.size ());
+        for (const auto &row : rows)
+          {
+            const auto it_candidate = row.find ("candidate_memory_id");
+            const auto it_embedding = row.find ("embedding");
+            if (it_candidate == row.end () || it_embedding == row.end ())
+              {
+                continue;
+              }
+            const long long candidate_memory_id
+                = AnyToInt64 (it_candidate->second);
+            if (candidate_memory_id <= 0)
+              {
+                continue;
+              }
+            Eigen::VectorXf source_vec;
+            if (!core::DecodeFloatBlob (
+                    it_embedding->second, static_cast<int> (q.size ()),
+                    source_vec))
+              {
+                continue;
+              }
+            const double link_weight = core::Clamp (
+                AnyToDouble (row.at ("link_weight"), 1.0), 0.0, 1.0);
+            const double sim
+                = core::Clamp (std::max (0.0, core::CosineSimilarity (q, source_vec))
+                                   * link_weight,
+                               0.0, 1.0);
+            auto score_it = max_source_score.find (candidate_memory_id);
+            if (score_it == max_source_score.end ())
+              {
+                max_source_score.emplace (candidate_memory_id, sim);
+              }
+            else
+              {
+                score_it->second = std::max (score_it->second, sim);
+              }
+            source_counts[candidate_memory_id]++;
+          }
+
+        for (auto &candidate : candidates)
+          {
+            auto score_it = max_source_score.find (candidate.memory_id);
+            if (score_it == max_source_score.end ())
+              {
+                continue;
+              }
+            const int source_count
+                = std::max (0, source_counts[candidate.memory_id]);
+            const double count_support = core::Clamp (
+                std::log1p (static_cast<double> (source_count))
+                    / std::log (5.0),
+                0.0, 1.0);
+            const double source_score
+                = core::Clamp (score_it->second
+                                   * (0.70 + 0.30 * count_support),
+                               0.0, 1.0);
+            if (source_score < durable_source_min_score)
+              {
+                continue;
+              }
+            candidate.durable_source_boost
+                = std::max (candidate.durable_source_boost, source_score);
+            candidate.durable_source_count
+                = std::max (candidate.durable_source_count, source_count);
+          }
+      }
+    catch (...)
+      {
+      }
+    const auto t_end = std::chrono::steady_clock::now ();
+    context.AddOperationTiming ("GraphRetrieve.durable_source_set",
+                                elapsed_ms (t_start, t_end));
+  };
+
   auto base_score = [&] (const Scored &s) {
     const double relevance = std::max (0.0, s.score);
     const double ctx_sim = std::max (0.0, s.ctx_score);
@@ -1981,7 +3674,138 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
     return w_rel * relevance + w_ctx * ctx_sim + w_proc * proc_sim
            + w_emotion * emotion_bonus + s.predictive_bonus + association_bonus
            + label_bonus
+           + label_graph_weight * s.label_graph_boost
+           + durable_source_weight * s.durable_source_boost
            + s.fact_boost - s.fact_stale_penalty;
+  };
+
+  auto is_source_backed = [] (const Scored &candidate) {
+    return candidate.durable_source_boost > 0.0
+           || (candidate.durable_source_count > 0
+               && candidate.label_graph_boost > 0.0);
+  };
+
+  auto is_source_backed_memory = [&] (const Scored &candidate) {
+    return !candidate.is_association && !candidate.is_label
+           && is_source_backed (candidate);
+  };
+
+  auto promote_durable_source_candidates = [&] (std::vector<Scored> &selected) {
+    if (durable_source_min_topk <= 0 || selected.size () < 2)
+      {
+        return;
+      }
+    const int target_count = std::min (
+        durable_source_min_topk, static_cast<int> (selected.size ()));
+    for (int slot = 0; slot < target_count; ++slot)
+      {
+        if (is_source_backed_memory (selected[static_cast<size_t> (slot)]))
+          {
+            continue;
+          }
+        int best_idx = -1;
+        double best_score = -1e9;
+        for (int i = slot + 1; i < static_cast<int> (selected.size ()); ++i)
+          {
+            if (!is_source_backed_memory (selected[static_cast<size_t> (i)]))
+              {
+                continue;
+              }
+            const double score = base_score (selected[static_cast<size_t> (i)]);
+            if (score > best_score)
+              {
+                best_score = score;
+                best_idx = i;
+              }
+          }
+        if (best_idx < 0)
+          {
+            break;
+          }
+        std::rotate (selected.begin () + slot,
+                     selected.begin () + best_idx,
+                     selected.begin () + best_idx + 1);
+      }
+  };
+
+  auto enforce_durable_source_floor =
+      [&] (std::vector<Scored> &selected,
+           const std::vector<Scored> &eligible) {
+    if (durable_source_min_topk <= 0 || selected.empty () || eligible.empty ())
+      {
+        return;
+      }
+    const int target_count = std::min (
+        durable_source_min_topk, static_cast<int> (selected.size ()));
+    int source_backed_count = 0;
+    std::unordered_set<long long> selected_embeddings;
+    selected_embeddings.reserve (selected.size ());
+    for (const auto &candidate : selected)
+      {
+        selected_embeddings.insert (candidate.embedding_id);
+        if (is_source_backed_memory (candidate))
+          {
+            ++source_backed_count;
+          }
+      }
+    while (source_backed_count < target_count)
+      {
+        int best_eligible_idx = -1;
+        double best_eligible_score = -1e9;
+        for (int i = 0; i < static_cast<int> (eligible.size ()); ++i)
+          {
+            const auto &candidate = eligible[static_cast<size_t> (i)];
+            if (!is_source_backed_memory (candidate)
+                || selected_embeddings.count (candidate.embedding_id) > 0)
+              {
+                continue;
+              }
+            const double score = base_score (candidate);
+            if (score > best_eligible_score)
+              {
+                best_eligible_score = score;
+                best_eligible_idx = i;
+              }
+          }
+        if (best_eligible_idx < 0)
+          {
+            break;
+          }
+
+        int replace_idx = -1;
+        double replace_score = 1e9;
+        for (int i = 0; i < static_cast<int> (selected.size ()); ++i)
+          {
+            const auto &candidate = selected[static_cast<size_t> (i)];
+            if (is_source_backed_memory (candidate))
+              {
+                continue;
+              }
+            const double score = base_score (candidate);
+            if (score < replace_score)
+              {
+                replace_score = score;
+                replace_idx = i;
+              }
+          }
+        if (replace_idx < 0)
+          {
+            break;
+          }
+
+        selected_embeddings.erase (
+            selected[static_cast<size_t> (replace_idx)].embedding_id);
+        selected[static_cast<size_t> (replace_idx)]
+            = eligible[static_cast<size_t> (best_eligible_idx)];
+        selected_embeddings.insert (
+            selected[static_cast<size_t> (replace_idx)].embedding_id);
+        ++source_backed_count;
+      }
+    std::stable_sort (selected.begin (), selected.end (),
+                      [&] (const Scored &a, const Scored &b) {
+                        return base_score (a) > base_score (b);
+                      });
+    promote_durable_source_candidates (selected);
   };
 
   auto apply_unknown_caution = [&] (std::vector<Scored> &selected) {
@@ -2218,6 +4042,8 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
             }
         }
       apply_fact_scores (seeds);
+      apply_label_graph_scores (seeds);
+      apply_durable_source_scores (seeds);
       const auto t_score_start = std::chrono::steady_clock::now ();
       FilterStats strict_stats;
       auto eligible = filter_candidates (seeds, true, true, &strict_stats);
@@ -2233,6 +4059,7 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
                         [&] (const Scored &a, const Scored &b) {
                           return base_score (a) > base_score (b);
                         });
+      enforce_durable_source_floor (selected, eligible);
       apply_unknown_caution (selected);
       const auto t_score_end = std::chrono::steady_clock::now ();
       context.AddOperationTiming ("GraphRetrieve.score", elapsed_ms (t_score_start, t_score_end));
@@ -2256,13 +4083,46 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
                   std::max (0.0, s.proc_score),
                   s.predictive_bonus,
                   s.pre_activation,
-                  s.fact_boost,
-                  s.fact_stale_penalty,
-                  s.linked_fact_count });
-          }
-        retrieval_debug::SetLastSelectedEmbeddingOrder (selected_order);
-        retrieval_debug::SetLastRankedCandidates (ranked_candidates);
-      }
+	                  s.fact_boost,
+	                  s.fact_stale_penalty,
+	                  s.linked_fact_count,
+	                  s.label_graph_boost,
+	                  s.label_match_count,
+	                  s.durable_source_boost,
+	                  s.durable_source_count });
+	          }
+	        int candidate_fact_link_row_count = 0;
+	        for (const auto &[memory_id, links] : candidate_fact_links)
+	          {
+	            (void)memory_id;
+	            candidate_fact_link_row_count
+	                += static_cast<int> (links.size ());
+	          }
+	        int selected_fact_linked_count = 0;
+	        for (const auto &s : selected)
+	          {
+	            if (s.fact_boost > 0.0 || s.fact_stale_penalty > 0.0
+	                || s.linked_fact_count > 0)
+	              {
+	                ++selected_fact_linked_count;
+	              }
+	          }
+	        retrieval_debug::SetLastRetrievalSummary (
+	            { fact_layer_enabled,
+	              static_cast<int> (matched_facts.size ()),
+	              static_cast<int> (candidate_fact_links.size ()),
+	              candidate_fact_link_row_count,
+	              selected_fact_linked_count,
+	              query_text_token_count,
+	              text_query_wm_slots,
+	              appended_wm_chars,
+	              fact_text_candidate_count,
+	              fact_text_rejected_low_score_count,
+	              fact_text_match_count,
+	              fact_text_best_score });
+	        retrieval_debug::SetLastSelectedEmbeddingOrder (selected_order);
+	        retrieval_debug::SetLastRankedCandidates (ranked_candidates);
+	      }
       append_reconstruction_versions (selected);
       context.SetRetrievedMemoryEmbeddings (std::move (out));
       reinstate_context (selected);
@@ -2285,6 +4145,8 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
     }
 
   apply_fact_scores (scored);
+  apply_label_graph_scores (scored);
+  apply_durable_source_scores (scored);
   FilterStats strict_stats;
   const auto t_score_start = std::chrono::steady_clock::now ();
   auto eligible = filter_candidates (scored, true, true, &strict_stats);
@@ -2376,6 +4238,7 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
                     [&] (const Scored &a, const Scored &b) {
                       return base_score (a) > base_score (b);
                     });
+  enforce_durable_source_floor (selected, eligible);
   apply_unknown_caution (selected);
   const auto t_score_end = std::chrono::steady_clock::now ();
   context.AddOperationTiming ("GraphRetrieve.score", elapsed_ms (t_score_start, t_score_end));
@@ -2399,13 +4262,45 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
               std::max (0.0, s.proc_score),
               s.predictive_bonus,
               s.pre_activation,
-              s.fact_boost,
-              s.fact_stale_penalty,
-              s.linked_fact_count });
-      }
-    retrieval_debug::SetLastSelectedEmbeddingOrder (selected_order);
-    retrieval_debug::SetLastRankedCandidates (ranked_candidates);
-  }
+	              s.fact_boost,
+	              s.fact_stale_penalty,
+	              s.linked_fact_count,
+	              s.label_graph_boost,
+	              s.label_match_count,
+	              s.durable_source_boost,
+	              s.durable_source_count });
+	      }
+	    int candidate_fact_link_row_count = 0;
+	    for (const auto &[memory_id, links] : candidate_fact_links)
+	      {
+	        (void)memory_id;
+	        candidate_fact_link_row_count += static_cast<int> (links.size ());
+	      }
+	    int selected_fact_linked_count = 0;
+	    for (const auto &s : selected)
+	      {
+	        if (s.fact_boost > 0.0 || s.fact_stale_penalty > 0.0
+	            || s.linked_fact_count > 0)
+	          {
+	            ++selected_fact_linked_count;
+	          }
+	      }
+	    retrieval_debug::SetLastRetrievalSummary (
+	        { fact_layer_enabled,
+	          static_cast<int> (matched_facts.size ()),
+	          static_cast<int> (candidate_fact_links.size ()),
+	          candidate_fact_link_row_count,
+	          selected_fact_linked_count,
+	          query_text_token_count,
+	          text_query_wm_slots,
+	          appended_wm_chars,
+	          fact_text_candidate_count,
+	          fact_text_rejected_low_score_count,
+	          fact_text_match_count,
+	          fact_text_best_score });
+	    retrieval_debug::SetLastSelectedEmbeddingOrder (selected_order);
+	    retrieval_debug::SetLastRankedCandidates (ranked_candidates);
+	  }
 
   append_reconstruction_versions (selected);
   context.SetRetrievedMemoryEmbeddings (std::move (out));
@@ -2457,6 +4352,8 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
   double selected_preactivation_sum = 0.0;
   double selected_fact_boost_sum = 0.0;
   double selected_stale_penalty_sum = 0.0;
+  double selected_label_graph_boost_sum = 0.0;
+  double selected_durable_source_boost_sum = 0.0;
   count_kinds (scored, scored_assoc, scored_label, scored_other);
   count_kinds (eligible, eligible_assoc, eligible_label, eligible_other);
   count_kinds (selected, selected_assoc, selected_label, selected_other);
@@ -2471,15 +4368,21 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
       selected_preactivation_sum += s.pre_activation;
       selected_fact_boost_sum += s.fact_boost;
       selected_stale_penalty_sum += s.fact_stale_penalty;
+      selected_label_graph_boost_sum += s.label_graph_boost;
+      selected_durable_source_boost_sum += s.durable_source_boost;
     }
 
   telemetry::LogDebug ("cortext.graph_retrieval", {
     telemetry::Attribute::Double ("dup_thresh", dup_thresh),
     telemetry::Attribute::Int64 ("write_exclusion_ts", static_cast<int64_t> (write_exclusion_ts)),
     telemetry::Attribute::Bool ("stored_id_present", stored_id.has_value ()),
-    telemetry::Attribute::Int64 ("selected_count", static_cast<int64_t> (selected.size ())),
-    telemetry::Attribute::Int64 ("seed_count", static_cast<int64_t> (seeds.size ())),
-    telemetry::Attribute::Int64 ("procedural_seed_count", procedural_seed_count),
+	    telemetry::Attribute::Int64 ("selected_count", static_cast<int64_t> (selected.size ())),
+	    telemetry::Attribute::Int64 ("seed_count", static_cast<int64_t> (seeds.size ())),
+	    telemetry::Attribute::Int64 ("seed_k", static_cast<int64_t> (seed_k)),
+	    telemetry::Attribute::Int64 ("selected_k", static_cast<int64_t> (k)),
+	    telemetry::Attribute::Int64 ("procedural_seed_count", procedural_seed_count),
+    telemetry::Attribute::Int64 ("hierarchical_label_seed_count",
+                                 hierarchical_label_seed_count),
     telemetry::Attribute::Int64 ("expansion_depth", static_cast<int64_t> (depth)),
     telemetry::Attribute::Int64 ("final_candidate_count", static_cast<int64_t> (scored.size ())),
     telemetry::Attribute::Int64 ("scored_assoc_count", scored_assoc),
@@ -2502,6 +4405,17 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
     telemetry::Attribute::Double ("retrieval_w_proc", w_proc),
     telemetry::Attribute::Double ("retrieval_predictive_weight",
                                   predictive_weight),
+    telemetry::Attribute::Bool ("preconsolidated_label_graph_enabled",
+                                preconsolidated_label_graph_enabled),
+    telemetry::Attribute::Double ("preconsolidated_label_graph_weight",
+                                  label_graph_weight),
+    telemetry::Attribute::Bool ("durable_source_set_enabled",
+                                durable_source_scoring_enabled),
+    telemetry::Attribute::Double ("durable_source_set_weight",
+                                  durable_source_weight),
+    telemetry::Attribute::Int64 (
+        "preconsolidated_label_graph_top_labels",
+        static_cast<int64_t> (label_graph_top_labels)),
     telemetry::Attribute::Int64 ("reinforcement_candidate_count",
                                  reinforcement_candidate_count),
     telemetry::Attribute::Bool ("reinforcement_enabled",
@@ -2571,6 +4485,16 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
         "fact_mean_stale_penalty",
         selected.empty () ? 0.0
                           : selected_stale_penalty_sum
+                                / static_cast<double> (selected.size ())),
+    telemetry::Attribute::Double (
+        "label_graph_mean_boost",
+        selected.empty () ? 0.0
+                          : selected_label_graph_boost_sum
+                                / static_cast<double> (selected.size ())),
+    telemetry::Attribute::Double (
+        "durable_source_set_mean_boost",
+        selected.empty () ? 0.0
+                          : selected_durable_source_boost_sum
                                 / static_cast<double> (selected.size ()))
   });
 }

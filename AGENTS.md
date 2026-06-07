@@ -41,11 +41,11 @@ cortext is the memory engine powering augmem.ai for augmenting human and LLM mem
 - CTest - test registration and execution live in `CMakeLists.txt` and `tests/CMakeLists.txt`.
 - Bazel/Bazelisk - required to build LiteRT-LM in `CMakeLists.txt` and `scripts/build_litert.sh`.
 - pkg-config - required to discover system SQLite on native builds in `CMakeLists.txt`.
-- Zlib - required for ONNX Runtime and ImageBind tokenizer gzip handling in `CMakeLists.txt` and `src/encoder/imagebind.cpp`.
+- Zlib - required for ONNX Runtime integration in `CMakeLists.txt` and `src/encoder/embeddinggemma.cpp`.
 - Emscripten - optional WASM toolchain in `cmake/EmscriptenToolchain.cmake`.
 ## Key Dependencies
 - `opentelemetry-cpp` v1.24.0 - tracing/metrics/logging API dependency fetched in `CMakeLists.txt` and used in `src/telemetry/telemetry.cpp`.
-- ONNX Runtime - local inference runtime for ImageBind and optional Gemma ORT paths in `CMakeLists.txt`, `src/encoder/imagebind.cpp`, and `src/encoder/embeddinggemma.cpp`.
+- ONNX Runtime - optional local inference runtime for Gemma ORT paths in `CMakeLists.txt` and `src/encoder/embeddinggemma.cpp`.
 - `onnxruntime-genai` - Phi-4 extractor/summarizer backend vendored via `third_party/onnxruntime-genai` and linked in `CMakeLists.txt`, `src/extractor/phi4_extractor.cpp`, and `include/cortext/summarizer/phi4_summarizer.hpp`.
 - LiteRT-LM - Gemma extractor/summarizer backend vendored via `third_party/litert-lm` and linked in `CMakeLists.txt`, `src/extractor/gemma_extractor.cpp`, and `src/summarizer/gemma_summarizer.cpp`.
 - `llama.cpp` system libraries (`llama`, `ggml`, `ggml-base`) - GGUF inference path for Liquid/LFM2 and optional EmbeddingGemma GGUF in `CMakeLists.txt`, `src/deep_llm/deep_llm_factory.cpp`, and `src/encoder/embeddinggemma.cpp`.
@@ -65,7 +65,6 @@ cortext is the memory engine powering augmem.ai for augmenting human and LLM mem
 - CI build recipe: `.github/workflows/build.yml`
 - Binding manifests: `bindings/python/pyproject.toml`, `bindings/go/go.mod`, and `bindings/javascript/package.json`
 ## Model and Runtime Assets
-- ImageBind ONNX encoders in `models/imagebind/`
 - EmbeddingGemma ONNX export in `models/embeddinggemma-300m-onnx/`
 - EmbeddingGemma LiteRT export in `models/embeddinggemma-300m-litert/`
 - EmbeddingGemma GGUF in `models/llama_cpp/`
@@ -76,7 +75,6 @@ cortext is the memory engine powering augmem.ai for augmenting human and LLM mem
 - sherpa-onnx ASR/TTS assets in `models/sherpa-onnx/`
 - whisper.cpp asset in `models/whisper.cpp/`
 - Preferred text encoder resolution is implemented in `src/encoder/text_encoder_factory.hpp`.
-- ImageBind requires ONNX model files plus BPE merges; BPE fallback includes `third_party/imagebind_assets/bpe/bpe_simple_vocab_16e6.txt.gz` in `src/encoder/imagebind.cpp`.
 - Deep LLM backend selection and model fallback order are implemented in `src/deep_llm/deep_llm_factory.cpp`.
 ## Platform Requirements
 - C++20-capable compiler, CMake, pkg-config, and SQLite development headers are required by `README.md`, `CMakeLists.txt`, and `.github/workflows/build.yml`.
@@ -183,9 +181,9 @@ cortext is the memory engine powering augmem.ai for augmenting human and LLM mem
 - Used by: `SignalProcessor`, `Cortext` hydration, store-focused tests such as `tests/store.test.cpp` and `tests/migration_core.test.cpp`.
 - Purpose: Encoders and local inference adapters for summarization, extraction, audio, and deep consolidation.
 - Location: `include/cortext/encoder/*.hpp`, `include/cortext/extractor/*.hpp`, `include/cortext/summarizer/*.hpp`, `include/cortext/audio/*.hpp`, `src/encoder/*.cpp`, `src/extractor/*.cpp`, `src/summarizer/*.cpp`, `src/audio/*.cpp`, `src/deep_llm/*.cpp`
-- Contains: `Encoder`, `Extractor`, `Summarizer` interfaces plus ImageBind, EmbeddingGemma, Gemma, Phi-4, sherpa-onnx, and llama.cpp-backed implementations.
+- Contains: `Encoder`, `Extractor`, `Summarizer` interfaces plus EmbeddingGemma, Gemma, Phi-4, sherpa-onnx, and llama.cpp-backed implementations.
 - Depends on: model assets under `models/`, third-party runtimes configured in `CMakeLists.txt`.
-- Used by: the composition layer in `src/cortext.cpp` and targeted tests like `tests/imagebind_encoder.test.cpp`, `tests/gemma_extractor.test.cpp`, `tests/phi4_summarizer.test.cpp`.
+- Used by: the composition layer in `src/cortext.cpp` and targeted tests like `tests/gemma_extractor.test.cpp` and `tests/phi4_summarizer.test.cpp`.
 - Purpose: Optional binaries for manual use, experiments, telemetry smoke tests, and research sweeps.
 - Location: `examples/`, `tools/`, `scripts/`
 - Contains: chat UI, benchmark programs, topical-chat analysis, sqlite telemetry smoke test, offline label/text tools, Python/bash experiment harnesses.
@@ -273,7 +271,7 @@ Do not make direct repo edits outside a GSD workflow unless the user explicitly 
 - `examples/`: runnable demos and analysis tooling (e.g., `examples/topical_chat_analysis`).
 - `scripts/` + `tools/`: experiment harnesses and generators (e.g., `scripts/run_memory_harness.py`).
 - `docs/paper/sections/`: manuscript source; `docs/paper/_manuscript/` is generated output.
-- `models/` + `third_party/`: runtime assets (ImageBind/ONNX, LiteRT, sqlite extensions).
+- `models/` + `third_party/`: runtime assets (EmbeddingGemma, LiteRT, sqlite extensions).
 
 ## Build, Test, and Development Commands
 - Configure/build:
@@ -320,7 +318,7 @@ Do not make direct repo edits outside a GSD workflow unless the user explicitly 
 
 ## Repository-Specific Notes
 - Behavior should derive from the three knobs (F/S/T) wherever possible.
-- Consolidation/labeling uses gemma-3n-e2b via LiteRT; embeddings use ImageBind/ONNX.
+- Consolidation/labeling uses gemma-3n-e2b via LiteRT; embeddings use the configured text encoder.
 - Do not modify the public API surface (public headers in `include/`, C API) without explicit approval.
 
 ## SML / stateforward Rules

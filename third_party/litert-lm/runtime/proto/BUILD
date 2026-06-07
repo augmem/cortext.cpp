@@ -126,3 +126,24 @@ alias(
     name = "llm_model_type_py_pb2",
     actual = ":llm_model_type_py_proto",
 )
+
+tf_proto_library(
+    name = "litert_lm_metrics",
+    srcs = ["litert_lm_metrics.proto"],
+    deps = [":engine_proto"],
+)
+
+alias(
+    name = "litert_lm_metrics_proto",
+    actual = ":litert_lm_metrics",
+)
+
+alias(
+    name = "litert_lm_metrics_cc_proto",
+    actual = ":litert_lm_metrics_cc",
+)
+
+alias(
+    name = "litert_lm_metrics_py_pb2",
+    actual = ":litert_lm_metrics_py_proto",
+)

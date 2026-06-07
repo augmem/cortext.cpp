@@ -15,22 +15,29 @@
 #ifndef THIRD_PARTY_ODML_LITERT_LM_RUNTIME_EXECUTOR_LLM_EXECUTOR_SETTINGS_UTILS_H_
 #define THIRD_PARTY_ODML_LITERT_LM_RUNTIME_EXECUTOR_LLM_EXECUTOR_SETTINGS_UTILS_H_
 
+#include <optional>
+#include <string>
+
 #include "absl/status/statusor.h"  // from @com_google_absl
-#include "third_party/odml/infra/genai/inference/proto/llm_inference_engine.pb.h"
+#include "litert/cc/litert_options.h"  // from @litert
 #include "runtime/executor/executor_settings_base.h"
+#include "runtime/executor/litert_compiled_model_executor_utils.h"
+#include "runtime/executor/llm_executor_settings.h"
 
 namespace litert::lm {
 
-// Convert LLM Engine backend to LiteRT backend. If conversion fails, return
-// the error.
-absl::StatusOr<Backend> ConvertBackend(
-    const odml::infra::proto::SessionConfig::Backend& backend);
+// Convert LLM Engine sampler backend to LiteRT backend. If conversion fails,
+// return the error.
+absl::StatusOr<Backend> GetSamplerBackend(
+    const LlmExecutorSettings& executor_settings);
 
-// Convert LLM Engine ActivationDataType to LiteRT ActivationDataType. If
-// conversion fails, return the error.
-absl::StatusOr<ActivationDataType> ConvertActivationDataType(
-    const odml::infra::proto::SessionConfig::ActivationDataType&
-        activation_data_type);
+// Create LiteRT compilation options from LLM Engine executor settings. If
+// creation fails, return the error.
+absl::StatusOr<litert::Options> CreateCompilationOptions(
+    const LlmExecutorSettings& executor_settings,
+    const ActivationDataType& activation_data_type,
+    std::optional<ModelSignatures*> signatures,
+    std::optional<std::string> cache_suffix = std::nullopt);
 
 }  // namespace litert::lm
 

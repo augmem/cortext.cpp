@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/Users/gabrielwillen/.atmux/src/atmux/adapter/scripts/on-stop",
+            "timeout": 60
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -5,7 +5,7 @@
 ## APIs & External Services
 
 **Local inference runtimes:**
-- ONNX Runtime - local inference runtime for ImageBind and optional Gemma ORT execution in `CMakeLists.txt`, `src/encoder/imagebind.cpp`, and `src/encoder/embeddinggemma.cpp`
+- ONNX Runtime - optional local inference runtime for Gemma ORT execution in `CMakeLists.txt` and `src/encoder/embeddinggemma.cpp`
   - SDK/Client: vendored ONNX Runtime source in `third_party/onnxruntime/` plus imported `onnxruntime` shared library
   - Auth: Not applicable
 - onnxruntime-genai - local Phi-4 multimodal extraction/summarization runtime in `CMakeLists.txt`, `src/extractor/phi4_extractor.cpp`, and `include/cortext/summarizer/phi4_summarizer.hpp`
@@ -49,9 +49,6 @@
   - Auth: Not applicable
 
 **Platform integrations:**
-- Apple CoreML provider - ONNX Runtime CoreML execution path is enabled on Apple platforms in `CMakeLists.txt` and selected by `src/encoder/imagebind.cpp`
-  - SDK/Client: ONNX Runtime CoreML provider
-  - Auth: Not applicable
 - macOS AVFoundation audio stack - microphone capture and playback for the chat example in `examples/chat/voice_session.mm`
   - SDK/Client: `AVFoundation`, `Cocoa`, `Foundation`, `IOKit`, and `CoreVideo` linked in `examples/chat/CMakeLists.txt`
   - Auth: Not applicable

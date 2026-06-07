@@ -186,6 +186,9 @@ extern "C"
     int procedural_enabled;
     int sequential_edges_enabled;
     const char *label_bank_path;
+    int signal_filter_audio_enabled;
+    int signal_filter_image_enabled;
+    int signal_filter_text_enabled;
   } cortext_config;
 
   /// @brief Consolidation mode for cortext_consolidate_mode.
@@ -204,7 +207,7 @@ extern "C"
   /// @return Handle to the created instance, or NULL on failure.
   ///
   /// The returned handle must be freed with cortext_free().
-  /// Default models directory is "models/imagebind".
+  /// Default models directory is "models".
   CORTEXT_EXPORT cortext_handle cortext_create (double focus, double sensitivity,
                                                 double stability,
                                                 const char *db_path);
@@ -326,8 +329,10 @@ extern "C"
   /// @return 0 on success, 1 if invalid handle, 2 on internal error.
   ///
   /// Shallow runs embedding-only labeling/graphing; deep runs the configured
-  /// local summarization/extraction backend (Gemma/LiteRT-LM, LFM2/llama.cpp,
-  /// or the mixed Gemma+LFM2 path). Both defaults to the full deep path.
+  /// local summarization/extraction backend. Auto requires Gemma 4 E2B via
+  /// LiteRT-LM for multimodal labeling and summarization; LFM2/llama.cpp and
+  /// mixed Gemma+LFM2 paths are explicit overrides. Both defaults to the full
+  /// deep path.
   CORTEXT_EXPORT int cortext_consolidate_mode (cortext_handle h, int mode);
 
   /// @brief Commits all buffered database writes.

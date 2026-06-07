@@ -33,6 +33,7 @@ namespace litert::lm {
 //   sampler_params: The parameters for the sampler.
 //   The following parameters are optional and only used for GPU backend.
 //   env: The litert environment to use for the sampler.
+//   sequence_size: The sequence size for the sampler.
 //   vocab_size: The vocabulary size for the sampler.
 //   activation_data_type: The activation data type for the sampler.
 //
@@ -41,6 +42,7 @@ namespace litert::lm {
 absl::StatusOr<std::unique_ptr<Sampler>> CreateSampler(
     Backend backend, int batch_size, proto::SamplerParameters sampler_params,
     LiteRtEnvironment env = nullptr,
+    std::optional<int> sequence_size = std::nullopt,
     std::optional<int> vocab_size = std::nullopt,
     std::optional<ActivationDataType> activation_data_type = std::nullopt);
 

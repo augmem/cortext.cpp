@@ -9,7 +9,7 @@ namespace cortext
 
 /// @brief Gemma-based summarizer using LiteRT-LM.
 ///
-/// Uses Gemma model via LiteRT-LM's Conversation API for abstractive
+/// Uses Gemma model via LiteRT-LM's engine API for abstractive
 /// summarization of text and audio content.
 ///
 /// When CORTEXT_DISABLE_LITERT is defined, all methods throw std::runtime_error.

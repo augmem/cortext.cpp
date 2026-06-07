@@ -546,20 +546,25 @@ TEST_CASE ("Summarization labels chat excerpts before prompting",
 
   Eigen::VectorXf emb = Eigen::VectorXf::Constant (256, 0.5f);
   emb[0] = 1.0f;
-  SeedEmbedding (store.get (), 1, emb);
-  SeedEmbedding (store.get (), 2, emb);
+  for (long long i = 1; i <= 4; ++i)
+    {
+      SeedEmbedding (store.get (), i, emb);
+    }
   SeedMemory (store.get (), 1, "My name is Gabe and I am testing memory.", 1000);
   SeedMemory (store.get (), 2, "I will remember that you are Gabe.", 2000);
-  store->Execute ("UPDATE memories SET source_id = 'chat/user' WHERE memory_id = 1",
-                  {});
+  SeedMemory (store.get (), 3, "The conversation stayed on memory testing.", 3000);
+  SeedMemory (store.get (), 4, "The last note confirms the test cluster.", 4000);
   store->Execute (
-      "UPDATE memories SET source_id = 'chat/assistant' WHERE memory_id = 2",
+      "UPDATE memories SET source_id = 'chat/user' WHERE memory_id IN (1, 3)",
+      {});
+  store->Execute (
+      "UPDATE memories SET source_id = 'chat/assistant' WHERE memory_id IN (2, 4)",
       {});
   MarkCompressibleClusterSources (store.get ());
 
   ClusterInfo cluster;
   cluster.cluster_id = 7;
-  cluster.embedding_ids = { 1, 2 };
+  cluster.embedding_ids = { 1, 2, 3, 4 };
   cluster.centroid = std::vector<float> (256, 0.5f);
   cluster.avg_score = 0.3;
   ctx.SetConsolidationClusters ({ cluster });
@@ -581,8 +586,249 @@ TEST_CASE ("Summarization labels chat excerpts before prompting",
   REQUIRE (summarizer.last_max_words == 0);
 }
 
-TEST_CASE ("Summarization is gated by storage pressure",
-           "[integration][consolidation][summarize][storage_pressure]")
+TEST_CASE ("Summarization source blob ablation keeps text evidence",
+           "[integration][consolidation][summarize][ablation]")
+{
+  cortext::testing::ScopedEnvVar disable_source_blobs (
+      "CORTEXT_DISABLE_SOURCE_BLOBS", "1");
+
+  auto unique_store = SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<Store> (std::move (unique_store));
+
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  cfg.focus = 0.0;
+  cfg.sensitivity = 0.5;
+  cfg.stability = 0.5;
+
+  CapturingSummarizer summarizer;
+
+  auto init_ops = std::make_unique<OperationSet> ();
+  SignalProcessor init_processor (cfg, store, std::move (init_ops));
+  init_processor.Process (MakeSignal (1));
+  init_processor.Flush ();
+
+  ProcessorContext pctx;
+  pctx.summarizer = &summarizer;
+  pctx.last_consolidation_ts = 100000;
+  Signal s = MakeSignal (3000);
+  s.source_id = ConsolidationSourceId (ConsolidationMode::Both);
+  OperationContext ctx (s, pctx, cfg, store.get ());
+  ctx.SetConsolidationShouldStart (true);
+
+  Eigen::VectorXf emb = Eigen::VectorXf::Constant (256, 0.5f);
+  emb[0] = 1.0f;
+  for (long long i = 1; i <= 4; ++i)
+    {
+      SeedEmbedding (store.get (), i, emb);
+    }
+  SeedMemory (store.get (), 1, "My name is Gabe and I am testing memory.", 1000);
+  SeedMemory (store.get (), 2, "I will remember that you are Gabe.", 2000);
+  SeedMemory (store.get (), 3, "The conversation stayed on memory testing.", 3000);
+  SeedMemory (store.get (), 4, "The last note confirms the test cluster.", 4000);
+  store->Execute (
+      "UPDATE memories SET source_id = 'chat/user' WHERE memory_id IN (1, 3)",
+      {});
+  store->Execute (
+      "UPDATE memories SET source_id = 'chat/assistant' WHERE memory_id IN (2, 4)",
+      {});
+  MarkCompressibleClusterSources (store.get ());
+
+  ClusterInfo cluster;
+  cluster.cluster_id = 7;
+  cluster.embedding_ids = { 1, 2, 3, 4 };
+  cluster.centroid = std::vector<float> (256, 0.5f);
+  cluster.avg_score = 0.3;
+  ctx.SetConsolidationClusters ({ cluster });
+
+  ConsolidationSummarize summarize_op;
+  cortext::operations::eviction::EvictionAblationOverride override;
+  override.storage_gate_enabled = true;
+  override.min_storage_bytes = 1000;
+  override.used_storage_bytes = 10000;
+  cortext::operations::eviction::ScopedEvictionAblationOverride pressure (
+      override);
+  auto tx = store->Begin ();
+  summarize_op.Execute (ctx, *tx);
+  tx->Commit ();
+
+  const auto requests = ctx.GetExtractionRequests ();
+  REQUIRE (requests.size () == 1);
+  REQUIRE (!requests[0].source_texts.empty ());
+  REQUIRE (requests[0].source_blobs.empty ());
+}
+
+TEST_CASE ("Summarization passes STM graph labels to relabeler as candidates",
+           "[integration][consolidation][summarize][labels]")
+{
+  cortext::testing::ScopedEnvVar enable_audit ("CORTEXT_STM_LTM_AUDIT", "1");
+
+  auto unique_store = SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<Store> (std::move (unique_store));
+
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  cfg.focus = 0.0;
+  cfg.sensitivity = 0.5;
+  cfg.stability = 0.5;
+
+  auto init_ops = std::make_unique<OperationSet> ();
+  SignalProcessor init_processor (cfg, store, std::move (init_ops));
+  init_processor.Process (MakeSignal (1));
+  init_processor.Flush ();
+
+  ProcessorContext pctx;
+  pctx.last_consolidation_ts = 100000;
+  Signal s = MakeSignal (3000);
+  s.source_id = ConsolidationSourceId (ConsolidationMode::Both);
+  OperationContext ctx (s, pctx, cfg, store.get ());
+  ctx.SetConsolidationShouldStart (true);
+
+  Eigen::VectorXf emb = Eigen::VectorXf::Constant (256, 0.5f);
+  emb[0] = 1.0f;
+  SeedEmbedding (store.get (), 1, emb);
+  SeedEmbedding (store.get (), 2, emb);
+  SeedEmbedding (store.get (), 3, emb);
+  SeedMemory (store.get (), 1, "They made plans for dinner.", 1000);
+  SeedMemory (store.get (), 2, "The next message discussed timing.", 2000);
+  SeedMemory (store.get (), 3, "The conversation stayed on logistics.", 3000);
+  MarkCompressibleClusterSources (store.get ());
+
+  ProcessorContext::ShadowLabelEdge edge;
+  edge.source_id = "chat/user";
+  edge.timestamp = 2000;
+  edge.step_index = 1;
+  edge.label = "Steve";
+  edge.weight = 0.9;
+  edge.signal_embedding = emb;
+  auto &label_edges
+      = ctx.GetProcessorContext ().short_term_graphs["chat/user"].label_edges;
+  label_edges.push_back (edge);
+  edge.label = "Alfred";
+  label_edges.push_back (edge);
+  edge.label = "Valarie";
+  label_edges.push_back (edge);
+  edge.label = "Maurice";
+  label_edges.push_back (edge);
+
+  ClusterInfo cluster;
+  cluster.cluster_id = 10;
+  cluster.embedding_ids = { 1, 2, 3 };
+  cluster.centroid = std::vector<float> (256, 0.5f);
+  cluster.avg_score = 0.3;
+  ctx.SetConsolidationClusters ({ cluster });
+
+  ConsolidationSummarize summarize_op;
+  auto tx = store->Begin ();
+  summarize_op.Execute (ctx, *tx);
+  tx->Commit ();
+
+  const auto requests = ctx.GetExtractionRequests ();
+  REQUIRE (requests.size () == 1);
+  REQUIRE (requests[0].current_labels.size ()
+           == std::min<size_t> (
+               4,
+               cortext::core::STMLabelConsolidationMaxUngrounded (
+                   cfg.focus, cfg.sensitivity, cfg.stability)));
+  REQUIRE (std::find (requests[0].current_labels.begin (),
+                      requests[0].current_labels.end (),
+                      "Steve")
+           != requests[0].current_labels.end ());
+  REQUIRE (std::find (requests[0].current_labels.begin (),
+                      requests[0].current_labels.end (),
+                      "Maurice")
+           != requests[0].current_labels.end ());
+
+  auto audit_rows = store->Execute (
+      "SELECT stm_label_edge_count, current_label_count, current_labels "
+      "FROM stm_ltm_relabel_audit",
+      {});
+  REQUIRE (audit_rows.size () == 1);
+  REQUIRE (GetInt64 (audit_rows[0], "stm_label_edge_count") == 4);
+  REQUIRE (GetInt64 (audit_rows[0], "current_label_count") == 4);
+  REQUIRE (std::any_cast<std::string> (
+               audit_rows[0].at ("current_labels"))
+           == "Steve\nAlfred\nValarie\nMaurice");
+}
+
+TEST_CASE ("Summarization can disable STM graph label handoff natively",
+           "[integration][consolidation][summarize][labels]")
+{
+  cortext::testing::ScopedEnvVar enable_audit ("CORTEXT_STM_LTM_AUDIT", "1");
+  cortext::testing::ScopedEnvVar disable_handoff (
+      "CORTEXT_DISABLE_STM_LABEL_HANDOFF", "1");
+
+  auto unique_store = SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<Store> (std::move (unique_store));
+
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  cfg.focus = 0.0;
+  cfg.sensitivity = 0.5;
+  cfg.stability = 0.5;
+
+  auto init_ops = std::make_unique<OperationSet> ();
+  SignalProcessor init_processor (cfg, store, std::move (init_ops));
+  init_processor.Process (MakeSignal (1));
+  init_processor.Flush ();
+
+  ProcessorContext pctx;
+  pctx.last_consolidation_ts = 100000;
+  Signal s = MakeSignal (3000);
+  s.source_id = ConsolidationSourceId (ConsolidationMode::Both);
+  OperationContext ctx (s, pctx, cfg, store.get ());
+  ctx.SetConsolidationShouldStart (true);
+
+  Eigen::VectorXf emb = Eigen::VectorXf::Constant (256, 0.5f);
+  emb[0] = 1.0f;
+  SeedEmbedding (store.get (), 1, emb);
+  SeedEmbedding (store.get (), 2, emb);
+  SeedEmbedding (store.get (), 3, emb);
+  SeedMemory (store.get (), 1, "They made plans for dinner.", 1000);
+  SeedMemory (store.get (), 2, "The next message discussed timing.", 2000);
+  SeedMemory (store.get (), 3, "The conversation stayed on logistics.", 3000);
+  MarkCompressibleClusterSources (store.get ());
+
+  ProcessorContext::ShadowLabelEdge edge;
+  edge.source_id = "chat/user";
+  edge.timestamp = 2000;
+  edge.step_index = 1;
+  edge.label = "Steve";
+  edge.weight = 0.9;
+  edge.signal_embedding = emb;
+  ctx.GetProcessorContext ().short_term_graphs["chat/user"].label_edges
+      .push_back (edge);
+
+  ClusterInfo cluster;
+  cluster.cluster_id = 10;
+  cluster.embedding_ids = { 1, 2, 3 };
+  cluster.centroid = std::vector<float> (256, 0.5f);
+  cluster.avg_score = 0.3;
+  ctx.SetConsolidationClusters ({ cluster });
+
+  ConsolidationSummarize summarize_op;
+  auto tx = store->Begin ();
+  summarize_op.Execute (ctx, *tx);
+  tx->Commit ();
+
+  const auto requests = ctx.GetExtractionRequests ();
+  REQUIRE (requests.size () == 1);
+  REQUIRE (requests[0].current_labels.empty ());
+
+  auto audit_rows = store->Execute (
+      "SELECT stm_label_edge_count, current_label_count, current_labels "
+      "FROM stm_ltm_relabel_audit",
+      {});
+  REQUIRE (audit_rows.size () == 1);
+  REQUIRE (GetInt64 (audit_rows[0], "stm_label_edge_count") == 1);
+  REQUIRE (GetInt64 (audit_rows[0], "current_label_count") == 0);
+  REQUIRE (std::any_cast<std::string> (
+               audit_rows[0].at ("current_labels"))
+           .empty ());
+}
+
+TEST_CASE ("Summarization creates retrieval summaries without storage pressure",
+           "[integration][consolidation][summarize]")
 {
   auto unique_store = SQLiteStore::Create (":memory:");
   auto store = std::shared_ptr<Store> (std::move (unique_store));
@@ -637,13 +883,13 @@ TEST_CASE ("Summarization is gated by storage pressure",
   summarize_op.Execute (ctx, *tx);
   tx->Commit ();
 
-  REQUIRE (summarizer.calls == 0);
-  REQUIRE (CountRows (store.get (), "associations") == 3);
+  REQUIRE (summarizer.calls == 1);
+  REQUIRE (CountRows (store.get (), "associations") == 6);
   auto summaries = store->Execute (
       "SELECT COUNT(*) AS c FROM memories "
       "WHERE kind = 'ASSOCIATION' AND source_id LIKE 'summary_%'",
       {});
-  REQUIRE (std::any_cast<long long> (summaries[0].at ("c")) == 0);
+  REQUIRE (std::any_cast<long long> (summaries[0].at ("c")) == 1);
   auto cues = store->Execute (
       "SELECT COUNT(*) AS c FROM memories "
       "WHERE kind = 'ASSOCIATION' AND source_id LIKE 'associative_cue_%'",
@@ -652,7 +898,7 @@ TEST_CASE ("Summarization is gated by storage pressure",
   REQUIRE (ctx.GetExtractionRequests ().size () == 1);
 }
 
-TEST_CASE ("Summarization skips protected fact evidence under pressure",
+TEST_CASE ("Summarization links protected fact evidence under pressure",
            "[integration][consolidation][summarize][storage_pressure]")
 {
   auto unique_store = SQLiteStore::Create (":memory:");
@@ -734,12 +980,12 @@ TEST_CASE ("Summarization skips protected fact evidence under pressure",
   summarize_op.Execute (ctx, *tx);
   tx->Commit ();
 
-  REQUIRE (summarizer.calls == 0);
+  REQUIRE (summarizer.calls == 1);
   auto summaries = store->Execute (
       "SELECT COUNT(*) AS c FROM memories "
       "WHERE kind = 'ASSOCIATION' AND source_id LIKE 'summary_%'",
       {});
-  REQUIRE (std::any_cast<long long> (summaries[0].at ("c")) == 0);
+  REQUIRE (std::any_cast<long long> (summaries[0].at ("c")) == 1);
   auto cues = store->Execute (
       "SELECT COUNT(*) AS c FROM memories "
       "WHERE kind = 'ASSOCIATION' AND source_id LIKE 'associative_cue_%'",

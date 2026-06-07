@@ -48,6 +48,12 @@ std::string GetSentencePieceModelPath() {
       .string();
 }
 
+std::string GetGemma3TokenizerModelPath() {
+  return (std::filesystem::path(::testing::SrcDir()) / kTestdataDir /
+          "gemma3_sentencepiece.model")
+      .string();
+}
+
 absl::StatusOr<std::string> GetContents(absl::string_view path) {
 #ifdef _WIN32
   int fd = open(path.data(), O_RDONLY | O_BINARY);
@@ -82,46 +88,39 @@ absl::StatusOr<std::string> GetContents(absl::string_view path) {
   return std::move(contents);
 }
 
-TEST(SentencePieceTokenizerTtest, CreateFromFile) {
+TEST(SentencePieceTokenizerTest, CreateFromFile) {
   auto tokenizer_or =
       SentencePieceTokenizer::CreateFromFile(GetSentencePieceModelPath());
   EXPECT_TRUE(tokenizer_or.ok());
 }
 
-TEST(SentencePieceTokenizerTtest, CreateFromBuffer) {
-  auto model_buffer_or = GetContents(GetSentencePieceModelPath());
-  EXPECT_TRUE(model_buffer_or.ok());
-  auto tokenizer_or =
-      SentencePieceTokenizer::CreateFromBuffer(*model_buffer_or);
-  EXPECT_TRUE(tokenizer_or.ok());
+TEST(SentencePieceTokenizerTest, CreateFromBuffer) {
+  ASSERT_OK_AND_ASSIGN(auto model_buffer,
+                       GetContents(GetSentencePieceModelPath()));
+  ASSERT_OK_AND_ASSIGN(auto tokenizer,
+                       SentencePieceTokenizer::CreateFromBuffer(model_buffer));
 }
 
-TEST(SentencePieceTokenizerTtest, Create) {
+TEST(SentencePieceTokenizerTest, Create) {
   auto tokenizer_or =
       SentencePieceTokenizer::CreateFromFile(GetSentencePieceModelPath());
   EXPECT_TRUE(tokenizer_or.ok());
 }
 
-TEST(SentencePieceTokenizerTtest, GetTokenizerType) {
-  auto tokenizer_or =
-      SentencePieceTokenizer::CreateFromFile(GetSentencePieceModelPath());
-  EXPECT_EQ(tokenizer_or.value()->GetTokenizerType(),
-            TokenizerType::kSentencePiece);
-  EXPECT_TRUE(tokenizer_or.ok());
+TEST(SentencePieceTokenizerTest, GetTokenizerType) {
+  ASSERT_OK_AND_ASSIGN(auto tokenizer, SentencePieceTokenizer::CreateFromFile(
+                                           GetSentencePieceModelPath()));
+  EXPECT_EQ(tokenizer->GetTokenizerType(), TokenizerType::kSentencePiece);
 }
 
 TEST(SentencePieceTokenizerTest, TextToTokenIds) {
-  auto tokenizer_or =
-      SentencePieceTokenizer::CreateFromFile(GetSentencePieceModelPath());
-  EXPECT_TRUE(tokenizer_or.ok());
-  auto tokenizer = std::move(tokenizer_or.value());
+  ASSERT_OK_AND_ASSIGN(auto tokenizer, SentencePieceTokenizer::CreateFromFile(
+                                           GetSentencePieceModelPath()));
 
   absl::string_view text = "How's it going?";
-  auto ids_or = tokenizer->TextToTokenIds(text);
-  EXPECT_TRUE(ids_or.ok());
+  ASSERT_OK_AND_ASSIGN(auto ids, tokenizer->TextToTokenIds(text));
 
-  EXPECT_THAT(ids_or.value(),
-              ::testing::ElementsAre(224, 24, 8, 66, 246, 18, 2295));
+  EXPECT_THAT(ids, ::testing::ElementsAre(224, 24, 8, 66, 246, 18, 2295));
 }
 
 TEST(SentencePieceTokenizerTest, TokenToId) {
@@ -138,16 +137,99 @@ TEST(SentencePieceTokenizerTest, TokenToIdUnknownTokenReturnsError) {
 }
 
 TEST(SentencePieceTokenizerTest, TokenIdsToText) {
-  auto tokenizer_or =
-      SentencePieceTokenizer::CreateFromFile(GetSentencePieceModelPath());
-  EXPECT_TRUE(tokenizer_or.ok());
-  auto tokenizer = std::move(tokenizer_or.value());
+  ASSERT_OK_AND_ASSIGN(auto tokenizer, SentencePieceTokenizer::CreateFromFile(
+                                           GetSentencePieceModelPath()));
 
   const std::vector<int> ids = {90, 547, 58, 735, 210, 466, 2294};
-  auto text_or = tokenizer->TokenIdsToText(ids);
-  EXPECT_TRUE(text_or.ok());
+  ASSERT_OK_AND_ASSIGN(auto text, tokenizer->TokenIdsToText(ids));
+  EXPECT_EQ(text, "▁Hello▁World!");
+}
 
-  EXPECT_EQ(text_or.value(), "▁Hello▁World!");
+TEST(SentencePieceTokenizerTest, TokenIdsToTextConsecutiveByteTokens) {
+  ASSERT_OK_AND_ASSIGN(auto tokenizer, SentencePieceTokenizer::CreateFromFile(
+                                           GetGemma3TokenizerModelPath()));
+
+  std::vector<std::string> tokens = tokenizer->GetTokens();
+  EXPECT_EQ(tokens.size(), 262144);
+
+  // Consecutive byte token combination
+  // <0xC2><0xB0> --> °
+  EXPECT_EQ(tokens[432], "<0xC2>");
+  EXPECT_EQ(tokens[414], "<0xB0>");
+
+  // Pass to tokenizer in two separate calls to TokenIdsToText.
+  ASSERT_OK_AND_ASSIGN(auto chunk_text, tokenizer->TokenIdsToText({432, 414}));
+  EXPECT_EQ(chunk_text, "°");
+}
+
+TEST(SentencePieceTokenizerTest, TokenIdsToTextMixedConsecutiveByteTokens) {
+  ASSERT_OK_AND_ASSIGN(auto tokenizer, SentencePieceTokenizer::CreateFromFile(
+                                           GetGemma3TokenizerModelPath()));
+
+  std::vector<std::string> tokens = tokenizer->GetTokens();
+  EXPECT_EQ(tokens.size(), 262144);
+
+  // Consecutive byte token combination
+  // <0x6B><0x6D><0xC2><0xB2> --> km²
+  EXPECT_EQ(tokens[345], "<0x6B>");
+  EXPECT_EQ(tokens[347], "<0x6D>");
+  EXPECT_EQ(tokens[432], "<0xC2>");
+  EXPECT_EQ(tokens[416], "<0xB2>");
+
+  auto chunk_token_ids = {345, 347, 432, 416};
+  ASSERT_OK_AND_ASSIGN(auto text, tokenizer->TokenIdsToText(chunk_token_ids));
+  EXPECT_EQ(text, "km²");
+}
+
+TEST(SentencePieceTokenizerTest, TokenIdsToTextMixedTokens) {
+  ASSERT_OK_AND_ASSIGN(auto tokenizer, SentencePieceTokenizer::CreateFromFile(
+                                           GetGemma3TokenizerModelPath()));
+
+  const std::vector<int> ids = {345, 347, 432, 416, 964};
+  ASSERT_OK_AND_ASSIGN(auto text, tokenizer->TokenIdsToText(ids));
+  EXPECT_EQ(text, "km²▁were");
+}
+
+TEST(SentencePieceTokenizerTest, TokenIdsToTextStartByteGivesDataLossError) {
+  ASSERT_OK_AND_ASSIGN(auto tokenizer, SentencePieceTokenizer::CreateFromFile(
+                                           GetGemma3TokenizerModelPath()));
+
+  // <0xC2> (432) is a start byte, invalid on its own.
+  // TokenIdsToText should return the byte string representation "<0xC2>"
+  // instead of the replacement character.
+  auto text_or = tokenizer->TokenIdsToText({432});
+  EXPECT_THAT(text_or, StatusIs(absl::StatusCode::kDataLoss));
+}
+
+TEST(SentencePieceTokenizerTest, TokenIdsToTextMixedTokensGivesDataLossError) {
+  ASSERT_OK_AND_ASSIGN(auto tokenizer, SentencePieceTokenizer::CreateFromFile(
+                                           GetGemma3TokenizerModelPath()));
+
+  const std::vector<int> ids = {964, 345, 347, 432};  // miss byte token 416
+  auto text_or = tokenizer->TokenIdsToText(ids);
+  EXPECT_THAT(text_or, StatusIs(absl::StatusCode::kDataLoss));
+}
+
+TEST(SentencePieceTokenizerTest, GetTokens) {
+  ASSERT_OK_AND_ASSIGN(auto tokenizer, SentencePieceTokenizer::CreateFromFile(
+                                           GetSentencePieceModelPath()));
+  std::vector<std::string> tokens = tokenizer->GetTokens();
+  EXPECT_EQ(tokens.size(), 4000);
+
+  // Verify 5 different tokens.
+  EXPECT_EQ(tokens[0], "<unk>");
+  EXPECT_EQ(tokens[1], "<s>");
+  EXPECT_EQ(tokens[2], "</s>");
+  EXPECT_EQ(tokens[224], "▁How");
+  EXPECT_EQ(tokens[2295], "?");
+}
+
+TEST(SentencePieceTokenizerTest, TokensTokenIdsToTextOutOfRange) {
+  ASSERT_OK_AND_ASSIGN(auto tokenizer, SentencePieceTokenizer::CreateFromFile(
+                                           GetSentencePieceModelPath()));
+  std::vector<std::string> tokens = tokenizer->GetTokens();
+  EXPECT_THAT(tokenizer->TokenIdsToText({10000}),
+              StatusIs(absl::StatusCode::kNotFound));
 }
 
 }  // namespace

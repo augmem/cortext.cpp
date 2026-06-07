@@ -21,15 +21,18 @@
 #include <string>
 #include <utility>
 
+#include <gmock/gmock.h>
 #include <gtest/gtest.h>
 #include "absl/types/span.h"  // from @com_google_absl
+#include "litert/c/litert_tensor_buffer_types.h"  // from @litert
 #include "litert/cc/litert_element_type.h"  // from @litert
 #include "litert/cc/litert_environment.h"  // from @litert
 #include "litert/cc/litert_layout.h"  // from @litert
-#include "litert/cc/litert_model.h"  // from @litert
+#include "litert/cc/litert_ranked_tensor_type.h"  // from @litert
 #include "litert/cc/litert_tensor_buffer.h"  // from @litert
 #include "runtime/components/constrained_decoding/constrained_decoder.h"
 #include "runtime/components/constrained_decoding/fake_constraint.h"
+#include "runtime/util/test_utils.h"  // IWYU pragma: keep
 
 namespace litert::lm {
 namespace {
@@ -789,6 +792,89 @@ TEST(LlmExecutorIoTypesTest, ExecutorDecodeParamsGetSet) {
   params.SetConstraintDecoder(&constraint_decoder);
   EXPECT_TRUE(params.HasConstraintDecoder());
   EXPECT_EQ(params.GetConstraintDecoder(), &constraint_decoder);
+}
+
+TEST(LlmExecutorIoTypesTest, ExecutorVisionDataDuplicate) {
+  struct alignas(LITERT_HOST_MEMORY_BUFFER_ALIGNMENT) {
+    float d[2] = {31.0f, 32.0f};
+  } emb_data;
+
+  struct alignas(LITERT_HOST_MEMORY_BUFFER_ALIGNMENT) {
+    float d[4] = {33.0f, 34.0f, 35.0f, 36.0f};
+  } ple_emb_data;
+
+  auto env = Environment::Create({});
+  auto embeddings = TensorBuffer::CreateFromHostMemory(
+      *env,
+      ::litert::RankedTensorType(ElementType::Float32, Layout(Dimensions({2}))),
+      emb_data.d, sizeof(emb_data.d));
+  ASSERT_TRUE(embeddings.HasValue());
+
+  auto per_layer_embeddings = TensorBuffer::CreateFromHostMemory(
+      *env,
+      ::litert::RankedTensorType(ElementType::Float32, Layout(Dimensions({4}))),
+      ple_emb_data.d, sizeof(ple_emb_data.d));
+  ASSERT_TRUE(per_layer_embeddings.HasValue());
+
+  ExecutorVisionData vision_data(std::move(*embeddings),
+                                 std::move(*per_layer_embeddings));
+  ASSERT_OK_AND_ASSIGN(ExecutorVisionData duplicate, vision_data.Duplicate());
+
+  // Verify embeddings
+  ASSERT_OK_AND_ASSIGN(TensorBuffer * duplicate_emb_ptr,
+                       duplicate.GetMutableEmbeddingsPtr());
+  float read_data[2];
+  ASSERT_TRUE(duplicate_emb_ptr->Read<float>(absl::MakeSpan(read_data)));
+  EXPECT_EQ(read_data[0], 31.0f);
+  EXPECT_EQ(read_data[1], 32.0f);
+
+  // Verify per-layer embeddings
+  ASSERT_OK_AND_ASSIGN(TensorBuffer * duplicate_ple_ptr,
+                       duplicate.GetMutablePerLayerEmbeddingsPtr());
+
+  float ple_read_data[4];
+  ASSERT_TRUE(duplicate_ple_ptr->Read<float>(absl::MakeSpan(ple_read_data)));
+  EXPECT_EQ(ple_read_data[0], 33.0f);
+  EXPECT_EQ(ple_read_data[1], 34.0f);
+  EXPECT_EQ(ple_read_data[2], 35.0f);
+  EXPECT_EQ(ple_read_data[3], 36.0f);
+
+  // Verify that empty duplicate works fine.
+  ExecutorVisionData vision_data_empty(std::nullopt, std::nullopt);
+  ASSERT_OK_AND_ASSIGN(ExecutorVisionData duplicate_empty,
+                       vision_data_empty.Duplicate());
+  ASSERT_FALSE(duplicate_empty.GetEmbeddingsPtr().ok());
+  ASSERT_FALSE(duplicate_empty.GetPerLayerEmbeddingsPtr().ok());
+}
+
+TEST(LlmExecutorIoTypesTest, ExecutorAudioDataDuplicate) {
+  struct alignas(LITERT_HOST_MEMORY_BUFFER_ALIGNMENT) {
+    float d[2] = {131.0f, 132.0f};
+  } emb_data;
+
+  auto env = Environment::Create({});
+  auto embeddings = TensorBuffer::CreateFromHostMemory(
+      *env,
+      ::litert::RankedTensorType(ElementType::Float32, Layout(Dimensions({2}))),
+      emb_data.d, sizeof(emb_data.d));
+  ASSERT_TRUE(embeddings.HasValue());
+
+  ExecutorAudioData audio_data(std::move(*embeddings), std::nullopt, 1);
+  ASSERT_OK_AND_ASSIGN(ExecutorAudioData duplicate, audio_data.Duplicate());
+
+  ASSERT_OK_AND_ASSIGN(TensorBuffer * duplicate_emb_ptr,
+                       duplicate.GetMutableEmbeddingsPtr());
+
+  float read_data[2];
+  ASSERT_TRUE(duplicate_emb_ptr->Read<float>(absl::MakeSpan(read_data)));
+  EXPECT_EQ(read_data[0], 131.0f);
+  EXPECT_EQ(read_data[1], 132.0f);
+  EXPECT_EQ(duplicate.GetValidTokens(), 1);
+
+  // Verify that empty duplicate works fine.
+  ExecutorAudioData audio_data_empty(std::nullopt, std::nullopt);
+  ASSERT_OK_AND_ASSIGN(ExecutorAudioData duplicate_empty,
+                       audio_data_empty.Duplicate());
 }
 
 }  // namespace

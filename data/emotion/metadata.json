@@ -1,0 +1,60 @@
+{
+  "contrastive": true,
+  "embedding_dim": 256,
+  "encoder": "AIST/ES-AIST via cortext_text_embedder",
+  "generated_by": "tools/centroid_vectors/build_aist_sliced_centroids.py",
+  "labels": {
+    "anger": {
+      "centroid_count": 172,
+      "file": "anger_256.npy",
+      "purity_removed": 3828,
+      "source_count": 4000
+    },
+    "fear": {
+      "centroid_count": 114,
+      "file": "fear_256.npy",
+      "purity_removed": 2549,
+      "source_count": 2663
+    },
+    "joy": {
+      "centroid_count": 172,
+      "file": "joy_256.npy",
+      "purity_removed": 3828,
+      "source_count": 4000
+    },
+    "love": {
+      "centroid_count": 172,
+      "file": "love_256.npy",
+      "purity_removed": 3828,
+      "source_count": 4000
+    },
+    "sadness": {
+      "centroid_count": 172,
+      "file": "sadness_256.npy",
+      "purity_removed": 3828,
+      "source_count": 4000
+    },
+    "surprise": {
+      "centroid_count": 117,
+      "file": "surprise_256.npy",
+      "purity_removed": 2599,
+      "source_count": 2716
+    }
+  },
+  "mean_centered": true,
+  "purity_iters": 3,
+  "purity_keep_top": 0.35,
+  "slice": [
+    0,
+    256
+  ],
+  "source": "data/emotion/_tmp_text_emotion",
+  "source_meta": {
+    "bytes": 118143259,
+    "exists": true,
+    "files": 13,
+    "path": "data/emotion/_tmp_text_emotion",
+    "sha256": "be789c3f9432f2f5b1d097627ec82aa1ab332c5b6443f9a214c4988fd371f5a1"
+  },
+  "timestamp": "2026-05-05T02:48:19Z"
+}

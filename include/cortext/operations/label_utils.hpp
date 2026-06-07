@@ -77,7 +77,8 @@ inline bool
 IsDurableLabelCandidate (const std::string &label,
                          const std::string &label_key)
 {
-  if (TrimLabel (label).empty () || label_key.empty ())
+  const std::string trimmed = TrimLabel (label);
+  if (trimmed.empty () || label_key.empty ())
     {
       return false;
     }
@@ -89,18 +90,189 @@ IsDurableLabelCandidate (const std::string &label,
     }
 
   static const std::unordered_set<std::string_view> kFillerLabels = {
-    "ah",        "aha",   "alright", "anyway",   "assistant",
-    "basically", "cool",  "er",      "erm",      "hmm",
-    "huh",       "just",  "k",       "kind of",  "know",
-    "like",      "mm",    "mm hmm",  "mhm",      "nope",
-    "oh",        "ok",    "okay",    "right",    "sort of",
-    "sure",      "system", "thanks", "thank you", "uh",
-    "uh huh",    "um",    "umm",     "user",     "well",
-    "ya",        "ya know",
-    "yeah",      "yep",   "you know"
+	    "a",         "about",     "ah",        "aha",       "alright",
+	    "also",      "an",        "and",       "anyway",    "are",
+	    "as",        "assistant", "at",        "basically", "be",
+	    "almost",    "almost done", "been",    "being",     "big cart",
+	    "all",       "but",
+	    "by",        "can",       "could",     "cool",      "did",
+	    "do",        "does",
+	    "doing",     "done",      "equate",    "er",        "erm",       "for",
+	    "food",      "from",      "get",       "gets",      "getting",   "go",
+	    "goes",      "going",     "got",       "had",       "has",
+	    "good",      "good luck", "have",      "having",    "he",        "her",       "hers",
+	    "him",       "his",       "hmm",       "huh",       "i",
+	    "idea",      "ideas",     "image",     "in",        "is",        "it",
+	    "its",       "just",
+	    "k",         "kind of",   "know",      "like",      "make",
+	    "makes",     "making",    "maybe",     "me",        "might",
+	    "mm",        "mm hmm",    "mhm",       "my",        "no",        "nope",
+	    "of",        "off brand", "oh",
+	    "ok",        "okay",      "on",        "once",      "or",        "our",
+	    "ours",      "probably",  "right",     "she",       "sorry",     "so",
+	    "sort of",   "stuff",     "sure",      "system",    "that",
+	    "the",       "their",
+	    "theirs",    "them",      "then",      "there",     "these",
+	    "they",      "thing",     "things",    "this",      "those",
+	    "to",        "thanks",    "thank you", "uh",        "uh huh",
+	    "um",        "umm",       "up",        "us",        "user",
+	    "we",        "well",      "what",      "when",      "where",
+	    "which",     "who",       "why",       "with",      "would",
+	    "ya",        "ya know",   "yeah",      "yep",       "you",
+	    "your",      "yours",     "you know",
+	    "agree",     "almost",    "back",      "back row",  "backs",     "bathroom",
+	    "cage",      "cart",      "come back", "cute",      "damn",      "damn passed",
+	    "how",       "including", "lighting",  "long",      "long line",
+	    "light",     "metal",     "not",       "not ideal", "shade",     "wall",
+	    "way",       "wild"
+	  };
+
+  if (kFillerLabels.find (canonical) != kFillerLabels.end ())
+    {
+      return false;
+    }
+
+  static const std::unordered_set<std::string_view> kWeakPhraseTokens = {
+    "a",       "about",   "all",     "almost", "and",    "around",
+    "as",      "at",      "back",    "be",     "been",   "being",
+    "can",     "come",    "could",   "did",    "do",     "does",
+    "doing",   "done",    "for",     "from",   "get",    "gets",
+    "getting", "go",      "goes",    "going",  "good",   "got",
+    "guess",   "had",     "has",     "have",   "having", "how",
+    "if",      "in",      "is",      "it",     "just",   "kind",
+    "like",    "make",    "makes",   "making", "maybe",  "might",
+    "not",     "of",      "on",      "once",   "or",     "probably",
+    "right",   "so",      "sort",    "that",   "the",    "then",
+    "there",   "thing",   "things",  "this",   "to",     "turn",
+    "turning", "up",      "was",     "way",    "well",   "what",
+    "when",    "where",   "which",   "who",    "why",    "with",
+    "would"
   };
 
-  return kFillerLabels.find (canonical) == kFillerLabels.end ();
+  int phrase_token_count = 0;
+  int weak_phrase_token_count = 0;
+  std::string phrase_token;
+  auto finish_phrase_token = [&] {
+    if (phrase_token.empty ())
+      {
+        return;
+      }
+    ++phrase_token_count;
+    if (kWeakPhraseTokens.find (phrase_token) != kWeakPhraseTokens.end ())
+      {
+        ++weak_phrase_token_count;
+      }
+    phrase_token.clear ();
+  };
+  for (unsigned char c : canonical)
+    {
+      if (std::isalnum (c) != 0)
+        {
+          phrase_token.push_back (static_cast<char> (c));
+        }
+      else
+        {
+          finish_phrase_token ();
+        }
+    }
+  finish_phrase_token ();
+  if (phrase_token_count >= 2
+      && phrase_token_count == weak_phrase_token_count)
+    {
+      return false;
+    }
+
+  int token_count = 0;
+  bool in_token = false;
+  int alpha_count = 0;
+  int digit_count = 0;
+  bool has_upper = false;
+  bool saw_alpha = false;
+  bool first_alpha_upper = false;
+  bool has_space = false;
+  bool has_connector = false;
+  bool first_nonspace_digit = false;
+  bool saw_nonspace = false;
+  for (unsigned char c : trimmed)
+    {
+      if (std::isspace (c) == 0 && !saw_nonspace)
+        {
+          first_nonspace_digit = std::isdigit (c) != 0;
+          saw_nonspace = true;
+        }
+      has_space = has_space || std::isspace (c) != 0;
+      has_connector = has_connector || c == '-' || c == '_';
+      if (std::isalnum (c) != 0)
+        {
+          if (!in_token)
+            {
+              ++token_count;
+              in_token = true;
+            }
+          if (std::isalpha (c) != 0)
+            {
+              if (!saw_alpha)
+                {
+                  first_alpha_upper = std::isupper (c) != 0;
+                  saw_alpha = true;
+                }
+              ++alpha_count;
+              has_upper = has_upper || std::isupper (c) != 0;
+            }
+          else if (std::isdigit (c) != 0)
+            {
+              ++digit_count;
+            }
+        }
+      else
+        {
+          in_token = false;
+        }
+    }
+
+  if (alpha_count == 0)
+    {
+      return false;
+    }
+  if (token_count == 1 && alpha_count <= 2 && !has_connector)
+    {
+      bool all_upper = true;
+      for (unsigned char c : trimmed)
+        {
+          if (std::isalpha (c) != 0 && std::isupper (c) == 0)
+            {
+              all_upper = false;
+              break;
+            }
+        }
+      if (!all_upper)
+        {
+          return false;
+        }
+    }
+  if (token_count <= 1 && digit_count > 0 && canonical.size () >= 6)
+    {
+      return false;
+    }
+  if (first_nonspace_digit && token_count <= 2 && !has_upper)
+    {
+      return false;
+    }
+  if (token_count <= 1 && (!has_upper || !first_alpha_upper)
+      && digit_count == 0)
+    {
+      return false;
+    }
+  if (!has_space && has_connector && !first_alpha_upper)
+    {
+      return false;
+    }
+  if (!has_space && has_connector && digit_count > 0 && canonical.size () >= 6)
+    {
+      return false;
+    }
+
+  return true;
 }
 
 } // namespace cortext::operations

@@ -1506,12 +1506,12 @@ private:
     (void)resolved;
     throw std::runtime_error ("llama.cpp backend unavailable: link libllama");
 #else
-    static std::once_flag backend_once;
-    std::call_once (backend_once, [] () {
-      internal::InstallLlamaCppLogFilter ();
-      ggml_backend_load_all ();
-      llama_backend_init ();
-    });
+	    static std::once_flag backend_once;
+	    std::call_once (backend_once, [] () {
+	      internal::InstallLlamaCppLogFilter ();
+	      internal::LoadGgmlBackendsOnce ();
+	      llama_backend_init ();
+	    });
 
     llama_model_params model_params = llama_model_default_params ();
     model_params.n_gpu_layers = 0;

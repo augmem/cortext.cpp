@@ -63,6 +63,7 @@ UpdateAccumulator::Execute (OperationContext &context,
       = (p_ctx.episode_start_ts > 0)
             ? static_cast<int64_t> (p_ctx.episode_start_ts)
             : 0;
+  const bool track_durable_signal = signal.retention == Retention::Durable;
   context.SetInterruptAborted (false);
 
   // Use drift step for accumulation (Section 4.4.2)
@@ -96,11 +97,17 @@ UpdateAccumulator::Execute (OperationContext &context,
       state.s_arousal_sum = arousal;
 
       // Track first signal for SIGNALS table (Section 4.4)
-      state.signals.push_back (
-          CreateSignalRecord (signal, 0.0, 0, context, tx));
+      if (track_durable_signal)
+        {
+          state.signals.push_back (
+              CreateSignalRecord (signal, 0.0, 0, context, tx));
+        }
 
       // Track primary modality (v2: first modality wins)
-      state.primary_modality = signal.modality;
+      if (track_durable_signal)
+        {
+          state.primary_modality = signal.modality;
+        }
       if (state.mu_acc.size () > 0)
         {
           state.acc_signals_window.push_back (state.mu_acc);
@@ -191,11 +198,17 @@ UpdateAccumulator::Execute (OperationContext &context,
       acc.s_arousal_sum = arousal;
 
       // Track first signal for SIGNALS table (Section 4.4)
-      acc.signals.push_back (
-          CreateSignalRecord (signal, 0.0, 0, context, tx));
+      if (track_durable_signal)
+        {
+          acc.signals.push_back (
+              CreateSignalRecord (signal, 0.0, 0, context, tx));
+        }
 
       // Track primary modality (v2: first modality wins)
-      acc.primary_modality = signal.modality;
+      if (track_durable_signal)
+        {
+          acc.primary_modality = signal.modality;
+        }
       if (acc.mu_acc.size () > 0)
         {
           acc.acc_signals_window.push_back (acc.mu_acc);
@@ -243,12 +256,15 @@ UpdateAccumulator::Execute (OperationContext &context,
 
   // Track signal for SIGNALS table (Section 4.4)
   // Serial position is the current signal count before accumulation
-  const int serial_pos = static_cast<int> (acc.signals.size ());
-  acc.signals.push_back (
-      CreateSignalRecord (signal, 0.0, serial_pos, context, tx));
+  if (track_durable_signal)
+    {
+      const int serial_pos = static_cast<int> (acc.signals.size ());
+      acc.signals.push_back (
+          CreateSignalRecord (signal, 0.0, serial_pos, context, tx));
+    }
 
   // Track primary modality (v2: first modality wins)
-  if (acc.primary_modality.empty ())
+  if (track_durable_signal && acc.primary_modality.empty ())
     {
       acc.primary_modality = signal.modality;
     }

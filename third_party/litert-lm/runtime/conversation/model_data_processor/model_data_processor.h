@@ -16,6 +16,7 @@
 #define THIRD_PARTY_ODML_LITERT_LM_RUNTIME_CONVERSATION_MODEL_DATA_PROCESSOR_MODEL_DATA_PROCESSOR_H_
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <variant>
 #include <vector>
@@ -25,6 +26,7 @@
 #include "absl/strings/string_view.h"  // from @com_google_absl
 #include "nlohmann/json.hpp"  // from @nlohmann_json
 #include "runtime/components/constrained_decoding/constraint.h"
+#include "runtime/components/prompt_template.h"
 #include "runtime/conversation/io_types.h"
 #include "runtime/conversation/model_data_processor/config_registry.h"
 #include "runtime/engine/io_types.h"
@@ -35,6 +37,15 @@ namespace litert::lm {
 // generic Json messages and the Litert LM InputData type.
 class ModelDataProcessor {
  public:
+  // The result of rendering a single turn template.
+  struct SingleTurnTemplateRenderResult {
+    // The rendered text.
+    std::string text;
+    // The new state of is_appending_message of Conversation should be updated
+    // to.
+    bool is_appending_message;
+  };
+
   virtual ~ModelDataProcessor() = default;
 
   // Converts a rendered template prompt and a list of messages to a vector of
@@ -61,6 +72,30 @@ class ModelDataProcessor {
   virtual absl::StatusOr<nlohmann::ordered_json> MessageToTemplateInput(
       const nlohmann::ordered_json& message) const = 0;
 
+  // Renders a single turn template for the given message and history. Only the
+  // prompt template supporting single turn is valid for this method.
+  //  - history: The history of the conversation.
+  //  - preface: The preface of the conversation.
+  //  - message: The current message to be rendered.
+  //  - prompt_template: The prompt template to use for rendering.
+  //  - current_is_appending_message: Whether the current conversation is in
+  //  appending state.
+  //  - append_message: Whether the current message is for appending.
+  //  - extra_context: Optional context to merge into the PromptTemplateInput
+  //  for prompt template rendering.
+  //
+  // Returns the rendered text and the new is_appending_message as a
+  // SingleTurnTemplateRenderResult.
+  virtual absl::StatusOr<SingleTurnTemplateRenderResult>
+  RenderSingleTurnTemplate(
+      std::vector<Message>& history, const Preface& preface,
+      const Message& message, const PromptTemplate& prompt_template,
+      bool current_is_appending_message, bool append_message,
+      std::optional<nlohmann::ordered_json> extra_context) const {
+    return absl::UnimplementedError(
+        "RenderSingleTurnTemplate is not implemented.");
+  }
+
   // Formats the provided tools to be inserted into the system/developer
   // instruction of the prompt.
   virtual absl::StatusOr<nlohmann::ordered_json> FormatTools(
@@ -79,6 +114,9 @@ class ModelDataProcessor {
 
   // Returns the end of tool call blocks.
   virtual absl::string_view CodeFenceEnd() const = 0;
+
+  // Clones the state of the other model data processor.
+  virtual absl::Status CloneState(const ModelDataProcessor& other) = 0;
 };
 
 // TypeSafeModelDataProcessor is a ModelDataProcessor that expects a specific
@@ -124,6 +162,18 @@ class TypeSafeModelDataProcessor : public ModelDataProcessor {
   // Returns the config of the model data processor.
   virtual const ExpectedConfigT& GetConfig() const = 0;
 
+  // Clones the state of the other model data processor.
+  absl::Status CloneState(const ModelDataProcessor& other) final {
+    const auto* typed_other = dynamic_cast<
+        const TypeSafeModelDataProcessor<ExpectedConfigT, ExpectedArgsT>*>(
+        &other);
+    if (typed_other == nullptr) {
+      return absl::InvalidArgumentError(
+          "The other ModelDataProcessor is not of the expected type.");
+    }
+    return this->CloneStateImpl(*typed_other);
+  }
+
  private:
   virtual absl::StatusOr<std::vector<InputData>> ToInputDataVectorImpl(
       const std::string& rendered_template_prompt,
@@ -132,6 +182,10 @@ class TypeSafeModelDataProcessor : public ModelDataProcessor {
 
   virtual absl::StatusOr<Message> ToMessageImpl(
       const Responses& responses, const ExpectedArgsT& typed_args) const = 0;
+
+  virtual absl::Status CloneStateImpl(
+      const TypeSafeModelDataProcessor<ExpectedConfigT, ExpectedArgsT>&
+          other) = 0;
 };
 
 }  // namespace litert::lm

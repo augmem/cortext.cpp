@@ -20,6 +20,7 @@
 #include <vector>
 
 #include "absl/status/statusor.h"  // from @com_google_absl
+#include "absl/strings/string_view.h"  // from @com_google_absl
 #include "runtime/components/tokenizer.h"
 #include "runtime/engine/engine_settings.h"
 #include "runtime/engine/io_types.h"
@@ -37,16 +38,21 @@ absl::StatusOr<InputText> StringToProcessedInputText(
     Tokenizer& tokenizer, const std::optional<BenchmarkInfo>& benchmark_info);
 
 // Util function for applying the prompt templates.
-// input: The input text to apply the prompt templates.
-// is_first_chunk: Whether the input is the first chunk of the turn.
-// is_last_chunk: Whether the input is the last chunk of the turn.
-// The output is the text input after applying the proper prompt templates.
-// TODO - b/453312248: This is a temporary solution to add required templates
-// to the input. Should be removed once the prompt templates are properly
-// handled via the conversation layer.
+// contents: The input contents to apply the prompt templates.
+// The output is the input after applying the proper prompt templates.
+// This function is intended for basic text-only content. Will raise error if
+// the input contains non-text contents and ApplyPromptTemplateInSession is
+// true.
+// The content_type is used to determine which prompt template to use.
+// kFirst: User's turn first chunk.
+// kMiddle: User's turn middle chunk.
+// kLast: User's turn last chunk.
+// kNA: Not applicable. Only used when ApplyPromptTemplateInSession is false.
+enum class ContentType : int { kFirst, kMiddle, kLast, kNA };
 absl::StatusOr<std::vector<InputData>> ApplyPromptTemplates(
-    const std::vector<InputData>& contents, const SessionConfig& session_config,
-    Tokenizer& tokenizer, bool& is_first_turn);
+    const std::vector<InputData>& contents, ContentType content_type,
+    const SessionConfig& session_config, Tokenizer& tokenizer,
+    bool is_first_turn);
 
 // Preprocesses the input contents. This function is used for pre-processing
 // the input contents before sending them to the LLM executor.

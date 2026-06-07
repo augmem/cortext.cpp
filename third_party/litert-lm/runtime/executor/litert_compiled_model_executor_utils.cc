@@ -16,32 +16,46 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdint>
 #include <cstring>
+#include <filesystem>  // NOLINT: Required for std::filesystem::path.
 #include <iterator>
 #include <limits>
 #include <memory>
 #include <string>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include "absl/algorithm/container.h"  // from @com_google_absl
+#include "absl/log/absl_log.h"  // from @com_google_absl
 #include "absl/status/status.h"  // from @com_google_absl
 #include "absl/status/statusor.h"  // from @com_google_absl
 #include "absl/strings/match.h"  // from @com_google_absl
 #include "absl/strings/string_view.h"  // from @com_google_absl
+#include "absl/types/span.h"  // from @com_google_absl
 #include "litert/cc/litert_element_type.h"  // from @litert
 #include "litert/cc/litert_expected.h"  // from @litert
 #include "litert/cc/litert_macros.h"  // from @litert
 #include "litert/cc/litert_model.h"  // from @litert
+#include "litert/cc/litert_ranked_tensor_type.h"  // from @litert
 #include "litert/cc/litert_tensor_buffer.h"  // from @litert
+#include "litert/cc/options/litert_cpu_options.h"  // from @litert
+#include "litert/cc/options/litert_gpu_options.h"  // from @litert
+#include "runtime/components/embedding_lookup/embedding_lookup_manager.h"
+#include "runtime/components/embedding_lookup/embedding_lookup_text.h"
 #include "runtime/components/model_resources.h"
 #include "runtime/components/model_resources_litert_lm.h"
 #include "runtime/components/model_resources_task.h"
 #include "runtime/executor/executor_settings_base.h"
+#include "runtime/util/convert_tensor_buffer.h"
 #include "runtime/util/file_format_util.h"
 #include "runtime/util/litert_lm_loader.h"
 #include "runtime/util/model_asset_bundle_resources.h"
+#include "runtime/util/scoped_file.h"
 #include "runtime/util/status_macros.h"  //NOLINT
+#include "runtime/util/tensor_buffer_util.h"
+#include "tflite/types/half.h"  // from @litert
 
 namespace litert::lm {
 
@@ -63,6 +77,9 @@ constexpr std::array<absl::string_view, 1> kEmbeddingNames = {"embeddings"};
 // Possible per layer embedding names:
 constexpr std::array<absl::string_view, 1> kPerLayerEmbeddingNames = {
     "per_layer_embeddings"};
+// Possible input int32 param names:
+constexpr std::array<absl::string_view, 1> kInputInt32ParamNames = {
+    "param_tensor"};
 // Possible output logits names:
 constexpr std::array<absl::string_view, 1> kOutputLogitsNames = {"logits"};
 
@@ -70,9 +87,10 @@ absl::StatusOr<std::unique_ptr<ModelResources>>
 BuildModelResourcesFromTaskFormat(const ModelAssets& model_assets) {
   std::unique_ptr<ModelAssetBundleResources> resources;
   if (model_assets.HasMemoryMappedFile()) {
-    ASSIGN_OR_RETURN(
-        resources, ModelAssetBundleResources::Create(
-                       /*tag=*/"", model_assets.GetMemoryMappedFile().value()));
+    ASSIGN_OR_RETURN(auto memory_mapped_file,
+                     model_assets.GetMemoryMappedFile());
+    ASSIGN_OR_RETURN(resources, ModelAssetBundleResources::Create(
+                                    /*tag=*/"", memory_mapped_file));
   } else {
     ASSIGN_OR_RETURN(auto scoped_file, model_assets.GetOrCreateScopedFile());
     ASSIGN_OR_RETURN(resources, ModelAssetBundleResources::Create(
@@ -90,15 +108,16 @@ absl::StatusOr<std::unique_ptr<ModelResources>>
 BuildModelResourcesFromLitertLmFormat(const ModelAssets& model_assets) {
   std::unique_ptr<LitertLmLoader> loader;
   if (model_assets.HasMemoryMappedFile()) {
-    loader = std::make_unique<LitertLmLoader>(
-        model_assets.GetMemoryMappedFile().value());
+    ASSIGN_OR_RETURN(auto memory_mapped_file,
+                     model_assets.GetMemoryMappedFile());
+    ASSIGN_OR_RETURN(loader, LitertLmLoader::Create(memory_mapped_file));
   } else {
     // `BuildModelResourcesFromLitertLmFormat` expects a ScopedFile that it
     // takes ownership of, so we need to duplicate the ScopedFile to keep
     // the original alive.
     ASSIGN_OR_RETURN(auto scoped_file, model_assets.GetOrCreateScopedFile());
     ASSIGN_OR_RETURN(auto duplicate_file, scoped_file->Duplicate());
-    loader = std::make_unique<LitertLmLoader>(std::move(duplicate_file));
+    ASSIGN_OR_RETURN(loader, LitertLmLoader::Create(std::move(duplicate_file)));
   }
   return ModelResourcesLitertLm::Create(std::move(loader));
 }
@@ -130,6 +149,10 @@ absl::StatusOr<ModelSignatures> GetModelSignaturesFromInputOutputNames(
       model_signatures.input_per_layer_embeddings = std::string(input_name);
       continue;
     }
+    if (absl::c_linear_search(kInputInt32ParamNames, input_name)) {
+      model_signatures.input_int32_param = std::string(input_name);
+      continue;
+    }
   }
 
   for (auto output_name : output_names) {
@@ -155,6 +178,7 @@ absl::StatusOr<ModelSignatures> GetModelSignaturesFromInputOutputNames(
 }
 
 absl::Status GetKVCacheRootNames(std::vector<absl::string_view> input_names,
+                                 std::vector<absl::string_view> output_names,
                                  std::string& k_root_name,
                                  std::string& v_root_name) {
   for (auto input_name : input_names) {
@@ -165,6 +189,25 @@ absl::Status GetKVCacheRootNames(std::vector<absl::string_view> input_names,
     } else if (input_name == "k_cache_0") {
       k_root_name = "k_cache_";
       v_root_name = "v_cache_";
+      return absl::OkStatus();
+    } else if (input_name == "kv_cache_c_0") {
+      k_root_name = "kv_cache_c_";
+      v_root_name = "kv_cache_c_";
+      return absl::OkStatus();
+    }
+  }
+  for (auto output_name : output_names) {
+    if (output_name == "kv_cache_k_0") {
+      k_root_name = "kv_cache_k_";
+      v_root_name = "kv_cache_v_";
+      return absl::OkStatus();
+    } else if (output_name == "k_cache_0") {
+      k_root_name = "k_cache_";
+      v_root_name = "v_cache_";
+      return absl::OkStatus();
+    } else if (output_name == "kv_cache_c_0") {
+      k_root_name = "kv_cache_c_";
+      v_root_name = "kv_cache_c_";
       return absl::OkStatus();
     }
   }
@@ -253,10 +296,43 @@ absl::Status InitializeAttentionMask(litert::TensorBuffer& mask, bool is_f16) {
                 is_f16 ? -45824 : -0.7f * std::numeric_limits<float>::max());
       break;
     }
+    case litert::ElementType::Float16: {
+      // Float16 mask: Default value is -45824.
+      // This value is approximately -0.7 * MaxFloat16 (65504).
+      // 0.7 * 65504 = 45852.8. Truncated to 45824.
+      // It provides a margin of ~19680 before overflowing to -inf.
+      tflite::half* mask_ptr =
+          static_cast<tflite::half*>(mask_lock_and_addr.second);
+      std::fill(mask_ptr, mask_ptr + mask_size / sizeof(tflite::half),
+                tflite::half(-45824.0f));
+      break;
+    }
     default:
       return absl::InvalidArgumentError(
           "Unsupported attention mask data type.");
   }
+  return absl::OkStatus();
+}
+
+absl::Status FillSingleBufferCacheParamTensor(
+    litert::TensorBuffer& param_tensor, int start_index, int update_length) {
+  // TODO(sulemanshahid): Local attention optimization is not supported in the
+  // OpenCL implementation, enable for WebGPU.
+  LITERT_ASSIGN_OR_RETURN(auto packed_size, param_tensor.PackedSize());
+  LITERT_ASSIGN_OR_RETURN(
+      auto param_tensor_lock_and_addr,
+      TensorBufferScopedLock::Create(param_tensor,
+                                     TensorBuffer::LockMode::kWrite));
+  std::memset(param_tensor_lock_and_addr.second, 0, packed_size);
+
+  // See parameter definition in ml_drift::LlmRuntimeParams.
+  // First 2 parameters are used by add_values_to_cache kernel.
+  // 3rd parameter is used by runtime_batched_matmul kernel to check the end
+  // channel index, which doesn't have to be aligned as the kernel does that.
+  int end_index = start_index + update_length;
+  int32_t params[] = {start_index, end_index, end_index};
+  LITERT_RETURN_IF_ERROR(sizeof(params) <= packed_size);
+  std::memcpy(param_tensor_lock_and_addr.second, params, sizeof(params));
   return absl::OkStatus();
 }
 
@@ -278,6 +354,8 @@ absl::Status FillAttentionMask(litert::TensorBuffer& mask, int start_timestep,
     batch_offset /= sizeof(bool);
   } else if (mask_tensor_type.ElementType() == litert::ElementType::Float32) {
     batch_offset /= sizeof(float);
+  } else if (mask_tensor_type.ElementType() == litert::ElementType::Float16) {
+    batch_offset /= sizeof(tflite::half);
   } else {
     return absl::InvalidArgumentError("Unsupported attention mask data type.");
   }
@@ -292,6 +370,13 @@ absl::Status FillAttentionMask(litert::TensorBuffer& mask, int start_timestep,
         bool* bool_ptr = static_cast<bool*>(mask_lock_and_addr.second);
         std::fill(bool_ptr + offset, bool_ptr + offset + current_step + 1,
                   true);
+      } else if (mask_tensor_type.ElementType() ==
+                 litert::ElementType::Float16) {
+        // Float16 mask: Fill value = 0.0f.
+        tflite::half* half_ptr =
+            static_cast<tflite::half*>(mask_lock_and_addr.second);
+        std::fill(half_ptr + offset, half_ptr + offset + current_step + 1,
+                  tflite::half(0.0f));
       } else {  // litert::ElementType::Float32, checked above.
         // Float mask: Fill value = 0.0f.
         float* float_ptr = static_cast<float*>(mask_lock_and_addr.second);
@@ -307,13 +392,150 @@ absl::StatusOr<std::unique_ptr<ModelResources>>
 BuildLiteRtCompiledModelResources(const ModelAssets& model_assets) {
   ASSIGN_OR_RETURN(auto format, GetFileFormat(model_assets));
   switch (format) {
-    case FileFormat::TFLITE:
-      return absl::InvalidArgumentError("Unsupported file format.");
     case FileFormat::TASK:
       return BuildModelResourcesFromTaskFormat(model_assets);
     case FileFormat::LITERT_LM:
       return BuildModelResourcesFromLitertLmFormat(model_assets);
+    default:
+      return absl::InvalidArgumentError("Unsupported file format.");
   }
+}
+
+absl::Status GenericComputeTokenEmbeddings(
+    const TensorBuffer& input_tokens, absl::Span<float> output_embeddings,
+    absl::Span<float> output_ple_embeddings,
+    EmbeddingLookupManager* embedding_lookup_manager,
+    EmbeddingLookupManager* per_layer_embedding_lookup_manager) {
+  LITERT_ASSIGN_OR_RETURN(auto input_tokens_span,
+                          ReferTensorBufferAsSpan<int32_t>(input_tokens));
+  const int num_tokens = input_tokens_span.size();
+  if (embedding_lookup_manager == nullptr) {
+    return absl::InvalidArgumentError("Embedding lookup manager is missing.");
+  }
+  const int embedding_dim =
+      embedding_lookup_manager->GetTextEmbeddingLookup()->GetFloatsPerToken();
+  auto output_buffer_type =
+      embedding_lookup_manager->GetTextEmbeddingLookup()->GetOutputBufferType();
+  std::vector<int32_t> dims = {num_tokens, embedding_dim};
+  if (output_buffer_type.has_value()) {
+    auto span_dims = output_buffer_type->Layout().Dimensions();
+    dims.assign(span_dims.begin(), span_dims.end());
+    dims[0] = 1;
+    dims[1] = num_tokens;
+  }
+  auto tensor_type = MakeRankedTensorType<float>(dims);
+  LITERT_ASSIGN_OR_RETURN(
+      auto wrapped_embeddings,
+      WrapOrCreateTensorBufferFromHostMemory(tensor_type, output_embeddings));
+
+  RETURN_IF_ERROR(embedding_lookup_manager->LookupPrefill(
+      input_tokens_span, &wrapped_embeddings.buffer, 0 /*token_offset=*/));
+
+  if (per_layer_embedding_lookup_manager != nullptr &&
+      !output_ple_embeddings.empty()) {
+    auto ple_output_buffer_type =
+        per_layer_embedding_lookup_manager->GetTextEmbeddingLookup()
+            ->GetOutputBufferType();
+    const int ple_embedding_dim =
+        per_layer_embedding_lookup_manager->GetTextEmbeddingLookup()
+            ->GetFloatsPerToken();
+    std::vector<int32_t> ple_dims = {num_tokens, ple_embedding_dim};
+    if (ple_output_buffer_type.has_value()) {
+      auto ple_span_dims = ple_output_buffer_type->Layout().Dimensions();
+      ple_dims.assign(ple_span_dims.begin(), ple_span_dims.end());
+      ple_dims[0] = 1;
+      ple_dims[1] = num_tokens;
+    }
+    auto ple_tensor_type = MakeRankedTensorType<float>(ple_dims);
+    LITERT_ASSIGN_OR_RETURN(auto wrapped_ple_embeddings,
+                            WrapOrCreateTensorBufferFromHostMemory(
+                                ple_tensor_type, output_ple_embeddings));
+    RETURN_IF_ERROR(per_layer_embedding_lookup_manager->LookupPrefill(
+        input_tokens_span, &wrapped_ple_embeddings.buffer,
+        0 /*token_offset=*/));
+  }
+  return absl::OkStatus();
+}
+
+absl::Status SetCpuCacheOptions(
+    const absl::StatusOr<
+        std::variant<std::string, std::shared_ptr<litert::lm::ScopedFile>>>&
+        weight_cache_file,
+    absl::string_view logging_prefix,
+    litert::CpuOptions& cpu_options) {
+  if (!weight_cache_file.ok()) {
+    ABSL_LOG(INFO) << logging_prefix << " does not use cache.";
+    return absl::OkStatus();
+  }
+
+  if (std::holds_alternative<std::shared_ptr<litert::lm::ScopedFile>>(
+          *weight_cache_file)) {
+    auto scoped_cache_file =
+        std::get<std::shared_ptr<litert::lm::ScopedFile>>(*weight_cache_file);
+    if (scoped_cache_file != nullptr) {
+      ASSIGN_OR_RETURN(auto duplicated, scoped_cache_file->Duplicate());
+      ASSIGN_OR_RETURN(int fd, duplicated.Release());
+      cpu_options.SetXNNPackWeightCacheFileDescriptor(fd);
+      ABSL_LOG(INFO) << logging_prefix
+                     << " use provided cache file descriptor: " << fd;
+    }
+  } else if (std::holds_alternative<std::string>(*weight_cache_file)) {
+    const std::string& weight_cache_path =
+        std::get<std::string>(*weight_cache_file);
+    cpu_options.SetXNNPackWeightCachePath(weight_cache_path.c_str());
+    ABSL_LOG(INFO) << logging_prefix
+                   << " use cache path: " << weight_cache_path;
+  }
+  return absl::OkStatus();
+}
+
+absl::Status SetGpuCacheOptions(
+    const std::string& weight_cache_path,
+    const absl::StatusOr<
+        std::variant<std::string, std::shared_ptr<litert::lm::ScopedFile>>>&
+        program_cache_file,
+    const ExecutorSettingsBase& executor_settings,
+    absl::string_view cache_key,
+    absl::string_view logging_prefix,
+    litert::GpuOptions& gpu_options) {
+  gpu_options.SetModelCacheKey(cache_key.data());
+  std::string cache_path = weight_cache_path;
+  bool serialization_dir_set = false;
+  if (cache_path != ":nocache") {
+    if (cache_path.empty()) {
+      ASSIGN_OR_RETURN(auto model_path,
+                       executor_settings.GetModelAssets().GetPath());
+      cache_path =
+          std::filesystem::path(std::string(model_path)).parent_path().string();
+      if (cache_path.empty()) {
+        cache_path = std::filesystem::current_path().string();
+      }
+    }
+    gpu_options.SetSerializationDir(cache_path.c_str());
+    gpu_options.SetSerializeExternalTensors(true);
+    serialization_dir_set = true;
+  }
+  if (program_cache_file.ok()) {
+    if (std::holds_alternative<std::string>(*program_cache_file)) {
+      if (!serialization_dir_set) {
+        cache_path =
+            std::filesystem::path(std::get<std::string>(*program_cache_file))
+                .parent_path()
+                .string();
+        gpu_options.SetSerializationDir(cache_path.c_str());
+      }
+    } else {
+      auto scoped_cache_file =
+          std::get<std::shared_ptr<lm::ScopedFile>>(*program_cache_file);
+      ASSIGN_OR_RETURN(auto duplicated, scoped_cache_file->Duplicate());
+      ASSIGN_OR_RETURN(int fd, duplicated.Release());
+      gpu_options.SetProgramCacheFd(fd);
+    }
+    gpu_options.SetSerializeProgramCache(true);
+  } else {
+    gpu_options.SetSerializeProgramCache(false);
+  }
+  return absl::OkStatus();
 }
 
 }  // namespace litert::lm

@@ -167,6 +167,18 @@ else()
   )
 endif()
 
+if(APPLE)
+  target_sources(cortext_chat PRIVATE
+    webcam_session.mm
+    media_preview_player.mm
+  )
+else()
+  target_sources(cortext_chat PRIVATE
+    webcam_session.cpp
+    media_preview_player.cpp
+  )
+endif()
+
 target_include_directories(cortext_chat_profile PRIVATE
   ${CMAKE_SOURCE_DIR}/src
 )
@@ -191,12 +203,14 @@ if(APPLE)
   find_library(COCOA_LIBRARY Cocoa REQUIRED)
   find_library(FOUNDATION_LIBRARY Foundation REQUIRED)
   find_library(AVFOUNDATION_LIBRARY AVFoundation REQUIRED)
+  find_library(COREMEDIA_LIBRARY CoreMedia REQUIRED)
   find_library(IOKIT_LIBRARY IOKit REQUIRED)
   find_library(COREVIDEO_LIBRARY CoreVideo REQUIRED)
   target_link_libraries(cortext_chat PRIVATE
     ${COCOA_LIBRARY}
     ${FOUNDATION_LIBRARY}
     ${AVFOUNDATION_LIBRARY}
+    ${COREMEDIA_LIBRARY}
     ${IOKIT_LIBRARY}
     ${COREVIDEO_LIBRARY}
   )

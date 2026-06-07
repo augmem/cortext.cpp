@@ -1,0 +1,30 @@
+{"id":"gold_001","text":"Hi, I'm Gabriel and I just moved to Chicago last month.","span":"Gabriel","type_label":"identity","promotion_label":"durable"}
+{"id":"gold_002","text":"Hi, I'm Gabriel and I just moved to Chicago last month.","span":"Chicago","type_label":"place","promotion_label":"durable"}
+{"id":"gold_003","text":"My name is Sarah Nguyen, and I lead the migration effort.","span":"Sarah Nguyen","type_label":"identity","promotion_label":"durable"}
+{"id":"gold_004","text":"I work with Michael on the platform team.","span":"Michael","type_label":"person_entity","promotion_label":"durable"}
+{"id":"gold_005","text":"Yesterday I met Emily after the release retro.","span":"Emily","type_label":"person_entity","promotion_label":"durable"}
+{"id":"gold_006","text":"We are flying to Kyoto tomorrow morning.","span":"Kyoto","type_label":"place","promotion_label":"durable"}
+{"id":"gold_007","text":"Traveling to South Africa is my big trip this year.","span":"South Africa","type_label":"place","promotion_label":"durable"}
+{"id":"gold_008","text":"I live in Austin now, but I grew up in Chicago.","span":"Austin","type_label":"place","promotion_label":"durable"}
+{"id":"gold_009","text":"I work at OpenAI on memory systems.","span":"OpenAI","type_label":"org_project","promotion_label":"durable"}
+{"id":"gold_010","text":"We're shipping Cortext to the research team next week.","span":"Cortext","type_label":"org_project","promotion_label":"durable"}
+{"id":"gold_011","text":"I'm debugging a SQLite migration for Cortext tonight.","span":"SQLite","type_label":"org_project","promotion_label":"durable"}
+{"id":"gold_012","text":"The Redis cache keeps timing out under load.","span":"Redis","type_label":"org_project","promotion_label":"durable"}
+{"id":"gold_013","text":"We spent the afternoon talking about jazz and old records.","span":"jazz","type_label":"topic","promotion_label":"provisional"}
+{"id":"gold_014","text":"The conversation drifted into travel planning after lunch.","span":"travel planning","type_label":"topic","promotion_label":"provisional"}
+{"id":"gold_015","text":"I've been reading about memory systems all weekend.","span":"memory systems","type_label":"topic","promotion_label":"provisional"}
+{"id":"gold_016","text":"Her favorite topic lately has been poetry and letters.","span":"poetry","type_label":"topic","promotion_label":"provisional"}
+{"id":"gold_017","text":"I feel exhausted after the deployment finally finished.","span":"exhausted","type_label":"state","promotion_label":"provisional"}
+{"id":"gold_018","text":"I'm frustrated because the migration keeps failing.","span":"frustrated","type_label":"state","promotion_label":"provisional"}
+{"id":"gold_019","text":"We were relieved once the alerts cleared.","span":"relieved","type_label":"state","promotion_label":"provisional"}
+{"id":"gold_020","text":"I'm excited for the trip to Ghana next week.","span":"excited","type_label":"state","promotion_label":"provisional"}
+{"id":"gold_021","text":"The first step took three minutes to complete.","span":"first step","type_label":"none","promotion_label":"ignore"}
+{"id":"gold_022","text":"Everything happened very quickly after that.","span":"very quickly","type_label":"none","promotion_label":"ignore"}
+{"id":"gold_023","text":"This one is a bit tricky to explain clearly.","span":"one","type_label":"none","promotion_label":"ignore"}
+{"id":"gold_024","text":"We should probably do that later today.","span":"probably","type_label":"none","promotion_label":"ignore"}
+{"id":"gold_025","text":"Call me Mia if that is easier to remember.","span":"Mia","type_label":"identity","promotion_label":"durable"}
+{"id":"gold_026","text":"My teammate James reviewed the patch for me.","span":"James","type_label":"person_entity","promotion_label":"durable"}
+{"id":"gold_027","text":"The team is meeting in London next quarter.","span":"London","type_label":"place","promotion_label":"durable"}
+{"id":"gold_028","text":"We are using Postgres for the analytics store.","span":"Postgres","type_label":"org_project","promotion_label":"durable"}
+{"id":"gold_029","text":"I keep thinking about database migration risks.","span":"database migration","type_label":"topic","promotion_label":"provisional"}
+{"id":"gold_030","text":"I was overwhelmed before the incident resolved.","span":"overwhelmed","type_label":"state","promotion_label":"provisional"}

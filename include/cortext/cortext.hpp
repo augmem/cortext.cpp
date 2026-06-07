@@ -9,12 +9,14 @@
 
 #include "cortext/consolidation_mode.hpp"
 #include "cortext/export.hpp"
+#include "cortext/retention.hpp"
 #include "cortext/stop_token.hpp"
 
 namespace cortext
 {
 
 class Cortext;
+class Clock;
 class ObjectStore;
 class Store;
 
@@ -26,6 +28,7 @@ enum class Metric;
 
 namespace internal
 {
+class ReplayIngress;
 class StreamingTextProbeSession;
 }
 
@@ -47,6 +50,22 @@ public:
     std::unordered_map<int, double> metrics; // Metric enum cast to int -> value
     std::unordered_map<std::string, double> operation_ms;
     std::optional<long long> stored_embedding_id;  // Set if stored to memory
+    std::optional<long long> stored_memory_id;     // Set if stored to memory
+    bool signal_filter_evaluated = false;
+    bool signal_filter_accepted = true;
+    std::string signal_filter_modality;
+    std::string signal_filter_reason;
+    double signal_filter_score = 0.0;
+    double signal_filter_threshold = 0.0;
+    double signal_filter_quiet_seconds = 0.0;
+    bool soft_anchor_enabled = false;
+    int soft_anchor_state_count = 0;
+    int soft_anchor_link_count = 0;
+    int soft_anchor_create_count = 0;
+    int soft_anchor_update_count = 0;
+    int soft_anchor_none_count = 0;
+    double soft_anchor_last_update_us = 0.0;
+    double soft_anchor_mean_update_us = 0.0;
   };
   
   /// @brief Context returned from processing calls, containing hydrated
@@ -55,6 +74,18 @@ public:
   {
     struct Memory
     {
+      struct SoftAnchor
+      {
+        std::string id;
+        double strength = 0.0;
+        double likelihood = 0.0;
+        std::string label;
+        std::string tier;
+        double score = 0.0;
+        double margin = 0.0;
+        double entropy = 0.0;
+      };
+
       std::string source_id;
       long long id = 0;
       std::uint64_t timestamp = 0;
@@ -79,6 +110,7 @@ public:
       double arousal = 0.0;
       double composite_score = 0.0;
       double threshold_t = 0.0;
+      std::vector<SoftAnchor> soft_anchors;
     };
 
     std::vector<Memory> working_memory;    ///< Active WM slots (conversation context)
@@ -119,6 +151,9 @@ public:
     bool reinforcement_enabled = true;
     bool procedural_enabled = true;
     bool sequential_edges_enabled = true;
+    bool signal_filter_audio_enabled = true;
+    bool signal_filter_image_enabled = true;
+    bool signal_filter_text_enabled = false;
     std::string label_bank_path;
   };
 
@@ -131,10 +166,23 @@ public:
                                           const std::string &db_path,
                                           const std::string &models_dir);
 
+  /// @brief Factory to create a Cortext instance with a caller-supplied clock.
+  static std::unique_ptr<Cortext> Create (const Config &cfg,
+                                          const std::string &db_path,
+                                          const std::string &models_dir,
+                                          std::shared_ptr<Clock> clock);
+
   /// @brief Factory using SQLite for metadata and caller-supplied object store.
   static std::unique_ptr<Cortext> Create (
       const Config &cfg, const std::string &db_path,
       std::shared_ptr<ObjectStore> object_store, const std::string &models_dir);
+
+  /// @brief Factory using SQLite metadata, caller-supplied object store, and
+  /// caller-supplied clock.
+  static std::unique_ptr<Cortext> Create (
+      const Config &cfg, const std::string &db_path,
+      std::shared_ptr<ObjectStore> object_store, const std::string &models_dir,
+      std::shared_ptr<Clock> clock);
 
   /// @brief Factory to create a Cortext instance using a caller-supplied store.
   /// @param cfg Three-knob configuration.
@@ -146,6 +194,12 @@ public:
                                           std::shared_ptr<Store> store,
                                           const std::string &models_dir);
 
+  /// @brief Factory with caller-supplied database store and clock.
+  static std::unique_ptr<Cortext> Create (const Config &cfg,
+                                          std::shared_ptr<Store> store,
+                                          const std::string &models_dir,
+                                          std::shared_ptr<Clock> clock);
+
   /// @brief Factory with caller-supplied database and object stores.
   /// @param cfg Three-knob configuration.
   /// @param store Caller-owned database store.
@@ -156,38 +210,61 @@ public:
       const Config &cfg, std::shared_ptr<Store> store,
       std::shared_ptr<ObjectStore> object_store, const std::string &models_dir);
 
+  /// @brief Factory with caller-supplied database store, object store, and
+  /// clock.
+  static std::unique_ptr<Cortext> Create (
+      const Config &cfg, std::shared_ptr<Store> store,
+      std::shared_ptr<ObjectStore> object_store, const std::string &models_dir,
+      std::shared_ptr<Clock> clock);
+
   /// @brief Process text input.
   /// @param text The text content to process.
-  /// @param source_id Identifier for the signal source (e.g., "chat/user").
+  /// @param source_id Identifier for the person/agent/source stream, not the
+  /// modality or capture device (e.g., "chat/user").
+  /// @param retention Durable by default; pass Ephemeral for no-storage
+  /// processing that still updates live context and retrieval.
   /// @return Context with retrieved memories and processing output.
-  Context ProcessText (const std::string &text, const std::string &source_id);
+  Context ProcessText (const std::string &text, const std::string &source_id,
+                       Retention retention = Retention::Durable);
 
   /// @brief Process text input with an explicit timestamp (ms since epoch).
   /// @param text The text content to process.
-  /// @param source_id Identifier for the signal source (e.g., "chat/user").
+  /// @param source_id Identifier for the person/agent/source stream, not the
+  /// modality or capture device (e.g., "chat/user").
   /// @param timestamp Milliseconds since Unix epoch (must be monotonic).
+  /// @param retention Durable by default; pass Ephemeral for no-storage
+  /// processing that still updates live context and retrieval.
   /// @return Context with retrieved memories and processing output.
   Context ProcessTextAt (const std::string &text, const std::string &source_id,
-                         std::uint64_t timestamp);
+                         std::uint64_t timestamp,
+                         Retention retention = Retention::Durable);
 
 
   /// @brief Process audio PCM input.
   /// @param pcm Pointer to PCM float samples (16kHz mono expected).
   /// @param num_samples Number of samples.
-  /// @param source_id Identifier for the signal source.
+  /// @param source_id Identifier for the person/agent/source stream, not the
+  /// modality or capture device.
+  /// @param retention Durable by default; pass Ephemeral for no-storage
+  /// processing that still updates live context and retrieval.
   /// @return Context with retrieved memories and processing output.
   Context ProcessAudio (const float *pcm, std::size_t num_samples,
-                        const std::string &source_id);
+                        const std::string &source_id,
+                        Retention retention = Retention::Durable);
 
   /// @brief Process image input.
   /// @param data Raw pixel data (RGB/RGBA).
   /// @param width Image width.
   /// @param height Image height.
   /// @param channels Number of channels (3 for RGB, 4 for RGBA).
-  /// @param source_id Identifier for the signal source.
+  /// @param source_id Identifier for the person/agent/source stream, not the
+  /// modality or capture device.
+  /// @param retention Durable by default; pass Ephemeral for no-storage
+  /// processing that still updates live context and retrieval.
   /// @return Context with retrieved memories and processing output.
   Context ProcessImage (const std::uint8_t *data, int width, int height,
-                        int channels, const std::string &source_id);
+                        int channels, const std::string &source_id,
+                        Retention retention = Retention::Durable);
 
   /// @brief Attempt to trigger consolidation if conditions allow.
   /// @param mode Shallow (embedding-only), deep (local summary/labels backend),
@@ -203,6 +280,9 @@ public:
   /// @brief Test-only helper to hydrate arbitrary memory ids.
   Context DebugHydrateForTest (const std::vector<long long> &candidate_ids,
                                const std::vector<long long> &used_ids);
+  Context DebugHydrateForTest (const std::vector<long long> &candidate_ids,
+                               const std::vector<long long> &used_ids,
+                               const std::vector<float> &query_embedding);
 #endif
 
   // Content persistence API (best-effort; no-op if id unavailable).
@@ -221,18 +301,33 @@ public:
   Cortext &operator= (Cortext &&) = delete;
 
 private:
+  friend class internal::ReplayIngress;
   friend class internal::StreamingTextProbeSession;
   struct Impl;
   explicit Cortext (const Config &cfg, const std::string &db_path,
                     const std::string &models_dir);
   explicit Cortext (const Config &cfg, const std::string &db_path,
+                    const std::string &models_dir,
+                    std::shared_ptr<Clock> clock);
+  explicit Cortext (const Config &cfg, const std::string &db_path,
                     std::shared_ptr<ObjectStore> object_store,
                     const std::string &models_dir);
+  explicit Cortext (const Config &cfg, const std::string &db_path,
+                    std::shared_ptr<ObjectStore> object_store,
+                    const std::string &models_dir,
+                    std::shared_ptr<Clock> clock);
   explicit Cortext (const Config &cfg, std::shared_ptr<Store> store,
                     const std::string &models_dir);
   explicit Cortext (const Config &cfg, std::shared_ptr<Store> store,
+                    const std::string &models_dir,
+                    std::shared_ptr<Clock> clock);
+  explicit Cortext (const Config &cfg, std::shared_ptr<Store> store,
                     std::shared_ptr<ObjectStore> object_store,
                     const std::string &models_dir);
+  explicit Cortext (const Config &cfg, std::shared_ptr<Store> store,
+                    std::shared_ptr<ObjectStore> object_store,
+                    const std::string &models_dir,
+                    std::shared_ptr<Clock> clock);
   std::unique_ptr<Impl> impl_;
 };
 

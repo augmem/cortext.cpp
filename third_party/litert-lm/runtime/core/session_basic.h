@@ -23,11 +23,15 @@
 #include <vector>
 
 #include "absl/base/nullability.h"  // from @com_google_absl
+#include "absl/base/thread_annotations.h"  // from @com_google_absl
+#include "absl/container/flat_hash_map.h"  // from @com_google_absl
+#include "absl/container/flat_hash_set.h"  // from @com_google_absl
 #include "absl/functional/any_invocable.h"  // from @com_google_absl
 #include "absl/log/absl_log.h"  // from @com_google_absl
 #include "absl/status/status.h"  // from @com_google_absl
 #include "absl/status/statusor.h"  // from @com_google_absl
 #include "absl/strings/string_view.h"  // from @com_google_absl
+#include "absl/synchronization/mutex.h"  // from @com_google_absl
 #include "runtime/components/sampler.h"
 #include "runtime/components/stop_token_detector.h"
 #include "runtime/components/tokenizer.h"
@@ -91,6 +95,12 @@ class SessionBasic : public Engine::Session {
       const std::vector<absl::string_view>& target_text,
       bool store_token_lengths) override;
 
+  absl::StatusOr<std::unique_ptr<Engine::Session::TaskController>>
+  RunTextScoringAsync(
+      const std::vector<absl::string_view>& target_text,
+      absl::AnyInvocable<void(absl::StatusOr<Responses>)> callback,
+      bool store_token_lengths) override;
+
   absl::Status RunPrefill(const std::vector<InputData>& contents) override;
 
   absl::StatusOr<std::unique_ptr<Engine::Session::TaskController>>
@@ -113,6 +123,8 @@ class SessionBasic : public Engine::Session {
 
   absl::StatusOr<BenchmarkInfo> GetBenchmarkInfo() override;
 
+  absl::StatusOr<BenchmarkInfo*> GetMutableBenchmarkInfo() override;
+
   // TODO(b/450903294): Add rollback history support for Session and
   // Conversation.
   void CancelProcess() override {
@@ -128,14 +140,25 @@ class SessionBasic : public Engine::Session {
     return session_config_;
   }
 
-  const Tokenizer& GetTokenizer() const override { return tokenizer_; }
-
   // Util function for creating the combined ExecutorInputs from the
   // preprocessed contents.
-  // TODO - b/436674053: Modulize the preprocessing logic into a separate
+  // TODO - b/436674053: Modularize the preprocessing logic into a separate
   // preprocessor class.
   absl::StatusOr<ExecutorInputs> ProcessAndCombineContents(
       const std::vector<InputData>& preprocessed_contents);
+
+  // Save the current step with the name `label`. You can later rewind to this
+  // checkpoint using `RewindToCheckpoint(label)`. If the checkpoint name
+  // already exists, the step number will be overwritten.
+  absl::Status SaveCheckpoint(absl::string_view label) override;
+
+  // Rewinds the session to the given checkpoint. Checkpoints after the
+  // restored step will be removed. Returns an error if the checkpoint name
+  // does not exist.
+  absl::Status RewindToCheckpoint(absl::string_view label) override;
+
+  // Get the current step of the session.
+  absl::StatusOr<int> GetCurrentStep() const override;
 
  private:
   explicit SessionBasic(LlmExecutor* absl_nonnull executor,
@@ -201,14 +224,31 @@ class SessionBasic : public Engine::Session {
   // The stop token detector used for the session.
   StopTokenDetector stop_token_detector_;
 
-  // Whether the current turn is the first turn.
-  // TODO - b/436674053: This is a temporary solution to determine whether the
-  // current turn is the first turn. Should be removed once prompt templates
-  // is no longer used.
-  bool is_first_turn_ = true;
-
   // An atomic boolean to indicate whether the session is cancelled.
   std::atomic<bool> cancelled_{false};
+
+  // The state of the session.
+  // * `kFresh` means the session is just created and
+  //   hasn't been prefilled yet.
+  // * `kPrefilled` means the session has been prefilled
+  //   but not decoded yet.
+  // * `kDecoded` means the session has been decoded.
+  //
+  // A session is considered fresh only if it has not been prefilled or decoded
+  // yet.
+  // A session could transition between kPrefilled and kDecoded if
+  // `RunPrefill` or `RunDecode` is called multiple times.
+  enum class SessionState : int { kFresh, kPrefilled, kDecoded };
+  SessionState session_state_ = SessionState::kFresh;
+
+  // The set of executors that are already existed in the system. This is used
+  // to avoid creating multiple sessions for the same executor.
+  static absl::flat_hash_set<LlmExecutor*>* occupied_executors_
+      ABSL_GUARDED_BY(occupied_executors_mu_);
+  static absl::Mutex occupied_executors_mu_;
+
+  // The map of checkpoint name to step.
+  absl::flat_hash_map<std::string, int> checkpoint_map_;
 };
 
 }  // namespace litert::lm

@@ -2,7 +2,6 @@
 #include <cortext/core/knobs.hpp>
 
 #include "encoder/embeddinggemma_profile.hpp"
-#include "encoder/imagebind_profile.hpp"
 #include "encoder/text_encoder_factory.hpp"
 #include "streaming_text_probe.hpp"
 
@@ -634,7 +633,6 @@ main (int argc, char **argv)
           seed_wall_ms += ElapsedMillis (start, end);
         }
       cortext::internal::ResetEmbeddingGemmaTextEncodeProfile ();
-      cortext::internal::ResetImageBindTextEncodeProfile ();
 
       const std::string user_prompt = ProfileUserPrompt ();
       const std::string assistant_reply = ProfileAssistantReply ();
@@ -708,8 +706,6 @@ main (int argc, char **argv)
       const double create_ms = ElapsedMillis (create_start, create_end);
       const double local_chat_wall_ms
           = user_phase.wall_ms + stream_phase.wall_ms + final_phase.wall_ms;
-      const auto imagebind_profile
-          = cortext::internal::GetImageBindTextEncodeProfileSnapshot ();
       const auto gemma_profile
           = cortext::internal::GetEmbeddingGemmaTextEncodeProfileSnapshot ();
       std::string resolved_backend = "unknown";
@@ -794,13 +790,6 @@ main (int argc, char **argv)
                        gemma_profile.tokenize_ms,
                        gemma_profile.tensor_create_ms, gemma_profile.run_ms,
                        gemma_profile.copy_ms, gemma_profile.normalize_ms);
-      print_breakdown ("imagebind_text_encode_breakdown",
-                       imagebind_profile.calls,
-                       imagebind_profile.ensure_initialized_ms,
-                       imagebind_profile.tokenize_ms,
-                       imagebind_profile.tensor_create_ms,
-                       imagebind_profile.run_ms, imagebind_profile.copy_ms,
-                       imagebind_profile.normalize_ms);
 
       if (!options.keep_db)
         {

@@ -24,8 +24,25 @@ package(
 
 licenses(["notice"])
 
+# In most case, pick the engine implementation with
+# //runtime/core:engine_impl_selected.
+#
+package_group(
+    name = "engine_impl_users",
+    packages = [
+        # for ":engine_impl_selected".
+        "//runtime/engine",
+        # for e2e tests.
+        "//runtime/e2e_tests/...",
+        "//c/...",
+        "//python/...",
+        "//kotlin/...",
+        # for SpeechProcessor
+        # for AI Edge Hub
+    ],
+)
+
 ENGINE_IMPL_COMMON_DEPS = [
-    ":session_factory",
     "@com_google_absl//absl/base:no_destructor",
     "@com_google_absl//absl/log",
     "@com_google_absl//absl/log:absl_check",
@@ -39,12 +56,15 @@ ENGINE_IMPL_COMMON_DEPS = [
     "@com_google_absl//absl/time",
     "@litert//litert/cc:litert_macros",
     "//runtime/components:model_resources",
+    "//runtime/components:tokenizer",
+    "//runtime/engine:engine_factory",
     "//runtime/engine:engine_interface",
     "//runtime/engine:engine_settings",
     "//runtime/engine:io_types",
     "//runtime/executor:audio_executor",
     "//runtime/executor:audio_executor_settings",
     "//runtime/executor:audio_litert_compiled_model_executor",
+    "//runtime/executor:audio_executor_utils",
     "//runtime/executor:executor_settings_base",
     "//runtime/executor:litert_compiled_model_executor_utils",
     "//runtime/executor:llm_executor",
@@ -59,30 +79,38 @@ ENGINE_IMPL_COMMON_DEPS = [
     "//runtime/executor:llm_litert_compiled_model_executor_factory",
     "//runtime/util:file_format_util",
     "//runtime/util:litert_status_util",
+    "//runtime/util:logging",
 ] + select({
     "@litert//litert:litert_link_capi_so": [
         "@litert//litert/cc:litert_api_with_dynamic_runtime",
     ],
     "//conditions:default": [
         "@litert//litert/cc:litert_environment",
+        "@litert//litert/cc:litert_environment_options",
     ],
 })
 
 cc_library(
     name = "engine_impl",
     srcs = ["engine_impl.cc"],
+    visibility = [":engine_impl_users"],
     deps = ENGINE_IMPL_COMMON_DEPS + [
         "//runtime/components:default_static_gpu_samplers",
+        "//runtime/core:session_basic",
         "//runtime/executor:default_static_gpu_accelerator",
     ] + select({
         "//conditions:default": [],
     }),
+    alwayslink = 1,
 )
 
 cc_library(
     name = "engine_impl_cpu_only",
     srcs = ["engine_impl.cc"],
-    deps = ENGINE_IMPL_COMMON_DEPS,
+    deps = ENGINE_IMPL_COMMON_DEPS + [
+        "//runtime/core:session_basic",
+    ],
+    alwayslink = 1,
 )
 
 cc_test(
@@ -97,9 +125,11 @@ cc_test(
         "@com_google_googletest//:gtest_main",
         "@com_google_absl//absl/cleanup",
         "@com_google_absl//absl/log:absl_check",
+        "@com_google_absl//absl/log:absl_log",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings",
+        "//runtime/engine:engine_factory",
         "//runtime/engine:engine_interface",
         "//runtime/engine:engine_settings",
         "//runtime/engine:io_types",
@@ -181,7 +211,10 @@ cc_library(
     deps = [
         ":pipeline",
         ":session_utils",
+        "@com_google_absl//absl/base:core_headers",
         "@com_google_absl//absl/base:nullability",
+        "@com_google_absl//absl/container:flat_hash_map",
+        "@com_google_absl//absl/container:flat_hash_set",
         "@com_google_absl//absl/functional:any_invocable",
         "@com_google_absl//absl/log:absl_log",
         "@com_google_absl//absl/memory",
@@ -189,6 +222,7 @@ cc_library(
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings",
         "@com_google_absl//absl/strings:string_view",
+        "@com_google_absl//absl/synchronization",
         "@com_google_absl//absl/time",
         "@com_google_absl//absl/types:span",
         "@litert//litert/cc:litert_layout",
@@ -270,46 +304,9 @@ cc_test(
         ],
         "//conditions:default": [
             "@litert//litert/cc:litert_environment",
+            "@litert//litert/cc:litert_environment_options",
         ],
     }),
-)
-
-cc_library(
-    name = "session_factory",
-    srcs = ["session_factory.cc"],
-    hdrs = ["session_factory.h"],
-    deps = [
-        ":session_basic",
-        "@com_google_absl//absl/base:nullability",
-        "@com_google_absl//absl/status:statusor",
-        "//runtime/components:tokenizer",
-        "//runtime/engine:engine_interface",
-        "//runtime/engine:engine_settings",
-        "//runtime/engine:io_types",
-        "//runtime/executor:audio_executor",
-        "//runtime/executor:llm_executor",
-        "//runtime/executor:vision_executor",
-        "//runtime/framework:threadpool",
-        "//runtime/proto:sampler_params_cc_proto",
-        "//runtime/util:litert_status_util",
-    ],
-)
-
-cc_test(
-    name = "session_factory_test",
-    srcs = ["session_factory_test.cc"],
-    deps = [
-        ":session_factory",
-        "@com_google_googletest//:gtest_main",
-        "@com_google_absl//absl/status:statusor",
-        "@com_google_absl//absl/strings:string_view",
-        "//runtime/components:tokenizer",
-        "//runtime/engine:engine_settings",
-        "//runtime/executor:executor_settings_base",
-        "//runtime/executor:fake_llm_executor",
-        "//runtime/framework:threadpool",
-        "//runtime/util:test_utils",
-    ],
 )
 
 cc_library(
@@ -354,7 +351,14 @@ cc_test(
         "//runtime/util:litert_status_util",
         "//runtime/util:tensor_buffer_util",
         "//runtime/util:test_utils",
-    ],
+    ] + select({
+        "@litert//litert:litert_link_capi_so": [
+            "@litert//litert/cc:litert_api_with_dynamic_runtime",
+        ],
+        "//conditions:default": [
+            "@litert//litert/cc:litert_tensor_buffer",
+        ],
+    }),
 )
 
 cc_library(
@@ -384,11 +388,13 @@ cc_library(
         "//runtime/proto:sampler_params_cc",
         "//runtime/util:convert_tensor_buffer",
         "//runtime/util:litert_status_util",
+        "@litert//tflite/types:half",
     ] + select({
         "@litert//litert:litert_link_capi_so": [
             "@litert//litert/cc:litert_api_with_dynamic_runtime",
         ],
         "//conditions:default": [
+            "@litert//litert/cc:litert_element_type",
             "@litert//litert/cc:litert_macros",
             "@litert//litert/cc:litert_tensor_buffer",
         ],

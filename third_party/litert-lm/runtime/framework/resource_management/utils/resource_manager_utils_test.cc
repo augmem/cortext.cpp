@@ -85,4 +85,20 @@ TEST(LlmResourceManagerUtilsTest, RemoveNoMatchingTokens) {
   EXPECT_EQ(time_step, 2);
 }
 
+TEST(LlmResourceManagerUtilsTest, RemoveNegativeTokens) {
+  std::vector<int> input_ids = {3, 4, 5, -1, -1, -1, -3};
+  std::vector<int> processed_tokens = {1, 2, 3, 4, 5, -1, -1, -1, -1, -3};
+  int time_step = 2;
+  EXPECT_OK(RemoveMatchingTokens(processed_tokens, &input_ids, &time_step));
+  EXPECT_EQ(input_ids, std::vector<int>({-1, -1, -1, -3}));
+  EXPECT_EQ(time_step, 5);
+
+  input_ids = {-2, -2, -2, -4};
+  processed_tokens = {-2, -2, -2, -2, -2, -4};
+  time_step = 2;
+  EXPECT_OK(RemoveMatchingTokens(processed_tokens, &input_ids, &time_step));
+  EXPECT_EQ(input_ids, std::vector<int>({-2, -2, -2, -4}));
+  EXPECT_EQ(time_step, 2);
+}
+
 }  // namespace litert::lm

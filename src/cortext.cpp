@@ -1,8 +1,13 @@
 #include "cortext/cortext.hpp"
+#include "cortext/clock.hpp"
+#include "cortext/core/algorithms.hpp"
 #include "cortext/internal/cancellation.hpp"
+#include "cortext/internal/replay_ingress.hpp"
 #include "encoder/text_encoder_factory.hpp"
 #include "operations/constructive_recall_internal.hpp"
 #include "operations/meta_learning_internal.hpp"
+#include "operations/retrieval_debug_state.hpp"
+#include "signal_filter.hpp"
 #include "streaming_text_probe.hpp"
 
 #include "cortext/processor.hpp"
@@ -30,11 +35,14 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <cmath>
 #include <cstring>
 #include <filesystem>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -63,6 +71,8 @@
 #include "cortext/operations/signal_metrics_persistence.hpp"
 #include "cortext/operations/stability.hpp"
 #include "cortext/operations/write_gate.hpp"
+#include "cortext/operations/short_term_memory_shadow.hpp"
+#include "cortext/operations/soft_anchor.hpp"
 #include "cortext/operations/memory_storage.hpp"
 #include "cortext/operations/stability_feedback.hpp"
 #include "cortext/operations/working_memory.hpp"
@@ -98,14 +108,34 @@ namespace cortext
 namespace
 {
 
-/// @brief Get current timestamp in milliseconds since Unix epoch.
-inline std::uint64_t
-NowMillis ()
+constexpr int kMaxHydratedSoftAnchors = 3;
+
+double
+Clamp01 (double value)
 {
-  return static_cast<std::uint64_t> (
-      std::chrono::duration_cast<std::chrono::milliseconds> (
-          std::chrono::system_clock::now ().time_since_epoch ())
-          .count ());
+  return std::clamp (value, 0.0, 1.0);
+}
+
+bool
+EnvFlag (const char *name)
+{
+  const char *value = std::getenv (name);
+  if (!value)
+    {
+      return false;
+    }
+  std::string s (value);
+  std::transform (s.begin (), s.end (), s.begin (),
+                  [] (unsigned char c) {
+                    return static_cast<char> (std::tolower (c));
+                  });
+  return s == "1" || s == "true" || s == "yes" || s == "on";
+}
+
+bool
+SourceBlobsDisabled ()
+{
+  return EnvFlag ("CORTEXT_DISABLE_SOURCE_BLOBS");
 }
 
 /// @brief Converts a std::vector<float> to an Eigen::VectorXf using Eigen::Map.
@@ -116,6 +146,69 @@ ToEigen (const std::vector<float> &v)
                                             static_cast<int> (v.size ()));
 }
 
+void
+NormalizeVector (std::vector<float> &v)
+{
+  double sum = 0.0;
+  for (float value : v)
+    {
+      sum += static_cast<double> (value) * value;
+    }
+  const double norm = std::sqrt (sum);
+  if (norm <= 1e-12 || !std::isfinite (norm))
+    {
+      return;
+    }
+  const float inv_norm = static_cast<float> (1.0 / norm);
+  for (float &value : v)
+    {
+      value *= inv_norm;
+    }
+}
+
+std::vector<float>
+RetrievalEmbeddingView (const std::vector<float> &encoded)
+{
+  std::vector<float> out = encoded;
+  if (out.size () > 256)
+    {
+      out.resize (256);
+      NormalizeVector (out);
+    }
+  return out;
+}
+
+std::optional<Eigen::VectorXf>
+SoftAnchorEmbeddingView (const std::vector<float> &encoded)
+{
+  if (encoded.size () >= 1536)
+    {
+      std::vector<float> out (encoded.begin (), encoded.begin () + 1536);
+      NormalizeVector (out);
+      return ToEigen (out);
+    }
+  return std::nullopt;
+}
+
+std::vector<float>
+ToStdVector (const Eigen::VectorXf &v)
+{
+  return std::vector<float> (v.data (), v.data () + v.size ());
+}
+
+internal::SignalFilterConfig
+MakeSignalFilterConfig (const Cortext::Config &cfg)
+{
+  internal::SignalFilterConfig filter_cfg;
+  filter_cfg.focus = cfg.focus;
+  filter_cfg.sensitivity = cfg.sensitivity;
+  filter_cfg.stability = cfg.stability;
+  filter_cfg.audio_enabled = cfg.signal_filter_audio_enabled;
+  filter_cfg.image_enabled = cfg.signal_filter_image_enabled;
+  filter_cfg.text_enabled = cfg.signal_filter_text_enabled;
+  return filter_cfg;
+}
+
 inline double
 ToMillis (std::chrono::steady_clock::duration duration)
 {
@@ -124,13 +217,50 @@ ToMillis (std::chrono::steady_clock::duration duration)
       .count ();
 }
 
+void
+ApplySignalFilterDecision (Cortext::ProcessorOutput &output,
+                           const internal::SignalFilterDecision &decision)
+{
+  output.signal_filter_evaluated = decision.evaluated;
+  output.signal_filter_accepted = decision.accepted;
+  output.signal_filter_modality = decision.modality;
+  output.signal_filter_reason = decision.reason;
+  output.signal_filter_score = decision.score;
+  output.signal_filter_threshold = decision.threshold;
+  output.signal_filter_quiet_seconds = decision.quiet_seconds;
+}
+
+Cortext::Context
+MakeFilteredContext (const internal::SignalFilterDecision &decision,
+                     std::chrono::steady_clock::time_point total_start)
+{
+  Cortext::Context result;
+  ApplySignalFilterDecision (result.output, decision);
+  result.total_ms = ToMillis (std::chrono::steady_clock::now () - total_start);
+  return result;
+}
+
+void
+ApplyRetrievalScore (Cortext::Context::Memory &memory,
+                     const std::unordered_map<long long,
+                                              operations::retrieval_debug::RankedCandidate>
+                         &ranked_by_memory_id)
+{
+  auto it = ranked_by_memory_id.find (memory.id);
+  if (it == ranked_by_memory_id.end ())
+    {
+      return;
+    }
+  memory.composite_score = it->second.score;
+  memory.relevance = it->second.relevance;
+}
+
 inline bool
 ShouldForceChatTurnStorage (const std::string &source_id)
 {
   return source_id.rfind ("chat/user", 0) == 0
          || source_id.rfind ("chat/assistant", 0) == 0;
 }
-
 
 bool
 LoadObjectPayload (Store *store, ObjectStore *object_store,
@@ -237,6 +367,84 @@ LoadSignalBlobs (Store *store, long long memory_id,
             telemetry::Attribute::Int64 ("memory_id", memory_id) });
     }
   return false;
+}
+
+void
+LoadSoftAnchors (
+    Store *store, long long memory_id,
+    std::vector<Cortext::Context::Memory::SoftAnchor> &out)
+{
+  out.clear ();
+  if (!store || memory_id <= 0)
+    return;
+
+  try
+    {
+      auto rows = store->Execute (
+          "SELECT anchor_id, anchor_strength, anchor_label, memory_tier, "
+          "       score, margin, entropy "
+          "FROM soft_anchor_links "
+          "WHERE memory_id = ? "
+          "  AND anchor_label NOT IN ('none', 'rejected') "
+          "ORDER BY anchor_strength DESC, score DESC, updated_step DESC "
+          "LIMIT ?",
+          { memory_id, static_cast<long long> (kMaxHydratedSoftAnchors) });
+
+      out.reserve (rows.size ());
+      for (const auto &row : rows)
+        {
+          auto get_s = [&row] (const char *k) -> std::string {
+            auto it = row.find (k);
+            if (it == row.end () || !it->second.has_value ())
+              return {};
+            if (it->second.type () == typeid (std::string))
+              return std::any_cast<std::string> (it->second);
+            return {};
+          };
+
+          auto get_dbl = [&row] (const char *k, double def = 0.0) -> double {
+            auto it = row.find (k);
+            if (it == row.end () || !it->second.has_value ())
+              return def;
+            if (it->second.type () == typeid (double))
+              return std::any_cast<double> (it->second);
+            if (it->second.type () == typeid (float))
+              return static_cast<double> (std::any_cast<float> (it->second));
+            if (it->second.type () == typeid (int))
+              return static_cast<double> (std::any_cast<int> (it->second));
+            if (it->second.type () == typeid (long long))
+              return static_cast<double> (
+                  std::any_cast<long long> (it->second));
+            return def;
+          };
+
+          Cortext::Context::Memory::SoftAnchor anchor;
+          anchor.id = get_s ("anchor_id");
+          anchor.strength = Clamp01 (get_dbl ("anchor_strength"));
+          anchor.likelihood = anchor.strength;
+          anchor.label = get_s ("anchor_label");
+          anchor.tier = get_s ("memory_tier");
+          anchor.score = Clamp01 (get_dbl ("score"));
+          anchor.margin = get_dbl ("margin");
+          anchor.entropy = Clamp01 (get_dbl ("entropy"));
+          out.push_back (std::move (anchor));
+        }
+    }
+  catch (const std::exception &e)
+    {
+      telemetry::LogWarn (
+          "Failed to load soft anchors",
+          { telemetry::Attribute::String ("component", "cortext"),
+            telemetry::Attribute::Int64 ("memory_id", memory_id),
+            telemetry::Attribute::String ("error", e.what ()) });
+    }
+  catch (...)
+    {
+      telemetry::LogWarn (
+          "Failed to load soft anchors (unknown error)",
+          { telemetry::Attribute::String ("component", "cortext"),
+            telemetry::Attribute::Int64 ("memory_id", memory_id) });
+    }
 }
 
 void
@@ -375,6 +583,7 @@ HydrateMemory (Store *store, ObjectStore *object_store, long long id,
           m.arousal = 0.0;
           m.composite_score = 0.0;
           m.threshold_t = 0.0;
+          LoadSoftAnchors (store, memory_id, m.soft_anchors);
         }
     }
   catch (const std::exception &e)
@@ -407,8 +616,51 @@ HasHydratedContent (const Cortext::Context::Memory &memory)
   return false;
 }
 
+void
+StripSourceBlobsIfDisabled (Cortext::Context::Memory &memory)
+{
+  if (SourceBlobsDisabled ())
+    {
+      memory.content.clear ();
+    }
+}
+
+std::string
+LoadMemoryKind (Store *store, long long memory_id)
+{
+  if (!store || memory_id <= 0)
+    {
+      return {};
+    }
+  try
+    {
+      auto rows = store->Execute (
+          "SELECT kind FROM memories WHERE memory_id = ?",
+          { memory_id });
+      if (rows.empty ())
+        {
+          return {};
+        }
+      auto it = rows[0].find ("kind");
+      if (it != rows[0].end () && it->second.type () == typeid (std::string))
+        {
+          return std::any_cast<std::string> (it->second);
+        }
+    }
+  catch (const std::exception &e)
+    {
+      telemetry::LogWarn (
+          "Failed to load memory kind",
+          { telemetry::Attribute::String ("component", "cortext"),
+            telemetry::Attribute::Int64 ("memory_id", memory_id),
+            telemetry::Attribute::String ("error", e.what ()) });
+    }
+  return {};
+}
+
 std::vector<long long>
-ResolveDisplayMemoryIdsForEmptyRetrieval (Store *store, long long memory_id)
+ResolveDisplayMemoryIdsForEmptyRetrieval (Store *store, long long memory_id,
+                                          const Eigen::VectorXf *query)
 {
   if (!store || memory_id <= 0)
     {
@@ -416,35 +668,60 @@ ResolveDisplayMemoryIdsForEmptyRetrieval (Store *store, long long memory_id)
     }
 
   constexpr int kMaxLinkedHydrationCandidates = 12;
+  const bool query_source_ordering_enabled
+      = EnvFlag ("CORTEXT_QUERY_AWARE_LINKED_SOURCE_HYDRATION")
+        && !EnvFlag ("CORTEXT_DISABLE_QUERY_AWARE_LINKED_SOURCE_HYDRATION");
   try
     {
       auto rows = store->Execute (
-          "SELECT linked.memory_id "
+          "SELECT linked.memory_id, linked.rel_rank, linked.weight, e.embedding "
           "FROM ("
+          "  SELECT df.target_memory_id AS memory_id, 0 AS rel_rank, "
+          "         hl.weight * df.weight AS weight "
+          "  FROM associations hl "
+          "  JOIN associations df ON df.source_memory_id = hl.source_memory_id "
+          "                       AND df.edge_type = 'derived_from' "
+          "  WHERE hl.target_memory_id = ? AND hl.edge_type = 'has_label' "
+          "  UNION ALL "
+          "  SELECT hl.source_memory_id AS memory_id, 1 AS rel_rank, "
+          "         hl.weight AS weight "
+          "  FROM associations hl "
+          "  WHERE hl.target_memory_id = ? AND hl.edge_type = 'has_label' "
+          "  UNION ALL "
           "  SELECT a.target_memory_id AS memory_id, 0 AS rel_rank, "
           "         a.weight AS weight "
           "  FROM associations a "
           "  WHERE a.source_memory_id = ? AND a.edge_type = 'derived_from' "
           "  UNION ALL "
-          "  SELECT a.source_memory_id AS memory_id, 1 AS rel_rank, "
+          "  SELECT a.source_memory_id AS memory_id, 2 AS rel_rank, "
           "         a.weight AS weight "
           "  FROM associations a "
           "  WHERE a.target_memory_id = ? "
           "    AND a.edge_type IN ('reinforces', 'derived_from') "
           ") linked "
           "JOIN memories m ON m.memory_id = linked.memory_id "
+          "LEFT JOIN embeddings e ON e.embedding_id = m.embedding_id "
           "WHERE m.memory_id != ? "
           "  AND m.kind NOT IN ('WORKING', 'LABEL', 'ASSOCIATION') "
           "ORDER BY linked.rel_rank ASC, linked.weight DESC, "
           "         COALESCE(m.last_access, 0) DESC, m.created_at DESC "
           "LIMIT ?",
-          { memory_id, memory_id, memory_id,
+          { memory_id, memory_id, memory_id, memory_id, memory_id,
             static_cast<long long> (kMaxLinkedHydrationCandidates) });
 
       std::vector<long long> out;
       out.reserve (rows.size ());
       std::unordered_set<long long> seen;
       seen.reserve (rows.size ());
+      struct RankedLinked
+      {
+        long long memory_id = 0;
+        int rel_rank = 0;
+        double weight = 0.0;
+        double query_score = 0.0;
+      };
+      std::vector<RankedLinked> ranked;
+      ranked.reserve (rows.size ());
       for (const auto &row : rows)
         {
           auto it = row.find ("memory_id");
@@ -456,8 +733,60 @@ ResolveDisplayMemoryIdsForEmptyRetrieval (Store *store, long long memory_id)
               = cortext::store::AnyToLongLong (it->second).value_or (0);
           if (linked_id > 0 && seen.insert (linked_id).second)
             {
-              out.push_back (linked_id);
+              RankedLinked item;
+              item.memory_id = linked_id;
+              auto rank_it = row.find ("rel_rank");
+              if (rank_it != row.end ())
+                {
+                  item.rel_rank = static_cast<int> (
+                      cortext::store::AnyToLongLong (rank_it->second)
+                          .value_or (0));
+                }
+              auto weight_it = row.find ("weight");
+              if (weight_it != row.end ())
+                {
+                  if (weight_it->second.type () == typeid (double))
+                    item.weight = std::any_cast<double> (weight_it->second);
+                  else if (weight_it->second.type () == typeid (float))
+                    item.weight = static_cast<double> (
+                        std::any_cast<float> (weight_it->second));
+                  else
+                    item.weight = static_cast<double> (
+                        cortext::store::AnyToLongLong (weight_it->second)
+                            .value_or (0));
+                }
+              if (query_source_ordering_enabled && query && query->size () > 0)
+                {
+                  auto emb_it = row.find ("embedding");
+                  Eigen::VectorXf v;
+                  if (emb_it != row.end ()
+                      && core::DecodeFloatBlob (
+                          emb_it->second, static_cast<int> (query->size ()),
+                          v))
+                    {
+                      item.query_score
+                          = std::max (0.0, core::CosineSimilarity (*query, v));
+                    }
+                }
+              ranked.push_back (item);
             }
+        }
+      if (query_source_ordering_enabled && query && query->size () > 0)
+        {
+          std::sort (ranked.begin (), ranked.end (),
+                     [] (const RankedLinked &a, const RankedLinked &b) {
+                       const double score_a
+                           = 0.82 * a.query_score + 0.18 * a.weight;
+                       const double score_b
+                           = 0.82 * b.query_score + 0.18 * b.weight;
+                       if (score_a != score_b)
+                         return score_a > score_b;
+                       return a.rel_rank < b.rel_rank;
+                     });
+        }
+      for (const auto &item : ranked)
+        {
+          out.push_back (item.memory_id);
         }
       return out;
     }
@@ -560,6 +889,8 @@ HydrateWorkingMemoryFromDB (Store *store, ObjectStore *object_store,
 
           // v2: Load content blobs from signals table (ordered by serial_position)
           LoadSignalBlobs (store, m.id, object_store, m.content);
+          StripSourceBlobsIfDisabled (m);
+          LoadSoftAnchors (store, m.id, m.soft_anchors);
 
           out.push_back (std::move (m));
         }
@@ -627,7 +958,7 @@ BuildPipelineRoot (bool probe_mode)
   using cortext::operations::PropagateEmotionalCascade;
   using cortext::operations::ResetAccumulatorAfterFlush;
   using cortext::operations::ResetAccumulatorOnInterrupt;
-  using cortext::operations::SeedLabelBank;
+  using cortext::operations::LoadLabelBank;
   using cortext::operations::UpdateAccumulator;
   using cortext::operations::UpdateAccumulatorScores;
   using cortext::operations::UpdateDriftAccumulation;
@@ -640,6 +971,8 @@ BuildPipelineRoot (bool probe_mode)
   using cortext::operations::UpdateRateState;
   using cortext::operations::UpdateRecentContext;
   using cortext::operations::UpdateSensitivity;
+  using cortext::operations::UpdateShortTermMemoryShadow;
+  using cortext::operations::UpdateSoftAnchor;
   using cortext::operations::UpdateStability;
   using cortext::operations::UpdateThreshold;
   using cortext::operations::UpdateUncertainty;
@@ -647,7 +980,7 @@ BuildPipelineRoot (bool probe_mode)
 
   auto pipeline = std::make_unique<OperationSet> (
       std::make_unique<InitializeEmbeddedCentroids> (),
-      std::make_unique<SeedLabelBank> (),
+      std::make_unique<LoadLabelBank> (),
 
       std::make_unique<InitializeFocusPriors> (),
       std::make_unique<InitializeSensitivityPriors> (),
@@ -676,12 +1009,14 @@ BuildPipelineRoot (bool probe_mode)
       std::make_unique<UpdateRecentContext> (),
 
       std::make_unique<DetectBoundary> (),
+      std::make_unique<UpdateShortTermMemoryShadow> (),
       std::make_unique<CheckSpikeBypass> (),
       std::make_unique<ComputeWriteGate> ());
 
   if (!probe_mode)
     {
       pipeline->Add (std::make_unique<MemoryStorage> ());
+      pipeline->Add (std::make_unique<UpdateSoftAnchor> ());
       pipeline->Add (std::make_unique<ApplySynapticTagging> ());
       pipeline->Add (std::make_unique<PersistSignalMetrics> ());
     }
@@ -730,10 +1065,12 @@ BuildPipelineRoot (bool probe_mode)
 struct Cortext::Impl
 {
   Config cfg;
+  internal::SignalFilter signal_filter;
   std::string db_path;
   std::string models_dir;
 
   std::unique_ptr<Encoder> encoder;
+  std::shared_ptr<cortext::Clock> clock;
   std::shared_ptr<cortext::Store> store;
   std::shared_ptr<cortext::ObjectStore> object_store;
   std::unique_ptr<cortext::IOperation> pipeline_root;
@@ -745,14 +1082,20 @@ struct Cortext::Impl
 
   Impl (const Config &c, std::shared_ptr<cortext::Store> supplied_store,
         std::shared_ptr<cortext::ObjectStore> supplied_object_store,
-        std::string models)
-      : cfg (c), models_dir (std::move (models)),
+        std::string models, std::shared_ptr<cortext::Clock> supplied_clock)
+      : cfg (c), signal_filter (MakeSignalFilterConfig (c)),
+        models_dir (std::move (models)),
+        clock (std::move (supplied_clock)),
         store (std::move (supplied_store)),
         object_store (std::move (supplied_object_store))
   {
     if (!store)
       {
         throw std::invalid_argument ("Cortext requires a non-null Store");
+      }
+    if (!clock)
+      {
+        clock = std::make_shared<cortext::SystemClock> ();
       }
     if (!object_store)
       {
@@ -773,13 +1116,20 @@ struct Cortext::Impl
         object_store);
   }
 
-  Impl (const Config &c, std::string db, std::string models)
+  Impl (const Config &c, std::string db, std::string models,
+        std::shared_ptr<cortext::Clock> supplied_clock)
       : Impl (c, std::shared_ptr<cortext::Store> (
                      cortext::SQLiteStore::Create (db.c_str ())),
               nullptr,
-              std::move (models))
+              std::move (models), std::move (supplied_clock))
   {
     db_path = std::move (db);
+  }
+
+  std::uint64_t
+  NowMillis () const
+  {
+    return clock->NowMillis ();
   }
 
   cortext::SignalProcessor::Config
@@ -796,6 +1146,7 @@ struct Cortext::Impl
     pcfg.sequential_edges_enabled = cfg.sequential_edges_enabled;
     pcfg.label_bank_path = cfg.label_bank_path;
     pcfg.encoder = encoder.get ();
+    pcfg.clock = clock;
 
     pcfg.extractor = extractor_instance.get ();
     pcfg.summarizer = summarizer_instance.get ();
@@ -814,18 +1165,22 @@ struct Cortext::Impl
   ProcessTextEmbeddingAt (const Eigen::VectorXf &embedding,
                           std::uint64_t timestamp,
                           const std::string &source_id,
-                          const std::string &text)
+                          const std::string &text,
+                          Retention retention = Retention::Durable)
   {
     telemetry::ScopedSpan span ("cortext.api.process_text_cached");
     const auto total_start = std::chrono::steady_clock::now ();
     const auto process_start = total_start;
+    const auto encoded = ToStdVector (embedding);
 
     cortext::Signal s;
-    s.embedding = embedding;
+    s.embedding = ToEigen (RetrievalEmbeddingView (encoded));
+    s.soft_anchor_embedding = SoftAnchorEmbeddingView (encoded);
     s.timestamp = timestamp != 0 ? timestamp : NowMillis ();
     s.source_id = source_id;
     s.force_boundary = ShouldForceChatTurnStorage (source_id);
     s.force_write = ShouldForceChatTurnStorage (source_id);
+    s.retention = retention;
     s.payload = std::vector<unsigned char> (text.begin (), text.end ());
     s.modality = "text";
     s.mimetype = "text/plain";
@@ -841,7 +1196,7 @@ struct Cortext::Impl
     span.SetStatusOk ();
     telemetry::ScopedSpan hydrate_span ("cortext.hydrate");
     const auto hydrate_start = std::chrono::steady_clock::now ();
-    Cortext::Context result = HydrateContext (out);
+    Cortext::Context result = HydrateContext (out, true, &s.embedding);
     const auto hydrate_end = std::chrono::steady_clock::now ();
     hydrate_span.SetStatusOk ();
     result.encode_ms = 0.0;
@@ -855,16 +1210,74 @@ struct Cortext::Impl
   ProcessEmbedding (const Eigen::VectorXf &embedding, std::uint64_t timestamp,
                     const std::string &source_id)
   {
+    const auto encoded = ToStdVector (embedding);
     cortext::Signal s;
-    s.embedding = embedding;
+    s.embedding = ToEigen (RetrievalEmbeddingView (encoded));
+    s.soft_anchor_embedding = SoftAnchorEmbeddingView (encoded);
     s.timestamp = timestamp;
     s.source_id = source_id;
     return processor->Process (s);
   }
 
   Cortext::Context
+  ConsolidateAt (StopToken stop_token, ConsolidationMode mode,
+                 std::uint64_t timestamp)
+  {
+    internal::ScopedStopToken scoped_stop (stop_token);
+    auto *sqlite_store = dynamic_cast<SQLiteStore *> (store.get ());
+    std::unique_ptr<StopCallback<std::function<void ()>>> stop_callback;
+    if (sqlite_store && stop_token.stop_possible ())
+      {
+        stop_callback
+            = std::make_unique<StopCallback<std::function<void ()>>> (
+                stop_token, [sqlite_store] {
+                  internal::SQLiteStoreQueryInterrupter::Interrupt (
+                      *sqlite_store);
+                });
+      }
+    internal::ThrowIfStopRequested ();
+    telemetry::ScopedSpan span ("cortext.api.consolidate");
+    const auto total_start = std::chrono::steady_clock::now ();
+    // Drive the pipeline to allow EvaluateConsolidation to emit events
+    // and ConsolidationGate to run scoring/jobs when start is signaled.
+    std::vector<float> v;
+    telemetry::ScopedSpan encode_span ("cortext.encode");
+    encoder->EncodeText (std::string (), v);
+    encode_span.SetStatusOk ();
+    const auto encode_end = std::chrono::steady_clock::now ();
+    internal::ThrowIfStopRequested ();
+    const std::string source_id = ConsolidationSourceId (mode);
+    const auto process_start = std::chrono::steady_clock::now ();
+    const Eigen::VectorXf consolidation_embedding
+        = ToEigen (RetrievalEmbeddingView (v));
+    auto out = ProcessEmbedding (consolidation_embedding,
+                                 timestamp != 0 ? timestamp : NowMillis (),
+                                 source_id);
+    const auto process_end = std::chrono::steady_clock::now ();
+    span.SetAttribute (
+        "cortext.candidate_memory_count",
+        static_cast<std::int64_t> (out.candidate_memory_ids.size ()));
+    span.SetAttribute (
+        "cortext.used_memory_count",
+        static_cast<std::int64_t> (out.used_memory_ids.size ()));
+    span.SetStatusOk ();
+    telemetry::ScopedSpan hydrate_span ("cortext.hydrate");
+    const auto hydrate_start = std::chrono::steady_clock::now ();
+    Cortext::Context result
+        = HydrateContext (out, true, &consolidation_embedding);
+    const auto hydrate_end = std::chrono::steady_clock::now ();
+    hydrate_span.SetStatusOk ();
+    result.encode_ms = ToMillis (encode_end - total_start);
+    result.process_ms = ToMillis (process_end - process_start);
+    result.hydrate_ms = ToMillis (hydrate_end - hydrate_start);
+    result.total_ms = ToMillis (hydrate_end - total_start);
+    return result;
+  }
+
+  Cortext::Context
   HydrateContext (const cortext::SignalProcessor::Output &out,
-                  bool hydrate_working_memory = true)
+                  bool hydrate_working_memory = true,
+                  const Eigen::VectorXf *query_embedding = nullptr)
   {
     Cortext::Context result;
     result.should_interrupt = out.interrupt_allowed;
@@ -906,6 +1319,15 @@ struct Cortext::Impl
 
   // Wire stored_embedding_id from MemoryStorage operation
   result.output.stored_embedding_id = out.stored_embedding_id;
+  result.output.stored_memory_id = out.stored_memory_id;
+  result.output.soft_anchor_enabled = out.soft_anchor_enabled;
+  result.output.soft_anchor_state_count = out.soft_anchor_state_count;
+  result.output.soft_anchor_link_count = out.soft_anchor_link_count;
+  result.output.soft_anchor_create_count = out.soft_anchor_create_count;
+  result.output.soft_anchor_update_count = out.soft_anchor_update_count;
+  result.output.soft_anchor_none_count = out.soft_anchor_none_count;
+  result.output.soft_anchor_last_update_us = out.soft_anchor_last_update_us;
+  result.output.soft_anchor_mean_update_us = out.soft_anchor_mean_update_us;
     
     if (!store)
       {
@@ -949,6 +1371,16 @@ struct Cortext::Impl
     seen_candidate_memory_ids.reserve (out.candidate_memory_ids.size ());
     std::unordered_set<long long> seen_output_memory_ids;
     seen_output_memory_ids.reserve (out.candidate_memory_ids.size ());
+    std::unordered_map<long long, operations::retrieval_debug::RankedCandidate>
+        ranked_by_memory_id;
+    for (const auto &candidate :
+         operations::retrieval_debug::GetLastRankedCandidates ())
+      {
+        if (candidate.memory_id > 0)
+          {
+            ranked_by_memory_id.emplace (candidate.memory_id, candidate);
+          }
+      }
 
     auto append_hydrated_memory = [&](long long memory_id,
                                       bool require_content) -> bool {
@@ -959,16 +1391,42 @@ struct Cortext::Impl
       Cortext::Context::Memory m;
       m.id = memory_id;
       HydrateMemory (store.get (), object_store.get (), memory_id, m);
+      ApplyRetrievalScore (m, ranked_by_memory_id);
       if (require_content && !HasHydratedContent (m))
         {
           seen_output_memory_ids.erase (memory_id);
           return false;
         }
+      StripSourceBlobsIfDisabled (m);
       result.retrieved_memory.push_back (std::move (m));
       return true;
     };
 
+    std::vector<long long> ordered_candidate_embedding_ids;
+    ordered_candidate_embedding_ids.reserve (out.candidate_memory_ids.size ());
+    std::unordered_set<long long> seen_ordered_embedding_ids;
+    seen_ordered_embedding_ids.reserve (out.candidate_memory_ids.size ());
+    std::unordered_set<long long> output_candidate_embedding_ids (
+        out.candidate_memory_ids.begin (), out.candidate_memory_ids.end ());
+    for (const auto &candidate :
+         operations::retrieval_debug::GetLastRankedCandidates ())
+      {
+        if (candidate.embedding_id > 0
+            && output_candidate_embedding_ids.count (candidate.embedding_id) != 0
+            && seen_ordered_embedding_ids.insert (candidate.embedding_id).second)
+          {
+            ordered_candidate_embedding_ids.push_back (candidate.embedding_id);
+          }
+      }
     for (const long long embedding_id : out.candidate_memory_ids)
+      {
+        if (seen_ordered_embedding_ids.insert (embedding_id).second)
+          {
+            ordered_candidate_embedding_ids.push_back (embedding_id);
+          }
+      }
+
+    for (const long long embedding_id : ordered_candidate_embedding_ids)
       {
         const long long memory_id = lookup_memory_id (embedding_id);
         if (memory_id <= 0
@@ -979,10 +1437,15 @@ struct Cortext::Impl
         Cortext::Context::Memory m;
         m.id = memory_id;
         HydrateMemory (store.get (), object_store.get (), memory_id, m);
-        if (HasHydratedContent (m))
+        ApplyRetrievalScore (m, ranked_by_memory_id);
+        const bool has_content = HasHydratedContent (m);
+        const bool prefer_linked_sources
+            = LoadMemoryKind (store.get (), memory_id) == "ASSOCIATION";
+        if (has_content && !prefer_linked_sources)
           {
             if (seen_output_memory_ids.insert (memory_id).second)
               {
+                StripSourceBlobsIfDisabled (m);
                 result.retrieved_memory.push_back (std::move (m));
               }
             continue;
@@ -991,7 +1454,8 @@ struct Cortext::Impl
         int expanded_count = 0;
         for (const long long linked_memory_id :
              ResolveDisplayMemoryIdsForEmptyRetrieval (store.get (),
-                                                       memory_id))
+                                                       memory_id,
+                                                       query_embedding))
           {
             if (append_hydrated_memory (linked_memory_id, true))
               {
@@ -1000,6 +1464,14 @@ struct Cortext::Impl
                   {
                     break;
                   }
+              }
+          }
+        if (expanded_count == 0 && has_content)
+          {
+            if (seen_output_memory_ids.insert (memory_id).second)
+              {
+                StripSourceBlobsIfDisabled (m);
+                result.retrieved_memory.push_back (std::move (m));
               }
           }
       }
@@ -1011,7 +1483,16 @@ std::unique_ptr<Cortext>
 Cortext::Create (const Config &cfg, const std::string &db_path,
                  const std::string &models_dir)
 {
-  return std::unique_ptr<Cortext> (new Cortext (cfg, db_path, models_dir));
+  return Cortext::Create (cfg, db_path, models_dir, nullptr);
+}
+
+std::unique_ptr<Cortext>
+Cortext::Create (const Config &cfg, const std::string &db_path,
+                 const std::string &models_dir,
+                 std::shared_ptr<Clock> clock)
+{
+  return std::unique_ptr<Cortext> (
+      new Cortext (cfg, db_path, models_dir, std::move (clock)));
 }
 
 std::unique_ptr<Cortext>
@@ -1019,16 +1500,33 @@ Cortext::Create (const Config &cfg, const std::string &db_path,
                  std::shared_ptr<ObjectStore> object_store,
                  const std::string &models_dir)
 {
+  return Cortext::Create (cfg, db_path, std::move (object_store), models_dir,
+                          nullptr);
+}
+
+std::unique_ptr<Cortext>
+Cortext::Create (const Config &cfg, const std::string &db_path,
+                 std::shared_ptr<ObjectStore> object_store,
+                 const std::string &models_dir, std::shared_ptr<Clock> clock)
+{
   return std::unique_ptr<Cortext> (
-      new Cortext (cfg, db_path, std::move (object_store), models_dir));
+      new Cortext (cfg, db_path, std::move (object_store), models_dir,
+                   std::move (clock)));
 }
 
 std::unique_ptr<Cortext>
 Cortext::Create (const Config &cfg, std::shared_ptr<Store> store,
                  const std::string &models_dir)
 {
+  return Cortext::Create (cfg, std::move (store), models_dir, nullptr);
+}
+
+std::unique_ptr<Cortext>
+Cortext::Create (const Config &cfg, std::shared_ptr<Store> store,
+                 const std::string &models_dir, std::shared_ptr<Clock> clock)
+{
   return std::unique_ptr<Cortext> (
-      new Cortext (cfg, std::move (store), models_dir));
+      new Cortext (cfg, std::move (store), models_dir, std::move (clock)));
 }
 
 std::unique_ptr<Cortext>
@@ -1036,47 +1534,90 @@ Cortext::Create (const Config &cfg, std::shared_ptr<Store> store,
                  std::shared_ptr<ObjectStore> object_store,
                  const std::string &models_dir)
 {
+  return Cortext::Create (cfg, std::move (store), std::move (object_store),
+                          models_dir, nullptr);
+}
+
+std::unique_ptr<Cortext>
+Cortext::Create (const Config &cfg, std::shared_ptr<Store> store,
+                 std::shared_ptr<ObjectStore> object_store,
+                 const std::string &models_dir, std::shared_ptr<Clock> clock)
+{
   return std::unique_ptr<Cortext> (
       new Cortext (cfg, std::move (store), std::move (object_store),
-                   models_dir));
+                   models_dir, std::move (clock)));
 }
 
 Cortext::Cortext (const Config &cfg, const std::string &db_path,
                   const std::string &models_dir)
-    : impl_ (std::make_unique<Impl> (cfg, db_path, models_dir))
+    : Cortext (cfg, db_path, models_dir, nullptr)
+{
+}
+
+Cortext::Cortext (const Config &cfg, const std::string &db_path,
+                  const std::string &models_dir,
+                  std::shared_ptr<Clock> clock)
+    : impl_ (std::make_unique<Impl> (cfg, db_path, models_dir,
+                                     std::move (clock)))
 {
 }
 
 Cortext::Cortext (const Config &cfg, const std::string &db_path,
                   std::shared_ptr<ObjectStore> object_store,
                   const std::string &models_dir)
+    : Cortext (cfg, db_path, std::move (object_store), models_dir, nullptr)
+{
+}
+
+Cortext::Cortext (const Config &cfg, const std::string &db_path,
+                  std::shared_ptr<ObjectStore> object_store,
+                  const std::string &models_dir,
+                  std::shared_ptr<Clock> clock)
     : impl_ (std::make_unique<Impl> (
           cfg,
           std::shared_ptr<cortext::Store> (
               cortext::SQLiteStore::Create (db_path.c_str ())),
-          std::move (object_store), models_dir))
+          std::move (object_store), models_dir, std::move (clock)))
 {
 }
 
 Cortext::Cortext (const Config &cfg, std::shared_ptr<Store> store,
                   const std::string &models_dir)
+    : Cortext (cfg, std::move (store), models_dir, nullptr)
+{
+}
+
+Cortext::Cortext (const Config &cfg, std::shared_ptr<Store> store,
+                  const std::string &models_dir,
+                  std::shared_ptr<Clock> clock)
     : impl_ (std::make_unique<Impl> (cfg, std::move (store), nullptr,
-                                     models_dir))
+                                     models_dir, std::move (clock)))
 {
 }
 
 Cortext::Cortext (const Config &cfg, std::shared_ptr<Store> store,
                   std::shared_ptr<ObjectStore> object_store,
                   const std::string &models_dir)
+    : Cortext (cfg, std::move (store), std::move (object_store), models_dir,
+               nullptr)
+{
+}
+
+Cortext::Cortext (const Config &cfg, std::shared_ptr<Store> store,
+                  std::shared_ptr<ObjectStore> object_store,
+                  const std::string &models_dir,
+                  std::shared_ptr<Clock> clock)
     : impl_ (std::make_unique<Impl> (cfg, std::move (store),
-                                     std::move (object_store), models_dir))
+                                     std::move (object_store), models_dir,
+                                     std::move (clock)))
 {
 }
 
 Cortext::~Cortext () = default;
 
 Cortext::Context
-Cortext::ProcessText (const std::string &text, const std::string &source_id)
+Cortext::ProcessText (const std::string &text, const std::string &source_id,
+                      Retention retention)
 {
   if (!impl_)
     {
@@ -1084,6 +1625,12 @@ Cortext::ProcessText (const std::string &text, const std::string &source_id)
     }
   telemetry::ScopedSpan span ("cortext.api.process_text");
   const auto total_start = std::chrono::steady_clock::now ();
+  const auto filter_decision = impl_->signal_filter.EvaluateText (text);
+  if (filter_decision.evaluated && !filter_decision.accepted)
+    {
+      span.SetStatusOk ();
+      return MakeFilteredContext (filter_decision, total_start);
+    }
   std::vector<float> v;
   telemetry::ScopedSpan encode_span ("cortext.encode");
   impl_->encoder->EncodeText (text, v);
@@ -1093,11 +1640,13 @@ Cortext::ProcessText (const std::string &text, const std::string &source_id)
   // Build signal with payload for MemoryStorage
   const auto process_start = std::chrono::steady_clock::now ();
   cortext::Signal s;
-  s.embedding = ToEigen (v);
-  s.timestamp = NowMillis ();
+  s.embedding = ToEigen (RetrievalEmbeddingView (v));
+  s.soft_anchor_embedding = SoftAnchorEmbeddingView (v);
+  s.timestamp = impl_->NowMillis ();
   s.source_id = source_id;
   s.force_boundary = ShouldForceChatTurnStorage (source_id);
   s.force_write = ShouldForceChatTurnStorage (source_id);
+  s.retention = retention;
   s.payload = std::vector<unsigned char> (text.begin (), text.end ());
   s.modality = "text";
   s.mimetype = "text/plain";
@@ -1111,19 +1660,20 @@ Cortext::ProcessText (const std::string &text, const std::string &source_id)
   span.SetStatusOk ();
   telemetry::ScopedSpan hydrate_span ("cortext.hydrate");
   const auto hydrate_start = std::chrono::steady_clock::now ();
-  Cortext::Context result = impl_->HydrateContext (out);
+  Cortext::Context result = impl_->HydrateContext (out, true, &s.embedding);
   const auto hydrate_end = std::chrono::steady_clock::now ();
   hydrate_span.SetStatusOk ();
   result.encode_ms = ToMillis (encode_end - total_start);
   result.process_ms = ToMillis (process_end - process_start);
   result.hydrate_ms = ToMillis (hydrate_end - hydrate_start);
   result.total_ms = ToMillis (hydrate_end - total_start);
+  ApplySignalFilterDecision (result.output, filter_decision);
   return result;
 }
 
 Cortext::Context
 Cortext::ProcessTextAt (const std::string &text, const std::string &source_id,
-                        std::uint64_t timestamp)
+                        std::uint64_t timestamp, Retention retention)
 {
   if (!impl_)
     {
@@ -1131,6 +1681,12 @@ Cortext::ProcessTextAt (const std::string &text, const std::string &source_id,
     }
   telemetry::ScopedSpan span ("cortext.api.process_text");
   const auto total_start = std::chrono::steady_clock::now ();
+  const auto filter_decision = impl_->signal_filter.EvaluateText (text);
+  if (filter_decision.evaluated && !filter_decision.accepted)
+    {
+      span.SetStatusOk ();
+      return MakeFilteredContext (filter_decision, total_start);
+    }
   std::vector<float> v;
   telemetry::ScopedSpan encode_span ("cortext.encode");
   impl_->encoder->EncodeText (text, v);
@@ -1140,11 +1696,13 @@ Cortext::ProcessTextAt (const std::string &text, const std::string &source_id,
   // Build signal with payload for MemoryStorage
   const auto process_start = std::chrono::steady_clock::now ();
   cortext::Signal s;
-  s.embedding = ToEigen (v);
+  s.embedding = ToEigen (RetrievalEmbeddingView (v));
+  s.soft_anchor_embedding = SoftAnchorEmbeddingView (v);
   s.timestamp = timestamp;
   s.source_id = source_id;
   s.force_boundary = ShouldForceChatTurnStorage (source_id);
   s.force_write = ShouldForceChatTurnStorage (source_id);
+  s.retention = retention;
   s.payload = std::vector<unsigned char> (text.begin (), text.end ());
   s.modality = "text";
   s.mimetype = "text/plain";
@@ -1158,26 +1716,38 @@ Cortext::ProcessTextAt (const std::string &text, const std::string &source_id,
   span.SetStatusOk ();
   telemetry::ScopedSpan hydrate_span ("cortext.hydrate");
   const auto hydrate_start = std::chrono::steady_clock::now ();
-  Cortext::Context result = impl_->HydrateContext (out);
+  Cortext::Context result = impl_->HydrateContext (out, true, &s.embedding);
   const auto hydrate_end = std::chrono::steady_clock::now ();
   hydrate_span.SetStatusOk ();
   result.encode_ms = ToMillis (encode_end - total_start);
   result.process_ms = ToMillis (process_end - process_start);
   result.hydrate_ms = ToMillis (hydrate_end - hydrate_start);
   result.total_ms = ToMillis (hydrate_end - total_start);
+  ApplySignalFilterDecision (result.output, filter_decision);
   return result;
 }
 
 Cortext::Context
 Cortext::ProcessAudio (const float *pcm, std::size_t num_samples,
-                       const std::string &source_id)
+                       const std::string &source_id, Retention retention)
 {
   if (!impl_)
     {
       throw std::runtime_error ("Cortext not initialized");
-    }
+  }
   telemetry::ScopedSpan span ("cortext.api.process_audio");
   const auto total_start = std::chrono::steady_clock::now ();
+  const auto filter_decision
+      = impl_->signal_filter.EvaluateAudio (pcm, num_samples, 16000);
+  if (filter_decision.evaluated && !filter_decision.accepted)
+    {
+      span.SetAttribute ("cortext.signal_filter.modality",
+                         filter_decision.modality);
+      span.SetAttribute ("cortext.signal_filter.reason",
+                         filter_decision.reason);
+      span.SetStatusOk ();
+      return MakeFilteredContext (filter_decision, total_start);
+    }
   std::vector<float> v;
   telemetry::ScopedSpan encode_span ("cortext.encode");
   impl_->encoder->EncodeAudio (pcm, num_samples, v);
@@ -1187,16 +1757,20 @@ Cortext::ProcessAudio (const float *pcm, std::size_t num_samples,
   // Build signal with payload for MemoryStorage
   const auto process_start = std::chrono::steady_clock::now ();
   cortext::Signal s;
-  s.embedding = ToEigen (v);
-  s.timestamp = NowMillis ();
+  s.embedding = ToEigen (RetrievalEmbeddingView (v));
+  s.soft_anchor_embedding = SoftAnchorEmbeddingView (v);
+  s.timestamp = impl_->NowMillis ();
   s.source_id = source_id;
+  s.force_boundary = ShouldForceChatTurnStorage (source_id);
+  s.force_write = ShouldForceChatTurnStorage (source_id);
+  s.retention = retention;
   // Store raw PCM bytes (f32le) as payload
   const std::size_t byte_len = num_samples * sizeof (float);
   s.payload = std::vector<unsigned char> (byte_len);
   std::memcpy (s.payload->data (), pcm, byte_len);
   s.modality = "audio";
   s.mimetype = "audio/pcm;format=f32";
-  s.sample_rate = 16000; // ImageBind expects 16kHz
+  s.sample_rate = 16000; // Public audio ingress contract is 16 kHz mono PCM.
   s.num_samples = num_samples;
 
   auto out = impl_->processor->Process (s);
@@ -1208,26 +1782,35 @@ Cortext::ProcessAudio (const float *pcm, std::size_t num_samples,
   span.SetStatusOk ();
   telemetry::ScopedSpan hydrate_span ("cortext.hydrate");
   const auto hydrate_start = std::chrono::steady_clock::now ();
-  Cortext::Context result = impl_->HydrateContext (out);
+  Cortext::Context result = impl_->HydrateContext (out, true, &s.embedding);
   const auto hydrate_end = std::chrono::steady_clock::now ();
   hydrate_span.SetStatusOk ();
   result.encode_ms = ToMillis (encode_end - total_start);
   result.process_ms = ToMillis (process_end - process_start);
   result.hydrate_ms = ToMillis (hydrate_end - hydrate_start);
   result.total_ms = ToMillis (hydrate_end - total_start);
+  ApplySignalFilterDecision (result.output, filter_decision);
   return result;
 }
 
 Cortext::Context
 Cortext::ProcessImage (const std::uint8_t *data, int width, int height,
-                       int channels, const std::string &source_id)
+                       int channels, const std::string &source_id,
+                       Retention retention)
 {
   if (!impl_)
     {
       throw std::runtime_error ("Cortext not initialized");
-    }
+  }
   telemetry::ScopedSpan span ("cortext.api.process_image");
   const auto total_start = std::chrono::steady_clock::now ();
+  const auto filter_decision
+      = impl_->signal_filter.EvaluateImage (data, width, height, channels);
+  if (filter_decision.evaluated && !filter_decision.accepted)
+    {
+      span.SetStatusOk ();
+      return MakeFilteredContext (filter_decision, total_start);
+    }
   std::vector<float> v;
   telemetry::ScopedSpan encode_span ("cortext.encode");
   impl_->encoder->EncodeImage (data, width, height, channels, v);
@@ -1237,9 +1820,11 @@ Cortext::ProcessImage (const std::uint8_t *data, int width, int height,
   // Build signal with payload for MemoryStorage
   const auto process_start = std::chrono::steady_clock::now ();
   cortext::Signal s;
-  s.embedding = ToEigen (v);
-  s.timestamp = NowMillis ();
+  s.embedding = ToEigen (RetrievalEmbeddingView (v));
+  s.soft_anchor_embedding = SoftAnchorEmbeddingView (v);
+  s.timestamp = impl_->NowMillis ();
   s.source_id = source_id;
+  s.retention = retention;
   // Store raw image bytes as payload
   const std::size_t byte_len
       = static_cast<std::size_t> (width) * static_cast<std::size_t> (height)
@@ -1247,7 +1832,9 @@ Cortext::ProcessImage (const std::uint8_t *data, int width, int height,
   s.payload = std::vector<unsigned char> (byte_len);
   std::memcpy (s.payload->data (), data, byte_len);
   s.modality = "image";
-  s.mimetype = "image/raw"; // Raw pixel bytes (RGB/RGBA)
+  s.mimetype = "image/raw;width=" + std::to_string (width)
+               + ";height=" + std::to_string (height)
+               + ";channels=" + std::to_string (channels);
   s.width = width;
   s.height = height;
   s.channels = channels;
@@ -1261,14 +1848,159 @@ Cortext::ProcessImage (const std::uint8_t *data, int width, int height,
   span.SetStatusOk ();
   telemetry::ScopedSpan hydrate_span ("cortext.hydrate");
   const auto hydrate_start = std::chrono::steady_clock::now ();
-  Cortext::Context result = impl_->HydrateContext (out);
+  Cortext::Context result = impl_->HydrateContext (out, true, &s.embedding);
   const auto hydrate_end = std::chrono::steady_clock::now ();
   hydrate_span.SetStatusOk ();
   result.encode_ms = ToMillis (encode_end - total_start);
   result.process_ms = ToMillis (process_end - process_start);
   result.hydrate_ms = ToMillis (hydrate_end - hydrate_start);
   result.total_ms = ToMillis (hydrate_end - total_start);
+  ApplySignalFilterDecision (result.output, filter_decision);
   return result;
+}
+
+Cortext::Context
+internal::ReplayIngress::ProcessAudioAt (Cortext &cortext, const float *pcm,
+                                         std::size_t num_samples,
+                                         const std::string &source_id,
+                                         std::uint64_t timestamp,
+                                         Retention retention)
+{
+  if (!cortext.impl_)
+    {
+      throw std::runtime_error ("Cortext not initialized");
+    }
+  telemetry::ScopedSpan span ("cortext.internal.replay.process_audio_at");
+  const auto total_start = std::chrono::steady_clock::now ();
+  const auto filter_decision
+      = cortext.impl_->signal_filter.EvaluateAudio (pcm, num_samples, 16000);
+  if (filter_decision.evaluated && !filter_decision.accepted)
+    {
+      span.SetStatusOk ();
+      return MakeFilteredContext (filter_decision, total_start);
+    }
+  std::vector<float> v;
+  telemetry::ScopedSpan encode_span ("cortext.encode");
+  cortext.impl_->encoder->EncodeAudio (pcm, num_samples, v);
+  encode_span.SetStatusOk ();
+  const auto encode_end = std::chrono::steady_clock::now ();
+
+  const auto process_start = std::chrono::steady_clock::now ();
+  cortext::Signal s;
+  s.embedding = ToEigen (RetrievalEmbeddingView (v));
+  s.soft_anchor_embedding = SoftAnchorEmbeddingView (v);
+  s.timestamp = timestamp != 0 ? timestamp : cortext.impl_->NowMillis ();
+  s.source_id = source_id;
+  s.force_boundary = ShouldForceChatTurnStorage (source_id);
+  s.force_write = ShouldForceChatTurnStorage (source_id);
+  s.retention = retention;
+  const std::size_t byte_len = num_samples * sizeof (float);
+  s.payload = std::vector<unsigned char> (byte_len);
+  std::memcpy (s.payload->data (), pcm, byte_len);
+  s.modality = "audio";
+  s.mimetype = "audio/pcm;format=f32";
+  s.sample_rate = 16000;
+  s.num_samples = num_samples;
+
+  auto out = cortext.impl_->processor->Process (s);
+  const auto process_end = std::chrono::steady_clock::now ();
+  span.SetAttribute ("cortext.candidate_memory_count",
+                     static_cast<std::int64_t> (out.candidate_memory_ids.size ()));
+  span.SetAttribute ("cortext.used_memory_count",
+                     static_cast<std::int64_t> (out.used_memory_ids.size ()));
+  span.SetStatusOk ();
+  telemetry::ScopedSpan hydrate_span ("cortext.hydrate");
+  const auto hydrate_start = std::chrono::steady_clock::now ();
+  Cortext::Context result
+      = cortext.impl_->HydrateContext (out, true, &s.embedding);
+  const auto hydrate_end = std::chrono::steady_clock::now ();
+  hydrate_span.SetStatusOk ();
+  result.encode_ms = ToMillis (encode_end - total_start);
+  result.process_ms = ToMillis (process_end - process_start);
+  result.hydrate_ms = ToMillis (hydrate_end - hydrate_start);
+  result.total_ms = ToMillis (hydrate_end - total_start);
+  ApplySignalFilterDecision (result.output, filter_decision);
+  return result;
+}
+
+Cortext::Context
+internal::ReplayIngress::ProcessImageAt (Cortext &cortext,
+                                         const std::uint8_t *data, int width,
+                                         int height, int channels,
+                                         const std::string &source_id,
+                                         std::uint64_t timestamp,
+                                         Retention retention)
+{
+  if (!cortext.impl_)
+    {
+      throw std::runtime_error ("Cortext not initialized");
+    }
+  telemetry::ScopedSpan span ("cortext.internal.replay.process_image_at");
+  const auto total_start = std::chrono::steady_clock::now ();
+  const auto filter_decision = cortext.impl_->signal_filter.EvaluateImage (
+      data, width, height, channels);
+  if (filter_decision.evaluated && !filter_decision.accepted)
+    {
+      span.SetStatusOk ();
+      return MakeFilteredContext (filter_decision, total_start);
+    }
+  std::vector<float> v;
+  telemetry::ScopedSpan encode_span ("cortext.encode");
+  cortext.impl_->encoder->EncodeImage (data, width, height, channels, v);
+  encode_span.SetStatusOk ();
+  const auto encode_end = std::chrono::steady_clock::now ();
+
+  const auto process_start = std::chrono::steady_clock::now ();
+  cortext::Signal s;
+  s.embedding = ToEigen (RetrievalEmbeddingView (v));
+  s.soft_anchor_embedding = SoftAnchorEmbeddingView (v);
+  s.timestamp = timestamp != 0 ? timestamp : cortext.impl_->NowMillis ();
+  s.source_id = source_id;
+  s.retention = retention;
+  const std::size_t byte_len
+      = static_cast<std::size_t> (width) * static_cast<std::size_t> (height)
+        * static_cast<std::size_t> (channels);
+  s.payload = std::vector<unsigned char> (byte_len);
+  std::memcpy (s.payload->data (), data, byte_len);
+  s.modality = "image";
+  s.mimetype = "image/raw;width=" + std::to_string (width)
+               + ";height=" + std::to_string (height)
+               + ";channels=" + std::to_string (channels);
+  s.width = width;
+  s.height = height;
+  s.channels = channels;
+
+  auto out = cortext.impl_->processor->Process (s);
+  const auto process_end = std::chrono::steady_clock::now ();
+  span.SetAttribute ("cortext.candidate_memory_count",
+                     static_cast<std::int64_t> (out.candidate_memory_ids.size ()));
+  span.SetAttribute ("cortext.used_memory_count",
+                     static_cast<std::int64_t> (out.used_memory_ids.size ()));
+  span.SetStatusOk ();
+  telemetry::ScopedSpan hydrate_span ("cortext.hydrate");
+  const auto hydrate_start = std::chrono::steady_clock::now ();
+  Cortext::Context result
+      = cortext.impl_->HydrateContext (out, true, &s.embedding);
+  const auto hydrate_end = std::chrono::steady_clock::now ();
+  hydrate_span.SetStatusOk ();
+  result.encode_ms = ToMillis (encode_end - total_start);
+  result.process_ms = ToMillis (process_end - process_start);
+  result.hydrate_ms = ToMillis (hydrate_end - hydrate_start);
+  result.total_ms = ToMillis (hydrate_end - total_start);
+  ApplySignalFilterDecision (result.output, filter_decision);
+  return result;
+}
+
+Cortext::Context
+internal::ReplayIngress::ConsolidateAt (Cortext &cortext,
+                                        std::uint64_t timestamp,
+                                        ConsolidationMode mode)
+{
+  if (!cortext.impl_)
+    {
+      throw std::runtime_error ("Cortext not initialized");
+    }
+  return cortext.impl_->ConsolidateAt (StopToken {}, mode, timestamp);
 }
 
 Cortext::Context
@@ -1284,48 +2016,7 @@ Cortext::Consolidate (StopToken stop_token, ConsolidationMode mode)
     {
       throw std::runtime_error ("Cortext not initialized");
     }
-  internal::ScopedStopToken scoped_stop (stop_token);
-  auto *sqlite_store = dynamic_cast<SQLiteStore *> (impl_->store.get ());
-  std::unique_ptr<StopCallback<std::function<void ()>>> stop_callback;
-  if (sqlite_store && stop_token.stop_possible ())
-    {
-      stop_callback
-          = std::make_unique<StopCallback<std::function<void ()>>> (
-              stop_token, [sqlite_store] {
-                internal::SQLiteStoreQueryInterrupter::Interrupt (*sqlite_store);
-              });
-    }
-  internal::ThrowIfStopRequested ();
-  telemetry::ScopedSpan span ("cortext.api.consolidate");
-  const auto total_start = std::chrono::steady_clock::now ();
-  // Drive the pipeline to allow EvaluateConsolidation to emit events
-  // and ConsolidationGate to run scoring/jobs when start is signaled.
-  std::vector<float> v;
-  telemetry::ScopedSpan encode_span ("cortext.encode");
-  impl_->encoder->EncodeText (std::string (), v);
-  encode_span.SetStatusOk ();
-  const auto encode_end = std::chrono::steady_clock::now ();
-  internal::ThrowIfStopRequested ();
-  const std::string source_id = ConsolidationSourceId (mode);
-  const auto process_start = std::chrono::steady_clock::now ();
-  auto out = impl_->ProcessEmbedding (ToEigen (v), NowMillis (),
-                                      source_id);
-  const auto process_end = std::chrono::steady_clock::now ();
-  span.SetAttribute ("cortext.candidate_memory_count",
-                     static_cast<std::int64_t> (out.candidate_memory_ids.size ()));
-  span.SetAttribute ("cortext.used_memory_count",
-                     static_cast<std::int64_t> (out.used_memory_ids.size ()));
-  span.SetStatusOk ();
-  telemetry::ScopedSpan hydrate_span ("cortext.hydrate");
-  const auto hydrate_start = std::chrono::steady_clock::now ();
-  Cortext::Context result = impl_->HydrateContext (out);
-  const auto hydrate_end = std::chrono::steady_clock::now ();
-  hydrate_span.SetStatusOk ();
-  result.encode_ms = ToMillis (encode_end - total_start);
-  result.process_ms = ToMillis (process_end - process_start);
-  result.hydrate_ms = ToMillis (hydrate_end - hydrate_start);
-  result.total_ms = ToMillis (hydrate_end - total_start);
-  return result;
+  return impl_->ConsolidateAt (stop_token, mode, impl_->NowMillis ());
 }
 
 void
@@ -1366,15 +2057,6 @@ namespace internal
 {
 namespace
 {
-
-inline std::uint64_t
-ProbeNowMillis ()
-{
-  return static_cast<std::uint64_t> (
-      std::chrono::duration_cast<std::chrono::milliseconds> (
-          std::chrono::system_clock::now ().time_since_epoch ())
-          .count ());
-}
 
 inline Eigen::VectorXf
 NormalizeProbeEmbedding (const Eigen::VectorXf &embedding)
@@ -1456,8 +2138,10 @@ struct StreamingTextProbeSession::Impl
       }
 
     cortext::Signal signal;
-    signal.embedding = eigen_embedding;
-    signal.timestamp = timestamp != 0 ? timestamp : ProbeNowMillis ();
+    signal.embedding = ToEigen (RetrievalEmbeddingView (embedding));
+    signal.soft_anchor_embedding = SoftAnchorEmbeddingView (embedding);
+    signal.timestamp = timestamp != 0 ? timestamp
+                                      : cortext->impl_->NowMillis ();
     signal.source_id = source_id;
     signal.payload = std::vector<unsigned char> (text.begin (), text.end ());
     signal.modality = "text";
@@ -1469,7 +2153,7 @@ struct StreamingTextProbeSession::Impl
 
     const auto hydrate_start = std::chrono::steady_clock::now ();
     Cortext::Context result
-        = cortext->impl_->HydrateContext (out, false);
+        = cortext->impl_->HydrateContext (out, false, &signal.embedding);
     const auto hydrate_end = std::chrono::steady_clock::now ();
 
     result.encode_ms = ToMillis (encode_end - total_start);
@@ -1614,6 +2298,23 @@ Cortext::DebugHydrateForTest (const std::vector<long long> &candidate_ids,
   out.candidate_memory_ids = candidate_ids;
   out.used_memory_ids = used_ids;
   return impl_->HydrateContext (out);
+}
+
+Cortext::Context
+Cortext::DebugHydrateForTest (const std::vector<long long> &candidate_ids,
+                              const std::vector<long long> &used_ids,
+                              const std::vector<float> &query_embedding)
+{
+  cortext::SignalProcessor::Output out;
+  out.candidate_memory_ids = candidate_ids;
+  out.used_memory_ids = used_ids;
+  Eigen::VectorXf query;
+  if (!query_embedding.empty ())
+    {
+      query = ToEigen (query_embedding);
+    }
+  return impl_->HydrateContext (out, true,
+                                query.size () > 0 ? &query : nullptr);
 }
 #endif
 

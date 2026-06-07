@@ -18,6 +18,7 @@
 #include <stdbool.h>
 
 #include <atomic>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <vector>
@@ -60,12 +61,12 @@ absl::StatusOr<int> Prefill(LlmExecutor& executor, ExecutorInputs& inputs,
 // - benchmark_info: The benchmark info to record the performance metrics.
 // - cancelled: A pointer to an atomic boolean. If the boolean is set to true,
 //   the decoding process will be cancelled.
-absl::StatusOr<Responses> Decode(LlmExecutor& executor, Tokenizer& tokenizer,
-                                 const StopTokenDetector& stop_token_detector,
-                                 int num_output_candidates,
-                                 Constraint* constraint,
-                                 std::optional<BenchmarkInfo>& benchmark_info,
-                                 std::atomic<bool>* cancelled = nullptr);
+absl::StatusOr<Responses> Decode(
+    LlmExecutor& executor, Tokenizer& tokenizer,
+    const StopTokenDetector& stop_token_detector, int num_output_candidates,
+    Constraint* constraint, std::optional<BenchmarkInfo>& benchmark_info,
+    std::atomic<bool>* cancelled = nullptr,
+    int max_output_tokens = std::numeric_limits<int>::max());
 
 // Runs the pipeline to decode the input prompt. The function is similar to
 // Decode, but it outputs the result using the callback to achieve streaming
@@ -78,7 +79,8 @@ absl::Status DecodeStreaming(
     const StopTokenDetector& stop_token_detector, int num_output_candidates,
     Constraint* constraint, std::optional<BenchmarkInfo>& benchmark_info,
     absl::AnyInvocable<void(absl::StatusOr<Responses>)> callback,
-    std::atomic<bool>* cancelled = nullptr);
+    std::atomic<bool>* cancelled = nullptr,
+    int max_output_tokens = std::numeric_limits<int>::max());
 
 // Runs the pipeline to decode the input prompt.
 // - executor: The executor that call the core LLM model.
@@ -97,7 +99,8 @@ absl::StatusOr<Responses> DecodeCustomSampling(
     const StopTokenDetector& stop_token_detector, int num_output_candidates,
     Sampler& sampler, litert::TensorBuffer decoded_ids, Constraint* constraint,
     std::optional<BenchmarkInfo>& benchmark_info,
-    std::atomic<bool>* cancelled = nullptr);
+    std::atomic<bool>* cancelled = nullptr,
+    int max_output_tokens = std::numeric_limits<int>::max());
 
 // Runs the pipeline to decode the input prompt. The function is similar to
 // DecodeCustomSampling, but it outputs the result using the callback to
@@ -111,7 +114,8 @@ absl::Status DecodeCustomSamplingStreaming(
     Sampler& sampler, litert::TensorBuffer decoded_ids, Constraint* constraint,
     std::optional<BenchmarkInfo>& benchmark_info,
     absl::AnyInvocable<void(absl::StatusOr<Responses>)> callback,
-    std::atomic<bool>* cancelled = nullptr);
+    std::atomic<bool>* cancelled = nullptr,
+    int max_output_tokens = std::numeric_limits<int>::max());
 
 // Runs the pipeline to score the input prompt.
 // - executor: The executor that calls the core LLM model.

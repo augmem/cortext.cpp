@@ -15,10 +15,13 @@
 #ifndef THIRD_PARTY_ODML_LITERT_LM_RUNTIME_EXECUTOR_LLM_EXECUTOR_BASE_H_
 #define THIRD_PARTY_ODML_LITERT_LM_RUNTIME_EXECUTOR_LLM_EXECUTOR_BASE_H_
 
+#include <vector>
+
 #include "absl/status/status.h"  // from @com_google_absl
 #include "absl/status/statusor.h"  // from @com_google_absl
 #include "absl/strings/str_cat.h"  // from @com_google_absl
 #include "absl/strings/string_view.h"  // from @com_google_absl
+#include "litert/cc/litert_environment.h"  // from @litert
 #include "litert/cc/litert_tensor_buffer.h"  // from @litert
 #include "runtime/executor/llm_executor_io_types.h"
 #include "runtime/executor/llm_executor_settings.h"
@@ -49,16 +52,15 @@ class LlmExecutorBase {
   };
 
   // ------------Output APIs------------:
-  // Basic API to trigger the "decode" process. On success, fills output tokens
-  // tensor buffer of shape `[batch, sequence_length]` of int32_t.
-  virtual absl::Status Decode(::litert::TensorBuffer& output_tokens) = 0;
+  // Basic API to trigger the "decode" process. On success, will return a vector
+  // of token ids of generated output tokens, one per candidate.
+  virtual absl::StatusOr<std::vector<std::vector<int>>> Decode() = 0;
 
   // Advanced API to trigger the decode and sampling process with custom
-  // parameters. On success, fills output tokens tensor buffer of shape `[batch,
-  // sequence_length]` of int32_t. decode_params: Parameters to control the
-  // decode process.
-  virtual absl::Status Decode(::litert::TensorBuffer& output_tokens,
-                              const ExecutorDecodeParams& decode_params) {
+  // parameters. On success, will return a vector of token ids of generated
+  // output tokens, one per candidate.
+  virtual absl::StatusOr<std::vector<std::vector<int>>> Decode(
+      const ExecutorDecodeParams& decode_params) {
     return absl::UnimplementedError(
         absl::StrCat("Decode with decode params not implemented for backend: ",
                      ExecutorBackendName()));
@@ -101,12 +103,28 @@ class LlmExecutorBase {
         "GetCurrentStep not implemented for backend: ", ExecutorBackendName()));
   };
 
+  virtual absl::Status SetCurrentStep(int current_step) {
+    return absl::UnimplementedError(absl::StrCat(
+        "SetCurrentStep not implemented for backend: ", ExecutorBackendName()));
+  };
+
   // Gets the executor settings of the executor.
   virtual absl::StatusOr<LlmExecutorSettings> GetExecutorSettings() const {
     return absl::UnimplementedError(
         absl::StrCat("GetExecutorSettings not implemented for backend: ",
                      ExecutorBackendName()));
   };
+
+  // Gets the litert environment used by the executor.
+  // This is used by AICore's EmbeddingModelMldrift to convert tokens to
+  // TensorBuffers.
+  virtual ::litert::Environment* GetEnvironment() const { return nullptr; };
+
+  // Updates the executor settings.
+  virtual absl::Status UpdateExecutorSettings(
+      const LlmExecutorSettings& executor_settings) {
+    return absl::OkStatus();
+  }
 
   // ------------Vision APIs------------:
   // This function will populate the GPU tensors with the vision embeddings and

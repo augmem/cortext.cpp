@@ -22,7 +22,8 @@ struct ConsolidationSummarizeParams
 /// For each valid cluster from ConsolidationCluster:
 /// - Creates a centroid associative cue node for graph labeling/retrieval
 /// - Queues ExtractionRequest from raw source memories, attached to that cue
-/// - Uses the deep LLM summarizer only when storage pressure permits compression
+/// - Uses the deep LLM summarizer to create a compact retrieval surface when
+///   available
 /// - Creates ASSOCIATIONS edges (edge_type='derived_from') linking cues/summaries to sources
 ///
 /// Input:

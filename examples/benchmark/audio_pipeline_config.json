@@ -24,8 +24,5 @@
     "tokenizer": "models/embeddinggemma-300m-onnx/tokenizer.model",
     "max_length": 256,
     "num_threads": 8
-  },
-  "imagebind": {
-    "models_dir": "models/imagebind"
   }
 }

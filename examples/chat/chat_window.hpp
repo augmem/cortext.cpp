@@ -14,6 +14,7 @@
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace chat {
@@ -73,6 +74,18 @@ struct MemoryEvent {
   double composite_score = 0.0;
   double threshold_t = 0.0;
   std::string filter_reason;
+
+  // Soft Anchor context for memory rows plus ingress counters for stored rows.
+  long long stored_memory_id = 0;
+  bool soft_anchor_enabled = false;
+  int soft_anchor_state_count = 0;
+  int soft_anchor_link_count = 0;
+  int soft_anchor_create_count = 0;
+  int soft_anchor_update_count = 0;
+  int soft_anchor_none_count = 0;
+  double soft_anchor_last_update_us = 0.0;
+  double soft_anchor_mean_update_us = 0.0;
+  std::vector<cortext::Cortext::Context::Memory::SoftAnchor> soft_anchors;
 };
 
 // Status bar telemetry state
@@ -90,11 +103,14 @@ struct SettingsState {
   double active_sensitivity = 0.5;
   double active_stability = 0.5;
   int active_idle_consolidation_seconds = 0;
+  double active_webcam_video_fps = 1.0;
   double draft_focus = 0.5;
   double draft_sensitivity = 0.5;
   double draft_stability = 0.5;
   int draft_idle_consolidation_seconds = 0;
+  double draft_webcam_video_fps = 1.0;
   int default_idle_consolidation_seconds = 0;
+  double default_webcam_video_fps = 1.0;
   std::string active_model;
   std::string draft_model;
   std::string default_model;
@@ -131,6 +147,74 @@ struct VoiceState {
   std::optional<std::string> last_error;
 };
 
+struct MemoryMediaPreview {
+  long long preview_id = 0;
+  long long memory_id = 0;
+  std::string modality;
+  std::string mimetype;
+  std::string source_id;
+  std::string preview;
+  std::vector<unsigned char> media_bytes;
+  std::vector<float> audio_samples;
+  int image_width = 0;
+  int image_height = 0;
+  int image_channels = 0;
+  int audio_sample_rate = 16000;
+  std::size_t blob_count = 0;
+  std::size_t byte_count = 0;
+  long long retrieved_count = 0;
+  long long used_count = 0;
+  double relevance = 0.0;
+  double composite_score = 0.0;
+  double salience = 0.0;
+  uint64_t timestamp = 0;
+};
+
+struct MediaLoadRequest {
+  std::string kind;
+  long long memory_id = 0;
+  long long signal_id = 0;
+};
+
+struct WebcamState {
+  mutable std::mutex mu;
+  bool supported = false;
+  bool available = false;
+  bool capturing = false;
+  bool start_requested = false;
+  bool stop_requested = false;
+  std::string capture_mode = "all";
+  bool image_capture_pending = false;
+  int video_width = 0;
+  int video_height = 0;
+  std::uint64_t video_frames_captured = 0;
+  std::uint64_t video_frames_ingested = 0;
+  std::uint64_t video_frames_filtered = 0;
+  std::uint64_t audio_chunks_captured = 0;
+  std::uint64_t audio_chunks_ingested = 0;
+  std::uint64_t audio_chunks_filtered = 0;
+  double last_video_ingest_ms = 0.0;
+  double last_audio_ingest_ms = 0.0;
+  double mean_video_ingest_ms = 0.0;
+  double mean_audio_ingest_ms = 0.0;
+  std::optional<MemoryMediaPreview> signal_filter_image;
+  std::uint64_t signal_filter_image_version = 0;
+  std::string last_signal_filter_modality;
+  std::string last_signal_filter_reason;
+  double last_signal_filter_score = 0.0;
+  double last_signal_filter_threshold = 0.0;
+  std::uint64_t retrieval_update_count = 0;
+  std::vector<MemoryMediaPreview> retrieved_memories;
+  std::vector<MemoryMediaPreview> latest_visual_retrieved_memories;
+  std::vector<MemoryMediaPreview> latest_audio_retrieved_memories;
+  std::deque<MemoryMediaPreview> live_memory_feed;
+  std::optional<MemoryMediaPreview> audio_play_request;
+  bool audio_stop_requested = false;
+  bool audio_playing = false;
+  long long audio_playing_memory_id = 0;
+  std::optional<std::string> last_error;
+};
+
 struct DatabaseMemoryRow {
   long long memory_id = 0;
   long long episode_id = 0;
@@ -160,6 +244,7 @@ struct DatabaseSignalRow {
   double score = 0.0;
   double salience = 0.0;
   double threshold_t = 0.0;
+  MemoryMediaPreview preview;
 };
 
 struct DatabaseAssociationRow {
@@ -237,9 +322,31 @@ struct DatabaseExplorerState {
   long long total_facts = 0;
   long long total_evictions = 0;
   uint64_t refreshed_at = 0;
-  bool refresh_requested = true;
+  bool refresh_requested = false;
+  bool consolidate_requested = false;
   bool clear_requested = false;
+  std::optional<MediaLoadRequest> media_load_request;
+  std::optional<MemoryMediaPreview> loaded_media_modal;
+  bool media_modal_open_requested = false;
+  std::optional<MemoryMediaPreview> audio_play_request;
+  bool audio_stop_requested = false;
+  bool audio_playing = false;
+  long long audio_playing_memory_id = 0;
   std::optional<std::string> last_refresh_status;
+};
+
+struct PlaygroundState {
+  mutable std::mutex mu;
+  bool process_text_requested = false;
+  bool processing = false;
+  std::string pending_text;
+  std::string last_input_kind;
+  std::string last_input_summary;
+  std::vector<MemoryMediaPreview> retrieved_memories;
+  double last_total_ms = 0.0;
+  double last_process_ms = 0.0;
+  std::optional<std::string> last_status;
+  std::optional<std::string> last_error;
 };
 
 // Log entry for the logs tab
@@ -279,6 +386,8 @@ public:
     std::shared_ptr<StatusBarState> status;
     std::shared_ptr<SettingsState> settings;
     std::shared_ptr<VoiceState> voice;
+    std::shared_ptr<WebcamState> webcam;
+    std::shared_ptr<PlaygroundState> playground;
     std::shared_ptr<DatabaseExplorerState> db_explorer;
     std::shared_ptr<OTelState> otel;
     std::string* input = nullptr;
@@ -295,6 +404,7 @@ public:
   };
 
   explicit ChatWindow(const State& state);
+  ~ChatWindow();
 
   // Called each frame to render the window
   void Render();
@@ -306,7 +416,9 @@ public:
 private:
   void RenderTabBar();
   void RenderChatTab();
+  void RenderPlaygroundTab();
   void RenderVoiceTab();
+  void RenderWebcamTab();
   void RenderEventsTab();
   void RenderChunksTab();
   void RenderMetricsTab();
@@ -317,6 +429,7 @@ private:
   void RenderGraphTab();
   void RenderContextTab();
   void RenderLogsTab();
+  void RenderMediaModal();
   void RenderStatusBar();
   void RenderInputBox();
 
@@ -324,6 +437,14 @@ private:
   static void TextColored(const char* role, const char* fmt, ...);
 
   State state_;
+  struct ImageTexture {
+    unsigned int texture_id = 0;
+    int width = 0;
+    int height = 0;
+    std::uint64_t version = 0;
+  };
+  std::unordered_map<long long, ImageTexture> webcam_image_textures_;
+  ImageTexture signal_filter_image_texture_;
   int selected_tab_ = 0;
   bool scroll_chat_to_bottom_ = true;
   std::size_t last_chat_message_count_ = 0;
@@ -333,6 +454,7 @@ private:
   bool refocus_input_next_frame_ = true;
   std::string pending_message_;
   char input_buffer_[4096] = {0};
+  char playground_text_buffer_[4096] = {0};
   bool show_clear_db_confirm_ = false;
   int db_memory_kind_filter_ = 0;
   ImVec2 graph_pan_offset_ = ImVec2(80.0f, 80.0f);

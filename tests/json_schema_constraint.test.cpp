@@ -6,6 +6,7 @@
 
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace
 {
@@ -46,6 +47,18 @@ public:
     for (int id : token_ids)
       out.push_back (static_cast<char> (id));
     return out;
+  }
+
+  std::vector<std::string>
+  GetTokens () const override
+  {
+    std::vector<std::string> tokens;
+    tokens.reserve (256);
+    for (int i = 0; i < 256; ++i)
+      {
+        tokens.emplace_back (1, static_cast<char> (i));
+      }
+    return tokens;
   }
 };
 

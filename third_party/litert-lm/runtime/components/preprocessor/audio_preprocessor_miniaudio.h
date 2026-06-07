@@ -19,6 +19,7 @@
 #include <utility>
 #include <vector>
 
+#include "absl/log/absl_check.h"  // from @com_google_absl
 #include "absl/status/status.h"  // from @com_google_absl
 #include "absl/status/statusor.h"  // from @com_google_absl
 #include "absl/strings/string_view.h"  // from @com_google_absl
@@ -68,7 +69,45 @@ class AudioPreprocessorMiniAudio : public AudioPreprocessor {
   // Resets the preprocessor to its initial state.
   void Reset() override {
     input_queue_.clear();
-    samples_to_next_step_ = config_.GetFrameLength();
+    if (config_.GetSemicausalPadding()) {
+      samples_to_next_step_ = config_.GetFrameLength() - config_.GetHopLength();
+      input_queue_.resize(config_.GetHopLength(), 0.0f);
+    } else {
+      samples_to_next_step_ = config_.GetFrameLength();
+    }
+  }
+
+  // Copy constructor for cloning the audio preprocessor.
+  AudioPreprocessorMiniAudio(const AudioPreprocessorMiniAudio& other)
+      : config_(other.config_),
+        mel_filterbank_(nullptr),
+        input_queue_(other.input_queue_),
+        samples_to_next_step_(other.samples_to_next_step_) {
+    mel_filterbank_ = std::make_unique<MelFilterbank>();
+    auto status = mel_filterbank_->Initialize(
+        other.config_.GetFftBins(), other.config_.GetSampleRateHz(),
+        other.config_.GetNumMelBins(), other.config_.GetMelLowHz(),
+        other.config_.GetMelHighHz());
+    if (!status.ok()) {
+      ABSL_LOG(ERROR) << "Failed to initialize mel filterbank: " << status;
+    }
+  }
+
+  // Copy assignment operator for cloning the audio preprocessor.
+  AudioPreprocessorMiniAudio& operator=(
+      const AudioPreprocessorMiniAudio& other) {
+    config_ = other.config_;
+    mel_filterbank_ = std::make_unique<MelFilterbank>();
+    auto status = mel_filterbank_->Initialize(
+        other.config_.GetFftBins(), other.config_.GetSampleRateHz(),
+        other.config_.GetNumMelBins(), other.config_.GetMelLowHz(),
+        other.config_.GetMelHighHz());
+    if (!status.ok()) {
+      ABSL_LOG(ERROR) << "Failed to initialize mel filterbank: " << status;
+    }
+    input_queue_ = other.input_queue_;
+    samples_to_next_step_ = other.samples_to_next_step_;
+    return *this;
   }
 
  private:
@@ -78,7 +117,12 @@ class AudioPreprocessorMiniAudio : public AudioPreprocessor {
       : config_(config),
         mel_filterbank_(std::move(mel_filterbank)),
         input_queue_(std::vector<float>()) {
-    samples_to_next_step_ = config_.GetFrameLength();
+    if (config.GetSemicausalPadding()) {
+      samples_to_next_step_ = config.GetFrameLength() - config.GetHopLength();
+      input_queue_.resize(config.GetHopLength(), 0.0f);
+    } else {
+      samples_to_next_step_ = config.GetFrameLength();
+    }
   }
 
   absl::Status PcmFramesToSpectrogram(absl::Span<const float> pcm_frames,

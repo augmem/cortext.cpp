@@ -1,0 +1,49 @@
+{
+  "dataset": "RAVDESS",
+  "embedding_dim": 256,
+  "encoder": "AIST/ES-AIST via cortext_aist_audio_embedder",
+  "generated_by": "tools/centroid_vectors/build_aist_sliced_centroids.py",
+  "labels": {
+    "anger": {
+      "file": "anger_256.npy",
+      "source_count": 192
+    },
+    "fear": {
+      "file": "fear_256.npy",
+      "source_count": 192
+    },
+    "joy": {
+      "file": "joy_256.npy",
+      "source_count": 192
+    },
+    "love": {
+      "file": "love_256.npy",
+      "source_count": 0
+    },
+    "neutral": {
+      "file": "neutral_256.npy",
+      "source_count": 96
+    },
+    "sadness": {
+      "file": "sadness_256.npy",
+      "source_count": 192
+    },
+    "surprise": {
+      "file": "surprise_256.npy",
+      "source_count": 192
+    }
+  },
+  "slice": [
+    0,
+    256
+  ],
+  "source": "data/ravdess",
+  "source_meta": {
+    "bytes": 798817403,
+    "exists": true,
+    "files": 1441,
+    "path": "data/ravdess",
+    "sha256": "848daf586b0ec4b4ab6441ef91b626c7047c8a11dfee272d188d037d2aba04e2"
+  },
+  "timestamp": "2026-05-05T02:48:20Z"
+}

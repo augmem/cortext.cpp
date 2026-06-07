@@ -19,6 +19,7 @@
 // being destroyed.
 #include <cstddef>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <string>
 #include <utility>
@@ -48,8 +49,11 @@ enum class ModelType {
   kTfLiteAudioAdapter = 10,
   kTfLiteEndOfAudio = 6,
   kTfLiteVisionAdapter = 7,
+  kTfLiteEndOfVision = 12,  // The end of vision token model.
   kTfLiteVisionEncoder = 8,
   kArtisanTextDecoder = 11,  // The text decoder model for the artisan gpu.
+  kTfLiteMtpDrafter = 13,    // The MTP drafter model.
+  kTfLiteMtpAux = 14,        // The MTP auxiliary model.
 };
 
 // Utility function to convert a string to ModelType. It's case insensitive.
@@ -75,10 +79,16 @@ inline absl::StatusOr<ModelType> StringToModelType(
     return ModelType::kTfLiteEndOfAudio;
   } else if (lower_case_model_type_str == "tf_lite_vision_adapter") {
     return ModelType::kTfLiteVisionAdapter;
+  } else if (lower_case_model_type_str == "tf_lite_end_of_vision") {
+    return ModelType::kTfLiteEndOfVision;
   } else if (lower_case_model_type_str == "tf_lite_vision_encoder") {
     return ModelType::kTfLiteVisionEncoder;
   } else if (lower_case_model_type_str == "tf_lite_artisan_text_decoder") {
     return ModelType::kArtisanTextDecoder;
+  } else if (lower_case_model_type_str == "tf_lite_mtp_drafter") {
+    return ModelType::kTfLiteMtpDrafter;
+  } else if (lower_case_model_type_str == "tf_lite_mtp_aux") {
+    return ModelType::kTfLiteMtpAux;
   } else {
     return absl::InvalidArgumentError(
         absl::StrCat("Unknown model type: ", model_type_str));
@@ -106,10 +116,16 @@ inline std::string ModelTypeToString(ModelType model_type) {
       return "TF_LITE_END_OF_AUDIO";
     case ModelType::kTfLiteVisionAdapter:
       return "TF_LITE_VISION_ADAPTER";
+    case ModelType::kTfLiteEndOfVision:
+      return "TF_LITE_END_OF_VISION";
     case ModelType::kTfLiteVisionEncoder:
       return "TF_LITE_VISION_ENCODER";
     case ModelType::kArtisanTextDecoder:
       return "TF_LITE_ARTISAN_TEXT_DECODER";
+    case ModelType::kTfLiteMtpDrafter:
+      return "TF_LITE_MTP_DRAFTER";
+    case ModelType::kTfLiteMtpAux:
+      return "TF_LITE_MTP_AUX";
     case ModelType::kUnknown:
       return "UNKNOWN";
     default:
@@ -158,8 +174,14 @@ class ModelResources {
   virtual std::optional<std::string> GetTFLiteModelBackendConstraint(
       ModelType model_type) = 0;
 
-  // Returns the tokenizer.
-  virtual absl::StatusOr<Tokenizer*> GetTokenizer() = 0;
+  // Returns the TFLite model prefer activation type. When there is no
+  // prefer activation type for the given model type, it will return an
+  // nullopt.
+  virtual std::optional<std::string> GetTFLiteModelPreferActivationType(
+      ModelType model_type) = 0;
+
+  // Builds a tokenizer instance from the model and returns it.
+  virtual absl::StatusOr<std::unique_ptr<Tokenizer>> GetTokenizer() = 0;
 
   // Returns the llm metadata.
   virtual absl::StatusOr<const proto::LlmMetadata*> GetLlmMetadata() = 0;

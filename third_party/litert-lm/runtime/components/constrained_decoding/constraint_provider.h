@@ -18,8 +18,8 @@
 #include <memory>
 
 #include "absl/status/statusor.h"  // from @com_google_absl
-#include "absl/strings/string_view.h"  // from @com_google_absl
 #include "runtime/components/constrained_decoding/constraint.h"
+#include "runtime/components/constrained_decoding/constraint_provider_config.h"
 
 namespace litert::lm {
 
@@ -27,9 +27,9 @@ namespace litert::lm {
 // maintained by the engine across multiple sessions of the same model.
 class ConstraintProvider {
  public:
-  // Creates a constraint from the given regex.
+  // Creates a constraint from the given constraint argument.
   virtual absl::StatusOr<std::unique_ptr<Constraint>> CreateConstraint(
-      absl::string_view) const = 0;
+      ConstraintArg constraint_arg) const = 0;
 
   virtual ~ConstraintProvider() = default;
 };

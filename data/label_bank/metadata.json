@@ -1,0 +1,8 @@
+{
+  "count": 6478,
+  "embedding_dim": 256,
+  "generated_by": "cortext/tools/label_bank_generator",
+  "labels_file": "labels.jsonl",
+  "source": "data/label_bank/hf_labels.txt",
+  "timestamp": "2025-12-31T05:36:46Z"
+}

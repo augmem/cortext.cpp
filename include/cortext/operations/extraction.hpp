@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <optional>
@@ -36,6 +37,16 @@ struct ExtractedFact
   std::optional<std::uint64_t> valid_end_ts;
 };
 
+/// @brief Source payload available to a consolidation extraction request.
+struct ExtractionSourceBlob
+{
+  std::vector<unsigned char> bytes;
+  std::string modality;
+  std::string mime;
+  int sample_rate = 0;
+  std::size_t num_samples = 0;
+};
+
 /// @brief Request for external LLM extraction.
 ///
 /// Created from clustered source memories for clusters meeting
@@ -47,6 +58,8 @@ struct ExtractionRequest
   std::string summary_id;
   std::string summary_text;
   std::vector<std::string> source_texts;
+  std::vector<std::string> current_labels;
+  std::vector<ExtractionSourceBlob> source_blobs;
   int cluster_size;
   uint64_t created_at;
 };

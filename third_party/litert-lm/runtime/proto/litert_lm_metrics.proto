@@ -1,0 +1,66 @@
+// Copyright 2026 The ODML Authors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+syntax = "proto3";
+
+package litert.lm.proto;
+
+import "runtime/proto/engine.proto";
+
+option java_package = "com.google.litert.lm.proto";
+option java_outer_classname = "LitertLmMetricsProto";
+option java_multiple_files = true;
+
+message BenchmarkTurnData {
+  int64 duration_us = 1;
+  int64 num_tokens = 2;
+  double tokens_per_second = 3;
+}
+
+// Metrics for LiteRtLm. This is a proto version of the LitertLmMetrics struct
+// in ../engine/litert_lm_lib.h.
+message LitertLmMetrics {
+  // Parameters used to configure the benchmarking process.
+  BenchmarkParams benchmark_params = 1;
+
+  // Durations of the init phases in microseconds mapped by phase name. Phase
+  // names are defined in BenchmarkInfo::InitPhase.
+  map<string, int64> init_phase_durations_us = 2;
+
+  // Durations of the mark phases in microseconds mapped by mark name. Mark
+  // names are defined by calls to BenchmarkInfo::TimeMarkDelta.
+  map<string, int64> mark_durations_us = 3;
+
+  // Data for each prefill turn.
+  repeated BenchmarkTurnData prefill_turns = 4;
+
+  // Data for each decode turn.
+  repeated BenchmarkTurnData decode_turns = 5;
+
+  // Data for each text to token ids turn.
+  repeated BenchmarkTurnData text_to_token_ids_turns = 6;
+
+  // Time to first token in seconds.
+  double time_to_first_token_seconds = 7;
+
+  // Peak memory usage in megabytes.
+  float peak_mem_mb = 8;
+
+  // Peak private memory usage in megabytes.
+  float peak_private_mb = 9;
+}
+
+message LitertLmMetricsList {
+  repeated LitertLmMetrics metrics = 1;
+}

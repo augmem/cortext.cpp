@@ -21,7 +21,6 @@
 #include <memory>
 #include <optional>
 #include <string>
-#include <utility>
 #include <vector>
 
 #include "absl/base/nullability.h"  // from @com_google_absl
@@ -39,7 +38,10 @@
 #include "litert/cc/litert_model.h"  // from @litert
 #include "litert/cc/litert_options.h"  // from @litert
 #include "litert/cc/litert_tensor_buffer.h"  // from @litert
-#include "runtime/util/status_macros.h"  //NOLINT
+#include "runtime/util/status_macros.h"  // NOLINT
+#if defined(__ANDROID__)
+#include "litert/cc/options/litert_qualcomm_options.h"  // from @litert
+#endif
 
 namespace litert::lm {
 
@@ -242,21 +244,34 @@ absl::Status EmbeddingLookupText::LookupPrefill(absl::Span<const int> tokens,
 }
 
 absl::StatusOr<std::unique_ptr<EmbeddingLookupText>>
-EmbeddingLookupText::Create(const litert::Model* absl_nonnull model,
+EmbeddingLookupText::Create(litert::Environment& env,
+                            const litert::Model* absl_nonnull model,
                             std::optional<std::string> signature_key) {
-  LITERT_ASSIGN_OR_RETURN(auto env, ::litert::Environment::Create({}));
   auto handler = std::unique_ptr<EmbeddingLookupText>(
-      new EmbeddingLookupText(std::move(env), model, signature_key));
+      new EmbeddingLookupText(env, model, signature_key));
   RETURN_IF_ERROR(handler->Initialize());
   return handler;
 }
 
 absl::Status EmbeddingLookupText::Initialize() {
   LITERT_ASSIGN_OR_RETURN(auto options, Options::Create());
+#if defined(__ANDROID__)
+  options.SetHardwareAccelerators(litert::HwAccelerators::kNpu |
+                                  litert::HwAccelerators::kCpu);
+#else
   options.SetHardwareAccelerators(litert::HwAccelerators::kCpu);
+#endif
+#if defined(__ANDROID__)
+  LITERT_ASSIGN_OR_RETURN(::litert::qualcomm::QualcommOptions & qnn_opts,
+                          options.GetQualcommOptions());
+  qnn_opts.SetLogLevel(::litert::qualcomm::QualcommOptions::LogLevel::kOff);
+  qnn_opts.SetHtpPerformanceMode(
+      ::litert::qualcomm::QualcommOptions::HtpPerformanceMode::
+          kSustainedHighPerformance);
+#endif
 
-  LITERT_ASSIGN_OR_RETURN(compiled_model_,
-                          litert::CompiledModel::Create(env_, model_, options));
+  LITERT_ASSIGN_OR_RETURN(compiled_model_, litert::CompiledModel::Create(
+                                               env_, model_.Get(), options));
   LITERT_ASSIGN_OR_RETURN(auto signatures, model_.GetSignatures());
 
   if (signature_key_.has_value()) {
@@ -285,6 +300,7 @@ absl::Status EmbeddingLookupText::Initialize() {
     signature_key_ = signatures.front().Key();
   }
 
+  ABSL_LOG(INFO) << "EmbeddingLookupText::Initialize Creating input buffers";
   LITERT_ASSIGN_OR_RETURN(input_buffers_, compiled_model_->CreateInputBuffers(
                                               signature_key_.value()));
 
@@ -322,6 +338,11 @@ absl::Status EmbeddingLookupText::Initialize() {
   for (size_t i = 2; i < output_buffer_layout.Rank(); ++i) {
     floats_per_token_output_ *= output_buffer_layout.Dimensions()[i];
   }
+
+  ABSL_LOG(INFO) << "EmbeddingLookupText initialized: "
+                 << "signature=" << signature_key_.value_or("default")
+                 << ", rank=" << output_buffer_layout.Rank()
+                 << ", floats_per_token=" << floats_per_token_output_;
 
   // Initialize the default embedding vector to be the embedding of token 0.
   default_embedding_vector_.resize(floats_per_token_output_);

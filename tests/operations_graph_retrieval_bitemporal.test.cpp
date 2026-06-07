@@ -8,6 +8,8 @@
 #include <cortext/processor.hpp>
 #include <cortext/processor/operation_set.hpp>
 #include <cortext/store/sqlite_store.hpp>
+#include <cortext/store/utils.hpp>
+#include <algorithm>
 #include <sstream>
 
 using namespace cortext;
@@ -47,11 +49,27 @@ MakeSignal (const Eigen::VectorXf &embedding, std::uint64_t ts)
   return s;
 }
 
+Signal
+MakeTextSignal (const Eigen::VectorXf &embedding, const std::string &text,
+                std::uint64_t ts)
+{
+  Signal s = MakeSignal (embedding, ts);
+  s.modality = "text";
+  s.mimetype = "text/plain";
+  s.payload = std::vector<unsigned char> (text.begin (), text.end ());
+  return s;
+}
+
 class ForceRetrievalGateOp : public IOperation
 {
 public:
+  explicit ForceRetrievalGateOp (std::string wm_text = {})
+      : wm_text_ (std::move (wm_text))
+  {
+  }
+
   void
-  Execute (OperationContext &ctx, Transaction & /*tx*/) const override
+  Execute (OperationContext &ctx, Transaction &tx) const override
   {
     ctx.SetShouldCheckRetrieval (true);
     auto &p_ctx = ctx.GetProcessorContext ();
@@ -62,7 +80,34 @@ public:
     auto &acc = p_ctx.accumulator_states[ctx.GetSignal ().source_id];
     acc.mu_acc = ctx.GetSignal ().embedding;
     acc.c_t = ctx.GetSignal ().embedding;
+    if (!wm_text_.empty ())
+      {
+        const std::vector<unsigned char> payload (wm_text_.begin (),
+                                                  wm_text_.end ());
+        auto rows = tx.Execute ("SELECT objstore_put(?1) AS id", { payload });
+        REQUIRE_FALSE (rows.empty ());
+        const auto blob_id = cortext::store::BlobFromAny (rows[0].at ("id"));
+        REQUIRE_FALSE (blob_id.empty ());
+
+        ProcessorContext::WMSlot slot;
+        slot.memory_id = 900000LL;
+        slot.source_id = "chat/user";
+        slot.modality = "text";
+        slot.strength = 1.0;
+        SignalRecord record;
+        record.timestamp = ctx.GetSignal ().timestamp > 0
+                               ? ctx.GetSignal ().timestamp - 1
+                               : 0;
+        record.modality = "text";
+        record.mime = "text/plain";
+        record.blob_id = blob_id;
+        slot.signal_records.push_back (std::move (record));
+        p_ctx.wm_slots.push_back (std::move (slot));
+      }
   }
+
+private:
+  std::string wm_text_;
 };
 
 void
@@ -155,7 +200,9 @@ RunRetrieval (std::shared_ptr<Store> store, const Eigen::VectorXf &query,
               operations::temporal::RetrievalMode mode,
               std::optional<std::uint64_t> retrieval_ts,
               std::optional<operations::temporal::RetrievalAblationOverride>
-                  ablation_override = std::nullopt)
+                  ablation_override = std::nullopt,
+              const std::string &query_text = {},
+              const std::string &working_memory_text = {})
 {
   SignalProcessor::Config cfg;
   cfg.focus = 1.0;
@@ -164,7 +211,7 @@ RunRetrieval (std::shared_ptr<Store> store, const Eigen::VectorXf &query,
   cortext::testing::RequireEncoder (cfg);
 
   auto ops = std::make_unique<OperationSet> (
-      std::make_unique<ForceRetrievalGateOp> (),
+      std::make_unique<ForceRetrievalGateOp> (working_memory_text),
       std::make_unique<operations::GraphAugmentedRetrieveCandidates> ());
   SignalProcessor processor (cfg, store, std::move (ops));
 
@@ -176,7 +223,9 @@ RunRetrieval (std::shared_ptr<Store> store, const Eigen::VectorXf &query,
       ablation_guard.emplace (*ablation_override);
     }
   operations::retrieval_debug::ClearLastSelectedEmbeddingOrder ();
-  (void)processor.Process (MakeSignal (query, signal_ts));
+  (void)processor.Process (query_text.empty ()
+                               ? MakeSignal (query, signal_ts)
+                               : MakeTextSignal (query, query_text, signal_ts));
   return operations::retrieval_debug::GetLastSelectedEmbeddingOrder ();
 }
 
@@ -353,6 +402,115 @@ TEST_CASE ("Graph retrieval fact-off ablation removes fact-linked rescue",
   REQUIRE (ranked.front ().fact_stale_penalty == 0.0);
 }
 
+TEST_CASE ("Graph retrieval text-seeds source-backed fact evidence when fact vectors miss",
+           "[operations][graph][facts]")
+{
+  auto unique_store = SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<Store> (std::move (unique_store));
+  cortext::testing::InitializeCoreSchema (*store);
+
+  const Eigen::VectorXf query = MakeVec (1.0f, 0.0f);
+  SeedMemoryWithEmbedding (*store, 1LL, 1LL, MakeVec (0.0f, 1.0f),
+                           "amelia-gave-money-source", 5000LL);
+  for (long long i = 0; i < 40; ++i)
+    {
+      const long long fact_id = 1000LL + i;
+      const long long embedding_id = 2000LL + i;
+      cortext::testing::SeedEmbeddingV2 (*store, embedding_id,
+                                         ToFloatVec (query), 7000LL + i);
+      InsertFactAssertion (*store, fact_id, "Alice", "likes", "tea",
+                           "alice", "likes", "tea", 5000LL, std::nullopt,
+                           7000LL + i, std::nullopt, 0.90, 1LL);
+      InsertFactCache (*store, fact_id, embedding_id, "Alice likes tea", true,
+                       5000LL, std::nullopt, 7000LL + i, std::nullopt,
+                       8000LL + i);
+    }
+
+  cortext::testing::SeedEmbeddingV2 (*store, 3000LL,
+                                     ToFloatVec (MakeVec (0.0f, 1.0f)),
+                                     9000LL);
+  InsertFactAssertion (*store, 500LL, "Amelia", "gave", "money", "amelia",
+                       "gave", "money", 5000LL, std::nullopt, 9000LL,
+                       std::nullopt, 0.95, 1LL);
+  InsertFactCache (*store, 500LL, 3000LL, "Amelia gave money", true, 5000LL,
+                   std::nullopt, 9000LL, std::nullopt, 9000LL);
+  LinkFactEvidence (*store, 500LL, 1LL, "episodic", 1.0);
+
+  const auto order = RunRetrieval (
+      store, query, 10000ULL, operations::temporal::RetrievalMode::Current,
+      10000ULL, std::nullopt, "Who gave money?");
+
+  REQUIRE_FALSE (order.empty ());
+  const auto summary = operations::retrieval_debug::GetLastRetrievalSummary ();
+  REQUIRE (summary.text_query_token_count > 0);
+  REQUIRE (summary.text_query_wm_slots > 0);
+  REQUIRE (summary.text_query_wm_chars == 0);
+  REQUIRE (summary.fact_seed_count > 0);
+  REQUIRE (summary.candidate_fact_link_memory_count > 0);
+
+  const auto &ranked = operations::retrieval_debug::GetLastRankedCandidates ();
+  const auto source = std::find_if (
+      ranked.begin (), ranked.end (), [] (const auto &candidate) {
+        return candidate.memory_id == 1LL;
+      });
+  REQUIRE (source != ranked.end ());
+  REQUIRE (source->linked_fact_count > 0);
+  REQUIRE (source->fact_boost > 0.0);
+}
+
+TEST_CASE ("Graph retrieval text routes use bounded working memory context",
+           "[operations][graph][facts]")
+{
+  cortext::testing::ScopedEnvVar disable_source_expansion (
+      "CORTEXT_DISABLE_SOURCE_SEED_GRAPH_EXPANSION", "1");
+  auto unique_store = SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<Store> (std::move (unique_store));
+  cortext::testing::InitializeCoreSchema (*store);
+
+  const Eigen::VectorXf query = MakeVec (1.0f, 0.0f);
+  SeedMemoryWithEmbedding (*store, 1LL, 1LL, MakeVec (0.0f, 1.0f),
+                           "amelia-gave-money-source", 5000LL);
+  SeedMemoryWithEmbedding (*store, 2LL, 2LL, MakeVec (1.0f, 0.0f),
+                           "semantic-distractor", 5000LL);
+
+  cortext::testing::SeedEmbeddingV2 (*store, 3000LL,
+                                     ToFloatVec (MakeVec (0.0f, 1.0f)),
+                                     9000LL);
+  InsertFactAssertion (*store, 500LL, "Amelia", "gave", "money", "amelia",
+                       "gave", "money", 5000LL, std::nullopt, 9000LL,
+                       std::nullopt, 0.95, 1LL);
+  InsertFactCache (*store, 500LL, 3000LL, "Amelia gave money", true, 5000LL,
+                   std::nullopt, 9000LL, std::nullopt, 9000LL);
+  LinkFactEvidence (*store, 500LL, 1LL, "episodic", 1.0);
+
+  const auto without_wm = RunRetrieval (
+      store, query, 10000ULL, operations::temporal::RetrievalMode::Current,
+      10000ULL, std::nullopt, "What happened?");
+  REQUIRE_FALSE (without_wm.empty ());
+  REQUIRE (without_wm.front () == 2LL);
+
+  const auto with_wm = RunRetrieval (
+      store, query, 10000ULL, operations::temporal::RetrievalMode::Current,
+      10000ULL, std::nullopt, "What happened?",
+      "We were just talking about Amelia and the money.");
+  REQUIRE_FALSE (with_wm.empty ());
+
+  const auto summary = operations::retrieval_debug::GetLastRetrievalSummary ();
+  REQUIRE (summary.text_query_token_count > 0);
+  REQUIRE (summary.text_query_wm_slots > 0);
+  REQUIRE (summary.text_query_wm_chars > 0);
+  REQUIRE (summary.fact_seed_count > 0);
+  REQUIRE (summary.candidate_fact_link_memory_count > 0);
+  const auto &ranked = operations::retrieval_debug::GetLastRankedCandidates ();
+  const auto source = std::find_if (
+      ranked.begin (), ranked.end (), [] (const auto &candidate) {
+        return candidate.memory_id == 1LL;
+      });
+  REQUIRE (source != ranked.end ());
+  REQUIRE (source->linked_fact_count > 0);
+  REQUIRE (source->fact_boost > 0.0);
+}
+
 TEST_CASE ("Graph retrieval current-only ablation collapses historical mode",
            "[operations][graph][facts]")
 {
@@ -398,6 +556,8 @@ TEST_CASE ("Graph retrieval current-only ablation collapses historical mode",
 TEST_CASE ("Graph retrieval any-fact-match provenance can lift unlinked distractor",
            "[operations][graph][facts]")
 {
+  cortext::testing::ScopedEnvVar disable_source_expansion (
+      "CORTEXT_DISABLE_SOURCE_SEED_GRAPH_EXPANSION", "1");
   auto unique_store = SQLiteStore::Create (":memory:");
   auto store = std::shared_ptr<Store> (std::move (unique_store));
   cortext::testing::InitializeCoreSchema (*store);

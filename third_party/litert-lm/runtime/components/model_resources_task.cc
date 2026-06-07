@@ -33,7 +33,7 @@
 #include "runtime/components/tokenizer.h"
 #include "runtime/util/metadata_util.h"
 #include "runtime/util/model_asset_bundle_resources.h"
-#include "runtime/util/status_macros.h"  // NOLINT
+#include "runtime/util/status_macros.h"
 
 namespace litert::lm {
 
@@ -75,22 +75,17 @@ absl::StatusOr<const litert::Model*> ModelResourcesTask::GetTFLiteModel(
   return model_map_[model_type].get();
 }
 
-absl::StatusOr<Tokenizer*> ModelResourcesTask::GetTokenizer() {
-  if (tokenizer_ == nullptr) {
-    ASSIGN_OR_RETURN(auto string_view,  // NOLINT
-                     model_asset_bundle_resources_->GetFile("TOKENIZER_MODEL"));
-    ASSIGN_OR_RETURN(auto tokenizer,  // NOLINT
-                     SentencePieceTokenizer::CreateFromBuffer(string_view));
-    tokenizer_ = std::move(tokenizer);
-  }
-  return tokenizer_.get();
+absl::StatusOr<std::unique_ptr<Tokenizer>> ModelResourcesTask::GetTokenizer() {
+  ASSIGN_OR_RETURN(auto string_view,
+                   model_asset_bundle_resources_->GetFile("TOKENIZER_MODEL"));
+  return SentencePieceTokenizer::CreateFromBuffer(string_view);
 }
 
 absl::StatusOr<const proto::LlmMetadata*> ModelResourcesTask::GetLlmMetadata() {
   if (llm_metadata_ == nullptr) {
-    ASSIGN_OR_RETURN(auto string_view,  // NOLINT
+    ASSIGN_OR_RETURN(auto string_view,
                      model_asset_bundle_resources_->GetFile("METADATA"));
-    ASSIGN_OR_RETURN(auto llm_metadata,  // NOLINT
+    ASSIGN_OR_RETURN(auto llm_metadata,
                      ExtractOrConvertLlmMetadata(string_view));
     llm_metadata_ =
         std::make_unique<proto::LlmMetadata>(std::move(llm_metadata));

@@ -15,6 +15,7 @@
 #ifndef THIRD_PARTY_ODML_LITERT_LM_RUNTIME_EXECUTOR_LLM_LITERT_COMPILED_MODEL_EXECUTOR_H_
 #define THIRD_PARTY_ODML_LITERT_LM_RUNTIME_EXECUTOR_LLM_LITERT_COMPILED_MODEL_EXECUTOR_H_
 
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -24,7 +25,6 @@
 
 #include "absl/base/nullability.h"  // from @com_google_absl
 #include "absl/container/flat_hash_map.h"  // from @com_google_absl
-#include "absl/log/absl_log.h"  // from @com_google_absl
 #include "absl/status/status.h"  // from @com_google_absl
 #include "absl/status/statusor.h"  // from @com_google_absl
 #include "absl/strings/string_view.h"  // from @com_google_absl
@@ -32,6 +32,7 @@
 #include "litert/cc/litert_compiled_model.h"  // from @litert
 #include "litert/cc/litert_environment.h"  // from @litert
 #include "litert/cc/litert_model.h"  // from @litert
+#include "litert/cc/litert_options.h"  // from @litert
 #include "litert/cc/litert_tensor_buffer.h"  // from @litert
 #include "runtime/components/embedding_lookup/embedding_lookup_manager.h"
 #include "runtime/components/model_resources.h"
@@ -42,6 +43,8 @@
 #include "runtime/executor/llm_executor_io_types.h"
 #include "runtime/executor/llm_executor_processed_tokens.h"
 #include "runtime/executor/llm_executor_settings.h"
+#include "runtime/executor/llm_litert_mtp_drafter.h"
+#include "runtime/executor/llm_processed_context.h"
 
 namespace litert::lm {
 
@@ -63,11 +66,11 @@ class LlmLiteRtCompiledModelExecutorBase : public LlmExecutor {
 
   // Output APIs:
   // Basic API to trigger the "decode" process.
-  absl::Status Decode(::litert::TensorBuffer& output_tokens) override;
+  absl::StatusOr<std::vector<std::vector<int>>> Decode() override;
 
   // Advanced API to allow customized query parameters.
-  absl::Status Decode(::litert::TensorBuffer& output_tokens,
-                      const ExecutorDecodeParams& decode_params) override;
+  absl::StatusOr<std::vector<std::vector<int>>> Decode(
+      const ExecutorDecodeParams& decode_params) override;
 
   // Basic API to trigger the "decode" process but without sampling.
   // Input is token ids with shape `[batch, sequence_length]`
@@ -75,12 +78,12 @@ class LlmLiteRtCompiledModelExecutorBase : public LlmExecutor {
   // TODO: b/355310550 - Shall we change the function naming here to not
   // overload Decode?
   absl::Status Decode(const ExecutorInputs& inputs,
-                      ::litert::TensorBuffer& output_logits) override;
+                      TensorBuffer& output_logits) override;
 
-  absl::StatusOr<::litert::TensorBuffer> DecodeLogits(
+  absl::StatusOr<TensorBuffer> DecodeLogits(
       const ExecutorInputs& inputs) override;
 
-  absl::StatusOr<::litert::TensorBuffer> DecodeLogits(
+  absl::StatusOr<TensorBuffer> DecodeLogits(
       const ExecutorInputs& inputs, const ExecutorDecodeParams& decode_params);
 
   absl::string_view ExecutorBackendName() const override {
@@ -92,13 +95,20 @@ class LlmLiteRtCompiledModelExecutorBase : public LlmExecutor {
     return executor_settings_;
   }
 
+  // Update executor settings.
+  absl::Status UpdateExecutorSettings(
+      const LlmExecutorSettings& executor_settings) override;
+
   // Gets the current step of the executor.
   // Public API, the return value is the current step that user expects (e.g.
   // users prefill 100 tokens, then they expect the current step to be 100). It
   // is different from the internal current step.
   absl::StatusOr<int> GetCurrentStep() const override {
-    return processed_tokens_.TokenCount();
+    return llm_context_->runtime_state().current_step;
   }
+
+  // Sets the current step of the executor.
+  absl::Status SetCurrentStep(int new_step) override;
 
   // Resets all of the internal states.
   absl::Status Reset() override;
@@ -106,38 +116,40 @@ class LlmLiteRtCompiledModelExecutorBase : public LlmExecutor {
   absl::StatusOr<int> GetVocabSize() override;
 
   // Initializes the sampler.
-  absl::Status InitializeSampler();
+  // `logits_data_type` is optional because the executor usually knows the
+  // logits data type from initialization. If it is not provided, the executor
+  // uses the internally stored `logits_data_type_`.
+  absl::Status InitializeSampler(
+      std::optional<ActivationDataType> logits_data_type = std::nullopt);
 
   using LogitsDataType = ActivationDataType;
 
   const ProcessedTokens& processed_tokens_for_testing() const {
-    return processed_tokens_;
+    return llm_context_->processed_context().processed_tokens();
   }
 
  protected:
   LlmLiteRtCompiledModelExecutorBase(
-      LlmExecutorSettings executor_settings, ::litert::Environment& env,
-      const ::litert::Model* absl_nonnull model,
-      ::litert::CompiledModel compiled_model,
-      absl::flat_hash_map<absl::string_view, ::litert::TensorBuffer>
-          decode_input_buffers,
-      absl::flat_hash_map<absl::string_view, ::litert::TensorBuffer>
+      LlmExecutorSettings executor_settings, Environment& env,
+      const Model* absl_nonnull model,
+      std::unique_ptr<CompiledModel> compiled_model,
+      absl::flat_hash_map<absl::string_view, TensorBuffer> decode_input_buffers,
+      absl::flat_hash_map<absl::string_view, TensorBuffer>
           decode_output_buffers,
-      absl::flat_hash_map<absl::string_view, ::litert::TensorBuffer>
+      absl::flat_hash_map<absl::string_view, TensorBuffer>
           input_kv_cache_buffers,
-      absl::flat_hash_map<absl::string_view, ::litert::TensorBuffer>
+      absl::flat_hash_map<absl::string_view, TensorBuffer>
           output_kv_cache_buffers,
-      std::optional<
-          absl::flat_hash_map<absl::string_view, ::litert::TensorBuffer>>
+      std::optional<absl::flat_hash_map<absl::string_view, TensorBuffer>>
           decode_input_kv_cache_buffers,
-      std::optional<
-          absl::flat_hash_map<absl::string_view, ::litert::TensorBuffer>>
+      std::optional<absl::flat_hash_map<absl::string_view, TensorBuffer>>
           decode_output_kv_cache_buffers,
       ModelSignatures signatures, int output_batch_size,
       std::string weight_cache_path,
       std::unique_ptr<EmbeddingLookupManager> embedding_lookup,
       std::unique_ptr<EmbeddingLookupManager> per_layer_embedding_lookup,
-      bool use_fp16_precision, LogitsDataType logits_data_type)
+      bool use_fp16_precision, LogitsDataType logits_data_type,
+      std::unique_ptr<LlmLiteRtMtpDrafter> mtp_drafter)
       : executor_settings_(std::move(executor_settings)),
         env_(env),
         model_(*model),
@@ -151,14 +163,43 @@ class LlmLiteRtCompiledModelExecutorBase : public LlmExecutor {
         decode_kv_cache_buffers_1_(std::move(decode_input_kv_cache_buffers)),
         decode_kv_cache_buffers_2_(std::move(decode_output_kv_cache_buffers)),
         signatures_(signatures),
-        output_batch_size_(output_batch_size),
         weight_cache_path_(std::move(weight_cache_path)),
         embedding_lookup_(std::move(embedding_lookup)),
         per_layer_embedding_lookup_(std::move(per_layer_embedding_lookup)),
         use_fp16_precision_(use_fp16_precision),
-        logits_data_type_(logits_data_type) {}
+        logits_data_type_(logits_data_type),
+        mtp_drafter_(std::move(mtp_drafter)) {
+    auto processed_context = std::make_unique<LlmProcessedContext>(
+        std::nullopt, absl::flat_hash_map<absl::string_view, TensorBuffer>(),
+        ProcessedTokens());
+    auto runtime_config = std::make_unique<RuntimeConfig>();
+    runtime_config->output_heads = output_batch_size;
+    auto runtime_state = std::make_unique<RuntimeState>();
+    llm_context_ = std::make_unique<LlmContext>(std::move(processed_context),
+                                                std::move(runtime_config),
+                                                std::move(runtime_state));
+  }
 
  protected:
+  // Attempts to create a compiled model for the MTP drafter.
+  // Returns a unique_ptr to the compiled model if the resource is found, or
+  // nullptr if the drafter model is optional and missing.
+  static absl::StatusOr<std::unique_ptr<CompiledModel>>
+  CreateMtpDrafterCompiledModel(ModelResources& resources, Environment& lrt_env,
+                                Options& compilation_options);
+
+  // Rolls back the processed tokens to the current step.
+  absl::Status RollBackProcessedTokens();
+
+  // Swaps the input tensors before Sampling when the sampler handles input.
+  // Current input_pos and mask tensors in decode_input_buffers_ are swapped
+  // with decode_prev_input_pos_ and decode_prev_mask_, i.e. current ones become
+  // previous ones, and new current ones will be calculated from the previous
+  // ones by the sampler.
+  absl::Status SwapSamplerInputTensors();
+  // Sets or resets the input tensors and inference function for the sampler.
+  absl::Status SetSamplerInputHandling(bool reset);
+
   // Samples output logits and write to ids_tensor.
   absl::Status SampleLogits(const TensorBuffer& logits,
                             TensorBuffer& ids_tensor);
@@ -167,19 +208,34 @@ class LlmLiteRtCompiledModelExecutorBase : public LlmExecutor {
   // with a certain length synchronously or asynchronously.
   absl::Status PrefillInternal(
       absl::string_view prefill_signature,
-      absl::flat_hash_map<absl::string_view /*input_name*/,
-                          ::litert::TensorBuffer>& prefill_input_buffers,
+      absl::flat_hash_map<absl::string_view /*input_name*/, TensorBuffer>&
+          prefill_input_buffers,
       absl::Span<const int> ids, bool async);
+
+  // Helper function of PrefillInternal to bind input/output tensors for prefill
+  // and run prefill signature.
+  absl::Status BindTensorsAndRunPrefill(
+      absl::string_view prefill_signature,
+      absl::flat_hash_map<absl::string_view /*input_name*/, TensorBuffer>&
+          prefill_input_buffers,
+      bool async);
 
   // Decode internal implementation. Uses the specified 'token' as the input
   // token and uses the specified 'step' as the current time step.  The
   // logits from the decode step are stored in the 'logits' output buffer of
   // the transformer model when this function returns absl::OkStatus().
   virtual absl::Status DecodeInternal(
-      int step, const std::vector<std::shared_ptr<TokenData>>& token,
+      const std::vector<std::shared_ptr<TokenData>>& token,
       TensorBuffer& output_logits);
 
-  // Create Prefill input buffers for a given signature.
+  // Helper function of DecodeInternal to bind input/output tensors for decode
+  // and run decode signature.
+  absl::Status BindTensorsAndRunDecode(TensorBuffer* output_logits);
+  // Static version of BindTensorsAndRunDecode to be used as a callback for
+  // sampler.
+  static int BindTensorsAndRunDecodeStatic(void* arg);
+
+  // Creates Prefill input buffers for a given signature.
   absl::Status CreatePrefillInputBuffers(
       absl::string_view prefill_signature, int sequence_length,
       int context_length,
@@ -189,8 +245,11 @@ class LlmLiteRtCompiledModelExecutorBase : public LlmExecutor {
   // Fills the input buffer from the unprocessed token.
   absl::Status FillInputBufferWithToken(
       const std::vector<std::shared_ptr<TokenData>>& unprocessed_token,
-      ::litert::TensorBuffer& input_buffer,
-      bool is_per_layer_embedding = false);
+      TensorBuffer& input_buffer, bool is_per_layer_embedding = false);
+
+  // Prepares the first prefill step possibly after decode.
+  // When output_batch_size_ > 1, It selects only one set of KV cache buffers.
+  absl::Status PrepareFirstPrefillAfterDecode(int token_index_to_reduce);
 
   // Prepares the first decode step.
   // When output_batch_size_ > 1, It broadcasts KV cache buffers to
@@ -210,54 +269,44 @@ class LlmLiteRtCompiledModelExecutorBase : public LlmExecutor {
       const std::vector<std::shared_ptr<TokenData>>& token);
 
   LlmExecutorSettings executor_settings_;
-  ::litert::Environment& env_;
-  const ::litert::Model& model_;
-  ::litert::CompiledModel compiled_model_;
+  Environment& env_;
+  const Model& model_;
+  std::unique_ptr<CompiledModel> compiled_model_;
 
-  absl::flat_hash_map<absl::string_view, ::litert::TensorBuffer>
-      decode_input_buffers_;
-  absl::flat_hash_map<absl::string_view, ::litert::TensorBuffer>
-      decode_output_buffers_;
+  absl::flat_hash_map<absl::string_view, TensorBuffer> decode_input_buffers_;
+  absl::flat_hash_map<absl::string_view, TensorBuffer> decode_output_buffers_;
   // KV cache double buffers because some GPU backends can't allocate one buffer
   // for both read and write at the same time.
-  absl::flat_hash_map<absl::string_view, ::litert::TensorBuffer>
-      kv_cache_buffers_1_;
-  absl::flat_hash_map<absl::string_view, ::litert::TensorBuffer>
-      kv_cache_buffers_2_;
-  absl::flat_hash_map<absl::string_view, ::litert::TensorBuffer>*
-      input_kv_cache_buffers_;
-  absl::flat_hash_map<absl::string_view, ::litert::TensorBuffer>*
+  absl::flat_hash_map<absl::string_view, TensorBuffer> kv_cache_buffers_1_;
+  absl::flat_hash_map<absl::string_view, TensorBuffer> kv_cache_buffers_2_;
+  absl::flat_hash_map<absl::string_view, TensorBuffer>* input_kv_cache_buffers_;
+  absl::flat_hash_map<absl::string_view, TensorBuffer>*
       output_kv_cache_buffers_;
   // KV cache (double) buffers used during decode when output_batch_size_ > 1.
-  std::optional<absl::flat_hash_map<absl::string_view, ::litert::TensorBuffer>>
+  std::optional<absl::flat_hash_map<absl::string_view, TensorBuffer>>
       decode_kv_cache_buffers_1_;
-  std::optional<absl::flat_hash_map<absl::string_view, ::litert::TensorBuffer>>
+  std::optional<absl::flat_hash_map<absl::string_view, TensorBuffer>>
       decode_kv_cache_buffers_2_;
 
   // The signatures of the model.
   ModelSignatures signatures_;
 
-  // The sampled ids to use for external sampling.
-  // The layout is batch-major.
-  // e.g. for output_batch_size=2, the layout is:
-  // {batch_0_seq_0, batch_1_seq_0, batch_0_seq_1, batch_1_seq_1, ...}
-  std::vector<int> sampled_ids_;
-  // Output batch size for the sampled ids.
-  const int output_batch_size_;
-  // Whether decode has been run ever after prefill.
-  // TODO: b/409401231 - Make sure this state is session dependent.
-  bool ran_decode_ = false;
+  // The context of the executor, which contains
+  // 1. The configuration settings.
+  // 2. The internal states.
+  // 3. The processed tokens.(e.g. KVCache)
+  std::unique_ptr<LlmContext> llm_context_;
+
+  // Whether the executor needs to prepare the kvcache buffers before execution.
+  bool force_prepare_needed_ = false;
 
   // Sampler for sampling logits.
   // For now, only CPU sampler is supported.
   std::unique_ptr<Sampler> sampler_;
-
-  // Internal timestep.
-  int current_step_ = 0;
-
-  // Keeps track of processed tokens during the LLM execution. This also keeps
-  // track of the pending input token, if any.
-  ProcessedTokens processed_tokens_;
+  bool sampler_handles_input_ = true;
+  // Extra input tensors to swap for decode when sampler handles input tensors.
+  TensorBuffer decode_prev_input_pos_;
+  TensorBuffer decode_prev_mask_;
 
   // The path to the weight cache directory. Executor will take the ownership of
   // this path to maintain the path lifecycle.
@@ -275,6 +324,12 @@ class LlmLiteRtCompiledModelExecutorBase : public LlmExecutor {
   // The logits data type of the model, used to determine the data type of the
   // logits tensor for gpu sampling.
   LogitsDataType logits_data_type_;
+
+  // GPU optimized single buffer cache
+  bool gpu_optimized_single_buffer_cache_ = false;
+
+  // The MTP drafter model.
+  std::unique_ptr<LlmLiteRtMtpDrafter> mtp_drafter_;
 };
 
 // The static executor for the prefill-decode compiled model.
@@ -293,22 +348,19 @@ class LlmLiteRtCompiledModelExecutorStatic
 
  private:
   LlmLiteRtCompiledModelExecutorStatic(
-      LlmExecutorSettings executor_settings, ::litert::Environment& env,
-      const ::litert::Model* absl_nonnull model,
-      ::litert::CompiledModel compiled_model,
-      absl::flat_hash_map<absl::string_view, ::litert::TensorBuffer>
-          decode_input_buffers,
-      absl::flat_hash_map<absl::string_view, ::litert::TensorBuffer>
+      LlmExecutorSettings executor_settings, Environment& env,
+      const Model* absl_nonnull model,
+      std::unique_ptr<CompiledModel> compiled_model,
+      absl::flat_hash_map<absl::string_view, TensorBuffer> decode_input_buffers,
+      absl::flat_hash_map<absl::string_view, TensorBuffer>
           decode_output_buffers,
-      absl::flat_hash_map<absl::string_view, ::litert::TensorBuffer>
+      absl::flat_hash_map<absl::string_view, TensorBuffer>
           input_kv_cache_buffers,
-      absl::flat_hash_map<absl::string_view, ::litert::TensorBuffer>
+      absl::flat_hash_map<absl::string_view, TensorBuffer>
           output_kv_cache_buffers,
-      std::optional<
-          absl::flat_hash_map<absl::string_view, ::litert::TensorBuffer>>
+      std::optional<absl::flat_hash_map<absl::string_view, TensorBuffer>>
           decode_input_kv_cache_buffers,
-      std::optional<
-          absl::flat_hash_map<absl::string_view, ::litert::TensorBuffer>>
+      std::optional<absl::flat_hash_map<absl::string_view, TensorBuffer>>
           decode_output_kv_cache_buffers,
       SortedPrefillSignatureMap prefill_signature_map,
       ModelSignatures signatures, int output_batch_size,
@@ -317,7 +369,8 @@ class LlmLiteRtCompiledModelExecutorStatic
       std::unique_ptr<EmbeddingLookupManager> per_layer_embedding_lookup =
           nullptr,
       bool use_fp16_precision = true,
-      LogitsDataType logits_data_type = LogitsDataType::FLOAT32)
+      LogitsDataType logits_data_type = LogitsDataType::FLOAT32,
+      std::unique_ptr<LlmLiteRtMtpDrafter> mtp_drafter = nullptr)
       : LlmLiteRtCompiledModelExecutorBase(
             std::move(executor_settings), env, model, std::move(compiled_model),
             std::move(decode_input_buffers), std::move(decode_output_buffers),
@@ -327,16 +380,17 @@ class LlmLiteRtCompiledModelExecutorStatic
             std::move(decode_output_kv_cache_buffers), signatures,
             output_batch_size, std::move(weight_cache_path),
             std::move(embedding_lookup), std::move(per_layer_embedding_lookup),
-            use_fp16_precision, logits_data_type),
+            use_fp16_precision, logits_data_type, std::move(mtp_drafter)),
         prefill_signature_map_(std::move(prefill_signature_map)) {}
 
   SortedPrefillSignatureMap prefill_signature_map_;
   // Signature names are unique across all signatures in a model so it is safe
   // to refer to them by just their unique name.
-  absl::flat_hash_map<std::string /*prefill_signature_name*/,
-                      absl::flat_hash_map<absl::string_view /*input_name*/,
-                                          ::litert::TensorBuffer>>
+  absl::flat_hash_map<
+      std::string /*prefill_signature_name*/,
+      absl::flat_hash_map<absl::string_view /*input_name*/, TensorBuffer>>
       prefill_input_buffers_;
+  std::optional<bool> do_prefill_sync_;
 };
 
 // The dynamic executor for the prefill-decode compiled model.
@@ -356,12 +410,11 @@ class LlmLiteRtCompiledModelExecutorDynamic
 
  private:
   LlmLiteRtCompiledModelExecutorDynamic(
-      LlmExecutorSettings executor_settings, ::litert::Environment& env,
-      const ::litert::Model* absl_nonnull model,
-      ::litert::CompiledModel compiled_model,
-      absl::flat_hash_map<absl::string_view, ::litert::TensorBuffer>
-          decode_input_buffers,
-      absl::flat_hash_map<absl::string_view, ::litert::TensorBuffer>
+      LlmExecutorSettings executor_settings, Environment& env,
+      const Model* absl_nonnull model,
+      std::unique_ptr<CompiledModel> compiled_model,
+      absl::flat_hash_map<absl::string_view, TensorBuffer> decode_input_buffers,
+      absl::flat_hash_map<absl::string_view, TensorBuffer>
           decode_output_buffers,
       int prefill_chunk_size, int key_dynamic_dim_index,
       int value_dynamic_dim_index, int kv_increament_size,
@@ -373,7 +426,8 @@ class LlmLiteRtCompiledModelExecutorDynamic
       std::unique_ptr<EmbeddingLookupManager> per_layer_embedding_lookup =
           nullptr,
       bool use_fp16_precision = true,
-      LogitsDataType logits_data_type = LogitsDataType::FLOAT32)
+      LogitsDataType logits_data_type = LogitsDataType::FLOAT32,
+      std::unique_ptr<LlmLiteRtMtpDrafter> mtp_drafter = nullptr)
       : LlmLiteRtCompiledModelExecutorBase(
             std::move(executor_settings), env, model, std::move(compiled_model),
             std::move(decode_input_buffers), std::move(decode_output_buffers),
@@ -383,7 +437,7 @@ class LlmLiteRtCompiledModelExecutorDynamic
             /*decode_output_kv_cache_buffers=*/std::nullopt, signatures,
             output_batch_size, std::move(weight_cache_path),
             std::move(embedding_lookup), std::move(per_layer_embedding_lookup),
-            use_fp16_precision, logits_data_type),
+            use_fp16_precision, logits_data_type, std::move(mtp_drafter)),
         prefill_chunk_size_(prefill_chunk_size),
         key_dynamic_dim_index_(key_dynamic_dim_index),
         value_dynamic_dim_index_(value_dynamic_dim_index),
@@ -396,7 +450,7 @@ class LlmLiteRtCompiledModelExecutorDynamic
 
   // Extends the base class DecodeInternal to handle KV cache buffers.
   absl::Status DecodeInternal(
-      int step, const std::vector<std::shared_ptr<TokenData>>& token,
+      const std::vector<std::shared_ptr<TokenData>>& token,
       TensorBuffer& output_logits) override;
 
   int prefill_chunk_size_;

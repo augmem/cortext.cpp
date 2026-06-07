@@ -4,7 +4,7 @@ The consolidation system transforms episodic memories into semantic structures t
 
 ## Complementary Learning Systems Split (Hippocampus vs Cortex)
 
-Cortext implements a true **Complementary Learning Systems (CLS)** split. The episodic stream remains intact, but a separate **sparse index store** supports rapid binding and pattern completion (hippocampal analogue). Consolidation then transfers structure into the semantic graph and long-lived embeddings (cortical analogue) via replay.
+Cortext implements a **Complementary Learning Systems (CLS)-inspired** split. The episodic stream remains intact, but a separate **sparse index store** supports rapid binding and pattern completion (hippocampal analogue). Consolidation then transfers structure into the semantic graph and long-lived embeddings (cortical analogue) via replay.
 
 * **Episodic stream (hippocampus-like):** `memory_stream` of coherent units + full metadata.
 * **Index store (hippocampus-like):** sparse keys for fast binding, disambiguation, and pattern completion.
@@ -14,18 +14,17 @@ This split makes “episodic vs semantic” a functional distinction rather than
 
 ## Pattern Separation and Completion {#sec-pattern-separation}
 
-Each memory builds a **sparse key** for pattern separation. Retrieval can then perform **pattern completion** from partial cues.
+Each memory builds a deterministic **sparse key** for pattern separation. The current implementation uses the top absolute embedding dimensions as a compact signature, not a learned projection. Retrieval can then perform exact-key sparse seeding from partial cues; radius/Hamming expansion remains a planned extension rather than the active lookup path.
 
 ```
-proj ← W_sparse × e_rep          # learned projection
-key  ← topk_binary(proj, k = round(lerp(16, 64, F)))  # sparsify
+key  ← top_abs_dims(e_rep, k = round(lerp(16, 64, F)))  # deterministic sparse signature
 index_store[key].append(memory_id)
 ```
 
 Pattern completion from a partial cue uses the sparse key to seed retrieval:
 ```
-cue_key ← topk_binary(W_sparse × q_partial, k)
-seed_ids ← index_store.lookup(cue_key, radius = lerp(1, 3, S))
+cue_key ← top_abs_dims(q_partial, k)
+seed_ids ← index_store.lookup(cue_key)  # exact sparse-key lookup in current runtime
 ```
 
 These seeds are merged with vector and graph candidates, improving disambiguation when content similarity is ambiguous.
@@ -119,7 +118,7 @@ Low-scoring memories are marked for merging.
 
 Consolidation proceeds via **generative replay** rather than one-shot merges. Representative episodes are re-encoded and used to update semantic structures, reducing drift and preserving detail.
 
-**Summarization + labeling engine (deep mode):** Consolidation is the only stage that invokes a generative model. Deep mode resolves a local backend internally: **gemma-3n-e2b** through `third_party/litert_lm`, **LFM2/LFM2.5** through `llama.cpp` GGUFs, or a **mixed** path that uses Gemma for summarization and a Liquid GGUF for extraction. The Liquid resolver now prefers `LFM2.5-350M-GGUF` for extraction and `LFM2.5-1.2B-Instruct-GGUF` for summarization when present, defaulting to the local `Q4_K_M` checkpoints and accepting other bundled GGUF quantizations as fallbacks. Auto resolution now prefers the pure Liquid `LFM2.5/llama.cpp` path when those assets are present; the mixed path and Gemma path are fallbacks. All other operations remain embedding-only. **There is no extractive fallback**: if no deep backend is available, deep consolidation raises an error rather than silently degrading. Summarization failure affects only optional compression, not label extraction from the underlying memory cluster. After the prompt-technique ablations in [Section 9](#sec-extractor-prompt-ablation) and [Section 9](#sec-summarizer-prompt-ablation), the default local Liquid extraction prompt is now a short **few-shot durable** prompt, and the default local Liquid summarization prompt is now a **transcript few-shot** prompt. That combination keeps the local path fast while materially reducing schema/meta leakage and last-excerpt bias.
+**Summarization + labeling engine (deep mode):** Consolidation is the only stage that invokes a generative model. Deep mode resolves a local backend internally: **Gemma 4 E2B** through `third_party/litert_lm`, **LFM2/LFM2.5** through `llama.cpp` GGUFs, or a **mixed** path that uses Gemma 4 for summarization and a Liquid GGUF for extraction. Auto resolution now requires the local Gemma 4 E2B LiteRT model. The Liquid resolver remains available by explicit override and prefers `LFM2.5-350M-GGUF` for extraction and `LFM2.5-1.2B-Instruct-GGUF` for summarization when present, defaulting to the local `Q4_K_M` checkpoints and accepting other bundled GGUF quantizations as fallbacks. All other operations remain embedding-only. **There is no extractive fallback**: if no deep backend is available, deep consolidation raises an error rather than silently degrading. Summarization now creates compact retrieval-surface summary nodes when the summarizer is available, while destructive eviction remains storage-gated. After the prompt-technique ablations in [Section 9](#sec-extractor-prompt-ablation) and [Section 9](#sec-summarizer-prompt-ablation), the default local Liquid extraction prompt is now a short **few-shot durable** prompt, and the default local Liquid summarization prompt is now a **transcript few-shot** prompt for the override path. The production default relies on Gemma 4 for multimodal label refinement and summarization.
 
 ## Shallow Consolidation (Embedding‑Only)
 
@@ -139,7 +138,7 @@ label_attach_threshold = clamp(lerp(0.30, 0.60, F̃) × lerp(1.0, 1.1, T), 0.15,
 For each cluster centroid, we compute cosine similarity to existing label embeddings,
 retain candidates above the threshold, and attach the top‑K labels by similarity.
 
-To avoid a cold start, we optionally seed a **label bank** at initialization: a static list of high‑frequency labels (objects, sounds, relations, names) **pre‑embedded** with ImageBind and stored as **LABEL** memories. Seeded labels receive a knob‑derived baseline salience:
+To avoid a cold start, we optionally seed a **label bank** at initialization: a static list of high‑frequency labels (objects, sounds, relations, names) **pre‑embedded** with the configured text encoder and stored as **LABEL** memories. Seeded labels receive a knob‑derived baseline salience:
 
 ```
 salience_seed = clamp(lerp(0.35, 0.65, 0.5(F̃+S̃)) × lerp(1.0, 0.9, T), 0, 1)
@@ -147,12 +146,17 @@ salience_seed = clamp(lerp(0.35, 0.65, 0.5(F̃+S̃)) × lerp(1.0, 0.9, T), 0, 1)
 
 This provides shallow consolidation with immediate label candidates without invoking any generative model.
 
-Label bank embeddings are generated offline (dataset → embeddings) and saved as
-`data/label_bank/labels.jsonl` with a `metadata.json` manifest; seeding reads the
-precomputed vectors and does not re‑encode at runtime. We build the label list
-from **Hugging Face datasets** (FSD50K for sounds, ConceptNet for common terms,
-and Gender‑by‑Name for names) using `tools/label_bank_builder/build_label_bank.py`,
-then embed with `tools/label_bank_generator`.
+Label bank embeddings are generated offline (dataset → embeddings) and committed
+as a compact SQLite vector seed at `data/label_bank/label_bank.sqlite`.
+Production `LoadLabelBank` attaches that database read-only and queries its
+`vec0` table directly, so the static bank is not copied into the user's graph
+database and is not fully hydrated into process memory. The JSONL form
+(`data/label_bank/labels.jsonl` plus `metadata.json`) remains the rebuild input
+and does not require runtime re‑encoding. We build the label list from
+**Hugging Face datasets** (FSD50K for sounds, ConceptNet for common terms, and
+Gender‑by‑Name for names) using `tools/label_bank_builder/build_label_bank.py`,
+embed with `tools/label_bank_generator`, and pack the committed SQLite vector
+seed with `tools/label_bank_sqlite_builder`.
 
 Replay batch:
 ```
@@ -180,8 +184,8 @@ cue.metadata.sources = [m.id for m in cluster_i]
 emit edge(cue, m, type="derived_from") for m in cluster_i
 ```
 
-Only when the storage-pressure/ejection frontier permits lossy compression does
-the runtime create a separate summary node:
+When source text and a summarizer are available, deep consolidation can also
+create a compact summary node:
 
 ```
 summary.embedding = μ_i
@@ -189,7 +193,7 @@ summary.blob = summarize(fetch_blobs(cluster_i))  # deep local LLM backend (Gemm
 summary.metadata.sources = [m.id for m in cluster_i]
 ```
 
-**Current implementation note:** same-level deep summarization now replays only raw episodic `LONG_TERM` memories that have not yet been assigned to a consolidation cluster. This prevents repeated summary-of-summary compression in long chat sessions while still allowing later raw evidence to form new sibling summaries. Higher-level semantic summarization, if desired, should be modeled as an explicit separate layer rather than by recursively feeding first-level summary blobs back into the same consolidation path. Associative cue nodes are reusable graph anchors for a source set; summary nodes are optional compression artifacts and are the only association nodes that satisfy the destructive deletion guard for "compressed before delete."
+**Current implementation note:** same-level deep summarization now replays only raw episodic `LONG_TERM` memories that have not yet been assigned to a consolidation cluster. This prevents repeated summary-of-summary compression in long chat sessions while still allowing later raw evidence to form new sibling summaries. Higher-level semantic summarization, if desired, should be modeled as an explicit separate layer rather than by recursively feeding first-level summary blobs back into the same consolidation path. Associative cue nodes are reusable graph anchors for a source set. Summary node creation is not itself gated by storage pressure when the summarizer and source text are available; storage pressure gates destructive eviction/deletion, so raw evidence remains canonical unless a separate deletion guard is satisfied.
 
 To keep consolidation latency bounded, summarization input is capped by knob‑derived limits. Source texts are ranked by similarity to the cluster centroid and truncated:
 
@@ -235,6 +239,19 @@ Labels are stored as surface strings (no type/category field) **and** persisted
 with their own embeddings so they can participate in retrieval and graph
 expansion.
 
+Deep consolidation also consumes the **short-term graph memory** accumulated
+during live processing. Before the relabeler runs, the associative cue gathers
+candidate labels from the STM graph whose signal embeddings match the cluster's
+source memories. These labels are passed as `current_labels` to the relabeler
+alongside the raw source blobs/text. The relabeler/pruner then returns the
+replacement durable label set for that cue: supported labels are inserted or
+reweighted as `has_label` edges, unsupported provisional STM labels are simply
+not promoted, unsupported durable label edges are deleted when present, and the
+cue remains connected to every source memory through `derived_from` edges. In
+other words, the intended LTM product is not a summary string. It is a durable,
+source-grounded graph node produced by replaying STM graph structure through a
+blob-aware relabel/prune step.
+
 **Current implementation note:** the deployed runtime now persists extracted labels directly from each extraction result, deduped by normalized label key within the result and reused by key across the store. The old knob-derived repetition gate and single-label fallback were removed because they made durable label formation too dependent on exact repeated strings and caused obvious chat failures like identity/name loss and severe label undercounting. The current runtime also applies deterministic quality gates before persistence: transcript fillers, helper tokens, and speaker-role terms such as `ya`, `know`, `you know`, `um`, `uh`, `ok`, `okay`, `user`, and `assistant` are not durable graph labels even if a model emits them; when raw cue evidence is available, candidate labels must also appear in the source memory text after simple canonicalization. This rejects prompt/example leakage such as `confidence` or `interview` in banter-only clusters without globally banning those words when they are actually present. The online path is still simple: accepted label strings are inserted as `LABEL` memories, salience is embedding-derived, and repeated mentions update `s_max` on the existing label node. In parallel, we continue to study a more semantic alternative through the **offline semantic label-classifier prototype** in `scripts/build_wordnet_label_index.py`, `scripts/build_name_priors.py`, `scripts/build_label_training_data.py`, `scripts/train_label_classifier.py`, and `scripts/eval_label_classifier.py`. That prototype trains two small models over candidate spans:
 
 * a **span typing** head (`identity`, `person_entity`, `place`, `org_project`, `topic`, `state`, `none`), and
@@ -274,7 +291,7 @@ fact_assertion_j = (
 )
 ```
 
-Under this model, consolidation remains **append-only** at the fact layer. New evidence does not erase prior assertions. Instead:
+Under this model, consolidation preserves temporal history at the fact layer. New evidence does not erase prior assertions in place as timeless truth. Instead:
 
 1. A new assertion is inserted with its own valid and transaction interval.
 2. If it conflicts with an earlier open-ended assertion on the same subject/predicate, the earlier assertion can be closed or superseded.
@@ -294,10 +311,12 @@ The next core requirement is lifecycle maintenance. Facts should remain more dur
 
 ## Knowledge Graph Construction
 
-The graph comprises two node types:
+The durable graph surface includes several node/fact products:
 
-* **Memory Nodes:** Summarized embeddings from merged clusters
-* **Label Nodes:** Extracted labels/tags derived from content blobs
+* **Episodic Memory Nodes:** Raw coherent memories and their embeddings.
+* **Association/Cue/Summary Nodes:** Consolidation anchors and optional compact summaries.
+* **Label Nodes:** Extracted labels/tags derived from content blobs.
+* **Fact Assertions/Cache Rows:** Bitemporal structured claims and retrieval surfaces used by fact-aware ranking.
 
 Edge types capture relationships:
 
@@ -372,7 +391,7 @@ results_vec ← topK(vector_search(q, k=kNN_size(F)))
 seed_vec ← [r.id for r in results_vec]
 summary_k(F̃,S̃,T) = round(lerp(2, 6, S̃) × lerp(1.0, 0.75, F̃) × lerp(1.0, 0.85, T))
 summary_seeds ← topK(summary_cache, k=summary_k)  # in‑memory label/association cache
-seed_idx ← index_store.lookup(sparse_key(q), radius = lerp(1, 3, S))
+seed_idx ← index_store.lookup(sparse_key(q))  # exact-key in current runtime
 seed_nodes ← union(seed_vec, summary_seeds, seed_idx)
 
 if |seed_nodes| == 0 OR graph is empty:
@@ -381,7 +400,7 @@ if |seed_nodes| == 0 OR graph is empty:
 expanded_nodes ← graph.traverse(seed_nodes,
                                 depth=graph_depth(T),
                                 min_edge_weight=min_edge_weight(F),
-                                edge_types={'semantic','next_in_episode','prev_in_episode','within_same_event'})
+                                edge_types=associations_above_threshold)
 combined ← union(seed_nodes, expanded_nodes)
 min_assoc(F̃,T) = round(lerp(3, 1, F̃) × lerp(1.0, 0.85, T))
 min_label(F̃,S̃) = round(lerp(0, 3, S̃) × lerp(1.0, 0.85, F̃))

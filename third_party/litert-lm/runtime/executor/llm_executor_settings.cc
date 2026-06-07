@@ -16,6 +16,7 @@
 
 #include <iostream>
 #include <memory>
+#include <optional>
 #include <ostream>
 #include <utility>
 #include <variant>
@@ -41,6 +42,7 @@ std::ostream& operator<<(std::ostream& os, const GpuArtisanConfig& config) {
   os << "enable_decode_logits: " << config.enable_decode_logits << "\n";
   os << "enable_external_embeddings: " << config.enable_external_embeddings
      << "\n";
+  os << "use_submodel: " << config.use_submodel << "\n";
   return os;
 }
 
@@ -53,6 +55,16 @@ std::ostream& operator<<(std::ostream& os, const CpuConfig& config) {
   os << "kv_increment_size: " << config.kv_increment_size << "\n";
   os << "prefill_chunk_size: " << config.prefill_chunk_size << "\n";
   os << "number_of_threads: " << config.number_of_threads << "\n";
+  return os;
+}
+
+std::ostream& operator<<(std::ostream& os, const NpuConfig& config) {
+  os << "enable_neon_for_npu_greedy_sampling: "
+     << config.enable_neon_for_npu_greedy_sampling << "\n";
+  os << "use_hw_masking_for_npu: " << config.use_hw_masking_for_npu << "\n";
+  os << "use_hw_cache_update_for_npu: " << config.use_hw_cache_update_for_npu
+     << "\n";
+  os << "enable_npu_debug_logging: " << config.enable_npu_debug_logging << "\n";
   return os;
 }
 
@@ -73,6 +85,42 @@ std::ostream& operator<<(std::ostream& os, const AdvancedSettings& settings) {
   os << "num_threads_to_upload: " << settings.num_threads_to_upload << "\n";
   os << "num_threads_to_compile: " << settings.num_threads_to_compile << "\n";
   os << "convert_weights_on_gpu: " << settings.convert_weights_on_gpu << "\n";
+  os << "wait_for_weights_conversion_complete_in_benchmark: "
+     << settings.wait_for_weights_conversion_complete_in_benchmark << "\n";
+  os << "optimize_shader_compilation: " << settings.optimize_shader_compilation
+     << "\n";
+  os << "cache_compiled_shaders_only: " << settings.cache_compiled_shaders_only
+     << "\n";
+  os << "share_constant_tensors: " << settings.share_constant_tensors << "\n";
+  os << "sampler_handles_input: " << settings.sampler_handles_input << "\n";
+  if (settings.allow_src_quantized_fc_conv_ops.has_value()) {
+    os << "allow_src_quantized_fc_conv_ops: "
+       << settings.allow_src_quantized_fc_conv_ops.value() << "\n";
+  } else {
+    os << "allow_src_quantized_fc_conv_ops: Not set\n";
+  }
+  if (settings.hint_waiting_for_completion.has_value()) {
+    os << "hint_waiting_for_completion: "
+       << settings.hint_waiting_for_completion.value() << "\n";
+  } else {
+    os << "hint_waiting_for_completion: Not set\n";
+  }
+  if (settings.gpu_context_low_priority.has_value()) {
+    os << "gpu_context_low_priority: "
+       << settings.gpu_context_low_priority.value() << "\n";
+  } else {
+    os << "gpu_context_low_priority: Not set\n";
+  }
+  os << "enable_speculative_decoding: " << settings.enable_speculative_decoding
+     << "\n";
+  os << "disable_delegate_clustering: " << settings.disable_delegate_clustering
+     << "\n";
+  if (settings.hint_kernel_batch_size.has_value()) {
+    os << "hint_kernel_batch_size: " << settings.hint_kernel_batch_size.value()
+       << "\n";
+  } else {
+    os << "hint_kernel_batch_size: Not set\n";
+  }
   return os;
 }
 
@@ -86,11 +134,18 @@ std::ostream& operator<<(std::ostream& os, const LlmExecutorSettings& config) {
   os << "max_tokens: " << config.GetMaxNumTokens() << "\n";
   os << "activation_data_type: " << config.GetActivationDataType() << "\n";
   os << "max_num_images: " << config.GetMaxNumImages() << "\n";
+  os << "lora_rank: " << config.GetLoraRank() << "\n";
   os << "cache_dir: " << config.GetCacheDir() << "\n";
   if (config.GetScopedCacheFile()) {
     os << "cache_file: " << config.GetScopedCacheFile()->file() << "\n";
   } else {
     os << "cache_file: Not set\n";
+  }
+  if (config.GetLitertDispatchLibDir().empty()) {
+    os << "litert_dispatch_lib_dir: Not set\n";
+  } else {
+    os << "litert_dispatch_lib_dir: " << config.GetLitertDispatchLibDir()
+       << "\n";
   }
   os << "model_assets: " << config.GetModelAssets() << "\n";
   if (config.GetAdvancedSettings().has_value()) {
@@ -103,7 +158,8 @@ std::ostream& operator<<(std::ostream& os, const LlmExecutorSettings& config) {
 
 // static
 absl::StatusOr<LlmExecutorSettings> LlmExecutorSettings::CreateDefault(
-    ModelAssets model_assets, Backend backend) {
+    ModelAssets model_assets, Backend backend,
+    std::optional<Backend> sampler_backend) {
   LlmExecutorSettings settings(std::move(model_assets));
   if (backend == Backend::CPU) {
     CpuConfig config;
@@ -117,6 +173,7 @@ absl::StatusOr<LlmExecutorSettings> LlmExecutorSettings::CreateDefault(
     config.max_top_k = 1;
     settings.SetBackendConfig(config);
   } else if (backend == Backend::NPU) {
+    settings.SetBackendConfig(NpuConfig());
   } else if (backend == Backend::GPU_ARTISAN) {
     settings.SetBackendConfig(GpuArtisanConfig());
   } else {
@@ -131,6 +188,12 @@ absl::StatusOr<LlmExecutorSettings> LlmExecutorSettings::CreateDefault(
   settings.SetMaxNumTokens(0);
   // Disable image input by default.
   settings.SetMaxNumImages(0);
+  // Disable LoRA by default.
+  settings.SetLoraRank(0);
+
+  if (sampler_backend.has_value() && *sampler_backend != Backend::UNSPECIFIED) {
+    settings.SetSamplerBackend(*sampler_backend);
+  }
   return settings;
 }
 

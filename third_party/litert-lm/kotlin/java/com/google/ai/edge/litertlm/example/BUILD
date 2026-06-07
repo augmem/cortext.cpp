@@ -40,3 +40,51 @@ java_binary(
         ":main_lib",
     ],
 )
+
+kt_jvm_library(
+    name = "tool_lib",
+    srcs = ["ToolMain.kt"],
+    deps = ["//kotlin/java/com/google/ai/edge/litertlm:litertlm-jvm"],
+)
+
+# Interactive chat with tool calling.
+#
+# This example requires a model that can support tool use. e.g., FunctionGemma.
+#
+# To run it with bazel:
+# bazel run -c opt //kotlin/java/com/google/ai/edge/litertlm/example:tool -- <abs_model_path>
+#
+# To build a standalone binary:
+# bazel build -c opt //kotlin/java/com/google/ai/edge/litertlm/example:tool_deploy.jar
+# ./bazel-bin/kotlin/java/com/google/ai/edge/litertlm/example/tool_deploy.jar -- <abs_model_apth>
+java_binary(
+    name = "tool",
+    jvm_flags = ["--enable-native-access=ALL-UNNAMED"],  # it is expect to access native code.
+    main_class = "com.google.ai.edge.litertlm.example.ToolMainKt",
+    runtime_deps = [
+        ":tool_lib",
+    ],
+)
+
+kt_jvm_library(
+    name = "benchmark_lib",
+    srcs = ["BenchmarkMain.kt"],
+    deps = ["//kotlin/java/com/google/ai/edge/litertlm:litertlm-jvm"],
+)
+
+# Example to benchmark a .litertlm model.
+#
+# To run it with bazel:
+# bazel run -c opt //kotlin/java/com/google/ai/edge/litertlm/example:benchmark -- <abs_model_path>
+#
+# To build a standalone binary:
+# bazel build -c opt //kotlin/java/com/google/ai/edge/litertlm/example:benchmark_deploy.jar
+# ./bazel-bin/kotlin/java/com/google/ai/edge/litertlm/example/benchmark_deploy.jar -- <abs_model_apth>
+java_binary(
+    name = "benchmark",
+    jvm_flags = ["--enable-native-access=ALL-UNNAMED"],  # it is expect to access native code.
+    main_class = "com.google.ai.edge.litertlm.example.BenchmarkMainKt",
+    runtime_deps = [
+        ":benchmark_lib",
+    ],
+)

@@ -2,6 +2,7 @@
 
 #include "../operations/temporal_retrieval.hpp"
 
+#include "cortext/clock.hpp"
 #include "cortext/core/algorithms.hpp"
 
 #include <algorithm>
@@ -26,9 +27,7 @@ thread_local FactLifecycleOptions g_fact_lifecycle_options;
 long long
 NowMs ()
 {
-  return std::chrono::duration_cast<std::chrono::milliseconds> (
-             std::chrono::system_clock::now ().time_since_epoch ())
-      .count ();
+  return static_cast<long long> (cortext::SystemClock ().NowMillis ());
 }
 
 long long
@@ -671,6 +670,32 @@ BuildFactText (const std::string &subject, const std::string &predicate,
 }
 
 void
+NormalizeRetrievalEmbedding (std::vector<float> &embedding)
+{
+  constexpr std::size_t kRetrievalEmbeddingDim = 256;
+  if (embedding.size () <= kRetrievalEmbeddingDim)
+    {
+      return;
+    }
+  embedding.resize (kRetrievalEmbeddingDim);
+  double norm_sq = 0.0;
+  for (float value : embedding)
+    {
+      norm_sq += static_cast<double> (value) * value;
+    }
+  const double norm = std::sqrt (norm_sq);
+  if (norm <= 1e-12 || !std::isfinite (norm))
+    {
+      return;
+    }
+  const float inv_norm = static_cast<float> (1.0 / norm);
+  for (float &value : embedding)
+    {
+      value *= inv_norm;
+    }
+}
+
+void
 RefreshFactCache (Transaction &tx, Encoder *encoder, long long fact_id,
                   std::uint64_t now_ts)
 {
@@ -724,6 +749,7 @@ RefreshFactCache (Transaction &tx, Encoder *encoder, long long fact_id,
         {
           embedding.clear ();
         }
+      NormalizeRetrievalEmbedding (embedding);
       if (!embedding.empty ())
         {
           tx.Execute ("INSERT INTO embeddings (embedding, created_at) VALUES (?, ?)",

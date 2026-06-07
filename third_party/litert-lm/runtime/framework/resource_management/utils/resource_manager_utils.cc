@@ -24,6 +24,22 @@
 
 namespace litert::lm {
 
+namespace {
+// Returns the comparable length of the vector, excluding the negative tokens,
+// which indicates the multi modal token and just a placeholder. From token id
+// level, there is no way to tell if the multi modal token is matched or not, so
+// we assume the multi modal token are not matched. If all tokens are not
+// negative, return vec.size().
+size_t ComparableLengthExcludingNegativeTokens(const std::vector<int>& vec) {
+  for (size_t i = 0; i < vec.size(); ++i) {
+    if (vec[i] < 0) {
+      return i;
+    }
+  }
+  return vec.size();
+}
+}  // namespace
+
 absl::Status RemoveMatchingTokens(const std::vector<int> &processed_tokens,
                                   std::vector<int> *input_ids, int *time_step) {
   RET_CHECK_NE(input_ids, nullptr) << "input_ids is null.";
@@ -39,7 +55,8 @@ absl::Status RemoveMatchingTokens(const std::vector<int> &processed_tokens,
   // Determine how many elements to actually compare (the minimum of the two
   // effective sequence lengths).
   const size_t comparison_len =
-      std::min(input_ids->size(), processed_tokens_comparable_len);
+      std::min(processed_tokens_comparable_len,
+               ComparableLengthExcludingNegativeTokens(*input_ids));
   // Find the first mismatch.
   // The first range for mismatch is [input_ids->begin(), input_ids->begin() +
   // comparison_len). The second range for mismatch is [processed_tokens.begin()

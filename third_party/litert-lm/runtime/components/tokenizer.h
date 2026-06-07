@@ -20,6 +20,7 @@
 
 #include "absl/status/status.h"  // from @com_google_absl
 #include "absl/status/statusor.h"  // from @com_google_absl
+#include "absl/strings/match.h"  // from @com_google_absl
 #include "absl/strings/string_view.h"  // from @com_google_absl
 #include "absl/types/span.h"  // from @com_google_absl
 #include "litert/cc/litert_macros.h"  // from @litert
@@ -55,7 +56,7 @@ class Tokenizer {
 
   // Helper function to convert a vector of token ids into a 1D
   // litert::TensorBuffer of shape [batch_size(==1), num_tokens].
-  absl::StatusOr<TensorBuffer> TokenIdsToTensorBuffer(
+  static absl::StatusOr<TensorBuffer> TokenIdsToTensorBuffer(
       const TokenIds& token_ids) {
     LITERT_ASSIGN_OR_RETURN(
         auto tensor,
@@ -69,6 +70,9 @@ class Tokenizer {
   // BPE sequence.
   virtual absl::StatusOr<std::string> TokenIdsToText(
       const TokenIds& token_ids) = 0;
+
+  // Returns the list of tokens in the tokenizer.
+  virtual std::vector<std::string> GetTokens() const = 0;
 
   // Converts a tensor buffer of token ids into a vector of token ids. The input
   // is a 2D litert::TensorBuffer shape [batch_size, decode_steps].
@@ -124,6 +128,14 @@ class Tokenizer {
   template <typename T>
   static bool IsIncompleteBpeSequence(const absl::StatusOr<T>& result) {
     return result.status().code() == absl::StatusCode::kDataLoss;
+  }
+
+  // Checks if the decoded string ends with the replacement character (U+FFFD),
+  // which indicates that the set of token IDs passed to the tokenizer is part
+  // of a BPE sequence and needs more tokens to be decoded.
+  static bool HasBpeSuffix(absl::string_view decoded) {
+    static const char kReplacementCharacter[] = "\xef\xbf\xbd";
+    return absl::EndsWith(decoded, kReplacementCharacter);
   }
 };
 

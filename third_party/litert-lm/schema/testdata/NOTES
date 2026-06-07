@@ -1,22 +1,22 @@
 NB: For significant changes, please remake the testdata as follows (from the schema/ directory)
 
 Remake test_tflite_tokenizer.litertlm :
-bazel run -c opt //third_party/odml/litert_lm/schema:litertlm_export_main -- \
- --tokenizer_file=$PWD/third_party/odml/litert_lm/schema/testdata//gemma3_tokenizer.spiece  \
- --tflite_file=$PWD/third_party/odml/litert_lm/schema/testdata/attention.tflite \
- --output_path=$PWD/third_party/odml/litert_lm/schema/testdata/test_tokenizer_tflite.litertlm  \
+bazel run -c opt //schema:litertlm_export_main -- \
+ --tokenizer_file=$PWD/schema/testdata//gemma3_tokenizer.spiece  \
+ --tflite_file=$PWD/schema/testdata/attention.tflite \
+ --output_path=$PWD/schema/testdata/test_tokenizer_tflite.litertlm  \
  --section_metadata="tokenizer:vocab_size=10000,algorithm=bpe;tflite:quantized=true,model_size=1234567"
 
 Remake test_tok_tfl_llm.litertlm
-bazel run -c opt //third_party/odml/litert_lm/schema:litertlm_export_main -- \
- --tokenizer_file=$PWD/third_party/odml/litert_lm/schema/testdata/gemma3_tokenizer.spiece \
- --tflite_file=$PWD/third_party/odml/litert_lm/schema/testdata/attention.tflite \
- --llm_metadata=$PWD/third_party/odml/litert_lm/schema/testdata/llm_metadata.pb \
- --binary_data=$PWD/third_party/odml/litert_lm/schema/testdata/data.bin \
- --output_path=$PWD/third_party/odml/litert_lm/schema/testdata/test_tok_tfl_llm.litertlm \
+bazel run -c opt //schema:litertlm_export_main -- \
+ --tokenizer_file=$PWD/schema/testdata/gemma3_tokenizer.spiece \
+ --tflite_file=$PWD/schema/testdata/attention.tflite \
+ --llm_metadata=$PWD/schema/testdata/llm_metadata.pb \
+ --binary_data=$PWD/schema/testdata/data.bin \
+ --output_path=$PWD/schema/testdata/test_tok_tfl_llm.litertlm \
  --section_metadata="tokenizer:vocab_size=10000,algorithm=bpe;tflite:quantized=true,model_size=1234567;llm_metadata:model=gemma3;binary_data:type=abc"
 
 Remake test_hf_tokenizer.litertlm :
-bazel run -c opt //third_party/odml/litert_lm/schema:litertlm_export_main -- \
- --hf_tokenizer_json_file=$PWD/third_party/odml/litert_lm/schema/testdata/tokenizer.json \
- --output_path=$PWD/third_party/odml/litert_lm/schema/testdata/test_hf_tokenizer.litertlm
+bazel run -c opt //schema:litertlm_export_main -- \
+ --hf_tokenizer_json_file=$PWD/schema/testdata/tokenizer.json \
+ --output_path=$PWD/schema/testdata/test_hf_tokenizer.litertlm

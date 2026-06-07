@@ -15,7 +15,6 @@ const cortext_cpp_sources = &.{
     "src/core/thread_config.cpp",
     "src/capi.cpp",
     "src/telemetry/telemetry.cpp",
-    "src/encoder/imagebind.cpp",
     "src/data/centroids.cpp",
     "src/data/embedded_centroid_vectors.cpp",
     "src/operations/centroids.cpp",
@@ -195,7 +194,6 @@ pub fn build(b: *std.Build) void {
     mod.addCMacro("SQLITE_VEC_OMIT_FS", "1");
     mod.addCMacro("CORTEXT_EMBED_OBJSTORE", "1");
     mod.addCMacro("CORTEXT_DISABLE_OPENTELEMETRY", "1");
-    mod.addCMacro("CORTEXT_DISABLE_IMAGEBIND_ORT", "1");
     mod.addCMacro("CORTEXT_DISABLE_OGA", "1");
     mod.addCMacro("CORTEXT_DISABLE_LITERT", "1");
     mod.addCMacro("CORTEXT_DISABLE_SHERPA_ONNX", "1");

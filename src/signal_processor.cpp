@@ -1,5 +1,6 @@
 #include "cortext/core/knobs.hpp"
 #include "cortext/consolidation_mode.hpp"
+#include "cortext/clock.hpp"
 #include "cortext/internal/cancellation.hpp"
 #include "cortext/processor.hpp"
 #include "cortext/processor/operation_context.hpp"
@@ -12,6 +13,7 @@
 #include <any>
 #include <cstring>
 #include <map>
+#include <sstream>
 #include <stdexcept>
 #include <vector>
 
@@ -84,6 +86,36 @@ AssembleOutputFields (const OperationContext &op_context,
   out.metrics = op_context.GetAllMetrics ();
   out.operation_ms = op_context.GetOperationTimings ();
   out.stored_embedding_id = op_context.GetStoredEmbeddingId ();
+  out.stored_memory_id = op_context.GetStoredMemoryId ();
+  const auto &processor_context = op_context.GetProcessorContext ();
+  out.shadow_stm_enabled = processor_context.shadow_stm_enabled;
+  out.shadow_stm_size = processor_context.shadow_stm_last_size;
+  out.shadow_stm_max_size = processor_context.shadow_stm_max_size;
+  out.shadow_stm_update_count = processor_context.shadow_stm_update_count;
+  out.shadow_stm_compaction_count
+      = processor_context.shadow_stm_compaction_count;
+  out.shadow_stm_last_update_us
+      = processor_context.shadow_stm_last_update_us;
+  out.shadow_stm_mean_update_us
+      = processor_context.shadow_stm_update_count > 0
+            ? processor_context.shadow_stm_total_update_us
+                  / static_cast<double> (
+                      processor_context.shadow_stm_update_count)
+            : 0.0;
+  out.soft_anchor_enabled = processor_context.soft_anchor_enabled;
+  out.soft_anchor_state_count = processor_context.soft_anchor_last_state_count;
+  out.soft_anchor_link_count = processor_context.soft_anchor_last_link_count;
+  out.soft_anchor_create_count = processor_context.soft_anchor_last_create_count;
+  out.soft_anchor_update_count = processor_context.soft_anchor_last_update_count;
+  out.soft_anchor_none_count = processor_context.soft_anchor_last_none_count;
+  out.soft_anchor_last_update_us
+      = processor_context.soft_anchor_last_update_us;
+  out.soft_anchor_mean_update_us
+      = processor_context.soft_anchor_update_count > 0
+            ? processor_context.soft_anchor_total_update_us
+                  / static_cast<double> (
+                      processor_context.soft_anchor_update_count)
+            : 0.0;
 }
 
 void
@@ -491,6 +523,41 @@ ExtractDouble (const std::map<std::string, std::any> &row,
   return default_val;
 }
 
+inline std::string
+ExtractString (const std::map<std::string, std::any> &row,
+               const std::string &key,
+               const std::string &default_val = std::string ())
+{
+  auto it = row.find (key);
+  if (it == row.end () || !it->second.has_value ())
+    return default_val;
+  if (it->second.type () == typeid (std::string))
+    return std::any_cast<std::string> (it->second);
+  return default_val;
+}
+
+std::deque<long long>
+ParseMemoryIds (const std::string &text)
+{
+  std::deque<long long> ids;
+  std::stringstream stream (text);
+  std::string item;
+  while (std::getline (stream, item, ','))
+    {
+      try
+        {
+          if (!item.empty ())
+            {
+              ids.push_back (std::stoll (item));
+            }
+        }
+      catch (...)
+        {
+        }
+    }
+  return ids;
+}
+
 // --- State Loading Functions ---
 // v2 Schema: Unified state table replaces processor_state + blender tables
 
@@ -749,13 +816,11 @@ LoadRecentScores (Store &store, ProcessorContext &ctx)
 }
 
 void
-LoadObservedRetentionHistory (Store &store, ProcessorContext &ctx)
+LoadObservedRetentionHistory (Store &store, ProcessorContext &ctx,
+                              std::uint64_t now_ms)
 {
   try
     {
-      const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds> (
-                              std::chrono::system_clock::now ().time_since_epoch ())
-                              .count ();
       auto rows = store.Execute (
           "SELECT COALESCE(last_used, last_access) AS last_used "
           "FROM memories "
@@ -769,7 +834,10 @@ LoadObservedRetentionHistory (Store &store, ProcessorContext &ctx)
           if (last_used <= 0)
             continue;
           const double retention_sec
-              = std::max (0.0, static_cast<double> (now_ms - last_used) / 1000.0);
+              = std::max (0.0,
+                          static_cast<double> (
+                              static_cast<long long> (now_ms) - last_used)
+                              / 1000.0);
           ctx.observed_retention_history.push_back (retention_sec);
         }
     }
@@ -784,13 +852,11 @@ LoadObservedRetentionHistory (Store &store, ProcessorContext &ctx)
 
 // v2 Schema: Load working memory from MEMORIES table (kind='WORKING')
 void
-LoadWorkingMemory (Store &store, ProcessorContext &ctx, double sensitivity)
+LoadWorkingMemory (Store &store, ProcessorContext &ctx, double sensitivity,
+                   std::uint64_t now_ms)
 {
   try
     {
-      const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds> (
-                              std::chrono::system_clock::now ().time_since_epoch ())
-                              .count ();
       const double cost_per_slot = core::WMMaintenanceCostPerSlot (sensitivity);
 
       // Load from MEMORIES table with kind='WORKING' and end_ts IS NULL (active)
@@ -940,6 +1006,96 @@ LoadWorkingMemory (Store &store, ProcessorContext &ctx, double sensitivity)
     }
 }
 
+void
+LoadSoftAnchors (Store &store, ProcessorContext &ctx)
+{
+  try
+    {
+      auto rows = store.Execute (
+          "SELECT anchor_id, status, semantic_centroid, entity_centroid, "
+          "       full_centroid, semantic_radius, entity_radius, full_radius, "
+          "       source_id, first_step, last_step, first_ts, last_ts, "
+          "       last_boundary_id, anchor_strength, support_count, "
+          "       contradiction_count, recent_memory_ids "
+          "FROM soft_anchors "
+          "WHERE status IN ('provisional', 'active', 'durable', 'decayed') "
+          "ORDER BY last_step ASC");
+      int max_numeric_id = 0;
+      for (const auto &row : rows)
+        {
+          ProcessorContext::SoftAnchorState anchor;
+          anchor.anchor_id = ExtractString (row, "anchor_id");
+          if (anchor.anchor_id.empty ())
+            {
+              continue;
+            }
+          anchor.status = ExtractString (row, "status", "provisional");
+          anchor.last_source_id = ExtractString (row, "source_id");
+          auto semantic_it = row.find ("semantic_centroid");
+          if (semantic_it != row.end () && semantic_it->second.has_value ())
+            {
+              anchor.semantic_centroid = BlobToEigen (semantic_it->second);
+            }
+          auto entity_it = row.find ("entity_centroid");
+          if (entity_it != row.end () && entity_it->second.has_value ())
+            {
+              anchor.entity_centroid = BlobToEigen (entity_it->second);
+            }
+          auto full_it = row.find ("full_centroid");
+          if (full_it != row.end () && full_it->second.has_value ())
+            {
+              anchor.full_centroid = BlobToEigen (full_it->second);
+            }
+          anchor.semantic_radius = ExtractDouble (row, "semantic_radius", 0.0);
+          anchor.entity_radius = ExtractDouble (row, "entity_radius", 0.0);
+          anchor.full_radius = ExtractDouble (row, "full_radius", 0.0);
+          anchor.first_step
+              = static_cast<int> (ExtractInt64 (row, "first_step", 0));
+          anchor.last_step
+              = static_cast<int> (ExtractInt64 (row, "last_step", 0));
+          anchor.first_ts
+              = static_cast<uint64_t> (ExtractInt64 (row, "first_ts", 0));
+          anchor.last_ts
+              = static_cast<uint64_t> (ExtractInt64 (row, "last_ts", 0));
+          anchor.last_boundary_id = ExtractInt64 (row, "last_boundary_id", 0);
+          anchor.anchor_strength = ExtractDouble (row, "anchor_strength", 0.0);
+          anchor.support_count
+              = static_cast<int> (ExtractInt64 (row, "support_count", 0));
+          anchor.contradiction_count = static_cast<int> (
+              ExtractInt64 (row, "contradiction_count", 0));
+          anchor.recent_memory_ids = ParseMemoryIds (
+              ExtractString (row, "recent_memory_ids"));
+
+          const std::string prefix = "soft_anchor_";
+          if (anchor.anchor_id.rfind (prefix, 0) == 0)
+            {
+              try
+                {
+                  max_numeric_id = std::max (
+                      max_numeric_id,
+                      std::stoi (anchor.anchor_id.substr (prefix.size ())));
+                }
+              catch (...)
+                {
+                }
+            }
+
+          ctx.soft_anchor_states.push_back (std::move (anchor));
+        }
+      ctx.soft_anchor_next_id = std::max (ctx.soft_anchor_next_id,
+                                          max_numeric_id + 1);
+      ctx.soft_anchor_last_state_count
+          = static_cast<int> (ctx.soft_anchor_states.size ());
+    }
+  catch (const std::exception &e)
+    {
+      telemetry::LogWarn (
+          "Failed to load soft anchors",
+          { telemetry::Attribute::String ("component", "signal_processor"),
+            telemetry::Attribute::String ("error", e.what ()) });
+    }
+}
+
 // v2 Schema: Load accumulators from ACCUMULATORS table (renamed from accumulator_state)
 void
 LoadAccumulators (Store &store, ProcessorContext &ctx)
@@ -1032,7 +1188,9 @@ SignalProcessor::SignalProcessor (const Config &config,
                                   std::shared_ptr<Store> store,
                                   std::unique_ptr<IOperation> root_operation,
                                   std::shared_ptr<ObjectStore> object_store)
-    : config_ (config), store_ (std::move (store)),
+    : config_ (config),
+      clock_ (config.clock ? config.clock : std::make_shared<SystemClock> ()),
+      store_ (std::move (store)),
       object_store_ (std::move (object_store)),
       root_operation_ (std::move (root_operation)),
       context_ (std::make_unique<ProcessorContext> ())
@@ -1056,6 +1214,7 @@ SignalProcessor::SignalProcessor (const Config &config,
     }
   // Apply schema migrations exactly once during initialization.
   bool loaded_state = false;
+  const auto now_ms = clock_->NowMillis ();
   if (store_)
     {
       cortext::store::ApplyMigrations (*store_);
@@ -1068,8 +1227,10 @@ SignalProcessor::SignalProcessor (const Config &config,
       loaded_state = LoadState (*store_, *context_);               // Unified state
       LoadRecentContext (*store_, *context_);                      // From views
       LoadRecentScores (*store_, *context_);                       // From views
-      LoadObservedRetentionHistory (*store_, *context_);           // Derived from memories
-      LoadWorkingMemory (*store_, *context_, config_.sensitivity); // From MEMORIES
+      LoadObservedRetentionHistory (*store_, *context_, now_ms);   // Derived from memories
+      LoadWorkingMemory (*store_, *context_, config_.sensitivity,
+                         now_ms);                                  // From MEMORIES
+      LoadSoftAnchors (*store_, *context_);
       LoadAccumulators (*store_, *context_);                       // From ACCUMULATORS
     }
 
@@ -1081,10 +1242,6 @@ SignalProcessor::SignalProcessor (const Config &config,
       context_->T_dynamic = core::TPrior (F, S, T);
       context_->T_target = context_->T_dynamic;
       context_->hysteresis = core::BaseBandPrior (T);
-      const auto now_ms
-          = std::chrono::duration_cast<std::chrono::milliseconds> (
-                std::chrono::system_clock::now ().time_since_epoch ())
-                .count ();
       context_->last_rate_timestamp = static_cast<uint64_t> (now_ms);
       context_->last_mood_ts = static_cast<uint64_t> (now_ms);
     }
@@ -1278,10 +1435,7 @@ SignalProcessor::Flush ()
   PersistState (*tx);           // v2: Unified state
   PersistWorkingMemory (*tx);   // v2: To MEMORIES
   PersistAccumulators (*tx);    // v2: To ACCUMULATORS
-  const auto now_ms
-      = std::chrono::duration_cast<std::chrono::milliseconds> (
-            std::chrono::system_clock::now ().time_since_epoch ())
-            .count ();
+  const auto now_ms = clock_->NowMillis ();
   StartNewEpisode (tx.get (), static_cast<uint64_t> (now_ms));
   if (object_tx)
     {
@@ -1325,12 +1479,7 @@ SignalProcessor::FinalizeEpisode (Transaction *tx,
     {
       const uint64_t end_ts
           = op_context ? op_context->GetSignal ().timestamp
-                       : static_cast<uint64_t> (
-                             std::chrono::duration_cast<
-                                 std::chrono::milliseconds> (
-                                 std::chrono::system_clock::now ()
-                                     .time_since_epoch ())
-                                 .count ());
+                       : clock_->NowMillis ();
       std::optional<std::string> boundary_type;
       std::optional<Eigen::VectorXf> centroid;
       if (op_context)
@@ -1402,9 +1551,12 @@ SignalProcessor::PersistState (Transaction &tx)
   if (!context_)
     return;
 
-  const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds> (
-                          std::chrono::system_clock::now ().time_since_epoch ())
-                          .count ();
+  const auto wall_now_ms
+      = static_cast<long long> (clock_->NowMillis ());
+  const auto now_ms = context_->last_signal_timestamp > 0
+                          ? static_cast<long long> (
+                                context_->last_signal_timestamp)
+                          : wall_now_ms;
 
   // Serialize mood_vector as raw binary BLOB (48 bytes = 6 doubles)
   std::vector<char> mood_blob (6 * sizeof (double));
@@ -1574,9 +1726,12 @@ SignalProcessor::PersistWorkingMemory (Transaction &tx)
   if (!context_)
     return;
 
-  const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds> (
-                          std::chrono::system_clock::now ().time_since_epoch ())
-                          .count ();
+  const auto wall_now_ms
+      = static_cast<long long> (clock_->NowMillis ());
+  const auto now_ms = context_->last_signal_timestamp > 0
+                          ? static_cast<long long> (
+                                context_->last_signal_timestamp)
+                          : wall_now_ms;
 
   // Close any stale WM rows not represented by active slots.
   std::vector<long long> active_ids;
@@ -1644,12 +1799,18 @@ SignalProcessor::PersistWorkingMemory (Transaction &tx)
       try
         {
           const auto ts_ms = static_cast<int64_t> (slot.last_ts * 1000.0);
+          const auto slot_created_at
+              = slot.start_ts > 0
+                    ? static_cast<long long> (slot.start_ts)
+                    : static_cast<long long> (ts_ms);
+          const auto slot_embedding_created_at
+              = ts_ms > 0 ? static_cast<long long> (ts_ms) : now_ms;
 
           failure_stage = "insert_slot_embedding";
           const std::vector<float> emb_vec = ToFloatVector (slot.embedding);
           tx.Execute (
               "INSERT INTO embeddings (embedding, created_at) VALUES (?, ?)",
-              { emb_vec, now_ms });
+              { emb_vec, slot_embedding_created_at });
           auto emb_rows
               = tx.Execute ("SELECT last_insert_rowid() AS id", {});
           const long long embedding_id
@@ -1691,7 +1852,7 @@ SignalProcessor::PersistWorkingMemory (Transaction &tx)
                                             : slot.source_id,
                     slot.modality, slot.start_ts, slot.n_signals, slot.s_max,
                     slot.s_avg, slot.s_emotion_max, slot.s_arousal_avg,
-                    slot.drift_acc, slot.strength, ts_ms, now_ms });
+                    slot.drift_acc, slot.strength, ts_ms, slot_created_at });
 
               auto mem_rows = tx.Execute ("SELECT last_insert_rowid() AS id", {});
               memory_id

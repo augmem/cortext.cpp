@@ -13,7 +13,6 @@
 # limitations under the License.
 
 load("//:rust_cxx_bridge.bzl", "rust_cxx_bridge")
-
 load("@rules_rust//rust:defs.bzl", "rust_library")
 
 package(
@@ -27,4 +26,67 @@ package_group(
     packages = [
         "//runtime/components/tool_use/...",
     ],
+)
+
+rust_library(
+    name = "fc_parser",
+    srcs = [
+        "fc_parser.rs",
+    ],
+    deps = [
+        "//runtime/components/tool_use/antlr/generated:antlr_fc_tool_call_parser",
+        "@crate_index//:antlr4rust",
+        "@crate_index//:serde_json",
+    ],
+)
+
+rust_library(
+    name = "python_parser",
+    srcs = [
+        "python_parser.rs",
+    ],
+    deps = [
+        "//runtime/components/tool_use/antlr/generated:antlr_python_tool_call_parser",
+        "@crate_index//:antlr4rust",
+        "@crate_index//:serde_json",
+    ],
+)
+
+rust_library(
+    name = "json_parser",
+    srcs = [
+        "json_parser.rs",
+    ],
+    deps = [
+        "@crate_index//:serde_json",
+    ],
+)
+
+rust_library(
+    name = "parsers",
+    srcs = [
+        "parsers.rs",
+    ],
+    deps = [
+        ":python_parser",
+        ":fc_parser",
+        ":json_parser",
+        "@crate_index//:cxx",
+        "@crate_index//:indexmap",
+        "@crate_index//:serde_json",
+    ],
+)
+
+rust_cxx_bridge(
+    name = "parsers_cpp",
+    src = "parsers.rs",
+    deps = [
+        ":parsers",
+    ] + select({
+        "@platforms//os:windows": [
+            "//rust:alloc_defs",
+            "//rust:global_allocator",
+        ],
+        "//conditions:default": [],
+    }),
 )

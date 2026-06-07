@@ -78,6 +78,10 @@ DetectBoundary::Execute (OperationContext &context,
       context.SetAtBoundary (true);
       context.SetBoundaryScore (1.0);
       context.SetBoundaryType (std::string ("explicit_turn"));
+      BoundaryDiagnostics diagnostics;
+      diagnostics.boundary_score = 1.0;
+      diagnostics.should_flush = true;
+      context.SetBoundaryDiagnostics (diagnostics);
       return;
     }
 
@@ -88,6 +92,10 @@ DetectBoundary::Execute (OperationContext &context,
       // No accumulator state - no boundary
       context.SetFlushRequired (false);
       context.SetBoundaryScore (0.0);
+      BoundaryDiagnostics diagnostics;
+      diagnostics.boundary_score = 0.0;
+      diagnostics.boundary_rate_ema = p_ctx.boundary_rate_ema;
+      context.SetBoundaryDiagnostics (diagnostics);
       return;
     }
 
@@ -341,6 +349,27 @@ DetectBoundary::Execute (OperationContext &context,
 
   context.SetFlushRequired (flush);
   context.SetAtBoundary (flush);
+
+  BoundaryDiagnostics diagnostics;
+  diagnostics.coherence_prev = coherence_prev;
+  diagnostics.coherence_curr = coherence;
+  diagnostics.coh_drop = coh_drop;
+  diagnostics.coh_drop_norm = coh_norm;
+  diagnostics.d_step = d_step;
+  diagnostics.eta_prev = eta_prev;
+  diagnostics.drift_spike = drift_spike;
+  diagnostics.drift_norm = drift_norm;
+  diagnostics.surprisal_raw = surprisal_raw;
+  diagnostics.surprisal_norm = surprisal_norm;
+  diagnostics.topic_shift = topic_raw;
+  diagnostics.topic_norm = topic_norm;
+  diagnostics.boundary_rate_ema = p_ctx.boundary_rate_ema;
+  diagnostics.boundary_rate_mult = rate_mult;
+  diagnostics.boundary_threshold = b_thresh;
+  diagnostics.boundary_floor = boundary_floor;
+  diagnostics.boundary_score = boundary_score;
+  diagnostics.should_flush = flush;
+  context.SetBoundaryDiagnostics (diagnostics);
 
   if (flush)
     {

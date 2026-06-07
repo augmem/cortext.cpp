@@ -30,8 +30,8 @@
 #include "absl/strings/str_cat.h"  // from @com_google_absl
 #include "absl/strings/string_view.h"  // from @com_google_absl
 #include "runtime/components/tokenizer.h"
-#include "runtime/util/status_macros.h"  // NOLINT
-#include "runtime/util/test_utils.h"     // NOLINT
+#include "runtime/util/status_macros.h"  // IWYU pragma: keep
+#include "runtime/util/test_utils.h"  // IWYU pragma: keep
 
 namespace litert::lm {
 namespace {
@@ -115,6 +115,24 @@ TEST(HuggingFaceTokenizerTest, TokenIdsToText) {
   ASSERT_OK(text_or);
 
   EXPECT_EQ(text_or.value(), "How's it going?");
+}
+
+TEST(HuggingFaceTokenizerTest, GetTokens) {
+  ASSERT_OK_AND_ASSIGN(auto tokenizer, HuggingFaceTokenizer::CreateFromFile(
+                                           GetHuggingFaceModelPath()));
+
+  std::vector<std::string> tokens = tokenizer->GetTokens();
+
+  // Check number of tokens.
+  EXPECT_EQ(tokens.size(), 49152);
+
+  // Check a few tokens.
+  EXPECT_EQ(tokens[0], "<|endoftext|>");
+  EXPECT_EQ(tokens[1], "<|im_start|>");
+  EXPECT_EQ(tokens[3], "<repo_name>");
+  EXPECT_EQ(tokens[17], "!");
+  EXPECT_EQ(tokens[47], "?");
+  EXPECT_EQ(tokens[72], "X");
 }
 
 }  // namespace

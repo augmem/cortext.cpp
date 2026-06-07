@@ -3,19 +3,11 @@
 Centroid vector management for Cortext VER (Vocal Emotion Recognition).
 
 Commands:
-  generate  Generate audio emotion centroids from RAVDESS dataset
   embed     Generate C++ embedded vectors from .npy centroid files
-  validate  Validate centroids against held-out RAVDESS files
 
 Examples:
-  # Generate audio emotion centroids from RAVDESS
-  python tools/centroid_vectors/centroid_vectors.py generate --ravdess-dir data/ravdess --models-dir models/imagebind
-
   # Generate C++ embedded vectors from .npy files
   python tools/centroid_vectors/centroid_vectors.py embed
-
-  # Validate centroids against held-out RAVDESS files
-  python tools/centroid_vectors/centroid_vectors.py validate --ravdess-dir data/ravdess --models-dir models/imagebind
 """
 
 from __future__ import annotations
@@ -430,8 +422,7 @@ def cmd_generate(args: argparse.Namespace) -> int:
             # Load audio at 16kHz mono
             y, sr = librosa.load(str(wav_path), sr=sample_rate, mono=True)
 
-            # Compute mel spectrogram (ImageBind preprocessing)
-            # Using librosa's mel spectrogram with ImageBind parameters
+            # Compute mel spectrogram using the legacy audio centroid shape.
             mel_spec = librosa.feature.melspectrogram(
                 y=y,
                 sr=sample_rate,
@@ -447,7 +438,7 @@ def cmd_generate(args: argparse.Namespace) -> int:
             import numpy as np
             mel_spec = np.log(mel_spec + 1e-10)
 
-            # Normalize with ImageBind stats
+            # Normalize using the legacy audio centroid constants.
             mel_spec = (mel_spec - (-4.268)) / 9.138
 
             # Pad/clip to 204 time frames (2 seconds at 16kHz with hop_length=160)
@@ -767,8 +758,8 @@ def main() -> int:
     embed_parser.add_argument(
         "--repo-root",
         type=Path,
-        default=Path(__file__).resolve().parents[1],
-        help="Repository root (defaults to script parent/..)",
+        default=Path(__file__).resolve().parents[2],
+        help="Repository root (defaults to script parent/../..)",
     )
     embed_parser.add_argument(
         "--out-cpp",
@@ -777,72 +768,10 @@ def main() -> int:
         help="Output .cpp path (default: <repo_root>/src/data/embedded_centroid_vectors.cpp)",
     )
 
-    # generate command
-    gen_parser = subparsers.add_parser(
-        "generate", help="Generate audio emotion centroids from RAVDESS dataset"
-    )
-    gen_parser.add_argument(
-        "--ravdess-dir",
-        type=Path,
-        required=True,
-        help="Path to RAVDESS dataset directory",
-    )
-    gen_parser.add_argument(
-        "--models-dir",
-        type=Path,
-        required=True,
-        help="Path to ImageBind ONNX models directory",
-    )
-    gen_parser.add_argument(
-        "--out-dir",
-        type=Path,
-        default=Path(__file__).resolve().parents[1] / "data" / "audio_emotion",
-        help="Output directory for .npy centroids (default: data/audio_emotion)",
-    )
-
-    # validate command
-    val_parser = subparsers.add_parser(
-        "validate", help="Validate centroids against held-out RAVDESS files"
-    )
-    val_parser.add_argument(
-        "--ravdess-dir",
-        type=Path,
-        required=True,
-        help="Path to RAVDESS dataset directory",
-    )
-    val_parser.add_argument(
-        "--models-dir",
-        type=Path,
-        required=True,
-        help="Path to ImageBind ONNX models directory",
-    )
-    val_parser.add_argument(
-        "--centroids-dir",
-        type=Path,
-        default=Path(__file__).resolve().parents[1] / "data" / "audio_emotion",
-        help="Directory containing centroid .npy files (default: data/audio_emotion)",
-    )
-    val_parser.add_argument(
-        "--holdout-ratio",
-        type=float,
-        default=0.2,
-        help="Fraction of data to use for validation (default: 0.2)",
-    )
-    val_parser.add_argument(
-        "--beta",
-        type=float,
-        default=8.0,
-        help="Softmax temperature (default: 8.0, mid-sensitivity)",
-    )
-
     args = parser.parse_args()
 
     if args.command == "embed":
         return cmd_embed(args)
-    elif args.command == "generate":
-        return cmd_generate(args)
-    elif args.command == "validate":
-        return cmd_validate(args)
     else:
         parser.print_help()
         return 1

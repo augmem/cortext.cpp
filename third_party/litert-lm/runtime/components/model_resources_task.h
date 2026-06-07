@@ -51,7 +51,12 @@ class ModelResourcesTask : public ModelResources {
     // Task model does not support backend constraint.
     return std::nullopt;
   };
-  absl::StatusOr<Tokenizer*> GetTokenizer() override;
+  std::optional<std::string> GetTFLiteModelPreferActivationType(
+      ModelType model_type) override {
+    // Task model does not support prefer activation type.
+    return std::nullopt;
+  };
+  absl::StatusOr<std::unique_ptr<Tokenizer>> GetTokenizer() override;
   absl::StatusOr<const proto::LlmMetadata*> GetLlmMetadata() override;
   absl::StatusOr<std::reference_wrapper<ScopedFile>> GetScopedFile() override {
     return absl::UnimplementedError(
@@ -70,7 +75,6 @@ class ModelResourcesTask : public ModelResources {
   }
 
   absl::flat_hash_map<ModelType, std::shared_ptr<litert::Model>> model_map_;
-  std::unique_ptr<SentencePieceTokenizer> tokenizer_;
   std::unique_ptr<proto::LlmMetadata> llm_metadata_;
 
   // The model asset bundle resources produced by reading task bundle. Not null

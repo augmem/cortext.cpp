@@ -198,7 +198,7 @@ This factor is consumed by the Stability update (@sec-stability-update), avoidin
 
 ## Generation Influence Tracking
 
-When generation embeddings are available, influence incorporates output trajectory:
+When generation embeddings are wired into the runtime, influence can incorporate output trajectory. The current implementation keeps generation-similarity and generation-drift terms neutral unless such embeddings are available:
 
 ```
 Δḡ ← l2_normalize(ḡ_t) − l2_normalize(ḡ_{t−1})
@@ -207,7 +207,7 @@ drift_contribution(m) ← (drift_mag_gen / 2) ×
                          max(0, cos(m.embedding, l2_normalize(Δḡ)))
 ```
 
-Total influence blends contextual gain, generation similarity, and drift contribution:
+The intended full influence blend is:
 
 ```
 λ₁ = 0.5; λ₂ = 0.4; λ₃ = 0.3

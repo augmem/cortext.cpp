@@ -23,8 +23,10 @@
 #include "absl/log/absl_log.h"  // from @com_google_absl
 #include "absl/status/status.h"  // from @com_google_absl
 #include "absl/status/statusor.h"  // from @com_google_absl
+#include "absl/strings/str_cat.h"  // from @com_google_absl
 #include "absl/strings/str_format.h"  // from @com_google_absl
 #include "absl/types/span.h"  // from @com_google_absl
+#include "runtime/util/status_macros.h"
 
 namespace litert::lm {
 namespace {
@@ -33,12 +35,12 @@ namespace {
 inline std::string PrintSequence(const std::vector<int>& sequence) {
   std::string existing_sequence_str = "{";
   for (size_t i = 0; i < sequence.size(); ++i) {
-    existing_sequence_str += std::to_string(sequence[i]);
+    absl::StrAppend(&existing_sequence_str, sequence[i]);
     if (i < sequence.size() - 1) {
-      existing_sequence_str += ", ";
+      absl::StrAppend(&existing_sequence_str, ", ");
     }
   }
-  existing_sequence_str += "}";
+  absl::StrAppend(&existing_sequence_str, "}");
   return existing_sequence_str;
 }
 
@@ -136,6 +138,24 @@ absl::Status StopTokenDetector::ProcessTokens(
     }
   }
   return absl::OkStatus();
+}
+
+absl::Status StopTokenDetector::ProcessTokens(
+    const std::vector<std::vector<int>>& latest_tokens) {
+  if (latest_tokens.size() != stop_token_found_.size()) {
+    return absl::InvalidArgumentError(absl::StrFormat(
+        "Size of latest_tokens (%d) does not match configured batch size (%d).",
+        latest_tokens.size(), stop_token_found_.size()));
+  }
+  std::vector<int> flattened_tokens;
+  flattened_tokens.reserve(latest_tokens.size());
+  for (auto& tokens : latest_tokens) {
+    RET_CHECK_EQ(tokens.size(), 1)
+        << "The current implementation of ProcessTokens() requires that "
+           "latest_tokens must contain only single tokens.";
+    flattened_tokens.push_back(tokens[0]);
+  }
+  return ProcessTokens(flattened_tokens);
 }
 
 int StopTokenDetector::MaxPartialStopTokenLength(int index) const {

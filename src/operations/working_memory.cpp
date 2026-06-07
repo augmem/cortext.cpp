@@ -3,6 +3,7 @@
 #include "cortext/core/algorithms.hpp"
 #include "cortext/core/knobs.hpp"
 #include "cortext/core/utils.hpp"
+#include "cortext/consolidation_mode.hpp"
 #include "cortext/operations/constants.hpp"
 #include "cortext/operations/metrics.hpp"
 #include "cortext/processor/operation_context.hpp"
@@ -146,6 +147,14 @@ WorkingMemory::Execute (OperationContext &context, Transaction &tx) const
   if (!context.GetAccumulatorWriteDecision ())
     {
       return; // No memory boundary - skip WM gating
+    }
+
+  // Consolidation signals drive maintenance jobs through the normal pipeline,
+  // but they are not user-facing ingress memories. They must not evict or
+  // insert working-memory chat turns.
+  if (IsConsolidationSignal (signal.source_id))
+    {
+      return;
     }
 
   // Get memory-level data: e_rep and S_window
