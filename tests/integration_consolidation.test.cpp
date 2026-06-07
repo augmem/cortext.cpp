@@ -580,9 +580,11 @@ TEST_CASE ("Summarization labels chat excerpts before prompting",
   summarize_op.Execute (ctx, *tx);
   tx->Commit ();
 
-  REQUIRE (summarizer.captured_texts.size () == 2);
+  REQUIRE (summarizer.captured_texts.size () == 4);
   REQUIRE (summarizer.captured_texts[0].rfind ("User:", 0) == 0);
   REQUIRE (summarizer.captured_texts[1].rfind ("Assistant:", 0) == 0);
+  REQUIRE (summarizer.captured_texts[2].rfind ("User:", 0) == 0);
+  REQUIRE (summarizer.captured_texts[3].rfind ("Assistant:", 0) == 0);
   REQUIRE (summarizer.last_max_words == 0);
 }
 
