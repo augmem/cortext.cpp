@@ -81,7 +81,8 @@ absl::StatusOr<FileFormat> GetFileFormat(
     absl::string_view header(reinterpret_cast<const char*>(mapped_file->data()),
                              mapped_file->length());
 
-    return GetFileFormatFromFileContents(header);
+    ASSIGN_OR_RETURN(auto file_format, GetFileFormatFromFileContents(header));
+    return file_format;
   }
 
   return absl::InvalidArgumentError("Unsupported or unknown file format.");

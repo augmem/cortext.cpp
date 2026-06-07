@@ -3,9 +3,19 @@
 #include <imgui.h>
 #include <implot.h>
 
+#if defined(__APPLE__)
+#ifndef GL_SILENCE_DEPRECATION
+#define GL_SILENCE_DEPRECATION
+#endif
+#include <OpenGL/gl3.h>
+#else
+#include <GL/gl.h>
+#endif
+
 #include <algorithm>
 #include <cmath>
 #include <cstdarg>
+#include <cstdint>
 #include <cstdio>
 #include <iomanip>
 #include <sstream>
@@ -58,6 +68,29 @@ std::string FormatDouble(double v) {
 std::string Truncate(const std::string& s, size_t max_len) {
   if (s.size() <= max_len) return s;
   return s.substr(0, max_len) + "...";
+}
+
+bool HasImagePreview(const MemoryMediaPreview& mem) {
+  return mem.modality == "image" && !mem.media_bytes.empty()
+      && mem.image_width > 0 && mem.image_height > 0
+      && (mem.image_channels == 3 || mem.image_channels == 4);
+}
+
+bool HasAudioPreview(const MemoryMediaPreview& mem) {
+  return mem.modality == "audio" && !mem.audio_samples.empty()
+      && mem.audio_sample_rate > 0;
+}
+
+void RequestMediaLoad(const std::shared_ptr<DatabaseExplorerState>& state,
+                      const std::string& kind,
+                      long long memory_id,
+                      long long signal_id) {
+  if (!state) {
+    return;
+  }
+  std::lock_guard<std::mutex> lock(state->mu);
+  state->media_load_request = MediaLoadRequest{kind, memory_id, signal_id};
+  state->last_refresh_status = "Loading media...";
 }
 
 std::string FormatPercent(double v) {
@@ -333,6 +366,19 @@ void PlotSeriesIfAvailable(const char* label,
 
 ChatWindow::ChatWindow(const State& state) : state_(state) {}
 
+ChatWindow::~ChatWindow() {
+  for (const auto& item : webcam_image_textures_) {
+    if (item.second.texture_id != 0) {
+      const GLuint texture_id = item.second.texture_id;
+      glDeleteTextures(1, &texture_id);
+    }
+  }
+  if (signal_filter_image_texture_.texture_id != 0) {
+    const GLuint texture_id = signal_filter_image_texture_.texture_id;
+    glDeleteTextures(1, &texture_id);
+  }
+}
+
 void ChatWindow::Render() {
   ImGui::SetNextWindowPos(ImVec2(0, 0));
   ImGui::SetNextWindowSize(ImGui::GetIO().DisplaySize);
@@ -357,33 +403,42 @@ void ChatWindow::Render() {
       RenderChatTab();
       break;
     case 1:
-      RenderVoiceTab();
+      RenderPlaygroundTab();
       break;
     case 2:
-      RenderEventsTab();
+      RenderVoiceTab();
       break;
     case 3:
-      RenderMetricsTab();
+      RenderWebcamTab();
       break;
     case 4:
-      RenderSettingsTab();
+      RenderEventsTab();
       break;
     case 5:
-      RenderDatabaseTab();
+      RenderMetricsTab();
       break;
     case 6:
-      RenderGraphTab();
+      RenderSettingsTab();
       break;
     case 7:
-      RenderContextTab();
+      RenderDatabaseTab();
       break;
     case 8:
+      RenderGraphTab();
+      break;
+    case 9:
+      RenderContextTab();
+      break;
+    case 10:
       RenderLogsTab();
       break;
   }
   ImGui::EndChild();
 
-  RenderInputBox();
+  RenderMediaModal();
+  if (selected_tab_ == 0) {
+    RenderInputBox();
+  }
   RenderStatusBar();
 
   ImGui::End();
@@ -395,36 +450,44 @@ void ChatWindow::RenderTabBar() {
       selected_tab_ = 0;
       ImGui::EndTabItem();
     }
-    if (ImGui::BeginTabItem("Voice")) {
+    if (ImGui::BeginTabItem("Playground")) {
       selected_tab_ = 1;
       ImGui::EndTabItem();
     }
-    if (ImGui::BeginTabItem("Events")) {
+    if (ImGui::BeginTabItem("Voice")) {
       selected_tab_ = 2;
       ImGui::EndTabItem();
     }
-    if (ImGui::BeginTabItem("Metrics")) {
+    if (ImGui::BeginTabItem("Webcam")) {
       selected_tab_ = 3;
       ImGui::EndTabItem();
     }
-    if (ImGui::BeginTabItem("Settings")) {
+    if (ImGui::BeginTabItem("Events")) {
       selected_tab_ = 4;
       ImGui::EndTabItem();
     }
-    if (ImGui::BeginTabItem("DB")) {
+    if (ImGui::BeginTabItem("Metrics")) {
       selected_tab_ = 5;
       ImGui::EndTabItem();
     }
-    if (ImGui::BeginTabItem("Graph")) {
+    if (ImGui::BeginTabItem("Settings")) {
       selected_tab_ = 6;
       ImGui::EndTabItem();
     }
-    if (ImGui::BeginTabItem("Context")) {
+    if (ImGui::BeginTabItem("DB")) {
       selected_tab_ = 7;
       ImGui::EndTabItem();
     }
-    if (ImGui::BeginTabItem("Telemetry")) {
+    if (ImGui::BeginTabItem("Graph")) {
       selected_tab_ = 8;
+      ImGui::EndTabItem();
+    }
+    if (ImGui::BeginTabItem("Context")) {
+      selected_tab_ = 9;
+      ImGui::EndTabItem();
+    }
+    if (ImGui::BeginTabItem("Telemetry")) {
+      selected_tab_ = 10;
       ImGui::EndTabItem();
     }
     ImGui::EndTabBar();
@@ -436,6 +499,618 @@ void ChatWindow::RenderEventsTab() {
   ImGui::Separator();
   ImGui::Spacing();
   RenderMemoryTab();
+}
+
+void ChatWindow::RenderPlaygroundTab() {
+  if (!state_.playground) {
+    ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f),
+                       "Playground state is unavailable.");
+    return;
+  }
+
+  bool processing = false;
+  std::string last_input_kind;
+  std::string last_input_summary;
+  std::vector<MemoryMediaPreview> retrieved_memories;
+  double last_total_ms = 0.0;
+  double last_process_ms = 0.0;
+  std::optional<std::string> last_status;
+  std::optional<std::string> last_error;
+  {
+    std::lock_guard<std::mutex> lock(state_.playground->mu);
+    processing = state_.playground->processing;
+    last_input_kind = state_.playground->last_input_kind;
+    last_input_summary = state_.playground->last_input_summary;
+    retrieved_memories = state_.playground->retrieved_memories;
+    last_total_ms = state_.playground->last_total_ms;
+    last_process_ms = state_.playground->last_process_ms;
+    last_status = state_.playground->last_status;
+    last_error = state_.playground->last_error;
+  }
+
+  ImGui::TextColored(ImVec4(0.8f, 0.8f, 1.0f, 1.0f),
+                     "CORTEXT PLAYGROUND");
+  ImGui::TextWrapped(
+      "Run text, visual, or audio inputs through Cortext retrieval without "
+      "calling the chat model. Retrieved image and audio memories load only "
+      "when you open them.");
+
+  ImGui::Separator();
+  ImGui::BeginDisabled(processing);
+  ImGui::SetNextItemWidth(-120.0f);
+  const bool enter_pressed = ImGui::InputTextWithHint(
+      "##playground_text",
+      "Type text and press Enter",
+      playground_text_buffer_,
+      sizeof(playground_text_buffer_),
+      ImGuiInputTextFlags_EnterReturnsTrue);
+  ImGui::SameLine();
+  const bool run_clicked = ImGui::Button("Run text");
+  if (enter_pressed || run_clicked) {
+    std::string text(playground_text_buffer_);
+    const auto start = text.find_first_not_of(" \t\r\n");
+    if (start != std::string::npos) {
+      const auto end = text.find_last_not_of(" \t\r\n");
+      text = text.substr(start, end - start + 1);
+      {
+        std::lock_guard<std::mutex> lock(state_.playground->mu);
+        state_.playground->pending_text = std::move(text);
+        state_.playground->process_text_requested = true;
+        state_.playground->last_status = "Queued text playground run.";
+        state_.playground->last_error.reset();
+      }
+      playground_text_buffer_[0] = '\0';
+    }
+  }
+  ImGui::EndDisabled();
+
+  ImGui::Separator();
+  bool webcam_supported = false;
+  bool webcam_capturing = false;
+  std::string webcam_capture_mode;
+  std::optional<MemoryMediaPreview> signal_filter_image;
+  if (state_.webcam) {
+    std::lock_guard<std::mutex> lock(state_.webcam->mu);
+    webcam_supported = state_.webcam->supported;
+    webcam_capturing = state_.webcam->capturing;
+    webcam_capture_mode = state_.webcam->capture_mode;
+    signal_filter_image = state_.webcam->signal_filter_image;
+  }
+
+  ImGui::TextColored(ImVec4(0.8f, 0.8f, 1.0f, 1.0f),
+                     "Live media playground inputs");
+  if (!webcam_supported) {
+    ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f),
+                       "Direct camera and microphone input is unavailable in this build.");
+  } else if (state_.webcam) {
+    ImGui::BeginDisabled(webcam_capturing);
+    if (ImGui::Button("Record audio##playground")) {
+      std::lock_guard<std::mutex> lock(state_.webcam->mu);
+      state_.webcam->capture_mode = "audio";
+      state_.webcam->image_capture_pending = false;
+      state_.webcam->start_requested = true;
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Capture video##playground")) {
+      std::lock_guard<std::mutex> lock(state_.webcam->mu);
+      state_.webcam->capture_mode = "video";
+      state_.webcam->image_capture_pending = false;
+      state_.webcam->start_requested = true;
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Capture image##playground")) {
+      std::lock_guard<std::mutex> lock(state_.webcam->mu);
+      state_.webcam->capture_mode = "image";
+      state_.webcam->image_capture_pending = true;
+      state_.webcam->start_requested = true;
+    }
+    ImGui::EndDisabled();
+    if (webcam_capturing) {
+      ImGui::SameLine();
+      if (ImGui::Button("Stop capture##playground")) {
+        std::lock_guard<std::mutex> lock(state_.webcam->mu);
+        state_.webcam->stop_requested = true;
+        state_.webcam->image_capture_pending = false;
+      }
+    }
+    ImGui::SameLine();
+    ImGui::TextColored(webcam_capturing ? ImVec4(0.3f, 1.0f, 0.3f, 1.0f)
+                                        : ImVec4(1.0f, 0.8f, 0.2f, 1.0f),
+                       webcam_capturing ? "capture: live" : "capture: stopped");
+    if (!webcam_capture_mode.empty()) {
+      ImGui::SameLine();
+      ImGui::TextColored(ImVec4(0.55f, 0.55f, 0.55f, 1.0f),
+                         "mode=%s",
+                         webcam_capture_mode.c_str());
+    }
+
+    if (signal_filter_image.has_value()
+        && HasImagePreview(*signal_filter_image)) {
+      ImGui::TextColored(ImVec4(0.55f, 0.55f, 0.55f, 1.0f),
+                         "latest accepted visual signal is displayed below as soon as it is processed");
+    }
+  }
+
+  ImGui::Separator();
+  if (processing) {
+    ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.3f, 1.0f),
+                       "Processing playground input...");
+  }
+  if (last_status.has_value()) {
+    ImGui::TextColored(ImVec4(0.6f, 0.8f, 1.0f, 1.0f),
+                       "%s",
+                       last_status->c_str());
+  }
+  if (last_error.has_value()) {
+    ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f),
+                       "%s",
+                       last_error->c_str());
+  }
+  if (!last_input_kind.empty()) {
+    ImGui::Text("Last input: %s / %s",
+                last_input_kind.c_str(),
+                last_input_summary.c_str());
+    if (last_total_ms > 0.0 || last_process_ms > 0.0) {
+      ImGui::Text("Latency: total %.2f ms, process %.2f ms",
+                  last_total_ms,
+                  last_process_ms);
+    }
+  }
+
+  ImGui::Separator();
+  ImGui::TextColored(ImVec4(0.8f, 0.8f, 1.0f, 1.0f),
+                     "Retrieved memories");
+  std::size_t text_count = 0;
+  std::size_t image_count = 0;
+  std::size_t audio_count = 0;
+  std::size_t other_count = 0;
+  for (const auto& mem : retrieved_memories) {
+    if (mem.modality == "text") {
+      ++text_count;
+    } else if (mem.modality == "image") {
+      ++image_count;
+    } else if (mem.modality == "audio") {
+      ++audio_count;
+    } else {
+      ++other_count;
+    }
+  }
+  ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f),
+                     "results=%zu text=%zu image=%zu audio=%zu other=%zu",
+                     retrieved_memories.size(),
+                     text_count,
+                     image_count,
+                     audio_count,
+                     other_count);
+  if (retrieved_memories.empty()) {
+    ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f),
+                       "(no playground retrieval results yet)");
+    return;
+  }
+
+  const ImGuiTableFlags flags = ImGuiTableFlags_Borders
+                                | ImGuiTableFlags_RowBg
+                                | ImGuiTableFlags_Resizable
+                                | ImGuiTableFlags_SizingStretchProp;
+  ImGui::BeginChild("PlaygroundRetrievedMemories", ImVec2(0, 0), true);
+  if (ImGui::BeginTable("PlaygroundRetrievedMemoriesTable", 6, flags)) {
+    ImGui::TableSetupColumn("id", ImGuiTableColumnFlags_WidthFixed, 54.0f);
+    ImGui::TableSetupColumn("type", ImGuiTableColumnFlags_WidthFixed, 72.0f);
+    ImGui::TableSetupColumn("source", ImGuiTableColumnFlags_WidthFixed, 120.0f);
+    ImGui::TableSetupColumn("score", ImGuiTableColumnFlags_WidthFixed, 84.0f);
+    ImGui::TableSetupColumn("use", ImGuiTableColumnFlags_WidthFixed, 72.0f);
+    ImGui::TableSetupColumn("memory");
+    ImGui::TableHeadersRow();
+
+    for (const auto& mem : retrieved_memories) {
+      ImGui::TableNextRow();
+      ImGui::TableSetColumnIndex(0);
+      ImGui::Text("%lld", mem.memory_id);
+      ImGui::TableSetColumnIndex(1);
+      ImGui::TextColored(mem.modality == "image"
+                             ? ImVec4(0.5f, 0.8f, 1.0f, 1.0f)
+                             : (mem.modality == "audio"
+                                    ? ImVec4(0.8f, 0.7f, 1.0f, 1.0f)
+                                    : ImVec4(0.8f, 1.0f, 0.7f, 1.0f)),
+                         "%s",
+                         mem.modality.c_str());
+      ImGui::TableSetColumnIndex(2);
+      ImGui::TextWrapped("%s", mem.source_id.c_str());
+      ImGui::TableSetColumnIndex(3);
+      ImGui::Text("%.3f", mem.composite_score);
+      if (mem.relevance != 0.0) {
+        ImGui::TextColored(ImVec4(0.55f, 0.55f, 0.55f, 1.0f),
+                           "rel %.3f",
+                           mem.relevance);
+      }
+      ImGui::TableSetColumnIndex(4);
+      ImGui::Text("%lld/%lld", mem.used_count, mem.retrieved_count);
+      ImGui::TableSetColumnIndex(5);
+      ImGui::PushTextWrapPos();
+      ImGui::TextWrapped("%s", mem.preview.c_str());
+      if (!mem.mimetype.empty()) {
+        ImGui::TextColored(ImVec4(0.55f, 0.55f, 0.55f, 1.0f),
+                           "%s, %zu bytes",
+                           mem.mimetype.c_str(),
+                           mem.byte_count);
+      }
+      if (mem.modality == "image") {
+        if (ImGui::SmallButton(("Open image##playground_image_"
+                                + std::to_string(mem.memory_id)).c_str())) {
+          RequestMediaLoad(state_.db_explorer, "memory_image",
+                           mem.memory_id, 0);
+        }
+      } else if (mem.modality == "audio") {
+        if (ImGui::SmallButton(("Open audio##playground_audio_"
+                                + std::to_string(mem.memory_id)).c_str())) {
+          RequestMediaLoad(state_.db_explorer, "memory_audio",
+                           mem.memory_id, 0);
+        }
+      }
+      ImGui::PopTextWrapPos();
+    }
+
+    ImGui::EndTable();
+  }
+  ImGui::EndChild();
+}
+
+void ChatWindow::RenderWebcamTab() {
+  if (!state_.webcam) {
+    ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f),
+                       "Webcam state is unavailable.");
+    return;
+  }
+
+  bool supported = false;
+  bool available = false;
+  bool capturing = false;
+  int video_width = 0;
+  int video_height = 0;
+  std::uint64_t video_frames_captured = 0;
+  std::uint64_t video_frames_ingested = 0;
+  std::uint64_t video_frames_filtered = 0;
+  std::uint64_t audio_chunks_captured = 0;
+  std::uint64_t audio_chunks_ingested = 0;
+  std::uint64_t audio_chunks_filtered = 0;
+  double last_video_ingest_ms = 0.0;
+  double last_audio_ingest_ms = 0.0;
+  double mean_video_ingest_ms = 0.0;
+  double mean_audio_ingest_ms = 0.0;
+  std::optional<MemoryMediaPreview> signal_filter_image;
+  std::uint64_t signal_filter_image_version = 0;
+  std::string last_signal_filter_modality;
+  std::string last_signal_filter_reason;
+  double last_signal_filter_score = 0.0;
+  double last_signal_filter_threshold = 0.0;
+  std::uint64_t retrieval_update_count = 0;
+  std::vector<MemoryMediaPreview> retrieved_memories;
+  std::deque<MemoryMediaPreview> live_memory_feed;
+  bool audio_playing = false;
+  long long audio_playing_memory_id = 0;
+  std::optional<std::string> last_error;
+  {
+    std::lock_guard<std::mutex> lock(state_.webcam->mu);
+    supported = state_.webcam->supported;
+    available = state_.webcam->available;
+    capturing = state_.webcam->capturing;
+    video_width = state_.webcam->video_width;
+    video_height = state_.webcam->video_height;
+    video_frames_captured = state_.webcam->video_frames_captured;
+    video_frames_ingested = state_.webcam->video_frames_ingested;
+    video_frames_filtered = state_.webcam->video_frames_filtered;
+    audio_chunks_captured = state_.webcam->audio_chunks_captured;
+    audio_chunks_ingested = state_.webcam->audio_chunks_ingested;
+    audio_chunks_filtered = state_.webcam->audio_chunks_filtered;
+    last_video_ingest_ms = state_.webcam->last_video_ingest_ms;
+    last_audio_ingest_ms = state_.webcam->last_audio_ingest_ms;
+    mean_video_ingest_ms = state_.webcam->mean_video_ingest_ms;
+    mean_audio_ingest_ms = state_.webcam->mean_audio_ingest_ms;
+    signal_filter_image = state_.webcam->signal_filter_image;
+    signal_filter_image_version = state_.webcam->signal_filter_image_version;
+    last_signal_filter_modality = state_.webcam->last_signal_filter_modality;
+    last_signal_filter_reason = state_.webcam->last_signal_filter_reason;
+    last_signal_filter_score = state_.webcam->last_signal_filter_score;
+    last_signal_filter_threshold = state_.webcam->last_signal_filter_threshold;
+    retrieval_update_count = state_.webcam->retrieval_update_count;
+    retrieved_memories = state_.webcam->retrieved_memories;
+    live_memory_feed = state_.webcam->live_memory_feed;
+    audio_playing = state_.webcam->audio_playing;
+    audio_playing_memory_id = state_.webcam->audio_playing_memory_id;
+    last_error = state_.webcam->last_error;
+  }
+
+  ImGui::TextColored(ImVec4(0.8f, 0.8f, 1.0f, 1.0f),
+                     "DIRECT CAMERA + MICROPHONE INGEST");
+  ImGui::TextWrapped(
+      "This path feeds raw webcam frames and microphone PCM directly into Cortext. "
+      "It does not run speech-to-text, diarization, speaker labeling, or reply generation.");
+
+  if (!supported) {
+    ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f),
+                       "Direct webcam capture is only available on macOS builds.");
+    return;
+  }
+
+  if (capturing) {
+    if (ImGui::Button("Stop Webcam Ingest")) {
+      std::lock_guard<std::mutex> lock(state_.webcam->mu);
+      state_.webcam->stop_requested = true;
+      state_.webcam->image_capture_pending = false;
+    }
+  } else {
+    if (ImGui::Button("Start Webcam Ingest")) {
+      std::lock_guard<std::mutex> lock(state_.webcam->mu);
+      state_.webcam->capture_mode = "all";
+      state_.webcam->image_capture_pending = false;
+      state_.webcam->start_requested = true;
+    }
+  }
+
+  ImGui::SameLine();
+  ImGui::TextColored(capturing ? ImVec4(0.3f, 1.0f, 0.3f, 1.0f)
+                               : ImVec4(1.0f, 0.8f, 0.2f, 1.0f),
+                     capturing ? "Capture: live" : "Capture: stopped");
+
+  if (!available) {
+    ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f),
+                       "Camera or microphone capture is unavailable.");
+  }
+  if (last_error.has_value()) {
+    ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f),
+                       "%s",
+                       last_error->c_str());
+  }
+
+  ImGui::Separator();
+  ImGui::Text("Video: %dx%d", video_width, video_height);
+  ImGui::Text("Frames captured: %llu",
+              static_cast<unsigned long long>(video_frames_captured));
+  ImGui::Text("Frames ingested: %llu",
+              static_cast<unsigned long long>(video_frames_ingested));
+  ImGui::Text("Frames skipped by SignalFilter: %llu",
+              static_cast<unsigned long long>(video_frames_filtered));
+  ImGui::Text("Last / mean video ingest: %.2f ms / %.2f ms",
+              last_video_ingest_ms,
+              mean_video_ingest_ms);
+
+  ImGui::Separator();
+  ImGui::Text("Audio chunks captured: %llu",
+              static_cast<unsigned long long>(audio_chunks_captured));
+  ImGui::Text("Audio chunks ingested: %llu",
+              static_cast<unsigned long long>(audio_chunks_ingested));
+  ImGui::Text("Audio chunks skipped by SignalFilter: %llu",
+              static_cast<unsigned long long>(audio_chunks_filtered));
+  ImGui::Text("Last / mean audio ingest: %.2f ms / %.2f ms",
+              last_audio_ingest_ms,
+              mean_audio_ingest_ms);
+
+  ImGui::Separator();
+  ImGui::TextColored(ImVec4(0.8f, 0.8f, 1.0f, 1.0f),
+                     "Last visual signal accepted by SignalFilter");
+  if (!last_signal_filter_modality.empty()) {
+    ImGui::TextColored(ImVec4(0.65f, 0.65f, 0.65f, 1.0f),
+                       "last filter: %s / %s score %.3f threshold %.3f",
+                       last_signal_filter_modality.c_str(),
+                       last_signal_filter_reason.empty()
+                           ? "-"
+                           : last_signal_filter_reason.c_str(),
+                       last_signal_filter_score,
+                       last_signal_filter_threshold);
+  }
+  if (signal_filter_image.has_value() && HasImagePreview(*signal_filter_image)) {
+    const auto& preview = *signal_filter_image;
+    ImageTexture& cached = signal_filter_image_texture_;
+    if (cached.texture_id == 0
+        || cached.width != preview.image_width
+        || cached.height != preview.image_height
+        || cached.version != signal_filter_image_version) {
+      if (cached.texture_id != 0) {
+        const GLuint old_texture_id = cached.texture_id;
+        glDeleteTextures(1, &old_texture_id);
+      }
+      GLuint texture_id = 0;
+      glGenTextures(1, &texture_id);
+      glBindTexture(GL_TEXTURE_2D, texture_id);
+      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+      glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+      glTexImage2D(GL_TEXTURE_2D,
+                   0,
+                   preview.image_channels == 4 ? GL_RGBA : GL_RGB,
+                   preview.image_width,
+                   preview.image_height,
+                   0,
+                   preview.image_channels == 4 ? GL_RGBA : GL_RGB,
+                   GL_UNSIGNED_BYTE,
+                   preview.media_bytes.data());
+      glBindTexture(GL_TEXTURE_2D, 0);
+      cached.texture_id = texture_id;
+      cached.width = preview.image_width;
+      cached.height = preview.image_height;
+      cached.version = signal_filter_image_version;
+    }
+    const float max_side = 260.0f;
+    const float scale = std::min(
+        max_side / static_cast<float>(std::max(1, preview.image_width)),
+        max_side / static_cast<float>(std::max(1, preview.image_height)));
+    ImGui::Image(static_cast<ImTextureID>(cached.texture_id),
+                 ImVec2(static_cast<float>(preview.image_width) * scale,
+                        static_cast<float>(preview.image_height) * scale));
+  } else {
+    ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f),
+                       "(no visual frame has passed the SignalFilter yet)");
+  }
+
+  ImGui::Separator();
+  ImGui::TextColored(ImVec4(0.8f, 0.8f, 1.0f, 1.0f),
+                     "Retrieved memories from latest media ingest");
+  ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f),
+                     "updates=%llu results=%zu",
+                     static_cast<unsigned long long>(retrieval_update_count),
+                     retrieved_memories.size());
+  if (retrieved_memories.empty()) {
+    ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f),
+                       "(no memories retrieved for the latest webcam or mic signal)");
+  }
+
+  const ImGuiTableFlags flags = ImGuiTableFlags_Borders
+                                | ImGuiTableFlags_RowBg
+                                | ImGuiTableFlags_Resizable
+                                | ImGuiTableFlags_SizingStretchProp;
+  if (!retrieved_memories.empty()
+      && ImGui::BeginTable("WebcamRetrievedMemories", 6, flags)) {
+    ImGui::TableSetupColumn("id", ImGuiTableColumnFlags_WidthFixed, 54.0f);
+    ImGui::TableSetupColumn("type", ImGuiTableColumnFlags_WidthFixed, 72.0f);
+    ImGui::TableSetupColumn("source", ImGuiTableColumnFlags_WidthFixed, 120.0f);
+    ImGui::TableSetupColumn("score", ImGuiTableColumnFlags_WidthFixed, 84.0f);
+    ImGui::TableSetupColumn("use", ImGuiTableColumnFlags_WidthFixed, 72.0f);
+    ImGui::TableSetupColumn("memory");
+    ImGui::TableHeadersRow();
+
+    for (const auto& mem : retrieved_memories) {
+      ImGui::TableNextRow();
+      ImGui::TableSetColumnIndex(0);
+      ImGui::Text("%lld", mem.memory_id);
+
+      ImGui::TableSetColumnIndex(1);
+      ImGui::TextColored(mem.modality == "image"
+                             ? ImVec4(0.5f, 0.8f, 1.0f, 1.0f)
+                             : (mem.modality == "audio"
+                                    ? ImVec4(0.8f, 0.7f, 1.0f, 1.0f)
+                                    : ImVec4(0.8f, 1.0f, 0.7f, 1.0f)),
+                         "%s",
+                         mem.modality.c_str());
+
+      ImGui::TableSetColumnIndex(2);
+      ImGui::TextWrapped("%s", mem.source_id.c_str());
+
+      ImGui::TableSetColumnIndex(3);
+      ImGui::Text("%.3f", mem.composite_score);
+      if (mem.relevance != 0.0) {
+        ImGui::TextColored(ImVec4(0.55f, 0.55f, 0.55f, 1.0f),
+                           "rel %.3f",
+                           mem.relevance);
+      }
+
+      ImGui::TableSetColumnIndex(4);
+      ImGui::Text("%lld/%lld", mem.used_count, mem.retrieved_count);
+
+      ImGui::TableSetColumnIndex(5);
+      ImGui::PushTextWrapPos();
+      ImGui::TextWrapped("%s", mem.preview.c_str());
+      if (!mem.mimetype.empty()) {
+        ImGui::TextColored(ImVec4(0.55f, 0.55f, 0.55f, 1.0f),
+                           "%s, %zu bytes",
+                           mem.mimetype.c_str(),
+                           mem.byte_count);
+      }
+      if (HasImagePreview(mem)) {
+        if (ImGui::SmallButton(("Open image##webcam_image_"
+                                + std::to_string(mem.memory_id)).c_str())) {
+          RequestMediaLoad(state_.db_explorer, "memory_image",
+                           mem.memory_id, 0);
+        }
+      } else if (mem.modality == "image") {
+        if (ImGui::SmallButton(("Open image##webcam_image_lazy_"
+                                + std::to_string(mem.memory_id)).c_str())) {
+          RequestMediaLoad(state_.db_explorer, "memory_image",
+                           mem.memory_id, 0);
+        }
+      }
+
+      if (mem.modality == "audio") {
+        const bool playing_this = audio_playing
+                                  && audio_playing_memory_id == mem.preview_id;
+        if (playing_this) {
+          if (ImGui::SmallButton(("Stop##webcam_audio_"
+                                  + std::to_string(mem.memory_id)).c_str())) {
+            std::lock_guard<std::mutex> lock(state_.webcam->mu);
+            state_.webcam->audio_stop_requested = true;
+          }
+        } else if (ImGui::SmallButton(("Open audio##webcam_audio_"
+                                       + std::to_string(mem.memory_id)).c_str())) {
+          RequestMediaLoad(state_.db_explorer, "memory_audio",
+                           mem.memory_id, 0);
+        }
+      }
+      ImGui::PopTextWrapPos();
+    }
+
+    ImGui::EndTable();
+  }
+
+  ImGui::Separator();
+  ImGui::TextColored(ImVec4(0.8f, 0.8f, 1.0f, 1.0f),
+                     "Live surfaced memory feed");
+  ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f),
+                     "rolling=%zu; this is fed directly from ingestion results, not DB refresh",
+                     live_memory_feed.size());
+  if (live_memory_feed.empty()) {
+    ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f),
+                       "(no surfaced memories yet)");
+    return;
+  }
+
+  ImGui::BeginChild("WebcamLiveMemoryFeed", ImVec2(0, 280), true);
+  if (ImGui::BeginTable("WebcamLiveMemoryFeedTable", 5, flags)) {
+    ImGui::TableSetupColumn("id", ImGuiTableColumnFlags_WidthFixed, 54.0f);
+    ImGui::TableSetupColumn("type", ImGuiTableColumnFlags_WidthFixed, 72.0f);
+    ImGui::TableSetupColumn("score", ImGuiTableColumnFlags_WidthFixed, 84.0f);
+    ImGui::TableSetupColumn("use", ImGuiTableColumnFlags_WidthFixed, 72.0f);
+    ImGui::TableSetupColumn("memory");
+    ImGui::TableHeadersRow();
+
+    int feed_row = 0;
+    for (const auto& mem : live_memory_feed) {
+      ImGui::PushID(feed_row++);
+      ImGui::TableNextRow();
+      ImGui::TableSetColumnIndex(0);
+      ImGui::Text("%lld", mem.memory_id);
+
+      ImGui::TableSetColumnIndex(1);
+      ImGui::TextColored(mem.modality == "image"
+                             ? ImVec4(0.5f, 0.8f, 1.0f, 1.0f)
+                             : (mem.modality == "audio"
+                                    ? ImVec4(0.8f, 0.7f, 1.0f, 1.0f)
+                                    : ImVec4(0.8f, 1.0f, 0.7f, 1.0f)),
+                         "%s",
+                         mem.modality.c_str());
+
+      ImGui::TableSetColumnIndex(2);
+      ImGui::Text("%.3f", mem.composite_score);
+      if (mem.relevance != 0.0) {
+        ImGui::TextColored(ImVec4(0.55f, 0.55f, 0.55f, 1.0f),
+                           "rel %.3f",
+                           mem.relevance);
+      }
+
+      ImGui::TableSetColumnIndex(3);
+      ImGui::Text("%lld/%lld", mem.used_count, mem.retrieved_count);
+
+      ImGui::TableSetColumnIndex(4);
+      ImGui::PushTextWrapPos();
+      ImGui::TextWrapped("%s", mem.preview.c_str());
+      if (mem.modality == "image") {
+        if (ImGui::SmallButton("Open image")) {
+          RequestMediaLoad(state_.db_explorer, "memory_image",
+                           mem.memory_id, 0);
+        }
+      } else if (mem.modality == "audio") {
+        if (ImGui::SmallButton("Open audio")) {
+          RequestMediaLoad(state_.db_explorer, "memory_audio",
+                           mem.memory_id, 0);
+        }
+      }
+      ImGui::PopTextWrapPos();
+      ImGui::PopID();
+    }
+
+    ImGui::EndTable();
+  }
+  ImGui::EndChild();
 }
 
 void ChatWindow::RenderChatTab() {
@@ -1287,6 +1962,20 @@ void ChatWindow::RenderMemoryTab() {
                          FormatDouble(evt.composite_score).c_str(),
                          FormatDouble(evt.threshold_t).c_str());
 
+      if (!evt.soft_anchors.empty()) {
+        ImGui::TextColored(ImVec4(0.4f, 0.9f, 1.0f, 1.0f), "  SoftAnchor");
+        for (const auto& anchor : evt.soft_anchors) {
+          ImGui::TextColored(
+              ImVec4(0.7f, 0.9f, 1.0f, 1.0f),
+              "    %s strength=%s likelihood=%s label=%s tier=%s",
+              anchor.id.empty() ? "(unknown)" : anchor.id.c_str(),
+              FormatDouble(anchor.strength).c_str(),
+              FormatDouble(anchor.likelihood).c_str(),
+              anchor.label.empty() ? "none" : anchor.label.c_str(),
+              anchor.tier.empty() ? "unknown" : anchor.tier.c_str());
+        }
+      }
+
       // Metrics row 1
       ImGui::TextColored(ImVec4(0.3f, 1.0f, 1.0f, 1.0f), "  rel=%s mis=%s sur=%s rar=%s",
                          FormatDouble(evt.relevance).c_str(),
@@ -1307,6 +1996,19 @@ void ChatWindow::RenderMemoryTab() {
                          FormatDouble(evt.salience).c_str(),
                          FormatDouble(evt.valence).c_str(),
                          FormatDouble(evt.arousal).c_str());
+
+      if (evt.soft_anchor_enabled) {
+        ImGui::TextColored(ImVec4(0.7f, 0.9f, 1.0f, 1.0f),
+                           "  soft anchor: mem=%lld states=%d links=%d create=%d update=%d none=%d last=%sus mean=%sus",
+                           evt.stored_memory_id,
+                           evt.soft_anchor_state_count,
+                           evt.soft_anchor_link_count,
+                           evt.soft_anchor_create_count,
+                           evt.soft_anchor_update_count,
+                           evt.soft_anchor_none_count,
+                           FormatDouble(evt.soft_anchor_last_update_us).c_str(),
+                           FormatDouble(evt.soft_anchor_mean_update_us).c_str());
+      }
 
       // Content preview
       std::string preview = Truncate(evt.content, 120);
@@ -1389,11 +2091,14 @@ void ChatWindow::RenderSettingsTab() {
   double active_sensitivity = 0.5;
   double active_stability = 0.5;
   int active_idle_consolidation_seconds = 0;
+  double active_webcam_video_fps = 1.0;
   double draft_focus = 0.5;
   double draft_sensitivity = 0.5;
   double draft_stability = 0.5;
   int draft_idle_consolidation_seconds = 0;
+  double draft_webcam_video_fps = 1.0;
   int default_idle_consolidation_seconds = 0;
+  double default_webcam_video_fps = 1.0;
   std::string active_model;
   std::string draft_model;
   std::string default_model;
@@ -1412,13 +2117,16 @@ void ChatWindow::RenderSettingsTab() {
     active_stability = state_.settings->active_stability;
     active_idle_consolidation_seconds
         = state_.settings->active_idle_consolidation_seconds;
+    active_webcam_video_fps = state_.settings->active_webcam_video_fps;
     draft_focus = state_.settings->draft_focus;
     draft_sensitivity = state_.settings->draft_sensitivity;
     draft_stability = state_.settings->draft_stability;
     draft_idle_consolidation_seconds
         = state_.settings->draft_idle_consolidation_seconds;
+    draft_webcam_video_fps = state_.settings->draft_webcam_video_fps;
     default_idle_consolidation_seconds
         = state_.settings->default_idle_consolidation_seconds;
+    default_webcam_video_fps = state_.settings->default_webcam_video_fps;
     active_model = state_.settings->active_model;
     draft_model = state_.settings->draft_model;
     default_model = state_.settings->default_model;
@@ -1459,6 +2167,8 @@ void ChatWindow::RenderSettingsTab() {
                      || !NearlyEqual(active_stability, draft_stability)
                      || active_idle_consolidation_seconds
                             != draft_idle_consolidation_seconds
+                     || !NearlyEqual(active_webcam_video_fps,
+                                     draft_webcam_video_fps)
                      || active_model != draft_model
                      || active_memory_prompt_prefix != draft_memory_prompt_prefix
                      || active_memory_prompt_suffix != draft_memory_prompt_suffix;
@@ -1514,6 +2224,32 @@ void ChatWindow::RenderSettingsTab() {
     ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f),
                        "Default uses stability.");
   }
+
+  ImGui::Separator();
+  ImGui::TextColored(ImVec4(0.8f, 0.8f, 1.0f, 1.0f), "Webcam");
+  ImGui::TextWrapped(
+      "Direct webcam ingest sends camera frames to Cortext as images. Lower FPS reduces multimodal ingest cost.");
+  float webcam_fps_f = static_cast<float>(draft_webcam_video_fps);
+  if (ImGui::SliderFloat("Webcam FPS", &webcam_fps_f, 0.1f, 30.0f, "%.1f")) {
+    webcam_fps_f = std::clamp(webcam_fps_f, 0.1f, 30.0f);
+    std::lock_guard<std::mutex> lock(state_.settings->mu);
+    state_.settings->draft_webcam_video_fps
+        = static_cast<double>(webcam_fps_f);
+    draft_webcam_video_fps = state_.settings->draft_webcam_video_fps;
+  }
+  ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f),
+                     "Active webcam FPS: %.1f",
+                     active_webcam_video_fps);
+  if (ImGui::Button("Reset Webcam FPS")) {
+    std::lock_guard<std::mutex> lock(state_.settings->mu);
+    state_.settings->draft_webcam_video_fps
+        = state_.settings->default_webcam_video_fps;
+    draft_webcam_video_fps = state_.settings->default_webcam_video_fps;
+  }
+  ImGui::SameLine();
+  ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f),
+                     "Default: %.1f FPS",
+                     default_webcam_video_fps);
 
   ImGui::Separator();
   ImGui::TextColored(ImVec4(0.8f, 0.8f, 1.0f, 1.0f), "Model");
@@ -1615,6 +2351,8 @@ void ChatWindow::RenderSettingsTab() {
     state_.settings->draft_stability = state_.settings->active_stability;
     state_.settings->draft_idle_consolidation_seconds
         = state_.settings->active_idle_consolidation_seconds;
+    state_.settings->draft_webcam_video_fps
+        = state_.settings->active_webcam_video_fps;
     state_.settings->draft_model = state_.settings->active_model;
     state_.settings->draft_memory_prompt_prefix
         = state_.settings->active_memory_prompt_prefix;
@@ -1627,6 +2365,124 @@ void ChatWindow::RenderSettingsTab() {
       "Changing these knobs rebuilds the Cortext instance against the same chat DB. "
       "New generations use the updated config; active working-memory contents may take "
       "a turn to fully reflect the new settings.");
+}
+
+void ChatWindow::RenderMediaModal() {
+  if (!state_.db_explorer) {
+    return;
+  }
+
+  std::optional<MemoryMediaPreview> media;
+  bool open_requested = false;
+  bool db_audio_playing = false;
+  long long db_audio_playing_id = 0;
+  {
+    std::lock_guard<std::mutex> lock(state_.db_explorer->mu);
+    media = state_.db_explorer->loaded_media_modal;
+    open_requested = state_.db_explorer->media_modal_open_requested;
+    state_.db_explorer->media_modal_open_requested = false;
+    db_audio_playing = state_.db_explorer->audio_playing;
+    db_audio_playing_id = state_.db_explorer->audio_playing_memory_id;
+  }
+
+  if (open_requested) {
+    ImGui::OpenPopup("Media preview");
+  }
+
+  ImGui::SetNextWindowSize(ImVec2(720.0f, 620.0f), ImGuiCond_Appearing);
+  if (!ImGui::BeginPopupModal("Media preview", nullptr,
+                              ImGuiWindowFlags_NoSavedSettings)) {
+    return;
+  }
+
+  if (!media.has_value()) {
+    ImGui::TextColored(ImVec4(0.8f, 0.6f, 0.4f, 1.0f),
+                       "No media loaded.");
+    if (ImGui::Button("Close")) {
+      ImGui::CloseCurrentPopup();
+    }
+    ImGui::EndPopup();
+    return;
+  }
+
+  const auto& preview = *media;
+  ImGui::TextColored(ImVec4(0.7f, 0.9f, 1.0f, 1.0f),
+                     "memory=%lld preview=%lld modality=%s",
+                     preview.memory_id,
+                     preview.preview_id,
+                     preview.modality.c_str());
+  ImGui::TextColored(ImVec4(0.55f, 0.55f, 0.55f, 1.0f),
+                     "%s, %zu bytes",
+                     preview.mimetype.empty() ? "-" : preview.mimetype.c_str(),
+                     preview.byte_count);
+  ImGui::Separator();
+
+  if (HasImagePreview(preview)) {
+    ImageTexture& cached = webcam_image_textures_[preview.preview_id];
+    if (cached.texture_id == 0
+        || cached.width != preview.image_width
+        || cached.height != preview.image_height) {
+      if (cached.texture_id != 0) {
+        const GLuint old_texture_id = cached.texture_id;
+        glDeleteTextures(1, &old_texture_id);
+      }
+      GLuint texture_id = 0;
+      glGenTextures(1, &texture_id);
+      glBindTexture(GL_TEXTURE_2D, texture_id);
+      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+      glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+      glTexImage2D(GL_TEXTURE_2D,
+                   0,
+                   preview.image_channels == 4 ? GL_RGBA : GL_RGB,
+                   preview.image_width,
+                   preview.image_height,
+                   0,
+                   preview.image_channels == 4 ? GL_RGBA : GL_RGB,
+                   GL_UNSIGNED_BYTE,
+                   preview.media_bytes.data());
+      glBindTexture(GL_TEXTURE_2D, 0);
+      cached.texture_id = texture_id;
+      cached.width = preview.image_width;
+      cached.height = preview.image_height;
+    }
+    const float max_side = 560.0f;
+    const float scale = std::min(
+        max_side / static_cast<float>(std::max(1, preview.image_width)),
+        max_side / static_cast<float>(std::max(1, preview.image_height)));
+    ImGui::Image(static_cast<ImTextureID>(cached.texture_id),
+                 ImVec2(static_cast<float>(preview.image_width) * scale,
+                        static_cast<float>(preview.image_height) * scale));
+  } else if (preview.modality == "audio" && HasAudioPreview(preview)) {
+    const bool playing_this = db_audio_playing
+                              && db_audio_playing_id == preview.preview_id;
+    if (playing_this) {
+      if (ImGui::Button("Stop audio")) {
+        std::lock_guard<std::mutex> lock(state_.db_explorer->mu);
+        state_.db_explorer->audio_stop_requested = true;
+      }
+    } else if (ImGui::Button("Play audio")) {
+      std::lock_guard<std::mutex> lock(state_.db_explorer->mu);
+      state_.db_explorer->audio_play_request = preview;
+    }
+    const double duration_s = static_cast<double>(preview.audio_samples.size())
+                              / static_cast<double>(preview.audio_sample_rate);
+    ImGui::SameLine();
+    ImGui::TextColored(ImVec4(0.55f, 0.55f, 0.55f, 1.0f),
+                       "%.2fs @ %d Hz",
+                       duration_s,
+                       preview.audio_sample_rate);
+  } else {
+    ImGui::TextWrapped("%s", preview.preview.c_str());
+  }
+
+  ImGui::Separator();
+  if (ImGui::Button("Close")) {
+    ImGui::CloseCurrentPopup();
+  }
+  ImGui::EndPopup();
 }
 
 void ChatWindow::RenderDatabaseTab() {
@@ -1645,6 +2501,10 @@ void ChatWindow::RenderDatabaseTab() {
   long long total_facts = 0;
   long long total_evictions = 0;
   uint64_t refreshed_at = 0;
+  bool db_audio_playing = false;
+  long long db_audio_playing_id = 0;
+  bool is_consolidating = state_.idle_consolidating
+                          && state_.idle_consolidating->load();
   std::optional<std::string> last_status;
   {
     std::lock_guard<std::mutex> lock(state_.db_explorer->mu);
@@ -1661,6 +2521,8 @@ void ChatWindow::RenderDatabaseTab() {
     total_facts = state_.db_explorer->total_facts;
     total_evictions = state_.db_explorer->total_evictions;
     refreshed_at = state_.db_explorer->refreshed_at;
+    db_audio_playing = state_.db_explorer->audio_playing;
+    db_audio_playing_id = state_.db_explorer->audio_playing_memory_id;
     last_status = state_.db_explorer->last_refresh_status;
   }
 
@@ -1671,6 +2533,19 @@ void ChatWindow::RenderDatabaseTab() {
     if (MatchesDatabaseExplorerFilter(row, filter)) {
       filtered_memories.push_back(row);
     }
+  }
+  std::unordered_map<long long, std::vector<DatabaseSignalRow>> signals_by_memory;
+  signals_by_memory.reserve(signals.size());
+  for (const auto& signal : signals) {
+    signals_by_memory[signal.memory_id].push_back(signal);
+  }
+  for (auto& kv : signals_by_memory) {
+    std::sort(kv.second.begin(), kv.second.end(), [](const auto& a, const auto& b) {
+      if (a.serial_position != b.serial_position) {
+        return a.serial_position < b.serial_position;
+      }
+      return a.signal_id < b.signal_id;
+    });
   }
 
   const bool show_associations = filter == DatabaseExplorerFilter::All
@@ -1689,6 +2564,19 @@ void ChatWindow::RenderDatabaseTab() {
     std::lock_guard<std::mutex> lock(state_.db_explorer->mu);
     state_.db_explorer->refresh_requested = true;
     state_.db_explorer->last_refresh_status = "Refresh requested...";
+  }
+  ImGui::SameLine();
+  ImGui::BeginDisabled(is_consolidating);
+  if (ImGui::Button("Consolidate")) {
+    std::lock_guard<std::mutex> lock(state_.db_explorer->mu);
+    state_.db_explorer->consolidate_requested = true;
+    state_.db_explorer->last_refresh_status = "Consolidation requested...";
+  }
+  ImGui::EndDisabled();
+  if (is_consolidating) {
+    ImGui::SameLine();
+    ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.3f, 1.0f),
+                       "consolidating");
   }
   ImGui::SameLine();
   ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.55f, 0.18f, 0.18f, 1.0f));
@@ -1778,7 +2666,7 @@ void ChatWindow::RenderDatabaseTab() {
 
   if (show_memories
       && ImGui::CollapsingHeader("Memories", ImGuiTreeNodeFlags_DefaultOpen)) {
-    ImGui::BeginChild("DbMemories", ImVec2(0, 220), true);
+    ImGui::BeginChild("DbMemories", ImVec2(0, 420), true);
     if (filtered_memories.empty()) {
       ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "(no memories)");
     } else {
@@ -1803,6 +2691,104 @@ void ChatWindow::RenderDatabaseTab() {
                              NullOrValue(row.end_ts).c_str());
           if (!row.label.empty()) {
             ImGui::TextWrapped("%s", row.label.c_str());
+          }
+          const auto signal_it = signals_by_memory.find(row.memory_id);
+          if (signal_it != signals_by_memory.end()) {
+            ImGui::Spacing();
+            int audio_count = 0;
+            int image_count = 0;
+            int text_count = 0;
+            for (const auto& signal : signal_it->second) {
+              if (signal.modality == "audio") {
+                ++audio_count;
+              } else if (signal.modality == "image") {
+                ++image_count;
+              } else if (signal.modality == "text") {
+                ++text_count;
+              }
+            }
+
+            ImGui::TextColored(ImVec4(0.8f, 0.8f, 1.0f, 1.0f),
+                               "Memory media");
+            ImGui::TextColored(ImVec4(0.55f, 0.55f, 0.55f, 1.0f),
+                               "audio=%d image=%d text=%d",
+                               audio_count,
+                               image_count,
+                               text_count);
+            if (audio_count > 0) {
+              const bool playing_this = db_audio_playing
+                                        && db_audio_playing_id
+                                               == -row.memory_id;
+              if (playing_this) {
+                if (ImGui::SmallButton(
+                        ("Stop memory audio##db_memory_audio_"
+                         + std::to_string(row.memory_id))
+                            .c_str())) {
+                  std::lock_guard<std::mutex> lock(state_.db_explorer->mu);
+                  state_.db_explorer->audio_stop_requested = true;
+                }
+              } else if (ImGui::SmallButton(
+                             ("Open memory audio##db_memory_audio_"
+                              + std::to_string(row.memory_id))
+                                 .c_str())) {
+                RequestMediaLoad(state_.db_explorer, "memory_audio",
+                                 row.memory_id, 0);
+              }
+              ImGui::SameLine();
+              ImGui::TextColored(ImVec4(0.55f, 0.55f, 0.55f, 1.0f),
+                                 "%d audio signal(s), loaded on demand",
+                                 audio_count);
+            }
+            ImGui::TextColored(ImVec4(0.8f, 0.8f, 1.0f, 1.0f),
+                               "Signal payloads");
+            for (const auto& signal : signal_it->second) {
+              const auto& preview = signal.preview;
+              ImGui::PushID(static_cast<int>(signal.signal_id));
+              ImGui::Separator();
+              ImGui::TextColored(ImVec4(0.7f, 0.9f, 1.0f, 1.0f),
+                                 "signal #%lld %s",
+                                 signal.signal_id,
+                                 signal.modality.c_str());
+              ImGui::SameLine();
+              ImGui::TextColored(ImVec4(0.55f, 0.55f, 0.55f, 1.0f),
+                                 "%s, %zu bytes",
+                                 signal.mime.empty() ? "-" : signal.mime.c_str(),
+                                 preview.byte_count);
+
+              if (signal.modality == "text") {
+                ImGui::PushTextWrapPos();
+                ImGui::TextWrapped("%s", preview.preview.c_str());
+                ImGui::PopTextWrapPos();
+              } else if (signal.modality == "image") {
+                const std::string show_label
+                    = "Open image##db_image_" + std::to_string(signal.signal_id);
+                if (ImGui::SmallButton(show_label.c_str())) {
+                  RequestMediaLoad(state_.db_explorer, "signal_image",
+                                   signal.memory_id, signal.signal_id);
+                }
+                ImGui::SameLine();
+                ImGui::TextColored(ImVec4(0.55f, 0.55f, 0.55f, 1.0f),
+                                   "loaded on demand");
+              } else if (signal.modality == "audio") {
+                const bool playing_this = db_audio_playing
+                                          && db_audio_playing_id == preview.preview_id;
+                if (playing_this) {
+                  if (ImGui::SmallButton("Stop")) {
+                    std::lock_guard<std::mutex> lock(state_.db_explorer->mu);
+                      state_.db_explorer->audio_stop_requested = true;
+                    }
+                  } else if (ImGui::SmallButton("Open audio")) {
+                    RequestMediaLoad(state_.db_explorer, "signal_audio",
+                                     signal.memory_id, signal.signal_id);
+                  }
+                ImGui::SameLine();
+                ImGui::TextColored(ImVec4(0.55f, 0.55f, 0.55f, 1.0f),
+                                   "loaded on demand");
+              } else {
+                ImGui::TextWrapped("%s", preview.preview.c_str());
+              }
+              ImGui::PopID();
+            }
           }
         }
       }

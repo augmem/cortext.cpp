@@ -27,7 +27,7 @@ namespace litert::lm {
 // Try to infer the model type from the tokenizer. This is for backward
 // compatibility, when the model type is not set in the model LlmMetadata.
 absl::StatusOr<proto::LlmModelType> InferLlmModelType(
-    const proto::LlmMetadata& metadata, Tokenizer& tokenizer);
+    const proto::LlmMetadata& metadata, Tokenizer* tokenizer);
 
 // Get the default jinja prompt template for the given model type.
 // This is for backwards compatibility when the deprecated prompt_templates of

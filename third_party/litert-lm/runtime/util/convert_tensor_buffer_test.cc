@@ -278,9 +278,9 @@ TEST(ConvertTensorBufferTest, DropTokensfromTensorBuffer2D_Success) {
   std::vector<int32_t> source_data = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10};
   LITERT_ASSERT_OK_AND_ASSIGN(auto source_tensor_buffer,
                               CopyToTensorBuffer<int32_t>(source_data, {2, 5}));
-  LITERT_ASSERT_OK(
-      DropTokensfromTensorBuffer<int32_t>(source_tensor_buffer,
-                                          /*num_tokens_to_drop=*/2, /*dimension=*/1));
+  LITERT_ASSERT_OK(DropTokensfromTensorBuffer<int32_t>(source_tensor_buffer,
+                                                       /*num_tokens_to_drop=*/2,
+                                                       /*dimension=*/1));
   EXPECT_THAT(source_tensor_buffer.TensorType(),
               IsOkAndHolds(LayoutDimensionsAre(Dimensions({2, 5}))));
   EXPECT_THAT(source_tensor_buffer.Size(), IsOkAndHolds(40));
@@ -304,32 +304,30 @@ TEST(ConvertTensorBufferTest, DropTokensfromTensorBuffer_InvalidDropSize) {
   std::vector<int32_t> source_data = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10};
   LITERT_ASSERT_OK_AND_ASSIGN(auto source_tensor_buffer,
                               CopyToTensorBuffer<int32_t>(source_data, {10}));
-  EXPECT_THAT(
-      DropTokensfromTensorBuffer<int32_t>(source_tensor_buffer, 2, 10),
-      IsError(::litert::Status::kErrorInvalidArgument,
-              "Target dimension is out of range."));
+  EXPECT_THAT(DropTokensfromTensorBuffer<int32_t>(source_tensor_buffer, 2, 10),
+              IsError(::litert::Status::kErrorInvalidArgument,
+                      "Target dimension is out of range."));
 }
 
 TEST(ConvertTensorBufferTest, DropTokensfromTensorBuffer4D_Dim_2_Success) {
-  std::vector<int32_t> source_data = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
+  std::vector<int32_t> source_data = {1,  2,  3,  4,  5,  6,  7,  8,  9,  10,
                                       11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
                                       21, 22, 23, 24, 25, 26, 27, 28, 29, 30,
                                       31, 32, 33, 34, 35, 36, 37, 38, 39, 40};
-  LITERT_ASSERT_OK_AND_ASSIGN(auto source_tensor_buffer,
-                              CopyToTensorBuffer<int32_t>(source_data,
-                                                          {2, 1, 4, 5}));
-  LITERT_ASSERT_OK(
-      DropTokensfromTensorBuffer<int32_t>(source_tensor_buffer,
-                                          /*num_tokens_to_drop=*/2,
-                                          /*dimension=*/2));
+  LITERT_ASSERT_OK_AND_ASSIGN(
+      auto source_tensor_buffer,
+      CopyToTensorBuffer<int32_t>(source_data, {2, 1, 4, 5}));
+  LITERT_ASSERT_OK(DropTokensfromTensorBuffer<int32_t>(source_tensor_buffer,
+                                                       /*num_tokens_to_drop=*/2,
+                                                       /*dimension=*/2));
   EXPECT_THAT(source_tensor_buffer.TensorType(),
               IsOkAndHolds(LayoutDimensionsAre(Dimensions({2, 1, 4, 5}))));
   EXPECT_THAT(source_tensor_buffer.Size(), IsOkAndHolds(160));
-  EXPECT_THAT(ReferTensorBufferAsSpan<int32_t>(source_tensor_buffer),
-              IsOkAndHolds(ElementsAre(11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
-                                       0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-                                       31, 32, 33, 34, 35, 36, 37, 38, 39, 40,
-                                       0, 0, 0, 0, 0, 0, 0, 0, 0, 0)));
+  EXPECT_THAT(
+      ReferTensorBufferAsSpan<int32_t>(source_tensor_buffer),
+      IsOkAndHolds(ElementsAre(11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 0, 0, 0,
+                               0, 0, 0, 0, 0, 0, 0, 31, 32, 33, 34, 35, 36, 37,
+                               38, 39, 40, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)));
 }
 
 TEST(ConvertTensorBufferTest,
@@ -411,25 +409,24 @@ TEST(ConvertTensorBufferTest,
 }
 
 TEST(ConvertTensorBufferTest, DropTokensfromTensorBuffer4D_Dim_3_Success) {
-  std::vector<int32_t> source_data = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
+  std::vector<int32_t> source_data = {1,  2,  3,  4,  5,  6,  7,  8,  9,  10,
                                       11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
                                       21, 22, 23, 24, 25, 26, 27, 28, 29, 30,
                                       31, 32, 33, 34, 35, 36, 37, 38, 39, 40};
-  LITERT_ASSERT_OK_AND_ASSIGN(auto source_tensor_buffer,
-                              CopyToTensorBuffer<int32_t>(source_data,
-                                                          {2, 1, 4, 5}));
-  LITERT_ASSERT_OK(
-      DropTokensfromTensorBuffer<int32_t>(source_tensor_buffer,
-                                          /*num_tokens_to_drop=*/2,
-                                          /*dimension=*/3));
+  LITERT_ASSERT_OK_AND_ASSIGN(
+      auto source_tensor_buffer,
+      CopyToTensorBuffer<int32_t>(source_data, {2, 1, 4, 5}));
+  LITERT_ASSERT_OK(DropTokensfromTensorBuffer<int32_t>(source_tensor_buffer,
+                                                       /*num_tokens_to_drop=*/2,
+                                                       /*dimension=*/3));
   EXPECT_THAT(source_tensor_buffer.TensorType(),
               IsOkAndHolds(LayoutDimensionsAre(Dimensions({2, 1, 4, 5}))));
   EXPECT_THAT(source_tensor_buffer.Size(), IsOkAndHolds(160));
-  EXPECT_THAT(ReferTensorBufferAsSpan<int32_t>(source_tensor_buffer),
-              IsOkAndHolds(ElementsAre(3, 4, 5, 0, 0, 8, 9, 10, 0, 0,
-                                       13, 14, 15, 0, 0, 18, 19, 20, 0, 0,
-                                       23, 24, 25, 0, 0, 28, 29, 30, 0, 0,
-                                       33, 34, 35, 0, 0, 38, 39, 40, 0, 0)));
+  EXPECT_THAT(
+      ReferTensorBufferAsSpan<int32_t>(source_tensor_buffer),
+      IsOkAndHolds(ElementsAre(3, 4, 5, 0, 0, 8, 9, 10, 0, 0, 13, 14, 15, 0, 0,
+                               18, 19, 20, 0, 0, 23, 24, 25, 0, 0, 28, 29, 30,
+                               0, 0, 33, 34, 35, 0, 0, 38, 39, 40, 0, 0)));
 }
 
 TEST(ConvertTensorBufferTest,
@@ -454,6 +451,53 @@ TEST(ConvertTensorBufferTest,
       IsOkAndHolds(ElementsAre(1, 4, 5, 0, 0, 6, 9, 10, 0, 0, 11, 14, 15, 0, 0,
                                16, 19, 20, 0, 0, 21, 24, 25, 0, 0, 26, 29, 30,
                                0, 0, 31, 34, 35, 0, 0, 36, 39, 40, 0, 0)));
+}
+
+TEST(ConvertTensorBufferTest, CopyToTensorBuffer_Bool_Success) {
+  bool data[] = {true,  false, true,  false, true,
+                 false, true,  false, true,  false};
+  LITERT_ASSERT_OK_AND_ASSIGN(
+      auto tensor_buffer,
+      CopyToTensorBuffer<bool>(absl::MakeConstSpan(data), {2, 5}));
+  EXPECT_THAT(tensor_buffer.TensorType(),
+              IsOkAndHolds(LayoutDimensionsAre(Dimensions({2, 5}))));
+  EXPECT_THAT(tensor_buffer.Size(), IsOkAndHolds(10));
+  EXPECT_THAT(tensor_buffer.BufferType(),
+              IsOkAndHolds(::litert::TensorBufferType::kHostMemory));
+
+  LITERT_ASSERT_OK_AND_ASSIGN(
+      auto lock_and_addr, ::litert::TensorBufferScopedLock::Create(
+                              tensor_buffer, TensorBuffer::LockMode::kRead));
+  LITERT_ASSERT_OK_AND_ASSIGN(const size_t buffer_size, tensor_buffer.Size());
+  const auto span = absl::MakeConstSpan(
+      static_cast<bool*>(lock_and_addr.second), buffer_size / sizeof(bool));
+  EXPECT_THAT(span, ElementsAre(true, false, true, false, true, false, true,
+                                false, true, false));
+}
+
+TEST(ConvertTensorBufferTest, CopyFromTensorBuffer_Bool_Success) {
+  bool data[] = {true,  false, true,  false, true,
+                 false, true,  false, true,  false};
+  LITERT_ASSERT_OK_AND_ASSIGN(
+      auto tensor_buffer,
+      CopyToTensorBuffer<bool>(absl::MakeConstSpan(data), {2, 5}));
+  EXPECT_THAT(CopyFromTensorBuffer<bool>(tensor_buffer),
+              IsOkAndHolds(ElementsAre(true, false, true, false, true, false,
+                                       true, false, true, false)));
+}
+
+TEST(ConvertTensorBufferTest, CopyFromTensorBuffer2D_Bool_Success) {
+  bool data[] = {true,  false, true,  false, true,
+                 false, true,  false, true,  false};
+  LITERT_ASSERT_OK_AND_ASSIGN(
+      auto tensor_buffer,
+      CopyToTensorBuffer<bool>(absl::MakeConstSpan(data), {2, 5}));
+
+  LITERT_ASSERT_OK_AND_ASSIGN(auto copied_data,
+                              CopyFromTensorBuffer2D<bool>(tensor_buffer));
+  EXPECT_EQ(copied_data.size(), 2);
+  EXPECT_THAT(copied_data[0], ElementsAre(true, false, true, false, true));
+  EXPECT_THAT(copied_data[1], ElementsAre(false, true, false, true, false));
 }
 
 }  // namespace

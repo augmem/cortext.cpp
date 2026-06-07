@@ -20,6 +20,7 @@
 #include <optional>
 #include <string>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include "absl/container/btree_map.h"  // from @com_google_absl
@@ -28,8 +29,13 @@
 #include "absl/strings/string_view.h"  // from @com_google_absl
 #include "litert/cc/litert_model.h"  // from @litert
 #include "litert/cc/litert_tensor_buffer.h"  // from @litert
+#include "runtime/components/embedding_lookup/embedding_lookup_manager.h"
 #include "runtime/components/model_resources.h"
+#include "litert/cc/options/litert_cpu_options.h"  // from @litert
+#include "litert/cc/options/litert_gpu_options.h"  // from @litert
 #include "runtime/executor/executor_settings_base.h"
+#include "runtime/proto/sampler_params.pb.h"
+#include "runtime/util/scoped_file.h"
 
 namespace litert::lm {
 
@@ -62,12 +68,14 @@ struct ModelSignatures {
   // When this is provided, the per layer embedding model will be used to look
   // up the per layer embeddings.
   std::optional<std::string> input_per_layer_embeddings;
+  // Input int32 param signature name. For both prefill and decode.
+  std::optional<std::string> input_int32_param;
   // Output logits signature name. Necessary for decode.
   std::string output_logits;
 };
 
 // Get the corresponding ModelSignatures struct for the given model using
-// the signature runner. Returns an error if the the runner's signature does not
+// the signature runner. Returns an error if the runner's signature does not
 // match any of the predefined signature set.
 // For now, we should use decode runner, since it contains all input and output
 // signatures of the model.
@@ -77,13 +85,14 @@ absl::StatusOr<ModelSignatures> GetModelSignaturesFromInputOutputNames(
     const std::vector<absl::string_view>& input_names,
     const std::vector<absl::string_view>& output_names, bool strict = true);
 
-// Returns the cache root names from the input names.
+// Returns the cache root names from the input names or output names.
 // The cache root names are the names of the inputs that are used to store the
 // KV cache. The root names are the names without the index suffix.
 // For example, if the input names are ["kv_cache_k_0", "kv_cache_v_0"], then
 // the k_root_name will be "kv_cache_k_" and the v_root_name will be
 // "kv_cache_v_".
 absl::Status GetKVCacheRootNames(std::vector<absl::string_view> input_names,
+                                 std::vector<absl::string_view> output_names,
                                  std::string& k_root_name,
                                  std::string& v_root_name);
 
@@ -112,7 +121,7 @@ GetOptimizedPrefillWorkGroups(
 // is_f16 only applies to FLOAT mask data type.
 absl::Status InitializeAttentionMask(::litert::TensorBuffer& mask, bool is_f16);
 
-// Fill attention mask for a given range of timesteps.
+// Fills attention mask for a given range of timesteps.
 // The mask is a 4D tensor with shape [batch=1, seq_len, 1, max_kv_len].
 // mask - The attention mask tensor to be filled.
 // start_timestep - The starting timestep to be filled at seq = 1.
@@ -120,10 +129,59 @@ absl::Status InitializeAttentionMask(::litert::TensorBuffer& mask, bool is_f16);
 absl::Status FillAttentionMask(::litert::TensorBuffer& mask, int start_timestep,
                                int steps);
 
+// Fills the parameters used by single buffer cache update from
+// start_index to start_index + update_length.
+// Note that this parameter tensor is used by add_values_to_cache kernel and
+// runtime_batched_matmul kernel.
+absl::Status FillSingleBufferCacheParamTensor(
+    ::litert::TensorBuffer& param_tensor, int start_index, int update_length);
+
 // Builds the model resources from the model_path for compiled model only.
 // Supports .task and .litertlm formats.
 absl::StatusOr<std::unique_ptr<ModelResources>>
 BuildLiteRtCompiledModelResources(const ModelAssets& model_assets);
+
+// Computes token embeddings using the given lookup managers.
+absl::Status GenericComputeTokenEmbeddings(
+    const TensorBuffer& input_tokens, absl::Span<float> output_embeddings,
+    absl::Span<float> output_ple_embeddings,
+    EmbeddingLookupManager* embedding_lookup_manager,
+    EmbeddingLookupManager* per_layer_embedding_lookup_manager);
+
+// Set the CPU weight cache options for XNNPACK.
+// Args:
+//   - weight_cache_file: An optional weight cache file path.
+//   - scoped_cache_file: An optional ScopedFile pointer holding an open file
+//     descriptor to the weight cache file.
+//   - logging_prefix: A prefix string for logging information.
+//   - cpu_options: The CpuOptions reference to apply the settings to.
+absl::Status SetCpuCacheOptions(
+    const absl::StatusOr<
+        std::variant<std::string, std::shared_ptr<litert::lm::ScopedFile>>>&
+        weight_cache_file,
+    absl::string_view logging_prefix,
+    litert::CpuOptions& cpu_options);
+
+// Set the GPU weight cache options for ML Drift.
+// Args:
+//   - weight_cache_path: An optional weight cache file path.
+//   - program_cache_file: An optional ScopedFile pointer holding an open file
+//     descriptor to the program cache file.
+//   - executor_settings: The ExecutorSettingsBase reference to query the model
+//     path.
+//   - cache_key: A string that defines the unique cache identifier for the
+//     model weight cache and program cache files.
+//   - logging_prefix: A prefix string for logging information.
+//   - gpu_options: The GpuOptions reference to apply the settings to.
+absl::Status SetGpuCacheOptions(
+    const std::string& weight_cache_path,
+    const absl::StatusOr<
+        std::variant<std::string, std::shared_ptr<litert::lm::ScopedFile>>>&
+        program_cache_file,
+    const ExecutorSettingsBase& executor_settings,
+    absl::string_view cache_key,
+    absl::string_view logging_prefix,
+    litert::GpuOptions& gpu_options);
 
 }  // namespace litert::lm
 

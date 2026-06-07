@@ -39,10 +39,11 @@
 #include "absl/strings/string_view.h"  // from @com_google_absl
 #include "absl/time/time.h"  // from @com_google_absl
 #include "nlohmann/json.hpp"  // from @nlohmann_json
-#include "litert/c/internal/litert_logging.h"  // from @litert
+#include "litert/cc/internal/scoped_file.h"  // from @litert
 #include "runtime/conversation/conversation.h"
 #include "runtime/conversation/io_types.h"
 #include "runtime/engine/engine.h"
+#include "runtime/engine/engine_factory.h"
 #include "runtime/engine/engine_settings.h"
 #include "runtime/engine/io_types.h"
 #include "runtime/executor/executor_settings_base.h"
@@ -51,8 +52,7 @@
 ABSL_FLAG(std::string, backend, "gpu",
           "Executor backend to use for LLM execution (cpu, gpu, etc.)");
 ABSL_FLAG(std::string, model_path, "", "Model path to use for LLM execution.");
-ABSL_FLAG(std::string, input_prompt,
-          "",
+ABSL_FLAG(std::string, input_prompt, "",
           "Input prompt to use for testing LLM execution.");
 ABSL_FLAG(std::string, input_prompt_file, "", "File path to the input prompt.");
 
@@ -61,10 +61,8 @@ namespace {
 using ::litert::lm::Backend;
 using ::litert::lm::Conversation;
 using ::litert::lm::ConversationConfig;
-using ::litert::lm::Engine;
 using ::litert::lm::EngineSettings;
 using ::litert::lm::InputData;
-using ::litert::lm::JsonMessage;
 using ::litert::lm::Message;
 using ::litert::lm::ModelAssets;
 using ::nlohmann::json;
@@ -75,17 +73,14 @@ absl::AnyInvocable<void(absl::StatusOr<Message>)> CreateMessageCallback() {
       std::cout << "Error: " << message.status() << std::endl;
       return;
     }
-    if (std::holds_alternative<JsonMessage>(*message)) {
-      const auto& json_message = std::get<JsonMessage>(*message);
-      if (json_message.is_null()) {
-        std::cout << std::endl << std::flush;
-        return;
-      }
-      for (const auto& content : json_message["content"]) {
-        std::cout << content["text"].get<std::string>();
-      }
-      std::cout << std::flush;
+    if (message->is_null()) {
+      std::cout << std::endl << std::flush;
+      return;
     }
+    for (const auto& content : (*message)["content"]) {
+      std::cout << content["text"].get<std::string>();
+    }
+    std::cout << std::flush;
   };
 }
 
@@ -119,7 +114,7 @@ absl::Status MainHelper(int argc, char** argv) {
   absl::ParseCommandLine(argc, argv);
   // Overrides the default for FLAGS_minloglevel to error.
   absl::SetMinLogLevel(absl::LogSeverityAtLeast::kError);
-  LiteRtSetMinLoggerSeverity(LiteRtGetDefaultLogger(), LITERT_SILENT);
+  absl::SetStderrThreshold(absl::LogSeverityAtLeast::kFatal);
 
   const std::string model_path = absl::GetFlag(FLAGS_model_path);
   if (model_path.empty()) {
@@ -138,14 +133,16 @@ absl::Status MainHelper(int argc, char** argv) {
       litert::lm::proto::BenchmarkParams();
 
   // Create the engine.
-  ASSIGN_OR_RETURN(auto engine, litert::lm::Engine::CreateEngine(
+  ASSIGN_OR_RETURN(auto engine, litert::lm::EngineFactory::CreateAny(
                                     std::move(engine_settings)));
 
   // Create the conversation.
   std::unique_ptr<Conversation> conversation;
+  auto session_config = litert::lm::SessionConfig::CreateDefault();
   ASSIGN_OR_RETURN(auto conversation_config,
-                   ConversationConfig::CreateFromSessionConfig(
-                       *engine, litert::lm::SessionConfig::CreateDefault()));
+                   ConversationConfig::Builder()
+                       .SetSessionConfig(session_config)
+                       .Build(*engine));
   ASSIGN_OR_RETURN(conversation,
                    Conversation::Create(*engine, conversation_config));
 
@@ -154,6 +151,9 @@ absl::Status MainHelper(int argc, char** argv) {
   const std::string input_prompt = GetInputPrompt();
   std::cout << "input_prompt: " << input_prompt << std::endl;
   content_list.push_back({{"type", "text"}, {"text", input_prompt}});
+
+  // Send the message and wait for the response, asynchronously log the
+  // response.
   RETURN_IF_ERROR(conversation->SendMessageAsync(
       json::object({{"role", "user"}, {"content", content_list}}),
       CreateMessageCallback()));

@@ -16,14 +16,14 @@
 #define THIRD_PARTY_ODML_LITERT_LM_RUNTIME_COMPONENTS_TOP_P_CPU_SAMPLER_H_
 
 #include <memory>
-#include <utility>
+#include <random>
 #include <vector>
 
-#include "absl/random/random.h"  // from @com_google_absl
 #include "absl/status/status.h"  // from @com_google_absl
 #include "absl/status/statusor.h"  // from @com_google_absl
 #include "litert/cc/litert_tensor_buffer.h"  // from @litert
 #include "runtime/components/sampler.h"
+#include "runtime/proto/sampler_params.pb.h"
 
 namespace litert::lm {
 
@@ -33,37 +33,48 @@ class TopPSampler : public Sampler {
   // - k: The number of top logits to consider.
   // - p: The top-p probability mass to consider.
   // - batch_size: The batch size of the input logits.
+  // - sequence_size: The sequence length of the input logits.
   // - seed: The seed for the random number generator.
   static absl::StatusOr<std::unique_ptr<TopPSampler>> Create(int k, float p,
                                                              float temperature,
                                                              int batch_size,
+                                                             int sequence_size,
                                                              int seed);
 
   // Given a batch of logits, samples a batch of token ids.
-  // The expected shape of the logits is [batch_size, vocab_size].
-  // The output ids_tensor is a 1D litert::TensorBuffer of shape [batch_size].
-  // The output scores_tensor is optional. If it is not nullptr, the sampled
-  // scores are also written to it (in the same shape as the ids_tensor). The
-  // scores are the log of the probability of the sampled token.
+  // The expected shape of the logits is [batch_size, sequence_size,
+  // vocab_size]. The output is a 2D litert::TensorBuffer of shape [batch_size,
+  // sequence_size]. The scores_tensor is optional. If it is not nullptr, the
+  // sampled scores are also written to it (in the same shape as the
+  // ids_tensor). The scores are the log of the probability of the sampled
+  // token.
   absl::Status SampleToIdAndScoreBuffer(const TensorBuffer& logits_tensor,
                                         TensorBuffer& ids_tensor,
                                         TensorBuffer* scores_tensor) override;
 
+  // Updates the configs of the sampler.
+  absl::Status UpdateConfig(
+      const proto::SamplerParameters& sampler_params, int batch_size,
+      std::shared_ptr<std::default_random_engine> rand_gen) override;
+
  private:
   explicit TopPSampler(int k, float p, float temperature, int batch_size,
-                       int seed)
-      : k_(k), p_(p), temperature_(temperature), batch_size_(batch_size) {
-    absl::SeedSeq proper_seed_seq({seed});
-    absl::BitGen rng(proper_seed_seq);
-    generator_ = std::move(rng);
+                       int sequence_size, int seed)
+      : k_(k),
+        p_(p),
+        temperature_(temperature),
+        batch_size_(batch_size),
+        sequence_size_(sequence_size) {
+    generator_ = std::make_shared<std::default_random_engine>(seed);
   }
 
   // The parameters for the sampler.
-  const int k_;
-  const float p_;
-  const float temperature_;
-  const int batch_size_;
-  absl::BitGen generator_;
+  int k_;
+  float p_;
+  float temperature_;
+  int batch_size_;
+  int sequence_size_;
+  std::shared_ptr<std::default_random_engine> generator_;
 
   // The logits data to be used for sampling. Having it as a member to avoid
   // re-allocating the vector for each sampling call.

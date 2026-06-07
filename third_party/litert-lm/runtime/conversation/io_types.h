@@ -16,16 +16,14 @@
 #define THIRD_PARTY_ODML_LITERT_LM_RUNTIME_CONVERSATION_IO_TYPES_H_
 
 #include <ostream>
+#include <string>
 #include <variant>
 
 #include "nlohmann/json.hpp"  // from @nlohmann_json
 
 namespace litert::lm {
 
-using JsonMessage = nlohmann::ordered_json;
-
-// Message is the data container for a single turn of the conversation.
-using Message = std::variant<JsonMessage>;
+using Message = nlohmann::ordered_json;
 
 std::ostream& operator<<(std::ostream& os, const Message& message);
 
@@ -40,6 +38,19 @@ struct JsonPreface {
   // extended by the model to support other features. For example, configurable
   // template rendering or other model-specific features.
   nlohmann::ordered_json extra_context;
+};
+
+// Definition of a channel for responses, e.g. thinking channel.
+struct Channel {
+  // The channel name. Text from this channel will be written to
+  // message["channels"][channel_name].
+  std::string channel_name;
+
+  // A string that marks the start of the channel, e.g. "<|channel>thought".
+  std::string start;
+
+  // A string that marks the end of the channel, e.g. "<channel|>".
+  std::string end;
 };
 
 // Preface is the initial messages, tools and extra context for the

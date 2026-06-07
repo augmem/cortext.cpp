@@ -14,7 +14,9 @@
 
 #include "runtime/components/scoring_cpu_util.h"
 
+#include <algorithm>
 #include <cmath>
+#include <iterator>
 #include <vector>
 
 #include "absl/status/status.h"  // from @com_google_absl
@@ -38,17 +40,30 @@ absl::StatusOr<std::vector<float>> ComputeLogLikelihood(
     }
   }
   // Get all indices and their probabilities for calculating perplexity.
-  ASSIGN_OR_RETURN(auto all_token_ids,
-                   TopKTokenIds(logits, vocab_size, batch_size));
-  std::vector<float> all_logit_values;
+  ASSIGN_OR_RETURN(
+      auto all_token_ids,
+      TopKTokenIds(logits, vocab_size, batch_size, /*sequence_size=*/1));
+  std::vector<int> flat_all_token_ids(batch_size * vocab_size);
+  for (int b = 0; b < batch_size; ++b) {
+    std::copy(all_token_ids[b].begin(), all_token_ids[b].end(),
+              flat_all_token_ids.begin() + b * vocab_size);
+  }
+  std::vector<std::vector<float>> all_logit_values;
   ASSIGN_OR_RETURN(auto all_probabilities,
-                   Softmax(logits, all_token_ids, temperature, batch_size,
-                           all_logit_values));
+                   Softmax(logits, flat_all_token_ids, temperature, batch_size,
+                           /*sequence_size=*/1, all_logit_values));
   std::vector<float> batch_confidence(batch_size);
   for (int b = 0; b < batch_size; ++b) {
     if (sampled_ids[b] >= 0 && sampled_ids[b] < vocab_size) {
-      const int sampled_index = b * vocab_size + sampled_ids[b];
-      batch_confidence[b] = std::log(all_probabilities[sampled_index]);
+      // Find the index of the sampled token id in the flat_all_token_ids array
+      auto it = std::find(all_token_ids[b].begin(), all_token_ids[b].end(),
+                          sampled_ids[b]);
+      if (it != all_token_ids[b].end()) {
+        int index_in_topk = std::distance(all_token_ids[b].begin(), it);
+        batch_confidence[b] = std::log(all_probabilities[b][index_in_topk]);
+      } else {
+        return absl::InternalError("Sampled ID not found in top-k tokens");
+      }
     }
   }
   return batch_confidence;

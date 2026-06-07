@@ -14,7 +14,6 @@
 
 #include "runtime/executor/llm_litert_compiled_model_cache_utils.h"
 
-#include <cstdint>
 #include <string>
 #include <utility>
 #include <vector>
@@ -22,9 +21,7 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 #include "absl/container/flat_hash_map.h"  // from @com_google_absl
-#include "absl/status/status.h"  // from @com_google_absl
 #include "absl/strings/string_view.h"  // from @com_google_absl
-#include "absl/types/span.h"  // from @com_google_absl
 #include "litert/cc/litert_tensor_buffer.h"  // from @litert
 #include "litert/test/matchers.h"  // from @litert
 #include "runtime/util/convert_tensor_buffer.h"
@@ -35,7 +32,6 @@ namespace {
 
 using ::testing::litert::IsError;
 using ::testing::litert::IsOkAndHolds;
-using ::testing::status::StatusIs;
 
 TEST(LlmLiteRtCompiledModelCacheUtilsTest,
      TriggerTokenDeletionFromKvcacheTest_Success) {
@@ -124,90 +120,26 @@ TEST(LlmLiteRtCompiledModelCacheUtilsTest, DeleteTokensIfNeededTest_Success) {
                                          0.0f, 0.0f, 0.0f, 0.0f}));
 }
 
-TEST(LlmLiteRtCompiledModelCacheUtilsTest, ExpandBufferMiddleDim) {
-  std::vector<float> src_data = {1, 2, 3, 4, 5, 6, 7, 8};
-  std::vector<int> src_shape = {2, 2, 2};
-  std::vector<int> dst_shape = {2, 4, 2};
-  std::vector<float> dst_data(16);
-  ASSERT_OK(ExpandBuffer(reinterpret_cast<const uint8_t*>(src_data.data()),
-                         src_shape, reinterpret_cast<uint8_t*>(dst_data.data()),
-                         dst_shape, sizeof(float)));
-  EXPECT_THAT(dst_data, testing::ElementsAreArray(
-                            {1.0f, 2.0f, 3.0f, 4.0f, 0.0f, 0.0f, 0.0f, 0.0f,
-                             5.0f, 6.0f, 7.0f, 8.0f, 0.0f, 0.0f, 0.0f, 0.0f}));
+TEST(LlmLiteRtCompiledModelCacheUtilsTest, ClearTensorBufferTest) {
+  std::vector<float> data = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10};
+  LITERT_ASSERT_OK_AND_ASSIGN(auto tensor_buffer,
+                              CopyToTensorBuffer<float>(data, {1, 1, 5, 2}));
+  LITERT_ASSERT_OK(tensor_buffer.Clear());
+  LITERT_ASSERT_OK_AND_ASSIGN(auto result_data,
+                              CopyFromTensorBuffer<float>(tensor_buffer));
+  EXPECT_THAT(result_data,
+              testing::ElementsAreArray({0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f,
+                                         0.0f, 0.0f, 0.0f, 0.0f}));
 }
 
-TEST(LlmLiteRtCompiledModelCacheUtilsTest, ExpandBufferLastDim) {
-  std::vector<int> src_data = {1, 2, 3, 4};
-  std::vector<int> src_shape = {2, 2};
-  std::vector<int> dst_shape = {2, 4};
-  std::vector<int> dst_data(8);
-  ASSERT_OK(ExpandBuffer(reinterpret_cast<const uint8_t*>(src_data.data()),
-                         src_shape, reinterpret_cast<uint8_t*>(dst_data.data()),
-                         dst_shape, sizeof(int)));
-  EXPECT_THAT(dst_data, testing::ElementsAreArray({1, 2, 0, 0, 3, 4, 0, 0}));
-}
-
-TEST(LlmLiteRtCompiledModelCacheUtilsTest, ExpandBufferFirstDim) {
-  std::vector<int> src_data = {1, 2, 3, 4};
-  std::vector<int> src_shape = {2, 2};
-  std::vector<int> dst_shape = {4, 2};
-  std::vector<int> dst_data(8);
-  ASSERT_OK(ExpandBuffer(reinterpret_cast<const uint8_t*>(src_data.data()),
-                         src_shape, reinterpret_cast<uint8_t*>(dst_data.data()),
-                         dst_shape, sizeof(int)));
-  EXPECT_THAT(dst_data, testing::ElementsAreArray({1, 2, 3, 4, 0, 0, 0, 0}));
-}
-
-TEST(LlmLiteRtCompiledModelCacheUtilsTest, ExpandBufferDifferentRank) {
-  std::vector<int> src_data = {1, 2};
-  std::vector<int> src_shape = {2};
-  std::vector<int> dst_shape = {2, 1};
-  std::vector<int> dst_data(2);
-  EXPECT_THAT(
-      ExpandBuffer(reinterpret_cast<const uint8_t*>(src_data.data()), src_shape,
-                   reinterpret_cast<uint8_t*>(dst_data.data()), dst_shape,
-                   sizeof(int)),
-      StatusIs(absl::StatusCode::kInternal));
-}
-
-TEST(LlmLiteRtCompiledModelCacheUtilsTest, ExpandBufferMultipleDifferentDims) {
-  std::vector<int> src_data = {1, 2};
-  std::vector<int> src_shape = {1, 2};
-  std::vector<int> dst_shape = {2, 3};
-  std::vector<int> dst_data(6);
-  EXPECT_THAT(
-      ExpandBuffer(reinterpret_cast<const uint8_t*>(src_data.data()), src_shape,
-                   reinterpret_cast<uint8_t*>(dst_data.data()), dst_shape,
-                   sizeof(int)),
-      StatusIs(absl::StatusCode::kInvalidArgument,
-               "Tensors differ in more than one dimension."));
-}
-
-TEST(LlmLiteRtCompiledModelCacheUtilsTest, ExpandBufferSmallerDestDim) {
-  std::vector<int> src_data = {1, 2, 3, 4};
-  std::vector<int> src_shape = {2, 2};
-  std::vector<int> dst_shape = {1, 2};
-  std::vector<int> dst_data(2);
-  EXPECT_THAT(
-      ExpandBuffer(reinterpret_cast<const uint8_t*>(src_data.data()), src_shape,
-                   reinterpret_cast<uint8_t*>(dst_data.data()), dst_shape,
-                   sizeof(int)),
-      StatusIs(absl::StatusCode::kInvalidArgument,
-               "Destination tensor dimension is smaller than source "
-               "along an axis."));
-}
-
-TEST(LlmLiteRtCompiledModelCacheUtilsTest, ExpandBufferNoExpansionAxis) {
-  std::vector<int> src_data = {1, 2, 3, 4};
-  std::vector<int> src_shape = {2, 2};
-  std::vector<int> dst_shape = {2, 2};
-  std::vector<int> dst_data(4);
-  EXPECT_THAT(
-      ExpandBuffer(reinterpret_cast<const uint8_t*>(src_data.data()), src_shape,
-                   reinterpret_cast<uint8_t*>(dst_data.data()), dst_shape,
-                   sizeof(int)),
-      StatusIs(absl::StatusCode::kInvalidArgument, "No expansion axis found."));
+TEST(LlmLiteRtCompiledModelCacheUtilsTest, IsKVCacheTensorTest) {
+  EXPECT_TRUE(IsKVCacheTensor("kv_cache_0"));
+  EXPECT_TRUE(IsKVCacheTensor("k_cache_0"));
+  EXPECT_TRUE(IsKVCacheTensor("v_cache_0"));
+  EXPECT_FALSE(IsKVCacheTensor("kv_cache"));
+  EXPECT_FALSE(IsKVCacheTensor("k_cache"));
+  EXPECT_FALSE(IsKVCacheTensor("v_cache"));
+  EXPECT_FALSE(IsKVCacheTensor("other"));
 }
 
 }  // namespace

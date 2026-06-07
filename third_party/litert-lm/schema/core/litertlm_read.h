@@ -25,6 +25,7 @@
 
 #include "absl/status/status.h"  // from @com_google_absl
 #include "absl/status/statusor.h"  // from @com_google_absl
+#include "absl/strings/string_view.h"  // from @com_google_absl
 #include "runtime/proto/llm_metadata.pb.h"
 #include "runtime/util/memory_mapped_file.h"
 #include "schema/core/litertlm_header_schema_generated.h"
@@ -39,14 +40,23 @@ namespace schema {
 
 using litert::lm::proto::LlmMetadata;
 
-// Returns true if the file is a LiteRT-LM file.
+// Returns true if the content is a LiteRT-LM file.
 //
 // Args:
-//   path: The path to the file to check.
+//   content: The content of the file to check.
 //
 // Returns:
-//   True if the file is a LiteRT-LM file, false otherwise.
-absl::StatusOr<bool> IsLiteRTLMFile(const std::string& path);
+//   True if the content is a LiteRT-LM file, false otherwise.
+bool IsLiteRTLMFile(absl::string_view content);
+
+// Returns true if the stream is a LiteRT-LM file.
+//
+// Args:
+//   stream: The input stream to check.
+//
+// Returns:
+//   True if the stream is a LiteRT-LM file, false otherwise.
+bool IsLiteRTLMFile(std::istream& stream);
 
 struct LitertlmHeader {
   std::unique_ptr<uint8_t[]> buffer;

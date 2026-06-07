@@ -119,8 +119,12 @@ GetCoreMigrations ()
               ")",
 
               // ------------------------------------------------------------------
-              // MEMORIES - Unified memory metadata (was split across 5 tables)
-              // Includes: memories, memory_feedback, rif_state, emotional_tags
+              // LONG-TERM GRAPH MEMORY NODES
+              //
+              // The durable LTM is the persisted graph. This table stores graph
+              // nodes: episodic memories, summaries/cues, labels, and working
+              // memory records. Per-node adaptive state from memory_feedback,
+              // rif_state, and emotional_tags is folded into the same row.
               // ------------------------------------------------------------------
               "CREATE TABLE IF NOT EXISTS memories ("
               "  memory_id INTEGER PRIMARY KEY,"
@@ -241,7 +245,10 @@ GetCoreMigrations ()
               ")",
 
               // ------------------------------------------------------------------
-              // ASSOCIATIONS - Unified graph (was graph_nodes + graph_edges)
+              // LONG-TERM GRAPH MEMORY EDGES
+              //
+              // Durable graph edges such as has_label, derived_from, reinforces,
+              // and relation links. Together, memories + associations are LTM.
               // ------------------------------------------------------------------
               "CREATE TABLE IF NOT EXISTS associations ("
               "  source_memory_id INTEGER NOT NULL,"
@@ -613,6 +620,56 @@ GetCoreMigrations ()
               "  update_count INTEGER NOT NULL DEFAULT 0,"
               "  updated_at INTEGER NOT NULL DEFAULT 0"
               ")",
+          },
+      },
+      {
+          6,
+          "Soft Anchor shadow state and links",
+          {
+              "CREATE TABLE IF NOT EXISTS soft_anchors ("
+              "  anchor_id TEXT PRIMARY KEY,"
+              "  status TEXT NOT NULL,"
+              "  semantic_centroid BLOB,"
+              "  entity_centroid BLOB,"
+              "  full_centroid BLOB,"
+              "  semantic_radius REAL NOT NULL DEFAULT 0.0,"
+              "  entity_radius REAL NOT NULL DEFAULT 0.0,"
+              "  full_radius REAL NOT NULL DEFAULT 0.0,"
+              "  source_id TEXT,"
+              "  first_step INTEGER NOT NULL DEFAULT 0,"
+              "  last_step INTEGER NOT NULL DEFAULT 0,"
+              "  first_ts INTEGER NOT NULL DEFAULT 0,"
+              "  last_ts INTEGER NOT NULL DEFAULT 0,"
+              "  last_boundary_id INTEGER NOT NULL DEFAULT 0,"
+              "  anchor_strength REAL NOT NULL DEFAULT 0.0,"
+              "  support_count INTEGER NOT NULL DEFAULT 0,"
+              "  contradiction_count INTEGER NOT NULL DEFAULT 0,"
+              "  recent_memory_ids TEXT,"
+              "  updated_at INTEGER NOT NULL DEFAULT 0"
+              ")",
+              "CREATE TABLE IF NOT EXISTS soft_anchor_links ("
+              "  memory_id INTEGER NOT NULL,"
+              "  anchor_id TEXT NOT NULL,"
+              "  anchor_strength REAL NOT NULL DEFAULT 0.0,"
+              "  anchor_label TEXT NOT NULL DEFAULT 'none',"
+              "  evidence_kind TEXT NOT NULL DEFAULT 'unknown',"
+              "  memory_tier TEXT NOT NULL DEFAULT 'WM',"
+              "  score REAL NOT NULL DEFAULT 0.0,"
+              "  margin REAL NOT NULL DEFAULT 0.0,"
+              "  entropy REAL NOT NULL DEFAULT 0.0,"
+              "  support_count INTEGER NOT NULL DEFAULT 0,"
+              "  contradiction_count INTEGER NOT NULL DEFAULT 0,"
+              "  created_step INTEGER NOT NULL DEFAULT 0,"
+              "  updated_step INTEGER NOT NULL DEFAULT 0,"
+              "  created_at INTEGER NOT NULL DEFAULT 0,"
+              "  PRIMARY KEY (memory_id, anchor_id)"
+              ")",
+              "CREATE INDEX IF NOT EXISTS idx_soft_anchors_status "
+              "ON soft_anchors(status, last_step)",
+              "CREATE INDEX IF NOT EXISTS idx_soft_anchor_links_anchor "
+              "ON soft_anchor_links(anchor_id, updated_step)",
+              "CREATE INDEX IF NOT EXISTS idx_soft_anchor_links_memory "
+              "ON soft_anchor_links(memory_id)",
           },
       },
   };

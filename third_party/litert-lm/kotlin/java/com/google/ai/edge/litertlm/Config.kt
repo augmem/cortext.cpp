@@ -15,15 +15,48 @@
  */
 package com.google.ai.edge.litertlm
 
+import com.google.gson.JsonObject
+
+/**
+ * Definition of a channel for responses, e.g. thinking channel.
+ *
+ * @property channelName The channel name. Text from this channel will be written to
+ *   [Message.channels] with the [channelName] as the key.
+ * @property start A string that marks the start of the channel.
+ * @property end A string that marks the end of the channel.
+ */
+data class Channel(val channelName: String, val start: String, val end: String) {
+  internal fun toJson() =
+    JsonObject().apply {
+      addProperty("channel_name", channelName)
+      addProperty("start", start)
+      addProperty("end", end)
+    }
+}
+
 /**
  * Backend for the LiteRT-LM engine.
  *
  * This is the Kotlin version of the C++'s `litert::lm::Backend`.
  */
-enum class Backend {
-  CPU, // CPU LiteRT backend.
-  GPU, // GPU LiteRT backend.
-  NPU, // NPU LiteRT backend.
+sealed class Backend(val name: String) {
+
+  /**
+   * @property numOfThreads The number of threads to use for CPU backend. When `null` or 0, use the
+   *   default value from the native engine.
+   */
+  data class CPU(val numOfThreads: Int? = null) : Backend("CPU")
+
+  class GPU : Backend("GPU")
+
+  /**
+   * @property nativeLibraryDir The directory contains the NPU libraries for [Backend.NPU]. On
+   *   Android, for apps with built-in NPU libraries, including NPU libraries delivered as Google
+   *   Play Feature modules, set it to [Context.applicationInfo.nativeLibraryDir]. If NPU libraries
+   *   are not built-in (downloaded separately or on JVM Desktop), set this path to the directory
+   *   containing the libraries.
+   */
+  data class NPU(val nativeLibraryDir: String = "") : Backend("NPU")
 }
 
 /**
@@ -37,20 +70,27 @@ enum class Backend {
  *   not be initialized.
  * @property maxNumTokens The maximum number of the sum of input and output tokens. It is equivalent
  *   to the size of the kv-cache. When `null`, use the default value from the model or the engine.
- * @property cacheDir The directory for placing cache files. It should be a directory where the
- *   Android application has write access. If not unset, it uses the directory of the [modelPath].
+ * @property maxNumImages The maximum number of images the model can handle. When `null`, use the
+ *   default value from the model or the engine.
+ * @property cacheDir The directory for placing cache files. It should be a directory with write
+ *   access. If not set, it uses the directory of the [modelPath]. Set to ":nocache" to disable
+ *   caching at all.
  */
 data class EngineConfig(
   val modelPath: String,
-  val backend: Backend = Backend.CPU,
+  val backend: Backend = Backend.CPU(),
   val visionBackend: Backend? = null,
   val audioBackend: Backend? = null,
   val maxNumTokens: Int? = null,
+  val maxNumImages: Int? = null,
   val cacheDir: String? = null,
 ) {
   init {
     require(maxNumTokens == null || maxNumTokens > 0) {
       "maxNumToken must be positive or null (use the default from model or engine)."
+    }
+    require(maxNumImages == null || maxNumImages > 0) {
+      "maxNumImages must be positive or null (use the default from model or engine)."
     }
   }
 }
@@ -58,15 +98,31 @@ data class EngineConfig(
 /**
  * Configuration for a LiteRT-LM [Conversation].
  *
- * @property systemMessage The system message to be used in the conversation.
+ * @property systemInstruction The system instruction for the conversation. If set, it will prepend
+ *   to [initialMessages].
+ * @property initialMessages The initial messages for the conversation.
  * @property tools A list of tool objects to be used in the conversation.
  * @property samplerConfig Configuration for the sampling process. If `null`, then uses the engine's
  *   default values.
+ * @property automaticToolCalling If true, tools will be called automatically. If false, tool calls
+ *   will be returned to the user to execute.
+ * @property channels A list of channels for the conversation. Each [Channel] is a part of the
+ *   model's output that is separate from the primary response, such as a 'thinking' channel.
+ *   Channel content will be written to [Message.channels] with the [Channel.channelName] as the
+ *   key. If `null`, uses the default channel configuration from the `LlmMetadata`. If empty,
+ *   channels will be disabled.
+ * @property extraContext Optional context passed to the prompt template rendering.
  */
-data class ConversationConfig(
-  val systemMessage: Message? = null,
-  val tools: List<Any> = listOf(),
+data class ConversationConfig
+@JvmOverloads
+constructor(
+  val systemInstruction: Contents? = null,
+  val initialMessages: List<Message> = listOf(),
+  val tools: List<ToolProvider> = listOf(),
   val samplerConfig: SamplerConfig? = null,
+  val automaticToolCalling: Boolean = true,
+  val channels: List<Channel>? = null,
+  val extraContext: Map<String, Any> = emptyMap(),
 )
 
 /**

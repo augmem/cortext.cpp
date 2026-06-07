@@ -47,12 +47,12 @@ TEST(ModelResourcesTest, InitializeWithValidLitertLmLoader) {
       "litert_lm/runtime/testdata/test_lm.litertlm";
   auto model_file = ScopedFile::Open(model_path.string());
   ASSERT_TRUE(model_file.ok());
-  LitertLmLoader loader(std::move(model_file.value()));
-  ASSERT_GT(loader.GetSentencePieceTokenizer()->Size(), 0);
-  ASSERT_GT(loader.GetTFLiteModel(ModelType::kTfLitePrefillDecode).Size(), 0);
+  ASSERT_OK_AND_ASSIGN(auto loader,
+                       LitertLmLoader::Create(std::move(model_file.value())));
+  ASSERT_GT(loader->GetSentencePieceTokenizer()->Size(), 0);
+  ASSERT_GT(loader->GetTFLiteModel(ModelType::kTfLitePrefillDecode).Size(), 0);
 
-  auto model_resources = ModelResourcesLitertLm::Create(
-      std::make_unique<LitertLmLoader>(std::move(loader)));
+  auto model_resources = ModelResourcesLitertLm::Create(std::move(loader));
   ASSERT_OK(model_resources);
 
   auto tflite_model =
@@ -71,13 +71,14 @@ TEST(ModelResourcesTest, InitializeWithExternalWeights) {
       "litert_lm/runtime/testdata/test_lm_external_weights.litertlm";
   auto model_file = ScopedFile::Open(model_path.string());
   ASSERT_TRUE(model_file.ok());
-  LitertLmLoader loader(std::move(model_file.value()));
-  ASSERT_GT(loader.GetSentencePieceTokenizer()->Size(), 0);
-  ASSERT_GT(loader.GetTFLiteModel(ModelType::kTfLitePrefillDecode).Size(), 0);
-  ASSERT_GT(loader.GetTFLiteWeights(ModelType::kTfLitePrefillDecode).Size(), 0);
+  ASSERT_OK_AND_ASSIGN(auto loader,
+                       LitertLmLoader::Create(std::move(model_file.value())));
+  ASSERT_GT(loader->GetSentencePieceTokenizer()->Size(), 0);
+  ASSERT_GT(loader->GetTFLiteModel(ModelType::kTfLitePrefillDecode).Size(), 0);
+  ASSERT_GT(loader->GetTFLiteWeights(ModelType::kTfLitePrefillDecode).Size(),
+            0);
 
-  auto model_resources = ModelResourcesLitertLm::Create(
-      std::make_unique<LitertLmLoader>(std::move(loader)));
+  auto model_resources = ModelResourcesLitertLm::Create(std::move(loader));
   ASSERT_OK(model_resources);
 
   auto tflite_model =
@@ -98,11 +99,11 @@ TEST(ModelResourcesTest, InitializeWithHuggingFaceTokenizer) {
       "litert_lm/runtime/testdata/test_hf_tokenizer.litertlm";
   auto model_file = ScopedFile::Open(model_path.string());
   ASSERT_TRUE(model_file.ok());
-  LitertLmLoader loader(std::move(model_file.value()));
-  ASSERT_GT(loader.GetHuggingFaceTokenizer()->Size(), 0);
+  ASSERT_OK_AND_ASSIGN(auto loader,
+                       LitertLmLoader::Create(std::move(model_file.value())));
+  ASSERT_GT(loader->GetHuggingFaceTokenizer()->Size(), 0);
 
-  auto model_resources = ModelResourcesLitertLm::Create(
-      std::make_unique<LitertLmLoader>(std::move(loader)));
+  auto model_resources = ModelResourcesLitertLm::Create(std::move(loader));
   ASSERT_OK(model_resources);
 
   auto tokenizer = model_resources.value()->GetTokenizer();
@@ -142,10 +143,10 @@ TEST(ModelResourcesTest, GetTFLiteModelNotFound) {
       "litert_lm/runtime/testdata/test_lm.litertlm";
   auto model_file = ScopedFile::Open(model_path.string());
   ASSERT_TRUE(model_file.ok());
-  LitertLmLoader loader(std::move(model_file.value()));
+  ASSERT_OK_AND_ASSIGN(auto loader,
+                       LitertLmLoader::Create(std::move(model_file.value())));
 
-  auto model_resources = ModelResourcesLitertLm::Create(
-      std::make_unique<LitertLmLoader>(std::move(loader)));
+  auto model_resources = ModelResourcesLitertLm::Create(std::move(loader));
   ASSERT_OK(model_resources);
 
   // Attempt to get a model type that doesn't exist in the test file.
@@ -208,6 +209,14 @@ TEST(ModelTypeConversionTest, StringToModelType) {
   ASSERT_OK(result);
   EXPECT_EQ(result.value(), ModelType::kArtisanTextDecoder);
 
+  result = StringToModelType("tf_lite_mtp_drafter");
+  ASSERT_OK(result);
+  EXPECT_EQ(result.value(), ModelType::kTfLiteMtpDrafter);
+
+  result = StringToModelType("TF_LITE_MTP_DRAFTER");
+  ASSERT_OK(result);
+  EXPECT_EQ(result.value(), ModelType::kTfLiteMtpDrafter);
+
   result = StringToModelType("unknown");
   EXPECT_FALSE(result.ok());
 }
@@ -220,6 +229,8 @@ TEST(ModelTypeConversionTest, ModelTypeToString) {
             "TF_LITE_PER_LAYER_EMBEDDER");
   EXPECT_EQ(ModelTypeToString(ModelType::kArtisanTextDecoder),
             "TF_LITE_ARTISAN_TEXT_DECODER");
+  EXPECT_EQ(ModelTypeToString(ModelType::kTfLiteMtpDrafter),
+            "TF_LITE_MTP_DRAFTER");
   EXPECT_EQ(ModelTypeToString(ModelType::kUnknown), "UNKNOWN");
 }
 

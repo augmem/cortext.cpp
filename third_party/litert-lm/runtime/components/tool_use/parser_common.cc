@@ -14,115 +14,36 @@
 
 #include "runtime/components/tool_use/parser_common.h"
 
-#include <cstddef>
-#include <exception>
-#include <string>
-#include <utility>
-
 #include "absl/strings/string_view.h"  // from @com_google_absl
-#include "ANTLRErrorListener.h"
-#include "Parser.h"
-#include "Recognizer.h"
-#include "Token.h"
-#include "atn/ATNConfigSet.h"
-#include "dfa/DFA.h"
 #include "nlohmann/json.hpp"  // from @nlohmann_json
-#include "runtime/components/tool_use/proto/tool_call.pb.h"
+#include "runtime/components/tool_use/rust/parsers.rs.h"
 
 namespace litert::lm {
 
-namespace {
-
-nlohmann::ordered_json StructToJson(const proto::Struct& struct_value);
-nlohmann::ordered_json ListToJson(const proto::ListValue& list_value);
-
-nlohmann::ordered_json ValueToJson(const proto::Value& value) {
-  switch (value.kind_case()) {
-    case proto::Value::kNullValue:
-      return nlohmann::ordered_json();
-    case proto::Value::kNumberValue:
-      return nlohmann::ordered_json(value.number_value());
-    case proto::Value::kStringValue:
-      return nlohmann::ordered_json(value.string_value());
-    case proto::Value::kBoolValue:
-      return nlohmann::ordered_json(value.bool_value());
-    case proto::Value::kStructValue:
-      return StructToJson(value.struct_value());
-    case proto::Value::kListValue:
-      return ListToJson(value.list_value());
-    default:
-      return nlohmann::ordered_json();
-  }
-}
-
-nlohmann::ordered_json StructToJson(const proto::Struct& struct_value) {
-  nlohmann::ordered_json struct_json = nlohmann::ordered_json::object();
-  for (const proto::Field& field : struct_value.fields()) {
-    struct_json[field.name()] = ValueToJson(field.value());
-  }
-  return struct_json;
-}
-
-nlohmann::ordered_json ListToJson(const proto::ListValue& list_value) {
-  nlohmann::ordered_json list_json = nlohmann::ordered_json::array();
-  for (const proto::Value& value : list_value.values()) {
-    list_json.push_back(ValueToJson(value));
-  }
-  return list_json;
-}
-
-}  // namespace
-
-void DefaultErrorListener::syntaxError(antlr4::Recognizer* recognizer,
-                                       antlr4::Token* offendingSymbol,
-                                       size_t line, size_t charPositionInLine,
-                                       const std::string& msg,
-                                       std::exception_ptr e) {
-  status_ = false;
-}
-
-void DefaultErrorListener::reportAmbiguity(antlr4::Parser* recognizer,
-                                           const antlr4::dfa::DFA& dfa,
-                                           size_t startIndex, size_t stopIndex,
-                                           bool exact,
-                                           const antlrcpp::BitSet& ambigAlts,
-                                           antlr4::atn::ATNConfigSet* configs) {
-  status_ = false;
-}
-
-void DefaultErrorListener::reportAttemptingFullContext(
-    antlr4::Parser* recognizer, const antlr4::dfa::DFA& dfa, size_t startIndex,
-    size_t stopIndex, const antlrcpp::BitSet& conflictingAlts,
-    antlr4::atn::ATNConfigSet* configs) {
-  status_ = false;
-}
-
-void DefaultErrorListener::reportContextSensitivity(
-    antlr4::Parser* recognizer, const antlr4::dfa::DFA& dfa, size_t startIndex,
-    size_t stopIndex, size_t prediction, antlr4::atn::ATNConfigSet* configs) {
-  status_ = false;
-}
-
-absl::string_view StripQuotes(absl::string_view text) {
-  if (text.size() < 2 || (text.front() != '"' && text.front() != '\'') ||
-      text.back() != text.front()) {
-    return text;
-  }
-  return text.substr(1, text.size() - 2);
-}
-
-nlohmann::ordered_json ToolCallsToJson(const proto::ToolCalls& tool_calls) {
-  nlohmann::ordered_json tool_calls_json = nlohmann::ordered_json::array();
-  for (const proto::ToolCall& tool_call : tool_calls.tool_calls()) {
-    nlohmann::ordered_json tool_call_json = nlohmann::ordered_json::object();
-    tool_call_json["name"] = tool_call.name();
-    tool_call_json["arguments"] = nlohmann::ordered_json::object();
-    for (const auto& field : tool_call.arguments().fields()) {
-      tool_call_json["arguments"][field.name()] = ValueToJson(field.value());
+nlohmann::ordered_json ConvertJsonValue(const JsonValue& json_value) {
+  if (json_value.is_null()) {
+    return nlohmann::ordered_json(nullptr);
+  } else if (json_value.is_bool()) {
+    return nlohmann::ordered_json(json_value.get_bool());
+  } else if (json_value.is_number()) {
+    return nlohmann::ordered_json(json_value.get_number());
+  } else if (json_value.is_string()) {
+    return nlohmann::ordered_json(json_value.get_string());
+  } else if (json_value.is_array()) {
+    nlohmann::ordered_json array = nlohmann::ordered_json::array();
+    for (const JsonValue& json_value : json_value.array_get()) {
+      array.push_back(ConvertJsonValue(json_value));
     }
-    tool_calls_json.push_back(std::move(tool_call_json));
+    return array;
+  } else if (json_value.is_object()) {
+    nlohmann::ordered_json object = nlohmann::ordered_json::object();
+    for (const auto& key : json_value.object_keys()) {
+      absl::string_view key_str(key.data(), key.size());
+      object[key_str] = ConvertJsonValue(*json_value.object_get(key));
+    }
+    return object;
   }
-  return tool_calls_json;
+  return nlohmann::ordered_json();
 }
 
 }  // namespace litert::lm

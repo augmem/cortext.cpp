@@ -108,7 +108,14 @@ coverage.info
 # Generated data files
 objects/
 data/
+!data/
+!data/label_bank/
+!data/label_bank/label_bank.sqlite
 models/
+!include/cortext/models/
+!include/cortext/models/**
+!src/models/
+!src/models/**
 *.dat
 *.npy
 
@@ -131,8 +138,6 @@ cache_dir/
 examples/benchmark/__pycache__/
 examples/benchmark/audio_cache/
 examples/benchmark/results/
-examples/benchmark/mteb_imagebind_tmp/
-examples/benchmark/mteb_imagebind_tmp.json
 examples/benchmark/mteb_results*.json
 examples/benchmark/mteb_results*/
 logs/
@@ -153,3 +158,17 @@ algorithms.docx
 .output.txt
 index_headers.txt
 0
+
+# ── GSD baseline (auto-generated) ──
+.gsd
+*.code-workspace
+.env
+.env.*
+!.env.example
+node_modules/
+.next/
+dist/
+.venv/
+target/
+vendor/
+.cache/

@@ -23,10 +23,17 @@ jobs:
   presubmit:
     name: "Presubmit-Win"
     runs-on: Windows_x64
+    defaults:
+      run:
+        shell: pwsh
     permissions:
       actions: write  # For gh cache delete.
       contents: write  # For gh release upload.
     env:
+      MODEL_KEY: gemma-3-1b-it-v1
+      MODEL_PATH: .\models\gemma3-1b-it-int4.litertlm
+      MODEL_URL: https://huggingface.co/litert-community/Gemma3-1B-IT/resolve/main/gemma3-1b-it-int4.litertlm
+
       # Clear ANDROID_NDK_HOME as Windows_x64 has NDK where jobs don't have permission for
       # androidndk rulesto create symlinks.
       ANDROID_NDK_HOME:
@@ -34,12 +41,18 @@ jobs:
       REFRESH_CACHE: ${{ github.event_name == 'schedule' ||
                          (github.event_name == 'workflow_dispatch' && inputs.REFRESH_CACHE) }}
     steps:
-      - name: Checkout code
+      - name: Checkout code.
         uses: actions/checkout@v4
+        with:
+          lfs: true
 
       - name : Set up cache keys and bazel output base.
         id: cache-keys
         run: |
+          $BAZEL_OUTPUT_BASE = "C:/w"
+          if ($env:GITHUB_WORKSPACE -match "^[Dd]:") {
+              $BAZEL_OUTPUT_BASE = "D:/w"
+          }
           $CACHE_RESTORE_KEY_2="${{ github.workflow }}"
           $CACHE_RESTORE_KEY_1="$CACHE_RESTORE_KEY_2-${{ hashFiles('**/WORKSPACE', '**/.bazelrc') }}"
           $CACHE_RESTORE_KEY_0="$CACHE_RESTORE_KEY_1-${{ hashFiles('**/BUILD*') }}"
@@ -53,7 +66,7 @@ jobs:
           echo "CACHE_KEY=$CACHE_KEY" >> "$env:GITHUB_OUTPUT"
           # D: is faster than C: for I/O.
           $SHORT_SHA=$("${{ github.sha }}".SubString(0, 8))
-          echo "BAZEL_OUTPUT_BASE=D:/w-$SHORT_SHA" >> "$env:GITHUB_ENV"
+          echo "BAZEL_OUTPUT_BASE=${BAZEL_OUTPUT_BASE}-$SHORT_SHA" >> "$env:GITHUB_ENV"
 
       - name: Clean build outputs if cache is being refreshed.
         if: env.REFRESH_CACHE == 'true'
@@ -64,7 +77,9 @@ jobs:
         if: env.REFRESH_CACHE != 'true'
         uses: actions/cache/restore@v4
         with:
-          path: ~/.cache/bazel-windows
+          path: |
+            ~/.cache/bazel-windows
+            ~/.cache/bazel-windows-dll
           key: ${{ steps.cache-keys.outputs.CACHE_KEY }}
           restore-keys: |
             ${{ steps.cache-keys.outputs.CACHE_RESTORE_KEY_HEAD }}
@@ -72,16 +87,41 @@ jobs:
             ${{ steps.cache-keys.outputs.CACHE_RESTORE_KEY_1 }}-
             ${{ steps.cache-keys.outputs.CACHE_RESTORE_KEY_2 }}-
 
-      - name: Check cache hit
+      - name: Check cache hit.
         run: |
           echo "Cache Hit: ${{ steps.bazel-cache.outputs.cache-hit }}"
           echo "Cache Primary Key: ${{ steps.bazel-cache.outputs.cache-primary-key }}"
           echo "Cache Matched Key: ${{ steps.bazel-cache.outputs.cache-matched-key }}"
 
-      - name: Run bazel build on Windows
+      - name: Download Model
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          if (-not (Test-Path "./models")) {
+            New-Item -ItemType Directory -Path "./models" -Force
+          }
+
+          $headers = @{
+              "Authorization" = "Bearer $($env:HF_TOKEN)"
+          }
+
+          Write-Host "Downloading model from Hugging Face: ${{ env.MODEL_URL }}"
+
+          Invoke-WebRequest -Uri "${{ env.MODEL_URL }}" `
+                  -Headers $headers `
+                  -OutFile "${{ env.MODEL_PATH }}" `
+                  -MaximumRetryCount 5
+
+          $file = Get-Item "${{ env.MODEL_PATH }}"
+          $sizeMB = [math]::Round($file.Length / 1MB, 2)
+          Write-Host "Verification Success: $($file.Name) ($sizeMB MB) is ready."
+          Get-ChildItem "${{ env.MODEL_PATH }}" | Select-Object Name, @{Name="Size(MB)";Expression={$_.Length / 1MB}}
+
+      - name: Run bazel build on Windows.
         run: |
           bazel --output_base="$env:BAZEL_OUTPUT_BASE" `
             build --disk_cache=~/.cache/bazel-windows `
+            --build_tag_filters='-nowindows' `
             //... `
             //runtime/engine:litert_lm_main
 
@@ -91,12 +131,26 @@ jobs:
           cp bazel-bin/runtime/engine/litert_lm_main.exe litert_lm_main.windows_x86_64.exe
           gh release upload ${{ github.ref_name }} litert_lm_main.windows_x86_64.exe --clobber
 
-      - name: Run bazel test on Windows
+      - name: Run bazel test on Windows.
         run: |
           bazel --output_base="$env:BAZEL_OUTPUT_BASE" `
             test --disk_cache=~/.cache/bazel-windows --test_output=errors `
-            --test_tag_filters=-requires-mac-inputs:hard //...
+            --test_tag_filters='-requires-mac-inputs:hard,-nowindows' `
+            '--' //... -//runtime/executor/litert:kv_cache_test
 
+      - name: Install pytest
+        run: python3 -m pip install --break-system-packages pytest==8.3.4
+
+      - name: Run pytest
+        run: pytest tools/test/ --model-path=${{ env.MODEL_PATH }} --build-system=bazel
+
+      - name: Run bazel build on Windows with dynamic linking.
+        run: |
+          bazel --output_base="$env:BAZEL_OUTPUT_BASE" `
+            build --disk_cache=~/.cache/bazel-windows-dll `
+            --define=litert_link_capi_so=true `
+            --define=resolve_symbols_in_exec=false `
+            //runtime/engine:litert_lm_main
 
       - name: Remove cache if cache is being refreshed.
         if: env.REFRESH_CACHE == 'true'
@@ -107,5 +161,7 @@ jobs:
         uses: actions/cache/save@v4
         if: env.REFRESH_CACHE == 'true' || steps.bazel-cache.outputs.cache-hit != 'true'
         with:
-          path: ~/.cache/bazel-windows
+          path: |
+            ~/.cache/bazel-windows
+            ~/.cache/bazel-windows-dll
           key: ${{ steps.cache-keys.outputs.CACHE_KEY }}

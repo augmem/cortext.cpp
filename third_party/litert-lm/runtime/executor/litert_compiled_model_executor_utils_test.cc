@@ -15,28 +15,34 @@
 #include "runtime/executor/litert_compiled_model_executor_utils.h"
 
 #include <filesystem>  // NOLINT: Required for path manipulation.
+#include <fstream>
 #include <limits>
 #include <memory>
 #include <string>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 #include "absl/status/status.h"  // from @com_google_absl
 #include "absl/strings/string_view.h"  // from @com_google_absl
+#include "absl/types/span.h"  // from @com_google_absl
 #include "litert/cc/litert_element_type.h"  // from @litert
 #include "litert/cc/litert_environment.h"  // from @litert
 #include "litert/cc/litert_layout.h"  // from @litert
 #include "litert/cc/litert_ranked_tensor_type.h"  // from @litert
 #include "litert/cc/litert_tensor_buffer.h"  // from @litert
 #include "litert/cc/litert_tensor_buffer_types.h"  // from @litert
+#include "litert/cc/options/litert_cpu_options.h"  // from @litert
+#include "litert/cc/options/litert_gpu_options.h"  // from @litert
 #include "litert/test/matchers.h"  // from @litert
 #include "runtime/components/model_resources.h"
 #include "runtime/executor/executor_settings_base.h"
 #include "runtime/util/memory_mapped_file.h"
 #include "runtime/util/scoped_file.h"
 #include "runtime/util/test_utils.h"  // IWYU pragma: keep
+#include "tflite/types/half.h"  // from @litert
 
 namespace litert::lm {
 namespace {
@@ -136,28 +142,78 @@ TEST(LlmLiteRTCompiledModelExecutorUtilsTest,
 
 TEST(LlmLiteRTCompiledModelExecutorUtilsTest, GetKVCacheRootNames_KvCache) {
   std::vector<absl::string_view> input_names = {"kv_cache_k_0", "kv_cache_v_0"};
+  std::vector<absl::string_view> output_names = {};
   std::string k_root_name;
   std::string v_root_name;
-  ASSERT_OK(GetKVCacheRootNames(input_names, k_root_name, v_root_name));
+  ASSERT_OK(
+      GetKVCacheRootNames(input_names, output_names, k_root_name, v_root_name));
   EXPECT_EQ(k_root_name, "kv_cache_k_");
   EXPECT_EQ(v_root_name, "kv_cache_v_");
 }
 
 TEST(LlmLiteRTCompiledModelExecutorUtilsTest, GetKVCacheRootNames_KCache) {
   std::vector<absl::string_view> input_names = {"k_cache_0", "v_cache_0"};
+  std::vector<absl::string_view> output_names = {};
   std::string k_root_name;
   std::string v_root_name;
-  ASSERT_OK(GetKVCacheRootNames(input_names, k_root_name, v_root_name));
+  ASSERT_OK(
+      GetKVCacheRootNames(input_names, output_names, k_root_name, v_root_name));
+  EXPECT_EQ(k_root_name, "k_cache_");
+  EXPECT_EQ(v_root_name, "v_cache_");
+}
+
+TEST(LlmLiteRTCompiledModelExecutorUtilsTest,
+     GetKVCacheRootNames_KCacheOutput) {
+  std::vector<absl::string_view> input_names = {};
+  std::vector<absl::string_view> output_names = {"k_cache_0", "v_cache_0"};
+  std::string k_root_name;
+  std::string v_root_name;
+  ASSERT_OK(
+      GetKVCacheRootNames(input_names, output_names, k_root_name, v_root_name));
   EXPECT_EQ(k_root_name, "k_cache_");
   EXPECT_EQ(v_root_name, "v_cache_");
 }
 
 TEST(LlmLiteRTCompiledModelExecutorUtilsTest, GetKVCacheRootNames_NotFound) {
   std::vector<absl::string_view> input_names = {"other_input"};
+  std::vector<absl::string_view> output_names = {};
   std::string k_root_name;
   std::string v_root_name;
-  EXPECT_THAT(GetKVCacheRootNames(input_names, k_root_name, v_root_name),
-              StatusIs(absl::StatusCode::kFailedPrecondition));
+  EXPECT_THAT(
+      GetKVCacheRootNames(input_names, output_names, k_root_name, v_root_name),
+      StatusIs(absl::StatusCode::kFailedPrecondition));
+}
+
+TEST(LlmLiteRTCompiledModelExecutorUtilsTest, GetKVCacheRootNames_KvCacheC) {
+  std::vector<absl::string_view> input_names = {"kv_cache_c_0"};
+  std::vector<absl::string_view> output_names = {};
+  std::string k_root_name;
+  std::string v_root_name;
+  ASSERT_OK(
+      GetKVCacheRootNames(input_names, output_names, k_root_name, v_root_name));
+  EXPECT_EQ(k_root_name, "kv_cache_c_");
+  EXPECT_EQ(v_root_name, "kv_cache_c_");
+}
+
+TEST(LlmLiteRTCompiledModelExecutorUtilsTest,
+     FillSingleBufferCacheParamTensor) {
+  LITERT_ASSERT_OK_AND_ASSIGN(auto env, ::litert::Environment::Create({}));
+  auto layout = ::litert::Layout(::litert::Dimensions({12}));
+  RankedTensorType ranked_tensor_type(ElementType::Int32, std::move(layout));
+  auto param_tensor =
+      TensorBuffer::CreateManaged(env, ::litert::TensorBufferType::kHostMemory,
+                                  ranked_tensor_type, sizeof(int) * 12);
+  ASSERT_TRUE(param_tensor);
+
+  ASSERT_OK(FillSingleBufferCacheParamTensor(*param_tensor, /*start_index=*/5,
+                                             /*update_length=*/10));
+  auto lock = litert::TensorBufferScopedLock::Create(
+      *param_tensor, litert::TensorBuffer::LockMode::kRead);
+  ASSERT_TRUE(lock);
+  int* param_ptr = static_cast<int*>(lock->second);
+  EXPECT_EQ(param_ptr[0], 5);
+  EXPECT_EQ(param_ptr[1], 15);
+  EXPECT_EQ(param_ptr[2], 15);
 }
 
 TEST(LlmLiteRTCompiledModelExecutorUtilsTest,
@@ -276,6 +332,27 @@ TEST(LlmLiteRTCompiledModelExecutorUtilsTest, InitializeAttentionMask_Float32) {
     for (int i = 0; i < count_float; ++i) {
       EXPECT_EQ(mask_ptr[i], expected_val);
     }
+  }
+}
+
+TEST(LlmLiteRTCompiledModelExecutorUtilsTest, InitializeAttentionMask_Float16) {
+  LITERT_ASSERT_OK_AND_ASSIGN(auto env, ::litert::Environment::Create({}));
+  auto layout = ::litert::Layout(::litert::Dimensions({1, 1, 1, 128}));
+  RankedTensorType ranked_tensor_type(ElementType::Float16, std::move(layout));
+  auto mask_buffer = TensorBuffer::CreateManaged(
+      env, ::litert::TensorBufferType::kHostMemory, ranked_tensor_type,
+      sizeof(tflite::half) * 128);
+  ASSERT_TRUE(mask_buffer);
+
+  ASSERT_OK(InitializeAttentionMask(*mask_buffer, /*is_f16=*/true));
+  auto lock = litert::TensorBufferScopedLock::Create(
+      *mask_buffer, litert::TensorBuffer::LockMode::kRead);
+  ASSERT_TRUE(lock);
+  tflite::half* mask_ptr = static_cast<tflite::half*>(lock->second);
+  float expected_val = -45824.0f;
+  int count_float = 128;
+  for (int i = 0; i < count_float; ++i) {
+    EXPECT_FLOAT_EQ(static_cast<float>(mask_ptr[i]), expected_val);
   }
 }
 
@@ -504,6 +581,82 @@ TEST(LlmLiteRTCompiledModelExecutorUtilsTest,
                        BuildLiteRtCompiledModelResources(*model_assets));
   ASSERT_NE(model_resources, nullptr);
   ASSERT_OK(model_resources->GetTFLiteModel(ModelType::kTfLitePrefillDecode));
+}
+
+TEST(LlmLiteRTCompiledModelExecutorUtilsTest,
+     SetCpuCacheOptions_WithScopedFile) {
+  LITERT_ASSERT_OK_AND_ASSIGN(auto env, ::litert::Environment::Create({}));
+  LITERT_ASSERT_OK_AND_ASSIGN(auto cpu_options, ::litert::CpuOptions::Create());
+
+  std::string test_file_path =
+      (std::filesystem::path(::testing::TempDir()) / "cpu_cache_test.bin")
+          .string();
+  {
+    std::ofstream touch_file(test_file_path);
+  }
+  ASSERT_OK_AND_ASSIGN(auto scoped_file,
+                       ScopedFile::OpenWritable(test_file_path));
+  auto scoped_file_ptr = std::make_shared<ScopedFile>(std::move(scoped_file));
+
+  std::variant<std::string, std::shared_ptr<litert::lm::ScopedFile>>
+      weight_cache = scoped_file_ptr;
+  ASSERT_OK(SetCpuCacheOptions(weight_cache, "test_prefix", cpu_options));
+
+  auto fd_expected = cpu_options.GetXNNPackWeightCacheFileDescriptor();
+  ASSERT_TRUE(fd_expected.HasValue());
+  EXPECT_GT(fd_expected.Value(), 0);
+}
+
+TEST(LlmLiteRTCompiledModelExecutorUtilsTest,
+     SetCpuCacheOptions_WithWeightCacheFile) {
+  LITERT_ASSERT_OK_AND_ASSIGN(auto env, ::litert::Environment::Create({}));
+  LITERT_ASSERT_OK_AND_ASSIGN(auto cpu_options, ::litert::CpuOptions::Create());
+
+  std::variant<std::string, std::shared_ptr<litert::lm::ScopedFile>>
+      weight_cache = "weight_cache.bin";
+  ASSERT_OK(SetCpuCacheOptions(weight_cache, "test_prefix", cpu_options));
+
+  auto path_expected = cpu_options.GetXNNPackWeightCachePath();
+  ASSERT_TRUE(path_expected.HasValue());
+  EXPECT_EQ(path_expected.Value(), "weight_cache.bin");
+}
+
+TEST(LlmLiteRTCompiledModelExecutorUtilsTest, SetCpuCacheOptions_WithoutCache) {
+  LITERT_ASSERT_OK_AND_ASSIGN(auto env, ::litert::Environment::Create({}));
+  LITERT_ASSERT_OK_AND_ASSIGN(auto cpu_options, ::litert::CpuOptions::Create());
+
+  ASSERT_OK(SetCpuCacheOptions(absl::NotFoundError("No cache file"),
+                               "test_prefix", cpu_options));
+
+  auto path_expected = cpu_options.GetXNNPackWeightCachePath();
+  ASSERT_TRUE(path_expected.HasValue());
+  EXPECT_TRUE(path_expected.Value().empty());
+
+  auto fd_expected = cpu_options.GetXNNPackWeightCacheFileDescriptor();
+  ASSERT_TRUE(fd_expected.HasValue());
+  EXPECT_EQ(fd_expected.Value(), -1);
+}
+
+TEST(LlmLiteRTCompiledModelExecutorUtilsTest, SetGpuCacheOptions_Nocache) {
+  LITERT_ASSERT_OK_AND_ASSIGN(auto env, ::litert::Environment::Create({}));
+  LITERT_ASSERT_OK_AND_ASSIGN(auto gpu_options, ::litert::GpuOptions::Create());
+
+  auto model_path =
+      std::filesystem::path(::testing::SrcDir()) /
+      "google3/runtime/testdata/test_lm.task";
+  ASSERT_OK_AND_ASSIGN(auto model_assets,
+                       ModelAssets::Create(model_path.string()));
+
+  class StubExecutorSettings : public ExecutorSettingsBase {
+   public:
+    explicit StubExecutorSettings(const ModelAssets& model_assets)
+        : ExecutorSettingsBase(model_assets) {}
+  };
+  StubExecutorSettings executor_settings(model_assets);
+
+  ASSERT_OK(SetGpuCacheOptions(
+      ":nocache", absl::NotFoundError("No program cache"), executor_settings,
+      "test_key", "test_prefix", gpu_options));
 }
 
 }  // namespace

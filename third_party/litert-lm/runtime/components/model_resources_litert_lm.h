@@ -48,10 +48,14 @@ class ModelResourcesLitertLm : public ModelResources {
 
   std::optional<std::string> GetTFLiteModelBackendConstraint(
       ModelType model_type) override;
+
+  std::optional<std::string> GetTFLiteModelPreferActivationType(
+      ModelType model_type) override;
+
   // Returns the tokenizer from the *.litertlm file. If both SentencePiece and
   // HuggingFace tokenizer are present and supported by the current build
   // configuration, the SentencePiece tokenizer will be used.
-  absl::StatusOr<Tokenizer*> GetTokenizer() override;
+  absl::StatusOr<std::unique_ptr<Tokenizer>> GetTokenizer() override;
 
   absl::StatusOr<const proto::LlmMetadata*> GetLlmMetadata() override;
 
@@ -71,7 +75,6 @@ class ModelResourcesLitertLm : public ModelResources {
 
  private:
   absl::flat_hash_map<ModelType, std::unique_ptr<litert::Model>> model_map_;
-  std::unique_ptr<Tokenizer> tokenizer_;
   std::unique_ptr<proto::LlmMetadata> llm_metadata_;
 };
 

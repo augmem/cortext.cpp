@@ -30,7 +30,7 @@ namespace litert::lm {
 
 class EmbeddingLookupMultiModal : public EmbeddingLookup {
  public:
-  ~EmbeddingLookupMultiModal() = default;
+  ~EmbeddingLookupMultiModal() override = default;
 
   // Creates a EmbeddingLookupMultiModal instance.
   //

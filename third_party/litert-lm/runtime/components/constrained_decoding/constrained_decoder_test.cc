@@ -27,13 +27,16 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 #include "absl/status/status.h"  // from @com_google_absl
+#include "litert/c/litert_model_types.h"  // from @litert
 #include "litert/cc/litert_environment.h"  // from @litert
 #include "litert/cc/litert_expected.h"  // from @litert
 #include "litert/cc/litert_layout.h"  // from @litert
+#include "litert/cc/litert_ranked_tensor_type.h"  // from @litert
 #include "litert/cc/litert_tensor_buffer.h"  // from @litert
 #include "litert/cc/litert_tensor_buffer_types.h"  // from @litert
 #include "litert/test/matchers.h"  // from @litert
 #include "runtime/components/constrained_decoding/constraint_provider.h"
+#include "runtime/components/constrained_decoding/fst_constraint_config.h"
 #include "runtime/components/constrained_decoding/fst_constraint_provider.h"
 #include "runtime/util/convert_tensor_buffer.h"
 #include "sentencepiece_processor.h"  // from @sentencepiece
@@ -114,7 +117,9 @@ class ConstrainedDecoderTest : public ::testing::Test {
 };
 
 TEST_F(ConstrainedDecoderTest, UpdateStateAndMaskLogitsBatchSize1) {
-  ASSERT_OK_AND_ASSIGN(auto constraint, provider_->CreateConstraint("ab"));
+  ASSERT_OK_AND_ASSIGN(
+      auto constraint,
+      provider_->CreateConstraint(FstConstraintArg{.constraint_string = "ab"}));
   ConstrainedDecoder constrained_decoder(constraint.get(), /*batch_size=*/1);
 
   // Create a tensor buffer for the token ids for "a".
@@ -182,7 +187,9 @@ TEST_F(ConstrainedDecoderTest, UpdateStateAndMaskLogitsBatchSize1) {
 }
 
 TEST_F(ConstrainedDecoderTest, UpdateStateAndMaskLogitsBatchSize2) {
-  ASSERT_OK_AND_ASSIGN(auto constraint, provider_->CreateConstraint("a|c"));
+  ASSERT_OK_AND_ASSIGN(auto constraint,
+                       provider_->CreateConstraint(
+                           FstConstraintArg{.constraint_string = "a|c"}));
   ConstrainedDecoder constrained_decoder(constraint.get(), /*batch_size=*/2);
 
   // Create a tensor buffer for the token ids for "a" and "c".
@@ -222,7 +229,9 @@ TEST_F(ConstrainedDecoderTest, UpdateStateAndMaskLogitsBatchSize2) {
 }
 
 TEST_F(ConstrainedDecoderTest, UpdateStateFailsWithWrongBatchSize) {
-  ASSERT_OK_AND_ASSIGN(auto constraint, provider_->CreateConstraint("ab"));
+  ASSERT_OK_AND_ASSIGN(
+      auto constraint,
+      provider_->CreateConstraint(FstConstraintArg{.constraint_string = "ab"}));
   ConstrainedDecoder constrained_decoder(constraint.get(), /*batch_size=*/2);
 
   // Create a tensor buffer for the token ids for "a".
@@ -240,7 +249,9 @@ TEST_F(ConstrainedDecoderTest, UpdateStateFailsWithWrongBatchSize) {
 }
 
 TEST_F(ConstrainedDecoderTest, MaskLogitsFailsWithWrongBatchSize) {
-  ASSERT_OK_AND_ASSIGN(auto constraint, provider_->CreateConstraint("ab"));
+  ASSERT_OK_AND_ASSIGN(
+      auto constraint,
+      provider_->CreateConstraint(FstConstraintArg{.constraint_string = "ab"}));
   ConstrainedDecoder constrained_decoder(constraint.get(), /*batch_size=*/1);
 
   // Create a tensor buffer for the token ids for "a".
@@ -268,7 +279,9 @@ TEST_F(ConstrainedDecoderTest, MaskLogitsFailsWithWrongBatchSize) {
 }
 
 TEST_F(ConstrainedDecoderTest, MaskLogitsFailsWithWrongVolabSize) {
-  ASSERT_OK_AND_ASSIGN(auto constraint, provider_->CreateConstraint("ab"));
+  ASSERT_OK_AND_ASSIGN(
+      auto constraint,
+      provider_->CreateConstraint(FstConstraintArg{.constraint_string = "ab"}));
   ConstrainedDecoder constrained_decoder(constraint.get(), /*batch_size=*/1);
 
   // Create a tensor buffer for the token ids for "a".

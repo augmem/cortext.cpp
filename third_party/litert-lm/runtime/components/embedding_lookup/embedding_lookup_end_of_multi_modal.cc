@@ -19,7 +19,6 @@
 #include <cstdint>
 #include <cstring>
 #include <memory>
-#include <utility>
 #include <vector>
 
 #include "absl/base/nullability.h"  // from @com_google_absl
@@ -36,6 +35,9 @@
 #include "litert/cc/litert_options.h"  // from @litert
 #include "litert/cc/litert_tensor_buffer.h"  // from @litert
 #include "runtime/util/status_macros.h"  //NOLINT
+#if defined(__ANDROID__)
+#include "litert/cc/options/litert_qualcomm_options.h"  // from @litert
+#endif
 
 namespace litert::lm {
 
@@ -148,11 +150,11 @@ absl::Status EndOfMultiModalEmbedding::LookupPrefill(
 }
 
 absl::StatusOr<std::unique_ptr<EndOfMultiModalEmbedding>>
-EndOfMultiModalEmbedding::Create(const litert::Model* absl_nonnull model,
+EndOfMultiModalEmbedding::Create(litert::Environment& env,
+                                 const litert::Model* absl_nonnull model,
                                  int special_token) {
-  LITERT_ASSIGN_OR_RETURN(auto env, ::litert::Environment::Create({}));
   auto handler = std::unique_ptr<EndOfMultiModalEmbedding>(
-      new EndOfMultiModalEmbedding(std::move(env), model, special_token));
+      new EndOfMultiModalEmbedding(env, model, special_token));
   RETURN_IF_ERROR(  // IWYU pragma: keep as is included by status_macros.h
       handler->Initialize());
   return handler;
@@ -160,10 +162,24 @@ EndOfMultiModalEmbedding::Create(const litert::Model* absl_nonnull model,
 
 absl::Status EndOfMultiModalEmbedding::Initialize() {
   LITERT_ASSIGN_OR_RETURN(auto options, Options::Create());
+#if defined(__ANDROID__)
+  options.SetHardwareAccelerators(litert::HwAccelerators::kNpu |
+                                  litert::HwAccelerators::kCpu);
+#else
   options.SetHardwareAccelerators(litert::HwAccelerators::kCpu);
+#endif
+#if defined(__ANDROID__)
+  LITERT_ASSIGN_OR_RETURN(::litert::qualcomm::QualcommOptions & qnn_opts,
+                          options.GetQualcommOptions());
+  qnn_opts.SetLogLevel(::litert::qualcomm::QualcommOptions::LogLevel::kOff);
+  qnn_opts.SetHtpPerformanceMode(
+      ::litert::qualcomm::QualcommOptions::HtpPerformanceMode::
+          kSustainedHighPerformance);
+#endif
 
-  LITERT_ASSIGN_OR_RETURN(litert::CompiledModel compiled_model,
-                          litert::CompiledModel::Create(env_, model_, options));
+  LITERT_ASSIGN_OR_RETURN(
+      litert::CompiledModel compiled_model,
+      litert::CompiledModel::Create(env_, model_.Get(), options));
   if (auto num_signatures = model_.GetNumSignatures(); num_signatures != 1) {
     return absl::InvalidArgumentError(absl::StrCat(
         "The Embedding model must have exactly one signature but got ",

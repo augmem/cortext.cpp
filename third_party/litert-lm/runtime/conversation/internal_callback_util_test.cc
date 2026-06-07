@@ -15,8 +15,8 @@
 #include "runtime/conversation/internal_callback_util.h"
 
 #include <memory>
+#include <string>
 #include <utility>
-#include <variant>
 #include <vector>
 
 #include <gmock/gmock.h>
@@ -47,6 +47,14 @@ nlohmann::ordered_json TextMessage(absl::string_view text) {
   return message;
 }
 
+nlohmann::ordered_json ChannelMessage(absl::string_view text,
+                                      absl::string_view channel_name) {
+  nlohmann::ordered_json message;
+  message["role"] = "assistant";
+  message["channels"] = {{channel_name, text}};
+  return message;
+}
+
 absl::AnyInvocable<void(absl::StatusOr<Message>)> CreateUserMessageCallback(
     std::vector<nlohmann::ordered_json>& output, bool& done,
     absl::Status& status) {
@@ -56,12 +64,10 @@ absl::AnyInvocable<void(absl::StatusOr<Message>)> CreateUserMessageCallback(
       status = message.status();
       return;
     }
-    if (auto json_message = std::get_if<JsonMessage>(&*message)) {
-      if (json_message->is_null()) {
-        done = true;
-      } else {
-        output.push_back(*json_message);
-      }
+    if (message->is_null()) {
+      done = true;
+    } else {
+      output.push_back(*message);
     }
   };
 }
@@ -88,12 +94,14 @@ class InternalCallbackTest : public testing::Test {
   bool done_ = false;
   absl::Status status_;
   DataProcessorArguments processor_args_;
+  std::vector<Channel> channels_;
 };
 
 TEST_F(InternalCallbackTest, OnDone) {
   auto user_callback = CreateUserMessageCallback(output_, done_, status_);
-  auto callback = CreateInternalCallback(
-      *model_data_processor_, processor_args_, std::move(user_callback));
+  auto callback =
+      CreateInternalCallback(*model_data_processor_, processor_args_, channels_,
+                             std::move(user_callback));
 
   callback(Responses(TaskState::kDone));
 
@@ -104,8 +112,9 @@ TEST_F(InternalCallbackTest, OnDone) {
 
 TEST_F(InternalCallbackTest, OnError) {
   auto user_callback = CreateUserMessageCallback(output_, done_, status_);
-  auto callback = CreateInternalCallback(
-      *model_data_processor_, processor_args_, std::move(user_callback));
+  auto callback =
+      CreateInternalCallback(*model_data_processor_, processor_args_, channels_,
+                             std::move(user_callback));
 
   callback(absl::InternalError("error"));
 
@@ -116,8 +125,9 @@ TEST_F(InternalCallbackTest, OnError) {
 
 TEST_F(InternalCallbackTest, Text) {
   auto user_callback = CreateUserMessageCallback(output_, done_, status_);
-  auto callback = CreateInternalCallback(
-      *model_data_processor_, processor_args_, std::move(user_callback));
+  auto callback =
+      CreateInternalCallback(*model_data_processor_, processor_args_, channels_,
+                             std::move(user_callback));
 
   callback(Responses(TaskState::kProcessing, {"this "}));
   callback(Responses(TaskState::kProcessing, {"is "}));
@@ -130,8 +140,9 @@ TEST_F(InternalCallbackTest, Text) {
 
 TEST_F(InternalCallbackTest, ToolCall) {
   auto user_callback = CreateUserMessageCallback(output_, done_, status_);
-  auto callback = CreateInternalCallback(
-      *model_data_processor_, processor_args_, std::move(user_callback));
+  auto callback =
+      CreateInternalCallback(*model_data_processor_, processor_args_, channels_,
+                             std::move(user_callback));
 
   callback(Responses(TaskState::kProcessing, {"```tool_code\n"}));
   callback(Responses(TaskState::kProcessing, {"tool_name"}));
@@ -156,8 +167,9 @@ TEST_F(InternalCallbackTest, ToolCall) {
 
 TEST_F(InternalCallbackTest, TextAndToolCall) {
   auto user_callback = CreateUserMessageCallback(output_, done_, status_);
-  auto callback = CreateInternalCallback(
-      *model_data_processor_, processor_args_, std::move(user_callback));
+  auto callback =
+      CreateInternalCallback(*model_data_processor_, processor_args_, channels_,
+                             std::move(user_callback));
 
   callback(Responses(TaskState::kProcessing, {"this "}));
   callback(Responses(TaskState::kProcessing, {"is "}));
@@ -188,8 +200,9 @@ TEST_F(InternalCallbackTest, TextAndToolCall) {
 
 TEST_F(InternalCallbackTest, SplitCodeFenceStart) {
   auto user_callback = CreateUserMessageCallback(output_, done_, status_);
-  auto callback = CreateInternalCallback(
-      *model_data_processor_, processor_args_, std::move(user_callback));
+  auto callback =
+      CreateInternalCallback(*model_data_processor_, processor_args_, channels_,
+                             std::move(user_callback));
 
   callback(Responses(TaskState::kProcessing, {"```tool_"}));
   callback(Responses(TaskState::kProcessing, {"code\n"}));
@@ -215,8 +228,9 @@ TEST_F(InternalCallbackTest, SplitCodeFenceStart) {
 
 TEST_F(InternalCallbackTest, TextBeforeSplitCodeFenceStart) {
   auto user_callback = CreateUserMessageCallback(output_, done_, status_);
-  auto callback = CreateInternalCallback(
-      *model_data_processor_, processor_args_, std::move(user_callback));
+  auto callback =
+      CreateInternalCallback(*model_data_processor_, processor_args_, channels_,
+                             std::move(user_callback));
 
   callback(Responses(TaskState::kProcessing, {"text```tool_"}));
   callback(Responses(TaskState::kProcessing, {"code\n"}));
@@ -243,8 +257,9 @@ TEST_F(InternalCallbackTest, TextBeforeSplitCodeFenceStart) {
 
 TEST_F(InternalCallbackTest, ToolCallAfterSplitCodeFenceStart) {
   auto user_callback = CreateUserMessageCallback(output_, done_, status_);
-  auto callback = CreateInternalCallback(
-      *model_data_processor_, processor_args_, std::move(user_callback));
+  auto callback =
+      CreateInternalCallback(*model_data_processor_, processor_args_, channels_,
+                             std::move(user_callback));
 
   callback(Responses(TaskState::kProcessing, {"```"}));
   callback(Responses(TaskState::kProcessing, {"tool_code\ntool_name"}));
@@ -269,8 +284,9 @@ TEST_F(InternalCallbackTest, ToolCallAfterSplitCodeFenceStart) {
 
 TEST_F(InternalCallbackTest, TextOnBothSidesOfCodeFenceStart) {
   auto user_callback = CreateUserMessageCallback(output_, done_, status_);
-  auto callback = CreateInternalCallback(
-      *model_data_processor_, processor_args_, std::move(user_callback));
+  auto callback =
+      CreateInternalCallback(*model_data_processor_, processor_args_, channels_,
+                             std::move(user_callback));
 
   callback(Responses(TaskState::kProcessing, {"text```tool_code\ntool_name"}));
   callback(Responses(TaskState::kProcessing, {"(x=1)"}));
@@ -295,8 +311,9 @@ TEST_F(InternalCallbackTest, TextOnBothSidesOfCodeFenceStart) {
 
 TEST_F(InternalCallbackTest, SplitCodeFenceEnd) {
   auto user_callback = CreateUserMessageCallback(output_, done_, status_);
-  auto callback = CreateInternalCallback(
-      *model_data_processor_, processor_args_, std::move(user_callback));
+  auto callback =
+      CreateInternalCallback(*model_data_processor_, processor_args_, channels_,
+                             std::move(user_callback));
 
   callback(Responses(TaskState::kProcessing, {"```tool_code\n"}));
   callback(Responses(TaskState::kProcessing, {"tool_name(x=1)"}));
@@ -321,8 +338,9 @@ TEST_F(InternalCallbackTest, SplitCodeFenceEnd) {
 
 TEST_F(InternalCallbackTest, TextBeforeSplitCodeFenceEnd) {
   auto user_callback = CreateUserMessageCallback(output_, done_, status_);
-  auto callback = CreateInternalCallback(
-      *model_data_processor_, processor_args_, std::move(user_callback));
+  auto callback =
+      CreateInternalCallback(*model_data_processor_, processor_args_, channels_,
+                             std::move(user_callback));
 
   callback(Responses(TaskState::kProcessing, {"```tool_code\n"}));
   callback(Responses(TaskState::kProcessing, {"tool_name(x="}));
@@ -347,8 +365,9 @@ TEST_F(InternalCallbackTest, TextBeforeSplitCodeFenceEnd) {
 
 TEST_F(InternalCallbackTest, TextAfterSplitCodeFenceEnd) {
   auto user_callback = CreateUserMessageCallback(output_, done_, status_);
-  auto callback = CreateInternalCallback(
-      *model_data_processor_, processor_args_, std::move(user_callback));
+  auto callback =
+      CreateInternalCallback(*model_data_processor_, processor_args_, channels_,
+                             std::move(user_callback));
 
   callback(Responses(TaskState::kProcessing, {"```tool_code\n"}));
   callback(Responses(TaskState::kProcessing, {"tool_name(x=1)"}));
@@ -374,8 +393,9 @@ TEST_F(InternalCallbackTest, TextAfterSplitCodeFenceEnd) {
 
 TEST_F(InternalCallbackTest, OnNextTextOnBothSidesOfSplitCodeFenceEnd) {
   auto user_callback = CreateUserMessageCallback(output_, done_, status_);
-  auto callback = CreateInternalCallback(
-      *model_data_processor_, processor_args_, std::move(user_callback));
+  auto callback =
+      CreateInternalCallback(*model_data_processor_, processor_args_, channels_,
+                             std::move(user_callback));
 
   callback(Responses(TaskState::kProcessing, {"```tool_code\n"}));
   callback(Responses(TaskState::kProcessing, {"tool_name(x="}));
@@ -401,8 +421,9 @@ TEST_F(InternalCallbackTest, OnNextTextOnBothSidesOfSplitCodeFenceEnd) {
 
 TEST_F(InternalCallbackTest, ParallelToolCalls) {
   auto user_callback = CreateUserMessageCallback(output_, done_, status_);
-  auto callback = CreateInternalCallback(
-      *model_data_processor_, processor_args_, std::move(user_callback));
+  auto callback =
+      CreateInternalCallback(*model_data_processor_, processor_args_, channels_,
+                             std::move(user_callback));
 
   callback(Responses(TaskState::kProcessing, {"```tool_code\n"}));
   callback(Responses(TaskState::kProcessing, {"tool_a(x=1)\n"}));
@@ -438,8 +459,9 @@ TEST_F(InternalCallbackTest, ParallelToolCalls) {
 
 TEST_F(InternalCallbackTest, TwoConsecutiveToolCodeBlocks) {
   auto user_callback = CreateUserMessageCallback(output_, done_, status_);
-  auto callback = CreateInternalCallback(
-      *model_data_processor_, processor_args_, std::move(user_callback));
+  auto callback =
+      CreateInternalCallback(*model_data_processor_, processor_args_, channels_,
+                             std::move(user_callback));
 
   callback(Responses(TaskState::kProcessing, {"```tool_code\n"}));
   callback(Responses(TaskState::kProcessing, {"tool_a(x=1)\n"}));
@@ -479,8 +501,9 @@ TEST_F(InternalCallbackTest, TwoConsecutiveToolCodeBlocks) {
 
 TEST_F(InternalCallbackTest, IncompleteToolCodeBlock) {
   auto user_callback = CreateUserMessageCallback(output_, done_, status_);
-  auto callback = CreateInternalCallback(
-      *model_data_processor_, processor_args_, std::move(user_callback));
+  auto callback =
+      CreateInternalCallback(*model_data_processor_, processor_args_, channels_,
+                             std::move(user_callback));
 
   callback(Responses(TaskState::kProcessing, {"```tool_code\n"}));
   callback(Responses(TaskState::kProcessing, {"tool_name(x=1)"}));
@@ -493,8 +516,9 @@ TEST_F(InternalCallbackTest, IncompleteToolCodeBlock) {
 
 TEST_F(InternalCallbackTest, WrongCodeFenceStart) {
   auto user_callback = CreateUserMessageCallback(output_, done_, status_);
-  auto callback = CreateInternalCallback(
-      *model_data_processor_, processor_args_, std::move(user_callback));
+  auto callback =
+      CreateInternalCallback(*model_data_processor_, processor_args_, channels_,
+                             std::move(user_callback));
 
   callback(Responses(TaskState::kProcessing, {"```tool\n"}));
   callback(Responses(TaskState::kProcessing, {"tool_name(x=1)"}));
@@ -508,8 +532,9 @@ TEST_F(InternalCallbackTest, WrongCodeFenceStart) {
 
 TEST_F(InternalCallbackTest, WrongCodeFenceEnd) {
   auto user_callback = CreateUserMessageCallback(output_, done_, status_);
-  auto callback = CreateInternalCallback(
-      *model_data_processor_, processor_args_, std::move(user_callback));
+  auto callback =
+      CreateInternalCallback(*model_data_processor_, processor_args_, channels_,
+                             std::move(user_callback));
 
   callback(Responses(TaskState::kProcessing, {"```tool_code\n"}));
   callback(Responses(TaskState::kProcessing, {"tool_name(x=1)"}));
@@ -522,8 +547,9 @@ TEST_F(InternalCallbackTest, WrongCodeFenceEnd) {
 
 TEST_F(InternalCallbackTest, InvalidFunctionCall) {
   auto user_callback = CreateUserMessageCallback(output_, done_, status_);
-  auto callback = CreateInternalCallback(
-      *model_data_processor_, processor_args_, std::move(user_callback));
+  auto callback =
+      CreateInternalCallback(*model_data_processor_, processor_args_, channels_,
+                             std::move(user_callback));
 
   callback(Responses(TaskState::kProcessing, {"```tool_code\n"}));
   callback(Responses(TaskState::kProcessing, {"not a function call"}));
@@ -531,6 +557,227 @@ TEST_F(InternalCallbackTest, InvalidFunctionCall) {
 
   EXPECT_TRUE(done_);
   EXPECT_THAT(status_, StatusIs(absl::StatusCode::kInvalidArgument));
+}
+
+// Verifies that when the system flushes the `complete_message` (e.g. used for
+// capturing history during `async=true` queries), tool call blocks aren't
+// accidentally stripped out as raw channels before the message formatter can
+// parse them into structured `tool_calls`.
+TEST_F(InternalCallbackTest, ToolCallWithCompleteMessageCallback) {
+  auto user_callback = CreateUserMessageCallback(output_, done_, status_);
+  Message final_message;
+  bool final_done = false;
+  auto complete_message_callback = [&](const Message& message) {
+    final_message = message;
+    final_done = true;
+  };
+
+  auto callback = CreateInternalCallback(
+      *model_data_processor_, processor_args_, channels_,
+      std::move(user_callback), /*cancel_callback=*/nullptr,
+      std::move(complete_message_callback));
+
+  callback(Responses(TaskState::kProcessing, {"```tool_code\n"}));
+  callback(Responses(TaskState::kProcessing, {"tool_name"}));
+  callback(Responses(TaskState::kProcessing, {"(x=1)"}));
+  callback(Responses(TaskState::kProcessing, {"\n```"}));
+  callback(Responses(TaskState::kProcessing, {"some text"}));
+  callback(Responses(TaskState::kDone));
+
+  EXPECT_TRUE(final_done);
+  EXPECT_THAT(final_message, testing::Eq(Message::parse(R"json({
+                "role": "assistant",
+                "content": [{"type": "text", "text": "some text"}],
+                "tool_calls": [
+                  {
+                    "type": "function",
+                    "function": {
+                      "name": "tool_name",
+                      "arguments": {
+                        "x": 1
+                      }
+                    }
+                  }
+                ]
+              })json")));
+}
+
+class InternalCallbackChannelTest : public testing::Test {
+ protected:
+  void SetUp() override {
+    Gemma3DataProcessorConfig config;
+
+    // Need a tool in the preface to trigger tool call parsing. The actual tool
+    // definition is unimportant.
+    JsonPreface preface{.tools = nlohmann::ordered_json::parse(R"json([{
+                  "name": "tool_name",
+                  "parameters": { "properties": { "x": { "type": "integer" } } }
+                }])json")};
+    ASSERT_OK_AND_ASSIGN(auto gemma3_processor,
+                         Gemma3DataProcessor::Create(config, preface));
+
+    channels_ = {{"thought", "<|channel>thought\n", "<channel|>"}};
+    model_data_processor_ = std::move(gemma3_processor);
+
+    processor_args_ = DataProcessorArguments();
+  }
+
+  std::unique_ptr<Gemma3DataProcessor> model_data_processor_;
+  std::vector<nlohmann::ordered_json> output_;
+  bool done_ = false;
+  absl::Status status_;
+  DataProcessorArguments processor_args_;
+  std::vector<Channel> channels_;
+};
+
+TEST_F(InternalCallbackChannelTest, ChannelStream) {
+  auto user_callback = CreateUserMessageCallback(output_, done_, status_);
+  auto callback =
+      CreateInternalCallback(*model_data_processor_, processor_args_, channels_,
+                             std::move(user_callback));
+
+  callback(Responses(TaskState::kProcessing, {"<|channel>thought\n"}));
+  callback(Responses(TaskState::kProcessing, {"I "}));
+  callback(Responses(TaskState::kProcessing, {"am "}));
+  callback(Responses(TaskState::kProcessing, {"thinking"}));
+  callback(Responses(TaskState::kProcessing, {"<channel|>"}));
+
+  EXPECT_THAT(output_, ElementsAre(ChannelMessage("I ", "thought"),
+                                   ChannelMessage("am ", "thought"),
+                                   ChannelMessage("thinking", "thought")));
+}
+
+TEST_F(InternalCallbackChannelTest, SplitChannelEnd) {
+  auto user_callback = CreateUserMessageCallback(output_, done_, status_);
+  auto callback =
+      CreateInternalCallback(*model_data_processor_, processor_args_, channels_,
+                             std::move(user_callback));
+
+  callback(Responses(TaskState::kProcessing, {"<|channel>thought\n"}));
+  callback(Responses(TaskState::kProcessing, {"partial "}));
+  callback(Responses(TaskState::kProcessing, {"<chan"}));
+  callback(Responses(TaskState::kProcessing, {"nel|>"}));
+
+  EXPECT_THAT(output_, ElementsAre(ChannelMessage("partial ", "thought")));
+}
+
+TEST_F(InternalCallbackChannelTest, ChannelAndText) {
+  auto user_callback = CreateUserMessageCallback(output_, done_, status_);
+  auto callback =
+      CreateInternalCallback(*model_data_processor_, processor_args_, channels_,
+                             std::move(user_callback));
+
+  callback(Responses(TaskState::kProcessing, {"some "}));
+  callback(Responses(TaskState::kProcessing, {"text\n"}));
+  callback(Responses(TaskState::kProcessing, {"<|chan"}));
+  callback(Responses(TaskState::kProcessing, {"nel>thought\n"}));
+  callback(Responses(TaskState::kProcessing, {"I "}));
+  callback(Responses(TaskState::kProcessing, {"am "}));
+  callback(Responses(TaskState::kProcessing, {"thinking"}));
+  callback(Responses(TaskState::kProcessing, {"<channel|>"}));
+  callback(Responses(TaskState::kProcessing, {" more text"}));
+
+  EXPECT_THAT(output_, ElementsAre(TextMessage("some "), TextMessage("text\n"),
+                                   ChannelMessage("I ", "thought"),
+                                   ChannelMessage("am ", "thought"),
+                                   ChannelMessage("thinking", "thought"),
+                                   TextMessage(" more text")));
+}
+
+TEST_F(InternalCallbackChannelTest, IncompleteChannel) {
+  auto user_callback = CreateUserMessageCallback(output_, done_, status_);
+  auto callback =
+      CreateInternalCallback(*model_data_processor_, processor_args_, channels_,
+                             std::move(user_callback));
+
+  callback(Responses(TaskState::kProcessing, {"<|channel>thought\n"}));
+  callback(Responses(TaskState::kProcessing, {"this is "}));
+  callback(Responses(TaskState::kDone));
+
+  EXPECT_THAT(output_, ElementsAre(ChannelMessage("this is ", "thought")));
+}
+
+TEST_F(InternalCallbackChannelTest, ChannelStreamWithCompleteMessageCallback) {
+  auto user_callback = CreateUserMessageCallback(output_, done_, status_);
+  Message final_message;
+  bool final_done = false;
+  auto complete_message_callback = [&](const Message& message) {
+    final_message = message;
+    final_done = true;
+  };
+
+  auto callback = CreateInternalCallback(
+      *model_data_processor_, processor_args_, channels_,
+      std::move(user_callback), /*cancel_callback=*/nullptr,
+      std::move(complete_message_callback));
+
+  callback(Responses(TaskState::kProcessing, {"Hello"}));
+  callback(Responses(TaskState::kProcessing, {"<|channel>thought\n"}));
+  callback(Responses(TaskState::kProcessing, {"I am thinking"}));
+  callback(Responses(TaskState::kProcessing, {"<channel|>"}));
+  callback(Responses(TaskState::kProcessing, {" World!"}));
+  callback(Responses(TaskState::kDone));
+
+  EXPECT_TRUE(final_done);
+  EXPECT_THAT(final_message, testing::Eq(Message::parse(R"json({
+                "role": "assistant",
+                "content": [{"type": "text", "text": "Hello World!"}],
+                "channels": {
+                  "thought": "I am thinking"
+                }
+              })json")));
+}
+
+TEST_F(InternalCallbackChannelTest,
+       ChannelStreamUnclosedWithCompleteMessageCallback) {
+  auto user_callback = CreateUserMessageCallback(output_, done_, status_);
+  Message final_message;
+  bool final_done = false;
+  auto complete_message_callback = [&](const Message& message) {
+    final_message = message;
+    final_done = true;
+  };
+
+  auto callback = CreateInternalCallback(
+      *model_data_processor_, processor_args_, channels_,
+      std::move(user_callback), /*cancel_callback=*/nullptr,
+      std::move(complete_message_callback));
+
+  callback(Responses(TaskState::kProcessing, {"<|channel>thought\n"}));
+  callback(Responses(TaskState::kProcessing, {"I am thinking"}));
+  callback(Responses(TaskState::kDone));
+
+  EXPECT_TRUE(final_done);
+  EXPECT_TRUE(final_message.contains("channels"));
+  EXPECT_EQ(final_message["channels"]["thought"], "I am thinking");
+}
+
+TEST_F(InternalCallbackChannelTest, OpenChannelAtStartNoEndTag) {
+  auto user_callback = CreateUserMessageCallback(output_, done_, status_);
+  auto callback = CreateInternalCallback(
+      *model_data_processor_, processor_args_, channels_,
+      std::move(user_callback), /*cancel_callback=*/nullptr,
+      /*complete_message_callback=*/nullptr, /*open_channel_name=*/"thought");
+
+  callback(Responses(TaskState::kProcessing, {"I am thinking"}));
+  callback(Responses(TaskState::kDone));
+
+  EXPECT_THAT(output_, ElementsAre(ChannelMessage("I am thinking", "thought")));
+}
+
+TEST_F(InternalCallbackChannelTest, OpenChannelAtStartWithEndTag) {
+  auto user_callback = CreateUserMessageCallback(output_, done_, status_);
+  auto callback = CreateInternalCallback(
+      *model_data_processor_, processor_args_, channels_,
+      std::move(user_callback), /*cancel_callback=*/nullptr,
+      /*complete_message_callback=*/nullptr, /*open_channel_name=*/"thought");
+
+  callback(Responses(TaskState::kProcessing, {"hmm<channel|>"}));
+  callback(Responses(TaskState::kProcessing, {" world"}));
+  callback(Responses(TaskState::kDone));
+
+  EXPECT_THAT(output_, ElementsAre(ChannelMessage("hmm", "thought"),
+                                   TextMessage(" world")));
 }
 
 }  // namespace

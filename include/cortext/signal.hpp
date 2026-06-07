@@ -5,6 +5,8 @@
 #include <string>
 #include <vector>
 
+#include "cortext/retention.hpp"
+
 namespace cortext
 {
 
@@ -19,11 +21,19 @@ struct Signal
   // The universal representation of the input data.
   Eigen::VectorXf embedding;
 
+  // Optional higher-dimensional signal representation for engine-side
+  // continuity policies such as SoftAnchor. Retrieval/storage may consume a
+  // compact embedding while ingress policies consume this richer signal.
+  std::optional<Eigen::VectorXf> soft_anchor_embedding;
+
   // Core metadata.
   uint64_t timestamp = 0;
   std::string source_id;
   bool force_boundary = false;
   bool force_write = false;
+  // Durable by default. Ephemeral signals update live processing state and
+  // retrieval context, but the write path must not persist them as memories.
+  Retention retention = Retention::Durable;
 
   // Payload for storage (persisted to objstore when write gate passes).
   std::optional<std::vector<unsigned char>> payload;

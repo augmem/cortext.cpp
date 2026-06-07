@@ -22,19 +22,22 @@
 #include <vector>
 
 #include "absl/base/nullability.h"  // from @com_google_absl
+#include "absl/container/flat_hash_map.h"  // from @com_google_absl
 #include "absl/status/status.h"  // from @com_google_absl
 #include "absl/status/statusor.h"  // from @com_google_absl
 #include "absl/strings/str_cat.h"  // from @com_google_absl
 #include "absl/strings/string_view.h"  // from @com_google_absl
 #include "absl/synchronization/mutex.h"  // from @com_google_absl
 #include "absl/types/span.h"  // from @com_google_absl
+#include "litert/cc/litert_environment_options.h"  // from @litert
 #include "litert/cc/litert_tensor_buffer.h"  // from @litert
+#include "runtime/components/model_resources.h"
 #include "runtime/engine/engine_settings.h"
+#include "runtime/engine/io_types.h"
 #include "runtime/executor/audio_executor.h"
 #include "runtime/executor/audio_executor_settings.h"
 #include "runtime/executor/executor_settings_base.h"
 #include "runtime/executor/llm_executor.h"
-#include "runtime/executor/llm_executor_google.h"
 #include "runtime/executor/llm_executor_io_types.h"
 #include "runtime/executor/llm_executor_processed_tokens.h"
 #include "runtime/executor/llm_executor_settings.h"
@@ -44,6 +47,7 @@
 #include "runtime/framework/resource_management/utils/movable_mutex_lock.h"
 #include "runtime/framework/resource_management/utils/resource_manager_utils.h"
 #include "runtime/util/convert_tensor_buffer.h"
+#include "runtime/util/logging.h"
 #include "runtime/util/status_macros.h"  // IWYU pragma: keep
 
 namespace litert::lm {
@@ -97,8 +101,19 @@ class LockedVisionExecutor : public VisionExecutor {
     return vision_executor_->Encode(input_image_tensor);
   }
 
+  absl::StatusOr<ExecutorVisionData> Encode(
+      const absl::flat_hash_map<std::string, TensorBuffer>& input_tensors)
+      override {
+    return vision_executor_->Encode(std::move(input_tensors));
+  }
+
   absl::StatusOr<std::vector<int>> GetExpectedInputDimension() const override {
     return vision_executor_->GetExpectedInputDimension();
+  }
+
+  absl::StatusOr<VisionExecutorProperties> GetVisionExecutorProperties()
+      const override {
+    return vision_executor_->GetVisionExecutorProperties();
   }
 
  private:
@@ -114,8 +129,33 @@ class LockedAudioExecutor : public AudioExecutor {
       : audio_executor_(std::move(audio_executor)), lock_(std::move(lock)) {}
 
   absl::StatusOr<ExecutorAudioData> Encode(
-      const TensorBuffer& input_image_tensor) override {
-    return audio_executor_->Encode(input_image_tensor);
+      const TensorBuffer& input_spectrogram_tensor) override {
+    return audio_executor_->Encode(input_spectrogram_tensor);
+  }
+
+  absl::Status Reset() override { return audio_executor_->Reset(); }
+
+  absl::StatusOr<AudioExecutorProperties> GetAudioExecutorProperties()
+      const override {
+    return audio_executor_->GetAudioExecutorProperties();
+  }
+
+  absl::StatusOr<std::unique_ptr<AudioContext>> CreateNewContext() override {
+    return audio_executor_->CreateNewContext();
+  }
+
+  absl::StatusOr<std::unique_ptr<AudioContext>> CloneContext() override {
+    return audio_executor_->CloneContext();
+  }
+
+  absl::StatusOr<std::unique_ptr<AudioContext>> CloneContext(
+      const AudioContext& audio_context) override {
+    return audio_executor_->CloneContext(audio_context);
+  }
+
+  absl::Status RestoreContext(
+      std::unique_ptr<AudioContext> audio_context) override {
+    return audio_executor_->RestoreContext(std::move(audio_context));
   }
 
  private:
@@ -166,7 +206,7 @@ class LockedLlmExecutor : public LlmExecutor {
     // prefill.
     ASSIGN_OR_RETURN(auto token_ids, inputs.GetTextTokenIdsPtr());
     LITERT_ASSIGN_OR_RETURN(auto token_ids_tensor_type,
-                                 token_ids->TensorType());
+                            token_ids->TensorType());
     RET_CHECK_EQ(token_ids_tensor_type.Layout().Dimensions()[0], 1);
     if (token_ids_tensor_type.Layout().Dimensions()[1] == 0) {
       return absl::OkStatus();
@@ -205,14 +245,51 @@ class LockedLlmExecutor : public LlmExecutor {
       return absl::OkStatus();
     }
 
+    // TODO: b/409401231 - Add unit tests for the new_inputs creation.
     LITERT_ASSIGN_OR_RETURN(
         auto new_inputs_token_ids,
         CopyToTensorBuffer(
             absl::MakeConstSpan(input_ids_vec.data(), input_ids_vec.size()),
             {1, static_cast<int>(input_ids_vec.size())}));
+    std::optional<ExecutorVisionData> new_vision_data = std::nullopt;
+    std::optional<ExecutorAudioData> new_audio_data = std::nullopt;
+    if (inputs.GetVisionDataPtr().ok()) {
+      new_vision_data = ExecutorVisionData();
+      LITERT_ASSIGN_OR_RETURN(
+          auto new_vision_embeddings,
+          inputs.GetVisionEmbeddingsPtr().value()->Duplicate());
+      new_vision_data->SetEmbeddings(std::move(new_vision_embeddings));
+      if (inputs.GetVisionDataPtr().value()->GetPerLayerEmbeddingsPtr().ok()) {
+        LITERT_ASSIGN_OR_RETURN(auto new_per_layer_embeddings,
+                                inputs.GetVisionDataPtr()
+                                    .value()
+                                    ->GetPerLayerEmbeddingsPtr()
+                                    .value()
+                                    ->Duplicate());
+        new_vision_data->SetPerLayerEmbeddings(
+            std::move(new_per_layer_embeddings));
+      }
+    }
+    if (inputs.GetAudioEmbeddingsPtr().ok()) {
+      new_audio_data = ExecutorAudioData();
+      LITERT_ASSIGN_OR_RETURN(
+          auto new_audio_embeddings,
+          inputs.GetAudioEmbeddingsPtr().value()->Duplicate());
+      new_audio_data->SetEmbeddings(std::move(new_audio_embeddings));
+      if (inputs.GetAudioDataPtr().value()->GetPerLayerEmbeddingsPtr().ok()) {
+        LITERT_ASSIGN_OR_RETURN(auto new_per_layer_embeddings,
+                                inputs.GetAudioDataPtr()
+                                    .value()
+                                    ->GetPerLayerEmbeddingsPtr()
+                                    .value()
+                                    ->Duplicate());
+        new_audio_data->SetPerLayerEmbeddings(
+            std::move(new_per_layer_embeddings));
+      }
+    }
     auto new_inputs =
         ExecutorInputs(ExecutorTextData(std::move(new_inputs_token_ids)),
-                       std::nullopt, std::nullopt);
+                       std::move(new_vision_data), std::move(new_audio_data));
 
     auto new_prefill_query_params = prefill_params;
     new_prefill_query_params.SetCurrentStep(current_step);
@@ -248,20 +325,21 @@ class LockedLlmExecutor : public LlmExecutor {
     return llm_executor_->Prefill(new_inputs, new_prefill_query_params);
   }
 
-  absl::Status Decode(TensorBuffer& output_tokens) override {
-    return Decode(output_tokens, ExecutorDecodeParams());
+  absl::StatusOr<std::vector<std::vector<int>>> Decode() override {
+    return Decode(ExecutorDecodeParams());
   }
 
-  absl::Status Decode(TensorBuffer& output_tokens,
-                      const ExecutorDecodeParams& decode_params) override {
+  absl::StatusOr<std::vector<std::vector<int>>> Decode(
+      const ExecutorDecodeParams& decode_params) override {
     RETURN_IF_ERROR(MaybeTruncateProcessedTokens());
-    return llm_executor_->Decode(output_tokens, decode_params);
+    return llm_executor_->Decode(decode_params);
   }
 
   absl::Status Decode(const ExecutorInputs& inputs,
                       TensorBuffer& output_logits) override {
     RETURN_IF_ERROR(MaybeTruncateProcessedTokens());
-    return llm_executor_->Decode(output_logits);
+    ASSIGN_OR_RETURN(output_logits, llm_executor_->DecodeLogits(inputs));
+    return absl::OkStatus();
   }
 
   absl::StatusOr<TensorBuffer> DecodeLogits(
@@ -269,9 +347,10 @@ class LockedLlmExecutor : public LlmExecutor {
     ASSIGN_OR_RETURN(int current_step, llm_executor_->GetCurrentStep());
     ASSIGN_OR_RETURN(const ProcessedTokens* processed_tokens,
                      llm_executor_->GetProcessedTokens());
-    // If the current step is pointing at right after the pending token, set the
-    // current step to the previous step, so that the current step is pointing
-    // at the to be processed token.(expected by llm_executor_->DecodeLogits())
+    // If the current step is pointing at right after the pending token, set
+    // the current step to the previous step. This ensures that the current
+    // step points to the token to be processed, as expected by
+    // llm_executor_->DecodeLogits().
     if (current_step == processed_tokens->TokenCount() &&
         !processed_tokens->GetNextUnprocessedToken().token.empty()) {
       RETURN_IF_ERROR(llm_executor_->SetCurrentStep(current_step - 1));
@@ -410,10 +489,18 @@ absl::Status ResourceManager::MaybeCreateLitertEnv() {
   if (litert_env_ != nullptr) {
     return absl::OkStatus();
   }
+  std::vector<::litert::EnvironmentOptions::Option> env_options;
+  if (auto severity = GetMinLogSeverity()) {
+    env_options.push_back(::litert::EnvironmentOptions::Option{
+        ::litert::EnvironmentOptions::Tag::kMinLoggerSeverity,
+        ToLiteRtLogSeverityInt8(*severity)});
+  }
   LITERT_ASSIGN_OR_RETURN(
-      auto env,
-      litert::Environment::Create(std::vector<litert::Environment::Option>()));
-  litert_env_ = std::make_unique<litert::Environment>(std::move(env));
+      auto new_litert_env,
+      litert::Environment::Create(::litert::EnvironmentOptions(env_options)));
+  backup_litert_env_ =
+      std::make_unique<litert::Environment>(std::move(new_litert_env));
+  litert_env_ = backup_litert_env_.get();
   return absl::OkStatus();
 }
 
@@ -430,16 +517,16 @@ ResourceManager::CreateContextHandler(const SessionConfig& session_config) {
       lora_hash_to_id_.find("fake_lora_path") != lora_hash_to_id_.end();
 
   // Find the lora id. If lora_id is not nullopt, it means the lora is used.
-  // TODO: b/462499294 - Use the real lora path.
-  std::optional<uint32_t> lora_id =
-      AssignLoraId(/*lora_path=*/"", /*has_scoped_lora_file=*/false);
+  std::optional<uint32_t> lora_id = AssignLoraId(
+      /*lora_path=*/"",
+      /*has_scoped_lora_file=*/session_config.GetScopedLoraFile() != nullptr);
 
   // If lora is used and not loaded, load the lora.
   if (lora_id.has_value() && !lora_is_loaded) {
-    // TODO: b/462499294 - Use the real lora path and scoped lora file.
+    RET_CHECK(session_config.GetScopedLoraFile() != nullptr);
     ASSIGN_OR_RETURN(ModelAssets model_assets,
-                     ModelAssets::Create(/*scoped_lora_file=*/nullptr,
-                                         /*lora_path=*/""));
+                     ModelAssets::Create(session_config.GetScopedLoraFile(),
+                                         /*model_path=*/""));
     MovableMutexLock lock(&executor_mutex_);
     RETURN_IF_ERROR(llm_executor_->LoadLoRA(lora_id.value(), model_assets));
   }
@@ -488,7 +575,22 @@ ResourceManager::CreateContextHandler(const SessionConfig& session_config) {
                      llm_executor_->CreateNewContext(
                          std::move(lora_id), std::move(runtime_config)));
   }
-  return ContextHandler::Create(std::move(llm_context));
+  std::unique_ptr<AudioContext> audio_context;
+  if (session_config.AudioModalityEnabled()) {
+    RETURN_IF_ERROR(TryLoadingAudioExecutor());
+    ASSIGN_OR_RETURN(auto audio_executor, AcquireAudioExecutor());
+    auto audio_executor_properties =
+        audio_executor->GetAudioExecutorProperties();
+    if (audio_executor_properties.ok()) {
+      if (audio_executor_properties->is_streaming_model) {
+        ASSIGN_OR_RETURN(audio_context, audio_executor->CreateNewContext());
+      }
+    } else if (!absl::IsUnimplemented(audio_executor_properties.status())) {
+      return audio_executor_properties.status();
+    }
+  }
+  return ContextHandler::Create(std::move(llm_context),
+                                std::move(audio_context));
 }
 
 absl::StatusOr<std::unique_ptr<ContextHandler>>
@@ -520,9 +622,17 @@ ResourceManager::CloneContextHandler(
     ASSIGN_OR_RETURN(runtime_state, llm_executor_->GetRuntimeState());
   }
   auto processed_context = llm_context_handler->shared_processed_context();
-  return ContextHandler::Bundle(processed_context,
-                                std::make_unique<RuntimeConfig>(runtime_config),
-                                std::make_unique<RuntimeState>(runtime_state));
+
+  std::unique_ptr<AudioContext> audio_context;
+  if (llm_context_handler->HasAudioContext()) {
+    ASSIGN_OR_RETURN(auto audio_executor, AcquireAudioExecutor());
+    ASSIGN_OR_RETURN(
+        audio_context,
+        audio_executor->CloneContext(llm_context_handler->GetAudioContext()));
+  }
+  return ContextHandler::Bundle(
+      processed_context, std::make_unique<RuntimeConfig>(runtime_config),
+      std::make_unique<RuntimeState>(runtime_state), std::move(audio_context));
 }
 
 absl::StatusOr<std::unique_ptr<LlmExecutor>>
@@ -614,6 +724,30 @@ ResourceManager::AcquireExecutorWithContextHandler(
     RETURN_IF_ERROR(llm_executor_->RestoreContext(std::move(llm_context)));
   }
 
+  // If the current handler has an audio context, update and save the audio
+  // context to the current handler.
+  if (current_handler_ != nullptr) {
+    // If the current handler has an audio context, update it from audio
+    // executor and save it back to the current handler.
+    if (current_handler_->HasAudioContext()) {
+      ASSIGN_OR_RETURN(auto audio_executor, AcquireAudioExecutor());
+      ASSIGN_OR_RETURN(auto current_audio_context,
+                       audio_executor->CloneContext());
+      RETURN_IF_ERROR(
+          current_handler_->SetAudioContext(std::move(current_audio_context)));
+    }
+    // If the new handler has an audio context, audio executor will restore
+    // the audio context from the new handler.
+    if (new_context_handler->HasAudioContext()) {
+      ASSIGN_OR_RETURN(auto audio_executor, AcquireAudioExecutor());
+      ASSIGN_OR_RETURN(
+          auto audio_context_cloned,
+          audio_executor->CloneContext(new_context_handler->GetAudioContext()));
+      RETURN_IF_ERROR(
+          audio_executor->RestoreContext(std::move(audio_context_cloned)));
+    }
+  }
+
   current_handler_ = new_context_handler;
 
   return std::make_unique<LockedLlmExecutor>(llm_executor_, std::move(lock),
@@ -621,15 +755,8 @@ ResourceManager::AcquireExecutorWithContextHandler(
 }
 
 absl::Status ResourceManager::TryLoadingVisionExecutor() {
-  absl::MutexLock lock(vision_executor_mutex_);
-  if (!vision_executor_settings_) {
-    return absl::InvalidArgumentError("Vision options should not be null.");
-  }
-  RETURN_IF_ERROR(MaybeCreateLitertEnv());
-  ASSIGN_OR_RETURN(vision_executor_,
-                   VisionLiteRtCompiledModelExecutor::Create(
-                       *vision_executor_settings_, *litert_env_));
-  return absl::OkStatus();
+  return absl::InvalidArgumentError(
+      "Vision executor backend is not supported.");
 }
 
 absl::StatusOr<std::unique_ptr<VisionExecutor>>
@@ -645,6 +772,14 @@ ResourceManager::AcquireVisionExecutor() {
 }
 
 absl::Status ResourceManager::TryLoadingAudioExecutor() {
+  bool is_llm_gpu_artisan = false;
+  if (audio_executor_settings_ && audio_executor_settings_->GetBackend() ==
+                                      litert::lm::Backend::GPU_ARTISAN) {
+    RET_CHECK(llm_executor_settings_.has_value());
+    is_llm_gpu_artisan =
+        (llm_executor_settings_->GetBackend() == Backend::GPU_ARTISAN);
+  }
+
   absl::MutexLock lock(audio_executor_mutex_);
   if (audio_executor_ != nullptr) {
     return absl::OkStatus();
@@ -652,8 +787,8 @@ absl::Status ResourceManager::TryLoadingAudioExecutor() {
   if (!audio_executor_settings_) {
     return absl::InvalidArgumentError("Audio options should not be null.");
   }
-  if (audio_executor_settings_->GetBackend() ==
-             litert::lm::Backend::CPU) {
+  if (audio_executor_settings_->GetBackend() == litert::lm::Backend::CPU ||
+      audio_executor_settings_->GetBackend() == litert::lm::Backend::GPU) {
     return absl::InvalidArgumentError(
         "Audio executor backend is not supported.");
   } else {
@@ -676,19 +811,38 @@ ResourceManager::AcquireAudioExecutor() {
 }
 
 absl::StatusOr<std::unique_ptr<ResourceManager>> ResourceManager::Create(
+    ModelResources* absl_nullable model_resources,
     std::unique_ptr<LlmExecutor> absl_nonnull llm_executor,
     std::unique_ptr<VisionExecutorSettings> absl_nullable
-    vision_executor_settings,
+        vision_executor_settings,
     std::unique_ptr<litert::lm::AudioExecutorSettings> absl_nullable
-    audio_executor_settings,
-    std::unique_ptr<::litert::Environment> absl_nullable litert_env) {
+        audio_executor_settings,
+    ::litert::Environment* absl_nullable litert_env,
+    std::unique_ptr<AudioExecutor> absl_nullable audio_executor) {
   if (llm_executor == nullptr) {
     return absl::InvalidArgumentError("Llm executor is null.");
   }
+  ASSIGN_OR_RETURN(LlmExecutorSettings llm_executor_settings,
+                   llm_executor->GetExecutorSettings());
   auto llm_resource_manager = std::make_unique<ResourceManager>(
-      std::move(llm_executor), std::move(vision_executor_settings),
-      std::move(audio_executor_settings), std::move(litert_env));
+      model_resources, std::move(llm_executor),
+      std::move(vision_executor_settings), std::move(audio_executor_settings),
+      std::move(llm_executor_settings), litert_env, std::move(audio_executor));
   return llm_resource_manager;
+}
+
+absl::StatusOr<AudioExecutorProperties>
+ResourceManager::GetAudioExecutorProperties() {
+  RETURN_IF_ERROR(TryLoadingAudioExecutor());
+  MovableMutexLock lock(&audio_executor_mutex_);
+  return audio_executor_->GetAudioExecutorProperties();
+}
+
+absl::StatusOr<VisionExecutorProperties>
+ResourceManager::GetVisionExecutorProperties() {
+  RETURN_IF_ERROR(TryLoadingVisionExecutor());
+  absl::MutexLock lock(vision_executor_mutex_);
+  return vision_executor_->GetVisionExecutorProperties();
 }
 
 }  // namespace litert::lm

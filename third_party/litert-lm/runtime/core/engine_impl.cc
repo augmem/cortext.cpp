@@ -15,6 +15,7 @@
 // TODO(b/417209286): Remove this once the model assets are stored in the
 // litertlm file format.
 #include <filesystem>  // NOLINT: Required for path manipulation.
+#include <future>      // NOLINT(build/c++11)
 #include <memory>
 #include <optional>
 #include <string>
@@ -28,12 +29,16 @@
 #include "absl/status/status.h"  // from @com_google_absl
 #include "absl/status/statusor.h"  // from @com_google_absl
 #include "absl/strings/string_view.h"  // from @com_google_absl
+#include "absl/time/clock.h"  // from @com_google_absl
 #include "absl/time/time.h"  // from @com_google_absl
 #include "litert/cc/litert_environment.h"  // from @litert
+#include "litert/cc/litert_environment_options.h"  // from @litert
 #include "litert/cc/litert_macros.h"  // from @litert
 #include "runtime/components/model_resources.h"
-#include "runtime/core/session_factory.h"
+#include "runtime/components/tokenizer.h"
+#include "runtime/core/session_basic.h"
 #include "runtime/engine/engine.h"
+#include "runtime/engine/engine_factory.h"
 #include "runtime/engine/engine_settings.h"
 #include "runtime/engine/io_types.h"
 #include "runtime/executor/audio_executor.h"
@@ -50,6 +55,7 @@
 #include "runtime/framework/threadpool.h"
 #include "runtime/proto/llm_metadata.pb.h"
 #include "runtime/proto/sampler_params.pb.h"
+#include "runtime/util/logging.h"
 #include "runtime/util/status_macros.h"  // NOLINT
 
 namespace litert::lm {
@@ -59,14 +65,19 @@ namespace {
 // with the provided settings. This ensure we maintain the same LiteRT
 // environment during the whole application lifetime. This is required for GPU
 // LiteRT environment. See b/454383477 for more details.
-absl::StatusOr<Environment&> GetEnvironment(
-    const EngineSettings& engine_settings, ModelResources& model_resources) {
+absl::StatusOr<Environment&> GetEnvironment(EngineSettings& engine_settings,
+                                            ModelResources& model_resources) {
   // Helper must be available until LlmLiteRtCompiledModelExecutor::Create() is
   // called. Since env is used multiple times, it should also be static.
   static absl::NoDestructor<MagicNumberConfigsHelper> helper;
   static absl::NoDestructor<absl::StatusOr<Environment>> kEnvironment(
       [&]() -> absl::StatusOr<Environment> {
-        std::vector<Environment::Option> env_options;
+        std::vector<EnvironmentOptions::Option> env_options;
+        if (auto severity = GetMinLogSeverity()) {
+          env_options.push_back(::litert::EnvironmentOptions::Option{
+              ::litert::EnvironmentOptions::Tag::kMinLoggerSeverity,
+              ToLiteRtLogSeverityInt8(*severity)});
+        }
         const auto& main_executor_settings =
             engine_settings.GetMainExecutorSettings();
 
@@ -84,25 +95,37 @@ absl::StatusOr<Environment&> GetEnvironment(
           return absl::InvalidArgumentError(
               "Only CPU and GPU backends are supported.");
 #else
-          std::string model_path(
-              main_executor_settings.GetModelAssets().GetPath().value_or(""));
-          std::filesystem::path path(model_path);
-          // Note: Existence check for path was here, but it's better to check
-          // before calling this function if needed.
-          static const absl::NoDestructor<std::string> kDispatchLibraryPath(
-              path.parent_path().string());
-          if (!kDispatchLibraryPath->empty()) {
-            ABSL_LOG(INFO) << "Setting dispatch library path: "
-                           << *kDispatchLibraryPath;
-            env_options.push_back(::litert::Environment::Option{
-                ::litert::Environment::OptionTag::DispatchLibraryDir,
-                absl::string_view(*kDispatchLibraryPath)});
+          if (!main_executor_settings.GetLitertDispatchLibDir().empty()) {
+            // If the dispatch library directory is provided, use it.
+            env_options.push_back(::litert::EnvironmentOptions::Option{
+                ::litert::EnvironmentOptions::Tag::kDispatchLibraryDir,
+                main_executor_settings.GetLitertDispatchLibDir()});
+            ABSL_LOG(INFO) << "Setting dispatch library path from "
+                              "main_executor_settings: "
+                           << main_executor_settings.GetLitertDispatchLibDir();
           } else {
-            ABSL_LOG(INFO) << "No dispatch library path provided.";
+            // Otherwise, use the directory of the model file.
+            std::string model_path(
+                main_executor_settings.GetModelAssets().GetPath().value_or(""));
+            std::filesystem::path path(model_path);
+            // Note: Existence check for path was here, but it's better to check
+            // before calling this function if needed.
+            static const absl::NoDestructor<std::string> kDispatchLibraryPath(
+                path.parent_path().string());
+            if (!kDispatchLibraryPath->empty()) {
+              ABSL_LOG(INFO)
+                  << "Setting dispatch library path: " << *kDispatchLibraryPath;
+              env_options.push_back(::litert::EnvironmentOptions::Option{
+                  ::litert::EnvironmentOptions::Tag::kDispatchLibraryDir,
+                  absl::string_view(*kDispatchLibraryPath)});
+            } else {
+              ABSL_LOG(INFO) << "No dispatch library path provided.";
+            }
           }
 #endif  // defined(LITERT_DISABLE_NPU)
         }
-        LITERT_ASSIGN_OR_RETURN(auto env, Environment::Create(env_options));
+        LITERT_ASSIGN_OR_RETURN(
+            auto env, Environment::Create(EnvironmentOptions(env_options)));
         return std::move(env);
       }());
   if (!kEnvironment->ok()) {
@@ -111,22 +134,29 @@ absl::StatusOr<Environment&> GetEnvironment(
   return **kEnvironment;
 }
 
-}  // namespace
-
 class EngineImpl : public Engine {
  public:
   ~EngineImpl() override {
-    ABSL_QCHECK_OK(WaitUntilDone(Engine::kDefaultTimeout));
+    auto status = WaitUntilDone(Engine::kDefaultTimeout);
+    if (!status.ok()) {
+      ABSL_LOG(ERROR) << "Failed to wait for engine to finish: " << status;
+    }
   }
-  explicit EngineImpl(EngineSettings engine_settings,
-                      std::unique_ptr<ModelResources> litert_model_resources,
-                      std::unique_ptr<LlmExecutor> executor,
-                      std::unique_ptr<VisionExecutor> vision_executor,
-                      std::unique_ptr<AudioExecutor> audio_executor,
-                      std::optional<BenchmarkInfo> benchmark_info,
-                      std::unique_ptr<ThreadPool> worker_thread_pool)
+
+  static absl::StatusOr<std::unique_ptr<Engine>> Create(
+      EngineSettings engine_settings, absl::string_view input_prompt_as_hint);
+
+  EngineImpl(EngineSettings engine_settings,
+             std::unique_ptr<ModelResources> litert_model_resources,
+             std::unique_ptr<Tokenizer> tokenizer,
+             std::unique_ptr<LlmExecutor> executor,
+             std::unique_ptr<VisionExecutor> vision_executor,
+             std::unique_ptr<AudioExecutor> audio_executor,
+             std::optional<BenchmarkInfo> benchmark_info,
+             std::unique_ptr<ThreadPool> worker_thread_pool)
       : engine_settings_(std::move(engine_settings)),
         litert_model_resources_(std::move(litert_model_resources)),
+        tokenizer_(std::move(tokenizer)),
         executor_(std::move(executor)),
         vision_executor_(std::move(vision_executor)),
         audio_executor_(std::move(audio_executor)),
@@ -136,19 +166,40 @@ class EngineImpl : public Engine {
         worker_thread_pool_(std::move(worker_thread_pool)) {}
   // Method to create the Session.
   absl::StatusOr<std::unique_ptr<Session>> CreateSession(
-      const SessionConfig& session_config) const override {
+      const SessionConfig& session_config) override {
+    std::optional<BenchmarkInfo> session_benchmark_info;
+    if (benchmark_info_.has_value()) {
+      // Each session will have its own benchmark info, which will be populated
+      // with the session-specific information.
+      session_benchmark_info = benchmark_info_;
+      RETURN_IF_ERROR(session_benchmark_info->TimeInitPhaseStart(
+          BenchmarkInfo::InitPhase::kSession));
+    }
+
     SessionConfig config = session_config;
     // TODO(b/418794726): Move this logics to be part of the SessionConfig
     // class.
     RETURN_IF_ERROR(config.MaybeUpdateAndValidate(engine_settings_));
 
-    ABSL_CHECK(litert_model_resources_ != nullptr);
-    ASSIGN_OR_RETURN(auto* tokenizer, litert_model_resources_->GetTokenizer());
-    return InitializeSessionBasic(executor_.get(), tokenizer,
-                                  /*vision_executor=*/vision_executor_.get(),
-                                  /*audio_executor=*/audio_executor_.get(),
-                                  config, benchmark_info_,
-                                  worker_thread_pool_.get());
+    if (litert_model_resources_ == nullptr) {
+      return absl::FailedPreconditionError(
+          "Model resources are not initialized.");
+    }
+    ASSIGN_OR_RETURN(
+        auto session,
+        SessionBasic::Create(executor_.get(), tokenizer_.get(),
+                             /*vision_executor=*/vision_executor_.get(),
+                             /*audio_executor=*/audio_executor_.get(), config,
+                             std::move(session_benchmark_info),
+                             worker_thread_pool_.get()));
+    if (benchmark_info_.has_value()) {
+      auto session_benchmark_info_or = session->GetMutableBenchmarkInfo();
+      if (session_benchmark_info_or.ok()) {
+        RETURN_IF_ERROR(session_benchmark_info_or.value()->TimeInitPhaseEnd(
+            BenchmarkInfo::InitPhase::kSession));
+      }
+    }
+    return session;
   }
   absl::Status WaitUntilDone(absl::Duration timeout) override {
     return worker_thread_pool_->WaitUntilDone(timeout);
@@ -158,11 +209,31 @@ class EngineImpl : public Engine {
     return engine_settings_;
   }
 
+  const Tokenizer& GetTokenizer() const override { return *tokenizer_; }
+
+  absl::StatusOr<AudioExecutorProperties> GetAudioExecutorProperties()
+      const override {
+    if (audio_executor_ == nullptr) {
+      return absl::FailedPreconditionError("Audio modality is not enabled.");
+    }
+    return audio_executor_->GetAudioExecutorProperties();
+  }
+
+  absl::StatusOr<VisionExecutorProperties> GetVisionExecutorProperties()
+      const override {
+    if (vision_executor_ == nullptr) {
+      return absl::FailedPreconditionError("Vision modality is not enabled.");
+    }
+    return vision_executor_->GetVisionExecutorProperties();
+  }
+
  private:
   // Stored engine settings.
   EngineSettings engine_settings_;
   // Model resources, which must outlive `executor_`.
   std::unique_ptr<ModelResources> litert_model_resources_;
+  // Tokenizer shared by all sessions.
+  std::unique_ptr<Tokenizer> tokenizer_;
   // Shared executor for all sessions.
   std::unique_ptr<LlmExecutor> executor_;
   // Shared vision executor for all sessions.
@@ -181,49 +252,113 @@ class EngineImpl : public Engine {
 };
 
 // Method to create Engine.
-absl::StatusOr<std::unique_ptr<Engine>> Engine::CreateEngine(
+absl::StatusOr<std::unique_ptr<Engine>> EngineImpl::Create(
     EngineSettings engine_settings, absl::string_view input_prompt_as_hint) {
-  std::optional<BenchmarkInfo> benchmark_info;
-  if (engine_settings.IsBenchmarkEnabled()) {
-    benchmark_info = std::make_optional<BenchmarkInfo>(
-        engine_settings.GetBenchmarkParams().value());
+  std::optional<BenchmarkInfo> benchmark_info =
+      engine_settings.IsBenchmarkEnabled()
+          ? std::make_optional<BenchmarkInfo>(
+                engine_settings.GetBenchmarkParams().value())
+          : std::nullopt;
+
+  if (benchmark_info.has_value()) {
     RETURN_IF_ERROR(
-        benchmark_info->TimeInitPhaseStart("Executor initialization"));
+        benchmark_info->TimeInitPhaseStart(BenchmarkInfo::InitPhase::kTotal));
+    RETURN_IF_ERROR(benchmark_info->TimeInitPhaseStart(
+        BenchmarkInfo::InitPhase::kModelAssets));
   }
   const auto& model_assets =
       engine_settings.GetMutableMainExecutorSettings().GetModelAssets();
-
   ASSIGN_OR_RETURN(auto model_resources,
                    BuildLiteRtCompiledModelResources(model_assets));
-
   if (benchmark_info.has_value()) {
-    RETURN_IF_ERROR(
-        benchmark_info->TimeInitPhaseStart("Tokenizer initialization"));
-  }
-  ASSIGN_OR_RETURN(auto* tokenizer, model_resources->GetTokenizer());
-  if (benchmark_info.has_value()) {
-    RETURN_IF_ERROR(
-        benchmark_info->TimeInitPhaseEnd("Tokenizer initialization"));
+    RETURN_IF_ERROR(benchmark_info->TimeInitPhaseEnd(
+        BenchmarkInfo::InitPhase::kModelAssets));
   }
 
+  if (benchmark_info.has_value()) {
+    RETURN_IF_ERROR(benchmark_info->TimeInitPhaseStart(
+        BenchmarkInfo::InitPhase::kLlmMetadata));
+  }
   ASSIGN_OR_RETURN(auto* llm_metadata, model_resources->GetLlmMetadata());
+  if (benchmark_info.has_value()) {
+    RETURN_IF_ERROR(benchmark_info->TimeInitPhaseEnd(
+        BenchmarkInfo::InitPhase::kLlmMetadata));
+  }
+  bool hasLlmModelType = llm_metadata->has_llm_model_type();
+  absl::Duration tokenizer_duration = absl::ZeroDuration();
+  // This lambda is used to create the tokenizer asynchronously if the model
+  // type is available, such that the tokenizer can be created in parallel with
+  // the executor.
+  auto create_tokenizer =
+      [&tokenizer_duration,
+       &model_resources]() -> absl::StatusOr<std::unique_ptr<Tokenizer>> {
+    absl::Time start_time = absl::Now();
+    ASSIGN_OR_RETURN(std::unique_ptr<Tokenizer> tokenizer,
+                     model_resources->GetTokenizer());
+    tokenizer_duration = absl::Now() - start_time;
+    return tokenizer;
+  };
 
-  // Update and load the parameters from the model file and convert the
-  // tokens to ids.
-  RETURN_IF_ERROR(engine_settings.MaybeUpdateAndValidate(
-      *tokenizer, llm_metadata, input_prompt_as_hint,
-      model_resources->GetTFLiteModelBackendConstraint(
-          ModelType::kTfLitePrefillDecode),
-      model_resources->GetTFLiteModelBackendConstraint(
-          ModelType::kTfLiteVisionEncoder),
-      model_resources->GetTFLiteModelBackendConstraint(
-          ModelType::kTfLiteAudioEncoderHw)));
+  const auto& main_executor_settings =
+      engine_settings.GetMainExecutorSettings();
 
+  std::future<absl::StatusOr<std::unique_ptr<Tokenizer>>> tokenizer_future;
+  std::unique_ptr<Tokenizer> tokenizer;
+  if (!hasLlmModelType) {
+    ABSL_LOG(INFO)
+        << "Legacy model files don't have LlmModelType, loading tokenizer now";
+    ASSIGN_OR_RETURN(tokenizer, create_tokenizer());
+    // Update and load the parameters from the model file and convert the
+    // tokens to ids.
+    RETURN_IF_ERROR(engine_settings.MaybeUpdateAndValidate(
+        tokenizer.get(), llm_metadata, input_prompt_as_hint,
+        model_resources->GetTFLiteModelBackendConstraint(
+            ModelType::kTfLitePrefillDecode),
+        model_resources->GetTFLiteModelBackendConstraint(
+            ModelType::kTfLiteVisionEncoder),
+        model_resources->GetTFLiteModelBackendConstraint(
+            ModelType::kTfLiteAudioEncoderHw),
+        model_resources->GetTFLiteModelPreferActivationType(
+            ModelType::kTfLitePrefillDecode),
+        model_resources->GetTFLiteModelPreferActivationType(
+            ModelType::kTfLiteVisionEncoder),
+        model_resources->GetTFLiteModelPreferActivationType(
+            ModelType::kTfLiteAudioEncoderHw)));
+  } else {
+    // If the model type is available, wait for the tokenizer to be created
+    // after the model is loaded.
+    ABSL_LOG(INFO) << "New model files have LlmModelType, loading tokenizer "
+                      "asynchronously";
+
+    if (engine_settings.GetParallelFileSectionLoading()) {
+      tokenizer_future = std::async(std::launch::async, create_tokenizer);
+    } else {
+      tokenizer_future = std::async(std::launch::deferred, create_tokenizer);
+    }
+
+    RETURN_IF_ERROR(engine_settings.MaybeUpdateAndValidate(
+        nullptr, llm_metadata, input_prompt_as_hint,
+        model_resources->GetTFLiteModelBackendConstraint(
+            ModelType::kTfLitePrefillDecode),
+        model_resources->GetTFLiteModelBackendConstraint(
+            ModelType::kTfLiteVisionEncoder),
+        model_resources->GetTFLiteModelBackendConstraint(
+            ModelType::kTfLiteAudioEncoderHw),
+        model_resources->GetTFLiteModelPreferActivationType(
+            ModelType::kTfLitePrefillDecode),
+        model_resources->GetTFLiteModelPreferActivationType(
+            ModelType::kTfLiteVisionEncoder),
+        model_resources->GetTFLiteModelPreferActivationType(
+            ModelType::kTfLiteAudioEncoderHw)));
+  }
+
+  if (benchmark_info.has_value()) {
+    RETURN_IF_ERROR(benchmark_info->TimeInitPhaseStart(
+        BenchmarkInfo::InitPhase::kExecutor));
+  }
   std::unique_ptr<LlmExecutor> executor;
   ASSIGN_OR_RETURN(auto& env,
                    GetEnvironment(engine_settings, *model_resources));
-  const auto& main_executor_settings =
-      engine_settings.GetMainExecutorSettings();
 
   switch (main_executor_settings.GetBackend()) {
     default: {
@@ -253,20 +388,60 @@ absl::StatusOr<std::unique_ptr<Engine>> Engine::CreateEngine(
 
   if (benchmark_info.has_value()) {
     RETURN_IF_ERROR(
-        benchmark_info->TimeInitPhaseEnd("Executor initialization"));
+        benchmark_info->TimeInitPhaseEnd(BenchmarkInfo::InitPhase::kExecutor));
+  }
+
+  if (hasLlmModelType) {
+    // Now load the tokenizer and update the engine settings.
+    ASSIGN_OR_RETURN(tokenizer, tokenizer_future.get());
+    RETURN_IF_ERROR(engine_settings.MaybeUpdateAndValidate(
+        tokenizer.get(), llm_metadata, input_prompt_as_hint,
+        model_resources->GetTFLiteModelBackendConstraint(
+            ModelType::kTfLitePrefillDecode),
+        model_resources->GetTFLiteModelBackendConstraint(
+            ModelType::kTfLiteVisionEncoder),
+        model_resources->GetTFLiteModelBackendConstraint(
+            ModelType::kTfLiteAudioEncoderHw),
+        model_resources->GetTFLiteModelPreferActivationType(
+            ModelType::kTfLitePrefillDecode),
+        model_resources->GetTFLiteModelPreferActivationType(
+            ModelType::kTfLiteVisionEncoder),
+        model_resources->GetTFLiteModelPreferActivationType(
+            ModelType::kTfLiteAudioEncoderHw)));
+    // As we load the tokenizer asynchronously, we need to update the executor
+    // settings after the tokenizer is loaded.
+    RETURN_IF_ERROR(executor->UpdateExecutorSettings(
+        engine_settings.GetMainExecutorSettings()));
+  }
+  if (benchmark_info.has_value()) {
+    RETURN_IF_ERROR(benchmark_info->InitPhaseRecord(
+        BenchmarkInfo::InitPhase::kTokenizer, tokenizer_duration));
   }
 
   // Creating the thread pool of a single thread to execute the works.
   auto worker_thread_pool =
       std::make_unique<ThreadPool>(/*name_prefix=*/"engine",
                                    /*max_num_threads=*/1);
+
+  if (benchmark_info.has_value()) {
+    RETURN_IF_ERROR(
+        benchmark_info->TimeInitPhaseEnd(BenchmarkInfo::InitPhase::kTotal));
+  }
+
   auto llm_impl = std::make_unique<EngineImpl>(
       std::move(engine_settings), std::move(model_resources),
-      std::move(executor), std::move(vision_executor),
+      std::move(tokenizer), std::move(executor), std::move(vision_executor),
       std::move(audio_executor), std::move(benchmark_info),
       std::move(worker_thread_pool));
 
   return llm_impl;
 };
 
+LITERT_LM_REGISTER_ENGINE(EngineFactory::EngineType::kLiteRTCompiledModel,
+                          [](EngineSettings settings,
+                             absl::string_view input_prompt_as_hint) {
+                            return EngineImpl::Create(std::move(settings),
+                                                      input_prompt_as_hint);
+                          });
+}  // namespace
 }  // namespace litert::lm

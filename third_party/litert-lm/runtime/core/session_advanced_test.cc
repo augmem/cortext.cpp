@@ -32,13 +32,13 @@
 #include "absl/status/statusor.h"  // from @com_google_absl
 #include "absl/strings/str_join.h"  // from @com_google_absl
 #include "absl/strings/string_view.h"  // from @com_google_absl
-#include "absl/synchronization/notification.h"  // from @com_google_absl
 #include "absl/time/clock.h"  // from @com_google_absl
 #include "absl/time/time.h"  // from @com_google_absl
 #include "litert/cc/litert_environment.h"  // from @litert
 #include "litert/cc/litert_tensor_buffer.h"  // from @litert
 #include "litert/test/matchers.h"  // from @litert
 #include "runtime/components/constrained_decoding/fake_constraint.h"
+#include "runtime/components/model_resources.h"
 #include "runtime/components/sentencepiece_tokenizer.h"
 #include "runtime/components/tokenizer.h"
 #include "runtime/engine/engine_settings.h"
@@ -47,14 +47,16 @@
 #include "runtime/executor/executor_settings_base.h"
 #include "runtime/executor/fake_llm_executor.h"
 #include "runtime/framework/resource_management/execution_manager.h"
-#include "runtime/framework/threadpool.h"
+#include "runtime/framework/resource_management/threaded_execution_manager.h"
 #include "runtime/util/convert_tensor_buffer.h"
 #include "runtime/util/scoped_file.h"
-#include "runtime/util/status_macros.h"  // NOLINT
-#include "runtime/util/test_utils.h"  // NOLINT
+#include "runtime/util/status_macros.h"
+#include "runtime/util/test_utils.h"  // IWYU pragma: keep
 
 namespace litert::lm {
 namespace {
+
+using ::testing::status::StatusIs;
 
 constexpr absl::string_view kTestdataDir =
     "litert_lm/runtime/components/testdata/";
@@ -160,6 +162,10 @@ class ExtendedTokenizer : public Tokenizer {
     return tokenizer_->GetTokenizerType();
   }
 
+  std::vector<std::string> GetTokens() const override {
+    return tokenizer_->GetTokens();
+  }
+
  private:
   explicit ExtendedTokenizer(std::unique_ptr<SentencePieceTokenizer> tokenizer)
       : tokenizer_(std::move(tokenizer)) {};
@@ -179,11 +185,43 @@ class SessionAdvancedTest : public testing::Test {
     ASSERT_OK(tokenizer);
     tokenizer.value()->SetExtendedToken(256000, "<start_of_audio>");
     tokenizer_ = std::move(*tokenizer);
+    model_resources_ = std::unique_ptr<ModelResources>();
     sampler_params_.set_type(proto::SamplerParameters::TYPE_UNSPECIFIED);
   }
 
+  absl::StatusOr<std::unique_ptr<SessionAdvanced>> CreateTestSession() {
+    const std::vector<std::vector<int>> stop_token_ids = {{2294}};
+    SessionConfig session_config = SessionConfig::CreateDefault();
+    session_config.GetMutableSamplerParams() = sampler_params_;
+    session_config.GetMutableStopTokenIds() = stop_token_ids;
+    session_config.SetStartTokenId(2);
+    session_config.SetSamplerBackend(Backend::CPU);
+
+    ASSIGN_OR_RETURN(
+        auto executor,
+        CreateFakeLlmExecutor(
+            // "Hello World!"
+            /*prefill_tokens=*/{{2, 90, 547, 58, 735, 210, 466, 2294}},
+            // "How's it going?"
+            /*decode_tokens=*/{
+                {224}, {24}, {8}, {66}, {246}, {18}, {2295}, {2294}}));
+    ASSIGN_OR_RETURN(
+        execution_manager_,
+        ThreadedExecutionManager::Create(
+            tokenizer_.get(), model_resources_.get(), std::move(executor),
+            /*vision_executor_settings=*/nullptr,
+            /*audio_executor_settings=*/nullptr,
+            /*litert_env=*/nullptr));
+
+    return SessionAdvanced::Create(execution_manager_, tokenizer_.get(),
+                                   session_config,
+                                   /*benchmark_info=*/std::nullopt);
+  }
+
   std::unique_ptr<Tokenizer> tokenizer_;
+  std::unique_ptr<ModelResources> model_resources_;
   proto::SamplerParameters sampler_params_;
+  std::shared_ptr<ExecutionManager> execution_manager_;
 };
 
 absl::StatusOr<std::unique_ptr<AudioExecutorSettings>>
@@ -202,18 +240,15 @@ CreateAudioExecutorSettings(const std::string& model_path,
 
 absl::AnyInvocable<void(absl::StatusOr<Responses>)> CreateStreamingTestCallback(
     absl::Status& status_ref, TaskState& state_ref,
-    std::vector<std::string>& texts_ref, absl::Notification& done_ref,
-    bool delay_on_next = false) {
-  return [&status_ref, &state_ref, &texts_ref, &done_ref,
+    std::vector<std::string>& texts_ref, bool delay_on_next = false) {
+  return [&status_ref, &state_ref, &texts_ref,
           delay_on_next](absl::StatusOr<Responses> responses) mutable {
     if (!responses.ok()) {
       status_ref = std::move(responses.status());
-      done_ref.Notify();
       return;
     }
     state_ref = responses->GetTaskState();
     if (IsTaskEndState(state_ref)) {
-      done_ref.Notify();
       return;
     }
     if (delay_on_next) {
@@ -248,17 +283,43 @@ TEST_F(SessionAdvancedTest, RunPrefill) {
               {224}, {24}, {8}, {66}, {246}, {18}, {2295}, {2294}}));
   ASSERT_OK_AND_ASSIGN(
       std::shared_ptr<ExecutionManager> execution_manager,
-      ExecutionManager::Create(tokenizer_.get(), std::move(executor),
-                               /*vision_executor_settings=*/nullptr,
-                               /*audio_executor_settings=*/nullptr,
-                               /*litert_env=*/nullptr));
+      ThreadedExecutionManager::Create(tokenizer_.get(), model_resources_.get(),
+                                       std::move(executor),
+                                       /*vision_executor_settings=*/nullptr,
+                                       /*audio_executor_settings=*/nullptr,
+                                       /*litert_env=*/nullptr));
 
   ASSERT_OK_AND_ASSIGN(
-      auto session, SessionAdvanced::Create(execution_manager, tokenizer_.get(),
-                                            session_config, std::nullopt));
+      auto session,
+      SessionAdvanced::Create(execution_manager, tokenizer_.get(),
+                              session_config, /*benchmark_info=*/std::nullopt));
   std::vector<InputData> inputs;
   inputs.emplace_back(InputText("Hello World!"));
   EXPECT_OK(session->RunPrefill(inputs));
+}
+
+TEST_F(SessionAdvancedTest, EmptyInputTextReturnsError) {
+  SessionConfig session_config = SessionConfig::CreateDefault();
+  session_config.SetSamplerBackend(Backend::CPU);
+  ASSERT_OK_AND_ASSIGN(auto executor, CreateFakeLlmExecutor(
+                                          /*prefill_tokens=*/{{}},
+                                          /*decode_tokens=*/{{}}));
+  ASSERT_OK_AND_ASSIGN(
+      std::shared_ptr<ExecutionManager> execution_manager,
+      ThreadedExecutionManager::Create(tokenizer_.get(), model_resources_.get(),
+                                       std::move(executor),
+                                       /*vision_executor_settings=*/nullptr,
+                                       /*audio_executor_settings=*/nullptr,
+                                       /*litert_env=*/nullptr));
+  ASSERT_OK_AND_ASSIGN(
+      auto session,
+      SessionAdvanced::Create(execution_manager, tokenizer_.get(),
+                              session_config, /*benchmark_info=*/std::nullopt));
+  std::vector<InputData> inputs;
+  inputs.emplace_back(InputText(""));
+  EXPECT_THAT(session->RunPrefill(inputs),
+              StatusIs(absl::StatusCode::kInvalidArgument,
+                       "No token IDs found in preprocessed_contents."));
 }
 
 TEST_F(SessionAdvancedTest, RunDecodeWithInternalSampler) {
@@ -277,14 +338,16 @@ TEST_F(SessionAdvancedTest, RunDecodeWithInternalSampler) {
               {224}, {24}, {8}, {66}, {246}, {18}, {2295}, {2294}}));
   ASSERT_OK_AND_ASSIGN(
       std::shared_ptr<ExecutionManager> execution_manager,
-      ExecutionManager::Create(tokenizer_.get(), std::move(executor),
-                               /*vision_executor_settings=*/nullptr,
-                               /*audio_executor_settings=*/nullptr,
-                               /*litert_env=*/nullptr));
+      ThreadedExecutionManager::Create(tokenizer_.get(), model_resources_.get(),
+                                       std::move(executor),
+                                       /*vision_executor_settings=*/nullptr,
+                                       /*audio_executor_settings=*/nullptr,
+                                       /*litert_env=*/nullptr));
 
   ASSERT_OK_AND_ASSIGN(
-      auto session, SessionAdvanced::Create(execution_manager, tokenizer_.get(),
-                                            session_config, std::nullopt));
+      auto session,
+      SessionAdvanced::Create(execution_manager, tokenizer_.get(),
+                              session_config, /*benchmark_info=*/std::nullopt));
   std::vector<InputData> inputs;
   inputs.emplace_back(InputText("Hello World!"));
   EXPECT_OK(session->RunPrefill(inputs));
@@ -295,6 +358,45 @@ TEST_F(SessionAdvancedTest, RunDecodeWithInternalSampler) {
   // The response is " How's it going?" since "!" is the stop token which is
   // not included in the response.
   EXPECT_EQ(responses->GetTexts()[0], " How's it going?");
+}
+
+TEST_F(SessionAdvancedTest, RunDecodeWithMaxOutputTokens) {
+  const std::vector<std::vector<int>> stop_token_ids = {{2294}};
+  SessionConfig session_config = SessionConfig::CreateDefault();
+  session_config.GetMutableSamplerParams() = sampler_params_;
+  session_config.GetMutableStopTokenIds() = stop_token_ids;
+  session_config.SetStartTokenId(2);
+  ASSERT_OK_AND_ASSIGN(
+      auto executor,
+      CreateFakeLlmExecutor(
+          // "Hello World!"
+          /*prefill_tokens=*/{{2, 90, 547, 58, 735, 210, 466, 2294}},
+          // "How's it going?"
+          /*decode_tokens=*/{
+              {224}, {24}, {8}, {66}, {246}, {18}, {2295}, {2294}}));
+  ASSERT_OK_AND_ASSIGN(
+      std::shared_ptr<ExecutionManager> execution_manager,
+      ThreadedExecutionManager::Create(tokenizer_.get(), model_resources_.get(),
+                                       std::move(executor),
+                                       /*vision_executor_settings=*/nullptr,
+                                       /*audio_executor_settings=*/nullptr,
+                                       /*litert_env=*/nullptr));
+
+  ASSERT_OK_AND_ASSIGN(
+      auto session,
+      SessionAdvanced::Create(execution_manager, tokenizer_.get(),
+                              session_config, /*benchmark_info=*/std::nullopt));
+  std::vector<InputData> inputs;
+  inputs.emplace_back(InputText("Hello World!"));
+  EXPECT_OK(session->RunPrefill(inputs));
+
+  auto decode_config = DecodeConfig::CreateDefault();
+  decode_config.SetMaxOutputTokens(2);
+  auto responses = session->RunDecode(decode_config);
+  EXPECT_OK(responses);
+  // Expect a single output candidate.
+  EXPECT_EQ(responses->GetTexts().size(), 1);
+  EXPECT_EQ(responses->GetTexts()[0], " How'");
 }
 
 TEST_F(SessionAdvancedTest, RunDecodeWithExternalSampler) {
@@ -315,14 +417,16 @@ TEST_F(SessionAdvancedTest, RunDecodeWithExternalSampler) {
               {224}, {24}, {8}, {66}, {246}, {18}, {2295}, {2294}}));
   ASSERT_OK_AND_ASSIGN(
       std::shared_ptr<ExecutionManager> execution_manager,
-      ExecutionManager::Create(tokenizer_.get(), std::move(executor),
-                               /*vision_executor_settings=*/nullptr,
-                               /*audio_executor_settings=*/nullptr,
-                               /*litert_env=*/nullptr));
+      ThreadedExecutionManager::Create(tokenizer_.get(), model_resources_.get(),
+                                       std::move(executor),
+                                       /*vision_executor_settings=*/nullptr,
+                                       /*audio_executor_settings=*/nullptr,
+                                       /*litert_env=*/nullptr));
 
   ASSERT_OK_AND_ASSIGN(
-      auto session, SessionAdvanced::Create(execution_manager, tokenizer_.get(),
-                                            session_config, std::nullopt));
+      auto session,
+      SessionAdvanced::Create(execution_manager, tokenizer_.get(),
+                              session_config, /*benchmark_info=*/std::nullopt));
   std::vector<InputData> inputs;
   inputs.emplace_back(InputText("Hello World!"));
   EXPECT_OK(session->RunPrefill(inputs));
@@ -359,14 +463,16 @@ TEST_F(SessionAdvancedTest,
                              {2294, 0, 2294}}));
   ASSERT_OK_AND_ASSIGN(
       std::shared_ptr<ExecutionManager> execution_manager,
-      ExecutionManager::Create(tokenizer_.get(), std::move(executor),
-                               /*vision_executor_settings=*/nullptr,
-                               /*audio_executor_settings=*/nullptr,
-                               /*litert_env=*/nullptr));
+      ThreadedExecutionManager::Create(tokenizer_.get(), model_resources_.get(),
+                                       std::move(executor),
+                                       /*vision_executor_settings=*/nullptr,
+                                       /*audio_executor_settings=*/nullptr,
+                                       /*litert_env=*/nullptr));
 
   ASSERT_OK_AND_ASSIGN(
-      auto session, SessionAdvanced::Create(execution_manager, tokenizer_.get(),
-                                            session_config, std::nullopt));
+      auto session,
+      SessionAdvanced::Create(execution_manager, tokenizer_.get(),
+                              session_config, /*benchmark_info=*/std::nullopt));
   std::vector<InputData> inputs;
   inputs.emplace_back(InputText("Hello World!"));
   EXPECT_OK(session->RunPrefill(inputs));
@@ -406,14 +512,16 @@ TEST_F(SessionAdvancedTest,
                              {2294, 0, 2294}}));
   ASSERT_OK_AND_ASSIGN(
       std::shared_ptr<ExecutionManager> execution_manager,
-      ExecutionManager::Create(tokenizer_.get(), std::move(executor),
-                               /*vision_executor_settings=*/nullptr,
-                               /*audio_executor_settings=*/nullptr,
-                               /*litert_env=*/nullptr));
+      ThreadedExecutionManager::Create(tokenizer_.get(), model_resources_.get(),
+                                       std::move(executor),
+                                       /*vision_executor_settings=*/nullptr,
+                                       /*audio_executor_settings=*/nullptr,
+                                       /*litert_env=*/nullptr));
 
   ASSERT_OK_AND_ASSIGN(
-      auto session, SessionAdvanced::Create(execution_manager, tokenizer_.get(),
-                                            session_config, std::nullopt));
+      auto session,
+      SessionAdvanced::Create(execution_manager, tokenizer_.get(),
+                              session_config, /*benchmark_info=*/std::nullopt));
   std::vector<InputData> inputs;
   inputs.emplace_back(InputText("Hello World!"));
   EXPECT_OK(session->RunPrefill(inputs));
@@ -458,14 +566,16 @@ TEST_F(SessionAdvancedTest,
           /*decode_tokens=*/{{24}, {8}, {66}, {246}, {18}, {2295}, {2294}}));
   ASSERT_OK_AND_ASSIGN(
       std::shared_ptr<ExecutionManager> execution_manager,
-      ExecutionManager::Create(tokenizer_.get(), std::move(executor),
-                               /*vision_executor_settings=*/nullptr,
-                               /*audio_executor_settings=*/nullptr,
-                               /*litert_env=*/nullptr));
+      ThreadedExecutionManager::Create(tokenizer_.get(), model_resources_.get(),
+                                       std::move(executor),
+                                       /*vision_executor_settings=*/nullptr,
+                                       /*audio_executor_settings=*/nullptr,
+                                       /*litert_env=*/nullptr));
 
   ASSERT_OK_AND_ASSIGN(
-      auto session, SessionAdvanced::Create(execution_manager, tokenizer_.get(),
-                                            session_config, std::nullopt));
+      auto session,
+      SessionAdvanced::Create(execution_manager, tokenizer_.get(),
+                              session_config, /*benchmark_info=*/std::nullopt));
 
   std::vector<InputData> inputs;
   inputs.emplace_back(InputText("How"));
@@ -511,14 +621,16 @@ TEST_F(SessionAdvancedTest,
           /*decode_tokens=*/{{24}, {8}, {66}, {246}, {18}, {2295}, {2294}}));
   ASSERT_OK_AND_ASSIGN(
       std::shared_ptr<ExecutionManager> execution_manager,
-      ExecutionManager::Create(tokenizer_.get(), std::move(executor),
-                               /*vision_executor_settings=*/nullptr,
-                               /*audio_executor_settings=*/nullptr,
-                               /*litert_env=*/nullptr));
+      ThreadedExecutionManager::Create(tokenizer_.get(), model_resources_.get(),
+                                       std::move(executor),
+                                       /*vision_executor_settings=*/nullptr,
+                                       /*audio_executor_settings=*/nullptr,
+                                       /*litert_env=*/nullptr));
 
   ASSERT_OK_AND_ASSIGN(
-      auto session, SessionAdvanced::Create(execution_manager, tokenizer_.get(),
-                                            session_config, std::nullopt));
+      auto session,
+      SessionAdvanced::Create(execution_manager, tokenizer_.get(),
+                              session_config, /*benchmark_info=*/std::nullopt));
 
   std::vector<InputData> inputs;
   inputs.emplace_back(InputText("How"));
@@ -557,14 +669,16 @@ TEST_F(SessionAdvancedTest, RunPrefillAsync) {
               {224}, {24}, {8}, {66}, {246}, {18}, {2295}, {2294}}));
   ASSERT_OK_AND_ASSIGN(
       std::shared_ptr<ExecutionManager> execution_manager,
-      ExecutionManager::Create(tokenizer_.get(), std::move(executor),
-                               /*vision_executor_settings=*/nullptr,
-                               /*audio_executor_settings=*/nullptr,
-                               /*litert_env=*/nullptr));
+      ThreadedExecutionManager::Create(tokenizer_.get(), model_resources_.get(),
+                                       std::move(executor),
+                                       /*vision_executor_settings=*/nullptr,
+                                       /*audio_executor_settings=*/nullptr,
+                                       /*litert_env=*/nullptr));
 
   ASSERT_OK_AND_ASSIGN(
-      auto session, SessionAdvanced::Create(execution_manager, tokenizer_.get(),
-                                            session_config, std::nullopt));
+      auto session,
+      SessionAdvanced::Create(execution_manager, tokenizer_.get(),
+                              session_config, /*benchmark_info=*/std::nullopt));
 
   std::vector<InputData> inputs;
   inputs.emplace_back(InputText("Hello World!"));
@@ -592,14 +706,16 @@ TEST_F(SessionAdvancedTest, RunDecodeAsyncWithInternalSampler) {
               {224}, {24}, {8}, {66}, {246}, {18}, {2295}, {2294}}));
   ASSERT_OK_AND_ASSIGN(
       std::shared_ptr<ExecutionManager> execution_manager,
-      ExecutionManager::Create(tokenizer_.get(), std::move(executor),
-                               /*vision_executor_settings=*/nullptr,
-                               /*audio_executor_settings=*/nullptr,
-                               /*litert_env=*/nullptr));
+      ThreadedExecutionManager::Create(tokenizer_.get(), model_resources_.get(),
+                                       std::move(executor),
+                                       /*vision_executor_settings=*/nullptr,
+                                       /*audio_executor_settings=*/nullptr,
+                                       /*litert_env=*/nullptr));
 
   ASSERT_OK_AND_ASSIGN(
-      auto session, SessionAdvanced::Create(execution_manager, tokenizer_.get(),
-                                            session_config, std::nullopt));
+      auto session,
+      SessionAdvanced::Create(execution_manager, tokenizer_.get(),
+                              session_config, /*benchmark_info=*/std::nullopt));
 
   std::vector<InputData> inputs;
   inputs.emplace_back(InputText("Hello World!"));
@@ -630,14 +746,16 @@ TEST_F(SessionAdvancedTest, RunDecodeAsyncWithExternalSampler) {
               {224}, {24}, {8}, {66}, {246}, {18}, {2295}, {2294}}));
   ASSERT_OK_AND_ASSIGN(
       std::shared_ptr<ExecutionManager> execution_manager,
-      ExecutionManager::Create(tokenizer_.get(), std::move(executor),
-                               /*vision_executor_settings=*/nullptr,
-                               /*audio_executor_settings=*/nullptr,
-                               /*litert_env=*/nullptr));
+      ThreadedExecutionManager::Create(tokenizer_.get(), model_resources_.get(),
+                                       std::move(executor),
+                                       /*vision_executor_settings=*/nullptr,
+                                       /*audio_executor_settings=*/nullptr,
+                                       /*litert_env=*/nullptr));
 
   ASSERT_OK_AND_ASSIGN(
       auto session, SessionAdvanced::Create(execution_manager, tokenizer_.get(),
-                                            session_config, std::nullopt));
+                                            session_config,
+                                            /*benchmark_info=*/std::nullopt));
 
   std::vector<InputData> inputs;
   inputs.emplace_back(InputText("Hello World!"));
@@ -681,14 +799,16 @@ TEST_F(SessionAdvancedTest,
           /*decode_tokens=*/{{24}, {8}, {66}, {246}, {18}, {2295}, {2294}}));
   ASSERT_OK_AND_ASSIGN(
       std::shared_ptr<ExecutionManager> execution_manager,
-      ExecutionManager::Create(tokenizer_.get(), std::move(executor),
-                               /*vision_executor_settings=*/nullptr,
-                               /*audio_executor_settings=*/nullptr,
-                               /*litert_env=*/nullptr));
+      ThreadedExecutionManager::Create(tokenizer_.get(), model_resources_.get(),
+                                       std::move(executor),
+                                       /*vision_executor_settings=*/nullptr,
+                                       /*audio_executor_settings=*/nullptr,
+                                       /*litert_env=*/nullptr));
 
   ASSERT_OK_AND_ASSIGN(
-      auto session, SessionAdvanced::Create(execution_manager, tokenizer_.get(),
-                                            session_config, std::nullopt));
+      auto session,
+      SessionAdvanced::Create(execution_manager, tokenizer_.get(),
+                              session_config, /*benchmark_info=*/std::nullopt));
 
   std::vector<InputData> inputs;
   inputs.emplace_back(InputText("How"));
@@ -696,16 +816,16 @@ TEST_F(SessionAdvancedTest,
   EXPECT_OK(session->RunPrefillAsync(inputs, CreateTestCallback(done_prefill)));
 
   absl::Status status;
-  TaskState task_state;
+  TaskState task_state = TaskState::kUnknown;
   std::vector<std::string> texts;
-  absl::Notification done_decode = absl::Notification();
   auto decode_config = DecodeConfig::CreateDefault();
   decode_config.SetConstraint(&constraint);
-  EXPECT_OK(session->RunDecodeAsync(
-      CreateStreamingTestCallback(status, task_state, texts, done_decode),
-      decode_config));
+  ASSERT_OK_AND_ASSIGN(auto task_controller,
+                       session->RunDecodeAsync(CreateStreamingTestCallback(
+                                                   status, task_state, texts),
+                                               decode_config));
 
-  done_decode.WaitForNotification();
+  EXPECT_OK(task_controller->WaitUntilDone(absl::Seconds(10)));
   EXPECT_OK(status);
   EXPECT_EQ(task_state, TaskState::kDone);
   EXPECT_EQ(texts.size(), 3);
@@ -745,14 +865,16 @@ TEST_F(SessionAdvancedTest,
           /*decode_tokens=*/{{24}, {8}, {66}, {246}, {18}, {2295}, {2294}}));
   ASSERT_OK_AND_ASSIGN(
       std::shared_ptr<ExecutionManager> execution_manager,
-      ExecutionManager::Create(tokenizer_.get(), std::move(executor),
-                               /*vision_executor_settings=*/nullptr,
-                               /*audio_executor_settings=*/nullptr,
-                               /*litert_env=*/nullptr));
+      ThreadedExecutionManager::Create(tokenizer_.get(), model_resources_.get(),
+                                       std::move(executor),
+                                       /*vision_executor_settings=*/nullptr,
+                                       /*audio_executor_settings=*/nullptr,
+                                       /*litert_env=*/nullptr));
 
   ASSERT_OK_AND_ASSIGN(
-      auto session, SessionAdvanced::Create(execution_manager, tokenizer_.get(),
-                                            session_config, std::nullopt));
+      auto session,
+      SessionAdvanced::Create(execution_manager, tokenizer_.get(),
+                              session_config, /*benchmark_info=*/std::nullopt));
 
   std::vector<InputData> inputs;
   inputs.emplace_back(InputText("How"));
@@ -760,20 +882,78 @@ TEST_F(SessionAdvancedTest,
   EXPECT_OK(session->RunPrefillAsync(inputs, CreateTestCallback(done_prefill)));
 
   absl::Status status;
-  TaskState task_state;
+  TaskState task_state = TaskState::kUnknown;
   std::vector<std::string> texts;
-  absl::Notification done_decode = absl::Notification();
   auto decode_config = DecodeConfig::CreateDefault();
   decode_config.SetConstraint(&constraint);
-  EXPECT_OK(session->RunDecodeAsync(
-      CreateStreamingTestCallback(status, task_state, texts, done_decode),
-      decode_config));
+  ASSERT_OK_AND_ASSIGN(auto task_controller,
+                       session->RunDecodeAsync(CreateStreamingTestCallback(
+                                                   status, task_state, texts),
+                                               decode_config));
 
-  done_decode.WaitForNotification();
+  EXPECT_OK(task_controller->WaitUntilDone(absl::Seconds(10)));
   EXPECT_OK(status);
   EXPECT_EQ(task_state, TaskState::kDone);
   EXPECT_EQ(texts.size(), 3);
   EXPECT_THAT(texts, testing::ElementsAre("'", "s", " it"));
+}
+
+TEST_F(SessionAdvancedTest, SaveAndRewindCheckpoint) {
+  ASSERT_OK_AND_ASSIGN(auto session, CreateTestSession());
+
+  std::vector<InputData> inputs;
+  inputs.emplace_back(InputText("Hello World!"));
+
+  EXPECT_OK(session->RunPrefill(inputs));
+
+  EXPECT_OK(session->SaveCheckpoint("checkpoint-1"));
+
+  auto decode_config = DecodeConfig::CreateDefault();
+  decode_config.SetMaxOutputTokens(2);
+  ASSERT_OK_AND_ASSIGN(auto responses1, session->RunDecode(decode_config));
+  EXPECT_EQ(responses1.GetTexts().size(), 1);
+  EXPECT_EQ(responses1.GetTexts()[0], " How'");
+
+  EXPECT_OK(session->SaveCheckpoint("checkpoint-2"));
+
+  EXPECT_OK(session->RewindToCheckpoint("checkpoint-1"));
+
+  decode_config.SetMaxOutputTokens(2);
+  ASSERT_OK_AND_ASSIGN(auto responses3, session->RunDecode(decode_config));
+  EXPECT_EQ(responses3.GetTexts().size(), 1);
+  EXPECT_EQ(responses3.GetTexts()[0], " How'");
+
+  EXPECT_THAT(session->RewindToCheckpoint("checkpoint-2"),
+              StatusIs(absl::StatusCode::kNotFound));
+
+  EXPECT_THAT(session->RewindToCheckpoint("non-existent"),
+              StatusIs(absl::StatusCode::kNotFound));
+}
+
+TEST_F(SessionAdvancedTest, GetCurrentStep) {
+  ASSERT_OK_AND_ASSIGN(auto session, CreateTestSession());
+
+  // Initially step should be 0.
+  ASSERT_OK_AND_ASSIGN(int step1, session->GetCurrentStep());
+  EXPECT_EQ(step1, 0);
+
+  std::vector<InputData> inputs;
+  inputs.emplace_back(InputText("Hello World!"));
+
+  EXPECT_OK(session->RunPrefill(inputs));
+
+  // After prefill, step should be number of prefill tokens.
+  // Fake executor uses 8 tokens for "Hello World!".
+  ASSERT_OK_AND_ASSIGN(int step2, session->GetCurrentStep());
+  EXPECT_EQ(step2, 8);
+
+  auto decode_config = DecodeConfig::CreateDefault();
+  decode_config.SetMaxOutputTokens(2);
+  ASSERT_OK_AND_ASSIGN(auto responses, session->RunDecode(decode_config));
+
+  // After decode, step should increase by number of decoded tokens.
+  ASSERT_OK_AND_ASSIGN(int step3, session->GetCurrentStep());
+  EXPECT_EQ(step3, 10);
 }
 
 TEST_F(SessionAdvancedTest, RunPrefillAndDecodeAsyncWithInternalSampler) {
@@ -792,26 +972,28 @@ TEST_F(SessionAdvancedTest, RunPrefillAndDecodeAsyncWithInternalSampler) {
               {224}, {24}, {8}, {66}, {246}, {18}, {2295}, {2294}}));
   ASSERT_OK_AND_ASSIGN(
       std::shared_ptr<ExecutionManager> execution_manager,
-      ExecutionManager::Create(tokenizer_.get(), std::move(executor),
-                               /*vision_executor_settings=*/nullptr,
-                               /*audio_executor_settings=*/nullptr,
-                               /*litert_env=*/nullptr));
+      ThreadedExecutionManager::Create(tokenizer_.get(), model_resources_.get(),
+                                       std::move(executor),
+                                       /*vision_executor_settings=*/nullptr,
+                                       /*audio_executor_settings=*/nullptr,
+                                       /*litert_env=*/nullptr));
 
   ASSERT_OK_AND_ASSIGN(
-      auto session, SessionAdvanced::Create(execution_manager, tokenizer_.get(),
-                                            session_config, std::nullopt));
+      auto session,
+      SessionAdvanced::Create(execution_manager, tokenizer_.get(),
+                              session_config, /*benchmark_info=*/std::nullopt));
 
   std::vector<InputData> inputs;
   inputs.emplace_back(InputText("Hello World!"));
   absl::Status status;
-  TaskState task_state;
+  TaskState task_state = TaskState::kUnknown;
   std::vector<std::string> texts;
-  absl::Notification done = absl::Notification();
   EXPECT_OK(session->RunPrefill(inputs));
-  EXPECT_OK(session->RunDecodeAsync(
-      CreateStreamingTestCallback(status, task_state, texts, done)));
+  ASSERT_OK_AND_ASSIGN(auto task_controller,
+                       session->RunDecodeAsync(CreateStreamingTestCallback(
+                           status, task_state, texts)));
 
-  done.WaitForNotification();
+  EXPECT_OK(task_controller->WaitUntilDone(absl::Seconds(10)));
   EXPECT_OK(status);
   EXPECT_EQ(task_state, TaskState::kDone);
   EXPECT_EQ(texts.size(), 7);
@@ -837,26 +1019,71 @@ TEST_F(SessionAdvancedTest, RunPrefillAndDecodeAsyncWithExternalSampler) {
               {224}, {24}, {8}, {66}, {246}, {18}, {2295}, {2294}}));
   ASSERT_OK_AND_ASSIGN(
       std::shared_ptr<ExecutionManager> execution_manager,
-      ExecutionManager::Create(tokenizer_.get(), std::move(executor),
-                               /*vision_executor_settings=*/nullptr,
-                               /*audio_executor_settings=*/nullptr,
-                               /*litert_env=*/nullptr));
+      ThreadedExecutionManager::Create(tokenizer_.get(), model_resources_.get(),
+                                       std::move(executor),
+                                       /*vision_executor_settings=*/nullptr,
+                                       /*audio_executor_settings=*/nullptr,
+                                       /*litert_env=*/nullptr));
 
   ASSERT_OK_AND_ASSIGN(
-      auto session, SessionAdvanced::Create(execution_manager, tokenizer_.get(),
-                                            session_config, std::nullopt));
+      auto session,
+      SessionAdvanced::Create(execution_manager, tokenizer_.get(),
+                              session_config, /*benchmark_info=*/std::nullopt));
+
+  std::vector<InputData> inputs;
+  inputs.emplace_back(InputText("Hello World!"));
+  absl::Status status;
+  TaskState task_state = TaskState::kUnknown;
+  std::vector<std::string> texts;
+  EXPECT_OK(session->RunPrefill(inputs));
+  ASSERT_OK_AND_ASSIGN(auto task_controller,
+                       session->RunDecodeAsync(CreateStreamingTestCallback(
+                           status, task_state, texts)));
+
+  EXPECT_OK(task_controller->WaitUntilDone(absl::Seconds(10)));
+  EXPECT_OK(status);
+  EXPECT_EQ(task_state, TaskState::kDone);
+  EXPECT_EQ(texts.size(), 7);
+  EXPECT_THAT(texts,
+              testing::ElementsAre(" How", "'", "s", " it", " go", "ing", "?"));
+}
+
+TEST_F(SessionAdvancedTest, GenerateContentStream) {
+  const std::vector<std::vector<int>> stop_token_ids = {{2294}};
+  SessionConfig session_config = SessionConfig::CreateDefault();
+  session_config.GetMutableSamplerParams() = sampler_params_;
+  session_config.GetMutableStopTokenIds() = stop_token_ids;
+  session_config.SetStartTokenId(2);
+  ASSERT_OK_AND_ASSIGN(
+      auto executor,
+      CreateFakeLlmExecutor(
+          // "Hello World!"
+          /*prefill_tokens=*/{{2, 90, 547, 58, 735, 210, 466, 2294}},
+          // "How's it going?"
+          /*decode_tokens=*/{
+              {224}, {24}, {8}, {66}, {246}, {18}, {2295}, {2294}}));
+  ASSERT_OK_AND_ASSIGN(
+      std::shared_ptr<ExecutionManager> execution_manager,
+      ThreadedExecutionManager::Create(tokenizer_.get(), model_resources_.get(),
+                                       std::move(executor),
+                                       /*vision_executor_settings=*/nullptr,
+                                       /*audio_executor_settings=*/nullptr,
+                                       /*litert_env=*/nullptr));
+
+  ASSERT_OK_AND_ASSIGN(
+      auto session,
+      SessionAdvanced::Create(execution_manager, tokenizer_.get(),
+                              session_config, /*benchmark_info=*/std::nullopt));
 
   std::vector<InputData> inputs;
   inputs.emplace_back(InputText("Hello World!"));
   absl::Status status;
   TaskState task_state;
   std::vector<std::string> texts;
-  absl::Notification done = absl::Notification();
-  EXPECT_OK(session->RunPrefill(inputs));
-  EXPECT_OK(session->RunDecodeAsync(
-      CreateStreamingTestCallback(status, task_state, texts, done)));
+  EXPECT_OK(session->GenerateContentStream(
+      inputs, CreateStreamingTestCallback(status, task_state, texts)));
 
-  done.WaitForNotification();
+  EXPECT_OK(session->WaitUntilDone());
   EXPECT_OK(status);
   EXPECT_EQ(task_state, TaskState::kDone);
   EXPECT_EQ(texts.size(), 7);
@@ -869,7 +1096,6 @@ TEST_F(SessionAdvancedTest, RunPrefillEmptyInput) {
   SessionConfig session_config = SessionConfig::CreateDefault();
   session_config.GetMutableSamplerParams() = sampler_params_;
   session_config.GetMutableStopTokenIds() = stop_token_ids;
-  session_config.SetStartTokenId(2);
   session_config.SetSamplerBackend(Backend::CPU);
   ASSERT_OK_AND_ASSIGN(
       auto executor,
@@ -881,22 +1107,21 @@ TEST_F(SessionAdvancedTest, RunPrefillEmptyInput) {
               {224}, {24}, {8}, {66}, {246}, {18}, {2295}, {2294}}));
   ASSERT_OK_AND_ASSIGN(
       std::shared_ptr<ExecutionManager> execution_manager,
-      ExecutionManager::Create(tokenizer_.get(), std::move(executor),
-                               /*vision_executor_settings=*/nullptr,
-                               /*audio_executor_settings=*/nullptr,
-                               /*litert_env=*/nullptr));
+      ThreadedExecutionManager::Create(tokenizer_.get(), model_resources_.get(),
+                                       std::move(executor),
+                                       /*vision_executor_settings=*/nullptr,
+                                       /*audio_executor_settings=*/nullptr,
+                                       /*litert_env=*/nullptr));
 
   ASSERT_OK_AND_ASSIGN(
-      auto session, SessionAdvanced::Create(execution_manager, tokenizer_.get(),
-                                            session_config, std::nullopt));
+      auto session,
+      SessionAdvanced::Create(execution_manager, tokenizer_.get(),
+                              session_config, /*benchmark_info=*/std::nullopt));
 
   std::vector<InputData> inputs;
-  absl::Status status;
-  std::vector<std::string> texts;
-  absl::Notification done;
   EXPECT_THAT(session->RunPrefill(inputs),
-              testing::status::StatusIs(absl::StatusCode::kInvalidArgument,
-                                        "Input is empty."));
+              StatusIs(absl::StatusCode::kInvalidArgument,
+                       "No token IDs found in preprocessed_contents."));
 }
 
 TEST_F(SessionAdvancedTest, RunPrefillAsyncFailed) {
@@ -921,29 +1146,29 @@ TEST_F(SessionAdvancedTest, RunPrefillAsyncFailed) {
   session_config.SetSamplerBackend(Backend::CPU);
   ASSERT_OK_AND_ASSIGN(
       std::shared_ptr<ExecutionManager> execution_manager,
-      ExecutionManager::Create(tokenizer_.get(), std::move(executor),
-                               /*vision_executor_settings=*/nullptr,
-                               /*audio_executor_settings=*/nullptr,
-                               /*litert_env=*/nullptr));
+      ThreadedExecutionManager::Create(tokenizer_.get(), model_resources_.get(),
+                                       std::move(executor),
+                                       /*vision_executor_settings=*/nullptr,
+                                       /*audio_executor_settings=*/nullptr,
+                                       /*litert_env=*/nullptr));
 
   ASSERT_OK_AND_ASSIGN(
-      auto session, SessionAdvanced::Create(execution_manager, tokenizer_.get(),
-                                            session_config, std::nullopt));
+      auto session,
+      SessionAdvanced::Create(execution_manager, tokenizer_.get(),
+                              session_config, /*benchmark_info=*/std::nullopt));
 
   std::vector<InputData> inputs;
   inputs.emplace_back(InputText("Hello World!"));
   absl::Status status;
-  TaskState task_state;
+  TaskState task_state = TaskState::kUnknown;
   std::vector<std::string> texts;
-  absl::Notification done;
   EXPECT_OK(session->RunPrefillAsync(
-      inputs, CreateStreamingTestCallback(status, task_state, texts, done)));
+      inputs, CreateStreamingTestCallback(status, task_state, texts)));
 
-  done.WaitForNotification();
+  EXPECT_OK(execution_manager->WaitUntilAllDone(absl::Seconds(10)));
   EXPECT_FALSE(status.ok());
   EXPECT_EQ(task_state, TaskState::kProcessing);
-  EXPECT_THAT(status, testing::status::StatusIs(absl::StatusCode::kInternal,
-                                                "Prefill failed"));
+  EXPECT_THAT(status, StatusIs(absl::StatusCode::kInternal, "Prefill failed"));
 }
 
 TEST_F(SessionAdvancedTest, RunDecodeAsyncFailed) {
@@ -967,30 +1192,31 @@ TEST_F(SessionAdvancedTest, RunDecodeAsyncFailed) {
   session_config.SetSamplerBackend(Backend::CPU);
   ASSERT_OK_AND_ASSIGN(
       std::shared_ptr<ExecutionManager> execution_manager,
-      ExecutionManager::Create(tokenizer_.get(), std::move(executor),
-                               /*vision_executor_settings=*/nullptr,
-                               /*audio_executor_settings=*/nullptr,
-                               /*litert_env=*/nullptr));
+      ThreadedExecutionManager::Create(tokenizer_.get(), model_resources_.get(),
+                                       std::move(executor),
+                                       /*vision_executor_settings=*/nullptr,
+                                       /*audio_executor_settings=*/nullptr,
+                                       /*litert_env=*/nullptr));
 
   ASSERT_OK_AND_ASSIGN(
-      auto session, SessionAdvanced::Create(execution_manager, tokenizer_.get(),
-                                            session_config, std::nullopt));
+      auto session,
+      SessionAdvanced::Create(execution_manager, tokenizer_.get(),
+                              session_config, /*benchmark_info=*/std::nullopt));
 
   std::vector<InputData> inputs;
   inputs.emplace_back(InputText("Hello World!"));
   absl::Status status;
-  TaskState task_state;
+  TaskState task_state = TaskState::kUnknown;
   std::vector<std::string> texts;
-  absl::Notification done;
   EXPECT_OK(session->RunPrefill(inputs));
-  EXPECT_OK(session->RunDecodeAsync(
-      CreateStreamingTestCallback(status, task_state, texts, done)));
+  ASSERT_OK_AND_ASSIGN(auto task_controller,
+                       session->RunDecodeAsync(CreateStreamingTestCallback(
+                           status, task_state, texts)));
 
-  done.WaitForNotification();
+  EXPECT_OK(task_controller->WaitUntilDone(absl::Seconds(10)));
   EXPECT_FALSE(status.ok());
   EXPECT_EQ(task_state, TaskState::kProcessing);
-  EXPECT_THAT(status, testing::status::StatusIs(absl::StatusCode::kInternal,
-                                                "Decode failed"));
+  EXPECT_THAT(status, StatusIs(absl::StatusCode::kInternal, "Decode failed"));
 }
 
 TEST_F(SessionAdvancedTest, RunDecodeAsyncWithCancellationWithInternalSampler) {
@@ -1012,26 +1238,29 @@ TEST_F(SessionAdvancedTest, RunDecodeAsyncWithCancellationWithInternalSampler) {
   session_config.SetStartTokenId(2);
   ASSERT_OK_AND_ASSIGN(
       std::shared_ptr<ExecutionManager> execution_manager,
-      ExecutionManager::Create(tokenizer_.get(), std::move(fake_executor),
-                               /*vision_executor_settings=*/nullptr,
-                               /*audio_executor_settings=*/nullptr,
-                               /*litert_env=*/nullptr));
+      ThreadedExecutionManager::Create(tokenizer_.get(), model_resources_.get(),
+                                       std::move(fake_executor),
+                                       /*vision_executor_settings=*/nullptr,
+                                       /*audio_executor_settings=*/nullptr,
+                                       /*litert_env=*/nullptr));
 
   ASSERT_OK_AND_ASSIGN(
-      auto session, SessionAdvanced::Create(execution_manager, tokenizer_.get(),
-                                            session_config, std::nullopt));
+      auto session,
+      SessionAdvanced::Create(execution_manager, tokenizer_.get(),
+                              session_config, /*benchmark_info=*/std::nullopt));
 
   std::vector<InputData> inputs;
   inputs.emplace_back(InputText("Hello World!"));
 
   absl::Status status;
-  TaskState task_state;
+  TaskState task_state = TaskState::kUnknown;
   std::vector<std::string> responses;
-  absl::Notification done;
 
   EXPECT_OK(session->RunPrefill(inputs));
-  EXPECT_OK(session->RunDecodeAsync(CreateStreamingTestCallback(
-      status, task_state, responses, done, /*delay_on_next=*/true)));
+  ASSERT_OK_AND_ASSIGN(auto task_controller,
+                       session->RunDecodeAsync(CreateStreamingTestCallback(
+                           status, task_state, responses,
+                           /*delay_on_next=*/true)));
 
   // Wait for a short time to ensure the decoding has started.
   absl::SleepFor(absl::Milliseconds(100));
@@ -1040,7 +1269,7 @@ TEST_F(SessionAdvancedTest, RunDecodeAsyncWithCancellationWithInternalSampler) {
   session->CancelProcess();
 
   // Wait for the callback to be done.
-  done.WaitForNotification();
+  EXPECT_OK(task_controller->WaitUntilDone(absl::Seconds(10)));
   EXPECT_OK(status);
   EXPECT_EQ(task_state, TaskState::kCancelled);
 }
@@ -1066,26 +1295,29 @@ TEST_F(SessionAdvancedTest, RunDecodeAsyncWithCancellationWithExternalSampler) {
   session_config.SetSamplerBackend(Backend::CPU);
   ASSERT_OK_AND_ASSIGN(
       std::shared_ptr<ExecutionManager> execution_manager,
-      ExecutionManager::Create(tokenizer_.get(), std::move(fake_executor),
-                               /*vision_executor_settings=*/nullptr,
-                               /*audio_executor_settings=*/nullptr,
-                               /*litert_env=*/nullptr));
+      ThreadedExecutionManager::Create(tokenizer_.get(), model_resources_.get(),
+                                       std::move(fake_executor),
+                                       /*vision_executor_settings=*/nullptr,
+                                       /*audio_executor_settings=*/nullptr,
+                                       /*litert_env=*/nullptr));
 
   ASSERT_OK_AND_ASSIGN(
-      auto session, SessionAdvanced::Create(execution_manager, tokenizer_.get(),
-                                            session_config, std::nullopt));
+      auto session,
+      SessionAdvanced::Create(execution_manager, tokenizer_.get(),
+                              session_config, /*benchmark_info=*/std::nullopt));
 
   std::vector<InputData> inputs;
   inputs.emplace_back(InputText("Hello World!"));
 
   absl::Status status;
-  TaskState task_state;
+  TaskState task_state = TaskState::kUnknown;
   std::vector<std::string> responses;
-  absl::Notification done;
 
   EXPECT_OK(session->RunPrefill(inputs));
-  EXPECT_OK(session->RunDecodeAsync(CreateStreamingTestCallback(
-      status, task_state, responses, done, /*delay_on_next=*/true)));
+  ASSERT_OK_AND_ASSIGN(auto task_controller,
+                       session->RunDecodeAsync(CreateStreamingTestCallback(
+                           status, task_state, responses,
+                           /*delay_on_next=*/true)));
 
   // Wait for a short time to ensure the decoding has started.
   absl::SleepFor(absl::Milliseconds(100));
@@ -1094,7 +1326,7 @@ TEST_F(SessionAdvancedTest, RunDecodeAsyncWithCancellationWithExternalSampler) {
   session->CancelProcess();
 
   // Wait for the callback to be done.
-  done.WaitForNotification();
+  EXPECT_OK(task_controller->WaitUntilDone(absl::Seconds(10)));
   EXPECT_OK(status);
   EXPECT_EQ(task_state, TaskState::kCancelled);
 }
@@ -1119,28 +1351,29 @@ TEST_F(SessionAdvancedTest,
   session_config.SetStartTokenId(2);
   ASSERT_OK_AND_ASSIGN(
       std::shared_ptr<ExecutionManager> execution_manager,
-      ExecutionManager::Create(tokenizer_.get(), std::move(fake_executor),
-                               /*vision_executor_settings=*/nullptr,
-                               /*audio_executor_settings=*/nullptr,
-                               /*litert_env=*/nullptr));
+      ThreadedExecutionManager::Create(tokenizer_.get(), model_resources_.get(),
+                                       std::move(fake_executor),
+                                       /*vision_executor_settings=*/nullptr,
+                                       /*audio_executor_settings=*/nullptr,
+                                       /*litert_env=*/nullptr));
 
   ASSERT_OK_AND_ASSIGN(
-      auto session, SessionAdvanced::Create(execution_manager, tokenizer_.get(),
-                                            session_config, std::nullopt));
+      auto session,
+      SessionAdvanced::Create(execution_manager, tokenizer_.get(),
+                              session_config, /*benchmark_info=*/std::nullopt));
 
   std::vector<InputData> inputs;
   inputs.emplace_back(InputText("Hello World!"));
 
   absl::Status status;
-  TaskState task_state;
+  TaskState task_state = TaskState::kUnknown;
   std::vector<std::string> responses;
-  absl::Notification done;
 
   EXPECT_OK(session->RunPrefill(inputs));
   ASSERT_OK_AND_ASSIGN(
       auto task_controller,
       session->RunDecodeAsync(CreateStreamingTestCallback(
-          status, task_state, responses, done, /*delay_on_next=*/true)));
+          status, task_state, responses, /*delay_on_next=*/true)));
 
   // Wait for a short time to ensure the decoding has started.
   absl::SleepFor(absl::Milliseconds(100));
@@ -1149,7 +1382,7 @@ TEST_F(SessionAdvancedTest,
   EXPECT_OK(task_controller->Cancel());
 
   // Wait for the callback to be done.
-  done.WaitForNotification();
+  EXPECT_OK(task_controller->WaitUntilDone(absl::Seconds(10)));
   EXPECT_OK(status);
   EXPECT_EQ(task_state, TaskState::kCancelled);
 }
@@ -1176,28 +1409,29 @@ TEST_F(SessionAdvancedTest,
   session_config.SetSamplerBackend(Backend::CPU);
   ASSERT_OK_AND_ASSIGN(
       std::shared_ptr<ExecutionManager> execution_manager,
-      ExecutionManager::Create(tokenizer_.get(), std::move(fake_executor),
-                               /*vision_executor_settings=*/nullptr,
-                               /*audio_executor_settings=*/nullptr,
-                               /*litert_env=*/nullptr));
+      ThreadedExecutionManager::Create(tokenizer_.get(), model_resources_.get(),
+                                       std::move(fake_executor),
+                                       /*vision_executor_settings=*/nullptr,
+                                       /*audio_executor_settings=*/nullptr,
+                                       /*litert_env=*/nullptr));
 
   ASSERT_OK_AND_ASSIGN(
-      auto session, SessionAdvanced::Create(execution_manager, tokenizer_.get(),
-                                            session_config, std::nullopt));
+      auto session,
+      SessionAdvanced::Create(execution_manager, tokenizer_.get(),
+                              session_config, /*benchmark_info=*/std::nullopt));
 
   std::vector<InputData> inputs;
   inputs.emplace_back(InputText("Hello World!"));
 
   absl::Status status;
-  TaskState task_state;
+  TaskState task_state = TaskState::kUnknown;
   std::vector<std::string> responses;
-  absl::Notification done;
 
   EXPECT_OK(session->RunPrefill(inputs));
   ASSERT_OK_AND_ASSIGN(
       auto task_controller,
       session->RunDecodeAsync(CreateStreamingTestCallback(
-          status, task_state, responses, done, /*delay_on_next=*/true)));
+          status, task_state, responses, /*delay_on_next=*/true)));
 
   // Wait for a short time to ensure the decoding has started.
   absl::SleepFor(absl::Milliseconds(100));
@@ -1206,7 +1440,7 @@ TEST_F(SessionAdvancedTest,
   EXPECT_OK(task_controller->Cancel());
 
   // Wait for the callback to be done.
-  done.WaitForNotification();
+  EXPECT_OK(task_controller->WaitUntilDone(absl::Seconds(10)));
   EXPECT_OK(status);
   EXPECT_EQ(task_state, TaskState::kCancelled);
 }
@@ -1221,15 +1455,13 @@ class SessionAdvancedCancellationTest : public testing::TestWithParam<bool> {
     ASSERT_OK(tokenizer);
     tokenizer.value()->SetExtendedToken(256000, "<start_of_audio>");
     tokenizer_ = std::move(*tokenizer);
+    model_resources_ = std::unique_ptr<ModelResources>();
     sampler_params_.set_type(proto::SamplerParameters::TYPE_UNSPECIFIED);
-    // Creating the thread pool of a single thread to execute the works.
-    worker_thread_pool_ = std::make_unique<ThreadPool>(/*name_prefix=*/"engine",
-                                                       /*max_num_threads=*/1);
   }
   bool use_benchmark_info_ = GetParam();
   std::unique_ptr<Tokenizer> tokenizer_;
+  std::unique_ptr<ModelResources> model_resources_;
   proto::SamplerParameters sampler_params_;
-  std::unique_ptr<ThreadPool> worker_thread_pool_;
 };
 
 TEST_P(SessionAdvancedCancellationTest,
@@ -1261,10 +1493,11 @@ TEST_P(SessionAdvancedCancellationTest,
 
   ASSERT_OK_AND_ASSIGN(
       std::shared_ptr<ExecutionManager> execution_manager,
-      ExecutionManager::Create(tokenizer_.get(), std::move(fake_executor),
-                               /*vision_executor_settings=*/nullptr,
-                               /*audio_executor_settings=*/nullptr,
-                               /*litert_env=*/nullptr));
+      ThreadedExecutionManager::Create(tokenizer_.get(), model_resources_.get(),
+                                       std::move(fake_executor),
+                                       /*vision_executor_settings=*/nullptr,
+                                       /*audio_executor_settings=*/nullptr,
+                                       /*litert_env=*/nullptr));
 
   ASSERT_OK_AND_ASSIGN(
       auto session, SessionAdvanced::Create(execution_manager, tokenizer_.get(),
@@ -1274,19 +1507,20 @@ TEST_P(SessionAdvancedCancellationTest,
   inputs.emplace_back(InputText("Hello World!"));
 
   absl::Status status;
-  TaskState task_state;
+  TaskState task_state = TaskState::kUnknown;
   std::vector<std::string> responses;
-  absl::Notification done1;
 
   EXPECT_OK(session->RunPrefill(inputs));
-  EXPECT_OK(session->RunDecodeAsync(CreateStreamingTestCallback(
-      status, task_state, responses, done1, /*delay_on_next=*/true)));
+  ASSERT_OK_AND_ASSIGN(
+      auto task_controller,
+      session->RunDecodeAsync(CreateStreamingTestCallback(
+          status, task_state, responses, /*delay_on_next=*/true)));
 
   // Cancel the process.
   session->CancelProcess();
 
   // Wait for the callback to be done.
-  done1.WaitForNotification();
+  EXPECT_OK(task_controller->WaitUntilDone(absl::Seconds(10)));
   EXPECT_OK(status);
   EXPECT_EQ(task_state, TaskState::kCancelled);
 
@@ -1294,15 +1528,14 @@ TEST_P(SessionAdvancedCancellationTest,
   // The second generation should succeed.
   status = absl::OkStatus();
   responses.clear();
-  absl::Notification done2;
   EXPECT_OK(session->RunPrefill(inputs));
-  EXPECT_OK(session->RunDecodeAsync(CreateStreamingTestCallback(
-      status, task_state, responses, done2, /*delay_on_next=*/true)));
-  done2.WaitForNotification();
+  ASSERT_OK_AND_ASSIGN(
+      task_controller,
+      session->RunDecodeAsync(CreateStreamingTestCallback(
+          status, task_state, responses, /*delay_on_next=*/true)));
+  EXPECT_OK(task_controller->WaitUntilDone(absl::Seconds(10)));
   EXPECT_OK(status);
   EXPECT_EQ(task_state, TaskState::kDependentTaskCancelled);
-  // Reset worker thread pool to stop accessing session and fake executor.
-  worker_thread_pool_.reset();
 }
 
 TEST_P(SessionAdvancedCancellationTest,
@@ -1336,10 +1569,11 @@ TEST_P(SessionAdvancedCancellationTest,
 
   ASSERT_OK_AND_ASSIGN(
       std::shared_ptr<ExecutionManager> execution_manager,
-      ExecutionManager::Create(tokenizer_.get(), std::move(fake_executor),
-                               /*vision_executor_settings=*/nullptr,
-                               /*audio_executor_settings=*/nullptr,
-                               /*litert_env=*/nullptr));
+      ThreadedExecutionManager::Create(tokenizer_.get(), model_resources_.get(),
+                                       std::move(fake_executor),
+                                       /*vision_executor_settings=*/nullptr,
+                                       /*audio_executor_settings=*/nullptr,
+                                       /*litert_env=*/nullptr));
 
   ASSERT_OK_AND_ASSIGN(
       auto session, SessionAdvanced::Create(execution_manager, tokenizer_.get(),
@@ -1349,19 +1583,20 @@ TEST_P(SessionAdvancedCancellationTest,
   inputs.emplace_back(InputText("Hello World!"));
 
   absl::Status status;
-  TaskState task_state;
+  TaskState task_state = TaskState::kUnknown;
   std::vector<std::string> responses;
-  absl::Notification done1;
 
   EXPECT_OK(session->RunPrefill(inputs));
-  EXPECT_OK(session->RunDecodeAsync(CreateStreamingTestCallback(
-      status, task_state, responses, done1, /*delay_on_next=*/true)));
+  ASSERT_OK_AND_ASSIGN(
+      auto task_controller,
+      session->RunDecodeAsync(CreateStreamingTestCallback(
+          status, task_state, responses, /*delay_on_next=*/true)));
 
   // Cancel the process.
   session->CancelProcess();
 
   // Wait for the callback to be done.
-  done1.WaitForNotification();
+  EXPECT_OK(task_controller->WaitUntilDone(absl::Seconds(10)));
   EXPECT_OK(status);
   EXPECT_EQ(task_state, TaskState::kCancelled);
 
@@ -1369,15 +1604,14 @@ TEST_P(SessionAdvancedCancellationTest,
   // The second generation should succeed.
   status = absl::OkStatus();
   responses.clear();
-  absl::Notification done2;
   EXPECT_OK(session->RunPrefill(inputs));
-  EXPECT_OK(session->RunDecodeAsync(CreateStreamingTestCallback(
-      status, task_state, responses, done2, /*delay_on_next=*/true)));
-  done2.WaitForNotification();
+  ASSERT_OK_AND_ASSIGN(
+      task_controller,
+      session->RunDecodeAsync(CreateStreamingTestCallback(
+          status, task_state, responses, /*delay_on_next=*/true)));
+  EXPECT_OK(task_controller->WaitUntilDone(absl::Seconds(10)));
   EXPECT_OK(status);
   EXPECT_EQ(task_state, TaskState::kDependentTaskCancelled);
-  // Reset worker thread pool to stop accessing session and fake executor.
-  worker_thread_pool_.reset();
 }
 
 INSTANTIATE_TEST_SUITE_P(SessionAdvancedCancellationTest,
@@ -1401,14 +1635,16 @@ TEST_F(SessionAdvancedTest, RunPrefillAsyncOnCancelledSession) {
   session_config.SetSamplerBackend(Backend::CPU);
   ASSERT_OK_AND_ASSIGN(
       std::shared_ptr<ExecutionManager> execution_manager,
-      ExecutionManager::Create(tokenizer_.get(), std::move(fake_executor),
-                               /*vision_executor_settings=*/nullptr,
-                               /*audio_executor_settings=*/nullptr,
-                               /*litert_env=*/nullptr));
+      ThreadedExecutionManager::Create(tokenizer_.get(), model_resources_.get(),
+                                       std::move(fake_executor),
+                                       /*vision_executor_settings=*/nullptr,
+                                       /*audio_executor_settings=*/nullptr,
+                                       /*litert_env=*/nullptr));
 
   ASSERT_OK_AND_ASSIGN(
-      auto session, SessionAdvanced::Create(execution_manager, tokenizer_.get(),
-                                            session_config, std::nullopt));
+      auto session,
+      SessionAdvanced::Create(execution_manager, tokenizer_.get(),
+                              session_config, /*benchmark_info=*/std::nullopt));
 
   session->CancelProcess();
 
@@ -1417,14 +1653,12 @@ TEST_F(SessionAdvancedTest, RunPrefillAsyncOnCancelledSession) {
   absl::Status status;
   TaskState task_state;
   std::vector<std::string> responses;
-  absl::Notification done;
   // The session is cancelled, so the call should return with a kCancelled
   // error.
   EXPECT_OK(session->RunPrefillAsync(
-      inputs,
-      CreateStreamingTestCallback(status, task_state, responses, done)));
+      inputs, CreateStreamingTestCallback(status, task_state, responses)));
   // Wait for the callback to be done.
-  done.WaitForNotification();
+  EXPECT_OK(execution_manager->WaitUntilAllDone(absl::Seconds(10)));
   EXPECT_OK(status);
   EXPECT_EQ(task_state, TaskState::kDone);
 }
@@ -1447,10 +1681,11 @@ TEST_F(SessionAdvancedTest,
   ASSERT_OK_AND_ASSIGN(
       auto executor,
       CreateFakeLlmExecutor(
-          // Expected tokens: "</s><test>User\nHello World!<end>\n<test>Model\n"
-          /*prefill_tokens=*/{{2,   4,  0,   39,  637, 0,    3328, 8,   179, 90,
-                               547, 58, 735, 210, 466, 2294, 0,    40,  23,  0,
-                               4,   0,  39,  637, 0,   197,  979,  3076}},
+          // Expected tokens: "</s><test>User\nHello World!" +
+          // "<end>\n<test>Model\n"
+          /*prefill_tokens=*/{{2, 4, 0, 39, 637, 0, 3328, 8, 179, 90, 547, 58,
+                               735, 210, 466, 2294},
+                              {0, 40, 23, 0, 4, 0, 39, 637, 0, 197, 979, 3076}},
           /*decode_tokens=*/{{224}}));
 
   proto::BenchmarkParams benchmark_params;
@@ -1458,10 +1693,11 @@ TEST_F(SessionAdvancedTest,
 
   ASSERT_OK_AND_ASSIGN(
       std::shared_ptr<ExecutionManager> execution_manager,
-      ExecutionManager::Create(tokenizer_.get(), std::move(executor),
-                               /*vision_executor_settings=*/nullptr,
-                               /*audio_executor_settings=*/nullptr,
-                               /*litert_env=*/nullptr));
+      ThreadedExecutionManager::Create(tokenizer_.get(), model_resources_.get(),
+                                       std::move(executor),
+                                       /*vision_executor_settings=*/nullptr,
+                                       /*audio_executor_settings=*/nullptr,
+                                       /*litert_env=*/nullptr));
 
   ASSERT_OK_AND_ASSIGN(
       auto session, SessionAdvanced::Create(execution_manager, tokenizer_.get(),
@@ -1501,10 +1737,11 @@ TEST_F(SessionAdvancedTest,
 
   ASSERT_OK_AND_ASSIGN(
       std::shared_ptr<ExecutionManager> execution_manager,
-      ExecutionManager::Create(tokenizer_.get(), std::move(executor),
-                               /*vision_executor_settings=*/nullptr,
-                               /*audio_executor_settings=*/nullptr,
-                               /*litert_env=*/nullptr));
+      ThreadedExecutionManager::Create(tokenizer_.get(), model_resources_.get(),
+                                       std::move(executor),
+                                       /*vision_executor_settings=*/nullptr,
+                                       /*audio_executor_settings=*/nullptr,
+                                       /*litert_env=*/nullptr));
 
   ASSERT_OK_AND_ASSIGN(
       auto session, SessionAdvanced::Create(execution_manager, tokenizer_.get(),
@@ -1548,13 +1785,15 @@ TEST_F(SessionAdvancedTest,
 
   ASSERT_OK_AND_ASSIGN(
       std::shared_ptr<ExecutionManager> execution_manager,
-      ExecutionManager::Create(tokenizer_.get(), std::move(executor),
-                               /*vision_executor_settings=*/nullptr,
-                               /*audio_executor_settings=*/nullptr,
-                               /*litert_env=*/nullptr));
+      ThreadedExecutionManager::Create(tokenizer_.get(), model_resources_.get(),
+                                       std::move(executor),
+                                       /*vision_executor_settings=*/nullptr,
+                                       /*audio_executor_settings=*/nullptr,
+                                       /*litert_env=*/nullptr));
 
-  auto session = SessionAdvanced::Create(execution_manager, tokenizer_.get(),
-                                         session_config, std::nullopt);
+  auto session =
+      SessionAdvanced::Create(execution_manager, tokenizer_.get(),
+                              session_config, /*benchmark_info=*/std::nullopt);
 
   std::vector<InputData> inputs;
   inputs.emplace_back(InputText("How"));
@@ -1563,16 +1802,16 @@ TEST_F(SessionAdvancedTest,
   TaskState task_state;
   std::vector<std::string> texts;
 
-  absl::Notification done_decode = absl::Notification();
   auto decode_config = DecodeConfig::CreateDefault();
   decode_config.SetConstraint(&constraint);
 
   EXPECT_OK((*session)->RunPrefill(inputs));
-  EXPECT_OK((*session)->RunDecodeAsync(
-      CreateStreamingTestCallback(status, task_state, texts, done_decode),
-      decode_config));
+  ASSERT_OK_AND_ASSIGN(auto task_controller, (*session)->RunDecodeAsync(
+                                                 CreateStreamingTestCallback(
+                                                     status, task_state, texts),
+                                                 decode_config));
 
-  done_decode.WaitForNotification();
+  EXPECT_OK(task_controller->WaitUntilDone(absl::Seconds(10)));
   EXPECT_OK(status);
   EXPECT_EQ(task_state, TaskState::kDone);
   EXPECT_EQ(texts.size(), 3);
@@ -1613,13 +1852,15 @@ TEST_F(SessionAdvancedTest,
 
   ASSERT_OK_AND_ASSIGN(
       std::shared_ptr<ExecutionManager> execution_manager,
-      ExecutionManager::Create(tokenizer_.get(), std::move(executor),
-                               /*vision_executor_settings=*/nullptr,
-                               /*audio_executor_settings=*/nullptr,
-                               /*litert_env=*/nullptr));
+      ThreadedExecutionManager::Create(tokenizer_.get(), model_resources_.get(),
+                                       std::move(executor),
+                                       /*vision_executor_settings=*/nullptr,
+                                       /*audio_executor_settings=*/nullptr,
+                                       /*litert_env=*/nullptr));
 
-  auto session = SessionAdvanced::Create(execution_manager, tokenizer_.get(),
-                                         session_config, std::nullopt);
+  auto session =
+      SessionAdvanced::Create(execution_manager, tokenizer_.get(),
+                              session_config, /*benchmark_info=*/std::nullopt);
 
   std::vector<InputData> inputs;
   inputs.emplace_back(InputText("How"));
@@ -1627,20 +1868,87 @@ TEST_F(SessionAdvancedTest,
   absl::Status status;
   TaskState task_state;
   std::vector<std::string> texts;
-  absl::Notification done_decode = absl::Notification();
   auto decode_config = DecodeConfig::CreateDefault();
   decode_config.SetConstraint(&constraint);
 
   EXPECT_OK((*session)->RunPrefill(inputs));
-  EXPECT_OK((*session)->RunDecodeAsync(
-      CreateStreamingTestCallback(status, task_state, texts, done_decode),
-      decode_config));
+  ASSERT_OK_AND_ASSIGN(auto task_controller, (*session)->RunDecodeAsync(
+                                                 CreateStreamingTestCallback(
+                                                     status, task_state, texts),
+                                                 decode_config));
 
-  done_decode.WaitForNotification();
+  EXPECT_OK(task_controller->WaitUntilDone(absl::Seconds(10)));
   EXPECT_OK(status);
   EXPECT_EQ(task_state, TaskState::kDone);
   EXPECT_EQ(texts.size(), 3);
   EXPECT_THAT(texts, testing::ElementsAre("'", "s", " it"));
+}
+
+TEST_F(SessionAdvancedTest, RunIncrementalPrefillWithDecode) {
+  const std::vector<std::vector<int>> stop_token_ids = {{2294}};
+  SessionConfig session_config = SessionConfig::CreateDefault();
+  session_config.SetStartTokenId(2);
+  session_config.SetSamplerBackend(Backend::CPU);
+  session_config.GetMutableSamplerParams() = sampler_params_;
+  session_config.GetMutableStopTokenIds() = stop_token_ids;
+  session_config.GetMutablePromptTemplates().mutable_user()->set_prefix(
+      "User:");
+  session_config.GetMutablePromptTemplates().mutable_user()->set_suffix(
+      "[END]");
+  session_config.GetMutablePromptTemplates().mutable_model()->set_prefix(
+      "Model:");
+  session_config.GetMutableLlmModelType().mutable_gemma3n();
+
+  ASSERT_OK_AND_ASSIGN(
+      auto executor,
+      CreateFakeLlmExecutor(
+          /*prefill_tokens=*/
+          {
+              {2, 423, 8, 179, 29, 207, 19, 547, 58},  // prefill chunk 1.1
+              {735, 210, 466, 2294},                   // prefill chunk 1.2
+              {433, 2172, 1920, 432, 197, 979, 3076,
+               29},  // prefill ran before decode with turn change template
+              {423, 8, 179, 29, 207, 19, 547, 58, 735, 210, 466,
+               2294},  // prefill chunk 2.1
+              {433, 2172, 1920, 432, 197, 979, 3076,
+               29},  // prefill ran before decode with turn change template
+          },
+          /*decode_tokens=*/
+          {{1}, {2}, {3}, {2294}, {1}, {2}, {3}, {2294}}));
+  ASSERT_OK_AND_ASSIGN(
+      std::shared_ptr<ExecutionManager> execution_manager,
+      ThreadedExecutionManager::Create(tokenizer_.get(), model_resources_.get(),
+                                       std::move(executor),
+                                       /*vision_executor_settings=*/nullptr,
+                                       /*audio_executor_settings=*/nullptr,
+                                       /*litert_env=*/nullptr));
+
+  ASSERT_OK_AND_ASSIGN(
+      auto session,
+      SessionAdvanced::Create(execution_manager, tokenizer_.get(),
+                              session_config, /*benchmark_info=*/std::nullopt));
+
+  {
+    std::vector<InputData> inputs;
+    inputs.emplace_back(InputText("Hello "));
+    EXPECT_OK(session->RunPrefill(inputs));
+  }
+  {
+    std::vector<InputData> inputs;
+    inputs.emplace_back(InputText("World!"));
+    EXPECT_OK(session->RunPrefill(inputs));
+  }
+  {
+    EXPECT_OK(session->RunDecode());
+  }
+  {
+    std::vector<InputData> inputs;
+    inputs.emplace_back(InputText("Hello World!"));
+    EXPECT_OK(session->RunPrefill(inputs));
+  }
+  {
+    EXPECT_OK(session->RunDecode());
+  }
 }
 
 #if !defined(WIN32) && !defined(_WIN32) && !defined(__WIN32__) && \
@@ -1671,10 +1979,10 @@ TEST_F(SessionAdvancedTest, ProcessAndCombineContentsTextAndAudioSuccess) {
       auto executor,
       CreateFakeLlmExecutor(
           // "User:Hello World!<start_of_audio>[END]Model:"
-          /*prefill_tokens=*/{{2,    423,  8,   179, 29,  207,  19,
-                               547,  58,   735, 210, 466, 2294, 256000,
-                               -2,   -2,   -2,  -2,  -2,  -4,   433,
-                               2172, 1920, 432, 197, 979, 3076, 29}},
+          /*prefill_tokens=*/{{2,   423, 8,   179, 29,  207,  19,
+                               547, 58,  735, 210, 466, 2294, 256000,
+                               -2,  -2,  -2,  -2,  -2,  -4},
+                              {433, 2172, 1920, 432, 197, 979, 3076, 29}},
           // "How's it going?"
           /*decode_tokens=*/
           {{224}, {24}, {8}, {66}, {246}, {18}, {2295}, {2294}},
@@ -1684,18 +1992,18 @@ TEST_F(SessionAdvancedTest, ProcessAndCombineContentsTextAndAudioSuccess) {
 
   LITERT_ASSERT_OK_AND_ASSIGN(
       auto env, Environment::Create(std::vector<Environment::Option>()));
-  auto env_ptr = std::make_unique<::litert::Environment>(std::move(env));
 
   ASSERT_OK_AND_ASSIGN(
       std::shared_ptr<ExecutionManager> execution_manager,
-      ExecutionManager::Create(
-          tokenizer_.get(), std::move(executor),
+      ThreadedExecutionManager::Create(
+          tokenizer_.get(), model_resources_.get(), std::move(executor),
           /*vision_executor_settings=*/nullptr,
           /*audio_executor_settings=*/std::move(audio_executor_settings),
-          /*litert_env=*/std::move(env_ptr)));
+          /*litert_env=*/&env));
   ASSERT_OK_AND_ASSIGN(
-      auto session, SessionAdvanced::Create(execution_manager, tokenizer_.get(),
-                                            session_config, std::nullopt));
+      auto session,
+      SessionAdvanced::Create(execution_manager, tokenizer_.get(),
+                              session_config, /*benchmark_info=*/std::nullopt));
 
   std::vector<InputData> inputs;
   inputs.emplace_back(InputText("Hello World!<start_of_audio>"));
@@ -1706,6 +2014,7 @@ TEST_F(SessionAdvancedTest, ProcessAndCombineContentsTextAndAudioSuccess) {
           {1, kSpectrogramSequenceLength, kSpectrogramFrequencySlots}));
   InputAudio input_audio(std::move(mel_spectrogram_data));
   inputs.emplace_back(std::move(input_audio));
+  inputs.emplace_back(InputAudioEnd());
   EXPECT_OK(session->RunPrefill(inputs));
 }
 
@@ -1734,14 +2043,13 @@ TEST_F(SessionAdvancedTest, ProcessAndCombineContentsTextAudioTextSuccess) {
   ASSERT_OK_AND_ASSIGN(
       auto executor,
       CreateFakeLlmExecutor(
-          // clang-format off
-          // "User:Hello World!<start_of_audio>What does the audio say?[END]Model:" // NOLINT
-          // clang-format on
+          // "User:Hello World!<start_of_audio>What does the audio say?"
+          // "[END]Model:"
           /*prefill_tokens=*/
-          {{2,    423,  8,    179,    29,  207, 19,   547,  58, 735,
-            210,  466,  2294, 256000, -2,  -2,  -2,   -2,   -2, -4,
-            583,  378,  844,  166,    3,   14,  1252, 54,   58, 626,
-            2295, 3995, 2172, 1920,   432, 197, 979,  3076, 29}},
+          {{2,   423,  8,      179, 29,   207, 19, 547, 58,  735, 210,
+            466, 2294, 256000, -2,  -2,   -2,  -2, -2,  -4,  583, 378,
+            844, 166,  3,      14,  1252, 54,  58, 626, 2295},
+           {3995, 2172, 1920, 432, 197, 979, 3076, 29}},
 
           // "How's it going?"
           /*decode_tokens=*/
@@ -1752,19 +2060,19 @@ TEST_F(SessionAdvancedTest, ProcessAndCombineContentsTextAudioTextSuccess) {
 
   LITERT_ASSERT_OK_AND_ASSIGN(
       auto env, Environment::Create(std::vector<Environment::Option>()));
-  auto env_ptr = std::make_unique<::litert::Environment>(std::move(env));
 
   ASSERT_OK_AND_ASSIGN(
       std::shared_ptr<ExecutionManager> execution_manager,
-      ExecutionManager::Create(
-          tokenizer_.get(), std::move(executor),
+      ThreadedExecutionManager::Create(
+          tokenizer_.get(), model_resources_.get(), std::move(executor),
           /*vision_executor_settings=*/nullptr,
           /*audio_executor_settings=*/std::move(audio_executor_settings),
-          /*litert_env=*/std::move(env_ptr)));
+          /*litert_env=*/&env));
 
   ASSERT_OK_AND_ASSIGN(
-      auto session, SessionAdvanced::Create(execution_manager, tokenizer_.get(),
-                                            session_config, std::nullopt));
+      auto session,
+      SessionAdvanced::Create(execution_manager, tokenizer_.get(),
+                              session_config, /*benchmark_info=*/std::nullopt));
 
   std::vector<InputData> inputs;
   inputs.emplace_back(InputText("Hello World!<start_of_audio>"));
@@ -1775,11 +2083,160 @@ TEST_F(SessionAdvancedTest, ProcessAndCombineContentsTextAudioTextSuccess) {
           {1, kSpectrogramSequenceLength, kSpectrogramFrequencySlots}));
   InputAudio input_audio(std::move(mel_spectrogram_data));
   inputs.emplace_back(std::move(input_audio));
+  inputs.emplace_back(InputAudioEnd());
   inputs.emplace_back(InputText("What does the audio say?"));
   EXPECT_OK(session->RunPrefill(inputs));
 }
 #endif  // !defined(WIN32) && !defined(_WIN32) && !defined(__WIN32__) && \
         // !defined(__NT__) && !defined(_WIN64)
+
+TEST_F(SessionAdvancedTest, RunTextScoringEmptyTargetTextFailure) {
+  ASSERT_OK_AND_ASSIGN(auto session, CreateTestSession());
+  std::vector<absl::string_view> target_text;
+  EXPECT_THAT(session->RunTextScoring(target_text,
+                                      /*store_token_lengths=*/false),
+              StatusIs(absl::StatusCode::kInvalidArgument,
+                       "Target text size should be 1."));
+}
+
+TEST_F(SessionAdvancedTest, RunTextScoringMultipleTargetTextFailure) {
+  ASSERT_OK_AND_ASSIGN(auto session, CreateTestSession());
+  std::vector<absl::string_view> target_text;
+  target_text.push_back("How's it going?");
+  target_text.push_back("How are you?");
+  EXPECT_THAT(
+      session->RunTextScoring(target_text, /*store_token_lengths=*/false),
+      StatusIs(absl::StatusCode::kInvalidArgument,
+               "Target text size should be 1."));
+}
+
+TEST_F(SessionAdvancedTest, RunTextScoringWithoutTokenLengthsSuccess) {
+  ASSERT_OK_AND_ASSIGN(auto session, CreateTestSession());
+  std::vector<InputData> inputs;
+  inputs.emplace_back(InputText("Hello World!"));
+  EXPECT_OK(session->RunPrefill(inputs));
+  std::vector<absl::string_view> target_texts;
+  target_texts.push_back("How's it going?");
+  const auto responses = session->RunTextScoring(target_texts,
+                                                 /*store_token_lengths=*/false);
+  EXPECT_OK(responses);
+  // Expect a single output candidate with score 0.0f.
+  EXPECT_EQ(responses->GetScores().size(), 1);
+  EXPECT_EQ(responses->GetScores()[0], 0.0f);
+  EXPECT_FALSE(responses->GetTokenLengths().has_value());
+}
+
+TEST_F(SessionAdvancedTest, RunTextScoringWithTokenLengthsSuccess) {
+  ASSERT_OK_AND_ASSIGN(auto session, CreateTestSession());
+  std::vector<InputData> inputs;
+  inputs.emplace_back(InputText("Hello World!"));
+  EXPECT_OK(session->RunPrefill(inputs));
+  std::vector<absl::string_view> target_texts;
+  target_texts.push_back("How's it going?");
+  const auto responses = session->RunTextScoring(target_texts,
+                                                 /*store_token_lengths=*/true);
+  EXPECT_OK(responses);
+  // Expect a single output candidate with score 0.0f and token length 7.
+  EXPECT_EQ(responses->GetScores().size(), 1);
+  EXPECT_EQ(responses->GetScores()[0], 0.0f);
+  EXPECT_TRUE(responses->GetTokenLengths().has_value());
+  EXPECT_EQ(responses->GetTokenLengths()->size(), 1);
+  EXPECT_EQ((*responses->GetTokenLengths())[0], 7);
+}
+
+TEST_F(SessionAdvancedTest, RunTextScoringAsyncEmptyTargetTextFailure) {
+  ASSERT_OK_AND_ASSIGN(auto session, CreateTestSession());
+  std::vector<absl::string_view> target_text;
+  auto controller = session->RunTextScoringAsync(
+      target_text, [](absl::StatusOr<Responses> r) {},
+      /*store_token_lengths=*/false);
+  EXPECT_THAT(controller.status(), StatusIs(absl::StatusCode::kInvalidArgument,
+                                            "Target text size should be 1."));
+}
+
+TEST_F(SessionAdvancedTest, RunTextScoringAsyncMultipleTargetTextFailure) {
+  ASSERT_OK_AND_ASSIGN(auto session, CreateTestSession());
+  std::vector<absl::string_view> target_text;
+  target_text.push_back("How's it going?");
+  target_text.push_back("How are you?");
+  auto controller = session->RunTextScoringAsync(
+      target_text, [](absl::StatusOr<Responses> r) {},
+      /*store_token_lengths=*/false);
+  EXPECT_THAT(controller.status(), StatusIs(absl::StatusCode::kInvalidArgument,
+                                            "Target text size should be 1."));
+}
+
+TEST_F(SessionAdvancedTest, RunTextScoringAsyncWithoutTokenLengthsSuccess) {
+  ASSERT_OK_AND_ASSIGN(auto session, CreateTestSession());
+  std::vector<InputData> inputs;
+  inputs.emplace_back(InputText("Hello World!"));
+  EXPECT_OK(session->RunPrefill(inputs));
+  std::vector<absl::string_view> target_texts;
+  target_texts.push_back("How's it going?");
+
+  absl::Status status;
+  std::optional<Responses> responses;
+
+  ASSERT_OK_AND_ASSIGN(auto controller,
+                       session->RunTextScoringAsync(
+                           target_texts,
+                           [&](absl::StatusOr<Responses> r) {
+                             if (!r.ok()) {
+                               status = r.status();
+                               return;
+                             }
+                             if (IsTaskEndState(r->GetTaskState())) {
+                               responses.emplace(*std::move(r));
+                             }
+                           },
+                           /*store_token_lengths=*/false));
+
+  EXPECT_OK(controller->WaitUntilDone(absl::Seconds(10)));
+
+  EXPECT_OK(status);
+  ASSERT_TRUE(responses.has_value());
+  // Expect a single output candidate with score 0.0f.
+  EXPECT_EQ(responses->GetScores().size(), 1);
+  EXPECT_EQ(responses->GetScores()[0], 0.0f);
+  EXPECT_FALSE(responses->GetTokenLengths().has_value());
+}
+
+TEST_F(SessionAdvancedTest, RunTextScoringAsyncWithTokenLengthsSuccess) {
+  ASSERT_OK_AND_ASSIGN(auto session, CreateTestSession());
+  std::vector<InputData> inputs;
+  inputs.emplace_back(InputText("Hello World!"));
+  EXPECT_OK(session->RunPrefill(inputs));
+  std::vector<absl::string_view> target_texts;
+  target_texts.push_back("How's it going?");
+
+  absl::Status status;
+  std::optional<Responses> responses;
+
+  ASSERT_OK_AND_ASSIGN(auto controller,
+                       session->RunTextScoringAsync(
+                           target_texts,
+                           [&](absl::StatusOr<Responses> r) {
+                             if (!r.ok()) {
+                               status = r.status();
+                               return;
+                             }
+                             if (IsTaskEndState(r->GetTaskState())) {
+                               responses.emplace(*std::move(r));
+                             }
+                           },
+                           /*store_token_lengths=*/true));
+
+  EXPECT_OK(controller->WaitUntilDone(absl::Seconds(10)));
+
+  EXPECT_OK(status);
+  ASSERT_TRUE(responses.has_value());
+  // Expect a single output candidate with score 0.0f and token length 7.
+  EXPECT_EQ(responses->GetScores().size(), 1);
+  EXPECT_EQ(responses->GetScores()[0], 0.0f);
+  EXPECT_TRUE(responses->GetTokenLengths().has_value());
+  EXPECT_EQ(responses->GetTokenLengths()->size(), 1);
+  EXPECT_EQ((*responses->GetTokenLengths())[0], 7);
+}
 
 }  // namespace
 }  // namespace litert::lm

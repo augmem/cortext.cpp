@@ -11,6 +11,7 @@
 #include "cortext/store/store.hpp"
 
 #include <any>
+#include <cstddef>
 #include <cstdlib>
 #include <cstring>
 #include <exception>
@@ -69,6 +70,27 @@ config_from_c (const cortext_config *cfg)
   cpp_cfg.procedural_enabled = cfg->procedural_enabled != 0;
   cpp_cfg.sequential_edges_enabled = cfg->sequential_edges_enabled != 0;
   cpp_cfg.label_bank_path = cfg->label_bank_path ? cfg->label_bank_path : "";
+  if (cfg->struct_size
+      >= offsetof (cortext_config, signal_filter_audio_enabled)
+             + sizeof (cfg->signal_filter_audio_enabled))
+    {
+      cpp_cfg.signal_filter_audio_enabled
+          = cfg->signal_filter_audio_enabled != 0;
+    }
+  if (cfg->struct_size
+      >= offsetof (cortext_config, signal_filter_image_enabled)
+             + sizeof (cfg->signal_filter_image_enabled))
+    {
+      cpp_cfg.signal_filter_image_enabled
+          = cfg->signal_filter_image_enabled != 0;
+    }
+  if (cfg->struct_size
+      >= offsetof (cortext_config, signal_filter_text_enabled)
+             + sizeof (cfg->signal_filter_text_enabled))
+    {
+      cpp_cfg.signal_filter_text_enabled
+          = cfg->signal_filter_text_enabled != 0;
+    }
   return cpp_cfg;
 }
 
@@ -721,6 +743,21 @@ memory_to_json (const cortext::Cortext::Context::Memory &memory)
       });
     }
 
+  nlohmann::json soft_anchors = nlohmann::json::array ();
+  for (const auto &anchor : memory.soft_anchors)
+    {
+      soft_anchors.push_back ({
+          { "id", anchor.id },
+          { "strength", anchor.strength },
+          { "likelihood", anchor.likelihood },
+          { "label", anchor.label },
+          { "tier", anchor.tier },
+          { "score", anchor.score },
+          { "margin", anchor.margin },
+          { "entropy", anchor.entropy },
+      });
+    }
+
   return {
     { "source_id", memory.source_id },
     { "id", memory.id },
@@ -744,6 +781,7 @@ memory_to_json (const cortext::Cortext::Context::Memory &memory)
     { "arousal", memory.arousal },
     { "composite_score", memory.composite_score },
     { "threshold_t", memory.threshold_t },
+    { "soft_anchors", std::move (soft_anchors) },
   };
 }
 
@@ -796,6 +834,28 @@ context_to_json (const cortext::Cortext::Context &ctx)
       ctx.output.stored_embedding_id.has_value ()
           ? nlohmann::json (*ctx.output.stored_embedding_id)
           : nlohmann::json (nullptr) },
+    { "stored_memory_id",
+      ctx.output.stored_memory_id.has_value ()
+          ? nlohmann::json (*ctx.output.stored_memory_id)
+          : nlohmann::json (nullptr) },
+    { "signal_filter_evaluated", ctx.output.signal_filter_evaluated },
+    { "signal_filter_accepted", ctx.output.signal_filter_accepted },
+    { "signal_filter_modality", ctx.output.signal_filter_modality },
+    { "signal_filter_reason", ctx.output.signal_filter_reason },
+    { "signal_filter_score", ctx.output.signal_filter_score },
+    { "signal_filter_threshold", ctx.output.signal_filter_threshold },
+    { "signal_filter_quiet_seconds",
+      ctx.output.signal_filter_quiet_seconds },
+    { "soft_anchor_enabled", ctx.output.soft_anchor_enabled },
+    { "soft_anchor_state_count", ctx.output.soft_anchor_state_count },
+    { "soft_anchor_link_count", ctx.output.soft_anchor_link_count },
+    { "soft_anchor_create_count", ctx.output.soft_anchor_create_count },
+    { "soft_anchor_update_count", ctx.output.soft_anchor_update_count },
+    { "soft_anchor_none_count", ctx.output.soft_anchor_none_count },
+    { "soft_anchor_last_update_us",
+      ctx.output.soft_anchor_last_update_us },
+    { "soft_anchor_mean_update_us",
+      ctx.output.soft_anchor_mean_update_us },
   };
 
   return {
@@ -940,6 +1000,12 @@ extern "C"
     cfg->procedural_enabled = defaults.procedural_enabled ? 1 : 0;
     cfg->sequential_edges_enabled = defaults.sequential_edges_enabled ? 1 : 0;
     cfg->label_bank_path = nullptr;
+    cfg->signal_filter_audio_enabled
+        = defaults.signal_filter_audio_enabled ? 1 : 0;
+    cfg->signal_filter_image_enabled
+        = defaults.signal_filter_image_enabled ? 1 : 0;
+    cfg->signal_filter_text_enabled
+        = defaults.signal_filter_text_enabled ? 1 : 0;
     clear_last_error ();
   }
 

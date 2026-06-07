@@ -42,6 +42,7 @@ class MockTokenizer : public Tokenizer {
   MOCK_METHOD(absl::StatusOr<int>, TokenToId, (absl::string_view token),
               (override));
   MOCK_METHOD(TokenizerType, GetTokenizerType, (), (const, override));
+  MOCK_METHOD(std::vector<std::string>, GetTokens, (), (const, override));
 };
 
 TEST(ModelTypeUtilsTest, InferLlmModelTypeGemma3N) {
@@ -52,7 +53,7 @@ TEST(ModelTypeUtilsTest, InferLlmModelTypeGemma3N) {
   EXPECT_CALL(tokenizer, TextToTokenIds("<start_of_audio>"))
       .WillRepeatedly(Return(std::vector<int>{256000}));
   ASSERT_OK_AND_ASSIGN(auto model_type,
-                       InferLlmModelType(proto::LlmMetadata(), tokenizer));
+                       InferLlmModelType(proto::LlmMetadata(), &tokenizer));
   EXPECT_THAT(model_type.has_gemma3n(), true);
 }
 
@@ -66,7 +67,7 @@ TEST(ModelTypeUtilsTest, InferLlmModelTypeGemma3NWrongAudioToken) {
           // The encoded ids for "<start_of_audio>" in the Gemma3 1B tokenizer.
           std::vector<int>{256001}));
   ASSERT_OK_AND_ASSIGN(auto model_type,
-                       InferLlmModelType(proto::LlmMetadata(), tokenizer));
+                       InferLlmModelType(proto::LlmMetadata(), &tokenizer));
   EXPECT_THAT(model_type.has_gemma3n(), false);
 }
 
@@ -80,7 +81,7 @@ TEST(ModelTypeUtilsTest, InferLlmModelTypeGemma3) {
           // The encoded ids for "<start_of_audio>" in the Gemma3 1B tokenizer.
           std::vector<int>{236820, 3041, 236779, 1340, 236779, 20156, 236813}));
   ASSERT_OK_AND_ASSIGN(auto model_type,
-                       InferLlmModelType(proto::LlmMetadata(), tokenizer));
+                       InferLlmModelType(proto::LlmMetadata(), &tokenizer));
   EXPECT_THAT(model_type.has_gemma3(), true);
 }
 
@@ -90,7 +91,7 @@ TEST(ModelTypeUtilsTest, InferLlmModelTypeGenericModel) {
   EXPECT_CALL(tokenizer, TextToTokenIds("<start_of_audio>"))
       .WillRepeatedly(Return(std::vector<int>{256000}));
   ASSERT_OK_AND_ASSIGN(auto model_type,
-                       InferLlmModelType(proto::LlmMetadata(), tokenizer));
+                       InferLlmModelType(proto::LlmMetadata(), &tokenizer));
   EXPECT_THAT(model_type.has_generic_model(), true);
 }
 

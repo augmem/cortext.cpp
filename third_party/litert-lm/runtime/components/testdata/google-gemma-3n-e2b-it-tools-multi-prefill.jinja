@@ -1,0 +1,152 @@
+{%- if not is_appending_to_prefill -%}
+    {{ bos_token }}
+    {%- if tools %}
+        {{- '<start_of_turn>system\n' }}
+        {%- for tool in tools %}
+            {{- tool | trim }}
+            {{- "\n\n" }}
+        {%- endfor %}
+        {{- '<end_of_turn>\n'}}
+    {%- endif %}
+    {%- if messages[0]['role'] == 'system' -%}
+        {%- if messages[0]['content'] is string -%}
+            {%- set first_user_prefix = messages[0]['content'] + '\n\n' -%}
+        {%- else -%}
+            {%- set first_user_prefix = messages[0]['content'][0]['text'] + '\n\n' -%}
+        {%- endif -%}
+        {%- set loop_messages = messages[1:] -%}
+    {%- else -%}
+        {%- set first_user_prefix = "" -%}
+        {%- set loop_messages = messages -%}
+    {%- endif -%}
+    {%- for message in loop_messages -%}
+        {%- if (message['role'] == 'assistant') -%}
+            {%- set role = "model" -%}
+        {%- elif (message['role'] == 'tool') -%}
+            {%- set is_tool = True -%}
+            {%- set role = "user" -%}
+        {%- else -%}
+            {%- set role = message['role'] -%}
+        {%- endif -%}
+        {{ '<start_of_turn>' + role + '\n' + (first_user_prefix if loop.first else "") }}
+        {%- if is_tool -%}
+            {{ '```tool_outputs\n' }}
+        {%- endif -%}
+        {%- if 'content' in message -%}
+            {%- if message['content'] is string -%}
+                {{ message['content'] | trim }}
+            {%- elif message['content'] is iterable -%}
+                {%- for item in message['content'] -%}
+                    {%- if item['type'] == 'audio' -%}
+                        {{ '<audio_soft_token>' }}
+                    {%- elif item['type'] == 'image' -%}
+                        {{ '<image_soft_token>' }}
+                    {%- elif item['type'] == 'text' -%}
+                        {{ item['text'] | trim }}
+                    {%- endif -%}
+                    {%- if is_tool -%}
+                        {{ '\n' }}
+                    {%- endif -%}
+                {%- endfor -%}
+            {%- else -%}
+                {{ raise_exception("Invalid content type") }}
+            {%- endif -%}
+        {%- endif -%}
+        {%- if is_tool -%}
+            {{ '```' }}
+            {%- set is_tool = False -%}
+        {%- endif -%}
+        {%- if 'tool_calls' in message -%}
+            {{- '```tool_code\n' -}}
+            {%- for tool_call in message['tool_calls'] -%}
+                {%- if 'function' in tool_call -%}
+                    {%- set tool_call = tool_call['function'] -%}
+                {%- endif -%}
+                {{-  tool_call['name'] + '(' -}}
+                {%- if 'arguments' in tool_call -%}
+                    {%- for key in tool_call['arguments'] -%}
+                        {{- key + '=' + tool_call['arguments'][key] -}}
+                        {% if not loop.last %}
+                            {{- ', ' -}}
+                        {% endif %}
+                    {%- endfor %}
+                {{- ')\n' -}}
+                {%- endif -%}
+            {%- endfor -%}
+            {{- '```' -}}
+        {%- endif -%}
+        {{'<end_of_turn>\n'}}
+    {%- endfor -%}
+{%- else -%}
+    {%- if (message['role'] == 'assistant') -%}
+        {%- set role = "model" -%}
+    {%- elif (message['role'] == 'tool') -%}
+        {%- set is_tool = True -%}
+        {%- set role = "user" -%}
+    {%- elif (message['role'] == 'system') -%}
+        {%- set is_system = True -%}
+        {%- set role = "user" -%}
+    {%- else -%}
+        {%- set role = message['role'] -%}
+    {%- endif -%}
+    {%- if is_first_part -%}
+        {{ '<start_of_turn>' + role + '\n' }}
+        {%- if is_tool -%}
+            {{ '```tool_outputs\n' }}
+        {%- endif -%}
+    {%- endif -%}
+    {%- if 'content' in message -%}
+        {%- if message['content'] is string -%}
+            {{ message['content'] }}
+            {%- if is_system -%}
+                {{- '\n\n' -}}
+            {%- endif -%}
+        {%- elif message['content'] is iterable -%}
+            {%- for item in message['content'] -%}
+                {%- if item['type'] == 'audio' -%}
+                    {{ '<audio_soft_token>' }}
+                {%- elif item['type'] == 'image' -%}
+                    {{ '<image_soft_token>' }}
+                {%- elif item['type'] == 'text' -%}
+                    {{ item['text'] }}
+                {%- endif -%}
+                {%- if is_tool -%}
+                    {{ '\n' }}
+                {%- endif -%}
+                {%- if is_system and loop.last -%}
+                    {{- '\n\n' -}}
+                {%- endif -%}
+            {%- endfor -%}
+        {%- else -%}
+            {{ raise_exception("Invalid content type") }}
+        {%- endif -%}
+    {%- endif -%}
+    {%- if 'tool_calls' in message -%}
+        {{- '```tool_code\n' -}}
+        {%- for tool_call in message['tool_calls'] -%}
+            {%- if 'function' in tool_call -%}
+                {%- set tool_call = tool_call['function'] -%}
+            {%- endif -%}
+            {{-  tool_call['name'] + '(' -}}
+            {%- if 'arguments' in tool_call -%}
+                {%- for key in tool_call['arguments'] -%}
+                    {{- key + '=' + tool_call['arguments'][key] -}}
+                    {% if not loop.last %}
+                        {{- ', ' -}}
+                    {% endif %}
+                {%- endfor %}
+            {{- ')\n' -}}
+            {%- endif -%}
+        {%- endfor -%}
+        {{- '```' -}}
+    {%- endif -%}
+    {%- if is_last_part -%}
+        {%- if is_tool -%}
+            {{ '\n```' }}
+        {%- endif -%}
+        {{ '<end_of_turn>\n' }}
+    {%- endif -%}
+{%- endif %}
+{%- if add_generation_prompt -%}
+    {{'<start_of_turn>model\n'}}
+{%- endif -%}

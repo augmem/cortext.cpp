@@ -18,6 +18,9 @@ namespace cortext::core
 constexpr double kFocusMidBias = 0.10;
 constexpr double kSensitivityMidBias = 0.10;
 constexpr double kAffectMidBias = -0.06;
+constexpr double kRetrievalFocusMidBias = -0.175;
+constexpr double kRetrievalSensitivityMidBias = 0.325;
+constexpr double kRetrievalStabilityMidBias = -0.25;
 
 inline double
 BiasMid (double x, double bias)
@@ -45,6 +48,33 @@ AffectSensitivityBias (double S)
   // Affective gain uses a lighter (slightly lifted) midpoint bias to ensure
   // mid-range Sensitivity still yields meaningful affect modulation.
   return BiasMid (S, kAffectMidBias);
+}
+
+inline double
+RetrievalFocusBias (double F)
+{
+  // The mixed-media judged matrix found the compact retrieval sweet spot at
+  // external F=0.75 under the global bias. Shift only retrieval/STM graph
+  // routing so neutral F=0.5 lands on that effective operating point.
+  return BiasMid (F, kRetrievalFocusMidBias);
+}
+
+inline double
+RetrievalSensitivityBias (double S)
+{
+  // The same matrix favored external S=0.25. This keeps the UI midpoint
+  // neutral while making the default retrieval policy less eager to admit
+  // marginal graph/context evidence.
+  return BiasMid (S, kRetrievalSensitivityMidBias);
+}
+
+inline double
+RetrievalStabilityBias (double T)
+{
+  // The post-remap judged matrix found the best compact retrieval point at
+  // external T=0.75. Shift only retrieval/STM graph policy so neutral T=0.5
+  // receives the same continuity/temporal support.
+  return BiasMid (T, kRetrievalStabilityMidBias);
 }
 
 inline double
@@ -108,12 +138,420 @@ MaxResults (double F)
   return static_cast<int> (std::round (Lerp (96.0, 8.0, FocusBias (F))));
 }
 
+inline int
+RetrievalMaxResults (double F)
+{
+  return static_cast<int> (
+      std::round (Lerp (96.0, 8.0, RetrievalFocusBias (F))));
+}
+
 inline double
 RetrievalContextMix (double F)
 {
   // retrieval_context_mix(F) = lerp(0.25, 0.05, F)
   // Lower focus blends in more recent context for query stability.
-  return Lerp (0.25, 0.05, FocusBias (F));
+  return Lerp (0.25, 0.05, RetrievalFocusBias (F));
+}
+
+inline int
+RetrievalTextQueryWMSlots (double F, double T)
+{
+  // Lower focus permits broader conversational addressing; higher stability
+  // trusts more short-term context while keeping the query bounded.
+  const double breadth
+      = (1.0 - RetrievalFocusBias (F))
+        * Lerp (0.75, 1.25, RetrievalStabilityBias (T));
+  return static_cast<int> (
+      std::round (Lerp (1.0, 4.0, Clamp (breadth, 0.0, 1.0))));
+}
+
+inline int
+RetrievalTextQueryWMChars (double F, double T)
+{
+  // Character budget follows the same addressing breadth as slot count.
+  const double breadth
+      = (1.0 - RetrievalFocusBias (F))
+        * Lerp (0.75, 1.25, RetrievalStabilityBias (T));
+  return static_cast<int> (
+      std::round (Lerp (512.0, 1800.0, Clamp (breadth, 0.0, 1.0))));
+}
+
+inline int
+RetrievalFactTextSeedCount (double F, double T)
+{
+  // Lower focus allows a wider fact-text rescue set; higher stability tightens
+  // it slightly because durable fact state should be less volatile.
+  const double f = RetrievalFocusBias (F);
+  const double t = RetrievalStabilityBias (T);
+  return static_cast<int> (
+      std::round (Lerp (24.0, 6.0, f) * Lerp (1.05, 0.90, t)));
+}
+
+inline double
+RetrievalFactTextSeedMinScore (double F, double S, double T)
+{
+  // Fact text scores are query-token coverage over concise fact text. When
+  // working memory is folded into the query, useful overlaps are smaller than
+  // exact-label matches, so Sensitivity lowers the admission floor.
+  const double f = RetrievalFocusBias (F);
+  const double s = RetrievalSensitivityBias (S);
+  const double t = RetrievalStabilityBias (T);
+  return Clamp (Lerp (0.18, 0.32, f) * Lerp (1.05, 0.82, s)
+                    * Lerp (0.95, 1.05, t),
+                0.14, 0.40);
+}
+
+inline double
+RetrievalPreconsolidatedLabelGraphWeight (double F, double S, double T)
+{
+  // Label-graph boosts are a soft candidate-ranking prior. Higher Sensitivity
+  // trusts label evidence more; higher Focus keeps the boost conservative.
+  const double f = RetrievalFocusBias (F);
+  const double s = RetrievalSensitivityBias (S);
+  const double t = RetrievalStabilityBias (T);
+  return Clamp (Lerp (0.14, 0.26, s) * Lerp (1.10, 0.82, f)
+                    * Lerp (1.05, 0.92, t),
+                0.08, 0.32);
+}
+
+inline int
+RetrievalPreconsolidatedLabelGraphTopLabels (double F, double T)
+{
+  // Lower Focus explores more provisional labels; higher Stability narrows the
+  // set because durable state should already carry persistent anchors.
+  const double f = RetrievalFocusBias (F);
+  const double t = RetrievalStabilityBias (T);
+  return static_cast<int> (
+      std::round (Lerp (16.0, 6.0, f) * Lerp (1.08, 0.92, t)));
+}
+
+inline double
+RetrievalPreconsolidatedLabelGraphMinQueryScore (double F, double S, double T)
+{
+  // Keep this low: the label graph is a rescue route, not a hard exact-match
+  // gate. Sensitivity lowers the floor for weak but useful query overlap.
+  const double f = RetrievalFocusBias (F);
+  const double s = RetrievalSensitivityBias (S);
+  const double t = RetrievalStabilityBias (T);
+  return Clamp (Lerp (0.0, 0.04, f) * Lerp (1.05, 0.70, s)
+                    * Lerp (0.90, 1.10, t),
+                0.0, 0.06);
+}
+
+inline double
+RetrievalPreconsolidatedLabelRelationWeight (double F, double S, double T)
+{
+  const double f = RetrievalFocusBias (F);
+  const double s = RetrievalSensitivityBias (S);
+  const double t = RetrievalStabilityBias (T);
+  return Clamp (Lerp (0.24, 0.46, s) * Lerp (1.05, 0.90, f)
+                    * Lerp (0.95, 1.05, t),
+                0.18, 0.55);
+}
+
+inline double
+RetrievalPreconsolidatedLabelGraphDegreeDamping (double F, double S, double T)
+{
+  // Generic-hub suppression rises with Sensitivity and lower Focus.
+  const double f = RetrievalFocusBias (F);
+  const double s = RetrievalSensitivityBias (S);
+  const double t = RetrievalStabilityBias (T);
+  return Clamp (Lerp (0.03, 0.12, s) * Lerp (1.20, 0.75, f)
+                    * Lerp (1.00, 0.85, t),
+                0.0, 0.15);
+}
+
+inline int
+RetrievalPreconsolidatedLabelGraphSeedSources (double F, double T)
+{
+  const double f = RetrievalFocusBias (F);
+  const double t = RetrievalStabilityBias (T);
+  return static_cast<int> (
+      std::round (Lerp (32.0, 12.0, f) * Lerp (1.05, 0.90, t)));
+}
+
+inline int
+RetrievalDurableSourceTextSeedSources (double F, double T)
+{
+  const double f = RetrievalFocusBias (F);
+  const double t = RetrievalStabilityBias (T);
+  return static_cast<int> (
+      std::round (Lerp (24.0, 8.0, f) * Lerp (1.05, 0.92, t)));
+}
+
+inline double
+RetrievalDurableSourceTextMinScore (double F, double S, double T)
+{
+  const double f = RetrievalFocusBias (F);
+  const double s = RetrievalSensitivityBias (S);
+  const double t = RetrievalStabilityBias (T);
+  return Clamp (Lerp (0.12, 0.24, f) * Lerp (1.05, 0.82, s)
+                    * Lerp (0.95, 1.05, t),
+                0.08, 0.30);
+}
+
+inline double
+RetrievalDurableSourceSetWeight (double F, double S, double T)
+{
+  const double f = RetrievalFocusBias (F);
+  const double s = RetrievalSensitivityBias (S);
+  const double t = RetrievalStabilityBias (T);
+  return Clamp (Lerp (0.08, 0.18, s) * Lerp (1.08, 0.88, f)
+                    * Lerp (1.05, 0.92, t),
+                0.04, 0.24);
+}
+
+inline double
+RetrievalDurableSourceSetMinScore (double F, double S, double T)
+{
+  const double f = RetrievalFocusBias (F);
+  const double s = RetrievalSensitivityBias (S);
+  const double t = RetrievalStabilityBias (T);
+  return Clamp (Lerp (0.0, 0.04, f) * Lerp (1.0, 0.70, s)
+                    * Lerp (0.90, 1.05, t),
+                0.0, 0.06);
+}
+
+inline int
+RetrievalDurableSourceMinTopK (double F, double T)
+{
+  const double f = RetrievalFocusBias (F);
+  const double t = RetrievalStabilityBias (T);
+  return static_cast<int> (
+      std::round (Lerp (2.0, 1.0, f) * Lerp (1.05, 0.95, t)));
+}
+
+inline int
+RetrievalGraphExpandedRagMaxItems (double F, double T)
+{
+  const double f = RetrievalFocusBias (F);
+  const double t = RetrievalStabilityBias (T);
+  return static_cast<int> (
+      std::round (Lerp (20.0, 8.0, f) * Lerp (1.08, 0.92, t)));
+}
+
+inline int
+RetrievalGraphExpandedRagTemporalWindow (double F, double T)
+{
+  const double f = RetrievalFocusBias (F);
+  const double t = RetrievalStabilityBias (T);
+  return static_cast<int> (
+      std::round (Lerp (4.0, 1.0, f) * Lerp (1.05, 0.90, t)));
+}
+
+inline int
+RetrievalGraphExpandedRagCompactItemLimit (double F, double T)
+{
+  const double f = RetrievalFocusBias (F);
+  const double t = RetrievalStabilityBias (T);
+  return static_cast<int> (
+      std::round (Lerp (4.0, 1.0, f) * Lerp (1.05, 0.90, t)));
+}
+
+inline double
+RetrievalGraphExpandedRagSeedWeight (double F, double S, double T)
+{
+  const double f = RetrievalFocusBias (F);
+  const double s = RetrievalSensitivityBias (S);
+  const double t = RetrievalStabilityBias (T);
+  return Clamp (Lerp (0.72, 0.90, f) * Lerp (1.02, 0.96, s)
+                    * Lerp (1.00, 0.96, t),
+                0.60, 0.95);
+}
+
+inline double
+RetrievalGraphExpandedRagGraphWeight (double F, double S, double T)
+{
+  const double f = RetrievalFocusBias (F);
+  const double s = RetrievalSensitivityBias (S);
+  const double t = RetrievalStabilityBias (T);
+  return Clamp (Lerp (0.16, 0.34, s) * Lerp (1.14, 0.78, f)
+                    * Lerp (1.04, 0.92, t),
+                0.08, 0.40);
+}
+
+inline double
+RetrievalGraphExpandedRagRelationWeight (double F, double S, double T)
+{
+  const double f = RetrievalFocusBias (F);
+  const double s = RetrievalSensitivityBias (S);
+  const double t = RetrievalStabilityBias (T);
+  return Clamp (Lerp (0.24, 0.48, s) * Lerp (1.10, 0.86, f)
+                    * Lerp (0.96, 1.04, t),
+                0.16, 0.55);
+}
+
+inline double
+RetrievalGraphExpandedRagTemporalWeight (double F, double S, double T)
+{
+  const double f = RetrievalFocusBias (F);
+  const double s = RetrievalSensitivityBias (S);
+  const double t = RetrievalStabilityBias (T);
+  return Clamp (Lerp (0.12, 0.26, 1.0 - f) * Lerp (0.94, 1.08, s)
+                    * Lerp (0.92, 1.04, t),
+                0.06, 0.30);
+}
+
+inline double
+RetrievalGraphExpandedRagFactWeight (double F, double S, double T)
+{
+  const double f = RetrievalFocusBias (F);
+  const double s = RetrievalSensitivityBias (S);
+  const double t = RetrievalStabilityBias (T);
+  return Clamp (Lerp (0.12, 0.30, s) * Lerp (1.05, 0.88, f)
+                    * Lerp (0.96, 1.06, t),
+                0.06, 0.34);
+}
+
+inline int
+RetrievalClusterLabelK (double F, double T)
+{
+  const double f = RetrievalFocusBias (F);
+  const double t = RetrievalStabilityBias (T);
+  return static_cast<int> (
+      std::round (Lerp (80.0, 24.0, f) * Lerp (1.10, 0.90, t)));
+}
+
+inline int
+RetrievalClusterLabelM (double F, double T)
+{
+  const double f = RetrievalFocusBias (F);
+  const double t = RetrievalStabilityBias (T);
+  return static_cast<int> (
+      std::round (Lerp (5.0, 2.0, f) * Lerp (1.05, 0.95, t)));
+}
+
+inline int
+RetrievalClusterLabelN (double F, double S, double T)
+{
+  const double f = RetrievalFocusBias (F);
+  const double s = RetrievalSensitivityBias (S);
+  const double t = RetrievalStabilityBias (T);
+  return static_cast<int> (
+      std::round (Lerp (12.0, 6.0, f) * Lerp (0.95, 1.08, s)
+                  * Lerp (1.05, 0.92, t)));
+}
+
+inline int
+STMShadowTTLSteps (double T)
+{
+  return static_cast<int> (
+      std::round (Lerp (8.0, 32.0, RetrievalStabilityBias (T))));
+}
+
+inline int
+STMShadowCapacity (double T)
+{
+  return static_cast<int> (
+      std::round (Lerp (16.0, 64.0, RetrievalStabilityBias (T))));
+}
+
+inline int
+STMLabelRouterTopK (double F, double T)
+{
+  // Reuse the retrieval cluster breadth as the flat-router budget.
+  return RetrievalClusterLabelK (F, T);
+}
+
+inline double
+STMLabelMinScore (double F, double S, double T)
+{
+  const double f = RetrievalFocusBias (F);
+  const double s = RetrievalSensitivityBias (S);
+  const double t = RetrievalStabilityBias (T);
+  return Clamp (Lerp (0.0, 0.05, f) * Lerp (1.0, 0.65, s)
+                    * Lerp (0.95, 1.05, t),
+                0.0, 0.08);
+}
+
+inline int
+STMLabelEdgeCapacity (double F, double S, double T)
+{
+  const int stm_capacity = STMShadowCapacity (T);
+  const int labels_per_cluster = RetrievalClusterLabelN (F, S, T);
+  return std::max (stm_capacity, stm_capacity * labels_per_cluster);
+}
+
+inline double
+STMLabelConsolidationMinSimilarity (double F, double S, double T)
+{
+  const double f = RetrievalFocusBias (F);
+  const double s = RetrievalSensitivityBias (S);
+  const double t = RetrievalStabilityBias (T);
+  return Clamp (Lerp (0.82, 0.93, f) * Lerp (0.98, 1.02, t)
+                    * Lerp (0.98, 0.94, s),
+                0.75, 0.95);
+}
+
+inline int
+STMLabelConsolidationMaxLabels (double F, double T)
+{
+  const double f = RetrievalFocusBias (F);
+  const double t = RetrievalStabilityBias (T);
+  return static_cast<int> (
+      std::round (Lerp (18.0, 8.0, f) * Lerp (1.05, 0.90, t)));
+}
+
+inline int
+STMLabelConsolidationMaxUngrounded (double F, double S, double T)
+{
+  const double f = RetrievalFocusBias (F);
+  const double s = RetrievalSensitivityBias (S);
+  const double t = RetrievalStabilityBias (T);
+  return static_cast<int> (
+      std::round (Lerp (5.0, 1.0, f) * Lerp (0.85, 1.10, s)
+                  * Lerp (1.05, 0.85, t)));
+}
+
+inline int
+STMLTMSourceSpanCandidateLimit (double F, double S, double T)
+{
+  (void)F;
+  const double s = SensitivityBias (S);
+  const double t = Clamp (T, 0.0, 1.0);
+  const double raw = Lerp (21.0, -1.5, s) * Lerp (1.05, 0.95, t);
+  return std::max (0, static_cast<int> (std::round (raw)));
+}
+
+inline int
+STMLTMDurableMinLabels (double F, double S, double T)
+{
+  const double f = FocusBias (F);
+  const double s = SensitivityBias (S);
+  const double t = Clamp (T, 0.0, 1.0);
+  const double raw = Lerp (4.0, 1.0, f) * Lerp (0.95, 1.05, s)
+                     * Lerp (1.05, 0.90, t);
+  return std::max (1, static_cast<int> (std::round (raw)));
+}
+
+inline int
+STMLTMDurableMaxLabels (double F, double S, double T)
+{
+  const int min_labels = STMLTMDurableMinLabels (F, S, T);
+  const double f = FocusBias (F);
+  const double t = Clamp (T, 0.0, 1.0);
+  const double raw_extra = Lerp (5.0, -1.0, f) * Lerp (1.05, 0.90, t);
+  const int extra = std::max (
+      0, static_cast<int> (std::round (raw_extra)));
+  return std::max (
+      min_labels, min_labels + extra);
+}
+
+inline int
+STMLTMLabelCooccurrenceMaxLabels (double F, double S, double T)
+{
+  return STMLTMDurableMaxLabels (F, S, T);
+}
+
+inline double
+STMLTMRelationEndpointMinConfidence (double F, double S, double T)
+{
+  const double f = FocusBias (F);
+  const double s = SensitivityBias (S);
+  const double t = Clamp (T, 0.0, 1.0);
+  return Clamp (Lerp (0.42, 0.58, f) * Lerp (1.08, 0.92, s)
+                    * Lerp (0.98, 1.02, t),
+                0.35, 0.65);
 }
 
 inline int
@@ -166,12 +604,19 @@ GraphDepth (double T)
   return static_cast<int> (std::round (Lerp (3.0, 2.0, Clamp (T, 0.0, 1.0))));
 }
 
+inline int
+RetrievalGraphDepth (double T)
+{
+  return static_cast<int> (
+      std::round (Lerp (3.0, 2.0, RetrievalStabilityBias (T))));
+}
+
 inline std::pair<double, double>
 RetrievalDiversificationWeights (double F, double S, double T)
 {
-  const double f = FocusBias (F);
-  const double s = SensitivityBias (S);
-  const double t = Clamp (T, 0.0, 1.0);
+  const double f = RetrievalFocusBias (F);
+  const double s = RetrievalSensitivityBias (S);
+  const double t = RetrievalStabilityBias (T);
 
   const double w_rel_raw = Lerp (0.65, 0.94, f) * Lerp (1.0, 0.85, s)
                            * Lerp (1.0, 0.90, t);

@@ -12,11 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include <algorithm>
 #include <cstdlib>
 #include <filesystem>  // NOLINT: Required for path manipulation.
 #include <fstream>
 #include <memory>
 #include <optional>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -24,10 +26,12 @@
 #include <gtest/gtest.h>
 #include "absl/cleanup/cleanup.h"  // from @com_google_absl
 #include "absl/log/absl_check.h"  // from @com_google_absl
+#include "absl/log/absl_log.h"  // from @com_google_absl
 #include "absl/status/status.h"  // from @com_google_absl
 #include "absl/status/statusor.h"  // from @com_google_absl
 #include "absl/strings/str_cat.h"  // from @com_google_absl
 #include "runtime/engine/engine.h"
+#include "runtime/engine/engine_factory.h"
 #include "runtime/engine/engine_settings.h"
 #include "runtime/engine/io_types.h"
 #include "runtime/executor/executor_settings_base.h"
@@ -60,7 +64,7 @@ TEST(EngineTest, CreateEngine_WithoutCache) {
   engine_settings->GetMutableMainExecutorSettings().SetCacheDir(":nocache");
 
   absl::StatusOr<std::unique_ptr<Engine>> llm =
-      Engine::CreateEngine(*engine_settings);
+      EngineFactory::CreateAny(*engine_settings);
   ABSL_CHECK_OK(llm);
 
   absl::StatusOr<std::unique_ptr<Engine::Session>> session =
@@ -89,6 +93,38 @@ TEST(EngineTest, CreateEngine_WithoutCache) {
   EXPECT_FALSE(responses->GetTexts()[0].empty());
 }
 
+TEST(EngineTest, CreateEngine_WithNoParallelFileSectionLoading_RunsInference) {
+  auto task_path =
+      std::filesystem::path(::testing::SrcDir()) /
+      "litert_lm/runtime/testdata/test_lm_new_metadata.task";
+  auto model_assets = ModelAssets::Create(task_path.string());
+  ASSERT_OK(model_assets);
+  auto engine_settings =
+      EngineSettings::CreateDefault(*model_assets, Backend::CPU);
+  ASSERT_OK(engine_settings);
+  engine_settings->GetMutableMainExecutorSettings().SetMaxNumTokens(
+      kMaxNumTokens);
+  engine_settings->GetMutableMainExecutorSettings().SetCacheDir(":nocache");
+  engine_settings->SetParallelFileSectionLoading(false);
+
+  absl::StatusOr<std::unique_ptr<Engine>> llm =
+      EngineFactory::CreateAny(*engine_settings);
+  ABSL_CHECK_OK(llm);
+
+  absl::StatusOr<std::unique_ptr<Engine::Session>> session =
+      (*llm)->CreateSession(SessionConfig::CreateDefault());
+  ABSL_CHECK_OK(session);
+
+  std::vector<InputData> inputs;
+  inputs.emplace_back(InputText("Hello world!"));
+  ABSL_CHECK_OK((*session)->RunPrefill(inputs));
+
+  auto responses = (*session)->RunDecode();
+  EXPECT_OK(responses);
+  EXPECT_EQ(responses->GetTexts().size(), 1);
+  EXPECT_FALSE(responses->GetTexts()[0].empty());
+}
+
 TEST(EngineTest, CreateEngine_WithCache) {
   auto cache_path = std::filesystem::path(::testing::TempDir()) /
                     absl::StrCat("cache-", std::rand());
@@ -112,7 +148,7 @@ TEST(EngineTest, CreateEngine_WithCache) {
 
   // 1st run to populate the cache.
   absl::StatusOr<std::unique_ptr<Engine>> llm =
-      Engine::CreateEngine(*engine_settings);
+      EngineFactory::CreateAny(*engine_settings);
   ABSL_CHECK_OK(llm);
 
   absl::StatusOr<std::unique_ptr<Engine::Session>> session =
@@ -143,7 +179,7 @@ TEST(EngineTest, CreateEngine_WithCache) {
   // 3rd run with a new engine and the same cache.
   session->reset();  // Destroy the previous first.
   llm->reset();
-  llm = Engine::CreateEngine(*engine_settings);
+  llm = EngineFactory::CreateAny(*engine_settings);
   ABSL_CHECK_OK(llm);
 
   session = (*llm)->CreateSession(SessionConfig::CreateDefault());
@@ -191,7 +227,7 @@ TEST(EngineTest, CreateEngine_WithModelAndCacheFromFileDescriptor) {
       shared_scoped_cache_file);
 
   absl::StatusOr<std::unique_ptr<Engine>> llm =
-      Engine::CreateEngine(*engine_settings);
+      EngineFactory::CreateAny(*engine_settings);
   ABSL_CHECK_OK(llm);
 
   absl::StatusOr<std::unique_ptr<Engine::Session>> session =
@@ -208,6 +244,100 @@ TEST(EngineTest, CreateEngine_WithModelAndCacheFromFileDescriptor) {
   EXPECT_FALSE(responses->GetTexts()[0].empty());
 }
 
+TEST(EngineTest, CreateEngine_WithBenchmark) {
+  auto task_path =
+      std::filesystem::path(::testing::SrcDir()) /
+      "litert_lm/runtime/testdata/test_lm_new_metadata.task";
+  auto model_assets = ModelAssets::Create(task_path.string());
+  ASSERT_OK(model_assets);
+  auto engine_settings =
+      EngineSettings::CreateDefault(*model_assets, Backend::CPU);
+  ASSERT_OK(engine_settings);
+
+  // Enable Benchmark
+  engine_settings->GetMutableBenchmarkParams();
+
+  absl::StatusOr<std::unique_ptr<Engine>> llm =
+      EngineFactory::CreateAny(*engine_settings);
+  ABSL_CHECK_OK(llm);
+
+  absl::StatusOr<std::unique_ptr<Engine::Session>> session =
+      (*llm)->CreateSession(SessionConfig::CreateDefault());
+  ABSL_CHECK_OK(session);
+
+  auto benchmark_info = (*session)->GetMutableBenchmarkInfo();
+  ASSERT_OK(benchmark_info);
+
+  const auto& init_phases = (*benchmark_info)->GetInitPhases();
+
+  EXPECT_TRUE(init_phases.contains(std::string(
+      BenchmarkInfo::InitPhaseToString(BenchmarkInfo::InitPhase::kTokenizer))));
+  EXPECT_TRUE(init_phases.contains(std::string(
+      BenchmarkInfo::InitPhaseToString(BenchmarkInfo::InitPhase::kExecutor))));
+  EXPECT_TRUE(init_phases.contains(std::string(
+      BenchmarkInfo::InitPhaseToString(BenchmarkInfo::InitPhase::kTotal))));
+}
+
+TEST(EngineTest, CreateEngine_AsyncTokenizer_ValidatesConcurrency) {
+  auto task_path =
+      std::filesystem::path(::testing::SrcDir()) /
+      "litert_lm/runtime/testdata/test_lm_new_metadata.task";
+  auto model_assets = ModelAssets::Create(task_path.string());
+  ASSERT_OK(model_assets);
+  auto engine_settings =
+      EngineSettings::CreateDefault(*model_assets, Backend::CPU);
+  ASSERT_OK(engine_settings);
+
+  engine_settings->GetMutableMainExecutorSettings().SetMaxNumTokens(
+      kMaxNumTokens);
+  engine_settings->GetMutableMainExecutorSettings().SetCacheDir(":nocache");
+
+  // Enable Benchmark to measure the phases and prove concurrency
+  engine_settings->GetMutableBenchmarkParams();
+
+  absl::StatusOr<std::unique_ptr<Engine>> llm =
+      EngineFactory::CreateAny(*engine_settings);
+  ABSL_CHECK_OK(llm);
+
+  absl::StatusOr<std::unique_ptr<Engine::Session>> session =
+      (*llm)->CreateSession(SessionConfig::CreateDefault());
+  ABSL_CHECK_OK(session);
+
+  auto benchmark_info = (*session)->GetMutableBenchmarkInfo();
+  ASSERT_OK(benchmark_info);
+
+  const auto& init_phases = benchmark_info.value()->GetInitPhases();
+
+  auto total_time = init_phases.at(std::string(
+      BenchmarkInfo::InitPhaseToString(BenchmarkInfo::InitPhase::kTotal)));
+  auto executor_time = init_phases.at(std::string(
+      BenchmarkInfo::InitPhaseToString(BenchmarkInfo::InitPhase::kExecutor)));
+  auto tokenizer_time = init_phases.at(std::string(
+      BenchmarkInfo::InitPhaseToString(BenchmarkInfo::InitPhase::kTokenizer)));
+  ABSL_LOG(INFO) << "total_time: " << total_time;
+  ABSL_LOG(INFO) << "executor_time: " << executor_time;
+  ABSL_LOG(INFO) << "tokenizer_time: " << tokenizer_time;
+  // The total duration should be greater than or equal to the longest
+  // concurrent branch.
+  EXPECT_GE(total_time, executor_time);
+  EXPECT_GE(total_time, tokenizer_time);
+  // The total duration (minus the sequential part) should be less than the sum
+  // of the two parallel branches. This is to prove that the tokenizer and
+  // executor are loaded concurrently.
+  auto rest_time = total_time - std::max(executor_time, tokenizer_time);
+  EXPECT_LT(total_time - rest_time, executor_time + tokenizer_time);
+
+  // Verifying tokenizer resolves tokens successfully without data bounds errors
+  std::vector<InputData> inputs;
+  inputs.emplace_back(InputText("Hello concurrent world!"));
+  ABSL_CHECK_OK(session.value()->RunPrefill(inputs));
+
+  auto responses = session.value()->RunDecode();
+  ASSERT_OK(responses);
+  EXPECT_EQ(responses.value().GetTexts().size(), 1);
+  EXPECT_FALSE(responses.value().GetTexts()[0].empty());
+}
+
 TEST(EngineTest, CreateEngine_FailsNoVisionModel) {
   auto task_path =
       std::filesystem::path(::testing::SrcDir()) /
@@ -220,7 +350,7 @@ TEST(EngineTest, CreateEngine_FailsNoVisionModel) {
   engine_settings->GetMutableMainExecutorSettings().SetMaxNumTokens(
       kMaxNumTokens);
   engine_settings->GetMutableMainExecutorSettings().SetCacheDir(":nocache");
-  EXPECT_THAT(Engine::CreateEngine(*engine_settings),
+  EXPECT_THAT(EngineFactory::CreateAny(*engine_settings),
               testing::status::StatusIs(
                   absl::StatusCode::kNotFound,
                   "TF_LITE_VISION_ENCODER not found in the model."));
@@ -238,7 +368,7 @@ TEST(EngineTest, CreateEngine_FailsNoAudioModel) {
   engine_settings->GetMutableMainExecutorSettings().SetMaxNumTokens(
       kMaxNumTokens);
   engine_settings->GetMutableMainExecutorSettings().SetCacheDir(":nocache");
-  EXPECT_THAT(Engine::CreateEngine(*engine_settings),
+  EXPECT_THAT(EngineFactory::CreateAny(*engine_settings),
               testing::status::StatusIs(
                   absl::StatusCode::kNotFound,
                   "TF_LITE_AUDIO_ENCODER_HW not found in the model."));

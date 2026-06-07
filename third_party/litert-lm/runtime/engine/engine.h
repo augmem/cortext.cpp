@@ -152,6 +152,20 @@ class Engine {
         const std::vector<absl::string_view>& target_text,
         bool store_token_lengths) = 0;
 
+    // Similar to the above RunTextScoring function, but this is a not blocking
+    // call and the function will return right away. The processing status will
+    // be signaled through the callback.
+    // - target_text: The target text to score.
+    // - callback: Callback to receive the scoring results.
+    // - store_token_lengths: Whether to store the token lengths of the target
+    //   texts in `Responses`.
+    virtual absl::StatusOr<std::unique_ptr<TaskController>> RunTextScoringAsync(
+        const std::vector<absl::string_view>& target_text,
+        absl::AnyInvocable<void(absl::StatusOr<Responses>)> callback,
+        bool store_token_lengths) {
+      return absl::UnimplementedError("Not implemented.");
+    }
+
     // Adds the input prompt/query to the model for starting the prefilling
     // process. Note that the user can break down their prompt/query into
     // multiple chunks and call this function multiple times.
@@ -201,6 +215,10 @@ class Engine {
     // benchmark is not enabled.
     virtual absl::StatusOr<BenchmarkInfo> GetBenchmarkInfo() = 0;
 
+    // Returns the mutable benchmark info for the session. Returns error if the
+    // benchmark is not enabled.
+    virtual absl::StatusOr<BenchmarkInfo*> GetMutableBenchmarkInfo() = 0;
+
     // Cancels the ongoing inference process. Note that if this function is
     // called, the inference process will return with a kCancelled error. The
     // session could still be used after afterwards.
@@ -211,21 +229,68 @@ class Engine {
     // Waits until all the tasks are done or the default timeout is reached.
     virtual absl::Status WaitUntilDone() = 0;
 
+    // Clones the session.
+    // The cloned session have all the settings and context
+    // of the original session up to the point that the clone function is
+    // called.
+    // - callback: Callback to when the streamed results.
+    //
+    // Example usage:
+    //   Session session1 = engine->CreateSession(...);
+    //   session1->Prefill("What is the tallest building ");
+    //   Session session2 = session1->Clone();
+    //   session1->Prefill("in the world?");
+    //   session1->Decode();
+    //   session2->Prefill("in France?");
+    //   session2->Decode();
+    virtual absl::StatusOr<std::unique_ptr<Session>> Clone() {
+      return absl::UnimplementedError("Not implemented.");
+    };
+
+    // Clones the session asynchronously.
+    // The cloned session have all the settings and context
+    // of the original session up to the point that the clone function is
+    // called.
+    // - callback: Callback to when the streamed results.
+    //
+    // Example usage:
+    //   Session session1 = engine->CreateSession(...);
+    //   session1->RunPrefillAsync("What is the tallest building ", ...);
+    //   Session session2 = session1->CloneAsync(...);
+    //   session1->RunPrefillAsync("in the world?", ...);
+    //   session1->RunDecodeAsync(...);
+    //   session2->RunPrefillAsync("in France?", ...);
+    //   session2->RunDecodeAsync(...);
+    virtual absl::StatusOr<std::unique_ptr<Session>> CloneAsync(
+        absl::AnyInvocable<void(absl::StatusOr<Responses>)> callback) {
+      return absl::UnimplementedError("Not implemented.");
+    };
+    // Save the current step with the name `label`. You can later rewind to this
+    // checkpoint using `RewindToCheckpoint(label)`. If the checkpoint name
+    // already exists, the step number will be overwritten.
+    virtual absl::Status SaveCheckpoint(absl::string_view label) {
+      return absl::UnimplementedError("SaveCheckpoint not implemented.");
+    }
+
+    // Rewinds the session to the given checkpoint. Checkpoints after the
+    // restored step will be removed. Returns an error if the checkpoint name
+    // does not exist.
+    virtual absl::Status RewindToCheckpoint(absl::string_view label) {
+      return absl::UnimplementedError("RewindToCheckpoint not implemented.");
+    }
+
+    // Get the current step of the session.
+    virtual absl::StatusOr<int> GetCurrentStep() const {
+      return absl::UnimplementedError("GetCurrentStep not implemented.");
+    }
+
     // Get the reference to the session config for the session.
     virtual const SessionConfig& GetSessionConfig() const = 0;
-
-    // Get the reference to the tokenizer for the session.
-    virtual const Tokenizer& GetTokenizer() const = 0;
   };
-
-  // Method to create Engine. An input prompt can be given as a hint to adjust
-  // engine optimized for that prompt.
-  static absl::StatusOr<std::unique_ptr<Engine>> CreateEngine(
-      EngineSettings settings, absl::string_view input_prompt_as_hint = "");
 
   // Method to create the Session.
   virtual absl::StatusOr<std::unique_ptr<Session>> CreateSession(
-      const SessionConfig& session_config) const = 0;
+      const SessionConfig& session_config) = 0;
 
   // Waits until the engine is done with all the tasks. The function will
   // return error if the timeout is reached.
@@ -235,6 +300,19 @@ class Engine {
 
   // Returns the EngineSettings currently used by the engine.
   virtual const EngineSettings& GetEngineSettings() const = 0;
+
+  // Get the reference to the tokenizer for the engine.
+  virtual const Tokenizer& GetTokenizer() const = 0;
+
+  // Get the audio model properties for the session. This is only available
+  // if the engine is created with audio modality enabled.
+  virtual absl::StatusOr<AudioExecutorProperties> GetAudioExecutorProperties()
+      const = 0;
+
+  // Get the vision model properties for the session. This is only available
+  // if the engine is created with vision modality enabled.
+  virtual absl::StatusOr<VisionExecutorProperties> GetVisionExecutorProperties()
+      const = 0;
 
   // Default timeout duration for the engine/session processes.
   static constexpr absl::Duration kDefaultTimeout = absl::Minutes(10);

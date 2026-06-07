@@ -9,8 +9,7 @@ namespace benchmark
 
 /// @brief Audio features prepared for Gemma 3n USM audio encoder.
 ///
-/// Gemma 3n uses a Universal Speech Model (USM) based audio encoder
-/// that differs from ImageBind in its preprocessing requirements.
+/// Gemma 3n uses a Universal Speech Model (USM) based audio encoder.
 struct Gemma3nAudioFeatures
 {
   std::vector<float> mel_features;       ///< Mel-spectrogram features
@@ -55,10 +54,8 @@ constexpr float kNormStd = 9.138f;
 /// Converts raw PCM audio (16kHz mono float32) to mel-spectrogram
 /// features expected by the USM-based audio encoder in Gemma 3n.
 ///
-/// Key differences from ImageBind:
-/// - 30 second chunks (vs 2 second clips)
-/// - 6.25 tokens per second output rate
-/// - USM-specific normalization parameters
+/// The feature path uses 30 second chunks, 6.25 tokens per second output
+/// rate, and USM-specific normalization parameters.
 ///
 /// @param pcm Raw PCM samples (must be 16kHz mono float32, normalized [-1, 1])
 /// @param num_samples Number of samples

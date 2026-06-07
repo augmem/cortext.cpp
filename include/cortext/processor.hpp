@@ -18,6 +18,7 @@ namespace cortext
 struct Signal;
 class OperationContext;
 class Encoder;
+class Clock;
 
 /// @brief Orchestrates the signal processing.
 ///
@@ -43,6 +44,7 @@ public:
     Extractor *extractor = nullptr;
     Summarizer *summarizer = nullptr;
     Encoder *encoder = nullptr; // Required for embedding-based operations
+    std::shared_ptr<Clock> clock;
   };
 
   /// @brief Constructs a SignalProcessor with a defined set of operations.
@@ -77,6 +79,7 @@ public:
 
     // Storage output (MemoryStorage operation)
     std::optional<long long> stored_embedding_id;  // Set if stored to memory
+    std::optional<long long> stored_memory_id;     // Set if stored to memory
 
     // Key thresholds and stabilizers
     double threshold_T_dynamic = 0.0;  // Alg 8
@@ -120,6 +123,27 @@ public:
     // Per-operation timings (ms) for this signal
     std::unordered_map<std::string, double> operation_ms;
 
+    // Short-term graph diagnostics. The STM graph maintains a bounded
+    // processor-local substrate; set CORTEXT_STM_SHADOW_DISABLE=1 to suppress it.
+    bool shadow_stm_enabled = false;
+    int shadow_stm_size = 0;
+    int shadow_stm_max_size = 0;
+    int shadow_stm_update_count = 0;
+    int shadow_stm_compaction_count = 0;
+    double shadow_stm_last_update_us = 0.0;
+    double shadow_stm_mean_update_us = 0.0;
+
+    // Soft Anchor diagnostics. Formation runs at ingress; retrieval/chat
+    // consumption is not changed by these fields.
+    bool soft_anchor_enabled = false;
+    int soft_anchor_state_count = 0;
+    int soft_anchor_link_count = 0;
+    int soft_anchor_create_count = 0;
+    int soft_anchor_update_count = 0;
+    int soft_anchor_none_count = 0;
+    double soft_anchor_last_update_us = 0.0;
+    double soft_anchor_mean_update_us = 0.0;
+
   };
 
   /// @brief Processes a single signal by executing the instruction set.
@@ -140,6 +164,7 @@ private:
   void PersistAccumulators (Transaction &tx);    // ACCUMULATORS table
 
   Config config_;
+  std::shared_ptr<Clock> clock_;
   std::shared_ptr<Store> store_;
   std::shared_ptr<ObjectStore> object_store_;
   std::unique_ptr<IOperation> root_operation_;

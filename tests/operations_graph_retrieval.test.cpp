@@ -8,11 +8,14 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <cortext/core/sparse.hpp>
+#include <cortext/core/knobs.hpp>
 #include <cortext/operations/graph_retrieval.hpp>
 #include <cortext/processor.hpp>
 #include <cortext/processor/operation_set.hpp>
 #include <cortext/store/sqlite_store.hpp>
+#include <cortext/store/utils.hpp>
 
+#include <algorithm>
 #include <cmath>
 #include <optional>
 
@@ -78,6 +81,17 @@ MakeSignal (const Eigen::VectorXf &emb, uint64_t ts)
   return s;
 }
 
+static Signal
+MakeTextSignal (const Eigen::VectorXf &emb, const std::string &text,
+                uint64_t ts)
+{
+  Signal s = MakeSignal (emb, ts);
+  s.modality = "text";
+  s.mimetype = "text/plain";
+  s.payload = std::vector<unsigned char> (text.begin (), text.end ());
+  return s;
+}
+
 class ForceRetrievalGateOp : public IOperation
 {
 public:
@@ -139,6 +153,39 @@ public:
 private:
   long long memory_id_ = 0;
   double score_ = 0.0;
+};
+
+class SeedSummaryCacheOp : public IOperation
+{
+public:
+  struct Entry
+  {
+    long long memory_id = 0;
+    long long embedding_id = 0;
+    Eigen::VectorXf embedding;
+    bool is_association = false;
+    bool is_label = false;
+  };
+
+  explicit SeedSummaryCacheOp (std::vector<Entry> entries)
+      : entries_ (std::move (entries))
+  {
+  }
+
+  void
+  Execute (OperationContext &ctx, Transaction & /*tx*/) const override
+  {
+    auto &p_ctx = ctx.GetProcessorContext ();
+    for (const auto &entry : entries_)
+      {
+        p_ctx.UpsertSummaryCache (entry.memory_id, entry.embedding_id,
+                                  entry.embedding, entry.is_association,
+                                  entry.is_label);
+      }
+  }
+
+private:
+  std::vector<Entry> entries_;
 };
 
 void
@@ -284,6 +331,682 @@ TEST_CASE ("Predictive pre-activation changes retrieval ranking",
   }
 }
 
+TEST_CASE ("Graph retrieval scores durable labels by derived source set",
+           "[operations][graph][durable_source]")
+{
+  auto unique_store = SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<Store> (std::move (unique_store));
+  cortext::testing::InitializeCoreSchema (*store);
+
+  const Eigen::VectorXf query = UnitVec256 (1.0f);
+  const Eigen::VectorXf label_vec = BlendVec256 (0.55f, 0.45f);
+  const Eigen::VectorXf unrelated = UnitVec256Second (1.0f);
+
+  cortext::testing::SeedEmbeddingV2 (*store, 100LL, query, 1000);
+  cortext::testing::SeedEmbeddingV2 (*store, 200LL, unrelated, 1000);
+  cortext::testing::SeedEmbeddingV2 (*store, 300LL, label_vec, 1000);
+  cortext::testing::SeedMemoryV2 (*store, 100LL, 100LL, "chat/user",
+                                  "LONG_TERM", 1.0, 1000);
+  cortext::testing::SeedMemoryV2 (*store, 200LL, 200LL,
+                                  "associative_cue_test", "ASSOCIATION",
+                                  1.0, 1000);
+  cortext::testing::SeedMemoryV2 (*store, 300LL, 300LL, "label/gallery",
+                                  "LABEL", 1.0, 1000);
+  store->Execute (
+      "INSERT INTO associations(source_memory_id, target_memory_id, edge_type, weight) "
+      "VALUES (?, ?, 'derived_from', 1.0), (?, ?, 'has_label', 1.0)",
+      { 200LL, 100LL, 200LL, 300LL });
+
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  cfg.focus = 0.5;
+  cfg.sensitivity = 1.0;
+  cfg.stability = 0.5;
+
+  auto run = [&] {
+    cortext::operations::retrieval_debug::ClearLastRankedCandidates ();
+    auto ops = std::make_unique<OperationSet> (
+        std::make_unique<ForceRetrievalGateOp> (),
+        std::make_unique<GraphAugmentedRetrieveCandidates> ());
+    SignalProcessor processor (cfg, store, std::move (ops));
+    processor.Process (MakeSignal (query, 2000));
+    processor.Flush ();
+    return cortext::operations::retrieval_debug::GetLastRankedCandidates ();
+  };
+
+  std::vector<cortext::operations::retrieval_debug::RankedCandidate> ranked;
+  ranked = run ();
+  auto label_it = std::find_if (
+      ranked.begin (), ranked.end (), [] (const auto &candidate) {
+        return candidate.memory_id == 300LL;
+      });
+  REQUIRE (label_it != ranked.end ());
+  REQUIRE (label_it->durable_source_count == 1);
+  REQUIRE (label_it->durable_source_boost > 0.80);
+
+  {
+    cortext::testing::ScopedEnvVar disabled (
+        "CORTEXT_DISABLE_DURABLE_SOURCE_SET_RETRIEVAL", "1");
+    ranked = run ();
+  }
+  label_it = std::find_if (
+      ranked.begin (), ranked.end (), [] (const auto &candidate) {
+        return candidate.memory_id == 300LL;
+      });
+  REQUIRE (label_it != ranked.end ());
+  REQUIRE (label_it->durable_source_count == 0);
+  REQUIRE (label_it->durable_source_boost == 0.0);
+}
+
+TEST_CASE ("Graph retrieval propagates label graph boost across durable label relations",
+           "[operations][graph][label_relation]")
+{
+  auto unique_store = SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<Store> (std::move (unique_store));
+  cortext::testing::InitializeCoreSchema (*store);
+
+  const Eigen::VectorXf source_vec = UnitVec256 (1.0f);
+  const Eigen::VectorXf mcdonalds_vec = UnitVec256 (1.0f);
+  const Eigen::VectorXf chicago_vec = UnitVec256Second (1.0f);
+
+  cortext::testing::SeedEmbeddingV2 (*store, 100LL, source_vec, 1000);
+  cortext::testing::SeedEmbeddingV2 (*store, 200LL, source_vec, 1000);
+  cortext::testing::SeedEmbeddingV2 (*store, 300LL, mcdonalds_vec, 1000);
+  cortext::testing::SeedEmbeddingV2 (*store, 400LL, chicago_vec, 1000);
+  cortext::testing::SeedMemoryV2 (*store, 100LL, 100LL, "chat/user",
+                                  "LONG_TERM", 1.0, 1000);
+  cortext::testing::SeedMemoryV2 (*store, 200LL, 200LL,
+                                  "associative_cue_test", "ASSOCIATION",
+                                  1.0, 1000);
+  cortext::testing::SeedMemoryV2 (*store, 300LL, 300LL, "mcdonalds",
+                                  "LABEL", 1.0, 1000);
+  cortext::testing::SeedMemoryV2 (*store, 400LL, 400LL, "chicago",
+                                  "LABEL", 1.0, 1000);
+  store->Execute (
+      "INSERT INTO associations(source_memory_id, target_memory_id, edge_type, weight) "
+      "VALUES (?, ?, 'derived_from', 1.0), "
+      "       (?, ?, 'has_label', 1.0), "
+      "       (?, ?, 'co_occurs', 1.0)",
+      { 200LL, 100LL, 200LL, 300LL, 300LL, 400LL });
+
+  auto run = [&] {
+    cortext::operations::retrieval_debug::ClearLastRankedCandidates ();
+    std::vector<SeedSummaryCacheOp::Entry> labels;
+    labels.push_back ({ 300LL, 300LL, mcdonalds_vec, false, true });
+    labels.push_back ({ 400LL, 400LL, chicago_vec, false, true });
+    auto ops = std::make_unique<OperationSet> (
+        std::make_unique<SeedSummaryCacheOp> (std::move (labels)),
+        std::make_unique<ForceRetrievalGateOp> (),
+        std::make_unique<GraphAugmentedRetrieveCandidates> ());
+    SignalProcessor::Config cfg;
+    cortext::testing::RequireEncoder (cfg);
+    cfg.focus = 0.5;
+    cfg.sensitivity = 1.0;
+    cfg.stability = 0.5;
+    SignalProcessor processor (cfg, store, std::move (ops));
+    processor.Process (MakeSignal (chicago_vec, 2000));
+    processor.Flush ();
+    return cortext::operations::retrieval_debug::GetLastRankedCandidates ();
+  };
+
+  const auto ranked = run ();
+  auto source_it = std::find_if (
+      ranked.begin (), ranked.end (), [] (const auto &candidate) {
+        return candidate.memory_id == 100LL;
+      });
+  REQUIRE (source_it != ranked.end ());
+  REQUIRE (source_it->label_match_count == 1);
+  REQUIRE (source_it->label_graph_boost > 0.30);
+}
+
+TEST_CASE ("Graph retrieval seeds source memories from durable label graph",
+           "[operations][graph][label_relation][seed]")
+{
+  auto unique_store = SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<Store> (std::move (unique_store));
+  cortext::testing::InitializeCoreSchema (*store);
+
+  const Eigen::VectorXf query_vec = UnitVec256 (1.0f);
+  const Eigen::VectorXf source_vec = UnitVec256Second (1.0f);
+
+  cortext::testing::SeedEmbeddingV2 (*store, 100LL, source_vec, 1000);
+  cortext::testing::SeedEmbeddingV2 (*store, 200LL, source_vec, 1000);
+  cortext::testing::SeedEmbeddingV2 (*store, 300LL, query_vec, 1000);
+  cortext::testing::SeedMemoryV2 (*store, 100LL, 100LL, "chat/source",
+                                  "LONG_TERM", 1.0, 1000);
+  cortext::testing::SeedMemoryV2 (*store, 200LL, 200LL,
+                                  "associative_cue_test", "ASSOCIATION",
+                                  1.0, 1000);
+  cortext::testing::SeedMemoryV2 (*store, 300LL, 300LL, "river park",
+                                  "LABEL", 1.0, 1000);
+  store->Execute (
+      "INSERT INTO associations(source_memory_id, target_memory_id, edge_type, weight) "
+      "VALUES (?, ?, 'derived_from', 1.0), (?, ?, 'has_label', 1.0)",
+      { 200LL, 100LL, 200LL, 300LL });
+
+  for (long long i = 0; i < 20; ++i)
+    {
+      const long long id = 1000LL + i;
+      cortext::testing::SeedEmbeddingV2 (*store, id, query_vec, 1000);
+      cortext::testing::SeedMemoryV2 (*store, id, id,
+                                      "chat/distractor" + std::to_string (i),
+                                      "LONG_TERM", 1.0, 1000);
+    }
+
+  cortext::operations::retrieval_debug::ClearLastRankedCandidates ();
+  std::vector<SeedSummaryCacheOp::Entry> labels;
+  labels.push_back ({ 300LL, 300LL, query_vec, false, true });
+  auto ops = std::make_unique<OperationSet> (
+      std::make_unique<SeedSummaryCacheOp> (std::move (labels)),
+      std::make_unique<ForceRetrievalGateOp> (),
+      std::make_unique<GraphAugmentedRetrieveCandidates> ());
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  cfg.focus = 0.5;
+  cfg.sensitivity = 1.0;
+  cfg.stability = 0.5;
+  SignalProcessor processor (cfg, store, std::move (ops));
+  processor.Process (MakeSignal (query_vec, 2000));
+  processor.Flush ();
+
+  const auto ranked
+      = cortext::operations::retrieval_debug::GetLastRankedCandidates ();
+  auto source_it = std::find_if (
+      ranked.begin (), ranked.end (), [] (const auto &candidate) {
+        return candidate.memory_id == 100LL;
+      });
+  REQUIRE (source_it != ranked.end ());
+  REQUIRE (source_it->label_match_count == 1);
+  REQUIRE (source_it->label_graph_boost > 0.0);
+}
+
+TEST_CASE ("Graph retrieval maps text query labels back to durable sources",
+           "[operations][graph][label_relation][text]")
+{
+  auto unique_store = SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<Store> (std::move (unique_store));
+  cortext::testing::InitializeCoreSchema (*store);
+
+  const Eigen::VectorXf query_vec = UnitVec256 (1.0f);
+  const Eigen::VectorXf source_vec = UnitVec256Second (1.0f);
+  const Eigen::VectorXf label_vec = UnitVec256Second (1.0f);
+
+  cortext::testing::SeedEmbeddingV2 (*store, 100LL, source_vec, 1000);
+  cortext::testing::SeedEmbeddingV2 (*store, 200LL, source_vec, 1000);
+  cortext::testing::SeedEmbeddingV2 (*store, 300LL, label_vec, 1000);
+  cortext::testing::SeedMemoryV2 (*store, 100LL, 100LL, "chat/source",
+                                  "LONG_TERM", 1.0, 1000);
+  cortext::testing::SeedMemoryV2 (*store, 200LL, 200LL,
+                                  "associative_cue_test", "ASSOCIATION",
+                                  1.0, 1000);
+  cortext::testing::SeedMemoryV2 (*store, 300LL, 300LL, "river park",
+                                  "LABEL", 1.0, 1000);
+  store->Execute ("UPDATE memories SET label = 'River Park' WHERE memory_id = 300",
+                  {});
+  store->Execute (
+      "INSERT INTO associations(source_memory_id, target_memory_id, edge_type, weight) "
+      "VALUES (?, ?, 'derived_from', 1.0), (?, ?, 'has_label', 1.0)",
+      { 200LL, 100LL, 200LL, 300LL });
+
+  for (long long i = 0; i < 20; ++i)
+    {
+      const long long id = 1000LL + i;
+      cortext::testing::SeedEmbeddingV2 (*store, id, query_vec, 1000);
+      cortext::testing::SeedMemoryV2 (*store, id, id,
+                                      "chat/distractor" + std::to_string (i),
+                                      "LONG_TERM", 1.0, 1000);
+    }
+
+  cortext::operations::retrieval_debug::ClearLastRankedCandidates ();
+  cortext::testing::ScopedEnvVar enable_token_route (
+      "CORTEXT_ENABLE_LABEL_TOKEN_TEXT_ROUTE", "1");
+  auto ops = std::make_unique<OperationSet> (
+      std::make_unique<ForceRetrievalGateOp> (),
+      std::make_unique<GraphAugmentedRetrieveCandidates> ());
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  cfg.focus = 0.5;
+  cfg.sensitivity = 1.0;
+  cfg.stability = 0.5;
+  SignalProcessor processor (cfg, store, std::move (ops));
+  processor.Process (MakeTextSignal (query_vec, "what happened at River Park?",
+                                     2000));
+  processor.Flush ();
+
+  const auto ranked
+      = cortext::operations::retrieval_debug::GetLastRankedCandidates ();
+  auto source_it = std::find_if (
+      ranked.begin (), ranked.end (), [] (const auto &candidate) {
+        return candidate.memory_id == 100LL;
+      });
+  REQUIRE (source_it != ranked.end ());
+  REQUIRE (source_it->label_match_count == 1);
+  REQUIRE (source_it->label_graph_boost > 0.0);
+}
+
+TEST_CASE ("Graph retrieval maps token-overlap text queries to durable labels",
+           "[operations][graph][label_relation][text][token]")
+{
+  auto unique_store = SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<Store> (std::move (unique_store));
+  cortext::testing::InitializeCoreSchema (*store);
+
+  const Eigen::VectorXf query_vec = UnitVec256 (1.0f);
+  const Eigen::VectorXf source_vec = UnitVec256Second (1.0f);
+  const Eigen::VectorXf label_vec = UnitVec256Second (1.0f);
+
+  cortext::testing::SeedEmbeddingV2 (*store, 100LL, source_vec, 1000);
+  cortext::testing::SeedEmbeddingV2 (*store, 200LL, source_vec, 1000);
+  cortext::testing::SeedEmbeddingV2 (*store, 300LL, label_vec, 1000);
+  cortext::testing::SeedMemoryV2 (*store, 100LL, 100LL, "chat/source",
+                                  "LONG_TERM", 1.0, 1000);
+  cortext::testing::SeedMemoryV2 (*store, 200LL, 200LL,
+                                  "associative_cue_test", "ASSOCIATION",
+                                  1.0, 1000);
+  cortext::testing::SeedMemoryV2 (*store, 300LL, 300LL,
+                                  "amelia just gave me money", "LABEL",
+                                  1.0, 1000);
+  store->Execute (
+      "UPDATE memories SET label = 'Amelia just gave me money' "
+      "WHERE memory_id = 300",
+      {});
+  store->Execute (
+      "INSERT INTO associations(source_memory_id, target_memory_id, edge_type, weight) "
+      "VALUES (?, ?, 'derived_from', 1.0), (?, ?, 'has_label', 1.0)",
+      { 200LL, 100LL, 200LL, 300LL });
+
+  for (long long i = 0; i < 20; ++i)
+    {
+      const long long id = 1000LL + i;
+      cortext::testing::SeedEmbeddingV2 (*store, id, query_vec, 1000);
+      cortext::testing::SeedMemoryV2 (*store, id, id,
+                                      "chat/distractor" + std::to_string (i),
+                                      "LONG_TERM", 1.0, 1000);
+    }
+
+  cortext::operations::retrieval_debug::ClearLastRankedCandidates ();
+  cortext::testing::ScopedEnvVar enable_token_route (
+      "CORTEXT_ENABLE_LABEL_TOKEN_TEXT_ROUTE", "1");
+  auto ops = std::make_unique<OperationSet> (
+      std::make_unique<ForceRetrievalGateOp> (),
+      std::make_unique<GraphAugmentedRetrieveCandidates> ());
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  cfg.focus = 0.5;
+  cfg.sensitivity = 1.0;
+  cfg.stability = 0.5;
+  SignalProcessor processor (cfg, store, std::move (ops));
+  processor.Process (MakeTextSignal (query_vec, "who gave money?", 2000));
+  processor.Flush ();
+
+  const auto ranked
+      = cortext::operations::retrieval_debug::GetLastRankedCandidates ();
+  auto source_it = std::find_if (
+      ranked.begin (), ranked.end (), [] (const auto &candidate) {
+        return candidate.memory_id == 100LL;
+      });
+  REQUIRE (source_it != ranked.end ());
+  REQUIRE (source_it->label_match_count == 1);
+  REQUIRE (source_it->label_graph_boost > 0.50);
+}
+
+TEST_CASE ("Graph retrieval expands source seeds through durable label relations",
+           "[operations][graph][label_relation][source_seed]")
+{
+  auto unique_store = SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<Store> (std::move (unique_store));
+  cortext::testing::InitializeCoreSchema (*store);
+
+  const Eigen::VectorXf query_vec = UnitVec256 (1.0f);
+  const Eigen::VectorXf related_vec = UnitVec256Second (1.0f);
+  const Eigen::VectorXf label_vec = BlendVec256 (0.3f, 0.7f);
+
+  cortext::testing::SeedEmbeddingV2 (*store, 100LL, query_vec, 1000);
+  cortext::testing::SeedEmbeddingV2 (*store, 101LL, related_vec, 1000);
+  cortext::testing::SeedEmbeddingV2 (*store, 200LL, query_vec, 1000);
+  cortext::testing::SeedEmbeddingV2 (*store, 201LL, related_vec, 1000);
+  cortext::testing::SeedEmbeddingV2 (*store, 300LL, label_vec, 1000);
+  cortext::testing::SeedEmbeddingV2 (*store, 301LL, label_vec, 1000);
+  cortext::testing::SeedMemoryV2 (*store, 100LL, 100LL, "chat/source",
+                                  "LONG_TERM", 1.0, 1000);
+  cortext::testing::SeedMemoryV2 (*store, 101LL, 101LL, "chat/related",
+                                  "LONG_TERM", 1.0, 1000);
+  cortext::testing::SeedMemoryV2 (*store, 200LL, 200LL,
+                                  "associative_cue_source", "ASSOCIATION",
+                                  1.0, 1000);
+  cortext::testing::SeedMemoryV2 (*store, 201LL, 201LL,
+                                  "associative_cue_related", "ASSOCIATION",
+                                  1.0, 1000);
+  cortext::testing::SeedMemoryV2 (*store, 300LL, 300LL, "river park",
+                                  "LABEL", 1.0, 1000);
+  cortext::testing::SeedMemoryV2 (*store, 301LL, 301LL, "playground",
+                                  "LABEL", 1.0, 1000);
+  store->Execute (
+      "INSERT INTO associations(source_memory_id, target_memory_id, edge_type, weight) "
+      "VALUES (?, ?, 'derived_from', 1.0), "
+      "       (?, ?, 'has_label', 1.0), "
+      "       (?, ?, 'co_occurs', 1.0), "
+      "       (?, ?, 'derived_from', 1.0), "
+      "       (?, ?, 'has_label', 1.0)",
+      { 200LL, 100LL, 200LL, 300LL, 300LL, 301LL, 201LL, 101LL,
+        201LL, 301LL });
+
+  cortext::operations::retrieval_debug::ClearLastRankedCandidates ();
+  auto ops = std::make_unique<OperationSet> (
+      std::make_unique<ForceRetrievalGateOp> (),
+      std::make_unique<GraphAugmentedRetrieveCandidates> ());
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  cfg.focus = 1.0;
+  cfg.sensitivity = 1.0;
+  cfg.stability = 0.5;
+  SignalProcessor processor (cfg, store, std::move (ops));
+  processor.Process (MakeSignal (query_vec, 5000));
+  processor.Flush ();
+
+  const auto ranked
+      = cortext::operations::retrieval_debug::GetLastRankedCandidates ();
+  auto related_it = std::find_if (
+      ranked.begin (), ranked.end (), [] (const auto &candidate) {
+        return candidate.memory_id == 101LL;
+      });
+  REQUIRE (related_it != ranked.end ());
+  REQUIRE (related_it->durable_source_count > 0);
+  REQUIRE (related_it->durable_source_boost > 0.0);
+}
+
+TEST_CASE (
+    "Graph retrieval preserves source seeds when consolidated summaries exist",
+    "[operations][graph][source_seed][consolidated]")
+{
+  auto unique_store = SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<Store> (std::move (unique_store));
+  cortext::testing::InitializeCoreSchema (*store);
+
+  const Eigen::VectorXf query_vec = UnitVec256 (1.0f);
+  const Eigen::VectorXf related_vec = UnitVec256Second (1.0f);
+  const Eigen::VectorXf label_vec = BlendVec256 (0.3f, 0.7f);
+
+  cortext::testing::SeedEmbeddingV2 (*store, 100LL, query_vec, 1000);
+  cortext::testing::SeedEmbeddingV2 (*store, 101LL, related_vec, 1000);
+  cortext::testing::SeedEmbeddingV2 (*store, 200LL, query_vec, 1000);
+  cortext::testing::SeedEmbeddingV2 (*store, 201LL, related_vec, 1000);
+  cortext::testing::SeedEmbeddingV2 (*store, 300LL, label_vec, 1000);
+  cortext::testing::SeedEmbeddingV2 (*store, 301LL, label_vec, 1000);
+  cortext::testing::SeedEmbeddingV2 (*store, 900LL, related_vec, 1000);
+  cortext::testing::SeedMemoryV2 (*store, 100LL, 100LL, "chat/source",
+                                  "LONG_TERM", 1.0, 1000);
+  cortext::testing::SeedMemoryV2 (*store, 101LL, 101LL, "chat/related",
+                                  "LONG_TERM", 1.0, 1000);
+  cortext::testing::SeedMemoryV2 (*store, 200LL, 200LL,
+                                  "associative_cue_source", "ASSOCIATION",
+                                  1.0, 1000);
+  cortext::testing::SeedMemoryV2 (*store, 201LL, 201LL,
+                                  "associative_cue_related", "ASSOCIATION",
+                                  1.0, 1000);
+  cortext::testing::SeedMemoryV2 (*store, 300LL, 300LL, "river park",
+                                  "LABEL", 1.0, 1000);
+  cortext::testing::SeedMemoryV2 (*store, 301LL, 301LL, "playground",
+                                  "LABEL", 1.0, 1000);
+  cortext::testing::SeedMemoryV2 (*store, 900LL, 900LL,
+                                  "daily/consolidated-summary", "LONG_TERM",
+                                  1.0, 1000);
+  store->Execute (
+      "INSERT INTO associations(source_memory_id, target_memory_id, edge_type, weight) "
+      "VALUES (?, ?, 'derived_from', 1.0), "
+      "       (?, ?, 'has_label', 1.0), "
+      "       (?, ?, 'co_occurs', 1.0), "
+      "       (?, ?, 'derived_from', 1.0), "
+      "       (?, ?, 'has_label', 1.0)",
+      { 200LL, 100LL, 200LL, 300LL, 300LL, 301LL, 201LL, 101LL,
+        201LL, 301LL });
+
+  cortext::operations::retrieval_debug::ClearLastRankedCandidates ();
+  auto ops = std::make_unique<OperationSet> (
+      std::make_unique<SeedSummaryCacheOp> (
+          std::vector<SeedSummaryCacheOp::Entry> {
+              { 900LL, 900LL, related_vec, false, false } }),
+      std::make_unique<ForceRetrievalGateOp> (),
+      std::make_unique<GraphAugmentedRetrieveCandidates> ());
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  cfg.focus = 1.0;
+  cfg.sensitivity = 1.0;
+  cfg.stability = 0.5;
+  SignalProcessor processor (cfg, store, std::move (ops));
+  processor.Process (MakeSignal (query_vec, 5000));
+  processor.Flush ();
+
+  const auto ranked
+      = cortext::operations::retrieval_debug::GetLastRankedCandidates ();
+  auto source_it = std::find_if (
+      ranked.begin (), ranked.end (), [] (const auto &candidate) {
+        return candidate.memory_id == 100LL;
+      });
+  auto related_it = std::find_if (
+      ranked.begin (), ranked.end (), [] (const auto &candidate) {
+        return candidate.memory_id == 101LL;
+      });
+  REQUIRE (source_it != ranked.end ());
+  REQUIRE (related_it != ranked.end ());
+  REQUIRE (related_it->durable_source_count > 0);
+  REQUIRE (related_it->durable_source_boost > 0.0);
+}
+
+TEST_CASE ("Graph retrieval uses broad source seeds but compact knob-derived output",
+           "[operations][graph][source_seed][compact]")
+{
+  auto unique_store = SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<Store> (std::move (unique_store));
+  cortext::testing::InitializeCoreSchema (*store);
+
+  const Eigen::VectorXf query_vec = UnitVec256 (1.0f);
+  for (long long i = 0; i < 40; ++i)
+    {
+      const long long id = 1000LL + i;
+      cortext::testing::SeedEmbeddingV2 (*store, id, query_vec, 1000 + i);
+      cortext::testing::SeedMemoryV2 (*store, id, id,
+                                      "chat/source" + std::to_string (i),
+                                      "LONG_TERM", 1.0, 1000 + i);
+    }
+
+  cortext::operations::retrieval_debug::ClearLastRankedCandidates ();
+  auto ops = std::make_unique<OperationSet> (
+      std::make_unique<ForceRetrievalGateOp> (),
+      std::make_unique<GraphAugmentedRetrieveCandidates> ());
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  cfg.focus = 0.35;
+  cfg.sensitivity = 0.65;
+  cfg.stability = 0.60;
+  SignalProcessor processor (cfg, store, std::move (ops));
+  processor.Process (MakeSignal (query_vec, 5000));
+  processor.Flush ();
+
+  const auto ranked
+      = cortext::operations::retrieval_debug::GetLastRankedCandidates ();
+  const int compact_k = std::max (
+      1, cortext::core::RetrievalGraphExpandedRagMaxItems (cfg.focus,
+                                                           cfg.stability));
+  const int seed_k = std::max (
+      1, cortext::core::RetrievalMaxResults (cfg.focus));
+  REQUIRE (seed_k > compact_k);
+  REQUIRE (!ranked.empty ());
+  REQUIRE (static_cast<int> (ranked.size ()) <= compact_k);
+}
+
+TEST_CASE ("Graph retrieval routes text queries through source-backed durable labels",
+           "[operations][graph][label_relation][text][source]")
+{
+  auto unique_store = SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<Store> (std::move (unique_store));
+  cortext::testing::InitializeCoreSchema (*store);
+
+  const Eigen::VectorXf query_vec = UnitVec256 (1.0f);
+  const Eigen::VectorXf source_vec = UnitVec256Second (1.0f);
+  const Eigen::VectorXf label_vec = UnitVec256Second (1.0f);
+
+  cortext::testing::SeedEmbeddingV2 (*store, 100LL, source_vec, 1000);
+  cortext::testing::SeedEmbeddingV2 (*store, 200LL, source_vec, 1000);
+  cortext::testing::SeedEmbeddingV2 (*store, 300LL, label_vec, 1000);
+  cortext::testing::SeedMemoryV2 (*store, 100LL, 100LL, "chat/source",
+                                  "LONG_TERM", 1.0, 1000);
+  cortext::testing::SeedMemoryV2 (*store, 200LL, 200LL,
+                                  "associative_cue_test", "ASSOCIATION",
+                                  1.0, 1000);
+  cortext::testing::SeedMemoryV2 (*store, 300LL, 300LL, "dinner errand",
+                                  "LABEL", 1.0, 1000);
+  store->Execute ("UPDATE memories SET label = 'dinner errand' WHERE memory_id = 300",
+                  {});
+  const std::string source_text
+      = "We ate noodles beside Moon Plaza after class.";
+  const std::vector<unsigned char> payload (source_text.begin (),
+                                            source_text.end ());
+  auto blob_rows = store->Execute ("SELECT objstore_put(?1) AS id",
+                                   { payload });
+  REQUIRE (blob_rows.size () == 1);
+  const auto blob_id = cortext::store::BlobFromAny (blob_rows[0].at ("id"));
+  REQUIRE (!blob_id.empty ());
+  store->Execute ("UPDATE memories SET blob_id = ? WHERE memory_id = 100",
+                  { blob_id });
+  store->Execute (
+      "INSERT INTO associations(source_memory_id, target_memory_id, edge_type, weight) "
+      "VALUES (?, ?, 'derived_from', 1.0), (?, ?, 'has_label', 1.0)",
+      { 200LL, 100LL, 200LL, 300LL });
+
+  for (long long i = 0; i < 20; ++i)
+    {
+      const long long id = 1000LL + i;
+      cortext::testing::SeedEmbeddingV2 (*store, id, query_vec, 1000);
+      cortext::testing::SeedMemoryV2 (*store, id, id,
+                                      "chat/distractor" + std::to_string (i),
+                                      "LONG_TERM", 1.0, 1000);
+    }
+
+  auto run = [&] {
+    cortext::operations::retrieval_debug::ClearLastRankedCandidates ();
+    auto ops = std::make_unique<OperationSet> (
+        std::make_unique<ForceRetrievalGateOp> (),
+        std::make_unique<GraphAugmentedRetrieveCandidates> ());
+    SignalProcessor::Config cfg;
+    cortext::testing::RequireEncoder (cfg);
+    cfg.focus = 0.5;
+    cfg.sensitivity = 1.0;
+    cfg.stability = 0.5;
+    SignalProcessor processor (cfg, store, std::move (ops));
+    processor.Process (
+        MakeTextSignal (query_vec, "what happened with noodles at Moon Plaza?",
+                        2000));
+    processor.Flush ();
+    return cortext::operations::retrieval_debug::GetLastRankedCandidates ();
+  };
+
+  std::vector<cortext::operations::retrieval_debug::RankedCandidate> ranked;
+  ranked = run ();
+  auto source_it = std::find_if (
+      ranked.begin (), ranked.end (), [] (const auto &candidate) {
+        return candidate.memory_id == 100LL;
+      });
+  auto label_it = std::find_if (
+      ranked.begin (), ranked.end (), [] (const auto &candidate) {
+        return candidate.memory_id == 300LL;
+      });
+  REQUIRE (!ranked.empty ());
+  REQUIRE ((ranked.front ().memory_id == 100LL
+            || ranked.front ().memory_id == 300LL));
+  REQUIRE (label_it != ranked.end ());
+  REQUIRE (label_it->label_match_count == 1);
+  REQUIRE (label_it->label_graph_boost > 0.60);
+  REQUIRE (source_it != ranked.end ());
+  REQUIRE (source_it->label_match_count == 1);
+  REQUIRE (source_it->label_graph_boost > 0.60);
+
+  {
+    cortext::testing::ScopedEnvVar disabled (
+        "CORTEXT_DISABLE_PRECONSOLIDATED_LABEL_GRAPH", "1");
+    ranked = run ();
+  }
+  source_it = std::find_if (
+      ranked.begin (), ranked.end (), [] (const auto &candidate) {
+        return candidate.memory_id == 100LL;
+      });
+  REQUIRE (source_it != ranked.end ());
+  REQUIRE (source_it->label_graph_boost == 0.0);
+}
+
+TEST_CASE ("Graph retrieval damps high-degree label graph boosts",
+           "[operations][graph][label_relation][generic]")
+{
+  auto unique_store = SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<Store> (std::move (unique_store));
+  cortext::testing::InitializeCoreSchema (*store);
+
+  const Eigen::VectorXf query_vec = UnitVec256 (1.0f);
+  const Eigen::VectorXf filler_vec = UnitVec256Second (1.0f);
+
+  cortext::testing::SeedEmbeddingV2 (*store, 100LL, query_vec, 1000);
+  cortext::testing::SeedEmbeddingV2 (*store, 101LL, query_vec, 1000);
+  cortext::testing::SeedEmbeddingV2 (*store, 200LL, query_vec, 1000);
+  cortext::testing::SeedEmbeddingV2 (*store, 201LL, query_vec, 1000);
+  cortext::testing::SeedMemoryV2 (*store, 100LL, 100LL, "chat/generic",
+                                  "LONG_TERM", 1.0, 1000);
+  cortext::testing::SeedMemoryV2 (*store, 101LL, 101LL, "chat/specific",
+                                  "LONG_TERM", 1.0, 1000);
+  cortext::testing::SeedMemoryV2 (*store, 200LL, 200LL, "generic",
+                                  "LABEL", 1.0, 1000);
+  cortext::testing::SeedMemoryV2 (*store, 201LL, 201LL, "specific",
+                                  "LABEL", 1.0, 1000);
+  store->Execute (
+      "INSERT INTO associations(source_memory_id, target_memory_id, edge_type, weight) "
+      "VALUES (?, ?, 'has_label', 1.0), (?, ?, 'has_label', 1.0)",
+      { 100LL, 200LL, 101LL, 201LL });
+
+  for (long long i = 0; i < 40; ++i)
+    {
+      const long long label_id = 300LL + i;
+      cortext::testing::SeedEmbeddingV2 (*store, label_id, filler_vec, 1000);
+      cortext::testing::SeedMemoryV2 (*store, label_id, label_id, "filler",
+                                      "LABEL", 1.0, 1000);
+      store->Execute (
+          "INSERT INTO associations(source_memory_id, target_memory_id, edge_type, weight) "
+          "VALUES (?, ?, 'co_occurs', 1.0)",
+          { 200LL, label_id });
+    }
+
+  cortext::operations::retrieval_debug::ClearLastRankedCandidates ();
+  std::vector<SeedSummaryCacheOp::Entry> labels;
+  labels.push_back ({ 200LL, 200LL, query_vec, false, true });
+  labels.push_back ({ 201LL, 201LL, query_vec, false, true });
+  auto ops = std::make_unique<OperationSet> (
+      std::make_unique<SeedSummaryCacheOp> (std::move (labels)),
+      std::make_unique<ForceRetrievalGateOp> (),
+      std::make_unique<GraphAugmentedRetrieveCandidates> ());
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  cfg.focus = 0.5;
+  cfg.sensitivity = 1.0;
+  cfg.stability = 0.5;
+  SignalProcessor processor (cfg, store, std::move (ops));
+  processor.Process (MakeSignal (query_vec, 2000));
+  processor.Flush ();
+
+  const auto ranked
+      = cortext::operations::retrieval_debug::GetLastRankedCandidates ();
+  auto generic_it = std::find_if (
+      ranked.begin (), ranked.end (), [] (const auto &candidate) {
+        return candidate.memory_id == 100LL;
+      });
+  auto specific_it = std::find_if (
+      ranked.begin (), ranked.end (), [] (const auto &candidate) {
+        return candidate.memory_id == 101LL;
+      });
+  REQUIRE (generic_it != ranked.end ());
+  REQUIRE (specific_it != ranked.end ());
+  REQUIRE (generic_it->label_match_count == 1);
+  REQUIRE (specific_it->label_match_count == 1);
+  REQUIRE (generic_it->label_graph_boost < specific_it->label_graph_boost);
+}
+
 TEST_CASE ("TOT recovery expands graph traversal depth",
            "[operations][graph][metacognitive][tot]")
 {
@@ -406,7 +1129,7 @@ TEST_CASE ("Procedural proactive retrieval surfaces learned routine memory",
   cortext::testing::InitializeCoreSchema (*store);
 
   const Eigen::VectorXf query = BlendVec256 (1.0f, 0.0f);
-  const Eigen::VectorXf routine_target = BlendVec256 (0.30f, 0.9539392f);
+  const Eigen::VectorXf routine_target = BlendVec256 (-1.0f, 0.0f);
   cortext::testing::SeedEmbeddingV2 (*store, 500LL, routine_target, 1);
   cortext::testing::SeedMemoryV2 (*store, 500LL, 500LL, "test", "LONG_TERM",
                                   1.0, 1);
@@ -430,17 +1153,17 @@ TEST_CASE ("Procedural proactive retrieval surfaces learned routine memory",
 
   auto run = [&] (bool disable_proactive) {
     cortext::operations::retrieval_debug::ClearLastRankedCandidates ();
-    auto ops = std::make_unique<OperationSet> (
-        std::make_unique<ForceRetrievalGateOp> (),
-        std::make_unique<SeedProceduralStoreOp> (500LL, 1.0),
-        std::make_unique<GraphAugmentedRetrieveCandidates> ());
-    SignalProcessor processor (cfg, store, std::move (ops));
     std::optional<cortext::testing::ScopedEnvVar> disable_guard;
     if (disable_proactive)
       {
         disable_guard.emplace (
             "CORTEXT_DISABLE_PROCEDURAL_PROACTIVE_RETRIEVAL", "1");
       }
+    auto ops = std::make_unique<OperationSet> (
+        std::make_unique<ForceRetrievalGateOp> (),
+        std::make_unique<SeedProceduralStoreOp> (500LL, 1.0),
+        std::make_unique<GraphAugmentedRetrieveCandidates> ());
+    SignalProcessor processor (cfg, store, std::move (ops));
     processor.Process (MakeSignal (query, 10));
     processor.Flush ();
     return cortext::operations::retrieval_debug::GetLastRankedCandidates ();
@@ -449,25 +1172,25 @@ TEST_CASE ("Procedural proactive retrieval surfaces learned routine memory",
   const auto ranked_off = run (true);
   const auto ranked_on = run (false);
 
-  bool off_has_target = false;
-  bool on_has_target = false;
+  bool off_has_procedural_target = false;
+  bool on_has_procedural_target = false;
   for (const auto &candidate : ranked_off)
     {
-      if (candidate.memory_id == 500LL)
+      if (candidate.memory_id == 500LL && candidate.proc_score >= 0.55)
         {
-          off_has_target = true;
+          off_has_procedural_target = true;
         }
     }
   for (const auto &candidate : ranked_on)
     {
-      if (candidate.memory_id == 500LL)
+      if (candidate.memory_id == 500LL && candidate.proc_score >= 0.55)
         {
-          on_has_target = true;
+          on_has_procedural_target = true;
         }
     }
 
-  REQUIRE (off_has_target == false);
-  REQUIRE (on_has_target == true);
+  REQUIRE (off_has_procedural_target == false);
+  REQUIRE (on_has_procedural_target == true);
   REQUIRE_FALSE (ranked_on.empty ());
   auto it_target = std::find_if (
       ranked_on.begin (), ranked_on.end (),

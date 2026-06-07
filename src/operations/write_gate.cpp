@@ -25,6 +25,18 @@ ComputeWriteGate::Execute (OperationContext &context,
   const bool flush = context.GetFlushRequired ();
   const bool spike_bypass = context.GetSpikeBypass ();
 
+  if (signal.retention == Retention::Ephemeral)
+    {
+      context.SetAccumulatorWriteDecision (false);
+      context.SetWriteDecision (false);
+      telemetry::AddCounter ("cortext.retention.ephemeral_no_store_total", 1);
+      telemetry::LogDebug ("cortext.write_gate", {
+        telemetry::Attribute::String ("retention", "ephemeral"),
+        telemetry::Attribute::Bool ("write_accumulator", false)
+      });
+      return;
+    }
+
   if (!flush && !spike_bypass)
     {
       // No flush trigger - no write decision

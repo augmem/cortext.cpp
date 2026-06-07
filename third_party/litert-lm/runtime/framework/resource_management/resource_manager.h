@@ -28,10 +28,13 @@
 #include "absl/status/statusor.h"  // from @com_google_absl
 #include "absl/synchronization/mutex.h"  // from @com_google_absl
 #include "litert/cc/litert_environment.h"  // from @litert
+#include "runtime/components/model_resources.h"
 #include "runtime/engine/engine_settings.h"
+#include "runtime/engine/io_types.h"
 #include "runtime/executor/audio_executor.h"
 #include "runtime/executor/audio_executor_settings.h"
 #include "runtime/executor/llm_executor.h"
+#include "runtime/executor/llm_executor_settings.h"
 #include "runtime/executor/vision_executor.h"
 #include "runtime/executor/vision_executor_settings.h"
 #include "runtime/framework/resource_management/context_handler/context_handler.h"
@@ -43,23 +46,33 @@ namespace litert::lm {
 class ResourceManager {
  public:
   explicit ResourceManager(
+      ModelResources* absl_nullable model_resources,
       std::unique_ptr<LlmExecutor> llm_executor,
       std::unique_ptr<VisionExecutorSettings> vision_executor_settings,
       std::unique_ptr<AudioExecutorSettings> audio_executor_settings,
-      std::unique_ptr<::litert::Environment> litert_env)
-      : llm_executor_(std::move(llm_executor)),
+      LlmExecutorSettings llm_executor_settings,
+      ::litert::Environment* absl_nullable litert_env,
+      std::unique_ptr<AudioExecutor> audio_executor = nullptr)
+      :  // dummy comment to prevent clang-format from moving the next line here
+        llm_executor_(std::move(llm_executor)),
         vision_executor_settings_(std::move(vision_executor_settings)),
+        audio_executor_(std::move(audio_executor)),
         audio_executor_settings_(std::move(audio_executor_settings)),
-        litert_env_(std::move(litert_env)) {}
+        litert_env_(litert_env),
+        llm_executor_settings_(std::move(llm_executor_settings)) {}
 
   // Creates a ResourceManager with the provided llm_executor.
+  // Note that the audio_executor is used for testing only (dependency
+  // injection)
   static absl::StatusOr<std::unique_ptr<ResourceManager>> Create(
+      ModelResources* absl_nullable model_resources,
       std::unique_ptr<LlmExecutor> absl_nonnull llm_executor,
       std::unique_ptr<VisionExecutorSettings> absl_nullable
-      vision_executor_settings,
+          vision_executor_settings,
       std::unique_ptr<AudioExecutorSettings> absl_nullable
-      audio_executor_settings,
-      std::unique_ptr<::litert::Environment> absl_nullable litert_env);
+          audio_executor_settings,
+      ::litert::Environment* absl_nullable litert_env,
+      std::unique_ptr<AudioExecutor> absl_nullable audio_executor = nullptr);
 
   ~ResourceManager() = default;
 
@@ -105,10 +118,15 @@ class ResourceManager {
   // Typically, this function is called instead of AcquireExecutor() when the
   // usage of the returned executor involves any state updates, e.g. prefill,
   // decode, etc.
+  // Note the method try to lock llm_executor_mutex_ and audio_executor_mutex_
+  // in order to clone the audio context if needed, thus other methods should
+  // not try to acquire the audio executor within the llm executor mutex.
+  // TODO(b/483136581): Refactor the locking mechanism.
   absl::StatusOr<std::unique_ptr<LlmExecutor>>
   AcquireExecutorWithContextHandler(
       std::shared_ptr<ContextHandler> new_context_handle)
-      ABSL_LOCKS_EXCLUDED(executor_mutex_);
+      ABSL_LOCKS_EXCLUDED(executor_mutex_)
+          ABSL_LOCKS_EXCLUDED(audio_executor_mutex_);
 
   // Try to load the vision executor if the vision executor is not loaded.
   absl::Status TryLoadingVisionExecutor()
@@ -125,6 +143,14 @@ class ResourceManager {
   // Acquires the audio executor.
   absl::StatusOr<std::unique_ptr<AudioExecutor>> AcquireAudioExecutor()
       ABSL_LOCKS_EXCLUDED(audio_executor_mutex_);
+
+  // Returns the audio executor properties.
+  absl::StatusOr<AudioExecutorProperties> GetAudioExecutorProperties()
+      ABSL_LOCKS_EXCLUDED(audio_executor_mutex_);
+
+  // Returns the vision executor properties.
+  absl::StatusOr<VisionExecutorProperties> GetVisionExecutorProperties()
+      ABSL_LOCKS_EXCLUDED(vision_executor_mutex_);
 
  private:
   // Creates the litert environment if it is not created yet.
@@ -164,7 +190,15 @@ class ResourceManager {
 
   // The potential litert compiled model environment for the vision and audio
   // executor.
-  std::unique_ptr<::litert::Environment> litert_env_;
+  ::litert::Environment* absl_nullable litert_env_;
+
+  // The backup litert compiled model environment for the vision and audio
+  // executor, created if litert_env is not provided when resource manager is
+  // created.
+  std::unique_ptr<::litert::Environment> backup_litert_env_;
+
+  // The llm executor settings.
+  std::optional<LlmExecutorSettings> llm_executor_settings_;
 
   friend class LockedLlmExecutor;
 };

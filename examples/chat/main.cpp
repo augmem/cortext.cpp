@@ -3,16 +3,19 @@
 #include "context_tab.hpp"
 #include "encoder/text_encoder_factory.hpp"
 #include "imgui_app.hpp"
+#include "media_preview_player.hpp"
 #include "metrics_state.hpp"
 #include "streaming_client.hpp"
 #include "streaming_text_probe.hpp"
 #include "voice_session.hpp"
+#include "webcam_session.hpp"
 
 #include <cortext/cortext.hpp>
 #include <cortext/core/knobs.hpp>
 #include <cortext/internal/cancellation.hpp>
 #include <cortext/operations/metrics.hpp>
 #include <cortext/store/sqlite_store.hpp>
+#include <cortext/store/utils.hpp>
 #include <cortext/telemetry/telemetry.hpp>
 
 #include <openai/openai.hpp>
@@ -57,6 +60,8 @@
 #include <algorithm>
 #include <chrono>
 #include <cctype>
+#include <cmath>
+#include <condition_variable>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -365,6 +370,35 @@ struct PendingUserTurn {
   bool voice_origin = false;
 };
 
+struct PendingMediaIngest {
+  enum class Kind {
+    Video,
+    Audio,
+  };
+
+  Kind kind = Kind::Video;
+  std::vector<std::uint8_t> rgb;
+  std::vector<float> pcm;
+  int width = 0;
+  int height = 0;
+  int channels = 3;
+  std::string capture_mode = "all";
+  std::uint64_t queued_at_ms = 0;
+};
+
+constexpr double kDefaultWebcamVideoFps = 1.0;
+
+double ClampWebcamVideoFps(double fps) {
+  if (!std::isfinite(fps)) {
+    return kDefaultWebcamVideoFps;
+  }
+  return std::clamp(fps, 0.1, 30.0);
+}
+
+bool NearlyEqual(double a, double b) {
+  return std::abs(a - b) < 1e-6;
+}
+
 std::string TrimUserText(const std::string& text) {
   const auto start = text.find_first_not_of(" \t\r\n");
   if (start == std::string::npos) {
@@ -600,6 +634,7 @@ CreateMemoryEvent(chat::MemoryEventType type,
   evt.arousal = mem.arousal;
   evt.composite_score = mem.composite_score;
   evt.threshold_t = mem.threshold_t;
+  evt.soft_anchors = mem.soft_anchors;
 
   return evt;
 }
@@ -630,6 +665,270 @@ chat::ChunkRetrievedMemory CreateRetrievedMemoryPreview(
   preview.relevance = mem.relevance;
   preview.composite_score = mem.composite_score;
   return preview;
+}
+
+std::size_t BlobByteCount(const std::vector<std::vector<unsigned char>>& blobs) {
+  std::size_t bytes = 0;
+  for (const auto& blob : blobs) {
+    bytes += blob.size();
+  }
+  return bytes;
+}
+
+bool InferSquareRawImageShape(std::size_t bytes,
+                              int& width,
+                              int& height,
+                              int& channels) {
+  for (const int candidate_channels : {3, 4}) {
+    if (bytes == 0 || bytes % static_cast<std::size_t>(candidate_channels) != 0) {
+      continue;
+    }
+    const auto pixels = bytes / static_cast<std::size_t>(candidate_channels);
+    const auto side = static_cast<std::size_t>(
+        std::llround(std::sqrt(static_cast<double>(pixels))));
+    if (side > 0 && side * side == pixels) {
+      width = static_cast<int>(side);
+      height = static_cast<int>(side);
+      channels = candidate_channels;
+      return true;
+    }
+  }
+  return false;
+}
+
+std::optional<int> ParseMimeInt(const std::string& mimetype,
+                                const std::string& key) {
+  const std::string marker = key + "=";
+  const std::size_t pos = mimetype.find(marker);
+  if (pos == std::string::npos) {
+    return std::nullopt;
+  }
+  const std::size_t begin = pos + marker.size();
+  const std::size_t end = mimetype.find(';', begin);
+  const std::string value = mimetype.substr(
+      begin, end == std::string::npos ? std::string::npos : end - begin);
+  try {
+    return std::stoi(value);
+  } catch (...) {
+    return std::nullopt;
+  }
+}
+
+bool ParseRawImageMimeShape(const std::string& mimetype,
+                            std::size_t bytes,
+                            int& width,
+                            int& height,
+                            int& channels) {
+  const auto parsed_width = ParseMimeInt(mimetype, "width");
+  const auto parsed_height = ParseMimeInt(mimetype, "height");
+  const auto parsed_channels = ParseMimeInt(mimetype, "channels");
+  if (!parsed_width.has_value() || !parsed_height.has_value()
+      || !parsed_channels.has_value()) {
+    return false;
+  }
+  const std::size_t expected_bytes
+      = static_cast<std::size_t>(*parsed_width)
+        * static_cast<std::size_t>(*parsed_height)
+        * static_cast<std::size_t>(*parsed_channels);
+  if (*parsed_width <= 0 || *parsed_height <= 0
+      || (*parsed_channels != 3 && *parsed_channels != 4)
+      || expected_bytes > bytes) {
+    return false;
+  }
+  width = *parsed_width;
+  height = *parsed_height;
+  channels = *parsed_channels;
+  return true;
+}
+
+chat::MemoryMediaPreview CreateMemoryMediaPreview(
+    long long preview_id,
+    long long memory_id,
+    const std::string& modality,
+    const std::string& mimetype,
+    const std::string& source_id,
+    uint64_t timestamp,
+    const std::vector<std::vector<unsigned char>>& content) {
+  chat::MemoryMediaPreview item;
+  item.preview_id = preview_id;
+  item.memory_id = memory_id;
+  item.modality = modality.empty() ? "unknown" : modality;
+  item.mimetype = mimetype;
+  item.source_id = source_id;
+  item.blob_count = content.size();
+  item.byte_count = BlobByteCount(content);
+  item.timestamp = timestamp;
+
+  if (item.modality == "audio" && content.size() == 1) {
+    for (const auto& blob : content) {
+      if (!blob.empty()) {
+        item.media_bytes.insert(item.media_bytes.end(),
+                                blob.begin(),
+                                blob.end());
+      }
+    }
+  } else {
+    for (const auto& blob : content) {
+      if (!blob.empty()) {
+        item.media_bytes = blob;
+        break;
+      }
+    }
+  }
+  if (item.modality == "image") {
+    if (!ParseRawImageMimeShape(item.mimetype,
+                                item.media_bytes.size(),
+                                item.image_width,
+                                item.image_height,
+                                item.image_channels)) {
+      (void)InferSquareRawImageShape(item.media_bytes.size(),
+                                     item.image_width,
+                                     item.image_height,
+                                     item.image_channels);
+    }
+  } else if (item.modality == "audio"
+             && item.media_bytes.size() >= sizeof(float)) {
+    const std::size_t sample_count = item.media_bytes.size() / sizeof(float);
+    item.audio_samples.resize(sample_count);
+    std::memcpy(item.audio_samples.data(),
+                item.media_bytes.data(),
+                sample_count * sizeof(float));
+    item.audio_sample_rate = 16000;
+  }
+
+  const std::string text = ExtractTextFromBlobs(content);
+  if (item.modality == "text" && !text.empty()) {
+    item.preview = TruncatePreview(text, 180);
+  } else if (item.modality == "image") {
+    item.preview = "[image memory: " + std::to_string(item.blob_count)
+                   + " blob(s), " + std::to_string(item.byte_count)
+                   + " bytes]";
+  } else if (item.modality == "audio") {
+    item.preview = "[audio memory: " + std::to_string(item.blob_count)
+                   + " blob(s), " + std::to_string(item.byte_count)
+                   + " bytes]";
+  } else if (!text.empty()) {
+    item.preview = TruncatePreview(text, 180);
+  } else {
+    item.preview = "[" + item.modality + " memory: "
+                   + std::to_string(item.blob_count) + " blob(s), "
+                   + std::to_string(item.byte_count) + " bytes]";
+  }
+  return item;
+}
+
+chat::MemoryMediaPreview CreateWebcamRetrievedMemory(
+    const cortext::Cortext::Context::Memory& mem) {
+  std::vector<std::vector<unsigned char>> content;
+  if (mem.modality == "text") {
+    content = mem.content;
+  }
+  chat::MemoryMediaPreview item = CreateMemoryMediaPreview(
+      mem.id, mem.id, mem.modality, mem.mimetype, mem.source_id, mem.timestamp,
+      content);
+  if (mem.modality != "text") {
+    item.blob_count = mem.content.size();
+    item.byte_count = BlobByteCount(mem.content);
+    if (mem.modality == "image") {
+      item.preview = "[image memory: " + std::to_string(item.blob_count)
+                     + " blob(s), " + std::to_string(item.byte_count)
+                     + " bytes, loaded on demand]";
+    } else if (mem.modality == "audio") {
+      item.preview = "[audio memory: " + std::to_string(item.blob_count)
+                     + " blob(s), " + std::to_string(item.byte_count)
+                     + " bytes, loaded on demand]";
+    }
+  }
+  item.retrieved_count = mem.retrieved_count;
+  item.used_count = mem.used_count;
+  item.relevance = mem.relevance;
+  item.composite_score = mem.composite_score;
+  item.salience = mem.salience;
+  return item;
+}
+
+std::vector<chat::MemoryMediaPreview> CreateWebcamRetrievedMemories(
+    const std::vector<cortext::Cortext::Context::Memory>& memories) {
+  std::vector<chat::MemoryMediaPreview> result;
+  result.reserve(memories.size());
+  for (const auto& mem : memories) {
+    result.push_back(CreateWebcamRetrievedMemory(mem));
+  }
+  return result;
+}
+
+chat::MemoryMediaPreview CreateSignalFilterImagePreview(
+    const std::vector<std::uint8_t>& rgb,
+    int width,
+    int height,
+    int channels,
+    uint64_t timestamp) {
+  constexpr int kMaxPreviewSide = 320;
+  chat::MemoryMediaPreview preview;
+  preview.preview_id = -1;
+  preview.memory_id = 0;
+  preview.modality = "image";
+  preview.source_id = "chat/user";
+  preview.timestamp = timestamp;
+  if (rgb.empty() || width <= 0 || height <= 0
+      || (channels != 3 && channels != 4)) {
+    preview.preview = "[no accepted visual signal]";
+    return preview;
+  }
+
+  const int max_side = std::max(width, height);
+  const double scale = std::min(
+      1.0,
+      static_cast<double>(kMaxPreviewSide) / static_cast<double>(max_side));
+  const int out_width = std::max(1, static_cast<int>(std::round(width * scale)));
+  const int out_height = std::max(1, static_cast<int>(std::round(height * scale)));
+  preview.image_width = out_width;
+  preview.image_height = out_height;
+  preview.image_channels = channels;
+  preview.media_bytes.resize(
+      static_cast<std::size_t>(out_width)
+      * static_cast<std::size_t>(out_height)
+      * static_cast<std::size_t>(channels));
+
+  for (int y = 0; y < out_height; ++y) {
+    const int src_y = std::min(height - 1, (y * height) / out_height);
+    for (int x = 0; x < out_width; ++x) {
+      const int src_x = std::min(width - 1, (x * width) / out_width);
+      const std::size_t src_index
+          = (static_cast<std::size_t>(src_y) * static_cast<std::size_t>(width)
+             + static_cast<std::size_t>(src_x))
+            * static_cast<std::size_t>(channels);
+      const std::size_t dst_index
+          = (static_cast<std::size_t>(y) * static_cast<std::size_t>(out_width)
+             + static_cast<std::size_t>(x))
+            * static_cast<std::size_t>(channels);
+      for (int c = 0; c < channels; ++c) {
+        preview.media_bytes[dst_index + static_cast<std::size_t>(c)]
+            = rgb[src_index + static_cast<std::size_t>(c)];
+      }
+    }
+  }
+
+  preview.byte_count = preview.media_bytes.size();
+  preview.blob_count = 1;
+  preview.mimetype = "image/raw;width=" + std::to_string(out_width)
+                     + ";height=" + std::to_string(out_height)
+                     + ";channels=" + std::to_string(channels);
+  preview.preview = "[accepted visual signal: " + std::to_string(width)
+                    + "x" + std::to_string(height) + "]";
+  return preview;
+}
+
+void AppendWebcamLiveMemoryFeed(
+    chat::WebcamState& state,
+    const std::vector<chat::MemoryMediaPreview>& memories,
+    std::size_t max_items) {
+  for (const auto& memory : memories) {
+    state.live_memory_feed.push_front(memory);
+  }
+  while (state.live_memory_feed.size() > max_items) {
+    state.live_memory_feed.pop_back();
+  }
 }
 
 chat::ChunkProbeEvent BeginChunkProbeEvent(
@@ -772,6 +1071,15 @@ CreateStoredEvent(long long embedding_id, const std::string &content,
   evt.arousal = output.arousal;
   evt.composite_score = output.composite_score.value_or(0.0);
   evt.threshold_t = output.threshold.value_or(0.0);
+  evt.stored_memory_id = output.stored_memory_id.value_or(0);
+  evt.soft_anchor_enabled = output.soft_anchor_enabled;
+  evt.soft_anchor_state_count = output.soft_anchor_state_count;
+  evt.soft_anchor_link_count = output.soft_anchor_link_count;
+  evt.soft_anchor_create_count = output.soft_anchor_create_count;
+  evt.soft_anchor_update_count = output.soft_anchor_update_count;
+  evt.soft_anchor_none_count = output.soft_anchor_none_count;
+  evt.soft_anchor_last_update_us = output.soft_anchor_last_update_us;
+  evt.soft_anchor_mean_update_us = output.soft_anchor_mean_update_us;
 
   return evt;
 }
@@ -824,6 +1132,14 @@ std::string GetAnyString(const std::map<std::string, std::any>& row,
   return fallback;
 }
 
+std::vector<unsigned char> GetAnyBlob(
+    const std::map<std::string, std::any>& row,
+    const std::string& key) {
+  auto it = row.find(key);
+  if (it == row.end() || !it->second.has_value()) return {};
+  return cortext::store::BlobFromAny(it->second);
+}
+
 uint64_t NowUnixMillis();
 
 void RefreshDatabaseExplorer(chat::DatabaseExplorerState& state,
@@ -852,10 +1168,13 @@ void RefreshDatabaseExplorer(chat::DatabaseExplorerState& state,
       "SELECT signal_id, COALESCE(memory_id, 0) AS memory_id, embedding_id, "
       "       source_id, modality, COALESCE(mime, '') AS mime, timestamp, "
       "       serial_position, score, COALESCE(salience, 0.0) AS salience, "
-      "       COALESCE(threshold_t, 0.0) AS threshold_t "
+      "       COALESCE(threshold_t, 0.0) AS threshold_t, "
+      "       blob_id, "
+      "       CASE WHEN blob_id IS NULL OR modality IN ('image', 'audio') "
+      "            THEN NULL ELSE objstore_get(blob_id) END AS payload "
       "FROM signals "
       "ORDER BY timestamp DESC, signal_id DESC "
-      "LIMIT 80",
+      "LIMIT 400",
       {});
 
   const auto association_rows = store->Execute(
@@ -947,6 +1266,21 @@ void RefreshDatabaseExplorer(chat::DatabaseExplorerState& state,
     item.score = GetAnyDouble(row, "score");
     item.salience = GetAnyDouble(row, "salience");
     item.threshold_t = GetAnyDouble(row, "threshold_t");
+    auto payload = GetAnyBlob(row, "payload");
+    std::vector<std::vector<unsigned char>> content;
+    if (!payload.empty()) {
+      content.push_back(payload);
+    }
+    item.preview = CreateMemoryMediaPreview(item.signal_id,
+                                            item.memory_id,
+                                            item.modality,
+                                            item.mime,
+                                            item.source_id,
+                                            item.timestamp,
+                                            content);
+    item.preview.relevance = item.score;
+    item.preview.composite_score = item.score;
+    item.preview.salience = item.salience;
     signals.push_back(std::move(item));
   }
 
@@ -1049,6 +1383,116 @@ void RefreshDatabaseExplorer(chat::DatabaseExplorerState& state,
       + std::to_string(state.evictions.size()) + " evictions.";
 }
 
+std::optional<chat::MemoryMediaPreview> LoadDatabaseMediaPreview(
+    const std::string& db_path,
+    const chat::MediaLoadRequest& request) {
+  auto store = cortext::SQLiteStore::Create(db_path);
+
+  auto load_single_signal = [&](long long signal_id,
+                                const std::string& expected_modality)
+      -> std::optional<chat::MemoryMediaPreview> {
+    const auto rows = store->Execute(
+        "SELECT signal_id, COALESCE(memory_id, 0) AS memory_id, "
+        "       source_id, modality, COALESCE(mime, '') AS mime, "
+        "       timestamp, objstore_get(blob_id) AS payload "
+        "FROM signals "
+        "WHERE signal_id = ? AND modality = ? AND blob_id IS NOT NULL "
+        "LIMIT 1",
+        { signal_id, expected_modality });
+    if (rows.empty()) {
+      return std::nullopt;
+    }
+    const auto& row = rows.front();
+    const auto payload = GetAnyBlob(row, "payload");
+    if (payload.empty()) {
+      return std::nullopt;
+    }
+    std::vector<std::vector<unsigned char>> content;
+    content.push_back(payload);
+    return CreateMemoryMediaPreview(
+        GetAnyInt64(row, "signal_id"),
+        GetAnyInt64(row, "memory_id"),
+        GetAnyString(row, "modality"),
+        GetAnyString(row, "mime"),
+        GetAnyString(row, "source_id"),
+        static_cast<uint64_t>(GetAnyInt64(row, "timestamp")),
+        content);
+  };
+
+  if (request.kind == "signal_image") {
+    return load_single_signal(request.signal_id, "image");
+  }
+  if (request.kind == "signal_audio") {
+    return load_single_signal(request.signal_id, "audio");
+  }
+  if (request.kind == "memory_image") {
+    const auto rows = store->Execute(
+        "SELECT signal_id FROM signals "
+        "WHERE memory_id = ? AND modality = 'image' AND blob_id IS NOT NULL "
+        "ORDER BY serial_position ASC, signal_id ASC "
+        "LIMIT 1",
+        { request.memory_id });
+    if (rows.empty()) {
+      return std::nullopt;
+    }
+    return load_single_signal(GetAnyInt64(rows.front(), "signal_id"), "image");
+  }
+  if (request.kind == "memory_audio") {
+    const auto rows = store->Execute(
+        "SELECT signal_id, COALESCE(memory_id, 0) AS memory_id, "
+        "       source_id, modality, COALESCE(mime, '') AS mime, "
+        "       timestamp, serial_position, objstore_get(blob_id) AS payload "
+        "FROM signals "
+        "WHERE memory_id = ? AND modality = 'audio' AND blob_id IS NOT NULL "
+        "ORDER BY serial_position ASC, signal_id ASC",
+        { request.memory_id });
+    if (rows.empty()) {
+      return std::nullopt;
+    }
+
+    chat::MemoryMediaPreview preview;
+    preview.preview_id = request.memory_id > 0 ? -request.memory_id
+                                               : request.memory_id;
+    preview.memory_id = request.memory_id;
+    preview.modality = "audio";
+    preview.mimetype = "audio/pcm;format=f32";
+    preview.audio_sample_rate = 16000;
+    preview.source_id = GetAnyString(rows.front(), "source_id");
+
+    for (const auto& row : rows) {
+      const auto payload = GetAnyBlob(row, "payload");
+      if (payload.size() < sizeof(float)) {
+        continue;
+      }
+      const std::size_t sample_count = payload.size() / sizeof(float);
+      const std::size_t offset = preview.audio_samples.size();
+      preview.audio_samples.resize(offset + sample_count);
+      std::memcpy(preview.audio_samples.data() + offset,
+                  payload.data(),
+                  sample_count * sizeof(float));
+      preview.byte_count += sample_count * sizeof(float);
+      preview.blob_count += 1;
+      const auto ts = static_cast<uint64_t>(GetAnyInt64(row, "timestamp"));
+      if (preview.timestamp == 0 || ts < preview.timestamp) {
+        preview.timestamp = ts;
+      }
+    }
+
+    if (preview.audio_samples.empty()) {
+      return std::nullopt;
+    }
+    const double seconds = static_cast<double>(preview.audio_samples.size())
+                           / static_cast<double>(preview.audio_sample_rate);
+    std::ostringstream ss;
+    ss << "[memory audio: " << preview.blob_count << " signal(s), "
+       << std::fixed << std::setprecision(2) << seconds << "s]";
+    preview.preview = ss.str();
+    return preview;
+  }
+
+  return std::nullopt;
+}
+
 void ResetChatDatabase(cortext::Cortext::Config cfg,
                        std::unique_ptr<cortext::Cortext>& cortext_ctx,
                        const std::filesystem::path& db_path,
@@ -1149,6 +1593,7 @@ struct PersistedChatSettings {
   std::optional<std::string> voice_backend;
   std::optional<bool> voice_reply_enabled;
   std::optional<bool> voice_retrieve_without_retain;
+  std::optional<double> webcam_video_fps;
 };
 
 std::filesystem::path DefaultChatSettingsPath(
@@ -1227,6 +1672,11 @@ std::optional<PersistedChatSettings> TryLoadPersistedChatSettings(
       settings.voice_retrieve_without_retain
           = json["voice_retrieve_without_retain"].get<bool>();
     }
+    if (json.contains("webcam_video_fps")
+        && json["webcam_video_fps"].is_number()) {
+      settings.webcam_video_fps
+          = ClampWebcamVideoFps(json["webcam_video_fps"].get<double>());
+    }
     return settings;
   } catch (const std::exception& ex) {
     if (error_message) {
@@ -1246,7 +1696,8 @@ void SavePersistedChatSettings(const std::filesystem::path& settings_path,
                                const std::string& memory_prompt_suffix,
                                const std::string& voice_backend,
                                bool voice_reply_enabled,
-                               bool voice_retrieve_without_retain) {
+                               bool voice_retrieve_without_retain,
+                               double webcam_video_fps) {
   nlohmann::json json = {
       {"focus", focus},
       {"sensitivity", sensitivity},
@@ -1258,6 +1709,7 @@ void SavePersistedChatSettings(const std::filesystem::path& settings_path,
       {"voice_backend", voice_backend},
       {"voice_reply_enabled", voice_reply_enabled},
       {"voice_retrieve_without_retain", voice_retrieve_without_retain},
+      {"webcam_video_fps", ClampWebcamVideoFps(webcam_video_fps)},
   };
 
   std::error_code ec;
@@ -1417,8 +1869,20 @@ std::string BuildInjectedSystemPrompt(
     }
     oss << "  <memory source_id=\"" << EscapeXml(mem.source_id)
         << "\" datetime=\"" << EscapeXml(FormatMemoryDateTime(mem.timestamp))
-        << "\" memory_id=\"" << mem.id << "\">"
-        << EscapeXml(text) << "</memory>\n";
+        << "\" memory_id=\"" << mem.id << "\">\n"
+        << "    <text>" << EscapeXml(text) << "</text>\n";
+    for (const auto& anchor : mem.soft_anchors) {
+      oss << "    <soft_anchor id=\"" << EscapeXml(anchor.id)
+          << "\" strength=\"" << anchor.strength
+          << "\" likelihood=\"" << anchor.likelihood
+          << "\" label=\"" << EscapeXml(anchor.label)
+          << "\" tier=\"" << EscapeXml(anchor.tier)
+          << "\" score=\"" << anchor.score
+          << "\" margin=\"" << anchor.margin
+          << "\" entropy=\"" << anchor.entropy
+          << "\"/>\n";
+    }
+    oss << "  </memory>\n";
   }
   oss << "</memories>";
   if (!suffix.empty()) {
@@ -1437,8 +1901,9 @@ std::string DefaultMemoryPromptPrefix() {
          "memory clearly refers to someone else or quotes someone else. Use "
          "them as supporting context when they are relevant to the user's "
          "current message. Prefer these memories over guesses, but do not "
-         "mention memory IDs, the XML format, or that you were given "
-         "retrieved memories.";
+         "mention memory IDs, soft_anchor IDs, the XML format, or that you "
+         "were given retrieved memories. Treat soft_anchor entries as optional "
+         "continuity likelihoods for their memory, not as resolved facts.";
 }
 
 std::string DefaultMemoryPromptSuffix() {
@@ -1686,12 +2151,22 @@ int main(int argc, char** argv) {
   std::filesystem::path db_path = GetEnv("CORTEXT_CHAT_DB", "examples/chat/chat_memory.db");
   std::filesystem::path models_dir = GetEnv("CORTEXT_MODELS_DIR", "models");
   std::filesystem::path settings_path = GetEnv("CORTEXT_CHAT_SETTINGS");
+  std::filesystem::path label_bank_path = GetEnv("CORTEXT_LABEL_BANK_PATH");
 
   if (!has_models_env && models_dir.is_relative() && repo_root.has_value()) {
     models_dir = *repo_root / models_dir;
   }
   if (!has_db_env && db_path.is_relative() && repo_root.has_value()) {
     db_path = *repo_root / db_path;
+  }
+  if (label_bank_path.empty() && repo_root.has_value()) {
+    const auto default_label_bank = *repo_root / "data/label_bank/metadata.json";
+    std::error_code ec;
+    if (std::filesystem::exists(default_label_bank, ec)) {
+      label_bank_path = default_label_bank;
+    }
+  } else if (label_bank_path.is_relative() && repo_root.has_value()) {
+    label_bank_path = *repo_root / label_bank_path;
   }
   if (settings_path.empty()) {
     settings_path = DefaultChatSettingsPath(db_path, repo_root);
@@ -1824,6 +2299,8 @@ int main(int argc, char** argv) {
   const double focus = GetEnvDouble("CORTEXT_FOCUS", 0.5);
   const double sensitivity = GetEnvDouble("CORTEXT_SENSITIVITY", 0.5);
   const double stability = GetEnvDouble("CORTEXT_STABILITY", 0.5);
+  const double webcam_video_fps_default = ClampWebcamVideoFps(
+      GetEnvDouble("CORTEXT_CHAT_WEBCAM_FPS", kDefaultWebcamVideoFps));
   const bool stream_interrupts = GetEnvBool("CORTEXT_CHAT_STREAM_INTERRUPTS", true);
   PersistedChatSettings persisted_settings;
   std::string persisted_settings_error;
@@ -1836,6 +2313,8 @@ int main(int argc, char** argv) {
   }
   auto settings_state = std::make_shared<chat::SettingsState>();
   auto voice_state = std::make_shared<chat::VoiceState>();
+  auto webcam_state = std::make_shared<chat::WebcamState>();
+  auto playground_state = std::make_shared<chat::PlaygroundState>();
   auto db_explorer_state = std::make_shared<chat::DatabaseExplorerState>();
   {
     std::lock_guard<std::mutex> lock(settings_state->mu);
@@ -1848,11 +2327,16 @@ int main(int argc, char** argv) {
     settings_state->default_idle_consolidation_seconds = 0;
     settings_state->active_idle_consolidation_seconds
         = persisted_settings.idle_consolidation_seconds.value_or(0);
+    settings_state->default_webcam_video_fps = webcam_video_fps_default;
+    settings_state->active_webcam_video_fps
+        = persisted_settings.webcam_video_fps.value_or(webcam_video_fps_default);
     settings_state->draft_focus = settings_state->active_focus;
     settings_state->draft_sensitivity = settings_state->active_sensitivity;
     settings_state->draft_stability = settings_state->active_stability;
     settings_state->draft_idle_consolidation_seconds
         = settings_state->active_idle_consolidation_seconds;
+    settings_state->draft_webcam_video_fps
+        = settings_state->active_webcam_video_fps;
     settings_state->default_model = model;
     settings_state->active_model
         = persisted_settings.model.value_or(model);
@@ -1903,6 +2387,7 @@ int main(int argc, char** argv) {
   cfg.focus = initial_focus;
   cfg.sensitivity = initial_sensitivity;
   cfg.stability = initial_stability;
+  cfg.label_bank_path = label_bank_path.string();
   std::unique_ptr<cortext::Cortext> cortext_ctx;
   try {
     cortext_ctx = cortext::Cortext::Create(cfg, db_path.string(), models_dir.string());
@@ -1952,8 +2437,6 @@ int main(int argc, char** argv) {
       db_explorer_state->last_refresh_status = std::string("DB refresh failed: ") + ex.what();
     }
   };
-  refresh_db_explorer();
-
   StreamingState streaming_state;
   std::string partial_response;
   int generation_restarts = 0;
@@ -1965,15 +2448,21 @@ int main(int argc, char** argv) {
   std::atomic<bool> idle_consolidating{false};
   std::mutex idle_consolidation_stop_mu;
   std::optional<cortext::StopSource> idle_consolidation_stop_source;
+  std::mutex media_ingest_mu;
+  std::condition_variable media_ingest_cv;
+  std::deque<PendingMediaIngest> pending_media_ingest;
+  std::atomic<bool> media_ingest_shutdown{false};
 
   // Track streaming thread to ensure proper cleanup before exit
   std::thread streaming_thread;
   std::atomic<bool> streaming_thread_active{false};
+  std::thread playground_thread;
 
   chat::StreamingChatClient streaming_client(api_key, openai_base_url.empty()
       ? "https://api.openai.com/v1/"
       : openai_base_url);
   std::unique_ptr<chat::VoiceSession> voice_session;
+  std::unique_ptr<chat::WebcamSession> webcam_session;
   std::string active_voice_backend;
   auto build_voice_session = [&](const std::string& backend) {
     chat::VoiceSessionConfig voice_config;
@@ -2101,6 +2590,94 @@ int main(int argc, char** argv) {
   }
   voice_session = build_voice_session(active_voice_backend);
 
+  auto enqueue_media = [&](PendingMediaIngest item) {
+    {
+      std::lock_guard<std::mutex> lock(media_ingest_mu);
+      pending_media_ingest.push_back(std::move(item));
+      while (pending_media_ingest.size() > 8) {
+        pending_media_ingest.pop_front();
+      }
+    }
+    media_ingest_cv.notify_one();
+  };
+
+  auto build_webcam_session = [&](double video_fps) {
+    chat::WebcamSessionConfig webcam_config;
+    webcam_config.audio_sample_rate = 16000;
+    webcam_config.audio_chunk_ms = 1000;
+    webcam_config.video_fps = ClampWebcamVideoFps(video_fps);
+    webcam_config.on_video_frame = [webcam_state, &enqueue_media](chat::WebcamFrame&& frame) {
+      std::string capture_mode;
+      {
+        std::lock_guard<std::mutex> lock(webcam_state->mu);
+        capture_mode = webcam_state->capture_mode;
+        if (webcam_state->capture_mode == "audio") {
+          return;
+        }
+        if (webcam_state->capture_mode == "image") {
+          if (!webcam_state->image_capture_pending) {
+            return;
+          }
+          webcam_state->image_capture_pending = false;
+          webcam_state->stop_requested = true;
+        }
+      }
+      PendingMediaIngest item;
+      item.kind = PendingMediaIngest::Kind::Video;
+      item.width = frame.width;
+      item.height = frame.height;
+      item.channels = frame.channels;
+      item.rgb = std::move(frame.rgb);
+      item.capture_mode = capture_mode;
+      item.queued_at_ms = NowUnixMillis();
+      {
+        std::lock_guard<std::mutex> lock(webcam_state->mu);
+        webcam_state->video_width = item.width;
+        webcam_state->video_height = item.height;
+        webcam_state->video_frames_captured += 1;
+      }
+      enqueue_media(std::move(item));
+    };
+    webcam_config.on_audio_chunk = [webcam_state, &enqueue_media](std::vector<float>&& pcm) {
+      std::string capture_mode;
+      {
+        std::lock_guard<std::mutex> lock(webcam_state->mu);
+        capture_mode = webcam_state->capture_mode;
+        if (webcam_state->capture_mode != "all"
+            && webcam_state->capture_mode != "audio") {
+          return;
+        }
+      }
+      PendingMediaIngest item;
+      item.kind = PendingMediaIngest::Kind::Audio;
+      item.pcm = std::move(pcm);
+      item.capture_mode = capture_mode;
+      item.queued_at_ms = NowUnixMillis();
+      {
+        std::lock_guard<std::mutex> lock(webcam_state->mu);
+        webcam_state->audio_chunks_captured += 1;
+      }
+      enqueue_media(std::move(item));
+    };
+    webcam_config.on_error = [webcam_state](const std::string& error) {
+      std::lock_guard<std::mutex> lock(webcam_state->mu);
+      webcam_state->last_error = error;
+    };
+    webcam_config.on_capture_changed = [webcam_state](bool capturing) {
+      std::lock_guard<std::mutex> lock(webcam_state->mu);
+      webcam_state->capturing = capturing;
+    };
+    return std::make_unique<chat::WebcamSession>(std::move(webcam_config));
+  };
+
+  webcam_session = build_webcam_session(settings_state->active_webcam_video_fps);
+  chat::MediaPreviewPlayer media_preview_player;
+  {
+    std::lock_guard<std::mutex> lock(webcam_state->mu);
+    webcam_state->supported = webcam_session->IsSupported();
+    webcam_state->available = webcam_session->IsAvailable();
+  }
+
   auto persist_runtime_settings = [&]() {
     double save_focus = 0.5;
     double save_sensitivity = 0.5;
@@ -2112,6 +2689,7 @@ int main(int argc, char** argv) {
     std::string save_voice_backend = "sherpa";
     bool save_voice_reply_enabled = true;
     bool save_voice_retrieve_without_retain = false;
+    double save_webcam_video_fps = kDefaultWebcamVideoFps;
     {
       std::lock_guard<std::mutex> lock(settings_state->mu);
       save_focus = settings_state->active_focus;
@@ -2121,6 +2699,7 @@ int main(int argc, char** argv) {
       save_model = settings_state->active_model;
       save_prefix = settings_state->active_memory_prompt_prefix;
       save_suffix = settings_state->active_memory_prompt_suffix;
+      save_webcam_video_fps = settings_state->active_webcam_video_fps;
     }
     {
       std::lock_guard<std::mutex> lock(voice_state->mu);
@@ -2138,7 +2717,8 @@ int main(int argc, char** argv) {
                               save_suffix,
                               save_voice_backend,
                               save_voice_reply_enabled,
-                              save_voice_retrieve_without_retain);
+                              save_voice_retrieve_without_retain,
+                              save_webcam_video_fps);
   };
 
 #if CORTEXT_CHAT_ENABLE_OTLP_GRPC
@@ -2167,6 +2747,8 @@ int main(int argc, char** argv) {
   window_state.status = status_state;
   window_state.settings = settings_state;
   window_state.voice = voice_state;
+  window_state.webcam = webcam_state;
+  window_state.playground = playground_state;
   window_state.db_explorer = db_explorer_state;
   window_state.otel = otel_state;
   window_state.input = &input;
@@ -2192,10 +2774,16 @@ int main(int argc, char** argv) {
       bool is_generating = false;
       bool has_draft = has_input_draft.load();
       bool is_consolidating = idle_consolidating.load();
+      bool manual_consolidation_requested = false;
       int consolidation_idle_seconds = IdleConsolidationSeconds(stability, 0);
       {
         std::lock_guard<std::mutex> lock(mu);
         is_generating = generating;
+      }
+      {
+        std::lock_guard<std::mutex> lock(db_explorer_state->mu);
+        manual_consolidation_requested
+            = db_explorer_state->consolidate_requested;
       }
 
       {
@@ -2205,8 +2793,19 @@ int main(int argc, char** argv) {
             settings_state->active_idle_consolidation_seconds);
       }
 
-      if (!is_generating && !has_draft && !is_consolidating
-          && idle_tracker.ShouldConsolidate(consolidation_idle_seconds)) {
+      const bool should_idle_consolidate
+          = !has_draft
+            && idle_tracker.ShouldConsolidate(consolidation_idle_seconds);
+      const bool should_consolidate
+          = manual_consolidation_requested || should_idle_consolidate;
+      if (!is_generating && !is_consolidating && should_consolidate) {
+        {
+          std::lock_guard<std::mutex> lock(db_explorer_state->mu);
+          if (manual_consolidation_requested) {
+            db_explorer_state->consolidate_requested = false;
+            db_explorer_state->last_refresh_status = "Consolidation running...";
+          }
+        }
         idle_consolidating.store(true);
         const auto consolidation_started_at = std::chrono::steady_clock::now();
         cortext::StopSource stop_source;
@@ -2242,10 +2841,17 @@ int main(int argc, char** argv) {
             metrics_sample.completed = true;
             metrics_sample.working_memory_size
                 = static_cast<int>(cons_ctx.working_memory.size());
+            {
+              std::lock_guard<std::mutex> lock(db_explorer_state->mu);
+              db_explorer_state->refresh_requested = true;
+              db_explorer_state->last_refresh_status
+                  = manual_consolidation_requested
+                        ? "Manual consolidation complete. Refresh requested..."
+                        : "Idle consolidation complete. Refresh requested...";
+            }
             cortext::telemetry::LogInfo("chat.idle_consolidation.complete", {
               cortext::telemetry::Attribute::Int64("working_memory_size", static_cast<int64_t>(cons_ctx.working_memory.size()))
             });
-            refresh_db_explorer();
           }
           RecordConsolidationMetrics(
               *metrics_state, std::move(metrics_sample),
@@ -2267,8 +2873,15 @@ int main(int argc, char** argv) {
           } else {
             metrics_sample.had_error = true;
             metrics_sample.error_message = ex.what();
-            std::lock_guard<std::mutex> lock(mu);
-            last_error = std::string("idle consolidation: ") + ex.what();
+            {
+              std::lock_guard<std::mutex> lock(mu);
+              last_error = std::string("consolidation: ") + ex.what();
+            }
+            {
+              std::lock_guard<std::mutex> lock(db_explorer_state->mu);
+              db_explorer_state->last_refresh_status
+                  = std::string("Consolidation failed: ") + ex.what();
+            }
             cortext::telemetry::LogError("chat.idle_consolidation.error", {
               cortext::telemetry::Attribute::String("error", ex.what())
             });
@@ -2282,6 +2895,167 @@ int main(int argc, char** argv) {
           idle_consolidation_stop_source.reset();
         }
         idle_consolidating.store(false);
+      }
+    }
+  });
+
+  std::thread media_ingest_thread([&] {
+    auto update_mean = [](double mean, std::uint64_t count, double value) {
+      if (count == 0) {
+        return value;
+      }
+      return mean + (value - mean) / static_cast<double>(count + 1);
+    };
+    while (!media_ingest_shutdown.load()) {
+      PendingMediaIngest item;
+      {
+        std::unique_lock<std::mutex> lock(media_ingest_mu);
+        media_ingest_cv.wait(lock, [&] {
+          return media_ingest_shutdown.load() || !pending_media_ingest.empty();
+        });
+        if (media_ingest_shutdown.load() && pending_media_ingest.empty()) {
+          break;
+        }
+        item = std::move(pending_media_ingest.front());
+        pending_media_ingest.pop_front();
+      }
+
+      const auto started = std::chrono::steady_clock::now();
+      try {
+        cortext::Cortext::Context ctx;
+        std::string source_id;
+        std::string event_content;
+        {
+          std::lock_guard<std::mutex> lock(db_write_mu);
+          const cortext::Retention retention
+              = item.capture_mode == "all"
+                    ? cortext::Retention::Durable
+                    : cortext::Retention::Ephemeral;
+          if (item.kind == PendingMediaIngest::Kind::Video) {
+            source_id = "chat/user";
+            event_content = "[webcam frame "
+                            + std::to_string(item.width) + "x"
+                            + std::to_string(item.height) + "]";
+            ctx = cortext_ctx->ProcessImage(item.rgb.data(), item.width,
+                                            item.height, item.channels,
+                                            source_id, retention);
+          } else {
+            source_id = "chat/user";
+            event_content = "[webcam microphone chunk "
+                            + std::to_string(item.pcm.size())
+                            + " samples @ 16000 Hz]";
+            ctx = cortext_ctx->ProcessAudio(item.pcm.data(), item.pcm.size(),
+                                            source_id, retention);
+          }
+        }
+
+        const double elapsed_ms
+            = std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(
+                  std::chrono::steady_clock::now() - started)
+                  .count();
+
+        if (ctx.output.signal_filter_evaluated) {
+          std::lock_guard<std::mutex> lock(webcam_state->mu);
+          webcam_state->last_signal_filter_modality
+              = ctx.output.signal_filter_modality;
+          webcam_state->last_signal_filter_reason
+              = ctx.output.signal_filter_reason;
+          webcam_state->last_signal_filter_score
+              = ctx.output.signal_filter_score;
+          webcam_state->last_signal_filter_threshold
+              = ctx.output.signal_filter_threshold;
+          if (!ctx.output.signal_filter_accepted) {
+            if (item.kind == PendingMediaIngest::Kind::Video) {
+              webcam_state->video_frames_filtered += 1;
+            } else {
+              webcam_state->audio_chunks_filtered += 1;
+            }
+            webcam_state->last_error.reset();
+            continue;
+          }
+        }
+
+        {
+          std::lock_guard<std::mutex> lock(mu);
+          working_memory = ctx.working_memory;
+          last_should_interrupt = ctx.should_interrupt;
+          if (ctx.output.stored_embedding_id.has_value()) {
+            PushMemoryEvent(memory_events,
+                            CreateStoredEvent(*ctx.output.stored_embedding_id,
+                                              event_content,
+                                              source_id,
+                                              NowUnixMillis(),
+                                              ctx.output),
+                            kMaxMemoryEvents);
+          }
+        }
+        std::optional<chat::MemoryMediaPreview> accepted_visual_signal;
+        if (item.kind == PendingMediaIngest::Kind::Video) {
+          accepted_visual_signal = CreateSignalFilterImagePreview(
+              item.rgb, item.width, item.height, item.channels,
+              NowUnixMillis());
+        }
+        auto media_results = CreateWebcamRetrievedMemories(ctx.retrieved_memory);
+        {
+          std::lock_guard<std::mutex> lock(webcam_state->mu);
+          webcam_state->last_error.reset();
+          webcam_state->retrieved_memories = media_results;
+          AppendWebcamLiveMemoryFeed(*webcam_state,
+                                     webcam_state->retrieved_memories,
+                                     160);
+          webcam_state->retrieval_update_count += 1;
+          if (item.kind == PendingMediaIngest::Kind::Video) {
+            const std::uint64_t before = webcam_state->video_frames_ingested;
+            webcam_state->mean_video_ingest_ms
+                = update_mean(webcam_state->mean_video_ingest_ms, before,
+                              elapsed_ms);
+            webcam_state->last_video_ingest_ms = elapsed_ms;
+            webcam_state->video_frames_ingested = before + 1;
+            if (accepted_visual_signal.has_value()) {
+              webcam_state->signal_filter_image_version += 1;
+              webcam_state->signal_filter_image
+                  = std::move(*accepted_visual_signal);
+            }
+            webcam_state->latest_visual_retrieved_memories
+                = media_results;
+          } else {
+            const std::uint64_t before = webcam_state->audio_chunks_ingested;
+            webcam_state->mean_audio_ingest_ms
+                = update_mean(webcam_state->mean_audio_ingest_ms, before,
+                              elapsed_ms);
+            webcam_state->last_audio_ingest_ms = elapsed_ms;
+            webcam_state->audio_chunks_ingested = before + 1;
+            webcam_state->latest_audio_retrieved_memories
+                = media_results;
+          }
+        }
+        if (item.capture_mode != "all") {
+          std::lock_guard<std::mutex> lock(playground_state->mu);
+          playground_state->retrieved_memories = std::move(media_results);
+          playground_state->last_input_kind
+              = item.kind == PendingMediaIngest::Kind::Video
+                    ? std::string("image")
+                    : std::string("audio");
+          if (item.capture_mode == "video") {
+            playground_state->last_input_summary
+                = "latest accepted video frame";
+          } else if (item.capture_mode == "image") {
+            playground_state->last_input_summary
+                = "captured still image";
+          } else {
+            playground_state->last_input_summary
+                = "latest accepted audio chunk";
+          }
+          playground_state->last_total_ms = elapsed_ms;
+          playground_state->last_process_ms = ctx.process_ms;
+          playground_state->last_status
+              = "Updated playground retrieval from "
+                + playground_state->last_input_summary + ".";
+          playground_state->last_error.reset();
+        }
+      } catch (const std::exception& ex) {
+        std::lock_guard<std::mutex> lock(webcam_state->mu);
+        webcam_state->last_error = std::string("direct media ingest: ") + ex.what();
       }
     }
   });
@@ -2412,6 +3186,45 @@ int main(int argc, char** argv) {
           voice_state->last_error.reset();
         }
         {
+          std::lock_guard<std::mutex> lock(webcam_state->mu);
+          webcam_state->video_frames_captured = 0;
+          webcam_state->video_frames_ingested = 0;
+          webcam_state->video_frames_filtered = 0;
+          webcam_state->audio_chunks_captured = 0;
+          webcam_state->audio_chunks_ingested = 0;
+          webcam_state->audio_chunks_filtered = 0;
+          webcam_state->capture_mode = "all";
+          webcam_state->image_capture_pending = false;
+          webcam_state->last_video_ingest_ms = 0.0;
+          webcam_state->last_audio_ingest_ms = 0.0;
+          webcam_state->mean_video_ingest_ms = 0.0;
+          webcam_state->mean_audio_ingest_ms = 0.0;
+          webcam_state->signal_filter_image.reset();
+          webcam_state->signal_filter_image_version += 1;
+          webcam_state->last_signal_filter_modality.clear();
+          webcam_state->last_signal_filter_reason.clear();
+          webcam_state->last_signal_filter_score = 0.0;
+          webcam_state->last_signal_filter_threshold = 0.0;
+          webcam_state->retrieval_update_count = 0;
+          webcam_state->retrieved_memories.clear();
+          webcam_state->latest_visual_retrieved_memories.clear();
+          webcam_state->latest_audio_retrieved_memories.clear();
+          webcam_state->live_memory_feed.clear();
+          webcam_state->last_error.reset();
+        }
+        {
+          std::lock_guard<std::mutex> lock(playground_state->mu);
+          playground_state->process_text_requested = false;
+          playground_state->pending_text.clear();
+          playground_state->retrieved_memories.clear();
+          playground_state->last_input_kind.clear();
+          playground_state->last_input_summary.clear();
+          playground_state->last_total_ms = 0.0;
+          playground_state->last_process_ms = 0.0;
+          playground_state->last_status.reset();
+          playground_state->last_error.reset();
+        }
+        {
           std::lock_guard<std::mutex> lock(db_explorer_state->mu);
           db_explorer_state->clear_requested = false;
           db_explorer_state->last_refresh_status = "Chat database cleared.";
@@ -2431,6 +3244,8 @@ int main(int argc, char** argv) {
     double new_sensitivity = 0.5;
     double new_stability = 0.5;
     int new_idle_consolidation_seconds = 0;
+    double old_webcam_video_fps = kDefaultWebcamVideoFps;
+    double new_webcam_video_fps = kDefaultWebcamVideoFps;
     std::string new_model;
     std::string new_memory_prompt_prefix;
     std::string new_memory_prompt_suffix;
@@ -2443,6 +3258,9 @@ int main(int argc, char** argv) {
         new_stability = settings_state->draft_stability;
         new_idle_consolidation_seconds
             = settings_state->draft_idle_consolidation_seconds;
+        old_webcam_video_fps = settings_state->active_webcam_video_fps;
+        new_webcam_video_fps = ClampWebcamVideoFps(
+            settings_state->draft_webcam_video_fps);
         new_model = settings_state->draft_model;
         new_memory_prompt_prefix = settings_state->draft_memory_prompt_prefix;
         new_memory_prompt_suffix = settings_state->draft_memory_prompt_suffix;
@@ -2485,7 +3303,8 @@ int main(int argc, char** argv) {
               + " idle="
               + (new_idle_consolidation_seconds > 0
                      ? std::to_string(new_idle_consolidation_seconds) + "s"
-                     : std::string("auto"));
+                     : std::string("auto"))
+              + " webcam_fps=" + std::to_string(new_webcam_video_fps);
           {
             std::lock_guard<std::mutex> lock(settings_state->mu);
             settings_state->active_focus = new_focus;
@@ -2493,10 +3312,31 @@ int main(int argc, char** argv) {
             settings_state->active_stability = new_stability;
             settings_state->active_idle_consolidation_seconds
                 = new_idle_consolidation_seconds;
+            settings_state->active_webcam_video_fps = new_webcam_video_fps;
+            settings_state->draft_webcam_video_fps = new_webcam_video_fps;
             settings_state->active_model = new_model;
             settings_state->active_memory_prompt_prefix = new_memory_prompt_prefix;
             settings_state->active_memory_prompt_suffix = new_memory_prompt_suffix;
             settings_state->last_apply_status = apply_status;
+          }
+          if (!NearlyEqual(old_webcam_video_fps, new_webcam_video_fps)
+              && webcam_session) {
+            bool restart_webcam = false;
+            {
+              std::lock_guard<std::mutex> lock(webcam_state->mu);
+              restart_webcam = webcam_state->capturing;
+            }
+            webcam_session->Stop();
+            webcam_session = build_webcam_session(new_webcam_video_fps);
+            const bool restarted = restart_webcam && webcam_session->Start();
+            std::lock_guard<std::mutex> lock(webcam_state->mu);
+            webcam_state->supported = webcam_session->IsSupported();
+            webcam_state->available = webcam_session->IsAvailable();
+            webcam_state->capturing = restarted;
+            if (restart_webcam && !restarted && !webcam_state->last_error.has_value()) {
+              webcam_state->last_error
+                  = "Applied webcam FPS, but failed to restart webcam ingest.";
+            }
           }
           try {
             persist_runtime_settings();
@@ -2568,6 +3408,185 @@ int main(int argc, char** argv) {
         voice_state->last_error
             = std::string("Failed to save voice preference: ") + ex.what();
       }
+    }
+
+    bool webcam_start_requested = false;
+    bool webcam_stop_requested = false;
+    {
+      std::lock_guard<std::mutex> lock(webcam_state->mu);
+      webcam_start_requested = webcam_state->start_requested;
+      webcam_stop_requested = webcam_state->stop_requested;
+      webcam_state->start_requested = false;
+      webcam_state->stop_requested = false;
+    }
+    if (webcam_start_requested && webcam_session) {
+      const bool started = webcam_session->Start();
+      std::lock_guard<std::mutex> lock(webcam_state->mu);
+      webcam_state->available = webcam_session->IsAvailable();
+      webcam_state->capturing = started;
+      if (!started && !webcam_state->last_error.has_value()) {
+        webcam_state->last_error = "Failed to start direct webcam ingest.";
+      }
+    }
+    if (webcam_stop_requested && webcam_session) {
+      webcam_session->Stop();
+      std::lock_guard<std::mutex> lock(webcam_state->mu);
+      webcam_state->capturing = false;
+    }
+
+    std::optional<chat::MemoryMediaPreview> audio_play_request;
+    bool audio_stop_requested = false;
+    {
+      std::lock_guard<std::mutex> lock(webcam_state->mu);
+      audio_play_request = webcam_state->audio_play_request;
+      audio_stop_requested = webcam_state->audio_stop_requested;
+      webcam_state->audio_play_request.reset();
+      webcam_state->audio_stop_requested = false;
+    }
+    if (audio_stop_requested) {
+      media_preview_player.Stop();
+      std::lock_guard<std::mutex> lock(webcam_state->mu);
+      webcam_state->audio_playing = false;
+      webcam_state->audio_playing_memory_id = 0;
+    }
+    if (audio_play_request.has_value()) {
+      media_preview_player.PlayPcmF32(audio_play_request->audio_samples,
+                                      audio_play_request->audio_sample_rate);
+      std::lock_guard<std::mutex> lock(webcam_state->mu);
+      webcam_state->audio_playing = media_preview_player.IsAvailable();
+      webcam_state->audio_playing_memory_id = audio_play_request->preview_id;
+    } else {
+      std::lock_guard<std::mutex> lock(webcam_state->mu);
+      if (!media_preview_player.IsPlaying()) {
+        webcam_state->audio_playing = false;
+        webcam_state->audio_playing_memory_id = 0;
+      }
+    }
+
+    std::optional<chat::MediaLoadRequest> db_media_load_request;
+    {
+      std::lock_guard<std::mutex> lock(db_explorer_state->mu);
+      db_media_load_request = db_explorer_state->media_load_request;
+      db_explorer_state->media_load_request.reset();
+    }
+    if (db_media_load_request.has_value()) {
+      try {
+        auto media = LoadDatabaseMediaPreview(db_path.string(),
+                                              *db_media_load_request);
+        std::lock_guard<std::mutex> lock(db_explorer_state->mu);
+        if (media.has_value()) {
+          db_explorer_state->loaded_media_modal = std::move(media);
+          db_explorer_state->media_modal_open_requested = true;
+          db_explorer_state->last_refresh_status = "Media loaded.";
+        } else {
+          db_explorer_state->loaded_media_modal.reset();
+          db_explorer_state->media_modal_open_requested = true;
+          db_explorer_state->last_refresh_status = "Media payload unavailable.";
+        }
+      } catch (const std::exception& ex) {
+        std::lock_guard<std::mutex> lock(db_explorer_state->mu);
+        db_explorer_state->loaded_media_modal.reset();
+        db_explorer_state->media_modal_open_requested = true;
+        db_explorer_state->last_refresh_status
+            = std::string("Media load failed: ") + ex.what();
+      }
+    }
+
+    std::optional<chat::MemoryMediaPreview> db_audio_play_request;
+    bool db_audio_stop_requested = false;
+    {
+      std::lock_guard<std::mutex> lock(db_explorer_state->mu);
+      db_audio_play_request = db_explorer_state->audio_play_request;
+      db_audio_stop_requested = db_explorer_state->audio_stop_requested;
+      db_explorer_state->audio_play_request.reset();
+      db_explorer_state->audio_stop_requested = false;
+    }
+    if (db_audio_stop_requested) {
+      media_preview_player.Stop();
+      std::lock_guard<std::mutex> lock(db_explorer_state->mu);
+      db_explorer_state->audio_playing = false;
+      db_explorer_state->audio_playing_memory_id = 0;
+    }
+    if (db_audio_play_request.has_value()) {
+      media_preview_player.PlayPcmF32(db_audio_play_request->audio_samples,
+                                      db_audio_play_request->audio_sample_rate);
+      std::lock_guard<std::mutex> lock(db_explorer_state->mu);
+      db_explorer_state->audio_playing = media_preview_player.IsAvailable();
+      db_explorer_state->audio_playing_memory_id
+          = db_audio_play_request->preview_id;
+    } else {
+      std::lock_guard<std::mutex> lock(db_explorer_state->mu);
+      if (!media_preview_player.IsPlaying()) {
+        db_explorer_state->audio_playing = false;
+        db_explorer_state->audio_playing_memory_id = 0;
+      }
+    }
+
+    std::optional<std::string> playground_text_request;
+    {
+      std::lock_guard<std::mutex> lock(playground_state->mu);
+      if (playground_state->process_text_requested
+          && !playground_state->processing) {
+        playground_text_request = std::move(playground_state->pending_text);
+        playground_state->pending_text.clear();
+        playground_state->process_text_requested = false;
+        playground_state->processing = true;
+        playground_state->last_input_kind = "text";
+        playground_state->last_input_summary = *playground_text_request;
+        playground_state->last_status = "Processing text playground input...";
+        playground_state->last_error.reset();
+      }
+    }
+    if (playground_text_request.has_value()) {
+      if (playground_thread.joinable()) {
+        playground_thread.join();
+      }
+      playground_thread = std::thread([&, text = *playground_text_request] {
+        cortext::Cortext::Context ctx;
+        try {
+          {
+            std::lock_guard<std::mutex> lock(db_write_mu);
+            ctx = cortext_ctx->ProcessText(
+                text, "playground/user", cortext::Retention::Ephemeral);
+          }
+          {
+            std::lock_guard<std::mutex> lock(mu);
+            working_memory = ctx.working_memory;
+            for (const auto& mem : ctx.retrieved_memory) {
+              PushMemoryEvent(
+                  memory_events,
+                  CreateMemoryEvent(chat::MemoryEventType::RETRIEVED_RAW, mem),
+                  kMaxMemoryEvents);
+            }
+            if (ctx.output.stored_embedding_id.has_value()) {
+              PushMemoryEvent(memory_events,
+                              CreateStoredEvent(*ctx.output.stored_embedding_id,
+                                                text,
+                                                "playground/user",
+                                                NowUnixMillis(),
+                                                ctx.output),
+                              kMaxMemoryEvents);
+            }
+          }
+          {
+            std::lock_guard<std::mutex> lock(playground_state->mu);
+            playground_state->retrieved_memories
+                = CreateWebcamRetrievedMemories(ctx.retrieved_memory);
+            playground_state->last_total_ms = ctx.total_ms;
+            playground_state->last_process_ms = ctx.process_ms;
+            playground_state->last_status
+                = "Processed text and loaded retrieved memories.";
+            playground_state->last_error.reset();
+            playground_state->processing = false;
+          }
+        } catch (const std::exception& ex) {
+          std::lock_guard<std::mutex> lock(playground_state->mu);
+          playground_state->last_error
+              = std::string("playground text: ") + ex.what();
+          playground_state->last_status.reset();
+          playground_state->processing = false;
+        }
+      });
     }
 
     if (window.HasPendingMessage()) {
@@ -2730,8 +3749,6 @@ int main(int argc, char** argv) {
               processing_latency_ms = *status_state->processing_latency_ms;
             }
           }
-          refresh_db_explorer();
-
           // Phase 2: Streaming generation with interrupt checking
           cortext::telemetry::LogDebug("chat.phase2.start", {
             cortext::telemetry::Attribute::Int64("memories_injected", static_cast<int64_t>(streaming_state.current_memories.size())),
@@ -3144,8 +4161,6 @@ int main(int argc, char** argv) {
             std::lock_guard<std::mutex> lock(status_state->mu);
             status_state->tokens_used = response_sample.usage.total_tokens;
           }
-          refresh_db_explorer();
-
           idle_tracker.RecordActivity();
 
           {
@@ -3260,7 +4275,6 @@ int main(int argc, char** argv) {
             std::lock_guard<std::mutex> lock(voice_state->mu);
             voice_state->surfaced_memories = std::move(surfaced_memories);
           }
-          refresh_db_explorer();
         } catch (const std::exception& ex) {
           std::lock_guard<std::mutex> lock(mu);
           last_error = std::string("voice ingress: ") + ex.what();
@@ -3278,16 +4292,27 @@ int main(int argc, char** argv) {
   if (voice_session) {
     voice_session->CancelAssistantReply();
   }
+  if (webcam_session) {
+    webcam_session->Stop();
+  }
+  media_ingest_shutdown.store(true);
+  media_ingest_cv.notify_all();
 
   // Wait for threads to complete before cleanup
   if (streaming_thread.joinable()) {
     streaming_thread.join();
+  }
+  if (playground_thread.joinable()) {
+    playground_thread.join();
   }
   if (voice_session) {
     voice_session->Stop();
   }
   if (refresh_thread.joinable()) {
     refresh_thread.join();
+  }
+  if (media_ingest_thread.joinable()) {
+    media_ingest_thread.join();
   }
 
   try {

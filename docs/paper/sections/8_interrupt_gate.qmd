@@ -1,6 +1,6 @@
 # Interrupt Gate and Streaming Integration {#sec-interrupt}
 
-The interrupt gate controls when retrieved memories enter active context during streaming generation. The gate balances novelty value against disruption cost. The interrupt gate operates on memory-level context, using centroids (μ_acc) rather than individual signal embeddings for novelty and relevance computation. All thresholds and gains in this section are derived from the three knobs (F, S, T); no fixed behavioral constants are introduced.
+The interrupt gate controls when retrieved memories enter active context during streaming generation. The gate balances novelty value against disruption cost. The interrupt gate operates on memory-level context, using centroids (μ_acc) rather than individual signal embeddings for novelty and relevance computation. The main interrupt thresholds and gains in this section are derived from the three knobs (F, S, T). The runtime also contains a small number of operational guard constants and environment-controlled diagnostics outside this core gate.
 
 **Note:** As defined in Section 1, all knob symbols here use the midpoint‑biased values F̃ and S̃ (T is unmodified). For affective gain, we use a lighter bias \( \tilde{S}_{affect} = \mathrm{BiasMid}(S, -0.06) \) to preserve mid‑range affect modulation.
 

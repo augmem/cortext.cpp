@@ -1,0 +1,10 @@
+--- src/json/numeric.rs
++++ src/json/numeric.rs
+@@ -20,6 +20,6 @@
+         let mut coef = coef;
+         let mut exp = exp;
+-        while exp > 0 && coef.is_multiple_of(10) {
++        while exp > 0 && coef % 10 == 0 {
+             coef /= 10;
+             exp -= 1;
+         }

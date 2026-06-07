@@ -17,45 +17,14 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 #include "absl/status/status.h"  // from @com_google_absl
-#include "third_party/odml/infra/genai/inference/proto/llm_inference_engine.pb.h"
-#include "runtime/executor/llm_executor_settings.h"
+#include "runtime/executor/executor_settings_base.h"
+#include "runtime/util/test_utils.h"  // IWYU pragma: keep
 
+namespace litert::lm {
 namespace {
 
-using ::litert::lm::ActivationDataType;
-using ::litert::lm::Backend;
-using ::litert::lm::ConvertActivationDataType;
-using ::litert::lm::ConvertBackend;
-using ::odml::infra::proto::SessionConfig;
 using ::testing::status::IsOkAndHolds;
 using ::testing::status::StatusIs;
 
-TEST(LlmExecutorUtilsTest, ConvertBackendSuccess) {
-  EXPECT_THAT(ConvertBackend(SessionConfig::XNNPACK),
-              IsOkAndHolds(Backend::CPU));
-  EXPECT_THAT(ConvertBackend(SessionConfig::ML_DRIFT),
-              IsOkAndHolds(Backend::GPU));
-  EXPECT_THAT(ConvertBackend(SessionConfig::GOOGLE_TENSOR),
-              IsOkAndHolds(Backend::GOOGLE_TENSOR_ARTISAN));
-}
-
-TEST(LlmExecutorUtilsTest, ConvertBackendFail) {
-  EXPECT_THAT(ConvertBackend(SessionConfig::UNSPECIFIED_BACKEND),
-              StatusIs(absl::StatusCode::kInvalidArgument));
-}
-
-TEST(LlmExecutorUtilsTest, ConvertActivationDataTypeSuccess) {
-  EXPECT_THAT(
-      ConvertActivationDataType(SessionConfig::ACTIVATION_DATA_TYPE_F32),
-      IsOkAndHolds(ActivationDataType::FLOAT32));
-  EXPECT_THAT(
-      ConvertActivationDataType(SessionConfig::ACTIVATION_DATA_TYPE_F16),
-      IsOkAndHolds(ActivationDataType::FLOAT16));
-  EXPECT_THAT(
-      ConvertActivationDataType(SessionConfig::ACTIVATION_DATA_TYPE_I16),
-      IsOkAndHolds(ActivationDataType::INT16));
-  EXPECT_THAT(ConvertActivationDataType(SessionConfig::ACTIVATION_DATA_TYPE_I8),
-              IsOkAndHolds(ActivationDataType::INT8));
-}
-
 }  // namespace
+}  // namespace litert::lm

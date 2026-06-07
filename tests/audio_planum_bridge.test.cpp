@@ -6,7 +6,7 @@
 
 #include "cortext/capi.h"
 #include "cortext/cortext.hpp"
-#include "planum/perception_event.hpp"
+#include "planum/contract/perception_event.hpp"
 
 #include "../src/audio/planum_bridge.hpp"
 
@@ -44,27 +44,27 @@ public:
   std::uint64_t last_timestamp = 0;
 };
 
-planum::PerceptionEvent
-MakeEvent (planum::EventKind kind)
+planum::contract::PerceptionEvent
+MakeEvent (planum::contract::EventKind kind)
 {
-  planum::PerceptionEvent event;
+  planum::contract::PerceptionEvent event;
   event.kind = kind;
   event.emitted_at_ms = 1400;
   event.segment_started_at_ms = 1100;
   event.segment_ended_at_ms = 1300;
-  event.stream_id = planum::StreamId{ "session-a" };
-  event.segment_id = planum::SegmentId{ "segment-7" };
-  event.turn_id = planum::TurnId{ "turn-2" };
+  event.stream_id = planum::contract::StreamId{ "session-a" };
+  event.segment_id = planum::contract::SegmentId{ "segment-7" };
+  event.turn_id = planum::contract::TurnId{ "turn-2" };
   event.transcript.text = "hello from the bridge";
   event.transcript.confidence = 0.98f;
-  event.speaker.id = planum::SpeakerId{ "speaker-3" };
+  event.speaker.id = planum::contract::SpeakerId{ "speaker-3" };
   event.speaker.confidence = 0.72f;
   return event;
 }
 
 template <typename T>
 concept HasProcessPlanumEvent
-    = requires (T &value, const planum::PerceptionEvent &event)
+    = requires (T &value, const planum::contract::PerceptionEvent &event)
 {
   value.ProcessPlanumEvent (event);
 };
@@ -77,7 +77,8 @@ TEST_CASE ("planum bridge routes finalized transcripts through ProcessTextAt",
   RecordingBridgeTarget target;
   cortext::audio::PlanumBridge bridge (target);
 
-  const auto result = bridge.Accept (MakeEvent (planum::EventKind::final_transcript));
+  const auto result = bridge.Accept (
+      MakeEvent (planum::contract::EventKind::final_transcript));
 
   REQUIRE (result.has_value ());
   CHECK (result->routed_to_text);
@@ -96,15 +97,17 @@ TEST_CASE ("planum bridge keeps non-final events in explicit no-write mode",
   RecordingBridgeTarget target;
   cortext::audio::PlanumBridge bridge (target);
 
-  const auto partial_result = bridge.Accept (MakeEvent (planum::EventKind::partial_transcript));
-  const auto endpoint_result = bridge.Accept (MakeEvent (planum::EventKind::endpoint_reached));
+  const auto partial_result = bridge.Accept (
+      MakeEvent (planum::contract::EventKind::partial_transcript));
+  const auto endpoint_result = bridge.Accept (
+      MakeEvent (planum::contract::EventKind::endpoint_reached));
 
-  auto degraded_event = MakeEvent (planum::EventKind::degraded);
+  auto degraded_event = MakeEvent (planum::contract::EventKind::degraded);
   degraded_event.degraded.active = true;
   degraded_event.degraded.code = 9;
   const auto degraded_result = bridge.Accept (degraded_event);
 
-  auto error_event = MakeEvent (planum::EventKind::error);
+  auto error_event = MakeEvent (planum::contract::EventKind::error);
   error_event.error.active = true;
   error_event.error.code = 12;
   const auto error_result = bridge.Accept (error_event);

@@ -28,6 +28,7 @@
 #include <variant>
 #include <vector>
 
+#include "absl/container/flat_hash_map.h"  // from @com_google_absl
 #include "absl/log/log.h"  // from @com_google_absl
 #include "absl/status/status.h"  // from @com_google_absl
 #include "absl/status/statusor.h"  // from @com_google_absl
@@ -74,6 +75,9 @@ absl::StatusOr<absl::string_view> InputImage::GetRawImageBytes() const {
   if (std::holds_alternative<std::string>(data_)) {
     return absl::string_view(std::get<std::string>(data_));
   }
+  if (std::holds_alternative<absl::string_view>(data_)) {
+    return std::get<absl::string_view>(data_);
+  }
   return absl::FailedPreconditionError(
       "The image is preprocessed and does not have raw image bytes.");
 }
@@ -87,13 +91,36 @@ absl::StatusOr<const TensorBuffer*> InputImage::GetPreprocessedImageTensor()
       "The image is not preprocessed and does not have a tensor.");
 }
 
+absl::StatusOr<const absl::flat_hash_map<std::string, TensorBuffer>*>
+InputImage::GetPreprocessedImageTensorMap() const {
+  if (std::holds_alternative<absl::flat_hash_map<std::string, TensorBuffer>>(
+          data_)) {
+    return &std::get<absl::flat_hash_map<std::string, TensorBuffer>>(data_);
+  }
+  return absl::FailedPreconditionError(
+      "The image is not preprocessed and does not have a tensor map.");
+}
+
 absl::StatusOr<InputImage> InputImage::CreateCopy() const {
   if (std::holds_alternative<std::string>(data_)) {
     return InputImage(std::move(std::get<std::string>(data_)));
+  } else if (std::holds_alternative<absl::string_view>(data_)) {
+    // Deep copy the string view.
+    return InputImage(std::string(std::get<absl::string_view>(data_)));
   } else if (std::holds_alternative<TensorBuffer>(data_)) {
     LITERT_ASSIGN_OR_RETURN(auto tensor_buffer_clone,
                             std::get<TensorBuffer>(data_).Duplicate());
     return InputImage(std::move(tensor_buffer_clone));
+  } else if (std::holds_alternative<
+                 absl::flat_hash_map<std::string, TensorBuffer>>(data_)) {
+    const auto& tensor_buffer_map =
+        std::get<absl::flat_hash_map<std::string, TensorBuffer>>(data_);
+    absl::flat_hash_map<std::string, TensorBuffer> tensor_buffer_map_copy;
+    for (const auto& [key, value] : tensor_buffer_map) {
+      LITERT_ASSIGN_OR_RETURN(auto tensor_buffer_clone, value.Duplicate());
+      tensor_buffer_map_copy.try_emplace(key, std::move(tensor_buffer_clone));
+    }
+    return InputImage(std::move(tensor_buffer_map_copy));
   }
   return absl::FailedPreconditionError(
       "The data_ is not a string or a TensorBuffer.");
@@ -165,6 +192,9 @@ std::ostream& operator<<(std::ostream& os, const TaskState& task_state) {
     case TaskState::kDependentTaskCancelled:
       os << "DependentTaskCancelled";
       break;
+    case TaskState::kLastCallbackQueued:
+      os << "LastCallbackQueued";
+      break;
     default:
       os << "Unknown";
       break;
@@ -213,7 +243,8 @@ const proto::BenchmarkParams& BenchmarkInfo::GetBenchmarkParams() const {
   return benchmark_params_;
 }
 
-absl::Status BenchmarkInfo::TimeInitPhaseStart(const std::string& phase_name) {
+absl::Status BenchmarkInfo::TimeInitPhaseStart(InitPhase phase) {
+  std::string phase_name = std::string(InitPhaseToString(phase));
   if (start_time_map_.contains(phase_name)) {
     return absl::InternalError(
         absl::StrCat("Phase ", phase_name, " already started."));
@@ -222,12 +253,25 @@ absl::Status BenchmarkInfo::TimeInitPhaseStart(const std::string& phase_name) {
   return absl::OkStatus();
 }
 
-absl::Status BenchmarkInfo::TimeInitPhaseEnd(const std::string& phase_name) {
+absl::Status BenchmarkInfo::TimeInitPhaseEnd(InitPhase phase) {
+  std::string phase_name = std::string(InitPhaseToString(phase));
   if (!start_time_map_.contains(phase_name)) {
     return absl::InternalError(
         absl::StrCat("Phase ", phase_name, " not started."));
   }
   init_phases_[phase_name] = absl::Now() - start_time_map_[phase_name];
+  return absl::OkStatus();
+}
+
+absl::Status BenchmarkInfo::InitPhaseRecord(InitPhase phase,
+                                            absl::Duration duration) {
+  std::string phase_name = std::string(InitPhaseToString(phase));
+  if (init_phases_.contains(phase_name)) {
+    return absl::InternalError(absl::StrCat("Phase ", phase_name,
+                                            " already recorded with duration ",
+                                            init_phases_[phase_name], "."));
+  }
+  init_phases_[phase_name] = duration;
   return absl::OkStatus();
 }
 
@@ -266,7 +310,14 @@ absl::Status BenchmarkInfo::TimePrefillTurnEnd(uint64_t num_prefill_tokens) {
   return absl::OkStatus();
 }
 
-const BenchmarkTurnData& BenchmarkInfo::GetPrefillTurn(int turn_index) const {
+absl::StatusOr<BenchmarkTurnData> BenchmarkInfo::GetPrefillTurn(
+    int turn_index) const {
+  if (turn_index < 0 ||
+      static_cast<size_t>(turn_index) >= prefill_turns_.size()) {
+    return absl::OutOfRangeError(absl::StrCat(
+        "Prefill turn index ", turn_index,
+        " is out of bounds. Total prefill turns: ", prefill_turns_.size()));
+  }
   return prefill_turns_[turn_index];
 }
 
@@ -292,7 +343,38 @@ absl::Status BenchmarkInfo::TimeDecodeTurnEnd(uint64_t num_decode_tokens) {
   return absl::OkStatus();
 }
 
-const BenchmarkTurnData& BenchmarkInfo::GetDecodeTurn(int turn_index) const {
+absl::Status BenchmarkInfo::TimeTextToTokenIdsStart() {
+  const std::string phase_name =
+      absl::StrCat("text_to_token_ids:", text_to_token_ids_turn_index_);
+  if (start_time_map_.contains(phase_name)) {
+    return absl::InternalError(
+        absl::StrCat("TextToTokenIds turn ", phase_name, " already started."));
+  }
+  start_time_map_[phase_name] = absl::Now();
+  return absl::OkStatus();
+}
+
+absl::Status BenchmarkInfo::TimeTextToTokenIdsEnd(uint64_t num_tokens) {
+  const std::string phase_name =
+      absl::StrCat("text_to_token_ids:", text_to_token_ids_turn_index_);
+  if (!start_time_map_.contains(phase_name)) {
+    return absl::InternalError(
+        absl::StrCat("TextToTokenIds turn ", phase_name, " not started."));
+  }
+  text_to_token_ids_turns_.emplace_back(
+      num_tokens, absl::Now() - start_time_map_[phase_name]);
+  text_to_token_ids_turn_index_++;
+  return absl::OkStatus();
+}
+
+absl::StatusOr<BenchmarkTurnData> BenchmarkInfo::GetDecodeTurn(
+    int turn_index) const {
+  if (turn_index < 0 ||
+      static_cast<size_t>(turn_index) >= decode_turns_.size()) {
+    return absl::OutOfRangeError(absl::StrCat(
+        "Decode turn index ", turn_index,
+        " is out of bounds. Total decode turns: ", decode_turns_.size()));
+  }
   return decode_turns_[turn_index];
 }
 
@@ -319,6 +401,22 @@ double BenchmarkInfo::GetPrefillTokensPerSec(int turn_index) const {
     return 0.0;
   }
   return static_cast<double>(turn.num_tokens) / turn_seconds;
+}
+
+uint64_t BenchmarkInfo::GetTotalTextToTokenIdsTurns() const {
+  return text_to_token_ids_turns_.size();
+}
+
+absl::StatusOr<BenchmarkTurnData> BenchmarkInfo::GetTextToTokenIdsTurn(
+    int turn_index) const {
+  if (turn_index < 0 ||
+      static_cast<size_t>(turn_index) >= text_to_token_ids_turns_.size()) {
+    return absl::OutOfRangeError(
+        absl::StrCat("TextToTokenIds turn index ", turn_index,
+                     " is out of bounds. Total text_to_token_ids turns: ",
+                     text_to_token_ids_turns_.size()));
+  }
+  return text_to_token_ids_turns_[turn_index];
 }
 
 uint64_t BenchmarkInfo::GetTotalDecodeTurns() const {
@@ -375,13 +473,29 @@ std::ostream& operator<<(std::ostream& os, const BenchmarkInfo& info) {
   if (info.GetInitPhases().empty()) {
     os << "    No init phases recorded." << std::endl;
   } else {
-    double total_time = 0.0;
-    for (const auto& phase : info.GetInitPhases()) {
-      total_time += absl::ToDoubleMilliseconds(phase.second);
+    const auto& init_phases = info.GetInitPhases();
+    bool has_conversation_creation = false;
+    std::string conversation_creation_phase_name =
+        std::string(BenchmarkInfo::InitPhaseToString(
+            BenchmarkInfo::InitPhase::kConversation));
+    std::string session_creation_phase_name = std::string(
+        BenchmarkInfo::InitPhaseToString(BenchmarkInfo::InitPhase::kSession));
+    for (const auto& [phase_name, phase_duration] : init_phases) {
+      if (phase_name == conversation_creation_phase_name) {
+        has_conversation_creation = true;
+        break;
+      }
+    }
+    for (const auto& phase : init_phases) {
+      if (has_conversation_creation &&
+          phase.first == session_creation_phase_name) {
+        // Session creation time is included in conversation creation time,
+        // so skip it.
+        continue;
+      }
       os << "    - " << phase.first << ": "
          << absl::ToDoubleMilliseconds(phase.second) << " ms" << std::endl;
     }
-    os << "    Total init time: " << total_time << " ms" << std::endl;
   }
 
   os << "--------------------------------------------------" << std::endl;
@@ -395,7 +509,7 @@ std::ostream& operator<<(std::ostream& os, const BenchmarkInfo& info) {
     os << "    No prefill turns recorded." << std::endl;
   } else {
     for (uint64_t i = 0; i < info.GetTotalPrefillTurns(); ++i) {
-      os << "    Prefill Turn " << i + 1 << ": " << info.GetPrefillTurn(i);
+      os << "    Prefill Turn " << i + 1 << ": " << *info.GetPrefillTurn(i);
       os << "      Prefill Speed: "
          << info.GetPrefillTokensPerSec(static_cast<int>(i)) << " tokens/sec."
          << std::endl;
@@ -409,12 +523,27 @@ std::ostream& operator<<(std::ostream& os, const BenchmarkInfo& info) {
     os << "    No decode turns recorded." << std::endl;
   } else {
     for (uint64_t i = 0; i < info.GetTotalDecodeTurns(); ++i) {
-      os << "    Decode Turn " << i + 1 << ": " << info.GetDecodeTurn(i);
+      os << "    Decode Turn " << i + 1 << ": " << *info.GetDecodeTurn(i);
       os << "      Decode Speed: "
          << info.GetDecodeTokensPerSec(static_cast<int>(i)) << " tokens/sec."
          << std::endl;
     }
   }
+  os << "--------------------------------------------------" << std::endl;
+  os << "  TextToTokenIds Turns (Total " << info.GetTotalTextToTokenIdsTurns()
+     << " turns):" << std::endl;
+  if (info.GetTotalTextToTokenIdsTurns() == 0) {
+    os << "    No text to token ids turns recorded." << std::endl;
+  } else {
+    for (uint64_t i = 0; i < info.GetTotalTextToTokenIdsTurns(); ++i) {
+      auto turn = info.GetTextToTokenIdsTurn(i);
+      if (turn.ok()) {
+        os << "    Turn " << i + 1 << ": " << turn->duration << ", "
+           << turn->num_tokens << " tokens" << std::endl;
+      }
+    }
+  }
+
   os << "--------------------------------------------------" << std::endl;
 
   if (!info.GetMarkDurations().empty()) {
@@ -429,5 +558,28 @@ std::ostream& operator<<(std::ostream& os, const BenchmarkInfo& info) {
 }
 
 DecodeConfig DecodeConfig::CreateDefault() { return DecodeConfig(); }
+
+std::ostream& operator<<(std::ostream& os,
+                         const VisionExecutorProperties& properties) {
+  os << "num_tokens_per_image: " << properties.num_tokens_per_image
+     << std::endl;
+  os << "patch_num_shrink_factor: "
+     << (properties.patch_num_shrink_factor.has_value()
+             ? absl::StrCat(properties.patch_num_shrink_factor.value())
+             : "not set")
+     << std::endl;
+  return os;
+}
+
+std::ostream& operator<<(std::ostream& os,
+                         const AudioExecutorProperties& properties) {
+  os << "is_streaming_model: " << properties.is_streaming_model << std::endl;
+  os << "streaming_chunk_size: " << properties.streaming_chunk_size
+     << std::endl;
+  os << "streaming_chunk_overlap_size: "
+     << properties.streaming_chunk_overlap_size << std::endl;
+  os << "audio_shrink_factor: " << properties.audio_shrink_factor << std::endl;
+  return os;
+}
 
 }  // namespace litert::lm

@@ -16,11 +16,11 @@
 package com.google.ai.edge.litertlm.example
 
 import com.google.ai.edge.litertlm.Backend
+import com.google.ai.edge.litertlm.Contents
 import com.google.ai.edge.litertlm.ConversationConfig
 import com.google.ai.edge.litertlm.Engine
 import com.google.ai.edge.litertlm.EngineConfig
 import com.google.ai.edge.litertlm.LogSeverity
-import com.google.ai.edge.litertlm.Message
 
 suspend fun main(args: Array<String>) {
   val modelPath =
@@ -28,16 +28,16 @@ suspend fun main(args: Array<String>) {
 
   Engine.setNativeMinLogSeverity(LogSeverity.ERROR) // silence noisy log for the TUI.
 
-  val engineConfig = EngineConfig(modelPath = modelPath, backend = Backend.CPU)
+  val engineConfig = EngineConfig(modelPath = modelPath, backend = Backend.CPU())
   Engine(engineConfig).use { engine ->
     engine.initialize()
 
     val conversationConfig =
-      ConversationConfig(systemMessage = Message.of("You are a helpful assistant."))
+      ConversationConfig(systemInstruction = Contents.of("You are a helpful assistant."))
     engine.createConversation(conversationConfig).use { conversation ->
       while (true) {
         print("\n>>> ")
-        conversation.sendMessageAsync(Message.of(readln())).collect { print(YELLOW + it + RESET) }
+        conversation.sendMessageAsync(readln()).collect { print(YELLOW + it + RESET) }
       }
     }
   }

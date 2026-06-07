@@ -25,23 +25,12 @@
 #include "absl/status/status.h"  // from @com_google_absl
 #include "absl/status/statusor.h"  // from @com_google_absl
 #include "absl/strings/string_view.h"  // from @com_google_absl
+#include "runtime/components/tokenizer.h"
 #include "runtime/util/memory_mapped_file.h"
 #include "runtime/util/status_macros.h"  // NOLINT
 #include "include/tokenizers_cpp.h"  // from @tokenizers_cpp
 
 namespace litert::lm {
-
-// Replacement character (U+FFFD) in UTF-8.
-// This character is used to represent incomplete BPE sequences (see below
-// https://github.com/huggingface/tokenizers/blob/76abe0f77d409aec1687ead442cedaa0a8c058e8/tokenizers/src/decoders/byte_fallback.rs#L25)
-const char kReplacementCharacter[] = "\xef\xbf\xbd";
-
-// Checks if the decoded string ends with the replacement character, which
-// indicates that the set of token IDs passed to the tokenizer is part of a BPE
-// sequence and needs more tokens to be decoded.
-static bool has_bpe_suffix(const std::string& decoded) {
-  return decoded.ends_with(kReplacementCharacter);
-}
 
 absl::StatusOr<std::unique_ptr<HuggingFaceTokenizer>>
 HuggingFaceTokenizer::CreateFromFile(absl::string_view json_path) {
@@ -54,7 +43,7 @@ HuggingFaceTokenizer::CreateFromFile(absl::string_view json_path) {
 }
 
 absl::StatusOr<std::unique_ptr<HuggingFaceTokenizer>>
-HuggingFaceTokenizer::CreateFromJson(std::string json) {
+HuggingFaceTokenizer::CreateFromJson(const std::string& json) {
   auto tokenizer = tokenizers::Tokenizer::FromBlobJSON(json);
   if (!tokenizer) {
     return absl::InvalidArgumentError("Failed to create tokenizer from JSON.");
@@ -87,7 +76,7 @@ absl::StatusOr<std::string> HuggingFaceTokenizer::TokenIdsToText(
     // support Rust's lazy_static initialization.
     // TODO(b/379364190) - Remove this once the leak checker is fixed.
     std::string decoded = tokenizer_->Decode(token_ids);
-    if (has_bpe_suffix(decoded)) {
+    if (Tokenizer::HasBpeSuffix(decoded)) {
       return absl::DataLossError(
           "The set of token IDs passed to the tokenizer is part of a BPE "
           "sequence and needs more tokens to be decoded.");
@@ -95,6 +84,17 @@ absl::StatusOr<std::string> HuggingFaceTokenizer::TokenIdsToText(
       return decoded;
     }
   }
+}
+
+std::vector<std::string> HuggingFaceTokenizer::GetTokens() const {
+  std::vector<std::string> tokens;
+  int vocab_size = tokenizer_->GetVocabSize();
+  tokens.reserve(vocab_size);
+  for (int i = 0; i < vocab_size; ++i) {
+    std::string token = tokenizer_->IdToToken(i);
+    tokens.push_back(token);
+  }
+  return tokens;
 }
 
 }  // namespace litert::lm

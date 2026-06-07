@@ -32,12 +32,12 @@ option(CORTEXT_EMBED_VEC "Embed sqlite-vec extension" ON)
 option(CORTEXT_EMBED_OBJSTORE "Embed sqlite-objstore extension" ON)
 option(CORTEXT_ENABLE_DYNAMIC_EXTENSIONS "Enable dynamic extension loading fallback" ON)
 option(CORTEXT_DISABLE_OPENTELEMETRY "Disable OpenTelemetry integration" OFF)
-option(CORTEXT_DISABLE_IMAGEBIND_ORT "Disable ONNX Runtime for ImageBind embedder" OFF)
 option(CORTEXT_ENABLE_GEMMA_ORT "Enable ONNX Runtime for Gemma text generator" OFF)
 option(CORTEXT_DISABLE_OGA "Disable onnxruntime-genai for Phi-4 Extractor/Summarizer" OFF)
 option(CORTEXT_DISABLE_LITERT "Disable LiteRT-LM for Gemma Extractor/Summarizer" OFF)
 option(CORTEXT_DISABLE_SHERPA_ONNX "Disable sherpa-onnx ASR/TTS integration" OFF)
 option(CORTEXT_ENABLE_EMBEDDINGGEMMA "Build EmbeddingGemma encoder" ON)
+option(CORTEXT_ENABLE_AAIT_GGUF "Build AAIT-86M GGUF inspection/encoder contract" ON)
 
 # Sanitizer options for catching memory bugs during development
 option(CORTEXT_ENABLE_ASAN "Enable AddressSanitizer" OFF)
@@ -143,11 +143,11 @@ add_library(cortext
     src/internal/cancellation.cpp
     src/processor/operation_context.cpp
     src/signal_processor.cpp
+    src/signal_filter.cpp
     src/cortext.cpp
     src/core/thread_config.cpp
     src/capi.cpp
     src/telemetry/telemetry.cpp
-    src/encoder/imagebind.cpp
     src/data/centroids.cpp
     src/data/embedded_centroid_vectors.cpp
     src/operations/centroids.cpp
@@ -204,6 +204,8 @@ add_library(cortext
     src/operations/synaptic_tagging.cpp
     src/operations/drift_accumulation.cpp
     src/operations/streaming_pacing.cpp
+    src/operations/short_term_memory_shadow.cpp
+    src/operations/soft_anchor.cpp
     # Section 4.4: Accumulator operations
     src/operations/accumulator_scores.cpp
     src/operations/accumulator.cpp
@@ -306,6 +308,13 @@ if(NOT EMSCRIPTEN)
   endif()
 endif()
 
+if(APPLE)
+  find_library(CORTEXT_ACCELERATE_FRAMEWORK Accelerate)
+  if(CORTEXT_ACCELERATE_FRAMEWORK)
+    target_link_libraries(cortext PUBLIC ${CORTEXT_ACCELERATE_FRAMEWORK})
+  endif()
+endif()
+
 if(CORTEXT_ENABLE_EMBEDDINGGEMMA)
   target_compile_definitions(cortext PUBLIC CORTEXT_ENABLE_EMBEDDINGGEMMA=1)
   target_sources(cortext PRIVATE src/encoder/embeddinggemma.cpp)
@@ -316,14 +325,18 @@ if(CORTEXT_ENABLE_EMBEDDINGGEMMA)
   endif()
 endif()
 
+if(CORTEXT_ENABLE_AAIT_GGUF)
+  target_compile_definitions(cortext PUBLIC CORTEXT_ENABLE_AAIT_GGUF=1)
+  target_sources(cortext PRIVATE src/models/aait_gguf_encoder.cpp)
+endif()
+
 if(NOT CORTEXT_DISABLE_SHERPA_ONNX)
   target_sources(cortext PRIVATE src/audio/sherpa_onnx.cpp)
 endif()
 add_library(cortext::cortext ALIAS cortext)
 
-if(CORTEXT_TARGET_IOS AND CORTEXT_DISABLE_IMAGEBIND_ORT AND CORTEXT_DISABLE_LITERT AND CORTEXT_DISABLE_OGA)
+if(CORTEXT_TARGET_IOS AND CORTEXT_DISABLE_LITERT AND CORTEXT_DISABLE_OGA)
   set_source_files_properties(
-    src/encoder/imagebind.cpp
     src/extractor/gemma_extractor.cpp
     src/summarizer/gemma_summarizer.cpp
     src/audio/gemma_audio.cpp
@@ -482,15 +495,13 @@ else()
   target_compile_definitions(cortext PRIVATE CORTEXT_DISABLE_OPENTELEMETRY=1)
 endif()
 
-# Optional ONNX Runtime integration for ImageBind embedder
-if(NOT CORTEXT_DISABLE_IMAGEBIND_ORT AND NOT EMSCRIPTEN)
+# Optional ONNX Runtime integration for Gemma text generator
+if(CORTEXT_ENABLE_GEMMA_ORT)
+  target_compile_definitions(cortext PUBLIC CORTEXT_ENABLE_GEMMA_ORT=1)
+
   include(ExternalProject)
   find_package(ZLIB REQUIRED)
 
-  # Expose this feature macro to dependents (tests, downstream consumers).
-  target_compile_definitions(cortext PUBLIC CORTEXT_ENABLE_IMAGEBIND_ORT=1)
-
-  # Build ONNX Runtime from vendored source when needed.
   set(CORTEXT_ORT_BUILD_TYPE "${CMAKE_BUILD_TYPE}")
   if(NOT CORTEXT_ORT_BUILD_TYPE)
     set(CORTEXT_ORT_BUILD_TYPE "Release")
@@ -507,13 +518,10 @@ if(NOT CORTEXT_DISABLE_IMAGEBIND_ORT AND NOT EMSCRIPTEN)
     set(CORTEXT_ORT_USE_COREML ON)
   endif()
 
-  # Use headers from the ORT install tree.
   target_include_directories(cortext PRIVATE
     ${CORTEXT_ORT_INSTALL_DIR}/include
   )
 
-  # If a prebuilt library exists, prefer it. Otherwise build/install into the
-  # build tree.
   if(NOT EXISTS "${CORTEXT_ORT_LIB_PATH}")
     ExternalProject_Add(onnxruntime_ep
       SOURCE_DIR "${CORTEXT_ORT_SOURCE_DIR}"
@@ -524,15 +532,10 @@ if(NOT CORTEXT_DISABLE_IMAGEBIND_ORT AND NOT EMSCRIPTEN)
         -DCMAKE_INSTALL_PREFIX=${CORTEXT_ORT_INSTALL_DIR}
         -DCMAKE_POSITION_INDEPENDENT_CODE=ON
         -DCMAKE_POLICY_VERSION_MINIMUM=3.5
-        # Prevent ORT from picking up Homebrew/system Protobuf configs,
-        # which can reference Abseil targets we aren't providing here.
         -DCMAKE_DISABLE_FIND_PACKAGE_Protobuf=ON
         -DCMAKE_DISABLE_FIND_PACKAGE_protobuf=ON
-        # Prevent ORT from picking up Homebrew/system ONNX config, which can
-        # pull in system Protobuf transitively.
         -DCMAKE_DISABLE_FIND_PACKAGE_ONNX=ON
         -DCMAKE_DISABLE_FIND_PACKAGE_onnx=ON
-        # Force ORT to use its bundled flatbuffers instead of system/homebrew.
         -DCMAKE_DISABLE_FIND_PACKAGE_Flatbuffers=ON
         -DCMAKE_DISABLE_FIND_PACKAGE_flatbuffers=ON
         -Donnxruntime_BUILD_SHARED_LIB=ON
@@ -565,86 +568,9 @@ if(NOT CORTEXT_DISABLE_IMAGEBIND_ORT AND NOT EMSCRIPTEN)
   endif()
 endif()
 
-# Optional ONNX Runtime integration for Gemma text generator
-# Shares the same ORT build as ImageBind if both are enabled
-if(CORTEXT_ENABLE_GEMMA_ORT)
-  target_compile_definitions(cortext PUBLIC CORTEXT_ENABLE_GEMMA_ORT=1)
-
-  if(CORTEXT_DISABLE_IMAGEBIND_ORT)
-    # Build ORT if not already built for ImageBind
-    include(ExternalProject)
-    find_package(ZLIB REQUIRED)
-
-    set(CORTEXT_ORT_BUILD_TYPE "${CMAKE_BUILD_TYPE}")
-    if(NOT CORTEXT_ORT_BUILD_TYPE)
-      set(CORTEXT_ORT_BUILD_TYPE "Release")
-    endif()
-
-    set(CORTEXT_ORT_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/onnxruntime/cmake")
-    set(CORTEXT_ORT_BINARY_DIR "${CMAKE_BINARY_DIR}/third_party/onnxruntime-build")
-    set(CORTEXT_ORT_INSTALL_DIR "${CMAKE_BINARY_DIR}/third_party/onnxruntime-install")
-    set(CORTEXT_ORT_LIB_PATH
-        "${CORTEXT_ORT_INSTALL_DIR}/lib/${CMAKE_SHARED_LIBRARY_PREFIX}onnxruntime${CMAKE_SHARED_LIBRARY_SUFFIX}")
-
-    set(CORTEXT_ORT_USE_COREML OFF)
-    if(APPLE AND CORTEXT_ENABLE_ORT_COREML)
-      set(CORTEXT_ORT_USE_COREML ON)
-    endif()
-
-    target_include_directories(cortext PRIVATE
-      ${CORTEXT_ORT_INSTALL_DIR}/include
-    )
-
-    if(NOT EXISTS "${CORTEXT_ORT_LIB_PATH}")
-      ExternalProject_Add(onnxruntime_ep
-        SOURCE_DIR "${CORTEXT_ORT_SOURCE_DIR}"
-        BINARY_DIR "${CORTEXT_ORT_BINARY_DIR}"
-        INSTALL_DIR "${CORTEXT_ORT_INSTALL_DIR}"
-        CMAKE_ARGS
-          -DCMAKE_BUILD_TYPE=${CORTEXT_ORT_BUILD_TYPE}
-          -DCMAKE_INSTALL_PREFIX=${CORTEXT_ORT_INSTALL_DIR}
-          -DCMAKE_POSITION_INDEPENDENT_CODE=ON
-          -DCMAKE_POLICY_VERSION_MINIMUM=3.5
-          -DCMAKE_DISABLE_FIND_PACKAGE_Protobuf=ON
-          -DCMAKE_DISABLE_FIND_PACKAGE_protobuf=ON
-          -DCMAKE_DISABLE_FIND_PACKAGE_ONNX=ON
-          -DCMAKE_DISABLE_FIND_PACKAGE_onnx=ON
-          -DCMAKE_DISABLE_FIND_PACKAGE_Flatbuffers=ON
-          -DCMAKE_DISABLE_FIND_PACKAGE_flatbuffers=ON
-          -Donnxruntime_BUILD_SHARED_LIB=ON
-          -Donnxruntime_BUILD_UNIT_TESTS=OFF
-          -Donnxruntime_ENABLE_PYTHON=OFF
-          -Donnxruntime_USE_COREML=${CORTEXT_ORT_USE_COREML}
-          -DFETCHCONTENT_TRY_FIND_PACKAGE_MODE=NEVER
-        BUILD_COMMAND ${CMAKE_COMMAND} --build <BINARY_DIR> --config ${CORTEXT_ORT_BUILD_TYPE} -- -j8
-        BUILD_BYPRODUCTS "${CORTEXT_ORT_LIB_PATH}"
-        USES_TERMINAL_CONFIGURE TRUE
-        USES_TERMINAL_BUILD TRUE
-        USES_TERMINAL_INSTALL TRUE
-      )
-    else()
-      add_custom_target(onnxruntime_ep)
-    endif()
-
-    add_library(onnxruntime SHARED IMPORTED GLOBAL)
-    set_target_properties(onnxruntime PROPERTIES IMPORTED_LOCATION "${CORTEXT_ORT_LIB_PATH}")
-    add_dependencies(onnxruntime onnxruntime_ep)
-
-    target_link_libraries(cortext PRIVATE onnxruntime ZLIB::ZLIB)
-    add_dependencies(cortext onnxruntime_ep)
-    if(APPLE AND CORTEXT_ENABLE_ORT_COREML)
-      set(CORTEXT_ORT_COREML_PROVIDER_LIB
-          "${CORTEXT_ORT_BINARY_DIR}/lib/libonnxruntime_providers_coreml.a")
-      if(EXISTS "${CORTEXT_ORT_COREML_PROVIDER_LIB}")
-        target_link_libraries(cortext PRIVATE "${CORTEXT_ORT_COREML_PROVIDER_LIB}")
-      endif()
-    endif()
-  endif()
-endif()
-
 # EmbeddingGemma ONNX/LiteRT tokenizers need SentencePiece. The llama.cpp
 # backend uses the model vocabulary directly and does not depend on it.
-if(CORTEXT_ENABLE_EMBEDDINGGEMMA AND ((NOT CORTEXT_DISABLE_IMAGEBIND_ORT AND NOT EMSCRIPTEN) OR CORTEXT_ENABLE_GEMMA_ORT OR NOT CORTEXT_DISABLE_LITERT))
+if(CORTEXT_ENABLE_EMBEDDINGGEMMA AND (CORTEXT_ENABLE_GEMMA_ORT OR NOT CORTEXT_DISABLE_LITERT))
   set(CORTEXT_SENTENCEPIECE_INCLUDE_DIR "${CMAKE_BINARY_DIR}/bazel-output/external/sentencepiece")
   set(CORTEXT_SENTENCEPIECE_PROTO_DIR "${CORTEXT_SENTENCEPIECE_INCLUDE_DIR}/builtin_pb")
   set(CORTEXT_SENTENCEPIECE_LIB_DIR "${CMAKE_BINARY_DIR}/bazel-output/execroot/litert_lm/bazel-out/darwin_arm64-opt/bin/external/sentencepiece")
@@ -691,7 +617,7 @@ if(CORTEXT_ENABLE_EMBEDDINGGEMMA AND ((NOT CORTEXT_DISABLE_IMAGEBIND_ORT AND NOT
   endif()
 endif()
 
-if(CORTEXT_ENABLE_EMBEDDINGGEMMA AND ((NOT CORTEXT_DISABLE_IMAGEBIND_ORT AND NOT EMSCRIPTEN) OR CORTEXT_ENABLE_GEMMA_ORT))
+if(CORTEXT_ENABLE_EMBEDDINGGEMMA AND CORTEXT_ENABLE_GEMMA_ORT)
   target_compile_definitions(cortext PUBLIC CORTEXT_ENABLE_EMBEDDINGGEMMA_ORT=1)
 endif()
 
@@ -708,10 +634,8 @@ if(NOT CORTEXT_DISABLE_OGA AND NOT EMSCRIPTEN)
     set(CMAKE_OSX_ARCHITECTURES "arm64" CACHE STRING "Build architecture" FORCE)
   endif()
 
-  # Use the same ORT library as ImageBind when enabled
-  # This avoids version mismatch issues between downloaded ORT and built-from-source ORT
-  if(NOT CORTEXT_DISABLE_IMAGEBIND_ORT)
-    # Use the ORT built from third_party/onnxruntime source (for ImageBind)
+  # Reuse the Gemma ORT build when it is enabled to avoid runtime mismatches.
+  if(CORTEXT_ENABLE_GEMMA_ORT)
     # OGA expects headers directly in include/, but ORT installs to include/onnxruntime/
     # Copy headers to the expected location if not already there
     if(NOT EXISTS "${CORTEXT_ORT_INSTALL_DIR}/include/onnxruntime_c_api.h")
@@ -722,9 +646,9 @@ if(NOT CORTEXT_DISABLE_OGA AND NOT EMSCRIPTEN)
       endif()
     endif()
     set(ORT_HOME "${CORTEXT_ORT_INSTALL_DIR}" CACHE PATH "ONNX Runtime home" FORCE)
-    message(STATUS "Using ONNX Runtime from ImageBind build: ${ORT_HOME}")
+    message(STATUS "Using ONNX Runtime from Gemma ORT build: ${ORT_HOME}")
   else()
-    # Download ORT from GitHub releases (CPU-only) when ImageBind ORT is disabled
+    # Download ORT from GitHub releases (CPU-only) when no local ORT build is enabled.
     set(ORT_VERSION "1.23.0")
     if(APPLE)
       if(CMAKE_OSX_ARCHITECTURES STREQUAL "arm64" OR CMAKE_SYSTEM_PROCESSOR STREQUAL "arm64")
@@ -877,7 +801,6 @@ if(NOT CORTEXT_DISABLE_LITERT AND NOT EMSCRIPTEN)
       BUILD_COMMAND ${BAZEL_EXECUTABLE}
         --output_base=${CMAKE_BINARY_DIR}/bazel-output
         build //:liblitert_lm_cpp.so
-        //runtime/engine:litert_lm_shared
         --config=${LITERT_BAZEL_CONFIG}
         --compilation_mode=opt
         --verbose_failures
@@ -897,7 +820,7 @@ if(NOT CORTEXT_DISABLE_LITERT AND NOT EMSCRIPTEN)
   set_target_properties(litert_lm PROPERTIES IMPORTED_LOCATION "${LITERT_LIB_PATH}")
   add_dependencies(litert_lm litert_ep)
 
-  target_include_directories(cortext PRIVATE ${LITERT_INSTALL_DIR}/include)
+  target_include_directories(cortext SYSTEM PRIVATE ${LITERT_INSTALL_DIR}/include)
   # PRIVATE link - LiteRT-LM symbols are hidden via visibility settings
   target_link_libraries(cortext PRIVATE litert_lm)
   add_dependencies(cortext litert_ep)

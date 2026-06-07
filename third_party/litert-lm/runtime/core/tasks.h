@@ -16,6 +16,7 @@
 #define THIRD_PARTY_ODML_LITERT_LM_RUNTIME_CORE_TASKS_H_
 
 #include <atomic>
+#include <limits>
 #include <optional>
 #include <vector>
 
@@ -44,7 +45,8 @@ absl::StatusOr<Responses> Decode(
     std::optional<Sampler*> sampler, Constraint* constraint,
     std::optional<litert::TensorBuffer> decoded_ids,
     absl::AnyInvocable<void(absl::StatusOr<Responses>)>& callback,
-    std::atomic<bool>* cancelled);
+    std::atomic<bool>* cancelled,
+    int max_output_tokens = std::numeric_limits<int>::max());
 
 absl::StatusOr<Responses> Score(
     LlmExecutor& executor, Tokenizer& tokenizer,

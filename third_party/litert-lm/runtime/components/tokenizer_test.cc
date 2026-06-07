@@ -43,6 +43,7 @@ class MockTokenizer : public Tokenizer {
   MOCK_METHOD(absl::StatusOr<std::string>, TokenIdsToText,
               (const std::vector<int>& token_ids), (override));
   MOCK_METHOD(TokenizerType, GetTokenizerType, (), (const, override));
+  MOCK_METHOD(std::vector<std::string>, GetTokens, (), (const, override));
 };
 
 TEST(TokenizerTest, TextToTensorBuffer) {
@@ -135,6 +136,13 @@ TEST(TokenizerTest, MergeTokenIds) {
   EXPECT_EQ(merged->size(), 2);
   EXPECT_EQ((*merged)[0], std::vector<int>({90, 547, 58, 735, 210, 466, 2294}));
   EXPECT_EQ((*merged)[1], std::vector<int>({224, 24, 8, 66, 246, 18, 2295}));
+}
+
+TEST(TokenizerTest, HasBpeSuffix) {
+  EXPECT_TRUE(Tokenizer::HasBpeSuffix("test\xef\xbf\xbd"));
+  EXPECT_FALSE(Tokenizer::HasBpeSuffix("test"));
+  EXPECT_FALSE(Tokenizer::HasBpeSuffix(""));
+  EXPECT_FALSE(Tokenizer::HasBpeSuffix("\xef\xbf\xbdtest"));
 }
 
 }  // namespace

@@ -169,6 +169,46 @@ print(tool_name(x=1))
               })json")));
 }
 
+TEST(ParserUtilsTest, ParseMultipleToolCallsOnSeparateLinesWithRegex) {
+  EXPECT_THAT(ParseTextAndToolCalls(
+                  R"(```tool_code
+print(default_api.get_artwork_price(museum_location="Philadelphia", sculpture_material="marble", sculpture_size=[4, 4]))
+print(default_api.get_artwork_price(museum_location="New York", sculpture_material="bronze", sculpture_size=[6, 3]))
+```)",
+                  /*code_fence_start=*/"```tool_code\n",
+                  /*code_fence_end=*/"\n```",
+                  /*syntax_type=*/SyntaxType::kPython,
+                  /*escape_fence_strings=*/false,
+                  /*tool_code_regex=*/
+                  R"regex(print\((?:default_api\.)?(.+\(.*\))\))regex"),
+              IsOkAndHolds(nlohmann::ordered_json::parse(R"json({
+              "tool_calls": [
+                  {
+                    "type": "function",
+                    "function": {
+                      "name": "get_artwork_price",
+                      "arguments": {
+                        "museum_location": "Philadelphia",
+                        "sculpture_material": "marble",
+                        "sculpture_size": [4, 4]
+                      }
+                    }
+                  },
+                  {
+                    "type": "function",
+                    "function": {
+                      "name": "get_artwork_price",
+                      "arguments": {
+                        "museum_location": "New York",
+                        "sculpture_material": "bronze",
+                        "sculpture_size": [6, 3]
+                      }
+                    }
+                  }
+                ]
+              })json")));
+}
+
 TEST(ParserUtilsTest, ParseJsonToolCall) {
   EXPECT_THAT(ParseTextAndToolCalls(R"(```tool_code
 [{"name": "tool_name", "arguments": {"x": 1}}]
@@ -235,6 +275,86 @@ TEST(ParserUtilsTest, ParseTextAndJsonToolCalls) {
                   /*code_fence_start=*/"```tool_code\n",
                   /*code_fence_end=*/"\n```",
                   /*syntax_type=*/SyntaxType::kJson),
+              IsOkAndHolds(nlohmann::ordered_json::parse(R"json({
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "This is some text.\n"
+                  }
+                ],
+                "tool_calls": [
+                  {
+                    "type": "function",
+                    "function": {
+                      "name": "tool_name",
+                      "arguments": {
+                        "x": 1
+                      }
+                    }
+                  }
+                ]
+              })json")));
+}
+
+TEST(ParserUtilsTest, ParseFcToolCall) {
+  EXPECT_THAT(ParseTextAndToolCalls(
+                  "<start_function_call>call:tool_name{x:1}<end_function_call>",
+                  /*code_fence_start=*/"<start_function_call>",
+                  /*code_fence_end=*/"<end_function_call>",
+                  /*syntax_type=*/SyntaxType::kFc),
+              IsOkAndHolds(nlohmann::ordered_json::parse(R"json({
+                "tool_calls": [
+                  {
+                    "type": "function",
+                    "function": {
+                      "name": "tool_name",
+                      "arguments": {
+                        "x": 1
+                      }
+                    }
+                  }
+                ]
+              })json")));
+}
+
+TEST(ParserUtilsTest, ParseFcParallelToolCalls) {
+  EXPECT_THAT(ParseTextAndToolCalls(
+                  "<start_function_call>call:tool_1{x:1}<end_function_call>"
+                  "<start_function_call>call:tool_2{y:2}<end_function_call>",
+                  /*code_fence_start=*/"<start_function_call>",
+                  /*code_fence_end=*/"<end_function_call>",
+                  /*syntax_type=*/SyntaxType::kFc),
+              IsOkAndHolds(nlohmann::ordered_json::parse(R"json({
+                "tool_calls": [
+                  {
+                    "type": "function",
+                    "function": {
+                      "name": "tool_1",
+                      "arguments": {
+                        "x": 1
+                      }
+                    }
+                  },
+                  {
+                    "type": "function",
+                    "function": {
+                      "name": "tool_2",
+                      "arguments": {
+                        "y": 2
+                      }
+                    }
+                  }
+                ]
+              })json")));
+}
+
+TEST(ParserUtilsTest, ParseTextAndFcToolCalls) {
+  EXPECT_THAT(ParseTextAndToolCalls(
+                  "This is some text.\n"
+                  "<start_function_call>call:tool_name{x:1}<end_function_call>",
+                  /*code_fence_start=*/"<start_function_call>",
+                  /*code_fence_end=*/"<end_function_call>",
+                  /*syntax_type=*/SyntaxType::kFc),
               IsOkAndHolds(nlohmann::ordered_json::parse(R"json({
                 "content": [
                   {

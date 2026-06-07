@@ -34,6 +34,13 @@ using llama_token = int32_t;
 
 #if defined(CORTEXT_ENABLE_LLAMA_CPP)
 
+inline void
+LoadGgmlBackendsOnce ()
+{
+  static std::once_flag backend_once;
+  std::call_once (backend_once, [] () { ggml_backend_load_all (); });
+}
+
 struct LlamaCppLogState
 {
   ggml_log_level threshold = GGML_LOG_LEVEL_ERROR;

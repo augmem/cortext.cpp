@@ -16,12 +16,9 @@
 #define THIRD_PARTY_ODML_LITERT_LM_RUNTIME_EXECUTOR_LLM_LITERT_COMPILED_MODEL_CACHE_UTILS_H_
 
 #include <cstddef>
-#include <cstdint>
 
 #include "absl/container/flat_hash_map.h"  // from @com_google_absl
-#include "absl/status/status.h"  // from @com_google_absl
 #include "absl/strings/string_view.h"  // from @com_google_absl
-#include "absl/types/span.h"  // from @com_google_absl
 #include "litert/cc/litert_expected.h"  // from @litert
 #include "litert/cc/litert_tensor_buffer.h"  // from @litert
 
@@ -72,18 +69,8 @@ namespace litert::lm {
     int num_tokens_to_drop, int init_tokens_to_retain, int current_step,
     int& start_position, size_t context_size);
 
-// Function to expand the buffer from src_data to dst_data. This function can
-// only handle a single expansion axis. Args:
-//   src_data: The source data.
-//   src_shape: The source shape.
-//   dst_data: The destination data.
-//   dst_shape: The destination shape.
-//   element_size: The element size of the data.
-// Returns:
-//   Status of the expansion.
-absl::Status ExpandBuffer(const uint8_t* src_data,
-                          absl::Span<const int> src_shape, uint8_t* dst_data,
-                          absl::Span<const int> dst_shape, size_t element_size);
+// Returns true if the tensor name is a KV cache tensor.
+bool IsKVCacheTensor(absl::string_view tensor_name);
 
 }  // namespace litert::lm
 #endif  // THIRD_PARTY_ODML_LITERT_LM_RUNTIME_EXECUTOR_LLM_LITERT_COMPILED_MODEL_CACHE_UTILS_H_

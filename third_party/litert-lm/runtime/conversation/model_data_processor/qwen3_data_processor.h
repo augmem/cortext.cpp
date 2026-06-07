@@ -21,6 +21,8 @@
 #include <utility>
 #include <vector>
 
+#include "absl/log/absl_log.h"  // from @com_google_absl
+#include "absl/status/status.h"  // from @com_google_absl
 #include "absl/status/statusor.h"  // from @com_google_absl
 #include "absl/strings/string_view.h"  // from @com_google_absl
 #include "nlohmann/json_fwd.hpp"  // from @nlohmann_json
@@ -75,6 +77,14 @@ class Qwen3DataProcessor
   absl::StatusOr<Message> ToMessageImpl(
       const Responses& responses,
       const Qwen3DataProcessorArguments& args) const override;
+
+  absl::Status CloneStateImpl(
+      const TypeSafeModelDataProcessor<Qwen3DataProcessorConfig,
+                                       Qwen3DataProcessorArguments>& other)
+      override {
+    ABSL_LOG(INFO) << "Qwen3DataProcessor::CloneStateImpl is a no-op.";
+    return absl::OkStatus();
+  }
 
   Qwen3DataProcessorConfig config_;
   std::optional<Preface> preface_;

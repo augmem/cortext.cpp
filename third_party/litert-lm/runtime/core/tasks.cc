@@ -16,6 +16,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstddef>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -30,10 +31,10 @@
 #include "absl/status/status.h"  // from @com_google_absl
 #include "absl/status/statusor.h"  // from @com_google_absl
 #include "absl/strings/str_cat.h"  // from @com_google_absl
-#include "absl/strings/str_format.h"  // from @com_google_absl
 #include "absl/strings/str_replace.h"  // from @com_google_absl
 #include "absl/strings/string_view.h"  // from @com_google_absl
 #include "absl/types/span.h"  // from @com_google_absl
+#include "litert/cc/litert_element_type.h"  // from @litert
 #include "litert/cc/litert_macros.h"  // from @litert
 #include "litert/cc/litert_tensor_buffer.h"  // from @litert
 #include "runtime/components/constrained_decoding/constrained_decoder.h"
@@ -50,9 +51,20 @@
 #include "runtime/proto/sampler_params.pb.h"
 #include "runtime/util/convert_tensor_buffer.h"
 #include "runtime/util/status_macros.h"  //NOLINT
+#include "tflite/types/half.h"  // from @litert
 
 namespace litert::lm::Tasks {
 namespace {
+
+// Converts a span of fp16 values to a vector of fp32 values.
+// TODO: b/499304966 - move this to a common util file and add tests.
+void ConvertFp16ToFp32(absl::Span<const tflite::half> fp16_values,
+                       std::vector<float>& out) {
+  out.resize(fp16_values.size());
+  for (int i = 0; i < fp16_values.size(); ++i) {
+    out[i] = static_cast<float>(fp16_values[i]);
+  }
+}
 
 // TODO(b/423364170): all LLM Executors should respect the max number of tokens
 // returned by the model. We should remove this default value once all Executors
@@ -72,7 +84,8 @@ int TryGetMaxNumTokens(const LlmExecutor& executor) {
 
 // Check whether the decoding loop should stop.
 bool ShouldStop(bool hit_stop_tokens, int benchmark_decode_token_count,
-                int num_decoded_steps, int current_step, int max_num_tokens) {
+                int num_decoded_steps, int current_step, int max_num_tokens,
+                int max_output_tokens) {
   // Stopping conditions.
   if (hit_stop_tokens && benchmark_decode_token_count == 0) {
     // Only early stop if no decode step
@@ -85,6 +98,9 @@ bool ShouldStop(bool hit_stop_tokens, int benchmark_decode_token_count,
     return true;
   } else if (current_step >= max_num_tokens) {
     // Reaching maximum number of kv-cache size.
+    return true;
+  } else if (num_decoded_steps >= max_output_tokens) {
+    // Reaching maximum number of output tokens.
     return true;
   }
   return false;
@@ -109,10 +125,7 @@ class DecodeOneStep {
       constrained_decoder_ = std::make_unique<ConstrainedDecoder>(
           constraint, num_output_candidates_);
     }
-    if (!sampler_.has_value()) {  // Internal sampling setup
-      auto output_tokens = CreateTensorBuffer<int>({num_output_candidates_, 1});
-      output_tokens_ = std::move(*output_tokens);
-    } else {  // External sampling setup
+    if (sampler_.has_value()) {  // External sampling setup
       auto scores_tensor = CreateTensorBuffer<float>({num_output_candidates_});
       scores_tensor_ = std::move(*scores_tensor);
     }
@@ -129,60 +142,82 @@ class DecodeOneStep {
   // For internal sampling, `decoded_ids` is ignored.
   absl::StatusOr<bool> Run(
       std::optional<litert::TensorBuffer> decoded_ids = std::nullopt) {
-    ASSIGN_OR_RETURN(litert::TensorBuffer next_tokens_buffer,
-                     DecodeAndSample(std::move(decoded_ids)));
+    ASSIGN_OR_RETURN(auto token_ids, DecodeAndSample(std::move(decoded_ids)));
 
-    // Post-processing the next tokens.
-    ASSIGN_OR_RETURN(auto token_ids,
-                     tokenizer_.TensorBufferToTokenIds(next_tokens_buffer));
+    size_t sequence_length = token_ids[0].size();
+    for (size_t i = 1; i < token_ids.size(); ++i) {
+      RET_CHECK_EQ(token_ids[i].size(), sequence_length)
+          << "The current implementation of ProcessTokens() requires that "
+             "latest_tokens must contain sequences of the same length.";
+    }
 
-    // Merge BPE partial token ids with the next token ids if any.
-    ASSIGN_OR_RETURN(
-        token_ids, tokenizer_.MergeTokenIds(bpe_partial_token_ids_, token_ids));
-
-    // Regardless of BPE, we always process the next tokens to detect stop
-    // tokens.
-    LITERT_ASSIGN_OR_RETURN(auto next_tokens_span,
-                            ReferTensorBufferAsSpan<int>(next_tokens_buffer));
-    RETURN_IF_ERROR(stop_token_detector_.ProcessTokens(next_tokens_span));
-
-    auto decoded_result =
-        tokenizer_.TokenIdsToTexts(num_output_candidates_, token_ids);
     for (int i = 0; i < num_output_candidates_; ++i) {
-      result_text_[i] = "";
-      if (Tokenizer::IsIncompleteBpeSequence(decoded_result.value()[i])) {
-        bpe_partial_token_ids_[i] = token_ids[i];
-      } else if (!stop_token_detector_.GetStopTokensFound()[i]) {
-        bpe_partial_token_ids_[i].clear();
+      result_text_[i].clear();
+    }
 
-        // Handle partial stop tokens.
-        int max_length = stop_token_detector_.MaxPartialStopTokenLength(i);
-        if (max_length > 0) {
-          pending_stop_tokens_[i].push(decoded_result.value()[i].value());
-        }
-        // We only need the latest max_length tokens for partial stop tokens.
-        // Add the extra ones to the result text and we could keep only the
-        // latest max_length stop tokens in the queue.
-        while (pending_stop_tokens_[i].size() > max_length) {
-          result_text_[i] += pending_stop_tokens_[i].front();
-          pending_stop_tokens_[i].pop();
-        }
+    for (size_t step = 0; step < sequence_length; ++step) {
+      std::vector<std::vector<int>> step_tokens;
+      step_tokens.reserve(num_output_candidates_);
+      for (int batch = 0; batch < num_output_candidates_; ++batch) {
+        step_tokens.push_back({token_ids[batch][step]});
+      }
 
-        // No partial stop token is found - add the current token to the result
-        // text directly - this is the most common case.
-        if (max_length == 0) {
-          result_text_[i] += decoded_result.value()[i].value();
+      // Regardless of BPE, we always process the next tokens to detect stop
+      // tokens.
+      RETURN_IF_ERROR(stop_token_detector_.ProcessTokens(step_tokens));
+
+      // Merge BPE partial token ids with the next token ids if any.
+      ASSIGN_OR_RETURN(step_tokens, tokenizer_.MergeTokenIds(
+                                        bpe_partial_token_ids_, step_tokens));
+
+      auto decoded_result =
+          tokenizer_.TokenIdsToTexts(num_output_candidates_, step_tokens);
+      for (int i = 0; i < num_output_candidates_; ++i) {
+        if (Tokenizer::IsIncompleteBpeSequence(decoded_result.value()[i])) {
+          bpe_partial_token_ids_[i] = step_tokens[i];
+        } else if (!stop_token_detector_.GetStopTokensFound()[i]) {
+          bpe_partial_token_ids_[i].clear();
+
+          // Handle partial stop tokens.
+          int max_length = stop_token_detector_.MaxPartialStopTokenLength(i);
+          if (max_length > 0) {
+            pending_stop_tokens_[i].push(decoded_result.value()[i].value());
+          }
+          // We only need the latest max_length tokens for partial stop tokens.
+          // Add the extra ones to the result text and we could keep only the
+          // latest max_length stop tokens in the queue.
+          while (pending_stop_tokens_[i].size() > max_length) {
+            result_text_[i] += pending_stop_tokens_[i].front();
+            pending_stop_tokens_[i].pop();
+          }
+
+          // No partial stop token is found - add the current token to the
+          // result text directly - this is the most common case.
+          if (max_length == 0) {
+            result_text_[i] += decoded_result.value()[i].value();
+          }
         }
       }
-    }
 
-    if (sampler_.has_value()) {
-      LITERT_ASSIGN_OR_RETURN(
-          scores_span_, ReferTensorBufferAsSpan<float>(scores_tensor_));
-    }
+      if (sampler_.has_value()) {
+        LITERT_ASSIGN_OR_RETURN(scores_span_,
+                                ReferTensorBufferAsSpan<float>(scores_tensor_));
+      }
 
-    is_first_step_ = false;
-    return stop_token_detector_.AllDone();
+      is_first_step_ = false;
+      ASSIGN_OR_RETURN(bool all_done, stop_token_detector_.AllDone());
+      if (all_done) {
+        if (step != sequence_length - 1) {
+          // we are done before all the tokens are processed, so we need to
+          // rollback the processed tokens in executor.
+          int diff = sequence_length - step;
+          ASSIGN_OR_RETURN(int current_step, executor_.GetCurrentStep());
+          RETURN_IF_ERROR(executor_.SetCurrentStep(current_step - diff));
+        }
+        return true;
+      }
+    }
+    return false;
   }
 
   absl::Span<float> GetScores() { return scores_span_; }
@@ -196,6 +231,7 @@ class DecodeOneStep {
   // decoded_ids: The decoded id tensor buffer in which the sampled ids are
   //              written so that the model uses reference text future step.
   // Returns: A vector of log likelihoods for the sampled ids.
+  // TODO: b/499304966 - Add tests for the float16 path.
   absl::StatusOr<std::vector<float>> RunScoreStep(
       const float temperature, const std::vector<int>& step_input_ids,
       litert::TensorBuffer decoded_ids) {
@@ -214,19 +250,45 @@ class DecodeOneStep {
       RETURN_IF_ERROR(benchmark_info_->TimeMarkDelta("executor_decode"));
     }
     decoded_ids.Write<int>(step_input_ids);
-    auto logits_data_or = ReferTensorBufferAsSpan<float>(output_logits);
+    LITERT_ASSIGN_OR_RETURN(auto logits_tensor_type,
+                            output_logits.TensorType());
+    auto logits_dims = logits_tensor_type.Layout().Dimensions();
+    // Logits dims are {batch, seq, vocab}. For scoring, we expect batch size to
+    // be the same as the input batch size, sequence length to be 1, and vocab
+    // size to be the same as the tokenizer size.
+    RET_CHECK_EQ(logits_dims.size(), 3)
+        << "Output logits must have shape [batch, seq, vocab].";
+    const int batch_size = step_input_ids.size();
+    RET_CHECK_EQ(logits_dims[0], batch_size)
+        << "Logits batch size does not match the input batch size.";
+    RET_CHECK_EQ(logits_dims[1], 1) << "Scoring expects a single decode step.";
+
     absl::Span<float> logits_data;
     std::vector<float> logits_data_buffer;
-    // Download the data if it is not in host memory.
-    if (!logits_data_or) {
-      LITERT_ASSIGN_OR_RETURN(auto logits_size, output_logits.PackedSize());
-      logits_data_buffer.resize(logits_size / sizeof(float));
-      LITERT_RETURN_IF_ERROR(
-          output_logits.Read(absl::MakeSpan(logits_data_buffer)));
+    if (logits_tensor_type.ElementType() == litert::ElementType::Float32) {
+      auto logits_data_or = ReferTensorBufferAsSpan<float>(output_logits);
+      if (!logits_data_or) {
+        LITERT_ASSIGN_OR_RETURN(logits_data_buffer,
+                                CopyFromTensorBuffer<float>(output_logits));
+        logits_data = absl::MakeSpan(logits_data_buffer);
+      } else {
+        logits_data = *logits_data_or;
+      }
+    } else if (logits_tensor_type.ElementType() ==
+               litert::ElementType::Float16) {
+      LITERT_ASSIGN_OR_RETURN(
+          auto logits_data_f16,
+          CopyFromTensorBuffer<tflite::half>(output_logits));
+      ConvertFp16ToFp32(absl::MakeConstSpan(logits_data_f16),
+                        logits_data_buffer);
       logits_data = absl::MakeSpan(logits_data_buffer);
     } else {
-      logits_data = *logits_data_or;
+      return absl::InvalidArgumentError(
+          absl::StrCat("Unsupported logits element type for scoring: ",
+                       logits_tensor_type.ElementType()));
     }
+    RET_CHECK_EQ(logits_data.size(), batch_size * logits_dims[2])
+        << "Logits buffer size does not match logits tensor shape.";
     return ComputeLogLikelihood(logits_data, step_input_ids, temperature);
   }
 
@@ -234,7 +296,7 @@ class DecodeOneStep {
   // Runs the core decoding and sampling step, for either internal or external
   // sampling. Returns a pointer to the tensor buffer containing the next token
   // IDs.
-  absl::StatusOr<litert::TensorBuffer> DecodeAndSample(
+  absl::StatusOr<std::vector<std::vector<int>>> DecodeAndSample(
       std::optional<litert::TensorBuffer> decoded_ids) {
     if (sampler_) {  // External sampling path
       if (!decoded_ids) {
@@ -277,27 +339,28 @@ class DecodeOneStep {
         RETURN_IF_ERROR(benchmark_info_->TimeMarkDelta("sampling"));
       }
 
-      return std::move(decoded_ids.value());
+      ASSIGN_OR_RETURN(auto token_ids,
+                       tokenizer_.TensorBufferToTokenIds(decoded_ids.value()));
+      return token_ids;
     } else {  // Internal sampling path
       // Benchmark executor_decode_and_sample section.
       if (benchmark_info_.has_value()) {
         RETURN_IF_ERROR(
             benchmark_info_->TimeMarkDelta("executor_decode_and_sample"));
       }
+      std::vector<std::vector<int>> output_tokens;
       if (constrained_decoder_) {
         auto decode_params = ExecutorDecodeParams();
         decode_params.SetConstraintDecoder(constrained_decoder_.get());
-        RETURN_IF_ERROR(executor_.Decode(output_tokens_, decode_params));
+        ASSIGN_OR_RETURN(output_tokens, executor_.Decode(decode_params));
       } else {
-        RETURN_IF_ERROR(executor_.Decode(output_tokens_));
+        ASSIGN_OR_RETURN(output_tokens, executor_.Decode());
       }
       if (benchmark_info_.has_value()) {
         RETURN_IF_ERROR(
             benchmark_info_->TimeMarkDelta("executor_decode_and_sample"));
       }
-      LITERT_ASSIGN_OR_RETURN(auto cloned_output_tokens,
-                              output_tokens_.Duplicate());
-      return std::move(cloned_output_tokens);
+      return output_tokens;
     }
   }
 
@@ -308,10 +371,6 @@ class DecodeOneStep {
   std::unique_ptr<ConstrainedDecoder> constrained_decoder_;
   std::optional<BenchmarkInfo> benchmark_info_;
   StopTokenDetector stop_token_detector_;
-
-  // For internal sampling.
-  // Holds the output token IDs. Dim: {num_output_candidates, 1}
-  litert::TensorBuffer output_tokens_;
 
   // For external sampling.
   // Holds the scores for the output candidates. Dim: {num_output_candidates}
@@ -368,7 +427,7 @@ absl::StatusOr<Responses> Decode(
     std::optional<Sampler*> sampler, Constraint* constraint,
     std::optional<litert::TensorBuffer> decoded_ids,
     absl::AnyInvocable<void(absl::StatusOr<Responses>)>& callback,
-    std::atomic<bool>* cancelled) {
+    std::atomic<bool>* cancelled, int max_output_tokens) {
   const bool is_streaming = callback != nullptr;
   const bool is_custom_sampling = sampler.has_value();
 
@@ -394,7 +453,7 @@ absl::StatusOr<Responses> Decode(
   // The number of decoded tokens for each candidate (for custom sampling).
   std::vector<int> num_decoded_tokens(num_output_candidates);
 
-  int num_decode_steps = 0;
+  ASSIGN_OR_RETURN(int executor_step_before_decode, executor.GetCurrentStep());
   const int max_num_tokens = TryGetMaxNumTokens(executor);
   DecodeOneStep run_one_step(&executor, &tokenizer, num_output_candidates,
                              stop_token_detector, benchmark_info, sampler,
@@ -402,9 +461,28 @@ absl::StatusOr<Responses> Decode(
   while (true) {
     if (cancelled != nullptr && cancelled->load()) {
       if (benchmark_info.has_value()) {
+        ASSIGN_OR_RETURN(int current_step, executor.GetCurrentStep());
+        int num_decode_steps = current_step - executor_step_before_decode;
         // If the process is cancelled, we need to end this benchmark phase.
         RETURN_IF_ERROR(benchmark_info->TimeDecodeTurnEnd(
             num_decode_steps * num_output_candidates));
+      }
+      if (is_custom_sampling) {
+        // For external sampling, the sampled tokens are provided by the
+        // sampler. We must run one prefill to add the last token as pending
+        // token in the LLM Executor when cancellation happens.
+        LITERT_ASSIGN_OR_RETURN(auto duplicated_decoded_ids,
+                                decoded_ids->Duplicate());
+        ExecutorInputs inputs;
+        inputs.SetTextData(ExecutorTextData(std::move(duplicated_decoded_ids)));
+        std::optional<BenchmarkInfo> unused_benchmark_info;
+        ASSIGN_OR_RETURN(auto current_step, executor.GetCurrentStep());
+        RETURN_IF_ERROR(executor.SetCurrentStep(current_step - 1));
+        auto status = Prefill(executor, inputs, /*wait_for_completion=*/true,
+                              unused_benchmark_info);
+        if (!status.ok()) {
+          return status.status();
+        }
       }
       return absl::CancelledError("Process cancelled.");
     }
@@ -417,7 +495,6 @@ absl::StatusOr<Responses> Decode(
     if (!all_done.ok()) {
       return all_done.status();
     }
-    num_decode_steps++;
     std::vector<std::string> step_texts;
     std::vector<float> step_scores;
     if (is_streaming) {
@@ -452,17 +529,21 @@ absl::StatusOr<Responses> Decode(
       }
     }
 
-    if (is_streaming && any_updates && !*all_done) {
+    if (is_streaming && any_updates) {
       callback(Responses(TaskState::kProcessing, std::move(step_texts),
                          std::move(step_scores)));
     }
 
+    ASSIGN_OR_RETURN(int current_step, executor.GetCurrentStep());
+    int num_decode_steps = current_step - executor_step_before_decode;
     if (ShouldStop(*all_done, benchmark_decode_token_count, num_decode_steps,
-                   executor.GetCurrentStep().value(), max_num_tokens)) {
+                   current_step, max_num_tokens, max_output_tokens)) {
       break;
     }
   }
 
+  int num_decode_steps =
+      executor.GetCurrentStep().value() - executor_step_before_decode;
   if (benchmark_info.has_value()) {
     RETURN_IF_ERROR(benchmark_info->TimeDecodeTurnEnd(num_decode_steps *
                                                       num_output_candidates));
@@ -477,6 +558,8 @@ absl::StatusOr<Responses> Decode(
     ExecutorInputs inputs;
     inputs.SetTextData(ExecutorTextData(std::move(duplicated_decoded_ids)));
     std::optional<BenchmarkInfo> unused_benchmark_info;
+    ASSIGN_OR_RETURN(auto current_step, executor.GetCurrentStep());
+    RETURN_IF_ERROR(executor.SetCurrentStep(current_step - 1));
     auto status = Prefill(executor, inputs, /*wait_for_completion=*/true,
                           unused_benchmark_info);
     if (!status.ok()) {
@@ -541,6 +624,7 @@ absl::StatusOr<Responses> Score(
   // The scores for each candidate. The scores are accumulated over the course
   // of the decoding process.
   std::vector<float> scores(num_output_candidates);
+  std::vector<std::vector<float>> token_scores(num_output_candidates);
   // We support multiple targets by padding the targets with a null token which
   // does not exist in the vocabulary and thus does not contribute to the
   // perplexity.
@@ -567,6 +651,7 @@ absl::StatusOr<Responses> Score(
       // Only add the log likelihood of the non-padded tokens to the score.
       if (i < size_of_jth_target) {
         scores[j] += step_log_likelihoods[j];
+        token_scores[j].push_back(step_log_likelihoods[j]);
       }
     }
   }
@@ -579,8 +664,10 @@ absl::StatusOr<Responses> Score(
       token_lengths.push_back(ids_for_each_target_in_batch[j].size());
     }
   }
-  return Responses(TaskState::kDone, /*response_texts=*/{}, std::move(scores),
-                   std::move(token_lengths));
+  auto responses = Responses(TaskState::kDone, /*response_texts=*/{},
+                             std::move(scores), std::move(token_lengths));
+  responses.GetMutableTokenScores() = std::move(token_scores);
+  return responses;
 }
 
 }  // namespace litert::lm::Tasks

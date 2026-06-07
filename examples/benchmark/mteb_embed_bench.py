@@ -1,7 +1,5 @@
 #!/usr/bin/env python3
 import argparse
-import gzip
-import html
 import json
 import hashlib
 import os
@@ -11,20 +9,10 @@ import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional
 
 import numpy as np
 from tokenizers import Tokenizer
-
-try:
-    import regex as re
-except Exception:
-    re = None
-
-try:
-    import ftfy
-except Exception:
-    ftfy = None
 
 
 def _try_import_tflite():
@@ -309,197 +297,6 @@ class OnnxEmbedder(BaseEmbedder):
         return _truncate_embeddings(np.vstack(all_embs), self.target_dim)
 
 
-class ImageBindOnnxEmbedder(BaseEmbedder):
-    def __init__(self, name: str, model_name: str, model_path: Path, tokenizer_name: str, max_length: int, batch_size: int, target_dim: int):
-        super().__init__(name, model_name, max_length, batch_size, target_dim)
-        import onnxruntime as ort  # local import
-        from transformers import CLIPTokenizerFast
-
-        self.tokenizer = CLIPTokenizerFast.from_pretrained(tokenizer_name)
-        self.max_length = 77  # ImageBind text encoder expects 77 tokens
-        self.session = ort.InferenceSession(str(model_path), providers=["CPUExecutionProvider"])
-
-        inputs = self.session.get_inputs()
-        outputs = self.session.get_outputs()
-        self.input_name = inputs[0].name if inputs else "text_tokens"
-        self.output_name = outputs[0].name if outputs else "text_embedding"
-
-    def _encode_single(self, text: str) -> np.ndarray:
-        tokens = self.tokenizer(
-            text,
-            padding="max_length",
-            truncation=True,
-            max_length=self.max_length,
-            return_tensors="np",
-        )
-        input_ids = tokens["input_ids"].astype(np.int64)
-        outputs = self.session.run([self.output_name], {self.input_name: input_ids})
-        return outputs[0]
-
-    def encode(self, sentences: List[str], **kwargs) -> np.ndarray:
-        all_embs: List[np.ndarray] = []
-        for sentence in sentences:
-            start = time.perf_counter()
-            embs = self._encode_single(sentence)
-            elapsed_ms = (time.perf_counter() - start) * 1000.0
-            self.latency.record(elapsed_ms, 1)
-            all_embs.append(embs)
-        if not all_embs:
-            return np.zeros((0, 0), dtype=np.float32)
-        return _truncate_embeddings(np.vstack(all_embs), self.target_dim)
-
-
-class ImageBindBPETokenizer:
-    def __init__(self, bpe_path: Path, context_length: int = 77):
-        if re is None:
-            raise RuntimeError("regex is required for ImageBind BPE tokenizer")
-        if ftfy is None:
-            raise RuntimeError("ftfy is required for ImageBind BPE tokenizer (pip install ftfy)")
-
-        self.byte_encoder = self._bytes_to_unicode()
-        self.byte_decoder = {v: k for k, v in self.byte_encoder.items()}
-
-        with gzip.open(bpe_path, "rb") as fh:
-            merges: List[str] = fh.read().decode("utf-8").split("\n")
-        merges = merges[1 : 49152 - 256 - 2 + 1]
-        merges_pairs: List[Tuple[str, ...]] = [tuple(merge.split()) for merge in merges]
-        vocab = list(self.byte_encoder.values())
-        vocab = vocab + [v + "</w>" for v in vocab]
-        for merge in merges_pairs:
-            vocab.append("".join(merge))
-        vocab.extend(["<|startoftext|>", "<|endoftext|>"])
-        self.encoder = dict(zip(vocab, range(len(vocab))))
-        self.bpe_ranks = dict(zip(merges_pairs, range(len(merges_pairs))))
-        self.cache: Dict[str, str] = {
-            "<|startoftext|>": "<|startoftext|>",
-            "<|endoftext|>": "<|endoftext|>",
-        }
-        self.pat = re.compile(
-            r"""<\|startoftext\|>|<\|endoftext\|>|'s|'t|'re|'ve|'m|'ll|'d|[\p{L}]+|[\p{N}]|[^\s\p{L}\p{N}]+""",
-            re.IGNORECASE,
-        )
-        self.context_length = context_length
-
-    def _bytes_to_unicode(self) -> Dict[int, str]:
-        bs = (
-            list(range(ord("!"), ord("~") + 1))
-            + list(range(ord("¡"), ord("¬") + 1))
-            + list(range(ord("®"), ord("ÿ") + 1))
-        )
-        cs = bs[:]
-        n = 0
-        for b in range(2**8):
-            if b not in bs:
-                bs.append(b)
-                cs.append(2**8 + n)
-                n += 1
-        cs = [chr(n) for n in cs]
-        return dict(zip(bs, cs))
-
-    def _get_pairs(self, word: Tuple[str, ...]) -> set:
-        pairs = set()
-        prev_char = word[0]
-        for char in word[1:]:
-            pairs.add((prev_char, char))
-            prev_char = char
-        return pairs
-
-    def _basic_clean(self, text: str) -> str:
-        text = ftfy.fix_text(text)
-        text = html.unescape(html.unescape(text))
-        return text.strip()
-
-    def _whitespace_clean(self, text: str) -> str:
-        text = re.sub(r"\s+", " ", text)
-        return text.strip()
-
-    def _bpe(self, token: str) -> str:
-        if token in self.cache:
-            return self.cache[token]
-        word = tuple(token[:-1]) + (token[-1] + "</w>",)
-        pairs = self._get_pairs(word)
-        if not pairs:
-            return token + "</w>"
-        while True:
-            bigram = min(pairs, key=lambda pair: self.bpe_ranks.get(pair, float("inf")))
-            if bigram not in self.bpe_ranks:
-                break
-            first, second = bigram
-            new_word = []
-            i = 0
-            while i < len(word):
-                try:
-                    j = word.index(first, i)
-                    new_word.extend(word[i:j])
-                    i = j
-                except Exception:
-                    new_word.extend(word[i:])
-                    break
-                if word[i] == first and i < len(word) - 1 and word[i + 1] == second:
-                    new_word.append(first + second)
-                    i += 2
-                else:
-                    new_word.append(word[i])
-                    i += 1
-            word = tuple(new_word)
-            if len(word) == 1:
-                break
-            pairs = self._get_pairs(word)
-        word_str = " ".join(word)
-        self.cache[token] = word_str
-        return word_str
-
-    def encode(self, text: str) -> List[int]:
-        text = self._whitespace_clean(self._basic_clean(text))
-        bpe_tokens = []
-        for token in re.findall(self.pat, text):
-            token = "".join(self.byte_encoder[b] for b in token.encode("utf-8"))
-            bpe_tokens.extend(
-                self.encoder[bpe_token]
-                for bpe_token in self._bpe(token).split(" ")
-            )
-
-        start_token = self.encoder["<|startoftext|>"]
-        end_token = self.encoder["<|endoftext|>"]
-        tokens = [start_token] + bpe_tokens + [end_token]
-        if len(tokens) > self.context_length:
-            tokens = tokens[: self.context_length]
-            tokens[-1] = end_token
-        while len(tokens) < self.context_length:
-            tokens.append(0)
-        return tokens
-
-
-class ImageBindBpeOnnxEmbedder(BaseEmbedder):
-    def __init__(self, name: str, model_name: str, model_path: Path, bpe_path: Path, max_length: int, batch_size: int, target_dim: int):
-        super().__init__(name, model_name, max_length, batch_size, target_dim)
-        import onnxruntime as ort  # local import
-
-        self.tokenizer = ImageBindBPETokenizer(bpe_path=bpe_path, context_length=77)
-        self.session = ort.InferenceSession(str(model_path), providers=["CPUExecutionProvider"])
-        inputs = self.session.get_inputs()
-        outputs = self.session.get_outputs()
-        self.input_name = inputs[0].name if inputs else "text_tokens"
-        self.output_name = outputs[0].name if outputs else "text_embedding"
-
-    def _encode_single(self, text: str) -> np.ndarray:
-        tokens = np.array([self.tokenizer.encode(text)], dtype=np.int64)
-        outputs = self.session.run([self.output_name], {self.input_name: tokens})
-        return outputs[0]
-
-    def encode(self, sentences: List[str], **kwargs) -> np.ndarray:
-        all_embs: List[np.ndarray] = []
-        for sentence in sentences:
-            start = time.perf_counter()
-            embs = self._encode_single(sentence)
-            elapsed_ms = (time.perf_counter() - start) * 1000.0
-            self.latency.record(elapsed_ms, 1)
-            all_embs.append(embs)
-        if not all_embs:
-            return np.zeros((0, 0), dtype=np.float32)
-        return _truncate_embeddings(np.vstack(all_embs), self.target_dim)
-
-
 class TfliteEmbedder(BaseEmbedder):
     def __init__(self, name: str, model_name: str, model_path: Path, tokenizer_path: Path, max_length: int, batch_size: int, target_dim: int):
         super().__init__(name, model_name, max_length, batch_size, target_dim)
@@ -625,7 +422,6 @@ class AudioPipelineEmbedder(BaseEmbedder):
         cache_path = None
         effective_mode = self.mode
         if self.cache_dir:
-            effective_mode = "both"
             cache_path = self.cache_dir / f"{self._cache_key(batch)}.jsonl"
         if self.keep_tmp:
             tmp_dir = Path(tempfile.mkdtemp(prefix="cortext_audio_bench_"))
@@ -686,22 +482,16 @@ class AudioPipelineEmbedder(BaseEmbedder):
                 if row is None:
                     raise RuntimeError(f"Missing output row for id={rid}")
                 tts_ms = float(row.get("tts_ms", 0.0))
-                if self.mode == "gemma":
-                    asr_ms = float(row.get("asr_ms", 0.0))
-                    embed_ms = float(row.get("gemma_ms", 0.0))
-                    emb_key = "embedding_gemma"
-                else:
-                    asr_ms = 0.0
-                    embed_ms = float(row.get("imagebind_ms", 0.0))
-                    emb_key = "embedding_imagebind"
+                asr_ms = float(row.get("asr_ms", 0.0))
+                embed_ms = float(row.get("gemma_ms", 0.0))
+                emb_key = "embedding_gemma"
                 total_ms = asr_ms + embed_ms
                 if not self.ignore_tts:
                     total_ms += tts_ms
 
                 if not self.ignore_tts:
                     self.component_latency["tts_ms"].append(tts_ms)
-                if self.mode == "gemma":
-                    self.component_latency["asr_ms"].append(asr_ms)
+                self.component_latency["asr_ms"].append(asr_ms)
                 self.component_latency["embed_ms"].append(embed_ms)
                 self.component_latency["total_ms"].append(total_ms)
                 self.latency.record(total_ms, 1)
@@ -750,8 +540,7 @@ class AudioPipelineEmbedder(BaseEmbedder):
             "embed_ms": _summarize_samples(self.component_latency["embed_ms"]),
             "total_ms": _summarize_samples(self.component_latency["total_ms"]),
         }
-        if self.mode == "gemma":
-            summary["asr_ms"] = _summarize_samples(self.component_latency["asr_ms"])
+        summary["asr_ms"] = _summarize_samples(self.component_latency["asr_ms"])
         return summary
 
 
@@ -761,14 +550,6 @@ def _resolve_default_paths() -> Dict[str, Path]:
     litert_sentencepiece = root / "models" / "embeddinggemma-300m-litert" / "sentencepiece.model"
     # sentencepiece + tf.lite model load can deadlock; default to tokenizer.json unless overridden
     tflite_tokenizer = onnx_tokenizer if onnx_tokenizer.exists() else litert_sentencepiece
-    imagebind_bpe_candidates = [
-        root / "models" / "imagebind" / "bpe" / "bpe_simple_vocab_16e6.txt.gz",
-        root / "models" / "imagebind" / "bpe_simple_vocab_16e6.txt.gz",
-        root.parent / "ImageBind" / "imagebind" / "bpe" / "bpe_simple_vocab_16e6.txt.gz",
-    ]
-    imagebind_bpe = None
-    if ftfy is not None and re is not None:
-        imagebind_bpe = next((p for p in imagebind_bpe_candidates if p.exists()), None)
     audio_bin_candidates = [
         root / "build" / "examples" / "benchmark" / "cortext_audio_pipeline_bench",
         root / "build-release" / "examples" / "benchmark" / "cortext_audio_pipeline_bench",
@@ -780,8 +561,6 @@ def _resolve_default_paths() -> Dict[str, Path]:
         "onnx_dir": root / "models" / "embeddinggemma-300m-onnx",
         "tflite_path": root / "models" / "embeddinggemma-300m-litert" / "embeddinggemma-300M_seq256_mixed-precision.tflite",
         "tflite_tokenizer": tflite_tokenizer,
-        "imagebind_dir": root / "models" / "imagebind",
-        "imagebind_bpe": imagebind_bpe,
         "audio_binary": audio_binary,
     }
 
@@ -818,36 +597,6 @@ def _build_embedder(kind: str, args) -> BaseEmbedder:
             batch_size=args.batch_size,
             target_dim=args.embed_dim,
         )
-    if kind in ("imagebind", "imagebind-int8", "imagebind-fp"):
-        model_dir = Path(args.imagebind_dir)
-        if kind == "imagebind-int8":
-            model_path = model_dir / "text_encoder_int8.onnx"
-        elif kind == "imagebind-fp":
-            model_path = model_dir / "text_encoder.onnx"
-        else:
-            model_path = model_dir / "text_encoder_int8.onnx"
-            if not model_path.exists():
-                model_path = model_dir / "text_encoder.onnx"
-        bpe_path = Path(args.imagebind_bpe) if args.imagebind_bpe else None
-        if bpe_path and bpe_path.exists() and ftfy is not None and re is not None:
-            return ImageBindBpeOnnxEmbedder(
-                name=f"imagebind-{model_path.stem}-bpe",
-                model_name="facebook/imagebind",
-                model_path=model_path,
-                bpe_path=bpe_path,
-                max_length=77,
-                batch_size=1,
-                target_dim=args.embed_dim,
-            )
-        return ImageBindOnnxEmbedder(
-            name=f"imagebind-{model_path.stem}",
-            model_name="facebook/imagebind",
-            model_path=model_path,
-            tokenizer_name=args.imagebind_tokenizer,
-            max_length=77,
-            batch_size=1,
-            target_dim=args.embed_dim,
-        )
     if kind == "audio-gemma":
         if not args.audio_config:
             raise RuntimeError("--audio-config is required for audio-gemma")
@@ -857,22 +606,6 @@ def _build_embedder(kind: str, args) -> BaseEmbedder:
             binary_path=Path(args.audio_binary),
             config_path=Path(args.audio_config),
             mode="gemma",
-            max_length=args.max_length,
-            batch_size=args.batch_size,
-            target_dim=args.embed_dim,
-            keep_tmp=args.audio_keep_tmp,
-            ignore_tts=args.audio_ignore_tts,
-            cache_dir=Path(args.audio_cache_dir) if args.audio_cache_dir else None,
-        )
-    if kind == "audio-imagebind":
-        if not args.audio_config:
-            raise RuntimeError("--audio-config is required for audio-imagebind")
-        return AudioPipelineEmbedder(
-            name="audio-imagebind",
-            model_name="facebook/imagebind",
-            binary_path=Path(args.audio_binary),
-            config_path=Path(args.audio_config),
-            mode="imagebind",
             max_length=args.max_length,
             batch_size=args.batch_size,
             target_dim=args.embed_dim,
@@ -970,13 +703,6 @@ def main() -> None:
     parser.add_argument("--onnx-dir", default=str(defaults["onnx_dir"]))
     parser.add_argument("--tflite-path", default=str(defaults["tflite_path"]))
     parser.add_argument("--tflite-tokenizer", default=str(defaults["tflite_tokenizer"]))
-    parser.add_argument("--imagebind-dir", default=str(defaults["imagebind_dir"]))
-    parser.add_argument("--imagebind-tokenizer", default="openai/clip-vit-base-patch32")
-    parser.add_argument(
-        "--imagebind-bpe",
-        default=str(defaults["imagebind_bpe"]) if defaults["imagebind_bpe"] else "",
-        help="Path to ImageBind BPE vocab (bpe_simple_vocab_16e6.txt.gz). If set, uses local BPE tokenizer.",
-    )
     parser.add_argument(
         "--audio-binary",
         default=str(defaults["audio_binary"]),
@@ -985,7 +711,7 @@ def main() -> None:
     parser.add_argument(
         "--audio-config",
         default="",
-        help="Path to audio pipeline config JSON (required for audio-gemma/audio-imagebind).",
+        help="Path to audio pipeline config JSON (required for audio-gemma).",
     )
     parser.add_argument(
         "--audio-keep-tmp",
@@ -1000,7 +726,7 @@ def main() -> None:
     parser.add_argument(
         "--audio-cache-dir",
         default="",
-        help="Cache audio pipeline JSONL outputs to reuse across models (runs in 'both' mode).",
+        help="Cache audio pipeline JSONL outputs to reuse across runs.",
     )
     parser.add_argument("--max-length", type=int, default=256)
     parser.add_argument("--batch-size", type=int, default=8)
@@ -1012,8 +738,7 @@ def main() -> None:
         "--models",
         default="onnx-q4,onnx-q8,litert",
         help=(
-            "Comma-separated model list: onnx-q4, onnx-q8, litert, imagebind, "
-            "imagebind-int8, imagebind-fp, audio-gemma, audio-imagebind"
+            "Comma-separated model list: onnx-q4, onnx-q8, litert, audio-gemma"
         ),
     )
     args = parser.parse_args()

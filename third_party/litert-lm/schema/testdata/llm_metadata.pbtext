@@ -1,4 +1,4 @@
-# proto-file: third_party/odml/litert_lm/runtime/proto/llm_metadata.proto
+# proto-file: runtime/proto/llm_metadata.proto
 # proto-message: LlmMetadata
 start_token: {
   token_str: "<bos>"

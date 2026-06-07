@@ -26,6 +26,7 @@ enum class SyntaxType {
   kUnknown = 0,
   kPython = 1,
   kJson = 2,
+  kFc = 3,
 };
 
 // Maps from string to SyntaxType.

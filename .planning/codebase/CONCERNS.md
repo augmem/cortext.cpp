@@ -23,7 +23,7 @@
 - Fix approach: Keep migrations small, introduce migration validation checks, and add database fixture coverage for upgrade paths from every published schema version.
 
 **Build logic is heavily duplicated across optional backends:**
-- Issue: `CMakeLists.txt` contains repeated ONNX Runtime setup for ImageBind and Gemma, plus separate paths for OGA, sherpa-onnx, and LiteRT-LM. The same external dependency is configured in multiple places with similar but not identical assumptions.
+- Issue: `CMakeLists.txt` contains repeated local-inference setup for Gemma, OGA, sherpa-onnx, and LiteRT-LM. The same external dependency families are configured in multiple places with similar but not identical assumptions.
 - Files: `CMakeLists.txt`
 - Impact: Build fixes can diverge by feature flag combination, and platform-specific failures are hard to reproduce reliably.
 - Fix approach: Consolidate backend bootstrap into shared CMake functions and reduce duplicate ORT configuration branches.
@@ -129,7 +129,7 @@
 ## Scaling Limits
 
 **Feature-flag combinations are likely to outpace practical validation:**
-- Current capacity: The repo supports many optional stacks: embedded SQLite extensions, ImageBind ORT, Gemma ORT, OGA, sherpa-onnx, LiteRT-LM, and platform-specific voice backends.
+- Current capacity: The repo supports many optional stacks: embedded SQLite extensions, Gemma ORT, OGA, sherpa-onnx, LiteRT-LM, and platform-specific voice backends.
 - Limit: The matrix in `CMakeLists.txt` is larger than the exercised test/build matrix visible in `tests/CMakeLists.txt`.
 - Scaling path: Define a supported subset of build profiles and automate those exact combinations in CI before adding more optional paths.
 

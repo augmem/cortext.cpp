@@ -15,6 +15,8 @@
 #ifndef THIRD_PARTY_ODML_LITERT_LM_RUNTIME_ENGINE_ENGINE_SETTINGS_H_
 #define THIRD_PARTY_ODML_LITERT_LM_RUNTIME_ENGINE_ENGINE_SETTINGS_H_
 
+#include <limits>
+#include <memory>
 #include <optional>
 #include <ostream>
 #include <string>
@@ -33,6 +35,7 @@
 #include "runtime/proto/llm_metadata.pb.h"
 #include "runtime/proto/llm_model_type.pb.h"
 #include "runtime/proto/sampler_params.pb.h"
+#include "runtime/util/scoped_file.h"
 
 namespace litert::lm {
 
@@ -75,19 +78,25 @@ class EngineSettings {
   static absl::StatusOr<EngineSettings> CreateDefault(
       ModelAssets model_assets, Backend backend = Backend::CPU,
       std::optional<Backend> vision_backend = std::nullopt,
-      std::optional<Backend> audio_backend = std::nullopt);
+      std::optional<Backend> audio_backend = std::nullopt,
+      std::optional<Backend> sampler_backend = std::nullopt);
 
   // Updates the EngineSettings fields by loading the metadata from the model
   // assets. The function also validates to check if all of the required fields
   // are set correctly. Returns an error if the validation fails.
   absl::Status MaybeUpdateAndValidate(
-      Tokenizer& tokenizer,
+      Tokenizer* tokenizer,
       const proto::LlmMetadata* absl_nullable metadata_from_file,
       absl::string_view input_prompt_as_hint = "",
       const std::optional<std::string>& text_backend_constraint = std::nullopt,
       const std::optional<std::string>& vision_backend_constraint =
           std::nullopt,
-      const std::optional<std::string>& audio_backend_constraint =
+      const std::optional<std::string>& audio_backend_constraint = std::nullopt,
+      const std::optional<std::string>& text_prefer_activation_type =
+          std::nullopt,
+      const std::optional<std::string>& vision_prefer_activation_type =
+          std::nullopt,
+      const std::optional<std::string>& audio_prefer_activation_type =
           std::nullopt);
 
   // Returns the LlmExecutorSettings.
@@ -121,6 +130,21 @@ class EngineSettings {
   // created and returned.
   proto::LlmMetadata& GetMutableLlmMetadata();
 
+  // Returns true if the engine may load different sections of the litertlm file
+  // in parallel.
+  bool GetParallelFileSectionLoading() const;
+  // Sets whether the engine should load different sections of the litertlm file
+  // in parallel.
+  void SetParallelFileSectionLoading(bool parallel_file_section_loading);
+
+  // Returns true if the engine should run tasks in a single thread. Defaults
+  // to false. Typically enabled when running in Wasm (and required for wasm
+  // without pthreads).
+  bool GetSingleThreadedExecution() const;
+  // Sets whether the engine should run tasks in a single thread. Defaults to
+  // false.
+  void SetSingleThreadedExecution(bool single_threaded_execution);
+
  private:
   explicit EngineSettings(
       LlmExecutorSettings executor_settings,
@@ -143,6 +167,13 @@ class EngineSettings {
   // Default metadata for the model. This is loaded from the model assets (if
   // present).
   std::optional<proto::LlmMetadata> metadata_;
+
+  // Whether the engine should load different sections of the litertlm file in
+  // parallel.
+  bool parallel_file_section_loading_ = true;
+
+  // Whether the advanced engine should run tasks in a single thread.
+  bool single_threaded_execution_ = false;
 };
 std::ostream& operator<<(std::ostream& os, const EngineSettings& settings);
 
@@ -198,9 +229,7 @@ class SessionConfig {
   // Prompt templates:
   // Getters for the prompt templates.
 
-  [[deprecated("Use Jinja prompt template instead.")]]
   const proto::PromptTemplates& GetPromptTemplates() const;
-  [[deprecated("Use Jinja prompt template instead.")]]
   proto::PromptTemplates& GetMutablePromptTemplates();
 
   // Llm model type:
@@ -208,14 +237,7 @@ class SessionConfig {
   const proto::LlmModelType& GetLlmModelType() const;
   proto::LlmModelType& GetMutableLlmModelType();
 
-  // Jinja prompt template:
-  // Getters for the jinja prompt template.
-  const std::string& GetJinjaPromptTemplate() const;
-  std::string& GetMutableJinjaPromptTemplate();
-
-  // Whether to apply the deprecated prompt templates in the session.
-  // TODO - b/453312248: Remove this field once the prompt templates are
-  // removed.
+  // Whether to apply the basic prompt templates in the session.
   bool GetApplyPromptTemplateInSession() const {
     return apply_prompt_template_in_session_;
   }
@@ -227,6 +249,18 @@ class SessionConfig {
   bool UseExternalSampler() const { return use_external_sampler_; }
   void SetUseExternalSampler(bool use_external_sampler) {
     use_external_sampler_ = use_external_sampler;
+  }
+
+  // Scoped LoRA file:
+  // Getters for the scoped LoRA file.
+  std::shared_ptr<ScopedFile> GetScopedLoraFile() const;
+  void SetScopedLoraFile(std::shared_ptr<ScopedFile> scoped_lora_file);
+
+  // The maximum number of tokens to generate in a single request:
+  // Getters for the max output tokens.
+  int GetMaxOutputTokens() const { return max_output_tokens_; }
+  void SetMaxOutputTokens(int max_output_tokens) {
+    max_output_tokens_ = max_output_tokens;
   }
 
  private:
@@ -260,9 +294,6 @@ class SessionConfig {
   // present).
   proto::LlmModelType llm_model_type_;
 
-  // Jinja prompt template for the session.
-  std::string jinja_prompt_template_;
-
   // The number of output candidates to generate. Default value is 1 and setting
   // it to a value greater than 1 will require the model to support batching.
   int num_output_candidates_ = 1;
@@ -270,14 +301,22 @@ class SessionConfig {
   // Backend to use for sampling.
   Backend sampler_backend_ = Backend::UNSPECIFIED;
 
-  // Whether to apply the deprecated prompt templates in the session.
-  // TODO - b/453312248: Remove this field once the prompt templates are
-  // removed.
+  // Whether to apply the prompt templates in the session.
   bool apply_prompt_template_in_session_ = true;
 
   // Whether to use external sampler.
   // notice: this is only used in advanced engine.
   bool use_external_sampler_ = false;
+
+  // Scoped file for the LoRA weights.
+  std::shared_ptr<ScopedFile> scoped_lora_file_;
+
+  // The maximum number of tokens to generate in a single request. This limits
+  // the number of decoding steps for a request, as opposed to
+  // LlmExecutorSettings::GetMaxNumTokens(), which limits the total number of
+  // tokens (input + output) stored in the KV cache over the lifetime of a
+  // session.
+  int max_output_tokens_ = std::numeric_limits<int>::max();
 };
 
 std::ostream& operator<<(std::ostream& os, const SessionConfig& config);

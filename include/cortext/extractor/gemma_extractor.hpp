@@ -38,6 +38,21 @@ public:
                                                  const nlohmann::json &schema)
       override;
 
+  operations::ExtractionResult
+  RefineLabelsFromText (const std::string &text,
+                        const std::vector<std::string> &current_labels,
+                        const nlohmann::json &schema);
+
+  operations::ExtractionResult
+  RefineLabelsFromAudio (const float *pcm, size_t num_samples,
+                         const std::vector<std::string> &current_labels,
+                         const nlohmann::json &schema);
+
+  operations::ExtractionResult
+  RefineLabelsFromImage (const std::vector<unsigned char> &image_bytes,
+                         const std::vector<std::string> &current_labels,
+                         const nlohmann::json &schema);
+
   bool IsAvailable () const override;
 
 private:

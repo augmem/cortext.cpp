@@ -61,6 +61,7 @@ class BytePairEncodingTokenizer : public Tokenizer {
   MOCK_METHOD(absl::StatusOr<int>, TokenToId, (absl::string_view token),
               (override));
   MOCK_METHOD(TokenizerType, GetTokenizerType, (), (const, override));
+  MOCK_METHOD(std::vector<std::string>, GetTokens, (), (const, override));
 };
 
 absl::AnyInvocable<void(absl::StatusOr<Responses>)> CreateTestCallback(
@@ -105,6 +106,13 @@ class TasksTest : public testing::Test {
     ASSERT_OK(tokenizer);
     tokenizer_ = std::move(*tokenizer);
 
+    auto gemma3_tokenizer = SentencePieceTokenizer::CreateFromFile(
+        (std::filesystem::path(::testing::SrcDir()) / kTestdataDir /
+         "gemma3_sentencepiece.model")
+            .string());
+    ASSERT_OK(gemma3_tokenizer);
+    gemma3_tokenizer_ = std::move(*gemma3_tokenizer);
+
     // The prefill tokens are the expected tokens that will be passed in at each
     // time the Tasks::Prefill function is called. The values are the token ids
     // of the input prompt "Hello World!" prepended with the bos token id (2).
@@ -121,6 +129,7 @@ class TasksTest : public testing::Test {
   }
 
   std::unique_ptr<Tokenizer> tokenizer_;
+  std::unique_ptr<Tokenizer> gemma3_tokenizer_;
   std::unique_ptr<FakeLlmExecutor> executor_;
 };
 
@@ -216,6 +225,7 @@ TEST_F(TasksTest, DecodeWithTwoStopTokens) {
   StopTokenDetector stop_token_detector(kNumOutputCandidates);
   EXPECT_OK(stop_token_detector.AddStopTokenSequence({2295, 2294}));
   absl::AnyInvocable<void(absl::StatusOr<Responses>)> callback = nullptr;
+
   auto responses = Tasks::Decode(
       *executor_, *tokenizer_, stop_token_detector, kNumOutputCandidates,
       benchmark_info, /*sampler=*/std::nullopt,
@@ -593,6 +603,165 @@ TEST_F(TasksTest, DecodeStopTokenIsPartialBytePairEncodingTokens) {
   EXPECT_EQ(task_responses->GetTexts()[0], "");
 }
 
+TEST_F(TasksTest, DecodeConsecutiveByteTokens) {
+  constexpr int kNumOutputCandidates = 1;
+  constexpr int kVocabSize = 262144;
+  std::vector<std::vector<int>> prefill_tokens = {{2}};
+  // <0xC2> (432), <0xB0> (414) -> "°"
+  std::vector<std::vector<int>> decode_tokens = {{432}, {414}, {0}};
+
+  auto executor = std::make_unique<FakeLlmExecutor>(
+      kVocabSize, prefill_tokens, decode_tokens, kNumOutputCandidates);
+
+  std::optional<BenchmarkInfo> benchmark_info;
+
+  // Run prefill first.
+  std::vector<int> prefill_token_ids = {2};
+  ASSERT_OK_AND_ASSIGN(
+      auto token_ids_buffer,
+      gemma3_tokenizer_->TokenIdsToTensorBuffer(prefill_token_ids));
+  ExecutorTextData text_data(std::move(token_ids_buffer));
+  ExecutorInputs inputs(std::move(text_data), std::nullopt, std::nullopt);
+  auto prefill_responses = Tasks::Prefill(
+      *executor, inputs, /*wait_for_completion=*/true, benchmark_info);
+  EXPECT_OK(prefill_responses);
+
+  StopTokenDetector stop_token_detector(kNumOutputCandidates);
+  EXPECT_OK(stop_token_detector.AddStopTokenSequence({0}));
+
+  std::vector<std::string> step_results;
+  absl::AnyInvocable<void(absl::StatusOr<Responses>)> callback =
+      [&](absl::StatusOr<Responses> responses) {
+        ASSERT_OK(responses);
+        if (responses->GetTaskState() == TaskState::kProcessing) {
+          ASSERT_EQ(responses->GetTexts().size(), 1);
+          step_results.push_back(responses->GetTexts()[0]);
+        }
+      };
+
+  auto task_responses = Tasks::Decode(
+      *executor, *gemma3_tokenizer_, stop_token_detector, kNumOutputCandidates,
+      benchmark_info, /*sampler=*/std::nullopt,
+      /*constraint=*/nullptr, /*decoded_ids=*/std::nullopt,
+      /*callback=*/callback, /*cancelled=*/nullptr);
+
+  EXPECT_OK(task_responses);
+
+  // 432 -> buffered, output ""
+  // 414 -> flushed "°"
+  ASSERT_EQ(step_results.size(), 1);
+  EXPECT_EQ(step_results[0], "°");
+}
+
+TEST_F(TasksTest, DecodeConsecutiveByteTokensWithNonByteTokens) {
+  constexpr int kNumOutputCandidates = 1;
+  constexpr int kVocabSize = 262144;
+  std::vector<std::vector<int>> prefill_tokens = {{2}};
+  // <0x6B> (345), <0x6D> (347), <0xC2> (432), <0xB2> (416) -> km²
+  std::vector<std::vector<int>> decode_tokens = {
+      {345}, {347}, {432}, {416}, {0}};
+
+  auto executor = std::make_unique<FakeLlmExecutor>(
+      kVocabSize, prefill_tokens, decode_tokens, kNumOutputCandidates);
+
+  std::optional<BenchmarkInfo> benchmark_info;
+
+  // Run prefill first.
+  std::vector<int> prefill_token_ids = {2};
+  ASSERT_OK_AND_ASSIGN(
+      auto token_ids_buffer,
+      gemma3_tokenizer_->TokenIdsToTensorBuffer(prefill_token_ids));
+  ExecutorTextData text_data(std::move(token_ids_buffer));
+  ExecutorInputs inputs(std::move(text_data), std::nullopt, std::nullopt);
+  auto prefill_responses = Tasks::Prefill(
+      *executor, inputs, /*wait_for_completion=*/true, benchmark_info);
+  EXPECT_OK(prefill_responses);
+
+  StopTokenDetector stop_token_detector(kNumOutputCandidates);
+  EXPECT_OK(stop_token_detector.AddStopTokenSequence({0}));
+
+  std::vector<std::string> step_results;
+  absl::AnyInvocable<void(absl::StatusOr<Responses>)> callback =
+      [&](absl::StatusOr<Responses> responses) {
+        ASSERT_OK(responses);
+        if (responses->GetTaskState() == TaskState::kProcessing) {
+          ASSERT_EQ(responses->GetTexts().size(), 1);
+          step_results.push_back(responses->GetTexts()[0]);
+        }
+      };
+
+  auto task_responses = Tasks::Decode(
+      *executor, *gemma3_tokenizer_, stop_token_detector, kNumOutputCandidates,
+      benchmark_info, /*sampler=*/std::nullopt,
+      /*constraint=*/nullptr, /*decoded_ids=*/std::nullopt,
+      /*callback=*/callback, /*cancelled=*/nullptr);
+
+  EXPECT_OK(task_responses);
+
+  // 345 -> "k"
+  // 347 -> "m"
+  // 432 -> ""
+  // 416 -> "²"
+  ASSERT_EQ(step_results.size(), 3);
+  EXPECT_EQ(step_results[0], "k");
+  EXPECT_EQ(step_results[1], "m");
+  EXPECT_EQ(step_results[2], "²");
+}
+
+TEST_F(TasksTest, DecodeConsecutiveByteTokensWithPartialBpeIgnored) {
+  constexpr int kNumOutputCandidates = 1;
+  constexpr int kVocabSize = 262144;
+  std::vector<std::vector<int>> prefill_tokens = {{2}};
+  // <0x6B> (345), <0x6D> (347), <0xC2> (432), <0xB2> (416) -> "km²"
+  // Ignore 416 as it is after the stop token 0.
+  std::vector<std::vector<int>> decode_tokens = {
+      {345}, {347}, {432}, {0}, {416}};
+
+  auto executor = std::make_unique<FakeLlmExecutor>(
+      kVocabSize, prefill_tokens, decode_tokens, kNumOutputCandidates);
+
+  std::optional<BenchmarkInfo> benchmark_info;
+
+  // Run prefill first.
+  std::vector<int> prefill_token_ids = {2};
+  ASSERT_OK_AND_ASSIGN(
+      auto token_ids_buffer,
+      gemma3_tokenizer_->TokenIdsToTensorBuffer(prefill_token_ids));
+  ExecutorTextData text_data(std::move(token_ids_buffer));
+  ExecutorInputs inputs(std::move(text_data), std::nullopt, std::nullopt);
+  auto prefill_responses = Tasks::Prefill(
+      *executor, inputs, /*wait_for_completion=*/true, benchmark_info);
+  EXPECT_OK(prefill_responses);
+
+  StopTokenDetector stop_token_detector(kNumOutputCandidates);
+  EXPECT_OK(stop_token_detector.AddStopTokenSequence({0}));
+
+  std::vector<std::string> step_results;
+  absl::AnyInvocable<void(absl::StatusOr<Responses>)> callback =
+      [&](absl::StatusOr<Responses> responses) {
+        ASSERT_OK(responses);
+        if (responses->GetTaskState() == TaskState::kProcessing) {
+          ASSERT_EQ(responses->GetTexts().size(), 1);
+          step_results.push_back(responses->GetTexts()[0]);
+        }
+      };
+
+  auto task_responses = Tasks::Decode(
+      *executor, *gemma3_tokenizer_, stop_token_detector, kNumOutputCandidates,
+      benchmark_info, /*sampler=*/std::nullopt,
+      /*constraint=*/nullptr, /*decoded_ids=*/std::nullopt,
+      /*callback=*/callback, /*cancelled=*/nullptr);
+
+  EXPECT_OK(task_responses);
+
+  // 345 -> "k"
+  // 347 -> "m"
+  // 432 -> ""
+  ASSERT_EQ(step_results.size(), 2);
+  EXPECT_EQ(step_results[0], "k");
+  EXPECT_EQ(step_results[1], "m");
+}
+
 class TasksCustomSamplingTest : public testing::Test {
  protected:
   void SetUp() override {
@@ -602,6 +771,13 @@ class TasksCustomSamplingTest : public testing::Test {
             .string());
     ASSERT_OK(tokenizer);
     tokenizer_ = std::move(*tokenizer);
+
+    auto gemma3_tokenizer = SentencePieceTokenizer::CreateFromFile(
+        (std::filesystem::path(::testing::SrcDir()) / kTestdataDir /
+         "gemma3_sentencepiece.model")
+            .string());
+    ASSERT_OK(gemma3_tokenizer);
+    gemma3_tokenizer_ = std::move(*gemma3_tokenizer);
   }
 
   FakeLlmExecutor CreateFakeLlmExecutor(
@@ -651,6 +827,7 @@ class TasksCustomSamplingTest : public testing::Test {
   }
 
   std::unique_ptr<Tokenizer> tokenizer_;
+  std::unique_ptr<Tokenizer> gemma3_tokenizer_;
 };
 
 TEST_F(TasksCustomSamplingTest, PrefillSucceed) {
@@ -699,8 +876,9 @@ TEST_F(TasksCustomSamplingTest, PrefillTooLong) {
 }
 
 TEST_F(TasksCustomSamplingTest, DecodeCustomSampling) {
-  auto sampler_or = TopPSampler::Create(/*k=*/1, /*p=*/0.5, /*temperature=*/1.0,
-                                        /*batch_size=*/2, /*seed=*/1);
+  auto sampler_or =
+      TopPSampler::Create(/*k=*/1, /*p=*/0.5, /*temperature=*/1.0,
+                          /*batch_size=*/2, /*sequence_size=*/1, /*seed=*/1);
   EXPECT_TRUE(sampler_or.ok());
   std::unique_ptr<TopPSampler> sampler = std::move(sampler_or.value());
 
@@ -738,6 +916,7 @@ TEST_F(TasksCustomSamplingTest, DecodeCustomSampling) {
   EXPECT_OK(prefill_responses);
 
   absl::AnyInvocable<void(absl::StatusOr<Responses>)> callback = nullptr;
+
   auto task_responses =
       Tasks::Decode(executor, *tokenizer_, stop_token_detector,
                     /*num_output_candidates=*/2, benchmark_info, sampler.get(),
@@ -759,8 +938,9 @@ TEST_F(TasksCustomSamplingTest, DecodeCustomSampling) {
 }
 
 TEST_F(TasksCustomSamplingTest, DecodeCustomSamplingWithConstrainedDecoding) {
-  auto sampler_or = TopPSampler::Create(/*k=*/1, /*p=*/0.5, /*temperature=*/1.0,
-                                        /*batch_size=*/2, /*seed=*/1);
+  auto sampler_or =
+      TopPSampler::Create(/*k=*/1, /*p=*/0.5, /*temperature=*/1.0,
+                          /*batch_size=*/2, /*sequence_size=*/1, /*seed=*/1);
   EXPECT_TRUE(sampler_or.ok());
   std::unique_ptr<TopPSampler> sampler = std::move(sampler_or.value());
 
@@ -808,6 +988,7 @@ TEST_F(TasksCustomSamplingTest, DecodeCustomSamplingWithConstrainedDecoding) {
   StopTokenDetector stop_token_detector(2);
   EXPECT_OK(stop_token_detector.AddStopTokenSequence({0}));
   absl::AnyInvocable<void(absl::StatusOr<Responses>)> callback = nullptr;
+
   auto task_responses = Tasks::Decode(
       executor, *tokenizer_, stop_token_detector,
       /*num_output_candidates=*/2, benchmark_info, sampler.get(),
@@ -821,6 +1002,59 @@ TEST_F(TasksCustomSamplingTest, DecodeCustomSamplingWithConstrainedDecoding) {
   EXPECT_EQ(task_responses->GetTexts()[0], " How's it");
   // Second candidate: " How's it".
   EXPECT_EQ(task_responses->GetTexts()[1], " How's it");
+}
+
+TEST_F(TasksCustomSamplingTest,
+       DecodeCustomSamplingWithPartialBytePairEncodingTokens) {
+  ASSERT_OK_AND_ASSIGN(
+      auto sampler,
+      TopPSampler::Create(/*k=*/1, /*p=*/0.5,
+                          /*temperature=*/0.0,
+                          /*batch_size=*/2, /*sequence_size=*/1, /*seed=*/1));
+
+  // <432, 416> --> "km²"
+  // <432, 414> --> "°"
+  auto executor = CreateFakeLlmExecutor(
+      // The expected prefill tokens that after stop tokens are found in
+      // decoding with CustomSampling. That is, the last sampled tokens at stop
+      // condition.
+      /*prefill_tokens=*/{{2}, {0, 0}},
+      /*decode_tokens=*/{{345, 345}, {347, 432}, {432, 414}, {416, 0}, {0, 0}});
+
+  std::optional<BenchmarkInfo> benchmark_info;
+
+  // Run prefill first.
+  std::vector<int> prefill_token_ids = {2};
+  ASSERT_OK_AND_ASSIGN(
+      auto token_ids_buffer,
+      gemma3_tokenizer_->TokenIdsToTensorBuffer(prefill_token_ids));
+  ExecutorTextData text_data(std::move(token_ids_buffer));
+  ExecutorInputs inputs(std::move(text_data), std::nullopt, std::nullopt);
+  auto prefill_responses = Tasks::Prefill(
+      executor, inputs, /*wait_for_completion=*/true, benchmark_info);
+  EXPECT_OK(prefill_responses);
+
+  StopTokenDetector stop_token_detector(2);
+  EXPECT_OK(stop_token_detector.AddStopTokenSequence({0}));
+  auto decoded_ids = CreateTensorBuffer<int>({2, 1});
+  EXPECT_TRUE(decoded_ids.HasValue());
+  decoded_ids->Write<int>({345, 345});
+
+  std::vector<std::string> step_results;
+  absl::AnyInvocable<void(absl::StatusOr<Responses>)> callback = nullptr;
+
+  ASSERT_OK_AND_ASSIGN(
+      auto task_responses,
+      Tasks::Decode(executor, *gemma3_tokenizer_, stop_token_detector,
+                    /*num_output_candidates=*/2, benchmark_info, sampler.get(),
+                    /*constraint=*/nullptr, std::move(decoded_ids.Value()),
+                    /*callback=*/callback,
+                    /*cancelled=*/nullptr));
+
+  EXPECT_EQ(task_responses.GetTaskState(), TaskState::kDone);
+  EXPECT_EQ(task_responses.GetTexts().size(), 2);
+  EXPECT_EQ(task_responses.GetTexts()[0], "km²");
+  EXPECT_EQ(task_responses.GetTexts()[1], "k°");
 }
 
 TEST_F(TasksCustomSamplingTest,
@@ -840,6 +1074,11 @@ TEST_F(TasksCustomSamplingTest,
   // decode tokens are the same as the target text.
   EXPECT_EQ(responses_without_token_lengths->GetScores()[0], 0.0f);
   EXPECT_FALSE(responses_without_token_lengths->GetTokenLengths().has_value());
+  ASSERT_TRUE(responses_without_token_lengths->GetTokenScores().has_value());
+  EXPECT_EQ(responses_without_token_lengths->GetTokenScores()->size(), 1);
+  EXPECT_EQ(responses_without_token_lengths->GetTokenScores()->at(0).size(), 7);
+  EXPECT_THAT(responses_without_token_lengths->GetTokenScores()->at(0),
+              testing::Each(0.0f));
 }
 
 TEST_F(TasksCustomSamplingTest,
@@ -861,6 +1100,11 @@ TEST_F(TasksCustomSamplingTest,
   EXPECT_TRUE(responses_with_token_lengths->GetTokenLengths().has_value());
   EXPECT_EQ(responses_with_token_lengths->GetTokenLengths()->size(), 1);
   EXPECT_EQ((*responses_with_token_lengths->GetTokenLengths())[0], 7);
+  ASSERT_TRUE(responses_with_token_lengths->GetTokenScores().has_value());
+  EXPECT_EQ(responses_with_token_lengths->GetTokenScores()->size(), 1);
+  EXPECT_EQ(responses_with_token_lengths->GetTokenScores()->at(0).size(), 7);
+  EXPECT_THAT(responses_with_token_lengths->GetTokenScores()->at(0),
+              testing::Each(0.0f));
 }
 
 TEST_F(TasksCustomSamplingTest,
@@ -894,6 +1138,17 @@ TEST_F(TasksCustomSamplingTest,
   EXPECT_EQ(task_responses_without_token_lengths->GetScores()[1], 0.0f);
   EXPECT_FALSE(
       task_responses_without_token_lengths->GetTokenLengths().has_value());
+  ASSERT_TRUE(
+      task_responses_without_token_lengths->GetTokenScores().has_value());
+  EXPECT_EQ(task_responses_without_token_lengths->GetTokenScores()->size(), 2);
+  EXPECT_EQ(
+      task_responses_without_token_lengths->GetTokenScores()->at(0).size(), 7);
+  EXPECT_THAT(task_responses_without_token_lengths->GetTokenScores()->at(0),
+              testing::Each(0.0f));
+  EXPECT_EQ(
+      task_responses_without_token_lengths->GetTokenScores()->at(1).size(), 7);
+  EXPECT_THAT(task_responses_without_token_lengths->GetTokenScores()->at(1),
+              testing::Each(0.0f));
 }
 
 TEST_F(TasksCustomSamplingTest, ScoreCustomSamplingMultiBatchWithTokenLengths) {
@@ -928,6 +1183,16 @@ TEST_F(TasksCustomSamplingTest, ScoreCustomSamplingMultiBatchWithTokenLengths) {
   EXPECT_EQ(task_responses_with_token_lengths->GetTokenLengths()->size(), 2);
   EXPECT_EQ((*task_responses_with_token_lengths->GetTokenLengths())[0], 7);
   EXPECT_EQ((*task_responses_with_token_lengths->GetTokenLengths())[1], 7);
+  ASSERT_TRUE(task_responses_with_token_lengths->GetTokenScores().has_value());
+  EXPECT_EQ(task_responses_with_token_lengths->GetTokenScores()->size(), 2);
+  EXPECT_EQ(task_responses_with_token_lengths->GetTokenScores()->at(0).size(),
+            7);
+  EXPECT_THAT(task_responses_with_token_lengths->GetTokenScores()->at(0),
+              testing::Each(0.0f));
+  EXPECT_EQ(task_responses_with_token_lengths->GetTokenScores()->at(1).size(),
+            7);
+  EXPECT_THAT(task_responses_with_token_lengths->GetTokenScores()->at(1),
+              testing::Each(0.0f));
 }
 
 TEST_F(TasksCustomSamplingTest, DecodeCustomSamplingReachMaxNumTokens) {
@@ -957,8 +1222,9 @@ TEST_F(TasksCustomSamplingTest, DecodeCustomSamplingReachMaxNumTokens) {
       executor, inputs, /*wait_for_completion=*/true, benchmark_info);
   EXPECT_OK(prefill_responses);
 
-  auto sampler_or = TopPSampler::Create(/*k=*/1, /*p=*/0.5, /*temperature=*/1.0,
-                                        /*batch_size=*/2, /*seed=*/1);
+  auto sampler_or =
+      TopPSampler::Create(/*k=*/1, /*p=*/0.5, /*temperature=*/1.0,
+                          /*batch_size=*/2, /*sequence_size=*/1, /*seed=*/1);
   EXPECT_TRUE(sampler_or.ok());
   std::unique_ptr<TopPSampler> sampler = std::move(sampler_or.value());
 
@@ -967,6 +1233,7 @@ TEST_F(TasksCustomSamplingTest, DecodeCustomSamplingReachMaxNumTokens) {
   StopTokenDetector stop_token_detector(2);
   EXPECT_OK(stop_token_detector.AddStopTokenSequence({0}));
   absl::AnyInvocable<void(absl::StatusOr<Responses>)> callback = nullptr;
+
   auto task_responses =
       Tasks::Decode(executor, *tokenizer_, stop_token_detector,
                     /*num_output_candidates=*/2, benchmark_info, sampler.get(),
@@ -983,8 +1250,9 @@ TEST_F(TasksCustomSamplingTest, DecodeCustomSamplingReachMaxNumTokens) {
 }
 
 TEST_F(TasksCustomSamplingTest, DecodeCustomSamplingStreaming) {
-  auto sampler_or = TopPSampler::Create(/*k=*/1, /*p=*/0.5, /*temperature=*/1.0,
-                                        /*batch_size=*/2, /*seed=*/1);
+  auto sampler_or =
+      TopPSampler::Create(/*k=*/1, /*p=*/0.5, /*temperature=*/1.0,
+                          /*batch_size=*/2, /*sequence_size=*/1, /*seed=*/1);
   EXPECT_TRUE(sampler_or.ok());
   std::unique_ptr<TopPSampler> sampler = std::move(sampler_or.value());
 
@@ -1078,8 +1346,9 @@ TEST_F(TasksCustomSamplingTest,
       executor, inputs, /*wait_for_completion=*/true, benchmark_info);
   EXPECT_OK(prefill_responses);
 
-  auto sampler_or = TopPSampler::Create(/*k=*/1, /*p=*/0.5, /*temperature=*/1.0,
-                                        /*batch_size=*/2, /*seed=*/1);
+  auto sampler_or =
+      TopPSampler::Create(/*k=*/1, /*p=*/0.5, /*temperature=*/1.0,
+                          /*batch_size=*/2, /*sequence_size=*/1, /*seed=*/1);
   EXPECT_TRUE(sampler_or.ok());
   std::unique_ptr<TopPSampler> sampler = std::move(sampler_or.value());
 
@@ -1113,8 +1382,9 @@ TEST_F(TasksCustomSamplingTest,
 }
 
 TEST_F(TasksCustomSamplingTest, DecodeComplexStopTokenDetector) {
-  auto sampler_or = TopPSampler::Create(/*k=*/1, /*p=*/0.5, /*temperature=*/1.0,
-                                        /*batch_size=*/2, /*seed=*/1);
+  auto sampler_or =
+      TopPSampler::Create(/*k=*/1, /*p=*/0.5, /*temperature=*/1.0,
+                          /*batch_size=*/2, /*sequence_size=*/1, /*seed=*/1);
   EXPECT_TRUE(sampler_or.ok());
   std::unique_ptr<TopPSampler> sampler = std::move(sampler_or.value());
 
@@ -1191,7 +1461,7 @@ TEST_F(TasksCustomSamplingTest, DecodeCustomSamplingStreamingWithCancellation) {
     decode_tokens.push_back({1, 1});
   }
   auto delayed_executor = CreateFakeLlmExecutor(
-      /*prefill_tokens=*/{{2}, {0, 0}},
+      /*prefill_tokens=*/{{2}, {224, 90}},
       /*decode_tokens=*/{{224, 90},
                          {24, 547},
                          {8, 58},
@@ -1217,8 +1487,9 @@ TEST_F(TasksCustomSamplingTest, DecodeCustomSamplingStreamingWithCancellation) {
   // Set the delay long enough not to be flaky.
   delayed_executor.SetDecodeDelay(absl::Milliseconds(1000));
 
-  auto sampler_or = TopPSampler::Create(/*k=*/1, /*p=*/0.5, /*temperature=*/1.0,
-                                        /*batch_size=*/2, /*seed=*/1);
+  auto sampler_or =
+      TopPSampler::Create(/*k=*/1, /*p=*/0.5, /*temperature=*/1.0,
+                          /*batch_size=*/2, /*sequence_size=*/1, /*seed=*/1);
   EXPECT_TRUE(sampler_or.ok());
   std::unique_ptr<TopPSampler> sampler = std::move(sampler_or.value());
 
@@ -1242,6 +1513,7 @@ TEST_F(TasksCustomSamplingTest, DecodeCustomSamplingStreamingWithCancellation) {
   ASSERT_OK(pool.Schedule([&]() {
     task_responses = Tasks::Decode(
         delayed_executor, *tokenizer_, stop_token_detector,
+
         /*num_output_candidates=*/2, benchmark_info, sampler.get(),
         /*constraint=*/nullptr, std::move(decoded_ids.Value()),
         /*callback=*/callback, &cancelled);
@@ -1263,8 +1535,9 @@ TEST_F(TasksCustomSamplingTest, DecodeCustomSamplingStreamingWithCancellation) {
 
 TEST_F(TasksCustomSamplingTest,
        DecodeCustomSamplingStreamingWithConstrainedDecoding) {
-  auto sampler_or = TopPSampler::Create(/*k=*/1, /*p=*/0.5, /*temperature=*/1.0,
-                                        /*batch_size=*/2, /*seed=*/1);
+  auto sampler_or =
+      TopPSampler::Create(/*k=*/1, /*p=*/0.5, /*temperature=*/1.0,
+                          /*batch_size=*/2, /*sequence_size=*/1, /*seed=*/1);
   EXPECT_TRUE(sampler_or.ok());
   std::unique_ptr<TopPSampler> sampler = std::move(sampler_or.value());
 
@@ -1326,9 +1599,10 @@ TEST_F(TasksCustomSamplingTest,
 }
 
 TEST_F(TasksCustomSamplingTest, DecodeStopTokenAndBPEDetector) {
-  auto sampler_or = TopPSampler::Create(/*k=*/1, /*p=*/0.5,
-                                        /*temperature=*/1.0,
-                                        /*batch_size=*/2, /*seed=*/1);
+  auto sampler_or =
+      TopPSampler::Create(/*k=*/1, /*p=*/0.5,
+                          /*temperature=*/1.0,
+                          /*batch_size=*/2, /*sequence_size=*/1, /*seed=*/1);
   EXPECT_TRUE(sampler_or.ok());
   std::unique_ptr<TopPSampler> sampler = std::move(sampler_or.value());
 

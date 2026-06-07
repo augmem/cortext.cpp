@@ -392,6 +392,8 @@ if spike_bypass:
 
   This keeps flashbulb moments intact while preventing early or highly coherent windows from fragmenting into micro-memories. As the unit matures, spike bypass becomes easier, and low coherence reduces the effective margin.
 
+The implementation also uses the same force-write path when the accumulator reaches its maximum signal capacity. That capacity flush is an operational safety valve, not an additional flashbulb criterion.
+
 ### Inactivity Boost
 
 We avoid hard timeouts for episode boundaries. Instead, when the stream becomes

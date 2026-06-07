@@ -38,11 +38,11 @@
 #include "schema/core/litertlm_header.h"
 #include "schema/core/litertlm_header_schema_generated.h"
 #include "schema/core/litertlm_utils.h"
+#include "zconf.h"  // from @zlib
+#include "zlib.h"  // from @zlib
 #include "sentencepiece_processor.h"  // from @sentencepiece
 #include "tflite/model_builder.h"  // from @litert
 #include "tflite/stderr_reporter.h"  // from @litert
-#include "zconf.h"  // from @zlib
-#include "zlib.h"  // from @zlib
 
 namespace litert {
 namespace lm {
@@ -50,22 +50,18 @@ namespace schema {
 
 using litert::lm::proto::LlmMetadata;
 
-absl::StatusOr<bool> IsLiteRTLMFile(const std::string& path) {
-  if (!std::filesystem::exists(path)) {
-    return absl::NotFoundError(
-        absl::StrFormat("File does not exist: %s", path));
+bool IsLiteRTLMFile(absl::string_view content) {
+  if (content.size() < 8) {
+    return false;
   }
 
-  std::ifstream input_file_stream(path, std::ios::binary);
-  if (!input_file_stream.is_open()) {
-    return absl::InternalError(
-        absl::StrFormat("Could not open file: %s", path));
-  }
+  return content.substr(0, 8) == "LITERTLM";
+}
 
+bool IsLiteRTLMFile(std::istream& stream) {
   char magic_number[8];
-  input_file_stream.read(magic_number, 8);
-  if (input_file_stream.gcount() != 8 ||
-      std::string(magic_number, 8) != "LITERTLM") {
+  stream.read(magic_number, 8);
+  if (stream.gcount() != 8 || std::string(magic_number, 8) != "LITERTLM") {
     return false;
   }
   return true;
@@ -204,6 +200,11 @@ absl::Status ReadValueTFromSection(
   // Calculate the size of the data.
   size_t end_offset = section->end_offset();
   size_t begin_offset = section->begin_offset();
+  if (begin_offset > end_offset) {
+    return absl::InvalidArgumentError(absl::StrFormat(
+        "Section %d has invalid offsets: begin_offset (%d) > end_offset (%d).",
+        section_idx, begin_offset, end_offset));
+  }
   size_t data_size = end_offset - begin_offset;
   if (data_size == 0) {
     return absl::InvalidArgumentError(
@@ -282,7 +283,7 @@ absl::Status ReadSectionIntoLlmMetadata(const std::string& litertlm_path,
     return absl::InternalError(
         absl::StrFormat("Could not read %d bytes from stream.", size));
   }
-  llm_metadata->ParseFromArray(buffer.get(), size);
+  llm_metadata->ParseFromString(absl::string_view(buffer.get(), size));
   return absl::OkStatus();
 }
 
@@ -341,6 +342,14 @@ absl::Status DecompressData(const uint8_t* compressed_data,
   }
   uint64_t uncompressed_buffer_size;
   std::memcpy(&uncompressed_buffer_size, compressed_data, sizeof(uint64_t));
+
+  constexpr uint64_t kMaxUncompressedSize = 1ULL << 30;  // 1 GB
+  if (uncompressed_buffer_size > kMaxUncompressedSize) {
+    return absl::InvalidArgumentError(
+        absl::StrFormat("Uncompressed size %d exceeds maximum allowed size %d.",
+                        uncompressed_buffer_size, kMaxUncompressedSize));
+  }
+
   output->resize(uncompressed_buffer_size);
 
   // Decompress the data.

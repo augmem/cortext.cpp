@@ -1,11 +1,11 @@
 #include "cortext/audio/sherpa_onnx.hpp"
 #include "cortext/encoder/embeddinggemma.hpp"
-#include "cortext/encoder/imagebind.hpp"
 
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -21,8 +21,11 @@ struct Options
   std::string input_path;
   std::string output_path;
   std::string config_path;
-  std::string mode = "both"; // gemma | imagebind | both
+  std::string mode = "gemma";
   std::size_t limit = 0;
+  std::string judge_output_path;
+  std::string judge_model = "nemotron-3-nano-omni-30b-a3b-8bit";
+  int judge_limit = -1;
 };
 
 void
@@ -30,7 +33,10 @@ PrintUsage (const char *argv0)
 {
   std::cout
       << "Usage: " << argv0
-      << " --input <jsonl> --config <json> --output <jsonl> [--mode gemma|imagebind|both] [--limit N]\n";
+      << " --input <jsonl> --config <json> --output <jsonl>"
+         " [--mode gemma] [--limit N]"
+         " [--judge-output <json>] [--judge-model <model>]"
+         " [--judge-limit N]\n";
 }
 
 std::optional<std::string>
@@ -84,6 +90,27 @@ ParseArgs (int argc, char *argv[])
             throw std::runtime_error ("--limit requires a value");
           opts.limit = static_cast<std::size_t> (std::stoul (*val));
         }
+      else if (arg == "--judge-output")
+        {
+          auto val = NextArg (i, argc, argv);
+          if (!val)
+            throw std::runtime_error ("--judge-output requires a value");
+          opts.judge_output_path = *val;
+        }
+      else if (arg == "--judge-model")
+        {
+          auto val = NextArg (i, argc, argv);
+          if (!val)
+            throw std::runtime_error ("--judge-model requires a value");
+          opts.judge_model = *val;
+        }
+      else if (arg == "--judge-limit")
+        {
+          auto val = NextArg (i, argc, argv);
+          if (!val)
+            throw std::runtime_error ("--judge-limit requires a value");
+          opts.judge_limit = std::stoi (*val);
+        }
       else if (arg == "--help" || arg == "-h")
         {
           PrintUsage (argv[0]);
@@ -96,6 +123,16 @@ ParseArgs (int argc, char *argv[])
       throw std::runtime_error ("Missing required arguments");
     }
   return opts;
+}
+
+std::string
+ShellQuote (const std::string &value)
+{
+  std::string out = "'";
+  for (char ch : value)
+    out += ch == '\'' ? "'\\''" : std::string (1, ch);
+  out += "'";
+  return out;
 }
 
 nlohmann::json
@@ -167,15 +204,6 @@ ParseGemmaConfig (const nlohmann::json &j)
   return cfg;
 }
 
-std::string
-ParseImageBindDir (const nlohmann::json &j)
-{
-  if (!j.contains ("imagebind"))
-    throw std::runtime_error ("Config missing 'imagebind' section");
-  const auto &ib = j.at ("imagebind");
-  return ib.value ("models_dir", "");
-}
-
 std::vector<float>
 ResampleLinear (const std::vector<float> &input, int32_t in_rate,
                 int32_t out_rate)
@@ -225,11 +253,11 @@ main (int argc, char *argv[])
   try
     {
       auto opts = ParseArgs (argc, argv);
+      if (opts.mode != "gemma")
+        {
+          throw std::runtime_error ("Unsupported mode: " + opts.mode);
+        }
       const auto config = LoadJson (opts.config_path);
-
-      const bool run_gemma = opts.mode == "gemma" || opts.mode == "both";
-      const bool run_imagebind
-          = opts.mode == "imagebind" || opts.mode == "both";
 
       const auto tts_config = ParseTtsConfig (config);
       cortext::SherpaOnnxOfflineTts tts (tts_config);
@@ -237,22 +265,11 @@ main (int argc, char *argv[])
       std::unique_ptr<cortext::EmbeddingGemmaEncoder> gemma;
       cortext::SherpaOnnxAsrConfig asr_config;
       cortext::EmbeddingGemmaConfig gemma_config;
-      std::unique_ptr<cortext::ImageBindEncoder> imagebind;
 
-      if (run_gemma)
-        {
-          asr_config = ParseAsrConfig (config);
-          gemma_config = ParseGemmaConfig (config);
-          asr = std::make_unique<cortext::SherpaOnnxOfflineAsr> (asr_config);
-          gemma = std::make_unique<cortext::EmbeddingGemmaEncoder> (gemma_config);
-        }
-      if (run_imagebind)
-        {
-          const auto ib_dir = ParseImageBindDir (config);
-          if (ib_dir.empty ())
-            throw std::runtime_error ("imagebind.models_dir is required");
-          imagebind = std::make_unique<cortext::ImageBindEncoder> (ib_dir);
-        }
+      asr_config = ParseAsrConfig (config);
+      gemma_config = ParseGemmaConfig (config);
+      asr = std::make_unique<cortext::SherpaOnnxOfflineAsr> (asr_config);
+      gemma = std::make_unique<cortext::EmbeddingGemmaEncoder> (gemma_config);
 
       std::ifstream in (opts.input_path);
       if (!in)
@@ -264,7 +281,6 @@ main (int argc, char *argv[])
       RunningStat tts_ms;
       RunningStat asr_ms;
       RunningStat gemma_ms;
-      RunningStat imagebind_ms;
 
       std::string line;
       std::size_t processed = 0;
@@ -290,50 +306,29 @@ main (int argc, char *argv[])
           out_row["text"] = text;
           out_row["tts_ms"] = tts_item_ms;
 
-          if (run_gemma)
-            {
-              auto resampled = ResampleLinear (audio.samples,
-                                              audio.sample_rate,
-                                              static_cast<int32_t> (asr_config.sample_rate));
-              auto t_asr0 = std::chrono::steady_clock::now ();
-              const std::string transcript
-                  = asr->Transcribe (resampled.data (), resampled.size (),
-                                     asr_config.sample_rate);
-              auto t_asr1 = std::chrono::steady_clock::now ();
-              const double asr_item_ms
-                  = std::chrono::duration<double, std::milli> (t_asr1 - t_asr0).count ();
-              asr_ms.Add (asr_item_ms);
+          auto resampled = ResampleLinear (audio.samples, audio.sample_rate,
+                                          static_cast<int32_t> (asr_config.sample_rate));
+          auto t_asr0 = std::chrono::steady_clock::now ();
+          const std::string transcript
+              = asr->Transcribe (resampled.data (), resampled.size (),
+                                 asr_config.sample_rate);
+          auto t_asr1 = std::chrono::steady_clock::now ();
+          const double asr_item_ms
+              = std::chrono::duration<double, std::milli> (t_asr1 - t_asr0).count ();
+          asr_ms.Add (asr_item_ms);
 
-              std::vector<float> emb;
-              auto t_g0 = std::chrono::steady_clock::now ();
-              gemma->EncodeText (transcript, emb);
-              auto t_g1 = std::chrono::steady_clock::now ();
-              const double gemma_item_ms
-                  = std::chrono::duration<double, std::milli> (t_g1 - t_g0).count ();
-              gemma_ms.Add (gemma_item_ms);
+          std::vector<float> emb;
+          auto t_g0 = std::chrono::steady_clock::now ();
+          gemma->EncodeText (transcript, emb);
+          auto t_g1 = std::chrono::steady_clock::now ();
+          const double gemma_item_ms
+              = std::chrono::duration<double, std::milli> (t_g1 - t_g0).count ();
+          gemma_ms.Add (gemma_item_ms);
 
-              out_row["asr_text"] = transcript;
-              out_row["asr_ms"] = asr_item_ms;
-              out_row["gemma_ms"] = gemma_item_ms;
-              out_row["embedding_gemma"] = emb;
-            }
-
-          if (run_imagebind)
-            {
-              auto resampled = ResampleLinear (audio.samples,
-                                              audio.sample_rate,
-                                              16000);
-              std::vector<float> emb;
-              auto t_ib0 = std::chrono::steady_clock::now ();
-              imagebind->EncodeAudio (resampled.data (), resampled.size (), emb);
-              auto t_ib1 = std::chrono::steady_clock::now ();
-              const double imagebind_item_ms
-                  = std::chrono::duration<double, std::milli> (t_ib1 - t_ib0).count ();
-              imagebind_ms.Add (imagebind_item_ms);
-
-              out_row["imagebind_ms"] = imagebind_item_ms;
-              out_row["embedding_imagebind"] = emb;
-            }
+          out_row["asr_text"] = transcript;
+          out_row["asr_ms"] = asr_item_ms;
+          out_row["gemma_ms"] = gemma_item_ms;
+          out_row["embedding_gemma"] = emb;
 
           out << out_row.dump () << "\n";
           ++processed;
@@ -343,14 +338,21 @@ main (int argc, char *argv[])
 
       std::cout << "Processed " << processed << " items\n";
       std::cout << "TTS mean ms: " << tts_ms.Mean () << "\n";
-      if (run_gemma)
+      std::cout << "ASR mean ms: " << asr_ms.Mean () << "\n";
+      std::cout << "Gemma mean ms: " << gemma_ms.Mean () << "\n";
+
+      if (!opts.judge_output_path.empty ())
         {
-          std::cout << "ASR mean ms: " << asr_ms.Mean () << "\n";
-          std::cout << "Gemma mean ms: " << gemma_ms.Mean () << "\n";
-        }
-      if (run_imagebind)
-        {
-          std::cout << "ImageBind mean ms: " << imagebind_ms.Mean () << "\n";
+          std::string cmd = "python3 tools/judge_audio_pipeline_stt.py --input "
+                            + ShellQuote (opts.output_path) + " --out "
+                            + ShellQuote (opts.judge_output_path) + " --model "
+                            + ShellQuote (opts.judge_model);
+          if (opts.judge_limit >= 0)
+            cmd += " --limit " + std::to_string (opts.judge_limit);
+          const int rc = std::system (cmd.c_str ());
+          if (rc != 0)
+            throw std::runtime_error (
+                "Nemotron STT judge failed; is the local judge server running?");
         }
     }
   catch (const std::exception &e)

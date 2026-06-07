@@ -52,6 +52,23 @@ TEST(PythonParserUtilsTest, ParseMultipleToolCalls) {
               }])json")));
 }
 
+TEST(PythonParserUtilsTest, ParseMultipleToolCallsOnSeparateLines) {
+  EXPECT_THAT(ParsePythonExpression(R"(func_1(x='hello')
+func_2(y=2))"),
+              IsOkAndHolds(nlohmann::ordered_json::parse(R"json([{
+                "name": "func_1",
+                "arguments": {
+                  "x": "hello"
+                }
+              },
+              {
+                "name": "func_2",
+                "arguments": {
+                  "y": 2
+                }
+              }])json")));
+}
+
 TEST(PythonParserUtilsTest, ParseEmptyList) {
   EXPECT_THAT(ParsePythonExpression("[]"),
               IsOkAndHolds(nlohmann::ordered_json::parse(R"json([])json")));
@@ -70,7 +87,8 @@ TEST(PythonParserUtilsTest, ParseInvalidToolCall) {
 TEST(PythonParserUtilsTest, ParseNoArguments) {
   EXPECT_THAT(ParsePythonExpression("function_name()"),
               IsOkAndHolds(nlohmann::ordered_json::parse(R"json([{
-                "name": "function_name"
+                "name": "function_name",
+                "arguments": {}
               }])json")));
 }
 
@@ -305,6 +323,17 @@ TEST(PythonParserUtilsTest, ParseListArgumentWithTrailingComma) {
                 "name": "function_name",
                 "arguments": {
                   "x": [1, 2, 3]
+                }
+              }])json")));
+}
+
+TEST(PythonParserUtilsTest, ParseDictArgumentWithTrailingComma) {
+  EXPECT_THAT(ParsePythonExpression(
+                  "function_name(x={'hello': 'world', 'foo': 'bar',})"),
+              IsOkAndHolds(nlohmann::ordered_json::parse(R"json([{
+                "name": "function_name",
+                "arguments": {
+                  "x": {"hello": "world", "foo": "bar"}
                 }
               }])json")));
 }

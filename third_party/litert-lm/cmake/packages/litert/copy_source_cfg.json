@@ -1,0 +1,20 @@
+{
+  "files": [
+    {
+      "src_path": "${LITERT_SRC_DIR}/cc/internal/scoped_file.cc",
+      "dest_path": "${GENERATED_SRC_DIR}/runtime/util/scoped_file.cc"
+    },
+    {
+      "src_path": "${LITERT_SRC_DIR}/cc/internal/scoped_file.h",
+      "dest_path": "${GENERATED_SRC_DIR}/runtime/util/scoped_file.h"
+    },
+    {
+      "src_path": "${LITERT_SRC_DIR}/cc/internal/scoped_file_posix.cc",
+      "dest_path": "${GENERATED_SRC_DIR}/runtime/util/scoped_file_posix.cc"
+    },
+    {
+      "src_path": "${LITERT_SRC_DIR}/cc/internal/scoped_file_win.cc",
+      "dest_path": "${GENERATED_SRC_DIR}/runtime/util/scoped_file_win.cc"
+    }
+  ]
+}

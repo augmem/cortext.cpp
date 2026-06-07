@@ -933,6 +933,17 @@ public:
     return stored_embedding_id_;
   }
 
+  void
+  SetStoredMemoryId (std::optional<long long> id)
+  {
+    stored_memory_id_ = id;
+  }
+  std::optional<long long>
+  GetStoredMemoryId () const
+  {
+    return stored_memory_id_;
+  }
+
   // ======================================================================
   // Memory Accumulation API (Section 4.4)
   // ======================================================================
@@ -946,6 +957,17 @@ public:
   GetBoundaryScore () const
   {
     return boundary_score_;
+  }
+
+  void
+  SetBoundaryDiagnostics (BoundaryDiagnostics v)
+  {
+    boundary_diagnostics_ = v;
+  }
+  std::optional<BoundaryDiagnostics>
+  GetBoundaryDiagnostics () const
+  {
+    return boundary_diagnostics_;
   }
 
   void
@@ -1215,6 +1237,7 @@ private:
 
   // Memory storage output (MemoryStorage operation)
   std::optional<long long> stored_embedding_id_;
+  std::optional<long long> stored_memory_id_;
 
   // Algorithm 27 fields
   bool at_boundary_ = false;
@@ -1258,6 +1281,7 @@ private:
 
   // Memory Accumulation fields (Section 4.4)
   std::optional<double> boundary_score_;
+  std::optional<BoundaryDiagnostics> boundary_diagnostics_;
   bool flush_required_ = false;
   bool spike_bypass_ = false;
   std::optional<double> window_score_;

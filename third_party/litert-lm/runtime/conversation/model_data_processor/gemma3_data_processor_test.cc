@@ -242,11 +242,8 @@ TEST_F(Gemma3DataProcessorTest, ToMessage) {
       processor->ToMessage(Responses(TaskState::kProcessing, {"test response"}),
                            std::monostate{}));
 
-  ASSERT_TRUE(std::holds_alternative<nlohmann::ordered_json>(message));
-  const nlohmann::ordered_json& json_message =
-      std::get<nlohmann::ordered_json>(message);
   EXPECT_EQ(
-      json_message,
+      message,
       json({{"role", "assistant"},
             {"content", {{{"type", "text"}, {"text", "test response"}}}}}));
 }
@@ -275,10 +272,7 @@ TEST_F(Gemma3DataProcessorTest, ToMessageWithToolCall) {
                     {"This is some text.\n```tool_code\ntool_name(x=1)\n```"}),
           std::monostate{}));
 
-  ASSERT_TRUE(std::holds_alternative<nlohmann::ordered_json>(message));
-  const nlohmann::ordered_json& json_message =
-      std::get<nlohmann::ordered_json>(message);
-  EXPECT_EQ(json_message, nlohmann::ordered_json::parse(R"json({
+  EXPECT_EQ(message, nlohmann::ordered_json::parse(R"json({
     "role": "assistant",
     "content": [
       {
@@ -325,9 +319,7 @@ TEST_F(Gemma3DataProcessorTest, ToMessageWithToolCallUsingToolCodeRegex) {
 print(tool_name(x=1))
 ```)"}),
                                             std::monostate{}));
-  ASSERT_TRUE(std::holds_alternative<nlohmann::ordered_json>(message1));
-  EXPECT_EQ(std::get<nlohmann::ordered_json>(message1),
-            nlohmann::ordered_json::parse(R"json({
+  EXPECT_EQ(message1, nlohmann::ordered_json::parse(R"json({
               "role": "assistant",
               "content": [
                 {
@@ -356,9 +348,7 @@ print(tool_name(x=1))
 print(default_api.tool_name(x=2, y="hello"))
 ```)"}),
                                             std::monostate{}));
-  ASSERT_TRUE(std::holds_alternative<nlohmann::ordered_json>(message2));
-  EXPECT_EQ(std::get<nlohmann::ordered_json>(message2),
-            nlohmann::ordered_json::parse(R"json({
+  EXPECT_EQ(message2, nlohmann::ordered_json::parse(R"json({
               "role": "assistant",
               "content": [
                 {
@@ -389,9 +379,7 @@ print(tool_name(x=3, y="world", z=True))
 print(default_api.another_tool())
 ```)"}),
                            std::monostate{}));
-  ASSERT_TRUE(std::holds_alternative<nlohmann::ordered_json>(message3));
-  EXPECT_EQ(std::get<nlohmann::ordered_json>(message3),
-            nlohmann::ordered_json::parse(R"json({
+  EXPECT_EQ(message3, nlohmann::ordered_json::parse(R"json({
               "role": "assistant",
               "content": [
                 {
@@ -414,7 +402,8 @@ print(default_api.another_tool())
                 {
                   "type": "function",
                   "function": {
-                    "name": "another_tool"
+                    "name": "another_tool",
+                    "arguments": {}
                   }
                 }
               ]
@@ -1111,6 +1100,155 @@ I am doing well, thanks for asking.<end_of_turn>
 
 #endif  // !defined(WIN32) && !defined(_WIN32) && !defined(__WIN32__) &&
         // !defined(__NT__) && !defined(_WIN64)
+
+TEST_F(Gemma3DataProcessorTest, CreateConstraint) {
+  // Create the model data processor.
+  ASSERT_OK_AND_ASSIGN(
+      auto processor,
+      Gemma3DataProcessor::Create(Gemma3DataProcessorConfig(),
+                                  /*preface=*/std::nullopt, tokenizer_.get(),
+                                  /*stop_token_ids=*/{},
+                                  /*enable_constrained_decoding=*/true));
+  const nlohmann::ordered_json tools = nlohmann::ordered_json::parse(R"json([
+    {
+      "name": "get_weather",
+      "description": "Gets weather information.",
+      "parameters": {
+        "properties": {
+          "location": {
+            "type": "STRING",
+            "description": "Weather location."
+          }
+        },
+        "required": ["location"]
+      }
+    },
+    {
+      "name": "get_stock_price",
+      "description": "Gets stock price.",
+      "parameters": {
+        "properties": {
+          "symbol": {
+            "type": "STRING",
+            "description": "Stock symbol."
+          }
+        },
+        "required": ["symbol"]
+      }
+    }
+  ])json");
+
+  ASSERT_OK_AND_ASSIGN(auto constraint, processor->CreateConstraint(tools));
+}
+
+TEST_F(Gemma3DataProcessorTest, CreateConstraintAlternativeToolFormat) {
+  // Create the model data processor.
+  ASSERT_OK_AND_ASSIGN(
+      auto processor,
+      Gemma3DataProcessor::Create(Gemma3DataProcessorConfig(),
+                                  /*preface=*/std::nullopt, tokenizer_.get(),
+                                  /*stop_token_ids=*/{},
+                                  /*enable_constrained_decoding=*/true));
+  const nlohmann::ordered_json tools = nlohmann::ordered_json::parse(R"json([
+    {
+      "function": {
+        "name": "get_weather",
+        "description": "Gets weather information.",
+        "parameters": {
+          "properties": {
+            "location": {
+              "type": "STRING",
+              "description": "Weather location."
+            }
+          },
+          "required": ["location"]
+        }
+      }
+    },
+    {
+      "function": {
+        "name": "get_stock_price",
+        "description": "Gets stock price.",
+        "parameters": {
+          "properties": {
+            "symbol": {
+              "type": "STRING",
+              "description": "Stock symbol."
+            }
+          },
+          "required": ["symbol"]
+        }
+      }
+    }
+  ])json");
+
+  ASSERT_OK_AND_ASSIGN(auto constraint, processor->CreateConstraint(tools));
+}
+
+TEST_F(Gemma3DataProcessorTest, CloneState) {
+  ASSERT_OK_AND_ASSIGN(auto processor1, Gemma3DataProcessor::Create());
+  ASSERT_OK_AND_ASSIGN(auto processor2, Gemma3DataProcessor::Create());
+
+  EXPECT_OK(processor2->CloneState(*processor1));
+
+  const std::string rendered_template_prompt =
+      "<start_of_turn>user\ntest prompt\n<end_of_turn>";
+  const nlohmann::ordered_json messages = {
+      {"role", "user"},
+      {"content", "test prompt"},
+  };
+  ASSERT_OK_AND_ASSIGN(
+      const std::vector<InputData> input_data,
+      processor2->ToInputDataVector(rendered_template_prompt, messages, {}));
+
+  InputText expected_text("<start_of_turn>user\ntest prompt\n<end_of_turn>");
+  EXPECT_THAT(input_data, ElementsAre(HasInputText(&expected_text)));
+}
+
+#if !defined(WIN32) && !defined(_WIN32) && !defined(__WIN32__) && \
+    !defined(__NT__) && !defined(_WIN64)
+TEST_F(Gemma3DataProcessorTest, CloneStateWithAudio) {
+  ASSERT_OK_AND_ASSIGN(auto processor1, Gemma3DataProcessor::Create());
+  ASSERT_OK_AND_ASSIGN(auto processor2, Gemma3DataProcessor::Create());
+
+  EXPECT_OK(processor2->CloneState(*processor1));
+
+  const std::string rendered_template_prompt =
+      "<start_of_turn>user\nHere is an audio. Please transcribe it: "
+      "<start_of_audio><end_of_turn>";
+
+  std::string audio_path = (std::filesystem::path(::testing::SrcDir()) /
+                            kTestdataDir / "audio_sample.wav")
+                               .string();
+  const nlohmann::ordered_json message = {
+      {"role", "user"},
+      {"content",
+       {{{"type", "text"},
+         {"text", "Here is an audio. Please transcribe it: "}},
+        {{"type", "audio"}, {"path", audio_path}}}}};
+  ASSERT_OK_AND_ASSIGN(
+      const std::vector<InputData> input_data,
+      processor2->ToInputDataVector(rendered_template_prompt,
+                                    json::array({message}), {}));
+
+  InputText expected_text1(
+      "<start_of_turn>user\nHere is an audio. Please transcribe it: "
+      "\n\n<start_of_audio>");
+  ASSERT_OK_AND_ASSIGN(auto audio_preprocessor,
+                       AudioPreprocessorMiniAudio::Create(
+                           AudioPreprocessorConfig::CreateDefaultUsmConfig()));
+  ASSERT_OK_AND_ASSIGN(
+      InputAudio expected_audio,
+      audio_preprocessor->Preprocess(InputAudio(ReadFile(audio_path))));
+  InputText expected_text2("\n\n");
+  InputText expected_text3("<end_of_turn>");
+  EXPECT_THAT(
+      input_data,
+      ElementsAre(HasInputText(&expected_text1), HasInputAudio(&expected_audio),
+                  HasInputAudioEnd(), HasInputText(&expected_text2),
+                  HasInputText(&expected_text3)));
+}
+#endif
 
 }  // namespace
 }  // namespace litert::lm

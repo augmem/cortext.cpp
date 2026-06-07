@@ -1,0 +1,32 @@
+{
+  "patches": [
+    {
+      "comment": "Fix SentencePiece return type",
+      "src_file": "runtime/components/sentencepiece_tokenizer.cc",
+      "find_string": "return status;",
+      "patch_file": "sentencepiece_return_fix.cc"
+    },
+    {
+      "comment": "Fix Read schema error",
+      "src_file": "schema/core/litertlm_read.cc",
+      "find_string": "return sp_proc->LoadFromSerializedProto(buffer_view);",
+      "patch_file": "litertlm_read_status_fix.cc"
+    },
+    {
+      "src_file": "runtime/executor/llm_litert_compiled_model_executor.cc",
+      "find_string": "output_buffer_dup.ClearEvent()",
+      "patch_file": "noop.cc"
+    },
+    {
+      "src_file": "runtime/executor/llm_litert_compiled_model_executor.cc",
+      "find_string": "LITERT_RETURN_IF_ERROR(input_buffer.Clear());",
+      "patch_file": "noop.cc"
+    },
+    {
+      "comment": "Fix RuntimeOptions missing method (Line 1617 & 2016)",
+      "src_file": "runtime/executor/llm_litert_compiled_model_executor.cc",
+      "find_string": "runtime_options.SetCompressQuantizationZeroPoints(true);",
+      "patch_file": "noop.cc"
+    }
+  ]
+}

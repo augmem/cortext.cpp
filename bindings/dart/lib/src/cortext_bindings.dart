@@ -27,7 +27,7 @@ class CortextBindings {
   /// @return Handle to the created instance, or NULL on failure.
   ///
   /// The returned handle must be freed with cortext_free().
-  /// Default models directory is "models/imagebind".
+  /// Default models directory is "models".
   cortext_handle cortext_create(
     double focus,
     double sensitivity,
@@ -101,7 +101,7 @@ class CortextBindings {
   /// @param sensitivity Sensitivity knob value in [0.0, 1.0].
   /// @param stability Stability knob value in [0.0, 1.0].
   /// @param db_path Path to SQLite database file (e.g., "memory.db" or ":memory:").
-  /// @param models_dir Path to directory containing ImageBind ONNX models.
+  /// @param models_dir Path to directory containing Cortext model assets.
   /// @return Handle to the created instance, or NULL on failure.
   ///
   /// The returned handle must be freed with cortext_free().

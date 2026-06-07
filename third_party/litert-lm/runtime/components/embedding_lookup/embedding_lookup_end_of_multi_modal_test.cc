@@ -33,6 +33,7 @@
 #include "litert/cc/litert_layout.h"  // from @litert
 #include "litert/cc/litert_macros.h"  // from @litert
 #include "litert/cc/litert_model.h"  // from @litert
+#include "litert/cc/litert_ranked_tensor_type.h"  // from @litert
 #include "litert/cc/litert_tensor_buffer.h"  // from @litert
 #include "litert/cc/litert_tensor_buffer_types.h"  // from @litert
 #include "litert/test/matchers.h"  // from @litert
@@ -67,7 +68,6 @@ class EndOfMultiModalEmbeddingTest : public testing::Test {
   }
 
   Expected<TensorBuffer> GetTensorBuffer(Dimensions& dimensions) {
-    LITERT_ASSIGN_OR_RETURN(auto env, ::litert::Environment::Create({}));
     size_t buffer_size = sizeof(float);
     for (auto dim : dimensions) {
       buffer_size *= dim;
@@ -78,7 +78,7 @@ class EndOfMultiModalEmbeddingTest : public testing::Test {
 
     LITERT_ASSIGN_OR_RETURN(auto buffer,
                             TensorBuffer::CreateManaged(
-                                env, ::litert::TensorBufferType::kHostMemory,
+                                *env_, ::litert::TensorBufferType::kHostMemory,
                                 ranked_tensor_type, buffer_size));
     // Clear the buffer to 0.
     auto buffer_lock_and_addr = ::litert::TensorBufferScopedLock::Create(
@@ -97,13 +97,15 @@ class EndOfMultiModalEmbeddingTest : public testing::Test {
     if (!model_.has_value()) {
       return nullptr;
     }
-    auto status = EndOfMultiModalEmbedding::Create(&*model_, special_token_);
+    auto status =
+        EndOfMultiModalEmbedding::Create(*env_, &*model_, special_token_);
     if (!status.ok()) {
       return nullptr;
     }
     return std::move(status.value());
   }
 
+  Expected<Environment> env_ = Environment::Create({});
   int special_token_ = -3;
   std::optional<Model> model_;
 };
@@ -163,8 +165,7 @@ TEST_F(EndOfMultiModalEmbeddingTest, LookupPrefillVector) {
   }
 }
 
-TEST_F(EndOfMultiModalEmbeddingTest,
-       LookupPrefillVectorBadOutputVector) {
+TEST_F(EndOfMultiModalEmbeddingTest, LookupPrefillVectorBadOutputVector) {
   std::unique_ptr<EndOfMultiModalEmbedding> embedding =
       GetEndOfMultiModalEmbedding();
   ASSERT_NE(embedding, nullptr);
@@ -179,8 +180,7 @@ TEST_F(EndOfMultiModalEmbeddingTest,
                                      "size for the end of multi-modal")));
 }
 
-TEST_F(EndOfMultiModalEmbeddingTest,
-       LookupPrefillVectorNonSpecialToken) {
+TEST_F(EndOfMultiModalEmbeddingTest, LookupPrefillVectorNonSpecialToken) {
   std::unique_ptr<EndOfMultiModalEmbedding> embedding =
       GetEndOfMultiModalEmbedding();
   ASSERT_NE(embedding, nullptr);
@@ -323,8 +323,7 @@ TEST_F(EndOfMultiModalEmbeddingTest, LookupNoSpecialTokens) {
   }
 }
 
-TEST_F(EndOfMultiModalEmbeddingTest,
-       LookupPrefillBadOutputTensorDimNum) {
+TEST_F(EndOfMultiModalEmbeddingTest, LookupPrefillBadOutputTensorDimNum) {
   std::unique_ptr<EndOfMultiModalEmbedding> embedding =
       GetEndOfMultiModalEmbedding();
   ASSERT_NE(embedding, nullptr);
@@ -343,8 +342,7 @@ TEST_F(EndOfMultiModalEmbeddingTest,
                       "model must be have the same number of dimensions")));
 }
 
-TEST_F(EndOfMultiModalEmbeddingTest,
-       LookupPrefillBadOutputTensorDimSize) {
+TEST_F(EndOfMultiModalEmbeddingTest, LookupPrefillBadOutputTensorDimSize) {
   std::unique_ptr<EndOfMultiModalEmbedding> embedding =
       GetEndOfMultiModalEmbedding();
   ASSERT_NE(embedding, nullptr);
@@ -363,8 +361,7 @@ TEST_F(EndOfMultiModalEmbeddingTest,
                       "model must be have the same dimensions")));
 }
 
-TEST_F(EndOfMultiModalEmbeddingTest,
-       LookupPrefillBadOutputTensorDim0) {
+TEST_F(EndOfMultiModalEmbeddingTest, LookupPrefillBadOutputTensorDim0) {
   std::unique_ptr<EndOfMultiModalEmbedding> embedding =
       GetEndOfMultiModalEmbedding();
   ASSERT_NE(embedding, nullptr);
@@ -384,8 +381,7 @@ TEST_F(EndOfMultiModalEmbeddingTest,
               "model must be have the 0th dimension as 1.")));
 }
 
-TEST_F(EndOfMultiModalEmbeddingTest,
-       LookupPrefillBadOutputTensorDim1) {
+TEST_F(EndOfMultiModalEmbeddingTest, LookupPrefillBadOutputTensorDim1) {
   std::unique_ptr<EndOfMultiModalEmbedding> embedding =
       GetEndOfMultiModalEmbedding();
   ASSERT_NE(embedding, nullptr);

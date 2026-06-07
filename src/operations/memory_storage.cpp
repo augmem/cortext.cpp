@@ -11,6 +11,7 @@
 #include "cortext/telemetry/telemetry.hpp"
 #include <algorithm>
 #include <cstring>
+#include <optional>
 #include <string>
 #include <unordered_map>
 
@@ -97,6 +98,11 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
     }
 
   const auto &signal = context.GetSignal ();
+  if (signal.retention == Retention::Ephemeral)
+    {
+      telemetry::AddCounter ("cortext.memory_storage.ephemeral_skip_total", 1);
+      return;
+    }
 
   Store *store = context.GetStore ();
   if (!store)
@@ -196,30 +202,45 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
                  [] (const SignalRecord *a, const SignalRecord *b) {
                    return a->serial_position < b->serial_position;
                  });
-      const bool text_mode = (primary_modality == "text");
-      for (const auto *rec : ordered_signals)
+      const bool text_mode = std::all_of (
+          ordered_signals.begin (), ordered_signals.end (),
+          [] (const SignalRecord *rec) {
+            return rec && rec->modality == "text";
+          });
+      const bool audio_mode = std::all_of (
+          ordered_signals.begin (), ordered_signals.end (),
+          [] (const SignalRecord *rec) {
+            return rec && rec->modality == "audio";
+          });
+      const bool single_payload_mode = ordered_signals.size () == 1;
+      const bool memory_blob_supported
+          = text_mode || audio_mode || single_payload_mode;
+      if (memory_blob_supported)
         {
-          if (!rec || rec->blob_id.empty ())
+          for (const auto *rec : ordered_signals)
             {
-              continue;
-            }
-          auto bytes_opt = GetObject (object_savepoint.get (), *savepoint,
-                                      rec->blob_id);
-          if (bytes_opt)
-            {
-              const auto &bytes = *bytes_opt;
-              if (!bytes.empty ())
+              if (!rec || rec->blob_id.empty ())
                 {
-                  if (text_mode && !content_payload.empty ())
+                  continue;
+                }
+              auto bytes_opt = GetObject (object_savepoint.get (), *savepoint,
+                                          rec->blob_id);
+              if (bytes_opt)
+                {
+                  const auto &bytes = *bytes_opt;
+                  if (!bytes.empty ())
                     {
-                      content_payload.push_back ('\n');
+                      if (text_mode && !content_payload.empty ())
+                        {
+                          content_payload.push_back ('\n');
+                        }
+                      content_payload.insert (content_payload.end (),
+                                              bytes.begin (), bytes.end ());
                     }
-                  content_payload.insert (content_payload.end (),
-                                          bytes.begin (), bytes.end ());
                 }
             }
         }
-      if (content_payload.empty () && signal.payload
+      if (memory_blob_supported && content_payload.empty () && signal.payload
           && !signal.payload->empty ())
         {
           content_payload = *signal.payload;
@@ -350,6 +371,14 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
 
       // Set stored_embedding_id in context for output
       context.SetStoredEmbeddingId (embedding_id);
+      if (memory_id > 0)
+        {
+          context.SetStoredMemoryId (memory_id);
+        }
+      else
+        {
+          context.SetStoredMemoryId (std::nullopt);
+        }
       p_ctx.memories_since_consolidation += 1;
       if (memory_id > 0 && embedding_to_store.size () > 0)
         {

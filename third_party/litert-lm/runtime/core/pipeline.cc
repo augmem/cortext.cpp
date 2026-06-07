@@ -62,12 +62,14 @@ absl::StatusOr<Responses> Decode(LlmExecutor& executor, Tokenizer& tokenizer,
                                  int num_output_candidates,
                                  Constraint* constraint,
                                  std::optional<BenchmarkInfo>& benchmark_info,
-                                 std::atomic<bool>* cancelled) {
+                                 std::atomic<bool>* cancelled,
+                                 int max_output_tokens) {
   absl::AnyInvocable<void(absl::StatusOr<Responses>)> callback = nullptr;
   return Tasks::Decode(
       executor, tokenizer, stop_token_detector, num_output_candidates,
       benchmark_info, /*sampler=*/std::nullopt, constraint,
-      /*decoded_ids=*/std::nullopt, /*callback=*/callback, cancelled);
+      /*decoded_ids=*/std::nullopt, /*callback=*/callback, cancelled,
+      max_output_tokens);
 }
 
 absl::Status DecodeStreaming(
@@ -75,7 +77,7 @@ absl::Status DecodeStreaming(
     const StopTokenDetector& stop_token_detector, int num_output_candidates,
     Constraint* constraint, std::optional<BenchmarkInfo>& benchmark_info,
     absl::AnyInvocable<void(absl::StatusOr<Responses>)> callback,
-    std::atomic<bool>* cancelled) {
+    std::atomic<bool>* cancelled, int max_output_tokens) {
   if (callback == nullptr) {
     return absl::InvalidArgumentError(
         "Callback must not be null for streaming.");
@@ -84,7 +86,8 @@ absl::Status DecodeStreaming(
       Tasks::Decode(executor, tokenizer, stop_token_detector,
                     num_output_candidates, benchmark_info,
                     /*sampler=*/std::nullopt, constraint,
-                    /*decoded_ids=*/std::nullopt, callback, cancelled);
+                    /*decoded_ids=*/std::nullopt, callback, cancelled,
+                    max_output_tokens);
 
   // Trigger the callback with the final result.
   // This can be either a error message, or a task state (e.g. kDone or
@@ -98,12 +101,12 @@ absl::StatusOr<Responses> DecodeCustomSampling(
     const StopTokenDetector& stop_token_detector, int num_output_candidates,
     Sampler& sampler, litert::TensorBuffer decoded_ids, Constraint* constraint,
     std::optional<BenchmarkInfo>& benchmark_info,
-    std::atomic<bool>* cancelled) {
+    std::atomic<bool>* cancelled, int max_output_tokens) {
   absl::AnyInvocable<void(absl::StatusOr<Responses>)> callback = nullptr;
   return Tasks::Decode(executor, tokenizer, stop_token_detector,
                        num_output_candidates, benchmark_info, &sampler,
                        constraint, std::move(decoded_ids),
-                       /*callback=*/callback, cancelled);
+                       /*callback=*/callback, cancelled, max_output_tokens);
 }
 
 absl::Status DecodeCustomSamplingStreaming(
@@ -112,15 +115,15 @@ absl::Status DecodeCustomSamplingStreaming(
     Sampler& sampler, litert::TensorBuffer decoded_ids, Constraint* constraint,
     std::optional<BenchmarkInfo>& benchmark_info,
     absl::AnyInvocable<void(absl::StatusOr<Responses>)> callback,
-    std::atomic<bool>* cancelled) {
+    std::atomic<bool>* cancelled, int max_output_tokens) {
   if (callback == nullptr) {
     return absl::InvalidArgumentError(
         "Callback must not be null for streaming.");
   }
-  absl::StatusOr<Responses> task_respones =
-      Tasks::Decode(executor, tokenizer, stop_token_detector,
-                    num_output_candidates, benchmark_info, &sampler, constraint,
-                    std::move(decoded_ids), callback, cancelled);
+  absl::StatusOr<Responses> task_respones = Tasks::Decode(
+      executor, tokenizer, stop_token_detector, num_output_candidates,
+      benchmark_info, &sampler, constraint, std::move(decoded_ids), callback,
+      cancelled, max_output_tokens);
 
   // Trigger the callback with the final result.
   // This can be either a error message, or a task state (e.g. kDone or

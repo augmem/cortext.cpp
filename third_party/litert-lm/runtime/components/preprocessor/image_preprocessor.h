@@ -15,6 +15,7 @@
 #ifndef THIRD_PARTY_ODML_LITERT_LM_RUNTIME_COMPONENTS_PREPROCESSOR_IMAGE_PREPROCESSOR_H_
 #define THIRD_PARTY_ODML_LITERT_LM_RUNTIME_COMPONENTS_PREPROCESSOR_IMAGE_PREPROCESSOR_H_
 
+#include <optional>
 #include <utility>
 
 #include "absl/status/status.h"  // from @com_google_absl
@@ -28,6 +29,18 @@ namespace litert::lm {
 
 class ImagePreprocessParameter {
  public:
+  // The config for patchify.
+  struct PatchifyConfig {
+    // The width of the patch.
+    int patch_width;
+    // The height of the patch.
+    int patch_height;
+    // The maximum number of patches.
+    int max_num_patches;
+    // The pooling kernel size.
+    int pooling_kernel_size;
+  };
+
   // Gets the target dimensions for preprocessing.
   const Dimensions& GetTargetDimensions() const { return dimensions_; }
 
@@ -36,8 +49,19 @@ class ImagePreprocessParameter {
     dimensions_ = dimensions;
   }
 
+  // Gets the patchify config for preprocessing.
+  const std::optional<PatchifyConfig>& GetPatchifyConfig() const {
+    return patchify_config_;
+  }
+
+  // Sets the patchify config for preprocessing.
+  void SetPatchifyConfig(const PatchifyConfig& patchify_config) {
+    patchify_config_ = patchify_config;
+  }
+
  private:
   Dimensions dimensions_;
+  std::optional<PatchifyConfig> patchify_config_;
 };
 
 // Preprocessor for image.

@@ -37,8 +37,7 @@
             "cacheVariables": {
                 "CMAKE_BUILD_TYPE": "Debug",
                 "CORTEXT_WARNINGS_AS_ERRORS": "ON",
-                "CORTEXT_BUILD_EXAMPLES": "ON",
-                "CORTEXT_ENABLE_IMAGEBIND_ORT": "ON"
+                "CORTEXT_BUILD_EXAMPLES": "ON"
             }
         },
         {

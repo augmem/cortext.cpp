@@ -50,10 +50,6 @@ DeepLlmSearchRoots (const std::filesystem::path &models_dir)
 {
   std::vector<std::filesystem::path> roots;
   AppendUniquePath (roots, models_dir);
-  if (models_dir.filename () == "imagebind")
-    {
-      AppendUniquePath (roots, models_dir.parent_path ());
-    }
   return roots;
 }
 
@@ -108,7 +104,7 @@ TryCreateGemmaSelection (const std::filesystem::path &models_dir,
     {
       if (error_out != nullptr)
         {
-          *error_out = "Gemma backend unavailable: no gemma3n-e2b-litert model found";
+          *error_out = "Gemma backend unavailable: no gemma4-e2b-litert model found";
         }
       return std::nullopt;
     }
@@ -222,7 +218,7 @@ TryCreateMixedSelection (const std::filesystem::path &models_dir,
     {
       if (error_out != nullptr)
         {
-          *error_out = "Mixed backend unavailable: no gemma3n-e2b-litert model found";
+          *error_out = "Mixed backend unavailable: no gemma4-e2b-litert model found";
         }
       return std::nullopt;
     }
@@ -308,20 +304,12 @@ ResolveGemmaDeepLlmModelPath (const std::filesystem::path &models_dir)
   const auto roots = DeepLlmSearchRoots (models_dir);
   for (const auto &root : roots)
     {
-      const std::filesystem::path gemma_root = root / "gemma3n-e2b-litert";
-      if (!std::filesystem::is_directory (gemma_root))
-        {
-          continue;
-        }
       for (const auto &candidate :
-           { std::filesystem::path ("gemma-3n-E2B-it-int4.litertlm"),
-             std::filesystem::path ("gemma-3n-E2B-it-int4-Web.litertlm"),
-             std::filesystem::path ("gemma-3n-E2B-it-int4.mediatek.mt6993.litertlm") })
+           { root / "gemma4-e2b-litert" / "gemma-4-E2B-it.litertlm" })
         {
-          const auto path = gemma_root / candidate;
-          if (std::filesystem::exists (path))
+          if (std::filesystem::exists (candidate))
             {
-              return path;
+              return candidate;
             }
         }
     }
@@ -436,34 +424,9 @@ TryCreateDeepLlmSelection (const std::filesystem::path &models_dir,
     case DeepLlmBackend::Mixed:
       return TryCreateMixedSelection (models_dir, error_out);
     case DeepLlmBackend::Auto:
-      break;
+      return TryCreateGemmaSelection (models_dir, error_out);
     }
 
-  std::string mixed_error;
-  std::string lfm2_error;
-  if (auto selection
-      = TryCreateLfm2Selection (models_dir, &lfm2_error))
-    {
-      return selection;
-    }
-
-  if (auto selection
-      = TryCreateMixedSelection (models_dir, &mixed_error))
-    {
-      return selection;
-    }
-
-  std::string gemma_error;
-  if (auto selection
-      = TryCreateGemmaSelection (models_dir, &gemma_error))
-    {
-      return selection;
-    }
-
-  if (error_out != nullptr)
-    {
-      *error_out = mixed_error + "; " + gemma_error + "; " + lfm2_error;
-    }
   return std::nullopt;
 }
 

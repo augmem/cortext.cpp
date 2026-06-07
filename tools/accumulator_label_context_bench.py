@@ -272,6 +272,89 @@ class LiveAccumulator:
         )
 
 
+class LabelAccumulator:
+    """
+    Per-signal Top-K label accumulator (the idea the user proposed).
+
+    Pipeline per signal:
+        signal embedding → Top-K labels → accumulate (decay + dedup + suppression) → repeat
+
+    This runs in the preconsolidation phase (while the embedding accumulator is still open).
+    It never centroids over a whole episode. Each signal contributes fresh Top-K labels,
+    and the accumulator blends them over time with explicit control over generic/modality labels.
+    """
+
+    def __init__(self, decay: float = 0.82, max_labels: int = 35,
+                 generic_suppression: float = 0.25, recency_boost: float = 1.35):
+        self.scores: dict[str, float] = defaultdict(float)
+        self.last_seen_step: dict[str, int] = {}
+        self.step_count = 0
+        self.decay = decay
+        self.max_labels = max_labels
+        self.generic_suppression = generic_suppression
+        self.recency_boost = recency_boost
+
+        # Labels we aggressively suppress (modality channels + generic person categories)
+        self.GENERIC_SUPPRESS = {
+            "person", "friend", "man", "male", "brother", "sister", "teacher",
+            "audio", "image", "video", "voice", "face", "photo", "we"
+        }
+
+    def step(self, embedding: np.ndarray,
+             labels_by_index: dict[int, dict],
+             row_label_indices: list[int],
+             vectors: np.memmap,
+             allowed_labels: set[str],
+             top_k: int = 8) -> None:
+        """Process one signal: fresh Top-K projection + accumulate with decay + suppression."""
+        self.step_count += 1
+
+        # 1. Fresh per-signal Top-K (no episode centroid)
+        cands = topk_labels(
+            embedding, labels_by_index, row_label_indices, vectors, top_k, allowed_labels
+        )
+
+        # 2. Global decay on everything (temporal forgetting)
+        for lab in list(self.scores.keys()):
+            self.scores[lab] *= self.decay
+
+        # 3. Add contributions from this signal's fresh labels
+        for cand in cands:
+            label = cand.label
+            score = cand.score01
+
+            # Strong suppression for modality hubs and generic person labels
+            if label in self.GENERIC_SUPPRESS:
+                score *= self.generic_suppression
+
+            # Recency boost for labels that appeared very recently (within last 2 steps)
+            if label in self.last_seen_step:
+                steps_ago = self.step_count - self.last_seen_step[label]
+                if steps_ago <= 2:
+                    score *= self.recency_boost
+
+            self.scores[label] += score
+            self.last_seen_step[label] = self.step_count
+
+        # 4. Prune to bounded size (deduping + capacity control)
+        if len(self.scores) > self.max_labels:
+            sorted_items = sorted(self.scores.items(), key=lambda x: -x[1])[:self.max_labels]
+            self.scores = defaultdict(float, {lab: sc for lab, sc in sorted_items})
+
+    def get_top_labels(self, n: int = 10) -> list[str]:
+        """Current active label readout from the accumulator state."""
+        if not self.scores:
+            return []
+        sorted_items = sorted(self.scores.items(), key=lambda x: -x[1])
+        return [lab for lab, sc in sorted_items[:n] if sc > 0.02]
+
+    def boost_from_query(self, query_labels: tuple[str, ...], boost: float = 0.6) -> None:
+        """Small attractive boost when a pronoun/query is observed (helps binding)."""
+        for lab in query_labels:
+            if lab in self.scores:
+                self.scores[lab] += boost
+
+
 # ---------------------------------------------------------------------------
 # Scaled multimodal sequence (identical to the static-graph bench)
 # ---------------------------------------------------------------------------
@@ -414,11 +497,107 @@ def run_live_accumulator_experiment(
     }
 
 
+def run_per_signal_label_accumulation_experiment(
+    labels_by_index: dict[int, dict],
+    row_label_indices: list[int],
+    vectors: np.memmap,
+    selected: dict[str, Label],
+    allowed_labels: set[str],
+    top_k: int,
+    label_top_k: int = 8,
+) -> dict[str, Any]:
+    """
+    Per-signal Top-K label accumulation experiment (user's proposed pipeline).
+
+    For every signal:
+        signal embedding → fresh Top-K labels (no episode centroid) → accumulate
+                           (decay + dedup + strong suppression of modality/generic labels)
+
+    This is the "signal → embeddings → top-k labels → accumulate → repeat" loop.
+    The active label state is read directly from the LabelAccumulator at probe time.
+    """
+    signals = scaled_multimodal_signals()
+    probes = scaled_multimodal_probes()
+    signal_by_id = {s.signal_id: s for s in signals}
+
+    results: list[dict[str, Any]] = []
+
+    for probe in probes:
+        prefix_len = probe["prefix"]
+        prefix_signals = signals[:prefix_len]
+
+        # Fresh accumulators for clean isolation per probe
+        label_acc = LabelAccumulator(decay=0.82, max_labels=35,
+                                     generic_suppression=0.22, recency_boost=1.4)
+
+        for s in prefix_signals:
+            emb = centroid_for(s.seed_labels, selected)
+            label_acc.step(
+                emb, labels_by_index, row_label_indices, vectors,
+                allowed_labels, top_k=label_top_k
+            )
+
+        # Small boost from the query labels themselves (the pronoun arriving)
+        label_acc.boost_from_query(probe["query"], boost=0.55)
+
+        # Readout from the current accumulated label state
+        live_labels = label_acc.get_top_labels(n=12)
+
+        expected = probe["expected"]
+        try:
+            rank = live_labels.index(expected) + 1
+        except ValueError:
+            rank = 0
+
+        hit = 1 <= rank <= 5
+
+        results.append({
+            "probe": probe["name"],
+            "query": "|".join(probe["query"]),
+            "expected_label": expected,
+            "at_signal": probe["at_signal"],
+            "prefix_length": prefix_len,
+            "top_label": live_labels[0] if live_labels else "",
+            "expected_label_rank": rank,
+            "hit": hit,
+            "live_top5": live_labels[:5],
+            "live_top10": live_labels[:10],
+            "modality_of_prefix_end": signal_by_id[probe["at_signal"]].modality,
+        })
+
+    hits = sum(1 for r in results if r["hit"])
+    probe_count = len(results)
+
+    return {
+        "design": "per_signal_topk_label_accumulation_with_decay_dedup_suppression",
+        "embedding_top_k": top_k,
+        "label_top_k_per_signal": label_top_k,
+        "probe_count": probe_count,
+        "hit_count": hits,
+        "hit_rate": hits / probe_count if probe_count else 0.0,
+        "results": results,
+        "interpretation": (
+            "Per-signal Top-K projection into a live LabelAccumulator (decay + dedup + "
+            "aggressive suppression of modality/generic labels). No episode centroid, "
+            "no static graph over guessed memories. Pure incremental accumulation in "
+            "the preconsolidation window."
+        ),
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--label-db-dir", type=Path, default=Path("build/label_vector_db_full_2proto"))
     parser.add_argument("--output-dir", type=Path, default=Path("build/accumulator_label_context_bench"))
-    parser.add_argument("--top-k", type=int, default=10)
+    parser.add_argument("--top-k", type=int, default=10, help="Top-K for label projection / embedding context")
+    parser.add_argument("--label-top-k", type=int, default=8, help="Per-signal Top-K labels to feed the accumulator")
+    parser.add_argument(
+        "--mode",
+        choices=["live_accumulator", "per_signal_accum"],
+        default="per_signal_accum",
+        help="live_accumulator = project from blended mu_acc (previous experiment); "
+             "per_signal_accum = per-signal Top-K → LabelAccumulator with decay/dedup/suppression (new)",
+    )
     parser.add_argument(
         "--suite",
         default="scaled_multimodal",
@@ -442,24 +621,39 @@ def main() -> int:
     allowed_labels = label_names
 
     start = time.perf_counter()
-    result = run_live_accumulator_experiment(
-        labels_by_index, row_label_indices, vectors, selected, allowed_labels, args.top_k
-    )
+
+    if args.mode == "per_signal_accum":
+        result = run_per_signal_label_accumulation_experiment(
+            labels_by_index, row_label_indices, vectors, selected, allowed_labels,
+            top_k=args.top_k, label_top_k=args.label_top_k
+        )
+        result["design_full"] = (
+            "Per-signal Top-K label projection into a live LabelAccumulator "
+            "(decay + dedup + aggressive generic/modality suppression). "
+            "No episode centroid. Pure incremental preconsolidation accumulation."
+        )
+        out_stem = "per_signal_label_accum"
+    else:
+        result = run_live_accumulator_experiment(
+            labels_by_index, row_label_indices, vectors, selected, allowed_labels, args.top_k
+        )
+        result["design_full"] = (
+            "LiveAccumulator (mu_acc incremental mean + c_t EWMA + recent window) "
+            "projected into label space at each pronoun probe. No static MemoryNode graph. "
+            "No pre-segmented episodes. Pure online blended context."
+        )
+        out_stem = "live_accumulator"
+
     elapsed = time.perf_counter() - start
     result["label_projection_elapsed_s"] = elapsed
     result["label_db_dir"] = str(args.label_db_dir)
     result["suite"] = args.suite
-    result["design_full"] = (
-        "LiveAccumulator (mu_acc incremental mean + c_t EWMA + recent window) "
-        "projected into label space at each pronoun probe. No static MemoryNode graph. "
-        "No pre-segmented episodes. Pure online blended context."
-    )
+    result["mode"] = args.mode
 
-    out_path = args.output_dir / "accumulator_label_context_results.json"
+    out_path = args.output_dir / f"{out_stem}_results.json"
     out_path.write_text(json.dumps(result, indent=2) + "\n")
 
-    # Also emit a tiny CSV for quick inspection (probe, expected, rank, hit, top5)
-    csv_path = args.output_dir / "accumulator_label_context_probes.csv"
+    csv_path = args.output_dir / f"{out_stem}_probes.csv"
     with csv_path.open("w", newline="") as f:
         w = csv.writer(f)
         w.writerow(["probe", "query", "expected", "rank", "hit", "top5"])
@@ -470,7 +664,7 @@ def main() -> int:
                 r["expected_label"],
                 r["expected_label_rank"],
                 int(r["hit"]),
-                "|".join(r["live_top5"]),
+                "|".join(r.get("live_top5", [])),
             ])
 
     print(json.dumps(result, indent=2))

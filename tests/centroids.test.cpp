@@ -233,7 +233,6 @@ TEST_CASE ("EmotionCentroids: GetTopEmotions respects top_k limit",
 
 // Note: Full integration tests with Initialize() would require:
 // - A valid encoder models directory
-// - ImageBind ONNX Runtime backend enabled
+// - local encoder backend enabled
 // - Sufficient time for centroid computation
 // These tests focus on the core computation logic that can run without external dependencies.
-

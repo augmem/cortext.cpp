@@ -330,7 +330,7 @@ def purify_embeddings(
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Generate text emotion centroids using ImageBind embeddings."
+        description="Generate text emotion centroids using the configured text embedder."
     )
     parser.add_argument(
         "--dataset",
@@ -349,7 +349,7 @@ def main() -> int:
     parser.add_argument(
         "--models",
         default="models",
-        help="Models directory (ImageBind).",
+        help="Models directory.",
     )
     parser.add_argument(
         "--out-dir",

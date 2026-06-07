@@ -2,14 +2,14 @@
 
 workspace(name = "litert_lm")
 
-# UPDATED = 2025-12-16
-LITERT_REF = "ab1506d352970f07d244812873f92181aa8acb0d"
+# UPDATED = 2026-04-27
+LITERT_REF = "47615eb6eaec25e8dfcd1aba922c560a57cba0a2"
 
-LITERT_SHA256 = "7e61bead8edbe68b5bf1f8fea6f1726e21b6a73ad52719f26931e7cdb456fe48"
+LITERT_SHA256 = "1d198ae395ba47d64dec282602de56b568ea964963861451933f00c6a39fbf2d"
 
-TENSORFLOW_REF = "bc72b2ce8d0eb465d783f2bc4127e487e5a229e3"
+TENSORFLOW_REF = "49e7f1937d1509dd7fea41bff9ccc994baa97258"
 
-TENSORFLOW_SHA256 = "69728e232d3bbb4c26cc846f6d947a94a6d05062cd8fa573964954c30e4f0de6"
+TENSORFLOW_SHA256 = "977114079cda0d6aa9d05bc73ae2c2e3d36705fbb041e631a564e4d42e1e1dd9"
 
 # buildifier: disable=load-on-top
 
@@ -34,66 +34,50 @@ http_archive(
     url = "https://github.com/bazelbuild/rules_platform/releases/download/0.1.0/rules_platform-0.1.0.tar.gz",
 )
 
-# Rust (for HuggingFace Tokenizers)
+# Use recent platoforms version to support uefi platform.
 http_archive(
-    name = "rules_rust",
-    patches = ["@//:PATCH.rules_rust"],
-    sha256 = "53c1bac7ec48f7ce48c4c1c6aa006f27515add2aeb05725937224e6e00ec7cea",
-    url = "https://github.com/bazelbuild/rules_rust/releases/download/0.61.0/rules_rust-0.61.0.tar.gz",
-)
-
-load("@rules_rust//rust:repositories.bzl", "rules_rust_dependencies", "rust_register_toolchains")
-
-rules_rust_dependencies()
-
-rust_register_toolchains(
-    edition = "2021",
-    extra_target_triples = [
-        # Explicitly add toolchains for mobile. Desktop platforms are supported by default.
-        "aarch64-linux-android",
-        "aarch64-apple-ios",
-        "aarch64-apple-ios-sim",
+    name = "platforms",
+    sha256 = "3384eb1c30762704fbe38e440204e114154086c8fc8a8c2e3e28441028c019a8",
+    urls = [
+        "https://mirror.bazel.build/github.com/bazelbuild/platforms/releases/download/1.0.0/platforms-1.0.0.tar.gz",
+        "https://github.com/bazelbuild/platforms/releases/download/1.0.0/platforms-1.0.0.tar.gz",
     ],
 )
 
-load("@rules_rust//crate_universe:repositories.bzl", "crate_universe_dependencies")
-
-crate_universe_dependencies()
-
-load("@rules_rust//crate_universe:defs.bzl", "crates_repository")
-
-crates_repository(
-    name = "crate_index",
-    cargo_lockfile = "//:Cargo.lock",
-    lockfile = "//:cargo-bazel-lock.json",
-    manifests = [
-        "//:Cargo.toml",
-    ],
-)
-
-load("@crate_index//:defs.bzl", "crate_repositories")
-
-crate_repositories()
-
-# cxxbridge-cmd is a binary-only package so we follow the steps in
-# https://bazelbuild.github.io/rules_rust/crate_universe_workspace.html#binary-dependencies.
+# Use 3.22.0 (from 3.5.1 of tensorflow) to fix binary signing issue on MacOS Tahoe.
 http_archive(
-    name = "cxxbridge_cmd",
-    build_file = "//cxxbridge_cmd:BUILD.cxxbridge_cmd.bazel",
-    strip_prefix = "cxxbridge-cmd-1.0.149",
-    type = "tar.gz",
-    urls = ["https://static.crates.io/crates/cxxbridge-cmd/cxxbridge-cmd-1.0.149.crate"],
+    name = "build_bazel_rules_apple",
+    sha256 = "a78f26c22ac8d6e3f3fcaad50eace4d9c767688bd7254b75bdf4a6735b299f6a",
+    url = "https://github.com/bazelbuild/rules_apple/releases/download/3.22.0/rules_apple.3.22.0.tar.gz",
 )
 
-crates_repository(
-    name = "cxxbridge_cmd_deps",
-    cargo_lockfile = "//cxxbridge_cmd:Cargo.lock",
-    manifests = ["@cxxbridge_cmd//:Cargo.toml"],
+load(
+    "@build_bazel_rules_apple//apple:repositories.bzl",
+    "apple_rules_dependencies",
 )
 
-load("@cxxbridge_cmd_deps//:defs.bzl", cxxbridge_cmd_deps = "crate_repositories")
+apple_rules_dependencies()
 
-cxxbridge_cmd_deps()
+http_archive(
+    name = "build_bazel_rules_swift",
+    sha256 = "f7a67197cd8a79debfe70b8cef4dc19d03039af02cc561e31e0718e98cad83ac",
+    url = "https://github.com/bazelbuild/rules_swift/releases/download/2.9.0/rules_swift.2.9.0.tar.gz",
+)
+
+# Lower the version from 1.24.5 that tensorflow uses to 1.23.1, the highest version which don't have
+# issues with missing LC_UUID, DEVELOPER_DIR or SDKROOT on MacOS Tahoe.
+http_archive(
+    name = "build_bazel_apple_support",
+    sha256 = "ee20cc5c0bab47065473c8033d462374dd38d172406ecc8de5c8f08487943f2f",
+    url = "https://github.com/bazelbuild/apple_support/releases/download/1.23.1/apple_support.1.23.1.tar.gz",
+)
+
+http_archive(
+    name = "bazel_features",
+    sha256 = "c26b4e69cf02fea24511a108d158188b9d8174426311aac59ce803a78d107648",
+    strip_prefix = "bazel_features-1.43.0",
+    url = "https://github.com/bazel-contrib/bazel_features/releases/download/v1.43.0/bazel_features-v1.43.0.tar.gz",
+)
 
 # TensorFlow
 http_archive(
@@ -120,9 +104,7 @@ http_archive(
     name = "rules_ml_toolchain",
     sha256 = "9dbee8f24cc1b430bf9c2a6661ab70cbca89979322ddc7742305a05ff637ab6b",
     strip_prefix = "rules_ml_toolchain-545c80f1026d526ea9c7aaa410bf0b52c9a82e74",
-    urls = [
-        "https://github.com/google-ml-infra/rules_ml_toolchain/archive/545c80f1026d526ea9c7aaa410bf0b52c9a82e74.tar.gz",
-    ],
+    url = "https://github.com/google-ml-infra/rules_ml_toolchain/archive/545c80f1026d526ea9c7aaa410bf0b52c9a82e74.tar.gz",
 )
 
 load(
@@ -133,11 +115,11 @@ load(
 cc_toolchain_deps()
 
 # Initialize hermetic Python
-load("@local_xla//third_party/py:python_init_rules.bzl", "python_init_rules")
+load("@xla//third_party/py:python_init_rules.bzl", "python_init_rules")
 
 python_init_rules()
 
-load("@local_xla//third_party/py:python_init_repositories.bzl", "python_init_repositories")
+load("@xla//third_party/py:python_init_repositories.bzl", "python_init_repositories")
 
 python_init_repositories(
     default_python_version = "system",
@@ -148,19 +130,19 @@ python_init_repositories(
     ],
     local_wheel_workspaces = ["@org_tensorflow//:WORKSPACE"],
     requirements = {
-        "3.9": "@org_tensorflow//:requirements_lock_3_9.txt",
         "3.10": "@org_tensorflow//:requirements_lock_3_10.txt",
         "3.11": "@org_tensorflow//:requirements_lock_3_11.txt",
         "3.12": "@org_tensorflow//:requirements_lock_3_12.txt",
         "3.13": "@org_tensorflow//:requirements_lock_3_13.txt",
+        "3.14": "@org_tensorflow//:requirements_lock_3_14.txt",
     },
 )
 
-load("@local_xla//third_party/py:python_init_toolchains.bzl", "python_init_toolchains")
+load("@xla//third_party/py:python_init_toolchains.bzl", "python_init_toolchains")
 
 python_init_toolchains()
 
-load("@local_xla//third_party/py:python_init_pip.bzl", "python_init_pip")
+load("@xla//third_party/py:python_init_pip.bzl", "python_init_pip")
 
 python_init_pip()
 
@@ -208,7 +190,7 @@ load("@org_tensorflow//tensorflow:workspace0.bzl", "tf_workspace0")
 tf_workspace0()
 
 load(
-    "@local_xla//third_party/py:python_wheel.bzl",
+    "@xla//third_party/py:python_wheel.bzl",
     "python_wheel_version_suffix_repository",
 )
 
@@ -264,8 +246,8 @@ nccl_configure(name = "local_config_nccl")
 # Kotlin rules
 http_archive(
     name = "rules_kotlin",
-    sha256 = "e1448a56b2462407b2688dea86df5c375b36a0991bd478c2ddd94c97168125e2",
-    url = "https://github.com/bazelbuild/rules_kotlin/releases/download/v2.1.3/rules_kotlin-v2.1.3.tar.gz",
+    sha256 = "13d5b767d697473ced9b55547a18a6ab65ab3fae5440555deee8a44c886b50aa",
+    url = "https://github.com/bazelbuild/rules_kotlin/releases/download/v2.3.20/rules_kotlin-v2.3.20.tar.gz",
 )
 
 load("@rules_kotlin//kotlin:repositories.bzl", "kotlin_repositories")
@@ -275,6 +257,93 @@ kotlin_repositories()  # if you want the default. Otherwise see custom kotlinc d
 load("@rules_kotlin//kotlin:core.bzl", "kt_register_toolchains")
 
 kt_register_toolchains()  # to use the default toolchain, otherwise see toolchains below
+
+# Rust (for HuggingFace Tokenizers)
+http_archive(
+    name = "rules_rust",
+    patches = ["@//:PATCH.rules_rust"],
+    sha256 = "53c1bac7ec48f7ce48c4c1c6aa006f27515add2aeb05725937224e6e00ec7cea",
+    url = "https://github.com/bazelbuild/rules_rust/releases/download/0.61.0/rules_rust-0.61.0.tar.gz",
+)
+
+load("@rules_rust//rust:repositories.bzl", "rules_rust_dependencies", "rust_register_toolchains")
+
+rules_rust_dependencies()
+
+rust_register_toolchains(
+    edition = "2021",
+    extra_target_triples = [
+        # Explicitly add toolchains for mobile. Desktop platforms are supported by default.
+        "aarch64-linux-android",
+        "aarch64-apple-ios",
+        "aarch64-apple-ios-sim",
+        "x86_64-linux-android",
+    ],
+)
+
+load("@rules_rust//crate_universe:repositories.bzl", "crate_universe_dependencies")
+
+crate_universe_dependencies()
+
+load("@rules_rust//crate_universe:defs.bzl", "crate", "crates_repository")
+load("@rules_rust//rust/platform:triple_mappings.bzl", "SUPPORTED_PLATFORM_TRIPLES")
+
+crates_repository(
+    name = "crate_index",
+    annotations = {
+        "llguidance": [
+            crate.annotation(
+                additive_build_file = "@//:BUILD.llguidance",
+                gen_build_script = False,
+                patches = [
+                    "@//:PATCH.llguidance_regexvec",
+                    "@//:PATCH.llguidance_numeric",
+                    "@//:PATCH.llguidance_grammar",
+                    "@//:PATCH.llguidance_parser",
+                    "@//:PATCH.llguidance_perf",
+                ],
+            ),
+        ],
+        "toktrie": [
+            crate.annotation(
+                patches = ["@//:PATCH.toktrie"],
+            ),
+        ],
+    },
+    cargo_lockfile = "//:Cargo.lock",
+    lockfile = "//:cargo-bazel-lock.json",
+    manifests = [
+        "//:Cargo.toml",
+    ],
+    supported_platform_triples = SUPPORTED_PLATFORM_TRIPLES + [
+        "x86_64-linux-android",
+    ],
+)
+
+load("@crate_index//:defs.bzl", "crate_repositories")
+
+crate_repositories()
+
+# cxxbridge-cmd is a binary-only package so we follow the steps in
+# https://bazelbuild.github.io/rules_rust/crate_universe_workspace.html#binary-dependencies.
+http_archive(
+    name = "cxxbridge_cmd",
+    build_file = "//cxxbridge_cmd:BUILD.cxxbridge_cmd.bazel",
+    integrity = "sha256-pf/3kWu94FwtuZRp8J3PryA78lsJbMv052GgR5JBLhA=",
+    strip_prefix = "cxxbridge-cmd-1.0.149",
+    type = "tar.gz",
+    url = "https://static.crates.io/crates/cxxbridge-cmd/cxxbridge-cmd-1.0.149.crate",
+)
+
+crates_repository(
+    name = "cxxbridge_cmd_deps",
+    cargo_lockfile = "//cxxbridge_cmd:Cargo.lock",
+    manifests = ["@cxxbridge_cmd//:Cargo.toml"],
+)
+
+load("@cxxbridge_cmd_deps//:defs.bzl", cxxbridge_cmd_deps = "crate_repositories")
+
+cxxbridge_cmd_deps()
 
 # Same one downloaded by tensorflow, but refer contrib/minizip.
 http_archive(
@@ -304,14 +373,6 @@ http_archive(
 )
 
 http_archive(
-    name = "darts_clone",
-    build_file = "@//:BUILD.darts_clone",
-    sha256 = "4a562824ec2fbb0ef7bd0058d9f73300173d20757b33bb69baa7e50349f65820",
-    strip_prefix = "darts-clone-e40ce4627526985a7767444b6ed6893ab6ff8983",
-    url = "https://github.com/s-yata/darts-clone/archive/e40ce4627526985a7767444b6ed6893ab6ff8983.tar.gz",
-)
-
-http_archive(
     name = "litert",
     patch_cmds = [
         # Replace @//third_party with @litert//third_party in files under third_party/.
@@ -334,16 +395,14 @@ http_archive(
     name = "absl_py",
     sha256 = "8a3d0830e4eb4f66c4fa907c06edf6ce1c719ced811a12e26d9d3162f8471758",
     strip_prefix = "abseil-py-2.1.0",
-    urls = [
-        "https://github.com/abseil/abseil-py/archive/refs/tags/v2.1.0.tar.gz",
-    ],
+    url = "https://github.com/abseil/abseil-py/archive/refs/tags/v2.1.0.tar.gz",
 )
 
 http_archive(
     name = "nlohmann_json",
     sha256 = "34660b5e9a407195d55e8da705ed26cc6d175ce5a6b1fb957e701fb4d5b04022",
     strip_prefix = "json-3.12.0",
-    urls = ["https://github.com/nlohmann/json/archive/refs/tags/v3.12.0.zip"],
+    url = "https://github.com/nlohmann/json/archive/refs/tags/v3.12.0.zip",
 )
 
 http_archive(
@@ -352,7 +411,7 @@ http_archive(
     patches = ["@//:PATCH.minja"],
     sha256 = "752f47dd2a2f4920a66f497c952785073c1983f12f084b99e5c12bf89f96acfe",
     strip_prefix = "minja-58568621432715b0ed38efd16238b0e7ff36c3ba",
-    urls = ["https://github.com/google/minja/archive/58568621432715b0ed38efd16238b0e7ff36c3ba.zip"],
+    url = "https://github.com/google/minja/archive/58568621432715b0ed38efd16238b0e7ff36c3ba.zip",
 )
 
 http_archive(
@@ -360,7 +419,7 @@ http_archive(
     build_file = "@//:BUILD.miniaudio",
     sha256 = "bcb07bfb27e6fa94d34da73ba2d5642d4940b208ec2a660dbf4e52e6b7cd492f",
     strip_prefix = "miniaudio-0.11.22",
-    urls = ["https://github.com/mackron/miniaudio/archive/refs/tags/0.11.22.tar.gz"],
+    url = "https://github.com/mackron/miniaudio/archive/refs/tags/0.11.22.tar.gz",
 )
 
 http_archive(
@@ -368,49 +427,13 @@ http_archive(
     build_file = "@//:BUILD.stb",
     sha256 = "119b9f3cca3e50225dc946ed1acd1b7a160943bc8bf549760109cea4e4e7c836",
     strip_prefix = "stb-f58f558c120e9b32c217290b80bad1a0729fbb2c",
-    urls = ["https://github.com/nothings/stb/archive/f58f558c120e9b32c217290b80bad1a0729fbb2c.zip"],
-)
-
-http_archive(
-    name = "rules_antlr",
-    sha256 = "26e6a83c665cf6c1093b628b3a749071322f0f70305d12ede30909695ed85591",
-    strip_prefix = "rules_antlr-0.5.0",
-    urls = ["https://github.com/marcohu/rules_antlr/archive/0.5.0.tar.gz"],
-)
-
-http_jar(
-    name = "antlr4_tool",
-    url = "https://jcenter.bintray.com/org/antlr/antlr4/4.13.2/antlr4-4.13.2.jar",
+    url = "https://github.com/nothings/stb/archive/f58f558c120e9b32c217290b80bad1a0729fbb2c.zip",
 )
 
 http_jar(
     name = "javax_json",
     sha256 = "0e1dec40a1ede965941251eda968aeee052cc4f50378bc316cc48e8159bdbeb4",
     url = "https://jcenter.bintray.com/org/glassfish/javax.json/1.0.4/javax.json-1.0.4.jar",
-)
-
-http_jar(
-    name = "stringtemplate4",
-    sha256 = "58caabc40c9f74b0b5993fd868e0f64a50c0759094e6a251aaafad98edfc7a3b",
-    url = "https://jcenter.bintray.com/org/antlr/ST4/4.0.8/ST4-4.0.8.jar",
-)
-
-http_jar(
-    name = "antlr3_runtime",
-    sha256 = "ce3fc8ecb10f39e9a3cddcbb2ce350d272d9cd3d0b1e18e6fe73c3b9389c8734",
-    url = "https://jcenter.bintray.com/org/antlr/antlr-runtime/3.5.2/antlr-runtime-3.5.2.jar",
-)
-
-http_jar(
-    name = "antlr4_runtime",
-    url = "https://repo1.maven.org/maven2/org/antlr/antlr4-runtime/4.13.2/antlr4-runtime-4.13.2.jar",
-)
-
-http_archive(
-    name = "antlr4",
-    build_file = "@//:BUILD.antlr4",
-    strip_prefix = "antlr4-bd8f9930d053ec6a83e7d751e8c6f69138957665",
-    urls = ["https://github.com/antlr/antlr4/archive/bd8f9930d053ec6a83e7d751e8c6f69138957665.tar.gz"],
 )
 
 # Android rules. Need latest rules_android_ndk to use NDK 26+.
@@ -453,3 +476,31 @@ neuro_pilot()
 load("@litert//third_party/google_tensor:workspace.bzl", "google_tensor")
 
 google_tensor()
+
+http_archive(
+    name = "nanobind_json",
+    build_file = "@//:BUILD.nanobind_json",
+    patches = ["@//:PATCH.nanobind_json"],
+    sha256 = "72cb4cdbf8108c7dd2dc669347669f2cc1acf4f943588f96661701f27f778912",
+    strip_prefix = "nanobind_json-e1953530697f61cbca9dc9b4f51561ea785cb09d",
+    urls = ["https://github.com/ianhbell/nanobind_json/archive/e1953530697f61cbca9dc9b4f51561ea785cb09d.zip"],
+)
+
+load("@rules_python//python:pip.bzl", "pip_parse")
+
+pip_parse(
+    name = "custom_pip_deps",
+    requirements_lock = "//:requirements.txt",
+)
+
+load("@custom_pip_deps//:requirements.bzl", install_custom_deps = "install_deps")
+
+install_custom_deps()
+
+# DirectX Shader Compiler DLLs for Windows
+http_archive(
+    name = "directx_shader_compiler",
+    build_file = "@//:BUILD.directx_shader_compiler",
+    sha256 = "a1e89031421cf3c1fca6627766ab3020ca4f962ac7e2caa7fab2b33a8436151e",
+    url = "https://github.com/microsoft/DirectXShaderCompiler/releases/download/v1.9.2602/dxc_2026_02_20.zip",
+)

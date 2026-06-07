@@ -21,7 +21,6 @@ list(APPEND CMAKE_MODULE_PATH ${Catch2_SOURCE_DIR}/extras)
 
 add_executable(cortext_tests
   cortext.test.cpp
-  imagebind_encoder.test.cpp
   data.test.cpp
   operations_centroids.test.cpp
   store.test.cpp
@@ -73,12 +72,15 @@ add_executable(cortext_tests
   operations_bitemporal_facts.test.cpp
   operations_write_gate.test.cpp
   operations_memory_storage.test.cpp
+  operations_short_term_memory_shadow.test.cpp
+  operations_soft_anchor.test.cpp
   operations_detect_memory_usage.test.cpp
   operations_streaming_pacing.test.cpp
   operations_accumulator.test.cpp
   migration_core.test.cpp
   cortext.test.cpp
   signal_processor.test.cpp
+  signal_filter.test.cpp
   operations_adherence_fixes.test.cpp
   # memory_feedback_insert.test.cpp removed - v1 table no longer exists
   state_persistence.test.cpp
@@ -101,6 +103,7 @@ add_executable(cortext_tests
   chat_metrics_state.test.cpp
   chat_stream_usage.test.cpp
   audio_planum_bridge.test.cpp
+  aait_gguf_encoder.test.cpp
   ${CMAKE_SOURCE_DIR}/src/audio/planum_bridge.cpp
 )
 
@@ -114,7 +117,7 @@ endif()
 
 # Ensure the ONNX Runtime and OGA dylibs can be found when Catch2 runs test
 # discovery during the build (macOS uses @rpath + LC_RPATH entries).
-if(CORTEXT_ENABLE_IMAGEBIND_ORT OR CORTEXT_ENABLE_GEMMA_ORT)
+if(CORTEXT_ENABLE_GEMMA_ORT)
   if(APPLE)
     # cortext_tests lives in <build>/tests; ORT is installed to
     # <build>/third_party/onnxruntime-install/lib
@@ -127,12 +130,10 @@ if(CORTEXT_ENABLE_IMAGEBIND_ORT OR CORTEXT_ENABLE_GEMMA_ORT)
     )
   endif()
 endif()
-# For OGA-enabled builds, add path to ORT and OGA
-# When ImageBind ORT is enabled, OGA shares that ORT; otherwise uses downloaded ORT
+# For OGA-enabled builds, add path to ORT and OGA.
 if(NOT CORTEXT_DISABLE_OGA)
   if(APPLE)
-    if(NOT CORTEXT_DISABLE_IMAGEBIND_ORT)
-      # OGA uses ImageBind ORT from onnxruntime-install
+    if(CORTEXT_ENABLE_GEMMA_ORT)
       set_property(TARGET cortext_tests APPEND PROPERTY BUILD_RPATH
         "@loader_path/../third_party/onnxruntime-install/lib"
         "@loader_path/../third_party/onnxruntime-genai"
@@ -145,7 +146,7 @@ if(NOT CORTEXT_DISABLE_OGA)
       )
     endif()
   elseif(UNIX)
-    if(NOT CORTEXT_DISABLE_IMAGEBIND_ORT)
+    if(CORTEXT_ENABLE_GEMMA_ORT)
       set_property(TARGET cortext_tests APPEND PROPERTY BUILD_RPATH
         "$ORIGIN/../third_party/onnxruntime-install/lib"
         "$ORIGIN/../third_party/onnxruntime-genai"

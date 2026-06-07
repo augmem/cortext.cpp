@@ -16,10 +16,12 @@
 #define THIRD_PARTY_ODML_LITERT_LM_RUNTIME_EXECUTOR_VISION_LITERT_COMPILED_MODEL_EXECUTOR_H_
 
 #include <memory>
+#include <string>
 #include <utility>
 #include <vector>
 
 #include "absl/base/nullability.h"  // from @com_google_absl
+#include "absl/container/flat_hash_map.h"  // from @com_google_absl
 #include "absl/status/status.h"  // from @com_google_absl
 #include "absl/status/statusor.h"  // from @com_google_absl
 #include "litert/cc/litert_compiled_model.h"  // from @litert
@@ -27,6 +29,7 @@
 #include "litert/cc/litert_model.h"  // from @litert
 #include "litert/cc/litert_tensor_buffer.h"  // from @litert
 #include "runtime/components/model_resources.h"
+#include "runtime/engine/io_types.h"
 #include "runtime/executor/executor_settings_base.h"
 #include "runtime/executor/llm_executor_io_types.h"
 #include "runtime/executor/vision_executor.h"
@@ -54,8 +57,16 @@ class VisionLiteRtCompiledModelExecutor : public VisionExecutor {
   absl::StatusOr<ExecutorVisionData> Encode(
       const litert::TensorBuffer& input_image_tensor) override;
 
+  absl::StatusOr<ExecutorVisionData> Encode(
+      const absl::flat_hash_map<std::string, litert::TensorBuffer>& input_maps)
+      override;
+
   // Returns the expected input dimension of the vision encoder model.
   absl::StatusOr<std::vector<int>> GetExpectedInputDimension() const override;
+
+  // Returns the vision executor properties.
+  absl::StatusOr<VisionExecutorProperties> GetVisionExecutorProperties()
+      const override;
 
  private:
   // The Vision Encoder LiteRT CompiledModel wrapper manage the input and
@@ -74,7 +85,8 @@ class VisionLiteRtCompiledModelExecutor : public VisionExecutor {
     //   if failed.
     static absl::StatusOr<std::unique_ptr<VisionEncoder>> Create(
         Environment& env, const Model* absl_nonnull model,
-        const VisionExecutorSettings& vision_executor_settings);
+        const VisionExecutorSettings& vision_executor_settings,
+        const VisionExecutorProperties& vision_executor_properties);
 
     // Initialize the VisionEncoder, which will create the input and output
     // buffers for the vision encoder model.
@@ -85,6 +97,9 @@ class VisionLiteRtCompiledModelExecutor : public VisionExecutor {
 
     // Returns the mutable CompiledModel for the vision encoder model.
     CompiledModel& GetMutableCompiledModel() { return compiled_model_; }
+
+    // Returns the LiteRT model for the vision encoder model.
+    const Model& GetModel() const { return model_; }
 
     // Returns the input buffers for the vision encoder model.
     const std::vector<TensorBuffer>& GetInputBuffers() const {
@@ -111,10 +126,12 @@ class VisionLiteRtCompiledModelExecutor : public VisionExecutor {
 
    private:
     VisionEncoder(Environment& env, const Model* absl_nonnull model,
-                  const VisionExecutorSettings& vision_executor_settings)
+                  const VisionExecutorSettings& vision_executor_settings,
+                  const VisionExecutorProperties& vision_executor_properties)
         : env_(env),
           vision_executor_settings_(vision_executor_settings),
-          model_(*model) {
+          model_(*model),
+          vision_executor_properties_(vision_executor_properties) {
       backend_ = vision_executor_settings.GetEncoderBackend();
     }
 
@@ -130,13 +147,16 @@ class VisionLiteRtCompiledModelExecutor : public VisionExecutor {
     // The vision encoder model.
     const Model& model_;
 
+    // The vision executor properties.
+    const VisionExecutorProperties& vision_executor_properties_;
+
     // The vision encoder compiled model.
     CompiledModel compiled_model_;
 
-    // The input buffers for the audio encoder model.
+    // The input buffers for the vision encoder model.
     std::vector<TensorBuffer> input_buffers_;
 
-    // The output buffers for the audio encoder model.
+    // The output buffers for the vision encoder model.
     std::vector<TensorBuffer> output_buffers_;
   };
 
@@ -155,7 +175,9 @@ class VisionLiteRtCompiledModelExecutor : public VisionExecutor {
     //   A unique pointer to the VisionAdapter if successful, or an error status
     //   if failed.
     static absl::StatusOr<std::unique_ptr<VisionAdapter>> Create(
-        Environment& env, const Model* absl_nonnull model, Backend backend);
+        Environment& env, const Model* absl_nonnull model,
+        const VisionExecutorSettings& vision_executor_settings,
+        const VisionExecutorProperties& vision_executor_properties);
 
     // Initialize the VisionAdapter.
     absl::Status Initialize();
@@ -166,13 +188,35 @@ class VisionLiteRtCompiledModelExecutor : public VisionExecutor {
     // Returns the mutable CompiledModel for the vision adapter model.
     CompiledModel& GetMutableCompiledModel() { return compiled_model_; }
 
+    // Returns the LiteRT model for the vision adapter model.
+    const Model& GetModel() const { return model_; }
+
+    // Returns the input buffers for the vision adapter model.
+    const std::vector<TensorBuffer>& GetInputBuffers() const {
+      return input_buffers_;
+    }
+
+    // Returns the mutable input buffers for the vision adapter model.
+    std::vector<TensorBuffer>& GetMutableInputBuffers() {
+      return input_buffers_;
+    }
+
    private:
     VisionAdapter(Environment& env, const Model* absl_nonnull model,
-                  Backend backend)
-        : env_(env), backend_(backend), model_(*model) {}
+                  const VisionExecutorSettings& vision_executor_settings,
+                  const VisionExecutorProperties& vision_executor_properties)
+        : env_(env),
+          vision_executor_settings_(vision_executor_settings),
+          model_(*model),
+          vision_executor_properties_(vision_executor_properties) {
+      backend_ = vision_executor_settings.GetAdapterBackend();
+    }
 
     // The LiteRT environment.
     Environment& env_;
+
+    // The VisionExecutorSettings for the vision adapter model.
+    const VisionExecutorSettings& vision_executor_settings_;
 
     // The backend to use for the vision adapter model.
     Backend backend_;
@@ -180,8 +224,14 @@ class VisionLiteRtCompiledModelExecutor : public VisionExecutor {
     // The vision adapter model.
     const Model& model_;
 
+    // The vision executor properties.
+    const VisionExecutorProperties& vision_executor_properties_;
+
     // The vision adapter compiled model.
     CompiledModel compiled_model_;
+
+    // The input buffers for the vision adapter model.
+    std::vector<TensorBuffer> input_buffers_;
   };
 
   explicit VisionLiteRtCompiledModelExecutor(
@@ -189,13 +239,15 @@ class VisionLiteRtCompiledModelExecutor : public VisionExecutor {
       std::unique_ptr<ModelResources> resources,
       std::unique_ptr<VisionEncoder> vision_encoder,
       std::unique_ptr<VisionAdapter> vision_adapter,
-      std::vector<int> expected_input_dimension)
+      std::vector<int> expected_input_dimension,
+      const VisionExecutorProperties& vision_executor_properties)
       : vision_executor_settings_(vision_executor_settings),
         env_(env),
         resources_(std::move(resources)),
         vision_encoder_(std::move(vision_encoder)),
         vision_adapter_(std::move(vision_adapter)),
-        expected_input_dimension_(expected_input_dimension) {}
+        expected_input_dimension_(expected_input_dimension),
+        vision_executor_properties_(vision_executor_properties) {}
 
   // The VisionExecutorSettings for the vision encoder and vision adapter
   // models.
@@ -215,6 +267,9 @@ class VisionLiteRtCompiledModelExecutor : public VisionExecutor {
 
   // The expected input dimension of the vision encoder model.
   std::vector<int> expected_input_dimension_;
+
+  // The vision executor properties.
+  VisionExecutorProperties vision_executor_properties_;
 };
 
 }  // namespace litert::lm

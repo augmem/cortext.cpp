@@ -89,6 +89,20 @@ TEST_CASE ("StreamingPacingThreshold knob function", "[core][knobs]")
   REQUIRE (StreamingPacingThreshold (0.3) > StreamingPacingThreshold (0.7));
 }
 
+TEST_CASE ("Neutral retrieval knobs map to judged mixed-media optimum",
+           "[core][knobs][retrieval]")
+{
+  REQUIRE (RetrievalFocusBias (0.5) == Catch::Approx (FocusBias (0.75)));
+  REQUIRE (RetrievalSensitivityBias (0.5)
+           == Catch::Approx (SensitivityBias (0.25)));
+  REQUIRE (RetrievalStabilityBias (0.5) == Catch::Approx (0.75));
+  REQUIRE (RetrievalMaxResults (0.5) == MaxResults (0.75));
+  const int previous_winner_items = static_cast<int> (std::round (
+      Lerp (20.0, 8.0, FocusBias (0.75)) * Lerp (1.08, 0.92, 0.75)));
+  REQUIRE (RetrievalGraphExpandedRagMaxItems (0.5, 0.5)
+           == previous_winner_items);
+}
+
 TEST_CASE ("MaxWaitDrift knob function", "[core][knobs]")
 {
   // max_wait_drift(F_eff) = lerp(1.2, 0.30, F_eff)

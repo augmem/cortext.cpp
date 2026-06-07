@@ -15,6 +15,10 @@
 #ifndef THIRD_PARTY_ODML_LITERT_LM_RUNTIME_CONVERSATION_INTERNAL_CALLBACK_UTIL_H_
 #define THIRD_PARTY_ODML_LITERT_LM_RUNTIME_CONVERSATION_INTERNAL_CALLBACK_UTIL_H_
 
+#include <optional>
+#include <string>
+#include <vector>
+
 #include "absl/functional/any_invocable.h"  // from @com_google_absl
 #include "absl/status/statusor.h"  // from @com_google_absl
 #include "runtime/conversation/io_types.h"
@@ -38,10 +42,11 @@ namespace litert::lm {
 //     user_callback when the task is completed.
 absl::AnyInvocable<void(absl::StatusOr<Responses>)> CreateInternalCallback(
     const ModelDataProcessor& model_data_processor,
-    DataProcessorArguments processor_args,
+    DataProcessorArguments processor_args, const std::vector<Channel>& channels,
     absl::AnyInvocable<void(absl::StatusOr<Message>)> user_callback,
     absl::AnyInvocable<void()> cancel_callback = nullptr,
-    absl::AnyInvocable<void(Message)> complete_message_callback = nullptr);
+    absl::AnyInvocable<void(Message)> complete_message_callback = nullptr,
+    const std::optional<std::string>& open_channel_name = std::nullopt);
 
 }  // namespace litert::lm
 

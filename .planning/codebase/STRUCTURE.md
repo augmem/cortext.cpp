@@ -71,8 +71,8 @@ cortext/
 
 **`models/`:**
 - Purpose: Runtime model directories resolved by encoder/extractor/summarizer factories.
-- Contains: ImageBind, EmbeddingGemma, Gemma, Liquid/LFM2, sherpa-onnx, whisper, and Phi-4 assets.
-- Key files: runtime directories such as `models/imagebind`, `models/embeddinggemma-300m-onnx`, `models/gemma3n-e2b-litert`, `models/LFM2.5-1.2B-Instruct-GGUF`.
+- Contains: EmbeddingGemma, Gemma, Liquid/LFM2, sherpa-onnx, whisper, and Phi-4 assets.
+- Key files: runtime directories such as `models/embeddinggemma-300m-onnx`, `models/gemma3n-e2b-litert`, `models/LFM2.5-1.2B-Instruct-GGUF`.
 
 **`third_party/`:**
 - Purpose: Vendored native dependencies referenced from `CMakeLists.txt`.

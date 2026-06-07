@@ -70,7 +70,7 @@ signal_gap ← now_s() − to_s(last_signal_ts)  # seconds
 
 ### No Fixed Behavioral Constants
 
-All behavioral thresholds, gains, and caps are derived from the three knobs (F, S, T) and/or state. Fixed numeric values are permitted only for numerical stability floors (e.g., ε(F, S, T)) and unit conversions. This keeps the system’s qualitative behavior entirely governed by the three knobs, consistent with the human-memory objective.
+Most behavioral thresholds, gains, and caps are derived from the three knobs (F, S, T) and/or state. Fixed numeric values are permitted for numerical stability floors (e.g., ε(F, S, T)), unit conversions, and explicitly labeled resource/safety invariants such as storage-pressure floors. This keeps the system's qualitative behavior governed by the three knobs while still allowing bounded implementation guards.
 
 ## Temporal Semantics for Structured Facts
 
@@ -147,7 +147,7 @@ S̃ = clamp(S − β_S × 4S(1 − S), 0, 1)
 β_F = β_S = 0.10
 ```
 
-Unless explicitly stated otherwise, all knob‑derived formulas use **F̃** and **S̃** in place of the raw UI knobs. Stability (T) is not biased.
+Unless explicitly stated otherwise, knob‑derived formulas in the paper use **F̃** and **S̃** in place of the raw UI knobs. Stability (T) is not biased. A small number of legacy/cold-start implementation priors still consume raw UI knobs directly and are called out where they matter.
 
 ## Knob-Derived Parameters
 
@@ -187,6 +187,28 @@ base_rate(S) = lerp(r_min, r_max, S)
 The hysteresis band prevents oscillation in threshold-crossing decisions. Write-rate targets establish homeostatic setpoints for the threshold controller.
 
 These ranges are canonical knob maps; no additional fixed thresholds are introduced beyond the three knobs.
+
+### Retrieval Breadth
+
+Retrieval uses two F/S/T-derived breadths rather than one global top-k. The
+candidate discovery pass stays broad so source memories remain reachable:
+
+```
+seed_k(F) = round(lerp(96, 8, FocusBias(F)))
+```
+
+The prompt-facing output is then narrowed after graph, fact, temporal, recency,
+affect, procedural, and context scoring:
+
+```
+selected_k(F,T) = round(lerp(20, 8, FocusBias(F)) * lerp(1.08, 0.92, T))
+```
+
+This split lets low Focus explore many source/blob seeds while still keeping the
+application prompt bounded by a compact final surface. The intermediate graph
+boosts, label-route weights, durable-source floors, and text/fact seed thresholds
+are likewise derived from Focus, Sensitivity, and Stability in the implementation
+rather than exposed as additional user settings.
 
 ### Experiential Mass and Maturity
 

@@ -17,6 +17,28 @@
 namespace cortext
 {
 
+struct BoundaryDiagnostics
+{
+  double coherence_prev = 0.0;
+  double coherence_curr = 1.0;
+  double coh_drop = 0.0;
+  double coh_drop_norm = 0.0;
+  double d_step = 0.0;
+  double eta_prev = 0.0;
+  double drift_spike = 0.0;
+  double drift_norm = 0.0;
+  double surprisal_raw = 0.0;
+  double surprisal_norm = 0.0;
+  double topic_shift = 0.0;
+  double topic_norm = 0.0;
+  double boundary_rate_ema = 0.0;
+  double boundary_rate_mult = 1.0;
+  double boundary_threshold = 0.0;
+  double boundary_floor = 0.0;
+  double boundary_score = 0.0;
+  bool should_flush = false;
+};
+
 // Forward declarations for LLM components
 class Extractor;
 class Summarizer;
@@ -230,7 +252,7 @@ struct ProcessorContext
   bool focus_priors_initialized = false;
   bool sensitivity_priors_initialized = false;
   bool stability_priors_initialized = false;
-  bool label_bank_seeded = false;
+  bool label_bank_loaded = false;
   int last_interrupt_tick = -1000000;
   int blender_update_count = 0;
   WriteRateWindow write_rate_window_;
@@ -428,6 +450,103 @@ struct ProcessorContext
   std::deque<Eigen::VectorXf> recent_memory_centroids;
 
   // ======================================================================
+  // Short-Term Graph Memory
+  // ======================================================================
+  struct ShadowSTMItem
+  {
+    std::string source_id;
+    uint64_t timestamp = 0;
+    int step_index = 0;
+    Eigen::VectorXf embedding;
+    double boundary_score = 0.0;
+    BoundaryDiagnostics boundary_diagnostics;
+    std::optional<std::string> boundary_type;
+  };
+
+  struct ShadowLabelEdge
+  {
+    std::string source_id;
+    uint64_t timestamp = 0;
+    int step_index = 0;
+    long long label_memory_id = 0;
+    std::string label;
+    double weight = 0.0;
+    Eigen::VectorXf signal_embedding;
+  };
+
+  struct ShortTermGraph
+  {
+    std::deque<ShadowSTMItem> items;
+    std::deque<ShadowLabelEdge> label_edges;
+  };
+
+  std::unordered_map<std::string, ShortTermGraph> short_term_graphs;
+  bool shadow_stm_enabled = false;
+  int shadow_stm_last_size = 0;
+  int shadow_stm_max_size = 0;
+  int shadow_stm_update_count = 0;
+  int shadow_stm_compaction_count = 0;
+  double shadow_stm_last_update_us = 0.0;
+  double shadow_stm_total_update_us = 0.0;
+  std::deque<double> shadow_stm_recent_update_us;
+
+  // ======================================================================
+  // Soft Anchor State (ingress-time formation)
+  // ======================================================================
+  struct SoftAnchorState
+  {
+    std::string anchor_id;
+    std::string status = "provisional";
+    std::string last_source_id;
+    Eigen::VectorXf semantic_centroid;
+    Eigen::VectorXf entity_centroid;
+    Eigen::VectorXf full_centroid;
+    double semantic_radius = 0.0;
+    double entity_radius = 0.0;
+    double full_radius = 0.0;
+    double anchor_strength = 0.0;
+    int support_count = 0;
+    int contradiction_count = 0;
+    int first_step = 0;
+    int last_step = 0;
+    uint64_t first_ts = 0;
+    uint64_t last_ts = 0;
+    int64_t last_boundary_id = 0;
+    std::deque<long long> recent_memory_ids;
+  };
+
+  struct SoftAnchorLink
+  {
+    long long memory_id = 0;
+    std::string anchor_id;
+    double anchor_strength = 0.0;
+    std::string anchor_label = "none";
+    std::string evidence_kind = "unknown";
+    std::string memory_tier = "WM";
+    double score = 0.0;
+    double margin = 0.0;
+    double entropy = 0.0;
+    int support_count = 0;
+    int contradiction_count = 0;
+    int created_step = 0;
+    int updated_step = 0;
+  };
+
+  std::vector<SoftAnchorState> soft_anchor_states;
+  std::vector<SoftAnchorLink> soft_anchor_last_links;
+  bool soft_anchor_enabled = false;
+  int soft_anchor_next_id = 1;
+  int soft_anchor_update_count = 0;
+  int soft_anchor_last_link_count = 0;
+  int soft_anchor_last_state_count = 0;
+  int soft_anchor_last_create_count = 0;
+  int soft_anchor_last_update_count = 0;
+  int soft_anchor_last_none_count = 0;
+  double soft_anchor_last_update_us = 0.0;
+  double soft_anchor_total_update_us = 0.0;
+  std::deque<double> soft_anchor_recent_update_us;
+
+  // ======================================================================
   // Index and Procedural Stores (CLS extensions)
   // ======================================================================
   struct SummaryCacheEntry
@@ -438,6 +557,16 @@ struct ProcessorContext
     float embedding_norm = 0.0f;
     bool is_association = false;
     bool is_label = false;
+  };
+
+  struct LabelClusterCache
+  {
+    bool valid = false;
+    int requested_clusters = 0;
+    int embedding_dim = 0;
+    size_t summary_cache_size = 0;
+    std::vector<Eigen::VectorXf> centroids;
+    std::vector<std::vector<size_t>> members;
   };
 
   void
@@ -463,6 +592,10 @@ struct ProcessorContext
         entry.embedding_norm = norm;
         entry.is_association = is_association;
         entry.is_label = is_label;
+        if (is_label)
+          {
+            label_cluster_cache.valid = false;
+          }
         return;
       }
     SummaryCacheEntry entry;
@@ -474,6 +607,10 @@ struct ProcessorContext
     entry.is_label = is_label;
     summary_cache_index[memory_id] = summary_cache.size ();
     summary_cache.push_back (std::move (entry));
+    if (is_label)
+      {
+        label_cluster_cache.valid = false;
+      }
   }
 
   std::unordered_map<std::string, std::vector<long long>> index_store;
@@ -483,6 +620,7 @@ struct ProcessorContext
   std::unordered_map<std::string, std::vector<float>> label_embedding_cache;
   std::vector<SummaryCacheEntry> summary_cache;
   std::unordered_map<long long, size_t> summary_cache_index;
+  LabelClusterCache label_cluster_cache;
 
   // ======================================================================
   // LLM Components (OGA/Phi-4)

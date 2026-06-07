@@ -222,6 +222,42 @@ TEST_CASE ("LFM2 env override takes precedence", "[deep_llm][resolution]")
   CHECK (std::filesystem::equivalent (*resolved, preferred));
 }
 
+TEST_CASE ("Gemma deep resolver requires Gemma4", "[deep_llm][resolution]")
+{
+  TempDir temp_dir;
+  temp_dir.Touch ("gemma3n-e2b-litert/gemma-3n-E2B-it-int4.litertlm");
+
+  CHECK_FALSE (
+      cortext::internal::ResolveGemmaDeepLlmModelPath (temp_dir.path ())
+          .has_value ());
+
+  const auto gemma4
+      = temp_dir.Touch ("gemma4-e2b-litert/gemma-4-E2B-it.litertlm");
+  const auto resolved
+      = cortext::internal::ResolveGemmaDeepLlmModelPath (temp_dir.path ());
+  REQUIRE (resolved.has_value ());
+  CHECK (std::filesystem::equivalent (*resolved, gemma4));
+}
+
+TEST_CASE ("Auto deep backend does not fall back without Gemma4",
+           "[deep_llm][resolution]")
+{
+  TempDir temp_dir;
+  temp_dir.Touch ("gemma3n-e2b-litert/gemma-3n-E2B-it-int4.litertlm");
+  temp_dir.Touch ("LFM2.5-350M-GGUF/LFM2.5-350M-Q4_K_M.gguf");
+  temp_dir.Touch (
+      "LFM2.5-1.2B-Instruct-GGUF/LFM2.5-1.2B-Instruct-Q4_K_M.gguf");
+
+  std::string error;
+  auto selection = cortext::internal::TryCreateDeepLlmSelection (
+      temp_dir.path (), cortext::internal::DeepLlmBackend::Auto, &error);
+
+  CHECK_FALSE (selection.has_value ());
+  CHECK_THAT (error, Catch::Matchers::ContainsSubstring ("gemma4-e2b-litert"));
+  CHECK (error.find ("Liquid") == std::string::npos);
+  CHECK (error.find ("Mixed") == std::string::npos);
+}
+
 TEST_CASE ("LFM2 extraction grammar supports current schema subset",
            "[deep_llm][grammar]")
 {
@@ -381,7 +417,7 @@ TEST_CASE ("LFM2 extractor integration", "[deep_llm][lfm2][integration]")
 TEST_CASE ("Mixed backend selection integration", "[deep_llm][integration]")
 {
   const std::string gemma_model = FindModelPath (
-      "models/gemma3n-e2b-litert/gemma-3n-E2B-it-int4.litertlm");
+      "models/gemma4-e2b-litert/gemma-4-E2B-it.litertlm");
   const std::string extract_model = FindModelPath (
       "models/lfm2.5-350m-gguf/LFM2.5-350M-Q4_K_M.gguf");
 
@@ -399,24 +435,21 @@ TEST_CASE ("Mixed backend selection integration", "[deep_llm][integration]")
   REQUIRE (selection.has_value ());
   CHECK (selection->backend_name == "Gemma+LFM2.5");
   CHECK (selection->summarizer_model_path.filename ()
-         == std::filesystem::path ("gemma-3n-E2B-it-int4.litertlm"));
+         == std::filesystem::path ("gemma-4-E2B-it.litertlm"));
   CHECK (selection->extractor_model_path.filename ()
          == std::filesystem::path ("LFM2.5-350M-Q4_K_M.gguf"));
 }
 
-TEST_CASE ("Auto deep backend prefers LFM2.5 selection", "[deep_llm][integration]")
+TEST_CASE ("Auto deep backend prefers Gemma4 selection", "[deep_llm][integration]")
 {
   ScopedEnvVar clear_backend ("CORTEXT_DEEP_LLM_BACKEND");
 
   const std::string gemma_model = FindModelPath (
-      "models/gemma3n-e2b-litert/gemma-3n-E2B-it-int4.litertlm");
-  const std::string extract_model = FindModelPath (
-      "models/lfm2.5-350m-gguf/LFM2.5-350M-Q4_K_M.gguf");
+      "models/gemma4-e2b-litert/gemma-4-E2B-it.litertlm");
 
-  if (!std::filesystem::exists (gemma_model)
-      || !std::filesystem::exists (extract_model))
+  if (!std::filesystem::exists (gemma_model))
     {
-      SUCCEED ("Skipping - mixed backend assets not found");
+      SUCCEED ("Skipping - Gemma4 backend assets not found");
       return;
     }
 
@@ -424,5 +457,9 @@ TEST_CASE ("Auto deep backend prefers LFM2.5 selection", "[deep_llm][integration
       FindModelPath ("models"), cortext::internal::DeepLlmBackend::Auto,
       nullptr);
   REQUIRE (selection.has_value ());
-  CHECK (selection->backend_name == "LFM2.5/llama.cpp");
+  CHECK (selection->backend_name == "Gemma/LiteRT-LM");
+  CHECK (selection->summarizer_model_path.filename ()
+         == std::filesystem::path ("gemma-4-E2B-it.litertlm"));
+  CHECK (selection->extractor_model_path.filename ()
+         == std::filesystem::path ("gemma-4-E2B-it.litertlm"));
 }

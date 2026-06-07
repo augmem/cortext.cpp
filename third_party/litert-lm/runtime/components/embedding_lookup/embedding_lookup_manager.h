@@ -26,6 +26,7 @@
 #include "absl/status/status.h"  // from @com_google_absl
 #include "absl/status/statusor.h"  // from @com_google_absl
 #include "absl/types/span.h"  // from @com_google_absl
+#include "litert/cc/litert_environment.h"  // from @litert
 #include "litert/cc/litert_model.h"  // from @litert
 #include "litert/cc/litert_tensor_buffer.h"  // from @litert
 #include "runtime/components/embedding_lookup/embedding_lookup_end_of_multi_modal.h"
@@ -52,6 +53,7 @@ class EmbeddingLookupManager {
   // If the provide text_embedding_model has more than one signature, the
   // signature_key must be provided.
   static absl::StatusOr<std::unique_ptr<EmbeddingLookupManager>> Create(
+      litert::Environment& env,
       const litert::Model* absl_nonnull text_embedding_model,
       absl::flat_hash_map<int, const litert::Model*>&
           end_of_multi_modal_embedding_models,
@@ -59,6 +61,7 @@ class EmbeddingLookupManager {
       std::optional<std::string> signature_key = std::nullopt);
 
   static absl::StatusOr<std::unique_ptr<EmbeddingLookupManager>> Create(
+      litert::Environment& env,
       const litert::Model* absl_nonnull text_embedding_model,
       bool fully_supports_multi_modal = true,
       std::optional<std::string> signature_key = std::nullopt);
@@ -76,8 +79,8 @@ class EmbeddingLookupManager {
   // Intended to be called at the end of the prefill pass.
   absl::Status CleanupMultiModalEmbeddings();
 
-  // For a given token, looks up the embedding and stores it in the
-  // output tensor.
+  // For a given token, looks up the embedding and stores it in the output
+  // vector.
   //
   // This is used for the case where the llm_litert_executor needs to look up
   // embeddings for the current step and then use the result for the next step.
@@ -88,10 +91,10 @@ class EmbeddingLookupManager {
   // output tensor.
   absl::Status LookupDecode(int token, litert::TensorBuffer* output_tensor);
 
-  // For a given token, looks up the embedding and stores it in the
-  // provided vector. This function is responsible for setting the size of the
-  // vector to the correct size and filling it with the embedding. Any data that
-  // was previously in the vector will be overwritten.
+  // For a given token, looks up the embedding and stores it in the provided
+  // vector. This function is responsible for setting the size of the vector to
+  // the correct size and filling it with the embedding. Any data that was
+  // previously in the vector will be overwritten.
   //
   // This is used for the case where the llm_litert_executor needs to look up
   // embeddings for the current step and then use the result for the next step.
@@ -109,8 +112,13 @@ class EmbeddingLookupManager {
                              litert::TensorBuffer* output_tensor,
                              size_t token_offset);
 
+  EmbeddingLookupText* GetTextEmbeddingLookup() const {
+    return text_embedding_lookup_.get();
+  }
+
  protected:
   absl::Status Initialize(
+      litert::Environment& env,
       const litert::Model* absl_nonnull text_embedding_model,
       absl::flat_hash_map<int, const litert::Model*>&
           end_of_multi_modal_embedding_models,
@@ -127,9 +135,6 @@ class EmbeddingLookupManager {
   // Otherwise, it will default any multimodal tokens to the text embedding
   // value of entry 0.
   bool fully_supports_multi_modal_;
-
-  // The default embedding vector to use when full_supports_multi_modal_=false.
-  std::vector<float> default_embedding_vector_;
 };
 
 }  // namespace litert::lm

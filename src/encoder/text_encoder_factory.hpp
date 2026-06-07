@@ -1,7 +1,9 @@
 #pragma once
 
 #include "cortext/encoder/embeddinggemma.hpp"
-#include "cortext/encoder/imagebind.hpp"
+#if defined(CORTEXT_ENABLE_AAIT_GGUF)
+#include "cortext/models/aait_gguf_encoder.hpp"
+#endif
 
 #include <filesystem>
 #include <cstdlib>
@@ -28,6 +30,10 @@ DescribeEmbeddingGemmaBackend (
   const std::string ext = model_path.extension ().string ();
   if (ext == ".gguf")
     {
+      if (model_path.filename ().string ().find ("mdbr") != std::string::npos)
+        {
+          return "MDBR/llama.cpp";
+        }
       return "EmbeddingGemma/llama.cpp";
     }
   if (ext == ".tflite")
@@ -73,11 +79,6 @@ ResolveEmbeddingGemmaConfigForBackend (const std::filesystem::path &models_dir,
       tokenizer_name = "tokenizer.model";
       AppendUniquePath (candidates, models_dir);
       AppendUniquePath (candidates, models_dir / "embeddinggemma-300m-onnx");
-      if (models_dir.filename () == "imagebind")
-        {
-          AppendUniquePath (
-              candidates, models_dir.parent_path () / "embeddinggemma-300m-onnx");
-        }
       model_candidates = {
         std::filesystem::path ("onnx/model_q4.onnx"),
         std::filesystem::path ("onnx/model_quantized.onnx"),
@@ -89,11 +90,8 @@ ResolveEmbeddingGemmaConfigForBackend (const std::filesystem::path &models_dir,
       require_tokenizer = false;
       AppendUniquePath (candidates, models_dir);
       AppendUniquePath (candidates, models_dir / "llama_cpp");
-      if (models_dir.filename () == "imagebind")
-        {
-          AppendUniquePath (candidates, models_dir.parent_path () / "llama_cpp");
-        }
       model_candidates = {
+        std::filesystem::path ("mdbr-leaf-ir-q8_0.gguf"),
         std::filesystem::path ("embeddinggemma-300M-Q8_0.gguf"),
         std::filesystem::path ("embeddinggemma-300M-Q4_K_M.gguf"),
       };
@@ -103,11 +101,6 @@ ResolveEmbeddingGemmaConfigForBackend (const std::filesystem::path &models_dir,
       tokenizer_name = "sentencepiece.model";
       AppendUniquePath (candidates, models_dir);
       AppendUniquePath (candidates, models_dir / "embeddinggemma-300m-litert");
-      if (models_dir.filename () == "imagebind")
-        {
-          AppendUniquePath (
-              candidates, models_dir.parent_path () / "embeddinggemma-300m-litert");
-        }
       model_candidates = {
         std::filesystem::path ("embeddinggemma-300M_seq256_mixed-precision.tflite"),
       };
@@ -147,6 +140,15 @@ ResolveEmbeddingGemmaConfigForBackend (const std::filesystem::path &models_dir,
 inline std::optional<EmbeddingGemmaConfig>
 ResolveEmbeddingGemmaConfig (const std::filesystem::path &models_dir)
 {
+  const char *model_path_override
+      = std::getenv ("CORTEXT_EMBEDDINGGEMMA_MODEL_PATH");
+  if (model_path_override != nullptr && *model_path_override != '\0')
+    {
+      EmbeddingGemmaConfig cfg;
+      cfg.model_path = model_path_override;
+      return cfg;
+    }
+
   const char *backend_override = std::getenv ("CORTEXT_EMBEDDINGGEMMA_BACKEND");
   if (backend_override != nullptr && *backend_override != '\0')
     {
@@ -172,37 +174,43 @@ ResolveEmbeddingGemmaConfig (const std::filesystem::path &models_dir)
   return std::nullopt;
 }
 
-inline std::optional<std::filesystem::path>
-ResolveImageBindDir (const std::filesystem::path &models_dir)
-{
-  const auto has_imagebind = [] (const std::filesystem::path &dir) {
-    return std::filesystem::exists (dir / "text_encoder.onnx")
-           || std::filesystem::exists (dir / "text_encoder_int8.onnx");
-  };
-
-  std::vector<std::filesystem::path> candidates;
-  AppendUniquePath (candidates, models_dir);
-  AppendUniquePath (candidates, models_dir / "imagebind");
-  if (models_dir.filename () == "embeddinggemma-300m-onnx")
-    {
-      AppendUniquePath (candidates, models_dir.parent_path () / "imagebind");
-    }
-
-  for (const auto &dir : candidates)
-    {
-      if (has_imagebind (dir))
-        {
-          return dir;
-        }
-    }
-
-  return std::nullopt;
-}
-
 inline TextEncoderSelection
 CreatePreferredTextEncoder (const std::string &models_dir)
 {
   const std::filesystem::path root (models_dir);
+
+#if defined(CORTEXT_ENABLE_AAIT_GGUF)
+  const char *aait_enable = std::getenv ("CORTEXT_AAIT_ENABLE");
+  const bool enable_aait = aait_enable != nullptr && *aait_enable != '\0'
+                           && std::string (aait_enable) != "0";
+  if (enable_aait)
+    {
+      if (auto aait = ResolveAaitGgufModelPath (root))
+        {
+          AaitGgufConfig cfg;
+          cfg.model_path = aait->string ();
+          TextEncoderSelection selection;
+          selection.backend_name = "AAIT-86M-GGUF";
+          selection.resolved_path = *aait;
+          selection.encoder = std::make_unique<AaitGgufEncoder> (cfg);
+          return selection;
+        }
+      throw std::runtime_error (
+          "CORTEXT_AAIT_ENABLE is set, but no AAIT GGUF model was found under "
+          + root.string ());
+    }
+
+  if (auto es_aist = ResolveEssAistGgufModelPath (root))
+    {
+      AaitGgufConfig cfg;
+      cfg.model_path = es_aist->string ();
+      TextEncoderSelection selection;
+      selection.backend_name = "ES-AIST-81M-GGUF";
+      selection.resolved_path = *es_aist;
+      selection.encoder = std::make_unique<AaitGgufEncoder> (cfg);
+      return selection;
+    }
+#endif
 
 #if defined(CORTEXT_ENABLE_EMBEDDINGGEMMA)
   if (auto gemma = ResolveEmbeddingGemmaConfig (root))
@@ -213,17 +221,6 @@ CreatePreferredTextEncoder (const std::string &models_dir)
       selection.resolved_path = model_path;
       selection.encoder
           = std::make_unique<EmbeddingGemmaEncoder> (std::move (*gemma));
-      return selection;
-    }
-#endif
-
-#if defined(CORTEXT_ENABLE_IMAGEBIND_ORT)
-  if (auto imagebind = ResolveImageBindDir (root))
-    {
-      TextEncoderSelection selection;
-      selection.backend_name = "ImageBind";
-      selection.resolved_path = *imagebind;
-      selection.encoder = std::make_unique<ImageBindEncoder> (imagebind->string ());
       return selection;
     }
 #endif

@@ -146,7 +146,7 @@ class Session(private val handle: Long) : AutoCloseable {
  * A sealed class representing the input data that can be provided to the LiteRT-LM.
  *
  * This corresponds to the native `InputData` in
- * third_party/odml/litert_lm/runtime/engine/io_types.h.
+ * runtime/engine/io_types.h.
  */
 sealed class InputData {
   /**

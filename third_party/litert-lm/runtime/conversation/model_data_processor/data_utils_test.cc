@@ -138,5 +138,11 @@ TEST(DataUtilsTest, LoadItemData_ToolResponseItem) {
   EXPECT_EQ(memory_mapped_file, nullptr);
 }
 
+TEST(DataUtilsTest, LoadItemData_MissingType) {
+  ASSERT_OK_AND_ASSIGN(std::unique_ptr<MemoryMappedFile> memory_mapped_file,
+                       LoadItemData({{"not_type", "some value"}}));
+  EXPECT_EQ(memory_mapped_file, nullptr);
+}
+
 }  // namespace
 }  // namespace litert::lm

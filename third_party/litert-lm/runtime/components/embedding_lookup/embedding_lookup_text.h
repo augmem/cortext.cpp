@@ -32,6 +32,8 @@
 #include "litert/cc/litert_compiled_model.h"  // from @litert
 #include "litert/cc/litert_environment.h"  // from @litert
 #include "litert/cc/litert_model.h"  // from @litert
+#include "litert/cc/litert_options.h"  // from @litert
+#include "litert/cc/litert_ranked_tensor_type.h"  // from @litert
 #include "litert/cc/litert_tensor_buffer.h"  // from @litert
 #include "runtime/components/embedding_lookup/embedding_lookup.h"
 
@@ -46,14 +48,14 @@ namespace litert::lm {
 // to tell a delegate to move embedding lookups to the CPU.
 class EmbeddingLookupText : public EmbeddingLookup {
  public:
-  ~EmbeddingLookupText() = default;
+  ~EmbeddingLookupText() override = default;
 
   // Creates a EmbeddingLookupText instance. The reference of |model| is kept
   // in the returned instance, so the caller must ensure that |model| outlives
   // the returned instance.  If the model has more than one signature, and
   // signature_key is not provided, the first signature will be used by default.
   static absl::StatusOr<std::unique_ptr<EmbeddingLookupText>> Create(
-      const litert::Model* absl_nonnull model,
+      litert::Environment& env, const litert::Model* absl_nonnull model,
       std::optional<std::string> signature_key = std::nullopt);
 
   // For a given token, looks up the embedding and stores it in the
@@ -103,15 +105,20 @@ class EmbeddingLookupText : public EmbeddingLookup {
 
   // Returns the default embedding vector to use when a token is not found in
   // the lookup table.
-  std::vector<float> GetDefaultEmbeddingVector() const {
+  const std::vector<float>& GetDefaultEmbeddingVector() const {
     return default_embedding_vector_;
   }
 
+  // Returns the signature key to use for the embedding model.
+  std::optional<litert::RankedTensorType> GetOutputBufferType() const {
+    return output_buffer_type_;
+  }
+
  protected:
-  EmbeddingLookupText(litert::Environment env,
+  EmbeddingLookupText(litert::Environment& env,
                       const litert::Model* absl_nonnull model,
                       std::optional<std::string> signature_key)
-      : env_(std::move(env)), model_(*model), signature_key_(signature_key) {}
+      : env_(env), model_(*model), signature_key_(signature_key) {}
 
   // Loads the provided model. This must be called before Lookup.
   absl::Status Initialize();
@@ -121,7 +128,7 @@ class EmbeddingLookupText : public EmbeddingLookup {
   absl::Status LookupInternal(int token, absl::Span<uint8_t> buffer);
 
   // The environment for the embedding lookup.
-  litert::Environment env_;
+  litert::Environment& env_;
   // The model for the embedding lookup. The actual model instance is owned by
   // the model resources.
   const litert::Model& model_;

@@ -47,7 +47,7 @@ PlanumBridge::PlanumBridge (PlanumBridgeTarget &target) noexcept : target_ (&tar
 }
 
 std::optional<PlanumBridgeResult>
-PlanumBridge::Accept (const planum::PerceptionEvent &event) const
+PlanumBridge::Accept (const planum::contract::PerceptionEvent &event) const
 {
   if (!ShouldRouteToText (event))
     {
@@ -66,22 +66,22 @@ PlanumBridge::Accept (const planum::PerceptionEvent &event) const
 
 bool
 PlanumBridge::ShouldRouteToText (
-    const planum::PerceptionEvent &event) noexcept
+    const planum::contract::PerceptionEvent &event) noexcept
 {
-  return event.kind == planum::EventKind::final_transcript
+  return event.kind == planum::contract::EventKind::final_transcript
          && !event.transcript.text.empty ();
 }
 
 std::uint64_t
 PlanumBridge::DeriveTimestamp (
-    const planum::PerceptionEvent &event) noexcept
+    const planum::contract::PerceptionEvent &event) noexcept
 {
   return event.segment_ended_at_ms != 0 ? event.segment_ended_at_ms
                                         : event.emitted_at_ms;
 }
 
 std::string
-PlanumBridge::DeriveSourceId (const planum::PerceptionEvent &event)
+PlanumBridge::DeriveSourceId (const planum::contract::PerceptionEvent &event)
 {
   const std::string_view stream_component
       = SourceComponentOr (event.stream_id.value, kUnknownStream);

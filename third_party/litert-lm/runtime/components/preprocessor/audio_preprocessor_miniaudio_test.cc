@@ -47,6 +47,8 @@ namespace {
 
 constexpr absl::string_view kFrontendModelPath =
     "litert_lm/runtime/components/testdata/frontend.tflite";
+constexpr absl::string_view kSlV1FrontendModelPath =
+    "litert_lm/runtime/components/testdata/frontend_sl_v1.tflite";
 constexpr absl::string_view kDecodedAudioPath =
     "litert_lm/runtime/components/testdata/decoded_audio_samples.bin";
 constexpr absl::string_view kAudioPath =
@@ -102,9 +104,10 @@ absl::StatusOr<std::string> GetRawAudioData() {
 
 class FrontendModelWrapper {
  public:
-  static constexpr int kInputTensorLength = 523426;
+  static constexpr int kUsmInputTensorLength = 523426;
+  static constexpr int kSlV1InputTensorLength = 131200;
   static absl::StatusOr<std::unique_ptr<FrontendModelWrapper>> Create(
-      absl::string_view model_path) {
+      absl::string_view model_path, int input_tensor_length) {
     LITERT_ASSIGN_OR_RETURN(auto env, litert::Environment::Create({}));
 
     LITERT_ASSIGN_OR_RETURN(auto options, litert::Options::Create());
@@ -115,8 +118,9 @@ class FrontendModelWrapper {
         litert::CompiledModel::Create(
             env, absl::StrCat(::testing::SrcDir(), "/", model_path), options));
 
-    auto wrapper = std::unique_ptr<FrontendModelWrapper>(
-        new FrontendModelWrapper(std::move(env), std::move(compiled_model)));
+    auto wrapper =
+        std::unique_ptr<FrontendModelWrapper>(new FrontendModelWrapper(
+            input_tensor_length, std::move(env), std::move(compiled_model)));
     LITERT_RETURN_IF_ERROR(wrapper->InitializeBuffers());
     return wrapper;
   }
@@ -132,8 +136,10 @@ class FrontendModelWrapper {
     // vector is not guaranteed to be continuous for memory. So here we use a
     // bool* to create a continuous memory buffer. This prevent the UBSan check
     // error. See go/ubsan.
-    bool* mask_data_ptr = new bool[kInputTensorLength];
-    for (int i = 0; i < kInputTensorLength; ++i) {
+    input_buffers_[0].Clear();
+    input_buffers_[1].Clear();
+    bool* mask_data_ptr = new bool[input_tensor_length_];
+    for (int i = 0; i < input_tensor_length_; ++i) {
       if (i < audio_data.size()) {
         mask_data_ptr[i] = true;
       } else {
@@ -141,7 +147,7 @@ class FrontendModelWrapper {
       }
     }
     LITERT_RETURN_IF_ERROR(input_buffers_[0].Write(
-        absl::MakeConstSpan(mask_data_ptr, kInputTensorLength)));
+        absl::MakeConstSpan(mask_data_ptr, input_tensor_length_)));
     delete[] mask_data_ptr;
     LITERT_RETURN_IF_ERROR(input_buffers_[1].Write(absl::MakeSpan(audio_data)));
 
@@ -154,8 +160,11 @@ class FrontendModelWrapper {
   }
 
  private:
-  FrontendModelWrapper(Environment env, litert::CompiledModel compiled_model)
-      : env_(std::move(env)), compiled_model_(std::move(compiled_model)) {}
+  FrontendModelWrapper(int input_tensor_length, Environment env,
+                       CompiledModel compiled_model)
+      : input_tensor_length_(input_tensor_length),
+        env_(std::move(env)),
+        compiled_model_(std::move(compiled_model)) {}
 
   absl::Status InitializeBuffers() {
     LITERT_ASSIGN_OR_RETURN(auto signatures, compiled_model_.GetSignatures());
@@ -177,6 +186,7 @@ class FrontendModelWrapper {
     return absl::OkStatus();
   }
 
+  int input_tensor_length_;
   Environment env_;
   litert::CompiledModel compiled_model_;
   std::vector<litert::TensorBuffer> input_buffers_;
@@ -209,8 +219,10 @@ TEST(AudioPreprocessorMiniAudioTest, UsmPreprocessing) {
       pcm_frames));
 
   // Ground truth from TFLite weightless USM frontend model.
-  ASSERT_OK_AND_ASSIGN(auto frontend_model,
-                       FrontendModelWrapper::Create(kFrontendModelPath));
+  ASSERT_OK_AND_ASSIGN(
+      auto frontend_model,
+      FrontendModelWrapper::Create(
+          kFrontendModelPath, FrontendModelWrapper::kUsmInputTensorLength));
   std::vector<float> frontend_mel_spectrogram;
   std::vector<uint8_t> frontend_mask;
   ASSERT_OK(frontend_model->Run(pcm_frames, &frontend_mel_spectrogram,
@@ -242,6 +254,74 @@ TEST(AudioPreprocessorMiniAudioTest, UsmPreprocessing) {
   }
 }
 
+TEST(AudioPreprocessorMiniAudioTest, SlV1Preprocessing) {
+  AudioPreprocessorConfig config = AudioPreprocessorConfig::Create(
+      /* sample_rate_hz= */ 16000,
+      /* num_channels= */ 1,
+      /* frame_length= */ 320,
+      /* hop_length= */ 160,
+      /* fft_length = */ 512,
+      /* input_scale = */ 1.0,
+      /* pre_emphasis_factor = */ 0.0,
+      /* num_mel_bins= */ 128,
+      /* mel_low_hz= */ 0.0,
+      /* mel_high_hz= */ 8000.0,
+      /* mel_floor= */ 1e-3,
+      /* normalize_mel= */ false,
+      /* add_floor_to_mel_before_log= */ true,
+      /* semicausal_padding= */ true,
+      /* non_zero_hanning= */ false,
+      /* periodic_hanning= */ true,
+      /* fft_padding_type= */ AudioPreprocessorConfig::FftPaddingType::kCenter);
+  ASSERT_OK_AND_ASSIGN(auto raw_audio_data, GetRawAudioData());
+  std::vector<float> pcm_frames;
+  ASSERT_OK(AudioPreprocessorMiniAudio::DecodeAudio(
+      raw_audio_data, config.GetNumChannels(), config.GetSampleRateHz(),
+      pcm_frames));
+
+  // Ground truth from TFLite weightless USM frontend model.
+  ASSERT_OK_AND_ASSIGN(auto frontend_model,
+                       FrontendModelWrapper::Create(
+                           kSlV1FrontendModelPath,
+                           FrontendModelWrapper::kSlV1InputTensorLength));
+  std::vector<float> frontend_mel_spectrogram;
+  std::vector<uint8_t> frontend_mask;
+  std::vector<float> padded_pcm_frames = pcm_frames;
+  // Semicausal padding. The front end model expects the input to be padded
+  padded_pcm_frames.insert(padded_pcm_frames.begin(), config.GetHopLength(),
+                           0.0f);
+  ASSERT_OK(frontend_model->Run(padded_pcm_frames, &frontend_mel_spectrogram,
+                                &frontend_mask));
+  int true_count = 0;
+  for (int i = 0; i < frontend_mask.size(); ++i) {
+    if (frontend_mask[i] == 1) {
+      true_count++;
+    }
+  }
+  // We drop the last frame for frontend model because in audio preprocessor,
+  // the last uncomplete frame is buffered and will not be output.
+  true_count -= 1;
+  frontend_mel_spectrogram.resize(true_count * config.GetNumMelBins());
+
+  // Create MiniAudio preprocessor.
+  ASSERT_OK_AND_ASSIGN(auto preprocessor,
+                       AudioPreprocessorMiniAudio::Create(config));
+  ASSERT_OK_AND_ASSIGN(auto preprocessed_audio,
+                       preprocessor->Preprocess(InputAudio(raw_audio_data)));
+  ASSERT_OK_AND_ASSIGN(auto preprocessed_mel_spectrogram_tensor,
+                       preprocessed_audio.GetPreprocessedAudioTensor());
+  ASSERT_OK_AND_ASSIGN(
+      auto preprocessed_mel_spectrogram,
+      GetDataAsVector<float>(*preprocessed_mel_spectrogram_tensor));
+
+  ASSERT_EQ(preprocessed_mel_spectrogram.size(),
+            frontend_mel_spectrogram.size());
+  for (int i = 0; i < preprocessed_mel_spectrogram.size(); ++i) {
+    EXPECT_NEAR(preprocessed_mel_spectrogram[i], frontend_mel_spectrogram[i],
+                2e-3);
+  }
+}
+
 TEST(AudioPreprocessorMiniAudioTest, UsmPreprocessingWithPcmFrames) {
   AudioPreprocessorConfig config =
       AudioPreprocessorConfig::CreateDefaultUsmConfig();
@@ -252,8 +332,10 @@ TEST(AudioPreprocessorMiniAudioTest, UsmPreprocessingWithPcmFrames) {
       pcm_frames));
 
   // Ground truth from TFLite weightless USM frontend model.
-  ASSERT_OK_AND_ASSIGN(auto frontend_model,
-                       FrontendModelWrapper::Create(kFrontendModelPath));
+  ASSERT_OK_AND_ASSIGN(
+      auto frontend_model,
+      FrontendModelWrapper::Create(
+          kFrontendModelPath, FrontendModelWrapper::kUsmInputTensorLength));
   std::vector<float> frontend_mel_spectrogram;
   std::vector<uint8_t> frontend_mask;
   ASSERT_OK(frontend_model->Run(pcm_frames, &frontend_mel_spectrogram,
@@ -295,8 +377,10 @@ TEST(AudioPreprocessorMiniAudioTest, UsmPreprocessingTwice) {
       pcm_frames));
 
   // Ground truth from TFLite weightless USM frontend model.
-  ASSERT_OK_AND_ASSIGN(auto frontend_model,
-                       FrontendModelWrapper::Create(kFrontendModelPath));
+  ASSERT_OK_AND_ASSIGN(
+      auto frontend_model,
+      FrontendModelWrapper::Create(
+          kFrontendModelPath, FrontendModelWrapper::kUsmInputTensorLength));
   std::vector<float> frontend_mel_spectrogram;
   std::vector<uint8_t> frontend_mask;
   ASSERT_OK(frontend_model->Run(pcm_frames, &frontend_mel_spectrogram,
@@ -329,11 +413,7 @@ TEST(AudioPreprocessorMiniAudioTest, UsmPreprocessingTwice) {
 
   // Preprocess the same audio data again without resetting the preprocessor.
   auto result = preprocessor->Preprocess(InputAudio(raw_audio_data));
-  EXPECT_THAT(result, ::testing::status::StatusIs(absl::StatusCode::kInternal));
-  EXPECT_THAT(
-      result.status().message(),
-      ::testing::HasSubstr(
-          "Windowed signals size is not equal to expected number of frames"));
+  EXPECT_THAT(result, ::testing::status::StatusIs(absl::StatusCode::kOk));
 
   // Preprocess the same audio data again after resetting the preprocessor.
   preprocessor->Reset();
@@ -344,6 +424,79 @@ TEST(AudioPreprocessorMiniAudioTest, UsmPreprocessingTwice) {
   ASSERT_OK_AND_ASSIGN(
       preprocessed_mel_spectrogram,
       GetDataAsVector<float>(*preprocessed_mel_spectrogram_tensor));
+  ASSERT_EQ(preprocessed_mel_spectrogram.size(),
+            frontend_mel_spectrogram.size());
+  for (int i = 0; i < preprocessed_mel_spectrogram.size(); ++i) {
+    EXPECT_NEAR(preprocessed_mel_spectrogram[i], frontend_mel_spectrogram[i],
+                5e-4);
+  }
+}
+
+TEST(AudioPreprocessorMiniAudioTest, UsmPreprocessingCopy) {
+  AudioPreprocessorConfig config =
+      AudioPreprocessorConfig::CreateDefaultUsmConfig();
+  ASSERT_OK_AND_ASSIGN(auto raw_audio_data, GetRawAudioData());
+  std::vector<float> pcm_frames;
+  ASSERT_OK(AudioPreprocessorMiniAudio::DecodeAudio(
+      raw_audio_data, config.GetNumChannels(), config.GetSampleRateHz(),
+      pcm_frames));
+
+  // Ground truth from TFLite weightless USM frontend model.
+  ASSERT_OK_AND_ASSIGN(
+      auto frontend_model,
+      FrontendModelWrapper::Create(
+          kFrontendModelPath, FrontendModelWrapper::kUsmInputTensorLength));
+  std::vector<float> frontend_mel_spectrogram;
+  std::vector<uint8_t> frontend_mask;
+  ASSERT_OK(frontend_model->Run(pcm_frames, &frontend_mel_spectrogram,
+                                &frontend_mask));
+  int true_count = 0;
+  for (int i = 0; i < frontend_mask.size(); ++i) {
+    if (frontend_mask[i] == 1) {
+      true_count++;
+    }
+  }
+  frontend_mel_spectrogram.resize(true_count * config.GetNumMelBins());
+  std::vector<float> pcm_frames_front_half(
+      pcm_frames.begin(), pcm_frames.begin() + pcm_frames.size() / 2);
+  std::vector<float> pcm_frames_back_half(
+      pcm_frames.begin() + pcm_frames.size() / 2, pcm_frames.end());
+
+  // Create MiniAudio preprocessor.
+  ASSERT_OK_AND_ASSIGN(auto preprocessor,
+                       AudioPreprocessorMiniAudio::Create(config));
+  ASSERT_OK_AND_ASSIGN(
+      auto preprocessed_audio_front_half,
+      preprocessor->Preprocess(InputAudio(pcm_frames_front_half)));
+
+  // Copy the preprocessor and reset the original preprocessor. The copy
+  // should not be affected by the reset.
+  AudioPreprocessorMiniAudio preprocessor_copy = *preprocessor;
+  preprocessor->Reset();
+
+  // Preprocess the back half of the audio data with the new preprocessor.
+  ASSERT_OK_AND_ASSIGN(
+      auto preprocessed_audio_back_half,
+      preprocessor_copy.Preprocess(InputAudio(pcm_frames_back_half)));
+
+  // Get the preprocessed mel spectrogram from the front and back half and
+  // concatenate them.
+  ASSERT_OK_AND_ASSIGN(
+      auto tensor_front_half,
+      preprocessed_audio_front_half.GetPreprocessedAudioTensor());
+  ASSERT_OK_AND_ASSIGN(
+      auto tensor_back_half,
+      preprocessed_audio_back_half.GetPreprocessedAudioTensor());
+  ASSERT_OK_AND_ASSIGN(auto data_front_half,
+                       GetDataAsVector<float>(*tensor_front_half));
+  ASSERT_OK_AND_ASSIGN(auto data_back_half,
+                       GetDataAsVector<float>(*tensor_back_half));
+  std::vector<float> preprocessed_mel_spectrogram(data_front_half.begin(),
+                                                  data_front_half.end());
+  preprocessed_mel_spectrogram.insert(preprocessed_mel_spectrogram.end(),
+                                      data_back_half.begin(),
+                                      data_back_half.end());
+
   ASSERT_EQ(preprocessed_mel_spectrogram.size(),
             frontend_mel_spectrogram.size());
   for (int i = 0; i < preprocessed_mel_spectrogram.size(); ++i) {

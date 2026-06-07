@@ -1,5 +1,6 @@
-#include <cortext/encoder/imagebind.hpp>
 #include <cortext/operations/label_utils.hpp>
+
+#include "encoder/text_encoder_factory.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -31,24 +32,6 @@ TimestampUtc ()
   char buf[64];
   std::strftime (buf, sizeof (buf), "%Y-%m-%dT%H:%M:%SZ", &tm);
   return std::string (buf);
-}
-
-fs::path
-ResolveImageBindDir (const fs::path &models_dir)
-{
-  const fs::path direct = models_dir;
-  if (fs::exists (direct / "text_encoder.onnx")
-      || fs::exists (direct / "text_encoder_int8.onnx"))
-    {
-      return direct;
-    }
-  const fs::path nested = models_dir / "imagebind";
-  if (fs::exists (nested / "text_encoder.onnx")
-      || fs::exists (nested / "text_encoder_int8.onnx"))
-    {
-      return nested;
-    }
-  throw std::runtime_error ("ImageBind text encoder not found in models dir");
 }
 
 } // namespace
@@ -91,8 +74,9 @@ main (int argc, char **argv)
       return 1;
     }
 
-  const fs::path imagebind_dir = ResolveImageBindDir (models_dir);
-  cortext::ImageBindEncoder encoder (imagebind_dir.string ());
+  auto encoder_selection
+      = cortext::internal::CreatePreferredTextEncoder (models_dir.string ());
+  auto &encoder = *encoder_selection.encoder;
 
   std::ifstream in (labels_path);
   if (!in.is_open ())
@@ -162,6 +146,8 @@ main (int argc, char **argv)
   meta["embedding_dim"] = 256;
   meta["labels_file"] = labels_out.filename ().string ();
   meta["source"] = labels_path.string ();
+  meta["encoder_backend"] = encoder_selection.backend_name;
+  meta["encoder_model"] = encoder_selection.resolved_path.string ();
   meta["count"] = written;
 
   const fs::path meta_out = out_dir / "metadata.json";

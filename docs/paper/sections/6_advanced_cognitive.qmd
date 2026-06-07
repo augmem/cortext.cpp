@@ -1,6 +1,8 @@
 # Advanced Cognitive Processes {#sec-advanced}
 
-This section presents algorithms modeling higher-order cognitive phenomena: working memory maintenance, metacognitive monitoring, reconsolidation dynamics, and serial position effects.
+This section presents algorithms modeling higher-order cognitive phenomena:
+working memory maintenance, soft anchor formation, metacognitive monitoring,
+reconsolidation dynamics, and serial position effects.
 
 **Knob note:** Unless explicitly stated otherwise, F and S in this section refer to midpoint‑biased values (F̃, S̃) defined in Section 1.
 
@@ -114,6 +116,300 @@ if |similar_memories| > 0:
 ```
 
 **Implementation note (chat applications):** turn-structured chat sources (`chat/user`, `chat/assistant`) bypass same-source chunk merging and generic WM rejection so the active working-memory window remains a FIFO sequence of recent turns for prompt reconstruction. Prompt hydration must order active slots by insertion/start time rather than `last_access`; otherwise rehearsal or retrieval touches can scramble the conversational sequence even when the underlying memories are correct.
+
+## Three-Tier Graph Memory Surface {#sec-three-tier-graph-memory}
+
+Cortext now separates live memory state into three graph-compatible tiers. The tiers differ by latency, commitment, and pruning authority rather than by modality:
+
+1. **Working memory (WM):** the bounded active slot set used for immediate prompt reconstruction, overlap suppression, and recent-turn continuity. WM stores coherent memories and preserves their ordered evidence packets. It is the most volatile tier and is optimized for exact recent context rather than broad semantic search.
+2. **Short-term graph memory (STM):** a processor-local graph substrate over recent signal embeddings. STM is represented as one bounded per-source graph: recent signal items are the nodes, and clustered label matches are provisional edges. The label edges are produced from cached label embeddings by clustered retrieval: the current signal selects nearby label clusters, then takes the top labels from each selected cluster. STM graph edges are candidates, not durable facts.
+3. **Long-term graph memory (LTM):** the persisted graph of memories, associative cue nodes, label nodes, relations, facts, and consolidation products. LTM is not separate from the long-term graph: durable memory nodes live in the `memories` table, durable edges live in `associations`, and structured factual claims live in the fact tables. LTM is the only tier that stores durable `has_label`, `derived_from`, relation, and fact edges.
+
+The intended control flow is:
+
+```
+signal embedding
+  -> WM active-slot update
+  -> STM graph proposal (recent embeddings + clustered label candidates)
+  -> LTM retrieval boost from existing durable graph edges
+  -> explicit consolidation
+  -> Gemma/text-audio-image refinement
+  -> durable LTM graph edge insert/update/delete
+```
+
+This keeps the online loop fast and modality-agnostic while allowing the graph to form before consolidation. The STM graph narrows the candidate label space, but it does not decide truth. Consolidation remains the commitment step: it receives STM labels as `current_labels`, checks them against raw source evidence, prunes unsupported edges, and adds missing durable labels to the LTM graph. The current experimental gate treats STM as a bounded ordered substrate/read surface, not as a promoted retrieval consumer: STM retains useful delayed evidence at small bounded sizes, but scalar STM scores and direct STM attention have not passed held-out transfer and topic-shift controls.
+
+## Soft Anchor Formation {#sec-soft-anchor}
+
+Soft Anchor is an ingress-time uncertainty layer for subject, entity, object, and
+event continuity. It is not a hard referent resolver and it is not a
+retrieval-time reranker. At memory ingestion time, Cortext compares the current
+memory signal against already-established working-memory (WM), short-term memory
+(STM), and long-term memory (LTM) anchor state. The output is a ranked,
+uncertainty-preserving set of possible continuities. Retrieval may later consume
+these links as context, but retrieval candidates do not create anchors.
+
+The input signal model emits view vectors:
+
+```
+x_sem  ← semantic_key(m)
+x_ent  ← entity_key(m)
+x_full ← full_key(m)
+```
+
+For an ES-AIST-style signal model these are the corrected slices:
+
+```
+semantic_key = z[0:768]
+entity_key   = z[768:1536]
+full_key     = z[0:1536]
+```
+
+Each active soft anchor state stores separate centroids and support statistics:
+
+```
+SoftAnchorState {
+  anchor_id
+  status ∈ {provisional, active, durable, decayed, rejected}
+  semantic_centroid, entity_centroid, full_centroid
+  semantic_radius, entity_radius, full_radius
+  memory_tier_mask
+  source_histogram
+  first_step, last_step, last_boundary_id
+  anchor_strength
+  support_count, contradiction_count
+  recent_memory_ids
+}
+```
+
+Each memory may retain multiple possible links:
+
+```
+SoftAnchorLink {
+  memory_id
+  anchor_id
+  anchor_strength ∈ [0, 1]
+  anchor_label ∈ {none, tentative, ambiguous, durable, decayed, rejected}
+  evidence_kind
+  memory_tier ∈ {WM, STM, LTM}
+  score
+  margin
+  entropy
+  support_count
+  contradiction_count
+  created_step
+  updated_step
+}
+```
+
+### Candidate Set
+
+The candidate set is built only from prior soft anchor state. The current
+runtime iterates the bounded set of non-rejected `SoftAnchorState` objects
+loaded into processor state; the WM/STM/LTM split below describes the intended
+tiered candidate policy and the metadata labels assigned to retained links, not
+a separate production retrieval over three anchor indexes yet.
+
+```
+C_WM  = active WM anchors
+C_STM = top STM anchors by state similarity, capped
+C_LTM = durable/provisional LTM anchors only when entity/full evidence is non-weak
+C     = bounded_union(C_WM, C_STM, C_LTM)
+```
+
+The caps are knob-derived:
+
+```
+K_STM_pre = round(lerp(24, 8, F) × (0.75 + 0.50S))
+K_LTM_pre = round(lerp(16, 4, F) × (0.70 + 0.30S) × (0.80 + 0.20T))
+K_pre     = min(64, |C_WM| + K_STM_pre + K_LTM_pre)
+```
+
+No future labels, retrieved memories, target flags, candidate classes, or
+gold actions enter the runtime candidate set.
+
+### View Evidence
+
+For each candidate anchor `a`, compute:
+
+```
+s_sem(a)  = map01(cos(x_sem,  a.semantic_centroid))
+s_ent(a)  = map01(cos(x_ent,  a.entity_centroid))
+s_full(a) = map01(cos(x_full, a.full_centroid))
+```
+
+The view weights use the three knobs. Focus increases entity specificity,
+Sensitivity preserves weak semantic continuity, and Stability increases
+context/full-vector influence:
+
+```
+w_sem_raw  = (0.45 - 0.15F + 0.10S) × q_sem
+w_ent_raw  = (0.25 + 0.35F) × q_ent
+w_full_raw = (0.20 + 0.25T + 0.05F) × q_full
+[w_sem, w_ent, w_full] = normalize([w_sem_raw, w_ent_raw, w_full_raw])
+
+view(a) = w_sem s_sem(a) + w_ent s_ent(a) + w_full s_full(a)
+```
+
+When quality estimates are unavailable, use `q_sem = q_full = 1` and
+`q_ent = 0.5`. If the entity vector is missing or known-diffuse, set
+`q_ent = 0`.
+
+### Engine Evidence
+
+Soft Anchor is an engine policy over signal evidence plus ingress state. The
+real-anchor score combines view evidence with source continuity, tier-adjusted
+recency, support history, boundary pressure, and contradiction pressure.
+Generic or low-information suppression is applied in the null/new hypothesis
+competition and hard-retention gates rather than subtracted from every real
+anchor score:
+
+```
+R(a) =
+  w_view    view(a)
++ w_source  source_continuity(m, a)
++ w_recency recency_tier(m, a, T)
++ w_support support_prior(a, T)
+- w_boundary boundary_shift(m, a, F, T)
+- w_contra   contradiction_penalty(a, S)
+```
+
+The blend weights are normalized:
+
+```
+[w_view, w_source, w_recency, w_support, w_boundary, w_contra] =
+normalize([
+  0.55 + 0.20F,
+  0.20 + 0.20F + 0.10T,
+  0.20 + 0.20S + 0.10T,
+  0.15 + 0.45T,
+  0.25 + 0.35F + 0.15T,
+  0.20 + 0.30S + 0.20F
+])
+```
+
+Generic or low-information memories must not create durable continuity. The
+generic suppressor is modality-general: it uses null centroids, low entity mass,
+low information content, and diffuse candidate entropy. Text shortcuts such as
+"ok", "yeah", "bye", and filler are optional extra evidence, not the anchor
+mechanism.
+
+### Null and New Hypotheses
+
+Soft Anchor competes every real anchor against two special hypotheses:
+
+```
+H_none = no continuity; emit no retained link
+H_new  = start a new provisional anchor
+```
+
+Compute:
+
+```
+best_real = max_a R(a), or 0 when C is empty
+H_real    = normalized_entropy({R(a)})
+info(m)   = clamp((q_sem + q_ent + q_full) / 3, 0, 1) × (1 - generic(m))
+
+score_none = clamp(0.25 + 0.55 generic(m) + 0.20 H_real
+                   + 0.20(1 - best_real) + 0.15 top_contra, 0, 1)
+
+score_new  = clamp(0.15 + 0.45 info(m) + 0.25 boundary_score(m)
+                   + 0.20(1 - best_real) - 0.35 generic(m), 0, 1)
+```
+
+Then:
+
+```
+β_anchor(F) = lerp(4.0, 14.0, F)
+P = softmaxβ([R(a_1), ..., R(a_n), score_none, score_new])
+```
+
+If `H_none` wins, the memory receives no active continuity link. If `H_new`
+wins and the signal is informative, Cortext creates a provisional soft anchor.
+
+### Labels and Retention
+
+Soft Anchor does not collapse uncertainty to top-1. It retains up to:
+
+```
+K_keep(F,S,T) = clamp(round(lerp(8, 3, F) × lerp(1.10, 0.85, T) + 2S), 2, 10)
+```
+
+for real anchors satisfying posterior and score thresholds. The label is a
+policy state, not a truth claim:
+
+```
+none       H_none wins or no candidate passes retention
+tentative  one anchor has usable evidence but insufficient support
+ambiguous  multiple anchors survive with low margin or high entropy
+durable    repeated non-generic support or exceptional evidence passes
+decayed    prior link has weakened below active threshold
+rejected   contradiction, generic suppression, or correction invalidates link
+```
+
+Ambiguous links may be surfaced as possible continuity, not as a fact. Durable
+facts must not be formed from ambiguous links.
+
+### Durable Promotion and Decay
+
+Durable promotion is deliberately conservative:
+
+```
+support_required(F,T) = clamp(ceil(2 + 1.5F + 2.0T), 2, 6)
+```
+
+A support event counts only if it is non-generic, boundary-compatible,
+low-entropy, has sufficient margin, and is not a near duplicate of the previous
+support event. Current durable promotion requires repeated support plus
+low-entropy, high-margin evidence; one-shot exceptional durable promotion remains
+a possible future policy rather than the active runtime behavior.
+
+Link strength decays independently from the anchor:
+
+```
+strength_t = strength_0 × exp(-ln(2) × Δt / τ_link_tier(T))
+```
+
+with WM shortest, STM intermediate, and LTM longest. Higher Stability increases
+half-life and support window length; it must not by itself override boundary
+pressure or force cross-boundary durable binds.
+
+### Knob Semantics
+
+The expected monotonic behavior is:
+
+```
+Focus ↑:
+  fewer weak retained links
+  higher margin requirement
+  stronger entity/split pressure
+  lower tentative recall acceptable
+
+Sensitivity ↑:
+  more tentative links
+  higher target-in-top-k recall
+  more ambiguous context acceptable
+  durable precision should not materially drop
+
+Stability ↑:
+  slower decay
+  longer support accumulation windows
+  fewer label flips
+  no cross-boundary durable overreach
+```
+
+Current experimental evidence is in @sec-experimental. The Soft Anchor v1
+benchmark preserves useful top-k continuity while holding hard/durable false
+binds at zero on the repaired slice, but it is not yet finished human subject
+anchoring because wrong-active distinct-anchor preservation remains incomplete.
+The engine integration follows the same formation rule: `UpdateSoftAnchor` runs
+at ingress after memory storage and writes soft anchor state and links by
+default. Production retrieval does not rank from these links yet, and chat/LLM
+surfacing is limited to optional continuity hints in chat and benchmark prompt
+snapshots. The next open question is consumption: formed anchors may become
+useful uncertain context only after replay and manual-review experiments show
+that possible-continuity hints help more often than they harm, without converting
+tentative or ambiguous evidence into durable facts.
 
 ## Metacognitive Monitoring
 

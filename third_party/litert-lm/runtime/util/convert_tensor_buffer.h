@@ -31,6 +31,7 @@
 #include "litert/cc/litert_ranked_tensor_type.h"  // from @litert
 #include "litert/cc/litert_tensor_buffer.h"  // from @litert
 #include "litert/cc/litert_tensor_buffer_types.h"  // from @litert
+#include "tflite/types/half.h"  // from @litert
 
 namespace litert::lm {
 
@@ -42,6 +43,11 @@ struct ElementTypeFor {
 // Here is the list of supported element types effectively. Support only minimal
 // types for now to avoid compatibility issues, e.g. whether or not uint8 is
 // compatible with int8.
+template <>
+struct ElementTypeFor<bool> {
+  static constexpr ::litert::ElementType kType = ::litert::ElementType::Bool;
+};
+
 template <>
 struct ElementTypeFor<int8_t> {
   static constexpr ::litert::ElementType kType = ::litert::ElementType::Int8;
@@ -60,6 +66,11 @@ struct ElementTypeFor<int32_t> {
 template <>
 struct ElementTypeFor<float> {
   static constexpr ::litert::ElementType kType = ::litert::ElementType::Float32;
+};
+
+template <>
+struct ElementTypeFor<tflite::half> {
+  static constexpr ::litert::ElementType kType = ::litert::ElementType::Float16;
 };
 
 template <typename T>
@@ -121,8 +132,15 @@ template <typename T>
       ::litert::TensorBufferScopedLock::Create(
           *const_cast<::litert::TensorBuffer*>(&tensor_buffer),
           TensorBuffer::LockMode::kRead));
-  std::memcpy(copied_data.data(), lock_and_addr.second,
-              num_elements * sizeof(T));
+  // Note: std::vector of bool is specialized to require fewer bits per element
+  // and is not compatible with a direct memcpy.
+  if constexpr (std::is_same_v<T, bool>) {
+    auto* src = static_cast<const bool*>(lock_and_addr.second);
+    std::copy(src, src + num_elements, copied_data.begin());
+  } else {
+    std::memcpy(copied_data.data(), lock_and_addr.second,
+                num_elements * sizeof(T));
+  }
   return copied_data;
 }
 
@@ -337,7 +355,7 @@ template <typename T>
       int dst_offset =
           i * next_dims_size * target_dims_size + j * next_dims_size;
       int src_offset = i * next_dims_size * target_dims_size +
-                     (j + num_tokens_to_drop) * next_dims_size;
+                       (j + num_tokens_to_drop) * next_dims_size;
       std::memcpy(target_ptr + dst_offset, target_ptr + src_offset,
                   next_dims_size * sizeof(T));
     }

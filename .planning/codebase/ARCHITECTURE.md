@@ -51,9 +51,9 @@
 **Model Backend Layer:**
 - Purpose: Encoders and local inference adapters for summarization, extraction, audio, and deep consolidation.
 - Location: `include/cortext/encoder/*.hpp`, `include/cortext/extractor/*.hpp`, `include/cortext/summarizer/*.hpp`, `include/cortext/audio/*.hpp`, `src/encoder/*.cpp`, `src/extractor/*.cpp`, `src/summarizer/*.cpp`, `src/audio/*.cpp`, `src/deep_llm/*.cpp`
-- Contains: `Encoder`, `Extractor`, `Summarizer` interfaces plus ImageBind, EmbeddingGemma, Gemma, Phi-4, sherpa-onnx, and llama.cpp-backed implementations.
+- Contains: `Encoder`, `Extractor`, `Summarizer` interfaces plus EmbeddingGemma, Gemma, Phi-4, sherpa-onnx, and llama.cpp-backed implementations.
 - Depends on: model assets under `models/`, third-party runtimes configured in `CMakeLists.txt`.
-- Used by: the composition layer in `src/cortext.cpp` and targeted tests like `tests/imagebind_encoder.test.cpp`, `tests/gemma_extractor.test.cpp`, `tests/phi4_summarizer.test.cpp`.
+- Used by: the composition layer in `src/cortext.cpp` and targeted tests like `tests/gemma_extractor.test.cpp` and `tests/phi4_summarizer.test.cpp`.
 
 **Application Layer:**
 - Purpose: Optional binaries for manual use, experiments, telemetry smoke tests, and research sweeps.

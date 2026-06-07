@@ -20,6 +20,7 @@
 #include <ios>
 #include <iterator>
 #include <memory>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -58,28 +59,22 @@ absl::StatusOr<std::string> ReadFileToString(const std::string& filename) {
   return content;
 }
 
-TEST(LiteRTLMReadTest, IsLiteRTLMFileFileDoesNotExist) {
-  const auto input_filename =
-      std::filesystem::path(::testing::SrcDir()) /
-      "litert_lm/schema/testdata/does_not_exist.litertlm";
-  EXPECT_THAT(IsLiteRTLMFile(input_filename.string()),
-              testing::status::StatusIs(absl::StatusCode::kNotFound));
-}
-
 TEST(LiteRTLMReadTest, IsLiteRTLMFileValidFile) {
-  const auto input_filename =
-      std::filesystem::path(::testing::SrcDir()) /
-      "litert_lm/schema/testdata/test_tok_tfl_llm.litertlm";
-  EXPECT_THAT(IsLiteRTLMFile(input_filename.string()),
-              testing::status::IsOkAndHolds(true));
+  ASSERT_OK_AND_ASSIGN(std::string content,
+                       ReadFileToString("test_tok_tfl_llm.litertlm"));
+  EXPECT_TRUE(IsLiteRTLMFile(content));
+
+  std::istringstream stream(content);
+  EXPECT_TRUE(IsLiteRTLMFile(stream));
 }
 
 TEST(LiteRTLMReadTest, IsLiteRTLMFileInvalidFile) {
-  const auto input_filename =
-      std::filesystem::path(::testing::SrcDir()) /
-      "litert_lm/schema/testdata/attention.tflite";
-  EXPECT_THAT(IsLiteRTLMFile(input_filename.string()),
-              testing::status::IsOkAndHolds(false));
+  ASSERT_OK_AND_ASSIGN(std::string content,
+                       ReadFileToString("attention.tflite"));
+  EXPECT_FALSE(IsLiteRTLMFile(content));
+
+  std::istringstream stream(content);
+  EXPECT_FALSE(IsLiteRTLMFile(stream));
 }
 
 TEST(LiteRTLMReadTest, HeaderReadFile) {
@@ -225,6 +220,17 @@ TEST(LiteRTLMReadTest, TFLiteRead_HFTokenizer) {
       ReadAnyHfTokenizerJson(input_filename.string(), &actual_tokenizer_json);
   ASSERT_OK(result);
   EXPECT_EQ(actual_tokenizer_json, expected_tokenizer_json);
+}
+
+TEST(LiteRTLMReadTest, DecompressData_InvalidSize) {
+  uint64_t huge_size = 2ULL << 30;  // 2 GB
+  std::vector<uint8_t> output;
+  absl::Status status = DecompressData(
+      reinterpret_cast<const uint8_t*>(&huge_size), sizeof(uint64_t), &output);
+  ASSERT_FALSE(status.ok());
+  EXPECT_EQ(status.code(), absl::StatusCode::kInvalidArgument);
+  EXPECT_THAT(status.message(),
+              ::testing::HasSubstr("exceeds maximum allowed size"));
 }
 
 }  // namespace

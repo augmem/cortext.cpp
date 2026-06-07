@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <cctype>
 #include <condition_variable>
+#include <cstdlib>
+#include <cstring>
 #include <mutex>
 #include <regex>
 #include <sstream>
@@ -17,12 +19,12 @@
 #pragma clang diagnostic ignored "-Wc99-extensions"
 #pragma clang diagnostic ignored "-Wunused-parameter"
 #pragma clang diagnostic ignored "-Wsign-compare"
-#include "runtime/conversation/conversation.h"
-#include "runtime/conversation/io_types.h"
 #include "runtime/engine/engine.h"
+#include "runtime/engine/engine_factory.h"
 #include "runtime/engine/engine_settings.h"
 #include "runtime/engine/io_types.h"
 #include "runtime/executor/llm_executor_settings.h"
+#include "litert/c/litert_tensor_buffer.h"
 #pragma clang diagnostic pop
 #endif
 
@@ -193,7 +195,7 @@ TryCreateEngine (const std::string &model_path, litert::lm::Backend backend,
     }
 
   auto engine_result
-      = litert::lm::Engine::CreateEngine (*std::move (settings));
+      = litert::lm::EngineFactory::CreateDefault (*std::move (settings));
   if (!engine_result.ok ())
     {
       return false;
@@ -203,6 +205,54 @@ TryCreateEngine (const std::string &model_path, litert::lm::Backend backend,
   return true;
 }
 
+litert::TensorBuffer
+BuildAudioTensor (const GemmaAudioFeatures &features)
+{
+  if (features.num_frames <= 0 || features.mel_bins <= 0)
+    {
+      throw std::runtime_error ("GemmaSummarizer: Invalid audio feature shape");
+    }
+
+  const size_t element_count = features.mel_features.size ();
+  const size_t byte_count = element_count * sizeof (float);
+  void *host_buffer = nullptr;
+  if (posix_memalign (&host_buffer, LITERT_HOST_MEMORY_BUFFER_ALIGNMENT,
+                      byte_count)
+          != 0
+      || host_buffer == nullptr)
+    {
+      throw std::runtime_error (
+          "GemmaSummarizer: Audio buffer allocation failed");
+    }
+  std::memcpy (host_buffer, features.mel_features.data (), byte_count);
+
+  LiteRtLayout layout{};
+  layout.rank = 3;
+  layout.has_strides = false;
+  layout.dimensions[0] = 1;
+  layout.dimensions[1] = static_cast<int32_t> (features.num_frames);
+  layout.dimensions[2] = static_cast<int32_t> (features.mel_bins);
+
+  LiteRtRankedTensorType tensor_type{};
+  tensor_type.element_type = kLiteRtElementTypeFloat32;
+  tensor_type.layout = layout;
+
+  LiteRtTensorBuffer buffer = nullptr;
+  LiteRtStatus status = LiteRtCreateTensorBufferFromHostMemory (
+      &tensor_type, host_buffer, byte_count, std::free, &buffer);
+  if (status != kLiteRtStatusOk || buffer == nullptr)
+    {
+      std::free (host_buffer);
+      throw std::runtime_error (
+          "GemmaSummarizer: Audio tensor creation failed");
+    }
+
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+  return litert::TensorBuffer::WrapCObject (buffer, litert::OwnHandle::kYes);
+#pragma clang diagnostic pop
+}
+
 } // namespace
 
 struct GemmaSummarizer::Impl
@@ -210,43 +260,13 @@ struct GemmaSummarizer::Impl
   std::unique_ptr<litert::lm::Engine> engine;
   bool available = false;
 
-  static std::string
-  ExtractContentText (const nlohmann::json &response_message)
+  ~Impl ()
   {
-    if (!response_message.contains ("content"))
-      {
-        return {};
-      }
-    const auto &content = response_message["content"];
-    if (content.is_string ())
-      {
-        return content.get<std::string> ();
-      }
-    if (content.is_array ())
-      {
-        std::ostringstream out;
-        for (const auto &item : content)
-          {
-            if (item.is_string ())
-              {
-                out << item.get<std::string> ();
-              }
-            else if (item.is_object ())
-              {
-                if (item.contains ("text") && item["text"].is_string ())
-                  {
-                    out << item["text"].get<std::string> ();
-                  }
-                else if (item.contains ("content")
-                         && item["content"].is_string ())
-                  {
-                    out << item["content"].get<std::string> ();
-                  }
-              }
-          }
-        return out.str ();
-      }
-    return {};
+    // LiteRT-LM currently segfaults while tearing down Gemma engines on this
+    // stack. The summarizer is constructed once per Cortext instance, so
+    // releasing here avoids a shutdown crash with bounded process-lifetime
+    // memory retention.
+    (void)engine.release ();
   }
 
   explicit Impl (const std::string &model_path)
@@ -400,58 +420,36 @@ struct GemmaSummarizer::Impl
     session_config.SetSamplerBackend (litert::lm::Backend::CPU);
 #endif
 
-    auto config_result = litert::lm::ConversationConfig::CreateFromSessionConfig (
-        *engine, session_config);
-
-    if (!config_result.ok ())
+    auto session_result = engine->CreateSession (session_config);
+    if (!session_result.ok ())
       {
         throw std::runtime_error (
-            "GemmaSummarizer: Failed to create conversation config");
+            "GemmaSummarizer: Failed to create audio session");
       }
 
-    // Create conversation
-    auto conversation_result
-        = litert::lm::Conversation::Create (*engine, *config_result);
-    if (!conversation_result.ok ())
+    litert::TensorBuffer mel_tensor = BuildAudioTensor (features);
+    std::vector<litert::lm::InputData> inputs;
+    inputs.emplace_back (litert::lm::InputText (instruction
+                                                + "\n<start_of_audio>"));
+    inputs.emplace_back (litert::lm::InputAudio (std::move (mel_tensor)));
+    inputs.emplace_back (litert::lm::InputAudioEnd ());
+
+    auto prefill_status = (*session_result)->RunPrefill (inputs);
+    if (!prefill_status.ok ())
       {
         throw std::runtime_error (
-            "GemmaSummarizer: Failed to create conversation");
+            "GemmaSummarizer: Audio prefill failed");
       }
-    auto &conversation = *conversation_result;
 
-    // Package mel features as binary data for audio input
-    std::string mel_data (
-        reinterpret_cast<const char *> (features.mel_features.data ()),
-        features.mel_features.size () * sizeof (float));
-
-    // Build message with audio reference
-    litert::lm::JsonMessage message = {
-      { "role", "user" },
-      { "content",
-        nlohmann::ordered_json::array (
-            { { { "type", "audio" }, { "data", mel_data } },
-              { { "type", "text" }, { "text", instruction } } }) }
-    };
-
-    auto response = conversation->SendMessage (litert::lm::Message{ message });
-
+    auto decode_config = litert::lm::DecodeConfig::CreateDefault ();
+    auto response = (*session_result)->RunDecode (decode_config);
     if (!response.ok ())
       {
-        throw std::runtime_error ("GemmaSummarizer: Audio inference failed");
+        throw std::runtime_error ("GemmaSummarizer: Audio decode failed");
       }
 
-    // Extract text content from response
-    try
-      {
-        auto &response_message = std::get<litert::lm::JsonMessage> (*response);
-        return ExtractContentText (response_message);
-      }
-    catch (const std::exception &)
-      {
-        // Return empty string on parse error
-      }
-
-    return {};
+    const auto &texts = response->GetTexts ();
+    return texts.empty () ? std::string{} : texts.front ();
   }
 };
 

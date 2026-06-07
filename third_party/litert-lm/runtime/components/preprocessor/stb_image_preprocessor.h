@@ -15,6 +15,8 @@
 #ifndef THIRD_PARTY_ODML_LITERT_LM_RUNTIME_COMPONENTS_PREPROCESSOR_STB_IMAGE_PREPROCESSOR_H_
 #define THIRD_PARTY_ODML_LITERT_LM_RUNTIME_COMPONENTS_PREPROCESSOR_STB_IMAGE_PREPROCESSOR_H_
 
+#include <vector>
+
 #include "absl/status/statusor.h"  // from @com_google_absl
 #include "runtime/components/preprocessor/image_preprocessor.h"
 #include "runtime/engine/io_types.h"
@@ -26,9 +28,18 @@ namespace litert::lm {
 class StbImagePreprocessor : public ImagePreprocessor {
  public:
   // Preprocesses the raw image bytes into a resized image TensorBuffer.
+  //
+  // If PatchifyConfig is set, the image will be patchified, with the image
+  // resized to the largest possible size that fits the max_num_patches limit
+  // while maintaining the original aspect ratio.
   absl::StatusOr<InputImage> Preprocess(
       const InputImage& input_image,
       const ImagePreprocessParameter& parameter) override;
+
+ private:
+  // Patchify the image into a tensor buffer.
+  absl::StatusOr<InputImage> PatchifyImage(
+      std::vector<float> image_data, const ImagePreprocessParameter& parameter);
 };
 
 }  // namespace litert::lm

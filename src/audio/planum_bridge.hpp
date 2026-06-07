@@ -6,7 +6,7 @@
 #include <string>
 
 #include "cortext/cortext.hpp"
-#include "planum/perception_event.hpp"
+#include "planum/contract/perception_event.hpp"
 
 namespace cortext::audio
 {
@@ -57,16 +57,16 @@ public:
   explicit PlanumBridge (PlanumBridgeTarget &target) noexcept;
 
   [[nodiscard]] std::optional<PlanumBridgeResult>
-  Accept (const planum::PerceptionEvent &event) const;
+  Accept (const planum::contract::PerceptionEvent &event) const;
 
   [[nodiscard]] static bool
-  ShouldRouteToText (const planum::PerceptionEvent &event) noexcept;
+  ShouldRouteToText (const planum::contract::PerceptionEvent &event) noexcept;
 
   [[nodiscard]] static std::uint64_t
-  DeriveTimestamp (const planum::PerceptionEvent &event) noexcept;
+  DeriveTimestamp (const planum::contract::PerceptionEvent &event) noexcept;
 
   [[nodiscard]] static std::string
-  DeriveSourceId (const planum::PerceptionEvent &event);
+  DeriveSourceId (const planum::contract::PerceptionEvent &event);
 
 private:
   PlanumBridgeTarget *target_ = nullptr;

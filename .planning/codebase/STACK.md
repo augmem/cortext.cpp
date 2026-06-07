@@ -44,14 +44,14 @@
 **Build/Dev:**
 - Bazel/Bazelisk - required to build LiteRT-LM in `CMakeLists.txt` and `scripts/build_litert.sh`.
 - pkg-config - required to discover system SQLite on native builds in `CMakeLists.txt`.
-- Zlib - required for ONNX Runtime and ImageBind tokenizer gzip handling in `CMakeLists.txt` and `src/encoder/imagebind.cpp`.
+- Zlib - required for ONNX Runtime integration in `CMakeLists.txt` and `src/encoder/embeddinggemma.cpp`.
 - Emscripten - optional WASM toolchain in `cmake/EmscriptenToolchain.cmake`.
 
 ## Key Dependencies
 
 **Critical:**
 - `opentelemetry-cpp` v1.24.0 - tracing/metrics/logging API dependency fetched in `CMakeLists.txt` and used in `src/telemetry/telemetry.cpp`.
-- ONNX Runtime - local inference runtime for ImageBind and optional Gemma ORT paths in `CMakeLists.txt`, `src/encoder/imagebind.cpp`, and `src/encoder/embeddinggemma.cpp`.
+- ONNX Runtime - optional local inference runtime for Gemma ORT paths in `CMakeLists.txt` and `src/encoder/embeddinggemma.cpp`.
 - `onnxruntime-genai` - Phi-4 extractor/summarizer backend vendored via `third_party/onnxruntime-genai` and linked in `CMakeLists.txt`, `src/extractor/phi4_extractor.cpp`, and `include/cortext/summarizer/phi4_summarizer.hpp`.
 - LiteRT-LM - Gemma extractor/summarizer backend vendored via `third_party/litert-lm` and linked in `CMakeLists.txt`, `src/extractor/gemma_extractor.cpp`, and `src/summarizer/gemma_summarizer.cpp`.
 - `llama.cpp` system libraries (`llama`, `ggml`, `ggml-base`) - GGUF inference path for Liquid/LFM2 and optional EmbeddingGemma GGUF in `CMakeLists.txt`, `src/deep_llm/deep_llm_factory.cpp`, and `src/encoder/embeddinggemma.cpp`.
@@ -89,7 +89,6 @@
 ## Model and Runtime Assets
 
 **Bundled local model directories:**
-- ImageBind ONNX encoders in `models/imagebind/`
 - EmbeddingGemma ONNX export in `models/embeddinggemma-300m-onnx/`
 - EmbeddingGemma LiteRT export in `models/embeddinggemma-300m-litert/`
 - EmbeddingGemma GGUF in `models/llama_cpp/`
@@ -102,7 +101,6 @@
 
 **Model resolution rules implemented in code:**
 - Preferred text encoder resolution is implemented in `src/encoder/text_encoder_factory.hpp`.
-- ImageBind requires ONNX model files plus BPE merges; BPE fallback includes `third_party/imagebind_assets/bpe/bpe_simple_vocab_16e6.txt.gz` in `src/encoder/imagebind.cpp`.
 - Deep LLM backend selection and model fallback order are implemented in `src/deep_llm/deep_llm_factory.cpp`.
 
 ## Platform Requirements

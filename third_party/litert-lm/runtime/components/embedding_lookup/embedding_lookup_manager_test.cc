@@ -33,14 +33,12 @@
 #include "litert/cc/litert_environment.h"  // from @litert
 #include "litert/cc/litert_expected.h"  // from @litert
 #include "litert/cc/litert_layout.h"  // from @litert
-#include "litert/cc/litert_macros.h"  // from @litert
 #include "litert/cc/litert_model.h"  // from @litert
 #include "litert/cc/litert_ranked_tensor_type.h"  // from @litert
 #include "litert/cc/litert_tensor_buffer.h"  // from @litert
 #include "litert/cc/litert_tensor_buffer_types.h"  // from @litert
 #include "litert/test/matchers.h"  // from @litert
 #include "runtime/executor/llm_executor_io_types.h"
-#include "runtime/util/status_macros.h"  //NOLINT
 
 namespace litert::lm {
 
@@ -79,7 +77,8 @@ class EmbeddingLookupManagerTest : public ::testing::Test {
         {-3, &end_of_multi_modal_model_});
 
     auto status = EmbeddingLookupManager::Create(
-        &text_embedding_model_, end_of_multi_modal_embedding_models);
+        *env_, &text_embedding_model_, end_of_multi_modal_embedding_models,
+        /*fully_supports_multi_modal=*/true, std::nullopt);
     ASSERT_OK(status);
     embedding_lookup_manager_ = std::move(status.value());
   }
@@ -181,7 +180,6 @@ class EmbeddingLookupManagerTest : public ::testing::Test {
   }
 
   Expected<TensorBuffer> GetTensorBuffer(Dimensions& dimensions) {
-    LITERT_ASSIGN_OR_RETURN(auto env, ::litert::Environment::Create({}));
     size_t buffer_size = sizeof(float);
     for (auto dim : dimensions) {
       buffer_size *= dim;
@@ -190,12 +188,13 @@ class EmbeddingLookupManagerTest : public ::testing::Test {
     RankedTensorType ranked_tensor_type(ElementType::Float32,
                                         std::move(layout));
 
-    return TensorBuffer::CreateManaged(env,
+    return TensorBuffer::CreateManaged(*env_,
                                        ::litert::TensorBufferType::kHostMemory,
                                        ranked_tensor_type, buffer_size);
   }
 
  protected:
+  Expected<Environment> env_ = Environment::Create({});
   std::unique_ptr<EmbeddingLookupManager> embedding_lookup_manager_;
   Model text_embedding_model_;
   Model end_of_multi_modal_model_;
@@ -1101,7 +1100,8 @@ TEST_F(EmbeddingLookupManagerTest,
 TEST_F(EmbeddingLookupManagerTest,
        LookupPrefillTextMultipleTokensWithPartialMultiModalSupport) {
   auto status = EmbeddingLookupManager::Create(
-      &text_embedding_model_, /*fully_supports_multi_modal=*/false);
+      *env_, &text_embedding_model_, /*fully_supports_multi_modal=*/false,
+      std::nullopt);
   ASSERT_OK(status);
   embedding_lookup_manager_ = std::move(status.value());
   ASSERT_NE(embedding_lookup_manager_, nullptr);
@@ -1183,7 +1183,8 @@ TEST_F(EmbeddingLookupManagerTest,
 TEST_F(EmbeddingLookupManagerTest,
        LookupPrefillMultimodalMultipleTokensWithPartialMultiModalSupport) {
   auto status = EmbeddingLookupManager::Create(
-      &text_embedding_model_, /*fully_supports_multi_modal=*/false);
+      *env_, &text_embedding_model_, /*fully_supports_multi_modal=*/false,
+      std::nullopt);
   ASSERT_OK(status);
   embedding_lookup_manager_ = std::move(status.value());
   ASSERT_NE(embedding_lookup_manager_, nullptr);
@@ -1249,7 +1250,8 @@ TEST_F(EmbeddingLookupManagerTest,
 TEST_F(EmbeddingLookupManagerTest,
        LookupPrefillTextMultipleTokensWithPartialMultiModalSupportWithOffset) {
   auto status = EmbeddingLookupManager::Create(
-      &text_embedding_model_, /*fully_supports_multi_modal=*/false);
+      *env_, &text_embedding_model_, /*fully_supports_multi_modal=*/false,
+      std::nullopt);
   ASSERT_OK(status);
   embedding_lookup_manager_ = std::move(status.value());
   ASSERT_NE(embedding_lookup_manager_, nullptr);
@@ -1354,7 +1356,8 @@ TEST_F(EmbeddingLookupManagerTest,
 TEST_F(EmbeddingLookupManagerTest,
        LookupPrefillTokenVectorWithPartialMultiModalSupport) {
   auto status = EmbeddingLookupManager::Create(
-      &text_embedding_model_, /*fully_supports_multi_modal=*/false);
+      *env_, &text_embedding_model_, /*fully_supports_multi_modal=*/false,
+      std::nullopt);
   ASSERT_OK(status);
   embedding_lookup_manager_ = std::move(status.value());
   ASSERT_NE(embedding_lookup_manager_, nullptr);
@@ -1394,7 +1397,7 @@ TEST_F(EmbeddingLookupManagerTest,
 
 TEST_F(EmbeddingLookupManagerTest, LookupPrefillTokenSpecifySignatureKey) {
   auto status = EmbeddingLookupManager::Create(
-      &text_embedding_model_, /*fully_supports_multi_modal=*/false,
+      *env_, &text_embedding_model_, /*fully_supports_multi_modal=*/false,
       "serving_default");
   ASSERT_OK(status);
   embedding_lookup_manager_ = std::move(status.value());
@@ -1436,7 +1439,8 @@ TEST_F(EmbeddingLookupManagerTest, LookupPrefillTokenSpecifySignatureKey) {
 TEST_F(EmbeddingLookupManagerTest,
        LookupPrefillPartialMultiModalSupportWithEmbeddings) {
   auto status = EmbeddingLookupManager::Create(
-      &text_embedding_model_, /*fully_supports_multi_modal=*/false);
+      *env_, &text_embedding_model_, /*fully_supports_multi_modal=*/false,
+      std::nullopt);
   ASSERT_OK(status);
   embedding_lookup_manager_ = std::move(status.value());
   ASSERT_NE(embedding_lookup_manager_, nullptr);
@@ -1455,8 +1459,8 @@ TEST_F(EmbeddingLookupManagerTest,
       end_of_multi_modal_embedding_models;
   end_of_multi_modal_embedding_models.insert({-3, &end_of_multi_modal_model_});
   auto status = EmbeddingLookupManager::Create(
-      &text_embedding_model_, end_of_multi_modal_embedding_models,
-      /*fully_supports_multi_modal=*/false);
+      *env_, &text_embedding_model_, end_of_multi_modal_embedding_models,
+      /*fully_supports_multi_modal=*/false, std::nullopt);
   ASSERT_THAT(status,
               testing::status::StatusIs(
                   absl::StatusCode::kInvalidArgument,
