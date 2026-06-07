@@ -74,7 +74,7 @@ rate_consolidate = (1 / max(consolidation_interval, 1)) ×
                     (0.3 + 0.7T) × (1 − 0.5S)
 ```
 
-When `Consolidate()` is invoked and no candidates fall below the periphery cutoff, the forced path selects the lowest-scoring `w_ret(T)` memories; if clustering still yields no groups, a fallback mini-cluster is formed around the lowest-score item using its top cosine neighbors. This keeps replay/summarization active while remaining fully knob-derived.
+When `Consolidate()` is invoked and fewer than `min_cluster_size(F)` candidates fall below the periphery cutoff, the forced path broadens to the lowest-scoring `max(w_ret(T), min_cluster_size(F))` eligible source memories. Deep mode keeps the source-blob eligibility filter so summarization always has raw evidence; shallow mode can use embedding-only memories. If clustering still yields no groups, a fallback mini-cluster is formed around the lowest-score item using its top cosine neighbors. This keeps replay/summarization active while remaining fully knob-derived.
 
 ### Activity-Aware Scheduling {#sec-activity}
 
@@ -135,10 +135,9 @@ max_labels_per_cluster = round(lerp(2, 6, S̃) × lerp(1.0, 0.7, F̃))
 label_attach_threshold = clamp(lerp(0.30, 0.60, F̃) × lerp(1.0, 1.1, T), 0.15, 0.95)
 ```
 
-For each cluster centroid, we compute cosine similarity to existing label embeddings,
-retain candidates above the threshold, and attach the top‑K labels by similarity.
+For each cluster centroid, we compute cosine similarity to the attached static label-bank vectors and to any durable dynamic labels already produced by consolidation, retain candidates above the threshold, and attach the top‑K labels by similarity.
 
-To avoid a cold start, we optionally seed a **label bank** at initialization: a static list of high‑frequency labels (objects, sounds, relations, names) **pre‑embedded** with the configured text encoder and stored as **LABEL** memories. Seeded labels receive a knob‑derived baseline salience:
+To avoid a cold start, Cortext ships a **label bank** as a static list of high-frequency labels (objects, sounds, relations, names) pre-embedded with the configured text encoder. The static bank is not copied into each user's graph database and is not stored as user-owned `LABEL` memories. Instead, production `LoadLabelBank` attaches `data/label_bank/label_bank.sqlite` read-only and queries its sqlite-vec table directly. Candidate static labels receive a knob-derived baseline salience:
 
 ```
 salience_seed = clamp(lerp(0.35, 0.65, 0.5(F̃+S̃)) × lerp(1.0, 0.9, T), 0, 1)
@@ -146,11 +145,9 @@ salience_seed = clamp(lerp(0.35, 0.65, 0.5(F̃+S̃)) × lerp(1.0, 0.9, T), 0, 1)
 
 This provides shallow consolidation with immediate label candidates without invoking any generative model.
 
-Label bank embeddings are generated offline (dataset → embeddings) and committed
+Label bank embeddings are generated offline (dataset -> embeddings) and committed
 as a compact SQLite vector seed at `data/label_bank/label_bank.sqlite`.
-Production `LoadLabelBank` attaches that database read-only and queries its
-`vec0` table directly, so the static bank is not copied into the user's graph
-database and is not fully hydrated into process memory. The JSONL form
+The JSONL form
 (`data/label_bank/labels.jsonl` plus `metadata.json`) remains the rebuild input
 and does not require runtime re‑encoding. We build the label list from
 **Hugging Face datasets** (FSD50K for sounds, ConceptNet for common terms, and
@@ -390,9 +387,10 @@ kNN_size(F) = round(lerp(96, 8, F))
 results_vec ← topK(vector_search(q, k=kNN_size(F)))
 seed_vec ← [r.id for r in results_vec]
 summary_k(F̃,S̃,T) = round(lerp(2, 6, S̃) × lerp(1.0, 0.75, F̃) × lerp(1.0, 0.85, T))
-summary_seeds ← topK(summary_cache, k=summary_k)  # in‑memory label/association cache
+static_label_seeds ← topK(attached_label_bank_vec, q, k=summary_k)
+dynamic_label_seeds ← topK(durable_label_and_association_state, q, k=summary_k)
 seed_idx ← index_store.lookup(sparse_key(q))  # exact-key in current runtime
-seed_nodes ← union(seed_vec, summary_seeds, seed_idx)
+seed_nodes ← union(seed_vec, static_label_seeds, dynamic_label_seeds, seed_idx)
 
 if |seed_nodes| == 0 OR graph is empty:
     return results_vec  # deterministic fallback, skip expansion
@@ -444,7 +442,7 @@ return selected
 
 Graph expansion uses recursive traversal with depth limits to find related context that pure vector search might miss. Using the memory centroid maintains consistency between vector search and graph expansion results.
 
-`summary_cache` is an in‑memory list of LABEL/ASSOCIATION embeddings seeded from the label bank and updated on consolidation. This avoids a second sqlite‑vec pass while preserving embedding‑only retrieval.
+Static label seeds come from the attached read-only SQLite label bank through sqlite-vec search. Dynamic label, association, fact, and summary seeds come from the ordinary durable memory graph produced by consolidation. The runtime no longer copies the static label bank into user memory tables or hydrates the entire bank into an in-memory `summary_cache`; the retrieval path remains embedding-only while keeping the static bank as an attached searchable object.
 
 For affective gain in retrieval, we use a lighter bias \(S_{affect} = \mathrm{BiasMid}(S, -0.06)\) to preserve mid‑range affect modulation.
 

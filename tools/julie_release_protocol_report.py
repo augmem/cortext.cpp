@@ -13,11 +13,14 @@ import hashlib
 import json
 import pathlib
 import random
+import shutil
 import shlex
+import sqlite3
 import subprocess
 import sys
 from datetime import datetime, timezone
 from typing import Any
+from urllib.parse import urlparse
 
 
 REQUIRED_SYSTEMS = [
@@ -27,13 +30,16 @@ REQUIRED_SYSTEMS = [
 ]
 REQUIRED_FIELDS = ["relevance", "sufficiency", "noise"]
 DEFAULT_KNOBS = {"focus": 0.5, "sensitivity": 0.5, "stability": 0.5}
-MIN_RELEASE_PROBES = 10
+MIN_RELEASE_PROBES = 30
 MIN_JUDGE_REPETITIONS = 3
-MIN_HUMAN_PROBES = 10
-MIN_HUMAN_SHARED_PROBES = 10
+MIN_HUMAN_PROBES = 30
+MIN_HUMAN_SHARED_PROBES = 30
 MIN_HUMAN_KAPPA = 0.4
 ABLATION_BOOTSTRAP_SAMPLES = 2000
 MIN_TOKEN_SAVINGS_CI95_LOWER = 0.5
+BENCHMARK_ENV_SNAPSHOT_NAME = "benchmark_environment_snapshot.json"
+MIN_JUDGE_MAJORITY_EVENT_RATE = 0.9
+MIN_JUDGE_MEAN_MAJORITY_FRACTION = 2.0 / 3.0
 QUALITY_COMPOSITE_FIELDS = {
     "relevance": 1.0,
     "sufficiency": 1.0,
@@ -102,6 +108,10 @@ def file_sha256(path: pathlib.Path) -> str:
     return h.hexdigest()
 
 
+def sha256_text(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
 def git_value(args: list[str], default: str = "") -> str:
     try:
         return subprocess.check_output(
@@ -113,13 +123,116 @@ def git_value(args: list[str], default: str = "") -> str:
         return default
 
 
+def git_output(args: list[str]) -> str:
+    try:
+        return subprocess.check_output(
+            ["git", *args],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception:
+        return ""
+
+
+def git_hash_output(args: list[str]) -> dict[str, Any]:
+    text = git_output(args)
+    return {
+        "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+        "bytes": len(text.encode("utf-8")),
+        "line_count": len(text.splitlines()),
+    }
+
+
 def git_info() -> dict[str, Any]:
-    status = git_value(["status", "--porcelain"], "")
+    status = git_output(["status", "--porcelain=v1"])
+    status_entries = sorted(
+        line[3:] if len(line) > 3 else line for line in status.splitlines()
+    )
+    untracked = sorted(
+        line for line in git_output(["ls-files", "--others", "--exclude-standard"]).splitlines()
+        if line
+    )
+    staged = git_hash_output(["diff", "--cached", "--binary", "--no-ext-diff"])
+    unstaged = git_hash_output(["diff", "--binary", "--no-ext-diff"])
+    submodule = git_hash_output(["diff", "--submodule=short", "--no-ext-diff"])
+    fingerprint_payload = {
+        "commit": git_value(["rev-parse", "HEAD"], "unknown"),
+        "status_sha256": hashlib.sha256(status.encode("utf-8")).hexdigest(),
+        "status_entries": status_entries,
+        "staged_diff_sha256": staged["sha256"],
+        "unstaged_diff_sha256": unstaged["sha256"],
+        "submodule_diff_sha256": submodule["sha256"],
+        "untracked_paths_sha256": hashlib.sha256(
+            "\n".join(untracked).encode("utf-8")
+        ).hexdigest(),
+    }
     return {
         "commit": git_value(["rev-parse", "HEAD"], "unknown"),
         "dirty": bool(status),
         "status_sha256": hashlib.sha256(status.encode("utf-8")).hexdigest(),
+        "status_entry_count": len(status_entries),
+        "status_paths": status_entries,
+        "staged_diff_sha256": staged["sha256"],
+        "staged_diff_bytes": staged["bytes"],
+        "unstaged_diff_sha256": unstaged["sha256"],
+        "unstaged_diff_bytes": unstaged["bytes"],
+        "submodule_diff_sha256": submodule["sha256"],
+        "submodule_diff_bytes": submodule["bytes"],
+        "untracked_path_count": len(untracked),
+        "untracked_paths": untracked,
+        "untracked_paths_sha256": fingerprint_payload["untracked_paths_sha256"],
+        "worktree_manifest_sha256": hashlib.sha256(
+            json.dumps(fingerprint_payload, sort_keys=True).encode("utf-8")
+        ).hexdigest(),
+        "dirty_reproducibility_policy": (
+            "dirty releases are allowed only when status paths plus staged, "
+            "unstaged, submodule, and untracked-path hashes are recorded"
+        ),
     }
+
+
+def git_provenance_checks(info: dict[str, Any]) -> list[dict[str, Any]]:
+    commit = str(info.get("commit", ""))
+    return [
+        check(
+            "git_commit_recorded",
+            len(commit) == 40 and all(ch in "0123456789abcdef" for ch in commit),
+            f"commit={commit!r}",
+        ),
+        check(
+            "git_dirty_flag_recorded",
+            isinstance(info.get("dirty"), bool)
+            and bool(info.get("status_sha256")),
+            (
+                f"dirty={info.get('dirty')!r} "
+                f"status_sha256={info.get('status_sha256')!r}"
+            ),
+        ),
+        check(
+            "git_dirty_worktree_reproducibility_recorded",
+            (
+                info.get("dirty") is False
+                or (
+                    bool(info.get("worktree_manifest_sha256"))
+                    and bool(info.get("status_sha256"))
+                    and isinstance(info.get("status_paths"), list)
+                    and info.get("staged_diff_sha256")
+                    and info.get("unstaged_diff_sha256")
+                    and info.get("submodule_diff_sha256")
+                    and info.get("untracked_paths_sha256")
+                )
+            ),
+            (
+                f"dirty={info.get('dirty')!r} "
+                f"status_entry_count={info.get('status_entry_count')} "
+                f"staged_diff_bytes={info.get('staged_diff_bytes')} "
+                f"unstaged_diff_bytes={info.get('unstaged_diff_bytes')} "
+                f"submodule_diff_bytes={info.get('submodule_diff_bytes')} "
+                f"untracked_path_count={info.get('untracked_path_count')} "
+                f"worktree_manifest_sha256={info.get('worktree_manifest_sha256')!r}"
+            ),
+        ),
+    ]
 
 
 def check(name: str, passed: bool, detail: str = "", severity: str = "required") -> dict[str, Any]:
@@ -154,6 +267,28 @@ def int_or_default(value: Any, default: int) -> int:
         return int(value)
     except Exception:
         return default
+
+
+def float_or_default(value: Any, default: float) -> float:
+    try:
+        if value is None:
+            return default
+        return float(value)
+    except Exception:
+        return default
+
+
+def is_loopback_url(value: Any) -> bool:
+    try:
+        parsed = urlparse(str(value))
+    except Exception:
+        return False
+    return parsed.scheme in {"http", "https"} and parsed.hostname in {
+        "127.0.0.1",
+        "localhost",
+        "0.0.0.0",
+        "::1",
+    }
 
 
 def percentile(values: list[float], pct: float) -> float | None:
@@ -403,6 +538,7 @@ def ci_metric_is_present(value: Any) -> bool:
     ci95 = value.get("ci95")
     return (
         isinstance(value.get("n"), int)
+        and value.get("n") >= MIN_RELEASE_PROBES
         and isinstance(value.get("mean"), (int, float))
         and isinstance(ci95, list)
         and len(ci95) == 2
@@ -428,6 +564,125 @@ def missing_required_ci_metrics(judge: dict[str, Any]) -> list[str]:
     if not ci_metric_is_present(token_ci):
         missing.append("tokens.cortext_savings_vs_traditional_chat_rag")
     return missing
+
+
+def packet_randomization_summary(judge: dict[str, Any]) -> dict[str, Any]:
+    systems = list(judge.get("protocol", {}).get("systems", REQUIRED_SYSTEMS))
+    mappings: list[dict[str, str]] = []
+    labels_by_system: dict[str, set[str]] = {system: set() for system in systems}
+    rows_missing_mapping = 0
+    for row in judge.get("judgments", []):
+        if not isinstance(row, dict):
+            continue
+        packet_blinding = row.get("packet_blinding", {})
+        if not isinstance(packet_blinding, dict):
+            rows_missing_mapping += 1
+            continue
+        real_to_label = packet_blinding.get("real_to_label", {})
+        if not isinstance(real_to_label, dict):
+            rows_missing_mapping += 1
+            continue
+        mapping: dict[str, str] = {}
+        for system in systems:
+            label = real_to_label.get(system)
+            if not isinstance(label, str) or not label:
+                continue
+            mapping[system] = label
+            labels_by_system.setdefault(system, set()).add(label)
+        if len(mapping) != len(systems):
+            rows_missing_mapping += 1
+            continue
+        mappings.append(mapping)
+
+    unique_mappings = {
+        tuple((system, mapping.get(system, "")) for system in systems)
+        for mapping in mappings
+    }
+    return {
+        "judgment_rows": len(judge.get("judgments", [])),
+        "mapped_rows": len(mappings),
+        "rows_missing_mapping": rows_missing_mapping,
+        "unique_mapping_count": len(unique_mappings),
+        "labels_seen_by_system": {
+            system: sorted(labels) for system, labels in labels_by_system.items()
+        },
+        "min_labels_per_system": (
+            min((len(labels) for labels in labels_by_system.values()), default=0)
+        ),
+    }
+
+
+def judge_repetition_consistency_summary(judge: dict[str, Any]) -> dict[str, Any]:
+    protocol = judge.get("protocol", {})
+    expected_repetitions = int(
+        judge.get("judge_repetitions") or protocol.get("judge_repetitions") or 0
+    )
+    by_event: dict[int, list[str]] = {}
+    for row in judge.get("judgments", []):
+        if not isinstance(row, dict):
+            continue
+        try:
+            event_index = int(row["event_index"])
+        except Exception:
+            continue
+        winner = str(row.get("winner", "tie_or_unclear"))
+        by_event.setdefault(event_index, []).append(winner)
+
+    majority_fractions: list[float] = []
+    majority_counts: list[int] = []
+    unanimous_event_count = 0
+    split_disagreement_event_count = 0
+    events_with_expected_repetitions = 0
+    majority_winners: dict[str, int] = {}
+    per_event: list[dict[str, Any]] = []
+    for event_index in sorted(by_event):
+        winners = by_event[event_index]
+        counts: dict[str, int] = {}
+        for winner in winners:
+            counts[winner] = counts.get(winner, 0) + 1
+        majority_winner, majority_count = max(
+            sorted(counts.items()), key=lambda item: item[1]
+        )
+        majority_fraction = majority_count / float(len(winners)) if winners else 0.0
+        majority_counts.append(majority_count)
+        majority_fractions.append(majority_fraction)
+        majority_winners[majority_winner] = majority_winners.get(majority_winner, 0) + 1
+        if majority_count == len(winners):
+            unanimous_event_count += 1
+        if expected_repetitions > 0 and len(winners) == expected_repetitions:
+            events_with_expected_repetitions += 1
+        if expected_repetitions > 0 and majority_count < (expected_repetitions // 2 + 1):
+            split_disagreement_event_count += 1
+        per_event.append(
+            {
+                "event_index": event_index,
+                "repetitions": len(winners),
+                "winner_counts": counts,
+                "majority_winner": majority_winner,
+                "majority_count": majority_count,
+                "majority_fraction": majority_fraction,
+            }
+        )
+
+    return {
+        "expected_repetitions": expected_repetitions,
+        "probe_count": int(judge.get("probe_count", 0) or 0),
+        "events_with_rows": len(by_event),
+        "events_with_expected_repetitions": events_with_expected_repetitions,
+        "majority_event_count": len(by_event) - split_disagreement_event_count,
+        "majority_event_rate": (
+            (len(by_event) - split_disagreement_event_count) / float(len(by_event))
+            if by_event
+            else 0.0
+        ),
+        "min_majority_count": min(majority_counts, default=0),
+        "mean_majority_fraction": mean(majority_fractions),
+        "min_majority_fraction": min(majority_fractions, default=0.0),
+        "unanimous_event_count": unanimous_event_count,
+        "split_disagreement_event_count": split_disagreement_event_count,
+        "majority_winners": majority_winners,
+        "per_event": per_event,
+    }
 
 
 def split_command(command: str) -> list[str]:
@@ -484,11 +739,16 @@ def command_protocol_checks(
             "benchmark_command_freezes_slice",
             command_flag_value(bench, "--input-dir") is not None
             and command_int_value(bench, "--max-messages") is not None
-            and command_int_value(bench, "--media-limit") is not None,
+            and command_int_value(bench, "--media-limit") is not None
+            and (
+                command_int_value(bench, "--skip-messages") is None
+                or command_int_value(bench, "--skip-messages") == 0
+            ),
             (
                 f"input_dir={command_flag_value(bench, '--input-dir')} "
                 f"max_messages={command_flag_value(bench, '--max-messages')} "
-                f"media_limit={command_flag_value(bench, '--media-limit')}"
+                f"media_limit={command_flag_value(bench, '--media-limit')} "
+                f"skip_messages={command_flag_value(bench, '--skip-messages')}"
             ),
         ),
         check(
@@ -553,6 +813,222 @@ def command_protocol_checks(
     ]
 
 
+def paths_equivalent(left: Any, right: Any) -> bool:
+    left_text = str(left or "")
+    right_text = str(right or "")
+    if not left_text or not right_text:
+        return False
+    try:
+        return pathlib.Path(left_text).resolve() == pathlib.Path(right_text).resolve()
+    except OSError:
+        return left_text == right_text
+
+
+def command_summary_consistency_checks(
+    benchmark_command: str,
+    summary: dict[str, Any],
+    summary_path: pathlib.Path,
+) -> list[dict[str, Any]]:
+    bench = split_command(benchmark_command)
+    knobs = summary.get("knobs", {})
+    if not isinstance(knobs, dict):
+        knobs = {}
+    return [
+        check(
+            "benchmark_command_matches_summary_input_dir",
+            paths_equivalent(command_flag_value(bench, "--input-dir"), summary.get("input_dir")),
+            (
+                f"command_input_dir={command_flag_value(bench, '--input-dir')} "
+                f"summary_input_dir={summary.get('input_dir')}"
+            ),
+        ),
+        check(
+            "benchmark_command_matches_summary_output_paths",
+            paths_equivalent(command_flag_value(bench, "--db"), summary.get("db_path"))
+            and paths_equivalent(command_flag_value(bench, "--out"), summary_path),
+            (
+                f"command_db={command_flag_value(bench, '--db')} "
+                f"summary_db={summary.get('db_path')} "
+                f"command_out={command_flag_value(bench, '--out')} "
+                f"summary_path={summary_path}"
+            ),
+        ),
+        check(
+            "benchmark_command_matches_summary_slice",
+            command_int_value(bench, "--max-messages")
+            == int_or_default(summary.get("processed_text_messages"), -1)
+            and command_int_value(bench, "--media-limit")
+            == int_or_default(summary.get("media_attempted"), -2)
+            and (
+                command_int_value(bench, "--skip-messages") is None
+                or command_int_value(bench, "--skip-messages")
+                == int_or_default(summary.get("skipped_transcript_messages"), -3)
+            ),
+            (
+                f"command_max_messages={command_flag_value(bench, '--max-messages')} "
+                f"processed_text_messages={summary.get('processed_text_messages')} "
+                f"command_media_limit={command_flag_value(bench, '--media-limit')} "
+                f"media_attempted={summary.get('media_attempted')} "
+                f"command_skip={command_flag_value(bench, '--skip-messages')} "
+                f"summary_skipped={summary.get('skipped_transcript_messages')}"
+            ),
+        ),
+        check(
+            "benchmark_command_matches_summary_probe_schedule",
+            command_int_value(bench, "--probe-stride")
+            == int_or_default(summary.get("probe_stride"), -1)
+            and command_int_value(bench, "--warmup-events")
+            == int_or_default(summary.get("warmup_events"), -2),
+            (
+                f"command_probe_stride={command_flag_value(bench, '--probe-stride')} "
+                f"summary_probe_stride={summary.get('probe_stride')} "
+                f"command_warmup_events={command_flag_value(bench, '--warmup-events')} "
+                f"summary_warmup_events={summary.get('warmup_events')}"
+            ),
+        ),
+        check(
+            "benchmark_command_matches_summary_rag_baseline",
+            command_int_value(bench, "--rag-top-k")
+            == int_or_default(summary.get("rag_top_k"), -1)
+            and command_int_value(bench, "--active-history-token-budget")
+            == int_or_default(summary.get("active_history_token_budget"), -2),
+            (
+                f"command_rag_top_k={command_flag_value(bench, '--rag-top-k')} "
+                f"summary_rag_top_k={summary.get('rag_top_k')} "
+                "command_active_history_token_budget="
+                f"{command_flag_value(bench, '--active-history-token-budget')} "
+                f"summary_active_history_token_budget={summary.get('active_history_token_budget')}"
+            ),
+        ),
+        check(
+            "benchmark_command_matches_summary_knobs",
+            all(
+                number_close(command_float_value(bench, f"--{key}"), value)
+                and number_close(knobs.get(key), value)
+                for key, value in DEFAULT_KNOBS.items()
+            ),
+            (
+                f"command_focus={command_flag_value(bench, '--focus')} "
+                f"command_sensitivity={command_flag_value(bench, '--sensitivity')} "
+                f"command_stability={command_flag_value(bench, '--stability')} "
+                f"summary_knobs={knobs}"
+            ),
+        ),
+        check(
+            "benchmark_command_matches_summary_consolidation_mode",
+            command_has_flag(bench, "--daily-consolidation")
+            == bool(summary.get("daily_consolidation"))
+            and command_has_flag(bench, "--deep") == bool(summary.get("deep_consolidation")),
+            (
+                f"command_daily={command_has_flag(bench, '--daily-consolidation')} "
+                f"summary_daily={summary.get('daily_consolidation')} "
+                f"command_deep={command_has_flag(bench, '--deep')} "
+                f"summary_deep={summary.get('deep_consolidation')}"
+            ),
+        ),
+    ]
+
+
+def command_judge_consistency_checks(
+    judge_command: str,
+    judge: dict[str, Any],
+    summary_path: pathlib.Path,
+    judge_path: pathlib.Path,
+) -> list[dict[str, Any]]:
+    command = split_command(judge_command)
+    protocol = judge.get("protocol", {})
+    tokens = judge.get("tokens", {})
+    media = judge.get("media_attachments", {})
+    expected_provider = (
+        "local_ollama"
+        if command_flag_value(command, "--judge-provider") == "ollama"
+        else command_flag_value(command, "--judge-provider")
+    )
+    return [
+        check(
+            "judge_command_matches_artifact_paths",
+            paths_equivalent(command_flag_value(command, "--summary"), summary_path)
+            and paths_equivalent(command_flag_value(command, "--db"), judge.get("db_path"))
+            and paths_equivalent(command_flag_value(command, "--out"), judge_path),
+            (
+                f"command_summary={command_flag_value(command, '--summary')} "
+                f"summary_path={summary_path} "
+                f"command_db={command_flag_value(command, '--db')} "
+                f"judge_db={judge.get('db_path')} "
+                f"command_out={command_flag_value(command, '--out')} "
+                f"judge_path={judge_path}"
+            ),
+        ),
+        check(
+            "judge_command_matches_artifact_provider",
+            expected_provider == judge.get("judge_provider")
+            and command_flag_value(command, "--model") == judge.get("judge_model")
+            and paths_equivalent(
+                command_flag_value(command, "--ollama-base-url"),
+                judge.get("judge_base_url"),
+            ),
+            (
+                f"command_provider={command_flag_value(command, '--judge-provider')} "
+                f"artifact_provider={judge.get('judge_provider')} "
+                f"command_model={command_flag_value(command, '--model')} "
+                f"artifact_model={judge.get('judge_model')} "
+                f"command_base_url={command_flag_value(command, '--ollama-base-url')} "
+                f"artifact_base_url={judge.get('judge_base_url')}"
+            ),
+        ),
+        check(
+            "judge_command_matches_artifact_protocol",
+            command_has_flag(command, "--blind-packets") == bool(
+                protocol.get("packet_blinding")
+            )
+            and command_int_value(command, "--judge-repetitions")
+            == int_or_default(protocol.get("judge_repetitions"), -1)
+            and command_int_value(command, "--judge-seed")
+            == int_or_default(protocol.get("judge_seed"), -2)
+            and command_int_value(command, "--bootstrap-samples")
+            == int_or_default(protocol.get("bootstrap_samples"), -3),
+            (
+                f"command_blind={command_has_flag(command, '--blind-packets')} "
+                f"artifact_blind={protocol.get('packet_blinding')} "
+                f"command_repetitions={command_flag_value(command, '--judge-repetitions')} "
+                f"artifact_repetitions={protocol.get('judge_repetitions')} "
+                f"command_seed={command_flag_value(command, '--judge-seed')} "
+                f"artifact_seed={protocol.get('judge_seed')} "
+                f"command_bootstrap={command_flag_value(command, '--bootstrap-samples')} "
+                f"artifact_bootstrap={protocol.get('bootstrap_samples')}"
+            ),
+        ),
+        check(
+            "judge_command_matches_artifact_context_and_media",
+            (
+                command_int_value(command, "--context-limit")
+                if command_int_value(command, "--context-limit") is not None
+                else -1
+            )
+            == int_or_default(tokens.get("context_limit_memories"), -2)
+            and (
+                command_int_value(command, "--judge-context-window-tokens")
+                if command_int_value(command, "--judge-context-window-tokens") is not None
+                else 262144
+            )
+            == int_or_default(tokens.get("judge_context_window_tokens"), -4)
+            and command_int_value(command, "--max-media-per-system")
+            == int_or_default(media.get("max_media_per_system"), -3),
+            (
+                f"command_context_limit={command_flag_value(command, '--context-limit')} "
+                f"artifact_context_limit={tokens.get('context_limit_memories')} "
+                "command_judge_context_window_tokens="
+                f"{command_flag_value(command, '--judge-context-window-tokens')} "
+                "artifact_judge_context_window_tokens="
+                f"{tokens.get('judge_context_window_tokens')} "
+                "command_max_media_per_system="
+                f"{command_flag_value(command, '--max-media-per-system')} "
+                f"artifact_max_media_per_system={media.get('max_media_per_system')}"
+            ),
+        ),
+    ]
+
+
 def numeric_probe_values(summary: dict[str, Any], key: str) -> list[float]:
     values = []
     for probe in summary.get("probes", []):
@@ -589,6 +1065,15 @@ def probes_missing_numeric(summary: dict[str, Any], field: str) -> list[Any]:
     return missing
 
 
+def probes_missing_positive_numeric(summary: dict[str, Any], field: str) -> list[Any]:
+    missing = []
+    for probe in summary.get("probes", []):
+        value = probe.get(field)
+        if not isinstance(value, (int, float)) or value <= 0:
+            missing.append(probe.get("event_index"))
+    return missing
+
+
 def rag_top_k_size_mismatches(summary: dict[str, Any]) -> list[dict[str, Any]]:
     mismatches = []
     try:
@@ -618,6 +1103,37 @@ def rag_top_k_size_mismatches(summary: dict[str, Any]) -> list[dict[str, Any]]:
     return mismatches
 
 
+def marker_only_compaction_probes(summary: dict[str, Any]) -> list[Any]:
+    out = []
+    for probe in summary.get("probes", []):
+        try:
+            compacted_items = int(
+                probe.get("normal_rag_compacted_history_items", 0) or 0
+            )
+        except Exception:
+            compacted_items = 0
+        if compacted_items <= 0:
+            continue
+        text = str(probe.get("normal_rag_compacted_summary", "")).strip()
+        if not text or text.startswith("[compacted_history "):
+            out.append(probe.get("event_index"))
+    return out
+
+
+def probes_missing_cortext_frozen_packets(summary: dict[str, Any]) -> list[Any]:
+    out = []
+    for probe in summary.get("probes", []):
+        if probe.get("cortext_frozen_packet_policy") != "probe_time_hydrated_context_snapshot":
+            out.append(probe.get("event_index"))
+            continue
+        if not isinstance(probe.get("cortext_frozen_working_memory"), list):
+            out.append(probe.get("event_index"))
+            continue
+        if not isinstance(probe.get("cortext_frozen_retrieved_memory"), list):
+            out.append(probe.get("event_index"))
+    return out
+
+
 def path_size_bytes(path: pathlib.Path) -> int:
     total = 0
     candidates = [path, pathlib.Path(str(path) + "-wal"), pathlib.Path(str(path) + "-shm")]
@@ -628,6 +1144,300 @@ def path_size_bytes(path: pathlib.Path) -> int:
         except OSError:
             pass
     return total
+
+
+def source_input_fingerprint(summary: dict[str, Any]) -> dict[str, Any]:
+    input_dir = pathlib.Path(str(summary.get("input_dir", "")))
+    body: dict[str, Any] = {
+        "schema": "cortext_julie_source_input_fingerprint_v1",
+        "privacy": (
+            "private local provenance: records content hashes and aggregate "
+            "file metadata only, never message text or media bytes"
+        ),
+        "input_dir": str(input_dir),
+        "exists": input_dir.exists(),
+        "recursive": True,
+        "file_count": 0,
+        "readable_file_count": 0,
+        "symlink_count": 0,
+        "total_bytes": 0,
+        "extension_counts": {},
+        "transcript_present": False,
+        "transcript_sha256": "",
+        "manifest_sha256": "",
+        "unreadable_files": 0,
+    }
+    if not input_dir.exists() or not input_dir.is_dir():
+        return body
+
+    private_entries: list[dict[str, Any]] = []
+    extension_counts: dict[str, int] = {}
+    for path in sorted(input_dir.rglob("*"), key=lambda item: str(item.relative_to(input_dir))):
+        if path.is_dir():
+            continue
+        try:
+            relative_path = path.relative_to(input_dir)
+        except ValueError:
+            relative_path = pathlib.Path(path.name)
+        suffix = path.suffix.lower()
+        extension_counts[suffix] = extension_counts.get(suffix, 0) + 1
+        entry: dict[str, Any] = {
+            "relative_path_sha256": sha256_text(str(relative_path)),
+            "suffix": suffix,
+            "is_symlink": path.is_symlink(),
+            "readable": False,
+            "size_bytes": None,
+            "sha256": "",
+        }
+        body["file_count"] += 1
+        if path.is_symlink():
+            body["symlink_count"] += 1
+        try:
+            stat = path.stat()
+            entry["size_bytes"] = stat.st_size
+            entry["sha256"] = file_sha256(path)
+            entry["readable"] = True
+            body["readable_file_count"] += 1
+            body["total_bytes"] += stat.st_size
+            if str(relative_path) == "Messages - Julie Willen.txt":
+                body["transcript_present"] = True
+                body["transcript_sha256"] = entry["sha256"]
+        except OSError as exc:
+            body["unreadable_files"] += 1
+            entry["error"] = exc.__class__.__name__
+        private_entries.append(entry)
+
+    body["extension_counts"] = extension_counts
+    body["manifest_sha256"] = hashlib.sha256(
+        json.dumps(
+            {
+                "schema": body["schema"],
+                "files": private_entries,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    return body
+
+
+def source_input_checks(fingerprint: dict[str, Any]) -> list[dict[str, Any]]:
+    return [
+        check(
+            "source_input_fingerprint_recorded",
+            bool(fingerprint.get("exists"))
+            and int(fingerprint.get("file_count", 0) or 0) > 0
+            and bool(fingerprint.get("manifest_sha256")),
+            (
+                f"exists={fingerprint.get('exists')} "
+                f"file_count={fingerprint.get('file_count')} "
+                f"manifest_sha256={fingerprint.get('manifest_sha256')}"
+            ),
+        ),
+        check(
+            "source_input_files_readable",
+            int(fingerprint.get("file_count", 0) or 0)
+            == int(fingerprint.get("readable_file_count", -1) or -1)
+            and int(fingerprint.get("unreadable_files", 0) or 0) == 0,
+            (
+                f"file_count={fingerprint.get('file_count')} "
+                f"readable_file_count={fingerprint.get('readable_file_count')} "
+                f"unreadable_files={fingerprint.get('unreadable_files')}"
+            ),
+        ),
+        check(
+            "source_transcript_hash_recorded",
+            bool(fingerprint.get("transcript_present"))
+            and bool(fingerprint.get("transcript_sha256")),
+            (
+                f"transcript_present={fingerprint.get('transcript_present')} "
+                f"transcript_sha256={fingerprint.get('transcript_sha256')}"
+            ),
+        ),
+        check(
+            "source_input_fingerprint_public_shape",
+            "files" not in fingerprint
+            and "private_entries" not in fingerprint
+            and "filenames" not in fingerprint,
+            (
+                "forbidden_keys_present="
+                f"{[key for key in ['files', 'private_entries', 'filenames'] if key in fingerprint]}"
+            ),
+        ),
+    ]
+
+
+def source_id_audit(summary: dict[str, Any]) -> dict[str, Any]:
+    db_path = pathlib.Path(str(summary.get("db_path", "")))
+    audit: dict[str, Any] = {
+        "schema": "cortext_source_id_audit_v1",
+        "db_path_recorded": str(db_path),
+        "db_exists": db_path.exists(),
+        "signal_rows": 0,
+        "source_counts": {},
+        "modality_source_counts": {},
+        "unexpected_source_id_sha256": [],
+        "media_source_mismatch_count": 0,
+        "media_encoded_source_id_count": 0,
+        "load_error": "",
+    }
+    if not db_path.exists():
+        return audit
+
+    allowed_sources = {"chat/user", "chat/assistant", "cortext/consolidate"}
+    media_modalities = {"audio", "image", "video"}
+    media_suffixes = (".wav", ".mp3", ".m4a", ".aac", ".jpg", ".jpeg", ".png", ".mov", ".mp4")
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        try:
+            rows = conn.execute(
+                """
+                select modality, source_id, count(*)
+                from signals
+                group by modality, source_id
+                """
+            ).fetchall()
+        finally:
+            conn.close()
+    except Exception as exc:
+        audit["load_error"] = exc.__class__.__name__
+        return audit
+
+    unexpected: set[str] = set()
+    for modality, source_id, count in rows:
+        modality_text = str(modality or "")
+        source_text = str(source_id or "")
+        count_int = int(count or 0)
+        audit["signal_rows"] += count_int
+        if source_text in allowed_sources:
+            audit["source_counts"][source_text] = (
+                audit["source_counts"].get(source_text, 0) + count_int
+            )
+            key = f"{modality_text}|{source_text}"
+            audit["modality_source_counts"][key] = count_int
+        else:
+            unexpected.add(source_text)
+        source_lower = source_text.lower()
+        if source_lower.endswith(media_suffixes):
+            audit["media_encoded_source_id_count"] += count_int
+        if modality_text in media_modalities and source_text not in {
+            "chat/user",
+            "chat/assistant",
+        }:
+            audit["media_source_mismatch_count"] += count_int
+
+    audit["unexpected_source_id_sha256"] = [
+        sha256_text(value) for value in sorted(unexpected)
+    ]
+    return audit
+
+
+def source_id_audit_checks(audit: dict[str, Any]) -> list[dict[str, Any]]:
+    return [
+        check(
+            "source_id_audit_available",
+            bool(audit.get("db_exists"))
+            and not audit.get("load_error")
+            and int_or_default(audit.get("signal_rows"), 0) > 0,
+            (
+                f"db_exists={audit.get('db_exists')} "
+                f"signal_rows={audit.get('signal_rows')} "
+                f"load_error={audit.get('load_error')!r}"
+            ),
+        ),
+        check(
+            "source_ids_verified_from_signals",
+            not audit.get("unexpected_source_id_sha256")
+            and int_or_default(audit.get("media_source_mismatch_count"), 0) == 0
+            and int_or_default(audit.get("media_encoded_source_id_count"), 0) == 0,
+            (
+                "unexpected_source_id_sha256="
+                f"{audit.get('unexpected_source_id_sha256')} "
+                "media_source_mismatch_count="
+                f"{audit.get('media_source_mismatch_count')} "
+                "media_encoded_source_id_count="
+                f"{audit.get('media_encoded_source_id_count')}"
+            ),
+        ),
+        check(
+            "media_modalities_share_speaker_source_ids",
+            any(
+                key.startswith("audio|chat/")
+                for key in audit.get("modality_source_counts", {})
+            )
+            and any(
+                key.startswith("image|chat/")
+                for key in audit.get("modality_source_counts", {})
+            ),
+            f"modality_source_counts={audit.get('modality_source_counts')}",
+        ),
+    ]
+
+
+def load_benchmark_environment_snapshot(summary_path: pathlib.Path) -> dict[str, Any] | None:
+    snapshot_path = summary_path.parent / BENCHMARK_ENV_SNAPSHOT_NAME
+    try:
+        if snapshot_path.exists():
+            body = load_json(snapshot_path)
+            body["path"] = str(snapshot_path)
+            return body
+    except Exception:
+        return {
+            "path": str(snapshot_path),
+            "schema": "invalid",
+            "load_error": True,
+        }
+    return None
+
+
+def benchmark_environment_checks(
+    snapshot: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    if snapshot is None:
+        return [
+            check(
+                "benchmark_environment_snapshot_present",
+                False,
+                (
+                    "missing "
+                    f"{BENCHMARK_ENV_SNAPSHOT_NAME}; release report needs a "
+                    "runtime environment snapshot for the main benchmark process"
+                ),
+            )
+        ]
+    behavior_env = snapshot.get("cortext_behavior_env", {})
+    if not isinstance(behavior_env, dict):
+        behavior_env = {}
+    hosted_provider_env = snapshot.get("hosted_provider_behavior_env", {})
+    if not isinstance(hosted_provider_env, dict):
+        hosted_provider_env = {}
+    return [
+        check(
+            "benchmark_environment_snapshot_present",
+            snapshot.get("schema") == "cortext_benchmark_environment_snapshot_v1"
+            and not snapshot.get("load_error"),
+            f"path={snapshot.get('path')} schema={snapshot.get('schema')}",
+        ),
+        check(
+            "benchmark_environment_snapshot_identifies_process",
+            int_or_default(snapshot.get("pid"), 0) > 0
+            and bool(snapshot.get("process_name")),
+            (
+                f"pid={snapshot.get('pid')} "
+                f"process_name={snapshot.get('process_name')!r}"
+            ),
+        ),
+        check(
+            "benchmark_runtime_cortext_behavior_env_clean",
+            not behavior_env,
+            f"cortext_behavior_env={behavior_env}",
+        ),
+        check(
+            "benchmark_runtime_no_hosted_provider_dependency",
+            not hosted_provider_env,
+            f"hosted_provider_behavior_env={hosted_provider_env}",
+        ),
+    ]
 
 
 def canonical_ablation_category(name: str) -> str | None:
@@ -656,6 +1466,22 @@ def summary_protocol_checks(summary: dict[str, Any]) -> list[dict[str, Any]]:
             int(summary.get("probe_count", 0) or 0) == len(summary.get("probes", []))
             and len(summary.get("probes", [])) > 0,
             f"probe_count={summary.get('probe_count')} probes={len(summary.get('probes', []))}",
+        ),
+        check(
+            "fixed_slice_starts_at_export_beginning",
+            int(summary.get("skipped_transcript_messages", 0) or 0) == 0,
+            (
+                "skipped_transcript_messages="
+                f"{summary.get('skipped_transcript_messages')}"
+            ),
+        ),
+        check(
+            "cortext_packets_frozen_at_probe_time",
+            not probes_missing_cortext_frozen_packets(summary),
+            (
+                "missing_or_legacy_probe_events="
+                f"{probes_missing_cortext_frozen_packets(summary)}"
+            ),
         ),
         check(
             "rag_baseline_fixed",
@@ -693,6 +1519,17 @@ def summary_protocol_checks(summary: dict[str, Any]) -> list[dict[str, Any]]:
             ),
         ),
         check(
+            "full_history_upper_bound_recorded",
+            not probes_missing_numeric(summary, "full_history_tokens")
+            and not probes_missing_positive_numeric(summary, "full_history_items"),
+            (
+                "missing_token_events="
+                f"{probes_missing_numeric(summary, 'full_history_tokens')} "
+                "missing_item_events="
+                f"{probes_missing_positive_numeric(summary, 'full_history_items')}"
+            ),
+        ),
+        check(
             "rag_top_k_packet_rows_present",
             not rag_top_k_size_mismatches(summary),
             f"mismatches={rag_top_k_size_mismatches(summary)}",
@@ -718,6 +1555,17 @@ def summary_protocol_checks(summary: dict[str, Any]) -> list[dict[str, Any]]:
             (
                 "normal_rag_compaction_events="
                 f"{summary.get('normal_rag_compaction', {}).get('compaction_events')}"
+            ),
+        ),
+        check(
+            "rag_compaction_has_content_summary",
+            summary.get("normal_rag_compaction_summary_policy")
+            == "deterministic_extractive_prior_chat"
+            and not marker_only_compaction_probes(summary),
+            (
+                "normal_rag_compaction_summary_policy="
+                f"{summary.get('normal_rag_compaction_summary_policy')!r} "
+                f"marker_only_or_missing_events={marker_only_compaction_probes(summary)}"
             ),
         ),
         check(
@@ -800,18 +1648,32 @@ def judge_protocol_checks(judge: dict[str, Any]) -> list[dict[str, Any]]:
     protocol = judge.get("protocol", {})
     fairness = judge.get("fairness_checks", {})
     tokens = judge.get("tokens", {})
+    media = judge.get("media_attachments", {})
+    judge_validation = judge.get("judge_validation", {})
+    processed = judge.get("processed", {})
+    media_capabilities = judge.get("judge_media_capabilities", {})
+    if not isinstance(media_capabilities, dict):
+        media_capabilities = {}
     systems = set(protocol.get("systems", []))
     fields = set(protocol.get("score_fields", []))
+    cortext_packet_source = protocol.get("cortext_packet_source", {})
+    if not isinstance(cortext_packet_source, dict):
+        cortext_packet_source = {}
     repetitions = int(
         judge.get("judge_repetitions") or protocol.get("judge_repetitions") or 0
     )
+    cortext_media_count = media_attachment_count(media, "cortext_native")
+    rag_media_count = media_attachment_count(media, "traditional_chat_rag")
+    full_history_media_count = media_attachment_count(media, "full_history_upper_bound")
+    randomization = packet_randomization_summary(judge)
+    repetition_consistency = judge_repetition_consistency_summary(judge)
+    expected_repetitions = int(repetition_consistency.get("expected_repetitions", 0) or 0)
+    required_majority_count = expected_repetitions // 2 + 1 if expected_repetitions > 0 else 0
     return [
         check(
             "judge_local_only",
             judge.get("remote_provider_allowed") is False
-            and str(judge.get("judge_base_url", "")).startswith(
-                ("http://127.0.0.1", "http://localhost", "http://0.0.0.0")
-            ),
+            and is_loopback_url(judge.get("judge_base_url", "")),
             f"provider={judge.get('judge_provider')} base_url={judge.get('judge_base_url')}",
         ),
         check(
@@ -820,9 +1682,58 @@ def judge_protocol_checks(judge: dict[str, Any]) -> list[dict[str, Any]]:
             f"packet_blinding={protocol.get('packet_blinding')}",
         ),
         check(
+            "judge_packet_surface_structurally_normalized",
+            protocol.get("packet_surface")
+            == "structurally_normalized_event_evidence_v1",
+            f"packet_surface={protocol.get('packet_surface')!r}",
+        ),
+        check(
+            "packet_labels_randomized_across_judgments",
+            bool(protocol.get("packet_blinding"))
+            and int(randomization.get("mapped_rows", 0) or 0)
+            == int(randomization.get("judgment_rows", -1) or -1)
+            and int(randomization.get("unique_mapping_count", 0) or 0) > 1
+            and int(randomization.get("min_labels_per_system", 0) or 0) >= 2,
+            f"packet_randomization={randomization}",
+        ),
+        check(
+            "judge_used_probe_time_cortext_snapshots",
+            int(cortext_packet_source.get("probe_time_summary_snapshot", 0) or 0)
+            == int(judge.get("probe_count", 0) or 0)
+            and int(cortext_packet_source.get("final_db_rehydration_fallback", 0) or 0)
+            == 0,
+            (
+                f"cortext_packet_source={cortext_packet_source} "
+                f"probe_count={judge.get('probe_count')}"
+            ),
+        ),
+        check(
             "judge_packets_uncropped",
             int(tokens.get("context_limit_memories", 0) or 0) == -1,
             f"context_limit_memories={tokens.get('context_limit_memories')}",
+        ),
+        check(
+            "judge_context_window_recorded",
+            int_or_default(tokens.get("judge_context_window_tokens"), 0) > 0
+            and int_or_default(tokens.get("max_judge_prompt_tokens_estimate"), 0) > 0,
+            (
+                f"judge_context_window_tokens={tokens.get('judge_context_window_tokens')} "
+                "max_judge_prompt_tokens_estimate="
+                f"{tokens.get('max_judge_prompt_tokens_estimate')}"
+            ),
+        ),
+        check(
+            "full_history_prompt_fits_judge_context",
+            fairness.get("full_history_prompt_fits_judge_context") is True
+            and int_or_default(tokens.get("max_judge_prompt_tokens_estimate"), 0)
+            <= int_or_default(tokens.get("judge_context_window_tokens"), 0),
+            (
+                "full_history_prompt_fits_judge_context="
+                f"{fairness.get('full_history_prompt_fits_judge_context')} "
+                "max_judge_prompt_tokens_estimate="
+                f"{tokens.get('max_judge_prompt_tokens_estimate')} "
+                f"judge_context_window_tokens={tokens.get('judge_context_window_tokens')}"
+            ),
         ),
         check(
             "judge_repetitions_at_least_3",
@@ -835,9 +1746,84 @@ def judge_protocol_checks(judge: dict[str, Any]) -> list[dict[str, Any]]:
             f"judge_repetitions={repetitions} required_range=3..5",
         ),
         check(
+            "judge_repetition_rows_complete",
+            expected_repetitions >= MIN_JUDGE_REPETITIONS
+            and int(repetition_consistency.get("events_with_expected_repetitions", 0) or 0)
+            == int(judge.get("probe_count", 0) or 0),
+            f"judge_repetition_consistency={repetition_consistency}",
+        ),
+        check(
+            "judge_repetition_majority_agreement",
+            required_majority_count > 0
+            and float(repetition_consistency.get("majority_event_rate", 0.0) or 0.0)
+            >= MIN_JUDGE_MAJORITY_EVENT_RATE
+            and float(repetition_consistency.get("mean_majority_fraction", 0.0) or 0.0)
+            >= MIN_JUDGE_MEAN_MAJORITY_FRACTION,
+            (
+                f"required_majority_count={required_majority_count} "
+                f"required_majority_event_rate={MIN_JUDGE_MAJORITY_EVENT_RATE} "
+                "required_mean_majority_fraction="
+                f"{MIN_JUDGE_MEAN_MAJORITY_FRACTION} "
+                f"judge_repetition_consistency={repetition_consistency}"
+            ),
+        ),
+        check(
             "multimodal_judge_enabled",
             judge.get("multimodal_judge") is True,
             f"multimodal_judge={judge.get('multimodal_judge')}",
+        ),
+        check(
+            "judge_image_capability_available_for_image_slice",
+            int_or_default(processed.get("image"), 0) == 0
+            or (
+                media_capabilities.get("image") is True
+                and fairness.get("attached_images_judged_when_present") is True
+            ),
+            (
+                f"processed_image={processed.get('image')} "
+                f"judge_media_capabilities={media_capabilities} "
+                "attached_images_judged_when_present="
+                f"{fairness.get('attached_images_judged_when_present')}"
+            ),
+        ),
+        check(
+            "judge_audio_capability_available_for_audio_slice",
+            int_or_default(processed.get("audio"), 0) == 0
+            or (
+                media_capabilities.get("audio") is True
+                and fairness.get("attached_audio_judged_when_present") is True
+            ),
+            (
+                f"processed_audio={processed.get('audio')} "
+                f"judge_media_capabilities={media_capabilities} "
+                "attached_audio_judged_when_present="
+                f"{fairness.get('attached_audio_judged_when_present')}"
+            ),
+        ),
+        check(
+            "judge_media_attachments_uncapped",
+            media.get("enabled") is True
+            and int(media.get("max_media_per_system", 0) or 0) == -1,
+            (
+                f"enabled={media.get('enabled')} "
+                f"max_media_per_system={media.get('max_media_per_system')}"
+            ),
+        ),
+        check(
+            "cortext_media_evidence_judged",
+            cortext_media_count > 0,
+            (
+                f"cortext_media_attachments={cortext_media_count} "
+                f"cortext_media={media.get('cortext_native')}"
+            ),
+        ),
+        check(
+            "text_only_baselines_received_no_media_attachments",
+            rag_media_count == 0 and full_history_media_count == 0,
+            (
+                f"traditional_chat_rag_media_attachments={rag_media_count} "
+                f"full_history_media_attachments={full_history_media_count}"
+            ),
         ),
         check(
             "required_systems_present",
@@ -885,6 +1871,22 @@ def judge_protocol_checks(judge: dict[str, Any]) -> list[dict[str, Any]]:
             f"fairness_counters={fairness.get('counters', {})}",
         ),
         check(
+            "rag_compaction_contentful_in_judge_packets",
+            fairness.get("traditional_chat_rag_contentful_compaction") is True,
+            f"fairness_counters={fairness.get('counters', {})}",
+        ),
+        check(
+            "judge_structural_reasons_present",
+            int(judge_validation.get("missing_system_reason", 0) or 0) == 0,
+            f"judge_validation={judge_validation}",
+        ),
+        check(
+            "judge_failure_reason_validation_clean",
+            int(judge_validation.get("invalid_failure_reason", 0) or 0) == 0
+            and int(judge_validation.get("winner_failure_mismatch", 0) or 0) == 0,
+            f"judge_validation={judge_validation}",
+        ),
+        check(
             "no_cortext_media_transcript_shortcut",
             judge.get("cortext_audio_image_transcript_shortcuts") is False,
             (
@@ -893,6 +1895,70 @@ def judge_protocol_checks(judge: dict[str, Any]) -> list[dict[str, Any]]:
             ),
         ),
     ]
+
+
+def judge_media_smoke_checks(
+    smoke: dict[str, Any] | None,
+    judge_command: str,
+) -> list[dict[str, Any]]:
+    if smoke is None:
+        return [
+            check(
+                "judge_media_smoke_recorded",
+                False,
+                "missing --judge-media-smoke artifact",
+            )
+        ]
+
+    command = split_command(judge_command)
+    command_model = command_flag_value(command, "--model")
+    selected_model = str(smoke.get("selected_release_judge_model", ""))
+    results = smoke.get("results", {})
+    selected = results.get(selected_model, {}) if isinstance(results, dict) else {}
+    image = selected.get("image", {}) if isinstance(selected, dict) else {}
+    audio = selected.get("audio", {}) if isinstance(selected, dict) else {}
+    image_parsed = image.get("parsed", {}) if isinstance(image, dict) else {}
+    audio_parsed = audio.get("parsed", {}) if isinstance(audio, dict) else {}
+    if not isinstance(image_parsed, dict):
+        image_parsed = {}
+    if not isinstance(audio_parsed, dict):
+        audio_parsed = {}
+
+    return [
+        check(
+            "judge_media_smoke_recorded",
+            smoke.get("schema") == "cortext_local_ollama_judge_media_smoke_v1"
+            and smoke.get("private_data_used") is False,
+            (
+                f"schema={smoke.get('schema')} "
+                f"private_data_used={smoke.get('private_data_used')}"
+            ),
+        ),
+        check(
+            "judge_media_smoke_model_matches_judge",
+            bool(selected_model) and selected_model == command_model,
+            f"selected_model={selected_model} command_model={command_model}",
+        ),
+        check(
+            "judge_media_smoke_image_supported",
+            image_parsed.get("image_seen") is True,
+            f"selected_model={selected_model} image={image_parsed}",
+        ),
+        check(
+            "judge_media_smoke_audio_supported",
+            audio_parsed.get("audio_seen") is True,
+            f"selected_model={selected_model} audio={audio_parsed}",
+        ),
+    ]
+
+
+def media_attachment_count(media: dict[str, Any], system: str) -> int:
+    system_media = media.get(system, {})
+    if not isinstance(system_media, dict):
+        return 0
+    return int(system_media.get("image", 0) or 0) + int(
+        system_media.get("audio", 0) or 0
+    )
 
 
 def cross_artifact_checks(
@@ -962,7 +2028,13 @@ def human_label_checks(
     if human.get("schema") == "cortext_human_label_score_v1":
         agreement = human.get("agreement", {})
         sample_path = pathlib.Path(str(human.get("sample", "")))
+        frozen_path = pathlib.Path(str(human.get("human_frozen", "")))
+        judge_frozen_path = pathlib.Path(str(agreement.get("judge_frozen", "")))
+        sample: dict[str, Any] = {}
+        frozen: dict[str, Any] = {}
         sample_matches = False
+        frozen_matches = False
+        judge_frozen_labeling: dict[str, Any] = {}
         if sample_path.exists():
             try:
                 sample = load_json(sample_path)
@@ -973,12 +2045,40 @@ def human_label_checks(
                 sample_composition = {}
         else:
             sample_composition = {}
+        if frozen_path.exists():
+            try:
+                frozen = load_json(frozen_path)
+                frozen_matches = (
+                    frozen.get("freeze_sha256") == human.get("human_freeze_sha256")
+                )
+            except Exception:
+                frozen_matches = False
+        if judge_frozen_path.exists():
+            try:
+                judge_frozen = load_json(judge_frozen_path)
+                judge_frozen_labeling = judge_frozen.get("labeling", {})
+                if not isinstance(judge_frozen_labeling, dict):
+                    judge_frozen_labeling = {}
+            except Exception:
+                judge_frozen_labeling = {}
+        frozen_candidate_sources = [
+            str(item).lower()
+            for item in judge_frozen_labeling.get("candidate_sources", [])
+        ]
         checks.extend(
             [
                 check(
                     "human_labels_same_summary",
                     sample_matches,
                     f"sample={sample_path} summary={summary_path}",
+                ),
+                check(
+                    "human_frozen_targets_hash_matches",
+                    frozen_matches,
+                    (
+                        f"human_frozen={frozen_path} "
+                        f"human_freeze_sha256={human.get('human_freeze_sha256')}"
+                    ),
                 ),
                 check(
                     "human_probe_count_floor",
@@ -1015,6 +2115,55 @@ def human_label_checks(
                     sample_composition.get("includes_media_candidates") is True,
                     f"sample_composition={sample_composition}",
                 ),
+                check(
+                    "human_judge_frozen_targets_include_active_packet_candidates",
+                    any("active packet" in item for item in frozen_candidate_sources),
+                    (
+                        f"judge_frozen={judge_frozen_path} "
+                        "candidate_sources="
+                        f"{judge_frozen_labeling.get('candidate_sources')}"
+                    ),
+                ),
+                check(
+                    "human_judge_frozen_targets_include_media_candidates",
+                    any(
+                        "audio" in item or "image" in item or "video" in item
+                        or "media" in item
+                        for item in frozen_candidate_sources
+                    ),
+                    (
+                        f"judge_frozen={judge_frozen_path} "
+                        "candidate_sources="
+                        f"{judge_frozen_labeling.get('candidate_sources')}"
+                    ),
+                ),
+                check(
+                    "human_judge_frozen_targets_local_only",
+                    judge_frozen_labeling.get("remote_provider_allowed") is False
+                    and is_loopback_url(judge_frozen_labeling.get("judge_base_url", "")),
+                    (
+                        f"judge_frozen={judge_frozen_path} "
+                        f"judge_provider={judge_frozen_labeling.get('judge_provider')} "
+                        f"judge_base_url={judge_frozen_labeling.get('judge_base_url')} "
+                        "remote_provider_allowed="
+                        f"{judge_frozen_labeling.get('remote_provider_allowed')}"
+                    ),
+                ),
+                check(
+                    "human_label_context_prior_only",
+                    sample.get("labeling_context_policy", {}).get(
+                        "future_turns_visible"
+                    )
+                    is False
+                    and sample.get("labeling_context_policy", {}).get(
+                        "query_context"
+                    )
+                    == "current_turn_plus_prior_context_only",
+                    (
+                        "labeling_context_policy="
+                        f"{sample.get('labeling_context_policy', {})}"
+                    ),
+                ),
             ]
         )
         return checks
@@ -1038,6 +2187,94 @@ def human_label_checks(
             "raw human labels supplied, but no agreement report was supplied",
         )
     )
+    return checks
+
+
+def public_human_label_summary(human: dict[str, Any] | None) -> dict[str, Any] | None:
+    if human is None:
+        return None
+    summary = {
+        "schema": human.get("schema"),
+        "probe_count": human.get("probe_count"),
+        "agreement": human.get("agreement", {}),
+    }
+    if human.get("schema") == "cortext_human_label_score_v1":
+        summary["human_freeze_sha256"] = human.get("human_freeze_sha256")
+    return summary
+
+
+def frozen_target_artifact_checks(
+    target_freeze: dict[str, Any] | None,
+    target_freeze_path: pathlib.Path | None,
+    human_eval: dict[str, Any] | None,
+    human_eval_path: pathlib.Path | None,
+    summary: dict[str, Any],
+    summary_path: pathlib.Path,
+) -> list[dict[str, Any]]:
+    checks: list[dict[str, Any]] = []
+    if target_freeze is None or target_freeze_path is None:
+        checks.append(
+            pending(
+                "judge_frozen_targets_present",
+                "no --target-freeze artifact supplied; release protocol needs a frozen judged target manifest",
+            )
+        )
+    else:
+        checks.extend(
+            [
+                check(
+                    "judge_frozen_targets_present",
+                    target_freeze.get("schema") == "cortext_frozen_retrieval_probe_set_v1"
+                    and bool(target_freeze.get("freeze_sha256")),
+                    (
+                        f"path={target_freeze_path} "
+                        f"schema={target_freeze.get('schema')} "
+                        f"freeze_sha256={target_freeze.get('freeze_sha256')}"
+                    ),
+                ),
+                check(
+                    "judge_frozen_targets_same_summary",
+                    pathlib.Path(str(target_freeze.get("source_summary", ""))) == summary_path,
+                    (
+                        f"target_source_summary={target_freeze.get('source_summary')} "
+                        f"summary_path={summary_path}"
+                    ),
+                ),
+                check(
+                    "judge_frozen_targets_keep_full_probe_schedule",
+                    int_or_default(target_freeze.get("probe_count"), -1)
+                    == int_or_default(summary.get("probe_count"), -2)
+                    and len(target_freeze.get("probes", []))
+                    == int_or_default(summary.get("probe_count"), -3),
+                    (
+                        f"target_probe_count={target_freeze.get('probe_count')} "
+                        f"target_probes={len(target_freeze.get('probes', []))} "
+                        f"summary_probe_count={summary.get('probe_count')}"
+                    ),
+                ),
+            ]
+        )
+
+    if human_eval is None or human_eval_path is None:
+        checks.append(
+            pending(
+                "human_label_retrieval_eval_present",
+                "no --human-label-eval artifact supplied; final release report should include retrieval scoring against human labels",
+            )
+        )
+    else:
+        checks.append(
+            check(
+                "human_label_retrieval_eval_present",
+                human_eval.get("schema") == "cortext_frozen_retrieval_eval_v1"
+                and pathlib.Path(str(human_eval.get("summary_path", ""))) == summary_path,
+                (
+                    f"path={human_eval_path} schema={human_eval.get('schema')} "
+                    f"summary_path={human_eval.get('summary_path')} "
+                    f"n={human_eval.get('n')}"
+                ),
+            )
+        )
     return checks
 
 
@@ -1101,6 +2338,8 @@ def ablation_plan_checks(
     missing_env = []
     bad_daily = []
     missing_commands = []
+    missing_executable_hashes = []
+    reuse_enabled = []
     for name in ablation_names:
         case = by_name.get(name, {})
         category = canonical_ablation_category(name)
@@ -1137,6 +2376,17 @@ def ablation_plan_checks(
                     )
         if not case.get("benchmark_command") or not case.get("judge_command"):
             missing_commands.append(name)
+        executable = case.get("benchmark_executable", {})
+        if not isinstance(executable, dict) or not executable.get("sha256"):
+            missing_executable_hashes.append(name)
+        if case.get("reuse_existing") is not False:
+            reuse_enabled.append(
+                {
+                    "name": name,
+                    "reuse_existing": case.get("reuse_existing"),
+                    "reuse_policy": case.get("reuse_policy"),
+                }
+            )
 
     return [
         check(
@@ -1164,12 +2414,23 @@ def ablation_plan_checks(
             not missing_commands,
             f"missing_commands={missing_commands}",
         ),
+        check(
+            "architecture_ablation_benchmark_executable_hashes_recorded",
+            not missing_executable_hashes,
+            f"missing_executable_hashes={missing_executable_hashes}",
+        ),
+        check(
+            "architecture_ablation_reuse_disabled_for_release",
+            not reuse_enabled,
+            f"reuse_enabled_or_unrecorded={reuse_enabled}",
+        ),
     ]
 
 
 def ablation_artifact_checks(
     ablations: list[dict[str, Any]],
     main_schedule_sha256: str,
+    main_source_input_manifest_sha256: str,
     summary: dict[str, Any],
 ) -> list[dict[str, Any]]:
     if not ablations:
@@ -1180,6 +2441,15 @@ def ablation_artifact_checks(
         for row in ablations
         if row.get("frozen_probe_schedule_sha256") != main_schedule_sha256
     ]
+    source_input_mismatches = [
+        {
+            "name": row["name"],
+            "source_input_manifest_sha256": row.get("source_input_manifest_sha256"),
+        }
+        for row in ablations
+        if row.get("source_input_manifest_sha256")
+        != main_source_input_manifest_sha256
+    ]
     non_default_knobs = [
         row["name"]
         for row in ablations
@@ -1187,16 +2457,126 @@ def ablation_artifact_checks(
         or not all(number_close(row["knobs"].get(k), v) for k, v in DEFAULT_KNOBS.items())
     ]
     weak_judges = []
+    bad_judge_randomization = []
+    bad_judge_repetition_consistency = []
+    bad_packet_surfaces = []
+    bad_context_fit = []
+    bad_media_capabilities = []
     for row in ablations:
         judge = row.get("judge_protocol", {})
-        repetitions = int(judge.get("judge_repetitions") or 0)
+        media = row.get("media_attachments", {})
+        tokens = row.get("tokens", {})
+        fairness = row.get("fairness_checks", {})
+        media_capabilities = row.get("judge_media_capabilities", {})
+        processed = row.get("processed", {})
+        if not isinstance(media_capabilities, dict):
+            media_capabilities = {}
+        repetitions = int(
+            row.get("judge_repetitions") or judge.get("judge_repetitions") or 0
+        )
         if (
             row.get("judge_provider") != "local_ollama"
             or row.get("remote_provider_allowed") is not False
+            or not is_loopback_url(row.get("judge_base_url", ""))
             or not judge.get("packet_blinding")
             or repetitions < MIN_JUDGE_REPETITIONS
+            or media.get("enabled") is not True
+            or int(media.get("max_media_per_system", 0) or 0) != -1
         ):
             weak_judges.append(row["name"])
+        if judge.get("packet_surface") != "structurally_normalized_event_evidence_v1":
+            bad_packet_surfaces.append(
+                {
+                    "name": row["name"],
+                    "packet_surface": judge.get("packet_surface"),
+                }
+            )
+        if (
+            fairness.get("full_history_prompt_fits_judge_context") is not True
+            or int_or_default(tokens.get("max_judge_prompt_tokens_estimate"), 0)
+            > int_or_default(tokens.get("judge_context_window_tokens"), 0)
+        ):
+            bad_context_fit.append(
+                {
+                    "name": row["name"],
+                    "full_history_prompt_fits_judge_context": fairness.get(
+                        "full_history_prompt_fits_judge_context"
+                    ),
+                    "max_judge_prompt_tokens_estimate": tokens.get(
+                        "max_judge_prompt_tokens_estimate"
+                    ),
+                    "judge_context_window_tokens": tokens.get(
+                        "judge_context_window_tokens"
+                    ),
+                }
+            )
+        if (
+            int_or_default(processed.get("audio"), 0) > 0
+            and (
+                media_capabilities.get("audio") is not True
+                or fairness.get("attached_audio_judged_when_present") is not True
+            )
+        ) or (
+            int_or_default(processed.get("image"), 0) > 0
+            and (
+                media_capabilities.get("image") is not True
+                or fairness.get("attached_images_judged_when_present") is not True
+            )
+        ):
+            bad_media_capabilities.append(
+                {
+                    "name": row["name"],
+                    "processed": processed,
+                    "judge_media_capabilities": media_capabilities,
+                    "fairness_checks": {
+                        "attached_audio_judged_when_present": fairness.get(
+                            "attached_audio_judged_when_present"
+                        ),
+                        "attached_images_judged_when_present": fairness.get(
+                            "attached_images_judged_when_present"
+                        ),
+                    },
+                }
+            )
+        randomization = row.get("packet_randomization", {})
+        if (
+            int_or_default(randomization.get("mapped_rows"), 0)
+            != int_or_default(randomization.get("judgment_rows"), -1)
+            or int_or_default(randomization.get("unique_mapping_count"), 0) <= 1
+            or int_or_default(randomization.get("min_labels_per_system"), 0) < 2
+        ):
+            bad_judge_randomization.append(
+                {
+                    "name": row["name"],
+                    "packet_randomization": randomization,
+                }
+            )
+        repetition_consistency = row.get("judge_repetition_consistency", {})
+        expected_repetitions = int_or_default(
+            repetition_consistency.get("expected_repetitions"), 0
+        )
+        if (
+            expected_repetitions < MIN_JUDGE_REPETITIONS
+            or int_or_default(
+                repetition_consistency.get("events_with_expected_repetitions"), 0
+            )
+            != int_or_default(row.get("probe_count"), -1)
+            or float_or_default(
+                repetition_consistency.get("majority_event_rate"), 0.0
+            )
+            < MIN_JUDGE_MAJORITY_EVENT_RATE
+            or float_or_default(
+                repetition_consistency.get("mean_majority_fraction"), 0.0
+            )
+            < MIN_JUDGE_MEAN_MAJORITY_FRACTION
+        ):
+            bad_judge_repetition_consistency.append(
+                {
+                    "name": row["name"],
+                    "probe_count": row.get("probe_count"),
+                    "judge_repetition_consistency": repetition_consistency,
+                }
+            )
     main_processed = {
         "text": summary.get("processed_text_messages"),
         "media_attempted": summary.get("media_attempted"),
@@ -1209,6 +2589,14 @@ def ablation_artifact_checks(
         row["name"]
         for row in ablations
         if row.get("processed") != main_processed
+    ]
+    command_mismatches = [
+        {
+            "name": row["name"],
+            "failures": row.get("command_check_failures", []),
+        }
+        for row in ablations
+        if row.get("command_check_failures")
     ]
     too_few_shared_probes = []
     ablation_beats_full = []
@@ -1251,6 +2639,15 @@ def ablation_artifact_checks(
             f"mismatched={manifest_mismatches}",
         ),
         check(
+            "architecture_ablations_share_source_input_manifest",
+            not source_input_mismatches,
+            (
+                f"main_source_input_manifest_sha256="
+                f"{main_source_input_manifest_sha256} "
+                f"mismatched={source_input_mismatches}"
+            ),
+        ),
+        check(
             "architecture_ablations_default_knobs",
             not non_default_knobs,
             f"non_default_or_missing={non_default_knobs}",
@@ -1261,9 +2658,42 @@ def ablation_artifact_checks(
             f"weak_or_mismatched_judges={weak_judges}",
         ),
         check(
+            "architecture_ablation_judge_packet_surfaces_normalized",
+            not bad_packet_surfaces,
+            f"bad_packet_surfaces={bad_packet_surfaces}",
+        ),
+        check(
+            "architecture_ablation_judge_context_windows_fit",
+            not bad_context_fit,
+            f"bad_context_fit={bad_context_fit}",
+        ),
+        check(
+            "architecture_ablation_judge_media_capabilities_match_slice",
+            not bad_media_capabilities,
+            f"bad_media_capabilities={bad_media_capabilities}",
+        ),
+        check(
+            "architecture_ablation_judge_packets_randomized",
+            not bad_judge_randomization,
+            f"bad_randomization={bad_judge_randomization}",
+        ),
+        check(
+            "architecture_ablation_judge_repetition_consistency",
+            not bad_judge_repetition_consistency,
+            (
+                "requires complete repeated local judging and majority agreement; "
+                f"bad_repetition_consistency={bad_judge_repetition_consistency}"
+            ),
+        ),
+        check(
             "architecture_ablations_share_processed_event_counts",
             not processed_mismatches,
             f"main={main_processed} mismatched={processed_mismatches}",
+        ),
+        check(
+            "architecture_ablation_commands_match_artifacts",
+            not command_mismatches,
+            f"command_mismatches={command_mismatches}",
         ),
         check(
             "architecture_ablations_share_judged_probe_floor",
@@ -1387,6 +2817,9 @@ def public_judge_summary(judge: dict[str, Any]) -> dict[str, Any]:
         "tokens": judge.get("tokens"),
         "latency": judge.get("latency"),
         "media_attachments": judge.get("media_attachments"),
+        "judge_media_capabilities": judge.get("judge_media_capabilities"),
+        "packet_randomization": packet_randomization_summary(judge),
+        "judge_repetition_consistency": judge_repetition_consistency_summary(judge),
     }
 
 
@@ -1483,11 +2916,16 @@ def cost_checks(costs: dict[str, Any]) -> list[dict[str, Any]]:
         "mean_consolidation_ms_per_run",
         "p50_cortext_probe_latency_ms",
         "p95_cortext_probe_latency_ms",
+        "p50_rag_total_latency_ms",
+        "p95_rag_total_latency_ms",
+        "p50_rag_retrieval_latency_ms",
+        "p95_rag_retrieval_latency_ms",
         "mean_cortext_prompt_tokens",
         "mean_rag_prompt_tokens",
         "db_disk_bytes",
         "db_disk_bytes_per_event",
         "events_per_second_excluding_consolidation",
+        "events_per_second_including_consolidation",
     ]
     missing = [key for key in required_present if costs.get(key) is None]
     checks = [
@@ -1519,6 +2957,56 @@ def cost_checks(costs: dict[str, Any]) -> list[dict[str, Any]]:
             ),
         )
     )
+    checks.append(
+        check(
+            "ingest_throughput_including_consolidation_present",
+            float(costs.get("events_per_second_including_consolidation") or 0.0)
+            > 0.0,
+            (
+                "events_per_second_including_consolidation="
+                f"{costs.get('events_per_second_including_consolidation')}"
+            ),
+        )
+    )
+    checks.append(
+        check(
+            "retrieval_latency_percentiles_recorded",
+            float_or_default(costs.get("p50_rag_retrieval_latency_ms"), 0.0) > 0.0
+            and float_or_default(costs.get("p95_rag_retrieval_latency_ms"), 0.0)
+            >= float_or_default(costs.get("p50_rag_retrieval_latency_ms"), 0.0),
+            (
+                "p50_rag_retrieval_latency_ms="
+                f"{costs.get('p50_rag_retrieval_latency_ms')} "
+                "p95_rag_retrieval_latency_ms="
+                f"{costs.get('p95_rag_retrieval_latency_ms')}"
+            ),
+        )
+    )
+    checks.append(
+        check(
+            "cortext_probe_latency_percentiles_recorded",
+            float_or_default(costs.get("p50_cortext_probe_latency_ms"), 0.0) > 0.0
+            and float_or_default(costs.get("p95_cortext_probe_latency_ms"), 0.0)
+            >= float_or_default(costs.get("p50_cortext_probe_latency_ms"), 0.0),
+            (
+                "p50_cortext_probe_latency_ms="
+                f"{costs.get('p50_cortext_probe_latency_ms')} "
+                "p95_cortext_probe_latency_ms="
+                f"{costs.get('p95_cortext_probe_latency_ms')}"
+            ),
+        )
+    )
+    checks.append(
+        check(
+            "disk_growth_recorded",
+            int_or_default(costs.get("db_disk_bytes"), 0) > 0
+            and float_or_default(costs.get("db_disk_bytes_per_event"), 0.0) > 0.0,
+            (
+                f"db_disk_bytes={costs.get('db_disk_bytes')} "
+                f"db_disk_bytes_per_event={costs.get('db_disk_bytes_per_event')}"
+            ),
+        )
+    )
     if costs.get("peak_rss_mb") is None:
         checks.append(
             pending(
@@ -1546,6 +3034,143 @@ def parse_ablation(value: str) -> tuple[str, pathlib.Path, pathlib.Path]:
     return parts[0], pathlib.Path(parts[1]), pathlib.Path(parts[2])
 
 
+def command_sha256(command: str) -> str:
+    return sha256_text(" ".join(shlex.split(command))) if command else ""
+
+
+def command_executable_artifact(command: str) -> dict[str, Any]:
+    parts = split_command(command)
+    raw = parts[0] if parts else ""
+    resolved = ""
+    if raw:
+        candidate = pathlib.Path(raw)
+        if candidate.exists() or "/" in raw:
+            resolved = str(candidate.resolve())
+        else:
+            resolved = shutil.which(raw) or ""
+    path = pathlib.Path(resolved) if resolved else None
+    exists = bool(path and path.exists() and path.is_file())
+    return {
+        "command": raw,
+        "path": str(path) if path else "",
+        "exists": exists,
+        "sha256": file_sha256(path) if path and exists else "",
+        "bytes": path.stat().st_size if path and exists else 0,
+        "mtime_ns": path.stat().st_mtime_ns if path and exists else 0,
+    }
+
+
+def load_protocol_freeze(path: pathlib.Path | None) -> dict[str, Any] | None:
+    if path is None:
+        return None
+    try:
+        body = load_json(path)
+        body["path"] = str(path)
+        body["sha256"] = file_sha256(path)
+        return body
+    except Exception as exc:
+        return {
+            "path": str(path),
+            "schema": "invalid",
+            "load_error": exc.__class__.__name__,
+        }
+
+
+def protocol_freeze_checks(
+    freeze: dict[str, Any] | None,
+    input_fingerprint: dict[str, Any],
+    schedule_manifest: dict[str, Any],
+    benchmark_command: str,
+    benchmark_executable: dict[str, Any],
+    git: dict[str, Any],
+) -> list[dict[str, Any]]:
+    if freeze is None:
+        return [
+            pending(
+                "protocol_freeze_file_present",
+                "no --freeze-file supplied; final release needs explicit pinned source/probe hashes",
+            )
+        ]
+
+    expected_source_manifest = freeze.get("source_input_manifest_sha256")
+    expected_probe_schedule = freeze.get("frozen_probe_schedule_sha256")
+    expected_benchmark_command = freeze.get("benchmark_command_sha256")
+    expected_benchmark_executable = freeze.get("benchmark_executable_sha256")
+    expected_git_commit = freeze.get("git_commit")
+    expected_git_worktree = freeze.get("git_worktree_manifest_sha256")
+    return [
+        check(
+            "protocol_freeze_file_present",
+            freeze.get("schema") == "cortext_julie_release_protocol_freeze_v1"
+            and not freeze.get("load_error"),
+            (
+                f"path={freeze.get('path')} schema={freeze.get('schema')} "
+                f"load_error={freeze.get('load_error')}"
+            ),
+        ),
+        check(
+            "source_input_manifest_matches_freeze",
+            bool(expected_source_manifest)
+            and expected_source_manifest == input_fingerprint.get("manifest_sha256"),
+            (
+                f"expected={expected_source_manifest} "
+                f"actual={input_fingerprint.get('manifest_sha256')}"
+            ),
+        ),
+        check(
+            "frozen_probe_schedule_matches_freeze",
+            bool(expected_probe_schedule)
+            and expected_probe_schedule == schedule_manifest.get("schedule_sha256"),
+            (
+                f"expected={expected_probe_schedule} "
+                f"actual={schedule_manifest.get('schedule_sha256')}"
+            ),
+        ),
+        check(
+            "benchmark_command_matches_freeze",
+            not expected_benchmark_command
+            or expected_benchmark_command == command_sha256(benchmark_command),
+            (
+                f"expected={expected_benchmark_command} "
+                f"actual={command_sha256(benchmark_command)}"
+            ),
+        ),
+        check(
+            "benchmark_executable_hash_recorded",
+            bool(benchmark_executable.get("exists"))
+            and bool(benchmark_executable.get("sha256")),
+            (
+                f"path={benchmark_executable.get('path')} "
+                f"exists={benchmark_executable.get('exists')} "
+                f"sha256={benchmark_executable.get('sha256')}"
+            ),
+        ),
+        check(
+            "benchmark_executable_matches_freeze",
+            not expected_benchmark_executable
+            or expected_benchmark_executable == benchmark_executable.get("sha256"),
+            (
+                f"expected={expected_benchmark_executable} "
+                f"actual={benchmark_executable.get('sha256')}"
+            ),
+        ),
+        check(
+            "git_commit_matches_freeze",
+            not expected_git_commit or expected_git_commit == git.get("commit"),
+            f"expected={expected_git_commit} actual={git.get('commit')}",
+        ),
+        check(
+            "git_worktree_manifest_matches_freeze",
+            not expected_git_worktree
+            or expected_git_worktree == git.get("worktree_manifest_sha256"),
+            (
+                f"expected={expected_git_worktree} "
+                f"actual={git.get('worktree_manifest_sha256')}"
+            ),
+        ),
+    ]
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--summary", type=pathlib.Path, required=True)
@@ -1554,39 +3179,144 @@ def main() -> int:
     parser.add_argument("--benchmark-command", default="")
     parser.add_argument("--judge-command", default="")
     parser.add_argument("--human-labels", type=pathlib.Path)
+    parser.add_argument("--human-label-eval", type=pathlib.Path)
+    parser.add_argument("--target-freeze", type=pathlib.Path)
     parser.add_argument("--ablation", type=parse_ablation, action="append", default=[])
     parser.add_argument("--ablation-plan", type=pathlib.Path)
+    parser.add_argument("--judge-media-smoke", type=pathlib.Path)
+    parser.add_argument(
+        "--freeze-file",
+        type=pathlib.Path,
+        help="Pinned source/probe freeze JSON for final release verification.",
+    )
+    parser.add_argument(
+        "--require-pass",
+        action="store_true",
+        help="Exit non-zero unless the release gate status is pass.",
+    )
     args = parser.parse_args()
 
     summary = load_json(args.summary)
     judge = load_json(args.judge)
+    judge_media_smoke = (
+        load_json(args.judge_media_smoke) if args.judge_media_smoke else None
+    )
     ablation_plan = load_json(args.ablation_plan) if args.ablation_plan else None
     if ablation_plan is not None:
         ablation_plan["path"] = str(args.ablation_plan)
     manifest = probe_manifest(summary)
     schedule_manifest = probe_schedule_manifest(summary)
+    input_fingerprint = source_input_fingerprint(summary)
+    protocol_freeze = load_protocol_freeze(args.freeze_file)
+    source_ids = source_id_audit(summary)
+    environment_snapshot = load_benchmark_environment_snapshot(args.summary)
     costs = cost_summary(summary, judge)
     claim_support = claim_support_summary(judge)
     ablation_names = [name for name, _, _ in args.ablation]
+    git = git_info()
+    benchmark_executable = command_executable_artifact(args.benchmark_command)
 
     checks: list[dict[str, Any]] = []
+    checks.extend(git_provenance_checks(git))
     checks.extend(command_protocol_checks(args.benchmark_command, args.judge_command))
+    checks.extend(
+        command_summary_consistency_checks(
+            args.benchmark_command, summary, args.summary
+        )
+    )
+    checks.extend(
+        command_judge_consistency_checks(
+            args.judge_command, judge, args.summary, args.judge
+        )
+    )
+    checks.extend(source_input_checks(input_fingerprint))
+    checks.extend(
+        protocol_freeze_checks(
+            protocol_freeze,
+            input_fingerprint,
+            schedule_manifest,
+            args.benchmark_command,
+            benchmark_executable,
+            git,
+        )
+    )
+    checks.extend(source_id_audit_checks(source_ids))
+    checks.extend(benchmark_environment_checks(environment_snapshot))
     checks.extend(summary_protocol_checks(summary))
     checks.extend(judge_protocol_checks(judge))
+    checks.extend(judge_media_smoke_checks(judge_media_smoke, args.judge_command))
     checks.extend(claim_support_checks(claim_support))
     checks.extend(cross_artifact_checks(summary, judge, args.summary))
     human = load_json(args.human_labels) if args.human_labels else None
+    human_eval = load_json(args.human_label_eval) if args.human_label_eval else None
+    target_freeze = load_json(args.target_freeze) if args.target_freeze else None
     checks.extend(human_label_checks(human, args.human_labels, args.summary))
+    checks.extend(
+        frozen_target_artifact_checks(
+            target_freeze,
+            args.target_freeze,
+            human_eval,
+            args.human_label_eval,
+            summary,
+            args.summary,
+        )
+    )
     checks.extend(ablation_checks(ablation_names))
     checks.extend(ablation_plan_checks(ablation_names, ablation_plan))
     checks.extend(cost_checks(costs))
 
     ablations = []
+    ablation_plan_cases_by_name: dict[str, dict[str, Any]] = {}
+    if isinstance(ablation_plan, dict):
+        cases = ablation_plan.get("cases", [])
+        if isinstance(cases, list):
+            ablation_plan_cases_by_name = {
+                str(case.get("name")): case
+                for case in cases
+                if isinstance(case, dict) and case.get("name")
+            }
     for name, summary_path, judge_path in args.ablation:
         ablation_summary = load_json(summary_path)
         ablation_judge = load_json(judge_path)
         ablation_manifest = probe_manifest(ablation_summary)
         ablation_schedule_manifest = probe_schedule_manifest(ablation_summary)
+        ablation_source_input_fingerprint = source_input_fingerprint(ablation_summary)
+        plan_case = ablation_plan_cases_by_name.get(name, {})
+        ablation_benchmark_command = str(plan_case.get("benchmark_command", "") or "")
+        ablation_judge_command = str(plan_case.get("judge_command", "") or "")
+        command_checks: list[dict[str, Any]] = []
+        if ablation_benchmark_command:
+            command_checks.extend(
+                command_summary_consistency_checks(
+                    ablation_benchmark_command, ablation_summary, summary_path
+                )
+            )
+            plan_executable = plan_case.get("benchmark_executable", {})
+            if not isinstance(plan_executable, dict):
+                plan_executable = {}
+            actual_executable = command_executable_artifact(ablation_benchmark_command)
+            command_checks.append(
+                check(
+                    "ablation_benchmark_executable_matches_plan",
+                    bool(plan_executable.get("sha256"))
+                    and plan_executable.get("sha256")
+                    == actual_executable.get("sha256"),
+                    (
+                        f"planned={plan_executable.get('sha256')} "
+                        f"actual={actual_executable.get('sha256')} "
+                        f"path={actual_executable.get('path')}"
+                    ),
+                )
+            )
+        if ablation_judge_command:
+            command_checks.extend(
+                command_judge_consistency_checks(
+                    ablation_judge_command, ablation_judge, summary_path, judge_path
+                )
+            )
+        command_check_failures = [
+            item for item in command_checks if item.get("status") != "pass"
+        ]
         ablations.append(
             {
                 "name": name,
@@ -1594,17 +3324,44 @@ def main() -> int:
                 "summary_sha256": file_sha256(summary_path),
                 "judge_path": str(judge_path),
                 "judge_sha256": file_sha256(judge_path),
+                "benchmark_command": ablation_benchmark_command,
+                "judge_command": ablation_judge_command,
+                "early_judge": {
+                    "enabled": bool(plan_case.get("early_judge_enabled")),
+                    "skip_reason": str(
+                        plan_case.get("early_judge_skip_reason", "") or ""
+                    ),
+                    "manifest_path": str(
+                        plan_case.get("early_judge_manifest_path", "") or ""
+                    ),
+                    "command_recorded": bool(plan_case.get("early_judge_command")),
+                },
+                "command_check_failures": command_check_failures,
                 "frozen_probe_manifest_sha256": ablation_manifest["manifest_sha256"],
                 "frozen_probe_schedule_sha256": ablation_schedule_manifest[
                     "schedule_sha256"
                 ],
+                "source_input_manifest_sha256": ablation_source_input_fingerprint.get(
+                    "manifest_sha256"
+                ),
                 "knobs": ablation_summary.get("knobs"),
                 "judge_provider": ablation_judge.get("judge_provider"),
+                "judge_base_url": ablation_judge.get("judge_base_url"),
+                "judge_repetitions": ablation_judge.get("judge_repetitions"),
                 "remote_provider_allowed": ablation_judge.get("remote_provider_allowed"),
+                "probe_count": ablation_judge.get("probe_count"),
                 "judge_protocol": ablation_judge.get("protocol", {}),
+                "judge_media_capabilities": ablation_judge.get(
+                    "judge_media_capabilities", {}
+                ),
                 "quality": ablation_judge.get("quality"),
                 "tokens": ablation_judge.get("tokens"),
                 "fairness_checks": ablation_judge.get("fairness_checks"),
+                "media_attachments": ablation_judge.get("media_attachments"),
+                "packet_randomization": packet_randomization_summary(ablation_judge),
+                "judge_repetition_consistency": judge_repetition_consistency_summary(
+                    ablation_judge
+                ),
                 "effect_vs_full": paired_delta_summary(
                     judge,
                     ablation_judge,
@@ -1623,7 +3380,12 @@ def main() -> int:
         )
 
     checks.extend(
-        ablation_artifact_checks(ablations, schedule_manifest["schedule_sha256"], summary)
+        ablation_artifact_checks(
+            ablations,
+            schedule_manifest["schedule_sha256"],
+            input_fingerprint.get("manifest_sha256", ""),
+            summary,
+        )
     )
 
     status_counts: dict[str, int] = {}
@@ -1634,12 +3396,14 @@ def main() -> int:
         "schema": "cortext_julie_release_protocol_report_v1",
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
         "privacy": {
-            "public_safe": True,
+            "public_safe": False,
+            "public_aggregate_summary_safe": True,
             "excludes_private_text": True,
             "excludes_judge_reason_strings": True,
             "private_artifacts_remain_local": True,
+            "why_private": "contains local paths and exact local commands for reproducibility",
         },
-        "git": git_info(),
+        "git": git,
         "commands": {
             "report": " ".join(sys.argv),
             "benchmark": args.benchmark_command,
@@ -1651,10 +3415,30 @@ def main() -> int:
             "judge_path": str(args.judge),
             "judge_sha256": file_sha256(args.judge),
             "human_labels_path": str(args.human_labels) if args.human_labels else "",
+            "human_label_eval_path": (
+                str(args.human_label_eval) if args.human_label_eval else ""
+            ),
+            "target_freeze_path": str(args.target_freeze) if args.target_freeze else "",
             "ablation_plan_path": str(args.ablation_plan) if args.ablation_plan else "",
+            "judge_media_smoke_path": (
+                str(args.judge_media_smoke) if args.judge_media_smoke else ""
+            ),
+            "judge_media_smoke_sha256": (
+                file_sha256(args.judge_media_smoke) if args.judge_media_smoke else ""
+            ),
+            "release_freeze_path": str(args.freeze_file) if args.freeze_file else "",
+            "release_freeze_sha256": (
+                file_sha256(args.freeze_file)
+                if args.freeze_file and args.freeze_file.exists()
+                else ""
+            ),
+            "benchmark_executable": benchmark_executable,
         },
         "source_run": {
             "input_dir_recorded": summary.get("input_dir"),
+            "source_input_fingerprint": input_fingerprint,
+            "source_id_audit": source_ids,
+            "benchmark_environment_snapshot": environment_snapshot,
             "db_path_recorded": summary.get("db_path"),
             "processed_text_messages": summary.get("processed_text_messages"),
             "media_attempted": summary.get("media_attempted"),
@@ -1676,6 +3460,9 @@ def main() -> int:
                 "normal_rag_vector_candidate_k"
             ),
             "normal_rag_compaction": summary.get("normal_rag_compaction"),
+            "normal_rag_compaction_summary_policy": summary.get(
+                "normal_rag_compaction_summary_policy"
+            ),
             "active_history_token_budget": summary.get("active_history_token_budget"),
             "knobs": summary.get("knobs"),
             "daily_consolidation": summary.get("daily_consolidation"),
@@ -1685,13 +3472,89 @@ def main() -> int:
             ),
             "deep_consolidation": summary.get("deep_consolidation"),
         },
+        "protocol_freeze": protocol_freeze,
         "frozen_probe_manifest": manifest,
         "frozen_probe_schedule": schedule_manifest,
         "judge": public_judge_summary(judge),
+        "judge_media_smoke": {
+            "schema": judge_media_smoke.get("schema"),
+            "private_data_used": judge_media_smoke.get("private_data_used"),
+            "selected_release_judge_model": judge_media_smoke.get(
+                "selected_release_judge_model"
+            ),
+            "selection_reason": judge_media_smoke.get("selection_reason"),
+        }
+        if judge_media_smoke
+        else None,
+        "human_labels": public_human_label_summary(human),
+        "human_label_eval": {
+            "schema": human_eval.get("schema"),
+            "n": human_eval.get("n"),
+            "freeze_sha256": human_eval.get("freeze_sha256"),
+            "token_vs_quality": human_eval.get("token_vs_quality"),
+        }
+        if human_eval
+        else None,
+        "judge_frozen_targets": {
+            "schema": target_freeze.get("schema"),
+            "probe_count": target_freeze.get("probe_count"),
+            "freeze_sha256": target_freeze.get("freeze_sha256"),
+            "labeling": target_freeze.get("labeling", {}),
+        }
+        if target_freeze
+        else None,
         "claim_support": claim_support,
         "costs": costs,
         "ablation_plan": ablation_plan,
         "ablations": ablations,
+        "public_aggregate_summary": {
+            "schema": "cortext_julie_release_public_aggregate_v1",
+            "public_safe": True,
+            "aggregate_only": True,
+            "processed": {
+                "text": summary.get("processed_text_messages"),
+                "media_attempted": summary.get("media_attempted"),
+                "media_processed": summary.get("media_processed"),
+                "audio_processed": summary.get("audio_processed"),
+                "image_processed": summary.get("image_processed"),
+                "video_processed": summary.get("video_processed"),
+                "probe_count": summary.get("probe_count"),
+            },
+            "judge": public_judge_summary(judge),
+            "judge_media_smoke": {
+                "selected_release_judge_model": judge_media_smoke.get(
+                    "selected_release_judge_model"
+                ),
+                "private_data_used": judge_media_smoke.get("private_data_used"),
+            }
+            if judge_media_smoke
+            else None,
+            "protocol_freeze": {
+                "schema": protocol_freeze.get("schema"),
+                "source_input_manifest_sha256": protocol_freeze.get(
+                    "source_input_manifest_sha256"
+                ),
+                "frozen_probe_schedule_sha256": protocol_freeze.get(
+                    "frozen_probe_schedule_sha256"
+                ),
+                "sha256": protocol_freeze.get("sha256"),
+            }
+            if protocol_freeze
+            else None,
+            "human_labels": public_human_label_summary(human),
+            "claim_support": claim_support,
+            "costs": costs,
+            "ablations": [
+                {
+                    "name": row.get("name"),
+                    "quality": row.get("quality"),
+                    "tokens": row.get("tokens"),
+                    "effect_vs_full": row.get("effect_vs_full"),
+                    "processed": row.get("processed"),
+                }
+                for row in ablations
+            ],
+        },
         "release_gate": {
             "overall_status": (
                 "pass"
@@ -1717,6 +3580,8 @@ def main() -> int:
         f"{output['release_gate']['overall_status']} "
         f"checks={status_counts} manifest_sha256={manifest['manifest_sha256']}"
     )
+    if args.require_pass and output["release_gate"]["overall_status"] != "pass":
+        return 2
     return 0
 
 

@@ -112,7 +112,7 @@ TEST_CASE ("Alg28 rate trigger starts when idle",
   SignalProcessor::Config cfg;
 
   cortext::testing::RequireEncoder (cfg);
-  cfg.focus = 0.5;
+  cfg.focus = 0.0; // min_cluster_size = 3, so three below-floor rows avoid fallback
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;
 
@@ -339,12 +339,13 @@ TEST_CASE ("ScoreConsolidation identifies low-strength candidates",
 
   cortext::store::ApplyMigrations (*store);
 
-  // Knobs: high T raises floor via periphery cutoff (~0.25 at T=1.0)
+  // Knobs: high T raises floor via periphery cutoff; F=0 keeps
+  // min_cluster_size at 3 so the three below-floor rows avoid fallback.
   SignalProcessor::Config cfg;
   cortext::testing::RequireEncoder (cfg);
-  cfg.focus = 0.5;
+  cfg.focus = 0.0;
   cfg.sensitivity = 0.5;
-  cfg.stability = 1.0; // T=1.0 → floor≈0.25
+  cfg.stability = 1.0; // T=1.0 -> floor=0.20
 
   // Initialize store and context
   Signal dummy;
@@ -354,30 +355,24 @@ TEST_CASE ("ScoreConsolidation identifies low-strength candidates",
   ProcessorContext p_ctx;
   OperationContext ctx (dummy, p_ctx, cfg, store.get ());
 
-  // v2: Seed embeddings
-  std::vector<float> emb (256, 0.0f);
-  emb[0] = 1.0f;
-  store->Execute (
-      "INSERT INTO embeddings(embedding_id, embedding, created_at) VALUES(?, ?, ?)",
-      { 1LL, emb, 0LL });
-  store->Execute (
-      "INSERT INTO embeddings(embedding_id, embedding, created_at) VALUES(?, ?, ?)",
-      { 2LL, emb, 0LL });
-  // v2: Insert into memories (id=1 below floor, id=2 above)
+  // v2: Insert memories. IDs 1-3 are below the floor; ID 4 is above.
   // score = T*strength - F*redundancy + S*connectivity + T*stability
-  // For T=1.0, F=0.5, S=0.5 and floor=0.25:
-  //   memory 1: 1.0*0.10 - 0.5*0 + 0.5*0 + 1.0*0 = 0.10 < 0.25 (candidate)
-  //   memory 2: 1.0*0.80 - 0.5*0 + 0.5*0 + 1.0*0 = 0.80 >= 0.25 (not candidate)
-  store->Execute (
-      "INSERT INTO memories(memory_id, embedding_id, source_id, kind, start_ts, "
-      "n_signals, modality, s_max, s_avg, strength, stability, created_at) "
-      "VALUES(?, ?, 'test', 'LONG_TERM', 0, 1, 'text', 0.5, 0.5, ?, ?, 0)",
-      { 1LL, 1LL, 0.10, 0.0 });
-  store->Execute (
-      "INSERT INTO memories(memory_id, embedding_id, source_id, kind, start_ts, "
-      "n_signals, modality, s_max, s_avg, strength, stability, created_at) "
-      "VALUES(?, ?, 'test', 'LONG_TERM', 0, 1, 'text', 0.5, 0.5, ?, ?, 0)",
-      { 2LL, 2LL, 0.80, 0.0 });
+  // For T=1.0, S=0.5 and floor=0.20, strength is the effective score.
+  for (long long id = 1; id <= 4; ++id)
+    {
+      std::vector<float> emb (256, 0.0f);
+      emb[static_cast<size_t> (id - 1)] = 1.0f;
+      const double strength = id == 4 ? 0.80 : 0.04 * id;
+      store->Execute (
+          "INSERT INTO embeddings(embedding_id, embedding, created_at) "
+          "VALUES(?, ?, ?)",
+          { id, emb, 0LL });
+      store->Execute (
+          "INSERT INTO memories(memory_id, embedding_id, source_id, kind, start_ts, "
+          "n_signals, modality, s_max, s_avg, strength, stability, created_at) "
+          "VALUES(?, ?, 'test', 'LONG_TERM', 0, 1, 'text', 0.5, 0.5, ?, ?, 0)",
+          { id, id, strength, 0.0 });
+    }
 
   // Run ScoreConsolidation
   ScoreConsolidation op;
@@ -386,10 +381,12 @@ TEST_CASE ("ScoreConsolidation identifies low-strength candidates",
 
   // Verify candidates in context
   const auto &candidates = ctx.GetConsolidationCandidates ();
-  REQUIRE (candidates.size () == 1);
+  REQUIRE (candidates.size () == 3);
   REQUIRE (candidates[0].embedding_id == 1LL);
-  // score = T*strength = 1.0 * 0.10 = 0.10
-  REQUIRE (candidates[0].score == Catch::Approx (0.10).margin (1e-6));
+  // score = T*strength = 1.0 * 0.04 = 0.04
+  REQUIRE (candidates[0].score == Catch::Approx (0.04).margin (1e-6));
+  REQUIRE (candidates[1].embedding_id == 2LL);
+  REQUIRE (candidates[2].embedding_id == 3LL);
   // Verify embedding loaded correctly
   REQUIRE (candidates[0].embedding.size() == 256);
   REQUIRE (candidates[0].embedding(0) == Catch::Approx(1.0f));
@@ -467,4 +464,105 @@ TEST_CASE ("ScoreConsolidation deep mode falls back to lowest eligible scores",
   REQUIRE (candidates[0].score == Catch::Approx (0.30).margin (1e-6));
   REQUIRE (candidates[1].embedding_id == 3LL);
   REQUIRE (candidates[1].score == Catch::Approx (0.40).margin (1e-6));
+}
+
+TEST_CASE ("ScoreConsolidation forced mode broadens partial candidate sets",
+           "[operations][consolidation]")
+{
+  auto unique_store = SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<Store> (std::move (unique_store));
+
+  cortext::store::ApplyMigrations (*store);
+
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  cfg.focus = 0.0;      // min_cluster_size = 3
+  cfg.sensitivity = 0.5;
+  cfg.stability = 1.0;  // score = strength, floor = 0.20
+
+  Signal dummy;
+  dummy.timestamp = 120'000ULL;
+  dummy.source_id = ConsolidationSourceId (ConsolidationMode::Deep);
+  dummy.embedding = Eigen::VectorXf::Zero (4);
+  ProcessorContext p_ctx;
+  OperationContext ctx (dummy, p_ctx, cfg, store.get ());
+
+  for (long long id = 1; id <= 6; ++id)
+    {
+      std::vector<float> emb (256, 0.0f);
+      emb[static_cast<size_t> (id - 1)] = 1.0f;
+      std::vector<unsigned char> blob = {
+        static_cast<unsigned char> ('a' + id - 1)
+      };
+      const double strength = (id == 1) ? 0.10 : 0.40 + 0.05 * id;
+      store->Execute (
+          "INSERT INTO embeddings(embedding_id, embedding, created_at) "
+          "VALUES(?, ?, ?)",
+          { id, emb, 0LL });
+      store->Execute (
+          "INSERT INTO memories(memory_id, embedding_id, source_id, kind, "
+          "start_ts, n_signals, modality, s_max, s_avg, strength, stability, "
+          "redundancy, blob_id, created_at) "
+          "VALUES(?, ?, 'test', 'LONG_TERM', 0, 1, 'text', 0.5, 0.5, "
+          "?, 0.0, 0.0, ?, 0)",
+          { id, id, strength, blob });
+    }
+
+  ScoreConsolidation op;
+  auto tx = store->Begin ();
+  op.Execute (ctx, *tx);
+
+  const auto &candidates = ctx.GetConsolidationCandidates ();
+  REQUIRE (candidates.size () >= static_cast<size_t> (core::MinClusterSize (cfg.focus)));
+  REQUIRE (candidates.size () == 6);
+  REQUIRE (candidates[0].embedding_id == 1LL);
+}
+
+TEST_CASE ("ScoreConsolidation forced shallow mode broadens partial candidate sets",
+           "[operations][consolidation]")
+{
+  auto unique_store = SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<Store> (std::move (unique_store));
+
+  cortext::store::ApplyMigrations (*store);
+
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  cfg.focus = 0.0;      // min_cluster_size = 3
+  cfg.sensitivity = 0.5;
+  cfg.stability = 1.0;  // score = strength, floor = 0.20
+
+  Signal dummy;
+  dummy.timestamp = 130'000ULL;
+  dummy.source_id = ConsolidationSourceId (ConsolidationMode::Shallow);
+  dummy.embedding = Eigen::VectorXf::Zero (4);
+  ProcessorContext p_ctx;
+  OperationContext ctx (dummy, p_ctx, cfg, store.get ());
+
+  for (long long id = 1; id <= 4; ++id)
+    {
+      std::vector<float> emb (256, 0.0f);
+      emb[static_cast<size_t> (id - 1)] = 1.0f;
+      const double strength = (id == 1) ? 0.10 : 0.45 + 0.05 * id;
+      store->Execute (
+          "INSERT INTO embeddings(embedding_id, embedding, created_at) "
+          "VALUES(?, ?, ?)",
+          { id, emb, 0LL });
+      store->Execute (
+          "INSERT INTO memories(memory_id, embedding_id, source_id, kind, "
+          "start_ts, n_signals, modality, s_max, s_avg, strength, stability, "
+          "redundancy, created_at) "
+          "VALUES(?, ?, 'test', 'LONG_TERM', 0, 1, 'text', 0.5, 0.5, "
+          "?, 0.0, 0.0, 0)",
+          { id, id, strength });
+    }
+
+  ScoreConsolidation op;
+  auto tx = store->Begin ();
+  op.Execute (ctx, *tx);
+
+  const auto &candidates = ctx.GetConsolidationCandidates ();
+  REQUIRE (candidates.size () >= static_cast<size_t> (core::MinClusterSize (cfg.focus)));
+  REQUIRE (candidates.size () == 4);
+  REQUIRE (candidates[0].embedding_id == 1LL);
 }

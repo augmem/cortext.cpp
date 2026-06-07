@@ -99,6 +99,10 @@ def main() -> int:
         wait_for_json(path)
         print(f"[finalizer] ready {path}", flush=True)
 
+    release_freeze = args.base / "release_protocol_freeze.json"
+    wait_for_json(release_freeze)
+    print(f"[finalizer] ready release freeze {release_freeze}", flush=True)
+
     wait_for_completed_sample(args.sample)
     print(f"[finalizer] completed human sample {args.sample}", flush=True)
 
@@ -150,10 +154,19 @@ def main() -> int:
         args.benchmark_command,
         "--judge-command",
         args.judge_command,
+        "--judge-media-smoke",
+        str(args.base / "judge_media_smoke_ollama.json"),
+        "--freeze-file",
+        str(release_freeze),
         "--human-labels",
         str(human_score),
+        "--human-label-eval",
+        str(human_eval),
+        "--target-freeze",
+        str(args.target_freeze),
         "--ablation-plan",
         str(args.ablation_plan),
+        "--require-pass",
         *ablation_args,
     ]
     print(f"[finalizer] final report: {' '.join(report_cmd)}", flush=True)
