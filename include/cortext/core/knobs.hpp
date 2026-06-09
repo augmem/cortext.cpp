@@ -3932,9 +3932,9 @@ LambdaMood (double delta_seconds, double T)
 inline int
 WMBaseCapacity (double S, double F)
 {
-  // base_capacity = round(lerp(5, 3, S) + lerp(-1, 1, F))
-  // Paper Section 8.1: capacity range [2, 6]
-  const double cap = Lerp (5.0, 3.0, SensitivityBias (S))
+  // base_capacity = round(lerp(8, 6, S) + lerp(-1, 1, F))
+  // Miller's 7±2: capacity range [5, 9], 7 at neutral knobs.
+  const double cap = Lerp (8.0, 6.0, SensitivityBias (S))
                      + Lerp (-1.0, 1.0, FocusBias (F));
   return static_cast<int> (std::round (cap));
 }
