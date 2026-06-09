@@ -13,6 +13,7 @@ import argparse
 import base64
 import hashlib
 import json
+import math
 import mimetypes
 import os
 import pathlib
@@ -140,17 +141,26 @@ def estimate_tokens(text: str) -> int:
     return max(1, (len(text) + 3) // 4)
 
 
-def estimate_content_tokens(content: str | list[dict]) -> int:
+# Calibrated against real Gemma tokenization of judge prompts: an 83,145-char
+# prompt measured >= 32,767 prompt-eval tokens via Ollama (<= 2.54 chars/token),
+# while chars/4 estimated only ~20.8k and let a 32k-context overflow pass the
+# judge_prompt_fits_context_window check. Used only for context-fit accounting;
+# packet token metrics keep the chars/4 scale shared with the benchmark.
+JUDGE_PROMPT_CHARS_PER_TOKEN = 2.5
+
+
+def estimate_judge_prompt_tokens(content: str | list[dict]) -> int:
     if isinstance(content, str):
-        return estimate_tokens(content)
-    total = 0
-    for part in content:
-        part_type = part.get("type")
-        if part_type == "text":
-            total += estimate_tokens(str(part.get("text", "")))
-        elif part_type in {"image_url", "input_audio"}:
-            total += estimate_tokens(f"[attached {part_type} evidence]")
-    return max(1, total)
+        chars = len(content)
+    else:
+        chars = 0
+        for part in content:
+            part_type = part.get("type")
+            if part_type == "text":
+                chars += len(str(part.get("text", "")))
+            elif part_type in {"image_url", "input_audio"}:
+                chars += len(f"[attached {part_type} evidence]")
+    return max(1, math.ceil(chars / JUDGE_PROMPT_CHARS_PER_TOKEN))
 
 
 def sum_doc_tokens(docs: list[TimelineDoc]) -> int:
@@ -2046,7 +2056,7 @@ def main() -> int:
                     and not judge_media_capabilities.get("image")
                 ):
                     fairness_checks["image_attached_but_judge_image_unsupported"] += 1
-                judge_prompt_tokens_estimate = estimate_content_tokens(content)
+                judge_prompt_tokens_estimate = estimate_judge_prompt_tokens(content)
                 token_totals["judge_prompt_tokens_estimated"] += judge_prompt_tokens_estimate
                 token_totals["max_judge_prompt_tokens_estimated"] = max(
                     token_totals["max_judge_prompt_tokens_estimated"],
