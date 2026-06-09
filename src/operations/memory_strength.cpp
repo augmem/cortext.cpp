@@ -307,8 +307,7 @@ UpdateMemoryStrength::Execute (OperationContext &context, Transaction &tx) const
           "     ON summary_memory.memory_id = summary_edge.source_memory_id"
           "   WHERE summary_edge.target_memory_id = m.memory_id"
           "     AND summary_edge.edge_type = 'derived_from'"
-          "     AND summary_memory.kind = 'ASSOCIATION'"
-          "     AND summary_memory.source_id LIKE 'summary_%'"
+          "     AND summary_memory.kind = 'LONG_TERM'"
           " )";
     }
   const std::string fact_join

@@ -219,8 +219,9 @@ public:
 
   /// @brief Process text input.
   /// @param text The text content to process.
-  /// @param source_id Identifier for the person/agent/source stream, not the
-  /// modality or capture device (e.g., "chat/user").
+  /// @param source_id Opaque source stream identifier used for provenance and
+  /// exact same-source grouping, not for semantic behavior (e.g.,
+  /// "conversation/main").
   /// @param retention Durable by default; pass Ephemeral for no-storage
   /// processing that still updates live context and retrieval.
   /// @return Context with retrieved memories and processing output.
@@ -229,8 +230,9 @@ public:
 
   /// @brief Process text input with an explicit timestamp (ms since epoch).
   /// @param text The text content to process.
-  /// @param source_id Identifier for the person/agent/source stream, not the
-  /// modality or capture device (e.g., "chat/user").
+  /// @param source_id Opaque source stream identifier used for provenance and
+  /// exact same-source grouping, not for semantic behavior (e.g.,
+  /// "conversation/main").
   /// @param timestamp Milliseconds since Unix epoch (must be monotonic).
   /// @param retention Durable by default; pass Ephemeral for no-storage
   /// processing that still updates live context and retrieval.
@@ -243,8 +245,8 @@ public:
   /// @brief Process audio PCM input.
   /// @param pcm Pointer to PCM float samples (16kHz mono expected).
   /// @param num_samples Number of samples.
-  /// @param source_id Identifier for the person/agent/source stream, not the
-  /// modality or capture device.
+  /// @param source_id Opaque source stream identifier used for provenance and
+  /// exact same-source grouping, not for semantic behavior.
   /// @param retention Durable by default; pass Ephemeral for no-storage
   /// processing that still updates live context and retrieval.
   /// @return Context with retrieved memories and processing output.
@@ -257,8 +259,8 @@ public:
   /// @param width Image width.
   /// @param height Image height.
   /// @param channels Number of channels (3 for RGB, 4 for RGBA).
-  /// @param source_id Identifier for the person/agent/source stream, not the
-  /// modality or capture device.
+  /// @param source_id Opaque source stream identifier used for provenance and
+  /// exact same-source grouping, not for semantic behavior.
   /// @param retention Durable by default; pass Ephemeral for no-storage
   /// processing that still updates live context and retrieval.
   /// @return Context with retrieved memories and processing output.

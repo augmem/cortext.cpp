@@ -22,10 +22,9 @@ EvaluateConsolidation::Execute (OperationContext &context, Transaction &tx) cons
   (void)tx;
   auto &p_ctx = context.GetProcessorContext ();
   const uint64_t now_ts = context.GetSignal ().timestamp;
-  const bool force_consolidation
-      = IsConsolidationSignal (context.GetSignal ().source_id);
+  const auto mode = context.GetSignal ().consolidation_mode;
 
-  if (!force_consolidation)
+  if (!mode.has_value ())
     {
       return;
     }
@@ -34,10 +33,9 @@ EvaluateConsolidation::Execute (OperationContext &context, Transaction &tx) cons
   p_ctx.last_consolidation_ts = now_ts;
   p_ctx.consolidation_count += 1;
   p_ctx.memories_since_consolidation = 0;
-  const auto mode = ParseConsolidationMode (context.GetSignal ().source_id);
   telemetry::LogDebug ("cortext.evaluate_consolidation", {
     telemetry::Attribute::Bool ("consolidation_start", true),
-    telemetry::Attribute::String ("mode", ConsolidationModeLabel (mode))
+    telemetry::Attribute::String ("mode", ConsolidationModeLabel (*mode))
   });
 }
 
@@ -49,7 +47,8 @@ EnqueueExtractionJobs::Execute (OperationContext &context, Transaction &tx) cons
     {
       return;
     }
-  const auto mode = ParseConsolidationMode (context.GetSignal ().source_id);
+  const auto mode = context.GetSignal ().consolidation_mode.value_or (
+      ConsolidationMode::Both);
   if (mode == ConsolidationMode::Shallow)
     {
       return;
@@ -110,8 +109,9 @@ ScoreConsolidation::Execute (OperationContext &context, Transaction &tx) const
   const uint64_t now_ts = context.GetSignal ().timestamp;
   (void)now_ts;
   const bool force_consolidation
-      = IsConsolidationSignal (context.GetSignal ().source_id);
-  const auto mode = ParseConsolidationMode (context.GetSignal ().source_id);
+      = context.GetSignal ().consolidation_mode.has_value ();
+  const auto mode = context.GetSignal ().consolidation_mode.value_or (
+      ConsolidationMode::Both);
   const bool deep_mode = (mode != ConsolidationMode::Shallow);
 
   // Floor derived from knobs (no magic numbers).

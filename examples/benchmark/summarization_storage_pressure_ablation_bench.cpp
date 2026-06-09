@@ -41,7 +41,8 @@ MakeSignal (uint64_t ts)
   cortext::Signal s;
   s.embedding = Eigen::VectorXf::Ones (256);
   s.timestamp = ts;
-  s.source_id = cortext::ConsolidationSourceId (cortext::ConsolidationMode::Both);
+  s.source_id = "bench/consolidation";
+  s.consolidation_mode = cortext::ConsolidationMode::Both;
   return s;
 }
 

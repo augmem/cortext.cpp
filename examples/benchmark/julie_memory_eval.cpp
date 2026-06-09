@@ -22,6 +22,9 @@ namespace fs = std::filesystem;
 namespace
 {
 
+constexpr const char *kGabeSourceId = "Gabe";
+constexpr const char *kJulieSourceId = "Julie";
+
 struct Config
 {
   fs::path input_dir;
@@ -391,8 +394,8 @@ main (int argc, char **argv)
               holdouts.push_back (msg);
               continue;
             }
-          const std::string source = msg.from_contact ? "julie/from"
-                                                      : "julie/to";
+          const std::string source = msg.from_contact ? kJulieSourceId
+                                                      : kGabeSourceId;
           auto ctx = engine->ProcessTextAt (msg.text, source, msg.timestamp);
           ++processed;
           process_ms_total += ctx.process_ms;
@@ -434,7 +437,7 @@ main (int argc, char **argv)
       for (const auto &query : holdouts)
         {
           auto ctx = engine->ProcessTextAt (
-              query.text, query.from_contact ? "julie/from" : "julie/to",
+              query.text, query.from_contact ? kJulieSourceId : kGabeSourceId,
               query_ts, cortext::Retention::Ephemeral);
           query_ts += 1000;
           ++query_count;

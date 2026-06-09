@@ -43,6 +43,9 @@ namespace fs = std::filesystem;
 namespace
 {
 
+constexpr const char *kGabeSourceId = "Gabe";
+constexpr const char *kJulieSourceId = "Julie";
+
 struct Config
 {
   fs::path input_dir;
@@ -542,8 +545,8 @@ bool
 IsTextChatDoc (const EventDoc &doc)
 {
   return doc.modality == "text"
-         && (doc.source_id == "chat/user"
-             || doc.source_id == "chat/assistant");
+         && (doc.source_id == kGabeSourceId
+             || doc.source_id == kJulieSourceId);
 }
 
 std::vector<EventDoc>
@@ -588,9 +591,9 @@ RagContextTokens (const CompactedHistory &history,
 std::string
 SpeakerLabel (const std::string &source_id)
 {
-  if (source_id == "chat/user")
+  if (source_id == kGabeSourceId)
     return "Gabe";
-  if (source_id == "chat/assistant")
+  if (source_id == kJulieSourceId)
     return "Julie";
   return source_id;
 }
@@ -875,9 +878,10 @@ BuildVectorRagPacket (cortext::Store &store,
       "JOIN embeddings e ON e.embedding_id = s.embedding_id "
       "WHERE s.timestamp < ? "
       "  AND s.modality = 'text' "
-      "  AND s.source_id IN ('chat/user', 'chat/assistant') "
+      "  AND s.source_id IN (?, ?) "
       "ORDER BY s.timestamp ASC, s.signal_id ASC",
-      { static_cast<long long> (query_ts) });
+      { static_cast<long long> (query_ts), std::string (kGabeSourceId),
+        std::string (kJulieSourceId) });
   for (const auto &row : prior_rows)
     {
       auto it_embedding = row.find ("embedding");
@@ -1035,14 +1039,20 @@ AppendProbeStream (const fs::path &path, const nlohmann::json &probe)
 }
 
 std::string
+SourceIdForMessage (const Message &message)
+{
+  return message.from_contact ? kJulieSourceId : kGabeSourceId;
+}
+
+std::string
 MediaSourceId (const MediaItem &item)
 {
   const std::string name = Lower (item.path.filename ().string ());
   if (item.kind == "audio"
       && (name.find ("_self") != std::string::npos
           || name.find (" self ") != std::string::npos))
-    return "chat/user";
-  return "chat/assistant";
+    return kGabeSourceId;
+  return kJulieSourceId;
 }
 
 std::vector<MediaItem>
@@ -1224,6 +1234,10 @@ main (int argc, char **argv)
       if (cfg.max_messages >= 0
           && static_cast<int> (messages.size ()) > cfg.max_messages)
         messages.resize (static_cast<size_t> (cfg.max_messages));
+      const std::uint64_t message_window_start
+          = messages.empty () ? 0 : messages.front ().timestamp;
+      const std::uint64_t message_window_end
+          = messages.empty () ? 0 : messages.back ().timestamp;
 
       if (!cfg.db_path.parent_path ().empty ())
         fs::create_directories (cfg.db_path.parent_path ());
@@ -1291,7 +1305,18 @@ main (int argc, char **argv)
       int image_processed = 0;
       int audio_processed = 0;
       int video_processed = 0;
-      const auto media = FindMedia (cfg.input_dir);
+      auto media = FindMedia (cfg.input_dir);
+      if (message_window_start > 0 && message_window_end >= message_window_start)
+        {
+          media.erase (
+              std::remove_if (
+                  media.begin (), media.end (),
+                  [&] (const MediaItem &item) {
+                    return item.timestamp < message_window_start
+                           || item.timestamp > message_window_end;
+                  }),
+              media.end ());
+        }
       const fs::path tmp_dir = cfg.db_path.parent_path () / "julie_live_media_tmp";
       fs::create_directories (tmp_dir);
       std::vector<EventDoc> prior_docs;
@@ -1369,8 +1394,7 @@ main (int argc, char **argv)
                 }
 
               const auto &msg = messages[event.index];
-              const std::string source = msg.from_contact ? "chat/assistant"
-                                                          : "chat/user";
+              const std::string source = SourceIdForMessage (msg);
               const EventDoc doc {
                 checkpoint_event_count,
                 msg.timestamp,
@@ -1727,14 +1751,14 @@ main (int argc, char **argv)
           out["consolidation_runs"]
               = SqlCount (cfg.db_path,
                           "SELECT COUNT(*) FROM signals "
-                          "WHERE source_id = 'cortext/consolidate'");
+                          "WHERE source_id = 'cortext/maintenance'");
           out["consolidation_ms_total"] = 0.0;
           out["wall_ms_excluding_consolidation"] = wall_ms;
           out["deep_consolidation"] = cfg.deep_consolidation;
           out["daily_consolidation"] = cfg.daily_consolidation;
           out["source_id_policy"]
-              = "chat/user and chat/assistant identify the conversation "
-                "speakers; media is not encoded into source_id";
+              = "Gabe and Julie are opaque conversation provenance source "
+                "IDs; media is not encoded into source_id";
           out["timeline_policy"]
               = "checkpoint eval opens an existing Cortext replay database "
                 "and scores future text turns with public timestamped "
@@ -1801,8 +1825,7 @@ main (int argc, char **argv)
                   continue;
                 }
               const auto &msg = messages[event.index];
-              const std::string source
-                  = msg.from_contact ? "chat/assistant" : "chat/user";
+              const std::string source = SourceIdForMessage (msg);
               const EventDoc doc {
                 profile_event_count,
                 msg.timestamp,
@@ -2007,8 +2030,7 @@ main (int argc, char **argv)
             {
               const auto &msg = messages[event.index];
               maybe_run_daily_consolidation (msg.timestamp);
-              const std::string source = msg.from_contact ? "chat/assistant"
-                                                          : "chat/user";
+              const std::string source = SourceIdForMessage (msg);
               const EventDoc doc {
                 event_count,
                 msg.timestamp,
@@ -2324,6 +2346,8 @@ main (int argc, char **argv)
       out["append"] = cfg.append;
       out["parsed_transcript_messages"] = parsed_messages;
       out["skipped_transcript_messages"] = skipped_messages;
+      out["message_window_start_timestamp"] = message_window_start;
+      out["message_window_end_timestamp"] = message_window_end;
       out["processed_text_messages"] = processed_text;
       out["text_write_events"] = text_write_events;
       out["retrieval_events_during_ingest"] = retrieval_events;
@@ -2404,7 +2428,7 @@ main (int argc, char **argv)
       out["deep_consolidation"] = cfg.deep_consolidation;
       out["daily_consolidation"] = cfg.daily_consolidation;
       out["source_id_policy"]
-          = "chat/user and chat/assistant identify the conversation speakers; "
+          = "Gabe and Julie are opaque conversation provenance source IDs; "
             "media is not encoded into source_id";
       out["timeline_policy"]
           = "transcript messages and media files are processed in timestamp "

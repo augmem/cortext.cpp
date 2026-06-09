@@ -169,7 +169,7 @@ TEST_CASE ("internal replay ingress preserves media event timestamps",
 
   REQUIRE_NOTHROW (
       cortext::internal::ReplayIngress::ProcessAudioAt (
-          *ctx, pcm.data (), pcm.size (), "chat/assistant", replay_ts));
+          *ctx, pcm.data (), pcm.size (), "stream/reply", replay_ts));
   ctx->Flush ();
 
   auto unique_store = cortext::SQLiteStore::Create (db_path.c_str ());
@@ -181,7 +181,7 @@ TEST_CASE ("internal replay ingress preserves media event timestamps",
   REQUIRE (AnyToLongLong (rows[0].at ("timestamp"))
            == static_cast<long long> (replay_ts));
   REQUIRE (std::any_cast<std::string> (rows[0].at ("source_id"))
-           == "chat/assistant");
+           == "stream/reply");
   REQUIRE (std::any_cast<std::string> (rows[0].at ("modality")) == "audio");
 }
 
@@ -199,7 +199,7 @@ TEST_CASE ("timestamped replay persists working memory source timestamps",
 
   const std::uint64_t replay_ts = 1573184762000ULL;
   REQUIRE_NOTHROW (
-      ctx->ProcessTextAt ("timestamped working memory replay", "chat/user",
+      ctx->ProcessTextAt ("timestamped working memory replay", "stream/main",
                           replay_ts));
   ctx->Flush ();
 
@@ -232,7 +232,7 @@ TEST_CASE ("replay clock override preserves working memory on reopen",
     auto ctx = cortext::Cortext::Create (cfg, db_path, models_dir, clock);
     REQUIRE (ctx != nullptr);
     REQUIRE_NOTHROW (ctx->ProcessTextAt (
-        "timestamped working memory replay survives reopen", "chat/user",
+        "timestamped working memory replay survives reopen", "stream/main",
         replay_ts));
     ctx->Flush ();
   }
@@ -243,7 +243,7 @@ TEST_CASE ("replay clock override preserves working memory on reopen",
                                               clock);
     REQUIRE (reopened != nullptr);
     auto probe = reopened->ProcessTextAt (
-        "follow up for the replay working memory", "chat/user",
+        "follow up for the replay working memory", "stream/main",
         replay_ts + 2000ULL, cortext::Retention::Ephemeral);
     REQUIRE_FALSE (probe.working_memory.empty ());
   }
@@ -266,7 +266,7 @@ TEST_CASE ("internal replay ingress preserves consolidation event timestamps",
     {
       REQUIRE_NOTHROW (ctx->ProcessTextAt (
           "shared replay consolidation topic package pickup dinner logistics",
-          "chat/user", source_ts + static_cast<std::uint64_t> (i) * 1000ULL));
+          "stream/main", source_ts + static_cast<std::uint64_t> (i) * 1000ULL));
     }
   ctx->Flush ();
 
@@ -584,13 +584,13 @@ TEST_CASE ("Cortext hydrates SoftAnchor metadata with retrieved memories",
   store->Execute (
       "INSERT INTO memories (memory_id, embedding_id, source_id, kind, blob_id, "
       "start_ts, end_ts, n_signals, modality, s_max, s_avg, strength, created_at) "
-      "VALUES (?, ?, 'chat/user', 'LONG_TERM', ?, 1000, 1000, 1, 'text', "
+      "VALUES (?, ?, 'stream/main', 'LONG_TERM', ?, 1000, 1000, 1, 'text', "
       "0.5, 0.5, 1.0, 1000)",
       { 501LL, 501LL, blob_id });
   store->Execute (
       "INSERT INTO signals (memory_id, embedding_id, source_id, timestamp, "
       "modality, mime, blob_id, serial_position, created_at) "
-      "VALUES (?, ?, 'chat/user', 1000, 'text', 'text/plain', ?, 0, 1000)",
+      "VALUES (?, ?, 'stream/main', 1000, 'text', 'text/plain', ?, 0, 1000)",
       { 501LL, 501LL, blob_id });
 
   store->Execute (
@@ -661,13 +661,13 @@ TEST_CASE ("Cortext expands internal retrieval nodes to linked text memories",
   store->Execute (
       "INSERT INTO memories (memory_id, embedding_id, source_id, kind, blob_id, "
       "start_ts, end_ts, n_signals, modality, s_max, s_avg, strength, created_at) "
-      "VALUES (?, ?, 'chat/user', 'LONG_TERM', ?, 1000, 1000, 1, 'text', "
+      "VALUES (?, ?, 'stream/main', 'LONG_TERM', ?, 1000, 1000, 1, 'text', "
       "0.5, 0.5, 1.0, 1000)",
       { 100LL, 100LL, blob_id });
   store->Execute (
       "INSERT INTO signals (memory_id, embedding_id, source_id, timestamp, "
       "modality, mime, blob_id, serial_position, created_at) "
-      "VALUES (?, ?, 'chat/user', 1000, 'text', 'text/plain', ?, 0, 1000)",
+      "VALUES (?, ?, 'stream/main', 1000, 'text', 'text/plain', ?, 0, 1000)",
       { 100LL, 100LL, blob_id });
   store->Execute (
       "INSERT INTO memories (memory_id, embedding_id, source_id, kind, label, "
@@ -732,7 +732,7 @@ TEST_CASE ("Cortext expands durable association retrieval nodes even when the cu
   store->Execute (
       "INSERT INTO memories (memory_id, embedding_id, source_id, kind, blob_id, "
       "start_ts, end_ts, n_signals, modality, s_max, s_avg, strength, created_at) "
-      "VALUES (?, ?, 'chat/user', 'LONG_TERM', ?, 1000, 1000, 1, 'text', "
+      "VALUES (?, ?, 'stream/main', 'LONG_TERM', ?, 1000, 1000, 1, 'text', "
       "0.5, 0.5, 1.0, 1000), "
       "(?, ?, 'associative_cue_test', 'ASSOCIATION', ?, 1000, 1000, 1, "
       "'text', 0.5, 0.5, 1.0, 1000)",
@@ -740,7 +740,7 @@ TEST_CASE ("Cortext expands durable association retrieval nodes even when the cu
   store->Execute (
       "INSERT INTO signals (memory_id, embedding_id, source_id, timestamp, "
       "modality, mime, blob_id, serial_position, created_at) "
-      "VALUES (?, ?, 'chat/user', 1000, 'text', 'text/plain', ?, 0, 1000), "
+      "VALUES (?, ?, 'stream/main', 1000, 'text', 'text/plain', ?, 0, 1000), "
       "(?, ?, 'associative_cue_test', 1000, 'text', 'text/plain', ?, 0, 1000)",
       { 100LL, 100LL, source_blob_id, 200LL, 200LL, cue_blob_id });
   store->Execute (
@@ -756,6 +756,72 @@ TEST_CASE ("Cortext expands durable association retrieval nodes even when the cu
   REQUIRE (cue_hydrated.retrieved_memory.size () == 1);
   REQUIRE (cue_hydrated.retrieved_memory[0].id == 100LL);
   REQUIRE (TextFromMemory (cue_hydrated.retrieved_memory[0]) == source_text);
+}
+
+TEST_CASE ("Cortext surfaces deep consolidated summaries as LTM content",
+           "[cortext][hydration][retrieval][consolidation]")
+{
+  ScopedTempDb temp_db;
+  const auto &db_path = temp_db.path ();
+  auto unique_store = cortext::SQLiteStore::Create (db_path);
+  auto store = std::shared_ptr<cortext::Store> (std::move (unique_store));
+  cortext::testing::InitializeCoreSchema (*store);
+
+  constexpr int kEmbeddingDim = 256;
+  std::vector<float> embedding (kEmbeddingDim, 0.0f);
+  embedding[0] = 1.0f;
+
+  const std::string source_text = "Julie asked about a package delivery.";
+  const std::string summary_text
+      = "Julie and Gabe discussed a package delivery.";
+  const std::vector<unsigned char> source_payload (source_text.begin (),
+                                                   source_text.end ());
+  const std::vector<unsigned char> summary_payload (summary_text.begin (),
+                                                    summary_text.end ());
+  auto source_blob_rows = store->Execute ("SELECT objstore_put(?1) AS id",
+                                          { source_payload });
+  auto summary_blob_rows = store->Execute ("SELECT objstore_put(?1) AS id",
+                                           { summary_payload });
+  REQUIRE (source_blob_rows.size () == 1);
+  REQUIRE (summary_blob_rows.size () == 1);
+  const auto source_blob_id = BlobFromAny (source_blob_rows[0].at ("id"));
+  const auto summary_blob_id = BlobFromAny (summary_blob_rows[0].at ("id"));
+  REQUIRE (!source_blob_id.empty ());
+  REQUIRE (!summary_blob_id.empty ());
+
+  store->Execute (
+      "INSERT INTO embeddings (embedding_id, embedding, created_at) "
+      "VALUES (?, ?, ?), (?, ?, ?)",
+      { 100LL, embedding, 1000LL, 200LL, embedding, 2000LL });
+  store->Execute (
+      "INSERT INTO memories (memory_id, embedding_id, source_id, kind, label, "
+      "blob_id, start_ts, end_ts, n_signals, modality, s_max, s_avg, strength, "
+      "created_at) "
+      "VALUES (?, ?, 'stream/package', 'LONG_TERM', NULL, ?, 1000, 1000, 1, 'text', "
+      "0.5, 0.5, 1.0, 1000), "
+      "(?, ?, 'summary_2000_0', 'LONG_TERM', ?, ?, 2000, 2000, 1, 'text', "
+      "0.5, 0.5, 1.0, 2000)",
+      { 100LL, 100LL, source_blob_id, 200LL, 200LL, summary_text,
+        summary_blob_id });
+  store->Execute (
+      "INSERT INTO signals (memory_id, embedding_id, source_id, timestamp, "
+      "modality, mime, blob_id, serial_position, created_at) "
+      "VALUES (?, ?, 'stream/package', 1000, 'text', 'text/plain', ?, 0, 1000)",
+      { 100LL, 100LL, source_blob_id });
+  store->Execute (
+      "INSERT INTO associations(source_memory_id, target_memory_id, edge_type, weight) "
+      "VALUES (?, ?, 'derived_from', 1.0)",
+      { 200LL, 100LL });
+
+  cortext::Cortext::Config cfg;
+  auto ctx = cortext::Cortext::Create (cfg, store, RepoModelsDir ());
+  REQUIRE (ctx != nullptr);
+
+  auto summary_hydrated = ctx->DebugHydrateForTest ({ 200LL }, {});
+  REQUIRE (summary_hydrated.retrieved_memory.size () == 1);
+  REQUIRE (summary_hydrated.retrieved_memory[0].id == 200LL);
+  REQUIRE (TextFromMemory (summary_hydrated.retrieved_memory[0])
+           == summary_text);
 }
 
 TEST_CASE ("Cortext expands durable label retrieval nodes through association sources",
@@ -787,13 +853,13 @@ TEST_CASE ("Cortext expands durable label retrieval nodes through association so
   store->Execute (
       "INSERT INTO memories (memory_id, embedding_id, source_id, kind, blob_id, "
       "start_ts, end_ts, n_signals, modality, s_max, s_avg, strength, created_at) "
-      "VALUES (?, ?, 'chat/user', 'LONG_TERM', ?, 1000, 1000, 1, 'text', "
+      "VALUES (?, ?, 'stream/main', 'LONG_TERM', ?, 1000, 1000, 1, 'text', "
       "0.5, 0.5, 1.0, 1000)",
       { 100LL, 100LL, source_blob_id });
   store->Execute (
       "INSERT INTO signals (memory_id, embedding_id, source_id, timestamp, "
       "modality, mime, blob_id, serial_position, created_at) "
-      "VALUES (?, ?, 'chat/user', 1000, 'text', 'text/plain', ?, 0, 1000)",
+      "VALUES (?, ?, 'stream/main', 1000, 'text', 'text/plain', ?, 0, 1000)",
       { 100LL, 100LL, source_blob_id });
   store->Execute (
       "INSERT INTO memories (memory_id, embedding_id, source_id, kind, label, "
@@ -858,16 +924,16 @@ TEST_CASE ("Cortext orders durable label source hydration by query similarity",
   store->Execute (
       "INSERT INTO memories (memory_id, embedding_id, source_id, kind, blob_id, "
       "start_ts, end_ts, n_signals, modality, s_max, s_avg, strength, created_at) "
-      "VALUES (?, ?, 'chat/user', 'LONG_TERM', ?, 1000, 1000, 1, 'text', "
+      "VALUES (?, ?, 'stream/main', 'LONG_TERM', ?, 1000, 1000, 1, 'text', "
       "0.5, 0.5, 1.0, 1000), "
-      "(?, ?, 'chat/user', 'LONG_TERM', ?, 2000, 2000, 1, 'text', "
+      "(?, ?, 'stream/main', 'LONG_TERM', ?, 2000, 2000, 1, 'text', "
       "0.5, 0.5, 1.0, 2000)",
       { 100LL, 100LL, relevant_blob_id, 101LL, 101LL, recent_blob_id });
   store->Execute (
       "INSERT INTO signals (memory_id, embedding_id, source_id, timestamp, "
       "modality, mime, blob_id, serial_position, created_at) "
-      "VALUES (?, ?, 'chat/user', 1000, 'text', 'text/plain', ?, 0, 1000), "
-      "(?, ?, 'chat/user', 2000, 'text', 'text/plain', ?, 0, 2000)",
+      "VALUES (?, ?, 'stream/main', 1000, 'text', 'text/plain', ?, 0, 1000), "
+      "(?, ?, 'stream/main', 2000, 'text', 'text/plain', ?, 0, 2000)",
       { 100LL, 100LL, relevant_blob_id, 101LL, 101LL, recent_blob_id });
   store->Execute (
       "INSERT INTO memories (memory_id, embedding_id, source_id, kind, label, "
@@ -960,13 +1026,13 @@ TEST_CASE ("Cortext caps linked source hydration with knob-derived compact limit
           "INSERT INTO memories (memory_id, embedding_id, source_id, kind, "
           "blob_id, start_ts, end_ts, n_signals, modality, s_max, s_avg, "
           "strength, created_at) "
-          "VALUES (?, ?, 'chat/user', 'LONG_TERM', ?, ?, ?, 1, 'text', "
+          "VALUES (?, ?, 'stream/main', 'LONG_TERM', ?, ?, ?, 1, 'text', "
           "0.5, 0.5, 1.0, ?)",
           { memory_id, memory_id, blob_id, ts, ts, ts });
       store->Execute (
           "INSERT INTO signals (memory_id, embedding_id, source_id, timestamp, "
           "modality, mime, blob_id, serial_position, created_at) "
-          "VALUES (?, ?, 'chat/user', ?, 'text', 'text/plain', ?, 0, ?)",
+          "VALUES (?, ?, 'stream/main', ?, 'text', 'text/plain', ?, 0, ?)",
           { memory_id, memory_id, ts, blob_id, ts });
       store->Execute (
           "INSERT INTO associations(source_memory_id, target_memory_id, "

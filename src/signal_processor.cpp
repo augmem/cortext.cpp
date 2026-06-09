@@ -1,5 +1,4 @@
 #include "cortext/core/knobs.hpp"
-#include "cortext/consolidation_mode.hpp"
 #include "cortext/clock.hpp"
 #include "cortext/internal/cancellation.hpp"
 #include "cortext/processor.hpp"
@@ -123,7 +122,7 @@ ApplyConsolidationHint (const Signal &signal, const SignalProcessor::Config &cfg
                         const ProcessorContext &ctx,
                         SignalProcessor::Output &out)
 {
-  if (IsConsolidationSignal (signal.source_id))
+  if (signal.consolidation_mode.has_value ())
     {
       out.consolidation_recommended = false;
       out.consolidation_required = false;

@@ -70,7 +70,9 @@ MakeSignal (const Eigen::VectorXf &embedding, std::uint64_t ts,
 cortext::Signal
 MakeConsolidationSignal (const Eigen::VectorXf &embedding, std::uint64_t ts)
 {
-  return MakeSignal (embedding, ts, "cortext/consolidate/shallow");
+  auto signal = MakeSignal (embedding, ts, "bench/consolidation");
+  signal.consolidation_mode = cortext::ConsolidationMode::Shallow;
+  return signal;
 }
 
 cortext::ProcessorContext

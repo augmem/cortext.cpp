@@ -181,8 +181,8 @@ GetCoreMigrations ()
               "  suppression REAL NOT NULL DEFAULT 0.0,"
               "  suppression_ts INTEGER,"
               // Source monitoring
-              "  source_origin TEXT,"
-              "  source_reliability REAL NOT NULL DEFAULT 0.5,"
+              "  source_origin TEXT DEFAULT 'source',"
+              "  source_reliability REAL NOT NULL DEFAULT 0.7,"
               "  source_contradiction_count INTEGER NOT NULL DEFAULT 0,"
               "  source_last_verified_ts INTEGER NOT NULL DEFAULT 0,"
               // Flashbulb (from emotional_tags v1)
@@ -400,6 +400,7 @@ GetCoreMigrations ()
               // MEMORIES indexes
               // ------------------------------------------------------------------
               "CREATE INDEX IF NOT EXISTS idx_memories_episode ON memories(episode_id, start_ts)",
+              "CREATE INDEX IF NOT EXISTS idx_memories_embedding ON memories(embedding_id)",
               "CREATE INDEX IF NOT EXISTS idx_memories_kind ON memories(kind)",
               "CREATE INDEX IF NOT EXISTS idx_memories_working ON memories(end_ts) WHERE kind = 'WORKING'",
               "CREATE INDEX IF NOT EXISTS idx_memories_strength ON memories(strength, last_access)",
@@ -670,6 +671,28 @@ GetCoreMigrations ()
               "ON soft_anchor_links(anchor_id, updated_step)",
               "CREATE INDEX IF NOT EXISTS idx_soft_anchor_links_memory "
               "ON soft_anchor_links(memory_id)",
+          },
+      },
+      {
+          7,
+          "Memory embedding lookup index for graph retrieval",
+          {
+              "CREATE INDEX IF NOT EXISTS idx_memories_embedding "
+              "ON memories(embedding_id)",
+          },
+      },
+      {
+          8,
+          "Neutral source metadata and LTM deep summaries",
+          {
+              "UPDATE memories "
+              "SET source_origin = 'source', source_reliability = 0.7 "
+              "WHERE source_origin IS NULL "
+              "   OR source_origin != 'source' "
+              "   OR source_reliability IN (0.5, 0.6, 0.8, 0.9)",
+              "UPDATE memories "
+              "SET kind = 'LONG_TERM' "
+              "WHERE kind = 'ASSOCIATION' AND source_id LIKE 'summary_%'",
           },
       },
   };

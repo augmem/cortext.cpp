@@ -403,7 +403,8 @@ TEST_CASE ("Consolidation pipeline triggers on explicit consolidation signal",
 
   SignalProcessor processor (cfg, store, std::move (ops));
   Signal s = MakeSignal (now_ts);
-  s.source_id = ConsolidationSourceId (ConsolidationMode::Both);
+  s.source_id = "test/consolidation";
+  s.consolidation_mode = ConsolidationMode::Both;
   processor.Process (s);
   processor.Flush ();
 }
@@ -517,7 +518,7 @@ TEST_CASE ("Summarization creates summary records",
   INFO ("Extraction request count: " << requests.size ());
 }
 
-TEST_CASE ("Summarization labels chat excerpts before prompting",
+TEST_CASE ("Summarization preserves raw evidence text before prompting",
            "[integration][consolidation][summarize]")
 {
   auto unique_store = SQLiteStore::Create (":memory:");
@@ -540,7 +541,8 @@ TEST_CASE ("Summarization labels chat excerpts before prompting",
   pctx.summarizer = &summarizer;
   pctx.last_consolidation_ts = 100000;
   Signal s = MakeSignal (3000);
-  s.source_id = ConsolidationSourceId (ConsolidationMode::Both);
+  s.source_id = "test/consolidation";
+  s.consolidation_mode = ConsolidationMode::Both;
   OperationContext ctx (s, pctx, cfg, store.get ());
   ctx.SetConsolidationShouldStart (true);
 
@@ -555,10 +557,10 @@ TEST_CASE ("Summarization labels chat excerpts before prompting",
   SeedMemory (store.get (), 3, "The conversation stayed on memory testing.", 3000);
   SeedMemory (store.get (), 4, "The last note confirms the test cluster.", 4000);
   store->Execute (
-      "UPDATE memories SET source_id = 'chat/user' WHERE memory_id IN (1, 3)",
+      "UPDATE memories SET source_id = 'stream/a' WHERE memory_id IN (1, 3)",
       {});
   store->Execute (
-      "UPDATE memories SET source_id = 'chat/assistant' WHERE memory_id IN (2, 4)",
+      "UPDATE memories SET source_id = 'stream/b' WHERE memory_id IN (2, 4)",
       {});
   MarkCompressibleClusterSources (store.get ());
 
@@ -580,11 +582,13 @@ TEST_CASE ("Summarization labels chat excerpts before prompting",
   summarize_op.Execute (ctx, *tx);
   tx->Commit ();
 
-  REQUIRE (summarizer.captured_texts.size () == 4);
-  REQUIRE (summarizer.captured_texts[0].rfind ("User:", 0) == 0);
-  REQUIRE (summarizer.captured_texts[1].rfind ("Assistant:", 0) == 0);
-  REQUIRE (summarizer.captured_texts[2].rfind ("User:", 0) == 0);
-  REQUIRE (summarizer.captured_texts[3].rfind ("Assistant:", 0) == 0);
+  REQUIRE (summarizer.captured_texts.size () == 3);
+  REQUIRE (summarizer.captured_texts[0]
+           == "My name is Gabe and I am testing memory.");
+  REQUIRE (summarizer.captured_texts[1]
+           == "I will remember that you are Gabe.");
+  REQUIRE (summarizer.captured_texts[2]
+           == "The conversation stayed on memory testing.");
   REQUIRE (summarizer.last_max_words == 0);
 }
 
@@ -614,7 +618,8 @@ TEST_CASE ("Summarization source blob ablation keeps text evidence",
   pctx.summarizer = &summarizer;
   pctx.last_consolidation_ts = 100000;
   Signal s = MakeSignal (3000);
-  s.source_id = ConsolidationSourceId (ConsolidationMode::Both);
+  s.source_id = "test/consolidation";
+  s.consolidation_mode = ConsolidationMode::Both;
   OperationContext ctx (s, pctx, cfg, store.get ());
   ctx.SetConsolidationShouldStart (true);
 
@@ -629,10 +634,10 @@ TEST_CASE ("Summarization source blob ablation keeps text evidence",
   SeedMemory (store.get (), 3, "The conversation stayed on memory testing.", 3000);
   SeedMemory (store.get (), 4, "The last note confirms the test cluster.", 4000);
   store->Execute (
-      "UPDATE memories SET source_id = 'chat/user' WHERE memory_id IN (1, 3)",
+      "UPDATE memories SET source_id = 'stream/a' WHERE memory_id IN (1, 3)",
       {});
   store->Execute (
-      "UPDATE memories SET source_id = 'chat/assistant' WHERE memory_id IN (2, 4)",
+      "UPDATE memories SET source_id = 'stream/b' WHERE memory_id IN (2, 4)",
       {});
   MarkCompressibleClusterSources (store.get ());
 
@@ -682,7 +687,8 @@ TEST_CASE ("Summarization passes STM graph labels to relabeler as candidates",
   ProcessorContext pctx;
   pctx.last_consolidation_ts = 100000;
   Signal s = MakeSignal (3000);
-  s.source_id = ConsolidationSourceId (ConsolidationMode::Both);
+  s.source_id = "test/consolidation";
+  s.consolidation_mode = ConsolidationMode::Both;
   OperationContext ctx (s, pctx, cfg, store.get ());
   ctx.SetConsolidationShouldStart (true);
 
@@ -697,14 +703,14 @@ TEST_CASE ("Summarization passes STM graph labels to relabeler as candidates",
   MarkCompressibleClusterSources (store.get ());
 
   ProcessorContext::ShadowLabelEdge edge;
-  edge.source_id = "chat/user";
+  edge.source_id = "stream/a";
   edge.timestamp = 2000;
   edge.step_index = 1;
   edge.label = "Steve";
   edge.weight = 0.9;
   edge.signal_embedding = emb;
   auto &label_edges
-      = ctx.GetProcessorContext ().short_term_graphs["chat/user"].label_edges;
+      = ctx.GetProcessorContext ().short_term_graphs["stream/a"].label_edges;
   label_edges.push_back (edge);
   edge.label = "Alfred";
   label_edges.push_back (edge);
@@ -777,7 +783,8 @@ TEST_CASE ("Summarization can disable STM graph label handoff natively",
   ProcessorContext pctx;
   pctx.last_consolidation_ts = 100000;
   Signal s = MakeSignal (3000);
-  s.source_id = ConsolidationSourceId (ConsolidationMode::Both);
+  s.source_id = "test/consolidation";
+  s.consolidation_mode = ConsolidationMode::Both;
   OperationContext ctx (s, pctx, cfg, store.get ());
   ctx.SetConsolidationShouldStart (true);
 
@@ -792,13 +799,13 @@ TEST_CASE ("Summarization can disable STM graph label handoff natively",
   MarkCompressibleClusterSources (store.get ());
 
   ProcessorContext::ShadowLabelEdge edge;
-  edge.source_id = "chat/user";
+  edge.source_id = "stream/a";
   edge.timestamp = 2000;
   edge.step_index = 1;
   edge.label = "Steve";
   edge.weight = 0.9;
   edge.signal_embedding = emb;
-  ctx.GetProcessorContext ().short_term_graphs["chat/user"].label_edges
+  ctx.GetProcessorContext ().short_term_graphs["stream/a"].label_edges
       .push_back (edge);
 
   ClusterInfo cluster;
@@ -852,7 +859,8 @@ TEST_CASE ("Summarization creates retrieval summaries without storage pressure",
   pctx.summarizer = &summarizer;
   pctx.last_consolidation_ts = 100000;
   Signal s = MakeSignal (3000);
-  s.source_id = ConsolidationSourceId (ConsolidationMode::Both);
+  s.source_id = "test/consolidation";
+  s.consolidation_mode = ConsolidationMode::Both;
   OperationContext ctx (s, pctx, cfg, store.get ());
   ctx.SetConsolidationShouldStart (true);
 
@@ -889,7 +897,7 @@ TEST_CASE ("Summarization creates retrieval summaries without storage pressure",
   REQUIRE (CountRows (store.get (), "associations") == 6);
   auto summaries = store->Execute (
       "SELECT COUNT(*) AS c FROM memories "
-      "WHERE kind = 'ASSOCIATION' AND source_id LIKE 'summary_%'",
+      "WHERE kind = 'LONG_TERM' AND source_id LIKE 'summary_%'",
       {});
   REQUIRE (std::any_cast<long long> (summaries[0].at ("c")) == 1);
   auto cues = store->Execute (
@@ -923,7 +931,8 @@ TEST_CASE ("Summarization links protected fact evidence under pressure",
   pctx.summarizer = &summarizer;
   pctx.last_consolidation_ts = 100000;
   Signal s = MakeSignal (3000);
-  s.source_id = ConsolidationSourceId (ConsolidationMode::Both);
+  s.source_id = "test/consolidation";
+  s.consolidation_mode = ConsolidationMode::Both;
   OperationContext ctx (s, pctx, cfg, store.get ());
   ctx.SetConsolidationShouldStart (true);
 
@@ -985,7 +994,7 @@ TEST_CASE ("Summarization links protected fact evidence under pressure",
   REQUIRE (summarizer.calls == 1);
   auto summaries = store->Execute (
       "SELECT COUNT(*) AS c FROM memories "
-      "WHERE kind = 'ASSOCIATION' AND source_id LIKE 'summary_%'",
+      "WHERE kind = 'LONG_TERM' AND source_id LIKE 'summary_%'",
       {});
   REQUIRE (std::any_cast<long long> (summaries[0].at ("c")) == 1);
   auto cues = store->Execute (

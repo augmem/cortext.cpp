@@ -52,13 +52,6 @@ EnvFlag (const char *name)
   return s == "1" || s == "true" || s == "yes" || s == "on";
 }
 
-bool
-IsChatConversationSource (const std::string &source_id)
-{
-  return source_id.rfind ("chat/user", 0) == 0
-         || source_id.rfind ("chat/assistant", 0) == 0;
-}
-
 std::string
 CanonicalQueryText (const std::string &text)
 {
@@ -1050,6 +1043,9 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
 
   // Convert query vector to std::vector<float> for parameter binding.
   std::vector<float> q_vec (q.data (), q.data () + q.size ());
+  const int seed_search_k = std::max (
+      seed_k,
+      std::min (512, std::max (seed_k * 12, seed_k + 32)));
 
   std::unordered_set<long long> seen_seed_embeddings;
   const auto &summary_cache = p_ctx.summary_cache;
@@ -1161,24 +1157,71 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
       }
   };
 
-  const std::string seed_sql
-      = std::string (
-            "SELECT m.embedding_id AS base_embedding_id, e.distance, "
-            "COALESCE(m.created_at, e.created_at, 0) AS created_at, "
+  std::string seed_sql;
+  if (disable_constructive_recall)
+    {
+      seed_sql
+          = "WITH seed AS ("
+            "  SELECT embedding_id, distance, created_at "
+            "  FROM embeddings "
+            "  WHERE embedding MATCH ? AND k = ? "
+            "  ORDER BY distance"
+            ") "
+            "SELECT m.embedding_id AS base_embedding_id, seed.distance, "
+            "COALESCE(m.created_at, seed.created_at, 0) AS created_at, "
             "m.memory_id, m.kind, COALESCE(m.pre_activation, 0.0) AS pre_activation "
-            "FROM memories m ")
-        + latest_reconstruction_join
-        + "JOIN embeddings e ON e.embedding_id = "
-        + current_embedding_expr
-        + " "
-	          "WHERE e.embedding MATCH ? AND k = ? "
-	          "AND m.kind != 'WORKING' "
-	          "AND m.kind != 'LABEL' "
-	          "AND (m.kind != 'ASSOCIATION' OR EXISTS ("
-          "  SELECT 1 FROM associations a "
-          "  WHERE a.source_memory_id = m.memory_id "
-          "    AND a.edge_type = 'derived_from'))";
-  append_seeds (seed_sql, { q_vec, static_cast<long long> (seed_k) },
+            "FROM seed "
+            "JOIN memories m ON m.embedding_id = seed.embedding_id "
+            "WHERE m.kind != 'WORKING' "
+            "AND m.kind != 'LABEL' "
+            "AND (m.kind != 'ASSOCIATION' OR EXISTS ("
+            "  SELECT 1 FROM associations a "
+            "  WHERE a.source_memory_id = m.memory_id "
+            "    AND a.edge_type = 'derived_from')) "
+            "ORDER BY seed.distance";
+    }
+  else
+    {
+      seed_sql
+          = "WITH seed AS ("
+            "  SELECT embedding_id, distance, created_at "
+            "  FROM embeddings "
+            "  WHERE embedding MATCH ? AND k = ? "
+            "  ORDER BY distance"
+            "), seed_memory AS ("
+            "  SELECT seed.embedding_id AS seed_embedding_id, seed.distance, "
+            "         seed.created_at AS seed_created_at, "
+            "         m.memory_id, m.embedding_id AS base_embedding_id "
+            "  FROM seed "
+            "  JOIN memories m ON m.embedding_id = seed.embedding_id "
+            "  UNION ALL "
+            "  SELECT seed.embedding_id AS seed_embedding_id, seed.distance, "
+            "         seed.created_at AS seed_created_at, "
+            "         mr.memory_id, m.embedding_id AS base_embedding_id "
+            "  FROM seed "
+            "  JOIN memory_reconstructions mr "
+            "       ON mr.embedding_id = seed.embedding_id "
+            "  JOIN memories m ON m.memory_id = mr.memory_id "
+            "  WHERE mr.reconstruction_id = ("
+            "    SELECT MAX(mr2.reconstruction_id) "
+            "    FROM memory_reconstructions mr2 "
+            "    WHERE mr2.memory_id = mr.memory_id"
+            "  )"
+            ") "
+            "SELECT sm.base_embedding_id, sm.distance, "
+            "COALESCE(m.created_at, sm.seed_created_at, 0) AS created_at, "
+            "m.memory_id, m.kind, COALESCE(m.pre_activation, 0.0) AS pre_activation "
+            "FROM seed_memory sm "
+            "JOIN memories m ON m.memory_id = sm.memory_id "
+            "WHERE m.kind != 'WORKING' "
+            "AND m.kind != 'LABEL' "
+            "AND (m.kind != 'ASSOCIATION' OR EXISTS ("
+            "  SELECT 1 FROM associations a "
+            "  WHERE a.source_memory_id = m.memory_id "
+            "    AND a.edge_type = 'derived_from')) "
+            "ORDER BY sm.distance";
+    }
+  append_seeds (seed_sql, { q_vec, static_cast<long long> (seed_search_k) },
                 "GraphRetrieve.seed_sql");
 
   const double k_summary_raw
@@ -2259,19 +2302,8 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
                   std::vector<std::any> temporal_params;
                   temporal_params.reserve (6);
                   temporal_params.push_back (anchor.start_ts);
-                  if (IsChatConversationSource (anchor.source_id))
-                    {
-                      temporal_sql
-                          += "(source_id = 'chat/user' "
-                             "OR source_id = 'chat/assistant' "
-                             "OR source_id LIKE 'chat/user/%' "
-                             "OR source_id LIKE 'chat/assistant/%') ";
-                    }
-                  else
-                    {
-                      temporal_sql += "source_id = ? ";
-                      temporal_params.push_back (anchor.source_id);
-                    }
+                  temporal_sql += "source_id = ? ";
+                  temporal_params.push_back (anchor.source_id);
                   temporal_sql +=
                       "  AND memory_id != ? "
                       "  AND kind NOT IN ('WORKING', 'LABEL', 'ASSOCIATION') ";
@@ -2930,7 +2962,7 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
                     "m.embedding_id AS base_embedding_id, "
                     "e.embedding, "
                     "COALESCE(m.created_at, e.created_at, 0) AS created_at, "
-                    "m.context, m.source_origin, m.source_reliability, "
+                    "m.context, m.source_reliability, "
                     "m.source_contradiction_count, m.emotional_intensity, "
                     "m.s_arousal_avg, m.kind, "
                     "COALESCE(m.pre_activation, 0.0) AS pre_activation "
@@ -2968,7 +3000,6 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
               auto it_emb = row.find ("embedding");
               auto it_created = row.find ("created_at");
               auto it_ctx = row.find ("context");
-              auto it_origin = row.find ("source_origin");
               auto it_rel = row.find ("source_reliability");
               auto it_contra = row.find ("source_contradiction_count");
               auto it_emotion = row.find ("emotional_intensity");
@@ -3004,23 +3035,11 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
                         ? core::CosineSimilarity (q_ctx, ctx_vec)
                         : 0.0;
 
-              std::string origin;
-              if (it_origin != row.end () && it_origin->second.type () == typeid (std::string))
-                {
-                  origin = std::any_cast<std::string> (it_origin->second);
-                }
-
               double base_rel = 0.7;
               if (it_rel != row.end () && it_rel->second.type () == typeid (double))
                 {
                   base_rel = std::any_cast<double> (it_rel->second);
                 }
-              if (origin == "user")
-                base_rel = std::max (base_rel, 0.8);
-              else if (origin == "assistant")
-                base_rel = std::max (base_rel, 0.6);
-              else if (origin == "system")
-                base_rel = std::max (base_rel, 0.9);
 
               int contradiction_count = 0;
               if (it_contra != row.end () && it_contra->second.type () == typeid (long long))

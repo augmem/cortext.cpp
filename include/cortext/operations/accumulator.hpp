@@ -9,7 +9,7 @@ namespace cortext::operations
  * @brief Section 4.4.1: Updates memory accumulator state for a signal.
  *
  * This operation:
- * 1. Gets or creates AccumulatorState for the signal's source_id
+ * 1. Gets or creates AccumulatorState for the signal's exact source stream
  * 2. Updates running mean: μ_acc = ((n-1) × μ_acc + x_t) / n
  * 3. Accumulates drift: D_acc += drift_mag_t
  * 4. Tracks signal metadata for later score aggregation

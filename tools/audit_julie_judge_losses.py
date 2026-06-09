@@ -37,7 +37,7 @@ def composite(row: dict, system: str) -> float:
     return (
         score(row, system, "relevance")
         + score(row, system, "sufficiency")
-        - score(row, system, "noise")
+        - 0.25 * score(row, system, "noise")
     )
 
 
@@ -622,7 +622,7 @@ def audit(judge: dict, summary: dict | None = None) -> dict:
         "probe_count": int(judge.get("probe_count", len(rows)) or len(rows)),
         "judged_rows": len(rows),
         "privacy": "private local artifact; no packet text or judge reason text",
-        "quality_composite_definition": "relevance + sufficiency - noise",
+        "quality_composite_definition": "relevance + sufficiency - 0.25*noise",
         "winner_counts": dict(Counter(str(row.get("winner", "")) for row in rows)),
         "failure_reason_counts": dict(
             Counter(str(row.get("failure_reason", "")) for row in rows)

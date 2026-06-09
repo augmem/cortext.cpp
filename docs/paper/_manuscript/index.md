@@ -2120,13 +2120,17 @@ same source:
     if |similar_memories| > 0:
         merge_into_chunk(similar_memories, memory)
 
-**Implementation note (chat applications):** turn-structured chat
-sources (`chat/user`, `chat/assistant`) bypass same-source chunk merging
-and generic WM rejection so the active working-memory window remains a
-FIFO sequence of recent turns for prompt reconstruction. Prompt
-hydration must order active slots by insertion/start time rather than
-`last_access`; otherwise rehearsal or retrieval touches can scramble the
-conversational sequence even when the underlying memories are correct.
+**Implementation note:** durable ingress inputs preserve an ordered
+working-memory trace independent of the literal `source_id` string.
+`source_id` is still used for opaque provenance and exact same-source
+grouping, but Cortext does not parse roles such as user, assistant,
+speaker, or device from it. Internal maintenance work follows the same
+rule: consolidation is driven by an explicit
+`Signal::consolidation_mode` hint rather than by a magic `source_id`
+value. Prompt hydration orders active slots by insertion/start time
+rather than `last_access`; otherwise rehearsal or retrieval touches can
+scramble the visible recent context even when the underlying memories
+are correct.
 
 ## Three-Tier Graph Memory Surface
 
@@ -4529,8 +4533,8 @@ removing the remaining benchmark-only retrieval policies. The corrected
 harness uses native Cortext output directly: full working memory, STM,
 LTM, and daily consolidation; no benchmark-side memory caps, retrieval
 gates, packet pruning, LTM-only verdict arm, or per-message `source_id`
-rewriting. Text and audio from the same stream use the same stable
-source identifiers, `chat/user` and `chat/assistant`; message indices,
+rewriting. Text and audio from the same stream use stable opaque source
+identifiers for each conversation direction; message indices,
 timestamps, media paths, and transcript text remain benchmark metadata.
 For audio, `Cortext::ProcessAudio` receives only the raw `16 kHz` mono
 float PCM speech samples. No ASR transcript, generated transcript,
@@ -9857,9 +9861,10 @@ under long runs, we added a **scripted 100-turn integration test** that
 alternates user and assistant turns through the real high-level chat
 processing path:
 
--   user turns commit through `ProcessTextAt(..., "chat/user", ...)`
+-   user turns commit through `ProcessTextAt(...)` with one stable
+    benchmark source identifier
 -   assistant turns stream through the non-durable probe path, then
-    finalize once as `chat/assistant`
+    finalize once with a second stable benchmark source identifier
 -   after each user turn, prompt reconstruction is compared against the
     exact recent conversational tail
 -   at the end of the run, the active working-memory rows and the final
@@ -9869,11 +9874,11 @@ The initial failure looked like an algorithmic recall problem, but it
 was not: late-run prompts drifted into malformed histories such as
 `assistant 82, user 83, assistant 84, assistant 100`, even though the
 intended recent tail was still alternating. Root cause analysis showed
-two chat-specific policy bugs:
+two production-policy bugs:
 
-1.  full `chat/user` / `chat/assistant` turns were still passing through
-    the generic working-memory admission and eviction logic rather than
-    being preserved as prompt-bearing dialogue turns;
+1.  durable ingress inputs were still passing through generic
+    working-memory admission and eviction logic rather than being
+    preserved as ordered recent input traces;
 2.  prompt hydration was ordering active working-memory slots by
     `last_access`, so rehearsal or retrieval touches could reorder the
     visible chat history.
@@ -12206,9 +12211,9 @@ engine already retained.
 
 We then added a private-safe live replay harness for a real long-running
 spouse conversation corpus. The harness ingests messages only through
-public Cortext APIs using turn-shaped chat sources (`chat/user` and
-`chat/assistant`), periodically runs consolidation, and compares the
-prompt surfaces a chat application would see:
+public Cortext APIs using stable opaque source identifiers for the two
+directions, periodically runs consolidation, and compares the prompt
+surfaces a chat application would see:
 
 -   **Cortext:** bounded working-memory chat turns plus retrieved
     long-term memories in the XML system prompt.
@@ -40744,7 +40749,13 @@ versus **294.25** traditional chat+RAG tokens, and the failed gate was
 `cortext_quality_delta_vs_traditional_chat_rag = -3.0` against the
 `-0.5` floor. This smoke is intentionally not release evidence; it
 verifies that a bad checkpoint can stop the expensive replay path before
-final judging.
+final judging. The current release protocol still records judge `noise`
+as an independent dimension, but the aggregate quality composite now
+treats it as a low-weight diagnostic
+(`relevance + sufficiency - 0.25*noise`) rather than as an equal penalty
+against relevance or sufficiency. This reflects the design target for a
+human-like memory system: unrelated associations can be noisy without
+being equivalent to missing the relevant context.
 
 A subsequent phase-aware private run
 (`build/julie_release_phase_gate_fast_1200_20260608/`) exercised the
@@ -40916,28 +40927,32 @@ but release readiness still depends on reducing text-packet noise and
 improving graph/fact-backed specificity before the final claim can be
 made.
 
-On the same v24 trace, the 24-probe loss audit
+On the same historical v24 trace, the 24-probe loss audit
 (`early_probe_024_loss_audit.json`) showed Cortext winning 11 probes,
 traditional chat+RAG winning 5, full-history winning 5, and 3 ties, with
-**94.7%** mean token savings. The failing quality delta came from the
-composite `relevance + sufficiency - noise`: Cortext had slightly higher
-mean relevance than text RAG (**3.125** vs **2.917**) but a larger mean
-noise penalty (**1.542** vs **0.792**) and slightly lower sufficiency
-(**2.875** vs **2.917**). All 10 Cortext losses in that checkpoint were
-text-query losses and were tagged with relevance, sufficiency, temporal,
-and noise gaps against the winning packet; 6 had negative Cortext
-composite scores. At 32 probes, the same pattern persisted: Cortext won
-16 of 32 probes and saved **95.2%** tokens, but 13 text-query losses and
-the higher noise penalty kept the composite below the text-RAG baseline.
-This points the next release-readiness work at packet selection/noise
-control on losing text probes, not at media leakage or baseline
-unfairness. The follow-up production fix capped linked-source hydration
-fan-out with the existing F/T-derived compact item limit instead of a
-fixed display constant, because the loss audit showed that selected
-internal label/cue nodes could expand into too many distant source
-memories after scoring. That fix is a candidate noise-control change; it
-does not become quality evidence until a new frozen run passes the same
-streamed and final local-judge gates.
+**94.7%** mean token savings. That audit used the older strict composite
+`relevance + sufficiency - noise`; under that historical scoring Cortext
+had slightly higher mean relevance than text RAG (**3.125** vs
+**2.917**) but a larger mean noise penalty (**1.542** vs **0.792**) and
+slightly lower sufficiency (**2.875** vs **2.917**). All 10 Cortext
+losses in that checkpoint were text-query losses and were tagged with
+relevance, sufficiency, temporal, and noise gaps against the winning
+packet; 6 had negative Cortext composite scores. At 32 probes, the same
+pattern persisted: Cortext won 16 of 32 probes and saved **95.2%**
+tokens, but 13 text-query losses and the higher full-noise penalty kept
+the historical composite below the text-RAG baseline. Current release
+runs do not reuse that full-noise penalty; they report noise separately
+and use the lower-weight `relevance + sufficiency - 0.25*noise`
+composite for quality gates and confidence intervals. This points the
+next release-readiness work at relevance/sufficiency and temporal
+specificity first, with packet noise kept as a diagnostic rather than a
+release-blocking proxy by itself. The follow-up production fix capped
+linked-source hydration fan-out with the existing F/T-derived compact
+item limit instead of a fixed display constant, because the loss audit
+showed that selected internal label/cue nodes could expand into too many
+distant source memories after scoring. That fix is a candidate
+noise-control change; it does not become quality evidence until a new
+frozen run passes the same streamed and final local-judge gates.
 
 # Implementation Considerations
 
@@ -40998,13 +41013,11 @@ internal label or cue node.
     available; destructive eviction remains separately storage-gated.
     Empty label arrays are valid, transcript filler labels are rejected
     before persistence, and cue-backed labels must be supported by
-    source evidence. The summarization prompt remains role-aware for
-    chat sources, favors direct fact-oriented memory notes over dialogue
-    recaps, explicitly preserves named people, projects, and
-    technologies, discourages speaker-role phrasing such as “the user”
-    or “the assistant”, and preserves chronological ordering when
-    selected chat excerpts are passed to the model. The Liquid GGUF path
-    is text-only; audio/image label refinement is Gemma-only.
+    source evidence. The summarization prompt favors direct
+    fact-oriented memory notes, preserves named people, projects,
+    technologies, and chronological ordering, and does not infer speaker
+    roles or trust from `source_id`. The Liquid GGUF path is text-only;
+    audio/image label refinement is Gemma-only.
 -   **Offline label-classifier prototype:** we now also ship a
     research-only Python pipeline that trains span typing / promotion
     models from WordNet, multilingual name priors, and sentence context.
@@ -41041,18 +41054,21 @@ evidence. The current production prompt surface uses WM directly and LTM
 retrieval directly; STM remains a bounded proposal/read substrate unless
 a downstream consumer passes the experimental transfer gates. Active WM
 slots also act as **temporal source anchors** for LTM retrieval: their
-`source_id` and prior timestamps seed the same temporal expansion used
-by durable source seeds, so nearby durable memories can be recovered
-when the immediate WM tail is too short for a chat-style rolling
-history. For chat sources, this expansion treats `chat/user*` and
-`chat/assistant*` as one conversation stream, allowing cross-speaker
-run-up to be recovered without carrying the normal RAG rolling
-transcript. Non-chat sources remain source-local. Temporal neighbors are
-also restricted to rows earlier than the current signal timestamp.
-`WORKING`, `LABEL`, and `ASSOCIATION` rows are excluded from the
-returned temporal neighbors, and final candidates still pass
-write-exclusion and WM-overlap filtering. The path is controlled by the
-existing F/S/T-derived graph-expanded temporal window, temporal weight,
+opaque `source_id` and prior timestamps seed the same temporal expansion
+used by durable source seeds, so nearby durable memories from the same
+source stream can be recovered when the immediate WM tail is short.
+`source_id` is treated as provenance and exact equality grouping only;
+Cortext does not parse application roles, speaker names, maintenance
+commands, or modality semantics from it. Scheduled/explicit
+consolidation is signaled by `Signal::consolidation_mode`; the
+maintenance signal is stored with neutral provenance and no
+caller-provided source string can trigger a different Cortext behavior
+by matching a reserved literal. Temporal neighbors are also restricted
+to rows earlier than the current signal timestamp. `WORKING`, `LABEL`,
+and `ASSOCIATION` rows are excluded from the returned temporal
+neighbors, and final candidates still pass write-exclusion and
+WM-overlap filtering. The path is controlled by the existing
+F/S/T-derived graph-expanded temporal window, temporal weight,
 durable-source weight, and compact output cap, and it is disabled by the
 source-seed graph-expansion ablation. This preserves the core online
 invariant: the live loop remains embedding-based, while durable semantic
@@ -41167,7 +41183,7 @@ rather than a separate fact-grounding path.
 
 Lower-level temporal retrieval modes (`current`, `valid_at`, `known_at`)
 remain implemented for deterministic tests and benchmarks. Explicit
-user-facing temporal controls and any future chat-specific grounding or
+user-facing temporal controls and any application-specific grounding or
 reply templating remain later work.
 
 ## Soft Anchor Implementation Status
@@ -41292,7 +41308,7 @@ truth. It can be disabled for regression isolation with
 admission floors, label breadth, source-seed breadth, and degree damping
 derive from F/S/T. Retrieval rank is preserved through hydration, and
 linked-source hydration from internal routing nodes is capped by the
-F/T-derived compact item limit, so chat applications consume the
+F/T-derived compact item limit, so applications consume the
 production-ranked compact LTM surface rather than a wide display
 expansion.
 

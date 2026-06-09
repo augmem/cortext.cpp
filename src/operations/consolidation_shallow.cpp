@@ -87,7 +87,8 @@ ConsolidationShallow::Execute (OperationContext &context, Transaction &tx) const
       return;
     }
 
-  const auto mode = ParseConsolidationMode (context.GetSignal ().source_id);
+  const auto mode = context.GetSignal ().consolidation_mode.value_or (
+      ConsolidationMode::Both);
   if (mode != ConsolidationMode::Shallow)
     {
       return;

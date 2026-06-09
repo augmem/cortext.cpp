@@ -629,6 +629,7 @@ def cleanup_runner_outputs(out_dir: pathlib.Path) -> None:
         "release_protocol_report_bootstrap.log",
         "benchmark_status.json",
         "benchmark_environment_snapshot.json",
+        "early_failure_report.json",
         "preflight_report.json",
     ]:
         path = out_dir / name
@@ -877,11 +878,163 @@ def validate_summary(
     return body
 
 
+def artifact_ref(path: pathlib.Path) -> dict:
+    return {
+        "path": str(path),
+        "exists": path.exists(),
+        "sha256": file_sha256(path) if path.exists() and path.is_file() else "",
+        "bytes": path.stat().st_size if path.exists() and path.is_file() else 0,
+    }
+
+
+def selected_metrics(metrics: dict) -> dict:
+    names = [
+        "judged_rows",
+        "probe_count",
+        "cortext_wins",
+        "traditional_chat_rag_wins",
+        "full_history_upper_bound_wins",
+        "cortext_win_rate",
+        "cortext_quality_composite",
+        "traditional_chat_rag_quality_composite",
+        "full_history_upper_bound_quality_composite",
+        "cortext_quality_delta_vs_traditional_chat_rag",
+        "cortext_quality_delta_vs_full_history_upper_bound",
+        "cortext_token_savings_vs_traditional_chat_rag",
+        "mean_cortext_context_tokens",
+        "mean_traditional_chat_rag_tokens",
+    ]
+    return {name: metrics.get(name) for name in names if name in metrics}
+
+
+def write_early_failure_report(
+    *,
+    out_path: pathlib.Path,
+    command_manifest_path: pathlib.Path,
+    status_path: pathlib.Path,
+    early_latest_path: pathlib.Path,
+    benchmark_log: pathlib.Path,
+    early_log: pathlib.Path,
+) -> pathlib.Path:
+    status = load_json_if_valid(status_path)
+    early_latest_payload = load_json_if_valid(early_latest_path)
+    command_manifest = load_json_if_valid(command_manifest_path)
+    latest = early_latest_payload.get("latest", {})
+    if not isinstance(latest, dict):
+        latest = {}
+    metrics = latest.get("metrics", {})
+    if not isinstance(metrics, dict):
+        metrics = {}
+    pre_confirm = latest.get("pre_confirm", {})
+    if not isinstance(pre_confirm, dict):
+        pre_confirm = {}
+
+    failed_checks = [
+        check
+        for check in latest.get("fail_fast_checks", []) or []
+        if isinstance(check, dict) and check.get("status") == "fail"
+    ]
+    artifact_paths = {
+        "benchmark_status": status_path,
+        "early_judge_latest": early_latest_path,
+        "benchmark_log": benchmark_log,
+        "early_judge_log": early_log,
+    }
+    for key in [
+        "summary",
+        "judge",
+        "loss_audit",
+        "delta_judge",
+        "confirm_judge",
+        "confirm_delta_judge",
+        "confirm_loss_audit",
+    ]:
+        value = latest.get(key)
+        if value:
+            artifact_paths[key] = pathlib.Path(str(value))
+
+    report = {
+        "schema": "cortext_julie_release_early_failure_report_v1",
+        "created_at_utc": utc_now(),
+        "privacy": (
+            "private local artifact; aggregate metrics and artifact hashes only, "
+            "no message text, media bytes, or judge reason strings"
+        ),
+        "release_gate_use": "fail_fast_failure_evidence_not_release_claim",
+        "overall_status": "fail",
+        "failure": {
+            "milestone": latest.get("milestone"),
+            "phase": latest.get("quality_gate_phase_reason"),
+            "fail_fast_status": latest.get("fail_fast_status"),
+            "confirm_fail_triggered": bool(latest.get("confirm_fail_triggered")),
+            "failed_checks": failed_checks,
+        },
+        "metrics": selected_metrics(metrics),
+        "pre_confirm_metrics": selected_metrics(pre_confirm.get("metrics", {}))
+        if isinstance(pre_confirm.get("metrics", {}), dict)
+        else {},
+        "fairness_checks": metrics.get("fairness_checks", {}),
+        "judge_validation": metrics.get("judge_validation", {}),
+        "rag_phase": {
+            "quality_gate_active": latest.get("quality_gate_active"),
+            "quality_gate_requires_rag_pressure": latest.get(
+                "quality_gate_requires_rag_pressure"
+            ),
+            "quality_gate_min_history_budget_ratio": latest.get(
+                "quality_gate_min_history_budget_ratio"
+            ),
+            "max_rolling_history_budget_ratio": latest.get(
+                "max_rolling_history_budget_ratio"
+            ),
+            "compaction_probe_count": latest.get("compaction_probe_count"),
+            "vector_augmented_probe_count": latest.get("vector_augmented_probe_count"),
+            "rag_phase_counts": latest.get("rag_phase_counts", {}),
+        },
+        "runner_status": {
+            "status": status.get("status"),
+            "detail": status.get("detail"),
+            "benchmark_exit_code": status.get("benchmark_exit_code"),
+            "early_judge_exit_code": status.get("early_judge_exit_code"),
+            "elapsed_s": status.get("elapsed_s"),
+            "probe_stream": status.get("probe_stream", {}),
+        },
+        "judge": {
+            "provider": early_latest_payload.get("judge_provider"),
+            "model": early_latest_payload.get("judge_model"),
+            "early_repetitions": early_latest_payload.get("judge_repetitions"),
+            "confirm_fail_repetitions": early_latest_payload.get(
+                "confirm_fail_repetitions"
+            ),
+        },
+        "protocol": {
+            "git": command_manifest.get("git", {}),
+            "fixed_protocol": command_manifest.get("fixed_protocol", {}),
+            "benchmark_command_sha256": command_sha256(
+                str(command_manifest.get("benchmark_command", ""))
+            )
+            if command_manifest.get("benchmark_command")
+            else "",
+            "early_judge_command_sha256": command_sha256(
+                str(command_manifest.get("early_judge_command_launched", ""))
+            )
+            if command_manifest.get("early_judge_command_launched")
+            else "",
+        },
+        "artifacts": {
+            name: artifact_ref(path) for name, path in sorted(artifact_paths.items())
+        },
+    }
+    write_json(out_path, report)
+    return out_path
+
+
 def build_benchmark_command(args: argparse.Namespace, db: pathlib.Path, summary: pathlib.Path) -> list[str]:
     return [
         str(args.benchmark),
         "--input-dir",
         str(args.input_dir),
+        "--skip-messages",
+        str(args.skip_messages),
         "--max-messages",
         str(args.max_messages),
         "--media-limit",
@@ -926,6 +1079,8 @@ def build_early_judge_command(
         str(args.input_dir),
         "--db",
         str(db),
+        "--timeline-skip-messages",
+        str(args.skip_messages),
         "--timeline-max-messages",
         str(args.max_messages),
         "--timeline-media-limit",
@@ -960,6 +1115,8 @@ def build_early_judge_command(
         args.judge_model,
         "--ollama-base-url",
         args.ollama_base_url,
+        "--ollama-keep-alive",
+        "0s",
         "--judge-repetitions",
         str(args.early_judge_repetitions),
         "--confirm-fail-repetitions",
@@ -1274,6 +1431,8 @@ def run_benchmark_with_early_judge(
     status_path: pathlib.Path,
     summary_path: pathlib.Path,
     environment_snapshot_path: pathlib.Path,
+    command_manifest_path: pathlib.Path,
+    early_failure_report_path: pathlib.Path,
     min_probe_rows_after_benchmark: int,
 ) -> str | None:
     run_log.parent.mkdir(parents=True, exist_ok=True)
@@ -1321,6 +1480,13 @@ def run_benchmark_with_early_judge(
                 "logs": {
                     "benchmark": str(run_log),
                     "early_judge": str(early_log),
+                },
+                "early_failure_report": {
+                    "path": str(early_failure_report_path),
+                    "exists": early_failure_report_path.exists(),
+                    "bytes": early_failure_report_path.stat().st_size
+                    if early_failure_report_path.exists()
+                    else 0,
                 },
                 "early_judge_launched_command": early_launch_command_text or "",
                 "early_judge_latest": load_json_if_valid(early_latest_path),
@@ -1391,9 +1557,27 @@ def run_benchmark_with_early_judge(
                         early_code=early_code,
                         detail=f"early judge failed; see {early_log}",
                     )
+                    report_path = write_early_failure_report(
+                        out_path=early_failure_report_path,
+                        command_manifest_path=command_manifest_path,
+                        status_path=status_path,
+                        early_latest_path=early_latest_path,
+                        benchmark_log=run_log,
+                        early_log=early_log,
+                    )
+                    write_status(
+                        "early_judge_failed",
+                        benchmark_code=benchmark_code,
+                        early_code=early_code,
+                        detail=(
+                            f"early judge failed; see {early_log}; "
+                            f"failure report: {report_path}"
+                        ),
+                    )
                     failure_status_written = True
                     raise RuntimeError(
-                        f"early judge failed with exit code {early_code}; see {early_log}"
+                        f"early judge failed with exit code {early_code}; "
+                        f"see {early_log}; failure report: {report_path}"
                     )
                 if benchmark_finished_code is not None:
                     if early_process and early_code is None:
@@ -1497,6 +1681,7 @@ def parse_args() -> argparse.Namespace:
         type=pathlib.Path,
         default=DEFAULT_INPUT_DIR,
     )
+    parser.add_argument("--skip-messages", type=int, default=0)
     parser.add_argument("--max-messages", type=int, default=1200)
     parser.add_argument("--media-limit", type=int, default=16)
     parser.add_argument("--probe-stride", type=int, default=25)
@@ -1661,6 +1846,8 @@ def main() -> int:
     if args.judge_media_smoke is not None:
         args.judge_media_smoke = args.judge_media_smoke.resolve()
 
+    if args.skip_messages < 0:
+        raise RuntimeError("--skip-messages must be non-negative")
     if args.max_messages <= 0 or args.media_limit < 0:
         raise RuntimeError("--max-messages must be positive and --media-limit non-negative")
     if args.judge_repetitions < 3:
@@ -1724,6 +1911,7 @@ def main() -> int:
     release_freeze = args.out_dir / "release_protocol_freeze.json"
     env_snapshot = args.out_dir / "benchmark_environment_snapshot.json"
     command_manifest = args.out_dir / "command_manifest.json"
+    early_failure_report = args.out_dir / "early_failure_report.json"
     judge_media_smoke = args.judge_media_smoke or (
         args.out_dir / "judge_media_smoke_ollama.json"
     )
@@ -1864,6 +2052,11 @@ def main() -> int:
             "fixed_protocol": {
                 "daily_consolidation": True,
                 "deep_consolidation": True,
+                "slice": {
+                    "skip_messages": args.skip_messages,
+                    "max_messages": args.max_messages,
+                    "media_limit": args.media_limit,
+                },
                 "knobs": {"focus": 0.5, "sensitivity": 0.5, "stability": 0.5},
                 "normal_rag": "rolling chat history until compaction plus text vector RAG",
                 "judge_provider": "local_ollama",
@@ -1872,6 +2065,7 @@ def main() -> int:
                 "early_judge_context_window_tokens": args.early_judge_context_window_tokens,
                 "judge_packet_item_limit": args.judge_packet_item_limit,
                 "early_judge_packet_item_limit": args.early_judge_packet_item_limit,
+                "early_judge_ollama_keep_alive": "0s",
                 "early_confirm_fail_repetitions": args.early_confirm_fail_repetitions,
                 "early_judge_milestones": args.early_judge_milestones,
                 "early_judge_periodic_stride": args.early_judge_periodic_stride,
@@ -1915,6 +2109,7 @@ def main() -> int:
             "bootstrap_report_command": shlex.join(report_cmd_bootstrap),
             "initial_report_command": shlex.join(report_cmd),
             "release_freeze": str(release_freeze),
+            "early_failure_report": str(early_failure_report),
             "frozen_probe_manifest": str(args.out_dir / "frozen_probe_manifest.json"),
             "frozen_probe_schedule": str(args.out_dir / "frozen_probe_schedule.json"),
             "human_label_sample": str(human_label_sample),
@@ -1954,6 +2149,8 @@ def main() -> int:
         status_path=args.out_dir / "benchmark_status.json",
         summary_path=summary,
         environment_snapshot_path=env_snapshot,
+        command_manifest_path=command_manifest,
+        early_failure_report_path=early_failure_report,
         min_probe_rows_after_benchmark=args.min_probe_rows_after_benchmark,
     )
     if early_launch_command_text:

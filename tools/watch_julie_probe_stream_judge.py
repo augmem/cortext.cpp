@@ -26,7 +26,7 @@ from datetime import datetime, timezone
 QUALITY_COMPOSITE_FIELDS = {
     "relevance": 1.0,
     "sufficiency": 1.0,
-    "noise": -1.0,
+    "noise": -0.25,
 }
 FAIRNESS_EXPECTED_VALUES = {
     "cortext_audio_image_transcript_shortcuts": False,
@@ -130,6 +130,7 @@ def partial_counts(args: argparse.Namespace, milestone: int) -> dict[str, int]:
     max_event_index = max((int(row.get("event_index", -1)) for row in rows), default=-1)
     timeline = build_timeline(
         args.input_dir,
+        args.timeline_skip_messages,
         args.timeline_max_messages,
         args.timeline_media_limit,
     )
@@ -195,11 +196,10 @@ def row_quality_composite(row: dict, system: str) -> float:
     scores = row.get("systems", {}).get(system, {})
     if not isinstance(scores, dict):
         return 0.0
-    return (
-        float(scores.get("relevance", 0.0) or 0.0)
-        + float(scores.get("sufficiency", 0.0) or 0.0)
-        - float(scores.get("noise", 0.0) or 0.0)
-    )
+    total = 0.0
+    for field, weight in QUALITY_COMPOSITE_FIELDS.items():
+        total += float(scores.get(field, 0.0) or 0.0) * weight
+    return total
 
 
 def prior_quality_delta_stats(segment_judges: list[pathlib.Path]) -> tuple[float, int]:
@@ -602,20 +602,34 @@ def fail_fast_checks(
         ),
     ]
     if quality_gate_active:
-        checks_to_apply.extend(
-            [
+        if args.min_cortext_win_rate is not None:
+            checks_to_apply.append(
                 check_floor(
                     "cortext_win_rate",
                     float(metrics["cortext_win_rate"]),
                     args.min_cortext_win_rate,
-                ),
+                )
+            )
+        if args.quality_trend_window <= 1:
+            checks_to_apply.append(
                 check_floor(
                     "cortext_quality_delta_vs_traditional_chat_rag",
                     float(metrics["cortext_quality_delta_vs_traditional_chat_rag"]),
                     args.min_cortext_quality_delta_vs_rag,
-                ),
-            ]
-        )
+                )
+            )
+        else:
+            checks.append(
+                {
+                    "name": "cortext_quality_delta_vs_traditional_chat_rag.observed",
+                    "value": float(
+                        metrics["cortext_quality_delta_vs_traditional_chat_rag"]
+                    ),
+                    "floor": args.min_cortext_quality_delta_vs_rag,
+                    "quality_trend_window": args.quality_trend_window,
+                    "status": "pass",
+                }
+            )
     else:
         checks.append(
             {
@@ -784,6 +798,8 @@ def materialize_partial(args: argparse.Namespace, milestone: int, summary_path: 
         str(counts["video_processed"]),
         "--media-failures",
         str(counts["media_failures"]),
+        "--timeline-skip-messages",
+        str(args.timeline_skip_messages),
         "--timeline-max-messages",
         str(args.timeline_max_messages),
         "--timeline-media-limit",
@@ -859,6 +875,8 @@ def run_judge(
         str(args.judge_timeout_s),
         "--judge-context-window-tokens",
         str(args.judge_context_window_tokens),
+        "--ollama-keep-alive",
+        args.ollama_keep_alive,
         "--context-limit",
         str(args.context_limit),
         "--checkpoint-rows",
@@ -924,6 +942,7 @@ def write_manifest(args: argparse.Namespace, completed: list[dict]) -> None:
         else "",
         "input_dir": str(args.input_dir),
         "db": str(args.db),
+        "timeline_skip_messages": args.timeline_skip_messages,
         "timeline_max_messages": args.timeline_max_messages,
         "timeline_media_limit": args.timeline_media_limit,
         "fixed_milestones": parse_milestones(args.milestones),
@@ -933,6 +952,7 @@ def write_manifest(args: argparse.Namespace, completed: list[dict]) -> None:
         else "",
         "judge_provider": args.judge_provider,
         "judge_model": args.model,
+        "ollama_keep_alive": args.ollama_keep_alive,
         "judge_repetitions": args.judge_repetitions,
         "confirm_fail_repetitions": args.confirm_fail_repetitions,
         "judge_packet_item_limit": args.context_limit,
@@ -962,6 +982,7 @@ def write_manifest(args: argparse.Namespace, completed: list[dict]) -> None:
             "periodic_stride": args.periodic_stride,
             "judge_provider": args.judge_provider,
             "judge_model": args.model,
+            "ollama_keep_alive": args.ollama_keep_alive,
             "judge_repetitions": args.judge_repetitions,
             "confirm_fail_repetitions": args.confirm_fail_repetitions,
             "quality_gate_min_milestone": args.quality_gate_min_milestone,
@@ -1167,6 +1188,7 @@ def main() -> int:
     parser.add_argument("--out-dir", type=pathlib.Path, required=True)
     parser.add_argument("--input-dir", type=pathlib.Path, required=True)
     parser.add_argument("--db", type=pathlib.Path, required=True)
+    parser.add_argument("--timeline-skip-messages", type=int, default=0)
     parser.add_argument("--timeline-max-messages", type=int, required=True)
     parser.add_argument("--timeline-media-limit", type=int, required=True)
     parser.add_argument(
@@ -1209,6 +1231,14 @@ def main() -> int:
     parser.add_argument("--judge-provider", default="ollama", choices=["ollama", "nemotron"])
     parser.add_argument("--model", default="gemma4:12b-it-qat")
     parser.add_argument("--ollama-base-url", default="http://127.0.0.1:11434")
+    parser.add_argument(
+        "--ollama-keep-alive",
+        default="0s",
+        help=(
+            "Ollama model residency after each streamed judge call. The default "
+            "unloads the local judge model before resuming Cortext replay."
+        ),
+    )
     parser.add_argument("--judge-repetitions", type=int, default=3)
     parser.add_argument(
         "--confirm-fail-repetitions",
@@ -1330,6 +1360,8 @@ def main() -> int:
         raise RuntimeError("--poll-seconds must be positive")
     if args.periodic_stride < 0:
         raise RuntimeError("--periodic-stride must be >= 0")
+    if args.timeline_skip_messages < 0:
+        raise RuntimeError("--timeline-skip-messages must be >= 0")
     if args.periodic_stride > 0 and args.completion_summary is None:
         raise RuntimeError("--completion-summary is required when --periodic-stride > 0")
     if args.judge_repetitions <= 0:

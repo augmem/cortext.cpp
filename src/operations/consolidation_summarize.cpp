@@ -292,41 +292,14 @@ SanitizeSummaryText (std::string summary)
   return TrimAsciiWhitespace (summary);
 }
 
-bool
-StartsWithAscii (const std::string &text, const std::string &prefix)
-{
-  return text.size () >= prefix.size ()
-         && std::equal (prefix.begin (), prefix.end (), text.begin ());
-}
-
 std::string
-FormatSourceTextForSummary (const std::string &source_id,
-                            const std::string &raw_text)
+FormatSourceTextForSummary (const std::string &raw_text)
 {
   std::string text = TrimAsciiWhitespace (raw_text);
   if (text.empty ())
     {
       return {};
     }
-
-  if (source_id.rfind ("chat/user", 0) == 0)
-    {
-      if (StartsWithAscii (text, "User:"))
-        {
-          return text;
-        }
-      return "User: " + text;
-    }
-
-  if (source_id.rfind ("chat/assistant", 0) == 0)
-    {
-      if (StartsWithAscii (text, "Assistant:"))
-        {
-          return text;
-        }
-      return "Assistant: " + text;
-    }
-
   return text;
 }
 
@@ -451,8 +424,7 @@ FindExistingDeepSummaryForSources (Transaction &tx,
       "SELECT s.memory_id "
       "FROM memories s "
       "JOIN associations a ON a.source_memory_id = s.memory_id "
-      "WHERE s.kind = 'ASSOCIATION' "
-      "  AND s.source_id LIKE 'summary_%' "
+      "WHERE s.kind = 'LONG_TERM' "
       "  AND a.edge_type = 'derived_from' "
       "GROUP BY s.memory_id "
       "HAVING COUNT(*) = ? "
@@ -501,7 +473,6 @@ FindExistingAssociativeCueForSources (
       "FROM memories s "
       "JOIN associations a ON a.source_memory_id = s.memory_id "
       "WHERE s.kind = 'ASSOCIATION' "
-      "  AND s.source_id LIKE 'associative_cue_%' "
       "  AND a.edge_type = 'derived_from' "
       "GROUP BY s.memory_id "
       "HAVING COUNT(*) = ? "
@@ -867,7 +838,8 @@ ConsolidationSummarize::Execute (OperationContext &context, Transaction &tx) con
     {
       return;
     }
-  const auto mode = ParseConsolidationMode (context.GetSignal ().source_id);
+  const auto mode = context.GetSignal ().consolidation_mode.value_or (
+      ConsolidationMode::Both);
   if (mode == ConsolidationMode::Shallow)
     {
       return;
@@ -934,7 +906,6 @@ ConsolidationSummarize::Execute (OperationContext &context, Transaction &tx) con
         std::string text;
         double sim;
         long long start_ts;
-        bool chat_source;
       };
       std::vector<SourceItem> source_items;
       source_items.reserve (cluster.embedding_ids.size ());
@@ -961,9 +932,9 @@ ConsolidationSummarize::Execute (OperationContext &context, Transaction &tx) con
       for (long long emb_id : cluster.embedding_ids)
         {
           internal::ThrowIfStopRequested ();
-          // Query embedding, memory row, blob_id, source_id, and start_ts.
+          // Query embedding, memory row, blob_id, and start_ts.
           auto rows = tx.Execute (
-              "SELECT e.embedding, m.memory_id, m.blob_id, m.source_id, "
+              "SELECT e.embedding, m.memory_id, m.blob_id, "
               "m.start_ts, m.kind, m.modality, "
               "(SELECT s.mime FROM signals s WHERE s.memory_id = m.memory_id "
               " ORDER BY s.serial_position ASC LIMIT 1) AS mime "
@@ -1009,14 +980,6 @@ ConsolidationSummarize::Execute (OperationContext &context, Transaction &tx) con
                       text.assign (data->begin (), data->end ());
                     }
                 }
-            }
-
-          std::string source_id;
-          auto it_source = row.find ("source_id");
-          if (it_source != row.end ()
-              && it_source->second.type () == typeid (std::string))
-            {
-              source_id = std::any_cast<std::string> (it_source->second);
             }
 
           std::string modality;
@@ -1070,7 +1033,7 @@ ConsolidationSummarize::Execute (OperationContext &context, Transaction &tx) con
             }
           latest_source_ts = std::max (latest_source_ts, start_ts);
 
-          text = FormatSourceTextForSummary (source_id, text);
+          text = FormatSourceTextForSummary (text);
 
           if (source_blobs_enabled && !payload_bytes.empty ()
               && !modality.empty ())
@@ -1091,39 +1054,27 @@ ConsolidationSummarize::Execute (OperationContext &context, Transaction &tx) con
           // Collect text for summarizer
           if (!text.empty ())
             {
-              const bool chat_source
-                  = (source_id.rfind ("chat/user", 0) == 0
-                     || source_id.rfind ("chat/assistant", 0) == 0);
               source_items.push_back (SourceItem{ std::move (text), sim,
-                                                  start_ts, chat_source });
+                                                  start_ts });
             }
         }
 
       if (!source_items.empty ())
         {
           internal::ThrowIfStopRequested ();
-          const int chat_source_count = static_cast<int> (
-              std::count_if (source_items.begin (), source_items.end (),
-                             [] (const SourceItem &item) {
-                               return item.chat_source;
-                             }));
-          const int effective_max_source_texts
-              = (chat_source_count >= 4)
-                    ? std::max (params.max_source_texts, 6)
-                    : params.max_source_texts;
           std::sort (source_items.begin (), source_items.end (),
                      [] (const SourceItem &a, const SourceItem &b) {
                        return a.sim > b.sim;
                      });
           std::vector<SourceItem> selected_items;
           selected_items.reserve (
-              static_cast<size_t> (effective_max_source_texts));
+              static_cast<size_t> (params.max_source_texts));
           int total_chars = 0;
           for (const auto &item : source_items)
             {
               internal::ThrowIfStopRequested ();
               if (static_cast<int> (selected_items.size ())
-                  >= effective_max_source_texts)
+                  >= params.max_source_texts)
                 {
                   break;
                 }
@@ -1261,7 +1212,7 @@ ConsolidationSummarize::Execute (OperationContext &context, Transaction &tx) con
                   existing_summary->memory_id,
                   existing_summary->embedding_id,
                   existing_summary->embedding,
-                  true,
+                  false,
                   false);
             }
 
@@ -1346,12 +1297,12 @@ ConsolidationSummarize::Execute (OperationContext &context, Transaction &tx) con
             }
         }
 
-      // 5. Create MEMORIES row for centroid with kind='ASSOCIATION' (v2 schema).
+      // 5. Create MEMORIES row for the consolidated summary as durable LTM.
       // Store summary_text as label + blob, n_signals as cluster size.
       AddWrite (tx,
                 "INSERT INTO memories "
                 "(embedding_id, source_id, kind, label, start_ts, n_signals, blob_id, created_at) "
-                "VALUES (?, ?, 'ASSOCIATION', ?, ?, ?, ?, ?)",
+                "VALUES (?, ?, 'LONG_TERM', ?, ?, ?, ?, ?)",
                 { centroid_embedding_id, summary_id, summary_text,
                   static_cast<long long> (now_ts),
                   static_cast<long long> (cluster.embedding_ids.size ()),
@@ -1384,7 +1335,7 @@ ConsolidationSummarize::Execute (OperationContext &context, Transaction &tx) con
                   = cluster.centroid[i];
             }
           context.GetProcessorContext ().UpsertSummaryCache (
-              centroid_memory_id, centroid_embedding_id, centroid_vec, true, false);
+              centroid_memory_id, centroid_embedding_id, centroid_vec, false, false);
         }
 
       // 6. Update cluster_id in memories for source embeddings and create
