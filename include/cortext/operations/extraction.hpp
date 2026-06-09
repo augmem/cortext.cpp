@@ -50,9 +50,9 @@ struct ExtractionSourceBlob
 /// @brief Request for external LLM extraction.
 ///
 /// Created from clustered source memories for clusters meeting
-/// MinClusterSizeForExtraction threshold. `summary_id` is the source_id of the
-/// graph association receiving extracted labels; it may identify an associative
-/// cue node, not necessarily an abstractive summary.
+/// MinClusterSizeForExtraction threshold. `summary_id` is an opaque internal
+/// consolidation artifact id for the graph node receiving extracted labels; it
+/// may identify an associative cue node, not necessarily an abstractive summary.
 struct ExtractionRequest
 {
   std::string summary_id;

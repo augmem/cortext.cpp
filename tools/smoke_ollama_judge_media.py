@@ -191,6 +191,7 @@ def chat_media(
         {
             "model": model,
             "stream": False,
+            "keep_alive": "0s",
             "think": False,
             "format": response_schema,
             "messages": [
@@ -327,7 +328,12 @@ def main() -> int:
         "generated_speech_source": speech_source,
         "generated_speech_available": speech_generated,
         "payload_field": "messages[].images base64 payloads for both image and wav audio",
-        "ollama_options": {"temperature": 0, "num_ctx": args.num_ctx, "num_predict": 256},
+        "ollama_options": {
+            "temperature": 0,
+            "num_ctx": args.num_ctx,
+            "num_predict": 256,
+            "keep_alive": "0s",
+        },
         "selected_release_judge_model": args.model,
         "selection_reason": (
             "local unified Gemma 4 12B judge; this smoke records the exact "

@@ -40,6 +40,9 @@ namespace fs = std::filesystem;
 namespace
 {
 
+constexpr const char *kGabeSourceId = "Gabe";
+constexpr const char *kJulieSourceId = "Julie";
+
 struct Config
 {
   fs::path input_dir;
@@ -1035,9 +1038,9 @@ LabelOverlap (const std::unordered_set<std::string> &query_tokens,
 std::string
 RoleFromSourceId (const std::string &source_id)
 {
-  if (source_id.rfind ("chat/user", 0) == 0 || source_id == "julie/to")
+  if (source_id == kGabeSourceId)
     return "user";
-  if (source_id.rfind ("chat/assistant", 0) == 0 || source_id == "julie/from")
+  if (source_id == kJulieSourceId)
     return "assistant";
   return {};
 }
@@ -2657,9 +2660,10 @@ BuildVectorRagPacket (cortext::Store &store, const std::vector<RagDoc> &all_docs
       "FROM signals s "
       "JOIN embeddings e ON e.embedding_id = s.embedding_id "
       "WHERE s.timestamp < ? "
-      "  AND s.source_id IN ('chat/user', 'chat/assistant') "
+      "  AND s.source_id IN (?, ?) "
       "ORDER BY s.timestamp ASC, s.signal_id ASC",
-      { static_cast<long long> (query_ts) });
+      { static_cast<long long> (query_ts), std::string (kGabeSourceId),
+        std::string (kJulieSourceId) });
   for (const auto &row : prior_rows)
     {
       auto it_embedding = row.find ("embedding");
@@ -4084,8 +4088,8 @@ main (int argc, char **argv)
       for (int i = 0; i < static_cast<int> (messages.size ()); ++i)
         {
 	          const auto &msg = messages[static_cast<size_t> (i)];
-	          const std::string source = msg.from_contact ? "chat/assistant"
-	                                                      : "chat/user";
+	          const std::string source
+	              = msg.from_contact ? kJulieSourceId : kGabeSourceId;
 	          const std::string message_text = EvalText (msg);
 	          const auto query_tokens = Tokens (message_text);
           const int message_day_bucket = LocalDayBucket (msg.timestamp);

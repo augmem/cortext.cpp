@@ -577,7 +577,7 @@ remaining benchmark-only retrieval policies. The corrected harness uses native
 Cortext output directly: full working memory, STM, LTM, and daily consolidation;
 no benchmark-side memory caps, retrieval gates, packet pruning, LTM-only verdict
 arm, or per-message `source_id` rewriting. Text and audio from the same stream
-use the same stable source identifiers, `chat/user` and `chat/assistant`; message
+use stable opaque source identifiers for each conversation direction; message
 indices, timestamps, media paths, and transcript text remain benchmark metadata.
 For audio, `Cortext::ProcessAudio` receives only the raw `16 kHz` mono float PCM
 speech samples. No ASR transcript, generated transcript, labels, OCR, or text
@@ -2231,14 +2231,14 @@ Runs:
 
 The broad topical-chat ablations above do not exercise the exact prompt-reconstruction path used by the interactive chat application. To check whether working memory still behaves like recent chat history under long runs, we added a **scripted 100-turn integration test** that alternates user and assistant turns through the real high-level chat processing path:
 
-* user turns commit through `ProcessTextAt(..., "chat/user", ...)`
-* assistant turns stream through the non-durable probe path, then finalize once as `chat/assistant`
+* user turns commit through `ProcessTextAt(...)` with one stable benchmark source identifier
+* assistant turns stream through the non-durable probe path, then finalize once with a second stable benchmark source identifier
 * after each user turn, prompt reconstruction is compared against the exact recent conversational tail
 * at the end of the run, the active working-memory rows and the final prompt are inspected directly
 
-The initial failure looked like an algorithmic recall problem, but it was not: late-run prompts drifted into malformed histories such as `assistant 82, user 83, assistant 84, assistant 100`, even though the intended recent tail was still alternating. Root cause analysis showed two chat-specific policy bugs:
+The initial failure looked like an algorithmic recall problem, but it was not: late-run prompts drifted into malformed histories such as `assistant 82, user 83, assistant 84, assistant 100`, even though the intended recent tail was still alternating. Root cause analysis showed two production-policy bugs:
 
-1. full `chat/user` / `chat/assistant` turns were still passing through the generic working-memory admission and eviction logic rather than being preserved as prompt-bearing dialogue turns;
+1. durable ingress inputs were still passing through generic working-memory admission and eviction logic rather than being preserved as ordered recent input traces;
 2. prompt hydration was ordering active working-memory slots by `last_access`, so rehearsal or retrieval touches could reorder the visible chat history.
 
 After fixing both issues, the same 100-turn scripted run again produced the exact last four turns in order and the backing store ended with exactly four active `WORKING` rows (`end_ts IS NULL`), each with `n_signals = 1`.
@@ -2828,7 +2828,7 @@ erase details that the base engine already retained.
 
 We then added a private-safe live replay harness for a real long-running spouse
 conversation corpus. The harness ingests messages only through public Cortext
-APIs using turn-shaped chat sources (`chat/user` and `chat/assistant`),
+APIs using stable opaque source identifiers for the two directions,
 periodically runs consolidation, and compares the prompt surfaces a chat
 application would see:
 
@@ -14780,7 +14780,13 @@ versus traditional chat+RAG were **0.388**, mean Cortext context was **180.0**
 tokens versus **294.25** traditional chat+RAG tokens, and the failed gate was
 `cortext_quality_delta_vs_traditional_chat_rag = -3.0` against the `-0.5` floor.
 This smoke is intentionally not release evidence; it verifies that a bad
-checkpoint can stop the expensive replay path before final judging.
+checkpoint can stop the expensive replay path before final judging. The current
+release protocol still records judge `noise` as an independent dimension, but
+the aggregate quality composite now treats it as a low-weight diagnostic
+(`relevance + sufficiency - 0.25*noise`) rather than as an equal penalty against
+relevance or sufficiency. This reflects the design target for a human-like
+memory system: unrelated associations can be noisy without being equivalent to
+missing the relevant context.
 
 A subsequent phase-aware private run
 (`build/julie_release_phase_gate_fast_1200_20260608/`) exercised the cheaper
@@ -14937,21 +14943,25 @@ diagnosis: token savings and fairness are strong, but release readiness still
 depends on reducing text-packet noise and improving graph/fact-backed specificity
 before the final claim can be made.
 
-On the same v24 trace, the 24-probe loss audit
+On the same historical v24 trace, the 24-probe loss audit
 (`early_probe_024_loss_audit.json`) showed Cortext winning
 11 probes, traditional chat+RAG winning 5, full-history winning 5, and 3 ties,
-with **94.7%** mean token savings. The failing quality delta came from the
-composite `relevance + sufficiency - noise`: Cortext had slightly higher mean
-relevance than text RAG (**3.125** vs **2.917**) but a larger mean noise penalty
-(**1.542** vs **0.792**) and slightly lower sufficiency (**2.875** vs
-**2.917**). All 10 Cortext losses in that checkpoint were text-query losses and
-were tagged with relevance, sufficiency, temporal, and noise gaps against the
-winning packet; 6 had negative Cortext composite scores. At 32 probes, the same
-pattern persisted: Cortext won 16 of 32 probes and saved **95.2%** tokens, but
-13 text-query losses and the higher noise penalty kept the composite below the
-text-RAG baseline. This points the next release-readiness work at packet
-selection/noise control on losing text probes, not at media leakage or baseline
-unfairness. The follow-up production fix capped linked-source hydration fan-out
+with **94.7%** mean token savings. That audit used the older strict composite
+`relevance + sufficiency - noise`; under that historical scoring Cortext had
+slightly higher mean relevance than text RAG (**3.125** vs **2.917**) but a
+larger mean noise penalty (**1.542** vs **0.792**) and slightly lower
+sufficiency (**2.875** vs **2.917**). All 10 Cortext losses in that checkpoint
+were text-query losses and were tagged with relevance, sufficiency, temporal,
+and noise gaps against the winning packet; 6 had negative Cortext composite
+scores. At 32 probes, the same pattern persisted: Cortext won 16 of 32 probes
+and saved **95.2%** tokens, but 13 text-query losses and the higher full-noise
+penalty kept the historical composite below the text-RAG baseline. Current
+release runs do not reuse that full-noise penalty; they report noise separately
+and use the lower-weight `relevance + sufficiency - 0.25*noise` composite for
+quality gates and confidence intervals. This points the next release-readiness
+work at relevance/sufficiency and temporal specificity first, with packet noise
+kept as a diagnostic rather than a release-blocking proxy by itself. The
+follow-up production fix capped linked-source hydration fan-out
 with the existing F/T-derived compact item limit instead of a fixed display
 constant, because the loss audit showed that selected internal label/cue nodes
 could expand into too many distant source memories after scoring. That fix is a

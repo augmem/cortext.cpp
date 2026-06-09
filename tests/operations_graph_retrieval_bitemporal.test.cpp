@@ -91,7 +91,7 @@ public:
 
         ProcessorContext::WMSlot slot;
         slot.memory_id = 900000LL;
-        slot.source_id = "chat/user";
+        slot.source_id = "stream/main";
         slot.modality = "text";
         slot.strength = 1.0;
         SignalRecord record;

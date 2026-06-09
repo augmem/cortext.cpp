@@ -276,7 +276,8 @@ extern "C"
   /// @brief Processes text input through the memory system.
   /// @param h Handle to a Cortext instance.
   /// @param text Input text string (must be non-NULL).
-  /// @param source_id Source identifier string (must be non-NULL).
+  /// @param source_id Opaque source stream identifier for provenance and exact
+  /// same-source grouping (must be non-NULL).
   /// @return 0 on success, 1 if invalid parameters, 2 on internal error.
   ///
   /// This function encodes the text and processes it through the signal
@@ -289,7 +290,8 @@ extern "C"
   /// @param h Handle to a Cortext instance.
   /// @param pcm PCM audio samples (float32, must be non-NULL).
   /// @param num_samples Number of PCM samples.
-  /// @param source_id Source identifier string (must be non-NULL).
+  /// @param source_id Opaque source stream identifier for provenance and exact
+  /// same-source grouping (must be non-NULL).
   /// @return 0 on success, 1 if invalid parameters, 2 on internal error.
   ///
   /// Audio must be 16kHz mono float32 PCM. Timestamps are generated internally.
@@ -304,7 +306,8 @@ extern "C"
   /// @param width Image width in pixels.
   /// @param height Image height in pixels.
   /// @param channels Number of channels (3 for RGB, 4 for RGBA).
-  /// @param source_id Source identifier string (must be non-NULL).
+  /// @param source_id Opaque source stream identifier for provenance and exact
+  /// same-source grouping (must be non-NULL).
   /// @return 0 on success, 1 if invalid parameters, 2 on internal error.
   ///
   /// Image data is expected in row-major order (height × width × channels).

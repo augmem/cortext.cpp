@@ -98,3 +98,59 @@ TEST_CASE("Migrations are idempotent", "[schema][migration]") {
     
     REQUIRE(c >= 1);
 }
+
+TEST_CASE("Migrations create graph retrieval lookup indexes", "[schema][migration]") {
+    auto unique_store = SQLiteStore::Create(":memory:");
+    auto store = std::shared_ptr<Store>(std::move(unique_store));
+
+    auto ops = std::make_unique<OperationSet>();
+    SignalProcessor::Config cfg;
+    cortext::testing::RequireEncoder(cfg);
+    SignalProcessor processor(cfg, store, std::move(ops));
+
+    auto rows = store->Execute(
+        "SELECT name FROM sqlite_master "
+        "WHERE type='index' AND name='idx_memories_embedding'",
+        {});
+
+    REQUIRE(rows.size() == 1);
+}
+
+TEST_CASE("Migrations neutralize role-derived source metadata and summary kind",
+          "[schema][migration]") {
+    auto unique_store = SQLiteStore::Create(":memory:");
+    auto store = std::shared_ptr<Store>(std::move(unique_store));
+
+    auto ops = std::make_unique<OperationSet>();
+    SignalProcessor::Config cfg;
+    cortext::testing::RequireEncoder(cfg);
+    SignalProcessor processor(cfg, store, std::move(ops));
+
+    std::vector<float> embedding(256, 0.0f);
+    embedding[0] = 1.0f;
+    store->Execute(
+        "INSERT INTO embeddings (embedding_id, embedding, created_at) "
+        "VALUES (?, ?, ?)",
+        {100LL, embedding, 1000LL});
+    store->Execute(
+        "INSERT INTO memories (memory_id, embedding_id, source_id, kind, "
+        "label, start_ts, n_signals, modality, source_origin, "
+        "source_reliability, created_at) "
+        "VALUES (?, ?, ?, 'ASSOCIATION', ?, 1000, 1, 'text', ?, ?, 1000)",
+        {100LL, 100LL, std::string("summary_1000_0"),
+         std::string("summary text"), std::string("assistant"), 0.6});
+
+    store->Execute("DELETE FROM cortext_schema_migrations WHERE id = 8");
+    cortext::store::ApplyMigrations(*store);
+
+    auto rows = store->Execute(
+        "SELECT kind, source_origin, source_reliability "
+        "FROM memories WHERE memory_id = ?",
+        {100LL});
+    REQUIRE(rows.size() == 1);
+    REQUIRE(std::any_cast<std::string>(rows[0].at("kind")) == "LONG_TERM");
+    REQUIRE(std::any_cast<std::string>(rows[0].at("source_origin"))
+            == "source");
+    REQUIRE(std::any_cast<double>(rows[0].at("source_reliability"))
+            == 0.7);
+}

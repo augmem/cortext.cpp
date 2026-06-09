@@ -43,6 +43,8 @@ DEFAULT_OLLAMA_MODEL = "gemma4:12b-it-qat"
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".heic", ".gif", ".tiff"}
 VIDEO_EXTENSIONS = {".mov", ".mp4", ".3gp"}
 AUDIO_EXTENSIONS = {".m4a", ".wav", ".mp3"}
+GABE_SOURCE_ID = "Gabe"
+JULIE_SOURCE_ID = "Julie"
 
 
 @dataclass(frozen=True)
@@ -130,7 +132,7 @@ def tokens(text: str) -> list[str]:
 
 
 def source_for_message(message: dict) -> str:
-    return "chat/assistant" if message["from_contact"] else "chat/user"
+    return JULIE_SOURCE_ID if message["from_contact"] else GABE_SOURCE_ID
 
 
 def media_kind(path: pathlib.Path) -> str:
@@ -147,8 +149,8 @@ def media_kind(path: pathlib.Path) -> str:
 def media_source_id(path: pathlib.Path, kind: str) -> str:
     name = path.name.lower()
     if kind == "audio" and ("_self" in name or " self " in name):
-        return "chat/user"
-    return "chat/assistant"
+        return GABE_SOURCE_ID
+    return JULIE_SOURCE_ID
 
 
 def build_timeline(input_dir: pathlib.Path, max_messages: int, media_limit: int) -> list[Doc]:

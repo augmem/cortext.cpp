@@ -41,6 +41,7 @@ def main() -> int:
     parser.add_argument("--db", type=pathlib.Path, required=True)
     parser.add_argument("--processed-text-messages", type=int, required=True)
     parser.add_argument("--media-attempted", type=int, required=True)
+    parser.add_argument("--timeline-skip-messages", type=int, default=0)
     parser.add_argument("--timeline-max-messages", type=int, default=-1)
     parser.add_argument("--timeline-media-limit", type=int, default=-1)
     parser.add_argument("--media-processed", type=int, default=0)
@@ -59,6 +60,8 @@ def main() -> int:
     parser.add_argument("--daily-consolidation", action="store_true")
     parser.add_argument("--deep", action="store_true")
     args = parser.parse_args()
+    if args.timeline_skip_messages < 0:
+        raise RuntimeError("--timeline-skip-messages must be non-negative")
 
     probes = load_probe_rows(args.probe_stream, args.probe_limit)
     if not probes:
@@ -71,8 +74,10 @@ def main() -> int:
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "input_dir": str(args.input_dir),
         "db_path": str(args.db),
+        "timeline_skip_messages": args.timeline_skip_messages,
         "timeline_max_messages": args.timeline_max_messages,
         "timeline_media_limit": args.timeline_media_limit,
+        "skipped_transcript_messages": args.timeline_skip_messages,
         "processed_text_messages": args.processed_text_messages,
         "media_attempted": args.media_attempted,
         "media_processed": args.media_processed,
@@ -107,7 +112,7 @@ def main() -> int:
         "daily_consolidation": args.daily_consolidation,
         "deep_consolidation": args.deep,
         "source_id_policy": (
-            "chat/user and chat/assistant identify the conversation speakers; "
+            "Gabe and Julie are opaque conversation provenance source IDs; "
             "media is not encoded into source_id"
         ),
         "timeline_policy": (

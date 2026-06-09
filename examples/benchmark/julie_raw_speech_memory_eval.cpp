@@ -27,6 +27,9 @@ namespace fs = std::filesystem;
 namespace
 {
 
+constexpr const char *kGabeSourceId = "Gabe";
+constexpr const char *kJulieSourceId = "Julie";
+
 struct Config
 {
   fs::path manifest_path;
@@ -153,8 +156,8 @@ ParseTranscriptDocs (const fs::path &path)
         doc.index = static_cast<int> (docs.size ());
         doc.timestamp = *timestamp;
         doc.source_id = pending_header.find (" from ") != std::string::npos
-                            ? "chat/assistant"
-                            : "chat/user";
+                            ? kJulieSourceId
+                            : kGabeSourceId;
         doc.text = std::move (text);
         docs.push_back (std::move (doc));
       }
@@ -328,7 +331,7 @@ LoadManifestRecords (const fs::path &path)
 std::string
 StreamSourceId (const Record &record)
 {
-  return record.speaker_role == "contact" ? "chat/assistant" : "chat/user";
+  return record.speaker_role == "contact" ? kJulieSourceId : kGabeSourceId;
 }
 
 template <typename Callback>
@@ -766,7 +769,7 @@ main (int argc, char **argv)
               ? "tts_generation_before_ingest_and_text_rag_oracle_metrics_only"
               : "text_cortext_ingest_and_text_rag_oracle_metrics";
       out["source_id_policy"] =
-          "Cortext receives the same chat/user or chat/assistant stream "
+          "Cortext receives the same Gabe or Julie opaque stream "
           "source_id for text and audio; eval-only original_index metadata is "
           "keyed by stored memory_id and never passed as source_id";
       out["timestamp_handling"]

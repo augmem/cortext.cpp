@@ -402,7 +402,7 @@ struct ProcessorContext
   {
     // v2 persistence fields
     int64_t memory_id = 0;               ///< DB row ID (for updates)
-    std::string source_id;               ///< Signal source (e.g., "chat/user")
+    std::string source_id;               ///< Opaque source stream identifier
     std::vector<std::vector<unsigned char>> blob_ids;  ///< Content refs for hydration
     std::string modality = "text";       ///< Content type ("text", "audio", "image")
     int64_t start_ts = 0;                ///< Memory start timestamp (ms)
@@ -431,10 +431,10 @@ struct ProcessorContext
   // ======================================================================
   // Memory Accumulation State (Section 4.4)
   // ======================================================================
-  /// @brief Per-source-stream accumulators for memory formation.
+  /// @brief Per-opaque-source-stream accumulators for memory formation.
   ///
-  /// Maps source_id → AccumulatorState. Each stream accumulates signals into
-  /// coherent memories before making write decisions. This implements
+  /// Maps exact source_id → AccumulatorState. Each stream accumulates signals
+  /// into coherent memories before making write decisions. This implements
   /// Event Segmentation Theory (Zacks & Swallow, 2007) for grouping
   /// signals into natural "thought units".
   std::unordered_map<std::string, AccumulatorState> accumulator_states;

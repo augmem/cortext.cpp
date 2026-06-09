@@ -309,6 +309,8 @@ def frozen_benchmark_common(benchmark_command: str) -> list[str]:
     common = [parts[0]]
     for flag in REQUIRED_BENCH_FLAGS:
         common += [flag, command_flag_value(parts, flag)]
+    if command_has_flag(parts, "--skip-messages"):
+        common += ["--skip-messages", command_flag_value(parts, "--skip-messages")]
     if command_has_flag(parts, "--deep"):
         common.append("--deep")
     return common
@@ -336,6 +338,10 @@ def build_early_judge_command(
         command_flag_value(bench_cmd, "--input-dir"),
         "--db",
         str(db),
+        "--timeline-skip-messages",
+        command_flag_value(bench_cmd, "--skip-messages")
+        if command_has_flag(bench_cmd, "--skip-messages")
+        else "0",
         "--timeline-max-messages",
         command_flag_value(bench_cmd, "--max-messages"),
         "--timeline-media-limit",
@@ -719,6 +725,8 @@ def main() -> int:
             str(args.judge_packet_item_limit),
             "--ollama-base-url",
             "http://127.0.0.1:11434",
+            "--ollama-keep-alive",
+            "0s",
             "--blind-packets",
             "--max-media-per-system",
             "-1",

@@ -2,6 +2,7 @@
 #include "cortext/clock.hpp"
 #include "cortext/core/algorithms.hpp"
 #include "cortext/core/knobs.hpp"
+#include "cortext/core/utils.hpp"
 #include "cortext/internal/cancellation.hpp"
 #include "cortext/internal/replay_ingress.hpp"
 #include "encoder/text_encoder_factory.hpp"
@@ -111,6 +112,7 @@ namespace
 {
 
 constexpr int kMaxHydratedSoftAnchors = 3;
+constexpr const char *kMaintenanceSourceId = "cortext/maintenance";
 
 double
 Clamp01 (double value)
@@ -273,10 +275,9 @@ ApplyRetrievalScore (Cortext::Context::Memory &memory,
 }
 
 inline bool
-ShouldForceChatTurnStorage (const std::string &source_id)
+ShouldPreserveDurableInput (Retention retention)
 {
-  return source_id.rfind ("chat/user", 0) == 0
-         || source_id.rfind ("chat/assistant", 0) == 0;
+  return retention == Retention::Durable;
 }
 
 bool
@@ -1264,8 +1265,8 @@ struct Cortext::Impl
     s.soft_anchor_embedding = SoftAnchorEmbeddingView (encoded);
     s.timestamp = timestamp != 0 ? timestamp : NowMillis ();
     s.source_id = source_id;
-    s.force_boundary = ShouldForceChatTurnStorage (source_id);
-    s.force_write = ShouldForceChatTurnStorage (source_id);
+    s.force_boundary = ShouldPreserveDurableInput (retention);
+    s.force_write = ShouldPreserveDurableInput (retention);
     s.retention = retention;
     s.payload = std::vector<unsigned char> (text.begin (), text.end ());
     s.modality = "text";
@@ -1294,7 +1295,9 @@ struct Cortext::Impl
 
   cortext::SignalProcessor::Output
   ProcessEmbedding (const Eigen::VectorXf &embedding, std::uint64_t timestamp,
-                    const std::string &source_id)
+                    const std::string &source_id,
+                    std::optional<ConsolidationMode> consolidation_mode
+                    = std::nullopt)
   {
     const auto encoded = ToStdVector (embedding);
     cortext::Signal s;
@@ -1302,6 +1305,7 @@ struct Cortext::Impl
     s.soft_anchor_embedding = SoftAnchorEmbeddingView (encoded);
     s.timestamp = timestamp;
     s.source_id = source_id;
+    s.consolidation_mode = consolidation_mode;
     return processor->Process (s);
   }
 
@@ -1332,13 +1336,12 @@ struct Cortext::Impl
     encode_span.SetStatusOk ();
     const auto encode_end = std::chrono::steady_clock::now ();
     internal::ThrowIfStopRequested ();
-    const std::string source_id = ConsolidationSourceId (mode);
     const auto process_start = std::chrono::steady_clock::now ();
     const Eigen::VectorXf consolidation_embedding
         = ToEigen (RetrievalEmbeddingView (v));
     auto out = ProcessEmbedding (consolidation_embedding,
                                  timestamp != 0 ? timestamp : NowMillis (),
-                                 source_id);
+                                 kMaintenanceSourceId, mode);
     const auto process_end = std::chrono::steady_clock::now ();
     span.SetAttribute (
         "cortext.candidate_memory_count",
@@ -1732,8 +1735,8 @@ Cortext::ProcessText (const std::string &text, const std::string &source_id,
   s.soft_anchor_embedding = SoftAnchorEmbeddingView (v);
   s.timestamp = impl_->NowMillis ();
   s.source_id = source_id;
-  s.force_boundary = ShouldForceChatTurnStorage (source_id);
-  s.force_write = ShouldForceChatTurnStorage (source_id);
+  s.force_boundary = ShouldPreserveDurableInput (retention);
+  s.force_write = ShouldPreserveDurableInput (retention);
   s.retention = retention;
   s.payload = std::vector<unsigned char> (text.begin (), text.end ());
   s.modality = "text";
@@ -1788,8 +1791,8 @@ Cortext::ProcessTextAt (const std::string &text, const std::string &source_id,
   s.soft_anchor_embedding = SoftAnchorEmbeddingView (v);
   s.timestamp = timestamp;
   s.source_id = source_id;
-  s.force_boundary = ShouldForceChatTurnStorage (source_id);
-  s.force_write = ShouldForceChatTurnStorage (source_id);
+  s.force_boundary = ShouldPreserveDurableInput (retention);
+  s.force_write = ShouldPreserveDurableInput (retention);
   s.retention = retention;
   s.payload = std::vector<unsigned char> (text.begin (), text.end ());
   s.modality = "text";
@@ -1849,8 +1852,8 @@ Cortext::ProcessAudio (const float *pcm, std::size_t num_samples,
   s.soft_anchor_embedding = SoftAnchorEmbeddingView (v);
   s.timestamp = impl_->NowMillis ();
   s.source_id = source_id;
-  s.force_boundary = ShouldForceChatTurnStorage (source_id);
-  s.force_write = ShouldForceChatTurnStorage (source_id);
+  s.force_boundary = ShouldPreserveDurableInput (retention);
+  s.force_write = ShouldPreserveDurableInput (retention);
   s.retention = retention;
   // Store raw PCM bytes (f32le) as payload
   const std::size_t byte_len = num_samples * sizeof (float);
@@ -1912,6 +1915,8 @@ Cortext::ProcessImage (const std::uint8_t *data, int width, int height,
   s.soft_anchor_embedding = SoftAnchorEmbeddingView (v);
   s.timestamp = impl_->NowMillis ();
   s.source_id = source_id;
+  s.force_boundary = ShouldPreserveDurableInput (retention);
+  s.force_write = ShouldPreserveDurableInput (retention);
   s.retention = retention;
   // Store raw image bytes as payload
   const std::size_t byte_len
@@ -1979,8 +1984,8 @@ internal::ReplayIngress::ProcessAudioAt (Cortext &cortext, const float *pcm,
   s.soft_anchor_embedding = SoftAnchorEmbeddingView (v);
   s.timestamp = timestamp != 0 ? timestamp : cortext.impl_->NowMillis ();
   s.source_id = source_id;
-  s.force_boundary = ShouldForceChatTurnStorage (source_id);
-  s.force_write = ShouldForceChatTurnStorage (source_id);
+  s.force_boundary = ShouldPreserveDurableInput (retention);
+  s.force_write = ShouldPreserveDurableInput (retention);
   s.retention = retention;
   const std::size_t byte_len = num_samples * sizeof (float);
   s.payload = std::vector<unsigned char> (byte_len);
@@ -2044,6 +2049,8 @@ internal::ReplayIngress::ProcessImageAt (Cortext &cortext,
   s.soft_anchor_embedding = SoftAnchorEmbeddingView (v);
   s.timestamp = timestamp != 0 ? timestamp : cortext.impl_->NowMillis ();
   s.source_id = source_id;
+  s.force_boundary = ShouldPreserveDurableInput (retention);
+  s.force_write = ShouldPreserveDurableInput (retention);
   s.retention = retention;
   const std::size_t byte_len
       = static_cast<std::size_t> (width) * static_cast<std::size_t> (height)

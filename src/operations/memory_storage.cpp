@@ -59,29 +59,15 @@ SerializeEmotionVector (const std::array<double, 6> &vec)
   return blob;
 }
 
-/// @brief Map source_id to an origin label for source monitoring.
 std::string
-SourceOriginFor (const std::string &source_id)
+SourceOriginFor ()
 {
-  if (source_id.find ("user") != std::string::npos)
-    return "user";
-  if (source_id.find ("assistant") != std::string::npos)
-    return "assistant";
-  if (source_id.find ("system") != std::string::npos)
-    return "system";
-  return "external";
+  return "source";
 }
 
-/// @brief Baseline source reliability prior.
 double
-SourcePriorReliability (const std::string &origin)
+SourcePriorReliability ()
 {
-  if (origin == "user")
-    return 0.8;
-  if (origin == "assistant")
-    return 0.6;
-  if (origin == "system")
-    return 0.9;
   return 0.7;
 }
 
@@ -178,8 +164,8 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
       const std::string primary_modality
           = GetPrimaryModality (acc.signals, signal.modality);
 
-      const std::string origin = SourceOriginFor (signal.source_id);
-      const double source_reliability = SourcePriorReliability (origin);
+      const std::string origin = SourceOriginFor ();
+      const double source_reliability = SourcePriorReliability ();
 
       // 4. Require tracked per-signal records for persistence.
       if (acc.signals.empty ())

@@ -71,7 +71,8 @@ MakeConsolidationSignal (uint64_t ts,
                          ConsolidationMode mode = ConsolidationMode::Both)
 {
   auto s = MakeSignal (ts);
-  s.source_id = ConsolidationSourceId (mode);
+  s.source_id = "test/consolidation";
+  s.consolidation_mode = mode;
   return s;
 }
 
@@ -350,7 +351,8 @@ TEST_CASE ("ScoreConsolidation identifies low-strength candidates",
   // Initialize store and context
   Signal dummy;
   dummy.timestamp = 50'000ULL;
-  dummy.source_id = ConsolidationSourceId (ConsolidationMode::Shallow);
+  dummy.source_id = "test/consolidation";
+  dummy.consolidation_mode = ConsolidationMode::Shallow;
   dummy.embedding = Eigen::VectorXf::Zero (4); // Not used by op directly
   ProcessorContext p_ctx;
   OperationContext ctx (dummy, p_ctx, cfg, store.get ());
@@ -408,7 +410,8 @@ TEST_CASE ("ScoreConsolidation deep mode falls back to lowest eligible scores",
 
   Signal dummy;
   dummy.timestamp = 90'000ULL;
-  dummy.source_id = ConsolidationSourceId (ConsolidationMode::Deep);
+  dummy.source_id = "test/consolidation";
+  dummy.consolidation_mode = ConsolidationMode::Deep;
   dummy.embedding = Eigen::VectorXf::Zero (4);
   ProcessorContext p_ctx;
   OperationContext ctx (dummy, p_ctx, cfg, store.get ());
@@ -482,7 +485,8 @@ TEST_CASE ("ScoreConsolidation forced mode broadens partial candidate sets",
 
   Signal dummy;
   dummy.timestamp = 120'000ULL;
-  dummy.source_id = ConsolidationSourceId (ConsolidationMode::Deep);
+  dummy.source_id = "test/consolidation";
+  dummy.consolidation_mode = ConsolidationMode::Deep;
   dummy.embedding = Eigen::VectorXf::Zero (4);
   ProcessorContext p_ctx;
   OperationContext ctx (dummy, p_ctx, cfg, store.get ());
@@ -534,7 +538,8 @@ TEST_CASE ("ScoreConsolidation forced shallow mode broadens partial candidate se
 
   Signal dummy;
   dummy.timestamp = 130'000ULL;
-  dummy.source_id = ConsolidationSourceId (ConsolidationMode::Shallow);
+  dummy.source_id = "test/consolidation";
+  dummy.consolidation_mode = ConsolidationMode::Shallow;
   dummy.embedding = Eigen::VectorXf::Zero (4);
   ProcessorContext p_ctx;
   OperationContext ctx (dummy, p_ctx, cfg, store.get ());

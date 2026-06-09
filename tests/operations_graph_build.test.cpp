@@ -30,7 +30,8 @@ MakeSignal (uint64_t ts)
   Signal s;
   s.embedding = Eigen::VectorXf::Ones (kEmbeddingDim);
   s.timestamp = ts;
-  s.source_id = ConsolidationSourceId (ConsolidationMode::Both);
+  s.source_id = "test/consolidation";
+  s.consolidation_mode = ConsolidationMode::Both;
   return s;
 }
 

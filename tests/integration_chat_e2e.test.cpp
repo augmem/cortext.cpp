@@ -442,11 +442,12 @@ CountRowsForSource (Store &store, const std::string &table,
 }
 
 std::vector<std::string>
-GetAssociationSummaryLabels (Store &store, long long min_memory_id = 0)
+GetDeepSummaryLabels (Store &store, long long min_memory_id = 0)
 {
   const auto rows = store.Execute (
       "SELECT memory_id, label FROM memories "
-      "WHERE kind = 'ASSOCIATION' AND label IS NOT NULL AND label != '' "
+      "WHERE source_id LIKE 'summary_%' "
+      "  AND label IS NOT NULL AND label != '' "
       "  AND memory_id > ? "
       "ORDER BY memory_id ASC",
       { min_memory_id });
@@ -903,7 +904,8 @@ MakeConsolidationSignal (uint64_t ts,
   Signal s;
   s.embedding = Eigen::VectorXf::Ones (kEmbeddingDim);
   s.timestamp = ts;
-  s.source_id = ConsolidationSourceId (mode);
+  s.source_id = "test/consolidation";
+  s.consolidation_mode = mode;
   return s;
 }
 
@@ -1294,7 +1296,7 @@ TEST_CASE ("Integration: deep consolidation reuses source sets and keeps cluster
 
   auto first_summary_rows = store->Execute (
       "SELECT COUNT(*) AS c FROM memories "
-      "WHERE kind = 'ASSOCIATION' AND source_id LIKE 'summary_%'",
+      "WHERE kind = 'LONG_TERM' AND source_id LIKE 'summary_%'",
       {});
   REQUIRE_FALSE (first_summary_rows.empty ());
   REQUIRE (cortext::testing::GetInt64 (first_summary_rows[0], "c") == 1);
@@ -1309,7 +1311,7 @@ TEST_CASE ("Integration: deep consolidation reuses source sets and keeps cluster
 
   auto second_summary_rows = store->Execute (
       "SELECT COUNT(*) AS c FROM memories "
-      "WHERE kind = 'ASSOCIATION' AND source_id LIKE 'summary_%'",
+      "WHERE kind = 'LONG_TERM' AND source_id LIKE 'summary_%'",
       {});
   REQUIRE_FALSE (second_summary_rows.empty ());
   REQUIRE (cortext::testing::GetInt64 (second_summary_rows[0], "c") == 2);
@@ -1331,7 +1333,7 @@ TEST_CASE ("Integration: deep consolidation reuses source sets and keeps cluster
 
   auto final_summary_rows = store->Execute (
       "SELECT COUNT(*) AS c FROM memories "
-      "WHERE kind = 'ASSOCIATION' AND source_id LIKE 'summary_%'",
+      "WHERE kind = 'LONG_TERM' AND source_id LIKE 'summary_%'",
       {});
   REQUIRE_FALSE (final_summary_rows.empty ());
   REQUIRE (cortext::testing::GetInt64 (final_summary_rows[0], "c") == 2);
@@ -1427,7 +1429,7 @@ TEST_CASE ("Integration: cancel during deep consolidation aborts without committ
 
   const auto summary_rows = store->Execute (
       "SELECT COUNT(*) AS c FROM memories "
-      "WHERE kind = 'ASSOCIATION' AND source_id LIKE 'summary_%'",
+      "WHERE source_id LIKE 'summary_%'",
       {});
   REQUIRE_FALSE (summary_rows.empty ());
   REQUIRE (cortext::testing::GetInt64 (summary_rows[0], "c") == 0);
@@ -2133,7 +2135,7 @@ TEST_CASE (
       SKIP ("deep consolidation backend unavailable in this test environment");
     }
 
-  const auto first_pass_summaries = GetAssociationSummaryLabels (*store);
+  const auto first_pass_summaries = GetDeepSummaryLabels (*store);
   REQUIRE_FALSE (first_pass_summaries.empty ());
   bool first_pass_mentions_emily = false;
   std::cout << "\n[first deep consolidation summaries]\n";
@@ -2153,7 +2155,8 @@ TEST_CASE (
 
   long long last_summary_memory_id = 0;
   const auto first_summary_rows = store->Execute (
-      "SELECT MAX(memory_id) AS max_id FROM memories WHERE kind = 'ASSOCIATION'",
+      "SELECT MAX(memory_id) AS max_id FROM memories "
+      "WHERE source_id LIKE 'summary_%'",
       {});
   REQUIRE_FALSE (first_summary_rows.empty ());
   last_summary_memory_id
@@ -2174,7 +2177,7 @@ TEST_CASE (
     latest_ctx = cortext_ctx->Consolidate (cortext::ConsolidationMode::Deep);
   }
   const auto second_pass_summaries
-      = GetAssociationSummaryLabels (*store, last_summary_memory_id);
+      = GetDeepSummaryLabels (*store, last_summary_memory_id);
 
   bool second_pass_mentions_cortext = false;
   bool second_pass_mentions_llama = false;
@@ -2208,7 +2211,7 @@ TEST_CASE (
       "JOIN memories src ON src.memory_id = a.source_memory_id "
       "JOIN memories dst ON dst.memory_id = a.target_memory_id "
       "WHERE a.edge_type = 'derived_from' "
-      "  AND src.kind = 'ASSOCIATION' "
+      "  AND src.source_id LIKE 'summary_%' "
       "  AND src.memory_id > ? "
       "  AND dst.kind != 'LONG_TERM'",
       { last_summary_memory_id });
@@ -2217,7 +2220,8 @@ TEST_CASE (
            == 0);
 
   const auto second_summary_rows = store->Execute (
-      "SELECT MAX(memory_id) AS max_id FROM memories WHERE kind = 'ASSOCIATION'",
+      "SELECT MAX(memory_id) AS max_id FROM memories "
+      "WHERE source_id LIKE 'summary_%'",
       {});
   REQUIRE_FALSE (second_summary_rows.empty ());
   const long long second_summary_max_id
@@ -2229,7 +2233,7 @@ TEST_CASE (
     latest_ctx = cortext_ctx->Consolidate (cortext::ConsolidationMode::Deep);
   }
   const auto third_pass_summaries
-      = GetAssociationSummaryLabels (*store, second_summary_max_id);
+      = GetDeepSummaryLabels (*store, second_summary_max_id);
   if (!third_pass_summaries.empty ())
     {
       std::cout << "\n[third deep consolidation summaries]\n";

@@ -115,7 +115,7 @@ if |similar_memories| > 0:
     merge_into_chunk(similar_memories, memory)
 ```
 
-**Implementation note (chat applications):** turn-structured chat sources (`chat/user`, `chat/assistant`) bypass same-source chunk merging and generic WM rejection so the active working-memory window remains a FIFO sequence of recent turns for prompt reconstruction. Prompt hydration must order active slots by insertion/start time rather than `last_access`; otherwise rehearsal or retrieval touches can scramble the conversational sequence even when the underlying memories are correct.
+**Implementation note:** durable ingress inputs preserve an ordered working-memory trace independent of the literal `source_id` string. `source_id` is still used for opaque provenance and exact same-source grouping, but Cortext does not parse roles such as user, assistant, speaker, or device from it. Internal maintenance work follows the same rule: consolidation is driven by an explicit `Signal::consolidation_mode` hint rather than by a magic `source_id` value. Prompt hydration orders active slots by insertion/start time rather than `last_access`; otherwise rehearsal or retrieval touches can scramble the visible recent context even when the underlying memories are correct.
 
 ## Three-Tier Graph Memory Surface {#sec-three-tier-graph-memory}
 

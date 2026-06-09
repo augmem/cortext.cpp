@@ -47,7 +47,16 @@ FIELDS = [
     "source_grounding",
     "modality_grounding",
 ]
+QUALITY_COMPOSITE_WEIGHTS = {
+    "relevance": 1.0,
+    "sufficiency": 1.0,
+    "noise": -0.25,
+}
+QUALITY_COMPOSITE_DEFINITION = "relevance + sufficiency - 0.25*noise"
 PACKET_ALIASES = ["A", "B", "C"]
+GABE_SOURCE_ID = "Gabe"
+JULIE_SOURCE_ID = "Julie"
+COMPACTED_HISTORY_SOURCE_ID = "Gabe-Julie-summary"
 BLIND_FORBIDDEN_TERMS = {
     "cortext",
     "cortext_native",
@@ -131,7 +140,7 @@ def sum_doc_tokens(docs: list[TimelineDoc]) -> int:
 
 
 def source_for_message(message: dict) -> str:
-    return "chat/assistant" if message["from_contact"] else "chat/user"
+    return JULIE_SOURCE_ID if message["from_contact"] else GABE_SOURCE_ID
 
 
 def media_kind(path: pathlib.Path) -> str:
@@ -416,14 +425,23 @@ def convert_audio_for_judge(source: pathlib.Path, work_dir: pathlib.Path, stem: 
 def media_source_id(path: pathlib.Path, kind: str) -> str:
     name = path.name.lower()
     if kind == "audio" and ("_self" in name or " self " in name):
-        return "chat/user"
-    return "chat/assistant"
+        return GABE_SOURCE_ID
+    return JULIE_SOURCE_ID
 
 
-def build_timeline(input_dir: pathlib.Path, max_messages: int, media_limit: int) -> list[TimelineDoc]:
+def build_timeline(
+    input_dir: pathlib.Path,
+    skip_messages: int,
+    max_messages: int,
+    media_limit: int,
+) -> list[TimelineDoc]:
     messages = parse_messages(input_dir / "Messages - Julie Willen.txt")
+    if skip_messages > 0:
+        messages = messages[skip_messages:]
     if max_messages >= 0:
         messages = messages[:max_messages]
+    message_window_start = int(messages[0]["timestamp"]) if messages else 0
+    message_window_end = int(messages[-1]["timestamp"]) if messages else 0
 
     media: list[tuple[pathlib.Path, int, str]] = []
     for path in input_dir.rglob("*"):
@@ -433,7 +451,12 @@ def build_timeline(input_dir: pathlib.Path, max_messages: int, media_limit: int)
         if kind not in {"audio", "image", "video"}:
             continue
         timestamp = parse_timestamp(path.name)
-        media.append((path, int(timestamp or 0), kind))
+        timestamp_value = int(timestamp or 0)
+        if message_window_start and (
+            timestamp_value < message_window_start or timestamp_value > message_window_end
+        ):
+            continue
+        media.append((path, timestamp_value, kind))
     media.sort(key=lambda item: (item[1], str(item[0])))
 
     events: list[tuple[int, int, bool, int]] = []
@@ -707,7 +730,7 @@ def compaction_doc(probe: dict, query_doc: TimelineDoc) -> TimelineDoc | None:
     return TimelineDoc(
         index=-1,
         timestamp=query_doc.timestamp,
-        source_id="chat/summary",
+        source_id=COMPACTED_HISTORY_SOURCE_ID,
         modality="text",
         text=summary_text,
     )
@@ -1082,6 +1105,7 @@ def call_ollama_judge(
     max_tokens: int,
     timeout_s: int,
     context_window_tokens: int,
+    keep_alive: str,
 ) -> dict:
     body = {
         "model": model,
@@ -1096,6 +1120,7 @@ def call_ollama_judge(
             ollama_user_message(content),
         ],
         "stream": False,
+        "keep_alive": keep_alive,
         "format": judge_json_schema(content),
         "think": False,
         "options": {
@@ -1117,6 +1142,7 @@ def call_judge_once(
     max_tokens: int,
     timeout_s: int,
     context_window_tokens: int,
+    ollama_keep_alive: str,
 ) -> dict:
     if provider == "ollama":
         if base_url is None:
@@ -1128,6 +1154,7 @@ def call_judge_once(
             max_tokens,
             timeout_s,
             context_window_tokens,
+            ollama_keep_alive,
         )
     return call_nemotron_judge(model, content, max_tokens, timeout_s)
 
@@ -1140,6 +1167,7 @@ def call_judge(
     max_tokens: int,
     timeout_s: int,
     context_window_tokens: int,
+    ollama_keep_alive: str,
 ) -> dict:
     for attempt in range(1, JUDGE_CALL_ATTEMPTS + 1):
         try:
@@ -1151,6 +1179,7 @@ def call_judge(
                 max_tokens,
                 timeout_s,
                 context_window_tokens,
+                ollama_keep_alive,
             )
         except (JudgeMalformedResponse, JudgeCallTimeout) as exc:
             if attempt >= JUDGE_CALL_ATTEMPTS:
@@ -1309,11 +1338,10 @@ def quality_composite_from_row(row: dict, system: str) -> float:
     scores = row.get("systems", {}).get(system, {})
     if not isinstance(scores, dict):
         return 0.0
-    return (
-        float(scores.get("relevance", 0.0) or 0.0)
-        + float(scores.get("sufficiency", 0.0) or 0.0)
-        - float(scores.get("noise", 0.0) or 0.0)
-    )
+    total = 0.0
+    for field, weight in QUALITY_COMPOSITE_WEIGHTS.items():
+        total += float(scores.get(field, 0.0) or 0.0) * weight
+    return total
 
 
 def quality_delta_from_row(row: dict) -> float:
@@ -1337,7 +1365,7 @@ def unrecoverable_quality_stop(
         return None
     current_sum = prior_quality_delta_sum + sum(quality_delta_from_row(row) for row in judged)
     remaining = expected_total_rows - rows_judged
-    max_remaining_delta_per_row = 15.0
+    max_remaining_delta_per_row = 11.25
     optimistic_final_delta = (
         current_sum + remaining * max_remaining_delta_per_row
     ) / expected_total_rows
@@ -1404,6 +1432,15 @@ def main() -> int:
     parser.add_argument(
         "--ollama-base-url",
         help="Loopback Ollama base URL, for example http://127.0.0.1:11434.",
+    )
+    parser.add_argument(
+        "--ollama-keep-alive",
+        default="5m",
+        help=(
+            "Ollama model residency after each local judge call. Streamed "
+            "early judging should pass 0s so the judge model releases GPU "
+            "memory before Cortext consolidation resumes."
+        ),
     )
     parser.add_argument("--judge-limit", type=int, default=-1)
     parser.add_argument(
@@ -1542,10 +1579,13 @@ def main() -> int:
     max_messages = int(
         summary.get("timeline_max_messages", summary.get("processed_text_messages", -1))
     )
+    skip_messages = int(
+        summary.get("timeline_skip_messages", summary.get("skipped_transcript_messages", 0))
+    )
     media_limit = int(
         summary.get("timeline_media_limit", summary.get("media_attempted", -1))
     )
-    timeline = build_timeline(input_dir, max_messages, media_limit)
+    timeline = build_timeline(input_dir, skip_messages, max_messages, media_limit)
     expected_judgments = expected_judgment_count(
         summary,
         timeline,
@@ -1867,6 +1907,7 @@ def main() -> int:
                         1300,
                         args.judge_timeout_s,
                         args.judge_context_window_tokens,
+                        args.ollama_keep_alive,
                     )
                 )
                 for packet_label in label_to_real:
@@ -2067,6 +2108,9 @@ def main() -> int:
             "expected_judgments": expected_judgments,
             "judge_timeout_s": args.judge_timeout_s,
             "judge_context_window_tokens": args.judge_context_window_tokens,
+            "ollama_keep_alive": args.ollama_keep_alive
+            if args.judge_provider == "ollama"
+            else "",
             "early_stop_prior_quality_delta_sum": (
                 args.early_stop_prior_quality_delta_sum
             ),
@@ -2078,6 +2122,8 @@ def main() -> int:
             "packet_surface": PACKET_SURFACE,
             "systems": systems,
             "score_fields": fields,
+            "quality_composite_definition": QUALITY_COMPOSITE_DEFINITION,
+            "quality_composite_weights": QUALITY_COMPOSITE_WEIGHTS,
             "cortext_packet_source": dict(cortext_packet_source),
             "normal_rag_baseline": (
                 "rolling text chat history until compaction plus text RAG hits"

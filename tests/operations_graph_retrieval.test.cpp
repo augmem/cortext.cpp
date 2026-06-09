@@ -436,7 +436,7 @@ TEST_CASE ("Graph retrieval scores durable labels by derived source set",
   cortext::testing::SeedEmbeddingV2 (*store, 100LL, query, 1000);
   cortext::testing::SeedEmbeddingV2 (*store, 200LL, unrelated, 1000);
   cortext::testing::SeedEmbeddingV2 (*store, 300LL, label_vec, 1000);
-  cortext::testing::SeedMemoryV2 (*store, 100LL, 100LL, "chat/user",
+  cortext::testing::SeedMemoryV2 (*store, 100LL, 100LL, "stream/main",
                                   "LONG_TERM", 1.0, 1000);
   cortext::testing::SeedMemoryV2 (*store, 200LL, 200LL,
                                   "associative_cue_test", "ASSOCIATION",
@@ -504,7 +504,7 @@ TEST_CASE ("Graph retrieval propagates label graph boost across durable label re
   cortext::testing::SeedEmbeddingV2 (*store, 200LL, source_vec, 1000);
   cortext::testing::SeedEmbeddingV2 (*store, 300LL, mcdonalds_vec, 1000);
   cortext::testing::SeedEmbeddingV2 (*store, 400LL, chicago_vec, 1000);
-  cortext::testing::SeedMemoryV2 (*store, 100LL, 100LL, "chat/user",
+  cortext::testing::SeedMemoryV2 (*store, 100LL, 100LL, "stream/main",
                                   "LONG_TERM", 1.0, 1000);
   cortext::testing::SeedMemoryV2 (*store, 200LL, 200LL,
                                   "associative_cue_test", "ASSOCIATION",
@@ -563,7 +563,7 @@ TEST_CASE ("Graph retrieval seeds source memories from durable label graph",
   cortext::testing::SeedEmbeddingV2 (*store, 100LL, source_vec, 1000);
   cortext::testing::SeedEmbeddingV2 (*store, 200LL, source_vec, 1000);
   cortext::testing::SeedEmbeddingV2 (*store, 300LL, query_vec, 1000);
-  cortext::testing::SeedMemoryV2 (*store, 100LL, 100LL, "chat/source",
+  cortext::testing::SeedMemoryV2 (*store, 100LL, 100LL, "stream/source",
                                   "LONG_TERM", 1.0, 1000);
   cortext::testing::SeedMemoryV2 (*store, 200LL, 200LL,
                                   "associative_cue_test", "ASSOCIATION",
@@ -580,7 +580,7 @@ TEST_CASE ("Graph retrieval seeds source memories from durable label graph",
       const long long id = 1000LL + i;
       cortext::testing::SeedEmbeddingV2 (*store, id, query_vec, 1000);
       cortext::testing::SeedMemoryV2 (*store, id, id,
-                                      "chat/distractor" + std::to_string (i),
+                                      "stream/distractor" + std::to_string (i),
                                       "LONG_TERM", 1.0, 1000);
     }
 
@@ -625,7 +625,7 @@ TEST_CASE ("Graph retrieval maps text query labels back to durable sources",
   cortext::testing::SeedEmbeddingV2 (*store, 100LL, source_vec, 1000);
   cortext::testing::SeedEmbeddingV2 (*store, 200LL, source_vec, 1000);
   cortext::testing::SeedEmbeddingV2 (*store, 300LL, label_vec, 1000);
-  cortext::testing::SeedMemoryV2 (*store, 100LL, 100LL, "chat/source",
+  cortext::testing::SeedMemoryV2 (*store, 100LL, 100LL, "stream/source",
                                   "LONG_TERM", 1.0, 1000);
   cortext::testing::SeedMemoryV2 (*store, 200LL, 200LL,
                                   "associative_cue_test", "ASSOCIATION",
@@ -644,7 +644,7 @@ TEST_CASE ("Graph retrieval maps text query labels back to durable sources",
       const long long id = 1000LL + i;
       cortext::testing::SeedEmbeddingV2 (*store, id, query_vec, 1000);
       cortext::testing::SeedMemoryV2 (*store, id, id,
-                                      "chat/distractor" + std::to_string (i),
+                                      "stream/distractor" + std::to_string (i),
                                       "LONG_TERM", 1.0, 1000);
     }
 
@@ -689,7 +689,7 @@ TEST_CASE ("Graph retrieval maps token-overlap text queries to durable labels",
   cortext::testing::SeedEmbeddingV2 (*store, 100LL, source_vec, 1000);
   cortext::testing::SeedEmbeddingV2 (*store, 200LL, source_vec, 1000);
   cortext::testing::SeedEmbeddingV2 (*store, 300LL, label_vec, 1000);
-  cortext::testing::SeedMemoryV2 (*store, 100LL, 100LL, "chat/source",
+  cortext::testing::SeedMemoryV2 (*store, 100LL, 100LL, "stream/source",
                                   "LONG_TERM", 1.0, 1000);
   cortext::testing::SeedMemoryV2 (*store, 200LL, 200LL,
                                   "associative_cue_test", "ASSOCIATION",
@@ -711,7 +711,7 @@ TEST_CASE ("Graph retrieval maps token-overlap text queries to durable labels",
       const long long id = 1000LL + i;
       cortext::testing::SeedEmbeddingV2 (*store, id, query_vec, 1000);
       cortext::testing::SeedMemoryV2 (*store, id, id,
-                                      "chat/distractor" + std::to_string (i),
+                                      "stream/distractor" + std::to_string (i),
                                       "LONG_TERM", 1.0, 1000);
     }
 
@@ -758,9 +758,9 @@ TEST_CASE ("Graph retrieval expands source seeds through durable label relations
   cortext::testing::SeedEmbeddingV2 (*store, 201LL, related_vec, 1000);
   cortext::testing::SeedEmbeddingV2 (*store, 300LL, label_vec, 1000);
   cortext::testing::SeedEmbeddingV2 (*store, 301LL, label_vec, 1000);
-  cortext::testing::SeedMemoryV2 (*store, 100LL, 100LL, "chat/source",
+  cortext::testing::SeedMemoryV2 (*store, 100LL, 100LL, "stream/source",
                                   "LONG_TERM", 1.0, 1000);
-  cortext::testing::SeedMemoryV2 (*store, 101LL, 101LL, "chat/related",
+  cortext::testing::SeedMemoryV2 (*store, 101LL, 101LL, "stream/related",
                                   "LONG_TERM", 1.0, 1000);
   cortext::testing::SeedMemoryV2 (*store, 200LL, 200LL,
                                   "associative_cue_source", "ASSOCIATION",
@@ -825,9 +825,9 @@ TEST_CASE (
   cortext::testing::SeedEmbeddingV2 (*store, 300LL, label_vec, 1000);
   cortext::testing::SeedEmbeddingV2 (*store, 301LL, label_vec, 1000);
   cortext::testing::SeedEmbeddingV2 (*store, 900LL, related_vec, 1000);
-  cortext::testing::SeedMemoryV2 (*store, 100LL, 100LL, "chat/source",
+  cortext::testing::SeedMemoryV2 (*store, 100LL, 100LL, "stream/source",
                                   "LONG_TERM", 1.0, 1000);
-  cortext::testing::SeedMemoryV2 (*store, 101LL, 101LL, "chat/related",
+  cortext::testing::SeedMemoryV2 (*store, 101LL, 101LL, "stream/related",
                                   "LONG_TERM", 1.0, 1000);
   cortext::testing::SeedMemoryV2 (*store, 200LL, 200LL,
                                   "associative_cue_source", "ASSOCIATION",
@@ -895,27 +895,27 @@ TEST_CASE ("Graph retrieval expands temporal neighbors from active working memor
   const Eigen::VectorXf target_vec = UnitVec256Second (1.0f);
   const Eigen::VectorXf wm_vec = UnitVec256 (-1.0f);
 
-  for (long long i = 0; i < 24; ++i)
+  for (long long i = 0; i < 540; ++i)
     {
       const long long id = 1000LL + i;
       cortext::testing::SeedEmbeddingV2 (*store, id, query_vec, 1000 + i);
       cortext::testing::SeedMemoryV2 (*store, id, id,
-                                      "chat/distractor" + std::to_string (i),
+                                      "stream/distractor" + std::to_string (i),
                                       "LONG_TERM", 1.0, 1000 + i);
     }
 
   cortext::testing::SeedEmbeddingV2 (*store, 200LL, target_vec, 1990);
   cortext::testing::SeedEmbeddingV2 (*store, 201LL, wm_vec, 2000);
-  cortext::testing::SeedMemoryV2 (*store, 200LL, 200LL, "chat/user",
+  cortext::testing::SeedMemoryV2 (*store, 200LL, 200LL, "stream/main",
                                   "LONG_TERM", 1.0, 1990);
-  cortext::testing::SeedMemoryV2 (*store, 201LL, 201LL, "chat/user",
+  cortext::testing::SeedMemoryV2 (*store, 201LL, 201LL, "stream/main",
                                   "WORKING", 1.0, 2000);
 
   auto run = [&] {
     cortext::operations::retrieval_debug::ClearLastRankedCandidates ();
     auto ops = std::make_unique<OperationSet> (
         std::make_unique<ForceRetrievalGateOp> (),
-        std::make_unique<SeedWorkingMemoryAnchorOp> (201LL, "chat/user",
+        std::make_unique<SeedWorkingMemoryAnchorOp> (201LL, "stream/main",
                                                      2000LL, wm_vec),
         std::make_unique<GraphAugmentedRetrieveCandidates> ());
     SignalProcessor::Config cfg;
@@ -955,8 +955,8 @@ TEST_CASE ("Graph retrieval expands temporal neighbors from active working memor
   REQUIRE (target_it == ranked.end ());
 }
 
-TEST_CASE ("Graph retrieval expands active chat working memory across speakers",
-           "[operations][graph][source_seed][wm_temporal][chat]")
+TEST_CASE ("Graph retrieval keeps active working-memory temporal expansion source-local",
+           "[operations][graph][source_seed][wm_temporal]")
 {
   auto unique_store = SQLiteStore::Create (":memory:");
   auto store = std::shared_ptr<Store> (std::move (unique_store));
@@ -971,25 +971,25 @@ TEST_CASE ("Graph retrieval expands active chat working memory across speakers",
       const long long id = 1000LL + i;
       cortext::testing::SeedEmbeddingV2 (*store, id, query_vec, 1000 + i);
       cortext::testing::SeedMemoryV2 (*store, id, id,
-                                      "chat/distractor" + std::to_string (i),
+                                      "stream/distractor" + std::to_string (i),
                                       "LONG_TERM", 1.0, 1000 + i);
     }
 
   cortext::testing::SeedEmbeddingV2 (*store, 200LL, target_vec, 1998);
   cortext::testing::SeedEmbeddingV2 (*store, 201LL, wm_vec, 2000);
-  cortext::testing::SeedEmbeddingV2 (*store, 202LL, target_vec, 3500);
-  cortext::testing::SeedMemoryV2 (*store, 200LL, 200LL, "chat/assistant",
+  cortext::testing::SeedEmbeddingV2 (*store, 203LL, target_vec, 1998);
+  cortext::testing::SeedMemoryV2 (*store, 200LL, 200LL, "stream/reply",
                                   "LONG_TERM", 1.0, 1998);
-  cortext::testing::SeedMemoryV2 (*store, 201LL, 201LL, "chat/user",
+  cortext::testing::SeedMemoryV2 (*store, 201LL, 201LL, "stream/main",
                                   "WORKING", 1.0, 2000);
-  cortext::testing::SeedMemoryV2 (*store, 202LL, 202LL, "chat/assistant",
-                                  "LONG_TERM", 1.0, 3500);
+  cortext::testing::SeedMemoryV2 (*store, 203LL, 203LL, "stream/main",
+                                  "LONG_TERM", 1.0, 1998);
 
   auto run = [&] {
     cortext::operations::retrieval_debug::ClearLastRankedCandidates ();
     auto ops = std::make_unique<OperationSet> (
         std::make_unique<ForceRetrievalGateOp> (),
-        std::make_unique<SeedWorkingMemoryAnchorOp> (201LL, "chat/user",
+        std::make_unique<SeedWorkingMemoryAnchorOp> (201LL, "stream/main",
                                                      2000LL, wm_vec),
         std::make_unique<GraphAugmentedRetrieveCandidates> ());
     SignalProcessor::Config cfg;
@@ -1004,7 +1004,7 @@ TEST_CASE ("Graph retrieval expands active chat working memory across speakers",
   };
 
   auto ranked = run ();
-  auto assistant_it = std::find_if (
+  auto different_source_it = std::find_if (
       ranked.begin (), ranked.end (), [] (const auto &candidate) {
         return candidate.memory_id == 200LL;
       });
@@ -1012,26 +1012,29 @@ TEST_CASE ("Graph retrieval expands active chat working memory across speakers",
       ranked.begin (), ranked.end (), [] (const auto &candidate) {
         return candidate.memory_id == 201LL;
       });
-  auto future_it = std::find_if (
+  auto same_source_it = std::find_if (
       ranked.begin (), ranked.end (), [] (const auto &candidate) {
-        return candidate.memory_id == 202LL;
+        return candidate.memory_id == 203LL;
       });
-  REQUIRE (assistant_it != ranked.end ());
-  REQUIRE (assistant_it->durable_source_count > 0);
-  REQUIRE (assistant_it->durable_source_boost > 0.0);
+  if (different_source_it != ranked.end ())
+    {
+      REQUIRE (different_source_it->durable_source_boost == 0.0);
+    }
+  REQUIRE (same_source_it != ranked.end ());
+  REQUIRE (same_source_it->durable_source_count > 0);
+  REQUIRE (same_source_it->durable_source_boost > 0.0);
   REQUIRE (working_it == ranked.end ());
-  REQUIRE (future_it == ranked.end ());
 
   {
     cortext::testing::ScopedEnvVar disabled (
         "CORTEXT_DISABLE_SOURCE_SEED_GRAPH_EXPANSION", "1");
     ranked = run ();
   }
-  assistant_it = std::find_if (
+  same_source_it = std::find_if (
       ranked.begin (), ranked.end (), [] (const auto &candidate) {
-        return candidate.memory_id == 200LL;
+        return candidate.memory_id == 203LL;
       });
-  REQUIRE (assistant_it == ranked.end ());
+  REQUIRE (same_source_it == ranked.end ());
 }
 
 TEST_CASE ("Graph retrieval uses broad source seeds but compact knob-derived output",
@@ -1047,7 +1050,7 @@ TEST_CASE ("Graph retrieval uses broad source seeds but compact knob-derived out
       const long long id = 1000LL + i;
       cortext::testing::SeedEmbeddingV2 (*store, id, query_vec, 1000 + i);
       cortext::testing::SeedMemoryV2 (*store, id, id,
-                                      "chat/source" + std::to_string (i),
+                                      "stream/source" + std::to_string (i),
                                       "LONG_TERM", 1.0, 1000 + i);
     }
 
@@ -1090,7 +1093,7 @@ TEST_CASE ("Graph retrieval routes text queries through source-backed durable la
   cortext::testing::SeedEmbeddingV2 (*store, 100LL, source_vec, 1000);
   cortext::testing::SeedEmbeddingV2 (*store, 200LL, source_vec, 1000);
   cortext::testing::SeedEmbeddingV2 (*store, 300LL, label_vec, 1000);
-  cortext::testing::SeedMemoryV2 (*store, 100LL, 100LL, "chat/source",
+  cortext::testing::SeedMemoryV2 (*store, 100LL, 100LL, "stream/source",
                                   "LONG_TERM", 1.0, 1000);
   cortext::testing::SeedMemoryV2 (*store, 200LL, 200LL,
                                   "associative_cue_test", "ASSOCIATION",
@@ -1120,7 +1123,7 @@ TEST_CASE ("Graph retrieval routes text queries through source-backed durable la
       const long long id = 1000LL + i;
       cortext::testing::SeedEmbeddingV2 (*store, id, query_vec, 1000);
       cortext::testing::SeedMemoryV2 (*store, id, id,
-                                      "chat/distractor" + std::to_string (i),
+                                      "stream/distractor" + std::to_string (i),
                                       "LONG_TERM", 1.0, 1000);
     }
 
@@ -1189,9 +1192,9 @@ TEST_CASE ("Graph retrieval damps high-degree label graph boosts",
   cortext::testing::SeedEmbeddingV2 (*store, 101LL, query_vec, 1000);
   cortext::testing::SeedEmbeddingV2 (*store, 200LL, query_vec, 1000);
   cortext::testing::SeedEmbeddingV2 (*store, 201LL, query_vec, 1000);
-  cortext::testing::SeedMemoryV2 (*store, 100LL, 100LL, "chat/generic",
+  cortext::testing::SeedMemoryV2 (*store, 100LL, 100LL, "stream/generic",
                                   "LONG_TERM", 1.0, 1000);
-  cortext::testing::SeedMemoryV2 (*store, 101LL, 101LL, "chat/specific",
+  cortext::testing::SeedMemoryV2 (*store, 101LL, 101LL, "stream/specific",
                                   "LONG_TERM", 1.0, 1000);
   cortext::testing::SeedMemoryV2 (*store, 200LL, 200LL, "generic",
                                   "LABEL", 1.0, 1000);

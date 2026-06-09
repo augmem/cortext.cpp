@@ -3,7 +3,6 @@
 #include "cortext/core/algorithms.hpp"
 #include "cortext/core/knobs.hpp"
 #include "cortext/core/utils.hpp"
-#include "cortext/consolidation_mode.hpp"
 #include "cortext/operations/constants.hpp"
 #include "cortext/operations/metrics.hpp"
 #include "cortext/processor/operation_context.hpp"
@@ -83,13 +82,6 @@ RelevanceToTask (const Eigen::VectorXf &q,
   return core::Clamp ((cos + 1.0) * 0.5, 0.0, 1.0);
 }
 
-inline bool
-PreserveChatTurns (const std::string &source_id)
-{
-  return source_id.rfind ("chat/user", 0) == 0
-         || source_id.rfind ("chat/assistant", 0) == 0;
-}
-
 } // namespace
 
 void
@@ -99,7 +91,7 @@ WorkingMemory::Execute (OperationContext &context, Transaction &tx) const
   auto &p_ctx = context.GetProcessorContext ();
   const auto &cfg = context.GetConfig ();
   const auto &signal = context.GetSignal ();
-  const bool preserve_chat_turns = PreserveChatTurns (signal.source_id);
+  const bool preserve_input_trace = signal.force_write;
 
   // Maintenance: decay strengths based on elapsed time.
   // NOTE: We do NOT evict slots during passive decay. Slots should only be
@@ -150,9 +142,9 @@ WorkingMemory::Execute (OperationContext &context, Transaction &tx) const
     }
 
   // Consolidation signals drive maintenance jobs through the normal pipeline,
-  // but they are not user-facing ingress memories. They must not evict or
-  // insert working-memory chat turns.
-  if (IsConsolidationSignal (signal.source_id))
+  // but they are not ingress memories. They must not evict or insert
+  // working-memory input traces.
+  if (signal.consolidation_mode.has_value ())
     {
       return;
     }
@@ -230,7 +222,7 @@ WorkingMemory::Execute (OperationContext &context, Transaction &tx) const
         * capacity_pressure;
   const double cost_total = raw_cost / (1.0 + raw_cost);
 
-  if (!preserve_chat_turns && margin < cost_total)
+  if (!preserve_input_trace && margin < cost_total)
     {
       // Reject
       telemetry::LogDebug ("cortext.working_memory", {
@@ -257,7 +249,7 @@ WorkingMemory::Execute (OperationContext &context, Transaction &tx) const
   // Section 6.1.4: Try to chunk into best-matching slot using e_rep.
   int best_idx = -1;
   double best_sim = -1.0;
-  for (int i = 0; !preserve_chat_turns && i < static_cast<int> (p_ctx.wm_slots.size ()); ++i)
+  for (int i = 0; !preserve_input_trace && i < static_cast<int> (p_ctx.wm_slots.size ()); ++i)
     {
       const auto &slot = p_ctx.wm_slots[static_cast<size_t> (i)];
       // v2: Only chunk into same-source slots (working-memory.plan.md)
@@ -383,7 +375,7 @@ WorkingMemory::Execute (OperationContext &context, Transaction &tx) const
   // Slots with similarity in [rehearsal_threshold, chunk_threshold)
   // get a strength boost but embedding is NOT merged.
   const double rehearsal_threshold = core::WMRehearsalThreshold (cfg.focus);
-  if (!preserve_chat_turns && best_idx >= 0 && best_sim >= rehearsal_threshold)
+  if (!preserve_input_trace && best_idx >= 0 && best_sim >= rehearsal_threshold)
     {
       auto &slot = p_ctx.wm_slots[static_cast<size_t> (best_idx)];
       const double rehearsal_rate = core::WMRehearsalRate (cfg.sensitivity);
@@ -428,7 +420,7 @@ WorkingMemory::Execute (OperationContext &context, Transaction &tx) const
   if (static_cast<int> (p_ctx.wm_slots.size ()) >= capacity)
     {
       int evict_idx = -1;
-      if (preserve_chat_turns)
+      if (preserve_input_trace)
         {
           int64_t oldest_start_ts = std::numeric_limits<int64_t>::max ();
           double oldest_last_ts = std::numeric_limits<double>::max ();

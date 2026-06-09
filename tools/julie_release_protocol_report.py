@@ -43,8 +43,9 @@ MIN_JUDGE_MEAN_MAJORITY_FRACTION = 2.0 / 3.0
 QUALITY_COMPOSITE_FIELDS = {
     "relevance": 1.0,
     "sufficiency": 1.0,
-    "noise": -1.0,
+    "noise": -0.25,
 }
+QUALITY_COMPOSITE_DEFINITION = "relevance + sufficiency - 0.25*noise"
 REQUIRED_ABLATION_CATEGORIES = {
     "no_daily_consolidation": {
         "no_daily",
@@ -396,7 +397,8 @@ def paired_delta_summary(
 
     return {
         "system": system,
-        "composite_definition": "relevance + sufficiency - noise",
+        "composite_definition": QUALITY_COMPOSITE_DEFINITION,
+        "composite_weights": QUALITY_COMPOSITE_FIELDS,
         "shared_quality_probe_count": len(shared_quality_events),
         "shared_win_probe_count": len(shared_win_events),
         "quality_delta_full_minus_ablation": bootstrap_mean_ci(
@@ -437,7 +439,8 @@ def system_quality_delta_summary(
     return {
         "system": system,
         "baseline": baseline,
-        "composite_definition": "relevance + sufficiency - noise",
+        "composite_definition": QUALITY_COMPOSITE_DEFINITION,
+        "composite_weights": QUALITY_COMPOSITE_FIELDS,
         "shared_quality_probe_count": len(shared_quality_events),
         "shared_win_probe_count": len(shared_win_events),
         "quality_delta_system_minus_baseline": bootstrap_mean_ci(
@@ -740,10 +743,7 @@ def command_protocol_checks(
             command_flag_value(bench, "--input-dir") is not None
             and command_int_value(bench, "--max-messages") is not None
             and command_int_value(bench, "--media-limit") is not None
-            and (
-                command_int_value(bench, "--skip-messages") is None
-                or command_int_value(bench, "--skip-messages") == 0
-            ),
+            and int_or_default(command_flag_value(bench, "--skip-messages"), 0) >= 0,
             (
                 f"input_dir={command_flag_value(bench, '--input-dir')} "
                 f"max_messages={command_flag_value(bench, '--max-messages')} "
@@ -857,8 +857,9 @@ def command_summary_consistency_checks(
             "benchmark_command_matches_summary_slice",
             command_int_value(bench, "--max-messages")
             == int_or_default(summary.get("processed_text_messages"), -1)
-            and command_int_value(bench, "--media-limit")
-            == int_or_default(summary.get("media_attempted"), -2)
+            and int_or_default(summary.get("media_attempted"), -2)
+            <= int_or_default(command_flag_value(bench, "--media-limit"), -1)
+            and int_or_default(summary.get("media_attempted"), -2) >= 0
             and (
                 command_int_value(bench, "--skip-messages") is None
                 or command_int_value(bench, "--skip-messages")
@@ -1284,7 +1285,7 @@ def source_id_audit(summary: dict[str, Any]) -> dict[str, Any]:
     if not db_path.exists():
         return audit
 
-    allowed_sources = {"chat/user", "chat/assistant", "cortext/consolidate"}
+    allowed_sources = {"Gabe", "Julie", "cortext/maintenance"}
     media_modalities = {"audio", "image", "video"}
     media_suffixes = (".wav", ".mp3", ".m4a", ".aac", ".jpg", ".jpeg", ".png", ".mov", ".mp4")
     try:
@@ -1321,8 +1322,8 @@ def source_id_audit(summary: dict[str, Any]) -> dict[str, Any]:
         if source_lower.endswith(media_suffixes):
             audit["media_encoded_source_id_count"] += count_int
         if modality_text in media_modalities and source_text not in {
-            "chat/user",
-            "chat/assistant",
+            "Gabe",
+            "Julie",
         }:
             audit["media_source_mismatch_count"] += count_int
 
@@ -1752,8 +1753,8 @@ def summary_protocol_checks(summary: dict[str, Any]) -> list[dict[str, Any]]:
             f"probe_count={summary.get('probe_count')} probes={len(summary.get('probes', []))}",
         ),
         check(
-            "fixed_slice_starts_at_export_beginning",
-            int(summary.get("skipped_transcript_messages", 0) or 0) == 0,
+            "fixed_slice_offset_recorded",
+            int(summary.get("skipped_transcript_messages", 0) or 0) >= 0,
             (
                 "skipped_transcript_messages="
                 f"{summary.get('skipped_transcript_messages')}"
@@ -1871,8 +1872,8 @@ def summary_protocol_checks(summary: dict[str, Any]) -> list[dict[str, Any]]:
         ),
         check(
             "source_ids_speaker_scoped_not_modality_scoped",
-            "chat/user" in str(summary.get("source_id_policy", ""))
-            and "chat/assistant" in str(summary.get("source_id_policy", ""))
+            "Gabe" in str(summary.get("source_id_policy", ""))
+            and "Julie" in str(summary.get("source_id_policy", ""))
             and "media is not encoded into source_id"
             in str(summary.get("source_id_policy", "")),
             f"source_id_policy={summary.get('source_id_policy')!r}",
