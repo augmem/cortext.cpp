@@ -597,22 +597,49 @@ def fail_fast_checks(
     phase: dict,
 ) -> list[dict]:
     checks: list[dict] = []
+    phase_ready = bool(phase.get("quality_gate_phase_ready", True))
     quality_gate_active = (
-        milestone >= args.quality_gate_min_milestone
-        and bool(phase.get("quality_gate_phase_ready", True))
+        milestone >= args.quality_gate_min_milestone and phase_ready
     )
     checks_to_apply = [
-        check_floor(
-            "cortext_token_savings_vs_traditional_chat_rag",
-            float(metrics["cortext_token_savings_vs_traditional_chat_rag"]),
-            args.min_cortext_token_savings_vs_rag,
-        ),
         check_floor(
             "mean_cortext_context_tokens",
             float(metrics["mean_cortext_context_tokens"]),
             args.min_mean_cortext_context_tokens,
         ),
     ]
+    if phase_ready:
+        # The token-savings floor is only meaningful once normal RAG is under
+        # real history-budget pressure: against a raw history smaller than a
+        # single Cortext packet (e.g. 60 tokens at the first probe of a short
+        # window), a 50% savings floor is unsatisfiable for any system.
+        checks_to_apply.insert(
+            0,
+            check_floor(
+                "cortext_token_savings_vs_traditional_chat_rag",
+                float(metrics["cortext_token_savings_vs_traditional_chat_rag"]),
+                args.min_cortext_token_savings_vs_rag,
+            ),
+        )
+    else:
+        checks.append(
+            {
+                "name": "token_savings_gate_deferred",
+                "value": float(
+                    metrics["cortext_token_savings_vs_traditional_chat_rag"]
+                ),
+                "floor": args.min_cortext_token_savings_vs_rag,
+                "phase_ready": phase_ready,
+                "phase_reason": phase.get("quality_gate_phase_reason", ""),
+                "max_rolling_history_budget_ratio": phase.get(
+                    "max_rolling_history_budget_ratio", 0.0
+                ),
+                "min_history_budget_ratio": phase.get(
+                    "quality_gate_min_history_budget_ratio", 0.0
+                ),
+                "status": "pass",
+            }
+        )
     if quality_gate_active:
         if args.min_cortext_win_rate is not None:
             checks_to_apply.append(

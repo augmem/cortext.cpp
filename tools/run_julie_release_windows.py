@@ -244,15 +244,15 @@ def parse_window_spec(spec: str) -> dict[str, Any]:
             "skip_messages": int(skip),
             "max_messages": int(max_messages),
             "media_limit": int(media_limit),
-            "probe_stride": 25,
-            "warmup_events": 200,
-            "min_probe_rows_after_benchmark": 30,
             "required_media_modalities": parse_modalities(modalities),
             "purpose": "custom fixed release window",
         }
     except ValueError as exc:
         raise RuntimeError(f"invalid numeric value in --window {spec!r}") from exc
-    validate_window(window)
+    # probe_stride / warmup_events / min_probe_rows_after_benchmark are filled
+    # from the CLI flags in selected_windows(); hardcoding them here silently
+    # discarded those flags for custom windows. Validation happens there too,
+    # after the defaults are applied.
     return window
 
 
@@ -289,7 +289,6 @@ def selected_windows(
     )
     seen: set[str] = set()
     for window in windows:
-        validate_window(window)
         name = str(window["name"])
         if name in seen:
             raise RuntimeError(f"duplicate release window name: {name}")
@@ -300,6 +299,7 @@ def selected_windows(
             "min_probe_rows_after_benchmark",
             args.min_probe_rows_after_benchmark,
         )
+        validate_window(window)
         window["required_media_modalities"] = parse_modalities(
             ",".join(str(item) for item in window.get("required_media_modalities", []))
         )
