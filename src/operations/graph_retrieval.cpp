@@ -52,6 +52,13 @@ EnvFlag (const char *name)
   return s == "1" || s == "true" || s == "yes" || s == "on";
 }
 
+bool
+IsChatConversationSource (const std::string &source_id)
+{
+  return source_id.rfind ("chat/user", 0) == 0
+         || source_id.rfind ("chat/assistant", 0) == 0;
+}
+
 std::string
 CanonicalQueryText (const std::string &text)
 {
@@ -2143,6 +2150,39 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
   std::vector<long long> source_seed_memory_ids;
   std::unordered_set<long long> seen_source_seed_memory_ids;
   std::unordered_map<long long, double> source_seed_expansion_scores;
+  struct SourceTemporalAnchor
+  {
+    long long memory_id = 0;
+    std::string source_id;
+    long long start_ts = 0;
+  };
+  std::vector<SourceTemporalAnchor> source_temporal_anchors;
+  std::unordered_set<std::string> seen_source_temporal_anchors;
+  int64_t wm_temporal_anchor_count = 0;
+  auto add_source_temporal_anchor = [&] (long long memory_id,
+                                         const std::string &source_id,
+                                         long long start_ts,
+                                         bool from_working_memory) {
+    if (source_id.empty () || start_ts <= 0)
+      {
+        return;
+      }
+    if (from_working_memory && signal.timestamp > 0
+        && static_cast<std::uint64_t> (start_ts) >= signal.timestamp)
+      {
+        return;
+      }
+    const std::string key = source_id + "\n" + std::to_string (start_ts);
+    if (!seen_source_temporal_anchors.insert (key).second)
+      {
+        return;
+      }
+    source_temporal_anchors.push_back ({ memory_id, source_id, start_ts });
+    if (from_working_memory)
+      {
+        ++wm_temporal_anchor_count;
+      }
+  };
   for (const auto &s : seeds)
     {
       if (s.memory_id > 0)
@@ -2163,48 +2203,93 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
         }
     }
 
-  if (source_seed_graph_expansion_enabled && !source_seed_memory_ids.empty ())
+  if (source_seed_graph_expansion_enabled
+      && (!source_seed_memory_ids.empty () || !p_ctx.wm_slots.empty ()))
     {
       try
         {
           const auto t_start = std::chrono::steady_clock::now ();
-          std::string seed_sql
-              = "SELECT memory_id, source_id, start_ts FROM memories "
-                "WHERE memory_id IN (";
-          std::vector<std::any> seed_params;
-          seed_params.reserve (source_seed_memory_ids.size ());
-          for (size_t i = 0; i < source_seed_memory_ids.size (); ++i)
+          if (!source_seed_memory_ids.empty ())
             {
-              if (i > 0)
-                seed_sql += ",";
-              seed_sql += "?";
-              seed_params.push_back (source_seed_memory_ids[i]);
-            }
-          seed_sql += ") AND kind NOT IN ('WORKING', 'LABEL', 'ASSOCIATION')";
-          const auto seed_rows = store->Execute (seed_sql, seed_params);
-          if (graph_expanded_temporal_window > 0)
-            {
+              std::string seed_sql
+                  = "SELECT memory_id, source_id, start_ts FROM memories "
+                    "WHERE memory_id IN (";
+              std::vector<std::any> seed_params;
+              seed_params.reserve (source_seed_memory_ids.size ());
+              for (size_t i = 0; i < source_seed_memory_ids.size (); ++i)
+                {
+                  if (i > 0)
+                    seed_sql += ",";
+                  seed_sql += "?";
+                  seed_params.push_back (source_seed_memory_ids[i]);
+                }
+              seed_sql += ") AND kind NOT IN ('WORKING', 'LABEL', 'ASSOCIATION')";
+              const auto seed_rows = store->Execute (seed_sql, seed_params);
               for (const auto &seed_row : seed_rows)
                 {
-                  const long long seed_id
-                      = AnyToInt64 (seed_row.at ("memory_id"));
-                  const std::string source_id
-                      = AnyToString (seed_row.at ("source_id"));
-                  const long long start_ts
-                      = AnyToInt64 (seed_row.at ("start_ts"));
-                  if (seed_id <= 0 || source_id.empty () || start_ts <= 0)
-                    continue;
-                  auto rows = store->Execute (
-                      "SELECT memory_id, ABS(start_ts - ?) AS distance "
-                      "FROM memories "
-                      "WHERE source_id = ? "
+                  add_source_temporal_anchor (
+                      AnyToInt64 (seed_row.at ("memory_id")),
+                      AnyToString (seed_row.at ("source_id")),
+                      AnyToInt64 (seed_row.at ("start_ts")), false);
+                }
+            }
+          for (const auto &slot : p_ctx.wm_slots)
+            {
+              add_source_temporal_anchor (
+                  slot.memory_id, slot.source_id, slot.start_ts, true);
+              for (const auto &record : slot.signal_records)
+                {
+                  add_source_temporal_anchor (
+                      slot.memory_id, slot.source_id,
+                      static_cast<long long> (record.timestamp), true);
+                }
+            }
+          if (graph_expanded_temporal_window > 0)
+            {
+              for (const auto &anchor : source_temporal_anchors)
+                {
+                  if (anchor.source_id.empty () || anchor.start_ts <= 0)
+                    {
+                      continue;
+                    }
+                  std::string temporal_sql
+                      = "SELECT memory_id, ABS(start_ts - ?) AS distance "
+                        "FROM memories "
+                        "WHERE ";
+                  std::vector<std::any> temporal_params;
+                  temporal_params.reserve (6);
+                  temporal_params.push_back (anchor.start_ts);
+                  if (IsChatConversationSource (anchor.source_id))
+                    {
+                      temporal_sql
+                          += "(source_id = 'chat/user' "
+                             "OR source_id = 'chat/assistant' "
+                             "OR source_id LIKE 'chat/user/%' "
+                             "OR source_id LIKE 'chat/assistant/%') ";
+                    }
+                  else
+                    {
+                      temporal_sql += "source_id = ? ";
+                      temporal_params.push_back (anchor.source_id);
+                    }
+                  temporal_sql +=
                       "  AND memory_id != ? "
-                      "  AND kind NOT IN ('WORKING', 'LABEL', 'ASSOCIATION') "
-                      "ORDER BY distance ASC, start_ts DESC "
-                      "LIMIT ?",
-                      { start_ts, source_id, seed_id,
-                        static_cast<long long> (
-                            graph_expanded_temporal_window) });
+                      "  AND kind NOT IN ('WORKING', 'LABEL', 'ASSOCIATION') ";
+                  temporal_params.push_back (anchor.memory_id);
+                  if (signal.timestamp > 0)
+                    {
+                      temporal_sql += "  AND start_ts < ? ";
+                      temporal_params.push_back (
+                          static_cast<long long> (std::min<std::uint64_t> (
+                              signal.timestamp,
+                              static_cast<std::uint64_t> (
+                                  std::numeric_limits<long long>::max ()))));
+                    }
+                  temporal_sql += "ORDER BY distance ASC, start_ts DESC "
+                                  "LIMIT ?";
+                  temporal_params.push_back (static_cast<long long> (
+                      graph_expanded_temporal_window));
+                  auto rows = store->Execute (temporal_sql, temporal_params);
                   int rank = 0;
                   for (const auto &row : rows)
                     {
@@ -2230,7 +2315,8 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
         {
         }
 
-      if (graph_expanded_graph_weight > 0.0)
+      if (graph_expanded_graph_weight > 0.0
+          && !source_seed_memory_ids.empty ())
         {
           try
             {
@@ -2340,7 +2426,8 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
             }
         }
 
-      if (fact_layer_enabled && graph_expanded_fact_weight > 0.0)
+      if (fact_layer_enabled && graph_expanded_fact_weight > 0.0
+          && !source_seed_memory_ids.empty ())
         {
           try
             {
@@ -4378,6 +4465,8 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
 	    telemetry::Attribute::Int64 ("procedural_seed_count", procedural_seed_count),
     telemetry::Attribute::Int64 ("hierarchical_label_seed_count",
                                  hierarchical_label_seed_count),
+    telemetry::Attribute::Int64 ("wm_temporal_anchor_count",
+                                 wm_temporal_anchor_count),
     telemetry::Attribute::Int64 ("expansion_depth", static_cast<int64_t> (depth)),
     telemetry::Attribute::Int64 ("final_candidate_count", static_cast<int64_t> (scored.size ())),
     telemetry::Attribute::Int64 ("scored_assoc_count", scored_assoc),

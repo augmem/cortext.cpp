@@ -39,6 +39,14 @@ def load_json(path: pathlib.Path) -> Any:
     return json.loads(path.read_text())
 
 
+def sha256_file(path: pathlib.Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
 LOCAL_TZ = ZoneInfo("America/Chicago")
 
 
@@ -254,6 +262,7 @@ def build_sample(args: argparse.Namespace) -> int:
         "schema": "cortext_human_label_sample_v1",
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
         "source_summary": str(args.summary),
+        "source_summary_sha256": sha256_file(args.summary),
         "db_path": str(db_path),
         "input_dir": str(input_dir),
         "seed": args.seed,
@@ -275,6 +284,19 @@ def build_sample(args: argparse.Namespace) -> int:
             "query_context": "current_turn_plus_prior_context_only",
             "candidate_context": "candidate_neighborhood_capped_before_query",
             "future_turns_visible": False,
+        },
+        "human_blinding_policy": {
+            "candidate_order": "randomized_with_seed",
+            "candidate_provenance_hidden_in_ui": True,
+            "hidden_candidate_fields": ["candidate_sources", "heuristic_score"],
+            "visible_candidate_fields": [
+                "candidate_id",
+                "source_id",
+                "modality",
+                "datetime",
+                "content",
+                "prior_context",
+            ],
         },
         "sample_selection_policy": {
             "probe_order": "seeded_shuffle" if args.shuffle_probes else "frozen_summary_order",
@@ -801,6 +823,7 @@ def score(args: argparse.Namespace) -> int:
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
         "frozen_before_evaluation": True,
         "source_summary": sample["source_summary"],
+        "source_summary_sha256": sample.get("source_summary_sha256"),
         "db_path": sample["db_path"],
         "input_dir": sample["input_dir"],
         "labeling": {
@@ -876,6 +899,9 @@ def score(args: argparse.Namespace) -> int:
         "schema": "cortext_human_label_score_v1",
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
         "sample": str(args.sample),
+        "sample_sha256": sample.get("sample_sha256"),
+        "source_summary": sample["source_summary"],
+        "source_summary_sha256": sample.get("source_summary_sha256"),
         "human_frozen": str(args.out_frozen),
         "human_freeze_sha256": frozen["freeze_sha256"],
         "probe_count": len(probes),

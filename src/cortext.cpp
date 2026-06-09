@@ -1,6 +1,7 @@
 #include "cortext/cortext.hpp"
 #include "cortext/clock.hpp"
 #include "cortext/core/algorithms.hpp"
+#include "cortext/core/knobs.hpp"
 #include "cortext/internal/cancellation.hpp"
 #include "cortext/internal/replay_ingress.hpp"
 #include "encoder/text_encoder_factory.hpp"
@@ -39,6 +40,7 @@
 #include <cstring>
 #include <filesystem>
 #include <functional>
+#include <map>
 #include <memory>
 #include <optional>
 #include <string>
@@ -136,6 +138,21 @@ bool
 SourceBlobsDisabled ()
 {
   return EnvFlag ("CORTEXT_DISABLE_SOURCE_BLOBS");
+}
+
+std::string
+RowString (const std::map<std::string, std::any> &row, const char *key)
+{
+  auto it = row.find (key);
+  if (it == row.end () || !it->second.has_value ())
+    {
+      return {};
+    }
+  if (it->second.type () == typeid (std::string))
+    {
+      return std::any_cast<std::string> (it->second);
+    }
+  return {};
 }
 
 /// @brief Converts a std::vector<float> to an Eigen::VectorXf using Eigen::Map.
@@ -312,6 +329,48 @@ LoadObjectPayload (Store *store, ObjectStore *object_store,
   return false;
 }
 
+bool
+IsLikelyTextPayload (const std::vector<unsigned char> &payload)
+{
+  if (payload.empty ())
+    {
+      return false;
+    }
+  std::size_t printable = 0;
+  for (unsigned char c : payload)
+    {
+      if (c == 0)
+        {
+          return false;
+        }
+      if (c == '\n' || c == '\r' || c == '\t'
+          || (c >= 0x20 && c < 0x7F) || c >= 0x80)
+        {
+          ++printable;
+        }
+    }
+  return printable == payload.size ();
+}
+
+bool
+PayloadMatchesMemorySurface (const std::string &memory_modality,
+                             const std::string &memory_mime,
+                             const std::string &signal_modality,
+                             const std::string &signal_mime,
+                             const std::vector<unsigned char> &payload)
+{
+  if (!memory_modality.empty () && signal_modality != memory_modality)
+    {
+      return false;
+    }
+  if (memory_modality == "text" || memory_mime == "text/plain"
+      || signal_mime == "text/plain")
+    {
+      return IsLikelyTextPayload (payload);
+    }
+  return true;
+}
+
 /// @brief Load all signal blobs for a memory, ordered by serial_position.
 /// @param store The store instance.
 /// @param memory_id The memory_id to query signals for.
@@ -320,6 +379,8 @@ LoadObjectPayload (Store *store, ObjectStore *object_store,
 bool
 LoadSignalBlobs (Store *store, long long memory_id,
                  ObjectStore *object_store,
+                 const std::string &memory_modality,
+                 const std::string &memory_mime,
                  std::vector<std::vector<unsigned char>> &out)
 {
   if (!store || memory_id <= 0)
@@ -328,7 +389,7 @@ LoadSignalBlobs (Store *store, long long memory_id,
   try
     {
       auto rows = store->Execute (
-          "SELECT blob_id FROM signals "
+          "SELECT modality, mime, blob_id FROM signals "
           "WHERE memory_id = ? AND blob_id IS NOT NULL "
           "ORDER BY serial_position ASC",
           { memory_id });
@@ -344,7 +405,15 @@ LoadSignalBlobs (Store *store, long long memory_id,
                   std::vector<unsigned char> payload;
                   if (LoadObjectPayload (store, object_store, blob_id, payload))
                     {
-                      out.push_back (std::move (payload));
+                      const std::string signal_modality
+                          = RowString (row, "modality");
+                      const std::string signal_mime = RowString (row, "mime");
+                      if (PayloadMatchesMemorySurface (
+                              memory_modality, memory_mime, signal_modality,
+                              signal_mime, payload))
+                        {
+                          out.push_back (std::move (payload));
+                        }
                     }
                 }
             }
@@ -465,8 +534,13 @@ HydrateMemory (Store *store, ObjectStore *object_store, long long id,
           "  m.blob_id, "
           "  COALESCE(m.retrieved_count, 0) AS retrieved_count, "
           "  COALESCE(m.used_count, 0) AS used_count, "
-          "  (SELECT s.mime FROM signals s WHERE s.memory_id = m.memory_id "
-          "   ORDER BY s.serial_position LIMIT 1) AS signal_mime "
+          "  COALESCE("
+          "    (SELECT s.mime FROM signals s WHERE s.memory_id = m.memory_id "
+          "       AND s.modality = m.modality "
+          "     ORDER BY s.serial_position LIMIT 1), "
+          "    (SELECT s.mime FROM signals s WHERE s.memory_id = m.memory_id "
+          "     ORDER BY s.serial_position LIMIT 1)"
+          "  ) AS signal_mime "
           "FROM memories m "
           "WHERE m.memory_id = ?",
           { id });
@@ -538,7 +612,9 @@ HydrateMemory (Store *store, ObjectStore *object_store, long long id,
             {
               std::vector<unsigned char> payload;
               if (LoadObjectPayload (store, object_store,
-                                     reconstruction->blob_id, payload))
+                                     reconstruction->blob_id, payload)
+                  && PayloadMatchesMemorySurface (
+                      m.modality, m.mimetype, m.modality, m.mimetype, payload))
                 {
                   m.content.push_back (std::move (payload));
                 }
@@ -547,7 +623,8 @@ HydrateMemory (Store *store, ObjectStore *object_store, long long id,
           if (m.content.empty ())
             {
               // v2: Load content blobs from signals table (ordered by serial_position)
-              LoadSignalBlobs (store, memory_id, object_store, m.content);
+              LoadSignalBlobs (store, memory_id, object_store, m.modality,
+                               m.mimetype, m.content);
               if (m.content.empty ())
                 {
                   const auto blob_id = get_blob ("blob_id");
@@ -555,7 +632,10 @@ HydrateMemory (Store *store, ObjectStore *object_store, long long id,
                     {
                       std::vector<unsigned char> payload;
                       if (LoadObjectPayload (store, object_store, blob_id,
-                                             payload))
+                                             payload)
+                          && PayloadMatchesMemorySurface (
+                              m.modality, m.mimetype, m.modality, m.mimetype,
+                              payload))
                         {
                           m.content.push_back (std::move (payload));
                         }
@@ -824,8 +904,13 @@ HydrateWorkingMemoryFromDB (Store *store, ObjectStore *object_store,
           "       m.strength, m.last_access, m.n_signals, "
           "       m.s_max, m.s_avg, m.s_arousal_avg, "
           "       m.retrieved_count, m.used_count, "
-          "       (SELECT s.mime FROM signals s WHERE s.memory_id = m.memory_id "
-          "        ORDER BY s.serial_position LIMIT 1) AS signal_mime "
+          "       COALESCE("
+          "         (SELECT s.mime FROM signals s WHERE s.memory_id = m.memory_id "
+          "            AND s.modality = m.modality "
+          "          ORDER BY s.serial_position LIMIT 1), "
+          "         (SELECT s.mime FROM signals s WHERE s.memory_id = m.memory_id "
+          "          ORDER BY s.serial_position LIMIT 1)"
+          "       ) AS signal_mime "
           "FROM memories m "
           "WHERE m.kind = 'WORKING' AND m.end_ts IS NULL "
           "ORDER BY m.start_ts ASC");
@@ -888,7 +973,8 @@ HydrateWorkingMemoryFromDB (Store *store, ObjectStore *object_store,
           m.used_count = get_ll ("used_count");
 
           // v2: Load content blobs from signals table (ordered by serial_position)
-          LoadSignalBlobs (store, m.id, object_store, m.content);
+          LoadSignalBlobs (store, m.id, object_store, m.modality, m.mimetype,
+                           m.content);
           StripSourceBlobsIfDisabled (m);
           LoadSoftAnchors (store, m.id, m.soft_anchors);
 
@@ -1366,7 +1452,9 @@ struct Cortext::Impl
       return memory_id;
     };
 
-    constexpr int kMaxExpandedDisplayMemoriesPerNode = 4;
+    const int max_expanded_display_memories_per_node = std::max (
+        1, core::RetrievalGraphExpandedRagCompactItemLimit (cfg.focus,
+                                                            cfg.stability));
     std::unordered_set<long long> seen_candidate_memory_ids;
     seen_candidate_memory_ids.reserve (out.candidate_memory_ids.size ());
     std::unordered_set<long long> seen_output_memory_ids;
@@ -1460,7 +1548,7 @@ struct Cortext::Impl
             if (append_hydrated_memory (linked_memory_id, true))
               {
                 ++expanded_count;
-                if (expanded_count >= kMaxExpandedDisplayMemoriesPerNode)
+                if (expanded_count >= max_expanded_display_memories_per_node)
                   {
                     break;
                   }
