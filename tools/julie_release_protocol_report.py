@@ -1440,6 +1440,290 @@ def benchmark_environment_checks(
     ]
 
 
+def load_optional_json(path: pathlib.Path) -> dict[str, Any] | None:
+    try:
+        if path.exists():
+            body = load_json(path)
+            body["path"] = str(path)
+            body["sha256"] = file_sha256(path)
+            return body
+    except Exception as exc:
+        return {
+            "path": str(path),
+            "schema": "invalid",
+            "load_error": exc.__class__.__name__,
+        }
+    return None
+
+
+def selected_early_metrics(record: dict[str, Any]) -> dict[str, Any]:
+    metrics = record.get("metrics", {})
+    if not isinstance(metrics, dict):
+        metrics = {}
+    selected = {}
+    for key in [
+        "judged_rows",
+        "probe_count",
+        "cortext_wins",
+        "traditional_chat_rag_wins",
+        "full_history_upper_bound_wins",
+        "cortext_win_rate",
+        "cortext_quality_delta_vs_traditional_chat_rag",
+        "cortext_quality_delta_vs_full_history_upper_bound",
+        "cortext_token_savings_vs_traditional_chat_rag",
+        "mean_cortext_context_tokens",
+        "mean_traditional_chat_rag_tokens",
+    ]:
+        if key in metrics:
+            selected[key] = metrics.get(key)
+    return selected
+
+
+def early_judge_summary(
+    benchmark_status: dict[str, Any] | None,
+    manifest: dict[str, Any] | None,
+) -> dict[str, Any]:
+    status_body = benchmark_status if isinstance(benchmark_status, dict) else {}
+    manifest_body = manifest if isinstance(manifest, dict) else {}
+    latest_payload = status_body.get("early_judge_latest", {})
+    if not isinstance(latest_payload, dict):
+        latest_payload = {}
+    latest_record = latest_payload.get("latest", {})
+    if not isinstance(latest_record, dict):
+        latest_record = manifest_body.get("latest", {})
+    if not isinstance(latest_record, dict):
+        latest_record = {}
+    completed = manifest_body.get("completed", [])
+    if not isinstance(completed, list):
+        completed = []
+
+    status_probe_stream = status_body.get("probe_stream", {})
+    if not isinstance(status_probe_stream, dict):
+        status_probe_stream = {}
+
+    completed_status_counts: dict[str, int] = {}
+    completed_early_stop_count = 0
+    completed_milestones = []
+    for record in completed:
+        if not isinstance(record, dict):
+            continue
+        try:
+            completed_milestones.append(int(record.get("milestone")))
+        except Exception:
+            pass
+        record_status = str(record.get("fail_fast_status", "unknown"))
+        completed_status_counts[record_status] = (
+            completed_status_counts.get(record_status, 0) + 1
+        )
+        early_stop = record.get("early_stop")
+        if isinstance(early_stop, dict) and early_stop:
+            completed_early_stop_count += 1
+
+    fixed_milestones = latest_payload.get(
+        "fixed_milestones", manifest_body.get("fixed_milestones", [])
+    )
+    if not isinstance(fixed_milestones, list):
+        fixed_milestones = []
+
+    return {
+        "schema": "cortext_julie_release_early_judge_summary_v1",
+        "benchmark_status_present": benchmark_status is not None
+        and not status_body.get("load_error"),
+        "benchmark_status_schema": status_body.get("schema"),
+        "benchmark_status": status_body.get("status"),
+        "benchmark_exit_code": status_body.get("benchmark_exit_code"),
+        "early_judge_exit_code": status_body.get("early_judge_exit_code"),
+        "elapsed_s": status_body.get("elapsed_s"),
+        "probe_stream_rows": status_probe_stream.get("rows"),
+        "required_rows_after_benchmark": status_probe_stream.get(
+            "required_rows_after_benchmark"
+        ),
+        "latest_payload_schema": latest_payload.get("schema"),
+        "release_gate_use": latest_payload.get("release_gate_use"),
+        "judge_provider": latest_payload.get(
+            "judge_provider", manifest_body.get("judge_provider")
+        ),
+        "judge_model": latest_payload.get(
+            "judge_model", manifest_body.get("judge_model")
+        ),
+        "judge_repetitions": latest_payload.get(
+            "judge_repetitions", manifest_body.get("judge_repetitions")
+        ),
+        "confirm_fail_repetitions": latest_payload.get(
+            "confirm_fail_repetitions",
+            manifest_body.get("confirm_fail_repetitions"),
+        ),
+        "blind_packets": manifest_body.get("blind_packets"),
+        "judge_packet_item_limit": manifest_body.get("judge_packet_item_limit"),
+        "fixed_milestones": fixed_milestones,
+        "periodic_stride": latest_payload.get(
+            "periodic_stride", manifest_body.get("periodic_stride")
+        ),
+        "quality_gate_min_milestone": latest_payload.get(
+            "quality_gate_min_milestone",
+            manifest_body.get("quality_gate_min_milestone"),
+        ),
+        "quality_trend_gate_min_milestone": latest_payload.get(
+            "quality_trend_gate_min_milestone",
+            manifest_body.get("quality_trend_gate_min_milestone"),
+        ),
+        "quality_trend_window": latest_payload.get(
+            "quality_trend_window", manifest_body.get("quality_trend_window")
+        ),
+        "quality_gate_requires_rag_pressure": latest_payload.get(
+            "quality_gate_requires_rag_pressure",
+            manifest_body.get("quality_gate_requires_rag_pressure"),
+        ),
+        "quality_gate_min_history_budget_ratio": latest_payload.get(
+            "quality_gate_min_history_budget_ratio",
+            manifest_body.get("quality_gate_min_history_budget_ratio"),
+        ),
+        "latest_milestone": latest_record.get("milestone"),
+        "latest_fail_fast_status": latest_record.get("fail_fast_status"),
+        "latest_quality_gate_active": latest_record.get("quality_gate_active"),
+        "latest_quality_trend_gate_active": latest_record.get(
+            "quality_trend_gate_active"
+        ),
+        "latest_quality_gate_phase_ready": latest_record.get(
+            "quality_gate_phase_ready"
+        ),
+        "latest_quality_gate_phase_reason": latest_record.get(
+            "quality_gate_phase_reason"
+        ),
+        "latest_early_stop": latest_record.get("early_stop"),
+        "latest_max_rolling_history_budget_ratio": latest_record.get(
+            "max_rolling_history_budget_ratio"
+        ),
+        "latest_metrics": selected_early_metrics(latest_record),
+        "completed_milestones": sorted(completed_milestones),
+        "completed_status_counts": completed_status_counts,
+        "completed_early_stop_count": completed_early_stop_count,
+        "manifest_present": manifest is not None and not manifest_body.get("load_error"),
+        "manifest_schema": manifest_body.get("schema"),
+        "manifest_sha256": manifest_body.get("sha256", ""),
+    }
+
+
+def early_judge_checks(early: dict[str, Any]) -> list[dict[str, Any]]:
+    fixed_milestones = early.get("fixed_milestones", [])
+    if not isinstance(fixed_milestones, list):
+        fixed_milestones = []
+    completed_milestones = early.get("completed_milestones", [])
+    if not isinstance(completed_milestones, list):
+        completed_milestones = []
+    latest_milestone = int_or_default(early.get("latest_milestone"), 0)
+    quality_gate_min = int_or_default(early.get("quality_gate_min_milestone"), 0)
+    trend_gate_min = int_or_default(
+        early.get("quality_trend_gate_min_milestone"), 0
+    )
+    early_code = early.get("early_judge_exit_code")
+    early_code_ok = early_code == 0
+    if early_code is None and early.get("benchmark_status") not in {
+        "early_judge_failed",
+        None,
+    }:
+        early_code_ok = False
+
+    return [
+        check(
+            "early_judge_status_recorded",
+            early.get("benchmark_status_present") is True
+            and early.get("benchmark_status_schema")
+            == "cortext_julie_release_benchmark_status_v1",
+            (
+                f"benchmark_status_present={early.get('benchmark_status_present')} "
+                f"benchmark_status_schema={early.get('benchmark_status_schema')}"
+            ),
+        ),
+        check(
+            "early_judge_manifest_recorded",
+            early.get("manifest_present") is True
+            and early.get("manifest_schema")
+            == "julie_probe_stream_early_judge_manifest_v1"
+            and bool(early.get("manifest_sha256")),
+            (
+                f"manifest_present={early.get('manifest_present')} "
+                f"manifest_schema={early.get('manifest_schema')} "
+                f"manifest_sha256={early.get('manifest_sha256')}"
+            ),
+        ),
+        check(
+            "early_judge_local_gemma4_configured",
+            early.get("latest_payload_schema")
+            == "julie_probe_stream_early_judge_latest_v1"
+            and early.get("judge_provider") == "ollama"
+            and early.get("judge_model") == "gemma4:12b-it-qat"
+            and int_or_default(early.get("judge_repetitions"), 0) >= 1,
+            (
+                f"latest_payload_schema={early.get('latest_payload_schema')} "
+                f"judge_provider={early.get('judge_provider')} "
+                f"judge_model={early.get('judge_model')} "
+                f"judge_repetitions={early.get('judge_repetitions')}"
+            ),
+        ),
+        check(
+            "early_judge_failures_confirmed",
+            int_or_default(early.get("confirm_fail_repetitions"), 0)
+            >= MIN_JUDGE_REPETITIONS,
+            (
+                "confirm_fail_repetitions="
+                f"{early.get('confirm_fail_repetitions')} "
+                f"min_required={MIN_JUDGE_REPETITIONS}"
+            ),
+        ),
+        check(
+            "early_judge_blind_packet_screening",
+            early.get("blind_packets") is True
+            and int_or_default(early.get("judge_packet_item_limit"), 0) != 0,
+            (
+                f"blind_packets={early.get('blind_packets')} "
+                f"judge_packet_item_limit={early.get('judge_packet_item_limit')}"
+            ),
+        ),
+        check(
+            "early_judge_quality_gates_configured",
+            16 in [int_or_default(item, -1) for item in fixed_milestones]
+            and 0 < quality_gate_min <= 16
+            and 0 < trend_gate_min <= 8
+            and int_or_default(early.get("quality_trend_window"), -1) >= 0,
+            (
+                f"fixed_milestones={fixed_milestones} "
+                f"quality_gate_min_milestone={early.get('quality_gate_min_milestone')} "
+                "quality_trend_gate_min_milestone="
+                f"{early.get('quality_trend_gate_min_milestone')} "
+                f"quality_trend_window={early.get('quality_trend_window')} "
+                "quality_gate_requires_rag_pressure="
+                f"{early.get('quality_gate_requires_rag_pressure')} "
+                "quality_gate_min_history_budget_ratio="
+                f"{early.get('quality_gate_min_history_budget_ratio')}"
+            ),
+        ),
+        check(
+            "early_judge_stream_progress_recorded",
+            int_or_default(early.get("probe_stream_rows"), 0) >= latest_milestone
+            and latest_milestone > 0,
+            (
+                f"probe_stream_rows={early.get('probe_stream_rows')} "
+                f"latest_milestone={early.get('latest_milestone')} "
+                f"completed_milestones={completed_milestones}"
+            ),
+        ),
+        check(
+            "early_judge_gate_passed_for_final_release",
+            early.get("benchmark_status") != "early_judge_failed"
+            and early_code_ok
+            and early.get("latest_fail_fast_status") == "pass",
+            (
+                f"benchmark_status={early.get('benchmark_status')} "
+                f"early_judge_exit_code={early.get('early_judge_exit_code')} "
+                f"latest_fail_fast_status={early.get('latest_fail_fast_status')} "
+                f"latest_milestone={early.get('latest_milestone')} "
+                f"latest_early_stop={early.get('latest_early_stop')}"
+            ),
+        ),
+    ]
+
+
 def canonical_ablation_category(name: str) -> str | None:
     normalized = name.strip().lower().replace(" ", "_")
     normalized_dash = normalized.replace("_", "-")
@@ -2007,7 +2291,10 @@ def cross_artifact_checks(
 
 
 def human_label_checks(
-    human: dict[str, Any] | None, human_path: pathlib.Path | None, summary_path: pathlib.Path
+    human: dict[str, Any] | None,
+    human_path: pathlib.Path | None,
+    summary_path: pathlib.Path,
+    summary: dict[str, Any],
 ) -> list[dict[str, Any]]:
     if human is None or human_path is None:
         return [
@@ -2033,18 +2320,66 @@ def human_label_checks(
         sample: dict[str, Any] = {}
         frozen: dict[str, Any] = {}
         sample_matches = False
+        sample_hash_matches = False
         frozen_matches = False
         judge_frozen_labeling: dict[str, Any] = {}
+        sample_event_indices: set[int] = set()
+        summary_probe_event_indices = {
+            int(probe.get("event_index", -1))
+            for probe in summary.get("probes", [])
+            if isinstance(probe, dict)
+        }
         if sample_path.exists():
             try:
                 sample = load_json(sample_path)
-                sample_matches = pathlib.Path(str(sample.get("source_summary", ""))) == summary_path
+                sample_matches = paths_equivalent(sample.get("source_summary", ""), summary_path)
+                sample_hash_matches = (
+                    sample.get("source_summary_sha256") == file_sha256(summary_path)
+                    and human.get("source_summary_sha256") == file_sha256(summary_path)
+                )
                 sample_composition = sample.get("sample_composition", {})
+                sample_event_indices = {
+                    int(task.get("event_index", -1))
+                    for task in sample.get("tasks", [])
+                    if isinstance(task, dict)
+                }
             except Exception:
                 sample_matches = False
+                sample_hash_matches = False
                 sample_composition = {}
         else:
             sample_composition = {}
+        human_blinding_policy = sample.get("human_blinding_policy", {})
+        if not isinstance(human_blinding_policy, dict):
+            human_blinding_policy = {}
+        non_random_candidate_tasks = [
+            task.get("probe_id", task.get("event_index"))
+            for task in sample.get("tasks", [])
+            if isinstance(task, dict)
+            and task.get("candidate_order_policy") != "randomized_blind_order_seeded"
+        ]
+        future_or_non_prior_candidates = []
+        for task in sample.get("tasks", []):
+            if not isinstance(task, dict):
+                continue
+            try:
+                event_index = int(task.get("event_index", -1))
+            except Exception:
+                event_index = -1
+            for cand in task.get("candidates", []):
+                if not isinstance(cand, dict):
+                    continue
+                try:
+                    candidate_event = int(cand.get("event_index", -1))
+                except Exception:
+                    candidate_event = -1
+                if candidate_event >= event_index:
+                    future_or_non_prior_candidates.append(
+                        {
+                            "probe_event_index": event_index,
+                            "candidate_event_index": candidate_event,
+                        }
+                    )
         if frozen_path.exists():
             try:
                 frozen = load_json(frozen_path)
@@ -2071,6 +2406,25 @@ def human_label_checks(
                     "human_labels_same_summary",
                     sample_matches,
                     f"sample={sample_path} summary={summary_path}",
+                ),
+                check(
+                    "human_labels_summary_hash_matches",
+                    sample_hash_matches,
+                    (
+                        f"sample_source_summary_sha256={sample.get('source_summary_sha256')} "
+                        f"score_source_summary_sha256={human.get('source_summary_sha256')} "
+                        f"summary_sha256={file_sha256(summary_path)}"
+                    ),
+                ),
+                check(
+                    "human_sample_probe_events_subset_of_frozen_summary",
+                    sample_event_indices.issubset(summary_probe_event_indices)
+                    and len(sample_event_indices) >= MIN_HUMAN_PROBES,
+                    (
+                        f"sample_probe_count={len(sample_event_indices)} "
+                        f"summary_probe_count={len(summary_probe_event_indices)} "
+                        f"extra={sorted(sample_event_indices - summary_probe_event_indices)}"
+                    ),
                 ),
                 check(
                     "human_frozen_targets_hash_matches",
@@ -2114,6 +2468,25 @@ def human_label_checks(
                     "human_sample_includes_media_candidates",
                     sample_composition.get("includes_media_candidates") is True,
                     f"sample_composition={sample_composition}",
+                ),
+                check(
+                    "human_candidate_order_randomized_blind",
+                    not non_random_candidate_tasks
+                    and human_blinding_policy.get("candidate_order")
+                    == "randomized_with_seed"
+                    and human_blinding_policy.get("candidate_provenance_hidden_in_ui")
+                    is True
+                    and "candidate_sources"
+                    in human_blinding_policy.get("hidden_candidate_fields", []),
+                    (
+                        f"human_blinding_policy={human_blinding_policy} "
+                        f"non_random_candidate_tasks={non_random_candidate_tasks}"
+                    ),
+                ),
+                check(
+                    "human_sample_candidates_prior_only",
+                    not future_or_non_prior_candidates,
+                    f"future_or_non_prior_candidates={future_or_non_prior_candidates[:10]}",
                 ),
                 check(
                     "human_judge_frozen_targets_include_active_packet_candidates",
@@ -2340,6 +2713,7 @@ def ablation_plan_checks(
     missing_commands = []
     missing_executable_hashes = []
     reuse_enabled = []
+    bad_environment_snapshots = []
     for name in ablation_names:
         case = by_name.get(name, {})
         category = canonical_ablation_category(name)
@@ -2387,6 +2761,59 @@ def ablation_plan_checks(
                     "reuse_policy": case.get("reuse_policy"),
                 }
             )
+        snapshot_path = case.get("environment_snapshot_path")
+        snapshot = None
+        if snapshot_path:
+            try:
+                snapshot = load_json(pathlib.Path(str(snapshot_path)))
+            except Exception as exc:
+                bad_environment_snapshots.append(
+                    {
+                        "name": name,
+                        "environment_snapshot_path": snapshot_path,
+                        "load_error": exc.__class__.__name__,
+                    }
+                )
+        else:
+            bad_environment_snapshots.append(
+                {
+                    "name": name,
+                    "environment_snapshot_path": "",
+                    "load_error": "missing_path",
+                }
+            )
+        if isinstance(snapshot, dict):
+            snapshot_env = snapshot.get("actual_env_overrides", {})
+            if not isinstance(snapshot_env, dict):
+                snapshot_env = {}
+            stripped_keys = snapshot.get("stripped_hosted_provider_env_keys", [])
+            if (
+                snapshot.get("schema") != "cortext_ablation_environment_snapshot_v1"
+                or "stripped" not in str(snapshot.get("hosted_provider_env_policy", ""))
+                or not isinstance(stripped_keys, list)
+                or snapshot_env != {
+                    key: env[key]
+                    for key in sorted(env)
+                }
+            ):
+                bad_environment_snapshots.append(
+                    {
+                        "name": name,
+                        "environment_snapshot_path": snapshot_path,
+                        "schema": snapshot.get("schema"),
+                        "hosted_provider_env_policy": snapshot.get(
+                            "hosted_provider_env_policy"
+                        ),
+                        "stripped_hosted_provider_env_keys_type": type(
+                            stripped_keys
+                        ).__name__,
+                        "actual_env_overrides": snapshot_env,
+                        "expected_env_overrides": {
+                            key: env[key]
+                            for key in sorted(env)
+                        },
+                    }
+                )
 
     return [
         check(
@@ -2423,6 +2850,11 @@ def ablation_plan_checks(
             "architecture_ablation_reuse_disabled_for_release",
             not reuse_enabled,
             f"reuse_enabled_or_unrecorded={reuse_enabled}",
+        ),
+        check(
+            "architecture_ablation_environment_snapshots_sanitize_hosted_providers",
+            not bad_environment_snapshots,
+            f"bad_environment_snapshots={bad_environment_snapshots}",
         ),
     ]
 
@@ -3210,6 +3642,11 @@ def main() -> int:
     protocol_freeze = load_protocol_freeze(args.freeze_file)
     source_ids = source_id_audit(summary)
     environment_snapshot = load_benchmark_environment_snapshot(args.summary)
+    benchmark_status = load_optional_json(args.summary.parent / "benchmark_status.json")
+    early_manifest = load_optional_json(
+        args.summary.parent / "early_judge" / "early_judge_manifest.json"
+    )
+    early = early_judge_summary(benchmark_status, early_manifest)
     costs = cost_summary(summary, judge)
     claim_support = claim_support_summary(judge)
     ablation_names = [name for name, _, _ in args.ablation]
@@ -3242,6 +3679,7 @@ def main() -> int:
     )
     checks.extend(source_id_audit_checks(source_ids))
     checks.extend(benchmark_environment_checks(environment_snapshot))
+    checks.extend(early_judge_checks(early))
     checks.extend(summary_protocol_checks(summary))
     checks.extend(judge_protocol_checks(judge))
     checks.extend(judge_media_smoke_checks(judge_media_smoke, args.judge_command))
@@ -3250,7 +3688,7 @@ def main() -> int:
     human = load_json(args.human_labels) if args.human_labels else None
     human_eval = load_json(args.human_label_eval) if args.human_label_eval else None
     target_freeze = load_json(args.target_freeze) if args.target_freeze else None
-    checks.extend(human_label_checks(human, args.human_labels, args.summary))
+    checks.extend(human_label_checks(human, args.human_labels, args.summary, summary))
     checks.extend(
         frozen_target_artifact_checks(
             target_freeze,
@@ -3414,6 +3852,16 @@ def main() -> int:
             "summary_sha256": file_sha256(args.summary),
             "judge_path": str(args.judge),
             "judge_sha256": file_sha256(args.judge),
+            "benchmark_status_path": str(args.summary.parent / "benchmark_status.json"),
+            "benchmark_status_sha256": (
+                benchmark_status.get("sha256", "") if benchmark_status else ""
+            ),
+            "early_judge_manifest_path": str(
+                args.summary.parent / "early_judge" / "early_judge_manifest.json"
+            ),
+            "early_judge_manifest_sha256": (
+                early_manifest.get("sha256", "") if early_manifest else ""
+            ),
             "human_labels_path": str(args.human_labels) if args.human_labels else "",
             "human_label_eval_path": (
                 str(args.human_label_eval) if args.human_label_eval else ""
@@ -3475,6 +3923,7 @@ def main() -> int:
         "protocol_freeze": protocol_freeze,
         "frozen_probe_manifest": manifest,
         "frozen_probe_schedule": schedule_manifest,
+        "early_judge": early,
         "judge": public_judge_summary(judge),
         "judge_media_smoke": {
             "schema": judge_media_smoke.get("schema"),
@@ -3541,6 +3990,7 @@ def main() -> int:
             }
             if protocol_freeze
             else None,
+            "early_judge": early,
             "human_labels": public_human_label_summary(human),
             "claim_support": claim_support,
             "costs": costs,

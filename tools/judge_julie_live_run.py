@@ -20,6 +20,7 @@ import random
 import re
 import sqlite3
 import subprocess
+import sys
 import tempfile
 import urllib.parse
 import urllib.request
@@ -35,6 +36,7 @@ DEFAULT_OLLAMA_MODEL = "gemma4:12b-it-qat"
 DEFAULT_MODEL = DEFAULT_NEMOTRON_MODEL
 DEFAULT_NEMOTRON_BASE_URL = "http://127.0.0.1:8000/v1"
 DEFAULT_OLLAMA_BASE_URL = "http://127.0.0.1:11434"
+JUDGE_CALL_ATTEMPTS = 3
 LOCAL_JUDGE_HOSTS = {"localhost", "127.0.0.1", "::1", "0.0.0.0"}
 SYSTEMS = ["cortext_native", "traditional_chat_rag", "full_history_upper_bound"]
 FIELDS = [
@@ -85,6 +87,10 @@ PACKET_SURFACE = "structurally_normalized_event_evidence_v1"
 
 
 class JudgeCallTimeout(TimeoutError):
+    pass
+
+
+class JudgeMalformedResponse(RuntimeError):
     pass
 
 
@@ -891,8 +897,68 @@ def parse_judge_json(content: str) -> dict:
         start = content.find("{")
         end = content.rfind("}")
         if start >= 0 and end > start:
-            return json.loads(content[start : end + 1])
-        raise RuntimeError(f"Judge returned non-JSON content: {content[:500]!r}")
+            try:
+                return json.loads(content[start : end + 1])
+            except json.JSONDecodeError as exc:
+                raise JudgeMalformedResponse(
+                    "Judge returned malformed JSON object "
+                    f"chars={len(content)} object_chars={end - start + 1}"
+                ) from exc
+        raise JudgeMalformedResponse(
+            "Judge returned non-JSON content "
+            f"chars={len(content)} has_open_brace={start >= 0} has_close_brace={end >= 0}"
+        )
+
+
+def prompt_text(content: str | list[dict]) -> str:
+    if isinstance(content, str):
+        return content
+    parts: list[str] = []
+    for part in content:
+        if part.get("type") == "text":
+            parts.append(str(part.get("text", "")))
+    return "\n\n".join(parts)
+
+
+def judge_packet_keys(content: str | list[dict]) -> list[str]:
+    text = prompt_text(content)
+    match = re.search(r"top-level keys\s+(.+?),\s+winner\b", text)
+    if not match:
+        return PACKET_ALIASES
+    keys: list[str] = []
+    for part in match.group(1).split(","):
+        key = part.strip()
+        if re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*", key):
+            keys.append(key)
+    return keys or PACKET_ALIASES
+
+
+def judge_score_schema() -> dict:
+    return {
+        "type": "object",
+        "properties": {
+            **{field: {"type": "number"} for field in FIELDS},
+            "reason": {"type": "string"},
+        },
+        "required": [*FIELDS, "reason"],
+        "additionalProperties": True,
+    }
+
+
+def judge_json_schema(content: str | list[dict]) -> dict:
+    keys = judge_packet_keys(content)
+    reasons = sorted(BLIND_FAILURE_REASONS | SYSTEM_FAILURE_REASONS)
+    return {
+        "type": "object",
+        "properties": {
+            **{key: judge_score_schema() for key in keys},
+            "winner": {"type": "string", "enum": [*keys, "tie_or_unclear"]},
+            "failure_reason": {"type": "string", "enum": reasons},
+            "winner_reason": {"type": "string"},
+        },
+        "required": [*keys, "winner", "failure_reason", "winner_reason"],
+        "additionalProperties": True,
+    }
 
 
 def post_json_local(url: str, body: dict, timeout_s: int) -> dict:
@@ -1030,7 +1096,7 @@ def call_ollama_judge(
             ollama_user_message(content),
         ],
         "stream": False,
-        "format": "json",
+        "format": judge_json_schema(content),
         "think": False,
         "options": {
             "temperature": 0,
@@ -1043,7 +1109,7 @@ def call_ollama_judge(
     return parse_judge_json(str(content_text))
 
 
-def call_judge(
+def call_judge_once(
     provider: str,
     model: str,
     base_url: str | None,
@@ -1064,6 +1130,43 @@ def call_judge(
             context_window_tokens,
         )
     return call_nemotron_judge(model, content, max_tokens, timeout_s)
+
+
+def call_judge(
+    provider: str,
+    model: str,
+    base_url: str | None,
+    content: str | list[dict],
+    max_tokens: int,
+    timeout_s: int,
+    context_window_tokens: int,
+) -> dict:
+    for attempt in range(1, JUDGE_CALL_ATTEMPTS + 1):
+        try:
+            return call_judge_once(
+                provider,
+                model,
+                base_url,
+                content,
+                max_tokens,
+                timeout_s,
+                context_window_tokens,
+            )
+        except (JudgeMalformedResponse, JudgeCallTimeout) as exc:
+            if attempt >= JUDGE_CALL_ATTEMPTS:
+                raise RuntimeError(
+                    "Local judge failed after retryable errors "
+                    f"attempts={JUDGE_CALL_ATTEMPTS} last_error={type(exc).__name__}: {exc}"
+                ) from exc
+            print(
+                "judge_retry "
+                f"ts={utc_now_text()} "
+                f"attempt={attempt + 1}/{JUDGE_CALL_ATTEMPTS} "
+                f"reason={type(exc).__name__}: {exc}",
+                file=sys.stderr,
+                flush=True,
+            )
+    raise RuntimeError("unreachable judge retry state")
 
 
 def score(scores: dict, system: str, field: str) -> float:
@@ -1180,6 +1283,82 @@ def confidence_intervals(
     return out
 
 
+def expected_judgment_count(
+    summary: dict,
+    timeline: list[TimelineDoc],
+    judge_limit: int,
+    judge_start_index: int,
+    judge_repetitions: int,
+) -> int:
+    query_probe_index = 0
+    probe_count = 0
+    for probe in summary.get("probes", []):
+        if not find_query_doc(timeline, probe):
+            continue
+        if judge_limit >= 0 and query_probe_index >= judge_limit:
+            break
+        if query_probe_index < judge_start_index:
+            query_probe_index += 1
+            continue
+        query_probe_index += 1
+        probe_count += 1
+    return probe_count * judge_repetitions
+
+
+def quality_composite_from_row(row: dict, system: str) -> float:
+    scores = row.get("systems", {}).get(system, {})
+    if not isinstance(scores, dict):
+        return 0.0
+    return (
+        float(scores.get("relevance", 0.0) or 0.0)
+        + float(scores.get("sufficiency", 0.0) or 0.0)
+        - float(scores.get("noise", 0.0) or 0.0)
+    )
+
+
+def quality_delta_from_row(row: dict) -> float:
+    return quality_composite_from_row(row, "cortext_native") - quality_composite_from_row(
+        row, "traditional_chat_rag"
+    )
+
+
+def unrecoverable_quality_stop(
+    judged: list[dict],
+    expected_rows: int,
+    floor: float | None,
+    prior_quality_delta_sum: float = 0.0,
+    prior_judgment_count: int = 0,
+) -> dict | None:
+    if floor is None or expected_rows <= 0 or not judged:
+        return None
+    expected_total_rows = prior_judgment_count + expected_rows
+    rows_judged = prior_judgment_count + len(judged)
+    if rows_judged >= expected_total_rows:
+        return None
+    current_sum = prior_quality_delta_sum + sum(quality_delta_from_row(row) for row in judged)
+    remaining = expected_total_rows - rows_judged
+    max_remaining_delta_per_row = 15.0
+    optimistic_final_delta = (
+        current_sum + remaining * max_remaining_delta_per_row
+    ) / expected_total_rows
+    observed_delta = current_sum / rows_judged
+    if optimistic_final_delta >= floor:
+        return None
+    return {
+        "reason": "quality_delta_floor_unrecoverable",
+        "segment_rows_judged": len(judged),
+        "segment_expected_rows": expected_rows,
+        "prior_rows": prior_judgment_count,
+        "rows_judged": rows_judged,
+        "expected_rows": expected_total_rows,
+        "remaining_rows": remaining,
+        "observed_quality_delta_vs_rag": observed_delta,
+        "optimistic_final_quality_delta_vs_rag": optimistic_final_delta,
+        "floor": floor,
+        "max_remaining_delta_per_row": max_remaining_delta_per_row,
+    }
+
+
 def summarize_db(conn: sqlite3.Connection) -> dict:
     def scalar(sql: str) -> int:
         return int(conn.execute(sql).fetchone()[0] or 0)
@@ -1228,6 +1407,15 @@ def main() -> int:
     )
     parser.add_argument("--judge-limit", type=int, default=-1)
     parser.add_argument(
+        "--judge-start-index",
+        type=int,
+        default=0,
+        help=(
+            "Skip this many query-bearing probes before judging. This is used "
+            "by streamed early checkpoints to avoid rejudging prior milestones."
+        ),
+    )
+    parser.add_argument(
         "--judge-repetitions",
         type=int,
         default=1,
@@ -1260,7 +1448,7 @@ def main() -> int:
     parser.add_argument(
         "--judge-context-window-tokens",
         type=int,
-        default=262144,
+        default=32768,
         help=(
             "Judge context window to request from the local backend and to use "
             "for prompt-fit checks."
@@ -1284,15 +1472,49 @@ def main() -> int:
             "media in the packet or 0 to disable multimodal attachments."
         ),
     )
+    parser.add_argument(
+        "--early-stop-min-quality-delta-vs-rag",
+        type=float,
+        help=(
+            "Optional confirmation-only fail-fast floor. After each completed "
+            "row, stop and write a partial aggregate if even perfect remaining "
+            "rows cannot bring Cortext's quality composite delta versus "
+            "traditional chat+RAG up to this floor."
+        ),
+    )
+    parser.add_argument(
+        "--early-stop-prior-quality-delta-sum",
+        type=float,
+        default=0.0,
+        help=(
+            "Cumulative Cortext-minus-RAG quality-delta sum from accepted prior "
+            "segments when judging only a streamed delta segment."
+        ),
+    )
+    parser.add_argument(
+        "--early-stop-prior-judgment-count",
+        type=int,
+        default=0,
+        help=(
+            "Number of accepted prior segment judgments represented by "
+            "--early-stop-prior-quality-delta-sum."
+        ),
+    )
     args = parser.parse_args()
     if args.judge_repetitions < 1:
         raise RuntimeError("--judge-repetitions must be >= 1")
     if args.bootstrap_samples < 0:
         raise RuntimeError("--bootstrap-samples must be >= 0")
+    if args.judge_start_index < 0:
+        raise RuntimeError("--judge-start-index must be >= 0")
+    if args.judge_limit >= 0 and args.judge_start_index > args.judge_limit:
+        raise RuntimeError("--judge-start-index cannot exceed --judge-limit")
     if args.judge_timeout_s < 1:
         raise RuntimeError("--judge-timeout-s must be >= 1")
     if args.judge_context_window_tokens < 1:
         raise RuntimeError("--judge-context-window-tokens must be >= 1")
+    if args.early_stop_prior_judgment_count < 0:
+        raise RuntimeError("--early-stop-prior-judgment-count must be >= 0")
     judge_model = resolve_judge_model(args.judge_provider, args.model)
     judge_base_url = (
         local_ollama_base_url(args.ollama_base_url)
@@ -1324,6 +1546,13 @@ def main() -> int:
         summary.get("timeline_media_limit", summary.get("media_attempted", -1))
     )
     timeline = build_timeline(input_dir, max_messages, media_limit)
+    expected_judgments = expected_judgment_count(
+        summary,
+        timeline,
+        args.judge_limit,
+        args.judge_start_index,
+        args.judge_repetitions,
+    )
     by_index = docs_by_index(timeline)
     conn = connect_db(db_path)
     media_memory_map = build_media_memory_map(conn, timeline)
@@ -1344,6 +1573,7 @@ def main() -> int:
         "full_history_upper_bound": Counter(),
     }
     cortext_packet_source = Counter()
+    early_stop: dict | None = None
 
     checkpoint_rows = args.checkpoint_rows or args.out.with_name(args.out.name + ".rows.jsonl")
     checkpoint_rows.parent.mkdir(parents=True, exist_ok=True)
@@ -1353,12 +1583,17 @@ def main() -> int:
     ) as tmp:
         work_dir = pathlib.Path(tmp)
         probes_seen = 0
+        query_probe_index = 0
         for probe in summary.get("probes", []):
-            if args.judge_limit >= 0 and probes_seen >= args.judge_limit:
-                break
             query_doc = find_query_doc(timeline, probe)
             if not query_doc:
                 continue
+            if args.judge_limit >= 0 and query_probe_index >= args.judge_limit:
+                break
+            if query_probe_index < args.judge_start_index:
+                query_probe_index += 1
+                continue
+            query_probe_index += 1
             probes_seen += 1
             frozen_working_rows = frozen_memory_rows(probe, "cortext_frozen_working_memory")
             frozen_retrieved_rows = frozen_memory_rows(
@@ -1767,6 +2002,28 @@ def main() -> int:
                 judged.append(row)
                 checkpoint_file.write(json.dumps(row, separators=(",", ":")) + "\n")
                 checkpoint_file.flush()
+                early_stop = unrecoverable_quality_stop(
+                    judged,
+                    expected_judgments,
+                    args.early_stop_min_quality_delta_vs_rag,
+                    args.early_stop_prior_quality_delta_sum,
+                    args.early_stop_prior_judgment_count,
+                )
+                if early_stop is not None:
+                    print(
+                        "judge_early_stop "
+                        f"ts={utc_now_text()} "
+                        f"reason={early_stop['reason']} "
+                        f"rows_judged={early_stop['rows_judged']} "
+                        f"expected_rows={early_stop['expected_rows']} "
+                        "optimistic_final_quality_delta_vs_rag="
+                        f"{early_stop['optimistic_final_quality_delta_vs_rag']:.6f} "
+                        f"floor={early_stop['floor']:.6f}",
+                        flush=True,
+                    )
+                    break
+            if early_stop is not None:
+                break
 
     quality = {}
     for system in systems:
@@ -1805,8 +2062,17 @@ def main() -> int:
             "packet_labels": PACKET_ALIASES[:len(systems)] if args.blind_packets else systems,
             "judge_repetitions": args.judge_repetitions,
             "judge_seed": args.judge_seed,
+            "judge_start_index": args.judge_start_index,
+            "judge_limit": args.judge_limit,
+            "expected_judgments": expected_judgments,
             "judge_timeout_s": args.judge_timeout_s,
             "judge_context_window_tokens": args.judge_context_window_tokens,
+            "early_stop_prior_quality_delta_sum": (
+                args.early_stop_prior_quality_delta_sum
+            ),
+            "early_stop_prior_judgment_count": (
+                args.early_stop_prior_judgment_count
+            ),
             "bootstrap_samples": args.bootstrap_samples,
             "bootstrap_unit": "probe",
             "packet_surface": PACKET_SURFACE,
@@ -1891,6 +2157,7 @@ def main() -> int:
         "judged": len(judged),
         "probe_count": probes_seen,
         "judge_repetitions": args.judge_repetitions,
+        "early_stop": early_stop,
         "quality": quality,
         "confidence_intervals": confidence_intervals(
             judged,

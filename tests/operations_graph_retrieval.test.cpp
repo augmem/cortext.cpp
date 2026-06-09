@@ -18,6 +18,7 @@
 #include <algorithm>
 #include <cmath>
 #include <optional>
+#include <utility>
 
 using namespace cortext;
 using cortext::operations::GraphAugmentedRetrieveCandidates;
@@ -191,6 +192,44 @@ private:
   std::vector<Entry> entries_;
 };
 
+class SeedWorkingMemoryAnchorOp : public IOperation
+{
+public:
+  SeedWorkingMemoryAnchorOp (long long memory_id,
+                             const std::string &source_id,
+                             long long start_ts,
+                             Eigen::VectorXf embedding)
+      : memory_id_ (memory_id), source_id_ (source_id), start_ts_ (start_ts),
+        embedding_ (std::move (embedding))
+  {
+  }
+
+  void
+  Execute (OperationContext &ctx, Transaction & /*tx*/) const override
+  {
+    ProcessorContext::WMSlot slot;
+    slot.memory_id = memory_id_;
+    slot.source_id = source_id_;
+    slot.modality = "text";
+    slot.start_ts = start_ts_;
+    slot.embedding = embedding_;
+    slot.strength = 1.0;
+    SignalRecord record;
+    record.timestamp = static_cast<uint64_t> (start_ts_);
+    record.modality = "text";
+    record.mime = "text/plain";
+    record.embedding = embedding_;
+    slot.signal_records.push_back (std::move (record));
+    ctx.GetProcessorContext ().wm_slots.push_back (std::move (slot));
+  }
+
+private:
+  long long memory_id_ = 0;
+  std::string source_id_;
+  long long start_ts_ = 0;
+  Eigen::VectorXf embedding_;
+};
+
 void
 SetMemorySourceMetadata (Store &store, long long memory_id,
                          const std::string &origin, double reliability,
@@ -349,6 +388,8 @@ TEST_CASE ("Predictive pre-activation changes retrieval ranking",
   cfg.focus = 1.0;
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;
+  cortext::testing::ScopedEnvVar disable_source_seed_expansion (
+      "CORTEXT_DISABLE_SOURCE_SEED_GRAPH_EXPANSION", "1");
 
   auto run = [&] {
     cortext::operations::retrieval_debug::ClearLastRankedCandidates ();
@@ -841,6 +882,156 @@ TEST_CASE (
   REQUIRE (related_it != ranked.end ());
   REQUIRE (related_it->durable_source_count > 0);
   REQUIRE (related_it->durable_source_boost > 0.0);
+}
+
+TEST_CASE ("Graph retrieval expands temporal neighbors from active working memory",
+           "[operations][graph][source_seed][wm_temporal]")
+{
+  auto unique_store = SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<Store> (std::move (unique_store));
+  cortext::testing::InitializeCoreSchema (*store);
+
+  const Eigen::VectorXf query_vec = UnitVec256 (1.0f);
+  const Eigen::VectorXf target_vec = UnitVec256Second (1.0f);
+  const Eigen::VectorXf wm_vec = UnitVec256 (-1.0f);
+
+  for (long long i = 0; i < 24; ++i)
+    {
+      const long long id = 1000LL + i;
+      cortext::testing::SeedEmbeddingV2 (*store, id, query_vec, 1000 + i);
+      cortext::testing::SeedMemoryV2 (*store, id, id,
+                                      "chat/distractor" + std::to_string (i),
+                                      "LONG_TERM", 1.0, 1000 + i);
+    }
+
+  cortext::testing::SeedEmbeddingV2 (*store, 200LL, target_vec, 1990);
+  cortext::testing::SeedEmbeddingV2 (*store, 201LL, wm_vec, 2000);
+  cortext::testing::SeedMemoryV2 (*store, 200LL, 200LL, "chat/user",
+                                  "LONG_TERM", 1.0, 1990);
+  cortext::testing::SeedMemoryV2 (*store, 201LL, 201LL, "chat/user",
+                                  "WORKING", 1.0, 2000);
+
+  auto run = [&] {
+    cortext::operations::retrieval_debug::ClearLastRankedCandidates ();
+    auto ops = std::make_unique<OperationSet> (
+        std::make_unique<ForceRetrievalGateOp> (),
+        std::make_unique<SeedWorkingMemoryAnchorOp> (201LL, "chat/user",
+                                                     2000LL, wm_vec),
+        std::make_unique<GraphAugmentedRetrieveCandidates> ());
+    SignalProcessor::Config cfg;
+    cortext::testing::RequireEncoder (cfg);
+    cfg.focus = 1.0;
+    cfg.sensitivity = 0.5;
+    cfg.stability = 0.5;
+    SignalProcessor processor (cfg, store, std::move (ops));
+    processor.Process (MakeSignal (query_vec, 3000));
+    processor.Flush ();
+    return cortext::operations::retrieval_debug::GetLastRankedCandidates ();
+  };
+
+  auto ranked = run ();
+  auto target_it = std::find_if (
+      ranked.begin (), ranked.end (), [] (const auto &candidate) {
+        return candidate.memory_id == 200LL;
+      });
+  auto working_it = std::find_if (
+      ranked.begin (), ranked.end (), [] (const auto &candidate) {
+        return candidate.memory_id == 201LL;
+      });
+  REQUIRE (target_it != ranked.end ());
+  REQUIRE (target_it->durable_source_count > 0);
+  REQUIRE (target_it->durable_source_boost > 0.0);
+  REQUIRE (working_it == ranked.end ());
+
+  {
+    cortext::testing::ScopedEnvVar disabled (
+        "CORTEXT_DISABLE_SOURCE_SEED_GRAPH_EXPANSION", "1");
+    ranked = run ();
+  }
+  target_it = std::find_if (
+      ranked.begin (), ranked.end (), [] (const auto &candidate) {
+        return candidate.memory_id == 200LL;
+      });
+  REQUIRE (target_it == ranked.end ());
+}
+
+TEST_CASE ("Graph retrieval expands active chat working memory across speakers",
+           "[operations][graph][source_seed][wm_temporal][chat]")
+{
+  auto unique_store = SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<Store> (std::move (unique_store));
+  cortext::testing::InitializeCoreSchema (*store);
+
+  const Eigen::VectorXf query_vec = UnitVec256 (1.0f);
+  const Eigen::VectorXf target_vec = UnitVec256Second (1.0f);
+  const Eigen::VectorXf wm_vec = UnitVec256 (-1.0f);
+
+  for (long long i = 0; i < 24; ++i)
+    {
+      const long long id = 1000LL + i;
+      cortext::testing::SeedEmbeddingV2 (*store, id, query_vec, 1000 + i);
+      cortext::testing::SeedMemoryV2 (*store, id, id,
+                                      "chat/distractor" + std::to_string (i),
+                                      "LONG_TERM", 1.0, 1000 + i);
+    }
+
+  cortext::testing::SeedEmbeddingV2 (*store, 200LL, target_vec, 1998);
+  cortext::testing::SeedEmbeddingV2 (*store, 201LL, wm_vec, 2000);
+  cortext::testing::SeedEmbeddingV2 (*store, 202LL, target_vec, 3500);
+  cortext::testing::SeedMemoryV2 (*store, 200LL, 200LL, "chat/assistant",
+                                  "LONG_TERM", 1.0, 1998);
+  cortext::testing::SeedMemoryV2 (*store, 201LL, 201LL, "chat/user",
+                                  "WORKING", 1.0, 2000);
+  cortext::testing::SeedMemoryV2 (*store, 202LL, 202LL, "chat/assistant",
+                                  "LONG_TERM", 1.0, 3500);
+
+  auto run = [&] {
+    cortext::operations::retrieval_debug::ClearLastRankedCandidates ();
+    auto ops = std::make_unique<OperationSet> (
+        std::make_unique<ForceRetrievalGateOp> (),
+        std::make_unique<SeedWorkingMemoryAnchorOp> (201LL, "chat/user",
+                                                     2000LL, wm_vec),
+        std::make_unique<GraphAugmentedRetrieveCandidates> ());
+    SignalProcessor::Config cfg;
+    cortext::testing::RequireEncoder (cfg);
+    cfg.focus = 1.0;
+    cfg.sensitivity = 0.5;
+    cfg.stability = 0.5;
+    SignalProcessor processor (cfg, store, std::move (ops));
+    processor.Process (MakeSignal (query_vec, 3000));
+    processor.Flush ();
+    return cortext::operations::retrieval_debug::GetLastRankedCandidates ();
+  };
+
+  auto ranked = run ();
+  auto assistant_it = std::find_if (
+      ranked.begin (), ranked.end (), [] (const auto &candidate) {
+        return candidate.memory_id == 200LL;
+      });
+  auto working_it = std::find_if (
+      ranked.begin (), ranked.end (), [] (const auto &candidate) {
+        return candidate.memory_id == 201LL;
+      });
+  auto future_it = std::find_if (
+      ranked.begin (), ranked.end (), [] (const auto &candidate) {
+        return candidate.memory_id == 202LL;
+      });
+  REQUIRE (assistant_it != ranked.end ());
+  REQUIRE (assistant_it->durable_source_count > 0);
+  REQUIRE (assistant_it->durable_source_boost > 0.0);
+  REQUIRE (working_it == ranked.end ());
+  REQUIRE (future_it == ranked.end ());
+
+  {
+    cortext::testing::ScopedEnvVar disabled (
+        "CORTEXT_DISABLE_SOURCE_SEED_GRAPH_EXPANSION", "1");
+    ranked = run ();
+  }
+  assistant_it = std::find_if (
+      ranked.begin (), ranked.end (), [] (const auto &candidate) {
+        return candidate.memory_id == 200LL;
+      });
+  REQUIRE (assistant_it == ranked.end ());
 }
 
 TEST_CASE ("Graph retrieval uses broad source seeds but compact knob-derived output",

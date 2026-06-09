@@ -10,6 +10,7 @@
 #include <vector>
 
 #include <cortext/clock.hpp>
+#include <cortext/core/knobs.hpp>
 #include <cortext/capi.h>
 #include <cortext/cortext.hpp>
 #include <cortext/internal/replay_ingress.hpp>
@@ -486,6 +487,75 @@ TEST_CASE ("Cortext hydrates sqlite-objstore payloads",
   }
 }
 
+TEST_CASE ("Cortext filters mixed signal blobs to the memory surface",
+           "[cortext][hydration]")
+{
+  ScopedTempDb temp_db;
+  const auto &db_path = temp_db.path ();
+  auto store = cortext::SQLiteStore::Create (db_path);
+  cortext::testing::InitializeCoreSchema (*store);
+
+  constexpr int kEmbeddingDim = 256;
+  std::vector<float> embedding (kEmbeddingDim, 0.0f);
+  embedding[0] = 1.0f;
+
+  const std::string source_text = "Slow delivery on amazon";
+  const std::vector<unsigned char> text_payload (source_text.begin (),
+                                                 source_text.end ());
+  const std::vector<unsigned char> image_payload = {
+    0x00, 0x01, 0x02, 0x03, 0xff, 0x00, 0x10, 0x20,
+  };
+
+  auto text_blob_rows = store->Execute ("SELECT objstore_put(?1) AS id",
+                                        { text_payload });
+  REQUIRE (text_blob_rows.size () == 1);
+  const auto text_blob_id = BlobFromAny (text_blob_rows[0].at ("id"));
+  REQUIRE (!text_blob_id.empty ());
+
+  auto image_blob_rows = store->Execute ("SELECT objstore_put(?1) AS id",
+                                         { image_payload });
+  REQUIRE (image_blob_rows.size () == 1);
+  const auto image_blob_id = BlobFromAny (image_blob_rows[0].at ("id"));
+  REQUIRE (!image_blob_id.empty ());
+
+  store->Execute (
+      "INSERT INTO embeddings (embedding_id, embedding, created_at) "
+      "VALUES (?, ?, ?)",
+      { 701LL, embedding, 0LL });
+
+  store->Execute (
+      "INSERT INTO memories (memory_id, embedding_id, source_id, kind, "
+      "start_ts, end_ts, n_signals, modality, s_max, s_avg, strength, "
+      "created_at) "
+      "VALUES (701, 701, 'test/source', 'LONG_TERM', 100, 200, 2, 'text', "
+      "0.5, 0.5, 1.0, 0)");
+
+  store->Execute (
+      "INSERT INTO signals (memory_id, embedding_id, source_id, timestamp, "
+      "modality, mime, blob_id, serial_position, created_at) "
+      "VALUES (701, 701, 'test/source', 100, 'text', 'text/plain', ?, 0, "
+      "100)",
+      { text_blob_id });
+  store->Execute (
+      "INSERT INTO signals (memory_id, embedding_id, source_id, timestamp, "
+      "modality, mime, blob_id, serial_position, created_at) "
+      "VALUES (701, 701, 'test/source', 100, 'image', "
+      "'image/raw;width=224;height=224;channels=3', ?, 1, 100)",
+      { image_blob_id });
+
+  cortext::Cortext::Config cfg;
+  auto ctx = cortext::Cortext::Create (cfg, db_path, RepoModelsDir ());
+  REQUIRE (ctx != nullptr);
+
+  auto hydrated = ctx->DebugHydrateForTest ({ 701LL }, {});
+  REQUIRE (hydrated.retrieved_memory.size () == 1);
+  const auto &memory = hydrated.retrieved_memory[0];
+  REQUIRE (memory.modality == "text");
+  REQUIRE (memory.mimetype == "text/plain");
+  REQUIRE (memory.content.size () == 1);
+  REQUIRE (TextFromMemory (memory) == source_text);
+}
+
 TEST_CASE ("Cortext hydrates SoftAnchor metadata with retrieved memories",
            "[cortext][hydration][soft_anchor]")
 {
@@ -834,6 +904,99 @@ TEST_CASE ("Cortext orders durable label source hydration by query similarity",
     REQUIRE (recency_hydrated.retrieved_memory.size () >= 2);
     REQUIRE (recency_hydrated.retrieved_memory[0].id == 101LL);
   }
+}
+
+TEST_CASE ("Cortext caps linked source hydration with knob-derived compact limit",
+           "[cortext][hydration][retrieval]")
+{
+  ScopedTempDb temp_db;
+  const auto &db_path = temp_db.path ();
+  auto store = cortext::SQLiteStore::Create (db_path);
+  cortext::testing::InitializeCoreSchema (*store);
+
+  cortext::testing::ScopedEnvVar clear_query_aware (
+      "CORTEXT_QUERY_AWARE_LINKED_SOURCE_HYDRATION");
+  cortext::testing::ScopedEnvVar clear_query_aware_disable (
+      "CORTEXT_DISABLE_QUERY_AWARE_LINKED_SOURCE_HYDRATION");
+
+  constexpr int kEmbeddingDim = 256;
+  std::vector<float> embedding (kEmbeddingDim, 0.0f);
+  embedding[0] = 1.0f;
+
+  constexpr long long kAssociationId = 200LL;
+  constexpr long long kLabelId = 300LL;
+  store->Execute (
+      "INSERT INTO embeddings (embedding_id, embedding, created_at) "
+      "VALUES (?, ?, ?), (?, ?, ?)",
+      { kAssociationId, embedding, 1000LL, kLabelId, embedding, 1000LL });
+  store->Execute (
+      "INSERT INTO memories (memory_id, embedding_id, source_id, kind, label, "
+      "start_ts, n_signals, modality, s_max, s_avg, strength, created_at) "
+      "VALUES (?, ?, 'associative_cue_test', 'ASSOCIATION', "
+      "'associative cue test', 1000, 1, 'text', 0.5, 0.5, 1.0, 1000), "
+      "(?, ?, 'dense label', 'LABEL', 'dense label', 1000, 1, 'text', "
+      "0.5, 0.5, 1.0, 1000)",
+      { kAssociationId, kAssociationId, kLabelId, kLabelId });
+
+  std::vector<long long> source_ids;
+  for (long long i = 0; i < 5; ++i)
+    {
+      const long long memory_id = 100LL + i;
+      const long long ts = 1000LL + i;
+      const std::string source_text = "linked source " + std::to_string (i);
+      const std::vector<unsigned char> payload (source_text.begin (),
+                                                source_text.end ());
+      auto blob_rows = store->Execute ("SELECT objstore_put(?1) AS id",
+                                       { payload });
+      REQUIRE (blob_rows.size () == 1);
+      const auto blob_id = BlobFromAny (blob_rows[0].at ("id"));
+      REQUIRE (!blob_id.empty ());
+
+      store->Execute (
+          "INSERT INTO embeddings (embedding_id, embedding, created_at) "
+          "VALUES (?, ?, ?)",
+          { memory_id, embedding, ts });
+      store->Execute (
+          "INSERT INTO memories (memory_id, embedding_id, source_id, kind, "
+          "blob_id, start_ts, end_ts, n_signals, modality, s_max, s_avg, "
+          "strength, created_at) "
+          "VALUES (?, ?, 'chat/user', 'LONG_TERM', ?, ?, ?, 1, 'text', "
+          "0.5, 0.5, 1.0, ?)",
+          { memory_id, memory_id, blob_id, ts, ts, ts });
+      store->Execute (
+          "INSERT INTO signals (memory_id, embedding_id, source_id, timestamp, "
+          "modality, mime, blob_id, serial_position, created_at) "
+          "VALUES (?, ?, 'chat/user', ?, 'text', 'text/plain', ?, 0, ?)",
+          { memory_id, memory_id, ts, blob_id, ts });
+      store->Execute (
+          "INSERT INTO associations(source_memory_id, target_memory_id, "
+          "edge_type, weight) VALUES (?, ?, 'derived_from', 1.0)",
+          { kAssociationId, memory_id });
+      source_ids.push_back (memory_id);
+    }
+  store->Execute (
+      "INSERT INTO associations(source_memory_id, target_memory_id, edge_type, "
+      "weight) VALUES (?, ?, 'has_label', 1.0)",
+      { kAssociationId, kLabelId });
+
+  cortext::Cortext::Config cfg;
+  auto ctx = cortext::Cortext::Create (cfg, db_path, RepoModelsDir ());
+  REQUIRE (ctx != nullptr);
+
+  const int expected_limit = std::max (
+      1, cortext::core::RetrievalGraphExpandedRagCompactItemLimit (
+             cfg.focus, cfg.stability));
+  REQUIRE (expected_limit < static_cast<int> (source_ids.size ()));
+
+  auto hydrated = ctx->DebugHydrateForTest ({ kLabelId }, {}, embedding);
+  REQUIRE (static_cast<int> (hydrated.retrieved_memory.size ())
+           == expected_limit);
+  for (const auto &memory : hydrated.retrieved_memory)
+    {
+      REQUIRE (std::find (source_ids.begin (), source_ids.end (), memory.id)
+               != source_ids.end ());
+      REQUIRE (!TextFromMemory (memory).empty ());
+    }
 }
 
 TEST_CASE ("Cortext hides unresolved internal retrieval nodes",

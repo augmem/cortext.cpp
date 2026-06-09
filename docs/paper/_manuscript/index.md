@@ -2795,12 +2795,15 @@ tracks memory writes, not signal writes):
     rate_consolidate = (1 / max(consolidation_interval, 1)) ×
                         (0.3 + 0.7T) × (1 − 0.5S)
 
-When `Consolidate()` is invoked and no candidates fall below the
-periphery cutoff, the forced path selects the lowest-scoring `w_ret(T)`
-memories; if clustering still yields no groups, a fallback mini-cluster
-is formed around the lowest-score item using its top cosine neighbors.
-This keeps replay/summarization active while remaining fully
-knob-derived.
+When `Consolidate()` is invoked and fewer than `min_cluster_size(F)`
+candidates fall below the periphery cutoff, the forced path broadens to
+the lowest-scoring `max(w_ret(T), min_cluster_size(F))` eligible source
+memories. Deep mode keeps the source-blob eligibility filter so
+summarization always has raw evidence; shallow mode can use
+embedding-only memories. If clustering still yields no groups, a
+fallback mini-cluster is formed around the lowest-score item using its
+top cosine neighbors. This keeps replay/summarization active while
+remaining fully knob-derived.
 
 ### Activity-Aware Scheduling
 
@@ -2887,27 +2890,28 @@ Shallow labeling uses knob‑derived limits and thresholds:
     max_labels_per_cluster = round(lerp(2, 6, S̃) × lerp(1.0, 0.7, F̃))
     label_attach_threshold = clamp(lerp(0.30, 0.60, F̃) × lerp(1.0, 1.1, T), 0.15, 0.95)
 
-For each cluster centroid, we compute cosine similarity to existing
-label embeddings, retain candidates above the threshold, and attach the
-top‑K labels by similarity.
+For each cluster centroid, we compute cosine similarity to the attached
+static label-bank vectors and to any durable dynamic labels already
+produced by consolidation, retain candidates above the threshold, and
+attach the top‑K labels by similarity.
 
-To avoid a cold start, we optionally seed a **label bank** at
-initialization: a static list of high‑frequency labels (objects, sounds,
-relations, names) **pre‑embedded** with the configured text encoder and
-stored as **LABEL** memories. Seeded labels receive a knob‑derived
-baseline salience:
+To avoid a cold start, Cortext ships a **label bank** as a static list
+of high-frequency labels (objects, sounds, relations, names)
+pre-embedded with the configured text encoder. The static bank is not
+copied into each user’s graph database and is not stored as user-owned
+`LABEL` memories. Instead, production `LoadLabelBank` attaches
+`data/label_bank/label_bank.sqlite` read-only and queries its sqlite-vec
+table directly. Candidate static labels receive a knob-derived baseline
+salience:
 
     salience_seed = clamp(lerp(0.35, 0.65, 0.5(F̃+S̃)) × lerp(1.0, 0.9, T), 0, 1)
 
 This provides shallow consolidation with immediate label candidates
 without invoking any generative model.
 
-Label bank embeddings are generated offline (dataset → embeddings) and
+Label bank embeddings are generated offline (dataset -\> embeddings) and
 committed as a compact SQLite vector seed at
-`data/label_bank/label_bank.sqlite`. Production `LoadLabelBank` attaches
-that database read-only and queries its `vec0` table directly, so the
-static bank is not copied into the user’s graph database and is not
-fully hydrated into process memory. The JSONL form
+`data/label_bank/label_bank.sqlite`. The JSONL form
 (`data/label_bank/labels.jsonl` plus `metadata.json`) remains the
 rebuild input and does not require runtime re‑encoding. We build the
 label list from **Hugging Face datasets** (FSD50K for sounds, ConceptNet
@@ -3214,9 +3218,10 @@ L2‑normalized for vector search.
     results_vec ← topK(vector_search(q, k=kNN_size(F)))
     seed_vec ← [r.id for r in results_vec]
     summary_k(F̃,S̃,T) = round(lerp(2, 6, S̃) × lerp(1.0, 0.75, F̃) × lerp(1.0, 0.85, T))
-    summary_seeds ← topK(summary_cache, k=summary_k)  # in‑memory label/association cache
+    static_label_seeds ← topK(attached_label_bank_vec, q, k=summary_k)
+    dynamic_label_seeds ← topK(durable_label_and_association_state, q, k=summary_k)
     seed_idx ← index_store.lookup(sparse_key(q))  # exact-key in current runtime
-    seed_nodes ← union(seed_vec, summary_seeds, seed_idx)
+    seed_nodes ← union(seed_vec, static_label_seeds, dynamic_label_seeds, seed_idx)
 
     if |seed_nodes| == 0 OR graph is empty:
         return results_vec  # deterministic fallback, skip expansion
@@ -3270,9 +3275,13 @@ related context that pure vector search might miss. Using the memory
 centroid maintains consistency between vector search and graph expansion
 results.
 
-`summary_cache` is an in‑memory list of LABEL/ASSOCIATION embeddings
-seeded from the label bank and updated on consolidation. This avoids a
-second sqlite‑vec pass while preserving embedding‑only retrieval.
+Static label seeds come from the attached read-only SQLite label bank
+through sqlite-vec search. Dynamic label, association, fact, and summary
+seeds come from the ordinary durable memory graph produced by
+consolidation. The runtime no longer copies the static label bank into
+user memory tables or hydrates the entire bank into an in-memory
+`summary_cache`; the retrieval path remains embedding-only while keeping
+the static bank as an attached searchable object.
 
 For affective gain in retrieval, we use a lighter bias (S\_{affect} =
 (S, -0.06)) to preserve mid‑range affect modulation.
@@ -3957,14 +3966,16 @@ structure, but the resulting labels/facts are still too sparse or too
 weakly aligned with live queries to behave like a RAG-quality standalone
 memory index.
 
-The current knob-derived production path was then smoke-tested on a
-smaller 20-message Julie replay after moving the remaining numeric
-STM/retrieval settings behind Focus/Sensitivity/Stability helpers
+A historical OpenAI-judged development smoke test then exercised the
+knob-derived production path on a smaller 20-message Julie replay after
+moving the remaining numeric STM/retrieval settings behind
+Focus/Sensitivity/Stability helpers
 (`build/stm_ltm_knob_derived_smoke_v46_openai.json`). This run used
 normal working memory, the production STM label graph, deep
 consolidation, relabel/prune, source-backed LTM retrieval,
 compact-policy bakeoff packets, and OpenAI `gpt-5.4-mini-2026-03-17`
-judging. The construction audit confirms the path is doing real
+judging. It is retained as development evidence, not release-gating
+evidence. The construction audit confirms the path is doing real
 STM-graph-to-LTM work: **4** relabel cycles consumed **32** STM items
 and **1,280** STM label edges, kept **16** labels, added **1** label,
 removed **25** labels, produced **17** refined durable labels, created
@@ -4083,12 +4094,13 @@ RAG-with-history used **639.6** mean prompt tokens with **557.8**
 active-history tokens (ratio **0.396**). Full history scored **4.20 /
 4.00 / 2.40** with **2 / 5** wins; Cortext LTM-only remained low at
 **1.20 / 0.20 / 0.60**. This keeps the architectural conclusion and
-strengthens the deployment claim: source-backed graph expansion is now
-production-reachable, F/S/T-derived, and token-efficient when evaluated
-under Cortext’s actual WM/STM/LTM chat policy. The next hardening point
-is not whether to carry normal chat history, but how to improve the
-relation/fact/temporal reranker so the compact packet wins more often
-instead of merely matching or approaching full-history quality.
+strengthens the development conclusion: source-backed graph expansion is
+now production-reachable, F/S/T-derived, and token-efficient when
+evaluated under Cortext’s actual WM/STM/LTM chat policy. The next
+hardening point is not whether to carry normal chat history, but how to
+improve the relation/fact/temporal reranker so the compact packet wins
+more often instead of merely matching or approaching full-history
+quality.
 
 We subsequently moved the retrieval-first source-anchor part of that
 benchmark into production retrieval: raw source/blob KNN seeds are
@@ -4153,15 +4165,16 @@ traditional chat+RAG’s **752.6** prompt tokens and **65.0** items.
 Quality improved to **4.4** relevance, **3.9** sufficiency, **0.3**
 noise, **4.8** temporal correctness, and **4.7** source grounding with
 **1** win. Traditional chat+RAG scored **4.6 / 4.2 / 0.6 / 5.0 / 4.9**
-with **2** wins. This is the stronger default tradeoff: roughly **30%**
-lower prompt cost than normal chat+RAG while retaining near-parity
-relevance, lower noise, and much better sufficiency than the first
-compact setting.
+with **2** wins. This is a stronger candidate tradeoff for that tuning
+pass, not a default-knob release result: roughly **30%** lower prompt
+cost than normal chat+RAG while retaining near-parity relevance, lower
+noise, and much better sufficiency than the first compact setting.
 
-We then swept the current native mixed-media chat path over the exposed
-Focus/Sensitivity/Stability controls at `{0.25, 0.50, 0.75}` for each
-knob (`build/julie_mixed_media_knob_matrix_20260526/summary.json`). Each
-of the **27** rows processed the same Julie replay slice through public
+We then ran a historical local-Nemotron tuning sweep over the native
+mixed-media chat path across the exposed Focus/Sensitivity/Stability
+controls at `{0.25, 0.50, 0.75}` for each knob
+(`build/julie_mixed_media_knob_matrix_20260526/summary.json`). Each of
+the **27** rows processed the same Julie replay slice through public
 Cortext calls only: **200** text messages, **16** media items, daily
 deep consolidation, seeded production label vectors, and no ASR
 transcript shortcut into Cortext. Judging used the local Nemotron omni
@@ -4245,8 +4258,11 @@ time was **1200.7 s**; consolidation accounted for **8.3 s**, so
 retrieval/ingest throughput excluding consolidation was **0.398
 events/s** over **474** events.
 
-The corrected harness now reuses the single durable public Cortext call
-for both chat ingest and probe measurement, and every probe records the
+The following 200- and 500-message runs are superseded for release
+quality and mixed-media temporal claims, but retained here because they
+verify the single-durable probe policy and rough token behavior. The
+corrected harness now reuses the single durable public Cortext call for
+both chat ingest and probe measurement, and every probe records the
 `single_durable_chat_turn_reused_for_probe_and_ingest` policy. The
 corrected 200-message mixed-media replay
 (`build/julie_mixed_media_native_200_singlepass/summary.json`,
@@ -4325,7 +4341,8 @@ through native `Retention::Ephemeral` ingress before recording selected
 probes, so Cortext’s working memory advances over source-time days like
 a live chat rather than skipping ungraded turns.
 
-The corrected clocked checkpoint artifact
+The following is a historical checkpoint-local Nemotron diagnostic, not
+release-gated evidence. The corrected clocked checkpoint artifact
 (`build/julie_checkpoint_eval_clocked_20260606/summary.json`,
 `build/julie_checkpoint_eval_clocked_20260606/nemotron_judge.json`)
 judged **8** future-turn probes locally with Nemotron. Cortext returned
@@ -4341,6 +4358,23 @@ full-corpus claim, but it verifies that source-time replay restore
 preserves bounded working memory and avoids the false empty-packet
 failure. The run also shows the current LTM gap clearly: the checkpoint
 win came from working memory, not retrieved LTM.
+
+A subsequent private local development run
+(`build/julie_release_early_gate_cross_speaker_v1/`) exercised the
+streamed Gemma 4 12B early-judge gate after adding chat-aware WM
+temporal expansion. The runner used the real local Julie input
+directory, daily deep consolidation, the default `F=S=T=0.50` knobs,
+blind packets, and local Ollama `gemma4:12b-it-qat`. The run was
+intentionally stopped after the first checkpoint to avoid spending more
+wall time once the fail-fast loop had been verified. At probe milestone
+**4**, the early judge passed the non-quality gates, reported **0.896**
+token savings versus traditional chat+RAG, and used **297.25** mean
+Cortext context tokens versus **2858.75** mean traditional chat+RAG
+tokens. Quality was not release-positive at that checkpoint
+(`cortext_quality_delta_vs_traditional_chat_rag = -1.5`), so this
+artifact is recorded only as development evidence that streamed local
+judging pauses replay and can prevent runaway benchmark work. It is not
+a release-quality claim.
 
 Profiling the superseded week run showed that the latency was not caused
 by embedding, hydration, STM shadow maintenance, the read-only label
@@ -4364,13 +4398,14 @@ not to remove constructive recall, but to make retrieval consult a
 bounded/current embedding surface rather than rebuilding latest
 reconstruction state inside every sqlite-vec seed query.
 
-The latest validation reran the current branch after the
-generic-fragment label filters and durable-source promotion changes. On
-the 30-message replay (`build/stm_ltm_label_quality_v18_openai.json`),
-consolidation again processed **27** STM items and **108** STM label
-edges across **4** cycles, preserved **25 / 25** hydratable source
-memories, and created **7** durable source-backed LTM nodes with **35**
-label-source backing pairs. On the wider 80-message replay
+Historical OpenAI-judged validation on the then-current branch reran
+after the generic-fragment label filters and durable-source promotion
+changes. On the 30-message replay
+(`build/stm_ltm_label_quality_v18_openai.json`), consolidation again
+processed **27** STM items and **108** STM label edges across **4**
+cycles, preserved **25 / 25** hydratable source memories, and created
+**7** durable source-backed LTM nodes with **35** label-source backing
+pairs. On the wider 80-message replay
 (`build/stm_ltm_label_quality_v18_80_openai.json`), the same path
 processed **63** STM items and **250** STM label edges across **9**
 cycles, preserved **70 / 70** source memories, and created **24**
@@ -12188,9 +12223,9 @@ prompt surfaces a chat application would see:
 
 The benchmark writes only aggregate counters, retrieval scores, and
 judge scores to JSON; no private message text is written to the summary
-artifact. A local `gemma4:e4b` judge scored relevance, sufficiency, and
-noise on a six-probe 80-message slice after a 20-message warmup. This is
-a diagnostic harness, not a product-quality claim.
+artifact. Local Gemma 4 judges scored relevance, sufficiency, and noise
+on small diagnostic slices after warmup. These early harness runs are
+diagnostics, not product-quality claims.
 
 The first corrected run preserved the retrieval rank returned by the
 graph retriever but left chat LTM injection uncapped. Rank preservation
@@ -12340,9 +12375,12 @@ over a rolling conversation where normal RAG carries active chat history
 until compaction while Cortext carries only bounded working memory plus
 STM/LTM graph memory. The summary artifact is privacy-safe: it records
 counters, scores, token estimates, media coverage, skipped-media
-reasons, and judge aggregates, but no message text.
+reasons, and judge aggregates, but no message text. This subsection is
+historical: it predates the current `cortext_julie_live_run` release
+protocol, default-knob command checks, probe-time Cortext packet
+freezing, and local-only Gemma 4 judge gate.
 
-Reproduction command:
+Historical command:
 
 ``` bash
 source env.sh && ./build/examples/benchmark/cortext_julie_conversation_memory_bakeoff \
@@ -12359,12 +12397,15 @@ source env.sh && ./build/examples/benchmark/cortext_julie_conversation_memory_ba
   --models models
 ```
 
-Current private Julie runs are restricted in code to a loopback local
-Nemotron judge endpoint (`CORTEXT_JUDGE_BASE_URL` or
-`LOCAL_JUDGE_BASE_URL`) and reject hosted or non-Nemotron judge models.
-The artifact described below was produced before that lock-down with a
-hosted OpenAI judge; it is retained as historical provenance, not as a
-current reproduction target for private data.
+Current private Julie runs are restricted to loopback-only local judge
+endpoints and reject hosted judge URLs before any private packet is
+sent. The current release protocol uses local Ollama Gemma 4 12B
+(`gemma4:12b-it-qat`) for the blind multimodal judge; the older local
+Nemotron/vllm-mlx path is retained only as an optional local
+disagreement check. The artifact described below was produced before
+that lock-down with a hosted OpenAI judge; it is retained as historical
+provenance, not as a current reproduction target or release claim for
+private data.
 
 The benchmark parsed **104,799** transcript messages and sampled
 **1,000** messages from contiguous early, middle, and recent windows
@@ -12448,7 +12489,7 @@ compacted **2,267** items, representing **27,671** original tokens into
 both the rolling-history prompt cost and vector retrieval cost, while
 Cortext does not include rolling chat history in the prompt.
 
-OpenAI judge results:
+Historical hosted-judge results:
 
 <table>
 <colgroup>
@@ -12531,16 +12572,13 @@ wins. It used only **4.6%** of the normal RAG prompt tokens, making it
 the cheapest strong packet, but it still trailed full Cortext on
 sufficiency and temporal correctness.
 
-**Verdict:** this run reverses the small-slice result for the full
-chat-shaped Cortext packet. Under rolling-history conditions, Cortext
-beat normal RAG on judged quality (12 wins vs 5) while using about
-**9.7%** of normal RAG’s prompt tokens. The graph-expanded
-Cortext-policy packet was even cheaper and had the best source-grounding
-score among the non-oracle arms, but it was less sufficient than full
-Cortext. Full-history remains the sufficiency and temporal ceiling, but
-it is noisier and more expensive than both Cortext packets. Media is
-represented in the sample, but media usefulness remains low across all
-non-oracle systems, so multimodal retrieval is not solved by this run.
+**Historical verdict:** this hosted-judge run reversed the small-slice
+result for the full chat-shaped Cortext packet, but it is not release
+evidence under the current private-data policy. Under those historical
+conditions, Cortext beat normal RAG on judged quality (12 wins vs 5)
+while using about **9.7%** of normal RAG’s prompt tokens. The result
+helped choose the next evaluation track, but all current private release
+claims must come from the local-only blind protocol below.
 
 We should **not** scale this exact configuration directly to all 104k
 messages yet. The result is strong enough to justify the rolling
@@ -12551,18 +12589,19 @@ consolidation throughput or use a staged run schedule that preserves
 daily consolidation semantics without replaying the entire corpus
 through the slow path in one pass.
 
-We then added a smaller native mixed-media replay to isolate production
-Cortext behavior without hosted judging or benchmark-only prompt
-packets. The fixture uses the same Julie export, **200** chronological
-text messages, **8** generated speech clips, **6** images, and **2**
-video-frame/image items. Text is processed through `ProcessTextAt`,
-audio through `ProcessAudio`, and images/video frames through
-`ProcessImage`; audio and image inputs are stored as source blobs and
-are not shortcut through ASR transcripts. The judge is the local
-`vllm-mlx` Nemotron server running
-`mlx-community/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-8bit` with
+We then added a smaller historical native mixed-media replay to isolate
+production Cortext behavior without hosted judging or benchmark-only
+prompt packets. The fixture uses the same Julie export, **200**
+chronological text messages, **8** generated speech clips, **6** images,
+and **2** video-frame/image items. Text is processed through
+`ProcessTextAt`, audio through `ProcessAudio`, and images/video frames
+through `ProcessImage`; audio and image inputs are stored as source
+blobs and are not shortcut through ASR transcripts. In this historical
+local-judge replay, the judge was the local `vllm-mlx` Nemotron server
+running `mlx-community/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-8bit` with
 `--mllm`. The judge artifacts record aggregate scores only and the exact
-private-text leak scan found **0** leaks in every row.
+private-text leak scan found **0** leaks in every row. This is not the
+current release judge path.
 
 As a local judge cross-check on the earlier **80-message** mixed-media
 slice, we also wired `tools/judge_julie_live_run.py` to a loopback-only
@@ -12575,24 +12614,184 @@ artifact decodes winners afterward. It also maps source-backed media
 memories through DB signal order and replay media-attempt order,
 avoiding the earlier timestamp guess that could attach the wrong future
 image for wall-clock-timestamped media memories. Hosted Ollama URLs are
-rejected before judging.
+rejected before judging. This 12B path is also the current release-grade
+local judge path for private mixed-media replay.
 
-The corrected one-pass blind Gemma 4 run
-(`build/julie_mixed_media_native_80/gemma4_12b_ollama_blind_judge.json`)
-judged **3** probes. Cortext won **3 / 3**, traditional chat+RAG won **0
-/ 3**, and full-history won **0 / 3**. Mean scores were Cortext **5.00**
-relevance, **5.00** sufficiency, **0.33** noise, **5.00** temporal
-correctness, **3.33** source grounding, and **3.33** modality grounding
-versus normal RAG **2.33**, **2.33**, **0.33**, **4.00**, **1.67**, and
-**0.00** respectively. The Cortext packet averaged **199.7** context
-tokens against **902.0** normal-RAG tokens, a **77.9%** prompt-token
-reduction. Probe-level bootstrap CIs are now recorded; for token savings
-the 95% CI was **67.3%–83.7%** on this tiny slice. Fairness checks
-passed for text-only RAG/full-history and no future-context violations.
-The artifact remains private because local judge reason strings can
-contain conversation-specific details. Release claims still require the
-same blinded protocol over a broader frozen slice with repeated local
-judge passes and human agreement checks.
+The current default-knob smoke rerun
+(`build/julie_release_default_80/gemma4_12b_ollama_blind_judge.json`)
+uses the same 80-message mixed-media input, records
+`focus = sensitivity = stability = 0.5`, enables daily deep
+consolidation, and judges **3** fixed probes. Cortext won **3 / 3**,
+traditional chat+RAG won **0 / 3**, and full-history won **0 / 3**. Mean
+scores were Cortext **5.00** relevance, **5.00** sufficiency, **0.67**
+noise, **5.00** temporal correctness, **1.67** source grounding, and
+**0.00** modality grounding versus normal RAG **2.33**, **2.67**,
+**0.67**, **4.00**, **1.67**, and **0.00** respectively. The Cortext
+packet averaged **264.3** context tokens against **902.0** normal-RAG
+tokens; the judge artifact reports a mean bootstrap token-savings
+estimate of **82.4%** with a 95% CI of **74.8%–89.4%**. Fairness checks
+passed for text-only RAG/full-history, no future-context violations, and
+no Cortext media transcript shortcut. This is a positive smoke result,
+not a release claim: it is too small and has only one local judge
+repetition.
+
+To make that distinction explicit, we added and hardened
+`tools/julie_release_protocol_report.py`, which builds a public-safe
+release protocol bundle from a private live-run summary and a private
+judge artifact. The bundle excludes message text, source-blob filenames,
+and judge reason strings, but records SHA-256 hashes of the private
+artifacts, the exact benchmark/judge commands, git commit, dirty flag,
+and dirty-worktree fingerprints, a private source-input fingerprint, a
+frozen probe manifest, aggregate quality/tokens/latency, confidence
+intervals, and a release-gate checklist. The gate fails if the report
+cannot record a real 40-character git commit hash plus an explicit dirty
+flag, status hash, staged/unstaged/submodule diff hashes, untracked-path
+hash, and combined worktree manifest hash. The release-freeze file also
+pins the benchmark executable hash, git commit, and worktree manifest
+hash so the final report cannot silently run under a different binary or
+dirty tree than the initial frozen report. The source-input fingerprint
+records only local file counts, extension counts, byte totals, content
+hashes, and a manifest hash; it does not copy private message text or
+media bytes into the report, and the gate rejects public fingerprints
+that expose raw per-file manifest entries. It also verifies source-ID
+policy directly from the SQLite `signals` table: ingress signals must
+use the shared speaker source IDs for text and media, media
+filenames/extensions must not be encoded as source IDs, and unexpected
+source IDs are reported only as hashes. It also cross-checks the
+recorded benchmark command against the summary artifact for input path,
+database/output path, slice size, media limit, probe schedule, RAG
+settings, knobs, and consolidation mode, records a behavior-relevant
+runtime environment snapshot for the main benchmark process, requires
+that snapshot to identify the sampled process, and cross-checks the
+recorded judge command against the judge artifact for
+summary/database/output paths, provider, model, loopback endpoint,
+blinding, repetitions, seed, bootstrap samples, context limit, and media
+attachment cap. It also reports aggregate packet-label randomization
+evidence and requires more than one A/B/C mapping across judged rows,
+then reports repeated-judge self-agreement and requires at least 90% of
+probes to have a majority winner across the local Gemma 4 repetitions
+with mean majority support of at least two-thirds. It now requires an
+explicit release-freeze file that pins the private source-input manifest
+hash, the frozen probe schedule hash, the benchmark command hash, and
+the benchmark executable hash; the final report is run in strict mode
+and exits non-zero unless the release gate passes. The gate also
+requires the full-history upper-bound packet to record non-empty
+prior-history items and token counts for every probe, so that the upper
+bound is a real comparator rather than a nominal judge arm. It also
+requires default knobs (`0.5 / 0.5 / 0.5`), daily deep consolidation,
+mixed media, a fixed slice with no skipped transcript messages, at least
+**30** fixed probes, probe-time frozen Cortext packet snapshots, **3–5**
+blind local judge repetitions, confidence intervals for
+win/quality/token metrics, same-run human labels with agreement against
+local frozen targets, the named architecture ablations, and production
+cost fields including p50/p95 retrieval latency, token counts, disk
+growth, consolidation wall time, peak RSS, and throughput both excluding
+and including idle consolidation time. Each required confidence interval
+must be computed over at least the release probe floor, so a partial or
+smoke-sized CI cannot satisfy the gate. The disk-growth gate requires
+positive database bytes and positive bytes per processed event, not
+merely a present JSON field. The latency gate requires explicit
+normal-RAG retrieval p50/p95 values and positive Cortext probe p50/p95
+values, so the cost story cannot rely only on aggregate wall time. The
+human-label gate also verifies that the scored human-label artifact
+points to a frozen target file whose recorded hash matches the score
+report, so human agreement cannot be computed against a different target
+freeze. The ablation judges are subject to the same release-grade
+local-only, blinded, packet-randomized, repeated-judge consistency
+checks as the main judge artifact, each ablation must share the main
+source-input manifest hash, and each ablation’s recorded benchmark
+executable, benchmark command, and judge command must match its
+summary/judge artifacts before it can support an algorithm-attribution
+claim.
+
+The release runner now also supports streamed early warning during the
+expensive private replay. `cortext_julie_live_run` writes a compact
+`<summary>.probes.jsonl` sidecar immediately after each fixed probe
+packet is constructed. `tools/watch_julie_probe_stream_judge.py` can
+materialize partial private summaries from that sidecar, run the same
+loopback-only Gemma 4 12B judge on milestone probe counts, and fail fast
+on configurable floors. The private runner uses a compact 32k judge
+context by default and records prompt-fit checks in every judge
+artifact; larger windows are unnecessary unless a frozen packet fails
+that fairness check. Streamed checkpoints use one local judge repetition
+and a shorter 180-second per-call timeout by default so they act as
+fail-fast screens; if such a screen would terminate replay, the watcher
+confirms only the newly added failing delta segment with three local
+repetitions before deciding whether to stop, reusing accepted prior
+segments in the cumulative checkpoint. Confirmation can terminate early
+when a strict optimistic bound proves that even perfect remaining rows
+cannot recover the configured quality floor. The final release judge
+remains the statistically repeated claim artifact and still requires at
+least three blind repetitions. Early milestones judge only newly reached
+probes and then rebuild a cumulative checkpoint from cached judge rows,
+so the default `1` through `12` release stream does not repeatedly
+rejudge the same private packets; after those fixed milestones it
+continues screening every additional probe until the final summary is
+written. The standalone watcher default covers every probe through 32
+when used without the release wrapper. The default private-release
+watcher enforces Cortext context presence, token savings, and fairness
+at every checkpoint. Quality and win-rate are still scored at early
+checkpoints, but the hard quality gates are deferred until the
+traditional chat+RAG baseline has actually entered the intended long-run
+regime: prior chat has compacted, vector RAG has added text outside the
+raw rolling history, or the raw rolling-history packet has reached the
+full active-history budget. This prevents an early pre-compaction
+raw-history packet from terminating replay while still surfacing the
+quality trend immediately. `tools/run_julie_release_protocol.py` wraps
+the main release replay so that a non-streaming benchmark binary is
+rejected when early judging is enabled, the early watcher runs beside
+the benchmark, and a failed early gate terminates the replay before the
+final summary. The watcher also writes `early_judge_latest.json`, and
+the top-level `benchmark_status.json` embeds that latest checkpoint when
+present, so long private runs can be monitored from one aggregate-only
+status file instead of waiting for final judging or parsing logs. The
+release report also loads `benchmark_status.json` and the early-judge
+manifest as first-class gate evidence: final protocol reports must show
+a local Gemma early judge, blind checkpoint packets, configured
+hard/trend quality milestones, three-repetition confirmation for failing
+checkpoints, probe-stream progress, and a passing latest checkpoint
+before they can be marked release-ready. If confirmation stopped because
+the optimistic recovery bound was already impossible, the report carries
+that `early_stop` reason into the final gate diagnostic instead of
+hiding it in private row artifacts. This keeps early screening auditable
+instead of being only a convenience wrapper around the long replay. For
+local-only judge runs, the watcher may also pause the benchmark process
+while a checkpoint judge call is active and resume it afterward,
+preventing replay progress from racing a still-undecided early gate on
+the same machine. When no explicit media-smoke artifact is supplied, the
+runner also generates the non-private local Ollama image/audio smoke
+before preflight and replay, and regenerates the default artifact when
+it is stale for a different judge model or failed to prove image/audio
+support. These early artifacts are explicitly marked non-release
+diagnostics; they exist to avoid wasting wall time on a run whose frozen
+packets are already invalid, empty, or unfair. The release claim still
+comes only from the complete frozen run, repeated blind local judging,
+human-label agreement, ablations, bootstrap intervals, and the strict
+public-safe protocol report.
+
+The ablation runner uses the same fail-fast shape. Each ablation
+benchmark is launched under a supervised process, its early watcher
+receives the benchmark PID, and a non-zero early gate terminates that
+ablation immediately instead of waiting for the whole replay before
+discovering that the run was already invalid. The watcher still pauses
+replay around local judge calls, so the screening checkpoint cannot race
+far ahead of the benchmark on the same machine. In strict final-release
+mode, `auto` early judging is strict whenever the benchmark executable
+supports probe streams; a missing or failing ablation early judge is a
+protocol failure rather than a warning.
+
+The fresh default 80-message report
+(`build/julie_release_default_80/release_protocol_report.json`) is
+intentionally **not ready**: it passes **17** checks, fails the
+probe-count and judge-repetition floors, and leaves human labels,
+architecture ablations, and peak-RSS recording pending. This is the
+intended behavior for a release gate: the 80-message blind result is
+useful evidence, not a production claim.
+
+The following 200-message table is retained as historical local-judge
+evidence, not as a release-gated result. Those artifacts used the older
+Nemotron judge path and do not record the full current protocol metadata
+required by the release report.
 
 <table style="width:100%;">
 <colgroup>
@@ -12982,25 +13181,26 @@ Cortext ranged from **0.0** to **0.25** on the four probes. The local
 Nemotron judge therefore preferred Cortext for source/modality/temporal
 grounding even when simple lexical overlap favored RAG/full history.
 
-On **May 26, 2026**, we ran a small F/S/T knob sweep over the same
-200-message mixed-media native path to measure the compact graph
-retrieval tradeoff directly
+On **May 26, 2026**, we ran a small pre-release F/S/T knob sweep over
+the same 200-message mixed-media native path to measure the compact
+graph retrieval tradeoff directly
 (`build/julie_mixed_media_knob_sweep_20260526/summary.json`). The sweep
 used daily deep consolidation, the same 8 audio clips, 6 images, and 2
 video-frame items, and local `vllm-mlx` Nemotron judging with a 4k
 rolling-history budget for the traditional chat+RAG comparator. Raising
-Focus and Stability from the default-ish `F=0.35, S=0.65, T=0.60` to
-`F=0.75, S=0.65, T=0.75` produced the best row: Cortext still won **4 /
-4** probes, relevance/sufficiency improved from **3.00 / 2.75** to
-**4.00 / 3.25**, noise fell from **1.75** to **0.50**, and estimated
-Cortext packet tokens fell from **299.0** to **255.5** with mean context
-items falling from **21.2** to **18.0**. The broad low-Focus row
-(`F=0.15, S=0.65, T=0.35`) used the largest packet (**330.0** estimated
-tokens, **23.2** items), increased associations (**3,249**), and did not
-beat the high-Focus/high-Stability score. This confirms that the compact
-retrieval policy is behaving as intended on this slice: higher
-Focus/Stability narrows the final prompt packet, lowers latency, and
-improves judged grounding instead of merely dropping useful context.
+Focus and Stability from the pre-release tuning baseline
+`F=0.35, S=0.65, T=0.60` to `F=0.75, S=0.65, T=0.75` produced the best
+row: Cortext still won **4 / 4** probes, relevance/sufficiency improved
+from **3.00 / 2.75** to **4.00 / 3.25**, noise fell from **1.75** to
+**0.50**, and estimated Cortext packet tokens fell from **299.0** to
+**255.5** with mean context items falling from **21.2** to **18.0**. The
+broad low-Focus row (`F=0.15, S=0.65, T=0.35`) used the largest packet
+(**330.0** estimated tokens, **23.2** items), increased associations
+(**3,249**), and did not beat the high-Focus/high-Stability score. This
+confirms that the compact retrieval policy is behaving as intended on
+this slice: higher Focus/Stability narrows the final prompt packet,
+lowers latency, and improves judged grounding instead of merely dropping
+useful context.
 
 ### Compact WM/STM/LTM Prompt Packet Bakeoff
 
@@ -13023,9 +13223,9 @@ compares replacement prompt surfaces over the same processed run:
     top-k notes.
 
 The judged run uses 180 processed messages, a 20-message warmup, probe
-stride 10, deep consolidation every 20 messages, `gemma4:e4b` as the
-local judge, and 16 judged probes. The JSON artifact contains only
-aggregate counters and scores; no private message text is recorded.
+stride 10, deep consolidation every 20 messages, a local Gemma 4 judge,
+and 16 judged probes. The JSON artifact contains only aggregate counters
+and scores; no private message text is recorded.
 
 <table>
 <colgroup>
@@ -14691,7 +14891,8 @@ relabel/pruned LTM both averaged **0.500** sufficiency and **1.000**
 relevance, while normal RAG averaged **3.500** sufficiency and **4.500**
 relevance.
 
-Finally, we ran a retrieval-weight sensitivity check,
+In the historical v12 OpenAI development artifact, we ran a
+retrieval-weight sensitivity check,
 `build/stm_ltm_durable_weight035_v12_openai.json`, with a historical
 fixed durable-source weight of **0.35** instead of the earlier **0.12**
 default. This moved a source-backed durable candidate to the top rank on
@@ -14700,17 +14901,18 @@ ranking. It still did not make the relabeled/pruned LTM competitive:
 graph-only relabel/pruned LTM remained at **0.500** sufficiency and
 **1.000** relevance, compact Cortext LTM fell to **0.500** sufficiency
 and **1.000** relevance, and compact normal RAG remained at **4.500**
-sufficiency and **5.000** relevance. The failure is therefore not just a
-too-small durable-source boost. The durable nodes preserve sources, but
-the relabel/prune output is too sparse and off-target for these probes:
+sufficiency and **5.000** relevance. The development claim should
+therefore remain conservative: the failure is not just a too-small
+durable-source boost. The durable nodes preserve sources, but the
+relabel/prune output is too sparse and off-target for these probes:
 **24** labels were pruned, only **4** refined durable labels survived,
 **28 / 33** label candidates were rejected as non-durable, and **2 / 2**
-relation candidates were skipped for non-durable endpoints. The current
-claim should remain conservative: Cortext has an STM-graph-to-LTM
-consolidation path that creates source-grounded durable structure, but
-this path is not yet a RAG-quality human-like long-term memory until the
-relabeler/pruner produces more query-discriminative labels and relation
-endpoints.
+relation candidates were skipped for non-durable endpoints. The
+development claim should remain conservative: Cortext has an
+STM-graph-to-LTM consolidation path that creates source-grounded durable
+structure, but this path is not yet a RAG-quality human-like long-term
+memory until the relabeler/pruner produces more query-discriminative
+labels and relation endpoints.
 
 We then hardened the relabel/prune admission path in two
 source-preserving ways. First, relation endpoint repair now runs before
@@ -15299,8 +15501,10 @@ development signal.
 After the private-evaluation lock-down, hosted OpenAI judging is no
 longer an allowed path for Julie data. This comparison remains useful as
 historical evidence that judge choice can change quality conclusions,
-but current reproduction and release-gating runs must use the local
-Nemotron judge.
+but current reproduction and release-gating runs must use the
+loopback-only Ollama Gemma 4 12B judge (`gemma4:12b-it-qat`). The older
+local Nemotron path is retained only as a historical development result
+or optional local disagreement check, not as the primary release judge.
 
 We then added a probe-level bootstrap over the same 64 chronological
 probes to separate quality evidence from token-efficiency evidence.
@@ -39586,9 +39790,11 @@ source env.sh && CORTEXT_STM_LTM_AUDIT=1 \
   --deep --compact-policy-bakeoff --stm-graph-bakeoff
 ```
 
-The artifact name below retains the original historical suffix; current
-private-data reproductions must use the local Nemotron judge model shown
-in the command.
+The artifact name and command below retain their original historical
+suffixes. Current private-data release reproductions instead use the
+loopback-only Ollama Gemma 4 12B judge (`gemma4:12b-it-qat`); the local
+Nemotron command is retained only as historical provenance or an
+optional disagreement-check path.
 
 Artifacts:
 
@@ -40342,6 +40548,397 @@ already favored by the rest of the cortext design (constructive recall,
 extractor/summarizer over payload, no label state inside the
 accumulator).
 
+### Julie Release Early-Judge Smoke After WM Temporal Anchors
+
+After production retrieval was updated so active WM slots can seed
+source-local temporal expansion into durable LTM neighbors, we ran a
+local-only smoke of the release wrapper. This is **not release
+evidence** and is not used for quality claims; it only verifies that the
+frozen-probe stream, local Gemma judge, blind packet path, fairness
+checks, and summary gate still compose after the retrieval change.
+
+Command:
+
+``` bash
+python3 tools/run_julie_release_protocol.py \
+  --out-dir build/julie_release_smoke_wm_anchor_v3 \
+  --max-messages 80 \
+  --media-limit 2 \
+  --warmup-events 20 \
+  --probe-stride 20 \
+  --early-judge-milestones 1 \
+  --early-judge-periodic-stride 0 \
+  --early-quality-gate-min-milestone 999 \
+  --early-min-cortext-token-savings-vs-rag -1.0 \
+  --early-judge-timeout-s 240 \
+  --early-judge-context-window-tokens 32768 \
+  --early-judge-packet-item-limit 128 \
+  --min-probe-rows-after-benchmark 1 \
+  --skip-final-judge \
+  --skip-initial-report \
+  --force
+```
+
+Artifacts:
+
+-   `build/julie_release_smoke_wm_anchor_v3/summary.json`
+-   `build/julie_release_smoke_wm_anchor_v3/summary_gate.json`
+-   `build/julie_release_smoke_wm_anchor_v3/early_judge/early_judge_manifest.json`
+-   `build/julie_release_smoke_wm_anchor_v3/early_judge/early_probe_001_judge.json`
+
+Aggregate smoke result:
+
+<table>
+<thead>
+<tr>
+<th>check</th>
+<th style="text-align: right;">result</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>wrapper exit</td>
+<td style="text-align: right;">0</td>
+</tr>
+<tr>
+<td>benchmark exit</td>
+<td style="text-align: right;">0</td>
+</tr>
+<tr>
+<td>early judge exit</td>
+<td style="text-align: right;">0</td>
+</tr>
+<tr>
+<td>elapsed wall time</td>
+<td style="text-align: right;">45.034 s</td>
+</tr>
+<tr>
+<td>summary probes</td>
+<td style="text-align: right;">4</td>
+</tr>
+<tr>
+<td>early judged probes</td>
+<td style="text-align: right;">1</td>
+</tr>
+<tr>
+<td>default knobs</td>
+<td style="text-align: right;">pass (<code>0.5, 0.5, 0.5</code>)</td>
+</tr>
+<tr>
+<td>daily + deep consolidation</td>
+<td style="text-align: right;">pass</td>
+</tr>
+<tr>
+<td>blind packets</td>
+<td style="text-align: right;">pass</td>
+</tr>
+<tr>
+<td>RAG baseline modality</td>
+<td style="text-align: right;">text-only</td>
+</tr>
+<tr>
+<td>no future/current-turn leakage</td>
+<td style="text-align: right;">pass</td>
+</tr>
+<tr>
+<td>attached audio/image judge support</td>
+<td style="text-align: right;">pass</td>
+</tr>
+</tbody>
+</table>
+
+The single early judged probe is intentionally too small for performance
+or quality interpretation. It reported `217` Cortext context tokens
+versus `204` traditional chat+RAG tokens and lower Cortext judged
+quality on that one probe. Those values are useful only as a guardrail
+against accidental prompt/fairness changes in the smoke harness; the
+release claim still requires the frozen multi-window protocol, repeated
+local judging, human labels, bootstrap confidence intervals, and
+ablations.
+
+### Julie Release Early-Judge Fail-Fast Harness Smoke
+
+Because full Julie mixed-media runs are expensive, the release wrapper
+was extended to stream frozen probe rows and run the same local Gemma 4
+judge before the final summary exists. The watcher materializes partial
+summaries, sends `SIGSTOP` to the benchmark while the local judge runs,
+aggregates delta judge rows cumulatively, and exits non-zero when token,
+context, fairness, hard quality, or rolling quality-trend gates fail.
+These early checkpoints are screening only; they are explicitly marked
+`fail_fast_screen_only_not_release_claim`.
+
+Two local-only smoke runs verified both sides of that behavior:
+
+<table>
+<colgroup>
+<col style="width: 30%" />
+<col style="width: 30%" />
+<col style="width: 40%" />
+</colgroup>
+<thead>
+<tr>
+<th>artifact</th>
+<th>purpose</th>
+<th style="text-align: right;">result</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>build/julie_release_early_smoke_v1/</code></td>
+<td>one-probe failure path</td>
+<td style="text-align: right;">early judge exited <code>2</code>; runner
+terminated benchmark</td>
+</tr>
+<tr>
+<td><code>build/julie_release_early_smoke_v2/</code></td>
+<td>four-probe pass path</td>
+<td style="text-align: right;">wrapper exit <code>0</code>; benchmark
+exit <code>0</code>; early judge exit <code>0</code></td>
+</tr>
+</tbody>
+</table>
+
+The one-probe run failed because there was no meaningful context yet
+(`0` Cortext context tokens and `0` traditional chat+RAG tokens), which
+is the expected behavior for an over-eager checkpoint. The four-probe
+run judged 4 probes while the benchmark was paused, then resumed and
+completed with 5 streamed probes total. It passed the summary gate with
+default knobs (`0.5, 0.5, 0.5`), daily + deep consolidation, frozen
+Cortext probe-time packets, text-only traditional RAG, contentful
+compaction policy, and no future/current-turn leakage. The early
+screening metrics at probe 4 were `172.0` mean Cortext context tokens,
+`444.75` mean traditional chat+RAG tokens, and `0.613` token savings.
+Quality was deliberately deferred in this smoke. Because the one-probe
+checkpoint can correctly fail before either path has meaningful context,
+the current release default judges every emitted probe while making the
+quality gates phase-aware. The release wrapper judges probes `1` through
+`12` and then every additional probe, with one local Gemma repetition
+and a 180-second per-call timeout per streamed screening row by default.
+A failing screening checkpoint is confirmed with three local repetitions
+only for the newly added failing delta segment; prior accepted segments
+are reused in the cumulative aggregate instead of being rejudged.
+Confirmation can also stop early once a strict optimistic bound proves
+that even perfect remaining rows cannot recover the configured
+Cortext-versus-RAG quality floor; for delta confirmations, that bound
+includes the accepted prior segments. Token, packet, privacy, and
+fairness gates apply at every checkpoint. Quality and win-rate gates are
+recorded but deferred until the traditional chat+RAG baseline has
+compacted prior chat, added vector RAG outside the raw rolling history,
+or reached the full active history token budget. Thus pre-compaction
+raw-history checkpoints can expose quality trends without prematurely
+killing the replay, while genuinely bad runs still stop well before
+final judging once the baseline is in the intended long-run regime.
+
+A later harness smoke
+(`build/julie_release_smoke_early_fail_hydration_cap_v1/`) tightened the
+default early-watcher polling interval from 30 seconds to 2 seconds and
+then forced the hard quality gate to activate at 4 probes. The watcher
+observed the first probe after roughly 10 seconds, reached the two-probe
+checkpoint at roughly 12 seconds, stopped the benchmark while judging,
+resumed for the next checkpoint, and then terminated replay at probe 4
+after the quality floor failed. The run had written only 5 streamed
+probe rows when killed, and no final summary was created. At the failing
+checkpoint, all fairness checks passed, token savings versus traditional
+chat+RAG were **0.388**, mean Cortext context was **180.0** tokens
+versus **294.25** traditional chat+RAG tokens, and the failed gate was
+`cortext_quality_delta_vs_traditional_chat_rag = -3.0` against the
+`-0.5` floor. This smoke is intentionally not release evidence; it
+verifies that a bad checkpoint can stop the expensive replay path before
+final judging.
+
+A subsequent phase-aware private run
+(`build/julie_release_phase_gate_fast_1200_20260608/`) exercised the
+cheaper one-repetition checkpoint path on the 1200-message mixed-media
+slice. Milestones 2, 4, and 8 passed token, context, privacy, packet,
+and fairness gates while quality remained deferred because traditional
+chat+RAG still had raw pre-compaction history. At milestone 12, the RAG
+packet reached **0.742** of the active history budget under the
+then-current 70% phase threshold. The screening checkpoint stopped
+replay after 12 probes: Cortext saved **94.5%** prompt tokens versus
+traditional chat+RAG and passed all fairness checks, but its mean
+quality composite trailed traditional chat+RAG by **2.67** points
+against the `-0.5` floor. Cortext won **4 / 12** packets versus **1 /
+12** for traditional chat+RAG, with **5** ties/unclear and **2**
+full-history upper-bound wins; the failure was the
+relevance/sufficiency/noise composite, not packet blinding or leakage.
+This aggregate failure is not a release result because the baseline was
+still in the raw pre-compaction chat-history regime. It hardened the
+protocol in two ways: future fail-fast terminations must be confirmed
+with three local judge repetitions before killing replay, and the
+default phase gate no longer treats a 70% raw-history budget ratio as
+sufficient for hard quality termination.
+
+The release wrapper also sanitizes subprocess environments before
+launching the main replay, streamed judge watcher, final local judge,
+report generator, and ablation pipeline. Hosted-provider-looking
+variables such as `OPENAI_*`, `ANTHROPIC_*`, `GEMINI_*`, `GOOGLE_*`,
+`VERTEX_*`, `AZURE_OPENAI_*`, `TOGETHER_*`, `MISTRAL_*`, `COHERE_*`, and
+`GROQ_*` are removed from child environments, while local Ollama
+endpoint metadata is preserved. The benchmark environment snapshot is
+written after the benchmark process starts and records the benchmark
+PID, process name, sanitized `CORTEXT_*` behavior environment, sanitized
+hosted-provider environment, and the names of stripped hosted-provider
+variables. The release report requires that the benchmark snapshot
+identify the sampled process, have an empty Cortext behavior override
+set, and have an empty hosted-provider environment. Ablation environment
+snapshots are checked separately for the same hosted-provider stripping
+policy and for exact match between planned and applied ablation
+overrides. This makes local-only metadata handling enforceable even when
+a developer shell has unrelated hosted API keys loaded.
+
+Human-label artifacts are also release-gated now. The Gradio sample
+records the source summary hash, an explicit blinding policy, randomized
+candidate order, and hidden provenance fields (`candidate_sources` and
+`heuristic_score`) so the annotator grades candidate memories rather
+than system identity. The release report requires the human sample to
+hash-match the same frozen summary, use only probe events from the
+frozen summary, include at least the release human-probe floor, include
+both active-packet and media candidates, keep all candidate events
+strictly prior to their query event, and pass the human-vs-local-judge
+agreement floor. This keeps the human check as an independent
+target-quality sanity check while preventing it from becoming another
+system-labeled benchmark view.
+
+The finalization helper now owns the full-probe frozen target manifest
+as well: if `--target-freeze` is not supplied, it creates
+`judge_frozen_targets.json` from the frozen summary with local Ollama
+Gemma 4 12B, loopback-only endpoint validation, `--keep-unanswerable`,
+and the same prior-message candidate pool used by the retrieval-eval
+tooling. The completed human sample is then scored against that full
+target freeze, while the final release report receives both the full
+freeze and the human sample/eval artifacts. Before creating the target
+freeze, the finalizer also regenerates the non-private image/audio judge
+media smoke when the artifact is missing, stale for the final judge
+model, or failed either modality. All subprocesses launched by the
+finalizer strip hosted-provider environment variables before running.
+The main release runner now writes that handoff explicitly: after the
+frozen summary passes its gate, it builds `human_label_sample.json`,
+writes `human_label_launch_command.txt` for the Gradio labeling UI, and
+writes `finalize_release_command.txt` for the final strict report. When
+human artifacts are not supplied before replay, the ablation pipeline
+produces an interim non-strict ablation report and the strict
+`--require-pass` check is deferred to the finalizer, which waits for the
+completed human sample and all ablation artifacts before emitting
+`release_protocol_report_final.json`.
+
+A short local handoff smoke
+(`build/julie_release_smoke_handoff_sample_v1/`) verified this
+post-summary path without making a release claim. The smoke used 80
+messages, 2 media items, default knobs, daily deep consolidation, one
+early local Gemma checkpoint, and skipped the final judge/report. The
+summary gate passed with 4 frozen probe rows, text-only traditional RAG,
+prior-only RAG rows, contentful compaction policy, and probe-time frozen
+Cortext packets. The runner then produced `human_label_sample.json` with
+4 tasks and 46 candidate memories; the sample included both Cortext
+active-packet candidates and image/media candidates, kept future turns
+hidden, and recorded randomized blinded candidate order. The same run
+wrote `human_label_launch_command.txt` and
+`finalize_release_command.txt`, confirming that a real release replay
+can hand off from automated replay to human annotation and final strict
+reporting without requiring human-label artifacts before replay starts.
+
+A subsequent **Jun 8, 2026** hardening pass added two release-protocol
+guards. First, strict release preflight now fails before replay if
+`--require-final-report-pass` is requested while the final judge packet
+is cropped; the final release judge uses `--judge-packet-item-limit -1`
+by default, while the early judge keeps its smaller packet cap for fast
+screening. Second, the local judge media smoke was made reproducible
+with generated, non-private fixtures. The current artifact,
+`build/julie_release_media_smoke_v4/judge_media_smoke_ollama.json`, uses
+local Ollama Gemma 4 12B (`gemma4:12b-it-qat`) against a generated
+red-square image and a generated `"blue apple seven"` WAV. It reports
+`image_seen=true` and `audio_seen=true` with transcript
+`"Blue Apple 7"`, confirming that the same local judge endpoint can
+inspect both image and audio attachments before a private release run
+starts. The release wrapper now generates the same non-private smoke
+automatically for the default path when it is missing, stale for a
+different judge model, or failed on either modality. A strict preflight
+with the generated smoke artifact and uncropped final judge packets
+passed the media and packet gates, then stopped only on the
+intentionally missing release artifacts: human labels, human-label
+evaluation, frozen target labels, and the ablation request.
+
+A historical 24-probe hard gate was selected after replaying the
+existing
+`build/julie_release_default_vector_v24/early_judge/early_judge_manifest.json`
+through `tools/audit_julie_early_gate_trace.py`. That long run
+originally continued until the 32-probe hard gate, where it failed with
+`cortext_quality_delta_vs_traditional_chat_rag=-0.71875`. Under the new
+24-probe default it would have failed at probe 24 instead, where the
+cumulative quality delta was already `-0.583333333333333` against the
+`-0.5` floor. The offline audit artifact is
+`build/julie_release_default_vector_v24/early_gate_trace_audit_quality24.json`.
+This fixed-probe policy has since been superseded by the phase-aware
+rolling-history-pressure gate described above; the v24 audit remains
+useful as a historical example that early judging can terminate a bad
+run before final judging.
+
+We also added a private-safe loss audit generated by
+`tools/audit_julie_judge_losses.py`; future early checkpoints write
+`early_probe_XXX_loss_audit.json` beside the cumulative judge artifact.
+The audit records scores, counts, token totals, media-attachment counts,
+and coarse loss tags, but no packet text or judge reason text. When the
+checkpoint summary contains production `cortext_retrieval_debug`, the
+same audit also joins judged rows by probe event index and records
+aggregate retrieval-signal provenance (candidate counts plus
+label-graph, durable-source, fact, procedural, and predictive signal
+counts/means) for all rows, Cortext wins, Cortext losses, ties, and all
+Cortext non-win rows.
+
+A current provenance-enabled diagnostic run
+(`build/julie_release_debug_current_28_v1/`) stopped at the first hard
+early quality gate, as intended. The run used default knobs
+(`F=S=T=0.5`), daily deep consolidation, the fixed
+rolling-history-plus-text-RAG baseline, local Gemma 4 12B judging, blind
+packet order, and the same streamed probe schedule. At checkpoint 16,
+Cortext won **8 / 16** probes and saved **94.9%** prompt tokens versus
+traditional chat+RAG, but failed the hard quality floor:
+`cortext_quality_delta_vs_traditional_chat_rag=-1.0` against the `-0.5`
+early floor. The watcher terminated the replay
+(`benchmark_exit_code=-15`, `early_judge_exit_code=2`) instead of
+continuing to the full slice. Fairness checks all passed. The
+private-safe loss audit had **100%** retrieval-debug coverage on the
+judged rows: losses were text-query rows tagged with relevance,
+sufficiency, noise, and temporal gaps. The selected candidate sets were
+present (mean **11** ranked candidates per judged row), but fact and
+procedural contributions were absent (**0** fact matches, **0** selected
+linked facts, and **0** procedural-score candidates across all rows).
+The fact route did execute: each row had two fact-text candidates, but
+every candidate was rejected as low-score, and non-win rows had mean
+best fact score **0.0**. Packet-composition auditing also ruled out
+simple future leakage or media flooding: judged Cortext packets averaged
+**16.0** memories, almost all text, with **0** future memories; loss
+rows averaged **15.75** judged memories and **0.5** media items. Cortext
+wins showed stronger mean label-graph signal than non-wins, while
+durable-source signal alone did not separate wins from failures. This
+preserves the earlier diagnosis: token savings and fairness are strong,
+but release readiness still depends on reducing text-packet noise and
+improving graph/fact-backed specificity before the final claim can be
+made.
+
+On the same v24 trace, the 24-probe loss audit
+(`early_probe_024_loss_audit.json`) showed Cortext winning 11 probes,
+traditional chat+RAG winning 5, full-history winning 5, and 3 ties, with
+**94.7%** mean token savings. The failing quality delta came from the
+composite `relevance + sufficiency - noise`: Cortext had slightly higher
+mean relevance than text RAG (**3.125** vs **2.917**) but a larger mean
+noise penalty (**1.542** vs **0.792**) and slightly lower sufficiency
+(**2.875** vs **2.917**). All 10 Cortext losses in that checkpoint were
+text-query losses and were tagged with relevance, sufficiency, temporal,
+and noise gaps against the winning packet; 6 had negative Cortext
+composite scores. At 32 probes, the same pattern persisted: Cortext won
+16 of 32 probes and saved **95.2%** tokens, but 13 text-query losses and
+the higher noise penalty kept the composite below the text-RAG baseline.
+This points the next release-readiness work at packet selection/noise
+control on losing text probes, not at media leakage or baseline
+unfairness. The follow-up production fix capped linked-source hydration
+fan-out with the existing F/T-derived compact item limit instead of a
+fixed display constant, because the loss audit showed that selected
+internal label/cue nodes could expand into too many distant source
+memories after scoring. That fix is a candidate noise-control change; it
+does not become quality evidence until a new frozen run passes the same
+streamed and final local-judge gates.
+
 # Implementation Considerations
 
 ## Embedding-Only Operations
@@ -40364,7 +40961,10 @@ intentionally non-renderable, such as `LABEL` nodes and associative cue
 anchors, remain graph-routing products: when one is selected for the
 public retrieval surface, hydration resolves a bounded set of linked
 source memories with actual payloads instead of exposing empty label/cue
-records to applications.
+records to applications. That linked-source fan-out is bounded by the
+same F/T-derived compact item limit used by graph-expanded retrieval, so
+applications do not receive an unbounded expansion from a single
+internal label or cue node.
 
 ## Model Stack (Local Inference)
 
@@ -40439,10 +41039,24 @@ proposals carried into consolidation as `current_labels`; consolidation
 then confirms, removes, or adds durable `has_label` edges from source
 evidence. The current production prompt surface uses WM directly and LTM
 retrieval directly; STM remains a bounded proposal/read substrate unless
-a downstream consumer passes the experimental transfer gates. This
-preserves the core online invariant: the live loop remains
-embedding-based, while durable semantic edits happen at consolidation
-boundaries.
+a downstream consumer passes the experimental transfer gates. Active WM
+slots also act as **temporal source anchors** for LTM retrieval: their
+`source_id` and prior timestamps seed the same temporal expansion used
+by durable source seeds, so nearby durable memories can be recovered
+when the immediate WM tail is too short for a chat-style rolling
+history. For chat sources, this expansion treats `chat/user*` and
+`chat/assistant*` as one conversation stream, allowing cross-speaker
+run-up to be recovered without carrying the normal RAG rolling
+transcript. Non-chat sources remain source-local. Temporal neighbors are
+also restricted to rows earlier than the current signal timestamp.
+`WORKING`, `LABEL`, and `ASSOCIATION` rows are excluded from the
+returned temporal neighbors, and final candidates still pass
+write-exclusion and WM-overlap filtering. The path is controlled by the
+existing F/S/T-derived graph-expanded temporal window, temporal weight,
+durable-source weight, and compact output cap, and it is disabled by the
+source-seed graph-expansion ablation. This preserves the core online
+invariant: the live loop remains embedding-based, while durable semantic
+edits happen at consolidation boundaries.
 
 The current alpha stores temporality primarily at the episodic level:
 
@@ -40641,7 +41255,10 @@ for metrics and retrieval. With `N` stored memories, naive search is
 Production retrieval now separates candidate discovery from prompt
 breadth. The first pass retrieves a broad source/blob seed set with
 `RetrievalMaxResults(F)` so concrete source memories remain reachable
-even when consolidated summaries are present. Those seeds are then
+even when consolidated summaries are present. Those seeds are read from
+the durable SQLite memory and embedding tables, so retrieval after
+process restart or benchmark checkpoint replay does not depend on the
+processor-local `memory_stream` being populated. Those seeds are then
 expanded and scored through existing durable graph structure:
 `derived_from` source links, durable `has_label` labels, label
 relation/co-occurrence edges, bitemporal fact evidence, temporal
@@ -40659,34 +41276,38 @@ This gives Cortext a RAG-style narrowing path inside the production
 operation: broad source/blob seeds first, graph/fact/temporal expansion
 second, compact source-backed output last.
 
-Label/association seeds are selected from an in-memory summary cache
-(populated by the label bank and consolidation) to avoid an additional
-vector search pass while keeping retrieval fully embedding-based. The
-retrieval scorer also consumes preconsolidated labels as a bounded soft
-graph signal by default: the current query is projected into cached
-`LABEL` nodes, candidate memories receive a knob-derived boost when
-their `has_label` links overlap those query labels, and the boost is
-combined with ordinary embedding, context, recency, affect, procedural,
-fact, durable-source, and graph-expansion scores. This path does not
-persist new labels and does not treat provisional labels as truth. It
-can be disabled for regression isolation with
+Static label seeds are selected from the attached read-only SQLite label
+bank (`cortext_label_bank.label_bank_vec`) through sqlite-vec search;
+dynamic label/association seeds still come from ordinary durable memory
+and association state created by consolidation. The retrieval scorer
+also consumes preconsolidated labels as a bounded soft graph signal by
+default: the current query is projected into attached label-bank vectors
+and durable `LABEL` nodes, candidate memories receive a knob-derived
+boost when their `has_label` links overlap those query labels, and the
+boost is combined with ordinary embedding, context, recency, affect,
+procedural, fact, durable-source, and graph-expansion scores. This path
+does not persist new labels and does not treat provisional labels as
+truth. It can be disabled for regression isolation with
 `CORTEXT_DISABLE_PRECONSOLIDATED_LABEL_GRAPH=1`; otherwise its weights,
 admission floors, label breadth, source-seed breadth, and degree damping
-derive from F/S/T. Retrieval rank is preserved through hydration so chat
-applications can consume the production-ranked compact LTM surface.
+derive from F/S/T. Retrieval rank is preserved through hydration, and
+linked-source hydration from internal routing nodes is capped by the
+F/T-derived compact item limit, so chat applications consume the
+production-ranked compact LTM surface rather than a wide display
+expansion.
 
 The live short-term graph memory surface mirrors the same separation
 between proposal and commitment. On ingress, STM is one bounded
-per-source graph: recent signal embeddings are graph nodes, and
-clustered label matches are provisional edges. The label edges are built
-by clustering cached label embeddings, selecting the nearest label
-clusters, and taking the top labels from each selected cluster. These
-STM label edges remain processor-local. During consolidation, source
-embeddings in each cluster are matched back to the STM graph, and
-matching labels are passed as `current_labels` to the multimodal
-refinement request. Gemma then confirms, removes, or adds labels from
-raw text/audio/image evidence before durable `has_label` edges are
-written to LTM graph memory. Thus the realtime clustered label graph
+per-source graph: recent signal embeddings are graph nodes, and attached
+label-bank vector matches become provisional edges. The label edges are
+built by querying the attached label-bank vector table with knob-derived
+breadth and score floors rather than by copying the label bank into the
+user database. These STM label edges remain processor-local. During
+consolidation, source embeddings in each cluster are matched back to the
+STM graph, and matching labels are passed as `current_labels` to the
+multimodal refinement request. Gemma then confirms, removes, or adds
+labels from raw text/audio/image evidence before durable `has_label`
+edges are written to LTM graph memory. Thus the realtime label graph
 narrows the candidate set, while consolidation remains the pruning and
 commitment stage. Current STM cost measurements keep the substrate
 inside the realtime budget: TTL12/cap24 reached p95 size **13** and p95

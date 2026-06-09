@@ -7,6 +7,7 @@
 #include <cortext/store/utils.hpp>
 
 #include "../../src/encoder/text_encoder_factory.hpp"
+#include "../../src/operations/retrieval_debug_state.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -429,6 +430,55 @@ MemoryPacketJson (
       });
     }
   return out;
+}
+
+nlohmann::json
+RetrievalDebugJson ()
+{
+  const auto summary
+      = cortext::operations::retrieval_debug::GetLastRetrievalSummary ();
+  nlohmann::json ranked = nlohmann::json::array ();
+  int rank = 0;
+  for (const auto &candidate :
+       cortext::operations::retrieval_debug::GetLastRankedCandidates ())
+    {
+      ranked.push_back ({
+        { "rank", rank++ },
+        { "embedding_id", candidate.embedding_id },
+        { "memory_id", candidate.memory_id },
+        { "score", candidate.score },
+        { "relevance", candidate.relevance },
+        { "proc_score", candidate.proc_score },
+        { "predictive_bonus", candidate.predictive_bonus },
+        { "pre_activation", candidate.pre_activation },
+        { "fact_boost", candidate.fact_boost },
+        { "fact_stale_penalty", candidate.fact_stale_penalty },
+        { "linked_fact_count", candidate.linked_fact_count },
+        { "label_graph_boost", candidate.label_graph_boost },
+        { "label_match_count", candidate.label_match_count },
+        { "durable_source_boost", candidate.durable_source_boost },
+        { "durable_source_count", candidate.durable_source_count },
+      });
+    }
+
+  return {
+    { "fact_layer_enabled", summary.fact_layer_enabled },
+    { "fact_seed_count", summary.fact_seed_count },
+    { "candidate_fact_link_memory_count",
+      summary.candidate_fact_link_memory_count },
+    { "candidate_fact_link_row_count",
+      summary.candidate_fact_link_row_count },
+    { "selected_fact_linked_count", summary.selected_fact_linked_count },
+    { "text_query_token_count", summary.text_query_token_count },
+    { "text_query_wm_slots", summary.text_query_wm_slots },
+    { "text_query_wm_chars", summary.text_query_wm_chars },
+    { "fact_text_candidate_count", summary.fact_text_candidate_count },
+    { "fact_text_rejected_low_score_count",
+      summary.fact_text_rejected_low_score_count },
+    { "fact_text_match_count", summary.fact_text_match_count },
+    { "fact_text_best_score", summary.fact_text_best_score },
+    { "ranked_candidates", std::move (ranked) },
+  };
 }
 
 nlohmann::json
@@ -1480,6 +1530,8 @@ main (int argc, char **argv)
                       probe["cortext_top_operation_ms"]
                           = TopOperationTimingsJson (
                               probe_ctx.output.operation_ms, 12);
+                      probe["cortext_retrieval_debug"]
+                          = RetrievalDebugJson ();
                       probe["normal_rag_compaction_latency_ms"]
                           = compaction_ms;
                       probe["normal_rag_retrieval_latency_ms"]
@@ -1811,6 +1863,7 @@ main (int argc, char **argv)
                   probe["cortext_top_operation_ms"]
                       = TopOperationTimingsJson (probe_ctx.output.operation_ms,
                                                  12);
+                  probe["cortext_retrieval_debug"] = RetrievalDebugJson ();
                   std::vector<float> rag_query_embedding;
                   rag_encoder_selection.encoder->EncodeText (
                       msg.text, rag_query_embedding);
@@ -2055,6 +2108,7 @@ main (int argc, char **argv)
                   probe["cortext_top_operation_ms"]
                       = TopOperationTimingsJson (probe_ctx.output.operation_ms,
                                                  12);
+                  probe["cortext_retrieval_debug"] = RetrievalDebugJson ();
                   probe["normal_rag_compaction_latency_ms"] = compaction_ms;
                   probe["normal_rag_retrieval_latency_ms"] = rag_retrieval_ms;
                   probe["normal_rag_total_latency_ms"]

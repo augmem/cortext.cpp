@@ -224,6 +224,8 @@ TEST_CASE ("Constructive recall retrieval uses the latest reconstruction and app
   cfg.focus = 1.0;
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;
+  cortext::testing::ScopedEnvVar disable_source_seed_expansion (
+      "CORTEXT_DISABLE_SOURCE_SEED_GRAPH_EXPANSION", "1");
 
   auto run = [&] {
     operations::retrieval_debug::ClearLastRankedCandidates ();
