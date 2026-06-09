@@ -1,5 +1,7 @@
 #include "signal_filter.hpp"
 
+#include "cortext/core/knobs.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -95,7 +97,9 @@ SignalFilter::DecideAdaptive (const std::string &modality, double mean_delta,
                               double &ema_abs_dev,
                               double min_accept_seconds) const
 {
-  const double alpha = 0.08 + 0.12 * (1.0 - config_.stability);
+  const auto policy = core::SignalFilterAdaptivePolicyForKnobs (
+      config_.focus, config_.sensitivity, config_.stability);
+  const double alpha = policy.alpha;
   if (!initialized)
     {
       ema_delta = mean_delta;
@@ -115,27 +119,25 @@ SignalFilter::DecideAdaptive (const std::string &modality, double mean_delta,
       = last_accept_index < 0 ? std::numeric_limits<double>::infinity ()
                               : current_seconds - last_accept_seconds;
 
-  constexpr double kBaseThreshold = 0.012;
-  constexpr double kHeartbeatSeconds = 2.0;
-  const double focus_pressure = 0.75 + 0.70 * config_.focus;
-  const double sensitivity_release = 1.10 - 0.45 * config_.sensitivity;
-  const double stability_pressure = 0.85 + 0.40 * config_.stability;
-  const bool settling = velocity < -0.15 * std::max (ema_delta, 1e-6);
+  const bool settling
+      = velocity
+        < -policy.settling_velocity_scale * std::max (ema_delta, 1e-6);
   const double quiet_release = std::clamp (
-      decision.quiet_seconds / kHeartbeatSeconds, 0.0, 1.0);
-  const double settling_release
-      = settling ? (0.35 + 0.35 * config_.sensitivity) : 0.0;
+      decision.quiet_seconds / policy.heartbeat_seconds, 0.0, 1.0);
+  const double settling_release = settling ? policy.settling_release : 0.0;
 
-  double threshold = kBaseThreshold;
-  threshold += ema_delta * focus_pressure;
-  threshold += ema_abs_dev * (0.75 + 0.40 * config_.focus);
-  threshold += entropy * ema_delta * 0.40;
-  threshold *= sensitivity_release * stability_pressure;
-  threshold *= (1.0 - 0.35 * quiet_release);
+  double threshold = policy.base_threshold;
+  threshold += ema_delta * policy.focus_pressure;
+  threshold += ema_abs_dev * policy.ema_abs_dev_weight;
+  threshold += entropy * ema_delta * policy.entropy_weight;
+  threshold *= policy.sensitivity_release * policy.stability_pressure;
+  threshold *= (1.0 - policy.quiet_release_weight * quiet_release);
   threshold *= (1.0 - settling_release);
-  threshold = std::clamp (threshold, 0.0025, 0.50);
+  threshold = std::clamp (threshold, policy.min_threshold,
+                          policy.max_threshold);
 
-  const double score = 0.60 * mean_delta + 0.40 * max_local_delta;
+  const double score = policy.mean_score_weight * mean_delta
+                       + policy.max_score_weight * max_local_delta;
   decision.threshold = threshold;
   decision.score = score;
 
@@ -144,7 +146,7 @@ SignalFilter::DecideAdaptive (const std::string &modality, double mean_delta,
       decision.accepted = true;
       decision.reason = "first_item";
     }
-  else if (decision.quiet_seconds >= kHeartbeatSeconds)
+  else if (decision.quiet_seconds >= policy.heartbeat_seconds)
     {
       decision.accepted = true;
       decision.reason = "heartbeat";
@@ -222,7 +224,8 @@ SignalFilter::EvaluateAudio (const float *pcm, std::size_t num_samples,
       "audio", mean_delta, max_delta, entropy, velocity, current_seconds,
       audio_.index, audio_.initialized, audio_.last_accept_index,
       audio_.last_accept_seconds, audio_.ema_delta, audio_.ema_abs_dev,
-      0.10);
+      core::SignalFilterAudioMinAcceptSeconds (
+          config_.focus, config_.sensitivity, config_.stability));
   std::copy (bins, bins + kBins, audio_.previous_bins);
   audio_.has_previous_bins = true;
   audio_.previous_delta = mean_delta;
@@ -319,7 +322,8 @@ SignalFilter::EvaluateImage (const std::uint8_t *data, int width, int height,
       "image", mean_delta, max_delta, entropy, velocity, current_seconds,
       image_.index, image_.initialized, image_.last_accept_index,
       image_.last_accept_seconds, image_.ema_delta, image_.ema_abs_dev,
-      1.0 / 60.0);
+      core::SignalFilterImageMinAcceptSeconds (
+          config_.focus, config_.sensitivity, config_.stability));
 
   image_.previous_blocks.assign (blocks, blocks + kBlockCount);
   image_.has_previous_blocks = true;

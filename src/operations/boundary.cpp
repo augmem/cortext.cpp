@@ -15,8 +15,6 @@ namespace cortext::operations
 namespace
 {
 constexpr double kEpsilon = 1e-9;
-constexpr double kBoundaryVarFloor = 0.0025;
-constexpr int kBoundaryWarmupSignals = 3;
 
 bool
 EnvFlag (const char *name)
@@ -138,23 +136,18 @@ DetectBoundary::Execute (OperationContext &context,
                         : 1.0;
   const double gap_z_inact
       = std::log1p (std::max (0.0, gap_ratio - 1.0));
+  const auto inactivity_policy = core::BoundaryInactivityPolicyForKnobs (
+      config.sensitivity, config.stability);
   const double gap_score_inact
-      = core::Sigmoid (core::Lerp (0.9, 1.8, config.sensitivity)
-                       * core::Lerp (1.1, 0.9, config.stability) * gap_z_inact);
-  const double gap_force_center
-      = core::Lerp (0.9, 0.4, config.sensitivity)
-        * core::Lerp (1.1, 0.9, config.stability);
-  const double gap_force_k
-      = core::Lerp (2.0, 5.0, config.sensitivity)
-        * core::Lerp (1.1, 0.9, config.stability);
+      = core::Sigmoid (inactivity_policy.gap_score_scale * gap_z_inact);
   const double gap_force
-      = core::Sigmoid (gap_force_k * (gap_z_inact - gap_force_center));
+      = core::Sigmoid (
+          inactivity_policy.gap_force_k
+          * (gap_z_inact - inactivity_policy.gap_force_center));
 
   // Bayesian change-point inference for boundary probability
-  const double h_base = core::Lerp (0.03, 0.18, config.sensitivity)
-                        * core::Lerp (1.2, 0.8, config.stability);
-  const double h_t_base
-      = core::Clamp (h_base * (0.8 + 0.2 * (1.0 - config.focus)), 0.0, 0.5);
+  const double h_t_base = core::BoundaryHazardPrior (
+      config.focus, config.sensitivity, config.stability);
 
   double surprisal_raw
       = context.GetMetric (operations::Metric::embedding_surprisal)
@@ -190,56 +183,55 @@ DetectBoundary::Execute (OperationContext &context,
         }
     }
 
-  const bool use_local = acc.n_signals >= kBoundaryWarmupSignals;
-  const double alpha_local = core::Lerp (0.35, 0.15, config.stability);
-  const double norm_gain
-      = core::Clamp (core::Lerp (1.6, 3.0, config.sensitivity)
-                         * core::Lerp (1.05, 0.95, config.stability),
-                     1.0, 3.2);
+  const auto norm_policy = core::BoundaryLocalNormPolicyForKnobs (
+      config.sensitivity, config.stability);
+  const bool use_local = acc.n_signals >= norm_policy.warmup_signals;
+  const double alpha_local = norm_policy.alpha;
+  const double norm_gain = norm_policy.gain;
   const double surprisal_norm
-      = NormalizeLocal (surprisal_raw, alpha_local, kBoundaryVarFloor, norm_gain,
+      = NormalizeLocal (surprisal_raw, alpha_local, norm_policy.variance_floor,
+                        norm_gain,
                         acc.boundary_surprisal_mean,
                         acc.boundary_surprisal_var, use_local);
   const double drift_norm
-      = NormalizeLocal (drift_raw, alpha_local, kBoundaryVarFloor, norm_gain,
+      = NormalizeLocal (drift_raw, alpha_local, norm_policy.variance_floor,
+                        norm_gain,
                         acc.boundary_drift_spike_mean,
                         acc.boundary_drift_spike_var, use_local);
   const double coh_norm
-      = NormalizeLocal (coh_raw, alpha_local, kBoundaryVarFloor, norm_gain,
+      = NormalizeLocal (coh_raw, alpha_local, norm_policy.variance_floor,
+                        norm_gain,
                         acc.boundary_coh_drop_mean,
                         acc.boundary_coh_drop_var, use_local);
   const double topic_norm
-      = NormalizeLocal (topic_raw, alpha_local, kBoundaryVarFloor, norm_gain,
+      = NormalizeLocal (topic_raw, alpha_local, norm_policy.variance_floor,
+                        norm_gain,
                         acc.boundary_topic_shift_mean,
                         acc.boundary_topic_shift_var, use_local);
 
-  const double w_s = 0.34 + 0.14 * config.sensitivity;
-  const double w_d = 0.18 + 0.05 * (1.0 - config.stability);
-  const double w_c = 0.36 + 0.16 * config.focus;
-  const double w_t = 0.30 + 0.22 * config.sensitivity;
-  const double w_g = 0.01;
+  const auto boundary_weights = core::BoundaryEvidenceScoringWeights (
+      config.focus, config.sensitivity, config.stability);
+  const double w_s = boundary_weights.surprisal;
+  const double w_d = boundary_weights.drift;
+  const double w_c = boundary_weights.coherence;
+  const double w_t = boundary_weights.topic;
+  const double w_g = boundary_weights.gap;
 
   // Natural-indicator gate: emphasize coherence/topic shifts over isolated spikes.
-  const double support = core::Clamp (0.5 * coh_norm + 0.5 * topic_norm, 0.0, 1.0);
-  const double support_gate = core::Lerp (0.45, 1.0, support);
-  const double gap_gate = core::Lerp (0.10, 0.50, support);
-  const double support_boost = core::Lerp (1.0, 1.25, support);
-  const double support_relax_rate
-      = core::Lerp (0.6, 1.6, config.sensitivity)
-        * core::Lerp (1.15, 0.85, config.stability);
+  const auto support_policy = core::BoundarySupportPolicyForKnobs (
+      config.focus, config.sensitivity, config.stability, coh_norm,
+      topic_norm);
+  const double support = support_policy.support;
+  const double support_gate = support_policy.support_gate;
+  const double gap_gate = support_policy.gap_gate;
+  const double support_boost = support_policy.support_boost;
   const double gap_z_inact_pos = std::max (0.0, gap_z_inact);
   const double support_relax
-      = std::exp (-support_relax_rate * gap_z_inact_pos);
+      = std::exp (-inactivity_policy.support_relax_rate * gap_z_inact_pos);
   const double inactivity
       = core::Clamp (gap_score_inact * (1.0 - support * support_relax), 0.0, 1.0);
-  const double k_inact
-      = core::Lerp (0.05, 0.25, config.sensitivity)
-        * core::Lerp (1.1, 0.9, config.stability);
-  const double inactivity_exp_rate
-      = core::Lerp (0.6, 1.6, config.sensitivity)
-        * core::Lerp (1.1, 0.9, config.stability);
   const double inactivity_scale
-      = std::exp (inactivity_exp_rate * gap_z_inact_pos);
+      = std::exp (inactivity_policy.inactivity_exp_rate * gap_z_inact_pos);
 
   const double w_s_eff = w_s * support_gate;
   const double w_d_eff = w_d * support_gate;
@@ -249,22 +241,17 @@ DetectBoundary::Execute (OperationContext &context,
   const double w_sum
       = std::max (kEpsilon,
                   w_s_eff + w_d_eff + w_c_eff + w_t_eff + w_g_eff);
-  const double z_center
-      = core::Clamp (core::Lerp (0.44, 0.30, config.sensitivity)
-                         * core::Lerp (1.05, 0.95, config.stability),
-                     0.26, 0.58);
-  const double z_center_eff
-      = core::Clamp (z_center * core::Lerp (1.0, 0.75, support), 0.24, 0.58);
+  const auto change_point_policy = core::BoundaryChangePointPolicyForKnobs (
+      config.sensitivity, config.stability, support);
+  const double z_center = change_point_policy.z_center;
+  const double z_center_eff = change_point_policy.z_center_eff;
   const double z_t
       = (w_s_eff / w_sum) * (surprisal_norm - z_center_eff)
         + (w_d_eff / w_sum) * (drift_norm - z_center_eff)
         + (w_c_eff / w_sum) * (coh_norm - z_center_eff)
         + (w_t_eff / w_sum) * (topic_norm - z_center_eff)
         + (w_g_eff / w_sum) * (gap_score - z_center_eff);
-  const double k_cp
-      = core::Lerp (8.0, 22.0, config.sensitivity)
-        * core::Lerp (1.1, 0.9, config.stability);
-  const double k_cp_eff = k_cp * core::Lerp (0.9, 1.35, support);
+  const double k_cp_eff = change_point_policy.k;
   const double likelihood = core::Sigmoid (k_cp_eff * z_t);
   const double target_rate
       = core::BoundaryTargetRate (config.focus, config.sensitivity,
@@ -288,7 +275,9 @@ DetectBoundary::Execute (OperationContext &context,
   else if (inactivity > 0.0)
     {
       boundary_score
-          = core::Clamp (boundary_score + k_inact * inactivity * inactivity_scale,
+          = core::Clamp (boundary_score
+                             + inactivity_policy.inactivity_weight * inactivity
+                                   * inactivity_scale,
                          0.0, 1.0);
     }
   boundary_score = std::max (boundary_score, gap_force);
@@ -329,10 +318,10 @@ DetectBoundary::Execute (OperationContext &context,
 
   // 3. Pressure vs capacity (dynamic flush probability)
   const double base_capacity = core::MaxMemoryDrift (config.sensitivity);
-  const double capacity_scale = (1.0 + config.stability)
-                                * (1.0 + config.stability);
-  const double capacity = base_capacity * capacity_scale;
-  const double pressure = acc.drift_acc * (1.0 + config.sensitivity);
+  const auto pressure_policy = core::BoundaryPressurePolicyForKnobs (
+      config.sensitivity, config.stability, acc.drift_acc);
+  const double capacity = pressure_policy.capacity;
+  const double pressure = pressure_policy.pressure;
   const double saturation_ratio = pressure / std::max (capacity, kEpsilon);
   const double k_flush
       = core::SurpriseGain (config.sensitivity, config.stability);
@@ -466,7 +455,8 @@ DetectBoundary::Execute (OperationContext &context,
     telemetry::Attribute::Double ("gap_z", gap_z),
     telemetry::Attribute::Double ("gap_score", gap_score),
     telemetry::Attribute::Double ("inactivity", inactivity),
-    telemetry::Attribute::Double ("inactivity_gain", k_inact),
+    telemetry::Attribute::Double ("inactivity_gain",
+                                  inactivity_policy.inactivity_weight),
     telemetry::Attribute::Double ("inactivity_scale", inactivity_scale),
     telemetry::Attribute::Bool ("trigger_drift", drift_trigger),
     telemetry::Attribute::Bool ("trigger_timeout", timeout_trigger),

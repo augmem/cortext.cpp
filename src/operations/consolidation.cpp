@@ -141,7 +141,8 @@ ScoreConsolidation::Execute (OperationContext &context, Transaction &tx) const
   // v2: Select candidates whose score is below floor.
   // score = T*strength - F*redundancy + S*connectivity + T*stability
   // Uses unified memories table which contains per-memory state.
-  const double tag_weight = core::Lerp (0.10, 0.25, S_eff);
+  const double tag_weight = core::ConsolidationCandidateTagWeight (
+      F_raw, S_raw, T);
   const std::string blob_filter
       = deep_mode ? " AND m.blob_id IS NOT NULL " : " ";
   const std::string candidate_scope

@@ -186,7 +186,7 @@ base_rate(S) = lerp(r_min, r_max, S)
 
 The hysteresis band prevents oscillation in threshold-crossing decisions. Write-rate targets establish homeostatic setpoints for the threshold controller.
 
-These ranges are canonical knob maps; no additional fixed thresholds are introduced beyond the three knobs.
+These ranges are canonical knob maps for memory behavior: admission thresholds, retrieval weights, graph expansion breadth, lifecycle scoring, and consolidation policy are derived from F/S/T. Fixed values may still appear as schema invariants, vector dimensions, parser guardrails, numeric epsilons, migration defaults, and benchmark protocol settings, but they are not additional user-facing memory knobs.
 
 ### Retrieval Breadth
 
@@ -202,6 +202,24 @@ affect, procedural, and context scoring:
 
 ```
 selected_k(F,T) = round(lerp(20, 8, FocusBias(F)) * lerp(1.08, 0.92, T))
+```
+
+Candidate ranking includes an event-time temporal prior in addition to source
+confidence freshness:
+
+```
+temporal_rank(m) = exp(-age_s(m) / tau_rank(F,S,T))
+score(m) += weight_rank(F,S,T) * temporal_rank(m)
+```
+
+New source-backed memories also receive a knob-derived source reliability prior
+instead of relying on a fixed storage default:
+
+```
+source_reliability_0(F,S,T)
+  = clamp(0.70 + 0.06(F' - F'_0.5)
+               - 0.05(S' - S'_0.5)
+               + 0.08(T - 0.5), 0.50, 0.90)
 ```
 
 This split lets low Focus explore many source/blob seeds while still keeping the

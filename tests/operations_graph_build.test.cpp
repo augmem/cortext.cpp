@@ -347,16 +347,20 @@ TEST_CASE ("V2: GraphBuild removes weak reinforcement edges",
   // Initialize core schema
   cortext::testing::InitializeCoreSchema (*store);
 
-  // Pre-insert a weak reinforcement edge (below 0.1 threshold after decay)
-  store->Execute (
-      "INSERT INTO associations (source_memory_id, target_memory_id, edge_type, weight) "
-      "VALUES (?, ?, 'reinforces', ?)",
-      { 1LL, 2LL, 0.05 }); // Will be < 0.1 after decay
-
   SignalProcessor::Config cfg;
 
   cortext::testing::RequireEncoder (cfg);
   cfg.stability = 0.0; // decay = 0.9
+  const double prune_threshold = core::ReinforcementPruneThreshold (
+      cfg.focus, cfg.sensitivity, cfg.stability);
+
+  // Pre-insert a weak reinforcement edge below the knob-derived threshold
+  // after decay.
+  store->Execute (
+      "INSERT INTO associations (source_memory_id, target_memory_id, edge_type, weight) "
+      "VALUES (?, ?, 'reinforces', ?)",
+      { 1LL, 2LL, prune_threshold * 0.5 });
+
   auto ops = std::make_unique<OperationSet> (
       std::make_unique<EvaluateConsolidation> (),
       std::make_unique<BuildGraphFromConsolidation> ());

@@ -238,6 +238,18 @@ def load_resume_state(args: argparse.Namespace) -> tuple[list[dict], set[int], l
     manifest = load_json_if_valid(args.manifest)
     if not manifest:
         return [], set(), []
+    try:
+        args.benchmark_pause_ms_total = float(
+            manifest.get("benchmark_pause_ms_total", 0.0) or 0.0
+        )
+    except (TypeError, ValueError):
+        args.benchmark_pause_ms_total = 0.0
+    try:
+        args.benchmark_pause_count = int(
+            manifest.get("benchmark_pause_count", 0) or 0
+        )
+    except (TypeError, ValueError):
+        args.benchmark_pause_count = 0
 
     manifest_probe_stream = manifest.get("probe_stream", "")
     if manifest_probe_stream:
@@ -838,7 +850,7 @@ def run_judge(
     early_stop_quality_delta_floor: float | None = None,
     early_stop_prior_quality_delta_sum: float = 0.0,
     early_stop_prior_judgment_count: int = 0,
-) -> None:
+) -> dict:
     rows_path = judge_path.with_name(judge_path.name + ".rows.jsonl")
     for path in [judge_path, rows_path]:
         if path.exists():
@@ -875,6 +887,8 @@ def run_judge(
         str(args.judge_timeout_s),
         "--judge-context-window-tokens",
         str(args.judge_context_window_tokens),
+        "--judge-max-output-tokens",
+        str(args.judge_max_output_tokens),
         "--ollama-keep-alive",
         args.ollama_keep_alive,
         "--context-limit",
@@ -899,9 +913,13 @@ def run_judge(
                 str(early_stop_prior_judgment_count),
             ]
         )
+    pause_started = None
+    pause_ms = 0.0
     paused = signal_process(
         args.pause_pid_during_judge, signal.SIGSTOP, "benchmark"
     )
+    if paused:
+        pause_started = time.monotonic()
     try:
         run_checked(cmd)
     finally:
@@ -909,6 +927,17 @@ def run_judge(
             signal_process(
                 args.pause_pid_during_judge, signal.SIGCONT, "benchmark"
             )
+            if pause_started is not None:
+                pause_ms = max(0.0, (time.monotonic() - pause_started) * 1000.0)
+                args.benchmark_pause_ms_total += pause_ms
+                args.benchmark_pause_count += 1
+    return {
+        "benchmark_pause_ms": round(pause_ms, 3),
+        "benchmark_pause_count": 1 if paused else 0,
+        "benchmark_pause_pid": args.pause_pid_during_judge if paused else 0,
+        "benchmark_pause_ms_total": round(args.benchmark_pause_ms_total, 3),
+        "benchmark_pause_count_total": args.benchmark_pause_count,
+    }
 
 
 def write_loss_audit(
@@ -956,6 +985,9 @@ def write_manifest(args: argparse.Namespace, completed: list[dict]) -> None:
         "judge_repetitions": args.judge_repetitions,
         "confirm_fail_repetitions": args.confirm_fail_repetitions,
         "judge_packet_item_limit": args.context_limit,
+        "benchmark_pause_pid": args.pause_pid_during_judge,
+        "benchmark_pause_ms_total": round(args.benchmark_pause_ms_total, 3),
+        "benchmark_pause_count": args.benchmark_pause_count,
         "quality_gate_min_milestone": args.quality_gate_min_milestone,
         "quality_trend_gate_min_milestone": args.quality_trend_gate_min_milestone,
         "quality_trend_window": args.quality_trend_window,
@@ -985,6 +1017,9 @@ def write_manifest(args: argparse.Namespace, completed: list[dict]) -> None:
             "ollama_keep_alive": args.ollama_keep_alive,
             "judge_repetitions": args.judge_repetitions,
             "confirm_fail_repetitions": args.confirm_fail_repetitions,
+            "benchmark_pause_pid": args.pause_pid_during_judge,
+            "benchmark_pause_ms_total": round(args.benchmark_pause_ms_total, 3),
+            "benchmark_pause_count": args.benchmark_pause_count,
             "quality_gate_min_milestone": args.quality_gate_min_milestone,
             "quality_trend_gate_min_milestone": args.quality_trend_gate_min_milestone,
             "quality_trend_window": args.quality_trend_window,
@@ -1011,7 +1046,9 @@ def run_milestone(
     delta_judge_path = args.out_dir / f"early_probe_{milestone:03d}_delta_judge.json"
     loss_audit_path = args.out_dir / f"early_probe_{milestone:03d}_loss_audit.json"
     materialize_partial(args, milestone, summary_path)
-    run_judge(args, milestone, start_index, summary_path, delta_judge_path)
+    pause_stats = run_judge(
+        args, milestone, start_index, summary_path, delta_judge_path
+    )
     next_segment_judges = [*segment_judges, delta_judge_path]
     aggregate_judge_rows(
         summary_path=summary_path,
@@ -1042,6 +1079,7 @@ def run_milestone(
         "delta_judge_sha256": file_sha256(delta_judge_path),
         "judge_start_index": start_index,
         "judge_limit": milestone,
+        **pause_stats,
         "metrics": metrics,
         **phase,
         "quality_gate_active": quality_gate_active,
@@ -1105,7 +1143,7 @@ def confirm_failed_record(
         flush=True,
     )
     prior_delta_sum, prior_judgment_count = prior_quality_delta_stats(segment_judges)
-    run_judge(
+    confirm_pause_stats = run_judge(
         args,
         milestone,
         start_index,
@@ -1159,6 +1197,18 @@ def confirm_failed_record(
             "confirm_delta_judge_sha256": file_sha256(confirm_delta_judge_path),
             "confirm_loss_audit": str(confirm_loss_audit_path),
             "confirm_loss_audit_sha256": file_sha256(confirm_loss_audit_path),
+            "confirm_benchmark_pause_ms": confirm_pause_stats.get(
+                "benchmark_pause_ms"
+            ),
+            "confirm_benchmark_pause_count": confirm_pause_stats.get(
+                "benchmark_pause_count"
+            ),
+            "benchmark_pause_ms_total": confirm_pause_stats.get(
+                "benchmark_pause_ms_total"
+            ),
+            "benchmark_pause_count_total": confirm_pause_stats.get(
+                "benchmark_pause_count_total"
+            ),
             "early_stop": confirm_payload.get("early_stop"),
             "metrics": metrics,
             **phase,
@@ -1254,6 +1304,7 @@ def main() -> int:
     parser.add_argument("--bootstrap-samples", type=int, default=200)
     parser.add_argument("--judge-timeout-s", type=int, default=180)
     parser.add_argument("--judge-context-window-tokens", type=int, default=32768)
+    parser.add_argument("--judge-max-output-tokens", type=int, default=1300)
     parser.add_argument(
         "--context-limit",
         type=int,
@@ -1372,6 +1423,8 @@ def main() -> int:
         raise RuntimeError("--judge-timeout-s must be >= 1")
     if args.judge_context_window_tokens < 1:
         raise RuntimeError("--judge-context-window-tokens must be >= 1")
+    if args.judge_max_output_tokens < 1:
+        raise RuntimeError("--judge-max-output-tokens must be >= 1")
     if args.context_limit == 0 or args.context_limit < -1:
         raise RuntimeError("--context-limit must be -1 or a positive item limit")
     if args.pause_pid_during_judge < 0:
@@ -1397,6 +1450,8 @@ def main() -> int:
     args.out_dir.mkdir(parents=True, exist_ok=True)
     if args.manifest is None:
         args.manifest = args.out_dir / "early_judge_manifest.json"
+    args.benchmark_pause_ms_total = 0.0
+    args.benchmark_pause_count = 0
 
     fixed_milestones = parse_milestones(args.milestones)
     completed, completed_milestones, segment_judges = load_resume_state(args)

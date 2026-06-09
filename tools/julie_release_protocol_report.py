@@ -87,14 +87,37 @@ REQUIRED_ABLATION_CATEGORIES = {
         "facts_disabled",
         "fact_boosts_disabled",
     },
+    "no_temporal_fact_boosts": {
+        "no_temporal_fact_boosts",
+        "no-temporal-fact-boosts",
+        "no_temporal_facts",
+        "temporal_and_facts_disabled",
+    },
 }
 REQUIRED_ABLATION_ENV_BY_CATEGORY = {
-    "no_graph_expansion": {"CORTEXT_DISABLE_SOURCE_SEED_GRAPH_EXPANSION": "1"},
+    "no_graph_expansion": {
+        "CORTEXT_DISABLE_SOURCE_SEED_GRAPH_EXPANSION": "1",
+        "CORTEXT_DISABLE_DURABLE_SOURCE_SET_RETRIEVAL": "1",
+        "CORTEXT_DISABLE_PRECONSOLIDATED_LABEL_GRAPH": "1",
+    },
     "no_media_source_blobs": {"CORTEXT_DISABLE_SOURCE_BLOBS": "1"},
     "no_stm_ltm_graph_label_handoff": {"CORTEXT_DISABLE_STM_LABEL_HANDOFF": "1"},
     "no_temporal_retrieval": {"CORTEXT_DISABLE_TEMPORAL_RETRIEVAL": "1"},
     "no_fact_boosts": {"CORTEXT_DISABLE_FACTS": "1"},
+    "no_temporal_fact_boosts": {
+        "CORTEXT_DISABLE_TEMPORAL_RETRIEVAL": "1",
+        "CORTEXT_DISABLE_FACTS": "1",
+    },
 }
+DISALLOWED_RELEASE_BENCHMARK_FLAGS = [
+    "--profile-probes-only",
+    "--checkpoint-eval-only",
+    "--checkpoint-after-timestamp",
+    "--checkpoint-query-count",
+    "--checkpoint-query-stride",
+    "--checkpoint-query-days",
+    "--checkpoint-queries-per-day",
+]
 
 
 def load_json(path: pathlib.Path) -> dict[str, Any]:
@@ -287,7 +310,6 @@ def is_loopback_url(value: Any) -> bool:
     return parsed.scheme in {"http", "https"} and parsed.hostname in {
         "127.0.0.1",
         "localhost",
-        "0.0.0.0",
         "::1",
     }
 
@@ -732,6 +754,9 @@ def command_protocol_checks(
     bench = split_command(benchmark_command)
     judge = split_command(judge_command)
     judge_repetitions = command_int_value(judge, "--judge-repetitions")
+    disallowed_benchmark_flags = [
+        flag for flag in DISALLOWED_RELEASE_BENCHMARK_FLAGS if command_has_flag(bench, flag)
+    ]
     return [
         check(
             "benchmark_command_recorded",
@@ -792,6 +817,11 @@ def command_protocol_checks(
             ),
         ),
         check(
+            "benchmark_command_no_eval_only_modes",
+            not disallowed_benchmark_flags,
+            f"disallowed_flags={disallowed_benchmark_flags}",
+        ),
+        check(
             "judge_command_recorded",
             bool(judge),
             f"judge_command={judge_command!r}",
@@ -833,6 +863,9 @@ def command_summary_consistency_checks(
     knobs = summary.get("knobs", {})
     if not isinstance(knobs, dict):
         knobs = {}
+    disallowed_benchmark_flags = [
+        flag for flag in DISALLOWED_RELEASE_BENCHMARK_FLAGS if command_has_flag(bench, flag)
+    ]
     return [
         check(
             "benchmark_command_matches_summary_input_dir",
@@ -925,6 +958,17 @@ def command_summary_consistency_checks(
                 f"summary_daily={summary.get('daily_consolidation')} "
                 f"command_deep={command_has_flag(bench, '--deep')} "
                 f"summary_deep={summary.get('deep_consolidation')}"
+            ),
+        ),
+        check(
+            "benchmark_summary_not_eval_only_mode",
+            not disallowed_benchmark_flags
+            and not bool(summary.get("profile_probes_only"))
+            and not bool(summary.get("checkpoint_eval_only")),
+            (
+                f"disallowed_flags={disallowed_benchmark_flags} "
+                f"profile_probes_only={summary.get('profile_probes_only')} "
+                f"checkpoint_eval_only={summary.get('checkpoint_eval_only')}"
             ),
         ),
     ]
@@ -1334,6 +1378,14 @@ def source_id_audit(summary: dict[str, Any]) -> dict[str, Any]:
 
 
 def source_id_audit_checks(audit: dict[str, Any]) -> list[dict[str, Any]]:
+    modality_source_counts = audit.get("modality_source_counts", {})
+
+    def has_speaker_media_source(modality: str) -> bool:
+        return any(
+            int_or_default(modality_source_counts.get(f"{modality}|{speaker}"), 0) > 0
+            for speaker in ("Gabe", "Julie")
+        )
+
     return [
         check(
             "source_id_audit_available",
@@ -1362,15 +1414,9 @@ def source_id_audit_checks(audit: dict[str, Any]) -> list[dict[str, Any]]:
         ),
         check(
             "media_modalities_share_speaker_source_ids",
-            any(
-                key.startswith("audio|chat/")
-                for key in audit.get("modality_source_counts", {})
-            )
-            and any(
-                key.startswith("image|chat/")
-                for key in audit.get("modality_source_counts", {})
-            ),
-            f"modality_source_counts={audit.get('modality_source_counts')}",
+            has_speaker_media_source("audio")
+            and has_speaker_media_source("image"),
+            f"modality_source_counts={modality_source_counts}",
         ),
     ]
 
@@ -1409,6 +1455,9 @@ def benchmark_environment_checks(
     behavior_env = snapshot.get("cortext_behavior_env", {})
     if not isinstance(behavior_env, dict):
         behavior_env = {}
+    env_guard = snapshot.get("cortext_behavior_env_guard", {})
+    if not isinstance(env_guard, dict):
+        env_guard = {}
     hosted_provider_env = snapshot.get("hosted_provider_behavior_env", {})
     if not isinstance(hosted_provider_env, dict):
         hosted_provider_env = {}
@@ -1432,6 +1481,13 @@ def benchmark_environment_checks(
             "benchmark_runtime_cortext_behavior_env_clean",
             not behavior_env,
             f"cortext_behavior_env={behavior_env}",
+        ),
+        check(
+            "benchmark_runtime_cortext_behavior_env_guard_fail_closed",
+            env_guard.get("mode") == "fail_closed"
+            and env_guard.get("leakage_detected") is False
+            and isinstance(env_guard.get("allowed_cortext_env_keys"), list),
+            f"cortext_behavior_env_guard={env_guard}",
         ),
         check(
             "benchmark_runtime_no_hosted_provider_dependency",
@@ -1554,6 +1610,16 @@ def early_judge_summary(
             "confirm_fail_repetitions",
             manifest_body.get("confirm_fail_repetitions"),
         ),
+        "benchmark_pause_pid": latest_payload.get(
+            "benchmark_pause_pid", manifest_body.get("benchmark_pause_pid")
+        ),
+        "benchmark_pause_ms_total": latest_payload.get(
+            "benchmark_pause_ms_total",
+            manifest_body.get("benchmark_pause_ms_total"),
+        ),
+        "benchmark_pause_count": latest_payload.get(
+            "benchmark_pause_count", manifest_body.get("benchmark_pause_count")
+        ),
         "blind_packets": manifest_body.get("blind_packets"),
         "judge_packet_item_limit": manifest_body.get("judge_packet_item_limit"),
         "fixed_milestones": fixed_milestones,
@@ -1617,6 +1683,9 @@ def early_judge_checks(early: dict[str, Any]) -> list[dict[str, Any]]:
     trend_gate_min = int_or_default(
         early.get("quality_trend_gate_min_milestone"), 0
     )
+    pause_pid = int_or_default(early.get("benchmark_pause_pid"), 0)
+    pause_count = int_or_default(early.get("benchmark_pause_count"), 0)
+    pause_ms = float_or_default(early.get("benchmark_pause_ms_total"), -1.0)
     early_code = early.get("early_judge_exit_code")
     early_code_ok = early_code == 0
     if early_code is None and early.get("benchmark_status") not in {
@@ -1679,6 +1748,18 @@ def early_judge_checks(early: dict[str, Any]) -> list[dict[str, Any]]:
             (
                 f"blind_packets={early.get('blind_packets')} "
                 f"judge_packet_item_limit={early.get('judge_packet_item_limit')}"
+            ),
+        ),
+        check(
+            "early_judge_benchmark_pause_accounting",
+            pause_pid > 0
+            and pause_count >= 0
+            and pause_ms >= 0.0
+            and (pause_count == 0 or pause_ms > 0.0),
+            (
+                f"benchmark_pause_pid={early.get('benchmark_pause_pid')} "
+                f"benchmark_pause_count={early.get('benchmark_pause_count')} "
+                f"benchmark_pause_ms_total={early.get('benchmark_pause_ms_total')}"
             ),
         ),
         check(
@@ -1787,12 +1868,30 @@ def summary_protocol_checks(summary: dict[str, Any]) -> list[dict[str, Any]]:
             ),
         ),
         check(
-            "rag_vector_candidate_k_matches_top_k",
+            "rag_vector_final_k_matches_top_k",
             int(summary.get("normal_rag_vector_candidate_k", -1) or -1)
             == int(summary.get("rag_top_k", -2) or -2),
             (
                 f"normal_rag_vector_candidate_k={summary.get('normal_rag_vector_candidate_k')} "
                 f"rag_top_k={summary.get('rag_top_k')}"
+            ),
+        ),
+        check(
+            "rag_vector_search_fanout_recorded",
+            int(summary.get("normal_rag_vector_search_multiplier", 0) or 0) > 1
+            and isinstance(summary.get("normal_rag_vector_search_k_policy"), str)
+            and "before dedupe" in summary.get("normal_rag_vector_search_k_policy", "")
+            and not probes_missing_numeric(summary, "normal_rag_vector_search_k")
+            and not probes_missing_numeric(summary, "normal_rag_vector_candidate_rows"),
+            (
+                "normal_rag_vector_search_multiplier="
+                f"{summary.get('normal_rag_vector_search_multiplier')} "
+                "normal_rag_vector_search_k_policy="
+                f"{summary.get('normal_rag_vector_search_k_policy')!r} "
+                "missing_search_k_events="
+                f"{probes_missing_numeric(summary, 'normal_rag_vector_search_k')} "
+                "missing_candidate_rows_events="
+                f"{probes_missing_numeric(summary, 'normal_rag_vector_candidate_rows')}"
             ),
         ),
         check(
@@ -2031,6 +2130,19 @@ def judge_protocol_checks(judge: dict[str, Any]) -> list[dict[str, Any]]:
             f"judge_repetitions={repetitions} required_range=3..5",
         ),
         check(
+            "judgment_complete",
+            judge.get("judgment_complete") is True
+            and int_or_default(judge.get("judged"), 0)
+            == int_or_default(judge.get("expected_judgments"), 0)
+            and int_or_default(judge.get("missing_judgments"), 0) == 0,
+            (
+                f"judgment_complete={judge.get('judgment_complete')} "
+                f"judged={judge.get('judged')} "
+                f"expected_judgments={judge.get('expected_judgments')} "
+                f"missing_judgments={judge.get('missing_judgments')}"
+            ),
+        ),
+        check(
             "judge_repetition_rows_complete",
             expected_repetitions >= MIN_JUDGE_REPETITIONS
             and int(repetition_consistency.get("events_with_expected_repetitions", 0) or 0)
@@ -2086,7 +2198,7 @@ def judge_protocol_checks(judge: dict[str, Any]) -> list[dict[str, Any]]:
             ),
         ),
         check(
-            "judge_media_attachments_uncapped",
+            "judge_media_attachment_count_uncapped",
             media.get("enabled") is True
             and int(media.get("max_media_per_system", 0) or 0) == -1,
             (
@@ -2095,11 +2207,34 @@ def judge_protocol_checks(judge: dict[str, Any]) -> list[dict[str, Any]]:
             ),
         ),
         check(
+            "judge_media_conversion_policy_recorded",
+            int_or_default(media.get("audio_max_seconds"), 0) > 0
+            and isinstance(media.get("audio_policy"), str)
+            and isinstance(media.get("image_policy"), str)
+            and isinstance(media.get("video_policy"), str)
+            and "one" in media.get("video_policy", "").lower()
+            and "frame" in media.get("video_policy", "").lower(),
+            (
+                f"audio_max_seconds={media.get('audio_max_seconds')} "
+                f"audio_policy={media.get('audio_policy')!r} "
+                f"image_policy={media.get('image_policy')!r} "
+                f"video_policy={media.get('video_policy')!r}"
+            ),
+        ),
+        check(
             "cortext_media_evidence_judged",
             cortext_media_count > 0,
             (
                 f"cortext_media_attachments={cortext_media_count} "
                 f"cortext_media={media.get('cortext_native')}"
+            ),
+        ),
+        check(
+            "media_memory_map_complete",
+            fairness.get("media_memory_map_complete") is True,
+            (
+                f"media_memory_map_complete={fairness.get('media_memory_map_complete')} "
+                f"fairness_counters={fairness.get('counters', {})}"
             ),
         ),
         check(
@@ -2895,6 +3030,7 @@ def ablation_artifact_checks(
     bad_packet_surfaces = []
     bad_context_fit = []
     bad_media_capabilities = []
+    bad_media_mapping = []
     for row in ablations:
         judge = row.get("judge_protocol", {})
         media = row.get("media_attachments", {})
@@ -2969,6 +3105,16 @@ def ablation_artifact_checks(
                             "attached_images_judged_when_present"
                         ),
                     },
+                }
+            )
+        if fairness.get("media_memory_map_complete") is not True:
+            bad_media_mapping.append(
+                {
+                    "name": row["name"],
+                    "media_memory_map_complete": fairness.get(
+                        "media_memory_map_complete"
+                    ),
+                    "fairness_counters": fairness.get("counters", {}),
                 }
             )
         randomization = row.get("packet_randomization", {})
@@ -3106,6 +3252,11 @@ def ablation_artifact_checks(
             f"bad_media_capabilities={bad_media_capabilities}",
         ),
         check(
+            "architecture_ablation_media_memory_maps_complete",
+            not bad_media_mapping,
+            f"bad_media_mapping={bad_media_mapping}",
+        ),
+        check(
             "architecture_ablation_judge_packets_randomized",
             not bad_judge_randomization,
             f"bad_randomization={bad_judge_randomization}",
@@ -3224,6 +3375,16 @@ def probe_schedule_manifest(summary: dict[str, Any]) -> dict[str, Any]:
         "warmup_events": summary.get("warmup_events"),
         "probe_stride": summary.get("probe_stride"),
         "rag_top_k": summary.get("rag_top_k"),
+        "normal_rag_vector_final_k": summary.get("normal_rag_vector_final_k"),
+        "normal_rag_vector_search_multiplier": summary.get(
+            "normal_rag_vector_search_multiplier"
+        ),
+        "normal_rag_vector_search_k_policy": summary.get(
+            "normal_rag_vector_search_k_policy"
+        ),
+        "normal_rag_vector_candidate_k_policy": summary.get(
+            "normal_rag_vector_candidate_k_policy"
+        ),
         "active_history_token_budget": summary.get("active_history_token_budget"),
         "probes": probes,
     }
@@ -3256,10 +3417,17 @@ def public_judge_summary(judge: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def cost_summary(summary: dict[str, Any], judge: dict[str, Any]) -> dict[str, Any]:
+def cost_summary(
+    summary: dict[str, Any], judge: dict[str, Any], early: dict[str, Any]
+) -> dict[str, Any]:
     wall_ms = float(summary.get("wall_ms", 0.0) or 0.0)
     consolidation_ms = float(summary.get("consolidation_ms_total", 0.0) or 0.0)
     wall_ms_excluding = float(summary.get("wall_ms_excluding_consolidation", 0.0) or 0.0)
+    early_pause_ms = max(
+        0.0, float_or_default(early.get("benchmark_pause_ms_total"), 0.0)
+    )
+    wall_ms_adjusted = max(0.0, wall_ms - early_pause_ms)
+    wall_ms_excluding_adjusted = max(0.0, wall_ms_excluding - early_pause_ms)
     processed = int(summary.get("processed_text_messages", 0) or 0) + int(
         summary.get("media_processed", 0) or 0
     )
@@ -3278,6 +3446,10 @@ def cost_summary(summary: dict[str, Any], judge: dict[str, Any]) -> dict[str, An
             by_day[day] = by_day.get(day, 0.0) + elapsed
         consolidation_ms_by_day = by_day
     cortext_probe_latencies = numeric_probe_values(summary, "cortext_latency_ms")
+    if not cortext_probe_latencies:
+        cortext_probe_latencies = numeric_probe_values(
+            summary, "cortext_probe_latency_ms"
+        )
     rag_total_latencies = numeric_probe_values(summary, "normal_rag_total_latency_ms")
     rag_retrieval_latencies = numeric_probe_values(summary, "normal_rag_retrieval_latency_ms")
     cortext_tokens = numeric_probe_values(summary, "cortext_context_tokens")
@@ -3290,6 +3462,18 @@ def cost_summary(summary: dict[str, Any], judge: dict[str, Any]) -> dict[str, An
         "processed_events_estimate": processed,
         "wall_ms": wall_ms,
         "wall_ms_excluding_consolidation": summary.get("wall_ms_excluding_consolidation"),
+        "early_judge_benchmark_pause_ms": early_pause_ms,
+        "early_judge_benchmark_pause_count": int_or_default(
+            early.get("benchmark_pause_count"), 0
+        ),
+        "wall_ms_pause_adjusted": wall_ms_adjusted,
+        "wall_ms_excluding_consolidation_pause_adjusted": (
+            wall_ms_excluding_adjusted
+        ),
+        "throughput_wall_time_policy": (
+            "raw wall_ms remains recorded; throughput subtracts benchmark "
+            "SIGSTOP time introduced by local early judging when present"
+        ),
         "consolidation_ms_total": consolidation_ms,
         "consolidation_runs": summary.get("consolidation_runs"),
         "consolidation_event_count": (
@@ -3331,12 +3515,14 @@ def cost_summary(summary: dict[str, Any], judge: dict[str, Any]) -> dict[str, An
         ),
         "peak_rss_mb": summary.get("peak_rss_mb"),
         "events_per_second_excluding_consolidation": (
-            processed / (wall_ms_excluding / 1000.0)
-            if wall_ms_excluding > 0
+            processed / (wall_ms_excluding_adjusted / 1000.0)
+            if wall_ms_excluding_adjusted > 0
             else 0.0
         ),
         "events_per_second_including_consolidation": (
-            processed / (wall_ms / 1000.0) if wall_ms > 0 else 0.0
+            processed / (wall_ms_adjusted / 1000.0)
+            if wall_ms_adjusted > 0
+            else 0.0
         ),
     }
 
@@ -3344,6 +3530,10 @@ def cost_summary(summary: dict[str, Any], judge: dict[str, Any]) -> dict[str, An
 def cost_checks(costs: dict[str, Any]) -> list[dict[str, Any]]:
     required_present = [
         "wall_ms_excluding_consolidation",
+        "wall_ms_pause_adjusted",
+        "wall_ms_excluding_consolidation_pause_adjusted",
+        "early_judge_benchmark_pause_ms",
+        "early_judge_benchmark_pause_count",
         "consolidation_ms_total",
         "consolidation_ms_by_day",
         "mean_consolidation_ms_per_run",
@@ -3376,6 +3566,34 @@ def cost_checks(costs: dict[str, Any]) -> list[dict[str, Any]]:
             (
                 f"consolidation_event_count={costs.get('consolidation_event_count')} "
                 f"consolidation_ms_by_day={costs.get('consolidation_ms_by_day')}"
+            ),
+        )
+    )
+    pause_ms = float_or_default(costs.get("early_judge_benchmark_pause_ms"), 0.0)
+    pause_count = int_or_default(costs.get("early_judge_benchmark_pause_count"), 0)
+    checks.append(
+        check(
+            "early_judge_pause_cost_accounting_recorded",
+            float_or_default(costs.get("wall_ms_pause_adjusted"), 0.0) > 0.0
+            and float_or_default(
+                costs.get("wall_ms_excluding_consolidation_pause_adjusted"), 0.0
+            )
+            > 0.0
+            and float_or_default(costs.get("wall_ms_pause_adjusted"), 0.0)
+            <= float_or_default(costs.get("wall_ms"), 0.0)
+            and float_or_default(
+                costs.get("wall_ms_excluding_consolidation_pause_adjusted"), 0.0
+            )
+            <= float_or_default(costs.get("wall_ms_excluding_consolidation"), 0.0)
+            and (pause_count == 0 or pause_ms > 0.0),
+            (
+                f"pause_ms={pause_ms} pause_count={pause_count} "
+                f"wall_ms={costs.get('wall_ms')} "
+                f"wall_ms_pause_adjusted={costs.get('wall_ms_pause_adjusted')} "
+                "wall_ms_excluding_consolidation="
+                f"{costs.get('wall_ms_excluding_consolidation')} "
+                "wall_ms_excluding_consolidation_pause_adjusted="
+                f"{costs.get('wall_ms_excluding_consolidation_pause_adjusted')}"
             ),
         )
     )
@@ -3451,7 +3669,7 @@ def cost_checks(costs: dict[str, Any]) -> list[dict[str, Any]]:
         checks.append(
             check(
                 "memory_use_recorded",
-                True,
+                float_or_default(costs.get("peak_rss_mb"), 0.0) > 0.0,
                 f"peak_rss_mb={costs.get('peak_rss_mb')}",
             )
         )
@@ -3512,6 +3730,7 @@ def load_protocol_freeze(path: pathlib.Path | None) -> dict[str, Any] | None:
 def protocol_freeze_checks(
     freeze: dict[str, Any] | None,
     input_fingerprint: dict[str, Any],
+    probe_manifest_body: dict[str, Any],
     schedule_manifest: dict[str, Any],
     benchmark_command: str,
     benchmark_executable: dict[str, Any],
@@ -3526,6 +3745,7 @@ def protocol_freeze_checks(
         ]
 
     expected_source_manifest = freeze.get("source_input_manifest_sha256")
+    expected_probe_manifest = freeze.get("frozen_probe_manifest_sha256")
     expected_probe_schedule = freeze.get("frozen_probe_schedule_sha256")
     expected_benchmark_command = freeze.get("benchmark_command_sha256")
     expected_benchmark_executable = freeze.get("benchmark_executable_sha256")
@@ -3548,6 +3768,15 @@ def protocol_freeze_checks(
             (
                 f"expected={expected_source_manifest} "
                 f"actual={input_fingerprint.get('manifest_sha256')}"
+            ),
+        ),
+        check(
+            "frozen_probe_manifest_matches_freeze",
+            bool(expected_probe_manifest)
+            and expected_probe_manifest == probe_manifest_body.get("manifest_sha256"),
+            (
+                f"expected={expected_probe_manifest} "
+                f"actual={probe_manifest_body.get('manifest_sha256')}"
             ),
         ),
         check(
@@ -3648,7 +3877,7 @@ def main() -> int:
         args.summary.parent / "early_judge" / "early_judge_manifest.json"
     )
     early = early_judge_summary(benchmark_status, early_manifest)
-    costs = cost_summary(summary, judge)
+    costs = cost_summary(summary, judge, early)
     claim_support = claim_support_summary(judge)
     ablation_names = [name for name, _, _ in args.ablation]
     git = git_info()
@@ -3672,6 +3901,7 @@ def main() -> int:
         protocol_freeze_checks(
             protocol_freeze,
             input_fingerprint,
+            manifest,
             schedule_manifest,
             args.benchmark_command,
             benchmark_executable,
@@ -3908,6 +4138,16 @@ def main() -> int:
             "normal_rag_vector_candidate_k": summary.get(
                 "normal_rag_vector_candidate_k"
             ),
+            "normal_rag_vector_final_k": summary.get("normal_rag_vector_final_k"),
+            "normal_rag_vector_search_multiplier": summary.get(
+                "normal_rag_vector_search_multiplier"
+            ),
+            "normal_rag_vector_search_k_policy": summary.get(
+                "normal_rag_vector_search_k_policy"
+            ),
+            "normal_rag_vector_candidate_k_policy": summary.get(
+                "normal_rag_vector_candidate_k_policy"
+            ),
             "normal_rag_compaction": summary.get("normal_rag_compaction"),
             "normal_rag_compaction_summary_policy": summary.get(
                 "normal_rag_compaction_summary_policy"
@@ -3983,6 +4223,9 @@ def main() -> int:
                 "schema": protocol_freeze.get("schema"),
                 "source_input_manifest_sha256": protocol_freeze.get(
                     "source_input_manifest_sha256"
+                ),
+                "frozen_probe_manifest_sha256": protocol_freeze.get(
+                    "frozen_probe_manifest_sha256"
                 ),
                 "frozen_probe_schedule_sha256": protocol_freeze.get(
                     "frozen_probe_schedule_sha256"

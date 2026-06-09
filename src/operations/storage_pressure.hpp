@@ -23,10 +23,10 @@ ComputeStoragePressureState (Transaction &tx,
 
 double
 GateScale (const StoragePressureState &state,
-           double low_pressure_scale = 0.2);
+           double low_pressure_scale);
 
 double
 RampScale (const StoragePressureState &state,
-           double low_pressure_scale = 0.2);
+           double low_pressure_scale);
 
 } // namespace cortext::operations::pressure

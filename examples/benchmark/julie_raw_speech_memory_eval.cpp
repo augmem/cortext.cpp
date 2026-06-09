@@ -38,9 +38,9 @@ struct Config
   fs::path label_bank_path = "data/label_bank/metadata.json";
   std::string models_dir = "models";
   std::string modality = "audio";
-  double focus = 0.35;
-  double sensitivity = 0.65;
-  double stability = 0.60;
+  double focus = 0.5;
+  double sensitivity = 0.5;
+  double stability = 0.5;
   int warmup_messages = 20;
   int probe_stride = 12;
   int rag_top_k = 5;
@@ -515,6 +515,12 @@ ParseArgs (int argc, char **argv)
         cfg.rag_top_k = std::stoi (require_value ());
       else if (arg == "--active-history-token-budget")
         cfg.active_history_token_budget = std::stoi (require_value ());
+      else if (arg == "--focus")
+        cfg.focus = std::stod (require_value ());
+      else if (arg == "--sensitivity")
+        cfg.sensitivity = std::stod (require_value ());
+      else if (arg == "--stability")
+        cfg.stability = std::stod (require_value ());
       else if (arg == "--shallow")
         cfg.deep_consolidation = false;
       else if (arg == "--no-label-bank")

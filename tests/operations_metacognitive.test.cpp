@@ -231,7 +231,7 @@ TEST_CASE ("Pressure-weighted idle decay preserves more confidence at low storag
   REQUIRE (pressure_weighted_confidence > 0.2);
 }
 
-TEST_CASE ("Pressure-weighted certainty requirement is independent of stability",
+TEST_CASE ("Pressure-weighted certainty requirement follows stability",
            "[operations][metacognitive][certainty][ablation]")
 {
   auto unique_store = SQLiteStore::Create (":memory:");
@@ -276,7 +276,7 @@ TEST_CASE ("Pressure-weighted certainty requirement is independent of stability"
   const double low_t = run (0.2);
   const double high_t = run (0.9);
 
-  REQUIRE (low_t == Catch::Approx (high_t).margin (1e-6));
+  REQUIRE (high_t < low_t);
 }
 
 TEST_CASE ("Pressure-weighted idle decay converges to time-only under high storage pressure",
@@ -365,11 +365,8 @@ TEST_CASE ("Disabling metacognitive confidence decay preserves prior confidence"
   ctx.SetMemoryUsageEvents ({ { 1LL, true, -1.0 } });
   op.Execute (ctx, cortext::testing::GetNullTransaction ());
 
-  const double expected_alpha = cortext::core::Clamp (
-      0.15 + 0.20
-                  * cortext::core::MetacognitiveSensitivity (cfg.focus,
-                                                            cfg.sensitivity),
-      0.15, 0.55);
+  const double expected_alpha = cortext::core::MetacognitiveConfidenceAlpha (
+      cfg.focus, cfg.sensitivity, cfg.stability);
   const double expected_confidence
       = std::max (0.2, cortext::core::Ewma (1.0, 0.2, expected_alpha));
   REQUIRE (pctx.metacognitive_confidence

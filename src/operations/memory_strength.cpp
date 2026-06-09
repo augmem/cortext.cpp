@@ -40,7 +40,8 @@ UpdateMemoryStrength::Execute (OperationContext &context, Transaction &tx) const
             : ((p_ctx.half_life > constants::kNormEpsilon)
                    ? p_ctx.half_life
                    : core::BaseHalfLifePrior (T));
-  const double L_cg = std::round (core::Lerp (8.0, 32.0, T));
+  const double L_cg = std::round (
+      core::MemoryContextualGainWindow (F_raw, S_raw, T));
   const double alpha_cg
       = (L_cg > 0.0) ? (constants::kTwo / (L_cg + 1.0)) : 1.0;
   const double serial_mult
@@ -111,14 +112,20 @@ UpdateMemoryStrength::Execute (OperationContext &context, Transaction &tx) const
           = get_int (rows[0].at ("flashbulb"), 0) != 0 ? 1 : 0;
       const double half_life_bonus_raw
           = get_double (rows[0].at ("half_life_bonus"), 0.0);
+      const auto trace_fallback = core::MemoryStoredTraceFallbackPolicy (
+          F_raw, S_raw, T);
       const double trace_fast_prev
-          = get_double (rows[0].at ("trace_fast"), strength_prev);
+          = get_double (rows[0].at ("trace_fast"),
+                        strength_prev * trace_fallback.fast);
       const double trace_med_prev
-          = get_double (rows[0].at ("trace_med"), strength_prev * 0.5);
+          = get_double (rows[0].at ("trace_med"),
+                        strength_prev * trace_fallback.medium);
       const double trace_slow_prev
-          = get_double (rows[0].at ("trace_slow"), strength_prev * 0.2);
+          = get_double (rows[0].at ("trace_slow"),
+                        strength_prev * trace_fallback.slow);
       const double trace_ultra_prev
-          = get_double (rows[0].at ("trace_ultra"), strength_prev * 0.05);
+          = get_double (rows[0].at ("trace_ultra"),
+                        strength_prev * trace_fallback.ultra);
 
       const long long access_base
           = has_last_access ? last_access_prev : created_at;
@@ -154,11 +161,12 @@ UpdateMemoryStrength::Execute (OperationContext &context, Transaction &tx) const
       const int n_traces
           = eviction_override.trace_count.has_value ()
                 ? core::Clamp (*eviction_override.trace_count, 1, 4)
-                : 2 + static_cast<int> (std::round (2.0 * T));
-      const double tau_fast = 0.10 * memory_half_life;
-      const double tau_med = 0.50 * memory_half_life;
-      const double tau_slow = 2.00 * memory_half_life;
-      const double tau_ultra = 8.00 * memory_half_life;
+                : core::MemoryTraceCount (F_raw, S_raw, T);
+      const auto tau_policy = core::MemoryTraceTauPolicy (F_raw, S_raw, T);
+      const double tau_fast = tau_policy.fast * memory_half_life;
+      const double tau_med = tau_policy.medium * memory_half_life;
+      const double tau_slow = tau_policy.slow * memory_half_life;
+      const double tau_ultra = tau_policy.ultra * memory_half_life;
       const double taus[4] = { tau_fast, tau_med, tau_slow, tau_ultra };
       double traces[4] = { trace_fast_prev, trace_med_prev,
                            trace_slow_prev, trace_ultra_prev };
@@ -207,7 +215,7 @@ UpdateMemoryStrength::Execute (OperationContext &context, Transaction &tx) const
                     && !*eviction_override.coupling_enabled
                 ? 0.0
                 : eviction_override.coupling_strength.value_or (
-                    0.05 + 0.10 * T);
+                    core::MemoryTraceCoupling (F_raw, S_raw, T));
       traces[1] = core::Clamp (traces[1] + coupling * traces[0],
                                constants::kNormalizedMin,
                                constants::kNormalizedMax);
@@ -232,10 +240,11 @@ UpdateMemoryStrength::Execute (OperationContext &context, Transaction &tx) const
         }
       else
         {
-          w_raw[0] = 0.40 - 0.25 * T;
-          w_raw[1] = 0.25;
-          w_raw[2] = 0.20 + 0.15 * T;
-          w_raw[3] = 0.15 + 0.10 * T;
+          const auto weights = core::MemoryTraceWeightPolicy (F_raw, S_raw, T);
+          w_raw[0] = weights.fast;
+          w_raw[1] = weights.medium;
+          w_raw[2] = weights.slow;
+          w_raw[3] = weights.ultra;
         }
       double w_sum = 0.0;
       for (int i = 0; i < 4; ++i)

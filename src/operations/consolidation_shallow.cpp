@@ -106,17 +106,12 @@ ConsolidationShallow::Execute (OperationContext &context, Transaction &tx) const
     }
 
   const auto &cfg = context.GetConfig ();
-  const double F_eff = core::FocusBias (cfg.focus);
-  const double S_eff = core::SensitivityBias (cfg.sensitivity);
-  const double T_eff = core::Clamp (cfg.stability, 0.0, 1.0);
-
-  const int max_labels = std::max (
-      1, static_cast<int> (std::round (
-             core::Lerp (2.0, 6.0, S_eff)
-             * core::Lerp (1.0, 0.7, F_eff))));
-  const double label_threshold = core::Clamp (
-      core::Lerp (0.30, 0.60, F_eff) * core::Lerp (1.0, 1.1, T_eff),
-      0.15, 0.95);
+  const int max_labels = core::ShallowConsolidationMaxLabels (
+      cfg.focus, cfg.sensitivity, cfg.stability);
+  const double label_threshold = core::ShallowConsolidationLabelMinSimilarity (
+      cfg.focus, cfg.sensitivity, cfg.stability);
+  const double derived_source_edge_weight = core::DerivedSourceEdgeWeight (
+      cfg.focus, cfg.sensitivity, cfg.stability);
 
   const int expected_dim = std::max (
       1, static_cast<int> (clusters[0].centroid.size ()));
@@ -229,8 +224,9 @@ ConsolidationShallow::Execute (OperationContext &context, Transaction &tx) const
                   AddWrite (tx,
                             "INSERT OR IGNORE INTO associations "
                             "(source_memory_id, target_memory_id, edge_type, weight) "
-                            "VALUES (?, ?, 'derived_from', 1.0)",
-                            { centroid_memory_id, src_memory_id });
+                            "VALUES (?, ?, 'derived_from', ?)",
+                            { centroid_memory_id, src_memory_id,
+                              derived_source_edge_weight });
                 }
             }
         }

@@ -35,6 +35,10 @@
 #include <unordered_set>
 #include <vector>
 
+#if defined(__unix__) || defined(__APPLE__)
+#include <sys/resource.h>
+#endif
+
 namespace fs = std::filesystem;
 
 namespace
@@ -42,6 +46,28 @@ namespace
 
 constexpr const char *kGabeSourceId = "Gabe";
 constexpr const char *kJulieSourceId = "Julie";
+
+double
+PeakResidentSetMb ()
+{
+#if defined(__APPLE__)
+  struct rusage usage
+  {
+  };
+  if (getrusage (RUSAGE_SELF, &usage) != 0)
+    return 0.0;
+  return static_cast<double> (usage.ru_maxrss) / (1024.0 * 1024.0);
+#elif defined(__unix__)
+  struct rusage usage
+  {
+  };
+  if (getrusage (RUSAGE_SELF, &usage) != 0)
+    return 0.0;
+  return static_cast<double> (usage.ru_maxrss) / 1024.0;
+#else
+  return 0.0;
+#endif
+}
 
 struct Config
 {
@@ -58,6 +84,9 @@ struct Config
   int rag_top_k = 5;
   int max_injected_memories = 8;
   int active_history_token_budget = 8000;
+  double focus = 0.5;
+  double sensitivity = 0.5;
+  double stability = 0.5;
   int consolidate_every = 20;
   int judge_limit = 6;
   std::string judge_model = "nemotron-3-nano-omni-30b-a3b-8bit";
@@ -113,6 +142,7 @@ struct Aggregate
   double latency_ms_sum = 0.0;
   std::vector<long long> prompt_token_samples;
   std::vector<long long> context_token_samples;
+  std::vector<double> latency_ms_samples;
 };
 
 struct QualityAggregate
@@ -1304,8 +1334,7 @@ bool
 IsLoopbackJudgeHost (const std::string &host)
 {
   const std::string lower = LowerAscii (host);
-  return lower == "localhost" || lower == "127.0.0.1" || lower == "::1"
-         || lower == "0.0.0.0";
+  return lower == "localhost" || lower == "127.0.0.1" || lower == "::1";
 }
 
 std::string
@@ -3315,6 +3344,7 @@ AddAggregate (Aggregate &agg, long long prompt_tokens, long long context_tokens,
   agg.latency_ms_sum += latency_ms;
   agg.prompt_token_samples.push_back (prompt_tokens);
   agg.context_token_samples.push_back (context_tokens);
+  agg.latency_ms_samples.push_back (latency_ms);
 }
 
 void
@@ -3344,6 +3374,22 @@ Percentile (std::vector<long long> values, double q)
   const double frac = pos - static_cast<double> (lo);
   return static_cast<double> (values[lo]) * (1.0 - frac)
          + static_cast<double> (values[hi]) * frac;
+}
+
+double
+Percentile (std::vector<double> values, double q)
+{
+  if (values.empty ())
+    return 0.0;
+  std::sort (values.begin (), values.end ());
+  const double pos = cortext::core::Clamp (q, 0.0, 1.0)
+                     * static_cast<double> (values.size () - 1);
+  const auto lo = static_cast<size_t> (std::floor (pos));
+  const auto hi = static_cast<size_t> (std::ceil (pos));
+  if (lo == hi)
+    return values[lo];
+  const double frac = pos - static_cast<double> (lo);
+  return values[lo] * (1.0 - frac) + values[hi] * frac;
 }
 
 nlohmann::json
@@ -3388,6 +3434,9 @@ AggregateJson (const Aggregate &agg)
   out["context_tokens_p50"] = Percentile (agg.context_token_samples, 0.50);
   out["context_tokens_p90"] = Percentile (agg.context_token_samples, 0.90);
   out["context_tokens_p99"] = Percentile (agg.context_token_samples, 0.99);
+  out["probe_latency_ms_p50"] = Percentile (agg.latency_ms_samples, 0.50);
+  out["probe_latency_ms_p95"] = Percentile (agg.latency_ms_samples, 0.95);
+  out["probe_latency_ms_p99"] = Percentile (agg.latency_ms_samples, 0.99);
   return out;
 }
 
@@ -3896,6 +3945,12 @@ ParseArgs (int argc, char **argv)
         cfg.max_injected_memories = std::stoi (require_value ());
       else if (arg == "--active-history-token-budget")
         cfg.active_history_token_budget = std::stoi (require_value ());
+      else if (arg == "--focus")
+        cfg.focus = std::stod (require_value ());
+      else if (arg == "--sensitivity")
+        cfg.sensitivity = std::stod (require_value ());
+      else if (arg == "--stability")
+        cfg.stability = std::stod (require_value ());
       else if (arg == "--consolidate-every")
         cfg.consolidate_every = std::stoi (require_value ());
       else if (arg == "--judge-model")
@@ -4007,9 +4062,9 @@ main (int argc, char **argv)
       fs::remove (cfg.db_path.string () + "-shm");
 
       cortext::Cortext::Config cortext_cfg;
-      cortext_cfg.focus = 0.35;
-      cortext_cfg.sensitivity = 0.65;
-      cortext_cfg.stability = 0.60;
+      cortext_cfg.focus = cfg.focus;
+      cortext_cfg.sensitivity = cfg.sensitivity;
+      cortext_cfg.stability = cfg.stability;
       if (cfg.use_label_bank)
         cortext_cfg.label_bank_path = cfg.label_bank_path.string ();
 
@@ -4147,6 +4202,8 @@ main (int argc, char **argv)
               const int vector_rag_item_limit = std::max (
                   1, cortext::core::RetrievalGraphExpandedRagMaxItems (
                          cortext_cfg.focus, cortext_cfg.stability));
+              const auto normal_rag_started
+                  = std::chrono::steady_clock::now ();
               std::vector<float> rag_query_embedding;
               rag_encoder_selection.encoder->EncodeText (message_text,
                                                          rag_query_embedding);
@@ -4156,6 +4213,12 @@ main (int argc, char **argv)
                   *vector_rag_store, rag_docs, rag_query_embedding,
                   msg.timestamp, cortext_cfg.focus, cortext_cfg.stability,
                   static_cast<std::size_t> (vector_rag_item_limit));
+              const auto normal_rag_retrieval_ended
+                  = std::chrono::steady_clock::now ();
+              const double normal_rag_retrieval_latency_ms
+                  = std::chrono::duration<double, std::milli> (
+                        normal_rag_retrieval_ended - normal_rag_started)
+                        .count ();
               const std::string rag_context = BuildSimpleRagSystemPrompt (
                   vector_rag_packet.docs,
                   static_cast<std::size_t> (vector_rag_item_limit));
@@ -4209,6 +4272,11 @@ main (int argc, char **argv)
                   = active_history_context + rag_context;
               const long long normal_rag_total_context_tokens
                   = active_history_tokens + rag_context_tokens;
+              const auto normal_rag_ended = std::chrono::steady_clock::now ();
+              const double normal_rag_total_latency_ms
+                  = std::chrono::duration<double, std::milli> (
+                        normal_rag_ended - normal_rag_started)
+                        .count ();
               const auto stm_recent_docs
                   = RecentDocs (rag_docs, cfg.source_stm_recent_k);
               const auto ltm_lexical_docs
@@ -4273,7 +4341,7 @@ main (int argc, char **argv)
                             active_history_items
                                 + vector_rag_packet.docs.size (),
                             Overlap (query_tokens, normal_rag_context),
-                            0.0);
+                            normal_rag_total_latency_ms);
               GraphExpandedRagPacket graph_expanded_packet;
               std::string graph_expanded_rag_context;
               long long graph_expanded_rag_source_tokens = 0;
@@ -4330,6 +4398,7 @@ main (int argc, char **argv)
                   = Overlap (query_tokens,
                              cortext_working_context + cortext_memory_context);
 	              probe["cortext_probe_latency_ms"] = cortext_latency_ms;
+	              probe["cortext_latency_ms"] = cortext_latency_ms;
               probe["cortext_probe_policy"]
                   = "single_durable_chat_turn_reused_for_probe_and_ingest";
 	              probe["retrieval_debug"] = RetrievalDebugJson ();
@@ -4380,6 +4449,10 @@ main (int argc, char **argv)
                   = active_history_items + vector_rag_packet.docs.size ();
               probe["normal_rag_overlap"]
                   = Overlap (query_tokens, normal_rag_context);
+              probe["normal_rag_retrieval_latency_ms"]
+                  = normal_rag_retrieval_latency_ms;
+              probe["normal_rag_total_latency_ms"]
+                  = normal_rag_total_latency_ms;
               if (cfg.graph_expanded_rag_bakeoff)
                 {
                   nlohmann::json graph_rag_json;
@@ -5335,6 +5408,11 @@ main (int argc, char **argv)
       out["rag_top_k"] = cfg.rag_top_k;
       out["max_injected_memories"] = cfg.max_injected_memories;
       out["active_history_token_budget"] = cfg.active_history_token_budget;
+      out["knobs"] = {
+        { "focus", cfg.focus },
+        { "sensitivity", cfg.sensitivity },
+        { "stability", cfg.stability },
+      };
       out["consolidate_every"] = cfg.consolidate_every;
       out["daily_consolidation_enabled"] = cfg.daily_consolidation;
       out["consolidation_policy"] =
@@ -5385,6 +5463,7 @@ main (int argc, char **argv)
           = std::chrono::duration_cast<std::chrono::milliseconds> (run_ended
                                                                    - run_started)
                 .count ();
+      out["peak_rss_mb"] = PeakResidentSetMb ();
       out["cortext"] = AggregateJson (cortext_agg);
       out["cortext_ltm_only"] = AggregateJson (cortext_ltm_agg);
       out["simple_rag"] = AggregateJson (rag_agg);

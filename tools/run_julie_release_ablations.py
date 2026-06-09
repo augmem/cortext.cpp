@@ -16,11 +16,20 @@ from datetime import datetime, timezone
 
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
+CORTEXT_RELEASE_ENV_ALLOWLIST = {
+    "CORTEXT_JUDGE_BASE_URL",
+    "CORTEXT_OLLAMA_BASE_URL",
+}
+NO_GRAPH_EXPANSION_ENV = {
+    "CORTEXT_DISABLE_SOURCE_SEED_GRAPH_EXPANSION": "1",
+    "CORTEXT_DISABLE_DURABLE_SOURCE_SET_RETRIEVAL": "1",
+    "CORTEXT_DISABLE_PRECONSOLIDATED_LABEL_GRAPH": "1",
+}
 CASES = [
     ("no_daily_consolidation", {}, False),
     (
         "no_graph_expansion",
-        {"CORTEXT_DISABLE_SOURCE_SEED_GRAPH_EXPANSION": "1"},
+        NO_GRAPH_EXPANSION_ENV,
         True,
     ),
     ("no_media_source_blobs", {"CORTEXT_DISABLE_SOURCE_BLOBS": "1"}, True),
@@ -35,6 +44,11 @@ CASES = [
         True,
     ),
     ("no_fact_boosts", {"CORTEXT_DISABLE_FACTS": "1"}, True),
+    (
+        "no_temporal_fact_boosts",
+        {"CORTEXT_DISABLE_TEMPORAL_RETRIEVAL": "1", "CORTEXT_DISABLE_FACTS": "1"},
+        True,
+    ),
 ]
 
 REQUIRED_BENCH_FLAGS = [
@@ -69,7 +83,52 @@ def is_hosted_provider_env_key(key: str) -> bool:
     return any(marker in upper for marker in HOSTED_PROVIDER_ENV_MARKERS)
 
 
+def redacted_env_value(key: str, value: str) -> str:
+    blocked = ("KEY", "TOKEN", "SECRET", "PASSWORD")
+    if any(part in key.upper() for part in blocked):
+        return "<redacted>"
+    return value
+
+
+def is_cortext_behavior_env_key(key: str) -> bool:
+    return key.startswith("CORTEXT_") and key not in CORTEXT_RELEASE_ENV_ALLOWLIST
+
+
+def cortext_behavior_env(env: dict[str, str]) -> dict[str, str]:
+    return {
+        key: redacted_env_value(key, value)
+        for key, value in sorted(env.items())
+        if is_cortext_behavior_env_key(key)
+    }
+
+
+def cortext_behavior_env_guard(env: dict[str, str]) -> dict:
+    leaked = cortext_behavior_env(env)
+    return {
+        "mode": "fail_closed",
+        "policy": (
+            "Julie release ablations reject ambient CORTEXT_* variables except "
+            "local judge endpoint metadata before applying named ablation "
+            "overrides."
+        ),
+        "allowed_cortext_env_keys": sorted(CORTEXT_RELEASE_ENV_ALLOWLIST),
+        "leakage_detected": bool(leaked),
+        "leaked_cortext_behavior_env": leaked,
+    }
+
+
+def ensure_no_ambient_cortext_behavior_env(env: dict[str, str]) -> None:
+    guard = cortext_behavior_env_guard(env)
+    if guard["leakage_detected"]:
+        raise RuntimeError(
+            "refusing to launch Julie release ablations with ambient CORTEXT_* "
+            "behavior variables: "
+            + json.dumps(guard, sort_keys=True)
+        )
+
+
 def sanitized_subprocess_env() -> tuple[dict[str, str], list[str]]:
+    ensure_no_ambient_cortext_behavior_env(dict(os.environ))
     env = dict(os.environ)
     stripped = sorted(key for key in env if is_hosted_provider_env_key(key))
     for key in stripped:
@@ -145,6 +204,14 @@ def write_environment_snapshot(
                     key: env_overrides[key]
                     for key in sorted(env_overrides)
                 },
+                "ambient_cortext_behavior_env_guard": cortext_behavior_env_guard(
+                    dict(os.environ)
+                ),
+                "ambient_cortext_behavior_env_policy": (
+                    "ambient parent CORTEXT_* behavior variables are rejected; "
+                    "only explicit named ablation env_overrides are applied "
+                    "after sanitizing the parent environment"
+                ),
                 "hosted_provider_env_policy": (
                     "hosted-provider variables are stripped before launching "
                     "ablation benchmarks, judges, and reports"
@@ -571,7 +638,7 @@ def main() -> int:
     parser.add_argument("--early-judge", choices=("auto", "on", "off"), default="auto")
     parser.add_argument(
         "--early-judge-milestones",
-        default="1,2,3,4,5,6,7,8,9,10,11,12",
+        default="1,2,3,4,5,6,7,8,9,10,11,12,16",
     )
     parser.add_argument("--early-judge-periodic-stride", type=int, default=1)
     parser.add_argument("--early-judge-poll-seconds", type=float, default=5.0)
@@ -581,7 +648,7 @@ def main() -> int:
     parser.add_argument("--early-judge-timeout-s", type=int, default=180)
     parser.add_argument("--early-judge-context-window-tokens", type=int, default=32768)
     parser.add_argument("--early-judge-packet-item-limit", type=int, default=256)
-    parser.add_argument("--judge-packet-item-limit", type=int, default=256)
+    parser.add_argument("--judge-packet-item-limit", type=int, default=-1)
     parser.add_argument("--early-quality-gate-min-milestone", type=int, default=8)
     parser.add_argument("--early-quality-trend-gate-min-milestone", type=int, default=4)
     parser.add_argument("--early-quality-trend-window", type=int, default=2)
@@ -636,6 +703,7 @@ def main() -> int:
         raise RuntimeError(
             "--early-quality-gate-min-history-budget-ratio must be in [0, 1]"
         )
+    ensure_no_ambient_cortext_behavior_env(dict(os.environ))
 
     wait_for_json(args.main_report)
     print(f"[ablation-pipeline] main report ready {datetime.now().isoformat()}", flush=True)

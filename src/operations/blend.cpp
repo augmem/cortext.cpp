@@ -15,11 +15,6 @@ namespace cortext::operations
 namespace
 {
 constexpr double kTiny = 1e-6;
-constexpr double kLamMin = 0.90;
-constexpr double kLamMax = 0.99;
-constexpr double kLamSlope = 0.09;
-constexpr double kTauRlsMin = 20.0;
-constexpr double kTauRlsMax = 80.0;
 
 // Number of metrics supported
 constexpr size_t kNumMetrics = 12;
@@ -185,7 +180,7 @@ BootstrapWeightByIndex (size_t metric_index, double F, double S, double T)
 {
   if (metric_index >= kNumMetrics)
     {
-      return 0.5; // Fallback for unknown metrics
+      return core::BlendBootstrapFallback (F, S, T);
     }
   const double f_eff = core::FocusBias (F);
   const double s_eff = core::SensitivityBias (S);
@@ -210,7 +205,7 @@ BootstrapWeight (operations::Metric name, double F, double S, double T)
           return BootstrapWeightByIndex (i, F, S, T);
         }
     }
-  return 0.5; // Fallback
+  return core::BlendBootstrapFallback (F, S, T);
 }
 
 inline void
@@ -313,7 +308,7 @@ UpdateRLSCovariance (const std::vector<double> &K,
 double
 ComputeBlendConfidence (int signals_processed, double stability)
 {
-  const double tau_rls = core::Lerp (kTauRlsMin, kTauRlsMax, stability);
+  const double tau_rls = core::BlenderRLSObservationTau (stability);
   const double count = static_cast<double> (std::max (0, signals_processed));
   return (count >= constants::kTwo)
             ? (1.0 - std::exp (-count / std::max (constants::kNormEpsilon, tau_rls)))
@@ -370,8 +365,7 @@ FitMetricWeightsRLS::Execute (OperationContext &context, Transaction &tx) const
   auto &p_ctx = context.GetProcessorContext ();
   const auto &cfg = context.GetConfig ();
   EnsureStateInitialized (p_ctx, cfg);
-  const int k = std::max (
-      1, static_cast<int> (std::round (core::Lerp (1.0, 8.0, cfg.stability))));
+  const int k = core::BlenderUpdateInterval (cfg.stability);
   p_ctx.blender_update_count += 1;
   if ((p_ctx.blender_update_count % k) != 0)
     {
@@ -386,19 +380,19 @@ FitMetricWeightsRLS::Execute (OperationContext &context, Transaction &tx) const
           context.GetMetric (operations::Metric::utility).value_or (0.0));
   const double o_unc = core::Clamp (1.0 - p_ctx.u_t, 0.0, 1.0);
   const double o_user = 0.0;
-  const double f_eff = core::FocusBias (cfg.focus);
-  const double s_eff = core::SensitivityBias (cfg.sensitivity);
-  const double w_use = 0.4 + 0.2 * f_eff;
-  const double w_pred = 0.3 + 0.2 * s_eff;
-  const double w_unc = 0.2 + 0.2 * cfg.stability;
-  const double w_user = 0.1;
+  const auto outcome_weights = core::BlenderOutcomeScoringWeights (
+      cfg.focus, cfg.sensitivity, cfg.stability);
+  const double w_use = outcome_weights.used;
+  const double w_pred = outcome_weights.predictive;
+  const double w_unc = outcome_weights.uncertainty;
+  const double w_user = outcome_weights.user;
   const double w_sum = std::max (kTiny, w_use + w_pred + w_unc + w_user);
   const double outcome_t
       = core::Clamp ((w_use * o_use + w_pred * o_pred + w_unc * o_unc
                       + w_user * o_user)
                          / w_sum,
                      0.0, 1.0);
-  const double alpha_out = core::Lerp (0.12, 0.03, cfg.stability);
+  const double alpha_out = core::BlenderOutcomeAlpha (cfg.stability);
   p_ctx.outcome_pred = core::Ewma (p_ctx.outcome_pred, outcome_t, alpha_out);
   p_ctx.delta_reward = outcome_t - p_ctx.outcome_pred;
   double y = outcome_t;
@@ -410,8 +404,7 @@ FitMetricWeightsRLS::Execute (OperationContext &context, Transaction &tx) const
     }
   y_hat = core::Clamp (y_hat, 0.0, 1.0);
   const double e = y - y_hat;
-  const double lam
-      = std::min (kLamMax, std::max (kLamMin, kLamMin + kLamSlope * cfg.stability));
+  const double lam = core::BlenderRLSForgettingFactor (cfg.stability);
   auto &P = p_ctx.blender_P;
   if (P.empty ())
     {
@@ -553,7 +546,7 @@ ComputeCompositeScore::Execute (OperationContext &context, Transaction &tx) cons
   context.SetCompositeScore (y);
 
   // Compute tau_rls for logging
-  const double tau_rls = core::Lerp (kTauRlsMin, kTauRlsMax, cfg.stability);
+  const double tau_rls = core::BlenderRLSObservationTau (cfg.stability);
   std::vector<double> w_norm (w_raw.size (), 0.0);
   if (weight_sum > 0.0)
     {

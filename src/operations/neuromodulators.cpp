@@ -26,8 +26,8 @@ UpdateNeuromodulators::Execute (OperationContext &context, Transaction &tx) cons
   const double F = cfg.focus;
   const double S = cfg.sensitivity;
   const double T = cfg.stability;
-  const double F_eff = core::FocusBias (F);
   const double S_eff = core::SensitivityBias (S);
+  const auto policy = core::NeuromodulatorPolicyForKnobs (F, S, T);
 
   const double novelty
       = context.GetMetric (operations::Metric::rarity).value_or (0.0);
@@ -36,23 +36,22 @@ UpdateNeuromodulators::Execute (OperationContext &context, Transaction &tx) cons
   const double arousal = context.GetArousal ();
   const double retrieval_pressure
       = core::Clamp (
-          static_cast<double> (context.GetRetrievalQueueDepth ()) / 10.0, 0.0,
-          1.0);
-
-  const double ACh_base = core::Clamp (
-      0.15 + 0.55 * S_eff + 0.25 * (1.0 - T) - 0.15 * F_eff, 0.0, 1.0);
-  const double NE_base
-      = core::Clamp (0.10 + 0.60 * S_eff + 0.20 * (1.0 - T), 0.0, 1.0);
-  const double DA_base
-      = core::Clamp (0.10 + 0.40 * F_eff + 0.30 * T, 0.0, 1.0);
+          static_cast<double> (context.GetRetrievalQueueDepth ())
+              / policy.retrieval_pressure_depth,
+          0.0, 1.0);
 
   p_ctx.neuromod_ach
-      = core::Clamp (ACh_base + 0.35 * novelty - 0.20 * retrieval_pressure,
+      = core::Clamp (policy.ach_base + policy.ach_novelty_gain * novelty
+                         - policy.ach_retrieval_pressure_gain
+                               * retrieval_pressure,
                      0.0, 1.0);
   p_ctx.neuromod_ne
-      = core::Clamp (NE_base + 0.50 * surprisal + 0.30 * arousal, 0.0, 1.0);
+      = core::Clamp (policy.ne_base + policy.ne_surprisal_gain * surprisal
+                         + policy.ne_arousal_gain * arousal,
+                     0.0, 1.0);
   p_ctx.neuromod_da
-      = core::Clamp (DA_base + std::max (0.0, p_ctx.delta_reward), 0.0, 1.0);
+      = core::Clamp (policy.da_base + std::max (0.0, p_ctx.delta_reward), 0.0,
+                     1.0);
 
   // Oscillatory gating (no discrete modes)
   const uint64_t now_ts = context.GetSignal ().timestamp;
@@ -61,12 +60,18 @@ UpdateNeuromodulators::Execute (OperationContext &context, Transaction &tx) cons
     {
       delta_t = static_cast<double> (now_ts - p_ctx.last_signal_timestamp) / 1000.0;
     }
-  const double omega = core::Lerp (0.03, 0.12, S_eff) * core::Lerp (1.2, 0.8, T);
+  const double omega = policy.oscillation_rate;
   p_ctx.osc_phase = std::fmod (p_ctx.osc_phase + omega * delta_t, kTwoPi);
   const double osc_t = 0.5 + 0.5 * std::sin (p_ctx.osc_phase);
 
-  const double encode_bias = p_ctx.neuromod_ach * (0.7 + 0.3 * S_eff);
-  p_ctx.encode_bias = encode_bias * (0.6 + 0.4 * osc_t);
+  const double encode_bias
+      = p_ctx.neuromod_ach
+        * (policy.encode_sensitivity_floor
+           + policy.encode_sensitivity_gain * S_eff);
+  p_ctx.encode_bias
+      = encode_bias
+        * (policy.encode_oscillation_floor
+           + policy.encode_oscillation_gain * osc_t);
   p_ctx.encode_bias = core::Clamp (p_ctx.encode_bias, 0.0, 1.0);
   p_ctx.retrieval_bias = core::Clamp (1.0 - p_ctx.encode_bias, 0.0, 1.0);
   const double write_threshold_scale

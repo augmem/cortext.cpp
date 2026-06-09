@@ -45,6 +45,7 @@ namespace
 
 constexpr const char *kGabeSourceId = "Gabe";
 constexpr const char *kJulieSourceId = "Julie";
+constexpr long long kNormalRagVectorSearchMultiplier = 8;
 
 struct Config
 {
@@ -902,7 +903,9 @@ BuildVectorRagPacket (cortext::Store &store,
 
   const long long requested = std::max<long long> (1, requested_top_k);
   packet.vector_search_k = std::min<long long> (
-      std::max<long long> (requested, requested * 8), packet.prior_chat_rows);
+      std::max<long long> (
+          requested, requested * kNormalRagVectorSearchMultiplier),
+      packet.prior_chat_rows);
 
   auto rows = store.Execute (
       "SELECT s.source_id, s.timestamp, distance "
@@ -1720,6 +1723,14 @@ main (int argc, char **argv)
           out["normal_rag_vector_query_encoder_path"]
               = rag_encoder_selection.resolved_path.string ();
           out["normal_rag_vector_candidate_k"] = cfg.rag_top_k;
+          out["normal_rag_vector_final_k"] = cfg.rag_top_k;
+          out["normal_rag_vector_search_multiplier"]
+              = kNormalRagVectorSearchMultiplier;
+          out["normal_rag_vector_search_k_policy"]
+              = "min(prior_text_rows, max(rag_top_k, rag_top_k * "
+                "normal_rag_vector_search_multiplier)) before dedupe";
+          out["normal_rag_vector_candidate_k_policy"]
+              = "final unique text RAG packet cap after vector-search fanout";
           out["normal_rag_context_token_policy"]
               = "text rolling chat after compaction plus unique text vector "
                 "RAG hits outside the active rolling window";
@@ -1955,6 +1966,14 @@ main (int argc, char **argv)
           out["normal_rag_vector_query_encoder_path"]
               = rag_encoder_selection.resolved_path.string ();
           out["normal_rag_vector_candidate_k"] = cfg.rag_top_k;
+          out["normal_rag_vector_final_k"] = cfg.rag_top_k;
+          out["normal_rag_vector_search_multiplier"]
+              = kNormalRagVectorSearchMultiplier;
+          out["normal_rag_vector_search_k_policy"]
+              = "min(prior_text_rows, max(rag_top_k, rag_top_k * "
+                "normal_rag_vector_search_multiplier)) before dedupe";
+          out["normal_rag_vector_candidate_k_policy"]
+              = "final unique text RAG packet cap after vector-search fanout";
           out["normal_rag_context_token_policy"]
               = "text rolling chat after compaction plus unique text vector "
                 "RAG hits outside the active rolling window";
@@ -2399,6 +2418,14 @@ main (int argc, char **argv)
       out["normal_rag_vector_query_encoder_path"]
           = rag_encoder_selection.resolved_path.string ();
       out["normal_rag_vector_candidate_k"] = cfg.rag_top_k;
+      out["normal_rag_vector_final_k"] = cfg.rag_top_k;
+      out["normal_rag_vector_search_multiplier"]
+          = kNormalRagVectorSearchMultiplier;
+      out["normal_rag_vector_search_k_policy"]
+          = "min(prior_text_rows, max(rag_top_k, rag_top_k * "
+            "normal_rag_vector_search_multiplier)) before dedupe";
+      out["normal_rag_vector_candidate_k_policy"]
+          = "final unique text RAG packet cap after vector-search fanout";
       out["normal_rag_context_token_policy"]
           = "text rolling chat after compaction plus unique text vector RAG "
             "hits outside the active rolling window";

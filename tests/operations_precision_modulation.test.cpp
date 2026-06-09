@@ -1,7 +1,7 @@
 // tests/operations_precision_modulation.test.cpp
 // Tests for §4.2.5 Precision-Based Threshold Adjustment
 // Spec: Δθ_prec = clamp(κ_prec × F × (coherence_struct_t − 0.5), −cap_prec, +cap_prec)
-// where κ_prec = 0.06, cap_prec = 0.15 × hysteresis_t
+// where κ_prec and cap_prec are computed by KappaPrec(...) and CapPrec(...).
 
 #include <catch2/catch_approx.hpp>
 #include "test_helpers.hpp"
@@ -33,7 +33,7 @@ TEST_CASE ("§4.2.5 sets positive Δ when structural coherence above 0.5",
            "[operations][precision][threshold]")
 {
   ProcessorContext pc;
-  pc.hysteresis = 0.10;  // cap_prec = 0.15 * 0.10 = 0.015
+  pc.hysteresis = 0.10;
   SignalProcessor::Config cfg;
   cortext::testing::RequireEncoder (cfg);
   cfg.focus = 1.0;
@@ -66,7 +66,7 @@ TEST_CASE ("§4.2.5 sets negative Δ when structural coherence below 0.5",
            "[operations][precision][threshold]")
 {
   ProcessorContext pc;
-  pc.hysteresis = 0.10;  // cap_prec = 0.15 * 0.10 = 0.015
+  pc.hysteresis = 0.10;
   SignalProcessor::Config cfg;
   cortext::testing::RequireEncoder (cfg);
   cfg.focus = 1.0;
@@ -112,7 +112,7 @@ TEST_CASE ("§4.2.5 sets zero Δ when structural coherence equals 0.5",
   // Set structural coherence exactly at midpoint
   ctx.SetStructuralCoherence (0.5);
 
-  // Expected: Δθ_prec = 0.06 × F × (0.5 − 0.5) = 0
+  // Expected: Δθ_prec is zero at the structural-coherence midpoint.
   UpdatePrecisionDelta op;
   op.Execute (ctx, cortext::testing::GetNullTransaction ());
 
@@ -125,13 +125,12 @@ TEST_CASE ("§4.2.5 Δ scales with Focus knob",
 {
   auto sig = MakeSignal ();
 
-  // High Focus should give larger delta magnitude
-  // coherence = 0.6 means (0.6 - 0.5) = 0.1, so delta = 0.06 * F * 0.1 = 0.006 * F
-  // For F=1.0: delta = 0.006, for F=0.2: delta = 0.0012, well below cap of 0.15
+  // High Focus should give larger delta magnitude through KappaPrec(...)
+  // and FocusBias(...), with hysteresis set high enough to avoid capping.
 
   // Create separate ProcessorContext and config for each case
   ProcessorContext pc_high;
-  pc_high.hysteresis = 1.0;  // Very large hysteresis to avoid capping (cap = 0.15)
+  pc_high.hysteresis = 1.0;  // Large enough to avoid capping.
   SignalProcessor::Config cfg_high;
   cortext::testing::RequireEncoder (cfg_high);
   cfg_high.focus = 1.0;

@@ -159,11 +159,12 @@ struct AccumulatorState
    * @param drift Drift magnitude of the signal
    *
    * Updates running mean: μ_acc = ((n-1) × μ_acc + x_t) / n
-   * Accumulates drift: D_acc += drift_mag_t / 2
+   * Accumulates drift: D_acc += drift_mag_t × drift_gain
    * Score aggregation is handled separately on the accumulator composite.
    */
   void
-  Accumulate (const Eigen::VectorXf &embedding, double drift)
+  Accumulate (const Eigen::VectorXf &embedding, double drift,
+              double drift_gain = 0.5)
   {
     // Update running mean (Welford-style incremental mean)
     if (n_signals == 0)
@@ -178,7 +179,7 @@ struct AccumulatorState
       }
 
     // Accumulate drift
-    drift_acc += drift * 0.5;
+    drift_acc += drift * drift_gain;
 
     n_signals++;
   }

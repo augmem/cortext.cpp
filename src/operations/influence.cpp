@@ -33,11 +33,8 @@ ApplyInfluenceFeedback::Execute (OperationContext &context, Transaction &tx) con
   const auto &events = context.GetMemoryUsageEvents ();
   const auto &emb_map = context.GetRetrievedMemoryEmbeddings ();
 
-  const double L_sustain
-      = std::round (core::Lerp (constants::kSustainWindowMin,
-                                constants::kSustainWindowMax, cfg.stability));
-  const double alpha_sustain
-      = (L_sustain > 0.0) ? (constants::kTwo / (L_sustain + 1.0)) : 1.0;
+  const auto influence_policy = core::InfluenceFeedbackPolicyForKnobs (
+      cfg.focus, cfg.sensitivity, cfg.stability);
 
   std::vector<double> influences;
   influences.reserve (events.size ());
@@ -59,9 +56,9 @@ ApplyInfluenceFeedback::Execute (OperationContext &context, Transaction &tx) con
       const double sim_gen = 0.0;
       const double drift_contrib = 0.0;
       const double influence
-          = constants::kLambda1 * contextual_gain
-            + constants::kLambda2 * sim_gen
-            - constants::kLambda3 * drift_contrib;
+          = influence_policy.contextual_gain_weight * contextual_gain
+            + influence_policy.generative_similarity_weight * sim_gen
+            - influence_policy.drift_weight * drift_contrib;
       influences.push_back (influence);
 
       auto rows = tx.Execute (
@@ -79,7 +76,8 @@ ApplyInfluenceFeedback::Execute (OperationContext &context, Transaction &tx) con
       const long long used_prev
           = std::any_cast<long long> (rows[0].at ("used_count"));
       const double sustained_new
-          = core::Ewma (sustained_prev, influence, alpha_sustain);
+          = core::Ewma (sustained_prev, influence,
+                        influence_policy.sustain_alpha);
       const double denom = static_cast<double> (std::max (used_prev, 0LL) + 1);
       const double mean_new = (denom > 0.0)
                                   ? ((mean_prev * used_prev + influence) / denom)

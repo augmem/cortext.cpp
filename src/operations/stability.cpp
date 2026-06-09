@@ -27,21 +27,26 @@ InitializeStabilityPriors::Execute (OperationContext &context, Transaction &tx) 
 
   p_ctx.hysteresis_band_prior
       = meta_learning::ResolveHysteresisBandPrior (tx, cfg);
+  const auto stability_priors = core::StabilityStatePriorsForKnobs (T);
   p_ctx.half_life_prior = core::BaseHalfLifePrior (T);
-  p_ctx.rate_decay_prior = core::Lerp (0.60, 0.98, T);
+  p_ctx.rate_decay_prior = stability_priors.rate_decay;
   p_ctx.periphery_half_life_prior
-      = core::ClampHalfLife (constants::kOneHalf * p_ctx.half_life_prior);
+      = core::ClampHalfLife (stability_priors.secondary_half_life_scale
+                             * p_ctx.half_life_prior);
   p_ctx.salience_half_life_prior
-      = core::ClampHalfLife (constants::kOneHalf * p_ctx.half_life_prior);
-  p_ctx.drift_weight_prior = constants::kOneHalf * (1.0 - T);
+      = core::ClampHalfLife (stability_priors.secondary_half_life_scale
+                             * p_ctx.half_life_prior);
+  p_ctx.drift_weight_prior = stability_priors.drift_weight;
 
   // Seed dynamic state from priors (Alg 6 bootstrap)
   p_ctx.half_life = p_ctx.half_life_prior;
-  p_ctx.rate_decay = core::Lerp (0.60, 0.98, T);
+  p_ctx.rate_decay = stability_priors.rate_decay;
   p_ctx.periphery_half_life
-      = core::ClampHalfLife (constants::kOneHalf * p_ctx.half_life);
+      = core::ClampHalfLife (stability_priors.secondary_half_life_scale
+                             * p_ctx.half_life);
   p_ctx.salience_half_life
-      = core::ClampHalfLife (constants::kOneHalf * p_ctx.half_life);
+      = core::ClampHalfLife (stability_priors.secondary_half_life_scale
+                             * p_ctx.half_life);
   p_ctx.drift_weight = p_ctx.drift_weight_prior;
   p_ctx.stability_priors_initialized = true;
 

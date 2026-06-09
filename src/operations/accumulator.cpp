@@ -68,6 +68,8 @@ UpdateAccumulator::Execute (OperationContext &context,
 
   // Use drift step for accumulation (Section 4.4.2)
   const double drift_step = context.GetAccumulatorDriftStep ();
+  const double drift_gain
+      = core::AccumulatorDriftGain (config.sensitivity, config.stability);
 
   // Get emotional metadata from context (Section 6.1.1)
   const double emotion_intensity = p_ctx.emotion_intensity_ewma;
@@ -80,7 +82,7 @@ UpdateAccumulator::Execute (OperationContext &context,
       // New source - initialize accumulator state
       AccumulatorState state;
       state.Reset (signal.embedding, signal.timestamp);
-      state.drift_acc = drift_step * 0.5;
+      state.drift_acc = drift_step * drift_gain;
       state.episode_id = episode_id;
       // Initialize temporal context with normalized embedding
       if (state.c_t.size () > 0)
@@ -151,9 +153,8 @@ UpdateAccumulator::Execute (OperationContext &context,
                                         acc.pending_interrupt_embedding);
           const double sim_mu
               = core::CosineSimilarity (signal.embedding, acc.mu_acc);
-          const double margin_base
-              = core::Lerp (0.01, 0.04, config.sensitivity)
-                * core::Lerp (1.1, 0.9, config.stability);
+          const double margin_base = core::InterruptAbortAcceptanceMargin (
+              config.focus, config.sensitivity, config.stability);
           accept = (sim_selected > (sim_mu + margin_base));
         }
 
@@ -176,11 +177,12 @@ UpdateAccumulator::Execute (OperationContext &context,
     {
       const Eigen::VectorXf prev_ctx = acc.c_t;
       acc.Reset (signal.embedding, signal.timestamp);
-      acc.drift_acc = drift_step * 0.5;
+      acc.drift_acc = drift_step * drift_gain;
       acc.episode_id = episode_id;
       if (prev_ctx.size () == acc.c_t.size () && prev_ctx.size () > 0)
         {
-          const double alpha_c = core::Lerp (0.06, 0.01, config.stability);
+          const double alpha_c = core::AccumulatorTemporalContextAlpha (
+              config.sensitivity, config.stability);
           acc.c_t = prev_ctx * static_cast<float> (1.0 - alpha_c)
                     + acc.c_t * static_cast<float> (alpha_c);
         }
@@ -228,10 +230,11 @@ UpdateAccumulator::Execute (OperationContext &context,
     }
 
   // Accumulate into memory
-  acc.Accumulate (signal.embedding, drift_step);
+  acc.Accumulate (signal.embedding, drift_step, drift_gain);
 
   // Update temporal context (slow drift)
-  const double alpha_c = core::Lerp (0.06, 0.01, config.stability);
+  const double alpha_c = core::AccumulatorTemporalContextAlpha (
+      config.sensitivity, config.stability);
   if (acc.c_t.size () == 0 || acc.c_t.size () != acc.mu_acc.size ())
     {
       acc.c_t = acc.mu_acc;

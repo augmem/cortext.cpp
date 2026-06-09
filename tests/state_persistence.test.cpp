@@ -3,6 +3,7 @@
 #include "test_helpers.hpp"
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
+#include <cortext/core/knobs.hpp>
 #include <cortext/operations/focus.hpp>
 #include <cortext/processor.hpp>
 #include <cortext/processor/operation_set.hpp>
@@ -51,6 +52,50 @@ struct TriggerBoundaryOp : IOperation
   Execute (OperationContext &ctx, Transaction & /*tx*/) const override
   {
     ctx.RequestFinalizeEpisode ();
+  }
+};
+
+struct CaptureRecentWindowOp : IOperation
+{
+  std::size_t *context_count = nullptr;
+  std::size_t *score_count = nullptr;
+
+  void
+  Execute (OperationContext &ctx, Transaction & /*tx*/) const override
+  {
+    const auto &pctx = ctx.GetProcessorContext ();
+    if (context_count)
+      {
+        *context_count = pctx.recent_context_embeddings.size ();
+      }
+    if (score_count)
+      {
+        *score_count = pctx.recent_scores.size ();
+      }
+  }
+};
+
+struct CaptureLoadedPolicyStateOp : IOperation
+{
+  mutable double weight_relevance = 0.0;
+  mutable double coverage_gain_floor = 0.0;
+  mutable double theta_dynamic = 0.0;
+  mutable double half_life = 0.0;
+  mutable double weight_surprise = 0.0;
+  mutable double rate_decay = 0.0;
+  mutable double reliability = -1.0;
+
+  void
+  Execute (OperationContext &ctx, Transaction & /*tx*/) const override
+  {
+    const auto &pctx = ctx.GetProcessorContext ();
+    weight_relevance = pctx.weight_relevance;
+    coverage_gain_floor = pctx.coverage_gain_floor;
+    theta_dynamic = pctx.T_dynamic;
+    half_life = pctx.half_life;
+    weight_surprise = pctx.weight_surprise;
+    rate_decay = pctx.rate_decay;
+    reliability = pctx.reliability;
   }
 };
 
@@ -152,6 +197,45 @@ TEST_CASE ("Processor state is persisted on flush",
   REQUIRE (signals == 3);
 }
 
+TEST_CASE ("Single signal state is persisted as loadable state",
+           "[state_persistence][processor_state]")
+{
+  auto unique_store = SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<Store> (std::move (unique_store));
+
+  {
+    auto ops
+        = std::make_unique<OperationSet> (std::make_unique<TriggerBoundaryOp> ());
+    SignalProcessor processor (MakeConfig (), store, std::move (ops));
+
+    Signal s;
+    s.embedding = Eigen::VectorXf::Random (256);
+    s.timestamp = 1000;
+    s.source_id = "test";
+    processor.Process (s);
+  }
+
+  auto rows = store->Execute ("SELECT signals_processed FROM state");
+  REQUIRE (rows.size () == 1);
+  REQUIRE (GetInt64 (rows[0], "signals_processed") == 1);
+
+  {
+    auto ops
+        = std::make_unique<OperationSet> (std::make_unique<TriggerBoundaryOp> ());
+    SignalProcessor processor (MakeConfig (), store, std::move (ops));
+
+    Signal s;
+    s.embedding = Eigen::VectorXf::Random (256);
+    s.timestamp = 2000;
+    s.source_id = "test";
+    processor.Process (s);
+  }
+
+  rows = store->Execute ("SELECT signals_processed FROM state");
+  REQUIRE (rows.size () == 1);
+  REQUIRE (GetInt64 (rows[0], "signals_processed") == 2);
+}
+
 TEST_CASE ("Processor state is loaded on startup",
            "[state_persistence][processor_state]")
 {
@@ -231,6 +315,134 @@ TEST_CASE ("Blender weights are persisted", "[state_persistence][blender]")
   REQUIRE_THAT (w_relevance, WithinAbs (0.5, 0.5));
 }
 
+TEST_CASE ("Bootstrap state persistence uses active knobs",
+           "[state_persistence][blender][knobs]")
+{
+  auto unique_store = SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<Store> (std::move (unique_store));
+
+  SignalProcessor::Config cfg = MakeConfig ();
+  cfg.focus = 1.0;
+  cfg.sensitivity = 1.0;
+  cfg.stability = 1.0;
+
+  {
+    auto ops = std::make_unique<OperationSet> ();
+    SignalProcessor processor (cfg, store, std::move (ops));
+    processor.Flush ();
+  }
+
+  auto rows
+      = store->Execute ("SELECT theta_dynamic, w_relevance FROM state WHERE id = 1");
+  REQUIRE (rows.size () == 1);
+
+  const double expected_theta
+      = core::TPrior (cfg.focus, cfg.sensitivity, cfg.stability);
+  const double expected_blender
+      = core::BlendBootstrapFallback (cfg.focus, cfg.sensitivity,
+                                      cfg.stability);
+  REQUIRE (expected_blender > 0.5);
+  REQUIRE_THAT (GetDouble (rows[0], "theta_dynamic"),
+                WithinAbs (expected_theta, 1e-9));
+  REQUIRE_THAT (GetDouble (rows[0], "w_relevance"),
+                WithinAbs (expected_blender, 1e-9));
+}
+
+TEST_CASE ("Legacy state defaults reload from active knobs",
+           "[state_persistence][processor_state][knobs]")
+{
+  auto unique_store = SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<Store> (std::move (unique_store));
+
+  {
+    auto ops = std::make_unique<OperationSet> ();
+    SignalProcessor processor (MakeConfig (), store, std::move (ops));
+    processor.Flush ();
+  }
+
+  store->Execute ("INSERT OR REPLACE INTO state (id, signals_processed) "
+                  "VALUES (1, 5)");
+
+  SignalProcessor::Config cfg = MakeConfig ();
+  cfg.focus = 1.0;
+  cfg.sensitivity = 1.0;
+  cfg.stability = 1.0;
+
+  auto capture = std::make_unique<CaptureLoadedPolicyStateOp> ();
+  auto *capture_raw = capture.get ();
+  auto ops = std::make_unique<OperationSet> (std::move (capture));
+  SignalProcessor processor (cfg, store, std::move (ops));
+
+  Signal s;
+  s.embedding = Eigen::VectorXf::Random (256);
+  s.timestamp = 1234;
+  s.source_id = "test";
+  processor.Process (s);
+
+  REQUIRE_THAT (capture_raw->weight_relevance,
+                WithinAbs (core::Sigmoid (1.0), 1e-9));
+  REQUIRE_THAT (capture_raw->coverage_gain_floor,
+                WithinAbs (1.0, 1e-9));
+  REQUIRE_THAT (capture_raw->theta_dynamic,
+                WithinAbs (core::TPrior (cfg.focus, cfg.sensitivity,
+                                         cfg.stability),
+                           1e-9));
+  REQUIRE_THAT (capture_raw->half_life,
+                WithinAbs (core::BaseHalfLifePrior (cfg.stability), 1e-9));
+  REQUIRE_THAT (capture_raw->weight_surprise,
+                WithinAbs (1.0, 1e-9));
+  REQUIRE_THAT (capture_raw->rate_decay,
+                WithinAbs (
+                    core::StabilityStatePriorsForKnobs (cfg.stability).rate_decay,
+                    1e-9));
+  REQUIRE_THAT (capture_raw->reliability, WithinAbs (0.0, 1e-9));
+}
+
+TEST_CASE ("Partial legacy state defaults reload from active knobs",
+           "[state_persistence][processor_state][knobs]")
+{
+  auto unique_store = SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<Store> (std::move (unique_store));
+
+  {
+    auto ops = std::make_unique<OperationSet> ();
+    SignalProcessor processor (MakeConfig (), store, std::move (ops));
+    processor.Flush ();
+  }
+
+  store->Execute (
+      "INSERT OR REPLACE INTO state (id, signals_processed, weight_relevance) "
+      "VALUES (1, 5, 0.9)");
+
+  SignalProcessor::Config cfg = MakeConfig ();
+  cfg.focus = 1.0;
+  cfg.sensitivity = 1.0;
+  cfg.stability = 1.0;
+
+  auto capture = std::make_unique<CaptureLoadedPolicyStateOp> ();
+  auto *capture_raw = capture.get ();
+  auto ops = std::make_unique<OperationSet> (std::move (capture));
+  SignalProcessor processor (cfg, store, std::move (ops));
+
+  Signal s;
+  s.embedding = Eigen::VectorXf::Random (256);
+  s.timestamp = 1234;
+  s.source_id = "test";
+  processor.Process (s);
+
+  REQUIRE_THAT (capture_raw->weight_relevance, WithinAbs (0.9, 1e-9));
+  REQUIRE_THAT (capture_raw->theta_dynamic,
+                WithinAbs (core::TPrior (cfg.focus, cfg.sensitivity,
+                                         cfg.stability),
+                           1e-9));
+  REQUIRE_THAT (capture_raw->weight_surprise,
+                WithinAbs (1.0, 1e-9));
+  REQUIRE_THAT (capture_raw->rate_decay,
+                WithinAbs (
+                    core::StabilityStatePriorsForKnobs (cfg.stability).rate_decay,
+                    1e-9));
+}
+
 TEST_CASE ("Recent context view derives from signals",
            "[state_persistence][recent_context]")
 {
@@ -298,6 +510,58 @@ TEST_CASE ("Recent scores are persisted", "[state_persistence][recent_scores]")
   auto rows = store->Execute ("SELECT COUNT(*) as c FROM recent_scores");
   REQUIRE (rows.size () == 1);
   // Scores may or may not be persisted depending on threshold logic
+}
+
+TEST_CASE ("Recent windows restore with knob-derived runtime limits",
+           "[state_persistence][recent_context][recent_scores]")
+{
+  auto unique_store = SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<Store> (std::move (unique_store));
+
+  {
+    auto ops = std::make_unique<OperationSet> ();
+    SignalProcessor::Config cfg = MakeConfig ();
+    cfg.stability = 1.0;
+    SignalProcessor processor (cfg, store, std::move (ops));
+    processor.Flush ();
+  }
+
+  constexpr int kSeedRows = 150;
+  for (int i = 0; i < kSeedRows; ++i)
+    {
+      std::vector<float> emb (256, 0.0f);
+      emb[static_cast<std::size_t> (i % 256)] = 1.0f;
+      const long long ts = 1000LL + static_cast<long long> (i);
+      store->Execute (
+          "INSERT INTO embeddings (embedding, created_at) VALUES (?, ?)",
+          { emb, ts });
+      store->Execute (
+          "INSERT INTO signals (embedding_id, source_id, timestamp, modality, "
+          "created_at, score) VALUES (?, ?, ?, 'text', ?, ?)",
+          { static_cast<long long> (i + 1), std::string ("test"), ts, ts,
+            static_cast<double> (i) / static_cast<double> (kSeedRows) });
+    }
+
+  std::size_t restored_context_count = 0;
+  std::size_t restored_score_count = 0;
+  {
+    auto capture = std::make_unique<CaptureRecentWindowOp> ();
+    capture->context_count = &restored_context_count;
+    capture->score_count = &restored_score_count;
+    auto ops = std::make_unique<OperationSet> (std::move (capture));
+    SignalProcessor::Config cfg = MakeConfig ();
+    cfg.stability = 1.0;
+    SignalProcessor processor (cfg, store, std::move (ops));
+
+    Signal s;
+    s.embedding = Eigen::VectorXf::Random (256);
+    s.timestamp = 5000;
+    s.source_id = "test";
+    processor.Process (s);
+  }
+
+  REQUIRE (restored_context_count == static_cast<std::size_t> (kSeedRows));
+  REQUIRE (restored_score_count == static_cast<std::size_t> (kSeedRows));
 }
 
 TEST_CASE ("State persistence is idempotent across restarts",
@@ -389,9 +653,13 @@ TEST_CASE ("Working memory slots are persisted",
   auto store = std::shared_ptr<Store> (std::move (unique_store));
 
   {
+    SignalProcessor::Config cfg = MakeConfig ();
+    cfg.focus = 0.0;
+    cfg.sensitivity = 1.0;
+    cfg.stability = 0.0;
     auto ops = std::make_unique<OperationSet> (
         std::make_unique<PopulateWMSlotsOp> ());
-    SignalProcessor processor (MakeConfig (), store, std::move (ops));
+    SignalProcessor processor (cfg, store, std::move (ops));
 
     Signal s;
     s.embedding = Eigen::VectorXf::Random (256);
@@ -404,11 +672,23 @@ TEST_CASE ("Working memory slots are persisted",
   // Check memories table has WM entries (v2 schema: kind='WORKING', active slots)
   // Active slots have end_ts IS NULL
   auto rows = store->Execute (
-      "SELECT memory_id, strength FROM memories "
+      "SELECT memory_id, strength, source_reliability, stability FROM memories "
       "WHERE kind = 'WORKING' AND end_ts IS NULL ORDER BY memory_id");
   REQUIRE (rows.size () == 2);
   REQUIRE_THAT (GetDouble (rows[0], "strength"), WithinAbs (0.8, 0.01));
   REQUIRE_THAT (GetDouble (rows[1], "strength"), WithinAbs (0.8, 0.01));
+  const double expected_source_reliability
+      = core::SourceReliabilityPrior (0.0, 1.0, 0.0);
+  const double expected_stability
+      = core::MemoryInitialStabilityPolicy (0.0, 1.0, 0.0);
+  REQUIRE_THAT (GetDouble (rows[0], "source_reliability"),
+                WithinAbs (expected_source_reliability, 1e-9));
+  REQUIRE_THAT (GetDouble (rows[1], "source_reliability"),
+                WithinAbs (expected_source_reliability, 1e-9));
+  REQUIRE_THAT (GetDouble (rows[0], "stability"),
+                WithinAbs (expected_stability, 1e-9));
+  REQUIRE_THAT (GetDouble (rows[1], "stability"),
+                WithinAbs (expected_stability, 1e-9));
 }
 
 TEST_CASE ("Working memory slots are loaded on startup",
@@ -583,7 +863,7 @@ TEST_CASE ("Working memory slots decay on load",
   REQUIRE_THAT (verify_raw->loaded_strength, WithinAbs (0.5, 0.1));
 }
 
-TEST_CASE ("Fully decayed WM slots are not loaded",
+TEST_CASE ("Working memory reload preserves floor like live passive decay",
            "[state_persistence][working_memory][decay]")
 {
   auto unique_store = SQLiteStore::Create (":memory:");
@@ -617,26 +897,34 @@ TEST_CASE ("Fully decayed WM slots are not loaded",
       "VALUES (?, ?, 'WORKING', 'text', ?, ?, ?, 1, 0.5, 0.5, ?)",
       { 1LL, std::string ("test"), 1.0, old_ts_ms, old_ts_ms, old_ts_ms });
 
-  // Load with sensitivity=0.5 → cost_per_slot = 0.10
-  // After 20 seconds: strength = 1.0 - 0.10 * 20 = -1.0 → not loaded
-  struct VerifyNotLoadedOp : IOperation
+  // Load with sensitivity=0.5 -> cost_per_slot would decay below zero.
+  // Persisted reload should match live WM passive decay and clamp to the
+  // knob-derived strength floor instead of dropping the active slot.
+  struct VerifyReloadedFloorOp : IOperation
   {
     mutable size_t slot_count = 999;
+    mutable double loaded_strength = -1.0;
 
     void
     Execute (OperationContext &ctx, Transaction & /*tx*/) const override
     {
       const auto &pctx = ctx.GetProcessorContext ();
       slot_count = pctx.wm_slots.size ();
+      if (!pctx.wm_slots.empty ())
+        {
+          loaded_strength = pctx.wm_slots[0].strength;
+        }
     }
   };
 
-  auto verify_ptr = std::make_unique<VerifyNotLoadedOp> ();
+  auto verify_ptr = std::make_unique<VerifyReloadedFloorOp> ();
   auto *verify_raw = verify_ptr.get ();
   auto ops = std::make_unique<OperationSet> (std::move (verify_ptr));
   SignalProcessor::Config cfg;
   cortext::testing::RequireEncoder (cfg);
+  cfg.focus = 0.5;
   cfg.sensitivity = 0.5;
+  cfg.stability = 0.5;
   SignalProcessor processor (cfg, store, std::move (ops));
 
   Signal s;
@@ -645,6 +933,10 @@ TEST_CASE ("Fully decayed WM slots are not loaded",
   s.source_id = "test";
   processor.Process (s);
 
-  // Slot should not have been loaded due to full decay
-  REQUIRE (verify_raw->slot_count == 0);
+  REQUIRE (verify_raw->slot_count == 1);
+  REQUIRE_THAT (
+      verify_raw->loaded_strength,
+      WithinAbs (core::WMStrengthFloor (cfg.focus, cfg.sensitivity,
+                                        cfg.stability),
+                 1e-9));
 }

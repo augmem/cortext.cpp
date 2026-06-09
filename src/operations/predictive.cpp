@@ -15,50 +15,6 @@ namespace cortext::operations
 
 namespace
 {
-// Prediction horizon: higher Focus yields longer horizon (more samples)
-// Paper Section 8.5: prediction_horizon = round(lerp(2, 8, F))
-constexpr double kPredictionHorizonMin = 2.0;
-constexpr double kPredictionHorizonMax = 8.0;
-constexpr double kConfMin = 0.3;
-constexpr double kConfMax = 0.7;
-constexpr double kDecayMax = 0.7;
-constexpr double kDecayMin = 0.3;
-constexpr double kSurpriseMax = 2.0;
-constexpr double kSurpriseMin = 0.5;
-constexpr double kBaseDeltaScale = 0.02;
-constexpr double kPadRef = 0.3;
-inline int
-PredictionHorizon (double F)
-{
-  // prediction_horizon = round(lerp(2, 8, F))
-  // Higher Focus = longer prediction horizon
-  const double f_eff = core::FocusBias (F);
-  return std::max (1, static_cast<int> (
-                          std::round (core::Lerp (kPredictionHorizonMin,
-                                                   kPredictionHorizonMax, f_eff))));
-}
-
-inline double
-PredictionConfidenceThreshold (double F)
-{
-  // prediction_conf_threshold = lerp(0.3, 0.7, F)
-  return core::Lerp (kConfMin, kConfMax, core::FocusBias (F));
-}
-
-inline double
-PreActivationDecay (double T)
-{
-  // pre_activation_decay = lerp(0.7, 0.3, T)
-  return core::Lerp (kDecayMax, kDecayMin, T);
-}
-
-inline double
-SurpriseSensitivity (double S, double T)
-{
-  // surprise_sensitivity = S × lerp(2.0, 0.5, T)
-  return core::SensitivityBias (S) * core::Lerp (kSurpriseMax, kSurpriseMin, T);
-}
-
 inline Eigen::VectorXf
 Unit (const Eigen::VectorXf &v)
 {
@@ -87,7 +43,7 @@ ApplyPredictivePreActivation::Execute (OperationContext &context, Transaction &t
 {
   auto &p_ctx = context.GetProcessorContext ();
   const auto &cfg = context.GetConfig ();
-  const double pad = PreActivationDecay (cfg.stability);
+  const double pad = core::PredictivePreActivationDecay (cfg.stability);
 
   // Keep predictive state transient by decaying prior pre-activation every turn.
   tx.Execute ("UPDATE memories "
@@ -105,7 +61,7 @@ ApplyPredictivePreActivation::Execute (OperationContext &context, Transaction &t
     }
   const int available
       = static_cast<int> (p_ctx.recent_context_embeddings.size ());
-  const int want = PredictionHorizon (cfg.focus);
+  const int want = core::PredictionHorizon (cfg.focus);
   const int take = std::max (1, std::min (available, want));
 
   // Predicted direction: mean of last `take` embeddings, then normalized.
@@ -132,14 +88,13 @@ ApplyPredictivePreActivation::Execute (OperationContext &context, Transaction &t
       return;
     }
 
-  const double conf_thresh = PredictionConfidenceThreshold (cfg.focus);
-  // Base delta in ~[0.012, 0.02]
-  const double base_delta = kBaseDeltaScale * (1.0 - (pad - kPadRef));
-  const double s_eff = core::SensitivityBias (cfg.sensitivity);
+  const double conf_thresh = core::PredictionConfidenceThreshold (cfg.focus);
+  const double base_delta = core::PredictiveBaseDelta (
+      cfg.focus, cfg.sensitivity, cfg.stability);
   const double update_rate_on_surprise
-      = core::Lerp (0.2, 0.02, cfg.stability) * s_eff;
+      = core::PredictiveSurpriseUpdateRate (cfg.sensitivity, cfg.stability);
   const double surp_sens
-      = SurpriseSensitivity (cfg.sensitivity, cfg.stability);
+      = core::PredictiveSurpriseSensitivity (cfg.sensitivity, cfg.stability);
 
   // Optional surprise modulation from metrics (map to [0,1]).
   double surprise_01 = constants::kNormalizedMin;
@@ -181,7 +136,9 @@ ApplyPredictivePreActivation::Execute (OperationContext &context, Transaction &t
       double delta = base_delta * (1.0 + constants::kQuarter * surp_sens
                                               * surprise_01);
       delta += update_rate_on_surprise * surprise_01;
-      delta = core::Clamp (delta, 0.0, 0.2);
+      delta = core::Clamp (
+          delta, 0.0,
+          core::PredictiveDeltaCap (cfg.focus, cfg.sensitivity, cfg.stability));
 
       // v2: Update memories pre_activation (row exists from storage)
       tx.Execute ("UPDATE memories "

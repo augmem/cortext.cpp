@@ -33,11 +33,11 @@ from generate_julie_raw_speech_manifest import parse_messages, parse_timestamp
 
 DEFAULT_NEMOTRON_MODEL = "nemotron-3-nano-omni-30b-a3b-8bit"
 DEFAULT_OLLAMA_MODEL = "gemma4:12b-it-qat"
-DEFAULT_MODEL = DEFAULT_NEMOTRON_MODEL
+DEFAULT_MODEL = DEFAULT_OLLAMA_MODEL
 DEFAULT_NEMOTRON_BASE_URL = "http://127.0.0.1:8000/v1"
 DEFAULT_OLLAMA_BASE_URL = "http://127.0.0.1:11434"
 JUDGE_CALL_ATTEMPTS = 3
-LOCAL_JUDGE_HOSTS = {"localhost", "127.0.0.1", "::1", "0.0.0.0"}
+LOCAL_JUDGE_HOSTS = {"localhost", "127.0.0.1", "::1"}
 SYSTEMS = ["cortext_native", "traditional_chat_rag", "full_history_upper_bound"]
 FIELDS = [
     "relevance",
@@ -52,11 +52,29 @@ QUALITY_COMPOSITE_WEIGHTS = {
     "sufficiency": 1.0,
     "noise": -0.25,
 }
+QUALITY_SCORE_MAX = 5.0
 QUALITY_COMPOSITE_DEFINITION = "relevance + sufficiency - 0.25*noise"
 PACKET_ALIASES = ["A", "B", "C"]
 GABE_SOURCE_ID = "Gabe"
 JULIE_SOURCE_ID = "Julie"
 COMPACTED_HISTORY_SOURCE_ID = "Gabe-Julie-summary"
+TOKEN_ESTIMATE_POLICY = (
+    "estimated_text_tokens=max(1, ceil(chars/4)); attached image/audio "
+    "evidence counted as a small placeholder for prompt-fit checks, not "
+    "provider-tokenized usage"
+)
+JUDGE_MEDIA_AUDIO_MAX_SECONDS = 30
+JUDGE_MEDIA_AUDIO_POLICY = (
+    "audio source blobs converted to mono 16 kHz WAV and clipped to the first "
+    f"{JUDGE_MEDIA_AUDIO_MAX_SECONDS} seconds for local multimodal judge input"
+)
+JUDGE_MEDIA_IMAGE_POLICY = (
+    "image source blobs converted to a 768x768 padded JPEG for local judge input"
+)
+JUDGE_MEDIA_VIDEO_POLICY = (
+    "video source blobs represented by one 768x768 padded JPEG frame for local "
+    "judge input"
+)
 BLIND_FORBIDDEN_TERMS = {
     "cortext",
     "cortext_native",
@@ -414,7 +432,7 @@ def convert_audio_for_judge(source: pathlib.Path, work_dir: pathlib.Path, stem: 
         "-ar",
         "16000",
         "-t",
-        "30",
+        str(JUDGE_MEDIA_AUDIO_MAX_SECONDS),
         str(out),
     ]
     if subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode != 0:
@@ -533,7 +551,7 @@ def connect_db(path: pathlib.Path) -> sqlite3.Connection:
 def build_media_memory_map(
     conn: sqlite3.Connection,
     timeline: list[TimelineDoc],
-) -> dict[tuple[str, str, int], list[TimelineDoc]]:
+) -> tuple[dict[tuple[str, str, int], list[TimelineDoc]], dict]:
     media_docs = [
         doc
         for doc in timeline
@@ -550,6 +568,7 @@ def build_media_memory_map(
     ).fetchall()
     out: dict[tuple[str, str, int], list[TimelineDoc]] = {}
     used_doc_indexes: set[int] = set()
+    unmatched: list[dict] = []
     for occurrence in occurrences:
         modality = str(occurrence["modality"])
         source_id = str(occurrence["source_id"])
@@ -566,10 +585,34 @@ def build_media_memory_map(
                 match = doc
                 break
         if match is None:
+            unmatched.append(
+                {
+                    "modality": modality,
+                    "source_id": source_id,
+                    "timestamp": timestamp,
+                }
+            )
             continue
         used_doc_indexes.add(match.index)
         out.setdefault((modality, source_id, timestamp), []).append(match)
-    return out
+    media_doc_count = len(media_docs)
+    mapped_doc_count = len(used_doc_indexes)
+    stats = {
+        "schema": "cortext_judge_media_memory_map_audit_v1",
+        "db_media_occurrence_count": len(occurrences),
+        "selected_timeline_media_doc_count": media_doc_count,
+        "mapped_media_doc_count": mapped_doc_count,
+        "unmatched_db_media_occurrence_count": len(unmatched),
+        "unused_selected_timeline_media_doc_count": max(
+            0, media_doc_count - mapped_doc_count
+        ),
+        "unmatched_db_media_occurrences_sample": unmatched[:20],
+        "policy": (
+            "audio/image DB signal rows must map to selected timeline media "
+            "by shared speaker source_id, modality, and timestamp"
+        ),
+    }
+    return out, stats
 
 
 def load_memory_rows(conn: sqlite3.Connection, memory_ids: list[int]) -> list[sqlite3.Row]:
@@ -1319,8 +1362,26 @@ def expected_judgment_count(
     judge_start_index: int,
     judge_repetitions: int,
 ) -> int:
+    return len(
+        expected_judgment_keys(
+            summary,
+            timeline,
+            judge_limit,
+            judge_start_index,
+            judge_repetitions,
+        )
+    )
+
+
+def expected_judgment_keys(
+    summary: dict,
+    timeline: list[TimelineDoc],
+    judge_limit: int,
+    judge_start_index: int,
+    judge_repetitions: int,
+) -> set[tuple[int, int]]:
     query_probe_index = 0
-    probe_count = 0
+    keys: set[tuple[int, int]] = set()
     for probe in summary.get("probes", []):
         if not find_query_doc(timeline, probe):
             continue
@@ -1330,8 +1391,78 @@ def expected_judgment_count(
             query_probe_index += 1
             continue
         query_probe_index += 1
-        probe_count += 1
-    return probe_count * judge_repetitions
+        event_index = int(probe["event_index"])
+        for repetition in range(judge_repetitions):
+            keys.add((event_index, repetition))
+    return keys
+
+
+def judgment_key(row: dict) -> tuple[int, int] | None:
+    try:
+        return (int(row["event_index"]), int(row["repetition"]))
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def load_checkpoint_judgments(
+    path: pathlib.Path,
+    expected_keys: set[tuple[int, int]],
+) -> tuple[list[dict], Counter]:
+    stats: Counter = Counter()
+    if not path.exists():
+        return [], stats
+
+    by_key: dict[tuple[int, int], dict] = {}
+    with path.open() as f:
+        for line_no, line in enumerate(f, start=1):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                stats["malformed_rows"] += 1
+                stats["last_malformed_line"] = line_no
+                continue
+            key = judgment_key(row)
+            if key is None:
+                stats["invalid_key_rows"] += 1
+                continue
+            if key not in expected_keys:
+                stats["out_of_scope_rows"] += 1
+                continue
+            if key in by_key:
+                stats["duplicate_rows"] += 1
+            by_key[key] = row
+    rows = [by_key[key] for key in sorted(by_key)]
+    stats["unique_rows_loaded"] = len(rows)
+    return rows, stats
+
+
+def add_completed_judgment_to_aggregates(
+    row: dict,
+    systems: list[str],
+    fields: list[str],
+    totals: dict[str, Counter],
+    failure_reasons: Counter,
+) -> None:
+    winner = str(row.get("winner", "tie_or_unclear"))
+    failure_reasons[str(row.get("failure_reason", "tie_or_unclear"))] += 1
+    row_systems = row.get("systems", {})
+    if not isinstance(row_systems, dict):
+        row_systems = {}
+    for system in systems:
+        totals[system]["judged"] += 1
+        if winner == system:
+            totals[system]["wins"] += 1
+        system_scores = row_systems.get(system, {})
+        if not isinstance(system_scores, dict):
+            system_scores = {}
+        for field in fields:
+            try:
+                totals[system][field] += float(system_scores.get(field, 0.0) or 0.0)
+            except (TypeError, ValueError):
+                pass
 
 
 def quality_composite_from_row(row: dict, system: str) -> float:
@@ -1350,6 +1481,10 @@ def quality_delta_from_row(row: dict) -> float:
     )
 
 
+def max_quality_delta_per_row() -> float:
+    return sum(abs(weight) * QUALITY_SCORE_MAX for weight in QUALITY_COMPOSITE_WEIGHTS.values())
+
+
 def unrecoverable_quality_stop(
     judged: list[dict],
     expected_rows: int,
@@ -1365,7 +1500,7 @@ def unrecoverable_quality_stop(
         return None
     current_sum = prior_quality_delta_sum + sum(quality_delta_from_row(row) for row in judged)
     remaining = expected_total_rows - rows_judged
-    max_remaining_delta_per_row = 11.25
+    max_remaining_delta_per_row = max_quality_delta_per_row()
     optimistic_final_delta = (
         current_sum + remaining * max_remaining_delta_per_row
     ) / expected_total_rows
@@ -1419,7 +1554,7 @@ def main() -> int:
     parser.add_argument(
         "--judge-provider",
         choices=("nemotron", "ollama"),
-        default="nemotron",
+        default="ollama",
         help="Local judge backend. Hosted endpoints are refused for Julie metadata.",
     )
     parser.add_argument(
@@ -1492,6 +1627,12 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--judge-max-output-tokens",
+        type=int,
+        default=1300,
+        help="Maximum local judge response tokens requested per probe.",
+    )
+    parser.add_argument(
         "--context-limit",
         type=int,
         default=-1,
@@ -1503,7 +1644,7 @@ def main() -> int:
     parser.add_argument(
         "--max-media-per-system",
         type=int,
-        default=4,
+        default=-1,
         help=(
             "Maximum source blobs to attach for each scored system. Use -1 for all "
             "media in the packet or 0 to disable multimodal attachments."
@@ -1550,6 +1691,8 @@ def main() -> int:
         raise RuntimeError("--judge-timeout-s must be >= 1")
     if args.judge_context_window_tokens < 1:
         raise RuntimeError("--judge-context-window-tokens must be >= 1")
+    if args.judge_max_output_tokens < 1:
+        raise RuntimeError("--judge-max-output-tokens must be >= 1")
     if args.early_stop_prior_judgment_count < 0:
         raise RuntimeError("--early-stop-prior-judgment-count must be >= 0")
     judge_model = resolve_judge_model(args.judge_provider, args.model)
@@ -1586,16 +1729,17 @@ def main() -> int:
         summary.get("timeline_media_limit", summary.get("media_attempted", -1))
     )
     timeline = build_timeline(input_dir, skip_messages, max_messages, media_limit)
-    expected_judgments = expected_judgment_count(
+    expected_keys = expected_judgment_keys(
         summary,
         timeline,
         args.judge_limit,
         args.judge_start_index,
         args.judge_repetitions,
     )
+    expected_judgments = len(expected_keys)
     by_index = docs_by_index(timeline)
     conn = connect_db(db_path)
-    media_memory_map = build_media_memory_map(conn, timeline)
+    media_memory_map, media_memory_map_audit = build_media_memory_map(conn, timeline)
 
     systems = SYSTEMS
     fields = FIELDS
@@ -1612,11 +1756,34 @@ def main() -> int:
         "traditional_chat_rag": Counter(),
         "full_history_upper_bound": Counter(),
     }
+    if int(media_memory_map_audit.get("unmatched_db_media_occurrence_count", 0) or 0) > 0:
+        fairness_checks["media_memory_map_unmatched_db_occurrences"] += int(
+            media_memory_map_audit.get("unmatched_db_media_occurrence_count", 0) or 0
+        )
     cortext_packet_source = Counter()
     early_stop: dict | None = None
 
     checkpoint_rows = args.checkpoint_rows or args.out.with_name(args.out.name + ".rows.jsonl")
     checkpoint_rows.parent.mkdir(parents=True, exist_ok=True)
+    loaded_checkpoint_rows, checkpoint_stats = load_checkpoint_judgments(
+        checkpoint_rows,
+        expected_keys,
+    )
+    completed_judgment_keys: set[tuple[int, int]] = set()
+    for row in loaded_checkpoint_rows:
+        key = judgment_key(row)
+        if key is None:
+            continue
+        judged.append(row)
+        completed_judgment_keys.add(key)
+        add_completed_judgment_to_aggregates(
+            row,
+            systems,
+            fields,
+            totals,
+            failure_reasons,
+        )
+    skipped_checkpoint_judgments = 0
 
     with checkpoint_rows.open("a") as checkpoint_file, tempfile.TemporaryDirectory(
         prefix="cortext_julie_judge_media_"
@@ -1891,6 +2058,11 @@ def main() -> int:
                     for key, value in media_stats.get(system, {}).items():
                         media_attachment_totals[system][key] += int(value)
 
+                current_key = (int(probe["event_index"]), repetition)
+                if current_key in completed_judgment_keys:
+                    skipped_checkpoint_judgments += 1
+                    continue
+
                 print(
                     "judge_call "
                     f"ts={utc_now_text()} "
@@ -1904,7 +2076,7 @@ def main() -> int:
                         judge_model,
                         judge_base_url,
                         content,
-                        1300,
+                        args.judge_max_output_tokens,
                         args.judge_timeout_s,
                         args.judge_context_window_tokens,
                         args.ollama_keep_alive,
@@ -2002,7 +2174,16 @@ def main() -> int:
                     "cortext_retrieved_tokens": cortext_retrieved_tokens,
                     "cortext_context_tokens": cortext_context_tokens,
                     "traditional_chat_rag_tokens": rag_context_tokens,
-                    "cortext_latency_ms": probe.get("cortext_latency_ms", 0.0),
+                    "cortext_latency_ms": probe.get(
+                        "cortext_latency_ms",
+                        probe.get("cortext_probe_latency_ms", 0.0),
+                    ),
+                    "normal_rag_total_latency_ms": probe.get(
+                        "normal_rag_total_latency_ms", 0.0
+                    ),
+                    "normal_rag_retrieval_latency_ms": probe.get(
+                        "normal_rag_retrieval_latency_ms", 0.0
+                    ),
                     "judge_prompt_tokens_estimate": judge_prompt_tokens_estimate,
                     "media_attachments": media_stats,
                     "judge_adjustments": [],
@@ -2041,6 +2222,7 @@ def main() -> int:
                     if not row["systems"][system]["reason"]:
                         judge_validation["missing_system_reason"] += 1
                 judged.append(row)
+                completed_judgment_keys.add(current_key)
                 checkpoint_file.write(json.dumps(row, separators=(",", ":")) + "\n")
                 checkpoint_file.flush()
                 early_stop = unrecoverable_quality_stop(
@@ -2124,9 +2306,19 @@ def main() -> int:
             "score_fields": fields,
             "quality_composite_definition": QUALITY_COMPOSITE_DEFINITION,
             "quality_composite_weights": QUALITY_COMPOSITE_WEIGHTS,
+            "token_estimate_policy": TOKEN_ESTIMATE_POLICY,
             "cortext_packet_source": dict(cortext_packet_source),
             "normal_rag_baseline": (
                 "rolling text chat history until compaction plus text RAG hits"
+            ),
+            "normal_rag_vector_search_multiplier": summary.get(
+                "normal_rag_vector_search_multiplier"
+            ),
+            "normal_rag_vector_search_k_policy": summary.get(
+                "normal_rag_vector_search_k_policy"
+            ),
+            "normal_rag_vector_candidate_k_policy": summary.get(
+                "normal_rag_vector_candidate_k_policy"
             ),
             "traditional_chat_rag_compaction_summary_policy": summary.get(
                 "normal_rag_compaction_summary_policy"
@@ -2135,6 +2327,21 @@ def main() -> int:
             "daily_consolidation_required_for_release": True,
             "default_knobs_required_for_release": [0.5, 0.5, 0.5],
             "judge_media_capabilities": judge_media_capabilities,
+            "checkpoint_rows": str(checkpoint_rows),
+            "checkpoint_resume_enabled": True,
+            "checkpoint_unique_rows_loaded": int(
+                checkpoint_stats.get("unique_rows_loaded", 0)
+            ),
+            "checkpoint_duplicate_rows_ignored": int(
+                checkpoint_stats.get("duplicate_rows", 0)
+            ),
+            "checkpoint_malformed_rows_ignored": int(
+                checkpoint_stats.get("malformed_rows", 0)
+            ),
+            "checkpoint_out_of_scope_rows_ignored": int(
+                checkpoint_stats.get("out_of_scope_rows", 0)
+            ),
+            "checkpoint_rows_skipped_during_resume": skipped_checkpoint_judgments,
         },
         "cortext_audio_image_transcript_shortcuts": False,
         "output_contains_private_text": True,
@@ -2153,6 +2360,7 @@ def main() -> int:
             "video": summary.get("video_processed", 0),
             "media_failures": summary.get("media_failures", 0),
         },
+        "media_memory_map_audit": media_memory_map_audit,
         "tokens": {
             "active_history_token_budget": summary.get("active_history_token_budget", 0),
             "mean_rolling_history_tokens": (
@@ -2180,6 +2388,7 @@ def main() -> int:
             "max_judge_prompt_tokens_estimate": int(
                 token_totals["max_judge_prompt_tokens_estimated"]
             ),
+            "token_count_policy": TOKEN_ESTIMATE_POLICY,
         },
         "normal_rag_compaction": summary.get("normal_rag_compaction", {}),
         "normal_rag_retrieval": summary.get("normal_rag_retrieval"),
@@ -2192,6 +2401,16 @@ def main() -> int:
         "normal_rag_vector_candidate_k": summary.get(
             "normal_rag_vector_candidate_k"
         ),
+        "normal_rag_vector_final_k": summary.get("normal_rag_vector_final_k"),
+        "normal_rag_vector_search_multiplier": summary.get(
+            "normal_rag_vector_search_multiplier"
+        ),
+        "normal_rag_vector_search_k_policy": summary.get(
+            "normal_rag_vector_search_k_policy"
+        ),
+        "normal_rag_vector_candidate_k_policy": summary.get(
+            "normal_rag_vector_candidate_k_policy"
+        ),
         "latency": {
             "mean_cortext_probe_latency_ms": (
                 sum(float(row["cortext_latency_ms"]) for row in judged) / max(1, len(judged))
@@ -2201,6 +2420,14 @@ def main() -> int:
         },
         "db_metrics": summarize_db(conn),
         "judged": len(judged),
+        "expected_judgments": expected_judgments,
+        "missing_judgments": max(0, expected_judgments - len(judged)),
+        "judgment_complete": (
+            len(judged) == expected_judgments and early_stop is None
+        ),
+        "checkpoint_rows_path": str(checkpoint_rows),
+        "checkpoint_stats": dict(checkpoint_stats),
+        "checkpoint_rows_skipped_during_resume": skipped_checkpoint_judgments,
         "probe_count": probes_seen,
         "judge_repetitions": args.judge_repetitions,
         "early_stop": early_stop,
@@ -2265,11 +2492,24 @@ def main() -> int:
                 fairness_checks.get("image_attached_but_judge_image_unsupported", 0)
                 == 0
             ),
+            "media_memory_map_complete": (
+                fairness_checks.get("media_memory_map_unmatched_db_occurrences", 0)
+                == 0
+            ),
             "counters": dict(fairness_checks),
         },
         "media_attachments": {
             "enabled": media_attachment_totals["enabled"],
             "max_media_per_system": media_attachment_totals["max_media_per_system"],
+            "count_policy": (
+                "max_media_per_system=-1 attaches all source blobs present in each "
+                "packet; conversion policies below may still clip or frame-reduce "
+                "media for local judge input"
+            ),
+            "audio_max_seconds": JUDGE_MEDIA_AUDIO_MAX_SECONDS,
+            "audio_policy": JUDGE_MEDIA_AUDIO_POLICY,
+            "image_policy": JUDGE_MEDIA_IMAGE_POLICY,
+            "video_policy": JUDGE_MEDIA_VIDEO_POLICY,
             "cortext_native": dict(media_attachment_totals["cortext_native"]),
             "traditional_chat_rag": dict(media_attachment_totals["traditional_chat_rag"]),
             "full_history_upper_bound": dict(media_attachment_totals["full_history_upper_bound"]),

@@ -109,11 +109,27 @@ TEST_CASE("Migrations create graph retrieval lookup indexes", "[schema][migratio
     SignalProcessor processor(cfg, store, std::move(ops));
 
     auto rows = store->Execute(
-        "SELECT name FROM sqlite_master "
-        "WHERE type='index' AND name='idx_memories_embedding'",
+        "SELECT name FROM sqlite_master WHERE type='index'",
         {});
+    auto has_index = [&] (const std::string& name) {
+        for(const auto& r : rows) {
+            auto it = r.find("name");
+            if(it != r.end() && std::any_cast<std::string>(it->second) == name) return true;
+        }
+        return false;
+    };
 
-    REQUIRE(rows.size() == 1);
+    REQUIRE(has_index("idx_memories_embedding"));
+    REQUIRE(has_index("idx_signals_embedding"));
+    REQUIRE(has_index("idx_signals_source_ts_serial"));
+    REQUIRE(has_index("idx_memories_kind_source"));
+    REQUIRE(has_index("idx_memories_source_start"));
+    REQUIRE(has_index("idx_memories_last_access"));
+    REQUIRE(has_index("idx_memories_label_created"));
+    REQUIRE(has_index("idx_fact_cache_embedding"));
+    REQUIRE(has_index("idx_associations_edge_source_target"));
+    REQUIRE(has_index("idx_associations_edge_target_source"));
+    REQUIRE(has_index("idx_fact_assertions_lifecycle_recorded"));
 }
 
 TEST_CASE("Migrations neutralize role-derived source metadata and summary kind",

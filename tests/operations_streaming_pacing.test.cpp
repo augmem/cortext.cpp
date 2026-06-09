@@ -1,11 +1,13 @@
 #include <catch2/catch_approx.hpp>
 #include "test_helpers.hpp"
 #include <catch2/catch_test_macros.hpp>
+#include <cortext/core/knobs.hpp>
 #include <cortext/operations/drift_accumulation.hpp>
 #include <cortext/operations/streaming_pacing.hpp>
 #include <cortext/processor.hpp>
 #include <cortext/processor/operation_context.hpp>
 #include <Eigen/Dense>
+#include <algorithm>
 
 using namespace cortext;
 using cortext::operations::UpdateDriftAccumulation;
@@ -137,12 +139,12 @@ TEST_CASE ("CheckStreamingPacing gates retrieval below threshold",
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
   cortext::testing::RequireEncoder (cfg);
-  cfg.sensitivity = 0.5;  // threshold = 0.3
-  cfg.focus = 0.5;        // max_wait = 1.25
+  cfg.sensitivity = 0.5;  // threshold from StreamingPacingThreshold(...)
+  cfg.focus = 0.5;        // max_wait from MaxWaitDrift(...)
 
 
   auto &acc = pctx.accumulator_states["test"];
-  acc.drift_acc_pacing = 0.1;  // Below threshold 0.3
+  acc.drift_acc_pacing = 0.1;  // Below helper-derived threshold.
   acc.x_last_check = Eigen::VectorXf::Ones (4);
 
   Signal s = MakeSignal (Eigen::VectorXf::Ones (4));
@@ -163,12 +165,12 @@ TEST_CASE ("CheckStreamingPacing triggers retrieval above threshold",
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
   cortext::testing::RequireEncoder (cfg);
-  cfg.sensitivity = 0.5;  // threshold = 0.3
-  cfg.focus = 0.5;        // max_wait = 1.25
+  cfg.sensitivity = 0.5;  // threshold from StreamingPacingThreshold(...)
+  cfg.focus = 0.5;        // max_wait from MaxWaitDrift(...)
 
 
   auto &acc = pctx.accumulator_states["test"];
-  acc.drift_acc_pacing = 0.5;  // Above threshold 0.3
+  acc.drift_acc_pacing = 0.5;  // Above helper-derived threshold.
   acc.x_last_check = Eigen::VectorXf::Zero (4);
 
   Eigen::VectorXf emb = Eigen::VectorXf::Ones (4);
@@ -185,18 +187,57 @@ TEST_CASE ("CheckStreamingPacing triggers retrieval above threshold",
   REQUIRE (pctx.accumulator_states.at ("test").x_last_check.size () > 0);
 }
 
+TEST_CASE ("CheckStreamingPacing derives retrieval bias gate from knobs",
+           "[operations][streaming_pacing]")
+{
+  ProcessorContext pctx;
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  cfg.focus = 0.5;
+  cfg.sensitivity = 0.5;
+  cfg.stability = 0.5;
+
+  const double pacing_threshold
+      = cortext::core::StreamingPacingThreshold (cfg.sensitivity);
+  const double bias_threshold
+      = cortext::core::StreamingRetrievalBiasThreshold (
+          cfg.focus, cfg.sensitivity, cfg.stability);
+
+  auto &acc = pctx.accumulator_states["test"];
+  acc.drift_acc_pacing = pacing_threshold + 0.01;
+  acc.x_last_check = Eigen::VectorXf::Ones (4);
+
+  Signal s = MakeSignal (Eigen::VectorXf::Ones (4));
+  pctx.retrieval_bias = std::max (0.0, bias_threshold - 0.01);
+  OperationContext blocked_ctx (s, pctx, cfg);
+
+  CheckStreamingPacing op;
+  op.Execute (blocked_ctx, cortext::testing::GetNullTransaction ());
+
+  REQUIRE_FALSE (blocked_ctx.GetShouldCheckRetrieval ());
+  REQUIRE (pctx.accumulator_states.at ("test").drift_acc_pacing
+           == Catch::Approx (pacing_threshold + 0.01));
+
+  pctx.retrieval_bias = std::min (1.0, bias_threshold + 0.01);
+  OperationContext allowed_ctx (s, pctx, cfg);
+  op.Execute (allowed_ctx, cortext::testing::GetNullTransaction ());
+
+  REQUIRE (allowed_ctx.GetShouldCheckRetrieval ());
+  REQUIRE (pctx.accumulator_states.at ("test").drift_acc_pacing == 0.0);
+}
+
 TEST_CASE ("CheckStreamingPacing force check on max_wait_drift",
            "[operations][streaming_pacing]")
 {
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
   cortext::testing::RequireEncoder (cfg);
-  cfg.sensitivity = 0.0;  // threshold = 0.5
-  cfg.focus = 1.0;        // max_wait = 0.5
+  cfg.sensitivity = 0.0;  // threshold from StreamingPacingThreshold(...)
+  cfg.focus = 1.0;        // max_wait from MaxWaitDrift(...)
 
 
   auto &acc = pctx.accumulator_states["test"];
-  acc.drift_acc_pacing = 0.6;  // Above max_wait 0.5 but below threshold 0.5
+  acc.drift_acc_pacing = 0.6;  // Above helper-derived max_wait.
   acc.x_last_check = Eigen::VectorXf::Zero (4);
 
   Signal s = MakeSignal (Eigen::VectorXf::Ones (4));

@@ -70,7 +70,7 @@ Result: **do not replace flat realtime label lookup with direct partition/tree d
 
 `signal vector -> flat top-k router hints -> map hints to cluster leaves -> take top-k labels from each reached leaf -> realtime recency/graph scorer`
 
-Across the broader May 2026 label-graph experiments, this conclusion is consistent with the strongest result. Flat top-k alone did not improve the scaled multimodal identity probes once graph attention was added, even with higher `top_k` and degree penalties: the scaled multimodal graph runs stayed at **3 / 18**. Hierarchical-only assignment also stayed at **3 / 18** because rare identity labels were too easy to miss. The best direct hierarchical accumulator run on the corrected default sweep reached **9 / 18** with `k=40, M=5, N=8`, but it was still an isolated label-accumulator result rather than the graph pairing. The best graph-paired run was `topk_plus_hierarchical` with `k=50, M=3, N=10`, cosine selection, recency decay **1.0**, temporal weight **0.1**, and degree penalty **0.5**; it reached **12 / 18** target top-5 hits. This is the current best-supported combination for realtime identity labeling:
+Across the broader May 2026 label-graph experiments, this conclusion is consistent with the strongest result. Flat top-k alone did not improve the scaled multimodal identity probes once graph attention was added, even with higher `top_k` and degree penalties: the scaled multimodal graph runs stayed at **3 / 18**. Hierarchical-only assignment also stayed at **3 / 18** because rare identity labels were too easy to miss. The best direct hierarchical accumulator run on the corrected default sweep reached **9 / 18** with `k=40, M=5, N=8`, but it was still an isolated label-accumulator result rather than the graph pairing. The best graph-paired run was `topk_plus_hierarchical` with `k=50, M=3, N=10`, cosine selection, recency decay **1.0**, temporal weight **0.1**, and degree penalty **0.5**; it reached **12 / 18** target top-5 hits. Those literal temporal/degree settings are historical sweep parameters, not current production constants: the production path now routes these behaviors through named F/S/T helpers. This is the current best-supported combination for realtime identity labeling:
 
 `flat top-k router -> cluster/hierarchical leaf expansion -> top-k per reached cluster -> recency-weighted label graph scoring -> generic/degree suppression`
 
@@ -492,6 +492,16 @@ spent **178.7 ms** mean time in `GraphRetrieve.seed_sql`, so the next
 engineering target is not to remove constructive recall, but to make retrieval
 consult a bounded/current embedding surface rather than rebuilding latest
 reconstruction state inside every sqlite-vec seed query.
+
+Implementation follow-up addressed this specific hot path structurally: seed
+SQL now looks up the latest reconstruction only for each candidate memory using
+the `(memory_id, reconstruction_id DESC)` index, and the schema adds ordinary
+lookup indexes for fact-cache embedding joins and edge-type-first association
+traversal. Recursive graph expansion now also applies an F/S/T-derived per-node
+fanout cap before the final row cap, so high-degree memories cannot force
+unbounded association work before result compaction. The week-run numbers above
+remain historical diagnostics from the superseded query plan; fresh latency and
+throughput numbers must come from a rerun of the current branch.
 
 Historical OpenAI-judged validation on the then-current branch reran after the
 generic-fragment label filters and durable-source promotion changes. On the
@@ -2308,6 +2318,29 @@ We ran a **156‑turn** comparison at **F=S=T=0.5** to evaluate **baseline**, **
 
 ## Reinforcement Ablation (Long Horizon)
 
+On **June 9, 2026**, the Julie release probe stream exposed a production graph
+plasticity problem: repeated compact retrieval packets were creating durable
+reinforcement hubs because `DetectMemoryUsage` used a fixed `0.1` increment for
+every pair of co-retrieved memories. We replaced that constant with the
+F/S/T-derived, contextual-support-weighted, fanout-damped rule described in
+@sec-reinforcement. Quick verification artifacts are in
+`build/reinforcement_knob_ablation_20260609/`.
+
+The numeric step-matrix ablation compares the old fixed update to the new rule.
+At the default knobs (`F=S=T=0.5`) and a 13-item retrieved packet matching the
+Julie trace shape, the selected/used-memory pair update falls from `0.10000` to
+`0.01981` (**5.0x** slower), while an unselected co-retrieval pair falls to
+`0.00282` (**35.4x** slower). For a 20-item packet, those reductions are
+**6.3x** and **44.0x** respectively. In a no-decay saturation calculation, the
+old edge reaches weight 1.0 after **10** repeated co-retrievals, while the new
+default needs **51** selected-pair repetitions for a 13-item packet and **355**
+unselected-pair repetitions. The deterministic full-unit ablation still marks
+`reinforcement_edges` as essential for the best score (`mean_marginal = 1.0`,
+`max_score_without = 13.0`, `essential_for_best = 1`), so the fix slows noisy
+online graph plasticity without removing the reinforcement family. This is a
+mechanism-level verification only; Julie release-quality claims must be rerun
+against the rebuilt production binary.
+
 We reran the reinforcement ablation on **Apr 4, 2026** under `EmbeddingGemma/llama.cpp` by comparing **reinforcement on vs off** at **F=S=T=0.5**, `max_total=360`, `max_turns=360`, `max_conversations=6` (single stream, interleave=1). Consolidation was invoked externally (`consolidate_cycles=2`). Rerun root: `logs/embeddinggemma_paper_harness_ablation_fast_20260404`.
 
 | reinforcement_mode | reinforcement_edge_count | retrieval_avg_candidates | retrieval_semantic_overlap_mean | interrupt_precision | interrupt_recall | interrupt_fn_rate | memory_retrieved_count_mean |
@@ -3065,7 +3098,12 @@ requires at least 90% of probes to have a majority winner across the local Gemma
 an explicit release-freeze file that pins the private source-input manifest hash,
 the frozen probe schedule hash, the benchmark command hash, and the benchmark
 executable hash; the final report is run in strict mode and exits non-zero
-unless the release gate passes. The gate
+unless the release gate passes. The main release runner can also receive an
+existing `--release-freeze` before replay; in that mode preflight recomputes the
+private source-input manifest hash and checks the benchmark command, executable
+hash, git commit, and dirty-worktree manifest against the freeze before spending
+wall time on the benchmark, then the generated report validates the frozen probe
+manifest and schedule against the same file. The gate
 also requires the full-history upper-bound packet to record non-empty
 prior-history items and token counts for every probe, so that the upper bound is
 a real comparator rather than a nominal judge arm. It also requires default knobs
@@ -3144,8 +3182,13 @@ screening auditable instead of being only a convenience wrapper around the long
 replay.
 For local-only judge runs, the watcher may also pause the benchmark process while
 a checkpoint judge call is active and resume it afterward, preventing replay
-progress from racing a still-undecided early gate on the same machine. When no
-explicit media-smoke artifact is supplied, the runner
+progress from racing a still-undecided early gate on the same machine. The
+watcher records total benchmark
+pause milliseconds and pause count in the early-judge manifest; the release
+report keeps raw wall time but computes throughput from wall time with that
+local-judge pause time subtracted. This prevents early screening overhead from
+making production ingest throughput look worse while still preserving the raw
+run duration for audit. When no explicit media-smoke artifact is supplied, the runner
 also generates the non-private local Ollama image/audio smoke before preflight
 and replay, and regenerates the default artifact when it is stale for a different
 judge model or failed to prove image/audio support. These early artifacts are
@@ -3968,17 +4011,20 @@ We also separated two hydration/admission concerns that had been entangled in
 the chat prompt path. First, hydration now preserves the ranked retrieval order
 emitted by the graph retriever instead of relying on the iteration order of the
 retrieved-embedding map. Second, query-aware ordering of sources inside a
-durable cue was tested behind
-`CORTEXT_QUERY_AWARE_LINKED_SOURCE_HYDRATION=1`. On the same `skip=1980`
-seven-probe slice, rank-preserving hydration with query-aware source ordering
+durable cue was first tested as an isolated source-ordering variant. On the same
+`skip=1980` seven-probe slice, rank-preserving hydration with query-aware source ordering
 (`build/stm_ltm_query_source_admission_judged.json`) raised compact Cortext LTM
 sufficiency to **1.00**, but non-compact Cortext-LTM-only sufficiency was only
 **1.00**. Rank preservation without query-aware source ordering
 (`build/stm_ltm_rank_preserve_judged.json`) also produced compact Cortext LTM
 sufficiency **1.00**, but non-compact Cortext-LTM-only sufficiency dropped to
 **0.43**. Because both variants still had **6 / 7** zero-overlap probes and **0**
-LTM wins, the conservative implementation keeps query-aware source ordering
-opt-in while retaining rank preservation as a deterministic hydration fix. The
+LTM wins, the result is treated as negative evidence for source ordering as a
+standalone quality fix, not as evidence against query similarity inside
+production hydration. Production now preserves retrieval rank and uses
+query-aware linked-source ordering by default, with
+`CORTEXT_DISABLE_QUERY_AWARE_LINKED_SOURCE_HYDRATION=1` retained only as an
+ablation/regression switch. The
 best short-slice LTM-only result remains the label-to-source hydration run
 (`build/stm_ltm_label_expansion_judged.json`), not either source-admission
 variant.
@@ -4029,8 +4075,10 @@ However, normal RAG still scored **3.857** sufficiency and **2** wins, while
 Cortext LTM had **0** wins and **6 / 7** zero-overlap probes. A query-aware
 linked-source ordering repeat
 (`build/stm_ltm_relation_label_propagation_query_sources.json`) did not improve
-compact LTM, so that ordering remains opt-in. The next bottleneck is therefore
-not lost source grounding or missing relation persistence, but overly broad or
+compact LTM as a standalone change, so the later production default treats it as
+bounded source ordering rather than a retrieval-quality claim. The next
+bottleneck is therefore not lost source grounding or missing relation persistence,
+but overly broad or
 weak label admission/ranking: relation propagation helps, yet it can still boost
 generic labels that do not select the right underlying experiences. A direct
 aggregate SQLite audit of the same artifact supports this diagnosis: the durable
@@ -14038,8 +14086,10 @@ episode signals
 
 The benchmark is
 `tools/preconsolidated_topk_label_graph_retrieval_bench.py`. It is
-benchmark-only and does not alter production retrieval or write to Cortext
-databases. It builds an episode centroid from signal embeddings, queries the
+offline and non-mutating: it does not write to Cortext databases. The bounded
+provisional-label graph boost it validated was later promoted into production
+retrieval as an F/S/T-derived soft signal. The benchmark builds an episode
+centroid from signal embeddings, queries the
 label vector store, keeps Top-K provisional labels, and evaluates retrieval with
 and without a bounded provisional-label graph boost. The pruning simulation
 uses offline truth only to model the later consolidation step that removes
@@ -14121,13 +14171,14 @@ temporary retrieval lift, because durable graph state must not preserve false
 hubs. On the text/image slice, direct retrieval was already at ceiling, and the
 preconsolidated/pruned graph preserved that ceiling.
 
-Implementation implication: build the production path as a separate
-preconsolidated graph layer. It should use episode centroids and the label
-vector store in realtime, expose a bounded low-weight retrieval boost, and mark
-all edges provisional with source/modality provenance. Consolidation should then
-promote only labels supported by source evidence and prune the rest. This gives
-realtime recall the benefit of "one right label in the set" without letting the
-many wrong labels become durable memory structure.
+Implementation implication, now promoted into production: use episode centroids
+and the attached label-bank/vector store as bounded soft routing signals inside
+the normal retrieval operation, not as a separate API path. The online path
+exposes a low-weight F/S/T-derived retrieval boost from provisional label/fact
+graph evidence, while consolidation promotes only labels supported by source
+evidence and prunes the rest. This gives realtime recall the benefit of "one
+right label in the set" without letting the many wrong labels become durable
+memory structure.
 
 ### STM graph to durable LTM consolidation replay
 
@@ -14209,17 +14260,18 @@ source-backed durable labels rather than adding more summaries.
 
 We also tested a narrower hydration hypothesis after this run: if a durable
 label points to many source memories, order the linked sources by query-embedding
-similarity instead of recency before hydrating the prompt packet. A unit
-regression now covers this opt-in behavior
-(`CORTEXT_QUERY_AWARE_LINKED_SOURCE_HYDRATION=1`), but the real Julie replay did
-not support making it the default. The 80-message judged artifact
+similarity instead of recency before hydrating the prompt packet. The 80-message
+judged artifact
 `build/stm_ltm_query_hydration_v27_80_openai.json` preserved the same source
 grounding counts but reduced LTM-only quality (`1.286` relevance, `0.429`
 sufficiency) and relabel/pruned graph quality (`2.429` relevance, `1.000`
 sufficiency). This negative result narrows the failure: source ordering alone is
 not the bottleneck. The durable graph needs better text/anchor admission and
 query routing into discriminative source-backed labels before hydration order can
-matter.
+matter. Production nevertheless now uses query-aware linked-source ordering by
+default as a bounded hydration policy, not as a claimed standalone fix; it can be
+disabled for isolation with
+`CORTEXT_DISABLE_QUERY_AWARE_LINKED_SOURCE_HYDRATION=1`.
 
 We then hardened the durable-label gate to reject weak multi-token discourse
 phrases whose tokens are all modal, helper, or conversational filler words. The
@@ -14279,12 +14331,14 @@ not support enabling this path by default. In
 remained unchanged at 16 refined labels, 103 source-link pairs, and zero missing
 source nodes, but judged retrieval regressed: LTM-only retrieval fell to `2.429`
 relevance and `1.286` sufficiency, and the graph relabel/prune packet fell to
-`2.286` relevance and `0.857` sufficiency. The token route is therefore kept as
-an explicit experiment switch (`CORTEXT_ENABLE_LABEL_TOKEN_TEXT_ROUTE=1`) rather
-than as production behavior. The negative result is useful:
+`2.286` relevance and `0.857` sufficiency. The negative result is useful:
 query-addressability cannot be fixed by broad lexical matching over durable
 labels alone; the labels themselves must be more event- and
-question-discriminative.
+question-discriminative. In the current production retrieval path this route is
+therefore not a separate experiment switch. It is enabled through the same
+F/S/T-derived routing policy as the rest of graph retrieval, with knob-derived
+token floors, breadth, fanout, and source-evidence caps so it contributes as a
+bounded rescue signal rather than an uncontrolled lexical override.
 
 The next consolidation-side probe converted accepted durable event labels into
 source-backed fact assertions when the label had a conservative shape:
@@ -14309,9 +14363,10 @@ existing `fact_evidence` mapping back to original memories. A focused graph
 retrieval regression verifies the intended failure case: the target fact vector
 is crowded out of the fact KNN set, but a query such as "Who gave money?" still
 reaches the source-backed fact text and gives the evidence memory a positive fact
-boost. The real replay
-(`build/stm_ltm_fact_text_seed_v33_80_openai.json`) showed why this is only a
-partial fix. Durable construction stayed source-grounded (**16** refined labels,
+boost. The pre-fix real replay
+(`build/stm_ltm_fact_text_seed_v33_80_openai.json`) showed why this was only a
+partial fix before the later temporal/source mapping and fact-route hardening.
+Durable construction stayed source-grounded (**16** refined labels,
 **103** label-source pairs, **32** relation edges, **0** missing source nodes,
 and **6** touched facts), but judged probes still reported **0** fact seeds,
 **0** candidate fact-linked memories, and **0** selected fact-linked memories.
@@ -14871,7 +14926,7 @@ confirming that a real release replay can hand off from automated replay to huma
 annotation and final strict reporting without requiring human-label artifacts
 before replay starts.
 
-A subsequent **Jun 8, 2026** hardening pass added two release-protocol guards.
+A subsequent **Jun 8, 2026** hardening pass added four release-protocol guards.
 First, strict release preflight now fails before replay if
 `--require-final-report-pass` is requested while the final judge packet is
 cropped; the final release judge uses `--judge-packet-item-limit -1` by default,
@@ -14890,6 +14945,89 @@ with the generated smoke artifact and uncropped final judge packets passed the
 media and packet gates, then stopped only on the intentionally missing release
 artifacts: human labels, human-label evaluation, frozen target labels, and the
 ablation request.
+
+Third, release preflight can now enforce the media kinds present in the exact
+frozen replay window after `skip_messages`, `max_messages`, and `media_limit`
+selection. This is a harness coverage check only; it does not alter Cortext
+ingress, retrieval, consolidation, or judging. The guard caught that the active
+early 1200-message diagnostic window contained selected media counts
+`image=13`, `video=3`, and `audio=0`, so it cannot support a speech-inclusive
+mixed-media claim by itself
+(`build/julie_release_preflight_media_guard_current/preflight_report.json`).
+Two deterministic later windows pass narrower modality checks without changing
+the production path: `skip=67300,max=80,media=4` contains `video=2,image=2`, and
+`skip=98412,max=80,media=4` contains `audio=1,image=3`
+(`build/julie_release_preflight_media_guard_video_window/preflight_report.json`
+and `build/julie_release_preflight_media_guard_audio_window/preflight_report.json`).
+The final mixed-media release protocol should therefore be treated as
+multi-window unless a single frozen window is explicitly shown to contain all
+required modalities.
+
+Fourth, the release runner and final report now reject benchmark commands that
+use diagnostic-only replay modes such as `--profile-probes-only`,
+`--checkpoint-eval-only`, or checkpoint query selectors. Those modes are useful
+for speed profiling and frozen checkpoint inspection, but they do not execute the
+full frozen daily-consolidation replay. The guard is checked before a runner
+spends wall time on replay and again when a report is generated from a recorded
+benchmark command, so a manually produced diagnostic summary cannot satisfy the
+native-Cortext release protocol by accident.
+
+A follow-up wrapper, `tools/run_julie_release_windows.py`, now makes that
+multi-window protocol explicit instead of relying on hand-run commands. By
+default it freezes three windows: `early_text_image`
+(`skip=0,max=1200,media=16,warmup=200,stride=25,min_probes=30,require=image`),
+`video_window`
+(`skip=67300,max=80,media=4,warmup=10,stride=10,min_probes=4,require=video`),
+and `audio_window`
+(`skip=98412,max=80,media=4,warmup=10,stride=10,min_probes=4,require=audio`).
+The short media windows deliberately use their own frozen probe schedules; the
+earlier global `warmup=200` schedule would make 80-message media windows
+incapable of emitting release probe rows. The wrapper writes
+`release_windows_manifest.json`, delegates each window to the single-window
+production release runner, strips hosted-provider environment variables, and
+shares one non-private local Gemma media-smoke artifact across all windows.
+`build/julie_release_windows_preflight_smoke_v3/release_windows_status.json`
+records a passing preflight for all three windows with selected media counts of
+`image=13,video=3,audio=0`, `image=2,video=2,audio=0`, and
+`image=3,video=0,audio=1`, respectively. The same wrapper now writes
+`release_windows_report.json`, a public-safe aggregate report that combines
+completed window-level judge rows by `(window,event_index)`, recomputes bootstrap
+confidence intervals for win rate, relevance, sufficiency, noise, quality delta,
+and token savings, and carries aggregate cost fields without including message
+text, media bytes, candidate labels, or judge reason strings. The aggregate report
+now separates planned ablations from judged ablation evidence: a recorded
+`ablation_plan.json` is required to prove the run requested the architecture
+ablations, but only final judged ablation rows with bootstrap CIs can support the
+claim that a component earned its keep. On the preflight smoke, re-running the
+current stricter report as
+`release_windows_report.after_ablation_gate.json` correctly reports
+`overall_status=not_ready`, with `13` passed checks, `0` failed checks, and `31`
+pending checks because replay summaries, repeated judges, human-label agreement,
+judged ablation effects, aggregate CIs, and release-quality claim support have
+not yet been produced. This is still protocol readiness evidence, not
+release-quality evidence.
+
+The first full multi-window evidence run was launched in tmux as
+`cortext_julie_release_windows_20260609` with output under
+`build/julie_release_windows_full_20260609/`. Early fail-fast judging is disabled
+for this run (`--early-judge off`) so each frozen window can complete and then
+receive the final repeated blind local Gemma judge. At launch, the shared
+non-private media smoke artifact passed and the `early_text_image` production
+replay entered `running` state; no quality or token claim is made until all
+window summaries, repeated judge artifacts, human labels, ablations, and
+aggregate confidence intervals are present.
+
+During that launch, a skipped-window labeling audit found and fixed a harness
+bug before the short media windows were reached: the human-label and frozen
+retrieval-eval timeline helper was rebuilding timelines from
+`processed_text_messages` without applying `skipped_transcript_messages` or the
+timestamp-bounded media window. The final judge path already used a skip-aware
+timeline, so production judging was not changed. The patched helper now derives
+`timeline_skip_messages`, `timeline_max_messages`, and `timeline_media_limit`
+from the summary. A no-text sanity check on the frozen media windows reports
+`video_window` as `80` text events plus `4` media events and `audio_window` as
+`80` text events plus `1` audio and `3` image events, matching the preflight
+coverage counts.
 
 A historical 24-probe hard gate was selected after replaying the existing
 `build/julie_release_default_vector_v24/early_judge/early_judge_manifest.json`

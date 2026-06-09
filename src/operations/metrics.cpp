@@ -112,7 +112,7 @@ ComputeMetrics::Execute (OperationContext &context, Transaction &tx) const
       = core::Clamp (
           rarity_base
               * (constants::kOneHalf + constants::kOneHalf * F_eff)
-              * (constants::kNormalizedMax - constants::kRarityTCoeff * T),
+              * core::MetricRarityStabilityScale (T),
           constants::kNormalizedMin, constants::kNormalizedMax);
   context.SetMetric (operations::Metric::rarity, rarity);
 
@@ -150,8 +150,7 @@ ComputeMetrics::Execute (OperationContext &context, Transaction &tx) const
   const double utility
       = core::Clamp (delta_sse
                          * (constants::kOneHalf + constants::kOneHalf * F_eff)
-                         * (constants::kNormalizedMax
-                            - constants::kUtilitySCoeff * S_eff),
+                         * core::MetricUtilitySensitivityScale (cfg.sensitivity),
                      constants::kNormalizedMin, constants::kNormalizedMax);
   context.SetMetric (operations::Metric::utility, utility);
 

@@ -15,14 +15,16 @@ import time
 from datetime import datetime
 
 
+REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 ABLATION_NAMES = [
     "no_daily_consolidation",
     "no_graph_expansion",
     "no_media_source_blobs",
-    "no_stm_label_handoff",
+    "no_stm_ltm_graph_label_handoff",
     "no_temporal_retrieval",
     "no_fact_boosts",
 ]
+DEFAULT_ABLATION_JUDGE_FILENAME = "gemma4_12b_ollama_blind_judge_reps3.json"
 DEFAULT_JUDGE_MODEL = "gemma4:12b-it-qat"
 DEFAULT_OLLAMA_BASE_URL = "http://127.0.0.1:11434"
 HOSTED_PROVIDER_ENV_MARKERS = (
@@ -141,6 +143,69 @@ def wait_for_completed_sample(path: pathlib.Path) -> None:
             )
         else:
             time.sleep(5)
+
+
+def resolve_plan_path(raw: object, fallback: pathlib.Path) -> pathlib.Path:
+    if raw is None or str(raw).strip() == "":
+        return fallback
+    path = pathlib.Path(str(raw))
+    if not path.is_absolute():
+        path = REPO_ROOT / path
+    return path.resolve()
+
+
+def fallback_ablation_artifacts(
+    base: pathlib.Path,
+) -> list[tuple[str, pathlib.Path, pathlib.Path]]:
+    artifacts = []
+    for name in ABLATION_NAMES:
+        out_dir = base / f"ablation_{name}"
+        artifacts.append(
+            (
+                name,
+                out_dir / "summary.json",
+                out_dir / DEFAULT_ABLATION_JUDGE_FILENAME,
+            )
+        )
+    return artifacts
+
+
+def required_ablation_artifacts(
+    base: pathlib.Path,
+    ablation_plan: pathlib.Path,
+) -> list[tuple[str, pathlib.Path, pathlib.Path]]:
+    plan = json.loads(ablation_plan.read_text())
+    if not isinstance(plan, dict) or "cases" not in plan:
+        return fallback_ablation_artifacts(base)
+
+    cases = plan.get("cases")
+    if not isinstance(cases, list) or not cases:
+        raise RuntimeError("ablation_plan cases must be a non-empty list")
+
+    artifacts = []
+    seen: set[str] = set()
+    for index, case in enumerate(cases):
+        if not isinstance(case, dict):
+            raise RuntimeError(f"ablation_plan case {index} must be an object")
+        name = str(case.get("name", "")).strip()
+        if not name:
+            raise RuntimeError(f"ablation_plan case {index} is missing name")
+        if name in seen:
+            raise RuntimeError(f"duplicate ablation_plan case name: {name}")
+        seen.add(name)
+
+        out_dir = base / f"ablation_{name}"
+        artifacts.append(
+            (
+                name,
+                resolve_plan_path(case.get("summary_path"), out_dir / "summary.json"),
+                resolve_plan_path(
+                    case.get("judge_path"),
+                    out_dir / DEFAULT_ABLATION_JUDGE_FILENAME,
+                ),
+            )
+        )
+    return artifacts
 
 
 def judge_media_smoke_needs_generation(
@@ -322,9 +387,10 @@ def main() -> int:
     print(f"[finalizer] completed human sample {args.sample}", flush=True)
 
     ablation_args: list[str] = []
-    for name in ABLATION_NAMES:
-        summary = args.base / f"ablation_{name}" / "summary.json"
-        judge = args.base / f"ablation_{name}" / "gemma4_12b_ollama_blind_judge_reps3.json"
+    for name, summary, judge in required_ablation_artifacts(
+        args.base,
+        args.ablation_plan,
+    ):
         wait_for_json(summary)
         wait_for_json(judge)
         print(f"[finalizer] ready ablation {name}", flush=True)

@@ -762,7 +762,8 @@ InsertAssociativeCue (OperationContext &context, Transaction &tx,
 void
 AttachClusterSources (Transaction &tx, long long association_memory_id,
                       int cluster_id,
-                      const std::vector<std::pair<long long, long long>> &source_links)
+                      const std::vector<std::pair<long long, long long>> &source_links,
+                      double derived_source_edge_weight)
 {
   for (const auto &[emb_id, src_memory_id] : source_links)
     {
@@ -777,8 +778,9 @@ AttachClusterSources (Transaction &tx, long long association_memory_id,
           AddWrite (tx,
                     "INSERT OR IGNORE INTO associations "
                     "(source_memory_id, target_memory_id, edge_type, weight) "
-                    "VALUES (?, ?, 'derived_from', 1.0)",
-                    { association_memory_id, src_memory_id });
+                    "VALUES (?, ?, 'derived_from', ?)",
+                    { association_memory_id, src_memory_id,
+                      derived_source_edge_weight });
         }
     }
 }
@@ -816,17 +818,13 @@ QueueExtractionIfNeeded (std::vector<ExtractionRequest> &requests,
 ConsolidationSummarizeParams
 ConsolidationSummarizeParams::FromKnobs (double F, double S, double T)
 {
-  (void)S;
   ConsolidationSummarizeParams p;
   p.min_cluster_size_for_extraction = core::MinClusterSizeForExtraction (F);
-  const double F_eff = core::FocusBias (F);
-  const double T_eff = core::Clamp (T, 0.0, 1.0);
-  p.max_source_texts = std::max (
-      2, static_cast<int> (std::round (core::Lerp (3.0, 8.0, F_eff))));
-  p.max_total_chars
-      = static_cast<int> (std::round (core::Lerp (1200.0, 3600.0, T_eff)));
-  p.max_text_chars
-      = static_cast<int> (std::round (core::Lerp (300.0, 900.0, F_eff)));
+  const auto budget = core::ConsolidationSummaryEvidenceBudgetForKnobs (
+      F, S, T);
+  p.max_source_texts = budget.max_source_texts;
+  p.max_total_chars = budget.max_total_chars;
+  p.max_text_chars = budget.max_text_chars;
   p.max_summary_words = 0;
   return p;
 }
@@ -860,6 +858,8 @@ ConsolidationSummarize::Execute (OperationContext &context, Transaction &tx) con
   auto params
       = ConsolidationSummarizeParams::FromKnobs (cfg.focus, cfg.sensitivity,
                                                   cfg.stability);
+  const double derived_source_edge_weight = core::DerivedSourceEdgeWeight (
+      cfg.focus, cfg.sensitivity, cfg.stability);
   auto &p_ctx = context.GetProcessorContext ();
   const uint64_t now_ts = context.GetSignal ().timestamp;
 
@@ -1167,7 +1167,7 @@ ConsolidationSummarize::Execute (OperationContext &context, Transaction &tx) con
         }
 
       AttachClusterSources (tx, cue_memory_id, cluster.cluster_id,
-                            source_links);
+                            source_links, derived_source_edge_weight);
       if (cue_memory_id > 0)
         {
           const bool stm_label_handoff_enabled
@@ -1226,8 +1226,9 @@ ConsolidationSummarize::Execute (OperationContext &context, Transaction &tx) con
               AddWrite (tx,
                         "INSERT OR IGNORE INTO associations "
                         "(source_memory_id, target_memory_id, edge_type, weight) "
-                        "VALUES (?, ?, 'derived_from', 1.0)",
-                        { centroid_memory_id, src_memory_id });
+                        "VALUES (?, ?, 'derived_from', ?)",
+                        { centroid_memory_id, src_memory_id,
+                          derived_source_edge_weight });
             }
           continue;
         }
@@ -1355,8 +1356,9 @@ ConsolidationSummarize::Execute (OperationContext &context, Transaction &tx) con
               AddWrite (tx,
                         "INSERT OR IGNORE INTO associations "
                         "(source_memory_id, target_memory_id, edge_type, weight) "
-                        "VALUES (?, ?, 'derived_from', 1.0)",
-                        { centroid_memory_id, src_memory_id });
+                        "VALUES (?, ?, 'derived_from', ?)",
+                        { centroid_memory_id, src_memory_id,
+                          derived_source_edge_weight });
             }
         }
 

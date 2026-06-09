@@ -16,19 +16,18 @@ namespace cortext::operations
 {
 
 ConsolidationClusterParams
-ConsolidationClusterParams::FromKnobs (double F, double /*S*/, double /*T*/)
+ConsolidationClusterParams::FromKnobs (double F, double S, double T)
 {
   ConsolidationClusterParams p;
   p.merge_threshold = core::MergeThreshold (F);
   p.min_cluster_size = core::MinClusterSize (F);
-  p.max_clusters = 100; // Reasonable cap
+  p.max_clusters = core::ConsolidationMaxClusters (F, S, T);
   return p;
 }
 
 void
 ConsolidationCluster::Execute (OperationContext &context, Transaction &tx) const
 {
-  (void)tx;
   (void)tx;
   if (!context.GetConsolidationShouldStart ())
     {

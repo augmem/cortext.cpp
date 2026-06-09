@@ -80,8 +80,7 @@ TEST_CASE ("Episode boundary drift threshold follows lerp(0.10, 0.35, T)",
   // The drift threshold for episode boundaries is derived from stability.
   // Already verified as correct in Phase 1.3 - this test documents the baseline.
 
-  // Note: The actual implementation uses kGainMedium=0.10 and kWeightHigh=0.35
-  // from constants, which matches lerp(0.10, 0.35, T)
+  // This baseline matches the documented lerp(0.10, 0.35, T) schedule.
 
   SECTION ("Low stability yields low threshold (more boundaries)")
   {
@@ -158,7 +157,7 @@ TEST_CASE ("Working memory capacity within [2, 6] range",
   }
 }
 
-TEST_CASE ("WM gate threshold follows spec: lerp(0.1, 0.4, F)",
+TEST_CASE ("WM gate threshold follows spec: lerp(0.1, 0.4, FocusBias(F))",
            "[regression][working_memory]")
 {
   // gate_threshold determines what composite score is required for WM entry
@@ -489,10 +488,10 @@ TEST_CASE ("Reinforcement decay increases with Stability",
   }
 }
 
-TEST_CASE ("Contradiction threshold is fixed at -0.5",
+TEST_CASE ("Contradiction threshold midpoint wrapper returns -0.5",
            "[regression][graph]")
 {
-  // Fixed threshold for detecting semantic contradictions
+  // Legacy zero-arg wrapper is anchored at the midpoint F/S/T setting.
   REQUIRE (ContradictionThreshold () == Catch::Approx (-0.5));
 }
 

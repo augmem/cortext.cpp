@@ -111,7 +111,6 @@ namespace cortext
 namespace
 {
 
-constexpr int kMaxHydratedSoftAnchors = 3;
 constexpr const char *kMaintenanceSourceId = "cortext/maintenance";
 
 double
@@ -442,11 +441,13 @@ LoadSignalBlobs (Store *store, long long memory_id,
 void
 LoadSoftAnchors (
     Store *store, long long memory_id,
-    std::vector<Cortext::Context::Memory::SoftAnchor> &out)
+    std::vector<Cortext::Context::Memory::SoftAnchor> &out,
+    int max_hydrated_soft_anchors)
 {
   out.clear ();
   if (!store || memory_id <= 0)
     return;
+  const int limit = std::max (1, max_hydrated_soft_anchors);
 
   try
     {
@@ -458,7 +459,7 @@ LoadSoftAnchors (
           "  AND anchor_label NOT IN ('none', 'rejected') "
           "ORDER BY anchor_strength DESC, score DESC, updated_step DESC "
           "LIMIT ?",
-          { memory_id, static_cast<long long> (kMaxHydratedSoftAnchors) });
+          { memory_id, static_cast<long long> (limit) });
 
       out.reserve (rows.size ());
       for (const auto &row : rows)
@@ -519,7 +520,8 @@ LoadSoftAnchors (
 
 void
 HydrateMemory (Store *store, ObjectStore *object_store, long long id,
-               Cortext::Context::Memory &m)
+               Cortext::Context::Memory &m,
+               int max_hydrated_soft_anchors)
 {
   if (!store)
     return;
@@ -664,7 +666,8 @@ HydrateMemory (Store *store, ObjectStore *object_store, long long id,
           m.arousal = 0.0;
           m.composite_score = 0.0;
           m.threshold_t = 0.0;
-          LoadSoftAnchors (store, memory_id, m.soft_anchors);
+          LoadSoftAnchors (store, memory_id, m.soft_anchors,
+                           max_hydrated_soft_anchors);
         }
     }
   catch (const std::exception &e)
@@ -741,17 +744,19 @@ LoadMemoryKind (Store *store, long long memory_id)
 
 std::vector<long long>
 ResolveDisplayMemoryIdsForEmptyRetrieval (Store *store, long long memory_id,
-                                          const Eigen::VectorXf *query)
+                                          const Eigen::VectorXf *query,
+                                          int max_linked_candidates,
+                                          std::pair<double, double>
+                                              query_ordering_weights)
 {
   if (!store || memory_id <= 0)
     {
       return {};
     }
 
-  constexpr int kMaxLinkedHydrationCandidates = 12;
+  const int limit = std::max (1, max_linked_candidates);
   const bool query_source_ordering_enabled
-      = EnvFlag ("CORTEXT_QUERY_AWARE_LINKED_SOURCE_HYDRATION")
-        && !EnvFlag ("CORTEXT_DISABLE_QUERY_AWARE_LINKED_SOURCE_HYDRATION");
+      = !EnvFlag ("CORTEXT_DISABLE_QUERY_AWARE_LINKED_SOURCE_HYDRATION");
   try
     {
       auto rows = store->Execute (
@@ -788,7 +793,7 @@ ResolveDisplayMemoryIdsForEmptyRetrieval (Store *store, long long memory_id,
           "         COALESCE(m.last_access, 0) DESC, m.created_at DESC "
           "LIMIT ?",
           { memory_id, memory_id, memory_id, memory_id, memory_id,
-            static_cast<long long> (kMaxLinkedHydrationCandidates) });
+            static_cast<long long> (limit) });
 
       std::vector<long long> out;
       out.reserve (rows.size ());
@@ -855,11 +860,14 @@ ResolveDisplayMemoryIdsForEmptyRetrieval (Store *store, long long memory_id,
       if (query_source_ordering_enabled && query && query->size () > 0)
         {
           std::sort (ranked.begin (), ranked.end (),
-                     [] (const RankedLinked &a, const RankedLinked &b) {
+                     [query_ordering_weights] (const RankedLinked &a,
+                                               const RankedLinked &b) {
                        const double score_a
-                           = 0.82 * a.query_score + 0.18 * a.weight;
+                           = query_ordering_weights.first * a.query_score
+                             + query_ordering_weights.second * a.weight;
                        const double score_b
-                           = 0.82 * b.query_score + 0.18 * b.weight;
+                           = query_ordering_weights.first * b.query_score
+                             + query_ordering_weights.second * b.weight;
                        if (score_a != score_b)
                          return score_a > score_b;
                        return a.rel_rank < b.rel_rank;
@@ -891,7 +899,8 @@ ResolveDisplayMemoryIdsForEmptyRetrieval (Store *store, long long memory_id,
 
 void
 HydrateWorkingMemoryFromDB (Store *store, ObjectStore *object_store,
-                            std::vector<Cortext::Context::Memory> &out)
+                            std::vector<Cortext::Context::Memory> &out,
+                            int max_hydrated_soft_anchors)
 {
   if (!store)
     return;
@@ -977,7 +986,8 @@ HydrateWorkingMemoryFromDB (Store *store, ObjectStore *object_store,
           LoadSignalBlobs (store, m.id, object_store, m.modality, m.mimetype,
                            m.content);
           StripSourceBlobsIfDisabled (m);
-          LoadSoftAnchors (store, m.id, m.soft_anchors);
+          LoadSoftAnchors (store, m.id, m.soft_anchors,
+                           max_hydrated_soft_anchors);
 
           out.push_back (std::move (m));
         }
@@ -1418,16 +1428,26 @@ struct Cortext::Impl
   result.output.soft_anchor_last_update_us = out.soft_anchor_last_update_us;
   result.output.soft_anchor_mean_update_us = out.soft_anchor_mean_update_us;
     
-    if (!store)
-      {
-        return result;
-      }
+	    if (!store)
+	      {
+	        return result;
+	      }
 
-    if (hydrate_working_memory)
-      {
-        HydrateWorkingMemoryFromDB (store.get (), object_store.get (),
-                                    result.working_memory);
-      }
+	    const int max_hydrated_soft_anchors = core::HydratedSoftAnchorLimit (
+	        cfg.focus, cfg.sensitivity, cfg.stability);
+	    const int max_linked_hydration_candidates
+	        = core::RetrievalLinkedHydrationCandidateLimit (
+	            cfg.focus, cfg.sensitivity, cfg.stability);
+	    const auto linked_hydration_ordering_weights
+	        = core::RetrievalLinkedHydrationOrderingWeights (
+	            cfg.focus, cfg.sensitivity, cfg.stability);
+
+	    if (hydrate_working_memory)
+	      {
+	        HydrateWorkingMemoryFromDB (store.get (), object_store.get (),
+	                                    result.working_memory,
+	                                    max_hydrated_soft_anchors);
+	      }
 
     // Hydrate retrieved memory (long-term retrieval results)
     auto lookup_memory_id = [&](long long embedding_id) -> long long {
@@ -1479,10 +1499,11 @@ struct Cortext::Impl
         {
           return false;
         }
-      Cortext::Context::Memory m;
-      m.id = memory_id;
-      HydrateMemory (store.get (), object_store.get (), memory_id, m);
-      ApplyRetrievalScore (m, ranked_by_memory_id);
+	      Cortext::Context::Memory m;
+	      m.id = memory_id;
+	      HydrateMemory (store.get (), object_store.get (), memory_id, m,
+	                     max_hydrated_soft_anchors);
+	      ApplyRetrievalScore (m, ranked_by_memory_id);
       if (require_content && !HasHydratedContent (m))
         {
           seen_output_memory_ids.erase (memory_id);
@@ -1525,9 +1546,10 @@ struct Cortext::Impl
           {
             continue;
           }
-        Cortext::Context::Memory m;
-        m.id = memory_id;
-        HydrateMemory (store.get (), object_store.get (), memory_id, m);
+	        Cortext::Context::Memory m;
+	        m.id = memory_id;
+	        HydrateMemory (store.get (), object_store.get (), memory_id, m,
+	                       max_hydrated_soft_anchors);
         ApplyRetrievalScore (m, ranked_by_memory_id);
         const bool has_content = HasHydratedContent (m);
         const bool prefer_linked_sources
@@ -1543,10 +1565,12 @@ struct Cortext::Impl
           }
 
         int expanded_count = 0;
-        for (const long long linked_memory_id :
-             ResolveDisplayMemoryIdsForEmptyRetrieval (store.get (),
-                                                       memory_id,
-                                                       query_embedding))
+	        for (const long long linked_memory_id :
+	             ResolveDisplayMemoryIdsForEmptyRetrieval (store.get (),
+	                                                       memory_id,
+	                                                       query_embedding,
+	                                                       max_linked_hydration_candidates,
+	                                                       linked_hydration_ordering_weights))
           {
             if (append_hydrated_memory (linked_memory_id, true))
               {

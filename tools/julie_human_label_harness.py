@@ -30,6 +30,7 @@ from frozen_julie_retrieval_eval import (
     estimate_tokens,
     label_targets,
     load_memory_doc_map,
+    timeline_args_from_summary,
     tokens,
     wilson,
 )
@@ -163,10 +164,12 @@ def build_sample(args: argparse.Namespace) -> int:
     summary = load_json(args.summary)
     input_dir = args.input_dir or pathlib.Path(summary["input_dir"])
     db_path = args.db or pathlib.Path(summary["db_path"])
+    skip_messages, max_messages, media_limit = timeline_args_from_summary(summary)
     timeline = build_timeline(
         input_dir,
-        int(summary.get("processed_text_messages", -1)),
-        int(summary.get("media_attempted", -1)),
+        max_messages,
+        media_limit,
+        skip_messages,
     )
     conn = connect(db_path)
     doc_to_memory = load_memory_doc_map(conn, timeline)
@@ -342,10 +345,12 @@ def launch(args: argparse.Namespace) -> int:
     try:
         summary = load_json(pathlib.Path(sample["source_summary"]))
         input_dir = pathlib.Path(sample["input_dir"])
+        skip_messages, max_messages, media_limit = timeline_args_from_summary(summary)
         timeline = build_timeline(
             input_dir,
-            int(summary.get("processed_text_messages", -1)),
-            int(summary.get("media_attempted", -1)),
+            max_messages,
+            media_limit,
+            skip_messages,
         )
     except Exception:
         timeline = []

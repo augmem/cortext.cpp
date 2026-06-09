@@ -26,24 +26,21 @@ ApplySynapticTagging::Execute (OperationContext &context, Transaction &tx) const
             .value_or (0.0);
   const double arousal = context.GetArousal ();
 
-  const double s_eff = core::SensitivityBias (cfg.sensitivity);
-  const double surprisal_thresh = core::Lerp (0.6, 0.4, s_eff);
-  const double arousal_thresh = core::Lerp (0.7, 0.5, s_eff);
+  const auto tag_policy = core::SynapticTaggingPolicyForKnobs (
+      cfg.focus, cfg.sensitivity, cfg.stability);
   const bool tag_trigger
-      = (surprisal > surprisal_thresh) || (arousal > arousal_thresh);
+      = (surprisal > tag_policy.surprisal_threshold)
+        || (arousal > tag_policy.arousal_threshold);
 
   if (!tag_trigger)
     {
       return;
     }
 
-  const int tag_window
-      = std::max (1, static_cast<int> (std::round (core::Lerp (
-                             2.0, 8.0, s_eff))));
-  const int tag_decay_s
-      = static_cast<int> (std::round (core::Lerp (300.0, 3600.0, cfg.stability)));
   const long long tag_expires_at
-      = static_cast<long long> (now_ts + static_cast<uint64_t> (tag_decay_s) * 1000ULL);
+      = static_cast<long long> (
+          now_ts
+          + static_cast<uint64_t> (tag_policy.tag_decay_seconds) * 1000ULL);
 
   tx.Execute (
       "UPDATE memories SET "
@@ -53,12 +50,16 @@ ApplySynapticTagging::Execute (OperationContext &context, Transaction &tx) const
       "  SELECT memory_id FROM memories "
       "  ORDER BY created_at DESC LIMIT ?2"
       ")",
-      { tag_expires_at, static_cast<long long> (tag_window) });
+      { tag_expires_at, static_cast<long long> (tag_policy.tag_window) });
 
   telemetry::LogDebug ("cortext.synaptic_tagging", {
     telemetry::Attribute::Double ("surprisal", surprisal),
     telemetry::Attribute::Double ("arousal", arousal),
-    telemetry::Attribute::Int64 ("tag_window", tag_window),
+    telemetry::Attribute::Double ("surprisal_threshold",
+                                  tag_policy.surprisal_threshold),
+    telemetry::Attribute::Double ("arousal_threshold",
+                                  tag_policy.arousal_threshold),
+    telemetry::Attribute::Int64 ("tag_window", tag_policy.tag_window),
     telemetry::Attribute::Int64 ("tag_expires_at", tag_expires_at)
   });
 }

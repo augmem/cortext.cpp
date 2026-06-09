@@ -31,6 +31,9 @@ struct FactLifecycleOptions
   bool allow_delete = true;
   bool compress_repeated_confirmations = true;
   bool preserve_high_severity_history = true;
+  double focus = 0.5;
+  double sensitivity = 0.5;
+  double stability = 0.5;
 };
 
 class ScopedFactLifecycleOptions
@@ -106,6 +109,13 @@ void ClearFactLifecycleOptions ();
 const char *ToString (FactLifecycleState state);
 FactLifecycleState ParseFactLifecycleState (const std::string &raw);
 std::string PredicateSeverityClass (const std::string &canonical_predicate);
+double PredicateCriticality (const std::string &canonical_predicate);
+double PredicateCriticality (const std::string &canonical_predicate,
+                             double focus, double sensitivity,
+                             double stability);
+double PredicateRoutineAffinity (const std::string &canonical_predicate,
+                                 double focus, double sensitivity,
+                                 double stability);
 std::string NormalizeFactTerm (const std::string &raw);
 std::string NormalizeFactPredicate (const std::string &raw);
 std::string BuildFactText (const std::string &subject,
@@ -120,5 +130,8 @@ void MaintainFactLifecycle (Transaction &tx, Encoder *encoder,
 std::vector<FactRecord> QueryFacts (Transaction &tx, const FactQuery &query);
 FactScore ScoreFactRecord (const FactRecord &record, FactQueryMode mode,
                            std::uint64_t timestamp);
+FactScore ScoreFactRecord (const FactRecord &record, FactQueryMode mode,
+                           std::uint64_t timestamp, double focus,
+                           double sensitivity, double stability);
 
 } // namespace cortext::store

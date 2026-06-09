@@ -27,11 +27,15 @@ import urllib.request
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 DEFAULT_MODEL = "gemma4:12b-it-qat"
 DEFAULT_INPUT_DIR = pathlib.Path.home() / "Documents/Memory/Julie"
-LOCAL_JUDGE_HOSTS = {"localhost", "127.0.0.1", "::1", "0.0.0.0"}
+LOCAL_JUDGE_HOSTS = {"localhost", "127.0.0.1", "::1"}
 LOCAL_PROVIDER_ENV_KEYS = {
     "CORTEXT_JUDGE_BASE_URL",
     "CORTEXT_OLLAMA_BASE_URL",
     "LOCAL_JUDGE_BASE_URL",
+}
+CORTEXT_RELEASE_ENV_ALLOWLIST = {
+    "CORTEXT_JUDGE_BASE_URL",
+    "CORTEXT_OLLAMA_BASE_URL",
 }
 LOCAL_PROVIDER_ENV_PREFIXES = ("OLLAMA_",)
 HOSTED_PROVIDER_ENV_MARKERS = (
@@ -61,6 +65,20 @@ MEDIA_EXTENSIONS = {
     ".wav",
     ".mp3",
 }
+MEDIA_KIND_EXTENSIONS = {
+    "image": {".jpg", ".jpeg", ".png", ".heic", ".gif", ".tiff"},
+    "video": {".mov", ".mp4", ".3gp"},
+    "audio": {".m4a", ".wav", ".mp3"},
+}
+DISALLOWED_RELEASE_BENCHMARK_FLAGS = [
+    "--profile-probes-only",
+    "--checkpoint-eval-only",
+    "--checkpoint-after-timestamp",
+    "--checkpoint-query-count",
+    "--checkpoint-query-stride",
+    "--checkpoint-query-days",
+    "--checkpoint-queries-per-day",
+]
 
 
 def utc_now() -> str:
@@ -143,6 +161,14 @@ def command_sha256(command: str) -> str:
     return hashlib.sha256(command.encode("utf-8")).hexdigest()
 
 
+def command_has_flag(parts: list[str], flag: str) -> bool:
+    return flag in parts or any(part.startswith(flag + "=") for part in parts)
+
+
+def sha256_text(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
 def git_output(args: list[str]) -> str:
     try:
         return subprocess.check_output(
@@ -155,14 +181,122 @@ def git_output(args: list[str]) -> str:
         return ""
 
 
+def git_hash_output(args: list[str]) -> dict:
+    text = git_output(args)
+    return {
+        "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+        "bytes": len(text.encode("utf-8")),
+        "line_count": len(text.splitlines()),
+    }
+
+
 def git_provenance() -> dict:
     status = git_output(["status", "--porcelain=v1"])
-    return {
+    status_entries = sorted(
+        line[3:] if len(line) > 3 else line for line in status.splitlines()
+    )
+    untracked = sorted(
+        line
+        for line in git_output(["ls-files", "--others", "--exclude-standard"]).splitlines()
+        if line
+    )
+    staged = git_hash_output(["diff", "--cached", "--binary", "--no-ext-diff"])
+    unstaged = git_hash_output(["diff", "--binary", "--no-ext-diff"])
+    submodule = git_hash_output(["diff", "--submodule=short", "--no-ext-diff"])
+    fingerprint_payload = {
         "commit": git_output(["rev-parse", "HEAD"]) or "unknown",
-        "dirty": bool(status),
         "status_sha256": hashlib.sha256(status.encode("utf-8")).hexdigest(),
-        "dirty_path_count": len([line for line in status.splitlines() if line.strip()]),
+        "status_entries": status_entries,
+        "staged_diff_sha256": staged["sha256"],
+        "unstaged_diff_sha256": unstaged["sha256"],
+        "submodule_diff_sha256": submodule["sha256"],
+        "untracked_paths_sha256": hashlib.sha256(
+            "\n".join(untracked).encode("utf-8")
+        ).hexdigest(),
     }
+    return {
+        "commit": fingerprint_payload["commit"],
+        "dirty": bool(status),
+        "status_sha256": fingerprint_payload["status_sha256"],
+        "dirty_path_count": len(status_entries),
+        "worktree_manifest_sha256": hashlib.sha256(
+            json.dumps(fingerprint_payload, sort_keys=True).encode("utf-8")
+        ).hexdigest(),
+    }
+
+
+def source_input_fingerprint(input_dir: pathlib.Path) -> dict:
+    body: dict = {
+        "schema": "cortext_julie_source_input_fingerprint_v1",
+        "privacy": (
+            "private local provenance: records content hashes and aggregate "
+            "file metadata only, never message text or media bytes"
+        ),
+        "input_dir": str(input_dir),
+        "exists": input_dir.exists(),
+        "recursive": True,
+        "file_count": 0,
+        "readable_file_count": 0,
+        "symlink_count": 0,
+        "total_bytes": 0,
+        "extension_counts": {},
+        "transcript_present": False,
+        "transcript_sha256": "",
+        "manifest_sha256": "",
+        "unreadable_files": 0,
+    }
+    if not input_dir.exists() or not input_dir.is_dir():
+        return body
+
+    private_entries: list[dict] = []
+    extension_counts: dict[str, int] = {}
+    for path in sorted(input_dir.rglob("*"), key=lambda item: str(item.relative_to(input_dir))):
+        if path.is_dir():
+            continue
+        try:
+            relative_path = path.relative_to(input_dir)
+        except ValueError:
+            relative_path = pathlib.Path(path.name)
+        suffix = path.suffix.lower()
+        extension_counts[suffix] = extension_counts.get(suffix, 0) + 1
+        entry: dict = {
+            "relative_path_sha256": sha256_text(str(relative_path)),
+            "suffix": suffix,
+            "is_symlink": path.is_symlink(),
+            "readable": False,
+            "size_bytes": None,
+            "sha256": "",
+        }
+        body["file_count"] += 1
+        if path.is_symlink():
+            body["symlink_count"] += 1
+        try:
+            stat = path.stat()
+            entry["size_bytes"] = stat.st_size
+            entry["sha256"] = file_sha256(path)
+            entry["readable"] = True
+            body["readable_file_count"] += 1
+            body["total_bytes"] += stat.st_size
+            if str(relative_path) == "Messages - Julie Willen.txt":
+                body["transcript_present"] = True
+                body["transcript_sha256"] = entry["sha256"]
+        except OSError as exc:
+            body["unreadable_files"] += 1
+            entry["error"] = exc.__class__.__name__
+        private_entries.append(entry)
+
+    body["extension_counts"] = extension_counts
+    body["manifest_sha256"] = hashlib.sha256(
+        json.dumps(
+            {
+                "schema": body["schema"],
+                "files": private_entries,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    return body
 
 
 def redacted_env_value(key: str, value: str) -> str:
@@ -175,6 +309,32 @@ def redacted_env_value(key: str, value: str) -> str:
 def is_hosted_provider_env_key(key: str) -> bool:
     upper = key.upper()
     return any(marker in upper for marker in HOSTED_PROVIDER_ENV_MARKERS)
+
+
+def is_cortext_behavior_env_key(key: str) -> bool:
+    return key.startswith("CORTEXT_") and key not in CORTEXT_RELEASE_ENV_ALLOWLIST
+
+
+def cortext_behavior_env(env: dict[str, str]) -> dict[str, str]:
+    return {
+        key: redacted_env_value(key, value)
+        for key, value in sorted(env.items())
+        if is_cortext_behavior_env_key(key)
+    }
+
+
+def cortext_behavior_env_guard(env: dict[str, str]) -> dict:
+    leaked = cortext_behavior_env(env)
+    return {
+        "mode": "fail_closed",
+        "policy": (
+            "Julie release replay rejects CORTEXT_* variables except local "
+            "judge endpoint metadata before launching production Cortext."
+        ),
+        "allowed_cortext_env_keys": sorted(CORTEXT_RELEASE_ENV_ALLOWLIST),
+        "leakage_detected": bool(leaked),
+        "leaked_cortext_behavior_env": leaked,
+    }
 
 
 def sanitized_subprocess_env() -> tuple[dict[str, str], list[str]]:
@@ -204,7 +364,7 @@ def benchmark_environment_snapshot(
             continue
         safe_value = redacted_env_value(key, value)
         selected_env[key] = safe_value
-        if key.startswith("CORTEXT_") and key not in LOCAL_PROVIDER_ENV_KEYS:
+        if is_cortext_behavior_env_key(key):
             cortext_behavior_env[key] = safe_value
         elif key in LOCAL_PROVIDER_ENV_KEYS or key.startswith(LOCAL_PROVIDER_ENV_PREFIXES):
             local_provider_env[key] = safe_value
@@ -229,6 +389,7 @@ def benchmark_environment_snapshot(
             ),
             "local_provider_env": "OLLAMA_* and local loopback judge endpoint metadata",
         },
+        "cortext_behavior_env_guard": cortext_behavior_env_guard(env),
         "cortext_behavior_env": cortext_behavior_env,
         "hosted_provider_behavior_env": hosted_provider_behavior_env,
         "local_provider_env": local_provider_env,
@@ -338,6 +499,114 @@ def count_media_files(input_dir: pathlib.Path) -> int:
     return count
 
 
+def parse_required_modalities(value: str) -> list[str]:
+    out: list[str] = []
+    for part in value.split(","):
+        name = part.strip().lower()
+        if not name:
+            continue
+        if name not in MEDIA_KIND_EXTENSIONS:
+            raise RuntimeError(
+                "--require-media-modalities entries must be one of "
+                f"{sorted(MEDIA_KIND_EXTENSIONS)}; got {name!r}"
+            )
+        if name not in out:
+            out.append(name)
+    return out
+
+
+def parse_timestamp_prefix(text: str) -> int | None:
+    if len(text) < 19:
+        return None
+    stamp = text[:19]
+    if len(stamp) >= 19 and stamp[13] == " " and stamp[16] == " ":
+        stamp = stamp[:13] + ":" + stamp[14:16] + ":" + stamp[17:]
+    try:
+        dt = datetime.strptime(stamp, "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return None
+    return int(dt.timestamp() * 1000)
+
+
+def parse_message_timestamps(transcript: pathlib.Path) -> list[int]:
+    if not transcript.is_file():
+        return []
+    timestamps: list[int] = []
+    pending_header = ""
+    pending_has_body = False
+
+    def flush() -> None:
+        nonlocal pending_header, pending_has_body
+        if pending_header and pending_has_body:
+            ts = parse_timestamp_prefix(pending_header)
+            if ts is not None:
+                timestamps.append(ts)
+        pending_header = ""
+        pending_has_body = False
+
+    with transcript.open(errors="replace") as stream:
+        for raw_line in stream:
+            line = raw_line.rstrip("\n")
+            if line.startswith("----------------------------------------------------"):
+                flush()
+                continue
+            if parse_timestamp_prefix(line) is not None:
+                flush()
+                pending_header = line
+                continue
+            if pending_header and line.strip():
+                pending_has_body = True
+    flush()
+    return timestamps
+
+
+def media_kind(path: pathlib.Path) -> str:
+    ext = path.suffix.lower()
+    for kind, extensions in MEDIA_KIND_EXTENSIONS.items():
+        if ext in extensions:
+            return kind
+    return ""
+
+
+def selected_media_kind_counts(
+    input_dir: pathlib.Path,
+    transcript: pathlib.Path,
+    skip_messages: int,
+    max_messages: int,
+    media_limit: int,
+) -> dict[str, int]:
+    counts = {kind: 0 for kind in MEDIA_KIND_EXTENSIONS}
+    if media_limit <= 0 or not input_dir.is_dir():
+        return counts
+
+    timestamps = parse_message_timestamps(transcript)
+    skipped = min(max(0, skip_messages), len(timestamps))
+    window_timestamps = timestamps[skipped:]
+    if max_messages >= 0:
+        window_timestamps = window_timestamps[:max_messages]
+    if not window_timestamps:
+        return counts
+    window_start = window_timestamps[0]
+    window_end = window_timestamps[-1]
+
+    media: list[tuple[int, str, str]] = []
+    for path in input_dir.rglob("*"):
+        if not path.is_file():
+            continue
+        kind = media_kind(path)
+        if not kind:
+            continue
+        ts = parse_timestamp_prefix(path.name)
+        if ts is None or ts < window_start or ts > window_end:
+            continue
+        media.append((ts, str(path), kind))
+    media.sort(key=lambda item: (item[0], item[1]))
+
+    for _, _, kind in media[:media_limit]:
+        counts[kind] += 1
+    return counts
+
+
 def preflight_check(checks: list[dict], name: str, ok: bool, detail: str = "") -> None:
     checks.append(
         {
@@ -372,11 +641,30 @@ def run_preflight(
     final_judge_command: list[str],
     bootstrap_report_command: list[str],
     freeze_report_command: list[str],
+    release_freeze_path: pathlib.Path | None = None,
 ) -> dict:
     checks: list[dict] = []
     transcript = args.input_dir / "Messages - Julie Willen.txt"
     media_count = count_media_files(args.input_dir)
+    required_modalities = parse_required_modalities(args.require_media_modalities)
+    selected_kind_counts = selected_media_kind_counts(
+        args.input_dir,
+        transcript,
+        args.skip_messages,
+        args.max_messages,
+        args.media_limit,
+    )
+    current_git = git_provenance()
+    input_fingerprint = source_input_fingerprint(args.input_dir)
+    supplied_freeze = load_json_if_valid(release_freeze_path) if release_freeze_path else {}
     ollama_status = ollama_model_status(args.ollama_base_url, args.judge_model)
+    env_guard = cortext_behavior_env_guard(dict(os.environ))
+    benchmark_parts = shlex.split(benchmark_command)
+    disallowed_benchmark_flags = [
+        flag
+        for flag in DISALLOWED_RELEASE_BENCHMARK_FLAGS
+        if command_has_flag(benchmark_parts, flag)
+    ]
     existing_outputs = [
         path
         for path in [
@@ -384,9 +672,9 @@ def run_preflight(
             args.out_dir / "summary.json",
             args.out_dir / "judge_gemma4_12b_local.json",
             args.out_dir / "release_protocol_report_initial.json",
-            args.out_dir / "release_protocol_freeze.json",
+            None if args.release_freeze else args.out_dir / "release_protocol_freeze.json",
         ]
-        if path.exists()
+        if path is not None and path.exists()
     ]
 
     preflight_check(
@@ -401,6 +689,19 @@ def run_preflight(
         args.media_limit == 0 or media_count > 0,
         f"media_count={media_count} media_limit={args.media_limit}",
     )
+    for modality in required_modalities:
+        preflight_check(
+            checks,
+            f"required_{modality}_media_in_frozen_window",
+            selected_kind_counts.get(modality, 0) > 0,
+            (
+                f"required_modalities={required_modalities} "
+                f"selected_media_kind_counts={selected_kind_counts} "
+                f"skip_messages={args.skip_messages} "
+                f"max_messages={args.max_messages} "
+                f"media_limit={args.media_limit}"
+            ),
+        )
     preflight_check(
         checks,
         "benchmark_executable_present",
@@ -436,6 +737,18 @@ def run_preflight(
     )
     preflight_check(
         checks,
+        "no_eval_only_benchmark_modes",
+        not disallowed_benchmark_flags,
+        f"disallowed_flags={disallowed_benchmark_flags}",
+    )
+    preflight_check(
+        checks,
+        "no_cortext_behavior_env_overrides",
+        not env_guard["leakage_detected"],
+        json.dumps(env_guard, sort_keys=True),
+    )
+    preflight_check(
+        checks,
         "local_ollama_url",
         bool(ollama_status.get("local_url")),
         str(ollama_status.get("error") or ollama_status.get("base_url")),
@@ -464,6 +777,63 @@ def run_preflight(
         "--freeze-file" in shlex.join(freeze_report_command),
         shlex.join(freeze_report_command),
     )
+    preflight_check(
+        checks,
+        "release_freeze_supplied_when_requested",
+        release_freeze_path is None or bool(supplied_freeze),
+        f"path={release_freeze_path}",
+    )
+    if release_freeze_path is not None:
+        expected_source = supplied_freeze.get("source_input_manifest_sha256")
+        expected_command = supplied_freeze.get("benchmark_command_sha256")
+        expected_executable = supplied_freeze.get("benchmark_executable_sha256")
+        expected_commit = supplied_freeze.get("git_commit")
+        expected_worktree = supplied_freeze.get("git_worktree_manifest_sha256")
+        preflight_check(
+            checks,
+            "source_input_manifest_matches_release_freeze",
+            bool(expected_source)
+            and expected_source == input_fingerprint.get("manifest_sha256"),
+            (
+                f"expected={expected_source} "
+                f"actual={input_fingerprint.get('manifest_sha256')}"
+            ),
+        )
+        preflight_check(
+            checks,
+            "benchmark_command_matches_release_freeze",
+            not expected_command or expected_command == command_sha256(benchmark_command),
+            (
+                f"expected={expected_command} "
+                f"actual={command_sha256(benchmark_command)}"
+            ),
+        )
+        preflight_check(
+            checks,
+            "benchmark_executable_matches_release_freeze",
+            bool(expected_executable)
+            and expected_executable == benchmark_artifact.get("sha256"),
+            (
+                f"expected={expected_executable} "
+                f"actual={benchmark_artifact.get('sha256')}"
+            ),
+        )
+        preflight_check(
+            checks,
+            "git_commit_matches_release_freeze",
+            bool(expected_commit) and expected_commit == current_git.get("commit"),
+            f"expected={expected_commit} actual={current_git.get('commit')}",
+        )
+        preflight_check(
+            checks,
+            "git_worktree_matches_release_freeze",
+            bool(expected_worktree)
+            and expected_worktree == current_git.get("worktree_manifest_sha256"),
+            (
+                f"expected={expected_worktree} "
+                f"actual={current_git.get('worktree_manifest_sha256')}"
+            ),
+        )
     preflight_check(
         checks,
         "no_stale_outputs_without_force",
@@ -584,8 +954,24 @@ def run_preflight(
             "input_dir": str(args.input_dir),
             "transcript": str(transcript),
             "media_file_count": media_count,
+            "required_media_modalities": required_modalities,
+            "selected_media_kind_counts": selected_kind_counts,
+            "source_input_fingerprint": {
+                "schema": input_fingerprint.get("schema"),
+                "manifest_sha256": input_fingerprint.get("manifest_sha256"),
+                "transcript_sha256": input_fingerprint.get("transcript_sha256"),
+                "file_count": input_fingerprint.get("file_count"),
+                "readable_file_count": input_fingerprint.get("readable_file_count"),
+                "total_bytes": input_fingerprint.get("total_bytes"),
+            },
+        },
+        "release_freeze": {
+            "path": str(release_freeze_path) if release_freeze_path else "",
+            "supplied": release_freeze_path is not None,
+            "schema": supplied_freeze.get("schema", "") if supplied_freeze else "",
         },
         "judge_model": ollama_status,
+        "environment_guard": env_guard,
         "commands": {
             "benchmark": benchmark_command,
             "early_judge": shlex.join(early_command) if early_command else "",
@@ -683,6 +1069,7 @@ def write_or_validate_release_freeze(
     source_fingerprint = report.get("source_run", {}).get(
         "source_input_fingerprint", {}
     )
+    manifest = report.get("frozen_probe_manifest", {})
     schedule = report.get("frozen_probe_schedule", {})
     git = report.get("git", {})
     benchmark_executable = report.get("artifacts", {}).get(
@@ -700,6 +1087,7 @@ def write_or_validate_release_freeze(
         "source_input_transcript_sha256": source_fingerprint.get(
             "transcript_sha256", ""
         ),
+        "frozen_probe_manifest_sha256": manifest.get("manifest_sha256", ""),
         "frozen_probe_schedule_sha256": schedule.get("schedule_sha256", ""),
         "frozen_probe_count": schedule.get("probe_count"),
         "benchmark_command_sha256": command_sha256(benchmark_command),
@@ -714,6 +1102,7 @@ def write_or_validate_release_freeze(
     }
     required = [
         "source_input_manifest_sha256",
+        "frozen_probe_manifest_sha256",
         "frozen_probe_schedule_sha256",
         "benchmark_command_sha256",
         "benchmark_executable_sha256",
@@ -1129,6 +1518,8 @@ def build_early_judge_command(
         str(args.early_judge_timeout_s),
         "--judge-context-window-tokens",
         str(args.early_judge_context_window_tokens),
+        "--judge-max-output-tokens",
+        str(args.early_judge_max_output_tokens),
         "--context-limit",
         str(args.early_judge_packet_item_limit),
         "--quality-gate-min-milestone",
@@ -1185,6 +1576,8 @@ def build_final_judge_command(args: argparse.Namespace, db: pathlib.Path, summar
         str(args.judge_timeout_s),
         "--judge-context-window-tokens",
         str(args.judge_context_window_tokens),
+        "--judge-max-output-tokens",
+        str(args.judge_max_output_tokens),
         "--context-limit",
         str(args.judge_packet_item_limit),
         "--blind-packets",
@@ -1684,6 +2077,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--skip-messages", type=int, default=0)
     parser.add_argument("--max-messages", type=int, default=1200)
     parser.add_argument("--media-limit", type=int, default=16)
+    parser.add_argument(
+        "--require-media-modalities",
+        default="",
+        help=(
+            "Comma-separated media kinds that must be present in the exact "
+            "frozen replay window after skip/max/media-limit selection. "
+            "Supported values: image,video,audio. This is a release harness "
+            "coverage guard only; it does not change Cortext behavior."
+        ),
+    )
     parser.add_argument("--probe-stride", type=int, default=25)
     parser.add_argument("--warmup-events", type=int, default=200)
     parser.add_argument("--rag-top-k", type=int, default=5)
@@ -1695,6 +2098,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--bootstrap-samples", type=int, default=2000)
     parser.add_argument("--judge-timeout-s", type=int, default=420)
     parser.add_argument("--judge-context-window-tokens", type=int, default=32768)
+    parser.add_argument("--judge-max-output-tokens", type=int, default=1300)
     parser.add_argument(
         "--judge-packet-item-limit",
         type=int,
@@ -1714,7 +2118,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--early-judge-milestones",
-        default="1,2,3,4,5,6,7,8,9,10,11,12",
+        default="1,2,3,4,5,6,7,8,9,10,11,12,16",
     )
     parser.add_argument(
         "--early-judge-periodic-stride",
@@ -1749,6 +2153,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--early-judge-bootstrap-samples", type=int, default=200)
     parser.add_argument("--early-judge-timeout-s", type=int, default=180)
     parser.add_argument("--early-judge-context-window-tokens", type=int, default=32768)
+    parser.add_argument("--early-judge-max-output-tokens", type=int, default=1300)
     parser.add_argument(
         "--early-judge-packet-item-limit",
         type=int,
@@ -1810,6 +2215,15 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument("--target-freeze", type=pathlib.Path)
+    parser.add_argument(
+        "--release-freeze",
+        type=pathlib.Path,
+        help=(
+            "Existing release_protocol_freeze.json to validate before replay "
+            "and again after report generation. When omitted, the runner "
+            "creates one under --out-dir from the first report."
+        ),
+    )
     parser.add_argument("--judge-media-smoke", type=pathlib.Path)
     parser.add_argument(
         "--require-final-report-pass",
@@ -1843,6 +2257,8 @@ def main() -> int:
         args.human_label_sample = args.human_label_sample.resolve()
     if args.target_freeze is not None:
         args.target_freeze = args.target_freeze.resolve()
+    if args.release_freeze is not None:
+        args.release_freeze = args.release_freeze.resolve()
     if args.judge_media_smoke is not None:
         args.judge_media_smoke = args.judge_media_smoke.resolve()
 
@@ -1850,6 +2266,7 @@ def main() -> int:
         raise RuntimeError("--skip-messages must be non-negative")
     if args.max_messages <= 0 or args.media_limit < 0:
         raise RuntimeError("--max-messages must be positive and --media-limit non-negative")
+    parse_required_modalities(args.require_media_modalities)
     if args.judge_repetitions < 3:
         raise RuntimeError("release judge repetitions must be at least 3")
     if args.early_judge_repetitions <= 0:
@@ -1864,6 +2281,10 @@ def main() -> int:
         raise RuntimeError("--early-judge-timeout-s must be >= 1")
     if args.judge_context_window_tokens < 1:
         raise RuntimeError("--judge-context-window-tokens must be >= 1")
+    if args.judge_max_output_tokens < 1:
+        raise RuntimeError("--judge-max-output-tokens must be >= 1")
+    if args.early_judge_max_output_tokens < 1:
+        raise RuntimeError("--early-judge-max-output-tokens must be >= 1")
     if args.judge_packet_item_limit == 0 or args.judge_packet_item_limit < -1:
         raise RuntimeError("--judge-packet-item-limit must be -1 or a positive item limit")
     if args.early_judge_context_window_tokens < 1:
@@ -1908,7 +2329,8 @@ def main() -> int:
     summary_gate = args.out_dir / "summary_gate.json"
     judge = args.out_dir / "judge_gemma4_12b_local.json"
     initial_report = args.out_dir / "release_protocol_report_initial.json"
-    release_freeze = args.out_dir / "release_protocol_freeze.json"
+    release_freeze = args.release_freeze or (args.out_dir / "release_protocol_freeze.json")
+    generated_release_freeze = args.release_freeze is None
     env_snapshot = args.out_dir / "benchmark_environment_snapshot.json"
     command_manifest = args.out_dir / "command_manifest.json"
     early_failure_report = args.out_dir / "early_failure_report.json"
@@ -1997,6 +2419,7 @@ def main() -> int:
             final_judge_command=final_judge_cmd,
             bootstrap_report_command=report_cmd_bootstrap,
             freeze_report_command=report_cmd,
+            release_freeze_path=args.release_freeze,
         )
         write_json(args.out_dir / "preflight_report.json", preflight_report)
         print(json.dumps(preflight_report, indent=2), flush=True)
@@ -2009,7 +2432,7 @@ def main() -> int:
         existing = [
             path
             for path in [db, summary, judge, initial_report, release_freeze]
-            if path.exists()
+            if path.exists() and (generated_release_freeze or path != release_freeze)
         ]
         if existing:
             raise RuntimeError(
@@ -2036,6 +2459,7 @@ def main() -> int:
         final_judge_command=final_judge_cmd,
         bootstrap_report_command=report_cmd_bootstrap,
         freeze_report_command=report_cmd,
+        release_freeze_path=args.release_freeze,
     )
     write_json(args.out_dir / "preflight_report.json", preflight_report)
     if preflight_report["status"] != "pass":
@@ -2056,6 +2480,9 @@ def main() -> int:
                     "skip_messages": args.skip_messages,
                     "max_messages": args.max_messages,
                     "media_limit": args.media_limit,
+                    "required_media_modalities": parse_required_modalities(
+                        args.require_media_modalities
+                    ),
                 },
                 "knobs": {"focus": 0.5, "sensitivity": 0.5, "stability": 0.5},
                 "normal_rag": "rolling chat history until compaction plus text vector RAG",
@@ -2095,6 +2522,9 @@ def main() -> int:
             },
             "benchmark_executable": artifact,
             "benchmark_supports_probe_stream": supports_probe_stream,
+            "cortext_behavior_env_guard": cortext_behavior_env_guard(
+                dict(os.environ)
+            ),
             "benchmark_command": benchmark_command_text,
             "early_judge_command": shlex.join(early_cmd) if early_cmd else "",
             "early_judge_command_launched": "",
@@ -2230,6 +2660,8 @@ def main() -> int:
             str(args.early_judge_timeout_s),
             "--early-judge-context-window-tokens",
             str(args.early_judge_context_window_tokens),
+            "--early-judge-max-output-tokens",
+            str(args.early_judge_max_output_tokens),
             "--early-judge-packet-item-limit",
             str(args.early_judge_packet_item_limit),
             "--judge-packet-item-limit",

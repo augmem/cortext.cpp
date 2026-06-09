@@ -1,5 +1,7 @@
+#include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 #include "test_helpers.hpp"
+#include <cortext/core/knobs.hpp>
 #include <cortext/operations/memory_storage.hpp>
 #include <cortext/processor.hpp>
 #include <cortext/processor/accumulator_state.hpp>
@@ -25,11 +27,12 @@ class ScopedTempDb
 public:
   ScopedTempDb ()
   {
-    auto tmp = std::filesystem::temp_directory_path ()
-               / ("memory_storage_test_"
-                  + std::to_string (std::rand ()) + ".db");
-    path_ = tmp.string ();
-    store_ = SQLiteStore::Create (path_.c_str ());
+	    auto tmp = std::filesystem::temp_directory_path ()
+	               / ("memory_storage_test_"
+	                  + std::to_string (std::rand ()) + ".db");
+	    path_ = tmp.string ();
+	    std::filesystem::remove (path_);
+	    store_ = SQLiteStore::Create (path_.c_str ());
 
     // Initialize core schema
     cortext::testing::InitializeCoreSchema (*store_);
@@ -72,9 +75,9 @@ TEST_CASE ("MemoryStorage stores payload when write_decision is true",
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
   cortext::testing::RequireEncoder (cfg);
-  cfg.focus = 0.5;
-  cfg.sensitivity = 0.5;
-  cfg.stability = 0.5;
+  cfg.focus = 0.9;
+  cfg.sensitivity = 0.1;
+  cfg.stability = 0.8;
 
   // Set up accumulator state required by memory storage
   AccumulatorState acc;
@@ -126,6 +129,11 @@ TEST_CASE ("MemoryStorage stores payload when write_decision is true",
   const auto memory_id
       = AnyToLongLong (idx_rows[0].at ("memory_id")).value_or (0);
   REQUIRE (memory_id > 0);
+  REQUIRE (std::any_cast<double> (idx_rows[0].at ("source_reliability"))
+           == Catch::Approx (cortext::core::SourceReliabilityPrior (
+               cfg.focus, cfg.sensitivity, cfg.stability)));
+  REQUIRE (std::any_cast<double> (idx_rows[0].at ("source_reliability"))
+           != Catch::Approx (0.7));
 
   // Verify signal row inserted with its own embedding + blob
   auto sig_rows = store->Execute (
@@ -139,10 +147,85 @@ TEST_CASE ("MemoryStorage stores payload when write_decision is true",
 
   // v2: Verify memories has all expected columns (strength, use_frequency now on memories)
   auto fb_rows = store->Execute (
-      "SELECT strength, use_frequency FROM memories WHERE embedding_id = ?", { *stored_id });
+      "SELECT strength, stability, use_frequency FROM memories "
+      "WHERE embedding_id = ?", { *stored_id });
   REQUIRE (fb_rows.size () == 1);
+  REQUIRE (std::any_cast<double> (fb_rows[0].at ("strength"))
+           == Catch::Approx (core::MemoryInitialStrengthPolicy (
+               cfg.focus, cfg.sensitivity, cfg.stability)));
+  REQUIRE (std::any_cast<double> (fb_rows[0].at ("stability"))
+           == Catch::Approx (core::MemoryInitialStabilityPolicy (
+               cfg.focus, cfg.sensitivity, cfg.stability)));
 
   // No buffered instructions since we use savepoints
+}
+
+TEST_CASE ("MemoryStorage initializes scalar memory fields from knobs",
+           "[operations][memory_storage][knobs]")
+{
+  ScopedTempDb db;
+  Store *store = db.get ();
+  REQUIRE (store != nullptr);
+
+  Signal s;
+  s.embedding = Eigen::VectorXf::Ones (kEmbeddingDim);
+  s.timestamp = 56789;
+  s.source_id = "knob-source";
+  s.modality = "text";
+  s.mimetype = "text/plain";
+
+  ProcessorContext pctx;
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  cfg.focus = 0.0;
+  cfg.sensitivity = 1.0;
+  cfg.stability = 0.0;
+
+  AccumulatorState acc;
+  acc.mu_acc = s.embedding;
+  acc.n_signals = 1;
+  acc.s_sum = 0.4;
+  acc.s_max = 0.4;
+  acc.t_start = s.timestamp - 500;
+  {
+    SignalRecord rec;
+    rec.embedding = s.embedding;
+    rec.timestamp = s.timestamp;
+    rec.modality = s.modality;
+    rec.mime = s.mimetype;
+    rec.score = 0.4;
+    rec.serial_position = 0;
+    acc.signals.push_back (std::move (rec));
+  }
+  pctx.accumulator_states[s.source_id] = std::move (acc);
+
+  OperationContext ctx (s, pctx, cfg, store);
+  ctx.SetAccumulatorWriteDecision (true);
+  ctx.SetRepresentativeEmbedding (s.embedding);
+
+  MemoryStorage op;
+  auto tx = store->Begin ();
+  op.Execute (ctx, *tx);
+  tx->Commit ();
+
+  auto stored_id = ctx.GetStoredEmbeddingId ();
+  REQUIRE (stored_id.has_value ());
+
+  auto rows = store->Execute (
+      "SELECT strength, stability FROM memories WHERE embedding_id = ?",
+      { *stored_id });
+  REQUIRE (rows.size () == 1);
+
+  const double expected_strength = core::MemoryInitialStrengthPolicy (
+      cfg.focus, cfg.sensitivity, cfg.stability);
+  const double expected_stability = core::MemoryInitialStabilityPolicy (
+      cfg.focus, cfg.sensitivity, cfg.stability);
+  REQUIRE (expected_strength < 1.0);
+  REQUIRE (expected_stability < 1.0);
+  REQUIRE (std::any_cast<double> (rows[0].at ("strength"))
+           == Catch::Approx (expected_strength));
+  REQUIRE (std::any_cast<double> (rows[0].at ("stability"))
+           == Catch::Approx (expected_stability));
 }
 
 TEST_CASE ("MemoryStorage discards when write_decision is false",

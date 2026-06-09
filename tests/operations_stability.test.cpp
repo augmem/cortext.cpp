@@ -87,13 +87,20 @@ TEST_CASE ("InitializeStabilityPriors mid T", "[operations][stability]")
   REQUIRE (pctx.half_life_prior
            == Catch::Approx (cortext::core::BaseHalfLifePrior (0.5)));
   REQUIRE (pctx.rate_decay_prior
-           == Catch::Approx (cortext::core::Lerp (0.60, 0.98, 0.5)));
+           == Catch::Approx (
+               cortext::core::StabilityStatePriorsForKnobs (0.5).rate_decay));
   REQUIRE (pctx.periphery_half_life_prior
            == Catch::Approx (
-               cortext::core::ClampHalfLife (0.5 * pctx.half_life_prior)));
+               cortext::core::ClampHalfLife (
+                   cortext::core::StabilityStatePriorsForKnobs (0.5)
+                       .secondary_half_life_scale
+                   * pctx.half_life_prior)));
   REQUIRE (pctx.salience_half_life_prior
            == Catch::Approx (
-               cortext::core::ClampHalfLife (0.5 * pctx.half_life_prior)));
+               cortext::core::ClampHalfLife (
+                   cortext::core::StabilityStatePriorsForKnobs (0.5)
+                       .secondary_half_life_scale
+                   * pctx.half_life_prior)));
   REQUIRE (pctx.drift_weight_prior == Catch::Approx (0.25));
 }
 

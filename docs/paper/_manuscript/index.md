@@ -407,8 +407,12 @@ The hysteresis band prevents oscillation in threshold-crossing
 decisions. Write-rate targets establish homeostatic setpoints for the
 threshold controller.
 
-These ranges are canonical knob maps; no additional fixed thresholds are
-introduced beyond the three knobs.
+These ranges are canonical knob maps for memory behavior: admission
+thresholds, retrieval weights, graph expansion breadth, lifecycle
+scoring, and consolidation policy are derived from F/S/T. Fixed values
+may still appear as schema invariants, vector dimensions, parser
+guardrails, numeric epsilons, migration defaults, and benchmark protocol
+settings, but they are not additional user-facing memory knobs.
 
 ### Retrieval Breadth
 
@@ -422,6 +426,20 @@ The prompt-facing output is then narrowed after graph, fact, temporal,
 recency, affect, procedural, and context scoring:
 
     selected_k(F,T) = round(lerp(20, 8, FocusBias(F)) * lerp(1.08, 0.92, T))
+
+Candidate ranking includes an event-time temporal prior in addition to
+source confidence freshness:
+
+    temporal_rank(m) = exp(-age_s(m) / tau_rank(F,S,T))
+    score(m) += weight_rank(F,S,T) * temporal_rank(m)
+
+New source-backed memories also receive a knob-derived source
+reliability prior instead of relying on a fixed storage default:
+
+    source_reliability_0(F,S,T)
+      = clamp(0.70 + 0.06(F' - F'_0.5)
+                   - 0.05(S' - S'_0.5)
+                   + 0.08(T - 0.5), 0.50, 0.90)
 
 This split lets low Focus explore many source/blob seeds while still
 keeping the application prompt bounded by a compact final surface. The
@@ -1255,6 +1273,8 @@ The threshold prior derives from knob settings:
 
 Observed evidence comes from the 90th percentile of recent scores:
 
+    score_history_cap(T) = round(lerp(512, 1536, T))
+    score_stream ← tail(score_stream, max(win_score(T), score_history_cap(T)))
     recent_scores ← tail(score_stream, win_score(T))
     if |recent_scores| == 0:
         observed_p90 ← θ_prior  # no evidence yet
@@ -1294,7 +1314,8 @@ weighting.
 
 The rate time constant scales with Stability:
 
-    τ_rate ← max(2^(3T) × dt_base, dt_floor(T))
+    rate_tau_exponent(T) = 3T
+    τ_rate ← max(2^rate_tau_exponent(T) × dt_base, dt_floor(T))
     α ← 1 − exp(−Δt / τ_rate)
 
 Instantaneous rate estimation with bias correction. Δwrites is the
@@ -1463,7 +1484,8 @@ this signal):
 
     μ_acc ← (n × μ_acc + x_t) / (n + 1)
     n ← n + 1
-    drift_acc ← drift_acc + (drift_mag_t / 2)  # accumulate normalized instantaneous drift (drift_mag_t ∈ [0,2])
+    drift_gain(S,T) = clamp(0.5 × scale(S,T), 0.35, 0.65)
+    drift_acc ← drift_acc + drift_mag_t × drift_gain(S,T)
     emo_max ← max(emo_max, emotion_intensity_t)
     arousal_sum ← arousal_sum + arousal_t
     last_signal_ts ← now_ms()  # update timestamp for next gap calculation (ms)
@@ -1542,32 +1564,39 @@ cohesion drop, drift, and temporal gaps, with a coherence/topic
     gap_score ← sigmoid(gap_z)
 
     # Local normalization (within-episode, contrast-boosted)
+    var_floor(S,T) = BoundaryVarianceFloor(S,T)
+    warmup_signals(S,T) = BoundaryWarmupSignals(S,T)
     ema_mean_x ← EWMA(ema_mean_x, x, α_local(T))
     ema_var_x  ← EWMA(ema_var_x, (x − ema_mean_x)^2, α_local(T))
     norm_gain(S,T) = clamp(lerp(1.6, 3.0, S) × lerp(1.05, 0.95, T), 1.0, 3.2)
-    x̂ ← sigmoid(norm_gain × (x − ema_mean_x) / sqrt(ema_var_x + ε))  # warm-up uses raw x
+    x̂ ← sigmoid(norm_gain × (x − ema_mean_x) / sqrt(max(ema_var_x, var_floor) + ε))
+    # warm-up uses raw x until warmup_signals(S,T)
 
     # Topic shift (embedding-only, temporal context anchor)
     topic_shift ← 1 − map01(cos(e_t, c_t))
 
     # Likelihood of a boundary given observations
-    support ← clamp(0.5 × coĥ + 0.5 × topiĉ, 0, 1)
-    support_gate ← lerp(0.45, 1.0, support)   # downweight isolated spikes
-    gap_gate ← lerp(0.10, 0.50, support)
-    support_boost ← lerp(1.0, 1.25, support)  # emphasize coherent/topic shifts
+    support_policy ← BoundarySupportPolicy(F,S,T, coĥ, topiĉ)
+    support ← support_policy.support
+    support_gate ← support_policy.support_gate   # downweight isolated spikes
+    gap_gate ← support_policy.gap_gate
+    support_boost ← support_policy.support_boost  # emphasize coherent/topic shifts
+    w_g(F,S,T) = clamp(0.01 × lerp(1.10, 0.90, F)
+                             × lerp(0.90, 1.10, S)
+                             × lerp(0.90, 1.10, T), 0.004, 0.020)
     [w_s, w_d, w_c, w_t, w_g] ← [0.34 + 0.14S, 0.18 + 0.05(1 − T),
-                                0.36 + 0.16F, 0.30 + 0.22S, 0.01]
+                                0.36 + 0.16F, 0.30 + 0.22S, w_g(F,S,T)]
     [w_s, w_d, w_c, w_t, w_g] ← normalize([w_s×support_gate, w_d×support_gate,
                                           w_c×support_boost, w_t×support_boost, w_g×gap_gate])
     z_center(S,T) = clamp(lerp(0.44, 0.30, S) × lerp(1.05, 0.95, T), 0.26, 0.58)
-    z_center_eff ← clamp(z_center × lerp(1.0, 0.75, support), 0.24, 0.58)
+    change_point_policy ← BoundaryChangePointPolicy(S,T,support)
+    z_center_eff ← change_point_policy.z_center_eff
     z_t ← w_s×(surprisal̂ − z_center_eff) +
           w_d×(drift̂ − z_center_eff) +
           w_c×(coĥ − z_center_eff) +
           w_t×(topiĉ − z_center_eff) +
           w_g×(gap_score − z_center_eff)
-    k_cp(S,T) = lerp(8, 22, S) × lerp(1.1, 0.9, T)
-    k_cp_eff ← k_cp × lerp(0.9, 1.35, support)
+    k_cp_eff ← change_point_policy.k
     lik_boundary ← sigmoid(k_cp_eff × z_t)
 
     # Bayesian update for boundary posterior
@@ -1583,8 +1612,7 @@ Boundary threshold and limits:
 Pressure-capacity ratio (continuous flush trigger derived from knobs):
 
     capacity_scale(T) = (1 + T)^2  # higher stability = larger capacity
-    capacity ← max_mem_drift(S) × capacity_scale(T)
-    pressure ← drift_acc × (1 + S)
+    [capacity, pressure] ← BoundaryPressurePolicy(S,T, drift_acc)
     saturation_ratio ← pressure / max(capacity, ε)
     k_flush(S,T) = k_surprise(S,T)
     pressure_score ← sigmoid((saturation_ratio − 1) × k_flush(S,T))
@@ -1658,17 +1686,17 @@ We avoid hard timeouts for episode boundaries. Instead, when the stream
 becomes quiet and natural indicators are weak, inactivity softly boosts
 the boundary score:
 
-    support_relax = exp(−lerp(0.6, 1.6, S) × lerp(1.15, 0.85, T) × gap_z⁺)
+    inactivity_policy ← BoundaryInactivityPolicy(S,T)
+    support_relax = exp(−inactivity_policy.support_relax_rate × gap_z⁺)
     gap_ratio = signal_gap_s / max(dt_ema, ε)
     gap_z_inact = log1p(max(gap_ratio − 1, 0))
-    gap_score_inact = sigmoid(lerp(0.9, 1.8, S) × lerp(1.1, 0.9, T) × gap_z_inact)
+    gap_score_inact = sigmoid(inactivity_policy.gap_score_scale × gap_z_inact)
     inactivity = gap_score_inact × (1 − support × support_relax)
-    k_inact(S,T) = lerp(0.05, 0.25, S) × lerp(1.1, 0.9, T)
     gap_z⁺ = max(0, gap_z_inact)
-    inactivity_scale = exp(lerp(0.6, 1.6, S) × lerp(1.1, 0.9, T) × gap_z⁺)
-    boundary_score ← boundary_score + k_inact(S,T) × inactivity × inactivity_scale
-    gap_force = sigmoid(lerp(2.0, 5.0, S) × lerp(1.1, 0.9, T) ×
-                       (gap_z_inact − lerp(0.9, 0.4, S) × lerp(1.1, 0.9, T)))
+    inactivity_scale = exp(inactivity_policy.inactivity_exp_rate × gap_z⁺)
+    boundary_score ← boundary_score + inactivity_policy.inactivity_weight × inactivity × inactivity_scale
+    gap_force = sigmoid(inactivity_policy.gap_force_k ×
+                       (gap_z_inact − inactivity_policy.gap_force_center))
     boundary_score ← max(boundary_score, gap_force)
 
 This closes episodes after prolonged inactivity without forcing
@@ -1858,7 +1886,8 @@ Persisted per-memory gain is tracked as a smoothed value:
 
 Per-memory stability initializes at creation and is bounded:
 
-    stability(m)_init = 1.0
+    strength(m)_init = memory_initial_strength(F,S,T)
+    stability(m)_init = memory_initial_stability(F,S,T)
     stability(m) ← clamp(stability(m), 0.0, 2.0)
 
 Retrieved vs used:
@@ -1896,6 +1925,39 @@ decayed during explicit consolidation cycles** (triggered externally via
 consolidation” policy. This prevents per-turn decay from erasing fresh
 reinforcement and keeps runtime retrieval updates stable while still
 allowing long-term pruning during consolidation.
+
+The online edge update is intentionally slower than per-memory trace
+reinforcement because it changes the durable graph topology. The current
+runtime derives the co-retrieval edge increment from the three knobs and
+the retrieved-packet shape rather than using a fixed constant:
+
+    base_edge_step(F,S,T) =
+      clamp(lerp(0.015, 0.055, S~) *
+            lerp(1.20, 0.70, F~) *
+            lerp(0.75, 1.15, T), 0.005, 0.08)
+
+    unselected_scale(F,S,T) =
+      clamp(lerp(0.10, 0.35, S~) *
+            lerp(0.85, 0.65, F~) *
+            lerp(0.80, 1.05, T), 0.05, 0.40)
+
+    fanout_damping(F,S,T,n) =
+      1, if n <= 2
+      clamp(sqrt(reference_fanout(F,S,T) / n), 0.25, 1.0), otherwise
+
+    pair_step(i,j) =
+      base_edge_step * fanout_damping *
+      sqrt(clamp(contextual_support_i,0,1) *
+           clamp(contextual_support_j,0,1)) *
+      (1.0 if either endpoint was the selected/used memory
+       else unselected_scale)
+
+Thus a pair anchored by an actually used memory can still learn from
+repeated co-activation, while pairs that merely co-occur inside a broad
+or noisy retrieval packet update much more slowly. This is the
+production replacement for the earlier fixed `0.1` co-retrieval
+increment, which could saturate repeated noisy packets into durable
+graph hubs after only a few retrievals.
 
 ## Causal Feedback Loop
 
@@ -2086,9 +2148,9 @@ individual signals. The WM update occurs **before** accumulator reset so
 each slot preserves ordered signal blobs for content hydration:
 
     on_memory_boundary:
-        [α, β, γ] ← normalize([lerp(0.55, 0.70, F),   # window score weight
-                            lerp(0.20, 0.35, F),   # task relevance weight
-                            lerp(0.10, 0.30, S)])   # novelty-to-WM weight
+        [α, β, γ] ← normalize([lerp(0.55, 0.70, F) × (1 + 0.10(T − 0.5)),
+                            lerp(0.20, 0.35, F) × (1 − 0.08(T − 0.5)),
+                            lerp(0.10, 0.30, S) × (1 − 0.12(T − 0.5))])
         memory_benefit ← α × S_window + β × relevance_to_task(μ_acc, task_context) +
                            γ × novelty_to_set(μ_acc, {m.embedding | m ∈ active_memories})
         margin ← memory_benefit − gate_threshold
@@ -2280,9 +2342,10 @@ Stability increases context/full-vector influence:
 
     view(a) = w_sem s_sem(a) + w_ent s_ent(a) + w_full s_full(a)
 
-When quality estimates are unavailable, use `q_sem = q_full = 1` and
-`q_ent = 0.5`. If the entity vector is missing or known-diffuse, set
-`q_ent = 0`.
+When quality estimates are unavailable, use `q_sem = q_full = 1` and an
+F/S/T-derived weak entity-quality prior. At the neutral midpoint this
+equals `q_ent = 0.5`. If the entity vector is missing or known-diffuse,
+set `q_ent = 0`.
 
 ### Engine Evidence
 
@@ -2332,11 +2395,11 @@ Compute:
     H_real    = normalized_entropy({R(a)})
     info(m)   = clamp((q_sem + q_ent + q_full) / 3, 0, 1) × (1 - generic(m))
 
-    score_none = clamp(0.25 + 0.55 generic(m) + 0.20 H_real
-                       + 0.20(1 - best_real) + 0.15 top_contra, 0, 1)
+    score_none = SoftAnchorNoneScore(F,S,T,generic,H_real,
+                                     1 - best_real, top_contra)
 
-    score_new  = clamp(0.15 + 0.45 info(m) + 0.25 boundary_score(m)
-                       + 0.20(1 - best_real) - 0.35 generic(m), 0, 1)
+    score_new  = SoftAnchorNewScore(F,S,T,info,boundary_score,
+                                    best_real,generic)
 
 Then:
 
@@ -2386,6 +2449,9 @@ Link strength decays independently from the anchor:
 with WM shortest, STM intermediate, and LTM longest. Higher Stability
 increases half-life and support window length; it must not by itself
 override boundary pressure or force cross-boundary durable binds.
+Non-durable anchor states decay after a bounded active-TTL grace period
+whose multiplier is also F/S/T-derived and remains `2x` at the neutral
+midpoint.
 
 ### Knob Semantics
 
@@ -2497,10 +2563,13 @@ reliability, and contradiction history. Retrieval returns **content +
 source confidence**, enabling downstream gating and auditability.
 
     source_model = {origin, reliability, contradiction_count, last_verified_ts}
-    source_prior(origin) = {'user': 0.8, 'assistant': 0.6, 'external': 0.7, 'system': 0.9}
-    source_confidence(m) ← clamp(source_prior(m.origin) ×
-                                 (1 − 0.15 × contradiction_count) ×
-                                 (0.7 + 0.3 × freshness(m)), 0, 1)
+    source_prior(origin, F, S, T) = SourceReliabilityPrior(F,S,T,origin)
+    freshness_weight = RetrievalSourceFreshnessWeight(F,S,T)
+    freshness(m) = exp(−age(m) / RetrievalSourceFreshnessTauSeconds(F,S,T))
+    source_confidence(m) ← clamp(source_prior(m.origin,F,S,T) ×
+                                 (1 − contradiction_penalty(F,S,T) × contradiction_count) ×
+                                 ((1 − freshness_weight) + freshness_weight × freshness(m)),
+                                 0, 1)
 
 Contradictions reduce `reliability`, and user corrections directly
 update `contradiction_count`. Source confidence gates injection into
@@ -2841,11 +2910,13 @@ Each memory receives a consolidation score determining merge priority:
     score_consolidate(m) = weight_strength × strength(m) −
                             weight_redundancy × redundancy(m) +
                             weight_connectivity × connectivity(m) +
-                            weight_stability × stability(m)
+                            weight_stability × stability(m) +
+                            weight_tag × active_tag_strength(m)
 
 Weights derive from knobs:
 
     weight_strength = T; weight_redundancy = F; weight_connectivity = S; weight_stability = T
+    weight_tag = ConsolidationCandidateTagWeight(F,S,T)
 
 Low-scoring memories are marked for merging.
 
@@ -2864,13 +2935,16 @@ resolution now requires the local Gemma 4 E2B LiteRT model. The Liquid
 resolver remains available by explicit override and prefers
 `LFM2.5-350M-GGUF` for extraction and `LFM2.5-1.2B-Instruct-GGUF` for
 summarization when present, defaulting to the local `Q4_K_M` checkpoints
-and accepting other bundled GGUF quantizations as fallbacks. All other
-operations remain embedding-only. **There is no extractive fallback**:
-if no deep backend is available, deep consolidation raises an error
-rather than silently degrading. Summarization now creates compact
-retrieval-surface summary nodes when the summarizer is available, while
-destructive eviction remains storage-gated. After the prompt-technique
-ablations in [Section 9](#sec-extractor-prompt-ablation) and [Section
+and accepting other bundled GGUF quantizations as fallbacks. Other
+online operations remain embedding-first and graph-first; production
+retrieval can also use bounded F/S/T-derived text, fact, label, and
+source-evidence routes when durable evidence already exists. **There is
+no extractive fallback**: if no deep backend is available, deep
+consolidation raises an error rather than silently degrading.
+Summarization now creates compact retrieval-surface summary nodes when
+the summarizer is available, while destructive eviction remains
+storage-gated. After the prompt-technique ablations in [Section
+9](#sec-extractor-prompt-ablation) and [Section
 9](#sec-summarizer-prompt-ablation), the default local Liquid extraction
 prompt is now a short **few-shot durable** prompt, and the default local
 Liquid summarization prompt is now a **transcript few-shot** prompt for
@@ -2891,8 +2965,8 @@ instead:
 
 Shallow labeling uses knob‑derived limits and thresholds:
 
-    max_labels_per_cluster = round(lerp(2, 6, S̃) × lerp(1.0, 0.7, F̃))
-    label_attach_threshold = clamp(lerp(0.30, 0.60, F̃) × lerp(1.0, 1.1, T), 0.15, 0.95)
+    max_labels_per_cluster = ShallowConsolidationMaxLabels(F,S,T)
+    label_attach_threshold = ShallowConsolidationLabelMinSimilarity(F,S,T)
 
 For each cluster centroid, we compute cosine similarity to the attached
 static label-bank vectors and to any durable dynamic labels already
@@ -2971,9 +3045,10 @@ To keep consolidation latency bounded, summarization input is capped by
 knob‑derived limits. Source texts are ranked by similarity to the
 cluster centroid and truncated:
 
-    max_source_texts(F̃) = round(lerp(3, 8, F̃))
-    max_text_chars(F̃)  = round(lerp(300, 900, F̃))
-    max_total_chars(T)  = round(lerp(1200, 3600, T))
+    budget = ConsolidationSummaryEvidenceBudgetForKnobs(F,S,T)
+    max_source_texts = budget.max_source_texts
+    max_text_chars   = budget.max_text_chars
+    max_total_chars  = budget.max_total_chars
     source_texts = topk_by_cosine(cluster_texts, k=max_source_texts)
     truncate each text to max_text_chars and total to max_total_chars
     size decoder budget from capped input length; do not hard-trim stored summary text
@@ -3211,21 +3286,25 @@ query vector is the **current accumulator centroid** (μ_acc),
 L2‑normalized for vector search.
 
     # Query and re-rank using current memory centroid + recent context
-    μ_ctx ← mean(recent_context_embeddings)  # recent context window (embedding-only)
-    λ_q(F) = lerp(0.25, 0.05, F)
+    μ_ctx ← mean(recent_context_embeddings)  # recent context query blend
+    λ_q(F,S,T) = RetrievalContextMix(F,S,T)  # bounded STM recency cue
     q ← l2_normalize((1 − λ_q) × μ_acc + λ_q × μ_ctx)  # cached pre-reset
     q_ctx ← c_t               # temporal context from @sec-temporal-context
-    if |memory_stream| == 0:
-        return []  # cold-start fallback (no retrieval candidates)
 
-    kNN_size(F) = round(lerp(96, 8, F))
-    results_vec ← topK(vector_search(q, k=kNN_size(F)))
+    kNN_size(F) = RetrievalMaxResults(F)
+    seed_search_k = RetrievalSeedSearchK(F,S,T,kNN_size)
+    results_vec ← topK(vector_search(q, k=seed_search_k))
+    score_vec(r) = RetrievalVectorDistanceScore(r.distance,F,S,T)
     seed_vec ← [r.id for r in results_vec]
-    summary_k(F̃,S̃,T) = round(lerp(2, 6, S̃) × lerp(1.0, 0.75, F̃) × lerp(1.0, 0.85, T))
+    summary_k = RetrievalSummaryLabelSeedCount(F,S,T)
+    fact_k = RetrievalFactVectorSeedCount(F,S,T)
     static_label_seeds ← topK(attached_label_bank_vec, q, k=summary_k)
     dynamic_label_seeds ← topK(durable_label_and_association_state, q, k=summary_k)
+    fact_seeds ← topK(fact_cache_vec, q, k=fact_k) ∪ bounded_fact_text_route(q)
+    source_text_seeds ← bounded_durable_source_text_route(q)
     seed_idx ← index_store.lookup(sparse_key(q))  # exact-key in current runtime
-    seed_nodes ← union(seed_vec, static_label_seeds, dynamic_label_seeds, seed_idx)
+    seed_nodes ← union(seed_vec, static_label_seeds, dynamic_label_seeds,
+                       fact_seeds, source_text_seeds, seed_idx)
 
     if |seed_nodes| == 0 OR graph is empty:
         return results_vec  # deterministic fallback, skip expansion
@@ -3233,10 +3312,10 @@ L2‑normalized for vector search.
     expanded_nodes ← graph.traverse(seed_nodes,
                                     depth=graph_depth(T),
                                     min_edge_weight=min_edge_weight(F),
+                                    row_limit=RetrievalGraphExpansionRowLimit(F,S,T,k),
                                     edge_types=associations_above_threshold)
     combined ← union(seed_nodes, expanded_nodes)
-    min_assoc(F̃,T) = round(lerp(3, 1, F̃) × lerp(1.0, 0.85, T))
-    min_label(F̃,S̃) = round(lerp(0, 3, S̃) × lerp(1.0, 0.85, F̃))
+    {min_assoc,min_label} = RetrievalGraphExpansionEvidenceCounts(F,S,T)
     if min_assoc > 0:
         combined ← combined ∪ {assoc | edge_type='derived_from' AND target∈combined}
     if min_label > 0:
@@ -3245,19 +3324,19 @@ L2‑normalized for vector search.
     dup_thresh = lerp(0.985, 0.95, F) × (0.98 + 0.02T)
     eligible ← {m ∈ combined | m.created_at < write_exclusion_ts}
     eligible ← {m ∈ eligible | max_{w∈WM} cos(m.embedding, w) < dup_thresh}
-    eligible ← {m ∈ eligible | source_confidence(m) ≥ lerp(0.15, 0.45, T)}
+    seed_only_source_confidence = RetrievalSeedFallbackSourceConfidence(F,S,T)
+    source_backed_floor = RetrievalSourceBackedBoostFloor(F,S,T)
+    eligible ← {m ∈ eligible | source_confidence(m) ≥ RetrievalSourceConfidenceThreshold(F,S,T,storage_pressure)}
 
     # Diversified re-rank (MMR-style) with context reinstatement
     w_rel_raw = lerp(0.65, 0.94, F) × lerp(1.0, 0.85, S) × lerp(1.0, 0.90, T)
     w_div_raw = lerp(0.35, 0.06, F) × lerp(0.75, 1.15, S) × lerp(0.85, 0.65, T)
     [w_rel, w_div] = normalize([w_rel_raw, w_div_raw])
-    w_ctx = lerp(0.15, 0.35, F) × lerp(1.0, 0.85, S)
-    w_proc = lerp(0.10, 0.25, S)
+    [w_ctx,w_proc,label_boost] = RetrievalCandidateBlendScoringWeights(F,S,T)
     w_emotion = lerp(0.0, 0.12, S_affect)
     affect_gain(S) = lerp(1.0, 2.4, S_affect)
-    weights_aff_raw = [lerp(0.30, 0.55, S_affect), lerp(0.30, 0.55, S_affect), lerp(0.10, 0.20, S_affect)]
-    [w_arousal, w_emotion_raw, w_salience] = normalize(weights_aff_raw)
-    affect_drive = clamp(affect_gain(S) × (w_arousal × arousal + w_emotion_raw × emotion_intensity + w_salience × salience), 0, 1)
+    [w_arousal, w_affect_emotion, w_salience] = AffectDriveWeights(S)
+    affect_drive = clamp(affect_gain(S) × (w_arousal × arousal + w_affect_emotion × emotion_intensity + w_salience × salience), 0, 1)
     weights_mem_raw = [lerp(0.60, 0.80, S), lerp(0.20, 0.40, S)]
     [w_mem_emotion, w_mem_arousal] = normalize(weights_mem_raw)
 
@@ -3267,6 +3346,9 @@ L2‑normalized for vector search.
                 w_rel × max(0, cos(q, m.embedding)) +
                 w_ctx × max(0, cos(q_ctx, m.context)) +
                 w_proc × max(0, proc_sim(m)) +
+                label_boost × durable_label_overlap(q,m) +
+                fact_boost(F,S,T,m) +
+                temporal_rank_weight(F,S,T) × temporal_rank_score(m) +
                 w_emotion × affect_drive × (w_mem_emotion × emotional_intensity(m) + w_mem_arousal × s_arousal_avg(m)) −
                 w_div × max_{s∈selected} max(0, cos(m.embedding, s.embedding))
              ]
@@ -3284,8 +3366,9 @@ through sqlite-vec search. Dynamic label, association, fact, and summary
 seeds come from the ordinary durable memory graph produced by
 consolidation. The runtime no longer copies the static label bank into
 user memory tables or hydrates the entire bank into an in-memory
-`summary_cache`; the retrieval path remains embedding-only while keeping
-the static bank as an attached searchable object.
+`summary_cache`; production retrieval is embedding-first with bounded
+F/S/T-derived label, fact, text, durable-source, graph, and temporal
+routes layered onto the same compact candidate surface.
 
 For affective gain in retrieval, we use a lighter bias (S\_{affect} =
 (S, -0.06)) to preserve mid‑range affect modulation.
@@ -3300,10 +3383,11 @@ The interrupt gate controls when retrieved memories enter active context
 during streaming generation. The gate balances novelty value against
 disruption cost. The interrupt gate operates on memory-level context,
 using centroids (μ_acc) rather than individual signal embeddings for
-novelty and relevance computation. The main interrupt thresholds and
-gains in this section are derived from the three knobs (F, S, T). The
-runtime also contains a small number of operational guard constants and
-environment-controlled diagnostics outside this core gate.
+novelty and relevance computation. The interrupt thresholds, candidate
+weights, maturity scaling, boundary multiplier, and refractory dynamics
+in this section are named policies derived from the three knobs (F, S,
+T). The runtime also contains environment-controlled diagnostics outside
+this core gate.
 
 **Note:** As defined in Section 1, all knob symbols here use the
 midpoint‑biased values F̃ and S̃ (T is unmodified). For affective gain, we
@@ -3314,14 +3398,13 @@ affect modulation.
 
 Novelty thresholds scale with knobs and refractory state:
 
-    τ_novelty = lerp(0.10, 0.35, F) × (1 − 0.15S) × (1 + 0.3T)
+    τ_novelty = lerp(0.12, 0.32, F) × (1 − 0.12S) × (1 + 0.25T)
     τ_mu = lerp(0.08, 0.18, F) × (1 − 0.4S) × (1 + 0.4T)
     retrieval_thresh(F) = lerp(0.12, 0.45, F)
     retrieval_thresh_interrupt(F,S) = retrieval_thresh(F) × (1 − 0.12S)
-    affect_relax_coeff(S) = lerp(0.15, 0.55, S_affect)
+    affect_relax_coeff(S) = lerp(0.08, 0.28, S_affect)
     affect_gain(S) = lerp(1.0, 2.4, S_affect)
-    weights_aff_raw = [lerp(0.30, 0.55, S_affect), lerp(0.30, 0.55, S_affect), lerp(0.10, 0.20, S_affect)]
-    [w_arousal, w_emotion, w_salience] = normalize(weights_aff_raw)
+    [w_arousal, w_emotion, w_salience] = AffectDriveWeights(S)
     affect_drive = clamp(affect_gain(S) × (w_arousal × arousal + w_emotion × emotion_intensity + w_salience × salience), 0, 1)
 
 Refractory dynamics suppress rapid successive interrupts:
@@ -3482,7 +3565,8 @@ already present in the system (no new constants).
     if pending_abort:
         sim_mem = cos(x_t, pending_mem)
         sim_acc = cos(x_t, μ_acc)
-        if sim_mem > sim_acc:        # accepted → drop partial unit
+        margin = InterruptAbortAcceptanceMargin(F,S,T)
+        if sim_mem > sim_acc + margin:        # accepted → drop partial unit
             reset_accumulator()
         pending_abort ← false
 
@@ -3737,8 +3821,10 @@ isolated label-accumulator result rather than the graph pairing. The
 best graph-paired run was `topk_plus_hierarchical` with
 `k=50, M=3, N=10`, cosine selection, recency decay **1.0**, temporal
 weight **0.1**, and degree penalty **0.5**; it reached **12 / 18**
-target top-5 hits. This is the current best-supported combination for
-realtime identity labeling:
+target top-5 hits. Those literal temporal/degree settings are historical
+sweep parameters, not current production constants: the production path
+now routes these behaviors through named F/S/T helpers. This is the
+current best-supported combination for realtime identity labeling:
 
 `flat top-k router -> cluster/hierarchical leaf expansion -> top-k per reached cluster -> recency-weighted label graph scoring -> generic/degree suppression`
 
@@ -4401,6 +4487,17 @@ mean time in `GraphRetrieve.seed_sql`, so the next engineering target is
 not to remove constructive recall, but to make retrieval consult a
 bounded/current embedding surface rather than rebuilding latest
 reconstruction state inside every sqlite-vec seed query.
+
+Implementation follow-up addressed this specific hot path structurally:
+seed SQL now looks up the latest reconstruction only for each candidate
+memory using the `(memory_id, reconstruction_id DESC)` index, and the
+schema adds ordinary lookup indexes for fact-cache embedding joins and
+edge-type-first association traversal. Recursive graph expansion now
+also applies an F/S/T-derived per-node fanout cap before the final row
+cap, so high-degree memories cannot force unbounded association work
+before result compaction. The week-run numbers above remain historical
+diagnostics from the superseded query plan; fresh latency and throughput
+numbers must come from a rerun of the current branch.
 
 Historical OpenAI-judged validation on the then-current branch reran
 after the generic-fragment label filters and durable-source promotion
@@ -10179,6 +10276,33 @@ structured semantic signals beyond shallow associations.
 
 ## Reinforcement Ablation (Long Horizon)
 
+On **June 9, 2026**, the Julie release probe stream exposed a production
+graph plasticity problem: repeated compact retrieval packets were
+creating durable reinforcement hubs because `DetectMemoryUsage` used a
+fixed `0.1` increment for every pair of co-retrieved memories. We
+replaced that constant with the F/S/T-derived,
+contextual-support-weighted, fanout-damped rule described in
+<a href="#sec-reinforcement" class="quarto-xref">Section 7</a>. Quick
+verification artifacts are in
+`build/reinforcement_knob_ablation_20260609/`.
+
+The numeric step-matrix ablation compares the old fixed update to the
+new rule. At the default knobs (`F=S=T=0.5`) and a 13-item retrieved
+packet matching the Julie trace shape, the selected/used-memory pair
+update falls from `0.10000` to `0.01981` (**5.0x** slower), while an
+unselected co-retrieval pair falls to `0.00282` (**35.4x** slower). For
+a 20-item packet, those reductions are **6.3x** and **44.0x**
+respectively. In a no-decay saturation calculation, the old edge reaches
+weight 1.0 after **10** repeated co-retrievals, while the new default
+needs **51** selected-pair repetitions for a 13-item packet and **355**
+unselected-pair repetitions. The deterministic full-unit ablation still
+marks `reinforcement_edges` as essential for the best score
+(`mean_marginal = 1.0`, `max_score_without = 13.0`,
+`essential_for_best = 1`), so the fix slows noisy online graph
+plasticity without removing the reinforcement family. This is a
+mechanism-level verification only; Julie release-quality claims must be
+rerun against the rebuilt production binary.
+
 We reran the reinforcement ablation on **Apr 4, 2026** under
 `EmbeddingGemma/llama.cpp` by comparing **reinforcement on vs off** at
 **F=S=T=0.5**, `max_total=360`, `max_turns=360`, `max_conversations=6`
@@ -12679,35 +12803,40 @@ with mean majority support of at least two-thirds. It now requires an
 explicit release-freeze file that pins the private source-input manifest
 hash, the frozen probe schedule hash, the benchmark command hash, and
 the benchmark executable hash; the final report is run in strict mode
-and exits non-zero unless the release gate passes. The gate also
-requires the full-history upper-bound packet to record non-empty
-prior-history items and token counts for every probe, so that the upper
-bound is a real comparator rather than a nominal judge arm. It also
-requires default knobs (`0.5 / 0.5 / 0.5`), daily deep consolidation,
-mixed media, a fixed slice with no skipped transcript messages, at least
-**30** fixed probes, probe-time frozen Cortext packet snapshots, **3–5**
-blind local judge repetitions, confidence intervals for
-win/quality/token metrics, same-run human labels with agreement against
-local frozen targets, the named architecture ablations, and production
-cost fields including p50/p95 retrieval latency, token counts, disk
-growth, consolidation wall time, peak RSS, and throughput both excluding
-and including idle consolidation time. Each required confidence interval
-must be computed over at least the release probe floor, so a partial or
-smoke-sized CI cannot satisfy the gate. The disk-growth gate requires
-positive database bytes and positive bytes per processed event, not
-merely a present JSON field. The latency gate requires explicit
-normal-RAG retrieval p50/p95 values and positive Cortext probe p50/p95
-values, so the cost story cannot rely only on aggregate wall time. The
-human-label gate also verifies that the scored human-label artifact
-points to a frozen target file whose recorded hash matches the score
-report, so human agreement cannot be computed against a different target
-freeze. The ablation judges are subject to the same release-grade
-local-only, blinded, packet-randomized, repeated-judge consistency
-checks as the main judge artifact, each ablation must share the main
-source-input manifest hash, and each ablation’s recorded benchmark
-executable, benchmark command, and judge command must match its
-summary/judge artifacts before it can support an algorithm-attribution
-claim.
+and exits non-zero unless the release gate passes. The main release
+runner can also receive an existing `--release-freeze` before replay; in
+that mode preflight recomputes the private source-input manifest hash
+and checks the benchmark command, executable hash, git commit, and
+dirty-worktree manifest against the freeze before spending wall time on
+the benchmark, then the generated report validates the frozen probe
+manifest and schedule against the same file. The gate also requires the
+full-history upper-bound packet to record non-empty prior-history items
+and token counts for every probe, so that the upper bound is a real
+comparator rather than a nominal judge arm. It also requires default
+knobs (`0.5 / 0.5 / 0.5`), daily deep consolidation, mixed media, a
+fixed slice with no skipped transcript messages, at least **30** fixed
+probes, probe-time frozen Cortext packet snapshots, **3–5** blind local
+judge repetitions, confidence intervals for win/quality/token metrics,
+same-run human labels with agreement against local frozen targets, the
+named architecture ablations, and production cost fields including
+p50/p95 retrieval latency, token counts, disk growth, consolidation wall
+time, peak RSS, and throughput both excluding and including idle
+consolidation time. Each required confidence interval must be computed
+over at least the release probe floor, so a partial or smoke-sized CI
+cannot satisfy the gate. The disk-growth gate requires positive database
+bytes and positive bytes per processed event, not merely a present JSON
+field. The latency gate requires explicit normal-RAG retrieval p50/p95
+values and positive Cortext probe p50/p95 values, so the cost story
+cannot rely only on aggregate wall time. The human-label gate also
+verifies that the scored human-label artifact points to a frozen target
+file whose recorded hash matches the score report, so human agreement
+cannot be computed against a different target freeze. The ablation
+judges are subject to the same release-grade local-only, blinded,
+packet-randomized, repeated-judge consistency checks as the main judge
+artifact, each ablation must share the main source-input manifest hash,
+and each ablation’s recorded benchmark executable, benchmark command,
+and judge command must match its summary/judge artifacts before it can
+support an algorithm-attribution claim.
 
 The release runner now also supports streamed early warning during the
 expensive private replay. `cortext_julie_live_run` writes a compact
@@ -12763,16 +12892,21 @@ instead of being only a convenience wrapper around the long replay. For
 local-only judge runs, the watcher may also pause the benchmark process
 while a checkpoint judge call is active and resume it afterward,
 preventing replay progress from racing a still-undecided early gate on
-the same machine. When no explicit media-smoke artifact is supplied, the
-runner also generates the non-private local Ollama image/audio smoke
-before preflight and replay, and regenerates the default artifact when
-it is stale for a different judge model or failed to prove image/audio
-support. These early artifacts are explicitly marked non-release
-diagnostics; they exist to avoid wasting wall time on a run whose frozen
-packets are already invalid, empty, or unfair. The release claim still
-comes only from the complete frozen run, repeated blind local judging,
-human-label agreement, ablations, bootstrap intervals, and the strict
-public-safe protocol report.
+the same machine. The watcher records total benchmark pause milliseconds
+and pause count in the early-judge manifest; the release report keeps
+raw wall time but computes throughput from wall time with that
+local-judge pause time subtracted. This prevents early screening
+overhead from making production ingest throughput look worse while still
+preserving the raw run duration for audit. When no explicit media-smoke
+artifact is supplied, the runner also generates the non-private local
+Ollama image/audio smoke before preflight and replay, and regenerates
+the default artifact when it is stale for a different judge model or
+failed to prove image/audio support. These early artifacts are
+explicitly marked non-release diagnostics; they exist to avoid wasting
+wall time on a run whose frozen packets are already invalid, empty, or
+unfair. The release claim still comes only from the complete frozen run,
+repeated blind local judging, human-label agreement, ablations,
+bootstrap intervals, and the strict public-safe protocol report.
 
 The ablation runner uses the same fail-fast shape. Each ablation
 benchmark is launched under a supervised process, its early watcher
@@ -14378,20 +14512,23 @@ We also separated two hydration/admission concerns that had been
 entangled in the chat prompt path. First, hydration now preserves the
 ranked retrieval order emitted by the graph retriever instead of relying
 on the iteration order of the retrieved-embedding map. Second,
-query-aware ordering of sources inside a durable cue was tested behind
-`CORTEXT_QUERY_AWARE_LINKED_SOURCE_HYDRATION=1`. On the same `skip=1980`
-seven-probe slice, rank-preserving hydration with query-aware source
-ordering (`build/stm_ltm_query_source_admission_judged.json`) raised
-compact Cortext LTM sufficiency to **1.00**, but non-compact
-Cortext-LTM-only sufficiency was only **1.00**. Rank preservation
-without query-aware source ordering
-(`build/stm_ltm_rank_preserve_judged.json`) also produced compact
-Cortext LTM sufficiency **1.00**, but non-compact Cortext-LTM-only
-sufficiency dropped to **0.43**. Because both variants still had **6 /
-7** zero-overlap probes and **0** LTM wins, the conservative
-implementation keeps query-aware source ordering opt-in while retaining
-rank preservation as a deterministic hydration fix. The best short-slice
-LTM-only result remains the label-to-source hydration run
+query-aware ordering of sources inside a durable cue was first tested as
+an isolated source-ordering variant. On the same `skip=1980` seven-probe
+slice, rank-preserving hydration with query-aware source ordering
+(`build/stm_ltm_query_source_admission_judged.json`) raised compact
+Cortext LTM sufficiency to **1.00**, but non-compact Cortext-LTM-only
+sufficiency was only **1.00**. Rank preservation without query-aware
+source ordering (`build/stm_ltm_rank_preserve_judged.json`) also
+produced compact Cortext LTM sufficiency **1.00**, but non-compact
+Cortext-LTM-only sufficiency dropped to **0.43**. Because both variants
+still had **6 / 7** zero-overlap probes and **0** LTM wins, the result
+is treated as negative evidence for source ordering as a standalone
+quality fix, not as evidence against query similarity inside production
+hydration. Production now preserves retrieval rank and uses query-aware
+linked-source ordering by default, with
+`CORTEXT_DISABLE_QUERY_AWARE_LINKED_SOURCE_HYDRATION=1` retained only as
+an ablation/regression switch. The best short-slice LTM-only result
+remains the label-to-source hydration run
 (`build/stm_ltm_label_expansion_judged.json`), not either
 source-admission variant.
 
@@ -14445,17 +14582,19 @@ RAG still scored **3.857** sufficiency and **2** wins, while Cortext LTM
 had **0** wins and **6 / 7** zero-overlap probes. A query-aware
 linked-source ordering repeat
 (`build/stm_ltm_relation_label_propagation_query_sources.json`) did not
-improve compact LTM, so that ordering remains opt-in. The next
-bottleneck is therefore not lost source grounding or missing relation
-persistence, but overly broad or weak label admission/ranking: relation
-propagation helps, yet it can still boost generic labels that do not
-select the right underlying experiences. A direct aggregate SQLite audit
-of the same artifact supports this diagnosis: the durable graph
-contained **10** `LABEL` nodes, **9** single-token labels, **6.4** mean
-label characters, and **23.1** mean label-relation degree. All labels
-had at least one source `has_label` edge, so the problem is not
-unattached labels; it is that many attached labels are too short and
-high-degree to be discriminative retrieval anchors.
+improve compact LTM as a standalone change, so the later production
+default treats it as bounded source ordering rather than a
+retrieval-quality claim. The next bottleneck is therefore not lost
+source grounding or missing relation persistence, but overly broad or
+weak label admission/ranking: relation propagation helps, yet it can
+still boost generic labels that do not select the right underlying
+experiences. A direct aggregate SQLite audit of the same artifact
+supports this diagnosis: the durable graph contained **10** `LABEL`
+nodes, **9** single-token labels, **6.4** mean label characters, and
+**23.1** mean label-relation degree. All labels had at least one source
+`has_label` edge, so the problem is not unattached labels; it is that
+many attached labels are too short and high-degree to be discriminative
+retrieval anchors.
 
 We tested a narrow degree-damping guard for this diagnosis without
 changing consolidation: `1 / (1 + damping * degree)` is applied to
@@ -39575,12 +39714,14 @@ episode signals
 
 The benchmark is
 `tools/preconsolidated_topk_label_graph_retrieval_bench.py`. It is
-benchmark-only and does not alter production retrieval or write to
-Cortext databases. It builds an episode centroid from signal embeddings,
-queries the label vector store, keeps Top-K provisional labels, and
-evaluates retrieval with and without a bounded provisional-label graph
-boost. The pruning simulation uses offline truth only to model the later
-consolidation step that removes labels unsupported by the episode group.
+offline and non-mutating: it does not write to Cortext databases. The
+bounded provisional-label graph boost it validated was later promoted
+into production retrieval as an F/S/T-derived soft signal. The benchmark
+builds an episode centroid from signal embeddings, queries the label
+vector store, keeps Top-K provisional labels, and evaluates retrieval
+with and without a bounded provisional-label graph boost. The pruning
+simulation uses offline truth only to model the later consolidation step
+that removes labels unsupported by the episode group.
 
 Commands:
 
@@ -39760,14 +39901,14 @@ because durable graph state must not preserve false hubs. On the
 text/image slice, direct retrieval was already at ceiling, and the
 preconsolidated/pruned graph preserved that ceiling.
 
-Implementation implication: build the production path as a separate
-preconsolidated graph layer. It should use episode centroids and the
-label vector store in realtime, expose a bounded low-weight retrieval
-boost, and mark all edges provisional with source/modality provenance.
-Consolidation should then promote only labels supported by source
-evidence and prune the rest. This gives realtime recall the benefit of
-“one right label in the set” without letting the many wrong labels
-become durable memory structure.
+Implementation implication, now promoted into production: use episode
+centroids and the attached label-bank/vector store as bounded soft
+routing signals inside the normal retrieval operation, not as a separate
+API path. The online path exposes a low-weight F/S/T-derived retrieval
+boost from provisional label/fact graph evidence, while consolidation
+promotes only labels supported by source evidence and prunes the rest.
+This gives realtime recall the benefit of “one right label in the set”
+without letting the many wrong labels become durable memory structure.
 
 ### STM graph to durable LTM consolidation replay
 
@@ -39904,16 +40045,18 @@ summaries.
 We also tested a narrower hydration hypothesis after this run: if a
 durable label points to many source memories, order the linked sources
 by query-embedding similarity instead of recency before hydrating the
-prompt packet. A unit regression now covers this opt-in behavior
-(`CORTEXT_QUERY_AWARE_LINKED_SOURCE_HYDRATION=1`), but the real Julie
-replay did not support making it the default. The 80-message judged
-artifact `build/stm_ltm_query_hydration_v27_80_openai.json` preserved
-the same source grounding counts but reduced LTM-only quality (`1.286`
-relevance, `0.429` sufficiency) and relabel/pruned graph quality
-(`2.429` relevance, `1.000` sufficiency). This negative result narrows
-the failure: source ordering alone is not the bottleneck. The durable
-graph needs better text/anchor admission and query routing into
-discriminative source-backed labels before hydration order can matter.
+prompt packet. The 80-message judged artifact
+`build/stm_ltm_query_hydration_v27_80_openai.json` preserved the same
+source grounding counts but reduced LTM-only quality (`1.286` relevance,
+`0.429` sufficiency) and relabel/pruned graph quality (`2.429`
+relevance, `1.000` sufficiency). This negative result narrows the
+failure: source ordering alone is not the bottleneck. The durable graph
+needs better text/anchor admission and query routing into discriminative
+source-backed labels before hydration order can matter. Production
+nevertheless now uses query-aware linked-source ordering by default as a
+bounded hydration policy, not as a claimed standalone fix; it can be
+disabled for isolation with
+`CORTEXT_DISABLE_QUERY_AWARE_LINKED_SOURCE_HYDRATION=1`.
 
 We then hardened the durable-label gate to reject weak multi-token
 discourse phrases whose tokens are all modal, helper, or conversational
@@ -39978,12 +40121,15 @@ durable construction remained unchanged at 16 refined labels, 103
 source-link pairs, and zero missing source nodes, but judged retrieval
 regressed: LTM-only retrieval fell to `2.429` relevance and `1.286`
 sufficiency, and the graph relabel/prune packet fell to `2.286`
-relevance and `0.857` sufficiency. The token route is therefore kept as
-an explicit experiment switch
-(`CORTEXT_ENABLE_LABEL_TOKEN_TEXT_ROUTE=1`) rather than as production
-behavior. The negative result is useful: query-addressability cannot be
-fixed by broad lexical matching over durable labels alone; the labels
-themselves must be more event- and question-discriminative.
+relevance and `0.857` sufficiency. The negative result is useful:
+query-addressability cannot be fixed by broad lexical matching over
+durable labels alone; the labels themselves must be more event- and
+question-discriminative. In the current production retrieval path this
+route is therefore not a separate experiment switch. It is enabled
+through the same F/S/T-derived routing policy as the rest of graph
+retrieval, with knob-derived token floors, breadth, fanout, and
+source-evidence caps so it contributes as a bounded rescue signal rather
+than an uncontrolled lexical override.
 
 The next consolidation-side probe converted accepted durable event
 labels into source-backed fact assertions when the label had a
@@ -40010,22 +40156,24 @@ rows, followed by the existing `fact_evidence` mapping back to original
 memories. A focused graph retrieval regression verifies the intended
 failure case: the target fact vector is crowded out of the fact KNN set,
 but a query such as “Who gave money?” still reaches the source-backed
-fact text and gives the evidence memory a positive fact boost. The real
-replay (`build/stm_ltm_fact_text_seed_v33_80_openai.json`) showed why
-this is only a partial fix. Durable construction stayed source-grounded
-(**16** refined labels, **103** label-source pairs, **32** relation
-edges, **0** missing source nodes, and **6** touched facts), but judged
-probes still reported **0** fact seeds, **0** candidate fact-linked
-memories, and **0** selected fact-linked memories. Quality remained
-below RAG: graph relabel/prune averaged `2.857` relevance and `1.286`
-sufficiency versus graph-bakeoff normal RAG at `4.857` and `3.571`, and
-compact Cortext LTM-only stayed at `1.857` relevance and `1.143`
-sufficiency versus compact normal RAG at `4.714` and `4.000`. The replay
-facts existed but did not lexical-match the judged questions, so the
-live bottleneck is not merely fact-cache reachability. It is the
-upstream durable anchor/fact generation contract: consolidation must
-produce enough question-addressable, source-backed facts and relations
-from the STM graph for fact retrieval to have something to hit.
+fact text and gives the evidence memory a positive fact boost. The
+pre-fix real replay (`build/stm_ltm_fact_text_seed_v33_80_openai.json`)
+showed why this was only a partial fix before the later temporal/source
+mapping and fact-route hardening. Durable construction stayed
+source-grounded (**16** refined labels, **103** label-source pairs,
+**32** relation edges, **0** missing source nodes, and **6** touched
+facts), but judged probes still reported **0** fact seeds, **0**
+candidate fact-linked memories, and **0** selected fact-linked memories.
+Quality remained below RAG: graph relabel/prune averaged `2.857`
+relevance and `1.286` sufficiency versus graph-bakeoff normal RAG at
+`4.857` and `3.571`, and compact Cortext LTM-only stayed at `1.857`
+relevance and `1.143` sufficiency versus compact normal RAG at `4.714`
+and `4.000`. The replay facts existed but did not lexical-match the
+judged questions, so the live bottleneck is not merely fact-cache
+reachability. It is the upstream durable anchor/fact generation
+contract: consolidation must produce enough question-addressable,
+source-backed facts and relations from the STM graph for fact retrieval
+to have something to hit.
 
 A follow-up prompt hardening made the Gemma refinement request
 explicitly ask for directly stated durable or episodic facts, with
@@ -40848,7 +40996,7 @@ wrote `human_label_launch_command.txt` and
 can hand off from automated replay to human annotation and final strict
 reporting without requiring human-label artifacts before replay starts.
 
-A subsequent **Jun 8, 2026** hardening pass added two release-protocol
+A subsequent **Jun 8, 2026** hardening pass added four release-protocol
 guards. First, strict release preflight now fails before replay if
 `--require-final-report-pass` is requested while the final judge packet
 is cropped; the final release judge uses `--judge-packet-item-limit -1`
@@ -40868,6 +41016,96 @@ with the generated smoke artifact and uncropped final judge packets
 passed the media and packet gates, then stopped only on the
 intentionally missing release artifacts: human labels, human-label
 evaluation, frozen target labels, and the ablation request.
+
+Third, release preflight can now enforce the media kinds present in the
+exact frozen replay window after `skip_messages`, `max_messages`, and
+`media_limit` selection. This is a harness coverage check only; it does
+not alter Cortext ingress, retrieval, consolidation, or judging. The
+guard caught that the active early 1200-message diagnostic window
+contained selected media counts `image=13`, `video=3`, and `audio=0`, so
+it cannot support a speech-inclusive mixed-media claim by itself
+(`build/julie_release_preflight_media_guard_current/preflight_report.json`).
+Two deterministic later windows pass narrower modality checks without
+changing the production path: `skip=67300,max=80,media=4` contains
+`video=2,image=2`, and `skip=98412,max=80,media=4` contains
+`audio=1,image=3`
+(`build/julie_release_preflight_media_guard_video_window/preflight_report.json`
+and
+`build/julie_release_preflight_media_guard_audio_window/preflight_report.json`).
+The final mixed-media release protocol should therefore be treated as
+multi-window unless a single frozen window is explicitly shown to
+contain all required modalities.
+
+Fourth, the release runner and final report now reject benchmark
+commands that use diagnostic-only replay modes such as
+`--profile-probes-only`, `--checkpoint-eval-only`, or checkpoint query
+selectors. Those modes are useful for speed profiling and frozen
+checkpoint inspection, but they do not execute the full frozen
+daily-consolidation replay. The guard is checked before a runner spends
+wall time on replay and again when a report is generated from a recorded
+benchmark command, so a manually produced diagnostic summary cannot
+satisfy the native-Cortext release protocol by accident.
+
+A follow-up wrapper, `tools/run_julie_release_windows.py`, now makes
+that multi-window protocol explicit instead of relying on hand-run
+commands. By default it freezes three windows: `early_text_image`
+(`skip=0,max=1200,media=16,warmup=200,stride=25,min_probes=30,require=image`),
+`video_window`
+(`skip=67300,max=80,media=4,warmup=10,stride=10,min_probes=4,require=video`),
+and `audio_window`
+(`skip=98412,max=80,media=4,warmup=10,stride=10,min_probes=4,require=audio`).
+The short media windows deliberately use their own frozen probe
+schedules; the earlier global `warmup=200` schedule would make
+80-message media windows incapable of emitting release probe rows. The
+wrapper writes `release_windows_manifest.json`, delegates each window to
+the single-window production release runner, strips hosted-provider
+environment variables, and shares one non-private local Gemma
+media-smoke artifact across all windows.
+`build/julie_release_windows_preflight_smoke_v3/release_windows_status.json`
+records a passing preflight for all three windows with selected media
+counts of `image=13,video=3,audio=0`, `image=2,video=2,audio=0`, and
+`image=3,video=0,audio=1`, respectively. The same wrapper now writes
+`release_windows_report.json`, a public-safe aggregate report that
+combines completed window-level judge rows by `(window,event_index)`,
+recomputes bootstrap confidence intervals for win rate, relevance,
+sufficiency, noise, quality delta, and token savings, and carries
+aggregate cost fields without including message text, media bytes,
+candidate labels, or judge reason strings. The aggregate report now
+separates planned ablations from judged ablation evidence: a recorded
+`ablation_plan.json` is required to prove the run requested the
+architecture ablations, but only final judged ablation rows with
+bootstrap CIs can support the claim that a component earned its keep. On
+the preflight smoke, re-running the current stricter report as
+`release_windows_report.after_ablation_gate.json` correctly reports
+`overall_status=not_ready`, with `13` passed checks, `0` failed checks,
+and `31` pending checks because replay summaries, repeated judges,
+human-label agreement, judged ablation effects, aggregate CIs, and
+release-quality claim support have not yet been produced. This is still
+protocol readiness evidence, not release-quality evidence.
+
+The first full multi-window evidence run was launched in tmux as
+`cortext_julie_release_windows_20260609` with output under
+`build/julie_release_windows_full_20260609/`. Early fail-fast judging is
+disabled for this run (`--early-judge off`) so each frozen window can
+complete and then receive the final repeated blind local Gemma judge. At
+launch, the shared non-private media smoke artifact passed and the
+`early_text_image` production replay entered `running` state; no quality
+or token claim is made until all window summaries, repeated judge
+artifacts, human labels, ablations, and aggregate confidence intervals
+are present.
+
+During that launch, a skipped-window labeling audit found and fixed a
+harness bug before the short media windows were reached: the human-label
+and frozen retrieval-eval timeline helper was rebuilding timelines from
+`processed_text_messages` without applying `skipped_transcript_messages`
+or the timestamp-bounded media window. The final judge path already used
+a skip-aware timeline, so production judging was not changed. The
+patched helper now derives `timeline_skip_messages`,
+`timeline_max_messages`, and `timeline_media_limit` from the summary. A
+no-text sanity check on the frozen media windows reports `video_window`
+as `80` text events plus `4` media events and `audio_window` as `80`
+text events plus `1` audio and `3` image events, matching the preflight
+coverage counts.
 
 A historical 24-probe hard gate was selected after replaying the
 existing
@@ -40956,14 +41194,18 @@ frozen run passes the same streamed and final local-judge gates.
 
 # Implementation Considerations
 
-## Embedding-Only Operations
+## Embedding-First Operations
 
-In the current alpha, all online operations (scoring, boundary
-detection, retrieval, gating, graph updates) operate **only** on
-embeddings. Raw text/audio/image content is used solely to generate
-embeddings; the live loop never re-enters token space. This preserves
-modality-agnostic behavior and prevents hidden heuristics from bypassing
-knob control.
+In the current alpha, online scoring, boundary detection, gating, graph
+updates, and the primary retrieval path are embedding- and graph-first.
+Raw text/audio/image content is used to generate embeddings and to
+hydrate returned memories. The exception is a bounded text-bearing
+rescue route inside retrieval: when durable source blobs, facts, or
+labels already contain text, a token-overlap seed can admit
+source/fact/label candidates before graph expansion. That overlap blend,
+its admission floors, and the downstream source/fact boosts are all
+F/S/T-derived, so text does not bypass knob control or create a separate
+application-specific path.
 
 Retrieved memories are hydrated only after core online scoring has
 completed. Hydration is used for inspection, evaluation, and application
@@ -40985,8 +41227,9 @@ internal label or cue node.
 
 -   **Embedding resolution:** text encoder resolution currently prefers
     the AAIT/ES-AIST GGUF path when enabled, then EmbeddingGemma where
-    available. Embedding-only online operations consume the resolved
-    vectors rather than raw payloads.
+    available. Embedding-first online operations consume the resolved
+    vectors as the primary signal; bounded text overlap is limited to
+    the retrieval rescue routes described above.
 -   **Consolidation LLM:** summarization and labeling are the only
     generative steps and run only during consolidation. Cortext resolves
     a local backend internally: **Gemma 4 E2B** via
@@ -41074,6 +41317,20 @@ source-seed graph-expansion ablation. This preserves the core online
 invariant: the live loop remains embedding-based, while durable semantic
 edits happen at consolidation boundaries.
 
+Runtime reinforcement edges are also part of the long-term graph, but
+their online plasticity is bounded. `DetectMemoryUsage` maps retrieved
+embeddings back to durable memory ids and updates only pairwise
+`reinforces` edges among the current retrieved packet. The increment is
+F/S/T-derived, contextual-gain weighted, and fanout-damped; pairs
+involving the selected/used memory receive the full scaled increment,
+while unselected co-retrieval pairs receive only a small F/S/T-derived
+fraction. Reinforcement decay and pruning use the same knob surface:
+decay slows with Stability, while the prune floor is derived from the
+anchored co-retrieval increment and a Focus/Sensitivity/Stability
+evidence requirement rather than a fixed edge-weight cutoff. This
+prevents noisy compact packets from quickly saturating durable graph
+hubs while preserving reinforcement as a learnable graph signal.
+
 The current alpha stores temporality primarily at the episodic level:
 
 -   episodic memories have event timestamps,
@@ -41120,10 +41377,13 @@ three query modes:
     (`what would Cortext have answered at system time τ?`)
 
 Crucially, this preserves the alpha architecture: the live control loop
-remains embedding-only, while structured temporal reasoning is added as
-a higher-level memory product derived from consolidation outputs. The
-current branch uses those facts in the core retrieval and lifecycle path
-rather than exposing a separate fact payload in the chat example.
+remains embedding-first, with embeddings and graph state as the primary
+scoring substrate, while bounded F/S/T-derived text, fact, label, and
+source-evidence routes can admit durable candidates when that evidence
+already exists. Structured temporal reasoning is added as a higher-level
+memory product derived from consolidation outputs. The current branch
+uses those facts in the core retrieval and lifecycle path rather than
+exposing a separate fact payload in the chat example.
 
 The three user-facing knobs still shape the core behavior:
 
@@ -41259,7 +41519,12 @@ ES-style signal creation, continued-link update, hydration, and
 chat-surface metadata. Broader tag-level test slices can include
 unrelated experimental failures during active development, so this
 section reports focused verification rather than claiming the entire
-`[operations]` slice as a Soft Anchor gate.
+`[operations]` slice as a Soft Anchor gate. Soft Anchor continuity gates
+are no longer standalone literals: view blending, single-view entity
+quality, source affinity, recency/support/contradiction saturation,
+none-versus-new scoring, active TTL and non-durable decay grace,
+recent-memory retention, support admission, contradiction admission, and
+durable promotion thresholds are all named F/S/T-derived policies.
 
 ## Computational Complexity
 
@@ -41285,8 +41550,37 @@ matrix: neutral `F=0.50` maps to the previously best effective
 high-Focus retrieval point, neutral `S=0.50` maps to the previously best
 low-Sensitivity retrieval point, and neutral `T=0.50` maps to the
 previously best higher-Stability compact retrieval point, while the
-public knobs and endpoints remain unchanged. The final selected output
-is compacted by `RetrievalGraphExpandedRagMaxItems(F,T)`, currently
+public knobs and endpoints remain unchanged. Procedural seed admission,
+sparse-key breadth, fact vector/text seed breadth, same-event graph
+continuity, contradiction admission, causal drift edge weighting, label
+co-occurrence edge weight, streaming retrieval-bias gating, and STM
+hard-boundary retention are also expressed as F/S/T-derived policies
+rather than standalone thresholds. The same rule now covers the
+remaining retrieval constants that previously lived inline:
+token-overlap query/source weighting and token-length floors,
+vector-distance score shaping for sqlite-vec routes including
+fact-vector seeding, fact stale and boost mixtures including ablation
+override strength multipliers, routine-vs-recency fact adjustment,
+predicate-class routine-affinity and criticality priors, metacognitive
+TOT expansion and diversification damping, low-pressure resurfacing
+scales, durable-source support saturation, source freshness
+half-life/weight, source-confidence thresholds, contradiction penalties,
+temporal rank half-life/weight, temporal-neighbor rank decay,
+AnyFactMatch fallback support/caps, unknown-caution cutoffs,
+context-reinstatement alpha, procedural reserve/fanout, memory-affect
+scoring, shared affect-drive weighting, and constructive-reconstruction
+blending. New memory writes also supply an F/S/T-derived
+`source_reliability` prior at insertion time; the SQLite `0.7` default
+remains only a migration/backstop value, and retrieval uses the same
+prior if old rows lack explicit reliability. High Stability therefore
+preserves source confidence and low-pressure resurfacing longer, high
+Focus asks for cleaner source evidence, and high Sensitivity admits
+weaker supported routes without adding a fourth tuning surface. The
+final ranker adds a bounded temporal score from the memory event
+timestamp, so recent relevant source memories receive a recency prior
+while strongly relevant older memories can still win on embedding,
+graph, fact, and source evidence. The final selected output is compacted
+by `RetrievalGraphExpandedRagMaxItems(F,T)`, currently
 `round(lerp(20, 8, RetrievalFocusBias(F)) * lerp(1.08, 0.92, RetrievalStabilityBias(T)))`.
 This gives Cortext a RAG-style narrowing path inside the production
 operation: broad source/blob seeds first, graph/fact/temporal expansion
@@ -41301,16 +41595,19 @@ default: the current query is projected into attached label-bank vectors
 and durable `LABEL` nodes, candidate memories receive a knob-derived
 boost when their `has_label` links overlap those query labels, and the
 boost is combined with ordinary embedding, context, recency, affect,
-procedural, fact, durable-source, and graph-expansion scores. This path
-does not persist new labels and does not treat provisional labels as
-truth. It can be disabled for regression isolation with
+procedural, fact, durable-source, and graph-expansion scores. Clustered
+label selection and token-overlap label text routing are production
+policy, not opt-in experiment gates; K/M/N, route breadth, token floors,
+and admission scores all derive from F/S/T. This path does not persist
+new labels and does not treat provisional labels as truth. It can be
+disabled for regression isolation with
 `CORTEXT_DISABLE_PRECONSOLIDATED_LABEL_GRAPH=1`; otherwise its weights,
-admission floors, label breadth, source-seed breadth, and degree damping
-derive from F/S/T. Retrieval rank is preserved through hydration, and
-linked-source hydration from internal routing nodes is capped by the
-F/T-derived compact item limit, so applications consume the
-production-ranked compact LTM surface rather than a wide display
-expansion.
+admission floors, label breadth, source-seed breadth, degree damping,
+and label-relation fanout derive from F/S/T. Retrieval rank is preserved
+through hydration, and linked-source hydration from internal routing
+nodes is capped by the F/T-derived compact item limit, so applications
+consume the production-ranked compact LTM surface rather than a wide
+display expansion.
 
 The live short-term graph memory surface mirrors the same separation
 between proposal and commitment. On ingress, STM is one bounded
@@ -41332,9 +41629,90 @@ update **10.208 µs**. Those numbers justify preserving STM as a small
 ordered substrate, but STM readout does not currently change production
 retrieval ranking.
 
-Recursive graph expansion adds overhead but is bounded by `depth` and
-`branching_factor`, effectively constant-time relative to `N`. Total
-complexity per stimulus is `O(log N)` with indexing.
+Working-memory maintenance uses the same knob discipline: benefit
+scoring, base strength, passive strength flooring, cost saturation,
+rehearsal boost increments, eviction recency decay, and capacity
+pressure now derive from F/S/T rather than fixed local constants. Signal
+filtering, threshold score-history retention/rate shape, boundary
+normalization and inactivity pressure, accumulator drift gain, interrupt
+candidate scoring/refractory scaling, shallow consolidation label
+fanout, consolidation tag weighting, fact supersession margin, and deep
+consolidation evidence budgets now follow the same rule. Consolidation
+cluster caps, STM/LTM source-span breadth, relation-endpoint repair
+strictness, label-refinement prompt counts, memory trace initialization,
+trace half-life ratios, trace coupling, and trace mixture weights are
+likewise named F/S/T policies. The default midpoint remains close to the
+previous behavior, but release tuning can now move these policies
+through the three public knobs.
+
+A subsequent hardening pass applied the same rule to adaptive blender
+cadence and RLS forgetting, predictive pre-activation horizons/decays,
+reconsolidation drift and ripple gates, emotional cascade floors,
+reinforcement fallback support, graph sequential-edge temporal
+weighting, stored-trace fallbacks, and Soft Anchor information scoring.
+A follow-up scalar-policy audit moved the same class of hidden constants
+for focus/stability bootstrap priors, affect threshold gain,
+rarity/utility metric scaling, retrieval-competition
+winner/radius/recovery policy, working-memory strength cap and initial
+slot strength, influence-feedback sustain/weighting, threshold high-tail
+quantile, primary reconsolidation drift, and consolidation
+`derived_from` source-edge weight into `core::knobs`. These values
+previously appeared as local calibration constants inside operation
+implementations; they are now named F/S/T-derived policies in the core
+knob layer so the production midpoint remains auditable while
+off-midpoint sweeps can move the behavior without adding new settings.
+
+The same audit also moved remaining neutral behavior fallbacks out of
+operation files and into named knob policies: missing label/summary
+embeddings now use `LabelSalienceFallback(F,S,T)`, absent working-memory
+task context uses `WMTaskRelevanceFallback(F,S,T)`, unknown bootstrap
+blend metrics use `BlendBootstrapFallback(F,S,T)`, and synaptic-tagging
+surprisal/arousal thresholds, tag window, and tag decay are supplied by
+`SynapticTaggingPolicyForKnobs(F,S,T)`. The neuromodulator base values,
+stream-statistic gains, retrieval-pressure divisor, oscillation rate,
+and encode-bias blend are likewise supplied by
+`NeuromodulatorPolicyForKnobs(F,S,T)`, and serial-position middle-zone
+suppression uses `SerialMiddleMultiplierFloor(F,S)` instead of an
+operation literal. These helpers preserve the neutral midpoint behavior
+while making the off-midpoint response visible to tests and release
+ablations. Processor state restore uses the same rule: empty state rows,
+single-signal state rows, and per-field legacy placeholders are seeded
+from the active knobs before learned persisted values overlay them, so a
+stale SQLite default cannot masquerade as learned policy. Working-memory
+reload also uses the same F/S/T-derived passive strength floor as live
+working-memory maintenance, so an active WM slot is not dropped merely
+because elapsed wall time would decay it below zero on restart. New
+durable and working-memory rows also supply explicit F/S/T-derived
+scalar `strength`, `stability`, and source-reliability baselines
+alongside the multi-timescale trace vector, leaving schema defaults as
+migration backstops rather than live policy.
+
+Recursive graph expansion adds overhead but is bounded by F/S/T-derived
+depth, per-node fanout, row, label, fact, and durable-source limits.
+Fact evidence expansion now orders by support and caps rows by
+matched-fact count; stale fact expansion is similarly capped by
+confidence, support, and recorded time. Durable source text routing
+reads only a knob-derived byte slice per source blob, and durable-source
+label/association scoring caps source links by candidate count. The
+vector lookup path is indexed and sublinear when the configured vector
+index is available; the SQLite schema also carries ordinary lookup
+indexes for signal embedding fallbacks, kind/source memory lookup,
+source/time temporal expansion, last-access recency views, label-created
+recency scans, fact-cache embedding joins, and edge-type-first
+association traversal so realtime retrieval does not depend on table
+scans as the durable graph grows. Constructive-reconstruction lookup is
+candidate-scoped through the latest reconstruction for each candidate
+memory rather than a global `memory_reconstructions` materialization
+inside every seed query. Text/fact/label/durable-source rescue routes
+are bounded SQL scans or indexed lookups rather than unbounded table
+walks. A follow-up fanout audit remains open for helper paths where only
+the final output is capped or where payload hydration can still be
+expensive: sparse-key expansion, temporal-anchor neighbor scans,
+multi-hop label/cue relation joins, and whole-memory signal-blob
+hydration. The practical per-stimulus cost is therefore “indexed seed
+lookup plus bounded expansion”, not pure `O(log N)`; latency and
+throughput claims should be read from the benchmark runs for the active
+storage/index configuration.
 
 ## Memory Footprint
 
@@ -41485,16 +41863,18 @@ On cold start (no persisted state), initialize retained state as follows
     `drift_acc_pacing = 0`, `x_last_check = unset` (μ_acc),
     `prev_x = unset` (μ_acc).
 
--   **Per-memory defaults (on insert):** `strength = 1`,
-    `trace_fast = 0`, `trace_med = 0`, `trace_slow = 0`,
-    `trace_ultra = 0`, `use_frequency = 0`, `stability = 1`,
-    `connectivity = 0`, `drift_mag = 0`, `influence = 0`,
-    `sustained_influence = 0`, `contextual_gain = 0`, `redundancy = 0`,
-    `pre_activation = 0`, `lability_state = 0`, `suppression_count = 0`,
-    `suppression = 0`, `flashbulb = 0`, `s_emotion_max = 0`,
-    `s_arousal_avg = 0`, `boundary_score = 0`, `tagged = false`,
-    `tag_expires_at = 0`, `context = 0_vector`,
-    `source_model = {origin: 'unknown', reliability: 0.5, contradiction_count: 0, last_verified_ts: 0}`.
+-   **Per-memory defaults (on insert):**
+    `strength = memory_initial_strength(F,S,T)`,
+    `trace_* = memory_initial_trace_policy(F,S,T)`, `use_frequency = 0`,
+    `stability = memory_initial_stability(F,S,T)`, `connectivity = 0`,
+    `drift_mag = 0`, `influence = 0`, `sustained_influence = 0`,
+    `contextual_gain = 0`, `redundancy = 0`, `pre_activation = 0`,
+    `lability_state = 0`, `suppression_count = 0`, `suppression = 0`,
+    `flashbulb = 0`, `s_emotion_max = 0`, `s_arousal_avg = 0`,
+    `boundary_score = 0`, `tagged = false`, `tag_expires_at = 0`,
+    `context = 0_vector`,
+    `source_model = {origin: source_origin(signal), reliability: source_reliability_0(F,S,T), contradiction_count: 0, last_verified_ts: 0}`.
+    SQLite defaults remain migration/backstop values for legacy rows.
     Evidence packets live in ordered `signals` rows, and the
     constructive-recall ledger starts empty until the initial
     reconstruction row is appended in `memory_reconstructions`.

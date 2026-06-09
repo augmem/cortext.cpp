@@ -34,6 +34,8 @@ ApplySerialPositionMultiplier::Execute (OperationContext &context, Transaction &
   // Algorithm 26 zone modulation parameters
   const double von_restorff = context.GetSerialVonRestorffMultiplier ();
   const double middle_suppression = context.GetSerialMiddleSuppression ();
+  const double middle_floor = core::SerialMiddleMultiplierFloor (
+      config.focus, config.sensitivity);
   // Note: distinctiveness_threshold is used internally by SerialDetermineZone
 
   // Use signal-level rarity as proxy for item distinctiveness
@@ -114,7 +116,7 @@ ApplySerialPositionMultiplier::Execute (OperationContext &context, Transaction &
           // Middle suppression: reduce salience of interference zone items
           // middle_suppression = lerp(0.8, 0.5, S) × (1 − F)
           // Apply as (1 - suppression) to reduce the multiplier
-          mult = std::max (0.1, 1.0 - middle_suppression);
+          mult = std::max (middle_floor, 1.0 - middle_suppression);
           break;
         }
 

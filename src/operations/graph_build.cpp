@@ -210,7 +210,7 @@ void
 BuildCausalEdges (Transaction &tx,
                   const std::map<int, std::vector<MemoryData>> &clusters,
                   double drift_threshold, double implies_threshold,
-                  long long now_ts)
+                  double drift_weight_scale, long long now_ts)
 {
   for (const auto &[cluster_id, memories] : clusters)
     {
@@ -228,8 +228,8 @@ BuildCausalEdges (Transaction &tx,
               = memories[i + 1].embedding - memories[i].embedding;
           double drift_mag = drift.norm ();
 
-          const double weight01
-              = core::Clamp (drift_mag / 2.0, 0.0, 1.0);
+          const double weight01 = core::Clamp (
+              drift_mag / std::max (drift_weight_scale, 1e-6), 0.0, 1.0);
           if (drift_mag > drift_threshold)
             {
               // Create causes edge (directional: earlier -> later)
@@ -260,7 +260,8 @@ BuildCausalEdges (Transaction &tx,
 void
 BuildSequentialEdges (Transaction &tx,
                       const std::map<int, std::vector<MemoryData>> &clusters,
-                      double tau_s, long long now_ts)
+                      double focus, double sensitivity, double stability,
+                      double same_event_boundary_threshold, long long now_ts)
 {
   for (const auto &[cluster_id, memories] : clusters)
     {
@@ -275,10 +276,8 @@ BuildSequentialEdges (Transaction &tx,
           const auto &m_j = memories[i + 1];
           const double gap_s = std::max (
               0.0, static_cast<double> (m_j.created_at - m_i.created_at) / 1000.0);
-          const double w_seq = core::Clamp (
-              std::exp (-gap_s / std::max (tau_s, 1e-6))
-                  * (1.0 - core::Clamp (m_j.boundary_score, 0.0, 1.0)),
-              0.0, 1.0);
+          const double w_seq = core::GraphBuildSequentialWeight (
+              focus, sensitivity, stability, gap_s, m_j.boundary_score);
           Add (tx,
                "INSERT OR REPLACE INTO associations "
                "(source_memory_id, target_memory_id, edge_type, weight, "
@@ -291,7 +290,7 @@ BuildSequentialEdges (Transaction &tx,
                "last_reinforced) "
                "VALUES (?, ?, 'prev_in_episode', ?, ?)",
                { m_j.memory_id, m_i.memory_id, w_seq, now_ts });
-          if (m_j.boundary_score < 0.3)
+          if (m_j.boundary_score < same_event_boundary_threshold)
             {
               Add (tx,
                    "INSERT OR REPLACE INTO associations "
@@ -350,18 +349,18 @@ BuildContradictionEdges (Transaction &tx,
 /// @brief Apply decay to reinforcement edges.
 /// Decays edge weights by decay_rate factor.
 void
-DecayReinforcementEdges (Transaction &tx, double decay_rate)
+DecayReinforcementEdges (Transaction &tx, double decay_rate,
+                         double prune_threshold)
 {
   Add (tx,
        "UPDATE associations SET weight = weight * ?1 "
        "WHERE edge_type = 'reinforces'",
        { decay_rate });
 
-  // Remove edges that have decayed below minimum threshold
   Add (tx,
        "DELETE FROM associations "
-       "WHERE edge_type = 'reinforces' AND weight < 0.1",
-       {});
+       "WHERE edge_type = 'reinforces' AND weight < ?1",
+       { prune_threshold });
 }
 
 } // namespace
@@ -383,9 +382,18 @@ BuildGraphFromConsolidation::Execute (OperationContext &context, Transaction &tx
   const double similar_threshold = core::SimilarToThreshold (cfg.focus);
   const double causal_drift_threshold = core::CausalDriftThreshold (cfg.stability);
   const double implies_drift_threshold = core::ImpliesDriftThreshold (cfg.stability);
-  const double contradiction_threshold = core::ContradictionThreshold ();
+  const double causal_drift_weight_scale
+      = core::CausalDriftWeightScale (cfg.stability);
+  const double contradiction_threshold = core::ContradictionThreshold (
+      cfg.focus, cfg.sensitivity, cfg.stability);
   const double reinforcement_decay = core::ReinforcementDecay (cfg.stability);
-  const double tau_seq = core::Lerp (10.0, 60.0, cfg.stability);
+  const double reinforcement_prune_threshold
+      = core::ReinforcementPruneThreshold (cfg.focus, cfg.sensitivity,
+                                           cfg.stability);
+  const double same_event_boundary_threshold
+      = core::GraphBuildSameEventBoundaryThreshold (cfg.focus,
+                                                    cfg.sensitivity,
+                                                    cfg.stability);
 
   // V2 schema: Nodes are MEMORIES, edges are ASSOCIATIONS
   // No need to create graph_nodes or graph_edges tables - using V2 tables
@@ -403,7 +411,8 @@ BuildGraphFromConsolidation::Execute (OperationContext &context, Transaction &tx
       // 3) Causal edges: memory -> memory based on temporal drift
       // Creates 'causes' edges for significant semantic drift over time
       BuildCausalEdges (tx, clusters, causal_drift_threshold,
-                        implies_drift_threshold, now_ts);
+                        implies_drift_threshold, causal_drift_weight_scale,
+                        now_ts);
 
       // 4) Contradiction edges: memory <-> memory for opposing semantics
       // Creates 'contradicts' edges for strong negative similarity
@@ -412,14 +421,17 @@ BuildGraphFromConsolidation::Execute (OperationContext &context, Transaction &tx
       // 5) Sequential edges: preserve episode order
       if (cfg.sequential_edges_enabled)
         {
-          BuildSequentialEdges (tx, clusters, tau_seq, now_ts);
+          BuildSequentialEdges (tx, clusters, cfg.focus, cfg.sensitivity,
+                                cfg.stability,
+                                same_event_boundary_threshold, now_ts);
         }
     }
 
   // 6) Decay reinforcement edges (created during retrieval)
   if (cfg.reinforcement_enabled)
     {
-      DecayReinforcementEdges (tx, reinforcement_decay);
+      DecayReinforcementEdges (tx, reinforcement_decay,
+                               reinforcement_prune_threshold);
     }
 
   // Count associations for logging
