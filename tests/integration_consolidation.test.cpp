@@ -1108,8 +1108,8 @@ TEST_CASE ("Streaming pacing blocks retrieval below threshold",
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
   cortext::testing::RequireEncoder (cfg);
-  cfg.sensitivity = 0.0; // threshold = 0.5 (highest)
-  cfg.focus = 0.0;       // max_wait = 2.0 (highest)
+  cfg.sensitivity = 0.0; // highest StreamingPacingThreshold(...)
+  cfg.focus = 0.0;       // highest MaxWaitDrift(...)
 
 
   // Set drift below threshold
@@ -1136,7 +1136,7 @@ TEST_CASE ("Streaming pacing triggers above threshold",
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
   cortext::testing::RequireEncoder (cfg);
-  cfg.sensitivity = 1.0; // threshold = 0.1 (lowest)
+  cfg.sensitivity = 1.0; // lowest StreamingPacingThreshold(...)
   cfg.focus = 0.5;
 
 
@@ -1163,8 +1163,8 @@ TEST_CASE ("Streaming pacing forces check on max_wait_drift",
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
   cortext::testing::RequireEncoder (cfg);
-  cfg.sensitivity = 0.0; // threshold = 0.5
-  cfg.focus = 1.0;       // max_wait = 0.5
+  cfg.sensitivity = 0.0; // threshold from StreamingPacingThreshold(...)
+  cfg.focus = 1.0;       // max_wait from MaxWaitDrift(...)
 
 
   // Set drift above max_wait but below threshold

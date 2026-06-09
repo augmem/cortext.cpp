@@ -1675,16 +1675,19 @@ TEST_CASE ("STM relabel source-span floor admits grounded labels when extractor 
       "SELECT source_id FROM memories WHERE kind = 'LABEL' "
       "ORDER BY source_id",
       {});
-  REQUIRE (label_rows.size () == 3);
   std::set<std::string> labels;
   for (const auto &row : label_rows)
     {
       labels.insert (std::any_cast<std::string> (row.at ("source_id")));
-    }
+  }
+  CAPTURE (labels);
+  REQUIRE (label_rows.size () == 4);
   REQUIRE (labels.count ("maria") == 1);
   REQUIRE (labels.count ("bailey") == 1);
   REQUIRE (labels.count ("river park") == 1);
+  REQUIRE (labels.count ("maria met bailey at river park") == 1);
   REQUIRE (labels.count ("7 days") == 0);
+  REQUIRE (labels.count ("delivery") == 0);
 
   auto audit_rows = store->Execute (
       "SELECT extraction_label_candidate_count, source_span_candidate_count, "
@@ -1703,38 +1706,38 @@ TEST_CASE ("STM relabel source-span floor admits grounded labels when extractor 
            == 0);
   REQUIRE (cortext::testing::GetInt64 (
                audit_rows[0], "source_span_candidate_count")
-           == 3);
+           == 4);
   REQUIRE (cortext::testing::GetInt64 (
                audit_rows[0], "labels_inserted_from_current_floor")
            == 0);
   REQUIRE (cortext::testing::GetInt64 (
                audit_rows[0], "labels_inserted_from_source_span_floor")
-           == 3);
+           == 4);
   REQUIRE (cortext::testing::GetInt64 (
                audit_rows[0], "label_cooccurrence_edges_created")
-           == 3);
+           == 6);
   REQUIRE (cortext::testing::GetInt64 (
                audit_rows[0], "relation_edges_created")
-           == 3);
+           == 6);
   REQUIRE (cortext::testing::GetInt64 (audit_rows[0], "refined_label_count")
-           == 3);
+           == 4);
   REQUIRE (cortext::testing::GetInt64 (
                audit_rows[0], "refined_labels_in_selected_evidence")
-           == 3);
+           == 4);
   REQUIRE (cortext::testing::GetInt64 (
                audit_rows[0], "durable_ltm_nodes_with_source")
-           == 3);
+           == 4);
   REQUIRE (cortext::testing::GetInt64 (
                audit_rows[0], "durable_ltm_nodes_missing_source")
            == 0);
   REQUIRE (cortext::testing::GetInt64 (
                audit_rows[0], "durable_ltm_source_link_pairs")
-           == 3);
+           == 4);
 
   auto cooccurrence_rows = store->Execute (
       "SELECT COUNT(*) AS c FROM associations WHERE edge_type = 'co_occurs'",
       {});
-  REQUIRE (cortext::testing::GetInt64 (cooccurrence_rows[0], "c") == 3);
+  REQUIRE (cortext::testing::GetInt64 (cooccurrence_rows[0], "c") == 6);
 }
 
 TEST_CASE ("STM relabel source-span complement enriches labels after extractor meets floor",

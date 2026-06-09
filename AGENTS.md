@@ -318,7 +318,7 @@ Do not make direct repo edits outside a GSD workflow unless the user explicitly 
 
 ## Repository-Specific Notes
 - Behavior should derive from the three knobs (F/S/T) wherever possible.
-- Consolidation/labeling uses gemma-3n-e2b via LiteRT; embeddings use the configured text encoder.
+- Consolidation/labeling uses Gemma 4 E2B by default; embeddings use the configured text encoder.
 - Do not modify the public API surface (public headers in `include/`, C API) without explicit approval.
 
 ## SML / stateforward Rules

@@ -103,13 +103,15 @@ Each stored embedding represents a memory representative (e_rep from @sec-rep-em
 score_consolidate(m) = weight_strength × strength(m) −
                         weight_redundancy × redundancy(m) +
                         weight_connectivity × connectivity(m) +
-                        weight_stability × stability(m)
+                        weight_stability × stability(m) +
+                        weight_tag × active_tag_strength(m)
 ```
 
 Weights derive from knobs:
 
 ```
 weight_strength = T; weight_redundancy = F; weight_connectivity = S; weight_stability = T
+weight_tag = ConsolidationCandidateTagWeight(F,S,T)
 ```
 
 Low-scoring memories are marked for merging.
@@ -118,7 +120,7 @@ Low-scoring memories are marked for merging.
 
 Consolidation proceeds via **generative replay** rather than one-shot merges. Representative episodes are re-encoded and used to update semantic structures, reducing drift and preserving detail.
 
-**Summarization + labeling engine (deep mode):** Consolidation is the only stage that invokes a generative model. Deep mode resolves a local backend internally: **Gemma 4 E2B** through `third_party/litert_lm`, **LFM2/LFM2.5** through `llama.cpp` GGUFs, or a **mixed** path that uses Gemma 4 for summarization and a Liquid GGUF for extraction. Auto resolution now requires the local Gemma 4 E2B LiteRT model. The Liquid resolver remains available by explicit override and prefers `LFM2.5-350M-GGUF` for extraction and `LFM2.5-1.2B-Instruct-GGUF` for summarization when present, defaulting to the local `Q4_K_M` checkpoints and accepting other bundled GGUF quantizations as fallbacks. All other operations remain embedding-only. **There is no extractive fallback**: if no deep backend is available, deep consolidation raises an error rather than silently degrading. Summarization now creates compact retrieval-surface summary nodes when the summarizer is available, while destructive eviction remains storage-gated. After the prompt-technique ablations in [Section 9](#sec-extractor-prompt-ablation) and [Section 9](#sec-summarizer-prompt-ablation), the default local Liquid extraction prompt is now a short **few-shot durable** prompt, and the default local Liquid summarization prompt is now a **transcript few-shot** prompt for the override path. The production default relies on Gemma 4 for multimodal label refinement and summarization.
+**Summarization + labeling engine (deep mode):** Consolidation is the only stage that invokes a generative model. Deep mode resolves a local backend internally: **Gemma 4 E2B** through `third_party/litert_lm`, **LFM2/LFM2.5** through `llama.cpp` GGUFs, or a **mixed** path that uses Gemma 4 for summarization and a Liquid GGUF for extraction. Auto resolution now requires the local Gemma 4 E2B LiteRT model. The Liquid resolver remains available by explicit override and prefers `LFM2.5-350M-GGUF` for extraction and `LFM2.5-1.2B-Instruct-GGUF` for summarization when present, defaulting to the local `Q4_K_M` checkpoints and accepting other bundled GGUF quantizations as fallbacks. Other online operations remain embedding-first and graph-first; production retrieval can also use bounded F/S/T-derived text, fact, label, and source-evidence routes when durable evidence already exists. **There is no extractive fallback**: if no deep backend is available, deep consolidation raises an error rather than silently degrading. Summarization now creates compact retrieval-surface summary nodes when the summarizer is available, while destructive eviction remains storage-gated. After the prompt-technique ablations in [Section 9](#sec-extractor-prompt-ablation) and [Section 9](#sec-summarizer-prompt-ablation), the default local Liquid extraction prompt is now a short **few-shot durable** prompt, and the default local Liquid summarization prompt is now a **transcript few-shot** prompt for the override path. The production default relies on Gemma 4 for multimodal label refinement and summarization.
 
 ## Shallow Consolidation (Embedding‑Only)
 
@@ -131,8 +133,8 @@ Shallow consolidation is an explicit, embedding‑only phase for fast labeling a
 Shallow labeling uses knob‑derived limits and thresholds:
 
 ```
-max_labels_per_cluster = round(lerp(2, 6, S̃) × lerp(1.0, 0.7, F̃))
-label_attach_threshold = clamp(lerp(0.30, 0.60, F̃) × lerp(1.0, 1.1, T), 0.15, 0.95)
+max_labels_per_cluster = ShallowConsolidationMaxLabels(F,S,T)
+label_attach_threshold = ShallowConsolidationLabelMinSimilarity(F,S,T)
 ```
 
 For each cluster centroid, we compute cosine similarity to the attached static label-bank vectors and to any durable dynamic labels already produced by consolidation, retain candidates above the threshold, and attach the top‑K labels by similarity.
@@ -195,9 +197,10 @@ summary.metadata.sources = [m.id for m in cluster_i]
 To keep consolidation latency bounded, summarization input is capped by knob‑derived limits. Source texts are ranked by similarity to the cluster centroid and truncated:
 
 ```
-max_source_texts(F̃) = round(lerp(3, 8, F̃))
-max_text_chars(F̃)  = round(lerp(300, 900, F̃))
-max_total_chars(T)  = round(lerp(1200, 3600, T))
+budget = ConsolidationSummaryEvidenceBudgetForKnobs(F,S,T)
+max_source_texts = budget.max_source_texts
+max_text_chars   = budget.max_text_chars
+max_total_chars  = budget.max_total_chars
 source_texts = topk_by_cosine(cluster_texts, k=max_source_texts)
 truncate each text to max_text_chars and total to max_total_chars
 size decoder budget from capped input length; do not hard-trim stored summary text
@@ -376,21 +379,25 @@ Retrieval combines vector similarity, **index-store pattern completion**, tempor
 
 ```
 # Query and re-rank using current memory centroid + recent context
-μ_ctx ← mean(recent_context_embeddings)  # recent context window (embedding-only)
-λ_q(F) = lerp(0.25, 0.05, F)
+μ_ctx ← mean(recent_context_embeddings)  # recent context query blend
+λ_q(F,S,T) = RetrievalContextMix(F,S,T)  # bounded STM recency cue
 q ← l2_normalize((1 − λ_q) × μ_acc + λ_q × μ_ctx)  # cached pre-reset
 q_ctx ← c_t               # temporal context from @sec-temporal-context
-if |memory_stream| == 0:
-    return []  # cold-start fallback (no retrieval candidates)
 
-kNN_size(F) = round(lerp(96, 8, F))
-results_vec ← topK(vector_search(q, k=kNN_size(F)))
+kNN_size(F) = RetrievalMaxResults(F)
+seed_search_k = RetrievalSeedSearchK(F,S,T,kNN_size)
+results_vec ← topK(vector_search(q, k=seed_search_k))
+score_vec(r) = RetrievalVectorDistanceScore(r.distance,F,S,T)
 seed_vec ← [r.id for r in results_vec]
-summary_k(F̃,S̃,T) = round(lerp(2, 6, S̃) × lerp(1.0, 0.75, F̃) × lerp(1.0, 0.85, T))
+summary_k = RetrievalSummaryLabelSeedCount(F,S,T)
+fact_k = RetrievalFactVectorSeedCount(F,S,T)
 static_label_seeds ← topK(attached_label_bank_vec, q, k=summary_k)
 dynamic_label_seeds ← topK(durable_label_and_association_state, q, k=summary_k)
+fact_seeds ← topK(fact_cache_vec, q, k=fact_k) ∪ bounded_fact_text_route(q)
+source_text_seeds ← bounded_durable_source_text_route(q)
 seed_idx ← index_store.lookup(sparse_key(q))  # exact-key in current runtime
-seed_nodes ← union(seed_vec, static_label_seeds, dynamic_label_seeds, seed_idx)
+seed_nodes ← union(seed_vec, static_label_seeds, dynamic_label_seeds,
+                   fact_seeds, source_text_seeds, seed_idx)
 
 if |seed_nodes| == 0 OR graph is empty:
     return results_vec  # deterministic fallback, skip expansion
@@ -398,10 +405,10 @@ if |seed_nodes| == 0 OR graph is empty:
 expanded_nodes ← graph.traverse(seed_nodes,
                                 depth=graph_depth(T),
                                 min_edge_weight=min_edge_weight(F),
+                                row_limit=RetrievalGraphExpansionRowLimit(F,S,T,k),
                                 edge_types=associations_above_threshold)
 combined ← union(seed_nodes, expanded_nodes)
-min_assoc(F̃,T) = round(lerp(3, 1, F̃) × lerp(1.0, 0.85, T))
-min_label(F̃,S̃) = round(lerp(0, 3, S̃) × lerp(1.0, 0.85, F̃))
+{min_assoc,min_label} = RetrievalGraphExpansionEvidenceCounts(F,S,T)
 if min_assoc > 0:
     combined ← combined ∪ {assoc | edge_type='derived_from' AND target∈combined}
 if min_label > 0:
@@ -410,19 +417,19 @@ min_edge_weight(F) = lerp(0.08, 0.40, F)
 dup_thresh = lerp(0.985, 0.95, F) × (0.98 + 0.02T)
 eligible ← {m ∈ combined | m.created_at < write_exclusion_ts}
 eligible ← {m ∈ eligible | max_{w∈WM} cos(m.embedding, w) < dup_thresh}
-eligible ← {m ∈ eligible | source_confidence(m) ≥ lerp(0.15, 0.45, T)}
+seed_only_source_confidence = RetrievalSeedFallbackSourceConfidence(F,S,T)
+source_backed_floor = RetrievalSourceBackedBoostFloor(F,S,T)
+eligible ← {m ∈ eligible | source_confidence(m) ≥ RetrievalSourceConfidenceThreshold(F,S,T,storage_pressure)}
 
 # Diversified re-rank (MMR-style) with context reinstatement
 w_rel_raw = lerp(0.65, 0.94, F) × lerp(1.0, 0.85, S) × lerp(1.0, 0.90, T)
 w_div_raw = lerp(0.35, 0.06, F) × lerp(0.75, 1.15, S) × lerp(0.85, 0.65, T)
 [w_rel, w_div] = normalize([w_rel_raw, w_div_raw])
-w_ctx = lerp(0.15, 0.35, F) × lerp(1.0, 0.85, S)
-w_proc = lerp(0.10, 0.25, S)
+[w_ctx,w_proc,label_boost] = RetrievalCandidateBlendScoringWeights(F,S,T)
 w_emotion = lerp(0.0, 0.12, S_affect)
 affect_gain(S) = lerp(1.0, 2.4, S_affect)
-weights_aff_raw = [lerp(0.30, 0.55, S_affect), lerp(0.30, 0.55, S_affect), lerp(0.10, 0.20, S_affect)]
-[w_arousal, w_emotion_raw, w_salience] = normalize(weights_aff_raw)
-affect_drive = clamp(affect_gain(S) × (w_arousal × arousal + w_emotion_raw × emotion_intensity + w_salience × salience), 0, 1)
+[w_arousal, w_affect_emotion, w_salience] = AffectDriveWeights(S)
+affect_drive = clamp(affect_gain(S) × (w_arousal × arousal + w_affect_emotion × emotion_intensity + w_salience × salience), 0, 1)
 weights_mem_raw = [lerp(0.60, 0.80, S), lerp(0.20, 0.40, S)]
 [w_mem_emotion, w_mem_arousal] = normalize(weights_mem_raw)
 
@@ -432,6 +439,9 @@ while |selected| < k AND |eligible| > 0:
             w_rel × max(0, cos(q, m.embedding)) +
             w_ctx × max(0, cos(q_ctx, m.context)) +
             w_proc × max(0, proc_sim(m)) +
+            label_boost × durable_label_overlap(q,m) +
+            fact_boost(F,S,T,m) +
+            temporal_rank_weight(F,S,T) × temporal_rank_score(m) +
             w_emotion × affect_drive × (w_mem_emotion × emotional_intensity(m) + w_mem_arousal × s_arousal_avg(m)) −
             w_div × max_{s∈selected} max(0, cos(m.embedding, s.embedding))
          ]
@@ -442,7 +452,7 @@ return selected
 
 Graph expansion uses recursive traversal with depth limits to find related context that pure vector search might miss. Using the memory centroid maintains consistency between vector search and graph expansion results.
 
-Static label seeds come from the attached read-only SQLite label bank through sqlite-vec search. Dynamic label, association, fact, and summary seeds come from the ordinary durable memory graph produced by consolidation. The runtime no longer copies the static label bank into user memory tables or hydrates the entire bank into an in-memory `summary_cache`; the retrieval path remains embedding-only while keeping the static bank as an attached searchable object.
+Static label seeds come from the attached read-only SQLite label bank through sqlite-vec search. Dynamic label, association, fact, and summary seeds come from the ordinary durable memory graph produced by consolidation. The runtime no longer copies the static label bank into user memory tables or hydrates the entire bank into an in-memory `summary_cache`; production retrieval is embedding-first with bounded F/S/T-derived label, fact, text, durable-source, graph, and temporal routes layered onto the same compact candidate surface.
 
 For affective gain in retrieval, we use a lighter bias \(S_{affect} = \mathrm{BiasMid}(S, -0.06)\) to preserve mid‑range affect modulation.
 

@@ -51,10 +51,12 @@ void
 ApplySensitivityFeedback::Execute (OperationContext &context, Transaction &tx) const
 {
   auto &p_ctx = context.GetProcessorContext ();
+  const auto &cfg = context.GetConfig ();
 
-  const double eta = constants::kEtaBase;
+  const double eta = core::SensitivityFeedbackNoveltyGain (
+      cfg.focus, cfg.sensitivity, cfg.stability);
 
-  const int window = static_cast<int> (core::NCtx (context.GetConfig ().stability));
+  const int window = static_cast<int> (core::NCtx (cfg.stability));
   const auto &retrieved = context.GetRetrievedMemoryEmbeddings ();
 
   double redundancy_mean = 0.0;

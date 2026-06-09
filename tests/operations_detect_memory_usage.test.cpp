@@ -3,11 +3,13 @@
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 #include <cortext/core/sparse.hpp>
+#include <cortext/core/knobs.hpp>
 #include <cortext/operations/detect_memory_usage.hpp>
 #include <cortext/processor.hpp>
 #include <cortext/processor/operation_context.hpp>
 #include <cortext/store/sqlite_store.hpp>
 
+#include <any>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -34,6 +36,28 @@ MakeSignal (uint64_t ts)
   s.timestamp = ts;
   s.source_id = "test";
   return s;
+}
+
+double
+AnyToDouble (const std::any &v)
+{
+  if (v.type () == typeid (double))
+    {
+      return std::any_cast<double> (v);
+    }
+  if (v.type () == typeid (float))
+    {
+      return static_cast<double> (std::any_cast<float> (v));
+    }
+  if (v.type () == typeid (long long))
+    {
+      return static_cast<double> (std::any_cast<long long> (v));
+    }
+  if (v.type () == typeid (int))
+    {
+      return static_cast<double> (std::any_cast<int> (v));
+    }
+  return 0.0;
 }
 
 double
@@ -76,9 +100,59 @@ RunProceduralUpdate (double neuromod_da, bool disable_scale)
   op.Execute (ctx, *tx);
   tx->Commit ();
 
-  const int k_key = core::SparseKeySize (cfg.focus);
+  const int k_key
+      = core::SparseKeySize (cfg.focus, cfg.sensitivity, cfg.stability);
   const std::string key = core::SparseKey (signal.embedding, k_key);
   return pctx.procedural_store[key][7LL];
+}
+
+double
+RunReinforcementUpdate (double focus, double sensitivity, double stability,
+                        bool selected)
+{
+  auto unique_store = SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<Store> (std::move (unique_store));
+  cortext::testing::InitializeCoreSchema (*store);
+
+  cortext::testing::SeedEmbeddingV2 (*store, 7LL, MakeVec (), 1);
+  cortext::testing::SeedEmbeddingV2 (*store, 8LL, MakeVec (), 1);
+  cortext::testing::SeedMemoryV2 (*store, 7LL, 7LL, "test", "LONG_TERM", 1.0,
+                                  1);
+  cortext::testing::SeedMemoryV2 (*store, 8LL, 8LL, "test", "LONG_TERM", 1.0,
+                                  1);
+
+  ProcessorContext pctx;
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  cfg.focus = focus;
+  cfg.sensitivity = sensitivity;
+  cfg.stability = stability;
+  cfg.reinforcement_enabled = true;
+
+  auto signal = MakeSignal (10);
+  OperationContext ctx (signal, pctx, cfg, store.get ());
+  ctx.SetInterruptAllowed (selected);
+  if (selected)
+    {
+      ctx.SetSelectedCandidateId (7LL);
+    }
+  ctx.SetRetrievedMemoryEmbeddings (
+      std::unordered_map<long long, Eigen::VectorXf>{
+        { 7LL, MakeVec () },
+        { 8LL, MakeVec () } });
+
+  operations::DetectMemoryUsage op;
+  auto tx = store->Begin ();
+  op.Execute (ctx, *tx);
+  tx->Commit ();
+
+  auto rows = store->Execute (
+      "SELECT weight FROM associations "
+      "WHERE source_memory_id = 7 AND target_memory_id = 8 "
+      "AND edge_type = 'reinforces'",
+      {});
+  REQUIRE (rows.size () == 1);
+  return AnyToDouble (rows[0].at ("weight"));
 }
 
 } // namespace
@@ -92,4 +166,28 @@ TEST_CASE ("High DA increases procedural value update gain",
 
   REQUIRE (high_da > low_da);
   REQUIRE (disabled == Catch::Approx (0.8).margin (1e-6));
+}
+
+TEST_CASE ("Reinforcement edge update is knob-derived",
+           "[operations][detect_memory_usage][reinforcement]")
+{
+  const double mid_selected
+      = RunReinforcementUpdate (0.5, 0.5, 0.5, true);
+  REQUIRE (mid_selected
+           == Catch::Approx (
+               core::ReinforcementCoRetrievalStep (0.5, 0.5, 0.5))
+                  .margin (1e-6));
+
+  const double mid_unselected
+      = RunReinforcementUpdate (0.5, 0.5, 0.5, false);
+  REQUIRE (mid_unselected
+           == Catch::Approx (
+               core::ReinforcementCoRetrievalStep (0.5, 0.5, 0.5)
+               * core::ReinforcementUnselectedScale (0.5, 0.5, 0.5))
+                  .margin (1e-6));
+  REQUIRE (mid_unselected < mid_selected);
+
+  const double conservative = RunReinforcementUpdate (1.0, 0.0, 0.0, true);
+  const double eager = RunReinforcementUpdate (0.0, 1.0, 1.0, true);
+  REQUIRE (eager > conservative);
 }

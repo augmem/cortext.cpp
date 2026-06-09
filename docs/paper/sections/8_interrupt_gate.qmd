@@ -1,6 +1,6 @@
 # Interrupt Gate and Streaming Integration {#sec-interrupt}
 
-The interrupt gate controls when retrieved memories enter active context during streaming generation. The gate balances novelty value against disruption cost. The interrupt gate operates on memory-level context, using centroids (μ_acc) rather than individual signal embeddings for novelty and relevance computation. The main interrupt thresholds and gains in this section are derived from the three knobs (F, S, T). The runtime also contains a small number of operational guard constants and environment-controlled diagnostics outside this core gate.
+The interrupt gate controls when retrieved memories enter active context during streaming generation. The gate balances novelty value against disruption cost. The interrupt gate operates on memory-level context, using centroids (μ_acc) rather than individual signal embeddings for novelty and relevance computation. The interrupt thresholds, candidate weights, maturity scaling, boundary multiplier, and refractory dynamics in this section are named policies derived from the three knobs (F, S, T). The runtime also contains environment-controlled diagnostics outside this core gate.
 
 **Note:** As defined in Section 1, all knob symbols here use the midpoint‑biased values F̃ and S̃ (T is unmodified). For affective gain, we use a lighter bias \( \tilde{S}_{affect} = \mathrm{BiasMid}(S, -0.06) \) to preserve mid‑range affect modulation.
 
@@ -9,14 +9,13 @@ The interrupt gate controls when retrieved memories enter active context during 
 Novelty thresholds scale with knobs and refractory state:
 
 ```
-τ_novelty = lerp(0.10, 0.35, F) × (1 − 0.15S) × (1 + 0.3T)
+τ_novelty = lerp(0.12, 0.32, F) × (1 − 0.12S) × (1 + 0.25T)
 τ_mu = lerp(0.08, 0.18, F) × (1 − 0.4S) × (1 + 0.4T)
 retrieval_thresh(F) = lerp(0.12, 0.45, F)
 retrieval_thresh_interrupt(F,S) = retrieval_thresh(F) × (1 − 0.12S)
-affect_relax_coeff(S) = lerp(0.15, 0.55, S_affect)
+affect_relax_coeff(S) = lerp(0.08, 0.28, S_affect)
 affect_gain(S) = lerp(1.0, 2.4, S_affect)
-weights_aff_raw = [lerp(0.30, 0.55, S_affect), lerp(0.30, 0.55, S_affect), lerp(0.10, 0.20, S_affect)]
-[w_arousal, w_emotion, w_salience] = normalize(weights_aff_raw)
+[w_arousal, w_emotion, w_salience] = AffectDriveWeights(S)
 affect_drive = clamp(affect_gain(S) × (w_arousal × arousal + w_emotion × emotion_intensity + w_salience × salience), 0, 1)
 ```
 
@@ -166,7 +165,8 @@ if allow_interrupt AND NOT should_flush AND NOT spike_bypass:
 if pending_abort:
     sim_mem = cos(x_t, pending_mem)
     sim_acc = cos(x_t, μ_acc)
-    if sim_mem > sim_acc:        # accepted → drop partial unit
+    margin = InterruptAbortAcceptanceMargin(F,S,T)
+    if sim_mem > sim_acc + margin:        # accepted → drop partial unit
         reset_accumulator()
     pending_abort ← false
 ```

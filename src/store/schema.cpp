@@ -695,6 +695,38 @@ GetCoreMigrations ()
               "WHERE kind = 'ASSOCIATION' AND source_id LIKE 'summary_%'",
           },
       },
+      {
+          9,
+          "Realtime retrieval lookup indexes",
+          {
+              "CREATE INDEX IF NOT EXISTS idx_signals_embedding "
+              "ON signals(embedding_id)",
+              "CREATE INDEX IF NOT EXISTS idx_signals_source_ts_serial "
+              "ON signals(source_id, timestamp, serial_position)",
+              "CREATE INDEX IF NOT EXISTS idx_memories_kind_source "
+              "ON memories(kind, source_id)",
+              "CREATE INDEX IF NOT EXISTS idx_memories_source_start "
+              "ON memories(source_id, start_ts)",
+              "CREATE INDEX IF NOT EXISTS idx_memories_last_access "
+              "ON memories(last_access DESC) WHERE last_access IS NOT NULL",
+              "CREATE INDEX IF NOT EXISTS idx_memories_label_created "
+              "ON memories(created_at DESC) WHERE kind = 'LABEL'",
+          },
+      },
+      {
+          10,
+          "Realtime graph retrieval query indexes",
+          {
+              "CREATE INDEX IF NOT EXISTS idx_fact_cache_embedding "
+              "ON fact_cache(embedding_id)",
+              "CREATE INDEX IF NOT EXISTS idx_associations_edge_source_target "
+              "ON associations(edge_type, source_memory_id, target_memory_id)",
+              "CREATE INDEX IF NOT EXISTS idx_associations_edge_target_source "
+              "ON associations(edge_type, target_memory_id, source_memory_id)",
+              "CREATE INDEX IF NOT EXISTS idx_fact_assertions_lifecycle_recorded "
+              "ON fact_assertions(lifecycle_state, recorded_at_ts DESC, fact_id DESC)",
+          },
+      },
   };
 }
 

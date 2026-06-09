@@ -446,6 +446,39 @@ TEST_CASE ("ReinforcementDecay follows spec: lerp(0.9, 0.99, T)",
   REQUIRE (ReinforcementDecay (0.3) < ReinforcementDecay (0.7));
 }
 
+TEST_CASE ("Reinforcement co-retrieval update is knob-derived",
+           "[formula][knobs][reinforcement]")
+{
+  const double low = ReinforcementCoRetrievalStep (1.0, 0.0, 0.0);
+  const double mid = ReinforcementCoRetrievalStep (0.5, 0.5, 0.5);
+  const double high = ReinforcementCoRetrievalStep (0.0, 1.0, 1.0);
+
+  REQUIRE (low > 0.0);
+  REQUIRE (mid > low);
+  REQUIRE (high > mid);
+  REQUIRE (high <= 0.08);
+
+  REQUIRE (ReinforcementUnselectedScale (0.5, 0.5, 0.5) < 0.40);
+  REQUIRE (ReinforcementUnselectedScale (0.0, 1.0, 1.0)
+           > ReinforcementUnselectedScale (1.0, 0.0, 0.0));
+
+  REQUIRE (ReinforcementFanoutDamping (0.5, 0.5, 0.5, 2)
+           == Catch::Approx (1.0));
+  REQUIRE (ReinforcementFanoutDamping (0.5, 0.5, 0.5, 20) < 1.0);
+  REQUIRE (ReinforcementFanoutDamping (1.0, 0.5, 0.5, 20)
+           < ReinforcementFanoutDamping (0.0, 0.5, 0.5, 20));
+
+  const double prune_mid = ReinforcementPruneThreshold (0.5, 0.5, 0.5);
+  REQUIRE (prune_mid > 0.08);
+  REQUIRE (prune_mid < 0.13);
+  REQUIRE (ReinforcementPruneThreshold (1.0, 0.5, 0.5)
+           > ReinforcementPruneThreshold (0.0, 0.5, 0.5));
+  REQUIRE (ReinforcementPruneThreshold (0.5, 1.0, 0.5)
+           > ReinforcementPruneThreshold (0.5, 0.0, 0.5));
+  REQUIRE (ReinforcementPruneThreshold (0.5, 0.5, 1.0)
+           < ReinforcementPruneThreshold (0.5, 0.5, 0.0));
+}
+
 TEST_CASE ("LambdaMood follows spec: exp(-ln2 * Δt / half_life)",
            "[formula][knobs][decay]")
 {
@@ -497,7 +530,7 @@ TEST_CASE ("EmotionalHalfLifeBonus follows spec",
 }
 
 // =============================================================================
-// 5.1.6 Working Memory Functions (4 functions)
+// 5.1.6 Working Memory Functions
 // =============================================================================
 
 TEST_CASE ("WMMaintenanceCostPerSlot follows spec: lerp(0.05, 0.15, S)",
@@ -511,6 +544,18 @@ TEST_CASE ("WMMaintenanceCostPerSlot follows spec: lerp(0.05, 0.15, S)",
 
   // Monotonic
   REQUIRE (WMMaintenanceCostPerSlot (0.3) < WMMaintenanceCostPerSlot (0.7));
+}
+
+TEST_CASE ("WMStrengthFloor derives from F/S/T",
+           "[formula][knobs][working_memory]")
+{
+  REQUIRE (WMStrengthFloor (0.5, 0.5, 0.5) > 0.0);
+  REQUIRE (WMStrengthFloor (0.5, 0.5, 1.0)
+           > WMStrengthFloor (0.5, 0.5, 0.0));
+  REQUIRE (WMStrengthFloor (1.0, 0.5, 0.5)
+           < WMStrengthFloor (0.0, 0.5, 0.5));
+  REQUIRE (WMStrengthFloor (0.5, 1.0, 0.5)
+           < WMStrengthFloor (0.5, 0.0, 0.5));
 }
 
 TEST_CASE ("WMChunkingThreshold follows spec: lerp(0.7, 0.9, F)",
@@ -537,6 +582,29 @@ TEST_CASE ("WMComplexityScale follows spec: lerp(0.5, 1.5, S)",
 
   // Monotonic
   REQUIRE (WMComplexityScale (0.3) < WMComplexityScale (0.7));
+}
+
+TEST_CASE ("WM rehearsal and eviction pressure derive from F/S/T",
+           "[formula][knobs][working_memory]")
+{
+  REQUIRE (WMRehearsalBaseDelta (0.0, 0.5, 0.5)
+           > WMRehearsalBaseDelta (1.0, 0.5, 0.5));
+  REQUIRE (WMRehearsalBaseDelta (0.5, 1.0, 0.5)
+           > WMRehearsalBaseDelta (0.5, 0.0, 0.5));
+  REQUIRE (WMRehearsalBaseDelta (0.5, 0.5, 1.0)
+           > WMRehearsalBaseDelta (0.5, 0.5, 0.0));
+
+  REQUIRE (WMRecencyTauSeconds (0.5, 0.5, 1.0)
+           > WMRecencyTauSeconds (0.5, 0.5, 0.0));
+  REQUIRE (WMRecencyTauSeconds (1.0, 0.5, 0.5)
+           < WMRecencyTauSeconds (0.0, 0.5, 0.5));
+  REQUIRE (WMRecencyTauSeconds (0.5, 1.0, 0.5)
+           < WMRecencyTauSeconds (0.5, 0.0, 0.5));
+
+  REQUIRE (WMCapacityPressureExponent (1.0, 0.5, 0.5)
+           > WMCapacityPressureExponent (0.0, 0.5, 0.5));
+  REQUIRE (WMCapacityPressureExponent (0.5, 0.5, 1.0)
+           > WMCapacityPressureExponent (0.5, 0.5, 0.0));
 }
 
 TEST_CASE ("StrategySwitchLatencyMs follows spec: lerp(500, 100, S)",
@@ -1037,10 +1105,10 @@ TEST_CASE ("MinEpisodesForConcept follows spec: lerp(2, 5, T)",
   REQUIRE (MinEpisodesForConcept (0.3) < MinEpisodesForConcept (0.7));
 }
 
-TEST_CASE ("ContradictionThreshold returns fixed -0.5",
+TEST_CASE ("ContradictionThreshold midpoint wrapper returns -0.5",
            "[formula][knobs][graph]")
 {
-  // ContradictionThreshold = -0.5 (fixed)
+  // Legacy zero-arg wrapper returns the midpoint F/S/T threshold.
   REQUIRE (ContradictionThreshold () == Catch::Approx (-0.5));
 }
 

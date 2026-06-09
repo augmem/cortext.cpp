@@ -50,7 +50,8 @@ struct EmotionalSource
 /// v2: Uses memories table (emotional fields merged from emotional_tags)
 std::vector<EmotionalSource>
 LoadEmotionalSources (Store *store, long long recent_window_ts,
-                      double theta_intensity, double theta_arousal)
+                      double theta_intensity, double theta_arousal,
+                      const EmotionCascadeParams &fallback)
 {
   std::vector<EmotionalSource> sources;
 
@@ -115,7 +116,7 @@ LoadEmotionalSources (Store *store, long long recent_window_ts,
         }
       else
         {
-          s.cascade_radius = 1;
+          s.cascade_radius = fallback.cascade_radius;
         }
 
       auto it_decay = row.find ("cascade_decay");
@@ -125,7 +126,7 @@ LoadEmotionalSources (Store *store, long long recent_window_ts,
         }
       else
         {
-          s.cascade_decay = 0.5;
+          s.cascade_decay = fallback.cascade_decay;
         }
 
       sources.push_back (s);
@@ -252,7 +253,9 @@ PropagateEmotionalCascade::Execute (OperationContext &context, Transaction &tx) 
   // Load high-intensity emotional sources
   auto sources
       = LoadEmotionalSources (store, recent_window_ts, theta_intensity,
-                              theta_arousal);
+                              theta_arousal, params);
+  const double intensity_floor = core::CascadeIntensityFloor (
+      cfg.focus, cfg.sensitivity, cfg.stability);
 
   if (sources.empty ())
     {
@@ -300,7 +303,7 @@ PropagateEmotionalCascade::Execute (OperationContext &context, Transaction &tx) 
               = src.half_life_bonus * std::pow (decay, neighbor.depth);
 
           // Skip if intensity has decayed too much
-          if (decayed_intensity < 0.1)
+          if (decayed_intensity < intensity_floor)
             {
               continue;
             }

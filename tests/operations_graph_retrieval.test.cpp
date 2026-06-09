@@ -148,7 +148,9 @@ public:
   void
   Execute (OperationContext &ctx, Transaction & /*tx*/) const override
   {
-    const int key_size = core::SparseKeySize (ctx.GetConfig ().focus);
+    const int key_size = core::SparseKeySize (
+        ctx.GetConfig ().focus, ctx.GetConfig ().sensitivity,
+        ctx.GetConfig ().stability);
     const auto &signal = ctx.GetSignal ();
     const std::string key = core::SparseKey (signal.embedding, key_size);
     ctx.GetProcessorContext ().procedural_store[key][memory_id_] = score_;
@@ -648,12 +650,10 @@ TEST_CASE ("Graph retrieval maps text query labels back to durable sources",
                                       "LONG_TERM", 1.0, 1000);
     }
 
-  cortext::operations::retrieval_debug::ClearLastRankedCandidates ();
-  cortext::testing::ScopedEnvVar enable_token_route (
-      "CORTEXT_ENABLE_LABEL_TOKEN_TEXT_ROUTE", "1");
-  auto ops = std::make_unique<OperationSet> (
-      std::make_unique<ForceRetrievalGateOp> (),
-      std::make_unique<GraphAugmentedRetrieveCandidates> ());
+	  cortext::operations::retrieval_debug::ClearLastRankedCandidates ();
+	  auto ops = std::make_unique<OperationSet> (
+	      std::make_unique<ForceRetrievalGateOp> (),
+	      std::make_unique<GraphAugmentedRetrieveCandidates> ());
   SignalProcessor::Config cfg;
   cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.5;
@@ -715,12 +715,10 @@ TEST_CASE ("Graph retrieval maps token-overlap text queries to durable labels",
                                       "LONG_TERM", 1.0, 1000);
     }
 
-  cortext::operations::retrieval_debug::ClearLastRankedCandidates ();
-  cortext::testing::ScopedEnvVar enable_token_route (
-      "CORTEXT_ENABLE_LABEL_TOKEN_TEXT_ROUTE", "1");
-  auto ops = std::make_unique<OperationSet> (
-      std::make_unique<ForceRetrievalGateOp> (),
-      std::make_unique<GraphAugmentedRetrieveCandidates> ());
+	  cortext::operations::retrieval_debug::ClearLastRankedCandidates ();
+	  auto ops = std::make_unique<OperationSet> (
+	      std::make_unique<ForceRetrievalGateOp> (),
+	      std::make_unique<GraphAugmentedRetrieveCandidates> ());
   SignalProcessor::Config cfg;
   cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.5;
@@ -1415,19 +1413,24 @@ TEST_CASE ("Procedural proactive retrieval surfaces learned routine memory",
 
   const auto ranked_off = run (true);
   const auto ranked_on = run (false);
+  const double procedural_seed_min_score
+      = core::RetrievalProceduralSeedMinScore (cfg.focus, cfg.sensitivity,
+                                               cfg.stability);
 
   bool off_has_procedural_target = false;
   bool on_has_procedural_target = false;
   for (const auto &candidate : ranked_off)
     {
-      if (candidate.memory_id == 500LL && candidate.proc_score >= 0.55)
+      if (candidate.memory_id == 500LL
+          && candidate.proc_score >= procedural_seed_min_score)
         {
           off_has_procedural_target = true;
         }
     }
   for (const auto &candidate : ranked_on)
     {
-      if (candidate.memory_id == 500LL && candidate.proc_score >= 0.55)
+      if (candidate.memory_id == 500LL
+          && candidate.proc_score >= procedural_seed_min_score)
         {
           on_has_procedural_target = true;
         }
@@ -1486,6 +1489,64 @@ TEST_CASE ("Unknown caution suppresses relaxed fallback retrieval",
     const auto ids = run ();
     REQUIRE (ids.empty ());
   }
+}
+
+TEST_CASE ("Temporal retrieval rank bias favors recent relevant memories",
+           "[operations][graph][temporal][recency]")
+{
+  auto unique_store = SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<Store> (std::move (unique_store));
+  cortext::testing::InitializeCoreSchema (*store);
+
+  constexpr long long kNow = 4'000'000LL;
+  constexpr long long kOldTs = kNow - 60LL * 60LL * 1000LL;
+  constexpr long long kRecentTs = kNow - 1000LL;
+
+  const Eigen::VectorXf query = UnitVec256 (1.0f);
+  const Eigen::VectorXf old_vec = query;
+  const Eigen::VectorXf recent_vec = BlendVec256 (
+      0.95f, std::sqrt (std::max (0.0f, 1.0f - 0.95f * 0.95f)));
+
+  cortext::testing::SeedEmbeddingV2 (*store, 10LL, old_vec, kOldTs);
+  cortext::testing::SeedMemoryV2 (*store, 10LL, 10LL, "test", "LONG_TERM",
+                                  1.0, kOldTs);
+  cortext::testing::SeedEmbeddingV2 (*store, 20LL, recent_vec, kRecentTs);
+  cortext::testing::SeedMemoryV2 (*store, 20LL, 20LL, "test", "LONG_TERM",
+                                  1.0, kRecentTs);
+  SetMemorySourceMetadata (*store, 10LL, "external", 1.0, 0);
+  SetMemorySourceMetadata (*store, 20LL, "external", 1.0, 0);
+
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  cfg.focus = 0.5;
+  cfg.sensitivity = 0.5;
+  cfg.stability = 0.5;
+
+  auto run = [&] (bool disable_temporal) {
+    cortext::operations::retrieval_debug::ClearLastRankedCandidates ();
+    std::optional<cortext::testing::ScopedEnvVar> disable_guard;
+    if (disable_temporal)
+      {
+        disable_guard.emplace ("CORTEXT_DISABLE_TEMPORAL_RETRIEVAL", "1");
+      }
+    auto ops = std::make_unique<OperationSet> (
+        std::make_unique<ForceRetrievalGateOp> (),
+        std::make_unique<GraphAugmentedRetrieveCandidates> ());
+    SignalProcessor processor (cfg, store, std::move (ops));
+    processor.Process (MakeSignal (query, static_cast<uint64_t> (kNow)));
+    processor.Flush ();
+    return cortext::operations::retrieval_debug::GetLastRankedCandidates ();
+  };
+
+  const auto temporal_ranked = run (false);
+  REQUIRE_FALSE (temporal_ranked.empty ());
+  REQUIRE (temporal_ranked.front ().memory_id == 20LL);
+  REQUIRE (temporal_ranked.front ().temporal_score > 0.95);
+
+  const auto no_temporal_ranked = run (true);
+  REQUIRE_FALSE (no_temporal_ranked.empty ());
+  REQUIRE (no_temporal_ranked.front ().memory_id == 10LL);
+  REQUIRE (no_temporal_ranked.front ().temporal_score == Catch::Approx (0.0));
 }
 
 TEST_CASE ("Pressure-weighted resurfacing preserves old but relevant memories at low pressure",
@@ -1600,7 +1661,7 @@ TEST_CASE ("Pressure-weighted resurfacing converges to time-only under high pres
   REQUIRE (pressure_weighted_ids.empty ());
 }
 
-TEST_CASE ("Pressure-weighted resurfacing under low pressure is independent of stability",
+TEST_CASE ("Pressure-weighted resurfacing under low pressure follows stability",
            "[operations][graph][ablation][resurfacing]")
 {
   auto unique_store = SQLiteStore::Create (":memory:");
@@ -1647,7 +1708,7 @@ TEST_CASE ("Pressure-weighted resurfacing under low pressure is independent of s
   const auto low_t_ids = run (0.2);
   const auto high_t_ids = run (0.9);
 
-  REQUIRE (low_t_ids == high_t_ids);
-  REQUIRE (std::find (low_t_ids.begin (), low_t_ids.end (), 99LL)
-           != low_t_ids.end ());
+  REQUIRE (std::find (high_t_ids.begin (), high_t_ids.end (), 99LL)
+           != high_t_ids.end ());
+  REQUIRE (high_t_ids.size () >= low_t_ids.size ());
 }

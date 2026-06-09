@@ -25,14 +25,10 @@ InitializeFocusPriors::Execute (OperationContext &context, Transaction &tx) cons
       return;
     }
 
-  p_ctx.weight_relevance_prior
-      = core::Sigmoid (operations::constants::kTwo * config.focus
-                       - operations::constants::kNormalizedMax);
-  p_ctx.coverage_gain_floor_prior
-      = operations::constants::kCoverageGainFloorBase
-        + operations::constants::kCoverageGainScale * config.focus;
-  p_ctx.mismatch_weight_prior
-      = operations::constants::kNormalizedMax - config.focus;
+  const auto focus_priors = core::FocusStatePriorsForKnobs (config.focus);
+  p_ctx.weight_relevance_prior = focus_priors.relevance_weight;
+  p_ctx.coverage_gain_floor_prior = focus_priors.coverage_gain_floor;
+  p_ctx.mismatch_weight_prior = focus_priors.mismatch_weight;
 
   p_ctx.attention_width_prior
       = meta_learning::ResolveAttentionWidthPrior (tx, config);

@@ -20,41 +20,16 @@ namespace cortext::operations
 
 namespace
 {
-/// @brief Computes the number of winners based on Focus.
-inline int
-ComputeWinnersK (double F)
-{
-  const double f_eff = core::FocusBias (F);
-  return static_cast<int> (std::round (
-      core::Lerp (constants::kWinnersKMax, constants::kWinnersKMin, f_eff)));
-}
-
-/// @brief Computes inhibition radius based on Focus.
-inline double
-InhibitionRadius (double F)
-{
-  return core::Lerp (constants::kInhibitionRadiusMin,
-                     constants::kInhibitionRadiusMax, core::FocusBias (F));
-}
-
 /// @brief Computes suppression per retrieval based on Stability.
 inline double
-SuppressionPerRetrieval (double T, double winning_activation)
+SuppressionPerRetrieval (double F, double S, double T,
+                         double winning_activation)
 {
-  const double base = core::Lerp (constants::kSuppressionBaseMax,
-                                  constants::kSuppressionBaseMin, T);
+  const double base = core::RetrievalCompetitionSuppressionBase (F, S, T);
   const double term = core::Clamp (constants::kNormalizedMax - winning_activation,
                                    constants::kNormalizedMin,
                                    constants::kNormalizedMax);
   return base * term;
-}
-
-/// @brief Computes RIF recovery time in seconds based on Stability.
-inline double
-RecoveryTimeSeconds (double T)
-{
-  return core::Lerp (constants::kRecoveryTimeMinSeconds,
-                     constants::kRecoveryTimeMaxSeconds, T);
 }
 
 /// @brief Clamps a value to [0, 1].
@@ -136,7 +111,8 @@ ScoreCandidates (const std::unordered_map<long long, Eigen::VectorXf> &retrieved
 void
 ApplyLateralInhibition (const std::vector<Candidate> &winners,
                         const std::vector<Candidate> &losers, double radius,
-                        double stability, double competition_scale,
+                        double focus, double sensitivity, double stability,
+                        double competition_scale,
                         long long now_ts, Transaction &tx,
                         int &suppressed_count)
 {
@@ -151,8 +127,8 @@ ApplyLateralInhibition (const std::vector<Candidate> &winners,
             {
               continue;
             }
-          const double spr
-              = SuppressionPerRetrieval (stability, winner.activation);
+          const double spr = SuppressionPerRetrieval (
+              focus, sensitivity, stability, winner.activation);
           total_supp += spr * competition_scale;
         }
       if (total_supp <= std::numeric_limits<double>::epsilon ())
@@ -191,7 +167,8 @@ ApplyRetrievalCompetition::Execute (OperationContext &context,
     }
   const long long now_ts
       = static_cast<long long> (context.GetSignal ().timestamp);
-  const double recovery_time = RecoveryTimeSeconds (cfg.stability);
+  const double recovery_time = core::RetrievalCompetitionRecoverySeconds (
+      cfg.stability);
   ApplyRIFRecovery (tx, now_ts, recovery_time);
   const double competition_scale
       = neuromodulation::RetrievalCompetitionScale (p_ctx.neuromod_ne);
@@ -201,9 +178,9 @@ ApplyRetrievalCompetition::Execute (OperationContext &context,
     {
       return;
     }
-  const int k = std::min (ComputeWinnersK (cfg.focus),
+  const int k = std::min (core::RetrievalCompetitionWinnerCount (cfg.focus),
                           static_cast<int> (cands.size ()));
-  const double radius = InhibitionRadius (cfg.focus);
+  const double radius = core::RetrievalCompetitionInhibitionRadius (cfg.focus);
   std::vector<Candidate> winners (cands.begin (), cands.begin () + k);
   std::vector<Candidate> losers (cands.begin () + k, cands.end ());
   if (winners.empty () || losers.empty ())
@@ -211,8 +188,9 @@ ApplyRetrievalCompetition::Execute (OperationContext &context,
       return;
     }
   int suppressed_count = 0;
-  ApplyLateralInhibition (winners, losers, radius, cfg.stability,
-                          competition_scale, now_ts, tx, suppressed_count);
+  ApplyLateralInhibition (winners, losers, radius, cfg.focus, cfg.sensitivity,
+                          cfg.stability, competition_scale, now_ts, tx,
+                          suppressed_count);
 
   // Debug logging
   telemetry::LogDebug ("cortext.competition", {

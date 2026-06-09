@@ -84,9 +84,9 @@ Working memory gating evaluates coherent memories at accumulation boundaries (@s
 
 ```
 on_memory_boundary:
-    [α, β, γ] ← normalize([lerp(0.55, 0.70, F),   # window score weight
-                        lerp(0.20, 0.35, F),   # task relevance weight
-                        lerp(0.10, 0.30, S)])   # novelty-to-WM weight
+    [α, β, γ] ← normalize([lerp(0.55, 0.70, F) × (1 + 0.10(T − 0.5)),
+                        lerp(0.20, 0.35, F) × (1 − 0.08(T − 0.5)),
+                        lerp(0.10, 0.30, S) × (1 − 0.12(T − 0.5))])
     memory_benefit ← α × S_window + β × relevance_to_task(μ_acc, task_context) +
                        γ × novelty_to_set(μ_acc, {m.embedding | m ∈ active_memories})
     margin ← memory_benefit − gate_threshold
@@ -251,7 +251,8 @@ w_full_raw = (0.20 + 0.25T + 0.05F) × q_full
 view(a) = w_sem s_sem(a) + w_ent s_ent(a) + w_full s_full(a)
 ```
 
-When quality estimates are unavailable, use `q_sem = q_full = 1` and
+When quality estimates are unavailable, use `q_sem = q_full = 1` and an
+F/S/T-derived weak entity-quality prior. At the neutral midpoint this equals
 `q_ent = 0.5`. If the entity vector is missing or known-diffuse, set
 `q_ent = 0`.
 
@@ -310,11 +311,11 @@ best_real = max_a R(a), or 0 when C is empty
 H_real    = normalized_entropy({R(a)})
 info(m)   = clamp((q_sem + q_ent + q_full) / 3, 0, 1) × (1 - generic(m))
 
-score_none = clamp(0.25 + 0.55 generic(m) + 0.20 H_real
-                   + 0.20(1 - best_real) + 0.15 top_contra, 0, 1)
+score_none = SoftAnchorNoneScore(F,S,T,generic,H_real,
+                                 1 - best_real, top_contra)
 
-score_new  = clamp(0.15 + 0.45 info(m) + 0.25 boundary_score(m)
-                   + 0.20(1 - best_real) - 0.35 generic(m), 0, 1)
+score_new  = SoftAnchorNewScore(F,S,T,info,boundary_score,
+                                best_real,generic)
 ```
 
 Then:
@@ -372,7 +373,9 @@ strength_t = strength_0 × exp(-ln(2) × Δt / τ_link_tier(T))
 
 with WM shortest, STM intermediate, and LTM longest. Higher Stability increases
 half-life and support window length; it must not by itself override boundary
-pressure or force cross-boundary durable binds.
+pressure or force cross-boundary durable binds. Non-durable anchor states decay
+after a bounded active-TTL grace period whose multiplier is also F/S/T-derived
+and remains `2x` at the neutral midpoint.
 
 ### Knob Semantics
 
@@ -479,10 +482,13 @@ Each memory carries a provenance model that tracks its origin, reliability, and 
 
 ```
 source_model = {origin, reliability, contradiction_count, last_verified_ts}
-source_prior(origin) = {'user': 0.8, 'assistant': 0.6, 'external': 0.7, 'system': 0.9}
-source_confidence(m) ← clamp(source_prior(m.origin) ×
-                             (1 − 0.15 × contradiction_count) ×
-                             (0.7 + 0.3 × freshness(m)), 0, 1)
+source_prior(origin, F, S, T) = SourceReliabilityPrior(F,S,T,origin)
+freshness_weight = RetrievalSourceFreshnessWeight(F,S,T)
+freshness(m) = exp(−age(m) / RetrievalSourceFreshnessTauSeconds(F,S,T))
+source_confidence(m) ← clamp(source_prior(m.origin,F,S,T) ×
+                             (1 − contradiction_penalty(F,S,T) × contradiction_count) ×
+                             ((1 − freshness_weight) + freshness_weight × freshness(m)),
+                             0, 1)
 ```
 
 Contradictions reduce `reliability`, and user corrections directly update `contradiction_count`. Source confidence gates injection into active context:

@@ -35,7 +35,8 @@ EnvFlag (const char *name)
 double
 ResolveResurfacingDecayScale (
     Transaction &tx,
-    const temporal::RetrievalAblationOverride &retrieval_override)
+    const temporal::RetrievalAblationOverride &retrieval_override,
+    double stability)
 {
   const auto mode = temporal::ResolveResurfacingDecayMode (retrieval_override);
   if (mode == temporal::ResurfacingDecayMode::TimeOnly)
@@ -49,9 +50,11 @@ ResolveResurfacingDecayScale (
   switch (mode)
     {
     case temporal::ResurfacingDecayMode::PressureGate:
-      return pressure::GateScale (pressure_state, 0.2);
+      return pressure::GateScale (
+          pressure_state, core::RetrievalPressureGateLowScale (stability));
     case temporal::ResurfacingDecayMode::PressureRamp:
-      return pressure::RampScale (pressure_state, 0.1);
+      return pressure::RampScale (
+          pressure_state, core::RetrievalPressureRampLowScale (stability));
     case temporal::ResurfacingDecayMode::TimeOnly:
       break;
     }
@@ -99,7 +102,7 @@ MetacognitiveMonitoring::Execute (OperationContext &context, Transaction &tx) co
   const auto resurfacing_decay_mode
       = temporal::ResolveResurfacingDecayMode (retrieval_override);
   const double resurfacing_decay_scale
-      = ResolveResurfacingDecayScale (tx, retrieval_override);
+      = ResolveResurfacingDecayScale (tx, retrieval_override, T);
   const double certainty_req
       = core::CertaintyRequirement (resurfacing_decay_scale);
   double delta_t_s = 0.0;
@@ -114,7 +117,7 @@ MetacognitiveMonitoring::Execute (OperationContext &context, Transaction &tx) co
   const double retained_confidence
       = core::Clamp01 (p_ctx.metacognitive_confidence * decay_factor);
   const double confidence_alpha
-      = core::Clamp (0.15 + 0.20 * meta_sens, 0.15, 0.55);
+      = core::MetacognitiveConfidenceAlpha (F, S, T);
   const double confidence = core::Clamp01 (
       std::max (FOK, core::Ewma (retained_confidence, FOK, confidence_alpha)));
 

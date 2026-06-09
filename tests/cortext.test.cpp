@@ -953,18 +953,16 @@ TEST_CASE ("Cortext orders durable label source hydration by query similarity",
   auto ctx = cortext::Cortext::Create (cfg, db_path, RepoModelsDir ());
   REQUIRE (ctx != nullptr);
 
-  {
-    cortext::testing::ScopedEnvVar enabled (
-        "CORTEXT_QUERY_AWARE_LINKED_SOURCE_HYDRATION", "1");
-    auto label_hydrated = ctx->DebugHydrateForTest ({ 300LL }, {},
-                                                    query_embedding);
-    REQUIRE (label_hydrated.retrieved_memory.size () >= 2);
-    REQUIRE (label_hydrated.retrieved_memory[0].id == 100LL);
-    REQUIRE (TextFromMemory (label_hydrated.retrieved_memory[0])
-             == relevant_text);
-  }
+  auto label_hydrated = ctx->DebugHydrateForTest ({ 300LL }, {},
+                                                  query_embedding);
+  REQUIRE (label_hydrated.retrieved_memory.size () >= 2);
+  REQUIRE (label_hydrated.retrieved_memory[0].id == 100LL);
+  REQUIRE (TextFromMemory (label_hydrated.retrieved_memory[0])
+           == relevant_text);
 
   {
+    cortext::testing::ScopedEnvVar disabled (
+        "CORTEXT_DISABLE_QUERY_AWARE_LINKED_SOURCE_HYDRATION", "1");
     auto recency_hydrated = ctx->DebugHydrateForTest ({ 300LL }, {},
                                                       query_embedding);
     REQUIRE (recency_hydrated.retrieved_memory.size () >= 2);
@@ -980,8 +978,6 @@ TEST_CASE ("Cortext caps linked source hydration with knob-derived compact limit
   auto store = cortext::SQLiteStore::Create (db_path);
   cortext::testing::InitializeCoreSchema (*store);
 
-  cortext::testing::ScopedEnvVar clear_query_aware (
-      "CORTEXT_QUERY_AWARE_LINKED_SOURCE_HYDRATION");
   cortext::testing::ScopedEnvVar clear_query_aware_disable (
       "CORTEXT_DISABLE_QUERY_AWARE_LINKED_SOURCE_HYDRATION");
 

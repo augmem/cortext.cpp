@@ -1,6 +1,8 @@
 #include "cortext/core/knobs.hpp"
+#include "cortext/core/constants.hpp"
 #include "cortext/clock.hpp"
 #include "cortext/internal/cancellation.hpp"
+#include "cortext/operations/constants.hpp"
 #include "cortext/processor.hpp"
 #include "cortext/processor/operation_context.hpp"
 #include "cortext/store/store.hpp"
@@ -10,6 +12,7 @@
 #include <algorithm>
 #include <chrono>
 #include <any>
+#include <cmath>
 #include <cstring>
 #include <map>
 #include <sstream>
@@ -522,6 +525,26 @@ ExtractDouble (const std::map<std::string, std::any> &row,
   return default_val;
 }
 
+inline bool
+NearlyEqual (double a, double b)
+{
+  return std::abs (a - b) <= 1e-12;
+}
+
+inline double
+ExtractPolicyDouble (const std::map<std::string, std::any> &row,
+                     const std::string &key, double legacy_default,
+                     double knob_default, bool legacy_policy_defaults)
+{
+  const double value = ExtractDouble (row, key, knob_default);
+  if (legacy_policy_defaults && NearlyEqual (value, legacy_default)
+      && !NearlyEqual (knob_default, legacy_default))
+    {
+      return knob_default;
+    }
+  return value;
+}
+
 inline std::string
 ExtractString (const std::map<std::string, std::any> &row,
                const std::string &key,
@@ -557,11 +580,72 @@ ParseMemoryIds (const std::string &text)
   return ids;
 }
 
+void
+SeedKnobDerivedStateDefaults (ProcessorContext &ctx,
+                              const SignalProcessor::Config &config)
+{
+  const double F = core::Clamp (config.focus, 0.0, 1.0);
+  const double S = core::Clamp (config.sensitivity, 0.0, 1.0);
+  const double T = core::Clamp (config.stability, 0.0, 1.0);
+  const auto focus_priors = core::FocusStatePriorsForKnobs (F);
+  const auto sensitivity_priors = core::SensitivityStatePriorsForKnobs (S);
+  const auto stability_priors = core::StabilityStatePriorsForKnobs (T);
+
+  ctx.weight_relevance_prior = focus_priors.relevance_weight;
+  ctx.coverage_gain_floor_prior = focus_priors.coverage_gain_floor;
+  ctx.mismatch_weight_prior = focus_priors.mismatch_weight;
+  ctx.attention_width_prior = core::Lerp (
+      static_cast<double> (core::kAttentionWidthMin),
+      static_cast<double> (core::kAttentionWidthMax), 1.0 - F);
+  ctx.weight_relevance = ctx.weight_relevance_prior;
+  ctx.attention_width = ctx.attention_width_prior;
+  ctx.coverage_gain_floor = ctx.coverage_gain_floor_prior;
+  ctx.mismatch_weight = ctx.mismatch_weight_prior;
+
+  ctx.base_rate_prior = core::BaseRatePrior (S);
+  ctx.weight_novelty_prior = sensitivity_priors.novelty_weight;
+  ctx.weight_surprise_prior = sensitivity_priors.surprise_weight;
+  ctx.weight_valence_prior = sensitivity_priors.valence_weight;
+  ctx.weight_arousal_prior = sensitivity_priors.arousal_weight;
+  ctx.weight_emotion_prior = sensitivity_priors.emotion_weight;
+  ctx.emotion_gain_prior = sensitivity_priors.emotion_gain;
+  ctx.score_gain_prior = sensitivity_priors.score_gain;
+  ctx.rate_target_prior = ctx.base_rate_prior;
+  ctx.weight_novelty = ctx.weight_novelty_prior;
+  ctx.weight_surprise = ctx.weight_surprise_prior;
+  ctx.weight_valence = ctx.weight_valence_prior;
+  ctx.weight_arousal = ctx.weight_arousal_prior;
+  ctx.emotion_gain = ctx.emotion_gain_prior;
+  ctx.score_gain = ctx.score_gain_prior;
+  ctx.rate_target = ctx.rate_target_prior;
+
+  ctx.hysteresis_band_prior = core::BaseBandPrior (T);
+  ctx.half_life_prior = core::BaseHalfLifePrior (T);
+  ctx.rate_decay_prior = stability_priors.rate_decay;
+  ctx.periphery_half_life_prior
+      = core::ClampHalfLife (stability_priors.secondary_half_life_scale
+                             * ctx.half_life_prior);
+  ctx.salience_half_life_prior
+      = core::ClampHalfLife (stability_priors.secondary_half_life_scale
+                             * ctx.half_life_prior);
+  ctx.drift_weight_prior = stability_priors.drift_weight;
+  ctx.half_life = ctx.half_life_prior;
+  ctx.rate_decay = ctx.rate_decay_prior;
+  ctx.periphery_half_life = ctx.periphery_half_life_prior;
+  ctx.salience_half_life = ctx.salience_half_life_prior;
+  ctx.drift_weight = ctx.drift_weight_prior;
+
+  ctx.T_dynamic = core::TPrior (F, S, T);
+  ctx.T_target = ctx.T_dynamic;
+  ctx.hysteresis = ctx.hysteresis_band_prior;
+}
+
 // --- State Loading Functions ---
 // v2 Schema: Unified state table replaces processor_state + blender tables
 
 bool
-LoadState (Store &store, ProcessorContext &ctx)
+LoadState (Store &store, ProcessorContext &ctx,
+           const SignalProcessor::Config &config)
 {
   try
     {
@@ -570,26 +654,57 @@ LoadState (Store &store, ProcessorContext &ctx)
         return false; // No persisted state, use defaults
 
       const auto &row = rows[0];
+      SeedKnobDerivedStateDefaults (ctx, config);
 
       // === Processor state fields ===
       ctx.signals_processed
           = static_cast<int> (ExtractInt64 (row, "signals_processed", 0));
+      if (ctx.signals_processed == 0)
+        {
+          return false;
+        }
+      const bool legacy_policy_defaults
+          = NearlyEqual (ExtractDouble (row, "theta_dynamic", 0.2), 0.2)
+            && NearlyEqual (ExtractDouble (row, "theta_target", 0.2), 0.2)
+            && NearlyEqual (ExtractDouble (row, "weight_relevance", 0.5), 0.5)
+            && NearlyEqual (ExtractDouble (row, "coverage_gain_floor", 0.65),
+                            0.65)
+            && NearlyEqual (ExtractDouble (row, "weight_novelty", 0.3), 0.3)
+            && NearlyEqual (ExtractDouble (row, "weight_surprise", 0.2), 0.2)
+            && NearlyEqual (ExtractDouble (row, "rate_decay", 0.60), 0.60)
+            && NearlyEqual (ExtractDouble (row, "drift_weight", 0.5), 0.5);
       ctx.u_t = ExtractDouble (row, "u_uncertainty", 0.0);
       ctx.outcome_pred = ExtractDouble (row, "outcome_pred", 0.0);
       ctx.neuromod_ach = ExtractDouble (row, "neuromod_ach", 0.0);
       ctx.neuromod_ne = ExtractDouble (row, "neuromod_ne", 0.0);
       ctx.neuromod_da = ExtractDouble (row, "neuromod_da", 0.0);
       ctx.osc_phase = ExtractDouble (row, "osc_phase", 0.0);
-      ctx.weight_relevance = ExtractDouble (row, "weight_relevance", 0.5);
-      ctx.attention_width = ExtractDouble (row, "attention_width", 1.57);
+      ctx.weight_relevance = ExtractPolicyDouble (
+          row, "weight_relevance", 0.5, ctx.weight_relevance,
+          true);
+      ctx.attention_width = ExtractPolicyDouble (
+          row, "attention_width", 1.57, ctx.attention_width,
+          true);
       ctx.coverage_gain_floor
-          = ExtractDouble (row, "coverage_gain_floor", 0.65);
-      ctx.mismatch_weight = ExtractDouble (row, "mismatch_weight", 0.5);
-      ctx.T_dynamic = ExtractDouble (row, "theta_dynamic", 0.2);
-      ctx.T_target = ExtractDouble (row, "theta_target", ctx.T_dynamic);
-      ctx.hysteresis = ExtractDouble (row, "hysteresis", 0.05);
-      ctx.half_life = ExtractDouble (row, "half_life", 120.0);
-      ctx.rate_target = ExtractDouble (row, "rate_target", 0.2);
+          = ExtractPolicyDouble (row, "coverage_gain_floor", 0.65,
+                                 ctx.coverage_gain_floor,
+                                 true);
+      ctx.mismatch_weight = ExtractPolicyDouble (
+          row, "mismatch_weight", 0.5, ctx.mismatch_weight,
+          true);
+      ctx.T_dynamic = ExtractPolicyDouble (
+          row, "theta_dynamic", 0.2, ctx.T_dynamic,
+          true);
+      ctx.T_target = ExtractPolicyDouble (
+          row, "theta_target", 0.2, ctx.T_dynamic,
+          true);
+      ctx.hysteresis = ExtractPolicyDouble (
+          row, "hysteresis", 0.05, ctx.hysteresis, true);
+      ctx.half_life = ExtractPolicyDouble (
+          row, "half_life", 120.0, ctx.half_life, true);
+      ctx.rate_target = ExtractPolicyDouble (
+          row, "rate_target", 0.2, ctx.rate_target,
+          true);
       ctx.delta_half_life_adj
           = ExtractDouble (row, "delta_half_life_adj", 0.0);
       ctx.sustained_influence
@@ -625,19 +740,37 @@ LoadState (Store &store, ProcessorContext &ctx)
           = ExtractDouble (row, "metacognitive_confidence", 0.0);
 
       // Sensitivity state
-      ctx.weight_novelty = ExtractDouble (row, "weight_novelty", 0.3);
-      ctx.weight_surprise = ExtractDouble (row, "weight_surprise", 0.2);
-      ctx.weight_valence = ExtractDouble (row, "weight_valence", 0.4);
-      ctx.weight_arousal = ExtractDouble (row, "weight_arousal", 0.0);
-      ctx.emotion_gain = ExtractDouble (row, "emotion_gain", 1.0);
-      ctx.score_gain = ExtractDouble (row, "score_gain", 1.0);
+      ctx.weight_novelty = ExtractPolicyDouble (
+          row, "weight_novelty", 0.3, ctx.weight_novelty,
+          true);
+      ctx.weight_surprise = ExtractPolicyDouble (
+          row, "weight_surprise", 0.2, ctx.weight_surprise,
+          true);
+      ctx.weight_valence = ExtractPolicyDouble (
+          row, "weight_valence", 0.4, ctx.weight_valence,
+          true);
+      ctx.weight_arousal = ExtractPolicyDouble (
+          row, "weight_arousal", 0.0, ctx.weight_arousal,
+          true);
+      ctx.emotion_gain = ExtractPolicyDouble (
+          row, "emotion_gain", 1.0, ctx.emotion_gain,
+          true);
+      ctx.score_gain = ExtractPolicyDouble (
+          row, "score_gain", 1.0, ctx.score_gain, true);
 
       // Stability state
-      ctx.rate_decay = ExtractDouble (row, "rate_decay", 0.60);
+      ctx.rate_decay = ExtractPolicyDouble (
+          row, "rate_decay", 0.60, ctx.rate_decay, true);
       ctx.periphery_half_life
-          = ExtractDouble (row, "periphery_half_life", 120.0);
-      ctx.salience_half_life = ExtractDouble (row, "salience_half_life", 120.0);
-      ctx.drift_weight = ExtractDouble (row, "drift_weight", 0.5);
+          = ExtractPolicyDouble (row, "periphery_half_life", 120.0,
+                                 ctx.periphery_half_life,
+                                 true);
+      ctx.salience_half_life
+          = ExtractPolicyDouble (row, "salience_half_life", 120.0,
+                                 ctx.salience_half_life,
+                                 true);
+      ctx.drift_weight = ExtractPolicyDouble (
+          row, "drift_weight", 0.5, ctx.drift_weight, true);
       ctx.retention_ema = ExtractDouble (row, "retention_ema", 0.0);
 
       // Rate control (Algorithm 8)
@@ -647,7 +780,8 @@ LoadState (Store &store, ProcessorContext &ctx)
       ctx.dt_ema = ExtractDouble (row, "dt_ema", 0.0);
       ctx.last_rate_timestamp
           = static_cast<uint64_t> (ExtractInt64 (row, "last_rate_timestamp", 0));
-      ctx.reliability = ExtractDouble (row, "reliability", 1.0);
+      ctx.reliability = ExtractPolicyDouble (
+          row, "reliability", 1.0, 0.0, legacy_policy_defaults);
 
       // Restore write rate window timestamps if present.
       auto write_rate_it = row.find ("write_rate_timestamps");
@@ -714,30 +848,32 @@ LoadState (Store &store, ProcessorContext &ctx)
         }
 
       // === Blender weights (from unified state table) ===
+      const double blender_fallback = core::BlendBootstrapFallback (
+          config.focus, config.sensitivity, config.stability);
       ctx.blender_state[operations::Metric::relevance]
-          = ExtractDouble (row, "w_relevance", 0.5);
+          = ExtractDouble (row, "w_relevance", blender_fallback);
       ctx.blender_state[operations::Metric::mismatch]
-          = ExtractDouble (row, "w_mismatch", 0.5);
+          = ExtractDouble (row, "w_mismatch", blender_fallback);
       ctx.blender_state[operations::Metric::surprise]
-          = ExtractDouble (row, "w_surprise", 0.5);
+          = ExtractDouble (row, "w_surprise", blender_fallback);
       ctx.blender_state[operations::Metric::rarity]
-          = ExtractDouble (row, "w_rarity", 0.5);
+          = ExtractDouble (row, "w_rarity", blender_fallback);
       ctx.blender_state[operations::Metric::drift]
-          = ExtractDouble (row, "w_drift", 0.5);
+          = ExtractDouble (row, "w_drift", blender_fallback);
       ctx.blender_state[operations::Metric::contradiction]
-          = ExtractDouble (row, "w_contradiction", 0.5);
+          = ExtractDouble (row, "w_contradiction", blender_fallback);
       ctx.blender_state[operations::Metric::utility]
-          = ExtractDouble (row, "w_utility", 0.5);
+          = ExtractDouble (row, "w_utility", blender_fallback);
       ctx.blender_state[operations::Metric::periphery]
-          = ExtractDouble (row, "w_periphery", 0.5);
+          = ExtractDouble (row, "w_periphery", blender_fallback);
       ctx.blender_state[operations::Metric::coverage]
-          = ExtractDouble (row, "w_coverage", 0.5);
+          = ExtractDouble (row, "w_coverage", blender_fallback);
       ctx.blender_state[operations::Metric::salience]
-          = ExtractDouble (row, "w_salience", 0.5);
+          = ExtractDouble (row, "w_salience", blender_fallback);
       ctx.blender_state[operations::Metric::valence]
-          = ExtractDouble (row, "w_valence", 0.5);
+          = ExtractDouble (row, "w_valence", blender_fallback);
       ctx.blender_state[operations::Metric::arousal]
-          = ExtractDouble (row, "w_arousal", 0.5);
+          = ExtractDouble (row, "w_arousal", blender_fallback);
       ctx.blender_ready = ExtractInt64 (row, "blender_ready", 0) != 0;
       ctx.blender_update_count
           = static_cast<int> (ExtractInt64 (row, "blender_update_count", 0));
@@ -765,12 +901,24 @@ LoadState (Store &store, ProcessorContext &ctx)
 }
 
 void
-LoadRecentContext (Store &store, ProcessorContext &ctx)
+LoadRecentContext (Store &store, ProcessorContext &ctx,
+                   const SignalProcessor::Config &config)
 {
   try
     {
+      const long long keep = static_cast<long long> (
+          std::max (1.0, core::NCtx (config.stability)
+                             + static_cast<double> (
+                                 core::KCtx (config.stability))));
       auto rows = store.Execute (
-          "SELECT embedding FROM recent_context ORDER BY timestamp ASC");
+          "SELECT embedding FROM ("
+          "  SELECT s.signal_id, s.embedding_id, e.embedding, s.timestamp "
+          "  FROM signals s "
+          "  JOIN embeddings e ON s.embedding_id = e.embedding_id "
+          "  ORDER BY s.timestamp DESC, s.signal_id DESC "
+          "  LIMIT ?"
+          ") ORDER BY timestamp ASC, signal_id ASC",
+          { keep });
       for (const auto &row : rows)
         {
           auto it = row.find ("embedding");
@@ -794,12 +942,23 @@ LoadRecentContext (Store &store, ProcessorContext &ctx)
 }
 
 void
-LoadRecentScores (Store &store, ProcessorContext &ctx)
+LoadRecentScores (Store &store, ProcessorContext &ctx,
+                  const SignalProcessor::Config &config)
 {
   try
     {
+      const int w = core::WScore (config.stability);
+      const long long keep = static_cast<long long> (std::max (
+          1, std::max (w, core::RecentScoreHistoryLimit (config.stability))));
       auto rows = store.Execute (
-          "SELECT score FROM recent_scores ORDER BY timestamp ASC");
+          "SELECT score FROM ("
+          "  SELECT signal_id, score, timestamp "
+          "  FROM signals "
+          "  WHERE score IS NOT NULL "
+          "  ORDER BY timestamp DESC, signal_id DESC "
+          "  LIMIT ?"
+          ") ORDER BY timestamp ASC, signal_id ASC",
+          { keep });
       for (const auto &row : rows)
         {
           ctx.recent_scores.push_back (ExtractDouble (row, "score", 0.0));
@@ -816,8 +975,9 @@ LoadRecentScores (Store &store, ProcessorContext &ctx)
 
 void
 LoadObservedRetentionHistory (Store &store, ProcessorContext &ctx,
-                              std::uint64_t now_ms)
+                              std::uint64_t now_ms, int history_limit)
 {
+  const int limit = std::max (1, history_limit);
   try
     {
       auto rows = store.Execute (
@@ -825,7 +985,8 @@ LoadObservedRetentionHistory (Store &store, ProcessorContext &ctx,
           "FROM memories "
           "WHERE COALESCE(last_used, last_access) IS NOT NULL "
           "ORDER BY last_used ASC "
-          "LIMIT 256");
+          "LIMIT ?",
+          { static_cast<long long> (limit) });
       for (const auto &row : rows)
         {
           const auto last_used
@@ -851,12 +1012,15 @@ LoadObservedRetentionHistory (Store &store, ProcessorContext &ctx,
 
 // v2 Schema: Load working memory from MEMORIES table (kind='WORKING')
 void
-LoadWorkingMemory (Store &store, ProcessorContext &ctx, double sensitivity,
-                   std::uint64_t now_ms)
+LoadWorkingMemory (Store &store, ProcessorContext &ctx,
+                   const SignalProcessor::Config &cfg, std::uint64_t now_ms)
 {
   try
     {
-      const double cost_per_slot = core::WMMaintenanceCostPerSlot (sensitivity);
+      const double cost_per_slot
+          = core::WMMaintenanceCostPerSlot (cfg.sensitivity);
+      const double strength_floor = core::WMStrengthFloor (
+          cfg.focus, cfg.sensitivity, cfg.stability);
 
       // Load from MEMORIES table with kind='WORKING' and end_ts IS NULL (active)
       auto rows = store.Execute (
@@ -918,12 +1082,14 @@ LoadWorkingMemory (Store &store, ProcessorContext &ctx, double sensitivity,
           const double elapsed = now_s - slot.last_ts;
           if (elapsed > 0)
             {
-              slot.strength -= cost_per_slot * elapsed;
+              slot.strength
+                  = std::max (strength_floor,
+                              slot.strength - cost_per_slot * elapsed);
             }
-
-          // Skip decayed slots
-          if (slot.strength <= 0.0)
-            continue;
+          else
+            {
+              slot.strength = std::max (strength_floor, slot.strength);
+            }
 
           // Load extended metadata
           slot.n_signals = static_cast<int> (ExtractInt64 (row, "n_signals", 1));
@@ -1206,6 +1372,10 @@ SignalProcessor::SignalProcessor (const Config &config,
       const int cap = core::WRateSeconds (T);
       context_->write_rate_window_.SetCapacity (
           static_cast<size_t> (std::max (1, cap)));
+      context_->recent_ids_lru_.SetCapacity (
+          static_cast<size_t> (std::max (
+              1, core::RecentRetrievedIdWindow (
+                     config_.focus, config_.sensitivity, config_.stability))));
 
       // Initialize LLM components from config
       context_->extractor = config_.extractor;
@@ -1223,11 +1393,14 @@ SignalProcessor::SignalProcessor (const Config &config,
         }
 
       // Load persisted state for algorithm resumption (v2 schema)
-      loaded_state = LoadState (*store_, *context_);               // Unified state
-      LoadRecentContext (*store_, *context_);                      // From views
-      LoadRecentScores (*store_, *context_);                       // From views
-      LoadObservedRetentionHistory (*store_, *context_, now_ms);   // Derived from memories
-      LoadWorkingMemory (*store_, *context_, config_.sensitivity,
+      loaded_state = LoadState (*store_, *context_, config_);      // Unified state
+      LoadRecentContext (*store_, *context_, config_);
+      LoadRecentScores (*store_, *context_, config_);
+      LoadObservedRetentionHistory (
+          *store_, *context_, now_ms,
+          core::ObservedRetentionHistoryLimit (
+              config_.focus, config_.sensitivity, config_.stability));
+      LoadWorkingMemory (*store_, *context_, config_,
                          now_ms);                                  // From MEMORIES
       LoadSoftAnchors (*store_, *context_);
       LoadAccumulators (*store_, *context_);                       // From ACCUMULATORS
@@ -1235,12 +1408,7 @@ SignalProcessor::SignalProcessor (const Config &config,
 
   if (!loaded_state && context_)
     {
-      const double F = core::Clamp (config_.focus, 0.0, 1.0);
-      const double S = core::Clamp (config_.sensitivity, 0.0, 1.0);
-      const double T = core::Clamp (config_.stability, 0.0, 1.0);
-      context_->T_dynamic = core::TPrior (F, S, T);
-      context_->T_target = context_->T_dynamic;
-      context_->hysteresis = core::BaseBandPrior (T);
+      SeedKnobDerivedStateDefaults (*context_, config_);
       context_->last_rate_timestamp = static_cast<uint64_t> (now_ms);
       context_->last_mood_ts = static_cast<uint64_t> (now_ms);
     }
@@ -1319,6 +1487,8 @@ SignalProcessor::Process (const Signal &signal)
           FinalizeEpisode (tx.get (), &op_context);
         }
 
+      context_->signals_processed += 1;
+
       // Persist state within the same transaction (v2 schema)
       if (tx)
         {
@@ -1383,7 +1553,6 @@ SignalProcessor::Process (const Signal &signal)
       throw std::runtime_error (msg);
     }
 
-  context_->signals_processed += 1;
   Output out;
   AssembleOutputMemories (op_context, out);
   AssembleOutputFields (op_context, out);
@@ -1520,9 +1689,9 @@ SignalProcessor::FinalizeEpisode (Transaction *tx,
       context_->episode_start_ts = 0;
     }
 
-  // v2 schema: recent_context and recent_scores are now VIEWs that derive
-  // from signals/embeddings tables. No need to persist - data comes from
-  // MemoryStorage operation which writes to signals table.
+  // v2 schema: recent context and score windows derive from signals/embeddings
+  // at restore time using F/S/T-derived runtime limits. No separate sliding
+  // window tables need to be persisted.
   //
   // Note: State, WM, and Accumulators persisted by caller (Flush/Process)
 
@@ -1569,9 +1738,12 @@ SignalProcessor::PersistState (Transaction &tx)
       = static_cast<int> (context_->wm_slots.size ());
 
   // Get blender weights
-  auto get_weight = [this] (operations::Metric m) {
+  const double blender_fallback = core::BlendBootstrapFallback (
+      config_.focus, config_.sensitivity, config_.stability);
+  auto get_weight = [this, blender_fallback] (operations::Metric m) {
     auto it = context_->blender_state.find (m);
-    return (it != context_->blender_state.end ()) ? it->second : 0.5;
+    return (it != context_->blender_state.end ()) ? it->second
+                                                  : blender_fallback;
   };
 
   double w_relevance = get_weight (operations::Metric::relevance);
@@ -1780,6 +1952,11 @@ SignalProcessor::PersistWorkingMemory (Transaction &tx)
       tx.Execute (query, params);
     }
 
+  const double working_source_reliability = core::SourceReliabilityPrior (
+      config_.focus, config_.sensitivity, config_.stability);
+  const double working_stability = core::MemoryInitialStabilityPolicy (
+      config_.focus, config_.sensitivity, config_.stability);
+
   // Upsert current slots as MEMORIES with kind='WORKING'
   for (auto &slot : context_->wm_slots)
     {
@@ -1828,6 +2005,7 @@ SignalProcessor::PersistWorkingMemory (Transaction &tx)
                   "embedding_id = ?, source_id = ?, modality = ?, start_ts = ?, "
                   "n_signals = ?, s_max = ?, s_avg = ?, s_emotion_max = ?, "
                   "s_arousal_avg = ?, drift_mag = ?, strength = ?, "
+                  "source_reliability = ?, stability = ?, "
                   "last_access = ?, end_ts = NULL "
                   "WHERE memory_id = ? AND kind = 'WORKING'",
                   { embedding_id,
@@ -1835,7 +2013,8 @@ SignalProcessor::PersistWorkingMemory (Transaction &tx)
                                             : slot.source_id,
                     slot.modality, slot.start_ts, slot.n_signals, slot.s_max,
                     slot.s_avg, slot.s_emotion_max, slot.s_arousal_avg,
-                    slot.drift_acc, slot.strength, ts_ms, memory_id });
+                    slot.drift_acc, slot.strength, working_source_reliability,
+                    working_stability, ts_ms, memory_id });
             }
           else
             {
@@ -1844,14 +2023,16 @@ SignalProcessor::PersistWorkingMemory (Transaction &tx)
                   "INSERT INTO memories "
                   "(embedding_id, source_id, kind, modality, start_ts, n_signals, "
                   " s_max, s_avg, s_emotion_max, s_arousal_avg, drift_mag, "
-                  " strength, last_access, created_at) "
-                  "VALUES (?, ?, 'WORKING', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                  " strength, source_reliability, stability, last_access, "
+                  " created_at) "
+                  "VALUES (?, ?, 'WORKING', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                   { embedding_id,
                     slot.source_id.empty () ? std::string ("unknown")
                                             : slot.source_id,
                     slot.modality, slot.start_ts, slot.n_signals, slot.s_max,
                     slot.s_avg, slot.s_emotion_max, slot.s_arousal_avg,
-                    slot.drift_acc, slot.strength, ts_ms, slot_created_at });
+                    slot.drift_acc, slot.strength, working_source_reliability,
+                    working_stability, ts_ms, slot_created_at });
 
               auto mem_rows = tx.Execute ("SELECT last_insert_rowid() AS id", {});
               memory_id

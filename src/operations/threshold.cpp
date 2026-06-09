@@ -15,10 +15,9 @@ namespace
 {
 constexpr double kTiny = 1e-6;
 constexpr double kMillisToSeconds = 1e-3;
-constexpr double kThree = 3.0;
 constexpr double kSecondsPerMinute = 60.0;
 inline double
-PercentileP90 (const std::deque<double> &values, int window)
+PercentileTail (const std::deque<double> &values, int window, double quantile)
 {
   if (values.empty () || window <= 0)
     {
@@ -37,10 +36,11 @@ PercentileP90 (const std::deque<double> &values, int window)
       return 0.0;
     }
   std::sort (tail.begin (), tail.end ());
+  const double q = core::Clamp (quantile, 0.0, 1.0);
   const int idx = std::max (
       0, std::min (static_cast<int> (tail.size ()) - 1,
                    static_cast<int> (std::floor (
-                       0.9 * (static_cast<int> (tail.size ()) - 1)))));
+                       q * (static_cast<int> (tail.size ()) - 1)))));
   return tail[static_cast<size_t> (idx)];
 }
 
@@ -65,7 +65,8 @@ UpdateThreshold::Execute (OperationContext &context, Transaction &tx) const
   // 2) Update rolling score history (cap size to a reasonable maximum).
   p_ctx.recent_scores.push_back (observed_score);
   const int w = core::WScore (cfg.stability);
-  const size_t kMaxScores = 1024;
+  const size_t kMaxScores = static_cast<size_t> (
+      std::max (w, core::RecentScoreHistoryLimit (cfg.stability)));
   if (p_ctx.recent_scores.size () > kMaxScores)
     {
       p_ctx.recent_scores.pop_front ();
@@ -78,10 +79,15 @@ UpdateThreshold::Execute (OperationContext &context, Transaction &tx) const
   const double T_prior
       = core::TPrior (cfg.focus, cfg.sensitivity, cfg.stability);
 
-  // 4) Compute observed p90 over the last w samples (fallback to prior).
+  // 4) Compute observed high-tail quantile over the last w samples.
   const int tail_count = std::min (w, count_scores);
-  const double observed_p90
-      = (tail_count > 0) ? PercentileP90 (p_ctx.recent_scores, w) : T_prior;
+  const double observed_tail
+      = (tail_count > 0)
+            ? PercentileTail (
+                p_ctx.recent_scores, w,
+                core::ThresholdObservedQuantile (
+                    cfg.focus, cfg.sensitivity, cfg.stability))
+            : T_prior;
 
   const double rho_obs = core::Clamp (p_ctx.u_t, constants::kNormalizedMin,
                                       constants::kNormalizedMax)
@@ -89,7 +95,7 @@ UpdateThreshold::Execute (OperationContext &context, Transaction &tx) const
   const double denom
       = std::max (constants::kNormEpsilon, rho_prior + rho_obs);
   const double T_target
-      = (rho_prior * T_prior + rho_obs * observed_p90) / denom;
+      = (rho_prior * T_prior + rho_obs * observed_tail) / denom;
   p_ctx.T_target = T_target;
 
   // 5) EWMA toward target with α_T schedule.
@@ -130,7 +136,10 @@ UpdateThreshold::Execute (OperationContext &context, Transaction &tx) const
 
   // τ_rate and α for rate EWMA
   const double tau_rate
-      = std::max (std::pow (constants::kTwo, kThree * cfg.stability) * dt_base,
+      = std::max (std::pow (
+                      constants::kTwo,
+                      core::RateTauStabilityExponentScale (cfg.stability))
+                      * dt_base,
                   core::DtFloor (cfg.stability));
   const double alpha_rate = 1.0 - std::exp (-delta_t / tau_rate);
 
@@ -196,7 +205,7 @@ UpdateThreshold::Execute (OperationContext &context, Transaction &tx) const
     telemetry::Attribute::Int64("tail_count", static_cast<int64_t> (tail_count)),
     telemetry::Attribute::Double("rho_prior", rho_prior),
     telemetry::Attribute::Double("prior_threshold", T_prior),
-    telemetry::Attribute::Double("observed_p90", observed_p90),
+    telemetry::Attribute::Double("observed_p90", observed_tail),
     telemetry::Attribute::Double("rho_obs", rho_obs),
     telemetry::Attribute::Double("denom", denom),
     telemetry::Attribute::Double("T_target", T_target),
@@ -252,7 +261,10 @@ UpdateRateState::Execute (OperationContext &context, Transaction &tx) const
 
   const double dt_base = std::max (p_ctx.dt_ema, core::DtFloor (cfg.stability));
   const double tau_rate
-      = std::max (std::pow (constants::kTwo, kThree * cfg.stability) * dt_base,
+      = std::max (std::pow (
+                      constants::kTwo,
+                      core::RateTauStabilityExponentScale (cfg.stability))
+                      * dt_base,
                   core::DtFloor (cfg.stability));
   const double alpha_rate = 1.0 - std::exp (-delta_t / tau_rate);
 

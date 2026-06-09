@@ -23,10 +23,6 @@ namespace cortext::operations
 
 namespace
 {
-constexpr double kDriftClampMax = 0.3;
-constexpr double kDriftSkipEpsilon = 0.001;
-constexpr double kRippleStrengthMin = 0.01;     // Min lability to propagate ripple
-constexpr double kRippleDriftCapFactor = 0.5;  // Ripple drift capped at 50% of primary
 
 /// @brief Normalizes a vector to unit length.
 inline Eigen::VectorXf
@@ -227,6 +223,7 @@ ApplyReconsolidation::Execute (OperationContext &context, Transaction &tx) const
 
   const double S = cfg.sensitivity;
   const double T = cfg.stability;
+  const double F = cfg.focus;
   const double recon_gain = core::ReconsolidationGain (T);
   const double recon_mod_scale
       = neuromodulation::ReconsolidationScale (p_ctx.neuromod_ach);
@@ -234,6 +231,13 @@ ApplyReconsolidation::Execute (OperationContext &context, Transaction &tx) const
   const int ripple_depth = core::RippleDepth (T);
   const double tau_labile = core::TauLabile (T);
   const double lability_susc = core::LabilitySusceptibility (S, T);
+  const double drift_clamp = core::ReconsolidationDriftClamp (F, S, T);
+  const double drift_skip_epsilon = core::ReconsolidationDriftSkipEpsilon (
+      F, S, T);
+  const double ripple_strength_min = core::RippleStrengthMin (F, S, T);
+  const double ripple_drift_cap_factor = core::RippleDriftCapFactor (F, S, T);
+  const double uncertainty_relevance_weight
+      = core::ReconsolidationUncertaintyRelevanceWeight (F, S, T);
 
   double max_drift = 0.0;
   const long long now_ts
@@ -339,12 +343,8 @@ ApplyReconsolidation::Execute (OperationContext &context, Transaction &tx) const
           current_lability = stored_lability;
         }
 
-      double drift_mag
-          = (1.0 - T) * S * current_lability * contextual_relevance;
-      drift_mag *= recon_gain * recon_mod_scale;
-      // Safety clamp
-      drift_mag = std::min (kDriftClampMax,
-                            std::max (constants::kNormalizedMin, drift_mag));
+      const double drift_mag = core::ReconsolidationPrimaryDriftMagnitude (
+          F, S, T, current_lability, contextual_relevance, recon_mod_scale);
       max_drift = std::max (max_drift, drift_mag);
 
       // Note: embeddings row already exists - no need to ensure it exists
@@ -359,7 +359,7 @@ ApplyReconsolidation::Execute (OperationContext &context, Transaction &tx) const
                   { current_lability, ToFloatVector (u_m), now_ts,
                     memory_id });
 
-      if (drift_mag < kDriftSkipEpsilon)
+      if (drift_mag < drift_skip_epsilon)
         {
           continue; // No embedding update when drift too small
         }
@@ -383,7 +383,9 @@ ApplyReconsolidation::Execute (OperationContext &context, Transaction &tx) const
           const auto blob_id
               = constructive_recall::LoadCurrentBlobId (tx, memory_id);
           const double uncertainty
-              = core::Clamp (current_lability * (1.0 - 0.5 * contextual_relevance),
+              = core::Clamp (current_lability
+                                 * (1.0 - uncertainty_relevance_weight
+                                                * contextual_relevance),
                              0.0, 1.0);
           constructive_recall::AppendReconstructionWithEmbedding (
               tx, memory_id, blended, blob_id, now_ts, uncertainty,
@@ -416,7 +418,7 @@ ApplyReconsolidation::Execute (OperationContext &context, Transaction &tx) const
                 * std::pow (ripple_decay, static_cast<double> (neighbor.depth));
 
           // Skip if lability too low
-          if (neighbor_lability < kRippleStrengthMin)
+          if (neighbor_lability < ripple_strength_min)
             {
               continue;
             }
@@ -433,10 +435,11 @@ ApplyReconsolidation::Execute (OperationContext &context, Transaction &tx) const
           // Compute neighbor drift (proportional to decayed lability)
           double neighbor_drift = neighbor_lability * recon_gain;
           // Cap ripple drift at reduced factor compared to primary
-          neighbor_drift = std::min (kDriftClampMax * kRippleDriftCapFactor,
-                                     std::max (kDriftSkipEpsilon, neighbor_drift));
+          neighbor_drift = std::min (
+              drift_clamp * ripple_drift_cap_factor,
+              std::max (drift_skip_epsilon, neighbor_drift));
 
-          if (neighbor_drift < kDriftSkipEpsilon)
+          if (neighbor_drift < drift_skip_epsilon)
             {
               continue;
             }

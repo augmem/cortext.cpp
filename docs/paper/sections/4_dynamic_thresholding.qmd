@@ -15,6 +15,8 @@ The threshold prior derives from knob settings:
 Observed evidence comes from the 90th percentile of recent scores:
 
 ```
+score_history_cap(T) = round(lerp(512, 1536, T))
+score_stream ← tail(score_stream, max(win_score(T), score_history_cap(T)))
 recent_scores ← tail(score_stream, win_score(T))
 if |recent_scores| == 0:
     observed_p90 ← θ_prior  # no evidence yet
@@ -58,7 +60,8 @@ dt_base ← max(dt_ema, dt_floor(T))
 The rate time constant scales with Stability:
 
 ```
-τ_rate ← max(2^(3T) × dt_base, dt_floor(T))
+rate_tau_exponent(T) = 3T
+τ_rate ← max(2^rate_tau_exponent(T) × dt_base, dt_floor(T))
 α ← 1 − exp(−Δt / τ_rate)
 ```
 
@@ -209,7 +212,8 @@ acc_signals_window ← tail(acc_signals_window, win_coh(T))
 
 μ_acc ← (n × μ_acc + x_t) / (n + 1)
 n ← n + 1
-drift_acc ← drift_acc + (drift_mag_t / 2)  # accumulate normalized instantaneous drift (drift_mag_t ∈ [0,2])
+drift_gain(S,T) = clamp(0.5 × scale(S,T), 0.35, 0.65)
+drift_acc ← drift_acc + drift_mag_t × drift_gain(S,T)
 emo_max ← max(emo_max, emotion_intensity_t)
 arousal_sum ← arousal_sum + arousal_t
 last_signal_ts ← now_ms()  # update timestamp for next gap calculation (ms)
@@ -279,32 +283,39 @@ gap_z ← (signal_gap_s − gap_ref_s) / max(gap_ref_s, ε)
 gap_score ← sigmoid(gap_z)
 
 # Local normalization (within-episode, contrast-boosted)
+var_floor(S,T) = BoundaryVarianceFloor(S,T)
+warmup_signals(S,T) = BoundaryWarmupSignals(S,T)
 ema_mean_x ← EWMA(ema_mean_x, x, α_local(T))
 ema_var_x  ← EWMA(ema_var_x, (x − ema_mean_x)^2, α_local(T))
 norm_gain(S,T) = clamp(lerp(1.6, 3.0, S) × lerp(1.05, 0.95, T), 1.0, 3.2)
-x̂ ← sigmoid(norm_gain × (x − ema_mean_x) / sqrt(ema_var_x + ε))  # warm-up uses raw x
+x̂ ← sigmoid(norm_gain × (x − ema_mean_x) / sqrt(max(ema_var_x, var_floor) + ε))
+# warm-up uses raw x until warmup_signals(S,T)
 
 # Topic shift (embedding-only, temporal context anchor)
 topic_shift ← 1 − map01(cos(e_t, c_t))
 
 # Likelihood of a boundary given observations
-support ← clamp(0.5 × coĥ + 0.5 × topiĉ, 0, 1)
-support_gate ← lerp(0.45, 1.0, support)   # downweight isolated spikes
-gap_gate ← lerp(0.10, 0.50, support)
-support_boost ← lerp(1.0, 1.25, support)  # emphasize coherent/topic shifts
+support_policy ← BoundarySupportPolicy(F,S,T, coĥ, topiĉ)
+support ← support_policy.support
+support_gate ← support_policy.support_gate   # downweight isolated spikes
+gap_gate ← support_policy.gap_gate
+support_boost ← support_policy.support_boost  # emphasize coherent/topic shifts
+w_g(F,S,T) = clamp(0.01 × lerp(1.10, 0.90, F)
+                         × lerp(0.90, 1.10, S)
+                         × lerp(0.90, 1.10, T), 0.004, 0.020)
 [w_s, w_d, w_c, w_t, w_g] ← [0.34 + 0.14S, 0.18 + 0.05(1 − T),
-                            0.36 + 0.16F, 0.30 + 0.22S, 0.01]
+                            0.36 + 0.16F, 0.30 + 0.22S, w_g(F,S,T)]
 [w_s, w_d, w_c, w_t, w_g] ← normalize([w_s×support_gate, w_d×support_gate,
                                       w_c×support_boost, w_t×support_boost, w_g×gap_gate])
 z_center(S,T) = clamp(lerp(0.44, 0.30, S) × lerp(1.05, 0.95, T), 0.26, 0.58)
-z_center_eff ← clamp(z_center × lerp(1.0, 0.75, support), 0.24, 0.58)
+change_point_policy ← BoundaryChangePointPolicy(S,T,support)
+z_center_eff ← change_point_policy.z_center_eff
 z_t ← w_s×(surprisal̂ − z_center_eff) +
       w_d×(drift̂ − z_center_eff) +
       w_c×(coĥ − z_center_eff) +
       w_t×(topiĉ − z_center_eff) +
       w_g×(gap_score − z_center_eff)
-k_cp(S,T) = lerp(8, 22, S) × lerp(1.1, 0.9, T)
-k_cp_eff ← k_cp × lerp(0.9, 1.35, support)
+k_cp_eff ← change_point_policy.k
 lik_boundary ← sigmoid(k_cp_eff × z_t)
 
 # Bayesian update for boundary posterior
@@ -324,8 +335,7 @@ Pressure-capacity ratio (continuous flush trigger derived from knobs):
 
 ```
 capacity_scale(T) = (1 + T)^2  # higher stability = larger capacity
-capacity ← max_mem_drift(S) × capacity_scale(T)
-pressure ← drift_acc × (1 + S)
+[capacity, pressure] ← BoundaryPressurePolicy(S,T, drift_acc)
 saturation_ratio ← pressure / max(capacity, ε)
 k_flush(S,T) = k_surprise(S,T)
 pressure_score ← sigmoid((saturation_ratio − 1) × k_flush(S,T))
@@ -400,17 +410,17 @@ We avoid hard timeouts for episode boundaries. Instead, when the stream becomes
 quiet and natural indicators are weak, inactivity softly boosts the boundary score:
 
 ```
-support_relax = exp(−lerp(0.6, 1.6, S) × lerp(1.15, 0.85, T) × gap_z⁺)
+inactivity_policy ← BoundaryInactivityPolicy(S,T)
+support_relax = exp(−inactivity_policy.support_relax_rate × gap_z⁺)
 gap_ratio = signal_gap_s / max(dt_ema, ε)
 gap_z_inact = log1p(max(gap_ratio − 1, 0))
-gap_score_inact = sigmoid(lerp(0.9, 1.8, S) × lerp(1.1, 0.9, T) × gap_z_inact)
+gap_score_inact = sigmoid(inactivity_policy.gap_score_scale × gap_z_inact)
 inactivity = gap_score_inact × (1 − support × support_relax)
-k_inact(S,T) = lerp(0.05, 0.25, S) × lerp(1.1, 0.9, T)
 gap_z⁺ = max(0, gap_z_inact)
-inactivity_scale = exp(lerp(0.6, 1.6, S) × lerp(1.1, 0.9, T) × gap_z⁺)
-boundary_score ← boundary_score + k_inact(S,T) × inactivity × inactivity_scale
-gap_force = sigmoid(lerp(2.0, 5.0, S) × lerp(1.1, 0.9, T) ×
-                   (gap_z_inact − lerp(0.9, 0.4, S) × lerp(1.1, 0.9, T)))
+inactivity_scale = exp(inactivity_policy.inactivity_exp_rate × gap_z⁺)
+boundary_score ← boundary_score + inactivity_policy.inactivity_weight × inactivity × inactivity_scale
+gap_force = sigmoid(inactivity_policy.gap_force_k ×
+                   (gap_z_inact − inactivity_policy.gap_force_center))
 boundary_score ← max(boundary_score, gap_force)
 ```
 

@@ -22,7 +22,7 @@ import zlib
 
 DEFAULT_MODEL = "gemma4:12b-it-qat"
 DEFAULT_BASE_URL = "http://127.0.0.1:11434"
-LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1", "0.0.0.0"}
+LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
 
 
 def normalize_local_base_url(base_url: str) -> str:

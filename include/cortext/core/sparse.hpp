@@ -1,8 +1,9 @@
 #pragma once
 
+#include "cortext/core/knobs.hpp"
+
 #include <Eigen/Dense>
 #include <algorithm>
-#include <cmath>
 #include <sstream>
 #include <string>
 #include <utility>
@@ -12,11 +13,9 @@ namespace cortext::core
 {
 
 inline int
-SparseKeySize (double F)
+SparseKeySize (double F, double S, double T)
 {
-  const double t = (F < 0.0) ? 0.0 : (F > 1.0 ? 1.0 : F);
-  const int k = static_cast<int> (std::round (16.0 + (64.0 - 16.0) * t));
-  return std::max (8, k);
+  return RetrievalSparseKeySize (F, S, T);
 }
 
 inline std::string

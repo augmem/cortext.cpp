@@ -94,7 +94,8 @@ contextual_gain(m) ← EWMA(contextual_gain(m), contextual_gain_t(m), α_cg)
 Per-memory stability initializes at creation and is bounded:
 
 ```
-stability(m)_init = 1.0
+strength(m)_init = memory_initial_strength(F,S,T)
+stability(m)_init = memory_initial_stability(F,S,T)
 stability(m) ← clamp(stability(m), 0.0, 2.0)
 ```
 
@@ -129,6 +130,40 @@ explicit consolidation cycles** (triggered externally via `cortext.consolidate()
 matching the system’s “idle-time consolidation” policy. This prevents per-turn
 decay from erasing fresh reinforcement and keeps runtime retrieval updates
 stable while still allowing long-term pruning during consolidation.
+
+The online edge update is intentionally slower than per-memory trace
+reinforcement because it changes the durable graph topology. The current
+runtime derives the co-retrieval edge increment from the three knobs and the
+retrieved-packet shape rather than using a fixed constant:
+
+```
+base_edge_step(F,S,T) =
+  clamp(lerp(0.015, 0.055, S~) *
+        lerp(1.20, 0.70, F~) *
+        lerp(0.75, 1.15, T), 0.005, 0.08)
+
+unselected_scale(F,S,T) =
+  clamp(lerp(0.10, 0.35, S~) *
+        lerp(0.85, 0.65, F~) *
+        lerp(0.80, 1.05, T), 0.05, 0.40)
+
+fanout_damping(F,S,T,n) =
+  1, if n <= 2
+  clamp(sqrt(reference_fanout(F,S,T) / n), 0.25, 1.0), otherwise
+
+pair_step(i,j) =
+  base_edge_step * fanout_damping *
+  sqrt(clamp(contextual_support_i,0,1) *
+       clamp(contextual_support_j,0,1)) *
+  (1.0 if either endpoint was the selected/used memory
+   else unselected_scale)
+```
+
+Thus a pair anchored by an actually used memory can still learn from repeated
+co-activation, while pairs that merely co-occur inside a broad or noisy
+retrieval packet update much more slowly. This is the production replacement
+for the earlier fixed `0.1` co-retrieval increment, which could saturate
+repeated noisy packets into durable graph hubs after only a few retrievals.
 
 ## Causal Feedback Loop {#sec-feedback}
 

@@ -3,6 +3,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include "test_helpers.hpp"
 #include <cortext/core/algorithms.hpp>
+#include <cortext/core/knobs.hpp>
 #include <cortext/operations/influence.hpp>
 #include <cortext/processor.hpp>
 #include <cortext/processor/operation_context.hpp>
@@ -125,13 +126,13 @@ TEST_CASE ("Alg19 influence persists per-memory", "[operations][influence]")
   const double sustained
       = std::any_cast<double> (rows[0].at ("sustained_influence"));
 
-  // Expected influence: generation terms neutralized when no generation embeddings
-  const double expected_influence = 0.5 * 0.8;
+  // Expected influence: generation terms neutralized when no generation embeddings.
+  const auto policy = core::InfluenceFeedbackPolicyForKnobs (
+      cfg.focus, cfg.sensitivity, cfg.stability);
+  const double expected_influence = policy.contextual_gain_weight * 0.8;
   REQUIRE (influence == Catch::Approx (expected_influence).margin (1e-6));
 
-  const double L_sustain = std::round (core::Lerp (3.0, 5.0, cfg.stability));
-  const double alpha_sustain = 2.0 / (L_sustain + 1.0);
-  const double expected_sustained = alpha_sustain * expected_influence;
+  const double expected_sustained = policy.sustain_alpha * expected_influence;
   REQUIRE (sustained == Catch::Approx (expected_sustained).margin (1e-6));
 }
 

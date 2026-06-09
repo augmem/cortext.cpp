@@ -2,12 +2,16 @@
 
 #include "neuromodulator_internal.hpp"
 #include "cortext/core/algorithms.hpp"
+#include "cortext/core/knobs.hpp"
 #include "cortext/processor/operation_context.hpp"
 #include "cortext/core/sparse.hpp"
 #include "cortext/telemetry/telemetry.hpp"
 #include "cortext/store/store.hpp"
 #include "cortext/store/utils.hpp"
 
+#include <algorithm>
+#include <cmath>
+#include <unordered_map>
 #include <unordered_set>
 
 namespace cortext::operations
@@ -15,24 +19,54 @@ namespace cortext::operations
 
 namespace
 {
-/// @brief Creates reinforcement edges for co-retrieved memories.
-void
-CreateReinforcementEdges (Transaction &tx,
-                          const std::vector<long long> &retrieved_ids,
-                          long long now_ts)
+struct ReinforcementCandidate
 {
-  if (retrieved_ids.size () < 2)
+  long long memory_id = 0;
+  double contextual_support = 0.0;
+  bool used = false;
+};
+
+/// @brief Creates reinforcement edges for co-retrieved memories.
+double
+CreateReinforcementEdges (Transaction &tx,
+                          const std::vector<ReinforcementCandidate> &candidates,
+                          long long now_ts,
+                          const SignalProcessor::Config &cfg)
+{
+  if (candidates.size () < 2)
     {
-      return;
+      return 0.0;
     }
 
-  for (size_t i = 0; i < retrieved_ids.size (); ++i)
+  const double base_step = core::ReinforcementCoRetrievalStep (
+      cfg.focus, cfg.sensitivity, cfg.stability);
+  const double unselected_scale = core::ReinforcementUnselectedScale (
+      cfg.focus, cfg.sensitivity, cfg.stability);
+  const double fanout_scale = core::ReinforcementFanoutDamping (
+      cfg.focus, cfg.sensitivity, cfg.stability,
+      static_cast<int> (candidates.size ()));
+
+  double step_sum = 0.0;
+  int step_count = 0;
+  for (size_t i = 0; i < candidates.size (); ++i)
     {
-      for (size_t j = i + 1; j < retrieved_ids.size (); ++j)
+      for (size_t j = i + 1; j < candidates.size (); ++j)
         {
-          constexpr double kReinforcementStep = 0.1;
-          long long id1 = std::min (retrieved_ids[i], retrieved_ids[j]);
-          long long id2 = std::max (retrieved_ids[i], retrieved_ids[j]);
+          long long id1 = std::min (candidates[i].memory_id,
+                                    candidates[j].memory_id);
+          long long id2 = std::max (candidates[i].memory_id,
+                                    candidates[j].memory_id);
+          const double support = std::sqrt (
+              core::Clamp (candidates[i].contextual_support, 0.0, 1.0)
+              * core::Clamp (candidates[j].contextual_support, 0.0, 1.0));
+          const bool anchored = candidates[i].used || candidates[j].used;
+          const double pair_scale = anchored ? 1.0 : unselected_scale;
+          const double pair_step = core::Clamp (
+              base_step * fanout_scale * support * pair_scale, 0.0, 1.0);
+          if (pair_step <= 0.0)
+            {
+              continue;
+            }
 
           tx.Execute (
               "INSERT INTO associations "
@@ -41,9 +75,12 @@ CreateReinforcementEdges (Transaction &tx,
               "ON CONFLICT (source_memory_id, target_memory_id, edge_type) DO UPDATE "
               "SET weight = MIN(weight + excluded.weight, 1.0), "
               "    last_reinforced = excluded.last_reinforced",
-              { id1, id2, kReinforcementStep, now_ts });
+              { id1, id2, pair_step, now_ts });
+          step_sum += pair_step;
+          ++step_count;
         }
     }
+  return step_count > 0 ? step_sum / static_cast<double> (step_count) : 0.0;
 }
 } // namespace
 
@@ -109,10 +146,11 @@ DetectMemoryUsage::Execute (OperationContext &context, Transaction &tx) const
   context.SetMemoryUsageEvents (std::move (events));
 
   int64_t reinforcement_candidate_count = 0;
+  double reinforcement_mean_step = 0.0;
   if (cfg.reinforcement_enabled && store)
     {
-      std::vector<long long> retrieved_memory_ids;
-      retrieved_memory_ids.reserve (retrieved.size ());
+      std::vector<ReinforcementCandidate> reinforcement_candidates;
+      reinforcement_candidates.reserve (retrieved.size ());
       std::unordered_set<long long> seen_memory_ids;
       seen_memory_ids.reserve (retrieved.size ());
       for (const auto &kv : retrieved)
@@ -146,14 +184,32 @@ DetectMemoryUsage::Execute (OperationContext &context, Transaction &tx) const
               if (!mem_exists.empty ()
                   && seen_memory_ids.insert (memory_id).second)
                 {
-                  retrieved_memory_ids.push_back (memory_id);
+                  double contextual_support
+                      = core::ReinforcementFallbackContextualSupport (
+                          cfg.focus, cfg.sensitivity, cfg.stability);
+                  for (const auto &event : context.GetMemoryUsageEvents ())
+                    {
+                      if (event.embedding_id == embedding_id
+                          && event.contextual_gain.has_value ())
+                        {
+                          contextual_support = core::Clamp (
+                              *event.contextual_gain, 0.0, 1.0);
+                          break;
+                        }
+                    }
+                  reinforcement_candidates.push_back (
+                      { memory_id,
+                        contextual_support,
+                        interrupt_allowed && selected_id.has_value ()
+                            && embedding_id == *selected_id });
                 }
             }
         }
       reinforcement_candidate_count
-          = static_cast<int64_t> (retrieved_memory_ids.size ());
-      CreateReinforcementEdges (tx, retrieved_memory_ids,
-                                static_cast<long long> (signal.timestamp));
+          = static_cast<int64_t> (reinforcement_candidates.size ());
+      reinforcement_mean_step = CreateReinforcementEdges (
+          tx, reinforcement_candidates, static_cast<long long> (signal.timestamp),
+          cfg);
     }
 
   const double usage_rate
@@ -166,7 +222,9 @@ DetectMemoryUsage::Execute (OperationContext &context, Transaction &tx) const
   // Update procedural store for successful usage
   if (cfg.procedural_enabled && used_count > 0 && x_ptr->size () > 0)
     {
-      const int k_key = core::SparseKeySize (context.GetConfig ().focus);
+      const int k_key = core::SparseKeySize (
+          context.GetConfig ().focus, context.GetConfig ().sensitivity,
+          context.GetConfig ().stability);
       const std::string key = core::SparseKey (*x_ptr, k_key);
       if (!key.empty ())
         {
@@ -233,7 +291,9 @@ DetectMemoryUsage::Execute (OperationContext &context, Transaction &tx) const
     telemetry::Attribute::Bool ("interrupt_allowed", interrupt_allowed),
     telemetry::Attribute::Int64 ("usage_count", static_cast<int64_t> (used_count)),
     telemetry::Attribute::Int64 ("reinforcement_candidate_count",
-                                 reinforcement_candidate_count)
+                                 reinforcement_candidate_count),
+    telemetry::Attribute::Double ("reinforcement_mean_step",
+                                  reinforcement_mean_step)
   });
 }
 

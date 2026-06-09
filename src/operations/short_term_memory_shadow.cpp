@@ -133,7 +133,8 @@ SelectAttachedVectorLabels (OperationContext &context, Transaction &tx,
                         && row.at ("distance").type () == typeid (double)
                     ? std::any_cast<double> (row.at ("distance"))
                     : 0.0;
-          const double score = core::Clamp (1.0 / (1.0 + distance), 0.0, 1.0);
+          const double score = core::RetrievalVectorDistanceScore (
+              distance, cfg.focus, cfg.sensitivity, cfg.stability);
           if (score < min_score)
             {
               continue;
@@ -240,7 +241,10 @@ SelectClusteredLabels (OperationContext &context, Transaction &tx,
         }
 
       std::vector<int> assignments (static_cast<size_t> (label_count), 0);
-      for (int iter = 0; iter < 25; ++iter)
+      const int cluster_iterations = std::max (
+          1, core::STMLabelClusterIterations (cfg.focus, cfg.sensitivity,
+                                              cfg.stability));
+      for (int iter = 0; iter < cluster_iterations; ++iter)
         {
           bool changed = false;
           for (int i = 0; i < label_count; ++i)
@@ -461,8 +465,14 @@ UpdateShortTermMemoryShadow::Execute (OperationContext &context,
   const double boundary_score = context.GetBoundaryScore ().value_or (0.0);
   const bool boundary_decay_enabled = !EnvBool (
       "CORTEXT_STM_SHADOW_DISABLE_BOUNDARY_DECAY", false);
+  const double hard_boundary_threshold
+      = core::STMShadowHardBoundaryThreshold (cfg.focus, cfg.sensitivity,
+                                              cfg.stability);
+  const int hard_boundary_retain_steps = std::max (
+      1, core::STMShadowHardBoundaryRetainSteps (cfg.focus, cfg.sensitivity,
+                                                 cfg.stability));
   const bool hard_boundary = boundary_decay_enabled
-                             && (boundary_score >= 0.65
+                             && (boundary_score >= hard_boundary_threshold
                                  || signal.force_boundary);
 
   std::deque<ProcessorContext::ShadowSTMItem> retained;
@@ -473,7 +483,8 @@ UpdateShortTermMemoryShadow::Execute (OperationContext &context,
         {
           continue;
         }
-      const bool keep = hard_boundary ? age <= 4 : age <= ttl_steps;
+      const bool keep = hard_boundary ? age <= hard_boundary_retain_steps
+                                      : age <= ttl_steps;
       if (keep)
         {
           retained.push_back (item);
@@ -512,7 +523,8 @@ UpdateShortTermMemoryShadow::Execute (OperationContext &context,
         {
           continue;
         }
-      const bool keep = hard_boundary ? age <= 4 : age <= ttl_steps;
+      const bool keep = hard_boundary ? age <= hard_boundary_retain_steps
+                                      : age <= ttl_steps;
       if (keep)
         {
           retained_edges.push_back (edge);

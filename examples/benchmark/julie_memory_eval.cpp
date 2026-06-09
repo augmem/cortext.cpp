@@ -36,6 +36,9 @@ struct Config
   int query_count = 120;
   int media_limit = 12;
   int consolidate_every = 0;
+  double focus = 0.5;
+  double sensitivity = 0.5;
+  double stability = 0.5;
   bool deep_consolidation = false;
 };
 
@@ -342,6 +345,12 @@ ParseArgs (int argc, char **argv)
         cfg.media_limit = std::stoi (require_value ());
       else if (arg == "--consolidate-every")
         cfg.consolidate_every = std::stoi (require_value ());
+      else if (arg == "--focus")
+        cfg.focus = std::stod (require_value ());
+      else if (arg == "--sensitivity")
+        cfg.sensitivity = std::stod (require_value ());
+      else if (arg == "--stability")
+        cfg.stability = std::stod (require_value ());
       else if (arg == "--deep")
         cfg.deep_consolidation = true;
       else
@@ -370,9 +379,9 @@ main (int argc, char **argv)
       fs::remove (cfg.db_path.string () + "-shm");
 
       cortext::Cortext::Config cortext_cfg;
-      cortext_cfg.focus = 0.35;
-      cortext_cfg.sensitivity = 0.65;
-      cortext_cfg.stability = 0.60;
+      cortext_cfg.focus = cfg.focus;
+      cortext_cfg.sensitivity = cfg.sensitivity;
+      cortext_cfg.stability = cfg.stability;
       auto engine = cortext::Cortext::Create (cortext_cfg, cfg.db_path.string (),
                                               cfg.models_dir);
 
@@ -571,6 +580,11 @@ main (int argc, char **argv)
       out["video_processed"] = video_processed;
       out["audio_processed"] = audio_processed;
       out["deep_consolidation"] = cfg.deep_consolidation;
+      out["knobs"] = {
+        { "focus", cfg.focus },
+        { "sensitivity", cfg.sensitivity },
+        { "stability", cfg.stability },
+      };
       out["privacy_note"]
           = "Aggregate metrics only; message text and media content are not "
             "written to this summary.";

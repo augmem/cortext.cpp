@@ -137,8 +137,8 @@ TEST_CASE ("Alg24 maintenance decays slots but preserves them with floor",
   cfg.stability = 0.5;
 
 
-  // One slot at t=0 with strength 1.0 → after 10s at 0.1/s → decay to 0
-  // But floor of 0.01 preserves slot
+  // One slot at t=0 with strength 1.0 -> after 10s at 0.1/s decays to the
+  // knob-derived floor.
   ProcessorContext::WMSlot slot;
   slot.embedding = s.embedding;
   slot.strength = 1.0;
@@ -155,10 +155,13 @@ TEST_CASE ("Alg24 maintenance decays slots but preserves them with floor",
 
   op.Execute (ctx, cortext::testing::GetNullTransaction ());
 
-  // Slot preserved with floor strength (0.01), not removed
+  // Slot preserved with floor strength, not removed.
   REQUIRE (pctx.wm_slots.size () == 1);
+  const double floor
+      = core::WMStrengthFloor (cfg.focus, cfg.sensitivity, cfg.stability);
   const double expected
-      = std::max (0.01, 1.0 - core::WMMaintenanceCostPerSlot (cfg.sensitivity) * 10.0);
+      = std::max (
+          floor, 1.0 - core::WMMaintenanceCostPerSlot (cfg.sensitivity) * 10.0);
   REQUIRE (pctx.wm_slots.front ().strength == Catch::Approx (expected));
   REQUIRE (pctx.wm_last_accepted == false);
   REQUIRE (pctx.wm_last_chunked == false);
@@ -196,8 +199,11 @@ TEST_CASE ("Alg24 maintenance reduces strength without removal when dt small",
   op.Execute (ctx, cortext::testing::GetNullTransaction ());
 
   REQUIRE (pctx.wm_slots.size () == 1);
+  const double floor
+      = core::WMStrengthFloor (cfg.focus, cfg.sensitivity, cfg.stability);
   const double expected
-      = std::max (0.01, 1.0 - core::WMMaintenanceCostPerSlot (cfg.sensitivity) * 5.0);
+      = std::max (
+          floor, 1.0 - core::WMMaintenanceCostPerSlot (cfg.sensitivity) * 5.0);
   REQUIRE (pctx.wm_slots.front ().strength == Catch::Approx (expected));
   // last_ts is NOT updated during passive decay - only when slot is accessed
   // Original last_ts (0.0) should be preserved
@@ -207,7 +213,7 @@ TEST_CASE ("Alg24 maintenance reduces strength without removal when dt small",
 TEST_CASE ("Alg24 uses Focus-derived gate_threshold for gating decision",
            "[operations][working_memory][gate_threshold]")
 {
-  // gate_threshold = lerp(0.1, 0.4, F) per Algorithm 24 spec
+  // gate_threshold = lerp(0.1, 0.4, FocusBias(F)) per Algorithm 24 spec
   // At F=0: threshold=0.1, at F=1: threshold=0.4
   Signal s;
   s.embedding = Eigen::VectorXf::Constant (4, 1.0f);
@@ -269,12 +275,12 @@ TEST_CASE ("Alg24 uses Focus-derived gate_threshold for gating decision",
     REQUIRE (pctx.wm_slots.size () == 1);
   }
 
-  SECTION ("Medium Focus (F=0.5) has threshold 0.25")
+  SECTION ("Medium Focus (F=0.5) uses FocusBias-derived threshold")
   {
     ProcessorContext pctx;
     SignalProcessor::Config cfg;
     cortext::testing::RequireEncoder (cfg);
-    cfg.focus = 0.5;       // gate_threshold = 0.25
+    cfg.focus = 0.5;
     cfg.sensitivity = 0.0; // minimal cost
     cfg.stability = 0.5;
 
@@ -360,7 +366,7 @@ TEST_CASE ("Alg24 input-based rehearsal boosts slot strength for similarity in "
   REQUIRE (pctx.wm_slots[0].strength >= before_strength);
 }
 
-TEST_CASE ("Alg24 rehearsal strength capped at kStrengthMax",
+TEST_CASE ("Alg24 rehearsal strength capped at knob-derived max",
            "[operations][working_memory][rehearsal][phase4][cap]")
 {
   Signal s;
@@ -376,14 +382,15 @@ TEST_CASE ("Alg24 rehearsal strength capped at kStrengthMax",
   cfg.focus = 0.0;       // chunk_threshold = 0.7, rehearsal_threshold = 0.5
   cfg.sensitivity = 1.0; // rehearsal_rate = 2.0 (max)
   cfg.stability = 0.5;
-
+  const double strength_max
+      = core::WMStrengthMax (cfg.focus, cfg.sensitivity, cfg.stability);
 
   // Seed slot at max strength
   ProcessorContext::WMSlot slot;
   slot.embedding = Eigen::VectorXf::Zero (3);
   slot.embedding[0] = 1.0f;
   slot.embedding.normalize ();
-  slot.strength = cortext::operations::constants::kStrengthMax;
+  slot.strength = strength_max;
   slot.last_ts = 100.0;
   slot.pos_index = 0;
   pctx.wm_slots.push_back (slot);
@@ -397,8 +404,7 @@ TEST_CASE ("Alg24 rehearsal strength capped at kStrengthMax",
   op.Execute (ctx, cortext::testing::GetNullTransaction ());
 
   // Strength should still be capped at max
-  REQUIRE (pctx.wm_slots[0].strength
-           <= cortext::operations::constants::kStrengthMax);
+  REQUIRE (pctx.wm_slots[0].strength <= strength_max);
 }
 
 TEST_CASE ("Alg24 rehearsal rate scales with Sensitivity knob",
@@ -876,11 +882,11 @@ TEST_CASE ("Alg24 recent slots resist eviction regardless of strength",
 
   // Calculate expected eviction scores:
   // Slot 0: dedication = 1.0 * 0.6 / 10.0 = 0.06
-  //         recency = exp(-1/60) ≈ 0.983
-  //         eviction_score = (1-0.06) * (1-0.983) ≈ 0.94 * 0.017 ≈ 0.016
+  //         recency = exp(-1/WMRecencyTauSeconds(F,S,T))
+  //         eviction_score stays low
   // Slot 1: dedication = 3.0 * 0.6 / 10.0 = 0.18
-  //         recency = exp(-180/60) = exp(-3) ≈ 0.050
-  //         eviction_score = (1-0.18) * (1-0.050) ≈ 0.82 * 0.95 ≈ 0.779
+  //         recency is much lower after 180s
+  //         eviction_score stays high
   // Slot 1 has MUCH higher eviction score → gets evicted
 
   WorkingMemory op;

@@ -1,5 +1,6 @@
 #include "cortext/operations/soft_anchor.hpp"
 
+#include "cortext/core/knobs.hpp"
 #include "cortext/processor/operation_context.hpp"
 #include "cortext/processor/processor_context.hpp"
 #include "cortext/store/store.hpp"
@@ -50,12 +51,6 @@ Clamp01 (double value)
   return std::max (0.0, std::min (1.0, value));
 }
 
-double
-Lerp (double a, double b, double t)
-{
-  return a + (b - a) * Clamp01 (t);
-}
-
 Eigen::VectorXf
 Normalize (const Eigen::VectorXf &v)
 {
@@ -83,7 +78,8 @@ SliceNormalize (const Eigen::VectorXf &v, Eigen::Index offset,
 }
 
 SignalViews
-ExtractViews (const Eigen::VectorXf &embedding)
+ExtractViews (const Eigen::VectorXf &embedding, double focus,
+              double sensitivity, double stability)
 {
   SignalViews views;
   views.full = Normalize (embedding);
@@ -100,7 +96,8 @@ ExtractViews (const Eigen::VectorXf &embedding)
       // without changing retrieval embeddings; entity quality remains weaker.
       views.semantic = views.full;
       views.entity = views.full;
-      views.q_entity = 0.5;
+      views.q_entity = core::SoftAnchorSingleViewEntityQuality (
+          focus, sensitivity, stability);
     }
   return views;
 }
@@ -187,9 +184,9 @@ JoinMemoryIds (const std::deque<long long> &ids)
 }
 
 std::string
-MemoryTier (int age, int active_ttl)
+MemoryTier (int age, int working_ttl, int active_ttl)
 {
-  if (age <= 4)
+  if (age <= working_ttl)
     {
       return "WM";
     }
@@ -325,32 +322,39 @@ UpdateSoftAnchor::Execute (OperationContext &context, Transaction &tx) const
       return;
     }
 
-  const SignalViews views = ExtractViews (*embedding);
   const double F = Clamp01 (context.GetConfig ().focus);
   const double S = Clamp01 (context.GetConfig ().sensitivity);
   const double T = Clamp01 (context.GetConfig ().stability);
+  const SignalViews views = ExtractViews (*embedding, F, S, T);
   const int step = processor.signals_processed;
-  const int active_ttl = static_cast<int> (std::round (Lerp (16.0, 56.0, T)));
+  const int working_ttl = std::max (
+      1, core::STMShadowHardBoundaryRetainSteps (F, S, T));
+  const int active_ttl = std::max (1, core::SoftAnchorActiveTTLSteps (T));
+  const std::size_t recent_memory_limit = static_cast<std::size_t> (
+      std::max (1, core::SoftAnchorRecentMemoryLimit (F, S, T)));
+  const double support_raw_threshold
+      = core::SoftAnchorSupportRawThreshold (F, S, T);
+  const double support_margin_threshold
+      = core::SoftAnchorSupportMarginThreshold (F, S, T);
+  const double support_entropy_max = core::SoftAnchorSupportEntropyMax (F, S, T);
+  const double contradiction_semantic_threshold
+      = core::SoftAnchorContradictionSemanticThreshold (F, S, T);
+  const double contradiction_entity_max
+      = core::SoftAnchorContradictionEntityMax (F, S, T);
+  const double durable_margin_threshold
+      = core::SoftAnchorDurableMarginThreshold (F, S, T);
+  const double durable_entropy_max
+      = core::SoftAnchorDurableEntropyMax (F, S, T);
   const double boundary_score = context.GetBoundaryScore ().value_or (0.0);
   const int64_t boundary_id = processor.episode_start_ts > 0
                                   ? static_cast<int64_t> (processor.episode_start_ts)
                                   : 0;
 
-  const double w_sem_raw = (0.45 - 0.15 * F + 0.10 * S) * views.q_semantic;
-  const double w_ent_raw = (0.25 + 0.35 * F) * views.q_entity;
-  const double w_full_raw = (0.20 + 0.25 * T + 0.05 * F) * views.q_full;
-  const double w_sum = std::max (1e-9, w_sem_raw + w_ent_raw + w_full_raw);
-  const double w_sem = w_sem_raw / w_sum;
-  const double w_ent = w_ent_raw / w_sum;
-  const double w_full = w_full_raw / w_sum;
-
-  const double blend_sum = 1.55 + 1.05 * F + 0.50 * S + 0.40 * T;
-  const double w_view = (0.55 + 0.20 * F) / blend_sum;
-  const double w_source = (0.20 + 0.20 * F + 0.10 * T) / blend_sum;
-  const double w_recency = (0.20 + 0.20 * S + 0.10 * T) / blend_sum;
-  const double w_support = (0.15 + 0.45 * T) / blend_sum;
-  const double w_boundary = (0.25 + 0.35 * F + 0.15 * T) / blend_sum;
-  const double w_contra = (0.20 + 0.30 * S + 0.20 * F) / blend_sum;
+  const auto view_weights = core::SoftAnchorViewScoringWeights (
+      F, S, T, views.q_semantic, views.q_entity, views.q_full);
+  const auto candidate_weights
+      = core::SoftAnchorCandidateScoringWeights (F, S, T);
+  const auto decision_policy = core::SoftAnchorDecisionPolicyForKnobs (F, S, T);
 
   std::vector<CandidateScore> candidates;
   candidates.reserve (processor.soft_anchor_states.size ());
@@ -363,7 +367,10 @@ UpdateSoftAnchor::Execute (OperationContext &context, Transaction &tx) const
           continue;
         }
       const int age = std::max (0, step - anchor.last_step);
-      if (anchor.status != "durable" && age > active_ttl * 2)
+      if (anchor.status != "durable"
+          && static_cast<double> (age)
+                 > static_cast<double> (active_ttl)
+                       * core::SoftAnchorActiveDecayMultiplier (F, S, T))
         {
           anchor.status = "decayed";
         }
@@ -373,26 +380,32 @@ UpdateSoftAnchor::Execute (OperationContext &context, Transaction &tx) const
       score.s_semantic = Map01Cosine (views.semantic, anchor.semantic_centroid);
       score.s_entity = Map01Cosine (views.entity, anchor.entity_centroid);
       score.s_full = Map01Cosine (views.full, anchor.full_centroid);
-      const double view = w_sem * score.s_semantic + w_ent * score.s_entity
-                          + w_full * score.s_full;
-      const double source = anchor.last_source_id == signal.source_id ? 1.0 : 0.25;
-      const double tau = std::max (1.0, Lerp (4.0, 32.0, T));
+      const double view = view_weights.semantic * score.s_semantic
+                          + view_weights.entity * score.s_entity
+                          + view_weights.full * score.s_full;
+      const double source = core::SoftAnchorSourceAffinity (
+          F, S, T, anchor.last_source_id == signal.source_id);
+      const double tau = core::SoftAnchorRecencyTauSteps (T);
       const double recency = std::exp (-std::log (2.0) * age / tau);
-      const double k_support = Lerp (1.5, 4.0, T);
+      const double k_support = core::SoftAnchorSupportSaturation (T);
       const double support = 1.0 - std::exp (
                                 -static_cast<double> (anchor.support_count)
                                     / k_support);
-      const double k_contra = Lerp (2.5, 1.0, S);
+      const double k_contra = core::SoftAnchorContradictionSaturation (S);
       const double contra = 1.0 - std::exp (
                                -static_cast<double> (anchor.contradiction_count)
                                    / k_contra);
       const double boundary_shift
           = anchor.last_boundary_id == boundary_id
                 ? 0.0
-                : Clamp01 (boundary_score * (0.40 + 0.40 * F + 0.20 * T));
-      score.raw = Clamp01 (w_view * view + w_source * source
-                           + w_recency * recency + w_support * support
-                           - w_boundary * boundary_shift - w_contra * contra);
+                : Clamp01 (boundary_score
+                           * core::SoftAnchorBoundaryShiftScale (F, T));
+      score.raw = Clamp01 (candidate_weights.view * view
+                           + candidate_weights.source * source
+                           + candidate_weights.recency * recency
+                           + candidate_weights.support * support
+                           - candidate_weights.boundary * boundary_shift
+                           - candidate_weights.contradiction * contra);
       candidates.push_back (score);
       raw_scores.push_back (score.raw);
     }
@@ -404,54 +417,41 @@ UpdateSoftAnchor::Execute (OperationContext &context, Transaction &tx) const
                                                    raw_scores.end ());
   const double specificity = Clamp01 (best_real - Median (raw_scores));
   const double real_entropy = raw_scores.empty () ? 0.0 : Entropy01 (
-      Softmax (raw_scores, Lerp (4.0, 14.0, F)));
-  const double generic = Clamp01 (0.40 * (1.0 - views.q_entity)
-                                  + 0.35 * real_entropy
-                                  + 0.25 * (1.0 - specificity));
-  const double info = Clamp01 ((views.q_semantic + views.q_entity
-                                + views.q_full) / 3.0)
+      Softmax (raw_scores, core::SoftAnchorSoftmaxTemperature (F)));
+  const double generic = core::SoftAnchorGenericScore (
+      F, S, T, views.q_entity, real_entropy, specificity);
+  const double info = Clamp01 (
+                          view_weights.semantic * views.q_semantic
+                          + view_weights.entity * views.q_entity
+                          + view_weights.full * views.q_full)
                       * (1.0 - generic);
   const double top_contra = 0.0;
   const double no_real_penalty = has_real_candidates ? (1.0 - best_real)
                                                      : (1.0 - info);
-  const double score_none = Clamp01 (0.20 + 0.55 * generic
-                                    + 0.20 * real_entropy
-                                    + 0.20 * no_real_penalty
-                                    + 0.15 * top_contra);
-  const double score_new = Clamp01 (0.15 + 0.45 * info
-                                   + 0.25 * boundary_score
-                                   + 0.20 * (1.0 - best_real)
-                                   - 0.35 * generic);
+  const double score_none = core::SoftAnchorNoneScore (
+      F, S, T, generic, real_entropy, no_real_penalty, top_contra);
+  const double score_new = core::SoftAnchorNewScore (
+      F, S, T, info, boundary_score, best_real, generic);
 
   std::vector<double> hypothesis_scores = raw_scores;
   const size_t none_index = hypothesis_scores.size ();
   hypothesis_scores.push_back (score_none);
   const size_t new_index = hypothesis_scores.size ();
   hypothesis_scores.push_back (score_new);
-  const auto probabilities = Softmax (hypothesis_scores, Lerp (4.0, 14.0, F));
+  const auto probabilities = Softmax (
+      hypothesis_scores, core::SoftAnchorSoftmaxTemperature (F));
   const double entropy = Entropy01 (probabilities);
   const auto winner = static_cast<size_t> (std::distance (
       probabilities.begin (),
       std::max_element (probabilities.begin (), probabilities.end ())));
 
-  const double theta_new = Clamp01 (Lerp (0.44, 0.62, F)
-                                   * Lerp (1.05, 0.90, S));
-  const double theta_keep = Clamp01 (Lerp (0.035, 0.080, F)
-                                    * Lerp (1.15, 0.75, S));
-  const double theta_tentative = Clamp01 (Lerp (0.38, 0.58, F)
-                                         * Lerp (1.10, 0.85, S));
-  const double margin_min = Clamp01 (Lerp (0.03, 0.15, F)
-                                    * Lerp (1.05, 0.75, S));
-  const double entropy_ambiguous = Clamp01 (Lerp (0.85, 0.55, F)
-                                           * Lerp (1.05, 1.15, S));
-  const double generic_hard = Clamp01 (Lerp (0.82, 0.65, F)
-                                      * Lerp (1.05, 0.95, S));
-
-  if ((winner == none_index) || generic >= generic_hard)
+  if ((winner == none_index)
+      || generic >= decision_policy.generic_hard_threshold)
     {
       processor.soft_anchor_last_none_count = 1;
     }
-  else if (winner == new_index && probabilities[new_index] >= theta_new)
+  else if (winner == new_index
+           && probabilities[new_index] >= decision_policy.new_threshold)
     {
       ProcessorContext::SoftAnchorState anchor;
       anchor.anchor_id = "soft_anchor_"
@@ -506,19 +506,17 @@ UpdateSoftAnchor::Execute (OperationContext &context, Transaction &tx) const
                                                          probabilities[new_index]);
       const double top_margin = candidates[0].posterior - second;
       const bool ambiguous = candidates.size () > 1
-                             && (top_margin < margin_min
-                                 || entropy >= entropy_ambiguous);
-      const int keep = std::max (
-          2, std::min (10, static_cast<int> (
-                              std::round (Lerp (8.0, 3.0, F)
-                                          * Lerp (1.10, 0.85, T)
-                                          + 2.0 * S))));
+                             && (top_margin < decision_policy.margin_min
+                                 || entropy
+                                        >= decision_policy.ambiguous_entropy);
+      const int keep = decision_policy.keep_count;
       for (int kept = 0;
            kept < keep && kept < static_cast<int> (candidates.size ());
            ++kept)
         {
           const auto &candidate = candidates[static_cast<size_t> (kept)];
-          if (candidate.posterior < theta_keep || candidate.raw < theta_tentative)
+          if (candidate.posterior < decision_policy.keep_threshold
+              || candidate.raw < decision_policy.tentative_threshold)
             {
               continue;
             }
@@ -530,7 +528,7 @@ UpdateSoftAnchor::Execute (OperationContext &context, Transaction &tx) const
           link.anchor_strength = candidate.posterior;
           link.anchor_label = ambiguous ? "ambiguous" : "tentative";
           link.evidence_kind = "continued";
-          link.memory_tier = MemoryTier (age, active_ttl);
+          link.memory_tier = MemoryTier (age, working_ttl, active_ttl);
           link.score = candidate.raw;
           link.margin = kept == 0 ? top_margin : candidate.posterior - second;
           link.entropy = entropy;
@@ -544,7 +542,7 @@ UpdateSoftAnchor::Execute (OperationContext &context, Transaction &tx) const
       if (!processor.soft_anchor_last_links.empty ())
         {
           auto &anchor = processor.soft_anchor_states[candidates[0].index];
-          const double alpha = Clamp01 (0.35 - 0.15 * T + 0.10 * S);
+          const double alpha = decision_policy.centroid_alpha;
           BlendCentroid (anchor.semantic_centroid, views.semantic, alpha);
           BlendCentroid (anchor.entity_centroid, views.entity, alpha);
           BlendCentroid (anchor.full_centroid, views.full, alpha);
@@ -561,25 +559,26 @@ UpdateSoftAnchor::Execute (OperationContext &context, Transaction &tx) const
           anchor.last_ts = signal.timestamp;
           anchor.last_boundary_id = boundary_id;
           anchor.recent_memory_ids.push_back (*memory_id);
-          while (anchor.recent_memory_ids.size () > 32)
+          while (anchor.recent_memory_ids.size () > recent_memory_limit)
             {
               anchor.recent_memory_ids.pop_front ();
             }
-          if (candidates[0].raw >= 0.72 && top_margin >= 0.12
-              && entropy <= 0.45)
+          if (candidates[0].raw >= support_raw_threshold
+              && top_margin >= support_margin_threshold
+              && entropy <= support_entropy_max)
             {
               anchor.support_count += 1;
             }
-          if (candidates[0].s_semantic >= 0.80 && candidates[0].s_entity <= 0.48)
+          if (candidates[0].s_semantic >= contradiction_semantic_threshold
+              && candidates[0].s_entity <= contradiction_entity_max)
             {
               anchor.contradiction_count += 1;
             }
-          const int support_required = std::max (
-              2, std::min (6, static_cast<int> (
-                                  std::ceil (2.0 + 1.5 * F + 2.0 * T))));
+          const int support_required = decision_policy.durable_support_required;
           if (anchor.support_count >= support_required
-              && anchor.contradiction_count == 0 && top_margin >= 0.24
-              && entropy <= 0.30)
+              && anchor.contradiction_count == 0
+              && top_margin >= durable_margin_threshold
+              && entropy <= durable_entropy_max)
             {
               anchor.status = "durable";
               processor.soft_anchor_last_links.front ().anchor_label = "durable";

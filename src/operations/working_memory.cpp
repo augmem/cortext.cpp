@@ -18,13 +18,6 @@ namespace cortext::operations
 
 namespace
 {
-/// @brief Computes WM strength base contribution scale based on Stability.
-inline double
-WMStrengthBase (double T)
-{
-  return core::Lerp (constants::kWMBaseMin, constants::kWMBaseMax, T);
-}
-
 inline double
 ComputeMeanCosWindow (const std::deque<Eigen::VectorXf> &ctx,
                       const Eigen::VectorXf &emb, int window)
@@ -56,11 +49,12 @@ ComputeMeanCosWindow (const std::deque<Eigen::VectorXf> &ctx,
 
 inline double
 RelevanceToTask (const Eigen::VectorXf &q,
-                 const std::deque<Eigen::VectorXf> &task_ctx)
+                 const std::deque<Eigen::VectorXf> &task_ctx,
+                 double focus, double sensitivity, double stability)
 {
   if (q.size () == 0 || task_ctx.empty ())
     {
-      return 0.5;
+      return core::WMTaskRelevanceFallback (focus, sensitivity, stability);
     }
   Eigen::VectorXf mean = Eigen::VectorXf::Zero (q.size ());
   int count = 0;
@@ -75,7 +69,7 @@ RelevanceToTask (const Eigen::VectorXf &q,
     }
   if (count <= 0)
     {
-      return 0.5;
+      return core::WMTaskRelevanceFallback (focus, sensitivity, stability);
     }
   mean /= static_cast<float> (count);
   const double cos = core::CosineSimilarity (q, mean);
@@ -92,6 +86,8 @@ WorkingMemory::Execute (OperationContext &context, Transaction &tx) const
   const auto &cfg = context.GetConfig ();
   const auto &signal = context.GetSignal ();
   const bool preserve_input_trace = signal.force_write;
+  const double wm_strength_max = core::WMStrengthMax (
+      cfg.focus, cfg.sensitivity, cfg.stability);
 
   // Maintenance: decay strengths based on elapsed time.
   // NOTE: We do NOT evict slots during passive decay. Slots should only be
@@ -110,7 +106,9 @@ WorkingMemory::Execute (OperationContext &context, Transaction &tx) const
       // Decay strength but floor at a minimum to preserve slot
       // Slot will be replaced via eviction when capacity is reached
       const double strength_after
-          = std::max (0.01, slot.strength - cost_per_slot * dt);
+          = std::max (core::WMStrengthFloor (
+                          cfg.focus, cfg.sensitivity, cfg.stability),
+                      slot.strength - cost_per_slot * dt);
       slot.strength = strength_after;
       // Do NOT update last_ts here - only update when slot is accessed
     }
@@ -173,7 +171,8 @@ WorkingMemory::Execute (OperationContext &context, Transaction &tx) const
   const Eigen::VectorXf &task_query
       = (acc.mu_acc.size () > 0) ? acc.mu_acc : e_rep;
   const double relevance = RelevanceToTask (
-      task_query, p_ctx.recent_context_embeddings);
+      task_query, p_ctx.recent_context_embeddings, cfg.focus,
+      cfg.sensitivity, cfg.stability);
 
   double max_cos = -1.0;
   for (const auto &slot : p_ctx.wm_slots)
@@ -190,15 +189,12 @@ WorkingMemory::Execute (OperationContext &context, Transaction &tx) const
             ? 1.0
             : core::Clamp ((1.0 - max_cos) * 0.5, 0.0, 1.0);
 
-  const double f_eff = core::FocusBias (cfg.focus);
-  const double s_eff = core::SensitivityBias (cfg.sensitivity);
-  const double w_alpha = core::Lerp (0.55, 0.70, f_eff);
-  const double w_beta = core::Lerp (0.20, 0.35, f_eff);
-  const double w_gamma = core::Lerp (0.10, 0.30, s_eff);
-  const double w_sum = std::max (constants::kTiny, w_alpha + w_beta + w_gamma);
-  const double alpha = w_alpha / w_sum;
-  const double beta = w_beta / w_sum;
-  const double gamma = w_gamma / w_sum;
+  const auto benefit_weights
+      = core::WMBenefitScoringWeights (cfg.focus, cfg.sensitivity,
+                                       cfg.stability);
+  const double alpha = benefit_weights.window;
+  const double beta = benefit_weights.relevance;
+  const double gamma = benefit_weights.novelty;
 
   const double benefit = core::Clamp01 (
       alpha * core::Clamp01 (S_window) + beta * relevance + gamma * novelty_to_set);
@@ -216,11 +212,15 @@ WorkingMemory::Execute (OperationContext &context, Transaction &tx) const
             ? (static_cast<double> (k - base_capacity)
                / static_cast<double> (base_capacity))
             : 0.0;
-  const double capacity_pressure = 1.0 + std::pow (over_ratio, 3.0);
+  const double capacity_pressure
+      = 1.0
+        + std::pow (over_ratio, core::WMCapacityPressureExponent (
+                                    cfg.focus, cfg.sensitivity,
+                                    cfg.stability));
   const double raw_cost
       = (cost_per_slot * static_cast<double> (k) + complexity_penalty)
         * capacity_pressure;
-  const double cost_total = raw_cost / (1.0 + raw_cost);
+  const double cost_total = core::WMCostSaturator (raw_cost);
 
   if (!preserve_input_trace && margin < cost_total)
     {
@@ -276,7 +276,7 @@ WorkingMemory::Execute (OperationContext &context, Transaction &tx) const
     {
       auto &slot = p_ctx.wm_slots[static_cast<size_t> (best_idx)];
       const int old_n = slot.n_signals;
-      const double add_strength = WMStrengthBase (cfg.stability) * benefit;
+      const double add_strength = core::WMStrengthBase (cfg.stability) * benefit;
       const double alpha = std::max (constants::kTiny, slot.strength);
       const double beta = std::max (constants::kTiny, add_strength);
       Eigen::VectorXf new_vec = alpha * slot.embedding + beta * e_rep;
@@ -286,10 +286,9 @@ WorkingMemory::Execute (OperationContext &context, Transaction &tx) const
           new_vec = new_vec / static_cast<float> (norm);
         }
       slot.embedding = new_vec;
-      slot.strength
-          = std::min (constants::kStrengthMax,
-                      std::max (constants::kNormalizedMin,
-                                slot.strength + add_strength));
+      slot.strength = std::min (
+          wm_strength_max,
+          std::max (constants::kNormalizedMin, slot.strength + add_strength));
       slot.last_ts = now_s;
 
       // Update memory-level metadata (Section 6.1.1)
@@ -360,9 +359,9 @@ WorkingMemory::Execute (OperationContext &context, Transaction &tx) const
         telemetry::Attribute::Int64 ("base_capacity", base_capacity),
         telemetry::Attribute::Double ("cost_per_slot", cost_per_slot),
         telemetry::Attribute::Double ("complexity_penalty", complexity_penalty),
-        telemetry::Attribute::Double ("w_alpha", w_alpha),
-        telemetry::Attribute::Double ("w_beta", w_beta),
-        telemetry::Attribute::Double ("w_gamma", w_gamma),
+        telemetry::Attribute::Double ("w_alpha", alpha),
+        telemetry::Attribute::Double ("w_beta", beta),
+        telemetry::Attribute::Double ("w_gamma", gamma),
         telemetry::Attribute::Double ("alpha", alpha),
         telemetry::Attribute::Double ("beta", beta),
         telemetry::Attribute::Double ("gamma", gamma),
@@ -379,8 +378,10 @@ WorkingMemory::Execute (OperationContext &context, Transaction &tx) const
     {
       auto &slot = p_ctx.wm_slots[static_cast<size_t> (best_idx)];
       const double rehearsal_rate = core::WMRehearsalRate (cfg.sensitivity);
-      const double boost = rehearsal_rate * constants::kWMRehearsalBaseDelta;
-      slot.strength = std::min (constants::kStrengthMax, slot.strength + boost);
+      const double boost = rehearsal_rate
+                           * core::WMRehearsalBaseDelta (
+                               cfg.focus, cfg.sensitivity, cfg.stability);
+      slot.strength = std::min (wm_strength_max, slot.strength + boost);
       slot.last_ts = now_s;
       // Continue to insert logic - rehearsal doesn't prevent new slot creation
     }
@@ -392,7 +393,9 @@ WorkingMemory::Execute (OperationContext &context, Transaction &tx) const
     {
       const double retrieval_threshold = core::WMChunkingThreshold (cfg.focus);
       const double rehearsal_rate = core::WMRehearsalRate (cfg.sensitivity);
-      const double boost = rehearsal_rate * constants::kWMRehearsalBaseDelta;
+      const double boost = rehearsal_rate
+                           * core::WMRehearsalBaseDelta (
+                               cfg.focus, cfg.sensitivity, cfg.stability);
 
       for (auto &slot : p_ctx.wm_slots)
         {
@@ -405,7 +408,7 @@ WorkingMemory::Execute (OperationContext &context, Transaction &tx) const
               if (sim >= retrieval_threshold)
                 {
                   slot.strength
-                      = std::min (constants::kStrengthMax, slot.strength + boost);
+                      = std::min (wm_strength_max, slot.strength + boost);
                   slot.last_ts = now_s;
                   break; // Only boost once per slot per memory
                 }
@@ -453,13 +456,15 @@ WorkingMemory::Execute (OperationContext &context, Transaction &tx) const
 
               // Dedication: higher strength + higher T = more dedicated
               const double dedication = std::clamp (
-                  slot.strength * dedication_strength / constants::kStrengthMax,
+                  slot.strength * dedication_strength / wm_strength_max,
                   0.0, 1.0);
 
               // Recency: recent access = lower eviction priority
               const double elapsed = std::max (0.0, now_s - slot.last_ts);
               const double recency
-                  = std::exp (-elapsed / constants::kWMRecencyTauSeconds);
+                  = std::exp (-elapsed / core::WMRecencyTauSeconds (
+                                            cfg.focus, cfg.sensitivity,
+                                            cfg.stability));
 
               // Eviction score: high = weak + old = evict first
               const double eviction_score = (1.0 - dedication) * (1.0 - recency);
@@ -490,12 +495,10 @@ WorkingMemory::Execute (OperationContext &context, Transaction &tx) const
   // Create new WMSlot with memory-level metadata (Section 6.1.1)
   ProcessorContext::WMSlot slot;
   slot.embedding = vec;
-  slot.strength
-      = std::min (constants::kStrengthMax,
-                  std::max (constants::kNormalizedMin,
-                            WMStrengthBase (cfg.stability)
-                                * (constants::kOneHalf
-                                   + constants::kOneHalf * benefit)));
+  slot.strength = std::max (
+      constants::kNormalizedMin,
+      core::WMInitialSlotStrength (cfg.focus, cfg.sensitivity,
+                                   cfg.stability, benefit));
   slot.last_ts = now_s;
   slot.pos_index = p_ctx.signals_processed;
 
@@ -556,9 +559,9 @@ WorkingMemory::Execute (OperationContext &context, Transaction &tx) const
     telemetry::Attribute::Int64 ("base_capacity", base_capacity),
     telemetry::Attribute::Double ("cost_per_slot", cost_per_slot),
     telemetry::Attribute::Double ("complexity_penalty", complexity_penalty),
-    telemetry::Attribute::Double ("w_alpha", w_alpha),
-    telemetry::Attribute::Double ("w_beta", w_beta),
-    telemetry::Attribute::Double ("w_gamma", w_gamma),
+    telemetry::Attribute::Double ("w_alpha", alpha),
+    telemetry::Attribute::Double ("w_beta", beta),
+    telemetry::Attribute::Double ("w_gamma", gamma),
     telemetry::Attribute::Double ("alpha", alpha),
     telemetry::Attribute::Double ("beta", beta),
     telemetry::Attribute::Double ("gamma", gamma),

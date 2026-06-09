@@ -36,7 +36,7 @@ STOPWORDS = {
     "they", "this", "was", "what", "when", "where", "who", "why", "with",
     "would", "you", "your",
 }
-LOCAL_JUDGE_HOSTS = {"localhost", "127.0.0.1", "::1", "0.0.0.0"}
+LOCAL_JUDGE_HOSTS = {"localhost", "127.0.0.1", "::1"}
 DEFAULT_LOCAL_JUDGE_BASE_URL = "http://127.0.0.1:8000/v1"
 DEFAULT_OLLAMA_BASE_URL = "http://127.0.0.1:11434"
 DEFAULT_OLLAMA_MODEL = "gemma4:12b-it-qat"
@@ -153,10 +153,19 @@ def media_source_id(path: pathlib.Path, kind: str) -> str:
     return JULIE_SOURCE_ID
 
 
-def build_timeline(input_dir: pathlib.Path, max_messages: int, media_limit: int) -> list[Doc]:
+def build_timeline(
+    input_dir: pathlib.Path,
+    max_messages: int,
+    media_limit: int,
+    skip_messages: int = 0,
+) -> list[Doc]:
     messages = parse_messages(input_dir / "Messages - Julie Willen.txt")
+    if skip_messages > 0:
+        messages = messages[skip_messages:]
     if max_messages >= 0:
         messages = messages[:max_messages]
+    message_window_start = int(messages[0]["timestamp"]) if messages else 0
+    message_window_end = int(messages[-1]["timestamp"]) if messages else 0
 
     media: list[tuple[pathlib.Path, int, str]] = []
     for path in input_dir.rglob("*"):
@@ -166,7 +175,12 @@ def build_timeline(input_dir: pathlib.Path, max_messages: int, media_limit: int)
         if kind not in {"audio", "image", "video"}:
             continue
         timestamp = parse_timestamp(path.name)
-        media.append((path, int(timestamp or 0), kind))
+        timestamp_value = int(timestamp or 0)
+        if message_window_start and (
+            timestamp_value < message_window_start or timestamp_value > message_window_end
+        ):
+            continue
+        media.append((path, timestamp_value, kind))
     media.sort(key=lambda item: (item[1], str(item[0])))
 
     events: list[tuple[int, int, bool, int]] = []
@@ -207,6 +221,19 @@ def build_timeline(input_dir: pathlib.Path, max_messages: int, media_limit: int)
             source_blob=source_blob,
         ))
     return out
+
+
+def timeline_args_from_summary(summary: dict) -> tuple[int, int, int]:
+    skip_messages = int(
+        summary.get("timeline_skip_messages", summary.get("skipped_transcript_messages", 0))
+    )
+    max_messages = int(
+        summary.get("timeline_max_messages", summary.get("processed_text_messages", -1))
+    )
+    media_limit = int(
+        summary.get("timeline_media_limit", summary.get("media_attempted", -1))
+    )
+    return skip_messages, max_messages, media_limit
 
 
 def connect(path: pathlib.Path) -> sqlite3.Connection:
@@ -775,10 +802,12 @@ def freeze(args: argparse.Namespace) -> int:
     summary = json.loads(args.summary.read_text())
     input_dir = args.input_dir or pathlib.Path(summary["input_dir"])
     db_path = args.db or pathlib.Path(summary["db_path"])
+    skip_messages, max_messages, media_limit = timeline_args_from_summary(summary)
     timeline = build_timeline(
         input_dir,
-        int(summary.get("processed_text_messages", -1)),
-        int(summary.get("media_attempted", -1)),
+        max_messages,
+        media_limit,
+        skip_messages,
     )
     conn = connect(db_path)
     doc_to_memory = load_memory_doc_map(conn, timeline)
@@ -840,10 +869,12 @@ def judge_freeze(args: argparse.Namespace) -> int:
     summary = json.loads(args.summary.read_text())
     input_dir = args.input_dir or pathlib.Path(summary["input_dir"])
     db_path = args.db or pathlib.Path(summary["db_path"])
+    skip_messages, max_messages, media_limit = timeline_args_from_summary(summary)
     timeline = build_timeline(
         input_dir,
-        int(summary.get("processed_text_messages", -1)),
-        int(summary.get("media_attempted", -1)),
+        max_messages,
+        media_limit,
+        skip_messages,
     )
     conn = connect(db_path)
     doc_to_memory = load_memory_doc_map(conn, timeline)
@@ -945,10 +976,12 @@ def evaluate(args: argparse.Namespace) -> int:
     judge = json.loads(args.judge.read_text()) if args.judge else {}
     input_dir = args.input_dir or pathlib.Path(summary.get("input_dir") or frozen.get("input_dir"))
     db_path = args.db or pathlib.Path(summary.get("db_path") or frozen.get("db_path"))
+    skip_messages, max_messages, media_limit = timeline_args_from_summary(summary)
     timeline = build_timeline(
         input_dir,
-        int(summary.get("processed_text_messages", -1)),
-        int(summary.get("media_attempted", -1)),
+        max_messages,
+        media_limit,
+        skip_messages,
     )
     conn = connect(db_path)
     doc_to_memory = load_memory_doc_map(conn, timeline)

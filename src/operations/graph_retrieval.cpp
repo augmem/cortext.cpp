@@ -107,14 +107,15 @@ IsRouteStopword (const std::string &token)
 }
 
 std::vector<std::string>
-RouteTokens (const std::string &text)
+RouteTokens (const std::string &text, int min_chars)
 {
   std::vector<std::string> tokens;
   std::istringstream in (CanonicalQueryText (text));
   std::string token;
+  const size_t min_token_chars = static_cast<size_t> (std::max (1, min_chars));
   while (in >> token)
     {
-      if (token.size () < 3 || IsRouteStopword (token))
+      if (token.size () < min_token_chars || IsRouteStopword (token))
         {
           continue;
         }
@@ -127,13 +128,14 @@ RouteTokens (const std::string &text)
 
 double
 RouteTokenOverlapScore (const std::vector<std::string> &query_tokens,
-                        const std::string &text)
+                        const std::string &text, double focus,
+                        double sensitivity, double stability, int min_chars)
 {
   if (query_tokens.empty () || text.empty ())
     {
       return 0.0;
     }
-  const auto text_tokens = RouteTokens (text);
+  const auto text_tokens = RouteTokens (text, min_chars);
   if (text_tokens.empty ())
     {
       return 0.0;
@@ -158,8 +160,11 @@ RouteTokenOverlapScore (const std::vector<std::string> &query_tokens,
       = static_cast<double> (overlap)
         / static_cast<double> (std::min (query_tokens.size (),
                                          text_tokens.size ()));
-  return core::Clamp (0.70 * query_coverage + 0.30 * source_coverage, 0.0,
-                      1.0);
+  const double query_weight = core::RetrievalTokenOverlapQueryWeight (
+      focus, sensitivity, stability);
+  return core::Clamp (query_weight * query_coverage
+                          + (1.0 - query_weight) * source_coverage,
+                      0.0, 1.0);
 }
 
 std::string
@@ -338,7 +343,8 @@ MetacognitiveModeLabel (ProcessorContext::MetacognitiveMode mode)
 double
 ResolveResurfacingDecayScale (
     Transaction &tx,
-    const temporal::RetrievalAblationOverride &retrieval_override)
+    const temporal::RetrievalAblationOverride &retrieval_override,
+    double stability)
 {
   const auto mode = temporal::ResolveResurfacingDecayMode (retrieval_override);
   if (mode == temporal::ResurfacingDecayMode::TimeOnly)
@@ -352,9 +358,11 @@ ResolveResurfacingDecayScale (
   switch (mode)
     {
     case temporal::ResurfacingDecayMode::PressureGate:
-      return pressure::GateScale (pressure_state, 0.2);
+      return pressure::GateScale (
+          pressure_state, core::RetrievalPressureGateLowScale (stability));
     case temporal::ResurfacingDecayMode::PressureRamp:
-      return pressure::RampScale (pressure_state, 0.1);
+      return pressure::RampScale (
+          pressure_state, core::RetrievalPressureRampLowScale (stability));
     case temporal::ResurfacingDecayMode::TimeOnly:
       break;
     }
@@ -368,7 +376,8 @@ ApplyFreshnessPenaltyScale (double freshness, double penalty_scale)
 }
 
 store::FactRecord
-BuildFactRecord (const std::map<std::string, std::any> &row)
+BuildFactRecord (const std::map<std::string, std::any> &row, double focus,
+                 double sensitivity, double stability)
 {
   store::FactRecord record;
   if (auto it = row.find ("fact_id"); it != row.end ())
@@ -394,7 +403,9 @@ BuildFactRecord (const std::map<std::string, std::any> &row)
   if (auto it = row.find ("superseded_at_ts"); it != row.end ())
     record.superseded_at_ts = AnyToOptionalInt64 (it->second);
   if (auto it = row.find ("confidence"); it != row.end ())
-    record.confidence = AnyToDouble (it->second, 0.5);
+    record.confidence = AnyToDouble (
+        it->second,
+        core::RetrievalFactMissingConfidence (focus, sensitivity, stability));
   if (auto it = row.find ("summary_memory_id"); it != row.end ())
     record.summary_memory_id = AnyToInt64 (it->second);
   if (auto it = row.find ("embedding_id"); it != row.end ())
@@ -441,67 +452,19 @@ FactPairKey (const std::string &canonical_subject,
 }
 
 double
-PredicateCriticality (const std::string &canonical_predicate)
+EvidenceWeight (const std::string &evidence_type, double support_weight,
+                double focus, double sensitivity, double stability)
 {
-  const auto contains = [&canonical_predicate] (const char *needle) {
-    return canonical_predicate.find (needle) != std::string::npos;
-  };
-  if (contains ("medication") || contains ("caregiver") || contains ("location")
-      || contains ("schedule") || contains ("appointment")
-      || contains ("safety") || contains ("destination")
-      || contains ("pickup") || contains ("lives_in"))
-    {
-      return 1.0;
-    }
-  if (contains ("routine") || contains ("household")
-      || contains ("home") || contains ("works_at"))
-    {
-      return 0.75;
-    }
-  if (contains ("prefer") || contains ("likes") || contains ("favorite"))
-    {
-      return 0.45;
-    }
-  return 0.60;
-}
-
-double
-PredicateRoutineAffinity (const std::string &canonical_predicate)
-{
-  const auto contains = [&canonical_predicate] (const char *needle) {
-    return canonical_predicate.find (needle) != std::string::npos;
-  };
-  if (contains ("schedule") || contains ("routine") || contains ("home")
-      || contains ("household") || contains ("works_at"))
-    {
-      return 1.0;
-    }
-  if (contains ("prefer") || contains ("likes") || contains ("favorite"))
-    {
-      return 0.8;
-    }
-  if (contains ("medication") || contains ("caregiver")
-      || contains ("lives_in") || contains ("location"))
-    {
-      return 0.35;
-    }
-  return 0.15;
-}
-
-double
-EvidenceWeight (const std::string &evidence_type, double support_weight)
-{
-  double type_weight = 0.75;
-  if (evidence_type == "episodic")
-    {
-      type_weight = 1.0;
-    }
-  else if (evidence_type == "summary")
-    {
-      type_weight = 0.88;
-    }
-  return core::Clamp (type_weight * core::Clamp (support_weight, 0.25, 1.0),
-                      0.0, 1.0);
+  const double type_weight = core::FactRetrievalEvidenceTypeWeight (
+      focus, sensitivity, stability, evidence_type.c_str ());
+  return core::Clamp (
+      type_weight
+          * core::Clamp (
+              support_weight,
+              core::FactRetrievalEvidenceSupportFloor (focus, sensitivity,
+                                                       stability),
+              1.0),
+      0.0, 1.0);
 }
 
 struct LinkedFactEvidence
@@ -522,7 +485,8 @@ struct CandidateFactScore
 };
 
 double
-FactBoostMultiplier (const temporal::RetrievalAblationOverride &override)
+FactBoostMultiplier (const temporal::RetrievalAblationOverride &override,
+                     double focus, double sensitivity, double stability)
 {
   if (!override.fact_boost_strength.has_value ())
     {
@@ -533,15 +497,18 @@ FactBoostMultiplier (const temporal::RetrievalAblationOverride &override)
     case temporal::FactBoostStrength::Off:
       return 0.0;
     case temporal::FactBoostStrength::Weak:
-      return 0.55;
+      return core::RetrievalFactBoostWeakMultiplier (focus, sensitivity,
+                                                     stability);
     case temporal::FactBoostStrength::Strong:
-      return 1.45;
+      return core::RetrievalFactBoostStrongMultiplier (focus, sensitivity,
+                                                       stability);
     }
   return 1.0;
 }
 
 double
-StalePenaltyMultiplier (const temporal::RetrievalAblationOverride &override)
+StalePenaltyMultiplier (const temporal::RetrievalAblationOverride &override,
+                        double focus, double sensitivity, double stability)
 {
   if (!override.stale_penalty_strength.has_value ())
     {
@@ -554,7 +521,8 @@ StalePenaltyMultiplier (const temporal::RetrievalAblationOverride &override)
     case temporal::StalePenaltyStrength::Moderate:
       return 1.0;
     case temporal::StalePenaltyStrength::Strong:
-      return 1.75;
+      return core::RetrievalStalePenaltyStrongMultiplier (focus, sensitivity,
+                                                          stability);
     }
   return 1.0;
 }
@@ -601,7 +569,9 @@ double
 RoutineRecencyBoostAdjustment (const store::FactRecord &record,
                                const store::FactScore &score,
                                temporal::RetrievalMode mode,
-                               const temporal::RetrievalAblationOverride &override)
+                               const temporal::RetrievalAblationOverride &override,
+                               double focus, double sensitivity,
+                               double stability)
 {
   if (mode != temporal::RetrievalMode::Current)
     {
@@ -609,21 +579,26 @@ RoutineRecencyBoostAdjustment (const store::FactRecord &record,
     }
 
   const double routine_affinity
-      = PredicateRoutineAffinity (record.canonical_predicate);
+      = store::PredicateRoutineAffinity (record.canonical_predicate, focus,
+                                         sensitivity, stability);
+  const auto policy = core::RetrievalRoutineRecencyAdjustmentPolicy (
+      focus, sensitivity, stability);
   switch (ResolveRoutineRecencyMode (override))
     {
     case temporal::RoutineRecencyMode::Balanced:
       return 1.0;
     case temporal::RoutineRecencyMode::RoutineBiased:
       return core::Clamp (
-          1.0 + 0.40 * routine_affinity * score.routine_support
-              - 0.16 * score.recency_support,
-          0.70, 1.45);
+          1.0 + policy.routine_boost_weight * routine_affinity
+                    * score.routine_support
+              - policy.routine_recency_penalty_weight * score.recency_support,
+          policy.routine_min_multiplier, policy.routine_max_multiplier);
     case temporal::RoutineRecencyMode::RecencyBiased:
       return core::Clamp (
-          1.0 + 0.46 * score.recency_support
-              - 0.18 * routine_affinity * score.routine_support,
-          0.70, 1.55);
+          1.0 + policy.recency_boost_weight * score.recency_support
+              - policy.recency_routine_penalty_weight * routine_affinity
+                    * score.routine_support,
+          policy.recency_min_multiplier, policy.recency_max_multiplier);
     }
   return 1.0;
 }
@@ -632,7 +607,8 @@ double
 RoutineRecencyStaleAdjustment (
     const store::FactRecord &record, const store::FactScore &score,
     temporal::RetrievalMode mode,
-    const temporal::RetrievalAblationOverride &override)
+    const temporal::RetrievalAblationOverride &override, double focus,
+    double sensitivity, double stability)
 {
   if (mode != temporal::RetrievalMode::Current)
     {
@@ -640,19 +616,29 @@ RoutineRecencyStaleAdjustment (
     }
 
   const double routine_affinity
-      = PredicateRoutineAffinity (record.canonical_predicate);
+      = store::PredicateRoutineAffinity (record.canonical_predicate, focus,
+                                         sensitivity, stability);
+  const auto policy = core::RetrievalRoutineRecencyAdjustmentPolicy (
+      focus, sensitivity, stability);
   switch (ResolveRoutineRecencyMode (override))
     {
     case temporal::RoutineRecencyMode::Balanced:
       return 1.0;
     case temporal::RoutineRecencyMode::RoutineBiased:
       return core::Clamp (
-          1.0 - 0.65 * routine_affinity * score.routine_support, 0.35, 1.05);
+          1.0 - policy.stale_routine_penalty_weight * routine_affinity
+                    * score.routine_support,
+          policy.stale_routine_min_multiplier,
+          policy.stale_routine_max_multiplier);
     case temporal::RoutineRecencyMode::RecencyBiased:
       return core::Clamp (
-          1.0 + 0.45 * std::max (score.recency_support, 0.35)
-              + 0.24 * routine_affinity,
-          0.95, 1.75);
+          1.0
+              + policy.stale_recency_boost_weight
+                    * std::max (score.recency_support,
+                                policy.stale_recency_floor)
+              + policy.stale_recency_routine_weight * routine_affinity,
+          policy.stale_recency_min_multiplier,
+          policy.stale_recency_max_multiplier);
     }
   return 1.0;
 }
@@ -669,16 +655,20 @@ ScoreCandidateFacts (const std::vector<LinkedFactEvidence> &links,
       return out;
     }
 
-  const double f_eff = core::RetrievalFocusBias (focus);
-  const double s_eff = core::SensitivityBias (sensitivity);
-  const double t_eff = core::Clamp (stability, 0.0, 1.0);
-  const double fact_weight = core::Lerp (0.08, 0.28, f_eff)
-                             * core::Lerp (0.90, 1.10, s_eff)
-                             * core::Lerp (1.05, 0.95, t_eff)
-                             * FactBoostMultiplier (override);
-  const double stale_weight = core::Lerp (0.05, 0.20, f_eff)
-                              * core::Lerp (0.90, 1.05, s_eff)
-                              * StalePenaltyMultiplier (override);
+  const auto fact_candidate_policy
+      = core::RetrievalFactCandidateScoringWeights (focus, sensitivity,
+                                                    stability);
+  const double fact_weight = fact_candidate_policy.boost_weight
+                             * FactBoostMultiplier (override, focus,
+                                                    sensitivity, stability);
+  const double stale_weight = fact_candidate_policy.stale_penalty_weight
+                              * StalePenaltyMultiplier (override, focus,
+                                                        sensitivity,
+                                                        stability);
+  const auto stale_policy
+      = core::RetrievalFactStaleScoringPolicy (focus, sensitivity, stability);
+  const auto boost_policy
+      = core::RetrievalFactBoostScoringPolicy (focus, sensitivity, stability);
 
   for (const auto &link : links)
     {
@@ -686,9 +676,10 @@ ScoreCandidateFacts (const std::vector<LinkedFactEvidence> &links,
       const double confidence
           = core::Clamp (link.record.confidence, 0.0, 1.0);
       const double provenance
-          = EvidenceWeight (link.evidence_type, link.support_weight);
-      const double criticality
-          = PredicateCriticality (link.record.canonical_predicate);
+          = EvidenceWeight (link.evidence_type, link.support_weight, focus,
+                            sensitivity, stability);
+      const double criticality = store::PredicateCriticality (
+          link.record.canonical_predicate, focus, sensitivity, stability);
       const double lifecycle
           = core::Clamp (link.fact_score.lifecycle_support, 0.0, 1.0);
 
@@ -697,12 +688,15 @@ ScoreCandidateFacts (const std::vector<LinkedFactEvidence> &links,
           if (mode == temporal::RetrievalMode::Current)
             {
               const double stale_adjust = RoutineRecencyStaleAdjustment (
-                  link.record, link.fact_score, mode, override);
+                  link.record, link.fact_score, mode, override, focus,
+                  sensitivity, stability);
               const double penalty
                   = stale_weight
-                    * (0.60 * similarity + 0.40 * confidence)
+                    * (stale_policy.similarity_weight * similarity
+                       + stale_policy.confidence_weight * confidence)
                     * criticality * provenance
-                    * std::max (0.55, lifecycle) * stale_adjust;
+                    * std::max (stale_policy.lifecycle_floor, lifecycle)
+                    * stale_adjust;
               out.stale_penalty = std::max (out.stale_penalty, penalty);
             }
           continue;
@@ -714,10 +708,13 @@ ScoreCandidateFacts (const std::vector<LinkedFactEvidence> &links,
       const double temporal_match
           = core::Clamp (link.fact_score.temporal_match, 0.0, 1.0);
       const double routine_recency_adjust = RoutineRecencyBoostAdjustment (
-          link.record, link.fact_score, mode, override);
-      const double signal = (0.45 * similarity + 0.35 * confidence
-                             + 0.20 * support)
-                            * (0.55 + 0.45 * temporal_match)
+          link.record, link.fact_score, mode, override, focus, sensitivity,
+          stability);
+      const double signal = (boost_policy.similarity_weight * similarity
+                             + boost_policy.confidence_weight * confidence
+                             + boost_policy.support_weight * support)
+                            * ((1.0 - boost_policy.temporal_weight)
+                               + boost_policy.temporal_weight * temporal_match)
                             * criticality * provenance * lifecycle
                             * routine_recency_adjust;
       out.boost = std::max (out.boost, fact_weight * signal);
@@ -777,7 +774,8 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
   Eigen::VectorXf q_ctx
       = (acc_it->second.c_t.size () > 0) ? acc_it->second.c_t : q;
 
-  const double ctx_mix = core::RetrievalContextMix (cfg.focus);
+  const double ctx_mix = core::RetrievalContextMix (
+      cfg.focus, cfg.sensitivity, cfg.stability);
   if (ctx_mix > 0.0 && !p_ctx.recent_context_embeddings.empty ()
       && q.size () > 0)
     {
@@ -817,16 +815,14 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
         }
     }
 
-  const double f_eff = core::RetrievalFocusBias (cfg.focus);
-  const double s_eff = core::RetrievalSensitivityBias (cfg.sensitivity);
   const int base_seed_k = std::max (1, core::RetrievalMaxResults (cfg.focus));
   const int base_k = std::max (
       1, core::RetrievalGraphExpandedRagMaxItems (cfg.focus, cfg.stability));
   const int base_depth = std::max (1, core::RetrievalGraphDepth (cfg.stability));
   const double min_edge_weight = core::MinEdgeWeight (cfg.focus);
-  const int k_key = core::SparseKeySize (cfg.focus);
+  const int k_key
+      = core::SparseKeySize (cfg.focus, cfg.sensitivity, cfg.stability);
   const std::string sparse_key = core::SparseKey (q, k_key);
-  const double s_eff_seed = s_eff;
   const auto retrieval_override = temporal::GetRetrievalOverride ();
   const auto requested_retrieval_mode
       = retrieval_override.mode.value_or (temporal::RetrievalMode::Current);
@@ -840,7 +836,7 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
                                             retrieval_override.timestamp,
                                             signal.timestamp);
   const double resurfacing_decay_scale
-      = ResolveResurfacingDecayScale (tx, ablation_override);
+      = ResolveResurfacingDecayScale (tx, ablation_override, cfg.stability);
   const auto fact_query_mode = temporal::ResolveFactQueryMode (
       temporal::ToFactQueryMode (retrieval_mode));
   const bool fact_layer_enabled
@@ -893,21 +889,28 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
   int depth = base_depth;
   if (metacognitive_mode == ProcessorContext::MetacognitiveMode::TotRecovery)
     {
+      const double tot_expansion_factor = core::RetrievalTotExpansionFactor (
+          cfg.focus, cfg.sensitivity, cfg.stability, tot_confidence_scale);
       seed_k = std::max (
           base_seed_k,
-          static_cast<int> (
-              std::ceil ((1.15 + 0.35 * tot_confidence_scale) * base_seed_k)));
+          static_cast<int> (std::ceil (tot_expansion_factor * base_seed_k)));
       k = std::max (
           base_k,
-          static_cast<int> (
-              std::ceil ((1.15 + 0.35 * tot_confidence_scale) * base_k)));
-      depth = std::min (3, base_depth + (tot_confidence_scale >= 0.2 ? 1 : 0));
+          static_cast<int> (std::ceil (tot_expansion_factor * base_k)));
+      depth = std::min (
+          core::RetrievalTotMaxDepth (cfg.focus, cfg.stability),
+          base_depth
+              + (tot_confidence_scale
+                         >= core::RetrievalTotDepthConfidenceThreshold (
+                             cfg.focus, cfg.sensitivity, cfg.stability)
+                     ? 1
+                     : 0));
     }
   const double predictive_weight
       = disable_predictive_bonus
             ? 0.0
-            : core::Lerp (0.05, 0.20, f_eff)
-                  * core::Lerp (1.0, 0.85, cfg.stability);
+            : core::RetrievalPredictiveBonusWeight (
+                  cfg.focus, cfg.sensitivity, cfg.stability);
   const bool preconsolidated_label_graph_enabled
       = !EnvFlag ("CORTEXT_DISABLE_PRECONSOLIDATED_LABEL_GRAPH");
   const double label_graph_weight
@@ -933,11 +936,24 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
   const int durable_source_text_seed_sources = std::max (
       0, core::RetrievalDurableSourceTextSeedSources (cfg.focus,
                                                      cfg.stability));
+  const int durable_source_text_search_limit = std::max (
+      durable_source_text_seed_sources,
+      core::RetrievalDurableSourceTextSearchLimit (
+          cfg.focus, cfg.sensitivity, cfg.stability));
   const double durable_source_text_min_score
       = core::RetrievalDurableSourceTextMinScore (
           cfg.focus, cfg.sensitivity, cfg.stability);
+  const int durable_source_text_max_bytes = std::max (
+      1, core::RetrievalDurableSourceTextMaxBytes (
+             cfg.focus, cfg.sensitivity, cfg.stability));
   const int fact_text_seed_count = std::max (
-      0, core::RetrievalFactTextSeedCount (cfg.focus, cfg.stability));
+      0, core::RetrievalFactTextSeedCount (
+             cfg.focus, cfg.sensitivity, cfg.stability));
+  const int fact_text_search_limit = std::max (
+      fact_text_seed_count,
+      core::RetrievalFactTextSearchLimit (
+          cfg.focus, cfg.sensitivity, cfg.stability,
+          std::max (fact_text_seed_count, 1)));
   const double fact_text_seed_min_score
       = core::RetrievalFactTextSeedMinScore (
           cfg.focus, cfg.sensitivity, cfg.stability);
@@ -956,22 +972,42 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
   const double graph_expanded_relation_weight
       = core::RetrievalGraphExpandedRagRelationWeight (
           cfg.focus, cfg.sensitivity, cfg.stability);
-  const double graph_expanded_temporal_weight
-      = temporal_retrieval_enabled
-            ? core::RetrievalGraphExpandedRagTemporalWeight (
-                cfg.focus, cfg.sensitivity, cfg.stability)
-            : 0.0;
   const double graph_expanded_fact_weight
       = core::RetrievalGraphExpandedRagFactWeight (
           cfg.focus, cfg.sensitivity, cfg.stability);
+  const double temporal_rank_tau_seconds
+      = core::RetrievalTemporalRankTauSeconds (
+          cfg.focus, cfg.sensitivity, cfg.stability);
+  const double temporal_rank_weight
+      = temporal_retrieval_enabled
+            ? core::RetrievalTemporalRankWeight (
+                cfg.focus, cfg.sensitivity, cfg.stability)
+            : 0.0;
+  const double procedural_seed_min_score
+      = core::RetrievalProceduralSeedMinScore (cfg.focus, cfg.sensitivity,
+                                               cfg.stability);
   const int text_query_wm_slots
       = std::max (0, core::RetrievalTextQueryWMSlots (cfg.focus,
                                                       cfg.stability));
   const int text_query_wm_chars
       = std::max (0, core::RetrievalTextQueryWMChars (cfg.focus,
                                                      cfg.stability));
-  const bool label_token_text_route_enabled = EnvFlag (
-      "CORTEXT_ENABLE_LABEL_TOKEN_TEXT_ROUTE");
+  const int label_text_route_limit = core::RetrievalLabelTextRouteLimit (
+      cfg.focus, cfg.sensitivity, cfg.stability, label_graph_top_labels);
+  const int graph_expansion_row_limit
+      = core::RetrievalGraphExpansionRowLimit (
+          cfg.focus, cfg.sensitivity, cfg.stability, base_k);
+  const int graph_expansion_fanout = core::RetrievalGraphExpansionFanout (
+      cfg.focus, cfg.sensitivity, cfg.stability);
+  const int label_graph_fanout = core::RetrievalLabelGraphFanout (
+      cfg.focus, cfg.sensitivity, cfg.stability);
+  const int fact_evidence_fanout = core::RetrievalFactEvidenceFanout (
+      cfg.focus, cfg.sensitivity, cfg.stability);
+  const int route_token_min_chars = core::RetrievalRouteTokenMinChars (
+      cfg.focus, cfg.sensitivity, cfg.stability);
+  const bool label_token_text_route_enabled
+      = core::RetrievalLabelTokenTextRouteEnabled (
+          cfg.focus, cfg.sensitivity, cfg.stability);
   std::string query_text_payload = SignalTextPayload (signal);
   int appended_wm_chars = 0;
   int query_text_token_count = 0;
@@ -989,8 +1025,27 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
           appended_wm_chars = static_cast<int> (wm_text.size ());
         }
     }
-  query_text_token_count
-      = static_cast<int> (RouteTokens (query_text_payload).size ());
+	  query_text_token_count
+	      = static_cast<int> (
+          RouteTokens (query_text_payload, route_token_min_chars).size ());
+
+  auto temporal_rank_score = [&] (long long event_ts) {
+    if (temporal_rank_weight <= 0.0 || temporal_rank_tau_seconds <= 0.0
+        || signal.timestamp == 0 || event_ts <= 0)
+      {
+        return 0.0;
+      }
+    if (static_cast<std::uint64_t> (event_ts) >= signal.timestamp)
+      {
+        return 1.0;
+      }
+    const double age_s
+        = static_cast<double> (signal.timestamp
+                               - static_cast<std::uint64_t> (event_ts))
+          / 1000.0;
+    return core::Clamp (std::exp (-age_s / temporal_rank_tau_seconds), 0.0,
+                        1.0);
+  };
 
   // Seed vector retrieval via sqlite-vec KNN query.
   struct Scored
@@ -1018,6 +1073,7 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
     bool is_label;
     Eigen::VectorXf vec;
     Eigen::VectorXf ctx;
+    double temporal_score = 0.0;
   };
   std::vector<Scored> seeds;
   seeds.reserve (static_cast<size_t> (seed_k));
@@ -1028,24 +1084,23 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
   const std::string latest_reconstruction_join
       = disable_constructive_recall
             ? ""
-            : "LEFT JOIN ("
-              "  SELECT mr.memory_id, mr.embedding_id, mr.created_at, mr.uncertainty "
-              "  FROM memory_reconstructions mr "
-              "  JOIN ("
-              "    SELECT memory_id, MAX(reconstruction_id) AS reconstruction_id "
-              "    FROM memory_reconstructions "
-              "    GROUP BY memory_id"
-              "  ) latest ON latest.reconstruction_id = mr.reconstruction_id"
-              ") rc ON rc.memory_id = m.memory_id ";
+            : "LEFT JOIN memory_reconstructions rc "
+              "  ON rc.memory_id = m.memory_id "
+              " AND rc.reconstruction_id = ("
+              "   SELECT mr2.reconstruction_id "
+              "   FROM memory_reconstructions mr2 "
+              "   WHERE mr2.memory_id = m.memory_id "
+              "   ORDER BY mr2.reconstruction_id DESC "
+              "   LIMIT 1"
+              " ) ";
   const char *current_embedding_expr
       = disable_constructive_recall ? "m.embedding_id"
                                     : "COALESCE(rc.embedding_id, m.embedding_id)";
 
   // Convert query vector to std::vector<float> for parameter binding.
   std::vector<float> q_vec (q.data (), q.data () + q.size ());
-  const int seed_search_k = std::max (
-      seed_k,
-      std::min (512, std::max (seed_k * 12, seed_k + 32)));
+  const int seed_search_k = core::RetrievalSeedSearchK (
+      cfg.focus, cfg.sensitivity, cfg.stability, seed_k);
 
   std::unordered_set<long long> seen_seed_embeddings;
   const auto &summary_cache = p_ctx.summary_cache;
@@ -1068,6 +1123,7 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
           }
         auto it_dist = row.find ("distance");
         auto it_created = row.find ("created_at");
+        auto it_event_ts = row.find ("event_ts");
         auto it_mem_id = row.find ("memory_id");
         auto it_kind = row.find ("kind");
         auto it_preact = row.find ("pre_activation");
@@ -1088,7 +1144,8 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
                  && it_dist->second.type () == typeid (double))
           {
             const double dist = std::any_cast<double> (it_dist->second);
-            sim = 1.0 / (1.0 + dist);
+            sim = core::RetrievalVectorDistanceScore (
+                dist, cfg.focus, cfg.sensitivity, cfg.stability);
           }
 
         long long mem_id = 0;
@@ -1117,6 +1174,12 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
           {
             created_at = std::any_cast<long long> (it_created->second);
           }
+        long long event_ts = created_at;
+        if (it_event_ts != row.end ()
+            && it_event_ts->second.type () == typeid (long long))
+          {
+            event_ts = std::any_cast<long long> (it_event_ts->second);
+          }
 
         bool is_association = false;
         bool is_label = false;
@@ -1136,7 +1199,9 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
                                  created_at,
                                  sim,
                                  0.0,
-                                 1.0,
+                                 core::RetrievalSeedFallbackSourceConfidence (
+                                     cfg.focus, cfg.sensitivity,
+                                     cfg.stability),
                                  0.0,
                                  pre_activation,
                                  predictive_weight * pre_activation,
@@ -1154,6 +1219,7 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
 	                                 is_label,
 	                                 Eigen::VectorXf (),
                                  Eigen::VectorXf () });
+        seeds.back ().temporal_score = temporal_rank_score (event_ts);
       }
   };
 
@@ -1169,6 +1235,8 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
             ") "
             "SELECT m.embedding_id AS base_embedding_id, seed.distance, "
             "COALESCE(m.created_at, seed.created_at, 0) AS created_at, "
+            "COALESCE(NULLIF(m.start_ts, 0), m.created_at, "
+            "         seed.created_at, 0) AS event_ts, "
             "m.memory_id, m.kind, COALESCE(m.pre_activation, 0.0) AS pre_activation "
             "FROM seed "
             "JOIN memories m ON m.embedding_id = seed.embedding_id "
@@ -1210,6 +1278,8 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
             ") "
             "SELECT sm.base_embedding_id, sm.distance, "
             "COALESCE(m.created_at, sm.seed_created_at, 0) AS created_at, "
+            "COALESCE(NULLIF(m.start_ts, 0), m.created_at, "
+            "         sm.seed_created_at, 0) AS event_ts, "
             "m.memory_id, m.kind, COALESCE(m.pre_activation, 0.0) AS pre_activation "
             "FROM seed_memory sm "
             "JOIN memories m ON m.memory_id = sm.memory_id "
@@ -1224,11 +1294,8 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
   append_seeds (seed_sql, { q_vec, static_cast<long long> (seed_search_k) },
                 "GraphRetrieve.seed_sql");
 
-  const double k_summary_raw
-      = core::Lerp (2.0, 6.0, s_eff_seed) * core::Lerp (1.0, 0.75, f_eff)
-        * core::Lerp (1.0, 0.85, cfg.stability);
-  const int k_summary
-      = std::max (1, static_cast<int> (std::round (k_summary_raw)));
+  const int k_summary = core::RetrievalSummaryLabelSeedCount (
+      cfg.focus, cfg.sensitivity, cfg.stability);
   auto build_ranked_query_label_ids = [&] {
     std::map<long long, double> query_label_scores;
     if (!preconsolidated_label_graph_enabled || label_graph_weight <= 0.0)
@@ -1278,9 +1345,12 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
                 break;
               }
           }
-        if (label_bank_attached)
-          {
-            const int static_label_k = std::max (label_graph_top_labels * 2, 8);
+	        if (label_bank_attached)
+	          {
+	            const int static_label_k
+	                = core::RetrievalLabelBankStaticSearchK (
+	                    cfg.focus, cfg.sensitivity, cfg.stability,
+	                    label_graph_top_labels);
             auto rows = store->Execute (
                 "SELECT key, distance "
                 "FROM cortext_label_bank.label_bank_vec "
@@ -1301,7 +1371,9 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
                           ? std::any_cast<double> (row.at ("distance"))
                           : 0.0;
                 const double query_score = core::Clamp (
-                    1.0 / (1.0 + distance), 0.0, 1.0);
+                    core::RetrievalVectorDistanceScore (
+                        distance, cfg.focus, cfg.sensitivity, cfg.stability),
+                    0.0, 1.0);
                 if (query_score >= label_graph_min_query_score)
                   {
                     add_dynamic_label_by_key (
@@ -1338,10 +1410,11 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
         {
           try
             {
-              auto rows = store->Execute (
-                "SELECT memory_id, COALESCE(label, source_id, '') AS label_text "
-                "FROM memories WHERE kind = 'LABEL'",
-                {});
+	              auto rows = store->Execute (
+	                "SELECT memory_id, COALESCE(label, source_id, '') AS label_text "
+	                "FROM memories WHERE kind = 'LABEL' "
+	                "ORDER BY created_at DESC, memory_id DESC LIMIT ?",
+	                { static_cast<long long> (label_text_route_limit) });
             for (const auto &row : rows)
               {
                 const long long label_id = AnyToInt64 (row.at ("memory_id"));
@@ -1358,11 +1431,15 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
                   {
                     text_score = 1.0;
                   }
-                else if (label_token_text_route_enabled)
-                  {
-                    text_score = RouteTokenOverlapScore (
-                        RouteTokens (query_text), label_text);
-                  }
+	                else if (label_token_text_route_enabled)
+	                  {
+	                    const auto label_query_tokens = RouteTokens (
+	                        query_text, route_token_min_chars);
+	                    text_score = RouteTokenOverlapScore (
+	                        label_query_tokens, label_text, cfg.focus,
+	                        cfg.sensitivity, cfg.stability,
+	                        route_token_min_chars);
+	                  }
                 if (text_score <= 0.0)
                   {
                     continue;
@@ -1440,7 +1517,8 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
                   0,
                   ranked[i].first,
                   0.0,
-                  1.0,
+                  core::RetrievalSeedFallbackSourceConfidence (
+                      cfg.focus, cfg.sensitivity, cfg.stability),
                   0.0,
                   0.0,
                   0.0,
@@ -1465,7 +1543,8 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
                                   elapsed_ms (t_start, t_end));
     }
 
-  if (EnvFlag ("CORTEXT_EXPERIMENTAL_CLUSTER_LABEL_RETRIEVAL")
+  if (core::RetrievalClusterLabelEnabled (cfg.focus, cfg.sensitivity,
+                                          cfg.stability)
       && !summary_cache.empty ())
     {
       const auto t_start = std::chrono::steady_clock::now ();
@@ -1504,7 +1583,10 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
             }
 
           std::vector<int> assignments (static_cast<size_t> (label_count), 0);
-          for (int iter = 0; iter < 25; ++iter)
+          const int cluster_iterations = std::max (
+              1, core::STMLabelClusterIterations (cfg.focus, cfg.sensitivity,
+                                                  cfg.stability));
+          for (int iter = 0; iter < cluster_iterations; ++iter)
             {
               bool changed = false;
               for (int i = 0; i < label_count; ++i)
@@ -1617,7 +1699,8 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
                       0,
                       sim,
                       0.0,
-                      1.0,
+                      core::RetrievalSeedFallbackSourceConfidence (
+                          cfg.focus, cfg.sensitivity, cfg.stability),
                       0.0,
                       0.0,
                       0.0,
@@ -1653,7 +1736,6 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
         {
           std::vector<std::pair<double, long long>> ranked_proc;
           ranked_proc.reserve (pit->second.size ());
-          constexpr double kProceduralSeedMin = 0.55;
           for (const auto &[memory_id, score] : pit->second)
             {
               if (memory_id <= 0)
@@ -1661,7 +1743,7 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
                   continue;
                 }
               const double clamped = core::Clamp (score, 0.0, 1.0);
-              if (clamped < kProceduralSeedMin)
+              if (clamped < procedural_seed_min_score)
                 {
                   continue;
                 }
@@ -1673,11 +1755,8 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
                          [] (const auto &a, const auto &b) {
                            return a.first > b.first;
                          });
-              const int k_proc
-                  = std::max (
-                      1, static_cast<int> (std::round (
-                             core::Lerp (1.0, 4.0, s_eff)
-                             * core::Lerp (1.0, 0.75, cfg.stability))));
+              const int k_proc = core::RetrievalProceduralSeedFanout (
+                  cfg.focus, cfg.sensitivity, cfg.stability);
               if (static_cast<int> (ranked_proc.size ()) > k_proc)
                 {
                   ranked_proc.resize (static_cast<size_t> (k_proc));
@@ -1688,6 +1767,8 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
                      << current_embedding_expr
                      << " AS embedding_id, "
                         "COALESCE(m.created_at, 0) AS created_at, "
+                        "COALESCE(NULLIF(m.start_ts, 0), m.created_at, 0) "
+                        "AS event_ts, "
                         "m.kind, COALESCE(m.pre_activation, 0.0) AS pre_activation "
                         "FROM memories m "
                   << latest_reconstruction_join
@@ -1706,9 +1787,9 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
                   sql << "?";
                   params.push_back (memory_id);
                 }
-              sql << ")";
+	              sql << ")";
 
-              const auto t_start = std::chrono::steady_clock::now ();
+	      const auto t_start = std::chrono::steady_clock::now ();
               auto rows = store->Execute (sql.str (), params);
               const auto t_end = std::chrono::steady_clock::now ();
               context.AddOperationTiming ("GraphRetrieve.procedural_seed_sql",
@@ -1729,8 +1810,9 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
                       || !seen_seed_embeddings.insert (emb_id).second)
                     {
                       continue;
-                    }
+                  }
                   const long long created_at = AnyToInt64 (row.at ("created_at"));
+                  const long long event_ts = AnyToInt64 (row.at ("event_ts"));
                   const std::string kind = AnyToString (row.at ("kind"));
                   const bool is_association = (kind == "ASSOCIATION");
                   const bool is_label = (kind == "LABEL");
@@ -1744,7 +1826,9 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
                                            created_at,
                                            0.0,
                                            0.0,
-                                           1.0,
+                                           core::RetrievalSeedFallbackSourceConfidence (
+                                               cfg.focus, cfg.sensitivity,
+                                               cfg.stability),
                                            proc_score,
                                            pre_activation,
                                            predictive_weight * pre_activation,
@@ -1762,6 +1846,7 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
 	                                           is_label,
 	                                           Eigen::VectorXf (),
                                            Eigen::VectorXf () });
+                  seeds.back ().temporal_score = temporal_rank_score (event_ts);
                   ++procedural_seed_count;
                 }
             }
@@ -1791,10 +1876,11 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
       {
         return;
       }
-    matched_facts.push_back (
-        { record, store::ScoreFactRecord (record, fact_query_mode,
-                                          retrieval_ts),
-          query_similarity });
+	    matched_facts.push_back (
+	        { record, store::ScoreFactRecord (record, fact_query_mode,
+	                                          retrieval_ts, cfg.focus,
+	                                          cfg.sensitivity, cfg.stability),
+	          query_similarity });
     if (retrieval_mode == temporal::RetrievalMode::Current)
       {
         const std::string key
@@ -1813,12 +1899,10 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
       }
   };
 
-  const int k_fact = std::max (
-      2, static_cast<int> (std::round (core::Lerp (12.0, 3.0, f_eff)
-                                       * core::Lerp (1.0, 0.85,
-                                                     cfg.stability))));
-  const int k_fact_search
-      = std::max (32, std::min (256, k_fact * 12));
+  const int k_fact = core::RetrievalFactVectorSeedCount (
+      cfg.focus, cfg.sensitivity, cfg.stability);
+  const int k_fact_search = core::RetrievalFactVectorSearchK (
+      cfg.focus, cfg.sensitivity, cfg.stability, k_fact);
   {
     const auto t_start = std::chrono::steady_clock::now ();
     std::ostringstream sql;
@@ -1896,13 +1980,14 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
 
     for (const auto &row : rows)
       {
-        const store::FactRecord record = BuildFactRecord (row);
+        const store::FactRecord record = BuildFactRecord (
+            row, cfg.focus, cfg.sensitivity, cfg.stability);
         const auto it_dist = row.find ("distance");
         const double query_similarity
-            = 1.0
-              / (1.0
-                 + (it_dist != row.end () ? AnyToDouble (it_dist->second, 0.0)
-                                          : 0.0));
+            = core::RetrievalVectorDistanceScore (
+                it_dist != row.end () ? AnyToDouble (it_dist->second, 0.0)
+                                      : 0.0,
+                cfg.focus, cfg.sensitivity, cfg.stability);
         add_matched_fact (record, query_similarity);
       }
   }
@@ -1910,7 +1995,8 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
   if (fact_layer_enabled && fact_text_seed_count > 0
       && fact_text_seed_min_score > 0.0 && !query_text_payload.empty ())
     {
-      const auto query_tokens = RouteTokens (query_text_payload);
+      const auto query_tokens = RouteTokens (
+          query_text_payload, route_token_min_chars);
       if (!query_tokens.empty ())
         {
           std::ostringstream sql;
@@ -1955,14 +2041,15 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
               sql << "AND (fa.valid_start_ts IS NULL OR fa.valid_start_ts <= ?) "
                      "AND (fa.valid_end_ts IS NULL OR fa.valid_end_ts > ?) ";
               break;
-            case temporal::RetrievalMode::KnownAt:
-              sql << "AND fa.recorded_at_ts <= ? "
-                     "AND (fa.superseded_at_ts IS NULL OR fa.superseded_at_ts > ?) ";
-              break;
-            }
+	            case temporal::RetrievalMode::KnownAt:
+	              sql << "AND fa.recorded_at_ts <= ? "
+	                     "AND (fa.superseded_at_ts IS NULL OR fa.superseded_at_ts > ?) ";
+	              break;
+	            }
+	          sql << "ORDER BY fa.recorded_at_ts DESC, fa.fact_id DESC LIMIT ? ";
 
-          std::vector<std::any> params;
-          switch (retrieval_mode)
+	          std::vector<std::any> params;
+	          switch (retrieval_mode)
             {
             case temporal::RetrievalMode::Current:
               params.push_back (static_cast<long long> (retrieval_ts));
@@ -1976,11 +2063,12 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
               break;
             case temporal::RetrievalMode::KnownAt:
               params.push_back (static_cast<long long> (retrieval_ts));
-              params.push_back (static_cast<long long> (retrieval_ts));
-              break;
-            }
+	              params.push_back (static_cast<long long> (retrieval_ts));
+	              break;
+	            }
+	          params.push_back (static_cast<long long> (fact_text_search_limit));
 
-          const auto t_start = std::chrono::steady_clock::now ();
+	          const auto t_start = std::chrono::steady_clock::now ();
           auto rows = store->Execute (sql.str (), params);
           const auto t_end = std::chrono::steady_clock::now ();
           context.AddOperationTiming ("GraphRetrieve.fact_text_seed_sql",
@@ -1996,9 +2084,11 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
           text_matches.reserve (rows.size ());
           for (const auto &row : rows)
             {
-              const auto record = BuildFactRecord (row);
-              const double score = RouteTokenOverlapScore (
-                  query_tokens, record.fact_text);
+              const auto record = BuildFactRecord (
+                  row, cfg.focus, cfg.sensitivity, cfg.stability);
+	              const double score = RouteTokenOverlapScore (
+	                  query_tokens, record.fact_text, cfg.focus, cfg.sensitivity,
+	                  cfg.stability, route_token_min_chars);
               fact_text_best_score = std::max (fact_text_best_score, score);
               if (score < fact_text_seed_min_score)
                 {
@@ -2047,7 +2137,11 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
           sql << "?";
           params.push_back (fact.record.fact_id);
         }
-      sql << ")";
+      sql << ") ORDER BY fe.fact_id ASC, fe.support_weight DESC, "
+             "fe.source_memory_id DESC LIMIT ?";
+      params.push_back (static_cast<long long> (
+          std::max (1, static_cast<int> (matched_facts.size ()))
+          * std::max (1, fact_evidence_fanout)));
 
       const auto t_start = std::chrono::steady_clock::now ();
       auto rows = store->Execute (sql.str (), params);
@@ -2075,7 +2169,10 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
                 it->second->score,
                 it->second->query_similarity,
                 AnyToString (row.at ("evidence_type")),
-                AnyToDouble (row.at ("support_weight"), 1.0),
+                AnyToDouble (
+                    row.at ("support_weight"),
+                    core::RetrievalFactMissingEvidenceSupportWeight (
+                        cfg.focus, cfg.sensitivity, cfg.stability)),
                 false });
         }
     }
@@ -2135,6 +2232,13 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
       params.push_back (static_cast<long long> (retrieval_ts));
       params.push_back (static_cast<long long> (retrieval_ts));
       params.push_back (static_cast<long long> (retrieval_ts));
+      sql << " ORDER BY fa.confidence DESC, fe.support_weight DESC, "
+             "COALESCE(fa.recorded_at_ts, 0) DESC, fe.source_memory_id DESC "
+             "LIMIT ?";
+      params.push_back (static_cast<long long> (
+          core::RetrievalFactStaleExpansionLimit (
+              cfg.focus, cfg.sensitivity, cfg.stability,
+              static_cast<int> (matched_facts.size ()))));
 
       const auto t_start = std::chrono::steady_clock::now ();
       auto rows = store->Execute (sql.str (), params);
@@ -2144,7 +2248,8 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
 
       for (const auto &row : rows)
         {
-          const store::FactRecord record = BuildFactRecord (row);
+          const store::FactRecord record = BuildFactRecord (
+              row, cfg.focus, cfg.sensitivity, cfg.stability);
           const long long source_memory_id
               = AnyToInt64 (row.at ("source_memory_id"));
           if (source_memory_id <= 0)
@@ -2159,12 +2264,16 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
               continue;
             }
           candidate_fact_links[source_memory_id].push_back (
-              { record,
-                store::ScoreFactRecord (record, store::FactQueryMode::Current,
-                                        retrieval_ts),
-                it->second,
+	              { record,
+	                store::ScoreFactRecord (record, store::FactQueryMode::Current,
+	                                        retrieval_ts, cfg.focus,
+	                                        cfg.sensitivity, cfg.stability),
+	                it->second,
                 AnyToString (row.at ("evidence_type")),
-                AnyToDouble (row.at ("support_weight"), 1.0),
+                AnyToDouble (
+                    row.at ("support_weight"),
+                    core::RetrievalFactMissingEvidenceSupportWeight (
+                        cfg.focus, cfg.sensitivity, cfg.stability)),
                 true });
 
           auto object_it = current_pair_object.find (key);
@@ -2332,8 +2441,9 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
                       expanded_memory_ids.insert (memory_id);
                       auto &score = source_seed_expansion_scores[memory_id];
                       score = std::max (
-                          score, graph_expanded_temporal_weight
-                                     / static_cast<double> (rank + 2));
+                          score,
+                          core::RetrievalGraphExpandedRagTemporalRankScore (
+                              cfg.focus, cfg.sensitivity, cfg.stability, rank));
                       ++rank;
                     }
                 }
@@ -2355,7 +2465,7 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
               const auto t_start = std::chrono::steady_clock::now ();
               std::string sql = "WITH seed(id) AS (VALUES ";
               std::vector<std::any> params;
-              params.reserve (source_seed_memory_ids.size () + 4);
+	              params.reserve (source_seed_memory_ids.size () + 5);
               for (size_t i = 0; i < source_seed_memory_ids.size (); ++i)
                 {
                   if (i > 0)
@@ -2426,8 +2536,16 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
                      "JOIN associations df ON df.source_memory_id = rc.cue_id "
                      "  AND df.edge_type = 'derived_from' "
                      "JOIN memories sm ON sm.memory_id = df.target_memory_id "
-                     "WHERE sm.kind NOT IN ('WORKING', 'LABEL', 'ASSOCIATION') "
-                     "GROUP BY df.target_memory_id, rc.cue_id";
+	                     "WHERE sm.kind NOT IN ('WORKING', 'LABEL', 'ASSOCIATION') "
+	                     "GROUP BY df.target_memory_id, rc.cue_id "
+	                     "ORDER BY score DESC, df.target_memory_id DESC "
+	                     "LIMIT ?";
+		              params.push_back (static_cast<long long> (std::min (
+		                  graph_expansion_row_limit,
+		                  label_graph_fanout
+		                      * std::max (
+		                          1, static_cast<int> (
+		                                 source_seed_memory_ids.size ())))));
               auto rows = store->Execute (sql, params);
               for (const auto &row : rows)
                 {
@@ -2466,7 +2584,7 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
               const auto t_start = std::chrono::steady_clock::now ();
               std::string sql = "WITH seed(id) AS (VALUES ";
               std::vector<std::any> params;
-              params.reserve (source_seed_memory_ids.size ());
+	              params.reserve (source_seed_memory_ids.size () + 1);
               for (size_t i = 0; i < source_seed_memory_ids.size (); ++i)
                 {
                   if (i > 0)
@@ -2482,9 +2600,13 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
                      "JOIN fact_assertions fa ON fa.fact_id = fe.fact_id "
                      "JOIN fact_evidence fe2 ON fe2.fact_id = fe.fact_id "
                      "JOIN memories m ON m.memory_id = fe2.source_memory_id "
-                     "WHERE COALESCE(fa.lifecycle_state, 'active') = 'active' "
-                     "  AND m.kind NOT IN ('WORKING', 'LABEL', 'ASSOCIATION') "
-                     "GROUP BY fe2.source_memory_id";
+	                     "WHERE COALESCE(fa.lifecycle_state, 'active') = 'active' "
+	                     "  AND m.kind NOT IN ('WORKING', 'LABEL', 'ASSOCIATION') "
+	                     "GROUP BY fe2.source_memory_id "
+	                     "ORDER BY score DESC, fe2.source_memory_id DESC "
+	                     "LIMIT ?";
+	              params.push_back (
+	                  static_cast<long long> (graph_expansion_row_limit));
               auto rows = store->Execute (sql, params);
               for (const auto &row : rows)
                 {
@@ -2549,7 +2671,8 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
                 }
               params.push_back (label_graph_relation_weight);
               params.push_back (label_graph_relation_weight);
-              params.push_back (static_cast<long long> (label_graph_seed_sources));
+	              params.push_back (static_cast<long long> (
+	                  std::min (label_graph_seed_sources, label_graph_fanout)));
               sql += "), direct_cue AS ("
                      "  SELECT hl.source_memory_id AS cue_id, "
                      "         q.qscore AS score "
@@ -2629,7 +2752,8 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
   if (preconsolidated_label_graph_enabled && label_graph_weight > 0.0
       && durable_source_text_seed_sources > 0 && !query_text_payload.empty ())
     {
-      const auto query_tokens = RouteTokens (query_text_payload);
+      const auto query_tokens = RouteTokens (
+          query_text_payload, route_token_min_chars);
       if (!query_tokens.empty ())
         {
           try
@@ -2649,12 +2773,16 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
                   "JOIN memories lm ON lm.memory_id = hl.target_memory_id "
                   "  AND lm.kind = 'LABEL' "
                   "JOIN memories sm ON sm.memory_id = df.target_memory_id "
-                  "WHERE df.edge_type = 'derived_from' "
-                  "  AND sm.kind NOT IN ('WORKING', 'LABEL', 'ASSOCIATION') "
-                  "  AND sm.blob_id IS NOT NULL "
-                  "GROUP BY df.target_memory_id, cue.memory_id, "
-                  "         lm.memory_id, sm.blob_id",
-                  {});
+	                  "WHERE df.edge_type = 'derived_from' "
+	                  "  AND sm.kind NOT IN ('WORKING', 'LABEL', 'ASSOCIATION') "
+	                  "  AND sm.blob_id IS NOT NULL "
+	                  "  AND sm.modality = 'text' "
+	                  "GROUP BY df.target_memory_id, cue.memory_id, "
+	                  "         lm.memory_id, sm.blob_id "
+	                  "ORDER BY sm.start_ts DESC, df.target_memory_id DESC "
+	                  "LIMIT ?",
+	                  { static_cast<long long> (
+	                      durable_source_text_search_limit) });
               struct TextSeed
               {
                 double score = 0.0;
@@ -2677,8 +2805,11 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
                     {
                       continue;
                     }
-                  auto payload_rows = store->Execute (
-                      "SELECT objstore_get(?1) AS payload", { blob_id });
+	                  auto payload_rows = store->Execute (
+	                      "SELECT substr(objstore_get(?1), 1, ?2) AS payload",
+	                      { blob_id,
+	                        static_cast<long long> (
+	                            durable_source_text_max_bytes) });
                   if (payload_rows.empty ()
                       || payload_rows[0].count ("payload") == 0)
                     {
@@ -2693,17 +2824,25 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
                   const std::string source_text (
                       reinterpret_cast<const char *> (payload.data ()),
                       payload.size ());
-                  double score
-                      = RouteTokenOverlapScore (query_tokens, source_text);
+	                  double score = RouteTokenOverlapScore (
+	                      query_tokens, source_text, cfg.focus, cfg.sensitivity,
+	                      cfg.stability, route_token_min_chars);
                   const int label_count = static_cast<int> (
                       store::AnyToLongLong (row.at ("label_count"))
                           .value_or (1));
                   const double label_support = core::Clamp (
                       std::log1p (static_cast<double> (label_count))
-                          / std::log (5.0),
+                          / std::log (core::RetrievalDurableSourceSupportSaturationCount (
+                              cfg.focus, cfg.stability)),
                       0.0, 1.0);
+                  const double text_base_weight
+                      = core::RetrievalDurableSourceTextBaseWeight (
+                          cfg.focus, cfg.sensitivity, cfg.stability);
                   score = core::Clamp (
-                      score * (0.80 + 0.20 * label_support), 0.0, 1.0);
+                      score
+                          * (text_base_weight
+                             + (1.0 - text_base_weight) * label_support),
+                      0.0, 1.0);
                   if (score < durable_source_text_min_score)
                     {
                       continue;
@@ -2783,11 +2922,14 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
         {
           const auto t_start = std::chrono::steady_clock::now ();
           // Build SQL with a VALUES list for seeds.
-          const char *edge_filter
+          const char *edge_filter_outer
               = cfg.reinforcement_enabled ? "" : " AND a.edge_type != 'reinforces' ";
+          const char *edge_filter_inner
+              = cfg.reinforcement_enabled ? ""
+                                           : " AND a2.edge_type != 'reinforces' ";
           std::string sql = "WITH RECURSIVE seed(id) AS (VALUES ";
           std::vector<std::any> params;
-          params.reserve (expanded_memory_ids.size () + 2);
+          params.reserve (expanded_memory_ids.size () + 9);
           bool first = true;
           for (long long mem_id : expanded_memory_ids)
             {
@@ -2802,19 +2944,45 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
                  "  UNION "
                  "  SELECT a.target_memory_id, expand.depth+1 "
                  "  FROM associations a JOIN expand ON a.source_memory_id = expand.id "
-                 "  WHERE expand.depth < ? AND a.weight >= ? ";
-          sql += edge_filter;
+                 "  WHERE expand.depth < ? AND a.weight >= ? "
+                 "  AND a.rowid IN ("
+                 "    SELECT a2.rowid FROM associations a2 "
+                 "    WHERE a2.source_memory_id = expand.id "
+                 "      AND a2.weight >= ? ";
+          sql += edge_filter_inner;
+          sql += "    ORDER BY a2.weight DESC, "
+                 "             COALESCE(a2.last_reinforced, 0) DESC, "
+                 "             a2.target_memory_id ASC "
+                 "    LIMIT ?"
+                 "  ) ";
+          sql += edge_filter_outer;
           sql += "  UNION "
                  "  SELECT a.source_memory_id, expand.depth+1 "
                  "  FROM associations a JOIN expand ON a.target_memory_id = expand.id "
-                 "  WHERE expand.depth < ? AND a.weight >= ? ";
-          sql += edge_filter;
+                 "  WHERE expand.depth < ? AND a.weight >= ? "
+                 "  AND a.rowid IN ("
+                 "    SELECT a2.rowid FROM associations a2 "
+                 "    WHERE a2.target_memory_id = expand.id "
+                 "      AND a2.weight >= ? ";
+          sql += edge_filter_inner;
+          sql += "    ORDER BY a2.weight DESC, "
+                 "             COALESCE(a2.last_reinforced, 0) DESC, "
+                 "             a2.source_memory_id ASC "
+                 "    LIMIT ?"
+                 "  ) ";
+          sql += edge_filter_outer;
           sql += ") "
-                 "SELECT DISTINCT id FROM expand;";
+                 "SELECT DISTINCT id FROM expand LIMIT ?;";
           params.push_back (static_cast<long long> (depth));
           params.push_back (min_edge_weight);
+          params.push_back (min_edge_weight);
+          params.push_back (static_cast<long long> (graph_expansion_fanout));
           params.push_back (static_cast<long long> (depth));
           params.push_back (min_edge_weight);
+          params.push_back (min_edge_weight);
+          params.push_back (static_cast<long long> (graph_expansion_fanout));
+          params.push_back (
+              static_cast<long long> (graph_expansion_row_limit));
 
           auto exp_rows = store->Execute (sql, params);
           const auto t_end = std::chrono::steady_clock::now ();
@@ -2835,16 +3003,11 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
         }
     }
 
-  const double min_assoc_raw
-      = core::Lerp (3.0, 1.0, f_eff) * core::Lerp (1.0, 0.85, cfg.stability);
-  const double min_label_raw
-      = core::Lerp (0.0, 3.0, s_eff) * core::Lerp (1.0, 0.85, f_eff);
-  int min_assoc = static_cast<int> (std::round (min_assoc_raw));
-  int min_label = static_cast<int> (std::round (min_label_raw));
-  if (min_assoc < 0)
-    min_assoc = 0;
-  if (min_label < 0)
-    min_label = 0;
+  const auto graph_expansion_evidence
+      = core::RetrievalGraphExpansionEvidenceCounts (
+          cfg.focus, cfg.sensitivity, cfg.stability);
+  int min_assoc = graph_expansion_evidence.min_association_count;
+  int min_label = graph_expansion_evidence.min_label_count;
 
   if (!expanded_memory_ids.empty () && (min_assoc > 0 || min_label > 0))
     {
@@ -2962,6 +3125,8 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
                     "m.embedding_id AS base_embedding_id, "
                     "e.embedding, "
                     "COALESCE(m.created_at, e.created_at, 0) AS created_at, "
+                    "COALESCE(NULLIF(m.start_ts, 0), m.created_at, "
+                    "         e.created_at, 0) AS event_ts, "
                     "m.context, m.source_reliability, "
                     "m.source_contradiction_count, m.emotional_intensity, "
                     "m.s_arousal_avg, m.kind, "
@@ -2999,6 +3164,7 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
                 }
               auto it_emb = row.find ("embedding");
               auto it_created = row.find ("created_at");
+              auto it_event_ts = row.find ("event_ts");
               auto it_ctx = row.find ("context");
               auto it_rel = row.find ("source_reliability");
               auto it_contra = row.find ("source_contradiction_count");
@@ -3024,6 +3190,12 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
                 {
                   created_at = std::any_cast<long long> (it_created->second);
                 }
+              long long event_ts = created_at;
+              if (it_event_ts != row.end ()
+                  && it_event_ts->second.type () == typeid (long long))
+                {
+                  event_ts = std::any_cast<long long> (it_event_ts->second);
+                }
               Eigen::VectorXf ctx_vec;
               if (it_ctx != row.end () && it_ctx->second.has_value ())
                 {
@@ -3035,7 +3207,8 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
                         ? core::CosineSimilarity (q_ctx, ctx_vec)
                         : 0.0;
 
-              double base_rel = 0.7;
+              double base_rel = core::SourceReliabilityPrior (
+                  cfg.focus, cfg.sensitivity, cfg.stability);
               if (it_rel != row.end () && it_rel->second.type () == typeid (double))
                 {
                   base_rel = std::any_cast<double> (it_rel->second);
@@ -3076,14 +3249,26 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
                 {
                   age_s = static_cast<double> (signal.timestamp - created_at) / 1000.0;
                 }
-              const double freshness = std::exp (-age_s / 3600.0);
+              const double freshness = std::exp (
+                  -age_s
+                  / core::RetrievalSourceFreshnessTauSeconds (
+                      cfg.focus, cfg.sensitivity, cfg.stability));
               const double effective_freshness
                   = ApplyFreshnessPenaltyScale (freshness,
                                                resurfacing_decay_scale);
+              const double freshness_weight
+                  = core::RetrievalSourceFreshnessWeight (
+                      cfg.focus, cfg.sensitivity, cfg.stability);
               const double source_conf
-                  = core::Clamp (base_rel * (1.0 - 0.15 * contradiction_count)
-                                     * (0.7 + 0.3 * effective_freshness),
-                                 0.0, 1.0);
+                  = core::Clamp (
+                      base_rel
+                          * (1.0
+                             - core::RetrievalSourceContradictionPenalty (
+                                 cfg.focus, cfg.sensitivity, cfg.stability)
+                                   * contradiction_count)
+                          * ((1.0 - freshness_weight)
+                             + freshness_weight * effective_freshness),
+                      0.0, 1.0);
 
               double proc_score = 0.0;
               if (cfg.procedural_enabled && !disable_procedural_proactive
@@ -3128,6 +3313,7 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
 	                                        is_label,
 	                                        v,
                                         ctx_vec });
+              scored.back ().temporal_score = temporal_rank_score (event_ts);
               fetched_any = true;
             }
         }
@@ -3193,8 +3379,14 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
 
   const double dup_thresh = core::DupThresh (cfg.focus, cfg.stability);
   const double dup_thresh_summary = core::Clamp (
-      dup_thresh * core::Lerp (1.35, 1.10, f_eff), 0.0, 0.99);
-  const bool bypass_summary_overlap = (f_eff < 0.75);
+      dup_thresh
+          * core::RetrievalSummaryDuplicateThresholdScale (
+              cfg.focus, cfg.sensitivity, cfg.stability),
+      0.0,
+      core::RetrievalSummaryDuplicateThresholdCap (
+          cfg.focus, cfg.sensitivity, cfg.stability));
+  const bool bypass_summary_overlap = core::RetrievalBypassSummaryOverlap (
+      cfg.focus, cfg.sensitivity, cfg.stability);
   const std::uint64_t write_exclusion_ts
       = context.GetWriteExclusionTs ().value_or (signal.timestamp);
   const auto stored_id = context.GetStoredEmbeddingId ();
@@ -3205,18 +3397,21 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
   double w_div = weights.second;
   if (metacognitive_mode == ProcessorContext::MetacognitiveMode::TotRecovery)
     {
-      w_div *= core::Lerp (0.95, 0.75, tot_confidence_scale);
+      w_div *= core::RetrievalTotDiversificationScale (
+          cfg.focus, cfg.sensitivity, cfg.stability, tot_confidence_scale);
     }
-  const double w_ctx = core::Lerp (0.15, 0.35, f_eff)
-                       * core::Lerp (1.0, 0.85, s_eff);
-  const double w_proc = core::Lerp (0.10, 0.25, s_eff);
+  const auto candidate_blend_weights
+      = core::RetrievalCandidateBlendScoringWeights (
+          cfg.focus, cfg.sensitivity, cfg.stability);
+  const double w_ctx = candidate_blend_weights.context;
+  const double w_proc = candidate_blend_weights.procedural;
   const double w_emotion
       = cfg.affect_retrieval
             ? core::RetrievalEmotionWeight (cfg.sensitivity)
             : 0.0;
   const double assoc_boost
       = core::AssociationBoost (cfg.focus, cfg.sensitivity, cfg.stability);
-  const double label_boost = core::Lerp (0.05, 0.18, s_eff);
+  const double label_boost = candidate_blend_weights.label_boost;
   const bool durable_source_scoring_enabled
       = !EnvFlag ("CORTEXT_DISABLE_DURABLE_SOURCE_SET_RETRIEVAL");
   const double durable_source_weight
@@ -3227,6 +3422,10 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
   const double durable_source_min_score
       = core::RetrievalDurableSourceSetMinScore (
           cfg.focus, cfg.sensitivity, cfg.stability);
+  const double source_backed_boost_floor = std::max (
+      durable_source_min_score,
+      core::RetrievalSourceBackedBoostFloor (
+          cfg.focus, cfg.sensitivity, cfg.stability));
   const int durable_source_min_topk = std::max (
       0, core::RetrievalDurableSourceMinTopK (cfg.focus, cfg.stability));
 
@@ -3235,34 +3434,24 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
   const double emotion_intensity
       = core::Clamp (context.GetEmotionIntensity (), 0.0, 1.0);
   const double arousal = core::Clamp (context.GetArousal (), 0.0, 1.0);
-  const double s_affect = core::AffectSensitivityBias (cfg.sensitivity);
-  const double w_arousal_raw = core::Lerp (0.30, 0.55, s_affect);
-  const double w_emotion_raw = core::Lerp (0.30, 0.55, s_affect);
-  const double w_salience_raw = core::Lerp (0.10, 0.20, s_affect);
-  const double w_aff_sum = std::max (constants::kNormEpsilon,
-                                     w_arousal_raw + w_emotion_raw
-                                       + w_salience_raw);
-  const double w_aff_arousal = w_arousal_raw / w_aff_sum;
-  const double w_aff_emotion = w_emotion_raw / w_aff_sum;
-  const double w_aff_salience = w_salience_raw / w_aff_sum;
+  const auto affect_weights = core::AffectDriveWeights (cfg.sensitivity);
   const double affect_gain = core::AffectGain (cfg.sensitivity);
   const double affect_drive
       = core::Clamp (affect_gain
-                         * (w_aff_arousal * arousal
-                            + w_aff_emotion * emotion_intensity
-                            + w_aff_salience * salience),
+                         * (affect_weights.arousal_weight * arousal
+                            + affect_weights.emotion_weight * emotion_intensity
+                            + affect_weights.salience_weight * salience),
                      0.0, 1.0);
-  const double w_mem_emotion_raw = core::Lerp (0.60, 0.80, s_eff);
-  const double w_mem_arousal_raw = core::Lerp (0.20, 0.40, s_eff);
-  const double w_mem_sum = std::max (constants::kNormEpsilon,
-                                     w_mem_emotion_raw + w_mem_arousal_raw);
-  const double w_mem_emotion = w_mem_emotion_raw / w_mem_sum;
-  const double w_mem_arousal = w_mem_arousal_raw / w_mem_sum;
+  const auto memory_affect_weights
+      = core::RetrievalMemoryAffectScoringWeights (cfg.sensitivity);
+  const double w_mem_emotion = memory_affect_weights.emotion;
+  const double w_mem_arousal = memory_affect_weights.arousal;
 
-  const double source_thresh
-      = core::Lerp (0.15, 0.45, resurfacing_decay_scale);
+  const double source_thresh = core::RetrievalSourceConfidenceThreshold (
+      cfg.focus, cfg.sensitivity, cfg.stability, resurfacing_decay_scale);
   const double certainty_requirement
-      = core::CertaintyRequirement (resurfacing_decay_scale);
+      = core::RetrievalUnknownCautionCertaintyRequirement (
+          cfg.focus, cfg.sensitivity, cfg.stability, resurfacing_decay_scale);
   struct FilterStats
   {
     int64_t total = 0;
@@ -3318,8 +3507,9 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
             continue;
           }
         const bool source_backed_by_graph
-            = s.durable_source_boost > 0.0
-              || (s.durable_source_count > 0 && s.label_graph_boost > 0.0);
+            = s.durable_source_boost >= source_backed_boost_floor
+              || (s.durable_source_count > 0
+                  && s.label_graph_boost >= source_backed_boost_floor);
         if (!disable_source_conf && enforce_source_conf
             && !source_backed_by_graph && s.source_confidence < source_thresh)
           {
@@ -3370,9 +3560,13 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
             const double candidate_support = core::Clamp (
                 std::max ({ candidate.score, candidate.ctx_score,
                             candidate.proc_score }),
-                0.25, 1.0);
-            const std::size_t cap = std::min<std::size_t> (matched_facts.size (),
-                                                           2);
+                core::RetrievalAnyFactMatchSupportFloor (
+                    cfg.focus, cfg.sensitivity, cfg.stability),
+                1.0);
+            const std::size_t cap = std::min<std::size_t> (
+                matched_facts.size (),
+                static_cast<std::size_t> (core::RetrievalAnyFactMatchLinkCap (
+                    cfg.focus, cfg.sensitivity, cfg.stability)));
             for (std::size_t i = 0; i < cap; ++i)
               {
                 links.push_back ({ matched_facts[i].record,
@@ -3463,10 +3657,10 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
             sql += "(?)";
             params.push_back (candidate_memory_ids[i]);
           }
-        params.push_back (label_graph_degree_damping);
-        params.push_back (label_graph_relation_weight);
-        params.push_back (label_graph_relation_weight);
-        sql += "), candidate_labels AS ("
+	        params.push_back (label_graph_relation_weight);
+	        params.push_back (label_graph_relation_weight);
+	        params.push_back (label_graph_degree_damping);
+	        sql += "), candidate_labels AS ("
                "  SELECT c.id AS candidate_memory_id, "
                "         a.target_memory_id AS label_memory_id, "
                "         MAX(a.weight) AS label_weight "
@@ -3483,35 +3677,8 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
                "    AND dl.edge_type = 'derived_from' "
                "  JOIN associations hl ON hl.source_memory_id = dl.source_memory_id "
                "    AND hl.edge_type = 'has_label' "
-               "  GROUP BY c.id, hl.target_memory_id "
-               "), label_degree AS ("
-               "  SELECT label_id, SUM(degree) AS degree "
-               "  FROM ("
-               "    SELECT target_memory_id AS label_id, COUNT(*) AS degree "
-               "    FROM associations "
-               "    WHERE edge_type = 'has_label' "
-               "    GROUP BY target_memory_id "
-               "    UNION ALL "
-               "    SELECT source_memory_id AS label_id, COUNT(*) AS degree "
-               "    FROM associations "
-               "    WHERE edge_type IN ('co_occurs', 'implies', 'contradicts', "
-               "                        'reinforces', 'causes', 'similar_to') "
-               "    GROUP BY source_memory_id "
-               "    UNION ALL "
-               "    SELECT target_memory_id AS label_id, COUNT(*) AS degree "
-               "    FROM associations "
-               "    WHERE edge_type IN ('co_occurs', 'implies', 'contradicts', "
-               "                        'reinforces', 'causes', 'similar_to') "
-               "    GROUP BY target_memory_id "
-               "  ) "
-               "  GROUP BY label_id "
-               "), label_specificity AS ("
-               "  SELECT m.memory_id AS label_id, "
-               "         1.0 / (1.0 + ? * COALESCE(ld.degree, 0)) AS specificity "
-               "  FROM memories m "
-               "  LEFT JOIN label_degree ld ON ld.label_id = m.memory_id "
-               "  WHERE m.kind = 'LABEL' "
-               "), relation_labels AS ("
+	               "  GROUP BY c.id, hl.target_memory_id "
+	               "), relation_labels AS ("
                "  SELECT cl.candidate_memory_id, "
                "         r.target_memory_id AS label_memory_id, "
                "         MAX(? * cl.label_weight * r.weight) AS label_weight "
@@ -3546,9 +3713,40 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
                "    UNION ALL "
                "    SELECT candidate_memory_id, label_memory_id, label_weight "
                "    FROM relation_labels "
-               "  ) "
-               "  GROUP BY candidate_memory_id, label_memory_id "
-               ") "
+	               "  ) "
+	               "  GROUP BY candidate_memory_id, label_memory_id "
+	               "), matched_labels AS ("
+	               "  SELECT DISTINCT label_memory_id AS label_id FROM matched "
+	               "), label_degree AS ("
+	               "  SELECT label_id, SUM(degree) AS degree "
+	               "  FROM ("
+	               "    SELECT a.target_memory_id AS label_id, COUNT(*) AS degree "
+	               "    FROM associations a "
+	               "    JOIN matched_labels ml ON ml.label_id = a.target_memory_id "
+	               "    WHERE a.edge_type = 'has_label' "
+	               "    GROUP BY a.target_memory_id "
+	               "    UNION ALL "
+	               "    SELECT a.source_memory_id AS label_id, COUNT(*) AS degree "
+	               "    FROM associations a "
+	               "    JOIN matched_labels ml ON ml.label_id = a.source_memory_id "
+	               "    WHERE a.edge_type IN ('co_occurs', 'implies', 'contradicts', "
+	               "                          'reinforces', 'causes', 'similar_to') "
+	               "    GROUP BY a.source_memory_id "
+	               "    UNION ALL "
+	               "    SELECT a.target_memory_id AS label_id, COUNT(*) AS degree "
+	               "    FROM associations a "
+	               "    JOIN matched_labels ml ON ml.label_id = a.target_memory_id "
+	               "    WHERE a.edge_type IN ('co_occurs', 'implies', 'contradicts', "
+	               "                          'reinforces', 'causes', 'similar_to') "
+	               "    GROUP BY a.target_memory_id "
+	               "  ) "
+	               "  GROUP BY label_id "
+	               "), label_specificity AS ("
+	               "  SELECT ml.label_id, "
+	               "         1.0 / (1.0 + ? * COALESCE(ld.degree, 0)) AS specificity "
+	               "  FROM matched_labels ml "
+	               "  LEFT JOIN label_degree ld ON ld.label_id = ml.label_id "
+	               ") "
                "SELECT m.candidate_memory_id AS memory_id, "
                "       SUM(q.qscore * m.label_weight "
                "           * COALESCE(ls.specificity, 1.0)) AS raw_boost, "
@@ -3641,9 +3839,13 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
     const auto t_start = std::chrono::steady_clock::now ();
     try
       {
+        const int durable_source_link_limit
+            = core::RetrievalDurableSourceLinkFanout (
+                cfg.focus, cfg.sensitivity, cfg.stability,
+                static_cast<int> (candidate_memory_ids.size ()));
         std::string sql = "WITH candidate(id) AS (VALUES ";
         std::vector<std::any> params;
-        params.reserve (candidate_memory_ids.size ());
+        params.reserve (candidate_memory_ids.size () + 1);
         for (size_t i = 0; i < candidate_memory_ids.size (); ++i)
           {
             if (i > 0)
@@ -3675,14 +3877,23 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
                "    AND df.edge_type = 'derived_from' "
                "  WHERE cm.kind = 'LABEL' "
                "  GROUP BY c.id, df.target_memory_id "
+               "), source_links_ranked AS ("
+               "  SELECT candidate_memory_id, source_memory_id, "
+               "         MAX(link_weight) AS link_weight "
+               "  FROM source_links "
+               "  GROUP BY candidate_memory_id, source_memory_id "
+               "  ORDER BY link_weight DESC, candidate_memory_id DESC, "
+               "           source_memory_id DESC "
+               "  LIMIT ? "
                ") "
                "SELECT sl.candidate_memory_id, sl.source_memory_id, "
                "       MAX(sl.link_weight) AS link_weight, e.embedding "
-               "FROM source_links sl "
+               "FROM source_links_ranked sl "
                "JOIN memories sm ON sm.memory_id = sl.source_memory_id "
                "JOIN embeddings e ON e.embedding_id = sm.embedding_id "
                "WHERE sm.kind NOT IN ('WORKING', 'LABEL', 'ASSOCIATION') "
                "GROUP BY sl.candidate_memory_id, sl.source_memory_id";
+        params.push_back (static_cast<long long> (durable_source_link_limit));
 
         auto rows = store->Execute (sql, params);
         std::unordered_map<long long, double> max_source_score;
@@ -3711,7 +3922,10 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
                 continue;
               }
             const double link_weight = core::Clamp (
-                AnyToDouble (row.at ("link_weight"), 1.0), 0.0, 1.0);
+                AnyToDouble (row.at ("link_weight"),
+                             core::DerivedSourceFallbackEdgeWeight (
+                                 cfg.focus, cfg.sensitivity, cfg.stability)),
+                0.0, 1.0);
             const double sim
                 = core::Clamp (std::max (0.0, core::CosineSimilarity (q, source_vec))
                                    * link_weight,
@@ -3739,11 +3953,17 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
                 = std::max (0, source_counts[candidate.memory_id]);
             const double count_support = core::Clamp (
                 std::log1p (static_cast<double> (source_count))
-                    / std::log (5.0),
+                    / std::log (core::RetrievalDurableSourceSupportSaturationCount (
+                        cfg.focus, cfg.stability)),
                 0.0, 1.0);
+            const double source_base_weight
+                = core::RetrievalDurableSourceSetBaseWeight (
+                    cfg.focus, cfg.sensitivity, cfg.stability);
             const double source_score
                 = core::Clamp (score_it->second
-                                   * (0.70 + 0.30 * count_support),
+                                   * (source_base_weight
+                                      + (1.0 - source_base_weight)
+                                            * count_support),
                                0.0, 1.0);
             if (source_score < durable_source_min_score)
               {
@@ -3772,18 +3992,20 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
     const double emotion_bonus = affect_drive * memory_affect;
     const double association_bonus = s.is_association ? assoc_boost : 0.0;
     const double label_bonus = s.is_label ? label_boost : 0.0;
+    const double temporal_bonus
+        = s.is_label ? 0.0 : temporal_rank_weight * s.temporal_score;
     return w_rel * relevance + w_ctx * ctx_sim + w_proc * proc_sim
            + w_emotion * emotion_bonus + s.predictive_bonus + association_bonus
            + label_bonus
            + label_graph_weight * s.label_graph_boost
            + durable_source_weight * s.durable_source_boost
-           + s.fact_boost - s.fact_stale_penalty;
+           + temporal_bonus + s.fact_boost - s.fact_stale_penalty;
   };
 
-  auto is_source_backed = [] (const Scored &candidate) {
-    return candidate.durable_source_boost > 0.0
+  auto is_source_backed = [&] (const Scored &candidate) {
+    return candidate.durable_source_boost >= source_backed_boost_floor
            || (candidate.durable_source_count > 0
-               && candidate.label_graph_boost > 0.0);
+               && candidate.label_graph_boost >= source_backed_boost_floor);
   };
 
   auto is_source_backed_memory = [&] (const Scored &candidate) {
@@ -3930,9 +4152,10 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
         selected.clear ();
         return;
       }
-    const double cutoff
-        = certainty_requirement * best_score
-          * core::Lerp (1.0, 1.15, unknown_caution_scale);
+    const double cutoff = certainty_requirement * best_score
+                          * core::RetrievalUnknownCautionCutoffMultiplier (
+                              cfg.focus, cfg.sensitivity, cfg.stability,
+                              unknown_caution_scale);
     selected.erase (
         std::remove_if (selected.begin (), selected.end (),
                         [&] (const Scored &candidate) {
@@ -4044,7 +4267,8 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
         if (acc_it != p_ctx.accumulator_states.end ())
           {
             auto &acc = acc_it->second;
-            const double alpha = core::Lerp (0.20, 0.05, cfg.stability);
+            const double alpha = core::RetrievalContextReinstatementAlpha (
+                cfg.focus, cfg.sensitivity, cfg.stability);
             if (acc.c_t.size () != mean_ctx.size ())
               {
                 acc.c_t = mean_ctx;
@@ -4079,20 +4303,34 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
 
         const double source_conf
             = core::Clamp (candidate.source_confidence, 0.0, 1.0);
+        const auto reconstruction_policy
+            = core::RetrievalConstructiveReconstructionPolicy (
+                cfg.focus, cfg.sensitivity, cfg.stability);
         const double uncertainty = core::Clamp (
-            0.45 * (1.0 - source_conf)
-                + 0.35 * (1.0 - std::max (0.0, candidate.score))
-                + 0.20 * (1.0 - std::max (0.0, candidate.ctx_score)),
+            reconstruction_policy.source_confidence_weight * (1.0 - source_conf)
+                + reconstruction_policy.candidate_score_weight
+                      * (1.0 - std::max (0.0, candidate.score))
+                + reconstruction_policy.context_score_weight
+                      * (1.0 - std::max (0.0, candidate.ctx_score)),
             0.0, 1.0);
-        const double blend = core::Clamp (0.05 + 0.20 * uncertainty, 0.05,
-                                          0.25);
+        const double blend = core::Clamp (
+            reconstruction_policy.min_blend
+                + (reconstruction_policy.max_blend
+                   - reconstruction_policy.min_blend)
+                      * uncertainty,
+            reconstruction_policy.min_blend, reconstruction_policy.max_blend);
 
         Eigen::VectorXf reconstructed
             = static_cast<float> (1.0 - blend) * candidate.vec
-              + static_cast<float> (blend * 0.75) * q;
+              + static_cast<float> (
+                    blend * reconstruction_policy.query_weight)
+                    * q;
         if (q_ctx.size () == q.size () && q_ctx.size () > 0)
           {
-            reconstructed += static_cast<float> (blend * 0.25) * q_ctx;
+            reconstructed
+                += static_cast<float> (
+                       blend * (1.0 - reconstruction_policy.query_weight))
+                   * q_ctx;
           }
         const float norm = reconstructed.norm ();
         if (norm <= 1e-9f)
@@ -4190,7 +4428,8 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
 	                  s.label_graph_boost,
 	                  s.label_match_count,
 	                  s.durable_source_boost,
-	                  s.durable_source_count });
+	                  s.durable_source_count,
+                  s.temporal_score });
 	          }
 	        int candidate_fact_link_row_count = 0;
 	        for (const auto &[memory_id, links] : candidate_fact_links)
@@ -4265,7 +4504,9 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
   int min_proc = 0;
   if (cfg.procedural_enabled && !disable_procedural_proactive)
     {
-      min_proc = std::min (1, k - min_assoc - min_label);
+      min_proc = core::RetrievalProceduralSeedReserveCount (
+          cfg.focus, cfg.sensitivity, cfg.stability,
+          k - min_assoc - min_label);
     }
 
   auto pick_top = [&] (const std::vector<Scored> &candidates,
@@ -4324,7 +4565,9 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
     {
       auto proc_seeds = pick_top (
           eligible, min_proc,
-          [] (const Scored &s) { return s.proc_score >= 0.55; });
+          [procedural_seed_min_score] (const Scored &s) {
+            return s.proc_score >= procedural_seed_min_score;
+          });
       for (const auto &seed : proc_seeds)
         {
           if (initial_ids.insert (seed.embedding_id).second)
@@ -4369,7 +4612,8 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
 	              s.label_graph_boost,
 	              s.label_match_count,
 	              s.durable_source_boost,
-	              s.durable_source_count });
+	              s.durable_source_count,
+              s.temporal_score });
 	      }
 	    int candidate_fact_link_row_count = 0;
 	    for (const auto &[memory_id, links] : candidate_fact_links)
@@ -4455,6 +4699,7 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
   double selected_stale_penalty_sum = 0.0;
   double selected_label_graph_boost_sum = 0.0;
   double selected_durable_source_boost_sum = 0.0;
+  double selected_temporal_score_sum = 0.0;
   count_kinds (scored, scored_assoc, scored_label, scored_other);
   count_kinds (eligible, eligible_assoc, eligible_label, eligible_other);
   count_kinds (selected, selected_assoc, selected_label, selected_other);
@@ -4471,6 +4716,7 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
       selected_stale_penalty_sum += s.fact_stale_penalty;
       selected_label_graph_boost_sum += s.label_graph_boost;
       selected_durable_source_boost_sum += s.durable_source_boost;
+      selected_temporal_score_sum += s.temporal_score;
     }
 
   telemetry::LogDebug ("cortext.graph_retrieval", {
@@ -4508,6 +4754,10 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
     telemetry::Attribute::Double ("retrieval_w_proc", w_proc),
     telemetry::Attribute::Double ("retrieval_predictive_weight",
                                   predictive_weight),
+    telemetry::Attribute::Double ("retrieval_temporal_rank_weight",
+                                  temporal_rank_weight),
+    telemetry::Attribute::Double ("retrieval_temporal_rank_tau_seconds",
+                                  temporal_rank_tau_seconds),
     telemetry::Attribute::Bool ("preconsolidated_label_graph_enabled",
                                 preconsolidated_label_graph_enabled),
     telemetry::Attribute::Double ("preconsolidated_label_graph_weight",
@@ -4598,6 +4848,11 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
         "durable_source_set_mean_boost",
         selected.empty () ? 0.0
                           : selected_durable_source_boost_sum
+                                / static_cast<double> (selected.size ())),
+    telemetry::Attribute::Double (
+        "temporal_rank_mean_score",
+        selected.empty () ? 0.0
+                          : selected_temporal_score_sum
                                 / static_cast<double> (selected.size ()))
   });
 }

@@ -22,7 +22,7 @@ from generate_julie_raw_speech_manifest import parse_messages
 
 DEFAULT_MODEL = "nemotron-3-nano-omni-30b-a3b-8bit"
 DEFAULT_LOCAL_BASE_URL = "http://127.0.0.1:8000/v1"
-LOCAL_JUDGE_HOSTS = {"localhost", "127.0.0.1", "::1", "0.0.0.0"}
+LOCAL_JUDGE_HOSTS = {"localhost", "127.0.0.1", "::1"}
 
 
 def require_nemotron_model(model: str) -> None:

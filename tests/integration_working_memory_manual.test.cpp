@@ -239,13 +239,11 @@ public:
               ? 1.0
               : core::Clamp ((1.0 - max_cos) * 0.5, 0.0, 1.0);
 
-    const double w_alpha = core::Lerp (0.55, 0.70, cfg.focus);
-    const double w_beta = core::Lerp (0.20, 0.35, cfg.focus);
-    const double w_gamma = core::Lerp (0.10, 0.30, cfg.sensitivity);
-    const double w_sum = std::max (1e-6, w_alpha + w_beta + w_gamma);
-    const double alpha = w_alpha / w_sum;
-    const double beta = w_beta / w_sum;
-    const double gamma = w_gamma / w_sum;
+    const auto benefit_weights = core::WMBenefitScoringWeights (
+        cfg.focus, cfg.sensitivity, cfg.stability);
+    const double alpha = benefit_weights.window;
+    const double beta = benefit_weights.relevance;
+    const double gamma = benefit_weights.novelty;
 
     const double S_window = context.GetWindowScore ().value_or (0.0);
     const double benefit = core::Clamp01 (
@@ -261,13 +259,17 @@ public:
               ? (static_cast<double> (k - base_capacity)
                  / static_cast<double> (base_capacity))
               : 0.0;
-    const double capacity_pressure = 1.0 + std::pow (over_ratio, 3.0);
+    const double capacity_pressure
+        = 1.0
+          + std::pow (over_ratio, core::WMCapacityPressureExponent (
+                                      cfg.focus, cfg.sensitivity,
+                                      cfg.stability));
     const double cost_per_slot
         = core::WMMaintenanceCostPerSlot (cfg.sensitivity);
     const double raw_cost
         = (cost_per_slot * static_cast<double> (k) + complexity_penalty)
           * capacity_pressure;
-    const double cost_total = raw_cost / (1.0 + raw_cost);
+    const double cost_total = core::WMCostSaturator (raw_cost);
 
     std::cout << std::fixed << std::setprecision (3);
     std::cout << "WM_LOG ts=" << signal.timestamp
@@ -354,13 +356,11 @@ public:
               ? 1.0
               : core::Clamp ((1.0 - max_cos) * 0.5, 0.0, 1.0);
 
-    const double w_alpha = core::Lerp (0.55, 0.70, cfg.focus);
-    const double w_beta = core::Lerp (0.20, 0.35, cfg.focus);
-    const double w_gamma = core::Lerp (0.10, 0.30, cfg.sensitivity);
-    const double w_sum = std::max (1e-6, w_alpha + w_beta + w_gamma);
-    const double alpha = w_alpha / w_sum;
-    const double beta = w_beta / w_sum;
-    const double gamma = w_gamma / w_sum;
+    const auto benefit_weights = core::WMBenefitScoringWeights (
+        cfg.focus, cfg.sensitivity, cfg.stability);
+    const double alpha = benefit_weights.window;
+    const double beta = benefit_weights.relevance;
+    const double gamma = benefit_weights.novelty;
 
     const double S_window = context.GetWindowScore ().value_or (0.0);
     const double benefit = core::Clamp01 (
@@ -376,13 +376,17 @@ public:
               ? (static_cast<double> (k - base_capacity)
                  / static_cast<double> (base_capacity))
               : 0.0;
-    const double capacity_pressure = 1.0 + std::pow (over_ratio, 3.0);
+    const double capacity_pressure
+        = 1.0
+          + std::pow (over_ratio, core::WMCapacityPressureExponent (
+                                      cfg.focus, cfg.sensitivity,
+                                      cfg.stability));
     const double cost_per_slot
         = core::WMMaintenanceCostPerSlot (cfg.sensitivity);
     const double raw_cost
         = (cost_per_slot * static_cast<double> (k) + complexity_penalty)
           * capacity_pressure;
-    const double cost_total = raw_cost / (1.0 + raw_cost);
+    const double cost_total = core::WMCostSaturator (raw_cost);
 
     int best_idx = -1;
     double best_sim = -1.0;

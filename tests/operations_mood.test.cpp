@@ -192,9 +192,7 @@ TEST_CASE ("UpdateMood ΔT_mood calculation", "[operations][mood]")
                    + (0.4 * lambda) * (0.4 * lambda));
   // Normalize by √6 per paper Section 4.2.4
   const double m_norm = core::Clamp (decayed_mag / std::sqrt (6.0), 0.0, 1.0);
-  const double kappa_mood
-      = operations::constants::kGainMedium
-        * core::SensitivityBias (cfg.sensitivity);
+  const double kappa_mood = core::AffectThresholdGain (cfg.sensitivity);
   const double expected_delta = -kappa_mood * m_norm;
 
   REQUIRE (ctx.GetDeltaThresholdMood ().has_value ());
@@ -383,9 +381,7 @@ TEST_CASE ("UpdateMood with mixed emotions", "[operations][mood]")
   const double m_norm = core::Clamp (mag / std::sqrt (6.0), 0.0, 1.0);
 
   // Verify ΔT_mood
-  const double kappa_mood
-      = operations::constants::kGainMedium
-        * core::SensitivityBias (cfg.sensitivity);
+  const double kappa_mood = core::AffectThresholdGain (cfg.sensitivity);
   REQUIRE (ctx.GetDeltaThresholdMood ().has_value ());
   REQUIRE (*ctx.GetDeltaThresholdMood ()
            == Catch::Approx (-kappa_mood * m_norm));
@@ -447,9 +443,7 @@ TEST_CASE ("UpdateMood max mood state normalization", "[operations][mood]")
       = core::Clamp (std::sqrt (mag_sq) / std::sqrt (6.0), 0.0, 1.0);
 
   // Verify ΔT_mood uses normalized value
-  const double kappa_mood
-      = operations::constants::kGainMedium
-        * core::SensitivityBias (cfg.sensitivity);
+  const double kappa_mood = core::AffectThresholdGain (cfg.sensitivity);
   const double expected_delta = -kappa_mood * m_norm;
 
   REQUIRE (ctx.GetDeltaThresholdMood ().has_value ());

@@ -4,6 +4,7 @@
 
 #include "cortext/clock.hpp"
 #include "cortext/core/algorithms.hpp"
+#include "cortext/core/knobs.hpp"
 
 #include <algorithm>
 #include <any>
@@ -147,8 +148,8 @@ MatchesKnownAt (const FactRecord &record, long long ts)
              || *record.superseded_at_ts > ts);
 }
 
-double
-PredicateRoutineAffinity (const std::string &canonical_predicate)
+core::FactRoutineClass
+PredicateRoutineClass (const std::string &canonical_predicate)
 {
   const auto contains = [&canonical_predicate] (const char *needle) {
     return canonical_predicate.find (needle) != std::string::npos;
@@ -156,18 +157,18 @@ PredicateRoutineAffinity (const std::string &canonical_predicate)
   if (contains ("schedule") || contains ("routine") || contains ("home")
       || contains ("household") || contains ("works_at"))
     {
-      return 1.0;
+      return core::FactRoutineClass::StableRoutine;
     }
   if (contains ("prefer") || contains ("likes") || contains ("favorite"))
     {
-      return 0.8;
+      return core::FactRoutineClass::Preference;
     }
   if (contains ("medication") || contains ("caregiver")
       || contains ("lives_in") || contains ("location"))
     {
-      return 0.35;
+      return core::FactRoutineClass::MutableState;
     }
-  return 0.15;
+  return core::FactRoutineClass::Generic;
 }
 
 std::string
@@ -191,93 +192,107 @@ PredicateSeverityClassImpl (const std::string &canonical_predicate)
   return "low";
 }
 
-double
-SeverityDecayWindow (const std::string &severity_class)
+core::FactSeverity
+ToCoreFactSeverity (const std::string &severity_class)
 {
   if (severity_class == "high")
     {
-      return 18000.0;
+      return core::FactSeverity::High;
     }
   if (severity_class == "medium")
     {
-      return 12000.0;
+      return core::FactSeverity::Medium;
     }
-  return 7000.0;
+  return core::FactSeverity::Low;
 }
 
 double
-DeletionGraceWindow (const std::string &severity_class)
+SeverityDecayWindow (const std::string &severity_class, double focus,
+                     double sensitivity, double stability)
 {
-  if (severity_class == "high")
-    {
-      return 16000.0;
-    }
-  if (severity_class == "medium")
-    {
-      return 9000.0;
-    }
-  return 4500.0;
+  return core::FactLifecycleDecayWindowMillis (
+      focus, sensitivity, stability, ToCoreFactSeverity (severity_class));
 }
 
 double
-LifecycleMultiplier (FactLifecycleState state, FactQueryMode mode)
+DeletionGraceWindow (const std::string &severity_class, double focus,
+                     double sensitivity, double stability)
+{
+  return core::FactLifecycleDeletionGraceWindowMillis (
+      focus, sensitivity, stability, ToCoreFactSeverity (severity_class));
+}
+
+double
+LifecycleMultiplier (FactLifecycleState state, FactQueryMode mode,
+                     const core::FactRetrievalPolicy &policy)
 {
   switch (state)
     {
     case FactLifecycleState::Active:
-      return 1.0;
+      return policy.active_lifecycle_multiplier;
     case FactLifecycleState::Weak:
-      return mode == FactQueryMode::Current ? 0.62 : 0.84;
+      return mode == FactQueryMode::Current
+                 ? policy.weak_current_lifecycle_multiplier
+                 : policy.weak_history_lifecycle_multiplier;
     case FactLifecycleState::Archived:
-      return mode == FactQueryMode::Current ? 0.0 : 0.85;
+      return mode == FactQueryMode::Current
+                 ? policy.archived_current_lifecycle_multiplier
+                 : policy.archived_history_lifecycle_multiplier;
     }
   return 1.0;
 }
 
 double
-EvidenceSupportValue (const std::string &evidence_type, double support_weight)
+EvidenceSupportValue (const std::string &evidence_type, double support_weight,
+                      double focus, double sensitivity, double stability)
 {
-  double type_weight = 0.70;
-  if (evidence_type == "episodic")
-    {
-      type_weight = 1.0;
-    }
-  else if (evidence_type == "summary")
-    {
-      type_weight = 0.88;
-    }
-  return core::Clamp (type_weight * core::Clamp (support_weight, 0.20, 1.0),
-                      0.0, 1.0);
+  const double type_weight = core::FactRetrievalEvidenceTypeWeight (
+      focus, sensitivity, stability, evidence_type.c_str ());
+  return core::Clamp (
+      type_weight
+          * core::Clamp (
+              support_weight,
+              core::FactRetrievalEvidenceSupportFloor (focus, sensitivity,
+                                                       stability),
+              1.0),
+      0.0, 1.0);
 }
 
 double
-ComputeRoutineSupport (const FactRecord &record, long long ts)
+ComputeRoutineSupport (const FactRecord &record, long long ts,
+                       const core::FactRetrievalPolicy &policy)
 {
   const long long anchor_ts
       = record.valid_start_ts.value_or (record.recorded_at_ts);
   const long long duration = std::max (0LL, ts - anchor_ts);
   const double duration_support
-      = std::clamp (static_cast<double> (duration) / 8000.0, 0.0, 1.0);
+      = std::clamp (static_cast<double> (duration)
+                        / policy.routine_duration_window_ms,
+                    0.0, 1.0);
   const double evidence_support
-      = std::clamp (0.55 * record.support_mass
-                        + 0.45
+      = std::clamp (policy.routine_evidence_weight * record.support_mass
+                        + (1.0 - policy.routine_evidence_weight)
                               * std::clamp (
                                   static_cast<double> (record.confirmation_count)
-                                      / 6.0,
+                                      / policy.routine_confirmation_saturation,
                                   0.0, 1.0),
                     0.0, 1.0);
-  return std::clamp (0.55 * duration_support + 0.45 * evidence_support, 0.0,
-                     1.0);
+  return std::clamp (
+      policy.routine_duration_weight * duration_support
+          + (1.0 - policy.routine_duration_weight) * evidence_support,
+      0.0, 1.0);
 }
 
 double
-ComputeRecencySupport (const FactRecord &record, long long ts)
+ComputeRecencySupport (const FactRecord &record, long long ts,
+                       const core::FactRetrievalPolicy &policy)
 {
   const long long anchor
       = record.last_confirmation_ts > 0 ? record.last_confirmation_ts
                                         : record.recorded_at_ts;
   const long long age = std::max (0LL, ts - anchor);
-  return std::clamp (1.0 - static_cast<double> (age) / 8000.0, 0.0, 1.0);
+  return std::clamp (1.0 - static_cast<double> (age) / policy.recency_window_ms,
+                     0.0, 1.0);
 }
 
 void
@@ -357,6 +372,10 @@ RecomputeFactLifecycle (Transaction &tx, Encoder *encoder, long long fact_id,
     }
 
   const auto options = GetFactLifecycleOptions ();
+  const double focus = core::Clamp (options.focus, 0.0, 1.0);
+  const double sensitivity = core::Clamp (options.sensitivity, 0.0, 1.0);
+  const double stability = core::Clamp (options.stability, 0.0, 1.0);
+  const auto severity = ToCoreFactSeverity (severity_class);
 
   double live_support_mass = 0.0;
   std::unordered_set<long long> live_sources;
@@ -378,7 +397,8 @@ RecomputeFactLifecycle (Transaction &tx, Encoder *encoder, long long fact_id,
       live_sources.insert (live_memory_id);
       live_support_mass += EvidenceSupportValue (
           ExtractString (evidence_row, "evidence_type"),
-          ExtractDouble (evidence_row, "support_weight", 1.0));
+          ExtractDouble (evidence_row, "support_weight", 1.0), focus,
+          sensitivity, stability);
     }
 
   double contradiction_mass = 0.0;
@@ -397,20 +417,31 @@ RecomputeFactLifecycle (Transaction &tx, Encoder *encoder, long long fact_id,
       contradiction_mass += ExtractDouble (conflict_row, "confidence", 0.0);
     }
 
-  const double evidence_norm = core::Clamp (live_support_mass / 2.2, 0.0, 1.0);
+  const double evidence_norm = core::Clamp (
+      live_support_mass
+          / core::FactLifecycleEvidenceNormDenominator (focus, sensitivity,
+                                                        stability),
+      0.0, 1.0);
   const double diversity_norm
-      = core::Clamp (static_cast<double> (live_sources.size ()) / 3.0, 0.0,
-                     1.0);
+      = core::Clamp (
+          static_cast<double> (live_sources.size ())
+              / core::FactLifecycleDiversitySaturation (focus, sensitivity,
+                                                        stability),
+          0.0, 1.0);
   const int repeated_count
       = std::max (confirmation_count, compressed_support_count + 1);
   const double repeated_bonus
       = options.compress_repeated_confirmations
             ? core::Clamp (
                   std::log1p (static_cast<double> (std::max (0, repeated_count - 1)))
-                      / std::log1p (20.0),
+                      / std::log1p (
+                          core::FactLifecycleRepeatedCompressedSaturation (
+                              focus, sensitivity, stability)),
                   0.0, 1.0)
             : core::Clamp (
-                  static_cast<double> (std::max (0, repeated_count - 1)) / 6.0,
+                  static_cast<double> (std::max (0, repeated_count - 1))
+                      / core::FactLifecycleRepeatedRawSaturation (
+                          focus, sensitivity, stability),
                   0.0, 1.0);
   double recency_factor = 1.0;
   if (options.support_decay_enabled)
@@ -418,32 +449,52 @@ RecomputeFactLifecycle (Transaction &tx, Encoder *encoder, long long fact_id,
       const long long age
           = std::max (0LL,
                       static_cast<long long> (now_ts) - last_confirmation_ts);
-      const double floor = severity_class == "high" ? 0.30 : 0.0;
+      const double floor
+          = severity_class == "high"
+                ? core::FactLifecycleHighSeverityRecencyFloor (
+                    focus, sensitivity, stability)
+                : 0.0;
       recency_factor
           = core::Clamp (1.0 - static_cast<double> (age)
-                                   / SeverityDecayWindow (severity_class),
+                                   / SeverityDecayWindow (
+                                       severity_class, focus, sensitivity,
+                                       stability),
                          floor, 1.0);
     }
 
   const double contradiction_norm
-      = core::Clamp (contradiction_mass / 1.6, 0.0, 1.0);
+      = core::Clamp (
+          contradiction_mass
+              / core::FactLifecycleContradictionNormDenominator (
+                  focus, sensitivity, stability),
+          0.0, 1.0);
+  const auto support_policy = core::FactLifecycleSupportScoringPolicy (
+      focus, sensitivity, stability);
   double support_score
-      = (0.38 * confidence + 0.30 * evidence_norm + 0.17 * diversity_norm
-         + 0.15 * repeated_bonus)
-        * (0.45 + 0.55 * recency_factor)
-        - 0.18 * contradiction_norm;
+      = (support_policy.confidence_weight * confidence
+         + support_policy.evidence_weight * evidence_norm
+         + support_policy.diversity_weight * diversity_norm
+         + support_policy.repeated_weight * repeated_bonus)
+        * (support_policy.recency_base_weight
+           + support_policy.recency_dynamic_weight * recency_factor)
+        - support_policy.contradiction_weight * contradiction_norm;
   const bool open_current
       = !valid_end_ts.has_value () && !superseded_at_ts.has_value ();
   if (live_sources.empty () && severity_class == "high"
       && options.preserve_high_severity_history && open_current)
     {
-      support_score = std::max (support_score, 0.22);
+      support_score = std::max (
+          support_score,
+          core::FactLifecycleSupportScoreFloor (focus, sensitivity, stability,
+                                                severity));
     }
   support_score = core::Clamp (support_score, 0.0, 1.0);
 
   FactLifecycleState lifecycle_state = FactLifecycleState::Archived;
-  const double active_threshold = severity_class == "high" ? 0.45 : 0.52;
-  const double weak_threshold = severity_class == "low" ? 0.22 : 0.18;
+  const double active_threshold = core::FactLifecycleActiveThreshold (
+      focus, sensitivity, stability, severity);
+  const double weak_threshold = core::FactLifecycleWeakThreshold (
+      focus, sensitivity, stability, severity);
   if (support_score >= active_threshold)
     {
       lifecycle_state = FactLifecycleState::Active;
@@ -485,11 +536,12 @@ RecomputeFactLifecycle (Transaction &tx, Encoder *encoder, long long fact_id,
           = superseded_at_ts.has_value () || valid_end_ts.has_value ();
       const bool allow_high_delete
           = !options.preserve_high_severity_history && severity_class == "high";
-      const double delete_threshold
-          = (low_value || allow_high_delete) ? 0.18 : 0.08;
+      const double delete_threshold = core::FactLifecycleDeleteThreshold (
+          focus, sensitivity, stability, severity);
       if ((low_value || allow_high_delete)
           && archived_age
-                 >= static_cast<long long> (DeletionGraceWindow (severity_class))
+                 >= static_cast<long long> (DeletionGraceWindow (
+                     severity_class, focus, sensitivity, stability))
           && (superseded_or_closed || live_sources.empty ())
           && support_score <= delete_threshold)
         {
@@ -526,11 +578,14 @@ RecomputeFactLifecycle (Transaction &tx, Encoder *encoder, long long fact_id,
 
 std::vector<long long>
 BuildLifecycleCandidates (Transaction &tx,
-                          const std::vector<long long> &priority_fact_ids)
+                          const std::vector<long long> &priority_fact_ids,
+                          const FactLifecycleOptions &options)
 {
-  constexpr std::size_t kSweepLimit = 256;
+  const std::size_t sweep_limit = static_cast<std::size_t> (
+      std::max (1, core::FactLifecycleMaintenanceSweepLimit (
+                       options.focus, options.sensitivity, options.stability)));
   std::vector<long long> candidates;
-  candidates.reserve (kSweepLimit);
+  candidates.reserve (sweep_limit + priority_fact_ids.size ());
   std::unordered_set<long long> seen;
 
   for (const long long fact_id : priority_fact_ids)
@@ -550,7 +605,7 @@ BuildLifecycleCandidates (Transaction &tx,
       "         COALESCE(last_maintenance_ts, 0) ASC, "
       "         recorded_at_ts ASC "
       "LIMIT ?",
-      { static_cast<long long> (kSweepLimit) });
+      { static_cast<long long> (sweep_limit) });
   for (const auto &row : rows)
     {
       const long long fact_id = ExtractInt64 (row, "fact_id");
@@ -628,6 +683,54 @@ std::string
 PredicateSeverityClass (const std::string &canonical_predicate)
 {
   return PredicateSeverityClassImpl (canonical_predicate);
+}
+
+double
+PredicateCriticality (const std::string &canonical_predicate)
+{
+  return PredicateCriticality (canonical_predicate, 0.5, 0.5, 0.5);
+}
+
+double
+PredicateCriticality (const std::string &canonical_predicate, double focus,
+                      double sensitivity, double stability)
+{
+  const auto contains = [&canonical_predicate] (const char *needle) {
+    return canonical_predicate.find (needle) != std::string::npos;
+  };
+  core::FactCriticalityClass criticality_class
+      = core::FactCriticalityClass::Generic;
+  if (contains ("medication") || contains ("caregiver") || contains ("location")
+      || contains ("schedule") || contains ("appointment")
+      || contains ("safety") || contains ("destination")
+      || contains ("pickup") || contains ("lives_in"))
+    {
+      criticality_class = core::FactCriticalityClass::High;
+    }
+  else if (contains ("routine") || contains ("household") || contains ("home")
+           || contains ("works_at"))
+    {
+      criticality_class = core::FactCriticalityClass::Medium;
+    }
+  else if (contains ("prefer") || contains ("likes") || contains ("favorite"))
+    {
+      criticality_class = core::FactCriticalityClass::Preference;
+    }
+  const double class_criticality = core::FactCriticalityClassPrior (
+      focus, sensitivity, stability, criticality_class);
+  return core::FactCriticality (focus, sensitivity, stability,
+                                class_criticality);
+}
+
+double
+PredicateRoutineAffinity (const std::string &canonical_predicate, double focus,
+                          double sensitivity, double stability)
+{
+  const auto routine_class = PredicateRoutineClass (canonical_predicate);
+  return core::FactRoutineAffinity (
+      focus, sensitivity, stability,
+      core::FactRoutineClassAffinity (
+          focus, sensitivity, stability, routine_class));
 }
 
 std::string
@@ -794,7 +897,9 @@ void
 MaintainFactLifecycle (Transaction &tx, Encoder *encoder, std::uint64_t now_ts,
                        const std::vector<long long> &priority_fact_ids)
 {
-  const auto candidates = BuildLifecycleCandidates (tx, priority_fact_ids);
+  const auto options = GetFactLifecycleOptions ();
+  const auto candidates
+      = BuildLifecycleCandidates (tx, priority_fact_ids, options);
   for (const long long fact_id : candidates)
     {
       RecomputeFactLifecycle (tx, encoder, fact_id, now_ts);
@@ -931,8 +1036,18 @@ FactScore
 ScoreFactRecord (const FactRecord &record, FactQueryMode mode,
                  std::uint64_t timestamp)
 {
+  return ScoreFactRecord (record, mode, timestamp, 0.5, 0.5, 0.5);
+}
+
+FactScore
+ScoreFactRecord (const FactRecord &record, FactQueryMode mode,
+                 std::uint64_t timestamp, double focus, double sensitivity,
+                 double stability)
+{
   const long long ts
       = timestamp == 0 ? NowMs () : static_cast<long long> (timestamp);
+  const auto policy
+      = core::FactRetrievalScoringPolicy (focus, sensitivity, stability);
 
   FactScore score;
   score.current_boost = (record.is_current
@@ -952,31 +1067,33 @@ ScoreFactRecord (const FactRecord &record, FactQueryMode mode,
       break;
     }
 
-  score.evidence_support
-      = core::Clamp (0.70 * record.support_mass
-                         + 0.30
-                               * std::clamp (
-                                   static_cast<double> (record.evidence_count)
-                                       / 5.0,
-                                   0.0, 1.0),
-                     0.0, 1.0);
-  score.routine_support = ComputeRoutineSupport (record, ts);
-  score.recency_support = ComputeRecencySupport (record, ts);
-  score.lifecycle_support = LifecycleMultiplier (record.lifecycle_state, mode);
+  score.evidence_support = core::Clamp (
+      policy.evidence_mass_weight * record.support_mass
+          + policy.evidence_count_weight
+                * std::clamp (static_cast<double> (record.evidence_count)
+                                  / policy.evidence_count_saturation,
+                              0.0, 1.0),
+      0.0, 1.0);
+  score.routine_support = ComputeRoutineSupport (record, ts, policy);
+  score.recency_support = ComputeRecencySupport (record, ts, policy);
+  score.lifecycle_support
+      = LifecycleMultiplier (record.lifecycle_state, mode, policy);
   score.supersession_penalty
       = record.superseded_at_ts.has_value () ? 1.0 : 0.0;
   const double routine_affinity
-      = PredicateRoutineAffinity (record.canonical_predicate);
-  const double base = 0.40 * score.temporal_match
-                      + 0.22 * std::clamp (record.confidence, 0.0, 1.0)
-                      + 0.24 * score.evidence_support
-                      + 0.10 * score.current_boost
-                      + 0.04
-                            * std::clamp (
-                                static_cast<double> (record.source_diversity)
-                                    / 3.0,
-                                0.0, 1.0)
-                      - 0.18 * score.supersession_penalty;
+      = PredicateRoutineAffinity (record.canonical_predicate, focus,
+                                  sensitivity, stability);
+  const double source_diversity_support = std::clamp (
+      static_cast<double> (record.source_diversity)
+          / policy.source_diversity_saturation,
+      0.0, 1.0);
+  const double base
+      = policy.temporal_match_weight * score.temporal_match
+        + policy.confidence_weight * std::clamp (record.confidence, 0.0, 1.0)
+        + policy.evidence_support_weight * score.evidence_support
+        + policy.current_boost_weight * score.current_boost
+        + policy.source_diversity_weight * source_diversity_support
+        - policy.supersession_penalty_weight * score.supersession_penalty;
   double routine_recency_adjust = 0.0;
   const auto override = operations::temporal::GetRetrievalAblationOverride ();
   switch (override.routine_recency_mode.value_or (
@@ -986,13 +1103,15 @@ ScoreFactRecord (const FactRecord &record, FactQueryMode mode,
       break;
     case operations::temporal::RoutineRecencyMode::RoutineBiased:
       routine_recency_adjust
-          = 0.30 * routine_affinity * score.routine_support
-            - 0.12 * score.recency_support;
+          = policy.routine_bias_weight * routine_affinity
+                * score.routine_support
+            - policy.routine_recency_penalty_weight * score.recency_support;
       break;
     case operations::temporal::RoutineRecencyMode::RecencyBiased:
       routine_recency_adjust
-          = 0.34 * score.recency_support
-            - 0.16 * routine_affinity * score.routine_support;
+          = policy.recency_bias_weight * score.recency_support
+            - policy.recency_routine_penalty_weight * routine_affinity
+                  * score.routine_support;
       break;
     }
   score.combined = std::clamp (

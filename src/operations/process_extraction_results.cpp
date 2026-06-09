@@ -199,16 +199,17 @@ LoadAttachedLabelBankEmbedding (Transaction &tx, const std::string &label_key,
 
 double
 ComputeLabelSalience (const std::vector<float> *label_embedding,
-                      const std::optional<Eigen::VectorXf> &summary_embedding)
+                      const std::optional<Eigen::VectorXf> &summary_embedding,
+                      double focus, double sensitivity, double stability)
 {
   if (!summary_embedding.has_value () || summary_embedding->size () == 0
       || label_embedding == nullptr || label_embedding->empty ())
     {
-      return 0.5;
+      return core::LabelSalienceFallback (focus, sensitivity, stability);
     }
   if (static_cast<int> (label_embedding->size ()) != summary_embedding->size ())
     {
-      return 0.5;
+      return core::LabelSalienceFallback (focus, sensitivity, stability);
     }
 
   Eigen::Map<const Eigen::VectorXf> label_vec (
@@ -374,10 +375,8 @@ double
 RequiredSupersessionConfidence (double existing_confidence, double sensitivity,
                                 double stability)
 {
-  const double s = core::SensitivityBias (sensitivity);
-  const double t = core::Clamp (stability, 0.0, 1.0);
-  const double margin = core::Lerp (0.18, 0.03, s)
-                        * core::Lerp (1.10, 0.90, t);
+  const double margin = core::FactSupersessionConfidenceMargin (
+      sensitivity, stability);
   return core::Clamp (
       existing_confidence
           + margin * (1.0 - core::Clamp (existing_confidence, 0.0, 1.0)),
@@ -494,7 +493,8 @@ SharedTokenCount (const std::string &a_tokens, const std::string &b_tokens)
 
 bool
 StrongEndpointAliasMatch (const std::string &endpoint_tokens,
-                          const std::string &candidate_tokens)
+                          const std::string &candidate_tokens,
+                          int min_shared_tokens)
 {
   if (endpoint_tokens.empty () || candidate_tokens.empty ())
     {
@@ -520,7 +520,8 @@ StrongEndpointAliasMatch (const std::string &endpoint_tokens,
 
   const int shorter = static_cast<int> (
       std::min (endpoint_parts.size (), candidate_parts.size ()));
-  return shorter > 0 && shared == shorter && shared >= 2;
+  return shorter > 0 && shared == shorter
+         && shared >= std::max (1, min_shared_tokens);
 }
 
 bool
@@ -672,9 +673,10 @@ IsStrongSourceSpanLabel (const std::string &label,
 
 bool
 IsContextualSourceSpanLabel (const std::vector<SourceSpanToken> &tokens,
-                             size_t start, int width)
+                             size_t start, int width,
+                             const core::STMLTMSourceSpanPolicy &policy)
 {
-  if (width < 4)
+  if (width < policy.contextual_min_width)
     {
       return false;
     }
@@ -709,7 +711,8 @@ IsContextualSourceSpanLabel (const std::vector<SourceSpanToken> &tokens,
           = has_eventish_token
             || kEventishTokens.find (token.canonical) != kEventishTokens.end ();
     }
-  return content_count >= 3 && (has_capitalized || has_eventish_token);
+  return content_count >= policy.contextual_min_content_tokens
+         && (has_capitalized || has_eventish_token);
 }
 
 bool
@@ -837,7 +840,8 @@ TokenizeSourceSpans (const std::string &text)
 
 std::vector<std::string>
 BuildSourceSpanCandidates (const std::string &evidence_text,
-                           int max_candidates)
+                           int max_candidates,
+                           const core::STMLTMSourceSpanPolicy &policy)
 {
   if (max_candidates <= 0 || evidence_text.empty ())
     {
@@ -895,7 +899,8 @@ BuildSourceSpanCandidates (const std::string &evidence_text,
 
       size_t object_end = object_start;
       int object_tokens = 0;
-      while (object_end < tokens.size () && object_tokens < 3)
+      while (object_end < tokens.size ()
+             && object_tokens < policy.action_object_max_tokens)
         {
           const auto &object_token = tokens[object_end];
           if (object_end > object_start && object_token.boundary_before)
@@ -941,7 +946,8 @@ BuildSourceSpanCandidates (const std::string &evidence_text,
                 {
                   break;
                 }
-              if (verb_index - subject_search >= 3)
+              if (verb_index - subject_search
+                  >= static_cast<size_t> (policy.subject_search_max_gap))
                 {
                   break;
                 }
@@ -966,7 +972,8 @@ BuildSourceSpanCandidates (const std::string &evidence_text,
       std::string phrase = tokens[i].surface;
       size_t j = i + 1;
       int parts = 1;
-	      while (j < tokens.size () && parts < 3 && tokens[j].capitalized
+	      while (j < tokens.size () && parts < policy.proper_noun_max_parts
+	             && tokens[j].capitalized
 	             && !tokens[j].boundary_before
 	             && !IsSourceSpanStopword (tokens[j].canonical))
 	        {
@@ -981,12 +988,13 @@ BuildSourceSpanCandidates (const std::string &evidence_text,
 	        }
 	    }
 
-  for (int width = 5; width >= 4; --width)
+	  for (int width = policy.contextual_max_width;
+	       width >= policy.contextual_min_width; --width)
     {
       for (size_t i = 0; i + static_cast<size_t> (width) <= tokens.size ();
            ++i)
         {
-          if (!IsContextualSourceSpanLabel (tokens, i, width))
+	          if (!IsContextualSourceSpanLabel (tokens, i, width, policy))
             {
               continue;
             }
@@ -994,7 +1002,8 @@ BuildSourceSpanCandidates (const std::string &evidence_text,
         }
     }
 
-  for (int width = 3; width >= 2; --width)
+	  for (int width = policy.phrase_max_width;
+	       width >= policy.phrase_min_width; --width)
     {
       for (size_t i = 0; i + static_cast<size_t> (width) <= tokens.size ();
            ++i)
@@ -1030,7 +1039,8 @@ BuildSourceSpanCandidates (const std::string &evidence_text,
 
   for (const auto &token : tokens)
     {
-      if (token.canonical.size () >= 5
+	      if (static_cast<int> (token.canonical.size ())
+	              >= policy.singleton_min_chars
           && !IsSourceSpanStopword (token.canonical))
         {
           add_candidate (token.surface);
@@ -1041,7 +1051,8 @@ BuildSourceSpanCandidates (const std::string &evidence_text,
 }
 
 std::optional<ExtractedFact>
-BuildFactFromDurableEventLabel (const std::string &label)
+BuildFactFromDurableEventLabel (const std::string &label, double focus,
+                                double sensitivity, double stability)
 {
   const auto tokens = TokenizeSourceSpans (label);
   if (tokens.size () < 3 || !tokens.front ().capitalized)
@@ -1114,7 +1125,8 @@ BuildFactFromDurableEventLabel (const std::string &label)
   fact.subject = tokens.front ().surface;
   fact.predicate = tokens[verb_index].canonical;
   fact.object = object;
-  fact.confidence = 0.62;
+  fact.confidence = core::FactDerivedEventConfidence (focus, sensitivity,
+                                                      stability);
   return fact;
 }
 
@@ -1572,23 +1584,31 @@ FormatCurrentLabelsForPrompt (const std::vector<std::string> &labels)
 
 std::string
 BuildTextLabelRefinementEvidence (
-    const std::string &combined_text,
-    const std::vector<std::string> &current_labels)
+	    const std::string &combined_text,
+	    const std::vector<std::string> &current_labels,
+	    double F, double S, double T)
 {
-	  return "Refine labels for one memory graph association. Keep correct "
-	         "current labels, remove unsupported or generic labels, and add "
-	         "missing concrete labels. Return the final replacement labels. "
-	         "Use durable memory anchors: named people, places, organizations, "
-	         "pets, specific objects, and short event phrases. Prefer 2-5 word "
-	         "noun/event phrases unless the label is a proper name or concrete "
-	         "object. When evidence contains enough anchors, return 4-8 labels. "
-	         "Every important word in a label must appear verbatim in the "
-	         "evidence; do not paraphrase, infer, summarize, or invent labels. "
-	         "Do not return pronouns, chat roles, filler words, helper "
-	         "verbs, modal words, status phrases, or generic labels such as "
-	         "that, this, thing, get, go, make, might, idea, food, stuff, "
-	         "almost done, user, assistant. "
-	         "Relations, when present, must use one of these predicates: "
+  const int min_words = core::STMLTMLabelPromptMinWords (F, S, T);
+  const int max_words = std::max (
+      min_words, core::STMLTMLabelPromptMaxWords (F, S, T));
+  const int min_labels = core::STMLTMDurableMinLabels (F, S, T);
+  const int max_labels = core::STMLTMDurableMaxLabels (F, S, T);
+  return "Refine labels for one memory graph association. Keep correct "
+         "current labels, remove unsupported or generic labels, and add "
+         "missing concrete labels. Return the final replacement labels. "
+         "Use durable memory anchors: named people, places, organizations, "
+         "pets, specific objects, and short event phrases. Prefer "
+         + std::to_string (min_words) + "-" + std::to_string (max_words)
+         + " word noun/event phrases unless the label is a proper name or "
+           "concrete object. When evidence contains enough anchors, return "
+         + std::to_string (min_labels) + "-" + std::to_string (max_labels)
+         + " labels. Every important word in a label must appear verbatim in "
+           "the evidence; do not paraphrase, infer, summarize, or invent "
+           "labels. Do not return pronouns, chat roles, filler words, helper "
+           "verbs, modal words, status phrases, or generic labels such as "
+           "that, this, thing, get, go, make, might, idea, food, stuff, "
+           "almost done, user, assistant. "
+           "Relations, when present, must use one of these predicates: "
          "co_occurs, implies, contradicts, reinforces, causes, similar_to. "
          "Every relation subject and object must exactly match one final "
          "label; omit unclear or unsupported relations. "
@@ -1665,6 +1685,9 @@ ProcessExtractionResults::Execute (OperationContext &context, Transaction &tx) c
 {
   auto &p_ctx = context.GetProcessorContext ();
   const auto &cfg = context.GetConfig ();
+  const double label_cooccurrence_edge_weight
+      = core::LabelCooccurrenceEdgeWeight (cfg.focus, cfg.sensitivity,
+                                           cfg.stability);
 
   // Get extractor (may be null if OGA disabled)
   Extractor *extractor = context.GetExtractor ();
@@ -1723,12 +1746,16 @@ ProcessExtractionResults::Execute (OperationContext &context, Transaction &tx) c
                   = request_current_labels_by_key[req.summary_id];
               std::vector<std::string> refinement_current_labels
                   = req.current_labels;
-              const int source_span_candidate_limit
-                  = core::STMLTMSourceSpanCandidateLimit (cfg.focus,
-                                                          cfg.sensitivity,
-                                                          cfg.stability);
-              const auto source_span_candidates = BuildSourceSpanCandidates (
-                  combined_text, source_span_candidate_limit);
+	              const int source_span_candidate_limit
+	                  = core::STMLTMSourceSpanCandidateLimit (cfg.focus,
+	                                                          cfg.sensitivity,
+	                                                          cfg.stability);
+              const auto source_span_policy
+                  = core::STMLTMSourceSpanCandidatePolicy (
+                      cfg.focus, cfg.sensitivity, cfg.stability);
+	              const auto source_span_candidates = BuildSourceSpanCandidates (
+	                  combined_text, source_span_candidate_limit,
+                      source_span_policy);
               auto &source_span_keys
                   = request_source_span_label_keys[req.summary_id];
               request_source_span_counts[req.summary_id]
@@ -1811,9 +1838,11 @@ ProcessExtractionResults::Execute (OperationContext &context, Transaction &tx) c
                 {
                   const std::string extraction_text
                       = refinement_current_labels.empty ()
-                            ? combined_text
-                            : BuildTextLabelRefinementEvidence (
-                                  combined_text, refinement_current_labels);
+	                            ? combined_text
+	                            : BuildTextLabelRefinementEvidence (
+	                                  combined_text, refinement_current_labels,
+	                                  cfg.focus, cfg.sensitivity,
+	                                  cfg.stability);
                   result = extractor->ExtractFromText (extraction_text,
                                                        kExtractionSchema);
                 }
@@ -2255,7 +2284,9 @@ ProcessExtractionResults::Execute (OperationContext &context, Transaction &tx) c
           const std::vector<float> *label_embedding_ptr
               = resolve_label_embedding (label, label_key, existing);
           const double salience
-              = ComputeLabelSalience (label_embedding_ptr, summary_embedding);
+              = ComputeLabelSalience (label_embedding_ptr, summary_embedding,
+                                      cfg.focus, cfg.sensitivity,
+                                      cfg.stability);
           if (use_legacy_label_gate && label_threshold > 1
               && label_counts[label_key] < label_threshold)
             {
@@ -2337,7 +2368,8 @@ ProcessExtractionResults::Execute (OperationContext &context, Transaction &tx) c
 	            const std::vector<float> *label_embedding_ptr
 	                = resolve_label_embedding (label, label_key, existing);
 	            const double salience = ComputeLabelSalience (
-	                label_embedding_ptr, summary_embedding);
+	                label_embedding_ptr, summary_embedding, cfg.focus,
+	                cfg.sensitivity, cfg.stability);
 	            if (!insert_label (label, label_key, salience,
 	                               label_embedding_ptr, existing))
 	              {
@@ -2414,9 +2446,12 @@ ProcessExtractionResults::Execute (OperationContext &context, Transaction &tx) c
 
 	        }
 
-      auto ensure_relation_endpoint_label =
-          [&] (const std::string &endpoint,
-               double relation_confidence) -> long long {
+      const int relation_endpoint_alias_min_shared
+          = core::STMLTMRelationEndpointAliasMinSharedTokens (
+              cfg.focus, cfg.sensitivity, cfg.stability);
+	      auto ensure_relation_endpoint_label =
+	          [&] (const std::string &endpoint,
+	               double relation_confidence) -> long long {
         const std::string label = TrimLabel (endpoint);
         const std::string label_key = NormalizeLabelKey (endpoint);
         auto existing_it = label_memory_ids.find (label_key);
@@ -2433,8 +2468,9 @@ ProcessExtractionResults::Execute (OperationContext &context, Transaction &tx) c
               {
                 const std::string candidate_tokens
                     = CanonicalLabelTokenKey (candidate_key);
-                if (!StrongEndpointAliasMatch (endpoint_tokens,
-                                               candidate_tokens))
+	                if (!StrongEndpointAliasMatch (
+	                        endpoint_tokens, candidate_tokens,
+	                        relation_endpoint_alias_min_shared))
                   {
                     continue;
                   }
@@ -2464,8 +2500,9 @@ ProcessExtractionResults::Execute (OperationContext &context, Transaction &tx) c
               {
                 const std::string candidate_tokens
                     = CanonicalLabelTokenKey (candidate_key);
-                if (!StrongEndpointAliasMatch (endpoint_tokens,
-                                               candidate_tokens))
+	                if (!StrongEndpointAliasMatch (
+	                        endpoint_tokens, candidate_tokens,
+	                        relation_endpoint_alias_min_shared))
                   {
                     continue;
                   }
@@ -2492,7 +2529,8 @@ ProcessExtractionResults::Execute (OperationContext &context, Transaction &tx) c
                         = resolve_label_embedding (durable_alias_label,
                                                    alias_key, existing);
                     const double salience = ComputeLabelSalience (
-                        label_embedding_ptr, summary_embedding);
+                        label_embedding_ptr, summary_embedding, cfg.focus,
+                        cfg.sensitivity, cfg.stability);
                     if (insert_label (durable_alias_label, alias_key,
                                       salience, label_embedding_ptr, existing))
                       {
@@ -2573,7 +2611,9 @@ ProcessExtractionResults::Execute (OperationContext &context, Transaction &tx) c
           }
 
         const double salience
-            = ComputeLabelSalience (label_embedding_ptr, summary_embedding);
+            = ComputeLabelSalience (label_embedding_ptr, summary_embedding,
+                                    cfg.focus, cfg.sensitivity,
+                                    cfg.stability);
         if (insert_label (label, label_key, salience, label_embedding_ptr,
                           existing))
           {
@@ -2764,7 +2804,8 @@ ProcessExtractionResults::Execute (OperationContext &context, Transaction &tx) c
                             "INSERT INTO associations "
                             "(source_memory_id, target_memory_id, edge_type, weight) "
                             "VALUES (?, ?, 'co_occurs', ?)",
-                            { lhs_id, rhs_id, 0.35 });
+                            { lhs_id, rhs_id,
+                              label_cooccurrence_edge_weight });
                   ++relation_edges_created;
                   ++label_cooccurrence_edges_created;
                 }
@@ -2847,7 +2888,8 @@ ProcessExtractionResults::Execute (OperationContext &context, Transaction &tx) c
           facts_to_process = result.facts;
           for (const auto &label : refined_label_texts)
             {
-              auto event_fact = BuildFactFromDurableEventLabel (label);
+              auto event_fact = BuildFactFromDurableEventLabel (
+                  label, cfg.focus, cfg.sensitivity, cfg.stability);
               if (!event_fact.has_value ())
                 {
                   continue;
@@ -3100,9 +3142,12 @@ ProcessExtractionResults::Execute (OperationContext &context, Transaction &tx) c
                 {
                   continue;
                 }
-              const std::string evidence_type
-                  = i == 0 ? "summary" : "episodic";
-              const double support_weight = i == 0 ? 1.0 : 0.75;
+	              const std::string evidence_type
+	                  = i == 0 ? "summary" : "episodic";
+	              const double support_weight
+	                  = core::FactEvidenceWriteSupportWeight (
+	                      cfg.focus, cfg.sensitivity, cfg.stability,
+	                      evidence_type.c_str ());
               AddWrite (tx,
                         "INSERT OR IGNORE INTO fact_evidence "
                         "(fact_id, source_memory_id, evidence_type, support_weight) "
@@ -3149,6 +3194,12 @@ ProcessExtractionResults::Execute (OperationContext &context, Transaction &tx) c
 
   if (!touched_fact_ids.empty ())
     {
+      auto lifecycle_options = store::GetFactLifecycleOptions ();
+      lifecycle_options.focus = cfg.focus;
+      lifecycle_options.sensitivity = cfg.sensitivity;
+      lifecycle_options.stability = cfg.stability;
+      store::ScopedFactLifecycleOptions lifecycle_options_guard (
+          lifecycle_options);
       store::MaintainFactLifecycle (
           tx, lifecycle_encoder,
           fact_maintenance_ts > 0 ? fact_maintenance_ts : now_ts,

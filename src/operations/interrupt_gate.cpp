@@ -21,31 +21,6 @@ namespace cortext::operations
 namespace
 {
 
-// File-scoped constants (not shared broadly across operations)
-constexpr double kCovMin = 0.40;
-constexpr double kCovMax = 0.60;
-constexpr double kRelMax = 0.35;
-constexpr double kRelMin = 0.25;
-constexpr double kRedMin = 0.15;
-constexpr double kRedMax = 0.25;
-constexpr double kCohMin = 0.15;
-constexpr double kCohMax = 0.25;
-constexpr double kSurpMin = 0.20;
-constexpr double kSurpMax = 0.50;
-constexpr double kTauMuMin = 0.08;
-constexpr double kTauMuMax = 0.18;
-constexpr double kTauMuMinusS = 0.4;
-constexpr double kTauMuPlusT = 0.4;
-constexpr double kTauRefracMin = 24.0;
-constexpr double kTauRefracMax = 96.0;
-constexpr double kTauRefracSMin = 1.4;
-constexpr double kTauRefracSMax = 1.0;
-constexpr double kExpEpsilon = 1e-6;
-constexpr double kBoundaryFMin = 1.3;
-constexpr double kBoundaryFMax = 2.0;
-constexpr double kBoundarySMin = 1.1;
-constexpr double kBoundarySMax = 0.9;
-
 inline double
 Clamp01 (double v)
 {
@@ -155,12 +130,8 @@ ComputeMniGateDecision::Execute (OperationContext &context, Transaction &tx) con
   const double S_eff = cortext::core::SensitivityBias (S);
   const double retrieval_thresh
       = cortext::core::RetrievalThresholdInterrupt (F, S);
-  const double boundary_mult
-      = cortext::core::Lerp (kBoundaryFMin, kBoundaryFMax, F)
-        * cortext::core::Lerp (kBoundarySMin, kBoundarySMax, S)
-        * cortext::core::Lerp (1.4, 0.6, T);
   const double boundary_mult_base
-      = boundary_mult * (1.0 - 0.20 * cortext::core::SensitivityBias (S));
+      = cortext::core::InterruptBoundaryMultiplier (F, S, T);
 
   context.SetInterruptGateHasCandidates (false);
   context.SetInterruptGateBlockedNoStore (false);
@@ -391,20 +362,13 @@ ComputeMniGateDecision::Execute (OperationContext &context, Transaction &tx) con
       = Clamp01 (context.GetEmotionIntensity ());
   const double arousal = Clamp01 (context.GetArousal ());
 
-  const double s_affect = cortext::core::AffectSensitivityBias (S);
-  const double w_arousal_raw = cortext::core::Lerp (0.30, 0.55, s_affect);
-  const double w_emotion_raw = cortext::core::Lerp (0.30, 0.55, s_affect);
-  const double w_salience_raw = cortext::core::Lerp (0.10, 0.20, s_affect);
-  const double w_sum = std::max (constants::kNormEpsilon,
-                                 w_arousal_raw + w_emotion_raw + w_salience_raw);
-  const double w_arousal = w_arousal_raw / w_sum;
-  const double w_emotion = w_emotion_raw / w_sum;
-  const double w_salience = w_salience_raw / w_sum;
+  const auto affect_weights = cortext::core::AffectDriveWeights (S);
   const double affect_gain = cortext::core::AffectGain (S);
   const double affect_drive = Clamp01 (
       affect_gain
-      * (w_arousal * arousal + w_emotion * emotion_intensity
-         + w_salience * salience));
+      * (affect_weights.arousal_weight * arousal
+         + affect_weights.emotion_weight * emotion_intensity
+         + affect_weights.salience_weight * salience));
   const bool affect_interrupt = context.GetConfig ().affect_interrupt;
   const double affect_drive_used = affect_interrupt ? affect_drive : 0.0;
   const double affect_relax
@@ -412,51 +376,44 @@ ComputeMniGateDecision::Execute (OperationContext &context, Transaction &tx) con
   double retrieval_thresh_eff = retrieval_thresh * affect_relax;
   const double boundary_mult_eff = boundary_mult_base * affect_relax;
 
-  // Knob-derived parameters (F/S/T, F_eff/S_eff, retrieval_thresh) are set
-  // at the start of this operation for diagnostics.
-  // Derived weights (raw)
-  const double w_cov_raw = cortext::core::Lerp (kCovMin, kCovMax, F_eff);
-  const double w_rel_raw = cortext::core::Lerp (kRelMax, kRelMin, F_eff);
-  const double w_red_raw = cortext::core::Lerp (kRedMin, kRedMax, S_eff);
-  const double w_coh_raw = cortext::core::Lerp (kCohMin, kCohMax, S_eff);
-  const double w_surp_raw = cortext::core::Lerp (kSurpMin, kSurpMax, S_eff);
-  const double total_w
-      = std::max (constants::kNormEpsilon,
-                  w_cov_raw + w_rel_raw + w_red_raw + w_coh_raw + w_surp_raw);
-  const double w_cov = w_cov_raw / total_w;
-  const double w_rel = w_rel_raw / total_w;
-  const double w_red = w_red_raw / total_w;
-  const double w_coh = w_coh_raw / total_w;
-  const double w_surp = w_surp_raw / total_w;
+  const auto scoring_weights
+      = cortext::core::InterruptGateCandidateScoringWeights (F, S, T);
+  const double w_cov_raw = scoring_weights.coverage_raw;
+  const double w_rel_raw = scoring_weights.relevance_raw;
+  const double w_red_raw = scoring_weights.redundancy_raw;
+  const double w_coh_raw = scoring_weights.coherence_raw;
+  const double w_surp_raw = scoring_weights.surprise_raw;
+  const double w_cov = scoring_weights.coverage;
+  const double w_rel = scoring_weights.relevance;
+  const double w_red = scoring_weights.redundancy;
+  const double w_coh = scoring_weights.coherence;
+  const double w_surp = scoring_weights.surprise;
 
   // Duplicate suppression threshold
   const double dup_thresh = cortext::core::DupThresh (F, T);
   // Novelty threshold (Section 8.1)
   const double tau_novelty = cortext::core::TauNovelty (F, S, T);
   // MU threshold
-  const double tau_mu = cortext::core::Lerp (kTauMuMin, kTauMuMax, F)
-                        * (constants::kNormalizedMax - kTauMuMinusS * S)
-                        * (constants::kNormalizedMax + kTauMuPlusT * T);
+  const double tau_mu = cortext::core::InterruptMuThreshold (F, S, T);
 
   // Refractory multiplier based on drift accumulation (Section 10)
   // Delta = cumulative drift since last interrupt
   const double Delta = std::max (0.0, acc.drift_accum
                                           - acc.drift_at_last_interrupt);
-  const double tau_refrac = cortext::core::Lerp (kTauRefracMin, kTauRefracMax, T)
-                            * cortext::core::Lerp (kTauRefracSMin, kTauRefracSMax,
-                                                   S);
-  const double k_refrac
-      = cortext::core::Lerp (constants::kWeight20, constants::kGainSmall, T)
-        * cortext::core::Lerp (0.8, 1.2, F);
+  const double tau_refrac = cortext::core::InterruptRefractoryTau (S, T);
+  const double k_refrac = cortext::core::InterruptRefractoryGain (F, T);
   const double M_refrac
-      = 1.0 + k_refrac * std::exp (-Delta / std::max (kExpEpsilon, tau_refrac));
+      = 1.0
+        + k_refrac
+              * std::exp (
+                  -Delta / std::max (constants::kTiny, tau_refrac));
 
   const double tau_novelty_eff = tau_novelty * M_refrac;
   const double win_coh = std::max (1.0, static_cast<double> (core::WinCoh (T)));
   const double acc_maturity
       = Clamp01 (static_cast<double> (acc.n_signals) / win_coh);
   const double maturity_scale
-      = 1.0 + (1.0 - acc_maturity) * core::Lerp (0.4, 1.0, T);
+      = core::InterruptMaturityScale (acc_maturity, T);
   const double tau_m_eff = tau_mu * M_refrac * maturity_scale;
 
   // Boundary multiplier (precomputed at start of operation)
@@ -675,7 +632,7 @@ ComputeMniGateDecision::Execute (OperationContext &context, Transaction &tx) con
     telemetry::Attribute::Double ("tau_refrac", tau_refrac),
     telemetry::Attribute::Double ("k_refrac", k_refrac),
     telemetry::Attribute::Double ("refractory_mult", M_refrac),
-    telemetry::Attribute::Double ("boundary_mult", boundary_mult),
+    telemetry::Attribute::Double ("boundary_mult", boundary_mult_base),
     telemetry::Attribute::Bool ("at_boundary", at_boundary),
     telemetry::Attribute::Int64 ("candidate_limit", static_cast<int64_t> (K)),
     telemetry::Attribute::Int64 ("candidate_count", static_cast<int64_t> (candidates.size ())),

@@ -15,7 +15,9 @@ ApplyStabilityFeedback::Execute (OperationContext &context, Transaction &tx) con
 {
   (void)tx;
   auto &p_ctx = context.GetProcessorContext ();
-  const double gamma_T = constants::kGammaTBase;
+  const auto &cfg = context.GetConfig ();
+  const double gamma_T = core::StabilityFeedbackUsageGain (
+      cfg.focus, cfg.sensitivity, cfg.stability);
 
   const auto &events = context.GetMemoryUsageEvents ();
   std::vector<double> stability_factors;

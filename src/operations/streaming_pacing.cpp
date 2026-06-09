@@ -71,7 +71,11 @@ CheckStreamingPacing::Execute (OperationContext &context, Transaction &tx) const
   const bool adjacent_ok = since_last_s >= min_gap_s;
 
   const double retrieval_bias = core::Clamp (p_ctx.retrieval_bias, 0.0, 1.0);
-  const bool bias_ok = (retrieval_bias >= 0.15) || at_boundary || force_check;
+  const double retrieval_bias_threshold
+      = core::StreamingRetrievalBiasThreshold (cfg.focus, cfg.sensitivity,
+                                               cfg.stability);
+  const bool bias_ok = (retrieval_bias >= retrieval_bias_threshold)
+                       || at_boundary || force_check;
   const bool should_check
       = (at_boundary || exceeds_threshold || force_check)
         && (adjacent_ok || at_boundary || force_check) && bias_ok;
@@ -93,6 +97,8 @@ CheckStreamingPacing::Execute (OperationContext &context, Transaction &tx) const
     telemetry::Attribute::Bool ("should_check_retrieval", should_check),
     telemetry::Attribute::Int64 ("adjacent_window", adjacent_window),
     telemetry::Attribute::Double ("since_last_retrieval_s", since_last_s),
+    telemetry::Attribute::Double ("retrieval_bias_threshold",
+                                  retrieval_bias_threshold),
     telemetry::Attribute::Double ("retrieval_bias", retrieval_bias)
   });
 }

@@ -1,5 +1,6 @@
 #include "cortext/extractor/gemma_extractor.hpp"
 
+#include "cortext/core/knobs.hpp"
 #include <algorithm>
 #include <cctype>
 #include <cstdlib>
@@ -206,6 +207,28 @@ FormatCurrentLabels (const std::vector<std::string> &current_labels)
 }
 
 std::string
+LabelPromptBoundsInstruction (const char *evidence_name)
+{
+  constexpr double kNeutralKnob = 0.5;
+  const int min_labels = core::STMLTMDurableMinLabels (
+      kNeutralKnob, kNeutralKnob, kNeutralKnob);
+  const int max_labels = core::STMLTMDurableMaxLabels (
+      kNeutralKnob, kNeutralKnob, kNeutralKnob);
+  const int min_words = core::STMLTMLabelPromptMinWords (
+      kNeutralKnob, kNeutralKnob, kNeutralKnob);
+  const int max_words = core::STMLTMLabelPromptMaxWords (
+      kNeutralKnob, kNeutralKnob, kNeutralKnob);
+
+  std::ostringstream out;
+  out << "When " << evidence_name << " contains enough anchors, return "
+      << min_labels << "-" << max_labels << " labels. Prefer " << min_words
+      << "-" << max_words
+      << " word noun/event phrases unless the label is a proper name or a "
+         "concrete object. ";
+  return out.str ();
+}
+
+std::string
 BuildLabelRefinementTextPrompt (
     const std::string &text,
     const std::vector<std::string> &current_labels)
@@ -216,12 +239,12 @@ BuildLabelRefinementTextPrompt (
 	      "Current labels are untrusted candidates and may be wrong. "
 	      "Keep a current label only if it appears in the evidence; remove every "
 	      "unsupported or generic current label, and add missing concrete labels. "
-	      "Return only a single JSON object with keys \"labels\", \"relations\", and optional \"facts\". "
-	      "\"labels\" must be the final replacement set of non-empty source spans copied from the evidence. "
-	      "Use durable memory anchors: named people, places, organizations, pets, specific objects, and short event phrases. "
-	      "When evidence contains enough anchors, return 4-8 labels. "
-	      "Prefer 2-5 word noun/event phrases unless the label is a proper name or a concrete object. "
-	      "Every important word in a label must appear verbatim in the evidence; do not paraphrase, infer, summarize, or invent labels. "
+		      "Return only a single JSON object with keys \"labels\", \"relations\", and optional \"facts\". "
+		      "\"labels\" must be the final replacement set of non-empty source spans copied from the evidence. "
+		      "Use durable memory anchors: named people, places, organizations, pets, specific objects, and short event phrases. "
+		      + LabelPromptBoundsInstruction ("evidence")
+		      +
+		      "Every important word in a label must appear verbatim in the evidence; do not paraphrase, infer, summarize, or invent labels. "
 	      "Do not return pronouns, chat roles, filler words, helper verbs, modal words, status phrases, or generic labels such as that, this, thing, get, go, make, might, idea, food, stuff, almost done, user, assistant. "
 	      "\"facts\" should contain directly stated durable or episodic assertions that a person would later ask about: named people/pets, actions, preferences, locations, ownership, names, relationships, plans, and important events. "
 	      "Each fact must use concise strings from the evidence, for example {\"subject\":\"Amelia\",\"predicate\":\"gave\",\"object\":\"money\"}. "
@@ -244,12 +267,12 @@ BuildLabelRefinementAudioPrompt (
       "You are refining labels for one memory graph association from audio evidence. "
 	      "Keep correct current labels, remove unsupported or generic labels, "
 	      "and add missing concrete labels from the audio. "
-	      "Return only a single JSON object with keys \"labels\", \"relations\", and optional \"facts\". "
-	      "\"labels\" must be the final replacement set of non-empty source spans from the audio. "
-	      "Use durable memory anchors: spoken names, places, organizations, pets, specific objects, and short event phrases. "
-	      "When audio contains enough anchors, return 4-8 labels. "
-	      "Prefer 2-5 word noun/event phrases unless the label is a proper name or a concrete object. "
-	      "Every important word in a label must be spoken in the audio; do not paraphrase, infer, summarize, or invent labels. "
+		      "Return only a single JSON object with keys \"labels\", \"relations\", and optional \"facts\". "
+		      "\"labels\" must be the final replacement set of non-empty source spans from the audio. "
+		      "Use durable memory anchors: spoken names, places, organizations, pets, specific objects, and short event phrases. "
+		      + LabelPromptBoundsInstruction ("audio")
+		      +
+		      "Every important word in a label must be spoken in the audio; do not paraphrase, infer, summarize, or invent labels. "
 	      "Do not return pronouns, chat roles, filler words, helper verbs, modal words, status phrases, or generic labels such as that, this, thing, get, go, make, might, idea, food, stuff, almost done, user, assistant. "
 	      "\"facts\" should contain directly stated durable or episodic assertions that a person would later ask about: named people/pets, actions, preferences, locations, ownership, names, relationships, plans, and important events. "
 	      "Each fact must use concise strings from the audio, for example {\"subject\":\"Bailey\",\"predicate\":\"loves\",\"object\":\"tennis balls\"}. "
@@ -272,12 +295,12 @@ BuildLabelRefinementImagePrompt (
       "You are refining labels for one memory graph association from image evidence. "
 	      "Keep correct current labels, remove unsupported or generic labels, "
 	      "and add missing concrete labels visible in the image. "
-	      "Return only a single JSON object with keys \"labels\", \"relations\", and optional \"facts\". "
-	      "\"labels\" must be the final replacement set of non-empty visible source spans. "
-	      "Use durable memory anchors: visible people, places, organizations, pets, specific objects, and short event phrases. "
-	      "When image evidence contains enough anchors, return 4-8 labels. "
-	      "Prefer 2-5 word noun/event phrases unless the label is a proper name or a concrete object. "
-	      "Every important word in a label must be visible or readable in the image; do not paraphrase, infer, summarize, or invent labels. "
+		      "Return only a single JSON object with keys \"labels\", \"relations\", and optional \"facts\". "
+		      "\"labels\" must be the final replacement set of non-empty visible source spans. "
+		      "Use durable memory anchors: visible people, places, organizations, pets, specific objects, and short event phrases. "
+		      + LabelPromptBoundsInstruction ("image evidence")
+		      +
+		      "Every important word in a label must be visible or readable in the image; do not paraphrase, infer, summarize, or invent labels. "
 	      "Do not return pronouns, chat roles, filler words, helper verbs, modal words, status phrases, or generic labels such as that, this, thing, get, go, make, might, idea, food, stuff, almost done, user, assistant. "
 	      "\"facts\" should contain only directly visible/readable durable assertions such as names, locations, ownership, relationships, and important events. "
 	      "Each fact must use concise visible/readable evidence strings. "

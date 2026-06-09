@@ -1,5 +1,6 @@
 #include "cortext/operations/memory_storage.hpp"
 #include "constructive_recall_internal.hpp"
+#include "cortext/core/knobs.hpp"
 #include "cortext/processor/accumulator_state.hpp"
 #include "cortext/processor/operation_context.hpp"
 #include "cortext/signal.hpp"
@@ -66,9 +67,9 @@ SourceOriginFor ()
 }
 
 double
-SourcePriorReliability ()
+SourcePriorReliability (double F, double S, double T)
 {
-  return 0.7;
+  return core::SourceReliabilityPrior (F, S, T);
 }
 
 } // namespace
@@ -84,6 +85,7 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
     }
 
   const auto &signal = context.GetSignal ();
+  const auto &cfg = context.GetConfig ();
   if (signal.retention == Retention::Ephemeral)
     {
       telemetry::AddCounter ("cortext.memory_storage.ephemeral_skip_total", 1);
@@ -165,7 +167,8 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
           = GetPrimaryModality (acc.signals, signal.modality);
 
       const std::string origin = SourceOriginFor ();
-      const double source_reliability = SourcePriorReliability ();
+      const double source_reliability
+          = SourcePriorReliability (cfg.focus, cfg.sensitivity, cfg.stability);
 
       // 4. Require tracked per-signal records for persistence.
       if (acc.signals.empty ())
@@ -278,14 +281,21 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
           ctx_vec = EigenToFloatVec (acc.c_t);
         }
 
+      const auto initial_trace = core::MemoryInitialTracePolicy (
+          cfg.focus, cfg.sensitivity, cfg.stability);
+      const double initial_strength = core::MemoryInitialStrengthPolicy (
+          cfg.focus, cfg.sensitivity, cfg.stability);
+      const double initial_stability = core::MemoryInitialStabilityPolicy (
+          cfg.focus, cfg.sensitivity, cfg.stability);
       savepoint->Execute (
           "INSERT INTO memories ("
           "  embedding_id, source_id, kind, start_ts, end_ts, n_signals, "
           "  modality, s_max, s_avg, s_emotion_max, s_arousal_avg, boundary_score, "
           "  drift_mag, emotion, ambient_mood, episode_id, "
           "  blob_id, created_at, context, source_origin, source_reliability, "
+          "  strength, stability, "
           "  trace_fast, trace_med, trace_slow, trace_ultra"
-          ") VALUES (?, ?, 'LONG_TERM', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          ") VALUES (?, ?, 'LONG_TERM', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
           { embedding_id, signal.source_id, static_cast<long long> (start_ts),
             static_cast<long long> (end_ts),
             static_cast<long long> (n_signals), primary_modality,
@@ -295,7 +305,9 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
             static_cast<long long> (end_ts),
             ctx_vec.empty () ? std::any () : std::any (ctx_vec),
             origin, source_reliability,
-            1.0, 0.0, 0.0, 0.0 });
+            initial_strength, initial_stability,
+            initial_trace.fast, initial_trace.medium, initial_trace.slow,
+            initial_trace.ultra });
 
       // 8. Get memory_id from inserted memories row
       auto mem_id_rows
@@ -368,7 +380,9 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
       p_ctx.memories_since_consolidation += 1;
       if (memory_id > 0 && embedding_to_store.size () > 0)
         {
-          const int k_key = core::SparseKeySize (context.GetConfig ().focus);
+          const int k_key = core::SparseKeySize (
+              context.GetConfig ().focus, context.GetConfig ().sensitivity,
+              context.GetConfig ().stability);
           const std::string key = core::SparseKey (embedding_to_store, k_key);
           if (!key.empty ())
             {

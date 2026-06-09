@@ -58,6 +58,9 @@ TEST_CASE ("STM shadow reuses cached label clusters and selects top labels",
            "[operations][stm][labels]")
 {
   cortext::testing::ScopedEnvVar enable ("CORTEXT_STM_SHADOW_ENABLE", "1");
+  cortext::testing::ScopedEnvVar clear_disable ("CORTEXT_STM_SHADOW_DISABLE");
+  cortext::testing::ScopedEnvVar clear_boundary_disable (
+      "CORTEXT_STM_SHADOW_DISABLE_BOUNDARY_DECAY");
 
   auto unique_store = SQLiteStore::Create (":memory:");
   auto store = std::shared_ptr<Store> (std::move (unique_store));
@@ -86,6 +89,16 @@ TEST_CASE ("STM shadow reuses cached label clusters and selects top labels",
   REQUIRE (p_ctx.label_cluster_cache.valid);
   REQUIRE (p_ctx.label_cluster_cache.centroids.size ()
            == expected_cluster_count);
+  const auto label_rows = store->Execute (
+      "SELECT COUNT(*) AS c FROM memories WHERE kind = 'LABEL'", {});
+  INFO ("summary_cache_size=" << p_ctx.summary_cache.size ());
+  INFO ("label_rows="
+        << (label_rows.empty ()
+                ? -1LL
+                : cortext::testing::GetInt64 (label_rows[0], "c")));
+  INFO ("stm_label_min_score="
+        << cortext::core::STMLabelMinScore (cfg.focus, cfg.sensitivity,
+                                            cfg.stability));
   REQUIRE_FALSE (p_ctx.short_term_graphs["julie-smoke"].label_edges.empty ());
   const auto first_centroid_0 = p_ctx.label_cluster_cache.centroids[0];
   const auto first_centroid_1 = p_ctx.label_cluster_cache.centroids[1];
@@ -128,6 +141,9 @@ TEST_CASE ("STM label selection expands top labels from flat-routed clusters",
            "[operations][stm][labels]")
 {
   cortext::testing::ScopedEnvVar enable ("CORTEXT_STM_SHADOW_ENABLE", "1");
+  cortext::testing::ScopedEnvVar clear_disable ("CORTEXT_STM_SHADOW_DISABLE");
+  cortext::testing::ScopedEnvVar clear_boundary_disable (
+      "CORTEXT_STM_SHADOW_DISABLE_BOUNDARY_DECAY");
 
   auto unique_store = SQLiteStore::Create (":memory:");
   auto store = std::shared_ptr<Store> (std::move (unique_store));
@@ -161,4 +177,54 @@ TEST_CASE ("STM label selection expands top labels from flat-routed clusters",
       });
   REQUIRE (has_alice);
   REQUIRE (has_bailey);
+}
+
+TEST_CASE ("STM shadow hard boundary retention is knob-derived",
+           "[operations][stm]")
+{
+  cortext::testing::ScopedEnvVar enable ("CORTEXT_STM_SHADOW_ENABLE", "1");
+  cortext::testing::ScopedEnvVar clear_disable ("CORTEXT_STM_SHADOW_DISABLE");
+
+  auto unique_store = SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<Store> (std::move (unique_store));
+  cortext::testing::InitializeCoreSchema (*store);
+
+  ProcessorContext p_ctx;
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  cfg.focus = 0.5;
+  cfg.sensitivity = 0.5;
+  cfg.stability = 0.5;
+
+  const int retain_steps = std::max (
+      1, core::STMShadowHardBoundaryRetainSteps (cfg.focus, cfg.sensitivity,
+                                                 cfg.stability));
+  p_ctx.signals_processed = 100;
+  auto &graph = p_ctx.short_term_graphs["julie-smoke"];
+
+  ProcessorContext::ShadowSTMItem retained_item;
+  retained_item.source_id = "julie-smoke";
+  retained_item.step_index = p_ctx.signals_processed - retain_steps;
+  retained_item.embedding = Vec (1.0f, 0.0f);
+  graph.items.push_back (retained_item);
+
+  ProcessorContext::ShadowSTMItem dropped_item = retained_item;
+  dropped_item.step_index = p_ctx.signals_processed - retain_steps - 1;
+  graph.items.push_back (dropped_item);
+
+  operations::UpdateShortTermMemoryShadow op;
+  auto tx = store->Begin ();
+  OperationContext ctx (MakeSignal (Vec (1.0f, 0.0f), 4000ULL), p_ctx, cfg,
+                        store.get ());
+  ctx.SetBoundaryScore (
+      core::STMShadowHardBoundaryThreshold (cfg.focus, cfg.sensitivity,
+                                            cfg.stability)
+      + 0.01);
+  op.Execute (ctx, *tx);
+  tx->Commit ();
+
+  const auto &items = p_ctx.short_term_graphs["julie-smoke"].items;
+  REQUIRE (items.size () == 2);
+  REQUIRE (items[0].step_index == p_ctx.signals_processed - retain_steps);
+  REQUIRE (items[1].step_index == p_ctx.signals_processed);
 }
