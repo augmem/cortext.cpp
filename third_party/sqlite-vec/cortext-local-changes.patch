@@ -1,0 +1,107 @@
+diff --git a/third_party/sqlite-vec/sqlite-vec.c b/third_party/sqlite-vec/sqlite-vec.c
+index 3cc802f0..6b06f0bf 100644
+--- a/third_party/sqlite-vec/sqlite-vec.c
++++ b/third_party/sqlite-vec/sqlite-vec.c
+@@ -5781,35 +5781,82 @@ void bitmap_fill(u8 *bitmap, i32 n) {
+  * @param k: Size of output array
+  * @return int
+  */
++/* Ordering used by min_idx: ascending distance, ties broken by HIGHER
++ * index first. This reproduces the original selection-scan exactly: it
++ * compared with `<=` over ascending i, so among equal distances the last
++ * index won each pass. Returns 1 when item a precedes item b. */
++static inline int min_idx_before(const f32 *distances, i32 a, i32 b) {
++  return distances[a] < distances[b] ||
++         (distances[a] == distances[b] && a > b);
++}
++
++static inline void min_idx_sift_down(const f32 *distances, i32 *heap, i32 end,
++                                     i32 root) {
++  for (;;) {
++    i32 l = 2 * root + 1;
++    i32 r = l + 1;
++    i32 m = root;
++    if (l < end && min_idx_before(distances, heap[m], heap[l])) {
++      m = l;
++    }
++    if (r < end && min_idx_before(distances, heap[m], heap[r])) {
++      m = r;
++    }
++    if (m == root) {
++      return;
++    }
++    i32 t = heap[root];
++    heap[root] = heap[m];
++    heap[m] = t;
++    root = m;
++  }
++}
++
+ int min_idx(const f32 *distances, i32 n, u8 *candidates, i32 *out, i32 k,
+             u8 *bTaken, i32 *k_used) {
+   assert(k > 0);
+   assert(k <= n);
+-
+-  bitmap_clear(bTaken, n);
+-
+-  for (int ik = 0; ik < k; ik++) {
+-    int min_idx = 0;
+-    while (min_idx < n &&
+-           (bitmap_get(bTaken, min_idx) || !bitmap_get(candidates, min_idx))) {
+-      min_idx++;
+-    }
+-    if (min_idx >= n) {
+-      *k_used = ik;
+-      return SQLITE_OK;
++  (void)bTaken;
++
++  /* Single-pass bounded selection via a max-heap of the k best items,
++   * O(n log k); the previous implementation rescanned all n distances
++   * once per selected item, O(k * n). Output order is identical for
++   * non-NaN distances (see min_idx_before). */
++  i32 heap_n = 0;
++  for (i32 i = 0; i < n; i++) {
++    if (!bitmap_get(candidates, i)) {
++      continue;
+     }
+-
+-    for (int i = 0; i < n; i++) {
+-      if (distances[i] <= distances[min_idx] && !bitmap_get(bTaken, i) &&
+-          (bitmap_get(candidates, i))) {
+-        min_idx = i;
++    if (heap_n < k) {
++      out[heap_n] = i;
++      i32 c = heap_n;
++      heap_n++;
++      while (c > 0) {
++        i32 parent = (c - 1) / 2;
++        if (min_idx_before(distances, out[parent], out[c])) {
++          i32 t = out[parent];
++          out[parent] = out[c];
++          out[c] = t;
++          c = parent;
++        } else {
++          break;
++        }
+       }
++    } else if (min_idx_before(distances, i, out[0])) {
++      out[0] = i;
++      min_idx_sift_down(distances, out, heap_n, 0);
+     }
++  }
+ 
+-    out[ik] = min_idx;
+-    bitmap_set(bTaken, min_idx, 1);
++  /* Heap-sort the kept indices into ascending order. */
++  for (i32 end = heap_n - 1; end > 0; end--) {
++    i32 t = out[0];
++    out[0] = out[end];
++    out[end] = t;
++    min_idx_sift_down(distances, out, end, 0);
+   }
+-  *k_used = k;
++
++  *k_used = heap_n;
+   return SQLITE_OK;
+ }
+ 

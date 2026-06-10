@@ -1,6 +1,7 @@
 # Build directories
 build/
 build-wasm/
+eval_runs/
 .zig-cache/
 zig-out/
 cmake-build-*/
