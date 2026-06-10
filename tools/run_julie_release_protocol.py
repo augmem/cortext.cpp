@@ -1418,7 +1418,7 @@ def write_early_failure_report(
 
 
 def build_benchmark_command(args: argparse.Namespace, db: pathlib.Path, summary: pathlib.Path) -> list[str]:
-    return [
+    cmd = [
         str(args.benchmark),
         "--input-dir",
         str(args.input_dir),
@@ -1449,6 +1449,15 @@ def build_benchmark_command(args: argparse.Namespace, db: pathlib.Path, summary:
         "--out",
         str(summary),
     ]
+    # Deep-LLM provider URIs are arm-defining: they change the summarizer/
+    # extractor runtime (and therefore latency comparability with on-device
+    # figures), so they flow through the frozen benchmark command and are
+    # recorded by the benchmark into summary.json.
+    if args.summarizer_provider:
+        cmd += ["--summarizer-provider", args.summarizer_provider]
+    if args.extractor_provider:
+        cmd += ["--extractor-provider", args.extractor_provider]
+    return cmd
 
 
 def build_early_judge_command(
@@ -2068,6 +2077,16 @@ def parse_args() -> argparse.Namespace:
         "--benchmark",
         type=pathlib.Path,
         default=REPO_ROOT / "build/examples/benchmark/cortext_julie_live_run",
+    )
+    parser.add_argument(
+        "--summarizer-provider",
+        default="",
+        help="Provider URI for the summarizer role (e.g. ollama://host:port/model).",
+    )
+    parser.add_argument(
+        "--extractor-provider",
+        default="",
+        help="Provider URI for the extractor role (e.g. ollama://host:port/model).",
     )
     parser.add_argument(
         "--input-dir",
