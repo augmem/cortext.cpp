@@ -2,19 +2,19 @@
 
 **A closed-loop context and memory engine for streaming AI.**
 
-Most memory systems for LLMs are open-loop: text flows in, gets chunked, embedded, summarized, and retrieved, and the parameters that govern those stages never change based on what retrieval or consolidation actually produced. Cortext is different. Retrieval outcomes, prediction error, and consolidation results feed back into three continuous control parameters — **Focus (F)**, **Sensitivity (S)**, and **Stability (T)** — which in turn modulate write gating, attention width, decay, thresholds, and consolidation cadence for the next input.
+Most memory systems for LLMs are open-loop: text flows in, gets chunked, embedded, summarized, and retrieved, and the parameters that govern those stages never change based on what retrieval or consolidation actually produced. Cortext is different. Retrieval outcomes, prediction error, and consolidation results feed back into three continuous control parameters: **Focus (F)**, **Sensitivity (S)**, and **Stability (T)**. Those parameters modulate write gating, attention width, decay, thresholds, and consolidation cadence for the next input.
 
-The architecture is specified formally in the accompanying paper. The design borrows ideas from the cognitive-science literature — working-memory capacity limits, reconsolidation, serial-position effects, emotional modulation of memory — as engineering heuristics. Cortext doesn't claim to model human memory. The claim is narrower: these borrowed mechanisms measurably improve machine memory, and the benchmarks to check that ship in this repo.
+The architecture is specified formally in the accompanying paper. The design borrows ideas from the cognitive-science literature (working-memory capacity limits, reconsolidation, serial-position effects, emotional modulation of memory) as engineering heuristics. Cortext doesn't claim to model human memory. The claim is narrower: these borrowed mechanisms measurably improve machine memory, and the benchmarks to check that ship in this repo.
 
 ## Why Cortext Exists
 
 Cortext began for a personal reason. In 2022, my father-in-law was diagnosed with dementia. I'm a software engineer, and since then I have been focused on building systems that help people with memory loss preserve continuity, confidence, and independence.
 
-The same architecture also happens to be useful for long-horizon LLM memory. But the primary motivation is human: Cortext is designed to process real-time information from a wearable device through a hub that can deliver gentle nudges to help someone remember context, reduce confusion, and avoid the humiliation and frustration that memory loss can create. A care context requires homeostasis — salience, confusion, and emotional state change through the day — which is exactly what an open-loop system cannot track.
+The same architecture also happens to be useful for long-horizon LLM memory. But the primary motivation is human: Cortext is designed to process real-time information from a wearable device through a hub that can deliver gentle nudges to help someone remember context, reduce confusion, and avoid the humiliation and frustration that memory loss can create. A care context requires homeostasis. Salience, confusion, and emotional state change through the day, and that is exactly what an open-loop system can't track.
 
 ## Who Built This
 
-Cortext is built by one software engineer. I'm not an ML researcher or a psychologist. The cognitive-science references here come from reading the literature while building this. They shaped the design, but don't mistake my reading for expert interpretation — the system's value doesn't rest on it.
+Cortext is built by one software engineer. I'm not an ML researcher or a psychologist. The cognitive-science references here come from reading the literature while building this. They shaped the design, but don't mistake my reading for expert interpretation. The system's value doesn't rest on it.
 
 What it does rest on is falsifiable. The benchmarks in this repo run blind LLM-judged comparisons against strong baselines, including a full-history arm that Cortext is expected to lose to sometimes, with fixed seeds, repeated judgments, and bootstrap confidence intervals. Where results failed to reproduce under real encoders, the paper says so and marks the old numbers superseded. If you find a spot where the psychology is misapplied, a baseline is unfair, or an eval is flattering the system, open an issue. I want to know.
 
@@ -46,12 +46,12 @@ flowchart TD
 
 Concretely, the following operations close the loop (see `src/operations/`):
 
-- `focus_feedback`, `sensitivity_feedback`, `stability_feedback` — adjust the three control knobs from retrieval and usage outcomes
-- `storage_pressure` — modulates write gating and consolidation urgency from store state
-- `embedding_prediction_error` — surprise signal into the feedback path
-- `neuromodulators` — emotional / arousal modulation of encoding strength
-- `reconsolidation` — updates existing memories on re-exposure rather than writing duplicates
-- `synaptic_tagging`, `metacognitive`, `constructive_recall_internal` — higher-order regulation
+- `focus_feedback`, `sensitivity_feedback`, `stability_feedback` - adjust the three control knobs from retrieval and usage outcomes
+- `storage_pressure` - modulates write gating and consolidation urgency from store state
+- `embedding_prediction_error` - surprise signal into the feedback path
+- `neuromodulators` - emotional / arousal modulation of encoding strength
+- `reconsolidation` - updates existing memories on re-exposure rather than writing duplicates
+- `synaptic_tagging`, `metacognitive`, `constructive_recall_internal` - higher-order regulation
 
 Ablation benchmarks for the loop live under `examples/benchmark/` (resurfacing pressure, resurfacing horizon, preference update, and the full operation-family sweeps described below).
 
@@ -76,7 +76,7 @@ three context arms on held-out probes: Cortext's compressed packet, standard
 embedding RAG, and the full history as an upper bound. Fixed seed, 3
 judgments per probe, bootstrap confidence intervals, fairness checks. The
 corpus format is just a directory with one timestamped `.txt` transcript plus
-media, so it runs on any export that matches the format — not just mine.
+media, so it runs on any export that matches the format, not just mine.
 
 Latest runs (June 2026, a private 1,200-message corpus, 39 probes × 3
 repetitions, local `gemma4:12b` judge):
@@ -91,7 +91,7 @@ is roughly 96% smaller and still wins the most judgments.
 
 The honest caveats:
 
-- Judged sufficiency trails the fat-context arms (~2.4–2.7 vs ~3.1). That's
+- Judged sufficiency trails the fat-context arms (~2.4-2.7 vs ~3.1). That's
   the cost of the compression, and raising working-memory capacity didn't
   close it.
 - An earlier run in this series was invalid: stale vectors from an older
@@ -101,7 +101,7 @@ The honest caveats:
   override. The paper documents both the failure and the rerun.
 - This is one private corpus and one judge model. I'm publishing the numbers
   for transparency, not claiming benchmarks. The whole protocol ships in this
-  repo — run it on your own data and tell me where it breaks.
+  repo. Run it on your own data and tell me where it breaks.
 
 ## What Cortext Provides
 
@@ -132,12 +132,12 @@ needed tensors, and executes the encoder (and anchor head) in C++.
 
 Text-encoder selection order (`CreatePreferredTextEncoder`):
 
-1. **AAIT-86M-GGUF** — opt-in: set `CORTEXT_AAIT_ENABLE=1` (model under
+1. **AAIT-86M-GGUF** - opt-in: set `CORTEXT_AAIT_ENABLE=1` (model under
    `models/AAIT-86M-GGUF/`)
-2. **AIST-87M-GGUF** — the default: auto-discovered under
+2. **AIST-87M-GGUF** - the default: auto-discovered under
    `models/AIST-87M-GGUF/` (q8_0 preferred over q5_1), or pinned explicitly
    with `CORTEXT_AIST_MODEL_PATH`
-3. **EmbeddingGemma** — fallback via llama.cpp GGUF, LiteRT `.tflite`, or ONNX
+3. **EmbeddingGemma** - fallback via llama.cpp GGUF, LiteRT `.tflite`, or ONNX
    (`CORTEXT_EMBEDDINGGEMMA_MODEL_PATH`, `CORTEXT_EMBEDDINGGEMMA_BACKEND`)
 
 ## Storage Abstractions
@@ -165,18 +165,18 @@ supported out-of-the-box path is SQLite metadata plus sqlite-objstore payloads.
 
 ## Repository Layout
 
-- `src/`, `include/` — core engine and public headers
-- `src/operations/` — the control-loop and memory operations
-- `tests/` — Catch2 suite (built as `cortext_tests`)
-- `examples/` — ImGui chat demo, benchmarks, telemetry smoke tests, topical-chat analysis
-- `bindings/` — Python, Go, JavaScript/TypeScript, and Dart bindings over the C ABI
-- `scripts/`, `tools/` — experiment harnesses and offline utilities
-- `docs/paper/` — manuscript source; generated output at `docs/paper/_manuscript/index.md`
-- `models/`, `third_party/` — local runtime assets and vendored dependencies
+- `src/`, `include/` - core engine and public headers
+- `src/operations/` - the control-loop and memory operations
+- `tests/` - Catch2 suite (built as `cortext_tests`)
+- `examples/` - ImGui chat demo, benchmarks, telemetry smoke tests, topical-chat analysis
+- `bindings/` - Python, Go, JavaScript/TypeScript, and Dart bindings over the C ABI
+- `scripts/`, `tools/` - experiment harnesses and offline utilities
+- `docs/paper/` - manuscript source; generated output at `docs/paper/_manuscript/index.md`
+- `models/`, `third_party/` - local runtime assets and vendored dependencies
 
 ## Paper
 
-The formal specification of the architecture is in [docs/paper/\_manuscript/index.md](docs/paper/_manuscript/index.md). If you want to understand *why* the loop is shaped the way it is — the derivations from the three knobs, the stability/plasticity analysis, the homeostatic threshold control — read the paper first.
+The formal specification of the architecture is in [docs/paper/\_manuscript/index.md](docs/paper/_manuscript/index.md). If you want to understand *why* the loop is shaped the way it is (the derivations from the three knobs, the stability/plasticity analysis, the homeostatic threshold control), read the paper first.
 
 ## Quickstart Build
 
@@ -206,9 +206,9 @@ The ImGui chat example also requires desktop dependencies such as `glfw3`, OpenG
 
 int main() {
   cortext::Cortext::Config cfg;
-  cfg.focus = 0.7;        // F — attentional precision
-  cfg.sensitivity = 0.5;  // S — reactivity to surprise
-  cfg.stability = 0.8;    // T — plasticity vs. retention
+  cfg.focus = 0.7;        // F - attentional precision
+  cfg.sensitivity = 0.5;  // S - reactivity to surprise
+  cfg.stability = 0.8;    // T - plasticity vs. retention
 
   auto engine = cortext::Cortext::Create(cfg, ":memory:", "models");
 
@@ -267,10 +267,10 @@ The C API includes:
 - `cortext_string_free()` to release JSON strings returned by the library
 
 Repository-local bindings live under `bindings/`:
-- `bindings/python` — pure `ctypes` wrapper over the JSON C ABI
-- `bindings/go` — `cgo` wrapper with raw JSON and decoded `map[string]any` helpers
-- `bindings/javascript` — Node.js addon plus TypeScript declarations
-- `bindings/dart` — `dart:ffi` wrapper with generated bindings and JSON helpers
+- `bindings/python` - pure `ctypes` wrapper over the JSON C ABI
+- `bindings/go` - `cgo` wrapper with raw JSON and decoded `map[string]any` helpers
+- `bindings/javascript` - Node.js addon plus TypeScript declarations
+- `bindings/dart` - `dart:ffi` wrapper with generated bindings and JSON helpers
 
 Smoke commands after a Zig build:
 
@@ -289,15 +289,15 @@ PYTHONPATH=bindings/python python3 -c "import cortext; print(cortext.version())"
 
 ## Important CMake Options
 
-- `BUILD_TESTING=ON|OFF` — build the Catch2 suite
-- `CORTEXT_BUILD_EXAMPLES=ON|OFF` — build binaries under `examples/`
-- `CORTEXT_BUILD_NODE_BINDINGS=ON|OFF` — build the Node.js addon under `bindings/javascript`
-- `BUILD_WASM=ON|OFF` — configure the WebAssembly build
-- `CORTEXT_ENABLE_AAIT_GGUF=ON|OFF` — build the native GGUF runtime for the AIST/AAIT custom encoders (default ON)
-- `CORTEXT_ENABLE_EMBEDDINGGEMMA=ON|OFF` — enable the EmbeddingGemma fallback encoder path
-- `CORTEXT_DISABLE_LITERT=ON|OFF` — disable LiteRT-LM-backed extractor/summarizer paths
-- `CORTEXT_DISABLE_OGA=ON|OFF` — disable onnxruntime-genai-backed Phi-4 paths
-- `CORTEXT_DISABLE_SHERPA_ONNX=ON|OFF` — disable sherpa-onnx audio integration
+- `BUILD_TESTING=ON|OFF` - build the Catch2 suite
+- `CORTEXT_BUILD_EXAMPLES=ON|OFF` - build binaries under `examples/`
+- `CORTEXT_BUILD_NODE_BINDINGS=ON|OFF` - build the Node.js addon under `bindings/javascript`
+- `BUILD_WASM=ON|OFF` - configure the WebAssembly build
+- `CORTEXT_ENABLE_AAIT_GGUF=ON|OFF` - build the native GGUF runtime for the AIST/AAIT custom encoders (default ON)
+- `CORTEXT_ENABLE_EMBEDDINGGEMMA=ON|OFF` - enable the EmbeddingGemma fallback encoder path
+- `CORTEXT_DISABLE_LITERT=ON|OFF` - disable LiteRT-LM-backed extractor/summarizer paths
+- `CORTEXT_DISABLE_OGA=ON|OFF` - disable onnxruntime-genai-backed Phi-4 paths
+- `CORTEXT_DISABLE_SHERPA_ONNX=ON|OFF` - disable sherpa-onnx audio integration
 
 ## Optional Local Runtimes
 
@@ -307,7 +307,7 @@ Some features rely on optional local runtimes or model assets under `models/` an
 - onnxruntime-genai
 - sherpa-onnx
 - `llama.cpp` GGUF support for EmbeddingGemma and Liquid deep-consolidation backends
-- the AIST/AAIT encoders need no external runtime — their `triembed` GGUF exports run on Cortext's built-in GGUF tensor runtime
+- the AIST/AAIT encoders need no external runtime - their `triembed` GGUF exports run on Cortext's built-in GGUF tensor runtime
 
 ## Deep Consolidation Backends
 
