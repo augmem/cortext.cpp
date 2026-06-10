@@ -2151,14 +2151,24 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument("--early-judge-bootstrap-samples", type=int, default=200)
-    parser.add_argument("--early-judge-timeout-s", type=int, default=180)
-    parser.add_argument("--early-judge-context-window-tokens", type=int, default=32768)
+    # Early-judge conditions mirror the formal judge (full packets, full
+    # context window). The previous truncated defaults (32k window, 256-item
+    # packets) clipped the fat baseline arms' packets and systematically
+    # inflated Cortext's streaming verdicts relative to the formal pass —
+    # the 2026-06-10 WM run looked transformative while streaming and merely
+    # modest under formal conditions. A cheaper early judge is pointless if
+    # its signal does not predict the formal outcome.
+    parser.add_argument("--early-judge-timeout-s", type=int, default=900)
+    parser.add_argument("--early-judge-context-window-tokens", type=int, default=131072)
     parser.add_argument("--early-judge-max-output-tokens", type=int, default=1300)
     parser.add_argument(
         "--early-judge-packet-item-limit",
         type=int,
-        default=256,
-        help="Maximum items per system packet shown to early local judges.",
+        default=-1,
+        help=(
+            "Maximum items per system packet shown to early local judges "
+            "(-1 = full packets, matching the formal judge)."
+        ),
     )
     parser.add_argument("--early-quality-gate-min-milestone", type=int, default=8)
     parser.add_argument("--early-quality-trend-gate-min-milestone", type=int, default=4)
