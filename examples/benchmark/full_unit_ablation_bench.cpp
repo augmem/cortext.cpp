@@ -371,7 +371,7 @@ public:
   Execute (cortext::OperationContext &ctx,
            cortext::Transaction & /*tx*/) const override
   {
-    const int key_size = cortext::core::SparseKeySize (ctx.GetConfig ().focus);
+    const int key_size = cortext::core::SparseKeySize (ctx.GetConfig ().focus, ctx.GetConfig ().sensitivity, ctx.GetConfig ().stability);
     const std::string key = cortext::core::SparseKey (ctx.GetSignal ().embedding,
                                                       key_size);
     ctx.GetProcessorContext ().procedural_store[key][memory_id_] = score_;
@@ -1324,7 +1324,7 @@ RunValueStudy (const NeuromodBundle &bundle, double neuromod_da)
   op.Execute (ctx, *tx);
   tx->Commit ();
 
-  const int key_size = cortext::core::SparseKeySize (cfg.focus);
+  const int key_size = cortext::core::SparseKeySize (cfg.focus, cfg.sensitivity, cfg.stability);
   const std::string key = cortext::core::SparseKey (signal.embedding, key_size);
   return pctx.procedural_store[key][7LL];
 }
