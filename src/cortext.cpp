@@ -1013,7 +1013,6 @@ HydrateWorkingMemoryFromDB (Store *store, ObjectStore *object_store,
 std::unique_ptr<IOperation>
 BuildPipelineRoot (bool probe_mode)
 {
-  using cortext::OperationSet;
   using cortext::operations::ApplyEmotionalConsolidation;
   using cortext::operations::ApplyFocusFeedback;
   using cortext::operations::ApplyInfluenceFeedback;
@@ -1076,88 +1075,55 @@ BuildPipelineRoot (bool probe_mode)
   using cortext::operations::UpdateUncertainty;
   using cortext::operations::WorkingMemory;
 
-  auto pipeline = std::make_unique<OperationSet> (
-      std::make_unique<InitializeEmbeddedCentroids> (),
-      std::make_unique<LoadLabelBank> (),
+  using cortext::OperationSet;
 
-      std::make_unique<InitializeFocusPriors> (),
-      std::make_unique<InitializeSensitivityPriors> (),
-      std::make_unique<InitializeStabilityPriors> (),
+  using CoreStage = OperationSet<
+      InitializeEmbeddedCentroids, LoadLabelBank,
 
-      std::make_unique<ComputeCoherence> (),
-      std::make_unique<UpdateAccumulator> (),
-      std::make_unique<UpdateDriftAccumulation> (),
-      std::make_unique<ComputeFocusSpread> (),
-      std::make_unique<UpdateEmbeddingPredictionError> (),
-      std::make_unique<UpdateUncertainty> (),
+      InitializeFocusPriors, InitializeSensitivityPriors,
+      InitializeStabilityPriors,
 
-      std::make_unique<UpdateFocus> (),
-      std::make_unique<UpdateSensitivity> (),
-      std::make_unique<UpdateMood> (),
+      ComputeCoherence, UpdateAccumulator, UpdateDriftAccumulation,
+      ComputeFocusSpread, UpdateEmbeddingPredictionError, UpdateUncertainty,
 
-      std::make_unique<ComputeEffectiveFocus> (),
-      std::make_unique<ComputeMetrics> (),
-      std::make_unique<UpdateNeuromodulators> (),
-      std::make_unique<FitMetricWeightsRLS> (),
-      std::make_unique<ComputeCompositeScore> (),
-      std::make_unique<UpdateAccumulatorScores> (),
+      UpdateFocus, UpdateSensitivity, UpdateMood,
 
-      std::make_unique<UpdatePrecisionDelta> (),
-      std::make_unique<UpdateThreshold> (),
-      std::make_unique<UpdateRecentContext> (),
+      ComputeEffectiveFocus, ComputeMetrics, UpdateNeuromodulators,
+      FitMetricWeightsRLS, ComputeCompositeScore, UpdateAccumulatorScores,
 
-      std::make_unique<DetectBoundary> (),
-      std::make_unique<UpdateShortTermMemoryShadow> (),
-      std::make_unique<CheckSpikeBypass> (),
-      std::make_unique<ComputeWriteGate> ());
+      UpdatePrecisionDelta, UpdateThreshold, UpdateRecentContext,
 
-  if (!probe_mode)
-    {
-      pipeline->Add (std::make_unique<MemoryStorage> ());
-      pipeline->Add (std::make_unique<UpdateSoftAnchor> ());
-      pipeline->Add (std::make_unique<ApplySynapticTagging> ());
-      pipeline->Add (std::make_unique<PersistSignalMetrics> ());
-    }
+      DetectBoundary, UpdateShortTermMemoryShadow, CheckSpikeBypass,
+      ComputeWriteGate>;
 
-  pipeline->Add (std::make_unique<CheckStreamingPacing> ());
-  pipeline->Add (std::make_unique<GraphAugmentedRetrieveCandidates> ());
-  pipeline->Add (std::make_unique<UpdateRateState> ());
-  pipeline->Add (std::make_unique<ComputeMniGateDecision> ());
-  pipeline->Add (std::make_unique<DetectMemoryUsage> ());
+  using StorageStage = OperationSet<MemoryStorage, UpdateSoftAnchor,
+                                    ApplySynapticTagging,
+                                    PersistSignalMetrics>;
+
+  using RetrievalStage
+      = OperationSet<CheckStreamingPacing, GraphAugmentedRetrieveCandidates,
+                     UpdateRateState, ComputeMniGateDecision,
+                     DetectMemoryUsage>;
+
+  using FeedbackStage = OperationSet<
+      ApplyRetrievalCompetition, ApplyPredictivePreActivation,
+      ApplyReconsolidation, ApplyFocusFeedback, ApplySensitivityFeedback,
+      ApplyStabilityFeedback, UpdateStability, ApplyInfluenceFeedback,
+      ApplySerialPositionEffects, ApplySerialPositionMultiplier,
+      UpdateMemoryStrength, ApplyEmotionalConsolidation, WorkingMemory,
+      ResetAccumulatorAfterFlush, ResetAccumulatorOnInterrupt,
+      MetacognitiveMonitoring, EvaluateConsolidation, ConsolidationGate,
+      ConsolidationCluster, cortext::operations::ConsolidationShallow,
+      ConsolidationSummarize, EnqueueExtractionJobs, ProcessExtractionResults,
+      BuildGraphFromConsolidation, PropagateEmotionalCascade,
+      ApplyMetaLearning>;
 
   if (probe_mode)
     {
-      return pipeline;
+      return std::make_unique<OperationSet<CoreStage, RetrievalStage> > ();
     }
-
-  pipeline->Add (std::make_unique<ApplyRetrievalCompetition> ());
-  pipeline->Add (std::make_unique<ApplyPredictivePreActivation> ());
-  pipeline->Add (std::make_unique<ApplyReconsolidation> ());
-  pipeline->Add (std::make_unique<ApplyFocusFeedback> ());
-  pipeline->Add (std::make_unique<ApplySensitivityFeedback> ());
-  pipeline->Add (std::make_unique<ApplyStabilityFeedback> ());
-  pipeline->Add (std::make_unique<UpdateStability> ());
-  pipeline->Add (std::make_unique<ApplyInfluenceFeedback> ());
-  pipeline->Add (std::make_unique<ApplySerialPositionEffects> ());
-  pipeline->Add (std::make_unique<ApplySerialPositionMultiplier> ());
-  pipeline->Add (std::make_unique<UpdateMemoryStrength> ());
-  pipeline->Add (std::make_unique<ApplyEmotionalConsolidation> ());
-  pipeline->Add (std::make_unique<WorkingMemory> ());
-  pipeline->Add (std::make_unique<ResetAccumulatorAfterFlush> ());
-  pipeline->Add (std::make_unique<ResetAccumulatorOnInterrupt> ());
-  pipeline->Add (std::make_unique<MetacognitiveMonitoring> ());
-  pipeline->Add (std::make_unique<EvaluateConsolidation> ());
-  pipeline->Add (std::make_unique<ConsolidationGate> ());
-  pipeline->Add (std::make_unique<ConsolidationCluster> ());
-  pipeline->Add (
-      std::make_unique<cortext::operations::ConsolidationShallow> ());
-  pipeline->Add (std::make_unique<ConsolidationSummarize> ());
-  pipeline->Add (std::make_unique<EnqueueExtractionJobs> ());
-  pipeline->Add (std::make_unique<ProcessExtractionResults> ());
-  pipeline->Add (std::make_unique<BuildGraphFromConsolidation> ());
-  pipeline->Add (std::make_unique<PropagateEmotionalCascade> ());
-  pipeline->Add (std::make_unique<ApplyMetaLearning> ());
-  return pipeline;
+  return std::make_unique<OperationSet<CoreStage, StorageStage,
+                                       RetrievalStage, FeedbackStage> > ();
 }
 
 namespace

@@ -109,7 +109,7 @@ TEST_CASE ("DetectMemoryUsage marks selected candidate as used",
       candidates, /*interrupt_allowed=*/true, /*selected_id=*/42LL);
   auto detect = std::make_unique<DetectMemoryUsage> ();
   auto capture = std::make_unique<CaptureUsageEventsOp> (events);
-  auto ops = std::make_unique<cortext::OperationSet> (
+  auto ops = std::make_unique<cortext::DynamicOperationSet> (
       std::move (setup), std::move (detect), std::move (capture));
 
   cortext::SignalProcessor processor (cfg, store, std::move (ops));
@@ -155,7 +155,7 @@ TEST_CASE ("DetectMemoryUsage marks none used when interrupt denied",
       candidates, /*interrupt_allowed=*/false, /*selected_id=*/7LL);
   auto detect = std::make_unique<DetectMemoryUsage> ();
   auto capture = std::make_unique<CaptureUsageEventsOp> (events);
-  auto ops = std::make_unique<cortext::OperationSet> (
+  auto ops = std::make_unique<cortext::DynamicOperationSet> (
       std::move (setup), std::move (detect), std::move (capture));
 
   cortext::SignalProcessor processor (cfg, store, std::move (ops));
@@ -183,7 +183,7 @@ TEST_CASE ("DetectMemoryUsage no-ops with empty candidates",
       std::nullopt);
   auto detect = std::make_unique<DetectMemoryUsage> ();
   auto capture = std::make_unique<CaptureUsageEventsOp> (events);
-  auto ops = std::make_unique<cortext::OperationSet> (
+  auto ops = std::make_unique<cortext::DynamicOperationSet> (
       std::move (setup), std::move (detect), std::move (capture));
 
   cortext::SignalProcessor processor (cfg, store, std::move (ops));

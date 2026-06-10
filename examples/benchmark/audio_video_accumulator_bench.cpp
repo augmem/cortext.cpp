@@ -247,10 +247,10 @@ MakeImageSignal (long long timestamp, bool flush, int axis)
   return signal;
 }
 
-std::unique_ptr<cortext::OperationSet>
+std::unique_ptr<cortext::DynamicOperationSet>
 MakeAccumulatorPipeline ()
 {
-  auto pipeline = std::make_unique<cortext::OperationSet> (
+  auto pipeline = std::make_unique<cortext::DynamicOperationSet> (
       std::make_unique<cortext::operations::UpdateAccumulator> (),
       std::make_unique<cortext::operations::DetectBoundary> (),
       std::make_unique<cortext::operations::ComputeWriteGate> (),

@@ -102,7 +102,7 @@ TEST_CASE ("PropagateEmotionalCascade propagates through graph edges",
   cortext::testing::RequireEncoder (cfg);
   cfg.sensitivity = 0.5; // cascade_radius = 3, decay = 0.5
   cfg.stability = 0.5;
-  auto ops = std::make_unique<OperationSet> (
+  auto ops = std::make_unique<DynamicOperationSet> (
 
       std::make_unique<PropagateEmotionalCascade> ());
   SignalProcessor processor (cfg, store, std::move (ops));

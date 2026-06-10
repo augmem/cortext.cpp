@@ -606,7 +606,7 @@ RunSourceConfidenceScenario (std::uint32_t mask)
 
   auto cfg = MakeConfig (mask, 0.5, 0.5, 1.0);
   cortext::operations::retrieval_debug::ClearLastRankedCandidates ();
-  auto ops = std::make_unique<cortext::OperationSet> (
+  auto ops = std::make_unique<cortext::DynamicOperationSet> (
       std::make_unique<ForceRetrievalGateOp> (),
       std::make_unique<cortext::operations::GraphAugmentedRetrieveCandidates> ());
   cortext::SignalProcessor processor (cfg, store, std::move (ops));
@@ -639,7 +639,7 @@ RunPredictiveScenario (std::uint32_t mask)
 
   auto cfg = MakeConfig (mask, 1.0, 0.5, 0.5);
   cortext::operations::retrieval_debug::ClearLastRankedCandidates ();
-  auto ops = std::make_unique<cortext::OperationSet> (
+  auto ops = std::make_unique<cortext::DynamicOperationSet> (
       std::make_unique<ForceRetrievalGateOp> (),
       std::make_unique<cortext::operations::GraphAugmentedRetrieveCandidates> ());
   cortext::SignalProcessor processor (cfg, store, std::move (ops));
@@ -673,7 +673,7 @@ RunConstructiveRecallScenario (std::uint32_t mask)
 
   auto cfg = MakeConfig (mask, 0.5, 0.5, 0.5);
   cortext::operations::retrieval_debug::ClearLastRankedCandidates ();
-  auto ops = std::make_unique<cortext::OperationSet> (
+  auto ops = std::make_unique<cortext::DynamicOperationSet> (
       std::make_unique<ForceRetrievalGateOp> (),
       std::make_unique<cortext::operations::GraphAugmentedRetrieveCandidates> ());
   cortext::SignalProcessor processor (cfg, store, std::move (ops));
@@ -707,7 +707,7 @@ RunProceduralScenario (std::uint32_t mask)
 
   auto cfg = MakeConfig (mask, 1.0, 1.0, 0.5);
   cortext::operations::retrieval_debug::ClearLastRankedCandidates ();
-  auto ops = std::make_unique<cortext::OperationSet> (
+  auto ops = std::make_unique<cortext::DynamicOperationSet> (
       std::make_unique<ForceRetrievalGateOp> (),
       std::make_unique<SeedProceduralStoreOp> (500LL, 1.0),
       std::make_unique<cortext::operations::GraphAugmentedRetrieveCandidates> ());
@@ -746,7 +746,7 @@ RunTotRetrievalForMask (std::uint32_t mask, double confidence)
       { 3LL, 4LL });
 
   auto cfg = MakeConfig (mask, 0.5, 0.5, 1.0);
-  auto ops = std::make_unique<cortext::OperationSet> (
+  auto ops = std::make_unique<cortext::DynamicOperationSet> (
       std::make_unique<ForceRetrievalGateOp> (
           cortext::ProcessorContext::MetacognitiveMode::TotRecovery,
           confidence),
@@ -773,7 +773,7 @@ RunMetacognitiveScenario (std::uint32_t mask)
     store->Execute ("UPDATE memories SET source_contradiction_count = ? WHERE memory_id = ?",
                     { 5LL, 77LL });
     auto cfg = MakeConfig (mask, 0.5, 0.5, 0.5);
-    auto ops = std::make_unique<cortext::OperationSet> (
+    auto ops = std::make_unique<cortext::DynamicOperationSet> (
         std::make_unique<ForceRetrievalGateOp> (
             cortext::ProcessorContext::MetacognitiveMode::UnknownCaution, 0.0),
         std::make_unique<cortext::operations::GraphAugmentedRetrieveCandidates> ());
@@ -881,7 +881,7 @@ RunAffectRetrievalScenario (std::uint32_t mask)
 
   auto cfg = MakeConfig (mask, 0.5, 1.0, 0.5);
   cortext::operations::retrieval_debug::ClearLastRankedCandidates ();
-  auto ops = std::make_unique<cortext::OperationSet> (
+  auto ops = std::make_unique<cortext::DynamicOperationSet> (
       std::make_unique<SetAffectInputsOp> (1.0, 1.0, 1.0),
       std::make_unique<ForceRetrievalGateOp> (),
       std::make_unique<cortext::operations::GraphAugmentedRetrieveCandidates> ());
@@ -907,16 +907,16 @@ RunFlashbulbScenario (std::uint32_t mask)
       { 0.95, 0.85, 101LL });
 
   auto cfg = MakeConfig (mask, 0.4, 0.8, 0.5);
-  std::unique_ptr<cortext::OperationSet> ops;
+  std::unique_ptr<cortext::DynamicOperationSet> ops;
   if (FamilyEnabled (mask, kFlashbulbConsolidation))
     {
-      ops = std::make_unique<cortext::OperationSet> (
+      ops = std::make_unique<cortext::DynamicOperationSet> (
           std::make_unique<SetupStoredIdOp> (101LL),
           std::make_unique<cortext::operations::ApplyEmotionalConsolidation> ());
     }
   else
     {
-      ops = std::make_unique<cortext::OperationSet> (
+      ops = std::make_unique<cortext::DynamicOperationSet> (
           std::make_unique<SetupStoredIdOp> (101LL));
     }
   cortext::SignalProcessor processor (cfg, store, std::move (ops));
@@ -1036,7 +1036,7 @@ RunSequentialScenario (std::uint32_t mask)
       "UPDATE memories SET cluster_id = 1, boundary_score = 0.0 WHERE memory_id IN (1, 2)");
 
   auto cfg = MakeConfig (mask, 0.5, 0.5, 0.5);
-  auto ops = std::make_unique<cortext::OperationSet> (
+  auto ops = std::make_unique<cortext::DynamicOperationSet> (
       std::make_unique<SetConsolidationStartOp> (),
       std::make_unique<cortext::operations::BuildGraphFromConsolidation> ());
   cortext::SignalProcessor processor (cfg, store, std::move (ops));

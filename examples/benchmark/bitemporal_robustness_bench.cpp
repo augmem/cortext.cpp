@@ -155,7 +155,7 @@ RunRetrieval (std::shared_ptr<cortext::Store> store, const Eigen::VectorXf &quer
   static BenchEncoder encoder;
   cfg.encoder = &encoder;
 
-  auto ops = std::make_unique<cortext::OperationSet> (
+  auto ops = std::make_unique<cortext::DynamicOperationSet> (
       std::make_unique<ForceRetrievalGateOp> (),
       std::make_unique<cortext::operations::GraphAugmentedRetrieveCandidates> ());
   cortext::SignalProcessor processor (cfg, store, std::move (ops));

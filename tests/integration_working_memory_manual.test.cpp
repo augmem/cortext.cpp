@@ -465,7 +465,7 @@ MakeTextSignal (KeywordEncoder &encoder, const std::string &text,
 std::unique_ptr<IOperation>
 BuildWorkingMemoryPipeline ()
 {
-  using cortext::OperationSet;
+  using cortext::DynamicOperationSet;
   using cortext::operations::CheckSpikeBypass;
   using cortext::operations::ComputeCoherence;
   using cortext::operations::ComputeCompositeScore;
@@ -490,7 +490,7 @@ BuildWorkingMemoryPipeline ()
   using cortext::operations::WorkingMemory;
   using cortext::operations::ComputeWriteGate;
 
-  return std::make_unique<OperationSet> (
+  return std::make_unique<DynamicOperationSet> (
       std::make_unique<InitializeEmbeddedCentroids> (),
       std::make_unique<InitializeFocusPriors> (),
       std::make_unique<InitializeSensitivityPriors> (),

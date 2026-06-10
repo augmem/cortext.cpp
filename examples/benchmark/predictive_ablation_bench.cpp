@@ -233,7 +233,7 @@ RunPredictiveRankingStudy ()
 
   auto run = [&] {
     cortext::operations::retrieval_debug::ClearLastRankedCandidates ();
-    auto ops = std::make_unique<cortext::OperationSet> (
+    auto ops = std::make_unique<cortext::DynamicOperationSet> (
         std::make_unique<ForceRetrievalGateOp> (),
         std::make_unique<cortext::operations::GraphAugmentedRetrieveCandidates> ());
     cortext::SignalProcessor processor (cfg, store, std::move (ops));
@@ -278,7 +278,7 @@ RunPredictiveDecayStudy ()
   cfg.stability = 0.5;
   cfg.encoder = &GetBenchEncoder ();
 
-  auto ops = std::make_unique<cortext::OperationSet> (
+  auto ops = std::make_unique<cortext::DynamicOperationSet> (
       std::make_unique<cortext::operations::ApplyPredictivePreActivation> ());
   cortext::SignalProcessor processor (cfg, store, std::move (ops));
   processor.Process (MakeSignal (aligned, 20));
@@ -313,7 +313,7 @@ RunPredictiveRefresh (double surprise)
   cfg.stability = 0.3;
   cfg.encoder = &GetBenchEncoder ();
 
-  auto ops = std::make_unique<cortext::OperationSet> (
+  auto ops = std::make_unique<cortext::DynamicOperationSet> (
       std::make_unique<SetupPredictiveInputsOp> (
           std::vector<Eigen::VectorXf>{ e0, e1, e2 },
           std::unordered_map<long long, Eigen::VectorXf>{ { 505LL, aligned } },

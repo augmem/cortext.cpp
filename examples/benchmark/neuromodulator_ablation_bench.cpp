@@ -344,7 +344,7 @@ RunCompetitionStudy (bool disable_scale)
   cfg.sensitivity = 1.0;
   cfg.stability = 0.0;
 
-  auto pipeline = std::make_unique<cortext::OperationSet> (
+  auto pipeline = std::make_unique<cortext::DynamicOperationSet> (
       std::make_unique<SeedCompetitionMemoriesOp> (retrieved),
       std::make_unique<SetupCompetitionInputsOp> (ctx, retrieved),
       std::make_unique<SetNeuromodOp> (0.0, 1.0),
@@ -389,7 +389,7 @@ RunReconStudy (bool disable_scale)
   cfg.sensitivity = 1.0;
   cfg.stability = 0.0;
 
-  auto pipeline = std::make_unique<cortext::OperationSet> (
+  auto pipeline = std::make_unique<cortext::DynamicOperationSet> (
       std::make_unique<SetupReconInputsOp> (
           current, std::unordered_map<long long, Eigen::VectorXf>{ { 9LL, mem } }),
       std::make_unique<SetNeuromodOp> (1.0, 0.0),

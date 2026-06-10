@@ -67,7 +67,7 @@ TEST_CASE ("Alg26 does not create any tables",
   cfg.stability = 0.5;
 
   auto op = std::make_unique<ApplySerialPositionEffects> ();
-  auto ops = std::make_unique<OperationSet> (std::move (op));
+  auto ops = std::make_unique<DynamicOperationSet> (std::move (op));
 
   SignalProcessor processor (cfg, store, std::move (ops));
 

@@ -31,6 +31,7 @@ add_executable(cortext_tests
   thread_config.test.cpp
   operation_context.test.cpp
   operation_set.test.cpp
+  operation_set_typed.test.cpp
   operations_uncertainty.test.cpp
   operations_focus.test.cpp
   operations_focus_spread.test.cpp

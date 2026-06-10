@@ -201,7 +201,7 @@ RunScenario (const Scenario &scenario, LiveModels &models)
   cfg.stability = 0.5;
   cfg.encoder = &models.encoder;
 
-  auto init_ops = std::make_unique<cortext::OperationSet> ();
+  auto init_ops = std::make_unique<cortext::DynamicOperationSet> ();
   cortext::SignalProcessor init_processor (cfg, store, std::move (init_ops));
   init_processor.Process (MakeSignal (1));
   init_processor.Flush ();

@@ -53,7 +53,7 @@ TEST_CASE ("Uncertainty weights respond to F and S", "[uncertainty]")
   auto store = std::shared_ptr<Store>(std::move(unique_store));
   
   // Minimal op set: just UpdateUncertainty
-  auto ops = std::make_unique<OperationSet> (
+  auto ops = std::make_unique<DynamicOperationSet> (
       std::make_unique<UpdateUncertainty> ());
   SignalProcessor processor (cfg, store, std::move (ops));
 

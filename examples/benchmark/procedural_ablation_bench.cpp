@@ -225,7 +225,7 @@ RunProceduralStudy (bool disable_proactive)
   cfg.procedural_enabled = true;
 
   cortext::operations::retrieval_debug::ClearLastRankedCandidates ();
-  auto ops = std::make_unique<cortext::OperationSet> (
+  auto ops = std::make_unique<cortext::DynamicOperationSet> (
       std::make_unique<ForceRetrievalGateOp> (),
       std::make_unique<SeedProceduralStoreOp> (500LL, 1.0),
       std::make_unique<cortext::operations::GraphAugmentedRetrieveCandidates> ());

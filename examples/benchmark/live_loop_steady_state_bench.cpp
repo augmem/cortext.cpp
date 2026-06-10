@@ -1,5 +1,5 @@
 // Steady-state live-loop benchmark for profiling the core operation
-// pipeline. Drives the exact production OperationSet (BuildPipelineRoot)
+// pipeline. Drives the exact production DynamicOperationSet (BuildPipelineRoot)
 // through one long-lived store with deterministic synthetic embeddings, so
 // CPU profiles concentrate on the memory algorithms rather than per-scenario
 // setup, encoder inference, or LLM consolidation backends.

@@ -195,7 +195,7 @@ TEST_CASE ("ConsolidationCluster groups similar embeddings",
   auto assert_op = std::make_unique<AssertClustersOp> (1);
   // At F=0, min_cluster_size=3, so Group A with 3 members passes
 
-  auto ops = std::make_unique<OperationSet> (
+  auto ops = std::make_unique<DynamicOperationSet> (
       std::move (seed), std::move (enable), std::move (cluster),
       std::move (assert_op));
 
@@ -228,7 +228,7 @@ TEST_CASE ("ConsolidationCluster filters small clusters",
   auto cluster = std::make_unique<ConsolidationCluster> ();
   auto assert_op = std::make_unique<AssertClustersOp> (0); // No clusters
 
-  auto ops = std::make_unique<OperationSet> (
+  auto ops = std::make_unique<DynamicOperationSet> (
       std::move (seed), std::move (enable), std::move (cluster),
       std::move (assert_op));
 
@@ -254,7 +254,7 @@ TEST_CASE ("ConsolidationCluster returns empty on no candidates",
   auto cluster = std::make_unique<ConsolidationCluster> ();
   auto assert_op = std::make_unique<AssertClustersOp> (0);
 
-  auto ops = std::make_unique<OperationSet> (
+  auto ops = std::make_unique<DynamicOperationSet> (
       std::move (enable), std::move (cluster), std::move (assert_op));
 
   SignalProcessor processor (cfg, store, std::move (ops));
@@ -286,7 +286,7 @@ TEST_CASE ("ConsolidationCluster skips when consolidation not started",
   auto cluster = std::make_unique<ConsolidationCluster> ();
   auto assert_op = std::make_unique<AssertClustersOp> (0);
 
-  auto ops = std::make_unique<OperationSet> (
+  auto ops = std::make_unique<DynamicOperationSet> (
       std::move (seed), std::move (cluster), std::move (assert_op));
 
   SignalProcessor processor (cfg, store, std::move (ops));

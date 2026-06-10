@@ -120,7 +120,7 @@ TEST_CASE ("Algorithm 14 creates and updates embeddings row", "[op14]")
       });
   auto update_strength
       = std::make_unique<cortext::operations::UpdateMemoryStrength> ();
-  auto ops = std::make_unique<cortext::OperationSet> (
+  auto ops = std::make_unique<cortext::DynamicOperationSet> (
       std::move (seed), std::move (set_events), std::move (update_strength));
 
   cortext::SignalProcessor processor (cfg, store, std::move (ops));
@@ -169,7 +169,7 @@ TEST_CASE ("Algorithm 14 decays and evicts below cutoff", "[op14]")
       std::vector<OperationContext::MemoryUsageEvent>{ { 42LL, false } });
   auto update_strength
       = std::make_unique<cortext::operations::UpdateMemoryStrength> ();
-  auto ops = std::make_unique<cortext::OperationSet> (
+  auto ops = std::make_unique<cortext::DynamicOperationSet> (
       std::move (set_events), std::move (update_strength));
 
   cortext::SignalProcessor processor (cfg, store, std::move (ops));
@@ -219,7 +219,7 @@ TEST_CASE (
       std::vector<OperationContext::MemoryUsageEvent>{ ev });
   auto update_strength
       = std::make_unique<cortext::operations::UpdateMemoryStrength> ();
-  auto ops = std::make_unique<cortext::OperationSet> (
+  auto ops = std::make_unique<cortext::DynamicOperationSet> (
       std::move (seed), std::move (set_events), std::move (update_strength));
 
   cortext::SignalProcessor processor (cfg, store, std::move (ops));
@@ -268,7 +268,7 @@ TEST_CASE ("Algorithm 18 writes an eviction audit row before deleting long-term 
       std::vector<OperationContext::MemoryUsageEvent>{ { 77LL, false } });
   auto update_strength
       = std::make_unique<cortext::operations::UpdateMemoryStrength> ();
-  auto ops = std::make_unique<cortext::OperationSet> (
+  auto ops = std::make_unique<cortext::DynamicOperationSet> (
       std::move (set_events), std::move (update_strength));
 
   cortext::SignalProcessor processor (cfg, store, std::move (ops));
@@ -321,7 +321,7 @@ TEST_CASE ("Algorithm 18 does not evict before storage budget is reached",
       std::vector<OperationContext::MemoryUsageEvent>{ { 88LL, false } });
   auto update_strength
       = std::make_unique<cortext::operations::UpdateMemoryStrength> ();
-  auto ops = std::make_unique<cortext::OperationSet> (
+  auto ops = std::make_unique<cortext::DynamicOperationSet> (
       std::move (set_events), std::move (update_strength));
 
   cortext::SignalProcessor processor (cfg, store, std::move (ops));
@@ -375,7 +375,7 @@ TEST_CASE ("Algorithm 18 evicts once storage budget is below threshold",
       std::vector<OperationContext::MemoryUsageEvent>{ { 89LL, false } });
   auto update_strength
       = std::make_unique<cortext::operations::UpdateMemoryStrength> ();
-  auto ops = std::make_unique<cortext::OperationSet> (
+  auto ops = std::make_unique<cortext::DynamicOperationSet> (
       std::move (set_events), std::move (update_strength));
 
   cortext::SignalProcessor processor (cfg, store, std::move (ops));
@@ -425,7 +425,7 @@ TEST_CASE (
       std::vector<OperationContext::MemoryUsageEvent>{ ev });
   auto update_strength
       = std::make_unique<cortext::operations::UpdateMemoryStrength> ();
-  auto ops = std::make_unique<cortext::OperationSet> (
+  auto ops = std::make_unique<cortext::DynamicOperationSet> (
       std::move (seed), std::move (set_events), std::move (update_strength));
 
   cortext::SignalProcessor processor (cfg, store, std::move (ops));
@@ -474,7 +474,7 @@ TEST_CASE ("Algorithm 18 counts retrieval when not used",
       std::vector<OperationContext::MemoryUsageEvent>{ ev });
   auto update_strength
       = std::make_unique<cortext::operations::UpdateMemoryStrength> ();
-  auto ops = std::make_unique<cortext::OperationSet> (
+  auto ops = std::make_unique<cortext::DynamicOperationSet> (
       std::move (seed), std::move (set_events), std::move (update_strength));
 
   cortext::SignalProcessor processor (cfg, store, std::move (ops));
@@ -521,7 +521,7 @@ TEST_CASE ("Algorithm 14 applies exponential decay based on elapsed time",
         std::vector<OperationContext::MemoryUsageEvent>{ ev });
     auto update_strength
         = std::make_unique<cortext::operations::UpdateMemoryStrength> ();
-    return std::make_unique<cortext::OperationSet> (
+    return std::make_unique<cortext::DynamicOperationSet> (
         std::move (set_events), std::move (update_strength));
   };
 
@@ -537,7 +537,7 @@ TEST_CASE ("Algorithm 14 applies exponential decay based on elapsed time",
         std::vector<OperationContext::MemoryUsageEvent>{ ev });
     auto update_strength
         = std::make_unique<cortext::operations::UpdateMemoryStrength> ();
-    auto ops = std::make_unique<cortext::OperationSet> (
+    auto ops = std::make_unique<cortext::DynamicOperationSet> (
         std::move (seed), std::move (set_events), std::move (update_strength));
     cortext::SignalProcessor processor (cfg, store, std::move (ops));
     auto signal = MakeSignal (4, 0);
@@ -599,7 +599,7 @@ TEST_CASE ("Algorithm 14 no decay when delta_t is zero", "[op14][decay]")
         std::vector<OperationContext::MemoryUsageEvent>{ ev });
     auto update_strength
         = std::make_unique<cortext::operations::UpdateMemoryStrength> ();
-    return std::make_unique<cortext::OperationSet> (
+    return std::make_unique<cortext::DynamicOperationSet> (
         std::move (set_events), std::move (update_strength));
   };
 
@@ -615,7 +615,7 @@ TEST_CASE ("Algorithm 14 no decay when delta_t is zero", "[op14][decay]")
         std::vector<OperationContext::MemoryUsageEvent>{ ev });
     auto update_strength
         = std::make_unique<cortext::operations::UpdateMemoryStrength> ();
-    auto ops = std::make_unique<cortext::OperationSet> (
+    auto ops = std::make_unique<cortext::DynamicOperationSet> (
         std::move (seed), std::move (set_events), std::move (update_strength));
     cortext::SignalProcessor processor (cfg, store, std::move (ops));
     auto signal = MakeSignal (4, 1000);
@@ -671,7 +671,7 @@ TEST_CASE ("Algorithm 14 initializes last_access on INSERT",
       std::vector<OperationContext::MemoryUsageEvent>{ { 300LL, true } });
   auto update_strength
       = std::make_unique<cortext::operations::UpdateMemoryStrength> ();
-  auto ops = std::make_unique<cortext::OperationSet> (
+  auto ops = std::make_unique<cortext::DynamicOperationSet> (
       std::move (seed), std::move (set_events), std::move (update_strength));
 
   cortext::SignalProcessor processor (cfg, store, std::move (ops));

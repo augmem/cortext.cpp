@@ -150,7 +150,7 @@ TEST_CASE ("Alg20 drifts embedding and writes lability fields",
   auto seed = std::make_unique<SeedEmbeddingsOp> (retrieved);
   auto setup = std::make_unique<SetupReconInputsOp> (cur, retrieved);
   auto apply = std::make_unique<ApplyReconsolidation> ();
-  auto ops = std::make_unique<cortext::OperationSet> (
+  auto ops = std::make_unique<cortext::DynamicOperationSet> (
       std::move (seed), std::move (setup), std::move (apply));
 
   cortext::SignalProcessor processor (cfg, store, std::move (ops));
@@ -199,7 +199,7 @@ TEST_CASE ("Alg20 no drift when S=0: embedding unchanged, lability updated",
   auto seed = std::make_unique<SeedEmbeddingsOp> (retrieved);
   auto setup = std::make_unique<SetupReconInputsOp> (cur, retrieved);
   auto apply = std::make_unique<ApplyReconsolidation> ();
-  auto ops = std::make_unique<cortext::OperationSet> (
+  auto ops = std::make_unique<cortext::DynamicOperationSet> (
       std::move (seed), std::move (setup), std::move (apply));
 
   cortext::SignalProcessor processor (cfg, store, std::move (ops));
@@ -250,7 +250,7 @@ TEST_CASE ("Alg20 bumps uncertainty with positive drift",
   auto setup = std::make_unique<SetupReconInputsOp> (
       cur, std::unordered_map<long long, Eigen::VectorXf>{ { 3LL, mem } });
   auto apply = std::make_unique<ApplyReconsolidation> ();
-  auto ops = std::make_unique<cortext::OperationSet> (
+  auto ops = std::make_unique<cortext::DynamicOperationSet> (
       std::move (seed), std::move (setup), std::move (apply));
 
   cortext::SignalProcessor processor (cfg, store, std::move (ops));
@@ -290,7 +290,7 @@ TEST_CASE ("High ACh increases reconsolidation drift",
         current, std::unordered_map<long long, Eigen::VectorXf>{ { 9LL, mem } });
     auto set_ach = std::make_unique<SetNeuromodAchOp> (1.0);
     auto apply = std::make_unique<ApplyReconsolidation> ();
-    auto ops = std::make_unique<cortext::OperationSet> (
+    auto ops = std::make_unique<cortext::DynamicOperationSet> (
         std::move (seed), std::move (setup), std::move (set_ach),
         std::move (apply));
 
@@ -446,7 +446,7 @@ TEST_CASE ("Alg20 ripple decay applied correctly per hop",
   auto setup = std::make_unique<SetupReconInputsOp> (
       cur, std::unordered_map<long long, Eigen::VectorXf>{ { 1LL, mem } });
   auto apply = std::make_unique<ApplyReconsolidation> ();
-  auto ops = std::make_unique<cortext::OperationSet> (
+  auto ops = std::make_unique<cortext::DynamicOperationSet> (
       std::move (seed), std::move (setup), std::move (apply));
 
   // Create processor first to initialize schema
@@ -523,7 +523,7 @@ TEST_CASE ("Alg20 RippleDepth knob affects traversal depth",
   auto setup = std::make_unique<SetupReconInputsOp> (
       cur, std::unordered_map<long long, Eigen::VectorXf>{ { 1LL, mem } });
   auto apply = std::make_unique<ApplyReconsolidation> ();
-  auto ops = std::make_unique<cortext::OperationSet> (
+  auto ops = std::make_unique<cortext::DynamicOperationSet> (
       std::move (seed), std::move (setup), std::move (apply));
 
   // Create processor first to initialize schema
@@ -590,7 +590,7 @@ TEST_CASE ("Alg20 ripple respects co_occurs edge type",
   auto setup = std::make_unique<SetupReconInputsOp> (
       cur, std::unordered_map<long long, Eigen::VectorXf>{ { 1LL, mem } });
   auto apply = std::make_unique<ApplyReconsolidation> ();
-  auto ops = std::make_unique<cortext::OperationSet> (
+  auto ops = std::make_unique<cortext::DynamicOperationSet> (
       std::move (seed), std::move (setup), std::move (apply));
 
   // Create processor first to initialize schema

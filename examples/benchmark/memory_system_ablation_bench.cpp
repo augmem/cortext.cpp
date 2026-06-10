@@ -864,7 +864,7 @@ RunStudy4Config (const std::string &name, bool fact_layer_enabled)
       const auto ts = static_cast<std::uint64_t> (cycle * kIntervalMs);
 
       // Run retrieval via SignalProcessor
-      auto ops = std::make_unique<cortext::OperationSet> (
+      auto ops = std::make_unique<cortext::DynamicOperationSet> (
           std::make_unique<ForceRetrievalGateOp> (),
           std::make_unique<
               cortext::operations::GraphAugmentedRetrieveCandidates> ());
@@ -944,7 +944,7 @@ RunStudy4Config (const std::string &name, bool fact_layer_enabled)
 
   // Get final retrieval ranking to compute top5_fact_fraction
   {
-    auto ops = std::make_unique<cortext::OperationSet> (
+    auto ops = std::make_unique<cortext::DynamicOperationSet> (
         std::make_unique<ForceRetrievalGateOp> (),
         std::make_unique<
             cortext::operations::GraphAugmentedRetrieveCandidates> ());

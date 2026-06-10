@@ -229,7 +229,7 @@ TEST_CASE ("Constructive recall retrieval uses the latest reconstruction and app
 
   auto run = [&] {
     operations::retrieval_debug::ClearLastRankedCandidates ();
-    auto ops = std::make_unique<OperationSet> (
+    auto ops = std::make_unique<DynamicOperationSet> (
         std::make_unique<ForceRetrievalGateOp> (),
         std::make_unique<operations::GraphAugmentedRetrieveCandidates> ());
     SignalProcessor processor (cfg, store, std::move (ops));
@@ -296,7 +296,7 @@ TEST_CASE ("Reconsolidation appends a new reconstruction while preserving the ev
   cfg.sensitivity = 1.0;
   cfg.stability = 0.0;
 
-  auto ops = std::make_unique<OperationSet> (
+  auto ops = std::make_unique<DynamicOperationSet> (
       std::make_unique<SetupReconInputsOp> (
           current,
           std::unordered_map<long long, Eigen::VectorXf>{ { 1LL, evidence } }),

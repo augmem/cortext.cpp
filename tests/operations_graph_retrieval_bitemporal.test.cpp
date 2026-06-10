@@ -210,7 +210,7 @@ RunRetrieval (std::shared_ptr<Store> store, const Eigen::VectorXf &query,
   cfg.stability = 0.5;
   cortext::testing::RequireEncoder (cfg);
 
-  auto ops = std::make_unique<OperationSet> (
+  auto ops = std::make_unique<DynamicOperationSet> (
       std::make_unique<ForceRetrievalGateOp> (working_memory_text),
       std::make_unique<operations::GraphAugmentedRetrieveCandidates> ());
   SignalProcessor processor (cfg, store, std::move (ops));

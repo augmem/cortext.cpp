@@ -800,7 +800,7 @@ RunFlashbulbCase (std::uint32_t mask, double emotion, double arousal,
   cfg.sensitivity = 0.8;
   cfg.stability = 0.5;
 
-  auto ops = std::make_unique<cortext::OperationSet> (
+  auto ops = std::make_unique<cortext::DynamicOperationSet> (
       std::make_unique<SetupStoredEmotionOp> (101LL, history, rate_ewma),
       std::make_unique<cortext::operations::ApplyEmotionalConsolidation> ());
   cortext::SignalProcessor processor (cfg, store, std::move (ops));
@@ -919,7 +919,7 @@ RunTotRetrievalForMask (std::uint32_t mask, double metacognitive_confidence)
   cfg.sensitivity = 0.5;
   cfg.stability = 1.0;
 
-  auto ops = std::make_unique<cortext::OperationSet> (
+  auto ops = std::make_unique<cortext::DynamicOperationSet> (
       std::make_unique<ForceRetrievalGateOp> (
           cortext::ProcessorContext::MetacognitiveMode::TotRecovery,
           metacognitive_confidence),
@@ -957,7 +957,7 @@ RunMetacogUnknownScenario (std::uint32_t mask)
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;
 
-  auto ops = std::make_unique<cortext::OperationSet> (
+  auto ops = std::make_unique<cortext::DynamicOperationSet> (
       std::make_unique<ForceRetrievalGateOp> (
           cortext::ProcessorContext::MetacognitiveMode::UnknownCaution, 0.0),
       std::make_unique<cortext::operations::GraphAugmentedRetrieveCandidates> ());
@@ -1082,7 +1082,7 @@ RunAffectRetrievalScenario (std::uint32_t mask)
 
   auto cfg = MakeAffectConfig (mask, 0.5, 1.0, 0.5);
   cortext::operations::retrieval_debug::ClearLastRankedCandidates ();
-  auto ops = std::make_unique<cortext::OperationSet> (
+  auto ops = std::make_unique<cortext::DynamicOperationSet> (
       std::make_unique<SetAffectInputsOp> (1.0, 1.0, 1.0),
       std::make_unique<ForceRetrievalGateOp> (),
       std::make_unique<cortext::operations::GraphAugmentedRetrieveCandidates> ());
@@ -1202,7 +1202,7 @@ RunNeuromodCompetitionScenario (std::uint32_t mask)
   cfg.sensitivity = 1.0;
   cfg.stability = 0.0;
 
-  auto pipeline = std::make_unique<cortext::OperationSet> (
+  auto pipeline = std::make_unique<cortext::DynamicOperationSet> (
       std::make_unique<SeedCompetitionMemoriesOp> (retrieved),
       std::make_unique<SetupCompetitionInputsOp> (ctx, retrieved),
       std::make_unique<SetNeuromodOp> (0.0, 1.0),
@@ -1235,7 +1235,7 @@ RunNeuromodReconScenario (std::uint32_t mask)
   cfg.sensitivity = 1.0;
   cfg.stability = 0.0;
 
-  auto pipeline = std::make_unique<cortext::OperationSet> (
+  auto pipeline = std::make_unique<cortext::DynamicOperationSet> (
       std::make_unique<SetupReconInputsOp> (
           current, std::unordered_map<long long, Eigen::VectorXf>{ { 9LL, mem } }),
       std::make_unique<SetNeuromodOp> (1.0, 0.0),

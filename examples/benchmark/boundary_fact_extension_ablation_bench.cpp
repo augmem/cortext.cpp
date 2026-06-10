@@ -302,7 +302,7 @@ RunFactRetrieval (std::shared_ptr<cortext::Store> store, const Eigen::VectorXf &
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;
   cfg.encoder = &GetBenchEncoder ();
-  auto ops = std::make_unique<cortext::OperationSet> (
+  auto ops = std::make_unique<cortext::DynamicOperationSet> (
       std::make_unique<ForceRetrievalGateOp> (),
       std::make_unique<cortext::operations::GraphAugmentedRetrieveCandidates> ());
   cortext::SignalProcessor processor (cfg, store, std::move (ops));

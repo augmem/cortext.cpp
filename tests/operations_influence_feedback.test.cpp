@@ -106,7 +106,7 @@ TEST_CASE ("Alg19 influence persists per-memory", "[operations][influence]")
       prev, cur, std::vector<OperationContext::MemoryUsageEvent>{ ev },
       std::unordered_map<long long, Eigen::VectorXf>{ { 101LL, mem } });
   auto apply = std::make_unique<ApplyInfluenceFeedback> ();
-  auto ops = std::make_unique<cortext::OperationSet> (
+  auto ops = std::make_unique<cortext::DynamicOperationSet> (
       std::move (setup), std::move (apply));
 
   cortext::SignalProcessor processor (cfg, store, std::move (ops));
@@ -159,7 +159,7 @@ TEST_CASE ("Alg19 negative influence allowed", "[operations][influence]")
       prev, cur, std::vector<OperationContext::MemoryUsageEvent>{ ev },
       std::unordered_map<long long, Eigen::VectorXf>{ { 202LL, mem } });
   auto apply = std::make_unique<ApplyInfluenceFeedback> ();
-  auto ops = std::make_unique<cortext::OperationSet> (
+  auto ops = std::make_unique<cortext::DynamicOperationSet> (
       std::move (setup), std::move (apply));
 
   cortext::SignalProcessor processor (cfg, store, std::move (ops));

@@ -107,7 +107,7 @@ TEST_CASE ("Alg23 triggers and persists emotional tags for stored memory",
   auto setup = std::make_unique<SetupEmotionInputsOp> (101LL);
   auto apply = std::make_unique<ApplyEmotionalConsolidation> ();
   auto ops
-      = std::make_unique<OperationSet> (std::move (setup), std::move (apply));
+      = std::make_unique<DynamicOperationSet> (std::move (setup), std::move (apply));
 
   SignalProcessor processor (cfg, store, std::move (ops));
   processor.Process (MakeSignal (/*ts=*/12345));
@@ -190,7 +190,7 @@ TEST_CASE ("Alg23 below thresholds performs no-op", "[operations][emotion]")
   auto setup = std::make_unique<SetupEmotionInputsOp> (201LL);
   auto apply = std::make_unique<ApplyEmotionalConsolidation> ();
   auto ops
-      = std::make_unique<OperationSet> (std::move (setup), std::move (apply));
+      = std::make_unique<DynamicOperationSet> (std::move (setup), std::move (apply));
 
   SignalProcessor processor (cfg, store, std::move (ops));
   processor.Process (MakeSignal (/*ts=*/99));
@@ -239,7 +239,7 @@ TEST_CASE ("Flashbulb rate no longer weakens percentile gate below target",
     auto setup = std::make_unique<SetupEmotionInputsOp> (
         301LL, std::vector<double> (16, 0.98), 0.0);
     auto apply = std::make_unique<ApplyEmotionalConsolidation> ();
-    auto ops = std::make_unique<OperationSet> (std::move (setup),
+    auto ops = std::make_unique<DynamicOperationSet> (std::move (setup),
                                                std::move (apply));
     SignalProcessor processor (cfg, store, std::move (ops));
     processor.Process (MakeSignal (123));
@@ -287,7 +287,7 @@ TEST_CASE ("Flashbulb rate is neutral below target when percentile is absent",
                                                          std::vector<double> (),
                                                          0.0);
     auto apply = std::make_unique<ApplyEmotionalConsolidation> ();
-    auto ops = std::make_unique<OperationSet> (std::move (setup),
+    auto ops = std::make_unique<DynamicOperationSet> (std::move (setup),
                                                std::move (apply));
     SignalProcessor processor (cfg, store, std::move (ops));
     processor.Process (MakeSignal (456));
