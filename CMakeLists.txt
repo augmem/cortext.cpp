@@ -220,6 +220,9 @@ add_library(cortext
     # Deep consolidation LLM backends
     src/deep_llm/deep_llm_factory.cpp
     src/deep_llm/lfm2_llama_backend.cpp
+    # Inference provider registry and legacy-interface adapters
+    src/providers/registry.cpp
+    src/providers/adapters.cpp
     # JSON schema parser for constrained decoding
     src/generator/json_decoder.cpp
     # Audio preprocessing

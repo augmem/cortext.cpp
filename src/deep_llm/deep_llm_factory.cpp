@@ -1,6 +1,8 @@
 #include "deep_llm_factory.hpp"
 
 #include "cortext/extractor/gemma_extractor.hpp"
+#include "cortext/providers/adapters.hpp"
+#include "cortext/providers/registry.hpp"
 #include "cortext/summarizer/gemma_summarizer.hpp"
 #include "lfm2_llama_backend.hpp"
 #include "llama_cpp_support.hpp"
@@ -430,6 +432,58 @@ TryCreateDeepLlmSelection (const std::filesystem::path &models_dir,
   return std::nullopt;
 }
 
+namespace
+{
+
+// Replace one role in an already-built selection with a provider resolved
+// from a CORTEXT_SUMMARIZER / CORTEXT_EXTRACTOR uri. Roles without an env
+// override keep the legacy in-process implementation, so mixed setups
+// (e.g. remote summarizer + local constrained extractor) compose naturally.
+void
+ApplyProviderOverrides (DeepLlmSelection &selection)
+{
+  using providers::Role;
+
+  if (auto uri = providers::RoleUriFromEnvironment (Role::Summarizer))
+    {
+      std::string error;
+      auto provider = providers::ResolveProvider (*uri, Role::Summarizer,
+                                                  &error);
+      if (provider == nullptr)
+        {
+          throw std::runtime_error ("CORTEXT_SUMMARIZER=" + *uri
+                                    + " could not be resolved: " + error);
+        }
+      selection.summarizer_model_path
+          = provider->Identity ().endpoint;
+      selection.backend_name += "+summarizer:"
+                                + provider->Identity ().scheme;
+      selection.summarizer = std::make_unique<providers::ProviderSummarizer> (
+          std::shared_ptr<providers::InferenceProvider> (
+              std::move (provider)));
+    }
+
+  if (auto uri = providers::RoleUriFromEnvironment (Role::Extractor))
+    {
+      std::string error;
+      auto provider = providers::ResolveProvider (*uri, Role::Extractor,
+                                                  &error);
+      if (provider == nullptr)
+        {
+          throw std::runtime_error ("CORTEXT_EXTRACTOR=" + *uri
+                                    + " could not be resolved: " + error);
+        }
+      selection.extractor_model_path = provider->Identity ().endpoint;
+      selection.backend_name += "+extractor:"
+                                + provider->Identity ().scheme;
+      selection.extractor = std::make_unique<providers::ProviderExtractor> (
+          std::shared_ptr<providers::InferenceProvider> (
+              std::move (provider)));
+    }
+}
+
+} // namespace
+
 DeepLlmSelection
 CreateDeepLlmSelection (const std::filesystem::path &models_dir)
 {
@@ -442,6 +496,7 @@ CreateDeepLlmSelection (const std::filesystem::path &models_dir)
                                 + DescribeDeepLlmBackend (backend) + ": "
                                 + error);
     }
+  ApplyProviderOverrides (*selection);
   return std::move (*selection);
 }
 

@@ -460,6 +460,11 @@ TryCreateMultimodalEngine (const std::string &model_path,
   return true;
 }
 
+} // namespace
+
+// External linkage: shared with providers::ProviderExtractor (see
+// cortext/extractor/extraction_parsing.hpp) so every transport parses model
+// output identically.
 operations::ExtractionResult
 ParseExtractionResponse (const std::string &content)
 {
@@ -577,6 +582,9 @@ ParseExtractionResponse (const std::string &content)
 
   return result;
 }
+
+namespace
+{
 
 bool
 HasNonEmptyLabel (const operations::ExtractionResult &result)
