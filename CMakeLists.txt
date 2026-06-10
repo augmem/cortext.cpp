@@ -37,7 +37,6 @@ option(CORTEXT_DISABLE_OGA "Disable onnxruntime-genai for Phi-4 Extractor/Summar
 option(CORTEXT_DISABLE_LITERT "Disable LiteRT-LM for Gemma Extractor/Summarizer" OFF)
 option(CORTEXT_DISABLE_SHERPA_ONNX "Disable sherpa-onnx ASR/TTS integration" OFF)
 option(CORTEXT_ENABLE_EMBEDDINGGEMMA "Build EmbeddingGemma encoder" ON)
-option(CORTEXT_ENABLE_AAIT_GGUF "Build AAIT-86M GGUF inspection/encoder contract" ON)
 
 # Sanitizer options for catching memory bugs during development
 option(CORTEXT_ENABLE_ASAN "Enable AddressSanitizer" OFF)
@@ -332,10 +331,9 @@ if(CORTEXT_ENABLE_EMBEDDINGGEMMA)
   endif()
 endif()
 
-if(CORTEXT_ENABLE_AAIT_GGUF)
-  target_compile_definitions(cortext PUBLIC CORTEXT_ENABLE_AAIT_GGUF=1)
-  target_sources(cortext PRIVATE src/models/aist_gguf_encoder.cpp)
-endif()
+# The AIST GGUF encoder is Cortext's required embedding model; its native
+# runtime always builds.
+target_sources(cortext PRIVATE src/models/aist_gguf_encoder.cpp)
 
 if(NOT CORTEXT_DISABLE_SHERPA_ONNX)
   target_sources(cortext PRIVATE src/audio/sherpa_onnx.cpp)

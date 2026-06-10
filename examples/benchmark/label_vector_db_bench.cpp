@@ -99,7 +99,7 @@ Usage ()
       << "  --source-records PATH            source records JSONL\n"
       << "  --output-dir PATH                output directory\n"
       << "  --models PATH                    models directory\n"
-      << "  --model PATH                     explicit ES-AIST/AIST GGUF path\n"
+      << "  --model PATH                     explicit AIST/AIST GGUF path\n"
       << "  --source-filter SOURCE|all       default: salt.csv\n"
       << "  --max-labels N                   deterministic cap, 0=all\n"
       << "  --prototype-candidates-per-label N default: 16\n"
@@ -286,12 +286,12 @@ ResolveModel (const Options &opts)
       return opts.model_path;
     }
   const auto candidate
-      = opts.models_dir / "ES-AIST-81M-preview-GGUF" / "ES-AIST-81M_q8_0.gguf";
+      = opts.models_dir / "AIST-81M-preview-GGUF" / "AIST-81M_q8_0.gguf";
   if (std::filesystem::exists (candidate))
     {
       return candidate;
     }
-  throw std::runtime_error ("Could not resolve ES-AIST q8 model under "
+  throw std::runtime_error ("Could not resolve AIST q8 model under "
                             + opts.models_dir.string ());
 }
 
@@ -357,7 +357,7 @@ LoadRecords (const Options &opts)
 }
 
 std::vector<float>
-EncodeText256 (cortext::AaitGgufEncoder &encoder, const std::string &text)
+EncodeText256 (cortext::AistGgufEncoder &encoder, const std::string &text)
 {
   std::vector<float> embedding;
   encoder.EncodeText (text, embedding);
@@ -720,13 +720,13 @@ Main (int argc, char **argv)
     }
 
   const auto model_path = ResolveModel (opts);
-  cortext::AaitGgufConfig config;
+  cortext::AistGgufConfig config;
   config.model_path = model_path.string ();
   config.context_length = 128;
-  cortext::AaitGgufEncoder encoder (config);
+  cortext::AistGgufEncoder encoder (config);
   if (!encoder.IsRuntimeAvailable ())
     {
-      throw std::runtime_error ("ES/AIST runtime unavailable: "
+      throw std::runtime_error ("AIST runtime unavailable: "
                                 + encoder.Inspect ().runtime_error);
     }
 

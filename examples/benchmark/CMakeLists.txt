@@ -160,14 +160,6 @@ add_executable(cortext_consolidation_label_pressure_ablation_bench
   summarization_storage_pressure_ablation_bench.cpp
 )
 
-add_executable(cortext_anchor_replay_bench
-  anchor_replay_bench.cpp
-)
-
-add_executable(cortext_ingress_anchor_formation_bench
-  ingress_anchor_formation_bench.cpp
-)
-
 add_executable(cortext_signal_filter_bench
   signal_filter_bench.cpp
 )
@@ -207,10 +199,6 @@ add_executable(cortext_chat_replay_raw_speech_memory_eval
 
 add_executable(cortext_label_vector_db_bench
   label_vector_db_bench.cpp
-)
-
-add_executable(cortext_es_aist_label_graph_signal_bench
-  es_aist_label_graph_signal_bench.cpp
 )
 
 if(NOT CORTEXT_DISABLE_LITERT AND NOT EMSCRIPTEN)
@@ -337,12 +325,6 @@ target_include_directories(cortext_summarization_storage_pressure_ablation_bench
 target_include_directories(cortext_consolidation_label_pressure_ablation_bench PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}
 )
-target_include_directories(cortext_anchor_replay_bench PRIVATE
-  ${CMAKE_CURRENT_SOURCE_DIR}
-)
-target_include_directories(cortext_ingress_anchor_formation_bench PRIVATE
-  ${CMAKE_CURRENT_SOURCE_DIR}
-)
 target_include_directories(cortext_signal_filter_bench PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}
 )
@@ -372,9 +354,6 @@ target_include_directories(cortext_chat_replay_raw_speech_memory_eval PRIVATE
 )
 target_compile_definitions(cortext_chat_replay_conversation_memory_bakeoff PRIVATE
   CORTEXT_TESTING=1
-)
-target_include_directories(cortext_es_aist_label_graph_signal_bench PRIVATE
-  ${CMAKE_CURRENT_SOURCE_DIR}
 )
 if(TARGET cortext_gemma3n_multimodal_label_bench)
   target_include_directories(cortext_gemma3n_multimodal_label_bench SYSTEM PRIVATE
@@ -508,14 +487,6 @@ target_link_libraries(cortext_consolidation_label_pressure_ablation_bench PRIVAT
   cortext
   nlohmann_json::nlohmann_json
 )
-target_link_libraries(cortext_anchor_replay_bench PRIVATE
-  cortext
-  nlohmann_json::nlohmann_json
-)
-target_link_libraries(cortext_ingress_anchor_formation_bench PRIVATE
-  cortext
-  nlohmann_json::nlohmann_json
-)
 target_link_libraries(cortext_signal_filter_bench PRIVATE
   cortext
   nlohmann_json::nlohmann_json
@@ -557,10 +528,6 @@ target_link_libraries(cortext_label_vector_db_bench PRIVATE
   cortext
   nlohmann_json::nlohmann_json
 )
-target_link_libraries(cortext_es_aist_label_graph_signal_bench PRIVATE
-  cortext
-  nlohmann_json::nlohmann_json
-)
 if(TARGET cortext_gemma3n_multimodal_label_bench)
   target_link_libraries(cortext_gemma3n_multimodal_label_bench PRIVATE
     cortext
@@ -576,36 +543,6 @@ if(TARGET cortext_gemma3n_multimodal_label_bench)
     set_property(TARGET cortext_gemma3n_multimodal_label_bench APPEND PROPERTY BUILD_RPATH
       "$ORIGIN/../../third_party/litert-lm-install/lib"
     )
-  endif()
-endif()
-if(CORTEXT_LLAMA_CPP_AVAILABLE)
-  target_include_directories(cortext_anchor_replay_bench PRIVATE
-    "${CORTEXT_LLAMA_INCLUDE_DIR}"
-    "${CORTEXT_GGML_INCLUDE_DIR}"
-  )
-  target_compile_definitions(cortext_anchor_replay_bench PRIVATE
-    CORTEXT_ENABLE_LLAMA_CPP=1
-    CORTEXT_GGML_BACKEND_HEADER_PATH="${CORTEXT_GGML_INCLUDE_DIR}/ggml-backend.h"
-    CORTEXT_LLAMA_HEADER_PATH="${CORTEXT_LLAMA_INCLUDE_DIR}/llama.h"
-  )
-  target_link_libraries(cortext_anchor_replay_bench PRIVATE
-    ${CORTEXT_LLAMA_LIBRARY}
-  )
-  if(CORTEXT_GGML_LIBRARY)
-    target_link_libraries(cortext_anchor_replay_bench PRIVATE ${CORTEXT_GGML_LIBRARY})
-  endif()
-  if(CORTEXT_GGML_BASE_LIBRARY)
-    target_link_libraries(cortext_anchor_replay_bench PRIVATE ${CORTEXT_GGML_BASE_LIBRARY})
-  endif()
-  if(CORTEXT_GGML_CPU_LIBRARY)
-    target_link_libraries(cortext_anchor_replay_bench PRIVATE ${CORTEXT_GGML_CPU_LIBRARY})
-  endif()
-  if(CORTEXT_GGML_BLAS_LIBRARY)
-    target_link_libraries(cortext_anchor_replay_bench PRIVATE ${CORTEXT_GGML_BLAS_LIBRARY})
-  endif()
-  if(APPLE AND CORTEXT_GGML_BLAS_LIBRARY)
-    find_library(ANCHOR_REPLAY_ACCELERATE_FRAMEWORK Accelerate REQUIRED)
-    target_link_libraries(cortext_anchor_replay_bench PRIVATE ${ANCHOR_REPLAY_ACCELERATE_FRAMEWORK})
   endif()
 endif()
 

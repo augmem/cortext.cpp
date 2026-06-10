@@ -1,17 +1,11 @@
 #pragma once
 
-#include "cortext/encoder/embeddinggemma.hpp"
-#if defined(CORTEXT_ENABLE_AAIT_GGUF)
 #include "cortext/models/aist_gguf_encoder.hpp"
-#endif
 
 #include <filesystem>
-#include <cstdlib>
 #include <memory>
-#include <optional>
 #include <stdexcept>
 #include <string>
-#include <vector>
 
 namespace cortext::internal
 {
@@ -23,211 +17,31 @@ struct TextEncoderSelection
   std::filesystem::path resolved_path;
 };
 
-inline std::string
-DescribeEmbeddingGemmaBackend (
-    const std::filesystem::path &model_path)
-{
-  const std::string ext = model_path.extension ().string ();
-  if (ext == ".gguf")
-    {
-      if (model_path.filename ().string ().find ("mdbr") != std::string::npos)
-        {
-          return "MDBR/llama.cpp";
-        }
-      return "EmbeddingGemma/llama.cpp";
-    }
-  if (ext == ".tflite")
-    {
-      return "EmbeddingGemma/LiteRT";
-    }
-  if (ext == ".onnx")
-    {
-      return "EmbeddingGemma/ONNX";
-    }
-  return "EmbeddingGemma";
-}
-
-inline void
-AppendUniquePath (std::vector<std::filesystem::path> &paths,
-                  const std::filesystem::path &path)
-{
-  if (path.empty ())
-    {
-      return;
-    }
-  for (const auto &existing : paths)
-    {
-      if (existing == path)
-        {
-          return;
-        }
-    }
-  paths.push_back (path);
-}
-
-inline std::optional<EmbeddingGemmaConfig>
-ResolveEmbeddingGemmaConfigForBackend (const std::filesystem::path &models_dir,
-                                       const std::string &backend)
-{
-  std::vector<std::filesystem::path> candidates;
-
-  std::filesystem::path tokenizer_name;
-  bool require_tokenizer = true;
-  std::vector<std::filesystem::path> model_candidates;
-  if (backend == "onnx")
-    {
-      tokenizer_name = "tokenizer.model";
-      AppendUniquePath (candidates, models_dir);
-      AppendUniquePath (candidates, models_dir / "embeddinggemma-300m-onnx");
-      model_candidates = {
-        std::filesystem::path ("onnx/model_q4.onnx"),
-        std::filesystem::path ("onnx/model_quantized.onnx"),
-        std::filesystem::path ("onnx/model.onnx"),
-      };
-    }
-  else if (backend == "llama.cpp")
-    {
-      require_tokenizer = false;
-      AppendUniquePath (candidates, models_dir);
-      AppendUniquePath (candidates, models_dir / "llama_cpp");
-      model_candidates = {
-        std::filesystem::path ("mdbr-leaf-ir-q8_0.gguf"),
-        std::filesystem::path ("embeddinggemma-300M-Q8_0.gguf"),
-        std::filesystem::path ("embeddinggemma-300M-Q4_K_M.gguf"),
-      };
-    }
-  else if (backend == "litert")
-    {
-      tokenizer_name = "sentencepiece.model";
-      AppendUniquePath (candidates, models_dir);
-      AppendUniquePath (candidates, models_dir / "embeddinggemma-300m-litert");
-      model_candidates = {
-        std::filesystem::path ("embeddinggemma-300M_seq256_mixed-precision.tflite"),
-      };
-    }
-  else
-    {
-      throw std::runtime_error ("Unsupported EmbeddingGemma backend: " + backend);
-    }
-
-  for (const auto &dir : candidates)
-    {
-      const auto tokenizer
-          = require_tokenizer ? dir / tokenizer_name : std::filesystem::path ();
-      if (require_tokenizer && !std::filesystem::exists (tokenizer))
-        {
-          continue;
-        }
-
-      for (const auto &model_rel : model_candidates)
-        {
-          const auto model = dir / model_rel;
-          if (!std::filesystem::exists (model))
-            {
-              continue;
-            }
-
-          EmbeddingGemmaConfig cfg;
-          cfg.model_path = model.string ();
-          cfg.tokenizer_path = tokenizer.string ();
-          return cfg;
-        }
-    }
-
-  return std::nullopt;
-}
-
-inline std::optional<EmbeddingGemmaConfig>
-ResolveEmbeddingGemmaConfig (const std::filesystem::path &models_dir)
-{
-  const char *model_path_override
-      = std::getenv ("CORTEXT_EMBEDDINGGEMMA_MODEL_PATH");
-  if (model_path_override != nullptr && *model_path_override != '\0')
-    {
-      EmbeddingGemmaConfig cfg;
-      cfg.model_path = model_path_override;
-      return cfg;
-    }
-
-  const char *backend_override = std::getenv ("CORTEXT_EMBEDDINGGEMMA_BACKEND");
-  if (backend_override != nullptr && *backend_override != '\0')
-    {
-      return ResolveEmbeddingGemmaConfigForBackend (models_dir, backend_override);
-    }
-
-  std::vector<std::string> backends = { "llama.cpp" };
-#if !defined(CORTEXT_DISABLE_LITERT)
-  backends.push_back ("litert");
-#endif
-#if defined(CORTEXT_ENABLE_EMBEDDINGGEMMA_ORT)
-  backends.push_back ("onnx");
-#endif
-
-  for (const auto &backend : backends)
-    {
-      if (auto cfg = ResolveEmbeddingGemmaConfigForBackend (models_dir, backend))
-        {
-          return cfg;
-        }
-    }
-
-  return std::nullopt;
-}
-
+/// Create the engine's text encoder. AIST is Cortext's required embedding
+/// model: it is resolved under the models directory (q8_0 preferred) or via
+/// CORTEXT_AIST_MODEL_PATH, and there is no fallback encoder. A database's
+/// stored embeddings are pinned to this encoder's fingerprint, so silently
+/// swapping encoders is never correct; failing loudly here is intentional.
 inline TextEncoderSelection
 CreatePreferredTextEncoder (const std::string &models_dir)
 {
   const std::filesystem::path root (models_dir);
 
-#if defined(CORTEXT_ENABLE_AAIT_GGUF)
-  const char *aait_enable = std::getenv ("CORTEXT_AAIT_ENABLE");
-  const bool enable_aait = aait_enable != nullptr && *aait_enable != '\0'
-                           && std::string (aait_enable) != "0";
-  if (enable_aait)
-    {
-      if (auto aait = ResolveAaitGgufModelPath (root))
-        {
-          AaitGgufConfig cfg;
-          cfg.model_path = aait->string ();
-          TextEncoderSelection selection;
-          selection.backend_name = "AAIT-86M-GGUF";
-          selection.resolved_path = *aait;
-          selection.encoder = std::make_unique<AaitGgufEncoder> (cfg);
-          return selection;
-        }
-      throw std::runtime_error (
-          "CORTEXT_AAIT_ENABLE is set, but no AAIT GGUF model was found under "
-          + root.string ());
-    }
-
   if (auto aist = ResolveAistGgufModelPath (root))
     {
-      AaitGgufConfig cfg;
+      AistGgufConfig cfg;
       cfg.model_path = aist->string ();
       TextEncoderSelection selection;
       selection.backend_name = "AIST-87M-GGUF";
       selection.resolved_path = *aist;
-      selection.encoder = std::make_unique<AaitGgufEncoder> (cfg);
+      selection.encoder = std::make_unique<AistGgufEncoder> (cfg);
       return selection;
     }
-
-#endif
-
-#if defined(CORTEXT_ENABLE_EMBEDDINGGEMMA)
-  if (auto gemma = ResolveEmbeddingGemmaConfig (root))
-    {
-      TextEncoderSelection selection;
-      const std::filesystem::path model_path (gemma->model_path);
-      selection.backend_name = DescribeEmbeddingGemmaBackend (model_path);
-      selection.resolved_path = model_path;
-      selection.encoder
-          = std::make_unique<EmbeddingGemmaEncoder> (std::move (*gemma));
-      return selection;
-    }
-#endif
 
   throw std::runtime_error (
-      "No supported text encoder models found under " + root.string () + ".");
+      "AIST GGUF model not found under " + root.string ()
+      + ". Cortext requires the AIST encoder (models/AIST-87M-GGUF/, or set "
+        "CORTEXT_AIST_MODEL_PATH).");
 }
 
 } // namespace cortext::internal
