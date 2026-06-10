@@ -102,10 +102,17 @@ add_executable(cortext_tests
   chat_chunk_diagnostics.test.cpp
   chat_metrics_state.test.cpp
   chat_stream_usage.test.cpp
-  audio_planum_bridge.test.cpp
   aist_gguf_encoder.test.cpp
-  ${CMAKE_SOURCE_DIR}/src/audio/planum_bridge.cpp
 )
+
+# The planum bridge test needs the planum.cpp submodule headers; skip it when
+# the submodule is not checked out so the rest of the suite still builds.
+if(EXISTS ${CMAKE_SOURCE_DIR}/third_party/planum.cpp/include/planum/contract/perception_event.hpp)
+  target_sources(cortext_tests PRIVATE
+    audio_planum_bridge.test.cpp
+    ${CMAKE_SOURCE_DIR}/src/audio/planum_bridge.cpp
+  )
+endif()
 
 target_link_libraries(cortext_tests PRIVATE cortext Catch2::Catch2WithMain nlohmann_json::nlohmann_json)
 target_compile_definitions(cortext_tests PRIVATE CORTEXT_TESTING=1)
