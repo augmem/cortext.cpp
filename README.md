@@ -4,13 +4,19 @@
 
 Most memory systems for LLMs are open-loop: text flows in, gets chunked, embedded, summarized, and retrieved, and the parameters that govern those stages never change based on what retrieval or consolidation actually produced. Cortext is different. Retrieval outcomes, prediction error, and consolidation results feed back into three continuous control parameters — **Focus (F)**, **Sensitivity (S)**, and **Stability (T)** — which in turn modulate write gating, attention width, decay, thresholds, and consolidation cadence for the next input.
 
-The architecture is specified formally in the accompanying paper and draws on established cognitive-science findings: Cowan's working-memory capacity limits, Nader's reconsolidation dynamics, serial-position effects, and emotional modulation of memory.
+The architecture is specified formally in the accompanying paper. Its design borrows ideas from the cognitive-science literature — Cowan's working-memory capacity limits, Nader's reconsolidation dynamics, serial-position effects, emotional modulation of memory — as engineering heuristics, not as claims of cognitive fidelity. Cortext does not claim to model human memory. It claims that these borrowed mechanisms measurably improve machine memory, and it ships the benchmarks to check that claim.
 
 ## Why Cortext Exists
 
-Cortext began for a personal reason. Three years ago, my father-in-law was diagnosed with dementia. Since then, I have been focused on using my background in AI and machine learning to build systems that help people with memory loss preserve continuity, confidence, and independence.
+Cortext began for a personal reason. In 2022, my father-in-law was diagnosed with dementia. I'm a software engineer, and since then I have been focused on building systems that help people with memory loss preserve continuity, confidence, and independence.
 
 The same architecture also happens to be useful for long-horizon LLM memory. But the primary motivation is human: Cortext is designed to process real-time information from a wearable device through a hub that can deliver gentle nudges to help someone remember context, reduce confusion, and avoid the humiliation and frustration that memory loss can create. A care context requires homeostasis — salience, confusion, and emotional state change through the day — which is exactly what an open-loop system cannot track.
+
+## Who Built This
+
+Cortext is built by one software engineer. I am not a machine-learning researcher and I am not a psychologist. The cognitive-science references in this project come from reading the literature as an outsider over the course of building it — they shaped the design, but my reading of them should not be mistaken for expert interpretation, and the system's value does not rest on it.
+
+What the system's value does rest on is falsifiable: the benchmark protocols in this repository run blind LLM-judged comparisons against strong baselines — including a full-history oracle arm that Cortext is *expected* to lose to sometimes — on real multimodal data, with fixed seeds, repeated judgments, and bootstrap confidence intervals. Where results failed to reproduce under real encoders, the paper says so and marks the old numbers superseded. If you find a place where the psychology is misapplied, a baseline is unfair, or an evaluation is flattering the system, I want to know: open an issue.
 
 ## The Loop
 
@@ -53,13 +59,45 @@ Ablation benchmarks for the loop live under `examples/benchmark/` (resurfacing p
 
 Short answer: yes, and we have tried to be honest about where it does and does not.
 
-A few load-bearing results from [docs/paper/sections/9_experimental.qmd](docs/paper/sections/9_experimental.qmd), all run against the real EmbeddingGemma encoder path rather than synthetic embeddings:
+A few load-bearing results from [docs/paper/sections/9_experimental.qmd](docs/paper/sections/9_experimental.qmd), all run against a real encoder path (EmbeddingGemma, the default at the time of those runs) rather than synthetic embeddings:
 
 - **Retrieval-reinforcement feedback is controlled, not runaway.** With the fact layer enabled, fact-linked memories accumulate a strength gap of **+0.30** over unlinked memories and take **100%** of top-5 retrieval positions. Disabling the fact layer cleanly **reverses** the gap to **−0.30** and flips top-5 fact fraction to **0.0**. The loop is driven by the fact layer; toggling it inverts the outcome rather than destabilizing it.
 - **Exhaustive operation-family ablation.** A deterministic `2^12 = 4096`-combination sweep over the major operation families (`examples/benchmark/cortext_full_operation_ablation_bench`) is used to identify minimal best-disabled sets rather than cherry-picked configurations.
 - **Bitemporal fact handling is required, not decorative.** Ablations on a `3 × 3 × 3` F/S/T sweep confirm that bitemporal history is required for historical and belief-at-time queries, and that stale penalties materially reduce present-oriented intrusion.
 
 Where earlier synthetic-encoder claims did **not** survive the switch to real embeddings (notably parts of the provenance, stale, and routine-vs-recency separations), the paper says so explicitly and marks those older numbers as superseded. The repo's claim about the loop rests on what reproduces under real encoders, not on what was convenient in synthetic ablations.
+
+## Current Evaluation Snapshot (Alpha)
+
+The primary end-to-end evaluation is the chat-replay protocol
+(`tools/run_chat_replay_release_protocol.py`). It replays a real chat export
+through the full production pipeline (text plus media), then runs a blind,
+seeded, repeated LLM-judged comparison of three context arms on held-out
+probes — Cortext's compressed memory packet, a traditional embedding-RAG arm,
+and a full-history upper-bound arm — with probe-level bootstrap confidence
+intervals and fairness checks. The corpus format is a plain timestamped chat
+export (one `.txt` transcript plus optional media in a directory), so the
+harness runs on any conforming export, not just the corpus used here.
+
+From the most recent corrected-stack runs (June 2026; private 1,200-message
+personal corpus; 39 probes × 3 repetitions; local `gemma4:12b` judge):
+
+- The judge preferred Cortext's packet most often in both tested
+  working-memory configurations (42 of 117 judgments vs 32 full-history and
+  25 RAG at capacity 7±2; 39 vs 35 and 20 at capacity 4), at a mean context
+  cost of ~220–260 tokens versus ~6,100 for the baseline arms (≈96% smaller).
+- Known weakness, reported deliberately: judged sufficiency trails the
+  fat-context arms (≈2.4–2.7 vs ≈3.1) uniformly across replay depth. That is
+  the current cost of the compression, and capacity changes did not close it.
+- An earlier run in this series was invalidated by stale cross-encoder vector
+  artifacts. That failure produced the embedding-model pin (a fatal startup
+  check with no override) and a full rerun; both are documented in the paper.
+
+These are internal results on one private corpus with one judge model,
+reported for transparency. They are **not** performance claims, and the alpha
+makes no public benchmark claims. The full protocol, judge configuration, and
+analysis tools ship in this repository so the evaluation can be reproduced —
+or attacked — on your own data.
 
 ## What Cortext Provides
 
