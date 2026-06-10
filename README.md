@@ -57,7 +57,7 @@ Ablation benchmarks for the loop live under `examples/benchmark/` (resurfacing p
 
 ## Does The Loop Actually Matter?
 
-Short answer: yes, and we have tried to be honest about where it does and does not.
+Short answer: yes, and I've tried to be honest about where it does and does not.
 
 A few load-bearing results from [docs/paper/sections/9_experimental.qmd](docs/paper/sections/9_experimental.qmd), all run against a real encoder path (EmbeddingGemma, the default at the time of those runs) rather than synthetic embeddings:
 
@@ -81,13 +81,13 @@ media, so it runs on any export that matches the format, not just mine.
 Latest runs (June 2026, a private 1,200-message corpus, 39 probes × 3
 repetitions, local `gemma4:12b` judge):
 
-| Run | Cortext wins | Full-history wins | RAG wins | Ties | Cortext sufficiency | Context tokens |
-|---|---|---|---|---|---|---|
-| Working memory 7±2 | **42**/117 | 32 | 25 | 18 | 2.72 | ~262 |
-| Working memory 4 (control) | **39**/117 | 35 | 20 | 23 | 2.43 | ~222 |
+| Run | Cortext wins | Full-history wins | RAG wins | Ties | Cortext sufficiency | Context tokens | Token reduction |
+|---|---|---|---|---|---|---|---|
+| Working memory 7±2 | **42**/117 | 32 | 25 | 18 | 2.72 | ~262 vs ~6,100 | **96%** |
+| Working memory 4 (control) | **39**/117 | 35 | 20 | 23 | 2.43 | ~222 vs ~6,100 | **96%** |
 
-Both baseline arms used ~6,100 context tokens per probe, so Cortext's packet
-is roughly 96% smaller and still wins the most judgments.
+Cortext's packet is roughly 96% smaller than what the baseline arms consume
+per probe, and it still wins the most judgments.
 
 The honest caveats:
 
