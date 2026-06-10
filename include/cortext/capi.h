@@ -189,6 +189,15 @@ extern "C"
     int signal_filter_audio_enabled;
     int signal_filter_image_enabled;
     int signal_filter_text_enabled;
+    /// Optional inference-provider URI for the Summarizer role, e.g.
+    /// "ollama://127.0.0.1:11435/gemma4:e2b". NULL or empty keeps the
+    /// default local model auto-discovery. If set but the provider cannot
+    /// be resolved, verified, or reached, creation fails (NULL handle,
+    /// details via cortext_last_error()).
+    const char *summarizer_provider_uri;
+    /// Optional inference-provider URI for the Extractor role. Same
+    /// semantics as summarizer_provider_uri.
+    const char *extractor_provider_uri;
   } cortext_config;
 
   /// @brief Consolidation mode for cortext_consolidate_mode.
