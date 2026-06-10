@@ -26,45 +26,6 @@ Registry ()
   return registry;
 }
 
-bool
-RoleNeedsConstraints (Role role)
-{
-  return role == Role::Extractor;
-}
-
-bool
-CapabilitiesFitRole (const Capabilities &caps, Role role,
-                     std::string *error_out)
-{
-  if (role == Role::Encoder && caps.embedding_dims.empty ())
-    {
-      if (error_out != nullptr)
-        {
-          *error_out = "provider declares no embedding dimensions";
-        }
-      return false;
-    }
-  if (RoleNeedsConstraints (role)
-      && caps.constraints == ConstraintSupport::None)
-    {
-      if (error_out != nullptr)
-        {
-          *error_out = "extractor role requires a constrained-decoding path "
-                       "(NativeGrammar or ServerSchema)";
-        }
-      return false;
-    }
-  if (role != Role::Encoder && !caps.text)
-    {
-      if (error_out != nullptr)
-        {
-          *error_out = "generation provider does not support text";
-        }
-      return false;
-    }
-  return true;
-}
-
 } // namespace
 
 std::optional<ProviderUri>
@@ -163,7 +124,11 @@ ResolveProvider (const std::string &uri, Role role, std::string *error_out)
     {
       return nullptr;
     }
-  if (!CapabilitiesFitRole (provider->GetCapabilities (), role, error_out))
+  // The same contract is enforced for every arrival path (here and for
+  // directly injected implementations): the consumer states requirements,
+  // the implementation declares capabilities, transport is irrelevant.
+  if (!VerifyContract (provider->GetCapabilities (), ContractForRole (role),
+                       error_out))
     {
       return nullptr;
     }
