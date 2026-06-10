@@ -9,7 +9,7 @@
 	url = https://github.com/sqlite/sqlite.git
 [submodule "third_party/sqlite-objstore"]
 	path = third_party/sqlite-objstore
-	url = https://github.com/gabewillen/sqlite-objstore
+	url = https://github.com/augmem/sqlite-objstore.git
 [submodule "third_party/onnxruntime-genai"]
 	path = third_party/onnxruntime-genai
 	url = https://github.com/microsoft/onnxruntime-genai.git

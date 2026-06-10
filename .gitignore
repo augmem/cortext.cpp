@@ -21,6 +21,7 @@ DartConfiguration.tcl
 Makefile
 compile_commands.json
 *.cmake
+!third_party/sqlite-objstore/cmake/**/*.cmake
 .ninja
 *.ninja
 
@@ -38,6 +39,7 @@ compile_commands.json
 *.manifest
 *.wasm
 *.js
+!third_party/sqlite-objstore/tests/opfs_worker.js
 
 # Test executables and data
 *_tests
@@ -72,6 +74,7 @@ Thumbs.db
 
 # Rust artifacts (this is a C++ project)
 Cargo.lock
+!third_party/sqlite-objstore/tests/wasm/rust/Cargo.lock
 
 # Dart/Flutter files (this is a C++ project)
 analysis_options.yaml
