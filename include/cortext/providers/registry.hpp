@@ -47,8 +47,4 @@ void RegisterProviderFactory (const std::string &scheme,
 std::unique_ptr<InferenceProvider>
 ResolveProvider (const std::string &uri, Role role, std::string *error_out);
 
-/// @brief Environment override for a role, if set and non-empty.
-///   CORTEXT_SUMMARIZER / CORTEXT_EXTRACTOR / CORTEXT_ENCODER
-std::optional<std::string> RoleUriFromEnvironment (Role role);
-
 } // namespace cortext::providers

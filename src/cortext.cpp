@@ -1260,6 +1260,18 @@ struct Cortext::Impl
     db_path = std::move (db);
   }
 
+  Impl (const Config &c, std::string db, std::string models,
+        std::shared_ptr<cortext::Clock> supplied_clock,
+        Cortext::InferenceOverrides inference)
+      : Impl (c, std::shared_ptr<cortext::Store> (
+                     cortext::SQLiteStore::Create (db.c_str ())),
+              nullptr,
+              std::move (models), std::move (supplied_clock),
+              std::move (inference))
+  {
+    db_path = std::move (db);
+  }
+
   std::uint64_t
   NowMillis () const
   {
@@ -1711,6 +1723,15 @@ Cortext::Create (const Config &cfg, std::shared_ptr<Store> store,
                    models_dir, std::move (clock), std::move (inference)));
 }
 
+std::unique_ptr<Cortext>
+Cortext::Create (const Config &cfg, const std::string &db_path,
+                 const std::string &models_dir, std::shared_ptr<Clock> clock,
+                 InferenceOverrides inference)
+{
+  return std::unique_ptr<Cortext> (new Cortext (
+      cfg, db_path, models_dir, std::move (clock), std::move (inference)));
+}
+
 Cortext::Cortext (const Config &cfg, const std::string &db_path,
                   const std::string &models_dir)
     : Cortext (cfg, db_path, models_dir, nullptr)
@@ -1782,6 +1803,15 @@ Cortext::Cortext (const Config &cfg, std::shared_ptr<Store> store,
                   std::shared_ptr<Clock> clock, InferenceOverrides inference)
     : impl_ (std::make_unique<Impl> (cfg, std::move (store),
                                      std::move (object_store), models_dir,
+                                     std::move (clock),
+                                     std::move (inference)))
+{
+}
+
+Cortext::Cortext (const Config &cfg, const std::string &db_path,
+                  const std::string &models_dir,
+                  std::shared_ptr<Clock> clock, InferenceOverrides inference)
+    : impl_ (std::make_unique<Impl> (cfg, db_path, models_dir,
                                      std::move (clock),
                                      std::move (inference)))
 {

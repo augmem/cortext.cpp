@@ -451,7 +451,7 @@ struct StreamingJSONParser::Impl
   {
     if (prop_schema.contains ("const"))
       {
-        return { { { prop_schema["const"] } },
+        return { std::vector<nlohmann::json>{ prop_schema["const"] },
                  InferJsonType (prop_schema["const"]) };
       }
     if (prop_schema.contains ("enum") && prop_schema["enum"].is_array ())

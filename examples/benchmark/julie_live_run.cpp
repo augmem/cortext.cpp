@@ -3,6 +3,8 @@
 #include <cortext/core/knobs.hpp>
 #include <cortext/cortext.hpp>
 #include <cortext/internal/replay_ingress.hpp>
+#include <cortext/providers/adapters.hpp>
+#include <cortext/providers/registry.hpp>
 #include <cortext/store/sqlite_store.hpp>
 #include <cortext/store/utils.hpp>
 
@@ -54,6 +56,10 @@ struct Config
   fs::path output_path = "build/julie_live_run_summary.json";
   fs::path label_bank_path = "data/label_bank/metadata.json";
   std::string models_dir = "models";
+  // Provider URIs for the deep-LLM roles (e.g. ollama://127.0.0.1:11435/
+  // gemma4:e4b). Empty means the library's local model auto-discovery.
+  std::string summarizer_provider;
+  std::string extractor_provider;
   int skip_messages = 0;
   int max_messages = 1000;
   int media_limit = 0;
@@ -1158,6 +1164,10 @@ ParseArgs (int argc, char **argv)
         cfg.models_dir = require_value ();
       else if (arg == "--label-bank")
         cfg.label_bank_path = require_value ();
+      else if (arg == "--summarizer-provider")
+        cfg.summarizer_provider = require_value ();
+      else if (arg == "--extractor-provider")
+        cfg.extractor_provider = require_value ();
       else if (arg == "--max-messages")
         cfg.max_messages = std::stoi (require_value ());
       else if (arg == "--skip-messages")
@@ -1275,8 +1285,38 @@ main (int argc, char **argv)
           clock = fixed_clock;
         }
 
+      cortext::Cortext::InferenceOverrides inference;
+      auto resolve_role = [] (const std::string &uri,
+                              cortext::providers::Role role) {
+        std::string error;
+        auto provider = cortext::providers::ResolveProvider (uri, role,
+                                                             &error);
+        if (provider == nullptr)
+          {
+            throw std::runtime_error ("provider " + uri
+                                      + " could not be resolved: " + error);
+          }
+        return std::shared_ptr<cortext::providers::InferenceProvider> (
+            std::move (provider));
+      };
+      if (!cfg.summarizer_provider.empty ())
+        {
+          inference.summarizer
+              = std::make_unique<cortext::providers::ProviderSummarizer> (
+                  resolve_role (cfg.summarizer_provider,
+                                cortext::providers::Role::Summarizer));
+        }
+      if (!cfg.extractor_provider.empty ())
+        {
+          inference.extractor
+              = std::make_unique<cortext::providers::ProviderExtractor> (
+                  resolve_role (cfg.extractor_provider,
+                                cortext::providers::Role::Extractor));
+        }
+
       auto engine = cortext::Cortext::Create (cortext_cfg, cfg.db_path.string (),
-                                              cfg.models_dir, clock);
+                                              cfg.models_dir, clock,
+                                              std::move (inference));
       auto rag_encoder_selection
           = cortext::internal::CreatePreferredTextEncoder (cfg.models_dir);
       auto vector_rag_store
@@ -1654,6 +1694,14 @@ main (int argc, char **argv)
           out["db_path"] = cfg.db_path.string ();
           out["label_bank_path"] = cfg.label_bank_path.string ();
           out["models_dir"] = cfg.models_dir;
+          out["summarizer_provider"]
+              = cfg.summarizer_provider.empty ()
+                    ? "local_auto_discovery"
+                    : cfg.summarizer_provider;
+          out["extractor_provider"]
+              = cfg.extractor_provider.empty ()
+                    ? "local_auto_discovery"
+                    : cfg.extractor_provider;
           out["append"] = cfg.append;
           out["checkpoint_eval_only"] = true;
           out["checkpoint_after_timestamp"]
@@ -1948,6 +1996,14 @@ main (int argc, char **argv)
           out["db_path"] = cfg.db_path.string ();
           out["label_bank_path"] = cfg.label_bank_path.string ();
           out["models_dir"] = cfg.models_dir;
+          out["summarizer_provider"]
+              = cfg.summarizer_provider.empty ()
+                    ? "local_auto_discovery"
+                    : cfg.summarizer_provider;
+          out["extractor_provider"]
+              = cfg.extractor_provider.empty ()
+                    ? "local_auto_discovery"
+                    : cfg.extractor_provider;
           out["profile_probes_only"] = true;
           out["append"] = cfg.append;
           out["warmup_events"] = cfg.warmup_events;
@@ -2362,6 +2418,14 @@ main (int argc, char **argv)
       out["db_path"] = cfg.db_path.string ();
       out["label_bank_path"] = cfg.label_bank_path.string ();
       out["models_dir"] = cfg.models_dir;
+          out["summarizer_provider"]
+              = cfg.summarizer_provider.empty ()
+                    ? "local_auto_discovery"
+                    : cfg.summarizer_provider;
+          out["extractor_provider"]
+              = cfg.extractor_provider.empty ()
+                    ? "local_auto_discovery"
+                    : cfg.extractor_provider;
       out["append"] = cfg.append;
       out["parsed_transcript_messages"] = parsed_messages;
       out["skipped_transcript_messages"] = skipped_messages;
