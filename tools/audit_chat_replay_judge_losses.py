@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Private-safe structural audit for Julie judge losses.
+"""Private-safe structural audit for chat-replay judge losses.
 
 The output intentionally excludes packet text and judge reason text. It keeps
 only scores, counts, event indices, token counts, and coarse loss categories.
@@ -615,7 +615,7 @@ def audit(judge: dict, summary: dict | None = None) -> dict:
     full_composite = quality["full_history_upper_bound"]["mean_composite"]
     tokens = judge.get("tokens", {})
     return {
-        "schema": "cortext_julie_private_judge_loss_audit_v1",
+        "schema": "cortext_chat_replay_private_judge_loss_audit_v1",
         "source_judge": judge.get("summary_path", ""),
         "judge_provider": judge.get("judge_provider", ""),
         "judge_model": judge.get("judge_model", ""),

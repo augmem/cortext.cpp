@@ -39,13 +39,15 @@
 #include <sys/resource.h>
 #endif
 
+#include "transcript_discovery.hpp"
+
 namespace fs = std::filesystem;
 
 namespace
 {
 
-constexpr const char *kGabeSourceId = "Gabe";
-constexpr const char *kJulieSourceId = "Julie";
+constexpr const char *kUserSourceId = "User";
+constexpr const char *kContactSourceId = "Contact";
 
 double
 PeakResidentSetMb ()
@@ -72,8 +74,8 @@ PeakResidentSetMb ()
 struct Config
 {
   fs::path input_dir;
-  fs::path db_path = "build/julie_conversation_memory_bakeoff.sqlite";
-  fs::path output_path = "build/julie_conversation_memory_bakeoff.json";
+  fs::path db_path = "build/chat_replay_conversation_memory_bakeoff.sqlite";
+  fs::path output_path = "build/chat_replay_conversation_memory_bakeoff.json";
   fs::path label_bank_path = "data/label_bank/metadata.json";
   std::string models_dir = "models";
   int skip_messages = 0;
@@ -1068,9 +1070,9 @@ LabelOverlap (const std::unordered_set<std::string> &query_tokens,
 std::string
 RoleFromSourceId (const std::string &source_id)
 {
-  if (source_id == kGabeSourceId)
+  if (source_id == kUserSourceId)
     return "user";
-  if (source_id == kJulieSourceId)
+  if (source_id == kContactSourceId)
     return "assistant";
   return {};
 }
@@ -1352,7 +1354,7 @@ LocalNemotronJudgeBaseUrl ()
   if (!IsLoopbackJudgeHost (host))
     {
       throw std::runtime_error (
-          "Refusing non-local judge endpoint for private Julie bakeoff: "
+          "Refusing non-local judge endpoint for private chat-replay bakeoff: "
           + base_url
           + ". Start the local Nemotron/MLX judge server and set "
             "CORTEXT_JUDGE_BASE_URL or LOCAL_JUDGE_BASE_URL to a loopback "
@@ -1371,7 +1373,7 @@ CallJudgeModel (const Config &cfg, const fs::path &tmp_stem,
   const fs::path tmp_path = tmp_stem.string () + ".json";
   if (!IsNemotronJudgeModel (cfg.judge_model))
     throw std::runtime_error (
-        "Refusing non-Nemotron judge model for private Julie bakeoff: "
+        "Refusing non-Nemotron judge model for private chat-replay bakeoff: "
         + cfg.judge_model);
 
   const std::string api_key = GetEnvString (
@@ -1486,7 +1488,7 @@ JudgeContexts (const Config &cfg, int probe_index,
 
   const fs::path tmp_stem
       = cfg.output_path.parent_path ()
-        / ("julie_bakeoff_judge_" + std::to_string (probe_index));
+        / ("chat_replay_bakeoff_judge_" + std::to_string (probe_index));
   return CallJudgeModel (cfg, tmp_stem, prompt.str (), 512);
 }
 
@@ -1528,7 +1530,7 @@ JudgeFactPromptContexts (const Config &cfg, int probe_index,
 
   const fs::path tmp_stem
       = cfg.output_path.parent_path ()
-        / ("julie_fact_prompt_judge_" + std::to_string (probe_index));
+        / ("chat_replay_fact_prompt_judge_" + std::to_string (probe_index));
   return CallJudgeModel (cfg, tmp_stem, prompt.str (), 256);
 }
 
@@ -1576,7 +1578,7 @@ JudgeSourceTaggedContexts (const Config &cfg, int probe_index,
 
   const fs::path tmp_stem
       = cfg.output_path.parent_path ()
-        / ("julie_source_tagged_judge_" + std::to_string (probe_index)
+        / ("chat_replay_source_tagged_judge_" + std::to_string (probe_index)
            );
   return CallJudgeModel (cfg, tmp_stem, prompt.str (), 384);
 }
@@ -1622,7 +1624,7 @@ JudgePromptPolicyContexts (const Config &cfg, int probe_index,
 
   const fs::path tmp_stem
       = cfg.output_path.parent_path ()
-        / ("julie_prompt_policy_judge_" + std::to_string (probe_index)
+        / ("chat_replay_prompt_policy_judge_" + std::to_string (probe_index)
            );
   return CallJudgeModel (cfg, tmp_stem, prompt.str (), 384);
 }
@@ -1668,7 +1670,7 @@ JudgeCompactPolicyContexts (const Config &cfg, int probe_index,
 
   const fs::path tmp_stem
       = cfg.output_path.parent_path ()
-        / ("julie_compact_policy_judge_" + std::to_string (probe_index)
+        / ("chat_replay_compact_policy_judge_" + std::to_string (probe_index)
            );
   return CallJudgeModel (cfg, tmp_stem, prompt.str (), 384);
 }
@@ -1713,7 +1715,7 @@ JudgeStmGraphContexts (const Config &cfg, int probe_index,
 
   const fs::path tmp_stem
       = cfg.output_path.parent_path ()
-        / ("julie_stm_graph_judge_" + std::to_string (probe_index));
+        / ("chat_replay_stm_graph_judge_" + std::to_string (probe_index));
   return CallJudgeModel (cfg, tmp_stem, prompt.str (), 384);
 }
 
@@ -1765,7 +1767,7 @@ JudgeGraphExpandedRagContexts (const Config &cfg, int probe_index,
 
   const fs::path tmp_stem
       = cfg.output_path.parent_path ()
-        / ("julie_graph_expanded_rag_judge_" + std::to_string (probe_index));
+        / ("chat_replay_graph_expanded_rag_judge_" + std::to_string (probe_index));
   return CallJudgeModel (cfg, tmp_stem, prompt.str (), 384);
 }
 
@@ -2691,8 +2693,8 @@ BuildVectorRagPacket (cortext::Store &store, const std::vector<RagDoc> &all_docs
       "WHERE s.timestamp < ? "
       "  AND s.source_id IN (?, ?) "
       "ORDER BY s.timestamp ASC, s.signal_id ASC",
-      { static_cast<long long> (query_ts), std::string (kGabeSourceId),
-        std::string (kJulieSourceId) });
+      { static_cast<long long> (query_ts), std::string (kUserSourceId),
+        std::string (kContactSourceId) });
   for (const auto &row : prior_rows)
     {
       auto it_embedding = row.find ("embedding");
@@ -3910,7 +3912,7 @@ Config
 ParseArgs (int argc, char **argv)
 {
   Config cfg;
-  cfg.input_dir = fs::path (std::getenv ("HOME")) / "Documents/Memory/Julie";
+  
   for (int i = 1; i < argc; ++i)
     {
       std::string arg = argv[i];
@@ -4017,7 +4019,8 @@ main (int argc, char **argv)
   try
     {
 	      Config cfg = ParseArgs (argc, argv);
-	      auto messages = ParseMessages (cfg.input_dir / "Messages - Julie Willen.txt");
+	      auto messages = ParseMessages (
+		  chat_replay::DiscoverTranscript (cfg.input_dir));
 	      const int parsed_messages = static_cast<int> (messages.size ());
 	      MediaIndex media_index = BuildMediaIndex (cfg.input_dir);
 	      AnnotateMediaAdjacency (messages, media_index);
@@ -4144,7 +4147,7 @@ main (int argc, char **argv)
         {
 	          const auto &msg = messages[static_cast<size_t> (i)];
 	          const std::string source
-	              = msg.from_contact ? kJulieSourceId : kGabeSourceId;
+	              = msg.from_contact ? kContactSourceId : kUserSourceId;
 	          const std::string message_text = EvalText (msg);
 	          const auto query_tokens = Tokens (message_text);
           const int message_day_bucket = LocalDayBucket (msg.timestamp);
@@ -5689,7 +5692,7 @@ main (int argc, char **argv)
     }
   catch (const std::exception &e)
     {
-      std::cerr << "julie_conversation_memory_bakeoff failed: " << e.what ()
+      std::cerr << "chat_replay_conversation_memory_bakeoff failed: " << e.what ()
                 << "\n";
       return 1;
     }

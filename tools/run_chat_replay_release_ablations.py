@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run Julie release ablations and emit an explicit ablation provenance plan."""
+"""Run chat-replay release ablations and emit an explicit ablation provenance plan."""
 
 from __future__ import annotations
 
@@ -107,7 +107,7 @@ def cortext_behavior_env_guard(env: dict[str, str]) -> dict:
     return {
         "mode": "fail_closed",
         "policy": (
-            "Julie release ablations reject ambient CORTEXT_* variables except "
+            "chat-replay release ablations reject ambient CORTEXT_* variables except "
             "local judge endpoint metadata before applying named ablation "
             "overrides."
         ),
@@ -121,7 +121,7 @@ def ensure_no_ambient_cortext_behavior_env(env: dict[str, str]) -> None:
     guard = cortext_behavior_env_guard(env)
     if guard["leakage_detected"]:
         raise RuntimeError(
-            "refusing to launch Julie release ablations with ambient CORTEXT_* "
+            "refusing to launch chat-replay release ablations with ambient CORTEXT_* "
             "behavior variables: "
             + json.dumps(guard, sort_keys=True)
         )
@@ -326,7 +326,7 @@ def write_or_validate_release_freeze(
     git = report.get("git", {})
     benchmark_executable = report.get("artifacts", {}).get("benchmark_executable", {})
     freeze = {
-        "schema": "cortext_julie_release_protocol_freeze_v1",
+        "schema": "cortext_chat_replay_release_protocol_freeze_v1",
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
         "source": "main_release_report",
         "source_report_path": str(report_path),
@@ -396,7 +396,7 @@ def build_early_judge_command(
 ) -> list[str]:
     cmd = [
         "python3",
-        "tools/watch_julie_probe_stream_judge.py",
+        "tools/watch_chat_replay_probe_stream_judge.py",
         "--probe-stream",
         str(probe_stream_path(summary)),
         "--out-dir",
@@ -768,7 +768,7 @@ def main() -> int:
         )
         judge_cmd = [
             "python3",
-            "tools/judge_julie_live_run.py",
+            "tools/judge_chat_replay_live_run.py",
             "--judge-provider",
             "ollama",
             "--model",
@@ -844,7 +844,7 @@ def main() -> int:
     args.ablation_plan.write_text(
         json.dumps(
             {
-                "schema": "cortext_julie_ablation_plan_v1",
+                "schema": "cortext_chat_replay_ablation_plan_v1",
                 "created_at_utc": datetime.now(timezone.utc).isoformat(),
                 "main_summary_path": str(args.main_summary),
                 "main_judge_path": str(args.main_judge),
@@ -872,7 +872,7 @@ def main() -> int:
                 probe_stream_path(summary),
                 summary.parent / "early_judge",
                 summary.parent / "early_judge_command_launched.txt",
-                summary.parent / "julie_live_media_tmp",
+                summary.parent / "chat_replay_live_media_tmp",
             ]
         )
         env, stripped_hosted_provider_env_keys = sanitized_subprocess_env()
@@ -911,7 +911,7 @@ def main() -> int:
 
     report_cmd = [
         "python3",
-        "tools/julie_release_protocol_report.py",
+        "tools/chat_replay_release_protocol_report.py",
         "--summary",
         str(args.main_summary),
         "--judge",

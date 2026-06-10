@@ -8,8 +8,8 @@ Command:
 scripts/launch_nemotron_judge_server.sh
 
 python3 tools/nemotron_privacy_prune_redact.py \
-  --input-dir "$HOME/Documents/Memory/Julie" \
-  --out-dir build/julie_privacy_redacted
+  --input-dir "/path/to/your/chat-export" \
+  --out-dir build/chat_replay_privacy_redacted
 ```
 
 Behavior:

@@ -8,6 +8,8 @@ Use --apply-delete only when you intentionally want private source media removed
 
 from __future__ import annotations
 
+from chat_replay_corpus import discover_transcript
+
 import argparse
 import base64
 import datetime as dt
@@ -28,7 +30,6 @@ from dataclasses import dataclass
 from typing import Any
 
 
-DEFAULT_INPUT = pathlib.Path.home() / "Documents/Memory/Julie"
 DEFAULT_MODEL = "nemotron-3-nano-omni-30b-a3b-8bit"
 DEFAULT_BASE_URL = "http://127.0.0.1:8000/v1"
 LOCAL_JUDGE_HOSTS = {"localhost", "127.0.0.1", "::1"}
@@ -481,9 +482,10 @@ def apply_delete(input_dir: pathlib.Path, decisions: list[dict[str, Any]]) -> in
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--input-dir", type=pathlib.Path, default=DEFAULT_INPUT)
+    parser.add_argument("--input-dir", type=pathlib.Path, required=True)
     parser.add_argument("--out-dir", type=pathlib.Path, required=True)
-    parser.add_argument("--transcript-name", default="Messages - Julie Willen.txt")
+    parser.add_argument("--transcript-name", default=None,
+                        help="transcript filename inside --input-dir (default: discovered)")
     parser.add_argument("--base-url")
     parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument("--env-file", type=pathlib.Path, default=pathlib.Path("env.sh"))
@@ -503,12 +505,16 @@ def main() -> int:
     require_nemotron_model(args.model)
     args.base_url = local_nemotron_base_url(args.base_url)
     started = time.perf_counter()
-    transcript = args.input_dir / args.transcript_name
+    transcript = (
+        args.input_dir / args.transcript_name
+        if args.transcript_name
+        else discover_transcript(args.input_dir)
+    )
     if not transcript.exists() and not args.skip_text:
         raise FileNotFoundError(f"Transcript not found: {transcript}")
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
-    redacted_transcript = args.out_dir / args.transcript_name
+    redacted_transcript = args.out_dir / transcript.name
     safe_media_dir = args.out_dir / "media"
     manifest_path = args.out_dir / "privacy_manifest.json"
 

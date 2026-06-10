@@ -17,19 +17,21 @@
 #include <unordered_set>
 #include <vector>
 
+#include "transcript_discovery.hpp"
+
 namespace fs = std::filesystem;
 
 namespace
 {
 
-constexpr const char *kGabeSourceId = "Gabe";
-constexpr const char *kJulieSourceId = "Julie";
+constexpr const char *kUserSourceId = "User";
+constexpr const char *kContactSourceId = "Contact";
 
 struct Config
 {
   fs::path input_dir;
-  fs::path db_path = "build/julie_memory_eval.sqlite";
-  fs::path output_path = "build/julie_memory_eval_summary.json";
+  fs::path db_path = "build/chat_replay_memory_eval.sqlite";
+  fs::path output_path = "build/chat_replay_memory_eval_summary.json";
   std::string models_dir = "models";
   int max_messages = 2000;
   int holdout_stride = 17;
@@ -318,7 +320,7 @@ Config
 ParseArgs (int argc, char **argv)
 {
   Config cfg;
-  cfg.input_dir = fs::path (std::getenv ("HOME")) / "Documents/Memory/Julie";
+  
   for (int i = 1; i < argc; ++i)
     {
       std::string arg = argv[i];
@@ -367,7 +369,8 @@ main (int argc, char **argv)
   try
     {
       Config cfg = ParseArgs (argc, argv);
-      const fs::path transcript = cfg.input_dir / "Messages - Julie Willen.txt";
+      const fs::path transcript
+          = chat_replay::DiscoverTranscript (cfg.input_dir);
       auto messages = ParseMessages (transcript);
       if (cfg.max_messages > 0
           && static_cast<int> (messages.size ()) > cfg.max_messages)
@@ -403,8 +406,8 @@ main (int argc, char **argv)
               holdouts.push_back (msg);
               continue;
             }
-          const std::string source = msg.from_contact ? kJulieSourceId
-                                                      : kGabeSourceId;
+          const std::string source = msg.from_contact ? kContactSourceId
+                                                      : kUserSourceId;
           auto ctx = engine->ProcessTextAt (msg.text, source, msg.timestamp);
           ++processed;
           process_ms_total += ctx.process_ms;
@@ -446,7 +449,7 @@ main (int argc, char **argv)
       for (const auto &query : holdouts)
         {
           auto ctx = engine->ProcessTextAt (
-              query.text, query.from_contact ? kJulieSourceId : kGabeSourceId,
+              query.text, query.from_contact ? kContactSourceId : kUserSourceId,
               query_ts, cortext::Retention::Ephemeral);
           query_ts += 1000;
           ++query_count;
@@ -483,7 +486,7 @@ main (int argc, char **argv)
       int audio_processed = 0;
       int video_processed = 0;
       const auto media = FindMedia (cfg.input_dir);
-      const fs::path tmp_dir = cfg.db_path.parent_path () / "julie_media_tmp";
+      const fs::path tmp_dir = cfg.db_path.parent_path () / "chat_replay_media_tmp";
       fs::create_directories (tmp_dir);
       for (const auto &item : media)
         {
@@ -509,8 +512,8 @@ main (int argc, char **argv)
                   && bytes.size () == 224ULL * 224ULL * 3ULL)
                 {
                   engine->ProcessImage (bytes.data (), 224, 224, 3,
-                                        item.kind == "image" ? "julie/image"
-                                                            : "julie/video");
+                                        item.kind == "image" ? "chat_replay/image"
+                                                            : "chat_replay/video");
                   ++media_processed;
                   item.kind == "image" ? ++image_processed : ++video_processed;
                 }
@@ -534,7 +537,7 @@ main (int argc, char **argv)
                   if (!pcm.empty ())
                     {
                       engine->ProcessAudio (pcm.data (), pcm.size (),
-                                            "julie/audio");
+                                            "chat_replay/audio");
                       ++media_processed;
                       ++audio_processed;
                     }
@@ -596,7 +599,7 @@ main (int argc, char **argv)
     }
   catch (const std::exception &e)
     {
-      std::cerr << "julie_memory_eval failed: " << e.what () << "\n";
+      std::cerr << "chat_replay_memory_eval failed: " << e.what () << "\n";
       return 1;
     }
 }

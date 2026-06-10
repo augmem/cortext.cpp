@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Judge a privacy-safe Julie raw-speech memory eval artifact.
+"""Judge a privacy-safe chat-replay raw-speech memory eval artifact.
 
 The generation transcripts are external ground truth for judging only. Cortext
 ingests raw audio blobs and embeddings in the eval; no ASR transcript or
@@ -7,6 +7,8 @@ transcript-derived text is passed back into Cortext.
 """
 
 from __future__ import annotations
+
+from chat_replay_corpus import discover_transcript
 
 import argparse
 import json
@@ -17,7 +19,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from generate_julie_raw_speech_manifest import parse_messages
+from generate_chat_replay_raw_speech_manifest import parse_messages
 
 
 DEFAULT_MODEL = "nemotron-3-nano-omni-30b-a3b-8bit"
@@ -28,7 +30,7 @@ LOCAL_JUDGE_HOSTS = {"localhost", "127.0.0.1", "::1"}
 def require_nemotron_model(model: str) -> None:
     if "nemotron" not in model.lower():
         raise RuntimeError(
-            f"Refusing non-Nemotron judge model for private Julie data: {model!r}. "
+            f"Refusing non-Nemotron judge model for private chat-replay data: {model!r}. "
             "Start the local Nemotron/MLX judge server and pass --model nemotron..."
         )
 
@@ -44,7 +46,7 @@ def local_judge_base_url() -> str:
     parsed = urllib.parse.urlparse(base_url)
     if parsed.scheme not in {"http", "https"} or parsed.hostname not in LOCAL_JUDGE_HOSTS:
         raise RuntimeError(
-            "Refusing non-local judge endpoint for private Julie raw-speech eval: "
+            "Refusing non-local judge endpoint for private chat-replay raw-speech eval: "
             f"{base_url!r}. Start the local Nemotron/MLX judge server and set "
             "CORTEXT_JUDGE_BASE_URL or LOCAL_JUDGE_BASE_URL to a loopback URL."
         )
@@ -233,7 +235,7 @@ def main() -> int:
     manifest_path = args.manifest or pathlib.Path(eval_data["manifest_path"])
     manifest = json.loads(manifest_path.read_text())
     input_dir = pathlib.Path(manifest["input_dir"])
-    messages = parse_messages(input_dir / "Messages - Julie Willen.txt")
+    messages = parse_messages(discover_transcript(input_dir))
     records = manifest["records"]
     original_by_local = {r["local_index"]: r["original_index"] for r in records}
 
@@ -339,7 +341,7 @@ def main() -> int:
         judged.append(row)
 
     summary = {
-        "schema": "julie_native_memory_judge_v1",
+        "schema": "chat_replay_native_memory_judge_v1",
         "eval_path": str(args.eval),
         "manifest_path": str(manifest_path),
         "judge_model": args.model,

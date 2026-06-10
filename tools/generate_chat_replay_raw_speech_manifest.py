@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
-"""Generate privacy-safe Julie raw-speech audio with Chatterbox Turbo."""
+"""Generate privacy-safe chat-replay raw-speech audio with Chatterbox Turbo."""
 
 from __future__ import annotations
+
+from chat_replay_corpus import discover_transcript
 
 import argparse
 import datetime as dt
@@ -15,7 +17,6 @@ import time
 from collections import Counter
 
 
-DEFAULT_INPUT = pathlib.Path.home() / "Documents/Memory/Julie"
 DEFAULT_MODEL = "mlx-community/chatterbox-turbo-fp16"
 DEFAULT_VLLM_MLX_SPEC = (
     "vllm-mlx[audio] @ git+https://github.com/waybarrios/vllm-mlx"
@@ -162,7 +163,7 @@ def run(cmd: list[str], env_prefix: dict[str, str], *, quiet: bool = False) -> f
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--input-dir", type=pathlib.Path, default=DEFAULT_INPUT)
+    parser.add_argument("--input-dir", type=pathlib.Path, required=True)
     parser.add_argument("--out-dir", type=pathlib.Path, required=True)
     parser.add_argument("--sample-messages", type=int, default=120)
     parser.add_argument("--model", default=DEFAULT_MODEL)
@@ -175,7 +176,7 @@ def main() -> int:
     parser.add_argument("--skip-existing", action="store_true")
     args = parser.parse_args()
 
-    messages = parse_messages(args.input_dir / "Messages - Julie Willen.txt")
+    messages = parse_messages(discover_transcript(args.input_dir))
     media_index = build_media_index(args.input_dir)
     sample = stratified_sample(messages, args.sample_messages)
     generated_dir = args.out_dir / "generated"
@@ -186,7 +187,7 @@ def main() -> int:
     env = macos_sdk_env()
     media_counts: Counter[str] = Counter()
     manifest: dict = {
-        "schema": "julie_raw_speech_manifest_v1",
+        "schema": "chat_replay_raw_speech_manifest_v1",
         "generator": "vllm-mlx mlx_audio.tts.generate",
         "model": args.model,
         "input_dir": str(args.input_dir),
@@ -202,7 +203,7 @@ def main() -> int:
         gender = "female" if message["from_contact"] else "male"
         ref_audio = args.female_ref_audio if message["from_contact"] else args.male_ref_audio
         ref_text = args.female_ref_text if message["from_contact"] else args.male_ref_text
-        prefix = f"julie_raw_speech_{local_index:05d}_{role}"
+        prefix = f"chat_replay_raw_speech_{local_index:05d}_{role}"
         wav_path = generated_dir / f"{prefix}.wav"
         raw_path = raw_dir / f"{prefix}_16k_mono.f32"
         text = message["text"][: args.max_chars]

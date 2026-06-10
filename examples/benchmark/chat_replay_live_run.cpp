@@ -40,20 +40,23 @@
 #include <sys/resource.h>
 #endif
 
+#include "transcript_discovery.hpp"
+
 namespace fs = std::filesystem;
 
 namespace
 {
 
-constexpr const char *kGabeSourceId = "Gabe";
-constexpr const char *kJulieSourceId = "Julie";
+constexpr const char *kUserSourceId = "User";
+constexpr const char *kContactSourceId = "Contact";
 constexpr long long kNormalRagVectorSearchMultiplier = 8;
 
 struct Config
 {
   fs::path input_dir;
-  fs::path db_path = "build/julie_live_run.sqlite";
-  fs::path output_path = "build/julie_live_run_summary.json";
+  fs::path transcript;
+  fs::path db_path = "build/chat_replay_live_run.sqlite";
+  fs::path output_path = "build/chat_replay_live_run_summary.json";
   fs::path label_bank_path = "data/label_bank/metadata.json";
   std::string models_dir = "models";
   // Provider URIs for the deep-LLM roles (e.g. ollama://127.0.0.1:11435/
@@ -552,8 +555,8 @@ bool
 IsTextChatDoc (const EventDoc &doc)
 {
   return doc.modality == "text"
-         && (doc.source_id == kGabeSourceId
-             || doc.source_id == kJulieSourceId);
+         && (doc.source_id == kUserSourceId
+             || doc.source_id == kContactSourceId);
 }
 
 std::vector<EventDoc>
@@ -598,10 +601,10 @@ RagContextTokens (const CompactedHistory &history,
 std::string
 SpeakerLabel (const std::string &source_id)
 {
-  if (source_id == kGabeSourceId)
-    return "Gabe";
-  if (source_id == kJulieSourceId)
-    return "Julie";
+  if (source_id == kUserSourceId)
+    return "User";
+  if (source_id == kContactSourceId)
+    return "Contact";
   return source_id;
 }
 
@@ -887,8 +890,8 @@ BuildVectorRagPacket (cortext::Store &store,
       "  AND s.modality = 'text' "
       "  AND s.source_id IN (?, ?) "
       "ORDER BY s.timestamp ASC, s.signal_id ASC",
-      { static_cast<long long> (query_ts), std::string (kGabeSourceId),
-        std::string (kJulieSourceId) });
+      { static_cast<long long> (query_ts), std::string (kUserSourceId),
+        std::string (kContactSourceId) });
   for (const auto &row : prior_rows)
     {
       auto it_embedding = row.find ("embedding");
@@ -1050,7 +1053,7 @@ AppendProbeStream (const fs::path &path, const nlohmann::json &probe)
 std::string
 SourceIdForMessage (const Message &message)
 {
-  return message.from_contact ? kJulieSourceId : kGabeSourceId;
+  return message.from_contact ? kContactSourceId : kUserSourceId;
 }
 
 std::string
@@ -1060,8 +1063,8 @@ MediaSourceId (const MediaItem &item)
   if (item.kind == "audio"
       && (name.find ("_self") != std::string::npos
           || name.find (" self ") != std::string::npos))
-    return kGabeSourceId;
-  return kJulieSourceId;
+    return kUserSourceId;
+  return kContactSourceId;
 }
 
 std::vector<MediaItem>
@@ -1145,7 +1148,6 @@ Config
 ParseArgs (int argc, char **argv)
 {
   Config cfg;
-  cfg.input_dir = fs::path (std::getenv ("HOME")) / "Documents/Memory/Julie";
   for (int i = 1; i < argc; ++i)
     {
       std::string arg = argv[i];
@@ -1156,6 +1158,8 @@ ParseArgs (int argc, char **argv)
       };
       if (arg == "--input-dir")
         cfg.input_dir = require_value ();
+      else if (arg == "--transcript")
+        cfg.transcript = require_value ();
       else if (arg == "--db")
         cfg.db_path = require_value ();
       else if (arg == "--out")
@@ -1234,7 +1238,8 @@ main (int argc, char **argv)
   try
     {
       Config cfg = ParseArgs (argc, argv);
-      const fs::path transcript = cfg.input_dir / "Messages - Julie Willen.txt";
+      const fs::path transcript
+          = chat_replay::DiscoverTranscript (cfg.input_dir, cfg.transcript);
       auto messages = ParseMessages (transcript);
       const int parsed_messages = static_cast<int> (messages.size ());
       const int skipped_messages
@@ -1360,7 +1365,7 @@ main (int argc, char **argv)
                   }),
               media.end ());
         }
-      const fs::path tmp_dir = cfg.db_path.parent_path () / "julie_live_media_tmp";
+      const fs::path tmp_dir = cfg.db_path.parent_path () / "chat_replay_live_media_tmp";
       fs::create_directories (tmp_dir);
       std::vector<EventDoc> prior_docs;
       std::vector<EventDoc> prior_text_docs;
@@ -1816,7 +1821,7 @@ main (int argc, char **argv)
           out["deep_consolidation"] = cfg.deep_consolidation;
           out["daily_consolidation"] = cfg.daily_consolidation;
           out["source_id_policy"]
-              = "Gabe and Julie are opaque conversation provenance source "
+              = "User and Contact are opaque conversation provenance source "
                 "IDs; media is not encoded into source_id";
           out["timeline_policy"]
               = "checkpoint eval opens an existing Cortext replay database "
@@ -2519,7 +2524,7 @@ main (int argc, char **argv)
       out["deep_consolidation"] = cfg.deep_consolidation;
       out["daily_consolidation"] = cfg.daily_consolidation;
       out["source_id_policy"]
-          = "Gabe and Julie are opaque conversation provenance source IDs; "
+          = "User and Contact are opaque conversation provenance source IDs; "
             "media is not encoded into source_id";
       out["timeline_policy"]
           = "transcript messages and media files are processed in timestamp "
@@ -2580,7 +2585,7 @@ main (int argc, char **argv)
     }
   catch (const std::exception &e)
     {
-      std::cerr << "julie_live_run failed: " << e.what () << "\n";
+      std::cerr << "chat_replay_live_run failed: " << e.what () << "\n";
       return 1;
     }
 }

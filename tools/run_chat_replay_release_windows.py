@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Plan or run the fixed multi-window Julie release protocol.
+"""Plan or run the fixed multi-window chat-replay release protocol.
 
-This wrapper keeps the mixed-media claim reproducible when no single Julie slice
+This wrapper keeps the mixed-media claim reproducible when no single corpus slice
 contains all media kinds. It delegates every window to
-tools/run_julie_release_protocol.py, so Cortext behavior remains the production
+tools/run_chat_replay_release_protocol.py, so Cortext behavior remains the production
 path used by the single-window release runner.
 """
 
@@ -23,9 +23,8 @@ from typing import Any
 
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
-DEFAULT_INPUT_DIR = pathlib.Path.home() / "Documents/Memory/Julie"
 DEFAULT_JUDGE_MODEL = "gemma4:12b-it-qat"
-DEFAULT_PROTOCOL_SPEC = REPO_ROOT / "tools/julie_release_protocol_spec.json"
+DEFAULT_PROTOCOL_SPEC = REPO_ROOT / "tools/chat_replay_release_protocol_spec.json"
 CORTEXT_RELEASE_ENV_ALLOWLIST = {
     "CORTEXT_JUDGE_BASE_URL",
     "CORTEXT_OLLAMA_BASE_URL",
@@ -115,7 +114,7 @@ def load_protocol_spec(path: pathlib.Path) -> dict[str, Any]:
         raise RuntimeError(f"failed to read protocol spec: {path}") from exc
     if not isinstance(payload, dict):
         raise RuntimeError(f"protocol spec must be a JSON object: {path}")
-    if payload.get("schema") != "cortext_julie_release_protocol_spec_v1":
+    if payload.get("schema") != "cortext_chat_replay_release_protocol_spec_v1":
         raise RuntimeError(f"unexpected protocol spec schema: {payload.get('schema')}")
     windows = payload.get("windows")
     if not isinstance(windows, list) or not windows:
@@ -178,7 +177,7 @@ def cortext_behavior_env_guard(env: dict[str, str]) -> dict[str, Any]:
     return {
         "mode": "fail_closed",
         "policy": (
-            "Julie release windows reject ambient CORTEXT_* variables except "
+            "chat-replay release windows reject ambient CORTEXT_* variables except "
             "local judge endpoint metadata before launching production Cortext."
         ),
         "allowed_cortext_env_keys": sorted(CORTEXT_RELEASE_ENV_ALLOWLIST),
@@ -191,7 +190,7 @@ def ensure_no_ambient_cortext_behavior_env(env: dict[str, str]) -> None:
     guard = cortext_behavior_env_guard(env)
     if guard["leakage_detected"]:
         raise RuntimeError(
-            "refusing to launch Julie release windows with ambient CORTEXT_* "
+            "refusing to launch chat-replay release windows with ambient CORTEXT_* "
             "behavior variables: "
             + json.dumps(guard, sort_keys=True)
         )
@@ -320,7 +319,7 @@ def build_window_command(
 ) -> list[str]:
     cmd = [
         args.python,
-        str(REPO_ROOT / "tools/run_julie_release_protocol.py"),
+        str(REPO_ROOT / "tools/run_chat_replay_release_protocol.py"),
         "--out-dir",
         str(out_dir),
         "--benchmark",
@@ -527,7 +526,7 @@ def write_protocol_manifest(
     ]
     spec_ref = artifact_ref(args.protocol_spec)
     compliance = {
-        "schema": "cortext_julie_release_protocol_compliance_v1",
+        "schema": "cortext_chat_replay_release_protocol_compliance_v1",
         "protocol_spec_schema": protocol_spec.get("schema"),
         "protocol_spec_version": protocol_spec.get("version"),
         "protocol_spec_sha256": spec_ref["sha256"],
@@ -560,7 +559,7 @@ def write_protocol_manifest(
         or key == "judge_repetitions_within_spec"
     ) and not compliance["custom_window_override"]
     payload = {
-        "schema": "cortext_julie_release_windows_manifest_v1",
+        "schema": "cortext_chat_replay_release_windows_manifest_v1",
         "created_at_utc": utc_now(),
         "privacy": "private local artifact; contains paths and commands, not message text",
         "git": git_provenance(),
@@ -609,7 +608,7 @@ def write_protocol_manifest(
 def build_aggregate_report_command(args: argparse.Namespace) -> list[str]:
     return [
         args.python,
-        str(REPO_ROOT / "tools/julie_release_windows_report.py"),
+        str(REPO_ROOT / "tools/chat_replay_release_windows_report.py"),
         "--base-dir",
         str(args.base_dir),
         "--manifest",
@@ -660,14 +659,14 @@ def parse_args() -> argparse.Namespace:
         "--protocol-spec",
         type=pathlib.Path,
         default=DEFAULT_PROTOCOL_SPEC,
-        help="Frozen public-safe Julie release protocol spec JSON.",
+        help="Frozen public-safe chat-replay release protocol spec JSON.",
     )
     parser.add_argument(
         "--benchmark",
         type=pathlib.Path,
-        default=REPO_ROOT / "build/examples/benchmark/cortext_julie_live_run",
+        default=REPO_ROOT / "build/examples/benchmark/cortext_chat_replay_live_run",
     )
-    parser.add_argument("--input-dir", type=pathlib.Path, default=DEFAULT_INPUT_DIR)
+    parser.add_argument("--input-dir", type=pathlib.Path, required=True)
     parser.add_argument(
         "--window",
         action="append",
@@ -795,7 +794,7 @@ def main() -> int:
                     break
 
     status_payload = {
-        "schema": "cortext_julie_release_windows_status_v1",
+        "schema": "cortext_chat_replay_release_windows_status_v1",
         "created_at_utc": utc_now(),
         "privacy": "private local artifact; aggregate status and artifact hashes only",
         "mode": mode,

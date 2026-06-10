@@ -46,7 +46,7 @@ Store/ObjectStore injection pattern), and applications turn their config
 strings into instances via the registry. The benchmark CLI exposes this as:
 
 ```
-cortext_julie_live_run --summarizer-provider ollama://127.0.0.1:11435/gemma4:e4b
+cortext_chat_replay_live_run --summarizer-provider ollama://127.0.0.1:11435/gemma4:e4b
                        # extractor unspecified -> local auto-discovery
 ```
 

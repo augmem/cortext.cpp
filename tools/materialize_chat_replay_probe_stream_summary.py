@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build a summary-shaped artifact from streamed Julie probe rows.
+"""Build a summary-shaped artifact from streamed chat-replay probe rows.
 
 This is a fail-fast helper for private local runs. It does not replace the
 final release summary; it lets the existing judge consume native probe rows
@@ -68,7 +68,7 @@ def main() -> int:
         raise RuntimeError(f"probe stream has no rows: {args.probe_stream}")
 
     out = {
-        "schema": "julie_probe_stream_partial_summary_v1",
+        "schema": "chat_replay_probe_stream_partial_summary_v1",
         "partial_probe_stream_summary": True,
         "release_gate_use": "none_non_release_early_warning_only",
         "created_at": datetime.now().isoformat(timespec="seconds"),
@@ -112,7 +112,7 @@ def main() -> int:
         "daily_consolidation": args.daily_consolidation,
         "deep_consolidation": args.deep,
         "source_id_policy": (
-            "Gabe and Julie are opaque conversation provenance source IDs; "
+            "User and Contact are opaque conversation provenance source IDs; "
             "media is not encoded into source_id"
         ),
         "timeline_policy": (

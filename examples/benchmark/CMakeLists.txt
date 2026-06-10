@@ -184,20 +184,20 @@ add_executable(cortext_label_centroid_bench
   label_centroid_bench.cpp
 )
 
-add_executable(cortext_julie_memory_eval
-  julie_memory_eval.cpp
+add_executable(cortext_chat_replay_memory_eval
+  chat_replay_memory_eval.cpp
 )
 
-add_executable(cortext_julie_live_run
-  julie_live_run.cpp
+add_executable(cortext_chat_replay_live_run
+  chat_replay_live_run.cpp
 )
 
-add_executable(cortext_julie_conversation_memory_bakeoff
-  julie_conversation_memory_bakeoff.cpp
+add_executable(cortext_chat_replay_conversation_memory_bakeoff
+  chat_replay_conversation_memory_bakeoff.cpp
 )
 
-add_executable(cortext_julie_raw_speech_memory_eval
-  julie_raw_speech_memory_eval.cpp
+add_executable(cortext_chat_replay_raw_speech_memory_eval
+  chat_replay_raw_speech_memory_eval.cpp
   src/audio_loader.cpp
 )
 
@@ -351,19 +351,19 @@ target_include_directories(cortext_audio_video_accumulator_bench PRIVATE
 target_include_directories(cortext_label_centroid_bench PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}
 )
-target_include_directories(cortext_julie_memory_eval PRIVATE
+target_include_directories(cortext_chat_replay_memory_eval PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}
 )
-target_include_directories(cortext_julie_live_run PRIVATE
+target_include_directories(cortext_chat_replay_live_run PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}
 )
-target_include_directories(cortext_julie_conversation_memory_bakeoff PRIVATE
+target_include_directories(cortext_chat_replay_conversation_memory_bakeoff PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}
 )
-target_include_directories(cortext_julie_raw_speech_memory_eval PRIVATE
+target_include_directories(cortext_chat_replay_raw_speech_memory_eval PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}
 )
-target_compile_definitions(cortext_julie_conversation_memory_bakeoff PRIVATE
+target_compile_definitions(cortext_chat_replay_conversation_memory_bakeoff PRIVATE
   CORTEXT_TESTING=1
 )
 target_include_directories(cortext_es_aist_label_graph_signal_bench PRIVATE
@@ -526,20 +526,20 @@ target_link_libraries(cortext_label_centroid_bench PRIVATE
   cortext
   nlohmann_json::nlohmann_json
 )
-target_link_libraries(cortext_julie_memory_eval PRIVATE
+target_link_libraries(cortext_chat_replay_memory_eval PRIVATE
   cortext
   nlohmann_json::nlohmann_json
 )
-target_link_libraries(cortext_julie_live_run PRIVATE
+target_link_libraries(cortext_chat_replay_live_run PRIVATE
   cortext
   nlohmann_json::nlohmann_json
   sqlite3
 )
-target_link_libraries(cortext_julie_conversation_memory_bakeoff PRIVATE
+target_link_libraries(cortext_chat_replay_conversation_memory_bakeoff PRIVATE
   cortext
   nlohmann_json::nlohmann_json
 )
-target_link_libraries(cortext_julie_raw_speech_memory_eval PRIVATE
+target_link_libraries(cortext_chat_replay_raw_speech_memory_eval PRIVATE
   cortext
   nlohmann_json::nlohmann_json
 )

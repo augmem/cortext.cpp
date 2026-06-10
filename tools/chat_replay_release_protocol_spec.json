@@ -1,5 +1,5 @@
 {
-  "schema": "cortext_julie_release_protocol_spec_v1",
+  "schema": "cortext_chat_replay_release_protocol_spec_v1",
   "version": 1,
   "privacy": "public-safe protocol only; no private message text, media bytes, labels, or judge reasons",
   "windows": [

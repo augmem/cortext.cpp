@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Audit where an existing Julie early-judge manifest would fail."""
+"""Audit where an existing chat-replay early-judge manifest would fail."""
 
 from __future__ import annotations
 
@@ -79,7 +79,7 @@ def main() -> int:
             first_failure = row
 
     output = {
-        "schema": "cortext_julie_early_gate_trace_audit_v1",
+        "schema": "cortext_chat_replay_early_gate_trace_audit_v1",
         "source_manifest": str(args.manifest),
         "quality_gate_min_milestone": args.quality_gate_min_milestone,
         "min_quality_delta": args.min_quality_delta,

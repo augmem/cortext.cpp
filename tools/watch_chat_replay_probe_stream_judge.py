@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Run local early-warning judges from streamed Julie probe rows.
+"""Run local early-warning judges from streamed chat-replay probe rows.
 
 This helper is intentionally not a release gate. It waits for native probe
-rows emitted by cortext_julie_live_run, materializes a partial summary, and
+rows emitted by cortext_chat_replay_live_run, materializes a partial summary, and
 runs the same local judge adapter used by the final protocol. The outputs are
 private fail-fast signals only; final claims still require the complete frozen
 summary and release report.
@@ -48,7 +48,7 @@ TOOLS_DIR = REPO_ROOT / "tools"
 if str(TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(TOOLS_DIR))
 
-from judge_julie_live_run import FIELDS, SYSTEMS, build_timeline, confidence_intervals  # noqa: E402
+from judge_chat_replay_live_run import FIELDS, SYSTEMS, build_timeline, confidence_intervals  # noqa: E402
 
 
 def utc_now() -> str:
@@ -413,7 +413,7 @@ def aggregate_judge_rows(
     token_savings = 1.0 - (cortext_tokens / rag_tokens) if rag_tokens > 0 else 0.0
 
     payload = {
-        "schema": "julie_probe_stream_cumulative_early_judge_v1",
+        "schema": "chat_replay_probe_stream_cumulative_early_judge_v1",
         "summary_path": str(summary_path),
         "judge_model": judge_model,
         "judge_provider": judge_provider,
@@ -814,7 +814,7 @@ def materialize_partial(args: argparse.Namespace, milestone: int, summary_path: 
     counts = partial_counts(args, milestone)
     cmd = [
         sys.executable,
-        str(REPO_ROOT / "tools/materialize_julie_probe_stream_summary.py"),
+        str(REPO_ROOT / "tools/materialize_chat_replay_probe_stream_summary.py"),
         "--probe-stream",
         str(args.probe_stream),
         "--out",
@@ -889,7 +889,7 @@ def run_judge(
     )
     cmd = [
         sys.executable,
-        str(REPO_ROOT / "tools/judge_julie_live_run.py"),
+        str(REPO_ROOT / "tools/judge_chat_replay_live_run.py"),
         "--summary",
         str(summary_path),
         "--db",
@@ -974,7 +974,7 @@ def write_loss_audit(
 ) -> None:
     cmd = [
         sys.executable,
-        str(REPO_ROOT / "tools/audit_julie_judge_losses.py"),
+        str(REPO_ROOT / "tools/audit_chat_replay_judge_losses.py"),
         "--judge",
         str(judge_path),
         "--summary",
@@ -988,7 +988,7 @@ def write_loss_audit(
 def write_manifest(args: argparse.Namespace, completed: list[dict]) -> None:
     latest = completed[-1] if completed else None
     manifest = {
-        "schema": "julie_probe_stream_early_judge_manifest_v1",
+        "schema": "chat_replay_probe_stream_early_judge_manifest_v1",
         "created_at_utc": utc_now(),
         "release_gate_use": "fail_fast_screen_only_not_release_claim",
         "privacy": "private local artifact; may point to private summaries and judge rows",
@@ -1030,7 +1030,7 @@ def write_manifest(args: argparse.Namespace, completed: list[dict]) -> None:
     if latest is not None:
         latest_path = args.manifest.with_name("early_judge_latest.json")
         latest_payload = {
-            "schema": "julie_probe_stream_early_judge_latest_v1",
+            "schema": "chat_replay_probe_stream_early_judge_latest_v1",
             "created_at_utc": utc_now(),
             "release_gate_use": "fail_fast_screen_only_not_release_claim",
             "privacy": "private local artifact; contains aggregate checkpoint metrics only",
