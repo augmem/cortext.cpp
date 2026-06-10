@@ -104,13 +104,25 @@ add_executable(cortext_tests
   aist_gguf_encoder.test.cpp
 )
 
-# The planum bridge test needs the planum.cpp submodule headers; skip it when
-# the submodule is not checked out so the rest of the suite still builds.
+# Asset- and submodule-dependent tests are gated at configure time: a test
+# is either compiled in (and must pass) or absent. No runtime skips.
+
+# The planum bridge test needs the planum.cpp submodule headers.
 if(EXISTS ${CMAKE_SOURCE_DIR}/third_party/planum.cpp/include/planum/contract/perception_event.hpp)
   target_sources(cortext_tests PRIVATE
     audio_planum_bridge.test.cpp
     ${CMAKE_SOURCE_DIR}/src/audio/planum_bridge.cpp
   )
+endif()
+
+# AIST encoder integration needs the model under models/.
+if(EXISTS ${CMAKE_SOURCE_DIR}/models/AIST-87M-GGUF)
+  target_sources(cortext_tests PRIVATE aist_gguf_encoder_integration.test.cpp)
+endif()
+
+# Deep-consolidation stack integration needs LiteRT and the Gemma4 model.
+if(NOT CORTEXT_DISABLE_LITERT AND EXISTS ${CMAKE_SOURCE_DIR}/models/gemma4-e2b-litert/gemma-4-E2B-it.litertlm)
+  target_sources(cortext_tests PRIVATE deep_llm_factory_integration.test.cpp)
 endif()
 
 target_link_libraries(cortext_tests PRIVATE cortext Catch2::Catch2WithMain nlohmann_json::nlohmann_json)
