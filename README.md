@@ -8,7 +8,7 @@ The architecture is specified formally in the accompanying paper. The design bor
 
 ## Why Cortext Exists
 
-Cortext began for a personal reason. In 2022, my father-in-law was diagnosed with dementia. I'm a software engineer, and since then I have been focused on building systems that help people with memory loss preserve continuity, confidence, and independence.
+Cortext began for a personal reason. In 2022, my father-in-law was diagnosed with dementia. Since then I've been focused on building systems that help people with memory loss preserve continuity, confidence, and independence.
 
 The same architecture also happens to be useful for long-horizon LLM memory. But the primary motivation is human: Cortext is designed to process real-time information from a wearable device through a hub that can deliver gentle nudges to help someone remember context, reduce confusion, and avoid the humiliation and frustration that memory loss can create. A care context requires homeostasis. Salience, confusion, and emotional state change through the day, and that is exactly what an open-loop system can't track.
 
@@ -16,7 +16,7 @@ The same architecture also happens to be useful for long-horizon LLM memory. But
 
 Cortext is built by one software engineer. I'm not an ML researcher or a psychologist. The cognitive-science references here come from reading the literature while building this. They shaped the design, but don't mistake my reading for expert interpretation. The system's value doesn't rest on it.
 
-What it does rest on is falsifiable. The benchmarks in this repo run blind LLM-judged comparisons against strong baselines, including a full-history arm that Cortext is expected to lose to sometimes, with fixed seeds, repeated judgments, and bootstrap confidence intervals. Where results failed to reproduce under real encoders, the paper says so and marks the old numbers superseded. If you find a spot where the psychology is misapplied, a baseline is unfair, or an eval is flattering the system, open an issue. I want to know.
+What it does rest on is falsifiable: the benchmarks and results below. If you find a spot where the psychology is misapplied, a baseline is unfair, or an eval is flattering the system, open an issue. I want to know.
 
 ## The Loop
 
@@ -86,10 +86,7 @@ repetitions, local `gemma4:12b` judge):
 | Working memory 7±2 | **42**/117 | 32 | 25 | 18 | 2.72 | ~262 vs ~6,100 | **96%** |
 | Working memory 4 (control) | **39**/117 | 35 | 20 | 23 | 2.43 | ~222 vs ~6,100 | **96%** |
 
-Cortext's packet is roughly 96% smaller than what the baseline arms consume
-per probe, and it still wins the most judgments.
-
-The honest caveats:
+Caveats:
 
 - Judged sufficiency trails the fat-context arms (~2.4-2.7 vs ~3.1). That's
   the cost of the compression, and raising working-memory capacity didn't
