@@ -73,14 +73,18 @@ Where earlier synthetic-encoder claims did **not** survive the switch to real em
 
 ## Embedding Models
 
-Cortext's primary encoder is **ES-AIST-81M** (also published as
-`augmem/ESS-AIST-81M-preview`), a custom 81M-parameter trimodal embedding model
-that places text, image, and audio in a single retrieval space. The repo also
-ships **AAIT-86M**, which bundles the preserved TE-86M trimodal retrieval
-checkpoint with an ingress-anchor head that emits anchor decisions
-(`CREATE / UPDATE / SPLIT / CLOSE / ABSTAIN`) at ingest time without changing
-the underlying retrieval behavior (zero retrieval delta vs the stage-1
-checkpoint under the publication gate).
+Cortext's embedding stack is built on augmem's custom **AIST** model family —
+compact multimodal encoders that place audio, image, speech, and text in a
+single retrieval space. The current published model is
+[`augmem/AIST-87M`](https://huggingface.co/augmem/AIST-87M) (87M parameters,
+unified 1280-d embeddings with Matryoshka slices, merged native audio tower).
+The runtime in this repo currently auto-loads the earlier **ESS-AIST-81M**
+GGUF export (`augmem/ESS-AIST-81M-preview`); AIST-87M GGUF export/integration
+is pending. The repo also ships **AAIT-86M**, which bundles the preserved
+TE-86M trimodal retrieval checkpoint with an ingress-anchor head that emits
+anchor decisions (`CREATE / UPDATE / SPLIT / CLOSE / ABSTAIN`) at ingest time
+without changing the underlying retrieval behavior (zero retrieval delta vs
+the stage-1 checkpoint under the publication gate).
 
 Both models are distributed as custom `triembed` GGUF exports that generic
 `llama.cpp` cannot load; Cortext includes its own native GGUF tensor runtime
