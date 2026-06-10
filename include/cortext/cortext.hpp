@@ -204,8 +204,11 @@ public:
 
   /// @brief Caller-supplied inference dependencies, mirroring the Store /
   /// ObjectStore injection pattern. Roles left null resolve through the
-  /// built-in factory (model auto-discovery plus CORTEXT_SUMMARIZER /
-  /// CORTEXT_EXTRACTOR provider URIs).
+  /// built-in factory's local model auto-discovery; when both roles are
+  /// supplied, local model discovery is skipped entirely (remote-only
+  /// deployments need no local weights). Configuration mechanisms (CLI
+  /// flags, environment) belong to the application layer, which turns them
+  /// into instances before calling Create.
   struct InferenceOverrides
   {
     std::unique_ptr<Summarizer> summarizer;
@@ -219,6 +222,14 @@ public:
           std::shared_ptr<ObjectStore> object_store,
           const std::string &models_dir, std::shared_ptr<Clock> clock,
           InferenceOverrides inference);
+
+  /// @brief SQLite-path factory with caller-supplied clock and inference
+  /// dependencies.
+  static std::unique_ptr<Cortext> Create (const Config &cfg,
+                                          const std::string &db_path,
+                                          const std::string &models_dir,
+                                          std::shared_ptr<Clock> clock,
+                                          InferenceOverrides inference);
 
   /// @brief Factory with caller-supplied database and object stores.
   /// @param cfg Three-knob configuration.
@@ -352,6 +363,10 @@ private:
                     std::shared_ptr<Clock> clock);
   explicit Cortext (const Config &cfg, std::shared_ptr<Store> store,
                     std::shared_ptr<ObjectStore> object_store,
+                    const std::string &models_dir,
+                    std::shared_ptr<Clock> clock,
+                    InferenceOverrides inference);
+  explicit Cortext (const Config &cfg, const std::string &db_path,
                     const std::string &models_dir,
                     std::shared_ptr<Clock> clock,
                     InferenceOverrides inference);

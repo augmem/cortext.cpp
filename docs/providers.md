@@ -40,13 +40,18 @@ ollama://127.0.0.1:11435/gemma4:e4b                         Ollama server
 openai://api.example.com/v1/model                           OpenAI-compatible
 ```
 
-Role overrides come from the environment and compose with the legacy chain —
-roles without an override keep today's in-process selection:
+Configuration mechanisms live in the application layer, not the library:
+the library accepts instances (`Cortext::InferenceOverrides`, mirroring the
+Store/ObjectStore injection pattern), and applications turn their config
+strings into instances via the registry. The benchmark CLI exposes this as:
 
 ```
-CORTEXT_SUMMARIZER=ollama://127.0.0.1:11435/gemma4:e4b   # summarizer remote
-                                                          # extractor stays LiteRT
+cortext_julie_live_run --summarizer-provider ollama://127.0.0.1:11435/gemma4:e4b
+                       # extractor unspecified -> local auto-discovery
 ```
+
+When both roles are injected, local model discovery is skipped entirely, so
+remote-only deployments need no local weights.
 
 ### Capabilities are checked at resolve time
 

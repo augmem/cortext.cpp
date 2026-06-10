@@ -135,28 +135,4 @@ ResolveProvider (const std::string &uri, Role role, std::string *error_out)
   return provider;
 }
 
-std::optional<std::string>
-RoleUriFromEnvironment (Role role)
-{
-  const char *name = nullptr;
-  switch (role)
-    {
-    case Role::Summarizer:
-      name = "CORTEXT_SUMMARIZER";
-      break;
-    case Role::Extractor:
-      name = "CORTEXT_EXTRACTOR";
-      break;
-    case Role::Encoder:
-      name = "CORTEXT_ENCODER";
-      break;
-    }
-  const char *value = std::getenv (name);
-  if (value == nullptr || *value == '\0')
-    {
-      return std::nullopt;
-    }
-  return std::string (value);
-}
-
 } // namespace cortext::providers
