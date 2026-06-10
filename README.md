@@ -108,7 +108,7 @@ Where earlier synthetic-encoder claims did **not** survive the switch to real em
 - explicit consolidation passes for summary, label, and relation generation
 - graph-augmented retrieval combining embedding similarity with extracted semantics
 - native C++20 API plus a C ABI for bindings
-- a first-party multimodal embedding model (AIST-87M) as the required encoder, with optional local backends for deep consolidation
+- a first-party multimodal embedding model (AIST-87M) as the required encoder, and one baked deep-consolidation stack (Gemma-4-E2B) with a provider-injection seam for alternatives
 
 ## Embedding Model
 
@@ -285,36 +285,27 @@ PYTHONPATH=bindings/python python3 -c "import cortext; print(cortext.version())"
 - `CORTEXT_BUILD_EXAMPLES=ON|OFF` - build binaries under `examples/`
 - `CORTEXT_BUILD_NODE_BINDINGS=ON|OFF` - build the Node.js addon under `bindings/javascript`
 - `BUILD_WASM=ON|OFF` - configure the WebAssembly build
-- `CORTEXT_ENABLE_EMBEDDINGGEMMA=ON|OFF` - build the EmbeddingGemma encoder backend (not used by the engine; the AIST runtime always builds)
-- `CORTEXT_DISABLE_LITERT=ON|OFF` - disable LiteRT-LM-backed extractor/summarizer paths
-- `CORTEXT_DISABLE_OGA=ON|OFF` - disable onnxruntime-genai-backed Phi-4 paths
+- `CORTEXT_DISABLE_LITERT=ON|OFF` - disable the LiteRT-LM-backed deep-consolidation stack (inject a Summarizer/Extractor instead)
 - `CORTEXT_DISABLE_SHERPA_ONNX=ON|OFF` - disable sherpa-onnx audio integration
 
 ## Optional Local Runtimes
 
 Some features rely on optional local runtimes or model assets under `models/` and `third_party/`:
-- ONNX Runtime
-- LiteRT-LM
-- onnxruntime-genai
-- sherpa-onnx
-- `llama.cpp` GGUF support for EmbeddingGemma and Liquid deep-consolidation backends
+- LiteRT-LM (the Gemma deep-consolidation stack)
+- sherpa-onnx (audio integration)
 - the AIST encoder needs no external runtime - its `triembed` GGUF export runs on Cortext's built-in GGUF tensor runtime
 
-## Deep Consolidation Backends
+## Deep Consolidation
 
-Deep consolidation backend selection stays internal, but you can override it with environment variables:
-
-- `CORTEXT_DEEP_LLM_BACKEND=auto|gemma|lfm2|mixed`
-- `CORTEXT_LFM2_SUMMARIZER_MODEL=/abs/path/LFM2.5-1.2B-Instruct-Q4_K_M.gguf`
-- `CORTEXT_LFM2_EXTRACT_MODEL=/abs/path/LFM2.5-350M-Q4_K_M.gguf`
-- `CORTEXT_LLAMA_CPP_LOG_LEVEL=none|error|warn|info|debug`
-
-Current behavior:
-- `auto` prefers the mixed path when both stacks are available
-- the Liquid `llama.cpp` summarizer path now prefers `LFM2.5-1.2B-Instruct-GGUF`
-- the Liquid extractor path continues to prefer `LFM2.5-350M-GGUF`
-- if the preferred Liquid summarizer is not present, the resolver falls back to `LFM2.5-350M-GGUF`, then the older pinned `LFM2-2.6B-Transcript` summarizer
-- the mixed path uses Gemma/LiteRT-LM for summarization and Liquid/`llama.cpp` for extraction
+Summarization and label/relation extraction during deep consolidation run on
+one stack: Gemma-4-E2B via LiteRT-LM (`models/gemma4-e2b-litert/`). There is
+no backend selection. If you need a different summarizer or extractor (a
+remote provider, a different local model), supply it through the inference
+injection seam on `Cortext::Create` — the provider layer
+(`include/cortext/providers/`) verifies the implementation's declared
+capabilities against the role's contract at composition time, and injected
+components compose with the default stack per role (you can inject just a
+summarizer and keep the Gemma extractor, or both).
 
 ## Experiments And Docs
 

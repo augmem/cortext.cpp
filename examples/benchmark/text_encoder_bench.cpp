@@ -1,4 +1,3 @@
-#include <cortext/encoder/embeddinggemma.hpp>
 #include <cortext/models/aist_gguf_encoder.hpp>
 
 #include <algorithm>
@@ -22,7 +21,7 @@ namespace
 
 struct Options
 {
-  std::string encoder = "gemma";
+  std::string encoder = "aist";
   std::filesystem::path models_dir = "models";
   int iterations = 50;
   int warmup = 5;
@@ -33,18 +32,12 @@ struct Options
       = "This is a short embedding benchmark sentence for cortext.";
 };
 
-struct GemmaResolved
-{
-  std::filesystem::path model_path;
-  std::filesystem::path tokenizer_path;
-};
-
 void
 PrintUsage ()
 {
   std::cout
       << "Usage: cortext_text_encoder_bench [options]\n"
-      << "  --encoder gemma|ess-aist\n"
+      << "  --encoder aist\n"
       << "  --models-dir <path>\n"
       << "  --iterations <n>\n"
       << "  --warmup <n>\n"
@@ -107,84 +100,6 @@ ParseArgs (int argc, char *argv[])
   opts.warmup = std::max (0, opts.warmup);
   opts.parallelism = std::max (1, opts.parallelism);
   return opts;
-}
-
-std::optional<GemmaResolved>
-ResolveGemma (const std::filesystem::path &models_dir)
-{
-  const char *model_path_override
-      = std::getenv ("CORTEXT_EMBEDDINGGEMMA_MODEL_PATH");
-  if (model_path_override != nullptr && *model_path_override != '\0')
-    {
-      const std::filesystem::path model (model_path_override);
-      if (std::filesystem::exists (model))
-        {
-          return GemmaResolved{ model, {} };
-        }
-    }
-
-  const char *backend_override = std::getenv ("CORTEXT_EMBEDDINGGEMMA_BACKEND");
-  const std::string backend
-      = backend_override != nullptr && *backend_override != '\0'
-            ? std::string (backend_override)
-            : std::string ("llama.cpp");
-
-  std::vector<std::filesystem::path> roots{ models_dir };
-  std::filesystem::path tokenizer_name = "tokenizer.model";
-  bool require_tokenizer = true;
-  std::vector<std::filesystem::path> model_candidates;
-
-  if (backend == "onnx")
-    {
-      roots.push_back (models_dir / "embeddinggemma-300m-onnx");
-      model_candidates = {
-        std::filesystem::path ("onnx/model_q4.onnx"),
-        std::filesystem::path ("onnx/model_quantized.onnx"),
-        std::filesystem::path ("onnx/model.onnx"),
-      };
-    }
-  else if (backend == "llama.cpp" || backend == "llama")
-    {
-      require_tokenizer = false;
-      roots.push_back (models_dir / "llama_cpp");
-      model_candidates = {
-        std::filesystem::path ("mdbr-leaf-ir-q8_0.gguf"),
-        std::filesystem::path ("embeddinggemma-300M-Q8_0.gguf"),
-        std::filesystem::path ("embeddinggemma-300M-Q4_K_M.gguf"),
-      };
-    }
-  else if (backend == "litert" || backend == "tflite")
-    {
-      tokenizer_name = "sentencepiece.model";
-      roots.push_back (models_dir / "embeddinggemma-300m-litert");
-      model_candidates = {
-        std::filesystem::path ("embeddinggemma-300M_seq256_mixed-precision.tflite"),
-      };
-    }
-  else
-    {
-      throw std::runtime_error ("Unsupported EmbeddingGemma backend: " + backend);
-    }
-
-  for (const auto &root : roots)
-    {
-      const auto tokenizer
-          = require_tokenizer ? root / tokenizer_name : std::filesystem::path ();
-      if (require_tokenizer && !std::filesystem::exists (tokenizer))
-        {
-          continue;
-        }
-      for (const auto &model_rel : model_candidates)
-        {
-          const auto model = root / model_rel;
-          if (std::filesystem::exists (model))
-            {
-              return GemmaResolved{ model, tokenizer };
-            }
-        }
-    }
-
-  return std::nullopt;
 }
 
 double
@@ -311,27 +226,6 @@ MakeEncoder (const Options &opts, std::string &resolved_model,
   if (aist_encoder != nullptr)
     {
       *aist_encoder = nullptr;
-    }
-  if (opts.encoder == "gemma")
-    {
-#if defined(CORTEXT_ENABLE_EMBEDDINGGEMMA)
-      const auto resolved = ResolveGemma (opts.models_dir);
-      if (!resolved.has_value ())
-        {
-          throw std::runtime_error (
-              "EmbeddingGemma assets not found under "
-              + opts.models_dir.string ());
-        }
-      cortext::EmbeddingGemmaConfig cfg;
-      cfg.model_path = resolved->model_path.string ();
-      cfg.tokenizer_path = resolved->tokenizer_path.string ();
-      resolved_model = resolved->model_path.string ();
-      return std::make_unique<cortext::EmbeddingGemmaEncoder> (std::move (cfg));
-#else
-      throw std::runtime_error (
-          "EmbeddingGemma encoder is not built into this binary "
-          "(CORTEXT_ENABLE_EMBEDDINGGEMMA=OFF)");
-#endif
     }
   if (opts.encoder == "ess-aist" || opts.encoder == "aist")
     {

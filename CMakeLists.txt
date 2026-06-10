@@ -33,10 +33,8 @@ option(CORTEXT_EMBED_OBJSTORE "Embed sqlite-objstore extension" ON)
 option(CORTEXT_ENABLE_DYNAMIC_EXTENSIONS "Enable dynamic extension loading fallback" ON)
 option(CORTEXT_DISABLE_OPENTELEMETRY "Disable OpenTelemetry integration" OFF)
 option(CORTEXT_ENABLE_GEMMA_ORT "Enable ONNX Runtime for Gemma text generator" OFF)
-option(CORTEXT_DISABLE_OGA "Disable onnxruntime-genai for Phi-4 Extractor/Summarizer" OFF)
 option(CORTEXT_DISABLE_LITERT "Disable LiteRT-LM for Gemma Extractor/Summarizer" OFF)
 option(CORTEXT_DISABLE_SHERPA_ONNX "Disable sherpa-onnx ASR/TTS integration" OFF)
-option(CORTEXT_ENABLE_EMBEDDINGGEMMA "Build EmbeddingGemma encoder" ON)
 
 # Sanitizer options for catching memory bugs during development
 option(CORTEXT_ENABLE_ASAN "Enable AddressSanitizer" OFF)
@@ -211,14 +209,11 @@ add_library(cortext
     src/operations/accumulator_reset.cpp
     src/operations/spike_bypass.cpp
     # Extractor component
-    src/extractor/phi4_extractor.cpp
     src/extractor/gemma_extractor.cpp
     # Summarizer component
-    src/summarizer/phi4_summarizer.cpp
     src/summarizer/gemma_summarizer.cpp
-    # Deep consolidation LLM backends
+    # Deep consolidation stack (Gemma/LiteRT-LM)
     src/deep_llm/deep_llm_factory.cpp
-    src/deep_llm/lfm2_llama_backend.cpp
     # Embedding-model pin (precomputed vectors hard-fail on encoder mismatch)
     src/models/embedding_model_pin.cpp
     # Inference provider registry and legacy-interface adapters
@@ -321,16 +316,6 @@ if(APPLE)
   endif()
 endif()
 
-if(CORTEXT_ENABLE_EMBEDDINGGEMMA)
-  target_compile_definitions(cortext PUBLIC CORTEXT_ENABLE_EMBEDDINGGEMMA=1)
-  target_sources(cortext PRIVATE src/encoder/embeddinggemma.cpp)
-  if(CORTEXT_LLAMA_CPP_AVAILABLE)
-    target_compile_definitions(cortext PRIVATE CORTEXT_ENABLE_EMBEDDINGGEMMA_LLAMA_CPP=1)
-  else()
-    message(STATUS "llama.cpp library not found; EmbeddingGemma llama.cpp backend disabled")
-  endif()
-endif()
-
 # The AIST GGUF encoder is Cortext's required embedding model; its native
 # runtime always builds.
 target_sources(cortext PRIVATE src/models/aist_gguf_encoder.cpp)
@@ -340,7 +325,7 @@ if(NOT CORTEXT_DISABLE_SHERPA_ONNX)
 endif()
 add_library(cortext::cortext ALIAS cortext)
 
-if(CORTEXT_TARGET_IOS AND CORTEXT_DISABLE_LITERT AND CORTEXT_DISABLE_OGA)
+if(CORTEXT_TARGET_IOS AND CORTEXT_DISABLE_LITERT)
   set_source_files_properties(
     src/extractor/gemma_extractor.cpp
     src/summarizer/gemma_summarizer.cpp
@@ -586,144 +571,6 @@ if(CORTEXT_ENABLE_GEMMA_ORT)
   endif()
 endif()
 
-# EmbeddingGemma ONNX/LiteRT tokenizers need SentencePiece. The llama.cpp
-# backend uses the model vocabulary directly and does not depend on it.
-if(CORTEXT_ENABLE_EMBEDDINGGEMMA AND (CORTEXT_ENABLE_GEMMA_ORT OR NOT CORTEXT_DISABLE_LITERT))
-  set(CORTEXT_SENTENCEPIECE_INCLUDE_DIR "${CMAKE_BINARY_DIR}/bazel-output/external/sentencepiece")
-  set(CORTEXT_SENTENCEPIECE_PROTO_DIR "${CORTEXT_SENTENCEPIECE_INCLUDE_DIR}/builtin_pb")
-  set(CORTEXT_SENTENCEPIECE_LIB_DIR "${CMAKE_BINARY_DIR}/bazel-output/execroot/litert_lm/bazel-out/darwin_arm64-opt/bin/external/sentencepiece")
-  set(CORTEXT_SENTENCEPIECE_PROCESSOR_LIB "${CORTEXT_SENTENCEPIECE_LIB_DIR}/libsentencepiece_processor.a")
-  set(CORTEXT_SENTENCEPIECE_MODEL_PROTO_LIB "${CORTEXT_SENTENCEPIECE_LIB_DIR}/libsentencepiece_model_proto.a")
-  set(CORTEXT_SENTENCEPIECE_PROTO_LIB "${CORTEXT_SENTENCEPIECE_LIB_DIR}/libsentencepiece_proto.a")
-
-  foreach(sp_path
-      "${CORTEXT_SENTENCEPIECE_INCLUDE_DIR}"
-      "${CORTEXT_SENTENCEPIECE_PROTO_DIR}"
-      "${CORTEXT_SENTENCEPIECE_PROCESSOR_LIB}"
-      "${CORTEXT_SENTENCEPIECE_MODEL_PROTO_LIB}"
-      "${CORTEXT_SENTENCEPIECE_PROTO_LIB}")
-    if(NOT EXISTS "${sp_path}")
-      message(FATAL_ERROR "EmbeddingGemma requires SentencePiece artifact: ${sp_path}")
-    endif()
-  endforeach()
-
-  target_include_directories(cortext PRIVATE
-    "${CORTEXT_SENTENCEPIECE_INCLUDE_DIR}"
-    "${CORTEXT_SENTENCEPIECE_PROTO_DIR}"
-  )
-  target_link_libraries(cortext PRIVATE
-    "${CORTEXT_SENTENCEPIECE_PROCESSOR_LIB}"
-    "${CORTEXT_SENTENCEPIECE_MODEL_PROTO_LIB}"
-    "${CORTEXT_SENTENCEPIECE_PROTO_LIB}"
-    protobuf::libprotobuf
-  )
-  get_target_property(CORTEXT_PROTOBUF_INCLUDE_DIRS protobuf::libprotobuf INTERFACE_INCLUDE_DIRECTORIES)
-  if(CORTEXT_PROTOBUF_INCLUDE_DIRS)
-    target_include_directories(cortext BEFORE PRIVATE ${CORTEXT_PROTOBUF_INCLUDE_DIRS})
-  endif()
-  if(TARGET absl::status)
-    get_target_property(CORTEXT_ABSL_INCLUDE_DIRS absl::status INTERFACE_INCLUDE_DIRECTORIES)
-    if(CORTEXT_ABSL_INCLUDE_DIRS)
-      target_include_directories(cortext BEFORE PRIVATE ${CORTEXT_ABSL_INCLUDE_DIRS})
-    endif()
-  endif()
-  if(TARGET absl::status)
-    target_link_libraries(cortext PRIVATE absl::status)
-  endif()
-  if(TARGET absl::statusor)
-    target_link_libraries(cortext PRIVATE absl::statusor)
-  endif()
-endif()
-
-if(CORTEXT_ENABLE_EMBEDDINGGEMMA AND CORTEXT_ENABLE_GEMMA_ORT)
-  target_compile_definitions(cortext PUBLIC CORTEXT_ENABLE_EMBEDDINGGEMMA_ORT=1)
-endif()
-
-# Optional onnxruntime-genai (OGA) integration for Phi-4 Extractor/Summarizer
-# Enabled by default; set CORTEXT_DISABLE_OGA=ON to disable
-if(CORTEXT_DISABLE_OGA)
-  target_compile_definitions(cortext PUBLIC CORTEXT_DISABLE_OGA=1)
-endif()
-
-if(NOT CORTEXT_DISABLE_OGA AND NOT EMSCRIPTEN)
-  # On Apple Silicon, explicitly set CMAKE_OSX_ARCHITECTURES if not already set
-  # This is needed for OGA's ortlib.cmake to detect the correct architecture
-  if(APPLE AND CMAKE_SYSTEM_PROCESSOR STREQUAL "arm64" AND NOT CMAKE_OSX_ARCHITECTURES)
-    set(CMAKE_OSX_ARCHITECTURES "arm64" CACHE STRING "Build architecture" FORCE)
-  endif()
-
-  # Reuse the Gemma ORT build when it is enabled to avoid runtime mismatches.
-  if(CORTEXT_ENABLE_GEMMA_ORT)
-    # OGA expects headers directly in include/, but ORT installs to include/onnxruntime/
-    # Copy headers to the expected location if not already there
-    if(NOT EXISTS "${CORTEXT_ORT_INSTALL_DIR}/include/onnxruntime_c_api.h")
-      file(GLOB ORT_HEADERS_TO_COPY "${CORTEXT_ORT_INSTALL_DIR}/include/onnxruntime/*.h")
-      if(ORT_HEADERS_TO_COPY)
-        file(COPY ${ORT_HEADERS_TO_COPY} DESTINATION "${CORTEXT_ORT_INSTALL_DIR}/include/")
-        message(STATUS "Copied ORT headers to ${CORTEXT_ORT_INSTALL_DIR}/include/")
-      endif()
-    endif()
-    set(ORT_HOME "${CORTEXT_ORT_INSTALL_DIR}" CACHE PATH "ONNX Runtime home" FORCE)
-    message(STATUS "Using ONNX Runtime from Gemma ORT build: ${ORT_HOME}")
-  else()
-    # Download ORT from GitHub releases (CPU-only) when no local ORT build is enabled.
-    set(ORT_VERSION "1.23.0")
-    if(APPLE)
-      if(CMAKE_OSX_ARCHITECTURES STREQUAL "arm64" OR CMAKE_SYSTEM_PROCESSOR STREQUAL "arm64")
-        set(ORT_PACKAGE "onnxruntime-osx-arm64-${ORT_VERSION}")
-      else()
-        set(ORT_PACKAGE "onnxruntime-osx-x86_64-${ORT_VERSION}")
-      endif()
-    elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-      if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64")
-        set(ORT_PACKAGE "onnxruntime-linux-aarch64-${ORT_VERSION}")
-      else()
-        set(ORT_PACKAGE "onnxruntime-linux-x64-${ORT_VERSION}")
-      endif()
-    else()
-      message(FATAL_ERROR "Unsupported platform for OGA")
-    endif()
-
-    set(ORT_URL "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/${ORT_PACKAGE}.tgz")
-    set(ORT_DOWNLOAD_DIR "${CMAKE_BINARY_DIR}/ort-download")
-
-    if(NOT EXISTS "${ORT_DOWNLOAD_DIR}/${ORT_PACKAGE}")
-      message(STATUS "Downloading ONNX Runtime ${ORT_VERSION}...")
-      file(DOWNLOAD ${ORT_URL} "${ORT_DOWNLOAD_DIR}/ort.tgz" SHOW_PROGRESS)
-      file(ARCHIVE_EXTRACT INPUT "${ORT_DOWNLOAD_DIR}/ort.tgz" DESTINATION "${ORT_DOWNLOAD_DIR}")
-    endif()
-
-    # Set ORT_HOME for OGA - must be set as CACHE FORCE to propagate to subdirectory
-    set(ORT_HOME "${ORT_DOWNLOAD_DIR}/${ORT_PACKAGE}" CACHE PATH "ONNX Runtime home" FORCE)
-    message(STATUS "Using downloaded ONNX Runtime from: ${ORT_HOME}")
-  endif()
-
-  # Save and disable BUILD_TESTING for OGA subdirectory
-  set(_cortext_saved_testing_for_oga "${BUILD_TESTING}")
-
-  # Configure OGA build options (must be set as CACHE FORCE before add_subdirectory)
-  set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
-  set(ENABLE_TESTS OFF CACHE BOOL "" FORCE)
-  set(ENABLE_PYTHON OFF CACHE BOOL "" FORCE)
-  set(ENABLE_MODEL_BENCHMARK OFF CACHE BOOL "" FORCE)
-  # CPU-only build, no CUDA/DML/ROCm
-  set(USE_CUDA OFF CACHE BOOL "" FORCE)
-  set(USE_DML OFF CACHE BOOL "" FORCE)
-  set(USE_ROCM OFF CACHE BOOL "" FORCE)
-  # Enable llguidance for JSON schema constrained decoding
-  set(USE_GUIDANCE ON CACHE BOOL "" FORCE)
-
-  add_subdirectory(third_party/onnxruntime-genai EXCLUDE_FROM_ALL)
-
-  # Restore BUILD_TESTING
-  set(BUILD_TESTING "${_cortext_saved_testing_for_oga}" CACHE BOOL "Build tests" FORCE)
-
-  # Add OGA include directories
-  target_include_directories(cortext PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/onnxruntime-genai/src
-  )
-  target_link_libraries(cortext PRIVATE onnxruntime-genai)
-endif()
 
 # Optional sherpa-onnx integration for ASR/TTS
 # Enabled by default; set CORTEXT_DISABLE_SHERPA_ONNX=ON to disable

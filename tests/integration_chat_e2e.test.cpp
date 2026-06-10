@@ -81,7 +81,6 @@
 #include <cortext/store/utils.hpp>
 #include <cortext/summarizer/summarizer.hpp>
 
-#include "../src/deep_llm/lfm2_llama_backend.hpp"
 #include "../src/operations/eviction_ablation.hpp"
 #include "../src/streaming_text_probe.hpp"
 
@@ -1965,68 +1964,6 @@ TEST_CASE (
       {});
   REQUIRE_FALSE (invalid_label_edges.empty ());
   REQUIRE (cortext::testing::GetInt64 (invalid_label_edges[0], "c") == 0);
-}
-
-TEST_CASE ("Integration: LFM2 summarizer honors stop token during generation",
-           "[integration][e2e][lfm2][cancel]")
-{
-#if !defined(CORTEXT_ENABLE_LLAMA_CPP)
-  SKIP ("llama.cpp backend not enabled in this test build");
-#else
-  namespace fs = std::filesystem;
-  const fs::path model_path
-      = fs::path (RepoModelsDir ()) / "LFM2.5-350M-GGUF"
-        / "LFM2.5-350M-Q4_K_M.gguf";
-  if (!fs::exists (model_path))
-    {
-      SKIP ("LFM2.5-350M model not present");
-    }
-
-  cortext::Lfm2LlamaSummarizer summarizer (model_path.string ());
-  if (!summarizer.IsAvailable ())
-    {
-      SKIP ("LFM2 summarizer unavailable in this test environment");
-    }
-
-  std::vector<std::string> texts;
-  texts.reserve (12);
-  for (int i = 0; i < 12; ++i)
-    {
-      texts.push_back (
-          "User: I am testing cancellation during deep consolidation and need "
-          "the summarizer to keep generating long enough to interrupt. Topic "
-          "block " + std::to_string (i)
-          + " mentions NISC, enterprise identity governance, pizza, and "
-            "bitemporal memory facts in a verbose repeated way.");
-    }
-
-  cortext::StopSource stop_source;
-  std::atomic<bool> cancelled { false };
-  std::optional<std::string> thread_error;
-
-  std::thread worker ([&] {
-    try
-      {
-        cortext::internal::ScopedStopToken scoped (stop_source.get_token ());
-        (void)summarizer.SummarizeTextsLimited (texts, 0);
-      }
-    catch (const cortext::internal::CancellationError &)
-      {
-        cancelled.store (true);
-      }
-    catch (const std::exception &ex)
-      {
-        thread_error = ex.what ();
-      }
-  });
-
-  std::this_thread::sleep_for (std::chrono::milliseconds (50));
-  (void)stop_source.request_stop ();
-  worker.join ();
-
-  REQUIRE_FALSE (thread_error.has_value ());
-  REQUIRE (cancelled.load ());
-#endif
 }
 
 TEST_CASE (
