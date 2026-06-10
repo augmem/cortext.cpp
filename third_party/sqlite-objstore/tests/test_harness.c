@@ -1,3 +1,7 @@
+#if !defined(_WIN32)
+#define _POSIX_C_SOURCE 200809L
+#endif
+
 #include "test_harness.h"
 
 #include <ctype.h>
@@ -15,6 +19,10 @@
 #include "objstore/objstore.h"
 #include "test_support.h"
 #include "unity.h"
+
+#ifndef PATH_MAX
+#define PATH_MAX 4096
+#endif
 
 static objstore_fixture_kind g_fixture_kind = OBJSTORE_FIXTURE_SMOKE;
 static sqlite3 *g_sqlite_backend_db = NULL;
@@ -191,17 +199,33 @@ objstore_create_temp_root (const char *tag)
     {
       tag = "objstore-temp-";
     }
-  char *tmpl = sqlite3_mprintf ("/tmp/%sXXXXXX", tag);
-  if (tmpl == NULL)
+  for (int attempt = 0; attempt < 16; ++attempt)
     {
-      return NULL;
-    }
-  if (mkdtemp (tmpl) == NULL)
-    {
+      unsigned char random_bytes[6] = { 0 };
+      char random_hex[sizeof (random_bytes) * 2 + 1];
+      sqlite3_randomness ((int)sizeof (random_bytes), random_bytes);
+      for (size_t i = 0; i < sizeof (random_bytes); ++i)
+        {
+          sqlite3_snprintf (3, &random_hex[i * 2], "%02x", random_bytes[i]);
+        }
+      random_hex[sizeof (random_hex) - 1] = '\0';
+
+      char *tmpl = sqlite3_mprintf ("/tmp/%s%s", tag, random_hex);
+      if (tmpl == NULL)
+        {
+          return NULL;
+        }
+      if (mkdir (tmpl, 0700) == 0)
+        {
+          return tmpl;
+        }
       sqlite3_free (tmpl);
-      return NULL;
+      if (errno != EEXIST)
+        {
+          return NULL;
+        }
     }
-  return tmpl;
+  return NULL;
 }
 
 void
@@ -424,4 +448,3 @@ main (void)
   object_manager_register_tests ();
   return UNITY_END ();
 }
-

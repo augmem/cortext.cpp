@@ -254,6 +254,165 @@ test_file_backend_vtab_recovers_pending_commit (void)
   sqlite3_free (base);
 }
 
+static void
+test_file_backend_vtab_savepoint_rollback_rewinds_inner_frame (void)
+{
+  char *base = NULL;
+  char *objects_root = NULL;
+  char *staging_root = NULL;
+  sqlite3 *db = objstore_open_file_backend_db (
+      &base, &objects_root, &staging_root, "file-vtab-savepoint");
+  objstore_exec_or_fail (db, "CREATE VIRTUAL TABLE store USING objstore();");
+
+  const uint8_t outer_payload[] = { 0x11 };
+  const uint8_t inner_payload[] = { 0x22 };
+  const uint8_t after_payload[] = { 0x33 };
+  const uint8_t outer_id[OBJSTORE_ID_SIZE] = {
+    0x10, 0x11, 0x12, 0x13, 0x21, 0x22, 0x23, 0x24, 0x31, 0x32, 0x33,
+    0x34, 0x41, 0x42, 0x43, 0x44, 0x51, 0x52, 0x53, 0x54, 0x61, 0x62,
+    0x63, 0x64, 0x71, 0x72, 0x73, 0x74, 0x81, 0x82, 0x83, 0x84,
+  };
+  const uint8_t inner_id[OBJSTORE_ID_SIZE] = {
+    0x20, 0x21, 0x22, 0x23, 0x31, 0x32, 0x33, 0x34, 0x41, 0x42, 0x43,
+    0x44, 0x51, 0x52, 0x53, 0x54, 0x61, 0x62, 0x63, 0x64, 0x71, 0x72,
+    0x73, 0x74, 0x81, 0x82, 0x83, 0x84, 0x91, 0x92, 0x93, 0x94,
+  };
+  const uint8_t after_id[OBJSTORE_ID_SIZE] = {
+    0x30, 0x31, 0x32, 0x33, 0x41, 0x42, 0x43, 0x44, 0x51, 0x52, 0x53,
+    0x54, 0x61, 0x62, 0x63, 0x64, 0x71, 0x72, 0x73, 0x74, 0x81, 0x82,
+    0x83, 0x84, 0x91, 0x92, 0x93, 0x94, 0xA1, 0xA2, 0xA3, 0xA4,
+  };
+
+  sqlite3_stmt *stmt = NULL;
+  objstore_exec_or_fail (db, "BEGIN;");
+
+  TEST_ASSERT_EQUAL_INT (
+      SQLITE_OK,
+      sqlite3_prepare_v2 (db, "INSERT INTO store(id, data) VALUES(?1, ?2);",
+                          -1, &stmt, NULL));
+  TEST_ASSERT_EQUAL_INT (
+      SQLITE_OK,
+      sqlite3_bind_blob (stmt, 1, outer_id, OBJSTORE_ID_SIZE, SQLITE_STATIC));
+  TEST_ASSERT_EQUAL_INT (
+      SQLITE_OK,
+      sqlite3_bind_blob (stmt, 2, outer_payload, (int)sizeof (outer_payload),
+                         SQLITE_STATIC));
+  TEST_ASSERT_EQUAL_INT (SQLITE_DONE, sqlite3_step (stmt));
+  sqlite3_finalize (stmt);
+
+  objstore_exec_or_fail (db, "SAVEPOINT s1;");
+
+  TEST_ASSERT_EQUAL_INT (
+      SQLITE_OK,
+      sqlite3_prepare_v2 (db, "INSERT INTO store(id, data) VALUES(?1, ?2);",
+                          -1, &stmt, NULL));
+  TEST_ASSERT_EQUAL_INT (
+      SQLITE_OK,
+      sqlite3_bind_blob (stmt, 1, inner_id, OBJSTORE_ID_SIZE, SQLITE_STATIC));
+  TEST_ASSERT_EQUAL_INT (
+      SQLITE_OK,
+      sqlite3_bind_blob (stmt, 2, inner_payload, (int)sizeof (inner_payload),
+                         SQLITE_STATIC));
+  TEST_ASSERT_EQUAL_INT (SQLITE_DONE, sqlite3_step (stmt));
+  sqlite3_finalize (stmt);
+
+  TEST_ASSERT_EQUAL_INT (1, objstore_exists_helper (db, outer_id));
+  TEST_ASSERT_EQUAL_INT (1, objstore_exists_helper (db, inner_id));
+
+  objstore_exec_or_fail (db, "ROLLBACK TO s1;");
+  TEST_ASSERT_EQUAL_INT (1, objstore_exists_helper (db, outer_id));
+  TEST_ASSERT_EQUAL_INT (0, objstore_exists_helper (db, inner_id));
+
+  TEST_ASSERT_EQUAL_INT (
+      SQLITE_OK,
+      sqlite3_prepare_v2 (db, "INSERT INTO store(id, data) VALUES(?1, ?2);",
+                          -1, &stmt, NULL));
+  TEST_ASSERT_EQUAL_INT (
+      SQLITE_OK,
+      sqlite3_bind_blob (stmt, 1, after_id, OBJSTORE_ID_SIZE, SQLITE_STATIC));
+  TEST_ASSERT_EQUAL_INT (
+      SQLITE_OK,
+      sqlite3_bind_blob (stmt, 2, after_payload, (int)sizeof (after_payload),
+                         SQLITE_STATIC));
+  TEST_ASSERT_EQUAL_INT (SQLITE_DONE, sqlite3_step (stmt));
+  sqlite3_finalize (stmt);
+
+  objstore_exec_or_fail (db, "RELEASE s1;");
+  objstore_exec_or_fail (db, "COMMIT;");
+
+  TEST_ASSERT_EQUAL_INT (1, objstore_exists_helper (db, outer_id));
+  TEST_ASSERT_EQUAL_INT (0, objstore_exists_helper (db, inner_id));
+  TEST_ASSERT_EQUAL_INT (1, objstore_exists_helper (db, after_id));
+
+  objstore_exec_or_fail (db, "DROP TABLE store;");
+  sqlite3_close (db);
+  TEST_ASSERT_EQUAL_INT (0, objstore_remove_tree (base));
+  sqlite3_free (objects_root);
+  sqlite3_free (staging_root);
+  sqlite3_free (base);
+}
+
+static void
+test_file_backend_vtab_savepoint_rollback_restores_outer_delete_target (void)
+{
+  char *base = NULL;
+  char *objects_root = NULL;
+  char *staging_root = NULL;
+  sqlite3 *db = objstore_open_file_backend_db (
+      &base, &objects_root, &staging_root, "file-vtab-savepoint-delete");
+  objstore_exec_or_fail (db, "CREATE VIRTUAL TABLE store USING objstore();");
+
+  const uint8_t payload[] = { 0x91, 0x92, 0x93 };
+  const uint8_t id[OBJSTORE_ID_SIZE] = {
+    0xB1, 0xB2, 0xB3, 0xB4, 0x11, 0x12, 0x13, 0x14, 0x21, 0x22, 0x23,
+    0x24, 0x31, 0x32, 0x33, 0x34, 0x41, 0x42, 0x43, 0x44, 0x51, 0x52,
+    0x53, 0x54, 0x61, 0x62, 0x63, 0x64, 0x71, 0x72, 0x73, 0x74,
+  };
+
+  sqlite3_stmt *stmt = NULL;
+  objstore_exec_or_fail (db, "BEGIN;");
+
+  TEST_ASSERT_EQUAL_INT (
+      SQLITE_OK,
+      sqlite3_prepare_v2 (db, "INSERT INTO store(id, data) VALUES(?1, ?2);",
+                          -1, &stmt, NULL));
+  TEST_ASSERT_EQUAL_INT (
+      SQLITE_OK,
+      sqlite3_bind_blob (stmt, 1, id, OBJSTORE_ID_SIZE, SQLITE_STATIC));
+  TEST_ASSERT_EQUAL_INT (
+      SQLITE_OK,
+      sqlite3_bind_blob (stmt, 2, payload, (int)sizeof (payload),
+                         SQLITE_STATIC));
+  TEST_ASSERT_EQUAL_INT (SQLITE_DONE, sqlite3_step (stmt));
+  sqlite3_finalize (stmt);
+
+  objstore_exec_or_fail (db, "SAVEPOINT s1;");
+  TEST_ASSERT_EQUAL_INT (
+      SQLITE_OK, sqlite3_prepare_v2 (db, "DELETE FROM store WHERE id = ?1;",
+                                     -1, &stmt, NULL));
+  TEST_ASSERT_EQUAL_INT (
+      SQLITE_OK,
+      sqlite3_bind_blob (stmt, 1, id, OBJSTORE_ID_SIZE, SQLITE_STATIC));
+  TEST_ASSERT_EQUAL_INT (SQLITE_DONE, sqlite3_step (stmt));
+  sqlite3_finalize (stmt);
+
+  TEST_ASSERT_EQUAL_INT (0, objstore_exists_helper (db, id));
+
+  objstore_exec_or_fail (db, "ROLLBACK TO s1;");
+  TEST_ASSERT_EQUAL_INT (1, objstore_exists_helper (db, id));
+
+  objstore_exec_or_fail (db, "RELEASE s1;");
+  objstore_exec_or_fail (db, "COMMIT;");
+  TEST_ASSERT_EQUAL_INT (1, objstore_exists_helper (db, id));
+
+  objstore_exec_or_fail (db, "DROP TABLE store;");
+  sqlite3_close (db);
+  TEST_ASSERT_EQUAL_INT (0, objstore_remove_tree (base));
+  sqlite3_free (objects_root);
+  sqlite3_free (staging_root);
+  sqlite3_free (base);
+}
+
 void
 file_backend_vtab_register_tests (void)
 {
@@ -262,4 +421,7 @@ file_backend_vtab_register_tests (void)
   RUN_TEST (test_objstore_runtime_reconfigures_file_backend);
   RUN_TEST (test_file_backend_vtab_commit_and_rollback);
   RUN_TEST (test_file_backend_vtab_recovers_pending_commit);
+  RUN_TEST (test_file_backend_vtab_savepoint_rollback_rewinds_inner_frame);
+  RUN_TEST (
+      test_file_backend_vtab_savepoint_rollback_restores_outer_delete_target);
 }

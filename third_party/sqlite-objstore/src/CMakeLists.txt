@@ -113,6 +113,8 @@ if(OBJSTORE_BUILD_SHARED)
     set_target_properties(objstore_shared
         PROPERTIES
             OUTPUT_NAME objstore
+            VERSION ${PROJECT_VERSION}
+            SOVERSION ${PROJECT_VERSION_MAJOR}
             EXPORT_NAME objstore_shared
     )
     target_link_libraries(objstore INTERFACE objstore_shared)
@@ -144,6 +146,9 @@ install(TARGETS ${_objstore_install_targets}
         ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
         LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
         RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+
+install(TARGETS objstore
+        EXPORT objstoreTargets)
 
 install(DIRECTORY ${PROJECT_SOURCE_DIR}/include/
         DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})

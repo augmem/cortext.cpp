@@ -30,6 +30,20 @@ struct objstore_txn_snapshot
   size_t count;
 };
 
+typedef enum objstore_txn_snapshot_slot_state
+{
+  OBJSTORE_TXN_SNAPSHOT_SLOT_EMPTY = 0,
+  OBJSTORE_TXN_SNAPSHOT_SLOT_OCCUPIED = 1,
+  OBJSTORE_TXN_SNAPSHOT_SLOT_TOMBSTONE = 2,
+} objstore_txn_snapshot_slot_state;
+
+typedef struct objstore_txn_snapshot_slot
+{
+  objstore_id id;
+  size_t snapshot_index;
+  objstore_txn_snapshot_slot_state state;
+} objstore_txn_snapshot_slot;
+
 static int
 objstore_txn_log_reserve_entries (objstore_txn_log *log)
 {
@@ -89,6 +103,65 @@ static ptrdiff_t
 objstore_txn_log_find_latest_index (const objstore_txn_log *log,
                                     const objstore_id *id,
                                     sqlite3_uint64 sequence_limit);
+
+static sqlite3_uint64
+objstore_txn_snapshot_hash_id (const objstore_id *id)
+{
+  sqlite3_uint64 hash = 1469598103934665603ull;
+  if (id == NULL)
+    {
+      return hash;
+    }
+  for (size_t i = 0; i < OBJSTORE_ID_SIZE; ++i)
+    {
+      hash ^= (sqlite3_uint64)id->bytes[i];
+      hash *= 1099511628211ull;
+    }
+  return hash;
+}
+
+static size_t
+objstore_txn_snapshot_table_capacity (size_t entry_count)
+{
+  size_t capacity = 16;
+  while (capacity < entry_count * 2)
+    {
+      capacity *= 2;
+    }
+  return capacity;
+}
+
+static size_t
+objstore_txn_snapshot_find_slot (objstore_txn_snapshot_slot *slots,
+                                 size_t slot_count, const objstore_id *id,
+                                 bool *out_found)
+{
+  size_t first_tombstone = SIZE_MAX;
+  size_t index
+      = (size_t)(objstore_txn_snapshot_hash_id (id) & (slot_count - 1));
+  for (;;)
+    {
+      objstore_txn_snapshot_slot *slot = &slots[index];
+      if (slot->state == OBJSTORE_TXN_SNAPSHOT_SLOT_EMPTY)
+        {
+          *out_found = false;
+          return (first_tombstone != SIZE_MAX) ? first_tombstone : index;
+        }
+      if (slot->state == OBJSTORE_TXN_SNAPSHOT_SLOT_TOMBSTONE)
+        {
+          if (first_tombstone == SIZE_MAX)
+            {
+              first_tombstone = index;
+            }
+        }
+      else if (memcmp (slot->id.bytes, id->bytes, OBJSTORE_ID_SIZE) == 0)
+        {
+          *out_found = true;
+          return index;
+        }
+      index = (index + 1) & (slot_count - 1);
+    }
+}
 
 int
 objstore_txn_log_create (sqlite3 *db, const objstore_config *config,
@@ -219,7 +292,8 @@ objstore_txn_log_state_for_id (const objstore_txn_log *log,
                                const objstore_id *id,
                                sqlite3_uint64 sequence_limit)
 {
-  ssize_t index = objstore_txn_log_find_latest_index (log, id, sequence_limit);
+  ptrdiff_t index = objstore_txn_log_find_latest_index (log, id,
+                                                        sequence_limit);
   if (index < 0)
     {
       return OBJSTORE_TXN_LOOKUP_NONE;
@@ -363,6 +437,17 @@ objstore_txn_snapshot_build (const objstore_txn_log *log,
       objstore_txn_snapshot_destroy (snapshot);
       return NULL;
     }
+  size_t slot_count = objstore_txn_snapshot_table_capacity (log->entry_count);
+  objstore_txn_snapshot_slot *slots
+      = sqlite3_malloc64 (slot_count * sizeof (*slots));
+  if (slots == NULL)
+    {
+      objstore_txn_snapshot_destroy (snapshot);
+      return NULL;
+    }
+  memset (slots, 0, slot_count * sizeof (*slots));
+  size_t append_count = 0;
+  size_t live_count = 0;
   for (size_t i = 0; i < log->entry_count; ++i)
     {
       const objstore_txn_entry_internal *entry = &log->entries[i];
@@ -370,44 +455,52 @@ objstore_txn_snapshot_build (const objstore_txn_log *log,
         {
           break;
         }
-      ptrdiff_t found = -1;
-      for (size_t j = 0; j < snapshot->count; ++j)
-        {
-          const objstore_txn_entry_internal *existing
-              = &log->entries[snapshot->op_indexes[j]];
-          if (memcmp (existing->pub.id.bytes, entry->pub.id.bytes,
-                      OBJSTORE_ID_SIZE)
-              == 0)
-            {
-              found = (ssize_t)j;
-              break;
-            }
-        }
+      bool found = false;
+      size_t slot_index = objstore_txn_snapshot_find_slot (
+          slots, slot_count, &entry->pub.id, &found);
       if (entry->pub.kind == OBJSTORE_TXN_ENTRY_DELETE)
         {
-          if (found >= 0)
+          if (found)
             {
-              size_t idx = (size_t)found;
-              if (idx + 1 < snapshot->count)
-                {
-                  memmove (&snapshot->op_indexes[idx],
-                           &snapshot->op_indexes[idx + 1],
-                           (snapshot->count - idx - 1)
-                               * sizeof (*snapshot->op_indexes));
-                }
-              --snapshot->count;
+              size_t snapshot_index = slots[slot_index].snapshot_index;
+              snapshot->op_indexes[snapshot_index] = SIZE_MAX;
+              slots[slot_index].state = OBJSTORE_TXN_SNAPSHOT_SLOT_TOMBSTONE;
+              slots[slot_index].snapshot_index = SIZE_MAX;
+              --live_count;
             }
           continue;
         }
-      if (found >= 0)
+      if (found)
         {
-          snapshot->op_indexes[(size_t)found] = i;
+          snapshot->op_indexes[slots[slot_index].snapshot_index] = i;
         }
       else
         {
-          snapshot->op_indexes[snapshot->count++] = i;
+          slots[slot_index].id = entry->pub.id;
+          slots[slot_index].snapshot_index = append_count;
+          slots[slot_index].state = OBJSTORE_TXN_SNAPSHOT_SLOT_OCCUPIED;
+          snapshot->op_indexes[append_count++] = i;
+          ++live_count;
         }
     }
+  if (live_count != append_count)
+    {
+      size_t write_index = 0;
+      for (size_t read_index = 0; read_index < append_count; ++read_index)
+        {
+          if (snapshot->op_indexes[read_index] == SIZE_MAX)
+            {
+              continue;
+            }
+          snapshot->op_indexes[write_index++] = snapshot->op_indexes[read_index];
+        }
+      snapshot->count = write_index;
+    }
+  else
+    {
+      snapshot->count = append_count;
+    }
+  sqlite3_free (slots);
   return snapshot;
 }
 

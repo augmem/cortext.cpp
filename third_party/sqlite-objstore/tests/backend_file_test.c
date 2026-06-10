@@ -1,3 +1,7 @@
+#if !defined(_WIN32)
+#define _POSIX_C_SOURCE 200809L
+#endif
+
 #include "unity.h"
 
 #include <dirent.h>
@@ -114,18 +118,34 @@ id_to_hex (const objstore_id *id, char *hex_out)
 static char *
 create_temp_dir (void)
 {
-  char tmpl[] = "/tmp/objstore-file-backend-XXXXXX";
-  char *path = sqlite3_mprintf ("%s", tmpl);
-  if (path == NULL)
+  for (int attempt = 0; attempt < 16; ++attempt)
     {
-      return NULL;
-    }
-  if (mkdtemp (path) == NULL)
-    {
+      unsigned char random_bytes[6] = { 0 };
+      char random_hex[sizeof (random_bytes) * 2 + 1];
+      sqlite3_randomness ((int)sizeof (random_bytes), random_bytes);
+      for (size_t i = 0; i < sizeof (random_bytes); ++i)
+        {
+          sqlite3_snprintf (3, &random_hex[i * 2], "%02x", random_bytes[i]);
+        }
+      random_hex[sizeof (random_hex) - 1] = '\0';
+
+      char *path
+          = sqlite3_mprintf ("/tmp/objstore-file-backend-%s", random_hex);
+      if (path == NULL)
+        {
+          return NULL;
+        }
+      if (mkdir (path, 0700) == 0)
+        {
+          return path;
+        }
       sqlite3_free (path);
-      return NULL;
+      if (errno != EEXIST)
+        {
+          return NULL;
+        }
     }
-  return path;
+  return NULL;
 }
 
 static int
@@ -207,6 +227,34 @@ compose_paths (char *base, char **objects_root, char **staging_root)
   *staging_root = (*objects_root != NULL)
                       ? sqlite3_mprintf ("%s/.staging", *objects_root)
                       : NULL;
+}
+
+static void
+rowidx_entry_path (const char *objects_root, const objstore_id *id,
+                   char **out_path)
+{
+  unsigned char prefix[OBJSTORE_ROWID_PREFIX_SIZE];
+  objstore_rowid_prefix_from_id (id, prefix);
+  char prefix_hex[OBJSTORE_ROWID_HEX_CHARS + 1];
+  static const char digits[] = "0123456789abcdef";
+  for (size_t i = 0; i < OBJSTORE_ROWID_PREFIX_SIZE; ++i)
+    {
+      prefix_hex[i * 2] = digits[(prefix[i] >> 4) & 0x0F];
+      prefix_hex[i * 2 + 1] = digits[prefix[i] & 0x0F];
+    }
+  prefix_hex[OBJSTORE_ROWID_HEX_CHARS] = '\0';
+
+  char shard_name[3] = { prefix_hex[0], prefix_hex[1], '\0' };
+  char hex_id[OBJSTORE_ID_SIZE * 2 + 1];
+  id_to_hex (id, hex_id);
+
+  char *row_dir = sqlite3_mprintf ("%s/rowidx/%s/%s", objects_root, shard_name,
+                                   prefix_hex);
+  TEST_ASSERT_NOT_NULL (row_dir);
+  ensure_dir (row_dir);
+  *out_path = sqlite3_mprintf ("%s/%s", row_dir, hex_id);
+  sqlite3_free (row_dir);
+  TEST_ASSERT_NOT_NULL (*out_path);
 }
 
 static void
@@ -320,6 +368,90 @@ file_backend_roundtrip (void)
                             (uint64_t)writer.length);
   TEST_ASSERT_EQUAL_MEMORY (payload, writer.data, sizeof (payload));
   free (writer.data);
+
+  shutdown_file_backend (base, objects_root, staging_root, db, backend, env);
+}
+
+static void
+file_backend_range_reads (void)
+{
+  char *base = NULL;
+  char *objects_root = NULL;
+  char *staging_root = NULL;
+  sqlite3 *db = NULL;
+  const objstore_backend *backend = NULL;
+  objstore_backend_env *env = NULL;
+  init_file_backend (&base, &objects_root, &staging_root, &db, &backend, &env);
+
+  objstore_id id = make_id (0x62);
+  uint8_t payload[] = { 1, 2, 3, 4, 5, 6 };
+  buffer_reader reader
+      = { .data = payload, .size = sizeof (payload), .offset = 0 };
+  objstore_stream_reader stream_reader
+      = { .ctx = &reader,
+          .pull = buffer_reader_pull,
+          .size_hint = (sqlite3_int64)reader.size };
+
+  objstore_backend_txn *txn = NULL;
+  TEST_ASSERT_EQUAL_INT (SQLITE_OK, backend->begin_txn (env, &txn));
+  TEST_ASSERT_EQUAL_INT (SQLITE_OK, backend->put (txn, &id, &stream_reader));
+  TEST_ASSERT_EQUAL_INT (SQLITE_OK, backend->commit_txn (txn));
+
+  objstore_backend_txn *read_txn = NULL;
+  TEST_ASSERT_EQUAL_INT (SQLITE_OK, backend->begin_txn (env, &read_txn));
+  sqlite3_int64 size = -1;
+  TEST_ASSERT_EQUAL_INT (SQLITE_OK, backend->get_size (read_txn, &id, &size));
+  TEST_ASSERT_EQUAL_INT ((int)sizeof (payload), (int)size);
+
+  buffer_writer writer = { .data = NULL, .length = 0, .capacity = 0 };
+  objstore_stream_writer stream_writer
+      = { .ctx = &writer, .push = buffer_writer_push };
+  TEST_ASSERT_EQUAL_INT (SQLITE_OK,
+                         backend->get_range (read_txn, &id, 3, 2,
+                                             &stream_writer));
+  TEST_ASSERT_EQUAL_UINT64 (2, (uint64_t)writer.length);
+  TEST_ASSERT_EQUAL_MEMORY (payload + 3, writer.data, 2);
+  free (writer.data);
+  TEST_ASSERT_EQUAL_INT (SQLITE_OK, backend->commit_txn (read_txn));
+
+  shutdown_file_backend (base, objects_root, staging_root, db, backend, env);
+}
+
+static void
+file_backend_range_unsatisfied (void)
+{
+  char *base = NULL;
+  char *objects_root = NULL;
+  char *staging_root = NULL;
+  sqlite3 *db = NULL;
+  const objstore_backend *backend = NULL;
+  objstore_backend_env *env = NULL;
+  init_file_backend (&base, &objects_root, &staging_root, &db, &backend, &env);
+
+  objstore_id id = make_id (0x63);
+  uint8_t payload[] = { 1, 2, 3, 4 };
+  buffer_reader reader
+      = { .data = payload, .size = sizeof (payload), .offset = 0 };
+  objstore_stream_reader stream_reader
+      = { .ctx = &reader,
+          .pull = buffer_reader_pull,
+          .size_hint = (sqlite3_int64)reader.size };
+
+  objstore_backend_txn *txn = NULL;
+  TEST_ASSERT_EQUAL_INT (SQLITE_OK, backend->begin_txn (env, &txn));
+  TEST_ASSERT_EQUAL_INT (SQLITE_OK, backend->put (txn, &id, &stream_reader));
+  TEST_ASSERT_EQUAL_INT (SQLITE_OK, backend->commit_txn (txn));
+
+  objstore_backend_txn *read_txn = NULL;
+  TEST_ASSERT_EQUAL_INT (SQLITE_OK, backend->begin_txn (env, &read_txn));
+  buffer_writer writer = { .data = NULL, .length = 0, .capacity = 0 };
+  objstore_stream_writer stream_writer
+      = { .ctx = &writer, .push = buffer_writer_push };
+  TEST_ASSERT_EQUAL_INT (SQLITE_RANGE,
+                         backend->get_range (read_txn, &id, 10, 1,
+                                             &stream_writer));
+  free (writer.data);
+  TEST_ASSERT_EQUAL_INT (SQLITE_OK, backend->commit_txn (read_txn));
 
   shutdown_file_backend (base, objects_root, staging_root, db, backend, env);
 }
@@ -672,6 +804,79 @@ file_backend_rowidx_lookup (void)
 }
 
 static void
+file_backend_scan_uses_rowidx_and_skips_stale_entries (void)
+{
+  char *base = NULL;
+  char *objects_root = NULL;
+  char *staging_root = NULL;
+  sqlite3 *db = NULL;
+  const objstore_backend *backend = NULL;
+  objstore_backend_env *env = NULL;
+  init_file_backend (&base, &objects_root, &staging_root, &db, &backend, &env);
+
+  objstore_id ids[3] = {
+    make_id (0x31),
+    make_id (0x11),
+    make_id (0x21),
+  };
+
+  for (size_t i = 0; i < 3; ++i)
+    {
+      uint8_t payload[8] = { (uint8_t)i };
+      buffer_reader reader
+          = { .data = payload, .size = sizeof (payload), .offset = 0 };
+      objstore_stream_reader stream_reader = {
+        .ctx = &reader,
+        .pull = buffer_reader_pull,
+        .size_hint = (sqlite3_int64)reader.size,
+      };
+      objstore_backend_txn *txn = NULL;
+      TEST_ASSERT_EQUAL_INT (SQLITE_OK, backend->begin_txn (env, &txn));
+      TEST_ASSERT_EQUAL_INT (SQLITE_OK,
+                             backend->put (txn, &ids[i], &stream_reader));
+      TEST_ASSERT_EQUAL_INT (SQLITE_OK, backend->commit_txn (txn));
+    }
+
+  objstore_id stale_id = make_id (0x91);
+  char *stale_entry_path = NULL;
+  rowidx_entry_path (objects_root, &stale_id, &stale_entry_path);
+  FILE *stale_entry = fopen (stale_entry_path, "wb");
+  TEST_ASSERT_NOT_NULL (stale_entry);
+  fclose (stale_entry);
+
+  objstore_backend_txn *read_txn = NULL;
+  objstore_backend_cursor *cursor = NULL;
+  TEST_ASSERT_EQUAL_INT (SQLITE_OK, backend->begin_txn (env, &read_txn));
+  TEST_ASSERT_EQUAL_INT (SQLITE_OK, backend->scan_open (read_txn, &cursor));
+
+  objstore_id scanned[3];
+  size_t scanned_count = 0;
+  for (;;)
+    {
+      objstore_id id = { 0 };
+      int rc = backend->scan_next (cursor, &id);
+      if (rc == SQLITE_DONE)
+        {
+          break;
+        }
+      TEST_ASSERT_EQUAL_INT (SQLITE_OK, rc);
+      TEST_ASSERT_TRUE (scanned_count < 3);
+      scanned[scanned_count++] = id;
+    }
+  backend->scan_close (cursor);
+  backend->rollback_txn (read_txn);
+
+  TEST_ASSERT_EQUAL_size_t (3, scanned_count);
+  TEST_ASSERT_EQUAL_MEMORY (&ids[1], &scanned[0], sizeof (objstore_id));
+  TEST_ASSERT_EQUAL_MEMORY (&ids[2], &scanned[1], sizeof (objstore_id));
+  TEST_ASSERT_EQUAL_MEMORY (&ids[0], &scanned[2], sizeof (objstore_id));
+  TEST_ASSERT_EQUAL_INT (-1, access (stale_entry_path, F_OK));
+
+  sqlite3_free (stale_entry_path);
+  shutdown_file_backend (base, objects_root, staging_root, db, backend, env);
+}
+
+static void
 file_backend_recover_handles_missing_payload (void)
 {
   char *base = create_temp_dir ();
@@ -891,6 +1096,8 @@ backend_file_register_tests (void)
 {
   objstore_tests_set_fixture (OBJSTORE_FIXTURE_SMOKE);
   RUN_TEST (file_backend_roundtrip);
+  RUN_TEST (file_backend_range_reads);
+  RUN_TEST (file_backend_range_unsatisfied);
   RUN_TEST (file_backend_delete_removes_object);
   RUN_TEST (file_backend_recovers_pending_commit);
   RUN_TEST (file_backend_recover_handles_missing_payload);
@@ -902,4 +1109,5 @@ backend_file_register_tests (void)
   RUN_TEST (file_backend_recover_detects_manifest_corruption);
   RUN_TEST (file_backend_size_hint_truncates);
   RUN_TEST (file_backend_rowidx_lookup);
+  RUN_TEST (file_backend_scan_uses_rowidx_and_skips_stale_entries);
 }

@@ -25,10 +25,7 @@
 * SIMD-enabled builds scale with available CPU features:
   * SSE4.1/AVX2 lanes provide 4–8-way parallelism inside a single thread.
   * AVX-512 widens to 16 lanes, which is helpful for high-core-count servers.
-* Benchmark TODOs:
-  * Re-run `benchmarks/file_backend_bench` for large (≥1 GiB) workloads and document updated MiB/s / ops/sec numbers.
-  * Repeat medium/small suites to validate that hashing no longer dominates.
-  * Capture WASM/OPFS numbers to confirm the portable path still meets <100 KB binary goals.
+* Benchmarks should be refreshed before performance-focused releases so the documented throughput numbers reflect the current file, SQLite, and WASM/OPFS backends.
 
 ## Operational Considerations
 

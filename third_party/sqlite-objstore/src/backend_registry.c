@@ -122,6 +122,15 @@ objstore_backend_validate (const objstore_backend *backend)
                    name);
       return SQLITE_MISUSE;
     }
+  if (backend->put == NULL || backend->get == NULL || backend->get_size == NULL
+      || backend->delete_fn == NULL || backend->exists == NULL)
+    {
+      const char *name = backend->name != NULL ? backend->name : "(unknown)";
+      sqlite3_log (SQLITE_MISUSE,
+                   "objstore backend %s missing object io implementation",
+                   name);
+      return SQLITE_MISUSE;
+    }
   return SQLITE_OK;
 }
 

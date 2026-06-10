@@ -2,8 +2,7 @@
 
 `sqlite-objstore` coordinates its backends with SQLite transactions so SQL code
 can treat `objstore` like any other table. This document summarizes the current
-behavior, the guarantees provided by the commit hooks, and the known
-limitations.
+behavior and the guarantees provided by the commit hooks.
 
 ## Backend-First Commits
 
@@ -34,28 +33,25 @@ Rollback behavior is symmetric:
 - Reads inside the same transaction always see pending writes because the log
   is consulted before touching the backend.
 
-Savepoints currently behave conservatively:
+Savepoints follow SQLite's nested transaction model:
 
-- `SAVEPOINT` increments an internal depth counter so objstore knows how many
-  frames exist.
-- `ROLLBACK TO` discards all staged work for the entire transaction (partial
-  rewinds are not supported in v1).
-- `RELEASE` is a no-op for the backend because data was already staged.
+- `SAVEPOINT` pushes a new frame in both the transaction log and the active
+  backend transaction.
+- `ROLLBACK TO name` rewinds only the objstore writes staged after that
+  savepoint, restoring the visible state from the parent frame while keeping
+  the outer transaction open.
+- `RELEASE name` merges the inner frame into its parent. The staged bytes stay
+  pending until the outermost `COMMIT` or `ROLLBACK`.
 
-In other words, nested savepoints work, but rolling back to an inner savepoint
-aborts the whole transaction instead of unwinding to an intermediate state.
-
-**Best practice:** wrap objstore writes in their own top-level transactions or
-only issue `ROLLBACK TO` before any objstore calls. Once a write has touched the
-object store, treat `ROLLBACK TO` as equivalent to `ROLLBACK` because the backend
-must discard every staged byte to stay crash-safe.
+In practice, that means you can mix metadata updates, nested savepoints, and
+partial retries without restarting the whole transaction.
 
 ### Snapshot visibility
 
 Every connection owns an `objstore_txn_log` that records PUT/DELETE metadata in
 monotonic order. When a virtual-table cursor starts (`xFilter`) it captures the
-current log sequence and replays only entries ≤ that snapshot. This yields
-familiar SQL semantics:
+current log sequence and replays only entries ≤ that snapshot. This gives you
+the usual SQL behavior:
 
 - Existing cursors continue scanning the snapshot they started with, even if new
   writes happen mid-scan.
@@ -66,13 +62,18 @@ familiar SQL semantics:
   metadata joins always see the latest data whereas long-running scans stay
   stable.
 
+Snapshot construction is linear in the number of staged operations visible to
+the cursor. Large transactions still cost proportionally more to snapshot, but
+the builder no longer performs nested rescans as the log grows.
+
 ## Orphaned Objects
 
-Because the backend commits before SQLite, a backend crash after the commit hook
-returns success but before SQLite finishes can leave “orphaned” payloads (blobs
-without metadata rows). These orphans are safe—the backend is crash consistent—
-but they consume storage. Long-term deployments should run periodic janitors
-that scan `objstore(id)` for references that no longer exist in metadata tables.
+Because the backend commits before SQLite, a crash after the commit hook returns
+success but before SQLite finishes can leave orphaned payloads behind: blobs
+with no metadata rows pointing at them. They are safe, but they still take up
+space. In long-lived deployments, plan to run a periodic cleanup job. The
+`objstore_example_orphan_sweep` utility can scan a file-backend storage root and
+delete payloads that are missing from a metadata-specific live-id query.
 
 ## Example
 
@@ -85,11 +86,23 @@ WITH new_photo AS (
 INSERT INTO files(id, filename, size, created_at)
 SELECT id, 'photo.jpg', size, strftime('%s','now') FROM new_photo;
 SELECT objstore_get(id) FROM files WHERE filename = 'photo.jpg'; -- sees staged bytes
+SELECT objstore_get_range(id, 'bytes=0-1023') FROM files WHERE filename = 'photo.jpg';
 COMMIT; -- backend flushes first, SQLite commits second
 ```
 
 If any statement fails or `ROLLBACK` is issued, the `files` row disappears and
 the staged payload is dropped.
+
+Savepoints behave as expected too:
+
+```sql
+BEGIN;
+INSERT INTO objstore(id, data) VALUES(?1, ?2);
+SAVEPOINT s1;
+DELETE FROM objstore WHERE id = ?1;
+ROLLBACK TO s1; -- the object becomes visible again
+COMMIT;
+```
 
 ## References
 
@@ -97,4 +110,3 @@ the staged payload is dropped.
   `objstore(id)` inside transactions.
 - `docs/architecture.md` expands on global invariants (BLAKE3 IDs, streaming
   buffers, staging layout) and backend-specific recovery behaviour.
-

@@ -10,6 +10,8 @@ target_include_directories(objstore_file_bench
 target_link_libraries(objstore_file_bench
     PRIVATE
         objstore
-        SQLite::SQLite3
 )
 
+if(UNIX)
+    target_link_libraries(objstore_file_bench PRIVATE m)
+endif()

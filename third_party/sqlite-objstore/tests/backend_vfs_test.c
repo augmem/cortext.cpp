@@ -1,8 +1,13 @@
+#if !defined(_WIN32)
+#define _POSIX_C_SOURCE 200809L
+#endif
+
 #include "unity.h"
 
 #include <sqlite3.h>
 
 #include <dirent.h>
+#include <errno.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -81,13 +86,30 @@ buffer_writer_push (void *ctx, const void *buffer, size_t nread)
 static char *
 create_temp_dir (const char *label)
 {
-  char tmpl[256];
-  sqlite3_snprintf ((int)sizeof (tmpl), tmpl, "/tmp/objstore-vfs-%s-XXXXXX",
-                    label != NULL ? label : "");
-  char *path = sqlite3_mprintf ("%s", tmpl);
-  TEST_ASSERT_NOT_NULL (path);
-  TEST_ASSERT_NOT_NULL (mkdtemp (path));
-  return path;
+  for (int attempt = 0; attempt < 16; ++attempt)
+    {
+      unsigned char random_bytes[6] = { 0 };
+      char random_hex[sizeof (random_bytes) * 2 + 1];
+      sqlite3_randomness ((int)sizeof (random_bytes), random_bytes);
+      for (size_t i = 0; i < sizeof (random_bytes); ++i)
+        {
+          sqlite3_snprintf (3, &random_hex[i * 2], "%02x", random_bytes[i]);
+        }
+      random_hex[sizeof (random_hex) - 1] = '\0';
+
+      char *path
+          = sqlite3_mprintf ("/tmp/objstore-vfs-%s-%s",
+                             label != NULL ? label : "", random_hex);
+      TEST_ASSERT_NOT_NULL (path);
+      if (mkdir (path, 0700) == 0)
+        {
+          return path;
+        }
+      sqlite3_free (path);
+      TEST_ASSERT_EQUAL_INT (EEXIST, errno);
+    }
+  TEST_FAIL_MESSAGE ("unable to create temp directory");
+  return NULL;
 }
 
 static void
@@ -308,11 +330,101 @@ vfs_backend_large_object (void)
   shutdown_vfs_backend (root, db, backend, env);
 }
 
+static void
+vfs_backend_range_reads (void)
+{
+  sqlite3 *db = NULL;
+  const objstore_backend *backend = NULL;
+  objstore_backend_env *env = NULL;
+  char *root = NULL;
+  init_vfs_backend ("range", &db, &backend, &env, &root);
+
+  objstore_id id = make_id (0x12);
+  uint8_t payload[] = { 5, 6, 7, 8, 9, 10 };
+  buffer_reader reader = {
+    .data = payload,
+    .size = sizeof (payload),
+    .offset = 0,
+  };
+  objstore_stream_reader stream_reader = {
+    .ctx = &reader,
+    .pull = buffer_reader_pull,
+    .size_hint = (sqlite3_int64)sizeof (payload),
+  };
+
+  objstore_backend_txn *txn = NULL;
+  TEST_ASSERT_EQUAL_INT (SQLITE_OK, backend->begin_txn (env, &txn));
+  TEST_ASSERT_EQUAL_INT (SQLITE_OK, backend->put (txn, &id, &stream_reader));
+  TEST_ASSERT_EQUAL_INT (SQLITE_OK, backend->commit_txn (txn));
+
+  objstore_backend_txn *read_txn = NULL;
+  TEST_ASSERT_EQUAL_INT (SQLITE_OK, backend->begin_txn (env, &read_txn));
+  sqlite3_int64 size = -1;
+  TEST_ASSERT_EQUAL_INT (SQLITE_OK, backend->get_size (read_txn, &id, &size));
+  TEST_ASSERT_EQUAL_INT ((int)sizeof (payload), (int)size);
+
+  buffer_writer writer = { .data = NULL, .length = 0, .capacity = 0 };
+  objstore_stream_writer stream_writer
+      = { .ctx = &writer, .push = buffer_writer_push };
+  TEST_ASSERT_EQUAL_INT (SQLITE_OK,
+                         backend->get_range (read_txn, &id, 1, 3,
+                                             &stream_writer));
+  TEST_ASSERT_EQUAL_size_t (3, writer.length);
+  TEST_ASSERT_EQUAL_MEMORY (payload + 1, writer.data, 3);
+  sqlite3_free (writer.data);
+  TEST_ASSERT_EQUAL_INT (SQLITE_OK, backend->commit_txn (read_txn));
+
+  shutdown_vfs_backend (root, db, backend, env);
+}
+
+static void
+vfs_backend_range_unsatisfied (void)
+{
+  sqlite3 *db = NULL;
+  const objstore_backend *backend = NULL;
+  objstore_backend_env *env = NULL;
+  char *root = NULL;
+  init_vfs_backend ("range-miss", &db, &backend, &env, &root);
+
+  objstore_id id = make_id (0x13);
+  uint8_t payload[] = { 1, 2, 3 };
+  buffer_reader reader = {
+    .data = payload,
+    .size = sizeof (payload),
+    .offset = 0,
+  };
+  objstore_stream_reader stream_reader = {
+    .ctx = &reader,
+    .pull = buffer_reader_pull,
+    .size_hint = (sqlite3_int64)sizeof (payload),
+  };
+
+  objstore_backend_txn *txn = NULL;
+  TEST_ASSERT_EQUAL_INT (SQLITE_OK, backend->begin_txn (env, &txn));
+  TEST_ASSERT_EQUAL_INT (SQLITE_OK, backend->put (txn, &id, &stream_reader));
+  TEST_ASSERT_EQUAL_INT (SQLITE_OK, backend->commit_txn (txn));
+
+  objstore_backend_txn *read_txn = NULL;
+  TEST_ASSERT_EQUAL_INT (SQLITE_OK, backend->begin_txn (env, &read_txn));
+  buffer_writer writer = { .data = NULL, .length = 0, .capacity = 0 };
+  objstore_stream_writer stream_writer
+      = { .ctx = &writer, .push = buffer_writer_push };
+  TEST_ASSERT_EQUAL_INT (SQLITE_RANGE,
+                         backend->get_range (read_txn, &id, 9, 1,
+                                             &stream_writer));
+  sqlite3_free (writer.data);
+  backend->rollback_txn (read_txn);
+
+  shutdown_vfs_backend (root, db, backend, env);
+}
+
 void
 backend_vfs_register_tests (void)
 {
   objstore_tests_set_fixture (OBJSTORE_FIXTURE_SMOKE);
   RUN_TEST (vfs_backend_roundtrip);
+  RUN_TEST (vfs_backend_range_reads);
+  RUN_TEST (vfs_backend_range_unsatisfied);
   RUN_TEST (vfs_backend_delete_and_exists);
   RUN_TEST (vfs_backend_large_object);
 }

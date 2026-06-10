@@ -2,6 +2,8 @@
 
 #include <dirent.h>
 #include <errno.h>
+#include <limits.h>
+#include <stddef.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -57,9 +59,27 @@ typedef struct objstore_portable_backend_txn
   char txn_id[33];
   char *active_dir;
   sqlite3_str *manifest;
+  struct objstore_portable_savepoint_frame *frames;
+  size_t frame_count;
+  size_t frame_capacity;
   bool manifest_written;
   bool staging_promoted;
 } objstore_portable_backend_txn;
+
+typedef struct objstore_portable_savepoint_entry
+{
+  objstore_id id;
+  bool had_pending;
+  bool had_delete_marker;
+} objstore_portable_savepoint_entry;
+
+typedef struct objstore_portable_savepoint_frame
+{
+  size_t manifest_length;
+  objstore_portable_savepoint_entry *entries;
+  size_t entry_count;
+  size_t entry_capacity;
+} objstore_portable_savepoint_frame;
 
 typedef struct objstore_portable_staged_writer
 {
@@ -77,6 +97,9 @@ typedef struct objstore_portable_cursor
   size_t count;
   size_t index;
 } objstore_portable_cursor;
+
+static void portable_savepoint_frames_clear (
+    objstore_portable_backend_txn *txn);
 
 static inline objstore_portable_backend_env *
 portable_env_from (objstore_backend_env *env)
@@ -186,6 +209,7 @@ portable_txn_free (objstore_portable_backend_txn *txn)
     {
       return;
     }
+  portable_savepoint_frames_clear (txn);
   portable_txn_reset_active (txn, true);
   sqlite3_free (txn);
 }
@@ -231,6 +255,264 @@ portable_delete_marker (objstore_portable_backend_txn *txn, const char *hex_id)
   char *path = objstore_fs_path_join (dir, hex_id);
   sqlite3_free (dir);
   return path;
+}
+
+static void
+portable_savepoint_frame_dispose (objstore_portable_savepoint_frame *frame)
+{
+  if (frame == NULL)
+    {
+      return;
+    }
+  sqlite3_free (frame->entries);
+  frame->entries = NULL;
+  frame->entry_count = 0;
+  frame->entry_capacity = 0;
+  frame->manifest_length = 0;
+}
+
+static void
+portable_savepoint_frames_clear (objstore_portable_backend_txn *txn)
+{
+  if (txn == NULL)
+    {
+      return;
+    }
+  for (size_t i = 0; i < txn->frame_count; ++i)
+    {
+      portable_savepoint_frame_dispose (&txn->frames[i]);
+    }
+  sqlite3_free (txn->frames);
+  txn->frames = NULL;
+  txn->frame_count = 0;
+  txn->frame_capacity = 0;
+}
+
+static int
+portable_savepoint_frames_ensure_capacity (objstore_portable_backend_txn *txn)
+{
+  if (txn == NULL)
+    {
+      return SQLITE_MISUSE;
+    }
+  if (txn->frame_count < txn->frame_capacity)
+    {
+      return SQLITE_OK;
+    }
+  size_t new_capacity
+      = (txn->frame_capacity == 0) ? 4u : txn->frame_capacity * 2u;
+  objstore_portable_savepoint_frame *resized = sqlite3_realloc64 (
+      txn->frames, new_capacity * sizeof (*txn->frames));
+  if (resized == NULL)
+    {
+      return SQLITE_NOMEM;
+    }
+  txn->frames = resized;
+  memset (&txn->frames[txn->frame_capacity], 0,
+          (new_capacity - txn->frame_capacity) * sizeof (*txn->frames));
+  txn->frame_capacity = new_capacity;
+  return SQLITE_OK;
+}
+
+static int
+portable_savepoint_entries_ensure_capacity (
+    objstore_portable_savepoint_frame *frame)
+{
+  if (frame == NULL)
+    {
+      return SQLITE_MISUSE;
+    }
+  if (frame->entry_count < frame->entry_capacity)
+    {
+      return SQLITE_OK;
+    }
+  size_t new_capacity
+      = (frame->entry_capacity == 0) ? 4u : frame->entry_capacity * 2u;
+  objstore_portable_savepoint_entry *resized = sqlite3_realloc64 (
+      frame->entries, new_capacity * sizeof (*frame->entries));
+  if (resized == NULL)
+    {
+      return SQLITE_NOMEM;
+    }
+  frame->entries = resized;
+  frame->entry_capacity = new_capacity;
+  return SQLITE_OK;
+}
+
+static ptrdiff_t
+portable_savepoint_frame_find_entry (
+    const objstore_portable_savepoint_frame *frame, const objstore_id *id)
+{
+  if (frame == NULL || id == NULL)
+    {
+      return -1;
+    }
+  for (size_t i = 0; i < frame->entry_count; ++i)
+    {
+      if (memcmp (frame->entries[i].id.bytes, id->bytes, OBJSTORE_ID_SIZE) == 0)
+        {
+          return (ptrdiff_t)i;
+        }
+    }
+  return -1;
+}
+
+static int
+portable_manifest_reset_prefix (objstore_portable_backend_txn *txn,
+                                size_t prefix_length)
+{
+  if (txn == NULL || txn->manifest == NULL)
+    {
+      return SQLITE_MISUSE;
+    }
+  const char *current = sqlite3_str_value (txn->manifest);
+  const size_t current_length = (size_t)sqlite3_str_length (txn->manifest);
+  if (prefix_length > current_length)
+    {
+      return SQLITE_CORRUPT;
+    }
+
+  sqlite3_str *replacement = sqlite3_str_new (NULL);
+  if (replacement == NULL)
+    {
+      return SQLITE_NOMEM;
+    }
+  if (prefix_length > 0 && current != NULL)
+    {
+      sqlite3_str_append (replacement, current, (int)prefix_length);
+    }
+  int rc = sqlite3_str_errcode (replacement);
+  if (rc != SQLITE_OK)
+    {
+      char *value = sqlite3_str_finish (replacement);
+      sqlite3_free (value);
+      return rc;
+    }
+
+  char *value = sqlite3_str_finish (txn->manifest);
+  sqlite3_free (value);
+  txn->manifest = replacement;
+  txn->manifest_written = false;
+  return SQLITE_OK;
+}
+
+static int
+portable_savepoint_capture_state (objstore_portable_backend_txn *txn,
+                                  const objstore_id *id)
+{
+  if (txn == NULL || id == NULL)
+    {
+      return SQLITE_MISUSE;
+    }
+  if (txn->frame_count == 0)
+    {
+      return SQLITE_OK;
+    }
+  objstore_portable_savepoint_frame *frame
+      = &txn->frames[txn->frame_count - 1];
+  if (portable_savepoint_frame_find_entry (frame, id) >= 0)
+    {
+      return SQLITE_OK;
+    }
+  int rc = portable_savepoint_entries_ensure_capacity (frame);
+  if (rc != SQLITE_OK)
+    {
+      return rc;
+    }
+
+  char hex[OBJSTORE_ID_SIZE * 2 + 1];
+  objstore_fs_id_to_hex (id, hex);
+  char *pending = portable_put_path (txn, hex);
+  char *marker = portable_delete_marker (txn, hex);
+  if (pending == NULL || marker == NULL)
+    {
+      sqlite3_free (pending);
+      sqlite3_free (marker);
+      return SQLITE_NOMEM;
+    }
+
+  objstore_portable_savepoint_entry *entry = &frame->entries[frame->entry_count++];
+  memset (entry, 0, sizeof (*entry));
+  entry->id = *id;
+  entry->had_pending = objstore_fs_path_exists (pending);
+  entry->had_delete_marker = objstore_fs_path_exists (marker);
+  sqlite3_free (pending);
+  sqlite3_free (marker);
+  return SQLITE_OK;
+}
+
+static int
+portable_savepoint_restore_entry (
+    objstore_portable_backend_txn *txn,
+    const objstore_portable_savepoint_entry *entry)
+{
+  if (txn == NULL || entry == NULL)
+    {
+      return SQLITE_MISUSE;
+    }
+
+  char hex[OBJSTORE_ID_SIZE * 2 + 1];
+  objstore_fs_id_to_hex (&entry->id, hex);
+  char *pending = portable_put_path (txn, hex);
+  char *marker = portable_delete_marker (txn, hex);
+  if (pending == NULL || marker == NULL)
+    {
+      sqlite3_free (pending);
+      sqlite3_free (marker);
+      return SQLITE_NOMEM;
+    }
+
+  if (!entry->had_pending && unlink (pending) != 0 && errno != ENOENT)
+    {
+      sqlite3_free (pending);
+      sqlite3_free (marker);
+      return SQLITE_IOERR_DELETE;
+    }
+  if (entry->had_delete_marker)
+    {
+      FILE *file = fopen (marker, "wb");
+      if (file == NULL)
+        {
+          sqlite3_free (pending);
+          sqlite3_free (marker);
+          return SQLITE_IOERR;
+        }
+      fclose (file);
+    }
+  else if (unlink (marker) != 0 && errno != ENOENT)
+    {
+      sqlite3_free (pending);
+      sqlite3_free (marker);
+      return SQLITE_IOERR_DELETE;
+    }
+
+  sqlite3_free (pending);
+  sqlite3_free (marker);
+  return SQLITE_OK;
+}
+
+static int
+portable_stat_size (const char *path, sqlite3_int64 *out_size)
+{
+  if (path == NULL || out_size == NULL)
+    {
+      return SQLITE_MISUSE;
+    }
+  struct stat st;
+  if (stat (path, &st) != 0)
+    {
+      return (errno == ENOENT) ? SQLITE_NOTFOUND : SQLITE_IOERR;
+    }
+  if (!S_ISREG (st.st_mode))
+    {
+      return SQLITE_NOTFOUND;
+    }
+  if (st.st_size < 0)
+    {
+      return SQLITE_IOERR;
+    }
+  *out_size = (sqlite3_int64)st.st_size;
+  return SQLITE_OK;
 }
 
 static int
@@ -358,6 +640,70 @@ portable_stream_file (FILE *file, const objstore_stream_writer *writer,
             }
           break;
         }
+    }
+  sqlite3_free (buffer);
+  return rc;
+}
+
+static int
+portable_seek (FILE *file, sqlite3_uint64 offset)
+{
+#if defined(_WIN32)
+  return _fseeki64 (file, (long long)offset, SEEK_SET);
+#else
+  if (offset > (sqlite3_uint64)LONG_MAX)
+    {
+      return -1;
+    }
+  return fseek (file, (long)offset, SEEK_SET);
+#endif
+}
+
+static int
+portable_stream_file_range (FILE *file, const objstore_stream_writer *writer,
+                            size_t chunk, sqlite3_uint64 offset,
+                            sqlite3_uint64 length)
+{
+  if (file == NULL || writer == NULL || writer->push == NULL)
+    {
+      return SQLITE_MISUSE;
+    }
+  if (length == 0)
+    {
+      return SQLITE_OK;
+    }
+  if (offset > (sqlite3_uint64)LONG_MAX)
+    {
+      return SQLITE_RANGE;
+    }
+  if (portable_seek (file, offset) != 0)
+    {
+      return SQLITE_IOERR;
+    }
+  unsigned char *buffer = sqlite3_malloc64 (chunk);
+  if (buffer == NULL)
+    {
+      return SQLITE_NOMEM;
+    }
+  sqlite3_uint64 remaining = length;
+  int rc = SQLITE_OK;
+  while (remaining > 0)
+    {
+      size_t to_read = (remaining < (sqlite3_uint64)chunk)
+                           ? (size_t)remaining
+                           : chunk;
+      size_t nread = fread (buffer, 1, to_read, file);
+      if (nread != to_read)
+        {
+          rc = ferror (file) ? SQLITE_IOERR_READ : SQLITE_RANGE;
+          break;
+        }
+      rc = writer->push (writer->ctx, buffer, nread);
+      if (rc != SQLITE_OK)
+        {
+          break;
+        }
+      remaining -= (sqlite3_uint64)nread;
     }
   sqlite3_free (buffer);
   return rc;
@@ -806,6 +1152,95 @@ objstore_portable_rollback_txn (objstore_backend_txn *txn)
 }
 
 int
+objstore_portable_savepoint_begin (objstore_backend_txn *txn)
+{
+  if (txn == NULL)
+    {
+      return SQLITE_MISUSE;
+    }
+  objstore_portable_backend_txn *portable_txn = portable_txn_from (txn);
+  int rc = portable_savepoint_frames_ensure_capacity (portable_txn);
+  if (rc != SQLITE_OK)
+    {
+      return rc;
+    }
+  objstore_portable_savepoint_frame *frame
+      = &portable_txn->frames[portable_txn->frame_count];
+  portable_savepoint_frame_dispose (frame);
+  frame->manifest_length
+      = (portable_txn->manifest != NULL)
+            ? (size_t)sqlite3_str_length (portable_txn->manifest)
+            : 0u;
+  ++portable_txn->frame_count;
+  return SQLITE_OK;
+}
+
+int
+objstore_portable_savepoint_release (objstore_backend_txn *txn)
+{
+  if (txn == NULL)
+    {
+      return SQLITE_MISUSE;
+    }
+  objstore_portable_backend_txn *portable_txn = portable_txn_from (txn);
+  if (portable_txn->frame_count == 0)
+    {
+      return SQLITE_OK;
+    }
+  objstore_portable_savepoint_frame *child
+      = &portable_txn->frames[portable_txn->frame_count - 1];
+  if (portable_txn->frame_count > 1)
+    {
+      objstore_portable_savepoint_frame *parent
+          = &portable_txn->frames[portable_txn->frame_count - 2];
+      for (size_t i = 0; i < child->entry_count; ++i)
+        {
+          if (portable_savepoint_frame_find_entry (parent,
+                                                   &child->entries[i].id)
+              >= 0)
+            {
+              continue;
+            }
+          int rc = portable_savepoint_entries_ensure_capacity (parent);
+          if (rc != SQLITE_OK)
+            {
+              return rc;
+            }
+          parent->entries[parent->entry_count++] = child->entries[i];
+        }
+    }
+  portable_savepoint_frame_dispose (child);
+  --portable_txn->frame_count;
+  return SQLITE_OK;
+}
+
+int
+objstore_portable_savepoint_rollback (objstore_backend_txn *txn)
+{
+  if (txn == NULL)
+    {
+      return SQLITE_MISUSE;
+    }
+  objstore_portable_backend_txn *portable_txn = portable_txn_from (txn);
+  if (portable_txn->frame_count == 0)
+    {
+      return SQLITE_OK;
+    }
+  objstore_portable_savepoint_frame *frame
+      = &portable_txn->frames[portable_txn->frame_count - 1];
+  for (size_t i = frame->entry_count; i > 0; --i)
+    {
+      int rc = portable_savepoint_restore_entry (portable_txn,
+                                                 &frame->entries[i - 1]);
+      if (rc != SQLITE_OK)
+        {
+          return rc;
+        }
+    }
+  return portable_manifest_reset_prefix (portable_txn, frame->manifest_length);
+}
+
+int
 objstore_portable_staged_write_begin (objstore_backend_txn *txn,
                                       objstore_backend_staged_writer **out)
 {
@@ -901,6 +1336,12 @@ objstore_portable_staged_write_finalize (
     }
   char hex[OBJSTORE_ID_SIZE * 2 + 1];
   objstore_fs_id_to_hex (id, hex);
+  rc = portable_savepoint_capture_state (portable_writer->txn, id);
+  if (rc != SQLITE_OK)
+    {
+      portable_writer_dispose (portable_writer, true);
+      return rc;
+    }
   char *dest = portable_put_path (portable_writer->txn, hex);
   if (dest == NULL)
     {
@@ -948,6 +1389,7 @@ objstore_portable_rollback_staged (objstore_backend_txn *txn)
     {
       return;
     }
+  portable_savepoint_frames_clear (portable_txn);
   portable_txn_reset_active (portable_txn, true);
 }
 
@@ -993,6 +1435,156 @@ portable_get_committed (objstore_portable_backend_env *env, const char *hex_id,
   return rc;
 }
 
+static int
+portable_get_size_pending (objstore_portable_backend_txn *txn,
+                           const char *hex_id, sqlite3_int64 *out_size)
+{
+  if (txn == NULL || txn->active_dir == NULL)
+    {
+      return SQLITE_NOTFOUND;
+    }
+  char *pending = portable_put_path (txn, hex_id);
+  if (pending == NULL)
+    {
+      return SQLITE_NOMEM;
+    }
+  int rc = portable_stat_size (pending, out_size);
+  sqlite3_free (pending);
+  return rc;
+}
+
+static int
+portable_get_size_committed (objstore_portable_backend_env *env,
+                             const char *hex_id, sqlite3_int64 *out_size)
+{
+  char *path
+      = objstore_fs_object_path (env->objects_root, env->shard_width, hex_id);
+  if (path == NULL)
+    {
+      return SQLITE_NOMEM;
+    }
+  int rc = portable_stat_size (path, out_size);
+  sqlite3_free (path);
+  return rc;
+}
+
+int
+objstore_portable_get_size (objstore_backend_txn *txn, const objstore_id *id,
+                            sqlite3_int64 *out_size)
+{
+  if (txn == NULL || id == NULL || out_size == NULL)
+    {
+      return SQLITE_MISUSE;
+    }
+  objstore_portable_backend_txn *portable_txn = portable_txn_from (txn);
+  char hex[OBJSTORE_ID_SIZE * 2 + 1];
+  objstore_fs_id_to_hex (id, hex);
+
+  char *marker = portable_delete_marker (portable_txn, hex);
+  if (marker == NULL)
+    {
+      return SQLITE_NOMEM;
+    }
+  if (objstore_fs_path_exists (marker))
+    {
+      sqlite3_free (marker);
+      return SQLITE_NOTFOUND;
+    }
+  sqlite3_free (marker);
+
+  int rc = portable_get_size_pending (portable_txn, hex, out_size);
+  if (rc != SQLITE_NOTFOUND)
+    {
+      return rc;
+    }
+  return portable_get_size_committed (portable_txn->env, hex, out_size);
+}
+
+static int
+portable_get_range_committed (objstore_portable_backend_env *env,
+                              const char *hex_id, sqlite3_uint64 offset,
+                              sqlite3_uint64 length,
+                              const objstore_stream_writer *writer)
+{
+  char *path
+      = objstore_fs_object_path (env->objects_root, env->shard_width, hex_id);
+  if (path == NULL)
+    {
+      return SQLITE_NOMEM;
+    }
+  FILE *file = fopen (path, "rb");
+  sqlite3_free (path);
+  if (file == NULL)
+    {
+      return (errno == ENOENT) ? SQLITE_NOTFOUND : SQLITE_IOERR;
+    }
+  int rc = portable_stream_file_range (file, writer, env->chunk_size, offset,
+                                       length);
+  fclose (file);
+  return rc;
+}
+
+int
+objstore_portable_get_range (objstore_backend_txn *txn, const objstore_id *id,
+                             sqlite3_uint64 offset, sqlite3_uint64 length,
+                             const objstore_stream_writer *writer)
+{
+  if (txn == NULL || id == NULL || writer == NULL || writer->push == NULL)
+    {
+      return SQLITE_MISUSE;
+    }
+  if (length == 0)
+    {
+      return SQLITE_OK;
+    }
+  if (offset > UINT64_MAX - length)
+    {
+      return SQLITE_RANGE;
+    }
+  objstore_portable_backend_txn *portable_txn = portable_txn_from (txn);
+  char hex[OBJSTORE_ID_SIZE * 2 + 1];
+  objstore_fs_id_to_hex (id, hex);
+
+  char *marker = portable_delete_marker (portable_txn, hex);
+  if (marker == NULL)
+    {
+      return SQLITE_NOMEM;
+    }
+  if (objstore_fs_path_exists (marker))
+    {
+      sqlite3_free (marker);
+      return SQLITE_NOTFOUND;
+    }
+  sqlite3_free (marker);
+
+  if (portable_txn->active_dir != NULL)
+    {
+      char *pending = portable_put_path (portable_txn, hex);
+      if (pending == NULL)
+        {
+          return SQLITE_NOMEM;
+        }
+      if (objstore_fs_path_exists (pending))
+        {
+          FILE *file = fopen (pending, "rb");
+          sqlite3_free (pending);
+          if (file == NULL)
+            {
+              return SQLITE_IOERR;
+            }
+          int rc = portable_stream_file_range (file, writer,
+                                               portable_txn->env->chunk_size,
+                                               offset, length);
+          fclose (file);
+          return rc;
+        }
+      sqlite3_free (pending);
+    }
+
+  return portable_get_range_committed (portable_txn->env, hex, offset, length,
+                                       writer);
+}
+
 int
 objstore_portable_put (objstore_backend_txn *txn, const objstore_id *id,
                        const objstore_stream_reader *reader)
@@ -1002,8 +1594,13 @@ objstore_portable_put (objstore_backend_txn *txn, const objstore_id *id,
       return SQLITE_MISUSE;
     }
   objstore_portable_backend_txn *portable_txn = portable_txn_from (txn);
+  int rc = portable_savepoint_capture_state (portable_txn, id);
+  if (rc != SQLITE_OK)
+    {
+      return rc;
+    }
   objstore_backend_staged_writer *writer = NULL;
-  int rc = objstore_portable_staged_write_begin (txn, &writer);
+  rc = objstore_portable_staged_write_begin (txn, &writer);
   if (rc != SQLITE_OK)
     {
       return rc;
@@ -1090,6 +1687,11 @@ objstore_portable_delete (objstore_backend_txn *txn, const objstore_id *id)
       return SQLITE_MISUSE;
     }
   objstore_portable_backend_txn *portable_txn = portable_txn_from (txn);
+  int rc = portable_savepoint_capture_state (portable_txn, id);
+  if (rc != SQLITE_OK)
+    {
+      return rc;
+    }
   char hex[OBJSTORE_ID_SIZE * 2 + 1];
   objstore_fs_id_to_hex (id, hex);
   char *marker = portable_delete_marker (portable_txn, hex);

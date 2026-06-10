@@ -1,6 +1,10 @@
 // Copyright 2024 sqlite-objstore
 // SPDX-License-Identifier: Apache-2.0
 
+#if !defined(_WIN32)
+#define _POSIX_C_SOURCE 200809L
+#endif
+
 #include <errno.h>
 #include <signal.h>
 #include <sqlite3.h>
@@ -25,11 +29,11 @@ fatalf (const char *msg)
 static char *
 create_temp_db_path (void)
 {
-  char tmpl[] = "/tmp/objstore-crash-dbXXXXXX.sqlite3";
-  int fd = mkstemps (tmpl, 8); /* keep .sqlite3 suffix */
+  char tmpl[] = "/tmp/objstore-crash-dbXXXXXX";
+  int fd = mkstemp (tmpl);
   if (fd < 0)
     {
-      fatalf ("mkstemps");
+      fatalf ("mkstemp");
     }
   close (fd);
   unlink (tmpl);
@@ -204,4 +208,3 @@ main (void)
   free (db_path);
   return EXIT_SUCCESS;
 }
-

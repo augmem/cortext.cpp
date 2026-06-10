@@ -41,11 +41,12 @@ stream_1gb backend=file bytes=1073741824 write_seconds=13.882 write_mib_per_s=73
 maximum resident set size: 2.5 MiB
 ```
 
-## Design targets & invariants
+## Longer-Term Targets
 
 `docs/architecture.md` lists the global goals that drove the original design.
-The headline performance/behavioral targets to keep an eye on when analysing the
-harness output are:
+The numbers below are still useful directionally, but they are not current
+release gates. Compare them against the snapshot results above when evaluating
+whether a given workload is already in-bounds for your deployment:
 
 - **Large objects (≈1 GiB)** – streaming writes should converge on ≥500 MiB/s so
   storing 1 GiB takes ≤2 s on NVMe/SSD-class storage. Reads routinely saturate
@@ -61,6 +62,10 @@ harness output are:
   implicitly validated that backend staging promoted before SQLite committed.
   Failures that occur after the backend writes can leave orphaned blobs; track
   them with metadata sweeps after stress tests.
+- **Full scans** – listing every object is intentionally linear work. The file
+  backend enumerates `rowidx/` instead of payload directories to keep scan
+  setup metadata-only, but a full `SELECT * FROM objstore` still scales with
+  object count.
 
 ## Custom workloads
 

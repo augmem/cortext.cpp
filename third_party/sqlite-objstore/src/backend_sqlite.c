@@ -2,6 +2,7 @@
 
 #include <assert.h>
 #include <errno.h>
+#include <limits.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -39,6 +40,10 @@ typedef struct sqlite_backend_txn
   sqlite_backend_write_entry *write_queue;
   size_t write_count;
   size_t write_capacity;
+  size_t *frame_write_counts;
+  sqlite3_int64 *frame_buffered_bytes;
+  size_t frame_count;
+  size_t frame_capacity;
   sqlite3_int64 buffered_bytes;
   bool staged_flushed;
 } sqlite_backend_txn;
@@ -431,6 +436,36 @@ sqlite_backend_stream_buffer_to_writer (const sqlite_backend_env *env,
   return SQLITE_OK;
 }
 
+static int
+sqlite_backend_stream_buffer_range (const sqlite_backend_env *env,
+                                    const unsigned char *payload,
+                                    sqlite3_int64 total_length,
+                                    sqlite3_uint64 offset,
+                                    sqlite3_uint64 length,
+                                    const objstore_stream_writer *writer)
+{
+  if (payload == NULL || writer == NULL || writer->push == NULL)
+    {
+      return SQLITE_MISUSE;
+    }
+  if (total_length < 0)
+    {
+      return SQLITE_IOERR;
+    }
+  const sqlite3_uint64 total = (sqlite3_uint64)total_length;
+  if (offset > total || length > total
+      || offset > UINT64_MAX - length || offset + length > total)
+    {
+      return SQLITE_RANGE;
+    }
+  if (length == 0)
+    {
+      return SQLITE_OK;
+    }
+  return sqlite_backend_stream_buffer_to_writer (
+      env, payload + (size_t)offset, (sqlite3_int64)length, writer);
+}
+
 static sqlite3_int64
 sqlite_backend_queue_remaining_bytes (const sqlite_backend_txn *tx,
                                       sqlite3_int64 reclaim_bytes)
@@ -465,6 +500,36 @@ sqlite_backend_queue_ensure_capacity (sqlite_backend_txn *tx)
     }
   tx->write_queue = resized;
   tx->write_capacity = new_capacity;
+  return SQLITE_OK;
+}
+
+static int
+sqlite_backend_frames_ensure_capacity (sqlite_backend_txn *tx)
+{
+  if (tx == NULL)
+    {
+      return SQLITE_MISUSE;
+    }
+  if (tx->frame_count < tx->frame_capacity)
+    {
+      return SQLITE_OK;
+    }
+  size_t new_capacity = tx->frame_capacity == 0 ? 4 : tx->frame_capacity * 2;
+  size_t *counts = sqlite3_realloc64 (tx->frame_write_counts,
+                                      new_capacity * sizeof (*counts));
+  if (counts == NULL)
+    {
+      return SQLITE_NOMEM;
+    }
+  sqlite3_int64 *buffered = sqlite3_realloc64 (tx->frame_buffered_bytes,
+                                               new_capacity * sizeof (*buffered));
+  if (buffered == NULL)
+    {
+      return SQLITE_NOMEM;
+    }
+  tx->frame_write_counts = counts;
+  tx->frame_buffered_bytes = buffered;
+  tx->frame_capacity = new_capacity;
   return SQLITE_OK;
 }
 
@@ -545,6 +610,80 @@ sqlite_backend_txn_clear_queue (sqlite_backend_txn *tx)
   tx->write_count = 0;
   tx->write_capacity = 0;
   tx->buffered_bytes = 0;
+}
+
+static void
+sqlite_backend_txn_clear_frames (sqlite_backend_txn *tx)
+{
+  if (tx == NULL)
+    {
+      return;
+    }
+  sqlite3_free (tx->frame_write_counts);
+  sqlite3_free (tx->frame_buffered_bytes);
+  tx->frame_write_counts = NULL;
+  tx->frame_buffered_bytes = NULL;
+  tx->frame_count = 0;
+  tx->frame_capacity = 0;
+}
+
+static int
+sqlite_backend_savepoint_begin (objstore_backend_txn *txn)
+{
+  if (txn == NULL)
+    {
+      return SQLITE_MISUSE;
+    }
+  sqlite_backend_txn *tx = (sqlite_backend_txn *)txn;
+  int rc = sqlite_backend_frames_ensure_capacity (tx);
+  if (rc != SQLITE_OK)
+    {
+      return rc;
+    }
+  tx->frame_write_counts[tx->frame_count] = tx->write_count;
+  tx->frame_buffered_bytes[tx->frame_count] = tx->buffered_bytes;
+  ++tx->frame_count;
+  return SQLITE_OK;
+}
+
+static int
+sqlite_backend_savepoint_release (objstore_backend_txn *txn)
+{
+  if (txn == NULL)
+    {
+      return SQLITE_MISUSE;
+    }
+  sqlite_backend_txn *tx = (sqlite_backend_txn *)txn;
+  if (tx->frame_count > 0)
+    {
+      --tx->frame_count;
+    }
+  return SQLITE_OK;
+}
+
+static int
+sqlite_backend_savepoint_rollback (objstore_backend_txn *txn)
+{
+  if (txn == NULL)
+    {
+      return SQLITE_MISUSE;
+    }
+  sqlite_backend_txn *tx = (sqlite_backend_txn *)txn;
+  if (tx->frame_count == 0)
+    {
+      return SQLITE_OK;
+    }
+  const size_t target_count = tx->frame_write_counts[tx->frame_count - 1];
+  while (tx->write_count > target_count)
+    {
+      sqlite_backend_queue_remove_at (tx, tx->write_count - 1);
+    }
+  tx->buffered_bytes = tx->frame_buffered_bytes[tx->frame_count - 1];
+  if (tx->buffered_bytes < 0)
+    {
+      tx->buffered_bytes = 0;
+    }
+  return SQLITE_OK;
 }
 
 static int
@@ -1043,9 +1182,7 @@ sqlite_backend_put (objstore_backend_txn *txn, const objstore_id *id,
 
   sqlite_backend_txn *tx = (sqlite_backend_txn *)txn;
   assert (tx->env != NULL);
-
-  sqlite3 *db = tx->env->primary_db;
-  assert (db != NULL);
+  assert (tx->env->primary_db != NULL);
   int rc = SQLITE_OK;
 
   size_t latest_index = 0;
@@ -1172,6 +1309,153 @@ sqlite_backend_get (objstore_backend_txn *txn, const objstore_id *id,
 }
 
 static int
+sqlite_backend_get_range (objstore_backend_txn *txn, const objstore_id *id,
+                          sqlite3_uint64 offset, sqlite3_uint64 length,
+                          const objstore_stream_writer *writer)
+{
+  if (txn == NULL || id == NULL || writer == NULL || writer->push == NULL)
+    {
+      return SQLITE_MISUSE;
+    }
+  if (length == 0)
+    {
+      return SQLITE_OK;
+    }
+
+  sqlite_backend_txn *tx = (sqlite_backend_txn *)txn;
+  size_t latest_index = 0;
+  sqlite_backend_write_entry *latest
+      = sqlite_backend_queue_find_latest (tx, id, &latest_index);
+  if (latest != NULL)
+    {
+      if (latest->kind == SQLITE_BACKEND_WRITE_DELETE)
+        {
+          return SQLITE_NOTFOUND;
+        }
+      return sqlite_backend_stream_buffer_range (tx->env, latest->payload,
+                                                 latest->size, offset, length,
+                                                 writer);
+    }
+
+  sqlite3 *db = tx->env->primary_db;
+  sqlite3_int64 rowid = 0;
+  int rc = sqlite_backend_lookup_rowid (db, id, &rowid);
+  if (rc != SQLITE_OK)
+    {
+      return rc;
+    }
+
+  sqlite3_blob *blob = NULL;
+  rc = sqlite_backend_open_blob (db, rowid, 0, &blob);
+  if (rc != SQLITE_OK)
+    {
+      return rc;
+    }
+
+  const int blob_size = sqlite3_blob_bytes (blob);
+  if (blob_size < 0)
+    {
+      sqlite3_blob_close (blob);
+      return SQLITE_IOERR;
+    }
+  if (offset > (sqlite3_uint64)INT_MAX
+      || length > (sqlite3_uint64)INT_MAX)
+    {
+      sqlite3_blob_close (blob);
+      return SQLITE_RANGE;
+    }
+  if (offset > UINT64_MAX - length)
+    {
+      sqlite3_blob_close (blob);
+      return SQLITE_RANGE;
+    }
+  if (offset + length > (sqlite3_uint64)blob_size)
+    {
+      sqlite3_blob_close (blob);
+      return SQLITE_RANGE;
+    }
+
+  unsigned char *buffer
+      = (unsigned char *)sqlite3_malloc64 (tx->env->chunk_size);
+  if (buffer == NULL)
+    {
+      sqlite3_blob_close (blob);
+      return SQLITE_NOMEM;
+    }
+
+  sqlite3_uint64 remaining = length;
+  sqlite3_int64 cursor = (sqlite3_int64)offset;
+  while (remaining > 0)
+    {
+      const sqlite3_uint64 max_chunk = (sqlite3_uint64)tx->env->chunk_size;
+      sqlite3_uint64 to_read_u64
+          = remaining < max_chunk ? remaining : max_chunk;
+      const int to_read = (int)to_read_u64;
+      rc = sqlite3_blob_read (blob, buffer, to_read, (int)cursor);
+      if (rc != SQLITE_OK)
+        {
+          break;
+        }
+      rc = writer->push (writer->ctx, buffer, (size_t)to_read);
+      if (rc != SQLITE_OK)
+        {
+          break;
+        }
+      remaining -= (sqlite3_uint64)to_read;
+      cursor += (sqlite3_int64)to_read;
+    }
+
+  sqlite3_free (buffer);
+  sqlite3_blob_close (blob);
+  return rc;
+}
+
+static int
+sqlite_backend_get_size (objstore_backend_txn *txn, const objstore_id *id,
+                         sqlite3_int64 *out_size)
+{
+  if (txn == NULL || id == NULL || out_size == NULL)
+    {
+      return SQLITE_MISUSE;
+    }
+  sqlite_backend_txn *tx = (sqlite_backend_txn *)txn;
+  size_t latest_index = 0;
+  sqlite_backend_write_entry *latest
+      = sqlite_backend_queue_find_latest (tx, id, &latest_index);
+  if (latest != NULL)
+    {
+      if (latest->kind == SQLITE_BACKEND_WRITE_DELETE)
+        {
+          return SQLITE_NOTFOUND;
+        }
+      *out_size = latest->size;
+      return SQLITE_OK;
+    }
+
+  sqlite3 *db = tx->env->primary_db;
+  sqlite3_int64 rowid = 0;
+  int rc = sqlite_backend_lookup_rowid (db, id, &rowid);
+  if (rc != SQLITE_OK)
+    {
+      return rc;
+    }
+  sqlite3_blob *blob = NULL;
+  rc = sqlite_backend_open_blob (db, rowid, 0, &blob);
+  if (rc != SQLITE_OK)
+    {
+      return rc;
+    }
+  *out_size = sqlite3_blob_bytes (blob);
+  if (*out_size < 0)
+    {
+      sqlite3_blob_close (blob);
+      return SQLITE_IOERR;
+    }
+  sqlite3_blob_close (blob);
+  return SQLITE_OK;
+}
+
+static int
 sqlite_backend_delete (objstore_backend_txn *txn, const objstore_id *id)
 {
   if (txn == NULL || id == NULL)
@@ -1188,6 +1472,10 @@ sqlite_backend_delete (objstore_backend_txn *txn, const objstore_id *id)
     {
       if (latest->kind == SQLITE_BACKEND_WRITE_PUT)
         {
+          if (tx->frame_count > 0)
+            {
+              return sqlite_backend_queue_append_delete (tx, id);
+            }
           sqlite_backend_queue_remove_at (tx, latest_index);
           return SQLITE_OK;
         }
@@ -1370,20 +1658,12 @@ sqlite_backend_open_env (sqlite3 *db, const objstore_config *config,
   int rc = sqlite_backend_ensure_schema (db);
   if (rc != SQLITE_OK)
     {
-      fprintf (stderr,
-               "objstore: ensure schema on primary db failed (rc=%d)\n", rc);
-      fflush (stderr);
       return rc;
     }
-  fprintf (stderr, "objstore: ensure schema on primary db ok\n");
-  fflush (stderr);
 
   rc = sqlite_backend_rowidx_backfill (db);
   if (rc != SQLITE_OK)
     {
-      fprintf (stderr,
-               "objstore: rowidx backfill failed (rc=%d)\n", rc);
-      fflush (stderr);
       return rc;
     }
 
@@ -1428,6 +1708,10 @@ sqlite_backend_begin_txn (objstore_backend_env *env,
   txn->write_queue = NULL;
   txn->write_count = 0;
   txn->write_capacity = 0;
+  txn->frame_write_counts = NULL;
+  txn->frame_buffered_bytes = NULL;
+  txn->frame_count = 0;
+  txn->frame_capacity = 0;
   txn->buffered_bytes = 0;
   txn->staged_flushed = false;
   *out_txn = (objstore_backend_txn *)txn;
@@ -1454,6 +1738,7 @@ sqlite_backend_commit_txn (objstore_backend_txn *txn)
         }
       sqlite_backend_txn_clear_queue (tx);
     }
+  sqlite_backend_txn_clear_frames (tx);
   sqlite3_free (tx);
   return rc;
 }
@@ -1467,6 +1752,7 @@ sqlite_backend_rollback_txn (objstore_backend_txn *txn)
     }
   sqlite_backend_txn *tx = (sqlite_backend_txn *)txn;
   sqlite_backend_txn_clear_queue (tx);
+  sqlite_backend_txn_clear_frames (tx);
   sqlite3_free (tx);
 }
 
@@ -1501,6 +1787,7 @@ sqlite_backend_rollback_staged (objstore_backend_txn *txn)
     }
   sqlite_backend_txn *tx = (sqlite_backend_txn *)txn;
   sqlite_backend_txn_clear_queue (tx);
+  sqlite_backend_txn_clear_frames (tx);
   tx->staged_flushed = true;
 }
 
@@ -1512,6 +1799,9 @@ const objstore_backend objstore_backend_sqlite = {
   .begin_txn = sqlite_backend_begin_txn,
   .commit_txn = sqlite_backend_commit_txn,
   .rollback_txn = sqlite_backend_rollback_txn,
+  .savepoint_begin = sqlite_backend_savepoint_begin,
+  .savepoint_release = sqlite_backend_savepoint_release,
+  .savepoint_rollback = sqlite_backend_savepoint_rollback,
   .staged_write_begin = sqlite_backend_staged_write_begin,
   .staged_write_push = sqlite_backend_staged_write_push,
   .staged_write_finalize = sqlite_backend_staged_write_finalize,
@@ -1520,6 +1810,8 @@ const objstore_backend objstore_backend_sqlite = {
   .rollback_staged = sqlite_backend_rollback_staged,
   .put = sqlite_backend_put,
   .get = sqlite_backend_get,
+  .get_range = sqlite_backend_get_range,
+  .get_size = sqlite_backend_get_size,
   .delete_fn = sqlite_backend_delete,
   .exists = sqlite_backend_exists,
   .scan_open = sqlite_backend_scan_open,

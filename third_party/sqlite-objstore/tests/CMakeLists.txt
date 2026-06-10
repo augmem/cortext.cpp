@@ -10,7 +10,17 @@ FetchContent_Declare(
     GIT_TAG v2.6.0
 )
 
-FetchContent_MakeAvailable(unity)
+FetchContent_GetProperties(unity)
+if(NOT unity_POPULATED)
+    if(POLICY CMP0169)
+        cmake_policy(PUSH)
+        cmake_policy(SET CMP0169 OLD)
+    endif()
+    FetchContent_Populate(unity)
+    if(POLICY CMP0169)
+        cmake_policy(POP)
+    endif()
+endif()
 
 add_library(objstore_unity STATIC ${unity_SOURCE_DIR}/src/unity.c)
 target_include_directories(objstore_unity PUBLIC ${unity_SOURCE_DIR}/src)
@@ -120,7 +130,6 @@ if(NOT WIN32)
     target_link_libraries(objstore_crash_kill
         PRIVATE
             objstore
-            SQLite::SQLite3
     )
     add_test(NAME crash_kill_during_commit COMMAND objstore_crash_kill)
     set_tests_properties(crash_kill_during_commit PROPERTIES LABELS crash)
@@ -162,4 +171,49 @@ if(OBJSTORE_ENABLE_WASM_CROSS_LANG)
     add_test(NAME wasm_cross_language
              COMMAND ${CMAKE_SOURCE_DIR}/scripts/run-wasm-cross-lang.sh
              WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+endif()
+
+if(OBJSTORE_ENABLE_FUZZERS)
+    if(CMAKE_C_COMPILER_ID MATCHES "Clang|AppleClang")
+        include(CheckCXXSourceCompiles)
+        set(CMAKE_REQUIRED_LINK_OPTIONS "-fsanitize=fuzzer")
+        check_cxx_source_compiles([=[
+extern "C" int LLVMFuzzerTestOneInput(const unsigned char *data, unsigned long size)
+{
+    (void)data;
+    (void)size;
+    return 0;
+}
+]=] OBJSTORE_HAS_LIBFUZZER_RUNTIME)
+        unset(CMAKE_REQUIRED_LINK_OPTIONS)
+
+        if(OBJSTORE_HAS_LIBFUZZER_RUNTIME)
+            add_executable(objstore_sql_surface_fuzzer
+                fuzz/sql_surface_fuzzer.c
+            )
+            set_target_properties(objstore_sql_surface_fuzzer PROPERTIES
+                LINKER_LANGUAGE CXX
+            )
+            target_link_libraries(objstore_sql_surface_fuzzer
+                PRIVATE
+                    objstore
+            )
+            target_compile_options(objstore_sql_surface_fuzzer
+                PRIVATE
+                    -fsanitize=fuzzer,address,undefined
+                    -fno-sanitize-recover=all
+            )
+            target_link_options(objstore_sql_surface_fuzzer
+                PRIVATE
+                    -fsanitize=fuzzer,address,undefined
+                    -fno-sanitize-recover=all
+            )
+        else()
+            message(WARNING
+                "OBJSTORE_ENABLE_FUZZERS requested, but this toolchain cannot link libFuzzer")
+        endif()
+    else()
+        message(WARNING
+            "OBJSTORE_ENABLE_FUZZERS requires Clang/AppleClang libFuzzer support")
+    endif()
 endif()

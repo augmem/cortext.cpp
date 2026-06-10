@@ -175,6 +175,75 @@ test_sqlite_backend_roundtrip_impl (void)
 }
 
 static void
+test_sqlite_backend_range_reads (void)
+{
+  uint8_t payload[] = { 9, 8, 7, 6, 5, 4, 3, 2 };
+  objstore_id id = make_id (0x90);
+
+  buffer_reader reader
+      = { .data = payload, .size = sizeof (payload), .offset = 0 };
+  objstore_stream_reader stream_reader = {
+    .ctx = &reader,
+    .pull = buffer_reader_pull,
+    .size_hint = (sqlite3_int64)reader.size,
+  };
+
+  objstore_backend_txn *write_txn = begin_backend_txn ();
+  TEST_ASSERT_EQUAL_INT (
+      SQLITE_OK, current_backend ()->put (write_txn, &id, &stream_reader));
+  commit_backend_txn (write_txn);
+
+  objstore_backend_txn *read_txn = begin_backend_txn ();
+  sqlite3_int64 size = -1;
+  TEST_ASSERT_EQUAL_INT (
+      SQLITE_OK, current_backend ()->get_size (read_txn, &id, &size));
+  TEST_ASSERT_EQUAL_INT ((int)sizeof (payload), (int)size);
+
+  buffer_writer writer = { .data = NULL, .capacity = 0, .length = 0 };
+  objstore_stream_writer stream_writer = {
+    .ctx = &writer,
+    .push = buffer_writer_push,
+  };
+  TEST_ASSERT_EQUAL_INT (
+      SQLITE_OK,
+      current_backend ()->get_range (read_txn, &id, 2, 4, &stream_writer));
+  TEST_ASSERT_EQUAL_UINT64 (4, (uint64_t)writer.length);
+  TEST_ASSERT_EQUAL_MEMORY (payload + 2, writer.data, 4);
+  free (writer.data);
+  commit_backend_txn (read_txn);
+}
+
+static void
+test_sqlite_backend_range_unsatisfied (void)
+{
+  uint8_t payload[] = { 1, 2, 3, 4 };
+  objstore_id id = make_id (0x91);
+  buffer_reader reader
+      = { .data = payload, .size = sizeof (payload), .offset = 0 };
+  objstore_stream_reader stream_reader = {
+    .ctx = &reader,
+    .pull = buffer_reader_pull,
+    .size_hint = (sqlite3_int64)reader.size,
+  };
+  objstore_backend_txn *write_txn = begin_backend_txn ();
+  TEST_ASSERT_EQUAL_INT (
+      SQLITE_OK, current_backend ()->put (write_txn, &id, &stream_reader));
+  commit_backend_txn (write_txn);
+
+  objstore_backend_txn *read_txn = begin_backend_txn ();
+  buffer_writer writer = { .data = NULL, .capacity = 0, .length = 0 };
+  objstore_stream_writer stream_writer = {
+    .ctx = &writer,
+    .push = buffer_writer_push,
+  };
+  TEST_ASSERT_EQUAL_INT (
+      SQLITE_RANGE,
+      current_backend ()->get_range (read_txn, &id, 8, 2, &stream_writer));
+  free (writer.data);
+  commit_backend_txn (read_txn);
+}
+
+static void
 test_sqlite_backend_duplicate_same_bytes_impl (void)
 {
   uint8_t payload[16];
@@ -559,6 +628,8 @@ backend_sqlite_register_tests (void)
 {
   objstore_tests_set_fixture (OBJSTORE_FIXTURE_SQLITE_BACKEND);
   RUN_TEST (test_sqlite_backend_roundtrip_impl);
+  RUN_TEST (test_sqlite_backend_range_reads);
+  RUN_TEST (test_sqlite_backend_range_unsatisfied);
   RUN_TEST (test_sqlite_backend_duplicate_same_bytes_impl);
   RUN_TEST (test_sqlite_backend_duplicate_conflict_impl);
   RUN_TEST (test_sqlite_backend_get_missing_impl);

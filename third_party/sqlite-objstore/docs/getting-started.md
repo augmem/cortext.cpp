@@ -1,12 +1,12 @@
 # Getting Started
 
-This guide walks through building `sqlite-objstore`, running the test suite, and
-embedding the virtual table inside a C application.
+This guide covers the normal setup flow: build the project, run the tests, and
+embed the extension in a C application.
 
 ## 1. Build & Test
 
 ```sh
-git clone https://github.com/.../sqlite-objstore.git
+git clone https://github.com/augmem/sqlite-objstore.git
 cd sqlite-objstore
 
 cmake --preset full-debug
@@ -36,8 +36,15 @@ The install tree contains:
 - `lib/libobjstore.{so,dylib}` — shared library (disabled on WASM builds).
 - `lib/libobjstore.a` — static archive (enable/disable via
   `OBJSTORE_BUILD_STATIC`).
-- `lib/cmake/objstore/ObjstoreConfig.cmake` — importable targets
+- `lib/cmake/objstore/objstoreConfig.cmake` — importable targets
   (`objstore::objstore`, `objstore::objstore_static`).
+
+Smoke-check the install with:
+
+```sh
+cmake --install build/full-release --prefix "$PWD/.install-smoke"
+sh scripts/verify-install.sh "$PWD/.install-smoke"
+```
 
 ## 3. Embed in C
 
@@ -62,14 +69,20 @@ sqlite3_exec(
 ```
 
 Once registered, applications can use both the virtual table and the scalar
-functions (`objstore_put`, `objstore_get`, …) in regular SQL. The example
-programs under `examples/` demonstrate metadata catalogs and TTL caches built on
-top of the virtual table.
+functions (`objstore_put`, `objstore_get`, `objstore_get_range`, ...) in normal
+SQL. The example programs under `examples/` show metadata catalogs and TTL
+caches built on top of the virtual table.
+
+For a downstream CMake consumer, the installed package exports `objstore::objstore`
+plus the explicit `objstore::objstore_shared` / `objstore::objstore_static`
+targets when those artifacts are built.
 
 ## 4. Explore the Patterns
 
 - `docs/metadata-patterns.md` covers canonical schemas and cleanup strategies.
-- `docs/transactions.md` describes the commit hooks, savepoint caveats, and the
+- `objstore_example_orphan_sweep --help` documents the file-backend orphan
+  sweep utility when you need an operator-facing cleanup command.
+- `docs/transactions.md` describes the commit hooks, savepoint behavior, and the
   backend-first commit ordering.
 - `README.md` documents presets, WASM builds, and additional tooling knobs.
-
+- `docs/releasing.md` captures the native prerelease gate used in CI.

@@ -6,8 +6,8 @@ table, `objstore(id BLOB PRIMARY KEY, data BLOB NOT NULL)`, and pushes all
 metadata responsibilities to normal SQLite tables so applications stay in
 control of schemas, indexes, and access patterns.
 
-This document replaces the historical `design.md`/`plans/` bundle and captures
-the durable facts contributors and integrators need before diving into code.
+This document replaces the old `design.md` / `plans/` material and focuses on
+the parts of the system that are unlikely to change.
 
 ## Executive Summary
 
@@ -39,12 +39,14 @@ the durable facts contributors and integrators need before diving into code.
 4. **Transactions** – writes stream into backend-owned staging areas. Commit
    hooks call `commit_staged()` **before** SQLite finalizes the transaction.
    Rollbacks drop staged files/rows, keeping storage consistent. Savepoints are
-   conservative: `ROLLBACK TO` behaves like `ROLLBACK` once an objstore write
-   has occurred. Details live in `docs/transactions.md`.
+   frame-aware: `ROLLBACK TO` rewinds only the staged objstore work in the
+   current frame while keeping the outer transaction alive. Details live in
+   `docs/transactions.md`.
 5. **Snapshot isolation** – every connection owns an `objstore_txn_log`. Cursors
    capture the log sequence at `xFilter` so mid-scan mutations stay invisible
    until a new cursor opens. Scalar helpers always consult the latest log, so
-   SQL inside the same transaction sees staged results immediately.
+   SQL inside the same transaction sees staged results immediately. Snapshot
+   construction is linear in the number of visible staged operations.
 6. **Rowid mapping** – the leading eight bytes of every ID are treated as a
    big-endian integer. `rowid = ?` constraints use backend-provided
    `lookup_id_by_rowid()` hooks (native + SQLite backends) or fall back to
@@ -107,6 +109,9 @@ File backend  OPFS/VFS backend SQLite backend (table fallback) ...
 - Deletes drop committed payloads if present and remove rowidx files.
 - Crash recovery clears stray `.staging/active` directories, replays remaining
   `.staging/commit` manifests, and tolerates partially replayed objects.
+- Full scans enumerate `rowidx/` rather than walking payload directories. They
+  are still O(number of objects), but they stay metadata-only and prune stale
+  row-index entries as they are discovered.
 - Config knobs (PRAGMA or `objstore_config`): `storage_root`, `shard_width`,
   `sync_mode` (`full|metadata|off`), and `chunk_size`.
 
@@ -154,8 +159,8 @@ File backend  OPFS/VFS backend SQLite backend (table fallback) ...
 | `wasi-release`     | VFS + SQLite       | WASI/CLI runtimes driven by `wasmtime`.                  |
 | `wasm-release`     | OPFS + VFS         | Browser/Web Worker bundles, `<100 KB` goal.              |
 
-All presets live in `CMakePresets.json`, and `docs/getting-started.md`
-walks through the typical `cmake --preset full-debug` workflow.
+All presets live in `CMakePresets.json`, and `docs/getting-started.md` walks
+through the usual `cmake --preset full-debug` flow.
 
 ## Document Map
 
@@ -168,5 +173,4 @@ walks through the typical `cmake --preset full-debug` workflow.
 - `docs/tuning.md` – chunk size, sync-mode, and size-hint recommendations.
 - `docs/wasm.md` – WASM/WASI builds, OPFS requirements, and matrix harness.
 
-Treat this file + the docs above as the public source of truth going forward.
-
+If you're new to the codebase, start here and then follow the linked docs.

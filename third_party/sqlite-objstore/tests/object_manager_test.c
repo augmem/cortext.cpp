@@ -14,6 +14,13 @@ typedef struct buffer_reader
   size_t offset;
 } buffer_reader;
 
+typedef struct buffer_writer
+{
+  uint8_t *data;
+  size_t size;
+  size_t capacity;
+} buffer_writer;
+
 static int
 buffer_reader_pull (void *ctx, void *buffer, size_t capacity, size_t *nread)
 {
@@ -32,6 +39,40 @@ buffer_reader_pull (void *ctx, void *buffer, size_t capacity, size_t *nread)
   memcpy (buffer, reader->data + reader->offset, to_copy);
   reader->offset += to_copy;
   *nread = to_copy;
+  return SQLITE_OK;
+}
+
+static int
+buffer_writer_push (void *ctx, const void *buffer, size_t nread)
+{
+  buffer_writer *writer = (buffer_writer *)ctx;
+  if (writer == NULL || (nread > 0 && buffer == NULL))
+    {
+      return SQLITE_MISUSE;
+    }
+  if (nread == 0)
+    {
+      return SQLITE_OK;
+    }
+  size_t needed = writer->size + nread;
+  if (needed > writer->capacity)
+    {
+      size_t new_capacity = writer->capacity == 0 ? 128 : writer->capacity;
+      while (new_capacity < needed)
+        {
+          new_capacity *= 2u;
+        }
+      uint8_t *resized
+          = (uint8_t *)sqlite3_realloc64 (writer->data, new_capacity);
+      if (resized == NULL)
+        {
+          return SQLITE_NOMEM;
+        }
+      writer->data = resized;
+      writer->capacity = new_capacity;
+    }
+  memcpy (writer->data + writer->size, buffer, nread);
+  writer->size += nread;
   return SQLITE_OK;
 }
 
@@ -243,6 +284,126 @@ test_object_manager_put_with_id_respects_existing_backend (void)
 }
 
 static void
+test_object_manager_stream_range_reads_expected_bytes (void)
+{
+  uint8_t payload[16];
+  for (size_t i = 0; i < sizeof (payload); ++i)
+    {
+      payload[i] = (uint8_t)(0xA0 + i);
+    }
+  objstore_id id = compute_stream_hash (payload, sizeof (payload));
+  seed_backend_object (&id, payload, sizeof (payload));
+
+  objstore_connection *conn = object_manager_open_connection ();
+  objstore_backend_txn *txn = NULL;
+  TEST_ASSERT_EQUAL_INT (SQLITE_OK, objstore_begin_read_txn (conn, &txn));
+
+  objstore_range_spec range = {
+    .has_start = 1,
+    .has_end = 1,
+    .start = 4,
+    .end = 9,
+  };
+  buffer_writer writer = { 0 };
+  objstore_stream_writer stream_writer
+      = { .ctx = &writer, .push = buffer_writer_push };
+  int rc = objstore_object_read_stream_range (
+      conn, txn, &id, (sqlite3_uint64)-1, &range, &stream_writer);
+  rc = objstore_end_read_txn (conn, txn, rc == SQLITE_OK ? SQLITE_OK : rc);
+  TEST_ASSERT_EQUAL_INT (SQLITE_OK, rc);
+  TEST_ASSERT_EQUAL_size_t (6, writer.size);
+  TEST_ASSERT_EQUAL_MEMORY (payload + 4, writer.data, writer.size);
+  sqlite3_free (writer.data);
+
+  TEST_ASSERT_EQUAL_INT (SQLITE_OK, objstore_begin_read_txn (conn, &txn));
+  objstore_range_spec suffix = {
+    .has_start = 0,
+    .has_end = 1,
+    .end = 4,
+  };
+  buffer_writer writer_suffix = { 0 };
+  objstore_stream_writer stream_writer_suffix
+      = { .ctx = &writer_suffix, .push = buffer_writer_push };
+  rc = objstore_object_read_stream_range (
+      conn, txn, &id, (sqlite3_uint64)-1, &suffix, &stream_writer_suffix);
+  rc = objstore_end_read_txn (conn, txn, rc == SQLITE_OK ? SQLITE_OK : rc);
+  TEST_ASSERT_EQUAL_INT (SQLITE_OK, rc);
+  TEST_ASSERT_EQUAL_size_t (4, writer_suffix.size);
+  TEST_ASSERT_EQUAL_MEMORY (payload + 12, writer_suffix.data,
+                            writer_suffix.size);
+  sqlite3_free (writer_suffix.data);
+
+  TEST_ASSERT_EQUAL_INT (SQLITE_OK, objstore_begin_read_txn (conn, &txn));
+  objstore_range_spec suffix_large = {
+    .has_start = 0,
+    .has_end = 1,
+    .end = 999,
+  };
+  buffer_writer writer_suffix_large = { 0 };
+  objstore_stream_writer stream_writer_suffix_large
+      = { .ctx = &writer_suffix_large, .push = buffer_writer_push };
+  rc = objstore_object_read_stream_range (conn, txn, &id, (sqlite3_uint64)-1,
+                                          &suffix_large,
+                                          &stream_writer_suffix_large);
+  rc = objstore_end_read_txn (conn, txn, rc == SQLITE_OK ? SQLITE_OK : rc);
+  TEST_ASSERT_EQUAL_INT (SQLITE_OK, rc);
+  TEST_ASSERT_EQUAL_size_t (sizeof (payload), writer_suffix_large.size);
+  TEST_ASSERT_EQUAL_MEMORY (payload, writer_suffix_large.data,
+                            writer_suffix_large.size);
+  sqlite3_free (writer_suffix_large.data);
+
+  TEST_ASSERT_EQUAL_INT (SQLITE_OK, objstore_begin_read_txn (conn, &txn));
+  objstore_range_spec past_end = {
+    .has_start = 1,
+    .has_end = 1,
+    .start = 14,
+    .end = 200,
+  };
+  buffer_writer writer_trunc = { 0 };
+  objstore_stream_writer stream_writer_trunc
+      = { .ctx = &writer_trunc, .push = buffer_writer_push };
+  rc = objstore_object_read_stream_range (
+      conn, txn, &id, (sqlite3_uint64)-1, &past_end, &stream_writer_trunc);
+  rc = objstore_end_read_txn (conn, txn, rc == SQLITE_OK ? SQLITE_OK : rc);
+  TEST_ASSERT_EQUAL_INT (SQLITE_OK, rc);
+  TEST_ASSERT_EQUAL_size_t (2, writer_trunc.size);
+  TEST_ASSERT_EQUAL_MEMORY (payload + 14, writer_trunc.data, writer_trunc.size);
+  sqlite3_free (writer_trunc.data);
+
+  TEST_ASSERT_EQUAL_INT (SQLITE_OK, objstore_begin_read_txn (conn, &txn));
+  objstore_range_spec invalid = {
+    .has_start = 1,
+    .has_end = 0,
+    .start = 32,
+  };
+  buffer_writer writer_invalid = { 0 };
+  objstore_stream_writer stream_writer_invalid
+      = { .ctx = &writer_invalid, .push = buffer_writer_push };
+  rc = objstore_object_read_stream_range (
+      conn, txn, &id, (sqlite3_uint64)-1, &invalid, &stream_writer_invalid);
+  rc = objstore_end_read_txn (conn, txn, rc == SQLITE_OK ? SQLITE_OK : rc);
+  TEST_ASSERT_EQUAL_INT (SQLITE_RANGE, rc);
+  sqlite3_free (writer_invalid.data);
+
+  TEST_ASSERT_EQUAL_INT (SQLITE_OK, objstore_begin_read_txn (conn, &txn));
+  objstore_range_spec suffix_zero = {
+    .has_start = 0,
+    .has_end = 1,
+    .end = 0,
+  };
+  buffer_writer writer_zero = { 0 };
+  objstore_stream_writer stream_writer_zero
+      = { .ctx = &writer_zero, .push = buffer_writer_push };
+  rc = objstore_object_read_stream_range (
+      conn, txn, &id, (sqlite3_uint64)-1, &suffix_zero, &stream_writer_zero);
+  rc = objstore_end_read_txn (conn, txn, rc == SQLITE_OK ? SQLITE_OK : rc);
+  TEST_ASSERT_EQUAL_INT (SQLITE_RANGE, rc);
+  sqlite3_free (writer_zero.data);
+
+  object_manager_close_connection (conn);
+}
+
+static void
 test_object_manager_verify_reports_integrity (void)
 {
   uint8_t payload[32];
@@ -275,6 +436,7 @@ object_manager_register_tests (void)
   RUN_TEST (test_object_manager_stream_put_different_content_changes_id);
   RUN_TEST (test_object_manager_stream_put_zero_length);
   RUN_TEST (test_object_manager_put_with_id_respects_existing_backend);
+  RUN_TEST (test_object_manager_stream_range_reads_expected_bytes);
   RUN_TEST (test_object_manager_verify_reports_integrity);
   objstore_tests_set_fixture (OBJSTORE_FIXTURE_SMOKE);
 }
