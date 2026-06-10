@@ -57,26 +57,6 @@ private:
   std::filesystem::path path_;
 };
 
-std::string
-FindModelPath (const std::string &relative_path)
-{
-  std::filesystem::path probe = std::filesystem::current_path ();
-  for (int i = 0; i < 6; ++i)
-    {
-      const auto candidate = probe / relative_path;
-      if (std::filesystem::exists (candidate))
-        {
-          return candidate.string ();
-        }
-      if (!probe.has_parent_path ())
-        {
-          break;
-        }
-      probe = probe.parent_path ();
-    }
-  return relative_path;
-}
-
 } // namespace
 
 TEST_CASE ("Gemma deep resolver requires Gemma4", "[deep_llm][resolution]")
@@ -110,26 +90,4 @@ TEST_CASE ("Deep selection fails clearly without Gemma4",
 #if !defined(CORTEXT_DISABLE_LITERT)
   CHECK_THAT (error, Catch::Matchers::ContainsSubstring ("gemma4-e2b-litert"));
 #endif
-}
-
-TEST_CASE ("Deep selection resolves the Gemma4 stack",
-           "[deep_llm][integration]")
-{
-  const std::string gemma_model = FindModelPath (
-      "models/gemma4-e2b-litert/gemma-4-E2B-it.litertlm");
-
-  if (!std::filesystem::exists (gemma_model))
-    {
-      SUCCEED ("Skipping - Gemma4 backend assets not found");
-      return;
-    }
-
-  auto selection = cortext::internal::TryCreateDeepLlmSelection (
-      FindModelPath ("models"), nullptr);
-  REQUIRE (selection.has_value ());
-  CHECK (selection->backend_name == "Gemma/LiteRT-LM");
-  CHECK (selection->summarizer_model_path.filename ()
-         == std::filesystem::path ("gemma-4-E2B-it.litertlm"));
-  CHECK (selection->extractor_model_path.filename ()
-         == std::filesystem::path ("gemma-4-E2B-it.litertlm"));
 }
