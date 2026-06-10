@@ -84,7 +84,7 @@ Usage ()
       << "  --source-records PATH       label_centroid_source_records.jsonl\n"
       << "  --output-dir PATH           output directory\n"
       << "  --models PATH               models directory\n"
-      << "  --model PATH                explicit ES-AIST GGUF path\n"
+      << "  --model PATH                explicit AIST GGUF path\n"
       << "  --source-filter SOURCE      default: salt.csv\n"
       << "  --max-labels N              deterministic cap, 0=all\n"
       << "  --train-prompts-per-label N default: 44\n"
@@ -295,21 +295,21 @@ ResolveModel (const Options &opts)
         }
       return opts.model_path;
     }
-  if (const char *env = std::getenv ("CORTEXT_ES_AIST_MODEL_PATH"))
+  if (const char *env = std::getenv ("CORTEXT_AIST_MODEL_PATH"))
     {
       std::filesystem::path path (env);
       if (!std::filesystem::exists (path))
         {
-          throw std::runtime_error ("CORTEXT_ES_AIST_MODEL_PATH does not exist: "
+          throw std::runtime_error ("CORTEXT_AIST_MODEL_PATH does not exist: "
                                     + path.string ());
         }
       return path;
     }
-  auto resolved = cortext::ResolveEssAistGgufModelPath (opts.models_dir);
+  auto resolved = cortext::ResolveAistGgufModelPath (opts.models_dir);
   if (!resolved)
     {
       throw std::runtime_error (
-          "ES-AIST/ESS-AIST GGUF not found. Use --model or --models.");
+          "AIST/AIST GGUF not found. Use --model or --models.");
     }
   return *resolved;
 }
@@ -372,7 +372,7 @@ LoadRecords (const Options &opts)
 }
 
 std::vector<float>
-EncodeText (cortext::AaitGgufEncoder &encoder, const std::string &text)
+EncodeText (cortext::AistGgufEncoder &encoder, const std::string &text)
 {
   std::vector<float> embedding;
   encoder.EncodeText (text, embedding);
@@ -549,13 +549,13 @@ Main (int argc, char **argv)
     }
 
   const auto model_path = ResolveModel (opts);
-  cortext::AaitGgufConfig config;
+  cortext::AistGgufConfig config;
   config.model_path = model_path.string ();
   config.context_length = 128;
-  cortext::AaitGgufEncoder encoder (config);
+  cortext::AistGgufEncoder encoder (config);
   if (!encoder.IsRuntimeAvailable ())
     {
-      throw std::runtime_error ("ES/AIST runtime unavailable: "
+      throw std::runtime_error ("AIST runtime unavailable: "
                                 + encoder.Inspect ().runtime_error);
     }
 
@@ -688,7 +688,7 @@ Main (int argc, char **argv)
     { "legacy_256d_centroids_compatible", false },
     { "reason_legacy_256d_incompatible",
       "Existing data/*_256.npy centroids were generated in the old 256d "
-      "embedding space and cannot be compared to ES/AIST 1536d outputs." },
+      "embedding space and cannot be compared to AIST outputs." },
     { "contract",
       Json{ { "semantic_key", Json::array ({ 0, 768 }) },
             { "entity_key", Json::array ({ 768, 1536 }) },

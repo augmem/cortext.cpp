@@ -28,7 +28,7 @@ struct Options
   int warmup = 5;
   int parallelism = 1;
   bool vary_text = false;
-  bool ess_aist_compare_fallback = false;
+  bool aist_compare_fallback = false;
   std::string text
       = "This is a short embedding benchmark sentence for cortext.";
 };
@@ -87,7 +87,7 @@ ParseArgs (int argc, char *argv[])
         }
       else if (arg == "--ess-aist-compare-fallback")
         {
-          opts.ess_aist_compare_fallback = true;
+          opts.aist_compare_fallback = true;
         }
       else if (arg == "--text" && i + 1 < argc)
         {
@@ -287,33 +287,34 @@ CompareVectors (const std::vector<float> &a, const std::vector<float> &b)
   return result;
 }
 
-std::unique_ptr<cortext::AaitGgufEncoder>
-MakeEssAistEncoder (const Options &opts, std::string &resolved_model)
+std::unique_ptr<cortext::AistGgufEncoder>
+MakeAistEncoder (const Options &opts, std::string &resolved_model)
 {
-  const auto resolved = cortext::ResolveEssAistGgufModelPath (
+  const auto resolved = cortext::ResolveAistGgufModelPath (
       opts.models_dir);
   if (!resolved.has_value ())
     {
-      throw std::runtime_error ("ESS-AIST GGUF assets not found under "
+      throw std::runtime_error ("AIST GGUF assets not found under "
                                 + opts.models_dir.string ());
     }
-  cortext::AaitGgufConfig cfg;
+  cortext::AistGgufConfig cfg;
   cfg.model_path = resolved->string ();
   cfg.context_length = 128;
   resolved_model = resolved->string ();
-  return std::make_unique<cortext::AaitGgufEncoder> (std::move (cfg));
+  return std::make_unique<cortext::AistGgufEncoder> (std::move (cfg));
 }
 
 std::unique_ptr<cortext::Encoder>
 MakeEncoder (const Options &opts, std::string &resolved_model,
-             cortext::AaitGgufEncoder **ess_aist_encoder = nullptr)
+             cortext::AistGgufEncoder **aist_encoder = nullptr)
 {
-  if (ess_aist_encoder != nullptr)
+  if (aist_encoder != nullptr)
     {
-      *ess_aist_encoder = nullptr;
+      *aist_encoder = nullptr;
     }
   if (opts.encoder == "gemma")
     {
+#if defined(CORTEXT_ENABLE_EMBEDDINGGEMMA)
       const auto resolved = ResolveGemma (opts.models_dir);
       if (!resolved.has_value ())
         {
@@ -326,13 +327,18 @@ MakeEncoder (const Options &opts, std::string &resolved_model,
       cfg.tokenizer_path = resolved->tokenizer_path.string ();
       resolved_model = resolved->model_path.string ();
       return std::make_unique<cortext::EmbeddingGemmaEncoder> (std::move (cfg));
+#else
+      throw std::runtime_error (
+          "EmbeddingGemma encoder is not built into this binary "
+          "(CORTEXT_ENABLE_EMBEDDINGGEMMA=OFF)");
+#endif
     }
-  if (opts.encoder == "ess-aist")
+  if (opts.encoder == "ess-aist" || opts.encoder == "aist")
     {
-      auto ess = MakeEssAistEncoder (opts, resolved_model);
-      if (ess_aist_encoder != nullptr)
+      auto ess = MakeAistEncoder (opts, resolved_model);
+      if (aist_encoder != nullptr)
         {
-          *ess_aist_encoder = ess.get ();
+          *aist_encoder = ess.get ();
         }
       return ess;
     }
@@ -340,7 +346,7 @@ MakeEncoder (const Options &opts, std::string &resolved_model,
 }
 
 int
-RunEssAistFallbackCompare (const Options &opts)
+RunAistFallbackCompare (const Options &opts)
 {
   if (opts.encoder != "ess-aist")
     {
@@ -349,9 +355,9 @@ RunEssAistFallbackCompare (const Options &opts)
     }
 
   std::string fallback_model;
-  SetEnvValue ("CORTEXT_AAIT_DISABLE_FULL_GGML_GRAPH", "1");
-  UnsetEnvValue ("CORTEXT_AAIT_REQUIRE_FULL_GGML_GRAPH");
-  auto fallback = MakeEssAistEncoder (opts, fallback_model);
+  SetEnvValue ("CORTEXT_AIST_DISABLE_FULL_GGML_GRAPH", "1");
+  UnsetEnvValue ("CORTEXT_AIST_REQUIRE_FULL_GGML_GRAPH");
+  auto fallback = MakeAistEncoder (opts, fallback_model);
   std::vector<float> fallback_embedding;
   const auto fallback_start = std::chrono::steady_clock::now ();
   fallback->EncodeText (opts.text, fallback_embedding);
@@ -360,9 +366,9 @@ RunEssAistFallbackCompare (const Options &opts)
   const std::string fallback_granularity = fallback->KernelOpsGranularity ();
 
   std::string full_graph_model;
-  UnsetEnvValue ("CORTEXT_AAIT_DISABLE_FULL_GGML_GRAPH");
-  SetEnvValue ("CORTEXT_AAIT_REQUIRE_FULL_GGML_GRAPH", "1");
-  auto full_graph = MakeEssAistEncoder (opts, full_graph_model);
+  UnsetEnvValue ("CORTEXT_AIST_DISABLE_FULL_GGML_GRAPH");
+  SetEnvValue ("CORTEXT_AIST_REQUIRE_FULL_GGML_GRAPH", "1");
+  auto full_graph = MakeAistEncoder (opts, full_graph_model);
   std::vector<float> full_graph_embedding;
   const auto full_start = std::chrono::steady_clock::now ();
   full_graph->EncodeText (opts.text, full_graph_embedding);
@@ -374,7 +380,7 @@ RunEssAistFallbackCompare (const Options &opts)
   const VectorDiff diff = CompareVectors (fallback_embedding,
                                           full_graph_embedding);
   std::cout << std::fixed << std::setprecision (6);
-  std::cout << "mode=ess_aist_full_graph_parity\n";
+  std::cout << "mode=aist_full_graph_parity\n";
   std::cout << "fallback_model=" << fallback_model << "\n";
   std::cout << "full_graph_model=" << full_graph_model << "\n";
   std::cout << "embedding_dim=" << full_graph_embedding.size () << "\n";
@@ -415,15 +421,15 @@ main (int argc, char *argv[])
   try
     {
       const Options opts = ParseArgs (argc, argv);
-      if (opts.ess_aist_compare_fallback)
+      if (opts.aist_compare_fallback)
         {
-          return RunEssAistFallbackCompare (opts);
+          return RunAistFallbackCompare (opts);
         }
 
-      cortext::AaitGgufEncoder *ess_aist_encoder = nullptr;
+      cortext::AistGgufEncoder *aist_encoder = nullptr;
       std::string resolved_model;
       std::unique_ptr<cortext::Encoder> encoder =
-          MakeEncoder (opts, resolved_model, &ess_aist_encoder);
+          MakeEncoder (opts, resolved_model, &aist_encoder);
 
       std::vector<float> embedding;
       std::chrono::steady_clock::time_point start;
@@ -521,20 +527,20 @@ main (int argc, char *argv[])
       std::cout << "embedding_dim=" << embedding.size () << "\n";
       std::cout << "embedding_norm=" << std::sqrt (norm_sq) << "\n";
       std::cout << "embedding_checksum=" << checksum << "\n";
-      if (ess_aist_encoder != nullptr)
+      if (aist_encoder != nullptr)
         {
           std::cout << "kernel_ops_backend="
-                    << ess_aist_encoder->KernelOpsBackend () << "\n";
+                    << aist_encoder->KernelOpsBackend () << "\n";
           std::cout << "kernel_ops_granularity="
-                    << ess_aist_encoder->KernelOpsGranularity () << "\n";
+                    << aist_encoder->KernelOpsGranularity () << "\n";
           std::cout << "full_text_graph_used="
-                    << (ess_aist_encoder->UsesFullTextGraphOps () ? "true"
+                    << (aist_encoder->UsesFullTextGraphOps () ? "true"
                                                                    : "false")
                     << "\n";
-          if (!ess_aist_encoder->FullTextGraphError ().empty ())
+          if (!aist_encoder->FullTextGraphError ().empty ())
             {
               std::cout << "full_text_graph_error="
-                        << ess_aist_encoder->FullTextGraphError () << "\n";
+                        << aist_encoder->FullTextGraphError () << "\n";
             }
         }
       std::cout << "total_ms=" << total_ms << "\n";

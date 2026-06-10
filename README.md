@@ -108,34 +108,29 @@ Where earlier synthetic-encoder claims did **not** survive the switch to real em
 - explicit consolidation passes for summary, label, and relation generation
 - graph-augmented retrieval combining embedding similarity with extracted semantics
 - native C++20 API plus a C ABI for bindings
-- a first-party multimodal embedding model (AIST-87M) as the default encoder, with optional local backends for embeddings and deep consolidation
+- a first-party multimodal embedding model (AIST-87M) as the required encoder, with optional local backends for deep consolidation
 
-## Embedding Models
+## Embedding Model
 
-Cortext's default encoder is
+Cortext's encoder is
 [`augmem/AIST-87M`](https://huggingface.co/augmem/AIST-87M), a custom
 87M-parameter multimodal embedding model that places audio, image, speech, and
 text in a single retrieval space (unified 1280-d embeddings with Matryoshka
-slices at 1280/768/512/256/128, merged native audio tower). The repo also
-ships **AAIT-86M**, which bundles a preserved trimodal retrieval checkpoint
-with an ingress-anchor head that emits anchor decisions
-(`CREATE / UPDATE / SPLIT / CLOSE / ABSTAIN`) at ingest time without changing
-the underlying retrieval behavior.
+slices at 1280/768/512/256/128, merged native audio tower).
 
-Both models are distributed as custom `triembed` GGUF exports that generic
+AIST is required, not swappable. Every database pins the fingerprint of the
+encoder that produced its embeddings, and the engine refuses to start on a
+mismatch; a configurable encoder would just be a way to corrupt a memory
+store. The model is auto-discovered under `models/AIST-87M-GGUF/` (q8_0
+preferred over q5_1) or pinned explicitly with `CORTEXT_AIST_MODEL_PATH`;
+if it cannot be resolved, engine creation fails with an error instead of
+falling back.
+
+The model is distributed as a custom `triembed` GGUF export that generic
 `llama.cpp` cannot load; Cortext includes its own native GGUF tensor runtime
-(`src/models/aist_gguf_encoder.cpp`) that parses the files, dequantizes the
-needed tensors, and executes the encoder (and anchor head) in C++.
-
-Text-encoder selection order (`CreatePreferredTextEncoder`):
-
-1. **AAIT-86M-GGUF** - opt-in: set `CORTEXT_AAIT_ENABLE=1` (model under
-   `models/AAIT-86M-GGUF/`)
-2. **AIST-87M-GGUF** - the default: auto-discovered under
-   `models/AIST-87M-GGUF/` (q8_0 preferred over q5_1), or pinned explicitly
-   with `CORTEXT_AIST_MODEL_PATH`
-3. **EmbeddingGemma** - fallback via llama.cpp GGUF, LiteRT `.tflite`, or ONNX
-   (`CORTEXT_EMBEDDINGGEMMA_MODEL_PATH`, `CORTEXT_EMBEDDINGGEMMA_BACKEND`)
+(`src/models/aist_gguf_encoder.cpp`) that parses the file, dequantizes the
+needed tensors, and executes the encoder in C++ with no external inference
+dependency.
 
 ## Storage Abstractions
 
@@ -290,8 +285,7 @@ PYTHONPATH=bindings/python python3 -c "import cortext; print(cortext.version())"
 - `CORTEXT_BUILD_EXAMPLES=ON|OFF` - build binaries under `examples/`
 - `CORTEXT_BUILD_NODE_BINDINGS=ON|OFF` - build the Node.js addon under `bindings/javascript`
 - `BUILD_WASM=ON|OFF` - configure the WebAssembly build
-- `CORTEXT_ENABLE_AAIT_GGUF=ON|OFF` - build the native GGUF runtime for the AIST/AAIT custom encoders (default ON)
-- `CORTEXT_ENABLE_EMBEDDINGGEMMA=ON|OFF` - enable the EmbeddingGemma fallback encoder path
+- `CORTEXT_ENABLE_EMBEDDINGGEMMA=ON|OFF` - build the EmbeddingGemma encoder backend (not used by the engine; the AIST runtime always builds)
 - `CORTEXT_DISABLE_LITERT=ON|OFF` - disable LiteRT-LM-backed extractor/summarizer paths
 - `CORTEXT_DISABLE_OGA=ON|OFF` - disable onnxruntime-genai-backed Phi-4 paths
 - `CORTEXT_DISABLE_SHERPA_ONNX=ON|OFF` - disable sherpa-onnx audio integration
@@ -304,7 +298,7 @@ Some features rely on optional local runtimes or model assets under `models/` an
 - onnxruntime-genai
 - sherpa-onnx
 - `llama.cpp` GGUF support for EmbeddingGemma and Liquid deep-consolidation backends
-- the AIST/AAIT encoders need no external runtime - their `triembed` GGUF exports run on Cortext's built-in GGUF tensor runtime
+- the AIST encoder needs no external runtime - its `triembed` GGUF export runs on Cortext's built-in GGUF tensor runtime
 
 ## Deep Consolidation Backends
 

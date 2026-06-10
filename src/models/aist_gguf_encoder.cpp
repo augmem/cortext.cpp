@@ -107,7 +107,7 @@ ReadScalar (std::istream &in)
   in.read (reinterpret_cast<char *> (&value), sizeof (T));
   if (!in)
     {
-      throw std::runtime_error ("AAIT GGUF inspect failed while reading scalar");
+      throw std::runtime_error ("AIST GGUF inspect failed while reading scalar");
     }
   return value;
 }
@@ -118,7 +118,7 @@ ReadString (std::istream &in)
   const std::uint64_t size = ReadScalar<std::uint64_t> (in);
   if (size > static_cast<std::uint64_t> (std::numeric_limits<int>::max ()))
     {
-      throw std::runtime_error ("AAIT GGUF string is unreasonably large");
+      throw std::runtime_error ("AIST GGUF string is unreasonably large");
     }
   std::string value (static_cast<std::size_t> (size), '\0');
   if (size > 0)
@@ -127,7 +127,7 @@ ReadString (std::istream &in)
       if (!in)
         {
           throw std::runtime_error (
-              "AAIT GGUF inspect failed while reading string");
+              "AIST GGUF inspect failed while reading string");
         }
     }
   return value;
@@ -142,12 +142,12 @@ SkipBytes (std::istream &in, std::uint64_t count)
     }
   if (count > static_cast<std::uint64_t> (std::numeric_limits<int>::max ()))
     {
-      throw std::runtime_error ("AAIT GGUF value is unreasonably large");
+      throw std::runtime_error ("AIST GGUF value is unreasonably large");
     }
   in.seekg (static_cast<std::streamoff> (count), std::ios::cur);
   if (!in)
     {
-      throw std::runtime_error ("AAIT GGUF inspect failed while skipping bytes");
+      throw std::runtime_error ("AIST GGUF inspect failed while skipping bytes");
     }
 }
 
@@ -201,7 +201,7 @@ SkipValue (std::istream &in, GgufValueType type)
         }
       if (element_type == GgufValueType::Array)
         {
-          throw std::runtime_error ("AAIT GGUF nested arrays are unsupported");
+          throw std::runtime_error ("AIST GGUF nested arrays are unsupported");
         }
       SkipBytes (in, ScalarSize (element_type) * count);
       return;
@@ -291,7 +291,7 @@ AppendIfPresent (std::vector<std::string> &values, const std::string &value)
 std::string
 RuntimeUnavailableReason ()
 {
-  return "aait_runtime_backend_unavailable: AAIT native triembed runtime was "
+  return "aist_runtime_backend_unavailable: AIST native triembed runtime was "
          "not initialized";
 }
 
@@ -335,7 +335,7 @@ TensorByteSize (std::uint32_t ggml_type, std::uint64_t element_count)
     case 8: // Q8_0: half scale + 32 int8 values per block.
       return ((element_count + 31) / 32) * 34;
     default:
-      throw std::runtime_error ("AAIT unsupported GGML tensor type: "
+      throw std::runtime_error ("AIST unsupported GGML tensor type: "
                                 + std::to_string (ggml_type));
     }
 }
@@ -486,7 +486,7 @@ DequantizeTensorBytes (std::uint32_t ggml_type,
         }
       return out;
     }
-  throw std::runtime_error ("AAIT unsupported GGML tensor type: "
+  throw std::runtime_error ("AIST unsupported GGML tensor type: "
                             + std::to_string (ggml_type));
 }
 
@@ -684,7 +684,7 @@ CubicWeight (float x)
 }
 
 std::vector<float>
-PreprocessEsAistImageNHWC (const std::uint8_t *data, int width, int height,
+PreprocessAistImageNHWC (const std::uint8_t *data, int width, int height,
                            int channels)
 {
   if (data == nullptr || width <= 0 || height <= 0 || channels < 3)
@@ -741,7 +741,7 @@ PreprocessEsAistImageNHWC (const std::uint8_t *data, int width, int height,
 }
 
 std::vector<float>
-PreprocessEsAistImageHWC (const std::uint8_t *data, int width, int height,
+PreprocessAistImageHWC (const std::uint8_t *data, int width, int height,
                           int channels)
 {
   if (data == nullptr || width <= 0 || height <= 0 || channels < 3)
@@ -798,7 +798,7 @@ PreprocessEsAistImageHWC (const std::uint8_t *data, int width, int height,
 }
 
 std::vector<float>
-PreprocessEsAistAudioNHWC (const float *pcm, std::size_t num_samples)
+PreprocessAistAudioNHWC (const float *pcm, std::size_t num_samples)
 {
   if (pcm == nullptr)
     {
@@ -945,7 +945,7 @@ public:
     std::ifstream in (model_path, std::ios::binary);
     if (!in)
       {
-        throw std::runtime_error ("AAIT native runtime model not found: "
+        throw std::runtime_error ("AIST native runtime model not found: "
                                   + model_path.string ());
       }
 
@@ -953,13 +953,13 @@ public:
     in.read (magic, sizeof (magic));
     if (!in || std::memcmp (magic, "GGUF", 4) != 0)
       {
-        throw std::runtime_error ("AAIT native runtime expected GGUF: "
+        throw std::runtime_error ("AIST native runtime expected GGUF: "
                                   + model_path.string ());
       }
     const std::uint32_t version = ReadScalar<std::uint32_t> (in);
     if (version < 2 || version > 3)
       {
-        throw std::runtime_error ("Unsupported AAIT GGUF version: "
+        throw std::runtime_error ("Unsupported AIST GGUF version: "
                                   + std::to_string (version));
       }
     const std::uint64_t tensor_count = ReadScalar<std::uint64_t> (in);
@@ -1022,7 +1022,7 @@ public:
                  static_cast<std::streamsize> (bytes.size ()));
         if (!in)
           {
-            throw std::runtime_error ("AAIT native runtime failed to read tensor "
+            throw std::runtime_error ("AIST native runtime failed to read tensor "
                                       + record.name);
           }
 
@@ -1043,7 +1043,7 @@ public:
     const auto it = tensors_.find (name);
     if (it == tensors_.end ())
       {
-        throw std::runtime_error ("AAIT native runtime missing tensor: " + name);
+        throw std::runtime_error ("AIST native runtime missing tensor: " + name);
       }
     return it->second;
   }
@@ -1103,7 +1103,7 @@ LoadFoldedBatchNorm (const RuntimeTensorStore &store,
   if (weight.data.size () != count || bias.data.size () != count
       || mean.data.size () != count)
     {
-      throw std::runtime_error ("ES-AIST image batchnorm mismatch for "
+      throw std::runtime_error ("AIST image batchnorm mismatch for "
                                 + prefix);
     }
   FoldedBatchNorm out;
@@ -1154,7 +1154,7 @@ LinearHostVector (const RuntimeTensorStore &store,
   if (static_cast<int> (input.size ()) != cols
       || static_cast<int> (bias.data.size ()) != rows)
     {
-      throw std::runtime_error ("AAIT host linear mismatch for " + prefix);
+      throw std::runtime_error ("AIST host linear mismatch for " + prefix);
     }
   std::vector<float> out = MulRowsByWeightTranspose (
       input.data (), 1, cols, weight, rows);
@@ -1174,7 +1174,7 @@ LayerNormHostVector (const RuntimeTensorStore &store,
   const RuntimeTensor &bias = store.Required (prefix + ".bias");
   if (weight.data.size () != input.size () || bias.data.size () != input.size ())
     {
-      throw std::runtime_error ("AAIT host layernorm mismatch for "
+      throw std::runtime_error ("AIST host layernorm mismatch for "
                                 + prefix);
     }
   double mean = 0.0;
@@ -1245,7 +1245,7 @@ ApplyBatchNormAndActivationInPlace (HwcTensor &x, const FoldedBatchNorm &bn,
   if (bn.scale.size () != static_cast<std::size_t> (x.channels)
       || bn.bias.size () != static_cast<std::size_t> (x.channels))
     {
-      throw std::runtime_error ("ES-AIST image batchnorm channel mismatch");
+      throw std::runtime_error ("AIST image batchnorm channel mismatch");
     }
   for (int y = 0; y < x.height; ++y)
     {
@@ -1271,7 +1271,7 @@ StandardConv2dHwc (const HwcTensor &input, const RuntimeTensor &weight,
 {
   if (weight.shape.size () != 4)
     {
-      throw std::runtime_error ("ES-AIST image conv weight must be 4D");
+      throw std::runtime_error ("AIST image conv weight must be 4D");
     }
   const int out_channels = static_cast<int> (weight.shape[0]);
   const int in_channels = static_cast<int> (weight.shape[1]);
@@ -1279,7 +1279,7 @@ StandardConv2dHwc (const HwcTensor &input, const RuntimeTensor &weight,
   const int kw = static_cast<int> (weight.shape[3]);
   if (in_channels != input.channels)
     {
-      throw std::runtime_error ("ES-AIST image conv input channel mismatch");
+      throw std::runtime_error ("AIST image conv input channel mismatch");
     }
   const int out_h = (input.height + 2 * pad - kh) / stride + 1;
   const int out_w = (input.width + 2 * pad - kw) / stride + 1;
@@ -1328,7 +1328,7 @@ DepthwiseConv2dHwc (const HwcTensor &input, const RuntimeTensor &weight,
 {
   if (weight.shape.size () != 4)
     {
-      throw std::runtime_error ("ES-AIST image depthwise weight must be 4D");
+      throw std::runtime_error ("AIST image depthwise weight must be 4D");
     }
   const int channels = static_cast<int> (weight.shape[0]);
   const int multiplier = static_cast<int> (weight.shape[1]);
@@ -1337,7 +1337,7 @@ DepthwiseConv2dHwc (const HwcTensor &input, const RuntimeTensor &weight,
   if (channels != input.channels || multiplier != 1)
     {
       throw std::runtime_error (
-          "ES-AIST image depthwise channel mismatch");
+          "AIST image depthwise channel mismatch");
     }
   const int out_h = (input.height + 2 * pad - kh) / stride + 1;
   const int out_w = (input.width + 2 * pad - kw) / stride + 1;
@@ -1380,14 +1380,14 @@ PointwiseConv2dHwc (const HwcTensor &input, const RuntimeTensor &weight)
 {
   if (weight.shape.size () != 4 || weight.shape[2] != 1 || weight.shape[3] != 1)
     {
-      throw std::runtime_error ("ES-AIST image pointwise weight must be 1x1");
+      throw std::runtime_error ("AIST image pointwise weight must be 1x1");
     }
   const int out_channels = static_cast<int> (weight.shape[0]);
   const int in_channels = static_cast<int> (weight.shape[1]);
   if (in_channels != input.channels)
     {
       throw std::runtime_error (
-          "ES-AIST image pointwise input channel mismatch");
+          "AIST image pointwise input channel mismatch");
     }
   const int row_count = input.height * input.width;
   std::vector<float> out_rows = MulRowsByWeightTranspose (
@@ -1491,12 +1491,12 @@ AveragePoolChannels (const HwcTensor &x)
 }
 
 std::vector<float>
-EncodeEsAistImageFeaturesNative (const RuntimeTensorStore &store,
+EncodeAistImageFeaturesNative (const RuntimeTensorStore &store,
                                  const std::vector<float> &input_hwc)
 {
   if (input_hwc.size () != static_cast<std::size_t> (384 * 384 * 3))
     {
-      throw std::runtime_error ("ES-AIST native image input must be 384x384x3");
+      throw std::runtime_error ("AIST native image input must be 384x384x3");
     }
   HwcTensor x (384, 384, 3);
   x.data = input_hwc;
@@ -1565,7 +1565,7 @@ ToGgmlType (std::uint32_t type)
     case 8:
       return GGML_TYPE_Q8_0;
     default:
-      throw std::runtime_error ("AAIT ggml kernel unsupported tensor type: "
+      throw std::runtime_error ("AIST ggml kernel unsupported tensor type: "
                                 + std::to_string (type));
     }
 }
@@ -1585,7 +1585,7 @@ LoadRawGgufTensors (const std::filesystem::path &model_path,
   std::ifstream in (model_path, std::ios::binary);
   if (!in)
     {
-      throw std::runtime_error ("AAIT ggml kernel model not found: "
+      throw std::runtime_error ("AIST ggml kernel model not found: "
                                 + model_path.string ());
     }
 
@@ -1593,13 +1593,13 @@ LoadRawGgufTensors (const std::filesystem::path &model_path,
   in.read (magic, sizeof (magic));
   if (!in || std::memcmp (magic, "GGUF", 4) != 0)
     {
-      throw std::runtime_error ("AAIT ggml kernel expected GGUF: "
+      throw std::runtime_error ("AIST ggml kernel expected GGUF: "
                                 + model_path.string ());
     }
   const std::uint32_t version = ReadScalar<std::uint32_t> (in);
   if (version < 2 || version > 3)
     {
-      throw std::runtime_error ("Unsupported AAIT GGUF version: "
+      throw std::runtime_error ("Unsupported AIST GGUF version: "
                                 + std::to_string (version));
     }
   const std::uint64_t tensor_count = ReadScalar<std::uint64_t> (in);
@@ -1668,7 +1668,7 @@ LoadRawGgufTensors (const std::filesystem::path &model_path,
                static_cast<std::streamsize> (tensor.bytes.size ()));
       if (!in)
         {
-          throw std::runtime_error ("AAIT ggml kernel failed to read tensor "
+          throw std::runtime_error ("AIST ggml kernel failed to read tensor "
                                     + record.name);
         }
       out.push_back (std::move (tensor));
@@ -1704,9 +1704,9 @@ public:
         const std::vector<std::string> &prefixes, int threads,
         std::string &error)
   {
-    if (GetEnvBool ("CORTEXT_AAIT_DISABLE_GGML_KERNELS", false))
+    if (GetEnvBool ("CORTEXT_AIST_DISABLE_GGML_KERNELS", false))
       {
-        error = "disabled by CORTEXT_AAIT_DISABLE_GGML_KERNELS";
+        error = "disabled by CORTEXT_AIST_DISABLE_GGML_KERNELS";
         return GgmlLinearLoadStatus::Disabled;
       }
 
@@ -1737,7 +1737,7 @@ public:
         weights_ctx_ = ggml_init (params);
         if (weights_ctx_ == nullptr)
           {
-            throw std::runtime_error ("ggml_init failed for AAIT weights");
+            throw std::runtime_error ("ggml_init failed for AIST weights");
           }
 
         for (const auto &raw : raw_tensors_)
@@ -1771,7 +1771,7 @@ public:
         if (weights_buffer_ == nullptr)
           {
             throw std::runtime_error (
-                "ggml backend failed to allocate AAIT weights");
+                "ggml backend failed to allocate AIST weights");
           }
         ggml_backend_buffer_set_usage (weights_buffer_,
                                        GGML_BACKEND_BUFFER_USAGE_WEIGHTS);
@@ -1881,25 +1881,25 @@ public:
   {
     if (!IsReady ())
       {
-        throw std::runtime_error ("AAIT ggml linear kernel is not loaded");
+        throw std::runtime_error ("AIST ggml linear kernel is not loaded");
       }
     struct ggml_tensor *weight = Required (prefix + ".weight");
     const auto bias_it = biases_.find (prefix + ".bias");
     if (bias_it == biases_.end ())
       {
-        throw std::runtime_error ("AAIT ggml missing bias: " + prefix
+        throw std::runtime_error ("AIST ggml missing bias: " + prefix
                                   + ".bias");
       }
     const Eigen::Index cols = static_cast<Eigen::Index> (weight->ne[0]);
     const Eigen::Index rows = static_cast<Eigen::Index> (weight->ne[1]);
     if (input.cols () != cols)
       {
-        throw std::runtime_error ("AAIT ggml linear input mismatch for "
+        throw std::runtime_error ("AIST ggml linear input mismatch for "
                                   + prefix);
       }
     if (static_cast<Eigen::Index> (bias_it->second.size ()) != rows)
       {
-        throw std::runtime_error ("AAIT ggml linear bias mismatch for "
+        throw std::runtime_error ("AIST ggml linear bias mismatch for "
                                   + prefix);
       }
 
@@ -1911,7 +1911,7 @@ public:
         backend_, plan.graph);
     if (status != GGML_STATUS_SUCCESS)
       {
-        throw std::runtime_error ("AAIT ggml graph compute failed for "
+        throw std::runtime_error ("AIST ggml graph compute failed for "
                                   + prefix + ": "
                                   + std::to_string (static_cast<int> (
                                       status)));
@@ -1935,7 +1935,7 @@ public:
   {
     if (!IsReady ())
       {
-        throw std::runtime_error ("AAIT ggml full graph kernel is not loaded");
+        throw std::runtime_error ("AIST ggml full graph kernel is not loaded");
       }
     if (ids.empty ())
       {
@@ -1955,7 +1955,7 @@ public:
         backend_, plan.graph);
     if (status != GGML_STATUS_SUCCESS)
       {
-        throw std::runtime_error ("AAIT ggml full text graph compute failed: "
+        throw std::runtime_error ("AIST ggml full text graph compute failed: "
                                   + std::to_string (static_cast<int> (
                                       status)));
       }
@@ -1972,11 +1972,11 @@ public:
   {
     if (!IsReady ())
       {
-        throw std::runtime_error ("AAIT ggml image graph kernel is not loaded");
+        throw std::runtime_error ("AIST ggml image graph kernel is not loaded");
       }
     if (nhwc.size () != static_cast<std::size_t> (384 * 384 * 3))
       {
-        throw std::runtime_error ("AAIT image input must be 384x384x3");
+        throw std::runtime_error ("AIST image input must be 384x384x3");
       }
     ModalityPlan &plan = GetOrCreateImagePlan ();
     ggml_backend_tensor_set (plan.input, nhwc.data (), 0,
@@ -1985,7 +1985,7 @@ public:
         backend_, plan.graph);
     if (status != GGML_STATUS_SUCCESS)
       {
-        throw std::runtime_error ("AAIT ggml image graph compute failed: "
+        throw std::runtime_error ("AIST ggml image graph compute failed: "
                                   + std::to_string (static_cast<int> (
                                       status)));
       }
@@ -2002,11 +2002,11 @@ public:
   {
     if (!IsReady ())
       {
-        throw std::runtime_error ("AAIT ggml audio graph kernel is not loaded");
+        throw std::runtime_error ("AIST ggml audio graph kernel is not loaded");
       }
     if (nhwc.size () != static_cast<std::size_t> (1000 * 128))
       {
-        throw std::runtime_error ("AAIT audio input must be 1000x128x1");
+        throw std::runtime_error ("AIST audio input must be 1000x128x1");
       }
     ModalityPlan &plan = GetOrCreateAudioPlan ();
     ggml_backend_tensor_set (plan.input, nhwc.data (), 0,
@@ -2015,7 +2015,7 @@ public:
         backend_, plan.graph);
     if (status != GGML_STATUS_SUCCESS)
       {
-        throw std::runtime_error ("AAIT ggml audio graph compute failed: "
+        throw std::runtime_error ("AIST ggml audio graph compute failed: "
                                   + std::to_string (static_cast<int> (
                                       status)));
       }
@@ -2055,7 +2055,7 @@ private:
             static_cast<int64_t> (raw.shape[2]),
             static_cast<int64_t> (raw.shape[3]));
       default:
-        throw std::runtime_error ("AAIT ggml unsupported tensor rank for "
+        throw std::runtime_error ("AIST ggml unsupported tensor rank for "
                                   + raw.name);
       }
   }
@@ -2066,7 +2066,7 @@ private:
     const auto found = weights_.find (name);
     if (found == weights_.end ())
       {
-        throw std::runtime_error ("AAIT ggml missing tensor: " + name);
+        throw std::runtime_error ("AIST ggml missing tensor: " + name);
       }
     return found->second;
   }
@@ -2611,7 +2611,7 @@ private:
     plan->ctx = ggml_init (params);
     if (plan->ctx == nullptr)
       {
-        throw std::runtime_error ("ggml_init failed for AAIT full text graph");
+        throw std::runtime_error ("ggml_init failed for AIST full text graph");
       }
 
     struct ggml_context *ctx = plan->ctx;
@@ -2676,7 +2676,7 @@ private:
     if (plan->buffer == nullptr)
       {
         throw std::runtime_error (
-            "ggml backend failed to allocate AAIT full text graph tensors");
+            "ggml backend failed to allocate AIST full text graph tensors");
       }
 
     std::vector<std::int32_t> positions (static_cast<std::size_t> (seq));
@@ -2715,7 +2715,7 @@ private:
     image_plan_->ctx = ggml_init (params);
     if (image_plan_->ctx == nullptr)
       {
-        throw std::runtime_error ("ggml_init failed for AAIT image graph");
+        throw std::runtime_error ("ggml_init failed for AIST image graph");
       }
     struct ggml_context *ctx = image_plan_->ctx;
     image_plan_->input = ggml_new_tensor_4d (ctx, GGML_TYPE_F32, 384, 384,
@@ -2727,7 +2727,7 @@ private:
     if (image_plan_->buffer == nullptr)
       {
         throw std::runtime_error (
-            "ggml backend failed to allocate AAIT image graph tensors");
+            "ggml backend failed to allocate AIST image graph tensors");
       }
     return *image_plan_;
   }
@@ -2747,7 +2747,7 @@ private:
     audio_plan_->ctx = ggml_init (params);
     if (audio_plan_->ctx == nullptr)
       {
-        throw std::runtime_error ("ggml_init failed for AAIT audio graph");
+        throw std::runtime_error ("ggml_init failed for AIST audio graph");
       }
     struct ggml_context *ctx = audio_plan_->ctx;
     audio_plan_->input = ggml_new_tensor_4d (ctx, GGML_TYPE_F32, 1000, 128,
@@ -2759,7 +2759,7 @@ private:
     if (audio_plan_->buffer == nullptr)
       {
         throw std::runtime_error (
-            "ggml backend failed to allocate AAIT audio graph tensors");
+            "ggml backend failed to allocate AIST audio graph tensors");
       }
     return *audio_plan_;
   }
@@ -2783,7 +2783,7 @@ private:
     plan->ctx = ggml_init (params);
     if (plan->ctx == nullptr)
       {
-        throw std::runtime_error ("ggml_init failed for AAIT graph");
+        throw std::runtime_error ("ggml_init failed for AIST graph");
       }
 
     plan->input = ggml_new_tensor_2d (
@@ -2795,7 +2795,7 @@ private:
     if (plan->buffer == nullptr)
       {
         throw std::runtime_error (
-            "ggml backend failed to allocate AAIT graph tensors");
+            "ggml backend failed to allocate AIST graph tensors");
       }
 
     auto inserted = plans_.emplace (key, std::move (plan));
@@ -2806,7 +2806,7 @@ private:
   InitBestBackend (int threads, std::string &error)
   {
     const std::string requested = GetEnvOrDefault (
-        "CORTEXT_AAIT_GGML_BACKEND");
+        "CORTEXT_AIST_GGML_BACKEND");
     std::vector<ggml_backend_dev_t> candidates;
     const auto append_matching = [&] (auto predicate) {
       const std::size_t count = ggml_backend_dev_count ();
@@ -2976,7 +2976,7 @@ private:
     std::ifstream in (path);
     if (!in)
       {
-        throw std::runtime_error ("AAIT tokenizer vocab not found: "
+        throw std::runtime_error ("AIST tokenizer vocab not found: "
                                   + path.string ());
       }
     tokens_.clear ();
@@ -3011,7 +3011,7 @@ private:
       }
     if (tokens_.empty ())
       {
-        throw std::runtime_error ("AAIT tokenizer vocab is empty: "
+        throw std::runtime_error ("AIST tokenizer vocab is empty: "
                                   + path.string ());
       }
   }
@@ -3022,14 +3022,14 @@ private:
     std::ifstream in (path, std::ios::binary);
     if (!in)
       {
-        throw std::runtime_error ("AAIT tokenizer GGUF not found: "
+        throw std::runtime_error ("AIST tokenizer GGUF not found: "
                                   + path.string ());
       }
     char magic[4]{};
     in.read (magic, sizeof (magic));
     if (!in || std::memcmp (magic, "GGUF", 4) != 0)
       {
-        throw std::runtime_error ("AAIT tokenizer path is not GGUF: "
+        throw std::runtime_error ("AIST tokenizer path is not GGUF: "
                                   + path.string ());
       }
     const std::uint32_t version = ReadScalar<std::uint32_t> (in);
@@ -3053,7 +3053,7 @@ private:
             if (element_type != GgufValueType::String)
               {
                 throw std::runtime_error (
-                    "AAIT tokenizer token array is not string typed");
+                    "AIST tokenizer token array is not string typed");
               }
             tokens_.clear ();
             tokens_.reserve (static_cast<std::size_t> (count));
@@ -3093,7 +3093,7 @@ private:
 
     if (tokens_.empty ())
       {
-        throw std::runtime_error ("AAIT tokenizer GGUF has no token list");
+        throw std::runtime_error ("AIST tokenizer GGUF has no token list");
       }
   }
 
@@ -3201,10 +3201,10 @@ private:
 };
 
 std::filesystem::path
-ResolveAaitTokenizerPath (const std::filesystem::path &model_path,
+ResolveAistTokenizerPath (const std::filesystem::path &model_path,
                           const std::string &override_path)
 {
-  const std::string env_path = GetEnvOrDefault ("CORTEXT_AAIT_TOKENIZER_GGUF_PATH");
+  const std::string env_path = GetEnvOrDefault ("CORTEXT_AIST_TOKENIZER_GGUF_PATH");
   if (!override_path.empty ())
     {
       return override_path;
@@ -3256,22 +3256,17 @@ L2Normalize (std::vector<float> &values)
 
 } // namespace
 
-class AaitGgufEncoder::NativeRuntime
+class AistGgufEncoder::NativeRuntime
 {
 public:
   void
-  Load (const AaitGgufConfig &config, bool load_anchor_heads)
+  Load (const AistGgufConfig &config)
   {
     context_length_ = std::max (8, config.context_length);
-    has_anchor_heads_ = load_anchor_heads;
     std::vector<std::string> prefixes{
       "text_encoder.",  "text_projection.",  "image_encoder.",
       "image_projection.", "audio_encoder.", "audio_projection.",
     };
-    if (load_anchor_heads)
-      {
-        prefixes.push_back ("anchor_head.");
-      }
     tensors_.Load (config.model_path, prefixes);
     std::string kernel_error;
     kernel_ = std::make_unique<GgmlLinearKernel> ();
@@ -3282,7 +3277,7 @@ public:
         kernel_.reset ();
         kernel_error_ = kernel_error;
       }
-    tokenizer_path_ = ResolveAaitTokenizerPath (config.model_path,
+    tokenizer_path_ = ResolveAistTokenizerPath (config.model_path,
                                                 config.tokenizer_gguf_path);
     tokenizer_.Load (tokenizer_path_);
   }
@@ -3293,47 +3288,21 @@ public:
     return tokenizer_path_;
   }
 
-  AaitOutput
-  Encode (const AaitIngressInput &input)
+  std::vector<float>
+  Encode (const std::string &text)
   {
-    const std::vector<float> semantic = input.semantic_vector.empty ()
-                                            ? EncodeSemantic (input.text)
-                                            : input.semantic_vector;
-    if (!has_anchor_heads_)
-      {
-        AaitOutput output;
-        output.semantic_vector = semantic;
-        output.has_semantic_vector = !semantic.empty ();
-        return output;
-      }
-    const std::vector<float> recent
-        = !input.recent_context_vector.empty ()
-              ? input.recent_context_vector
-              : (input.recent_context.empty () ? semantic
-                                               : EncodeSemantic (
-                                                   input.recent_context));
-    const std::vector<float> active
-        = !input.active_anchor_state.empty ()
-              ? input.active_anchor_state
-              : (!input.candidate_semantic.empty ()
-                     ? MeanSemantic (input.candidate_semantic)
-                     : (input.active_context.empty ()
-                            ? recent
-                            : EncodeSemantic (input.active_context)));
-    return AnchorForward (semantic, recent, active, input.modality_id,
-                          input.source_id, input.time_delta,
-                          input.candidate_semantic, input.candidate_features);
+    return EncodeSemantic (text);
   }
 
   std::vector<float>
   EncodeImage (const std::uint8_t *data, int width, int height, int channels)
   {
     native_image_used_ = false;
-    if (!GetEnvBool ("CORTEXT_AAIT_DISABLE_NATIVE_IMAGE_KERNELS", false))
+    if (!GetEnvBool ("CORTEXT_AIST_DISABLE_NATIVE_IMAGE_KERNELS", false))
       {
-        std::vector<float> input = PreprocessEsAistImageHWC (
+        std::vector<float> input = PreprocessAistImageHWC (
             data, width, height, channels);
-        std::vector<float> features = EncodeEsAistImageFeaturesNative (
+        std::vector<float> features = EncodeAistImageFeaturesNative (
             tensors_, input);
         std::vector<float> semantic = ProjectionBlockHostVector (
             tensors_, features, "image_projection");
@@ -3347,7 +3316,7 @@ public:
         throw std::runtime_error (
             "triembed image runtime requires compiled ggml kernel ops");
       }
-    std::vector<float> input = PreprocessEsAistImageNHWC (data, width, height,
+    std::vector<float> input = PreprocessAistImageNHWC (data, width, height,
                                                           channels);
     std::vector<float> semantic = kernel_->EncodeImageFullGraph (input);
     NormalizeL2InPlace (semantic);
@@ -3362,7 +3331,7 @@ public:
         throw std::runtime_error (
             "triembed audio runtime requires compiled ggml kernel ops");
       }
-    std::vector<float> input = PreprocessEsAistAudioNHWC (pcm, num_samples);
+    std::vector<float> input = PreprocessAistAudioNHWC (pcm, num_samples);
     std::vector<float> semantic = kernel_->EncodeAudioFullGraph (input);
     NormalizeL2InPlace (semantic);
     return semantic;
@@ -3374,7 +3343,7 @@ public:
     return tokenizer_.Encode (text, context_length_);
   }
 
-  AaitRuntimeStats
+  AistRuntimeStats
   Stats () const
   {
     return stats_;
@@ -3414,7 +3383,7 @@ public:
       {
         return "native_image_hwc";
       }
-    if (GetEnvBool ("CORTEXT_AAIT_DISABLE_FULL_GGML_GRAPH", false))
+    if (GetEnvBool ("CORTEXT_AIST_DISABLE_FULL_GGML_GRAPH", false))
       {
         return "per_linear_graph_debug";
       }
@@ -3474,47 +3443,13 @@ private:
     const Eigen::Index cols = static_cast<Eigen::Index> (weight.Cols ());
     if (static_cast<std::size_t> (cols) != input.size ())
       {
-        throw std::runtime_error ("AAIT linear input mismatch for " + prefix);
+        throw std::runtime_error ("AIST linear input mismatch for " + prefix);
       }
     ConstMatrixMap w (weight.data.data (), rows, cols);
     ConstVectorMap x (input.data (), cols);
     ConstVectorMap b (bias.data.data (), rows);
     Eigen::VectorXf y = (w * x) + b;
     return std::vector<float> (y.data (), y.data () + y.size ());
-  }
-
-  static std::vector<float>
-  MeanSemantic (const std::vector<std::vector<float>> &vectors)
-  {
-    if (vectors.empty ())
-      {
-        return {};
-      }
-    std::vector<float> out (vectors.front ().size (), 0.0F);
-    int count = 0;
-    for (const auto &vector : vectors)
-      {
-        if (vector.size () != out.size ())
-          {
-            continue;
-          }
-        for (std::size_t i = 0; i < out.size (); ++i)
-          {
-            out[i] += vector[i];
-          }
-        ++count;
-      }
-    if (count == 0)
-      {
-        return {};
-      }
-    const float inv = 1.0F / static_cast<float> (count);
-    for (float &value : out)
-      {
-        value *= inv;
-      }
-    NormalizeL2InPlace (out);
-    return out;
   }
 
   RowMatrix
@@ -3530,7 +3465,7 @@ private:
     const Eigen::Index cols = static_cast<Eigen::Index> (weight.Cols ());
     if (input.cols () != cols)
       {
-        throw std::runtime_error ("AAIT row-linear input mismatch for "
+        throw std::runtime_error ("AIST row-linear input mismatch for "
                                   + prefix);
       }
     ConstMatrixMap w (weight.data.data (), rows, cols);
@@ -3548,7 +3483,7 @@ private:
     const RuntimeTensor &bias = T (prefix + ".bias");
     if (weight.data.size () != input.size () || bias.data.size () != input.size ())
       {
-        throw std::runtime_error ("AAIT layernorm shape mismatch for "
+        throw std::runtime_error ("AIST layernorm shape mismatch for "
                                   + prefix);
       }
     double mean = 0.0;
@@ -3585,7 +3520,7 @@ private:
     if (static_cast<std::size_t> (matrix.cols ()) != weight.data.size ()
         || weight.data.size () != bias.data.size ())
       {
-        throw std::runtime_error ("AAIT row layernorm shape mismatch for "
+        throw std::runtime_error ("AIST row layernorm shape mismatch for "
                                   + prefix);
       }
     for (Eigen::Index row = 0; row < matrix.rows (); ++row)
@@ -3718,7 +3653,7 @@ private:
 
     const std::vector<int> ids = tokenizer_.Encode (text, context_length_);
     if (kernel_ != nullptr && kernel_->IsReady ()
-        && !GetEnvBool ("CORTEXT_AAIT_DISABLE_FULL_GGML_GRAPH", false))
+        && !GetEnvBool ("CORTEXT_AIST_DISABLE_FULL_GGML_GRAPH", false))
       {
         try
           {
@@ -3731,7 +3666,7 @@ private:
           }
         catch (const std::exception &ex)
           {
-            if (GetEnvBool ("CORTEXT_AAIT_REQUIRE_FULL_GGML_GRAPH", false))
+            if (GetEnvBool ("CORTEXT_AIST_REQUIRE_FULL_GGML_GRAPH", false))
               {
                 throw;
               }
@@ -3823,451 +3758,17 @@ private:
                                    + static_cast<std::ptrdiff_t> (begin + cols));
   }
 
-  AaitOutput
-  AnchorForward (const std::vector<float> &semantic,
-                 const std::vector<float> &recent,
-                 const std::vector<float> &active, int modality_id,
-                 int source_id, float time_delta,
-                 const std::vector<std::vector<float>> &candidate_semantic,
-                 const std::vector<std::array<float, 7>> &candidate_features)
-      const
-  {
-    std::vector<float> time_input{ time_delta };
-    std::vector<float> time = Linear (time_input, "anchor_head.time_mlp.0");
-    ApplyGeluInPlace (time);
-    time = Linear (time, "anchor_head.time_mlp.2");
-    std::vector<float> modality = EmbeddingLookup (
-        "anchor_head.modality_embedding.weight", modality_id);
-    std::vector<float> source = EmbeddingLookup (
-        "anchor_head.source_embedding.weight", source_id);
-
-    std::vector<float> x;
-    x.reserve (semantic.size () + recent.size () + active.size ()
-               + modality.size () + time.size () + source.size ());
-    x.insert (x.end (), semantic.begin (), semantic.end ());
-    x.insert (x.end (), recent.begin (), recent.end ());
-    x.insert (x.end (), active.begin (), active.end ());
-    x.insert (x.end (), modality.begin (), modality.end ());
-    x.insert (x.end (), time.begin (), time.end ());
-    x.insert (x.end (), source.begin (), source.end ());
-
-    std::vector<float> h = Linear (x, "anchor_head.input_mlp.0");
-    h = LayerNorm (h, "anchor_head.input_mlp.1", 1e-5F);
-    ApplyGeluInPlace (h);
-    h = Linear (h, "anchor_head.input_mlp.3");
-    h = LayerNorm (h, "anchor_head.input_mlp.4", 1e-5F);
-
-    RowMatrix candidate_states = CandidateStates (candidate_semantic,
-                                                  candidate_features);
-    const std::vector<float> attended = CandidateAttention (h,
-                                                           candidate_states);
-
-    std::vector<float> fused_input;
-    fused_input.reserve (h.size () * 2);
-    fused_input.insert (fused_input.end (), h.begin (), h.end ());
-    if (attended.empty ())
-      {
-        fused_input.resize (h.size () * 2, 0.0F);
-      }
-    else
-      {
-        fused_input.insert (fused_input.end (), attended.begin (),
-                            attended.end ());
-      }
-    std::vector<float> fused = Linear (fused_input, "anchor_head.fuse.0");
-    fused = LayerNorm (fused, "anchor_head.fuse.1", 1e-5F);
-    ApplyGeluInPlace (fused);
-
-    AaitOutput output;
-    output.semantic_vector = semantic;
-    output.has_semantic_vector = true;
-    output.anchor_key = Linear (fused, "anchor_head.anchor_proj");
-    L2Normalize (output.anchor_key);
-    output.has_anchor_key = true;
-    output.anchor_action_logits = Linear (fused, "anchor_head.action_head");
-    output.has_anchor_action_logits = output.anchor_action_logits.size () == 5;
-    const std::vector<float> confidence = Linear (
-        fused, "anchor_head.confidence_head");
-    const std::vector<float> salience = Linear (
-        fused, "anchor_head.salience_head");
-    output.anchor_confidence = confidence.empty ()
-                                   ? 0.0F
-                                   : 1.0F / (1.0F + std::exp (-confidence[0]));
-    output.salience_delta = salience.empty () ? 0.0F : std::tanh (salience[0]);
-    output.has_anchor_confidence = !confidence.empty ();
-    output.has_salience_delta = !salience.empty ();
-    output.bind_logits = BindLogits (fused, candidate_states);
-    output.has_bind_logits = !output.bind_logits.empty ();
-    return output;
-  }
-
-  RowMatrix
-  CandidateStates (
-      const std::vector<std::vector<float>> &candidate_semantic,
-      const std::vector<std::array<float, 7>> &candidate_features) const
-  {
-    const std::size_t count = std::min (candidate_semantic.size (),
-                                        candidate_features.size ());
-    if (count == 0)
-      {
-        return RowMatrix (0, 1024);
-      }
-    RowMatrix inputs (static_cast<Eigen::Index> (count), 1287);
-    for (std::size_t row = 0; row < count; ++row)
-      {
-        if (candidate_semantic[row].size () != 1280)
-          {
-            throw std::runtime_error (
-                "AAIT candidate semantic vector must have dimension 1280");
-          }
-        for (Eigen::Index col = 0; col < 1280; ++col)
-          {
-            inputs (static_cast<Eigen::Index> (row), col)
-                = candidate_semantic[row][static_cast<std::size_t> (col)];
-          }
-        for (Eigen::Index col = 0; col < 7; ++col)
-          {
-            inputs (static_cast<Eigen::Index> (row), 1280 + col)
-                = candidate_features[row][static_cast<std::size_t> (col)];
-          }
-      }
-    RowMatrix states = LinearRows (inputs, "anchor_head.candidate_state.0");
-    LayerNormRowsInPlace (states, "anchor_head.candidate_state.1", 1e-5F);
-    for (Eigen::Index row = 0; row < states.rows (); ++row)
-      {
-        for (Eigen::Index col = 0; col < states.cols (); ++col)
-          {
-            states (row, col) = Gelu (states (row, col));
-          }
-      }
-    states = LinearRows (states, "anchor_head.candidate_state.3");
-    return states;
-  }
-
-  std::vector<float>
-  CandidateAttention (const std::vector<float> &query,
-                      const RowMatrix &candidate_states) const
-  {
-    if (candidate_states.rows () == 0)
-      {
-        return {};
-      }
-    constexpr int kHeads = 8;
-    constexpr int kHeadDim = 128;
-    constexpr int kHidden = 1024;
-    const RuntimeTensor &in_proj_weight = T (
-        "anchor_head.cross_attn.in_proj_weight");
-    const RuntimeTensor &in_proj_bias = T (
-        "anchor_head.cross_attn.in_proj_bias");
-    ConstMatrixMap w (in_proj_weight.data.data (),
-                      static_cast<Eigen::Index> (in_proj_weight.Rows ()),
-                      static_cast<Eigen::Index> (in_proj_weight.Cols ()));
-    ConstVectorMap b (in_proj_bias.data.data (),
-                      static_cast<Eigen::Index> (in_proj_bias.data.size ()));
-    ConstVectorMap q_input (query.data (), kHidden);
-    Eigen::VectorXf qkv_query = (w * q_input) + b;
-
-    Eigen::VectorXf q = qkv_query.segment (0, kHidden);
-    RowMatrix k (candidate_states.rows (), kHidden);
-    RowMatrix v (candidate_states.rows (), kHidden);
-    for (Eigen::Index row = 0; row < candidate_states.rows (); ++row)
-      {
-        Eigen::VectorXf qkv = (w * candidate_states.row (row).transpose ())
-                              + b;
-        k.row (row) = qkv.segment (kHidden, kHidden).transpose ();
-        v.row (row) = qkv.segment (2 * kHidden, kHidden).transpose ();
-      }
-
-    Eigen::VectorXf context = Eigen::VectorXf::Zero (kHidden);
-    const float scale = 1.0F / std::sqrt (static_cast<float> (kHeadDim));
-    std::vector<float> scores (static_cast<std::size_t> (
-        candidate_states.rows ()));
-    for (int head = 0; head < kHeads; ++head)
-      {
-        const Eigen::Index base = static_cast<Eigen::Index> (head * kHeadDim);
-        float max_score = -std::numeric_limits<float>::infinity ();
-        for (Eigen::Index row = 0; row < candidate_states.rows (); ++row)
-          {
-            float dot = 0.0F;
-            for (int d = 0; d < kHeadDim; ++d)
-              {
-                dot += q (base + d) * k (row, base + d);
-              }
-            const float score = dot * scale;
-            scores[static_cast<std::size_t> (row)] = score;
-            max_score = std::max (max_score, score);
-          }
-        float denom = 0.0F;
-        for (Eigen::Index row = 0; row < candidate_states.rows (); ++row)
-          {
-            const float value = std::exp (
-                scores[static_cast<std::size_t> (row)] - max_score);
-            scores[static_cast<std::size_t> (row)] = value;
-            denom += value;
-          }
-        if (denom <= 0.0F)
-          {
-            continue;
-          }
-        for (int d = 0; d < kHeadDim; ++d)
-          {
-            float value = 0.0F;
-            for (Eigen::Index row = 0; row < candidate_states.rows (); ++row)
-              {
-                value += (scores[static_cast<std::size_t> (row)] / denom)
-                         * v (row, base + d);
-              }
-            context (base + d) = value;
-          }
-      }
-
-    const RuntimeTensor &out_weight = T ("anchor_head.cross_attn.out_proj.weight");
-    const RuntimeTensor &out_bias = T ("anchor_head.cross_attn.out_proj.bias");
-    ConstMatrixMap ow (out_weight.data.data (),
-                       static_cast<Eigen::Index> (out_weight.Rows ()),
-                       static_cast<Eigen::Index> (out_weight.Cols ()));
-    ConstVectorMap ob (out_bias.data.data (),
-                       static_cast<Eigen::Index> (out_bias.data.size ()));
-    Eigen::VectorXf out = (ow * context) + ob;
-    return std::vector<float> (out.data (), out.data () + out.size ());
-  }
-
-  std::vector<float>
-  BindLogits (const std::vector<float> &fused,
-              const RowMatrix &candidate_states) const
-  {
-    std::vector<float> logits;
-    logits.reserve (static_cast<std::size_t> (candidate_states.rows ()) + 1);
-    std::vector<float> query = Linear (fused, "anchor_head.bind_query");
-    ConstVectorMap q (query.data (), static_cast<Eigen::Index> (query.size ()));
-    const float scale = 1.0F / std::sqrt (static_cast<float> (query.size ()));
-    for (Eigen::Index row = 0; row < candidate_states.rows (); ++row)
-      {
-        logits.push_back (candidate_states.row (row).dot (q) * scale);
-      }
-    const std::vector<float> abstain = Linear (fused,
-                                               "anchor_head.bind_abstain");
-    logits.push_back (abstain.empty () ? 0.0F : abstain[0]);
-    return logits;
-  }
-
   RuntimeTensorStore tensors_;
   BertWordpieceTokenizer tokenizer_;
   std::filesystem::path tokenizer_path_;
   int context_length_ = 512;
-  bool has_anchor_heads_ = false;
   std::unique_ptr<GgmlLinearKernel> kernel_;
   std::string kernel_error_;
   std::string full_graph_error_;
   bool native_image_used_ = false;
   std::unordered_map<std::string, std::vector<float>> semantic_cache_;
-  AaitRuntimeStats stats_;
+  AistRuntimeStats stats_;
 };
-
-std::string
-AaitAnchorActionName (AaitAnchorAction action)
-{
-  switch (action)
-    {
-    case AaitAnchorAction::CreateAnchor:
-      return "CREATE_ANCHOR";
-    case AaitAnchorAction::UpdateExistingAnchor:
-      return "UPDATE_EXISTING_ANCHOR";
-    case AaitAnchorAction::SplitAnchor:
-      return "SPLIT_ANCHOR";
-    case AaitAnchorAction::CloseAnchor:
-      return "CLOSE_ANCHOR";
-    case AaitAnchorAction::Abstain:
-      return "ABSTAIN";
-    }
-  return "UNKNOWN";
-}
-
-std::optional<std::filesystem::path>
-ResolveAaitGgufModelPath (const std::filesystem::path &models_dir,
-                          const std::filesystem::path &override_path)
-{
-  const std::string env_path = GetEnvOrDefault ("CORTEXT_AAIT_MODEL_PATH");
-  if (!override_path.empty ())
-    {
-      if (std::filesystem::exists (override_path))
-        {
-          return override_path;
-        }
-      throw std::runtime_error ("AAIT model override does not exist: "
-                                + override_path.string ());
-    }
-  if (!env_path.empty ())
-    {
-      std::filesystem::path path (env_path);
-      if (std::filesystem::exists (path))
-        {
-          return path;
-        }
-      throw std::runtime_error ("CORTEXT_AAIT_MODEL_PATH does not exist: "
-                                + env_path);
-    }
-
-  const std::vector<std::filesystem::path> roots{
-    models_dir / "AAIT-86M-GGUF",
-    models_dir / "aait-86m-gguf",
-    models_dir,
-  };
-  for (const auto &root : roots)
-    {
-      if (!std::filesystem::exists (root))
-        {
-          continue;
-        }
-      if (std::filesystem::is_regular_file (root)
-          && root.extension () == ".gguf")
-        {
-          return root;
-        }
-      if (std::filesystem::is_directory (root))
-        {
-          std::vector<std::filesystem::path> matches;
-          for (const auto &entry : std::filesystem::directory_iterator (root))
-            {
-              if (entry.is_regular_file ()
-                  && entry.path ().extension () == ".gguf")
-                {
-                  matches.push_back (entry.path ());
-                }
-            }
-          std::sort (matches.begin (), matches.end (),
-                     [] (const auto &lhs, const auto &rhs) {
-                       const std::string left = lhs.filename ().string ();
-                       const std::string right = rhs.filename ().string ();
-                       const bool left_q8 = left.find ("q8_0")
-                                            != std::string::npos;
-                       const bool right_q8 = right.find ("q8_0")
-                                             != std::string::npos;
-                       if (left_q8 != right_q8)
-                         {
-                           return left_q8;
-                         }
-                       return left < right;
-                     });
-          if (!matches.empty ())
-            {
-              return matches.front ();
-            }
-        }
-    }
-  return std::nullopt;
-}
-
-std::optional<std::filesystem::path>
-ResolveEssAistGgufModelPath (const std::filesystem::path &models_dir,
-                             const std::filesystem::path &override_path)
-{
-  std::string env_path = GetEnvOrDefault ("CORTEXT_ES_AIST_MODEL_PATH");
-  if (env_path.empty ())
-    {
-      env_path = GetEnvOrDefault ("CORTEXT_ESS_AIST_MODEL_PATH");
-    }
-  if (!override_path.empty ())
-    {
-      if (std::filesystem::exists (override_path))
-        {
-          return override_path;
-        }
-      throw std::runtime_error ("ESS-AIST model override does not exist: "
-                                + override_path.string ());
-    }
-  if (!env_path.empty ())
-    {
-      std::filesystem::path path (env_path);
-      if (std::filesystem::exists (path))
-        {
-          return path;
-        }
-      throw std::runtime_error ("CORTEXT_ESS_AIST_MODEL_PATH does not exist: "
-                                + env_path);
-    }
-
-  std::vector<std::filesystem::path> search_bases{ models_dir };
-  if (models_dir.has_parent_path ())
-    {
-      search_bases.push_back (models_dir.parent_path ());
-    }
-  std::vector<std::filesystem::path> roots;
-  for (const auto &base : search_bases)
-    {
-      roots.push_back (base / "ES-AIST-81M-preview-GGUF");
-      roots.push_back (base / "ES-AIST-81M-GGUF");
-      roots.push_back (base / "es-aist-81m-preview-gguf");
-      roots.push_back (base / "ESS-AIST-81M-preview-GGUF");
-      roots.push_back (base / "ESS-AIST-81M-GGUF");
-      roots.push_back (base / "ess-aist-81m-preview-gguf");
-      roots.push_back (base);
-    }
-  for (const auto &root : roots)
-    {
-      if (!std::filesystem::exists (root))
-        {
-          continue;
-        }
-      if (std::filesystem::is_regular_file (root)
-          && root.extension () == ".gguf")
-        {
-          return root;
-        }
-      if (std::filesystem::is_directory (root))
-        {
-          const std::vector<std::filesystem::path> preferred_files = {
-            root / "ES-AIST-81M_q8_0.gguf",
-            root / "ES-AIST-81M-preview_q8_0.gguf",
-            root / "ES-AIST-81M_q5_1.gguf",
-            root / "ESS-AIST-81M_q8_0.gguf",
-            root / "ESS-AIST-81M-preview_q8_0.gguf",
-            root / "ESS-AIST-81M_q5_1.gguf",
-          };
-          for (const auto &candidate : preferred_files)
-            {
-              if (std::filesystem::exists (candidate))
-                {
-                  return candidate;
-                }
-            }
-          std::vector<std::filesystem::path> matches;
-          for (const auto &entry : std::filesystem::directory_iterator (root))
-            {
-              const bool is_file_or_link =
-                  entry.is_regular_file ()
-                  || std::filesystem::is_symlink (entry.symlink_status ());
-              if (is_file_or_link && entry.path ().extension () == ".gguf"
-                  && (entry.path ().filename ().string ().find ("ESS-AIST")
-                          != std::string::npos
-	                      || entry.path ().filename ().string ().find ("ES-AIST")
-	                         != std::string::npos))
-                {
-                  matches.push_back (entry.path ());
-                }
-            }
-          std::sort (matches.begin (), matches.end (),
-                     [] (const auto &lhs, const auto &rhs) {
-                       const std::string left = lhs.filename ().string ();
-                       const std::string right = rhs.filename ().string ();
-                       const bool left_q8 = left.find ("q8_0")
-                                            != std::string::npos;
-                       const bool right_q8 = right.find ("q8_0")
-                                             != std::string::npos;
-                       if (left_q8 != right_q8)
-                         {
-                           return left_q8;
-                         }
-                       return left < right;
-                     });
-          if (!matches.empty ())
-            {
-              return matches.front ();
-            }
-        }
-    }
-  return std::nullopt;
-}
 
 std::optional<std::filesystem::path>
 ResolveAistGgufModelPath (const std::filesystem::path &models_dir,
@@ -4366,13 +3867,13 @@ ResolveAistGgufModelPath (const std::filesystem::path &models_dir,
   return std::nullopt;
 }
 
-AaitModelInfo
-InspectAaitGgufModel (const std::filesystem::path &model_path)
+AistModelInfo
+InspectAistGgufModel (const std::filesystem::path &model_path)
 {
   std::ifstream in (model_path, std::ios::binary);
   if (!in)
     {
-      throw std::runtime_error ("AAIT GGUF model not found: "
+      throw std::runtime_error ("AIST GGUF model not found: "
                                 + model_path.string ());
     }
 
@@ -4380,19 +3881,19 @@ InspectAaitGgufModel (const std::filesystem::path &model_path)
   in.read (magic, sizeof (magic));
   if (!in || std::memcmp (magic, "GGUF", 4) != 0)
     {
-      throw std::runtime_error ("AAIT model is not a GGUF file: "
+      throw std::runtime_error ("AIST model is not a GGUF file: "
                                 + model_path.string ());
     }
   const std::uint32_t version = ReadScalar<std::uint32_t> (in);
   if (version < 2 || version > 3)
     {
-      throw std::runtime_error ("Unsupported AAIT GGUF version: "
+      throw std::runtime_error ("Unsupported AIST GGUF version: "
                                 + std::to_string (version));
     }
   const std::uint64_t tensor_count = ReadScalar<std::uint64_t> (in);
   const std::uint64_t kv_count = ReadScalar<std::uint64_t> (in);
 
-  AaitModelInfo info;
+  AistModelInfo info;
   info.model_path = model_path.string ();
   std::unordered_set<std::string> key_set;
   for (std::uint64_t i = 0; i < kv_count; ++i)
@@ -4437,7 +3938,7 @@ InspectAaitGgufModel (const std::filesystem::path &model_path)
   info.tensor_names.reserve (static_cast<std::size_t> (tensor_count));
   for (std::uint64_t i = 0; i < tensor_count; ++i)
     {
-      AaitTensorInfo tensor;
+      AistTensorInfo tensor;
       tensor.name = ReadString (in);
       const std::uint32_t n_dims = ReadScalar<std::uint32_t> (in);
       tensor.shape.reserve (n_dims);
@@ -4454,39 +3955,12 @@ InspectAaitGgufModel (const std::filesystem::path &model_path)
   info.has_semantic_vector
       = ContainsTensor (info.tensor_names, "text_projection.project.weight")
         || key_set.count ("triembed.embed_dim") > 0;
-  info.has_anchor_key
-      = ContainsTensor (info.tensor_names, "anchor_head.anchor_proj.weight")
-        && ContainsTensor (info.tensor_names, "anchor_head.anchor_proj.bias");
-  info.has_anchor_action_logits
-      = ContainsTensor (info.tensor_names, "anchor_head.action_head.weight")
-        && ContainsTensor (info.tensor_names, "anchor_head.action_head.bias");
-  info.has_anchor_confidence
-      = ContainsTensor (info.tensor_names, "anchor_head.confidence_head.weight")
-        && ContainsTensor (info.tensor_names, "anchor_head.confidence_head.bias");
-  info.has_salience_delta
-      = ContainsTensor (info.tensor_names, "anchor_head.salience_head.weight")
-        && ContainsTensor (info.tensor_names, "anchor_head.salience_head.bias");
-  info.has_bind_logits
-      = ContainsTensor (info.tensor_names, "anchor_head.bind_abstain.weight");
   info.pooling_type = "model-defined";
   info.runtime_available = info.architecture == "triembed"
                            && info.has_semantic_vector;
-  const bool anchor_runtime_available
-      = info.runtime_available && info.has_anchor_key
-        && info.has_anchor_action_logits && info.has_anchor_confidence
-        && info.has_salience_delta;
-  if (anchor_runtime_available)
-    {
-      info.runtime_status = "aait_native_triembed_runtime_available";
-    }
-  else if (info.runtime_available)
-    {
-      info.runtime_status = "triembed_embedding_runtime_available";
-    }
-  else
-    {
-      info.runtime_status = "triembed_embedding_outputs_unavailable";
-    }
+  info.runtime_status = info.runtime_available
+                            ? "triembed_embedding_runtime_available"
+                            : "triembed_embedding_outputs_unavailable";
   info.runtime_error = info.runtime_available ? "" : RuntimeUnavailableReason ();
   return info;
 }
@@ -4511,7 +3985,7 @@ NormalizeL2InPlace (std::vector<float> &values)
 }
 
 std::vector<float>
-TruncateAaitMatryoshka (const std::vector<float> &values, std::size_t dim)
+TruncateAistMatryoshka (const std::vector<float> &values, std::size_t dim)
 {
   std::vector<float> out = values;
   if (out.size () > dim)
@@ -4523,7 +3997,7 @@ TruncateAaitMatryoshka (const std::vector<float> &values, std::size_t dim)
 }
 
 std::vector<float>
-SliceAaitEmbedding (const std::vector<float> &values, std::size_t begin,
+SliceAistEmbedding (const std::vector<float> &values, std::size_t begin,
                     std::size_t end)
 {
   if (begin >= end || begin >= values.size ())
@@ -4539,63 +4013,45 @@ SliceAaitEmbedding (const std::vector<float> &values, std::size_t begin,
   return out;
 }
 
-EssAistEmbeddingViews
-BuildEssAistEmbeddingViews (const std::vector<float> &embedding)
-{
-  EssAistEmbeddingViews views;
-  views.semantic_key = SliceAaitEmbedding (embedding, 0, 512);
-  views.subject_key = SliceAaitEmbedding (embedding, 512, 1024);
-  views.event_key = SliceAaitEmbedding (embedding, 1024, 1536);
-  views.semantic_768_key = SliceAaitEmbedding (embedding, 0, 768);
-  views.entity_key = SliceAaitEmbedding (embedding, 768, 1536);
-  views.full_key = embedding;
-  NormalizeL2InPlace (views.full_key);
-  views.prefix_512 = TruncateAaitMatryoshka (embedding, 512);
-  views.prefix_768 = TruncateAaitMatryoshka (embedding, 768);
-  views.prefix_1024 = TruncateAaitMatryoshka (embedding, 1024);
-  views.prefix_1536 = TruncateAaitMatryoshka (embedding, 1536);
-  return views;
-}
+AistGgufEncoder::AistGgufEncoder () = default;
 
-AaitGgufEncoder::AaitGgufEncoder () = default;
-
-AaitGgufEncoder::AaitGgufEncoder (AaitGgufConfig config)
+AistGgufEncoder::AistGgufEncoder (AistGgufConfig config)
 {
   (void)Load (config);
 }
 
-AaitGgufEncoder::~AaitGgufEncoder () = default;
+AistGgufEncoder::~AistGgufEncoder () = default;
 
 bool
-AaitGgufEncoder::Load (const AaitGgufConfig &config)
+AistGgufEncoder::Load (const AistGgufConfig &config)
 {
   config_ = config;
   if (config_.threads <= 0)
     {
-      config_.threads = GetEnvInt ("CORTEXT_AAIT_THREADS", 0);
+      config_.threads = GetEnvInt ("CORTEXT_AIST_THREADS", 0);
     }
-  config_.n_gpu_layers = GetEnvInt ("CORTEXT_AAIT_N_GPU_LAYERS",
+  config_.n_gpu_layers = GetEnvInt ("CORTEXT_AIST_N_GPU_LAYERS",
                                     config_.n_gpu_layers);
-  config_.context_length = GetEnvInt ("CORTEXT_AAIT_CONTEXT_LENGTH",
+  config_.context_length = GetEnvInt ("CORTEXT_AIST_CONTEXT_LENGTH",
                                       config_.context_length);
-  config_.shadow_only = GetEnvBool ("CORTEXT_AAIT_SHADOW_ONLY",
+  config_.shadow_only = GetEnvBool ("CORTEXT_AIST_SHADOW_ONLY",
                                     config_.shadow_only);
   config_.use_semantic_for_retrieval = GetEnvBool (
-      "CORTEXT_AAIT_USE_SEMANTIC_FOR_RETRIEVAL",
+      "CORTEXT_AIST_USE_SEMANTIC_FOR_RETRIEVAL",
       config_.use_semantic_for_retrieval);
   const std::string tokenizer_override = GetEnvOrDefault (
-      "CORTEXT_AAIT_TOKENIZER_GGUF_PATH");
+      "CORTEXT_AIST_TOKENIZER_GGUF_PATH");
   if (!tokenizer_override.empty ())
     {
       config_.tokenizer_gguf_path = tokenizer_override;
     }
   const std::string runtime_override = GetEnvOrDefault (
-      "CORTEXT_AAIT_RUNTIME");
+      "CORTEXT_AIST_RUNTIME");
   if (!runtime_override.empty ())
     {
       config_.runtime = runtime_override;
     }
-  info_ = InspectAaitGgufModel (config_.model_path);
+  info_ = InspectAistGgufModel (config_.model_path);
   if (!info_.runtime_available)
     {
       loaded_ = true;
@@ -4605,26 +4061,19 @@ AaitGgufEncoder::Load (const AaitGgufConfig &config)
         || config_.runtime == "native_gguf"))
     {
       info_.runtime_available = false;
-      info_.runtime_status = "aait_runtime_unavailable";
-      info_.runtime_error = "AAIT runtime '" + config_.runtime
+      info_.runtime_status = "aist_runtime_unavailable";
+      info_.runtime_error = "AIST runtime '" + config_.runtime
                             + "' is not built in this Cortext binary; use "
-                              "CORTEXT_AAIT_RUNTIME=gguf";
+                              "CORTEXT_AIST_RUNTIME=gguf";
       loaded_ = true;
       return loaded_;
     }
   try
     {
       runtime_ = std::make_unique<NativeRuntime> ();
-      runtime_->Load (config_, info_.has_anchor_key
-                                   && info_.has_anchor_action_logits
-                                   && info_.has_anchor_confidence
-                                   && info_.has_salience_delta);
+      runtime_->Load (config_);
       info_.runtime_available = true;
-      const std::string base_status =
-          info_.has_anchor_key && info_.has_anchor_action_logits
-                  && info_.has_anchor_confidence && info_.has_salience_delta
-              ? "aait_native_triembed_runtime_loaded"
-              : "triembed_embedding_runtime_loaded";
+      const std::string base_status = "triembed_embedding_runtime_loaded";
       info_.runtime_status = runtime_->UsesKernelOps ()
                                   ? base_status + "_with_ggml_kernel_ops"
                                   : base_status + "_with_eigen_fallback";
@@ -4634,45 +4083,45 @@ AaitGgufEncoder::Load (const AaitGgufConfig &config)
     {
       runtime_.reset ();
       info_.runtime_available = false;
-      info_.runtime_status = "aait_native_triembed_runtime_load_failed";
+      info_.runtime_status = "aist_native_triembed_runtime_load_failed";
       info_.runtime_error = ex.what ();
     }
   loaded_ = true;
   return loaded_;
 }
 
-const AaitModelInfo &
-AaitGgufEncoder::Inspect () const
+const AistModelInfo &
+AistGgufEncoder::Inspect () const
 {
   return info_;
 }
 
 bool
-AaitGgufEncoder::IsLoaded () const
+AistGgufEncoder::IsLoaded () const
 {
   return loaded_;
 }
 
 bool
-AaitGgufEncoder::IsRuntimeAvailable () const
+AistGgufEncoder::IsRuntimeAvailable () const
 {
   return loaded_ && info_.runtime_available;
 }
 
 bool
-AaitGgufEncoder::UsesKernelOps () const
+AistGgufEncoder::UsesKernelOps () const
 {
   return runtime_ != nullptr && runtime_->UsesKernelOps ();
 }
 
 bool
-AaitGgufEncoder::UsesFullTextGraphOps () const
+AistGgufEncoder::UsesFullTextGraphOps () const
 {
   return runtime_ != nullptr && runtime_->UsesFullTextGraphOps ();
 }
 
 std::string
-AaitGgufEncoder::KernelOpsBackend () const
+AistGgufEncoder::KernelOpsBackend () const
 {
   if (runtime_ == nullptr)
     {
@@ -4682,7 +4131,7 @@ AaitGgufEncoder::KernelOpsBackend () const
 }
 
 std::string
-AaitGgufEncoder::KernelOpsGranularity () const
+AistGgufEncoder::KernelOpsGranularity () const
 {
   if (runtime_ == nullptr)
     {
@@ -4692,7 +4141,7 @@ AaitGgufEncoder::KernelOpsGranularity () const
 }
 
 std::string
-AaitGgufEncoder::FullTextGraphError () const
+AistGgufEncoder::FullTextGraphError () const
 {
   if (runtime_ == nullptr)
     {
@@ -4701,34 +4150,8 @@ AaitGgufEncoder::FullTextGraphError () const
   return runtime_->FullTextGraphError ();
 }
 
-AaitOutput
-AaitGgufEncoder::EncodeTextWithAnchors (const std::string &text)
-{
-  AaitIngressInput input;
-  input.text = text;
-  input.recent_context = text;
-  input.active_context = text;
-  return EncodeTextWithAnchors (input);
-}
-
-AaitOutput
-AaitGgufEncoder::EncodeTextWithAnchors (const AaitIngressInput &input)
-{
-  if (!loaded_)
-    {
-      throw std::runtime_error ("AAIT GGUF encoder is not loaded");
-    }
-  if (!runtime_)
-    {
-      throw std::runtime_error (info_.runtime_error.empty ()
-                                    ? RuntimeUnavailableReason ()
-                                    : info_.runtime_error);
-    }
-  return runtime_->Encode (input);
-}
-
 std::vector<int>
-AaitGgufEncoder::DebugTokenizeText (const std::string &text) const
+AistGgufEncoder::DebugTokenizeText (const std::string &text) const
 {
   if (!runtime_)
     {
@@ -4737,8 +4160,8 @@ AaitGgufEncoder::DebugTokenizeText (const std::string &text) const
   return runtime_->Tokenize (text);
 }
 
-AaitRuntimeStats
-AaitGgufEncoder::DebugRuntimeStats () const
+AistRuntimeStats
+AistGgufEncoder::DebugRuntimeStats () const
 {
   if (!runtime_)
     {
@@ -4748,24 +4171,33 @@ AaitGgufEncoder::DebugRuntimeStats () const
 }
 
 void
-AaitGgufEncoder::EncodeText (const std::string &text,
+AistGgufEncoder::EncodeText (const std::string &text,
                              std::vector<float> &out_embedding)
 {
-  AaitOutput output = EncodeTextWithAnchors (text);
-  if (!output.has_semantic_vector)
+  if (!loaded_)
     {
-      throw std::runtime_error ("AAIT semantic_vector output unavailable");
+      throw std::runtime_error ("AIST GGUF encoder is not loaded");
     }
-  out_embedding = std::move (output.semantic_vector);
+  if (!runtime_)
+    {
+      throw std::runtime_error (info_.runtime_error.empty ()
+                                    ? RuntimeUnavailableReason ()
+                                    : info_.runtime_error);
+    }
+  out_embedding = runtime_->Encode (text);
+  if (out_embedding.empty ())
+    {
+      throw std::runtime_error ("AIST semantic_vector output unavailable");
+    }
 }
 
 void
-AaitGgufEncoder::EncodeAudio (const float *pcm, std::size_t num_samples,
+AistGgufEncoder::EncodeAudio (const float *pcm, std::size_t num_samples,
                               std::vector<float> &out_embedding)
 {
   if (!loaded_)
     {
-      throw std::runtime_error ("AAIT GGUF encoder is not loaded");
+      throw std::runtime_error ("AIST GGUF encoder is not loaded");
     }
   if (!runtime_ || !info_.runtime_available)
     {
@@ -4777,13 +4209,13 @@ AaitGgufEncoder::EncodeAudio (const float *pcm, std::size_t num_samples,
 }
 
 void
-AaitGgufEncoder::EncodeImage (const std::uint8_t *data, int width,
+AistGgufEncoder::EncodeImage (const std::uint8_t *data, int width,
                               int height, int channels,
                               std::vector<float> &out_embedding)
 {
   if (!loaded_)
     {
-      throw std::runtime_error ("AAIT GGUF encoder is not loaded");
+      throw std::runtime_error ("AIST GGUF encoder is not loaded");
     }
   if (!runtime_ || !info_.runtime_available)
     {
