@@ -1,3 +1,4 @@
+#include <cortext/models/embedding_model_pin.hpp>
 #include <cortext/operations/label_utils.hpp>
 
 #include "encoder/text_encoder_factory.hpp"
@@ -172,6 +173,8 @@ main (int argc, char **argv)
   meta["generated_by"] = "cortext/tools/label_bank_generator";
   meta["timestamp"] = TimestampUtc ();
   meta["embedding_dim"] = 256;
+  meta["embedding_model_pin"] = cortext::models::ComputeEmbeddingModelPin (
+      encoder_selection.backend_name, encoder_selection.resolved_path, 256);
   meta["labels_file"] = labels_out.filename ().string ();
   meta["source"] = labels_path.string ();
   meta["encoder_backend"] = encoder_selection.backend_name;

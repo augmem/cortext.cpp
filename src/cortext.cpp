@@ -4,6 +4,7 @@
 #include "cortext/core/knobs.hpp"
 #include "cortext/core/utils.hpp"
 #include "cortext/internal/cancellation.hpp"
+#include "cortext/models/embedding_model_pin.hpp"
 #include "cortext/internal/replay_ingress.hpp"
 #include "encoder/text_encoder_factory.hpp"
 #include "operations/constructive_recall_internal.hpp"
@@ -1159,6 +1160,84 @@ BuildPipelineRoot (bool probe_mode)
   return pipeline;
 }
 
+namespace
+{
+
+/// Enforce the embedding-model pin: a database that already contains
+/// embeddings must carry the fingerprint of the encoder that produced them,
+/// and it must match the active encoder. See models/embedding_model_pin.hpp.
+void
+VerifyEmbeddingModel (cortext::Store &store, const std::string &active)
+{
+  store.Execute ("CREATE TABLE IF NOT EXISTS cortext_embedding_model_pin ("
+                 "  id INTEGER PRIMARY KEY CHECK (id = 1),"
+                 "  fingerprint TEXT NOT NULL"
+                 ")",
+                 {});
+  auto rows = store.Execute (
+      "SELECT fingerprint FROM cortext_embedding_model_pin WHERE id = 1", {});
+  if (!rows.empty ())
+    {
+      std::string stored;
+      auto it = rows[0].find ("fingerprint");
+      if (it != rows[0].end () && it->second.type () == typeid (std::string))
+        {
+          stored = std::any_cast<std::string> (it->second);
+        }
+      if (stored != active)
+        {
+          throw std::runtime_error (
+              "embedding-model pin mismatch: database vectors were produced by '"
+              + stored + "' but the active encoder is '" + active
+              + "'. Precomputed embeddings are not comparable across "
+                "encoder spaces; re-ingest with the active encoder or "
+                "restore the original model.");
+        }
+      return;
+    }
+
+  long long existing = 0;
+  try
+    {
+      auto count_rows
+          = store.Execute ("SELECT COUNT(*) AS n FROM embeddings", {});
+      if (!count_rows.empty ())
+        {
+          auto it = count_rows[0].find ("n");
+          if (it != count_rows[0].end ())
+            {
+              if (it->second.type () == typeid (long long))
+                {
+                  existing = std::any_cast<long long> (it->second);
+                }
+              else if (it->second.type () == typeid (int))
+                {
+                  existing = std::any_cast<int> (it->second);
+                }
+            }
+        }
+    }
+  catch (const std::exception &)
+    {
+      // Fresh database without the embeddings table yet.
+    }
+  if (existing > 0)
+    {
+      throw std::runtime_error (
+          "embedding-model pin missing: database already contains "
+          + std::to_string (existing)
+          + " embeddings with no record of the model that produced them. "
+            "There is no override: vectors from an unknown model cannot be "
+            "compared against '"
+          + active + "'. Re-ingest the data with the active encoder.");
+    }
+  store.Execute (
+      "INSERT INTO cortext_embedding_model_pin (id, fingerprint) VALUES (1, ?)",
+      { active });
+}
+
+} // namespace
+
 struct Cortext::Impl
 {
   Config cfg;
@@ -1176,6 +1255,7 @@ struct Cortext::Impl
   std::unique_ptr<Extractor> extractor_instance;
   std::unique_ptr<Summarizer> summarizer_instance;
   std::string deep_llm_backend_name;
+  std::string embedding_model_pin;
 
   Impl (const Config &c, std::shared_ptr<cortext::Store> supplied_store,
         std::shared_ptr<cortext::ObjectStore> supplied_object_store,
@@ -1201,6 +1281,13 @@ struct Cortext::Impl
       }
 
     auto text_encoder = internal::CreatePreferredTextEncoder (models_dir);
+    // Pin every precomputed vector to the encoder that produced it. The
+    // runtime similarity space is the 256-d Matryoshka slice (see the vec0
+    // schema in store/schema.cpp); comparing vectors across encoder spaces
+    // is silently wrong, so mismatches are fatal rather than degraded.
+    embedding_model_pin = models::ComputeEmbeddingModelPin (
+        text_encoder.backend_name, text_encoder.resolved_path, 256);
+    VerifyEmbeddingModel (*store, embedding_model_pin);
     encoder = std::move (text_encoder.encoder);
 
     // Injected dependencies are contract-checked at composition time like

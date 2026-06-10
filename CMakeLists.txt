@@ -220,6 +220,8 @@ add_library(cortext
     # Deep consolidation LLM backends
     src/deep_llm/deep_llm_factory.cpp
     src/deep_llm/lfm2_llama_backend.cpp
+    # Embedding-model pin (precomputed vectors hard-fail on encoder mismatch)
+    src/models/embedding_model_pin.cpp
     # Inference provider registry and legacy-interface adapters
     src/providers/registry.cpp
     src/providers/adapters.cpp
