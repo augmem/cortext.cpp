@@ -17,8 +17,10 @@ namespace cortext
 
 class Cortext;
 class Clock;
+class Extractor;
 class ObjectStore;
 class Store;
+class Summarizer;
 
 // Forward declaration for ProcessorOutput fields
 namespace operations
@@ -200,6 +202,24 @@ public:
                                           const std::string &models_dir,
                                           std::shared_ptr<Clock> clock);
 
+  /// @brief Caller-supplied inference dependencies, mirroring the Store /
+  /// ObjectStore injection pattern. Roles left null resolve through the
+  /// built-in factory (model auto-discovery plus CORTEXT_SUMMARIZER /
+  /// CORTEXT_EXTRACTOR provider URIs).
+  struct InferenceOverrides
+  {
+    std::unique_ptr<Summarizer> summarizer;
+    std::unique_ptr<Extractor> extractor;
+  };
+
+  /// @brief Factory with caller-supplied stores, clock, and inference
+  /// dependencies (the fully injected form).
+  static std::unique_ptr<Cortext>
+  Create (const Config &cfg, std::shared_ptr<Store> store,
+          std::shared_ptr<ObjectStore> object_store,
+          const std::string &models_dir, std::shared_ptr<Clock> clock,
+          InferenceOverrides inference);
+
   /// @brief Factory with caller-supplied database and object stores.
   /// @param cfg Three-knob configuration.
   /// @param store Caller-owned database store.
@@ -330,6 +350,11 @@ private:
                     std::shared_ptr<ObjectStore> object_store,
                     const std::string &models_dir,
                     std::shared_ptr<Clock> clock);
+  explicit Cortext (const Config &cfg, std::shared_ptr<Store> store,
+                    std::shared_ptr<ObjectStore> object_store,
+                    const std::string &models_dir,
+                    std::shared_ptr<Clock> clock,
+                    InferenceOverrides inference);
   std::unique_ptr<Impl> impl_;
 };
 
