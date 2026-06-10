@@ -83,10 +83,12 @@ consolidation. Section 9 details the consolidation and graph integration
 system. Section 10 presents the interrupt gate for streaming
 integration. Section 11 reports experimental results. Section 12
 discusses implementation considerations and computational complexity.
-Section 13 concludes with limitations and future directions. In the
-source tree these correspond to `sections/1_...` through
-`sections/10_...`; the rendered manuscript section numbering includes
-the introduction and related-work sections before those files.
+Section 13 documents the performance profiling and optimization of the
+reference implementation. Section 14 concludes with limitations and
+future directions. In the source tree these correspond to
+`sections/1_...` through `sections/11_...`; the rendered manuscript
+section numbering includes the introduction and related-work sections
+before those files.
 
 # Related Work
 
@@ -3889,24 +3891,24 @@ replacement path consumed the same refined labels through
 with three true labels, zero false labels, precision **1.00**, and
 recall **1.00**.
 
-On **May 23, 2026**, we ran the personal-chat conversation replay through the
-same production Cortext path rather than a summary-only proxy: normal
-working memory, STM graph creation, consolidation, relabel/prune,
-source-preserving `derived_from` links, durable `has_label` links, label
-co-occurrence edges, and LTM retrieval were all enabled. The
-privacy-safe replay slice processed **30** messages after a warmup
-window, performed **4** consolidation cycles over **27** STM items and
-**108** STM label edges, and preserved source content for **25 / 25**
-source memories. The first source-preserving run admitted **15** durable
-labels and created **24** label co-occurrence edges, but most labels
-were generic one-word anchors; Cortext LTM-only retrieval judged at
-**2.5** relevance and **1.0** sufficiency versus normal RAG-with-history
-at **3.5** and **2.5** on the two judged probes. Tightening
-durable-label admission to reject filler, weak one-word conversational
-labels, digit-heavy product fragments, URL-like connector tokens,
-image-file tokens, and status phrases pruned the durable set to **4**
-labels with **3** co-occurrence edges while keeping **25 / 25** source
-memories hydratable.
+On **May 23, 2026**, we ran the personal-chat conversation replay
+through the same production Cortext path rather than a summary-only
+proxy: normal working memory, STM graph creation, consolidation,
+relabel/prune, source-preserving `derived_from` links, durable
+`has_label` links, label co-occurrence edges, and LTM retrieval were all
+enabled. The privacy-safe replay slice processed **30** messages after a
+warmup window, performed **4** consolidation cycles over **27** STM
+items and **108** STM label edges, and preserved source content for **25
+/ 25** source memories. The first source-preserving run admitted **15**
+durable labels and created **24** label co-occurrence edges, but most
+labels were generic one-word anchors; Cortext LTM-only retrieval judged
+at **2.5** relevance and **1.0** sufficiency versus normal
+RAG-with-history at **3.5** and **2.5** on the two judged probes.
+Tightening durable-label admission to reject filler, weak one-word
+conversational labels, digit-heavy product fragments, URL-like connector
+tokens, image-file tokens, and status phrases pruned the durable set to
+**4** labels with **3** co-occurrence edges while keeping **25 / 25**
+source memories hydratable.
 
 A follow-up fix exposed an earlier handoff bug: the STM graph contained
 label edges, but the relabeler request was receiving zero current labels
@@ -3975,18 +3977,18 @@ scoring for durable LTM by default and added an exact text-label route
 from a live text query to durable labels and then back to their
 `derived_from` source memories. A focused graph-retrieval regression
 verifies the mapping on a synthetic “River Park” query without relying
-on embedding similarity. On the personal-chat replay, the new path did activate:
-production retrieval debug rows included durable-source boosts of
-**0.968**, **0.760**, and **0.751** with **7–8** backed source memories.
-This improved LTM-only sufficiency from **1.0** to **1.5** and full
-Cortext sufficiency from **2.0** to **2.5** on the two judged probes. It
-did not fix the graph-isolation arm: raw STM graph and relabel/pruned
-LTM both remained at **1.0 / 0.0**, and normal RAG remained higher at
-**3.5 / 3.0** in the running-history arm and **5.0 / 4.0** in the
-compact-policy arm. The evidence now separates three issues: (1) source
-preservation is solved for produced durable nodes, (2) retrieval can
-consume source-backed durable nodes when candidates are reachable, and
-(3) the live relabel/prune graph still emits too few
+on embedding similarity. On the personal-chat replay, the new path did
+activate: production retrieval debug rows included durable-source boosts
+of **0.968**, **0.760**, and **0.751** with **7–8** backed source
+memories. This improved LTM-only sufficiency from **1.0** to **1.5** and
+full Cortext sufficiency from **2.0** to **2.5** on the two judged
+probes. It did not fix the graph-isolation arm: raw STM graph and
+relabel/pruned LTM both remained at **1.0 / 0.0**, and normal RAG
+remained higher at **3.5 / 3.0** in the running-history arm and **5.0 /
+4.0** in the compact-policy arm. The evidence now separates three
+issues: (1) source preservation is solved for produced durable nodes,
+(2) retrieval can consume source-backed durable nodes when candidates
+are reachable, and (3) the live relabel/prune graph still emits too few
 query-discriminative labels and no relation edges, so exact label/query
 routing rarely fires on real probes.
 
@@ -4057,8 +4059,8 @@ weakly aligned with live queries to behave like a RAG-quality standalone
 memory index.
 
 A historical OpenAI-judged development smoke test then exercised the
-knob-derived production path on a smaller 20-message personal-chat replay after
-moving the remaining numeric STM/retrieval settings behind
+knob-derived production path on a smaller 20-message personal-chat
+replay after moving the remaining numeric STM/retrieval settings behind
 Focus/Sensitivity/Stability helpers
 (`build/stm_ltm_knob_derived_smoke_v46_openai.json`). This run used
 normal working memory, the production STM label graph, deep
@@ -4142,23 +4144,24 @@ map those hits back to Cortext source memories, expand through
 `derived_from`, `has_label`, label relation/co-occurrence, fact
 evidence, and temporal-neighbor links, then rank source memories with
 weights derived only from Focus/Sensitivity/Stability. On the same
-80-message semantic-gated corpus slice, all **40 / 40** lexical seeds
-mapped back to source memories, graph expansion contributed candidates
-on **3 / 8** probes, and fact expansion contributed on **4 / 8** probes.
-The packet used more prompt budget than normal RAG with active history
-(**227.6** versus **202.4** mean prompt tokens, ratio **1.125**) but far
-less than full history (**542.8** mean prompt tokens). OpenAI judging
-favored the expansion tradeoff: graph-expanded RAG averaged **4.375**
-relevance, **3.625** sufficiency, **1.750** noise, and **3 / 8** wins
-plus one tie, while normal RAG averaged **4.125 / 3.000 / 1.750** with
-**1 / 8** win in the same four-way graph-expanded comparison; full
-history also won **3 / 8**. This does not rescue standalone LTM: Cortext
-LTM-only in the same comparison averaged only **1.750 / 0.625**. The
-corrected architecture is therefore explicit: lexical/source RAG
-provides query addressability, while Cortext’s graph provides bounded
-relationship, fact, and temporal expansion over high-confidence source
-hits. LTM graph memory should be evaluated and promoted as a
-source-backed expansion layer, not as the primary lookup replacement.
+80-message semantic-gated personal-chat slice, all **40 / 40** lexical
+seeds mapped back to source memories, graph expansion contributed
+candidates on **3 / 8** probes, and fact expansion contributed on **4 /
+8** probes. The packet used more prompt budget than normal RAG with
+active history (**227.6** versus **202.4** mean prompt tokens, ratio
+**1.125**) but far less than full history (**542.8** mean prompt
+tokens). OpenAI judging favored the expansion tradeoff: graph-expanded
+RAG averaged **4.375** relevance, **3.625** sufficiency, **1.750**
+noise, and **3 / 8** wins plus one tie, while normal RAG averaged
+**4.125 / 3.000 / 1.750** with **1 / 8** win in the same four-way
+graph-expanded comparison; full history also won **3 / 8**. This does
+not rescue standalone LTM: Cortext LTM-only in the same comparison
+averaged only **1.750 / 0.625**. The corrected architecture is therefore
+explicit: lexical/source RAG provides query addressability, while
+Cortext’s graph provides bounded relationship, fact, and temporal
+expansion over high-confidence source hits. LTM graph memory should be
+evaluated and promoted as a source-backed expansion layer, not as the
+primary lookup replacement.
 
 After adding the same source-seed label/relation traversal to the
 production `GraphAugmentedRetrieveCandidates` path, we reran the
@@ -4202,18 +4205,18 @@ verifies that a consolidated summary surface no longer suppresses a
 matching source anchor or its durable-label related source. The
 100-message native personal-chat text rerun
 (`build/chat_replay_native_text_100_retrieval_first_v2/eval.json` and
-`build/chat_replay_native_text_100_retrieval_first_v2/judge.json`) processed
-the same 100 messages, ran **9** daily consolidations, and judged **10**
-probes with `gpt-5.4-mini`. It did not improve the native chat result:
-Cortext averaged **1032.2** prompt tokens, **40.4** context items,
-**4.8** relevance, **4.5** sufficiency, **0.5** noise, **4.9** temporal
-correctness, and **4.6** source grounding with **1** win. Traditional
-chat+RAG remained at **752.6** prompt tokens and scored **4.8 / 4.7 /
-0.6 / 4.9 / 4.7** with **4** wins. The production change is therefore an
-addressability fix, not a complete prompt policy: source anchors now
-survive consolidation, but uncapped native retrieval still needs a
-compact, knob-derived injection policy to beat chat+RAG on prompt budget
-and sufficiency.
+`build/chat_replay_native_text_100_retrieval_first_v2/judge.json`)
+processed the same 100 messages, ran **9** daily consolidations, and
+judged **10** probes with `gpt-5.4-mini`. It did not improve the native
+chat result: Cortext averaged **1032.2** prompt tokens, **40.4** context
+items, **4.8** relevance, **4.5** sufficiency, **0.5** noise, **4.9**
+temporal correctness, and **4.6** source grounding with **1** win.
+Traditional chat+RAG remained at **752.6** prompt tokens and scored
+**4.8 / 4.7 / 0.6 / 4.9 / 4.7** with **4** wins. The production change
+is therefore an addressability fix, not a complete prompt policy: source
+anchors now survive consolidation, but uncapped native retrieval still
+needs a compact, knob-derived injection policy to beat chat+RAG on
+prompt budget and sufficiency.
 
 The compact follow-up moved that policy into the same production
 operation rather than into the benchmark harness. Graph retrieval now
@@ -4223,8 +4226,10 @@ routes, then returns a compact selected set from
 `RetrievalGraphExpandedRagMaxItems(F,T)`. The regression
 `Graph retrieval uses broad source seeds but compact knob-derived output`
 verifies that seed breadth and final prompt breadth are separate
-F/S/T-derived quantities. On the matched 100-message personal-chat text rerun
-(`build/chat_replay_native_text_100_retrieval_first_compact_v2/eval.json` and
+F/S/T-derived quantities. On the matched 100-message personal-chat text
+rerun
+(`build/chat_replay_native_text_100_retrieval_first_compact_v2/eval.json`
+and
 `build/chat_replay_native_text_100_retrieval_first_compact_v2/judge.json`),
 Cortext averaged **386.3** prompt tokens and **15.5** context items over
 **10** probes, down from **955.7** prompt tokens and **38.0** items in
@@ -4244,10 +4249,12 @@ We then retuned only the existing F/S/T-derived compact budget, raising
 `RetrievalGraphExpandedRagMaxItems(F,T)` from
 `lerp(12, 5, FocusBias(F))` to `lerp(20, 8, FocusBias(F))`. The current
 implementation applies the later retrieval-specific midpoint remap
-through `RetrievalFocusBias(F)`. At the personal-chat replay knobs (`F=0.35`,
-`T=0.6`), the final selected budget rises from **10** to **17** while
-the broad source/blob seed budget remains unchanged. The matched rerun
-(`build/chat_replay_native_text_100_retrieval_first_compact_v3/eval.json` and
+through `RetrievalFocusBias(F)`. At the personal-chat-corpus replay
+knobs (`F=0.35`, `T=0.6`), the final selected budget rises from **10**
+to **17** while the broad source/blob seed budget remains unchanged. The
+matched rerun
+(`build/chat_replay_native_text_100_retrieval_first_compact_v3/eval.json`
+and
 `build/chat_replay_native_text_100_retrieval_first_compact_v3/judge.json`)
 preserved the token advantage while recovering quality: Cortext averaged
 **526.4** prompt tokens and **20.7** context items, still below
@@ -4263,26 +4270,26 @@ noise, and much better sufficiency than the first compact setting.
 We then ran a historical local-Nemotron tuning sweep over the native
 mixed-media chat path across the exposed Focus/Sensitivity/Stability
 controls at `{0.25, 0.50, 0.75}` for each knob
-(`build/chat_replay_mixed_media_knob_matrix_20260526/summary.json`). Each of
-the **27** rows processed the same personal-chat replay slice through public
-Cortext calls only: **200** text messages, **16** media items, daily
-deep consolidation, seeded production label vectors, and no ASR
-transcript shortcut into Cortext. Judging used the local Nemotron omni
-model through `vllm-mlx` and compared native Cortext WM/STM/LTM packets
-with traditional chat+RAG carrying active history. The best quality and
-best token tradeoff were the same row: `F=0.75, S=0.25, T=0.50`, with
-**4 / 4** Cortext wins, **4.75** relevance, **4.75** sufficiency,
-**0.00** noise, and about **595** estimated Cortext packet tokens. The
-default `F=S=T=0.50` also won **4 / 4** probes but was heavier and
-weaker (**4.00** relevance, **3.25** sufficiency, **0.00** noise, about
-**881** Cortext packet tokens). The matrix supports the current
-three-knob architecture and suggests a high-Focus, low-Sensitivity
-regime is a better compact retrieval operating point for this
-mixed-media slice. Implementation follow-up retuned the
-retrieval/STM-label midpoint biases so the public neutral setting
-`F=S=T=0.50` now maps to the effective retrieval policy of the winning
-`F=0.75, S=0.25, T=0.50` row, while preserving knob endpoints and
-leaving non-retrieval global knob semantics unchanged.
+(`build/chat_replay_mixed_media_knob_matrix_20260526/summary.json`).
+Each of the **27** rows processed the same personal-chat replay slice
+through public Cortext calls only: **200** text messages, **16** media
+items, daily deep consolidation, seeded production label vectors, and no
+ASR transcript shortcut into Cortext. Judging used the local Nemotron
+omni model through `vllm-mlx` and compared native Cortext WM/STM/LTM
+packets with traditional chat+RAG carrying active history. The best
+quality and best token tradeoff were the same row:
+`F=0.75, S=0.25, T=0.50`, with **4 / 4** Cortext wins, **4.75**
+relevance, **4.75** sufficiency, **0.00** noise, and about **595**
+estimated Cortext packet tokens. The default `F=S=T=0.50` also won **4 /
+4** probes but was heavier and weaker (**4.00** relevance, **3.25**
+sufficiency, **0.00** noise, about **881** Cortext packet tokens). The
+matrix supports the current three-knob architecture and suggests a
+high-Focus, low-Sensitivity regime is a better compact retrieval
+operating point for this mixed-media slice. Implementation follow-up
+retuned the retrieval/STM-label midpoint biases so the public neutral
+setting `F=S=T=0.50` now maps to the effective retrieval policy of the
+winning `F=0.75, S=0.25, T=0.50` row, while preserving knob endpoints
+and leaving non-retrieval global knob semantics unchanged.
 
 A reduced post-remap rerun over the upper/neutral region
 (`build/chat_replay_mixed_media_knob_matrix_post_remap_20260527/summary.json`)
@@ -4318,8 +4325,8 @@ neutral midpoint all the way to that high-focus/high-stability effective
 point failed the source-backed durable-label graph retrieval tests, so
 we kept the conservative Stability remap. The current verdict is that
 the default is strong and much improved, but the judged
-compactness/quality knee for this personal-chat mixed-media slice still sits
-above neutral on Focus and Stability.
+compactness/quality knee for this personal-chat mixed-media slice still
+sits above neutral on Focus and Stability.
 
 We also checked judge determinism on the three closest rows by repeating
 the local Nemotron `vllm-mlx` judge pass five times per row
@@ -4331,12 +4338,12 @@ The observed variance was zero on this fixed prompt/model path:
 The result should still be treated as a small-slice ranking, but the
 ordering is not an artifact of single-pass judge randomness.
 
-We then profiled a pre-audit native path on a one-week personal-chat replay with
-mixed media and daily consolidation enabled
+We then profiled a pre-audit native path on a one-week personal-chat
+replay with mixed media and daily consolidation enabled
 (`build/chat_replay_week_media_daily_profile.json`,
-`build/chat_replay_week_media_daily_judge.json`). A later benchmark audit
-found that the personal-chat probe rows in this family used an extra
-`Retention::Ephemeral` preflight before durable ingest. That still
+`build/chat_replay_week_media_daily_judge.json`). A later benchmark
+audit found that the personal-chat probe rows in this family used an
+extra `Retention::Ephemeral` preflight before durable ingest. That still
 executed the processor and could mutate long-lived state, so the
 week-scale quality numbers are now treated as superseded exploratory
 evidence rather than the current validity result. The latency profile
@@ -4534,8 +4541,8 @@ We also fixed the exact source-text route so a query match on a source
 blob seeds the original source memory, the durable associative cue, and
 the durable label node together instead of seeding only the source
 memory. A focused regression now asserts that the durable label is
-surfaced first while still mapping back to the source memory. The chat-replay
-ablations with a stronger durable-source floor
+surfaced first while still mapping back to the source memory. The
+chat-replay ablations with a stronger durable-source floor
 (`build/stm_ltm_text_seed_durable_nodes_v20_openai.json`) and a fully
 relaxed source-text threshold
 (`build/stm_ltm_text_seed_relaxed_v21_openai.json`) did not improve the
@@ -4554,15 +4561,15 @@ sentence-start discourse words and generic one-token object labels while
 preserving multi-token anchors. The regression test now rejects generic
 current labels such as standalone discourse words, two-character
 fragments, and isolated object words, while still admitting concrete
-multi-token place/event/object labels. On the 80-message personal-chat replay
-(`build/stm_ltm_discourse_label_filter_v22_80_openai.json`), the cleaner
-gate reduced durable nodes from **24** to **17** and label-source
-backing pairs from **183** to **111**, with **70 / 70** source memories
-still hydratable and **0** durable nodes missing source links. The
-graph-isolation arm improved from **1.143 / 0.286** to **1.571 / 0.714**
-relevance/sufficiency, and full Cortext improved to **3.857 / 2.714**,
-but compact normal RAG remained higher at **4.714 / 3.857**. A follow-up
-short replay
+multi-token place/event/object labels. On the 80-message personal-chat
+replay (`build/stm_ltm_discourse_label_filter_v22_80_openai.json`), the
+cleaner gate reduced durable nodes from **24** to **17** and
+label-source backing pairs from **183** to **111**, with **70 / 70**
+source memories still hydratable and **0** durable nodes missing source
+links. The graph-isolation arm improved from **1.143 / 0.286** to
+**1.571 / 0.714** relevance/sufficiency, and full Cortext improved to
+**3.857 / 2.714**, but compact normal RAG remained higher at **4.714 /
+3.857**. A follow-up short replay
 (`build/stm_ltm_generic_single_token_filter_v24_openai.json`) confirmed
 that the filter should reject isolated one-token object labels without
 treating those tokens as source-span stopwords, because phrase
@@ -4639,10 +4646,10 @@ labels, OCR, or text fallback enters Cortext. The transcript is used
 only as private judge ground truth because it was the source used to
 synthesize the speech.
 
-The corrected text run (`build/chat_replay_native_text_100_v2/eval.json` and
-`build/chat_replay_native_text_100_v2/judge.json`) processed **100** text
-messages, ran **9** daily consolidations, and judged **10** probes with
-`gpt-5.4-mini`. Native Cortext WM+STM+LTM averaged **955.7** prompt
+The corrected text run (`build/chat_replay_native_text_100_v2/eval.json`
+and `build/chat_replay_native_text_100_v2/judge.json`) processed **100**
+text messages, ran **9** daily consolidations, and judged **10** probes
+with `gpt-5.4-mini`. Native Cortext WM+STM+LTM averaged **955.7** prompt
 tokens and **38.0** returned context items per probe; traditional
 chat-history-plus-RAG averaged **752.6** prompt tokens and **65.0**
 context items. Quality was close rather than dominant: Cortext scored
@@ -4652,8 +4659,9 @@ traditional chat+RAG scored **4.8 / 4.7 / 0.7 / 4.9 / 4.9** with **3**
 wins. The full-history arm is retained only as an upper bound and scored
 **4.9** relevance and **4.9** sufficiency.
 
-The corrected raw-audio run (`build/chat_replay_native_audio_100_v5/eval.json`
-and `build/chat_replay_native_audio_100_v5/judge.json`) processed the same
+The corrected raw-audio run
+(`build/chat_replay_native_audio_100_v5/eval.json` and
+`build/chat_replay_native_audio_100_v5/judge.json`) processed the same
 **100** messages as raw speech, ran **9** daily consolidations, and
 judged **10** probes. It records
 `transcript_text_passed_to_cortext=false`, `asr_transcript_used=false`,
@@ -10276,10 +10284,10 @@ structured semantic signals beyond shallow associations.
 
 ## Reinforcement Ablation (Long Horizon)
 
-On **June 9, 2026**, the chat-replay release probe stream exposed a production
-graph plasticity problem: repeated compact retrieval packets were
-creating durable reinforcement hubs because `DetectMemoryUsage` used a
-fixed `0.1` increment for every pair of co-retrieved memories. We
+On **June 9, 2026**, the chat-replay release probe stream exposed a
+production graph plasticity problem: repeated compact retrieval packets
+were creating durable reinforcement hubs because `DetectMemoryUsage`
+used a fixed `0.1` increment for every pair of co-retrieved memories. We
 replaced that constant with the F/S/T-derived,
 contextual-support-weighted, fanout-damped rule described in
 <a href="#sec-reinforcement" class="quarto-xref">Section 7</a>. Quick
@@ -10288,10 +10296,10 @@ verification artifacts are in
 
 The numeric step-matrix ablation compares the old fixed update to the
 new rule. At the default knobs (`F=S=T=0.5`) and a 13-item retrieved
-packet matching the personal-chat trace shape, the selected/used-memory pair
-update falls from `0.10000` to `0.01981` (**5.0x** slower), while an
-unselected co-retrieval pair falls to `0.00282` (**35.4x** slower). For
-a 20-item packet, those reductions are **6.3x** and **44.0x**
+packet matching the personal-chat trace shape, the selected/used-memory
+pair update falls from `0.10000` to `0.01981` (**5.0x** slower), while
+an unselected co-retrieval pair falls to `0.00282` (**35.4x** slower).
+For a 20-item packet, those reductions are **6.3x** and **44.0x**
 respectively. In a no-decay saturation calculation, the old edge reaches
 weight 1.0 after **10** repeated co-retrievals, while the new default
 needs **51** selected-pair repetitions for a 13-item packet and **355**
@@ -10300,8 +10308,8 @@ marks `reinforcement_edges` as essential for the best score
 (`mean_marginal = 1.0`, `max_score_without = 13.0`,
 `essential_for_best = 1`), so the fix slows noisy online graph
 plasticity without removing the reinforcement family. This is a
-mechanism-level verification only; chat-replay release-quality claims must be
-rerun against the rebuilt production binary.
+mechanism-level verification only; chat-replay release-quality claims
+must be rerun against the rebuilt production binary.
 
 We reran the reinforcement ablation on **Apr 4, 2026** under
 `EmbeddingGemma/llama.cpp` by comparing **reinforcement on vs off** at
@@ -12505,8 +12513,8 @@ until compaction while Cortext carries only bounded working memory plus
 STM/LTM graph memory. The summary artifact is privacy-safe: it records
 counters, scores, token estimates, media coverage, skipped-media
 reasons, and judge aggregates, but no message text. This subsection is
-historical: it predates the current `cortext_chat_replay_live_run` release
-protocol, default-knob command checks, probe-time Cortext packet
+historical: it predates the current `cortext_chat_replay_live_run`
+release protocol, default-knob command checks, probe-time Cortext packet
 freezing, and local-only Gemma 4 judge gate.
 
 Historical command:
@@ -12526,9 +12534,9 @@ source env.sh && ./build/examples/benchmark/cortext_chat_replay_conversation_mem
   --models models
 ```
 
-Current private personal-chat runs are restricted to loopback-only local judge
-endpoints and reject hosted judge URLs before any private packet is
-sent. The current release protocol uses local Ollama Gemma 4 12B
+Current private personal-chat runs are restricted to loopback-only local
+judge endpoints and reject hosted judge URLs before any private packet
+is sent. The current release protocol uses local Ollama Gemma 4 12B
 (`gemma4:12b-it-qat`) for the blind multimodal judge; the older local
 Nemotron/vllm-mlx path is retained only as an optional local
 disagreement check. The artifact described below was produced before
@@ -12733,11 +12741,11 @@ private-text leak scan found **0** leaks in every row. This is not the
 current release judge path.
 
 As a local judge cross-check on the earlier **80-message** mixed-media
-slice, we also wired `tools/judge_chat_replay_live_run.py` to a loopback-only
-Ollama provider and ran Gemma 4 12B (`gemma4:12b-it-qat`) over
-`build/chat_replay_mixed_media_native_80/summary.json`. The adapter preserves
-the same native Cortext and normal chat+RAG packets, but now blinds
-packet identity before judging: packet order is deterministically
+slice, we also wired `tools/judge_chat_replay_live_run.py` to a
+loopback-only Ollama provider and ran Gemma 4 12B (`gemma4:12b-it-qat`)
+over `build/chat_replay_mixed_media_native_80/summary.json`. The adapter
+preserves the same native Cortext and normal chat+RAG packets, but now
+blinds packet identity before judging: packet order is deterministically
 randomized per probe, the judge sees only `A`/`B`/`C`, and the private
 artifact decodes winners afterward. It also maps source-backed media
 memories through DB signal order and replay media-attempt order,
@@ -12765,34 +12773,34 @@ not a release claim: it is too small and has only one local judge
 repetition.
 
 To make that distinction explicit, we added and hardened
-`tools/chat_replay_release_protocol_report.py`, which builds a public-safe
-release protocol bundle from a private live-run summary and a private
-judge artifact. The bundle excludes message text, source-blob filenames,
-and judge reason strings, but records SHA-256 hashes of the private
-artifacts, the exact benchmark/judge commands, git commit, dirty flag,
-and dirty-worktree fingerprints, a private source-input fingerprint, a
-frozen probe manifest, aggregate quality/tokens/latency, confidence
-intervals, and a release-gate checklist. The gate fails if the report
-cannot record a real 40-character git commit hash plus an explicit dirty
-flag, status hash, staged/unstaged/submodule diff hashes, untracked-path
-hash, and combined worktree manifest hash. The release-freeze file also
-pins the benchmark executable hash, git commit, and worktree manifest
-hash so the final report cannot silently run under a different binary or
-dirty tree than the initial frozen report. The source-input fingerprint
-records only local file counts, extension counts, byte totals, content
-hashes, and a manifest hash; it does not copy private message text or
-media bytes into the report, and the gate rejects public fingerprints
-that expose raw per-file manifest entries. It also verifies source-ID
-policy directly from the SQLite `signals` table: ingress signals must
-use the shared speaker source IDs for text and media, media
-filenames/extensions must not be encoded as source IDs, and unexpected
-source IDs are reported only as hashes. It also cross-checks the
-recorded benchmark command against the summary artifact for input path,
-database/output path, slice size, media limit, probe schedule, RAG
-settings, knobs, and consolidation mode, records a behavior-relevant
-runtime environment snapshot for the main benchmark process, requires
-that snapshot to identify the sampled process, and cross-checks the
-recorded judge command against the judge artifact for
+`tools/chat_replay_release_protocol_report.py`, which builds a
+public-safe release protocol bundle from a private live-run summary and
+a private judge artifact. The bundle excludes message text, source-blob
+filenames, and judge reason strings, but records SHA-256 hashes of the
+private artifacts, the exact benchmark/judge commands, git commit, dirty
+flag, and dirty-worktree fingerprints, a private source-input
+fingerprint, a frozen probe manifest, aggregate quality/tokens/latency,
+confidence intervals, and a release-gate checklist. The gate fails if
+the report cannot record a real 40-character git commit hash plus an
+explicit dirty flag, status hash, staged/unstaged/submodule diff hashes,
+untracked-path hash, and combined worktree manifest hash. The
+release-freeze file also pins the benchmark executable hash, git commit,
+and worktree manifest hash so the final report cannot silently run under
+a different binary or dirty tree than the initial frozen report. The
+source-input fingerprint records only local file counts, extension
+counts, byte totals, content hashes, and a manifest hash; it does not
+copy private message text or media bytes into the report, and the gate
+rejects public fingerprints that expose raw per-file manifest entries.
+It also verifies source-ID policy directly from the SQLite `signals`
+table: ingress signals must use the shared speaker source IDs for text
+and media, media filenames/extensions must not be encoded as source IDs,
+and unexpected source IDs are reported only as hashes. It also
+cross-checks the recorded benchmark command against the summary artifact
+for input path, database/output path, slice size, media limit, probe
+schedule, RAG settings, knobs, and consolidation mode, records a
+behavior-relevant runtime environment snapshot for the main benchmark
+process, requires that snapshot to identify the sampled process, and
+cross-checks the recorded judge command against the judge artifact for
 summary/database/output paths, provider, model, loopback endpoint,
 blinding, repetitions, seed, bootstrap samples, context limit, and media
 attachment cap. It also reports aggregate packet-label randomization
@@ -12839,50 +12847,51 @@ and judge command must match its summary/judge artifacts before it can
 support an algorithm-attribution claim.
 
 The release runner now also supports streamed early warning during the
-expensive private replay. `cortext_chat_replay_live_run` writes a compact
-`<summary>.probes.jsonl` sidecar immediately after each fixed probe
-packet is constructed. `tools/watch_chat_replay_probe_stream_judge.py` can
-materialize partial private summaries from that sidecar, run the same
-loopback-only Gemma 4 12B judge on milestone probe counts, and fail fast
-on configurable floors. The private runner uses a compact 32k judge
-context by default and records prompt-fit checks in every judge
-artifact; larger windows are unnecessary unless a frozen packet fails
-that fairness check. Streamed checkpoints use one local judge repetition
-and a shorter 180-second per-call timeout by default so they act as
-fail-fast screens; if such a screen would terminate replay, the watcher
-confirms only the newly added failing delta segment with three local
-repetitions before deciding whether to stop, reusing accepted prior
-segments in the cumulative checkpoint. Confirmation can terminate early
-when a strict optimistic bound proves that even perfect remaining rows
-cannot recover the configured quality floor. The final release judge
-remains the statistically repeated claim artifact and still requires at
-least three blind repetitions. Early milestones judge only newly reached
-probes and then rebuild a cumulative checkpoint from cached judge rows,
-so the default `1` through `12` release stream does not repeatedly
-rejudge the same private packets; after those fixed milestones it
-continues screening every additional probe until the final summary is
-written. The standalone watcher default covers every probe through 32
-when used without the release wrapper. The default private-release
-watcher enforces Cortext context presence, token savings, and fairness
-at every checkpoint. Quality and win-rate are still scored at early
-checkpoints, but the hard quality gates are deferred until the
-traditional chat+RAG baseline has actually entered the intended long-run
-regime: prior chat has compacted, vector RAG has added text outside the
-raw rolling history, or the raw rolling-history packet has reached the
-full active-history budget. This prevents an early pre-compaction
-raw-history packet from terminating replay while still surfacing the
-quality trend immediately. `tools/run_chat_replay_release_protocol.py` wraps
-the main release replay so that a non-streaming benchmark binary is
-rejected when early judging is enabled, the early watcher runs beside
-the benchmark, and a failed early gate terminates the replay before the
-final summary. The watcher also writes `early_judge_latest.json`, and
-the top-level `benchmark_status.json` embeds that latest checkpoint when
-present, so long private runs can be monitored from one aggregate-only
-status file instead of waiting for final judging or parsing logs. The
-release report also loads `benchmark_status.json` and the early-judge
-manifest as first-class gate evidence: final protocol reports must show
-a local Gemma early judge, blind checkpoint packets, configured
-hard/trend quality milestones, three-repetition confirmation for failing
+expensive private replay. `cortext_chat_replay_live_run` writes a
+compact `<summary>.probes.jsonl` sidecar immediately after each fixed
+probe packet is constructed.
+`tools/watch_chat_replay_probe_stream_judge.py` can materialize partial
+private summaries from that sidecar, run the same loopback-only Gemma 4
+12B judge on milestone probe counts, and fail fast on configurable
+floors. The private runner uses a compact 32k judge context by default
+and records prompt-fit checks in every judge artifact; larger windows
+are unnecessary unless a frozen packet fails that fairness check.
+Streamed checkpoints use one local judge repetition and a shorter
+180-second per-call timeout by default so they act as fail-fast screens;
+if such a screen would terminate replay, the watcher confirms only the
+newly added failing delta segment with three local repetitions before
+deciding whether to stop, reusing accepted prior segments in the
+cumulative checkpoint. Confirmation can terminate early when a strict
+optimistic bound proves that even perfect remaining rows cannot recover
+the configured quality floor. The final release judge remains the
+statistically repeated claim artifact and still requires at least three
+blind repetitions. Early milestones judge only newly reached probes and
+then rebuild a cumulative checkpoint from cached judge rows, so the
+default `1` through `12` release stream does not repeatedly rejudge the
+same private packets; after those fixed milestones it continues
+screening every additional probe until the final summary is written. The
+standalone watcher default covers every probe through 32 when used
+without the release wrapper. The default private-release watcher
+enforces Cortext context presence, token savings, and fairness at every
+checkpoint. Quality and win-rate are still scored at early checkpoints,
+but the hard quality gates are deferred until the traditional chat+RAG
+baseline has actually entered the intended long-run regime: prior chat
+has compacted, vector RAG has added text outside the raw rolling
+history, or the raw rolling-history packet has reached the full
+active-history budget. This prevents an early pre-compaction raw-history
+packet from terminating replay while still surfacing the quality trend
+immediately. `tools/run_chat_replay_release_protocol.py` wraps the main
+release replay so that a non-streaming benchmark binary is rejected when
+early judging is enabled, the early watcher runs beside the benchmark,
+and a failed early gate terminates the replay before the final summary.
+The watcher also writes `early_judge_latest.json`, and the top-level
+`benchmark_status.json` embeds that latest checkpoint when present, so
+long private runs can be monitored from one aggregate-only status file
+instead of waiting for final judging or parsing logs. The release report
+also loads `benchmark_status.json` and the early-judge manifest as
+first-class gate evidence: final protocol reports must show a local
+Gemma early judge, blind checkpoint packets, configured hard/trend
+quality milestones, three-repetition confirmation for failing
 checkpoints, probe-stream progress, and a passing latest checkpoint
 before they can be marked release-ready. If confirmation stopped because
 the optimistic recovery bound was already impossible, the report carries
@@ -13323,9 +13332,9 @@ grounding even when simple lexical overlap favored RAG/full history.
 On **May 26, 2026**, we ran a small pre-release F/S/T knob sweep over
 the same 200-message mixed-media native path to measure the compact
 graph retrieval tradeoff directly
-(`build/chat_replay_mixed_media_knob_sweep_20260526/summary.json`). The sweep
-used daily deep consolidation, the same 8 audio clips, 6 images, and 2
-video-frame items, and local `vllm-mlx` Nemotron judging with a 4k
+(`build/chat_replay_mixed_media_knob_sweep_20260526/summary.json`). The
+sweep used daily deep consolidation, the same 8 audio clips, 6 images,
+and 2 video-frame items, and local `vllm-mlx` Nemotron judging with a 4k
 rolling-history budget for the traditional chat+RAG comparator. Raising
 Focus and Stability from the pre-release tuning baseline
 `F=0.35, S=0.65, T=0.60` to `F=0.75, S=0.65, T=0.75` produced the best
@@ -13795,9 +13804,9 @@ inspection narrows this further. The current deep-180 stores contain
 embedded fact-cache rows and fact evidence, but only 1–3 facts per store
 are `active`; most are `weak`. The production fact seed query does not
 directly filter out weak facts, so weak lifecycle alone does not explain
-zero seeds. Earlier fact-only diagnostics on the same chat-replay harness
-showed the likely candidate-generation bottleneck: a fact-only vector
-table retrieved fact candidates for every probe, while the
+zero seeds. Earlier fact-only diagnostics on the same chat-replay
+harness showed the likely candidate-generation bottleneck: a fact-only
+vector table retrieved fact candidates for every probe, while the
 production-shaped global embeddings KNN followed by `fact_cache` join
 found no fact rows at `k=32` and almost none at `k=256`. Facts exist and
 can be queried in a fact-specific space; they are outcompeted before the
@@ -13808,9 +13817,9 @@ score and admit linked evidence memories without changing the production
 default.
 
 On **May 23, 2026** we added a narrower STM-to-LTM audit for the active
-relabel/prune path and reran a bounded, privacy-safe personal-chat replay
-through the normal Cortext processing and consolidation path, then
-hardened endpoint alignment and reran the same slice
+relabel/prune path and reran a bounded, privacy-safe personal-chat
+replay through the normal Cortext processing and consolidation path,
+then hardened endpoint alignment and reran the same slice
 (`build/stm_ltm_endpoint_rejection_reason_judged.json`, `skip=1980`,
 `max_messages=30`, `consolidate_every=10`, OpenAI
 `gpt-5.4-mini-2026-03-17` judge limited to two probes). This run
@@ -14006,8 +14015,9 @@ budget. The first attempt with the default current model root failed
 because the worktree now prefers an ES-AIST 1536-dimensional encoder
 while this benchmark/schema path is still 256-dimensional. To keep the
 run exploratory and avoid production algorithm edits, the rerun used
-`build/chat_replay_goal_explore/modelroot_256`, a symlink-only model root that
-exposes the compatible 256-dimensional assets and excludes ES-AIST.
+`build/chat_replay_goal_explore/modelroot_256`, a symlink-only model
+root that exposes the compatible 256-dimensional assets and excludes
+ES-AIST.
 
 <table>
 <colgroup>
@@ -14913,13 +14923,13 @@ when all canonical label tokens appear somewhere in the evidence, even
 if the exact phrase is not contiguous; a regression test covers the
 `car crash` / `car ... crash` case. The follow-up artifact
 `build/stm_ltm_token_grounding_openai.json` did not change the live
-Per-corpus counters: **9** label candidates, **5** ungrounded rejects, **3**
-admitted labels, **2** relation candidates, and **0** relation edges.
-This rules out simple phrase-contiguity as the cause of under-admission
-on this slice. The next hardening target is the relabeler contract
-itself: it needs to propose more source-token-supported durable anchors
-and supported predicates, not looser post-hoc admission of labels that
-the evidence does not contain.
+personal-chat counters: **9** label candidates, **5** ungrounded
+rejects, **3** admitted labels, **2** relation candidates, and **0**
+relation edges. This rules out simple phrase-contiguity as the cause of
+under-admission on this slice. The next hardening target is the
+relabeler contract itself: it needs to propose more
+source-token-supported durable anchors and supported predicates, not
+looser post-hoc admission of labels that the evidence does not contain.
 
 We tightened that relabeler prompt contract next. The Gemma text, audio,
 and image relabel prompts now ask for **4–8** exact source spans when
@@ -15073,17 +15083,17 @@ subspans inside an already admitted proper phrase.
 
 The OpenAI-judged artifact
 `build/stm_ltm_source_span_complement_v14_openai.json` shows the effect
-on the same 30-message corpus slice. The relabeler still processed **27**
-STM items and **108** STM label edges across four cycles, with **25 /
-25** source memories hydratable. The durable LTM surface grew from **4**
-to **7** refined labels: **4** came from the extractor and **3** from
-the source-span complement. Durable source-backed LTM nodes rose from
-**4** to **7**, label-source backing pairs from **20** to **35**,
-`has_label` links from **4** to **7**, and deterministic co-occurrence
-edges from **3** to **15**. Over-pruning decreased from **24** to **21**
-removed labels. Relation extraction did not improve on this slice: **2 /
-2** relation candidates were still skipped for non-durable endpoints,
-with **0** direct relation edges.
+on the same 30-message corpus slice. The relabeler still processed
+**27** STM items and **108** STM label edges across four cycles, with
+**25 / 25** source memories hydratable. The durable LTM surface grew
+from **4** to **7** refined labels: **4** came from the extractor and
+**3** from the source-span complement. Durable source-backed LTM nodes
+rose from **4** to **7**, label-source backing pairs from **20** to
+**35**, `has_label` links from **4** to **7**, and deterministic
+co-occurrence edges from **3** to **15**. Over-pruning decreased from
+**24** to **21** removed labels. Relation extraction did not improve on
+this slice: **2 / 2** relation candidates were still skipped for
+non-durable endpoints, with **0** direct relation edges.
 
 Quality moved in the expected but still insufficient direction. LTM-only
 Cortext improved to **3.500** relevance and **1.500** sufficiency, and
@@ -15109,10 +15119,11 @@ A focused regression verifies this with a durable label whose own text
 does not match the query but whose backing source payload does. The
 second change preserves the best high-confidence durable-source
 candidate near the front of the selected list so chat-demo injection
-caps do not discard it after retrieval already found it. On the personal-chat
-replay (`build/stm_ltm_durable_source_promote_v16_openai.json`), this
-worked mechanically: a source-backed durable candidate with **8**
-backing sources and durable-source boost **0.968** moved to the top
+caps do not discard it after retrieval already found it. On the
+personal-chat replay
+(`build/stm_ltm_durable_source_promote_v16_openai.json`), this worked
+mechanically: a source-backed durable candidate with **8** backing
+sources and durable-source boost **0.968** moved to the top
 retrieval-debug rank on the first probe. The graph-isolation arm also
 improved over the v14 source-span run: relabel/pruned LTM rose from
 **0.500 / 0.000** relevance/sufficiency to **1.000 / 0.500**, while raw
@@ -15643,12 +15654,13 @@ result the stricter adjudication than the earlier local Gemma 4
 development signal.
 
 After the private-evaluation lock-down, hosted OpenAI judging is no
-longer an allowed path for personal-chat data. This comparison remains useful as
-historical evidence that judge choice can change quality conclusions,
-but current reproduction and release-gating runs must use the
-loopback-only Ollama Gemma 4 12B judge (`gemma4:12b-it-qat`). The older
-local Nemotron path is retained only as a historical development result
-or optional local disagreement check, not as the primary release judge.
+longer an allowed path for personal-chat data. This comparison remains
+useful as historical evidence that judge choice can change quality
+conclusions, but current reproduction and release-gating runs must use
+the loopback-only Ollama Gemma 4 12B judge (`gemma4:12b-it-qat`). The
+older local Nemotron path is retained only as a historical development
+result or optional local disagreement check, not as the primary release
+judge.
 
 We then added a probe-level bootstrap over the same 64 chronological
 probes to separate quality evidence from token-efficiency evidence.
@@ -15668,9 +15680,9 @@ current Cortext for both `k=1` and `k=3`, with paired deltas from
 **-0.8125** to **-1.3750** and intervals entirely below zero.
 
 We then added one more chronological slice at `skip=720` using the same
-benchmark shape, `build/chat_replay_goal_explore/modelroot_256`, compact STM
-`k=3`, and lexical LTM top-5. This slice changes the story in a useful
-way: compact full history is weak (**1.3125** sufficiency), while
+benchmark shape, `build/chat_replay_goal_explore/modelroot_256`, compact
+STM `k=3`, and lexical LTM top-5. This slice changes the story in a
+useful way: compact full history is weak (**1.3125** sufficiency), while
 STM+LTM union is best on the compact-policy surface (**2.5000**) and STM
 recent remains close (**2.3125**) at lower token cost. Over the
 resulting five-slice, 80-probe surface, compact STM remains the best
@@ -39912,13 +39924,13 @@ without letting the many wrong labels become durable memory structure.
 
 ### STM graph to durable LTM consolidation replay
 
-The next production-shaped check was a real personal-chat conversation replay
-through Cortext rather than an offline label-vector benchmark. The goal
-was not to test summarization quality. It was to test the intended
-memory path: working memory and STM graph structure enter consolidation,
-the relabeler/pruner turns that structure into durable source-grounded
-LTM labels and relations, and later retrieval hydrates the original
-experiences behind those durable nodes.
+The next production-shaped check was a real personal-chat conversation
+replay through Cortext rather than an offline label-vector benchmark.
+The goal was not to test summarization quality. It was to test the
+intended memory path: working memory and STM graph structure enter
+consolidation, the relabeler/pruner turns that structure into durable
+source-grounded LTM labels and relations, and later retrieval hydrates
+the original experiences behind those durable nodes.
 
 Command:
 
@@ -40115,21 +40127,21 @@ using token overlap instead of exact phrase containment. A focused
 synthetic regression showed the intended capability: a query such as
 “who gave money?” can route through a longer durable label that contains
 those discriminative tokens even when the label embedding is not
-aligned. The real personal-chat replay did not support enabling this path by
-default. In `build/stm_ltm_label_token_route_v31_80_openai.json`,
-durable construction remained unchanged at 16 refined labels, 103
-source-link pairs, and zero missing source nodes, but judged retrieval
-regressed: LTM-only retrieval fell to `2.429` relevance and `1.286`
-sufficiency, and the graph relabel/prune packet fell to `2.286`
-relevance and `0.857` sufficiency. The negative result is useful:
-query-addressability cannot be fixed by broad lexical matching over
-durable labels alone; the labels themselves must be more event- and
-question-discriminative. In the current production retrieval path this
-route is therefore not a separate experiment switch. It is enabled
-through the same F/S/T-derived routing policy as the rest of graph
-retrieval, with knob-derived token floors, breadth, fanout, and
-source-evidence caps so it contributes as a bounded rescue signal rather
-than an uncontrolled lexical override.
+aligned. The real personal-chat replay did not support enabling this
+path by default. In
+`build/stm_ltm_label_token_route_v31_80_openai.json`, durable
+construction remained unchanged at 16 refined labels, 103 source-link
+pairs, and zero missing source nodes, but judged retrieval regressed:
+LTM-only retrieval fell to `2.429` relevance and `1.286` sufficiency,
+and the graph relabel/prune packet fell to `2.286` relevance and `0.857`
+sufficiency. The negative result is useful: query-addressability cannot
+be fixed by broad lexical matching over durable labels alone; the labels
+themselves must be more event- and question-discriminative. In the
+current production retrieval path this route is therefore not a separate
+experiment switch. It is enabled through the same F/S/T-derived routing
+policy as the rest of graph retrieval, with knob-derived token floors,
+breadth, fanout, and source-evidence caps so it contributes as a bounded
+rescue signal rather than an uncontrolled lexical override.
 
 The next consolidation-side probe converted accepted durable event
 labels into source-backed fact assertions when the label had a
@@ -40811,14 +40823,14 @@ ablations.
 
 ### Chat-Replay Release Early-Judge Fail-Fast Harness Smoke
 
-Because full personal-chat mixed-media runs are expensive, the release wrapper
-was extended to stream frozen probe rows and run the same local Gemma 4
-judge before the final summary exists. The watcher materializes partial
-summaries, sends `SIGSTOP` to the benchmark while the local judge runs,
-aggregates delta judge rows cumulatively, and exits non-zero when token,
-context, fairness, hard quality, or rolling quality-trend gates fail.
-These early checkpoints are screening only; they are explicitly marked
-`fail_fast_screen_only_not_release_claim`.
+Because full personal-chat mixed-media runs are expensive, the release
+wrapper was extended to stream frozen probe rows and run the same local
+Gemma 4 judge before the final summary exists. The watcher materializes
+partial summaries, sends `SIGSTOP` to the benchmark while the local
+judge runs, aggregates delta judge rows cumulatively, and exits non-zero
+when token, context, fairness, hard quality, or rolling quality-trend
+gates fail. These early checkpoints are screening only; they are
+explicitly marked `fail_fast_screen_only_not_release_claim`.
 
 Two local-only smoke runs verified both sides of that behavior:
 
@@ -40883,17 +40895,18 @@ killing the replay, while genuinely bad runs still stop well before
 final judging once the baseline is in the intended long-run regime.
 
 A later harness smoke
-(`build/chat_replay_release_smoke_early_fail_hydration_cap_v1/`) tightened the
-default early-watcher polling interval from 30 seconds to 2 seconds and
-then forced the hard quality gate to activate at 4 probes. The watcher
-observed the first probe after roughly 10 seconds, reached the two-probe
-checkpoint at roughly 12 seconds, stopped the benchmark while judging,
-resumed for the next checkpoint, and then terminated replay at probe 4
-after the quality floor failed. The run had written only 5 streamed
-probe rows when killed, and no final summary was created. At the failing
-checkpoint, all fairness checks passed, token savings versus traditional
-chat+RAG were **0.388**, mean Cortext context was **180.0** tokens
-versus **294.25** traditional chat+RAG tokens, and the failed gate was
+(`build/chat_replay_release_smoke_early_fail_hydration_cap_v1/`)
+tightened the default early-watcher polling interval from 30 seconds to
+2 seconds and then forced the hard quality gate to activate at 4 probes.
+The watcher observed the first probe after roughly 10 seconds, reached
+the two-probe checkpoint at roughly 12 seconds, stopped the benchmark
+while judging, resumed for the next checkpoint, and then terminated
+replay at probe 4 after the quality floor failed. The run had written
+only 5 streamed probe rows when killed, and no final summary was
+created. At the failing checkpoint, all fairness checks passed, token
+savings versus traditional chat+RAG were **0.388**, mean Cortext context
+was **180.0** tokens versus **294.25** traditional chat+RAG tokens, and
+the failed gate was
 `cortext_quality_delta_vs_traditional_chat_rag = -3.0` against the
 `-0.5` floor. This smoke is intentionally not release evidence; it
 verifies that a bad checkpoint can stop the expensive replay path before
@@ -40906,19 +40919,19 @@ human-like memory system: unrelated associations can be noisy without
 being equivalent to missing the relevant context.
 
 A subsequent phase-aware private run
-(`build/chat_replay_release_phase_gate_fast_1200_20260608/`) exercised the
-cheaper one-repetition checkpoint path on the 1200-message mixed-media
-slice. Milestones 2, 4, and 8 passed token, context, privacy, packet,
-and fairness gates while quality remained deferred because traditional
-chat+RAG still had raw pre-compaction history. At milestone 12, the RAG
-packet reached **0.742** of the active history budget under the
-then-current 70% phase threshold. The screening checkpoint stopped
-replay after 12 probes: Cortext saved **94.5%** prompt tokens versus
-traditional chat+RAG and passed all fairness checks, but its mean
-quality composite trailed traditional chat+RAG by **2.67** points
-against the `-0.5` floor. Cortext won **4 / 12** packets versus **1 /
-12** for traditional chat+RAG, with **5** ties/unclear and **2**
-full-history upper-bound wins; the failure was the
+(`build/chat_replay_release_phase_gate_fast_1200_20260608/`) exercised
+the cheaper one-repetition checkpoint path on the 1200-message
+mixed-media slice. Milestones 2, 4, and 8 passed token, context,
+privacy, packet, and fairness gates while quality remained deferred
+because traditional chat+RAG still had raw pre-compaction history. At
+milestone 12, the RAG packet reached **0.742** of the active history
+budget under the then-current 70% phase threshold. The screening
+checkpoint stopped replay after 12 probes: Cortext saved **94.5%**
+prompt tokens versus traditional chat+RAG and passed all fairness
+checks, but its mean quality composite trailed traditional chat+RAG by
+**2.67** points against the `-0.5` floor. Cortext won **4 / 12** packets
+versus **1 / 12** for traditional chat+RAG, with **5** ties/unclear and
+**2** full-history upper-bound wins; the failure was the
 relevance/sufficiency/noise composite, not packet blinding or leakage.
 This aggregate failure is not a release result because the baseline was
 still in the raw pre-compaction chat-history regime. It hardened the
@@ -41003,8 +41016,8 @@ is cropped; the final release judge uses `--judge-packet-item-limit -1`
 by default, while the early judge keeps its smaller packet cap for fast
 screening. Second, the local judge media smoke was made reproducible
 with generated, non-private fixtures. The current artifact,
-`build/chat_replay_release_media_smoke_v4/judge_media_smoke_ollama.json`, uses
-local Ollama Gemma 4 12B (`gemma4:12b-it-qat`) against a generated
+`build/chat_replay_release_media_smoke_v4/judge_media_smoke_ollama.json`,
+uses local Ollama Gemma 4 12B (`gemma4:12b-it-qat`) against a generated
 red-square image and a generated `"blue apple seven"` WAV. It reports
 `image_seen=true` and `audio_seen=true` with transcript
 `"Blue Apple 7"`, confirming that the same local judge endpoint can
@@ -41046,8 +41059,8 @@ wall time on replay and again when a report is generated from a recorded
 benchmark command, so a manually produced diagnostic summary cannot
 satisfy the native-Cortext release protocol by accident.
 
-A follow-up wrapper, `tools/run_chat_replay_release_windows.py`, now makes
-that multi-window protocol explicit instead of relying on hand-run
+A follow-up wrapper, `tools/run_chat_replay_release_windows.py`, now
+makes that multi-window protocol explicit instead of relying on hand-run
 commands. By default it freezes three windows: `early_text_image`
 (`skip=0,max=1200,media=16,warmup=200,stride=25,min_probes=30,require=image`),
 `video_window`
@@ -41085,14 +41098,14 @@ protocol readiness evidence, not release-quality evidence.
 
 The first full multi-window evidence run was launched in tmux as
 `cortext_chat_replay_release_windows_20260609` with output under
-`build/chat_replay_release_windows_full_20260609/`. Early fail-fast judging is
-disabled for this run (`--early-judge off`) so each frozen window can
-complete and then receive the final repeated blind local Gemma judge. At
-launch, the shared non-private media smoke artifact passed and the
-`early_text_image` production replay entered `running` state; no quality
-or token claim is made until all window summaries, repeated judge
-artifacts, human labels, ablations, and aggregate confidence intervals
-are present.
+`build/chat_replay_release_windows_full_20260609/`. Early fail-fast
+judging is disabled for this run (`--early-judge off`) so each frozen
+window can complete and then receive the final repeated blind local
+Gemma judge. At launch, the shared non-private media smoke artifact
+passed and the `early_text_image` production replay entered `running`
+state; no quality or token claim is made until all window summaries,
+repeated judge artifacts, human labels, ablations, and aggregate
+confidence intervals are present.
 
 During that launch, a skipped-window labeling audit found and fixed a
 harness bug before the short media windows were reached: the human-label
@@ -41123,20 +41136,20 @@ useful as a historical example that early judging can terminate a bad
 run before final judging.
 
 We also added a private-safe loss audit generated by
-`tools/audit_chat_replay_judge_losses.py`; future early checkpoints write
-`early_probe_XXX_loss_audit.json` beside the cumulative judge artifact.
-The audit records scores, counts, token totals, media-attachment counts,
-and coarse loss tags, but no packet text or judge reason text. When the
-checkpoint summary contains production `cortext_retrieval_debug`, the
-same audit also joins judged rows by probe event index and records
-aggregate retrieval-signal provenance (candidate counts plus
-label-graph, durable-source, fact, procedural, and predictive signal
-counts/means) for all rows, Cortext wins, Cortext losses, ties, and all
-Cortext non-win rows.
+`tools/audit_chat_replay_judge_losses.py`; future early checkpoints
+write `early_probe_XXX_loss_audit.json` beside the cumulative judge
+artifact. The audit records scores, counts, token totals,
+media-attachment counts, and coarse loss tags, but no packet text or
+judge reason text. When the checkpoint summary contains production
+`cortext_retrieval_debug`, the same audit also joins judged rows by
+probe event index and records aggregate retrieval-signal provenance
+(candidate counts plus label-graph, durable-source, fact, procedural,
+and predictive signal counts/means) for all rows, Cortext wins, Cortext
+losses, ties, and all Cortext non-win rows.
 
 A current provenance-enabled diagnostic run
-(`build/chat_replay_release_debug_current_28_v1/`) stopped at the first hard
-early quality gate, as intended. The run used default knobs
+(`build/chat_replay_release_debug_current_28_v1/`) stopped at the first
+hard early quality gate, as intended. The run used default knobs
 (`F=S=T=0.5`), daily deep consolidation, the fixed
 rolling-history-plus-text-RAG baseline, local Gemma 4 12B judging, blind
 packet order, and the same streamed probe schedule. At checkpoint 16,
@@ -41191,6 +41204,173 @@ showed that selected internal label/cue nodes could expand into too many
 distant source memories after scoring. That fix is a candidate
 noise-control change; it does not become quality evidence until a new
 frozen run passes the same streamed and final local-judge gates.
+
+### Capacity-4 Baseline: Formal Blind Judge Completion (2026-06-10)
+
+The frozen `early_text_image` window
+(`build/chat_replay_release_windows_fresh_20260609/early_text_image/`)
+completed its formal blind judge pass: **117/117** judgments (39 probes
+× 3 repetitions, `gemma4:12b-it-qat`, seed 42, blind packet order,
+probe-level bootstrap with 2000 resamples). Judging ran on a separate
+Linux host (two NVIDIA L4s, sharded by probe range and merged; judging
+is encoder-independent because it scores frozen packets). Cortext won
+**43** judgments (win rate **0.368**, CI95 \[0.265, 0.462\]) against
+**31** for the full-history upper bound (0.265 \[0.179, 0.359\]) and
+**20** for traditional chat+RAG (0.171 \[0.111, 0.239\]), with 22 ties
+and 1 insufficient-context row. The Cortext-vs-RAG win-rate intervals do
+not overlap. Mean prompt-token savings versus traditional chat+RAG was
+**96.0%** \[95.3, 96.7\] (≈211 vs ≈6,091 tokens per probe). The known
+weakness held: mean sufficiency **2.72** vs **3.32** (RAG) and **3.31**
+(full history), while Cortext led source grounding (**4.62**) and was
+the only arm receiving modality-grounding credit. This artifact is the
+capacity-4 / ES-AIST-81M-era baseline arm for subsequent working-memory
+experiments.
+
+### Embedding-Model Pinning After Cross-Space Artifact Contamination (2026-06-10)
+
+Three attempts to run the WM 7±2 capacity arm (`a6dbb10`) on the
+AIST-87M stack were invalidated in sequence, each exposing a distinct
+defect, and all three share one root cause worth recording:
+**derived-embedding artifacts that silently survived an encoder
+change**. Because every encoder generation emits a 256-d Matryoshka
+slice, vectors from different model families are dimension-compatible
+and nothing fails loudly — similarity is simply computed across
+unrelated spaces.
+
+-   **Attempt 1** crashed at replay event ≈620 with an objstore
+    `SQLITE_CONSTRAINT` at commit. Root cause was unrelated to
+    embeddings: the vendored `sqlite-objstore` snapshot predated
+    upstream’s savepoint-aware rollback, and Cortext’s nested
+    `ROLLBACK TO SAVEPOINT` left stale buffered blob writes that
+    collided at the outer commit. Fixed by syncing
+    `third_party/sqlite-objstore` to upstream HEAD.
+-   **Attempt 2** ran with a label bank generated 2025-12-31 by the
+    previous encoder: 6,478 label vectors in the ES-AIST-81M space
+    scored against AIST-87M summary embeddings. Regenerating it exposed
+    a second cutover bug — the generator emitted full 1280-d vectors
+    while the runtime label space is the 256-d slice; the generator now
+    Matryoshka-truncates and L2-renormalizes exactly as the runtime does
+    (`EncodeLabelEmbedding`), and stamps the encoder identity into the
+    bank metadata.
+-   **Attempt 3** completed the benchmark and 116/117 formal judgments
+    before being invalidated post hoc: the **embedded centroid vectors**
+    (named centroids plus 6 text-emotion and 7 audio-emotion centroids
+    baked into the binary from `.npy` assets) were generated 2026-06-07
+    — two days before the AIST-87M cutover — and therefore modulated
+    neuromodulator/emotion encoding from the wrong space for every run
+    since the cutover.
+
+Partial observations from the invalidated attempt 3 are recorded here as
+**diagnostics only, not evidence**: the truncated-packet streaming judge
+(packet item limit 256, 32k window) substantially flattered Cortext
+relative to the full-packet formal judge and will be aligned with formal
+packet construction; the formal partial tally (116/117) was Cortext 41 /
+full-history 36 / RAG 21 / tie 18 with sufficiency 2.75 vs 3.11 — a
+modest profile shift, not the streaming judge’s transformation; and a
+window-position breakdown showed the arm’s win rate *declining* with
+replay depth (42% early → 34% late) where the capacity-4 baseline *rose*
+(33% → 40%), alongside an association-edge deficit (1,370 → 1,220).
+Notably, identical memory counts (2,515 / 1,236 LTM / 14 consolidation
+runs in both arms) rule out capacity-driven consolidation starvation;
+suspicion falls on deep-store retrieval quality in the new embedding
+space. The AIST-87M slice release report validates retrieval quality at
+1280/768/512 dimensions only — the 256-d slice the runtime actually uses
+is unmeasured, and 512-d operation is under consideration.
+
+The systemic mitigation is an **embedding-model pin**: a fingerprint of
+the active encoder (`<backend>:b3-<blake3/16hex of model file>:dim<N>`)
+is stamped into every live database (`cortext_embedding_model_pin`) on
+first ingest and verified at startup. A mismatch — or pre-existing
+embeddings with no pin — is fatal, with no configuration override:
+vectors from an unknown or different model cannot be compared against
+the active space, and the only remedy is re-ingestion. The same
+fingerprint is being propagated to the label bank (verified at attach)
+and to the embedded centroid sources (verified at initialization) so
+that every precomputed-vector artifact fails loudly when the encoder
+moves. The WM 7±2 arm will be rerun on the corrected stack (regenerated
+centroids, pinned artifacts, realism-aligned streaming judge), followed
+by a capacity-4 control on the identical stack to attribute any
+remaining differences to the capacity change alone.
+
+### Corrected-Stack A/B: Miller 7±2 vs Capacity-4 Control (2026-06-10)
+
+Both arms of the promised pair completed on the corrected stack —
+AIST-87M encoder with the embedding-model pin enforced, pin-verified
+label bank, regenerated centroids, GPU summarizer/extractor providers
+(`ollama://gemma4:e2b`), and the realism-aligned streaming judge —
+differing by exactly one compile-time constant (`WMBaseCapacity`:
+lerp(8,6,S) vs lerp(5,3,S); the binaries were verified to otherwise
+build byte-identically). Formal blind judge, 39 probes × 3 repetitions,
+seed 42:
+
+<table>
+<colgroup>
+<col style="width: 33%" />
+<col style="width: 33%" />
+<col style="width: 33%" />
+</colgroup>
+<thead>
+<tr>
+<th>Metric (n=117)</th>
+<th>WM 7±2</th>
+<th>Capacity-4 control</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Cortext wins</td>
+<td><strong>42</strong> (rate 0.359 [0.256, 0.453])</td>
+<td><strong>39</strong> (rate 0.333 [0.239, 0.427])</td>
+</tr>
+<tr>
+<td>Full-history / RAG / tie</td>
+<td>32 / 25 / 18</td>
+<td>35 / 20 / 23</td>
+</tr>
+<tr>
+<td>Cortext sufficiency</td>
+<td>2.72</td>
+<td>2.43</td>
+</tr>
+<tr>
+<td>Cortext relevance</td>
+<td>3.09</td>
+<td>2.73</td>
+</tr>
+<tr>
+<td>Mean context tokens</td>
+<td>262 (95.7% savings vs RAG)</td>
+<td>222 (96.4%)</td>
+</tr>
+<tr>
+<td>Association edges</td>
+<td>1,349</td>
+<td>1,169</td>
+</tr>
+<tr>
+<td>Win rate by window depth</td>
+<td>54% / 54% / 46%</td>
+<td>46% / 46% / 46%</td>
+</tr>
+</tbody>
+</table>
+
+Three findings. **First, the invalidated run’s depth inversion is
+gone**: on the corrected stack the WM 7±2 arm wins the early and middle
+window thirds at 54% and holds the late third at 46% — the same
+late-window rate as the capacity-4 baseline — with late-window
+sufficiency at parity with the full-history upper bound (2.72 vs 2.72).
+The apparent long-term-memory weakness was an artifact of stale
+cross-space vectors, not a property of the architecture. **Second,
+capacity raises packet completeness but not verdicts**: 7±2 doubles
+working-memory tokens (81 vs 41), adds ~180 association edges, and lifts
+sufficiency (+0.29) and relevance (+0.36) consistently across all window
+depths, but the win-rate difference (0.359 vs 0.333) is well inside the
+bootstrap intervals. **Third, the sufficiency gap against the
+fat-context arms persists at both capacities** (2.4–2.7 vs ~3.1) and is
+uniform across window depth — it is the price of 96% context
+compression, not memory decay, and the judge’s overall verdicts continue
+to favor the compressed packets.
 
 # Implementation Considerations
 
@@ -41733,6 +41913,440 @@ Exponential decays and probability computations can suffer from
 underflow. We use `log-space` arithmetic where appropriate and clamp all
 potentially divergent values (e.g., division by small sums) with ε =
 10⁻⁶.
+
+# Performance Optimization
+
+This section documents an iterative profile-and-optimize pass over the
+reference C++ implementation of the algorithms specified in
+<a href="#sec-math" class="quarto-xref">Section 3</a> through
+<a href="#sec-interrupt" class="quarto-xref">Section 10</a>. The
+optimization work is strictly implementation-level: every change
+preserves the algorithmic semantics, parameter derivations, and
+numerical contracts of the specification. No knob-derived formula,
+threshold, capacity bound, or update rule was altered. Correctness is
+enforced after each change by the full unit and integration test suite
+and, where the workload is deterministic, by bit-identical benchmark
+output before and after the change.
+
+## Methodology
+
+**Hardware and toolchain.** All measurements were taken on an AMD Ryzen
+9 5950X (16 cores, 32 threads) running Ubuntu 24.04 in an LXC container,
+compiling with GCC 13 at `-O3 -DNDEBUG`. Profiling builds add
+`-g -fno-omit-frame-pointer`, which we measured to be
+performance-neutral within run-to-run variance for these workloads.
+
+**Profiler.** Kernel-assisted sampling (`perf`) is unavailable inside
+the container, so we use the gperftools CPU profiler (v2.16), a
+userspace SIGPROF sampler, at its default 100 Hz sampling rate, with
+`pprof` for attribution. Sampling profiles guide where to look; reported
+speedups always come from end-to-end wall-clock reruns of the unmodified
+benchmark binaries, not from profiler estimates.
+
+**Scope.** Optimization targets the operation pipeline, embedding-space
+computations, and graph algorithms
+(<a href="#sec-core-adaptation" class="quarto-xref">Section 4</a>
+through <a href="#sec-interrupt" class="quarto-xref">Section 10</a>).
+The generative consolidation paths (LLM label extraction and
+summarization,
+<a href="#sec-implementation" class="quarto-xref">Section 12</a>) are
+out of scope: their cost is dominated by model inference, not by the
+algorithms specified here.
+
+**Workloads.** We profile deterministic, model-free benchmarks from
+`examples/benchmark` that drive the production `Processor` pipeline with
+synthetic embeddings, so that profile time concentrates in the memory
+algorithms themselves rather than in encoder or LLM inference:
+
+<table>
+<colgroup>
+<col style="width: 50%" />
+<col style="width: 50%" />
+</colgroup>
+<thead>
+<tr>
+<th>Workload</th>
+<th>Exercises</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>live_loop_steady_state_bench</code></td>
+<td>primary workload: the exact production operation pipeline over one
+long-lived store; 4,000 deterministic synthetic signals across 16
+revisited topics with periodic shallow consolidation</td>
+</tr>
+<tr>
+<td><code>resurfacing_knob_sweep_bench</code></td>
+<td>retrieval resurfacing across a grid of (F, S, T) knob settings;
+setup-heavy (fresh store per scenario), used as a secondary check</td>
+</tr>
+<tr>
+<td><code>storage_consolidation_e2e_bench</code></td>
+<td>full consolidation lifecycle across storage-floor and interval grids
+(long-running; end-to-end check per milestone rather than per
+round)</td>
+</tr>
+</tbody>
+</table>
+
+The primary workload was added during this work: auditing the existing
+benchmark suite showed that no compiling benchmark exercised the
+production pipeline in steady state. Per-scenario harnesses spend most
+of their cycles on store setup and schema migration, and the storage
+sweeps are dominated by their own padding I/O, so optimizing against
+them would tune the wrong code. `live_loop_steady_state_bench` holds one
+store open for the whole run, which makes per-signal costs over a
+growing memory graph the dominant term, and its stdout is a set of
+deterministic aggregate counters and checksums used as the
+semantic-equivalence gate below.
+
+Each timing figure is the median of 5 runs on an otherwise idle machine;
+we report the spread where it exceeds 2%.
+
+**Procedure.** Each round proceeds as: (1) profile all workloads; (2)
+rank inclusive and self-time hotspots; (3) apply implementation-level
+optimizations to the top-ranked sites (memory layout, allocation reuse,
+redundant-computation elimination, algorithm-neutral data-structure
+substitutions); (4) verify with the test suite and deterministic-output
+comparison; (5) re-measure. The loop terminates when a full round yields
+less than roughly 5% end-to-end improvement on every workload, or when
+the remaining hotspots cannot be improved without changing specified
+algorithm behavior.
+
+## Round 0: A Correctness Precondition
+
+Constructing the steady-state workload surfaced a latent memory-safety
+defect before any optimization landed. The graph-neighborhood query used
+by reconsolidation (`QueryGraphNeighbors`) implemented its breadth-first
+expansion by holding a structured-binding *reference* into the frontier
+vector while appending newly discovered neighbors to the same vector.
+Once the frontier outgrew its capacity, the append reallocated the
+buffer and the held reference dangled; subsequent reads of the current
+node id were use-after-free reads. AddressSanitizer confirmed the defect
+on the unmodified tree, and at 4,000 steady-state signals it aborted
+roughly half of all runs (a corrupted reinforcement weight eventually
+violates a NOT NULL constraint) and made even “passing” runs
+non-reproducible.
+
+The defect had been invisible to the existing test and benchmark suite
+because no harness both ran the reconsolidation operation and kept a
+store alive long enough for the frontier to reallocate. The fix copies
+the frontier entry by value instead of by reference; it changes no
+algorithm semantics, only removes undefined behavior. After the fix the
+workload is bit-reproducible across runs (identical output checksums),
+under AddressSanitizer and in optimized builds alike. All speedups
+reported below are measured against the *fixed* baseline, so the bug
+repair is not counted as an optimization gain.
+
+This is a methodological point worth stating explicitly: a profiling
+workload with a deterministic output contract is also a correctness
+instrument. The same property that lets us assert “the optimization
+changed nothing” (byte-identical output) is what exposed that the
+unoptimized system was not even equal to itself.
+
+## Baseline
+
+After the Round 0 fix, the primary workload (4,000 signals, knobs at
+0.5/0.5/0.5) completes in a median 382.8 s over 5 runs (spread 381.0 to
+392.4 s), about 96 ms per signal at the end-of-run store size of 771
+memories. All 5 runs produce byte-identical output, which is the
+reference checksum for every subsequent change.
+
+## Round 1: Prepared-Statement Caching in the Store Layer
+
+Initial profiles of the per-scenario benchmarks attributed 25 to 30% of
+CPU samples to SQLite’s SQL parser (`sqlite3RunParser`, tokenizer, and
+parse-action functions): the store layer prepared every statement from
+SQL text on each `Execute` call and finalized it immediately after, so
+the same statement strings were re-parsed thousands of times per run.
+
+The change adds a per-connection prepared-statement cache to
+`SQLiteStore`, keyed by exact SQL text. On reuse the statement is reset
+and its bindings cleared, which preserves fresh-prepare semantics
+(unbound parameters are NULL in both cases); statements are finalized on
+a step failure (so the next execution re-prepares from scratch) and when
+the store closes. The cache is FIFO-bounded at 256 entries so one-shot
+statements such as migration DDL and address-derived savepoint names age
+out instead of accumulating.
+
+Results on the primary workload:
+
+<table>
+<colgroup>
+<col style="width: 21%" />
+<col style="width: 28%" />
+<col style="width: 28%" />
+<col style="width: 21%" />
+</colgroup>
+<thead>
+<tr>
+<th>Configuration</th>
+<th style="text-align: right;">Median (5 runs)</th>
+<th style="text-align: right;">Range</th>
+<th>Output checksum</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Round 0 baseline</td>
+<td style="text-align: right;">382.8 s</td>
+<td style="text-align: right;">381.0 - 392.4 s</td>
+<td><code>cbfb7906…</code></td>
+</tr>
+<tr>
+<td>+ statement cache</td>
+<td style="text-align: right;">367.4 s</td>
+<td style="text-align: right;">367.0 - 369.0 s</td>
+<td><code>cbfb7906…</code> (identical)</td>
+</tr>
+</tbody>
+</table>
+
+The end-to-end gain is 4.2%. It is much smaller than the parse share
+seen in the per-scenario benchmarks because those run against freshly
+created stores where parsing dominates a tiny data volume; in steady
+state, query *execution* over a growing graph dominates and parsing is a
+thin slice. This is exactly the kind of misattribution the steady-state
+workload exists to prevent. The secondary benchmarks remain
+byte-identical to their pre-change outputs, and the unit-test suite
+reports exactly the same pass/fail set as the unmodified tree on the
+same machine (the few failing cases are environment-dependent: locally
+absent encoder/summarizer models and expectations not yet updated for a
+pending working-memory capacity change).
+
+## Round 2: kNN Top-k Selection in the Vector Index
+
+With statement parsing reduced, re-profiling the primary workload
+against properly symbolized binaries placed the dominant cost inside the
+vendored `sqlite-vec` extension that backs the `embeddings` virtual
+table. Roughly 22% of all CPU samples landed in `min_idx`, the routine
+that selects the k nearest candidates from a chunk’s distance array, and
+a further 11% in the scalar L2 distance kernel itself. The `min_idx`
+implementation was a repeated selection scan: for each of the k outputs
+it rescanned all n chunk distances with two bitmap probes per element,
+O(k·n) with a heavy constant.
+
+The replacement is a single-pass bounded max-heap selection, O(n log k).
+Care is needed to remain bit-identical: the original scan compared with
+`<=` over ascending indices, so among equal distances the highest index
+won each pass. The heap comparator reproduces that order exactly
+(ascending distance, ties broken by descending index), and the final
+heap-sort emits the same sequence the repeated scans produced. The
+change touches no SQL surface and no caller; for non-NaN distances the
+selected set, order, and reported distances are identical by
+construction.
+
+Results on the primary workload:
+
+<table style="width:100%;">
+<colgroup>
+<col style="width: 16%" />
+<col style="width: 22%" />
+<col style="width: 22%" />
+<col style="width: 22%" />
+<col style="width: 16%" />
+</colgroup>
+<thead>
+<tr>
+<th>Configuration</th>
+<th style="text-align: right;">Median (5 runs)</th>
+<th style="text-align: right;">Range</th>
+<th style="text-align: right;">vs. baseline</th>
+<th>Output checksum</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Round 1</td>
+<td style="text-align: right;">367.4 s</td>
+<td style="text-align: right;">367.0 - 369.0 s</td>
+<td style="text-align: right;">1.04x</td>
+<td><code>cbfb7906…</code></td>
+</tr>
+<tr>
+<td>+ heap top-k selection</td>
+<td style="text-align: right;">288.7 s</td>
+<td style="text-align: right;">288.4 - 290.0 s</td>
+<td style="text-align: right;">1.33x</td>
+<td><code>cbfb7906…</code> (identical)</td>
+</tr>
+</tbody>
+</table>
+
+A 21% end-to-end reduction from one routine, with byte-identical output
+and an unchanged unit-test pass/fail set. The asymmetry against Round 1
+is instructive: the parser cache addressed a cost that is constant per
+statement, while the selection scan grows with both store size and
+retrieval k, so it compounds exactly where the steady-state workload
+spends its time.
+
+## Round 3: Temporal Neighbor Query
+
+The remaining sorter-related samples pointed at the temporal
+source-anchor expansion in graph retrieval: for every working-memory
+anchor (roughly 15 per signal in the workload), the operation sorted
+*all* same-source memories by `ABS(start_ts - anchor)` to take the
+closest few. The query was rewritten as the union of two index range
+scans on the existing `(source_id, start_ts)` index, the nearest rows
+at-or-below the anchor and the nearest rows above it, re-sorted with the
+original keys over at most twice the requested window. The result set
+and order are unchanged by construction, and the 4,000-signal output
+checksum is again identical.
+
+The measured end-to-end gain was 0.9% (median 286.1 s, range 284.7 -
+287.2 s), well below what the sample attribution suggested. The
+instrumentation that found the query counts statement executions, not
+time per sort, and most of the sorter samples turn out to be distributed
+across the vector index’s internal shadow-table operations rather than
+this one statement. The rewrite is kept because it is strictly better
+(per-anchor cost now scales with the retrieval window rather than with
+per-source store size, which matters for long-lived stores), but it
+illustrates the diminishing-returns regime: past the first large
+hotspot, sample clusters fragment across many small sites.
+
+## Round 4: SIMD Distance Kernels
+
+After Round 3 the single largest remaining cost was the scalar L2
+distance kernel inside the vector index (21.6% of samples): one
+multiply-accumulate per dimension per stored vector per query, compiled
+scalar because C-standard floating-point semantics forbid
+auto-vectorizing the reduction. The vendored `sqlite-vec` ships AVX and
+NEON kernels behind compile-time flags, disabled in our build.
+
+This is the one change in this section that is not bit-exact by
+construction: an 8-lane SIMD reduction reorders the summation, so
+computed distances can differ from the scalar path in the final ulp, and
+a near-exact tie between two candidates could in principle rank
+differently. We therefore treated it as a semantics-relevant change,
+obtained explicit sign-off, and relaxed the acceptance gate for this
+round to tolerance-based comparison. Empirically the relaxation was not
+needed: on the primary workload every output, including the
+floating-point aggregate checksums, was byte-identical to the scalar
+build. The build enables the kernels per architecture (AVX on x86-64,
+NEON on arm64), matching upstream’s release configuration.
+
+Results on the primary workload:
+
+<table style="width:100%;">
+<colgroup>
+<col style="width: 16%" />
+<col style="width: 22%" />
+<col style="width: 22%" />
+<col style="width: 22%" />
+<col style="width: 16%" />
+</colgroup>
+<thead>
+<tr>
+<th>Configuration</th>
+<th style="text-align: right;">Median (5 runs)</th>
+<th style="text-align: right;">Range</th>
+<th style="text-align: right;">vs. baseline</th>
+<th>Output checksum</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Round 3</td>
+<td style="text-align: right;">286.1 s</td>
+<td style="text-align: right;">284.7 - 287.2 s</td>
+<td style="text-align: right;">1.34x</td>
+<td><code>cbfb7906…</code></td>
+</tr>
+<tr>
+<td>+ SIMD distance kernels</td>
+<td style="text-align: right;">233.1 s</td>
+<td style="text-align: right;">231.7 - 233.7 s</td>
+<td style="text-align: right;">1.64x</td>
+<td><code>cbfb7906…</code> (identical)</td>
+</tr>
+</tbody>
+</table>
+
+## Summary
+
+Four rounds of profile-guided, implementation-level optimization reduced
+steady-state processing time by 39% (1.64x) with no change to any
+algorithm, parameter derivation, or stored result:
+
+<table style="width:100%;">
+<colgroup>
+<col style="width: 21%" />
+<col style="width: 21%" />
+<col style="width: 28%" />
+<col style="width: 28%" />
+</colgroup>
+<thead>
+<tr>
+<th>Round</th>
+<th>Change</th>
+<th style="text-align: right;">Median</th>
+<th style="text-align: right;">Cumulative speedup</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>0</td>
+<td>use-after-free fix (correctness precondition)</td>
+<td style="text-align: right;">382.8 s</td>
+<td style="text-align: right;">1.00x</td>
+</tr>
+<tr>
+<td>1</td>
+<td>prepared-statement cache in the store layer</td>
+<td style="text-align: right;">367.4 s</td>
+<td style="text-align: right;">1.04x</td>
+</tr>
+<tr>
+<td>2</td>
+<td>O(n log k) heap top-k selection in the vector index</td>
+<td style="text-align: right;">288.7 s</td>
+<td style="text-align: right;">1.33x</td>
+</tr>
+<tr>
+<td>3</td>
+<td>indexed two-range temporal neighbor query</td>
+<td style="text-align: right;">286.1 s</td>
+<td style="text-align: right;">1.34x</td>
+</tr>
+<tr>
+<td>4</td>
+<td>SIMD (AVX/NEON) distance kernels</td>
+<td style="text-align: right;">233.1 s</td>
+<td style="text-align: right;">1.64x</td>
+</tr>
+</tbody>
+</table>
+
+Every round was gated on byte-identical benchmark output, an unchanged
+unit-test pass/fail set, and unchanged secondary-benchmark output; all
+gates held, including, empirically, for the SIMD round that was only
+required to meet a tolerance gate.
+
+The pass stops here under the stated criterion: no remaining single site
+accounts for 5% of samples and is improvable without touching specified
+behavior. The post-Round-4 profile is dominated by the SQLite bytecode
+interpreter’s dispatch loop (~20%, distributed across all statements),
+bulk memory copies for vector blob traffic (~11%), and the vector
+index’s internal shadow-table record handling (~15% spread over many
+small operations). We note three candidates for future work, in
+increasing order of invasiveness: switching result-row materialization
+away from per-row `std::map<std::string, std::any>` to cut allocation
+churn; binding vector blobs without an intermediate copy; and
+restructuring the vector index’s chunk metadata handling, which would
+modify vendored third-party internals. Beyond these, further gains would
+require algorithm-level decisions, such as bounding the growth of stored
+reconstruction embeddings, which we deliberately leave out of scope.
+
+Two methodological conclusions carry beyond this codebase. First,
+optimize against a steady-state workload: every per-scenario benchmark
+in the suite misattributed costs (SQL parsing, setup I/O) that are
+negligible in a long-lived store, and the one optimization motivated by
+those benchmarks returned only 4% end to end. Second, a deterministic
+output contract is the cheapest verification instrument available: it
+reduced “did the optimization change behavior” to a checksum comparison,
+and it caught a pre-existing memory-safety bug that several thousand
+prior test executions had missed.
 
 # Conclusion and Future Directions
 

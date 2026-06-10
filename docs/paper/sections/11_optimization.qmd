@@ -1,0 +1,104 @@
+# Performance Optimization {#sec-optimization}
+
+This section documents an iterative profile-and-optimize pass over the reference C++ implementation of the algorithms specified in @sec-math through @sec-interrupt. The optimization work is strictly implementation-level: every change preserves the algorithmic semantics, parameter derivations, and numerical contracts of the specification. No knob-derived formula, threshold, capacity bound, or update rule was altered. Correctness is enforced after each change by the full unit and integration test suite and, where the workload is deterministic, by bit-identical benchmark output before and after the change.
+
+## Methodology
+
+**Hardware and toolchain.** All measurements were taken on an AMD Ryzen 9 5950X (16 cores, 32 threads) running Ubuntu 24.04 in an LXC container, compiling with GCC 13 at `-O3 -DNDEBUG`. Profiling builds add `-g -fno-omit-frame-pointer`, which we measured to be performance-neutral within run-to-run variance for these workloads.
+
+**Profiler.** Kernel-assisted sampling (`perf`) is unavailable inside the container, so we use the gperftools CPU profiler (v2.16), a userspace SIGPROF sampler, at its default 100 Hz sampling rate, with `pprof` for attribution. Sampling profiles guide where to look; reported speedups always come from end-to-end wall-clock reruns of the unmodified benchmark binaries, not from profiler estimates.
+
+**Scope.** Optimization targets the operation pipeline, embedding-space computations, and graph algorithms (@sec-core-adaptation through @sec-interrupt). The generative consolidation paths (LLM label extraction and summarization, @sec-implementation) are out of scope: their cost is dominated by model inference, not by the algorithms specified here.
+
+**Workloads.** We profile deterministic, model-free benchmarks from `examples/benchmark` that drive the production `Processor` pipeline with synthetic embeddings, so that profile time concentrates in the memory algorithms themselves rather than in encoder or LLM inference:
+
+| Workload | Exercises |
+|---|---|
+| `live_loop_steady_state_bench` | primary workload: the exact production operation pipeline over one long-lived store; 4,000 deterministic synthetic signals across 16 revisited topics with periodic shallow consolidation |
+| `resurfacing_knob_sweep_bench` | retrieval resurfacing across a grid of (F, S, T) knob settings; setup-heavy (fresh store per scenario), used as a secondary check |
+| `storage_consolidation_e2e_bench` | full consolidation lifecycle across storage-floor and interval grids (long-running; end-to-end check per milestone rather than per round) |
+
+The primary workload was added during this work: auditing the existing benchmark suite showed that no compiling benchmark exercised the production pipeline in steady state. Per-scenario harnesses spend most of their cycles on store setup and schema migration, and the storage sweeps are dominated by their own padding I/O, so optimizing against them would tune the wrong code. `live_loop_steady_state_bench` holds one store open for the whole run, which makes per-signal costs over a growing memory graph the dominant term, and its stdout is a set of deterministic aggregate counters and checksums used as the semantic-equivalence gate below.
+
+Each timing figure is the median of 5 runs on an otherwise idle machine; we report the spread where it exceeds 2%.
+
+**Procedure.** Each round proceeds as: (1) profile all workloads; (2) rank inclusive and self-time hotspots; (3) apply implementation-level optimizations to the top-ranked sites (memory layout, allocation reuse, redundant-computation elimination, algorithm-neutral data-structure substitutions); (4) verify with the test suite and deterministic-output comparison; (5) re-measure. The loop terminates when a full round yields less than roughly 5% end-to-end improvement on every workload, or when the remaining hotspots cannot be improved without changing specified algorithm behavior.
+
+## Round 0: A Correctness Precondition
+
+Constructing the steady-state workload surfaced a latent memory-safety defect before any optimization landed. The graph-neighborhood query used by reconsolidation (`QueryGraphNeighbors`) implemented its breadth-first expansion by holding a structured-binding *reference* into the frontier vector while appending newly discovered neighbors to the same vector. Once the frontier outgrew its capacity, the append reallocated the buffer and the held reference dangled; subsequent reads of the current node id were use-after-free reads. AddressSanitizer confirmed the defect on the unmodified tree, and at 4,000 steady-state signals it aborted roughly half of all runs (a corrupted reinforcement weight eventually violates a NOT NULL constraint) and made even "passing" runs non-reproducible.
+
+The defect had been invisible to the existing test and benchmark suite because no harness both ran the reconsolidation operation and kept a store alive long enough for the frontier to reallocate. The fix copies the frontier entry by value instead of by reference; it changes no algorithm semantics, only removes undefined behavior. After the fix the workload is bit-reproducible across runs (identical output checksums), under AddressSanitizer and in optimized builds alike. All speedups reported below are measured against the *fixed* baseline, so the bug repair is not counted as an optimization gain.
+
+This is a methodological point worth stating explicitly: a profiling workload with a deterministic output contract is also a correctness instrument. The same property that lets us assert "the optimization changed nothing" (byte-identical output) is what exposed that the unoptimized system was not even equal to itself.
+
+## Baseline
+
+After the Round 0 fix, the primary workload (4,000 signals, knobs at 0.5/0.5/0.5) completes in a median 382.8 s over 5 runs (spread 381.0 to 392.4 s), about 96 ms per signal at the end-of-run store size of 771 memories. All 5 runs produce byte-identical output, which is the reference checksum for every subsequent change.
+
+## Round 1: Prepared-Statement Caching in the Store Layer
+
+Initial profiles of the per-scenario benchmarks attributed 25 to 30% of CPU samples to SQLite's SQL parser (`sqlite3RunParser`, tokenizer, and parse-action functions): the store layer prepared every statement from SQL text on each `Execute` call and finalized it immediately after, so the same statement strings were re-parsed thousands of times per run.
+
+The change adds a per-connection prepared-statement cache to `SQLiteStore`, keyed by exact SQL text. On reuse the statement is reset and its bindings cleared, which preserves fresh-prepare semantics (unbound parameters are NULL in both cases); statements are finalized on a step failure (so the next execution re-prepares from scratch) and when the store closes. The cache is FIFO-bounded at 256 entries so one-shot statements such as migration DDL and address-derived savepoint names age out instead of accumulating.
+
+Results on the primary workload:
+
+| Configuration | Median (5 runs) | Range | Output checksum |
+|---|---:|---:|---|
+| Round 0 baseline | 382.8 s | 381.0 - 392.4 s | `cbfb7906…` |
+| + statement cache | 367.4 s | 367.0 - 369.0 s | `cbfb7906…` (identical) |
+
+The end-to-end gain is 4.2%. It is much smaller than the parse share seen in the per-scenario benchmarks because those run against freshly created stores where parsing dominates a tiny data volume; in steady state, query *execution* over a growing graph dominates and parsing is a thin slice. This is exactly the kind of misattribution the steady-state workload exists to prevent. The secondary benchmarks remain byte-identical to their pre-change outputs, and the unit-test suite reports exactly the same pass/fail set as the unmodified tree on the same machine (the few failing cases are environment-dependent: locally absent encoder/summarizer models and expectations not yet updated for a pending working-memory capacity change).
+
+## Round 2: kNN Top-k Selection in the Vector Index
+
+With statement parsing reduced, re-profiling the primary workload against properly symbolized binaries placed the dominant cost inside the vendored `sqlite-vec` extension that backs the `embeddings` virtual table. Roughly 22% of all CPU samples landed in `min_idx`, the routine that selects the k nearest candidates from a chunk's distance array, and a further 11% in the scalar L2 distance kernel itself. The `min_idx` implementation was a repeated selection scan: for each of the k outputs it rescanned all n chunk distances with two bitmap probes per element, O(k·n) with a heavy constant.
+
+The replacement is a single-pass bounded max-heap selection, O(n log k). Care is needed to remain bit-identical: the original scan compared with `<=` over ascending indices, so among equal distances the highest index won each pass. The heap comparator reproduces that order exactly (ascending distance, ties broken by descending index), and the final heap-sort emits the same sequence the repeated scans produced. The change touches no SQL surface and no caller; for non-NaN distances the selected set, order, and reported distances are identical by construction.
+
+Results on the primary workload:
+
+| Configuration | Median (5 runs) | Range | vs. baseline | Output checksum |
+|---|---:|---:|---:|---|
+| Round 1 | 367.4 s | 367.0 - 369.0 s | 1.04x | `cbfb7906…` |
+| + heap top-k selection | 288.7 s | 288.4 - 290.0 s | 1.33x | `cbfb7906…` (identical) |
+
+A 21% end-to-end reduction from one routine, with byte-identical output and an unchanged unit-test pass/fail set. The asymmetry against Round 1 is instructive: the parser cache addressed a cost that is constant per statement, while the selection scan grows with both store size and retrieval k, so it compounds exactly where the steady-state workload spends its time.
+
+## Round 3: Temporal Neighbor Query
+
+The remaining sorter-related samples pointed at the temporal source-anchor expansion in graph retrieval: for every working-memory anchor (roughly 15 per signal in the workload), the operation sorted *all* same-source memories by `ABS(start_ts - anchor)` to take the closest few. The query was rewritten as the union of two index range scans on the existing `(source_id, start_ts)` index, the nearest rows at-or-below the anchor and the nearest rows above it, re-sorted with the original keys over at most twice the requested window. The result set and order are unchanged by construction, and the 4,000-signal output checksum is again identical.
+
+The measured end-to-end gain was 0.9% (median 286.1 s, range 284.7 - 287.2 s), well below what the sample attribution suggested. The instrumentation that found the query counts statement executions, not time per sort, and most of the sorter samples turn out to be distributed across the vector index's internal shadow-table operations rather than this one statement. The rewrite is kept because it is strictly better (per-anchor cost now scales with the retrieval window rather than with per-source store size, which matters for long-lived stores), but it illustrates the diminishing-returns regime: past the first large hotspot, sample clusters fragment across many small sites.
+
+## Round 4: SIMD Distance Kernels
+
+After Round 3 the single largest remaining cost was the scalar L2 distance kernel inside the vector index (21.6% of samples): one multiply-accumulate per dimension per stored vector per query, compiled scalar because C-standard floating-point semantics forbid auto-vectorizing the reduction. The vendored `sqlite-vec` ships AVX and NEON kernels behind compile-time flags, disabled in our build.
+
+This is the one change in this section that is not bit-exact by construction: an 8-lane SIMD reduction reorders the summation, so computed distances can differ from the scalar path in the final ulp, and a near-exact tie between two candidates could in principle rank differently. We therefore treated it as a semantics-relevant change, obtained explicit sign-off, and relaxed the acceptance gate for this round to tolerance-based comparison. Empirically the relaxation was not needed: on the primary workload every output, including the floating-point aggregate checksums, was byte-identical to the scalar build. The build enables the kernels per architecture (AVX on x86-64, NEON on arm64), matching upstream's release configuration.
+
+Results on the primary workload:
+
+| Configuration | Median (5 runs) | Range | vs. baseline | Output checksum |
+|---|---:|---:|---:|---|
+| Round 3 | 286.1 s | 284.7 - 287.2 s | 1.34x | `cbfb7906…` |
+| + SIMD distance kernels | 233.1 s | 231.7 - 233.7 s | 1.64x | `cbfb7906…` (identical) |
+
+## Summary
+
+Four rounds of profile-guided, implementation-level optimization reduced steady-state processing time by 39% (1.64x) with no change to any algorithm, parameter derivation, or stored result:
+
+| Round | Change | Median | Cumulative speedup |
+|---|---|---:|---:|
+| 0 | use-after-free fix (correctness precondition) | 382.8 s | 1.00x |
+| 1 | prepared-statement cache in the store layer | 367.4 s | 1.04x |
+| 2 | O(n log k) heap top-k selection in the vector index | 288.7 s | 1.33x |
+| 3 | indexed two-range temporal neighbor query | 286.1 s | 1.34x |
+| 4 | SIMD (AVX/NEON) distance kernels | 233.1 s | 1.64x |
+
+Every round was gated on byte-identical benchmark output, an unchanged unit-test pass/fail set, and unchanged secondary-benchmark output; all gates held, including, empirically, for the SIMD round that was only required to meet a tolerance gate.
+
+The pass stops here under the stated criterion: no remaining single site accounts for 5% of samples and is improvable without touching specified behavior. The post-Round-4 profile is dominated by the SQLite bytecode interpreter's dispatch loop (~20%, distributed across all statements), bulk memory copies for vector blob traffic (~11%), and the vector index's internal shadow-table record handling (~15% spread over many small operations). We note three candidates for future work, in increasing order of invasiveness: switching result-row materialization away from per-row `std::map<std::string, std::any>` to cut allocation churn; binding vector blobs without an intermediate copy; and restructuring the vector index's chunk metadata handling, which would modify vendored third-party internals. Beyond these, further gains would require algorithm-level decisions, such as bounding the growth of stored reconstruction embeddings, which we deliberately leave out of scope.
+
+Two methodological conclusions carry beyond this codebase. First, optimize against a steady-state workload: every per-scenario benchmark in the suite misattributed costs (SQL parsing, setup I/O) that are negligible in a long-lived store, and the one optimization motivated by those benchmarks returned only 4% end to end. Second, a deterministic output contract is the cheapest verification instrument available: it reduced "did the optimization change behavior" to a checksum comparison, and it caught a pre-existing memory-safety bug that several thousand prior test executions had missed.
