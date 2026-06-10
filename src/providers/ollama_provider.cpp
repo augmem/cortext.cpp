@@ -245,6 +245,10 @@ OllamaProvider::OllamaProvider (std::string authority, std::string model)
   impl_->capabilities.image = true;
   impl_->capabilities.audio = true;
   impl_->capabilities.constraints = ConstraintSupport::ServerSchema;
+  // Socket-level timeouts surface as prompt failures (fail fast), and
+  // seeded generation at temperature 0 reproduces on a fixed server build.
+  impl_->capabilities.honors_deadline = true;
+  impl_->capabilities.deterministic = true;
 
   impl_->identity.scheme = "ollama";
   impl_->identity.endpoint

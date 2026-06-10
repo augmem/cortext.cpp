@@ -26,11 +26,12 @@ enum class ConstraintSupport
   ServerSchema    ///< Server-side schema enforcement (e.g. Ollama `format`).
 };
 
-/// @brief Static capabilities a provider declares at resolve time.
+/// @brief Static capabilities an implementation declares.
 ///
-/// The factory verifies fitness here instead of discovering failures
-/// mid-run (e.g. an encoder asked to caption an image, or an extractor
-/// without any constrained-decoding path).
+/// This is the implementation's half of the contract; the consumer's half
+/// is InferenceContract. Verified by VerifyContract for every path an
+/// implementation can arrive through (registry resolution and direct
+/// injection alike) so failures surface at composition time, not mid-run.
 struct Capabilities
 {
   bool text = false;
@@ -39,7 +40,41 @@ struct Capabilities
   ConstraintSupport constraints = ConstraintSupport::None;
   /// Embedding output dimensions (empty for generation providers).
   std::vector<std::size_t> embedding_dims;
+  /// Honors GenerateParams::timeout_ms by failing fast (vs best-effort).
+  bool honors_deadline = false;
+  /// Reproducible output for identical (request, seed) at temperature 0.
+  bool deterministic = false;
 };
+
+/// @brief The consumer's half of the contract: what a role requires of any
+/// implementation, independent of transport. The pipeline cares only that
+/// these are met — in-process engine, local server, or remote API is an
+/// implementation detail.
+struct InferenceContract
+{
+  bool needs_text = true;
+  bool needs_image = false;
+  bool needs_audio = false;
+  /// Minimum acceptable constraint mechanism (None accepts anything).
+  ConstraintSupport min_constraints = ConstraintSupport::None;
+  /// Required embedding dimension (0 for generation roles).
+  std::size_t embedding_dim = 0;
+  /// Caller will set per-request deadlines and needs fail-fast behavior.
+  bool needs_deadline = false;
+  /// Caller replays/evaluates and needs reproducible output.
+  bool needs_determinism = false;
+};
+
+/// @brief The default contract each pipeline role demands.
+InferenceContract ContractForRole (Role role);
+
+class InferenceProvider;
+
+/// @brief Check an implementation's declared capabilities against a
+/// contract. Returns false and fills error_out with the first violation.
+bool VerifyContract (const Capabilities &capabilities,
+                     const InferenceContract &contract,
+                     std::string *error_out);
 
 /// @brief Generation parameters shared across transports.
 struct GenerateParams

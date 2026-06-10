@@ -223,6 +223,7 @@ add_library(cortext
     # Inference provider registry and legacy-interface adapters
     src/providers/registry.cpp
     src/providers/adapters.cpp
+    src/providers/contract.cpp
     src/providers/ollama_provider.cpp
     # JSON schema parser for constrained decoding
     src/generator/json_decoder.cpp

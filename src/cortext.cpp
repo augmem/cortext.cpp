@@ -1203,6 +1203,21 @@ struct Cortext::Impl
     auto text_encoder = internal::CreatePreferredTextEncoder (models_dir);
     encoder = std::move (text_encoder.encoder);
 
+    // Injected dependencies are contract-checked at composition time like
+    // registry-resolved providers; the check available at this layer is
+    // liveness (the capability half is verified when the adapter is built).
+    if (inference.summarizer != nullptr
+        && !inference.summarizer->IsAvailable ())
+      {
+        throw std::invalid_argument (
+            "injected Summarizer reports unavailable");
+      }
+    if (inference.extractor != nullptr
+        && !inference.extractor->IsAvailable ())
+      {
+        throw std::invalid_argument (
+            "injected Extractor reports unavailable");
+      }
     if (inference.summarizer != nullptr && inference.extractor != nullptr)
       {
         deep_llm_backend_name = "injected";
