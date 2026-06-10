@@ -435,51 +435,43 @@ TryCreateDeepLlmSelection (const std::filesystem::path &models_dir,
 namespace
 {
 
-// Replace one role in an already-built selection with a provider resolved
-// from a CORTEXT_SUMMARIZER / CORTEXT_EXTRACTOR uri. Roles without an env
-// override keep the legacy in-process implementation, so mixed setups
-// (e.g. remote summarizer + local constrained extractor) compose naturally.
-void
-ApplyProviderOverrides (DeepLlmSelection &selection)
+std::shared_ptr<providers::InferenceProvider>
+ResolveRoleProviderOrThrow (providers::Role role, const std::string &uri)
 {
-  using providers::Role;
-
-  if (auto uri = providers::RoleUriFromEnvironment (Role::Summarizer))
+  std::string error;
+  auto provider = providers::ResolveProvider (uri, role, &error);
+  if (provider == nullptr)
     {
-      std::string error;
-      auto provider = providers::ResolveProvider (*uri, Role::Summarizer,
-                                                  &error);
-      if (provider == nullptr)
-        {
-          throw std::runtime_error ("CORTEXT_SUMMARIZER=" + *uri
-                                    + " could not be resolved: " + error);
-        }
-      selection.summarizer_model_path
-          = provider->Identity ().endpoint;
-      selection.backend_name += "+summarizer:"
-                                + provider->Identity ().scheme;
-      selection.summarizer = std::make_unique<providers::ProviderSummarizer> (
-          std::shared_ptr<providers::InferenceProvider> (
-              std::move (provider)));
+      const char *var = role == providers::Role::Summarizer
+                            ? "CORTEXT_SUMMARIZER"
+                            : "CORTEXT_EXTRACTOR";
+      throw std::runtime_error (std::string (var) + "=" + uri
+                                + " could not be resolved: " + error);
     }
+  return std::shared_ptr<providers::InferenceProvider> (std::move (provider));
+}
 
-  if (auto uri = providers::RoleUriFromEnvironment (Role::Extractor))
-    {
-      std::string error;
-      auto provider = providers::ResolveProvider (*uri, Role::Extractor,
-                                                  &error);
-      if (provider == nullptr)
-        {
-          throw std::runtime_error ("CORTEXT_EXTRACTOR=" + *uri
-                                    + " could not be resolved: " + error);
-        }
-      selection.extractor_model_path = provider->Identity ().endpoint;
-      selection.backend_name += "+extractor:"
-                                + provider->Identity ().scheme;
-      selection.extractor = std::make_unique<providers::ProviderExtractor> (
-          std::shared_ptr<providers::InferenceProvider> (
-              std::move (provider)));
-    }
+void
+InstallSummarizerProvider (DeepLlmSelection &selection,
+                           const std::string &uri)
+{
+  auto provider
+      = ResolveRoleProviderOrThrow (providers::Role::Summarizer, uri);
+  selection.summarizer_model_path = provider->Identity ().endpoint;
+  selection.backend_name += "+summarizer:" + provider->Identity ().scheme;
+  selection.summarizer
+      = std::make_unique<providers::ProviderSummarizer> (std::move (provider));
+}
+
+void
+InstallExtractorProvider (DeepLlmSelection &selection, const std::string &uri)
+{
+  auto provider
+      = ResolveRoleProviderOrThrow (providers::Role::Extractor, uri);
+  selection.extractor_model_path = provider->Identity ().endpoint;
+  selection.backend_name += "+extractor:" + provider->Identity ().scheme;
+  selection.extractor
+      = std::make_unique<providers::ProviderExtractor> (std::move (provider));
 }
 
 } // namespace
@@ -487,6 +479,24 @@ ApplyProviderOverrides (DeepLlmSelection &selection)
 DeepLlmSelection
 CreateDeepLlmSelection (const std::filesystem::path &models_dir)
 {
+  using providers::Role;
+  const auto summarizer_uri = providers::RoleUriFromEnvironment (
+      Role::Summarizer);
+  const auto extractor_uri = providers::RoleUriFromEnvironment (
+      Role::Extractor);
+
+  // Fully provider-specified setups are true replacement DI: build the
+  // selection entirely from providers without touching local model
+  // discovery, so remote-only deployments need no local weights at all.
+  if (summarizer_uri && extractor_uri)
+    {
+      DeepLlmSelection selection;
+      selection.backend_name = "providers";
+      InstallSummarizerProvider (selection, *summarizer_uri);
+      InstallExtractorProvider (selection, *extractor_uri);
+      return selection;
+    }
+
   const DeepLlmBackend backend = ResolveDeepLlmBackendOverride ();
   std::string error;
   auto selection = TryCreateDeepLlmSelection (models_dir, backend, &error);
@@ -496,7 +506,17 @@ CreateDeepLlmSelection (const std::filesystem::path &models_dir)
                                 + DescribeDeepLlmBackend (backend) + ": "
                                 + error);
     }
-  ApplyProviderOverrides (*selection);
+  // Partial override: the local factory supplies the role without an env
+  // uri, so mixed setups (e.g. remote summarizer + local constrained
+  // extractor) compose naturally.
+  if (summarizer_uri)
+    {
+      InstallSummarizerProvider (*selection, *summarizer_uri);
+    }
+  if (extractor_uri)
+    {
+      InstallExtractorProvider (*selection, *extractor_uri);
+    }
   return std::move (*selection);
 }
 
