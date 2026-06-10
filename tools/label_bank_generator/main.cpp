@@ -5,6 +5,7 @@
 #include <nlohmann/json.hpp>
 
 #include <chrono>
+#include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -129,6 +130,33 @@ main (int argc, char **argv)
       std::vector<float> embedding;
       encoder.EncodeText (label, embedding);
       if (embedding.empty ())
+        {
+          continue;
+        }
+      // Match the runtime's label space (process_extraction_results.cpp
+      // EncodeLabelEmbedding): Matryoshka-truncate to the 256-d working dim
+      // and L2-renormalize. Full-dim encoders (AIST-87M emits 1280) would
+      // otherwise produce rows the sqlite builder and runtime reject.
+      constexpr size_t kLabelBankDim = 256;
+      if (embedding.size () > kLabelBankDim)
+        {
+          embedding.resize (kLabelBankDim);
+          double norm_sq = 0.0;
+          for (float value : embedding)
+            {
+              norm_sq += static_cast<double> (value) * value;
+            }
+          const double norm = std::sqrt (norm_sq);
+          if (norm > 1e-12 && std::isfinite (norm))
+            {
+              const float inv_norm = static_cast<float> (1.0 / norm);
+              for (float &value : embedding)
+                {
+                  value *= inv_norm;
+                }
+            }
+        }
+      else if (embedding.size () != kLabelBankDim)
         {
           continue;
         }
