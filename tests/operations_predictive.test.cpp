@@ -148,7 +148,7 @@ TEST_CASE ("Alg22 boosts predicted-aligned candidates",
   auto seed = std::make_unique<SeedEmbeddingsOp> (retrieved);
   auto setup = std::make_unique<SetupPredictiveInputsOp> (recent, retrieved);
   auto apply = std::make_unique<ApplyPredictivePreActivation> ();
-  auto pipeline = std::make_unique<OperationSet> (
+  auto pipeline = std::make_unique<DynamicOperationSet> (
       std::move (seed), std::move (setup), std::move (apply));
 
   SignalProcessor processor (cfg, store, std::move (pipeline));
@@ -210,7 +210,7 @@ TEST_CASE ("Alg22 respects prediction confidence threshold",
   auto seed = std::make_unique<SeedEmbeddingsOp> (retrieved);
   auto setup = std::make_unique<SetupPredictiveInputsOp> (recent, retrieved);
   auto apply = std::make_unique<ApplyPredictivePreActivation> ();
-  auto pipeline = std::make_unique<OperationSet> (
+  auto pipeline = std::make_unique<DynamicOperationSet> (
       std::move (seed), std::move (setup), std::move (apply));
 
   SignalProcessor processor (cfg, store, std::move (pipeline));
@@ -271,7 +271,7 @@ TEST_CASE ("Prediction horizon increases with Focus",
     auto seed = std::make_unique<SeedEmbeddingsOp> (retrieved);
     auto setup = std::make_unique<SetupPredictiveInputsOp> (recent, retrieved);
     auto apply = std::make_unique<ApplyPredictivePreActivation> ();
-    auto pipeline = std::make_unique<OperationSet> (
+    auto pipeline = std::make_unique<DynamicOperationSet> (
         std::move (seed), std::move (setup), std::move (apply));
 
     SignalProcessor processor (cfg, store, std::move (pipeline));
@@ -316,7 +316,7 @@ TEST_CASE ("Prediction horizon increases with Focus",
     auto seed = std::make_unique<SeedEmbeddingsOp> (retrieved);
     auto setup = std::make_unique<SetupPredictiveInputsOp> (recent, retrieved);
     auto apply = std::make_unique<ApplyPredictivePreActivation> ();
-    auto pipeline = std::make_unique<OperationSet> (
+    auto pipeline = std::make_unique<DynamicOperationSet> (
         std::move (seed), std::move (setup), std::move (apply));
 
     SignalProcessor processor (cfg, store, std::move (pipeline));
@@ -355,7 +355,7 @@ TEST_CASE ("Predictive pre-activation decays even without new aligned retrieval"
   cfg.stability = 0.5;
 
   auto pipeline
-      = std::make_unique<OperationSet> (std::make_unique<ApplyPredictivePreActivation> ());
+      = std::make_unique<DynamicOperationSet> (std::make_unique<ApplyPredictivePreActivation> ());
   SignalProcessor processor (cfg, store, std::move (pipeline));
   processor.Process (MakeSignal (aligned, /*ts=*/999));
   processor.Flush ();

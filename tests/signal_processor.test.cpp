@@ -48,7 +48,7 @@ TEST_CASE ("SignalProcessor processes and flushes to SQLite", "[processor]")
 
   cortext::testing::RequireEncoder (cfg);
   auto pipeline
-      = std::make_unique<OperationSet> (std::make_unique<InsertOp> ());
+      = std::make_unique<DynamicOperationSet> (std::make_unique<InsertOp> ());
   SignalProcessor proc (cfg, store, std::move (pipeline));
 
   Signal s;
@@ -73,7 +73,7 @@ TEST_CASE ("SignalProcessor executes pipeline in order", "[processor][order]")
 
   cortext::testing::RequireEncoder (cfg);
   std::vector<int> order;
-  auto pipeline = std::make_unique<OperationSet> (
+  auto pipeline = std::make_unique<DynamicOperationSet> (
       std::make_unique<RecordOrderOp> (&order, 1),
       std::make_unique<RecordOrderOp> (&order, 2),
       std::make_unique<RecordOrderOp> (&order, 3));

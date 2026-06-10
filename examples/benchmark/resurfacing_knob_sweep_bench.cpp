@@ -272,7 +272,7 @@ RunRetrieval (const Scenario &scenario, const KnobPoint &knobs,
   BenchEncoder encoder;
   cfg.encoder = &encoder;
 
-  auto ops = std::make_unique<cortext::OperationSet> (
+  auto ops = std::make_unique<cortext::DynamicOperationSet> (
       std::make_unique<ForceRetrievalGateOp> (
           cortext::ProcessorContext::MetacognitiveMode::UnknownCaution, 0.0),
       std::make_unique<cortext::operations::GraphAugmentedRetrieveCandidates> ());

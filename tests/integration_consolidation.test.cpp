@@ -397,7 +397,7 @@ TEST_CASE ("Consolidation pipeline triggers on explicit consolidation signal",
   auto setup = std::make_unique<SetupConsolidationTriggerOp> (now_ts, cfg.stability);
   auto eval = std::make_unique<EvaluateConsolidation> ();
   auto assert_op = std::make_unique<AssertConsolidationStartedOp> ();
-  auto ops = std::make_unique<OperationSet> (std::move (setup),
+  auto ops = std::make_unique<DynamicOperationSet> (std::move (setup),
                                               std::move (eval),
                                               std::move (assert_op));
 
@@ -423,7 +423,7 @@ TEST_CASE ("Clustering groups similar embeddings",
   cfg.stability = 0.5;
 
   // Initialize schema
-  auto init_ops = std::make_unique<OperationSet> ();
+  auto init_ops = std::make_unique<DynamicOperationSet> ();
   SignalProcessor init_processor (cfg, store, std::move (init_ops));
   init_processor.Process (MakeSignal (1));
   init_processor.Flush ();
@@ -472,7 +472,7 @@ TEST_CASE ("Summarization creates summary records",
   cfg.stability = 0.5;
 
   // Initialize schema
-  auto init_ops = std::make_unique<OperationSet> ();
+  auto init_ops = std::make_unique<DynamicOperationSet> ();
   SignalProcessor init_processor (cfg, store, std::move (init_ops));
   init_processor.Process (MakeSignal (1));
   init_processor.Flush ();
@@ -532,7 +532,7 @@ TEST_CASE ("Summarization preserves raw evidence text before prompting",
 
   CapturingSummarizer summarizer;
 
-  auto init_ops = std::make_unique<OperationSet> ();
+  auto init_ops = std::make_unique<DynamicOperationSet> ();
   SignalProcessor init_processor (cfg, store, std::move (init_ops));
   init_processor.Process (MakeSignal (1));
   init_processor.Flush ();
@@ -609,7 +609,7 @@ TEST_CASE ("Summarization source blob ablation keeps text evidence",
 
   CapturingSummarizer summarizer;
 
-  auto init_ops = std::make_unique<OperationSet> ();
+  auto init_ops = std::make_unique<DynamicOperationSet> ();
   SignalProcessor init_processor (cfg, store, std::move (init_ops));
   init_processor.Process (MakeSignal (1));
   init_processor.Flush ();
@@ -679,7 +679,7 @@ TEST_CASE ("Summarization passes STM graph labels to relabeler as candidates",
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;
 
-  auto init_ops = std::make_unique<OperationSet> ();
+  auto init_ops = std::make_unique<DynamicOperationSet> ();
   SignalProcessor init_processor (cfg, store, std::move (init_ops));
   init_processor.Process (MakeSignal (1));
   init_processor.Flush ();
@@ -775,7 +775,7 @@ TEST_CASE ("Summarization can disable STM graph label handoff natively",
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;
 
-  auto init_ops = std::make_unique<OperationSet> ();
+  auto init_ops = std::make_unique<DynamicOperationSet> ();
   SignalProcessor init_processor (cfg, store, std::move (init_ops));
   init_processor.Process (MakeSignal (1));
   init_processor.Flush ();
@@ -850,7 +850,7 @@ TEST_CASE ("Summarization creates retrieval summaries without storage pressure",
 
   CapturingSummarizer summarizer;
 
-  auto init_ops = std::make_unique<OperationSet> ();
+  auto init_ops = std::make_unique<DynamicOperationSet> ();
   SignalProcessor init_processor (cfg, store, std::move (init_ops));
   init_processor.Process (MakeSignal (1));
   init_processor.Flush ();
@@ -922,7 +922,7 @@ TEST_CASE ("Summarization links protected fact evidence under pressure",
 
   CapturingSummarizer summarizer;
 
-  auto init_ops = std::make_unique<OperationSet> ();
+  auto init_ops = std::make_unique<DynamicOperationSet> ();
   SignalProcessor init_processor (cfg, store, std::move (init_ops));
   init_processor.Process (MakeSignal (1));
   init_processor.Flush ();
@@ -1023,7 +1023,7 @@ TEST_CASE ("Graph build creates co_occurs edges",
   cfg.stability = 0.5;
 
   // Initialize schema
-  auto init_ops = std::make_unique<OperationSet> ();
+  auto init_ops = std::make_unique<DynamicOperationSet> ();
   SignalProcessor init_processor (cfg, store, std::move (init_ops));
   init_processor.Process (MakeSignal (1));
   init_processor.Flush ();
@@ -1067,7 +1067,7 @@ TEST_CASE ("Graph build creates label nodes and edges",
   cfg.stability = 0.5;
 
   // Initialize schema
-  auto init_ops = std::make_unique<OperationSet> ();
+  auto init_ops = std::make_unique<DynamicOperationSet> ();
   SignalProcessor init_processor (cfg, store, std::move (init_ops));
   init_processor.Process (MakeSignal (1));
   init_processor.Flush ();
@@ -1402,7 +1402,7 @@ TEST_CASE ("Uncertainty feeds focus update in the pipeline",
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;
 
-  auto pipeline = std::make_unique<OperationSet> (
+  auto pipeline = std::make_unique<DynamicOperationSet> (
       std::make_unique<InitializeFocusPriors> (),
       std::make_unique<UpdateRecentContext> (),
       std::make_unique<UpdateEmbeddingPredictionError> (),

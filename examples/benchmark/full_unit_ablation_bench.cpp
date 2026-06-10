@@ -738,7 +738,7 @@ RunSourceConfidenceScenario (const SingletonBundle &bundle)
   cfg.reinforcement_enabled = bundle.reinforcement_edges;
   cfg.sequential_edges_enabled = bundle.sequential_edges;
   cortext::operations::retrieval_debug::ClearLastRankedCandidates ();
-  auto ops = std::make_unique<cortext::OperationSet> (
+  auto ops = std::make_unique<cortext::DynamicOperationSet> (
       std::make_unique<ForceRetrievalGateOp> (),
       std::make_unique<cortext::operations::GraphAugmentedRetrieveCandidates> ());
   cortext::SignalProcessor processor (cfg, store, std::move (ops));
@@ -770,7 +770,7 @@ RunPredictiveScenario (const SingletonBundle &bundle)
   cfg.reinforcement_enabled = bundle.reinforcement_edges;
   cfg.sequential_edges_enabled = bundle.sequential_edges;
   cortext::operations::retrieval_debug::ClearLastRankedCandidates ();
-  auto ops = std::make_unique<cortext::OperationSet> (
+  auto ops = std::make_unique<cortext::DynamicOperationSet> (
       std::make_unique<ForceRetrievalGateOp> (),
       std::make_unique<cortext::operations::GraphAugmentedRetrieveCandidates> ());
   cortext::SignalProcessor processor (cfg, store, std::move (ops));
@@ -803,7 +803,7 @@ RunConstructiveRecallScenario (const SingletonBundle &bundle)
   cfg.reinforcement_enabled = bundle.reinforcement_edges;
   cfg.sequential_edges_enabled = bundle.sequential_edges;
   cortext::operations::retrieval_debug::ClearLastRankedCandidates ();
-  auto ops = std::make_unique<cortext::OperationSet> (
+  auto ops = std::make_unique<cortext::DynamicOperationSet> (
       std::make_unique<ForceRetrievalGateOp> (),
       std::make_unique<cortext::operations::GraphAugmentedRetrieveCandidates> ());
   cortext::SignalProcessor processor (cfg, store, std::move (ops));
@@ -835,7 +835,7 @@ RunProceduralScenario (const SingletonBundle &bundle)
   cfg.reinforcement_enabled = bundle.reinforcement_edges;
   cfg.sequential_edges_enabled = bundle.sequential_edges;
   cortext::operations::retrieval_debug::ClearLastRankedCandidates ();
-  auto ops = std::make_unique<cortext::OperationSet> (
+  auto ops = std::make_unique<cortext::DynamicOperationSet> (
       std::make_unique<ForceRetrievalGateOp> (),
       std::make_unique<SeedProceduralStoreOp> (500LL, 1.0),
       std::make_unique<cortext::operations::GraphAugmentedRetrieveCandidates> ());
@@ -938,7 +938,7 @@ RunSequentialScenario (const SingletonBundle &bundle)
   cfg.procedural_enabled = bundle.procedural_proactive;
   cfg.reinforcement_enabled = bundle.reinforcement_edges;
   cfg.sequential_edges_enabled = bundle.sequential_edges;
-  auto ops = std::make_unique<cortext::OperationSet> (
+  auto ops = std::make_unique<cortext::DynamicOperationSet> (
       std::make_unique<SetConsolidationStartOp> (),
       std::make_unique<cortext::operations::BuildGraphFromConsolidation> ());
   cortext::SignalProcessor processor (cfg, store, std::move (ops));
@@ -994,7 +994,7 @@ RunTotRetrieval (const MetacogBundle &bundle, double confidence)
       { 3LL, 4LL });
 
   auto cfg = BaseConfig (0.5, 0.5, 1.0);
-  auto ops = std::make_unique<cortext::OperationSet> (
+  auto ops = std::make_unique<cortext::DynamicOperationSet> (
       std::make_unique<ForceRetrievalGateOp> (
           cortext::ProcessorContext::MetacognitiveMode::TotRecovery,
           confidence),
@@ -1026,7 +1026,7 @@ RunMetacogUnknownScenario (const MetacogBundle &bundle)
                   { 77LL });
 
   auto cfg = BaseConfig (0.5, 0.5, 0.5);
-  auto ops = std::make_unique<cortext::OperationSet> (
+  auto ops = std::make_unique<cortext::DynamicOperationSet> (
       std::make_unique<ForceRetrievalGateOp> (
           cortext::ProcessorContext::MetacognitiveMode::UnknownCaution, 0.0),
       std::make_unique<cortext::operations::GraphAugmentedRetrieveCandidates> ());
@@ -1125,7 +1125,7 @@ RunAffectRetrievalScenario (const AffectBundle &bundle)
   cfg.affect_interrupt = bundle.interrupt;
   cfg.affect_retrieval = bundle.retrieval;
   cortext::operations::retrieval_debug::ClearLastRankedCandidates ();
-  auto ops = std::make_unique<cortext::OperationSet> (
+  auto ops = std::make_unique<cortext::DynamicOperationSet> (
       std::make_unique<SetAffectInputsOp> (1.0, 1.0, 1.0),
       std::make_unique<ForceRetrievalGateOp> (),
       std::make_unique<cortext::operations::GraphAugmentedRetrieveCandidates> ());
@@ -1159,7 +1159,7 @@ RunFlashbulbCase (const FlashbulbBundle &bundle, double emotion, double arousal,
       { emotion, arousal, 101LL });
 
   auto cfg = BaseConfig (0.4, 0.8, 0.5);
-  auto ops = std::make_unique<cortext::OperationSet> (
+  auto ops = std::make_unique<cortext::DynamicOperationSet> (
       std::make_unique<SetupStoredEmotionOp> (101LL, history, rate_ewma),
       std::make_unique<cortext::operations::ApplyEmotionalConsolidation> ());
   cortext::SignalProcessor processor (cfg, store, std::move (ops));
@@ -1245,7 +1245,7 @@ RunNeuromodCompetitionScenario (const NeuromodBundle &bundle)
   };
 
   auto cfg = BaseConfig (1.0, 1.0, 0.0);
-  auto pipeline = std::make_unique<cortext::OperationSet> (
+  auto pipeline = std::make_unique<cortext::DynamicOperationSet> (
       std::make_unique<SeedCompetitionMemoriesOp> (retrieved),
       std::make_unique<SetupCompetitionInputsOp> (ctx, retrieved),
       std::make_unique<SetNeuromodOp> (0.0, 1.0),
@@ -1273,7 +1273,7 @@ RunNeuromodReconScenario (const NeuromodBundle &bundle)
   SeedMemory (*store, 9LL, 9LL, mem);
 
   auto cfg = BaseConfig (0.5, 1.0, 0.0);
-  auto pipeline = std::make_unique<cortext::OperationSet> (
+  auto pipeline = std::make_unique<cortext::DynamicOperationSet> (
       std::make_unique<SetupReconInputsOp> (
           current, std::unordered_map<long long, Eigen::VectorXf>{ { 9LL, mem } }),
       std::make_unique<SetNeuromodOp> (1.0, 0.0),

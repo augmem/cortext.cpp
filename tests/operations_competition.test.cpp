@@ -164,7 +164,7 @@ TEST_CASE ("Alg21 inhibits near losers but not distant ones",
   auto seed = std::make_unique<SeedEmbeddingsOp> (retrieved);
   auto setup = std::make_unique<SetupCompetitionInputsOp> (ctx, retrieved);
   auto apply = std::make_unique<ApplyRetrievalCompetition> ();
-  auto pipeline = std::make_unique<OperationSet> (
+  auto pipeline = std::make_unique<DynamicOperationSet> (
       std::move (seed), std::move (setup), std::move (apply));
 
   SignalProcessor processor (cfg, store, std::move (pipeline));
@@ -226,7 +226,7 @@ TEST_CASE ("Alg21 RIF recovery UPDATE does not violate NOT NULL constraint",
     auto seed = std::make_unique<SeedEmbeddingsOp> (retrieved);
     auto setup = std::make_unique<SetupCompetitionInputsOp> (ctx, retrieved);
     auto apply = std::make_unique<ApplyRetrievalCompetition> ();
-    auto pipeline = std::make_unique<OperationSet> (
+    auto pipeline = std::make_unique<DynamicOperationSet> (
         std::move (seed), std::move (setup), std::move (apply));
     SignalProcessor processor (cfg, store, std::move (pipeline));
     processor.Process (MakeSignal (ctx, /*ts=*/1000));
@@ -248,7 +248,7 @@ TEST_CASE ("Alg21 RIF recovery UPDATE does not violate NOT NULL constraint",
     auto setup = std::make_unique<SetupCompetitionInputsOp> (ctx, retrieved);
     auto apply = std::make_unique<ApplyRetrievalCompetition> ();
     auto pipeline
-        = std::make_unique<OperationSet> (std::move (setup), std::move (apply));
+        = std::make_unique<DynamicOperationSet> (std::move (setup), std::move (apply));
     SignalProcessor processor (cfg, store, std::move (pipeline));
     REQUIRE_NOTHROW (processor.Process (MakeSignal (ctx, /*ts=*/2000)));
     processor.Flush ();
@@ -294,7 +294,7 @@ TEST_CASE ("Alg21 recovery restores strength over time",
     auto seed = std::make_unique<SeedEmbeddingsOp> (retrieved);
     auto setup = std::make_unique<SetupCompetitionInputsOp> (ctx, retrieved);
     auto apply = std::make_unique<ApplyRetrievalCompetition> ();
-    auto pipeline = std::make_unique<OperationSet> (
+    auto pipeline = std::make_unique<DynamicOperationSet> (
         std::move (seed), std::move (setup), std::move (apply));
     SignalProcessor processor (cfg, store, std::move (pipeline));
     processor.Process (MakeSignal (ctx, /*ts=*/1000));
@@ -318,7 +318,7 @@ TEST_CASE ("Alg21 recovery restores strength over time",
     cfg.focus = 0.0; // make all candidates winners (k=7) → no new suppression
     auto setup = std::make_unique<SetupCompetitionInputsOp> (ctx, retrieved);
     auto apply = std::make_unique<ApplyRetrievalCompetition> ();
-    auto pipeline = std::make_unique<OperationSet> (std::move (setup),
+    auto pipeline = std::make_unique<DynamicOperationSet> (std::move (setup),
                                                     std::move (apply));
     SignalProcessor processor (cfg, store, std::move (pipeline));
     processor.Process (MakeSignal (ctx, /*ts=*/2000)); // +1000s
@@ -365,7 +365,7 @@ TEST_CASE ("High NE increases retrieval competition suppression",
     auto setup = std::make_unique<SetupCompetitionInputsOp> (ctx, retrieved);
     auto set_ne = std::make_unique<SetNeuromodOp> (1.0);
     auto apply = std::make_unique<ApplyRetrievalCompetition> ();
-    auto pipeline = std::make_unique<OperationSet> (
+    auto pipeline = std::make_unique<DynamicOperationSet> (
         std::move (seed), std::move (setup), std::move (set_ne),
         std::move (apply));
 

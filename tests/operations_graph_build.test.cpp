@@ -85,7 +85,7 @@ TEST_CASE ("V2: GraphBuild creates co-occurrence edges for similar memories in s
 
   cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.0; // Low focus = threshold 0.85
-  auto ops = std::make_unique<OperationSet> (
+  auto ops = std::make_unique<DynamicOperationSet> (
       std::make_unique<EvaluateConsolidation> (),
       std::make_unique<BuildGraphFromConsolidation> ());
   SignalProcessor processor (cfg, store, std::move (ops));
@@ -144,7 +144,7 @@ TEST_CASE ("V2: GraphBuild creates causal edges for temporal drift within cluste
 
   cortext::testing::RequireEncoder (cfg);
   cfg.stability = 0.0; // Low stability = threshold 0.15
-  auto ops = std::make_unique<OperationSet> (
+  auto ops = std::make_unique<DynamicOperationSet> (
       std::make_unique<EvaluateConsolidation> (),
       std::make_unique<BuildGraphFromConsolidation> ());
   SignalProcessor processor (cfg, store, std::move (ops));
@@ -199,7 +199,7 @@ TEST_CASE ("V2: GraphBuild creates contradiction edges for opposing semantics",
   SignalProcessor::Config cfg;
 
   cortext::testing::RequireEncoder (cfg);
-  auto ops = std::make_unique<OperationSet> (
+  auto ops = std::make_unique<DynamicOperationSet> (
       std::make_unique<EvaluateConsolidation> (),
       std::make_unique<BuildGraphFromConsolidation> ());
   SignalProcessor processor (cfg, store, std::move (ops));
@@ -256,7 +256,7 @@ TEST_CASE ("V2: GraphBuild does not create edges across different clusters",
 
   cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.0;
-  auto ops = std::make_unique<OperationSet> (
+  auto ops = std::make_unique<DynamicOperationSet> (
       std::make_unique<EvaluateConsolidation> (),
       std::make_unique<BuildGraphFromConsolidation> ());
   SignalProcessor processor (cfg, store, std::move (ops));
@@ -318,7 +318,7 @@ TEST_CASE ("V2: GraphBuild decays reinforcement edges",
 
   cortext::testing::RequireEncoder (cfg);
   cfg.stability = 0.0; // decay = 0.9
-  auto ops = std::make_unique<OperationSet> (
+  auto ops = std::make_unique<DynamicOperationSet> (
       std::make_unique<EvaluateConsolidation> (),
       std::make_unique<BuildGraphFromConsolidation> ());
   SignalProcessor processor (cfg, store, std::move (ops));
@@ -361,7 +361,7 @@ TEST_CASE ("V2: GraphBuild removes weak reinforcement edges",
       "VALUES (?, ?, 'reinforces', ?)",
       { 1LL, 2LL, prune_threshold * 0.5 });
 
-  auto ops = std::make_unique<OperationSet> (
+  auto ops = std::make_unique<DynamicOperationSet> (
       std::make_unique<EvaluateConsolidation> (),
       std::make_unique<BuildGraphFromConsolidation> ());
   SignalProcessor processor (cfg, store, std::move (ops));

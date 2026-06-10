@@ -44,7 +44,7 @@ struct RecordOrderOp : IOperation
   int id = 0;
 };
 
-TEST_CASE ("OperationSet executes in order", "[operation_set]")
+TEST_CASE ("DynamicOperationSet executes in order", "[operation_set]")
 {
   Signal s;
   s.embedding = Eigen::VectorXf::Zero (2);
@@ -54,7 +54,7 @@ TEST_CASE ("OperationSet executes in order", "[operation_set]")
 
   OperationContext ctx (s, pctx, cfg);
 
-  OperationSet set (std::make_unique<SetCompositeScoreOp> (),
+  DynamicOperationSet set (std::make_unique<SetCompositeScoreOp> (),
                     std::make_unique<SetDeltaSensitivityOp> ());
 
   set.Execute (ctx, cortext::testing::GetNullTransaction ());
@@ -65,7 +65,7 @@ TEST_CASE ("OperationSet executes in order", "[operation_set]")
   REQUIRE (b.has_value ());
 }
 
-TEST_CASE ("OperationSet preserves explicit ordering", "[operation_set][order]")
+TEST_CASE ("DynamicOperationSet preserves explicit ordering", "[operation_set][order]")
 {
   Signal s;
   s.embedding = Eigen::VectorXf::Zero (2);
@@ -76,7 +76,7 @@ TEST_CASE ("OperationSet preserves explicit ordering", "[operation_set][order]")
   OperationContext ctx (s, pctx, cfg);
   std::vector<int> order;
 
-  OperationSet set (std::make_unique<RecordOrderOp> (&order, 1),
+  DynamicOperationSet set (std::make_unique<RecordOrderOp> (&order, 1),
                     std::make_unique<RecordOrderOp> (&order, 2),
                     std::make_unique<RecordOrderOp> (&order, 3));
 

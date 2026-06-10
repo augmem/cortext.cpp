@@ -14,7 +14,7 @@ TEST_CASE("Migrations apply core tables automatically", "[schema][migration]") {
     auto store = std::shared_ptr<Store>(std::move(unique_store));
 
     // No operations, just core processor
-    auto ops = std::make_unique<OperationSet>();
+    auto ops = std::make_unique<DynamicOperationSet>();
     SignalProcessor::Config cfg;
     cortext::testing::RequireEncoder(cfg);
     SignalProcessor processor(cfg, store, std::move(ops));
@@ -49,7 +49,7 @@ TEST_CASE("Migrations track version history", "[schema][migration]") {
     auto unique_store = SQLiteStore::Create(":memory:");
     auto store = std::shared_ptr<Store>(std::move(unique_store));
 
-    auto ops = std::make_unique<OperationSet>();
+    auto ops = std::make_unique<DynamicOperationSet>();
     SignalProcessor::Config cfg;
     cortext::testing::RequireEncoder(cfg);
     SignalProcessor processor(cfg, store, std::move(ops));
@@ -75,7 +75,7 @@ TEST_CASE("Migrations are idempotent", "[schema][migration]") {
 
     // First run
     {
-        auto ops = std::make_unique<OperationSet>();
+        auto ops = std::make_unique<DynamicOperationSet>();
         SignalProcessor::Config cfg;
         cortext::testing::RequireEncoder(cfg);
         SignalProcessor p1(cfg, store, std::move(ops));
@@ -83,7 +83,7 @@ TEST_CASE("Migrations are idempotent", "[schema][migration]") {
 
     // Second run with same store
     {
-        auto ops = std::make_unique<OperationSet>();
+        auto ops = std::make_unique<DynamicOperationSet>();
         SignalProcessor::Config cfg;
         cortext::testing::RequireEncoder(cfg);
         SignalProcessor p2(cfg, store, std::move(ops));
@@ -103,7 +103,7 @@ TEST_CASE("Migrations create graph retrieval lookup indexes", "[schema][migratio
     auto unique_store = SQLiteStore::Create(":memory:");
     auto store = std::shared_ptr<Store>(std::move(unique_store));
 
-    auto ops = std::make_unique<OperationSet>();
+    auto ops = std::make_unique<DynamicOperationSet>();
     SignalProcessor::Config cfg;
     cortext::testing::RequireEncoder(cfg);
     SignalProcessor processor(cfg, store, std::move(ops));
@@ -137,7 +137,7 @@ TEST_CASE("Migrations neutralize role-derived source metadata and summary kind",
     auto unique_store = SQLiteStore::Create(":memory:");
     auto store = std::shared_ptr<Store>(std::move(unique_store));
 
-    auto ops = std::make_unique<OperationSet>();
+    auto ops = std::make_unique<DynamicOperationSet>();
     SignalProcessor::Config cfg;
     cortext::testing::RequireEncoder(cfg);
     SignalProcessor processor(cfg, store, std::move(ops));

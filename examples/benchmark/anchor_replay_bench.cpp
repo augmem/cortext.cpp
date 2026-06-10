@@ -35471,7 +35471,7 @@ BuildProcessorBackedStmAttentionCases (const Options &opts, int ttl_steps,
   cfg.encoder = &encoder;
   ProcessorShadowSnapshotMap snapshots;
   ProcessorShadowBoundarySnapshotMap boundary_snapshots;
-  auto pipeline = std::make_unique<cortext::OperationSet> (
+  auto pipeline = std::make_unique<cortext::DynamicOperationSet> (
       std::make_unique<cortext::operations::ComputeCoherence> (),
       std::make_unique<cortext::operations::UpdateAccumulator> (),
       std::make_unique<cortext::operations::UpdateDriftAccumulation> (),
@@ -35721,7 +35721,7 @@ RunShortTermMemoryProcessorShadowExperiments (const Options &opts)
   cfg.encoder = &encoder;
   ProcessorShadowSnapshotMap snapshots;
   ProcessorShadowBoundarySnapshotMap boundary_snapshots;
-  auto pipeline = std::make_unique<cortext::OperationSet> (
+  auto pipeline = std::make_unique<cortext::DynamicOperationSet> (
       std::make_unique<cortext::operations::ComputeCoherence> (),
       std::make_unique<cortext::operations::UpdateAccumulator> (),
       std::make_unique<cortext::operations::UpdateDriftAccumulation> (),

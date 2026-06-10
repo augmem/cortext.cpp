@@ -345,7 +345,7 @@ RunRetrievalAblationStudy ()
 
   auto run = [&] {
     cortext::operations::retrieval_debug::ClearLastRankedCandidates ();
-    auto ops = std::make_unique<cortext::OperationSet> (
+    auto ops = std::make_unique<cortext::DynamicOperationSet> (
         std::make_unique<ForceRetrievalGateOp> (),
         std::make_unique<cortext::operations::GraphAugmentedRetrieveCandidates> ());
     cortext::SignalProcessor processor (cfg, store, std::move (ops));
@@ -428,7 +428,7 @@ RunReconsolidationStudy ()
   cfg.sensitivity = 1.0;
   cfg.stability = 0.0;
 
-  auto ops = std::make_unique<cortext::OperationSet> (
+  auto ops = std::make_unique<cortext::DynamicOperationSet> (
       std::make_unique<SetupReconInputsOp> (
           current,
           std::unordered_map<long long, Eigen::VectorXf>{ { 1LL, evidence } }),

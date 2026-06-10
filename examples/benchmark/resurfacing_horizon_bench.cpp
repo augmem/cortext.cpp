@@ -223,7 +223,7 @@ RunRetrieval (const Scenario &scenario, const cortext::SignalProcessor::Config &
   cortext::store::ApplyMigrations (*store);
   SeedMemory (*store, kTargetMemoryId, UnitVec256 (), 1);
 
-  auto ops = std::make_unique<cortext::OperationSet> (
+  auto ops = std::make_unique<cortext::DynamicOperationSet> (
       std::make_unique<ForceRetrievalGateOp> (
           cortext::ProcessorContext::MetacognitiveMode::UnknownCaution, 0.0),
       std::make_unique<cortext::operations::GraphAugmentedRetrieveCandidates> ());

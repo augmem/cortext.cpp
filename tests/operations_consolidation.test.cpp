@@ -139,7 +139,7 @@ TEST_CASE ("Alg28 rate trigger starts when idle",
       /*last_consolidation_ts=*/std::nullopt);
   auto eval = std::make_unique<EvaluateConsolidation> ();
   auto assert_op = std::make_unique<AssertConsolidationStartedOp> (now_ts);
-  auto ops = std::make_unique<OperationSet> (std::move (setup),
+  auto ops = std::make_unique<DynamicOperationSet> (std::move (setup),
                                               std::move (eval),
                                               std::move (assert_op));
   SignalProcessor processor (cfg, store, std::move (ops));
@@ -181,7 +181,7 @@ TEST_CASE ("Alg28 explicit consolidation signal starts even when busy",
       /*last_consolidation_ts=*/std::nullopt);
   auto eval = std::make_unique<EvaluateConsolidation> ();
   auto assert_op = std::make_unique<AssertConsolidationStartedOp> (now_ts);
-  auto ops = std::make_unique<OperationSet> (std::move (setup),
+  auto ops = std::make_unique<DynamicOperationSet> (std::move (setup),
                                               std::move (eval),
                                               std::move (assert_op));
   SignalProcessor processor (cfg, store, std::move (ops));
@@ -220,7 +220,7 @@ TEST_CASE ("Alg28 interval trigger starts when elapsed exceeds interval",
       /*last_consolidation_ts=*/last_cons);
   auto eval = std::make_unique<EvaluateConsolidation> ();
   auto assert_op = std::make_unique<AssertConsolidationStartedOp> (now_ts);
-  auto ops = std::make_unique<OperationSet> (std::move (setup),
+  auto ops = std::make_unique<DynamicOperationSet> (std::move (setup),
                                               std::move (eval),
                                               std::move (assert_op));
   SignalProcessor processor (cfg, store, std::move (ops));
@@ -288,7 +288,7 @@ TEST_CASE ("Alg28 capacity trigger starts when db_size exceeds threshold",
       /*last_consolidation_ts=*/std::nullopt);
   auto eval = std::make_unique<EvaluateConsolidation> ();
   auto assert_op = std::make_unique<AssertConsolidationStartedOp> (now_ts);
-  auto ops = std::make_unique<OperationSet> (std::move (seed),
+  auto ops = std::make_unique<DynamicOperationSet> (std::move (seed),
                                               std::move (setup),
                                               std::move (eval),
                                               std::move (assert_op));
@@ -323,7 +323,7 @@ TEST_CASE ("Alg28 no trigger does not set start flag",
       /*last_consolidation_ts=*/last_cons);
   auto eval = std::make_unique<EvaluateConsolidation> ();
   auto assert_op = std::make_unique<AssertConsolidationNotStartedOp> ();
-  auto ops = std::make_unique<OperationSet> (std::move (setup),
+  auto ops = std::make_unique<DynamicOperationSet> (std::move (setup),
                                               std::move (eval),
                                               std::move (assert_op));
   SignalProcessor processor (cfg, store, std::move (ops));

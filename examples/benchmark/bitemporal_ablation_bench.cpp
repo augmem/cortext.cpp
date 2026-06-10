@@ -382,7 +382,7 @@ RunRetrieval (std::shared_ptr<cortext::Store> store, BenchEncoder &encoder,
   cfg.stability = config.stability;
   cfg.encoder = &encoder;
 
-  auto ops = std::make_unique<cortext::OperationSet> (
+  auto ops = std::make_unique<cortext::DynamicOperationSet> (
       std::make_unique<ForceRetrievalGateOp> (),
       std::make_unique<cortext::operations::GraphAugmentedRetrieveCandidates> ());
   cortext::SignalProcessor processor (cfg, store, std::move (ops));

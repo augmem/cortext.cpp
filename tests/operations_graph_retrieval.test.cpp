@@ -292,7 +292,7 @@ TEST_CASE ("V2: Alg31 expands vector seeds via ASSOCIATIONS and returns expanded
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;
 
-  auto ops = std::make_unique<OperationSet> (
+  auto ops = std::make_unique<DynamicOperationSet> (
       std::make_unique<ForceRetrievalGateOp> (),
       std::make_unique<GraphAugmentedRetrieveCandidates> ());
   SignalProcessor processor (cfg, store, std::move (ops));
@@ -346,7 +346,7 @@ TEST_CASE ("Graph retrieval uses durable DB seeds after process restart",
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;
 
-  auto ops = std::make_unique<OperationSet> (
+  auto ops = std::make_unique<DynamicOperationSet> (
       std::make_unique<ForceRetrievalGateOp> (std::nullopt, std::nullopt,
                                               false),
       std::make_unique<GraphAugmentedRetrieveCandidates> ());
@@ -395,7 +395,7 @@ TEST_CASE ("Predictive pre-activation changes retrieval ranking",
 
   auto run = [&] {
     cortext::operations::retrieval_debug::ClearLastRankedCandidates ();
-    auto ops = std::make_unique<OperationSet> (
+    auto ops = std::make_unique<DynamicOperationSet> (
         std::make_unique<ForceRetrievalGateOp> (),
         std::make_unique<GraphAugmentedRetrieveCandidates> ());
     SignalProcessor processor (cfg, store, std::move (ops));
@@ -458,7 +458,7 @@ TEST_CASE ("Graph retrieval scores durable labels by derived source set",
 
   auto run = [&] {
     cortext::operations::retrieval_debug::ClearLastRankedCandidates ();
-    auto ops = std::make_unique<OperationSet> (
+    auto ops = std::make_unique<DynamicOperationSet> (
         std::make_unique<ForceRetrievalGateOp> (),
         std::make_unique<GraphAugmentedRetrieveCandidates> ());
     SignalProcessor processor (cfg, store, std::move (ops));
@@ -527,7 +527,7 @@ TEST_CASE ("Graph retrieval propagates label graph boost across durable label re
     std::vector<SeedSummaryCacheOp::Entry> labels;
     labels.push_back ({ 300LL, 300LL, mcdonalds_vec, false, true });
     labels.push_back ({ 400LL, 400LL, chicago_vec, false, true });
-    auto ops = std::make_unique<OperationSet> (
+    auto ops = std::make_unique<DynamicOperationSet> (
         std::make_unique<SeedSummaryCacheOp> (std::move (labels)),
         std::make_unique<ForceRetrievalGateOp> (),
         std::make_unique<GraphAugmentedRetrieveCandidates> ());
@@ -589,7 +589,7 @@ TEST_CASE ("Graph retrieval seeds source memories from durable label graph",
   cortext::operations::retrieval_debug::ClearLastRankedCandidates ();
   std::vector<SeedSummaryCacheOp::Entry> labels;
   labels.push_back ({ 300LL, 300LL, query_vec, false, true });
-  auto ops = std::make_unique<OperationSet> (
+  auto ops = std::make_unique<DynamicOperationSet> (
       std::make_unique<SeedSummaryCacheOp> (std::move (labels)),
       std::make_unique<ForceRetrievalGateOp> (),
       std::make_unique<GraphAugmentedRetrieveCandidates> ());
@@ -651,7 +651,7 @@ TEST_CASE ("Graph retrieval maps text query labels back to durable sources",
     }
 
 	  cortext::operations::retrieval_debug::ClearLastRankedCandidates ();
-	  auto ops = std::make_unique<OperationSet> (
+	  auto ops = std::make_unique<DynamicOperationSet> (
 	      std::make_unique<ForceRetrievalGateOp> (),
 	      std::make_unique<GraphAugmentedRetrieveCandidates> ());
   SignalProcessor::Config cfg;
@@ -716,7 +716,7 @@ TEST_CASE ("Graph retrieval maps token-overlap text queries to durable labels",
     }
 
 	  cortext::operations::retrieval_debug::ClearLastRankedCandidates ();
-	  auto ops = std::make_unique<OperationSet> (
+	  auto ops = std::make_unique<DynamicOperationSet> (
 	      std::make_unique<ForceRetrievalGateOp> (),
 	      std::make_unique<GraphAugmentedRetrieveCandidates> ());
   SignalProcessor::Config cfg;
@@ -781,7 +781,7 @@ TEST_CASE ("Graph retrieval expands source seeds through durable label relations
         201LL, 301LL });
 
   cortext::operations::retrieval_debug::ClearLastRankedCandidates ();
-  auto ops = std::make_unique<OperationSet> (
+  auto ops = std::make_unique<DynamicOperationSet> (
       std::make_unique<ForceRetrievalGateOp> (),
       std::make_unique<GraphAugmentedRetrieveCandidates> ());
   SignalProcessor::Config cfg;
@@ -851,7 +851,7 @@ TEST_CASE (
         201LL, 301LL });
 
   cortext::operations::retrieval_debug::ClearLastRankedCandidates ();
-  auto ops = std::make_unique<OperationSet> (
+  auto ops = std::make_unique<DynamicOperationSet> (
       std::make_unique<SeedSummaryCacheOp> (
           std::vector<SeedSummaryCacheOp::Entry> {
               { 900LL, 900LL, related_vec, false, false } }),
@@ -911,7 +911,7 @@ TEST_CASE ("Graph retrieval expands temporal neighbors from active working memor
 
   auto run = [&] {
     cortext::operations::retrieval_debug::ClearLastRankedCandidates ();
-    auto ops = std::make_unique<OperationSet> (
+    auto ops = std::make_unique<DynamicOperationSet> (
         std::make_unique<ForceRetrievalGateOp> (),
         std::make_unique<SeedWorkingMemoryAnchorOp> (201LL, "stream/main",
                                                      2000LL, wm_vec),
@@ -985,7 +985,7 @@ TEST_CASE ("Graph retrieval keeps active working-memory temporal expansion sourc
 
   auto run = [&] {
     cortext::operations::retrieval_debug::ClearLastRankedCandidates ();
-    auto ops = std::make_unique<OperationSet> (
+    auto ops = std::make_unique<DynamicOperationSet> (
         std::make_unique<ForceRetrievalGateOp> (),
         std::make_unique<SeedWorkingMemoryAnchorOp> (201LL, "stream/main",
                                                      2000LL, wm_vec),
@@ -1053,7 +1053,7 @@ TEST_CASE ("Graph retrieval uses broad source seeds but compact knob-derived out
     }
 
   cortext::operations::retrieval_debug::ClearLastRankedCandidates ();
-  auto ops = std::make_unique<OperationSet> (
+  auto ops = std::make_unique<DynamicOperationSet> (
       std::make_unique<ForceRetrievalGateOp> (),
       std::make_unique<GraphAugmentedRetrieveCandidates> ());
   SignalProcessor::Config cfg;
@@ -1127,7 +1127,7 @@ TEST_CASE ("Graph retrieval routes text queries through source-backed durable la
 
   auto run = [&] {
     cortext::operations::retrieval_debug::ClearLastRankedCandidates ();
-    auto ops = std::make_unique<OperationSet> (
+    auto ops = std::make_unique<DynamicOperationSet> (
         std::make_unique<ForceRetrievalGateOp> (),
         std::make_unique<GraphAugmentedRetrieveCandidates> ());
     SignalProcessor::Config cfg;
@@ -1219,7 +1219,7 @@ TEST_CASE ("Graph retrieval damps high-degree label graph boosts",
   std::vector<SeedSummaryCacheOp::Entry> labels;
   labels.push_back ({ 200LL, 200LL, query_vec, false, true });
   labels.push_back ({ 201LL, 201LL, query_vec, false, true });
-  auto ops = std::make_unique<OperationSet> (
+  auto ops = std::make_unique<DynamicOperationSet> (
       std::make_unique<SeedSummaryCacheOp> (std::move (labels)),
       std::make_unique<ForceRetrievalGateOp> (),
       std::make_unique<GraphAugmentedRetrieveCandidates> ());
@@ -1286,7 +1286,7 @@ TEST_CASE ("TOT recovery expands graph traversal depth",
   cfg.stability = 1.0;
 
   auto run = [&] {
-    auto ops = std::make_unique<OperationSet> (
+    auto ops = std::make_unique<DynamicOperationSet> (
         std::make_unique<ForceRetrievalGateOp> (
             ProcessorContext::MetacognitiveMode::TotRecovery, 1.0),
         std::make_unique<GraphAugmentedRetrieveCandidates> ());
@@ -1347,7 +1347,7 @@ TEST_CASE ("TOT recovery strength scales with metacognitive confidence",
   cfg.stability = 1.0;
 
   auto run = [&] (double confidence) {
-    auto ops = std::make_unique<OperationSet> (
+    auto ops = std::make_unique<DynamicOperationSet> (
         std::make_unique<ForceRetrievalGateOp> (
             ProcessorContext::MetacognitiveMode::TotRecovery, confidence),
         std::make_unique<GraphAugmentedRetrieveCandidates> ());
@@ -1401,7 +1401,7 @@ TEST_CASE ("Procedural proactive retrieval surfaces learned routine memory",
         disable_guard.emplace (
             "CORTEXT_DISABLE_PROCEDURAL_PROACTIVE_RETRIEVAL", "1");
       }
-    auto ops = std::make_unique<OperationSet> (
+    auto ops = std::make_unique<DynamicOperationSet> (
         std::make_unique<ForceRetrievalGateOp> (),
         std::make_unique<SeedProceduralStoreOp> (500LL, 1.0),
         std::make_unique<GraphAugmentedRetrieveCandidates> ());
@@ -1466,7 +1466,7 @@ TEST_CASE ("Unknown caution suppresses relaxed fallback retrieval",
   cfg.stability = 0.5;
 
   auto run = [&] {
-    auto ops = std::make_unique<OperationSet> (
+    auto ops = std::make_unique<DynamicOperationSet> (
         std::make_unique<ForceRetrievalGateOp> (
             ProcessorContext::MetacognitiveMode::UnknownCaution, 0.0),
         std::make_unique<GraphAugmentedRetrieveCandidates> ());
@@ -1529,7 +1529,7 @@ TEST_CASE ("Temporal retrieval rank bias favors recent relevant memories",
       {
         disable_guard.emplace ("CORTEXT_DISABLE_TEMPORAL_RETRIEVAL", "1");
       }
-    auto ops = std::make_unique<OperationSet> (
+    auto ops = std::make_unique<DynamicOperationSet> (
         std::make_unique<ForceRetrievalGateOp> (),
         std::make_unique<GraphAugmentedRetrieveCandidates> ());
     SignalProcessor processor (cfg, store, std::move (ops));
@@ -1582,7 +1582,7 @@ TEST_CASE ("Pressure-weighted resurfacing preserves old but relevant memories at
     eviction::ScopedEvictionAblationOverride eviction_guard (
         eviction_override);
 
-    auto ops = std::make_unique<OperationSet> (
+    auto ops = std::make_unique<DynamicOperationSet> (
         std::make_unique<ForceRetrievalGateOp> (
             ProcessorContext::MetacognitiveMode::UnknownCaution, 0.0),
         std::make_unique<GraphAugmentedRetrieveCandidates> ());
@@ -1639,7 +1639,7 @@ TEST_CASE ("Pressure-weighted resurfacing converges to time-only under high pres
     eviction::ScopedEvictionAblationOverride eviction_guard (
         eviction_override);
 
-    auto ops = std::make_unique<OperationSet> (
+    auto ops = std::make_unique<DynamicOperationSet> (
         std::make_unique<ForceRetrievalGateOp> (
             ProcessorContext::MetacognitiveMode::UnknownCaution, 0.0),
         std::make_unique<GraphAugmentedRetrieveCandidates> ());
@@ -1694,7 +1694,7 @@ TEST_CASE ("Pressure-weighted resurfacing under low pressure follows stability",
     eviction::ScopedEvictionAblationOverride eviction_guard (
         eviction_override);
 
-    auto ops = std::make_unique<OperationSet> (
+    auto ops = std::make_unique<DynamicOperationSet> (
         std::make_unique<ForceRetrievalGateOp> (
             ProcessorContext::MetacognitiveMode::UnknownCaution, 0.0),
         std::make_unique<GraphAugmentedRetrieveCandidates> ());

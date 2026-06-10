@@ -114,7 +114,7 @@ TEST_CASE ("State persistence tables are created", "[state_persistence][schema]"
   auto unique_store = SQLiteStore::Create (":memory:");
   auto store = std::shared_ptr<Store> (std::move (unique_store));
 
-  auto ops = std::make_unique<OperationSet> ();
+  auto ops = std::make_unique<DynamicOperationSet> ();
   SignalProcessor processor (MakeConfig (), store, std::move (ops));
 
   auto rows
@@ -171,7 +171,7 @@ TEST_CASE ("Processor state is persisted on flush",
   // First processor instance - process some signals
   {
     auto ops
-        = std::make_unique<OperationSet> (std::make_unique<TriggerBoundaryOp> ());
+        = std::make_unique<DynamicOperationSet> (std::make_unique<TriggerBoundaryOp> ());
     SignalProcessor processor (MakeConfig (), store, std::move (ops));
 
     Signal s;
@@ -205,7 +205,7 @@ TEST_CASE ("Single signal state is persisted as loadable state",
 
   {
     auto ops
-        = std::make_unique<OperationSet> (std::make_unique<TriggerBoundaryOp> ());
+        = std::make_unique<DynamicOperationSet> (std::make_unique<TriggerBoundaryOp> ());
     SignalProcessor processor (MakeConfig (), store, std::move (ops));
 
     Signal s;
@@ -221,7 +221,7 @@ TEST_CASE ("Single signal state is persisted as loadable state",
 
   {
     auto ops
-        = std::make_unique<OperationSet> (std::make_unique<TriggerBoundaryOp> ());
+        = std::make_unique<DynamicOperationSet> (std::make_unique<TriggerBoundaryOp> ());
     SignalProcessor processor (MakeConfig (), store, std::move (ops));
 
     Signal s;
@@ -245,7 +245,7 @@ TEST_CASE ("Processor state is loaded on startup",
   // First processor instance - set some state
   {
     auto ops
-        = std::make_unique<OperationSet> (std::make_unique<TriggerBoundaryOp> ());
+        = std::make_unique<DynamicOperationSet> (std::make_unique<TriggerBoundaryOp> ());
     SignalProcessor processor (MakeConfig (), store, std::move (ops));
 
     Signal s;
@@ -267,7 +267,7 @@ TEST_CASE ("Processor state is loaded on startup",
   // Second processor instance - should load state
   {
     auto ops
-        = std::make_unique<OperationSet> (std::make_unique<TriggerBoundaryOp> ());
+        = std::make_unique<DynamicOperationSet> (std::make_unique<TriggerBoundaryOp> ());
     SignalProcessor processor (MakeConfig (), store, std::move (ops));
 
     Signal s;
@@ -294,7 +294,7 @@ TEST_CASE ("Blender weights are persisted", "[state_persistence][blender]")
 
   {
     auto ops
-        = std::make_unique<OperationSet> (std::make_unique<TriggerBoundaryOp> ());
+        = std::make_unique<DynamicOperationSet> (std::make_unique<TriggerBoundaryOp> ());
     SignalProcessor processor (MakeConfig (), store, std::move (ops));
 
     Signal s;
@@ -327,7 +327,7 @@ TEST_CASE ("Bootstrap state persistence uses active knobs",
   cfg.stability = 1.0;
 
   {
-    auto ops = std::make_unique<OperationSet> ();
+    auto ops = std::make_unique<DynamicOperationSet> ();
     SignalProcessor processor (cfg, store, std::move (ops));
     processor.Flush ();
   }
@@ -355,7 +355,7 @@ TEST_CASE ("Legacy state defaults reload from active knobs",
   auto store = std::shared_ptr<Store> (std::move (unique_store));
 
   {
-    auto ops = std::make_unique<OperationSet> ();
+    auto ops = std::make_unique<DynamicOperationSet> ();
     SignalProcessor processor (MakeConfig (), store, std::move (ops));
     processor.Flush ();
   }
@@ -370,7 +370,7 @@ TEST_CASE ("Legacy state defaults reload from active knobs",
 
   auto capture = std::make_unique<CaptureLoadedPolicyStateOp> ();
   auto *capture_raw = capture.get ();
-  auto ops = std::make_unique<OperationSet> (std::move (capture));
+  auto ops = std::make_unique<DynamicOperationSet> (std::move (capture));
   SignalProcessor processor (cfg, store, std::move (ops));
 
   Signal s;
@@ -405,7 +405,7 @@ TEST_CASE ("Partial legacy state defaults reload from active knobs",
   auto store = std::shared_ptr<Store> (std::move (unique_store));
 
   {
-    auto ops = std::make_unique<OperationSet> ();
+    auto ops = std::make_unique<DynamicOperationSet> ();
     SignalProcessor processor (MakeConfig (), store, std::move (ops));
     processor.Flush ();
   }
@@ -421,7 +421,7 @@ TEST_CASE ("Partial legacy state defaults reload from active knobs",
 
   auto capture = std::make_unique<CaptureLoadedPolicyStateOp> ();
   auto *capture_raw = capture.get ();
-  auto ops = std::make_unique<OperationSet> (std::move (capture));
+  auto ops = std::make_unique<DynamicOperationSet> (std::move (capture));
   SignalProcessor processor (cfg, store, std::move (ops));
 
   Signal s;
@@ -451,7 +451,7 @@ TEST_CASE ("Recent context view derives from signals",
 
   {
     // Initialize schema
-    auto ops = std::make_unique<OperationSet> ();
+    auto ops = std::make_unique<DynamicOperationSet> ();
     SignalProcessor processor (MakeConfig (), store, std::move (ops));
     processor.Flush ();
   }
@@ -491,7 +491,7 @@ TEST_CASE ("Recent scores are persisted", "[state_persistence][recent_scores]")
 
   {
     auto ops
-        = std::make_unique<OperationSet> (std::make_unique<TriggerBoundaryOp> ());
+        = std::make_unique<DynamicOperationSet> (std::make_unique<TriggerBoundaryOp> ());
     SignalProcessor processor (MakeConfig (), store, std::move (ops));
 
     for (int i = 0; i < 3; ++i)
@@ -519,7 +519,7 @@ TEST_CASE ("Recent windows restore with knob-derived runtime limits",
   auto store = std::shared_ptr<Store> (std::move (unique_store));
 
   {
-    auto ops = std::make_unique<OperationSet> ();
+    auto ops = std::make_unique<DynamicOperationSet> ();
     SignalProcessor::Config cfg = MakeConfig ();
     cfg.stability = 1.0;
     SignalProcessor processor (cfg, store, std::move (ops));
@@ -548,7 +548,7 @@ TEST_CASE ("Recent windows restore with knob-derived runtime limits",
     auto capture = std::make_unique<CaptureRecentWindowOp> ();
     capture->context_count = &restored_context_count;
     capture->score_count = &restored_score_count;
-    auto ops = std::make_unique<OperationSet> (std::move (capture));
+    auto ops = std::make_unique<DynamicOperationSet> (std::move (capture));
     SignalProcessor::Config cfg = MakeConfig ();
     cfg.stability = 1.0;
     SignalProcessor processor (cfg, store, std::move (ops));
@@ -573,7 +573,7 @@ TEST_CASE ("State persistence is idempotent across restarts",
   // Run 1
   {
     auto ops
-        = std::make_unique<OperationSet> (std::make_unique<TriggerBoundaryOp> ());
+        = std::make_unique<DynamicOperationSet> (std::make_unique<TriggerBoundaryOp> ());
     SignalProcessor processor (MakeConfig (), store, std::move (ops));
 
     Signal s;
@@ -587,7 +587,7 @@ TEST_CASE ("State persistence is idempotent across restarts",
   // Run 2
   {
     auto ops
-        = std::make_unique<OperationSet> (std::make_unique<TriggerBoundaryOp> ());
+        = std::make_unique<DynamicOperationSet> (std::make_unique<TriggerBoundaryOp> ());
     SignalProcessor processor (MakeConfig (), store, std::move (ops));
 
     Signal s;
@@ -601,7 +601,7 @@ TEST_CASE ("State persistence is idempotent across restarts",
   // Run 3
   {
     auto ops
-        = std::make_unique<OperationSet> (std::make_unique<TriggerBoundaryOp> ());
+        = std::make_unique<DynamicOperationSet> (std::make_unique<TriggerBoundaryOp> ());
     SignalProcessor processor (MakeConfig (), store, std::move (ops));
 
     Signal s;
@@ -657,7 +657,7 @@ TEST_CASE ("Working memory slots are persisted",
     cfg.focus = 0.0;
     cfg.sensitivity = 1.0;
     cfg.stability = 0.0;
-    auto ops = std::make_unique<OperationSet> (
+    auto ops = std::make_unique<DynamicOperationSet> (
         std::make_unique<PopulateWMSlotsOp> ());
     SignalProcessor processor (cfg, store, std::move (ops));
 
@@ -699,7 +699,7 @@ TEST_CASE ("Working memory slots are loaded on startup",
 
   // Directly insert slots into database
   {
-    auto ops = std::make_unique<OperationSet> ();
+    auto ops = std::make_unique<DynamicOperationSet> ();
     SignalProcessor processor (MakeConfig (), store, std::move (ops));
     // This ensures schema is created
     processor.Flush ();
@@ -736,7 +736,7 @@ TEST_CASE ("Working memory slots are loaded on startup",
 
   // Create new processor - should load slots
   {
-    auto verify_op = std::make_unique<OperationSet> ();
+    auto verify_op = std::make_unique<DynamicOperationSet> ();
     SignalProcessor::Config cfg;
     cortext::testing::RequireEncoder (cfg);
     cfg.sensitivity = 0.5;
@@ -775,7 +775,7 @@ TEST_CASE ("Working memory slots are loaded on startup",
 
   auto verify_ptr = std::make_unique<VerifyWMSlotsOp> ();
   auto *verify_raw = verify_ptr.get ();
-  auto ops = std::make_unique<OperationSet> (std::move (verify_ptr));
+  auto ops = std::make_unique<DynamicOperationSet> (std::move (verify_ptr));
   SignalProcessor::Config cfg;
   cortext::testing::RequireEncoder (cfg);
   cfg.sensitivity = 0.5;
@@ -802,7 +802,7 @@ TEST_CASE ("Working memory slots decay on load",
 
   // Create schema
   {
-    auto ops = std::make_unique<OperationSet> ();
+    auto ops = std::make_unique<DynamicOperationSet> ();
     SignalProcessor processor (MakeConfig (), store, std::move (ops));
     processor.Flush ();
   }
@@ -847,7 +847,7 @@ TEST_CASE ("Working memory slots decay on load",
 
   auto verify_ptr = std::make_unique<VerifyDecayOp> ();
   auto *verify_raw = verify_ptr.get ();
-  auto ops = std::make_unique<OperationSet> (std::move (verify_ptr));
+  auto ops = std::make_unique<DynamicOperationSet> (std::move (verify_ptr));
   SignalProcessor::Config cfg;
   cortext::testing::RequireEncoder (cfg);
   cfg.sensitivity = 0.5;
@@ -871,7 +871,7 @@ TEST_CASE ("Working memory reload preserves floor like live passive decay",
 
   // Create schema
   {
-    auto ops = std::make_unique<OperationSet> ();
+    auto ops = std::make_unique<DynamicOperationSet> ();
     SignalProcessor processor (MakeConfig (), store, std::move (ops));
     processor.Flush ();
   }
@@ -919,7 +919,7 @@ TEST_CASE ("Working memory reload preserves floor like live passive decay",
 
   auto verify_ptr = std::make_unique<VerifyReloadedFloorOp> ();
   auto *verify_raw = verify_ptr.get ();
-  auto ops = std::make_unique<OperationSet> (std::move (verify_ptr));
+  auto ops = std::make_unique<DynamicOperationSet> (std::move (verify_ptr));
   SignalProcessor::Config cfg;
   cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.5;

@@ -271,7 +271,7 @@ RunTotRetrieval (bool disable_tot, double metacognitive_confidence = 1.0)
       env = std::make_unique<ScopedEnvVar> ("CORTEXT_DISABLE_METACOG_TOT_RECOVERY");
     }
 
-  auto ops = std::make_unique<cortext::OperationSet> (
+  auto ops = std::make_unique<cortext::DynamicOperationSet> (
       std::make_unique<ForceRetrievalGateOp> (
           cortext::ProcessorContext::MetacognitiveMode::TotRecovery,
           metacognitive_confidence),
@@ -329,7 +329,7 @@ RunUnknownRetrieval (bool disable_unknown)
           "CORTEXT_DISABLE_METACOG_UNKNOWN_CAUTION");
     }
 
-  auto ops = std::make_unique<cortext::OperationSet> (
+  auto ops = std::make_unique<cortext::DynamicOperationSet> (
       std::make_unique<ForceRetrievalGateOp> (
           cortext::ProcessorContext::MetacognitiveMode::UnknownCaution),
       std::make_unique<cortext::operations::GraphAugmentedRetrieveCandidates> ());

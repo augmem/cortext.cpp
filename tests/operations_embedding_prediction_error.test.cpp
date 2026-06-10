@@ -43,7 +43,7 @@ TEST_CASE ("Embedding Prediction Error - first signal initializes state",
   cfg.stability = 0.5;
 
   auto op = std::make_unique<UpdateEmbeddingPredictionError> ();
-  auto ops = std::make_unique<OperationSet> (std::move (op));
+  auto ops = std::make_unique<DynamicOperationSet> (std::move (op));
 
   SignalProcessor processor (cfg, store, std::move (ops));
 
@@ -71,7 +71,7 @@ TEST_CASE ("Embedding Prediction Error - identical embeddings yield low "
   cfg.stability = 0.5;
 
   auto op1 = std::make_unique<UpdateEmbeddingPredictionError> ();
-  auto ops = std::make_unique<OperationSet> (std::move (op1));
+  auto ops = std::make_unique<DynamicOperationSet> (std::move (op1));
 
   SignalProcessor processor (cfg, store, std::move (ops));
 
@@ -103,7 +103,7 @@ TEST_CASE ("Embedding Prediction Error - orthogonal shift yields high surprisal"
   cfg.stability = 0.5;
 
   auto op = std::make_unique<UpdateEmbeddingPredictionError> ();
-  auto ops = std::make_unique<OperationSet> (std::move (op));
+  auto ops = std::make_unique<DynamicOperationSet> (std::move (op));
 
   SignalProcessor processor (cfg, store, std::move (ops));
 
@@ -137,7 +137,7 @@ TEST_CASE ("Embedding Prediction Error - EMA adapts to repeated input",
   cfg.stability = 0.5;
 
   auto op = std::make_unique<UpdateEmbeddingPredictionError> ();
-  auto ops = std::make_unique<OperationSet> (std::move (op));
+  auto ops = std::make_unique<DynamicOperationSet> (std::move (op));
 
   SignalProcessor processor (cfg, store, std::move (ops));
 
@@ -180,7 +180,7 @@ TEST_CASE ("Embedding Prediction Error - dimension mismatch resets state",
   cfg.stability = 0.5;
 
   auto op = std::make_unique<UpdateEmbeddingPredictionError> ();
-  auto ops = std::make_unique<OperationSet> (std::move (op));
+  auto ops = std::make_unique<DynamicOperationSet> (std::move (op));
 
   SignalProcessor processor (cfg, store, std::move (ops));
 
@@ -212,7 +212,7 @@ TEST_CASE ("Embedding Prediction Error - empty embedding is no-op",
   cfg.stability = 0.5;
 
   auto op = std::make_unique<UpdateEmbeddingPredictionError> ();
-  auto ops = std::make_unique<OperationSet> (std::move (op));
+  auto ops = std::make_unique<DynamicOperationSet> (std::move (op));
 
   SignalProcessor processor (cfg, store, std::move (ops));
 
