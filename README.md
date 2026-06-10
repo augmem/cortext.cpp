@@ -69,7 +69,33 @@ Where earlier synthetic-encoder claims did **not** survive the switch to real em
 - explicit consolidation passes for summary, label, and relation generation
 - graph-augmented retrieval combining embedding similarity with extracted semantics
 - native C++20 API plus a C ABI for bindings
-- optional local model backends for embeddings and deep consolidation
+- a first-party trimodal embedding model (ES-AIST-81M) as the default encoder, with optional local backends for embeddings and deep consolidation
+
+## Embedding Models
+
+Cortext's primary encoder is **ES-AIST-81M** (also published as
+`augmem/ESS-AIST-81M-preview`), a custom 81M-parameter trimodal embedding model
+that places text, image, and audio in a single retrieval space. The repo also
+ships **AAIT-86M**, which bundles the preserved TE-86M trimodal retrieval
+checkpoint with an ingress-anchor head that emits anchor decisions
+(`CREATE / UPDATE / SPLIT / CLOSE / ABSTAIN`) at ingest time without changing
+the underlying retrieval behavior (zero retrieval delta vs the stage-1
+checkpoint under the publication gate).
+
+Both models are distributed as custom `triembed` GGUF exports that generic
+`llama.cpp` cannot load; Cortext includes its own native GGUF tensor runtime
+(`src/models/aait_gguf_encoder.cpp`) that parses the files, dequantizes the
+needed tensors, and executes the encoder (and anchor head) in C++.
+
+Text-encoder selection order (`CreatePreferredTextEncoder`):
+
+1. **AAIT-86M-GGUF** — opt-in: set `CORTEXT_AAIT_ENABLE=1` (model under
+   `models/AAIT-86M-GGUF/`)
+2. **ES-AIST-81M-GGUF** — the default when present: auto-discovered under
+   `models/ES{,S}-AIST-81M[-preview]-GGUF/` (q8_0 preferred over q5_1), or
+   pinned explicitly with `CORTEXT_ES_AIST_MODEL_PATH`
+3. **EmbeddingGemma** — fallback via llama.cpp GGUF, LiteRT `.tflite`, or ONNX
+   (`CORTEXT_EMBEDDINGGEMMA_MODEL_PATH`, `CORTEXT_EMBEDDINGGEMMA_BACKEND`)
 
 ## Storage Abstractions
 
@@ -224,7 +250,8 @@ PYTHONPATH=bindings/python python3 -c "import cortext; print(cortext.version())"
 - `CORTEXT_BUILD_EXAMPLES=ON|OFF` — build binaries under `examples/`
 - `CORTEXT_BUILD_NODE_BINDINGS=ON|OFF` — build the Node.js addon under `bindings/javascript`
 - `BUILD_WASM=ON|OFF` — configure the WebAssembly build
-- `CORTEXT_ENABLE_EMBEDDINGGEMMA=ON|OFF` — enable the EmbeddingGemma encoder path
+- `CORTEXT_ENABLE_AAIT_GGUF=ON|OFF` — build the native GGUF runtime for the ES-AIST/AAIT custom encoders (default ON)
+- `CORTEXT_ENABLE_EMBEDDINGGEMMA=ON|OFF` — enable the EmbeddingGemma fallback encoder path
 - `CORTEXT_DISABLE_LITERT=ON|OFF` — disable LiteRT-LM-backed extractor/summarizer paths
 - `CORTEXT_DISABLE_OGA=ON|OFF` — disable onnxruntime-genai-backed Phi-4 paths
 - `CORTEXT_DISABLE_SHERPA_ONNX=ON|OFF` — disable sherpa-onnx audio integration
@@ -237,6 +264,7 @@ Some features rely on optional local runtimes or model assets under `models/` an
 - onnxruntime-genai
 - sherpa-onnx
 - `llama.cpp` GGUF support for EmbeddingGemma and Liquid deep-consolidation backends
+- the ES-AIST/AAIT encoders need no external runtime — their `triembed` GGUF exports run on Cortext's built-in GGUF tensor runtime
 
 ## Deep Consolidation Backends
 
