@@ -126,6 +126,10 @@ std::optional<std::filesystem::path>
 ResolveEssAistGgufModelPath (const std::filesystem::path &models_dir,
                              const std::filesystem::path &override_path = {});
 
+std::optional<std::filesystem::path>
+ResolveAistGgufModelPath (const std::filesystem::path &models_dir,
+                          const std::filesystem::path &override_path = {});
+
 AaitModelInfo InspectAaitGgufModel (const std::filesystem::path &model_path);
 
 void NormalizeL2InPlace (std::vector<float> &values);

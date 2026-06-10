@@ -1,7 +1,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
 
-#include <cortext/models/aait_gguf_encoder.hpp>
+#include <cortext/models/aist_gguf_encoder.hpp>
 
 #include <cmath>
 #include <filesystem>

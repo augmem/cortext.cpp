@@ -327,7 +327,7 @@ endif()
 
 if(CORTEXT_ENABLE_AAIT_GGUF)
   target_compile_definitions(cortext PUBLIC CORTEXT_ENABLE_AAIT_GGUF=1)
-  target_sources(cortext PRIVATE src/models/aait_gguf_encoder.cpp)
+  target_sources(cortext PRIVATE src/models/aist_gguf_encoder.cpp)
 endif()
 
 if(NOT CORTEXT_DISABLE_SHERPA_ONNX)

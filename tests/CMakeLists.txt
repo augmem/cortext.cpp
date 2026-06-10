@@ -103,7 +103,7 @@ add_executable(cortext_tests
   chat_metrics_state.test.cpp
   chat_stream_usage.test.cpp
   audio_planum_bridge.test.cpp
-  aait_gguf_encoder.test.cpp
+  aist_gguf_encoder.test.cpp
   ${CMAKE_SOURCE_DIR}/src/audio/planum_bridge.cpp
 )
 
