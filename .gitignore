@@ -21,7 +21,9 @@ DartConfiguration.tcl
 Makefile
 compile_commands.json
 *.cmake
+!cmake/*.cmake
 !third_party/sqlite-objstore/cmake/**/*.cmake
+!third_party/litert-lm/**/*.cmake
 .ninja
 *.ninja
 
@@ -75,6 +77,7 @@ Thumbs.db
 # Rust artifacts (this is a C++ project)
 Cargo.lock
 !third_party/sqlite-objstore/tests/wasm/rust/Cargo.lock
+!third_party/litert-lm/**/Cargo.lock
 
 # Dart/Flutter files (this is a C++ project)
 analysis_options.yaml
@@ -175,3 +178,6 @@ dist/
 target/
 vendor/
 .cache/
+
+# Local build-output symlink (created by the Linux build recipe)
+third_party/litert-lm-install
