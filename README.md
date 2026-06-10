@@ -6,6 +6,39 @@ Most memory systems for LLMs are open-loop: text flows in, gets chunked, embedde
 
 The architecture is specified formally in the accompanying paper. The design borrows ideas from the cognitive-science literature (working-memory capacity limits, reconsolidation, serial-position effects, emotional modulation of memory) as engineering heuristics. Cortext doesn't claim to model human memory. The claim is narrower: these borrowed mechanisms measurably improve machine memory, and the benchmarks to check that ship in this repo.
 
+## Evaluation Results (Alpha)
+
+The main end-to-end eval is the chat-replay protocol
+(`tools/run_chat_replay_release_protocol.py`). It replays a real chat export
+(text plus media) through the full pipeline, then a local LLM blind-judges
+three context arms on held-out probes: Cortext's compressed packet, standard
+embedding RAG, and the full history as an upper bound. Fixed seed, 3
+judgments per probe, bootstrap confidence intervals, fairness checks. The
+corpus format is just a directory with one timestamped `.txt` transcript plus
+media, so it runs on any export that matches the format, not just mine.
+
+Latest runs (June 2026, a private 1,200-message corpus, 39 probes × 3
+repetitions, local `gemma4:12b` judge):
+
+| Run | Cortext wins | Full-history wins | RAG wins | Ties | Cortext sufficiency | Context tokens | Token reduction |
+|---|---|---|---|---|---|---|---|
+| Working memory 7±2 | **42**/117 | 32 | 25 | 18 | 2.72 | ~262 vs ~6,100 | **96%** |
+| Working memory 4 (control) | **39**/117 | 35 | 20 | 23 | 2.43 | ~222 vs ~6,100 | **96%** |
+
+Caveats:
+
+- Judged sufficiency trails the fat-context arms (~2.4-2.7 vs ~3.1). That's
+  the cost of the compression, and raising working-memory capacity didn't
+  close it.
+- An earlier run in this series was invalid: stale vectors from an older
+  encoder were silently compared against the new embedding space. That
+  failure is why the engine now pins every database and precomputed artifact
+  to the encoder's fingerprint and refuses to start on a mismatch, with no
+  override. The paper documents both the failure and the rerun.
+- This is one private corpus and one judge model. I'm publishing the numbers
+  for transparency, not claiming benchmarks. The whole protocol ships in this
+  repo. Run it on your own data and tell me where it breaks.
+
 ## Why Cortext Exists
 
 Cortext began for a personal reason. In 2022, my father-in-law was diagnosed with dementia. Since then I've been focused on building systems that help people with memory loss preserve continuity, confidence, and independence.
@@ -16,7 +49,7 @@ The same architecture also happens to be useful for long-horizon LLM memory. But
 
 Cortext is built by one software engineer. I'm not an ML researcher or a psychologist. The cognitive-science references here come from reading the literature while building this. They shaped the design, but don't mistake my reading for expert interpretation. The system's value doesn't rest on it.
 
-What it does rest on is falsifiable: the benchmarks and results below. If you find a spot where the psychology is misapplied, a baseline is unfair, or an eval is flattering the system, open an issue. I want to know.
+What it does rest on is falsifiable: the benchmarks and results above. If you find a spot where the psychology is misapplied, a baseline is unfair, or an eval is flattering the system, open an issue. I want to know.
 
 ## The Loop
 
@@ -66,39 +99,6 @@ A few load-bearing results from [docs/paper/sections/9_experimental.qmd](docs/pa
 - **Bitemporal fact handling is required, not decorative.** Ablations on a `3 × 3 × 3` F/S/T sweep confirm that bitemporal history is required for historical and belief-at-time queries, and that stale penalties materially reduce present-oriented intrusion.
 
 Where earlier synthetic-encoder claims did **not** survive the switch to real embeddings (notably parts of the provenance, stale, and routine-vs-recency separations), the paper says so explicitly and marks those older numbers as superseded. The repo's claim about the loop rests on what reproduces under real encoders, not on what was convenient in synthetic ablations.
-
-## Evaluation Results (Alpha)
-
-The main end-to-end eval is the chat-replay protocol
-(`tools/run_chat_replay_release_protocol.py`). It replays a real chat export
-(text plus media) through the full pipeline, then a local LLM blind-judges
-three context arms on held-out probes: Cortext's compressed packet, standard
-embedding RAG, and the full history as an upper bound. Fixed seed, 3
-judgments per probe, bootstrap confidence intervals, fairness checks. The
-corpus format is just a directory with one timestamped `.txt` transcript plus
-media, so it runs on any export that matches the format, not just mine.
-
-Latest runs (June 2026, a private 1,200-message corpus, 39 probes × 3
-repetitions, local `gemma4:12b` judge):
-
-| Run | Cortext wins | Full-history wins | RAG wins | Ties | Cortext sufficiency | Context tokens | Token reduction |
-|---|---|---|---|---|---|---|---|
-| Working memory 7±2 | **42**/117 | 32 | 25 | 18 | 2.72 | ~262 vs ~6,100 | **96%** |
-| Working memory 4 (control) | **39**/117 | 35 | 20 | 23 | 2.43 | ~222 vs ~6,100 | **96%** |
-
-Caveats:
-
-- Judged sufficiency trails the fat-context arms (~2.4-2.7 vs ~3.1). That's
-  the cost of the compression, and raising working-memory capacity didn't
-  close it.
-- An earlier run in this series was invalid: stale vectors from an older
-  encoder were silently compared against the new embedding space. That
-  failure is why the engine now pins every database and precomputed artifact
-  to the encoder's fingerprint and refuses to start on a mismatch, with no
-  override. The paper documents both the failure and the rerun.
-- This is one private corpus and one judge model. I'm publishing the numbers
-  for transparency, not claiming benchmarks. The whole protocol ships in this
-  repo. Run it on your own data and tell me where it breaks.
 
 ## What Cortext Provides
 
