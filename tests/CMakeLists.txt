@@ -88,8 +88,6 @@ add_executable(cortext_tests
   implicit_feedback.test.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/telemetry_noop_by_default.test.cpp
   # Extractor and Summarizer tests
-  phi4_extractor.test.cpp
-  phi4_summarizer.test.cpp
   gemma_extractor.test.cpp
   gemma_summarizer.test.cpp
   json_schema_constraint.test.cpp
@@ -138,36 +136,6 @@ if(CORTEXT_ENABLE_GEMMA_ORT)
     )
   endif()
 endif()
-# For OGA-enabled builds, add path to ORT and OGA.
-if(NOT CORTEXT_DISABLE_OGA)
-  if(APPLE)
-    if(CORTEXT_ENABLE_GEMMA_ORT)
-      set_property(TARGET cortext_tests APPEND PROPERTY BUILD_RPATH
-        "@loader_path/../third_party/onnxruntime-install/lib"
-        "@loader_path/../third_party/onnxruntime-genai"
-      )
-    else()
-      # OGA uses downloaded ORT
-      set_property(TARGET cortext_tests APPEND PROPERTY BUILD_RPATH
-        "@loader_path/../ort-download/onnxruntime-osx-arm64-1.23.0/lib"
-        "@loader_path/../third_party/onnxruntime-genai"
-      )
-    endif()
-  elseif(UNIX)
-    if(CORTEXT_ENABLE_GEMMA_ORT)
-      set_property(TARGET cortext_tests APPEND PROPERTY BUILD_RPATH
-        "$ORIGIN/../third_party/onnxruntime-install/lib"
-        "$ORIGIN/../third_party/onnxruntime-genai"
-      )
-    else()
-      set_property(TARGET cortext_tests APPEND PROPERTY BUILD_RPATH
-        "$ORIGIN/../ort-download/onnxruntime-linux-x64-1.23.0/lib"
-        "$ORIGIN/../third_party/onnxruntime-genai"
-      )
-    endif()
-  endif()
-endif()
-
 # For LiteRT-LM enabled builds, add path to LiteRT-LM library
 if(NOT CORTEXT_DISABLE_LITERT)
   if(APPLE)

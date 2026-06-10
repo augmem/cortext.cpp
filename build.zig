@@ -73,12 +73,9 @@ const cortext_cpp_sources = &.{
     "src/operations/accumulator.cpp",
     "src/operations/accumulator_reset.cpp",
     "src/operations/spike_bypass.cpp",
-    "src/extractor/phi4_extractor.cpp",
     "src/extractor/gemma_extractor.cpp",
-    "src/summarizer/phi4_summarizer.cpp",
     "src/summarizer/gemma_summarizer.cpp",
     "src/deep_llm/deep_llm_factory.cpp",
-    "src/deep_llm/lfm2_llama_backend.cpp",
     "src/generator/json_decoder.cpp",
     "src/audio/gemma_audio.cpp",
 };
