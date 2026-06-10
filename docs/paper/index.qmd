@@ -30,7 +30,7 @@ The core contribution of this work is a formally specified memory architecture i
 4. A knowledge graph layer enables semantic consolidation and graph-augmented retrieval.
 5. Ingress-time Soft Anchor state preserves uncertain subject/entity continuity without forcing immediate hard binding.
 
-The remainder of this paper is organized as follows. Section 2 reviews relevant literature. Section 3 presents the mathematical foundations including notation, helper functions, and knob-derived parameters. Section 4 details the core algorithms for Focus, Sensitivity, and Stability adaptation. Section 5 describes structural metrics and composite scoring. Section 6 covers dynamic thresholding and homeostatic control. Section 7 presents the reinforcement and decay dynamics. Section 8 describes advanced cognitive processes including working memory, Soft Anchor formation, metacognition, and emotional consolidation. Section 9 details the consolidation and graph integration system. Section 10 presents the interrupt gate for streaming integration. Section 11 reports experimental results. Section 12 discusses implementation considerations and computational complexity. Section 13 concludes with limitations and future directions. In the source tree these correspond to `sections/1_...` through `sections/10_...`; the rendered manuscript section numbering includes the introduction and related-work sections before those files.
+The remainder of this paper is organized as follows. Section 2 reviews relevant literature. Section 3 presents the mathematical foundations including notation, helper functions, and knob-derived parameters. Section 4 details the core algorithms for Focus, Sensitivity, and Stability adaptation. Section 5 describes structural metrics and composite scoring. Section 6 covers dynamic thresholding and homeostatic control. Section 7 presents the reinforcement and decay dynamics. Section 8 describes advanced cognitive processes including working memory, Soft Anchor formation, metacognition, and emotional consolidation. Section 9 details the consolidation and graph integration system. Section 10 presents the interrupt gate for streaming integration. Section 11 reports experimental results. Section 12 discusses implementation considerations and computational complexity. Section 13 documents the performance profiling and optimization of the reference implementation. Section 14 concludes with limitations and future directions. In the source tree these correspond to `sections/1_...` through `sections/11_...`; the rendered manuscript section numbering includes the introduction and related-work sections before those files.
 
 # Related Work
 
@@ -73,6 +73,8 @@ The homeostatic threshold controller draws on classical control theory, specific
 {{< include sections/9_experimental.qmd >}}
 
 {{< include sections/10_implementation.qmd >}}
+
+{{< include sections/11_optimization.qmd >}}
 
 # Conclusion and Future Directions
 
