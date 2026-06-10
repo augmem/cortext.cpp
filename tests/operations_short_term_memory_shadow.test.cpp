@@ -33,7 +33,7 @@ Signal
 MakeSignal (const Eigen::VectorXf &embedding, uint64_t ts)
 {
   Signal s;
-  s.source_id = "julie-smoke";
+  s.source_id = "chat-replay-smoke";
   s.timestamp = ts;
   s.embedding = embedding;
   return s;
@@ -99,7 +99,7 @@ TEST_CASE ("STM shadow reuses cached label clusters and selects top labels",
   INFO ("stm_label_min_score="
         << cortext::core::STMLabelMinScore (cfg.focus, cfg.sensitivity,
                                             cfg.stability));
-  REQUIRE_FALSE (p_ctx.short_term_graphs["julie-smoke"].label_edges.empty ());
+  REQUIRE_FALSE (p_ctx.short_term_graphs["chat-replay-smoke"].label_edges.empty ());
   const auto first_centroid_0 = p_ctx.label_cluster_cache.centroids[0];
   const auto first_centroid_1 = p_ctx.label_cluster_cache.centroids[1];
 
@@ -165,7 +165,7 @@ TEST_CASE ("STM label selection expands top labels from flat-routed clusters",
   op.Execute (ctx, *tx);
   tx->Commit ();
 
-  const auto &edges = p_ctx.short_term_graphs["julie-smoke"].label_edges;
+  const auto &edges = p_ctx.short_term_graphs["chat-replay-smoke"].label_edges;
   REQUIRE (edges.size () >= 2);
   const auto has_alice = std::any_of (
       edges.begin (), edges.end (), [] (const auto &edge) {
@@ -200,10 +200,10 @@ TEST_CASE ("STM shadow hard boundary retention is knob-derived",
       1, core::STMShadowHardBoundaryRetainSteps (cfg.focus, cfg.sensitivity,
                                                  cfg.stability));
   p_ctx.signals_processed = 100;
-  auto &graph = p_ctx.short_term_graphs["julie-smoke"];
+  auto &graph = p_ctx.short_term_graphs["chat-replay-smoke"];
 
   ProcessorContext::ShadowSTMItem retained_item;
-  retained_item.source_id = "julie-smoke";
+  retained_item.source_id = "chat-replay-smoke";
   retained_item.step_index = p_ctx.signals_processed - retain_steps;
   retained_item.embedding = Vec (1.0f, 0.0f);
   graph.items.push_back (retained_item);
@@ -223,7 +223,7 @@ TEST_CASE ("STM shadow hard boundary retention is knob-derived",
   op.Execute (ctx, *tx);
   tx->Commit ();
 
-  const auto &items = p_ctx.short_term_graphs["julie-smoke"].items;
+  const auto &items = p_ctx.short_term_graphs["chat-replay-smoke"].items;
   REQUIRE (items.size () == 2);
   REQUIRE (items[0].step_index == p_ctx.signals_processed - retain_steps);
   REQUIRE (items[1].step_index == p_ctx.signals_processed);

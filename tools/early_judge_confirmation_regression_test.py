@@ -26,18 +26,18 @@ def load_module(name: str, path: pathlib.Path):
     return module
 
 
-judge = load_module("judge_julie_live_run_test_target", TOOLS_DIR / "judge_julie_live_run.py")
+judge = load_module("judge_chat_replay_live_run_test_target", TOOLS_DIR / "judge_chat_replay_live_run.py")
 watcher = load_module(
-    "watch_julie_probe_stream_judge_test_target",
-    TOOLS_DIR / "watch_julie_probe_stream_judge.py",
+    "watch_chat_replay_probe_stream_judge_test_target",
+    TOOLS_DIR / "watch_chat_replay_probe_stream_judge.py",
 )
 report = load_module(
-    "julie_release_protocol_report_test_target",
-    TOOLS_DIR / "julie_release_protocol_report.py",
+    "chat_replay_release_protocol_report_test_target",
+    TOOLS_DIR / "chat_replay_release_protocol_report.py",
 )
 ablations = load_module(
-    "run_julie_release_ablations_test_target",
-    TOOLS_DIR / "run_julie_release_ablations.py",
+    "run_chat_replay_release_ablations_test_target",
+    TOOLS_DIR / "run_chat_replay_release_ablations.py",
 )
 
 
@@ -140,12 +140,12 @@ def test_release_report_surfaces_early_stop_metadata() -> None:
         "expected_rows": 20,
     }
     status = {
-        "schema": "cortext_julie_release_benchmark_status_v1",
+        "schema": "cortext_chat_replay_release_benchmark_status_v1",
         "status": "early_judge_failed",
         "early_judge_exit_code": 2,
         "probe_stream": {"rows": 20, "required_rows_after_benchmark": 10},
         "early_judge_latest": {
-            "schema": "julie_probe_stream_early_judge_latest_v1",
+            "schema": "chat_replay_probe_stream_early_judge_latest_v1",
             "judge_provider": "ollama",
             "judge_model": "gemma4:12b-it-qat",
             "judge_repetitions": 1,
@@ -166,7 +166,7 @@ def test_release_report_surfaces_early_stop_metadata() -> None:
         },
     }
     manifest = {
-        "schema": "julie_probe_stream_early_judge_manifest_v1",
+        "schema": "chat_replay_probe_stream_early_judge_manifest_v1",
         "sha256": "abc123",
         "blind_packets": True,
         "judge_packet_item_limit": 256,

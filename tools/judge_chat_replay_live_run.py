@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
-"""Judge a Julie mixed-media live-run artifact with a local judge endpoint.
+"""Judge a chat-replay mixed-media live-run artifact with a local judge endpoint.
 
 This script is intentionally an eval adapter only. It does not feed transcripts
-back into Cortext. Text from the Julie export is used locally inside the judge
+back into Cortext. Text from the chat export is used locally inside the judge
 prompt, and output artifacts must be treated as private because local model
 reasons can still contain conversation-specific details.
 """
 
 from __future__ import annotations
+
+from chat_replay_corpus import discover_transcript
 
 import argparse
 import base64
@@ -29,7 +31,7 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from generate_julie_raw_speech_manifest import parse_messages, parse_timestamp
+from generate_chat_replay_raw_speech_manifest import parse_messages, parse_timestamp
 
 
 DEFAULT_NEMOTRON_MODEL = "nemotron-3-nano-omni-30b-a3b-8bit"
@@ -56,9 +58,12 @@ QUALITY_COMPOSITE_WEIGHTS = {
 QUALITY_SCORE_MAX = 5.0
 QUALITY_COMPOSITE_DEFINITION = "relevance + sufficiency - 0.25*noise"
 PACKET_ALIASES = ["A", "B", "C"]
-GABE_SOURCE_ID = "Gabe"
-JULIE_SOURCE_ID = "Julie"
-COMPACTED_HISTORY_SOURCE_ID = "Gabe-Julie-summary"
+USER_SOURCE_ID = "User"
+LEGACY_USER_SOURCE_ID = "Gabe"
+CONTACT_SOURCE_ID = "Contact"
+LEGACY_CONTACT_SOURCE_ID = "Julie"
+COMPACTED_HISTORY_SOURCE_ID = "User-Contact-summary"
+LEGACY_COMPACTED_HISTORY_SOURCE_ID = "Gabe-Julie-summary"
 TOKEN_ESTIMATE_POLICY = (
     "estimated_text_tokens=max(1, ceil(chars/4)); attached image/audio "
     "evidence counted as a small placeholder for prompt-fit checks, not "
@@ -168,7 +173,7 @@ def sum_doc_tokens(docs: list[TimelineDoc]) -> int:
 
 
 def source_for_message(message: dict) -> str:
-    return JULIE_SOURCE_ID if message["from_contact"] else GABE_SOURCE_ID
+    return CONTACT_SOURCE_ID if message["from_contact"] else USER_SOURCE_ID
 
 
 def media_kind(path: pathlib.Path) -> str:
@@ -285,7 +290,7 @@ def require_local_base_url(base_url: str, provider: str) -> str:
     parsed = urllib.parse.urlparse(base_url)
     if parsed.scheme not in {"http", "https"} or parsed.hostname not in LOCAL_JUDGE_HOSTS:
         raise RuntimeError(
-            "Refusing non-local judge endpoint for private Julie metadata: "
+            "Refusing non-local judge endpoint for private chat-replay metadata: "
             f"{base_url!r}. Start the local {provider} judge server and set a "
             "loopback URL."
         )
@@ -403,7 +408,7 @@ def resolve_judge_model(provider: str, model: str | None) -> str:
 def require_nemotron_model(model: str) -> None:
     if "nemotron" not in model.lower():
         raise RuntimeError(
-            f"Refusing non-Nemotron judge model for private Julie metadata: {model!r}. "
+            f"Refusing non-Nemotron judge model for private chat-replay metadata: {model!r}. "
             "Start the local Nemotron/MLX judge server and pass --model nemotron..."
         )
 
@@ -453,8 +458,8 @@ def convert_audio_for_judge(source: pathlib.Path, work_dir: pathlib.Path, stem: 
 def media_source_id(path: pathlib.Path, kind: str) -> str:
     name = path.name.lower()
     if kind == "audio" and ("_self" in name or " self " in name):
-        return GABE_SOURCE_ID
-    return JULIE_SOURCE_ID
+        return USER_SOURCE_ID
+    return CONTACT_SOURCE_ID
 
 
 def build_timeline(
@@ -463,7 +468,7 @@ def build_timeline(
     max_messages: int,
     media_limit: int,
 ) -> list[TimelineDoc]:
-    messages = parse_messages(input_dir / "Messages - Julie Willen.txt")
+    messages = parse_messages(discover_transcript(input_dir))
     if skip_messages > 0:
         messages = messages[skip_messages:]
     if max_messages >= 0:
@@ -1565,7 +1570,7 @@ def main() -> int:
         "--judge-provider",
         choices=("nemotron", "ollama"),
         default="ollama",
-        help="Local judge backend. Hosted endpoints are refused for Julie metadata.",
+        help="Local judge backend. Hosted endpoints are refused for chat-replay metadata.",
     )
     parser.add_argument(
         "--model",
@@ -1796,7 +1801,7 @@ def main() -> int:
     skipped_checkpoint_judgments = 0
 
     with checkpoint_rows.open("a") as checkpoint_file, tempfile.TemporaryDirectory(
-        prefix="cortext_julie_judge_media_"
+        prefix="cortext_chat_replay_judge_media_"
     ) as tmp:
         work_dir = pathlib.Path(tmp)
         probes_seen = 0
@@ -2277,7 +2282,7 @@ def main() -> int:
     )
 
     output = {
-        "schema": "julie_live_run_multimodal_judge_v8",
+        "schema": "chat_replay_live_run_multimodal_judge_v8",
         "summary_path": str(args.summary),
         "db_path": str(db_path),
         "input_dir": str(input_dir),

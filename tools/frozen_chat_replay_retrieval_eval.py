@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Freeze and evaluate Julie retrieval probes against labeled target memories.
+"""Freeze and evaluate chat-replay retrieval probes against labeled target memories.
 
 The labels produced here are deterministic, self-labeled relevance targets from
 the source timeline. They are useful for regression pressure, not as independent
@@ -7,6 +7,8 @@ human ground truth.
 """
 
 from __future__ import annotations
+
+from chat_replay_corpus import discover_transcript
 
 import argparse
 import hashlib
@@ -24,7 +26,7 @@ from datetime import datetime, timezone
 from statistics import mean, median
 from typing import Any
 
-from generate_julie_raw_speech_manifest import parse_messages, parse_timestamp
+from generate_chat_replay_raw_speech_manifest import parse_messages, parse_timestamp
 
 
 TOKEN_RE = re.compile(r"[a-z0-9][a-z0-9']+")
@@ -43,8 +45,8 @@ DEFAULT_OLLAMA_MODEL = "gemma4:12b-it-qat"
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".heic", ".gif", ".tiff"}
 VIDEO_EXTENSIONS = {".mov", ".mp4", ".3gp"}
 AUDIO_EXTENSIONS = {".m4a", ".wav", ".mp3"}
-GABE_SOURCE_ID = "Gabe"
-JULIE_SOURCE_ID = "Julie"
+USER_SOURCE_ID = "User"  # legacy artifacts used "Gabe"
+CONTACT_SOURCE_ID = "Contact"  # legacy artifacts used "Julie"
 
 
 @dataclass(frozen=True)
@@ -132,7 +134,7 @@ def tokens(text: str) -> list[str]:
 
 
 def source_for_message(message: dict) -> str:
-    return JULIE_SOURCE_ID if message["from_contact"] else GABE_SOURCE_ID
+    return CONTACT_SOURCE_ID if message["from_contact"] else USER_SOURCE_ID
 
 
 def media_kind(path: pathlib.Path) -> str:
@@ -149,8 +151,8 @@ def media_kind(path: pathlib.Path) -> str:
 def media_source_id(path: pathlib.Path, kind: str) -> str:
     name = path.name.lower()
     if kind == "audio" and ("_self" in name or " self " in name):
-        return GABE_SOURCE_ID
-    return JULIE_SOURCE_ID
+        return USER_SOURCE_ID
+    return CONTACT_SOURCE_ID
 
 
 def build_timeline(
@@ -159,7 +161,7 @@ def build_timeline(
     media_limit: int,
     skip_messages: int = 0,
 ) -> list[Doc]:
-    messages = parse_messages(input_dir / "Messages - Julie Willen.txt")
+    messages = parse_messages(discover_transcript(input_dir))
     if skip_messages > 0:
         messages = messages[skip_messages:]
     if max_messages >= 0:
@@ -1376,7 +1378,7 @@ def main() -> int:
         "--judge-provider",
         choices=("nemotron", "ollama"),
         default="ollama",
-        help="Loopback target-label judge provider for private Julie labels.",
+        help="Loopback target-label judge provider for private chat-replay labels.",
     )
     judge_freeze_p.add_argument("--model", default="")
     judge_freeze_p.add_argument(

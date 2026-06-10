@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build a public-safe aggregate report for Julie release windows."""
+"""Build a public-safe aggregate report for chat-replay release windows."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from typing import Any
 
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
-DEFAULT_PROTOCOL_SPEC = REPO_ROOT / "tools/julie_release_protocol_spec.json"
+DEFAULT_PROTOCOL_SPEC = REPO_ROOT / "tools/chat_replay_release_protocol_spec.json"
 SYSTEMS = ["cortext_native", "traditional_chat_rag", "full_history_upper_bound"]
 FIELDS = ["relevance", "sufficiency", "noise"]
 QUALITY_WEIGHTS = {"relevance": 1.0, "sufficiency": 1.0, "noise": -0.25}
@@ -84,7 +84,7 @@ def canonical_json_sha256(value: Any) -> str:
 
 def load_protocol_spec(path: pathlib.Path) -> dict[str, Any]:
     payload = load_json(path)
-    if payload.get("schema") != "cortext_julie_release_protocol_spec_v1":
+    if payload.get("schema") != "cortext_chat_replay_release_protocol_spec_v1":
         raise RuntimeError(f"unexpected protocol spec schema: {payload.get('schema')}")
     return payload
 
@@ -1210,12 +1210,12 @@ def main() -> int:
         [
             check(
                 "manifest_present",
-                manifest.get("schema") == "cortext_julie_release_windows_manifest_v1",
+                manifest.get("schema") == "cortext_chat_replay_release_windows_manifest_v1",
                 f"schema={manifest.get('schema')}",
             ),
             check(
                 "protocol_spec_present",
-                protocol_spec.get("schema") == "cortext_julie_release_protocol_spec_v1"
+                protocol_spec.get("schema") == "cortext_chat_replay_release_protocol_spec_v1"
                 and protocol_spec_path.exists(),
                 f"path={protocol_spec_path} schema={protocol_spec.get('schema')}",
             ),
@@ -1423,7 +1423,7 @@ def main() -> int:
     )
 
     output = {
-        "schema": "cortext_julie_release_windows_report_v1",
+        "schema": "cortext_chat_replay_release_windows_report_v1",
         "created_at_utc": utc_now(),
         "privacy": (
             "public-safe aggregate report: no message text, media bytes, "

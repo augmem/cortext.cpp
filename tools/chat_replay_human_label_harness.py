@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Human labeling harness for Julie retrieval probes.
+"""Human labeling harness for chat-replay retrieval probes.
 
 This tool builds a local labeling sample, launches a small Gradio UI, and
 converts completed human labels into the same frozen/eval format used by
-``frozen_julie_retrieval_eval.py``.
+``frozen_chat_replay_retrieval_eval.py``.
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ from datetime import datetime, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from frozen_julie_retrieval_eval import (
+from frozen_chat_replay_retrieval_eval import (
     build_timeline,
     canonical_hash,
     connect,
@@ -360,9 +360,9 @@ def launch(args: argparse.Namespace) -> int:
 
     def speaker_label(source_id: str) -> str:
         if source_id == "chat/user":
-            return "Gabe"
+            return "User"
         if source_id == "chat/assistant":
-            return "Julie"
+            return "Contact"
         return source_id
 
     def display_datetime(timestamp_ms: int) -> str:
@@ -373,7 +373,7 @@ def launch(args: argparse.Namespace) -> int:
         except Exception:
             return str(timestamp_ms)
 
-    thumb_dir = pathlib.Path("build/julie_human_label_thumbnails")
+    thumb_dir = pathlib.Path("build/chat_replay_human_label_thumbnails")
     thumb_dir.mkdir(parents=True, exist_ok=True)
 
     def thumbnail_path(path: pathlib.Path, max_px: int = 720) -> str | None:

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Launch the local OpenAI-compatible judge endpoint used by the Julie/Nemotron
+# Launch the local OpenAI-compatible judge endpoint used by the chat-replay/Nemotron
 # evaluation scripts. The judge scripts default to this URL and model name.
 
 MODEL_ID="${MODEL_ID:-mlx-community/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-8bit}"

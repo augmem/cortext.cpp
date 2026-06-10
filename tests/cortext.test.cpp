@@ -708,7 +708,7 @@ TEST_CASE ("Cortext expands durable association retrieval nodes even when the cu
   std::vector<float> embedding (kEmbeddingDim, 0.0f);
   embedding[0] = 1.0f;
 
-  const std::string source_text = "Julie mentioned the art show downtown.";
+  const std::string source_text = "Jamie mentioned the art show downtown.";
   const std::string cue_text = "durable cue about art";
   const std::vector<unsigned char> source_payload (source_text.begin (),
                                                    source_text.end ());
@@ -771,9 +771,9 @@ TEST_CASE ("Cortext surfaces deep consolidated summaries as LTM content",
   std::vector<float> embedding (kEmbeddingDim, 0.0f);
   embedding[0] = 1.0f;
 
-  const std::string source_text = "Julie asked about a package delivery.";
+  const std::string source_text = "Jamie asked about a package delivery.";
   const std::string summary_text
-      = "Julie and Gabe discussed a package delivery.";
+      = "Jamie and Quinn discussed a package delivery.";
   const std::vector<unsigned char> source_payload (source_text.begin (),
                                                    source_text.end ());
   const std::vector<unsigned char> summary_payload (summary_text.begin (),
@@ -836,7 +836,7 @@ TEST_CASE ("Cortext expands durable label retrieval nodes through association so
   std::vector<float> embedding (kEmbeddingDim, 0.0f);
   embedding[0] = 1.0f;
 
-  const std::string source_text = "Julie talked about the gallery opening.";
+  const std::string source_text = "Jamie talked about the gallery opening.";
   const std::vector<unsigned char> source_payload (source_text.begin (),
                                                    source_text.end ());
   auto source_blob_rows = store->Execute ("SELECT objstore_put(?1) AS id",
@@ -898,8 +898,8 @@ TEST_CASE ("Cortext orders durable label source hydration by query similarity",
   std::vector<float> unrelated_embedding (kEmbeddingDim, 0.0f);
   unrelated_embedding[1] = 1.0f;
 
-  const std::string relevant_text = "Julie talked about noodles at Moon Plaza.";
-  const std::string recent_text = "Julie mentioned a different errand.";
+  const std::string relevant_text = "Jamie talked about noodles at Moon Plaza.";
+  const std::string recent_text = "Jamie mentioned a different errand.";
   const std::vector<unsigned char> relevant_payload (relevant_text.begin (),
                                                      relevant_text.end ());
   const std::vector<unsigned char> recent_payload (recent_text.begin (),

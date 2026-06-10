@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Finalize the Julie release protocol after judge, ablations, and labels finish."""
+"""Finalize the chat-replay release protocol after judge, ablations, and labels finish."""
 
 from __future__ import annotations
 
@@ -295,7 +295,7 @@ def ensure_target_freeze(args: argparse.Namespace, target_freeze: pathlib.Path) 
         return
     cmd = [
         args.python,
-        "tools/frozen_julie_retrieval_eval.py",
+        "tools/frozen_chat_replay_retrieval_eval.py",
         "judge-freeze",
         "--summary",
         str(args.summary),
@@ -401,7 +401,7 @@ def main() -> int:
     human_eval = args.base / "human_label_eval.json"
     score_cmd = [
         args.python,
-        "tools/julie_human_label_harness.py",
+        "tools/chat_replay_human_label_harness.py",
         "score",
         "--sample",
         str(args.sample),
@@ -423,7 +423,7 @@ def main() -> int:
 
     report_cmd = [
         args.python,
-        "tools/julie_release_protocol_report.py",
+        "tools/chat_replay_release_protocol_report.py",
         "--summary",
         str(args.summary),
         "--judge",

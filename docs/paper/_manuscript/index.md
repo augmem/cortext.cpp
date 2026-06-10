@@ -3889,7 +3889,7 @@ replacement path consumed the same refined labels through
 with three true labels, zero false labels, precision **1.00**, and
 recall **1.00**.
 
-On **May 23, 2026**, we ran the Julie conversation replay through the
+On **May 23, 2026**, we ran the personal-chat conversation replay through the
 same production Cortext path rather than a summary-only proxy: normal
 working memory, STM graph creation, consolidation, relabel/prune,
 source-preserving `derived_from` links, durable `has_label` links, label
@@ -3975,7 +3975,7 @@ scoring for durable LTM by default and added an exact text-label route
 from a live text query to durable labels and then back to their
 `derived_from` source memories. A focused graph-retrieval regression
 verifies the mapping on a synthetic “River Park” query without relying
-on embedding similarity. On the Julie replay, the new path did activate:
+on embedding similarity. On the personal-chat replay, the new path did activate:
 production retrieval debug rows included durable-source boosts of
 **0.968**, **0.760**, and **0.751** with **7–8** backed source memories.
 This improved LTM-only sufficiency from **1.0** to **1.5** and full
@@ -3995,7 +3995,7 @@ The May 23 working-memory query replay
 continuity budget into the normal knob system rather than standalone
 retrieval settings: the number of working-memory slots and character
 budget are derived from Focus and Stability. On the 80-message
-privacy-safe Julie slice, production retrieval appended working-memory
+privacy-safe corpus slice, production retrieval appended working-memory
 query text on **7 / 7** probes, with a derived slot budget of **3** and
 **652** total appended characters. This disproves the earlier hypothesis
 that production fact routing failed because working-memory text was
@@ -4057,7 +4057,7 @@ weakly aligned with live queries to behave like a RAG-quality standalone
 memory index.
 
 A historical OpenAI-judged development smoke test then exercised the
-knob-derived production path on a smaller 20-message Julie replay after
+knob-derived production path on a smaller 20-message personal-chat replay after
 moving the remaining numeric STM/retrieval settings behind
 Focus/Sensitivity/Stability helpers
 (`build/stm_ltm_knob_derived_smoke_v46_openai.json`). This run used
@@ -4142,7 +4142,7 @@ map those hits back to Cortext source memories, expand through
 `derived_from`, `has_label`, label relation/co-occurrence, fact
 evidence, and temporal-neighbor links, then rank source memories with
 weights derived only from Focus/Sensitivity/Stability. On the same
-80-message semantic-gated Julie slice, all **40 / 40** lexical seeds
+80-message semantic-gated corpus slice, all **40 / 40** lexical seeds
 mapped back to source memories, graph expansion contributed candidates
 on **3 / 8** probes, and fact expansion contributed on **4 / 8** probes.
 The packet used more prompt budget than normal RAG with active history
@@ -4200,9 +4200,9 @@ F/S/T-derived graph, fact, and temporal expansion routes. The regression
 `Graph retrieval preserves source seeds when consolidated summaries exist`
 verifies that a consolidated summary surface no longer suppresses a
 matching source anchor or its durable-label related source. The
-100-message native Julie text rerun
-(`build/julie_native_text_100_retrieval_first_v2/eval.json` and
-`build/julie_native_text_100_retrieval_first_v2/judge.json`) processed
+100-message native personal-chat text rerun
+(`build/chat_replay_native_text_100_retrieval_first_v2/eval.json` and
+`build/chat_replay_native_text_100_retrieval_first_v2/judge.json`) processed
 the same 100 messages, ran **9** daily consolidations, and judged **10**
 probes with `gpt-5.4-mini`. It did not improve the native chat result:
 Cortext averaged **1032.2** prompt tokens, **40.4** context items,
@@ -4223,9 +4223,9 @@ routes, then returns a compact selected set from
 `RetrievalGraphExpandedRagMaxItems(F,T)`. The regression
 `Graph retrieval uses broad source seeds but compact knob-derived output`
 verifies that seed breadth and final prompt breadth are separate
-F/S/T-derived quantities. On the matched 100-message Julie text rerun
-(`build/julie_native_text_100_retrieval_first_compact_v2/eval.json` and
-`build/julie_native_text_100_retrieval_first_compact_v2/judge.json`),
+F/S/T-derived quantities. On the matched 100-message personal-chat text rerun
+(`build/chat_replay_native_text_100_retrieval_first_compact_v2/eval.json` and
+`build/chat_replay_native_text_100_retrieval_first_compact_v2/judge.json`),
 Cortext averaged **386.3** prompt tokens and **15.5** context items over
 **10** probes, down from **955.7** prompt tokens and **38.0** items in
 the corrected native baseline and below traditional chat+RAG’s **752.6**
@@ -4244,11 +4244,11 @@ We then retuned only the existing F/S/T-derived compact budget, raising
 `RetrievalGraphExpandedRagMaxItems(F,T)` from
 `lerp(12, 5, FocusBias(F))` to `lerp(20, 8, FocusBias(F))`. The current
 implementation applies the later retrieval-specific midpoint remap
-through `RetrievalFocusBias(F)`. At the Julie replay knobs (`F=0.35`,
+through `RetrievalFocusBias(F)`. At the personal-chat replay knobs (`F=0.35`,
 `T=0.6`), the final selected budget rises from **10** to **17** while
 the broad source/blob seed budget remains unchanged. The matched rerun
-(`build/julie_native_text_100_retrieval_first_compact_v3/eval.json` and
-`build/julie_native_text_100_retrieval_first_compact_v3/judge.json`)
+(`build/chat_replay_native_text_100_retrieval_first_compact_v3/eval.json` and
+`build/chat_replay_native_text_100_retrieval_first_compact_v3/judge.json`)
 preserved the token advantage while recovering quality: Cortext averaged
 **526.4** prompt tokens and **20.7** context items, still below
 traditional chat+RAG’s **752.6** prompt tokens and **65.0** items.
@@ -4263,8 +4263,8 @@ noise, and much better sufficiency than the first compact setting.
 We then ran a historical local-Nemotron tuning sweep over the native
 mixed-media chat path across the exposed Focus/Sensitivity/Stability
 controls at `{0.25, 0.50, 0.75}` for each knob
-(`build/julie_mixed_media_knob_matrix_20260526/summary.json`). Each of
-the **27** rows processed the same Julie replay slice through public
+(`build/chat_replay_mixed_media_knob_matrix_20260526/summary.json`). Each of
+the **27** rows processed the same personal-chat replay slice through public
 Cortext calls only: **200** text messages, **16** media items, daily
 deep consolidation, seeded production label vectors, and no ASR
 transcript shortcut into Cortext. Judging used the local Nemotron omni
@@ -4285,7 +4285,7 @@ retrieval/STM-label midpoint biases so the public neutral setting
 leaving non-retrieval global knob semantics unchanged.
 
 A reduced post-remap rerun over the upper/neutral region
-(`build/julie_mixed_media_knob_matrix_post_remap_20260527/summary.json`)
+(`build/chat_replay_mixed_media_knob_matrix_post_remap_20260527/summary.json`)
 shows that this remap fixed cost direction but did not make
 `0.50 / 0.50 / 0.50` the judged optimum. The new default row used fewer
 estimated Cortext packet tokens than the old default (**796**
@@ -4304,7 +4304,7 @@ meant to absorb the judged optimum.
 We therefore added a retrieval-only Stability midpoint remap and reran
 the same reduced matrix with the previously missing `T=0.25` rows
 included
-(`build/julie_mixed_media_knob_matrix_post_stability_remap_20260527/summary.json`).
+(`build/chat_replay_mixed_media_knob_matrix_post_stability_remap_20260527/summary.json`).
 The default improved materially: `F=S=T=0.50` scored **4 / 4** Cortext
 wins, **4.50** relevance, **4.00** sufficiency, **0.00** noise, **4.70**
 aggregate quality, and about **783** estimated Cortext packet tokens.
@@ -4318,12 +4318,12 @@ neutral midpoint all the way to that high-focus/high-stability effective
 point failed the source-backed durable-label graph retrieval tests, so
 we kept the conservative Stability remap. The current verdict is that
 the default is strong and much improved, but the judged
-compactness/quality knee for this Julie mixed-media slice still sits
+compactness/quality knee for this personal-chat mixed-media slice still sits
 above neutral on Focus and Stability.
 
 We also checked judge determinism on the three closest rows by repeating
 the local Nemotron `vllm-mlx` judge pass five times per row
-(`build/julie_mixed_media_knob_matrix_post_stability_remap_20260527/judge_stability/summary.json`).
+(`build/chat_replay_mixed_media_knob_matrix_post_stability_remap_20260527/judge_stability/summary.json`).
 The observed variance was zero on this fixed prompt/model path:
 `F=0.75, S=0.50, T=0.75` ranked first in **5 / 5** repeats with **4.90
 +/- 0.00** quality, `F=0.75, S=0.25, T=0.50` ranked second with **4.85
@@ -4331,11 +4331,11 @@ The observed variance was zero on this fixed prompt/model path:
 The result should still be treated as a small-slice ranking, but the
 ordering is not an artifact of single-pass judge randomness.
 
-We then profiled a pre-audit native path on a one-week Julie replay with
+We then profiled a pre-audit native path on a one-week personal-chat replay with
 mixed media and daily consolidation enabled
-(`build/julie_week_media_daily_profile.json`,
-`build/julie_week_media_daily_judge.json`). A later benchmark audit
-found that the Julie probe rows in this family used an extra
+(`build/chat_replay_week_media_daily_profile.json`,
+`build/chat_replay_week_media_daily_judge.json`). A later benchmark audit
+found that the personal-chat probe rows in this family used an extra
 `Retention::Ephemeral` preflight before durable ingest. That still
 executed the processor and could mutate long-lived state, so the
 week-scale quality numbers are now treated as superseded exploratory
@@ -4355,8 +4355,8 @@ corrected harness now reuses the single durable public Cortext call for
 both chat ingest and probe measurement, and every probe records the
 `single_durable_chat_turn_reused_for_probe_and_ingest` policy. The
 corrected 200-message mixed-media replay
-(`build/julie_mixed_media_native_200_singlepass/summary.json`,
-`build/julie_mixed_media_native_200_singlepass/nemotron_judge.json`)
+(`build/chat_replay_mixed_media_native_200_singlepass/summary.json`,
+`build/chat_replay_mixed_media_native_200_singlepass/nemotron_judge.json`)
 processed **200** text messages plus **16** media items (**8** audio,
 **6** images, **2** videos), performed **4** daily deep-consolidation
 cycles, and judged **4** probes with the local Nemotron `vllm-mlx` judge
@@ -4367,8 +4367,8 @@ The native Cortext packet averaged **183.8** context tokens versus
 **1838.3** for traditional chat+RAG, a **90.0%** prompt-token reduction.
 
 The broader corrected 500-message replay
-(`build/julie_mixed_media_native_500_singlepass_budget4k/summary.json`,
-`build/julie_mixed_media_native_500_singlepass_budget4k/nemotron_judge.json`)
+(`build/chat_replay_mixed_media_native_500_singlepass_budget4k/summary.json`,
+`build/chat_replay_mixed_media_native_500_singlepass_budget4k/nemotron_judge.json`)
 processed **500** text messages plus the same **16** media items,
 performed **8** daily deep-consolidation cycles, and again judged **4**
 probes locally. All probes used the corrected single-durable policy.
@@ -4405,7 +4405,7 @@ rows, **348** `LONG_TERM` rows, **347** `WORKING` rows, **10**
 leakage. The clean full-corpus timestamped replay was then stopped early
 because the observed throughput made full-corpus completion impractical
 for an interactive release gate. The stopped checkpoint
-(`build/julie_full_corpus_native_replay_timestamped_20260606/live.sqlite`)
+(`build/chat_replay_full_corpus_native_replay_timestamped_20260606/live.sqlite`)
 covered the source timeline through **2019-11-25 12:03:29**, with
 **3307** signal rows, **1622** `LONG_TERM` rows, **1615** `WORKING`
 rows, **63** `LABEL` rows, **36** `ASSOCIATION` memory rows, **8095**
@@ -4433,8 +4433,8 @@ a live chat rather than skipping ungraded turns.
 
 The following is a historical checkpoint-local Nemotron diagnostic, not
 release-gated evidence. The corrected clocked checkpoint artifact
-(`build/julie_checkpoint_eval_clocked_20260606/summary.json`,
-`build/julie_checkpoint_eval_clocked_20260606/nemotron_judge.json`)
+(`build/chat_replay_checkpoint_eval_clocked_20260606/summary.json`,
+`build/chat_replay_checkpoint_eval_clocked_20260606/nemotron_judge.json`)
 judged **8** future-turn probes locally with Nemotron. Cortext returned
 **4** working-memory items on every probe, **0** LTM retrieval items on
 this narrow immediate-future slice, and averaged **43.0** context
@@ -4450,9 +4450,9 @@ failure. The run also shows the current LTM gap clearly: the checkpoint
 win came from working memory, not retrieved LTM.
 
 A subsequent private local development run
-(`build/julie_release_early_gate_cross_speaker_v1/`) exercised the
+(`build/chat_replay_release_early_gate_cross_speaker_v1/`) exercised the
 streamed Gemma 4 12B early-judge gate after adding chat-aware WM
-temporal expansion. The runner used the real local Julie input
+temporal expansion. The runner used the real local personal-chat input
 directory, daily deep consolidation, the default `F=S=T=0.50` knobs,
 blind packets, and local Ollama `gemma4:12b-it-qat`. The run was
 intentionally stopped after the first checkpoint to avoid spending more
@@ -4534,7 +4534,7 @@ We also fixed the exact source-text route so a query match on a source
 blob seeds the original source memory, the durable associative cue, and
 the durable label node together instead of seeding only the source
 memory. A focused regression now asserts that the durable label is
-surfaced first while still mapping back to the source memory. The Julie
+surfaced first while still mapping back to the source memory. The chat-replay
 ablations with a stronger durable-source floor
 (`build/stm_ltm_text_seed_durable_nodes_v20_openai.json`) and a fully
 relaxed source-text threshold
@@ -4554,7 +4554,7 @@ sentence-start discourse words and generic one-token object labels while
 preserving multi-token anchors. The regression test now rejects generic
 current labels such as standalone discourse words, two-character
 fragments, and isolated object words, while still admitting concrete
-multi-token place/event/object labels. On the 80-message Julie replay
+multi-token place/event/object labels. On the 80-message personal-chat replay
 (`build/stm_ltm_discourse_label_filter_v22_80_openai.json`), the cleaner
 gate reduced durable nodes from **24** to **17** and label-source
 backing pairs from **183** to **111**, with **70 / 70** source memories
@@ -4625,7 +4625,7 @@ Transcript text is therefore allowed only as external ground truth for
 the judge because the same text was used to synthesize the speech
 fixture.
 
-We then reran the Julie text and raw-speech memory benchmark after
+We then reran the chat-replay text and raw-speech memory benchmark after
 removing the remaining benchmark-only retrieval policies. The corrected
 harness uses native Cortext output directly: full working memory, STM,
 LTM, and daily consolidation; no benchmark-side memory caps, retrieval
@@ -4639,8 +4639,8 @@ labels, OCR, or text fallback enters Cortext. The transcript is used
 only as private judge ground truth because it was the source used to
 synthesize the speech.
 
-The corrected text run (`build/julie_native_text_100_v2/eval.json` and
-`build/julie_native_text_100_v2/judge.json`) processed **100** text
+The corrected text run (`build/chat_replay_native_text_100_v2/eval.json` and
+`build/chat_replay_native_text_100_v2/judge.json`) processed **100** text
 messages, ran **9** daily consolidations, and judged **10** probes with
 `gpt-5.4-mini`. Native Cortext WM+STM+LTM averaged **955.7** prompt
 tokens and **38.0** returned context items per probe; traditional
@@ -4652,8 +4652,8 @@ traditional chat+RAG scored **4.8 / 4.7 / 0.7 / 4.9 / 4.9** with **3**
 wins. The full-history arm is retained only as an upper bound and scored
 **4.9** relevance and **4.9** sufficiency.
 
-The corrected raw-audio run (`build/julie_native_audio_100_v5/eval.json`
-and `build/julie_native_audio_100_v5/judge.json`) processed the same
+The corrected raw-audio run (`build/chat_replay_native_audio_100_v5/eval.json`
+and `build/chat_replay_native_audio_100_v5/judge.json`) processed the same
 **100** messages as raw speech, ran **9** daily consolidations, and
 judged **10** probes. It records
 `transcript_text_passed_to_cortext=false`, `asr_transcript_used=false`,
@@ -4668,7 +4668,7 @@ wins; traditional chat+RAG scored **4.1 / 3.7 / 0.5 / 4.5 / 4.4** with
 and **3.9** sufficiency.
 
 The combined privacy-safe comparison is
-`build/julie_native_text_audio_comparison_v1.json`. The corrected
+`build/chat_replay_native_text_audio_comparison_v1.json`. The corrected
 verdict is negative for replacement: on this 100-message private slice,
 native Cortext text is roughly quality-parity with traditional chat+RAG
 but uses more prompt tokens, and native raw audio runs end-to-end
@@ -4682,14 +4682,14 @@ cues, not source persistence.
 
 The ablation artifacts are:
 
--   `tools/generate_julie_raw_speech_manifest.py`
--   `tools/judge_julie_raw_speech_eval.py`
--   `build/julie_raw_speech_100/manifest.json`
--   `build/julie_native_text_100_v2/eval.json`
--   `build/julie_native_text_100_v2/judge.json`
--   `build/julie_native_audio_100_v5/eval.json`
--   `build/julie_native_audio_100_v5/judge.json`
--   `build/julie_native_text_audio_comparison_v1.json`
+-   `tools/generate_chat_replay_raw_speech_manifest.py`
+-   `tools/judge_chat_replay_raw_speech_eval.py`
+-   `build/chat_replay_raw_speech_100/manifest.json`
+-   `build/chat_replay_native_text_100_v2/eval.json`
+-   `build/chat_replay_native_text_100_v2/judge.json`
+-   `build/chat_replay_native_audio_100_v5/eval.json`
+-   `build/chat_replay_native_audio_100_v5/judge.json`
+-   `build/chat_replay_native_text_audio_comparison_v1.json`
 -   `tools/realtime_label_cluster_tree_ablation.py`
 -   `build/realtime_label_partition_drill_ablation_20260520_b8_l6/realtime_label_cluster_tree_ablation.json`
 -   `build/realtime_label_cluster_tree_ablation_20260520_scored_b8_l6/realtime_label_cluster_tree_ablation.json`
@@ -10276,7 +10276,7 @@ structured semantic signals beyond shallow associations.
 
 ## Reinforcement Ablation (Long Horizon)
 
-On **June 9, 2026**, the Julie release probe stream exposed a production
+On **June 9, 2026**, the chat-replay release probe stream exposed a production
 graph plasticity problem: repeated compact retrieval packets were
 creating durable reinforcement hubs because `DetectMemoryUsage` used a
 fixed `0.1` increment for every pair of co-retrieved memories. We
@@ -10288,7 +10288,7 @@ verification artifacts are in
 
 The numeric step-matrix ablation compares the old fixed update to the
 new rule. At the default knobs (`F=S=T=0.5`) and a 13-item retrieved
-packet matching the Julie trace shape, the selected/used-memory pair
+packet matching the personal-chat trace shape, the selected/used-memory pair
 update falls from `0.10000` to `0.01981` (**5.0x** slower), while an
 unselected co-retrieval pair falls to `0.00282` (**35.4x** slower). For
 a 20-item packet, those reductions are **6.3x** and **44.0x**
@@ -10300,7 +10300,7 @@ marks `reinforcement_edges` as essential for the best score
 (`mean_marginal = 1.0`, `max_score_without = 13.0`,
 `essential_for_best = 1`), so the fix slows noisy online graph
 plasticity without removing the reinforcement family. This is a
-mechanism-level verification only; Julie release-quality claims must be
+mechanism-level verification only; chat-replay release-quality claims must be
 rerun against the rebuilt production binary.
 
 We reran the reinforcement ablation on **Apr 4, 2026** under
@@ -12489,11 +12489,11 @@ relevance margin before injecting one-turn conversational LTMs.
 
 Artifacts:
 
--   `examples/benchmark/julie_conversation_memory_bakeoff.cpp`
--   `build/julie_ranked_uncapped_fixedrag_judged.json`
--   `build/julie_ranked_cap8_fixedrag_judged.json`
+-   `examples/benchmark/chat_replay_conversation_memory_bakeoff.cpp`
+-   `build/chat_replay_ranked_uncapped_fixedrag_judged.json`
+-   `build/chat_replay_ranked_cap8_fixedrag_judged.json`
 
-### Rolling Julie Chat Memory Bakeoff
+### Rolling Personal-Chat Memory Bakeoff
 
 On **May 25, 2026**, we ran the first tractable rolling judged version
 of the private spouse-conversation chat-memory bakeoff. This run uses a
@@ -12505,14 +12505,14 @@ until compaction while Cortext carries only bounded working memory plus
 STM/LTM graph memory. The summary artifact is privacy-safe: it records
 counters, scores, token estimates, media coverage, skipped-media
 reasons, and judge aggregates, but no message text. This subsection is
-historical: it predates the current `cortext_julie_live_run` release
+historical: it predates the current `cortext_chat_replay_live_run` release
 protocol, default-knob command checks, probe-time Cortext packet
 freezing, and local-only Gemma 4 judge gate.
 
 Historical command:
 
 ``` bash
-source env.sh && ./build/examples/benchmark/cortext_julie_conversation_memory_bakeoff \
+source env.sh && ./build/examples/benchmark/cortext_chat_replay_conversation_memory_bakeoff \
   --rolling-eval \
   --stratified-sample-messages 1000 \
   --media-adjacent-min 50 \
@@ -12521,12 +12521,12 @@ source env.sh && ./build/examples/benchmark/cortext_julie_conversation_memory_ba
   --active-history-token-budget 8000 \
   --judge-model nemotron-3-nano-omni-30b-a3b-8bit \
   --judge-limit 30 \
-  --db build/julie_rolling_gemma4_nemotron_1000.sqlite \
-  --out build/julie_rolling_gemma4_nemotron_1000.json \
+  --db build/chat_replay_rolling_gemma4_nemotron_1000.sqlite \
+  --out build/chat_replay_rolling_gemma4_nemotron_1000.json \
   --models models
 ```
 
-Current private Julie runs are restricted to loopback-only local judge
+Current private personal-chat runs are restricted to loopback-only local judge
 endpoints and reject hosted judge URLs before any private packet is
 sent. The current release protocol uses local Ollama Gemma 4 12B
 (`gemma4:12b-it-qat`) for the blind multimodal judge; the older local
@@ -12720,7 +12720,7 @@ through the slow path in one pass.
 
 We then added a smaller historical native mixed-media replay to isolate
 production Cortext behavior without hosted judging or benchmark-only
-prompt packets. The fixture uses the same Julie export, **200**
+prompt packets. The fixture uses the same chat export, **200**
 chronological text messages, **8** generated speech clips, **6** images,
 and **2** video-frame/image items. Text is processed through
 `ProcessTextAt`, audio through `ProcessAudio`, and images/video frames
@@ -12733,9 +12733,9 @@ private-text leak scan found **0** leaks in every row. This is not the
 current release judge path.
 
 As a local judge cross-check on the earlier **80-message** mixed-media
-slice, we also wired `tools/judge_julie_live_run.py` to a loopback-only
+slice, we also wired `tools/judge_chat_replay_live_run.py` to a loopback-only
 Ollama provider and ran Gemma 4 12B (`gemma4:12b-it-qat`) over
-`build/julie_mixed_media_native_80/summary.json`. The adapter preserves
+`build/chat_replay_mixed_media_native_80/summary.json`. The adapter preserves
 the same native Cortext and normal chat+RAG packets, but now blinds
 packet identity before judging: packet order is deterministically
 randomized per probe, the judge sees only `A`/`B`/`C`, and the private
@@ -12747,7 +12747,7 @@ rejected before judging. This 12B path is also the current release-grade
 local judge path for private mixed-media replay.
 
 The current default-knob smoke rerun
-(`build/julie_release_default_80/gemma4_12b_ollama_blind_judge.json`)
+(`build/chat_replay_release_default_80/gemma4_12b_ollama_blind_judge.json`)
 uses the same 80-message mixed-media input, records
 `focus = sensitivity = stability = 0.5`, enables daily deep
 consolidation, and judges **3** fixed probes. Cortext won **3 / 3**,
@@ -12765,7 +12765,7 @@ not a release claim: it is too small and has only one local judge
 repetition.
 
 To make that distinction explicit, we added and hardened
-`tools/julie_release_protocol_report.py`, which builds a public-safe
+`tools/chat_replay_release_protocol_report.py`, which builds a public-safe
 release protocol bundle from a private live-run summary and a private
 judge artifact. The bundle excludes message text, source-blob filenames,
 and judge reason strings, but records SHA-256 hashes of the private
@@ -12839,9 +12839,9 @@ and judge command must match its summary/judge artifacts before it can
 support an algorithm-attribution claim.
 
 The release runner now also supports streamed early warning during the
-expensive private replay. `cortext_julie_live_run` writes a compact
+expensive private replay. `cortext_chat_replay_live_run` writes a compact
 `<summary>.probes.jsonl` sidecar immediately after each fixed probe
-packet is constructed. `tools/watch_julie_probe_stream_judge.py` can
+packet is constructed. `tools/watch_chat_replay_probe_stream_judge.py` can
 materialize partial private summaries from that sidecar, run the same
 loopback-only Gemma 4 12B judge on milestone probe counts, and fail fast
 on configurable floors. The private runner uses a compact 32k judge
@@ -12871,7 +12871,7 @@ regime: prior chat has compacted, vector RAG has added text outside the
 raw rolling history, or the raw rolling-history packet has reached the
 full active-history budget. This prevents an early pre-compaction
 raw-history packet from terminating replay while still surfacing the
-quality trend immediately. `tools/run_julie_release_protocol.py` wraps
+quality trend immediately. `tools/run_chat_replay_release_protocol.py` wraps
 the main release replay so that a non-streaming benchmark binary is
 rejected when early judging is enabled, the early watcher runs beside
 the benchmark, and a failed early gate terminates the replay before the
@@ -12920,7 +12920,7 @@ supports probe streams; a missing or failing ablation early judge is a
 protocol failure rather than a warning.
 
 The fresh default 80-message report
-(`build/julie_release_default_80/release_protocol_report.json`) is
+(`build/chat_replay_release_default_80/release_protocol_report.json`) is
 intentionally **not ready**: it passes **17** checks, fails the
 probe-count and judge-repetition floors, and leaves human labels,
 architecture ablations, and peak-RSS recording pending. This is the
@@ -13106,35 +13106,35 @@ required by the release report.
 
 Artifacts:
 
--   `build/julie_mixed_media_native_200/summary.json`
--   `build/julie_mixed_media_native_200/nemotron_judge.json`
--   `build/julie_mixed_media_native_200_no_facts/summary.json`
--   `build/julie_mixed_media_native_200_no_facts/nemotron_judge.json`
--   `build/julie_mixed_media_native_200_no_facts/diagnostics.json`
--   `build/julie_mixed_media_native_200_no_temporal/summary.json`
--   `build/julie_mixed_media_native_200_no_temporal/nemotron_judge.json`
--   `build/julie_mixed_media_native_200_no_temporal/diagnostics.json`
--   `build/julie_mixed_media_native_200_no_stm_label_handoff/summary.json`
--   `build/julie_mixed_media_native_200_no_stm_label_handoff/nemotron_judge.json`
--   `build/julie_mixed_media_native_200_no_stm_label_handoff/diagnostics.json`
--   `build/julie_mixed_media_native_200_no_label_graph/summary.json`
--   `build/julie_mixed_media_native_200_no_label_graph/nemotron_judge.json`
--   `build/julie_mixed_media_native_200_no_source_seed_graph/summary.json`
--   `build/julie_mixed_media_native_200_no_source_seed_graph/nemotron_judge.json`
--   `build/julie_mixed_media_native_200_no_durable_source/summary.json`
--   `build/julie_mixed_media_native_200_no_durable_source/nemotron_judge.json`
--   `build/julie_mixed_media_native_200_no_graph_expansion/summary.json`
--   `build/julie_mixed_media_native_200_no_graph_expansion/nemotron_judge.json`
--   `build/julie_mixed_media_native_200_no_graph_expansion/diagnostics.json`
--   `build/julie_mixed_media_native_200_no_daily/summary.json`
--   `build/julie_mixed_media_native_200_no_daily/nemotron_judge.json`
--   `build/julie_mixed_media_native_200_ablation_summary.json`
--   `build/julie_mixed_media_native_200_diagnostics.json`
--   `build/julie_mixed_media_native_500_compaction_budget4k_baseline/summary.json`
--   `build/julie_mixed_media_native_500_compaction_budget4k_baseline/nemotron_judge.json`
--   `build/julie_mixed_media_native_500_compaction_budget4k_baseline/diagnostics.json`
--   `build/julie_mixed_media_native_current_verdict.json`
--   `build/julie_mixed_media_native_current_verdict.md`
+-   `build/chat_replay_mixed_media_native_200/summary.json`
+-   `build/chat_replay_mixed_media_native_200/nemotron_judge.json`
+-   `build/chat_replay_mixed_media_native_200_no_facts/summary.json`
+-   `build/chat_replay_mixed_media_native_200_no_facts/nemotron_judge.json`
+-   `build/chat_replay_mixed_media_native_200_no_facts/diagnostics.json`
+-   `build/chat_replay_mixed_media_native_200_no_temporal/summary.json`
+-   `build/chat_replay_mixed_media_native_200_no_temporal/nemotron_judge.json`
+-   `build/chat_replay_mixed_media_native_200_no_temporal/diagnostics.json`
+-   `build/chat_replay_mixed_media_native_200_no_stm_label_handoff/summary.json`
+-   `build/chat_replay_mixed_media_native_200_no_stm_label_handoff/nemotron_judge.json`
+-   `build/chat_replay_mixed_media_native_200_no_stm_label_handoff/diagnostics.json`
+-   `build/chat_replay_mixed_media_native_200_no_label_graph/summary.json`
+-   `build/chat_replay_mixed_media_native_200_no_label_graph/nemotron_judge.json`
+-   `build/chat_replay_mixed_media_native_200_no_source_seed_graph/summary.json`
+-   `build/chat_replay_mixed_media_native_200_no_source_seed_graph/nemotron_judge.json`
+-   `build/chat_replay_mixed_media_native_200_no_durable_source/summary.json`
+-   `build/chat_replay_mixed_media_native_200_no_durable_source/nemotron_judge.json`
+-   `build/chat_replay_mixed_media_native_200_no_graph_expansion/summary.json`
+-   `build/chat_replay_mixed_media_native_200_no_graph_expansion/nemotron_judge.json`
+-   `build/chat_replay_mixed_media_native_200_no_graph_expansion/diagnostics.json`
+-   `build/chat_replay_mixed_media_native_200_no_daily/summary.json`
+-   `build/chat_replay_mixed_media_native_200_no_daily/nemotron_judge.json`
+-   `build/chat_replay_mixed_media_native_200_ablation_summary.json`
+-   `build/chat_replay_mixed_media_native_200_diagnostics.json`
+-   `build/chat_replay_mixed_media_native_500_compaction_budget4k_baseline/summary.json`
+-   `build/chat_replay_mixed_media_native_500_compaction_budget4k_baseline/nemotron_judge.json`
+-   `build/chat_replay_mixed_media_native_500_compaction_budget4k_baseline/diagnostics.json`
+-   `build/chat_replay_mixed_media_native_current_verdict.json`
+-   `build/chat_replay_mixed_media_native_current_verdict.md`
 
 We also ran a compaction-scale mixed-media pass to make the normal
 chat+RAG baseline pay for rolling-history compaction without waiting for
@@ -13323,7 +13323,7 @@ grounding even when simple lexical overlap favored RAG/full history.
 On **May 26, 2026**, we ran a small pre-release F/S/T knob sweep over
 the same 200-message mixed-media native path to measure the compact
 graph retrieval tradeoff directly
-(`build/julie_mixed_media_knob_sweep_20260526/summary.json`). The sweep
+(`build/chat_replay_mixed_media_knob_sweep_20260526/summary.json`). The sweep
 used daily deep consolidation, the same 8 audio clips, 6 images, and 2
 video-frame items, and local `vllm-mlx` Nemotron judging with a 4k
 rolling-history budget for the traditional chat+RAG comparator. Raising
@@ -13795,7 +13795,7 @@ inspection narrows this further. The current deep-180 stores contain
 embedded fact-cache rows and fact evidence, but only 1–3 facts per store
 are `active`; most are `weak`. The production fact seed query does not
 directly filter out weak facts, so weak lifecycle alone does not explain
-zero seeds. Earlier fact-only diagnostics on the same Julie harness
+zero seeds. Earlier fact-only diagnostics on the same chat-replay harness
 showed the likely candidate-generation bottleneck: a fact-only vector
 table retrieved fact candidates for every probe, while the
 production-shaped global embeddings KNN followed by `fact_cache` join
@@ -13808,7 +13808,7 @@ score and admit linked evidence memories without changing the production
 default.
 
 On **May 23, 2026** we added a narrower STM-to-LTM audit for the active
-relabel/prune path and reran a bounded, privacy-safe Julie replay
+relabel/prune path and reran a bounded, privacy-safe personal-chat replay
 through the normal Cortext processing and consolidation path, then
 hardened endpoint alignment and reran the same slice
 (`build/stm_ltm_endpoint_rejection_reason_judged.json`, `skip=1980`,
@@ -14006,7 +14006,7 @@ budget. The first attempt with the default current model root failed
 because the worktree now prefers an ES-AIST 1536-dimensional encoder
 while this benchmark/schema path is still 256-dimensional. To keep the
 run exploratory and avoid production algorithm edits, the rerun used
-`build/julie_goal_explore/modelroot_256`, a symlink-only model root that
+`build/chat_replay_goal_explore/modelroot_256`, a symlink-only model root that
 exposes the compatible 256-dimensional assets and excludes ES-AIST.
 
 <table>
@@ -14388,7 +14388,7 @@ manual or learned gate.
 
 To test the actual STM-graph-to-LTM mechanism rather than treating LTM
 as summary retrieval, we added an opt-in consolidation audit
-(`CORTEXT_STM_LTM_AUDIT=1`) and reran the `skip=1980` Julie slice
+(`CORTEXT_STM_LTM_AUDIT=1`) and reran the `skip=1980` corpus slice
 through the live Cortext path with STM graph formation, deep
 consolidation, relabeling, pruning, LTM retrieval, and OpenAI
 `gpt-5.4-mini-2026-03-17` judging enabled. The audit is per
@@ -14443,7 +14443,7 @@ is retrieval/ranking and admission over the durable STM-derived graph,
 not summary generation.
 
 The benchmark now emits this taxonomy directly as privacy-safe aggregate
-JSON. A current judged short rerun of the same Julie slice wrote
+JSON. A current judged short rerun of the same corpus slice wrote
 `build/stm_ltm_taxonomy_judged.json` with 80 processed messages, 7
 judged compact-policy probes, 5 consolidation cycles, **52** STM label
 edges entering the relabeler, **6** refined durable labels, **8**
@@ -14495,7 +14495,7 @@ candidate receive ranking credit from the best matching source memory
 reachable through `derived_from` (or
 `has_label -> ASSOCIATION -> derived_from`). A deterministic unit test
 verifies that this path can assign a nonzero source-set boost to a
-durable label. The judged Julie ablation
+durable label. The judged chat-replay ablation
 (`build/stm_ltm_source_set_rank_judged.json`) showed that the naive
 source-set boost was not a production default in that initial form. It
 activated on broad durable cues, but non-compact Cortext-LTM-only
@@ -14679,7 +14679,7 @@ and still drops the generic labels.
 The corresponding live replay artifact
 `build/stm_ltm_current_label_floor.json` shows that this fixes the
 construction collapse but not the compact-LTM quality gap. On the same
-80-message Julie slice, cycles with current labels pruned to zero fell
+80-message corpus slice, cycles with current labels pruned to zero fell
 from **2** to **0** and durable `has_label` edges rose from **2** to
 **5**. Source grounding remained intact (**59 / 59** hydratable source
 memories and **59** `derived_from` links), and cycles without durable
@@ -14913,7 +14913,7 @@ when all canonical label tokens appear somewhere in the evidence, even
 if the exact phrase is not contiguous; a regression test covers the
 `car crash` / `car ... crash` case. The follow-up artifact
 `build/stm_ltm_token_grounding_openai.json` did not change the live
-Julie counters: **9** label candidates, **5** ungrounded rejects, **3**
+Per-corpus counters: **9** label candidates, **5** ungrounded rejects, **3**
 admitted labels, **2** relation candidates, and **0** relation edges.
 This rules out simple phrase-contiguity as the cause of under-admission
 on this slice. The next hardening target is the relabeler contract
@@ -15021,7 +15021,7 @@ relabel/prune arm uses the same source-backed durable LTM path that
 production retrieval exposes in debug state, rather than ranking only by
 refined-label lexical overlap. The artifact
 `build/stm_ltm_production_graph_packet_v11_openai.json` reran the same
-30-message Julie slice with this production-shaped graph packet. The
+30-message corpus slice with this production-shaped graph packet. The
 construction audit remained stable: **27** STM items and **108** STM
 label edges entered four relabel/prune cycles; **25 / 25** source
 memories were hydratable; **25** `derived_from` links, **4** durable
@@ -15073,7 +15073,7 @@ subspans inside an already admitted proper phrase.
 
 The OpenAI-judged artifact
 `build/stm_ltm_source_span_complement_v14_openai.json` shows the effect
-on the same 30-message Julie slice. The relabeler still processed **27**
+on the same 30-message corpus slice. The relabeler still processed **27**
 STM items and **108** STM label edges across four cycles, with **25 /
 25** source memories hydratable. The durable LTM surface grew from **4**
 to **7** refined labels: **4** came from the extractor and **3** from
@@ -15109,7 +15109,7 @@ A focused regression verifies this with a durable label whose own text
 does not match the query but whose backing source payload does. The
 second change preserves the best high-confidence durable-source
 candidate near the front of the selected list so chat-demo injection
-caps do not discard it after retrieval already found it. On the Julie
+caps do not discard it after retrieval already found it. On the personal-chat
 replay (`build/stm_ltm_durable_source_promote_v16_openai.json`), this
 worked mechanically: a source-backed durable candidate with **8**
 backing sources and durable-source boost **0.968** moved to the top
@@ -15643,7 +15643,7 @@ result the stricter adjudication than the earlier local Gemma 4
 development signal.
 
 After the private-evaluation lock-down, hosted OpenAI judging is no
-longer an allowed path for Julie data. This comparison remains useful as
+longer an allowed path for personal-chat data. This comparison remains useful as
 historical evidence that judge choice can change quality conclusions,
 but current reproduction and release-gating runs must use the
 loopback-only Ollama Gemma 4 12B judge (`gemma4:12b-it-qat`). The older
@@ -15668,7 +15668,7 @@ current Cortext for both `k=1` and `k=3`, with paired deltas from
 **-0.8125** to **-1.3750** and intervals entirely below zero.
 
 We then added one more chronological slice at `skip=720` using the same
-benchmark shape, `build/julie_goal_explore/modelroot_256`, compact STM
+benchmark shape, `build/chat_replay_goal_explore/modelroot_256`, compact STM
 `k=3`, and lexical LTM top-5. This slice changes the story in a useful
 way: compact full history is weak (**1.3125** sufficiency), while
 STM+LTM union is best on the compact-policy surface (**2.5000**) and STM
@@ -15742,102 +15742,102 @@ always better” prompt policy.
 
 Artifacts:
 
--   `examples/benchmark/julie_conversation_memory_bakeoff.cpp`
--   `build/julie_goal_explore/continuation_20260521/deep180_shifted_lfm2_cap4_history128_compact_only_stm1_judged16_nolabelbank.json`
--   `build/julie_goal_explore/continuation_20260521/deep180_shifted_lfm2_cap4_history128_compact_only_stm2_judged16_nolabelbank.json`
--   `build/julie_goal_explore/continuation_20260521/deep180_shifted_lfm2_cap4_history128_compact_only_stm3_judged16_nolabelbank.json`
--   `build/julie_goal_explore/continuation_20260521/deep180_shifted_lfm2_skip180_cap4_history128_compact_only_stm2_judged16_nolabelbank.json`
--   `build/julie_goal_explore/continuation_20260521/deep180_shifted_lfm2_skip180_cap4_history128_compact_only_stm3_judged16_nolabelbank.json`
--   `build/julie_goal_explore/continuation_20260521/deep180_shifted_lfm2_skip360_cap4_history128_compact_only_stm3_judged16_nolabelbank.json`
--   `build/julie_goal_explore/continuation_20260521/deep180_shifted_lfm2_skip360_cap4_history128_compact_only_stm4_judged16_nolabelbank.json`
--   `build/julie_goal_explore/continuation_20260521/deep180_shifted_lfm2_skip540_cap4_history128_compact_only_stm3_judged16_nolabelbank.json`
--   `build/julie_goal_explore/continuation_20260521/deep180_shifted_lfm2_skip540_cap4_history128_rerun256root_compact_only_stm3_judged16_nolabelbank.json`
--   `build/julie_goal_explore/continuation_20260521/deep180_shifted_lfm2_skip540_cap4_history128_ltmk1_compact_stm3_judged16_nolabelbank.json`
--   `build/julie_goal_explore/continuation_20260521/deep180_shifted_lfm2_skip540_cap4_history256_compact_only_stm3_judged16_nolabelbank.json`
--   `build/julie_goal_explore/continuation_20260521/deep180_shifted_lfm2_skip540_cap4_history512_compact_only_stm3_judged16_nolabelbank.json`
--   `build/julie_goal_explore/continuation_20260521/deep180_shifted_lfm2_skip720_cap4_history128_compact_only_stm3_judged16_nolabelbank.json`
--   `build/julie_goal_explore/continuation_20260521/wm_stm_ltm_skip540_ltm_breadth_probe_20260521.json`
--   `build/julie_goal_explore/continuation_20260521/wm_stm_ltm_skip540_history_expansion_policy_20260521.json`
--   `build/julie_goal_explore/continuation_20260521/wm_stm_ltm_five_slice_compact_stm_k3_summary_20260521.json`
--   `build/julie_goal_explore/continuation_20260521/wm_stm_ltm_five_slice_heldout_verifier_policy_20260521.json`
--   `build/julie_goal_explore/continuation_20260521/wm_stm_ltm_five_slice_temporal_source_verifier_policy_20260521.json`
--   `build/julie_goal_explore/continuation_20260521/wm_stm_ltm_five_slice_event_topic_verifier_policy_20260521.json`
--   `build/julie_goal_explore/continuation_20260521/deep180_shifted_lfm2_skip900_cap4_history128_compact_only_stm3_judged16_nolabelbank.json`
--   `build/julie_goal_explore/continuation_20260521/wm_stm_ltm_skip900_predeclared_event_topic_rule_eval_20260521.json`
--   `build/julie_goal_explore/continuation_20260521/deep180_shifted_lfm2_skip1080_cap4_history128_compact_only_stm3_judged16_nolabelbank.json`
--   `build/julie_goal_explore/continuation_20260521/wm_stm_ltm_skip1080_predeclared_event_topic_rule_eval_20260521.json`
--   `build/julie_goal_explore/continuation_20260521/deep180_shifted_lfm2_skip1260_cap4_history128_compact_only_stm3_judged16_nolabelbank.json`
--   `build/julie_goal_explore/continuation_20260521/wm_stm_ltm_skip1260_predeclared_event_topic_rule_eval_20260521.json`
--   `build/julie_goal_explore/continuation_20260521/wm_stm_ltm_fresh_predeclared_event_topic_rule_summary_20260521.json`
--   `build/julie_goal_explore/continuation_20260521/wm_stm_ltm_fresh3_predeclared_event_topic_rule_summary_20260521.json`
--   `build/julie_goal_explore/continuation_20260521/wm_stm_ltm_fresh3_expanded_history_policy_probe_20260521.json`
--   `build/julie_goal_explore/continuation_20260521/wm_stm_ltm_fresh3_strict_history_feature_probe_20260521.json`
--   `build/julie_goal_explore/continuation_20260521/deep180_shifted_lfm2_skip1440_cap4_history128_compact_only_stm3_judged16_nolabelbank.json`
--   `build/julie_goal_explore/continuation_20260521/wm_stm_ltm_skip1440_predeclared_strict_history_gate_eval_20260521.json`
--   `build/julie_goal_explore/continuation_20260521/wm_stm_ltm_fresh4_strict_history_gate_summary_20260521.json`
--   `build/julie_goal_explore/continuation_20260521/deep180_shifted_lfm2_skip1620_cap4_history128_compact_only_stm3_judged16_nolabelbank.json`
--   `build/julie_goal_explore/continuation_20260521/wm_stm_ltm_skip1620_predeclared_strict_history_gate_eval_20260521.json`
--   `build/julie_goal_explore/continuation_20260521/wm_stm_ltm_fresh5_strict_history_gate_summary_20260521.json`
--   `build/julie_goal_explore/continuation_20260521/wm_stm_ltm_chronological_compact_policy_k3_fresh9_summary_20260521.json`
--   `build/julie_goal_explore/continuation_20260521/wm_stm_ltm_compact_policy_stm_k_sweep_judged16_20260521.json`
--   `build/julie_goal_explore/continuation_20260521/wm_stm_ltm_posthoc_ltm_admission_gates_judged16_20260521.json`
--   `build/julie_goal_explore/continuation_20260521/wm_stm_ltm_heldout_ltm_admission_gates_skip180_judged16_20260521.json`
--   `build/julie_goal_explore/continuation_20260521/wm_stm_ltm_heldout_compact_stm_k2_k3_skip180_summary_20260521.json`
--   `build/julie_goal_explore/continuation_20260521/wm_stm_ltm_chronological_compact_stm_k3_summary_20260521.json`
--   `build/julie_goal_explore/continuation_20260521/wm_stm_ltm_heldout_compact_stm_k3_k4_skip360_summary_20260521.json`
--   `build/julie_goal_explore/continuation_20260521/deep180_shifted_lfm2_skip720_cap4_history128_compact_only_stm4_judged16_nolabelbank.json`
--   `build/julie_goal_explore/continuation_20260521/deep180_shifted_lfm2_skip1260_cap4_history128_compact_only_stm4_judged16_nolabelbank.json`
--   `build/julie_goal_explore/continuation_20260521/deep180_shifted_lfm2_skip1800_cap4_history128_compact_only_stm2_judged16_nolabelbank.json`
--   `build/julie_goal_explore/continuation_20260521/deep180_shifted_lfm2_skip1800_cap4_history128_compact_only_stm3_judged16_nolabelbank.json`
--   `build/julie_goal_explore/continuation_20260521/deep180_shifted_lfm2_skip1800_cap4_history128_compact_only_stm4_judged16_nolabelbank.json`
--   `build/julie_goal_explore/continuation_20260521/wm_stm_ltm_compact_policy_k_sweep_extended_20260522.json`
--   `build/julie_goal_explore/continuation_20260521/deep180_shifted_lfm2_skip1260_cap4_history128_compact_only_stm3_ltm5_rerun_judged16_nolabelbank.json`
--   `build/julie_goal_explore/continuation_20260521/deep180_shifted_lfm2_skip1260_cap6_history128_compact_only_stm3_ltm5_judged16_nolabelbank.json`
--   `build/julie_goal_explore/continuation_20260521/deep180_shifted_lfm2_skip1260_cap8_history128_compact_only_stm3_ltm5_judged16_nolabelbank.json`
--   `build/julie_goal_explore/continuation_20260521/wm_stm_ltm_skip1260_ltm_union_cap_sweep_20260522.json`
--   `build/julie_goal_explore/continuation_20260521/deep180_shifted_lfm2_skip900_cap6_history128_compact_only_stm3_ltm5_judged16_nolabelbank.json`
--   `build/julie_goal_explore/continuation_20260521/deep180_shifted_lfm2_skip1080_cap6_history128_compact_only_stm3_ltm5_judged16_nolabelbank.json`
--   `build/julie_goal_explore/continuation_20260521/deep180_shifted_lfm2_skip1440_cap6_history128_compact_only_stm3_ltm5_judged16_nolabelbank.json`
--   `build/julie_goal_explore/continuation_20260521/deep180_shifted_lfm2_skip1620_cap6_history128_compact_only_stm3_ltm5_judged16_nolabelbank.json`
--   `build/julie_goal_explore/continuation_20260521/wm_stm_ltm_ltm_union_cap6_transfer_20260522.json`
--   `build/julie_goal_explore/continuation_20260521/wm_stm_ltm_posthoc_cap6_expansion_gate_20260522.json`
--   `build/julie_goal_explore/continuation_20260521/deep180_shifted_lfm2_skip180_cap6_history128_compact_only_stm3_ltm5_heldout_judged16_nolabelbank.json`
--   `build/julie_goal_explore/continuation_20260521/deep180_shifted_lfm2_skip360_cap6_history128_compact_only_stm3_ltm5_heldout_judged16_nolabelbank.json`
--   `build/julie_goal_explore/continuation_20260521/deep180_shifted_lfm2_skip720_cap6_history128_compact_only_stm3_ltm5_heldout_judged16_nolabelbank.json`
--   `build/julie_goal_explore/continuation_20260521/wm_stm_ltm_cap6_gate_heldout_skip720_20260522.json`
--   `build/julie_goal_explore/continuation_20260521/wm_stm_ltm_cap6_gate_heldout_skip180_720_20260522.json`
--   `build/julie_goal_explore/continuation_20260521/wm_stm_ltm_cap6_gate_heldout_skip180_360_720_20260522.json`
--   `build/julie_goal_explore/continuation_20260521/wm_stm_ltm_stm_vs_cap4_union_selector_loo10_20260522.json`
--   `build/julie_goal_explore/continuation_20260521/wm_stm_ltm_learned_packet_verifier_loo10_20260522.json`
--   `build/julie_goal_explore/continuation_20260521/wm_stm_ltm_constrained_learned_packet_verifier_loo10_20260522.json`
--   `build/julie_goal_explore/continuation_20260521/wm_stm_ltm_forward_learned_packet_verifier_20260522.json`
--   `build/julie_goal_explore/continuation_20260521/deep180_shifted_lfm2_skip1980_cap4_history128_compact_only_stm3_judged16_nolabelbank.json`
--   `build/julie_goal_explore/continuation_20260521/deep180_shifted_lfm2_skip2160_cap4_history128_compact_only_stm3_judged16_nolabelbank.json`
--   `build/julie_goal_explore/continuation_20260521/deep180_shifted_lfm2_skip2340_cap4_history128_compact_only_stm3_judged16_nolabelbank.json`
--   `build/julie_goal_explore/continuation_20260521/wm_stm_ltm_later_future_slices_1980_2340_20260522.json`
--   `build/julie_goal_explore/continuation_20260521/deep180_shifted_lfm2_skip2520_cap4_history128_compact_only_stm3_judged16_nolabelbank.json`
--   `build/julie_goal_explore/continuation_20260521/deep180_shifted_lfm2_skip2700_cap4_history128_compact_only_stm3_judged16_nolabelbank.json`
--   `build/julie_goal_explore/continuation_20260521/deep180_shifted_lfm2_skip2880_cap4_history128_compact_only_stm3_judged16_nolabelbank.json`
--   `build/julie_goal_explore/continuation_20260521/wm_stm_ltm_later_future_slices_2520_2880_20260522.json`
--   `build/julie_goal_explore/continuation_20260521/deep180_shifted_lfm2_skip1980_cap4_history128_compact_only_stm3_judged16_openai_gpt54mini_nolabelbank.json`
--   `build/julie_goal_explore/continuation_20260521/deep180_shifted_lfm2_skip2160_cap4_history128_compact_only_stm3_judged16_openai_gpt54mini_nolabelbank.json`
--   `build/julie_goal_explore/continuation_20260521/deep180_shifted_lfm2_skip2340_cap4_history128_compact_only_stm3_judged16_openai_gpt54mini_nolabelbank.json`
--   `build/julie_goal_explore/continuation_20260521/deep180_shifted_lfm2_skip2520_cap4_history128_compact_only_stm3_judged16_openai_gpt54mini_nolabelbank.json`
--   `build/julie_goal_explore/continuation_20260521/deep180_shifted_lfm2_skip2700_cap4_history128_compact_only_stm3_judged16_openai_gpt54mini_nolabelbank.json`
--   `build/julie_goal_explore/continuation_20260521/deep180_shifted_lfm2_skip2880_cap4_history128_compact_only_stm3_judged16_openai_gpt54mini_nolabelbank.json`
--   `build/julie_goal_explore/continuation_20260521/wm_stm_ltm_later_future_slices_1980_2880_openai_gpt54mini_20260522.json`
--   `build/julie_goal_explore/continuation_20260521/wm_stm_ltm_skip540_history_budget_sweep_20260521.json`
--   `build/julie_goal_explore/continuation_20260521/wm_stm_ltm_consolidation_graph_audit_20260521.json`
--   `build/julie_goal_explore/continuation_20260521/wm_stm_ltm_graph_retrieval_admission_audit_20260521.json`
--   `build/julie_goal_explore/continuation_20260521/wm_stm_ltm_fact_seed_path_diagnosis_20260521.json`
--   `build/julie_goal_explore/continuation_20260521/deep180_shifted_lfm2_skip540_cap4_history128_factprompt_k1_judged16_nolabelbank.json`
--   `build/julie_goal_explore/continuation_20260521/deep180_shifted_lfm2_skip540_cap4_history128_factprompt_k3_judged16_nolabelbank.json`
--   `build/julie_goal_explore/continuation_20260521/wm_stm_ltm_skip540_fact_proposal_breadth_20260521.json`
--   `build/julie_goal_explore/continuation_20260521/wm_stm_ltm_skip540_constrained_fact_admission_20260521.json`
--   `build/julie_goal_explore/continuation_20260521/wm_stm_ltm_posthoc_adaptive_policy_chronological_20260521.json`
--   `build/julie_goal_explore/continuation_20260521/wm_stm_ltm_posthoc_adaptive_policy_skip540_budget_sweep_20260521.json`
--   `build/julie_goal_explore/continuation_20260521/wm_stm_ltm_posthoc_adaptive_policy_loo_20260521.json`
--   `build/julie_goal_explore/continuation_20260521/wm_stm_ltm_probe_level_robustness_20260521.json`
+-   `examples/benchmark/chat_replay_conversation_memory_bakeoff.cpp`
+-   `build/chat_replay_goal_explore/continuation_20260521/deep180_shifted_lfm2_cap4_history128_compact_only_stm1_judged16_nolabelbank.json`
+-   `build/chat_replay_goal_explore/continuation_20260521/deep180_shifted_lfm2_cap4_history128_compact_only_stm2_judged16_nolabelbank.json`
+-   `build/chat_replay_goal_explore/continuation_20260521/deep180_shifted_lfm2_cap4_history128_compact_only_stm3_judged16_nolabelbank.json`
+-   `build/chat_replay_goal_explore/continuation_20260521/deep180_shifted_lfm2_skip180_cap4_history128_compact_only_stm2_judged16_nolabelbank.json`
+-   `build/chat_replay_goal_explore/continuation_20260521/deep180_shifted_lfm2_skip180_cap4_history128_compact_only_stm3_judged16_nolabelbank.json`
+-   `build/chat_replay_goal_explore/continuation_20260521/deep180_shifted_lfm2_skip360_cap4_history128_compact_only_stm3_judged16_nolabelbank.json`
+-   `build/chat_replay_goal_explore/continuation_20260521/deep180_shifted_lfm2_skip360_cap4_history128_compact_only_stm4_judged16_nolabelbank.json`
+-   `build/chat_replay_goal_explore/continuation_20260521/deep180_shifted_lfm2_skip540_cap4_history128_compact_only_stm3_judged16_nolabelbank.json`
+-   `build/chat_replay_goal_explore/continuation_20260521/deep180_shifted_lfm2_skip540_cap4_history128_rerun256root_compact_only_stm3_judged16_nolabelbank.json`
+-   `build/chat_replay_goal_explore/continuation_20260521/deep180_shifted_lfm2_skip540_cap4_history128_ltmk1_compact_stm3_judged16_nolabelbank.json`
+-   `build/chat_replay_goal_explore/continuation_20260521/deep180_shifted_lfm2_skip540_cap4_history256_compact_only_stm3_judged16_nolabelbank.json`
+-   `build/chat_replay_goal_explore/continuation_20260521/deep180_shifted_lfm2_skip540_cap4_history512_compact_only_stm3_judged16_nolabelbank.json`
+-   `build/chat_replay_goal_explore/continuation_20260521/deep180_shifted_lfm2_skip720_cap4_history128_compact_only_stm3_judged16_nolabelbank.json`
+-   `build/chat_replay_goal_explore/continuation_20260521/wm_stm_ltm_skip540_ltm_breadth_probe_20260521.json`
+-   `build/chat_replay_goal_explore/continuation_20260521/wm_stm_ltm_skip540_history_expansion_policy_20260521.json`
+-   `build/chat_replay_goal_explore/continuation_20260521/wm_stm_ltm_five_slice_compact_stm_k3_summary_20260521.json`
+-   `build/chat_replay_goal_explore/continuation_20260521/wm_stm_ltm_five_slice_heldout_verifier_policy_20260521.json`
+-   `build/chat_replay_goal_explore/continuation_20260521/wm_stm_ltm_five_slice_temporal_source_verifier_policy_20260521.json`
+-   `build/chat_replay_goal_explore/continuation_20260521/wm_stm_ltm_five_slice_event_topic_verifier_policy_20260521.json`
+-   `build/chat_replay_goal_explore/continuation_20260521/deep180_shifted_lfm2_skip900_cap4_history128_compact_only_stm3_judged16_nolabelbank.json`
+-   `build/chat_replay_goal_explore/continuation_20260521/wm_stm_ltm_skip900_predeclared_event_topic_rule_eval_20260521.json`
+-   `build/chat_replay_goal_explore/continuation_20260521/deep180_shifted_lfm2_skip1080_cap4_history128_compact_only_stm3_judged16_nolabelbank.json`
+-   `build/chat_replay_goal_explore/continuation_20260521/wm_stm_ltm_skip1080_predeclared_event_topic_rule_eval_20260521.json`
+-   `build/chat_replay_goal_explore/continuation_20260521/deep180_shifted_lfm2_skip1260_cap4_history128_compact_only_stm3_judged16_nolabelbank.json`
+-   `build/chat_replay_goal_explore/continuation_20260521/wm_stm_ltm_skip1260_predeclared_event_topic_rule_eval_20260521.json`
+-   `build/chat_replay_goal_explore/continuation_20260521/wm_stm_ltm_fresh_predeclared_event_topic_rule_summary_20260521.json`
+-   `build/chat_replay_goal_explore/continuation_20260521/wm_stm_ltm_fresh3_predeclared_event_topic_rule_summary_20260521.json`
+-   `build/chat_replay_goal_explore/continuation_20260521/wm_stm_ltm_fresh3_expanded_history_policy_probe_20260521.json`
+-   `build/chat_replay_goal_explore/continuation_20260521/wm_stm_ltm_fresh3_strict_history_feature_probe_20260521.json`
+-   `build/chat_replay_goal_explore/continuation_20260521/deep180_shifted_lfm2_skip1440_cap4_history128_compact_only_stm3_judged16_nolabelbank.json`
+-   `build/chat_replay_goal_explore/continuation_20260521/wm_stm_ltm_skip1440_predeclared_strict_history_gate_eval_20260521.json`
+-   `build/chat_replay_goal_explore/continuation_20260521/wm_stm_ltm_fresh4_strict_history_gate_summary_20260521.json`
+-   `build/chat_replay_goal_explore/continuation_20260521/deep180_shifted_lfm2_skip1620_cap4_history128_compact_only_stm3_judged16_nolabelbank.json`
+-   `build/chat_replay_goal_explore/continuation_20260521/wm_stm_ltm_skip1620_predeclared_strict_history_gate_eval_20260521.json`
+-   `build/chat_replay_goal_explore/continuation_20260521/wm_stm_ltm_fresh5_strict_history_gate_summary_20260521.json`
+-   `build/chat_replay_goal_explore/continuation_20260521/wm_stm_ltm_chronological_compact_policy_k3_fresh9_summary_20260521.json`
+-   `build/chat_replay_goal_explore/continuation_20260521/wm_stm_ltm_compact_policy_stm_k_sweep_judged16_20260521.json`
+-   `build/chat_replay_goal_explore/continuation_20260521/wm_stm_ltm_posthoc_ltm_admission_gates_judged16_20260521.json`
+-   `build/chat_replay_goal_explore/continuation_20260521/wm_stm_ltm_heldout_ltm_admission_gates_skip180_judged16_20260521.json`
+-   `build/chat_replay_goal_explore/continuation_20260521/wm_stm_ltm_heldout_compact_stm_k2_k3_skip180_summary_20260521.json`
+-   `build/chat_replay_goal_explore/continuation_20260521/wm_stm_ltm_chronological_compact_stm_k3_summary_20260521.json`
+-   `build/chat_replay_goal_explore/continuation_20260521/wm_stm_ltm_heldout_compact_stm_k3_k4_skip360_summary_20260521.json`
+-   `build/chat_replay_goal_explore/continuation_20260521/deep180_shifted_lfm2_skip720_cap4_history128_compact_only_stm4_judged16_nolabelbank.json`
+-   `build/chat_replay_goal_explore/continuation_20260521/deep180_shifted_lfm2_skip1260_cap4_history128_compact_only_stm4_judged16_nolabelbank.json`
+-   `build/chat_replay_goal_explore/continuation_20260521/deep180_shifted_lfm2_skip1800_cap4_history128_compact_only_stm2_judged16_nolabelbank.json`
+-   `build/chat_replay_goal_explore/continuation_20260521/deep180_shifted_lfm2_skip1800_cap4_history128_compact_only_stm3_judged16_nolabelbank.json`
+-   `build/chat_replay_goal_explore/continuation_20260521/deep180_shifted_lfm2_skip1800_cap4_history128_compact_only_stm4_judged16_nolabelbank.json`
+-   `build/chat_replay_goal_explore/continuation_20260521/wm_stm_ltm_compact_policy_k_sweep_extended_20260522.json`
+-   `build/chat_replay_goal_explore/continuation_20260521/deep180_shifted_lfm2_skip1260_cap4_history128_compact_only_stm3_ltm5_rerun_judged16_nolabelbank.json`
+-   `build/chat_replay_goal_explore/continuation_20260521/deep180_shifted_lfm2_skip1260_cap6_history128_compact_only_stm3_ltm5_judged16_nolabelbank.json`
+-   `build/chat_replay_goal_explore/continuation_20260521/deep180_shifted_lfm2_skip1260_cap8_history128_compact_only_stm3_ltm5_judged16_nolabelbank.json`
+-   `build/chat_replay_goal_explore/continuation_20260521/wm_stm_ltm_skip1260_ltm_union_cap_sweep_20260522.json`
+-   `build/chat_replay_goal_explore/continuation_20260521/deep180_shifted_lfm2_skip900_cap6_history128_compact_only_stm3_ltm5_judged16_nolabelbank.json`
+-   `build/chat_replay_goal_explore/continuation_20260521/deep180_shifted_lfm2_skip1080_cap6_history128_compact_only_stm3_ltm5_judged16_nolabelbank.json`
+-   `build/chat_replay_goal_explore/continuation_20260521/deep180_shifted_lfm2_skip1440_cap6_history128_compact_only_stm3_ltm5_judged16_nolabelbank.json`
+-   `build/chat_replay_goal_explore/continuation_20260521/deep180_shifted_lfm2_skip1620_cap6_history128_compact_only_stm3_ltm5_judged16_nolabelbank.json`
+-   `build/chat_replay_goal_explore/continuation_20260521/wm_stm_ltm_ltm_union_cap6_transfer_20260522.json`
+-   `build/chat_replay_goal_explore/continuation_20260521/wm_stm_ltm_posthoc_cap6_expansion_gate_20260522.json`
+-   `build/chat_replay_goal_explore/continuation_20260521/deep180_shifted_lfm2_skip180_cap6_history128_compact_only_stm3_ltm5_heldout_judged16_nolabelbank.json`
+-   `build/chat_replay_goal_explore/continuation_20260521/deep180_shifted_lfm2_skip360_cap6_history128_compact_only_stm3_ltm5_heldout_judged16_nolabelbank.json`
+-   `build/chat_replay_goal_explore/continuation_20260521/deep180_shifted_lfm2_skip720_cap6_history128_compact_only_stm3_ltm5_heldout_judged16_nolabelbank.json`
+-   `build/chat_replay_goal_explore/continuation_20260521/wm_stm_ltm_cap6_gate_heldout_skip720_20260522.json`
+-   `build/chat_replay_goal_explore/continuation_20260521/wm_stm_ltm_cap6_gate_heldout_skip180_720_20260522.json`
+-   `build/chat_replay_goal_explore/continuation_20260521/wm_stm_ltm_cap6_gate_heldout_skip180_360_720_20260522.json`
+-   `build/chat_replay_goal_explore/continuation_20260521/wm_stm_ltm_stm_vs_cap4_union_selector_loo10_20260522.json`
+-   `build/chat_replay_goal_explore/continuation_20260521/wm_stm_ltm_learned_packet_verifier_loo10_20260522.json`
+-   `build/chat_replay_goal_explore/continuation_20260521/wm_stm_ltm_constrained_learned_packet_verifier_loo10_20260522.json`
+-   `build/chat_replay_goal_explore/continuation_20260521/wm_stm_ltm_forward_learned_packet_verifier_20260522.json`
+-   `build/chat_replay_goal_explore/continuation_20260521/deep180_shifted_lfm2_skip1980_cap4_history128_compact_only_stm3_judged16_nolabelbank.json`
+-   `build/chat_replay_goal_explore/continuation_20260521/deep180_shifted_lfm2_skip2160_cap4_history128_compact_only_stm3_judged16_nolabelbank.json`
+-   `build/chat_replay_goal_explore/continuation_20260521/deep180_shifted_lfm2_skip2340_cap4_history128_compact_only_stm3_judged16_nolabelbank.json`
+-   `build/chat_replay_goal_explore/continuation_20260521/wm_stm_ltm_later_future_slices_1980_2340_20260522.json`
+-   `build/chat_replay_goal_explore/continuation_20260521/deep180_shifted_lfm2_skip2520_cap4_history128_compact_only_stm3_judged16_nolabelbank.json`
+-   `build/chat_replay_goal_explore/continuation_20260521/deep180_shifted_lfm2_skip2700_cap4_history128_compact_only_stm3_judged16_nolabelbank.json`
+-   `build/chat_replay_goal_explore/continuation_20260521/deep180_shifted_lfm2_skip2880_cap4_history128_compact_only_stm3_judged16_nolabelbank.json`
+-   `build/chat_replay_goal_explore/continuation_20260521/wm_stm_ltm_later_future_slices_2520_2880_20260522.json`
+-   `build/chat_replay_goal_explore/continuation_20260521/deep180_shifted_lfm2_skip1980_cap4_history128_compact_only_stm3_judged16_openai_gpt54mini_nolabelbank.json`
+-   `build/chat_replay_goal_explore/continuation_20260521/deep180_shifted_lfm2_skip2160_cap4_history128_compact_only_stm3_judged16_openai_gpt54mini_nolabelbank.json`
+-   `build/chat_replay_goal_explore/continuation_20260521/deep180_shifted_lfm2_skip2340_cap4_history128_compact_only_stm3_judged16_openai_gpt54mini_nolabelbank.json`
+-   `build/chat_replay_goal_explore/continuation_20260521/deep180_shifted_lfm2_skip2520_cap4_history128_compact_only_stm3_judged16_openai_gpt54mini_nolabelbank.json`
+-   `build/chat_replay_goal_explore/continuation_20260521/deep180_shifted_lfm2_skip2700_cap4_history128_compact_only_stm3_judged16_openai_gpt54mini_nolabelbank.json`
+-   `build/chat_replay_goal_explore/continuation_20260521/deep180_shifted_lfm2_skip2880_cap4_history128_compact_only_stm3_judged16_openai_gpt54mini_nolabelbank.json`
+-   `build/chat_replay_goal_explore/continuation_20260521/wm_stm_ltm_later_future_slices_1980_2880_openai_gpt54mini_20260522.json`
+-   `build/chat_replay_goal_explore/continuation_20260521/wm_stm_ltm_skip540_history_budget_sweep_20260521.json`
+-   `build/chat_replay_goal_explore/continuation_20260521/wm_stm_ltm_consolidation_graph_audit_20260521.json`
+-   `build/chat_replay_goal_explore/continuation_20260521/wm_stm_ltm_graph_retrieval_admission_audit_20260521.json`
+-   `build/chat_replay_goal_explore/continuation_20260521/wm_stm_ltm_fact_seed_path_diagnosis_20260521.json`
+-   `build/chat_replay_goal_explore/continuation_20260521/deep180_shifted_lfm2_skip540_cap4_history128_factprompt_k1_judged16_nolabelbank.json`
+-   `build/chat_replay_goal_explore/continuation_20260521/deep180_shifted_lfm2_skip540_cap4_history128_factprompt_k3_judged16_nolabelbank.json`
+-   `build/chat_replay_goal_explore/continuation_20260521/wm_stm_ltm_skip540_fact_proposal_breadth_20260521.json`
+-   `build/chat_replay_goal_explore/continuation_20260521/wm_stm_ltm_skip540_constrained_fact_admission_20260521.json`
+-   `build/chat_replay_goal_explore/continuation_20260521/wm_stm_ltm_posthoc_adaptive_policy_chronological_20260521.json`
+-   `build/chat_replay_goal_explore/continuation_20260521/wm_stm_ltm_posthoc_adaptive_policy_skip540_budget_sweep_20260521.json`
+-   `build/chat_replay_goal_explore/continuation_20260521/wm_stm_ltm_posthoc_adaptive_policy_loo_20260521.json`
+-   `build/chat_replay_goal_explore/continuation_20260521/wm_stm_ltm_probe_level_robustness_20260521.json`
 
 ### Storage-Pressure Summary Gate
 
@@ -39912,7 +39912,7 @@ without letting the many wrong labels become durable memory structure.
 
 ### STM graph to durable LTM consolidation replay
 
-The next production-shaped check was a real Julie conversation replay
+The next production-shaped check was a real personal-chat conversation replay
 through Cortext rather than an offline label-vector benchmark. The goal
 was not to test summarization quality. It was to test the intended
 memory path: working memory and STM graph structure enter consolidation,
@@ -39924,8 +39924,8 @@ Command:
 
 ``` bash
 source env.sh && CORTEXT_STM_LTM_AUDIT=1 \
-./build/examples/benchmark/cortext_julie_conversation_memory_bakeoff \
-  --input-dir "$HOME/Documents/Memory/Julie" --models models \
+./build/examples/benchmark/cortext_chat_replay_conversation_memory_bakeoff \
+  --input-dir "/path/to/personal-chat-export" --models models \
   --db build/stm_ltm_graph_chat_packet_v26_80.sqlite \
   --out build/stm_ltm_graph_chat_packet_v26_80_openai.json \
   --skip-messages 1980 --max-messages 80 --warmup-messages 5 \
@@ -40062,7 +40062,7 @@ We then hardened the durable-label gate to reject weak multi-token
 discourse phrases whose tokens are all modal, helper, or conversational
 filler words. The privacy-safe replay artifact
 `build/stm_ltm_weak_phrase_filter_v28_80_openai.json` used the same
-80-message Julie slice and still verified source preservation: 9
+80-message corpus slice and still verified source preservation: 9
 consolidation cycles, 70 source memories, 63 STM items, 252 STM label
 edges, 70 `derived_from` links, and zero durable LTM nodes missing
 source content. The gate reduced durable output from 20 to 16 refined
@@ -40115,7 +40115,7 @@ using token overlap instead of exact phrase containment. A focused
 synthetic regression showed the intended capability: a query such as
 “who gave money?” can route through a longer durable label that contains
 those discriminative tokens even when the label embedding is not
-aligned. The real Julie replay did not support enabling this path by
+aligned. The real personal-chat replay did not support enabling this path by
 default. In `build/stm_ltm_label_token_route_v31_80_openai.json`,
 durable construction remained unchanged at 16 refined labels, 103
 source-link pairs, and zero missing source nodes, but judged retrieval
@@ -40137,7 +40137,7 @@ conservative shape: `ProperName + action verb + object`. This is
 deliberately downstream of relabel/prune, so pruned or unsupported
 labels cannot create facts. A focused regression verifies that an
 accepted source-span event label creates a fact and links it to both the
-associative cue and original source memory. On the Julie replay
+associative cue and original source memory. On the personal-chat replay
 (`build/stm_ltm_event_fact_v32_80_openai.json`), this promoted one
 additional active fact (`Amelia gave money`) and increased fact evidence
 rows from 47 to 53 without changing durable label/source construction.
@@ -40701,7 +40701,7 @@ already favored by the rest of the cortext design (constructive recall,
 extractor/summarizer over payload, no label state inside the
 accumulator).
 
-### Julie Release Early-Judge Smoke After WM Temporal Anchors
+### Chat-Replay Release Early-Judge Smoke After WM Temporal Anchors
 
 After production retrieval was updated so active WM slots can seed
 source-local temporal expansion into durable LTM neighbors, we ran a
@@ -40713,8 +40713,8 @@ checks, and summary gate still compose after the retrieval change.
 Command:
 
 ``` bash
-python3 tools/run_julie_release_protocol.py \
-  --out-dir build/julie_release_smoke_wm_anchor_v3 \
+python3 tools/run_chat_replay_release_protocol.py \
+  --out-dir build/chat_replay_release_smoke_wm_anchor_v3 \
   --max-messages 80 \
   --media-limit 2 \
   --warmup-events 20 \
@@ -40734,10 +40734,10 @@ python3 tools/run_julie_release_protocol.py \
 
 Artifacts:
 
--   `build/julie_release_smoke_wm_anchor_v3/summary.json`
--   `build/julie_release_smoke_wm_anchor_v3/summary_gate.json`
--   `build/julie_release_smoke_wm_anchor_v3/early_judge/early_judge_manifest.json`
--   `build/julie_release_smoke_wm_anchor_v3/early_judge/early_probe_001_judge.json`
+-   `build/chat_replay_release_smoke_wm_anchor_v3/summary.json`
+-   `build/chat_replay_release_smoke_wm_anchor_v3/summary_gate.json`
+-   `build/chat_replay_release_smoke_wm_anchor_v3/early_judge/early_judge_manifest.json`
+-   `build/chat_replay_release_smoke_wm_anchor_v3/early_judge/early_probe_001_judge.json`
 
 Aggregate smoke result:
 
@@ -40809,9 +40809,9 @@ release claim still requires the frozen multi-window protocol, repeated
 local judging, human labels, bootstrap confidence intervals, and
 ablations.
 
-### Julie Release Early-Judge Fail-Fast Harness Smoke
+### Chat-Replay Release Early-Judge Fail-Fast Harness Smoke
 
-Because full Julie mixed-media runs are expensive, the release wrapper
+Because full personal-chat mixed-media runs are expensive, the release wrapper
 was extended to stream frozen probe rows and run the same local Gemma 4
 judge before the final summary exists. The watcher materializes partial
 summaries, sends `SIGSTOP` to the benchmark while the local judge runs,
@@ -40837,13 +40837,13 @@ Two local-only smoke runs verified both sides of that behavior:
 </thead>
 <tbody>
 <tr>
-<td><code>build/julie_release_early_smoke_v1/</code></td>
+<td><code>build/chat_replay_release_early_smoke_v1/</code></td>
 <td>one-probe failure path</td>
 <td style="text-align: right;">early judge exited <code>2</code>; runner
 terminated benchmark</td>
 </tr>
 <tr>
-<td><code>build/julie_release_early_smoke_v2/</code></td>
+<td><code>build/chat_replay_release_early_smoke_v2/</code></td>
 <td>four-probe pass path</td>
 <td style="text-align: right;">wrapper exit <code>0</code>; benchmark
 exit <code>0</code>; early judge exit <code>0</code></td>
@@ -40883,7 +40883,7 @@ killing the replay, while genuinely bad runs still stop well before
 final judging once the baseline is in the intended long-run regime.
 
 A later harness smoke
-(`build/julie_release_smoke_early_fail_hydration_cap_v1/`) tightened the
+(`build/chat_replay_release_smoke_early_fail_hydration_cap_v1/`) tightened the
 default early-watcher polling interval from 30 seconds to 2 seconds and
 then forced the hard quality gate to activate at 4 probes. The watcher
 observed the first probe after roughly 10 seconds, reached the two-probe
@@ -40906,7 +40906,7 @@ human-like memory system: unrelated associations can be noisy without
 being equivalent to missing the relevant context.
 
 A subsequent phase-aware private run
-(`build/julie_release_phase_gate_fast_1200_20260608/`) exercised the
+(`build/chat_replay_release_phase_gate_fast_1200_20260608/`) exercised the
 cheaper one-repetition checkpoint path on the 1200-message mixed-media
 slice. Milestones 2, 4, and 8 passed token, context, privacy, packet,
 and fairness gates while quality remained deferred because traditional
@@ -40981,7 +40981,7 @@ completed human sample and all ablation artifacts before emitting
 `release_protocol_report_final.json`.
 
 A short local handoff smoke
-(`build/julie_release_smoke_handoff_sample_v1/`) verified this
+(`build/chat_replay_release_smoke_handoff_sample_v1/`) verified this
 post-summary path without making a release claim. The smoke used 80
 messages, 2 media items, default knobs, daily deep consolidation, one
 early local Gemma checkpoint, and skipped the final judge/report. The
@@ -41003,7 +41003,7 @@ is cropped; the final release judge uses `--judge-packet-item-limit -1`
 by default, while the early judge keeps its smaller packet cap for fast
 screening. Second, the local judge media smoke was made reproducible
 with generated, non-private fixtures. The current artifact,
-`build/julie_release_media_smoke_v4/judge_media_smoke_ollama.json`, uses
+`build/chat_replay_release_media_smoke_v4/judge_media_smoke_ollama.json`, uses
 local Ollama Gemma 4 12B (`gemma4:12b-it-qat`) against a generated
 red-square image and a generated `"blue apple seven"` WAV. It reports
 `image_seen=true` and `audio_seen=true` with transcript
@@ -41024,14 +41024,14 @@ not alter Cortext ingress, retrieval, consolidation, or judging. The
 guard caught that the active early 1200-message diagnostic window
 contained selected media counts `image=13`, `video=3`, and `audio=0`, so
 it cannot support a speech-inclusive mixed-media claim by itself
-(`build/julie_release_preflight_media_guard_current/preflight_report.json`).
+(`build/chat_replay_release_preflight_media_guard_current/preflight_report.json`).
 Two deterministic later windows pass narrower modality checks without
 changing the production path: `skip=67300,max=80,media=4` contains
 `video=2,image=2`, and `skip=98412,max=80,media=4` contains
 `audio=1,image=3`
-(`build/julie_release_preflight_media_guard_video_window/preflight_report.json`
+(`build/chat_replay_release_preflight_media_guard_video_window/preflight_report.json`
 and
-`build/julie_release_preflight_media_guard_audio_window/preflight_report.json`).
+`build/chat_replay_release_preflight_media_guard_audio_window/preflight_report.json`).
 The final mixed-media release protocol should therefore be treated as
 multi-window unless a single frozen window is explicitly shown to
 contain all required modalities.
@@ -41046,7 +41046,7 @@ wall time on replay and again when a report is generated from a recorded
 benchmark command, so a manually produced diagnostic summary cannot
 satisfy the native-Cortext release protocol by accident.
 
-A follow-up wrapper, `tools/run_julie_release_windows.py`, now makes
+A follow-up wrapper, `tools/run_chat_replay_release_windows.py`, now makes
 that multi-window protocol explicit instead of relying on hand-run
 commands. By default it freezes three windows: `early_text_image`
 (`skip=0,max=1200,media=16,warmup=200,stride=25,min_probes=30,require=image`),
@@ -41061,7 +41061,7 @@ wrapper writes `release_windows_manifest.json`, delegates each window to
 the single-window production release runner, strips hosted-provider
 environment variables, and shares one non-private local Gemma
 media-smoke artifact across all windows.
-`build/julie_release_windows_preflight_smoke_v3/release_windows_status.json`
+`build/chat_replay_release_windows_preflight_smoke_v3/release_windows_status.json`
 records a passing preflight for all three windows with selected media
 counts of `image=13,video=3,audio=0`, `image=2,video=2,audio=0`, and
 `image=3,video=0,audio=1`, respectively. The same wrapper now writes
@@ -41084,8 +41084,8 @@ release-quality claim support have not yet been produced. This is still
 protocol readiness evidence, not release-quality evidence.
 
 The first full multi-window evidence run was launched in tmux as
-`cortext_julie_release_windows_20260609` with output under
-`build/julie_release_windows_full_20260609/`. Early fail-fast judging is
+`cortext_chat_replay_release_windows_20260609` with output under
+`build/chat_replay_release_windows_full_20260609/`. Early fail-fast judging is
 disabled for this run (`--early-judge off`) so each frozen window can
 complete and then receive the final repeated blind local Gemma judge. At
 launch, the shared non-private media smoke artifact passed and the
@@ -41109,21 +41109,21 @@ coverage counts.
 
 A historical 24-probe hard gate was selected after replaying the
 existing
-`build/julie_release_default_vector_v24/early_judge/early_judge_manifest.json`
-through `tools/audit_julie_early_gate_trace.py`. That long run
+`build/chat_replay_release_default_vector_v24/early_judge/early_judge_manifest.json`
+through `tools/audit_chat_replay_early_gate_trace.py`. That long run
 originally continued until the 32-probe hard gate, where it failed with
 `cortext_quality_delta_vs_traditional_chat_rag=-0.71875`. Under the new
 24-probe default it would have failed at probe 24 instead, where the
 cumulative quality delta was already `-0.583333333333333` against the
 `-0.5` floor. The offline audit artifact is
-`build/julie_release_default_vector_v24/early_gate_trace_audit_quality24.json`.
+`build/chat_replay_release_default_vector_v24/early_gate_trace_audit_quality24.json`.
 This fixed-probe policy has since been superseded by the phase-aware
 rolling-history-pressure gate described above; the v24 audit remains
 useful as a historical example that early judging can terminate a bad
 run before final judging.
 
 We also added a private-safe loss audit generated by
-`tools/audit_julie_judge_losses.py`; future early checkpoints write
+`tools/audit_chat_replay_judge_losses.py`; future early checkpoints write
 `early_probe_XXX_loss_audit.json` beside the cumulative judge artifact.
 The audit records scores, counts, token totals, media-attachment counts,
 and coarse loss tags, but no packet text or judge reason text. When the
@@ -41135,7 +41135,7 @@ counts/means) for all rows, Cortext wins, Cortext losses, ties, and all
 Cortext non-win rows.
 
 A current provenance-enabled diagnostic run
-(`build/julie_release_debug_current_28_v1/`) stopped at the first hard
+(`build/chat_replay_release_debug_current_28_v1/`) stopped at the first hard
 early quality gate, as intended. The run used default knobs
 (`F=S=T=0.5`), daily deep consolidation, the fixed
 rolling-history-plus-text-RAG baseline, local Gemma 4 12B judging, blind

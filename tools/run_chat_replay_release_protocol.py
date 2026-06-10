@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the Julie release replay with streamed early local judging.
+"""Run the chat-replay release replay with streamed early local judging.
 
 This is a reproducibility wrapper around the production benchmark and the
 existing local judge/report tools. It does not add eval-specific Cortext
@@ -8,6 +8,8 @@ failing early frozen probes.
 """
 
 from __future__ import annotations
+
+from chat_replay_corpus import discover_transcript
 
 import argparse
 import hashlib
@@ -26,7 +28,6 @@ import urllib.request
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 DEFAULT_MODEL = "gemma4:12b-it-qat"
-DEFAULT_INPUT_DIR = pathlib.Path.home() / "Documents/Memory/Julie"
 LOCAL_JUDGE_HOSTS = {"localhost", "127.0.0.1", "::1"}
 LOCAL_PROVIDER_ENV_KEYS = {
     "CORTEXT_JUDGE_BASE_URL",
@@ -227,7 +228,7 @@ def git_provenance() -> dict:
 
 def source_input_fingerprint(input_dir: pathlib.Path) -> dict:
     body: dict = {
-        "schema": "cortext_julie_source_input_fingerprint_v1",
+        "schema": "cortext_chat_replay_source_input_fingerprint_v1",
         "privacy": (
             "private local provenance: records content hashes and aggregate "
             "file metadata only, never message text or media bytes"
@@ -277,7 +278,7 @@ def source_input_fingerprint(input_dir: pathlib.Path) -> dict:
             entry["readable"] = True
             body["readable_file_count"] += 1
             body["total_bytes"] += stat.st_size
-            if str(relative_path) == "Messages - Julie Willen.txt":
+            if len(relative_path.parts) == 1 and relative_path.suffix == ".txt":
                 body["transcript_present"] = True
                 body["transcript_sha256"] = entry["sha256"]
         except OSError as exc:
@@ -328,7 +329,7 @@ def cortext_behavior_env_guard(env: dict[str, str]) -> dict:
     return {
         "mode": "fail_closed",
         "policy": (
-            "Julie release replay rejects CORTEXT_* variables except local "
+            "chat-replay release replay rejects CORTEXT_* variables except local "
             "judge endpoint metadata before launching production Cortext."
         ),
         "allowed_cortext_env_keys": sorted(CORTEXT_RELEASE_ENV_ALLOWLIST),
@@ -405,7 +406,7 @@ def normalize_local_base_url(base_url: str, provider: str) -> str:
     parsed = urllib.parse.urlparse(normalized)
     if parsed.scheme not in {"http", "https"} or parsed.hostname not in LOCAL_JUDGE_HOSTS:
         raise RuntimeError(
-            "Refusing non-local judge endpoint for private Julie metadata: "
+            "Refusing non-local judge endpoint for private chat-replay metadata: "
             f"{normalized!r}. Start the local {provider} server and use a "
             "loopback URL."
         )
@@ -644,7 +645,7 @@ def run_preflight(
     release_freeze_path: pathlib.Path | None = None,
 ) -> dict:
     checks: list[dict] = []
-    transcript = args.input_dir / "Messages - Julie Willen.txt"
+    transcript = discover_transcript(args.input_dir)
     media_count = count_media_files(args.input_dir)
     required_modalities = parse_required_modalities(args.require_media_modalities)
     selected_kind_counts = selected_media_kind_counts(
@@ -945,7 +946,7 @@ def run_preflight(
 
     status = "fail" if any(check["status"] == "fail" for check in checks) else "pass"
     return {
-        "schema": "cortext_julie_release_preflight_v1",
+        "schema": "cortext_chat_replay_release_preflight_v1",
         "created_at_utc": utc_now(),
         "privacy": "private local artifact; contains paths and commands, not message text",
         "status": status,
@@ -1076,7 +1077,7 @@ def write_or_validate_release_freeze(
         "benchmark_executable", {}
     )
     freeze = {
-        "schema": "cortext_julie_release_protocol_freeze_v1",
+        "schema": "cortext_chat_replay_release_protocol_freeze_v1",
         "created_at_utc": utc_now(),
         "source": "main_release_report",
         "source_report_path": str(report_path),
@@ -1255,7 +1256,7 @@ def validate_summary(
     add_check(checks, "rag_prior_only", not future, f"future={future[:10]}")
 
     body = {
-        "schema": "cortext_julie_summary_gate_v3",
+        "schema": "cortext_chat_replay_summary_gate_v3",
         "created_at_utc": utc_now(),
         "summary": str(summary_path),
         "overall_status": "pass"
@@ -1343,7 +1344,7 @@ def write_early_failure_report(
             artifact_paths[key] = pathlib.Path(str(value))
 
     report = {
-        "schema": "cortext_julie_release_early_failure_report_v1",
+        "schema": "cortext_chat_replay_release_early_failure_report_v1",
         "created_at_utc": utc_now(),
         "privacy": (
             "private local artifact; aggregate metrics and artifact hashes only, "
@@ -1468,7 +1469,7 @@ def build_early_judge_command(
 ) -> list[str]:
     cmd = [
         sys.executable,
-        str(REPO_ROOT / "tools/watch_julie_probe_stream_judge.py"),
+        str(REPO_ROOT / "tools/watch_chat_replay_probe_stream_judge.py"),
         "--probe-stream",
         str(summary) + ".probes.jsonl",
         "--out-dir",
@@ -1562,7 +1563,7 @@ def build_early_judge_command(
 def build_final_judge_command(args: argparse.Namespace, db: pathlib.Path, summary: pathlib.Path, judge: pathlib.Path) -> list[str]:
     return [
         sys.executable,
-        str(REPO_ROOT / "tools/judge_julie_live_run.py"),
+        str(REPO_ROOT / "tools/judge_chat_replay_live_run.py"),
         "--summary",
         str(summary),
         "--db",
@@ -1603,7 +1604,7 @@ def build_human_label_sample_command(
 ) -> list[str]:
     cmd = [
         sys.executable,
-        str(REPO_ROOT / "tools/julie_human_label_harness.py"),
+        str(REPO_ROOT / "tools/chat_replay_human_label_harness.py"),
         "build-sample",
         "--summary",
         str(summary),
@@ -1631,7 +1632,7 @@ def build_human_label_launch_command(
 ) -> list[str]:
     return [
         sys.executable,
-        str(REPO_ROOT / "tools/julie_human_label_harness.py"),
+        str(REPO_ROOT / "tools/chat_replay_human_label_harness.py"),
         "launch",
         "--sample",
         str(sample),
@@ -1654,7 +1655,7 @@ def build_finalizer_command(
 ) -> list[str]:
     cmd = [
         sys.executable,
-        str(REPO_ROOT / "tools/finalize_julie_release_protocol.py"),
+        str(REPO_ROOT / "tools/finalize_chat_replay_release_protocol.py"),
         "--base",
         str(args.out_dir / "ablations"),
         "--summary",
@@ -1766,7 +1767,7 @@ def build_report_command(
 ) -> list[str]:
     cmd = [
         sys.executable,
-        str(REPO_ROOT / "tools/julie_release_protocol_report.py"),
+        str(REPO_ROOT / "tools/chat_replay_release_protocol_report.py"),
         "--summary",
         str(summary),
         "--judge",
@@ -1855,7 +1856,7 @@ def run_benchmark_with_early_judge(
         write_json(
             status_path,
             {
-                "schema": "cortext_julie_release_benchmark_status_v1",
+                "schema": "cortext_chat_replay_release_benchmark_status_v1",
                 "created_at_utc": utc_now(),
                 "status": status,
                 "detail": detail,
@@ -2076,7 +2077,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--benchmark",
         type=pathlib.Path,
-        default=REPO_ROOT / "build/examples/benchmark/cortext_julie_live_run",
+        default=REPO_ROOT / "build/examples/benchmark/cortext_chat_replay_live_run",
     )
     parser.add_argument(
         "--summarizer-provider",
@@ -2091,7 +2092,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--input-dir",
         type=pathlib.Path,
-        default=DEFAULT_INPUT_DIR,
+        required=True,
     )
     parser.add_argument("--skip-messages", type=int, default=0)
     parser.add_argument("--max-messages", type=int, default=1200)
@@ -2345,10 +2346,10 @@ def main() -> int:
         raise RuntimeError("--human-label-min-overlap must be non-negative")
     if args.human_label_port < 1:
         raise RuntimeError("--human-label-port must be positive")
-    transcript = args.input_dir / "Messages - Julie Willen.txt"
+    transcript = discover_transcript(args.input_dir)
     if not transcript.is_file():
         raise RuntimeError(
-            "Julie transcript not found under --input-dir: "
+            "transcript not found under --input-dir: "
             f"{transcript}"
         )
 
@@ -2498,7 +2499,7 @@ def main() -> int:
     write_json(
         command_manifest,
         {
-            "schema": "cortext_julie_release_protocol_runner_v1",
+            "schema": "cortext_chat_replay_release_protocol_runner_v1",
             "created_at_utc": utc_now(),
             "privacy": "private local artifact; contains paths and commands, not message text",
             "git": git_provenance(),
@@ -2652,7 +2653,7 @@ def main() -> int:
         )
         ablation_cmd = [
             sys.executable,
-            str(REPO_ROOT / "tools/run_julie_release_ablations.py"),
+            str(REPO_ROOT / "tools/run_chat_replay_release_ablations.py"),
             "--base",
             str(args.out_dir / "ablations"),
             "--main-report",

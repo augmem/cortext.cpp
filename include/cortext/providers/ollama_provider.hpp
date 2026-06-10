@@ -12,7 +12,7 @@ namespace cortext::providers
 /// @brief InferenceProvider over an Ollama server's native /api/chat.
 ///
 /// Text parts join the message content; image bytes and audio (encoded to
-/// 16 kHz mono WAV) ride the `images` field — the same convention the Julie
+/// 16 kHz mono WAV) ride the `images` field — the same convention the chat-replay
 /// judge harness uses for Gemma 4 multimodal payloads. JSON-schema
 /// constraints are enforced server-side via `format` (ServerSchema).
 class OllamaProvider : public InferenceProvider

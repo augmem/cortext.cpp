@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build a public-safe Julie release-eval protocol report.
+"""Build a public-safe chat-replay release-eval protocol report.
 
 The report intentionally excludes private message text and judge reason strings.
 It is a reproducibility and release-gating wrapper around an existing Cortext
@@ -1194,7 +1194,7 @@ def path_size_bytes(path: pathlib.Path) -> int:
 def source_input_fingerprint(summary: dict[str, Any]) -> dict[str, Any]:
     input_dir = pathlib.Path(str(summary.get("input_dir", "")))
     body: dict[str, Any] = {
-        "schema": "cortext_julie_source_input_fingerprint_v1",
+        "schema": "cortext_chat_replay_source_input_fingerprint_v1",
         "privacy": (
             "private local provenance: records content hashes and aggregate "
             "file metadata only, never message text or media bytes"
@@ -1244,7 +1244,7 @@ def source_input_fingerprint(summary: dict[str, Any]) -> dict[str, Any]:
             entry["readable"] = True
             body["readable_file_count"] += 1
             body["total_bytes"] += stat.st_size
-            if str(relative_path) == "Messages - Julie Willen.txt":
+            if len(relative_path.parts) == 1 and relative_path.suffix == ".txt":
                 body["transcript_present"] = True
                 body["transcript_sha256"] = entry["sha256"]
         except OSError as exc:
@@ -1329,7 +1329,8 @@ def source_id_audit(summary: dict[str, Any]) -> dict[str, Any]:
     if not db_path.exists():
         return audit
 
-    allowed_sources = {"Gabe", "Julie", "cortext/maintenance"}
+    # User/Contact are current; Gabe/Julie appear in legacy artifacts.
+    allowed_sources = {"User", "Contact", "Gabe", "Julie", "cortext/maintenance"}
     media_modalities = {"audio", "image", "video"}
     media_suffixes = (".wav", ".mp3", ".m4a", ".aac", ".jpg", ".jpeg", ".png", ".mov", ".mp4")
     try:
@@ -1366,6 +1367,8 @@ def source_id_audit(summary: dict[str, Any]) -> dict[str, Any]:
         if source_lower.endswith(media_suffixes):
             audit["media_encoded_source_id_count"] += count_int
         if modality_text in media_modalities and source_text not in {
+            "User",
+            "Contact",
             "Gabe",
             "Julie",
         }:
@@ -1383,7 +1386,7 @@ def source_id_audit_checks(audit: dict[str, Any]) -> list[dict[str, Any]]:
     def has_speaker_media_source(modality: str) -> bool:
         return any(
             int_or_default(modality_source_counts.get(f"{modality}|{speaker}"), 0) > 0
-            for speaker in ("Gabe", "Julie")
+            for speaker in ("User", "Contact", "Gabe", "Julie")
         )
 
     return [
@@ -1583,7 +1586,7 @@ def early_judge_summary(
         fixed_milestones = []
 
     return {
-        "schema": "cortext_julie_release_early_judge_summary_v1",
+        "schema": "cortext_chat_replay_release_early_judge_summary_v1",
         "benchmark_status_present": benchmark_status is not None
         and not status_body.get("load_error"),
         "benchmark_status_schema": status_body.get("schema"),
@@ -1699,7 +1702,7 @@ def early_judge_checks(early: dict[str, Any]) -> list[dict[str, Any]]:
             "early_judge_status_recorded",
             early.get("benchmark_status_present") is True
             and early.get("benchmark_status_schema")
-            == "cortext_julie_release_benchmark_status_v1",
+            == "cortext_chat_replay_release_benchmark_status_v1",
             (
                 f"benchmark_status_present={early.get('benchmark_status_present')} "
                 f"benchmark_status_schema={early.get('benchmark_status_schema')}"
@@ -1709,7 +1712,7 @@ def early_judge_checks(early: dict[str, Any]) -> list[dict[str, Any]]:
             "early_judge_manifest_recorded",
             early.get("manifest_present") is True
             and early.get("manifest_schema")
-            == "julie_probe_stream_early_judge_manifest_v1"
+            == "chat_replay_probe_stream_early_judge_manifest_v1"
             and bool(early.get("manifest_sha256")),
             (
                 f"manifest_present={early.get('manifest_present')} "
@@ -1720,7 +1723,7 @@ def early_judge_checks(early: dict[str, Any]) -> list[dict[str, Any]]:
         check(
             "early_judge_local_gemma4_configured",
             early.get("latest_payload_schema")
-            == "julie_probe_stream_early_judge_latest_v1"
+            == "chat_replay_probe_stream_early_judge_latest_v1"
             and early.get("judge_provider") == "ollama"
             and early.get("judge_model") == "gemma4:12b-it-qat"
             and int_or_default(early.get("judge_repetitions"), 0) >= 1,
@@ -1971,8 +1974,10 @@ def summary_protocol_checks(summary: dict[str, Any]) -> list[dict[str, Any]]:
         ),
         check(
             "source_ids_speaker_scoped_not_modality_scoped",
-            "Gabe" in str(summary.get("source_id_policy", ""))
-            and "Julie" in str(summary.get("source_id_policy", ""))
+            ("User" in str(summary.get("source_id_policy", ""))
+             and "Contact" in str(summary.get("source_id_policy", "")))
+            or ("Gabe" in str(summary.get("source_id_policy", ""))
+                and "Julie" in str(summary.get("source_id_policy", "")))
             and "media is not encoded into source_id"
             in str(summary.get("source_id_policy", "")),
             f"source_id_policy={summary.get('source_id_policy')!r}",
@@ -3330,7 +3335,7 @@ def probe_manifest(summary: dict[str, Any]) -> dict[str, Any]:
             }
         )
     body = {
-        "schema": "cortext_julie_frozen_probe_manifest_v1",
+        "schema": "cortext_chat_replay_frozen_probe_manifest_v1",
         "privacy": "no message text or source blob bytes",
         "probe_count": len(probes),
         "probes": probes,
@@ -3369,7 +3374,7 @@ def probe_schedule_manifest(summary: dict[str, Any]) -> dict[str, Any]:
             }
         )
     body = {
-        "schema": "cortext_julie_frozen_probe_schedule_v1",
+        "schema": "cortext_chat_replay_frozen_probe_schedule_v1",
         "privacy": "no message text, source blob bytes, or Cortext result IDs",
         "probe_count": len(probes),
         "warmup_events": summary.get("warmup_events"),
@@ -3754,7 +3759,7 @@ def protocol_freeze_checks(
     return [
         check(
             "protocol_freeze_file_present",
-            freeze.get("schema") == "cortext_julie_release_protocol_freeze_v1"
+            freeze.get("schema") == "cortext_chat_replay_release_protocol_freeze_v1"
             and not freeze.get("load_error"),
             (
                 f"path={freeze.get('path')} schema={freeze.get('schema')} "
@@ -4062,7 +4067,7 @@ def main() -> int:
         status_counts[item["status"]] = status_counts.get(item["status"], 0) + 1
 
     output = {
-        "schema": "cortext_julie_release_protocol_report_v1",
+        "schema": "cortext_chat_replay_release_protocol_report_v1",
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
         "privacy": {
             "public_safe": False,
@@ -4198,7 +4203,7 @@ def main() -> int:
         "ablation_plan": ablation_plan,
         "ablations": ablations,
         "public_aggregate_summary": {
-            "schema": "cortext_julie_release_public_aggregate_v1",
+            "schema": "cortext_chat_replay_release_public_aggregate_v1",
             "public_safe": True,
             "aggregate_only": True,
             "processed": {

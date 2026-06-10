@@ -22,19 +22,21 @@
 #include <unordered_set>
 #include <vector>
 
+#include "transcript_discovery.hpp"
+
 namespace fs = std::filesystem;
 
 namespace
 {
 
-constexpr const char *kGabeSourceId = "Gabe";
-constexpr const char *kJulieSourceId = "Julie";
+constexpr const char *kUserSourceId = "User";
+constexpr const char *kContactSourceId = "Contact";
 
 struct Config
 {
   fs::path manifest_path;
-  fs::path db_path = "build/julie_raw_speech_memory_eval.sqlite";
-  fs::path output_path = "build/julie_raw_speech_memory_eval.json";
+  fs::path db_path = "build/chat_replay_raw_speech_memory_eval.sqlite";
+  fs::path output_path = "build/chat_replay_raw_speech_memory_eval.json";
   fs::path label_bank_path = "data/label_bank/metadata.json";
   std::string models_dir = "models";
   std::string modality = "audio";
@@ -156,8 +158,8 @@ ParseTranscriptDocs (const fs::path &path)
         doc.index = static_cast<int> (docs.size ());
         doc.timestamp = *timestamp;
         doc.source_id = pending_header.find (" from ") != std::string::npos
-                            ? kJulieSourceId
-                            : kGabeSourceId;
+                            ? kContactSourceId
+                            : kUserSourceId;
         doc.text = std::move (text);
         docs.push_back (std::move (doc));
       }
@@ -331,7 +333,7 @@ LoadManifestRecords (const fs::path &path)
 std::string
 StreamSourceId (const Record &record)
 {
-  return record.speaker_role == "contact" ? kJulieSourceId : kGabeSourceId;
+  return record.speaker_role == "contact" ? kContactSourceId : kUserSourceId;
 }
 
 template <typename Callback>
@@ -544,14 +546,13 @@ main (int argc, char **argv)
     {
       Config cfg = ParseArgs (argc, argv);
       auto records = LoadManifestRecords (cfg.manifest_path);
-      fs::path input_dir = fs::path (std::getenv ("HOME"))
-                           / "Documents/Memory/Julie";
+      fs::path input_dir;
       std::ifstream manifest_in (cfg.manifest_path);
       nlohmann::json manifest = nlohmann::json::parse (manifest_in);
       if (manifest.contains ("input_dir"))
         input_dir = manifest["input_dir"].get<std::string> ();
       auto transcript_docs = ParseTranscriptDocs (
-          input_dir / "Messages - Julie Willen.txt");
+          chat_replay::DiscoverTranscript (input_dir));
       for (auto &doc : transcript_docs)
         doc.tokens = Tokens (doc.text);
 
@@ -742,7 +743,7 @@ main (int argc, char **argv)
       const auto run_ended = std::chrono::steady_clock::now ();
 
       nlohmann::json out;
-      out["schema"] = "julie_native_memory_eval_v1";
+      out["schema"] = "chat_replay_native_memory_eval_v1";
       out["manifest_path"] = cfg.manifest_path.string ();
       out["db_path"] = cfg.db_path.string ();
       out["modality"] = cfg.modality;
@@ -775,7 +776,7 @@ main (int argc, char **argv)
               ? "tts_generation_before_ingest_and_text_rag_oracle_metrics_only"
               : "text_cortext_ingest_and_text_rag_oracle_metrics";
       out["source_id_policy"] =
-          "Cortext receives the same Gabe or Julie opaque stream "
+          "Cortext receives the same User or Contact opaque stream "
           "source_id for text and audio; eval-only original_index metadata is "
           "keyed by stored memory_id and never passed as source_id";
       out["timestamp_handling"]
@@ -786,7 +787,7 @@ main (int argc, char **argv)
                 : "manifest timestamps are passed through ProcessTextAt for "
                   "event-time replay";
       out["privacy_note"]
-          = "No raw Julie transcript text is written to this artifact.";
+          = "No raw transcript text is written to this artifact.";
       out["audio_pipeline_cost_ms"]["manifest_tts_sum"] = 0.0;
       out["audio_pipeline_cost_ms"]["manifest_ffmpeg_sum"] = 0.0;
       for (const auto &record : records)
@@ -826,7 +827,7 @@ main (int argc, char **argv)
     }
   catch (const std::exception &e)
     {
-      std::cerr << "julie_raw_speech_memory_eval failed: " << e.what ()
+      std::cerr << "chat_replay_raw_speech_memory_eval failed: " << e.what ()
                 << "\n";
       return 1;
     }
