@@ -1,5 +1,7 @@
 #include "cortext/providers/registry.hpp"
 
+#include "cortext/providers/ollama_provider.hpp"
+
 #include <cstdlib>
 #include <map>
 #include <mutex>
@@ -109,9 +111,27 @@ RegisterProviderFactory (const std::string &scheme, ProviderFactory factory)
   Registry ()[scheme] = std::move (factory);
 }
 
+namespace
+{
+
+// Built-in schemes are registered on first resolve. Explicit registration
+// (rather than per-TU static initializers) survives static-library linking,
+// where initializers in unreferenced translation units are dropped.
+void
+EnsureBuiltinProvidersRegistered ()
+{
+  static std::once_flag once;
+  std::call_once (once, [] {
+    RegisterProviderFactory ("ollama", &OllamaProvider::Create);
+  });
+}
+
+} // namespace
+
 std::unique_ptr<InferenceProvider>
 ResolveProvider (const std::string &uri, Role role, std::string *error_out)
 {
+  EnsureBuiltinProvidersRegistered ();
   auto parsed = ParseProviderUri (uri);
   if (!parsed)
     {
