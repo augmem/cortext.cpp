@@ -20,6 +20,20 @@
 #include "test_support.h"
 
 static void
+test_assert_range_error (sqlite3 *db, sqlite3_stmt *stmt)
+{
+  TEST_ASSERT_NOT_NULL (db);
+  TEST_ASSERT_NOT_NULL (stmt);
+  const int rc = sqlite3_step (stmt);
+  if (rc == SQLITE_ERROR)
+    {
+      TEST_ASSERT_EQUAL_INT (SQLITE_RANGE, sqlite3_extended_errcode (db));
+      return;
+    }
+  TEST_ASSERT_EQUAL_INT (SQLITE_RANGE, rc);
+}
+
+static void
 test_scalar_functions_roundtrip (void)
 {
   sqlite3 *db = objstore_open_ephemeral_db ();
@@ -194,6 +208,158 @@ test_objstore_get_missing_returns_null (void)
 }
 
 static void
+test_objstore_get_range_returns_slice (void)
+{
+  sqlite3 *db = objstore_open_ephemeral_db ();
+  const uint8_t payload[] = { 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16 };
+
+  sqlite3_stmt *stmt = NULL;
+  TEST_ASSERT_EQUAL_INT (
+      SQLITE_OK,
+      sqlite3_prepare_v2 (db, "SELECT objstore_put(?1);", -1, &stmt, NULL));
+  TEST_ASSERT_EQUAL_INT (SQLITE_OK, sqlite3_bind_blob (stmt, 1, payload,
+                                                       (int)sizeof (payload),
+                                                       SQLITE_STATIC));
+  TEST_ASSERT_EQUAL_INT (SQLITE_ROW, sqlite3_step (stmt));
+  const uint8_t *id_blob = sqlite3_column_blob (stmt, 0);
+  TEST_ASSERT_NOT_NULL (id_blob);
+  uint8_t id_copy[OBJSTORE_ID_SIZE];
+  memcpy (id_copy, id_blob, OBJSTORE_ID_SIZE);
+  sqlite3_finalize (stmt);
+
+  TEST_ASSERT_EQUAL_INT (
+      SQLITE_OK,
+      sqlite3_prepare_v2 (db,
+                          "SELECT objstore_get_range(?1, 'bytes=2-5');", -1,
+                          &stmt, NULL));
+  TEST_ASSERT_EQUAL_INT (SQLITE_OK,
+                         sqlite3_bind_blob (stmt, 1, id_copy, OBJSTORE_ID_SIZE,
+                                            SQLITE_STATIC));
+  TEST_ASSERT_EQUAL_INT (SQLITE_ROW, sqlite3_step (stmt));
+  TEST_ASSERT_EQUAL_INT (4, sqlite3_column_bytes (stmt, 0));
+  TEST_ASSERT_EQUAL_MEMORY (payload + 2, sqlite3_column_blob (stmt, 0), 4);
+  sqlite3_finalize (stmt);
+
+  TEST_ASSERT_EQUAL_INT (
+      SQLITE_OK,
+      sqlite3_prepare_v2 (db,
+                          "SELECT objstore_get_range(?1, 'bytes= 1 - 3 ');",
+                          -1, &stmt, NULL));
+  TEST_ASSERT_EQUAL_INT (SQLITE_OK,
+                         sqlite3_bind_blob (stmt, 1, id_copy, OBJSTORE_ID_SIZE,
+                                            SQLITE_STATIC));
+  TEST_ASSERT_EQUAL_INT (SQLITE_ROW, sqlite3_step (stmt));
+  TEST_ASSERT_EQUAL_INT (3, sqlite3_column_bytes (stmt, 0));
+  TEST_ASSERT_EQUAL_MEMORY (payload + 1, sqlite3_column_blob (stmt, 0), 3);
+  sqlite3_finalize (stmt);
+
+  TEST_ASSERT_EQUAL_INT (
+      SQLITE_OK,
+      sqlite3_prepare_v2 (db,
+                          "SELECT objstore_get_range(?1, 'bytes=0-');", -1,
+                          &stmt, NULL));
+  TEST_ASSERT_EQUAL_INT (SQLITE_OK,
+                         sqlite3_bind_blob (stmt, 1, id_copy, OBJSTORE_ID_SIZE,
+                                            SQLITE_STATIC));
+  TEST_ASSERT_EQUAL_INT (SQLITE_ROW, sqlite3_step (stmt));
+  TEST_ASSERT_EQUAL_INT ((int)sizeof (payload), sqlite3_column_bytes (stmt, 0));
+  TEST_ASSERT_EQUAL_MEMORY (payload, sqlite3_column_blob (stmt, 0),
+                            sizeof (payload));
+  sqlite3_finalize (stmt);
+
+  TEST_ASSERT_EQUAL_INT (
+      SQLITE_OK,
+      sqlite3_prepare_v2 (db,
+                          "SELECT objstore_get_range(?1, 'bytes=-3');", -1,
+                          &stmt, NULL));
+  TEST_ASSERT_EQUAL_INT (SQLITE_OK,
+                         sqlite3_bind_blob (stmt, 1, id_copy, OBJSTORE_ID_SIZE,
+                                            SQLITE_STATIC));
+  TEST_ASSERT_EQUAL_INT (SQLITE_ROW, sqlite3_step (stmt));
+  TEST_ASSERT_EQUAL_INT (3, sqlite3_column_bytes (stmt, 0));
+  TEST_ASSERT_EQUAL_MEMORY (payload + 4, sqlite3_column_blob (stmt, 0), 3);
+  sqlite3_finalize (stmt);
+
+  TEST_ASSERT_EQUAL_INT (
+      SQLITE_OK,
+      sqlite3_prepare_v2 (db,
+                          "SELECT objstore_get_range(?1, 'bytes=99-100');",
+                          -1, &stmt, NULL));
+  TEST_ASSERT_EQUAL_INT (SQLITE_OK,
+                         sqlite3_bind_blob (stmt, 1, id_copy, OBJSTORE_ID_SIZE,
+                                            SQLITE_STATIC));
+  TEST_ASSERT_EQUAL_INT (SQLITE_ROW, sqlite3_step (stmt));
+  TEST_ASSERT_EQUAL_INT (SQLITE_NULL, sqlite3_column_type (stmt, 0));
+  sqlite3_finalize (stmt);
+
+  TEST_ASSERT_EQUAL_INT (
+      SQLITE_OK,
+      sqlite3_prepare_v2 (db,
+                          "SELECT objstore_get_range(?1, 'bytes=1-2,3-4');",
+                          -1, &stmt, NULL));
+  TEST_ASSERT_EQUAL_INT (SQLITE_OK,
+                         sqlite3_bind_blob (stmt, 1, id_copy, OBJSTORE_ID_SIZE,
+                                            SQLITE_STATIC));
+  test_assert_range_error (db, stmt);
+  sqlite3_finalize (stmt);
+
+  TEST_ASSERT_EQUAL_INT (
+      SQLITE_OK,
+      sqlite3_prepare_v2 (db,
+                          "SELECT objstore_get_range(?1, '0-1');", -1, &stmt,
+                          NULL));
+  TEST_ASSERT_EQUAL_INT (SQLITE_OK,
+                         sqlite3_bind_blob (stmt, 1, id_copy, OBJSTORE_ID_SIZE,
+                                            SQLITE_STATIC));
+  TEST_ASSERT_EQUAL_INT (SQLITE_ROW, sqlite3_step (stmt));
+  TEST_ASSERT_EQUAL_INT (2, sqlite3_column_bytes (stmt, 0));
+  TEST_ASSERT_EQUAL_MEMORY (payload, sqlite3_column_blob (stmt, 0), 2);
+  sqlite3_finalize (stmt);
+
+  TEST_ASSERT_EQUAL_INT (
+      SQLITE_OK,
+      sqlite3_prepare_v2 (db,
+                          "SELECT objstore_get_range(?1, 'bytes=foo');", -1,
+                          &stmt, NULL));
+  TEST_ASSERT_EQUAL_INT (SQLITE_OK,
+                         sqlite3_bind_blob (stmt, 1, id_copy, OBJSTORE_ID_SIZE,
+                                            SQLITE_STATIC));
+  test_assert_range_error (db, stmt);
+  sqlite3_finalize (stmt);
+
+  static const char *const kInvalidRanges[] = {
+    "bytes=",
+    "bytes=-",
+    "bytes=1--2",
+    "bytes=1-2-3",
+    "bytes=1-2,3-4",
+    "bytes=abc-def",
+    "bytes=1-2x",
+    "bytes=+1-2",
+    "bytes=1-+2",
+    "bytes=18446744073709551616-1",
+  };
+  for (size_t i = 0; i < sizeof (kInvalidRanges) / sizeof (kInvalidRanges[0]);
+       ++i)
+    {
+      TEST_ASSERT_EQUAL_INT (
+          SQLITE_OK,
+          sqlite3_prepare_v2 (db, "SELECT objstore_get_range(?1, ?2);", -1,
+                              &stmt, NULL));
+      TEST_ASSERT_EQUAL_INT (SQLITE_OK, sqlite3_bind_blob (
+                                            stmt, 1, id_copy, OBJSTORE_ID_SIZE,
+                                            SQLITE_STATIC));
+      TEST_ASSERT_EQUAL_INT (SQLITE_OK, sqlite3_bind_text (
+                                            stmt, 2, kInvalidRanges[i], -1,
+                                            SQLITE_STATIC));
+      test_assert_range_error (db, stmt);
+      sqlite3_finalize (stmt);
+    }
+
+  objstore_close_ephemeral_db (db);
+}
+
+static void
 test_scalar_mutations_execute_without_consuming_result (void)
 {
   sqlite3 *db = objstore_open_ephemeral_db ();
@@ -313,6 +479,7 @@ scalar_function_register_tests (void)
   RUN_TEST (test_scalar_functions_respect_transactions);
   RUN_TEST (test_objstore_put_with_id_enforces_immutability);
   RUN_TEST (test_objstore_get_missing_returns_null);
+  RUN_TEST (test_objstore_get_range_returns_slice);
   RUN_TEST (test_scalar_mutations_execute_without_consuming_result);
   RUN_TEST (test_objstore_get_rejects_non_blob_ids);
   RUN_TEST (test_objstore_insert_with_short_id_fails);

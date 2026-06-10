@@ -1,3 +1,7 @@
+#if !defined(_WIN32)
+#define _POSIX_C_SOURCE 200809L
+#endif
+
 #include "objstore/backend.h"
 
 #include "backend_fs_common.h"
@@ -5,6 +9,8 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
+#include <stddef.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -50,11 +56,29 @@ typedef struct file_backend_txn
   char txn_id[33];
   char *active_dir;
   sqlite3_str *manifest_buffer;
+  struct file_backend_savepoint_frame *frames;
+  size_t frame_count;
+  size_t frame_capacity;
   unsigned char *io_buffer;
   size_t io_buffer_size;
   bool staging_promoted;
   bool manifest_written;
 } file_backend_txn;
+
+typedef struct file_backend_savepoint_entry
+{
+  objstore_id id;
+  bool had_pending;
+  bool had_delete_marker;
+} file_backend_savepoint_entry;
+
+typedef struct file_backend_savepoint_frame
+{
+  size_t manifest_length;
+  file_backend_savepoint_entry *entries;
+  size_t entry_count;
+  size_t entry_capacity;
+} file_backend_savepoint_frame;
 
 typedef struct file_backend_cursor
 {
@@ -77,6 +101,9 @@ typedef struct file_backend_staged_writer
 static int file_backend_collect_ids (file_backend_env *env,
                                      objstore_id **out_ids,
                                      size_t *out_count);
+static int file_backend_collect_object_ids (file_backend_env *env,
+                                            objstore_id **out_ids,
+                                            size_t *out_count);
 
 static bool
 file_backend_force_disk_full (void)
@@ -92,6 +119,7 @@ file_backend_force_disk_full (void)
 static int objstore_fsync_fd (int fd);
 static void *file_backend_alloc_aligned (size_t size);
 static void file_backend_free_aligned (void *ptr);
+static bool file_backend_path_exists (const char *path);
 
 static inline file_backend_txn *
 file_txn_from (objstore_backend_txn *txn)
@@ -174,7 +202,7 @@ file_backend_write_all (int fd, const void *buffer, size_t nbytes)
   size_t remaining = nbytes;
   while (remaining > 0)
     {
-      ssize_t wrote = write (fd, cursor, remaining);
+      int wrote = (int)write (fd, cursor, remaining);
       if (wrote < 0)
         {
           if (errno == EINTR)
@@ -390,6 +418,237 @@ file_backend_delete_marker (file_backend_txn *txn, const char *hex_id)
   return path;
 }
 
+static void
+file_backend_savepoint_frame_dispose (file_backend_savepoint_frame *frame)
+{
+  if (frame == NULL)
+    {
+      return;
+    }
+  sqlite3_free (frame->entries);
+  frame->entries = NULL;
+  frame->entry_count = 0;
+  frame->entry_capacity = 0;
+  frame->manifest_length = 0;
+}
+
+static void
+file_backend_savepoint_frames_clear (file_backend_txn *txn)
+{
+  if (txn == NULL)
+    {
+      return;
+    }
+  for (size_t i = 0; i < txn->frame_count; ++i)
+    {
+      file_backend_savepoint_frame_dispose (&txn->frames[i]);
+    }
+  sqlite3_free (txn->frames);
+  txn->frames = NULL;
+  txn->frame_count = 0;
+  txn->frame_capacity = 0;
+}
+
+static int
+file_backend_savepoint_frames_ensure_capacity (file_backend_txn *txn)
+{
+  if (txn == NULL)
+    {
+      return SQLITE_MISUSE;
+    }
+  if (txn->frame_count < txn->frame_capacity)
+    {
+      return SQLITE_OK;
+    }
+  size_t new_capacity
+      = (txn->frame_capacity == 0) ? 4u : txn->frame_capacity * 2u;
+  file_backend_savepoint_frame *resized = sqlite3_realloc64 (
+      txn->frames, new_capacity * sizeof (*txn->frames));
+  if (resized == NULL)
+    {
+      return SQLITE_NOMEM;
+    }
+  txn->frames = resized;
+  memset (&txn->frames[txn->frame_capacity], 0,
+          (new_capacity - txn->frame_capacity) * sizeof (*txn->frames));
+  txn->frame_capacity = new_capacity;
+  return SQLITE_OK;
+}
+
+static int
+file_backend_savepoint_entries_ensure_capacity (
+    file_backend_savepoint_frame *frame)
+{
+  if (frame == NULL)
+    {
+      return SQLITE_MISUSE;
+    }
+  if (frame->entry_count < frame->entry_capacity)
+    {
+      return SQLITE_OK;
+    }
+  size_t new_capacity
+      = (frame->entry_capacity == 0) ? 4u : frame->entry_capacity * 2u;
+  file_backend_savepoint_entry *resized = sqlite3_realloc64 (
+      frame->entries, new_capacity * sizeof (*frame->entries));
+  if (resized == NULL)
+    {
+      return SQLITE_NOMEM;
+    }
+  frame->entries = resized;
+  frame->entry_capacity = new_capacity;
+  return SQLITE_OK;
+}
+
+static ptrdiff_t
+file_backend_savepoint_frame_find_entry (const file_backend_savepoint_frame *frame,
+                                         const objstore_id *id)
+{
+  if (frame == NULL || id == NULL)
+    {
+      return -1;
+    }
+  for (size_t i = 0; i < frame->entry_count; ++i)
+    {
+      if (memcmp (frame->entries[i].id.bytes, id->bytes, OBJSTORE_ID_SIZE) == 0)
+        {
+          return (ptrdiff_t)i;
+        }
+    }
+  return -1;
+}
+
+static int
+file_backend_manifest_reset_prefix (file_backend_txn *txn, size_t prefix_length)
+{
+  if (txn == NULL || txn->manifest_buffer == NULL)
+    {
+      return SQLITE_MISUSE;
+    }
+  const char *current = sqlite3_str_value (txn->manifest_buffer);
+  const size_t current_length
+      = (size_t)sqlite3_str_length (txn->manifest_buffer);
+  if (prefix_length > current_length)
+    {
+      return SQLITE_CORRUPT;
+    }
+
+  sqlite3_str *replacement = sqlite3_str_new (NULL);
+  if (replacement == NULL)
+    {
+      return SQLITE_NOMEM;
+    }
+  if (prefix_length > 0 && current != NULL)
+    {
+      sqlite3_str_append (replacement, current, (int)prefix_length);
+    }
+  int rc = sqlite3_str_errcode (replacement);
+  if (rc != SQLITE_OK)
+    {
+      char *value = sqlite3_str_finish (replacement);
+      sqlite3_free (value);
+      return rc;
+    }
+
+  file_backend_manifest_dispose (txn);
+  txn->manifest_buffer = replacement;
+  txn->manifest_written = false;
+  return SQLITE_OK;
+}
+
+static int
+file_backend_savepoint_capture_state (file_backend_txn *txn,
+                                      const objstore_id *id)
+{
+  if (txn == NULL || id == NULL)
+    {
+      return SQLITE_MISUSE;
+    }
+  if (txn->frame_count == 0)
+    {
+      return SQLITE_OK;
+    }
+  file_backend_savepoint_frame *frame = &txn->frames[txn->frame_count - 1];
+  if (file_backend_savepoint_frame_find_entry (frame, id) >= 0)
+    {
+      return SQLITE_OK;
+    }
+  int rc = file_backend_savepoint_entries_ensure_capacity (frame);
+  if (rc != SQLITE_OK)
+    {
+      return rc;
+    }
+
+  char hex_id[kObjstoreIdHexChars + 1];
+  objstore_fs_id_to_hex (id, hex_id);
+  char *pending_path = file_backend_put_path (txn, hex_id);
+  char *marker_path = file_backend_delete_marker (txn, hex_id);
+  if (pending_path == NULL || marker_path == NULL)
+    {
+      sqlite3_free (pending_path);
+      sqlite3_free (marker_path);
+      return SQLITE_NOMEM;
+    }
+
+  file_backend_savepoint_entry *entry = &frame->entries[frame->entry_count++];
+  memset (entry, 0, sizeof (*entry));
+  entry->id = *id;
+  entry->had_pending = file_backend_path_exists (pending_path);
+  entry->had_delete_marker = file_backend_path_exists (marker_path);
+  sqlite3_free (pending_path);
+  sqlite3_free (marker_path);
+  return SQLITE_OK;
+}
+
+static int
+file_backend_savepoint_restore_entry (file_backend_txn *txn,
+                                      const file_backend_savepoint_entry *entry)
+{
+  if (txn == NULL || entry == NULL)
+    {
+      return SQLITE_MISUSE;
+    }
+
+  char hex_id[kObjstoreIdHexChars + 1];
+  objstore_fs_id_to_hex (&entry->id, hex_id);
+  char *pending_path = file_backend_put_path (txn, hex_id);
+  char *marker_path = file_backend_delete_marker (txn, hex_id);
+  if (pending_path == NULL || marker_path == NULL)
+    {
+      sqlite3_free (pending_path);
+      sqlite3_free (marker_path);
+      return SQLITE_NOMEM;
+    }
+
+  if (!entry->had_pending && unlink (pending_path) != 0 && errno != ENOENT)
+    {
+      sqlite3_free (pending_path);
+      sqlite3_free (marker_path);
+      return SQLITE_IOERR_DELETE;
+    }
+  if (entry->had_delete_marker)
+    {
+      FILE *marker = fopen (marker_path, "wb");
+      if (marker == NULL)
+        {
+          sqlite3_free (pending_path);
+          sqlite3_free (marker_path);
+          return SQLITE_IOERR;
+        }
+      fclose (marker);
+    }
+  else if (unlink (marker_path) != 0 && errno != ENOENT)
+    {
+      sqlite3_free (pending_path);
+      sqlite3_free (marker_path);
+      return SQLITE_IOERR_DELETE;
+    }
+
+  sqlite3_free (pending_path);
+  sqlite3_free (marker_path);
+  return SQLITE_OK;
+}
+
 static char *
 file_backend_committed_object_path (file_backend_env *env, const char *hex_id)
 {
@@ -431,11 +690,103 @@ file_backend_stream_file (FILE *file, const objstore_stream_writer *writer,
   return rc;
 }
 
+static int
+file_backend_seek (FILE *file, sqlite3_uint64 offset)
+{
+#if defined(_WIN32)
+  return _fseeki64 (file, (long long)offset, SEEK_SET);
+#else
+  if (offset > (sqlite3_uint64)LONG_MAX)
+    {
+      return -1;
+    }
+  return fseek (file, (long)offset, SEEK_SET);
+#endif
+}
+
+static int
+file_backend_stream_file_range (FILE *file, const objstore_stream_writer *writer,
+                                size_t chunk_size, sqlite3_uint64 offset,
+                                sqlite3_uint64 length)
+{
+  if (file == NULL || writer == NULL || writer->push == NULL)
+    {
+      return SQLITE_MISUSE;
+    }
+  if (length == 0)
+    {
+      return SQLITE_OK;
+    }
+  if (offset > (sqlite3_uint64)LONG_MAX)
+    {
+      return SQLITE_RANGE;
+    }
+  if (chunk_size == 0)
+    {
+      chunk_size = OBJSTORE_DEFAULT_CHUNK_SIZE;
+    }
+  if (file_backend_seek (file, offset) != 0)
+    {
+      return SQLITE_IOERR;
+    }
+  unsigned char *buffer = (unsigned char *)sqlite3_malloc64 (chunk_size);
+  if (buffer == NULL)
+    {
+      return SQLITE_NOMEM;
+    }
+  sqlite3_uint64 remaining = length;
+  int rc = SQLITE_OK;
+  while (remaining > 0)
+    {
+      size_t to_read = (remaining < (sqlite3_uint64)chunk_size)
+                           ? (size_t)remaining
+                           : chunk_size;
+      size_t nread = fread (buffer, 1, to_read, file);
+      if (nread != to_read)
+        {
+          rc = ferror (file) ? SQLITE_IOERR_READ : SQLITE_RANGE;
+          break;
+        }
+      rc = writer->push (writer->ctx, buffer, nread);
+      if (rc != SQLITE_OK)
+        {
+          break;
+        }
+      remaining -= (sqlite3_uint64)nread;
+    }
+  sqlite3_free (buffer);
+  return rc;
+}
+
 static bool
 file_backend_path_exists (const char *path)
 {
   struct stat st;
   return path != NULL && stat (path, &st) == 0;
+}
+
+static int
+file_backend_stat_size (const char *path, sqlite3_int64 *out_size)
+{
+  if (path == NULL || out_size == NULL)
+    {
+      return SQLITE_MISUSE;
+    }
+  struct stat st;
+  if (stat (path, &st) != 0)
+    {
+      return (errno == ENOENT) ? SQLITE_NOTFOUND : SQLITE_IOERR;
+    }
+  if (!S_ISREG (st.st_mode))
+    {
+      return SQLITE_NOTFOUND;
+    }
+  if (st.st_size < 0)
+    {
+      return SQLITE_IOERR;
+    }
+  *out_size = (sqlite3_int64)st.st_size;
+  return SQLITE_OK;
 }
 
 static void
@@ -680,7 +1031,7 @@ file_backend_rowidx_rebuild (file_backend_env *env)
     }
   objstore_id *ids = NULL;
   size_t count = 0;
-  rc = file_backend_collect_ids (env, &ids, &count);
+  rc = file_backend_collect_object_ids (env, &ids, &count);
   if (rc != SQLITE_OK)
     {
       sqlite3_free (ids);
@@ -1103,6 +1454,7 @@ file_backend_txn_release (file_backend_txn *txn, bool drop_active)
     {
       return;
     }
+  file_backend_savepoint_frames_clear (txn);
   file_backend_reset_active (txn, drop_active);
   if (txn->io_buffer != NULL)
     {
@@ -1368,6 +1720,12 @@ file_backend_staged_write_finalize (
 
   char hex_id[kObjstoreIdHexChars + 1];
   objstore_fs_id_to_hex (id, hex_id);
+  rc = file_backend_savepoint_capture_state (writer->txn, id);
+  if (rc != SQLITE_OK)
+    {
+      file_backend_staged_writer_cleanup (writer, true);
+      return rc;
+    }
   char *dest_path = file_backend_put_path (writer->txn, hex_id);
   if (dest_path == NULL)
     {
@@ -1506,11 +1864,9 @@ file_backend_begin_txn (objstore_backend_env *env,
     {
       return SQLITE_NOMEM;
     }
+  memset (txn, 0, sizeof (*txn));
   txn->env = backend_env;
-  txn->manifest_buffer = NULL;
-  txn->io_buffer = NULL;
   txn->io_buffer_size = backend_env->chunk_size;
-  txn->manifest_written = false;
   objstore_fs_random_hex (txn->txn_id, sizeof (txn->txn_id));
   txn->active_dir
       = objstore_fs_path_join (backend_env->staging_active_root, txn->txn_id);
@@ -1614,7 +1970,96 @@ file_backend_rollback_staged (objstore_backend_txn *txn)
     {
       return;
     }
+  file_backend_savepoint_frames_clear (file_txn);
   file_backend_reset_active (file_txn, true);
+}
+
+static int
+file_backend_savepoint_begin (objstore_backend_txn *txn)
+{
+  if (txn == NULL)
+    {
+      return SQLITE_MISUSE;
+    }
+  file_backend_txn *file_txn = file_txn_from (txn);
+  int rc = file_backend_savepoint_frames_ensure_capacity (file_txn);
+  if (rc != SQLITE_OK)
+    {
+      return rc;
+    }
+  file_backend_savepoint_frame *frame = &file_txn->frames[file_txn->frame_count];
+  file_backend_savepoint_frame_dispose (frame);
+  frame->manifest_length = (file_txn->manifest_buffer != NULL)
+                               ? (size_t)sqlite3_str_length (
+                                     file_txn->manifest_buffer)
+                               : 0u;
+  ++file_txn->frame_count;
+  return SQLITE_OK;
+}
+
+static int
+file_backend_savepoint_release (objstore_backend_txn *txn)
+{
+  if (txn == NULL)
+    {
+      return SQLITE_MISUSE;
+    }
+  file_backend_txn *file_txn = file_txn_from (txn);
+  if (file_txn->frame_count == 0)
+    {
+      return SQLITE_OK;
+    }
+  file_backend_savepoint_frame *child
+      = &file_txn->frames[file_txn->frame_count - 1];
+  if (file_txn->frame_count > 1)
+    {
+      file_backend_savepoint_frame *parent
+          = &file_txn->frames[file_txn->frame_count - 2];
+      for (size_t i = 0; i < child->entry_count; ++i)
+        {
+          if (file_backend_savepoint_frame_find_entry (parent,
+                                                       &child->entries[i].id)
+              >= 0)
+            {
+              continue;
+            }
+          int rc = file_backend_savepoint_entries_ensure_capacity (parent);
+          if (rc != SQLITE_OK)
+            {
+              return rc;
+            }
+          parent->entries[parent->entry_count++] = child->entries[i];
+        }
+    }
+  file_backend_savepoint_frame_dispose (child);
+  --file_txn->frame_count;
+  return SQLITE_OK;
+}
+
+static int
+file_backend_savepoint_rollback (objstore_backend_txn *txn)
+{
+  if (txn == NULL)
+    {
+      return SQLITE_MISUSE;
+    }
+  file_backend_txn *file_txn = file_txn_from (txn);
+  if (file_txn->frame_count == 0)
+    {
+      return SQLITE_OK;
+    }
+  file_backend_savepoint_frame *frame
+      = &file_txn->frames[file_txn->frame_count - 1];
+  for (size_t i = frame->entry_count; i > 0; --i)
+    {
+      int rc = file_backend_savepoint_restore_entry (file_txn,
+                                                     &frame->entries[i - 1]);
+      if (rc != SQLITE_OK)
+        {
+          return rc;
+        }
+    }
+  return file_backend_manifest_reset_prefix (file_txn, frame->manifest_length);
 }
 
 static int
@@ -1626,6 +2071,11 @@ file_backend_put (objstore_backend_txn *txn, const objstore_id *id,
       return SQLITE_MISUSE;
     }
   file_backend_txn *file_txn = file_txn_from (txn);
+  int rc = file_backend_savepoint_capture_state (file_txn, id);
+  if (rc != SQLITE_OK)
+    {
+      return rc;
+    }
   char hex_id[OBJSTORE_ID_SIZE * 2 + 1];
   objstore_fs_id_to_hex (id, hex_id);
   char *path = file_backend_put_path (file_txn, hex_id);
@@ -1649,7 +2099,7 @@ file_backend_put (objstore_backend_txn *txn, const objstore_id *id,
       sqlite3_free (path);
       return SQLITE_FULL;
     }
-  int rc = SQLITE_OK;
+  rc = SQLITE_OK;
   if (reader->size_hint > 0)
     {
       rc = file_backend_preallocate_fd (fd, reader->size_hint);
@@ -1732,6 +2182,162 @@ file_backend_get_from_committed (file_backend_env *env, const char *hex_id,
   int rc = file_backend_stream_file (file, writer, env->chunk_size);
   fclose (file);
   return rc;
+}
+
+static int
+file_backend_get_size_pending (file_backend_txn *txn, const char *hex_id,
+                               sqlite3_int64 *out_size)
+{
+  if (txn == NULL || hex_id == NULL)
+    {
+      return SQLITE_MISUSE;
+    }
+  if (txn->active_dir == NULL)
+    {
+      return SQLITE_NOTFOUND;
+    }
+  char *pending_path = file_backend_put_path (txn, hex_id);
+  if (pending_path == NULL)
+    {
+      return SQLITE_NOMEM;
+    }
+  if (!file_backend_path_exists (pending_path))
+    {
+      sqlite3_free (pending_path);
+      return SQLITE_NOTFOUND;
+    }
+  int rc = file_backend_stat_size (pending_path, out_size);
+  sqlite3_free (pending_path);
+  return rc;
+}
+
+static int
+file_backend_get_size_committed (file_backend_env *env, const char *hex_id,
+                                 sqlite3_int64 *out_size)
+{
+  char *path = file_backend_committed_object_path (env, hex_id);
+  if (path == NULL)
+    {
+      return SQLITE_NOMEM;
+    }
+  int rc = file_backend_stat_size (path, out_size);
+  sqlite3_free (path);
+  return rc;
+}
+
+static int
+file_backend_get_size (objstore_backend_txn *txn, const objstore_id *id,
+                       sqlite3_int64 *out_size)
+{
+  if (txn == NULL || id == NULL || out_size == NULL)
+    {
+      return SQLITE_MISUSE;
+    }
+  file_backend_txn *file_txn = file_txn_from (txn);
+  char hex_id[OBJSTORE_ID_SIZE * 2 + 1];
+  objstore_fs_id_to_hex (id, hex_id);
+
+  char *delete_marker = file_backend_delete_marker (file_txn, hex_id);
+  if (delete_marker == NULL)
+    {
+      return SQLITE_NOMEM;
+    }
+  if (file_backend_path_exists (delete_marker))
+    {
+      sqlite3_free (delete_marker);
+      return SQLITE_NOTFOUND;
+    }
+  sqlite3_free (delete_marker);
+
+  int pending_rc = file_backend_get_size_pending (file_txn, hex_id, out_size);
+  if (pending_rc != SQLITE_NOTFOUND)
+    {
+      return pending_rc;
+    }
+  return file_backend_get_size_committed (file_txn->env, hex_id, out_size);
+}
+
+static int
+file_backend_get_range_from_committed (file_backend_env *env, const char *hex_id,
+                                       sqlite3_uint64 offset,
+                                       sqlite3_uint64 length,
+                                       const objstore_stream_writer *writer)
+{
+  char *path = file_backend_committed_object_path (env, hex_id);
+  if (path == NULL)
+    {
+      return SQLITE_NOMEM;
+    }
+  FILE *file = fopen (path, "rb");
+  sqlite3_free (path);
+  if (file == NULL)
+    {
+      return (errno == ENOENT) ? SQLITE_NOTFOUND : SQLITE_IOERR;
+    }
+  int rc = file_backend_stream_file_range (file, writer, env->chunk_size,
+                                           offset, length);
+  fclose (file);
+  return rc;
+}
+
+static int
+file_backend_get_range (objstore_backend_txn *txn, const objstore_id *id,
+                        sqlite3_uint64 offset, sqlite3_uint64 length,
+                        const objstore_stream_writer *writer)
+{
+  if (txn == NULL || id == NULL || writer == NULL || writer->push == NULL)
+    {
+      return SQLITE_MISUSE;
+    }
+  if (length == 0)
+    {
+      return SQLITE_OK;
+    }
+  if (offset > UINT64_MAX - length)
+    {
+      return SQLITE_RANGE;
+    }
+  file_backend_txn *file_txn = file_txn_from (txn);
+  char hex_id[OBJSTORE_ID_SIZE * 2 + 1];
+  objstore_fs_id_to_hex (id, hex_id);
+
+  char *delete_marker = file_backend_delete_marker (file_txn, hex_id);
+  if (delete_marker == NULL)
+    {
+      return SQLITE_NOMEM;
+    }
+  if (file_backend_path_exists (delete_marker))
+    {
+      sqlite3_free (delete_marker);
+      return SQLITE_NOTFOUND;
+    }
+  sqlite3_free (delete_marker);
+
+  if (file_txn->active_dir != NULL)
+    {
+      char *pending_path = file_backend_put_path (file_txn, hex_id);
+      if (pending_path == NULL)
+        {
+          return SQLITE_NOMEM;
+        }
+      if (file_backend_path_exists (pending_path))
+        {
+          FILE *file = fopen (pending_path, "rb");
+          sqlite3_free (pending_path);
+          if (file == NULL)
+            {
+              return SQLITE_IOERR;
+            }
+          int rc = file_backend_stream_file_range (
+              file, writer, file_txn->env->chunk_size, offset, length);
+          fclose (file);
+          return rc;
+        }
+      sqlite3_free (pending_path);
+    }
+
+  return file_backend_get_range_from_committed (file_txn->env, hex_id, offset,
+                                                length, writer);
 }
 
 static int
@@ -1821,6 +2427,11 @@ file_backend_delete (objstore_backend_txn *txn, const objstore_id *id)
       return SQLITE_MISUSE;
     }
   file_backend_txn *file_txn = file_txn_from (txn);
+  int rc = file_backend_savepoint_capture_state (file_txn, id);
+  if (rc != SQLITE_OK)
+    {
+      return rc;
+    }
   char hex_id[OBJSTORE_ID_SIZE * 2 + 1];
   objstore_fs_id_to_hex (id, hex_id);
   char *marker = file_backend_delete_marker (file_txn, hex_id);
@@ -1844,8 +2455,33 @@ compare_ids (const void *lhs, const void *rhs)
 }
 
 static int
-file_backend_collect_ids_from_dir (const char *path, objstore_id **ids,
-                                   size_t *count, size_t *capacity)
+file_backend_collect_ids_append (objstore_id **ids, size_t *count,
+                                 size_t *capacity, const objstore_id *id)
+{
+  if (ids == NULL || count == NULL || capacity == NULL || id == NULL)
+    {
+      return SQLITE_MISUSE;
+    }
+  if (*capacity == *count)
+    {
+      size_t new_capacity = (*capacity == 0) ? 16 : (*capacity * 2);
+      objstore_id *resized
+          = sqlite3_realloc64 (*ids, new_capacity * sizeof (objstore_id));
+      if (resized == NULL)
+        {
+          return SQLITE_NOMEM;
+        }
+      *ids = resized;
+      *capacity = new_capacity;
+    }
+  (*ids)[*count] = *id;
+  ++(*count);
+  return SQLITE_OK;
+}
+
+static int
+file_backend_collect_object_ids_from_dir (const char *path, objstore_id **ids,
+                                          size_t *count, size_t *capacity)
 {
   DIR *dir = opendir (path);
   if (dir == NULL)
@@ -1876,7 +2512,8 @@ file_backend_collect_ids_from_dir (const char *path, objstore_id **ids,
         }
       if (S_ISDIR (st.st_mode))
         {
-          rc = file_backend_collect_ids_from_dir (child, ids, count, capacity);
+          rc = file_backend_collect_object_ids_from_dir (child, ids, count,
+                                                         capacity);
           sqlite3_free (child);
           continue;
         }
@@ -1899,27 +2536,81 @@ file_backend_collect_ids_from_dir (const char *path, objstore_id **ids,
           sqlite3_free (child);
           continue;
         }
-      if (*capacity == *count)
-        {
-          size_t new_capacity = (*capacity == 0) ? 16 : (*capacity * 2);
-          objstore_id *resized
-              = sqlite3_realloc64 (*ids, new_capacity * sizeof (objstore_id));
-          if (resized == NULL)
-            {
-              sqlite3_free (child);
-              rc = SQLITE_NOMEM;
-              break;
-            }
-          *ids = resized;
-          *capacity = new_capacity;
-        }
+      objstore_id id = { 0 };
       char hex[OBJSTORE_ID_SIZE * 2 + 1] = { 0 };
       memcpy (hex, entry->d_name, hex_len);
-      if (objstore_fs_hex_to_id (hex, &(*ids)[*count]) == SQLITE_OK)
+      if (objstore_fs_hex_to_id (hex, &id) == SQLITE_OK)
         {
-          ++(*count);
+          rc = file_backend_collect_ids_append (ids, count, capacity, &id);
         }
       sqlite3_free (child);
+    }
+  closedir (dir);
+  return rc;
+}
+
+static int
+file_backend_collect_object_ids (file_backend_env *env, objstore_id **out_ids,
+                                 size_t *out_count)
+{
+  if (env == NULL || out_ids == NULL || out_count == NULL)
+    {
+      return SQLITE_MISUSE;
+    }
+  objstore_id *ids = NULL;
+  size_t count = 0;
+  size_t capacity = 0;
+  int rc = file_backend_collect_object_ids_from_dir (env->objects_root, &ids,
+                                                     &count, &capacity);
+  if (rc != SQLITE_OK)
+    {
+      sqlite3_free (ids);
+      return rc;
+    }
+  if (count > 1)
+    {
+      qsort (ids, count, sizeof (objstore_id), compare_ids);
+    }
+  *out_ids = ids;
+  *out_count = count;
+  return SQLITE_OK;
+}
+
+static int
+file_backend_collect_ids_from_row_dir (file_backend_env *env,
+                                       const char *row_dir_path,
+                                       objstore_id **ids, size_t *count,
+                                       size_t *capacity)
+{
+  DIR *dir = opendir (row_dir_path);
+  if (dir == NULL)
+    {
+      return (errno == ENOENT) ? SQLITE_OK : SQLITE_IOERR;
+    }
+  int rc = SQLITE_OK;
+  struct dirent *entry = NULL;
+  while ((entry = readdir (dir)) != NULL && rc == SQLITE_OK)
+    {
+      if (strcmp (entry->d_name, ".") == 0
+          || strcmp (entry->d_name, "..") == 0)
+        {
+          continue;
+        }
+      if (strlen (entry->d_name) != kObjstoreIdHexChars)
+        {
+          continue;
+        }
+      objstore_id id = { 0 };
+      if (objstore_fs_hex_to_id (entry->d_name, &id) != SQLITE_OK)
+        {
+          continue;
+        }
+      if (!file_backend_object_exists (env, &id))
+        {
+          (void)file_backend_rowidx_remove_entry (env, &id);
+          continue;
+        }
+      rc = file_backend_collect_ids_append (ids, count, capacity, &id);
     }
   closedir (dir);
   return rc;
@@ -1929,11 +2620,66 @@ static int
 file_backend_collect_ids (file_backend_env *env, objstore_id **out_ids,
                           size_t *out_count)
 {
+  if (env == NULL || out_ids == NULL || out_count == NULL)
+    {
+      return SQLITE_MISUSE;
+    }
   objstore_id *ids = NULL;
   size_t count = 0;
   size_t capacity = 0;
-  int rc = file_backend_collect_ids_from_dir (env->objects_root, &ids, &count,
-                                              &capacity);
+  DIR *rowidx_root = opendir (env->rowidx_root);
+  if (rowidx_root == NULL)
+    {
+      return (errno == ENOENT) ? SQLITE_OK : SQLITE_IOERR;
+    }
+  int rc = SQLITE_OK;
+  struct dirent *shard_entry = NULL;
+  while ((shard_entry = readdir (rowidx_root)) != NULL && rc == SQLITE_OK)
+    {
+      if (strlen (shard_entry->d_name) != FILE_BACKEND_ROWIDX_SHARD_CHARS)
+        {
+          continue;
+        }
+      char *shard_path = objstore_fs_path_join (env->rowidx_root,
+                                                shard_entry->d_name);
+      if (shard_path == NULL)
+        {
+          rc = SQLITE_NOMEM;
+          break;
+        }
+      DIR *shard_dir = opendir (shard_path);
+      if (shard_dir == NULL)
+        {
+          sqlite3_free (shard_path);
+          rc = (errno == ENOENT) ? SQLITE_OK : SQLITE_IOERR;
+          if (rc == SQLITE_OK)
+            {
+              continue;
+            }
+          break;
+        }
+      struct dirent *row_entry = NULL;
+      while ((row_entry = readdir (shard_dir)) != NULL && rc == SQLITE_OK)
+        {
+          if (strlen (row_entry->d_name) != OBJSTORE_ROWID_HEX_CHARS)
+            {
+              continue;
+            }
+          char *row_dir_path = objstore_fs_path_join (shard_path,
+                                                      row_entry->d_name);
+          if (row_dir_path == NULL)
+            {
+              rc = SQLITE_NOMEM;
+              break;
+            }
+          rc = file_backend_collect_ids_from_row_dir (env, row_dir_path, &ids,
+                                                      &count, &capacity);
+          sqlite3_free (row_dir_path);
+        }
+      closedir (shard_dir);
+      sqlite3_free (shard_path);
+    }
+  closedir (rowidx_root);
   if (rc != SQLITE_OK)
     {
       sqlite3_free (ids);
@@ -2016,6 +2762,9 @@ const objstore_backend objstore_backend_file = {
   .begin_txn = file_backend_begin_txn,
   .commit_txn = file_backend_commit_txn,
   .rollback_txn = file_backend_rollback_txn,
+  .savepoint_begin = file_backend_savepoint_begin,
+  .savepoint_release = file_backend_savepoint_release,
+  .savepoint_rollback = file_backend_savepoint_rollback,
   .staged_write_begin = file_backend_staged_write_begin,
   .staged_write_push = file_backend_staged_write_push,
   .staged_write_finalize = file_backend_staged_write_finalize,
@@ -2024,6 +2773,8 @@ const objstore_backend objstore_backend_file = {
   .rollback_staged = file_backend_rollback_staged,
   .put = file_backend_put,
   .get = file_backend_get,
+  .get_range = file_backend_get_range,
+  .get_size = file_backend_get_size,
   .delete_fn = file_backend_delete,
   .exists = file_backend_exists,
   .scan_open = file_backend_scan_open,

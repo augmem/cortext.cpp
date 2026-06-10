@@ -28,6 +28,14 @@ typedef struct objstore_hash_writer
   objstore_blake3 *hash;
 } objstore_hash_writer;
 
+typedef struct objstore_range_writer
+{
+  const objstore_stream_writer *inner;
+  sqlite3_uint64 offset;
+  sqlite3_uint64 remaining;
+  sqlite3_uint64 skipped;
+} objstore_range_writer;
+
 static int objstore_value_reader_pull (void *ctx, void *buffer,
                                        size_t capacity, size_t *nread);
 static int objstore_blob_builder_reserve (objstore_blob_builder *builder,
@@ -35,6 +43,12 @@ static int objstore_blob_builder_reserve (objstore_blob_builder *builder,
 static int objstore_blob_builder_push (void *ctx, const void *buffer,
                                        size_t nread);
 static void objstore_blob_builder_reset (objstore_blob_builder *builder);
+static int objstore_range_writer_push (void *ctx, const void *buffer,
+                                       size_t nread);
+static int objstore_range_resolve (const objstore_range_spec *range,
+                                   sqlite3_int64 size,
+                                   sqlite3_uint64 *out_offset,
+                                   sqlite3_uint64 *out_length);
 static int objstore_connection_backend_exists (objstore_connection *conn,
                                                const objstore_id *id,
                                                int *out_present);
@@ -351,6 +365,65 @@ objstore_object_read_stream (objstore_connection *conn,
 }
 
 int
+objstore_object_read_stream_range (objstore_connection *conn,
+                                   objstore_backend_txn *txn,
+                                   const objstore_id *id,
+                                   sqlite3_uint64 sequence_limit,
+                                   const objstore_range_spec *range,
+                                   const objstore_stream_writer *writer)
+{
+  if (conn == NULL || txn == NULL || id == NULL || range == NULL
+      || writer == NULL || writer->push == NULL)
+    {
+      return SQLITE_MISUSE;
+    }
+  objstore_txn_lookup_state state
+      = objstore_txn_log_state_for_id (conn->txn_log, id, sequence_limit);
+  objstore_backend_txn *target_txn = txn;
+  if (state == OBJSTORE_TXN_LOOKUP_PUT && conn->txn_log != NULL)
+    {
+      if (conn->write_txn == NULL)
+        {
+          return SQLITE_MISUSE;
+        }
+      target_txn = conn->write_txn;
+    }
+  else if (state == OBJSTORE_TXN_LOOKUP_DELETE)
+    {
+      return SQLITE_NOTFOUND;
+    }
+
+  sqlite3_int64 size = 0;
+  int rc = conn->backend->get_size (target_txn, id, &size);
+  if (rc != SQLITE_OK)
+    {
+      return rc;
+    }
+  sqlite3_uint64 offset = 0;
+  sqlite3_uint64 length = 0;
+  rc = objstore_range_resolve (range, size, &offset, &length);
+  if (rc != SQLITE_OK)
+    {
+      return rc;
+    }
+  if (conn->backend->get_range != NULL)
+    {
+      return conn->backend->get_range (target_txn, id, offset, length, writer);
+    }
+  objstore_range_writer range_writer = {
+    .inner = writer,
+    .offset = offset,
+    .remaining = length,
+    .skipped = 0,
+  };
+  objstore_stream_writer wrapper = {
+    .ctx = &range_writer,
+    .push = objstore_range_writer_push,
+  };
+  return conn->backend->get (target_txn, id, &wrapper);
+}
+
+int
 objstore_object_read_blob (sqlite3_context *ctx, objstore_connection *conn,
                            objstore_backend_txn *txn, const objstore_id *id,
                            sqlite3_uint64 sequence_limit)
@@ -367,6 +440,41 @@ objstore_object_read_blob (sqlite3_context *ctx, objstore_connection *conn,
   };
   int rc
       = objstore_object_read_stream (conn, txn, id, sequence_limit, &writer);
+  if (rc == SQLITE_NOTFOUND)
+    {
+      sqlite3_result_null (ctx);
+      objstore_blob_builder_reset (&builder);
+      return SQLITE_OK;
+    }
+  if (rc != SQLITE_OK)
+    {
+      objstore_blob_builder_reset (&builder);
+      return rc;
+    }
+  sqlite3_result_blob (ctx, builder.data, (int)builder.size, SQLITE_TRANSIENT);
+  objstore_blob_builder_reset (&builder);
+  return SQLITE_OK;
+}
+
+int
+objstore_object_read_blob_range (sqlite3_context *ctx, objstore_connection *conn,
+                                 objstore_backend_txn *txn,
+                                 const objstore_id *id,
+                                 sqlite3_uint64 sequence_limit,
+                                 const objstore_range_spec *range)
+{
+  if (ctx == NULL)
+    {
+      return SQLITE_MISUSE;
+    }
+  objstore_blob_builder builder
+      = { .ctx = ctx, .data = NULL, .size = 0, .capacity = 0 };
+  objstore_stream_writer writer = {
+    .ctx = &builder,
+    .push = objstore_blob_builder_push,
+  };
+  int rc = objstore_object_read_stream_range (conn, txn, id, sequence_limit,
+                                              range, &writer);
   if (rc == SQLITE_NOTFOUND)
     {
       sqlite3_result_null (ctx);
@@ -537,6 +645,122 @@ objstore_blob_builder_reset (objstore_blob_builder *builder)
   builder->data = NULL;
   builder->size = 0;
   builder->capacity = 0;
+}
+
+static int
+objstore_range_writer_push (void *ctx, const void *buffer, size_t nread)
+{
+  objstore_range_writer *range = (objstore_range_writer *)ctx;
+  if (range == NULL || range->inner == NULL || range->inner->push == NULL
+      || (nread > 0 && buffer == NULL))
+    {
+      return SQLITE_MISUSE;
+    }
+  if (nread == 0 || range->remaining == 0)
+    {
+      return SQLITE_OK;
+    }
+  const uint8_t *cursor = (const uint8_t *)buffer;
+  size_t available = nread;
+  if (range->skipped < range->offset)
+    {
+      sqlite3_uint64 to_skip = range->offset - range->skipped;
+      size_t skip_now = (size_t)((to_skip < (sqlite3_uint64)available)
+                                     ? to_skip
+                                     : available);
+      range->skipped += skip_now;
+      cursor += skip_now;
+      available -= skip_now;
+      if (available == 0)
+        {
+          return SQLITE_OK;
+        }
+    }
+  size_t to_send = available;
+  if ((sqlite3_uint64)to_send > range->remaining)
+    {
+      to_send = (size_t)range->remaining;
+    }
+  int rc = SQLITE_OK;
+  if (to_send > 0)
+    {
+      rc = range->inner->push (range->inner->ctx, cursor, to_send);
+      if (rc != SQLITE_OK)
+        {
+          return rc;
+        }
+      range->remaining -= (sqlite3_uint64)to_send;
+    }
+  return SQLITE_OK;
+}
+
+static int
+objstore_range_resolve (const objstore_range_spec *range, sqlite3_int64 size,
+                        sqlite3_uint64 *out_offset, sqlite3_uint64 *out_length)
+{
+  if (range == NULL || out_offset == NULL || out_length == NULL)
+    {
+      return SQLITE_MISUSE;
+    }
+  if (!range->has_start && !range->has_end)
+    {
+      return SQLITE_MISUSE;
+    }
+  if (size < 0)
+    {
+      return SQLITE_IOERR;
+    }
+  const sqlite3_uint64 total = (sqlite3_uint64)size;
+  if (total == 0)
+    {
+      return SQLITE_RANGE;
+    }
+  if (range->has_start && range->has_end)
+    {
+      if (range->end < range->start)
+        {
+          return SQLITE_RANGE;
+        }
+      if (range->start >= total)
+        {
+          return SQLITE_RANGE;
+        }
+      sqlite3_uint64 end = range->end;
+      if (end >= total)
+        {
+          end = total - 1u;
+        }
+      if (end < range->start)
+        {
+          return SQLITE_RANGE;
+        }
+      *out_offset = range->start;
+      *out_length = end - range->start + 1u;
+      return SQLITE_OK;
+    }
+  if (range->has_start)
+    {
+      if (range->start >= total)
+        {
+          return SQLITE_RANGE;
+        }
+      *out_offset = range->start;
+      *out_length = total - range->start;
+      return SQLITE_OK;
+    }
+  if (range->end == 0)
+    {
+      return SQLITE_RANGE;
+    }
+  if (range->end >= total)
+    {
+      *out_offset = 0;
+      *out_length = total;
+      return SQLITE_OK;
+    }
+  *out_offset = total - range->end;
+  *out_length = range->end;
+  return SQLITE_OK;
 }
 
 static int

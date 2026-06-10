@@ -13,6 +13,20 @@ extern "C"
   typedef struct objstore_connection objstore_connection;
 
   /**
+   * S3-style byte range spec:
+   * - has_start + has_end => "start-end" (inclusive)
+   * - has_start only      => "start-"
+   * - has_end only        => "-suffix_length"
+   */
+  typedef struct objstore_range_spec
+  {
+    int has_start;
+    int has_end;
+    sqlite3_uint64 start;
+    sqlite3_uint64 end;
+  } objstore_range_spec;
+
+  /**
    * Validates that a SQLite value is a non-NULL BLOB suitable for storage.
    * Returns SQLITE_OK on success or SQLITE_MISMATCH for unsupported types.
    */
@@ -72,6 +86,17 @@ extern "C"
                                    const objstore_stream_writer *writer);
 
   /**
+   * Streams a range from an object payload into the provided writer.
+   * Range spec follows S3 semantics (inclusive end, suffix ranges).
+   */
+  int objstore_object_read_stream_range (objstore_connection *conn,
+                                         objstore_backend_txn *txn,
+                                         const objstore_id *id,
+                                         sqlite3_uint64 sequence_limit,
+                                         const objstore_range_spec *range,
+                                         const objstore_stream_writer *writer);
+
+  /**
    * Convenience wrapper that materializes an entire blob owned by SQLite.
    */
   int objstore_object_read_blob (sqlite3_context *ctx,
@@ -79,6 +104,16 @@ extern "C"
                                  objstore_backend_txn *txn,
                                  const objstore_id *id,
                                  sqlite3_uint64 sequence_limit);
+
+  /**
+   * Convenience wrapper that materializes a range of a blob owned by SQLite.
+   */
+  int objstore_object_read_blob_range (sqlite3_context *ctx,
+                                       objstore_connection *conn,
+                                       objstore_backend_txn *txn,
+                                       const objstore_id *id,
+                                       sqlite3_uint64 sequence_limit,
+                                       const objstore_range_spec *range);
 
   /**
    * Re-reads an object's bytes, recomputes BLAKE3, and reports whether the

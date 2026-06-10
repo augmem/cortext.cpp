@@ -17,6 +17,9 @@ int objstore_portable_begin_txn (objstore_backend_env *env,
                                  objstore_backend_txn **out_txn);
 int objstore_portable_commit_txn (objstore_backend_txn *txn);
 void objstore_portable_rollback_txn (objstore_backend_txn *txn);
+int objstore_portable_savepoint_begin (objstore_backend_txn *txn);
+int objstore_portable_savepoint_release (objstore_backend_txn *txn);
+int objstore_portable_savepoint_rollback (objstore_backend_txn *txn);
 int
 objstore_portable_staged_write_begin (objstore_backend_txn *txn,
                                       objstore_backend_staged_writer **out);
@@ -33,6 +36,13 @@ int objstore_portable_put (objstore_backend_txn *txn, const objstore_id *id,
                            const objstore_stream_reader *reader);
 int objstore_portable_get (objstore_backend_txn *txn, const objstore_id *id,
                            const objstore_stream_writer *writer);
+int objstore_portable_get_range (objstore_backend_txn *txn,
+                                 const objstore_id *id,
+                                 sqlite3_uint64 offset, sqlite3_uint64 length,
+                                 const objstore_stream_writer *writer);
+int objstore_portable_get_size (objstore_backend_txn *txn,
+                                const objstore_id *id,
+                                sqlite3_int64 *out_size);
 int objstore_portable_delete (objstore_backend_txn *txn,
                               const objstore_id *id);
 int objstore_portable_exists (objstore_backend_txn *txn,

@@ -123,6 +123,41 @@ test_txn_log_savepoint_frames (void)
 }
 
 static void
+test_txn_log_snapshot_preserves_order_across_delete_reinsert (void)
+{
+  sqlite3 *db = NULL;
+  objstore_txn_log *log = txn_log_create (&db);
+  objstore_id id1 = txn_make_id (0x60);
+  objstore_id id2 = txn_make_id (0x70);
+
+  TEST_ASSERT_EQUAL_INT (SQLITE_OK,
+                         objstore_txn_log_append_put (log, &id1, 10));
+  TEST_ASSERT_EQUAL_INT (SQLITE_OK,
+                         objstore_txn_log_append_put (log, &id2, 20));
+  TEST_ASSERT_EQUAL_INT (SQLITE_OK,
+                         objstore_txn_log_append_delete (log, &id1));
+  TEST_ASSERT_EQUAL_INT (SQLITE_OK,
+                         objstore_txn_log_append_put (log, &id1, 30));
+
+  objstore_txn_snapshot *snapshot = objstore_txn_snapshot_build (log, 4);
+  TEST_ASSERT_NOT_NULL (snapshot);
+  TEST_ASSERT_EQUAL_size_t (2, objstore_txn_snapshot_count (snapshot));
+
+  const objstore_txn_entry *first = objstore_txn_snapshot_entry (snapshot, 0);
+  const objstore_txn_entry *second = objstore_txn_snapshot_entry (snapshot, 1);
+  TEST_ASSERT_NOT_NULL (first);
+  TEST_ASSERT_NOT_NULL (second);
+  TEST_ASSERT_EQUAL_MEMORY (id2.bytes, first->id.bytes, OBJSTORE_ID_SIZE);
+  TEST_ASSERT_EQUAL_INT (20, first->payload_size);
+  TEST_ASSERT_EQUAL_MEMORY (id1.bytes, second->id.bytes, OBJSTORE_ID_SIZE);
+  TEST_ASSERT_EQUAL_INT (30, second->payload_size);
+
+  objstore_txn_snapshot_destroy (snapshot);
+  objstore_txn_log_destroy (log);
+  objstore_close_ephemeral_db (db);
+}
+
+static void
 test_txn_log_drop_last_entry (void)
 {
   sqlite3 *db = NULL;
@@ -156,6 +191,6 @@ txn_log_register_tests (void)
   RUN_TEST (test_txn_log_tracks_state_by_sequence);
   RUN_TEST (test_txn_log_snapshots_filter_by_sequence);
   RUN_TEST (test_txn_log_savepoint_frames);
+  RUN_TEST (test_txn_log_snapshot_preserves_order_across_delete_reinsert);
   RUN_TEST (test_txn_log_drop_last_entry);
 }
-

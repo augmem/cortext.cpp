@@ -53,7 +53,7 @@ The packaging script drives the `wasm-release` preset, then copies the shared fi
 
 Every consumer (Python, Go, Rust, Node, browser) mounts the bundle at `/bundle`, verifies `checksums.txt`, and streams the same fixtures so regressions are reproducible across languages.
 
-## Cross-Language Harness & CI
+## Cross-Language Harness & Release Checks
 
 ```sh
 scripts/run-wasm-cross-lang.sh   # packages bundle + runs Python/Go/Rust/Node harnesses
@@ -81,7 +81,10 @@ cargo run --release --manifest-path tests/wasm/rust/Cargo.toml -- --bundle dist/
 node tests/wasm/js/node_harness.mjs --bundle dist/wasm/<id>
 ```
 
-Set `-DOBJSTORE_ENABLE_WASM_CROSS_LANG=ON` when configuring CMake to register this script with CTest (`ctest -R wasm_cross_language`). CI pipelines can then enforce the WASM matrix before tagging releases.
+Set `-DOBJSTORE_ENABLE_WASM_CROSS_LANG=ON` when configuring CMake to register
+this script with CTest (`ctest -R wasm_cross_language`). Use it in a dedicated
+WASM validation job or as part of a release checklist; it is not part of the
+default native CI matrix today.
 All harness invocations run under `gtimeout`/`timeout` per workspace policy so hung WASM executions cannot block CI.
 
 ## Manual OPFS Harness

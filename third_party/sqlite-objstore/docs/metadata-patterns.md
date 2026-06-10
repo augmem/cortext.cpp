@@ -94,10 +94,21 @@ management. Common approaches:
 - Foreign keys referencing `objstore(id)` plus `ON DELETE CASCADE` ensure
   deleting metadata also removes the payload.
 - Periodic jobs can reclaim orphaned objects by scanning `objstore` ids and
-  cross-checking metadata tables.
+  cross-checking metadata tables. `objstore_example_orphan_sweep` automates the
+  file-backend sweep once you provide a query that returns every live object id
+  from your metadata schema.
 - For caches, `DELETE FROM cache_entries WHERE expires_at < strftime('%s','now');`
   releases unused payload IDs before vacuuming `objstore`.
 
+Example sweep command:
+
+```sh
+cmake --build --preset full-release --target objstore_example_orphan_sweep
+build/full-release/examples/objstore_example_orphan_sweep \
+  --db /var/lib/myapp/app.sqlite3 \
+  --storage-root /var/lib/myapp/objstore \
+  --live-query "SELECT file_id FROM files UNION SELECT obj_id FROM cache_entries"
+```
+
 Designing schemas this way keeps objstore small and makes it clear which table
 owns each object.
-

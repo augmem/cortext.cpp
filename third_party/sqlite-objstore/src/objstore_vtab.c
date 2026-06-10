@@ -83,6 +83,8 @@ static void objstore_sql_put_with_id (sqlite3_context *ctx, int argc,
                                       sqlite3_value **argv);
 static void objstore_sql_get (sqlite3_context *ctx, int argc,
                               sqlite3_value **argv);
+static void objstore_sql_get_range (sqlite3_context *ctx, int argc,
+                                    sqlite3_value **argv);
 static void objstore_sql_delete (sqlite3_context *ctx, int argc,
                                  sqlite3_value **argv);
 static void objstore_sql_exists (sqlite3_context *ctx, int argc,
@@ -731,6 +733,22 @@ objstore_connection_begin_write (objstore_connection *conn,
         {
           return rc;
         }
+      for (int depth = 0; depth < conn->savepoint_depth; ++depth)
+        {
+          if (conn->backend->savepoint_begin == NULL)
+            {
+              conn->backend->rollback_txn (conn->write_txn);
+              conn->write_txn = NULL;
+              return SQLITE_AUTH;
+            }
+          rc = conn->backend->savepoint_begin (conn->write_txn);
+          if (rc != SQLITE_OK)
+            {
+              conn->backend->rollback_txn (conn->write_txn);
+              conn->write_txn = NULL;
+              return rc;
+            }
+        }
     }
   if (out_txn != NULL)
     {
@@ -864,12 +882,30 @@ objstore_authorizer (void *ctx, int action, const char *param1,
                   return SQLITE_DENY;
                 }
             }
+          if (conn->write_txn != NULL)
+            {
+              if (conn->backend->savepoint_begin == NULL)
+                {
+                  return SQLITE_DENY;
+                }
+              if (conn->backend->savepoint_begin (conn->write_txn) != SQLITE_OK)
+                {
+                  return SQLITE_DENY;
+                }
+            }
         }
       else if (sqlite3_stricmp (op, "RELEASE") == 0)
         {
           if (conn->savepoint_depth > 0)
             {
               --conn->savepoint_depth;
+            }
+          if (conn->write_txn != NULL && conn->backend->savepoint_release != NULL)
+            {
+              if (conn->backend->savepoint_release (conn->write_txn) != SQLITE_OK)
+                {
+                  return SQLITE_DENY;
+                }
             }
           if (conn->txn_log != NULL)
             {
@@ -878,24 +914,34 @@ objstore_authorizer (void *ctx, int action, const char *param1,
         }
       else if (sqlite3_stricmp (op, "ROLLBACK") == 0)
         {
-          bool has_pending = (conn->txn_log != NULL)
-                             && !objstore_txn_log_is_empty (conn->txn_log);
-          if (has_pending)
+          if (conn->write_txn != NULL && conn->backend->savepoint_rollback != NULL)
             {
-              if (conn->write_txn != NULL)
+              if (conn->backend->savepoint_rollback (conn->write_txn) != SQLITE_OK)
                 {
-                  conn->backend->rollback_staged (conn->write_txn);
-                  conn->backend->rollback_txn (conn->write_txn);
-                  conn->write_txn = NULL;
+                  return SQLITE_DENY;
                 }
-              if (conn->txn_log != NULL)
+            }
+          else
+            {
+              bool has_pending = (conn->txn_log != NULL)
+                                 && !objstore_txn_log_is_empty (conn->txn_log);
+              if (has_pending)
                 {
-                  objstore_txn_log_clear (conn->txn_log);
+                  if (conn->write_txn != NULL)
+                    {
+                      conn->backend->rollback_staged (conn->write_txn);
+                      conn->backend->rollback_txn (conn->write_txn);
+                      conn->write_txn = NULL;
+                    }
+                  if (conn->txn_log != NULL)
+                    {
+                      objstore_txn_log_clear (conn->txn_log);
+                    }
+                  conn->txn_state = OBJSTORE_TXN_NONE;
+                  conn->savepoint_depth = 0;
+                  conn->last_error = OBJSTORE_ERROR_SAVEPOINT;
+                  return SQLITE_DENY;
                 }
-              conn->txn_state = OBJSTORE_TXN_NONE;
-              conn->savepoint_depth = 0;
-              conn->last_error = OBJSTORE_ERROR_SAVEPOINT;
-              return SQLITE_DENY;
             }
           if (conn->txn_log != NULL)
             {
@@ -930,6 +976,146 @@ objstore_value_to_id (sqlite3_value *value, objstore_id *out)
     }
   memcpy (out->bytes, blob, OBJSTORE_ID_SIZE);
   return SQLITE_OK;
+}
+
+static const char *
+objstore_skip_space (const char *cursor)
+{
+  if (cursor == NULL)
+    {
+      return NULL;
+    }
+  while (*cursor != '\0' && isspace ((unsigned char)*cursor))
+    {
+      ++cursor;
+    }
+  return cursor;
+}
+
+static int
+objstore_parse_u64_span (const char *start, const char *end,
+                         sqlite3_uint64 *out)
+{
+  if (start == NULL || end == NULL || out == NULL)
+    {
+      return SQLITE_MISUSE;
+    }
+  if (start >= end)
+    {
+      return SQLITE_RANGE;
+    }
+  sqlite3_uint64 value = 0;
+  for (const char *cursor = start; cursor < end; ++cursor)
+    {
+      if (!isdigit ((unsigned char)*cursor))
+        {
+          return SQLITE_RANGE;
+        }
+      const unsigned int digit = (unsigned int)(*cursor - '0');
+      if (value > (UINT64_MAX - digit) / 10u)
+        {
+          return SQLITE_RANGE;
+        }
+      value = value * 10u + digit;
+    }
+  *out = value;
+  return SQLITE_OK;
+}
+
+static int
+objstore_parse_range_text (const char *text, objstore_range_spec *out)
+{
+  if (text == NULL || out == NULL)
+    {
+      return SQLITE_MISUSE;
+    }
+  const char *cursor = objstore_skip_space (text);
+  if (cursor == NULL)
+    {
+      return SQLITE_RANGE;
+    }
+  if (sqlite3_strnicmp (cursor, "bytes=", 6) == 0)
+    {
+      cursor += 6;
+    }
+  cursor = objstore_skip_space (cursor);
+  const char *end = cursor + strlen (cursor);
+  while (end > cursor && isspace ((unsigned char)end[-1]))
+    {
+      --end;
+    }
+  if (end <= cursor)
+    {
+      return SQLITE_RANGE;
+    }
+  if (memchr (cursor, ',', (size_t)(end - cursor)) != NULL)
+    {
+      return SQLITE_RANGE;
+    }
+  const char *dash = memchr (cursor, '-', (size_t)(end - cursor));
+  if (dash == NULL)
+    {
+      return SQLITE_RANGE;
+    }
+  if (memchr (dash + 1, '-', (size_t)(end - dash - 1)) != NULL)
+    {
+      return SQLITE_RANGE;
+    }
+
+  const char *start_end = dash;
+  while (start_end > cursor && isspace ((unsigned char)start_end[-1]))
+    {
+      --start_end;
+    }
+  const char *suffix_start = dash + 1;
+  while (suffix_start < end && isspace ((unsigned char)*suffix_start))
+    {
+      ++suffix_start;
+    }
+  const char *suffix_end = end;
+  while (suffix_end > suffix_start && isspace ((unsigned char)suffix_end[-1]))
+    {
+      --suffix_end;
+    }
+
+  if (start_end == cursor)
+    {
+      out->has_start = 0;
+      out->has_end = 1;
+      return objstore_parse_u64_span (suffix_start, suffix_end, &out->end);
+    }
+  out->has_start = 1;
+  int rc = objstore_parse_u64_span (cursor, start_end, &out->start);
+  if (rc != SQLITE_OK)
+    {
+      return rc;
+    }
+  if (suffix_start >= suffix_end)
+    {
+      out->has_end = 0;
+      return SQLITE_OK;
+    }
+  out->has_end = 1;
+  return objstore_parse_u64_span (suffix_start, suffix_end, &out->end);
+}
+
+static int
+objstore_value_to_range (sqlite3_value *value, objstore_range_spec *out)
+{
+  if (value == NULL || out == NULL)
+    {
+      return SQLITE_MISUSE;
+    }
+  if (sqlite3_value_type (value) != SQLITE_TEXT)
+    {
+      return SQLITE_MISMATCH;
+    }
+  const unsigned char *text = sqlite3_value_text (value);
+  if (text == NULL)
+    {
+      return SQLITE_MISMATCH;
+    }
+  return objstore_parse_range_text ((const char *)text, out);
 }
 
 static int
@@ -1755,6 +1941,50 @@ objstore_sql_get (sqlite3_context *ctx, int argc, sqlite3_value **argv)
 }
 
 static void
+objstore_sql_get_range (sqlite3_context *ctx, int argc, sqlite3_value **argv)
+{
+  objstore_connection *conn = objstore_context_get_connection (ctx);
+  if (conn == NULL || argv == NULL || argc != 2)
+    {
+      sqlite3_result_error_code (ctx, SQLITE_MISUSE);
+      return;
+    }
+  objstore_id id;
+  int rc = objstore_value_to_id (argv[0], &id);
+  if (rc != SQLITE_OK)
+    {
+      sqlite3_result_error_code (ctx, rc);
+      return;
+    }
+  objstore_range_spec range = { 0 };
+  rc = objstore_value_to_range (argv[1], &range);
+  if (rc != SQLITE_OK)
+    {
+      sqlite3_result_error_code (ctx, rc);
+      return;
+    }
+  objstore_backend_txn *txn = NULL;
+  rc = objstore_begin_read_txn (conn, &txn);
+  if (rc != SQLITE_OK)
+    {
+      sqlite3_result_error_code (ctx, rc);
+      return;
+    }
+  rc = objstore_object_read_blob_range (ctx, conn, txn, &id,
+                                        (sqlite3_uint64)-1, &range);
+  if (rc == SQLITE_RANGE)
+    {
+      sqlite3_result_null (ctx);
+      rc = SQLITE_OK;
+    }
+  rc = objstore_end_read_txn (conn, txn, rc == SQLITE_OK ? SQLITE_OK : rc);
+  if (rc != SQLITE_OK)
+    {
+      sqlite3_result_error_code (ctx, rc);
+    }
+}
+
+static void
 objstore_sql_delete (sqlite3_context *ctx, int argc, sqlite3_value **argv)
 {
   objstore_connection *conn = objstore_context_get_connection (ctx);
@@ -1836,6 +2066,7 @@ objstore_module_register (sqlite3 *db, objstore_connection *conn)
     { "objstore_put", 1, objstore_sql_put },
     { "objstore_put_with_id", 2, objstore_sql_put_with_id },
     { "objstore_get", 1, objstore_sql_get },
+    { "objstore_get_range", 2, objstore_sql_get_range },
     { "objstore_delete", 1, objstore_sql_delete },
     { "objstore_exists", 1, objstore_sql_exists },
   };

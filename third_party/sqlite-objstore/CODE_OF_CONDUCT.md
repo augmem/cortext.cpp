@@ -60,7 +60,7 @@ representative at an online or offline event.
 
 Instances of abusive, harassing, or otherwise unacceptable behavior may be
 reported by opening an issue at
-<https://github.com/agentflare/sqlite-objstore/issues>. All complaints will be
+<https://github.com/augmem/sqlite-objstore/issues>. All complaints will be
 reviewed and investigated promptly and fairly.
 
 All community leaders are obligated to respect the privacy and security of the
@@ -127,4 +127,3 @@ For answers to common questions about this code of conduct, see the FAQ at
 
 [homepage]: https://www.contributor-covenant.org
 [mozilla-co]: https://github.com/mozilla/diversity
-

@@ -74,6 +74,31 @@
       }
     },
     {
+      "name": "fuzz-debug",
+      "displayName": "Fuzz (Debug, macOS/Homebrew LLVM)",
+      "inherits": "base",
+      "binaryDir": "${sourceDir}/build/fuzz-debug",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_C_COMPILER": "/opt/homebrew/opt/llvm/bin/clang",
+        "CMAKE_CXX_COMPILER": "/opt/homebrew/opt/llvm/bin/clang++",
+        "CMAKE_CXX_FLAGS": "-nostdinc++ -isystem /opt/homebrew/opt/llvm/include/c++/v1",
+        "CMAKE_EXE_LINKER_FLAGS": "-L/opt/homebrew/opt/llvm/lib/c++ -Wl,-rpath,/opt/homebrew/opt/llvm/lib/c++",
+        "OBJSTORE_ENABLE_WARNINGS_AS_ERRORS": "ON",
+        "OBJSTORE_ENABLE_ASAN": "ON",
+        "OBJSTORE_ENABLE_UBSAN": "ON",
+        "OBJSTORE_ENABLE_FUZZERS": "ON",
+        "OBJSTORE_BUILD_SHARED": "ON",
+        "OBJSTORE_BUILD_STATIC": "OFF",
+        "OBJSTORE_BACKEND_FILE": "ON",
+        "OBJSTORE_BACKEND_SQLITE": "ON",
+        "OBJSTORE_BACKEND_OPFS": "ON",
+        "OBJSTORE_BACKEND_VFS": "ON",
+        "OBJSTORE_BUILD_BENCHMARKS": "OFF",
+        "BUILD_TESTING": "ON"
+      }
+    },
+    {
       "name": "wasi-release",
       "displayName": "WASI (VFS) Release",
       "inherits": "base",
@@ -162,6 +187,10 @@
       "configurePreset": "full-asan"
     },
     {
+      "name": "fuzz-debug",
+      "configurePreset": "fuzz-debug"
+    },
+    {
       "name": "wasi-release",
       "configurePreset": "wasi-release"
     },
@@ -186,6 +215,10 @@
     {
       "name": "full-asan",
       "configurePreset": "full-asan"
+    },
+    {
+      "name": "fuzz-debug",
+      "configurePreset": "fuzz-debug"
     },
     {
       "name": "wasi-release",

@@ -1,6 +1,10 @@
 // Copyright 2024 sqlite-objstore
 // SPDX-License-Identifier: Apache-2.0
 
+#if !defined(_WIN32)
+#define _POSIX_C_SOURCE 200809L
+#endif
+
 #include "perf_common.h"
 
 #include <errno.h>
@@ -32,13 +36,13 @@ perf_dup_string (const char *input)
 static int
 perf_prepare_db_path (char **path_out)
 {
-  char tmpl[] = "/tmp/objstore-perf-db-XXXXXX.sqlite3";
+  char tmpl[] = "/tmp/objstore-perf-db-XXXXXX";
   char *path = sqlite3_mprintf ("%s", tmpl);
   if (path == NULL)
     {
       return SQLITE_NOMEM;
     }
-  int fd = mkstemps (path, 8); /* ".sqlite3" suffix */
+  int fd = mkstemp (path);
   if (fd < 0)
     {
       sqlite3_free (path);
@@ -368,4 +372,3 @@ perf_exec_sql (sqlite3 *db, const char *sql)
   sqlite3_free (errmsg);
   return rc;
 }
-

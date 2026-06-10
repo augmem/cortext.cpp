@@ -19,6 +19,7 @@ option(OBJSTORE_ENABLE_SANITIZERS "Deprecated: enable both ASan and UBSan" OFF)
 option(OBJSTORE_ENABLE_COVERAGE "Enable LLVM coverage instrumentation" OFF)
 option(OBJSTORE_ENABLE_CLANG_TIDY "Run clang-tidy during builds" OFF)
 option(OBJSTORE_ENABLE_CPPCHECK "Run cppcheck during builds" OFF)
+option(OBJSTORE_ENABLE_FUZZERS "Build libFuzzer-based hardening targets" OFF)
 option(OBJSTORE_BUILD_SHARED "Build the shared sqlite-objstore library" ON)
 option(OBJSTORE_BUILD_STATIC "Build the static sqlite-objstore library" ON)
 
@@ -155,12 +156,12 @@ include(CMakePackageConfigHelpers)
 
 configure_package_config_file(
     cmake/ObjstoreConfig.cmake.in
-    ${CMAKE_CURRENT_BINARY_DIR}/ObjstoreConfig.cmake
+    ${CMAKE_CURRENT_BINARY_DIR}/objstoreConfig.cmake
     INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/objstore
 )
 
 write_basic_package_version_file(
-    ${CMAKE_CURRENT_BINARY_DIR}/ObjstoreConfigVersion.cmake
+    ${CMAKE_CURRENT_BINARY_DIR}/objstoreConfigVersion.cmake
     VERSION ${PROJECT_VERSION}
     COMPATIBILITY SameMajorVersion
 )
@@ -170,8 +171,8 @@ install(EXPORT objstoreTargets
         DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/objstore)
 
 install(FILES
-    ${CMAKE_CURRENT_BINARY_DIR}/ObjstoreConfig.cmake
-    ${CMAKE_CURRENT_BINARY_DIR}/ObjstoreConfigVersion.cmake
+    ${CMAKE_CURRENT_BINARY_DIR}/objstoreConfig.cmake
+    ${CMAKE_CURRENT_BINARY_DIR}/objstoreConfigVersion.cmake
     DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/objstore
 )
 

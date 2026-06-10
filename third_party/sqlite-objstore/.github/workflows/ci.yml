@@ -21,10 +21,13 @@ jobs:
         include:
           - os: ubuntu-latest
             preset: full-debug
+            cmake_args: ""
           - os: ubuntu-latest
             preset: full-asan
+            cmake_args: ""
           - os: macos-latest
             preset: full-debug
+            cmake_args: "-DOBJSTORE_USE_SYSTEM_SQLITE=ON"
     steps:
       - uses: actions/checkout@v4
 
@@ -37,10 +40,44 @@ jobs:
         run: brew install ninja || true
 
       - name: Configure
-        run: cmake --preset ${{ matrix.preset }}
+        run: cmake --preset ${{ matrix.preset }} ${{ matrix.cmake_args }}
 
       - name: Build
         run: cmake --build --preset ${{ matrix.preset }}
 
       - name: Test
         run: ctest --preset ${{ matrix.preset }}
+
+  install-smoke:
+    name: ${{ matrix.os }} / full-release install smoke
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            cmake_args: ""
+          - os: macos-latest
+            cmake_args: "-DOBJSTORE_USE_SYSTEM_SQLITE=ON"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Ninja (Ubuntu)
+        if: matrix.os == 'ubuntu-latest'
+        run: sudo apt-get update && sudo apt-get install -y ninja-build
+
+      - name: Install Ninja (macOS)
+        if: matrix.os == 'macos-latest'
+        run: brew install ninja || true
+
+      - name: Configure
+        run: cmake --preset full-release ${{ matrix.cmake_args }}
+
+      - name: Build
+        run: cmake --build --preset full-release
+
+      - name: Install
+        run: cmake --install build/full-release --prefix "$PWD/.install-smoke"
+
+      - name: Verify Install
+        run: sh scripts/verify-install.sh "$PWD/.install-smoke"

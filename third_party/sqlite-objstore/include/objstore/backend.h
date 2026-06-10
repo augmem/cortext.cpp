@@ -57,6 +57,10 @@ extern "C"
    * SQLITE_CONSTRAINT. Readers signal EOF via SQLITE_DONE.
    *   - get: Streams bytes via objstore_stream_writer; return SQLITE_NOTFOUND
    *     when object is missing, SQLITE_IOERR_* on storage failures.
+   *   - get_range: Optional. Streams a byte range into the writer (offset +
+   *     length resolved by caller). Return SQLITE_NOTFOUND when missing.
+   *   - get_size: Returns payload size in bytes for id; return SQLITE_NOTFOUND
+   *     when object is missing.
    *   - delete_fn: Idempotent delete; return SQLITE_OK even if object was
    * absent.
    *
@@ -197,6 +201,15 @@ extern "C"
     void (*rollback_txn) (objstore_backend_txn *txn);
 
     /**
+     * Optional nested savepoint hooks. Backends that support partial
+     * SAVEPOINT rollback must mirror SQLite's push/release/rollback behavior
+     * for staged state without aborting the outer transaction.
+     */
+    int (*savepoint_begin) (objstore_backend_txn *txn);
+    int (*savepoint_release) (objstore_backend_txn *txn);
+    int (*savepoint_rollback) (objstore_backend_txn *txn);
+
+    /**
      * Begins a staged write. Returns an opaque writer handle tied to txn. The
      * handle remains valid until staged_write_finalize is called.
      */
@@ -253,6 +266,21 @@ extern "C"
      */
     int (*get) (objstore_backend_txn *txn, const objstore_id *id,
                 const objstore_stream_writer *writer);
+
+    /**
+     * Optional range read: streams a byte range starting at offset, spanning
+     * length bytes. Returns SQLITE_NOTFOUND when object is missing.
+     */
+    int (*get_range) (objstore_backend_txn *txn, const objstore_id *id,
+                      sqlite3_uint64 offset, sqlite3_uint64 length,
+                      const objstore_stream_writer *writer);
+
+    /**
+     * Returns the stored payload size in bytes. Returns SQLITE_NOTFOUND when
+     * object is missing.
+     */
+    int (*get_size) (objstore_backend_txn *txn, const objstore_id *id,
+                     sqlite3_int64 *out_size);
 
     /**
      * Removes the object identified by id. Missing rows should return
