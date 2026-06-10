@@ -100,7 +100,9 @@ QueryGraphNeighbors (Store *store, long long embedding_id, int max_depth)
   size_t frontier_idx = 0;
   while (frontier_idx < frontier.size ())
     {
-      const auto &[current_mem_id, current_depth] = frontier[frontier_idx];
+      // Copy, not reference: push_back below may reallocate `frontier`,
+      // which would leave a reference dangling.
+      const auto [current_mem_id, current_depth] = frontier[frontier_idx];
       ++frontier_idx;
 
       if (current_depth >= max_depth)
