@@ -383,11 +383,24 @@ if(CORTEXT_EMBED_VEC)
     ${CMAKE_BINARY_DIR}/third_party/sqlite-vec
   )
   target_compile_definitions(cortext PRIVATE CORTEXT_EMBED_VEC=1 SQLITE_VEC_OMIT_FS=1)
-  # Silence non-portable warning noise in embedded third-party C sources
+  # Silence non-portable warning noise in embedded third-party C sources,
+  # and enable sqlite-vec's SIMD distance kernels per architecture (matches
+  # upstream release builds). The SIMD kernels reorder float summation, so
+  # distances can differ from the scalar path in the last ulp.
   if(CMAKE_C_COMPILER_ID MATCHES "Clang|AppleClang|GNU")
+    set(CORTEXT_VEC_OPTIONS "-w")
+    set(CORTEXT_VEC_DEFS "")
+    if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
+      list(APPEND CORTEXT_VEC_OPTIONS "-mavx")
+      list(APPEND CORTEXT_VEC_DEFS "SQLITE_VEC_ENABLE_AVX")
+    elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64")
+      list(APPEND CORTEXT_VEC_DEFS "SQLITE_VEC_ENABLE_NEON")
+    endif()
     set_source_files_properties(
       ${CMAKE_CURRENT_SOURCE_DIR}/third_party/sqlite-vec/sqlite-vec.c
-      PROPERTIES COMPILE_OPTIONS "-w"
+      PROPERTIES
+        COMPILE_OPTIONS "${CORTEXT_VEC_OPTIONS}"
+        COMPILE_DEFINITIONS "${CORTEXT_VEC_DEFS}"
     )
   endif()
 endif()

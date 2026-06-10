@@ -417,6 +417,57 @@ SQLiteStore::Create (const std::string &database_path,
   return std::make_unique<SQLiteStore> (std::move (connection));
 }
 
+SQLiteStore::~SQLiteStore ()
+{
+  ClearStatementCache ();
+}
+
+sqlite3_stmt *
+SQLiteStore::AcquireStatement (const std::string &query)
+{
+  auto it = statement_cache_.find (query);
+  if (it != statement_cache_.end ())
+    {
+      sqlite3_stmt *stmt = it->second;
+      sqlite3_reset (stmt);
+      sqlite3_clear_bindings (stmt);
+      return stmt;
+    }
+  int prepare_rc = SQLITE_OK;
+  sqlite3_stmt *stmt
+      = PrepareStatement (connection_->GetConnection (), query, prepare_rc);
+  if (statement_cache_.size () >= kStatementCacheCapacity)
+    {
+      EvictStatement (statement_cache_fifo_.front ());
+      statement_cache_fifo_.pop_front ();
+    }
+  statement_cache_.emplace (query, stmt);
+  statement_cache_fifo_.push_back (query);
+  return stmt;
+}
+
+void
+SQLiteStore::EvictStatement (const std::string &query)
+{
+  auto it = statement_cache_.find (query);
+  if (it != statement_cache_.end ())
+    {
+      sqlite3_finalize (it->second);
+      statement_cache_.erase (it);
+    }
+}
+
+void
+SQLiteStore::ClearStatementCache ()
+{
+  for (auto &entry : statement_cache_)
+    {
+      sqlite3_finalize (entry.second);
+    }
+  statement_cache_.clear ();
+  statement_cache_fifo_.clear ();
+}
+
 SQLiteStore::SQLiteStore (std::unique_ptr<SQLiteConnection> connection)
     : connection_ (std::move (connection)), in_transaction_ (false)
 {
@@ -599,14 +650,14 @@ SQLiteStore::ExecuteDirect (const std::string &query,
         telemetry::Attribute::String ("db.operation", op) });
   sqlite3_stmt *stmt = nullptr;
   std::vector<std::map<std::string, std::any> > results;
-  int prepare_rc = SQLITE_OK;
   try
     {
-      stmt = PrepareStatement (connection_->GetConnection (), query, prepare_rc);
+      stmt = AcquireStatement (query);
     }
   catch (const StoreError &)
     {
       const int errcode = sqlite3_errcode (connection_->GetConnection ());
+      const int prepare_rc = errcode;
       const int extended_errcode
           = sqlite3_extended_errcode (connection_->GetConnection ());
       const char *errstr = sqlite3_errstr (errcode);
@@ -632,11 +683,19 @@ SQLiteStore::ExecuteDirect (const std::string &query,
     }
   BindParameters (stmt, params);
   int rc;
-  while ((rc = sqlite3_step (stmt)) == SQLITE_ROW)
+  try
     {
-      std::map<std::string, std::any> row;
-      FetchResultRow (stmt, row);
-      results.push_back (std::move (row));
+      while ((rc = sqlite3_step (stmt)) == SQLITE_ROW)
+        {
+          std::map<std::string, std::any> row;
+          FetchResultRow (stmt, row);
+          results.push_back (std::move (row));
+        }
+    }
+  catch (...)
+    {
+      sqlite3_reset (stmt);
+      throw;
     }
   if (rc != SQLITE_DONE && rc != SQLITE_OK)
     {
@@ -645,7 +704,7 @@ SQLiteStore::ExecuteDirect (const std::string &query,
       const int extended_errcode
           = sqlite3_extended_errcode (connection_->GetConnection ());
       const char *errstr = sqlite3_errstr (errcode);
-      sqlite3_finalize (stmt);
+      EvictStatement (query);
       span.SetStatusError ("sqlite.step_failed");
       telemetry::LogError (
           "SQLite step failed",
@@ -664,7 +723,7 @@ SQLiteStore::ExecuteDirect (const std::string &query,
                                           errstr ? errstr : "") });
       throw StoreError ("Query execution failed: " + error_msg);
     }
-  sqlite3_finalize (stmt);
+  sqlite3_reset (stmt);
   span.SetStatusOk ();
   return results;
 }
