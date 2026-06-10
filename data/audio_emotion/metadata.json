@@ -39,11 +39,11 @@
   ],
   "source": "data/ravdess",
   "source_meta": {
-    "bytes": 798817403,
+    "bytes": 590349330,
     "exists": true,
-    "files": 1441,
+    "files": 1440,
     "path": "data/ravdess",
-    "sha256": "848daf586b0ec4b4ab6441ef91b626c7047c8a11dfee272d188d037d2aba04e2"
+    "sha256": "9a33114a3cdc2ae77bfd35d748bf8e793315f4468b784d7d148f85ad8e869a8e"
   },
-  "timestamp": "2026-05-05T02:48:20Z"
+  "timestamp": "2026-06-10T06:11:31Z"
 }
