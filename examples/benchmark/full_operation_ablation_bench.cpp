@@ -463,7 +463,7 @@ public:
   Execute (cortext::OperationContext &ctx,
            cortext::Transaction & /*tx*/) const override
   {
-    const int key_size = cortext::core::SparseKeySize (ctx.GetConfig ().focus);
+    const int key_size = cortext::core::SparseKeySize (ctx.GetConfig ().focus, ctx.GetConfig ().sensitivity, ctx.GetConfig ().stability);
     const std::string key = cortext::core::SparseKey (ctx.GetSignal ().embedding,
                                                       key_size);
     ctx.GetProcessorContext ().procedural_store[key][memory_id_] = score_;

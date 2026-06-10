@@ -465,7 +465,7 @@ RunValueStudy (double neuromod_da, bool disable_scale)
   op.Execute (ctx, *tx);
   tx->Commit ();
 
-  const int k_key = cortext::core::SparseKeySize (cfg.focus);
+  const int k_key = cortext::core::SparseKeySize (cfg.focus, cfg.sensitivity, cfg.stability);
   const std::string key = cortext::core::SparseKey (signal.embedding, k_key);
   return pctx.procedural_store[key][7LL];
 }
