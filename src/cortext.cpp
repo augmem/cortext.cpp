@@ -1179,7 +1179,8 @@ struct Cortext::Impl
 
   Impl (const Config &c, std::shared_ptr<cortext::Store> supplied_store,
         std::shared_ptr<cortext::ObjectStore> supplied_object_store,
-        std::string models, std::shared_ptr<cortext::Clock> supplied_clock)
+        std::string models, std::shared_ptr<cortext::Clock> supplied_clock,
+        Cortext::InferenceOverrides inference = {})
       : cfg (c), signal_filter (MakeSignalFilterConfig (c)),
         models_dir (std::move (models)),
         clock (std::move (supplied_clock)),
@@ -1202,10 +1203,31 @@ struct Cortext::Impl
     auto text_encoder = internal::CreatePreferredTextEncoder (models_dir);
     encoder = std::move (text_encoder.encoder);
 
-    auto deep_llm = internal::CreateDeepLlmSelection (models_dir);
-    deep_llm_backend_name = deep_llm.backend_name;
-    extractor_instance = std::move (deep_llm.extractor);
-    summarizer_instance = std::move (deep_llm.summarizer);
+    if (inference.summarizer != nullptr && inference.extractor != nullptr)
+      {
+        deep_llm_backend_name = "injected";
+        summarizer_instance = std::move (inference.summarizer);
+        extractor_instance = std::move (inference.extractor);
+      }
+    else
+      {
+        auto deep_llm = internal::CreateDeepLlmSelection (models_dir);
+        deep_llm_backend_name = deep_llm.backend_name;
+        extractor_instance = std::move (deep_llm.extractor);
+        summarizer_instance = std::move (deep_llm.summarizer);
+        // Partial injection composes with the factory result, mirroring how
+        // a caller-supplied ObjectStore composes with the default Store.
+        if (inference.summarizer != nullptr)
+          {
+            deep_llm_backend_name += "+injected_summarizer";
+            summarizer_instance = std::move (inference.summarizer);
+          }
+        if (inference.extractor != nullptr)
+          {
+            deep_llm_backend_name += "+injected_extractor";
+            extractor_instance = std::move (inference.extractor);
+          }
+      }
 
     pipeline_root = BuildPipelineRoot (false);
     processor = std::make_unique<cortext::SignalProcessor> (
@@ -1663,6 +1685,17 @@ Cortext::Create (const Config &cfg, std::shared_ptr<Store> store,
                    models_dir, std::move (clock)));
 }
 
+std::unique_ptr<Cortext>
+Cortext::Create (const Config &cfg, std::shared_ptr<Store> store,
+                 std::shared_ptr<ObjectStore> object_store,
+                 const std::string &models_dir, std::shared_ptr<Clock> clock,
+                 InferenceOverrides inference)
+{
+  return std::unique_ptr<Cortext> (
+      new Cortext (cfg, std::move (store), std::move (object_store),
+                   models_dir, std::move (clock), std::move (inference)));
+}
+
 Cortext::Cortext (const Config &cfg, const std::string &db_path,
                   const std::string &models_dir)
     : Cortext (cfg, db_path, models_dir, nullptr)
@@ -1725,6 +1758,17 @@ Cortext::Cortext (const Config &cfg, std::shared_ptr<Store> store,
     : impl_ (std::make_unique<Impl> (cfg, std::move (store),
                                      std::move (object_store), models_dir,
                                      std::move (clock)))
+{
+}
+
+Cortext::Cortext (const Config &cfg, std::shared_ptr<Store> store,
+                  std::shared_ptr<ObjectStore> object_store,
+                  const std::string &models_dir,
+                  std::shared_ptr<Clock> clock, InferenceOverrides inference)
+    : impl_ (std::make_unique<Impl> (cfg, std::move (store),
+                                     std::move (object_store), models_dir,
+                                     std::move (clock),
+                                     std::move (inference)))
 {
 }
 
