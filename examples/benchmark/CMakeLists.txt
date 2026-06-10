@@ -100,6 +100,10 @@ add_executable(cortext_storage_eviction_sweep_bench
   storage_eviction_sweep_bench.cpp
 )
 
+add_executable(cortext_live_loop_steady_state_bench
+  live_loop_steady_state_bench.cpp
+)
+
 add_executable(cortext_storage_consolidation_e2e_bench
   storage_consolidation_e2e_bench.cpp
 )
@@ -288,6 +292,9 @@ target_include_directories(cortext_storage_eviction_budget_bench PRIVATE
 target_include_directories(cortext_storage_eviction_sweep_bench PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}
 )
+target_include_directories(cortext_live_loop_steady_state_bench PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}
+)
 target_include_directories(cortext_storage_consolidation_e2e_bench PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}
 )
@@ -449,6 +456,9 @@ target_link_libraries(cortext_storage_eviction_budget_bench PRIVATE
   cortext
 )
 target_link_libraries(cortext_storage_eviction_sweep_bench PRIVATE
+  cortext
+)
+target_link_libraries(cortext_live_loop_steady_state_bench PRIVATE
   cortext
 )
 target_link_libraries(cortext_storage_consolidation_e2e_bench PRIVATE

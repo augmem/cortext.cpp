@@ -2404,32 +2404,71 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
                     {
                       continue;
                     }
+                  // Top-N by ABS(start_ts - anchor) is the merge of the N
+                  // nearest rows at-or-below the anchor and the N nearest
+                  // above it; both halves are index range scans on
+                  // idx_memories_source_start (no full per-source sort).
+                  // The outer ORDER BY uses the original keys, so result
+                  // set and order are unchanged.
+                  const long long temporal_limit = static_cast<long long> (
+                      graph_expanded_temporal_window);
+                  const bool has_ts_cap = signal.timestamp > 0;
+                  const long long ts_cap
+                      = has_ts_cap
+                            ? static_cast<long long> (
+                                  std::min<std::uint64_t> (
+                                      signal.timestamp,
+                                      static_cast<std::uint64_t> (
+                                          std::numeric_limits<
+                                              long long>::max ())))
+                            : 0;
+                  const char *ts_cap_clause
+                      = has_ts_cap ? "  AND start_ts < ? " : "";
                   std::string temporal_sql
-                      = "SELECT memory_id, ABS(start_ts - ?) AS distance "
-                        "FROM memories "
-                        "WHERE ";
+                      = std::string (
+                            "SELECT memory_id, "
+                            "       ABS(start_ts - ?) AS distance, start_ts "
+                            "FROM ("
+                            "  SELECT memory_id, start_ts FROM ("
+                            "    SELECT memory_id, start_ts FROM memories "
+                            "    WHERE source_id = ? AND memory_id != ? "
+                            "      AND kind NOT IN ('WORKING', 'LABEL', "
+                            "'ASSOCIATION') "
+                            "      AND start_ts <= ? ")
+                        + ts_cap_clause
+                        + "    ORDER BY start_ts DESC LIMIT ?) "
+                          "  UNION ALL "
+                          "  SELECT memory_id, start_ts FROM ("
+                          "    SELECT memory_id, start_ts FROM memories "
+                          "    WHERE source_id = ? AND memory_id != ? "
+                          "      AND kind NOT IN ('WORKING', 'LABEL', "
+                          "'ASSOCIATION') "
+                          "      AND start_ts > ? "
+                        + ts_cap_clause
+                        + "    ORDER BY start_ts ASC LIMIT ?) "
+                          ") "
+                          "ORDER BY distance ASC, start_ts DESC "
+                          "LIMIT ?";
                   std::vector<std::any> temporal_params;
-                  temporal_params.reserve (6);
+                  temporal_params.reserve (12);
                   temporal_params.push_back (anchor.start_ts);
-                  temporal_sql += "source_id = ? ";
                   temporal_params.push_back (anchor.source_id);
-                  temporal_sql +=
-                      "  AND memory_id != ? "
-                      "  AND kind NOT IN ('WORKING', 'LABEL', 'ASSOCIATION') ";
                   temporal_params.push_back (anchor.memory_id);
-                  if (signal.timestamp > 0)
+                  temporal_params.push_back (anchor.start_ts);
+                  if (has_ts_cap)
                     {
-                      temporal_sql += "  AND start_ts < ? ";
-                      temporal_params.push_back (
-                          static_cast<long long> (std::min<std::uint64_t> (
-                              signal.timestamp,
-                              static_cast<std::uint64_t> (
-                                  std::numeric_limits<long long>::max ()))));
+                      temporal_params.push_back (ts_cap);
                     }
-                  temporal_sql += "ORDER BY distance ASC, start_ts DESC "
-                                  "LIMIT ?";
-                  temporal_params.push_back (static_cast<long long> (
-                      graph_expanded_temporal_window));
+                  temporal_params.push_back (temporal_limit);
+                  temporal_params.push_back (anchor.source_id);
+                  temporal_params.push_back (anchor.memory_id);
+                  temporal_params.push_back (anchor.start_ts);
+                  if (has_ts_cap)
+                    {
+                      temporal_params.push_back (ts_cap);
+                    }
+                  temporal_params.push_back (temporal_limit);
+                  temporal_params.push_back (temporal_limit);
                   auto rows = store->Execute (temporal_sql, temporal_params);
                   int rank = 0;
                   for (const auto &row : rows)

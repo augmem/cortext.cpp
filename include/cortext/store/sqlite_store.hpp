@@ -3,9 +3,12 @@
 #include "store.hpp"
 
 #include <any>
+#include <cstddef>
+#include <deque>
 #include <map>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include <sqlite3.h>
@@ -158,7 +161,7 @@ public:
   /// @param connection A unique pointer to the SQLite connection.
   explicit SQLiteStore (std::unique_ptr<SQLiteConnection> connection);
 
-  ~SQLiteStore () override = default;
+  ~SQLiteStore () override;
 
   /// @brief Execute a query and return results.
   /// @param query The SQL query to execute.
@@ -199,6 +202,24 @@ private:
   std::unique_ptr<SQLiteConnection> connection_;
   bool in_transaction_;
   std::vector<SQLiteTransaction *> transaction_stack_;
+
+  // Prepared-statement cache keyed by exact SQL text. Statements are reset
+  // (not finalized) after each execution so repeated queries skip SQL
+  // parsing. Bounded FIFO eviction: one-off statements (DDL, savepoint
+  // names) age out instead of accumulating.
+  static constexpr std::size_t kStatementCacheCapacity = 256;
+  std::unordered_map<std::string, sqlite3_stmt *> statement_cache_;
+  std::deque<std::string> statement_cache_fifo_;
+
+  // Return a reset, rebindable statement for `query`, preparing and caching
+  // it on first use. Throws StoreError if preparation fails.
+  sqlite3_stmt *AcquireStatement (const std::string &query);
+
+  // Finalize and drop a cached statement (used when a step fails so the
+  // next execution re-prepares from scratch).
+  void EvictStatement (const std::string &query);
+
+  void ClearStatementCache ();
 
   bool IsDbInTransaction () const;
 
