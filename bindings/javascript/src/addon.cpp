@@ -150,7 +150,9 @@ GetOptionalBoolProperty (napi_env env, napi_value obj, const char *name,
 
 bool
 ParseConfigObject (napi_env env, napi_value value, cortext_config &cfg,
-                   std::string &label_bank_path)
+                   std::string &label_bank_path,
+                   std::string &summarizer_provider_uri,
+                   std::string &extractor_provider_uri)
 {
   if (!GetOptionalDoubleProperty (env, value, "focus", cfg.focus)
       || !GetOptionalDoubleProperty (env, value, "sensitivity",
@@ -167,7 +169,11 @@ ParseConfigObject (napi_env env, napi_value value, cortext_config &cfg,
       || !GetOptionalBoolProperty (env, value, "sequentialEdgesEnabled",
                                    cfg.sequential_edges_enabled)
       || !GetOptionalStringProperty (env, value, "labelBankPath",
-                                     label_bank_path))
+                                     label_bank_path)
+      || !GetOptionalStringProperty (env, value, "summarizerProviderUri",
+                                     summarizer_provider_uri)
+      || !GetOptionalStringProperty (env, value, "extractorProviderUri",
+                                     extractor_provider_uri))
     {
       return false;
     }
@@ -175,6 +181,14 @@ ParseConfigObject (napi_env env, napi_value value, cortext_config &cfg,
   if (!label_bank_path.empty ())
     {
       cfg.label_bank_path = label_bank_path.c_str ();
+    }
+  if (!summarizer_provider_uri.empty ())
+    {
+      cfg.summarizer_provider_uri = summarizer_provider_uri.c_str ();
+    }
+  if (!extractor_provider_uri.empty ())
+    {
+      cfg.extractor_provider_uri = extractor_provider_uri.c_str ();
     }
   return true;
 }
@@ -302,6 +316,8 @@ CortextCtor (napi_env env, napi_callback_info info)
   cortext_config_init (&cfg);
 
   std::string label_bank_path;
+  std::string summarizer_provider_uri;
+  std::string extractor_provider_uri;
   std::string db_path = ":memory:";
   std::string models_dir;
   bool first_arg_is_db_path = false;
@@ -320,8 +336,10 @@ CortextCtor (napi_env env, napi_callback_info info)
         }
       else if (type != napi_undefined && type != napi_null)
         {
-          if (type != napi_object || !ParseConfigObject (env, args[0], cfg,
-                                                         label_bank_path))
+          if (type != napi_object
+              || !ParseConfigObject (env, args[0], cfg, label_bank_path,
+                                     summarizer_provider_uri,
+                                     extractor_provider_uri))
             {
               return ThrowTypeError (env, "config must be an object");
             }

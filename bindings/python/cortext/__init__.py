@@ -43,6 +43,11 @@ class Config:
     procedural_enabled: bool = True
     sequential_edges_enabled: bool = True
     label_bank_path: str | None = None
+    # Inference-provider URIs (e.g. "ollama://127.0.0.1:11435/gemma4:e2b").
+    # None/empty keeps local model auto-discovery; a URI that cannot be
+    # resolved and verified makes construction fail.
+    summarizer_provider_uri: str | None = None
+    extractor_provider_uri: str | None = None
 
 
 class _NativeConfig(ctypes.Structure):
@@ -57,6 +62,11 @@ class _NativeConfig(ctypes.Structure):
         ("procedural_enabled", ctypes.c_int),
         ("sequential_edges_enabled", ctypes.c_int),
         ("label_bank_path", ctypes.c_char_p),
+        ("signal_filter_audio_enabled", ctypes.c_int),
+        ("signal_filter_image_enabled", ctypes.c_int),
+        ("signal_filter_text_enabled", ctypes.c_int),
+        ("summarizer_provider_uri", ctypes.c_char_p),
+        ("extractor_provider_uri", ctypes.c_char_p),
     ]
 
 
@@ -785,6 +795,8 @@ class Cortext:
         self._lib.cortext_config_init(ctypes.byref(native_cfg))
 
         label_bank_keepalive = None
+        summarizer_uri_keepalive = None
+        extractor_uri_keepalive = None
         if config is not None:
             native_cfg.focus = config.focus
             native_cfg.sensitivity = config.sensitivity
@@ -798,6 +810,22 @@ class Cortext:
             native_cfg.label_bank_path = (
                 ctypes.cast(label_bank_keepalive, ctypes.c_char_p)
                 if label_bank_keepalive is not None
+                else None
+            )
+            summarizer_uri_keepalive = _encode_optional_string(
+                config.summarizer_provider_uri
+            )
+            native_cfg.summarizer_provider_uri = (
+                ctypes.cast(summarizer_uri_keepalive, ctypes.c_char_p)
+                if summarizer_uri_keepalive is not None
+                else None
+            )
+            extractor_uri_keepalive = _encode_optional_string(
+                config.extractor_provider_uri
+            )
+            native_cfg.extractor_provider_uri = (
+                ctypes.cast(extractor_uri_keepalive, ctypes.c_char_p)
+                if extractor_uri_keepalive is not None
                 else None
             )
 
@@ -839,6 +867,8 @@ class Cortext:
                 models_dir_raw,
             )
         self._label_bank_keepalive = label_bank_keepalive
+        self._summarizer_uri_keepalive = summarizer_uri_keepalive
+        self._extractor_uri_keepalive = extractor_uri_keepalive
         if not self._handle:
             _raise_last_error("cortext create failed")
 

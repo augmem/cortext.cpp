@@ -8,6 +8,14 @@ export interface CortextConfig {
   proceduralEnabled?: boolean;
   sequentialEdgesEnabled?: boolean;
   labelBankPath?: string;
+  /**
+   * Inference-provider URI for the Summarizer role, e.g.
+   * "ollama://127.0.0.1:11435/gemma4:e2b". Omitted/empty keeps local
+   * model auto-discovery; an unresolvable URI makes construction throw.
+   */
+  summarizerProviderUri?: string;
+  /** Inference-provider URI for the Extractor role; same semantics. */
+  extractorProviderUri?: string;
 }
 
 export type CortextContext = Record<string, unknown>;

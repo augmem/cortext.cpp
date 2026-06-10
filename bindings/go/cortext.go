@@ -40,6 +40,14 @@ type Config struct {
 	ProceduralEnabled      bool
 	SequentialEdgesEnabled bool
 	LabelBankPath          string
+	// SummarizerProviderURI routes the Summarizer role to an external
+	// inference provider (e.g. "ollama://127.0.0.1:11435/gemma4:e2b").
+	// Empty keeps local model auto-discovery; a URI that cannot be
+	// resolved and verified makes New fail.
+	SummarizerProviderURI string
+	// ExtractorProviderURI routes the Extractor role; same semantics as
+	// SummarizerProviderURI.
+	ExtractorProviderURI string
 }
 
 type Handle struct {
@@ -68,6 +76,8 @@ func New(dbPath string, modelsDir string, cfg *Config) (*Handle, error) {
 	C.cortext_config_init(&nativeCfg)
 
 	var labelBankCleanup func()
+	var summarizerURICleanup func()
+	var extractorURICleanup func()
 	if cfg != nil {
 		nativeCfg.focus = C.double(cfg.Focus)
 		nativeCfg.sensitivity = C.double(cfg.Sensitivity)
@@ -84,9 +94,29 @@ func New(dbPath string, modelsDir string, cfg *Config) (*Handle, error) {
 				C.free(unsafe.Pointer(labelBankPath))
 			}
 		}
+		if cfg.SummarizerProviderURI != "" {
+			summarizerURI := C.CString(cfg.SummarizerProviderURI)
+			nativeCfg.summarizer_provider_uri = summarizerURI
+			summarizerURICleanup = func() {
+				C.free(unsafe.Pointer(summarizerURI))
+			}
+		}
+		if cfg.ExtractorProviderURI != "" {
+			extractorURI := C.CString(cfg.ExtractorProviderURI)
+			nativeCfg.extractor_provider_uri = extractorURI
+			extractorURICleanup = func() {
+				C.free(unsafe.Pointer(extractorURI))
+			}
+		}
 	}
 	if labelBankCleanup != nil {
 		defer labelBankCleanup()
+	}
+	if summarizerURICleanup != nil {
+		defer summarizerURICleanup()
+	}
+	if extractorURICleanup != nil {
+		defer extractorURICleanup()
 	}
 
 	handle := C.cortext_create_with_config(&nativeCfg, cDBPath, cModelsDir)

@@ -539,6 +539,19 @@ final class cortext_config extends ffi.Struct {
   external int sequential_edges_enabled;
 
   external ffi.Pointer<ffi.Char> label_bank_path;
+
+  @ffi.Int()
+  external int signal_filter_audio_enabled;
+
+  @ffi.Int()
+  external int signal_filter_image_enabled;
+
+  @ffi.Int()
+  external int signal_filter_text_enabled;
+
+  external ffi.Pointer<ffi.Char> summarizer_provider_uri;
+
+  external ffi.Pointer<ffi.Char> extractor_provider_uri;
 }
 
 /// @brief Consolidation mode for cortext_consolidate_mode.
