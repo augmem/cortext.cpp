@@ -1,5 +1,5 @@
 #include <cortext/encoder/embeddinggemma.hpp>
-#include <cortext/models/aait_gguf_encoder.hpp>
+#include <cortext/models/aist_gguf_encoder.hpp>
 
 #include <algorithm>
 #include <atomic>

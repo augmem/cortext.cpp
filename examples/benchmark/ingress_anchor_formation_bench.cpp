@@ -5,7 +5,7 @@
 /// on each incoming signal, updates shadow soft-anchor state before retrieval,
 /// and audits whether later references reuse already-established anchors.
 
-#include "cortext/models/aait_gguf_encoder.hpp"
+#include "cortext/models/aist_gguf_encoder.hpp"
 
 #include <nlohmann/json.hpp>
 

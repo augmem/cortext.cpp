@@ -1,4 +1,4 @@
-#include "cortext/models/aait_gguf_encoder.hpp"
+#include "cortext/models/aist_gguf_encoder.hpp"
 #include "../deep_llm/llama_cpp_support.hpp"
 
 #include <algorithm>
@@ -1989,7 +1989,8 @@ public:
                                   + std::to_string (static_cast<int> (
                                       status)));
       }
-    std::vector<float> out (1536, 0.0F);
+    std::vector<float> out (
+        static_cast<std::size_t> (ggml_nelements (plan.output)), 0.0F);
     ggml_backend_tensor_get (plan.output, out.data (), 0,
                              sizeof (float) * out.size ());
     full_image_graph_used_ = true;
@@ -2018,7 +2019,8 @@ public:
                                   + std::to_string (static_cast<int> (
                                       status)));
       }
-    std::vector<float> out (1536, 0.0F);
+    std::vector<float> out (
+        static_cast<std::size_t> (ggml_nelements (plan.output)), 0.0F);
     ggml_backend_tensor_get (plan.output, out.data (), 0,
                              sizeof (float) * out.size ());
     full_audio_graph_used_ = true;
@@ -4240,6 +4242,103 @@ ResolveEssAistGgufModelPath (const std::filesystem::path &models_dir,
                           != std::string::npos
 	                      || entry.path ().filename ().string ().find ("ES-AIST")
 	                         != std::string::npos))
+                {
+                  matches.push_back (entry.path ());
+                }
+            }
+          std::sort (matches.begin (), matches.end (),
+                     [] (const auto &lhs, const auto &rhs) {
+                       const std::string left = lhs.filename ().string ();
+                       const std::string right = rhs.filename ().string ();
+                       const bool left_q8 = left.find ("q8_0")
+                                            != std::string::npos;
+                       const bool right_q8 = right.find ("q8_0")
+                                             != std::string::npos;
+                       if (left_q8 != right_q8)
+                         {
+                           return left_q8;
+                         }
+                       return left < right;
+                     });
+          if (!matches.empty ())
+            {
+              return matches.front ();
+            }
+        }
+    }
+  return std::nullopt;
+}
+
+std::optional<std::filesystem::path>
+ResolveAistGgufModelPath (const std::filesystem::path &models_dir,
+                          const std::filesystem::path &override_path)
+{
+  const std::string env_path = GetEnvOrDefault ("CORTEXT_AIST_MODEL_PATH");
+  if (!override_path.empty ())
+    {
+      if (std::filesystem::exists (override_path))
+        {
+          return override_path;
+        }
+      throw std::runtime_error ("AIST model override does not exist: "
+                                + override_path.string ());
+    }
+  if (!env_path.empty ())
+    {
+      std::filesystem::path path (env_path);
+      if (std::filesystem::exists (path))
+        {
+          return path;
+        }
+      throw std::runtime_error ("CORTEXT_AIST_MODEL_PATH does not exist: "
+                                + env_path);
+    }
+
+  std::vector<std::filesystem::path> search_bases{ models_dir };
+  if (models_dir.has_parent_path ())
+    {
+      search_bases.push_back (models_dir.parent_path ());
+    }
+  std::vector<std::filesystem::path> roots;
+  for (const auto &base : search_bases)
+    {
+      roots.push_back (base / "AIST-87M-GGUF");
+      roots.push_back (base / "aist-87m-gguf");
+      roots.push_back (base);
+    }
+  for (const auto &root : roots)
+    {
+      if (!std::filesystem::exists (root))
+        {
+          continue;
+        }
+      if (std::filesystem::is_regular_file (root)
+          && root.extension () == ".gguf")
+        {
+          return root;
+        }
+      if (std::filesystem::is_directory (root))
+        {
+          const std::vector<std::filesystem::path> preferred_files = {
+            root / "AIST-87M_q8_0.gguf",
+            root / "AIST-87M_q5_1.gguf",
+          };
+          for (const auto &candidate : preferred_files)
+            {
+              if (std::filesystem::exists (candidate))
+                {
+                  return candidate;
+                }
+            }
+          std::vector<std::filesystem::path> matches;
+          for (const auto &entry : std::filesystem::directory_iterator (root))
+            {
+              const bool is_file_or_link =
+                  entry.is_regular_file ()
+                  || std::filesystem::is_symlink (entry.symlink_status ());
+              const std::string filename = entry.path ().filename ().string ();
+              if (is_file_or_link && entry.path ().extension () == ".gguf"
+                  && filename.find ("AIST-87M") != std::string::npos)
                 {
                   matches.push_back (entry.path ());
                 }

@@ -8,7 +8,7 @@
 #include "cortext/processor.hpp"
 #include "cortext/processor/operation_set.hpp"
 #include "cortext/store/sqlite_store.hpp"
-#include "cortext/models/aait_gguf_encoder.hpp"
+#include "cortext/models/aist_gguf_encoder.hpp"
 #include "../../src/deep_llm/llama_cpp_support.hpp"
 
 #include <nlohmann/json.hpp>

@@ -2,7 +2,7 @@
 
 #include "cortext/encoder/embeddinggemma.hpp"
 #if defined(CORTEXT_ENABLE_AAIT_GGUF)
-#include "cortext/models/aait_gguf_encoder.hpp"
+#include "cortext/models/aist_gguf_encoder.hpp"
 #endif
 
 #include <filesystem>
@@ -200,16 +200,17 @@ CreatePreferredTextEncoder (const std::string &models_dir)
           + root.string ());
     }
 
-  if (auto es_aist = ResolveEssAistGgufModelPath (root))
+  if (auto aist = ResolveAistGgufModelPath (root))
     {
       AaitGgufConfig cfg;
-      cfg.model_path = es_aist->string ();
+      cfg.model_path = aist->string ();
       TextEncoderSelection selection;
-      selection.backend_name = "ES-AIST-81M-GGUF";
-      selection.resolved_path = *es_aist;
+      selection.backend_name = "AIST-87M-GGUF";
+      selection.resolved_path = *aist;
       selection.encoder = std::make_unique<AaitGgufEncoder> (cfg);
       return selection;
     }
+
 #endif
 
 #if defined(CORTEXT_ENABLE_EMBEDDINGGEMMA)
