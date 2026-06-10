@@ -236,6 +236,8 @@ main (int argc, char **argv)
       InsertMeta (db, "jsonl_generated_by",
                   metadata.value ("generated_by", ""));
       InsertMeta (db, "jsonl_skipped_count", std::to_string (skipped));
+      InsertMeta (db, "embedding_model_pin",
+                  metadata.value ("embedding_model_pin", ""));
       sqlite3_close (db);
       fs::rename (tmp_path, output_path);
 

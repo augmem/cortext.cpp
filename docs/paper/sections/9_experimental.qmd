@@ -15105,3 +15105,83 @@ constant, because the loss audit showed that selected internal label/cue nodes
 could expand into too many distant source memories after scoring. That fix is a
 candidate noise-control change; it does not become quality evidence until a new
 frozen run passes the same streamed and final local-judge gates.
+
+### Capacity-4 Baseline: Formal Blind Judge Completion (2026-06-10)
+
+The frozen `early_text_image` window
+(`build/julie_release_windows_fresh_20260609/early_text_image/`) completed its
+formal blind judge pass: **117/117** judgments (39 probes × 3 repetitions,
+`gemma4:12b-it-qat`, seed 42, blind packet order, probe-level bootstrap with
+2000 resamples). Judging ran on a separate Linux host (two NVIDIA L4s, sharded
+by probe range and merged; judging is encoder-independent because it scores
+frozen packets). Cortext won **43** judgments (win rate **0.368**, CI95
+[0.265, 0.462]) against **31** for the full-history upper bound (0.265
+[0.179, 0.359]) and **20** for traditional chat+RAG (0.171 [0.111, 0.239]),
+with 22 ties and 1 insufficient-context row. The Cortext-vs-RAG win-rate
+intervals do not overlap. Mean prompt-token savings versus traditional
+chat+RAG was **96.0%** [95.3, 96.7] (≈211 vs ≈6,091 tokens per probe). The
+known weakness held: mean sufficiency **2.72** vs **3.32** (RAG) and **3.31**
+(full history), while Cortext led source grounding (**4.62**) and was the only
+arm receiving modality-grounding credit. This artifact is the capacity-4 /
+ES-AIST-81M-era baseline arm for subsequent working-memory experiments.
+
+### Embedding-Model Pinning After Cross-Space Artifact Contamination (2026-06-10)
+
+Three attempts to run the WM 7±2 capacity arm (`a6dbb10`) on the AIST-87M
+stack were invalidated in sequence, each exposing a distinct defect, and all
+three share one root cause worth recording: **derived-embedding artifacts that
+silently survived an encoder change**. Because every encoder generation emits
+a 256-d Matryoshka slice, vectors from different model families are
+dimension-compatible and nothing fails loudly — similarity is simply computed
+across unrelated spaces.
+
+- **Attempt 1** crashed at replay event ≈620 with an objstore
+  `SQLITE_CONSTRAINT` at commit. Root cause was unrelated to embeddings: the
+  vendored `sqlite-objstore` snapshot predated upstream's savepoint-aware
+  rollback, and Cortext's nested `ROLLBACK TO SAVEPOINT` left stale buffered
+  blob writes that collided at the outer commit. Fixed by syncing
+  `third_party/sqlite-objstore` to upstream HEAD.
+- **Attempt 2** ran with a label bank generated 2025-12-31 by the previous
+  encoder: 6,478 label vectors in the ES-AIST-81M space scored against
+  AIST-87M summary embeddings. Regenerating it exposed a second cutover bug —
+  the generator emitted full 1280-d vectors while the runtime label space is
+  the 256-d slice; the generator now Matryoshka-truncates and L2-renormalizes
+  exactly as the runtime does (`EncodeLabelEmbedding`), and stamps the encoder
+  identity into the bank metadata.
+- **Attempt 3** completed the benchmark and 116/117 formal judgments before
+  being invalidated post hoc: the **embedded centroid vectors** (named
+  centroids plus 6 text-emotion and 7 audio-emotion centroids baked into the
+  binary from `.npy` assets) were generated 2026-06-07 — two days before the
+  AIST-87M cutover — and therefore modulated neuromodulator/emotion encoding
+  from the wrong space for every run since the cutover.
+
+Partial observations from the invalidated attempt 3 are recorded here as
+**diagnostics only, not evidence**: the truncated-packet streaming judge
+(packet item limit 256, 32k window) substantially flattered Cortext relative
+to the full-packet formal judge and will be aligned with formal packet
+construction; the formal partial tally (116/117) was Cortext 41 / full-history
+36 / RAG 21 / tie 18 with sufficiency 2.75 vs 3.11 — a modest profile shift,
+not the streaming judge's transformation; and a window-position breakdown
+showed the arm's win rate *declining* with replay depth (42% early → 34%
+late) where the capacity-4 baseline *rose* (33% → 40%), alongside an
+association-edge deficit (1,370 → 1,220). Notably, identical memory counts
+(2,515 / 1,236 LTM / 14 consolidation runs in both arms) rule out
+capacity-driven consolidation starvation; suspicion falls on deep-store
+retrieval quality in the new embedding space. The AIST-87M slice release
+report validates retrieval quality at 1280/768/512 dimensions only — the
+256-d slice the runtime actually uses is unmeasured, and 512-d operation is
+under consideration.
+
+The systemic mitigation is an **embedding-model pin**: a fingerprint of the
+active encoder (`<backend>:b3-<blake3/16hex of model file>:dim<N>`) is stamped
+into every live database (`cortext_embedding_model_pin`) on first ingest and
+verified at startup. A mismatch — or pre-existing embeddings with no pin —
+is fatal, with no configuration override: vectors from an unknown or different
+model cannot be compared against the active space, and the only remedy is
+re-ingestion. The same fingerprint is being propagated to the label bank
+(verified at attach) and to the embedded centroid sources (verified at
+initialization) so that every precomputed-vector artifact fails loudly when
+the encoder moves. The WM 7±2 arm will be rerun on the corrected stack
+(regenerated centroids, pinned artifacts, realism-aligned streaming judge),
+followed by a capacity-4 control on the identical stack to attribute any
+remaining differences to the capacity change alone.

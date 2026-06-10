@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <any>
 #include <filesystem>
+#include <stdexcept>
 #include <string>
 
 namespace cortext::operations
@@ -16,6 +17,13 @@ namespace
 {
 
 constexpr const char *kLabelBankSchema = "cortext_label_bank";
+
+/// Distinguishes a wrong-embedding-space bank (fatal) from ordinary attach
+/// failures (skippable) in LoadLabelBank::Execute's error handling.
+struct LabelBankPinMismatch : std::runtime_error
+{
+  using std::runtime_error::runtime_error;
+};
 
 std::filesystem::path
 ResolveLabelBankSqlite (const std::string &path)
@@ -154,12 +162,54 @@ LoadLabelBank::Execute (OperationContext &context, Transaction &tx) const
 
       const long long label_count = ReadLabelCount (tx);
       const std::string content_hash = ReadMeta (tx, "content_hash");
+
+      // Embedding-model pin: the bank's vectors must come from the same
+      // encoder as the live database's. Both pins are reachable in this
+      // transaction (the bank is attached to the main connection). A
+      // mismatch is fatal — it cannot be skipped like a missing bank,
+      // because a wrong-space bank silently corrupts label salience.
+      const std::string bank_pin = ReadMeta (tx, "embedding_model_pin");
+      std::string active_pin;
+      try
+        {
+          auto pin_rows = tx.Execute (
+              "SELECT fingerprint FROM main.cortext_embedding_model_pin "
+              "WHERE id = 1",
+              {});
+          if (!pin_rows.empty ())
+            {
+              auto it = pin_rows[0].find ("fingerprint");
+              if (it != pin_rows[0].end ()
+                  && it->second.type () == typeid (std::string))
+                {
+                  active_pin = std::any_cast<std::string> (it->second);
+                }
+            }
+        }
+      catch (const std::exception &)
+        {
+          // Live database predates pinning; nothing to compare against.
+        }
+      if (!active_pin.empty () && bank_pin != active_pin)
+        {
+          throw LabelBankPinMismatch (
+              "label bank embedding-model pin mismatch: bank='"
+              + (bank_pin.empty () ? std::string ("<unpinned>") : bank_pin)
+              + "' active='" + active_pin
+              + "'. Regenerate the label bank with the active encoder "
+                "(tools/label_bank_generator + label_bank_sqlite_builder).");
+        }
       telemetry::LogInfo (
           "cortext.label_bank_load",
           { telemetry::Attribute::String ("path", sqlite_path.string ()),
             telemetry::Attribute::String ("mode", "attached_vector_search"),
             telemetry::Attribute::String ("content_hash", content_hash),
             telemetry::Attribute::Int64 ("labels_available", label_count) });
+    }
+  catch (const LabelBankPinMismatch &)
+    {
+      // Wrong-space banks must not degrade to "skipped": fail the process.
+      throw;
     }
   catch (const std::exception &e)
     {
