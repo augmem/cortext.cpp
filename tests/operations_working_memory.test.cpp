@@ -653,19 +653,8 @@ TEST_CASE ("Alg24 eviction prioritizes weak old slots over strong recent ones",
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
   cortext::testing::RequireEncoder (cfg);
-  cfg.focus = 1.0;       // Forces capacity = 2 (low capacity for test)
-  cfg.sensitivity = 0.5; // S=0.5 → capacity = lerp(5,3,0.5)+lerp(-1,1,1) = 4+1 = 5
   cfg.stability = 0.5;
-
-  // Actually, let's recalculate: capacity = round(lerp(5,3,S) + lerp(-1,1,F))
-  // S=0.5 → lerp(5,3,0.5) = 4
-  // F=1.0 → lerp(-1,1,1.0) = 1
-  // capacity = max(1, round(4+1)) = 5
-  // Need F=0, S=1 for smaller capacity:
-  // S=1 → lerp(5,3,1) = 3
-  // F=0 → lerp(-1,1,0) = -1
-  // capacity = max(1, round(3-1)) = 2
-
+  // S=1, F=0 is the capacity floor (5 under Miller's 7±2 mapping).
   cfg.focus = 0.0;
   cfg.sensitivity = 1.0;
 
@@ -690,6 +679,23 @@ TEST_CASE ("Alg24 eviction prioritizes weak old slots over strong recent ones",
   slot1.pos_index = 1;
   pctx.wm_slots.push_back (slot1);
 
+  // Fill the remaining capacity with strong, recent fillers so the new
+  // signal forces an eviction. Fillers sit in the emb[0]/emb[1] plane:
+  // orthogonal to the signal and below the 0.9 component checks.
+  const int capacity = core::WMBaseCapacity (cfg.sensitivity, cfg.focus);
+  for (int i = static_cast<int> (pctx.wm_slots.size ()); i < capacity; ++i)
+    {
+      ProcessorContext::WMSlot filler;
+      filler.embedding = Eigen::VectorXf::Zero (3);
+      filler.embedding[0] = 1.0f;
+      filler.embedding[1] = 1.0f;
+      filler.embedding.normalize ();
+      filler.strength = 5.0;
+      filler.last_ts = 195.0;
+      filler.pos_index = i;
+      pctx.wm_slots.push_back (filler);
+    }
+
   // Record which embeddings we have before eviction
   const auto slot0_emb = slot0.embedding;
   const auto slot1_emb = slot1.embedding;
@@ -702,8 +708,8 @@ TEST_CASE ("Alg24 eviction prioritizes weak old slots over strong recent ones",
 
   op.Execute (ctx, cortext::testing::GetNullTransaction ());
 
-  // Should have 2 slots (capacity), one evicted and one new added
-  REQUIRE (pctx.wm_slots.size () == 2);
+  // Should be back at capacity: one evicted and one new added
+  REQUIRE (pctx.wm_slots.size () == static_cast<size_t> (capacity));
 
   // The weak+old slot (slot0, embedding[0]=1) should be evicted
   // The strong+recent slot (slot1, embedding[1]=1) should remain
@@ -757,7 +763,7 @@ TEST_CASE ("Alg24 high-T increases slot dedication resistance to eviction",
     SignalProcessor::Config cfg;
     cortext::testing::RequireEncoder (cfg);
     cfg.focus = 0.0;
-    cfg.sensitivity = 1.0; // capacity = 2
+    cfg.sensitivity = 1.0; // capacity floor (5 under 7±2)
     cfg.stability = 0.0;   // Low T → dedication_strength = 0.3
 
     // Two slots with same strength, same age, recent timestamps
@@ -779,6 +785,22 @@ TEST_CASE ("Alg24 high-T increases slot dedication resistance to eviction",
     slot1.pos_index = 1;
     pctx.wm_slots.push_back (slot1);
 
+    // Fill to capacity with strong, recent fillers (orthogonal to signal)
+    // so the new signal forces an eviction among the two equal slots.
+    const int capacity = core::WMBaseCapacity (cfg.sensitivity, cfg.focus);
+    for (int i = static_cast<int> (pctx.wm_slots.size ()); i < capacity; ++i)
+      {
+        ProcessorContext::WMSlot filler;
+        filler.embedding = Eigen::VectorXf::Zero (3);
+        filler.embedding[0] = 1.0f;
+        filler.embedding[1] = 1.0f;
+        filler.embedding.normalize ();
+        filler.strength = 5.0;
+        filler.last_ts = 195.0;
+        filler.pos_index = i;
+        pctx.wm_slots.push_back (filler);
+      }
+
     WorkingMemory op;
     OperationContext ctx (s, pctx, cfg);
 
@@ -790,7 +812,7 @@ TEST_CASE ("Alg24 high-T increases slot dedication resistance to eviction",
     // With T=0: dedication_strength = 0.3
     // dedication = (2.0 - 0.75) * 0.3 / 10.0 ≈ 0.0375
     // Both slots have same eviction score, first one (slot0) gets evicted
-    REQUIRE (pctx.wm_slots.size () == 2);
+    REQUIRE (pctx.wm_slots.size () == static_cast<size_t> (capacity));
   }
 
   // Test with T=1 (high dedication_strength = 0.9)
@@ -799,7 +821,7 @@ TEST_CASE ("Alg24 high-T increases slot dedication resistance to eviction",
     SignalProcessor::Config cfg;
     cortext::testing::RequireEncoder (cfg);
     cfg.focus = 0.0;
-    cfg.sensitivity = 1.0; // capacity = 2
+    cfg.sensitivity = 1.0; // capacity floor (5 under 7±2)
     cfg.stability = 1.0;   // High T → dedication_strength = 0.9
 
     // Same setup as above with recent timestamps
@@ -821,6 +843,22 @@ TEST_CASE ("Alg24 high-T increases slot dedication resistance to eviction",
     slot1.pos_index = 1;
     pctx.wm_slots.push_back (slot1);
 
+    // Fill to capacity with strong, recent fillers (orthogonal to signal)
+    // so the new signal forces an eviction among the two equal slots.
+    const int capacity = core::WMBaseCapacity (cfg.sensitivity, cfg.focus);
+    for (int i = static_cast<int> (pctx.wm_slots.size ()); i < capacity; ++i)
+      {
+        ProcessorContext::WMSlot filler;
+        filler.embedding = Eigen::VectorXf::Zero (3);
+        filler.embedding[0] = 1.0f;
+        filler.embedding[1] = 1.0f;
+        filler.embedding.normalize ();
+        filler.strength = 5.0;
+        filler.last_ts = 195.0;
+        filler.pos_index = i;
+        pctx.wm_slots.push_back (filler);
+      }
+
     WorkingMemory op;
     OperationContext ctx (s, pctx, cfg);
 
@@ -832,7 +870,7 @@ TEST_CASE ("Alg24 high-T increases slot dedication resistance to eviction",
     // With T=1: dedication_strength = 0.9
     // dedication = (2.0 - 0.75) * 0.9 / 10.0 ≈ 0.1125
     // Higher dedication means lower eviction score
-    REQUIRE (pctx.wm_slots.size () == 2);
+    REQUIRE (pctx.wm_slots.size () == static_cast<size_t> (capacity));
   }
 
   // Verify that WMSlotDedicationStrength produces expected values
@@ -856,7 +894,7 @@ TEST_CASE ("Alg24 recent slots resist eviction regardless of strength",
   SignalProcessor::Config cfg;
   cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.0;
-  cfg.sensitivity = 1.0; // capacity = 2
+  cfg.sensitivity = 1.0; // capacity floor (5 under 7±2)
   cfg.stability = 0.5;   // dedication_strength = 0.6
 
 
@@ -880,6 +918,22 @@ TEST_CASE ("Alg24 recent slots resist eviction regardless of strength",
   slot1.pos_index = 1;
   pctx.wm_slots.push_back (slot1);
 
+  // Fill to capacity with strong, recent fillers (orthogonal to signal,
+  // components below the 0.9 survivor checks) so an eviction is forced.
+  const int capacity = core::WMBaseCapacity (cfg.sensitivity, cfg.focus);
+  for (int i = static_cast<int> (pctx.wm_slots.size ()); i < capacity; ++i)
+    {
+      ProcessorContext::WMSlot filler;
+      filler.embedding = Eigen::VectorXf::Zero (3);
+      filler.embedding[0] = 1.0f;
+      filler.embedding[1] = 1.0f;
+      filler.embedding.normalize ();
+      filler.strength = 5.0;
+      filler.last_ts = 199.0;
+      filler.pos_index = i;
+      pctx.wm_slots.push_back (filler);
+    }
+
   // Calculate expected eviction scores:
   // Slot 0: dedication = 1.0 * 0.6 / 10.0 = 0.06
   //         recency = exp(-1/WMRecencyTauSeconds(F,S,T))
@@ -897,7 +951,7 @@ TEST_CASE ("Alg24 recent slots resist eviction regardless of strength",
 
   op.Execute (ctx, cortext::testing::GetNullTransaction ());
 
-  REQUIRE (pctx.wm_slots.size () == 2);
+  REQUIRE (pctx.wm_slots.size () == static_cast<size_t> (capacity));
 
   // The weaker+recent slot (slot0, embedding[0]=1) should survive
   bool slot0_survived = false;

@@ -116,33 +116,33 @@ TEST_CASE ("Episode boundary drift threshold follows lerp(0.10, 0.35, T)",
 TEST_CASE ("Working memory capacity within [2, 6] range",
            "[regression][working_memory]")
 {
-  // Paper Section 8.1: base_capacity = round(lerp(5, 3, S) + lerp(-1, 1, F))
-  // Range: [2, 6]
+  // base_capacity = round(lerp(8, 6, SensitivityBias(S)) + lerp(-1, 1, FocusBias(F)))
+  // Miller's 7±2: range [5, 9], 7 at neutral knobs.
 
   SECTION ("Extreme knob values produce correct bounds")
   {
-    // S=1, F=0 yields minimum (2)
-    // lerp(5, 3, 1) + lerp(-1, 1, 0) = 3 + (-1) = 2
-    REQUIRE (WMBaseCapacity (1.0, 0.0) == 2);
+    // S=1, F=0 yields minimum (5)
+    // lerp(8, 6, 1) + lerp(-1, 1, 0) = 6 + (-1) = 5
+    REQUIRE (WMBaseCapacity (1.0, 0.0) == 5);
 
-    // S=0, F=1 yields maximum (6)
-    // lerp(5, 3, 0) + lerp(-1, 1, 1) = 5 + 1 = 6
-    REQUIRE (WMBaseCapacity (0.0, 1.0) == 6);
+    // S=0, F=1 yields maximum (9)
+    // lerp(8, 6, 0) + lerp(-1, 1, 1) = 8 + 1 = 9
+    REQUIRE (WMBaseCapacity (0.0, 1.0) == 9);
   }
 
-  SECTION ("Mid-range knobs produce capacity around 4")
+  SECTION ("Mid-range knobs produce capacity around 7")
   {
-    // S=0.5, F=0.5: lerp(5, 3, 0.5) + lerp(-1, 1, 0.5) = 4 + 0 = 4
-    REQUIRE (WMBaseCapacity (0.5, 0.5) == 4);
+    // S=0.5, F=0.5: biased lerps cancel to exactly 7
+    REQUIRE (WMBaseCapacity (0.5, 0.5) == 7);
 
-    // S=0, F=0: lerp(5, 3, 0) + lerp(-1, 1, 0) = 5 + (-1) = 4
-    REQUIRE (WMBaseCapacity (0.0, 0.0) == 4);
+    // S=0, F=0: lerp(8, 6, 0) + lerp(-1, 1, 0) = 8 + (-1) = 7
+    REQUIRE (WMBaseCapacity (0.0, 0.0) == 7);
 
-    // S=1, F=1: lerp(5, 3, 1) + lerp(-1, 1, 1) = 3 + 1 = 4
-    REQUIRE (WMBaseCapacity (1.0, 1.0) == 4);
+    // S=1, F=1: lerp(8, 6, 1) + lerp(-1, 1, 1) = 6 + 1 = 7
+    REQUIRE (WMBaseCapacity (1.0, 1.0) == 7);
   }
 
-  SECTION ("All combinations stay within [2, 6]")
+  SECTION ("All combinations stay within [5, 9]")
   {
     for (double S = 0.0; S <= 1.0; S += 0.1)
       {
@@ -150,8 +150,8 @@ TEST_CASE ("Working memory capacity within [2, 6] range",
           {
             int cap = WMBaseCapacity (S, F);
             CAPTURE (S, F, cap);
-            REQUIRE (cap >= 2);
-            REQUIRE (cap <= 6);
+            REQUIRE (cap >= 5);
+            REQUIRE (cap <= 9);
           }
       }
   }
