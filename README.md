@@ -4,7 +4,7 @@
 
 Most memory systems for LLMs are open-loop: text flows in, gets chunked, embedded, summarized, and retrieved, and the parameters that govern those stages never change based on what retrieval or consolidation actually produced. Cortext is different. Retrieval outcomes, prediction error, and consolidation results feed back into three continuous control parameters — **Focus (F)**, **Sensitivity (S)**, and **Stability (T)** — which in turn modulate write gating, attention width, decay, thresholds, and consolidation cadence for the next input.
 
-The architecture is specified formally in the accompanying paper. Its design borrows ideas from the cognitive-science literature — Cowan's working-memory capacity limits, Nader's reconsolidation dynamics, serial-position effects, emotional modulation of memory — as engineering heuristics, not as claims of cognitive fidelity. Cortext does not claim to model human memory. It claims that these borrowed mechanisms measurably improve machine memory, and it ships the benchmarks to check that claim.
+The architecture is specified formally in the accompanying paper. The design borrows ideas from the cognitive-science literature — working-memory capacity limits, reconsolidation, serial-position effects, emotional modulation of memory — as engineering heuristics. Cortext doesn't claim to model human memory. The claim is narrower: these borrowed mechanisms measurably improve machine memory, and the benchmarks to check that ship in this repo.
 
 ## Why Cortext Exists
 
@@ -14,9 +14,9 @@ The same architecture also happens to be useful for long-horizon LLM memory. But
 
 ## Who Built This
 
-Cortext is built by one software engineer. I am not a machine-learning researcher and I am not a psychologist. The cognitive-science references in this project come from reading the literature as an outsider over the course of building it — they shaped the design, but my reading of them should not be mistaken for expert interpretation, and the system's value does not rest on it.
+Cortext is built by one software engineer. I'm not an ML researcher or a psychologist. The cognitive-science references here come from reading the literature while building this. They shaped the design, but don't mistake my reading for expert interpretation — the system's value doesn't rest on it.
 
-What the system's value does rest on is falsifiable: the benchmark protocols in this repository run blind LLM-judged comparisons against strong baselines — including a full-history oracle arm that Cortext is *expected* to lose to sometimes — on real multimodal data, with fixed seeds, repeated judgments, and bootstrap confidence intervals. Where results failed to reproduce under real encoders, the paper says so and marks the old numbers superseded. If you find a place where the psychology is misapplied, a baseline is unfair, or an evaluation is flattering the system, I want to know: open an issue.
+What it does rest on is falsifiable. The benchmarks in this repo run blind LLM-judged comparisons against strong baselines, including a full-history arm that Cortext is expected to lose to sometimes, with fixed seeds, repeated judgments, and bootstrap confidence intervals. Where results failed to reproduce under real encoders, the paper says so and marks the old numbers superseded. If you find a spot where the psychology is misapplied, a baseline is unfair, or an eval is flattering the system, open an issue. I want to know.
 
 ## The Loop
 
@@ -67,37 +67,41 @@ A few load-bearing results from [docs/paper/sections/9_experimental.qmd](docs/pa
 
 Where earlier synthetic-encoder claims did **not** survive the switch to real embeddings (notably parts of the provenance, stale, and routine-vs-recency separations), the paper says so explicitly and marks those older numbers as superseded. The repo's claim about the loop rests on what reproduces under real encoders, not on what was convenient in synthetic ablations.
 
-## Current Evaluation Snapshot (Alpha)
+## Evaluation Results (Alpha)
 
-The primary end-to-end evaluation is the chat-replay protocol
+The main end-to-end eval is the chat-replay protocol
 (`tools/run_chat_replay_release_protocol.py`). It replays a real chat export
-through the full production pipeline (text plus media), then runs a blind,
-seeded, repeated LLM-judged comparison of three context arms on held-out
-probes — Cortext's compressed memory packet, a traditional embedding-RAG arm,
-and a full-history upper-bound arm — with probe-level bootstrap confidence
-intervals and fairness checks. The corpus format is a plain timestamped chat
-export (one `.txt` transcript plus optional media in a directory), so the
-harness runs on any conforming export, not just the corpus used here.
+(text plus media) through the full pipeline, then a local LLM blind-judges
+three context arms on held-out probes: Cortext's compressed packet, standard
+embedding RAG, and the full history as an upper bound. Fixed seed, 3
+judgments per probe, bootstrap confidence intervals, fairness checks. The
+corpus format is just a directory with one timestamped `.txt` transcript plus
+media, so it runs on any export that matches the format — not just mine.
 
-From the most recent corrected-stack runs (June 2026; private 1,200-message
-personal corpus; 39 probes × 3 repetitions; local `gemma4:12b` judge):
+Latest runs (June 2026, a private 1,200-message corpus, 39 probes × 3
+repetitions, local `gemma4:12b` judge):
 
-- The judge preferred Cortext's packet most often in both tested
-  working-memory configurations (42 of 117 judgments vs 32 full-history and
-  25 RAG at capacity 7±2; 39 vs 35 and 20 at capacity 4), at a mean context
-  cost of ~220–260 tokens versus ~6,100 for the baseline arms (≈96% smaller).
-- Known weakness, reported deliberately: judged sufficiency trails the
-  fat-context arms (≈2.4–2.7 vs ≈3.1) uniformly across replay depth. That is
-  the current cost of the compression, and capacity changes did not close it.
-- An earlier run in this series was invalidated by stale cross-encoder vector
-  artifacts. That failure produced the embedding-model pin (a fatal startup
-  check with no override) and a full rerun; both are documented in the paper.
+| Run | Cortext wins | Full-history wins | RAG wins | Ties | Cortext sufficiency | Context tokens |
+|---|---|---|---|---|---|---|
+| Working memory 7±2 | **42**/117 | 32 | 25 | 18 | 2.72 | ~262 |
+| Working memory 4 (control) | **39**/117 | 35 | 20 | 23 | 2.43 | ~222 |
 
-These are internal results on one private corpus with one judge model,
-reported for transparency. They are **not** performance claims, and the alpha
-makes no public benchmark claims. The full protocol, judge configuration, and
-analysis tools ship in this repository so the evaluation can be reproduced —
-or attacked — on your own data.
+Both baseline arms used ~6,100 context tokens per probe, so Cortext's packet
+is roughly 96% smaller and still wins the most judgments.
+
+The honest caveats:
+
+- Judged sufficiency trails the fat-context arms (~2.4–2.7 vs ~3.1). That's
+  the cost of the compression, and raising working-memory capacity didn't
+  close it.
+- An earlier run in this series was invalid: stale vectors from an older
+  encoder were silently compared against the new embedding space. That
+  failure is why the engine now pins every database and precomputed artifact
+  to the encoder's fingerprint and refuses to start on a mismatch, with no
+  override. The paper documents both the failure and the rerun.
+- This is one private corpus and one judge model. I'm publishing the numbers
+  for transparency, not claiming benchmarks. The whole protocol ships in this
+  repo — run it on your own data and tell me where it breaks.
 
 ## What Cortext Provides
 
