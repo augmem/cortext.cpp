@@ -89,78 +89,47 @@ IsDurableLabelCandidate (const std::string &label,
       return false;
     }
 
-  static const std::unordered_set<std::string_view> kFillerLabels = {
-	    "a",         "about",     "ah",        "aha",       "alright",
-	    "also",      "an",        "and",       "anyway",    "are",
-	    "as",        "assistant", "at",        "basically", "be",
-	    "almost",    "almost done", "been",    "being",     "big cart",
-	    "all",       "but",
-	    "by",        "can",       "could",     "cool",      "did",
-	    "do",        "does",
-	    "doing",     "done",      "equate",    "er",        "erm",       "for",
-	    "food",      "from",      "get",       "gets",      "getting",   "go",
-	    "goes",      "going",     "got",       "had",       "has",
-	    "good",      "good luck", "have",      "having",    "he",        "her",       "hers",
-	    "him",       "his",       "hmm",       "huh",       "i",
-	    "idea",      "ideas",     "image",     "in",        "is",        "it",
-	    "its",       "just",
-	    "k",         "kind of",   "know",      "like",      "make",
-	    "makes",     "making",    "maybe",     "me",        "might",
-	    "mm",        "mm hmm",    "mhm",       "my",        "no",        "nope",
-	    "of",        "off brand", "oh",
-	    "ok",        "okay",      "on",        "once",      "or",        "our",
-	    "ours",      "probably",  "right",     "she",       "sorry",     "so",
-	    "sort of",   "stuff",     "sure",      "system",    "that",
-	    "the",       "their",
-	    "theirs",    "them",      "then",      "there",     "these",
-	    "they",      "thing",     "things",    "this",      "those",
-	    "to",        "thanks",    "thank you", "uh",        "uh huh",
-	    "um",        "umm",       "up",        "us",        "user",
-	    "we",        "well",      "what",      "when",      "where",
-	    "which",     "who",       "why",       "with",      "would",
-	    "ya",        "ya know",   "yeah",      "yep",       "you",
-	    "your",      "yours",     "you know",
-	    "agree",     "almost",    "back",      "back row",  "backs",     "bathroom",
-	    "cage",      "cart",      "come back", "cute",      "damn",      "damn passed",
-	    "how",       "including", "lighting",  "long",      "long line",
-	    "light",     "metal",     "not",       "not ideal", "shade",     "wall",
-	    "way",       "wild"
-	  };
-
-  if (kFillerLabels.find (canonical) != kFillerLabels.end ())
-    {
-      return false;
-    }
-
-  // A phrase composed entirely of these tokens carries no durable content.
-  // This is the compositional complement of kFillerLabels above: the filler
-  // list can only reject exact phrases it has already seen ("okay" and
-  // "thanks" were listed, "okay thanks" sailed through), while this rule
-  // rejects any combination of weak and conversational-acknowledgment
-  // tokens.
-  static const std::unordered_set<std::string_view> kWeakPhraseTokens = {
-    "a",       "about",   "all",     "almost", "and",    "around",
-    "as",      "at",      "back",    "be",     "been",   "being",
-    "can",     "come",    "could",   "did",    "do",     "does",
-    "doing",   "done",    "for",     "from",   "get",    "gets",
-    "getting", "go",      "goes",    "going",  "good",   "got",
-    "guess",   "had",     "has",     "have",   "having", "how",
-    "if",      "in",      "is",      "it",     "just",   "kind",
-    "like",    "make",    "makes",   "making", "maybe",  "might",
-    "not",     "of",      "on",      "once",   "or",     "probably",
-    "right",   "so",      "sort",    "that",   "the",    "then",
-    "there",   "thing",   "things",  "this",   "to",     "turn",
-    "turning", "up",      "was",     "way",    "well",   "what",
-    "when",    "where",   "which",   "who",    "why",    "with",
-    "would",
-    // Conversational acknowledgments and discourse filler.
-    "ah",      "aha",     "alright", "bye",    "cool",   "fine",
-    "great",   "hello",   "hey",     "hi",     "hmm",    "huh",
-    "know",    "mhm",     "mm",      "nah",    "nice",   "no",
-    "nope",    "oh",      "ok",      "okay",   "oops",   "please",
-    "sorry",   "sounds",  "sure",    "thank",  "thanks", "uh",
-    "um",      "umm",     "welcome", "wow",    "ya",     "yeah",
-    "yep",     "yes",     "you",     "your"
+  // Closed-class language structure only: function words, pronouns,
+  // auxiliaries, interjections, and conversational acknowledgments, plus
+  // chat-transcript role artifacts. This set is frozen - it encodes grammar,
+  // not corpus tuning. Content-word filtering is the job of corpus-derived
+  // signals (label-bank similarity contrast, document frequency), never of
+  // this list. See docs: a phrase is rejected here only when EVERY token is
+  // closed-class.
+  static const std::unordered_set<std::string_view> kClosedClassTokens = {
+    // Articles, conjunctions, prepositions, particles
+    "a",     "about", "after",  "again",  "all",   "almost", "also",
+    "an",    "and",   "any",    "around", "as",    "at",     "back",
+    "basically", "before", "but", "by",   "down",  "for",    "from",
+    "if",    "in",    "into",   "just",   "kind",  "like",   "maybe",
+    "not",   "of",    "off",    "on",     "once",  "only",   "or",
+    "out",   "over",  "probably", "so",   "some",  "sort",   "still",
+    "than",  "that",  "the",    "then",   "there", "these",  "this",
+    "those", "through", "to",   "too",    "under", "up",     "very",
+    "well",  "when",  "where",  "which",  "while", "who",    "why",
+    "with",  "would",
+    // Pronouns and possessives
+    "he",    "her",   "hers",   "him",    "his",   "i",      "it",
+    "its",   "me",    "my",     "our",    "ours",  "she",    "their",
+    "theirs", "them", "they",   "us",     "we",    "what",   "you",
+    "your",  "yours",
+    // Auxiliaries and light verbs
+    "am",    "are",   "be",     "been",   "being", "came",   "can",
+    "come",  "could", "did",    "do",     "does",  "doing",  "done",
+    "get",   "gets",
+    "getting", "go",  "goes",   "going",  "got",   "had",    "has",
+    "have",  "having", "is",    "make",   "makes", "making", "might",
+    "must",  "shall", "should", "turn",   "turned", "turning", "was",
+    "were",  "will",
+    // Interjections, acknowledgments, discourse markers
+    "ah",    "aha",   "alright", "bye",   "cool",  "er",     "erm",
+    "fine",  "good",  "great",  "hello",  "hey",   "hi",     "hmm",
+    "huh",   "know",  "mhm",    "mm",     "nah",   "nice",   "no",
+    "nope",  "oh",    "ok",     "okay",   "oops",  "please", "right",
+    "sorry", "sounds", "sure",  "thank",  "thanks", "uh",    "um",
+    "umm",   "welcome", "wow",  "ya",     "yeah",  "yep",    "yes",
+    // Chat-transcript role artifacts
+    "assistant", "system", "user"
   };
 
   int phrase_token_count = 0;
@@ -172,7 +141,7 @@ IsDurableLabelCandidate (const std::string &label,
         return;
       }
     ++phrase_token_count;
-    if (kWeakPhraseTokens.find (phrase_token) != kWeakPhraseTokens.end ())
+    if (kClosedClassTokens.find (phrase_token) != kClosedClassTokens.end ())
       {
         ++weak_phrase_token_count;
       }
@@ -190,7 +159,8 @@ IsDurableLabelCandidate (const std::string &label,
         }
     }
   finish_phrase_token ();
-  if (phrase_token_count >= 2
+  // Single closed-class tokens are as empty as all-closed-class phrases.
+  if (phrase_token_count >= 1
       && phrase_token_count == weak_phrase_token_count)
     {
       return false;

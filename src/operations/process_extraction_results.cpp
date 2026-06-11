@@ -838,6 +838,91 @@ TokenizeSourceSpans (const std::string &text)
   return tokens;
 }
 
+/// Genericity signal derived from the retrieval space instead of token
+/// lists: a candidate label is conversational filler when its similarity
+/// profile against the existing label bank is HIGH and FLAT (it sits in the
+/// dense conversational region, near everything, peaked at nothing).
+/// Measured on AIST-256 against a six-label bank (see
+/// stm_labeling_integration.test.cpp, which keeps these measurements
+/// honest): filler phrases sit at mean 0.688-0.701 with peak-mean
+/// 0.064-0.079; on-topic content peaks 0.24-0.31 above its mean; novel
+/// topics sit at mean 0.47-0.61. The mean floor (0.65) sits in the
+/// 0.611-0.688 gap separating novel topics from filler, and the peak
+/// threshold (0.15) sits in the 0.111-0.244 gap separating everything
+/// non-content from content.
+struct LabelBankContrast
+{
+  bool available = false;
+  double mean_similarity = 0.0;
+  double max_similarity = 0.0;
+};
+
+constexpr int kContrastMinBankSize = 4;
+constexpr double kContrastGenericMeanFloor = 0.65;
+constexpr double kContrastMinPeak = 0.15;
+
+/// bank_size_limit caps the scan to summary-cache entries that existed
+/// before this consolidation pass began: labels admitted moments ago for
+/// the same summary are siblings of the candidate, and measuring contrast
+/// against them makes every cohesive scene's later labels look generic
+/// (high-flat against their own scene-mates).
+LabelBankContrast
+ComputeLabelBankContrast (const std::vector<float> &embedding,
+                          const ProcessorContext &p_ctx,
+                          size_t bank_size_limit)
+{
+  LabelBankContrast out;
+  if (embedding.empty ())
+    {
+      return out;
+    }
+  const Eigen::Map<const Eigen::VectorXf> v (
+      embedding.data (), static_cast<Eigen::Index> (embedding.size ()));
+  const float v_norm = v.norm ();
+  if (v_norm <= 1e-9f)
+    {
+      return out;
+    }
+  double sum = 0.0;
+  double max_sim = -1.0;
+  int count = 0;
+  const size_t scan_count
+      = std::min (bank_size_limit, p_ctx.summary_cache.size ());
+  for (size_t entry_idx = 0; entry_idx < scan_count; ++entry_idx)
+    {
+      const auto &entry = p_ctx.summary_cache[entry_idx];
+      if (!entry.is_label || entry.embedding_norm <= 1e-9f
+          || entry.embedding.size () != v.size ())
+        {
+          continue;
+        }
+      const double sim = static_cast<double> (entry.embedding.dot (v))
+                         / (static_cast<double> (entry.embedding_norm)
+                            * static_cast<double> (v_norm));
+      sum += sim;
+      max_sim = std::max (max_sim, sim);
+      ++count;
+    }
+  if (count < kContrastMinBankSize)
+    {
+      return out;
+    }
+  out.available = true;
+  out.mean_similarity = sum / static_cast<double> (count);
+  out.max_similarity = max_sim;
+  return out;
+}
+
+bool
+IsGenericByLabelBankContrast (const LabelBankContrast &contrast)
+{
+  return contrast.available
+         && contrast.mean_similarity >= kContrastGenericMeanFloor
+         && (contrast.max_similarity - contrast.mean_similarity)
+                < kContrastMinPeak;
+}
+
+
 std::vector<std::string>
 BuildSourceSpanCandidates (const std::string &evidence_text,
                            int max_candidates,
@@ -1303,6 +1388,7 @@ EnsureStmLtmAuditTable (Transaction &tx)
       "  source_span_candidate_count INTEGER DEFAULT 0,"
       "  label_candidates_rejected_non_durable INTEGER DEFAULT 0,"
       "  label_candidates_rejected_ungrounded INTEGER DEFAULT 0,"
+      "  label_candidates_rejected_low_contrast INTEGER DEFAULT 0,"
       "  label_candidates_rejected_duplicate INTEGER DEFAULT 0,"
       "  label_candidates_rejected_legacy_gate INTEGER DEFAULT 0,"
       "  labels_inserted_from_extractor INTEGER DEFAULT 0,"
@@ -1447,6 +1533,9 @@ EnsureStmLtmAuditTable (Transaction &tx)
       "label_candidates_rejected_ungrounded",
       "label_candidates_rejected_ungrounded INTEGER DEFAULT 0");
   add_column_if_missing (
+      "label_candidates_rejected_low_contrast",
+      "label_candidates_rejected_low_contrast INTEGER DEFAULT 0");
+  add_column_if_missing (
       "label_candidates_rejected_duplicate",
       "label_candidates_rejected_duplicate INTEGER DEFAULT 0");
   add_column_if_missing (
@@ -1543,6 +1632,7 @@ AuditProcessedRelabelResult (
     long long source_span_candidate_count,
     long long label_candidates_rejected_non_durable,
     long long label_candidates_rejected_ungrounded,
+    long long label_candidates_rejected_low_contrast,
     long long label_candidates_rejected_duplicate,
     long long label_candidates_rejected_legacy_gate,
     long long labels_inserted_from_extractor,
@@ -1622,6 +1712,7 @@ AuditProcessedRelabelResult (
       "source_span_candidate_count = ?, "
       "label_candidates_rejected_non_durable = ?, "
       "label_candidates_rejected_ungrounded = ?, "
+      "label_candidates_rejected_low_contrast = ?, "
       "label_candidates_rejected_duplicate = ?, "
       "label_candidates_rejected_legacy_gate = ?, "
       "labels_inserted_from_extractor = ?, "
@@ -1658,6 +1749,7 @@ AuditProcessedRelabelResult (
         source_span_candidate_count,
         label_candidates_rejected_non_durable,
         label_candidates_rejected_ungrounded,
+        label_candidates_rejected_low_contrast,
         label_candidates_rejected_duplicate,
         label_candidates_rejected_legacy_gate,
         labels_inserted_from_extractor,
@@ -2180,6 +2272,7 @@ ProcessExtractionResults::Execute (OperationContext &context, Transaction &tx) c
       long long relation_endpoint_rejected_ungrounded = 0;
       long long label_candidates_rejected_non_durable = 0;
       long long label_candidates_rejected_ungrounded = 0;
+      long long label_candidates_rejected_low_contrast = 0;
       long long label_candidates_rejected_duplicate = 0;
       long long label_candidates_rejected_legacy_gate = 0;
       long long labels_inserted_from_extractor = 0;
@@ -2377,9 +2470,72 @@ ProcessExtractionResults::Execute (OperationContext &context, Transaction &tx) c
         return nullptr;
       };
 
-      // 1. Insert labels into MEMORIES (kind='LABEL').
+      // Contrast is measured against the bank as it existed before this
+      // result's admissions (see ComputeLabelBankContrast).
+      const size_t label_bank_snapshot = p_ctx.summary_cache.size ();
+      // A single-token label whose token already appears inside an admitted
+      // multi-token label for this summary is a redundant fragment ("Cart"
+      // next to "cart situation"); standalone single-token labels ("Dog")
+      // are fine. Multi-token labels are admitted first so the check sees
+      // the full batch.
+      std::unordered_set<std::string> admitted_multi_tokens;
+      auto note_admitted_label_tokens = [&] (const std::string &label_key) {
+        const std::string canonical = CanonicalLabelTokenKey (label_key);
+        if (CanonicalTokenCount (canonical) < 2)
+          {
+            return;
+          }
+        std::string token;
+        for (unsigned char c : canonical)
+          {
+            if (std::isalnum (c) != 0)
+              {
+                token.push_back (static_cast<char> (c));
+              }
+            else if (!token.empty ())
+              {
+                admitted_multi_tokens.insert (token);
+                token.clear ();
+              }
+          }
+        if (!token.empty ())
+          {
+            admitted_multi_tokens.insert (token);
+          }
+      };
+      auto single_token_subsumed = [&] (const std::string &label_key) {
+        const std::string canonical = CanonicalLabelTokenKey (label_key);
+        if (CanonicalTokenCount (canonical) != 1)
+          {
+            return false;
+          }
+        return admitted_multi_tokens.find (canonical)
+               != admitted_multi_tokens.end ();
+      };
+
+      // 1. Insert labels into MEMORIES (kind='LABEL'). Multi-token labels
+      // go first so single-token fragments can be checked against them.
+      std::vector<const operations::ExtractedLabel *> ordered_labels;
+      ordered_labels.reserve (result.labels.size ());
       for (const auto &label_entry : result.labels)
         {
+          if (CanonicalTokenCount (CanonicalLabelTokenKey (
+                  NormalizeLabelKey (label_entry.label))) >= 2)
+            {
+              ordered_labels.push_back (&label_entry);
+            }
+        }
+      for (const auto &label_entry : result.labels)
+        {
+          if (CanonicalTokenCount (CanonicalLabelTokenKey (
+                  NormalizeLabelKey (label_entry.label))) < 2)
+            {
+              ordered_labels.push_back (&label_entry);
+            }
+        }
+      for (const auto *label_entry_ptr : ordered_labels)
+        {
+          const auto &label_entry = *label_entry_ptr;
           const std::string label = TrimLabel (label_entry.label);
           const std::string label_key = NormalizeLabelKey (label_entry.label);
           if (!IsDurableLabelCandidate (label, label_key))
@@ -2392,6 +2548,11 @@ ProcessExtractionResults::Execute (OperationContext &context, Transaction &tx) c
               ++label_candidates_rejected_ungrounded;
               continue;
             }
+          if (single_token_subsumed (label_key))
+            {
+              ++label_candidates_rejected_duplicate;
+              continue;
+            }
           if (!inserted_label_keys.insert (label_key).second)
             {
               ++label_candidates_rejected_duplicate;
@@ -2400,6 +2561,27 @@ ProcessExtractionResults::Execute (OperationContext &context, Transaction &tx) c
           auto &existing = get_existing (label_key);
           const std::vector<float> *label_embedding_ptr
               = resolve_label_embedding (label, label_key, existing);
+          if (label_embedding_ptr != nullptr)
+            {
+              const auto contrast
+                  = ComputeLabelBankContrast (*label_embedding_ptr, p_ctx,
+                                              label_bank_snapshot);
+              if (IsGenericByLabelBankContrast (contrast))
+                {
+                  ++label_candidates_rejected_low_contrast;
+                  inserted_label_keys.erase (label_key);
+                  telemetry::LogDebug (
+                      "cortext.label_admission",
+                      { telemetry::Attribute::String ("label", label),
+                        telemetry::Attribute::String ("decision",
+                                                      "rejected_low_contrast"),
+                        telemetry::Attribute::Double (
+                            "mean_similarity", contrast.mean_similarity),
+                        telemetry::Attribute::Double (
+                            "max_similarity", contrast.max_similarity) });
+                  continue;
+                }
+            }
           const double salience
               = ComputeLabelSalience (label_embedding_ptr, summary_embedding,
                                       cfg.focus, cfg.sensitivity,
@@ -2430,6 +2612,7 @@ ProcessExtractionResults::Execute (OperationContext &context, Transaction &tx) c
               inserted_any_label = true;
               ++labels_inserted_from_extractor;
               refined_label_texts.push_back (label);
+              note_admitted_label_tokens (label_key);
             }
         }
 
@@ -2477,13 +2660,34 @@ ProcessExtractionResults::Execute (OperationContext &context, Transaction &tx) c
 	            const std::string label = TrimLabel (original_label);
 	            if (!IsDurableLabelCandidate (label, label_key)
 	                || (!has_blob_evidence
-	                    && !LabelAppearsInEvidence (label_key, evidence_text)))
+	                    && !LabelAppearsInEvidence (label_key, evidence_text))
+	                || single_token_subsumed (label_key))
 	              {
 	                return false;
 	              }
 	            auto &existing = get_existing (label_key);
 	            const std::vector<float> *label_embedding_ptr
 	                = resolve_label_embedding (label, label_key, existing);
+	            if (label_embedding_ptr != nullptr)
+	              {
+	                const auto contrast
+	                    = ComputeLabelBankContrast (*label_embedding_ptr, p_ctx,
+	                                          label_bank_snapshot);
+	                if (IsGenericByLabelBankContrast (contrast))
+	                  {
+	                    ++label_candidates_rejected_low_contrast;
+	                    telemetry::LogDebug (
+	                        "cortext.label_admission",
+	                        { telemetry::Attribute::String ("label", label),
+	                          telemetry::Attribute::String (
+	                              "decision", "rejected_low_contrast"),
+	                          telemetry::Attribute::Double (
+	                              "mean_similarity", contrast.mean_similarity),
+	                          telemetry::Attribute::Double (
+	                              "max_similarity", contrast.max_similarity) });
+	                    return false;
+	                  }
+	              }
 	            const double salience = ComputeLabelSalience (
 	                label_embedding_ptr, summary_embedding, cfg.focus,
 	                cfg.sensitivity, cfg.stability);
@@ -3300,6 +3504,7 @@ ProcessExtractionResults::Execute (OperationContext &context, Transaction &tx) c
           request_source_span_counts[result.summary_id],
           label_candidates_rejected_non_durable,
           label_candidates_rejected_ungrounded,
+          label_candidates_rejected_low_contrast,
           label_candidates_rejected_duplicate,
           label_candidates_rejected_legacy_gate,
           labels_inserted_from_extractor,
