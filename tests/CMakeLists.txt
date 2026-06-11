@@ -117,7 +117,10 @@ endif()
 
 # AIST encoder integration needs the model under models/.
 if(EXISTS ${CMAKE_SOURCE_DIR}/models/AIST-87M-GGUF)
-  target_sources(cortext_tests PRIVATE aist_gguf_encoder_integration.test.cpp)
+  target_sources(cortext_tests PRIVATE
+    aist_gguf_encoder_integration.test.cpp
+    stm_labeling_integration.test.cpp
+  )
 endif()
 
 # Deep-consolidation stack integration needs LiteRT and the Gemma4 model.
