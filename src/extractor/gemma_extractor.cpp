@@ -155,7 +155,8 @@ BuildTextPrompt (const std::string &text)
 {
   return std::string (
       "Extract labels, relations, and durable facts from the text below. "
-      "Return only a single JSON object with keys \"labels\", \"relations\", and optional \"facts\". "
+      "Return only a single JSON object with keys \"labels\", \"relations\", and \"facts\". "
+      "Always include all three keys; \"relations\" and \"facts\" must be empty arrays when the evidence states none. "
       "\"labels\" must be an array of non-empty strings copied from the text "
       "(no placeholders, no objects, no types/categories). "
       "Each relation must include non-empty \"subject\", \"predicate\", and "
@@ -174,7 +175,8 @@ BuildAudioPrompt ()
 {
   return std::string (
       "Extract labels, relations, and durable facts from the audio. "
-      "Return only a single JSON object with keys \"labels\", \"relations\", and optional \"facts\". "
+      "Return only a single JSON object with keys \"labels\", \"relations\", and \"facts\". "
+      "Always include all three keys; \"relations\" and \"facts\" must be empty arrays when the evidence states none. "
       "\"labels\" must be an array of non-empty strings drawn "
       "from the audio content (no placeholders, no objects, no types/categories). "
       "Each relation must include non-empty \"subject\", \"predicate\", and "
@@ -239,7 +241,8 @@ BuildLabelRefinementTextPrompt (
 	      "Current labels are untrusted candidates and may be wrong. "
 	      "Keep a current label only if it appears in the evidence; remove every "
 	      "unsupported or generic current label, and add missing concrete labels. "
-		      "Return only a single JSON object with keys \"labels\", \"relations\", and optional \"facts\". "
+		      "Return only a single JSON object with keys \"labels\", \"relations\", and \"facts\". "
+      "Always include all three keys; \"relations\" and \"facts\" must be empty arrays when the evidence states none. "
 		      "\"labels\" must be the final replacement set of non-empty source spans copied from the evidence. "
 		      "Use durable memory anchors: named people, places, organizations, pets, specific objects, and short event phrases. "
 		      + LabelPromptBoundsInstruction ("evidence")
@@ -267,7 +270,8 @@ BuildLabelRefinementAudioPrompt (
       "You are refining labels for one memory graph association from audio evidence. "
 	      "Keep correct current labels, remove unsupported or generic labels, "
 	      "and add missing concrete labels from the audio. "
-		      "Return only a single JSON object with keys \"labels\", \"relations\", and optional \"facts\". "
+		      "Return only a single JSON object with keys \"labels\", \"relations\", and \"facts\". "
+      "Always include all three keys; \"relations\" and \"facts\" must be empty arrays when the evidence states none. "
 		      "\"labels\" must be the final replacement set of non-empty source spans from the audio. "
 		      "Use durable memory anchors: spoken names, places, organizations, pets, specific objects, and short event phrases. "
 		      + LabelPromptBoundsInstruction ("audio")
@@ -295,7 +299,8 @@ BuildLabelRefinementImagePrompt (
       "You are refining labels for one memory graph association from image evidence. "
 	      "Keep correct current labels, remove unsupported or generic labels, "
 	      "and add missing concrete labels visible in the image. "
-		      "Return only a single JSON object with keys \"labels\", \"relations\", and optional \"facts\". "
+		      "Return only a single JSON object with keys \"labels\", \"relations\", and \"facts\". "
+      "Always include all three keys; \"relations\" and \"facts\" must be empty arrays when the evidence states none. "
 		      "\"labels\" must be the final replacement set of non-empty visible source spans. "
 		      "Use durable memory anchors: visible people, places, organizations, pets, specific objects, and short event phrases. "
 		      + LabelPromptBoundsInstruction ("image evidence")

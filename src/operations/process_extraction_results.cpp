@@ -87,7 +87,7 @@ const nlohmann::json kExtractionSchema = nlohmann::json::parse (R"({
       }
     }
   },
-  "required": ["labels"]
+  "required": ["labels", "relations", "facts"]
 })");
 
 bool
@@ -795,8 +795,9 @@ OnlySourceSpanStopwordsBetween (const std::vector<SourceSpanToken> &tokens,
 }
 
 std::vector<SourceSpanToken>
-TokenizeSourceSpans (const std::string &text)
+TokenizeSourceSpans (const std::string &raw_text)
 {
+  const std::string text = NormalizeApostrophes (raw_text);
   std::vector<SourceSpanToken> tokens;
   std::string current;
   bool next_boundary_before = true;
