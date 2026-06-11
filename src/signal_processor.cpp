@@ -1022,13 +1022,14 @@ LoadWorkingMemory (Store &store, ProcessorContext &ctx,
       const double strength_floor = core::WMStrengthFloor (
           cfg.focus, cfg.sensitivity, cfg.stability);
 
-      // Load from MEMORIES table with kind='WORKING' and end_ts IS NULL (active)
+      // Load active slots for both WM partitions: kind='WORKING' is the
+      // associative slice, kind='WORKING_RECENT' is the FIFO recent slice.
       auto rows = store.Execute (
           "SELECT memory_id, embedding_id, source_id, strength, last_access, "
           "       n_signals, s_max, s_avg, s_emotion_max, s_arousal_avg, "
-          "       drift_mag, modality, start_ts "
+          "       drift_mag, modality, start_ts, kind "
           "FROM memories "
-          "WHERE kind = 'WORKING' AND end_ts IS NULL "
+          "WHERE kind IN ('WORKING', 'WORKING_RECENT') AND end_ts IS NULL "
           "ORDER BY start_ts ASC");
 
       int pos = 0;
@@ -1159,7 +1160,21 @@ LoadWorkingMemory (Store &store, ProcessorContext &ctx,
               slot.signal_records.push_back (std::move (rec));
             }
 
-          ctx.wm_slots.push_back (std::move (slot));
+          if (ExtractString (row, "kind", "WORKING") == "WORKING_RECENT")
+            {
+              ctx.wm_recent_slots.push_back (std::move (slot));
+            }
+          else
+            {
+              ctx.wm_slots.push_back (std::move (slot));
+            }
+        }
+
+      const int recent_capacity = std::max (
+          1, core::WMRecentCapacity (cfg.sensitivity, cfg.focus));
+      while (static_cast<int> (ctx.wm_recent_slots.size ()) > recent_capacity)
+        {
+          ctx.wm_recent_slots.pop_front ();
         }
     }
   catch (const std::exception &e)
@@ -1904,25 +1919,32 @@ SignalProcessor::PersistWorkingMemory (Transaction &tx)
                                 context_->last_signal_timestamp)
                           : wall_now_ms;
 
-  // Close any stale WM rows not represented by active slots.
+  // Close any stale WM rows (either partition) not represented by active
+  // slots.
   std::vector<long long> active_ids;
-  active_ids.reserve (context_->wm_slots.size ());
-  for (const auto &slot : context_->wm_slots)
-    {
-      if (slot.strength <= 0.0 || slot.embedding.size () == 0)
-        {
-          continue;
-        }
-      if (slot.memory_id > 0)
-        {
-          active_ids.push_back (slot.memory_id);
-        }
-    }
+  active_ids.reserve (context_->wm_slots.size ()
+                      + context_->wm_recent_slots.size ());
+  auto collect_active = [&active_ids] (const auto &slots) {
+    for (const auto &slot : slots)
+      {
+        if (slot.strength <= 0.0 || slot.embedding.size () == 0)
+          {
+            continue;
+          }
+        if (slot.memory_id > 0)
+          {
+            active_ids.push_back (slot.memory_id);
+          }
+      }
+  };
+  collect_active (context_->wm_slots);
+  collect_active (context_->wm_recent_slots);
 
   if (active_ids.empty ())
     {
       tx.Execute (
-          "UPDATE memories SET end_ts = ? WHERE kind = 'WORKING' AND end_ts IS NULL",
+          "UPDATE memories SET end_ts = ? "
+          "WHERE kind IN ('WORKING', 'WORKING_RECENT') AND end_ts IS NULL",
           { now_ms });
     }
   else
@@ -1939,7 +1961,7 @@ SignalProcessor::PersistWorkingMemory (Transaction &tx)
         }
       std::string query
           = "UPDATE memories SET end_ts = ? "
-            "WHERE kind = 'WORKING' AND end_ts IS NULL "
+            "WHERE kind IN ('WORKING', 'WORKING_RECENT') AND end_ts IS NULL "
             "AND memory_id NOT IN ("
             + placeholders + ")";
       std::vector<std::any> params;
@@ -1957,19 +1979,19 @@ SignalProcessor::PersistWorkingMemory (Transaction &tx)
   const double working_stability = core::MemoryInitialStabilityPolicy (
       config_.focus, config_.sensitivity, config_.stability);
 
-  // Upsert current slots as MEMORIES with kind='WORKING'
-  for (auto &slot : context_->wm_slots)
-    {
+  // Upsert current slots as MEMORIES: the associative slice persists as
+  // kind='WORKING', the recent FIFO slice as kind='WORKING_RECENT'.
+  auto persist_slot = [&] (auto &slot, const std::string &kind) {
       std::string failure_stage = "slot_precheck";
       if (slot.strength <= 0.0)
         {
           slot.memory_id = 0;
-          continue;
+          return;
         }
       if (slot.embedding.size () == 0)
         {
           slot.memory_id = 0;
-          continue;
+          return;
         }
 
       try
@@ -1993,7 +2015,7 @@ SignalProcessor::PersistWorkingMemory (Transaction &tx)
               = emb_rows.empty () ? 0 : ExtractInt64 (emb_rows[0], "id", 0);
           if (embedding_id == 0)
             {
-              continue;
+              return;
             }
 
           long long memory_id = slot.memory_id;
@@ -2007,14 +2029,14 @@ SignalProcessor::PersistWorkingMemory (Transaction &tx)
                   "s_arousal_avg = ?, drift_mag = ?, strength = ?, "
                   "source_reliability = ?, stability = ?, "
                   "last_access = ?, end_ts = NULL "
-                  "WHERE memory_id = ? AND kind = 'WORKING'",
+                  "WHERE memory_id = ? AND kind = ?",
                   { embedding_id,
                     slot.source_id.empty () ? std::string ("unknown")
                                             : slot.source_id,
                     slot.modality, slot.start_ts, slot.n_signals, slot.s_max,
                     slot.s_avg, slot.s_emotion_max, slot.s_arousal_avg,
                     slot.drift_acc, slot.strength, working_source_reliability,
-                    working_stability, ts_ms, memory_id });
+                    working_stability, ts_ms, memory_id, kind });
             }
           else
             {
@@ -2025,10 +2047,11 @@ SignalProcessor::PersistWorkingMemory (Transaction &tx)
                   " s_max, s_avg, s_emotion_max, s_arousal_avg, drift_mag, "
                   " strength, source_reliability, stability, last_access, "
                   " created_at) "
-                  "VALUES (?, ?, 'WORKING', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                  "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                   { embedding_id,
                     slot.source_id.empty () ? std::string ("unknown")
                                             : slot.source_id,
+                    kind,
                     slot.modality, slot.start_ts, slot.n_signals, slot.s_max,
                     slot.s_avg, slot.s_emotion_max, slot.s_arousal_avg,
                     slot.drift_acc, slot.strength, working_source_reliability,
@@ -2039,7 +2062,7 @@ SignalProcessor::PersistWorkingMemory (Transaction &tx)
                   = mem_rows.empty () ? 0 : ExtractInt64 (mem_rows[0], "id", 0);
               if (memory_id == 0)
                 {
-                  continue;
+                  return;
                 }
               slot.memory_id = memory_id;
             }
@@ -2115,8 +2138,17 @@ SignalProcessor::PersistWorkingMemory (Transaction &tx)
                     "signal_record_count",
                     static_cast<std::int64_t> (slot.signal_records.size ())),
                 telemetry::Attribute::String ("error", e.what ()) });
-          continue;
+          return;
         }
+  };
+
+  for (auto &slot : context_->wm_slots)
+    {
+      persist_slot (slot, "WORKING");
+    }
+  for (auto &slot : context_->wm_recent_slots)
+    {
+      persist_slot (slot, "WORKING_RECENT");
     }
 }
 

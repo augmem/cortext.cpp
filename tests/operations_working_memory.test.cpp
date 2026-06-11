@@ -682,7 +682,7 @@ TEST_CASE ("Alg24 eviction prioritizes weak old slots over strong recent ones",
   // Fill the remaining capacity with strong, recent fillers so the new
   // signal forces an eviction. Fillers sit in the emb[0]/emb[1] plane:
   // orthogonal to the signal and below the 0.9 component checks.
-  const int capacity = core::WMBaseCapacity (cfg.sensitivity, cfg.focus);
+  const int capacity = core::WMAssociativeCapacity (cfg.sensitivity, cfg.focus);
   for (int i = static_cast<int> (pctx.wm_slots.size ()); i < capacity; ++i)
     {
       ProcessorContext::WMSlot filler;
@@ -787,7 +787,7 @@ TEST_CASE ("Alg24 high-T increases slot dedication resistance to eviction",
 
     // Fill to capacity with strong, recent fillers (orthogonal to signal)
     // so the new signal forces an eviction among the two equal slots.
-    const int capacity = core::WMBaseCapacity (cfg.sensitivity, cfg.focus);
+    const int capacity = core::WMAssociativeCapacity (cfg.sensitivity, cfg.focus);
     for (int i = static_cast<int> (pctx.wm_slots.size ()); i < capacity; ++i)
       {
         ProcessorContext::WMSlot filler;
@@ -845,7 +845,7 @@ TEST_CASE ("Alg24 high-T increases slot dedication resistance to eviction",
 
     // Fill to capacity with strong, recent fillers (orthogonal to signal)
     // so the new signal forces an eviction among the two equal slots.
-    const int capacity = core::WMBaseCapacity (cfg.sensitivity, cfg.focus);
+    const int capacity = core::WMAssociativeCapacity (cfg.sensitivity, cfg.focus);
     for (int i = static_cast<int> (pctx.wm_slots.size ()); i < capacity; ++i)
       {
         ProcessorContext::WMSlot filler;
@@ -920,7 +920,7 @@ TEST_CASE ("Alg24 recent slots resist eviction regardless of strength",
 
   // Fill to capacity with strong, recent fillers (orthogonal to signal,
   // components below the 0.9 survivor checks) so an eviction is forced.
-  const int capacity = core::WMBaseCapacity (cfg.sensitivity, cfg.focus);
+  const int capacity = core::WMAssociativeCapacity (cfg.sensitivity, cfg.focus);
   for (int i = static_cast<int> (pctx.wm_slots.size ()); i < capacity; ++i)
     {
       ProcessorContext::WMSlot filler;
@@ -988,4 +988,79 @@ TEST_CASE ("Alg24 recent slots resist eviction regardless of strength",
         }
     }
   REQUIRE (new_slot_added);
+}
+
+TEST_CASE ("WM partition keeps a FIFO recent ring independent of the gate",
+           "[operations][working_memory][partition][recent]")
+{
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  cfg.focus = 0.5;
+  cfg.sensitivity = 0.5;
+  cfg.stability = 0.5;
+
+  ProcessorContext pctx;
+  WorkingMemory op;
+  const int recent_capacity
+      = core::WMRecentCapacity (cfg.sensitivity, cfg.focus);
+  const int assoc_capacity
+      = core::WMAssociativeCapacity (cfg.sensitivity, cfg.focus);
+  REQUIRE (recent_capacity >= 3);
+  REQUIRE (recent_capacity + assoc_capacity
+           == core::WMBaseCapacity (cfg.sensitivity, cfg.focus));
+
+  // Feed more memories than the ring holds; embeddings rotate so each is a
+  // distinct memory.
+  const int total = recent_capacity + 4;
+  for (int i = 0; i < total; ++i)
+    {
+      Signal s;
+      s.embedding = Eigen::VectorXf::Zero (8);
+      s.embedding (i % 8) = 1.0f;
+      s.timestamp = 100000ULL + static_cast<uint64_t> (i) * 10000ULL;
+      s.source_id = "test";
+      OperationContext ctx (s, pctx, cfg, nullptr);
+      SetupMemoryGatingContext (ctx, pctx, s, 0.9);
+      op.Execute (ctx, cortext::testing::GetNullTransaction ());
+    }
+
+  // The ring holds exactly the last recent_capacity memories, oldest first.
+  REQUIRE (static_cast<int> (pctx.wm_recent_slots.size ()) == recent_capacity);
+  for (int i = 0; i < recent_capacity; ++i)
+    {
+      const auto &slot = pctx.wm_recent_slots[static_cast<size_t> (i)];
+      const int expected_index = total - recent_capacity + i;
+      REQUIRE (slot.last_ts
+               == Catch::Approx (
+                      (100000.0 + expected_index * 10000.0) / 1000.0));
+    }
+
+  // The associative slice respects its own capacity.
+  REQUIRE (static_cast<int> (pctx.wm_slots.size ()) <= assoc_capacity);
+}
+
+TEST_CASE ("WM recent ring admits memories the associative gate rejects",
+           "[operations][working_memory][partition][recent]")
+{
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  cfg.focus = 1.0; // strictest gate threshold
+  cfg.sensitivity = 1.0;
+  cfg.stability = 0.5;
+
+  ProcessorContext pctx;
+  WorkingMemory op;
+
+  Signal s;
+  s.embedding = Eigen::VectorXf::Constant (4, 1.0f);
+  s.timestamp = 100000;
+  s.source_id = "test";
+  OperationContext ctx (s, pctx, cfg, nullptr);
+  // Worthless memory: zero window score, zero relevance.
+  SetupMemoryGatingContext (ctx, pctx, s, 0.0, 0.0);
+  op.Execute (ctx, cortext::testing::GetNullTransaction ());
+
+  // The gate may reject the associative insert, but continuity is
+  // structural: the memory is in the recent ring regardless.
+  REQUIRE (pctx.wm_recent_slots.size () == 1);
 }

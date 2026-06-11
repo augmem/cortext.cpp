@@ -4072,6 +4072,25 @@ WMBaseCapacity (double S, double F)
   return static_cast<int> (std::round (cap));
 }
 
+// Working memory partitions into [recent | associations]: the recent slice
+// is a pure FIFO of the last N memories (verbatim conversational
+// continuity, no scoring), the associative slice keeps the gated,
+// chunked, salience-evicted slots. Both derive from WMBaseCapacity:
+// recent = max(3, capacity / 2), associations get the remainder. The
+// floor of 3 guarantees minimal turn continuity even at low capacity.
+inline int
+WMRecentCapacity (double S, double F)
+{
+  const int capacity = WMBaseCapacity (S, F);
+  return std::max (3, capacity / 2);
+}
+
+inline int
+WMAssociativeCapacity (double S, double F)
+{
+  return std::max (1, WMBaseCapacity (S, F) - WMRecentCapacity (S, F));
+}
+
 inline double
 WMMaintenanceCostPerSlot (double S)
 {

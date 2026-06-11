@@ -292,10 +292,19 @@ ComputeMniGateDecision::Execute (OperationContext &context, Transaction &tx) con
 
   context.SetInterruptGateHasCandidates (true);
 
-  // Build WM set (used for duplicate suppression and overlap checks)
+  // Build WM set (used for duplicate suppression and overlap checks).
+  // Both partitions count: retrieved candidates duplicating the recent
+  // ring are already in the packet and must be suppressed too.
   std::vector<Eigen::VectorXf> wm_vecs;
-  wm_vecs.reserve (p_ctx.wm_slots.size ());
+  wm_vecs.reserve (p_ctx.wm_slots.size () + p_ctx.wm_recent_slots.size ());
   for (const auto &slot : p_ctx.wm_slots)
+    {
+      if (slot.embedding.size () > 0)
+        {
+          wm_vecs.push_back (slot.embedding);
+        }
+    }
+  for (const auto &slot : p_ctx.wm_recent_slots)
     {
       if (slot.embedding.size () > 0)
         {
