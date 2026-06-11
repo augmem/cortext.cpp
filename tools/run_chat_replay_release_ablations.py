@@ -438,10 +438,14 @@ def build_early_judge_command(
         command_flag_value(bench_cmd, "--max-messages"),
         "--timeline-media-limit",
         command_flag_value(bench_cmd, "--media-limit"),
+        # Arms are first-pass screens whose verdict is the live judge; the
+        # 3-repetition judge runs post hoc on the shortlist. Sparse
+        # milestones cut the benchmark-pause tax (~80s per judged probe)
+        # roughly 3x per arm while keeping the fail-fast gate live.
         "--milestones",
-        args.early_judge_milestones,
+        "4,8,12,16",
         "--periodic-stride",
-        str(args.early_judge_periodic_stride),
+        str(max(args.early_judge_periodic_stride, 3)),
         "--completion-summary",
         str(summary),
         "--poll-seconds",
