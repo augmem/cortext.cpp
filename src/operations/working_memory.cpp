@@ -96,7 +96,7 @@ WorkingMemory::Execute (OperationContext &context, Transaction &tx) const
   // NOTE: We do NOT update last_ts during passive decay - recency should only
   // reflect when a slot was actually accessed (chunked, rehearsed, or inserted).
   const double cost_per_slot
-      = core::WMMaintenanceCostPerSlot (cfg.sensitivity);
+      = core::WMMaintenanceCostPerSlot (cfg.sensitivity, cfg.focus);
   // Convert timestamp from milliseconds to seconds for decay calculations
   const double now_s = static_cast<double> (signal.timestamp) / 1000.0;
   for (auto &slot : p_ctx.wm_slots)

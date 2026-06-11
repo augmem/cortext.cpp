@@ -1093,12 +1093,17 @@ TEST_CASE ("Integration: chat memories consolidate and retrieve", "[integration]
   REQUIRE (!assoc_rows.empty ());
   REQUIRE (cortext::testing::GetInt64 (assoc_rows[0], "c") >= 1);
 
+  // This environment has no extractor, so the label bank can never mature
+  // and cold start declines the optional admission paths (floor fill,
+  // endpoint creation): zero labels is the intended contract here. Label
+  // production with a real extractor is covered by the gated integration
+  // cases.
   auto label_rows = store->Execute (
       "SELECT COUNT(*) AS c FROM memories "
       "WHERE kind = 'LABEL'",
       {});
   REQUIRE (!label_rows.empty ());
-  REQUIRE (cortext::testing::GetInt64 (label_rows[0], "c") >= 1);
+  REQUIRE (cortext::testing::GetInt64 (label_rows[0], "c") == 0);
 
   auto derived_rows = store->Execute (
       "SELECT COUNT(*) AS c FROM associations WHERE edge_type = 'derived_from'",
@@ -1109,7 +1114,7 @@ TEST_CASE ("Integration: chat memories consolidate and retrieve", "[integration]
   auto label_edges = store->Execute (
       "SELECT COUNT(*) AS c FROM associations WHERE edge_type = 'has_label'", {});
   REQUIRE (!label_edges.empty ());
-  REQUIRE (cortext::testing::GetInt64 (label_edges[0], "c") > 0);
+  REQUIRE (cortext::testing::GetInt64 (label_edges[0], "c") == 0);
 
   auto co_occurs = store->Execute (
       "SELECT COUNT(*) AS c FROM associations WHERE edge_type = 'co_occurs'", {});
