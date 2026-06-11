@@ -1,5 +1,7 @@
 #include "cortext/internal/cancellation.hpp"
 #include "cortext/operations/consolidation_summarize.hpp"
+#include <limits>
+#include <cstdint>
 
 #include "cortext/core/algorithms.hpp"
 #include "cortext/core/knobs.hpp"
@@ -865,7 +867,10 @@ ConsolidationSummarize::Execute (OperationContext &context, Transaction &tx) con
 
   const auto eviction_override = eviction::GetEvictionAblationOverride ();
   const auto eviction_frontier = eviction_policy::ResolveEvictionFrontier (
-      tx, cfg.stability, static_cast<long long> (p_ctx.last_consolidation_ts),
+      tx, cfg.stability, static_cast<long long> (std::min<std::uint64_t> (
+          p_ctx.last_consolidation_ts,
+          static_cast<std::uint64_t> (
+              std::numeric_limits<long long>::max ()))),
       eviction_override);
   const bool storage_compression_allowed
       = eviction_frontier.storage_gate_active
