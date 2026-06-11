@@ -90,7 +90,6 @@ add_executable(cortext_tests
   # Extractor and Summarizer tests
   gemma_extractor.test.cpp
   gemma_summarizer.test.cpp
-  json_schema_constraint.test.cpp
   deep_llm_factory.test.cpp
   # Phase 5: Testing and Validation
   formula_validation.test.cpp
@@ -130,6 +129,7 @@ target_compile_definitions(cortext_tests PRIVATE CORTEXT_TESTING=1)
 target_include_directories(cortext_tests PRIVATE ${CMAKE_SOURCE_DIR}/third_party/planum.cpp/include)
 
 if(NOT CORTEXT_DISABLE_LITERT)
+  target_sources(cortext_tests PRIVATE json_schema_constraint.test.cpp)
   target_include_directories(cortext_tests PRIVATE ${LITERT_INSTALL_DIR}/include)
 endif()
 

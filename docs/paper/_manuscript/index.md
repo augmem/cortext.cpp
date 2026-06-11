@@ -3677,6 +3677,130 @@ wall‑clock variance while preserving cadence‑derived timing for boundary
 and interrupt gating. Snapshot configs record the seed and synthetic
 clock parameters.
 
+## ACT-R-Inspired Retrieval Gate Ablations
+
+On **June 11, 2026**, we added a focused real-encoder ablation target
+for the ACT-R-inspired retrieval ideas:
+`examples/benchmark/cortext_actr_retrieval_ablation_bench`. This
+benchmark does not import ACT-R’s production-rule architecture. It tests
+four transplanted scoring ideas in the existing Cortext retrieval
+pipeline: base-level availability, recent retrieval inhibition,
+procedural utility, and partial matching over existing metadata. It also
+tests downstream evidence blending as a rank-preserving
+packet-generation step for near-tied selected candidates. The harness
+encodes all query and memory text through the production AIST path,
+truncates to the same 256-dimensional Matryoshka retrieval view used by
+the SQLite vector schema, and then runs each study with the relevant
+gate off and on. The validation run used:
+
+``` bash
+cmake -S . -B .tmp/actr-ablation-build \
+  -DCMAKE_BUILD_TYPE=Debug \
+  -DCORTEXT_BUILD_EXAMPLES=ON \
+  -DCORTEXT_DISABLE_LITERT=ON
+cmake --build .tmp/actr-ablation-build \
+  --target cortext_actr_retrieval_ablation_bench -j8
+.tmp/actr-ablation-build/examples/benchmark/cortext_actr_retrieval_ablation_bench \
+  --models=models
+```
+
+`CORTEXT_DISABLE_LITERT=ON` was used only to avoid an unrelated local
+LiteRT/protobuf rebuild mismatch; this target exercises AIST text
+encoding, SQLite storage, and graph retrieval, not Gemma extraction or
+summarization. The resolved encoder was `AIST-87M-GGUF` at
+`models/AIST-87M-GGUF/AIST-87M_q8_0.gguf`.
+
+<table style="width:100%;">
+<colgroup>
+<col style="width: 10%" />
+<col style="width: 13%" />
+<col style="width: 13%" />
+<col style="width: 13%" />
+<col style="width: 13%" />
+<col style="width: 13%" />
+<col style="width: 13%" />
+<col style="width: 10%" />
+</colgroup>
+<thead>
+<tr>
+<th>study</th>
+<th style="text-align: right;">target rank off</th>
+<th style="text-align: right;">target rank on</th>
+<th style="text-align: right;">comparison rank off</th>
+<th style="text-align: right;">comparison rank on</th>
+<th style="text-align: right;">target score off</th>
+<th style="text-align: right;">target score on</th>
+<th>decisive enabled term</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>base-level availability</td>
+<td style="text-align: right;">2</td>
+<td style="text-align: right;">1</td>
+<td style="text-align: right;">1</td>
+<td style="text-align: right;">2</td>
+<td style="text-align: right;">0.837739</td>
+<td style="text-align: right;">0.917310</td>
+<td>base-level availability</td>
+</tr>
+<tr>
+<td>recent retrieval inhibition</td>
+<td style="text-align: right;">2</td>
+<td style="text-align: right;">1</td>
+<td style="text-align: right;">1</td>
+<td style="text-align: right;">2</td>
+<td style="text-align: right;">0.766630</td>
+<td style="text-align: right;">0.796289</td>
+<td>recent-inhibition = -0.090426 on the repeated candidate</td>
+</tr>
+<tr>
+<td>procedural utility</td>
+<td style="text-align: right;">2</td>
+<td style="text-align: right;">1</td>
+<td style="text-align: right;">1</td>
+<td style="text-align: right;">2</td>
+<td style="text-align: right;">0.745194</td>
+<td style="text-align: right;">0.941837</td>
+<td>utility = 0.162960</td>
+</tr>
+<tr>
+<td>partial matching</td>
+<td style="text-align: right;">2</td>
+<td style="text-align: right;">1</td>
+<td style="text-align: right;">1</td>
+<td style="text-align: right;">2</td>
+<td style="text-align: right;">0.814634</td>
+<td style="text-align: right;">0.835859</td>
+<td>partial-match penalty = -0.071739 on the near-miss candidate</td>
+</tr>
+<tr>
+<td>evidence blending</td>
+<td style="text-align: right;">1</td>
+<td style="text-align: right;">1</td>
+<td style="text-align: right;">2</td>
+<td style="text-align: right;">2</td>
+<td style="text-align: right;">0.864534</td>
+<td style="text-align: right;">0.864534</td>
+<td>one normalized near-tie packet and one <code>evidence_blend</code>
+reconstruction</td>
+</tr>
+</tbody>
+</table>
+
+All five studies passed (`summary=5/5 passed`). The first four required
+a rank flip under the real encoder rather than merely observing a
+non-zero ledger component. Evidence blending has a different pass
+condition: it must leave the selected ranks and scores unchanged while
+producing a normalized near-tie packet and a constructive-recall
+reconstruction tagged `evidence_blend`. The interpretation is
+deliberately narrow: the scoring mechanisms are promotable only because
+they show causal rank movement in the existing retrieval pipeline under
+the production embedding view, while evidence blending is promotable
+only as a downstream packet-quality mechanism. The activation ledger
+itself is treated as observability and is validated separately by
+rank-preservation/unit-test invariants, not as a quality mechanism.
+
 To quantify consolidation utility, we also track:
 
 -   **retrieval_summary_hit_rate:** share of retrieval turns containing
@@ -41788,6 +41912,48 @@ through hydration, and linked-source hydration from internal routing
 nodes is capped by the F/T-derived compact item limit, so applications
 consume the production-ranked compact LTM surface rather than a wide
 display expansion.
+
+The retrieval debug path now records an ACT-R-inspired activation ledger
+for each ranked candidate without changing the rank expression. The
+ledger partitions the existing score into base-level availability,
+spreading activation, partial-match penalty, recent-inhibition, utility,
+exploration-noise, and total-activation fields; the first
+instrumentation phase maps only existing score terms into those buckets
+and leaves recent-inhibition and exploration-noise at zero. Production
+ordering still uses the same scalar expression as before, while
+telemetry and benchmark debug JSON can inspect why a retrieved candidate
+won without introducing ACT-R chunk structures, production rules, or a
+second retrieval architecture. The same debug path also records rejected
+candidates with their ledger, rejection stage, reason, observed value,
+and threshold, so benchmark probes can distinguish filter exclusions
+from candidates that survived admission but lost final selection. A
+second, opt-in phase gates recent retrieval inhibition behind
+`CORTEXT_ENABLE_RECENT_RETRIEVAL_INHIBITION=1`: when a candidate has
+existing `last_access` metadata older than the current signal timestamp,
+a knob-shaped decaying negative term is written into the ledger’s
+recent-inhibition bucket and included in the same total activation. A
+third, opt-in phase gates ACT-R-style base-level availability behind
+`CORTEXT_ENABLE_BASE_LEVEL_AVAILABILITY=1`: candidates with persisted
+`retrieved_count`, `used_count`, and `last_access` metadata receive a
+bounded, F/S/T-shaped count-saturation and recency contribution inside
+the ledger’s base-level bucket. A fourth, opt-in phase gates metadata
+partial matching behind `CORTEXT_ENABLE_PARTIAL_MATCHING_PENALTY=1`:
+candidates keep their embedding reachability, but contradiction count,
+source mismatch, modality mismatch, and stale fact validity can add a
+bounded negative term to the partial-match bucket. A fifth, opt-in phase
+gates evidence blending behind `CORTEXT_ENABLE_EVIDENCE_BLENDING=1`:
+after primary selection and sorting, near-tied selected candidates
+within an F/S/T-derived activation margin are converted into a weighted
+evidence packet for `constructive_recall_summary` consumers. The packet
+stores member rank, memory id, embedding id, normalized weight, score,
+and activation ledger, and the constructive-recall ledger receives an
+`evidence_blend` reconstruction for the packet anchor when constructive
+recall is enabled. Evidence packets are exported in replay/debug JSON
+and telemetry as packet/member counts, but they do not replace the
+primary ranker and do not add candidates to the retrieved-memory list.
+With all ACT-R behavior flags unset, the new behavior terms remain zero
+except for pre-existing fact stale penalties, evidence packets remain
+empty, and the phase-one ranking-preservation invariant holds.
 
 The live short-term graph memory surface mirrors the same separation
 between proposal and commitment. On ingress, STM is one bounded
