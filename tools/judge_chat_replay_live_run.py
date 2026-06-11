@@ -1798,6 +1798,7 @@ def main() -> int:
                         "--ollama-base-url",
                         "--judge-start-index",
                         "--judge-limit",
+                        "--ollama-keep-alive",
                     ):
                         skip_next = True
                         continue
@@ -1808,6 +1809,8 @@ def main() -> int:
                     "--ollama-base-url", shard_url,
                     "--judge-start-index", str(shard_lo),
                     "--judge-limit", str(shard_hi),
+                    # Dedicated endpoints per shard: keep models resident.
+                    "--ollama-keep-alive", "10m",
                 ]
                 shard_env = dict(os.environ)
                 shard_env["CORTEXT_JUDGE_SHARD_CHILD"] = "1"
