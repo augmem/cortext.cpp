@@ -45,6 +45,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <set>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -908,10 +909,13 @@ HydrateWorkingMemoryFromDB (Store *store, ObjectStore *object_store,
 
   try
     {
-      // Query active WM slots from MEMORIES table with kind='WORKING'
-      // Content blobs are loaded separately via LoadSignalBlobs
+      // Query active slots from both WM partitions. Associative slots
+      // (kind='WORKING') come first, then the recent FIFO slice
+      // (kind='WORKING_RECENT') in chronological order so prompt
+      // reconstruction ends with the turns adjacent to the current input.
+      // Content blobs are loaded separately via LoadSignalBlobs.
       auto rows = store->Execute (
-          "SELECT m.memory_id, m.source_id, m.modality, m.start_ts, "
+          "SELECT m.memory_id, m.source_id, m.modality, m.start_ts, m.kind, "
           "       m.strength, m.last_access, m.n_signals, "
           "       m.s_max, m.s_avg, m.s_arousal_avg, "
           "       m.retrieved_count, m.used_count, "
@@ -923,8 +927,39 @@ HydrateWorkingMemoryFromDB (Store *store, ObjectStore *object_store,
           "          ORDER BY s.serial_position LIMIT 1)"
           "       ) AS signal_mime "
           "FROM memories m "
-          "WHERE m.kind = 'WORKING' AND m.end_ts IS NULL "
-          "ORDER BY m.start_ts ASC");
+          "WHERE m.kind IN ('WORKING', 'WORKING_RECENT') AND m.end_ts IS NULL "
+          "ORDER BY (m.kind = 'WORKING_RECENT') ASC, m.start_ts ASC");
+
+      // A memory accepted into the associative slice is usually also in the
+      // recent ring; the recent copy wins (it carries the chronological
+      // position), so associative rows duplicating a recent (source_id,
+      // start_ts) pair are dropped.
+      std::set<std::pair<std::string, long long>> recent_keys;
+      for (const auto &row : rows)
+        {
+          auto kind_it = row.find ("kind");
+          if (kind_it != row.end () && kind_it->second.has_value ()
+              && kind_it->second.type () == typeid (std::string)
+              && std::any_cast<std::string> (kind_it->second)
+                     == "WORKING_RECENT")
+            {
+              std::string source;
+              auto src_it = row.find ("source_id");
+              if (src_it != row.end () && src_it->second.has_value ()
+                  && src_it->second.type () == typeid (std::string))
+                {
+                  source = std::any_cast<std::string> (src_it->second);
+                }
+              long long start_ts = 0;
+              auto ts_it = row.find ("start_ts");
+              if (ts_it != row.end () && ts_it->second.has_value ()
+                  && ts_it->second.type () == typeid (long long))
+                {
+                  start_ts = std::any_cast<long long> (ts_it->second);
+                }
+              recent_keys.emplace (std::move (source), start_ts);
+            }
+        }
 
       for (const auto &row : rows)
         {
@@ -969,6 +1004,11 @@ HydrateWorkingMemoryFromDB (Store *store, ObjectStore *object_store,
           // Populate Memory struct from WM slot row
           m.id = get_ll ("memory_id");
           m.source_id = get_s ("source_id");
+          if (get_s ("kind") == "WORKING"
+              && recent_keys.count ({ m.source_id, get_ll ("start_ts") }) > 0)
+            {
+              continue; // recent copy of this memory wins
+            }
           m.modality = get_s ("modality");
           m.mimetype = get_s ("signal_mime");
           // Preserve conversational/order semantics using the slot start time.
