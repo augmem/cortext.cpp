@@ -1,6 +1,7 @@
 #pragma once
 
 #include "cortext/processor/operation.hpp"
+#include "cortext/processor/contract_tags.hpp"
 
 namespace cortext::operations
 {
@@ -24,7 +25,8 @@ namespace cortext::operations
 /// - label memories populated
 /// - associations populated
 /// - pending_extraction_results cleared
-class ProcessExtractionResults : public IOperation
+class ProcessExtractionResults
+    : public Operation<Requires<tags::ExtractionRequests>, Satisfies<> >
 {
 public:
   void Execute (OperationContext &context, Transaction &tx) const override;

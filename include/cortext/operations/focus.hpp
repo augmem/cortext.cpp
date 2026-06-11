@@ -1,6 +1,7 @@
 #pragma once
 
 #include "cortext/processor/operation.hpp"
+#include "cortext/processor/contract_tags.hpp"
 
 namespace cortext::operations
 {
@@ -8,7 +9,8 @@ namespace cortext::operations
 /// @brief Implements Algorithm 1: Initializes the focus-related priors.
 ///
 /// This operation should typically be run once at the beginning of a session.
-class InitializeFocusPriors : public IOperation
+class InitializeFocusPriors
+    : public Operation<Requires<>, Satisfies<> >
 {
 public:
   /// @brief Calculates and sets the focus priors in the ProcessorContext.
@@ -19,7 +21,8 @@ public:
 ///
 /// This operation updates the relevance weighting and attention width based
 /// on the incoming signal's relationship to the recent context.
-class UpdateFocus : public IOperation
+class UpdateFocus
+    : public Operation<Requires<>, Satisfies<> >
 {
 public:
   /// @brief Executes the dynamic focus update logic.

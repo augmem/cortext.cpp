@@ -1,6 +1,7 @@
 #pragma once
 
 #include "cortext/processor/operation.hpp"
+#include "cortext/processor/contract_tags.hpp"
 
 namespace cortext::operations
 {
@@ -12,7 +13,8 @@ namespace cortext::operations
 /// represents the average primacy/recency boost across used memories in
 /// this signal. The multiplier is stored in OperationContext and is
 /// ephemeral (not persisted).
-class ApplySerialPositionMultiplier : public IOperation
+class ApplySerialPositionMultiplier
+    : public Operation<Requires<tags::MemoryUsageEvents, tags::MetricValues, tags::SerialPositionPolicy>, Satisfies<tags::SerialPositionMultiplier> >
 {
 public:
   void Execute (OperationContext &context, Transaction &tx) const override;

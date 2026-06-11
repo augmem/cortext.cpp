@@ -1,6 +1,7 @@
 #pragma once
 
 #include "cortext/processor/operation.hpp"
+#include "cortext/processor/contract_tags.hpp"
 
 namespace cortext::operations
 {
@@ -32,7 +33,8 @@ struct ConsolidationClusterParams
 ///
 /// Output:
 /// - context.SetConsolidationClusters(clusters) for downstream operations
-class ConsolidationCluster : public IOperation
+class ConsolidationCluster
+    : public Operation<Requires<tags::ConsolidationShouldStart, tags::ConsolidationCandidates>, Satisfies<tags::ConsolidationClusters> >
 {
 public:
   void Execute (OperationContext &context, Transaction &tx) const override;

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "cortext/processor/operation.hpp"
+#include "cortext/processor/contract_tags.hpp"
 
 namespace cortext::operations
 {
@@ -10,7 +11,8 @@ namespace cortext::operations
 ///
 /// This operation dynamically instantiates ScoreConsolidation and
 /// EnqueueExtractionJobs during Execute().
-class ConsolidationGate : public IOperation
+class ConsolidationGate
+    : public Operation<Requires<tags::ConsolidationShouldStart>, Satisfies<> >
 {
 public:
   void Execute (OperationContext &context, Transaction &tx) const override;

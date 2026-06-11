@@ -1,6 +1,7 @@
 #pragma once
 
 #include "cortext/processor/operation.hpp"
+#include "cortext/processor/contract_tags.hpp"
 
 namespace cortext::operations
 {
@@ -20,7 +21,8 @@ namespace cortext::operations
 ///
 /// If write_decision=true but no payload:
 ///   - Logs warning, no storage occurs.
-class MemoryStorage : public IOperation
+class MemoryStorage
+    : public Operation<Requires<tags::AccumulatorWriteDecision, tags::BoundaryDecision, tags::EmotionProbabilities, tags::RepresentativeEmbedding>, Satisfies<tags::StoredEmbeddingId, tags::StoredMemoryId> >
 {
 public:
   void Execute (OperationContext &context, Transaction &tx) const override;

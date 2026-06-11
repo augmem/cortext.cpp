@@ -2,6 +2,7 @@
 #pragma once
 
 #include "cortext/processor/operation.hpp"
+#include "cortext/processor/contract_tags.hpp"
 
 namespace cortext::operations
 {
@@ -25,7 +26,8 @@ namespace cortext::operations
 ///
 /// Output:
 /// - ASSOCIATIONS edges between memories
-class BuildGraphFromConsolidation : public IOperation
+class BuildGraphFromConsolidation
+    : public Operation<Requires<tags::ConsolidationShouldStart>, Satisfies<> >
 {
 public:
   void Execute (OperationContext &context, Transaction &tx) const override;

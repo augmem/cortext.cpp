@@ -2,6 +2,7 @@
 #pragma once
 
 #include "cortext/processor/operation.hpp"
+#include "cortext/processor/contract_tags.hpp"
 
 namespace cortext::operations
 {
@@ -11,7 +12,8 @@ namespace cortext::operations
 /// Applies per-memory contextual gain feedback to adjust focus-derived
 /// parameters. Positive contextual gain increases relevance weighting and
 /// narrows attention width; non-positive gain widens attention width.
-class ApplyFocusFeedback : public IOperation
+class ApplyFocusFeedback
+    : public Operation<Requires<tags::AccumulatorWindowState, tags::MemoryUsageEvents>, Satisfies<> >
 {
 public:
   void Execute (OperationContext &context, Transaction &tx) const override;

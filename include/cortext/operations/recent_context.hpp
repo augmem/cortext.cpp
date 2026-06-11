@@ -1,6 +1,7 @@
 #pragma once
 
 #include "cortext/processor/operation.hpp"
+#include "cortext/processor/contract_tags.hpp"
 
 namespace cortext::operations
 {
@@ -9,7 +10,8 @@ namespace cortext::operations
 ///
 /// This aligns with Appendix D step 2 (update buffers) by appending x_t and
 /// trimming to n_ctx(T) + k_ctx(T).
-class UpdateRecentContext : public IOperation
+class UpdateRecentContext
+    : public Operation<Requires<>, Satisfies<> >
 {
 public:
   void Execute (OperationContext &context, Transaction &tx) const override;

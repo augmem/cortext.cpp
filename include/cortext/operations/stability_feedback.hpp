@@ -2,6 +2,7 @@
 #pragma once
 
 #include "cortext/processor/operation.hpp"
+#include "cortext/processor/contract_tags.hpp"
 
 namespace cortext::operations
 {
@@ -12,7 +13,8 @@ namespace cortext::operations
 /// stability of used memories and modulate the half-life target accordingly.
 /// This operation updates ProcessorContext.half_life via EWMA toward a target
 /// derived from BaseHalfLifePrior(T) and the aggregated stability adjustment.
-class ApplyStabilityFeedback : public IOperation
+class ApplyStabilityFeedback
+    : public Operation<Requires<tags::MemoryUsageEvents>, Satisfies<tags::DeltaHalfLifeAdjustment> >
 {
 public:
   void Execute (OperationContext &context, Transaction &tx) const override;

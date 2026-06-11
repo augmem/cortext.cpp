@@ -1,6 +1,7 @@
 #pragma once
 
 #include "cortext/processor/operation.hpp"
+#include "cortext/processor/contract_tags.hpp"
 
 namespace cortext::operations
 {
@@ -11,7 +12,8 @@ namespace cortext::operations
 /// database already has the current label bank imported, this operation only
 /// rebuilds the in-memory label caches. Otherwise it imports labels from a
 /// prebuilt SQLite label bank or falls back to the JSONL label bank manifest.
-class LoadLabelBank : public IOperation
+class LoadLabelBank
+    : public Operation<Requires<>, Satisfies<> >
 {
 public:
   void Execute (OperationContext &context, Transaction &tx) const override;

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "cortext/processor/operation.hpp"
+#include "cortext/processor/contract_tags.hpp"
 
 namespace cortext::operations
 {
@@ -10,7 +11,8 @@ namespace cortext::operations
 /// Computes normalized entropy of a softmax over kNN cosine similarities
 /// between the current signal embedding and the recent context embeddings.
 /// Result is written as metric "focus_spread" in [0,1].
-class ComputeFocusSpread : public IOperation
+class ComputeFocusSpread
+    : public Operation<Requires<>, Satisfies<tags::MetricValues> >
 {
 public:
   void Execute (OperationContext &context, Transaction &tx) const override;

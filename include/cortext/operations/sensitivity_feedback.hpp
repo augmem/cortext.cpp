@@ -1,6 +1,7 @@
 #pragma once
 
 #include "cortext/processor/operation.hpp"
+#include "cortext/processor/contract_tags.hpp"
 
 namespace cortext::operations
 {
@@ -9,7 +10,8 @@ namespace cortext::operations
 ///
 /// Applies per-memory feedback to adjust the novelty weight based on
 /// novelty reward, contextual gain, and redundancy (fallback 0).
-class ApplySensitivityFeedback : public IOperation
+class ApplySensitivityFeedback
+    : public Operation<Requires<tags::MemoryUsageEvents, tags::RetrievedMemoryEmbeddings>, Satisfies<> >
 {
 public:
   void Execute (OperationContext &context, Transaction &tx) const override;

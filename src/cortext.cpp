@@ -1118,12 +1118,27 @@ BuildPipelineRoot (bool probe_mode)
       BuildGraphFromConsolidation, PropagateEmotionalCascade,
       ApplyMetaLearning>;
 
+  using ProbeRoot = OperationSet<CoreStage, RetrievalStage>;
+  using FullRoot
+      = OperationSet<CoreStage, StorageStage, RetrievalStage, FeedbackStage>;
+
+  // Every operation declares its Requires/Satisfies contract; the chain
+  // aggregation proves at compile time that both pipeline variants are
+  // self-contained (no operation consumes a per-signal value that no
+  // earlier operation produced). On failure, inspect the offending root's
+  // Input alias: it lists the unsatisfied tags.
+  static_assert (FullRoot::kContractsComplete,
+                 "every pipeline operation must declare its contract");
+  static_assert (IsSelfContained<ProbeRoot>,
+                 "probe pipeline consumes a value no operation produces");
+  static_assert (IsSelfContained<FullRoot>,
+                 "full pipeline consumes a value no operation produces");
+
   if (probe_mode)
     {
-      return std::make_unique<OperationSet<CoreStage, RetrievalStage> > ();
+      return std::make_unique<ProbeRoot> ();
     }
-  return std::make_unique<OperationSet<CoreStage, StorageStage,
-                                       RetrievalStage, FeedbackStage> > ();
+  return std::make_unique<FullRoot> ();
 }
 
 namespace

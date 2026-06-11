@@ -2,6 +2,7 @@
 #pragma once
 
 #include "cortext/processor/operation.hpp"
+#include "cortext/processor/contract_tags.hpp"
 
 namespace cortext::operations
 {
@@ -32,7 +33,8 @@ struct EmotionCascadeParams
 ///
 /// Higher Sensitivity (S) increases cascade radius (more hops) and slows
 /// decay (emotional influence persists longer through the graph).
-class PropagateEmotionalCascade : public IOperation
+class PropagateEmotionalCascade
+    : public Operation<Requires<>, Satisfies<> >
 {
 public:
   void Execute (OperationContext &context, Transaction &tx) const override;

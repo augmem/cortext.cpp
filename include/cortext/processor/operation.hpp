@@ -47,15 +47,19 @@ struct Satisfies
 
 /// @brief Contract-declaring base for operations.
 ///
-/// Operations migrate from raw IOperation to this base as their contracts
-/// are audited, e.g.:
+/// Every pipeline operation declares its per-signal dataflow contract,
+/// e.g.:
 ///
 ///   class ComputeCompositeScore
-///       : public Operation<Requires<Metrics, Neuromodulators>,
-///                          Satisfies<CompositeScore>>
+///       : public Operation<Requires<tags::MetricValues>,
+///                          Satisfies<tags::CompositeScore>>
 ///
-/// The construction-time validator is not implemented yet; until it lands
-/// this base only records the contract types.
+/// Tags live in cortext/processor/contract_tags.hpp. Validation happens at
+/// compile time: OperationSet aggregates member contracts in sequence
+/// (operation_set.hpp), and the pipeline build site static_asserts that
+/// both pipeline variants are self-contained - an operation consuming a
+/// value no earlier operation produces fails the build, with the missing
+/// tags listed in the set's Input alias.
 template <typename TRequires, typename TSatisfies>
 class Operation : public IOperation
 {

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "cortext/processor/operation.hpp"
+#include "cortext/processor/contract_tags.hpp"
 
 namespace cortext::operations
 {
@@ -12,7 +13,8 @@ namespace cortext::operations
  * update s_sum, s_max, and e_peak, and patches the latest signal record.
  * This keeps decisions grounded on the current unflushed signal group.
  */
-class UpdateAccumulatorScores : public IOperation
+class UpdateAccumulatorScores
+    : public Operation<Requires<tags::CompositeScore>, Satisfies<> >
 {
 public:
   void Execute (OperationContext &context, Transaction &tx) const override;

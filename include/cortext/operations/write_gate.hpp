@@ -1,6 +1,7 @@
 #pragma once
 
 #include "cortext/processor/operation.hpp"
+#include "cortext/processor/contract_tags.hpp"
 
 namespace cortext::operations
 {
@@ -28,7 +29,8 @@ namespace cortext::operations
  * - CheckSpikeBypass (provides spike_bypass)
  * - UpdateThreshold (provides θ_dynamic)
  */
-class ComputeWriteGate : public IOperation
+class ComputeWriteGate
+    : public Operation<Requires<tags::FlushRequired, tags::SpikeBypass, tags::ThresholdState>, Satisfies<tags::AccumulatorWriteDecision, tags::RepresentativeEmbedding, tags::WindowScore, tags::WriteDecision> >
 {
 public:
   void Execute (OperationContext &context, Transaction &tx) const override;

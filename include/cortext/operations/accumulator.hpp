@@ -1,6 +1,7 @@
 #pragma once
 
 #include "cortext/processor/operation.hpp"
+#include "cortext/processor/contract_tags.hpp"
 
 namespace cortext::operations
 {
@@ -18,7 +19,8 @@ namespace cortext::operations
  * Must run AFTER:
  * - UpdateEmbeddingPredictionError (provides drift_mag in context)
  */
-class UpdateAccumulator : public IOperation
+class UpdateAccumulator
+    : public Operation<Requires<tags::AccumulatorWindowState>, Satisfies<tags::WriteExclusionTs, tags::InterruptAborted> >
 {
 public:
   void Execute (OperationContext &context, Transaction &tx) const override;

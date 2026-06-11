@@ -1,6 +1,7 @@
 #pragma once
 
 #include "cortext/processor/operation.hpp"
+#include "cortext/processor/contract_tags.hpp"
 
 namespace cortext::operations
 {
@@ -24,7 +25,8 @@ namespace cortext::operations
  * Must run AFTER:
  * - ComputeCoherence (provides d_step, coherence)
  */
-class DetectBoundary : public IOperation
+class DetectBoundary
+    : public Operation<Requires<tags::AccumulatorWindowState, tags::MetricValues>, Satisfies<tags::BoundaryDecision, tags::FlushRequired> >
 {
 public:
   void Execute (OperationContext &context, Transaction &tx) const override;
