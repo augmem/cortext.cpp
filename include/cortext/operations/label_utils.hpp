@@ -8,9 +8,37 @@
 namespace cortext::operations
 {
 
+// Smart single quotes (U+2018/U+2019) are apostrophes in chat corpora; the
+// byte-wise tokenizers below would otherwise split "aren’t" into "aren" + "t"
+// and emit truncated label surfaces.
 inline std::string
-TrimLabel (const std::string &label)
+NormalizeApostrophes (const std::string &text)
 {
+  std::string out;
+  out.reserve (text.size ());
+  for (size_t i = 0; i < text.size (); ++i)
+    {
+      if (i + 2 < text.size ()
+          && static_cast<unsigned char> (text[i]) == 0xE2
+          && static_cast<unsigned char> (text[i + 1]) == 0x80
+          && (static_cast<unsigned char> (text[i + 2]) == 0x98
+              || static_cast<unsigned char> (text[i + 2]) == 0x99))
+        {
+          out.push_back ('\'');
+          i += 2;
+        }
+      else
+        {
+          out.push_back (text[i]);
+        }
+    }
+  return out;
+}
+
+inline std::string
+TrimLabel (const std::string &raw_label)
+{
+  const std::string label = NormalizeApostrophes (raw_label);
   auto start = label.begin ();
   auto end = label.end ();
   while (start != end && std::isspace (static_cast<unsigned char> (*start)))
@@ -108,19 +136,24 @@ IsDurableLabelCandidate (const std::string &label,
     "those", "through", "to",   "too",    "under", "up",     "very",
     "well",  "when",  "where",  "which",  "while", "who",    "why",
     "with",  "would",
-    // Pronouns and possessives
+    // Pronouns and possessives (incl. indefinite pronouns)
+    "anybody", "anyone", "anything", "everybody", "everyone", "everything",
     "he",    "her",   "hers",   "him",    "his",   "i",      "it",
-    "its",   "me",    "my",     "our",    "ours",  "she",    "their",
+    "its",   "me",    "my",     "nobody", "none",  "nothing", "our",
+    "ours",  "she",   "somebody", "someone", "something", "their",
     "theirs", "them", "they",   "us",     "we",    "what",   "you",
     "your",  "yours",
-    // Auxiliaries and light verbs
+    // Auxiliaries, light verbs, and desiderative semi-modals
     "am",    "are",   "be",     "been",   "being", "came",   "can",
     "come",  "could", "did",    "do",     "does",  "doing",  "done",
     "get",   "gets",
     "getting", "go",  "goes",   "going",  "got",   "had",    "has",
     "have",  "having", "is",    "make",   "makes", "making", "might",
-    "must",  "shall", "should", "turn",   "turned", "turning", "was",
-    "were",  "will",
+    "must",  "need",  "needed", "needing", "needs", "shall", "should",
+    "turn",  "turned", "turning", "want", "wanted", "wanting", "wants",
+    "was",   "were",  "will",
+    // Degree adverbs
+    "quite", "rather", "really",
     // Interjections, acknowledgments, discourse markers
     "ah",    "aha",   "alright", "bye",   "cool",  "er",     "erm",
     "fine",  "good",  "great",  "hello",  "hey",   "hi",     "hmm",
