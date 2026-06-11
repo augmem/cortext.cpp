@@ -1732,6 +1732,94 @@ def main() -> int:
     )
 
     summary = json.loads(args.summary.read_text())
+
+    # Opportunistic judge sharding: when the run directory provides
+    # judge_shards.json ({"base_urls": ["http://127.0.0.1:11434", ...]}),
+    # a full-range invocation splits the probe range across the endpoints
+    # by re-invoking itself once per shard, then absorbs the shard
+    # checkpoints through the normal checkpoint path (no re-judging) and
+    # writes the merged artifact itself. Range-limited invocations (the
+    # early judge) and shard children are never re-sharded.
+    shard_config_path = args.out.parent / "judge_shards.json"
+    if (
+        args.judge_provider == "ollama"
+        and args.judge_start_index == 0
+        and args.judge_limit < 0
+        and os.environ.get("CORTEXT_JUDGE_SHARD_CHILD") != "1"
+        and shard_config_path.exists()
+    ):
+        try:
+            shard_urls = [
+                str(u)
+                for u in json.loads(shard_config_path.read_text()).get(
+                    "base_urls", []
+                )
+                if str(u).strip()
+            ]
+        except Exception:
+            shard_urls = []
+        probe_total = len(summary.get("probes") or [])
+        if len(shard_urls) >= 2 and probe_total >= 4:
+            boundary = (probe_total + 1) // 2
+            shard_ranges = [(0, boundary), (boundary, probe_total)]
+            shard_children = []
+            shard_rows_paths = []
+            for shard_index, ((shard_lo, shard_hi), shard_url) in enumerate(
+                zip(shard_ranges, shard_urls)
+            ):
+                shard_out = args.out.with_name(
+                    args.out.stem + f".shard{shard_index}" + args.out.suffix
+                )
+                shard_rows = shard_out.with_name(shard_out.name + ".rows.jsonl")
+                shard_rows_paths.append(shard_rows)
+                shard_cmd = [sys.executable, str(pathlib.Path(__file__).resolve())]
+                skip_next = False
+                for raw_arg in sys.argv[1:]:
+                    if skip_next:
+                        skip_next = False
+                        continue
+                    if raw_arg in (
+                        "--out",
+                        "--checkpoint-rows",
+                        "--ollama-base-url",
+                        "--judge-start-index",
+                        "--judge-limit",
+                    ):
+                        skip_next = True
+                        continue
+                    shard_cmd.append(raw_arg)
+                shard_cmd += [
+                    "--out", str(shard_out),
+                    "--checkpoint-rows", str(shard_rows),
+                    "--ollama-base-url", shard_url,
+                    "--judge-start-index", str(shard_lo),
+                    "--judge-limit", str(shard_hi),
+                ]
+                shard_env = dict(os.environ)
+                shard_env["CORTEXT_JUDGE_SHARD_CHILD"] = "1"
+                print(
+                    f"[judge-shard] shard{shard_index}: probes "
+                    f"[{shard_lo},{shard_hi}) on {shard_url}",
+                    flush=True,
+                )
+                shard_children.append(subprocess.Popen(shard_cmd, env=shard_env))
+            shard_rcs = [child.wait() for child in shard_children]
+            if any(rc != 0 for rc in shard_rcs):
+                raise RuntimeError(f"judge shards failed: rcs={shard_rcs}")
+            merged_rows = args.checkpoint_rows or args.out.with_name(
+                args.out.name + ".rows.jsonl"
+            )
+            merged_rows.parent.mkdir(parents=True, exist_ok=True)
+            with merged_rows.open("w") as merged_file:
+                for rows_path in shard_rows_paths:
+                    if rows_path.exists():
+                        merged_file.write(rows_path.read_text())
+            print(
+                f"[judge-shard] merged shard checkpoints into {merged_rows}; "
+                "aggregating without re-judging",
+                flush=True,
+            )
+
     input_dir = pathlib.Path(summary["input_dir"])
     db_path = args.db or pathlib.Path(summary["db_path"])
     max_messages = int(
