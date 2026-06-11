@@ -185,95 +185,70 @@ std::string
 BuildWorkingMemoryTextPayload (Store &store, const ProcessorContext &p_ctx,
                                int max_slots, int max_chars)
 {
-  if (max_slots <= 0 || max_chars <= 0
-      || (p_ctx.wm_slots.empty () && p_ctx.wm_recent_slots.empty ()))
+  if (max_slots <= 0 || max_chars <= 0 || p_ctx.wm_slots.empty ())
     {
       return {};
     }
 
   std::string out;
   int slots_seen = 0;
-  bool budget_exhausted = false;
-  // Associative slots usually duplicate recent-ring content; the same blob
-  // is appended once.
-  std::set<std::vector<unsigned char>> seen_blobs;
-  auto append_slot_text = [&] (const ProcessorContext::WMSlot &slot) {
-    bool added_slot_text = false;
-    for (auto rec_it = slot.signal_records.rbegin ();
-         rec_it != slot.signal_records.rend (); ++rec_it)
-      {
-        if (rec_it->blob_id.empty ())
-          {
-            continue;
-          }
-        if (!seen_blobs.insert (rec_it->blob_id).second)
-          {
-            continue;
-          }
-        if (!rec_it->modality.empty () && rec_it->modality != "text"
-            && rec_it->mime != "text/plain")
-          {
-            continue;
-          }
-        try
-          {
-            auto rows = store.Execute ("SELECT objstore_get(?1) AS payload",
-                                       { rec_it->blob_id });
-            if (rows.empty () || rows[0].count ("payload") == 0)
-              {
-                continue;
-              }
-            const auto payload = store::BlobFromAny (rows[0].at ("payload"));
-            if (payload.empty ())
-              {
-                continue;
-              }
-            if (!out.empty ())
-              {
-                out.push_back ('\n');
-              }
-            const int remaining = max_chars - static_cast<int> (out.size ());
-            if (remaining <= 0)
-              {
-                budget_exhausted = true;
-                return;
-              }
-            const int take = std::min<int> (
-                remaining, static_cast<int> (payload.size ()));
-            out.append (reinterpret_cast<const char *> (payload.data ()),
-                        static_cast<size_t> (take));
-            added_slot_text = true;
-            if (static_cast<int> (out.size ()) >= max_chars)
-              {
-                budget_exhausted = true;
-                return;
-              }
-          }
-        catch (...)
-          {
-          }
-      }
-    if (added_slot_text)
-      {
-        ++slots_seen;
-      }
-  };
-
-  // The recent FIFO slice carries the newest conversational turns; walk it
-  // newest-first before the associative slots.
-  for (auto slot_it = p_ctx.wm_recent_slots.rbegin ();
-       slot_it != p_ctx.wm_recent_slots.rend () && slots_seen < max_slots
-       && !budget_exhausted;
-       ++slot_it)
-    {
-      append_slot_text (*slot_it);
-    }
   for (auto slot_it = p_ctx.wm_slots.rbegin ();
-       slot_it != p_ctx.wm_slots.rend () && slots_seen < max_slots
-       && !budget_exhausted;
+       slot_it != p_ctx.wm_slots.rend () && slots_seen < max_slots;
        ++slot_it)
     {
-      append_slot_text (*slot_it);
+      bool added_slot_text = false;
+      for (auto rec_it = slot_it->signal_records.rbegin ();
+           rec_it != slot_it->signal_records.rend (); ++rec_it)
+        {
+          if (rec_it->blob_id.empty ())
+            {
+              continue;
+            }
+          if (!rec_it->modality.empty () && rec_it->modality != "text"
+              && rec_it->mime != "text/plain")
+            {
+              continue;
+            }
+          try
+            {
+              auto rows = store.Execute ("SELECT objstore_get(?1) AS payload",
+                                         { rec_it->blob_id });
+              if (rows.empty () || rows[0].count ("payload") == 0)
+                {
+                  continue;
+                }
+              const auto payload = store::BlobFromAny (rows[0].at ("payload"));
+              if (payload.empty ())
+                {
+                  continue;
+                }
+              if (!out.empty ())
+                {
+                  out.push_back ('\n');
+                }
+              const int remaining = max_chars - static_cast<int> (out.size ());
+              if (remaining <= 0)
+                {
+                  return out;
+                }
+              const int take = std::min<int> (
+                  remaining, static_cast<int> (payload.size ()));
+              out.append (reinterpret_cast<const char *> (payload.data ()),
+                          static_cast<size_t> (take));
+              added_slot_text = true;
+              if (static_cast<int> (out.size ()) >= max_chars)
+                {
+                  return out;
+                }
+            }
+          catch (...)
+            {
+            }
+        }
+      if (added_slot_text)
+        {
+          ++slots_seen;
+        }
     }
   return out;
 }

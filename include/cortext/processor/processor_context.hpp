@@ -425,10 +425,6 @@ struct ProcessorContext
     std::vector<SignalRecord> signal_records;  ///< Ordered signal records
   };
   std::vector<WMSlot> wm_slots;
-  /// Recent slice of the working-memory partition: a pure FIFO ring of the
-  /// last N accepted memories (no gate, no chunking, evict oldest). The
-  /// associative slice above keeps the scored admission and eviction.
-  std::deque<WMSlot> wm_recent_slots;
   bool wm_last_accepted = false;
   bool wm_last_chunked = false;
 
