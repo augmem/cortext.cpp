@@ -4,10 +4,13 @@
 #include "cortext/store/store.hpp"
 #include "cortext/processor.hpp"
 #include "cortext/encoder/encoder.hpp"
+#include "cortext/models/aist_gguf_encoder.hpp"
+#include "cortext/models/embedding_model_pin.hpp"
 #include <Eigen/Dense>
 #include <any>
 #include <chrono>
 #include <cstdlib>
+#include <filesystem>
 #include <map>
 #include <memory>
 #include <string>
@@ -226,12 +229,42 @@ SeedSignalV2 (Store &store, long long signal_id, long long embedding_id,
       { signal_id, embedding_id, source_id, timestamp, score, timestamp });
 }
 
+/// @brief Stamp the embedding-model pin the engine will expect.
+///
+/// Fixtures that seed embeddings directly (bypassing the engine) must record
+/// the active encoder's fingerprint, exactly as Cortext::Create does;
+/// otherwise the pin check correctly refuses to start on the seeded store.
+inline void
+StampEmbeddingModelPin (Store &store)
+{
+  namespace fs = std::filesystem;
+  const fs::path models_dir
+      = fs::path (__FILE__).parent_path ().parent_path () / "models";
+  const auto aist = cortext::ResolveAistGgufModelPath (models_dir);
+  if (!aist)
+    {
+      return; // No model on this machine; engine creation fails earlier.
+    }
+  const std::string pin
+      = cortext::models::ComputeEmbeddingModelPin ("AIST-87M-GGUF", *aist,
+                                                   256);
+  store.Execute ("CREATE TABLE IF NOT EXISTS cortext_embedding_model_pin ("
+                 "  id INTEGER PRIMARY KEY CHECK (id = 1),"
+                 "  fingerprint TEXT NOT NULL"
+                 ")",
+                 {});
+  store.Execute ("INSERT OR REPLACE INTO cortext_embedding_model_pin "
+                 "(id, fingerprint) VALUES (1, ?)",
+                 { pin });
+}
+
 /// @brief Initialize the core schema on a store using ApplyMigrations.
 /// This ensures tests use the same schema as production code.
 inline void
 InitializeCoreSchema (Store &store)
 {
   cortext::store::ApplyMigrations (store);
+  StampEmbeddingModelPin (store);
 }
 
 /// @brief A no-op transaction for tests that don't need actual database writes.

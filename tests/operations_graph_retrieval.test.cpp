@@ -1436,6 +1436,14 @@ TEST_CASE ("Procedural proactive retrieval surfaces learned routine memory",
         }
     }
 
+  std::ostringstream ranked_debug;
+  ranked_debug << "min_score=" << procedural_seed_min_score << "\non:\n";
+  for (const auto &candidate : ranked_on)
+    {
+      ranked_debug << "  id=" << candidate.memory_id
+                   << " proc=" << candidate.proc_score << "\n";
+    }
+  INFO (ranked_debug.str ());
   REQUIRE (off_has_procedural_target == false);
   REQUIRE (on_has_procedural_target == true);
   REQUIRE_FALSE (ranked_on.empty ());
