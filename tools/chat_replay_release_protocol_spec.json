@@ -235,6 +235,27 @@
         "CORTEXT_ENABLE_PARTIAL_MATCHING_PENALTY": "1",
         "CORTEXT_ENABLE_EVIDENCE_BLENDING": "1"
       }
+    },
+    {
+      "name": "wm_capacity_10",
+      "daily_consolidation": true,
+      "env": {
+        "CORTEXT_WM_CAPACITY_OVERRIDE": "10"
+      }
+    },
+    {
+      "name": "wm_capacity_14",
+      "daily_consolidation": true,
+      "env": {
+        "CORTEXT_WM_CAPACITY_OVERRIDE": "14"
+      }
+    },
+    {
+      "name": "wm_capacity_21",
+      "daily_consolidation": true,
+      "env": {
+        "CORTEXT_WM_CAPACITY_OVERRIDE": "21"
+      }
     }
   ],
   "cost_metrics": [

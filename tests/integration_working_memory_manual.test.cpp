@@ -265,7 +265,7 @@ public:
                                       cfg.focus, cfg.sensitivity,
                                       cfg.stability));
     const double cost_per_slot
-        = core::WMMaintenanceCostPerSlot (cfg.sensitivity);
+        = core::WMMaintenanceCostPerSlot (cfg.sensitivity, cfg.focus);
     const double raw_cost
         = (cost_per_slot * static_cast<double> (k) + complexity_penalty)
           * capacity_pressure;
@@ -382,7 +382,7 @@ public:
                                       cfg.focus, cfg.sensitivity,
                                       cfg.stability));
     const double cost_per_slot
-        = core::WMMaintenanceCostPerSlot (cfg.sensitivity);
+        = core::WMMaintenanceCostPerSlot (cfg.sensitivity, cfg.focus);
     const double raw_cost
         = (cost_per_slot * static_cast<double> (k) + complexity_penalty)
           * capacity_pressure;

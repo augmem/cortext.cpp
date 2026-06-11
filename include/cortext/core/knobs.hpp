@@ -3,6 +3,7 @@
 #include "cortext/core/algorithms.hpp"
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <utility>
 
 namespace cortext::core
@@ -4065,6 +4066,17 @@ LambdaMood (double delta_seconds, double T)
 inline int
 WMBaseCapacity (double S, double F)
 {
+  // Ablation-arm override (wm_capacity_* arms in
+  // chat_replay_release_protocol_spec.json); cached once per process.
+  static const int kCapacityOverride = [] {
+    const char *value = std::getenv ("CORTEXT_WM_CAPACITY_OVERRIDE");
+    const int parsed = value != nullptr ? std::atoi (value) : 0;
+    return parsed > 0 ? parsed : 0;
+  }();
+  if (kCapacityOverride > 0)
+    {
+      return kCapacityOverride;
+    }
   // base_capacity = round(lerp(8, 6, S) + lerp(-1, 1, F))
   // Miller's 7±2: capacity range [5, 9], 7 at neutral knobs.
   const double cap = Lerp (8.0, 6.0, SensitivityBias (S))
@@ -4073,10 +4085,18 @@ WMBaseCapacity (double S, double F)
 }
 
 inline double
-WMMaintenanceCostPerSlot (double S)
+WMMaintenanceCostPerSlot (double S, double F)
 {
-  // maintenance_cost_per_slot = lerp(0.05, 0.15, S)
-  return Lerp (0.05, 0.15, SensitivityBias (S));
+  // Per-slot maintenance shares a fixed total budget: a FULL working
+  // memory always costs lerp(0.05, 0.15, S) x 7 (the neutral capacity),
+  // regardless of actual capacity. Capacity changes - including the
+  // wm_capacity_* ablation override - therefore do not change gate
+  // strictness; the size arms measure window value, not gate side effects.
+  constexpr double kNeutralCapacity = 7.0;
+  const double per_slot_at_neutral = Lerp (0.05, 0.15, SensitivityBias (S));
+  const int capacity = std::max (1, WMBaseCapacity (S, F));
+  return per_slot_at_neutral * kNeutralCapacity
+         / static_cast<double> (capacity);
 }
 
 inline double

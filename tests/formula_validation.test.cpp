@@ -533,17 +533,34 @@ TEST_CASE ("EmotionalHalfLifeBonus follows spec",
 // 5.1.6 Working Memory Functions
 // =============================================================================
 
-TEST_CASE ("WMMaintenanceCostPerSlot follows spec: lerp(0.05, 0.15, S)",
+TEST_CASE ("WMMaintenanceCostPerSlot keeps the full-WM budget "
+           "capacity-invariant",
            "[formula][knobs][working_memory]")
 {
-  // WMMaintenanceCostPerSlot = lerp(0.05, 0.15, S)
-  REQUIRE (WMMaintenanceCostPerSlot (0.0) == Catch::Approx (0.05));
-  REQUIRE (WMMaintenanceCostPerSlot (1.0) == Catch::Approx (0.15));
-  REQUIRE (WMMaintenanceCostPerSlot (0.5)
+  // Per-slot maintenance shares a fixed total budget: cost-per-slot x
+  // capacity = lerp(0.05, 0.15, S) x 7 (the neutral capacity), so capacity
+  // changes never change gate strictness.
+  for (const double S : { 0.0, 0.3, 0.5, 0.7, 1.0 })
+    {
+      for (const double F : { 0.0, 0.5, 1.0 })
+        {
+          const double total = WMMaintenanceCostPerSlot (S, F)
+                               * static_cast<double> (WMBaseCapacity (S, F));
+          REQUIRE (total
+                   == Catch::Approx (SensitivityExpected (0.05, 0.15, S)
+                                     * 7.0));
+        }
+    }
+
+  // At neutral knobs (capacity exactly 7) the per-slot cost matches the
+  // original spec value lerp(0.05, 0.15, S).
+  REQUIRE (WMBaseCapacity (0.5, 0.5) == 7);
+  REQUIRE (WMMaintenanceCostPerSlot (0.5, 0.5)
            == Catch::Approx (SensitivityExpected (0.05, 0.15, 0.5)));
 
-  // Monotonic
-  REQUIRE (WMMaintenanceCostPerSlot (0.3) < WMMaintenanceCostPerSlot (0.7));
+  // Monotonic in S at fixed capacity.
+  REQUIRE (WMMaintenanceCostPerSlot (0.3, 0.5)
+           < WMMaintenanceCostPerSlot (0.7, 0.5));
 }
 
 TEST_CASE ("WMStrengthFloor derives from F/S/T",

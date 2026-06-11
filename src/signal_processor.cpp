@@ -1018,7 +1018,7 @@ LoadWorkingMemory (Store &store, ProcessorContext &ctx,
   try
     {
       const double cost_per_slot
-          = core::WMMaintenanceCostPerSlot (cfg.sensitivity);
+          = core::WMMaintenanceCostPerSlot (cfg.sensitivity, cfg.focus);
       const double strength_floor = core::WMStrengthFloor (
           cfg.focus, cfg.sensitivity, cfg.stability);
 
@@ -1733,7 +1733,7 @@ SignalProcessor::PersistState (Transaction &tx)
   const std::vector<char> write_rate_blob = SerializeUint64Vector (
       context_->write_rate_window_.GetTimestamps ());
   const double wm_maintenance_cost
-      = core::WMMaintenanceCostPerSlot (config_.sensitivity);
+      = core::WMMaintenanceCostPerSlot (config_.sensitivity, config_.focus);
   const int wm_slot_count
       = static_cast<int> (context_->wm_slots.size ());
 
