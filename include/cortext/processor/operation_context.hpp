@@ -3,10 +3,14 @@
 #include "cortext/operations/extraction.hpp"
 #include "cortext/operations/metrics.hpp"
 #include "cortext/processor.hpp" // For SignalProcessor::Config
+#include "cortext/processor/operation_fork.hpp"
 #include "cortext/processor/processor_context.hpp"
 #include "cortext/signal.hpp"
 #include <Eigen/Dense>
 #include <array>
+#include <deque>
+#include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -77,6 +81,18 @@ public:
   OperationContext (const Signal &signal, ProcessorContext &context,
                     const SignalProcessor::Config &config, Store *store,
                     ObjectTransaction *object_tx);
+
+  /// Safety net for Fork without its Join: branch tasks must never
+  /// outlive the context and transaction they reference. Joins normally
+  /// drain this (the chain contracts make an unjoined fork hard to
+  /// write); blocking here beats a dangling reference.
+  ~OperationContext ()
+  {
+    while (auto fork = PopPendingFork ())
+      {
+        fork->Wait ();
+      }
+  }
 
   // --- Accessors ---
 
@@ -1167,6 +1183,42 @@ public:
     return context_.summarizer;
   }
 
+  // --- Fork/Join state (see processor/operation_fork.hpp) ---
+
+  /// @brief Registers an outstanding Fork. Joins pair FIFO.
+  void
+  PushPendingFork (std::shared_ptr<PendingFork> fork)
+  {
+    pending_forks_.push_back (std::move (fork));
+  }
+
+  /// @brief Takes the oldest outstanding Fork for a Join to wait on.
+  std::shared_ptr<PendingFork>
+  PopPendingFork ()
+  {
+    if (pending_forks_.empty ())
+      {
+        return nullptr;
+      }
+    auto fork = std::move (pending_forks_.front ());
+    pending_forks_.pop_front ();
+    return fork;
+  }
+
+  bool
+  HasPendingForks () const
+  {
+    return !pending_forks_.empty ();
+  }
+
+  /// @brief Mutex serializing Transaction method calls while any Fork is
+  /// outstanding; shared by branch work and main-thread members.
+  std::mutex &
+  ForkTransactionMutex ()
+  {
+    return *fork_tx_mutex_;
+  }
+
 private:
   const Signal &signal_;
   ProcessorContext &context_;
@@ -1175,6 +1227,8 @@ private:
   ObjectTransaction *object_tx_ = nullptr;
   std::string current_operation_type_ = "unknown";
   std::unordered_map<std::string, double> operation_timings_ms_;
+  std::deque<std::shared_ptr<PendingFork> > pending_forks_;
+  std::shared_ptr<std::mutex> fork_tx_mutex_ = std::make_shared<std::mutex> ();
 
   // Typed scratch fields
   std::optional<double> composite_score_;
