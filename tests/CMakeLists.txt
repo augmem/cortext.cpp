@@ -120,11 +120,13 @@ if(EXISTS ${CMAKE_SOURCE_DIR}/models/AIST-87M-GGUF)
     aist_gguf_encoder_integration.test.cpp
     stm_labeling_integration.test.cpp
   )
+  target_compile_definitions(cortext_tests PRIVATE CORTEXT_TESTS_HAVE_AIST_MODEL=1)
 endif()
 
 # Deep-consolidation stack integration needs LiteRT and the Gemma4 model.
 if(NOT CORTEXT_DISABLE_LITERT AND EXISTS ${CMAKE_SOURCE_DIR}/models/gemma4-e2b-litert/gemma-4-E2B-it.litertlm)
   target_sources(cortext_tests PRIVATE deep_llm_factory_integration.test.cpp)
+  target_compile_definitions(cortext_tests PRIVATE CORTEXT_TESTS_HAVE_GEMMA4_LITERT=1)
 endif()
 
 target_link_libraries(cortext_tests PRIVATE cortext Catch2::Catch2WithMain nlohmann_json::nlohmann_json)

@@ -307,10 +307,13 @@ TEST_CASE ("Cortext::Create succeeds even when models dir is missing",
 #endif
 }
 
+// Injected-store construction without local models only exists in
+// CORTEXT_DISABLE_LITERT builds; the case is gated at compile time rather
+// than runtime-skipped.
+#if defined(CORTEXT_DISABLE_LITERT)
 TEST_CASE ("Cortext can initialize with caller supplied store",
            "[cortext][store]")
 {
-#if defined(CORTEXT_DISABLE_LITERT)
   auto unique_store = cortext::SQLiteStore::Create (":memory:");
   auto store = std::shared_ptr<cortext::Store> (std::move (unique_store));
 
@@ -324,11 +327,8 @@ TEST_CASE ("Cortext can initialize with caller supplied store",
       "SELECT name FROM sqlite_master WHERE type='table' AND name='state'",
       {});
   REQUIRE (rows.size () == 1);
-#else
-  SKIP ("Injected-store construction without local models is covered in "
-        "CORTEXT_DISABLE_LITERT builds");
-#endif
 }
+#endif
 
 TEST_CASE ("Cortext C ABI stubs return success", "[cortext][capi][stub]")
 {

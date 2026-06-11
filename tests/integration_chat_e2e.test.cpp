@@ -1444,28 +1444,19 @@ TEST_CASE ("Integration: cancel during deep consolidation aborts without committ
            == 0);
 }
 
+// The scripted-chat cases run against the real model stack; they are gated
+// at configure time on the models directory (and the deep case additionally
+// on LiteRT + Gemma4), never runtime-skipped.
+#if defined(CORTEXT_TESTS_HAVE_AIST_MODEL)
+
 TEST_CASE ("Integration: scripted chat preserves turn-shaped working memory",
            "[integration][e2e][chat][scripted]")
 {
-  namespace fs = std::filesystem;
-
-  if (!fs::exists (RepoModelsDir ()))
-    {
-      SKIP ("repo models directory not present");
-    }
-
   ScopedTempDb temp_db;
   cortext::Cortext::Config cfg;
 
-  std::unique_ptr<cortext::Cortext> cortext_ctx;
-  try
-    {
-      cortext_ctx = cortext::Cortext::Create (cfg, temp_db.path, RepoModelsDir ());
-    }
-  catch (...)
-    {
-      SKIP ("Cortext::Create unavailable in this test environment");
-    }
+  std::unique_ptr<cortext::Cortext> cortext_ctx
+      = cortext::Cortext::Create (cfg, temp_db.path, RepoModelsDir ());
   REQUIRE (cortext_ctx != nullptr);
 
   auto unique_store = SQLiteStore::Create (temp_db.path);
@@ -1511,14 +1502,7 @@ TEST_CASE ("Integration: scripted chat preserves turn-shaped working memory",
 
       if (is_user)
         {
-          try
-            {
-              latest_ctx = cortext_ctx->ProcessTextAt (text, source_id, ts++);
-            }
-          catch (...)
-            {
-              SKIP ("text processing backend unavailable in this test environment");
-            }
+          latest_ctx = cortext_ctx->ProcessTextAt (text, source_id, ts++);
           REQUIRE (latest_ctx.output.stored_embedding_id.has_value ());
 
           const auto prompt = BuildPromptMessages (latest_ctx.working_memory, text);
@@ -1685,26 +1669,12 @@ TEST_CASE (
     "Integration: scripted chat consolidation preserves prompt shape and graph integrity",
     "[integration][e2e][chat][scripted][consolidation]")
 {
-  namespace fs = std::filesystem;
-
-  if (!fs::exists (RepoModelsDir ()))
-    {
-      SKIP ("repo models directory not present");
-    }
-
   ScopedTempDb temp_db;
   cortext::Cortext::Config cfg;
   cfg.stability = 0.0;
 
-  std::unique_ptr<cortext::Cortext> cortext_ctx;
-  try
-    {
-      cortext_ctx = cortext::Cortext::Create (cfg, temp_db.path, RepoModelsDir ());
-    }
-  catch (...)
-    {
-      SKIP ("Cortext::Create unavailable in this test environment");
-    }
+  std::unique_ptr<cortext::Cortext> cortext_ctx
+      = cortext::Cortext::Create (cfg, temp_db.path, RepoModelsDir ());
   REQUIRE (cortext_ctx != nullptr);
 
   auto unique_store = SQLiteStore::Create (temp_db.path);
@@ -1804,14 +1774,7 @@ TEST_CASE (
 
       if (is_user)
         {
-          try
-            {
-              latest_ctx = cortext_ctx->ProcessTextAt (text, source_id, ts++);
-            }
-          catch (...)
-            {
-              SKIP ("text processing backend unavailable in this test environment");
-            }
+          latest_ctx = cortext_ctx->ProcessTextAt (text, source_id, ts++);
           REQUIRE (latest_ctx.output.stored_embedding_id.has_value ());
 
           const auto prompt = BuildPromptMessages (latest_ctx.working_memory, text);
@@ -1871,15 +1834,8 @@ TEST_CASE (
       if (!is_user
           && assistant_turns_seen % kConsolidateEveryAssistantTurns == 0)
         {
-          try
-            {
-              latest_ctx = cortext_ctx->Consolidate (
-                  cortext::ConsolidationMode::Shallow);
-            }
-          catch (...)
-            {
-              SKIP ("consolidation backend unavailable in this test environment");
-            }
+          latest_ctx = cortext_ctx->Consolidate (
+              cortext::ConsolidationMode::Shallow);
           ++consolidation_runs;
 
           const auto prompt_after_consolidation
@@ -1983,18 +1939,13 @@ TEST_CASE (
   REQUIRE (cortext::testing::GetInt64 (invalid_label_edges[0], "c") == 0);
 }
 
+#if defined(CORTEXT_TESTS_HAVE_GEMMA4_LITERT)
 TEST_CASE (
     "Integration: deep consolidation generates fact-oriented summaries with the real model",
     "[integration][e2e][chat][consolidation][deep][gemma]")
 {
-  namespace fs = std::filesystem;
   cortext::testing::ScopedEnvVar backend_guard ("CORTEXT_DEEP_LLM_BACKEND",
                                                 "gemma");
-
-  if (!fs::exists (RepoModelsDir ()))
-    {
-      SKIP ("repo models directory not present");
-    }
 
   ScopedTempDb temp_db;
   cortext::Cortext::Config cfg;
@@ -2002,15 +1953,8 @@ TEST_CASE (
   cfg.sensitivity = 0.5;
   cfg.stability = 0.0;
 
-  std::unique_ptr<cortext::Cortext> cortext_ctx;
-  try
-    {
-      cortext_ctx = cortext::Cortext::Create (cfg, temp_db.path, RepoModelsDir ());
-    }
-  catch (...)
-    {
-      SKIP ("Cortext::Create unavailable in this test environment");
-    }
+  std::unique_ptr<cortext::Cortext> cortext_ctx
+      = cortext::Cortext::Create (cfg, temp_db.path, RepoModelsDir ());
   REQUIRE (cortext_ctx != nullptr);
 
   auto unique_store = SQLiteStore::Create (temp_db.path);
@@ -2077,17 +2021,12 @@ TEST_CASE (
     }
 
   cortext::Cortext::Context latest_ctx;
-  try
-    {
-      MarkLongTermMemoriesCompressible (*store);
-      cortext::operations::eviction::ScopedEvictionAblationOverride pressure (
-          MakeHighSummaryPressureOverride ());
-      latest_ctx = cortext_ctx->Consolidate (cortext::ConsolidationMode::Deep);
-    }
-  catch (...)
-    {
-      SKIP ("deep consolidation backend unavailable in this test environment");
-    }
+  {
+    MarkLongTermMemoriesCompressible (*store);
+    cortext::operations::eviction::ScopedEvictionAblationOverride pressure (
+        MakeHighSummaryPressureOverride ());
+    latest_ctx = cortext_ctx->Consolidate (cortext::ConsolidationMode::Deep);
+  }
 
   const auto first_pass_summaries = GetDeepSummaryLabels (*store);
   REQUIRE_FALSE (first_pass_summaries.empty ());
@@ -2203,3 +2142,6 @@ TEST_CASE (
         }
     }
 }
+#endif // CORTEXT_TESTS_HAVE_GEMMA4_LITERT
+
+#endif // CORTEXT_TESTS_HAVE_AIST_MODEL
