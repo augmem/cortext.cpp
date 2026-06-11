@@ -1,4 +1,6 @@
 #include "cortext/operations/memory_strength.hpp"
+#include <limits>
+#include <cstdint>
 
 #include "cortext/store/store.hpp"
 #include "cortext/core/algorithms.hpp"
@@ -294,7 +296,10 @@ UpdateMemoryStrength::Execute (OperationContext &context, Transaction &tx) const
   const long long evicted_at
       = static_cast<long long> (context.GetSignal ().timestamp);
   const auto frontier = eviction_policy::ResolveEvictionFrontier (
-      tx, T, static_cast<long long> (p_ctx.last_consolidation_ts),
+      tx, T, static_cast<long long> (std::min<std::uint64_t> (
+          p_ctx.last_consolidation_ts,
+          static_cast<std::uint64_t> (
+              std::numeric_limits<long long>::max ()))),
       eviction_override);
 
   // Eviction condition: strength < cutoff AND either (a) not fact-linked

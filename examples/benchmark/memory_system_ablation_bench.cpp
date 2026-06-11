@@ -823,7 +823,10 @@ RunStudy4Config (const std::string &name, bool fact_layer_enabled)
       SeedMemory (
           *store, i, 1.0, 0LL,
           encoder.EncodeTextEigen (
-              "Emily handles Alice's meals, medication reminders, and daily support"));
+              // AIST 256-slice: sim ~0.730 to the query, vs ~0.795 for the
+              // unlinked text below - linked memories lose on similarity
+              // alone, so the fact boost has to earn the inversion.
+              "Emily prepares meals and sets out medication reminders each morning"));
     }
   // Unlinked memories are MORE similar to query embedding
   for (int i = 11; i <= 20; ++i)
