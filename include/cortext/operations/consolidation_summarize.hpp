@@ -1,6 +1,7 @@
 #pragma once
 
 #include "cortext/processor/operation.hpp"
+#include "cortext/processor/contract_tags.hpp"
 
 namespace cortext::operations
 {
@@ -37,7 +38,8 @@ struct ConsolidationSummarizeParams
 /// - ASSOCIATIONS edges linking centroid to source memories
 /// - embeddings entry for each cluster centroid
 /// - context.SetExtractionRequests(requests) for EnqueueExtractionJobs
-class ConsolidationSummarize : public IOperation
+class ConsolidationSummarize
+    : public Operation<Requires<tags::ConsolidationShouldStart, tags::ConsolidationClusters>, Satisfies<tags::ExtractionRequests> >
 {
 public:
   void Execute (OperationContext &context, Transaction &tx) const override;

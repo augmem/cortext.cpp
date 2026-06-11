@@ -1,6 +1,7 @@
 #pragma once
 
 #include "cortext/processor/operation.hpp"
+#include "cortext/processor/contract_tags.hpp"
 
 namespace cortext::operations
 {
@@ -10,7 +11,8 @@ namespace cortext::operations
 /// Evaluates whether background consolidation should start based on
 /// rate/interval triggers (Alg 28) and idle gating (Alg 28b). Emits an
 /// event row into `consolidation_events` for start/defer actions.
-class EvaluateConsolidation : public IOperation
+class EvaluateConsolidation
+    : public Operation<Requires<>, Satisfies<tags::ConsolidationShouldStart, tags::ConsolidationCandidates> >
 {
 public:
   void Execute (OperationContext &context, Transaction &tx) const override;
@@ -26,7 +28,8 @@ public:
 ///
 /// Current implementation uses available columns in memory_feedback; when
 /// redundancy/connectivity/stability are absent they are treated as 0.
-class ScoreConsolidation : public IOperation
+class ScoreConsolidation
+    : public Operation<Requires<>, Satisfies<> >
 {
 public:
   void Execute (OperationContext &context, Transaction &tx) const override;
@@ -38,7 +41,8 @@ public:
 /// derived gating and batching rules. This operation does not perform model
 /// inference; it only inserts rows into `extraction_jobs` with a prompt built
 /// from the summary text and its clustered source texts.
-class EnqueueExtractionJobs : public IOperation
+class EnqueueExtractionJobs
+    : public Operation<Requires<tags::ExtractionRequests>, Satisfies<> >
 {
 public:
   void Execute (OperationContext &context, Transaction &tx) const override;

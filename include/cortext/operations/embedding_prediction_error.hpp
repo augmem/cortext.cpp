@@ -1,6 +1,7 @@
 #pragma once
 
 #include "cortext/processor/operation.hpp"
+#include "cortext/processor/contract_tags.hpp"
 
 namespace cortext::operations
 {
@@ -16,7 +17,8 @@ namespace cortext::operations
 /// token-level language model outputs.
 ///
 /// Output: Sets Metric::embedding_surprisal in [0,1]
-class UpdateEmbeddingPredictionError : public IOperation
+class UpdateEmbeddingPredictionError
+    : public Operation<Requires<>, Satisfies<tags::MetricValues> >
 {
 public:
   void Execute (OperationContext &context, Transaction &tx) const override;

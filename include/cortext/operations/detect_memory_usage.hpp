@@ -1,6 +1,7 @@
 #pragma once
 
 #include "cortext/processor/operation.hpp"
+#include "cortext/processor/contract_tags.hpp"
 
 namespace cortext::operations
 {
@@ -18,7 +19,8 @@ namespace cortext::operations
 /// retrieved/used counts without cache-based heuristics.
 ///
 /// Pipeline order: Must run AFTER the interrupt gate, BEFORE feedback ops.
-class DetectMemoryUsage : public IOperation
+class DetectMemoryUsage
+    : public Operation<Requires<tags::InterruptAllowed, tags::RetrievedMemoryEmbeddings, tags::SelectedCandidateId>, Satisfies<tags::MemoryUsageEvents> >
 {
 public:
   void Execute (OperationContext &context, Transaction &tx) const override;

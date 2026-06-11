@@ -2,6 +2,7 @@
 #pragma once
 
 #include "cortext/processor/operation.hpp"
+#include "cortext/processor/contract_tags.hpp"
 
 namespace cortext::operations
 {
@@ -13,7 +14,8 @@ namespace cortext::operations
 /// similarity to the current embedding, and drift contribution from the change
 /// in embedding space. Applies the mean influence to adjust derived parameters:
 /// attention width, target write rate, and threshold hysteresis.
-class ApplyInfluenceFeedback : public IOperation
+class ApplyInfluenceFeedback
+    : public Operation<Requires<tags::MemoryUsageEvents, tags::RetrievedMemoryEmbeddings>, Satisfies<> >
 {
 public:
   void Execute (OperationContext &context, Transaction &tx) const override;

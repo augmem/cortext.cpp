@@ -1,6 +1,7 @@
 #pragma once
 
 #include "cortext/processor/operation.hpp"
+#include "cortext/processor/contract_tags.hpp"
 
 namespace cortext::operations
 {
@@ -12,7 +13,8 @@ namespace cortext::operations
 /// - If drift_acc_pacing > max_wait_drift(F): force check regardless
 /// - Boundary flush also triggers retrieval checks
 /// - Resets drift_acc_pacing and updates x_last_check on trigger
-class CheckStreamingPacing : public IOperation
+class CheckStreamingPacing
+    : public Operation<Requires<tags::FlushRequired>, Satisfies<tags::ShouldCheckRetrieval> >
 {
 public:
   void Execute (OperationContext &context, Transaction &tx) const override;

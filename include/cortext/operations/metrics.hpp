@@ -1,6 +1,7 @@
 #pragma once
 
 #include "cortext/processor/operation.hpp"
+#include "cortext/processor/contract_tags.hpp"
 
 namespace cortext::operations
 {
@@ -36,7 +37,8 @@ enum class Metric
 /// Metrics:
 /// - relevance, mismatch, surprise, rarity, drift, utility,
 ///   salience, valence, arousal, contradiction, periphery, coverage
-class ComputeMetrics : public IOperation
+class ComputeMetrics
+    : public Operation<Requires<tags::Arousal, tags::Valence, tags::AccumulatorWindowState>, Satisfies<tags::MetricValues, tags::Violation> >
 {
 public:
   void Execute (OperationContext &context, Transaction &tx) const override;

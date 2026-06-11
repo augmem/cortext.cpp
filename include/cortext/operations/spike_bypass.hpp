@@ -1,6 +1,7 @@
 #pragma once
 
 #include "cortext/processor/operation.hpp"
+#include "cortext/processor/contract_tags.hpp"
 
 namespace cortext::operations
 {
@@ -16,7 +17,8 @@ namespace cortext::operations
 /// Must run AFTER:
 /// - UpdateThreshold (provides θ_dynamic)
 /// - ComputeCompositeScore (provides score_t)
-class CheckSpikeBypass : public IOperation
+class CheckSpikeBypass
+    : public Operation<Requires<tags::AccumulatorWindowState, tags::BoundaryDecision, tags::CompositeScore, tags::ThresholdState>, Satisfies<tags::SpikeBypass, tags::BoundaryDecision, tags::FlushRequired> >
 {
 public:
   void Execute (OperationContext &context, Transaction &tx) const override;

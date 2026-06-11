@@ -2,6 +2,7 @@
 #pragma once
 
 #include "cortext/processor/operation.hpp"
+#include "cortext/processor/contract_tags.hpp"
 
 namespace cortext::operations
 {
@@ -10,7 +11,8 @@ namespace cortext::operations
 ///
 /// Populates `ProcessorContext::centroids` once so downstream operations can
 /// compute affect and emotion projections without runtime IO.
-class InitializeEmbeddedCentroids : public IOperation
+class InitializeEmbeddedCentroids
+    : public Operation<Requires<>, Satisfies<> >
 {
 public:
   void Execute (OperationContext &context, Transaction &tx) const override;

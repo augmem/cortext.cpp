@@ -2,6 +2,7 @@
 #pragma once
 
 #include "cortext/processor/operation.hpp"
+#include "cortext/processor/contract_tags.hpp"
 
 namespace cortext::operations
 {
@@ -13,7 +14,8 @@ namespace cortext::operations
 /// knob-derived depth, then re-ranks by cosine similarity.
 ///
 /// Requires `OperationContext::GetStore()` to be non-null.
-class GraphAugmentedRetrieveCandidates : public IOperation
+class GraphAugmentedRetrieveCandidates
+    : public Operation<Requires<tags::Arousal, tags::EmotionIntensity, tags::MetricValues, tags::ShouldCheckRetrieval, tags::WriteExclusionTs>, Satisfies<tags::RetrievedMemoryEmbeddings> >
 {
 public:
   void Execute (OperationContext &context, Transaction &tx) const override;

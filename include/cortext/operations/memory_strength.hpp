@@ -2,6 +2,7 @@
 #pragma once
 
 #include "cortext/processor/operation.hpp"
+#include "cortext/processor/contract_tags.hpp"
 
 namespace cortext::operations
 {
@@ -12,7 +13,8 @@ namespace cortext::operations
 /// strength with reinforcement minus decay (Alg 14) and an additional
 /// influence-weighted term derived from retrieval/usage counts and
 /// contextual gain (Alg 18). Evicts rows below periphery cutoff.
-class UpdateMemoryStrength : public IOperation
+class UpdateMemoryStrength
+    : public Operation<Requires<tags::MemoryUsageEvents, tags::SerialPositionMultiplier>, Satisfies<> >
 {
 public:
   void Execute (OperationContext &context, Transaction &tx) const override;

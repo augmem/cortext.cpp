@@ -2,6 +2,7 @@
 #pragma once
 
 #include "cortext/processor/operation.hpp"
+#include "cortext/processor/contract_tags.hpp"
 
 namespace cortext::operations
 {
@@ -15,7 +16,8 @@ namespace cortext::operations
 /// `memory_feedback.strength`. A time-based recovery step restores strength
 /// proportionally to elapsed time since last suppression (RIF recovery), then
 /// decays the stored suppression.
-class ApplyRetrievalCompetition : public IOperation
+class ApplyRetrievalCompetition
+    : public Operation<Requires<tags::RetrievedMemoryEmbeddings>, Satisfies<> >
 {
 public:
   void Execute (OperationContext &context, Transaction &tx) const override;

@@ -3,6 +3,10 @@
 #include <cortext/processor.hpp>
 #include <cortext/processor/operation_context.hpp>
 #include <cortext/processor/operation_set.hpp>
+#include <cortext/operations/boundary.hpp>
+#include <cortext/operations/coherence.hpp>
+#include <cortext/operations/accumulator.hpp>
+#include <cortext/operations/streaming_pacing.hpp>
 
 #include <vector>
 
@@ -157,4 +161,35 @@ TEST_CASE ("OperationSet aggregates contracts at compile time", "[operation_set]
   using Mixed = OperationSet<ProducesA, RecordOp>;
   STATIC_REQUIRE (!Mixed::kContractsComplete);
   STATIC_REQUIRE (!IsSelfContained<Mixed>);
+}
+
+TEST_CASE ("real pipeline operations declare validated contracts",
+           "[operation_set][contracts]")
+{
+  using cortext::operations::CheckStreamingPacing;
+  using cortext::operations::ComputeCoherence;
+  using cortext::operations::DetectBoundary;
+  using cortext::operations::UpdateAccumulator;
+
+  // Producer before consumer is self-contained.
+  using Ordered = OperationSet<ComputeCoherence, UpdateAccumulator>;
+  STATIC_REQUIRE (Ordered::kContractsComplete);
+  STATIC_REQUIRE (IsSelfContained<Ordered>);
+
+  // A real consumer without its producer surfaces the missing tag: the
+  // streaming-pacing gate needs the boundary flush decision.
+  using MissingProducer = OperationSet<CheckStreamingPacing>;
+  STATIC_REQUIRE (MissingProducer::kContractsComplete);
+  STATIC_REQUIRE (!IsSelfContained<MissingProducer>);
+  STATIC_REQUIRE (cortext::operation_set_detail::Contains<
+                  cortext::tags::FlushRequired,
+                  MissingProducer::Input>::value);
+
+  // Supplying the producer (boundary detection needs its own inputs, so
+  // the set is still not self-contained, but the flush requirement is now
+  // met internally).
+  using WithProducer = OperationSet<DetectBoundary, CheckStreamingPacing>;
+  STATIC_REQUIRE (!cortext::operation_set_detail::Contains<
+                  cortext::tags::FlushRequired,
+                  WithProducer::Input>::value);
 }
