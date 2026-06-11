@@ -1818,10 +1818,14 @@ TEST_CASE ("STM relabel source-span complement enriches labels after extractor m
       "ORDER BY source_id",
       {});
   std::set<std::string> labels;
+  std::ostringstream labels_debug;
   for (const auto &row : label_rows)
     {
-      labels.insert (std::any_cast<std::string> (row.at ("source_id")));
+      const auto value = std::any_cast<std::string> (row.at ("source_id"));
+      labels_debug << "label='" << value << "'\n";
+      labels.insert (value);
     }
+  INFO (labels_debug.str ());
   REQUIRE (labels.size () == 5);
   REQUIRE (labels.count ("maria") == 1);
   REQUIRE (labels.count ("bailey") == 1);

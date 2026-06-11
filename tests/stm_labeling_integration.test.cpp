@@ -211,3 +211,75 @@ TEST_CASE ("STM labeling routes real text to the right labels and keeps "
   // STM labels can never reach LTM at all.
   CHECK (top_edge->weight >= consolidation_gate);
 }
+
+TEST_CASE ("Label-bank similarity contrast separates filler from content",
+           "[stm][labels][aist][contrast][integration]")
+{
+  // Mirrors ComputeLabelBankContrast / IsGenericByLabelBankContrast in
+  // process_extraction_results.cpp: generic = mean >= 0.65 with peak-mean
+  // < 0.15 against the label bank. This test is the evidence that those
+  // thresholds sit in real gaps on AIST-256 geometry: filler is HIGH and
+  // FLAT (mean 0.688-0.701, peak 0.064-0.079), on-topic content PEAKS
+  // (0.24-0.31), novel topics sit LOW (mean 0.47-0.61, protected by the
+  // mean floor).
+  constexpr double kGenericMeanFloor = 0.65;
+  constexpr double kMinPeak = 0.15;
+
+  const std::vector<std::string> bank = {
+    "kitchen renovation",  "kitchen appliances", "soccer practice",
+    "soccer tournament",   "medication schedule", "tax documents",
+  };
+  std::vector<Eigen::VectorXf> bank_embeddings;
+  bank_embeddings.reserve (bank.size ());
+  for (const auto &label : bank)
+    {
+      bank_embeddings.push_back (RuntimeView (label));
+    }
+
+  auto contrast = [&] (const std::string &phrase) {
+    const Eigen::VectorXf v = RuntimeView (phrase);
+    double sum = 0.0;
+    double max_sim = -1.0;
+    for (const auto &b : bank_embeddings)
+      {
+        const double sim = static_cast<double> (b.dot (v));
+        sum += sim;
+        max_sim = std::max (max_sim, sim);
+      }
+    const double mean = sum / static_cast<double> (bank_embeddings.size ());
+    return std::make_pair (mean, max_sim - mean);
+  };
+
+  auto is_generic = [&] (const std::string &phrase) {
+    const auto [mean, peak] = contrast (phrase);
+    INFO ("phrase='" << phrase << "' mean=" << mean << " peak=" << peak);
+    return mean >= kGenericMeanFloor && peak < kMinPeak;
+  };
+
+  std::ostringstream all_debug;
+  for (const std::string phrase :
+       { "okay thanks sounds good", "ya know", "no problem sure thing",
+         "kitchen renovation quotes", "soccer tournament schedule",
+         "medication refill reminder", "quantum entanglement lecture",
+         "volcano hiking trail" })
+    {
+      const auto [mean, peak] = contrast (phrase);
+      all_debug << "phrase='" << phrase << "' mean=" << mean
+                << " peak=" << peak << "\n";
+    }
+  INFO (all_debug.str ());
+
+  // Filler: high and flat -> generic.
+  CHECK (is_generic ("okay thanks sounds good"));
+  CHECK (is_generic ("ya know"));
+  CHECK (is_generic ("no problem sure thing"));
+
+  // On-topic content: peaks above its own baseline -> not generic.
+  CHECK_FALSE (is_generic ("kitchen renovation quotes"));
+  CHECK_FALSE (is_generic ("soccer tournament schedule"));
+  CHECK_FALSE (is_generic ("medication refill reminder"));
+
+  // Novel topics: low mean -> protected by the mean floor, never generic.
+  CHECK_FALSE (is_generic ("quantum entanglement lecture"));
+  CHECK_FALSE (is_generic ("volcano hiking trail"));
+}
