@@ -25,7 +25,7 @@ NO_GRAPH_EXPANSION_ENV = {
     "CORTEXT_DISABLE_DURABLE_SOURCE_SET_RETRIEVAL": "1",
     "CORTEXT_DISABLE_PRECONSOLIDATED_LABEL_GRAPH": "1",
 }
-CASES = [
+CASES = [  # fallback when the spec file is unavailable
     ("no_daily_consolidation", {}, False),
     (
         "no_graph_expansion",
@@ -50,6 +50,30 @@ CASES = [
         True,
     ),
 ]
+
+def _load_spec_cases():
+    """Ablation arms come from the protocol spec when available, so the spec
+    JSON is the single source of truth; the hardcoded CASES list is the
+    fallback. Each spec arm: {name, env, daily_consolidation}."""
+    spec_path = pathlib.Path(__file__).resolve().parent / "chat_replay_release_protocol_spec.json"
+    try:
+        arms = json.loads(spec_path.read_text()).get("ablations") or []
+        cases = [
+            (
+                arm["name"],
+                dict(arm.get("env") or {}),
+                bool(arm.get("daily_consolidation", True)),
+            )
+            for arm in arms
+        ]
+        if cases:
+            return cases
+    except (OSError, ValueError, KeyError):
+        pass
+    return CASES
+
+
+CASES = _load_spec_cases() or CASES
 
 REQUIRED_BENCH_FLAGS = [
     "--input-dir",
