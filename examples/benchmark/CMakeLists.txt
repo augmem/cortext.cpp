@@ -1,5 +1,11 @@
 # Benchmark executable with new source files
 
+# sqlite_store.hpp includes <sqlite3.h>; resolve it the same way the
+# library does (pkg-config on native).
+if(SQLITE3_INCLUDE_DIRS)
+  include_directories(${SQLITE3_INCLUDE_DIRS})
+endif()
+
 add_executable(cortext_text_encoder_bench
   text_encoder_bench.cpp
 )
