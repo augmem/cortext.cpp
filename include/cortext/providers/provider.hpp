@@ -10,7 +10,7 @@
 namespace cortext::providers
 {
 
-/// @brief Role a provider fulfils inside the deep-LLM pipeline.
+/// @brief Role a provider fulfils inside the deep-LLM stack.
 enum class Role
 {
   Summarizer,
@@ -47,7 +47,7 @@ struct Capabilities
 };
 
 /// @brief The consumer's half of the contract: what a role requires of any
-/// implementation, independent of transport. The pipeline cares only that
+/// implementation, independent of transport. The engine cares only that
 /// these are met — in-process engine, local server, or remote API is an
 /// implementation detail.
 struct InferenceContract
@@ -65,7 +65,7 @@ struct InferenceContract
   bool needs_determinism = false;
 };
 
-/// @brief The default contract each pipeline role demands.
+/// @brief The default contract each provider role demands.
 InferenceContract ContractForRole (Role role);
 
 class InferenceProvider;

@@ -1,5 +1,5 @@
 // Steady-state live-loop benchmark for profiling the core operation
-// pipeline. Drives the exact production DynamicOperationSet (BuildPipelineRoot)
+// processing sequence. Drives the exact production operation set (BuildRootOperationSet)
 // through one long-lived store with deterministic synthetic embeddings, so
 // CPU profiles concentrate on the memory algorithms rather than per-scenario
 // setup, encoder inference, or LLM consolidation backends.
@@ -30,8 +30,8 @@
 
 namespace cortext
 {
-// Production pipeline factory defined in src/cortext.cpp.
-std::unique_ptr<IOperation> BuildPipelineRoot (bool probe_mode);
+// Production operation-set factory defined in src/cortext.cpp.
+std::unique_ptr<IOperation> BuildRootOperationSet (bool probe_mode);
 } // namespace cortext
 
 namespace
@@ -99,7 +99,7 @@ public:
   }
 };
 
-// Fixed clock so any wall-clock reads inside the pipeline are deterministic.
+// Fixed clock so any wall-clock reads inside the engine are deterministic.
 class FixedClock : public cortext::Clock
 {
 public:
@@ -167,7 +167,7 @@ main (int argc, char **argv)
   cfg.clock = clock;
 
   cortext::SignalProcessor processor (cfg, store,
-                                      cortext::BuildPipelineRoot (false),
+                                      cortext::BuildRootOperationSet (false),
                                       nullptr);
 
   Lcg rng (0x5DEECE66DULL);

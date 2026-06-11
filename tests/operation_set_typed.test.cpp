@@ -90,9 +90,9 @@ TEST_CASE ("OperationSet executes members in order", "[operation_set]")
   OperationContext ctx (s, pctx, cfg);
 
   std::vector<int> order;
-  OperationSet pipeline (RecordOp (&order, 1), RecordOp2 (&order, 2),
+  OperationSet set (RecordOp (&order, 1), RecordOp2 (&order, 2),
                      RecordOp3 (&order, 3));
-  pipeline.Execute (ctx, cortext::testing::GetNullTransaction ());
+  set.Execute (ctx, cortext::testing::GetNullTransaction ());
 
   REQUIRE (order == std::vector<int>{ 1, 2, 3 });
 }
@@ -107,14 +107,14 @@ TEST_CASE ("OperationSet records per-operation timings under distinct names",
   cortext::testing::RequireEncoder (cfg);
   OperationContext ctx (s, pctx, cfg);
 
-  OperationSet<RecordOp, RecordOp2> pipeline;
-  pipeline.Execute (ctx, cortext::testing::GetNullTransaction ());
+  OperationSet<RecordOp, RecordOp2> set;
+  set.Execute (ctx, cortext::testing::GetNullTransaction ());
 
   const auto &timings = ctx.GetOperationTimings ();
   REQUIRE (timings.size () == 2);
 }
 
-TEST_CASE ("Nested pipelines execute inline without a stage timing entry",
+TEST_CASE ("Nested operation sets execute inline without a stage timing entry",
            "[operation_set]")
 {
   Signal s;
@@ -153,7 +153,7 @@ TEST_CASE ("OperationSet aggregates contracts at compile time", "[operation_set]
   using NeedsC = OperationSet<ProducesA, ConsumesC>;
   STATIC_REQUIRE (std::is_same_v<NeedsC::Input, Requires<TagC> >);
 
-  // Nested pipelines propagate contracts upward.
+  // Nested operation sets propagate contracts upward.
   using Nested = OperationSet<OperationSet<ProducesA>, ConsumesAProducesB>;
   STATIC_REQUIRE (IsSelfContained<Nested>);
 
@@ -163,7 +163,7 @@ TEST_CASE ("OperationSet aggregates contracts at compile time", "[operation_set]
   STATIC_REQUIRE (!IsSelfContained<Mixed>);
 }
 
-TEST_CASE ("real pipeline operations declare validated contracts",
+TEST_CASE ("real operations declare validated contracts",
            "[operation_set][contracts]")
 {
   using cortext::operations::CheckStreamingPacing;

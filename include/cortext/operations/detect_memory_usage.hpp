@@ -18,7 +18,7 @@ namespace cortext::operations
 /// This enables feedback algorithms (Algorithms 14–19) to use consistent
 /// retrieved/used counts without cache-based heuristics.
 ///
-/// Pipeline order: Must run AFTER the interrupt gate, BEFORE feedback ops.
+/// Ordering: must run AFTER the interrupt gate, BEFORE feedback ops.
 class DetectMemoryUsage
     : public Operation<Requires<tags::InterruptAllowed, tags::RetrievedMemoryEmbeddings, tags::SelectedCandidateId>, Satisfies<tags::MemoryUsageEvents> >
 {
