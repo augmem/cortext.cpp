@@ -166,63 +166,6 @@ WorkingMemory::Execute (OperationContext &context, Transaction &tx) const
                                    ? acc.n_signals
                                    : static_cast<int> (acc.signals.size ());
 
-  // Recent slice of the WM partition: every accepted memory enters the
-  // FIFO ring unconditionally - conversational continuity is structural,
-  // never a competition outcome. The associative gate below is unchanged
-  // and governs only the scored slice.
-  {
-    ProcessorContext::WMSlot recent;
-    Eigen::VectorXf recent_vec = e_rep;
-    const double recent_norm = recent_vec.norm ();
-    if (recent_norm > constants::kNormEpsilon)
-      {
-        recent_vec = recent_vec / static_cast<float> (recent_norm);
-      }
-    recent.embedding = recent_vec;
-    recent.strength = 1.0;
-    recent.last_ts = now_s;
-    recent.pos_index = p_ctx.signals_processed;
-    recent.n_signals = acc_signal_count;
-    recent.s_max = acc.s_max;
-    recent.s_avg = acc_signal_count > 0
-                       ? acc.s_sum / static_cast<double> (acc_signal_count)
-                       : 0.0;
-    recent.drift_acc = acc.drift_acc;
-    recent.mem_elapsed
-        = static_cast<double> (signal.timestamp - acc.t_start) / 1000.0;
-    recent.s_emotion_max = acc.s_emotion_max;
-    recent.s_arousal_avg
-        = acc_signal_count > 0
-              ? acc.s_arousal_sum / static_cast<double> (acc_signal_count)
-              : 0.0;
-    recent.source_id = signal.source_id;
-    if (!acc.primary_modality.empty ())
-      {
-        recent.modality = acc.primary_modality;
-      }
-    else
-      {
-        recent.modality
-            = acc.signals.empty () ? signal.modality : acc.signals[0].modality;
-      }
-    recent.start_ts = static_cast<int64_t> (acc.t_start);
-    recent.signal_records = acc.signals;
-    for (const auto &rec : acc.signals)
-      {
-        if (!rec.blob_id.empty ())
-          {
-            recent.blob_ids.push_back (rec.blob_id);
-          }
-      }
-    p_ctx.wm_recent_slots.push_back (std::move (recent));
-    const int recent_capacity = std::max (
-        1, core::WMRecentCapacity (cfg.sensitivity, cfg.focus));
-    while (static_cast<int> (p_ctx.wm_recent_slots.size ()) > recent_capacity)
-      {
-        p_ctx.wm_recent_slots.pop_front ();
-      }
-  }
-
   // Section 8.1: memory_benefit = α × S_window + β × relevance + γ × novelty
   const double S_window = context.GetWindowScore ().value_or (0.0);
   const Eigen::VectorXf &task_query
@@ -263,7 +206,7 @@ WorkingMemory::Execute (OperationContext &context, Transaction &tx) const
   const double margin = benefit - gate_threshold;
   const int k = static_cast<int> (p_ctx.wm_slots.size ());
   const int base_capacity
-      = std::max (1, core::WMAssociativeCapacity (cfg.sensitivity, cfg.focus));
+      = std::max (1, core::WMBaseCapacity (cfg.sensitivity, cfg.focus));
   const double over_ratio
       = (k > base_capacity)
             ? (static_cast<double> (k - base_capacity)
@@ -476,7 +419,7 @@ WorkingMemory::Execute (OperationContext &context, Transaction &tx) const
   // Insert new slot (evict highest eviction_score if capacity reached).
   // Eviction considers both dedication (strength * T-derived factor) and recency.
   const int capacity
-      = std::max (1, core::WMAssociativeCapacity (cfg.sensitivity, cfg.focus));
+      = std::max (1, core::WMBaseCapacity (cfg.sensitivity, cfg.focus));
   if (static_cast<int> (p_ctx.wm_slots.size ()) >= capacity)
     {
       int evict_idx = -1;

@@ -1093,17 +1093,12 @@ TEST_CASE ("Integration: chat memories consolidate and retrieve", "[integration]
   REQUIRE (!assoc_rows.empty ());
   REQUIRE (cortext::testing::GetInt64 (assoc_rows[0], "c") >= 1);
 
-  // This environment has no extractor, so the label bank can never mature
-  // and cold start declines the optional admission paths (floor fill,
-  // endpoint creation): zero labels is the intended contract here. Label
-  // production with a real extractor is covered by the gated integration
-  // cases.
   auto label_rows = store->Execute (
       "SELECT COUNT(*) AS c FROM memories "
       "WHERE kind = 'LABEL'",
       {});
   REQUIRE (!label_rows.empty ());
-  REQUIRE (cortext::testing::GetInt64 (label_rows[0], "c") == 0);
+  REQUIRE (cortext::testing::GetInt64 (label_rows[0], "c") >= 1);
 
   auto derived_rows = store->Execute (
       "SELECT COUNT(*) AS c FROM associations WHERE edge_type = 'derived_from'",
@@ -1114,7 +1109,7 @@ TEST_CASE ("Integration: chat memories consolidate and retrieve", "[integration]
   auto label_edges = store->Execute (
       "SELECT COUNT(*) AS c FROM associations WHERE edge_type = 'has_label'", {});
   REQUIRE (!label_edges.empty ());
-  REQUIRE (cortext::testing::GetInt64 (label_edges[0], "c") == 0);
+  REQUIRE (cortext::testing::GetInt64 (label_edges[0], "c") > 0);
 
   auto co_occurs = store->Execute (
       "SELECT COUNT(*) AS c FROM associations WHERE edge_type = 'co_occurs'", {});
@@ -1178,26 +1173,10 @@ TEST_CASE ("Integration: chat memories consolidate and retrieve", "[integration]
       embedding_map.emplace (row.first, row.second);
     }
 
-  // The relevance threshold is computed over RETRIEVABLE embeddings only
-  // (long-term memories). The embeddings table also holds working-memory
-  // slot embeddings, including chunk-blended vectors that mix both query
-  // topics and so score higher against mu_acc than any single retrievable
-  // memory can - those are not candidates and must not set the bar.
-  std::unordered_set<long long> ltm_embedding_ids;
-  for (const auto &row : store->Execute (
-           "SELECT embedding_id FROM memories WHERE kind = 'LONG_TERM'", {}))
-    {
-      ltm_embedding_ids.insert (
-          cortext::testing::GetInt64 (row, "embedding_id"));
-    }
   std::vector<double> mu_scores;
   mu_scores.reserve (embeddings.size ());
   for (const auto &row : embeddings)
     {
-      if (ltm_embedding_ids.count (row.first) == 0)
-        {
-          continue;
-        }
       mu_scores.push_back (core::CosineSimilarity (mu_acc, row.second));
     }
   std::sort (mu_scores.begin (), mu_scores.end (),
@@ -1210,25 +1189,20 @@ TEST_CASE ("Integration: chat memories consolidate and retrieve", "[integration]
 
   std::size_t count_high = 0;
   std::size_t resolved = 0;
-  std::ostringstream cand_debug;
-  cand_debug << "mu_threshold=" << mu_threshold << "\n";
   for (const auto &id : actual_ids)
     {
       auto emb = LookupEmbeddingForId (*store, embedding_map, id);
       if (!emb.has_value ())
         {
-          cand_debug << "candidate " << id << ": no embedding\n";
           continue;
         }
       ++resolved;
       const double sim = core::CosineSimilarity (mu_acc, *emb);
-      cand_debug << "candidate " << id << ": mu_sim=" << sim << "\n";
       if (sim + 1e-6 >= mu_threshold)
         {
           ++count_high;
         }
     }
-  INFO (cand_debug.str ());
   REQUIRE (resolved > 0);
   REQUIRE (count_high >= 1);
 
@@ -1538,63 +1512,38 @@ TEST_CASE ("Integration: scripted chat preserves turn-shaped working memory",
           max_user_prompt_size = std::max (max_user_prompt_size, prompt.size ());
           if (turn >= 7)
             {
-              // The WM partition guarantees the prompt tail: the last
-              // recent-capacity transcript turns, verbatim and in order,
-              // immediately before the current user input. Associative
-              // entries (deduplicated against the recent ring) may precede
-              // the tail; every prompt entry must be a real transcript turn.
-              const std::size_t keep_recent = static_cast<std::size_t> (
-                  std::max (1, cortext::core::WMRecentCapacity (
-                                   cfg.sensitivity, cfg.focus)));
-              std::vector<ChatMessage> expected_tail;
-              const std::size_t tail_start
-                  = transcript.size () > keep_recent
-                        ? transcript.size () - keep_recent
+              std::vector<ChatMessage> expected_prompt;
+              // Prompt history is shaped by working memory: capacity - 1
+              // prior turns plus the current user input.
+              const std::size_t keep_prior = static_cast<std::size_t> (
+                  std::max (1, cortext::core::WMBaseCapacity (
+                                   cfg.sensitivity, cfg.focus))) - 1;
+              const std::size_t prior_start
+                  = transcript.size () > keep_prior
+                        ? transcript.size () - keep_prior
                         : 0;
-              for (std::size_t i = tail_start; i < transcript.size (); ++i)
+              for (std::size_t i = prior_start; i < transcript.size (); ++i)
                 {
-                  expected_tail.push_back (transcript[i]);
+                  expected_prompt.push_back (transcript[i]);
                 }
-              expected_tail.push_back ({ "user", text });
+              expected_prompt.push_back ({ "user", text });
               std::ostringstream prompt_debug;
               prompt_debug << "turn=" << turn << "\nactual:\n";
               for (const auto &msg : prompt)
                 {
                   prompt_debug << msg.role << " :: " << msg.content << "\n";
                 }
-              prompt_debug << "expected tail:\n";
-              for (const auto &msg : expected_tail)
+              prompt_debug << "expected:\n";
+              for (const auto &msg : expected_prompt)
                 {
                   prompt_debug << msg.role << " :: " << msg.content << "\n";
                 }
               INFO (prompt_debug.str ());
-              REQUIRE (prompt.size () >= expected_tail.size ());
-              const std::size_t tail_offset
-                  = prompt.size () - expected_tail.size ();
-              for (std::size_t i = 0; i < expected_tail.size (); ++i)
+              REQUIRE (prompt.size () == expected_prompt.size ());
+              for (std::size_t i = 0; i < prompt.size (); ++i)
                 {
-                  REQUIRE (prompt[tail_offset + i].role
-                           == expected_tail[i].role);
-                  REQUIRE (prompt[tail_offset + i].content
-                           == expected_tail[i].content);
-                }
-              // Entries before the tail must be distinct real transcript
-              // turns (no duplicates of the tail, no fabricated content).
-              for (std::size_t i = 0; i < tail_offset; ++i)
-                {
-                  const bool is_transcript_turn = std::any_of (
-                      transcript.begin (), transcript.end (),
-                      [&] (const ChatMessage &t) {
-                        return t.role == prompt[i].role
-                               && t.content == prompt[i].content;
-                      });
-                  REQUIRE (is_transcript_turn);
-                  const bool duplicates_tail = std::any_of (
-                      expected_tail.begin (), expected_tail.end (),
-                      [&] (const ChatMessage &t) {
-                        return t.content == prompt[i].content;
-                      });
-                  REQUIRE_FALSE (duplicates_tail);
+                  REQUIRE (prompt[i].role == expected_prompt[i].role);
+                  REQUIRE (prompt[i].content == expected_prompt[i].content);
                 }
             }
         }
@@ -1655,35 +1604,30 @@ TEST_CASE ("Integration: scripted chat preserves turn-shaped working memory",
                          << final_prompt[i].content << "\n";
     }
   INFO ("final working-memory prompt:\n" << final_prompt_debug.str ());
-  // The partition guarantees the chronological tail: the last
-  // recent-capacity transcript turns end the prompt, with deduplicated
-  // associative entries optionally before them.
-  const std::size_t final_recent = static_cast<std::size_t> (
-      std::max (1, cortext::core::WMRecentCapacity (cfg.sensitivity,
-                                                    cfg.focus)));
-  REQUIRE (final_prompt.size () >= final_recent);
-  const std::size_t tail_offset = final_prompt.size () - final_recent;
+  const std::size_t final_keep = static_cast<std::size_t> (
+      std::max (1, cortext::core::WMBaseCapacity (cfg.sensitivity,
+                                                  cfg.focus)));
+  REQUIRE (final_prompt.size () == final_keep);
   const std::size_t tail_start
-      = transcript.size () > final_recent ? transcript.size () - final_recent
-                                          : 0;
-  for (std::size_t i = 0; i < final_recent; ++i)
+      = transcript.size () > final_keep ? transcript.size () - final_keep : 0;
+  for (std::size_t i = 0; i < final_prompt.size (); ++i)
     {
       const auto &expected = transcript[tail_start + i];
-      REQUIRE (final_prompt[tail_offset + i].role == expected.role);
-      REQUIRE (final_prompt[tail_offset + i].content == expected.content);
+      REQUIRE (final_prompt[i].role == expected.role);
+      REQUIRE (final_prompt[i].content == expected.content);
     }
 
   const auto wm_rows = store->Execute (
       "SELECT memory_id, source_id, n_signals "
       "FROM memories "
-      "WHERE kind = 'WORKING_RECENT' AND end_ts IS NULL "
+      "WHERE kind = 'WORKING' AND end_ts IS NULL "
       "ORDER BY start_ts ASC, memory_id ASC",
       {});
   auto fresh_store = SQLiteStore::Create (temp_db.path);
   const auto fresh_wm_rows = fresh_store->Execute (
       "SELECT memory_id, source_id, n_signals, start_ts, end_ts "
       "FROM memories "
-      "WHERE kind = 'WORKING_RECENT' AND end_ts IS NULL "
+      "WHERE kind = 'WORKING' AND end_ts IS NULL "
       "ORDER BY start_ts ASC, memory_id ASC",
       {});
   std::ostringstream fresh_wm_debug;
@@ -1711,9 +1655,7 @@ TEST_CASE ("Integration: scripted chat preserves turn-shaped working memory",
                      << " | end_ts=" << end_ts << "\n";
     }
   INFO ("fresh working rows:\n" << fresh_wm_debug.str ());
-  // The recent ring persists as kind='WORKING_RECENT': exactly the last
-  // recent-capacity turns, one signal each.
-  REQUIRE (wm_rows.size () == final_recent);
+  REQUIRE (wm_rows.size () == final_keep);
   for (const auto &row : wm_rows)
     {
       const std::string source_id
@@ -1770,26 +1712,36 @@ TEST_CASE (
   cortext::Cortext::Context latest_ctx;
   std::size_t max_user_prompt_size = 0;
 
-  // The WM partition guarantees the prompt tail: the last recent-capacity
-  // transcript turns, verbatim and in order, with the current user input
-  // (when present) last. Deduplicated associative entries may precede the
-  // tail; every prompt entry must be a real transcript turn.
-  const std::size_t wm_recent = static_cast<std::size_t> (
-      std::max (1, cortext::core::WMRecentCapacity (0.5, 0.5)));
-  auto assert_prompt_tail = [&transcript, wm_recent] (
+  // Prompt history is shaped by working memory: capacity turns total
+  // (capacity - 1 prior plus the current user input when present).
+  const std::size_t wm_capacity = static_cast<std::size_t> (
+      std::max (1, cortext::core::WMBaseCapacity (0.5, 0.5)));
+  auto assert_prompt_tail = [&transcript, wm_capacity] (
                                 const std::vector<ChatMessage> &prompt,
                                 const std::string &latest_user_input,
                                 int turn) {
-    std::vector<ChatMessage> expected_tail;
-    const std::size_t tail_start
-        = transcript.size () > wm_recent ? transcript.size () - wm_recent : 0;
-    for (std::size_t i = tail_start; i < transcript.size (); ++i)
+    std::vector<ChatMessage> expected_prompt;
+    if (latest_user_input.empty ())
       {
-        expected_tail.push_back (transcript[i]);
+        const std::size_t tail_start
+            = transcript.size () > wm_capacity
+                  ? transcript.size () - wm_capacity
+                  : 0;
+        for (std::size_t i = tail_start; i < transcript.size (); ++i)
+          {
+            expected_prompt.push_back (transcript[i]);
+          }
       }
-    if (!latest_user_input.empty ())
+    else
       {
-        expected_tail.push_back ({ "user", latest_user_input });
+        const std::size_t keep_prior = wm_capacity - 1;
+        const std::size_t prior_start
+            = transcript.size () > keep_prior ? transcript.size () - keep_prior : 0;
+        for (std::size_t i = prior_start; i < transcript.size (); ++i)
+          {
+            expected_prompt.push_back (transcript[i]);
+          }
+        expected_prompt.push_back ({ "user", latest_user_input });
       }
 
     std::ostringstream prompt_debug;
@@ -1798,34 +1750,17 @@ TEST_CASE (
       {
         prompt_debug << msg.role << " :: " << msg.content << "\n";
       }
-    prompt_debug << "expected tail:\n";
-    for (const auto &msg : expected_tail)
+    prompt_debug << "expected:\n";
+    for (const auto &msg : expected_prompt)
       {
         prompt_debug << msg.role << " :: " << msg.content << "\n";
       }
     INFO (prompt_debug.str ());
-    REQUIRE (prompt.size () >= expected_tail.size ());
-    const std::size_t tail_offset = prompt.size () - expected_tail.size ();
-    for (std::size_t i = 0; i < expected_tail.size (); ++i)
+    REQUIRE (prompt.size () == expected_prompt.size ());
+    for (std::size_t i = 0; i < prompt.size (); ++i)
       {
-        REQUIRE (prompt[tail_offset + i].role == expected_tail[i].role);
-        REQUIRE (prompt[tail_offset + i].content == expected_tail[i].content);
-      }
-    for (std::size_t i = 0; i < tail_offset; ++i)
-      {
-        const bool is_transcript_turn = std::any_of (
-            transcript.begin (), transcript.end (),
-            [&] (const ChatMessage &t) {
-              return t.role == prompt[i].role
-                     && t.content == prompt[i].content;
-            });
-        REQUIRE (is_transcript_turn);
-        const bool duplicates_tail = std::any_of (
-            expected_tail.begin (), expected_tail.end (),
-            [&] (const ChatMessage &t) {
-              return t.content == prompt[i].content;
-            });
-        REQUIRE_FALSE (duplicates_tail);
+        REQUIRE (prompt[i].role == expected_prompt[i].role);
+        REQUIRE (prompt[i].content == expected_prompt[i].content);
       }
   };
 
@@ -1913,11 +1848,7 @@ TEST_CASE (
   INFO ("consolidation_runs=" << consolidation_runs);
   REQUIRE (consolidation_runs >= 1);
   REQUIRE (transcript.size () == static_cast<std::size_t> (kTotalTurns));
-  // Prompt size is bounded by both partitions plus the current input.
-  REQUIRE (max_user_prompt_size
-           <= static_cast<std::size_t> (
-                  std::max (1, cortext::core::WMBaseCapacity (0.5, 0.5)))
-                  + 1);
+  REQUIRE (max_user_prompt_size <= wm_capacity);
 
   const auto final_prompt = BuildPromptMessages (latest_ctx.working_memory, "");
   assert_prompt_tail (final_prompt, "", kTotalTurns);
