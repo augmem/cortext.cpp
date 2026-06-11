@@ -129,7 +129,14 @@ endif()
 
 target_link_libraries(cortext_tests PRIVATE cortext Catch2::Catch2WithMain nlohmann_json::nlohmann_json)
 target_compile_definitions(cortext_tests PRIVATE CORTEXT_TESTING=1)
-target_include_directories(cortext_tests PRIVATE ${CMAKE_SOURCE_DIR}/third_party/planum.cpp/include)
+target_include_directories(cortext_tests PRIVATE
+  ${CMAKE_SOURCE_DIR}/third_party/planum.cpp/include
+)
+# sqlite_store.hpp includes <sqlite3.h>; resolve it the same way the library
+# does (pkg-config on native, vendored elsewhere).
+if(SQLITE3_INCLUDE_DIRS)
+  target_include_directories(cortext_tests PRIVATE ${SQLITE3_INCLUDE_DIRS})
+endif()
 
 if(NOT CORTEXT_DISABLE_LITERT)
   target_sources(cortext_tests PRIVATE json_schema_constraint.test.cpp)
