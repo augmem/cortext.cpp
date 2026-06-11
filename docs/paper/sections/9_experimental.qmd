@@ -24,6 +24,33 @@ At the time of the historical topical-chat runs, deep consolidation summarizatio
 
 For reproducibility, the analysis runner supports **deterministic synthetic timing** (`--deterministic`, `--seed`), which removes wall‑clock variance while preserving cadence‑derived timing for boundary and interrupt gating. Snapshot configs record the seed and synthetic clock parameters.
 
+## ACT-R-Inspired Retrieval Gate Ablations
+
+On **June 11, 2026**, we added a focused real-encoder ablation target for the ACT-R-inspired retrieval ideas: `examples/benchmark/cortext_actr_retrieval_ablation_bench`. This benchmark does not import ACT-R's production-rule architecture. It tests four transplanted scoring ideas in the existing Cortext retrieval pipeline: base-level availability, recent retrieval inhibition, procedural utility, and partial matching over existing metadata. It also tests downstream evidence blending as a rank-preserving packet-generation step for near-tied selected candidates. The harness encodes all query and memory text through the production AIST path, truncates to the same 256-dimensional Matryoshka retrieval view used by the SQLite vector schema, and then runs each study with the relevant gate off and on. The validation run used:
+
+```bash
+cmake -S . -B .tmp/actr-ablation-build \
+  -DCMAKE_BUILD_TYPE=Debug \
+  -DCORTEXT_BUILD_EXAMPLES=ON \
+  -DCORTEXT_DISABLE_LITERT=ON
+cmake --build .tmp/actr-ablation-build \
+  --target cortext_actr_retrieval_ablation_bench -j8
+.tmp/actr-ablation-build/examples/benchmark/cortext_actr_retrieval_ablation_bench \
+  --models=models
+```
+
+`CORTEXT_DISABLE_LITERT=ON` was used only to avoid an unrelated local LiteRT/protobuf rebuild mismatch; this target exercises AIST text encoding, SQLite storage, and graph retrieval, not Gemma extraction or summarization. The resolved encoder was `AIST-87M-GGUF` at `models/AIST-87M-GGUF/AIST-87M_q8_0.gguf`.
+
+| study | target rank off | target rank on | comparison rank off | comparison rank on | target score off | target score on | decisive enabled term |
+|---|---:|---:|---:|---:|---:|---:|---|
+| base-level availability | 2 | 1 | 1 | 2 | 0.837739 | 0.917310 | base-level availability |
+| recent retrieval inhibition | 2 | 1 | 1 | 2 | 0.766630 | 0.796289 | recent-inhibition = -0.090426 on the repeated candidate |
+| procedural utility | 2 | 1 | 1 | 2 | 0.745194 | 0.941837 | utility = 0.162960 |
+| partial matching | 2 | 1 | 1 | 2 | 0.814634 | 0.835859 | partial-match penalty = -0.071739 on the near-miss candidate |
+| evidence blending | 1 | 1 | 2 | 2 | 0.864534 | 0.864534 | one normalized near-tie packet and one `evidence_blend` reconstruction |
+
+All five studies passed (`summary=5/5 passed`). The first four required a rank flip under the real encoder rather than merely observing a non-zero ledger component. Evidence blending has a different pass condition: it must leave the selected ranks and scores unchanged while producing a normalized near-tie packet and a constructive-recall reconstruction tagged `evidence_blend`. The interpretation is deliberately narrow: the scoring mechanisms are promotable only because they show causal rank movement in the existing retrieval pipeline under the production embedding view, while evidence blending is promotable only as a downstream packet-quality mechanism. The activation ledger itself is treated as observability and is validated separately by rank-preservation/unit-test invariants, not as a quality mechanism.
+
 To quantify consolidation utility, we also track:
 
 * **retrieval_summary_hit_rate:** share of retrieval turns containing consolidated summaries (ASSOCIATION nodes).

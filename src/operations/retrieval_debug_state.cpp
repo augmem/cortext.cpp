@@ -8,6 +8,8 @@ namespace
 
 thread_local std::vector<long long> g_last_selected_embedding_order;
 thread_local std::vector<RankedCandidate> g_last_ranked_candidates;
+thread_local std::vector<RejectedCandidate> g_last_rejected_candidates;
+thread_local std::vector<EvidencePacket> g_last_evidence_packets;
 thread_local RetrievalSummary g_last_retrieval_summary;
 
 } // namespace
@@ -46,6 +48,42 @@ const std::vector<RankedCandidate> &
 GetLastRankedCandidates ()
 {
   return g_last_ranked_candidates;
+}
+
+void
+ClearLastRejectedCandidates ()
+{
+  g_last_rejected_candidates.clear ();
+}
+
+void
+SetLastRejectedCandidates (const std::vector<RejectedCandidate> &candidates)
+{
+  g_last_rejected_candidates = candidates;
+}
+
+const std::vector<RejectedCandidate> &
+GetLastRejectedCandidates ()
+{
+  return g_last_rejected_candidates;
+}
+
+void
+ClearLastEvidencePackets ()
+{
+  g_last_evidence_packets.clear ();
+}
+
+void
+SetLastEvidencePackets (const std::vector<EvidencePacket> &packets)
+{
+  g_last_evidence_packets = packets;
+}
+
+const std::vector<EvidencePacket> &
+GetLastEvidencePackets ()
+{
+  return g_last_evidence_packets;
 }
 
 void
