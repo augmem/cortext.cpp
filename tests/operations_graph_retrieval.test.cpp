@@ -9,7 +9,9 @@
 
 #include <cortext/core/sparse.hpp>
 #include <cortext/core/knobs.hpp>
+#include <cortext/operations/detect_memory_usage.hpp>
 #include <cortext/operations/graph_retrieval.hpp>
+#include <cortext/operations/memory_strength.hpp>
 #include <cortext/processor.hpp>
 #include <cortext/processor/operation_set.hpp>
 #include <cortext/store/sqlite_store.hpp>
@@ -244,6 +246,33 @@ SetMemorySourceMetadata (Store &store, long long memory_id,
                  { origin, reliability, static_cast<long long> (contradictions),
                    memory_id });
 }
+
+void
+RequireActivationLedgerPreservesScore (
+    const std::vector<operations::retrieval_debug::RankedCandidate> &ranked,
+    bool expect_zero_recent_inhibition = true)
+{
+  for (const auto &candidate : ranked)
+    {
+      const double component_sum
+          = candidate.activation.base_level
+            + candidate.activation.spreading_activation
+            + candidate.activation.partial_match_penalty
+            + candidate.activation.recent_inhibition
+            + candidate.activation.utility
+            + candidate.activation.exploration_noise;
+      REQUIRE (candidate.activation.activation_total
+               == Catch::Approx (candidate.score));
+      REQUIRE (candidate.activation.activation_total
+               == Catch::Approx (component_sum).margin (1e-9));
+      if (expect_zero_recent_inhibition)
+        {
+          REQUIRE (candidate.activation.recent_inhibition
+                   == Catch::Approx (0.0));
+        }
+      REQUIRE (candidate.activation.exploration_noise == Catch::Approx (0.0));
+    }
+}
 } // namespace
 
 TEST_CASE ("V2: Alg31 expands vector seeds via ASSOCIATIONS and returns expanded ids",
@@ -310,6 +339,48 @@ TEST_CASE ("V2: Alg31 expands vector seeds via ASSOCIATIONS and returns expanded
     }
   REQUIRE (has1);
   REQUIRE (has2);
+}
+
+TEST_CASE ("Graph retrieval records rejected candidate activation ledgers",
+           "[operations][graph][debug]")
+{
+  auto unique_store = SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<Store> (std::move (unique_store));
+  cortext::testing::InitializeCoreSchema (*store);
+
+  const Eigen::VectorXf query = UnitVec256 (1.0f);
+  cortext::testing::SeedEmbeddingV2 (*store, 10LL, query, 1);
+  cortext::testing::SeedMemoryV2 (*store, 10LL, 10LL, "test", "LONG_TERM",
+                                  1.0, 1);
+
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  cfg.focus = 0.5;
+  cfg.sensitivity = 0.5;
+  cfg.stability = 0.5;
+
+  cortext::operations::retrieval_debug::ClearLastRejectedCandidates ();
+  auto ops = std::make_unique<DynamicOperationSet> (
+      std::make_unique<ForceRetrievalGateOp> (),
+      std::make_unique<SeedWorkingMemoryAnchorOp> (900LL, "test", 1, query),
+      std::make_unique<GraphAugmentedRetrieveCandidates> ());
+  SignalProcessor processor (cfg, store, std::move (ops));
+  processor.Process (MakeSignal (query, 10));
+  processor.Flush ();
+
+  const auto &rejected
+      = cortext::operations::retrieval_debug::GetLastRejectedCandidates ();
+  auto it = std::find_if (
+      rejected.begin (), rejected.end (),
+      [] (const cortext::operations::retrieval_debug::RejectedCandidate &entry) {
+        return entry.candidate.memory_id == 10LL
+               && entry.reason == "working_memory_overlap";
+      });
+  REQUIRE (it != rejected.end ());
+  REQUIRE (it->observed >= it->threshold);
+  RequireActivationLedgerPreservesScore (
+      std::vector<cortext::operations::retrieval_debug::RankedCandidate>{
+          it->candidate });
 }
 
 TEST_CASE ("Graph retrieval uses durable DB seeds after process restart",
@@ -409,6 +480,7 @@ TEST_CASE ("Predictive pre-activation changes retrieval ranking",
         "CORTEXT_DISABLE_PREDICTIVE_RETRIEVAL_BONUS", "1");
     const auto ranked = run ();
     REQUIRE (ranked.size () >= 2);
+    RequireActivationLedgerPreservesScore (ranked);
     REQUIRE (ranked.front ().memory_id == 22LL);
     REQUIRE (ranked.front ().predictive_bonus == Catch::Approx (0.0));
   }
@@ -418,9 +490,456 @@ TEST_CASE ("Predictive pre-activation changes retrieval ranking",
         "CORTEXT_DISABLE_PREDICTIVE_RETRIEVAL_BONUS");
     const auto ranked = run ();
     REQUIRE (ranked.size () >= 2);
+    RequireActivationLedgerPreservesScore (ranked);
     REQUIRE (ranked.front ().memory_id == 11LL);
     REQUIRE (ranked.front ().predictive_bonus > 0.0);
     REQUIRE (ranked.front ().pre_activation == Catch::Approx (1.0));
+    REQUIRE (ranked.front ().activation.utility > 0.0);
+  }
+}
+
+TEST_CASE ("Recent retrieval inhibition is feature flagged and ledgered",
+           "[operations][graph][actr][inhibition]")
+{
+  auto unique_store = SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<Store> (std::move (unique_store));
+  cortext::testing::InitializeCoreSchema (*store);
+
+  constexpr long long kNow = 101'000LL;
+  const Eigen::VectorXf query = UnitVec256 (1.0f);
+  const Eigen::VectorXf slightly_weaker
+      = BlendVec256 (0.99f, std::sqrt (1.0f - 0.99f * 0.99f));
+
+  cortext::testing::SeedEmbeddingV2 (*store, 10LL, query, 1);
+  cortext::testing::SeedMemoryV2 (*store, 10LL, 10LL, "test", "LONG_TERM",
+                                  1.0, 1);
+  cortext::testing::SeedEmbeddingV2 (*store, 20LL, slightly_weaker, 1);
+  cortext::testing::SeedMemoryV2 (*store, 20LL, 20LL, "test", "LONG_TERM",
+                                  1.0, 1);
+  store->Execute ("UPDATE memories SET last_access = ? WHERE memory_id = ?",
+                  { kNow - 1000LL, 10LL });
+
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  cfg.focus = 0.5;
+  cfg.sensitivity = 0.5;
+  cfg.stability = 0.5;
+
+  cortext::testing::ScopedEnvVar disable_source_seed_expansion (
+      "CORTEXT_DISABLE_SOURCE_SEED_GRAPH_EXPANSION", "1");
+  cortext::testing::ScopedEnvVar disable_temporal (
+      "CORTEXT_DISABLE_TEMPORAL_RETRIEVAL", "1");
+
+  auto run = [&] (bool enable_recent_inhibition) {
+    cortext::operations::retrieval_debug::ClearLastRankedCandidates ();
+    std::optional<cortext::testing::ScopedEnvVar> guard;
+    if (enable_recent_inhibition)
+      {
+        guard.emplace ("CORTEXT_ENABLE_RECENT_RETRIEVAL_INHIBITION", "1");
+      }
+    else
+      {
+        guard.emplace ("CORTEXT_ENABLE_RECENT_RETRIEVAL_INHIBITION");
+      }
+    auto ops = std::make_unique<DynamicOperationSet> (
+        std::make_unique<ForceRetrievalGateOp> (),
+        std::make_unique<GraphAugmentedRetrieveCandidates> ());
+    SignalProcessor processor (cfg, store, std::move (ops));
+    processor.Process (MakeSignal (query, static_cast<uint64_t> (kNow)));
+    processor.Flush ();
+    return cortext::operations::retrieval_debug::GetLastRankedCandidates ();
+  };
+
+  const auto baseline = run (false);
+  REQUIRE (baseline.size () >= 2);
+  RequireActivationLedgerPreservesScore (baseline);
+  REQUIRE (baseline.front ().memory_id == 10LL);
+
+  const auto inhibited = run (true);
+  REQUIRE (inhibited.size () >= 2);
+  RequireActivationLedgerPreservesScore (inhibited, false);
+  REQUIRE (inhibited.front ().memory_id == 20LL);
+  auto recent_it = std::find_if (
+      inhibited.begin (), inhibited.end (),
+      [] (const cortext::operations::retrieval_debug::RankedCandidate &entry) {
+        return entry.memory_id == 10LL;
+      });
+  REQUIRE (recent_it != inhibited.end ());
+  REQUIRE (recent_it->activation.recent_inhibition < 0.0);
+}
+
+TEST_CASE ("Base-level availability is feature flagged and ledgered",
+           "[operations][graph][actr][base-level]")
+{
+  auto unique_store = SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<Store> (std::move (unique_store));
+  cortext::testing::InitializeCoreSchema (*store);
+
+  constexpr long long kNow = 120'000LL;
+  const Eigen::VectorXf query = UnitVec256 (1.0f);
+  const Eigen::VectorXf reinforced_but_weaker
+      = BlendVec256 (0.97f, std::sqrt (1.0f - 0.97f * 0.97f));
+
+  cortext::testing::SeedEmbeddingV2 (*store, 10LL, reinforced_but_weaker, 1);
+  cortext::testing::SeedMemoryV2 (*store, 10LL, 10LL, "test", "LONG_TERM",
+                                  1.0, 1);
+  cortext::testing::SeedEmbeddingV2 (*store, 20LL, query, 1);
+  cortext::testing::SeedMemoryV2 (*store, 20LL, 20LL, "test", "LONG_TERM",
+                                  1.0, 1);
+  store->Execute ("UPDATE memories "
+                  "SET retrieved_count = ?, used_count = ?, last_access = ? "
+                  "WHERE memory_id = ?",
+                  { 40LL, 20LL, kNow - 1000LL, 10LL });
+
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  cfg.focus = 0.5;
+  cfg.sensitivity = 0.5;
+  cfg.stability = 0.5;
+
+  cortext::testing::ScopedEnvVar disable_source_seed_expansion (
+      "CORTEXT_DISABLE_SOURCE_SEED_GRAPH_EXPANSION", "1");
+  cortext::testing::ScopedEnvVar disable_temporal (
+      "CORTEXT_DISABLE_TEMPORAL_RETRIEVAL", "1");
+  cortext::testing::ScopedEnvVar clear_recent_inhibition (
+      "CORTEXT_ENABLE_RECENT_RETRIEVAL_INHIBITION");
+
+  auto run = [&] (bool enable_base_level_availability) {
+    cortext::operations::retrieval_debug::ClearLastRankedCandidates ();
+    std::optional<cortext::testing::ScopedEnvVar> guard;
+    if (enable_base_level_availability)
+      {
+        guard.emplace ("CORTEXT_ENABLE_BASE_LEVEL_AVAILABILITY", "1");
+      }
+    else
+      {
+        guard.emplace ("CORTEXT_ENABLE_BASE_LEVEL_AVAILABILITY");
+      }
+    auto ops = std::make_unique<DynamicOperationSet> (
+        std::make_unique<ForceRetrievalGateOp> (),
+        std::make_unique<GraphAugmentedRetrieveCandidates> ());
+    SignalProcessor processor (cfg, store, std::move (ops));
+    processor.Process (MakeSignal (query, static_cast<std::uint64_t> (kNow)));
+    processor.Flush ();
+    return cortext::operations::retrieval_debug::GetLastRankedCandidates ();
+  };
+
+  const auto baseline = run (false);
+  REQUIRE (baseline.size () >= 2);
+  RequireActivationLedgerPreservesScore (baseline);
+  REQUIRE (baseline.front ().memory_id == 20LL);
+
+  const auto boosted = run (true);
+  REQUIRE (boosted.size () >= 2);
+  RequireActivationLedgerPreservesScore (boosted);
+  REQUIRE (boosted.front ().memory_id == 10LL);
+
+  auto reinforced_it = std::find_if (
+      boosted.begin (), boosted.end (),
+      [] (const cortext::operations::retrieval_debug::RankedCandidate &entry) {
+        return entry.memory_id == 10LL;
+      });
+  auto fresh_it = std::find_if (
+      boosted.begin (), boosted.end (),
+      [] (const cortext::operations::retrieval_debug::RankedCandidate &entry) {
+        return entry.memory_id == 20LL;
+      });
+  REQUIRE (reinforced_it != boosted.end ());
+  REQUIRE (fresh_it != boosted.end ());
+  REQUIRE (reinforced_it->activation.base_level
+           > fresh_it->activation.base_level);
+  REQUIRE (reinforced_it->score > fresh_it->score);
+}
+
+TEST_CASE ("Partial matching penalty is feature flagged and ledgered",
+           "[operations][graph][actr][partial-match]")
+{
+  auto unique_store = SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<Store> (std::move (unique_store));
+  cortext::testing::InitializeCoreSchema (*store);
+
+  constexpr long long kNow = 130'000LL;
+  const Eigen::VectorXf query = UnitVec256 (1.0f);
+  const Eigen::VectorXf clean_but_slightly_weaker
+      = BlendVec256 (0.99f, std::sqrt (1.0f - 0.99f * 0.99f));
+
+  cortext::testing::SeedEmbeddingV2 (*store, 10LL, query, 1);
+  cortext::testing::SeedMemoryV2 (*store, 10LL, 10LL, "other-source",
+                                  "LONG_TERM", 1.0, 1);
+  cortext::testing::SeedEmbeddingV2 (*store, 20LL, clean_but_slightly_weaker,
+                                     1);
+  cortext::testing::SeedMemoryV2 (*store, 20LL, 20LL, "test", "LONG_TERM",
+                                  1.0, 1);
+  store->Execute ("UPDATE memories "
+                  "SET modality = 'audio', source_reliability = 1.0, "
+                  "source_contradiction_count = ? "
+                  "WHERE memory_id = ?",
+                  { 4LL, 10LL });
+
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  cfg.focus = 0.5;
+  cfg.sensitivity = 0.8;
+  cfg.stability = 0.5;
+
+  cortext::testing::ScopedEnvVar disable_source_seed_expansion (
+      "CORTEXT_DISABLE_SOURCE_SEED_GRAPH_EXPANSION", "1");
+  cortext::testing::ScopedEnvVar disable_source_conf (
+      "CORTEXT_DISABLE_SOURCE_CONF", "1");
+  cortext::testing::ScopedEnvVar disable_temporal (
+      "CORTEXT_DISABLE_TEMPORAL_RETRIEVAL", "1");
+  cortext::testing::ScopedEnvVar clear_recent_inhibition (
+      "CORTEXT_ENABLE_RECENT_RETRIEVAL_INHIBITION");
+  cortext::testing::ScopedEnvVar clear_base_level (
+      "CORTEXT_ENABLE_BASE_LEVEL_AVAILABILITY");
+
+  auto run = [&] (bool enable_partial_matching) {
+    cortext::operations::retrieval_debug::ClearLastRankedCandidates ();
+    std::optional<cortext::testing::ScopedEnvVar> guard;
+    if (enable_partial_matching)
+      {
+        guard.emplace ("CORTEXT_ENABLE_PARTIAL_MATCHING_PENALTY", "1");
+      }
+    else
+      {
+        guard.emplace ("CORTEXT_ENABLE_PARTIAL_MATCHING_PENALTY");
+      }
+    auto ops = std::make_unique<DynamicOperationSet> (
+        std::make_unique<ForceRetrievalGateOp> (),
+        std::make_unique<GraphAugmentedRetrieveCandidates> ());
+    SignalProcessor processor (cfg, store, std::move (ops));
+    processor.Process (MakeTextSignal (query, "launch checklist",
+                                       static_cast<std::uint64_t> (kNow)));
+    processor.Flush ();
+    return cortext::operations::retrieval_debug::GetLastRankedCandidates ();
+  };
+
+  const auto baseline = run (false);
+  REQUIRE (baseline.size () >= 2);
+  RequireActivationLedgerPreservesScore (baseline);
+  REQUIRE (baseline.front ().memory_id == 10LL);
+  REQUIRE (baseline.front ().activation.partial_match_penalty
+           == Catch::Approx (0.0));
+
+  const auto penalized = run (true);
+  REQUIRE (penalized.size () >= 2);
+  RequireActivationLedgerPreservesScore (penalized);
+  REQUIRE (penalized.front ().memory_id == 20LL);
+
+  auto near_miss_it = std::find_if (
+      penalized.begin (), penalized.end (),
+      [] (const cortext::operations::retrieval_debug::RankedCandidate &entry) {
+        return entry.memory_id == 10LL;
+      });
+  auto clean_it = std::find_if (
+      penalized.begin (), penalized.end (),
+      [] (const cortext::operations::retrieval_debug::RankedCandidate &entry) {
+        return entry.memory_id == 20LL;
+      });
+  REQUIRE (near_miss_it != penalized.end ());
+  REQUIRE (clean_it != penalized.end ());
+  REQUIRE (near_miss_it->activation.partial_match_penalty < 0.0);
+  REQUIRE (clean_it->activation.partial_match_penalty == Catch::Approx (0.0));
+  REQUIRE (near_miss_it->score < clean_it->score);
+}
+
+TEST_CASE ("Evidence blending packets are feature flagged and rank preserving",
+           "[operations][graph][actr][evidence-blend]")
+{
+  constexpr long long kNow = 140'000LL;
+  const Eigen::VectorXf query = UnitVec256 (1.0f);
+  const Eigen::VectorXf near_tie
+      = BlendVec256 (0.995f, std::sqrt (1.0f - 0.995f * 0.995f));
+  const Eigen::VectorXf far_control = UnitVec256Second (1.0f);
+
+  auto make_store = [&] {
+    auto unique_store = SQLiteStore::Create (":memory:");
+    auto store = std::shared_ptr<Store> (std::move (unique_store));
+    cortext::testing::InitializeCoreSchema (*store);
+    cortext::testing::SeedEmbeddingV2 (*store, 10LL, query, 1);
+    cortext::testing::SeedMemoryV2 (*store, 10LL, 10LL, "test", "LONG_TERM",
+                                    1.0, 1);
+    cortext::testing::SeedEmbeddingV2 (*store, 20LL, near_tie, 1);
+    cortext::testing::SeedMemoryV2 (*store, 20LL, 20LL, "test", "LONG_TERM",
+                                    1.0, 1);
+    cortext::testing::SeedEmbeddingV2 (*store, 30LL, far_control, 1);
+    cortext::testing::SeedMemoryV2 (*store, 30LL, 30LL, "test", "LONG_TERM",
+                                    1.0, 1);
+    return store;
+  };
+
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  cfg.focus = 0.5;
+  cfg.sensitivity = 0.5;
+  cfg.stability = 0.5;
+
+  cortext::testing::ScopedEnvVar disable_source_seed_expansion (
+      "CORTEXT_DISABLE_SOURCE_SEED_GRAPH_EXPANSION", "1");
+  cortext::testing::ScopedEnvVar disable_temporal (
+      "CORTEXT_DISABLE_TEMPORAL_RETRIEVAL", "1");
+  cortext::testing::ScopedEnvVar clear_recent_inhibition (
+      "CORTEXT_ENABLE_RECENT_RETRIEVAL_INHIBITION");
+  cortext::testing::ScopedEnvVar clear_base_level (
+      "CORTEXT_ENABLE_BASE_LEVEL_AVAILABILITY");
+  cortext::testing::ScopedEnvVar clear_partial (
+      "CORTEXT_ENABLE_PARTIAL_MATCHING_PENALTY");
+  cortext::testing::ScopedEnvVar enable_constructive_recall (
+      "CORTEXT_DISABLE_CONSTRUCTIVE_RECALL");
+
+  auto run = [&] (const std::shared_ptr<Store> &store,
+                  bool enable_evidence_blending) {
+    cortext::operations::retrieval_debug::ClearLastRankedCandidates ();
+    cortext::operations::retrieval_debug::ClearLastEvidencePackets ();
+    std::optional<cortext::testing::ScopedEnvVar> guard;
+    if (enable_evidence_blending)
+      {
+        guard.emplace ("CORTEXT_ENABLE_EVIDENCE_BLENDING", "1");
+      }
+    else
+      {
+        guard.emplace ("CORTEXT_ENABLE_EVIDENCE_BLENDING");
+      }
+    auto ops = std::make_unique<DynamicOperationSet> (
+        std::make_unique<ForceRetrievalGateOp> (),
+        std::make_unique<GraphAugmentedRetrieveCandidates> ());
+    SignalProcessor processor (cfg, store, std::move (ops));
+    processor.Process (MakeSignal (query, static_cast<std::uint64_t> (kNow)));
+    processor.Flush ();
+    return cortext::operations::retrieval_debug::GetLastRankedCandidates ();
+  };
+
+  auto baseline_store = make_store ();
+  const auto baseline = run (baseline_store, false);
+  REQUIRE (baseline.size () >= 2);
+  RequireActivationLedgerPreservesScore (baseline);
+  REQUIRE (baseline[0].memory_id == 10LL);
+  REQUIRE (baseline[1].memory_id == 20LL);
+  REQUIRE (
+      cortext::operations::retrieval_debug::GetLastEvidencePackets ().empty ());
+
+  auto blended_store = make_store ();
+  const auto before_rows = blended_store->Execute (
+      "SELECT COUNT(*) AS cnt FROM memory_reconstructions "
+      "WHERE trigger = 'evidence_blend'",
+      {});
+  REQUIRE (store::AnyToLongLong (before_rows[0].at ("cnt")).value_or (-1)
+           == 0);
+
+  const auto blended = run (blended_store, true);
+  REQUIRE (blended.size () >= 2);
+  RequireActivationLedgerPreservesScore (blended);
+  REQUIRE (blended[0].memory_id == 10LL);
+  REQUIRE (blended[1].memory_id == 20LL);
+  REQUIRE (blended[0].score == Catch::Approx (baseline[0].score));
+  REQUIRE (blended[1].score == Catch::Approx (baseline[1].score));
+
+  const auto &packets
+      = cortext::operations::retrieval_debug::GetLastEvidencePackets ();
+  REQUIRE (packets.size () == 1);
+  const auto &packet = packets.front ();
+  REQUIRE (packet.consumer == "constructive_recall_summary");
+  REQUIRE (packet.reason == "near_tied_top_candidates");
+  REQUIRE (packet.members.size () == 2);
+  REQUIRE (packet.score_span <= packet.tie_margin);
+  REQUIRE (packet.members[0].rank == 0);
+  REQUIRE (packet.members[0].memory_id == 10LL);
+  REQUIRE (packet.members[1].rank == 1);
+  REQUIRE (packet.members[1].memory_id == 20LL);
+  const double weight_sum = packet.members[0].weight + packet.members[1].weight;
+  REQUIRE (weight_sum == Catch::Approx (1.0).margin (1e-9));
+  REQUIRE (packet.members[0].weight > packet.members[1].weight);
+  REQUIRE (packet.members[0].activation.activation_total
+           == Catch::Approx (packet.members[0].score));
+  REQUIRE (packet.members[1].activation.activation_total
+           == Catch::Approx (packet.members[1].score));
+
+  const auto summary
+      = cortext::operations::retrieval_debug::GetLastRetrievalSummary ();
+  REQUIRE (summary.evidence_packet_count == 1);
+  REQUIRE (summary.evidence_packet_member_count == 2);
+
+  const auto after_rows = blended_store->Execute (
+      "SELECT COUNT(*) AS cnt FROM memory_reconstructions "
+      "WHERE memory_id = ? AND trigger = 'evidence_blend'",
+      { 10LL });
+  REQUIRE (store::AnyToLongLong (after_rows[0].at ("cnt")).value_or (-1)
+           == 1);
+}
+
+TEST_CASE ("Recent retrieval inhibition uses feedback-populated last access",
+           "[operations][graph][actr][inhibition][feedback]")
+{
+  auto unique_store = SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<Store> (std::move (unique_store));
+  cortext::testing::InitializeCoreSchema (*store);
+
+  constexpr long long kFirst = 100'000LL;
+  constexpr long long kSecond = 101'000LL;
+  const Eigen::VectorXf query = UnitVec256 (1.0f);
+  const Eigen::VectorXf slightly_weaker
+      = BlendVec256 (0.99f, std::sqrt (1.0f - 0.99f * 0.99f));
+
+  cortext::testing::SeedEmbeddingV2 (*store, 10LL, query, 1);
+  cortext::testing::SeedMemoryV2 (*store, 10LL, 10LL, "test", "LONG_TERM",
+                                  1.0, 1);
+
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  cfg.focus = 0.5;
+  cfg.sensitivity = 0.5;
+  cfg.stability = 0.5;
+
+  cortext::testing::ScopedEnvVar clear_recent_inhibition (
+      "CORTEXT_ENABLE_RECENT_RETRIEVAL_INHIBITION");
+  cortext::testing::ScopedEnvVar disable_source_seed_expansion (
+      "CORTEXT_DISABLE_SOURCE_SEED_GRAPH_EXPANSION", "1");
+  cortext::testing::ScopedEnvVar disable_temporal (
+      "CORTEXT_DISABLE_TEMPORAL_RETRIEVAL", "1");
+
+  auto run_feedback_pipeline = [&] (std::uint64_t timestamp) {
+    cortext::operations::retrieval_debug::ClearLastRankedCandidates ();
+    auto ops = std::make_unique<DynamicOperationSet> (
+        std::make_unique<ForceRetrievalGateOp> (),
+        std::make_unique<GraphAugmentedRetrieveCandidates> (),
+        std::make_unique<cortext::operations::DetectMemoryUsage> (),
+        std::make_unique<cortext::operations::UpdateMemoryStrength> ());
+    SignalProcessor processor (cfg, store, std::move (ops));
+    processor.Process (MakeSignal (query, timestamp));
+    processor.Flush ();
+    return cortext::operations::retrieval_debug::GetLastRankedCandidates ();
+  };
+
+  const auto first = run_feedback_pipeline (static_cast<std::uint64_t> (kFirst));
+  REQUIRE_FALSE (first.empty ());
+  RequireActivationLedgerPreservesScore (first);
+  REQUIRE (first.front ().memory_id == 10LL);
+
+  auto access_rows = store->Execute (
+      "SELECT last_access FROM memories WHERE memory_id = ?", { 10LL });
+  REQUIRE (access_rows.size () == 1);
+  REQUIRE (std::any_cast<long long> (access_rows[0].at ("last_access"))
+           == kFirst);
+
+  cortext::testing::SeedEmbeddingV2 (*store, 20LL, slightly_weaker, 1);
+  cortext::testing::SeedMemoryV2 (*store, 20LL, 20LL, "test", "LONG_TERM",
+                                  1.0, 1);
+
+  {
+    cortext::testing::ScopedEnvVar enable_recent_inhibition (
+        "CORTEXT_ENABLE_RECENT_RETRIEVAL_INHIBITION", "1");
+    const auto second
+        = run_feedback_pipeline (static_cast<std::uint64_t> (kSecond));
+    REQUIRE (second.size () >= 2);
+    RequireActivationLedgerPreservesScore (second, false);
+    REQUIRE (second.front ().memory_id == 20LL);
+    auto accessed_it = std::find_if (
+        second.begin (), second.end (),
+        [] (const cortext::operations::retrieval_debug::RankedCandidate &entry) {
+          return entry.memory_id == 10LL;
+        });
+    REQUIRE (accessed_it != second.end ());
+    REQUIRE (accessed_it->activation.recent_inhibition < 0.0);
   }
 }
 
@@ -1551,11 +2070,13 @@ TEST_CASE ("Temporal retrieval rank bias favors recent relevant memories",
 
   const auto temporal_ranked = run (false);
   REQUIRE_FALSE (temporal_ranked.empty ());
+  RequireActivationLedgerPreservesScore (temporal_ranked);
   REQUIRE (temporal_ranked.front ().memory_id == 20LL);
   REQUIRE (temporal_ranked.front ().temporal_score > 0.95);
 
   const auto no_temporal_ranked = run (true);
   REQUIRE_FALSE (no_temporal_ranked.empty ());
+  RequireActivationLedgerPreservesScore (no_temporal_ranked);
   REQUIRE (no_temporal_ranked.front ().memory_id == 10LL);
   REQUIRE (no_temporal_ranked.front ().temporal_score == Catch::Approx (0.0));
 }

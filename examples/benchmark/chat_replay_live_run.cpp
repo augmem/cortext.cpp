@@ -471,6 +471,97 @@ RetrievalDebugJson ()
         { "label_match_count", candidate.label_match_count },
         { "durable_source_boost", candidate.durable_source_boost },
         { "durable_source_count", candidate.durable_source_count },
+        { "activation",
+          {
+              { "base_level", candidate.activation.base_level },
+              { "spreading_activation",
+                candidate.activation.spreading_activation },
+              { "partial_match_penalty",
+                candidate.activation.partial_match_penalty },
+              { "recent_inhibition", candidate.activation.recent_inhibition },
+              { "utility", candidate.activation.utility },
+              { "exploration_noise", candidate.activation.exploration_noise },
+              { "activation_total", candidate.activation.activation_total },
+          } },
+      });
+    }
+  nlohmann::json rejected = nlohmann::json::array ();
+  for (const auto &entry :
+       cortext::operations::retrieval_debug::GetLastRejectedCandidates ())
+    {
+      const auto &candidate = entry.candidate;
+      rejected.push_back ({
+        { "reason", entry.reason },
+        { "stage", entry.stage },
+        { "observed", entry.observed },
+        { "threshold", entry.threshold },
+        { "embedding_id", candidate.embedding_id },
+        { "memory_id", candidate.memory_id },
+        { "score", candidate.score },
+        { "relevance", candidate.relevance },
+        { "proc_score", candidate.proc_score },
+        { "predictive_bonus", candidate.predictive_bonus },
+        { "pre_activation", candidate.pre_activation },
+        { "fact_boost", candidate.fact_boost },
+        { "fact_stale_penalty", candidate.fact_stale_penalty },
+        { "linked_fact_count", candidate.linked_fact_count },
+        { "label_graph_boost", candidate.label_graph_boost },
+        { "label_match_count", candidate.label_match_count },
+        { "durable_source_boost", candidate.durable_source_boost },
+        { "durable_source_count", candidate.durable_source_count },
+        { "activation",
+          {
+              { "base_level", candidate.activation.base_level },
+              { "spreading_activation",
+                candidate.activation.spreading_activation },
+              { "partial_match_penalty",
+                candidate.activation.partial_match_penalty },
+              { "recent_inhibition", candidate.activation.recent_inhibition },
+              { "utility", candidate.activation.utility },
+              { "exploration_noise", candidate.activation.exploration_noise },
+              { "activation_total", candidate.activation.activation_total },
+          } },
+      });
+    }
+  nlohmann::json evidence_packets = nlohmann::json::array ();
+  for (const auto &packet :
+       cortext::operations::retrieval_debug::GetLastEvidencePackets ())
+    {
+      nlohmann::json members = nlohmann::json::array ();
+      for (const auto &member : packet.members)
+        {
+          members.push_back ({
+            { "rank", member.rank },
+            { "embedding_id", member.embedding_id },
+            { "memory_id", member.memory_id },
+            { "weight", member.weight },
+            { "score", member.score },
+            { "activation",
+              {
+                  { "base_level", member.activation.base_level },
+                  { "spreading_activation",
+                    member.activation.spreading_activation },
+                  { "partial_match_penalty",
+                    member.activation.partial_match_penalty },
+                  { "recent_inhibition",
+                    member.activation.recent_inhibition },
+                  { "utility", member.activation.utility },
+                  { "exploration_noise",
+                    member.activation.exploration_noise },
+                  { "activation_total",
+                    member.activation.activation_total },
+              } },
+          });
+        }
+      evidence_packets.push_back ({
+        { "packet_id", packet.packet_id },
+        { "consumer", packet.consumer },
+        { "reason", packet.reason },
+        { "tie_margin", packet.tie_margin },
+        { "temperature", packet.temperature },
+        { "score_span", packet.score_span },
+        { "activation_total", packet.activation_total },
+        { "members", std::move (members) },
       });
     }
 
@@ -490,7 +581,14 @@ RetrievalDebugJson ()
       summary.fact_text_rejected_low_score_count },
     { "fact_text_match_count", summary.fact_text_match_count },
     { "fact_text_best_score", summary.fact_text_best_score },
+    { "rejected_candidate_count", summary.rejected_candidate_count },
+    { "rejected_filter_count", summary.rejected_filter_count },
+    { "rejected_selection_count", summary.rejected_selection_count },
+    { "evidence_packet_count", summary.evidence_packet_count },
+    { "evidence_packet_member_count", summary.evidence_packet_member_count },
     { "ranked_candidates", std::move (ranked) },
+    { "rejected_candidates", std::move (rejected) },
+    { "evidence_packets", std::move (evidence_packets) },
   };
 }
 

@@ -989,6 +989,139 @@ RetrievalCompetitionRecoverySeconds (double T)
   return Lerp (300.0, 1800.0, Clamp (T, 0.0, 1.0));
 }
 
+inline double
+RetrievalRecentInhibitionWeight (double F, double S, double T)
+{
+  const double f = FocusBias (F);
+  const double s = SensitivityBias (S);
+  const double t = Clamp (T, 0.0, 1.0);
+  return Clamp (Lerp (0.04, 0.16, s) * Lerp (1.20, 0.75, f)
+                    * Lerp (1.25, 0.65, t),
+                0.0, 0.20);
+}
+
+inline double
+RetrievalRecentInhibitionTauSeconds (double F, double S, double T)
+{
+  const double f = FocusBias (F);
+  const double s = SensitivityBias (S);
+  const double t = Clamp (T, 0.0, 1.0);
+  return Clamp (Lerp (90.0, 900.0, t) * Lerp (0.80, 1.20, f)
+                    * Lerp (1.10, 0.85, s),
+                30.0, 1800.0);
+}
+
+inline double
+RetrievalBaseLevelAvailabilityWeight (double F, double S, double T)
+{
+  const double f = RetrievalFocusBias (F);
+  const double s = RetrievalSensitivityBias (S);
+  const double t = RetrievalStabilityBias (T);
+  return Clamp (Lerp (0.04, 0.14, s) * Lerp (1.20, 0.75, f)
+                    * Lerp (0.85, 1.20, t),
+                0.0, 0.18);
+}
+
+inline double
+RetrievalBaseLevelAvailabilityTauSeconds (double F, double S, double T)
+{
+  const double f = RetrievalFocusBias (F);
+  const double s = RetrievalSensitivityBias (S);
+  const double t = RetrievalStabilityBias (T);
+  return Clamp (Lerp (1800.0, 21600.0, t) * Lerp (0.85, 1.15, f)
+                    * Lerp (1.10, 0.85, s),
+                600.0, 43200.0);
+}
+
+inline double
+RetrievalBaseLevelAvailabilityCountSaturation (double F, double S, double T)
+{
+  const double f = RetrievalFocusBias (F);
+  const double s = RetrievalSensitivityBias (S);
+  const double t = RetrievalStabilityBias (T);
+  return Clamp (std::round (Lerp (8.0, 32.0, t) * Lerp (0.80, 1.20, f)
+                            * Lerp (0.90, 1.10, s)),
+                4.0, 64.0);
+}
+
+inline double
+RetrievalPartialMatchPenaltyWeight (double F, double S, double T)
+{
+  const double f = RetrievalFocusBias (F);
+  const double s = RetrievalSensitivityBias (S);
+  const double t = RetrievalStabilityBias (T);
+  return Clamp (Lerp (0.06, 0.18, s) * Lerp (0.85, 1.15, f)
+                    * Lerp (1.10, 0.85, t),
+                0.0, 0.22);
+}
+
+inline double
+RetrievalPartialMatchContradictionSaturation (double F, double S, double T)
+{
+  const double f = RetrievalFocusBias (F);
+  const double s = RetrievalSensitivityBias (S);
+  const double t = RetrievalStabilityBias (T);
+  return Clamp (std::round (Lerp (6.0, 3.0, f) * Lerp (1.15, 0.85, s)
+                            * Lerp (0.90, 1.20, t)),
+                2.0, 8.0);
+}
+
+inline double
+RetrievalPartialMatchSourceMismatchWeight (double F, double S, double T)
+{
+  const double f = RetrievalFocusBias (F);
+  const double s = RetrievalSensitivityBias (S);
+  const double t = RetrievalStabilityBias (T);
+  return Clamp (Lerp (0.20, 0.42, f) * Lerp (0.90, 1.10, s)
+                    * Lerp (1.08, 0.92, t),
+                0.10, 0.55);
+}
+
+inline double
+RetrievalPartialMatchModalityMismatchWeight (double F, double S, double T)
+{
+  const double f = RetrievalFocusBias (F);
+  const double s = RetrievalSensitivityBias (S);
+  const double t = RetrievalStabilityBias (T);
+  return Clamp (Lerp (0.12, 0.32, f) * Lerp (0.90, 1.15, s)
+                    * Lerp (1.05, 0.95, t),
+                0.06, 0.45);
+}
+
+inline double
+RetrievalEvidenceBlendTieMargin (double F, double S, double T)
+{
+  const double f = RetrievalFocusBias (F);
+  const double s = RetrievalSensitivityBias (S);
+  const double t = RetrievalStabilityBias (T);
+  return Clamp (Lerp (0.030, 0.070, s) * Lerp (0.78, 1.12, f)
+                    * Lerp (0.92, 1.08, t),
+                0.015, 0.10);
+}
+
+inline double
+RetrievalEvidenceBlendTemperature (double F, double S, double T)
+{
+  const double f = RetrievalFocusBias (F);
+  const double s = RetrievalSensitivityBias (S);
+  const double t = RetrievalStabilityBias (T);
+  return Clamp (Lerp (0.018, 0.055, s) * Lerp (0.82, 1.10, f)
+                    * Lerp (0.95, 1.08, t),
+                0.010, 0.075);
+}
+
+inline int
+RetrievalEvidenceBlendMaxMembers (double F, double S, double T)
+{
+  const double f = RetrievalFocusBias (F);
+  const double s = RetrievalSensitivityBias (S);
+  const double t = RetrievalStabilityBias (T);
+  return std::max (
+      2, static_cast<int> (std::round (Lerp (2.0, 4.0, s)
+                                      * Lerp (1.10, 0.90, f)
+                                      * Lerp (0.95, 1.10, t))));
+}
+
 struct InfluenceFeedbackPolicy
 {
   double sustain_window;
