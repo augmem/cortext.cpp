@@ -3239,6 +3239,48 @@ ProcessExtractionResults::Execute (OperationContext &context, Transaction &tx) c
             }
         }
 
+      // Fact admission is derived, never list-based: a durable assertion
+      // needs a subject that references something (not pure closed-class
+      // grammar), a predicate that is an actual assertion (the six relation
+      // predicates are mis-slotted relations, already handled by the
+      // relation path), and endpoints that are not the same phrase.
+      static const std::unordered_set<std::string_view>
+          kRelationOnlyPredicates = { "co_occurs",   "implies", "contradicts",
+                                      "reinforces",  "causes",  "similar_to" };
+      auto fact_token_set = [] (const std::string &text) {
+        std::unordered_set<std::string> tokens;
+        const std::string canonical
+            = CanonicalLabelTokenKey (NormalizeLabelKey (text));
+        std::string token;
+        for (unsigned char c : canonical)
+          {
+            if (std::isalnum (c) != 0)
+              {
+                token.push_back (static_cast<char> (c));
+              }
+            else if (!token.empty ())
+              {
+                tokens.insert (token);
+                token.clear ();
+              }
+          }
+        if (!token.empty ())
+          {
+            tokens.insert (token);
+          }
+        return tokens;
+      };
+      auto reject_fact = [] (const std::string &subject,
+                             const std::string &predicate,
+                             const std::string &object,
+                             const char *reason) {
+        telemetry::LogDebug (
+            "cortext.fact_admission",
+            { telemetry::Attribute::String ("subject", subject),
+              telemetry::Attribute::String ("predicate", predicate),
+              telemetry::Attribute::String ("object", object),
+              telemetry::Attribute::String ("decision", reason) });
+      };
       for (const auto &fact : facts_to_process)
         {
           const std::string canonical_subject
@@ -3250,6 +3292,38 @@ ProcessExtractionResults::Execute (OperationContext &context, Transaction &tx) c
           if (canonical_subject.empty () || canonical_predicate.empty ()
               || canonical_object.empty () || summary_memory_id <= 0)
             {
+              continue;
+            }
+          if (kRelationOnlyPredicates.find (canonical_predicate)
+              != kRelationOnlyPredicates.end ())
+            {
+              reject_fact (fact.subject, fact.predicate, fact.object,
+                           "rejected_relation_predicate");
+              continue;
+            }
+          if (IsAllClosedClassTokens (
+                  CanonicalLabelTokenKey (NormalizeLabelKey (fact.subject))))
+            {
+              reject_fact (fact.subject, fact.predicate, fact.object,
+                           "rejected_closed_class_subject");
+              continue;
+            }
+          const auto subject_tokens = fact_token_set (fact.subject);
+          const auto object_tokens = fact_token_set (fact.object);
+          const bool subject_covers_object = std::all_of (
+              object_tokens.begin (), object_tokens.end (),
+              [&] (const std::string &t) {
+                return subject_tokens.count (t) > 0;
+              });
+          const bool object_covers_subject = std::all_of (
+              subject_tokens.begin (), subject_tokens.end (),
+              [&] (const std::string &t) {
+                return object_tokens.count (t) > 0;
+              });
+          if (subject_covers_object || object_covers_subject)
+            {
+              reject_fact (fact.subject, fact.predicate, fact.object,
+                           "rejected_self_loop");
               continue;
             }
 

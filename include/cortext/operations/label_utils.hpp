@@ -101,6 +101,101 @@ CanonicalLabelTokenKey (const std::string &label_key)
   return out;
 }
 
+// Closed-class language structure only: function words, pronouns,
+// auxiliaries, interjections, and conversational acknowledgments, plus
+// chat-transcript role artifacts. This set is frozen - it encodes grammar,
+// not corpus tuning. Content-word filtering is the job of corpus-derived
+// signals (label-bank similarity contrast, document frequency), never of
+// this list. See docs: a phrase is rejected here only when EVERY token is
+// closed-class.
+inline const std::unordered_set<std::string_view> &
+ClosedClassTokens ()
+{
+  static const std::unordered_set<std::string_view> kClosedClassTokens = {
+  // Articles, conjunctions, prepositions, particles
+  "a",     "about", "after",  "again",  "all",   "almost", "also",
+  "an",    "and",   "any",    "around", "as",    "at",     "back",
+  "basically", "before", "but", "by",   "down",  "for",    "from",
+  "if",    "in",    "into",   "just",   "kind",  "like",   "maybe",
+  "not",   "of",    "off",    "on",     "once",  "only",   "or",
+  "out",   "over",  "probably", "so",   "some",  "sort",   "still",
+  "than",  "that",  "the",    "then",   "there", "these",  "this",
+  "those", "through", "to",   "too",    "under", "up",     "very",
+  "well",  "when",  "where",  "which",  "while", "who",    "why",
+  "with",  "would",
+  // Pronouns and possessives (incl. indefinite pronouns)
+  "anybody", "anyone", "anything", "everybody", "everyone", "everything",
+  "he",    "her",   "hers",   "him",    "his",   "i",      "it",
+  "its",   "me",    "my",     "nobody", "none",  "nothing", "our",
+  "ours",  "she",   "somebody", "someone", "something", "their",
+  "theirs", "them", "they",   "us",     "we",    "what",   "you",
+  "your",  "yours",
+  // Auxiliaries, light verbs, and desiderative semi-modals
+  "am",    "are",   "be",     "been",   "being", "came",   "can",
+  "come",  "could", "did",    "do",     "does",  "doing",  "done",
+  "get",   "gets",
+  "getting", "go",  "goes",   "going",  "got",   "had",    "has",
+  "have",  "having", "is",    "make",   "makes", "making", "might",
+  "must",  "need",  "needed", "needing", "needs", "shall", "should",
+  "turn",  "turned", "turning", "want", "wanted", "wanting", "wants",
+  "was",   "were",  "will",
+  // Contraction stems and enclitics: canonicalization splits "don't"
+  // into "don" + "t", so negated-auxiliary stems and clitic fragments
+  // are closed-class tokens in their own right.
+  "ain",   "aren",  "couldn", "didn",   "doesn", "don",    "hadn",
+  "hasn",  "haven", "isn",    "mustn",  "needn", "shan",   "shouldn",
+  "wasn",  "weren", "won",    "wouldn",
+  "d",     "ll",    "m",      "re",     "s",     "t",      "ve",
+  // Degree adverbs
+  "quite", "rather", "really",
+  // Interjections, acknowledgments, discourse markers
+  "ah",    "aha",   "alright", "bye",   "cool",  "er",     "erm",
+  "fine",  "good",  "great",  "hello",  "hey",   "hi",     "hmm",
+  "huh",   "know",  "mhm",    "mm",     "nah",   "nice",   "no",
+  "nope",  "oh",    "ok",     "okay",   "oops",  "please", "right",
+  "sorry", "sounds", "sure",  "thank",  "thanks", "uh",    "um",
+  "umm",   "welcome", "wow",  "ya",     "yeah",  "yep",    "yes",
+  // Chat-transcript role artifacts
+  "assistant", "system", "user"
+};
+  return kClosedClassTokens;
+}
+
+// A phrase is structurally empty when every canonical token is
+// closed-class; used by both label and fact admission.
+inline bool
+IsAllClosedClassTokens (const std::string &canonical)
+{
+  int token_count = 0;
+  int weak_count = 0;
+  std::string token;
+  auto finish = [&] {
+    if (token.empty ())
+      {
+        return;
+      }
+    ++token_count;
+    if (ClosedClassTokens ().find (token) != ClosedClassTokens ().end ())
+      {
+        ++weak_count;
+      }
+    token.clear ();
+  };
+  for (unsigned char c : canonical)
+    {
+      if (std::isalnum (c) != 0)
+        {
+          token.push_back (static_cast<char> (c));
+        }
+      else
+        {
+          finish ();
+        }
+    }
+  finish ();
+  return token_count >= 1 && token_count == weak_count;
+}
+
 inline bool
 IsDurableLabelCandidate (const std::string &label,
                          const std::string &label_key)
@@ -117,84 +212,9 @@ IsDurableLabelCandidate (const std::string &label,
       return false;
     }
 
-  // Closed-class language structure only: function words, pronouns,
-  // auxiliaries, interjections, and conversational acknowledgments, plus
-  // chat-transcript role artifacts. This set is frozen - it encodes grammar,
-  // not corpus tuning. Content-word filtering is the job of corpus-derived
-  // signals (label-bank similarity contrast, document frequency), never of
-  // this list. See docs: a phrase is rejected here only when EVERY token is
-  // closed-class.
-  static const std::unordered_set<std::string_view> kClosedClassTokens = {
-    // Articles, conjunctions, prepositions, particles
-    "a",     "about", "after",  "again",  "all",   "almost", "also",
-    "an",    "and",   "any",    "around", "as",    "at",     "back",
-    "basically", "before", "but", "by",   "down",  "for",    "from",
-    "if",    "in",    "into",   "just",   "kind",  "like",   "maybe",
-    "not",   "of",    "off",    "on",     "once",  "only",   "or",
-    "out",   "over",  "probably", "so",   "some",  "sort",   "still",
-    "than",  "that",  "the",    "then",   "there", "these",  "this",
-    "those", "through", "to",   "too",    "under", "up",     "very",
-    "well",  "when",  "where",  "which",  "while", "who",    "why",
-    "with",  "would",
-    // Pronouns and possessives (incl. indefinite pronouns)
-    "anybody", "anyone", "anything", "everybody", "everyone", "everything",
-    "he",    "her",   "hers",   "him",    "his",   "i",      "it",
-    "its",   "me",    "my",     "nobody", "none",  "nothing", "our",
-    "ours",  "she",   "somebody", "someone", "something", "their",
-    "theirs", "them", "they",   "us",     "we",    "what",   "you",
-    "your",  "yours",
-    // Auxiliaries, light verbs, and desiderative semi-modals
-    "am",    "are",   "be",     "been",   "being", "came",   "can",
-    "come",  "could", "did",    "do",     "does",  "doing",  "done",
-    "get",   "gets",
-    "getting", "go",  "goes",   "going",  "got",   "had",    "has",
-    "have",  "having", "is",    "make",   "makes", "making", "might",
-    "must",  "need",  "needed", "needing", "needs", "shall", "should",
-    "turn",  "turned", "turning", "want", "wanted", "wanting", "wants",
-    "was",   "were",  "will",
-    // Degree adverbs
-    "quite", "rather", "really",
-    // Interjections, acknowledgments, discourse markers
-    "ah",    "aha",   "alright", "bye",   "cool",  "er",     "erm",
-    "fine",  "good",  "great",  "hello",  "hey",   "hi",     "hmm",
-    "huh",   "know",  "mhm",    "mm",     "nah",   "nice",   "no",
-    "nope",  "oh",    "ok",     "okay",   "oops",  "please", "right",
-    "sorry", "sounds", "sure",  "thank",  "thanks", "uh",    "um",
-    "umm",   "welcome", "wow",  "ya",     "yeah",  "yep",    "yes",
-    // Chat-transcript role artifacts
-    "assistant", "system", "user"
-  };
 
-  int phrase_token_count = 0;
-  int weak_phrase_token_count = 0;
-  std::string phrase_token;
-  auto finish_phrase_token = [&] {
-    if (phrase_token.empty ())
-      {
-        return;
-      }
-    ++phrase_token_count;
-    if (kClosedClassTokens.find (phrase_token) != kClosedClassTokens.end ())
-      {
-        ++weak_phrase_token_count;
-      }
-    phrase_token.clear ();
-  };
-  for (unsigned char c : canonical)
-    {
-      if (std::isalnum (c) != 0)
-        {
-          phrase_token.push_back (static_cast<char> (c));
-        }
-      else
-        {
-          finish_phrase_token ();
-        }
-    }
-  finish_phrase_token ();
   // Single closed-class tokens are as empty as all-closed-class phrases.
-  if (phrase_token_count >= 1
-      && phrase_token_count == weak_phrase_token_count)
+  if (IsAllClosedClassTokens (canonical))
     {
       return false;
     }
