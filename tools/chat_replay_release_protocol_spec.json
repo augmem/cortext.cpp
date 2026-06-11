@@ -11,7 +11,9 @@
       "probe_stride": 25,
       "warmup_events": 200,
       "min_probe_rows_after_benchmark": 30,
-      "required_media_modalities": ["image"],
+      "required_media_modalities": [
+        "image"
+      ],
       "purpose": "early dense text conversation with image media coverage"
     },
     {
@@ -22,7 +24,9 @@
       "probe_stride": 10,
       "warmup_events": 10,
       "min_probe_rows_after_benchmark": 4,
-      "required_media_modalities": ["video"],
+      "required_media_modalities": [
+        "video"
+      ],
       "purpose": "fixed window that exercises video source blobs"
     },
     {
@@ -33,7 +37,9 @@
       "probe_stride": 10,
       "warmup_events": 10,
       "min_probe_rows_after_benchmark": 4,
-      "required_media_modalities": ["audio"],
+      "required_media_modalities": [
+        "audio"
+      ],
       "purpose": "fixed window that exercises raw speech/audio source blobs"
     }
   ],
@@ -72,7 +78,11 @@
     "model": "gemma4:12b-it-qat",
     "repetitions_min": 3,
     "repetitions_max": 5,
-    "packet_aliases": ["A", "B", "C"],
+    "packet_aliases": [
+      "A",
+      "B",
+      "C"
+    ],
     "blind_packets": true,
     "randomize_packet_order": true,
     "decode_winners_afterward": true,
@@ -88,7 +98,11 @@
       "source_grounding",
       "modality_grounding"
     ],
-    "release_composite_fields": ["relevance", "sufficiency", "noise"],
+    "release_composite_fields": [
+      "relevance",
+      "sufficiency",
+      "noise"
+    ],
     "release_composite_weights": {
       "relevance": 1.0,
       "sufficiency": 1.0,
@@ -146,6 +160,80 @@
       "env": {
         "CORTEXT_DISABLE_TEMPORAL_RETRIEVAL": "1",
         "CORTEXT_DISABLE_FACTS": "1"
+      }
+    },
+    {
+      "name": "no_predictive_bonus",
+      "daily_consolidation": true,
+      "env": {
+        "CORTEXT_DISABLE_PREDICTIVE_RETRIEVAL_BONUS": "1"
+      }
+    },
+    {
+      "name": "no_procedural_proactive",
+      "daily_consolidation": true,
+      "env": {
+        "CORTEXT_DISABLE_PROCEDURAL_PROACTIVE_RETRIEVAL": "1"
+      }
+    },
+    {
+      "name": "no_metacognitive",
+      "daily_consolidation": true,
+      "env": {
+        "CORTEXT_DISABLE_METACOG_TOT_RECOVERY": "1",
+        "CORTEXT_DISABLE_METACOG_UNKNOWN_CAUTION": "1"
+      }
+    },
+    {
+      "name": "no_constructive_recall",
+      "daily_consolidation": true,
+      "env": {
+        "CORTEXT_DISABLE_CONSTRUCTIVE_RECALL": "1"
+      }
+    },
+    {
+      "name": "no_stm_shadow",
+      "daily_consolidation": true,
+      "env": {
+        "CORTEXT_STM_SHADOW_DISABLE": "1"
+      }
+    },
+    {
+      "name": "actr_base_level",
+      "daily_consolidation": true,
+      "env": {
+        "CORTEXT_ENABLE_BASE_LEVEL_AVAILABILITY": "1"
+      }
+    },
+    {
+      "name": "actr_recent_inhibition",
+      "daily_consolidation": true,
+      "env": {
+        "CORTEXT_ENABLE_RECENT_RETRIEVAL_INHIBITION": "1"
+      }
+    },
+    {
+      "name": "actr_partial_matching",
+      "daily_consolidation": true,
+      "env": {
+        "CORTEXT_ENABLE_PARTIAL_MATCHING_PENALTY": "1"
+      }
+    },
+    {
+      "name": "actr_evidence_blending",
+      "daily_consolidation": true,
+      "env": {
+        "CORTEXT_ENABLE_EVIDENCE_BLENDING": "1"
+      }
+    },
+    {
+      "name": "actr_all_gates",
+      "daily_consolidation": true,
+      "env": {
+        "CORTEXT_ENABLE_BASE_LEVEL_AVAILABILITY": "1",
+        "CORTEXT_ENABLE_RECENT_RETRIEVAL_INHIBITION": "1",
+        "CORTEXT_ENABLE_PARTIAL_MATCHING_PENALTY": "1",
+        "CORTEXT_ENABLE_EVIDENCE_BLENDING": "1"
       }
     }
   ],

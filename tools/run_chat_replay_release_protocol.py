@@ -37,6 +37,8 @@ LOCAL_PROVIDER_ENV_KEYS = {
 CORTEXT_RELEASE_ENV_ALLOWLIST = {
     "CORTEXT_JUDGE_BASE_URL",
     "CORTEXT_OLLAMA_BASE_URL",
+    # Observability only: per-summary label/fact admission counters.
+    "CORTEXT_STM_LTM_AUDIT",
 }
 LOCAL_PROVIDER_ENV_PREFIXES = ("OLLAMA_",)
 HOSTED_PROVIDER_ENV_MARKERS = (
@@ -343,6 +345,10 @@ def sanitized_subprocess_env() -> tuple[dict[str, str], list[str]]:
     stripped = sorted(key for key in env if is_hosted_provider_env_key(key))
     for key in stripped:
         env.pop(key, None)
+    # Observability, not behavior: every protocol run records the per-summary
+    # label admission/rejection counters (stm_ltm_relabel_audit) so label and
+    # fact decisions are explainable after the fact.
+    env["CORTEXT_STM_LTM_AUDIT"] = "1"
     return env, stripped
 
 
