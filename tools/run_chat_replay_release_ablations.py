@@ -20,6 +20,9 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 CORTEXT_RELEASE_ENV_ALLOWLIST = {
     "CORTEXT_JUDGE_BASE_URL",
     "CORTEXT_OLLAMA_BASE_URL",
+    # Observability only: per-summary label/fact admission counters,
+    # injected by the orchestrator for every protocol run.
+    "CORTEXT_STM_LTM_AUDIT",
 }
 NO_GRAPH_EXPANSION_ENV = {
     "CORTEXT_DISABLE_SOURCE_SEED_GRAPH_EXPANSION": "1",
@@ -822,8 +825,10 @@ def main() -> int:
             str(args.judge_packet_item_limit),
             "--ollama-base-url",
             "http://127.0.0.1:11434",
+            # The judge has a dedicated GPU; evicting the model between
+            # requests just pays an ~8GB reload per judged probe.
             "--ollama-keep-alive",
-            "0s",
+            "10m",
             "--blind-packets",
             "--max-media-per-system",
             "-1",

@@ -1520,8 +1520,10 @@ def build_early_judge_command(
         args.judge_model,
         "--ollama-base-url",
         args.ollama_base_url,
+        # The judge has a dedicated GPU; keep the model resident instead
+        # of paying an ~8GB reload per judged probe.
         "--ollama-keep-alive",
-        "0s",
+        "10m",
         "--judge-repetitions",
         str(args.early_judge_repetitions),
         "--confirm-fail-repetitions",
