@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import hashlib
 import json
 import os
@@ -881,25 +882,16 @@ def main() -> int:
     print(f"[ablation-pipeline] wrote plan {args.ablation_plan}", flush=True)
 
     ablation_args: list[str] = []
-    # Two-stage pipeline across the two judge/provider endpoints: while arm
-    # N's full judge runs (judge GPU), arm N+1's benchmark replays (provider
-    # GPU). Judges serialize on their endpoint, so each arm waits for the
-    # previous arm's judge before launching its own.
-    pending_judge: tuple[str, subprocess.Popen] | None = None
 
-    def wait_for_pending_judge() -> None:
-        nonlocal pending_judge
-        if pending_judge is None:
-            return
-        pending_name, pending_process = pending_judge
-        rc = pending_process.wait()
-        pending_judge = None
-        if rc != 0:
-            raise RuntimeError(
-                f"ablation judge {pending_name} exited with rc={rc}"
-            )
-
-    for case, plan_case in zip(CASES, plan_cases):
+    # First-pass arms take their verdict from the live (early) judge that
+    # runs during each benchmark (1 repetition per probe via the real judge
+    # tool); the heavyweight 3-repetition judge is post-hoc work for arms
+    # worth confirming. Two arms run concurrently: while one pauses for its
+    # judgment on the judge GPU, the other replays on the provider GPU.
+    # Per-database objects roots keep concurrent engine processes isolated.
+    # An arm stopped early by its own quality gate is a verdict, not a
+    # sweep failure: its live-judge artifacts up to the stop are recorded.
+    def run_case(case, plan_case) -> str:
         name, env_overrides, _ = case
         summary = pathlib.Path(plan_case["summary_path"])
         judge = pathlib.Path(plan_case["judge_path"])
@@ -932,6 +924,7 @@ def main() -> int:
             f"env_overrides={env_overrides}",
             flush=True,
         )
+        stopped_early: str | None = None
         try:
             run_ablation_benchmark_with_early_judge(
                 name=name,
@@ -941,27 +934,58 @@ def main() -> int:
                 summary=summary,
                 strict_early_judge=bool(plan_case.get("strict_early_judge")),
             )
-        except BaseException:
-            if pending_judge is not None:
-                terminate_process(
-                    pending_judge[1], f"ablation judge {pending_judge[0]}"
-                )
-                pending_judge = None
-            raise
+        except RuntimeError as exc:
+            stopped_early = str(exc)
+            print(
+                f"[ablation-pipeline] arm {name} stopped early "
+                f"(gate or benchmark failure is itself a verdict): {exc}",
+                flush=True,
+            )
 
-        wait_for_pending_judge()
-        judge_cmd = shlex.split(plan_case["judge_command"])
-        print(
-            f"[ablation-pipeline] judge {name} (pipelined): "
-            f"{plan_case['judge_command']}",
-            flush=True,
+        early_dir = summary.parent / "early_judge"
+        live_judges = sorted(
+            p
+            for p in early_dir.glob("early_probe_*_judge.json")
+            if not p.name.endswith("_delta_judge.json")
+            and not p.name.endswith("_confirm_judge.json")
         )
-        judge_env, _ = sanitized_subprocess_env()
-        pending_judge = (name, subprocess.Popen(judge_cmd, env=judge_env))
+        if live_judges:
+            print(
+                f"[ablation-pipeline] judge {name}: using live judge "
+                f"artifact {live_judges[-1]}",
+                flush=True,
+            )
+            shutil.copyfile(live_judges[-1], judge)
+            live_rows = pathlib.Path(str(live_judges[-1]) + ".rows.jsonl")
+            if live_rows.exists():
+                shutil.copyfile(live_rows, pathlib.Path(str(judge) + ".rows.jsonl"))
+        elif stopped_early is None:
+            judge_cmd = shlex.split(plan_case["judge_command"])
+            print(
+                f"[ablation-pipeline] judge {name} (full, fallback): "
+                f"{plan_case['judge_command']}",
+                flush=True,
+            )
+            judge_env, _ = sanitized_subprocess_env()
+            subprocess.run(judge_cmd, check=True, env=judge_env)
+        else:
+            raise RuntimeError(
+                f"ablation {name} stopped early with no live judge "
+                f"artifacts: {stopped_early}"
+            )
+        return f"{name}:{summary}:{judge}"
 
-        ablation_args += ["--ablation", f"{name}:{summary}:{judge}"]
-
-    wait_for_pending_judge()
+    case_results: list[str | None] = [None] * len(plan_cases)
+    with concurrent.futures.ThreadPoolExecutor (max_workers=2) as pool:
+        futures = {
+            pool.submit(run_case, case, plan_case): index
+            for index, (case, plan_case) in enumerate(zip(CASES, plan_cases))
+        }
+        for future in concurrent.futures.as_completed(futures):
+            case_results[futures[future]] = future.result()
+    for result in case_results:
+        if result is not None:
+            ablation_args += ["--ablation", result]
 
     report_cmd = [
         "python3",
