@@ -881,6 +881,24 @@ def main() -> int:
     print(f"[ablation-pipeline] wrote plan {args.ablation_plan}", flush=True)
 
     ablation_args: list[str] = []
+    # Two-stage pipeline across the two judge/provider endpoints: while arm
+    # N's full judge runs (judge GPU), arm N+1's benchmark replays (provider
+    # GPU). Judges serialize on their endpoint, so each arm waits for the
+    # previous arm's judge before launching its own.
+    pending_judge: tuple[str, subprocess.Popen] | None = None
+
+    def wait_for_pending_judge() -> None:
+        nonlocal pending_judge
+        if pending_judge is None:
+            return
+        pending_name, pending_process = pending_judge
+        rc = pending_process.wait()
+        pending_judge = None
+        if rc != 0:
+            raise RuntimeError(
+                f"ablation judge {pending_name} exited with rc={rc}"
+            )
+
     for case, plan_case in zip(CASES, plan_cases):
         name, env_overrides, _ = case
         summary = pathlib.Path(plan_case["summary_path"])
@@ -914,24 +932,36 @@ def main() -> int:
             f"env_overrides={env_overrides}",
             flush=True,
         )
-        run_ablation_benchmark_with_early_judge(
-            name=name,
-            bench_cmd=bench_cmd,
-            early_cmd_text=str(plan_case.get("early_judge_command", "") or ""),
-            env=env,
-            summary=summary,
-            strict_early_judge=bool(plan_case.get("strict_early_judge")),
-        )
+        try:
+            run_ablation_benchmark_with_early_judge(
+                name=name,
+                bench_cmd=bench_cmd,
+                early_cmd_text=str(plan_case.get("early_judge_command", "") or ""),
+                env=env,
+                summary=summary,
+                strict_early_judge=bool(plan_case.get("strict_early_judge")),
+            )
+        except BaseException:
+            if pending_judge is not None:
+                terminate_process(
+                    pending_judge[1], f"ablation judge {pending_judge[0]}"
+                )
+                pending_judge = None
+            raise
 
+        wait_for_pending_judge()
         judge_cmd = shlex.split(plan_case["judge_command"])
         print(
-            f"[ablation-pipeline] judge {name}: {plan_case['judge_command']}",
+            f"[ablation-pipeline] judge {name} (pipelined): "
+            f"{plan_case['judge_command']}",
             flush=True,
         )
         judge_env, _ = sanitized_subprocess_env()
-        subprocess.run(judge_cmd, check=True, env=judge_env)
+        pending_judge = (name, subprocess.Popen(judge_cmd, env=judge_env))
 
         ablation_args += ["--ablation", f"{name}:{summary}:{judge}"]
+
+    wait_for_pending_judge()
 
     report_cmd = [
         "python3",
