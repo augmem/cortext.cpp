@@ -113,6 +113,27 @@
   },
   "ablations": [
     {
+      "name": "wm_capacity_10",
+      "daily_consolidation": true,
+      "env": {
+        "CORTEXT_WM_CAPACITY_OVERRIDE": "10"
+      }
+    },
+    {
+      "name": "wm_capacity_14",
+      "daily_consolidation": true,
+      "env": {
+        "CORTEXT_WM_CAPACITY_OVERRIDE": "14"
+      }
+    },
+    {
+      "name": "wm_capacity_21",
+      "daily_consolidation": true,
+      "env": {
+        "CORTEXT_WM_CAPACITY_OVERRIDE": "21"
+      }
+    },
+    {
       "name": "no_daily_consolidation",
       "daily_consolidation": false,
       "env": {}
@@ -234,27 +255,6 @@
         "CORTEXT_ENABLE_RECENT_RETRIEVAL_INHIBITION": "1",
         "CORTEXT_ENABLE_PARTIAL_MATCHING_PENALTY": "1",
         "CORTEXT_ENABLE_EVIDENCE_BLENDING": "1"
-      }
-    },
-    {
-      "name": "wm_capacity_10",
-      "daily_consolidation": true,
-      "env": {
-        "CORTEXT_WM_CAPACITY_OVERRIDE": "10"
-      }
-    },
-    {
-      "name": "wm_capacity_14",
-      "daily_consolidation": true,
-      "env": {
-        "CORTEXT_WM_CAPACITY_OVERRIDE": "14"
-      }
-    },
-    {
-      "name": "wm_capacity_21",
-      "daily_consolidation": true,
-      "env": {
-        "CORTEXT_WM_CAPACITY_OVERRIDE": "21"
       }
     }
   ],
