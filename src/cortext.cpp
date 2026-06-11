@@ -1011,7 +1011,7 @@ HydrateWorkingMemoryFromDB (Store *store, ObjectStore *object_store,
 } // namespace
 
 std::unique_ptr<IOperation>
-BuildPipelineRoot (bool probe_mode)
+BuildRootOperationSet (bool probe_mode)
 {
   using cortext::operations::ApplyEmotionalConsolidation;
   using cortext::operations::ApplyFocusFeedback;
@@ -1123,16 +1123,16 @@ BuildPipelineRoot (bool probe_mode)
       = OperationSet<CoreStage, StorageStage, RetrievalStage, FeedbackStage>;
 
   // Every operation declares its Requires/Satisfies contract; the chain
-  // aggregation proves at compile time that both pipeline variants are
+  // aggregation proves at compile time that both root variants are
   // self-contained (no operation consumes a per-signal value that no
   // earlier operation produced). On failure, inspect the offending root's
   // Input alias: it lists the unsatisfied tags.
   static_assert (FullRoot::kContractsComplete,
-                 "every pipeline operation must declare its contract");
+                 "every operation must declare its contract");
   static_assert (IsSelfContained<ProbeRoot>,
-                 "probe pipeline consumes a value no operation produces");
+                 "probe operation set consumes a value no operation produces");
   static_assert (IsSelfContained<FullRoot>,
-                 "full pipeline consumes a value no operation produces");
+                 "full operation set consumes a value no operation produces");
 
   if (probe_mode)
     {
@@ -1230,7 +1230,7 @@ struct Cortext::Impl
   std::shared_ptr<cortext::Clock> clock;
   std::shared_ptr<cortext::Store> store;
   std::shared_ptr<cortext::ObjectStore> object_store;
-  std::unique_ptr<cortext::IOperation> pipeline_root;
+  std::unique_ptr<cortext::IOperation> root_operations;
   std::unique_ptr<cortext::SignalProcessor> processor;
 
   std::unique_ptr<Extractor> extractor_instance;
@@ -1312,9 +1312,9 @@ struct Cortext::Impl
           }
       }
 
-    pipeline_root = BuildPipelineRoot (false);
+    root_operations = BuildRootOperationSet (false);
     processor = std::make_unique<cortext::SignalProcessor> (
-        MakeProcessorConfig (), store, std::move (pipeline_root),
+        MakeProcessorConfig (), store, std::move (root_operations),
         object_store);
   }
 
@@ -1371,7 +1371,7 @@ struct Cortext::Impl
   MakeProbeProcessor () const
   {
     return std::make_unique<cortext::SignalProcessor> (
-        MakeProcessorConfig (), store, BuildPipelineRoot (true),
+        MakeProcessorConfig (), store, BuildRootOperationSet (true),
         object_store);
   }
 
@@ -1455,7 +1455,7 @@ struct Cortext::Impl
     internal::ThrowIfStopRequested ();
     telemetry::ScopedSpan span ("cortext.api.consolidate");
     const auto total_start = std::chrono::steady_clock::now ();
-    // Drive the pipeline to allow EvaluateConsolidation to emit events
+    // Drive the operation set to allow EvaluateConsolidation to emit events
     // and ConsolidationGate to run scoring/jobs when start is signaled.
     std::vector<float> v;
     telemetry::ScopedSpan encode_span ("cortext.encode");

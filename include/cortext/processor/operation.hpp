@@ -28,8 +28,8 @@ public:
 ///
 /// Each parameter is a tag type identifying a value on the operation
 /// context. Every required value must be satisfied by an earlier operation
-/// in the assembled pipeline (or be a declared pipeline input); a
-/// construction-time validator checks this for each pipeline variant.
+/// in the assembled operation set (or be a declared external input);
+/// OperationSet validates this at compile time for each root variant.
 template <typename... Tags>
 struct Requires
 {
@@ -39,7 +39,7 @@ struct Requires
 ///
 /// Each parameter is a tag type identifying a value on the operation
 /// context. Producing a value satisfies the requirements of later
-/// operations in the pipeline.
+/// operations in the set.
 template <typename... Tags>
 struct Satisfies
 {
@@ -47,7 +47,7 @@ struct Satisfies
 
 /// @brief Contract-declaring base for operations.
 ///
-/// Every pipeline operation declares its per-signal dataflow contract,
+/// Every operation declares its per-signal dataflow contract,
 /// e.g.:
 ///
 ///   class ComputeCompositeScore
@@ -56,8 +56,8 @@ struct Satisfies
 ///
 /// Tags live in cortext/processor/contract_tags.hpp. Validation happens at
 /// compile time: OperationSet aggregates member contracts in sequence
-/// (operation_set.hpp), and the pipeline build site static_asserts that
-/// both pipeline variants are self-contained - an operation consuming a
+/// (operation_set.hpp), and the root build site static_asserts that
+/// both root variants are self-contained - an operation consuming a
 /// value no earlier operation produces fails the build, with the missing
 /// tags listed in the set's Input alias.
 template <typename TRequires, typename TSatisfies>

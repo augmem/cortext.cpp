@@ -139,7 +139,8 @@ WorkingMemory::Execute (OperationContext &context, Transaction &tx) const
       return; // No memory boundary - skip WM gating
     }
 
-  // Consolidation signals drive maintenance jobs through the normal pipeline,
+  // Consolidation signals drive maintenance jobs through the normal
+  // operation sequence,
   // but they are not ingress memories. They must not evict or insert
   // working-memory input traces.
   if (signal.consolidation_mode.has_value ())
