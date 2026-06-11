@@ -255,6 +255,21 @@ RunPredictiveRankingStudy ()
     top_on = ranked.empty () ? 0LL : ranked.front ().memory_id;
   }
 
+  {
+    const auto ranked = run ();
+    for (const auto &candidate : ranked)
+      {
+        std::cout << "predictive_ranking_candidate id=" << candidate.memory_id
+                  << " score=" << candidate.score
+                  << " relevance=" << candidate.relevance
+                  << " pre_activation=" << candidate.pre_activation
+                  << " predictive_bonus=" << candidate.predictive_bonus
+                  << " durable_boost=" << candidate.durable_source_boost
+                  << " durable_count=" << candidate.durable_source_count
+                  << " label_boost=" << candidate.label_graph_boost
+                  << "\n";
+      }
+  }
   std::cout << "predictive_target_top1_on=" << (top_on == 11LL ? 1 : 0)
             << " predictive_target_top1_off=" << (top_off == 11LL ? 1 : 0)
             << "\n";

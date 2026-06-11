@@ -1154,8 +1154,11 @@ TEST_CASE ("Graph retrieval routes text queries through source-backed durable la
         return candidate.memory_id == 300LL;
       });
   REQUIRE (!ranked.empty ());
-  REQUIRE ((ranked.front ().memory_id == 100LL
-            || ranked.front ().memory_id == 300LL));
+  // The durable text route must surface both candidates into the ranked set
+  // despite zero embedding similarity against 20 perfect-similarity
+  // distractors. Hard top-slot promotion of source-backed candidates was
+  // removed (it overrode every other ranking influence); presence plus the
+  // label-graph boost is the routing guarantee.
   REQUIRE (label_it != ranked.end ());
   REQUIRE (label_it->label_match_count == 1);
   REQUIRE (label_it->label_graph_boost > 0.60);

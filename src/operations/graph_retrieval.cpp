@@ -4052,43 +4052,6 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
            && is_source_backed (candidate);
   };
 
-  auto promote_durable_source_candidates = [&] (std::vector<Scored> &selected) {
-    if (durable_source_min_topk <= 0 || selected.size () < 2)
-      {
-        return;
-      }
-    const int target_count = std::min (
-        durable_source_min_topk, static_cast<int> (selected.size ()));
-    for (int slot = 0; slot < target_count; ++slot)
-      {
-        if (is_source_backed_memory (selected[static_cast<size_t> (slot)]))
-          {
-            continue;
-          }
-        int best_idx = -1;
-        double best_score = -1e9;
-        for (int i = slot + 1; i < static_cast<int> (selected.size ()); ++i)
-          {
-            if (!is_source_backed_memory (selected[static_cast<size_t> (i)]))
-              {
-                continue;
-              }
-            const double score = base_score (selected[static_cast<size_t> (i)]);
-            if (score > best_score)
-              {
-                best_score = score;
-                best_idx = i;
-              }
-          }
-        if (best_idx < 0)
-          {
-            break;
-          }
-        std::rotate (selected.begin () + slot,
-                     selected.begin () + best_idx,
-                     selected.begin () + best_idx + 1);
-      }
-  };
 
   auto enforce_durable_source_floor =
       [&] (std::vector<Scored> &selected,
@@ -4175,7 +4138,6 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
                       [&] (const Scored &a, const Scored &b) {
                         return base_score (a) > base_score (b);
                       });
-    promote_durable_source_candidates (selected);
   };
 
   auto apply_unknown_caution = [&] (std::vector<Scored> &selected) {
