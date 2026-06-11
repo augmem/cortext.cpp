@@ -107,7 +107,11 @@ ComputeStoragePressureState (Transaction &tx,
 
   const std::string db_path = ResolveMainDbPath (tx);
   const bool file_backed = !db_path.empty ();
-  info.active = override.storage_gate_enabled.value_or (file_backed);
+  // An explicit used-bytes override is a simulated storage state: harnesses
+  // drive in-memory stores through pressure scenarios, so the gate must be
+  // considered active even though there is no backing file to measure.
+  info.active = override.storage_gate_enabled.value_or (
+      file_backed || override.used_storage_bytes.has_value ());
   if (!info.active)
     return info;
 
