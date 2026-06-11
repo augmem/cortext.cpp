@@ -283,3 +283,23 @@ TEST_CASE ("Label-bank similarity contrast separates filler from content",
   CHECK_FALSE (is_generic ("quantum entanglement lecture"));
   CHECK_FALSE (is_generic ("volcano hiking trail"));
 }
+
+// Cold-start contrast fallbacks were measured here and falsified on
+// AIST-256 before any engine code shipped (June 11 measurements):
+//  - Summary-bank contrast: cross-register similarity compresses the peak
+//    signature (content peaks 0.027-0.073 vs filler 0.077-0.088, i.e.
+//    INVERTED) and the mean ranges overlap ("commerce bank" 0.698 and
+//    novel "quantum entanglement lecture" 0.731 sit inside the filler
+//    band 0.677-0.784). No usable gap.
+//  - Evidence-signal contrast (candidate vs its own window's messages):
+//    filler that appears verbatim in a message peaks like content
+//    ("taste fine" peak 0.218), proper nouns inside long messages do not
+//    peak ("Troy" 0.115, inside the filler peak band), and the mean gap
+//    between the strongest content (0.774) and weakest filler (0.782) is
+//    0.007. No usable gap.
+// Consequence: the engine does not gate cold-start admissions by
+// similarity. Instead the optional admission paths (floor fill,
+// relation-endpoint creation) decline entirely until the label bank is
+// mature enough for the measured label-bank contrast above
+// (kContrastMinBankSize), and only the primary extractor path seeds the
+// bank.
