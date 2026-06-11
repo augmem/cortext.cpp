@@ -4143,6 +4143,14 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
               {
                 continue;
               }
+            // Proactive procedural selections hold reserved slots: they are
+            // semantically dissimilar by design (routine recall, not
+            // similarity recall) and would otherwise always be the cheapest
+            // replacement victim.
+            if (candidate.proc_score >= procedural_seed_min_score)
+              {
+                continue;
+              }
             const double score = base_score (candidate);
             if (score < replace_score)
               {
@@ -4387,6 +4395,94 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
       }
   };
 
+  // Reserved-slot seeding for diversified selection: high-evidence
+  // association/label candidates and qualifying procedural candidates are
+  // admitted ahead of MMR competition. Procedural seeds are proactive by
+  // design - they surface routine memories regardless of semantic
+  // similarity, so they must not have to win a similarity-ranked slot.
+  // Both selection paths (vector-backed and the no-fetch fallback) use this.
+  auto build_reserved_initial = [&] (const std::vector<Scored> &eligible) {
+    const int reserve_assoc = std::min (min_assoc, k);
+    const int reserve_label = std::min (min_label, k - reserve_assoc);
+    int reserve_proc = 0;
+    if (cfg.procedural_enabled && !disable_procedural_proactive)
+      {
+        reserve_proc = core::RetrievalProceduralSeedReserveCount (
+            cfg.focus, cfg.sensitivity, cfg.stability,
+            k - reserve_assoc - reserve_label);
+      }
+
+    auto pick_top = [&] (const std::vector<Scored> &candidates, int count,
+                         const std::function<bool (const Scored &)> &pred) {
+      std::vector<std::pair<double, Scored>> ranked;
+      ranked.reserve (candidates.size ());
+      for (const auto &cand : candidates)
+        {
+          if (!pred (cand))
+            {
+              continue;
+            }
+          ranked.emplace_back (base_score (cand), cand);
+        }
+      std::sort (ranked.begin (), ranked.end (),
+                 [] (const auto &a, const auto &b)
+                 { return a.first > b.first; });
+      std::vector<Scored> out;
+      for (int i = 0; i < count && i < static_cast<int> (ranked.size ());
+           ++i)
+        {
+          out.push_back (ranked[i].second);
+        }
+      return out;
+    };
+
+    std::vector<Scored> initial;
+    initial.reserve (
+        static_cast<size_t> (reserve_assoc + reserve_label + reserve_proc));
+    std::unordered_set<long long> initial_ids;
+    if (reserve_assoc > 0)
+      {
+        auto assoc_seeds = pick_top (
+            eligible, reserve_assoc,
+            [] (const Scored &s) { return s.is_association; });
+        for (const auto &seed : assoc_seeds)
+          {
+            if (initial_ids.insert (seed.embedding_id).second)
+              {
+                initial.push_back (seed);
+              }
+          }
+      }
+    if (reserve_label > 0)
+      {
+        auto label_seeds = pick_top (
+            eligible, reserve_label,
+            [] (const Scored &s) { return s.is_label; });
+        for (const auto &seed : label_seeds)
+          {
+            if (initial_ids.insert (seed.embedding_id).second)
+              {
+                initial.push_back (seed);
+              }
+          }
+      }
+    if (reserve_proc > 0)
+      {
+        auto proc_seeds = pick_top (
+            eligible, reserve_proc,
+            [procedural_seed_min_score] (const Scored &s)
+            { return s.proc_score >= procedural_seed_min_score; });
+        for (const auto &seed : proc_seeds)
+          {
+            if (initial_ids.insert (seed.embedding_id).second)
+              {
+                initial.push_back (seed);
+              }
+          }
+      }
+    return initial;
+  };
+
   int64_t reinforcement_candidate_count = 0;
   if (!fetched_any)
     {
@@ -4432,7 +4528,8 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
         {
           eligible = filter_candidates (seeds, false, false, &relax_stats);
         }
-      auto selected = select_diversified (eligible, k, {});
+      auto selected
+          = select_diversified (eligible, k, build_reserved_initial (eligible));
       std::stable_sort (selected.begin (), selected.end (),
                         [&] (const Scored &a, const Scored &b) {
                           return base_score (a) > base_score (b);
@@ -4536,86 +4633,7 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
     {
       eligible = filter_candidates (scored, false, false, &relax_stats);
     }
-  if (min_assoc > k)
-    min_assoc = k;
-  if (min_label > k - min_assoc)
-    min_label = k - min_assoc;
-  int min_proc = 0;
-  if (cfg.procedural_enabled && !disable_procedural_proactive)
-    {
-      min_proc = core::RetrievalProceduralSeedReserveCount (
-          cfg.focus, cfg.sensitivity, cfg.stability,
-          k - min_assoc - min_label);
-    }
-
-  auto pick_top = [&] (const std::vector<Scored> &candidates,
-                       int count,
-                       const std::function<bool(const Scored &)> &pred) {
-    std::vector<std::pair<double, Scored>> ranked;
-    ranked.reserve (candidates.size ());
-    for (const auto &cand : candidates)
-      {
-        if (!pred (cand))
-          {
-            continue;
-          }
-        ranked.emplace_back (base_score (cand), cand);
-      }
-    std::sort (ranked.begin (), ranked.end (),
-               [] (const auto &a, const auto &b) { return a.first > b.first; });
-    std::vector<Scored> out;
-    for (int i = 0; i < count && i < static_cast<int> (ranked.size ()); ++i)
-      {
-        out.push_back (ranked[i].second);
-      }
-    return out;
-  };
-
-  std::vector<Scored> initial;
-  initial.reserve (static_cast<size_t> (min_assoc + min_label));
-  std::unordered_set<long long> initial_ids;
-  if (min_assoc > 0)
-    {
-      auto assoc_seeds = pick_top (
-          eligible, min_assoc,
-          [] (const Scored &s) { return s.is_association; });
-      for (const auto &seed : assoc_seeds)
-        {
-          if (initial_ids.insert (seed.embedding_id).second)
-            {
-              initial.push_back (seed);
-            }
-        }
-    }
-  if (min_label > 0)
-    {
-      auto label_seeds = pick_top (
-          eligible, min_label,
-          [] (const Scored &s) { return s.is_label; });
-      for (const auto &seed : label_seeds)
-        {
-          if (initial_ids.insert (seed.embedding_id).second)
-            {
-              initial.push_back (seed);
-            }
-        }
-    }
-  if (min_proc > 0)
-    {
-      auto proc_seeds = pick_top (
-          eligible, min_proc,
-          [procedural_seed_min_score] (const Scored &s) {
-            return s.proc_score >= procedural_seed_min_score;
-          });
-      for (const auto &seed : proc_seeds)
-        {
-          if (initial_ids.insert (seed.embedding_id).second)
-            {
-              initial.push_back (seed);
-            }
-        }
-    }
-
+  const auto initial = build_reserved_initial (eligible);
   auto selected = select_diversified (eligible, k, initial);
   std::stable_sort (selected.begin (), selected.end (),
                     [&] (const Scored &a, const Scored &b) {
