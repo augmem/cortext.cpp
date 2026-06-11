@@ -97,8 +97,10 @@ long long
 CountSummaries (cortext::Store *store)
 {
   auto rows = store->Execute (
+      // Deep summaries are LONG_TERM memories (the ASSOCIATION form was
+      // migrated away; see store/schema.cpp).
       "SELECT COUNT(*) AS c FROM memories "
-      "WHERE kind = 'ASSOCIATION' AND source_id LIKE 'summary_%'",
+      "WHERE kind = 'LONG_TERM' AND source_id LIKE 'summary_%'",
       {});
   if (rows.empty ())
     {
@@ -321,22 +323,22 @@ main ()
             << models.deep_llm.summarizer_model_path.string () << "\n";
 
   const std::vector<Scenario> scenarios = {
-    { "low_pressure", 1, false, 0, 1 },
+    { "low_pressure", 1, false, 1, 1 },
     { "high_pressure_compressible", 10000, false, 1, 1 },
-    { "high_pressure_protected_evidence", 10000, true, 0, 1 },
-    { "filler_only", 1, false, 0, 1, 0, 0, 0, 0,
+    { "high_pressure_protected_evidence", 10000, true, 1, 1 },
+    { "filler_only", 1, false, 1, 1, 0, 0, 0, 0,
       {
         "User: ya know.",
         "Assistant: okay.",
         "User: ya, know.",
       } },
-    { "banter_only", 1, false, 0, 1, 0, 0, 0, 0,
+    { "banter_only", 1, false, 1, 1, 0, 0, 0, 0,
       {
         "User: thanks.",
         "Assistant: sure.",
         "User: okay thanks.",
       } },
-    { "mixed_durable_filler", 1, false, 0, 1, 1, 1,
+    { "mixed_durable_filler", 1, false, 1, 1, 1, 1,
       -1, -1,
       {
         "User: ya know, Maya is 11 years old.",
