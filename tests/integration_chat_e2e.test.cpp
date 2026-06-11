@@ -1529,7 +1529,11 @@ TEST_CASE ("Integration: scripted chat preserves turn-shaped working memory",
           if (turn >= 7)
             {
               std::vector<ChatMessage> expected_prompt;
-              const std::size_t keep_prior = 3;
+              // Prompt history is shaped by working memory: capacity - 1
+              // prior turns plus the current user input.
+              const std::size_t keep_prior = static_cast<std::size_t> (
+                  std::max (1, cortext::core::WMBaseCapacity (
+                                   cfg.sensitivity, cfg.focus))) - 1;
               const std::size_t prior_start
                   = transcript.size () > keep_prior
                         ? transcript.size () - keep_prior
@@ -1603,7 +1607,10 @@ TEST_CASE ("Integration: scripted chat preserves turn-shaped working memory",
     }
 
   REQUIRE (transcript.size () == static_cast<std::size_t> (kTotalTurns));
-  REQUIRE (max_user_prompt_size <= 4);
+  REQUIRE (max_user_prompt_size
+           <= static_cast<std::size_t> (
+                  std::max (1, cortext::core::WMBaseCapacity (
+                                   cfg.sensitivity, cfg.focus))));
 
   const auto final_prompt = BuildPromptMessages (latest_ctx.working_memory, "");
   std::ostringstream final_prompt_debug;
@@ -1613,9 +1620,12 @@ TEST_CASE ("Integration: scripted chat preserves turn-shaped working memory",
                          << final_prompt[i].content << "\n";
     }
   INFO ("final working-memory prompt:\n" << final_prompt_debug.str ());
-  REQUIRE (final_prompt.size () == 4);
+  const std::size_t final_keep = static_cast<std::size_t> (
+      std::max (1, cortext::core::WMBaseCapacity (cfg.sensitivity,
+                                                  cfg.focus)));
+  REQUIRE (final_prompt.size () == final_keep);
   const std::size_t tail_start
-      = transcript.size () > 4 ? transcript.size () - 4 : 0;
+      = transcript.size () > final_keep ? transcript.size () - final_keep : 0;
   for (std::size_t i = 0; i < final_prompt.size (); ++i)
     {
       const auto &expected = transcript[tail_start + i];
@@ -1661,7 +1671,7 @@ TEST_CASE ("Integration: scripted chat preserves turn-shaped working memory",
                      << " | end_ts=" << end_ts << "\n";
     }
   INFO ("fresh working rows:\n" << fresh_wm_debug.str ());
-  REQUIRE (wm_rows.size () == 4);
+  REQUIRE (wm_rows.size () == final_keep);
   for (const auto &row : wm_rows)
     {
       const std::string source_id
@@ -1732,14 +1742,21 @@ TEST_CASE (
   cortext::Cortext::Context latest_ctx;
   std::size_t max_user_prompt_size = 0;
 
-  auto assert_prompt_tail = [&transcript] (const std::vector<ChatMessage> &prompt,
-                                           const std::string &latest_user_input,
-                                           int turn) {
+  // Prompt history is shaped by working memory: capacity turns total
+  // (capacity - 1 prior plus the current user input when present).
+  const std::size_t wm_capacity = static_cast<std::size_t> (
+      std::max (1, cortext::core::WMBaseCapacity (0.5, 0.5)));
+  auto assert_prompt_tail = [&transcript, wm_capacity] (
+                                const std::vector<ChatMessage> &prompt,
+                                const std::string &latest_user_input,
+                                int turn) {
     std::vector<ChatMessage> expected_prompt;
     if (latest_user_input.empty ())
       {
         const std::size_t tail_start
-            = transcript.size () > 4 ? transcript.size () - 4 : 0;
+            = transcript.size () > wm_capacity
+                  ? transcript.size () - wm_capacity
+                  : 0;
         for (std::size_t i = tail_start; i < transcript.size (); ++i)
           {
             expected_prompt.push_back (transcript[i]);
@@ -1747,7 +1764,7 @@ TEST_CASE (
       }
     else
       {
-        const std::size_t keep_prior = 3;
+        const std::size_t keep_prior = wm_capacity - 1;
         const std::size_t prior_start
             = transcript.size () > keep_prior ? transcript.size () - keep_prior : 0;
         for (std::size_t i = prior_start; i < transcript.size (); ++i)
@@ -1875,7 +1892,7 @@ TEST_CASE (
   INFO ("consolidation_runs=" << consolidation_runs);
   REQUIRE (consolidation_runs >= 1);
   REQUIRE (transcript.size () == static_cast<std::size_t> (kTotalTurns));
-  REQUIRE (max_user_prompt_size <= 4);
+  REQUIRE (max_user_prompt_size <= wm_capacity);
 
   const auto final_prompt = BuildPromptMessages (latest_ctx.working_memory, "");
   assert_prompt_tail (final_prompt, "", kTotalTurns);

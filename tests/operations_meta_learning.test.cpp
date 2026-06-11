@@ -63,7 +63,8 @@ TEST_CASE ("Initialize priors load learned meta-learning values",
   cfg.stability = 0.5;
 
   auto tx = store->Begin ();
-  OperationContext ctx (MakeSignal (), pctx, cfg, store.get ());
+  const Signal signal = MakeSignal ();
+  OperationContext ctx (signal, pctx, cfg, store.get ());
 
   operations::InitializeFocusPriors focus;
   operations::InitializeSensitivityPriors sensitivity;
@@ -152,7 +153,8 @@ TEST_CASE ("ApplyMetaLearning ablation flag freezes learned coefficients",
   cfg.stability = 0.5;
 
   auto tx = store->Begin ();
-  OperationContext ctx (MakeSignal (), pctx, cfg, store.get ());
+  const Signal signal = MakeSignal ();
+  OperationContext ctx (signal, pctx, cfg, store.get ());
   operations::InitializeFocusPriors focus;
   operations::InitializeSensitivityPriors sensitivity;
   operations::InitializeStabilityPriors stability;

@@ -80,8 +80,8 @@ TEST_CASE ("STM shadow reuses cached label clusters and selects top labels",
 
   {
     auto tx = store->Begin ();
-    OperationContext ctx (MakeSignal (Vec (1.0f, 0.0f), 2000ULL), p_ctx, cfg,
-                          store.get ());
+    const Signal signal = MakeSignal (Vec (1.0f, 0.0f), 2000ULL);
+    OperationContext ctx (signal, p_ctx, cfg, store.get ());
     op.Execute (ctx, *tx);
     tx->Commit ();
   }
@@ -105,8 +105,8 @@ TEST_CASE ("STM shadow reuses cached label clusters and selects top labels",
 
   {
     auto tx = store->Begin ();
-    OperationContext ctx (MakeSignal (Vec (1.0f, 0.0f), 3000ULL), p_ctx, cfg,
-                          store.get ());
+    const Signal signal = MakeSignal (Vec (1.0f, 0.0f), 3000ULL);
+    OperationContext ctx (signal, p_ctx, cfg, store.get ());
     op.Execute (ctx, *tx);
     tx->Commit ();
   }
@@ -160,8 +160,8 @@ TEST_CASE ("STM label selection expands top labels from flat-routed clusters",
   operations::UpdateShortTermMemoryShadow op;
 
   auto tx = store->Begin ();
-  OperationContext ctx (MakeSignal (Vec (1.0f, 0.0f), 2000ULL), p_ctx, cfg,
-                        store.get ());
+  const Signal signal = MakeSignal (Vec (1.0f, 0.0f), 2000ULL);
+  OperationContext ctx (signal, p_ctx, cfg, store.get ());
   op.Execute (ctx, *tx);
   tx->Commit ();
 
@@ -214,8 +214,8 @@ TEST_CASE ("STM shadow hard boundary retention is knob-derived",
 
   operations::UpdateShortTermMemoryShadow op;
   auto tx = store->Begin ();
-  OperationContext ctx (MakeSignal (Vec (1.0f, 0.0f), 4000ULL), p_ctx, cfg,
-                        store.get ());
+  const Signal signal = MakeSignal (Vec (1.0f, 0.0f), 4000ULL);
+  OperationContext ctx (signal, p_ctx, cfg, store.get ());
   ctx.SetBoundaryScore (
       core::STMShadowHardBoundaryThreshold (cfg.focus, cfg.sensitivity,
                                             cfg.stability)
@@ -224,6 +224,15 @@ TEST_CASE ("STM shadow hard boundary retention is knob-derived",
   tx->Commit ();
 
   const auto &items = p_ctx.short_term_graphs["chat-replay-smoke"].items;
+  std::ostringstream items_debug;
+  items_debug << "retain_steps=" << retain_steps
+              << " signals_processed=" << p_ctx.signals_processed << "\n";
+  for (std::size_t i = 0; i < items.size (); ++i)
+    {
+      items_debug << "[" << i << "] step_index=" << items[i].step_index
+                  << "\n";
+    }
+  INFO (items_debug.str ());
   REQUIRE (items.size () == 2);
   REQUIRE (items[0].step_index == p_ctx.signals_processed - retain_steps);
   REQUIRE (items[1].step_index == p_ctx.signals_processed);
