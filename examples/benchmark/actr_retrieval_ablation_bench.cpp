@@ -13,6 +13,7 @@
 
 #include <Eigen/Dense>
 
+#include <any>
 #include <cmath>
 #include <cstdlib>
 #include <iomanip>
@@ -128,6 +129,8 @@ struct RetrievalRun
   RankInfo target;
   RankInfo comparison;
   long long evidence_blend_reconstructions = 0;
+  double evidence_blend_source_confidence = 0.0;
+  double evidence_packet_confidence = 0.0;
 };
 
 struct StudyResult
@@ -151,6 +154,32 @@ ToEigen (const std::vector<float> &values)
       out (static_cast<Eigen::Index> (i)) = values[i];
     }
   return out;
+}
+
+double
+AnyToDouble (const std::any &value)
+{
+  if (!value.has_value ())
+    {
+      return 0.0;
+    }
+  if (value.type () == typeid (double))
+    {
+      return std::any_cast<double> (value);
+    }
+  if (value.type () == typeid (float))
+    {
+      return static_cast<double> (std::any_cast<float> (value));
+    }
+  if (value.type () == typeid (long long))
+    {
+      return static_cast<double> (std::any_cast<long long> (value));
+    }
+  if (value.type () == typeid (int))
+    {
+      return static_cast<double> (std::any_cast<int> (value));
+    }
+  return 0.0;
 }
 
 Eigen::VectorXf
@@ -196,6 +225,50 @@ SeedTextMemory (cortext::Store &store, BenchEncoder &encoder, long long id,
         retrieved_count, used_count, source_contradiction_count });
 }
 
+void
+SeedFactEvidencePacket (cortext::Store &store, long long fact_id,
+                        long long embedding_id, const Eigen::VectorXf &embedding,
+                        const std::vector<long long> &source_memory_ids,
+                        double confidence, long long ts)
+{
+  store.Execute (
+      "INSERT OR REPLACE INTO embeddings(embedding_id, embedding, created_at) "
+      "VALUES(?, ?, ?)",
+      { embedding_id, ToFloatVec (embedding), ts });
+  store.Execute (
+      "INSERT INTO fact_assertions("
+      "fact_id, subject, predicate, object, canonical_subject, "
+      "canonical_predicate, canonical_object, valid_start_ts, recorded_at_ts, "
+      "confidence, summary_memory_id, created_at, support_mass, "
+      "source_diversity, contradiction_mass, confirmation_count, "
+      "compressed_support_count, last_confirmation_ts, lifecycle_state) "
+      "VALUES(?, 'Nadia', 'owns', 'cobalt rollback', 'nadia', 'owns', "
+      "'cobalt rollback', ?, ?, ?, ?, ?, 0.92, ?, 0.0, ?, ?, ?, 'active')",
+      { fact_id,
+        ts,
+        ts,
+        confidence,
+        source_memory_ids.empty () ? 0LL : source_memory_ids.front (),
+        ts,
+        static_cast<long long> (source_memory_ids.size ()),
+        static_cast<long long> (source_memory_ids.size ()),
+        static_cast<long long> (source_memory_ids.size ()),
+        ts });
+  store.Execute (
+      "INSERT INTO fact_cache(fact_id, embedding_id, fact_text, is_current, "
+      "valid_start_ts, recorded_at_ts, updated_at) "
+      "VALUES(?, ?, 'Nadia owns cobalt rollback', 1, ?, ?, ?)",
+      { fact_id, embedding_id, ts, ts, ts });
+  for (const long long memory_id : source_memory_ids)
+    {
+      store.Execute (
+          "INSERT OR REPLACE INTO fact_evidence("
+          "fact_id, source_memory_id, evidence_type, support_weight) "
+          "VALUES(?, ?, 'episodic', 1.0)",
+          { fact_id, memory_id });
+    }
+}
+
 std::shared_ptr<cortext::Store>
 CreateStore ()
 {
@@ -236,11 +309,19 @@ RunRetrieval (const std::shared_ptr<cortext::Store> &store,
               bool enable_recent_inhibition, bool enable_procedural,
               bool enable_partial_matching = false,
               std::optional<long long> procedural_memory_id = std::nullopt,
-              bool enable_evidence_blending = false)
+              bool enable_evidence_blending = false,
+              bool disable_facts = true,
+              bool enable_evidence_confidence = false,
+              bool disable_source_confidence_filter = false)
 {
   std::vector<std::unique_ptr<ScopedEnvVar>> guards;
   guards.push_back (std::make_unique<ScopedEnvVar> (
       "CORTEXT_DISABLE_SOURCE_SEED_GRAPH_EXPANSION", "1"));
+  guards.push_back (disable_source_confidence_filter
+                        ? std::make_unique<ScopedEnvVar> (
+                              "CORTEXT_DISABLE_SOURCE_CONF", "1")
+                        : std::make_unique<ScopedEnvVar> (
+                              "CORTEXT_DISABLE_SOURCE_CONF"));
   guards.push_back (std::make_unique<ScopedEnvVar> (
       "CORTEXT_DISABLE_DURABLE_SOURCE_SET_RETRIEVAL", "1"));
   guards.push_back (std::make_unique<ScopedEnvVar> (
@@ -248,7 +329,9 @@ RunRetrieval (const std::shared_ptr<cortext::Store> &store,
   guards.push_back (std::make_unique<ScopedEnvVar> (
       "CORTEXT_DISABLE_TEMPORAL_RETRIEVAL", "1"));
   guards.push_back (
-      std::make_unique<ScopedEnvVar> ("CORTEXT_DISABLE_FACTS", "1"));
+      disable_facts
+          ? std::make_unique<ScopedEnvVar> ("CORTEXT_DISABLE_FACTS", "1")
+          : std::make_unique<ScopedEnvVar> ("CORTEXT_DISABLE_FACTS"));
   guards.push_back (enable_base_level
                         ? std::make_unique<ScopedEnvVar> (
                               "CORTEXT_ENABLE_BASE_LEVEL_AVAILABILITY", "1")
@@ -276,6 +359,11 @@ RunRetrieval (const std::shared_ptr<cortext::Store> &store,
                               "CORTEXT_ENABLE_EVIDENCE_BLENDING", "1")
                         : std::make_unique<ScopedEnvVar> (
                               "CORTEXT_ENABLE_EVIDENCE_BLENDING"));
+  guards.push_back (enable_evidence_confidence
+                        ? std::make_unique<ScopedEnvVar> (
+                              "CORTEXT_ENABLE_EVIDENCE_CONFIDENCE", "1")
+                        : std::make_unique<ScopedEnvVar> (
+                              "CORTEXT_ENABLE_EVIDENCE_CONFIDENCE"));
   guards.push_back (std::make_unique<ScopedEnvVar> (
       "CORTEXT_DISABLE_CONSTRUCTIVE_RECALL"));
 
@@ -318,6 +406,20 @@ RunRetrieval (const std::shared_ptr<cortext::Store> &store,
       run.evidence_blend_reconstructions
           = cortext::store::AnyToLongLong (rows[0].at ("cnt")).value_or (0);
     }
+  rows = store->Execute (
+      "SELECT COALESCE(AVG(source_confidence), 0.0) AS avg_conf "
+      "FROM memory_reconstructions WHERE trigger = 'evidence_blend'",
+      {});
+  if (!rows.empty () && rows[0].count ("avg_conf"))
+    {
+      run.evidence_blend_source_confidence
+          = AnyToDouble (rows[0].at ("avg_conf"));
+    }
+  if (!run.evidence_packets.empty ())
+    {
+      run.evidence_packet_confidence
+          = run.evidence_packets.front ().evidence_confidence;
+    }
   return run;
 }
 
@@ -345,6 +447,14 @@ PrintStudy (const std::string &name, const RetrievalRun &off,
             << " on_evidence_packets=" << on.evidence_packets.size ()
             << " on_evidence_blend_reconstructions="
             << on.evidence_blend_reconstructions
+            << " off_evidence_packet_confidence="
+            << off.evidence_packet_confidence
+            << " on_evidence_packet_confidence="
+            << on.evidence_packet_confidence
+            << " off_evidence_blend_source_confidence="
+            << off.evidence_blend_source_confidence
+            << " on_evidence_blend_source_confidence="
+            << on.evidence_blend_source_confidence
             << " passed=" << (result.passed ? 1 : 0) << "\n";
 }
 
@@ -596,6 +706,73 @@ RunEvidenceBlendingStudy (BenchEncoder &encoder)
   return result;
 }
 
+StudyResult
+RunEvidenceWeightedConfidenceStudy (BenchEncoder &encoder)
+{
+  constexpr long long kTarget = 600;
+  constexpr long long kComparison = 601;
+  constexpr long long kNow = 6'000'000;
+  const std::string query
+      = "cobalt migration rollback checklist canary health checks build "
+        "captain handoff";
+  const Eigen::VectorXf fact_embedding = EncodeTextEigen256 (
+      encoder, "Nadia owns cobalt migration rollback checklist build captain "
+               "handoff");
+
+  auto make_store = [&] {
+    auto store = CreateStore ();
+    SeedTextMemory (
+        *store, encoder, kTarget,
+        "Nadia documented the cobalt migration rollback checklist with canary "
+        "health checks and build captain handoff.",
+        4'900'000);
+    SeedTextMemory (
+        *store, encoder, kComparison,
+        "Nadia documented the cobalt migration rollback checklist with canary "
+        "health checks and release captain handoff.",
+        4'910'000);
+    SeedTextMemory (
+        *store, encoder, 602,
+        "The weekend plan mentions trail shoes, coffee, and a book pickup.",
+        4'920'000);
+    store->Execute (
+        "UPDATE memories SET source_reliability = 0.30 "
+        "WHERE memory_id IN (?, ?)",
+        { kTarget, kComparison });
+    SeedFactEvidencePacket (*store, 960LL, 961LL, fact_embedding,
+                            { kTarget, kComparison }, 0.93, 4'930'000);
+    return store;
+  };
+
+  auto off_store = make_store ();
+  const RetrievalRun off = RunRetrieval (
+      off_store, encoder, query, kNow, kTarget, kComparison, false, false, false,
+      false, std::nullopt, true, false, false, true);
+  auto on_store = make_store ();
+  const RetrievalRun on = RunRetrieval (
+      on_store, encoder, query, kNow, kTarget, kComparison, false, false, false,
+      false, std::nullopt, true, false, true, true);
+
+  StudyResult result{ "evidence_weighted_confidence", false };
+  result.passed
+      = off.target.selected
+        && off.comparison.selected
+        && on.target.selected
+        && on.comparison.selected
+        && off.target.rank == on.target.rank
+        && off.comparison.rank == on.comparison.rank
+        && std::abs (off.target.score - on.target.score) <= 1e-9
+        && std::abs (off.comparison.score - on.comparison.score) <= 1e-9
+        && !off.evidence_packets.empty ()
+        && !on.evidence_packets.empty ()
+        && off.evidence_packet_confidence == 0.0
+        && on.evidence_packet_confidence > 0.60
+        && on.evidence_blend_source_confidence
+               > off.evidence_blend_source_confidence + 0.15;
+  PrintStudy (result.name, off, on, result);
+  return result;
+}
+
 } // namespace
 
 int
@@ -612,10 +789,11 @@ main (int argc, char **argv)
       const std::vector<StudyResult> results{
         RunBaseLevelStudy (encoder),
         RunRecentInhibitionStudy (encoder),
-        RunProceduralStudy (encoder),
-        RunPartialMatchingStudy (encoder),
-        RunEvidenceBlendingStudy (encoder),
-      };
+	        RunProceduralStudy (encoder),
+	        RunPartialMatchingStudy (encoder),
+	        RunEvidenceBlendingStudy (encoder),
+	        RunEvidenceWeightedConfidenceStudy (encoder),
+	      };
 
       int passed = 0;
       for (const auto &result : results)

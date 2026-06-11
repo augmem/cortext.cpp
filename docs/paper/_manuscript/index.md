@@ -3687,7 +3687,9 @@ four transplanted scoring ideas in the existing Cortext retrieval
 pipeline: base-level availability, recent retrieval inhibition,
 procedural utility, and partial matching over existing metadata. It also
 tests downstream evidence blending as a rank-preserving
-packet-generation step for near-tied selected candidates. The harness
+packet-generation step for near-tied selected candidates and
+evidence-weighted confidence as a rank-preserving
+annotation/source-confidence mechanism for those packets. The harness
 encodes all query and memory text through the production AIST path,
 truncates to the same 256-dimensional Matryoshka retrieval view used by
 the SQLite vector schema, and then runs each study with the relevant
@@ -3785,21 +3787,36 @@ summarization. The resolved encoder was `AIST-87M-GGUF` at
 <td>one normalized near-tie packet and one <code>evidence_blend</code>
 reconstruction</td>
 </tr>
+<tr>
+<td>evidence-weighted confidence</td>
+<td style="text-align: right;">1</td>
+<td style="text-align: right;">1</td>
+<td style="text-align: right;">2</td>
+<td style="text-align: right;">2</td>
+<td style="text-align: right;">0.993295</td>
+<td style="text-align: right;">0.993295</td>
+<td>packet confidence 0.834525; reconstruction source confidence
+0.274780 -&gt; 0.834525</td>
+</tr>
 </tbody>
 </table>
 
-All five studies passed (`summary=5/5 passed`). The first four required
-a rank flip under the real encoder rather than merely observing a
-non-zero ledger component. Evidence blending has a different pass
-condition: it must leave the selected ranks and scores unchanged while
-producing a normalized near-tie packet and a constructive-recall
-reconstruction tagged `evidence_blend`. The interpretation is
-deliberately narrow: the scoring mechanisms are promotable only because
-they show causal rank movement in the existing retrieval pipeline under
-the production embedding view, while evidence blending is promotable
-only as a downstream packet-quality mechanism. The activation ledger
-itself is treated as observability and is validated separately by
-rank-preservation/unit-test invariants, not as a quality mechanism.
+All six studies passed (`summary=6/6 passed`). The first four required a
+rank flip under the real encoder rather than merely observing a non-zero
+ledger component. Evidence blending has a different pass condition: it
+must leave the selected ranks and scores unchanged while producing a
+normalized near-tie packet and a constructive-recall reconstruction
+tagged `evidence_blend`. Evidence-weighted confidence must also preserve
+ranks and scores, but its packet confidence must exceed 0.60 and
+materially raise the reconstruction source confidence over the
+unannotated packet. The interpretation is deliberately narrow: the
+scoring mechanisms are promotable only because they show causal rank
+movement in the existing retrieval pipeline under the production
+embedding view, while evidence blending and evidence-weighted confidence
+are promotable only as downstream packet-quality mechanisms. The
+activation ledger itself is treated as observability and is validated
+separately by rank-preservation/unit-test invariants, not as a quality
+mechanism.
 
 To quantify consolidation utility, we also track:
 
@@ -41948,8 +41965,14 @@ evidence packet for `constructive_recall_summary` consumers. The packet
 stores member rank, memory id, embedding id, normalized weight, score,
 and activation ledger, and the constructive-recall ledger receives an
 `evidence_blend` reconstruction for the packet anchor when constructive
-recall is enabled. Evidence packets are exported in replay/debug JSON
-and telemetry as packet/member counts, but they do not replace the
+recall is enabled. A sixth, opt-in phase gates evidence-weighted
+confidence behind `CORTEXT_ENABLE_EVIDENCE_CONFIDENCE=1`: linked fact
+evidence is projected into bounded support/conflict/source-diversity
+estimates, packet members carry those annotations, and
+constructive-recall source confidence can use the packet confidence
+without changing candidate rank or packet membership. Evidence packets
+are exported in replay/debug JSON and telemetry as packet/member counts
+and confidence/weight/contradiction means, but they do not replace the
 primary ranker and do not add candidates to the retrieved-memory list.
 With all ACT-R behavior flags unset, the new behavior terms remain zero
 except for pre-existing fact stale penalties, evidence packets remain

@@ -209,6 +209,7 @@ add_library(cortext
     src/operations/accumulator_reset.cpp
     src/operations/spike_bypass.cpp
     # Extractor component
+    src/extractor/extraction_parsing.cpp
     src/extractor/gemma_extractor.cpp
     # Summarizer component
     src/summarizer/gemma_summarizer.cpp
