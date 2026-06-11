@@ -730,6 +730,8 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
   (void)tx;
   retrieval_debug::ClearLastSelectedEmbeddingOrder ();
   retrieval_debug::ClearLastRankedCandidates ();
+  retrieval_debug::ClearLastRejectedCandidates ();
+  retrieval_debug::ClearLastEvidencePackets ();
   retrieval_debug::ClearLastRetrievalSummary ();
   auto elapsed_ms = [] (const std::chrono::steady_clock::time_point &start,
                         const std::chrono::steady_clock::time_point &end) {
@@ -1053,6 +1055,7 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
     long long embedding_id;
     long long memory_id;
     long long created_at;
+    long long last_access;
     double score;
     double ctx_score;
     double source_confidence;
@@ -1074,10 +1077,15 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
     Eigen::VectorXf vec;
     Eigen::VectorXf ctx;
     double temporal_score = 0.0;
+    long long retrieved_count = 0;
+    long long used_count = 0;
+    std::string source_id;
+    std::string modality;
   };
   std::vector<Scored> seeds;
   seeds.reserve (static_cast<size_t> (seed_k));
   std::unordered_map<long long, double> durable_source_text_seed_scores;
+  std::unordered_map<long long, double> procedural_seed_scores;
   int64_t procedural_seed_count = 0;
   int64_t hierarchical_label_seed_count = 0;
 
@@ -1123,9 +1131,14 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
           }
         auto it_dist = row.find ("distance");
         auto it_created = row.find ("created_at");
+        auto it_last_access = row.find ("last_access");
+        auto it_retrieved_count = row.find ("retrieved_count");
+        auto it_used_count = row.find ("used_count");
         auto it_event_ts = row.find ("event_ts");
         auto it_mem_id = row.find ("memory_id");
         auto it_kind = row.find ("kind");
+        auto it_source_id = row.find ("source_id");
+        auto it_modality = row.find ("modality");
         auto it_preact = row.find ("pre_activation");
         if (it_emb_id == row.end ())
           continue;
@@ -1174,6 +1187,24 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
           {
             created_at = std::any_cast<long long> (it_created->second);
           }
+        long long last_access = 0;
+        if (it_last_access != row.end ()
+            && it_last_access->second.type () == typeid (long long))
+          {
+            last_access = std::any_cast<long long> (it_last_access->second);
+          }
+        const long long retrieved_count
+            = std::max (0LL,
+                        (it_retrieved_count != row.end ())
+                            ? store::AnyToLongLong (it_retrieved_count->second)
+                                  .value_or (0)
+                            : 0LL);
+        const long long used_count
+            = std::max (0LL,
+                        (it_used_count != row.end ())
+                            ? store::AnyToLongLong (it_used_count->second)
+                                  .value_or (0)
+                            : 0LL);
         long long event_ts = created_at;
         if (it_event_ts != row.end ()
             && it_event_ts->second.type () == typeid (long long))
@@ -1193,10 +1224,17 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
 
         const double pre_activation
             = (it_preact != row.end ()) ? AnyToDouble (it_preact->second, 0.0) : 0.0;
+        const std::string memory_source_id
+            = it_source_id != row.end () ? AnyToString (it_source_id->second)
+                                         : std::string ();
+        const std::string modality
+            = it_modality != row.end () ? AnyToString (it_modality->second)
+                                        : std::string ();
 
         seeds.push_back (Scored{ emb_id,
                                  mem_id,
                                  created_at,
+                                 last_access,
                                  sim,
                                  0.0,
                                  core::RetrievalSeedFallbackSourceConfidence (
@@ -1208,18 +1246,27 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
                                  0,
                                  0.0,
                                  0.0,
-	                                 0.0,
-	                                 0.0,
-	                                 0,
-	                                 0.0,
-	                                 0,
-	                                 0.0,
-	                                 0,
-	                                 is_association,
-	                                 is_label,
-	                                 Eigen::VectorXf (),
-                                 Eigen::VectorXf () });
+                                 0.0,
+                                 0.0,
+                                 0,
+                                 0.0,
+                                 0,
+                                 0.0,
+                                 0,
+                                 is_association,
+                                 is_label,
+                                 Eigen::VectorXf (),
+                                 Eigen::VectorXf (),
+                                 0.0,
+                                 0LL,
+                                 0LL,
+                                 std::string (),
+                                 std::string () });
         seeds.back ().temporal_score = temporal_rank_score (event_ts);
+        seeds.back ().retrieved_count = retrieved_count;
+        seeds.back ().used_count = used_count;
+        seeds.back ().source_id = memory_source_id;
+        seeds.back ().modality = modality;
       }
   };
 
@@ -1234,10 +1281,14 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
             "  ORDER BY distance"
             ") "
             "SELECT m.embedding_id AS base_embedding_id, seed.distance, "
-            "COALESCE(m.created_at, seed.created_at, 0) AS created_at, "
-            "COALESCE(NULLIF(m.start_ts, 0), m.created_at, "
+              "COALESCE(m.created_at, seed.created_at, 0) AS created_at, "
+              "COALESCE(m.last_access, 0) AS last_access, "
+              "COALESCE(m.retrieved_count, 0) AS retrieved_count, "
+              "COALESCE(m.used_count, 0) AS used_count, "
+              "COALESCE(NULLIF(m.start_ts, 0), m.created_at, "
             "         seed.created_at, 0) AS event_ts, "
-            "m.memory_id, m.kind, COALESCE(m.pre_activation, 0.0) AS pre_activation "
+            "m.memory_id, m.kind, m.source_id, m.modality, "
+            "COALESCE(m.pre_activation, 0.0) AS pre_activation "
             "FROM seed "
             "JOIN memories m ON m.embedding_id = seed.embedding_id "
             "WHERE m.kind != 'WORKING' "
@@ -1277,10 +1328,14 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
             "  )"
             ") "
             "SELECT sm.base_embedding_id, sm.distance, "
-            "COALESCE(m.created_at, sm.seed_created_at, 0) AS created_at, "
-            "COALESCE(NULLIF(m.start_ts, 0), m.created_at, "
+              "COALESCE(m.created_at, sm.seed_created_at, 0) AS created_at, "
+              "COALESCE(m.last_access, 0) AS last_access, "
+              "COALESCE(m.retrieved_count, 0) AS retrieved_count, "
+              "COALESCE(m.used_count, 0) AS used_count, "
+              "COALESCE(NULLIF(m.start_ts, 0), m.created_at, "
             "         sm.seed_created_at, 0) AS event_ts, "
-            "m.memory_id, m.kind, COALESCE(m.pre_activation, 0.0) AS pre_activation "
+            "m.memory_id, m.kind, m.source_id, m.modality, "
+            "COALESCE(m.pre_activation, 0.0) AS pre_activation "
             "FROM seed_memory sm "
             "JOIN memories m ON m.memory_id = sm.memory_id "
             "WHERE m.kind != 'WORKING' "
@@ -1515,6 +1570,7 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
                   entry.embedding_id,
                   entry.memory_id,
                   0,
+                  0,
                   ranked[i].first,
                   0.0,
                   core::RetrievalSeedFallbackSourceConfidence (
@@ -1535,7 +1591,12 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
 	                  entry.is_association,
 	                  entry.is_label,
 	                  entry.embedding,
-                  Eigen::VectorXf () });
+                  Eigen::VectorXf (),
+                  0.0,
+                  0LL,
+                  0LL,
+                  std::string (),
+                  std::string () });
             }
         }
       const auto t_end = std::chrono::steady_clock::now ();
@@ -1697,6 +1758,7 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
                       entry.embedding_id,
                       entry.memory_id,
                       0,
+                      0,
                       sim,
                       0.0,
                       core::RetrievalSeedFallbackSourceConfidence (
@@ -1717,7 +1779,12 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
 	                      false,
 	                      true,
 	                      entry.embedding,
-                      Eigen::VectorXf () });
+                      Eigen::VectorXf (),
+                      0.0,
+                      0LL,
+                      0LL,
+                      std::string (),
+                      std::string () });
                   hierarchical_label_seed_count++;
                 }
             }
@@ -1767,9 +1834,13 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
                      << current_embedding_expr
                      << " AS embedding_id, "
                         "COALESCE(m.created_at, 0) AS created_at, "
+                        "COALESCE(m.last_access, 0) AS last_access, "
+                        "COALESCE(m.retrieved_count, 0) AS retrieved_count, "
+                        "COALESCE(m.used_count, 0) AS used_count, "
                         "COALESCE(NULLIF(m.start_ts, 0), m.created_at, 0) "
                         "AS event_ts, "
-                        "m.kind, COALESCE(m.pre_activation, 0.0) AS pre_activation "
+                        "m.kind, m.source_id, m.modality, "
+                        "COALESCE(m.pre_activation, 0.0) AS pre_activation "
                         "FROM memories m "
                   << latest_reconstruction_join
                   << "WHERE m.memory_id IN (";
@@ -1787,9 +1858,9 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
                   sql << "?";
                   params.push_back (memory_id);
                 }
-	              sql << ")";
+              sql << ")";
 
-	      const auto t_start = std::chrono::steady_clock::now ();
+              const auto t_start = std::chrono::steady_clock::now ();
               auto rows = store->Execute (sql.str (), params);
               const auto t_end = std::chrono::steady_clock::now ();
               context.AddOperationTiming ("GraphRetrieve.procedural_seed_sql",
@@ -1806,24 +1877,74 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
                 {
                   const long long mem_id = AnyToInt64 (row.at ("memory_id"));
                   const long long emb_id = AnyToInt64 (row.at ("embedding_id"));
-                  if (mem_id <= 0 || emb_id <= 0
-                      || !seen_seed_embeddings.insert (emb_id).second)
+                  if (mem_id <= 0 || emb_id <= 0)
                     {
                       continue;
-                  }
+                    }
                   const long long created_at = AnyToInt64 (row.at ("created_at"));
+                  const long long last_access = AnyToInt64 (row.at ("last_access"));
+                  const long long retrieved_count
+                      = std::max (0LL, AnyToInt64 (row.at ("retrieved_count")));
+                  const long long used_count
+                      = std::max (0LL, AnyToInt64 (row.at ("used_count")));
                   const long long event_ts = AnyToInt64 (row.at ("event_ts"));
                   const std::string kind = AnyToString (row.at ("kind"));
                   const bool is_association = (kind == "ASSOCIATION");
                   const bool is_label = (kind == "LABEL");
                   const double pre_activation = core::Clamp (
                       AnyToDouble (row.at ("pre_activation"), 0.0), 0.0, 1.0);
+                  const std::string memory_source_id
+                      = AnyToString (row.at ("source_id"));
+                  const std::string modality = AnyToString (row.at ("modality"));
                   const double proc_score
                       = proc_scores.count (mem_id) == 1 ? proc_scores[mem_id] : 0.0;
+                  if (proc_score > 0.0)
+                    {
+                      auto &slot = procedural_seed_scores[mem_id];
+                      slot = std::max (slot, proc_score);
+                    }
+                  if (!seen_seed_embeddings.insert (emb_id).second)
+                    {
+                      for (auto &seed : seeds)
+                        {
+                          if (seed.embedding_id != emb_id)
+                            {
+                              continue;
+                            }
+                          seed.proc_score
+                              = std::max (seed.proc_score, proc_score);
+                          seed.pre_activation
+                              = std::max (seed.pre_activation, pre_activation);
+                          seed.predictive_bonus
+                              = std::max (seed.predictive_bonus,
+                                          predictive_weight * pre_activation);
+                          seed.last_access
+                              = std::max (seed.last_access, last_access);
+                          seed.retrieved_count = std::max (
+                              seed.retrieved_count, retrieved_count);
+                          seed.used_count
+                              = std::max (seed.used_count, used_count);
+                          if (seed.source_id.empty ())
+                            {
+                              seed.source_id = memory_source_id;
+                            }
+                          if (seed.modality.empty ())
+                            {
+                              seed.modality = modality;
+                            }
+                          break;
+                        }
+                      if (proc_score > 0.0)
+                        {
+                          ++procedural_seed_count;
+                        }
+                      continue;
+                    }
 
                   seeds.push_back (Scored{ emb_id,
                                            mem_id,
                                            created_at,
+                                           last_access,
                                            0.0,
                                            0.0,
                                            core::RetrievalSeedFallbackSourceConfidence (
@@ -1835,18 +1956,25 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
                                            0,
                                            0.0,
                                            0.0,
-	                                           0.0,
-	                                           0.0,
-	                                           0,
-	                                           0.0,
-	                                           0,
-	                                           0.0,
-	                                           0,
-	                                           is_association,
-	                                           is_label,
-	                                           Eigen::VectorXf (),
-                                           Eigen::VectorXf () });
+                                           0.0,
+                                           0.0,
+                                           0,
+                                           0.0,
+                                           0,
+                                           0.0,
+                                           0,
+                                           is_association,
+                                           is_label,
+                                           Eigen::VectorXf (),
+                                           Eigen::VectorXf (),
+                                           0.0,
+                                           0LL,
+                                           0LL,
+                                           memory_source_id,
+                                           modality });
                   seeds.back ().temporal_score = temporal_rank_score (event_ts);
+                  seeds.back ().retrieved_count = retrieved_count;
+                  seeds.back ().used_count = used_count;
                   ++procedural_seed_count;
                 }
             }
@@ -3164,11 +3292,15 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
                     "m.embedding_id AS base_embedding_id, "
                     "e.embedding, "
                     "COALESCE(m.created_at, e.created_at, 0) AS created_at, "
+                    "COALESCE(m.last_access, 0) AS last_access, "
+                    "COALESCE(m.retrieved_count, 0) AS retrieved_count, "
+                    "COALESCE(m.used_count, 0) AS used_count, "
                     "COALESCE(NULLIF(m.start_ts, 0), m.created_at, "
                     "         e.created_at, 0) AS event_ts, "
                     "m.context, m.source_reliability, "
                     "m.source_contradiction_count, m.emotional_intensity, "
                     "m.s_arousal_avg, m.kind, "
+                    "m.source_id, m.modality, "
                     "COALESCE(m.pre_activation, 0.0) AS pre_activation "
                     "FROM memories m ")
                 + latest_reconstruction_join
@@ -3203,13 +3335,18 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
                 }
               auto it_emb = row.find ("embedding");
               auto it_created = row.find ("created_at");
-              auto it_event_ts = row.find ("event_ts");
+                auto it_last_access = row.find ("last_access");
+                auto it_retrieved_count = row.find ("retrieved_count");
+                auto it_used_count = row.find ("used_count");
+                auto it_event_ts = row.find ("event_ts");
               auto it_ctx = row.find ("context");
               auto it_rel = row.find ("source_reliability");
               auto it_contra = row.find ("source_contradiction_count");
               auto it_emotion = row.find ("emotional_intensity");
               auto it_arousal = row.find ("s_arousal_avg");
               auto it_kind = row.find ("kind");
+              auto it_source_id = row.find ("source_id");
+              auto it_modality = row.find ("modality");
               auto it_preact = row.find ("pre_activation");
               if (it_mem_id == row.end () || it_emb_id == row.end () || it_emb == row.end ())
                 continue;
@@ -3229,7 +3366,26 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
                 {
                   created_at = std::any_cast<long long> (it_created->second);
                 }
-              long long event_ts = created_at;
+                long long last_access = 0;
+                if (it_last_access != row.end ()
+                    && it_last_access->second.type () == typeid (long long))
+                  {
+                    last_access = std::any_cast<long long> (it_last_access->second);
+                  }
+                const long long retrieved_count
+                    = std::max (0LL,
+                                (it_retrieved_count != row.end ())
+                                    ? store::AnyToLongLong (
+                                          it_retrieved_count->second)
+                                          .value_or (0)
+                                    : 0LL);
+                const long long used_count
+                    = std::max (0LL,
+                                (it_used_count != row.end ())
+                                    ? store::AnyToLongLong (it_used_count->second)
+                                          .value_or (0)
+                                    : 0LL);
+                long long event_ts = created_at;
               if (it_event_ts != row.end ()
                   && it_event_ts->second.type () == typeid (long long))
                 {
@@ -3309,10 +3465,10 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
                              + freshness_weight * effective_freshness),
                       0.0, 1.0);
 
-              double proc_score = 0.0;
-              if (cfg.procedural_enabled && !disable_procedural_proactive
-                  && !sparse_key.empty ())
-                {
+                double proc_score = 0.0;
+                if (cfg.procedural_enabled && !disable_procedural_proactive
+                    && !sparse_key.empty ())
+                  {
                   auto pit = p_ctx.procedural_store.find (sparse_key);
                   if (pit != p_ctx.procedural_store.end ())
                     {
@@ -3320,18 +3476,32 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
                       if (mit != pit->second.end ())
                         {
                           proc_score = mit->second;
-                        }
-                    }
-                }
+                          }
+                      }
+                  }
+                auto proc_seed_it = procedural_seed_scores.find (mem_id);
+                if (proc_seed_it != procedural_seed_scores.end ())
+                  {
+                    proc_score = std::max (proc_score, proc_seed_it->second);
+                  }
 
               const double pre_activation
                   = (it_preact != row.end ())
                         ? core::Clamp (get_double (it_preact->second, 0.0), 0.0, 1.0)
                         : 0.0;
+              const std::string memory_source_id
+                  = it_source_id != row.end ()
+                        ? AnyToString (it_source_id->second)
+                        : std::string ();
+              const std::string modality
+                  = it_modality != row.end ()
+                        ? AnyToString (it_modality->second)
+                        : std::string ();
 
               scored.push_back (Scored{ emb_id,
                                         mem_id,
                                         created_at,
+                                        last_access,
                                         sim,
                                         ctx_sim,
                                         source_conf,
@@ -3341,19 +3511,28 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
                                         contradiction_count,
                                         memory_emotion,
                                         memory_arousal,
-	                                        0.0,
-	                                        0.0,
-	                                        0,
-	                                        0.0,
-	                                        0,
-	                                        0.0,
-	                                        0,
-	                                        is_association,
-	                                        is_label,
-	                                        v,
-                                        ctx_vec });
-              scored.back ().temporal_score = temporal_rank_score (event_ts);
-              fetched_any = true;
+                                          0.0,
+                                          0.0,
+                                          0,
+                                          0.0,
+                                          0,
+                                          0.0,
+                                          0,
+                                          is_association,
+                                          is_label,
+                                          v,
+                                        ctx_vec,
+                                        0.0,
+                                        0LL,
+                                        0LL,
+                                        std::string (),
+                                        std::string () });
+                scored.back ().temporal_score = temporal_rank_score (event_ts);
+                scored.back ().retrieved_count = retrieved_count;
+                scored.back ().used_count = used_count;
+                scored.back ().source_id = memory_source_id;
+                scored.back ().modality = modality;
+                fetched_any = true;
             }
         }
       catch (...)
@@ -3396,24 +3575,30 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
         }
     }
 
-  auto is_overlap_wm = [&p_ctx] (const Eigen::VectorXf &v,
-                                 double dup_thresh) -> bool {
+  auto max_wm_overlap = [&p_ctx] (const Eigen::VectorXf &v) -> double {
     if (v.size () == 0)
       {
-        return false;
+        return 0.0;
       }
+    double max_similarity = 0.0;
     for (const auto &slot : p_ctx.wm_slots)
       {
         if (slot.embedding.size () == v.size () && slot.embedding.size () > 0)
           {
             const double sim = core::CosineSimilarity (slot.embedding, v);
-            if (sim >= dup_thresh)
-              {
-                return true;
-              }
+            max_similarity = std::max (max_similarity, sim);
           }
       }
-    return false;
+    return max_similarity;
+  };
+
+  auto is_overlap_wm = [&max_wm_overlap] (const Eigen::VectorXf &v,
+                                          double dup_thresh) -> bool {
+    if (v.size () == 0)
+      {
+        return false;
+      }
+    return max_wm_overlap (v) >= dup_thresh;
   };
 
   const double dup_thresh = core::DupThresh (cfg.focus, cfg.stability);
@@ -3467,6 +3652,63 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
           cfg.focus, cfg.sensitivity, cfg.stability));
   const int durable_source_min_topk = std::max (
       0, core::RetrievalDurableSourceMinTopK (cfg.focus, cfg.stability));
+  const bool recent_retrieval_inhibition_enabled
+      = EnvFlag ("CORTEXT_ENABLE_RECENT_RETRIEVAL_INHIBITION");
+  const double recent_retrieval_inhibition_weight
+      = recent_retrieval_inhibition_enabled
+            ? core::RetrievalRecentInhibitionWeight (
+                cfg.focus, cfg.sensitivity, cfg.stability)
+            : 0.0;
+  const double recent_retrieval_inhibition_tau_seconds
+      = core::RetrievalRecentInhibitionTauSeconds (
+          cfg.focus, cfg.sensitivity, cfg.stability);
+  const bool base_level_availability_enabled
+      = EnvFlag ("CORTEXT_ENABLE_BASE_LEVEL_AVAILABILITY");
+  const double base_level_availability_weight
+      = base_level_availability_enabled
+            ? core::RetrievalBaseLevelAvailabilityWeight (
+                cfg.focus, cfg.sensitivity, cfg.stability)
+            : 0.0;
+  const double base_level_availability_tau_seconds
+      = core::RetrievalBaseLevelAvailabilityTauSeconds (
+          cfg.focus, cfg.sensitivity, cfg.stability);
+  const double base_level_availability_count_saturation
+      = core::RetrievalBaseLevelAvailabilityCountSaturation (
+          cfg.focus, cfg.sensitivity, cfg.stability);
+  const bool partial_matching_enabled
+      = EnvFlag ("CORTEXT_ENABLE_PARTIAL_MATCHING_PENALTY");
+  const double partial_match_penalty_weight
+      = partial_matching_enabled
+            ? core::RetrievalPartialMatchPenaltyWeight (
+                cfg.focus, cfg.sensitivity, cfg.stability)
+            : 0.0;
+  const double partial_match_contradiction_saturation
+      = core::RetrievalPartialMatchContradictionSaturation (
+          cfg.focus, cfg.sensitivity, cfg.stability);
+  const double partial_match_source_mismatch_weight
+      = core::RetrievalPartialMatchSourceMismatchWeight (
+          cfg.focus, cfg.sensitivity, cfg.stability);
+  const double partial_match_modality_mismatch_weight
+      = core::RetrievalPartialMatchModalityMismatchWeight (
+          cfg.focus, cfg.sensitivity, cfg.stability);
+  const bool evidence_blending_enabled
+      = EnvFlag ("CORTEXT_ENABLE_EVIDENCE_BLENDING");
+  const double evidence_blend_tie_margin
+      = core::RetrievalEvidenceBlendTieMargin (
+          cfg.focus, cfg.sensitivity, cfg.stability);
+  const double evidence_blend_temperature
+      = core::RetrievalEvidenceBlendTemperature (
+          cfg.focus, cfg.sensitivity, cfg.stability);
+  const int evidence_blend_max_members
+      = evidence_blending_enabled
+            ? core::RetrievalEvidenceBlendMaxMembers (
+                cfg.focus, cfg.sensitivity, cfg.stability)
+            : 0;
+  std::string signal_modality = signal.modality;
+  if (signal_modality.empty () && signal.mimetype == "text/plain")
+    {
+      signal_modality = "text";
+    }
 
   const double salience = core::Clamp (
       context.GetMetric (operations::Metric::salience).value_or (0.0), 0.0, 1.0);
@@ -3485,6 +3727,107 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
       = core::RetrievalMemoryAffectScoringWeights (cfg.sensitivity);
   const double w_mem_emotion = memory_affect_weights.emotion;
   const double w_mem_arousal = memory_affect_weights.arousal;
+
+  auto base_level_availability = [&] (const Scored &s) {
+    if (!base_level_availability_enabled
+        || base_level_availability_weight <= 0.0)
+      {
+        return 0.0;
+      }
+    const long long retrieved_count = std::max (0LL, s.retrieved_count);
+    const long long used_count = std::max (0LL, s.used_count);
+    const double exposure_count
+        = static_cast<double> (retrieved_count)
+          + 2.0 * static_cast<double> (used_count);
+    if (exposure_count <= 0.0)
+      {
+        return 0.0;
+      }
+
+    const double saturation
+        = std::max (base_level_availability_count_saturation, 1.0);
+    const double count_support = core::Clamp (
+        std::log1p (exposure_count) / std::log1p (saturation), 0.0, 1.0);
+    const long long access_ts = s.last_access > 0 ? s.last_access : s.created_at;
+    double recency = 0.5;
+    if (access_ts > 0)
+      {
+        if (signal.timestamp > static_cast<std::uint64_t> (access_ts))
+          {
+            const double age_s
+                = static_cast<double> (
+                      signal.timestamp - static_cast<std::uint64_t> (access_ts))
+                  / 1000.0;
+            recency = std::exp (
+                -age_s
+                / std::max (base_level_availability_tau_seconds,
+                            constants::kNormEpsilon));
+          }
+        else
+          {
+            recency = 1.0;
+          }
+      }
+
+    const double use_ratio
+        = retrieved_count > 0
+              ? static_cast<double> (used_count)
+                    / static_cast<double> (retrieved_count)
+              : (used_count > 0 ? 1.0 : 0.0);
+    const double use_quality = core::Clamp (0.75 + 0.25 * use_ratio, 0.75,
+                                            1.0);
+    return base_level_availability_weight * count_support
+           * core::Clamp (recency, 0.0, 1.0) * use_quality;
+  };
+
+  auto recent_retrieval_inhibition = [&] (const Scored &s) {
+    if (!recent_retrieval_inhibition_enabled
+        || recent_retrieval_inhibition_weight <= 0.0 || s.last_access <= 0
+        || signal.timestamp <= static_cast<std::uint64_t> (s.last_access))
+      {
+        return 0.0;
+      }
+    const double age_s
+        = static_cast<double> (signal.timestamp
+                               - static_cast<std::uint64_t> (s.last_access))
+          / 1000.0;
+    const double decay = std::exp (
+        -age_s
+        / std::max (recent_retrieval_inhibition_tau_seconds,
+                    constants::kNormEpsilon));
+    return -recent_retrieval_inhibition_weight
+           * core::Clamp (decay, 0.0, 1.0);
+  };
+
+  auto partial_match_penalty = [&] (const Scored &s) {
+    double penalty = std::max (0.0, s.fact_stale_penalty);
+    if (!partial_matching_enabled || partial_match_penalty_weight <= 0.0)
+      {
+        return -penalty;
+      }
+
+    const double contradiction_support = core::Clamp (
+        static_cast<double> (std::max (0, s.source_contradictions))
+            / std::max (partial_match_contradiction_saturation, 1.0),
+        0.0, 1.0);
+    penalty += partial_match_penalty_weight * contradiction_support;
+
+    const bool summary_like = s.is_association || s.is_label;
+    if (!summary_like && !signal.source_id.empty () && !s.source_id.empty ()
+        && s.source_id != signal.source_id)
+      {
+        penalty += partial_match_penalty_weight
+                   * partial_match_source_mismatch_weight;
+      }
+    if (!summary_like && !signal_modality.empty () && !s.modality.empty ()
+        && s.modality != signal_modality)
+      {
+        penalty += partial_match_penalty_weight
+                   * partial_match_modality_mismatch_weight;
+      }
+
+    return -core::Clamp (penalty, 0.0, 1.0);
+  };
 
   const double source_thresh = core::RetrievalSourceConfidenceThreshold (
       cfg.focus, cfg.sensitivity, cfg.stability, resurfacing_decay_scale);
@@ -4022,7 +4365,7 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
                                 elapsed_ms (t_start, t_end));
   };
 
-  auto base_score = [&] (const Scored &s) {
+  auto activation_ledger = [&] (const Scored &s) {
     const double relevance = std::max (0.0, s.score);
     const double ctx_sim = std::max (0.0, s.ctx_score);
     const double proc_sim = std::max (0.0, s.proc_score);
@@ -4033,13 +4376,318 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
     const double label_bonus = s.is_label ? label_boost : 0.0;
     const double temporal_bonus
         = s.is_label ? 0.0 : temporal_rank_weight * s.temporal_score;
-    return w_rel * relevance + w_ctx * ctx_sim + w_proc * proc_sim
-           + w_emotion * emotion_bonus + s.predictive_bonus + association_bonus
-           + label_bonus
-           + label_graph_weight * s.label_graph_boost
-           + durable_source_weight * s.durable_source_boost
-           + temporal_bonus + s.fact_boost - s.fact_stale_penalty;
+    const double availability = base_level_availability (s);
+    retrieval_debug::ActivationLedger ledger;
+    ledger.base_level = w_rel * relevance + temporal_bonus + availability;
+    ledger.spreading_activation
+        = w_ctx * ctx_sim + w_emotion * emotion_bonus + association_bonus
+          + label_bonus + label_graph_weight * s.label_graph_boost
+          + durable_source_weight * s.durable_source_boost + s.fact_boost;
+    ledger.partial_match_penalty = partial_match_penalty (s);
+    ledger.recent_inhibition = recent_retrieval_inhibition (s);
+    ledger.utility = w_proc * proc_sim + s.predictive_bonus;
+    ledger.exploration_noise = 0.0;
+    ledger.activation_total
+        = ledger.base_level + ledger.spreading_activation
+          + ledger.partial_match_penalty + ledger.recent_inhibition
+          + ledger.utility + ledger.exploration_noise;
+    return ledger;
   };
+
+  auto base_score = [&] (const Scored &s) {
+    return activation_ledger (s).activation_total;
+  };
+
+  auto ranked_candidate = [&] (const Scored &s) {
+    const auto activation = activation_ledger (s);
+    retrieval_debug::RankedCandidate candidate;
+    candidate.embedding_id = s.embedding_id;
+    candidate.memory_id = s.memory_id;
+    candidate.score = activation.activation_total;
+    candidate.relevance = std::max (0.0, s.score);
+    candidate.proc_score = std::max (0.0, s.proc_score);
+    candidate.predictive_bonus = s.predictive_bonus;
+    candidate.pre_activation = s.pre_activation;
+    candidate.fact_boost = s.fact_boost;
+    candidate.fact_stale_penalty = s.fact_stale_penalty;
+    candidate.linked_fact_count = s.linked_fact_count;
+    candidate.label_graph_boost = s.label_graph_boost;
+    candidate.label_match_count = s.label_match_count;
+    candidate.durable_source_boost = s.durable_source_boost;
+    candidate.durable_source_count = s.durable_source_count;
+    candidate.temporal_score = s.temporal_score;
+    candidate.activation = activation;
+    return candidate;
+  };
+
+  auto build_evidence_packets = [&] (const std::vector<Scored> &selected) {
+    std::vector<retrieval_debug::EvidencePacket> packets;
+    if (!evidence_blending_enabled || selected.size () < 2
+        || evidence_blend_max_members < 2)
+      {
+        return packets;
+      }
+
+    const double best_score = base_score (selected.front ());
+    if (!std::isfinite (best_score))
+      {
+        return packets;
+      }
+
+    std::vector<std::pair<int, const Scored *>> members;
+    members.reserve (
+        static_cast<size_t> (std::max (2, evidence_blend_max_members)));
+    for (int rank = 0; rank < static_cast<int> (selected.size ()); ++rank)
+      {
+        const auto &candidate = selected[static_cast<size_t> (rank)];
+        const double score = base_score (candidate);
+        if (!std::isfinite (score))
+          {
+            continue;
+          }
+        const double gap = best_score - score;
+        if (gap > evidence_blend_tie_margin)
+          {
+            break;
+          }
+        members.emplace_back (rank, &candidate);
+        if (static_cast<int> (members.size ()) >= evidence_blend_max_members)
+          {
+            break;
+          }
+      }
+    if (members.size () < 2)
+      {
+        return packets;
+      }
+
+    const double temperature = std::max (evidence_blend_temperature,
+                                         constants::kNormEpsilon);
+    double unnormalized_sum = 0.0;
+    std::vector<double> unnormalized;
+    unnormalized.reserve (members.size ());
+    for (const auto &[rank, candidate] : members)
+      {
+        (void)rank;
+        const double weight = std::exp (
+            (base_score (*candidate) - best_score) / temperature);
+        unnormalized.push_back (weight);
+        unnormalized_sum += weight;
+      }
+    if (unnormalized_sum <= constants::kNormEpsilon)
+      {
+        return packets;
+      }
+
+    retrieval_debug::EvidencePacket packet;
+    packet.packet_id = 1;
+    packet.consumer = "constructive_recall_summary";
+    packet.reason = "near_tied_top_candidates";
+    packet.tie_margin = evidence_blend_tie_margin;
+    packet.temperature = temperature;
+    packet.score_span = best_score - base_score (*members.back ().second);
+    packet.members.reserve (members.size ());
+    for (size_t i = 0; i < members.size (); ++i)
+      {
+        const auto &[rank, candidate] = members[i];
+        const double weight = unnormalized[i] / unnormalized_sum;
+        packet.activation_total += weight * base_score (*candidate);
+        packet.members.push_back (
+            { rank,
+              candidate->embedding_id,
+              candidate->memory_id,
+              weight,
+              base_score (*candidate),
+              activation_ledger (*candidate) });
+      }
+    packets.push_back (std::move (packet));
+    return packets;
+  };
+
+  auto append_evidence_blend_reconstructions =
+      [&] (const std::vector<Scored> &selected,
+           const std::vector<retrieval_debug::EvidencePacket> &packets) {
+    if (!evidence_blending_enabled || disable_constructive_recall
+        || packets.empty ())
+      {
+        return;
+      }
+
+    std::unordered_map<long long, const Scored *> selected_by_memory_id;
+    selected_by_memory_id.reserve (selected.size ());
+    for (const auto &candidate : selected)
+      {
+        if (candidate.memory_id > 0)
+          {
+            selected_by_memory_id.emplace (candidate.memory_id, &candidate);
+          }
+      }
+
+    for (const auto &packet : packets)
+      {
+        if (packet.members.size () < 2)
+          {
+            continue;
+          }
+        const long long anchor_memory_id = packet.members.front ().memory_id;
+        if (anchor_memory_id <= 0)
+          {
+            continue;
+          }
+
+        Eigen::VectorXf blended = Eigen::VectorXf::Zero (q.size ());
+        double total_weight = 0.0;
+        double source_confidence = 0.0;
+        double context_similarity = 0.0;
+        for (const auto &member : packet.members)
+          {
+            auto it = selected_by_memory_id.find (member.memory_id);
+            if (it == selected_by_memory_id.end ())
+              {
+                continue;
+              }
+            const Scored &candidate = *it->second;
+            if (candidate.vec.size () != q.size () || candidate.vec.size () == 0
+                || member.weight <= 0.0)
+              {
+                continue;
+              }
+            blended += static_cast<float> (member.weight) * candidate.vec;
+            total_weight += member.weight;
+            source_confidence += member.weight
+                                 * core::Clamp (
+                                     candidate.source_confidence, 0.0, 1.0);
+            context_similarity += member.weight
+                                  * std::max (0.0, candidate.ctx_score);
+          }
+        if (total_weight <= constants::kNormEpsilon)
+          {
+            continue;
+          }
+        blended /= static_cast<float> (total_weight);
+        const float norm = blended.norm ();
+        if (norm <= 1e-9f)
+          {
+            continue;
+          }
+        blended /= norm;
+
+        const double anchor_weight
+            = core::Clamp (packet.members.front ().weight, 0.0, 1.0);
+        const double uncertainty = core::Clamp (1.0 - anchor_weight, 0.0, 1.0);
+        const auto blob_id
+            = constructive_recall::LoadCurrentBlobId (tx, anchor_memory_id);
+        constructive_recall::AppendReconstructionWithEmbedding (
+            tx, anchor_memory_id, blended, blob_id,
+            static_cast<long long> (signal.timestamp), uncertainty,
+            "evidence_blend",
+            core::Clamp (source_confidence / total_weight, 0.0, 1.0),
+            core::Clamp (context_similarity / total_weight, 0.0, 1.0));
+      }
+  };
+
+  auto collect_filter_rejections =
+      [&] (const std::vector<Scored> &candidates,
+           bool enforce_write_exclusion,
+           bool enforce_source_conf,
+           const std::string &stage) {
+        std::vector<retrieval_debug::RejectedCandidate> rejected;
+        rejected.reserve (candidates.size ());
+        for (const auto &s : candidates)
+          {
+            std::string reason;
+            double observed = 0.0;
+            double threshold = 0.0;
+            if (stored_id.has_value () && s.embedding_id == *stored_id)
+              {
+                reason = "stored_embedding";
+                observed = static_cast<double> (s.embedding_id);
+                threshold = static_cast<double> (*stored_id);
+              }
+            else
+              {
+                const bool summary_like = (s.is_association || s.is_label);
+                if (enforce_write_exclusion && !summary_like
+                    && s.created_at > 0
+                    && static_cast<std::uint64_t> (s.created_at)
+                           >= write_exclusion_ts)
+                  {
+                    reason = "write_exclusion";
+                    observed = static_cast<double> (s.created_at);
+                    threshold = static_cast<double> (write_exclusion_ts);
+                  }
+                else
+                  {
+                    const double cand_dup_thresh
+                        = summary_like ? dup_thresh_summary : dup_thresh;
+                    const double wm_overlap = max_wm_overlap (s.vec);
+                    if (!(summary_like && bypass_summary_overlap)
+                        && wm_overlap >= cand_dup_thresh)
+                      {
+                        reason = "working_memory_overlap";
+                        observed = wm_overlap;
+                        threshold = cand_dup_thresh;
+                      }
+                    else
+                      {
+                        const bool source_backed_by_graph
+                            = s.durable_source_boost
+                                  >= source_backed_boost_floor
+                              || (s.durable_source_count > 0
+                                  && s.label_graph_boost
+                                         >= source_backed_boost_floor);
+                        if (!disable_source_conf && enforce_source_conf
+                            && !source_backed_by_graph
+                            && s.source_confidence < source_thresh)
+                          {
+                            reason = "source_confidence";
+                            observed = s.source_confidence;
+                            threshold = source_thresh;
+                          }
+                      }
+                  }
+              }
+
+            if (!reason.empty ())
+              {
+                rejected.push_back (
+                    { ranked_candidate (s), reason, stage, observed,
+                      threshold });
+              }
+          }
+        return rejected;
+      };
+
+  auto append_unselected_rejections =
+      [&] (std::vector<retrieval_debug::RejectedCandidate> &rejected,
+           const std::vector<Scored> &eligible,
+           const std::vector<Scored> &selected) {
+        std::unordered_set<long long> selected_embeddings;
+        selected_embeddings.reserve (selected.size ());
+        double selected_min_score = 0.0;
+        bool have_selected = false;
+        for (const auto &s : selected)
+          {
+            selected_embeddings.insert (s.embedding_id);
+            const double score = base_score (s);
+            selected_min_score
+                = have_selected ? std::min (selected_min_score, score) : score;
+            have_selected = true;
+          }
+        for (const auto &s : eligible)
+          {
+            if (selected_embeddings.count (s.embedding_id) > 0)
+              {
+                continue;
+              }
+            rejected.push_back (
+                { ranked_candidate (s),
+                  "not_selected",
+                  "selection",
+                  base_score (s),
+                  have_selected ? selected_min_score : 0.0 });
+          }
+      };
 
   auto is_source_backed = [&] (const Scored &candidate) {
     return candidate.durable_source_boost >= source_backed_boost_floor
@@ -4484,11 +5132,13 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
       FilterStats strict_stats;
       auto eligible = filter_candidates (seeds, true, true, &strict_stats);
       FilterStats relax_stats;
+      bool used_relaxed_filter = false;
       if (eligible.empty ()
           && metacognitive_mode
                  != ProcessorContext::MetacognitiveMode::UnknownCaution)
         {
           eligible = filter_candidates (seeds, false, false, &relax_stats);
+          used_relaxed_filter = true;
         }
       auto selected
           = select_diversified (eligible, k, build_reserved_initial (eligible));
@@ -4498,8 +5148,10 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
                         });
       enforce_durable_source_floor (selected, eligible);
       apply_unknown_caution (selected);
+      const auto evidence_packets = build_evidence_packets (selected);
       const auto t_score_end = std::chrono::steady_clock::now ();
-      context.AddOperationTiming ("GraphRetrieve.score", elapsed_ms (t_score_start, t_score_end));
+      context.AddOperationTiming ("GraphRetrieve.score",
+                                  elapsed_ms (t_score_start, t_score_end));
       for (const auto &s : selected)
         {
           out.emplace (s.embedding_id, s.vec);
@@ -4509,59 +5161,76 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
         selected_order.reserve (selected.size ());
         std::vector<retrieval_debug::RankedCandidate> ranked_candidates;
         ranked_candidates.reserve (selected.size ());
+        auto rejected_candidates = collect_filter_rejections (
+            seeds, !used_relaxed_filter, !used_relaxed_filter,
+            used_relaxed_filter ? "relaxed_filter" : "strict_filter");
+        append_unselected_rejections (rejected_candidates, eligible,
+                                      selected);
+        int rejected_filter_count = 0;
+        int rejected_selection_count = 0;
+        for (const auto &entry : rejected_candidates)
+          {
+            if (entry.stage == "selection")
+              {
+                ++rejected_selection_count;
+              }
+            else
+              {
+                ++rejected_filter_count;
+              }
+          }
         for (const auto &s : selected)
           {
             selected_order.push_back (s.embedding_id);
-            ranked_candidates.push_back (
-                { s.embedding_id,
-                  s.memory_id,
-                  base_score (s),
-                  std::max (0.0, s.score),
-                  std::max (0.0, s.proc_score),
-                  s.predictive_bonus,
-                  s.pre_activation,
-	                  s.fact_boost,
-	                  s.fact_stale_penalty,
-	                  s.linked_fact_count,
-	                  s.label_graph_boost,
-	                  s.label_match_count,
-	                  s.durable_source_boost,
-	                  s.durable_source_count,
-                  s.temporal_score });
-	          }
-	        int candidate_fact_link_row_count = 0;
-	        for (const auto &[memory_id, links] : candidate_fact_links)
-	          {
-	            (void)memory_id;
-	            candidate_fact_link_row_count
-	                += static_cast<int> (links.size ());
-	          }
-	        int selected_fact_linked_count = 0;
-	        for (const auto &s : selected)
-	          {
-	            if (s.fact_boost > 0.0 || s.fact_stale_penalty > 0.0
-	                || s.linked_fact_count > 0)
-	              {
-	                ++selected_fact_linked_count;
-	              }
-	          }
-	        retrieval_debug::SetLastRetrievalSummary (
-	            { fact_layer_enabled,
-	              static_cast<int> (matched_facts.size ()),
-	              static_cast<int> (candidate_fact_links.size ()),
-	              candidate_fact_link_row_count,
-	              selected_fact_linked_count,
-	              query_text_token_count,
-	              text_query_wm_slots,
-	              appended_wm_chars,
-	              fact_text_candidate_count,
-	              fact_text_rejected_low_score_count,
-	              fact_text_match_count,
-	              fact_text_best_score });
-	        retrieval_debug::SetLastSelectedEmbeddingOrder (selected_order);
-	        retrieval_debug::SetLastRankedCandidates (ranked_candidates);
-	      }
+            ranked_candidates.push_back (ranked_candidate (s));
+          }
+        int candidate_fact_link_row_count = 0;
+        for (const auto &[memory_id, links] : candidate_fact_links)
+          {
+            (void)memory_id;
+            candidate_fact_link_row_count
+                += static_cast<int> (links.size ());
+          }
+        int selected_fact_linked_count = 0;
+        for (const auto &s : selected)
+          {
+            if (s.fact_boost > 0.0 || s.fact_stale_penalty > 0.0
+                || s.linked_fact_count > 0)
+              {
+                ++selected_fact_linked_count;
+              }
+          }
+        int evidence_packet_member_count = 0;
+        for (const auto &packet : evidence_packets)
+          {
+            evidence_packet_member_count
+                += static_cast<int> (packet.members.size ());
+          }
+        retrieval_debug::SetLastRetrievalSummary (
+            { fact_layer_enabled,
+              static_cast<int> (matched_facts.size ()),
+              static_cast<int> (candidate_fact_links.size ()),
+              candidate_fact_link_row_count,
+              selected_fact_linked_count,
+              query_text_token_count,
+              text_query_wm_slots,
+              appended_wm_chars,
+              fact_text_candidate_count,
+              fact_text_rejected_low_score_count,
+              fact_text_match_count,
+              fact_text_best_score,
+              static_cast<int> (rejected_candidates.size ()),
+              rejected_filter_count,
+              rejected_selection_count,
+              static_cast<int> (evidence_packets.size ()),
+              evidence_packet_member_count });
+        retrieval_debug::SetLastSelectedEmbeddingOrder (selected_order);
+        retrieval_debug::SetLastRankedCandidates (ranked_candidates);
+        retrieval_debug::SetLastRejectedCandidates (rejected_candidates);
+        retrieval_debug::SetLastEvidencePackets (evidence_packets);
+      }
       append_reconstruction_versions (selected);
+      append_evidence_blend_reconstructions (selected, evidence_packets);
       context.SetRetrievedMemoryEmbeddings (std::move (out));
       reinstate_context (selected);
 
@@ -4589,11 +5258,13 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
   const auto t_score_start = std::chrono::steady_clock::now ();
   auto eligible = filter_candidates (scored, true, true, &strict_stats);
   FilterStats relax_stats;
+  bool used_relaxed_filter = false;
   if (eligible.empty ()
       && metacognitive_mode
              != ProcessorContext::MetacognitiveMode::UnknownCaution)
     {
       eligible = filter_candidates (scored, false, false, &relax_stats);
+      used_relaxed_filter = true;
     }
   const auto initial = build_reserved_initial (eligible);
   auto selected = select_diversified (eligible, k, initial);
@@ -4603,8 +5274,10 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
                     });
   enforce_durable_source_floor (selected, eligible);
   apply_unknown_caution (selected);
+  const auto evidence_packets = build_evidence_packets (selected);
   const auto t_score_end = std::chrono::steady_clock::now ();
-  context.AddOperationTiming ("GraphRetrieve.score", elapsed_ms (t_score_start, t_score_end));
+  context.AddOperationTiming ("GraphRetrieve.score",
+                              elapsed_ms (t_score_start, t_score_end));
   for (const auto &s : selected)
     {
       out.emplace (s.embedding_id, s.vec);
@@ -4614,59 +5287,75 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
     selected_order.reserve (selected.size ());
     std::vector<retrieval_debug::RankedCandidate> ranked_candidates;
     ranked_candidates.reserve (selected.size ());
+    auto rejected_candidates = collect_filter_rejections (
+        scored, !used_relaxed_filter, !used_relaxed_filter,
+        used_relaxed_filter ? "relaxed_filter" : "strict_filter");
+    append_unselected_rejections (rejected_candidates, eligible, selected);
+    int rejected_filter_count = 0;
+    int rejected_selection_count = 0;
+    for (const auto &entry : rejected_candidates)
+      {
+        if (entry.stage == "selection")
+          {
+            ++rejected_selection_count;
+          }
+        else
+          {
+            ++rejected_filter_count;
+          }
+      }
     for (const auto &s : selected)
       {
         selected_order.push_back (s.embedding_id);
-        ranked_candidates.push_back (
-            { s.embedding_id,
-              s.memory_id,
-              base_score (s),
-              std::max (0.0, s.score),
-              std::max (0.0, s.proc_score),
-              s.predictive_bonus,
-              s.pre_activation,
-	              s.fact_boost,
-	              s.fact_stale_penalty,
-	              s.linked_fact_count,
-	              s.label_graph_boost,
-	              s.label_match_count,
-	              s.durable_source_boost,
-	              s.durable_source_count,
-              s.temporal_score });
-	      }
-	    int candidate_fact_link_row_count = 0;
-	    for (const auto &[memory_id, links] : candidate_fact_links)
-	      {
-	        (void)memory_id;
-	        candidate_fact_link_row_count += static_cast<int> (links.size ());
-	      }
-	    int selected_fact_linked_count = 0;
-	    for (const auto &s : selected)
-	      {
-	        if (s.fact_boost > 0.0 || s.fact_stale_penalty > 0.0
-	            || s.linked_fact_count > 0)
-	          {
-	            ++selected_fact_linked_count;
-	          }
-	      }
-	    retrieval_debug::SetLastRetrievalSummary (
-	        { fact_layer_enabled,
-	          static_cast<int> (matched_facts.size ()),
-	          static_cast<int> (candidate_fact_links.size ()),
-	          candidate_fact_link_row_count,
-	          selected_fact_linked_count,
-	          query_text_token_count,
-	          text_query_wm_slots,
-	          appended_wm_chars,
-	          fact_text_candidate_count,
-	          fact_text_rejected_low_score_count,
-	          fact_text_match_count,
-	          fact_text_best_score });
-	    retrieval_debug::SetLastSelectedEmbeddingOrder (selected_order);
-	    retrieval_debug::SetLastRankedCandidates (ranked_candidates);
-	  }
+        ranked_candidates.push_back (ranked_candidate (s));
+      }
+    int candidate_fact_link_row_count = 0;
+    for (const auto &[memory_id, links] : candidate_fact_links)
+      {
+        (void)memory_id;
+        candidate_fact_link_row_count += static_cast<int> (links.size ());
+      }
+    int selected_fact_linked_count = 0;
+    for (const auto &s : selected)
+      {
+        if (s.fact_boost > 0.0 || s.fact_stale_penalty > 0.0
+            || s.linked_fact_count > 0)
+          {
+            ++selected_fact_linked_count;
+          }
+      }
+    int evidence_packet_member_count = 0;
+    for (const auto &packet : evidence_packets)
+      {
+        evidence_packet_member_count
+            += static_cast<int> (packet.members.size ());
+      }
+    retrieval_debug::SetLastRetrievalSummary (
+        { fact_layer_enabled,
+          static_cast<int> (matched_facts.size ()),
+          static_cast<int> (candidate_fact_links.size ()),
+          candidate_fact_link_row_count,
+          selected_fact_linked_count,
+          query_text_token_count,
+          text_query_wm_slots,
+          appended_wm_chars,
+          fact_text_candidate_count,
+          fact_text_rejected_low_score_count,
+          fact_text_match_count,
+          fact_text_best_score,
+          static_cast<int> (rejected_candidates.size ()),
+          rejected_filter_count,
+          rejected_selection_count,
+          static_cast<int> (evidence_packets.size ()),
+          evidence_packet_member_count });
+    retrieval_debug::SetLastSelectedEmbeddingOrder (selected_order);
+    retrieval_debug::SetLastRankedCandidates (ranked_candidates);
+    retrieval_debug::SetLastRejectedCandidates (rejected_candidates);
+    retrieval_debug::SetLastEvidencePackets (evidence_packets);
+  }
 
   append_reconstruction_versions (selected);
+  append_evidence_blend_reconstructions (selected, evidence_packets);
   context.SetRetrievedMemoryEmbeddings (std::move (out));
   reinstate_context (selected);
 
@@ -4719,12 +5408,26 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
   double selected_label_graph_boost_sum = 0.0;
   double selected_durable_source_boost_sum = 0.0;
   double selected_temporal_score_sum = 0.0;
+  double selected_activation_base_level_sum = 0.0;
+  double selected_activation_spreading_sum = 0.0;
+  double selected_activation_partial_penalty_sum = 0.0;
+  double selected_activation_recent_inhibition_sum = 0.0;
+  double selected_activation_utility_sum = 0.0;
+  double selected_activation_exploration_noise_sum = 0.0;
+  double selected_activation_total_sum = 0.0;
+  int64_t evidence_packet_member_count = 0;
+  for (const auto &packet : evidence_packets)
+    {
+      evidence_packet_member_count
+          += static_cast<int64_t> (packet.members.size ());
+    }
   count_kinds (scored, scored_assoc, scored_label, scored_other);
   count_kinds (eligible, eligible_assoc, eligible_label, eligible_other);
   count_kinds (selected, selected_assoc, selected_label, selected_other);
   count_kinds (initial, initial_assoc, initial_label, initial_other);
   for (const auto &s : selected)
     {
+      const auto activation = activation_ledger (s);
       if (s.fact_boost > 0.0 || s.fact_stale_penalty > 0.0)
         {
           fact_linked_selected++;
@@ -4736,17 +5439,27 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
       selected_label_graph_boost_sum += s.label_graph_boost;
       selected_durable_source_boost_sum += s.durable_source_boost;
       selected_temporal_score_sum += s.temporal_score;
+      selected_activation_base_level_sum += activation.base_level;
+      selected_activation_spreading_sum += activation.spreading_activation;
+      selected_activation_partial_penalty_sum
+          += activation.partial_match_penalty;
+      selected_activation_recent_inhibition_sum
+          += activation.recent_inhibition;
+      selected_activation_utility_sum += activation.utility;
+      selected_activation_exploration_noise_sum
+          += activation.exploration_noise;
+      selected_activation_total_sum += activation.activation_total;
     }
 
   telemetry::LogDebug ("cortext.graph_retrieval", {
     telemetry::Attribute::Double ("dup_thresh", dup_thresh),
     telemetry::Attribute::Int64 ("write_exclusion_ts", static_cast<int64_t> (write_exclusion_ts)),
     telemetry::Attribute::Bool ("stored_id_present", stored_id.has_value ()),
-	    telemetry::Attribute::Int64 ("selected_count", static_cast<int64_t> (selected.size ())),
-	    telemetry::Attribute::Int64 ("seed_count", static_cast<int64_t> (seeds.size ())),
-	    telemetry::Attribute::Int64 ("seed_k", static_cast<int64_t> (seed_k)),
-	    telemetry::Attribute::Int64 ("selected_k", static_cast<int64_t> (k)),
-	    telemetry::Attribute::Int64 ("procedural_seed_count", procedural_seed_count),
+      telemetry::Attribute::Int64 ("selected_count", static_cast<int64_t> (selected.size ())),
+      telemetry::Attribute::Int64 ("seed_count", static_cast<int64_t> (seeds.size ())),
+      telemetry::Attribute::Int64 ("seed_k", static_cast<int64_t> (seed_k)),
+      telemetry::Attribute::Int64 ("selected_k", static_cast<int64_t> (k)),
+      telemetry::Attribute::Int64 ("procedural_seed_count", procedural_seed_count),
     telemetry::Attribute::Int64 ("hierarchical_label_seed_count",
                                  hierarchical_label_seed_count),
     telemetry::Attribute::Int64 ("wm_temporal_anchor_count",
@@ -4777,6 +5490,50 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
                                   temporal_rank_weight),
     telemetry::Attribute::Double ("retrieval_temporal_rank_tau_seconds",
                                   temporal_rank_tau_seconds),
+    telemetry::Attribute::Bool ("recent_retrieval_inhibition_enabled",
+                                recent_retrieval_inhibition_enabled),
+    telemetry::Attribute::Double ("recent_retrieval_inhibition_weight",
+                                  recent_retrieval_inhibition_weight),
+      telemetry::Attribute::Double (
+          "recent_retrieval_inhibition_tau_seconds",
+          recent_retrieval_inhibition_tau_seconds),
+      telemetry::Attribute::Bool ("base_level_availability_enabled",
+                                  base_level_availability_enabled),
+      telemetry::Attribute::Double ("base_level_availability_weight",
+                                    base_level_availability_weight),
+      telemetry::Attribute::Double (
+          "base_level_availability_tau_seconds",
+          base_level_availability_tau_seconds),
+      telemetry::Attribute::Double (
+          "base_level_availability_count_saturation",
+          base_level_availability_count_saturation),
+    telemetry::Attribute::Bool ("partial_matching_enabled",
+                                partial_matching_enabled),
+    telemetry::Attribute::Double ("partial_match_penalty_weight",
+                                  partial_match_penalty_weight),
+    telemetry::Attribute::Double (
+        "partial_match_contradiction_saturation",
+        partial_match_contradiction_saturation),
+    telemetry::Attribute::Double (
+        "partial_match_source_mismatch_weight",
+        partial_match_source_mismatch_weight),
+    telemetry::Attribute::Double (
+        "partial_match_modality_mismatch_weight",
+        partial_match_modality_mismatch_weight),
+    telemetry::Attribute::Bool ("evidence_blending_enabled",
+                                evidence_blending_enabled),
+    telemetry::Attribute::Double ("evidence_blend_tie_margin",
+                                  evidence_blend_tie_margin),
+    telemetry::Attribute::Double ("evidence_blend_temperature",
+                                  evidence_blend_temperature),
+    telemetry::Attribute::Int64 (
+        "evidence_blend_max_members",
+        static_cast<int64_t> (evidence_blend_max_members)),
+    telemetry::Attribute::Int64 (
+        "evidence_packet_count",
+        static_cast<int64_t> (evidence_packets.size ())),
+    telemetry::Attribute::Int64 ("evidence_packet_member_count",
+                                 evidence_packet_member_count),
     telemetry::Attribute::Bool ("preconsolidated_label_graph_enabled",
                                 preconsolidated_label_graph_enabled),
     telemetry::Attribute::Double ("preconsolidated_label_graph_weight",
@@ -4872,6 +5629,41 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
         "temporal_rank_mean_score",
         selected.empty () ? 0.0
                           : selected_temporal_score_sum
+                                / static_cast<double> (selected.size ())),
+    telemetry::Attribute::Double (
+        "activation_base_level_mean",
+        selected.empty () ? 0.0
+                          : selected_activation_base_level_sum
+                                / static_cast<double> (selected.size ())),
+    telemetry::Attribute::Double (
+        "activation_spreading_mean",
+        selected.empty () ? 0.0
+                          : selected_activation_spreading_sum
+                                / static_cast<double> (selected.size ())),
+    telemetry::Attribute::Double (
+        "activation_partial_match_penalty_mean",
+        selected.empty () ? 0.0
+                          : selected_activation_partial_penalty_sum
+                                / static_cast<double> (selected.size ())),
+    telemetry::Attribute::Double (
+        "activation_recent_inhibition_mean",
+        selected.empty () ? 0.0
+                          : selected_activation_recent_inhibition_sum
+                                / static_cast<double> (selected.size ())),
+    telemetry::Attribute::Double (
+        "activation_utility_mean",
+        selected.empty () ? 0.0
+                          : selected_activation_utility_sum
+                                / static_cast<double> (selected.size ())),
+    telemetry::Attribute::Double (
+        "activation_exploration_noise_mean",
+        selected.empty () ? 0.0
+                          : selected_activation_exploration_noise_sum
+                                / static_cast<double> (selected.size ())),
+    telemetry::Attribute::Double (
+        "activation_total_mean",
+        selected.empty () ? 0.0
+                          : selected_activation_total_sum
                                 / static_cast<double> (selected.size ()))
   });
 }

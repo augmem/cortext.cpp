@@ -53,6 +53,10 @@ add_executable(cortext_procedural_ablation_bench
   procedural_ablation_bench.cpp
 )
 
+add_executable(cortext_actr_retrieval_ablation_bench
+  actr_retrieval_ablation_bench.cpp
+)
+
 add_executable(cortext_meta_learning_ablation_bench
   meta_learning_ablation_bench.cpp
 )
@@ -227,6 +231,9 @@ target_include_directories(cortext_neuromodulator_ablation_bench PRIVATE
 target_include_directories(cortext_procedural_ablation_bench PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}
 )
+target_include_directories(cortext_actr_retrieval_ablation_bench PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}
+)
 target_include_directories(cortext_meta_learning_ablation_bench PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}
 )
@@ -365,6 +372,9 @@ target_link_libraries(cortext_neuromodulator_ablation_bench PRIVATE
   cortext
 )
 target_link_libraries(cortext_procedural_ablation_bench PRIVATE
+  cortext
+)
+target_link_libraries(cortext_actr_retrieval_ablation_bench PRIVATE
   cortext
 )
 target_link_libraries(cortext_meta_learning_ablation_bench PRIVATE

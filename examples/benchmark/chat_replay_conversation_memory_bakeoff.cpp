@@ -3293,17 +3293,115 @@ RetrievalDebugJson ()
       row["proc_score"] = candidate.proc_score;
       row["predictive_bonus"] = candidate.predictive_bonus;
       row["pre_activation"] = candidate.pre_activation;
-	      row["fact_boost"] = candidate.fact_boost;
-	      row["fact_stale_penalty"] = candidate.fact_stale_penalty;
-	      row["linked_fact_count"] = candidate.linked_fact_count;
-	      row["label_graph_boost"] = candidate.label_graph_boost;
-	      row["label_match_count"] = candidate.label_match_count;
-	      row["durable_source_boost"] = candidate.durable_source_boost;
-	      row["durable_source_count"] = candidate.durable_source_count;
-	      out.push_back (std::move (row));
-	    }
-	  return out;
-	}
+      row["fact_boost"] = candidate.fact_boost;
+      row["fact_stale_penalty"] = candidate.fact_stale_penalty;
+      row["linked_fact_count"] = candidate.linked_fact_count;
+      row["label_graph_boost"] = candidate.label_graph_boost;
+      row["label_match_count"] = candidate.label_match_count;
+      row["durable_source_boost"] = candidate.durable_source_boost;
+      row["durable_source_count"] = candidate.durable_source_count;
+      row["activation"] = {
+        { "base_level", candidate.activation.base_level },
+        { "spreading_activation",
+          candidate.activation.spreading_activation },
+        { "partial_match_penalty",
+          candidate.activation.partial_match_penalty },
+        { "recent_inhibition", candidate.activation.recent_inhibition },
+        { "utility", candidate.activation.utility },
+        { "exploration_noise", candidate.activation.exploration_noise },
+        { "activation_total", candidate.activation.activation_total },
+      };
+      out.push_back (std::move (row));
+    }
+  return out;
+}
+
+nlohmann::json
+RetrievalRejectionJson ()
+{
+  nlohmann::json out = nlohmann::json::array ();
+  for (const auto &entry :
+       cortext::operations::retrieval_debug::GetLastRejectedCandidates ())
+    {
+      const auto &candidate = entry.candidate;
+      nlohmann::json row;
+      row["reason"] = entry.reason;
+      row["stage"] = entry.stage;
+      row["observed"] = entry.observed;
+      row["threshold"] = entry.threshold;
+      row["embedding_id"] = candidate.embedding_id;
+      row["memory_id"] = candidate.memory_id;
+      row["score"] = candidate.score;
+      row["relevance"] = candidate.relevance;
+      row["proc_score"] = candidate.proc_score;
+      row["predictive_bonus"] = candidate.predictive_bonus;
+      row["pre_activation"] = candidate.pre_activation;
+      row["fact_boost"] = candidate.fact_boost;
+      row["fact_stale_penalty"] = candidate.fact_stale_penalty;
+      row["linked_fact_count"] = candidate.linked_fact_count;
+      row["label_graph_boost"] = candidate.label_graph_boost;
+      row["label_match_count"] = candidate.label_match_count;
+      row["durable_source_boost"] = candidate.durable_source_boost;
+      row["durable_source_count"] = candidate.durable_source_count;
+      row["activation"] = {
+        { "base_level", candidate.activation.base_level },
+        { "spreading_activation",
+          candidate.activation.spreading_activation },
+        { "partial_match_penalty",
+          candidate.activation.partial_match_penalty },
+        { "recent_inhibition", candidate.activation.recent_inhibition },
+        { "utility", candidate.activation.utility },
+        { "exploration_noise", candidate.activation.exploration_noise },
+        { "activation_total", candidate.activation.activation_total },
+      };
+      out.push_back (std::move (row));
+    }
+  return out;
+}
+
+nlohmann::json
+RetrievalEvidencePacketJson ()
+{
+  nlohmann::json out = nlohmann::json::array ();
+  for (const auto &packet :
+       cortext::operations::retrieval_debug::GetLastEvidencePackets ())
+    {
+      nlohmann::json members = nlohmann::json::array ();
+      for (const auto &member : packet.members)
+        {
+          nlohmann::json row;
+          row["rank"] = member.rank;
+          row["embedding_id"] = member.embedding_id;
+          row["memory_id"] = member.memory_id;
+          row["weight"] = member.weight;
+          row["score"] = member.score;
+          row["activation"] = {
+            { "base_level", member.activation.base_level },
+            { "spreading_activation",
+              member.activation.spreading_activation },
+            { "partial_match_penalty",
+              member.activation.partial_match_penalty },
+            { "recent_inhibition", member.activation.recent_inhibition },
+            { "utility", member.activation.utility },
+            { "exploration_noise", member.activation.exploration_noise },
+            { "activation_total", member.activation.activation_total },
+          };
+          members.push_back (std::move (row));
+        }
+
+      nlohmann::json row;
+      row["packet_id"] = packet.packet_id;
+      row["consumer"] = packet.consumer;
+      row["reason"] = packet.reason;
+      row["tie_margin"] = packet.tie_margin;
+      row["temperature"] = packet.temperature;
+      row["score_span"] = packet.score_span;
+      row["activation_total"] = packet.activation_total;
+      row["members"] = std::move (members);
+      out.push_back (std::move (row));
+    }
+  return out;
+}
 
 nlohmann::json
 RetrievalSummaryJson ()
@@ -3325,6 +3423,11 @@ RetrievalSummaryJson ()
       = summary.fact_text_rejected_low_score_count;
   out["fact_text_match_count"] = summary.fact_text_match_count;
   out["fact_text_best_score"] = summary.fact_text_best_score;
+  out["rejected_candidate_count"] = summary.rejected_candidate_count;
+  out["rejected_filter_count"] = summary.rejected_filter_count;
+  out["rejected_selection_count"] = summary.rejected_selection_count;
+  out["evidence_packet_count"] = summary.evidence_packet_count;
+  out["evidence_packet_member_count"] = summary.evidence_packet_member_count;
   return out;
 }
 
@@ -4405,6 +4508,9 @@ main (int argc, char **argv)
               probe["cortext_probe_policy"]
                   = "single_durable_chat_turn_reused_for_probe_and_ingest";
 	              probe["retrieval_debug"] = RetrievalDebugJson ();
+	              probe["retrieval_rejections"] = RetrievalRejectionJson ();
+	              probe["retrieval_evidence_packets"]
+	                  = RetrievalEvidencePacketJson ();
 	              probe["retrieval_summary"] = RetrievalSummaryJson ();
 	              probe["cortext_raw_retrieved_memory_items"]
 	                  = raw_retrieved_memory_items;
