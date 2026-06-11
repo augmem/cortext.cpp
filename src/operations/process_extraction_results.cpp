@@ -851,24 +851,70 @@ BuildSourceSpanCandidates (const std::string &evidence_text,
   const auto tokens = TokenizeSourceSpans (evidence_text);
   std::vector<std::string> candidates;
   std::unordered_set<std::string> seen;
-  auto add_candidate = [&] (const std::string &candidate) {
+  std::unordered_set<std::string> window_keys;
+  auto add_candidate_impl = [&] (const std::string &candidate,
+                                 bool from_window) -> bool {
     if (static_cast<int> (candidates.size ()) >= max_candidates)
       {
-        return;
+        return false;
       }
     const std::string label = TrimLabel (candidate);
     const std::string key = NormalizeLabelKey (label);
     if (key.empty () || seen.find (key) != seen.end ())
       {
-        return;
+        return false;
       }
     if (!IsStrongSourceSpanLabel (label, key)
         || !LabelAppearsInEvidence (key, evidence_text))
       {
-        return;
+        return false;
       }
     seen.insert (key);
+    if (from_window)
+      {
+        window_keys.insert (key);
+      }
     candidates.push_back (label);
+    return true;
+  };
+  auto add_candidate = [&] (const std::string &candidate) -> bool {
+    return add_candidate_impl (candidate, false);
+  };
+  auto add_window_candidate = [&] (const std::string &candidate) -> bool {
+    return add_candidate_impl (candidate, true);
+  };
+
+  // The sliding-window generators below emit every (start, width)
+  // combination, which turns one event into a chain of nested variants
+  // ("Maya gave", "Maya gave a pitch", ...). Windows iterate widest-first;
+  // once a window is admitted its token range is covered and any window
+  // nested inside an already-covered range is redundant. The event,
+  // proper-noun, and action generators are exempt: their shorter anchors
+  // ("taco bell", "gave money") are intentional multi-granularity labels.
+  std::vector<bool> covered;
+  auto range_covered = [&] (size_t start, int width) {
+    if (covered.size () < static_cast<size_t> (start) + width)
+      {
+        return false;
+      }
+    for (int j = 0; j < width; ++j)
+      {
+        if (!covered[start + static_cast<size_t> (j)])
+          {
+            return false;
+          }
+      }
+    return true;
+  };
+  auto mark_covered = [&] (size_t start, int width) {
+    if (covered.size () < static_cast<size_t> (start) + width)
+      {
+        covered.resize (start + static_cast<size_t> (width), false);
+      }
+    for (int j = 0; j < width; ++j)
+      {
+        covered[start + static_cast<size_t> (j)] = true;
+      }
   };
 
   for (size_t verb_index = 0; verb_index < tokens.size (); ++verb_index)
@@ -994,11 +1040,18 @@ BuildSourceSpanCandidates (const std::string &evidence_text,
       for (size_t i = 0; i + static_cast<size_t> (width) <= tokens.size ();
            ++i)
         {
+          if (range_covered (i, width))
+            {
+              continue;
+            }
 	          if (!IsContextualSourceSpanLabel (tokens, i, width, policy))
             {
               continue;
             }
-          add_candidate (BuildTrimmedSourceSpanPhrase (tokens, i, width));
+          if (add_window_candidate (BuildTrimmedSourceSpanPhrase (tokens, i, width)))
+            {
+              mark_covered (i, width);
+            }
         }
     }
 
@@ -1008,6 +1061,10 @@ BuildSourceSpanCandidates (const std::string &evidence_text,
       for (size_t i = 0; i + static_cast<size_t> (width) <= tokens.size ();
            ++i)
         {
+          if (range_covered (i, width))
+            {
+              continue;
+            }
           std::string phrase;
           bool usable = true;
           for (int j = 0; j < width; ++j)
@@ -1030,9 +1087,9 @@ BuildSourceSpanCandidates (const std::string &evidence_text,
                 }
               phrase += token.surface;
             }
-          if (usable)
+          if (usable && add_window_candidate (phrase))
             {
-              add_candidate (phrase);
+              mark_covered (i, width);
             }
         }
     }
@@ -1047,7 +1104,67 @@ BuildSourceSpanCandidates (const std::string &evidence_text,
         }
     }
 
-  return candidates;
+  // Sliding windows emit nested variants of one span ("Maya gave a pitch",
+  // "Maya gave a pitch this weekend"); a window label whose tokens are a
+  // subset of any other candidate's adds no information. Event, action,
+  // and proper-noun anchors are exempt: their shorter forms are deliberate
+  // multi-granularity labels.
+  auto token_set = [] (const std::string &label) {
+    std::unordered_set<std::string> tokens_out;
+    const std::string canonical
+        = CanonicalLabelTokenKey (NormalizeLabelKey (label));
+    std::string token;
+    for (unsigned char c : canonical)
+      {
+        if (std::isalnum (c) != 0)
+          {
+            token.push_back (static_cast<char> (c));
+          }
+        else if (!token.empty ())
+          {
+            tokens_out.insert (token);
+            token.clear ();
+          }
+      }
+    if (!token.empty ())
+      {
+        tokens_out.insert (token);
+      }
+    return tokens_out;
+  };
+  std::vector<std::string> kept;
+  kept.reserve (candidates.size ());
+  for (size_t i = 0; i < candidates.size (); ++i)
+    {
+      const std::string key_i = NormalizeLabelKey (candidates[i]);
+      if (window_keys.find (key_i) == window_keys.end ())
+        {
+          kept.push_back (candidates[i]);
+          continue;
+        }
+      const auto tokens_i = token_set (candidates[i]);
+      bool subsumed = false;
+      for (size_t j = 0; j < candidates.size () && !subsumed; ++j)
+        {
+          if (i == j)
+            {
+              continue;
+            }
+          const auto tokens_j = token_set (candidates[j]);
+          if (tokens_i.size () >= tokens_j.size ())
+            {
+              continue;
+            }
+          subsumed = std::all_of (
+              tokens_i.begin (), tokens_i.end (),
+              [&] (const std::string &t) { return tokens_j.count (t) > 0; });
+        }
+      if (!subsumed)
+        {
+          kept.push_back (candidates[i]);
+        }
+    }
+  return kept;
 }
 
 std::optional<ExtractedFact>

@@ -132,6 +132,12 @@ IsDurableLabelCandidate (const std::string &label,
       return false;
     }
 
+  // A phrase composed entirely of these tokens carries no durable content.
+  // This is the compositional complement of kFillerLabels above: the filler
+  // list can only reject exact phrases it has already seen ("okay" and
+  // "thanks" were listed, "okay thanks" sailed through), while this rule
+  // rejects any combination of weak and conversational-acknowledgment
+  // tokens.
   static const std::unordered_set<std::string_view> kWeakPhraseTokens = {
     "a",       "about",   "all",     "almost", "and",    "around",
     "as",      "at",      "back",    "be",     "been",   "being",
@@ -146,7 +152,15 @@ IsDurableLabelCandidate (const std::string &label,
     "there",   "thing",   "things",  "this",   "to",     "turn",
     "turning", "up",      "was",     "way",    "well",   "what",
     "when",    "where",   "which",   "who",    "why",    "with",
-    "would"
+    "would",
+    // Conversational acknowledgments and discourse filler.
+    "ah",      "aha",     "alright", "bye",    "cool",   "fine",
+    "great",   "hello",   "hey",     "hi",     "hmm",    "huh",
+    "know",    "mhm",     "mm",      "nah",    "nice",   "no",
+    "nope",    "oh",      "ok",      "okay",   "oops",   "please",
+    "sorry",   "sounds",  "sure",    "thank",  "thanks", "uh",
+    "um",      "umm",     "welcome", "wow",    "ya",     "yeah",
+    "yep",     "yes",     "you",     "your"
   };
 
   int phrase_token_count = 0;
