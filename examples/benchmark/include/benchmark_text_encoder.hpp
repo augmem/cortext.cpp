@@ -4,6 +4,8 @@
 
 #include <Eigen/Dense>
 
+#include <cmath>
+
 #include <filesystem>
 #include <memory>
 #include <stdexcept>
@@ -104,6 +106,29 @@ private:
       {
         throw std::runtime_error (
             "Benchmark text encoder produced an empty embedding");
+      }
+
+    // Benchmarks that drive SignalProcessor directly must operate in the
+    // runtime similarity space: the 256-d Matryoshka slice, renormalized
+    // (mirrors RetrievalEmbeddingView in src/cortext.cpp; the vec0 schema
+    // stores 256-d vectors).
+    if (embedding.size () > 256)
+      {
+        embedding.resize (256);
+        double sum = 0.0;
+        for (const float value : embedding)
+          {
+            sum += static_cast<double> (value) * value;
+          }
+        const double norm = std::sqrt (sum);
+        if (norm > 1e-12 && std::isfinite (norm))
+          {
+            const float inv = static_cast<float> (1.0 / norm);
+            for (float &value : embedding)
+              {
+                value *= inv;
+              }
+          }
       }
 
     auto inserted = cache_.emplace (text, std::move (embedding));

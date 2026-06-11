@@ -661,7 +661,11 @@ RunConstructiveRecallScenario (std::uint32_t mask)
 
   const Eigen::VectorXf query = MakeVec ({ { 0, 0.98f }, { 1, 0.19f } });
   const Eigen::VectorXf evidence = MakeVec ({ { 0, 0.84f }, { 1, 0.54f } });
-  const Eigen::VectorXf competitor = MakeVec ({ { 0, 0.96f }, { 1, 0.28f } });
+  // Competitor sits between the stale evidence (sim ~0.93) and the
+  // reconstructed current embedding (sim 1.0): off -> competitor wins,
+  // on -> reconstruction routing wins, with margins that survive the
+  // post-remap score terms instead of a 0.006 knife edge.
+  const Eigen::VectorXf competitor = MakeVec ({ { 0, 0.90f }, { 1, 0.436f } });
   const Eigen::VectorXf reconstructed = query;
 
   SeedMemory (*store, 11LL, 11LL, evidence, "LONG_TERM", 1);
@@ -1000,8 +1004,12 @@ RunReinforcementScenario (std::uint32_t mask)
 {
   ScopedMaskEnv guards (mask);
   auto store = GetScenarioStore (kReinforcementEdges);
+  // Reinforcement steps are support-weighted (geometric mean of contextual
+  // support), so an exactly-orthogonal co-retrieved pair earns no edge by
+  // design. The claim under test: co-retrieved memories with shared context
+  // gain a reinforces edge.
   const Eigen::VectorXf emb_a = MakeVec ({ { 0, 1.0f } });
-  const Eigen::VectorXf emb_b = MakeVec ({ { 1, 1.0f } });
+  const Eigen::VectorXf emb_b = MakeVec ({ { 0, 0.6f }, { 1, 0.8f } });
   SeedMemory (*store, 1LL, 1LL, emb_a, "LONG_TERM", 1);
   SeedMemory (*store, 2LL, 2LL, emb_b, "LONG_TERM", 1);
 
