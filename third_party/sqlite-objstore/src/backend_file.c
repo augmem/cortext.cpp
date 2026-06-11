@@ -18,6 +18,9 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
+#if !defined(_WIN32)
+#include <sys/file.h>
+#endif
 #if defined(__linux__)
 extern int fallocate (int fd, int mode, off_t offset, off_t len);
 #endif
@@ -48,6 +51,7 @@ typedef struct file_backend_env
   char *staging_commit_root;
   size_t shard_width; /* number of hex chars used for sharding */
   objstore_sync_mode sync_mode;
+  int lock_fd; /* shared flock held while this env is open */
 } file_backend_env;
 
 typedef struct file_backend_txn
@@ -1806,6 +1810,7 @@ file_backend_open_env (sqlite3 *db, const objstore_config *config,
       return SQLITE_NOMEM;
     }
 
+  env->lock_fd = -1;
   int rc = objstore_fs_mkdirs (env->objects_root);
   if (rc == SQLITE_OK)
     rc = objstore_fs_mkdirs (env->staging_root);
@@ -1815,12 +1820,66 @@ file_backend_open_env (sqlite3 *db, const objstore_config *config,
     rc = objstore_fs_mkdirs (env->staging_commit_root);
   if (rc == SQLITE_OK)
     rc = objstore_fs_mkdirs (env->rowidx_root);
+#if !defined(_WIN32)
+  /* Staging recovery deletes everything under .staging/active, so it is
+     only safe when no other live env shares this objects root. Each env
+     holds a shared flock for its lifetime; recovery runs only if we can
+     briefly take the lock exclusively. */
+  bool run_recovery = true;
+  if (rc == SQLITE_OK)
+    {
+      char *lock_path = objstore_fs_path_join (env->objects_root, ".lock");
+      if (lock_path == NULL)
+        {
+          rc = SQLITE_NOMEM;
+        }
+      else
+        {
+          env->lock_fd = open (lock_path, O_RDWR | O_CREAT | O_CLOEXEC, 0644);
+          sqlite3_free (lock_path);
+          if (env->lock_fd < 0)
+            {
+              rc = SQLITE_IOERR;
+            }
+          else if (flock (env->lock_fd, LOCK_EX | LOCK_NB) == 0)
+            {
+              /* Sole owner for now: recovery is safe. Downgrade to shared
+                 after it runs. */
+            }
+          else if (errno == EWOULDBLOCK)
+            {
+              run_recovery = false;
+              if (flock (env->lock_fd, LOCK_SH) != 0)
+                {
+                  rc = SQLITE_IOERR;
+                }
+            }
+          else
+            {
+              rc = SQLITE_IOERR;
+            }
+        }
+    }
+  if (rc == SQLITE_OK && run_recovery)
+    {
+      rc = file_backend_recover (env);
+      if (flock (env->lock_fd, LOCK_SH) != 0 && rc == SQLITE_OK)
+        {
+          rc = SQLITE_IOERR;
+        }
+    }
+#else
   if (rc == SQLITE_OK)
     rc = file_backend_recover (env);
+#endif
   if (rc == SQLITE_OK)
     rc = file_backend_rowidx_bootstrap (env);
   if (rc != SQLITE_OK)
     {
+      if (env->lock_fd >= 0)
+        {
+          close (env->lock_fd);
+        }
       sqlite3_free (env->objects_root);
       sqlite3_free (env->rowidx_root);
       sqlite3_free (env->staging_root);
@@ -1842,6 +1901,10 @@ file_backend_close_env (objstore_backend_env *env)
       return;
     }
   file_backend_env *backend_env = (file_backend_env *)env;
+  if (backend_env->lock_fd >= 0)
+    {
+      close (backend_env->lock_fd);
+    }
   sqlite3_free (backend_env->objects_root);
   sqlite3_free (backend_env->rowidx_root);
   sqlite3_free (backend_env->staging_root);

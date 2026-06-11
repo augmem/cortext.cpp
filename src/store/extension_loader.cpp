@@ -1,10 +1,15 @@
 // src/store/extension_loader.cpp
 #include "cortext/store/extension_loader.hpp"
 
+#include <atomic>
 #include <cstdlib>
 #include <mutex>
 #include <string>
 #include <vector>
+
+#if !defined(_WIN32)
+#include <unistd.h>
+#endif
 
 #if defined(CORTEXT_EMBED_OBJSTORE)
 #include "objstore/objstore.h"
@@ -148,6 +153,29 @@ RegisterBuiltInExtensionsOnDb (sqlite3 *db)
 #if defined(CORTEXT_EMBED_OBJSTORE)
   objstore_config cfg{};
   cfg.backend = OBJSTORE_BACKEND_AUTO;
+  // The objects root must be keyed to the database, never the process cwd:
+  // a cwd-relative root is shared mutable state across unrelated processes,
+  // and the file backend's open-time staging recovery deletes another live
+  // process's in-flight staged writes (commit then fails as SQLITE_CORRUPT,
+  // surfaced as a bare "constraint failed" on COMMIT).
+  std::string objects_root;
+  const char *db_filename = sqlite3_db_filename (db, "main");
+  if (db_filename != nullptr && db_filename[0] != '\0')
+    {
+      objects_root = std::string (db_filename) + ".objects";
+    }
+  else
+    {
+      // In-memory and temp databases get a connection-unique root.
+      static std::atomic<unsigned long long> objstore_root_counter{ 0 };
+      const char *tmpdir = std::getenv ("TMPDIR");
+      objects_root = std::string (tmpdir != nullptr ? tmpdir : "/tmp")
+                     + "/cortext-objstore-"
+                     + std::to_string (static_cast<long long> (getpid ()))
+                     + "-"
+                     + std::to_string (objstore_root_counter.fetch_add (1));
+    }
+  cfg.storage_root = objects_root.c_str ();
   (void)objstore_register (db, &cfg);
 #endif
 }
