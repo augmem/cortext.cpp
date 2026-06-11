@@ -8,6 +8,9 @@
 #include <cortext/operations/accumulator.hpp>
 #include <cortext/operations/streaming_pacing.hpp>
 
+#include <atomic>
+#include <chrono>
+#include <thread>
 #include <vector>
 
 using namespace cortext;
@@ -192,4 +195,269 @@ TEST_CASE ("real operations declare validated contracts",
   STATIC_REQUIRE (!cortext::operation_set_detail::Contains<
                   cortext::tags::FlushRequired,
                   WithProducer::Input>::value);
+}
+
+namespace
+{
+
+struct ForkTagA;
+struct ForkTagB;
+struct ForkTagC;
+
+class ForkBranchA final
+    : public Operation<Requires<>, Satisfies<ForkTagA> >
+{
+public:
+  ForkBranchA () = default;
+  ForkBranchA (std::atomic<bool> *mine, std::atomic<bool> *other,
+               std::atomic<bool> *both_ran)
+      : mine_ (mine), other_ (other), both_ran_ (both_ran)
+  {
+  }
+  void
+  Execute (OperationContext &, Transaction &) const override
+  {
+    if (!mine_)
+      {
+        return;
+      }
+    mine_->store (true);
+    const auto deadline
+        = std::chrono::steady_clock::now () + std::chrono::seconds (5);
+    while (!other_->load ())
+      {
+        if (std::chrono::steady_clock::now () > deadline)
+          {
+            return; // both_ran_ stays false -> test fails visibly
+          }
+        std::this_thread::yield ();
+      }
+    both_ran_->store (true);
+  }
+
+private:
+  std::atomic<bool> *mine_ = nullptr;
+  std::atomic<bool> *other_ = nullptr;
+  std::atomic<bool> *both_ran_ = nullptr;
+};
+
+class ForkBranchB final
+    : public Operation<Requires<>, Satisfies<ForkTagB> >
+{
+public:
+  ForkBranchB () = default;
+  ForkBranchB (std::atomic<bool> *mine, std::atomic<bool> *other)
+      : mine_ (mine), other_ (other)
+  {
+  }
+  void
+  Execute (OperationContext &, Transaction &) const override
+  {
+    if (!mine_)
+      {
+        return;
+      }
+    mine_->store (true);
+    const auto deadline
+        = std::chrono::steady_clock::now () + std::chrono::seconds (5);
+    while (!other_->load ())
+      {
+        if (std::chrono::steady_clock::now () > deadline)
+          {
+            return;
+          }
+        std::this_thread::yield ();
+      }
+  }
+
+private:
+  std::atomic<bool> *mine_ = nullptr;
+  std::atomic<bool> *other_ = nullptr;
+};
+
+class ForkThrows final : public Operation<Requires<>, Satisfies<ForkTagC> >
+{
+public:
+  void
+  Execute (OperationContext &, Transaction &) const override
+  {
+    throw std::runtime_error ("branch failure");
+  }
+};
+
+class ForkConsumesA final
+    : public Operation<Requires<ForkTagA>, Satisfies<> >
+{
+public:
+  void
+  Execute (OperationContext &, Transaction &) const override
+  {
+  }
+};
+
+class ForkTouchesTx final : public Operation<Requires<>, Satisfies<ForkTagA> >
+{
+public:
+  ForkTouchesTx () = default;
+  explicit ForkTouchesTx (int calls) : calls_ (calls) {}
+  void
+  Execute (OperationContext &, Transaction &tx) const override
+  {
+    for (int i = 0; i < calls_; ++i)
+      {
+        tx.Execute ("probe", {});
+      }
+  }
+
+private:
+  int calls_ = 0;
+};
+
+class ForkTouchesTxB final
+    : public Operation<Requires<>, Satisfies<ForkTagB> >
+{
+public:
+  ForkTouchesTxB () = default;
+  explicit ForkTouchesTxB (int calls) : calls_ (calls) {}
+  void
+  Execute (OperationContext &, Transaction &tx) const override
+  {
+    for (int i = 0; i < calls_; ++i)
+      {
+        tx.Execute ("probe", {});
+      }
+  }
+
+private:
+  int calls_ = 0;
+};
+
+/// Counts overlapping Execute calls; overlap proves a serialization hole.
+class OverlapProbeTransaction final : public Transaction
+{
+public:
+  std::unique_ptr<Transaction>
+  Begin () override
+  {
+    return nullptr;
+  }
+  std::vector<std::map<std::string, std::any> >
+  Execute (const std::string &, const std::vector<std::any> &) override
+  {
+    const int now = ++in_flight_;
+    max_in_flight_.store (std::max (max_in_flight_.load (), now));
+    std::this_thread::sleep_for (std::chrono::microseconds (200));
+    --in_flight_;
+    ++total_calls_;
+    return {};
+  }
+  void
+  Commit () override
+  {
+  }
+  void
+  Rollback () override
+  {
+  }
+
+  std::atomic<int> in_flight_{ 0 };
+  std::atomic<int> max_in_flight_{ 0 };
+  std::atomic<int> total_calls_{ 0 };
+};
+
+} // namespace
+
+TEST_CASE ("Fork and Join contracts encode fork-join correctness",
+           "[operation_set][fork]")
+{
+  using TheFork = Fork<ForkBranchA, ForkBranchB>;
+  using TheJoin = Join<ForkBranchA, ForkBranchB>;
+
+  // Fork satisfies nothing; outputs appear at the Join.
+  STATIC_REQUIRE (std::is_same_v<TheFork::Output, Satisfies<> >);
+  STATIC_REQUIRE (
+      cortext::operation_set_detail::Contains<ForkTagA,
+                                              TheJoin::Output>::value);
+  STATIC_REQUIRE (
+      cortext::operation_set_detail::Contains<ForkTagB,
+                                              TheJoin::Output>::value);
+
+  // A consumer between Fork and Join leaves the requirement external; a
+  // consumer after Join is satisfied.
+  using ConsumerBeforeJoin
+      = OperationSet<TheFork, ForkConsumesA, TheJoin>;
+  STATIC_REQUIRE (!IsSelfContained<ConsumerBeforeJoin>);
+  using ConsumerAfterJoin = OperationSet<TheFork, TheJoin, ForkConsumesA>;
+  STATIC_REQUIRE (IsSelfContained<ConsumerAfterJoin>);
+
+  // Conflict proofs: disjoint branches fork; overlapping outputs or a
+  // branch consuming a sibling's output do not.
+  STATIC_REQUIRE (ForkBranchesConflictFree<ForkBranchA, ForkBranchB>);
+  STATIC_REQUIRE (!ForkBranchesConflictFree<ForkBranchA, ForkBranchA>);
+  STATIC_REQUIRE (!ForkBranchesConflictFree<ForkBranchA, ForkConsumesA>);
+}
+
+TEST_CASE ("Fork runs branches concurrently and Join is the barrier",
+           "[operation_set][fork]")
+{
+  Signal s;
+  ProcessorContext pctx;
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  OperationContext ctx (s, pctx, cfg);
+
+  std::atomic<bool> a_started{ false };
+  std::atomic<bool> b_started{ false };
+  std::atomic<bool> both_ran{ false };
+
+  // Each branch waits for the other: completion proves true concurrency.
+  OperationSet<Fork<ForkBranchA, ForkBranchB>, Join<ForkBranchA, ForkBranchB> >
+      set (Fork<ForkBranchA, ForkBranchB> (
+               ForkBranchA (&a_started, &b_started, &both_ran),
+               ForkBranchB (&b_started, &a_started)),
+           Join<ForkBranchA, ForkBranchB> ());
+  set.Execute (ctx, cortext::testing::GetNullTransaction ());
+
+  REQUIRE (a_started.load ());
+  REQUIRE (b_started.load ());
+  REQUIRE (both_ran.load ());
+  REQUIRE_FALSE (ctx.HasPendingForks ());
+}
+
+TEST_CASE ("Join rethrows the first branch failure", "[operation_set][fork]")
+{
+  Signal s;
+  ProcessorContext pctx;
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  OperationContext ctx (s, pctx, cfg);
+
+  OperationSet<Fork<ForkThrows, ForkBranchB>, Join<ForkThrows, ForkBranchB> >
+      set;
+  REQUIRE_THROWS_AS (
+      set.Execute (ctx, cortext::testing::GetNullTransaction ()),
+      std::runtime_error);
+  REQUIRE_FALSE (ctx.HasPendingForks ());
+}
+
+TEST_CASE ("Fork serializes transaction access per method call",
+           "[operation_set][fork]")
+{
+  Signal s;
+  ProcessorContext pctx;
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  OperationContext ctx (s, pctx, cfg);
+
+  OverlapProbeTransaction probe_tx;
+  constexpr int kCalls = 50;
+  OperationSet<Fork<ForkTouchesTx, ForkTouchesTxB>,
+               Join<ForkTouchesTx, ForkTouchesTxB> >
+      set{ Fork<ForkTouchesTx, ForkTouchesTxB>{ ForkTouchesTx (kCalls),
+                                                 ForkTouchesTxB (kCalls) },
+           Join<ForkTouchesTx, ForkTouchesTxB>{} };
+  set.Execute (ctx, probe_tx);
+
+  REQUIRE (probe_tx.total_calls_.load () == 2 * kCalls);
+  REQUIRE (probe_tx.max_in_flight_.load () == 1);
 }
