@@ -277,6 +277,7 @@ RunBlobConsolidationLabelCase (
   cfg.extractor = replacement_path ? extractor : nullptr;
 
   ProcessorContext pctx;
+  cortext::testing::SeedMatureLabelContrastBank (pctx, kEmbeddingDim);
   pctx.extractor = replacement_path ? extractor : nullptr;
   Signal s = MakeSignal (2000ULL);
   OperationContext ctx (s, pctx, cfg, store.get ());
@@ -437,6 +438,7 @@ TEST_CASE ("EnqueueExtractionJobs respects consolidation gate",
            "[operations][extraction][alg29c]")
 {
   ProcessorContext pctx;
+  cortext::testing::SeedMatureLabelContrastBank (pctx, kEmbeddingDim);
   SignalProcessor::Config cfg;
   cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.5;
@@ -466,6 +468,7 @@ TEST_CASE ("EnqueueExtractionJobs forwards requests when gate opens",
            "[operations][extraction][alg29c]")
 {
   ProcessorContext pctx;
+  cortext::testing::SeedMatureLabelContrastBank (pctx, kEmbeddingDim);
   SignalProcessor::Config cfg;
   cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.5;
@@ -496,6 +499,7 @@ TEST_CASE ("Alg29c batches up to ExtractionBatchSize(T) per run",
            "[operations][extraction][alg29c]")
 {
   ProcessorContext pctx;
+  cortext::testing::SeedMatureLabelContrastBank (pctx, kEmbeddingDim);
   SignalProcessor::Config cfg;
   cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.5;
@@ -526,6 +530,7 @@ TEST_CASE ("Alg32 caps jobs to MaxExtractionsPerCycle(T)",
            "[operations][extraction][alg32]")
 {
   ProcessorContext pctx;
+  cortext::testing::SeedMatureLabelContrastBank (pctx, kEmbeddingDim);
   SignalProcessor::Config cfg;
   cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.5;
@@ -555,6 +560,7 @@ TEST_CASE ("EnqueueExtractionJobs forwards summary and sources",
            "[operations][extraction][alg29c]")
 {
   ProcessorContext pctx;
+  cortext::testing::SeedMatureLabelContrastBank (pctx, kEmbeddingDim);
   SignalProcessor::Config cfg;
   cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.4;
@@ -595,6 +601,7 @@ TEST_CASE ("Alg29c is idempotent on repeated runs",
            "[operations][extraction][alg29c]")
 {
   ProcessorContext pctx;
+  cortext::testing::SeedMatureLabelContrastBank (pctx, kEmbeddingDim);
   SignalProcessor::Config cfg;
   cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.5;
@@ -654,6 +661,7 @@ TEST_CASE ("ProcessExtractionResults computes label salience from embeddings",
   cfg.encoder = &encoder;
 
   ProcessorContext pctx;
+  cortext::testing::SeedMatureLabelContrastBank (pctx, kEmbeddingDim);
   Signal s = MakeSignal (2000ULL);
   OperationContext ctx (s, pctx, cfg, store.get ());
 
@@ -706,6 +714,7 @@ TEST_CASE ("ProcessExtractionResults stores 1536-dim label encoder output as ret
     cfg.encoder = &encoder;
 
   ProcessorContext pctx;
+  cortext::testing::SeedMatureLabelContrastBank (pctx, kEmbeddingDim);
   Signal s = MakeSignal (2000ULL);
   OperationContext ctx (s, pctx, cfg, store.get ());
 
@@ -753,6 +762,7 @@ TEST_CASE ("ProcessExtractionResults preserves multiple distinct labels from one
   cfg.encoder = &encoder;
 
   ProcessorContext pctx;
+  cortext::testing::SeedMatureLabelContrastBank (pctx, kEmbeddingDim);
   Signal s = MakeSignal (2000ULL);
   OperationContext ctx (s, pctx, cfg, store.get ());
 
@@ -820,6 +830,7 @@ TEST_CASE ("ProcessExtractionResults materializes relation endpoints as durable 
 	    cfg.encoder = &encoder;
 
   ProcessorContext pctx;
+  cortext::testing::SeedMatureLabelContrastBank (pctx, kEmbeddingDim);
   Signal s = MakeSignal (2000ULL);
   OperationContext ctx (s, pctx, cfg, store.get ());
 
@@ -913,6 +924,7 @@ TEST_CASE ("ProcessExtractionResults audits relation skip reasons",
   cfg.encoder = &encoder;
 
   ProcessorContext pctx;
+  cortext::testing::SeedMatureLabelContrastBank (pctx, kEmbeddingDim);
   Signal s = MakeSignal (2000ULL);
   OperationContext ctx (s, pctx, cfg, store.get ());
 
@@ -1013,6 +1025,7 @@ TEST_CASE ("ProcessExtractionResults drops relations with non durable endpoints"
   cfg.encoder = &encoder;
 
   ProcessorContext pctx;
+  cortext::testing::SeedMatureLabelContrastBank (pctx, kEmbeddingDim);
   Signal s = MakeSignal (2000ULL);
   OperationContext ctx (s, pctx, cfg, store.get ());
 
@@ -1082,6 +1095,7 @@ TEST_CASE ("ProcessExtractionResults repairs relation endpoints to admitted labe
   cfg.encoder = &encoder;
 
   ProcessorContext pctx;
+  cortext::testing::SeedMatureLabelContrastBank (pctx, kEmbeddingDim);
   Signal s = MakeSignal (2000ULL);
   OperationContext ctx (s, pctx, cfg, store.get ());
 
@@ -1139,6 +1153,7 @@ TEST_CASE ("ProcessExtractionResults repairs non-durable relation endpoints befo
   cfg.encoder = &encoder;
 
   ProcessorContext pctx;
+  cortext::testing::SeedMatureLabelContrastBank (pctx, kEmbeddingDim);
   Signal s = MakeSignal (2000ULL);
   OperationContext ctx (s, pctx, cfg, store.get ());
 
@@ -1203,6 +1218,7 @@ TEST_CASE ("ProcessExtractionResults repairs relation endpoints to current STM l
   cfg.extractor = &extractor;
 
   ProcessorContext pctx;
+  cortext::testing::SeedMatureLabelContrastBank (pctx, kEmbeddingDim);
   pctx.extractor = &extractor;
   Signal s = MakeSignal (2000ULL);
   OperationContext ctx (s, pctx, cfg, store.get ());
@@ -1269,6 +1285,7 @@ TEST_CASE ("ProcessExtractionResults admits high confidence relation-backed endp
   cfg.extractor = &extractor;
 
   ProcessorContext pctx;
+  cortext::testing::SeedMatureLabelContrastBank (pctx, kEmbeddingDim);
   pctx.extractor = &extractor;
   Signal s = MakeSignal (2000ULL);
   OperationContext ctx (s, pctx, cfg, store.get ());
@@ -1328,6 +1345,7 @@ TEST_CASE ("ProcessExtractionResults admits relation endpoints from blob-backed 
   cfg.extractor = &extractor;
 
   ProcessorContext pctx;
+  cortext::testing::SeedMatureLabelContrastBank (pctx, kEmbeddingDim);
   pctx.extractor = &extractor;
   Signal s = MakeSignal (2000ULL);
   OperationContext ctx (s, pctx, cfg, store.get ());
@@ -1380,6 +1398,7 @@ TEST_CASE ("ProcessExtractionResults rejects transcript filler labels",
   cfg.encoder = &encoder;
 
   ProcessorContext pctx;
+  cortext::testing::SeedMatureLabelContrastBank (pctx, kEmbeddingDim);
   Signal s = MakeSignal (2000ULL);
   OperationContext ctx (s, pctx, cfg, store.get ());
 
@@ -1453,6 +1472,7 @@ TEST_CASE ("Blob-aware consolidation replaces noisy preconsolidated label edges"
     cfg.extractor = replacement_path ? &extractor : nullptr;
 
     ProcessorContext pctx;
+  cortext::testing::SeedMatureLabelContrastBank (pctx, kEmbeddingDim);
     pctx.extractor = replacement_path ? &extractor : nullptr;
     Signal s = MakeSignal (2000ULL);
     OperationContext ctx (s, pctx, cfg, store.get ());
@@ -1566,6 +1586,7 @@ TEST_CASE ("STM relabel current-label floor does not treat text blobs as multimo
   cfg.extractor = &extractor;
 
   ProcessorContext pctx;
+  cortext::testing::SeedMatureLabelContrastBank (pctx, kEmbeddingDim);
   pctx.extractor = &extractor;
   Signal s = MakeSignal (2000ULL);
   OperationContext ctx (s, pctx, cfg, store.get ());
@@ -1654,6 +1675,7 @@ TEST_CASE ("STM relabel source-span floor admits grounded labels when extractor 
   cfg.extractor = &extractor;
 
   ProcessorContext pctx;
+  cortext::testing::SeedMatureLabelContrastBank (pctx, kEmbeddingDim);
   pctx.extractor = &extractor;
   Signal s = MakeSignal (2000ULL);
   OperationContext ctx (s, pctx, cfg, store.get ());
@@ -1795,6 +1817,7 @@ TEST_CASE ("STM relabel source-span complement enriches labels after extractor m
   cfg.extractor = &extractor;
 
   ProcessorContext pctx;
+  cortext::testing::SeedMatureLabelContrastBank (pctx, kEmbeddingDim);
   pctx.extractor = &extractor;
   Signal s = MakeSignal (2000ULL);
   OperationContext ctx (s, pctx, cfg, store.get ());
@@ -1877,6 +1900,7 @@ TEST_CASE ("STM relabel floor prioritizes source-span anchors over current label
   cfg.extractor = &extractor;
 
   ProcessorContext pctx;
+  cortext::testing::SeedMatureLabelContrastBank (pctx, kEmbeddingDim);
   pctx.extractor = &extractor;
   Signal s = MakeSignal (2000ULL);
   OperationContext ctx (s, pctx, cfg, store.get ());
@@ -1944,6 +1968,7 @@ TEST_CASE ("STM relabel promotes accepted event labels into source-backed facts"
   cfg.extractor = &extractor;
 
   ProcessorContext pctx;
+  cortext::testing::SeedMatureLabelContrastBank (pctx, kEmbeddingDim);
   pctx.extractor = &extractor;
   Signal s = MakeSignal (2000ULL);
   OperationContext ctx (s, pctx, cfg, store.get ());
@@ -2017,6 +2042,7 @@ TEST_CASE ("Fact writes can be disabled natively during relabel processing",
   cfg.extractor = &extractor;
 
   ProcessorContext pctx;
+  cortext::testing::SeedMatureLabelContrastBank (pctx, kEmbeddingDim);
   pctx.extractor = &extractor;
   Signal s = MakeSignal (2000ULL);
   OperationContext ctx (s, pctx, cfg, store.get ());
@@ -2071,6 +2097,7 @@ TEST_CASE ("STM relabel source-span candidates include contextual event anchors"
   cfg.extractor = &extractor;
 
   ProcessorContext pctx;
+  cortext::testing::SeedMatureLabelContrastBank (pctx, kEmbeddingDim);
   pctx.extractor = &extractor;
   Signal s = MakeSignal (2000ULL);
   OperationContext ctx (s, pctx, cfg, store.get ());
@@ -2129,6 +2156,7 @@ TEST_CASE ("STM relabel source-span candidates prioritize event action anchors",
   cfg.extractor = &extractor;
 
   ProcessorContext pctx;
+  cortext::testing::SeedMatureLabelContrastBank (pctx, kEmbeddingDim);
   pctx.extractor = &extractor;
   Signal s = MakeSignal (2000ULL);
   OperationContext ctx (s, pctx, cfg, store.get ());
@@ -2195,6 +2223,7 @@ TEST_CASE ("STM relabel source-span candidates skip generic commercial fragments
   cfg.extractor = &extractor;
 
   ProcessorContext pctx;
+  cortext::testing::SeedMatureLabelContrastBank (pctx, kEmbeddingDim);
   pctx.extractor = &extractor;
   Signal s = MakeSignal (2000ULL);
   OperationContext ctx (s, pctx, cfg, store.get ());
@@ -2257,6 +2286,7 @@ TEST_CASE ("STM relabel skips sentence-start discourse labels",
   cfg.extractor = &extractor;
 
   ProcessorContext pctx;
+  cortext::testing::SeedMatureLabelContrastBank (pctx, kEmbeddingDim);
   pctx.extractor = &extractor;
   Signal s = MakeSignal (2000ULL);
   OperationContext ctx (s, pctx, cfg, store.get ());
@@ -2326,6 +2356,7 @@ TEST_CASE ("STM relabel admits multi-token labels when evidence contains all tok
   cfg.extractor = &extractor;
 
   ProcessorContext pctx;
+  cortext::testing::SeedMatureLabelContrastBank (pctx, kEmbeddingDim);
   pctx.extractor = &extractor;
   Signal s = MakeSignal (2000ULL);
   OperationContext ctx (s, pctx, cfg, store.get ());
@@ -2483,4 +2514,73 @@ TEST_CASE ("Gemma4 live label refinement covers text audio and image",
   CHECK (HasLabelContaining (text_labels, "Maria"));
   CHECK (HasLabelContaining (audio_labels, "crash"));
   CHECK (HasLabelContaining (image_labels, "dog"));
+}
+
+TEST_CASE ("Cold start declines optional label admission paths",
+           "[operations][extraction][labels][coldstart]")
+{
+  // With an immature contrast bank (fewer than kContrastMinBankSize
+  // labels) the optional admission paths decline: relation-endpoint
+  // creation and floor fill wait until candidates can be vetted, while
+  // the primary extractor path still admits so the bank can seed.
+  auto unique_store = SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<Store> (std::move (unique_store));
+  cortext::testing::InitializeCoreSchema (*store);
+
+  std::vector<float> unit_embedding (kEmbeddingDim, 0.0f);
+  unit_embedding[0] = 1.0f;
+
+  cortext::testing::SeedEmbeddingV2 (*store, 10LL, unit_embedding, 1000LL);
+  cortext::testing::SeedMemoryV2 (*store, 20LL, 10LL, "summary-1",
+                                  "ASSOCIATION", 1.0, 1000LL);
+  cortext::testing::SeedEmbeddingV2 (*store, 30LL, unit_embedding, 1000LL);
+  cortext::testing::SeedMemoryV2 (*store, 30LL, 30LL,
+                                  "Maria met the dog at River Park.",
+                                  "LONG_TERM", 1.0, 1000LL);
+  store->Execute (
+      "INSERT INTO associations(source_memory_id, target_memory_id, edge_type, weight) "
+      "VALUES (20, 30, 'derived_from', 1.0)",
+      {});
+
+  FixedEncoder encoder (unit_embedding);
+
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  cfg.focus = 0.75;
+  cfg.sensitivity = 0.95;
+  cfg.stability = 0.85;
+  cfg.encoder = &encoder;
+
+  ProcessorContext cold_pctx; // intentionally empty contrast bank
+  Signal s = MakeSignal (2000ULL);
+  OperationContext ctx (s, cold_pctx, cfg, store.get ());
+
+  operations::ExtractionResult extraction;
+  extraction.summary_id = "summary-1";
+  extraction.labels.push_back ({ "Maria", 0.0 });
+  extraction.relations.push_back ({ "Maria", "reinforces", "Dog", 0.75 });
+  cold_pctx.pending_extraction_results.push_back (std::move (extraction));
+
+  operations::ProcessExtractionResults op;
+  auto tx = store->Begin ();
+  op.Execute (ctx, *tx);
+  tx->Commit ();
+
+  // The extractor label seeds the bank.
+  auto label_rows = store->Execute (
+      "SELECT source_id FROM memories WHERE kind = 'LABEL' ORDER BY source_id",
+      {});
+  REQUIRE (label_rows.size () == 1);
+  REQUIRE (std::any_cast<std::string> (label_rows[0].at ("source_id"))
+           == "maria");
+
+  // The relation endpoint is NOT manufactured into a label at cold start,
+  // so the relation edge has no target and is skipped.
+  auto relation_rows = store->Execute (
+      "SELECT a.edge_type FROM associations a "
+      "JOIN memories s ON s.memory_id = a.source_memory_id "
+      "JOIN memories o ON o.memory_id = a.target_memory_id "
+      "WHERE s.source_id = 'maria' AND o.source_id = 'dog'",
+      {});
+  REQUIRE (relation_rows.empty ());
 }

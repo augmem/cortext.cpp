@@ -303,4 +303,25 @@ GetNullTransaction ()
   return null_tx;
 }
 
+/// @brief Seed a mature label-contrast bank into the processor context.
+///
+/// The optional label-admission paths (floor fill, relation-endpoint
+/// creation) decline until the contrast bank holds kContrastMinBankSize
+/// labels. Fixtures exercising them seed this minimal mature bank; its
+/// embeddings sit on the highest axes so fixture labels (low-index
+/// one-hot by convention) measure mean ~0 against the bank and are never
+/// rejected as generic.
+inline void
+SeedMatureLabelContrastBank (ProcessorContext &p_ctx, int dim = 256,
+                             int count = 4)
+{
+  for (int i = 0; i < count; ++i)
+    {
+      Eigen::VectorXf v = Eigen::VectorXf::Zero (dim);
+      v (dim - 1 - i) = 1.0f;
+      const long long id = 900000 + i;
+      p_ctx.UpsertSummaryCache (id, id, v, false, true);
+    }
+}
+
 } // namespace cortext::testing

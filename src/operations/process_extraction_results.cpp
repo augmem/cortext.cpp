@@ -923,6 +923,24 @@ IsGenericByLabelBankContrast (const LabelBankContrast &contrast)
                 < kContrastMinPeak;
 }
 
+size_t
+CountContrastBankLabels (const ProcessorContext &p_ctx,
+                         size_t bank_size_limit)
+{
+  size_t count = 0;
+  const size_t scan_count
+      = std::min (bank_size_limit, p_ctx.summary_cache.size ());
+  for (size_t entry_idx = 0; entry_idx < scan_count; ++entry_idx)
+    {
+      const auto &entry = p_ctx.summary_cache[entry_idx];
+      if (entry.is_label && entry.embedding_norm > 1e-9f)
+        {
+          ++count;
+        }
+    }
+  return count;
+}
+
 
 std::vector<std::string>
 BuildSourceSpanCandidates (const std::string &evidence_text,
@@ -2474,6 +2492,15 @@ ProcessExtractionResults::Execute (OperationContext &context, Transaction &tx) c
       // Contrast is measured against the bank as it existed before this
       // result's admissions (see ComputeLabelBankContrast).
       const size_t label_bank_snapshot = p_ctx.summary_cache.size ();
+      // The optional admission paths (floor fill, relation-endpoint
+      // creation) only run once the contrast gate can vet candidates.
+      // Before the bank matures, forcing unvetted labels seeds it with
+      // cold-start junk that the rest of the run then measures against;
+      // fewer labels is strictly better than unvetted ones. The primary
+      // extractor path still admits so the bank can seed at all.
+      const bool contrast_gate_available
+          = CountContrastBankLabels (p_ctx, label_bank_snapshot)
+            >= static_cast<size_t> (kContrastMinBankSize);
       // A single-token label whose token already appears inside an admitted
       // multi-token label for this summary is a redundant fragment ("Cart"
       // next to "cart situation"); standalone single-token labels ("Dog")
@@ -2653,6 +2680,16 @@ ProcessExtractionResults::Execute (OperationContext &context, Transaction &tx) c
 	          auto admit_current_or_source_span_label =
 	              [&] (const std::string &label_key,
 	                   const std::string &original_label) {
+	            if (!contrast_gate_available)
+	              {
+	                telemetry::LogDebug (
+	                    "cortext.label_admission",
+	                    { telemetry::Attribute::String ("label",
+	                                                    original_label),
+	                      telemetry::Attribute::String (
+	                          "decision", "rejected_cold_start_floor") });
+	                return false;
+	              }
 	            if (inserted_label_keys.find (label_key)
 	                != inserted_label_keys.end ())
 	              {
@@ -2893,6 +2930,19 @@ ProcessExtractionResults::Execute (OperationContext &context, Transaction &tx) c
             ++relation_endpoint_rejected_ungrounded;
             return 0;
           }
+        // Creating a label to back a relation endpoint is optional work;
+        // it waits for a mature bank and passes the same contrast gate as
+        // every other admission path.
+        if (!contrast_gate_available)
+          {
+            ++relation_endpoint_rejected_count;
+            telemetry::LogDebug (
+                "cortext.label_admission",
+                { telemetry::Attribute::String ("label", label),
+                  telemetry::Attribute::String (
+                      "decision", "rejected_cold_start_endpoint") });
+            return 0;
+          }
 
         auto &existing = get_existing (label_key);
         const std::vector<float> *label_embedding_ptr = nullptr;
@@ -2929,6 +2979,28 @@ ProcessExtractionResults::Execute (OperationContext &context, Transaction &tx) c
                 auto [it, _] = label_cache.emplace (label_key,
                                                     std::move (*encoded));
                 label_embedding_ptr = &it->second;
+              }
+          }
+
+        if (label_embedding_ptr != nullptr)
+          {
+            const auto contrast
+                = ComputeLabelBankContrast (*label_embedding_ptr, p_ctx,
+                                            label_bank_snapshot);
+            if (IsGenericByLabelBankContrast (contrast))
+              {
+                ++relation_endpoint_rejected_count;
+                ++label_candidates_rejected_low_contrast;
+                telemetry::LogDebug (
+                    "cortext.label_admission",
+                    { telemetry::Attribute::String ("label", label),
+                      telemetry::Attribute::String (
+                          "decision", "rejected_low_contrast_endpoint"),
+                      telemetry::Attribute::Double (
+                          "mean_similarity", contrast.mean_similarity),
+                      telemetry::Attribute::Double (
+                          "max_similarity", contrast.max_similarity) });
+                return 0;
               }
           }
 
