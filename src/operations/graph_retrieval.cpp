@@ -2,6 +2,7 @@
 
 #include "constructive_recall_internal.hpp"
 #include "../store/facts.hpp"
+#include "evidence_confidence.hpp"
 #include "eviction_ablation.hpp"
 #include "retrieval_debug_state.hpp"
 #include "storage_pressure.hpp"
@@ -464,7 +465,16 @@ EvidenceWeight (const std::string &evidence_type, double support_weight,
               core::FactRetrievalEvidenceSupportFloor (focus, sensitivity,
                                                        stability),
               1.0),
-      0.0, 1.0);
+	      0.0, 1.0);
+}
+
+double
+FactEvidenceConfidenceHalfLifeMs (double stability)
+{
+  constexpr double kHourMs = 60.0 * 60.0 * 1000.0;
+  constexpr double kDayMs = 24.0 * kHourMs;
+  return core::Lerp (6.0 * kHourMs, 30.0 * kDayMs,
+                     core::Clamp (stability, 0.0, 1.0));
 }
 
 struct LinkedFactEvidence
@@ -482,7 +492,57 @@ struct CandidateFactScore
   double boost = 0.0;
   double stale_penalty = 0.0;
   int linked_fact_count = 0;
+  double evidence_confidence = 0.0;
+  double evidence_weight = 0.0;
+  int evidence_source_diversity = 0;
+  double evidence_contradiction_mass = 0.0;
 };
+
+struct LinkedEvidenceConfidence
+{
+  double confidence = 0.0;
+  double evidence_weight = 0.0;
+};
+
+LinkedEvidenceConfidence
+EstimateLinkedEvidenceConfidence (const LinkedFactEvidence &link,
+                                  long long retrieval_ts,
+                                  const evidence::RevisionOptions &options,
+                                  double focus, double sensitivity,
+                                  double stability)
+{
+  const double contradiction_mass
+      = std::max (0.0, link.record.contradiction_mass);
+  const double dampened_confidence
+      = evidence::DampenConfidenceForContradiction (
+          core::Clamp (link.record.confidence, 0.0, 1.0), contradiction_mass,
+          options);
+  auto truth = evidence::MakeTruth (1.0, dampened_confidence, {},
+                                    contradiction_mass,
+                                    link.record.last_confirmation_ts,
+                                    options.horizon);
+  const long long from_ts
+      = std::max (link.record.recorded_at_ts,
+                  link.record.last_confirmation_ts);
+  truth = evidence::ProjectConfidence (
+      truth, from_ts, retrieval_ts, FactEvidenceConfidenceHalfLifeMs (stability),
+      options.horizon);
+
+  const double evidence_support
+      = core::Clamp (link.fact_score.evidence_support, 0.0, 1.0);
+  const double diversity_support = core::Clamp (
+      static_cast<double> (std::max (0, link.record.source_diversity))
+          / core::Lerp (2.0, 4.0, core::Clamp (focus, 0.0, 1.0)),
+      0.0, 1.0);
+  const double projected_confidence
+      = core::Clamp (0.60 * truth.confidence + 0.25 * evidence_support
+                         + 0.15 * diversity_support,
+                     0.0, 1.0);
+  (void)sensitivity;
+  return { projected_confidence,
+           evidence::ConfidenceToWeight (projected_confidence,
+                                         options.horizon) };
+}
 
 double
 FactBoostMultiplier (const temporal::RetrievalAblationOverride &override,
@@ -646,6 +706,8 @@ RoutineRecencyStaleAdjustment (
 CandidateFactScore
 ScoreCandidateFacts (const std::vector<LinkedFactEvidence> &links,
                      double focus, double sensitivity, double stability,
+                     long long retrieval_ts,
+                     bool evidence_confidence_enabled,
                      temporal::RetrievalMode mode,
                      const temporal::RetrievalAblationOverride &override)
 {
@@ -669,6 +731,10 @@ ScoreCandidateFacts (const std::vector<LinkedFactEvidence> &links,
       = core::RetrievalFactStaleScoringPolicy (focus, sensitivity, stability);
   const auto boost_policy
       = core::RetrievalFactBoostScoringPolicy (focus, sensitivity, stability);
+  const auto evidence_confidence_options
+      = evidence::OptionsForKnobs (focus, sensitivity, stability);
+  double evidence_confidence_sum = 0.0;
+  double evidence_confidence_weight_sum = 0.0;
 
   for (const auto &link : links)
     {
@@ -682,6 +748,23 @@ ScoreCandidateFacts (const std::vector<LinkedFactEvidence> &links,
           link.record.canonical_predicate, focus, sensitivity, stability);
       const double lifecycle
           = core::Clamp (link.fact_score.lifecycle_support, 0.0, 1.0);
+      if (evidence_confidence_enabled)
+        {
+          const auto estimate = EstimateLinkedEvidenceConfidence (
+              link, retrieval_ts, evidence_confidence_options, focus,
+              sensitivity, stability);
+          const double estimate_weight = std::max (
+              constants::kNormEpsilon,
+              provenance * std::max (0.10, similarity));
+          evidence_confidence_sum += estimate_weight * estimate.confidence;
+          evidence_confidence_weight_sum += estimate_weight;
+          out.evidence_weight += estimate_weight * estimate.evidence_weight;
+          out.evidence_source_diversity
+              = std::max (out.evidence_source_diversity,
+                          link.record.source_diversity);
+          out.evidence_contradiction_mass
+              += std::max (0.0, link.record.contradiction_mass);
+        }
 
       if (link.stale)
         {
@@ -720,6 +803,15 @@ ScoreCandidateFacts (const std::vector<LinkedFactEvidence> &links,
       out.boost = std::max (out.boost, fact_weight * signal);
     }
 
+  if (evidence_confidence_enabled
+      && evidence_confidence_weight_sum > constants::kNormEpsilon)
+    {
+      out.evidence_confidence
+          = core::Clamp (evidence_confidence_sum
+                             / evidence_confidence_weight_sum,
+                         0.0, 1.0);
+      out.evidence_weight /= evidence_confidence_weight_sum;
+    }
   return out;
 }
 } // namespace
@@ -1081,6 +1173,10 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
     long long used_count = 0;
     std::string source_id;
     std::string modality;
+    double evidence_confidence = 0.0;
+    double evidence_weight = 0.0;
+    int evidence_source_diversity = 0;
+    double evidence_contradiction_mass = 0.0;
   };
   std::vector<Scored> seeds;
   seeds.reserve (static_cast<size_t> (seed_k));
@@ -3691,9 +3787,11 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
   const double partial_match_modality_mismatch_weight
       = core::RetrievalPartialMatchModalityMismatchWeight (
           cfg.focus, cfg.sensitivity, cfg.stability);
-  const bool evidence_blending_enabled
-      = EnvFlag ("CORTEXT_ENABLE_EVIDENCE_BLENDING");
-  const double evidence_blend_tie_margin
+	  const bool evidence_blending_enabled
+	      = EnvFlag ("CORTEXT_ENABLE_EVIDENCE_BLENDING");
+	  const bool evidence_confidence_enabled
+	      = EnvFlag ("CORTEXT_ENABLE_EVIDENCE_CONFIDENCE");
+	  const double evidence_blend_tie_margin
       = core::RetrievalEvidenceBlendTieMargin (
           cfg.focus, cfg.sensitivity, cfg.stability);
   const double evidence_blend_temperature
@@ -3963,14 +4061,20 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
           {
             continue;
           }
-        const auto score = ScoreCandidateFacts (
-            links, cfg.focus, cfg.sensitivity, cfg.stability, retrieval_mode,
-            ablation_override);
-        candidate.fact_boost = score.boost;
-        candidate.fact_stale_penalty = score.stale_penalty;
-        candidate.linked_fact_count = score.linked_fact_count;
-      }
-  };
+	        const auto score = ScoreCandidateFacts (
+	            links, cfg.focus, cfg.sensitivity, cfg.stability,
+	            static_cast<long long> (retrieval_ts),
+	            evidence_confidence_enabled, retrieval_mode, ablation_override);
+	        candidate.fact_boost = score.boost;
+	        candidate.fact_stale_penalty = score.stale_penalty;
+	        candidate.linked_fact_count = score.linked_fact_count;
+	        candidate.evidence_confidence = score.evidence_confidence;
+	        candidate.evidence_weight = score.evidence_weight;
+	        candidate.evidence_source_diversity = score.evidence_source_diversity;
+	        candidate.evidence_contradiction_mass
+	            = score.evidence_contradiction_mass;
+	      }
+	  };
 
   auto apply_label_graph_scores = [&] (std::vector<Scored> &candidates) {
     if (!preconsolidated_label_graph_enabled || label_graph_weight <= 0.0
@@ -4413,12 +4517,16 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
     candidate.linked_fact_count = s.linked_fact_count;
     candidate.label_graph_boost = s.label_graph_boost;
     candidate.label_match_count = s.label_match_count;
-    candidate.durable_source_boost = s.durable_source_boost;
-    candidate.durable_source_count = s.durable_source_count;
-    candidate.temporal_score = s.temporal_score;
-    candidate.activation = activation;
-    return candidate;
-  };
+	    candidate.durable_source_boost = s.durable_source_boost;
+	    candidate.durable_source_count = s.durable_source_count;
+	    candidate.temporal_score = s.temporal_score;
+	    candidate.evidence_confidence = s.evidence_confidence;
+	    candidate.evidence_weight = s.evidence_weight;
+	    candidate.evidence_source_diversity = s.evidence_source_diversity;
+	    candidate.evidence_contradiction_mass = s.evidence_contradiction_mass;
+	    candidate.activation = activation;
+	    return candidate;
+	  };
 
   auto build_evidence_packets = [&] (const std::vector<Scored> &selected) {
     std::vector<retrieval_debug::EvidencePacket> packets;
@@ -4486,20 +4594,38 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
     packet.tie_margin = evidence_blend_tie_margin;
     packet.temperature = temperature;
     packet.score_span = best_score - base_score (*members.back ().second);
-    packet.members.reserve (members.size ());
-    for (size_t i = 0; i < members.size (); ++i)
-      {
-        const auto &[rank, candidate] = members[i];
-        const double weight = unnormalized[i] / unnormalized_sum;
-        packet.activation_total += weight * base_score (*candidate);
-        packet.members.push_back (
-            { rank,
-              candidate->embedding_id,
-              candidate->memory_id,
-              weight,
-              base_score (*candidate),
-              activation_ledger (*candidate) });
-      }
+	    packet.members.reserve (members.size ());
+	    for (size_t i = 0; i < members.size (); ++i)
+	      {
+	        const auto &[rank, candidate] = members[i];
+	        const double weight = unnormalized[i] / unnormalized_sum;
+	        packet.activation_total += weight * base_score (*candidate);
+	        packet.members.push_back (
+	            { rank,
+	              candidate->embedding_id,
+	              candidate->memory_id,
+	              weight,
+	              base_score (*candidate),
+	              activation_ledger (*candidate) });
+	        if (evidence_confidence_enabled)
+	          {
+	            auto &member = packet.members.back ();
+	            member.evidence_confidence = candidate->evidence_confidence;
+	            member.evidence_weight = candidate->evidence_weight;
+	            member.evidence_source_diversity
+	                = candidate->evidence_source_diversity;
+	            member.evidence_contradiction_mass
+	                = candidate->evidence_contradiction_mass;
+	            packet.evidence_confidence
+	                += weight * member.evidence_confidence;
+	            packet.evidence_weight += weight * member.evidence_weight;
+	            packet.evidence_source_diversity = std::max (
+	                packet.evidence_source_diversity,
+	                member.evidence_source_diversity);
+	            packet.evidence_contradiction_mass
+	                += weight * member.evidence_contradiction_mass;
+	          }
+	      }
     packets.push_back (std::move (packet));
     return packets;
   };
@@ -4572,19 +4698,27 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
           }
         blended /= norm;
 
-        const double anchor_weight
-            = core::Clamp (packet.members.front ().weight, 0.0, 1.0);
-        const double uncertainty = core::Clamp (1.0 - anchor_weight, 0.0, 1.0);
-        const auto blob_id
-            = constructive_recall::LoadCurrentBlobId (tx, anchor_memory_id);
-        constructive_recall::AppendReconstructionWithEmbedding (
-            tx, anchor_memory_id, blended, blob_id,
-            static_cast<long long> (signal.timestamp), uncertainty,
-            "evidence_blend",
-            core::Clamp (source_confidence / total_weight, 0.0, 1.0),
-            core::Clamp (context_similarity / total_weight, 0.0, 1.0));
-      }
-  };
+	        const double anchor_weight
+	            = core::Clamp (packet.members.front ().weight, 0.0, 1.0);
+	        const double uncertainty = core::Clamp (1.0 - anchor_weight, 0.0, 1.0);
+	        const auto blob_id
+	            = constructive_recall::LoadCurrentBlobId (tx, anchor_memory_id);
+	        double reconstruction_source_confidence
+	            = core::Clamp (source_confidence / total_weight, 0.0, 1.0);
+	        if (evidence_confidence_enabled && packet.evidence_confidence > 0.0)
+	          {
+	            reconstruction_source_confidence = std::max (
+	                reconstruction_source_confidence,
+	                core::Clamp (packet.evidence_confidence, 0.0, 1.0));
+	          }
+	        constructive_recall::AppendReconstructionWithEmbedding (
+	            tx, anchor_memory_id, blended, blob_id,
+	            static_cast<long long> (signal.timestamp), uncertainty,
+	            "evidence_blend",
+	            reconstruction_source_confidence,
+	            core::Clamp (context_similarity / total_weight, 0.0, 1.0));
+	      }
+	  };
 
   auto collect_filter_rejections =
       [&] (const std::vector<Scored> &candidates,
@@ -5200,14 +5334,21 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
                 ++selected_fact_linked_count;
               }
           }
-        int evidence_packet_member_count = 0;
-        for (const auto &packet : evidence_packets)
-          {
-            evidence_packet_member_count
-                += static_cast<int> (packet.members.size ());
-          }
-        retrieval_debug::SetLastRetrievalSummary (
-            { fact_layer_enabled,
+	        int evidence_packet_member_count = 0;
+	        double evidence_packet_confidence_sum = 0.0;
+	        for (const auto &packet : evidence_packets)
+	          {
+	            evidence_packet_member_count
+	                += static_cast<int> (packet.members.size ());
+	            evidence_packet_confidence_sum += packet.evidence_confidence;
+	          }
+	        const double evidence_packet_confidence_mean
+	            = evidence_packets.empty ()
+	                  ? 0.0
+	                  : evidence_packet_confidence_sum
+	                        / static_cast<double> (evidence_packets.size ());
+	        retrieval_debug::SetLastRetrievalSummary (
+	            { fact_layer_enabled,
               static_cast<int> (matched_facts.size ()),
               static_cast<int> (candidate_fact_links.size ()),
               candidate_fact_link_row_count,
@@ -5221,9 +5362,10 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
               fact_text_best_score,
               static_cast<int> (rejected_candidates.size ()),
               rejected_filter_count,
-              rejected_selection_count,
-              static_cast<int> (evidence_packets.size ()),
-              evidence_packet_member_count });
+	              rejected_selection_count,
+	              static_cast<int> (evidence_packets.size ()),
+	              evidence_packet_member_count,
+	              evidence_packet_confidence_mean });
         retrieval_debug::SetLastSelectedEmbeddingOrder (selected_order);
         retrieval_debug::SetLastRankedCandidates (ranked_candidates);
         retrieval_debug::SetLastRejectedCandidates (rejected_candidates);
@@ -5324,14 +5466,21 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
             ++selected_fact_linked_count;
           }
       }
-    int evidence_packet_member_count = 0;
-    for (const auto &packet : evidence_packets)
-      {
-        evidence_packet_member_count
-            += static_cast<int> (packet.members.size ());
-      }
-    retrieval_debug::SetLastRetrievalSummary (
-        { fact_layer_enabled,
+	    int evidence_packet_member_count = 0;
+	    double evidence_packet_confidence_sum = 0.0;
+	    for (const auto &packet : evidence_packets)
+	      {
+	        evidence_packet_member_count
+	            += static_cast<int> (packet.members.size ());
+	        evidence_packet_confidence_sum += packet.evidence_confidence;
+	      }
+	    const double evidence_packet_confidence_mean
+	        = evidence_packets.empty ()
+	              ? 0.0
+	              : evidence_packet_confidence_sum
+	                    / static_cast<double> (evidence_packets.size ());
+	    retrieval_debug::SetLastRetrievalSummary (
+	        { fact_layer_enabled,
           static_cast<int> (matched_facts.size ()),
           static_cast<int> (candidate_fact_links.size ()),
           candidate_fact_link_row_count,
@@ -5345,9 +5494,10 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
           fact_text_best_score,
           static_cast<int> (rejected_candidates.size ()),
           rejected_filter_count,
-          rejected_selection_count,
-          static_cast<int> (evidence_packets.size ()),
-          evidence_packet_member_count });
+	          rejected_selection_count,
+	          static_cast<int> (evidence_packets.size ()),
+	          evidence_packet_member_count,
+	          evidence_packet_confidence_mean });
     retrieval_debug::SetLastSelectedEmbeddingOrder (selected_order);
     retrieval_debug::SetLastRankedCandidates (ranked_candidates);
     retrieval_debug::SetLastRejectedCandidates (rejected_candidates);
@@ -5413,14 +5563,20 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
   double selected_activation_partial_penalty_sum = 0.0;
   double selected_activation_recent_inhibition_sum = 0.0;
   double selected_activation_utility_sum = 0.0;
-  double selected_activation_exploration_noise_sum = 0.0;
-  double selected_activation_total_sum = 0.0;
-  int64_t evidence_packet_member_count = 0;
-  for (const auto &packet : evidence_packets)
-    {
-      evidence_packet_member_count
-          += static_cast<int64_t> (packet.members.size ());
-    }
+	  double selected_activation_exploration_noise_sum = 0.0;
+	  double selected_activation_total_sum = 0.0;
+	  int64_t evidence_packet_member_count = 0;
+	  double evidence_packet_confidence_sum = 0.0;
+	  double evidence_packet_weight_sum = 0.0;
+	  double evidence_packet_contradiction_sum = 0.0;
+	  for (const auto &packet : evidence_packets)
+	    {
+	      evidence_packet_member_count
+	          += static_cast<int64_t> (packet.members.size ());
+	      evidence_packet_confidence_sum += packet.evidence_confidence;
+	      evidence_packet_weight_sum += packet.evidence_weight;
+	      evidence_packet_contradiction_sum += packet.evidence_contradiction_mass;
+	    }
   count_kinds (scored, scored_assoc, scored_label, scored_other);
   count_kinds (eligible, eligible_assoc, eligible_label, eligible_other);
   count_kinds (selected, selected_assoc, selected_label, selected_other);
@@ -5520,10 +5676,12 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
     telemetry::Attribute::Double (
         "partial_match_modality_mismatch_weight",
         partial_match_modality_mismatch_weight),
-    telemetry::Attribute::Bool ("evidence_blending_enabled",
-                                evidence_blending_enabled),
-    telemetry::Attribute::Double ("evidence_blend_tie_margin",
-                                  evidence_blend_tie_margin),
+	    telemetry::Attribute::Bool ("evidence_blending_enabled",
+	                                evidence_blending_enabled),
+	    telemetry::Attribute::Bool ("evidence_confidence_enabled",
+	                                evidence_confidence_enabled),
+	    telemetry::Attribute::Double ("evidence_blend_tie_margin",
+	                                  evidence_blend_tie_margin),
     telemetry::Attribute::Double ("evidence_blend_temperature",
                                   evidence_blend_temperature),
     telemetry::Attribute::Int64 (
@@ -5532,8 +5690,26 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
     telemetry::Attribute::Int64 (
         "evidence_packet_count",
         static_cast<int64_t> (evidence_packets.size ())),
-    telemetry::Attribute::Int64 ("evidence_packet_member_count",
-                                 evidence_packet_member_count),
+	    telemetry::Attribute::Int64 ("evidence_packet_member_count",
+	                                 evidence_packet_member_count),
+	    telemetry::Attribute::Double (
+	        "evidence_packet_confidence_mean",
+	        evidence_packets.empty ()
+	            ? 0.0
+	            : evidence_packet_confidence_sum
+	                  / static_cast<double> (evidence_packets.size ())),
+	    telemetry::Attribute::Double (
+	        "evidence_packet_weight_mean",
+	        evidence_packets.empty ()
+	            ? 0.0
+	            : evidence_packet_weight_sum
+	                  / static_cast<double> (evidence_packets.size ())),
+	    telemetry::Attribute::Double (
+	        "evidence_packet_contradiction_mean",
+	        evidence_packets.empty ()
+	            ? 0.0
+	            : evidence_packet_contradiction_sum
+	                  / static_cast<double> (evidence_packets.size ())),
     telemetry::Attribute::Bool ("preconsolidated_label_graph_enabled",
                                 preconsolidated_label_graph_enabled),
     telemetry::Attribute::Double ("preconsolidated_label_graph_weight",

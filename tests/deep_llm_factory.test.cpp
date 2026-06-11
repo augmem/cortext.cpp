@@ -3,11 +3,13 @@
 
 #include "../src/deep_llm/deep_llm_factory.hpp"
 
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <stdexcept>
 #include <string>
 #include <vector>
+#include <unistd.h>
 
 namespace
 {
