@@ -1240,6 +1240,20 @@ def call_judge(
                 ollama_keep_alive,
             )
         except (JudgeMalformedResponse, JudgeCallTimeout) as exc:
+            # A timed-out request is abandoned by the client but the server
+            # keeps grinding it; retries then queue behind the orphan and
+            # come back truncated. Force-unload the model to reset the
+            # runner before retrying.
+            if provider == "ollama" and base_url is not None:
+                try:
+                    post_json_local(
+                        f"{base_url}/api/chat",
+                        {"model": model, "messages": [], "keep_alive": 0},
+                        60,
+                    )
+                    print("judge_runner_reset sent keep_alive=0", flush=True)
+                except Exception:
+                    pass
             if attempt >= JUDGE_CALL_ATTEMPTS:
                 raise RuntimeError(
                     "Local judge failed after retryable errors "
