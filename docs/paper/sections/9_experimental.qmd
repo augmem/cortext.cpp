@@ -98,7 +98,7 @@ judge pass over the capacity-21 arm confirms the screen.
 
 Eighteen single-mechanism arms ran at the winning capacity, each a full
 39-probe live-judge screen against the capacity-21 control (22/39 wins,
-sufficiency 3.95, noise 0.59, 503 packet tokens). Win rate never
+sufficiency 3.95, noise 0.67, 503 packet tokens). Win rate never
 separated any mechanism from control; at this horizon the win column is
 saturated by recency coverage, so mechanism value appears in packet
 quality (sufficiency, noise) and token economy instead.
@@ -127,8 +127,41 @@ Everything else is indistinguishable from control at 1,200 messages;
 the durable-structure family (consolidation, labels, facts, graph) is
 deferred to the long-horizon run by design, and the metacognitive layer
 is the strongest simplification candidate, having no long-horizon story
-to defer to. Five further arms enabling the opt-in ACT-R-derived gates
-(reported below) complete the sweep; results pending at time of writing.
+to defer to.
+
+### ACT-R Gate Promotion Arms
+
+Six further arms complete the sweep. These invert the ablation logic:
+each enables one of the opt-in ACT-R-derived scoring gates on top of
+the full default stack, so a gate earns promotion to the default
+configuration only by beating the control it would ship into. This
+measures marginal value at the actual operating point rather than
+intrinsic value over a bare stack, which is the quantity a shipping
+decision needs; a gate that helps in isolation but is redundant with
+the existing fact-boost and temporal-retrieval machinery should not
+ship.
+
+| enabled gate | wins | sufficiency | noise | tokens | reading |
+|---|---:|---:|---:|---:|---|
+| base_level_availability | 22/39 | 3.82 | 0.69 | 521 | null; redundant with recency boosts |
+| recent_retrieval_inhibition | 22/39 | 4.00 | 0.64 | 551 | null at +48 tokens |
+| partial_matching_penalty | 22/39 | 3.92 | 0.64 | 648 | null at +29% packet size |
+| evidence_blending | 23/39 | 3.97 | 0.67 | 465 | null; only token-negative arm |
+| all_gates | 23/39 | 3.72 | 0.95 | 484 | harmful; perturbations compound |
+| evidence_confidence | 22/39 | 3.97 | 0.67 | 503 | exact null; identical to control |
+
+No gate earns promotion. Every single-gate arm pins the win column at
+22-23 of 39 with quality deltas inside judge noise; they differ only in
+token cost, from evidence blending (38 tokens cheaper than control) to
+partial matching (145 tokens more, with the near-miss memories it
+admits earning no judge credit). The combined arm answers the synergy
+question in the negative direction: with all four scoring gates active,
+noise rises from 0.67 to 0.95 and sufficiency falls 0.23, the worst
+quality profile in the sweep. The gates' individual ranking
+perturbations do not reinforce; they compound into junk admission. The
+gates remain available as opt-in flags, and evidence blending's
+favorable token economics make it the one candidate worth re-testing at
+long horizon.
 
 ### Horizon Caveat for Consolidation-Family Ablations
 
