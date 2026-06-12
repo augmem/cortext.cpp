@@ -94,6 +94,42 @@ so the doubling search stops there: capacity 21 is the operating point,
 and the remaining mechanism ablations run at it. A three-repetition
 judge pass over the capacity-21 arm confirms the screen.
 
+### Mechanism Ablations at Capacity 21 (June 12, 2026)
+
+Eighteen single-mechanism arms ran at the winning capacity, each a full
+39-probe live-judge screen against the capacity-21 control (22/39 wins,
+sufficiency 3.95, noise 0.59, 503 packet tokens). Win rate never
+separated any mechanism from control; at this horizon the win column is
+saturated by recency coverage, so mechanism value appears in packet
+quality (sufficiency, noise) and token economy instead.
+
+| ablated mechanism | wins | sufficiency | noise | tokens | reading |
+|---|---:|---:|---:|---:|---|
+| daily_consolidation | 23/39 | 4.03 | 0.41 | 352 | removal mildly positive; defer to long horizon |
+| graph_expansion | 21/39 | 3.90 | 0.71 | 507 | null |
+| media_source_blobs | 21/39 | 3.77 | 0.76 | 198 | real late-corpus cost; 60% of packet weight |
+| stm_ltm_graph_label_handoff | 22/39 | 3.97 | 0.68 | 500 | exact null; defer to long horizon |
+| temporal_retrieval | 22/39 | 3.74 | 0.97 | 543 | largest hygiene loss; keep |
+| fact_boosts | 21/39 | 3.87 | 0.59 | 502 | negligible |
+| temporal_fact_boosts | 22/39 | 3.74 | 0.97 | 543 | identical to temporal alone; no interaction |
+| predictive_bonus | 22/39 | 3.79 | 0.86 | 655 | packet bloat +30%, ties triple; keep |
+| procedural_proactive | 22/39 | 3.97 | 0.59 | 502 | exact null |
+| metacognitive | 24/39 | 3.85 | 0.74 | 473 | removal mildly positive; simplification candidate |
+| constructive_recall | 22/39 | 3.79 | 0.74 | 430 | late-corpus sufficiency cost; weak keep |
+| stm_shadow | 22/39 | 3.97 | 0.70 | 500 | exact null |
+
+Two mechanisms earn their place on packet quality per token: temporal
+retrieval (removal costs 0.21 sufficiency and near-doubles noise,
+monotonically across the run) and the predictive bonus (removal costs
+0.16 sufficiency and 30 percent packet bloat). Constructive recall and
+media source blobs show real but late-concentrated contributions.
+Everything else is indistinguishable from control at 1,200 messages;
+the durable-structure family (consolidation, labels, facts, graph) is
+deferred to the long-horizon run by design, and the metacognitive layer
+is the strongest simplification candidate, having no long-horizon story
+to defer to. Five further arms enabling the opt-in ACT-R-derived gates
+(reported below) complete the sweep; results pending at time of writing.
+
 ### Horizon Caveat for Consolidation-Family Ablations
 
 A short replay cannot fairly judge the consolidation family. On 1,200
