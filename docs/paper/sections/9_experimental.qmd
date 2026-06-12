@@ -80,18 +80,19 @@ against the three-repetition baseline.
 | capacity | wins | sufficiency | mean tokens | savings vs RAG |
 |---:|---:|---:|---:|---:|
 | 7 (baseline) | 22/39 (56%) | 3.40 | 290 | 95% |
-| 10 | 21/37 (57%) | 3.54 | 324 | 95% |
-| 14 | 22/37 (59%) | 3.68 | 350 | 94% |
-| 21 | 21/37 (57%) | 4.00 | 456 | 91% |
+| 10 | 22/39 (56%) | 3.51 | 331 | 95% |
+| 14 | 23/39 (59%) | 3.64 | 377 | 94% |
+| 21 | 22/39 (56%) | 3.95 | 503 | 92% |
+| 42 | 23/39 (59%) | 3.82 | 758 | 88% |
 
 Win rate stays inside a 56-59 percent band, within single-repetition
 judge variance. Sufficiency, the judge's was-there-enough-context score
-and the metric a wider window should move, climbs strictly and is still
-climbing at capacity 21. The capacity search continues by doubling until
-sufficiency drops or token savings fall below 50 percent; the savings
-floor sits near capacity 200 at the observed growth of roughly 11 tokens
-per slot, so quality saturation will bind first. The remaining mechanism
-ablations will run at the winning capacity.
+and the metric a wider window should move, climbs strictly through
+capacity 21 and then declines at 42, which pays 1.5 times the context
+tokens for less sufficiency. The curve is unimodal with its peak at 21,
+so the doubling search stops there: capacity 21 is the operating point,
+and the remaining mechanism ablations run at it. A three-repetition
+judge pass over the capacity-21 arm confirms the screen.
 
 ### Horizon Caveat for Consolidation-Family Ablations
 
