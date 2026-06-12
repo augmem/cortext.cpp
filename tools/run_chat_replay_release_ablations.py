@@ -318,16 +318,23 @@ def strict_early_judge_required(
     )
 
 
-def ensure_initial_report_freezable(report: dict) -> None:
+def ensure_initial_report_freezable(
+    report: dict, waived_checks: set[str] | None = None
+) -> list[str]:
     checks = report.get("release_gate", {}).get("checks", [])
     if not isinstance(checks, list):
         raise RuntimeError("initial report does not contain release_gate.checks")
+    waived_checks = waived_checks or set()
+    waived_hits: list[str] = []
     unexpected_failures = []
     for item in checks:
         if not isinstance(item, dict) or item.get("status") != "fail":
             continue
         name = str(item.get("name", ""))
         if name.startswith("claim_"):
+            continue
+        if name in waived_checks:
+            waived_hits.append(name)
             continue
         unexpected_failures.append(
             {
@@ -340,15 +347,17 @@ def ensure_initial_report_freezable(report: dict) -> None:
             "refusing to freeze initial report with protocol/provenance failures: "
             + json.dumps(unexpected_failures, sort_keys=True)
         )
+    return waived_hits
 
 
 def write_or_validate_release_freeze(
     path: pathlib.Path,
     report_path: pathlib.Path,
     benchmark_command: str,
+    waived_checks: set[str] | None = None,
 ) -> None:
     report = json.loads(report_path.read_text())
-    ensure_initial_report_freezable(report)
+    waived_hits = ensure_initial_report_freezable(report, waived_checks)
     source_fingerprint = report.get("source_run", {}).get("source_input_fingerprint", {})
     schedule = report.get("frozen_probe_schedule", {})
     git = report.get("git", {})
@@ -357,6 +366,10 @@ def write_or_validate_release_freeze(
         "schema": "cortext_chat_replay_release_protocol_freeze_v1",
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
         "source": "main_release_report",
+        # Engineering-sweep waivers: explicitly named failing checks the
+        # operator accepted for this run; a release claim must re-run with
+        # an empty waiver list.
+        "waived_release_gate_checks": sorted(waived_hits),
         "source_report_path": str(report_path),
         "source_report_sha256": hashlib.sha256(report_path.read_bytes()).hexdigest(),
         "source_input_manifest_sha256": source_fingerprint.get("manifest_sha256", ""),
@@ -661,6 +674,14 @@ def main() -> int:
     parser.add_argument("--human-label-eval", type=pathlib.Path)
     parser.add_argument("--target-freeze", type=pathlib.Path)
     parser.add_argument(
+        "--freeze-waiver",
+        default="",
+        help=(
+            "Comma-separated release-gate check names allowed to fail for "
+            "this run (engineering sweeps); recorded in the freeze artifact."
+        ),
+    )
+    parser.add_argument(
         "--require-final-report-pass",
         action="store_true",
         help=(
@@ -745,10 +766,16 @@ def main() -> int:
     judge_media_smoke = args.judge_media_smoke or (args.base / "judge_media_smoke_ollama.json")
 
     release_freeze = args.base / "release_protocol_freeze.json"
+    freeze_waivers = {
+        name.strip()
+        for name in str(args.freeze_waiver).split(",")
+        if name.strip()
+    }
     write_or_validate_release_freeze(
         release_freeze,
         args.main_report,
         args.benchmark_command,
+        freeze_waivers,
     )
     print(f"[ablation-pipeline] release freeze ready {release_freeze}", flush=True)
 
