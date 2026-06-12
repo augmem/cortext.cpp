@@ -57,7 +57,7 @@ QUALITY_COMPOSITE_WEIGHTS = {
 }
 QUALITY_SCORE_MAX = 5.0
 QUALITY_COMPOSITE_DEFINITION = "relevance + sufficiency - 0.25*noise"
-PACKET_ALIASES = ["A", "B", "C"]
+PACKET_ALIASES = ["A", "B", "C", "D"]
 USER_SOURCE_ID = "User"
 LEGACY_USER_SOURCE_ID = "Gabe"
 CONTACT_SOURCE_ID = "Contact"
@@ -101,6 +101,7 @@ SYSTEM_FAILURE_REASONS = {
     "modality_blindness",
     "rag_context_advantage",
     "full_history_upper_bound_advantage",
+    "compacting_session_advantage",
     "cortext_wins",
     "tie_or_unclear",
 }
@@ -889,6 +890,171 @@ def memory_doc_tokens(
     return sum_doc_tokens(docs)
 
 
+
+def load_judge_systems_config(out_path: pathlib.Path) -> dict:
+    """Optional run-directory config (judge_systems.json) enabling simulated
+    comparison systems and per-system budgets, mirroring judge_shards.json."""
+    config_path = out_path.parent / "judge_systems.json"
+    if not config_path.exists():
+        return {}
+    try:
+        return json.loads(config_path.read_text())
+    except Exception:
+        return {}
+
+
+def summarize_text_chunks(
+    text: str,
+    base_url: str,
+    model: str,
+    max_chunk_tokens: int = 20000,
+) -> str:
+    """Map-reduce summarization for session compaction: chunk, summarize
+    each, then summarize the summaries when more than one chunk."""
+
+    def call(prompt_text: str) -> str:
+        body = {
+            "model": model,
+            "stream": False,
+            "think": False,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": (
+                        "Summarize this conversation history into a compact "
+                        "briefing for continuing the conversation. Preserve "
+                        "names, relationships, decisions, plans, dates, "
+                        "places, and unresolved threads. Be specific and "
+                        "dense; do not add commentary.\n\n" + prompt_text
+                    ),
+                }
+            ],
+            "options": {"temperature": 0, "num_predict": 700},
+        }
+        payload = post_json_local(f"{base_url}/api/chat", body, 600)
+        return str(payload.get("message", {}).get("content", "")).strip()
+
+    chunks: list[str] = []
+    current: list[str] = []
+    current_tokens = 0
+    for line in text.splitlines():
+        line_tokens = estimate_tokens(line)
+        if current and current_tokens + line_tokens > max_chunk_tokens:
+            chunks.append("\n".join(current))
+            current, current_tokens = [], 0
+        current.append(line)
+        current_tokens += line_tokens
+    if current:
+        chunks.append("\n".join(current))
+    summaries = [call(chunk) for chunk in chunks]
+    summaries = [item for item in summaries if item]
+    if not summaries:
+        return "(compaction produced no summary)"
+    if len(summaries) == 1:
+        return summaries[0]
+    return call("\n\n".join(summaries)) or "\n\n".join(summaries)
+
+
+def simulate_compacting_session(
+    timeline: list,
+    probe_indices: list[int],
+    config: dict,
+    cache_path: pathlib.Path,
+) -> dict[int, list]:
+    """Replays the timeline as a chat session that compacts when the
+    running context reaches trigger x budget: history is summarized (the
+    summary becomes the leading message) and the tail continues. Returns
+    the session state visible at each probe (docs strictly before it).
+    Snapshots cache to disk so judge shards do not re-summarize."""
+    budget = int(config.get("budget_tokens", 49152))
+    trigger = float(config.get("trigger", 0.8))
+    base_url = str(config.get("base_url", "http://127.0.0.1:11435"))
+    model = str(config.get("model", "gemma4:e2b"))
+
+    snapshots: dict[str, dict] = {}
+    if cache_path.exists():
+        try:
+            snapshots = json.loads(cache_path.read_text())
+        except Exception:
+            snapshots = {}
+    probe_set = set(int(p) for p in probe_indices)
+    if not all(str(p) in snapshots for p in probe_set):
+        snapshots = {}
+        summary_text = ""
+        summary_tokens = 0
+        tail: list = []
+        tail_tokens = 0
+        compactions = 0
+        text_docs = [d for d in timeline if d.modality == "text"]
+        for doc in sorted(text_docs, key=lambda d: d.index):
+            if doc.index in probe_set:
+                snapshots[str(doc.index)] = {
+                    "summary": summary_text,
+                    "tail_start": tail[0].index if tail else -1,
+                    "tail_end": tail[-1].index if tail else -1,
+                    "compactions": compactions,
+                }
+            doc_tokens = estimate_tokens(doc.text or "")
+            tail.append(doc)
+            tail_tokens += doc_tokens
+            if summary_tokens + tail_tokens > trigger * budget:
+                print(
+                    f"compaction_event at_doc_index={doc.index} "
+                    f"tokens={summary_tokens + tail_tokens}",
+                    flush=True,
+                )
+                source = (
+                    ("[Previous session summary]\n" + summary_text + "\n\n")
+                    if summary_text
+                    else ""
+                ) + "\n".join(d.text or "" for d in tail)
+                summary_text = summarize_text_chunks(source, base_url, model)
+                summary_tokens = estimate_tokens(summary_text)
+                tail = []
+                tail_tokens = 0
+                compactions += 1
+        # Probes at indices beyond the last text doc still need state.
+        for p in probe_set:
+            if str(p) not in snapshots:
+                snapshots[str(p)] = {
+                    "summary": summary_text,
+                    "tail_start": tail[0].index if tail else -1,
+                    "tail_end": tail[-1].index if tail else -1,
+                    "compactions": compactions,
+                }
+        tmp = cache_path.with_name(cache_path.name + ".tmp")
+        tmp.write_text(json.dumps(snapshots, indent=1))
+        tmp.replace(cache_path)
+
+    by_index = {d.index: d for d in timeline}
+    result: dict[int, list] = {}
+    for p in probe_set:
+        snap = snapshots.get(str(p)) or {}
+        docs: list = []
+        if snap.get("summary"):
+            docs.append(
+                TimelineDoc(
+                    index=-1,
+                    timestamp=0,
+                    source_id="session/compaction-summary",
+                    modality="text",
+                    text="[Session summary after "
+                    + str(snap.get("compactions", 0))
+                    + " compaction(s)]\n"
+                    + str(snap.get("summary")),
+                )
+            )
+        tail_start = int(snap.get("tail_start", -1))
+        tail_end = int(snap.get("tail_end", -1))
+        if tail_start >= 0:
+            for i in range(tail_start, min(tail_end, p - 1) + 1):
+                doc = by_index.get(i)
+                if doc is not None and doc.modality == "text" and doc.index < p:
+                    docs.append(doc)
+        result[p] = docs
+    return result
+
+
 def text_only_docs(docs: list[TimelineDoc]) -> list[TimelineDoc]:
     return [doc for doc in docs if doc.modality == "text"]
 
@@ -1296,6 +1462,8 @@ def expected_failure_reason(winner: str) -> str | None:
         return "rag_context_advantage"
     if winner == "full_history_upper_bound":
         return "full_history_upper_bound_advantage"
+    if winner == "compacting_session":
+        return "compacting_session_advantage"
     return None
 
 
@@ -1849,6 +2017,34 @@ def main() -> int:
         summary.get("timeline_media_limit", summary.get("media_attempted", -1))
     )
     timeline = build_timeline(input_dir, skip_messages, max_messages, media_limit)
+
+    judge_systems_config = load_judge_systems_config(args.out)
+    compacting_config = judge_systems_config.get("compacting_session") or {}
+    compacting_enabled = bool(compacting_config.get("enabled"))
+    full_history_budget_override = judge_systems_config.get(
+        "full_history_budget_tokens"
+    )
+    compacting_snapshots: dict[int, list] = {}
+    if compacting_enabled:
+        probe_event_indices = [
+            int(p.get("event_index"))
+            for p in (summary.get("probes") or [])
+            if p.get("event_index") is not None
+        ]
+        compacting_snapshots = simulate_compacting_session(
+            timeline,
+            probe_event_indices,
+            compacting_config,
+            args.out.parent / "compacting_session_snapshots.json",
+        )
+        print(
+            f"compacting_session enabled: budget="
+            f"{compacting_config.get('budget_tokens', 49152)} trigger="
+            f"{compacting_config.get('trigger', 0.8)} probes="
+            f"{len(compacting_snapshots)}",
+            flush=True,
+        )
+
     expected_keys = expected_judgment_keys(
         summary,
         timeline,
@@ -1861,7 +2057,9 @@ def main() -> int:
     conn = connect_db(db_path)
     media_memory_map, media_memory_map_audit = build_media_memory_map(conn, timeline)
 
-    systems = SYSTEMS
+    systems = list(SYSTEMS) + (
+        ["compacting_session"] if compacting_enabled else []
+    )
     fields = FIELDS
     totals = {system: Counter() for system in systems}
     judged: list[dict] = []
@@ -1872,9 +2070,7 @@ def main() -> int:
     media_attachment_totals = {
         "enabled": args.max_media_per_system != 0,
         "max_media_per_system": args.max_media_per_system,
-        "cortext_native": Counter(),
-        "traditional_chat_rag": Counter(),
-        "full_history_upper_bound": Counter(),
+        **{system: Counter() for system in systems},
     }
     if int(media_memory_map_audit.get("unmatched_db_media_occurrence_count", 0) or 0) > 0:
         fairness_checks["media_memory_map_unmatched_db_occurrences"] += int(
@@ -2023,8 +2219,9 @@ def main() -> int:
             # instead of corrupting the judge prompt via server-side
             # truncation. Reserve room for instructions and the other
             # systems' packets.
-            full_history_budget_tokens = max(
-                8192, args.judge_context_window_tokens - 24576
+            full_history_budget_tokens = int(
+                full_history_budget_override
+                or max(8192, args.judge_context_window_tokens - 24576)
             )
             kept_docs: list = []
             kept_tokens = 0
@@ -2061,6 +2258,14 @@ def main() -> int:
                 "traditional_chat_rag": rag_packet_docs,
                 "full_history_upper_bound": full_docs,
             }
+            if compacting_enabled:
+                packet_docs_by_system["compacting_session"] = (
+                    compacting_snapshots.get(int(probe["event_index"]), [])
+                )
+                token_totals["compacting_session_tokens"] += sum(
+                    estimate_tokens(doc.text or "")
+                    for doc in packet_docs_by_system["compacting_session"]
+                )
             for row in memory_rows:
                 docs = map_memory_to_docs(row, timeline, media_memory_map)
                 if docs:
@@ -2466,6 +2671,9 @@ def main() -> int:
                 "normal_rag_compaction_summary_policy"
             ),
             "full_history_upper_bound": "prior text history only",
+            "compacting_session": (
+                "session that summarizes itself when near its context budget"
+            ),
             "daily_consolidation_required_for_release": True,
             "default_knobs_required_for_release": [0.5, 0.5, 0.5],
             "judge_media_capabilities": judge_media_capabilities,
