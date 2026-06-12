@@ -61,6 +61,10 @@ add_executable(cortext_cognitive_mechanism_ablation_bench
   cognitive_mechanism_ablation_bench.cpp
 )
 
+add_executable(cortext_soar_cue_rarity_julie_bench
+  soar_cue_rarity_julie_bench.cpp
+)
+
 add_executable(cortext_meta_learning_ablation_bench
   meta_learning_ablation_bench.cpp
 )
@@ -241,6 +245,9 @@ target_include_directories(cortext_actr_retrieval_ablation_bench PRIVATE
 target_include_directories(cortext_cognitive_mechanism_ablation_bench PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}
 )
+target_include_directories(cortext_soar_cue_rarity_julie_bench PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}
+)
 target_include_directories(cortext_meta_learning_ablation_bench PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}
 )
@@ -385,6 +392,9 @@ target_link_libraries(cortext_actr_retrieval_ablation_bench PRIVATE
   cortext
 )
 target_link_libraries(cortext_cognitive_mechanism_ablation_bench PRIVATE
+  cortext
+)
+target_link_libraries(cortext_soar_cue_rarity_julie_bench PRIVATE
   cortext
 )
 target_link_libraries(cortext_meta_learning_ablation_bench PRIVATE
