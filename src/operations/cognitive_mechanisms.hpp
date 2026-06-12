@@ -191,6 +191,44 @@ CueRarityScore (double base_score, const std::vector<CueEvidence> &cues,
 }
 
 inline double
+CueRarityProductScore (double base_score,
+                       const std::vector<CueEvidence> &cues,
+                       double document_count,
+                       double specificity,
+                       double cue_scale = 0.35,
+                       double negative_scale = 0.25,
+                       double normalizer = 0.0)
+{
+  double positive = 0.0;
+  double negative = 0.0;
+  for (const auto &cue : cues)
+    {
+      const double weighted
+          = core::Clamp (cue.support, 0.0, 1.0)
+            * CueRarityWeight (document_count, cue.document_frequency);
+      if (cue.negative)
+        {
+          negative += weighted;
+        }
+      else
+        {
+          positive += weighted;
+        }
+    }
+  const double denom = normalizer > 0.0
+                           ? normalizer
+                           : std::max (1.0, static_cast<double> (cues.size ()));
+  const double positive_signal = core::Clamp (positive / denom, 0.0, 1.0);
+  const double evidence_gate
+      = 0.82 + 0.18 * core::Clamp (specificity, 0.0, 1.0);
+  return core::Clamp (
+      core::Clamp (base_score, 0.0, 1.0)
+              * (1.0 + cue_scale * positive_signal) * evidence_gate
+          - negative_scale * cue_scale * core::Clamp (negative, 0.0, 1.0),
+      0.0, 1.0);
+}
+
+inline double
 UsefulnessScore (double retrieved_count, double selected_count,
                  double feedback_count, double age_ms, double half_life_ms)
 {

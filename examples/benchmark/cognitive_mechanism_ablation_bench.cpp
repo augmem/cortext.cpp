@@ -213,15 +213,16 @@ RunCueRarityStudy (BenchEncoder &encoder)
 
   ScopedEnvVar guard (cognitive::kCueRarityFlag, "1");
   result.on_target = cognitive::EnvFlagEnabled (cognitive::kCueRarityFlag)
-                         ? cognitive::CueRarityScore (
+                         ? cognitive::CueRarityProductScore (
                                target_semantic, { { 0.92, 1.0, false } },
-                               128.0)
+                               128.0, 0.88)
                          : target_semantic;
   result.on_comparison
       = cognitive::EnvFlagEnabled (cognitive::kCueRarityFlag)
-            ? cognitive::CueRarityScore (
+            ? cognitive::CueRarityProductScore (
                   comparison_semantic,
-                  { { 0.70, 80.0, false }, { 0.90, 4.0, true } }, 128.0)
+                  { { 0.70, 80.0, false }, { 0.90, 4.0, true } }, 128.0,
+                  0.35)
             : comparison_semantic;
   result.on_winner = Winner (result.on_target, result.on_comparison);
   result.passed = result.off_winner == "comparison"

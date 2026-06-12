@@ -66,6 +66,22 @@ TEST_CASE ("Cue rarity boosts rare support and negative cues penalize",
   REQUIRE (contradicted_score < rare_score);
 }
 
+TEST_CASE ("Cue rarity product rewards rare diagnostic cues without saturation",
+           "[operations][cognitive-mechanisms]")
+{
+  const double target = cognitive::CueRarityProductScore (
+      0.78, { { 0.95, 1.0, false } }, 100.0, 0.90);
+  const double generic = cognitive::CueRarityProductScore (
+      0.83, { { 0.95, 80.0, false } }, 100.0, 0.35);
+  const double contradicted = cognitive::CueRarityProductScore (
+      0.78, { { 0.95, 1.0, false }, { 0.80, 1.0, true } }, 100.0,
+      0.90);
+
+  REQUIRE (target > generic);
+  REQUIRE (target < 1.0);
+  REQUIRE (contradicted < target);
+}
+
 TEST_CASE ("Usefulness score rewards selected feedback and decays with age",
            "[operations][cognitive-mechanisms]")
 {

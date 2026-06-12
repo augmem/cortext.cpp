@@ -8,10 +8,11 @@ This pass tested six small mechanisms inspired by cognitive architectures after
 the ACT-R/evidence-confidence work. It does not import OpenCog, LIDA, Soar, ONA,
 CLARION, Sigma, NARS, or any runtime. The implementation is limited to internal
 helper functions in `src/operations/cognitive_mechanisms.hpp`, focused unit
-tests, and a benchmark target:
+tests, and benchmark targets:
 
 ```bash
 examples/benchmark/cortext_cognitive_mechanism_ablation_bench
+examples/benchmark/cortext_soar_cue_rarity_julie_bench
 ```
 
 No public API, C API, or schema changes were made. The mechanisms are disabled
@@ -44,7 +45,7 @@ Focused unit tests:
 ./build/tests/cortext_tests "[operations][cognitive-mechanisms]"
 ```
 
-Result: all tests passed, `14` assertions in `6` test cases.
+Result: all tests passed, `17` assertions in `7` test cases.
 
 Real-encoder ablation:
 
@@ -65,12 +66,51 @@ model=/Users/gabrielwillen/VSCode/cortext/models/AIST-87M-GGUF/AIST-87M_q8_0.ggu
 |---|---|---|---|---:|---:|---:|---:|---|
 | `opencog_attention_ledger` | OpenCog | comparison | target | 0.706926 | 0.932638 | 0.747612 | 0.304568 | keep gated |
 | `lida_packet_competition` | LIDA | comparison | target | 0.706224 | 0.801292 | 0.636614 | 0.801292 | keep gated |
-| `soar_cue_rarity_negative` | Soar | comparison | target | 0.756858 | 0.911577 | 1.000000 | 0.664162 | keep gated |
+| `soar_cue_rarity_negative` | Soar | comparison | target | 0.756858 | 0.911577 | 0.944945 | 0.761694 | keep gated |
 | `ona_usefulness_rank` | ONA | comparison | target | 0.834012 | 0.951573 | 1.000000 | 0.951573 | keep gated |
 | `clarion_explicit_implicit_lanes` | CLARION | comparison | target | 0.732446 | 0.859891 | 0.766382 | 0.342163 | keep gated |
 | `sigma_factor_fusion` | Sigma | comparison | target | 0.916532 | 0.928370 | 0.836923 | 0.572766 | keep gated |
 
 Summary: `6/6 passed`.
+
+The initial additive Soar cue-rarity score was not good enough for promotion:
+it passed the synthetic two-candidate fixture but saturated the target and
+reduced pairwise accuracy on the Julie-derived sweep. The kept prototype is the
+bounded product form `CueRarityProductScore`, which keeps semantic similarity as
+the carrier signal, multiplies in rare positive cue support, gates by candidate
+specificity, and subtracts bounded negative-cue evidence.
+
+Julie transcript follow-up:
+
+```bash
+./build/examples/benchmark/cortext_soar_cue_rarity_julie_bench \
+  --models=/Users/gabrielwillen/VSCode/cortext/models \
+  --transcript="/Users/gabrielwillen/VSCode/cortext/build/julie_mixed_media_week_2025_03_20_input/Messages - Julie Willen.txt"
+```
+
+Resolved encoder:
+
+```text
+encoder_backend=AIST-87M-GGUF
+model=/Users/gabrielwillen/VSCode/cortext/models/AIST-87M-GGUF/AIST-87M_q8_0.gguf
+messages=520
+```
+
+The benchmark generated 24 Julie-derived trials and evaluated three folds.
+Baseline is raw encoder cosine. Product is the Soar cue-rarity product score.
+
+| metric | baseline | Soar product |
+|---|---:|---:|
+| pair accuracy | 0.208333 | 0.791667 |
+| MRR | 0.188959 | 0.829440 |
+| hit@10 | 0.250000 | 0.958333 |
+| mean rank | 173.583333 | 4.500000 |
+| mean margin | -0.061604 | 0.035554 |
+
+The pass gate requires product pair accuracy, MRR, and hit@10 each to improve by
+at least `0.20`; this run cleared all three. This supports keeping the Soar
+product primitive for a production-wiring experiment. It does not, by itself,
+prove that the primitive should be enabled in the live ranker.
 
 Regression checks:
 
@@ -91,7 +131,7 @@ real-encoder ablation remained `6/6 passed`.
 |---|---|---|---|
 | OpenCog | Split transient activation, durable importance, persistence intent, and evidence confidence before recombining. | keep gated | It flipped a high lexical/semantic distractor to the durable evidence target under the real encoder. Useful as a bounded ledger shape, not a replacement ranker. |
 | LIDA | Bounded packet proposal competition with refractory suppression. | keep gated | Refractory suppression moved selection away from a recently repeated packet without changing the production retrieval path. |
-| Soar | Cue rarity plus negative-cue penalties. | keep gated | Rare positive support and explicit negative evidence beat a generic high-semantic distractor. Needs corpus-level cue statistics before production use. |
+| Soar | Cue rarity plus negative-cue penalties, using the bounded product form. | keep gated | Rare positive support and explicit negative evidence beat a generic high-semantic distractor, and the product variant passed the 24-trial Julie cross-fold check with pair accuracy `0.208333 -> 0.791667`. Needs corpus-level cue statistics before production use. |
 | ONA | Usefulness-ranked admission/forgetting pressure from retrieval, selection, feedback, and age. | keep gated | Historical usefulness repaired the ranking in the fixture. It should remain bounded because the current run saturates the target score. |
 | CLARION | Explicit fact confidence and implicit semantic evidence as separate lanes before fusion. | keep gated | Source-backed explicit evidence overcame a generic semantic match, while unsupported explicit evidence remains downweighted in unit coverage. |
 | Sigma | Small product-of-experts fusion over semantic/source/quality factors. | keep gated | Balanced support beat a spiky high-semantic/low-quality candidate. This is a candidate scoring primitive, not a graph rewrite. |

@@ -3889,8 +3889,8 @@ CORTEXT_AIST_MODEL_PATH=/Users/gabrielwillen/VSCode/cortext/models/AIST-87M-GGUF
 <td>target</td>
 <td style="text-align: right;">0.756858</td>
 <td style="text-align: right;">0.911577</td>
-<td style="text-align: right;">1.000000</td>
-<td style="text-align: right;">0.664162</td>
+<td style="text-align: right;">0.944945</td>
+<td style="text-align: right;">0.761694</td>
 </tr>
 <tr>
 <td>ONA usefulness rank</td>
@@ -3923,12 +3923,73 @@ CORTEXT_AIST_MODEL_PATH=/Users/gabrielwillen/VSCode/cortext/models/AIST-87M-GGUF
 </table>
 
 All six probes passed (`summary=6/6 passed`), and the focused unit tests
-covered the six helper functions. The result is intentionally weaker
-than production promotion: these mechanisms are kept as gated candidate
-primitives, not wired into production ranking. The next promotion gate
-must attach one candidate at a time to an existing ranking or admission
-surface and rerun corpus or long-horizon harnesses to check that the
-local two-candidate gain is not dead weight or a regression source.
+covered the helper functions. The result is intentionally weaker than
+production promotion: these mechanisms are kept as gated candidate
+primitives, not wired into production ranking.
+
+The Soar cue-rarity probe received a stricter follow-up because the
+first additive score saturated the target on the synthetic fixture and
+did not prove value on Julie-derived text. The retained prototype is a
+bounded product form, `CueRarityProductScore`, which keeps semantic
+similarity as the carrier signal, multiplies in rare positive cue
+support, gates by candidate specificity, and subtracts bounded
+negative-cue evidence. The tracked follow-up benchmark is:
+
+``` bash
+./build/examples/benchmark/cortext_soar_cue_rarity_julie_bench \
+  --models=/Users/gabrielwillen/VSCode/cortext/models \
+  --transcript="/Users/gabrielwillen/VSCode/cortext/build/julie_mixed_media_week_2025_03_20_input/Messages - Julie Willen.txt"
+```
+
+It parsed 520 Julie messages, generated 24 held-out-style rare-cue
+trials, and evaluated three folds with the real `AIST-87M-GGUF` encoder.
+Raw encoder cosine was the baseline:
+
+<table>
+<thead>
+<tr>
+<th>metric</th>
+<th style="text-align: right;">baseline</th>
+<th style="text-align: right;">Soar product</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>pair accuracy</td>
+<td style="text-align: right;">0.208333</td>
+<td style="text-align: right;">0.791667</td>
+</tr>
+<tr>
+<td>MRR</td>
+<td style="text-align: right;">0.188959</td>
+<td style="text-align: right;">0.829440</td>
+</tr>
+<tr>
+<td>hit@10</td>
+<td style="text-align: right;">0.250000</td>
+<td style="text-align: right;">0.958333</td>
+</tr>
+<tr>
+<td>mean rank</td>
+<td style="text-align: right;">173.583333</td>
+<td style="text-align: right;">4.500000</td>
+</tr>
+<tr>
+<td>mean margin</td>
+<td style="text-align: right;">-0.061604</td>
+<td style="text-align: right;">0.035554</td>
+</tr>
+</tbody>
+</table>
+
+The benchmark exits successfully only when pair accuracy, MRR, and
+hit@10 each improve by at least `0.20`; this run cleared all three. The
+verdict is therefore to keep the Soar product primitive for a
+production-wiring experiment. It is not promoted directly into
+production ranking by this branch. The next promotion gate must attach
+one candidate at a time to an existing ranking or admission surface and
+rerun corpus or long-horizon harnesses to check that the local gain is
+not dead weight or a regression source.
 
 To quantify consolidation utility, we also track:
 
