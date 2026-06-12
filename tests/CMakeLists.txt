@@ -69,9 +69,11 @@ add_executable(cortext_tests
 
   operations_consolidation.test.cpp
   operations_consolidation_cluster.test.cpp
-  operations_extraction.test.cpp
-  operations_bitemporal_facts.test.cpp
-  operations_write_gate.test.cpp
+	  operations_extraction.test.cpp
+	  operations_bitemporal_facts.test.cpp
+	  operations_evidence_confidence.test.cpp
+	  operations_cognitive_mechanisms.test.cpp
+	  operations_write_gate.test.cpp
   operations_memory_storage.test.cpp
   operations_short_term_memory_shadow.test.cpp
   operations_soft_anchor.test.cpp

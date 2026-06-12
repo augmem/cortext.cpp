@@ -3687,7 +3687,9 @@ four transplanted scoring ideas in the existing Cortext retrieval
 pipeline: base-level availability, recent retrieval inhibition,
 procedural utility, and partial matching over existing metadata. It also
 tests downstream evidence blending as a rank-preserving
-packet-generation step for near-tied selected candidates. The harness
+packet-generation step for near-tied selected candidates and
+evidence-weighted confidence as a rank-preserving
+annotation/source-confidence mechanism for those packets. The harness
 encodes all query and memory text through the production AIST path,
 truncates to the same 256-dimensional Matryoshka retrieval view used by
 the SQLite vector schema, and then runs each study with the relevant
@@ -3785,21 +3787,209 @@ summarization. The resolved encoder was `AIST-87M-GGUF` at
 <td>one normalized near-tie packet and one <code>evidence_blend</code>
 reconstruction</td>
 </tr>
+<tr>
+<td>evidence-weighted confidence</td>
+<td style="text-align: right;">1</td>
+<td style="text-align: right;">1</td>
+<td style="text-align: right;">2</td>
+<td style="text-align: right;">2</td>
+<td style="text-align: right;">0.993295</td>
+<td style="text-align: right;">0.993295</td>
+<td>packet confidence 0.834525; reconstruction source confidence
+0.274780 -&gt; 0.834525</td>
+</tr>
 </tbody>
 </table>
 
-All five studies passed (`summary=5/5 passed`). The first four required
-a rank flip under the real encoder rather than merely observing a
-non-zero ledger component. Evidence blending has a different pass
-condition: it must leave the selected ranks and scores unchanged while
-producing a normalized near-tie packet and a constructive-recall
-reconstruction tagged `evidence_blend`. The interpretation is
-deliberately narrow: the scoring mechanisms are promotable only because
-they show causal rank movement in the existing retrieval pipeline under
-the production embedding view, while evidence blending is promotable
-only as a downstream packet-quality mechanism. The activation ledger
-itself is treated as observability and is validated separately by
-rank-preservation/unit-test invariants, not as a quality mechanism.
+All six studies passed (`summary=6/6 passed`). The first four required a
+rank flip under the real encoder rather than merely observing a non-zero
+ledger component. Evidence blending has a different pass condition: it
+must leave the selected ranks and scores unchanged while producing a
+normalized near-tie packet and a constructive-recall reconstruction
+tagged `evidence_blend`. Evidence-weighted confidence must also preserve
+ranks and scores, but its packet confidence must exceed 0.60 and
+materially raise the reconstruction source confidence over the
+unannotated packet. The interpretation is deliberately narrow: the
+scoring mechanisms are promotable only because they show causal rank
+movement in the existing retrieval pipeline under the production
+embedding view, while evidence blending and evidence-weighted confidence
+are promotable only as downstream packet-quality mechanisms. The
+activation ledger itself is treated as observability and is validated
+separately by rank-preservation/unit-test invariants, not as a quality
+mechanism.
+
+## Cognitive-Architecture Mechanism Probe
+
+On **June 11, 2026**, we ran a second benchmark-only probe for small
+ideas from other cognitive-architecture systems: an OpenCog-style
+attention ledger, LIDA-style packet competition with refractory
+suppression, Soar-style cue rarity and negative cues, ONA-style
+usefulness ranking, CLARION-style explicit/implicit evidence lanes, and
+Sigma-style product-of-experts fusion. The implementation does not
+import those systems or add public API, C API, or schema surface. The
+mechanisms live as isolated internal helpers in
+`src/operations/cognitive_mechanisms.hpp` and are tested by
+`examples/benchmark/cortext_cognitive_mechanism_ablation_bench` behind
+disabled-by-default environment flags.
+
+The benchmark used the same local AIST-87M q8 path and 256-dimensional
+retrieval view as the ACT-R ablation. Each study starts from the current
+embedding-only comparison, then enables exactly one proposed mechanism
+and requires the target to beat a stronger embedding distractor:
+
+``` bash
+CORTEXT_AIST_MODEL_PATH=/Users/gabrielwillen/VSCode/cortext/models/AIST-87M-GGUF/AIST-87M_q8_0.gguf \
+  ./build/examples/benchmark/cortext_cognitive_mechanism_ablation_bench \
+  --models-dir /Users/gabrielwillen/VSCode/cortext/models
+```
+
+<table>
+<colgroup>
+<col style="width: 12%" />
+<col style="width: 12%" />
+<col style="width: 12%" />
+<col style="width: 16%" />
+<col style="width: 16%" />
+<col style="width: 16%" />
+<col style="width: 16%" />
+</colgroup>
+<thead>
+<tr>
+<th>study</th>
+<th>off winner</th>
+<th>on winner</th>
+<th style="text-align: right;">off target</th>
+<th style="text-align: right;">off comparison</th>
+<th style="text-align: right;">on target</th>
+<th style="text-align: right;">on comparison</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>OpenCog attention ledger</td>
+<td>comparison</td>
+<td>target</td>
+<td style="text-align: right;">0.706926</td>
+<td style="text-align: right;">0.932638</td>
+<td style="text-align: right;">0.747612</td>
+<td style="text-align: right;">0.304568</td>
+</tr>
+<tr>
+<td>LIDA packet competition</td>
+<td>comparison</td>
+<td>target</td>
+<td style="text-align: right;">0.706224</td>
+<td style="text-align: right;">0.801292</td>
+<td style="text-align: right;">0.636614</td>
+<td style="text-align: right;">0.801292</td>
+</tr>
+<tr>
+<td>Soar cue rarity / negative cues</td>
+<td>comparison</td>
+<td>target</td>
+<td style="text-align: right;">0.756858</td>
+<td style="text-align: right;">0.911577</td>
+<td style="text-align: right;">0.944945</td>
+<td style="text-align: right;">0.761694</td>
+</tr>
+<tr>
+<td>ONA usefulness rank</td>
+<td>comparison</td>
+<td>target</td>
+<td style="text-align: right;">0.834012</td>
+<td style="text-align: right;">0.951573</td>
+<td style="text-align: right;">1.000000</td>
+<td style="text-align: right;">0.951573</td>
+</tr>
+<tr>
+<td>CLARION evidence lanes</td>
+<td>comparison</td>
+<td>target</td>
+<td style="text-align: right;">0.732446</td>
+<td style="text-align: right;">0.859891</td>
+<td style="text-align: right;">0.766382</td>
+<td style="text-align: right;">0.342163</td>
+</tr>
+<tr>
+<td>Sigma factor fusion</td>
+<td>comparison</td>
+<td>target</td>
+<td style="text-align: right;">0.916532</td>
+<td style="text-align: right;">0.928370</td>
+<td style="text-align: right;">0.836923</td>
+<td style="text-align: right;">0.572766</td>
+</tr>
+</tbody>
+</table>
+
+All six probes passed (`summary=6/6 passed`), and the focused unit tests
+covered the helper functions. The result is intentionally weaker than
+production promotion: these mechanisms are kept as gated candidate
+primitives, not wired into production ranking.
+
+The Soar cue-rarity probe received a stricter follow-up because the
+first additive score saturated the target on the synthetic fixture and
+did not prove value on Julie-derived text. The retained prototype is a
+bounded product form, `CueRarityProductScore`, which keeps semantic
+similarity as the carrier signal, multiplies in rare positive cue
+support, gates by candidate specificity, and subtracts bounded
+negative-cue evidence. The tracked follow-up benchmark is:
+
+``` bash
+./build/examples/benchmark/cortext_soar_cue_rarity_julie_bench \
+  --models=/Users/gabrielwillen/VSCode/cortext/models \
+  --transcript="/Users/gabrielwillen/VSCode/cortext/build/julie_mixed_media_week_2025_03_20_input/Messages - Julie Willen.txt"
+```
+
+It parsed 520 Julie messages, generated 24 held-out-style rare-cue
+trials, and evaluated three folds with the real `AIST-87M-GGUF` encoder.
+Raw encoder cosine was the baseline:
+
+<table>
+<thead>
+<tr>
+<th>metric</th>
+<th style="text-align: right;">baseline</th>
+<th style="text-align: right;">Soar product</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>pair accuracy</td>
+<td style="text-align: right;">0.208333</td>
+<td style="text-align: right;">0.791667</td>
+</tr>
+<tr>
+<td>MRR</td>
+<td style="text-align: right;">0.188959</td>
+<td style="text-align: right;">0.829440</td>
+</tr>
+<tr>
+<td>hit@10</td>
+<td style="text-align: right;">0.250000</td>
+<td style="text-align: right;">0.958333</td>
+</tr>
+<tr>
+<td>mean rank</td>
+<td style="text-align: right;">173.583333</td>
+<td style="text-align: right;">4.500000</td>
+</tr>
+<tr>
+<td>mean margin</td>
+<td style="text-align: right;">-0.061604</td>
+<td style="text-align: right;">0.035554</td>
+</tr>
+</tbody>
+</table>
+
+The benchmark exits successfully only when pair accuracy, MRR, and
+hit@10 each improve by at least `0.20`; this run cleared all three. The
+verdict is therefore to keep the Soar product primitive for a
+production-wiring experiment. It is not promoted directly into
+production ranking by this branch. The next promotion gate must attach
+one candidate at a time to an existing ranking or admission surface and
+rerun corpus or long-horizon harnesses to check that the local gain is
+not dead weight or a regression source.
 
 To quantify consolidation utility, we also track:
 
@@ -41948,8 +42138,14 @@ evidence packet for `constructive_recall_summary` consumers. The packet
 stores member rank, memory id, embedding id, normalized weight, score,
 and activation ledger, and the constructive-recall ledger receives an
 `evidence_blend` reconstruction for the packet anchor when constructive
-recall is enabled. Evidence packets are exported in replay/debug JSON
-and telemetry as packet/member counts, but they do not replace the
+recall is enabled. A sixth, opt-in phase gates evidence-weighted
+confidence behind `CORTEXT_ENABLE_EVIDENCE_CONFIDENCE=1`: linked fact
+evidence is projected into bounded support/conflict/source-diversity
+estimates, packet members carry those annotations, and
+constructive-recall source confidence can use the packet confidence
+without changing candidate rank or packet membership. Evidence packets
+are exported in replay/debug JSON and telemetry as packet/member counts
+and confidence/weight/contradiction means, but they do not replace the
 primary ranker and do not add candidates to the retrieved-memory list.
 With all ACT-R behavior flags unset, the new behavior terms remain zero
 except for pre-existing fact stale penalties, evidence packets remain

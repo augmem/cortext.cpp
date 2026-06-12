@@ -2932,21 +2932,65 @@ public:
     return false;
   }
 
-  const std::string &
-  BackendName () const
-  {
-    static const std::string none = "not_used";
-    return none;
-  }
+	  const std::string &
+	  BackendName () const
+	  {
+	    static const std::string none = "not_used";
+	    return none;
+	  }
 
-  std::vector<float>
-  Linear (const std::vector<float> &, const std::string &)
-  {
-    throw std::runtime_error ("ggml kernel runtime unavailable");
-  }
+	  bool
+	  UsesFullTextGraph () const
+	  {
+	    return false;
+	  }
 
-  RowMatrix
-  LinearRows (const RowMatrix &, const std::string &)
+	  bool
+	  UsesFullImageGraph () const
+	  {
+	    return false;
+	  }
+
+	  bool
+	  UsesFullAudioGraph () const
+	  {
+	    return false;
+	  }
+
+	  const std::string &
+	  FullTextGraphError () const
+	  {
+	    static const std::string error
+	        = "ggml kernel runtime was not compiled into this build";
+	    return error;
+	  }
+
+	  std::vector<float>
+	  Linear (const std::vector<float> &, const std::string &)
+	  {
+	    throw std::runtime_error ("ggml kernel runtime unavailable");
+	  }
+
+	  std::vector<float>
+	  EncodeTextTokensFullGraph (const std::vector<int> &)
+	  {
+	    throw std::runtime_error ("ggml kernel runtime unavailable");
+	  }
+
+	  std::vector<float>
+	  EncodeImageFullGraph (const std::vector<float> &)
+	  {
+	    throw std::runtime_error ("ggml kernel runtime unavailable");
+	  }
+
+	  std::vector<float>
+	  EncodeAudioFullGraph (const std::vector<float> &)
+	  {
+	    throw std::runtime_error ("ggml kernel runtime unavailable");
+	  }
+
+	  RowMatrix
+	  LinearRows (const RowMatrix &, const std::string &)
   {
     throw std::runtime_error ("ggml kernel runtime unavailable");
   }

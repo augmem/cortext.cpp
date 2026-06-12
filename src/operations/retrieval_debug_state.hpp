@@ -34,6 +34,10 @@ struct RankedCandidate
   double durable_source_boost = 0.0;
   int durable_source_count = 0;
   double temporal_score = 0.0;
+  double evidence_confidence = 0.0;
+  double evidence_weight = 0.0;
+  int evidence_source_diversity = 0;
+  double evidence_contradiction_mass = 0.0;
   ActivationLedger activation;
 };
 
@@ -54,6 +58,10 @@ struct EvidencePacketMember
   double weight = 0.0;
   double score = 0.0;
   ActivationLedger activation;
+  double evidence_confidence = 0.0;
+  double evidence_weight = 0.0;
+  int evidence_source_diversity = 0;
+  double evidence_contradiction_mass = 0.0;
 };
 
 struct EvidencePacket
@@ -65,6 +73,10 @@ struct EvidencePacket
   double temperature = 0.0;
   double score_span = 0.0;
   double activation_total = 0.0;
+  double evidence_confidence = 0.0;
+  double evidence_weight = 0.0;
+  int evidence_source_diversity = 0;
+  double evidence_contradiction_mass = 0.0;
   std::vector<EvidencePacketMember> members;
 };
 
@@ -87,6 +99,7 @@ struct RetrievalSummary
   int rejected_selection_count = 0;
   int evidence_packet_count = 0;
   int evidence_packet_member_count = 0;
+  double evidence_packet_confidence_mean = 0.0;
 };
 
 void ClearLastSelectedEmbeddingOrder ();

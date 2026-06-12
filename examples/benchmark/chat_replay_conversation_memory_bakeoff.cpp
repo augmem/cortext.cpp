@@ -3372,10 +3372,16 @@ RetrievalEvidencePacketJson ()
           nlohmann::json row;
           row["rank"] = member.rank;
           row["embedding_id"] = member.embedding_id;
-          row["memory_id"] = member.memory_id;
-          row["weight"] = member.weight;
-          row["score"] = member.score;
-          row["activation"] = {
+	          row["memory_id"] = member.memory_id;
+	          row["weight"] = member.weight;
+	          row["score"] = member.score;
+	          row["evidence_confidence"] = member.evidence_confidence;
+	          row["evidence_weight"] = member.evidence_weight;
+	          row["evidence_source_diversity"]
+	              = member.evidence_source_diversity;
+	          row["evidence_contradiction_mass"]
+	              = member.evidence_contradiction_mass;
+	          row["activation"] = {
             { "base_level", member.activation.base_level },
             { "spreading_activation",
               member.activation.spreading_activation },
@@ -3395,9 +3401,14 @@ RetrievalEvidencePacketJson ()
       row["reason"] = packet.reason;
       row["tie_margin"] = packet.tie_margin;
       row["temperature"] = packet.temperature;
-      row["score_span"] = packet.score_span;
-      row["activation_total"] = packet.activation_total;
-      row["members"] = std::move (members);
+	      row["score_span"] = packet.score_span;
+	      row["activation_total"] = packet.activation_total;
+	      row["evidence_confidence"] = packet.evidence_confidence;
+	      row["evidence_weight"] = packet.evidence_weight;
+	      row["evidence_source_diversity"] = packet.evidence_source_diversity;
+	      row["evidence_contradiction_mass"]
+	          = packet.evidence_contradiction_mass;
+	      row["members"] = std::move (members);
       out.push_back (std::move (row));
     }
   return out;
@@ -3426,9 +3437,11 @@ RetrievalSummaryJson ()
   out["rejected_candidate_count"] = summary.rejected_candidate_count;
   out["rejected_filter_count"] = summary.rejected_filter_count;
   out["rejected_selection_count"] = summary.rejected_selection_count;
-  out["evidence_packet_count"] = summary.evidence_packet_count;
-  out["evidence_packet_member_count"] = summary.evidence_packet_member_count;
-  return out;
+	  out["evidence_packet_count"] = summary.evidence_packet_count;
+	  out["evidence_packet_member_count"] = summary.evidence_packet_member_count;
+	  out["evidence_packet_confidence_mean"]
+	      = summary.evidence_packet_confidence_mean;
+	  return out;
 }
 
 void
