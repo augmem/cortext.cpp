@@ -355,9 +355,13 @@ OllamaProvider::Generate (const GenerateRequest &request)
     {
       try
         {
-          const std::string payload
-              = HttpPostJson (impl_->host, impl_->port, "/api/chat",
-                              body.dump (), request.params.timeout_ms);
+          // Corpus-derived text can carry invalid UTF-8 bytes; replace them
+          // with U+FFFD instead of throwing mid-run (type_error.316).
+          const std::string payload = HttpPostJson (
+              impl_->host, impl_->port, "/api/chat",
+              body.dump (-1, ' ', false,
+                         nlohmann::json::error_handler_t::replace),
+              request.params.timeout_ms);
           const auto parsed = nlohmann::json::parse (payload);
           GenerateResponse response;
           response.text
