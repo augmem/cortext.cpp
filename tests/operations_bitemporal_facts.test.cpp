@@ -143,6 +143,8 @@ TEST_CASE ("ProcessExtractionResults persists bitemporal facts and fact cache",
 TEST_CASE ("Duplicate fact assertions merge and accumulate evidence",
            "[operations][facts]")
 {
+  cortext::testing::ScopedEnvVar clear_evidence_confidence (
+      "CORTEXT_ENABLE_EVIDENCE_CONFIDENCE");
   auto unique_store = SQLiteStore::Create (":memory:");
   auto store = std::shared_ptr<Store> (std::move (unique_store));
   cortext::testing::InitializeCoreSchema (*store);
@@ -186,7 +188,98 @@ TEST_CASE ("Duplicate fact assertions merge and accumulate evidence",
   query.timestamp = 5000ULL;
   const auto facts = cortext::store::QueryFacts (*tx, query);
   REQUIRE (facts.size () == 1);
+	  REQUIRE (facts[0].evidence_count == 2);
+}
+
+TEST_CASE ("Evidence confidence revises fact confidence for independent evidence",
+           "[operations][facts][evidence-confidence]")
+{
+  cortext::testing::ScopedEnvVar enable_evidence_confidence (
+      "CORTEXT_ENABLE_EVIDENCE_CONFIDENCE", "1");
+  auto unique_store = SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<Store> (std::move (unique_store));
+  cortext::testing::InitializeCoreSchema (*store);
+
+  SeedSummary (*store, 10LL, 20LL, "summary-1", 1000LL);
+  SeedSummary (*store, 11LL, 21LL, "summary-2", 2000LL);
+
+  ProcessorContext pctx;
+  FixedEncoder encoder;
+
+  operations::ExtractionResult first;
+  first.summary_id = "summary-1";
+  first.facts.push_back (
+      { "Alice", "works_at", "Acme", 0.6, std::nullopt, std::nullopt });
+  pctx.pending_extraction_results.push_back (std::move (first));
+  RunExtraction (*store, pctx, encoder, 3000ULL);
+
+  operations::ExtractionResult second;
+  second.summary_id = "summary-2";
+  second.facts.push_back (
+      { "Alice", "works_at", "Acme", 0.6, std::nullopt, std::nullopt });
+  pctx.pending_extraction_results.push_back (std::move (second));
+  RunExtraction (*store, pctx, encoder, 4000ULL);
+
+  auto rows = store->Execute (
+      "SELECT confidence FROM fact_assertions "
+      "WHERE canonical_subject = 'alice' AND canonical_predicate = 'works_at' "
+      "  AND canonical_object = 'acme'",
+      {});
+  REQUIRE (rows.size () == 1);
+  REQUIRE (cortext::testing::GetDouble (rows[0], "confidence") > 0.6);
+
+  auto tx = store->Begin ();
+  cortext::store::FactQuery query;
+  query.mode = cortext::store::FactQueryMode::Current;
+  query.canonical_subject = "alice";
+  query.canonical_predicate = "works_at";
+  query.timestamp = 5000ULL;
+  const auto facts = cortext::store::QueryFacts (*tx, query);
+  REQUIRE (facts.size () == 1);
   REQUIRE (facts[0].evidence_count == 2);
+}
+
+TEST_CASE ("Evidence confidence ignores duplicate fact evidence stamps",
+           "[operations][facts][evidence-confidence]")
+{
+  cortext::testing::ScopedEnvVar enable_evidence_confidence (
+      "CORTEXT_ENABLE_EVIDENCE_CONFIDENCE", "1");
+  auto unique_store = SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<Store> (std::move (unique_store));
+  cortext::testing::InitializeCoreSchema (*store);
+
+  SeedSummary (*store, 10LL, 20LL, "summary-1", 1000LL);
+
+  ProcessorContext pctx;
+  FixedEncoder encoder;
+
+  operations::ExtractionResult first;
+  first.summary_id = "summary-1";
+  first.facts.push_back (
+      { "Alice", "works_at", "Acme", 0.6, std::nullopt, std::nullopt });
+  pctx.pending_extraction_results.push_back (std::move (first));
+  RunExtraction (*store, pctx, encoder, 3000ULL);
+
+  operations::ExtractionResult duplicate;
+  duplicate.summary_id = "summary-1";
+  duplicate.facts.push_back (
+      { "Alice", "works_at", "Acme", 0.6, std::nullopt, std::nullopt });
+  pctx.pending_extraction_results.push_back (std::move (duplicate));
+  RunExtraction (*store, pctx, encoder, 4000ULL);
+
+  auto rows = store->Execute (
+      "SELECT confidence FROM fact_assertions "
+      "WHERE canonical_subject = 'alice' AND canonical_predicate = 'works_at' "
+      "  AND canonical_object = 'acme'",
+      {});
+  REQUIRE (rows.size () == 1);
+  REQUIRE (cortext::testing::GetDouble (rows[0], "confidence")
+           == Catch::Approx (0.6));
+
+  auto evidence_rows = store->Execute (
+      "SELECT COUNT(*) AS c FROM fact_evidence",
+      {});
+  REQUIRE (cortext::testing::GetInt64 (evidence_rows[0], "c") == 1LL);
 }
 
 TEST_CASE ("Bitemporal queries distinguish valid time from known time",

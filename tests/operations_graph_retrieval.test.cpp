@@ -74,6 +74,47 @@ ToFloatVec (const Eigen::VectorXf &v)
   return std::vector<float> (v.data (), v.data () + v.size ());
 }
 
+static void
+SeedFactEvidencePacket (Store &store, long long fact_id, long long embedding_id,
+                        const Eigen::VectorXf &embedding,
+                        const std::vector<long long> &source_memory_ids,
+                        double confidence, long long ts)
+{
+  cortext::testing::SeedEmbeddingV2 (store, embedding_id, embedding, ts);
+  store.Execute (
+      "INSERT INTO fact_assertions("
+      "fact_id, subject, predicate, object, canonical_subject, "
+      "canonical_predicate, canonical_object, valid_start_ts, recorded_at_ts, "
+      "confidence, summary_memory_id, created_at, support_mass, "
+      "source_diversity, contradiction_mass, confirmation_count, "
+      "compressed_support_count, last_confirmation_ts, lifecycle_state) "
+      "VALUES(?, 'Nadia', 'owns', 'cobalt rollback', 'nadia', 'owns', "
+      "'cobalt rollback', ?, ?, ?, ?, ?, 0.92, ?, 0.0, ?, ?, ?, 'active')",
+      { fact_id,
+        ts,
+        ts,
+        confidence,
+        source_memory_ids.empty () ? 0LL : source_memory_ids.front (),
+        ts,
+        static_cast<long long> (source_memory_ids.size ()),
+        static_cast<long long> (source_memory_ids.size ()),
+        static_cast<long long> (source_memory_ids.size ()),
+        ts });
+  store.Execute (
+      "INSERT INTO fact_cache(fact_id, embedding_id, fact_text, is_current, "
+      "valid_start_ts, recorded_at_ts, updated_at) "
+      "VALUES(?, ?, 'Nadia owns cobalt rollback', 1, ?, ?, ?)",
+      { fact_id, embedding_id, ts, ts, ts });
+  for (const long long memory_id : source_memory_ids)
+    {
+      store.Execute (
+          "INSERT OR REPLACE INTO fact_evidence("
+          "fact_id, source_memory_id, evidence_type, support_weight) "
+          "VALUES(?, ?, 'episodic', 1.0)",
+          { fact_id, memory_id });
+    }
+}
+
 static Signal
 MakeSignal (const Eigen::VectorXf &emb, uint64_t ts)
 {
@@ -863,8 +904,132 @@ TEST_CASE ("Evidence blending packets are feature flagged and rank preserving",
       "SELECT COUNT(*) AS cnt FROM memory_reconstructions "
       "WHERE memory_id = ? AND trigger = 'evidence_blend'",
       { 10LL });
-  REQUIRE (store::AnyToLongLong (after_rows[0].at ("cnt")).value_or (-1)
-           == 1);
+	  REQUIRE (store::AnyToLongLong (after_rows[0].at ("cnt")).value_or (-1)
+	           == 1);
+}
+
+TEST_CASE ("Evidence confidence annotates packets without changing rank",
+           "[operations][graph][evidence-confidence]")
+{
+  constexpr long long kNow = 150'000LL;
+  const Eigen::VectorXf query = UnitVec256 (1.0f);
+  const Eigen::VectorXf near_tie
+      = BlendVec256 (0.995f, std::sqrt (1.0f - 0.995f * 0.995f));
+  const Eigen::VectorXf far_control = UnitVec256Second (1.0f);
+
+  auto make_store = [&] {
+    auto unique_store = SQLiteStore::Create (":memory:");
+    auto store = std::shared_ptr<Store> (std::move (unique_store));
+    cortext::testing::InitializeCoreSchema (*store);
+    cortext::testing::SeedEmbeddingV2 (*store, 10LL, query, 1);
+    cortext::testing::SeedMemoryV2 (*store, 10LL, 10LL, "test", "LONG_TERM",
+                                    1.0, 1);
+    cortext::testing::SeedEmbeddingV2 (*store, 20LL, near_tie, 1);
+    cortext::testing::SeedMemoryV2 (*store, 20LL, 20LL, "test", "LONG_TERM",
+                                    1.0, 1);
+    cortext::testing::SeedEmbeddingV2 (*store, 30LL, far_control, 1);
+    cortext::testing::SeedMemoryV2 (*store, 30LL, 30LL, "test", "LONG_TERM",
+                                    1.0, 1);
+    store->Execute (
+        "UPDATE memories SET source_reliability = 0.30 "
+        "WHERE memory_id IN (10, 20)",
+        {});
+    SeedFactEvidencePacket (*store, 900LL, 901LL, query, { 10LL, 20LL },
+                            0.92, 10LL);
+    return store;
+  };
+
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  cfg.focus = 0.5;
+  cfg.sensitivity = 0.5;
+  cfg.stability = 0.5;
+
+  cortext::testing::ScopedEnvVar disable_source_seed_expansion (
+      "CORTEXT_DISABLE_SOURCE_SEED_GRAPH_EXPANSION", "1");
+  cortext::testing::ScopedEnvVar disable_source_conf (
+      "CORTEXT_DISABLE_SOURCE_CONF", "1");
+  cortext::testing::ScopedEnvVar disable_temporal (
+      "CORTEXT_DISABLE_TEMPORAL_RETRIEVAL", "1");
+  cortext::testing::ScopedEnvVar clear_recent_inhibition (
+      "CORTEXT_ENABLE_RECENT_RETRIEVAL_INHIBITION");
+  cortext::testing::ScopedEnvVar clear_base_level (
+      "CORTEXT_ENABLE_BASE_LEVEL_AVAILABILITY");
+  cortext::testing::ScopedEnvVar clear_partial (
+      "CORTEXT_ENABLE_PARTIAL_MATCHING_PENALTY");
+  cortext::testing::ScopedEnvVar enable_blending (
+      "CORTEXT_ENABLE_EVIDENCE_BLENDING", "1");
+  cortext::testing::ScopedEnvVar enable_constructive_recall (
+      "CORTEXT_DISABLE_CONSTRUCTIVE_RECALL");
+
+  struct Run
+  {
+    std::vector<cortext::operations::retrieval_debug::RankedCandidate> ranked;
+    std::vector<cortext::operations::retrieval_debug::EvidencePacket> packets;
+    double reconstruction_source_confidence = 0.0;
+  };
+
+  auto run = [&] (const std::shared_ptr<Store> &store,
+                  bool enable_evidence_confidence) {
+    cortext::operations::retrieval_debug::ClearLastRankedCandidates ();
+    cortext::operations::retrieval_debug::ClearLastEvidencePackets ();
+    std::optional<cortext::testing::ScopedEnvVar> guard;
+    if (enable_evidence_confidence)
+      {
+        guard.emplace ("CORTEXT_ENABLE_EVIDENCE_CONFIDENCE", "1");
+      }
+    else
+      {
+        guard.emplace ("CORTEXT_ENABLE_EVIDENCE_CONFIDENCE");
+      }
+
+    auto ops = std::make_unique<DynamicOperationSet> (
+        std::make_unique<ForceRetrievalGateOp> (),
+        std::make_unique<GraphAugmentedRetrieveCandidates> ());
+    SignalProcessor processor (cfg, store, std::move (ops));
+    processor.Process (MakeSignal (query, static_cast<std::uint64_t> (kNow)));
+    processor.Flush ();
+
+    Run result;
+    result.ranked
+        = cortext::operations::retrieval_debug::GetLastRankedCandidates ();
+    result.packets
+        = cortext::operations::retrieval_debug::GetLastEvidencePackets ();
+    auto rows = store->Execute (
+        "SELECT source_confidence FROM memory_reconstructions "
+        "WHERE memory_id = 10 AND trigger = 'evidence_blend' "
+        "ORDER BY reconstruction_id DESC LIMIT 1",
+        {});
+    REQUIRE (rows.size () == 1);
+    result.reconstruction_source_confidence
+        = cortext::testing::GetDouble (rows[0], "source_confidence");
+    return result;
+  };
+
+  auto off_store = make_store ();
+  const Run off = run (off_store, false);
+  auto on_store = make_store ();
+  const Run on = run (on_store, true);
+
+  REQUIRE (off.ranked.size () >= 2);
+  REQUIRE (on.ranked.size () >= 2);
+  REQUIRE (off.ranked[0].memory_id == on.ranked[0].memory_id);
+  REQUIRE (off.ranked[1].memory_id == on.ranked[1].memory_id);
+  REQUIRE (off.ranked[0].score == Catch::Approx (on.ranked[0].score));
+  REQUIRE (off.ranked[1].score == Catch::Approx (on.ranked[1].score));
+
+  REQUIRE (off.packets.size () == 1);
+  REQUIRE (on.packets.size () == 1);
+  REQUIRE (off.packets.front ().evidence_confidence == Catch::Approx (0.0));
+  REQUIRE (on.packets.front ().evidence_confidence > 0.60);
+  REQUIRE (on.packets.front ().members[0].evidence_confidence > 0.60);
+  REQUIRE (on.packets.front ().evidence_source_diversity >= 2);
+  REQUIRE (on.reconstruction_source_confidence
+           > off.reconstruction_source_confidence + 0.20);
+
+  const auto summary
+      = cortext::operations::retrieval_debug::GetLastRetrievalSummary ();
+  REQUIRE (summary.evidence_packet_confidence_mean > 0.60);
 }
 
 TEST_CASE ("Recent retrieval inhibition uses feedback-populated last access",

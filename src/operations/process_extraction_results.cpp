@@ -2,6 +2,7 @@
 #include "cortext/operations/process_extraction_results.hpp"
 
 #include "../store/facts.hpp"
+#include "evidence_confidence.hpp"
 #include "cortext/store/store.hpp"
 #include "cortext/core/algorithms.hpp"
 #include "cortext/core/knobs.hpp"
@@ -17,11 +18,14 @@
 #include <algorithm>
 #include <any>
 #include <cstdlib>
+#include <map>
 #include <optional>
+#include <set>
 #include <cstring>
 #include <nlohmann/json.hpp>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 #include <Eigen/Dense>
 
@@ -412,6 +416,27 @@ ExtractDoubleField (const std::map<std::string, std::any> &row,
 }
 
 std::string
+ExtractStringField (const std::map<std::string, std::any> &row,
+                    const char *field)
+{
+  auto it = row.find (field);
+  if (it == row.end () || !it->second.has_value ())
+    {
+      return {};
+    }
+  if (it->second.type () == typeid (std::string))
+    {
+      return std::any_cast<std::string> (it->second);
+    }
+  if (it->second.type () == typeid (const char *))
+    {
+      const char *value = std::any_cast<const char *> (it->second);
+      return value ? std::string (value) : std::string ();
+    }
+  return {};
+}
+
+std::string
 CanonicalEvidenceText (const std::string &text)
 {
   std::string out;
@@ -596,6 +621,57 @@ EnvBool (const char *name, bool fallback = false)
                     return static_cast<char> (std::tolower (c));
                   });
   return text == "1" || text == "true" || text == "yes" || text == "on";
+}
+
+evidence::RevisionOptions
+EvidenceConfidenceOptions (double focus, double sensitivity, double stability)
+{
+  return evidence::OptionsForKnobs (focus, sensitivity, stability);
+}
+
+std::vector<evidence::EvidenceStamp>
+BuildFactEvidenceStamps (const std::vector<long long> &evidence_memory_ids)
+{
+  std::vector<evidence::EvidenceStamp> stamps;
+  stamps.reserve (evidence_memory_ids.size ());
+  for (size_t i = 0; i < evidence_memory_ids.size (); ++i)
+    {
+      const long long evidence_memory_id = evidence_memory_ids[i];
+      if (evidence_memory_id <= 0)
+        {
+          continue;
+        }
+      stamps.push_back (
+          { evidence_memory_id, i == 0 ? "summary" : "episodic" });
+    }
+  return stamps;
+}
+
+std::vector<evidence::EvidenceStamp>
+LoadFactEvidenceStamps (Transaction &tx, long long fact_id)
+{
+  std::vector<evidence::EvidenceStamp> stamps;
+  if (fact_id <= 0)
+    {
+      return stamps;
+    }
+  auto rows = tx.Execute (
+      "SELECT source_memory_id, evidence_type FROM fact_evidence "
+      "WHERE fact_id = ?",
+      { fact_id });
+  stamps.reserve (rows.size ());
+  for (const auto &row : rows)
+    {
+      const long long source_memory_id
+          = ExtractInt64Field (row, "source_memory_id");
+      if (source_memory_id <= 0)
+        {
+          continue;
+        }
+      stamps.push_back (
+          { source_memory_id, ExtractStringField (row, "evidence_type") });
+    }
+  return stamps;
 }
 
 bool
@@ -3308,8 +3384,8 @@ ProcessExtractionResults::Execute (OperationContext &context, Transaction &tx) c
                 {
                   facts_to_process.push_back (std::move (*event_fact));
                 }
-            }
-        }
+	            }
+	        }
 
       // Fact admission is derived, never list-based: a durable assertion
       // needs a subject that references something (not pure closed-class
@@ -3353,6 +3429,11 @@ ProcessExtractionResults::Execute (OperationContext &context, Transaction &tx) c
               telemetry::Attribute::String ("object", object),
               telemetry::Attribute::String ("decision", reason) });
       };
+      const bool evidence_confidence_enabled
+          = EnvBool ("CORTEXT_ENABLE_EVIDENCE_CONFIDENCE");
+      const auto evidence_confidence_options = EvidenceConfidenceOptions (
+          cfg.focus, cfg.sensitivity, cfg.stability);
+
       for (const auto &fact : facts_to_process)
         {
           const std::string canonical_subject
@@ -3409,11 +3490,15 @@ ProcessExtractionResults::Execute (OperationContext &context, Transaction &tx) c
               = fact.valid_end_ts.has_value ()
                     ? OptionalI64 (*fact.valid_end_ts)
                     : std::nullopt;
-          const bool explicit_valid_start = fact.valid_start_ts.has_value ();
-          const bool explicit_valid_end = fact.valid_end_ts.has_value ();
-          const double confidence = core::Clamp (fact.confidence, 0.0, 1.0);
+	          const bool explicit_valid_start = fact.valid_start_ts.has_value ();
+	          const bool explicit_valid_end = fact.valid_end_ts.has_value ();
+	          const double confidence = core::Clamp (fact.confidence, 0.0, 1.0);
+	          const auto incoming_evidence_stamps
+	              = evidence_confidence_enabled
+	                    ? BuildFactEvidenceStamps (evidence_memory_ids)
+	                    : std::vector<evidence::EvidenceStamp> ();
 
-          long long fact_id = 0;
+	          long long fact_id = 0;
           const auto duplicate_rows
               = (!explicit_valid_start && !explicit_valid_end)
                     ? tx.Execute (
@@ -3442,15 +3527,61 @@ ProcessExtractionResults::Execute (OperationContext &context, Transaction &tx) c
                             NullableAny (valid_end_ts),
                             NullableAny (valid_end_ts),
                             static_cast<long long> (result_ts) });
-          if (!duplicate_rows.empty ())
-            {
-              fact_id = ExtractInt64Field (duplicate_rows[0], "fact_id");
-              const double merged_confidence
-                  = std::max (confidence,
-                              ExtractDoubleField (duplicate_rows[0],
-                                                  "confidence", confidence));
-              if (fact_id > 0)
-                {
+	          if (!duplicate_rows.empty ())
+	            {
+	              fact_id = ExtractInt64Field (duplicate_rows[0], "fact_id");
+	              const double existing_confidence
+	                  = ExtractDoubleField (duplicate_rows[0], "confidence",
+	                                        confidence);
+	              double merged_confidence
+	                  = std::max (confidence,
+	                              existing_confidence);
+	              if (evidence_confidence_enabled && fact_id > 0)
+	                {
+	                  const auto existing_evidence_stamps
+	                      = LoadFactEvidenceStamps (tx, fact_id);
+	                  const auto existing_truth = evidence::MakeTruth (
+	                      1.0, existing_confidence, existing_evidence_stamps, 0.0,
+	                      static_cast<long long> (result_ts),
+	                      evidence_confidence_options.horizon);
+	                  const auto incoming_truth = evidence::MakeTruth (
+	                      1.0, confidence, incoming_evidence_stamps, 0.0,
+	                      static_cast<long long> (result_ts),
+	                      evidence_confidence_options.horizon);
+	                  const auto revision = evidence::Revise (
+	                      existing_truth, incoming_truth, false,
+	                      evidence_confidence_options);
+	                  merged_confidence = revision.truth.confidence;
+	                  telemetry::LogDebug (
+	                      "cortext.fact_evidence_confidence",
+	                      { telemetry::Attribute::String (
+	                            "decision",
+	                            evidence::ToString (revision.decision)),
+	                        telemetry::Attribute::Int64 ("fact_id", fact_id),
+	                        telemetry::Attribute::Double (
+	                            "old_confidence",
+	                            revision.old_confidence),
+	                        telemetry::Attribute::Double (
+	                            "incoming_confidence",
+	                            revision.incoming_confidence),
+	                        telemetry::Attribute::Double (
+	                            "revised_confidence",
+	                            revision.revised_confidence),
+	                        telemetry::Attribute::Double (
+	                            "evidence_weight",
+	                            revision.truth.evidence_weight),
+	                        telemetry::Attribute::Int64 (
+	                            "independent_stamps",
+	                            revision.independent_stamp_count),
+	                        telemetry::Attribute::Int64 (
+	                            "overlapping_stamps",
+	                            revision.overlapping_stamp_count),
+	                        telemetry::Attribute::Double (
+	                            "contradiction_mass",
+	                            revision.truth.contradiction_mass) });
+	                }
+	              if (fact_id > 0)
+	                {
                   if (!explicit_valid_start && valid_start_ts.has_value ())
                     {
                       AddWrite (
@@ -3501,16 +3632,50 @@ ProcessExtractionResults::Execute (OperationContext &context, Transaction &tx) c
                     static_cast<long long> (result_ts),
                     NullableAny (valid_start_ts) });
 
-              double strongest_conflicting_confidence = 0.0;
-              for (const auto &row : conflicting_rows)
+	              double strongest_conflicting_confidence = 0.0;
+	              for (const auto &row : conflicting_rows)
                 {
                   strongest_conflicting_confidence = std::max (
                       strongest_conflicting_confidence,
-                      ExtractDoubleField (row, "confidence", 0.0));
-                }
-              const bool accept_conflicting_update
-                  = conflicting_rows.empty ()
-                    || confidence
+	                      ExtractDoubleField (row, "confidence", 0.0));
+	                }
+	              double confidence_for_write = confidence;
+	              if (evidence_confidence_enabled
+	                  && strongest_conflicting_confidence > 0.0)
+	                {
+	                  confidence_for_write
+	                      = evidence::DampenConfidenceForContradiction (
+	                          confidence, strongest_conflicting_confidence,
+	                          evidence_confidence_options);
+	                  telemetry::LogDebug (
+	                      "cortext.fact_evidence_confidence",
+	                      { telemetry::Attribute::String (
+	                            "decision",
+	                            evidence::ToString (
+	                                evidence::RevisionDecision::
+	                                    DampenedConflict)),
+	                        telemetry::Attribute::Int64 ("fact_id", 0),
+	                        telemetry::Attribute::Double ("old_confidence",
+	                                                      0.0),
+	                        telemetry::Attribute::Double (
+	                            "incoming_confidence", confidence),
+	                        telemetry::Attribute::Double (
+	                            "revised_confidence", confidence_for_write),
+	                        telemetry::Attribute::Double ("evidence_weight",
+	                                                      0.0),
+	                        telemetry::Attribute::Int64 (
+	                            "independent_stamps",
+	                            static_cast<int64_t> (
+	                                incoming_evidence_stamps.size ())),
+	                        telemetry::Attribute::Int64 ("overlapping_stamps",
+	                                                     0),
+	                        telemetry::Attribute::Double (
+	                            "contradiction_mass",
+	                            strongest_conflicting_confidence) });
+	                }
+	              const bool accept_conflicting_update
+	                  = conflicting_rows.empty ()
+	                    || confidence
                            >= RequiredSupersessionConfidence (
                                strongest_conflicting_confidence,
                                cfg.sensitivity, cfg.stability);
@@ -3569,7 +3734,7 @@ ProcessExtractionResults::Execute (OperationContext &context, Transaction &tx) c
                                                     : std::any (
                                                           static_cast<long long> (
                                                               result_ts)),
-                          confidence, summary_memory_id,
+	                          confidence_for_write, summary_memory_id,
                           static_cast<long long> (result_ts),
                           0.0,
                           0LL,

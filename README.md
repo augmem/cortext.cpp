@@ -87,7 +87,7 @@ Concretely, the following operations close the loop (see `src/operations/`):
 - `synaptic_tagging`, `metacognitive`, `constructive_recall_internal` - higher-order regulation
 
 <!-- ablation benchmark targets from examples/benchmark/CMakeLists.txt -->
-Ablation benchmarks for the loop live under `examples/benchmark/` (resurfacing pressure, resurfacing horizon, preference update, ACT-R-inspired retrieval gates/evidence packets, and the full operation-family sweeps described below).
+Ablation benchmarks for the loop live under `examples/benchmark/` (resurfacing pressure, resurfacing horizon, preference update, ACT-R-inspired retrieval gates/evidence packets, cognitive-architecture mechanism probes including the Julie Soar cue-rarity check, and the full operation-family sweeps described below).
 
 ## Does The Loop Actually Matter?
 
@@ -96,7 +96,8 @@ Short answer: yes, and I've tried to be honest about where it does and does not.
 A few load-bearing results from [docs/paper/sections/9_experimental.qmd](docs/paper/sections/9_experimental.qmd), all run against a real encoder path rather than synthetic embeddings:
 
 - **Retrieval-reinforcement feedback is controlled, not runaway.** With the fact layer enabled, fact-linked memories accumulate a strength gap of **+0.30** over unlinked memories and take **100%** of top-5 retrieval positions. Disabling the fact layer cleanly **reverses** the gap to **−0.30** and flips top-5 fact fraction to **0.0**. The loop is driven by the fact layer; toggling it inverts the outcome rather than destabilizing it.
-- **Borrowed cognitive heuristics need real-encoder ablations.** `examples/benchmark/cortext_actr_retrieval_ablation_bench` gates the ACT-R-inspired retrieval ideas against AIST-87M q8 embeddings, requiring base-level availability, recent inhibition, procedural utility, and partial matching to move the intended memory from rank 2 to rank 1, while evidence blending must preserve rank/score and emit a normalized near-tie packet.
+- **Borrowed cognitive heuristics need real-encoder ablations.** `examples/benchmark/cortext_actr_retrieval_ablation_bench` gates the ACT-R-inspired retrieval ideas against AIST-87M q8 embeddings, requiring base-level availability, recent inhibition, procedural utility, and partial matching to move the intended memory from rank 2 to rank 1, while evidence blending and evidence-weighted confidence must preserve rank/score and emit useful near-tie packet metadata.
+- **Other cognitive-architecture ideas stay candidate-only until they pass the same bar.** `examples/benchmark/cortext_cognitive_mechanism_ablation_bench` checks OpenCog-style attention ledgers, LIDA packet competition, Soar cue rarity, ONA usefulness, CLARION evidence lanes, and Sigma product-of-experts fusion as isolated gated mechanisms against the real AIST encoder. `examples/benchmark/cortext_soar_cue_rarity_julie_bench` adds a Julie-derived cross-fold check for the Soar cue-rarity product variant before any production wiring.
 - **Exhaustive operation-family ablation.** A deterministic `2^12 = 4096`-combination sweep over the major operation families (`examples/benchmark/cortext_full_operation_ablation_bench`) is used to identify minimal best-disabled sets rather than cherry-picked configurations.
 - **Bitemporal fact handling is required, not decorative.** Ablations on a `3 × 3 × 3` F/S/T sweep confirm that bitemporal history is required for historical and belief-at-time queries, and that stale penalties materially reduce present-oriented intrusion.
 
