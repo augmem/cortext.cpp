@@ -2017,6 +2017,28 @@ def main() -> int:
             full_docs = text_only_docs(
                 [doc for doc in timeline if doc.index < event_index]
             )
+            # A real session that outgrows its context window loses its
+            # OLDEST messages; emulate that here so the judge prompt always
+            # fits and a blown-out full-history arm degrades by falloff
+            # instead of corrupting the judge prompt via server-side
+            # truncation. Reserve room for instructions and the other
+            # systems' packets.
+            full_history_budget_tokens = max(
+                8192, args.judge_context_window_tokens - 24576
+            )
+            kept_docs: list = []
+            kept_tokens = 0
+            for doc in reversed(full_docs):
+                doc_tokens = estimate_tokens(doc.text or "")
+                if kept_tokens + doc_tokens > full_history_budget_tokens:
+                    break
+                kept_docs.append(doc)
+                kept_tokens += doc_tokens
+            if len(kept_docs) < len(full_docs):
+                fairness_checks["full_history_oldest_messages_dropped"] += len(
+                    full_docs
+                ) - len(kept_docs)
+            full_docs = list(reversed(kept_docs))
             rag_context_tokens = int(
                 probe.get(
                     "normal_rag_context_tokens",
