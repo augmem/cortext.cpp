@@ -39,6 +39,9 @@ CORTEXT_RELEASE_ENV_ALLOWLIST = {
     "CORTEXT_OLLAMA_BASE_URL",
     # Observability only: per-summary label/fact admission counters.
     "CORTEXT_STM_LTM_AUDIT",
+    # WM capacity selected by the v7 capacity sweep; passed explicitly so
+    # stress runs execute at the validated operating point.
+    "CORTEXT_WM_CAPACITY_OVERRIDE",
 }
 LOCAL_PROVIDER_ENV_PREFIXES = ("OLLAMA_",)
 HOSTED_PROVIDER_ENV_MARKERS = (
