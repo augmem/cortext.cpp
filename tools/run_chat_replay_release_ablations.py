@@ -485,6 +485,8 @@ def build_early_judge_command(
         str(args.early_judge_timeout_s),
         "--judge-context-window-tokens",
         str(args.early_judge_context_window_tokens),
+        "--judge-max-output-tokens",
+        str(args.early_judge_max_output_tokens),
         "--context-limit",
         str(args.early_judge_packet_item_limit),
         "--quality-gate-min-milestone",
@@ -679,6 +681,7 @@ def main() -> int:
     parser.add_argument("--early-judge-bootstrap-samples", type=int, default=200)
     parser.add_argument("--early-judge-timeout-s", type=int, default=180)
     parser.add_argument("--early-judge-context-window-tokens", type=int, default=32768)
+    parser.add_argument("--early-judge-max-output-tokens", type=int, default=1300)
     parser.add_argument("--early-judge-packet-item-limit", type=int, default=256)
     parser.add_argument("--judge-packet-item-limit", type=int, default=-1)
     parser.add_argument("--early-quality-gate-min-milestone", type=int, default=8)
