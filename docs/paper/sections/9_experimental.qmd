@@ -24,6 +24,89 @@ At the time of the historical topical-chat runs, deep consolidation summarizatio
 
 For reproducibility, the analysis runner supports **deterministic synthetic timing** (`--deterministic`, `--seed`), which removes wall‑clock variance while preserving cadence‑derived timing for boundary and interrupt gating. Snapshot configs record the seed and synthetic clock parameters.
 
+## Chat-Replay Release Protocol on a Real Personal Corpus (June 11-12, 2026)
+
+This is the first end-to-end evaluation of the full Cortext stack on a real
+personal corpus: a 1,200-message slice of a multi-year text-message history
+with attached media, replayed live through the production engine with
+AIST-87M embeddings on CPU and Gemma 4 E2B extraction and summarization on
+a local Ollama provider. The protocol judges three systems on identical
+probe questions with blinded packets: Cortext (working memory plus
+associative retrieval), a traditional chat-RAG arm with an 8,000-token
+rolling history budget and compaction, and a full-history upper bound. The
+judge is gemma4:12b-it-qat, three repetitions per probe with bootstrap
+confidence intervals, and a streaming fail-fast judge that kills a run
+whose quality trend collapses.
+
+The baseline replicated across three independent runs on identical probes
+before we trusted it. The release-judge result for the final baseline:
+
+| metric | Cortext | RAG | full history |
+|---|---:|---:|---:|
+| wins (108 judged rows) | 40 | 18 | 33 |
+| mean context tokens | 290 | 5,931 | 10,918 max |
+
+Cortext wins 69 percent of decided matchups against RAG at one twentieth
+of the token budget. Ties account for the remainder. The loss mode is
+singular: every RAG win is judged `rag_context_advantage`, a
+chronological-continuity question answered better by a long recency
+window. There was exactly one `insufficient_context` loss in 108 rows.
+Retrieval is not the weakness; recency window length is.
+
+### A Falsified Fix: Working-Memory Partitioning
+
+We first attacked the loss mode with a structural change: partitioning
+working memory into a guaranteed-recency FIFO ring plus an associative
+slice. The protocol falsified it decisively. The associative slice
+admitted the same newest memories the ring already held, deduplication
+dropped the copies, and the effective window shrank from seven distinct
+turns to four. Early wins fell from 5/8 to 2/8 on identical probes, and
+the fail-fast judge killed the run at milestone 28 with a quality delta of
+-1.6 to -2.0 against RAG (the healthy baseline sits at +0.8). The loss
+audit then showed the premise was wrong: in all fifteen chronology losses
+the working memory was full and the immediately preceding turns were
+present. The old working memory was already a reliable natural recency
+buffer. The deficit was width, not a missing guarantee. We reverted the
+partition and turned the question into a measured one.
+
+### Working-Memory Capacity Curve
+
+Capacity is overridable per ablation arm, with per-slot maintenance cost
+normalized so a full working memory costs the same total regardless of
+capacity; gate strictness is therefore capacity-invariant and the arms
+measure window value alone. Arms are single-repetition live-judge screens
+against the three-repetition baseline.
+
+| capacity | wins | sufficiency | mean tokens | savings vs RAG |
+|---:|---:|---:|---:|---:|
+| 7 (baseline) | 22/39 (56%) | 3.40 | 290 | 95% |
+| 10 | 21/37 (57%) | 3.54 | 324 | 95% |
+| 14 | 22/37 (59%) | 3.68 | 350 | 94% |
+| 21 | 21/37 (57%) | 4.00 | 456 | 91% |
+
+Win rate stays inside a 56-59 percent band, within single-repetition
+judge variance. Sufficiency, the judge's was-there-enough-context score
+and the metric a wider window should move, climbs strictly and is still
+climbing at capacity 21. The capacity search continues by doubling until
+sufficiency drops or token savings fall below 50 percent; the savings
+floor sits near capacity 200 at the observed growth of roughly 11 tokens
+per slot, so quality saturation will bind first. The remaining mechanism
+ablations will run at the winning capacity.
+
+### Horizon Caveat for Consolidation-Family Ablations
+
+A short replay cannot fairly judge the consolidation family. On 1,200
+messages, retrieval can serve most probes from raw recent memories, so
+ablating daily consolidation moves the judge little (50% wins, 3.46
+sufficiency, mildly below baseline). Consolidation exists to keep
+month-old content reachable; its verdict comes from long-horizon stress
+runs. A context-blowout run is queued: 18,000 messages, where full
+history must drop its oldest messages, the chat-RAG arm compacts, a
+fourth simulated arm summarizes itself at 80 percent of a 48k budget, and
+Cortext retrieves from the memory graph. Roughly 70 percent of its probes
+sit past the point where every windowed strategy has lost the early
+conversation.
+
 ## ACT-R-Inspired Retrieval Gate Ablations
 
 On **June 11, 2026**, we added a focused real-encoder ablation target for the ACT-R-inspired retrieval ideas: `examples/benchmark/cortext_actr_retrieval_ablation_bench`. This benchmark does not import ACT-R's production-rule architecture. It tests four transplanted scoring ideas in the existing Cortext retrieval pipeline: base-level availability, recent retrieval inhibition, procedural utility, and partial matching over existing metadata. It also tests downstream evidence blending as a rank-preserving packet-generation step for near-tied selected candidates. The harness encodes all query and memory text through the production AIST path, truncates to the same 256-dimensional Matryoshka retrieval view used by the SQLite vector schema, and then runs each study with the relevant gate off and on. The validation run used:
