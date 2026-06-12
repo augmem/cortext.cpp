@@ -981,7 +981,10 @@ char *
 context_result_to_json (const cortext::Cortext::Context &ctx)
 {
   clear_last_error ();
-  return copy_string_result (context_to_json (ctx).dump ());
+  // Memory text can carry invalid UTF-8 from raw sources; replace with
+  // U+FFFD rather than throwing across the C boundary.
+  return copy_string_result (context_to_json (ctx).dump (
+      -1, ' ', false, nlohmann::json::error_handler_t::replace));
 }
 
 cortext::ConsolidationMode
