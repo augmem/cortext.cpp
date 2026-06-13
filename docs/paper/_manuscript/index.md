@@ -3677,6 +3677,471 @@ wall‑clock variance while preserving cadence‑derived timing for boundary
 and interrupt gating. Snapshot configs record the seed and synthetic
 clock parameters.
 
+## Chat-Replay Release Protocol on a Real Personal Corpus (June 11-13, 2026)
+
+This is the first end-to-end evaluation of the full Cortext stack on a
+real personal corpus: a 1,200-message slice of a multi-year text-message
+history with attached media, replayed live through the production engine
+with AIST-87M embeddings on CPU and Gemma 4 E2B extraction and
+summarization on a local Ollama provider. The protocol judges three
+systems on identical probe questions with blinded packets: Cortext
+(working memory plus associative retrieval), a traditional chat-RAG arm
+with an 8,000-token rolling history budget and compaction, and a
+full-history upper bound. The judge is gemma4:12b-it-qat, three
+repetitions per probe with bootstrap confidence intervals, and a
+streaming fail-fast judge that kills a run whose quality trend
+collapses.
+
+The baseline replicated across three independent runs on identical
+probes before we trusted it. The release-judge result for the final
+baseline:
+
+<table>
+<thead>
+<tr>
+<th>metric</th>
+<th style="text-align: right;">Cortext</th>
+<th style="text-align: right;">RAG</th>
+<th style="text-align: right;">full history</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>wins (108 judged rows)</td>
+<td style="text-align: right;">40</td>
+<td style="text-align: right;">18</td>
+<td style="text-align: right;">33</td>
+</tr>
+<tr>
+<td>mean context tokens</td>
+<td style="text-align: right;">290</td>
+<td style="text-align: right;">5,931</td>
+<td style="text-align: right;">10,918 max</td>
+</tr>
+</tbody>
+</table>
+
+Cortext wins 69 percent of decided matchups against RAG at one twentieth
+of the token budget. Ties account for the remainder. The loss mode is
+singular: every RAG win is judged `rag_context_advantage`, a
+chronological-continuity question answered better by a long recency
+window. There was exactly one `insufficient_context` loss in 108 rows.
+Retrieval is not the weakness; recency window length is.
+
+### A Falsified Fix: Working-Memory Partitioning
+
+We first attacked the loss mode with a structural change: partitioning
+working memory into a guaranteed-recency FIFO ring plus an associative
+slice. The protocol falsified it decisively. The associative slice
+admitted the same newest memories the ring already held, deduplication
+dropped the copies, and the effective window shrank from seven distinct
+turns to four. Early wins fell from 5/8 to 2/8 on identical probes, and
+the fail-fast judge killed the run at milestone 28 with a quality delta
+of -1.6 to -2.0 against RAG (the healthy baseline sits at +0.8). The
+loss audit then showed the premise was wrong: in all fifteen chronology
+losses the working memory was full and the immediately preceding turns
+were present. The old working memory was already a reliable natural
+recency buffer. The deficit was width, not a missing guarantee. We
+reverted the partition and turned the question into a measured one.
+
+### Working-Memory Capacity Curve
+
+Capacity is overridable per ablation arm, with per-slot maintenance cost
+normalized so a full working memory costs the same total regardless of
+capacity; gate strictness is therefore capacity-invariant and the arms
+measure window value alone. Arms are single-repetition live-judge
+screens against the three-repetition baseline.
+
+<table>
+<thead>
+<tr>
+<th style="text-align: right;">capacity</th>
+<th style="text-align: right;">wins</th>
+<th style="text-align: right;">sufficiency</th>
+<th style="text-align: right;">mean tokens</th>
+<th style="text-align: right;">savings vs RAG</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: right;">7 (baseline)</td>
+<td style="text-align: right;">22/39 (56%)</td>
+<td style="text-align: right;">3.40</td>
+<td style="text-align: right;">290</td>
+<td style="text-align: right;">95%</td>
+</tr>
+<tr>
+<td style="text-align: right;">10</td>
+<td style="text-align: right;">22/39 (56%)</td>
+<td style="text-align: right;">3.51</td>
+<td style="text-align: right;">331</td>
+<td style="text-align: right;">95%</td>
+</tr>
+<tr>
+<td style="text-align: right;">14</td>
+<td style="text-align: right;">23/39 (59%)</td>
+<td style="text-align: right;">3.64</td>
+<td style="text-align: right;">377</td>
+<td style="text-align: right;">94%</td>
+</tr>
+<tr>
+<td style="text-align: right;">21</td>
+<td style="text-align: right;">22/39 (56%)</td>
+<td style="text-align: right;">3.95</td>
+<td style="text-align: right;">503</td>
+<td style="text-align: right;">92%</td>
+</tr>
+<tr>
+<td style="text-align: right;">42</td>
+<td style="text-align: right;">23/39 (59%)</td>
+<td style="text-align: right;">3.82</td>
+<td style="text-align: right;">758</td>
+<td style="text-align: right;">88%</td>
+</tr>
+</tbody>
+</table>
+
+Win rate stays inside a 56-59 percent band, within single-repetition
+judge variance. Sufficiency, the judge’s was-there-enough-context score
+and the metric a wider window should move, climbs strictly through
+capacity 21 and then declines at 42, which pays 1.5 times the context
+tokens for less sufficiency. The curve is unimodal with its peak at 21,
+so the doubling search stops there: capacity 21 is the operating point,
+and the remaining mechanism ablations run at it. A three-repetition
+judge pass over the capacity-21 arm confirms the screen.
+
+### Mechanism Ablations at Capacity 21 (June 12, 2026)
+
+Eighteen single-mechanism arms ran at the winning capacity, each a full
+39-probe live-judge screen against the capacity-21 control (22/39 wins,
+sufficiency 3.95, noise 0.67, 503 packet tokens). Win rate never
+separated any mechanism from control; at this horizon the win column is
+saturated by recency coverage, so mechanism value appears in packet
+quality (sufficiency, noise) and token economy instead.
+
+<table>
+<colgroup>
+<col style="width: 13%" />
+<col style="width: 18%" />
+<col style="width: 18%" />
+<col style="width: 18%" />
+<col style="width: 18%" />
+<col style="width: 13%" />
+</colgroup>
+<thead>
+<tr>
+<th>ablated mechanism</th>
+<th style="text-align: right;">wins</th>
+<th style="text-align: right;">sufficiency</th>
+<th style="text-align: right;">noise</th>
+<th style="text-align: right;">tokens</th>
+<th>reading</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>daily_consolidation</td>
+<td style="text-align: right;">23/39</td>
+<td style="text-align: right;">4.03</td>
+<td style="text-align: right;">0.41</td>
+<td style="text-align: right;">352</td>
+<td>removal mildly positive; defer to long horizon</td>
+</tr>
+<tr>
+<td>graph_expansion</td>
+<td style="text-align: right;">21/39</td>
+<td style="text-align: right;">3.90</td>
+<td style="text-align: right;">0.71</td>
+<td style="text-align: right;">507</td>
+<td>null</td>
+</tr>
+<tr>
+<td>media_source_blobs</td>
+<td style="text-align: right;">21/39</td>
+<td style="text-align: right;">3.77</td>
+<td style="text-align: right;">0.76</td>
+<td style="text-align: right;">198</td>
+<td>real late-corpus cost; 60% of packet weight</td>
+</tr>
+<tr>
+<td>stm_ltm_graph_label_handoff</td>
+<td style="text-align: right;">22/39</td>
+<td style="text-align: right;">3.97</td>
+<td style="text-align: right;">0.68</td>
+<td style="text-align: right;">500</td>
+<td>exact null; defer to long horizon</td>
+</tr>
+<tr>
+<td>temporal_retrieval</td>
+<td style="text-align: right;">22/39</td>
+<td style="text-align: right;">3.74</td>
+<td style="text-align: right;">0.97</td>
+<td style="text-align: right;">543</td>
+<td>largest hygiene loss; keep</td>
+</tr>
+<tr>
+<td>fact_boosts</td>
+<td style="text-align: right;">21/39</td>
+<td style="text-align: right;">3.87</td>
+<td style="text-align: right;">0.59</td>
+<td style="text-align: right;">502</td>
+<td>negligible</td>
+</tr>
+<tr>
+<td>temporal_fact_boosts</td>
+<td style="text-align: right;">22/39</td>
+<td style="text-align: right;">3.74</td>
+<td style="text-align: right;">0.97</td>
+<td style="text-align: right;">543</td>
+<td>identical to temporal alone; no interaction</td>
+</tr>
+<tr>
+<td>predictive_bonus</td>
+<td style="text-align: right;">22/39</td>
+<td style="text-align: right;">3.79</td>
+<td style="text-align: right;">0.86</td>
+<td style="text-align: right;">655</td>
+<td>packet bloat +30%, ties triple; keep</td>
+</tr>
+<tr>
+<td>procedural_proactive</td>
+<td style="text-align: right;">22/39</td>
+<td style="text-align: right;">3.97</td>
+<td style="text-align: right;">0.59</td>
+<td style="text-align: right;">502</td>
+<td>exact null</td>
+</tr>
+<tr>
+<td>metacognitive</td>
+<td style="text-align: right;">24/39</td>
+<td style="text-align: right;">3.85</td>
+<td style="text-align: right;">0.74</td>
+<td style="text-align: right;">473</td>
+<td>removal mildly positive; simplification candidate</td>
+</tr>
+<tr>
+<td>constructive_recall</td>
+<td style="text-align: right;">22/39</td>
+<td style="text-align: right;">3.79</td>
+<td style="text-align: right;">0.74</td>
+<td style="text-align: right;">430</td>
+<td>late-corpus sufficiency cost; weak keep</td>
+</tr>
+<tr>
+<td>stm_shadow</td>
+<td style="text-align: right;">22/39</td>
+<td style="text-align: right;">3.97</td>
+<td style="text-align: right;">0.70</td>
+<td style="text-align: right;">500</td>
+<td>exact null</td>
+</tr>
+</tbody>
+</table>
+
+Two mechanisms earn their place on packet quality per token: temporal
+retrieval (removal costs 0.21 sufficiency and near-doubles noise,
+monotonically across the run) and the predictive bonus (removal costs
+0.16 sufficiency and 30 percent packet bloat). Constructive recall and
+media source blobs show real but late-concentrated contributions.
+Everything else is indistinguishable from control at 1,200 messages; the
+durable-structure family (consolidation, labels, facts, graph) is
+deferred to the long-horizon run by design, and the metacognitive layer
+is the strongest simplification candidate, having no long-horizon story
+to defer to.
+
+### ACT-R Gate Promotion Arms
+
+Six further arms complete the sweep. These invert the ablation logic:
+each enables one of the opt-in ACT-R-derived scoring gates on top of the
+full default stack, so a gate earns promotion to the default
+configuration only by beating the control it would ship into. This
+measures marginal value at the actual operating point rather than
+intrinsic value over a bare stack, which is the quantity a shipping
+decision needs; a gate that helps in isolation but is redundant with the
+existing fact-boost and temporal-retrieval machinery should not ship.
+
+<table>
+<colgroup>
+<col style="width: 13%" />
+<col style="width: 18%" />
+<col style="width: 18%" />
+<col style="width: 18%" />
+<col style="width: 18%" />
+<col style="width: 13%" />
+</colgroup>
+<thead>
+<tr>
+<th>enabled gate</th>
+<th style="text-align: right;">wins</th>
+<th style="text-align: right;">sufficiency</th>
+<th style="text-align: right;">noise</th>
+<th style="text-align: right;">tokens</th>
+<th>reading</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>base_level_availability</td>
+<td style="text-align: right;">22/39</td>
+<td style="text-align: right;">3.82</td>
+<td style="text-align: right;">0.69</td>
+<td style="text-align: right;">521</td>
+<td>null; redundant with recency boosts</td>
+</tr>
+<tr>
+<td>recent_retrieval_inhibition</td>
+<td style="text-align: right;">22/39</td>
+<td style="text-align: right;">4.00</td>
+<td style="text-align: right;">0.64</td>
+<td style="text-align: right;">551</td>
+<td>null at +48 tokens</td>
+</tr>
+<tr>
+<td>partial_matching_penalty</td>
+<td style="text-align: right;">22/39</td>
+<td style="text-align: right;">3.92</td>
+<td style="text-align: right;">0.64</td>
+<td style="text-align: right;">648</td>
+<td>null at +29% packet size</td>
+</tr>
+<tr>
+<td>evidence_blending</td>
+<td style="text-align: right;">23/39</td>
+<td style="text-align: right;">3.97</td>
+<td style="text-align: right;">0.67</td>
+<td style="text-align: right;">465</td>
+<td>null; only token-negative arm</td>
+</tr>
+<tr>
+<td>all_gates</td>
+<td style="text-align: right;">23/39</td>
+<td style="text-align: right;">3.72</td>
+<td style="text-align: right;">0.95</td>
+<td style="text-align: right;">484</td>
+<td>harmful; perturbations compound</td>
+</tr>
+<tr>
+<td>evidence_confidence</td>
+<td style="text-align: right;">22/39</td>
+<td style="text-align: right;">3.97</td>
+<td style="text-align: right;">0.67</td>
+<td style="text-align: right;">503</td>
+<td>exact null; identical to control</td>
+</tr>
+</tbody>
+</table>
+
+No gate earns promotion. Every single-gate arm pins the win column at
+22-23 of 39 with quality deltas inside judge noise; they differ only in
+token cost, from evidence blending (38 tokens cheaper than control) to
+partial matching (145 tokens more, with the near-miss memories it admits
+earning no judge credit). The combined arm answers the synergy question
+in the negative direction: with all four scoring gates active, noise
+rises from 0.67 to 0.95 and sufficiency falls 0.23, the worst quality
+profile in the sweep. The gates’ individual ranking perturbations do not
+reinforce; they compound into junk admission. The gates remain available
+as opt-in flags, and evidence blending’s favorable token economics make
+it the one candidate worth re-testing at long horizon.
+
+### Long-Horizon Context-Blowout Stress Run
+
+The short replay cannot fairly judge the consolidation family in
+isolation: on 1,200 messages, retrieval can serve most probes from raw
+recent memories, so ablating daily consolidation moves the judge little
+(50% wins, 3.46 sufficiency, mildly below baseline). Consolidation
+exists to keep old content reachable, so the release verdict also needs
+a long-horizon stress run. We therefore ran the capacity-21 stack for
+18,000 text messages plus 128 media candidates (126 processed, 2
+failed), with 30 probes at stride 600 and three blinded Gemma 4 12B
+local-judge repetitions per probe. The judge compared four packets:
+Cortext native working-memory plus associative retrieval, traditional
+chat RAG with a 48k active-history budget and deterministic compaction,
+a prior full-history upper bound, and a simulated compacting session
+that summarizes itself near the same budget.
+
+The first uncapped final judge prompt exceeded the local context window,
+so the accepted final artifact caps each packet at 128 memories or
+history items for judge presentation. This cap does not change the
+benchmark replay, retrieval accounting, or token counters. A separate
+audit also found that the frozen probe-time Cortext packets included the
+current turn and short-lookahead rows; the accepted judge rerun filters
+all non-prior Cortext rows before packet construction. The final
+artifact records 82 filtered non-prior rows, 90 / 90 completed
+judgments, zero judge-validation failures, no future-context violations,
+no current-turn inclusions, and prompt-fit success under the
+131,072-token judge window.
+
+<table>
+<colgroup>
+<col style="width: 13%" />
+<col style="width: 17%" />
+<col style="width: 17%" />
+<col style="width: 17%" />
+<col style="width: 17%" />
+<col style="width: 17%" />
+</colgroup>
+<thead>
+<tr>
+<th>system</th>
+<th style="text-align: right;">row wins</th>
+<th style="text-align: right;">probe-bootstrap win rate</th>
+<th style="text-align: right;">sufficiency</th>
+<th style="text-align: right;">noise</th>
+<th style="text-align: right;">mean context tokens</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Cortext native</td>
+<td style="text-align: right;">30 / 90</td>
+<td style="text-align: right;">0.33 [0.22, 0.44]</td>
+<td style="text-align: right;">3.14 [2.76, 3.51]</td>
+<td style="text-align: right;">1.64 [1.32, 1.96]</td>
+<td style="text-align: right;">433</td>
+</tr>
+<tr>
+<td>traditional chat RAG</td>
+<td style="text-align: right;">9 / 90</td>
+<td style="text-align: right;">0.10 [0.03, 0.19]</td>
+<td style="text-align: right;">2.57 [2.22, 2.91]</td>
+<td style="text-align: right;">1.09 [0.82, 1.37]</td>
+<td style="text-align: right;">42,550</td>
+</tr>
+<tr>
+<td>full-history upper bound</td>
+<td style="text-align: right;">23 / 90</td>
+<td style="text-align: right;">0.26 [0.17, 0.34]</td>
+<td style="text-align: right;">3.70 [3.36, 4.02]</td>
+<td style="text-align: right;">0.36 [0.21, 0.51]</td>
+<td style="text-align: right;">88,806</td>
+</tr>
+<tr>
+<td>compacting session</td>
+<td style="text-align: right;">10 / 90</td>
+<td style="text-align: right;">0.11 [0.06, 0.18]</td>
+<td style="text-align: right;">2.90 [2.58, 3.24]</td>
+<td style="text-align: right;">0.84 [0.66, 1.04]</td>
+<td style="text-align: right;">n/a</td>
+</tr>
+</tbody>
+</table>
+
+The full-history packet remains the quality upper bound: it has the best
+sufficiency and lowest noise, but it is not a deployable memory strategy
+and the judge had to drop 123,359 oldest full-history items across
+probes to keep prompts bounded. Cortext is the highest row-win system at
+this horizon and uses 432.7 mean context tokens versus 42,550.2 for
+traditional chat RAG, an aggregate 98.98 percent token reduction
+(probe-bootstrap savings mean 98.61 percent, 95% CI \[98.05%, 99.04%\]).
+The tradeoff is visible: after strict prior-only filtering, Cortext
+carries more noise than the windowed baselines, and its sufficiency
+confidence interval overlaps the compacting and RAG arms. The result is
+therefore not a per-mechanism promotion of every durable-structure
+component. Instead, it is the full-stack release stress verdict: at a
+horizon where windowed strategies compact or discard old context,
+Cortext remains competitive with the full-history upper bound while
+spending roughly two orders of magnitude less context than chat RAG.
+
 ## ACT-R-Inspired Retrieval Gate Ablations
 
 On **June 11, 2026**, we added a focused real-encoder ablation target

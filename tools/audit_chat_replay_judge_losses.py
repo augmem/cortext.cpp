@@ -411,6 +411,9 @@ def packet_row_summary(row: dict, probe_by_event: dict[int, dict]) -> dict:
         "current_turn_excluded_count": len(
             row.get("cortext_current_turn_memory_ids_excluded", []) or []
         ),
+        "non_prior_excluded_count": len(
+            row.get("cortext_non_prior_memory_ids_excluded", []) or []
+        ),
         "text_plain_count": mimetypes.get("text/plain", 0),
     }
 
@@ -444,6 +447,7 @@ def summarize_packet_composition(
         "mean_age_days",
         "max_age_days",
         "current_turn_excluded_count",
+        "non_prior_excluded_count",
         "text_plain_count",
     ]
     aggregates = {

@@ -1063,19 +1063,25 @@ def prior_context_docs(docs: list[TimelineDoc], event_index: int) -> list[Timeli
     return [doc for doc in docs if doc.index < 0 or doc.index < event_index]
 
 
-def exclude_current_memory_rows(
+def exclude_non_prior_memory_rows(
     rows: list,
     timeline: list[TimelineDoc],
     media_memory_map: dict[tuple[str, str, int], list[TimelineDoc]],
     event_index: int,
+    query_timestamp: int,
 ) -> tuple[list[sqlite3.Row], list[int]]:
     kept: list[sqlite3.Row] = []
     excluded: list[int] = []
     for row in rows:
         docs = map_memory_to_docs(row, timeline, media_memory_map)
-        if any(doc.index == event_index for doc in docs):
+        if docs and any(doc.index >= event_index for doc in docs):
             excluded.append(int(row_get(row, "memory_id", 0) or 0))
             continue
+        if not docs:
+            start_ts = int(row_get(row, "start_ts", 0) or 0)
+            if start_ts >= query_timestamp:
+                excluded.append(int(row_get(row, "memory_id", 0) or 0))
+                continue
         kept.append(row)
     return kept, excluded
 
@@ -2150,23 +2156,35 @@ def main() -> int:
                 raw_retrieved_rows = load_memory_rows(conn, retrieved_memory_ids)
                 cortext_packet_source["final_db_rehydration_fallback"] += 1
             event_index = int(probe["event_index"])
-            memory_rows, excluded_current_memory_ids = exclude_current_memory_rows(
+            memory_rows, excluded_non_prior_memory_ids = exclude_non_prior_memory_rows(
                 raw_memory_rows,
                 timeline,
                 media_memory_map,
                 event_index,
+                query_doc.timestamp,
             )
-            working_rows, excluded_current_working_ids = exclude_current_memory_rows(
+            working_rows, excluded_non_prior_working_ids = exclude_non_prior_memory_rows(
                 raw_working_rows,
                 timeline,
                 media_memory_map,
                 event_index,
+                query_doc.timestamp,
             )
-            retrieved_rows, excluded_current_retrieved_ids = exclude_current_memory_rows(
+            retrieved_rows, excluded_non_prior_retrieved_ids = exclude_non_prior_memory_rows(
                 raw_retrieved_rows,
                 timeline,
                 media_memory_map,
                 event_index,
+                query_doc.timestamp,
+            )
+            fairness_checks["cortext_native_non_prior_memory_rows_excluded"] += len(
+                excluded_non_prior_memory_ids
+            )
+            fairness_checks["cortext_native_non_prior_working_rows_excluded"] += len(
+                excluded_non_prior_working_ids
+            )
+            fairness_checks["cortext_native_non_prior_retrieved_rows_excluded"] += len(
+                excluded_non_prior_retrieved_ids
             )
             cortext_working_tokens = memory_doc_tokens(
                 working_rows,
@@ -2505,9 +2523,12 @@ def main() -> int:
                         int(row_get(row, "memory_id", 0) or 0)
                         for row in memory_rows
                     ],
-                    "cortext_current_turn_memory_ids_excluded": excluded_current_memory_ids,
-                    "cortext_current_turn_working_ids_excluded": excluded_current_working_ids,
-                    "cortext_current_turn_retrieved_ids_excluded": excluded_current_retrieved_ids,
+                    "cortext_current_turn_memory_ids_excluded": [],
+                    "cortext_current_turn_working_ids_excluded": [],
+                    "cortext_current_turn_retrieved_ids_excluded": [],
+                    "cortext_non_prior_memory_ids_excluded": excluded_non_prior_memory_ids,
+                    "cortext_non_prior_working_ids_excluded": excluded_non_prior_working_ids,
+                    "cortext_non_prior_retrieved_ids_excluded": excluded_non_prior_retrieved_ids,
                     "rag_top_k_indices": probe.get("rag_top_k_indices", []),
                     "rolling_history_tokens": probe.get(
                         "normal_rag_active_history_tokens",

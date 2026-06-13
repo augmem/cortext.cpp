@@ -24,7 +24,7 @@ At the time of the historical topical-chat runs, deep consolidation summarizatio
 
 For reproducibility, the analysis runner supports **deterministic synthetic timing** (`--deterministic`, `--seed`), which removes wall‑clock variance while preserving cadence‑derived timing for boundary and interrupt gating. Snapshot configs record the seed and synthetic clock parameters.
 
-## Chat-Replay Release Protocol on a Real Personal Corpus (June 11-12, 2026)
+## Chat-Replay Release Protocol on a Real Personal Corpus (June 11-13, 2026)
 
 This is the first end-to-end evaluation of the full Cortext stack on a real
 personal corpus: a 1,200-message slice of a multi-year text-message history
@@ -163,19 +163,55 @@ gates remain available as opt-in flags, and evidence blending's
 favorable token economics make it the one candidate worth re-testing at
 long horizon.
 
-### Horizon Caveat for Consolidation-Family Ablations
+### Long-Horizon Context-Blowout Stress Run
 
-A short replay cannot fairly judge the consolidation family. On 1,200
-messages, retrieval can serve most probes from raw recent memories, so
-ablating daily consolidation moves the judge little (50% wins, 3.46
-sufficiency, mildly below baseline). Consolidation exists to keep
-month-old content reachable; its verdict comes from long-horizon stress
-runs. A context-blowout run is queued: 18,000 messages, where full
-history must drop its oldest messages, the chat-RAG arm compacts, a
-fourth simulated arm summarizes itself at 80 percent of a 48k budget, and
-Cortext retrieves from the memory graph. Roughly 70 percent of its probes
-sit past the point where every windowed strategy has lost the early
-conversation.
+The short replay cannot fairly judge the consolidation family in
+isolation: on 1,200 messages, retrieval can serve most probes from raw
+recent memories, so ablating daily consolidation moves the judge little
+(50% wins, 3.46 sufficiency, mildly below baseline). Consolidation exists
+to keep old content reachable, so the release verdict also needs a
+long-horizon stress run. We therefore ran the capacity-21 stack for
+18,000 text messages plus 128 media candidates (126 processed, 2 failed),
+with 30 probes at stride 600 and three blinded Gemma 4 12B local-judge
+repetitions per probe. The judge compared four packets: Cortext native
+working-memory plus associative retrieval, traditional chat RAG with a
+48k active-history budget and deterministic compaction, a prior
+full-history upper bound, and a simulated compacting session that
+summarizes itself near the same budget.
+
+The first uncapped final judge prompt exceeded the local context window,
+so the accepted final artifact caps each packet at 128 memories or
+history items for judge presentation. This cap does not change the
+benchmark replay, retrieval accounting, or token counters. A separate
+audit also found that the frozen probe-time Cortext packets included the
+current turn and short-lookahead rows; the accepted judge rerun filters
+all non-prior Cortext rows before packet construction. The final artifact
+records 82 filtered non-prior rows, 90 / 90 completed judgments, zero
+judge-validation failures, no future-context violations, no current-turn
+inclusions, and prompt-fit success under the 131,072-token judge window.
+
+| system | row wins | probe-bootstrap win rate | sufficiency | noise | mean context tokens |
+|---|---:|---:|---:|---:|---:|
+| Cortext native | 30 / 90 | 0.33 [0.22, 0.44] | 3.14 [2.76, 3.51] | 1.64 [1.32, 1.96] | 433 |
+| traditional chat RAG | 9 / 90 | 0.10 [0.03, 0.19] | 2.57 [2.22, 2.91] | 1.09 [0.82, 1.37] | 42,550 |
+| full-history upper bound | 23 / 90 | 0.26 [0.17, 0.34] | 3.70 [3.36, 4.02] | 0.36 [0.21, 0.51] | 88,806 |
+| compacting session | 10 / 90 | 0.11 [0.06, 0.18] | 2.90 [2.58, 3.24] | 0.84 [0.66, 1.04] | n/a |
+
+The full-history packet remains the quality upper bound: it has the best
+sufficiency and lowest noise, but it is not a deployable memory strategy
+and the judge had to drop 123,359 oldest full-history items across
+probes to keep prompts bounded. Cortext is the highest row-win system at
+this horizon and uses 432.7 mean context tokens versus 42,550.2 for
+traditional chat RAG, an aggregate 98.98 percent token reduction
+(probe-bootstrap savings mean 98.61 percent, 95% CI [98.05%, 99.04%]).
+The tradeoff is visible: after strict prior-only filtering, Cortext carries
+more noise than the windowed baselines, and its sufficiency confidence
+interval overlaps the compacting and RAG arms. The result is therefore
+not a per-mechanism promotion of every durable-structure component.
+Instead, it is the full-stack release stress verdict: at a horizon where
+windowed strategies compact or discard old context, Cortext remains
+competitive with the full-history upper bound while spending roughly two
+orders of magnitude less context than chat RAG.
 
 ## ACT-R-Inspired Retrieval Gate Ablations
 
