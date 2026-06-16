@@ -25,6 +25,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.parse
 import urllib.request
 from collections import Counter, defaultdict
@@ -130,6 +131,15 @@ class JudgeMalformedResponse(RuntimeError):
 
 def utc_now_text() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def apply_replay_timezone(summary: dict) -> None:
+    timezone_name = str(summary.get("replay_timezone", "") or "").strip()
+    if not timezone_name or timezone_name == "process_default":
+        return
+    os.environ["TZ"] = timezone_name
+    if hasattr(time, "tzset"):
+        time.tzset()
 
 
 @dataclass(frozen=True)
@@ -1951,6 +1961,7 @@ def main() -> int:
     )
 
     summary = json.loads(args.summary.read_text())
+    apply_replay_timezone(summary)
 
     # Opportunistic judge sharding: when the run directory provides
     # judge_shards.json ({"base_urls": ["http://127.0.0.1:11434", ...]}),
