@@ -213,11 +213,12 @@ TEST_CASE ("Constructive recall retrieval uses the latest reconstruction and app
   cortext::testing::SeedMemoryV2 (*store, 22LL, 22LL, "test", "LONG_TERM",
                                   1.0, 1);
   cortext::testing::SeedEmbeddingV2 (*store, 111LL, target_reconstructed, 2);
-  store->Execute (
-      "INSERT INTO memory_reconstructions("
-      "memory_id, embedding_id, created_at, uncertainty, trigger"
-      ") VALUES(?, ?, ?, ?, 'initial')",
-      { 11LL, 111LL, 2LL, 0.0 });
+  {
+    auto tx = store->Begin ();
+    operations::constructive_recall::AppendReconstructionWithEmbeddingId (
+        *tx, 11LL, 111LL, {}, 2LL, 0.0, "initial");
+    tx->Commit ();
+  }
 
   SignalProcessor::Config cfg;
   cortext::testing::RequireEncoder (cfg);
@@ -284,11 +285,12 @@ TEST_CASE ("Reconsolidation appends a new reconstruction while preserving the ev
   cortext::testing::SeedEmbeddingV2 (*store, 1LL, evidence, 1);
   cortext::testing::SeedMemoryV2 (*store, 1LL, 1LL, "test", "LONG_TERM", 1.0,
                                   1);
-  store->Execute (
-      "INSERT INTO memory_reconstructions("
-      "memory_id, embedding_id, created_at, uncertainty, trigger"
-      ") VALUES(?, ?, ?, ?, 'initial')",
-      { 1LL, 1LL, 1LL, 0.0 });
+  {
+    auto tx = store->Begin ();
+    operations::constructive_recall::AppendReconstructionWithEmbeddingId (
+        *tx, 1LL, 1LL, {}, 1LL, 0.0, "initial");
+    tx->Commit ();
+  }
 
   SignalProcessor::Config cfg;
   cortext::testing::RequireEncoder (cfg);

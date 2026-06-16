@@ -727,6 +727,70 @@ GetCoreMigrations ()
               "ON fact_assertions(lifecycle_state, recorded_at_ts DESC, fact_id DESC)",
           },
       },
+      {
+          11,
+          "Current memory embedding surface",
+          {
+              "CREATE VIRTUAL TABLE IF NOT EXISTS current_memory_embeddings "
+              "USING vec0("
+              "memory_id INTEGER PRIMARY KEY,"
+              "embedding float[256],"
+              "+embedding_id INTEGER,"
+              "+created_at INTEGER"
+              ")",
+              "DELETE FROM current_memory_embeddings",
+              "INSERT INTO current_memory_embeddings("
+              "memory_id, embedding, embedding_id, created_at"
+              ") "
+              "WITH latest AS ("
+              "  SELECT mr.memory_id, mr.embedding_id, mr.created_at "
+              "  FROM memory_reconstructions mr "
+              "  JOIN ("
+              "    SELECT memory_id, MAX(reconstruction_id) AS reconstruction_id "
+              "    FROM memory_reconstructions "
+              "    GROUP BY memory_id"
+              "  ) mx ON mx.memory_id = mr.memory_id "
+              "       AND mx.reconstruction_id = mr.reconstruction_id"
+              "), current AS ("
+              "  SELECT m.memory_id, "
+              "         COALESCE(latest.embedding_id, m.embedding_id) AS embedding_id, "
+              "         COALESCE(latest.created_at, m.created_at, 0) AS created_at "
+              "  FROM memories m "
+              "  LEFT JOIN latest ON latest.memory_id = m.memory_id "
+              "  WHERE COALESCE(latest.embedding_id, m.embedding_id) IS NOT NULL"
+              ") "
+              "SELECT current.memory_id, e.embedding, current.embedding_id, "
+              "       current.created_at "
+              "FROM current "
+              "JOIN embeddings e ON e.embedding_id = current.embedding_id",
+          },
+      },
+      {
+          12,
+          "Realtime memory recency lookup index",
+          {
+              "CREATE INDEX IF NOT EXISTS idx_memories_created_desc "
+              "ON memories(created_at DESC)",
+          },
+      },
+      {
+          13,
+          "Long-term memory eviction lookup index",
+          {
+              "CREATE INDEX IF NOT EXISTS idx_memories_ltm_strength_created "
+              "ON memories(strength, created_at, embedding_id) "
+              "WHERE kind = 'LONG_TERM'",
+          },
+      },
+      {
+          14,
+          "Covering strength index for retention aggregate",
+          {
+              "DROP INDEX IF EXISTS idx_memories_strength",
+              "CREATE INDEX IF NOT EXISTS idx_memories_strength "
+              "ON memories(strength, last_access, created_at, start_ts)",
+          },
+      },
   };
 }
 

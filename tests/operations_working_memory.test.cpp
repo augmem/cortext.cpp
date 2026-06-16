@@ -654,7 +654,7 @@ TEST_CASE ("Alg24 eviction prioritizes weak old slots over strong recent ones",
   SignalProcessor::Config cfg;
   cortext::testing::RequireEncoder (cfg);
   cfg.stability = 0.5;
-  // S=1, F=0 is the capacity floor (5 under Miller's 7±2 mapping).
+  // S=1, F=0 is the capacity floor (15 under the WM21 mapping).
   cfg.focus = 0.0;
   cfg.sensitivity = 1.0;
 
@@ -763,7 +763,7 @@ TEST_CASE ("Alg24 high-T increases slot dedication resistance to eviction",
     SignalProcessor::Config cfg;
     cortext::testing::RequireEncoder (cfg);
     cfg.focus = 0.0;
-    cfg.sensitivity = 1.0; // capacity floor (5 under 7±2)
+    cfg.sensitivity = 1.0; // capacity floor (15 under WM21)
     cfg.stability = 0.0;   // Low T → dedication_strength = 0.3
 
     // Two slots with same strength, same age, recent timestamps
@@ -821,7 +821,7 @@ TEST_CASE ("Alg24 high-T increases slot dedication resistance to eviction",
     SignalProcessor::Config cfg;
     cortext::testing::RequireEncoder (cfg);
     cfg.focus = 0.0;
-    cfg.sensitivity = 1.0; // capacity floor (5 under 7±2)
+    cfg.sensitivity = 1.0; // capacity floor (15 under WM21)
     cfg.stability = 1.0;   // High T → dedication_strength = 0.9
 
     // Same setup as above with recent timestamps
@@ -894,7 +894,7 @@ TEST_CASE ("Alg24 recent slots resist eviction regardless of strength",
   SignalProcessor::Config cfg;
   cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.0;
-  cfg.sensitivity = 1.0; // capacity floor (5 under 7±2)
+  cfg.sensitivity = 1.0; // capacity floor (15 under WM21)
   cfg.stability = 0.5;   // dedication_strength = 0.6
 
 

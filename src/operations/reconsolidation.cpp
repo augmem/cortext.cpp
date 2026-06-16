@@ -11,6 +11,7 @@
 #include "cortext/telemetry/telemetry.hpp"
 #include <Eigen/Dense>
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <numeric>
 #include <optional>
@@ -23,6 +24,14 @@ namespace cortext::operations
 
 namespace
 {
+using SteadyClock = std::chrono::steady_clock;
+
+double
+ElapsedMillis (SteadyClock::time_point start)
+{
+  return std::chrono::duration<double, std::milli> (SteadyClock::now () - start)
+      .count ();
+}
 
 /// @brief Normalizes a vector to unit length.
 inline Eigen::VectorXf
@@ -137,7 +146,8 @@ QueryGraphNeighbors (Store *store, long long embedding_id, int max_depth)
             }
 
           // The neighbor is the other end of the edge
-          long long neighbor_mem_id = (src_id == current_mem_id) ? tgt_id : src_id;
+          long long neighbor_mem_id
+              = (src_id == current_mem_id) ? tgt_id : src_id;
 
           if (visited.count (neighbor_mem_id))
             {
@@ -258,9 +268,15 @@ ApplyReconsolidation::Execute (OperationContext &context, Transaction &tx) const
         }
 
       long long memory_id = 0;
+      double stored_lability = 0.0;
+      long long lability_ts = 0;
+      const auto metadata_start = SteadyClock::now ();
       auto mem_rows = tx.Execute (
-          "SELECT memory_id FROM memories WHERE embedding_id = ?",
+          "SELECT memory_id, lability_state, lability_ts "
+          "FROM memories WHERE embedding_id = ?",
           { embedding_id });
+      context.AddOperationTiming ("Reconsolidation.metadata_sql",
+                                  ElapsedMillis (metadata_start));
       if (!mem_rows.empty ())
         {
           auto it_mem = mem_rows[0].find ("memory_id");
@@ -273,6 +289,31 @@ ApplyReconsolidation::Execute (OperationContext &context, Transaction &tx) const
               else if (it_mem->second.type () == typeid (int))
                 {
                   memory_id = static_cast<long long> (std::any_cast<int> (it_mem->second));
+                }
+            }
+          auto state_it = mem_rows[0].find ("lability_state");
+          if (state_it != mem_rows[0].end ())
+            {
+              if (state_it->second.type () == typeid (double))
+                {
+                  stored_lability = std::any_cast<double> (state_it->second);
+                }
+              else if (state_it->second.type () == typeid (float))
+                {
+                  stored_lability
+                      = static_cast<double> (std::any_cast<float> (state_it->second));
+                }
+            }
+          auto ts_it = mem_rows[0].find ("lability_ts");
+          if (ts_it != mem_rows[0].end ())
+            {
+              if (ts_it->second.type () == typeid (long long))
+                {
+                  lability_ts = std::any_cast<long long> (ts_it->second);
+                }
+              else if (ts_it->second.type () == typeid (int))
+                {
+                  lability_ts = std::any_cast<int> (ts_it->second);
                 }
             }
         }
@@ -293,41 +334,6 @@ ApplyReconsolidation::Execute (OperationContext &context, Transaction &tx) const
         contextual_relevance = constants::kNormalizedMax;
 
       double current_lability = lability_susc;
-      double stored_lability = 0.0;
-      long long lability_ts = 0;
-      auto lability_rows = tx.Execute (
-          "SELECT lability_state, lability_ts FROM memories WHERE memory_id = ?",
-          { memory_id });
-      if (!lability_rows.empty ())
-        {
-          const auto &lab_row = lability_rows[0];
-          auto state_it = lab_row.find ("lability_state");
-          if (state_it != lab_row.end ())
-            {
-              if (state_it->second.type () == typeid (double))
-                {
-                  stored_lability = std::any_cast<double> (state_it->second);
-                }
-              else if (state_it->second.type () == typeid (float))
-                {
-                  stored_lability
-                      = static_cast<double> (std::any_cast<float> (state_it->second));
-                }
-            }
-          auto ts_it = lab_row.find ("lability_ts");
-          if (ts_it != lab_row.end ())
-            {
-              if (ts_it->second.type () == typeid (long long))
-                {
-                  lability_ts = std::any_cast<long long> (ts_it->second);
-                }
-              else if (ts_it->second.type () == typeid (int))
-                {
-                  lability_ts = std::any_cast<int> (ts_it->second);
-                }
-            }
-        }
-
       if (lability_ts > 0 && now_ts > lability_ts)
         {
           const double dt_s
@@ -353,13 +359,17 @@ ApplyReconsolidation::Execute (OperationContext &context, Transaction &tx) const
 
       // v2: Update lability_state, original_centroid, and lability_ts in
       // memories table (merged from memory_feedback)
-      tx.Execute ("UPDATE memories "
-                  "SET lability_state = COALESCE(?, 0.0), "
-                  "    original_centroid = COALESCE(original_centroid, ?), "
-                  "    lability_ts = ? "
-                  "WHERE memory_id = ?",
-                  { current_lability, ToFloatVector (u_m), now_ts,
-                    memory_id });
+      const auto lability_update_start = SteadyClock::now ();
+      tx.Execute (
+          "UPDATE memories "
+          "SET lability_state = COALESCE(?, 0.0), "
+          "    original_centroid = COALESCE(original_centroid, ?), "
+          "    lability_ts = ? "
+          "WHERE memory_id = ?",
+          { current_lability, ToFloatVector (u_m), now_ts, memory_id });
+      context.AddOperationTiming (
+          "Reconsolidation.primary_lability_update_sql",
+          ElapsedMillis (lability_update_start));
 
       if (drift_mag < drift_skip_epsilon)
         {
@@ -373,15 +383,19 @@ ApplyReconsolidation::Execute (OperationContext &context, Transaction &tx) const
 
       if (constructive_recall::Disabled ())
         {
+          const auto primary_append_start = SteadyClock::now ();
           tx.Execute ("DELETE FROM embeddings WHERE embedding_id = ?",
                       { embedding_id });
           tx.Execute (
               "INSERT INTO embeddings (embedding_id, embedding, created_at) "
               "VALUES (?, ?, ?)",
               { embedding_id, ToFloatVector (blended), now_ts });
+          context.AddOperationTiming ("Reconsolidation.primary_append",
+                                      ElapsedMillis (primary_append_start));
         }
       else
         {
+          const auto primary_append_start = SteadyClock::now ();
           const auto blob_id
               = constructive_recall::LoadCurrentBlobId (tx, memory_id);
           const double uncertainty
@@ -392,6 +406,8 @@ ApplyReconsolidation::Execute (OperationContext &context, Transaction &tx) const
           constructive_recall::AppendReconstructionWithEmbedding (
               tx, memory_id, blended, blob_id, now_ts, uncertainty,
               "reconsolidation", 1.0, contextual_relevance);
+          context.AddOperationTiming ("Reconsolidation.primary_append",
+                                      ElapsedMillis (primary_append_start));
         }
 
       // --- BEGIN RIPPLE PROPAGATION ---
@@ -402,7 +418,10 @@ ApplyReconsolidation::Execute (OperationContext &context, Transaction &tx) const
         }
 
       // Query graph neighbors of this reconsolidated memory
+      const auto neighbor_query_start = SteadyClock::now ();
       auto neighbors = QueryGraphNeighbors (store, embedding_id, ripple_depth);
+      context.AddOperationTiming ("Reconsolidation.neighbor_query",
+                                  ElapsedMillis (neighbor_query_start));
 
       for (const auto &neighbor : neighbors)
         {
@@ -426,9 +445,12 @@ ApplyReconsolidation::Execute (OperationContext &context, Transaction &tx) const
             }
 
           // Load neighbor embedding
+          const auto neighbor_load_start = SteadyClock::now ();
           auto neighbor_emb = constructive_recall::LoadCurrentEmbedding (
               tx, neighbor.memory_id, neighbor.embedding_id,
               static_cast<int> (u_cur.size ()));
+          context.AddOperationTiming ("Reconsolidation.neighbor_load",
+                                      ElapsedMillis (neighbor_load_start));
           if (!neighbor_emb)
             {
               continue;
@@ -454,9 +476,11 @@ ApplyReconsolidation::Execute (OperationContext &context, Transaction &tx) const
           neighbor_blended = Unit (neighbor_blended);
 
           // Write updates for this neighbor
+          const auto neighbor_write_start = SteadyClock::now ();
           WriteNeighborUpdates (tx, neighbor.embedding_id, neighbor.memory_id,
-                                neighbor_lability, now_ts,
-                                neighbor_blended);
+                                neighbor_lability, now_ts, neighbor_blended);
+          context.AddOperationTiming ("Reconsolidation.neighbor_write",
+                                      ElapsedMillis (neighbor_write_start));
         }
       // --- END RIPPLE PROPAGATION ---
     }

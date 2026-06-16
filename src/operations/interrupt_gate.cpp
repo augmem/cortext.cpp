@@ -9,6 +9,7 @@
 #include "cortext/telemetry/telemetry.hpp"
 #include <algorithm>
 #include <any>
+#include <chrono>
 #include <cmath>
 #include <limits>
 #include <numeric>
@@ -20,6 +21,14 @@ namespace cortext::operations
 {
 namespace
 {
+using SteadyClock = std::chrono::steady_clock;
+
+double
+ElapsedMillis (SteadyClock::time_point start)
+{
+  return std::chrono::duration<double, std::milli> (SteadyClock::now () - start)
+      .count ();
+}
 
 inline double
 Clamp01 (double v)
@@ -207,7 +216,7 @@ ComputeMniGateDecision::Execute (OperationContext &context, Transaction &tx) con
   std::unordered_map<long long, Eigen::VectorXf> candidates;
   {
     // Build IN clause for candidate IDs
-    std::string sql = "SELECT embedding_id, created_at FROM embeddings "
+    std::string sql = "SELECT embedding_id, created_at FROM memories "
                       "WHERE embedding_id IN (";
     std::vector<std::any> params;
     params.reserve (raw_candidates.size ());
@@ -224,7 +233,10 @@ ComputeMniGateDecision::Execute (OperationContext &context, Transaction &tx) con
 
     try
       {
+        const auto metadata_start = SteadyClock::now ();
         auto rows = store->Execute (sql, params);
+        context.AddOperationTiming ("MniGate.write_exclusion_sql",
+                                    ElapsedMillis (metadata_start));
 
         // Build set of eligible IDs (created_at < write_exclusion_ts)
         std::unordered_set<long long> eligible_ids;

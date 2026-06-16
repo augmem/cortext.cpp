@@ -1,8 +1,11 @@
 #include "cortext/operations/memory_strength.hpp"
+#include <algorithm>
 #include <limits>
 #include <cstdint>
+#include <chrono>
 
 #include "cortext/store/store.hpp"
+#include "cortext/store/utils.hpp"
 #include "cortext/core/algorithms.hpp"
 #include "cortext/operations/constants.hpp"
 #include "cortext/core/knobs.hpp"
@@ -12,7 +15,9 @@
 #include "eviction_ablation.hpp"
 #include "eviction_policy.hpp"
 #include <cmath>
+#include <functional>
 #include <typeinfo>
+#include <unordered_set>
 #include <vector>
 
 namespace cortext::operations
@@ -20,6 +25,51 @@ namespace cortext::operations
 
 namespace
 {
+using SteadyClock = std::chrono::steady_clock;
+constexpr std::size_t kEvictionSqlChunkSize = 400;
+
+double
+ElapsedMillis (SteadyClock::time_point start)
+{
+  return std::chrono::duration<double, std::milli> (SteadyClock::now () - start)
+      .count ();
+}
+
+std::vector<std::any>
+MakeParams (const std::vector<long long> &values, std::size_t begin,
+            std::size_t end)
+{
+  std::vector<std::any> params;
+  params.reserve (end - begin);
+  for (std::size_t i = begin; i < end; ++i)
+    {
+      params.push_back (values[i]);
+    }
+  return params;
+}
+
+void
+AppendParams (std::vector<std::any> &params,
+              const std::vector<long long> &values, std::size_t begin,
+              std::size_t end)
+{
+  for (std::size_t i = begin; i < end; ++i)
+    {
+      params.push_back (values[i]);
+    }
+}
+
+void
+ForEachChunk (std::size_t count, const std::function<void (std::size_t,
+                                                           std::size_t)> &fn)
+{
+  for (std::size_t begin = 0; begin < count; begin += kEvictionSqlChunkSize)
+    {
+      const std::size_t end
+          = std::min (count, begin + kEvictionSqlChunkSize);
+      fn (begin, end);
+    }
+}
 } // namespace
 
 void
@@ -62,12 +112,15 @@ UpdateMemoryStrength::Execute (OperationContext &context, Transaction &tx) const
       const long long ts
           = static_cast<long long> (context.GetSignal ().timestamp);
 
+      const auto select_start = SteadyClock::now ();
       auto rows = tx.Execute (
           "SELECT strength, use_frequency, contextual_gain, retrieved_count, "
           "       used_count, last_access, created_at, flashbulb, "
           "       half_life_bonus, trace_fast, trace_med, trace_slow, trace_ultra "
           "FROM memories WHERE embedding_id = ?",
           { id });
+      context.AddOperationTiming ("MemoryStrength.feedback_select_sql",
+                                  ElapsedMillis (select_start));
       if (rows.empty ())
         {
           continue;
@@ -267,6 +320,7 @@ UpdateMemoryStrength::Execute (OperationContext &context, Transaction &tx) const
       strength = core::Clamp (strength, constants::kNormalizedMin,
                               constants::kNormalizedMax);
 
+      const auto update_start = SteadyClock::now ();
       tx.Execute (
           "UPDATE memories "
           "SET retrieved_count = ?, "
@@ -285,6 +339,8 @@ UpdateMemoryStrength::Execute (OperationContext &context, Transaction &tx) const
           { retrieved_new, used_new, used_flag, ts, contextual_gain,
             influence_factor, use_frequency, strength,
             traces[0], traces[1], traces[2], traces[3], ts, id });
+      context.AddOperationTiming ("MemoryStrength.feedback_update_sql",
+                                  ElapsedMillis (update_start));
 
       ++update_count;
     }
@@ -295,12 +351,15 @@ UpdateMemoryStrength::Execute (OperationContext &context, Transaction &tx) const
   // when their strength >= fact_floor(T), scaled by Stability.
   const long long evicted_at
       = static_cast<long long> (context.GetSignal ().timestamp);
+  const auto frontier_start = SteadyClock::now ();
   const auto frontier = eviction_policy::ResolveEvictionFrontier (
       tx, T, static_cast<long long> (std::min<std::uint64_t> (
           p_ctx.last_consolidation_ts,
           static_cast<std::uint64_t> (
               std::numeric_limits<long long>::max ()))),
       eviction_override);
+  context.AddOperationTiming ("MemoryStrength.eviction_frontier",
+                              ElapsedMillis (frontier_start));
 
   // Eviction condition: strength < cutoff AND either (a) not fact-linked
   // or (b) strength < fact_floor. Expressed in SQL as a LEFT JOIN that
@@ -315,6 +374,7 @@ UpdateMemoryStrength::Execute (OperationContext &context, Transaction &tx) const
   if (summary_guard_active)
     {
       eviction_where +=
+          " AND m.source_id NOT LIKE 'summary_%'"
           " AND EXISTS ("
           "   SELECT 1 FROM associations summary_edge"
           "   JOIN memories summary_memory"
@@ -327,8 +387,6 @@ UpdateMemoryStrength::Execute (OperationContext &context, Transaction &tx) const
   const std::string fact_join
       = eviction_policy::ActiveFactEvidenceJoin (
           frontier.fact_floor_active);
-  const std::vector<std::any> eviction_params
-      = eviction_policy::EvictionInsertParams (evicted_at, frontier);
   const std::vector<std::any> delete_params
       = eviction_policy::EvictionWhereParams (frontier);
 
@@ -345,46 +403,153 @@ UpdateMemoryStrength::Execute (OperationContext &context, Transaction &tx) const
       return;
     }
 
-  tx.Execute (
-      "INSERT INTO memory_evictions ("
-      "  memory_id, embedding_id, source_id, kind, label, start_ts, end_ts, "
-      "  created_at, last_access, strength, use_frequency, contextual_gain, "
-      "  retrieved_count, used_count, n_signals, modality, eviction_reason, "
-      "  evicted_at"
-      ") "
-      "SELECT m.memory_id, m.embedding_id, m.source_id, m.kind, "
-      "       COALESCE(m.label, ''), m.start_ts, m.end_ts, m.created_at, "
-      "       m.last_access, m.strength, m.use_frequency, m.contextual_gain, "
-      "       m.retrieved_count, m.used_count, m.n_signals, m.modality, "
-      "       'periphery_cutoff', ? "
-      "FROM memories m" + fact_join + " " + eviction_where,
-      eviction_params);
+  const auto eviction_select_start = SteadyClock::now ();
+  auto evictable_rows = tx.Execute (
+      "SELECT m.memory_id, m.embedding_id "
+      "FROM memories m INDEXED BY idx_memories_ltm_strength_created"
+          + fact_join + " " + eviction_where,
+      delete_params);
+  context.AddOperationTiming ("MemoryStrength.eviction_select_ids_sql",
+                              ElapsedMillis (eviction_select_start));
 
-  // Build subquery for evictable memory_ids
-  const std::string evictable_ids
-      = "SELECT m.memory_id FROM memories m" + fact_join + " " + eviction_where;
+  std::vector<long long> evictable_memory_ids;
+  std::vector<long long> evictable_embedding_ids;
+  std::unordered_set<long long> seen_memory_ids;
+  std::unordered_set<long long> seen_embedding_ids;
+  evictable_memory_ids.reserve (evictable_rows.size ());
+  evictable_embedding_ids.reserve (evictable_rows.size ());
+  for (const auto &row : evictable_rows)
+    {
+      const auto memory_it = row.find ("memory_id");
+      if (memory_it == row.end ())
+        {
+          continue;
+        }
+      const auto memory_id = store::AnyToLongLong (memory_it->second);
+      if (!memory_id.has_value () || !seen_memory_ids.insert (*memory_id).second)
+        {
+          continue;
+        }
+      evictable_memory_ids.push_back (*memory_id);
 
-  tx.Execute (
-      "DELETE FROM associations "
-      "WHERE source_memory_id IN (" + evictable_ids + ") "
-      "   OR target_memory_id IN (" + evictable_ids + ")",
-      [&] {
-        auto p = delete_params;
-        p.insert (p.end (), delete_params.begin (), delete_params.end ());
-        return p;
-      }());
-  tx.Execute (
-      "DELETE FROM signals WHERE memory_id IN (" + evictable_ids + ")",
-      delete_params);
-  tx.Execute (
-      "DELETE FROM embeddings WHERE embedding_id IN "
-      "(SELECT m.embedding_id FROM memories m" + fact_join + " "
-          + eviction_where + ")",
-      delete_params);
-  auto eviction_result = tx.Execute (
-      "DELETE FROM memories WHERE memory_id IN (" + evictable_ids + ")",
-      delete_params);
-  const int64_t eviction_count = eviction_result.size ();
+      const auto embedding_it = row.find ("embedding_id");
+      if (embedding_it == row.end ())
+        {
+          continue;
+        }
+      const auto embedding_id = store::AnyToLongLong (embedding_it->second);
+      if (embedding_id.has_value ()
+          && seen_embedding_ids.insert (*embedding_id).second)
+        {
+          evictable_embedding_ids.push_back (*embedding_id);
+        }
+    }
+
+  if (evictable_memory_ids.empty ())
+    {
+      telemetry::LogDebug (
+          "cortext.memory_strength",
+          { telemetry::Attribute::Int64 ("update_count", update_count),
+            telemetry::Attribute::Int64 ("eviction_count", 0),
+            telemetry::Attribute::Int64 ("storage_used_bytes",
+                                         frontier.storage_used_bytes),
+            telemetry::Attribute::Int64 ("storage_threshold_bytes",
+                                         frontier.storage_threshold_bytes) });
+      return;
+    }
+
+  const auto eviction_insert_start = SteadyClock::now ();
+  ForEachChunk (evictable_memory_ids.size (),
+                [&] (std::size_t begin, std::size_t end) {
+                  const std::string placeholders
+                      = eviction_policy::MakePlaceholders (end - begin);
+                  std::vector<std::any> params = { evicted_at };
+                  AppendParams (params, evictable_memory_ids, begin, end);
+                  tx.Execute (
+                      "INSERT INTO memory_evictions ("
+                      "  memory_id, embedding_id, source_id, kind, label, "
+                      "  start_ts, end_ts, created_at, last_access, strength, "
+                      "  use_frequency, contextual_gain, retrieved_count, "
+                      "  used_count, n_signals, modality, eviction_reason, "
+                      "  evicted_at"
+                      ") "
+                      "SELECT m.memory_id, m.embedding_id, m.source_id, "
+                      "       m.kind, COALESCE(m.label, ''), m.start_ts, "
+                      "       m.end_ts, m.created_at, m.last_access, "
+                      "       m.strength, m.use_frequency, "
+                      "       m.contextual_gain, m.retrieved_count, "
+                      "       m.used_count, m.n_signals, m.modality, "
+                      "       'periphery_cutoff', ? "
+                      "FROM memories m "
+                      "WHERE m.memory_id IN (" + placeholders + ")",
+                      params);
+                });
+  context.AddOperationTiming ("MemoryStrength.eviction_insert_sql",
+                              ElapsedMillis (eviction_insert_start));
+
+  const auto assoc_delete_start = SteadyClock::now ();
+  ForEachChunk (evictable_memory_ids.size (),
+                [&] (std::size_t begin, std::size_t end) {
+                  const std::string placeholders
+                      = eviction_policy::MakePlaceholders (end - begin);
+                  auto params
+                      = MakeParams (evictable_memory_ids, begin, end);
+                  AppendParams (params, evictable_memory_ids, begin, end);
+                  tx.Execute (
+                      "DELETE FROM associations "
+                      "WHERE source_memory_id IN (" + placeholders + ") "
+                      "   OR target_memory_id IN (" + placeholders + ")",
+                      params);
+                });
+  context.AddOperationTiming ("MemoryStrength.eviction_delete_associations_sql",
+                              ElapsedMillis (assoc_delete_start));
+
+  const auto signal_delete_start = SteadyClock::now ();
+  ForEachChunk (evictable_memory_ids.size (),
+                [&] (std::size_t begin, std::size_t end) {
+                  const std::string placeholders
+                      = eviction_policy::MakePlaceholders (end - begin);
+                  tx.Execute (
+                      "DELETE FROM signals WHERE memory_id IN ("
+                          + placeholders + ")",
+                      MakeParams (evictable_memory_ids, begin, end));
+                });
+  context.AddOperationTiming ("MemoryStrength.eviction_delete_signals_sql",
+                              ElapsedMillis (signal_delete_start));
+
+  const auto current_surface_delete_start = SteadyClock::now ();
+  for (const long long memory_id : evictable_memory_ids)
+    {
+      tx.Execute ("DELETE FROM current_memory_embeddings WHERE memory_id = ?",
+                  { memory_id });
+    }
+  context.AddOperationTiming (
+      "MemoryStrength.eviction_delete_current_surface_sql",
+      ElapsedMillis (current_surface_delete_start));
+
+  const auto embedding_delete_start = SteadyClock::now ();
+  for (const long long embedding_id : evictable_embedding_ids)
+    {
+      tx.Execute ("DELETE FROM embeddings WHERE embedding_id = ?",
+                  { embedding_id });
+    }
+  context.AddOperationTiming ("MemoryStrength.eviction_delete_embeddings_sql",
+                              ElapsedMillis (embedding_delete_start));
+
+  const auto memory_delete_start = SteadyClock::now ();
+  ForEachChunk (evictable_memory_ids.size (),
+                [&] (std::size_t begin, std::size_t end) {
+                  const std::string placeholders
+                      = eviction_policy::MakePlaceholders (end - begin);
+                  tx.Execute (
+                      "DELETE FROM memories WHERE memory_id IN ("
+                          + placeholders + ")",
+                      MakeParams (evictable_memory_ids, begin, end));
+                });
+  context.AddOperationTiming ("MemoryStrength.eviction_delete_memories_sql",
+                              ElapsedMillis (memory_delete_start));
+  const int64_t eviction_count
+      = static_cast<int64_t> (evictable_memory_ids.size ());
 
   telemetry::LogDebug ("cortext.memory_strength",
                        { telemetry::Attribute::Int64 ("update_count",

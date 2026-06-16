@@ -1399,48 +1399,30 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
     {
       seed_sql
           = "WITH seed AS ("
-            "  SELECT embedding_id, distance, created_at "
-            "  FROM embeddings "
+            "  SELECT memory_id, embedding_id AS current_embedding_id, "
+            "         distance, created_at "
+            "  FROM current_memory_embeddings "
             "  WHERE embedding MATCH ? AND k = ? "
             "  ORDER BY distance"
-            "), seed_memory AS ("
-            "  SELECT seed.embedding_id AS seed_embedding_id, seed.distance, "
-            "         seed.created_at AS seed_created_at, "
-            "         m.memory_id, m.embedding_id AS base_embedding_id "
-            "  FROM seed "
-            "  JOIN memories m ON m.embedding_id = seed.embedding_id "
-            "  UNION ALL "
-            "  SELECT seed.embedding_id AS seed_embedding_id, seed.distance, "
-            "         seed.created_at AS seed_created_at, "
-            "         mr.memory_id, m.embedding_id AS base_embedding_id "
-            "  FROM seed "
-            "  JOIN memory_reconstructions mr "
-            "       ON mr.embedding_id = seed.embedding_id "
-            "  JOIN memories m ON m.memory_id = mr.memory_id "
-            "  WHERE mr.reconstruction_id = ("
-            "    SELECT MAX(mr2.reconstruction_id) "
-            "    FROM memory_reconstructions mr2 "
-            "    WHERE mr2.memory_id = mr.memory_id"
-            "  )"
             ") "
-            "SELECT sm.base_embedding_id, sm.distance, "
-              "COALESCE(m.created_at, sm.seed_created_at, 0) AS created_at, "
+            "SELECT m.embedding_id AS base_embedding_id, seed.distance, "
+              "COALESCE(m.created_at, seed.created_at, 0) AS created_at, "
               "COALESCE(m.last_access, 0) AS last_access, "
               "COALESCE(m.retrieved_count, 0) AS retrieved_count, "
               "COALESCE(m.used_count, 0) AS used_count, "
               "COALESCE(NULLIF(m.start_ts, 0), m.created_at, "
-            "         sm.seed_created_at, 0) AS event_ts, "
+            "         seed.created_at, 0) AS event_ts, "
             "m.memory_id, m.kind, m.source_id, m.modality, "
             "COALESCE(m.pre_activation, 0.0) AS pre_activation "
-            "FROM seed_memory sm "
-            "JOIN memories m ON m.memory_id = sm.memory_id "
+            "FROM seed "
+            "JOIN memories m ON m.memory_id = seed.memory_id "
             "WHERE m.kind != 'WORKING' "
             "AND m.kind != 'LABEL' "
             "AND (m.kind != 'ASSOCIATION' OR EXISTS ("
             "  SELECT 1 FROM associations a "
             "  WHERE a.source_memory_id = m.memory_id "
             "    AND a.edge_type = 'derived_from')) "
-            "ORDER BY sm.distance";
+            "ORDER BY seed.distance";
     }
   append_seeds (seed_sql, { q_vec, static_cast<long long> (seed_search_k) },
                 "GraphRetrieve.seed_sql");
@@ -2114,12 +2096,13 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
         if (it == current_pair_similarity.end ())
           {
             current_pair_similarity.emplace (key, query_similarity);
+            current_pair_object[key] = record.canonical_object;
           }
-        else
+        else if (query_similarity > it->second)
           {
-            it->second = std::max (it->second, query_similarity);
+            it->second = query_similarity;
+            current_pair_object[key] = record.canonical_object;
           }
-        current_pair_object[key] = record.canonical_object;
       }
   };
 
@@ -2130,7 +2113,7 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
   {
     const auto t_start = std::chrono::steady_clock::now ();
     std::ostringstream sql;
-    sql << "SELECT fc.fact_id, fc.embedding_id, e.distance, "
+    sql << "SELECT fc.fact_id, fc.embedding_id, "
            "fa.subject, fa.predicate, fa.object, "
            "fa.canonical_subject, fa.canonical_predicate, fa.canonical_object, "
            "fa.valid_start_ts, fa.valid_end_ts, fa.recorded_at_ts, "
@@ -2153,10 +2136,10 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
            " LEFT JOIN memories m ON m.memory_id = fe.source_memory_id "
            " WHERE fe.fact_id = fa.fact_id AND m.memory_id IS NOT NULL) "
            " AS evidence_count "
-           "FROM embeddings e "
-           "JOIN fact_cache fc ON fc.embedding_id = e.embedding_id "
+           "FROM fact_cache fc "
            "JOIN fact_assertions fa ON fa.fact_id = fc.fact_id "
-           "WHERE e.embedding MATCH ? AND k = ? ";
+           "WHERE fc.embedding_id IS NOT NULL "
+           "AND fc.embedding_id > 0 ";
     switch (retrieval_mode)
       {
       case temporal::RetrievalMode::Current:
@@ -2175,10 +2158,9 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
                "AND (fa.superseded_at_ts IS NULL OR fa.superseded_at_ts > ?) ";
         break;
       }
-    sql << "ORDER BY e.distance ASC";
+    sql << "ORDER BY fc.updated_at DESC, fc.fact_id DESC";
 
-    std::vector<std::any> params
-        = { q_vec, static_cast<long long> (k_fact_search) };
+    std::vector<std::any> params;
     switch (retrieval_mode)
       {
       case temporal::RetrievalMode::Current:
@@ -2198,21 +2180,68 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
       }
 
     auto rows = store->Execute (sql.str (), params);
-    const auto t_end = std::chrono::steady_clock::now ();
-    context.AddOperationTiming ("GraphRetrieve.fact_seed_sql",
-                                elapsed_ms (t_start, t_end));
-
+    struct ScoredFactSeed
+    {
+      store::FactRecord record;
+      double query_similarity = 0.0;
+    };
+    std::vector<ScoredFactSeed> scored_fact_seeds;
+    scored_fact_seeds.reserve (rows.size ());
     for (const auto &row : rows)
       {
         const store::FactRecord record = BuildFactRecord (
             row, cfg.focus, cfg.sensitivity, cfg.stability);
-        const auto it_dist = row.find ("distance");
+        if (record.embedding_id <= 0)
+          {
+            continue;
+          }
+        auto embedding_rows = store->Execute (
+            "SELECT embedding FROM embeddings WHERE embedding_id = ?",
+            { record.embedding_id });
+        if (embedding_rows.empty ())
+          {
+            continue;
+          }
+        auto it_embedding = embedding_rows[0].find ("embedding");
+        if (it_embedding == embedding_rows[0].end ())
+          {
+            continue;
+          }
+        Eigen::VectorXf fact_embedding;
+        if (!core::DecodeFloatBlob (
+                it_embedding->second, static_cast<int> (q.size ()),
+                fact_embedding))
+          {
+            continue;
+          }
+        const double cosine = core::Clamp (
+            core::CosineSimilarity (q, fact_embedding), -1.0, 1.0);
+        const double distance = std::sqrt (
+            std::max (0.0, 2.0 - 2.0 * cosine));
         const double query_similarity
             = core::RetrievalVectorDistanceScore (
-                it_dist != row.end () ? AnyToDouble (it_dist->second, 0.0)
-                                      : 0.0,
-                cfg.focus, cfg.sensitivity, cfg.stability);
-        add_matched_fact (record, query_similarity);
+                distance, cfg.focus, cfg.sensitivity, cfg.stability);
+        scored_fact_seeds.push_back ({ record, query_similarity });
+      }
+    std::sort (scored_fact_seeds.begin (), scored_fact_seeds.end (),
+               [] (const ScoredFactSeed &a, const ScoredFactSeed &b) {
+                 if (a.query_similarity != b.query_similarity)
+                   {
+                     return a.query_similarity > b.query_similarity;
+                   }
+                 return a.record.fact_id > b.record.fact_id;
+               });
+    if (static_cast<int> (scored_fact_seeds.size ()) > k_fact_search)
+      {
+        scored_fact_seeds.resize (static_cast<size_t> (k_fact_search));
+      }
+    const auto t_end = std::chrono::steady_clock::now ();
+    context.AddOperationTiming ("GraphRetrieve.fact_seed_sql",
+                                elapsed_ms (t_start, t_end));
+
+    for (const auto &seed : scored_fact_seeds)
+      {
+        add_matched_fact (seed.record, seed.query_similarity);
       }
   }
 
@@ -3382,29 +3411,50 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context, Transactio
       try
         {
           const auto t_start = std::chrono::steady_clock::now ();
-          std::string sql
-              = std::string (
-                    "SELECT m.memory_id, "
-                    "m.embedding_id AS base_embedding_id, "
-                    "e.embedding, "
-                    "COALESCE(m.created_at, e.created_at, 0) AS created_at, "
-                    "COALESCE(m.last_access, 0) AS last_access, "
-                    "COALESCE(m.retrieved_count, 0) AS retrieved_count, "
-                    "COALESCE(m.used_count, 0) AS used_count, "
-                    "COALESCE(NULLIF(m.start_ts, 0), m.created_at, "
-                    "         e.created_at, 0) AS event_ts, "
-                    "m.context, m.source_reliability, "
-                    "m.source_contradiction_count, m.emotional_intensity, "
-                    "m.s_arousal_avg, m.kind, "
-                    "m.source_id, m.modality, "
-                    "COALESCE(m.pre_activation, 0.0) AS pre_activation "
-                    "FROM memories m ")
-                + latest_reconstruction_join
-                + "JOIN embeddings e "
-                  "ON e.embedding_id = "
-                + current_embedding_expr
-                + " "
+          std::string sql;
+          if (disable_constructive_recall)
+            {
+              sql =
+                  "SELECT m.memory_id, "
+                  "m.embedding_id AS base_embedding_id, "
+                  "e.embedding, "
+                  "COALESCE(m.created_at, e.created_at, 0) AS created_at, "
+                  "COALESCE(m.last_access, 0) AS last_access, "
+                  "COALESCE(m.retrieved_count, 0) AS retrieved_count, "
+                  "COALESCE(m.used_count, 0) AS used_count, "
+                  "COALESCE(NULLIF(m.start_ts, 0), m.created_at, "
+                  "         e.created_at, 0) AS event_ts, "
+                  "m.context, m.source_reliability, "
+                  "m.source_contradiction_count, m.emotional_intensity, "
+                  "m.s_arousal_avg, m.kind, "
+                  "m.source_id, m.modality, "
+                  "COALESCE(m.pre_activation, 0.0) AS pre_activation "
+                  "FROM memories m "
+                  "JOIN embeddings e ON e.embedding_id = m.embedding_id "
                   "WHERE m.memory_id IN (";
+            }
+          else
+            {
+              sql =
+                  "SELECT m.memory_id, "
+                  "m.embedding_id AS base_embedding_id, "
+                  "cme.embedding, "
+                  "COALESCE(m.created_at, cme.created_at, 0) AS created_at, "
+                  "COALESCE(m.last_access, 0) AS last_access, "
+                  "COALESCE(m.retrieved_count, 0) AS retrieved_count, "
+                  "COALESCE(m.used_count, 0) AS used_count, "
+                  "COALESCE(NULLIF(m.start_ts, 0), m.created_at, "
+                  "         cme.created_at, 0) AS event_ts, "
+                  "m.context, m.source_reliability, "
+                  "m.source_contradiction_count, m.emotional_intensity, "
+                  "m.s_arousal_avg, m.kind, "
+                  "m.source_id, m.modality, "
+                  "COALESCE(m.pre_activation, 0.0) AS pre_activation "
+                  "FROM memories m "
+                  "JOIN current_memory_embeddings cme "
+                  "ON cme.memory_id = m.memory_id "
+                  "WHERE m.memory_id IN (";
+            }
           std::vector<std::any> params;
           params.reserve (expanded_memory_ids.size ());
           bool first = true;
