@@ -285,6 +285,22 @@ tighten gates. The full replay was then restarted from scratch with baseline
 and stripped arms both inheriting the WM21 default; live 12B judging and the
 15-minute status monitor were reattached to the replacement run.
 
+A second restart on June 16, 2026 corrected the consolidation timing contract.
+The replay was intended to model human nightly consolidation, but the existing
+`--daily-consolidation` path fired when source timestamps crossed a calendar-day
+bucket and recorded the first event of the new day as the consolidation time.
+That is a poor proxy for sleep: it can consolidate at midnight or at the next
+message rather than at a stable off-hours checkpoint. The live replay runner now
+supports `--daily-consolidation-hour` and `--replay-timezone`; the replacement
+run sets them to local 02:00 and `America/Los_Angeles`, respectively. Daily
+consolidation compares source-time sleep buckets, records the consolidation at
+the configured local sleep checkpoint, and labels the trigger
+`daily_sleep_checkpoint`. The replacement full-corpus run
+(`eval_runs/full6y_strip_ablation_20260616T070310Z_ollama_e2b_wm21_sleep0200_pacific_gpu2`)
+therefore keeps the same two-arm WM21 stripping contrast and live judge setup,
+but treats consolidation as a source-time nightly sleep event rather than a
+host-time calendar boundary.
+
 ## ACT-R-Inspired Retrieval Gate Ablations
 
 On **June 11, 2026**, we added a focused real-encoder ablation target for the ACT-R-inspired retrieval ideas: `examples/benchmark/cortext_actr_retrieval_ablation_bench`. This benchmark does not import ACT-R's production-rule architecture. It tests four transplanted scoring ideas in the existing Cortext retrieval pipeline: base-level availability, recent retrieval inhibition, procedural utility, and partial matching over existing metadata. It also tests downstream evidence blending as a rank-preserving packet-generation step for near-tied selected candidates and evidence-weighted confidence as a rank-preserving annotation/source-confidence mechanism for those packets. The harness encodes all query and memory text through the production AIST path, truncates to the same 256-dimensional Matryoshka retrieval view used by the SQLite vector schema, and then runs each study with the relevant gate off and on. The validation run used:

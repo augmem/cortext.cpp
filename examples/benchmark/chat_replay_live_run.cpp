@@ -21,6 +21,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
+#include <ctime>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -76,6 +77,8 @@ struct Config
   double stability = 0.5;
   bool deep_consolidation = false;
   bool daily_consolidation = false;
+  int daily_consolidation_hour = 2;
+  std::string replay_timezone;
   bool append = false;
   bool resume_from_existing = false;
   bool profile_probes_only = false;
@@ -223,6 +226,22 @@ ParseTimestamp (const std::string &text)
   return static_cast<std::uint64_t> (seconds) * 1000ULL;
 }
 
+void
+ApplyReplayTimezone (const std::string &timezone)
+{
+  if (timezone.empty ())
+    return;
+#if defined(_WIN32)
+  if (_putenv_s ("TZ", timezone.c_str ()) != 0)
+    throw std::runtime_error ("failed to set replay timezone: " + timezone);
+  _tzset ();
+#else
+  if (setenv ("TZ", timezone.c_str (), 1) != 0)
+    throw std::runtime_error ("failed to set replay timezone: " + timezone);
+  tzset ();
+#endif
+}
+
 int
 LocalDayBucket (std::uint64_t timestamp_ms)
 {
@@ -234,6 +253,45 @@ LocalDayBucket (std::uint64_t timestamp_ms)
   localtime_r (&seconds, &local);
 #endif
   return (local.tm_year + 1900) * 1000 + local.tm_yday;
+}
+
+int
+LocalSleepBucket (std::uint64_t timestamp_ms, int sleep_hour)
+{
+  const std::time_t seconds = static_cast<std::time_t> (timestamp_ms / 1000ULL);
+  std::tm local{};
+#if defined(_WIN32)
+  localtime_s (&local, &seconds);
+#else
+  localtime_r (&seconds, &local);
+#endif
+  local.tm_hour -= sleep_hour;
+  local.tm_isdst = -1;
+  if (std::mktime (&local) < 0)
+    return LocalDayBucket (timestamp_ms);
+  return (local.tm_year + 1900) * 1000 + local.tm_yday;
+}
+
+std::uint64_t
+LocalSleepCheckpointTimestamp (std::uint64_t timestamp_ms, int sleep_hour)
+{
+  const std::time_t seconds = static_cast<std::time_t> (timestamp_ms / 1000ULL);
+  std::tm local{};
+#if defined(_WIN32)
+  localtime_s (&local, &seconds);
+#else
+  localtime_r (&seconds, &local);
+#endif
+  if (local.tm_hour < sleep_hour)
+    local.tm_mday -= 1;
+  local.tm_hour = sleep_hour;
+  local.tm_min = 0;
+  local.tm_sec = 0;
+  local.tm_isdst = -1;
+  const std::time_t checkpoint_seconds = std::mktime (&local);
+  if (checkpoint_seconds < 0)
+    return timestamp_ms;
+  return static_cast<std::uint64_t> (checkpoint_seconds) * 1000ULL;
 }
 
 std::vector<Message>
@@ -1343,6 +1401,16 @@ ParseArgs (int argc, char **argv)
           cfg.daily_consolidation = true;
           cfg.consolidate_every = 0;
         }
+      else if (arg == "--daily-consolidation-hour")
+        {
+          cfg.daily_consolidation_hour = std::stoi (require_value ());
+          if (cfg.daily_consolidation_hour < 0
+              || cfg.daily_consolidation_hour > 23)
+            throw std::runtime_error (
+                "--daily-consolidation-hour must be in [0, 23]");
+        }
+      else if (arg == "--replay-timezone")
+        cfg.replay_timezone = require_value ();
       else if (arg == "--deep")
         cfg.deep_consolidation = true;
       else if (arg == "--append")
@@ -1389,6 +1457,7 @@ main (int argc, char **argv)
   try
     {
       Config cfg = ParseArgs (argc, argv);
+      ApplyReplayTimezone (cfg.replay_timezone);
       const fs::path transcript
           = chat_replay::DiscoverTranscript (cfg.input_dir, cfg.transcript);
       auto messages = ParseMessages (transcript);
@@ -2010,6 +2079,13 @@ main (int argc, char **argv)
           out["wall_ms_excluding_consolidation"] = wall_ms;
           out["deep_consolidation"] = cfg.deep_consolidation;
           out["daily_consolidation"] = cfg.daily_consolidation;
+          out["daily_consolidation_hour_local"]
+              = cfg.daily_consolidation_hour;
+          out["daily_consolidation_policy"]
+              = "source_time_sleep_checkpoint";
+          out["replay_timezone"] = cfg.replay_timezone.empty ()
+                                       ? "process_default"
+                                       : cfg.replay_timezone;
           out["source_id_policy"]
               = "User and Contact are opaque conversation provenance source "
                 "IDs; media is not encoded into source_id";
@@ -2025,7 +2101,8 @@ main (int argc, char **argv)
                 "media ingress";
           out["consolidation_timestamp_policy"]
               = "checkpoint database consolidation rows use source event "
-                "timestamps";
+                "timestamps; daily replay consolidation uses the configured "
+                "local sleep checkpoint";
           out["wall_ms"] = wall_ms;
           out["peak_rss_mb"] = PeakRssMb ();
           out["mean_encode_ms"] = 0.0;
@@ -2248,7 +2325,7 @@ main (int argc, char **argv)
           return 0;
         }
 
-      int current_day_bucket = -1;
+      int current_sleep_bucket = -1;
       auto started = std::chrono::steady_clock::now ();
       int event_count = 0;
       std::uint64_t last_processed_timestamp = 0;
@@ -2306,7 +2383,8 @@ main (int argc, char **argv)
           media_processed = resume.media_count_offset;
           media_attempted = resume.media_count_offset;
           event_count = resume.event_count_offset;
-          current_day_bucket = LocalDayBucket (resume.after_timestamp);
+          current_sleep_bucket = LocalSleepBucket (
+              resume.after_timestamp, cfg.daily_consolidation_hour);
           last_processed_timestamp = resume.after_timestamp;
 
           nlohmann::json resume_log {
@@ -2338,6 +2416,9 @@ main (int argc, char **argv)
           { "trigger", trigger },
           { "timestamp", timestamp },
           { "local_day_bucket", LocalDayBucket (timestamp) },
+          { "local_sleep_bucket",
+            LocalSleepBucket (timestamp, cfg.daily_consolidation_hour) },
+          { "sleep_hour_local", cfg.daily_consolidation_hour },
           { "elapsed_ms", elapsed_ms },
           { "processed_text_messages", processed_text },
           { "media_processed", media_processed },
@@ -2345,28 +2426,32 @@ main (int argc, char **argv)
         });
       };
       auto maybe_run_daily_consolidation = [&] (std::uint64_t timestamp) {
-        const int day_bucket = LocalDayBucket (timestamp);
-        if (cfg.daily_consolidation && current_day_bucket >= 0
-            && day_bucket != current_day_bucket
+        const int sleep_bucket
+            = LocalSleepBucket (timestamp, cfg.daily_consolidation_hour);
+        if (cfg.daily_consolidation && current_sleep_bucket >= 0
+            && sleep_bucket != current_sleep_bucket
             && (processed_text > 0 || media_processed > 0))
           {
+            const std::uint64_t checkpoint_timestamp
+                = LocalSleepCheckpointTimestamp (
+                    timestamp, cfg.daily_consolidation_hour);
             const auto consolidation_started
                 = std::chrono::steady_clock::now ();
             cortext::internal::ReplayIngress::ConsolidateAt (
-                *engine, timestamp, consolidation_mode ());
+                *engine, checkpoint_timestamp, consolidation_mode ());
             const auto consolidation_ended = std::chrono::steady_clock::now ();
             consolidation_ms_total
                 += std::chrono::duration<double, std::milli> (
                        consolidation_ended - consolidation_started)
                        .count ();
             record_consolidation_event (
-                "daily_boundary", timestamp,
+                "daily_sleep_checkpoint", checkpoint_timestamp,
                 std::chrono::duration<double, std::milli> (
                     consolidation_ended - consolidation_started)
                     .count ());
             ++consolidation_runs;
           }
-        current_day_bucket = day_bucket;
+        current_sleep_bucket = sleep_bucket;
       };
       auto maybe_log_progress = [&] (const EventDoc &doc,
                                      const cortext::Cortext::Context &ctx) {
@@ -2862,6 +2947,10 @@ main (int argc, char **argv)
           = static_cast<double> (wall_ms) - consolidation_ms_total;
       out["deep_consolidation"] = cfg.deep_consolidation;
       out["daily_consolidation"] = cfg.daily_consolidation;
+      out["daily_consolidation_hour_local"] = cfg.daily_consolidation_hour;
+      out["daily_consolidation_policy"] = "source_time_sleep_checkpoint";
+      out["replay_timezone"] = cfg.replay_timezone.empty () ? "process_default"
+                                                            : cfg.replay_timezone;
       out["source_id_policy"]
           = "User and Contact are opaque conversation provenance source IDs; "
             "media is not encoded into source_id";
@@ -2874,8 +2963,8 @@ main (int argc, char **argv)
           = "media replay uses internal timestamped ingress so signal "
             "timestamps match source event timestamps";
       out["consolidation_timestamp_policy"]
-          = "benchmark replay consolidation uses source event timestamps, not "
-            "wall-clock time";
+          = "benchmark replay consolidation uses source event timestamps at "
+            "the configured local sleep checkpoint, not wall-clock time";
       out["wall_ms"] = wall_ms;
       out["peak_rss_mb"] = PeakRssMb ();
       out["mean_encode_ms"] = processed_text_this_run > 0
