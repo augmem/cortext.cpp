@@ -538,8 +538,8 @@ TEST_CASE ("WMMaintenanceCostPerSlot keeps the full-WM budget "
            "[formula][knobs][working_memory]")
 {
   // Per-slot maintenance shares a fixed total budget: cost-per-slot x
-  // capacity = lerp(0.05, 0.15, S) x 7 (the neutral capacity), so capacity
-  // changes never change gate strictness.
+  // capacity = lerp(0.05, 0.15, S) x 7 (the legacy neutral-capacity budget),
+  // so capacity changes never change gate strictness.
   for (const double S : { 0.0, 0.3, 0.5, 0.7, 1.0 })
     {
       for (const double F : { 0.0, 0.5, 1.0 })
@@ -552,11 +552,11 @@ TEST_CASE ("WMMaintenanceCostPerSlot keeps the full-WM budget "
         }
     }
 
-  // At neutral knobs (capacity exactly 7) the per-slot cost matches the
-  // original spec value lerp(0.05, 0.15, S).
-  REQUIRE (WMBaseCapacity (0.5, 0.5) == 7);
+  // At neutral knobs, the production default is capacity 21 and the per-slot
+  // cost is one third of the original seven-slot spec value.
+  REQUIRE (WMBaseCapacity (0.5, 0.5) == 21);
   REQUIRE (WMMaintenanceCostPerSlot (0.5, 0.5)
-           == Catch::Approx (SensitivityExpected (0.05, 0.15, 0.5)));
+           == Catch::Approx (SensitivityExpected (0.05, 0.15, 0.5) / 3.0));
 
   // Monotonic in S at fixed capacity.
   REQUIRE (WMMaintenanceCostPerSlot (0.3, 0.5)

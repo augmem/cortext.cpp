@@ -70,7 +70,7 @@ UpdateStability::Execute (OperationContext &context, Transaction &tx) const
   const double cutoff = core::PeripheryCutoff (T);
   const double now_s
       = static_cast<double> (context.GetSignal ().timestamp) / 1000.0;
-  if (Store *store = context.GetStore ())
+  if (context.GetStore ())
     {
       try
         {
@@ -89,31 +89,39 @@ UpdateStability::Execute (OperationContext &context, Transaction &tx) const
                   std::any_cast<double> (it->second));
             return def;
           };
+          auto get_double = [] (const std::map<std::string, std::any> &row,
+                                const std::string &key,
+                                double def) -> double {
+            auto it = row.find (key);
+            if (it == row.end () || !it->second.has_value ())
+              return def;
+            if (it->second.type () == typeid (double))
+              return std::any_cast<double> (it->second);
+            if (it->second.type () == typeid (float))
+              return static_cast<double> (std::any_cast<float> (it->second));
+            if (it->second.type () == typeid (long long))
+              return static_cast<double> (std::any_cast<long long> (it->second));
+            if (it->second.type () == typeid (int))
+              return static_cast<double> (std::any_cast<int> (it->second));
+            return def;
+          };
           auto rows = tx.Execute (
-              "SELECT created_at, start_ts "
-              "FROM memories WHERE strength >= ?",
-              { cutoff });
-          double sum_age = 0.0;
-          int count = 0;
-          for (const auto &row : rows)
-            {
-              const long long created_at
-                  = get_int64 (row, "created_at", 0);
-              const long long start_ts
-                  = get_int64 (row, "start_ts", 0);
-              const long long ts
-                  = (created_at > 0) ? created_at : start_ts;
-              if (ts <= 0)
-                {
-                  continue;
-                }
-              const double age_s = std::max (0.0, now_s
-                                                       - static_cast<double> (ts)
-                                                             / 1000.0);
-              sum_age += age_s;
-              ++count;
-            }
-          observed_retention = (count > 0) ? (sum_age / count) : 0.0;
+              "SELECT COUNT(*) AS count, "
+              "       AVG(MAX(0.0, ?1 - "
+              "           (CASE WHEN created_at > 0 "
+              "                 THEN created_at ELSE start_ts END) / 1000.0)) "
+              "           AS avg_age "
+              "FROM memories "
+              "WHERE strength >= ?2 "
+              "  AND (CASE WHEN created_at > 0 "
+              "            THEN created_at ELSE start_ts END) > 0",
+              { now_s, cutoff });
+          const auto &row = rows.empty ()
+                                ? std::map<std::string, std::any> {}
+                                : rows.front ();
+          const long long count = get_int64 (row, "count", 0);
+          observed_retention
+              = (count > 0) ? get_double (row, "avg_age", 0.0) : 0.0;
         }
       catch (...)
         {

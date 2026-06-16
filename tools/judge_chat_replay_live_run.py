@@ -1337,31 +1337,62 @@ def call_ollama_judge(
     context_window_tokens: int,
     keep_alive: str,
 ) -> dict:
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are a strict multimodal retrieval-quality judge. Inspect "
+                "attached image/audio evidence when present. Return only valid JSON."
+            ),
+        },
+        ollama_user_message(content),
+    ]
+    options = {
+        "temperature": 0,
+        "num_predict": max_tokens,
+        "num_ctx": context_window_tokens,
+    }
     body = {
         "model": model,
-        "messages": [
-            {
-                "role": "system",
-                "content": (
-                    "You are a strict multimodal retrieval-quality judge. Inspect "
-                    "attached image/audio evidence when present. Return only valid JSON."
-                ),
-            },
-            ollama_user_message(content),
-        ],
+        "messages": messages,
         "stream": False,
         "keep_alive": keep_alive,
         "format": judge_json_schema(content),
         "think": False,
-        "options": {
-            "temperature": 0,
-            "num_predict": max_tokens,
-            "num_ctx": context_window_tokens,
-        },
+        "options": options,
     }
     payload = post_json_local(f"{base_url}/api/chat", body, timeout_s)
     content_text = payload.get("message", {}).get("content", "")
-    return parse_judge_json(str(content_text))
+    try:
+        return parse_judge_json(str(content_text))
+    except JudgeMalformedResponse as schema_exc:
+        fallback_body = {
+            "model": model,
+            "messages": messages,
+            "stream": False,
+            "keep_alive": keep_alive,
+            "format": "json",
+            "think": False,
+            "options": options,
+        }
+        print(
+            "judge_ollama_schema_fallback "
+            f"ts={utc_now_text()} "
+            f"reason={type(schema_exc).__name__}: {schema_exc}",
+            file=sys.stderr,
+            flush=True,
+        )
+        fallback_payload = post_json_local(
+            f"{base_url}/api/chat", fallback_body, timeout_s
+        )
+        fallback_text = fallback_payload.get("message", {}).get("content", "")
+        try:
+            return parse_judge_json(str(fallback_text))
+        except JudgeMalformedResponse as fallback_exc:
+            raise JudgeMalformedResponse(
+                "Ollama schema format and json format both returned malformed "
+                f"responses: schema={schema_exc}; json={fallback_exc}"
+            ) from fallback_exc
 
 
 def call_judge_once(
@@ -2321,28 +2352,6 @@ def main() -> int:
                     int(probe["event_index"]),
                     repetition,
                 )
-                packet_sections: list[str] = []
-                for system in ordered_systems:
-                    packet_label = real_to_label[system]
-                    if system == "cortext_native":
-                        packet_sections.append(
-                            packet_from_memories(
-                                f"PACKET {packet_label}",
-                                memory_rows,
-                                timeline,
-                                media_memory_map,
-                                args.context_limit,
-                            )
-                        )
-                    else:
-                        packet_sections.append(
-                            packet_from_docs(
-                                f"PACKET {packet_label}",
-                                packet_docs_by_system[system],
-                                args.context_limit,
-                            )
-                        )
-
                 packet_key_list = ", ".join(real_to_label[system] for system in ordered_systems)
                 if args.blind_packets:
                     prompt_rules = [
@@ -2368,13 +2377,117 @@ def main() -> int:
                         "Allowed failure_reason values: missing_source_link, temporal_drift, insufficient_context, unrelated_retrieval, modality_blindness, rag_context_advantage, full_history_upper_bound_advantage, cortext_wins, tie_or_unclear. If winner is cortext_native use cortext_wins unless a more specific failure applies. If winner is traditional_chat_rag use rag_context_advantage. If winner is full_history_upper_bound use full_history_upper_bound_advantage.",
                     ]
 
-                prompt = "\n\n".join(
-                    [
-                        *prompt_rules,
-                        f"CURRENT_TURN:\nevent_index={query_doc.index} modality={query_doc.modality} source_id={query_doc.source_id} timestamp={query_doc.timestamp}: {query_doc.text}",
-                        *packet_sections,
+                def build_judge_content(prompt_docs_by_system: dict[str, list[TimelineDoc]]):
+                    packet_sections: list[str] = []
+                    for system in ordered_systems:
+                        packet_label = real_to_label[system]
+                        if system == "cortext_native":
+                            packet_sections.append(
+                                packet_from_memories(
+                                    f"PACKET {packet_label}",
+                                    memory_rows,
+                                    timeline,
+                                    media_memory_map,
+                                    args.context_limit,
+                                )
+                            )
+                        else:
+                            packet_sections.append(
+                                packet_from_docs(
+                                    f"PACKET {packet_label}",
+                                    prompt_docs_by_system[system],
+                                    args.context_limit,
+                                )
+                            )
+                    prompt = "\n\n".join(
+                        [
+                            *prompt_rules,
+                            f"CURRENT_TURN:\nevent_index={query_doc.index} modality={query_doc.modality} source_id={query_doc.source_id} timestamp={query_doc.timestamp}: {query_doc.text}",
+                            *packet_sections,
+                        ]
+                    )
+                    packet_media_docs = [
+                        (system, real_to_label[system], prompt_docs_by_system[system])
+                        for system in ordered_systems
                     ]
+                    content, media_stats = build_multimodal_content(
+                        prompt,
+                        input_dir,
+                        packet_media_docs,
+                        args.max_media_per_system,
+                        work_dir,
+                    )
+                    return prompt, packet_media_docs, content, media_stats
+
+                prompt_packet_docs_by_system = dict(packet_docs_by_system)
+                prompt, packet_media_docs, content, media_stats = build_judge_content(
+                    prompt_packet_docs_by_system
                 )
+                prompt_budget_tokens = max(
+                    4096,
+                    args.judge_context_window_tokens
+                    - args.judge_max_output_tokens
+                    - 1024,
+                )
+                if (
+                    estimate_judge_prompt_tokens(content) > prompt_budget_tokens
+                    and "full_history_upper_bound" in prompt_packet_docs_by_system
+                ):
+                    original_full_docs = prompt_packet_docs_by_system[
+                        "full_history_upper_bound"
+                    ]
+                    lo = 0
+                    hi = len(original_full_docs)
+                    best_docs: list[TimelineDoc] = []
+                    best_prompt = prompt
+                    best_packet_media_docs = packet_media_docs
+                    best_content = content
+                    best_media_stats = media_stats
+                    while lo <= hi:
+                        mid = (lo + hi) // 2
+                        trial_docs = (
+                            original_full_docs[-mid:] if mid > 0 else []
+                        )
+                        trial_packet_docs_by_system = dict(prompt_packet_docs_by_system)
+                        trial_packet_docs_by_system["full_history_upper_bound"] = trial_docs
+                        (
+                            trial_prompt,
+                            trial_packet_media_docs,
+                            trial_content,
+                            trial_media_stats,
+                        ) = build_judge_content(trial_packet_docs_by_system)
+                        if (
+                            estimate_judge_prompt_tokens(trial_content)
+                            <= prompt_budget_tokens
+                        ):
+                            best_docs = trial_docs
+                            best_prompt = trial_prompt
+                            best_packet_media_docs = trial_packet_media_docs
+                            best_content = trial_content
+                            best_media_stats = trial_media_stats
+                            lo = mid + 1
+                        else:
+                            hi = mid - 1
+                    if len(best_docs) < len(original_full_docs):
+                        dropped = len(original_full_docs) - len(best_docs)
+                        fairness_checks[
+                            "full_history_oldest_messages_dropped_for_judge_prompt_fit"
+                        ] += dropped
+                        print(
+                            "judge_prompt_fit_shrink "
+                            f"ts={utc_now_text()} "
+                            f"probe_event_index={probe.get('event_index')} "
+                            f"dropped_full_history_docs={dropped} "
+                            f"kept_full_history_docs={len(best_docs)} "
+                            f"prompt_tokens_estimate={estimate_judge_prompt_tokens(best_content)} "
+                            f"prompt_budget_tokens={prompt_budget_tokens}",
+                            flush=True,
+                        )
+                    prompt = best_prompt
+                    packet_media_docs = best_packet_media_docs
+                    content = best_content
+                    media_stats = best_media_stats
+
                 if args.blind_packets:
                     prompt_lower = prompt.lower()
                     hidden_mentions = sorted(
@@ -2382,17 +2495,6 @@ def main() -> int:
                     )
                     if hidden_mentions:
                         fairness_checks["blind_prompt_hidden_system_label_mentions"] += 1
-                packet_media_docs = [
-                    (system, real_to_label[system], packet_docs_by_system[system])
-                    for system in ordered_systems
-                ]
-                content, media_stats = build_multimodal_content(
-                    prompt,
-                    input_dir,
-                    packet_media_docs,
-                    args.max_media_per_system,
-                    work_dir,
-                )
                 if (
                     media_stats.get("enabled")
                     and any(

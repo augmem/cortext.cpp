@@ -828,8 +828,19 @@ TEST_CASE ("Working memory slots decay on load",
       "VALUES (?, ?, 'WORKING', 'text', ?, ?, ?, 1, 0.5, 0.5, ?)",
       { 1LL, std::string ("test"), 1.0, old_ts_ms, old_ts_ms, old_ts_ms });
 
-  // Load with sensitivity=0.5 → cost_per_slot = lerp(0.05, 0.15, 0.5) = 0.10
-  // After 5 seconds: strength = 1.0 - 0.10 * 5 = 0.5
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  cfg.focus = 0.5;
+  cfg.sensitivity = 0.5;
+  cfg.stability = 0.5;
+  const double expected_strength = std::max (
+      core::WMStrengthFloor (cfg.focus, cfg.sensitivity, cfg.stability),
+      1.0 - core::WMMaintenanceCostPerSlot (cfg.sensitivity, cfg.focus)
+                * 5.0);
+
+  // Load with neutral knobs. The WM21 default spreads the legacy full-window
+  // maintenance budget over 21 slots, so five seconds decays to the
+  // knob-derived expected strength rather than the old seven-slot value.
   struct VerifyDecayOp : IOperation
   {
     mutable double loaded_strength = 0.0;
@@ -848,9 +859,6 @@ TEST_CASE ("Working memory slots decay on load",
   auto verify_ptr = std::make_unique<VerifyDecayOp> ();
   auto *verify_raw = verify_ptr.get ();
   auto ops = std::make_unique<DynamicOperationSet> (std::move (verify_ptr));
-  SignalProcessor::Config cfg;
-  cortext::testing::RequireEncoder (cfg);
-  cfg.sensitivity = 0.5;
   SignalProcessor processor (cfg, store, std::move (ops));
 
   Signal s;
@@ -859,8 +867,8 @@ TEST_CASE ("Working memory slots decay on load",
   s.source_id = "test";
   processor.Process (s);
 
-  // Strength should have decayed from 1.0 to approximately 0.5
-  REQUIRE_THAT (verify_raw->loaded_strength, WithinAbs (0.5, 0.1));
+  REQUIRE_THAT (verify_raw->loaded_strength,
+                WithinAbs (expected_strength, 1e-6));
 }
 
 TEST_CASE ("Working memory reload preserves floor like live passive decay",
@@ -876,12 +884,13 @@ TEST_CASE ("Working memory reload preserves floor like live passive decay",
     processor.Flush ();
   }
 
-  // Insert slot with very old timestamp (20 seconds ago)
+  // Insert slot with very old timestamp. Under the WM21 maintenance budget this
+  // needs to be older than the old seven-slot test case to reach the floor.
   // v2 schema: WM slots stored in memories table with kind='WORKING'
   const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds> (
                           std::chrono::system_clock::now ().time_since_epoch ())
                           .count ();
-  const auto old_ts_ms = now_ms - 20000; // 20 seconds ago in milliseconds
+  const auto old_ts_ms = now_ms - 60000; // 60 seconds ago in milliseconds
 
   std::vector<float> emb (256, 0.1f);
 

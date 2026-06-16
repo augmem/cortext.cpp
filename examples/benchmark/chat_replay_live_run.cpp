@@ -77,13 +77,30 @@ struct Config
   bool deep_consolidation = false;
   bool daily_consolidation = false;
   bool append = false;
+  bool resume_from_existing = false;
   bool profile_probes_only = false;
   bool checkpoint_eval_only = false;
+  int progress_stride = 1000;
   std::uint64_t checkpoint_after_timestamp = 0;
   int checkpoint_query_count = 8;
   int checkpoint_query_stride = 1;
   int checkpoint_query_days = 0;
   int checkpoint_queries_per_day = 0;
+};
+
+struct ResumeCheckpoint
+{
+  bool enabled = false;
+  int event_count_offset = 0;
+  int text_count_offset = 0;
+  int media_count_offset = 0;
+  int probe_count_offset = 0;
+  int rebuilt_event_count = 0;
+  int rebuilt_text_count = 0;
+  int prior_timeline_events = 0;
+  int db_signal_count = 0;
+  int db_text_signal_count = 0;
+  std::uint64_t after_timestamp = 0;
 };
 
 struct Message
@@ -1238,6 +1255,22 @@ SqlCount (const fs::path &db_path, const std::string &sql)
   return value;
 }
 
+int
+ProbeStreamRows (const fs::path &path)
+{
+  std::ifstream in (path);
+  if (!in)
+    return 0;
+  int rows = 0;
+  std::string line;
+  while (std::getline (in, line))
+    {
+      if (!Trim (line).empty ())
+        ++rows;
+    }
+  return rows;
+}
+
 double
 PeakRssMb ()
 {
@@ -1314,6 +1347,11 @@ ParseArgs (int argc, char **argv)
         cfg.deep_consolidation = true;
       else if (arg == "--append")
         cfg.append = true;
+      else if (arg == "--resume-from-existing")
+        {
+          cfg.resume_from_existing = true;
+          cfg.append = true;
+        }
       else if (arg == "--profile-probes-only")
         {
           cfg.profile_probes_only = true;
@@ -1335,6 +1373,8 @@ ParseArgs (int argc, char **argv)
         cfg.checkpoint_query_days = std::stoi (require_value ());
       else if (arg == "--checkpoint-queries-per-day")
         cfg.checkpoint_queries_per_day = std::stoi (require_value ());
+      else if (arg == "--progress-stride")
+        cfg.progress_stride = std::stoi (require_value ());
       else
         throw std::runtime_error ("unknown argument: " + arg);
     }
@@ -1373,12 +1413,44 @@ main (int argc, char **argv)
       if (!cfg.output_path.parent_path ().empty ())
         fs::create_directories (cfg.output_path.parent_path ());
       const fs::path probe_stream_path = ProbeStreamPath (cfg.output_path);
-      ResetProbeStream (probe_stream_path);
+      if (!cfg.resume_from_existing)
+        ResetProbeStream (probe_stream_path);
       if (!cfg.append)
         {
           fs::remove (cfg.db_path);
           fs::remove (cfg.db_path.string () + "-wal");
           fs::remove (cfg.db_path.string () + "-shm");
+        }
+
+      ResumeCheckpoint resume;
+      resume.enabled = cfg.resume_from_existing;
+      if (resume.enabled)
+        {
+          if (!fs::exists (cfg.db_path))
+            {
+              throw std::runtime_error (
+                  "--resume-from-existing requires an existing DB: "
+                  + cfg.db_path.string ());
+            }
+          resume.db_signal_count = static_cast<int> (std::max<long long> (
+              0, SqlCount (cfg.db_path, "SELECT COUNT(*) FROM signals")));
+          resume.db_text_signal_count = static_cast<int> (std::max<long long> (
+              0,
+              SqlCount (cfg.db_path,
+                        "SELECT COUNT(*) FROM signals WHERE modality = 'text'")));
+          resume.after_timestamp = static_cast<std::uint64_t> (
+              std::max<long long> (
+                  0,
+                  SqlCount (cfg.db_path,
+                            "SELECT COALESCE(MAX(timestamp), 0) FROM signals "
+                            "WHERE source_id IN ('User', 'Contact')")));
+          if (resume.db_signal_count <= 0 || resume.after_timestamp == 0)
+            {
+              throw std::runtime_error (
+                  "--resume-from-existing found no durable signal checkpoint in "
+                  + cfg.db_path.string ());
+            }
+          resume.probe_count_offset = ProbeStreamRows (probe_stream_path);
         }
 
       cortext::Cortext::Config cortext_cfg;
@@ -1501,6 +1573,13 @@ main (int argc, char **argv)
                      return !a.is_media;
                    return a.order < b.order;
                  });
+
+      if (cfg.resume_from_existing
+          && (cfg.checkpoint_eval_only || cfg.profile_probes_only))
+        {
+          throw std::runtime_error (
+              "--resume-from-existing is only supported for normal replay mode");
+        }
 
       if (cfg.checkpoint_eval_only)
         {
@@ -2174,6 +2253,80 @@ main (int argc, char **argv)
       int event_count = 0;
       std::uint64_t last_processed_timestamp = 0;
       bool final_window_consolidated = false;
+      std::size_t replay_start_index = 0;
+      if (resume.enabled)
+        {
+          while (replay_start_index < timeline.size ())
+            {
+              const auto &event = timeline[replay_start_index];
+              const bool prior_event = event.timestamp <= resume.after_timestamp;
+              if (!prior_event)
+                break;
+
+              if (!event.is_media)
+                {
+                  const auto &msg = messages[event.index];
+                  EventDoc doc {
+                    resume.rebuilt_event_count,
+                    msg.timestamp,
+                    SourceIdForMessage (msg),
+                    "text",
+                    msg.text,
+                  };
+                  prior_docs.push_back (doc);
+                  prior_text_docs.push_back (std::move (doc));
+                  ++resume.rebuilt_text_count;
+                }
+              else
+                {
+                  const auto &item = media[event.index];
+                  EventDoc media_doc {
+                    resume.rebuilt_event_count,
+                    item.timestamp,
+                    MediaSourceId (item),
+                    item.kind == "video" ? "image" : item.kind,
+                    "[" + item.kind
+                        + " source blob: " + item.path.filename ().string ()
+                        + "]",
+                  };
+                  prior_docs.push_back (std::move (media_doc));
+                }
+              ++resume.rebuilt_event_count;
+              ++resume.prior_timeline_events;
+              ++replay_start_index;
+            }
+
+          resume.event_count_offset = resume.rebuilt_event_count;
+          resume.text_count_offset = resume.rebuilt_text_count;
+          resume.media_count_offset
+              = std::max (0,
+                          resume.event_count_offset - resume.text_count_offset);
+
+          processed_text = resume.text_count_offset;
+          media_processed = resume.media_count_offset;
+          media_attempted = resume.media_count_offset;
+          event_count = resume.event_count_offset;
+          current_day_bucket = LocalDayBucket (resume.after_timestamp);
+          last_processed_timestamp = resume.after_timestamp;
+
+          nlohmann::json resume_log {
+            { "event_count_offset", resume.event_count_offset },
+            { "text_count_offset", resume.text_count_offset },
+            { "media_count_offset", resume.media_count_offset },
+            { "probe_count_offset", resume.probe_count_offset },
+            { "db_signal_count", resume.db_signal_count },
+            { "db_text_signal_count", resume.db_text_signal_count },
+            { "after_timestamp", resume.after_timestamp },
+            { "rebuilt_event_count", resume.rebuilt_event_count },
+            { "rebuilt_text_count", resume.rebuilt_text_count },
+            { "prior_timeline_events", resume.prior_timeline_events },
+            { "replay_start_timeline_index", replay_start_index },
+          };
+          std::cerr << "CHAT_REPLAY_RESUME "
+                    << resume_log.dump (-1, ' ', false,
+                                        nlohmann::json::error_handler_t::replace)
+                    << "\n";
+        }
       auto consolidation_mode = [&] {
         return cfg.deep_consolidation ? cortext::ConsolidationMode::Both
                                       : cortext::ConsolidationMode::Shallow;
@@ -2215,8 +2368,57 @@ main (int argc, char **argv)
           }
         current_day_bucket = day_bucket;
       };
-      for (const auto &event : timeline)
+      auto maybe_log_progress = [&] (const EventDoc &doc,
+                                     const cortext::Cortext::Context &ctx) {
+        if (cfg.progress_stride <= 0)
+          return;
+        const int cumulative_events = event_count + 1;
+        if (cumulative_events <= 0
+            || cumulative_events % cfg.progress_stride != 0)
+          return;
+        const int processed_text_this_run
+            = std::max (0, processed_text - resume.text_count_offset);
+        nlohmann::json progress {
+          { "event_index", event_count },
+          { "cumulative_events", cumulative_events },
+          { "timestamp", doc.timestamp },
+          { "modality", doc.modality },
+          { "resume_from_existing", resume.enabled },
+          { "processed_text_messages", processed_text },
+          { "processed_text_messages_this_run", processed_text_this_run },
+          { "media_processed", media_processed },
+          { "media_processed_this_run",
+            std::max (0, media_processed - resume.media_count_offset) },
+          { "last_total_ms", ctx.total_ms },
+          { "last_process_ms", ctx.process_ms },
+          { "last_hydrate_ms", ctx.hydrate_ms },
+          { "mean_total_ms_this_run",
+            processed_text_this_run > 0
+                ? total_ms_total / static_cast<double> (processed_text_this_run)
+                : 0.0 },
+          { "mean_process_ms_this_run",
+            processed_text_this_run > 0
+                ? process_ms_total
+                      / static_cast<double> (processed_text_this_run)
+                : 0.0 },
+          { "mean_hydrate_ms_this_run",
+            processed_text_this_run > 0
+                ? hydrate_ms_total
+                      / static_cast<double> (processed_text_this_run)
+                : 0.0 },
+          { "probe_stream_rows_before_resume", resume.probe_count_offset },
+          { "probe_rows_this_run", probes.size () },
+        };
+        std::cerr << "CHAT_REPLAY_PROGRESS "
+                  << progress.dump (-1, ' ', false,
+                                    nlohmann::json::error_handler_t::replace)
+                  << "\n";
+      };
+
+      for (std::size_t timeline_index = replay_start_index;
+           timeline_index < timeline.size (); ++timeline_index)
         {
+          const auto &event = timeline[timeline_index];
           if (!event.is_media)
             {
               const auto &msg = messages[event.index];
@@ -2387,6 +2589,7 @@ main (int argc, char **argv)
               if (!ctx.retrieved_memory.empty ())
                 ++retrieval_events;
               retrieval_items += static_cast<int> (ctx.retrieved_memory.size ());
+              maybe_log_progress (doc, ctx);
 
               if (cfg.consolidate_every > 0
                   && processed_text % cfg.consolidate_every == 0)
@@ -2456,6 +2659,7 @@ main (int argc, char **argv)
                   item.kind == "image" ? ++image_processed : ++video_processed;
                   last_processed_timestamp = item.timestamp;
                   prior_docs.push_back (media_doc);
+                  maybe_log_progress (media_doc, ctx);
                   ++event_count;
                 }
               else
@@ -2488,6 +2692,7 @@ main (int argc, char **argv)
                       ++audio_processed;
                       last_processed_timestamp = item.timestamp;
                       prior_docs.push_back (media_doc);
+                      maybe_log_progress (media_doc, ctx);
                       ++event_count;
                     }
                   else
@@ -2528,6 +2733,11 @@ main (int argc, char **argv)
           = std::chrono::duration_cast<std::chrono::milliseconds> (ended
                                                                    - started)
                 .count ();
+      const int processed_text_this_run
+          = std::max (0, processed_text - resume.text_count_offset);
+      const int media_processed_this_run
+          = std::max (0, media_processed - resume.media_count_offset);
+      const int probe_count_this_run = static_cast<int> (probes.size ());
 
       nlohmann::json out;
       out["input_dir"] = cfg.input_dir.string ();
@@ -2543,11 +2753,26 @@ main (int argc, char **argv)
                     ? "local_auto_discovery"
                     : cfg.extractor_provider;
       out["append"] = cfg.append;
+      out["resume_from_existing"] = resume.enabled;
+      out["resume"] = {
+        { "event_count_offset", resume.event_count_offset },
+        { "text_count_offset", resume.text_count_offset },
+        { "media_count_offset", resume.media_count_offset },
+        { "probe_count_offset", resume.probe_count_offset },
+        { "db_signal_count", resume.db_signal_count },
+        { "db_text_signal_count", resume.db_text_signal_count },
+        { "after_timestamp", resume.after_timestamp },
+        { "rebuilt_event_count", resume.rebuilt_event_count },
+        { "rebuilt_text_count", resume.rebuilt_text_count },
+        { "prior_timeline_events", resume.prior_timeline_events },
+        { "replay_start_timeline_index", replay_start_index },
+      };
       out["parsed_transcript_messages"] = parsed_messages;
       out["skipped_transcript_messages"] = skipped_messages;
       out["message_window_start_timestamp"] = message_window_start;
       out["message_window_end_timestamp"] = message_window_end;
       out["processed_text_messages"] = processed_text;
+      out["processed_text_messages_this_run"] = processed_text_this_run;
       out["text_write_events"] = text_write_events;
       out["retrieval_events_during_ingest"] = retrieval_events;
       out["retrieval_items_during_ingest"] = retrieval_items;
@@ -2580,7 +2805,9 @@ main (int argc, char **argv)
       };
       out["warmup_events"] = cfg.warmup_events;
       out["probe_stride"] = cfg.probe_stride;
-      out["probe_count"] = probes.size ();
+      out["probe_count"] = resume.probe_count_offset + probe_count_this_run;
+      out["probe_count_this_run"] = probe_count_this_run;
+      out["probe_count_before_resume"] = resume.probe_count_offset;
       out["probes"] = probes;
       out["probe_stream_path"] = probe_stream_path.string ();
       out["probe_stream_policy"]
@@ -2620,6 +2847,7 @@ main (int argc, char **argv)
       out["media_candidates_found"] = media.size ();
       out["media_attempted"] = media_attempted;
       out["media_processed"] = media_processed;
+      out["media_processed_this_run"] = media_processed_this_run;
       out["media_failures"] = media_failures;
       out["image_processed"] = image_processed;
       out["video_processed"] = video_processed;
@@ -2650,17 +2878,18 @@ main (int argc, char **argv)
             "wall-clock time";
       out["wall_ms"] = wall_ms;
       out["peak_rss_mb"] = PeakRssMb ();
-      out["mean_encode_ms"] = processed_text > 0
-                                  ? encode_ms_total / processed_text
+      out["mean_encode_ms"] = processed_text_this_run > 0
+                                  ? encode_ms_total / processed_text_this_run
                                   : 0.0;
-      out["mean_process_ms"] = processed_text > 0
-                                   ? process_ms_total / processed_text
+      out["mean_process_ms"] = processed_text_this_run > 0
+                                   ? process_ms_total / processed_text_this_run
                                    : 0.0;
-      out["mean_hydrate_ms"] = processed_text > 0
-                                   ? hydrate_ms_total / processed_text
+      out["mean_hydrate_ms"] = processed_text_this_run > 0
+                                   ? hydrate_ms_total / processed_text_this_run
                                    : 0.0;
-      out["mean_total_ms"] = processed_text > 0 ? total_ms_total / processed_text
-                                                : 0.0;
+      out["mean_total_ms"] = processed_text_this_run > 0
+                                 ? total_ms_total / processed_text_this_run
+                                 : 0.0;
       out["db_memory_count"] = SqlCount (cfg.db_path,
                                          "SELECT COUNT(*) FROM memories");
       out["db_label_memory_count"]

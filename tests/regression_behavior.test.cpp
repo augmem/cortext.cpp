@@ -113,36 +113,35 @@ TEST_CASE ("Episode boundary drift threshold follows lerp(0.10, 0.35, T)",
 // 5.3.3 Working Memory Capacity Tests
 // =============================================================================
 
-TEST_CASE ("Working memory capacity within [2, 6] range",
+TEST_CASE ("Working memory capacity within [15, 27] range",
            "[regression][working_memory]")
 {
-  // base_capacity = round(lerp(8, 6, SensitivityBias(S)) + lerp(-1, 1, FocusBias(F)))
-  // Miller's 7±2: range [5, 9], 7 at neutral knobs.
+  // base_capacity = 3 * (lerp(8, 6, SensitivityBias(S))
+  //                      + lerp(-1, 1, FocusBias(F)))
+  // Capacity range [15, 27], with 21 at neutral knobs.
 
   SECTION ("Extreme knob values produce correct bounds")
   {
-    // S=1, F=0 yields minimum (5)
-    // lerp(8, 6, 1) + lerp(-1, 1, 0) = 6 + (-1) = 5
-    REQUIRE (WMBaseCapacity (1.0, 0.0) == 5);
+    // S=1, F=0 yields minimum: 3 * (6 + (-1)) = 15
+    REQUIRE (WMBaseCapacity (1.0, 0.0) == 15);
 
-    // S=0, F=1 yields maximum (9)
-    // lerp(8, 6, 0) + lerp(-1, 1, 1) = 8 + 1 = 9
-    REQUIRE (WMBaseCapacity (0.0, 1.0) == 9);
+    // S=0, F=1 yields maximum: 3 * (8 + 1) = 27
+    REQUIRE (WMBaseCapacity (0.0, 1.0) == 27);
   }
 
-  SECTION ("Mid-range knobs produce capacity around 7")
+  SECTION ("Mid-range knobs produce capacity around 21")
   {
-    // S=0.5, F=0.5: biased lerps cancel to exactly 7
-    REQUIRE (WMBaseCapacity (0.5, 0.5) == 7);
+    // S=0.5, F=0.5: biased lerps cancel to exactly 21
+    REQUIRE (WMBaseCapacity (0.5, 0.5) == 21);
 
-    // S=0, F=0: lerp(8, 6, 0) + lerp(-1, 1, 0) = 8 + (-1) = 7
-    REQUIRE (WMBaseCapacity (0.0, 0.0) == 7);
+    // S=0, F=0: 3 * (8 + (-1)) = 21
+    REQUIRE (WMBaseCapacity (0.0, 0.0) == 21);
 
-    // S=1, F=1: lerp(8, 6, 1) + lerp(-1, 1, 1) = 6 + 1 = 7
-    REQUIRE (WMBaseCapacity (1.0, 1.0) == 7);
+    // S=1, F=1: 3 * (6 + 1) = 21
+    REQUIRE (WMBaseCapacity (1.0, 1.0) == 21);
   }
 
-  SECTION ("All combinations stay within [5, 9]")
+  SECTION ("All combinations stay within [15, 27]")
   {
     for (double S = 0.0; S <= 1.0; S += 0.1)
       {
@@ -150,8 +149,8 @@ TEST_CASE ("Working memory capacity within [2, 6] range",
           {
             int cap = WMBaseCapacity (S, F);
             CAPTURE (S, F, cap);
-            REQUIRE (cap >= 5);
-            REQUIRE (cap <= 9);
+            REQUIRE (cap >= 15);
+            REQUIRE (cap <= 27);
           }
       }
   }

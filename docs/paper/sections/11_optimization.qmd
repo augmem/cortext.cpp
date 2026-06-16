@@ -102,3 +102,102 @@ Every round was gated on byte-identical benchmark output, an unchanged unit-test
 The pass stops here under the stated criterion: no remaining single site accounts for 5% of samples and is improvable without touching specified behavior. The post-Round-4 profile is dominated by the SQLite bytecode interpreter's dispatch loop (~20%, distributed across all statements), bulk memory copies for vector blob traffic (~11%), and the vector index's internal shadow-table record handling (~15% spread over many small operations). We note three candidates for future work, in increasing order of invasiveness: switching result-row materialization away from per-row `std::map<std::string, std::any>` to cut allocation churn; binding vector blobs without an intermediate copy; and restructuring the vector index's chunk metadata handling, which would modify vendored third-party internals. Beyond these, further gains would require algorithm-level decisions, such as bounding the growth of stored reconstruction embeddings, which we deliberately leave out of scope.
 
 Two methodological conclusions carry beyond this codebase. First, optimize against a steady-state workload: every per-scenario benchmark in the suite misattributed costs (SQL parsing, setup I/O) that are negligible in a long-lived store, and the one optimization motivated by those benchmarks returned only 4% end to end. Second, a deterministic output contract is the cheapest verification instrument available: it reduced "did the optimization change behavior" to a checksum comparison, and it caught a pre-existing memory-safety bug that several thousand prior test executions had missed.
+
+## Full-Corpus Live Replay Addendum (June 16, 2026)
+
+The four-round pass above was deliberately model-free and deterministic. A later
+optimization pass targeted a different workload: the live full-six-year
+personal-corpus replay used for the stripping ablation in @sec-experimental.
+That run exercises the production chat-replay binary, deep daily consolidation,
+Gemma 4 E2B summarization through Ollama, attached-media ingestion, streaming
+probe generation, and a live local Gemma 4 12B judge. It is therefore noisier
+than the synthetic steady-state benchmark, but it exposes the long-horizon
+surfaces the smaller harnesses miss.
+
+The run was already in progress when profiling began, so the first requirement
+was operational rather than algorithmic: avoid throwing away the partial
+six-year replay. We added an explicit benchmark-only resume mode to
+`cortext_chat_replay_live_run`:
+
+* `--resume-from-existing` requires an existing SQLite database and fails closed
+  if no durable signal checkpoint exists.
+* The runner derives the checkpoint from the maximum durable `User`/`Contact`
+  signal timestamp, not from raw signal counts. This distinction matters because
+  text events can produce multiple signal rows and maintenance rows are not
+  replay events.
+* Before replaying new events, it rebuilds the comparator-only prior history
+  from the transcript and media timeline up to the checkpoint timestamp without
+  ingesting those events into Cortext again. This preserves the rolling-history,
+  raw-chat RAG, and full-history comparator packets.
+* It preserves the existing probe JSONL stream, carries the previous probe-row
+  count forward, and emits `CHAT_REPLAY_RESUME` plus periodic
+  `CHAT_REPLAY_PROGRESS` aggregate lines. The progress lines contain counters
+  and latency aggregates only; they do not expose message text.
+
+A disposable smoke test caught a resume bug before the live run restarted:
+after five messages the database contained ten text signal rows, so using
+`COUNT(signals)` as the event offset would have skipped too far. The fixed
+resume path rebuilt an offset of five replay events, appended the resumed probe
+rows to the same stream, and then processed the remaining three messages in an
+eight-message window. The live baseline was then restarted from the checkpoint
+with:
+
+```
+event_count_offset = 18,199
+text_count_offset  = 17,519
+media_count_offset = 680
+probe_count_offset = 14
+db_signal_count    = 36,407
+```
+
+The checkpoint-local profiler snapshot identified a separate scaling failure
+from the earlier deterministic benchmark. On the old binary, a retrieved probe
+around event 17,000 spent about **4.6 s** in processor time, dominated by
+database surfaces that grew with historical reconstruction and fact rows:
+`GraphRetrieve.seed_sql` was **1,792 ms**, `UpdateMemoryStrength` was
+**848 ms**, `GraphRetrieve.fact_seed_sql` was **778 ms**, and
+`ComputeMniGateDecision` was **768 ms**. These costs were not encoder or LLM
+inference.
+
+The implementation changes replaced those global surfaces with bounded current
+or indexed surfaces:
+
+| Hot path | Implementation change | Checkpoint timing after change |
+|---|---|---:|
+| graph seed search over latest reconstruction state | add/use `current_memory_embeddings` keyed by `memory_id` | `GraphRetrieve.seed_sql`: **9.94 ms** |
+| fact vector seeding over all embedding kinds | prefilter eligible fact rows and score direct embedding lookups in C++ | `GraphRetrieve.fact_seed_sql`: **~1.15 ms** |
+| expanded-memory embedding fetch | fetch from the current-memory surface rather than the global embedding table | `GraphRetrieve.fetch_embeddings_sql`: **13.11 ms** |
+| memory-strength eviction frontier | materialize evictable memory/embedding ids and delete vector rows by direct key | `MemoryStrength.eviction_select_ids_sql`: **2.29 ms** |
+| global memory-strength update | use bounded indexed current-state lookups | `UpdateMemoryStrength`: **2.79 ms** |
+| stability retention scan | replace C++ row-map materialization with a SQL aggregate over a covering index | `UpdateStability`: **1.82 ms** |
+| synaptic-tagging recency scan | use a `created_at DESC` memory index | `< 0.2 ms` on the profiled path |
+
+After restart, live progress lines show the intended order-of-magnitude change
+in the measured per-event path. The last pre-restart sparse probe at event
+18,000 recorded **5,210 ms** total Cortext time, with **4,866 ms** in
+processing and **342 ms** in hydration. In the resumed run, aggregate progress
+through events 19,000 to 24,000 reported mean total time rising from
+**709 ms** to **775 ms** per text event, with mean process time rising from
+**343 ms** to **399 ms** and mean hydration around **363-374 ms**. In other
+words, the hot SQL/retrieval path moved from multi-second to sub-second scale
+on the same growing database.
+
+End-to-end throughput improved less than the per-event timings because the live
+replay includes media, object-store writes, daily deep consolidation, and judge
+backpressure. The baseline had reached **36,407** signal rows after roughly
+15.5 hours from a cold start, about **39 signal rows/minute**. After the resume
+restart it reached **47,929** signal rows by 05:08 UTC, adding **11,522** rows
+at roughly **120 signal rows/minute**. That is about a **3x** live-throughput
+improvement while preserving the same database and probe stream, versus a
+roughly **6-7x** improvement in the measured event processing path.
+
+The new bottleneck is also visible. The replay process is frequently observed
+in `jbd2_log_wait_commit`, the WAL grows in tens of MiB, and `iostat` shows
+bursts of thousands of small writes. This points at SQLite/object-store write
+amplification, WAL checkpoint behavior, or consolidation write bursts as the
+next long-horizon scaling target. We therefore do not claim the full-corpus
+run is now linear over six years. The specific conclusion is narrower and more
+useful: the unbounded retrieval/reconstruction/fact surfaces that caused the
+multi-second probe failure have been removed for newly started or resumed runs;
+the remaining long-horizon performance work has moved to the write and
+consolidation path.

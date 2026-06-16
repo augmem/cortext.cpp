@@ -127,29 +127,31 @@ TEST_CASE ("Fact lifecycle maintenance sweep is knob-derived with historical mid
   REQUIRE (broad <= 512);
 }
 
-TEST_CASE ("WMBaseCapacity follows paper spec: range [5, 9]", "[core][knobs]")
+TEST_CASE ("WMBaseCapacity defaults to the capacity-21 operating point",
+           "[core][knobs]")
 {
-  // base_capacity = round(lerp(8, 6, SensitivityBias(S)) + lerp(-1, 1, FocusBias(F)))
-  // Miller's 7±2: capacity range [5, 9], 7 at neutral knobs.
+  // base_capacity = 3 * (lerp(8, 6, SensitivityBias(S))
+  //                      + lerp(-1, 1, FocusBias(F)))
+  // Capacity range [15, 27], with 21 at neutral knobs.
 
-  // At S=0, F=0: lerp(8, 6, 0) + lerp(-1, 1, 0) = 8 + (-1) = 7
-  REQUIRE (WMBaseCapacity (0.0, 0.0) == 7);
+  // At S=0, F=0: 3 * (8 + (-1)) = 21
+  REQUIRE (WMBaseCapacity (0.0, 0.0) == 21);
 
-  // At S=1, F=1: lerp(8, 6, 1) + lerp(-1, 1, 1) = 6 + 1 = 7
-  REQUIRE (WMBaseCapacity (1.0, 1.0) == 7);
+  // At S=1, F=1: 3 * (6 + 1) = 21
+  REQUIRE (WMBaseCapacity (1.0, 1.0) == 21);
 
-  // At S=0, F=1: lerp(8, 6, 0) + lerp(-1, 1, 1) = 8 + 1 = 9 (max)
-  REQUIRE (WMBaseCapacity (0.0, 1.0) == 9);
+  // At S=0, F=1: 3 * (8 + 1) = 27 (max)
+  REQUIRE (WMBaseCapacity (0.0, 1.0) == 27);
 
-  // At S=1, F=0: lerp(8, 6, 1) + lerp(-1, 1, 0) = 6 + (-1) = 5 (min)
-  REQUIRE (WMBaseCapacity (1.0, 0.0) == 5);
+  // At S=1, F=0: 3 * (6 + (-1)) = 15 (min)
+  REQUIRE (WMBaseCapacity (1.0, 0.0) == 15);
 
   // Verify range bounds across all extreme values
-  REQUIRE (WMBaseCapacity (0.0, 1.0) == 9); // max
-  REQUIRE (WMBaseCapacity (1.0, 0.0) == 5); // min
+  REQUIRE (WMBaseCapacity (0.0, 1.0) == 27); // max
+  REQUIRE (WMBaseCapacity (1.0, 0.0) == 15); // min
 
-  // Mid-point: biased lerps cancel to exactly 7 at neutral knobs
-  REQUIRE (WMBaseCapacity (0.5, 0.5) == 7);
+  // Mid-point: biased lerps cancel to exactly 21 at neutral knobs
+  REQUIRE (WMBaseCapacity (0.5, 0.5) == 21);
   REQUIRE (WMStrengthBase (0.5) == Catch::Approx (0.60));
   REQUIRE (WMStrengthBase (1.0) > WMStrengthBase (0.0));
   REQUIRE (WMStrengthMax (0.5, 0.5, 0.5) == Catch::Approx (10.0));

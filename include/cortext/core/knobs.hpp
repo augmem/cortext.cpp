@@ -4067,7 +4067,9 @@ inline int
 WMBaseCapacity (double S, double F)
 {
   // Ablation-arm override (wm_capacity_* arms in
-  // chat_replay_release_protocol_spec.json); cached once per process.
+  // chat_replay_release_protocol_spec.json); cached once per process. The
+  // production default is the capacity-21 operating point from the live-judge
+  // sweep, while preserving the original F/S shape around that point.
   static const int kCapacityOverride = [] {
     const char *value = std::getenv ("CORTEXT_WM_CAPACITY_OVERRIDE");
     const int parsed = value != nullptr ? std::atoi (value) : 0;
@@ -4077,10 +4079,11 @@ WMBaseCapacity (double S, double F)
     {
       return kCapacityOverride;
     }
-  // base_capacity = round(lerp(8, 6, S) + lerp(-1, 1, F))
-  // Miller's 7±2: capacity range [5, 9], 7 at neutral knobs.
-  const double cap = Lerp (8.0, 6.0, SensitivityBias (S))
-                     + Lerp (-1.0, 1.0, FocusBias (F));
+  // base_capacity = 3 * round-ish Miller window:
+  //   3 * (lerp(8, 6, S) + lerp(-1, 1, F))
+  // Capacity range [15, 27], with 21 at neutral knobs.
+  const double cap = 3.0 * (Lerp (8.0, 6.0, SensitivityBias (S))
+                            + Lerp (-1.0, 1.0, FocusBias (F)));
   return static_cast<int> (std::round (cap));
 }
 

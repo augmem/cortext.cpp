@@ -169,6 +169,29 @@ SeedEmbeddingV2 (Store &store, long long id, const Eigen::VectorXf &emb,
   SeedEmbeddingV2 (store, id, vec, created_at);
 }
 
+/// @brief Seed or refresh the bounded current-memory vector surface.
+inline void
+SeedCurrentMemoryEmbeddingV2 (Store &store, long long memory_id,
+                              long long embedding_id)
+{
+  try
+    {
+      store.Execute ("DELETE FROM current_memory_embeddings "
+                     "WHERE memory_id = ?",
+                     { memory_id });
+      store.Execute (
+          "INSERT INTO current_memory_embeddings("
+          "memory_id, embedding, embedding_id, created_at"
+          ") "
+          "SELECT ?, embedding, embedding_id, created_at "
+          "FROM embeddings WHERE embedding_id = ?",
+          { memory_id, embedding_id });
+    }
+  catch (...)
+    {
+    }
+}
+
 /// @brief Seed a memory into the v2 memories table with comprehensive metadata.
 /// @param store The store to seed into.
 /// @param memory_id The memory_id (primary key).
@@ -190,6 +213,7 @@ SeedMemoryV2 (Store &store, long long memory_id, long long embedding_id,
       "s_max, s_avg, strength, created_at) "
       "VALUES(?, ?, ?, ?, ?, 1, 'text', 0.5, 0.5, ?, ?)",
       { memory_id, embedding_id, source_id, kind, start_ts, strength, start_ts });
+  SeedCurrentMemoryEmbeddingV2 (store, memory_id, embedding_id);
 }
 
 /// @brief Seed a memory with extended metadata fields.
@@ -208,6 +232,7 @@ SeedMemoryV2Extended (Store &store, long long memory_id, long long embedding_id,
       "VALUES(?, ?, ?, 'LONG_TERM', ?, 1, 'text', 0.5, 0.5, ?, ?, ?, ?, ?)",
       { memory_id, embedding_id, source_id, start_ts, strength, redundancy,
         connectivity, stability, start_ts });
+  SeedCurrentMemoryEmbeddingV2 (store, memory_id, embedding_id);
 }
 
 /// @brief Seed a signal into the v2 signals table with inline metrics.

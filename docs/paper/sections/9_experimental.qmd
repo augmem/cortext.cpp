@@ -92,7 +92,9 @@ capacity 21 and then declines at 42, which pays 1.5 times the context
 tokens for less sufficiency. The curve is unimodal with its peak at 21,
 so the doubling search stops there: capacity 21 is the operating point,
 and the remaining mechanism ablations run at it. A three-repetition
-judge pass over the capacity-21 arm confirms the screen.
+judge pass over the capacity-21 arm confirms the screen. After the
+long-horizon restart described below, this operating point is the code
+default at neutral F/S knobs rather than a launch-script-only override.
 
 ### Mechanism Ablations at Capacity 21 (June 12, 2026)
 
@@ -212,6 +214,76 @@ Instead, it is the full-stack release stress verdict: at a horizon where
 windowed strategies compact or discard old context, Cortext remains
 competitive with the full-history upper bound while spending roughly two
 orders of magnitude less context than chat RAG.
+
+### Full-Corpus Strip Ablation Sentinel (June 14-15, 2026)
+
+The next stripping question is deliberately harsher than the 1,200-message
+release slice: can we remove a bundled set of mechanisms and still preserve
+long-horizon retrieval quality over the complete six-year Julie message
+corpus? The full run is a sequential two-arm replay over 104,799 parsed
+messages, not a four-arm judge comparison. The first arm is the capacity-21
+baseline with media, deep processing, and daily consolidation enabled. The
+second arm replays the same corpus after disabling the candidate mechanisms:
+
+```bash
+CORTEXT_DISABLE_METACOG_TOT_RECOVERY=1
+CORTEXT_DISABLE_METACOG_UNKNOWN_CAUTION=1
+CORTEXT_DISABLE_FACTS=1
+CORTEXT_DISABLE_PROCEDURAL_PROACTIVE_RETRIEVAL=1
+CORTEXT_STM_SHADOW_DISABLE=1
+CORTEXT_DISABLE_STM_LABEL_HANDOFF=1
+```
+
+Because that full replay takes many hours, we also ran a text-only sentinel
+with the same baseline/stripped contrast. The sentinel processed 12,000 text
+messages, emitted 10 identical probe points at event indices 2,000 through
+11,000, and completed both arms successfully. The monitoring table reports
+24,000 stored rows because long-term and working-memory rows are both
+materialized; the summary denominator for the sentinel is
+`processed_text_messages = 12000`.
+
+| metric | baseline text sentinel | stripped text sentinel | reading |
+|---|---:|---:|---|
+| processed text messages | 12,000 | 12,000 | matched |
+| probes judged | 10 | 10 | matched |
+| Cortext composite | 3.23 | 2.04 | quality drop |
+| relevance | 1.65 | 0.85 | worse |
+| sufficiency | 1.69 | 1.27 | worse |
+| noise | 0.43 | 0.32 | cleaner but less useful |
+| temporal correctness | 0.72 | 0.63 | slightly worse |
+| source grounding | 0.13 | 0.00 | no gain |
+| mean Cortext context tokens | 106.6 | 107.0 | no token saving |
+| token savings vs chat RAG | 98.67% | 98.67% | unchanged |
+| association rows | 1,545 | 1,230 | less graph structure |
+| retrieval items during ingest | 71,303 | 61,785 | less retrieval activity |
+| mean total latency | 1,395.6 ms | 1,410.6 ms | no speed win |
+| fact assertions / evidence rows | 0 / 0 | 0 / 0 | facts do not explain this sentinel |
+
+The composite is the streaming judge's packet-quality summary,
+`relevance + sufficiency - 0.25 * noise`. On this early slice, the stripped
+bundle does not buy context-budget, latency, or memory-quality savings; it
+mostly removes useful evidence. The sharper five-probe delta judge over the
+late sentinel probes points the same way: baseline Cortext relevance and
+sufficiency are 1.88 and 2.32, while stripped falls to 1.04 and 1.10.
+
+This is an early-warning result, not the final six-year verdict and not a
+single-mechanism attribution. The stripped arm changes several mechanisms at
+once, so the sentinel cannot say whether the loss comes from metacognitive
+recovery, procedural proactive retrieval, STM shadowing, STM-label handoff,
+or an interaction among them. It also does not answer the independent
+`source_id` question: both arms use the same source-id policy, and media is
+not encoded into `source_id`.
+
+The first full six-year restart on June 15, 2026 was invalidated operationally:
+the baseline arm launched without `CORTEXT_WM_CAPACITY_OVERRIDE`, while the
+code default still followed the old 7-ish formula. It was abandoned at 24,893 /
+104,799 signals (23.75%), with `cortext_working_items=7` in the probe stream.
+Those partial results are diagnostics only. To prevent recurrence, the neutral
+working-memory default was changed to 21 in `WMBaseCapacity` itself, preserving
+the old seven-slot maintenance-cost budget so the wider window does not also
+tighten gates. The full replay was then restarted from scratch with baseline
+and stripped arms both inheriting the WM21 default; live 12B judging and the
+15-minute status monitor were reattached to the replacement run.
 
 ## ACT-R-Inspired Retrieval Gate Ablations
 
@@ -762,6 +834,70 @@ fanout cap before the final row cap, so high-degree memories cannot force
 unbounded association work before result compaction. The week-run numbers above
 remain historical diagnostics from the superseded query plan; fresh latency and
 throughput numbers must come from a rerun of the current branch.
+
+**Full-six-year checkpoint profiling follow-up (Jun 16, 2026):**
+
+While the full six-year four-arm run was still executing, we copied the live
+baseline replay database into a checkpoint-local profiling snapshot:
+`eval_runs/full6y_strip_ablation_20260615T114853Z_ollama_e2b_wm21_default_gpu2/perf_opt/current_surface_snapshot_20260616T020805Z`.
+The snapshot contained **35,319** memories, **17,580** long-term memories,
+**17,320** working memories, and more than **2.36M** reconstruction rows in the
+source run. The profiling harness used three source-time future probes through
+`cortext_chat_replay_live_run --checkpoint-eval-only`; it records aggregate
+operation timings only and does not expose message text.
+
+The first live/probe profile on the old binary had already made the scaling
+failure concrete: a retrieved probe around event 17,000 spent **4,585 ms** in
+processing, with `GraphAugmentedRetrieveCandidates` at **2,750 ms**,
+`GraphRetrieve.seed_sql` at **1,792 ms**, `UpdateMemoryStrength` at **848 ms**,
+`GraphRetrieve.fact_seed_sql` at **778 ms**, and `ComputeMniGateDecision` at
+**768 ms**. These costs were not model inference; they were database surfaces
+that scaled with historical reconstruction/fact rows rather than current
+retrievable state.
+
+The optimization pass replaced the hot global surfaces with bounded current or
+indexed surfaces:
+
+* `current_memory_embeddings` is now a sqlite-vec current-memory surface keyed
+  by `memory_id`; graph seed search and expanded-memory embedding fetch use it
+  instead of joining the global `embeddings` table through latest
+  reconstruction state.
+* fact vector seeding now filters eligible `fact_cache` / `fact_assertions`
+  rows first, scores their direct embedding lookups in C++, and keeps the top
+  fact seeds, avoiding a global vector search over all embedding kinds.
+* memory eviction materializes evictable memory and embedding ids once, deletes
+  vector rows by direct key, and uses a partial long-term strength index for the
+  eviction frontier.
+* write-exclusion metadata now reads `memories(embedding_id)` instead of the
+  global vector table.
+* stability retention now uses a SQL aggregate over a covering strength index
+  instead of materializing all active memories into C++ row maps.
+* synaptic tagging uses a `created_at DESC` memory index instead of sorting the
+  full memory table on each trigger.
+
+Checkpoint profiling after these changes shows the intended shape. On the
+retrieved probe in
+`checkpoint_eval_stability_covering_index`, `GraphRetrieve.seed_sql` was
+**9.94 ms**, `GraphRetrieve.fact_seed_sql` was previously reduced to about
+**1.15 ms**, `GraphRetrieve.fetch_embeddings_sql` was **13.11 ms** after the
+current-surface fetch change, `MemoryStrength.eviction_select_ids_sql` was
+**2.29 ms**, `UpdateMemoryStrength` was **2.79 ms**, `UpdateStability` was
+**1.82 ms**, and synaptic tagging was below **0.2 ms** on the same profiled
+path. No-retrieval probes fell to roughly **26-29 ms** processing time, with
+hydration around **211-213 ms**.
+
+The remaining large costs are now algorithmic or packet-facing rather than the
+original unbounded SQL surfaces. Retrieved probes still spend about
+**127-151 ms** in `GraphAugmentedRetrieveCandidates` on this snapshot, with
+about **33 ms** in preconsolidated label-graph scoring and **17-29 ms** in
+source-backed text/temporal expansion. Reconsolidation can spike when ripple
+propagation writes many neighbor reconstructions; instrumentation attributes
+those spikes to `Reconsolidation.neighbor_query`, `neighbor_load`, and
+`neighbor_write`, not to primary reconstruction append. Hydration remains a
+separate **350-370 ms** packet assembly cost on retrieved probes. These are the
+next optimization targets; the historical multi-second failure was the global
+embedding/reconstruction/fact surface, and that specific scaling problem is now
+removed for newly started runs.
 
 Historical OpenAI-judged validation on the then-current branch reran after the
 generic-fragment label filters and durable-source promotion changes. On the

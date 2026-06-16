@@ -330,23 +330,12 @@ TEST_CASE ("V2: Alg31 expands vector seeds via ASSOCIATIONS and returns expanded
   Eigen::VectorXf emb2 = UnitVec256Second (1.0f); // Second dimension = 1
 
   // id=1 aligns with query, id=2 does not.
-  // V2: Insert into embeddings (minimal vec0 table)
-  store->Execute ("INSERT INTO embeddings(embedding_id, embedding, created_at) "
-                  "VALUES (?, ?, ?)",
-                  { 1LL, ToFloatVec (emb1), 0LL });
-  store->Execute ("INSERT INTO embeddings(embedding_id, embedding, created_at) "
-                  "VALUES (?, ?, ?)",
-                  { 2LL, ToFloatVec (emb2), 0LL });
-
-  // V2: Insert into memories (comprehensive metadata)
-  store->Execute ("INSERT INTO memories(memory_id, embedding_id, source_id, kind, "
-                  "start_ts, n_signals, modality, s_max, s_avg, strength, created_at) "
-                  "VALUES (?, ?, 'test', 'LONG_TERM', 0, 1, 'text', 0.5, 0.5, 1.0, 0)",
-                  { 1LL, 1LL });
-  store->Execute ("INSERT INTO memories(memory_id, embedding_id, source_id, kind, "
-                  "start_ts, n_signals, modality, s_max, s_avg, strength, created_at) "
-                  "VALUES (?, ?, 'test', 'LONG_TERM', 0, 1, 'text', 0.5, 0.5, 1.0, 0)",
-                  { 2LL, 2LL });
+  cortext::testing::SeedEmbeddingV2 (*store, 1LL, emb1, 1LL);
+  cortext::testing::SeedMemoryV2 (*store, 1LL, 1LL, "test", "LONG_TERM",
+                                  1.0, 1LL);
+  cortext::testing::SeedEmbeddingV2 (*store, 2LL, emb2, 1LL);
+  cortext::testing::SeedMemoryV2 (*store, 2LL, 2LL, "test", "LONG_TERM",
+                                  1.0, 1LL);
 
   // V2: Create ASSOCIATIONS edge directly between memories (no intermediate label)
   // memory_id 1 -> memory_id 2 via 'co_occurs' edge
@@ -433,24 +422,12 @@ TEST_CASE ("Graph retrieval uses durable DB seeds after process restart",
 
   const Eigen::VectorXf query = UnitVec256 (1.0f);
   const Eigen::VectorXf other = UnitVec256Second (1.0f);
-  store->Execute (
-      "INSERT INTO embeddings(embedding_id, embedding, created_at) "
-      "VALUES (?, ?, ?)",
-      { 1LL, ToFloatVec (query), 0LL });
-  store->Execute (
-      "INSERT INTO embeddings(embedding_id, embedding, created_at) "
-      "VALUES (?, ?, ?)",
-      { 2LL, ToFloatVec (other), 0LL });
-  store->Execute (
-      "INSERT INTO memories(memory_id, embedding_id, source_id, kind, "
-      "start_ts, n_signals, modality, s_max, s_avg, strength, created_at) "
-      "VALUES (?, ?, 'test', 'LONG_TERM', 0, 1, 'text', 0.5, 0.5, 1.0, 0)",
-      { 1LL, 1LL });
-  store->Execute (
-      "INSERT INTO memories(memory_id, embedding_id, source_id, kind, "
-      "start_ts, n_signals, modality, s_max, s_avg, strength, created_at) "
-      "VALUES (?, ?, 'test', 'LONG_TERM', 0, 1, 'text', 0.5, 0.5, 1.0, 0)",
-      { 2LL, 2LL });
+  cortext::testing::SeedEmbeddingV2 (*store, 1LL, query, 1LL);
+  cortext::testing::SeedMemoryV2 (*store, 1LL, 1LL, "test", "LONG_TERM",
+                                  1.0, 1LL);
+  cortext::testing::SeedEmbeddingV2 (*store, 2LL, other, 1LL);
+  cortext::testing::SeedMemoryV2 (*store, 2LL, 2LL, "test", "LONG_TERM",
+                                  1.0, 1LL);
 
   SignalProcessor::Config cfg;
   cortext::testing::RequireEncoder (cfg);

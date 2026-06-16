@@ -11,25 +11,55 @@ The architecture is specified formally in the accompanying paper. The design bor
 The main end-to-end eval is the chat-replay protocol
 (`tools/run_chat_replay_release_protocol.py`). It replays a real chat export
 (text plus media) through the full pipeline, then a local LLM blind-judges
-three context arms on held-out probes: Cortext's compressed packet, standard
+context arms on held-out probes: Cortext's compressed packet, standard
 embedding RAG, and the full history as an upper bound. Fixed seed, 3
 judgments per probe, bootstrap confidence intervals, fairness checks. The
 corpus format is just a directory with one timestamped `.txt` transcript plus
 media, so it runs on any export that matches the format, not just mine.
 
-Latest runs (June 2026, a private 1,200-message corpus, 39 probes × 3
-repetitions, local `gemma4:12b` judge):
+**Working-memory capacity is a measured operating point, not a guess** (June
+2026, a private 1,200-message corpus, 39 probes, local `gemma4:12b-it-qat`
+judge). Win rate stays flat across capacity because recency coverage saturates
+it, so the deciding metric is judged sufficiency (was there enough context). It
+climbs strictly to capacity 21 and then declines, so 21 is where Cortext runs.
 
-| Run | Cortext wins | Full-history wins | RAG wins | Ties | Cortext sufficiency | Context tokens | Token reduction |
-|---|---|---|---|---|---|---|---|
-| Working memory 7±2 | **42**/117 | 32 | 25 | 18 | 2.72 | ~262 vs ~6,100 | **96%** |
-| Working memory 4 (control) | **39**/117 | 35 | 20 | 23 | 2.43 | ~222 vs ~6,100 | **96%** |
+| WM capacity | wins | sufficiency | context tokens | savings vs RAG |
+|---|---|---|---|---|
+| 7 | 22/39 | 3.40 | 290 | 95% |
+| 10 | 22/39 | 3.51 | 331 | 95% |
+| 14 | 23/39 | 3.64 | 377 | 94% |
+| **21** (operating point) | 22/39 | **3.95** | 503 | 92% |
+| 42 | 23/39 | 3.82 | 758 | 88% |
+
+A follow-on 18-arm single-mechanism sweep at capacity 21 keeps temporal
+retrieval and the predictive bonus (each pays for itself in packet quality),
+flags the metacognitive layer as a simplification candidate, and promotes none
+of the opt-in ACT-R scoring gates (enabling all four at once is actively
+harmful). The paper has the per-arm numbers.
+
+**Long-horizon stress run** (18,000 messages, 30 probes, 3-rep local
+Gemma-4-12B judge). The short replay can serve most probes from raw recent
+memory, so it can't fairly judge the consolidation family; the stress run can.
+Four packets judged blind:
+
+| system | row wins | sufficiency | mean context tokens |
+|---|---|---|---|
+| **Cortext** | **30**/90 | 3.14 | **433** |
+| full-history upper bound | 23/90 | 3.70 | 88,806 |
+| compacting session | 10/90 | 2.90 | n/a |
+| traditional chat RAG | 9/90 | 2.57 | 42,550 |
+
+At a horizon where windowed strategies have to compact or discard old context,
+Cortext is the highest-row-win system, ahead of the full-history upper bound,
+for an aggregate **98.98%** token reduction against chat RAG (probe-bootstrap
+mean 98.61%, 95% CI [98.05%, 99.04%]).
 
 Caveats:
 
-- Judged sufficiency trails the fat-context arms (~2.4-2.7 vs ~3.1). That's
-  the cost of the compression, and raising working-memory capacity didn't
-  close it.
+- After strict prior-only filtering, Cortext carries more noise than the
+  windowed baselines, and its sufficiency confidence interval overlaps the RAG
+  and compacting arms. The full-history packet is still the quality ceiling; it
+  just isn't a deployable memory strategy.
 - An earlier run in this series was invalid: stale vectors from an older
   encoder were silently compared against the new embedding space. That
   failure is why the engine now pins every database and precomputed artifact
@@ -38,6 +68,10 @@ Caveats:
 - This is one private corpus and one judge model. I'm publishing the numbers
   for transparency, not claiming benchmarks. The whole protocol ships in this
   repo. Run it on your own data and tell me where it breaks.
+
+In progress: a 6-year long-horizon eval, replaying a multi-year message history
+end to end to stress consolidation and retrieval at a scale the 18,000-message
+run only approximates.
 
 ## Why Cortext Exists
 
@@ -247,12 +281,7 @@ zig build -Dshared=true -Dllama=true \
 
 Cross-compiling with llama enabled requires llama/ggml libraries built for that target. Cross smoke builds without target SQLite artifacts can leave SQLite unlinked with the default non-native behavior; pass `-Dlink-sqlite=true` when a target SQLite library is available.
 
-The CMake FFI path is also supported:
-
-```bash
-cmake --preset ffi-release
-cmake --build --preset ffi-release --target cortext
-```
+The CMake FFI path is also supported via the `ffi-release` preset (shown in the smoke commands below).
 
 The C API includes:
 - `cortext_config_init()` and `cortext_create_with_config()` for binding-safe configuration
@@ -271,12 +300,10 @@ Smoke commands after a Zig build:
 
 ```bash
 PYTHONPATH=bindings/python python3 -c "import cortext; print(cortext.version())"
-zig build -Dtarget=x86_64-linux-gnu -Dshared=true -Dllama=false
 
-# Legacy CMake/binding smoke path:
+# CMake preset path (equivalent shared-library build):
 cmake --preset ffi-release
 cmake --build --preset ffi-release --target cortext
-PYTHONPATH=bindings/python python3 -c "import cortext; print(cortext.version())"
 (cd bindings/go && go test .)
 (cd bindings/javascript && npm run build && node -e "const { version } = require('./'); console.log(version())")
 (cd bindings/dart && dart pub get && dart test)

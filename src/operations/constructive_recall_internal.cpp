@@ -70,6 +70,63 @@ ExtractInsertedId (const std::vector<std::map<std::string, std::any>> &rows)
     }
   return 0;
 }
+
+template <typename Executor>
+void
+StoreCurrentEmbeddingSurface (Executor &executor, long long memory_id,
+                              long long embedding_id,
+                              const std::any &embedding,
+                              long long created_at)
+{
+  if (memory_id <= 0 || embedding_id <= 0 || !embedding.has_value ())
+    {
+      return;
+    }
+
+  Exec (executor,
+        "DELETE FROM current_memory_embeddings WHERE memory_id = ?",
+        { memory_id });
+  Exec (
+      executor,
+      "INSERT INTO current_memory_embeddings("
+      "memory_id, embedding, embedding_id, created_at"
+      ") VALUES (?, ?, ?, ?)",
+      { memory_id, embedding, embedding_id, created_at });
+}
+
+template <typename Executor>
+void
+UpdateCurrentEmbeddingSurface (Executor &executor, long long memory_id,
+                               long long embedding_id, long long created_at)
+{
+  if (memory_id <= 0 || embedding_id <= 0)
+    {
+      return;
+    }
+
+  auto rows = Exec (
+      executor,
+      "SELECT embedding FROM embeddings WHERE embedding_id = ?",
+      { embedding_id });
+  if (rows.empty ())
+    {
+      return;
+    }
+  auto it = rows[0].find ("embedding");
+  if (it == rows[0].end () || !it->second.has_value ())
+    {
+      return;
+    }
+
+  const auto embedding = store::BlobFromAny (it->second);
+  if (embedding.empty ())
+    {
+      return;
+    }
+
+  StoreCurrentEmbeddingSurface (executor, memory_id, embedding_id,
+                                std::any (embedding), created_at);
+}
 } // namespace
 
 bool
@@ -296,6 +353,8 @@ AppendReconstructionWithEmbeddingId (Transaction &tx, long long memory_id,
         uncertainty, std::string (trigger), source_confidence,
         context_similarity });
 
+  UpdateCurrentEmbeddingSurface (tx, memory_id, embedding_id, created_at);
+
   return ExtractInsertedId (
       tx.Execute ("SELECT last_insert_rowid() AS id", {}));
 }
@@ -314,9 +373,10 @@ AppendReconstructionWithEmbedding (Transaction &tx, long long memory_id,
       return 0;
     }
 
+  const auto embedding_values = ToFloatVector (embedding);
   tx.Execute (
       "INSERT INTO embeddings (embedding, created_at) VALUES (?, ?)",
-      { ToFloatVector (embedding), created_at });
+      { embedding_values, created_at });
   const long long embedding_id
       = ExtractInsertedId (tx.Execute ("SELECT last_insert_rowid() AS id", {}));
   if (embedding_id <= 0)
@@ -324,9 +384,22 @@ AppendReconstructionWithEmbedding (Transaction &tx, long long memory_id,
       return 0;
     }
 
-  return AppendReconstructionWithEmbeddingId (
-      tx, memory_id, embedding_id, blob_id, created_at, uncertainty, trigger,
-      source_confidence, context_similarity);
+  tx.Execute (
+      "INSERT INTO memory_reconstructions("
+      "memory_id, embedding_id, blob_id, created_at, uncertainty, trigger, "
+      "source_confidence, context_similarity"
+      ") VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+      { memory_id, embedding_id,
+        blob_id.empty () ? std::any () : std::any (blob_id), created_at,
+        uncertainty, std::string (trigger), source_confidence,
+        context_similarity });
+  const long long reconstruction_id
+      = ExtractInsertedId (tx.Execute ("SELECT last_insert_rowid() AS id", {}));
+
+  StoreCurrentEmbeddingSurface (tx, memory_id, embedding_id,
+                                std::any (embedding_values), created_at);
+
+  return reconstruction_id;
 }
 
 } // namespace cortext::operations::constructive_recall
