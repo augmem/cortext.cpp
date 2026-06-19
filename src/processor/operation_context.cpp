@@ -26,6 +26,7 @@ OperationContext::OperationContext (const Signal &signal,
     : signal_ (signal), context_ (context), config_ (config), store_ (store),
       object_tx_ (object_tx)
 {
+  operation_timings_ms_.reserve (128);
 }
 
 void
@@ -48,8 +49,12 @@ OperationContext::AddOperationTiming (std::string_view op_type, double ms)
     {
       return;
     }
-  const std::string key (op_type);
-  operation_timings_ms_[key] += ms;
+  std::string key (op_type);
+  auto [it, inserted] = operation_timings_ms_.try_emplace (std::move (key), ms);
+  if (!inserted)
+    {
+      it->second += ms;
+    }
 }
 
 // Note: Getters/Setters for new fields are inline in the header.

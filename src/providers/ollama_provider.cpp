@@ -1,13 +1,18 @@
 #include "cortext/providers/ollama_provider.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
+#include <exception>
+#include <mutex>
 #include <netdb.h>
 #include <nlohmann/json.hpp>
 #include <stdexcept>
 #include <sys/socket.h>
 #include <sys/time.h>
+#include <thread>
 #include <unistd.h>
 
 namespace cortext::providers
@@ -211,6 +216,42 @@ HttpPostJson (const std::string &host, const std::string &port,
   return payload;
 }
 
+int
+OllamaBatchParallelism ()
+{
+  const char *raw = std::getenv ("CORTEXT_OLLAMA_BATCH_PARALLELISM");
+  if (raw == nullptr || *raw == '\0')
+    {
+      return 1;
+    }
+  try
+    {
+      return std::clamp (std::stoi (raw), 1, 16);
+    }
+  catch (const std::exception &)
+    {
+      return 1;
+    }
+}
+
+int
+OllamaTimeoutMs (int fallback_ms)
+{
+  const char *raw = std::getenv ("CORTEXT_OLLAMA_TIMEOUT_MS");
+  if (raw == nullptr || *raw == '\0')
+    {
+      return fallback_ms;
+    }
+  try
+    {
+      return std::clamp (std::stoi (raw), 1000, 30 * 60 * 1000);
+    }
+  catch (const std::exception &)
+    {
+      return fallback_ms;
+    }
+}
+
 } // namespace
 
 struct OllamaProvider::Impl
@@ -361,7 +402,7 @@ OllamaProvider::Generate (const GenerateRequest &request)
               impl_->host, impl_->port, "/api/chat",
               body.dump (-1, ' ', false,
                          nlohmann::json::error_handler_t::replace),
-              request.params.timeout_ms);
+              OllamaTimeoutMs (request.params.timeout_ms));
           const auto parsed = nlohmann::json::parse (payload);
           GenerateResponse response;
           response.text
@@ -384,6 +425,61 @@ OllamaProvider::Generate (const GenerateRequest &request)
   throw std::runtime_error ("ollama generate failed after "
                             + std::to_string (attempts)
                             + " attempt(s): " + last_error);
+}
+
+std::vector<GenerateResponse>
+OllamaProvider::GenerateBatch (const std::vector<GenerateRequest> &requests)
+{
+  const int parallelism = OllamaBatchParallelism ();
+  if (parallelism <= 1 || requests.size () <= 1)
+    {
+      return InferenceProvider::GenerateBatch (requests);
+    }
+
+  std::vector<GenerateResponse> responses (requests.size ());
+  std::atomic<std::size_t> next_index { 0 };
+  std::exception_ptr first_error;
+  std::mutex error_mutex;
+
+  const int worker_count
+      = std::min<int> (parallelism, static_cast<int> (requests.size ()));
+  std::vector<std::thread> workers;
+  workers.reserve (static_cast<std::size_t> (worker_count));
+  for (int i = 0; i < worker_count; ++i)
+    {
+      workers.emplace_back ([&] {
+        for (;;)
+          {
+            const std::size_t index = next_index.fetch_add (1);
+            if (index >= requests.size ())
+              {
+                break;
+              }
+            try
+              {
+                responses[index] = Generate (requests[index]);
+              }
+            catch (...)
+              {
+                std::lock_guard<std::mutex> lock (error_mutex);
+                if (!first_error)
+                  {
+                    first_error = std::current_exception ();
+                  }
+              }
+          }
+      });
+    }
+
+  for (auto &worker : workers)
+    {
+      worker.join ();
+    }
+  if (first_error)
+    {
+      std::rethrow_exception (first_error);
+    }
+  return responses;
 }
 
 std::unique_ptr<InferenceProvider>

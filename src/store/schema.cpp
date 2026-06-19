@@ -402,8 +402,12 @@ GetCoreMigrations ()
               "CREATE INDEX IF NOT EXISTS idx_memories_episode ON memories(episode_id, start_ts)",
               "CREATE INDEX IF NOT EXISTS idx_memories_embedding ON memories(embedding_id)",
               "CREATE INDEX IF NOT EXISTS idx_memories_kind ON memories(kind)",
-              "CREATE INDEX IF NOT EXISTS idx_memories_working ON memories(end_ts) WHERE kind = 'WORKING'",
-              "CREATE INDEX IF NOT EXISTS idx_memories_strength ON memories(strength, last_access)",
+              "CREATE INDEX IF NOT EXISTS idx_memories_working_active "
+              "ON memories(end_ts, memory_id) "
+              "WHERE kind = 'WORKING' AND end_ts IS NULL",
+              "CREATE INDEX IF NOT EXISTS idx_memories_working_closed_end "
+              "ON memories(end_ts, memory_id) "
+              "WHERE kind = 'WORKING' AND end_ts IS NOT NULL",
               "CREATE INDEX IF NOT EXISTS idx_memories_cluster ON memories(cluster_id) WHERE cluster_id IS NOT NULL",
 
               // ------------------------------------------------------------------
@@ -418,6 +422,14 @@ GetCoreMigrations ()
               // ------------------------------------------------------------------
               "CREATE INDEX IF NOT EXISTS idx_associations_source ON associations(source_memory_id, edge_type)",
               "CREATE INDEX IF NOT EXISTS idx_associations_target ON associations(target_memory_id, edge_type)",
+              "CREATE INDEX IF NOT EXISTS idx_associations_source_weight "
+              "ON associations(source_memory_id, weight DESC, last_reinforced DESC, target_memory_id)",
+              "CREATE INDEX IF NOT EXISTS idx_associations_target_weight "
+              "ON associations(target_memory_id, weight DESC, last_reinforced DESC, source_memory_id)",
+              "CREATE INDEX IF NOT EXISTS idx_associations_source_edge_weight "
+              "ON associations(source_memory_id, edge_type, weight DESC, last_reinforced DESC, target_memory_id)",
+              "CREATE INDEX IF NOT EXISTS idx_associations_target_edge_weight "
+              "ON associations(target_memory_id, edge_type, weight DESC, last_reinforced DESC, source_memory_id)",
 
               // ------------------------------------------------------------------
               // ACCUMULATORS indexes
@@ -451,6 +463,7 @@ GetCoreMigrations ()
               "SELECT memory_id, last_access as last_retrieval_ts "
               "FROM memories "
               "WHERE last_access IS NOT NULL "
+              "  AND kind != 'WORKING' "
               "ORDER BY last_access DESC "
               "LIMIT 128",
           },
@@ -708,7 +721,8 @@ GetCoreMigrations ()
               "CREATE INDEX IF NOT EXISTS idx_memories_source_start "
               "ON memories(source_id, start_ts)",
               "CREATE INDEX IF NOT EXISTS idx_memories_last_access "
-              "ON memories(last_access DESC) WHERE last_access IS NOT NULL",
+              "ON memories(last_access DESC) "
+              "WHERE last_access IS NOT NULL AND kind != 'WORKING'",
               "CREATE INDEX IF NOT EXISTS idx_memories_label_created "
               "ON memories(created_at DESC) WHERE kind = 'LABEL'",
           },
@@ -757,7 +771,8 @@ GetCoreMigrations ()
               "         COALESCE(latest.created_at, m.created_at, 0) AS created_at "
               "  FROM memories m "
               "  LEFT JOIN latest ON latest.memory_id = m.memory_id "
-              "  WHERE COALESCE(latest.embedding_id, m.embedding_id) IS NOT NULL"
+              "  WHERE COALESCE(latest.embedding_id, m.embedding_id) IS NOT NULL "
+              "    AND m.kind NOT IN ('WORKING', 'LABEL')"
               ") "
               "SELECT current.memory_id, e.embedding, current.embedding_id, "
               "       current.created_at "
@@ -789,6 +804,105 @@ GetCoreMigrations ()
               "DROP INDEX IF EXISTS idx_memories_strength",
               "CREATE INDEX IF NOT EXISTS idx_memories_strength "
               "ON memories(strength, last_access, created_at, start_ts)",
+          },
+      },
+      {
+          15,
+          "Retrievable current embedding surface",
+          {
+              "DELETE FROM current_memory_embeddings "
+              "WHERE memory_id NOT IN ("
+              "  SELECT memory_id FROM memories "
+              "  WHERE kind NOT IN ('WORKING', 'LABEL')"
+              ")",
+          },
+      },
+      {
+          16,
+          "Predictive pre-activation lookup index",
+          {
+              "CREATE INDEX IF NOT EXISTS idx_memories_pre_activation_embedding "
+              "ON memories(pre_activation, embedding_id) "
+              "WHERE pre_activation > 0.0",
+              "CREATE INDEX IF NOT EXISTS idx_memories_pre_activation_embedding_active "
+              "ON memories(embedding_id) "
+              "WHERE pre_activation > 0.0",
+          },
+      },
+      {
+          17,
+          "Association fanout order indexes",
+          {
+              "CREATE INDEX IF NOT EXISTS idx_associations_source_weight "
+              "ON associations(source_memory_id, weight DESC, last_reinforced DESC, target_memory_id)",
+              "CREATE INDEX IF NOT EXISTS idx_associations_target_weight "
+              "ON associations(target_memory_id, weight DESC, last_reinforced DESC, source_memory_id)",
+          },
+      },
+      {
+          18,
+          "Association edge-filtered fanout order indexes",
+          {
+              "CREATE INDEX IF NOT EXISTS idx_associations_source_edge_weight "
+              "ON associations(source_memory_id, edge_type, weight DESC, last_reinforced DESC, target_memory_id)",
+              "CREATE INDEX IF NOT EXISTS idx_associations_target_edge_weight "
+              "ON associations(target_memory_id, edge_type, weight DESC, last_reinforced DESC, source_memory_id)",
+          },
+      },
+      {
+          19,
+          "Long-term retention sample index",
+          {
+              "CREATE INDEX IF NOT EXISTS idx_memories_ltm_created_strength "
+              "ON memories(created_at DESC, start_ts DESC, strength) "
+              "WHERE kind = 'LONG_TERM'",
+          },
+      },
+      {
+          20,
+          "Drop obsolete strength retention index",
+          {
+              "DROP INDEX IF EXISTS idx_memories_strength",
+          },
+      },
+      {
+          21,
+          "Bound working-memory lookup indexes",
+          {
+              "DROP INDEX IF EXISTS idx_memories_working",
+              "CREATE INDEX IF NOT EXISTS idx_memories_working_active "
+              "ON memories(end_ts, memory_id) "
+              "WHERE kind = 'WORKING' AND end_ts IS NULL",
+              "CREATE INDEX IF NOT EXISTS idx_memories_working_closed_end "
+              "ON memories(end_ts, memory_id) "
+              "WHERE kind = 'WORKING' AND end_ts IS NOT NULL",
+          },
+      },
+      {
+          22,
+          "Exclude working rows from durable recency lookups",
+          {
+              "DROP VIEW IF EXISTS recent_retrievals",
+              "CREATE VIEW IF NOT EXISTS recent_retrievals AS "
+              "SELECT memory_id, last_access as last_retrieval_ts "
+              "FROM memories "
+              "WHERE last_access IS NOT NULL "
+              "  AND kind != 'WORKING' "
+              "ORDER BY last_access DESC "
+              "LIMIT 128",
+              "DROP INDEX IF EXISTS idx_memories_last_access",
+              "CREATE INDEX IF NOT EXISTS idx_memories_last_access "
+              "ON memories(last_access DESC) "
+              "WHERE last_access IS NOT NULL AND kind != 'WORKING'",
+          },
+      },
+      {
+          23,
+          "Predictive pre-activation active embedding lookup",
+          {
+              "CREATE INDEX IF NOT EXISTS idx_memories_pre_activation_embedding_active "
+              "ON memories(embedding_id) "
+              "WHERE pre_activation > 0.0",
           },
       },
   };

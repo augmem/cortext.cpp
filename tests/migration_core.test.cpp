@@ -128,10 +128,45 @@ TEST_CASE("Migrations create graph retrieval lookup indexes", "[schema][migratio
     REQUIRE(has_index("idx_memories_label_created"));
     REQUIRE(has_index("idx_memories_created_desc"));
     REQUIRE(has_index("idx_memories_ltm_strength_created"));
+    REQUIRE(has_index("idx_memories_pre_activation_embedding_active"));
+    REQUIRE_FALSE(has_index("idx_memories_strength"));
+    REQUIRE_FALSE(has_index("idx_memories_working"));
+    REQUIRE(has_index("idx_memories_working_active"));
+    REQUIRE(has_index("idx_memories_working_closed_end"));
     REQUIRE(has_index("idx_fact_cache_embedding"));
     REQUIRE(has_index("idx_associations_edge_source_target"));
     REQUIRE(has_index("idx_associations_edge_target_source"));
+    REQUIRE(has_index("idx_associations_source_weight"));
+    REQUIRE(has_index("idx_associations_target_weight"));
     REQUIRE(has_index("idx_fact_assertions_lifecycle_recorded"));
+
+    auto last_access_sql_rows = store->Execute(
+        "SELECT sql FROM sqlite_master WHERE type='index' "
+        "AND name='idx_memories_last_access'",
+        {});
+    REQUIRE(last_access_sql_rows.size() == 1);
+    auto last_access_sql = std::any_cast<std::string>(
+        last_access_sql_rows[0].at("sql"));
+    REQUIRE(last_access_sql.find("kind != 'WORKING'") != std::string::npos);
+
+    auto recent_view_rows = store->Execute(
+        "SELECT sql FROM sqlite_master WHERE type='view' "
+        "AND name='recent_retrievals'",
+        {});
+    REQUIRE(recent_view_rows.size() == 1);
+    auto recent_view_sql = std::any_cast<std::string>(
+        recent_view_rows[0].at("sql"));
+    REQUIRE(recent_view_sql.find("kind != 'WORKING'") != std::string::npos);
+
+    auto preactivation_sql_rows = store->Execute(
+        "SELECT sql FROM sqlite_master WHERE type='index' "
+        "AND name='idx_memories_pre_activation_embedding_active'",
+        {});
+    REQUIRE(preactivation_sql_rows.size() == 1);
+    auto preactivation_sql = std::any_cast<std::string>(
+        preactivation_sql_rows[0].at("sql"));
+    REQUIRE(preactivation_sql.find("embedding_id") != std::string::npos);
+    REQUIRE(preactivation_sql.find("pre_activation > 0.0") != std::string::npos);
 }
 
 TEST_CASE("Migrations neutralize role-derived source metadata and summary kind",

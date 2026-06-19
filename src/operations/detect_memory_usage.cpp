@@ -22,6 +22,7 @@ namespace
 struct ReinforcementCandidate
 {
   long long memory_id = 0;
+  long long embedding_id = 0;
   double contextual_support = 0.0;
   bool used = false;
 };
@@ -31,7 +32,8 @@ double
 CreateReinforcementEdges (Transaction &tx,
                           const std::vector<ReinforcementCandidate> &candidates,
                           long long now_ts,
-                          const SignalProcessor::Config &cfg)
+                          const SignalProcessor::Config &cfg,
+                          ProcessorContext::AssociationFanoutCache &cache)
 {
   if (candidates.size () < 2)
     {
@@ -48,6 +50,54 @@ CreateReinforcementEdges (Transaction &tx,
 
   double step_sum = 0.0;
   int step_count = 0;
+  std::unordered_map<long long, long long> embedding_by_memory_id;
+  embedding_by_memory_id.reserve (candidates.size ());
+  for (const auto &candidate : candidates)
+    {
+      if (candidate.memory_id > 0 && candidate.embedding_id > 0)
+        {
+          embedding_by_memory_id[candidate.memory_id]
+              = candidate.embedding_id;
+        }
+    }
+  std::unordered_set<long long> touched_sources;
+  std::unordered_set<long long> touched_targets;
+  auto upsert_cache_edge =
+      [&] (long long source_id, long long target_id, double step) {
+    if (!cache.valid || source_id <= 0 || target_id <= 0 || step <= 0.0)
+      {
+        return;
+      }
+    const long long source_embedding_id
+        = embedding_by_memory_id[source_id];
+    const long long target_embedding_id
+        = embedding_by_memory_id[target_id];
+    auto update_edges =
+        [&] (auto &edges, long long neighbor_id,
+             long long neighbor_embedding_id) {
+      auto edge_it = std::find_if (
+          edges.begin (), edges.end (), [&] (const auto &edge) {
+        return edge.memory_id == neighbor_id
+               && edge.edge_type == "reinforces";
+      });
+      if (edge_it == edges.end ())
+        {
+          edges.push_back ({ neighbor_id, neighbor_embedding_id,
+                            "reinforces", core::Clamp (step, 0.0, 1.0),
+                            now_ts });
+          return;
+        }
+      edge_it->weight = std::min (edge_it->weight + step, 1.0);
+      edge_it->last_reinforced = now_ts;
+      edge_it->embedding_id = neighbor_embedding_id;
+    };
+    update_edges (cache.out_by_source[source_id], target_id,
+                  target_embedding_id);
+    update_edges (cache.in_by_target[target_id], source_id,
+                  source_embedding_id);
+    touched_sources.insert (source_id);
+    touched_targets.insert (target_id);
+  };
   for (size_t i = 0; i < candidates.size (); ++i)
     {
       for (size_t j = i + 1; j < candidates.size (); ++j)
@@ -76,11 +126,82 @@ CreateReinforcementEdges (Transaction &tx,
               "SET weight = MIN(weight + excluded.weight, 1.0), "
               "    last_reinforced = excluded.last_reinforced",
               { id1, id2, pair_step, now_ts });
+          upsert_cache_edge (id1, id2, pair_step);
           step_sum += pair_step;
           ++step_count;
         }
     }
+  auto sort_edges = [] (auto &edges) {
+    std::sort (edges.begin (), edges.end (), [] (const auto &a,
+                                                 const auto &b) {
+      if (a.weight != b.weight)
+        {
+          return a.weight > b.weight;
+        }
+      if (a.last_reinforced != b.last_reinforced)
+        {
+          return a.last_reinforced > b.last_reinforced;
+        }
+      return a.memory_id < b.memory_id;
+    });
+  };
+  for (const long long source_id : touched_sources)
+    {
+      sort_edges (cache.out_by_source[source_id]);
+    }
+  for (const long long target_id : touched_targets)
+    {
+      sort_edges (cache.in_by_target[target_id]);
+    }
   return step_count > 0 ? step_sum / static_cast<double> (step_count) : 0.0;
+}
+
+long long
+ResolveMemoryIdForEmbedding (ProcessorContext &p_ctx, Store *store,
+                             long long embedding_id)
+{
+  auto cache_it = p_ctx.retrieval_surface_embedding_index.find (embedding_id);
+  if (cache_it != p_ctx.retrieval_surface_embedding_index.end ())
+    {
+      const long long memory_id
+          = p_ctx.retrieval_surface_cache[cache_it->second].memory_id;
+      if (memory_id > 0)
+        {
+          return memory_id;
+        }
+    }
+  if (!store)
+    {
+      return 0;
+    }
+
+  auto rows = store->Execute (
+      "SELECT memory_id FROM memories WHERE embedding_id = ? LIMIT 1",
+      { embedding_id });
+  if (!rows.empty () && rows[0].count ("memory_id") == 1)
+    {
+      return store::AnyToLongLong (rows[0].at ("memory_id")).value_or (0);
+    }
+
+  auto sig_rows = store->Execute (
+      "SELECT memory_id FROM signals WHERE embedding_id = ? LIMIT 1",
+      { embedding_id });
+  if (sig_rows.empty () || sig_rows[0].count ("memory_id") != 1)
+    {
+      return 0;
+    }
+
+  const long long memory_id
+      = store::AnyToLongLong (sig_rows[0].at ("memory_id")).value_or (0);
+  if (memory_id <= 0)
+    {
+      return 0;
+    }
+
+  auto mem_exists = store->Execute (
+      "SELECT 1 AS present FROM memories WHERE memory_id = ? LIMIT 1",
+      { memory_id });
+  return mem_exists.empty () ? 0 : memory_id;
 }
 } // namespace
 
@@ -121,6 +242,8 @@ DetectMemoryUsage::Execute (OperationContext &context, Transaction &tx) const
     {
       const long long embedding_id = kv.first;
       const Eigen::VectorXf &emb = kv.second;
+      const long long memory_id
+          = ResolveMemoryIdForEmbedding (p_ctx, store, embedding_id);
 
       ++total_checked;
 
@@ -134,7 +257,7 @@ DetectMemoryUsage::Execute (OperationContext &context, Transaction &tx) const
         }
 
       events.push_back (
-          { embedding_id, used, contextual_gain });
+          { embedding_id, used, contextual_gain, memory_id });
 
       if (used)
         {
@@ -153,63 +276,32 @@ DetectMemoryUsage::Execute (OperationContext &context, Transaction &tx) const
       reinforcement_candidates.reserve (retrieved.size ());
       std::unordered_set<long long> seen_memory_ids;
       seen_memory_ids.reserve (retrieved.size ());
-      for (const auto &kv : retrieved)
+      for (const auto &event : context.GetMemoryUsageEvents ())
         {
-          const long long embedding_id = kv.first;
-          long long memory_id = 0;
-          auto rows = store->Execute (
-              "SELECT memory_id FROM memories WHERE embedding_id = ?",
-              { embedding_id });
-          if (!rows.empty () && rows[0].count ("memory_id") == 1)
+          const long long embedding_id = event.embedding_id;
+          const long long memory_id = event.memory_id;
+          if (memory_id > 0 && seen_memory_ids.insert (memory_id).second)
             {
-              memory_id = store::AnyToLongLong (rows[0].at ("memory_id"))
-                              .value_or (0);
-            }
-          if (memory_id == 0)
-            {
-              auto sig_rows = store->Execute (
-                  "SELECT memory_id FROM signals WHERE embedding_id = ? LIMIT 1",
-                  { embedding_id });
-              if (!sig_rows.empty () && sig_rows[0].count ("memory_id") == 1)
+              double contextual_support
+                  = core::ReinforcementFallbackContextualSupport (
+                      cfg.focus, cfg.sensitivity, cfg.stability);
+              if (event.contextual_gain.has_value ())
                 {
-                  memory_id = store::AnyToLongLong (sig_rows[0].at ("memory_id"))
-                                  .value_or (0);
+                  contextual_support = core::Clamp (*event.contextual_gain,
+                                                    0.0, 1.0);
                 }
-            }
-          if (memory_id > 0)
-            {
-              auto mem_exists = store->Execute (
-                  "SELECT 1 AS present FROM memories WHERE memory_id = ? LIMIT 1",
-                  { memory_id });
-              if (!mem_exists.empty ()
-                  && seen_memory_ids.insert (memory_id).second)
-                {
-                  double contextual_support
-                      = core::ReinforcementFallbackContextualSupport (
-                          cfg.focus, cfg.sensitivity, cfg.stability);
-                  for (const auto &event : context.GetMemoryUsageEvents ())
-                    {
-                      if (event.embedding_id == embedding_id
-                          && event.contextual_gain.has_value ())
-                        {
-                          contextual_support = core::Clamp (
-                              *event.contextual_gain, 0.0, 1.0);
-                          break;
-                        }
-                    }
-                  reinforcement_candidates.push_back (
-                      { memory_id,
-                        contextual_support,
-                        interrupt_allowed && selected_id.has_value ()
-                            && embedding_id == *selected_id });
-                }
+              reinforcement_candidates.push_back (
+                  { memory_id,
+                    embedding_id,
+                    contextual_support,
+                    event.used });
             }
         }
       reinforcement_candidate_count
           = static_cast<int64_t> (reinforcement_candidates.size ());
       reinforcement_mean_step = CreateReinforcementEdges (
           tx, reinforcement_candidates, static_cast<long long> (signal.timestamp),
-          cfg);
+          cfg, p_ctx.association_fanout_cache);
     }
 
   const double usage_rate
@@ -228,46 +320,16 @@ DetectMemoryUsage::Execute (OperationContext &context, Transaction &tx) const
       const std::string key = core::SparseKey (*x_ptr, k_key);
       if (!key.empty ())
         {
-          for (const auto &kv : retrieved)
+          for (const auto &event : context.GetMemoryUsageEvents ())
             {
-              const long long embedding_id = kv.first;
-              bool used = false;
-              if (selected_id.has_value () && embedding_id == *selected_id)
-                used = true;
-              if (!used)
+              if (!event.used || event.memory_id <= 0)
                 continue;
-              // Map embedding_id -> memory_id for procedural store
-              long long memory_id = 0;
-              if (store)
-                {
-                  auto rows = store->Execute (
-                      "SELECT memory_id FROM memories WHERE embedding_id = ?",
-                      { embedding_id });
-                  if (!rows.empty () && rows[0].count ("memory_id") == 1)
-                    {
-                      memory_id = store::AnyToLongLong (rows[0].at ("memory_id"))
-                                      .value_or (0);
-                    }
-                  if (memory_id == 0)
-                    {
-                      auto sig_rows = store->Execute (
-                          "SELECT memory_id FROM signals WHERE embedding_id = ? LIMIT 1",
-                          { embedding_id });
-                      if (!sig_rows.empty () && sig_rows[0].count ("memory_id") == 1)
-                        {
-                          memory_id = store::AnyToLongLong (sig_rows[0].at ("memory_id"))
-                                          .value_or (0);
-                        }
-                    }
-                }
-              if (memory_id > 0)
-                {
-                  const double gain
-                      = neuromodulation::ValueUpdateGain (p_ctx.neuromod_da);
-                  double &q = p_ctx.procedural_store[key][memory_id];
-                  q = core::Clamp (q + gain * std::max (0.0, p_ctx.delta_reward),
-                                   0.0, 1.0);
-                }
+
+              const double gain
+                  = neuromodulation::ValueUpdateGain (p_ctx.neuromod_da);
+              double &q = p_ctx.procedural_store[key][event.memory_id];
+              q = core::Clamp (q + gain * std::max (0.0, p_ctx.delta_reward),
+                               0.0, 1.0);
             }
         }
     }

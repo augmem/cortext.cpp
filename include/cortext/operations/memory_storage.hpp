@@ -14,7 +14,8 @@ namespace cortext::operations
 ///   1. Stores per-signal payloads in objstore → SIGNALS.blob_id
 ///   2. Inserts per-signal embeddings → SIGNALS.embedding_id
 ///   3. Inserts a memory-level embedding and MEMORIES row
-///   4. Sets stored_embedding_id in OperationContext
+///   4. Sets stored_embedding_id, stored_memory_id, and stored_signal_id in
+///      OperationContext
 ///
 /// If write_decision=false:
 ///   - Discards entirely, no storage occurs.
@@ -22,7 +23,7 @@ namespace cortext::operations
 /// If write_decision=true but no payload:
 ///   - Logs warning, no storage occurs.
 class MemoryStorage
-    : public Operation<Requires<tags::AccumulatorWriteDecision, tags::BoundaryDecision, tags::EmotionProbabilities, tags::RepresentativeEmbedding>, Satisfies<tags::StoredEmbeddingId, tags::StoredMemoryId> >
+    : public Operation<Requires<tags::AccumulatorWriteDecision, tags::BoundaryDecision, tags::EmotionProbabilities, tags::RepresentativeEmbedding>, Satisfies<tags::StoredEmbeddingId, tags::StoredMemoryId, tags::StoredSignalId> >
 {
 public:
   void Execute (OperationContext &context, Transaction &tx) const override;

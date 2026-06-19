@@ -1,5 +1,6 @@
 #include "storage_pressure.hpp"
 
+#include "cortext/processor/processor_context.hpp"
 #include "cortext/store/store.hpp"
 
 #include <algorithm>
@@ -7,6 +8,8 @@
 #include <cmath>
 #include <cstdlib>
 #include <filesystem>
+#include <optional>
+#include <sstream>
 #include <string>
 #include <system_error>
 
@@ -97,6 +100,36 @@ QueryPragmaInt64 (Transaction &tx, const std::string &pragma_name)
   return 0;
 }
 
+template <typename T>
+void
+AppendOptionalKey (std::ostringstream &out, const char *name,
+                   const std::optional<T> &value)
+{
+  out << name << '=';
+  if (value.has_value ())
+    {
+      out << *value;
+    }
+  out << ';';
+}
+
+std::string
+StoragePressureCacheKey (
+    const eviction::EvictionAblationOverride &override)
+{
+  std::ostringstream out;
+  AppendOptionalKey (out, "gate", override.storage_gate_enabled);
+  AppendOptionalKey (out, "used", override.used_storage_bytes);
+  AppendOptionalKey (out, "min_bytes", override.min_storage_bytes);
+  AppendOptionalKey (out, "min_fraction",
+                     override.min_storage_fraction_of_available);
+  const char *env_min = std::getenv ("CORTEXT_EVICTION_MIN_DB_BYTES");
+  const char *env_pct = std::getenv ("CORTEXT_EVICTION_MIN_DB_AVAIL_PCT");
+  out << "env_min=" << (env_min ? env_min : "") << ';';
+  out << "env_pct=" << (env_pct ? env_pct : "") << ';';
+  return out.str ();
+}
+
 } // namespace
 
 StoragePressureState
@@ -165,6 +198,39 @@ ComputeStoragePressureState (Transaction &tx,
     }
   info.threshold_bytes = threshold_bytes;
   return info;
+}
+
+StoragePressureState
+ComputeCachedStoragePressureState (
+    ProcessorContext &ctx, Transaction &tx,
+    const eviction::EvictionAblationOverride &override,
+    int refresh_interval_signals)
+{
+  const int interval = std::max (1, refresh_interval_signals);
+  const std::string key = StoragePressureCacheKey (override);
+  const bool cache_fresh
+      = ctx.storage_pressure_cache_valid
+        && ctx.storage_pressure_cache_key == key
+        && ctx.storage_pressure_cache_signal >= 0
+        && (ctx.signals_processed - ctx.storage_pressure_cache_signal)
+               < interval;
+  if (cache_fresh)
+    {
+      return StoragePressureState{
+        ctx.storage_pressure_cache_active,
+        ctx.storage_pressure_cache_used_bytes,
+        ctx.storage_pressure_cache_threshold_bytes,
+      };
+    }
+
+  StoragePressureState state = ComputeStoragePressureState (tx, override);
+  ctx.storage_pressure_cache_valid = true;
+  ctx.storage_pressure_cache_signal = ctx.signals_processed;
+  ctx.storage_pressure_cache_key = key;
+  ctx.storage_pressure_cache_active = state.active;
+  ctx.storage_pressure_cache_used_bytes = state.used_bytes;
+  ctx.storage_pressure_cache_threshold_bytes = state.threshold_bytes;
+  return state;
 }
 
 double

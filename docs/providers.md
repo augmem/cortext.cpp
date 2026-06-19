@@ -25,10 +25,15 @@ model inference.
 ## Shape
 
 One new seam: `cortext::providers::InferenceProvider` — a transport with
-`Health()`, `Capabilities()`, `Identity()`, and a single `Generate(request)`
-primitive. The existing `Summarizer`/`Extractor` interfaces stay; adapters
+`Health()`, `Capabilities()`, `Identity()`, `Generate(request)`, and
+`GenerateBatch(requests)`. `GenerateBatch` is first-class because most
+production engines can batch independent generations; the base implementation
+falls back to sequential `Generate` calls so existing providers preserve
+behavior. The existing `Summarizer`/`Extractor` interfaces stay; adapters
 (`ProviderSummarizer`, `ProviderExtractor`) present any provider through
-them.
+them. Both adapters now expose first-class batching at their legacy interface
+level, so the operation pipeline does not need to know which transport is
+serving the request.
 
 Providers are addressed by URI and resolved through a scheme registry
 (`RegisterProviderFactory` / `ResolveProvider`):
@@ -37,7 +42,7 @@ Providers are addressed by URI and resolved through a scheme registry
 litert://models/gemma4-e2b-litert/gemma-4-E2B-it.litertlm   in-process LiteRT
 gguf://models/LFM2.5-1.2B-Instruct-GGUF                     in-process llama.cpp
 ollama://127.0.0.1:11435/gemma4:e4b                         Ollama server
-openai://api.example.com/v1/model                           OpenAI-compatible
+openai://127.0.0.1:8000/v1/gemma4-e2b                       OpenAI-compatible
 ```
 
 Configuration mechanisms live in the application layer, not the library:
@@ -46,12 +51,69 @@ Store/ObjectStore injection pattern), and applications turn their config
 strings into instances via the registry. The benchmark CLI exposes this as:
 
 ```
-cortext_chat_replay_live_run --summarizer-provider ollama://127.0.0.1:11435/gemma4:e4b
-                       # extractor unspecified -> local auto-discovery
+cortext_chat_replay_live_run \
+  --summarizer-provider ollama://127.0.0.1:11435/gemma4:e4b \
+  --extractor-provider ollama://127.0.0.1:11435/gemma4:e4b
 ```
 
 When both roles are injected, local model discovery is skipped entirely, so
 remote-only deployments need no local weights.
+
+There is no separate label-provider role. Labels, relations, and facts all flow
+through the extractor adapter: `ConsolidationSummarize` queues extraction
+requests, and `ProcessExtractionResults` uses the configured extractor to
+produce the final labels and structured graph updates. A run that sets only
+`--summarizer-provider` still uses the local default extractor for labeling.
+
+Extraction batching is first-class at the extractor level:
+`Extractor::ExtractBatchFromTexts` accepts independent text items with stable
+ids and returns results in input order. Extractors that do not support native
+batching inherit the sequential default. `ProviderExtractor` overrides the
+method and forwards independent `GenerateRequest`s to
+`InferenceProvider::GenerateBatch`, so provider engines can implement true
+runtime batching without changing consolidation code.
+
+Summarization batching follows the same contract:
+`Summarizer::SummarizeTextBatches` accepts independent groups of source texts
+with stable ids and a per-item word cap. The default implementation loops
+through `SummarizeTextsLimited`; `ProviderSummarizer` forwards independent
+summary requests to `InferenceProvider::GenerateBatch`. Deep consolidation
+uses this path for independent cluster summaries and flushes them in bounded
+batches controlled by `CORTEXT_CONSOLIDATION_SUMMARY_BATCH_SIZE`.
+
+The current Ollama transport has no native batch endpoint, but it can run
+independent requests concurrently when explicitly enabled:
+
+```bash
+CORTEXT_OLLAMA_BATCH_PARALLELISM=2 \
+CORTEXT_CONSOLIDATION_SUMMARY_BATCH_SIZE=8 \
+cortext_chat_replay_live_run \
+  --summarizer-provider ollama://127.0.0.1:11435/gemma4:e2b \
+  --extractor-provider ollama://127.0.0.1:11435/gemma4:e2b
+```
+
+The default is `1` to preserve the old deterministic request shape. On the
+late six-year replay slice, parallelism `2` was a modest win; prompt-packing
+multiple extraction items into one large request was a regression and should
+not be treated as engine batching.
+
+OpenAI-compatible servers use the same provider contract:
+
+```bash
+CORTEXT_OPENAI_BATCH_PARALLELISM=4 \
+CORTEXT_CONSOLIDATION_SUMMARY_BATCH_SIZE=8 \
+cortext_chat_replay_live_run \
+  --summarizer-provider openai://127.0.0.1:8000/v1/gemma4-e2b \
+  --extractor-provider openai://127.0.0.1:8000/v1/gemma4-e2b
+```
+
+The `openai://` provider is intended for local OpenAI-compatible engines such
+as vLLM or llama.cpp servers. It sends text-only `/chat/completions` requests,
+uses server-side JSON schema response formats for extraction, and exposes
+client-side parallelism through `CORTEXT_OPENAI_BATCH_PARALLELISM` until the
+server's own scheduler performs the real continuous batching. It does not yet
+implement TLS, API keys, image/audio parts, or encoder embeddings; use it for
+local consolidation summarization/extraction, not hosted public APIs.
 
 ### Capabilities are checked at resolve time
 
@@ -82,12 +144,11 @@ claim is unaffected unless a run explicitly opts into a server provider.
 
 ## Phases
 
-1. **(this branch)** `provider.hpp`, `registry.hpp/.cpp`, `adapters.hpp/.cpp`,
-   env-override hook in `CreateDeepLlmSelection`. No registered schemes yet;
-   default behavior is bit-identical to main.
-2. `OllamaProvider` (HTTP, `/api/chat`, `format` for schema, base64 media) —
-   registers `ollama://`. Unblocks GPU summarization on Linux eval hosts via
-   the already-running Ollama instances.
+1. `provider.hpp`, `registry.hpp/.cpp`, `adapters.hpp/.cpp`, env-override hook
+   in `CreateDeepLlmSelection`.
+2. `OllamaProvider` (HTTP, `/api/chat`, `format` for schema, base64 media) and
+   `OpenAIProvider` (HTTP, `/chat/completions`, JSON-schema response format for
+   text-only local servers) register `ollama://` and `openai://`.
 3. Wrap LiteRT and llama.cpp engines as `litert://` / `gguf://` providers;
    `deep_llm_factory` resolves everything through the registry; retire the
    hardcoded search-path chain into the default URI set.

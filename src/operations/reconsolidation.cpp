@@ -1,5 +1,6 @@
 #include "cortext/operations/reconsolidation.hpp"
 
+#include "association_fanout_cache_internal.hpp"
 #include "constructive_recall_internal.hpp"
 #include "neuromodulator_internal.hpp"
 #include "cortext/core/algorithms.hpp"
@@ -13,8 +14,10 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstddef>
 #include <numeric>
 #include <optional>
+#include <unordered_map>
 #include <string>
 #include <unordered_set>
 #include <vector>
@@ -65,12 +68,26 @@ struct NeighborInfo
   int depth;
 };
 
+struct LabilityUpdate
+{
+  long long memory_id = 0;
+  double lability = 0.0;
+};
+
+constexpr long long kReconsolidationNeighborLimit = 128;
+constexpr std::size_t kReconsolidationTraversalOvercollect
+    = static_cast<std::size_t> (kReconsolidationNeighborLimit) * 2;
+constexpr std::size_t kReconsolidationFanoutPerNode = 8;
+constexpr std::size_t kReconsolidationLabilityBatchSize = 16;
+constexpr std::size_t kReconsolidationLabilityOnlyLimit = 16;
+
 /// @brief Queries graph neighbors of a given embedding via iterative BFS.
 /// V2: Uses ASSOCIATIONS table with memory_ids instead of graph_edges.
 /// Returns neighbors connected via 'co_occurs' or 'reinforces' edges
 /// up to max_depth hops away.
 inline std::vector<NeighborInfo>
-QueryGraphNeighbors (Store *store, long long embedding_id, int max_depth)
+QueryGraphNeighbors (Store *store, ProcessorContext &p_ctx,
+                     long long embedding_id, int max_depth)
 {
   std::vector<NeighborInfo> neighbors;
   if (!store || max_depth < 1)
@@ -78,121 +95,258 @@ QueryGraphNeighbors (Store *store, long long embedding_id, int max_depth)
       return neighbors;
     }
 
-  // V2: First find the memory_id for this embedding_id
-  auto mem_rows = store->Execute (
-      "SELECT memory_id FROM memories WHERE embedding_id = ?",
-      { embedding_id });
-
-  if (mem_rows.empty ())
-    {
-      return neighbors;
-    }
-
   long long seed_memory_id = 0;
-  auto it_mem = mem_rows[0].find ("memory_id");
-  if (it_mem != mem_rows[0].end () && it_mem->second.type () == typeid (long long))
+  auto seed_rows = store->Execute (
+      "SELECT memory_id FROM memories WHERE embedding_id = ? LIMIT 1",
+      { embedding_id });
+  if (!seed_rows.empty ())
     {
-      seed_memory_id = std::any_cast<long long> (it_mem->second);
+      auto it = seed_rows[0].find ("memory_id");
+      if (it != seed_rows[0].end ())
+        {
+          seed_memory_id = store::AnyToLongLong (it->second).value_or (0);
+        }
     }
-  else
+  if (seed_memory_id <= 0)
     {
       return neighbors;
     }
 
-  // V2: Use BFS to traverse ASSOCIATIONS
-  std::unordered_set<long long> visited;
-  std::vector<std::pair<long long, int>> frontier; // (memory_id, depth)
-
-  visited.insert (seed_memory_id);
-  frontier.push_back ({ seed_memory_id, 0 });
-
-  size_t frontier_idx = 0;
-  while (frontier_idx < frontier.size ())
+  auto *association_cache
+      = association_fanout_cache::Ensure (store, p_ctx);
+  if (association_cache && association_cache->valid)
     {
-      // Copy, not reference: push_back below may reallocate `frontier`,
-      // which would leave a reference dangling.
-      const auto [current_mem_id, current_depth] = frontier[frontier_idx];
-      ++frontier_idx;
+      std::unordered_map<long long, NeighborInfo> best;
+      std::unordered_set<long long> visited;
+      visited.insert (seed_memory_id);
+      std::vector<long long> frontier { seed_memory_id };
 
-      if (current_depth >= max_depth)
+      auto visit_edges =
+          [&] (const auto &edges_by_memory, long long memory_id, int depth,
+               std::vector<long long> &next_frontier) {
+        auto edge_it = edges_by_memory.find (memory_id);
+        if (edge_it == edges_by_memory.end ())
+          {
+            return false;
+          }
+        std::size_t considered = 0;
+        for (const auto &edge : edge_it->second)
+          {
+            if (edge.memory_id <= 0
+                || (edge.edge_type != "co_occurs"
+                    && edge.edge_type != "reinforces"))
+              {
+                continue;
+              }
+            if (considered++ >= kReconsolidationFanoutPerNode)
+              {
+                break;
+              }
+            if (visited.insert (edge.memory_id).second)
+              {
+                if (next_frontier.size ()
+                    < kReconsolidationTraversalOvercollect)
+                  {
+                    next_frontier.push_back (edge.memory_id);
+                  }
+              }
+            if (edge.embedding_id <= 0)
+              {
+                continue;
+              }
+            auto best_it = best.find (edge.memory_id);
+            if (best_it == best.end () || depth < best_it->second.depth)
+              {
+                best[edge.memory_id] = { edge.memory_id, edge.embedding_id,
+                                         depth };
+              }
+            if (best.size () >= kReconsolidationTraversalOvercollect)
+              {
+                return true;
+              }
+          }
+        return false;
+      };
+
+      for (int depth = 1; depth <= max_depth && !frontier.empty (); ++depth)
+        {
+          std::vector<long long> next_frontier;
+          for (const long long memory_id : frontier)
+            {
+              if (visit_edges (association_cache->out_by_source, memory_id,
+                               depth, next_frontier)
+                  || visit_edges (association_cache->in_by_target, memory_id,
+                                  depth, next_frontier))
+                {
+                  break;
+                }
+            }
+          frontier.swap (next_frontier);
+          if (best.size () >= kReconsolidationNeighborLimit)
+            {
+              break;
+            }
+        }
+
+      neighbors.reserve (best.size ());
+      for (const auto &[memory_id, info] : best)
+        {
+          if (memory_id != seed_memory_id && info.depth > 0)
+            {
+              neighbors.push_back (info);
+            }
+        }
+      std::sort (neighbors.begin (), neighbors.end (),
+                 [] (const auto &a, const auto &b) {
+        if (a.depth != b.depth)
+          {
+            return a.depth < b.depth;
+          }
+        return a.memory_id < b.memory_id;
+      });
+      if (neighbors.size ()
+          > static_cast<size_t> (kReconsolidationNeighborLimit))
+        {
+          neighbors.resize (
+              static_cast<size_t> (kReconsolidationNeighborLimit));
+        }
+      return neighbors;
+    }
+
+  auto rows = store->Execute (
+      "WITH RECURSIVE "
+      "seed(memory_id) AS ("
+      "  SELECT ? AS memory_id "
+      "), "
+      "expand(memory_id, depth) AS ("
+      "  SELECT memory_id, 0 FROM seed "
+      "  UNION "
+      "  SELECT a.target_memory_id, expand.depth + 1 "
+      "  FROM expand "
+      "  JOIN associations a INDEXED BY idx_associations_source_edge_weight "
+      "    ON a.source_memory_id = expand.memory_id "
+      "   AND a.edge_type IN ('co_occurs', 'reinforces') "
+      "  WHERE expand.depth < ? "
+      "  UNION "
+      "  SELECT a.source_memory_id, expand.depth + 1 "
+      "  FROM expand "
+      "  JOIN associations a INDEXED BY idx_associations_target_edge_weight "
+      "    ON a.target_memory_id = expand.memory_id "
+      "   AND a.edge_type IN ('co_occurs', 'reinforces') "
+      "  WHERE expand.depth < ? "
+      "), "
+      "best(memory_id, depth) AS ("
+      "  SELECT memory_id, MIN(depth) "
+      "  FROM expand "
+      "  WHERE depth > 0 "
+      "    AND memory_id NOT IN (SELECT memory_id FROM seed) "
+      "  GROUP BY memory_id"
+      ") "
+      "SELECT best.memory_id, m.embedding_id, best.depth "
+      "FROM best "
+      "JOIN memories m ON m.memory_id = best.memory_id "
+      "WHERE m.embedding_id IS NOT NULL "
+      "ORDER BY best.depth ASC, best.memory_id ASC "
+      "LIMIT ?",
+      { seed_memory_id, static_cast<long long> (max_depth),
+        static_cast<long long> (max_depth),
+        kReconsolidationNeighborLimit });
+
+  neighbors.reserve (rows.size ());
+  for (const auto &row : rows)
+    {
+      auto mem_it = row.find ("memory_id");
+      auto emb_it = row.find ("embedding_id");
+      auto depth_it = row.find ("depth");
+      if (mem_it == row.end () || emb_it == row.end ()
+          || depth_it == row.end ())
         {
           continue;
         }
-
-      // V2: Query edges from/to this memory via ASSOCIATIONS
-      auto rows = store->Execute (
-          "SELECT source_memory_id, target_memory_id FROM associations "
-          "WHERE (source_memory_id = ? OR target_memory_id = ?) "
-          "AND edge_type IN ('co_occurs', 'reinforces')",
-          { current_mem_id, current_mem_id });
-
-      for (const auto &row : rows)
+      if (mem_it->second.type () != typeid (long long)
+          || emb_it->second.type () != typeid (long long))
         {
-          auto src_it = row.find ("source_memory_id");
-          auto tgt_it = row.find ("target_memory_id");
-          if (src_it == row.end () || tgt_it == row.end ())
-            {
-              continue;
-            }
-
-          long long src_id = 0, tgt_id = 0;
-          if (src_it->second.type () == typeid (long long))
-            {
-              src_id = std::any_cast<long long> (src_it->second);
-            }
-          if (tgt_it->second.type () == typeid (long long))
-            {
-              tgt_id = std::any_cast<long long> (tgt_it->second);
-            }
-
-          // The neighbor is the other end of the edge
-          long long neighbor_mem_id
-              = (src_id == current_mem_id) ? tgt_id : src_id;
-
-          if (visited.count (neighbor_mem_id))
-            {
-              continue;
-            }
-          visited.insert (neighbor_mem_id);
-
-          int neighbor_depth = current_depth + 1;
-          frontier.push_back ({ neighbor_mem_id, neighbor_depth });
-
-          // Look up embedding_id for this neighbor memory
-          auto emb_rows = store->Execute (
-              "SELECT embedding_id FROM memories WHERE memory_id = ?",
-              { neighbor_mem_id });
-
-          if (!emb_rows.empty ())
-            {
-              auto emb_it = emb_rows[0].find ("embedding_id");
-              if (emb_it != emb_rows[0].end ()
-                  && emb_it->second.type () == typeid (long long))
-                {
-                  neighbors.push_back (
-                      { neighbor_mem_id,
-                        std::any_cast<long long> (emb_it->second),
-                        neighbor_depth });
-                }
-            }
+          continue;
         }
+      int depth = 0;
+      if (depth_it->second.type () == typeid (long long))
+        {
+          depth = static_cast<int> (std::any_cast<long long> (
+              depth_it->second));
+        }
+      else if (depth_it->second.type () == typeid (int))
+        {
+          depth = std::any_cast<int> (depth_it->second);
+        }
+      if (depth <= 0)
+        {
+          continue;
+        }
+      neighbors.push_back (
+          { std::any_cast<long long> (mem_it->second),
+            std::any_cast<long long> (emb_it->second), depth });
     }
 
   return neighbors;
+}
+
+inline void
+WriteNeighborLability (Transaction &tx, long long memory_id, double lability,
+                       long long timestamp)
+{
+  tx.Execute ("UPDATE memories "
+              "SET lability_state = COALESCE(?, 0.0), lability_ts = ? "
+              "WHERE memory_id = ?",
+              { lability, timestamp, memory_id });
+}
+
+inline void
+WriteNeighborLabilityBatch (Transaction &tx,
+                            const std::vector<LabilityUpdate> &updates,
+                            long long timestamp)
+{
+  for (size_t offset = 0; offset < updates.size ();
+       offset += kReconsolidationLabilityBatchSize)
+    {
+      const size_t count = std::min (kReconsolidationLabilityBatchSize,
+                                     updates.size () - offset);
+      std::string sql
+          = "UPDATE memories SET lability_state = CASE memory_id ";
+      std::vector<std::any> params;
+      params.reserve (count * 3 + 1);
+      for (size_t i = 0; i < count; ++i)
+        {
+          const auto &update = updates[offset + i];
+          sql += "WHEN ? THEN COALESCE(?, 0.0) ";
+          params.push_back (update.memory_id);
+          params.push_back (update.lability);
+        }
+      sql += "ELSE lability_state END, lability_ts = ? WHERE memory_id IN (";
+      params.push_back (timestamp);
+      for (size_t i = 0; i < count; ++i)
+        {
+          if (i > 0)
+            {
+              sql += ",";
+            }
+          sql += "?";
+          params.push_back (updates[offset + i].memory_id);
+        }
+      sql += ")";
+      tx.Execute (sql, params);
+    }
 }
 
 /// @brief Writes ripple updates for a neighbor embedding (v2 schema).
 inline void
 WriteNeighborUpdates (Transaction &tx, long long embedding_id,
                       long long memory_id, double lability, long long timestamp,
-                      const Eigen::VectorXf &blended)
+                      const Eigen::VectorXf &blended,
+                      constructive_recall::ReconstructionUpdatePolicy policy)
 {
   // Update lability_state and lability_ts in memories table (v2: merged from
   // memory_feedback)
-  tx.Execute ("UPDATE memories "
-              "SET lability_state = COALESCE(?, 0.0), lability_ts = ? "
-              "WHERE memory_id = ?",
-              { lability, timestamp, memory_id });
+  WriteNeighborLability (tx, memory_id, lability, timestamp);
 
   if (constructive_recall::Disabled ())
     {
@@ -207,7 +361,7 @@ WriteNeighborUpdates (Transaction &tx, long long embedding_id,
   const auto blob_id = constructive_recall::LoadCurrentBlobId (tx, memory_id);
   constructive_recall::AppendReconstructionWithEmbedding (
       tx, memory_id, blended, blob_id, timestamp, std::min (1.0, lability),
-      "reconsolidation", 1.0, 1.0);
+      "reconsolidation", 1.0, 1.0, policy);
 }
 
 } // namespace
@@ -248,8 +402,19 @@ ApplyReconsolidation::Execute (OperationContext &context, Transaction &tx) const
       F, S, T);
   const double ripple_strength_min = core::RippleStrengthMin (F, S, T);
   const double ripple_drift_cap_factor = core::RippleDriftCapFactor (F, S, T);
+  const int ripple_reconstruction_limit
+      = core::ReconsolidationRippleReconstructionLimit (F, S, T);
+  const int primary_reconstruction_limit
+      = core::ReconsolidationPrimaryReconstructionLimit (F, S, T);
   const double uncertainty_relevance_weight
       = core::ReconsolidationUncertaintyRelevanceWeight (F, S, T);
+  const constructive_recall::ReconstructionUpdatePolicy
+      reconstruction_update_policy {
+        core::ReconstructionHistoryLimit (F, S, T),
+        core::ReconstructionPruneBatchLimit (F, S, T),
+        core::ReconstructionMinUpdateIntervalMs (F, S, T),
+        false
+      };
 
   double max_drift = 0.0;
   const long long now_ts
@@ -257,6 +422,8 @@ ApplyReconsolidation::Execute (OperationContext &context, Transaction &tx) const
 
   // Track which embeddings we've already processed (avoid duplicate ripple)
   std::unordered_set<long long> processed_ids;
+  int primary_reconstruction_attempts = 0;
+  int ripple_reconstruction_attempts = 0;
 
   for (const auto &kv : retrieved)
     {
@@ -288,7 +455,8 @@ ApplyReconsolidation::Execute (OperationContext &context, Transaction &tx) const
                 }
               else if (it_mem->second.type () == typeid (int))
                 {
-                  memory_id = static_cast<long long> (std::any_cast<int> (it_mem->second));
+                  memory_id = static_cast<long long> (
+                      std::any_cast<int> (it_mem->second));
                 }
             }
           auto state_it = mem_rows[0].find ("lability_state");
@@ -300,8 +468,8 @@ ApplyReconsolidation::Execute (OperationContext &context, Transaction &tx) const
                 }
               else if (state_it->second.type () == typeid (float))
                 {
-                  stored_lability
-                      = static_cast<double> (std::any_cast<float> (state_it->second));
+                  stored_lability = static_cast<double> (
+                      std::any_cast<float> (state_it->second));
                 }
             }
           auto ts_it = mem_rows[0].find ("lability_ts");
@@ -381,7 +549,9 @@ ApplyReconsolidation::Execute (OperationContext &context, Transaction &tx) const
                                 + static_cast<float> (drift_mag) * u_cur;
       blended = Unit (blended);
 
-      if (constructive_recall::Disabled ())
+      const bool persist_primary_reconstruction =
+          primary_reconstruction_attempts < primary_reconstruction_limit;
+      if (persist_primary_reconstruction && constructive_recall::Disabled ())
         {
           const auto primary_append_start = SteadyClock::now ();
           tx.Execute ("DELETE FROM embeddings WHERE embedding_id = ?",
@@ -392,8 +562,9 @@ ApplyReconsolidation::Execute (OperationContext &context, Transaction &tx) const
               { embedding_id, ToFloatVector (blended), now_ts });
           context.AddOperationTiming ("Reconsolidation.primary_append",
                                       ElapsedMillis (primary_append_start));
+          ++primary_reconstruction_attempts;
         }
-      else
+      else if (persist_primary_reconstruction)
         {
           const auto primary_append_start = SteadyClock::now ();
           const auto blob_id
@@ -405,9 +576,11 @@ ApplyReconsolidation::Execute (OperationContext &context, Transaction &tx) const
                              0.0, 1.0);
           constructive_recall::AppendReconstructionWithEmbedding (
               tx, memory_id, blended, blob_id, now_ts, uncertainty,
-              "reconsolidation", 1.0, contextual_relevance);
+              "reconsolidation", 1.0, contextual_relevance,
+              reconstruction_update_policy);
           context.AddOperationTiming ("Reconsolidation.primary_append",
                                       ElapsedMillis (primary_append_start));
+          ++primary_reconstruction_attempts;
         }
 
       // --- BEGIN RIPPLE PROPAGATION ---
@@ -417,12 +590,14 @@ ApplyReconsolidation::Execute (OperationContext &context, Transaction &tx) const
           continue;
         }
 
-      // Query graph neighbors of this reconsolidated memory
       const auto neighbor_query_start = SteadyClock::now ();
-      auto neighbors = QueryGraphNeighbors (store, embedding_id, ripple_depth);
+      auto neighbors = QueryGraphNeighbors (store, p_ctx, embedding_id,
+                                            ripple_depth);
       context.AddOperationTiming ("Reconsolidation.neighbor_query",
                                   ElapsedMillis (neighbor_query_start));
 
+      std::vector<LabilityUpdate> pending_lability_updates;
+      pending_lability_updates.reserve (neighbors.size ());
       for (const auto &neighbor : neighbors)
         {
           // Skip if already processed (either as primary or via earlier ripple)
@@ -441,6 +616,19 @@ ApplyReconsolidation::Execute (OperationContext &context, Transaction &tx) const
           // Skip if lability too low
           if (neighbor_lability < ripple_strength_min)
             {
+              continue;
+            }
+
+          const bool persist_neighbor_reconstruction
+              = ripple_reconstruction_attempts < ripple_reconstruction_limit;
+          if (!persist_neighbor_reconstruction)
+            {
+              if (pending_lability_updates.size ()
+                  < kReconsolidationLabilityOnlyLimit)
+                {
+                  pending_lability_updates.push_back (
+                      { neighbor.memory_id, neighbor_lability });
+                }
               continue;
             }
 
@@ -478,8 +666,17 @@ ApplyReconsolidation::Execute (OperationContext &context, Transaction &tx) const
           // Write updates for this neighbor
           const auto neighbor_write_start = SteadyClock::now ();
           WriteNeighborUpdates (tx, neighbor.embedding_id, neighbor.memory_id,
-                                neighbor_lability, now_ts, neighbor_blended);
+                                neighbor_lability, now_ts, neighbor_blended,
+                                reconstruction_update_policy);
+          ++ripple_reconstruction_attempts;
           context.AddOperationTiming ("Reconsolidation.neighbor_write",
+                                      ElapsedMillis (neighbor_write_start));
+        }
+      if (!pending_lability_updates.empty ())
+        {
+          const auto neighbor_write_start = SteadyClock::now ();
+          WriteNeighborLabilityBatch (tx, pending_lability_updates, now_ts);
+          context.AddOperationTiming ("Reconsolidation.neighbor_lability_write",
                                       ElapsedMillis (neighbor_write_start));
         }
       // --- END RIPPLE PROPAGATION ---

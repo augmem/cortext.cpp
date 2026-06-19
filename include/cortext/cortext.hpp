@@ -53,6 +53,7 @@ public:
     std::unordered_map<std::string, double> operation_ms;
     std::optional<long long> stored_embedding_id;  // Set if stored to memory
     std::optional<long long> stored_memory_id;     // Set if stored to memory
+    std::optional<long long> stored_signal_id;     // Set if stored to signal
     bool signal_filter_evaluated = false;
     bool signal_filter_accepted = true;
     std::string signal_filter_modality;
@@ -299,6 +300,28 @@ public:
                         int channels, const std::string &source_id,
                         Retention retention = Retention::Durable);
 
+  /// @brief Encode text and return the configured encoder's raw embedding.
+  ///
+  /// This is an embedding-only call: it does not run signal filters, mutate
+  /// processor state, write to storage, retrieve memories, or trigger
+  /// consolidation.
+  std::vector<float> EmbedText (const std::string &text) const;
+
+  /// @brief Encode audio PCM and return the configured encoder's raw embedding.
+  ///
+  /// Audio uses the same public input contract as ProcessAudio: 16 kHz mono
+  /// float32 PCM. The call is embedding-only and does not mutate memory state.
+  std::vector<float> EmbedAudio (const float *pcm,
+                                 std::size_t num_samples) const;
+
+  /// @brief Encode image pixels and return the configured encoder's raw embedding.
+  ///
+  /// Image data uses the same public input contract as ProcessImage: row-major
+  /// RGB/RGBA-style bytes with explicit width, height, and channel count. The
+  /// call is embedding-only and does not mutate memory state.
+  std::vector<float> EmbedImage (const std::uint8_t *data, int width,
+                                 int height, int channels) const;
+
   /// @brief Attempt to trigger consolidation if conditions allow.
   /// @param mode Shallow (embedding-only), deep (local summary/labels backend),
   /// or both.
@@ -308,6 +331,14 @@ public:
 
   /// @brief Flush/commit any pending episode writes.
   void Flush ();
+
+  /// @brief Reset volatile in-memory processor state.
+  ///
+  /// Durable memories, signals, embeddings, and object-store content are
+  /// retained. The processor is rebuilt against the same store and model
+  /// dependencies, reloading persisted adaptive state as a newly created
+  /// handle would.
+  void Reset ();
 
 #if defined(CORTEXT_TESTING)
   /// @brief Test-only helper to hydrate arbitrary memory ids.

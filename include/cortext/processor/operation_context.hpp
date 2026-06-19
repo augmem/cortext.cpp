@@ -55,10 +55,11 @@ public:
   /// @brief Usage event for a memory row in the feedback table.
   struct MemoryUsageEvent
   {
-    long long embedding_id;
-    bool used;
+    long long embedding_id = 0;
+    bool used = false;
     std::optional<double>
         contextual_gain; // Cosine similarity to input; std::nullopt if unknown
+    long long memory_id = 0;
   };
 
   /// @brief Constructs an OperationContext.
@@ -960,6 +961,17 @@ public:
     return stored_memory_id_;
   }
 
+  void
+  SetStoredSignalId (std::optional<long long> id)
+  {
+    stored_signal_id_ = id;
+  }
+  std::optional<long long>
+  GetStoredSignalId () const
+  {
+    return stored_signal_id_;
+  }
+
   // ======================================================================
   // Memory Accumulation API (Section 4.4)
   // ======================================================================
@@ -1292,6 +1304,7 @@ private:
   // Memory storage output (MemoryStorage operation)
   std::optional<long long> stored_embedding_id_;
   std::optional<long long> stored_memory_id_;
+  std::optional<long long> stored_signal_id_;
 
   // Algorithm 27 fields
   bool at_boundary_ = false;

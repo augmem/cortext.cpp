@@ -20,6 +20,7 @@ struct SignalRecord
   std::string modality;                   ///< "text" | "audio" | "image"
   std::string mime;                       ///< MIME type
   std::vector<unsigned char> blob_id;     ///< objstore hash (may be empty)
+  std::string text_payload;               ///< Transient text cache for active WM
   double score = 0.0;                     ///< Composite score
   int serial_position = 0;                ///< Order within memory (0-based)
 };

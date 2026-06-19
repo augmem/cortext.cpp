@@ -222,6 +222,7 @@ add_library(cortext
     src/providers/adapters.cpp
     src/providers/contract.cpp
     src/providers/ollama_provider.cpp
+    src/providers/openai_provider.cpp
     # JSON schema parser for constrained decoding
     src/generator/json_decoder.cpp
     # Audio preprocessing

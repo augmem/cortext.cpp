@@ -151,6 +151,29 @@ TEST_CASE ("Cortext C++ stub can be created and used", "[cortext][stub]")
   REQUIRE (rows.size () == 1);
 }
 
+TEST_CASE ("Cortext embed-only API returns vectors without storing signals",
+           "[cortext][embed]")
+{
+  ScopedTempDb temp_db;
+  cortext::Cortext::Config cfg;
+  const std::string &db_path = temp_db.path ();
+  const std::string models_dir = RepoModelsDir ();
+
+  std::unique_ptr<cortext::Cortext> ctx;
+  REQUIRE_NOTHROW (ctx = cortext::Cortext::Create (cfg, db_path, models_dir));
+  REQUIRE (ctx != nullptr);
+
+  std::vector<float> embedding;
+  REQUIRE_NOTHROW (embedding = ctx->EmbedText ("embed only text"));
+  REQUIRE_FALSE (embedding.empty ());
+
+  auto store = std::shared_ptr<cortext::Store> (
+      cortext::SQLiteStore::Create (db_path.c_str ()));
+  const auto rows = store->Execute ("SELECT COUNT(*) AS n FROM signals");
+  REQUIRE (rows.size () == 1);
+  REQUIRE (AnyToLongLong (rows[0].at ("n")) == 0);
+}
+
 TEST_CASE ("internal replay ingress preserves media event timestamps",
            "[cortext][replay][media]")
 {
@@ -216,6 +239,98 @@ TEST_CASE ("timestamped replay persists working memory source timestamps",
   REQUIRE (AnyToLongLong (rows[0].at ("last_access"))
            == static_cast<long long> (replay_ts));
   REQUIRE (std::any_cast<std::string> (rows[0].at ("kind")) == "WORKING");
+}
+
+TEST_CASE ("internal replay text ingress can skip context hydration",
+           "[cortext][replay][hydration]")
+{
+  ScopedTempDb temp_db;
+  cortext::Cortext::Config cfg;
+  const std::string &db_path = temp_db.path ();
+  const std::string models_dir = RepoModelsDir ();
+
+  std::unique_ptr<cortext::Cortext> ctx;
+  REQUIRE_NOTHROW (ctx = cortext::Cortext::Create (cfg, db_path, models_dir));
+  REQUIRE (ctx != nullptr);
+
+  const std::uint64_t replay_ts = 1573184762000ULL;
+  auto ingest = cortext::internal::ReplayIngress::ProcessTextAt (
+      *ctx, "non hydrated replay text still persists memory", "stream/main",
+      replay_ts, cortext::Retention::Durable, false);
+  REQUIRE (ingest.working_memory.empty ());
+  REQUIRE (ingest.retrieved_memory.empty ());
+  REQUIRE (ingest.output.stored_memory_id.has_value ());
+  REQUIRE (ingest.output.stored_signal_id.has_value ());
+  ctx->Flush ();
+
+  auto unique_store = cortext::SQLiteStore::Create (db_path.c_str ());
+  auto store = std::shared_ptr<cortext::Store> (std::move (unique_store));
+  auto rows = store->Execute (
+      "SELECT timestamp, signal_id FROM signals "
+      "WHERE memory_id = ? ORDER BY signal_id DESC LIMIT 1",
+      { *ingest.output.stored_memory_id });
+  REQUIRE (rows.size () == 1);
+  REQUIRE (AnyToLongLong (rows[0].at ("timestamp"))
+           == static_cast<long long> (replay_ts));
+  REQUIRE (AnyToLongLong (rows[0].at ("signal_id"))
+           == ingest.output.stored_signal_id);
+  auto wm_rows = store->Execute (
+      "SELECT start_ts, kind FROM memories "
+      "WHERE kind = 'WORKING' ORDER BY memory_id DESC LIMIT 1");
+  REQUIRE (wm_rows.size () == 1);
+  REQUIRE (AnyToLongLong (wm_rows[0].at ("start_ts"))
+           == static_cast<long long> (replay_ts));
+  REQUIRE (std::any_cast<std::string> (wm_rows[0].at ("kind")) == "WORKING");
+
+  auto probe = cortext::internal::ReplayIngress::ProcessTextAt (
+      *ctx, "hydrated replay probe sees existing working memory",
+      "stream/main", replay_ts + 1000ULL, cortext::Retention::Ephemeral,
+      true);
+  REQUIRE_FALSE (probe.working_memory.empty ());
+  REQUIRE_FALSE (probe.output.stored_memory_id.has_value ());
+  REQUIRE_FALSE (probe.output.stored_signal_id.has_value ());
+}
+
+TEST_CASE ("working memory persistence does not rewrite clean slot embeddings",
+           "[cortext][replay][working_memory][performance]")
+{
+  ScopedTempDb temp_db;
+  cortext::Cortext::Config cfg;
+  const std::string &db_path = temp_db.path ();
+  const std::string models_dir = RepoModelsDir ();
+
+  std::unique_ptr<cortext::Cortext> ctx;
+  REQUIRE_NOTHROW (ctx = cortext::Cortext::Create (cfg, db_path, models_dir));
+  REQUIRE (ctx != nullptr);
+
+  const std::uint64_t replay_ts = 1573184762000ULL;
+  for (int i = 0; i < 6; ++i)
+    {
+      const auto ts = replay_ts + static_cast<std::uint64_t> (i) * 1000ULL;
+      REQUIRE_NOTHROW (
+          cortext::internal::ReplayIngress::ProcessTextAt (
+              *ctx,
+              "bounded replay working memory persistence message "
+                  + std::to_string (i),
+              "stream/main", ts, cortext::Retention::Durable, false));
+    }
+  ctx->Flush ();
+
+  auto unique_store = cortext::SQLiteStore::Create (db_path.c_str ());
+  auto store = std::shared_ptr<cortext::Store> (std::move (unique_store));
+  auto rows = store->Execute (
+      "SELECT COUNT(*) AS c FROM embeddings e "
+      "WHERE NOT EXISTS ("
+      "  SELECT 1 FROM memories m WHERE m.embedding_id = e.embedding_id"
+      ") AND NOT EXISTS ("
+      "  SELECT 1 FROM signals s WHERE s.embedding_id = e.embedding_id"
+      ")");
+  REQUIRE (rows.size () == 1);
+  auto wm_rows = store->Execute (
+      "SELECT COUNT(*) AS c FROM memories WHERE kind = 'WORKING'");
+  REQUIRE (wm_rows.size () == 1);
+  REQUIRE (AnyToLongLong (rows[0].at ("c"))
+           <= AnyToLongLong (wm_rows[0].at ("c")));
 }
 
 TEST_CASE ("replay clock override preserves working memory on reopen",
@@ -1173,6 +1288,42 @@ TEST_CASE ("C API handles NULL inputs correctly", "[cortext][capi][safety]")
     cortext_free (h);
   }
 
+  SECTION ("cortext_embed_text_json reports NULL arguments")
+  {
+    char *json_ptr = cortext_embed_text_json (nullptr, "hello");
+    REQUIRE (json_ptr == nullptr);
+    REQUIRE (std::string (cortext_last_error ())
+             == "handle and text must both be non-NULL");
+  }
+
+  SECTION ("cortext_embed_audio_json reports NULL arguments")
+  {
+    ScopedTempDb temp_db;
+    const auto models_dir = RepoModelsDir ();
+    auto h = cortext_create_with_models (0.5, 0.5, 0.5, temp_db.path ().c_str (),
+                                         models_dir.c_str ());
+    REQUIRE (h != nullptr);
+    char *json_ptr = cortext_embed_audio_json (h, nullptr, 100);
+    REQUIRE (json_ptr == nullptr);
+    REQUIRE (std::string (cortext_last_error ())
+             == "handle and pcm must both be non-NULL");
+    cortext_free (h);
+  }
+
+  SECTION ("cortext_embed_image_json reports NULL arguments")
+  {
+    ScopedTempDb temp_db;
+    const auto models_dir = RepoModelsDir ();
+    auto h = cortext_create_with_models (0.5, 0.5, 0.5, temp_db.path ().c_str (),
+                                         models_dir.c_str ());
+    REQUIRE (h != nullptr);
+    char *json_ptr = cortext_embed_image_json (h, nullptr, 10, 10, 3);
+    REQUIRE (json_ptr == nullptr);
+    REQUIRE (std::string (cortext_last_error ())
+             == "handle and data must both be non-NULL");
+    cortext_free (h);
+  }
+
   SECTION ("cortext_consolidate returns 1 for NULL handle")
   {
     CHECK (cortext_consolidate (nullptr) == 1);
@@ -1183,6 +1334,43 @@ TEST_CASE ("C API handles NULL inputs correctly", "[cortext][capi][safety]")
   {
     CHECK (cortext_flush (nullptr) == 1);
     REQUIRE (std::string (cortext_last_error ()) == "handle must not be NULL");
+  }
+
+  SECTION ("cortext_reset returns 1 for NULL handle")
+  {
+    CHECK (cortext_reset (nullptr) == 1);
+    REQUIRE (std::string (cortext_last_error ()) == "handle must not be NULL");
+  }
+
+  SECTION ("cortext_reset keeps handle usable")
+  {
+    ScopedTempDb temp_db;
+    const auto models_dir = RepoModelsDir ();
+    auto h = cortext_create_with_models (0.5, 0.5, 0.5, temp_db.path ().c_str (),
+                                         models_dir.c_str ());
+    REQUIRE (h != nullptr);
+
+    REQUIRE (cortext_process_text (h, "before reset", "reset/source") == 0);
+    REQUIRE (cortext_reset (h) == 0);
+    REQUIRE (cortext_last_error () == nullptr);
+
+    char *json_ptr
+        = cortext_process_text_json (h, "after reset", "reset/source");
+    REQUIRE (json_ptr != nullptr);
+
+    auto parsed = nlohmann::json::parse (json_ptr);
+    REQUIRE (parsed.contains ("output"));
+    REQUIRE (parsed.at ("output").contains ("stored_signal_id"));
+    REQUIRE (parsed.at ("output").at ("stored_signal_id").is_number_integer ());
+    cortext_string_free (json_ptr);
+
+    auto store = std::shared_ptr<cortext::Store> (
+        cortext::SQLiteStore::Create (temp_db.path ().c_str ()));
+    const auto rows = store->Execute ("SELECT COUNT(*) AS n FROM signals");
+    REQUIRE (rows.size () == 1);
+    REQUIRE (AnyToLongLong (rows[0].at ("n")) >= 2);
+
+    cortext_free (h);
   }
 
   SECTION ("cortext_config_init populates defaults and create_with_config works")
@@ -1211,10 +1399,22 @@ TEST_CASE ("C API handles NULL inputs correctly", "[cortext][capi][safety]")
     REQUIRE (h != nullptr);
 
     char *json_ptr
+        = cortext_process_text_json (h, "json api stores ids", "json/source");
+    REQUIRE (json_ptr != nullptr);
+
+    auto parsed = nlohmann::json::parse (json_ptr);
+    REQUIRE (parsed.contains ("output"));
+    REQUIRE (parsed.at ("output").contains ("stored_memory_id"));
+    REQUIRE (parsed.at ("output").contains ("stored_signal_id"));
+    REQUIRE (parsed.at ("output").at ("stored_memory_id").is_number_integer ());
+    REQUIRE (parsed.at ("output").at ("stored_signal_id").is_number_integer ());
+    cortext_string_free (json_ptr);
+
+    json_ptr
         = cortext_consolidate_mode_json (h, CORTEXT_CONSOLIDATE_SHALLOW);
     REQUIRE (json_ptr != nullptr);
 
-    const auto parsed = nlohmann::json::parse (json_ptr);
+    parsed = nlohmann::json::parse (json_ptr);
     REQUIRE (parsed.contains ("working_memory"));
     REQUIRE (parsed.contains ("retrieved_memory"));
     REQUIRE (parsed.contains ("output"));
@@ -1222,6 +1422,36 @@ TEST_CASE ("C API handles NULL inputs correctly", "[cortext][capi][safety]")
     REQUIRE (parsed.at ("retrieved_memory").is_array ());
 
     cortext_string_free (json_ptr);
+    cortext_free (h);
+  }
+
+  SECTION ("Embed JSON C API returns parseable embedding")
+  {
+    ScopedTempDb temp_db;
+    const auto models_dir = RepoModelsDir ();
+    auto h = cortext_create_with_models (0.5, 0.5, 0.5, temp_db.path ().c_str (),
+                                         models_dir.c_str ());
+    REQUIRE (h != nullptr);
+
+    char *json_ptr = cortext_embed_text_json (h, "json api embeds text");
+    REQUIRE (json_ptr != nullptr);
+
+    auto parsed = nlohmann::json::parse (json_ptr);
+    REQUIRE (parsed.contains ("embedding"));
+    REQUIRE (parsed.contains ("dimension"));
+    REQUIRE (parsed.at ("embedding").is_array ());
+    REQUIRE (parsed.at ("dimension").is_number_unsigned ());
+    REQUIRE_FALSE (parsed.at ("embedding").empty ());
+    REQUIRE (parsed.at ("dimension").get<std::size_t> ()
+             == parsed.at ("embedding").size ());
+    cortext_string_free (json_ptr);
+
+    auto store = std::shared_ptr<cortext::Store> (
+        cortext::SQLiteStore::Create (temp_db.path ().c_str ()));
+    const auto rows = store->Execute ("SELECT COUNT(*) AS n FROM signals");
+    REQUIRE (rows.size () == 1);
+    REQUIRE (AnyToLongLong (rows[0].at ("n")) == 0);
+
     cortext_free (h);
   }
 

@@ -6,11 +6,26 @@
 #include "cortext/processor/operation_context.hpp"
 #include "cortext/telemetry/telemetry.hpp"
 #include <any>
+#include <chrono>
 #include <map>
 #include <string>
 
 namespace cortext::operations
 {
+
+namespace
+{
+using SteadyClock = std::chrono::steady_clock;
+constexpr int kRetentionScanIntervalSignals = 128;
+constexpr int kRetentionScanSampleLimit = 4096;
+
+double
+ElapsedMillis (SteadyClock::time_point start)
+{
+  return std::chrono::duration<double, std::milli> (SteadyClock::now () - start)
+      .count ();
+}
+} // namespace
 
 void
 InitializeStabilityPriors::Execute (OperationContext &context, Transaction &tx) const
@@ -70,67 +85,95 @@ UpdateStability::Execute (OperationContext &context, Transaction &tx) const
   const double cutoff = core::PeripheryCutoff (T);
   const double now_s
       = static_cast<double> (context.GetSignal ().timestamp) / 1000.0;
-  if (context.GetStore ())
-    {
-      try
-        {
-          auto get_int64 = [] (const std::map<std::string, std::any> &row,
-                               const std::string &key,
-                               long long def) -> long long {
-            auto it = row.find (key);
-            if (it == row.end () || !it->second.has_value ())
-              return def;
-            if (it->second.type () == typeid (long long))
-              return std::any_cast<long long> (it->second);
-            if (it->second.type () == typeid (int))
-              return static_cast<long long> (std::any_cast<int> (it->second));
-            if (it->second.type () == typeid (double))
-              return static_cast<long long> (
-                  std::any_cast<double> (it->second));
-            return def;
-          };
-          auto get_double = [] (const std::map<std::string, std::any> &row,
-                                const std::string &key,
-                                double def) -> double {
-            auto it = row.find (key);
-            if (it == row.end () || !it->second.has_value ())
-              return def;
-            if (it->second.type () == typeid (double))
-              return std::any_cast<double> (it->second);
-            if (it->second.type () == typeid (float))
-              return static_cast<double> (std::any_cast<float> (it->second));
-            if (it->second.type () == typeid (long long))
-              return static_cast<double> (std::any_cast<long long> (it->second));
-            if (it->second.type () == typeid (int))
-              return static_cast<double> (std::any_cast<int> (it->second));
-            return def;
-          };
-          auto rows = tx.Execute (
-              "SELECT COUNT(*) AS count, "
-              "       AVG(MAX(0.0, ?1 - "
-              "           (CASE WHEN created_at > 0 "
-              "                 THEN created_at ELSE start_ts END) / 1000.0)) "
-              "           AS avg_age "
-              "FROM memories "
-              "WHERE strength >= ?2 "
-              "  AND (CASE WHEN created_at > 0 "
-              "            THEN created_at ELSE start_ts END) > 0",
-              { now_s, cutoff });
-          const auto &row = rows.empty ()
-                                ? std::map<std::string, std::any> {}
-                                : rows.front ();
-          const long long count = get_int64 (row, "count", 0);
-          observed_retention
-              = (count > 0) ? get_double (row, "avg_age", 0.0) : 0.0;
-        }
-      catch (...)
-        {
-          observed_retention = std::nullopt;
-        }
-    }
-  else if (auto obs = context.GetObservedRetentionSeconds (); obs.has_value ())
+  if (auto obs = context.GetObservedRetentionSeconds (); obs.has_value ())
     {
       observed_retention = *obs;
+    }
+  else if (context.GetStore ())
+    {
+      const bool first_scan = p_ctx.last_retention_scan_signal < 0;
+      const bool consolidation_advanced
+          = p_ctx.last_retention_scan_consolidation_ts
+            != p_ctx.last_consolidation_ts;
+      const bool periodic_scan
+          = (p_ctx.signals_processed - p_ctx.last_retention_scan_signal)
+            >= kRetentionScanIntervalSignals;
+      if (first_scan || consolidation_advanced || periodic_scan)
+        {
+          try
+            {
+              auto get_int64 = [] (const std::map<std::string, std::any> &row,
+                                   const std::string &key,
+                                   long long def) -> long long {
+                auto it = row.find (key);
+                if (it == row.end () || !it->second.has_value ())
+                  return def;
+                if (it->second.type () == typeid (long long))
+                  return std::any_cast<long long> (it->second);
+                if (it->second.type () == typeid (int))
+                  return static_cast<long long> (std::any_cast<int> (it->second));
+                if (it->second.type () == typeid (double))
+                  return static_cast<long long> (
+                      std::any_cast<double> (it->second));
+                return def;
+              };
+              auto get_double = [] (const std::map<std::string, std::any> &row,
+                                    const std::string &key,
+                                    double def) -> double {
+                auto it = row.find (key);
+                if (it == row.end () || !it->second.has_value ())
+                  return def;
+                if (it->second.type () == typeid (double))
+                  return std::any_cast<double> (it->second);
+                if (it->second.type () == typeid (float))
+                  return static_cast<double> (std::any_cast<float> (it->second));
+                if (it->second.type () == typeid (long long))
+                  return static_cast<double> (std::any_cast<long long> (it->second));
+                if (it->second.type () == typeid (int))
+                  return static_cast<double> (std::any_cast<int> (it->second));
+                return def;
+              };
+              const auto retention_start = SteadyClock::now ();
+              auto rows = tx.Execute (
+                  "WITH active_sample AS ("
+                  "  SELECT created_at, start_ts "
+                  "  FROM memories INDEXED BY idx_memories_ltm_created_strength "
+                  "  WHERE kind = 'LONG_TERM' "
+                  "    AND strength >= ?2 "
+                  "    AND (created_at > 0 OR start_ts > 0) "
+                  "  ORDER BY created_at DESC, start_ts DESC "
+                  "  LIMIT ?3"
+                  ") "
+                  "SELECT COUNT(*) AS count, "
+                  "       AVG(MAX(0.0, ?1 - "
+                  "           (CASE WHEN created_at > 0 "
+                  "                 THEN created_at ELSE start_ts END) / 1000.0)) "
+                  "           AS avg_age "
+                  "FROM active_sample",
+                  { now_s, cutoff,
+                    static_cast<long long> (kRetentionScanSampleLimit) });
+              context.AddOperationTiming ("Stability.retention_scan_sql",
+                                          ElapsedMillis (retention_start));
+              p_ctx.last_retention_scan_signal = p_ctx.signals_processed;
+              p_ctx.last_retention_scan_consolidation_ts
+                  = p_ctx.last_consolidation_ts;
+              const auto &row = rows.empty ()
+                                    ? std::map<std::string, std::any> {}
+                                    : rows.front ();
+              const long long count = get_int64 (row, "count", 0);
+              observed_retention
+                  = (count > 0) ? get_double (row, "avg_age", 0.0) : 0.0;
+            }
+          catch (...)
+            {
+              observed_retention = std::nullopt;
+            }
+        }
+      else
+        {
+          context.AddOperationTiming ("Stability.retention_scan_deferred",
+                                      0.0);
+        }
     }
 
   if (observed_retention.has_value ())

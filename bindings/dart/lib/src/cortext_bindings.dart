@@ -335,6 +335,24 @@ class CortextBindings {
   late final _cortext_flush = _cortext_flushPtr
       .asFunction<int Function(cortext_handle)>();
 
+  /// @brief Resets volatile in-memory processor state.
+  /// @param h Handle to a Cortext instance.
+  /// @return 0 on success, 1 if invalid handle, 2 on internal error.
+  ///
+  /// Durable memories, signals, embeddings, and object-store content are
+  /// retained. The handle remains valid and reloads persisted adaptive state
+  /// from the same backing store.
+  int cortext_reset(cortext_handle h) {
+    return _cortext_reset(h);
+  }
+
+  late final _cortext_resetPtr =
+      _lookup<ffi.NativeFunction<ffi.Int Function(cortext_handle)>>(
+        'cortext_reset',
+      );
+  late final _cortext_reset = _cortext_resetPtr
+      .asFunction<int Function(cortext_handle)>();
+
   /// @brief Returns the Cortext library version string.
   ffi.Pointer<ffi.Char> cortext_version() {
     return _cortext_version();
@@ -471,6 +489,90 @@ class CortextBindings {
           int,
           int,
           ffi.Pointer<ffi.Char>,
+        )
+      >();
+
+  /// @brief Encodes text and returns an embedding JSON object.
+  ffi.Pointer<ffi.Char> cortext_embed_text_json(
+    cortext_handle h,
+    ffi.Pointer<ffi.Char> text,
+  ) {
+    return _cortext_embed_text_json(h, text);
+  }
+
+  late final _cortext_embed_text_jsonPtr =
+      _lookup<
+        ffi.NativeFunction<
+          ffi.Pointer<ffi.Char> Function(
+            cortext_handle,
+            ffi.Pointer<ffi.Char>,
+          )
+        >
+      >('cortext_embed_text_json');
+  late final _cortext_embed_text_json = _cortext_embed_text_jsonPtr
+      .asFunction<
+        ffi.Pointer<ffi.Char> Function(cortext_handle, ffi.Pointer<ffi.Char>)
+      >();
+
+  /// @brief Encodes audio PCM and returns an embedding JSON object.
+  ffi.Pointer<ffi.Char> cortext_embed_audio_json(
+    cortext_handle h,
+    ffi.Pointer<ffi.Float> pcm,
+    int num_samples,
+  ) {
+    return _cortext_embed_audio_json(h, pcm, num_samples);
+  }
+
+  late final _cortext_embed_audio_jsonPtr =
+      _lookup<
+        ffi.NativeFunction<
+          ffi.Pointer<ffi.Char> Function(
+            cortext_handle,
+            ffi.Pointer<ffi.Float>,
+            ffi.Size,
+          )
+        >
+      >('cortext_embed_audio_json');
+  late final _cortext_embed_audio_json = _cortext_embed_audio_jsonPtr
+      .asFunction<
+        ffi.Pointer<ffi.Char> Function(
+          cortext_handle,
+          ffi.Pointer<ffi.Float>,
+          int,
+        )
+      >();
+
+  /// @brief Encodes image pixels and returns an embedding JSON object.
+  ffi.Pointer<ffi.Char> cortext_embed_image_json(
+    cortext_handle h,
+    ffi.Pointer<ffi.Uint8> data,
+    int width,
+    int height,
+    int channels,
+  ) {
+    return _cortext_embed_image_json(h, data, width, height, channels);
+  }
+
+  late final _cortext_embed_image_jsonPtr =
+      _lookup<
+        ffi.NativeFunction<
+          ffi.Pointer<ffi.Char> Function(
+            cortext_handle,
+            ffi.Pointer<ffi.Uint8>,
+            ffi.Int,
+            ffi.Int,
+            ffi.Int,
+          )
+        >
+      >('cortext_embed_image_json');
+  late final _cortext_embed_image_json = _cortext_embed_image_jsonPtr
+      .asFunction<
+        ffi.Pointer<ffi.Char> Function(
+          cortext_handle,
+          ffi.Pointer<ffi.Uint8>,
+          int,
+          int,
+          int,
         )
       >();
 

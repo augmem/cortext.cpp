@@ -210,6 +210,60 @@ public:
   int calls = 0;
 };
 
+class BatchCapturingSummarizer final : public Summarizer
+{
+public:
+  std::string
+  SummarizeTexts (const std::vector<std::string> &texts) override
+  {
+    return SummarizeTextsLimited (texts, 0);
+  }
+
+  std::string
+  SummarizeTextsLimited (const std::vector<std::string> & /*texts*/,
+                         int /*max_words*/) override
+  {
+    ++single_calls;
+    return "single summary";
+  }
+
+  std::vector<std::string>
+  SummarizeTextBatches (const std::vector<BatchTextItem> &items) override
+  {
+    ++batch_calls;
+    batches = items;
+    std::vector<std::string> summaries;
+    summaries.reserve (items.size ());
+    for (std::size_t i = 0; i < items.size (); ++i)
+      {
+        summaries.push_back ("batch summary " + std::to_string (i));
+      }
+    return summaries;
+  }
+
+  std::string
+  SummarizeAudio (const float * /*pcm*/, size_t /*num_samples*/) override
+  {
+    return {};
+  }
+
+  std::string
+  SummarizeAudioSegments (const std::vector<AudioSegment> & /*segments*/) override
+  {
+    return {};
+  }
+
+  bool
+  IsAvailable () const override
+  {
+    return true;
+  }
+
+  int single_calls = 0;
+  int batch_calls = 0;
+  std::vector<BatchTextItem> batches;
+};
+
 void
 MarkCompressibleClusterSources (Store *store)
 {
@@ -590,6 +644,94 @@ TEST_CASE ("Summarization preserves raw evidence text before prompting",
   REQUIRE (summarizer.captured_texts[2]
            == "The conversation stayed on memory testing.");
   REQUIRE (summarizer.last_max_words == 0);
+}
+
+TEST_CASE ("Summarization batches independent cluster summaries",
+           "[integration][consolidation][summarize][batch]")
+{
+  cortext::testing::ScopedEnvVar batch_size (
+      "CORTEXT_CONSOLIDATION_SUMMARY_BATCH_SIZE", "8");
+
+  auto unique_store = SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<Store> (std::move (unique_store));
+
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  cfg.focus = 0.0;
+  cfg.sensitivity = 0.5;
+  cfg.stability = 0.5;
+
+  BatchCapturingSummarizer summarizer;
+
+  auto init_ops = std::make_unique<DynamicOperationSet> ();
+  SignalProcessor init_processor (cfg, store, std::move (init_ops));
+  init_processor.Process (MakeSignal (1));
+  init_processor.Flush ();
+
+  ProcessorContext pctx;
+  pctx.summarizer = &summarizer;
+  pctx.last_consolidation_ts = 100000;
+  Signal s = MakeSignal (3000);
+  s.source_id = "test/consolidation";
+  s.consolidation_mode = ConsolidationMode::Both;
+  OperationContext ctx (s, pctx, cfg, store.get ());
+  ctx.SetConsolidationShouldStart (true);
+
+  Eigen::VectorXf emb_a = Eigen::VectorXf::Zero (256);
+  emb_a[0] = 1.0f;
+  Eigen::VectorXf emb_b = Eigen::VectorXf::Zero (256);
+  emb_b[1] = 1.0f;
+  for (long long i = 1; i <= 3; ++i)
+    {
+      SeedEmbedding (store.get (), i, emb_a);
+      SeedMemory (store.get (), i,
+                  "Cluster A evidence " + std::to_string (i),
+                  static_cast<uint64_t> (i * 1000));
+    }
+  for (long long i = 4; i <= 6; ++i)
+    {
+      SeedEmbedding (store.get (), i, emb_b);
+      SeedMemory (store.get (), i,
+                  "Cluster B evidence " + std::to_string (i),
+                  static_cast<uint64_t> (i * 1000));
+    }
+
+  ClusterInfo cluster_a;
+  cluster_a.cluster_id = 10;
+  cluster_a.embedding_ids = { 1, 2, 3 };
+  cluster_a.centroid = std::vector<float> (256, 0.0f);
+  cluster_a.centroid[0] = 1.0f;
+  cluster_a.avg_score = 0.3;
+
+  ClusterInfo cluster_b;
+  cluster_b.cluster_id = 11;
+  cluster_b.embedding_ids = { 4, 5, 6 };
+  cluster_b.centroid = std::vector<float> (256, 0.0f);
+  cluster_b.centroid[1] = 1.0f;
+  cluster_b.avg_score = 0.3;
+  ctx.SetConsolidationClusters ({ cluster_a, cluster_b });
+
+  ConsolidationSummarize summarize_op;
+  auto tx = store->Begin ();
+  summarize_op.Execute (ctx, *tx);
+  tx->Commit ();
+
+  REQUIRE (summarizer.single_calls == 0);
+  REQUIRE (summarizer.batch_calls == 1);
+  REQUIRE (summarizer.batches.size () == 2);
+  REQUIRE (summarizer.batches[0].texts.size () == 3);
+  REQUIRE (summarizer.batches[1].texts.size () == 3);
+
+  auto summaries = store->Execute (
+      "SELECT label FROM memories WHERE kind = 'LONG_TERM' "
+      "AND source_id LIKE 'summary_%' "
+      "ORDER BY source_id ASC",
+      {});
+  REQUIRE (summaries.size () == 2);
+  REQUIRE (std::any_cast<std::string> (summaries[0].at ("label"))
+           == "batch summary 0");
+  REQUIRE (std::any_cast<std::string> (summaries[1].at ("label"))
+           == "batch summary 1");
 }
 
 TEST_CASE ("Summarization source blob ablation keeps text evidence",

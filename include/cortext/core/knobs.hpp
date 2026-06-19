@@ -523,6 +523,30 @@ RetrievalDurableSourceTextSearchLimit (double F, double S, double T)
 }
 
 inline int
+RetrievalDurableSourceTextRefreshBatch (double F, double S, double T)
+{
+  const double f = RetrievalFocusBias (F);
+  const double s = RetrievalSensitivityBias (S);
+  const double t = RetrievalStabilityBias (T);
+  return static_cast<int> (
+      std::round (Clamp (Lerp (9.0, 3.0, f) * Lerp (1.10, 0.90, s)
+                             * Lerp (1.05, 0.90, t),
+                         2.0, 16.0)));
+}
+
+inline int
+RetrievalDurableSourceTextRefreshInterval (double F, double S, double T)
+{
+  const double f = RetrievalFocusBias (F);
+  const double s = RetrievalSensitivityBias (S);
+  const double t = RetrievalStabilityBias (T);
+  return static_cast<int> (
+      std::round (Clamp (Lerp (32.0, 96.0, f) * Lerp (1.25, 0.75, s)
+                             * Lerp (0.85, 1.15, t),
+                         16.0, 192.0)));
+}
+
+inline int
 RetrievalDurableSourceTextMaxBytes (double F, double S, double T)
 {
   const double f = RetrievalFocusBias (F);
@@ -2194,6 +2218,51 @@ RetrievalConstructiveReconstructionPolicy (double F, double S, double T)
     Clamp (Lerp (0.18, 0.30, s) * Lerp (1.04, 0.90, t), 0.12, 0.35),
     Clamp (Lerp (0.80, 0.72, t) * Lerp (1.02, 0.98, f), 0.60, 0.90)
   };
+}
+
+inline int
+ReconstructionHistoryLimit (double F, double S, double T)
+{
+  const double f = RetrievalFocusBias (F);
+  const double s = RetrievalSensitivityBias (S);
+  const double t = RetrievalStabilityBias (T);
+  const double raw = Lerp (6.0, 14.0, t) * Lerp (1.08, 0.92, f)
+                     * Lerp (0.94, 1.08, s);
+  return static_cast<int> (std::round (Clamp (raw, 4.0, 24.0)));
+}
+
+inline int
+ReconstructionPruneBatchLimit (double F, double S, double T)
+{
+  const double f = RetrievalFocusBias (F);
+  const double s = RetrievalSensitivityBias (S);
+  const double t = RetrievalStabilityBias (T);
+  const double raw = Lerp (64.0, 192.0, t) * Lerp (0.90, 1.05, f)
+                     * Lerp (0.95, 1.10, s);
+  return static_cast<int> (std::round (Clamp (raw, 32.0, 256.0)));
+}
+
+inline long long
+ReconstructionMinUpdateIntervalMs (double F, double S, double T)
+{
+  const double f = RetrievalFocusBias (F);
+  const double s = RetrievalSensitivityBias (S);
+  const double t = RetrievalStabilityBias (T);
+  const double seconds = Lerp (300.0, 1800.0, t) * Lerp (0.90, 1.18, f)
+                         * Lerp (1.10, 0.80, s);
+  return static_cast<long long> (
+      std::llround (Clamp (seconds, 120.0, 3600.0) * 1000.0));
+}
+
+inline int
+RetrievalReconstructionUpdateCount (double F, double S, double T)
+{
+  const double f = RetrievalFocusBias (F);
+  const double s = RetrievalSensitivityBias (S);
+  const double t = RetrievalStabilityBias (T);
+  const double raw = Lerp (3.0, 1.0, f) * Lerp (0.85, 1.25, s)
+                     * Lerp (1.20, 0.75, t);
+  return static_cast<int> (std::round (Clamp (raw, 1.0, 4.0)));
 }
 
 inline int
@@ -3913,6 +3982,26 @@ RippleDepth (double T)
 {
   // ripple_depth = round(lerp(2, 1, T)) — higher stability = shallower ripple
   return static_cast<int> (std::round (Lerp (2.0, 1.0, T)));
+}
+
+inline int
+ReconsolidationRippleReconstructionLimit (double F, double S, double T)
+{
+  const double f = FocusBias (F);
+  const double s = SensitivityBias (S);
+  const double t = Clamp (T, 0.0, 1.0);
+  const double raw = (1.0 - t) * s * Lerp (1.0, 0.4, f) * 5.0 - 1.0;
+  return static_cast<int> (std::round (Clamp (raw, 0.0, 6.0)));
+}
+
+inline int
+ReconsolidationPrimaryReconstructionLimit (double F, double S, double T)
+{
+  const double f = FocusBias (F);
+  const double s = SensitivityBias (S);
+  const double t = Clamp (T, 0.0, 1.0);
+  const double raw = (1.0 - t) * s * Lerp (1.1, 0.75, f) * 3.0;
+  return static_cast<int> (std::round (Clamp (raw, 0.0, 3.0)));
 }
 
 inline double

@@ -369,6 +369,28 @@ def _configure_library(lib: ctypes.CDLL) -> ctypes.CDLL:
     ]
     lib.cortext_process_image_json.restype = ctypes.c_void_p
 
+    lib.cortext_embed_text_json.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_char_p,
+    ]
+    lib.cortext_embed_text_json.restype = ctypes.c_void_p
+
+    lib.cortext_embed_audio_json.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_float),
+        ctypes.c_size_t,
+    ]
+    lib.cortext_embed_audio_json.restype = ctypes.c_void_p
+
+    lib.cortext_embed_image_json.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_uint8),
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+    ]
+    lib.cortext_embed_image_json.restype = ctypes.c_void_p
+
     lib.cortext_consolidate_json.argtypes = [ctypes.c_void_p]
     lib.cortext_consolidate_json.restype = ctypes.c_void_p
 
@@ -377,6 +399,9 @@ def _configure_library(lib: ctypes.CDLL) -> ctypes.CDLL:
 
     lib.cortext_flush.argtypes = [ctypes.c_void_p]
     lib.cortext_flush.restype = ctypes.c_int
+
+    lib.cortext_reset.argtypes = [ctypes.c_void_p]
+    lib.cortext_reset.restype = ctypes.c_int
 
     lib.cortext_version.argtypes = []
     lib.cortext_version.restype = ctypes.c_char_p
@@ -894,6 +919,11 @@ class Cortext:
         if status != 0:
             _raise_last_error("cortext_flush failed")
 
+    def reset(self) -> None:
+        status = self._lib.cortext_reset(self._handle)
+        if status != 0:
+            _raise_last_error("cortext_reset failed")
+
     def process_text_json(self, text: str, source_id: str) -> str:
         return self._call_json(
             self._lib.cortext_process_text_json,
@@ -903,6 +933,15 @@ class Cortext:
 
     def process_text(self, text: str, source_id: str) -> dict[str, Any]:
         return json.loads(self.process_text_json(text, source_id))
+
+    def embed_text_json(self, text: str) -> str:
+        return self._call_json(
+            self._lib.cortext_embed_text_json,
+            text.encode("utf-8"),
+        )
+
+    def embed_text(self, text: str) -> list[float]:
+        return list(json.loads(self.embed_text_json(text))["embedding"])
 
     def process_audio_json(self, pcm: Iterable[float], source_id: str) -> str:
         samples = array("f", pcm)
@@ -916,6 +955,18 @@ class Cortext:
 
     def process_audio(self, pcm: Iterable[float], source_id: str) -> dict[str, Any]:
         return json.loads(self.process_audio_json(pcm, source_id))
+
+    def embed_audio_json(self, pcm: Iterable[float]) -> str:
+        samples = array("f", pcm)
+        raw = (ctypes.c_float * len(samples)).from_buffer(samples)
+        return self._call_json(
+            self._lib.cortext_embed_audio_json,
+            raw,
+            len(samples),
+        )
+
+    def embed_audio(self, pcm: Iterable[float]) -> list[float]:
+        return list(json.loads(self.embed_audio_json(pcm))["embedding"])
 
     def process_image_json(
         self,
@@ -947,6 +998,33 @@ class Cortext:
         return json.loads(
             self.process_image_json(data, width, height, channels, source_id)
         )
+
+    def embed_image_json(
+        self,
+        data: bytes | bytearray | memoryview,
+        width: int,
+        height: int,
+        channels: int,
+    ) -> str:
+        blob = bytes(data)
+        raw = (ctypes.c_uint8 * len(blob)).from_buffer_copy(blob)
+        return self._call_json(
+            self._lib.cortext_embed_image_json,
+            raw,
+            width,
+            height,
+            channels,
+        )
+
+    def embed_image(
+        self,
+        data: bytes | bytearray | memoryview,
+        width: int,
+        height: int,
+        channels: int,
+    ) -> list[float]:
+        payload = self.embed_image_json(data, width, height, channels)
+        return list(json.loads(payload)["embedding"])
 
     def consolidate_json(self) -> str:
         return self._call_json(self._lib.cortext_consolidate_json)

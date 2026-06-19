@@ -11,6 +11,7 @@ thread_local std::vector<RankedCandidate> g_last_ranked_candidates;
 thread_local std::vector<RejectedCandidate> g_last_rejected_candidates;
 thread_local std::vector<EvidencePacket> g_last_evidence_packets;
 thread_local RetrievalSummary g_last_retrieval_summary;
+thread_local bool g_capture_enabled = true;
 
 } // namespace
 
@@ -102,6 +103,23 @@ RetrievalSummary
 GetLastRetrievalSummary ()
 {
   return g_last_retrieval_summary;
+}
+
+bool
+CaptureEnabled ()
+{
+  return g_capture_enabled;
+}
+
+ScopedCapture::ScopedCapture (bool enabled)
+    : previous_ (g_capture_enabled)
+{
+  g_capture_enabled = enabled;
+}
+
+ScopedCapture::~ScopedCapture ()
+{
+  g_capture_enabled = previous_;
 }
 
 } // namespace cortext::operations::retrieval_debug

@@ -148,6 +148,21 @@ public:
   /// @brief Synchronous generation. Throws std::runtime_error on transport
   /// failure after exhausting GenerateParams::max_retries.
   virtual GenerateResponse Generate (const GenerateRequest &request) = 0;
+
+  /// @brief Synchronous batch generation for independent requests. Engines
+  /// with native batching should override this; the default preserves
+  /// semantics by issuing requests sequentially through Generate().
+  virtual std::vector<GenerateResponse>
+  GenerateBatch (const std::vector<GenerateRequest> &requests)
+  {
+    std::vector<GenerateResponse> responses;
+    responses.reserve (requests.size ());
+    for (const auto &request : requests)
+      {
+        responses.push_back (Generate (request));
+      }
+    return responses;
+  }
 };
 
 } // namespace cortext::providers

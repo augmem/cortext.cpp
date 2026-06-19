@@ -8,6 +8,7 @@
 #include "storage_pressure.hpp"
 #include "temporal_retrieval.hpp"
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <cmath>
 #include <cstdlib>
@@ -34,6 +35,7 @@ EnvFlag (const char *name)
 
 double
 ResolveResurfacingDecayScale (
+    ProcessorContext &p_ctx,
     Transaction &tx,
     const temporal::RetrievalAblationOverride &retrieval_override,
     double stability)
@@ -46,7 +48,8 @@ ResolveResurfacingDecayScale (
 
   const auto eviction_override = eviction::GetEvictionAblationOverride ();
   const auto pressure_state
-      = pressure::ComputeStoragePressureState (tx, eviction_override);
+      = pressure::ComputeCachedStoragePressureState (p_ctx, tx,
+                                                     eviction_override);
   switch (mode)
     {
     case temporal::ResurfacingDecayMode::PressureGate:
@@ -101,8 +104,14 @@ MetacognitiveMonitoring::Execute (OperationContext &context, Transaction &tx) co
   const auto retrieval_override = temporal::GetRetrievalAblationOverride ();
   const auto resurfacing_decay_mode
       = temporal::ResolveResurfacingDecayMode (retrieval_override);
+  const auto storage_pressure_start = std::chrono::steady_clock::now ();
   const double resurfacing_decay_scale
-      = ResolveResurfacingDecayScale (tx, retrieval_override, T);
+      = ResolveResurfacingDecayScale (p_ctx, tx, retrieval_override, T);
+  context.AddOperationTiming (
+      "Metacognitive.storage_pressure",
+      std::chrono::duration<double, std::milli> (
+          std::chrono::steady_clock::now () - storage_pressure_start)
+          .count ());
   const double certainty_req
       = core::CertaintyRequirement (resurfacing_decay_scale);
   double delta_t_s = 0.0;

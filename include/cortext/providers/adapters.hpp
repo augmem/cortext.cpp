@@ -5,6 +5,8 @@
 #include "cortext/summarizer/summarizer.hpp"
 
 #include <memory>
+#include <string>
+#include <vector>
 
 namespace cortext::providers
 {
@@ -18,6 +20,8 @@ public:
   std::string SummarizeTexts (const std::vector<std::string> &texts) override;
   std::string SummarizeTextsLimited (const std::vector<std::string> &texts,
                                      int max_words) override;
+  std::vector<std::string>
+  SummarizeTextBatches (const std::vector<BatchTextItem> &items) override;
   std::string SummarizeAudio (const float *pcm, size_t num_samples) override;
   std::string
   SummarizeAudioSegments (const std::vector<AudioSegment> &segments) override;
@@ -43,6 +47,9 @@ public:
   operations::ExtractionResult
   ExtractFromAudio (const float *pcm, size_t num_samples,
                     const nlohmann::json &schema) override;
+  std::vector<operations::ExtractionResult>
+  ExtractBatchFromTexts (const std::vector<BatchTextItem> &items,
+                         const nlohmann::json &schema) override;
   bool IsAvailable () const override;
 
 private:

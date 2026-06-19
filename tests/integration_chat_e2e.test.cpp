@@ -440,6 +440,20 @@ CountRowsForSource (Store &store, const std::string &table,
   return cortext::testing::GetInt64 (rows[0], "c");
 }
 
+long long
+CountSignalRowsById (Store &store, long long signal_id,
+                     const std::string &source_id)
+{
+  const auto rows = store.Execute (
+      "SELECT COUNT(*) AS c FROM signals WHERE signal_id = ? AND source_id = ?",
+      { signal_id, source_id });
+  if (rows.empty ())
+    {
+      return 0;
+    }
+  return cortext::testing::GetInt64 (rows[0], "c");
+}
+
 std::vector<std::string>
 GetDeepSummaryLabels (Store &store, long long min_memory_id = 0)
 {
@@ -1588,8 +1602,11 @@ TEST_CASE ("Integration: scripted chat preserves turn-shaped working memory",
 
           latest_ctx = probe.FinalizeTextAt (text, ts++);
           REQUIRE (latest_ctx.output.stored_embedding_id.has_value ());
-          REQUIRE (CountRowsForSource (*store, "signals", "chat/assistant")
-                   > assistant_signals_before_stream);
+          REQUIRE (latest_ctx.output.stored_signal_id.has_value ());
+          REQUIRE (CountSignalRowsById (*store,
+                                        *latest_ctx.output.stored_signal_id,
+                                        "chat/assistant")
+                   == 1);
         }
 
       transcript.push_back ({ role, text });
@@ -1828,8 +1845,11 @@ TEST_CASE (
 
           latest_ctx = probe.FinalizeTextAt (text, ts++);
           REQUIRE (latest_ctx.output.stored_embedding_id.has_value ());
-          REQUIRE (CountRowsForSource (*store, "signals", "chat/assistant")
-                   > assistant_signals_before_stream);
+          REQUIRE (latest_ctx.output.stored_signal_id.has_value ());
+          REQUIRE (CountSignalRowsById (*store,
+                                        *latest_ctx.output.stored_signal_id,
+                                        "chat/assistant")
+                   == 1);
 
           ++assistant_turns_seen;
         }

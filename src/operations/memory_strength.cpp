@@ -27,6 +27,9 @@ namespace
 {
 using SteadyClock = std::chrono::steady_clock;
 constexpr std::size_t kEvictionSqlChunkSize = 400;
+constexpr std::size_t kEvictionSelectLimit = 512;
+constexpr int kEvictionScanIntervalSignals = 128;
+constexpr int kEvictionPressureScanIntervalSignals = 16;
 
 double
 ElapsedMillis (SteadyClock::time_point start)
@@ -70,6 +73,7 @@ ForEachChunk (std::size_t count, const std::function<void (std::size_t,
       fn (begin, end);
     }
 }
+
 } // namespace
 
 void
@@ -109,16 +113,24 @@ UpdateMemoryStrength::Execute (OperationContext &context, Transaction &tx) const
       const double cg_event = core::Clamp (
           e.contextual_gain.value_or (constants::kNormalizedMin), -1.0, 1.0);
       const long long id = static_cast<long long> (e.embedding_id);
+      const long long memory_id = static_cast<long long> (e.memory_id);
+      const bool has_memory_id = memory_id > 0;
+      const char *lookup_column = has_memory_id ? "memory_id" : "embedding_id";
+      const long long lookup_id = has_memory_id ? memory_id : id;
       const long long ts
           = static_cast<long long> (context.GetSignal ().timestamp);
 
+      const std::string select_sql
+          = std::string (
+                "SELECT memory_id, strength, use_frequency, contextual_gain, "
+                "retrieved_count, "
+                "       used_count, last_access, created_at, flashbulb, "
+                "       half_life_bonus, trace_fast, trace_med, trace_slow, "
+                "trace_ultra "
+                "FROM memories WHERE ")
+            + lookup_column + " = ?";
       const auto select_start = SteadyClock::now ();
-      auto rows = tx.Execute (
-          "SELECT strength, use_frequency, contextual_gain, retrieved_count, "
-          "       used_count, last_access, created_at, flashbulb, "
-          "       half_life_bonus, trace_fast, trace_med, trace_slow, trace_ultra "
-          "FROM memories WHERE embedding_id = ?",
-          { id });
+      auto rows = tx.Execute (select_sql, { lookup_id });
       context.AddOperationTiming ("MemoryStrength.feedback_select_sql",
                                   ElapsedMillis (select_start));
       if (rows.empty ())
@@ -152,6 +164,8 @@ UpdateMemoryStrength::Execute (OperationContext &context, Transaction &tx) const
           return static_cast<long long> (std::any_cast<double> (v));
         return def;
       };
+      const long long row_memory_id
+          = get_int (rows[0].at ("memory_id"), memory_id);
       const long long retrieved_prev
           = std::any_cast<long long> (rows[0].at ("retrieved_count"));
       const long long used_prev
@@ -320,25 +334,39 @@ UpdateMemoryStrength::Execute (OperationContext &context, Transaction &tx) const
       strength = core::Clamp (strength, constants::kNormalizedMin,
                               constants::kNormalizedMax);
 
+      const std::string update_sql
+          = std::string (
+                "UPDATE memories "
+                "SET retrieved_count = ?, "
+                "    used_count = ?, "
+                "    last_used = CASE WHEN ? > 0 THEN ? ELSE last_used END, "
+                "    contextual_gain = ?, "
+                "    influence_factor = ?, "
+                "    use_frequency = ?, "
+                "    strength = ?, "
+                "    trace_fast = ?, "
+                "    trace_med = ?, "
+                "    trace_slow = ?, "
+                "    trace_ultra = ?, "
+                "    last_access = ? "
+                "WHERE ")
+            + lookup_column + " = ?";
       const auto update_start = SteadyClock::now ();
       tx.Execute (
-          "UPDATE memories "
-          "SET retrieved_count = ?, "
-          "    used_count = ?, "
-          "    last_used = CASE WHEN ? > 0 THEN ? ELSE last_used END, "
-          "    contextual_gain = ?, "
-          "    influence_factor = ?, "
-          "    use_frequency = ?, "
-          "    strength = ?, "
-          "    trace_fast = ?, "
-          "    trace_med = ?, "
-          "    trace_slow = ?, "
-          "    trace_ultra = ?, "
-          "    last_access = ? "
-          "WHERE embedding_id = ?",
+          update_sql,
           { retrieved_new, used_new, used_flag, ts, contextual_gain,
-            influence_factor, use_frequency, strength,
-            traces[0], traces[1], traces[2], traces[3], ts, id });
+            influence_factor, use_frequency, strength, traces[0], traces[1],
+            traces[2], traces[3], ts, lookup_id });
+      if (row_memory_id > 0)
+        {
+          p_ctx.UpdateRetrievalSurfaceUsageByMemory (row_memory_id,
+                                                     retrieved_new, used_new, ts);
+        }
+      else
+        {
+          p_ctx.UpdateRetrievalSurfaceUsageByEmbedding (id, retrieved_new,
+                                                        used_new, ts);
+        }
       context.AddOperationTiming ("MemoryStrength.feedback_update_sql",
                                   ElapsedMillis (update_start));
 
@@ -353,7 +381,7 @@ UpdateMemoryStrength::Execute (OperationContext &context, Transaction &tx) const
       = static_cast<long long> (context.GetSignal ().timestamp);
   const auto frontier_start = SteadyClock::now ();
   const auto frontier = eviction_policy::ResolveEvictionFrontier (
-      tx, T, static_cast<long long> (std::min<std::uint64_t> (
+      p_ctx, tx, T, static_cast<long long> (std::min<std::uint64_t> (
           p_ctx.last_consolidation_ts,
           static_cast<std::uint64_t> (
               std::numeric_limits<long long>::max ()))),
@@ -403,12 +431,66 @@ UpdateMemoryStrength::Execute (OperationContext &context, Transaction &tx) const
       return;
     }
 
+  if (frontier.consolidation_gate_active && frontier.consolidation_ts <= 0)
+    {
+      context.AddOperationTiming ("MemoryStrength.eviction_scan_deferred",
+                                  0.0);
+      telemetry::LogDebug (
+          "cortext.memory_strength",
+          { telemetry::Attribute::Int64 ("update_count", update_count),
+            telemetry::Attribute::Int64 ("eviction_count", 0),
+            telemetry::Attribute::Int64 ("storage_used_bytes",
+                                         frontier.storage_used_bytes),
+            telemetry::Attribute::Int64 ("storage_threshold_bytes",
+                                         frontier.storage_threshold_bytes) });
+      return;
+    }
+
+  const bool consolidation_gate_disabled
+      = !frontier.consolidation_gate_active;
+  const bool storage_pressure_active
+      = frontier.storage_gate_active && frontier.storage_allows_eviction;
+  const bool consolidation_advanced
+      = p_ctx.last_eviction_scan_consolidation_ts
+        != p_ctx.last_consolidation_ts;
+  const bool first_scan = p_ctx.last_eviction_scan_signal < 0;
+  const int scan_interval = storage_pressure_active
+                                ? kEvictionPressureScanIntervalSignals
+                                : kEvictionScanIntervalSignals;
+  const bool periodic_scan_due
+      = (p_ctx.signals_processed - p_ctx.last_eviction_scan_signal)
+        >= scan_interval;
+  const bool periodic_scan
+      = periodic_scan_due
+        && (consolidation_gate_disabled || storage_pressure_active);
+  if (!consolidation_gate_disabled && !consolidation_advanced && !first_scan
+      && !periodic_scan)
+    {
+      context.AddOperationTiming ("MemoryStrength.eviction_scan_deferred",
+                                  0.0);
+      telemetry::LogDebug (
+          "cortext.memory_strength",
+          { telemetry::Attribute::Int64 ("update_count", update_count),
+            telemetry::Attribute::Int64 ("eviction_count", 0),
+            telemetry::Attribute::Int64 ("storage_used_bytes",
+                                         frontier.storage_used_bytes),
+            telemetry::Attribute::Int64 ("storage_threshold_bytes",
+                                         frontier.storage_threshold_bytes) });
+      return;
+    }
+
+  p_ctx.last_eviction_scan_signal = p_ctx.signals_processed;
+  p_ctx.last_eviction_scan_consolidation_ts = p_ctx.last_consolidation_ts;
+
   const auto eviction_select_start = SteadyClock::now ();
+  std::vector<std::any> select_params = delete_params;
+  select_params.push_back (static_cast<long long> (kEvictionSelectLimit));
   auto evictable_rows = tx.Execute (
       "SELECT m.memory_id, m.embedding_id "
       "FROM memories m INDEXED BY idx_memories_ltm_strength_created"
-          + fact_join + " " + eviction_where,
-      delete_params);
+          + fact_join + " " + eviction_where
+          + " ORDER BY m.strength ASC, m.created_at ASC LIMIT ?",
+      select_params);
   context.AddOperationTiming ("MemoryStrength.eviction_select_ids_sql",
                               ElapsedMillis (eviction_select_start));
 
@@ -458,6 +540,11 @@ UpdateMemoryStrength::Execute (OperationContext &context, Transaction &tx) const
       return;
     }
 
+  for (const long long memory_id : evictable_memory_ids)
+    {
+      p_ctx.RemoveRetrievalSurface (memory_id);
+    }
+
   const auto eviction_insert_start = SteadyClock::now ();
   ForEachChunk (evictable_memory_ids.size (),
                 [&] (std::size_t begin, std::size_t end) {
@@ -503,6 +590,8 @@ UpdateMemoryStrength::Execute (OperationContext &context, Transaction &tx) const
                 });
   context.AddOperationTiming ("MemoryStrength.eviction_delete_associations_sql",
                               ElapsedMillis (assoc_delete_start));
+  p_ctx.association_fanout_cache.valid = false;
+  p_ctx.label_graph_relation_cache.valid = false;
 
   const auto signal_delete_start = SteadyClock::now ();
   ForEachChunk (evictable_memory_ids.size (),

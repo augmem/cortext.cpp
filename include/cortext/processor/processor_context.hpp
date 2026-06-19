@@ -6,7 +6,10 @@
 #include "cortext/processor/accumulator_state.hpp"
 #include "cortext/signal.hpp"
 #include <Eigen/Dense>
+#include <algorithm>
 #include <array>
+#include <cstddef>
+#include <cstdint>
 #include <deque>
 #include <optional>
 #include <string>
@@ -282,6 +285,13 @@ struct ProcessorContext
   double mismatch_weight = 0.5;
   std::deque<Eigen::VectorXf> recent_context_embeddings;
 
+  /// @brief Embedding ids whose persisted memories currently have non-zero
+  /// predictive pre-activation and therefore need per-turn decay.
+  std::unordered_set<long long> predictive_pre_activation_embedding_ids;
+  /// @brief Embedding ids whose persisted memories currently carry retrieval
+  /// induced forgetting suppression and therefore need recovery updates.
+  std::unordered_set<long long> retrieval_suppression_embedding_ids;
+
   // ======================================================================
   // Sensitivity-Related State (Algorithms 3, 4, 16)
   // ======================================================================
@@ -366,6 +376,25 @@ struct ProcessorContext
   int memories_since_consolidation = 0;
   bool is_processing_signal = false;
 
+  // Eviction frontier scans are corpus-size-sensitive maintenance work. They
+  // are still run after consolidation and under pressure, but not every turn.
+  int last_eviction_scan_signal = -1;
+  uint64_t last_eviction_scan_consolidation_ts = 0;
+
+  // Retention aggregates scan the memory table. Keep them periodic so
+  // stability adaptation does not add a corpus-size term to every signal.
+  int last_retention_scan_signal = -1;
+  uint64_t last_retention_scan_consolidation_ts = 0;
+
+  // Storage pressure reads touch filesystem/SQLite metadata and are used by
+  // multiple operations in one turn. Cache briefly to avoid per-signal jitter.
+  bool storage_pressure_cache_valid = false;
+  int storage_pressure_cache_signal = -1;
+  std::string storage_pressure_cache_key;
+  bool storage_pressure_cache_active = false;
+  long long storage_pressure_cache_used_bytes = 0;
+  long long storage_pressure_cache_threshold_bytes = 0;
+
   // ======================================================================
   // Metacognitive State (Section 6.2)
   // ======================================================================
@@ -402,10 +431,15 @@ struct ProcessorContext
   {
     // v2 persistence fields
     int64_t memory_id = 0;               ///< DB row ID (for updates)
+    int64_t embedding_id = 0;            ///< Current representative embedding row
     std::string source_id;               ///< Opaque source stream identifier
     std::vector<std::vector<unsigned char>> blob_ids;  ///< Content refs for hydration
     std::string modality = "text";       ///< Content type ("text", "audio", "image")
     int64_t start_ts = 0;                ///< Memory start timestamp (ms)
+    bool metadata_dirty = true;          ///< Slot metadata needs DB update
+    bool embedding_dirty = true;         ///< Representative embedding changed
+    bool signal_records_dirty = true;    ///< Attached signal rows changed
+    std::size_t persisted_signal_record_count = 0;
 
     // Core slot state
     Eigen::VectorXf embedding;           ///< e_rep (representative embedding)
@@ -425,6 +459,7 @@ struct ProcessorContext
     std::vector<SignalRecord> signal_records;  ///< Ordered signal records
   };
   std::vector<WMSlot> wm_slots;
+  bool wm_slots_dirty = false;           ///< Active slot set changed since persist
   bool wm_last_accepted = false;
   bool wm_last_chunked = false;
 
@@ -559,6 +594,93 @@ struct ProcessorContext
     bool is_label = false;
   };
 
+  struct RetrievalSurfaceEntry
+  {
+    long long memory_id = 0;
+    long long embedding_id = 0;
+    long long created_at = 0;
+    long long start_ts = 0;
+    long long last_access = 0;
+    long long event_ts = 0;
+    long long retrieved_count = 0;
+    long long used_count = 0;
+    std::string kind;
+    std::string source_id;
+    std::string modality;
+    double source_reliability = -1.0;
+    int source_contradiction_count = 0;
+    double emotional_intensity = 0.0;
+    double arousal_avg = 0.0;
+    double pre_activation = 0.0;
+    bool is_association = false;
+    bool is_label = false;
+    bool vector_seed_eligible = true;
+    Eigen::VectorXf embedding;
+    Eigen::VectorXf context_embedding;
+    float embedding_norm = 0.0f;
+    std::uint32_t seed_visit_epoch = 0;
+  };
+
+  struct RetrievalSurfaceSourceIndexEntry
+  {
+    long long memory_id = 0;
+    long long start_ts = 0;
+
+    bool
+    operator== (const RetrievalSurfaceSourceIndexEntry &other) const
+    {
+      return memory_id == other.memory_id && start_ts == other.start_ts;
+    }
+  };
+
+  struct DurableSourceTextSeedEntry
+  {
+    long long source_id = 0;
+    long long cue_id = 0;
+    long long label_id = 0;
+    int label_count = 0;
+    long long start_ts = 0;
+    std::vector<std::string> source_tokens;
+  };
+
+  struct DurableSourceTextSeedMetadataEntry
+  {
+    long long source_id = 0;
+    long long cue_id = 0;
+    long long label_id = 0;
+    int label_count = 0;
+    long long start_ts = 0;
+    std::string blob_key;
+  };
+
+  struct DurableSourceTextSeedCache
+  {
+    bool valid = false;
+    bool entries_complete = true;
+    long long edge_count = 0;
+    long long source_sum = 0;
+    long long target_sum = 0;
+    long long source_max = 0;
+    long long target_max = 0;
+    int search_limit = 0;
+    int max_bytes = 0;
+    int route_token_min_chars = 0;
+    int last_metadata_refresh_signal = -1;
+    std::vector<DurableSourceTextSeedEntry> entries;
+    std::vector<DurableSourceTextSeedMetadataEntry> metadata_entries;
+    size_t metadata_cursor = 0;
+    std::unordered_map<std::string, std::vector<std::string>> token_cache;
+    std::deque<std::string> token_cache_order;
+    int token_cache_max_bytes = 0;
+    int token_cache_route_token_min_chars = 0;
+  };
+
+  struct FactEmbeddingCacheEntry
+  {
+    long long embedding_id = 0;
+    Eigen::VectorXf embedding;
+  };
+
   struct LabelClusterCache
   {
     bool valid = false;
@@ -567,6 +689,80 @@ struct ProcessorContext
     size_t summary_cache_size = 0;
     std::vector<Eigen::VectorXf> centroids;
     std::vector<std::vector<size_t>> members;
+  };
+
+  struct LabelGraphRelationCache
+  {
+    struct SourceSeedRoute
+    {
+      long long memory_id = 0;
+      long long cue_id = 0;
+      double score = 0.0;
+    };
+
+    bool valid = false;
+    long long edge_count = 0;
+    long long source_sum = 0;
+    long long target_sum = 0;
+    long long source_max = 0;
+    long long target_max = 0;
+    long long weight_sum_micros = 0;
+    long long last_reinforced_sum = 0;
+    int last_fingerprint_check_signal = -1;
+    int consolidation_count = -1;
+    std::unordered_map<long long, std::vector<std::pair<long long, double>>>
+        labels_by_source;
+    std::unordered_map<long long, std::vector<std::pair<long long, double>>>
+        label_sources_by_target;
+    std::unordered_map<long long, std::vector<std::pair<long long, double>>>
+        derived_sources_by_target;
+    std::unordered_map<long long, std::vector<std::pair<long long, double>>>
+        derived_cues_by_target;
+    std::unordered_map<long long, std::vector<std::pair<long long, double>>>
+        derived_targets_by_cue;
+    std::unordered_map<long long, std::vector<std::pair<long long, double>>>
+        label_relations_out;
+    std::unordered_map<long long, std::vector<std::pair<long long, double>>>
+        label_relations_in;
+    std::unordered_map<long long, long long> label_degree;
+    int candidate_label_route_top_labels = 0;
+    int candidate_label_route_fanout = 0;
+    long long candidate_label_route_relation_weight_micros = 0;
+    std::unordered_map<long long, std::vector<std::pair<long long, double>>>
+        candidate_label_routes;
+    int source_seed_route_top_labels = 0;
+    int source_seed_route_relation_fanout = 0;
+    int source_seed_route_target_fanout = 0;
+    long long source_seed_route_relation_weight_micros = 0;
+    std::unordered_map<long long, std::vector<SourceSeedRoute>>
+        source_seed_label_routes;
+  };
+
+  struct AssociationFanoutEdge
+  {
+    long long memory_id = 0;
+    long long embedding_id = 0;
+    std::string edge_type;
+    double weight = 1.0;
+    long long last_reinforced = 0;
+  };
+
+  struct AssociationFanoutCache
+  {
+    bool valid = false;
+    long long edge_count = 0;
+    long long source_sum = 0;
+    long long target_sum = 0;
+    long long source_max = 0;
+    long long target_max = 0;
+    long long weight_sum_micros = 0;
+    long long last_reinforced_sum = 0;
+    int last_fingerprint_check_signal = -1;
+    int consolidation_count = -1;
+    std::unordered_map<long long, std::vector<AssociationFanoutEdge>>
+        out_by_source;
+    std::unordered_map<long long, std::vector<AssociationFanoutEdge>>
+        in_by_target;
   };
 
   void
@@ -613,6 +809,278 @@ struct ProcessorContext
       }
   }
 
+  void
+  UpsertRetrievalSurface (RetrievalSurfaceEntry entry)
+  {
+    if (entry.memory_id <= 0 || entry.embedding_id <= 0
+        || entry.embedding.size () == 0)
+      {
+        return;
+      }
+    entry.embedding_norm = entry.embedding.norm ();
+    if (entry.embedding_norm <= 1e-9f)
+      {
+        return;
+      }
+    entry.is_association = (entry.kind == "ASSOCIATION");
+    entry.is_label = (entry.kind == "LABEL");
+    auto it = retrieval_surface_index.find (entry.memory_id);
+    if (it != retrieval_surface_index.end ())
+      {
+        auto &existing = retrieval_surface_cache[it->second];
+        const bool reindex_source
+            = RetrievalSurfaceSourceIndexable (existing)
+              != RetrievalSurfaceSourceIndexable (entry)
+              || existing.source_id != entry.source_id
+              || existing.start_ts != entry.start_ts;
+        if (reindex_source && RetrievalSurfaceSourceIndexable (existing))
+          {
+            RemoveRetrievalSurfaceSourceIndex (existing.memory_id,
+                                               existing.source_id);
+          }
+        retrieval_surface_embedding_index.erase (existing.embedding_id);
+        existing = std::move (entry);
+        retrieval_surface_embedding_index[existing.embedding_id] = it->second;
+        if (reindex_source && RetrievalSurfaceSourceIndexable (existing))
+          {
+            AddRetrievalSurfaceSourceIndex (existing);
+          }
+        return;
+      }
+    const size_t index = retrieval_surface_cache.size ();
+    retrieval_surface_index[entry.memory_id] = index;
+    retrieval_surface_embedding_index[entry.embedding_id] = index;
+    retrieval_surface_cache.push_back (std::move (entry));
+    AddRetrievalSurfaceSourceIndex (retrieval_surface_cache.back ());
+  }
+
+  void
+  RemoveRetrievalSurface (long long memory_id)
+  {
+    auto it = retrieval_surface_index.find (memory_id);
+    if (it == retrieval_surface_index.end ())
+      {
+        return;
+      }
+    const size_t index = it->second;
+    const long long removed_memory_id
+        = retrieval_surface_cache[index].memory_id;
+    const std::string removed_source_id
+        = retrieval_surface_cache[index].source_id;
+    const bool removed_source_indexable
+        = RetrievalSurfaceSourceIndexable (retrieval_surface_cache[index]);
+    if (removed_source_indexable)
+      {
+        RemoveRetrievalSurfaceSourceIndex (removed_memory_id,
+                                           removed_source_id);
+      }
+    retrieval_surface_embedding_index.erase (
+        retrieval_surface_cache[index].embedding_id);
+    const size_t last = retrieval_surface_cache.size () - 1;
+    if (index != last)
+      {
+        retrieval_surface_cache[index]
+            = std::move (retrieval_surface_cache[last]);
+        retrieval_surface_index[retrieval_surface_cache[index].memory_id]
+            = index;
+        retrieval_surface_embedding_index[
+            retrieval_surface_cache[index].embedding_id]
+            = index;
+      }
+    retrieval_surface_cache.pop_back ();
+    retrieval_surface_index.erase (it);
+  }
+
+  static bool
+  RetrievalSurfaceSourceIndexable (const RetrievalSurfaceEntry &entry)
+  {
+    return entry.memory_id > 0 && entry.start_ts > 0
+           && !entry.source_id.empty () && !entry.is_association
+           && !entry.is_label && entry.kind != "WORKING";
+  }
+
+  void
+  AddRetrievalSurfaceSourceIndex (const RetrievalSurfaceEntry &entry)
+  {
+    if (!RetrievalSurfaceSourceIndexable (entry))
+      {
+        return;
+      }
+    auto &entries = retrieval_surface_source_index[entry.source_id];
+    if (!entries.empty ())
+      {
+        const auto &last_entry = entries.back ();
+        if (entry.start_ts < last_entry.start_ts)
+          {
+            retrieval_surface_source_index_dirty.insert (entry.source_id);
+          }
+      }
+    entries.push_back ({ entry.memory_id, entry.start_ts });
+  }
+
+  void
+  RemoveRetrievalSurfaceSourceIndex (long long memory_id,
+                                     const std::string &source_id)
+  {
+    if (memory_id <= 0 || source_id.empty ())
+      {
+        return;
+      }
+    auto it = retrieval_surface_source_index.find (source_id);
+    if (it == retrieval_surface_source_index.end ())
+      {
+        return;
+      }
+    auto &entries = it->second;
+    entries.erase (
+        std::remove_if (
+            entries.begin (), entries.end (),
+            [&] (const RetrievalSurfaceSourceIndexEntry &entry) {
+              return entry.memory_id == memory_id;
+            }),
+        entries.end ());
+    if (entries.empty ())
+      {
+        retrieval_surface_source_index.erase (it);
+        retrieval_surface_source_index_dirty.erase (source_id);
+      }
+  }
+
+  void
+  SortRetrievalSurfaceSourceIndex (const std::string &source_id)
+  {
+    auto it = retrieval_surface_source_index.find (source_id);
+    if (it == retrieval_surface_source_index.end ())
+      {
+        retrieval_surface_source_index_dirty.erase (source_id);
+        return;
+      }
+    auto &entries = it->second;
+    std::sort (
+        entries.begin (), entries.end (),
+        [] (const RetrievalSurfaceSourceIndexEntry &a,
+            const RetrievalSurfaceSourceIndexEntry &b) {
+      if (a.start_ts != b.start_ts)
+        {
+          return a.start_ts < b.start_ts;
+        }
+      return a.memory_id < b.memory_id;
+    });
+    entries.erase (
+        std::unique (entries.begin (), entries.end ()),
+        entries.end ());
+    retrieval_surface_source_index_dirty.erase (source_id);
+  }
+
+  void
+  SortRetrievalSurfaceSourceIndexes ()
+  {
+    for (auto &entry : retrieval_surface_source_index)
+      {
+        std::sort (entry.second.begin (), entry.second.end (),
+                   [] (const RetrievalSurfaceSourceIndexEntry &a,
+                       const RetrievalSurfaceSourceIndexEntry &b) {
+          if (a.start_ts != b.start_ts)
+            {
+              return a.start_ts < b.start_ts;
+            }
+          return a.memory_id < b.memory_id;
+        });
+        entry.second.erase (
+            std::unique (entry.second.begin (), entry.second.end ()),
+            entry.second.end ());
+      }
+    retrieval_surface_source_index_dirty.clear ();
+  }
+
+  void
+  EnsureRetrievalSurfaceSourceIndexSorted (const std::string &source_id)
+  {
+    if (retrieval_surface_source_index_dirty.find (source_id)
+        == retrieval_surface_source_index_dirty.end ())
+      {
+        return;
+      }
+    SortRetrievalSurfaceSourceIndex (source_id);
+  }
+
+  void
+  UpdateRetrievalSurfacePreActivationByEmbedding (long long embedding_id,
+                                                  double pre_activation)
+  {
+    auto it = retrieval_surface_embedding_index.find (embedding_id);
+    if (it == retrieval_surface_embedding_index.end ())
+      {
+        return;
+      }
+    retrieval_surface_cache[it->second].pre_activation = pre_activation;
+  }
+
+  void
+  DecayRetrievalSurfacePreActivationByEmbedding (long long embedding_id,
+                                                 double pad)
+  {
+    auto it = retrieval_surface_embedding_index.find (embedding_id);
+    if (it == retrieval_surface_embedding_index.end ())
+      {
+        return;
+      }
+    auto &entry = retrieval_surface_cache[it->second];
+    entry.pre_activation = std::max (0.0, entry.pre_activation * pad);
+    if (entry.pre_activation <= 1e-6)
+      {
+        entry.pre_activation = 0.0;
+      }
+  }
+
+  void
+  BoostRetrievalSurfacePreActivationByEmbedding (long long embedding_id,
+                                                 double pad, double delta)
+  {
+    auto it = retrieval_surface_embedding_index.find (embedding_id);
+    if (it == retrieval_surface_embedding_index.end ())
+      {
+        return;
+      }
+    auto &entry = retrieval_surface_cache[it->second];
+    entry.pre_activation = std::min (
+        1.0, std::max (0.0, entry.pre_activation) * pad + delta);
+  }
+
+  void
+  UpdateRetrievalSurfaceUsageByEmbedding (long long embedding_id,
+                                          long long retrieved_count,
+                                          long long used_count,
+                                          long long last_access)
+  {
+    auto it = retrieval_surface_embedding_index.find (embedding_id);
+    if (it == retrieval_surface_embedding_index.end ())
+      {
+        return;
+      }
+    auto &entry = retrieval_surface_cache[it->second];
+    entry.retrieved_count = retrieved_count;
+    entry.used_count = used_count;
+    entry.last_access = last_access;
+  }
+
+  void
+  UpdateRetrievalSurfaceUsageByMemory (long long memory_id,
+                                       long long retrieved_count,
+                                       long long used_count,
+                                       long long last_access)
+  {
+    auto it = retrieval_surface_index.find (memory_id);
+    if (it == retrieval_surface_index.end ())
+      {
+        return;
+      }
+    auto &entry = retrieval_surface_cache[it->second];
+    entry.retrieved_count = retrieved_count;
+    entry.used_count = used_count;
+    entry.last_access = last_access;
+  }
+
   std::unordered_map<std::string, std::vector<long long>> index_store;
   std::unordered_map<long long, std::string> index_reverse;
   std::unordered_map<std::string, std::unordered_map<long long, double>> procedural_store;
@@ -620,7 +1088,19 @@ struct ProcessorContext
   std::unordered_map<std::string, std::vector<float>> label_embedding_cache;
   std::vector<SummaryCacheEntry> summary_cache;
   std::unordered_map<long long, size_t> summary_cache_index;
+  std::vector<RetrievalSurfaceEntry> retrieval_surface_cache;
+  std::uint32_t retrieval_surface_seed_visit_epoch = 0;
+  std::unordered_map<long long, size_t> retrieval_surface_index;
+  std::unordered_map<long long, size_t> retrieval_surface_embedding_index;
+  std::unordered_map<std::string,
+                     std::vector<RetrievalSurfaceSourceIndexEntry>>
+      retrieval_surface_source_index;
+  std::unordered_set<std::string> retrieval_surface_source_index_dirty;
+  std::unordered_map<long long, FactEmbeddingCacheEntry> fact_embedding_cache;
+  DurableSourceTextSeedCache durable_source_text_seed_cache;
   LabelClusterCache label_cluster_cache;
+  LabelGraphRelationCache label_graph_relation_cache;
+  AssociationFanoutCache association_fanout_cache;
 
   // ======================================================================
   // LLM Components (OGA/Phi-4)

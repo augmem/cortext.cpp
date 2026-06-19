@@ -1,6 +1,7 @@
 #include "cortext/providers/registry.hpp"
 
 #include "cortext/providers/ollama_provider.hpp"
+#include "cortext/providers/openai_provider.hpp"
 
 #include <cstdlib>
 #include <map>
@@ -84,6 +85,7 @@ EnsureBuiltinProvidersRegistered ()
   static std::once_flag once;
   std::call_once (once, [] {
     RegisterProviderFactory ("ollama", &OllamaProvider::Create);
+    RegisterProviderFactory ("openai", &OpenAIProvider::Create);
   });
 }
 

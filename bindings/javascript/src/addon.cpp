@@ -417,6 +417,31 @@ ProcessTextJSON (napi_env env, napi_callback_info info)
 }
 
 napi_value
+EmbedTextJSON (napi_env env, napi_callback_info info)
+{
+  size_t argc = 1;
+  napi_value args[1];
+  napi_value jsthis;
+  NAPI_RETURN_IF_FAILED (
+      env, napi_get_cb_info (env, info, &argc, args, &jsthis, nullptr));
+  BindingHandle *wrapped = UnwrapHandle (env, jsthis);
+  if (wrapped == nullptr)
+    {
+      return ThrowCortextError (env, "invalid Cortext handle");
+    }
+
+  std::string text;
+  if (argc < 1 || !GetString (env, args[0], text))
+    {
+      return ThrowTypeError (env, "embedTextJson(text) expects a string");
+    }
+
+  return JSONStringResult (
+      env, cortext_embed_text_json (wrapped->handle, text.c_str ()),
+      "cortext_embed_text_json failed");
+}
+
+napi_value
 ProcessAudioJSON (napi_env env, napi_callback_info info)
 {
   size_t argc = 2;
@@ -444,6 +469,33 @@ ProcessAudioJSON (napi_env env, napi_callback_info info)
       env, cortext_process_audio_json (wrapped->handle, pcm, sample_count,
                                        source_id.c_str ()),
       "cortext_process_audio_json failed");
+}
+
+napi_value
+EmbedAudioJSON (napi_env env, napi_callback_info info)
+{
+  size_t argc = 1;
+  napi_value args[1];
+  napi_value jsthis;
+  NAPI_RETURN_IF_FAILED (
+      env, napi_get_cb_info (env, info, &argc, args, &jsthis, nullptr));
+  BindingHandle *wrapped = UnwrapHandle (env, jsthis);
+  if (wrapped == nullptr)
+    {
+      return ThrowCortextError (env, "invalid Cortext handle");
+    }
+
+  const float *pcm = nullptr;
+  size_t sample_count = 0;
+  if (argc < 1 || !GetFloat32Array (env, args[0], &pcm, sample_count))
+    {
+      return ThrowTypeError (
+          env, "embedAudioJson(pcm) expects a Float32Array");
+    }
+
+  return JSONStringResult (
+      env, cortext_embed_audio_json (wrapped->handle, pcm, sample_count),
+      "cortext_embed_audio_json failed");
 }
 
 napi_value
@@ -495,6 +547,55 @@ ProcessImageJSON (napi_env env, napi_callback_info info)
       env, cortext_process_image_json (wrapped->handle, data, width, height,
                                        channels, source_id.c_str ()),
       "cortext_process_image_json failed");
+}
+
+napi_value
+EmbedImageJSON (napi_env env, napi_callback_info info)
+{
+  size_t argc = 4;
+  napi_value args[4];
+  napi_value jsthis;
+  NAPI_RETURN_IF_FAILED (
+      env, napi_get_cb_info (env, info, &argc, args, &jsthis, nullptr));
+  BindingHandle *wrapped = UnwrapHandle (env, jsthis);
+  if (wrapped == nullptr)
+    {
+      return ThrowCortextError (env, "invalid Cortext handle");
+    }
+
+  const uint8_t *data = nullptr;
+  size_t byte_count = 0;
+  int32_t width = 0;
+  int32_t height = 0;
+  int32_t channels = 0;
+  if (argc < 4 || !GetUint8Data (env, args[0], &data, byte_count)
+      || napi_get_value_int32 (env, args[1], &width) != napi_ok
+      || napi_get_value_int32 (env, args[2], &height) != napi_ok
+      || napi_get_value_int32 (env, args[3], &channels) != napi_ok)
+    {
+      return ThrowTypeError (
+          env,
+          "embedImageJson(data, width, height, channels) expects bytes and numbers");
+    }
+
+  if (width <= 0 || height <= 0 || channels <= 0)
+    {
+      return ThrowTypeError (env, "width, height, and channels must be positive");
+    }
+
+  const size_t expected
+      = static_cast<size_t> (width) * static_cast<size_t> (height)
+        * static_cast<size_t> (channels);
+  if (byte_count < expected)
+    {
+      return ThrowTypeError (
+          env, "image buffer is smaller than width * height * channels");
+    }
+
+  return JSONStringResult (
+      env, cortext_embed_image_json (wrapped->handle, data, width, height,
+                                     channels),
+      "cortext_embed_image_json failed");
 }
 
 napi_value
@@ -561,6 +662,28 @@ Flush (napi_env env, napi_callback_info info)
 }
 
 napi_value
+Reset (napi_env env, napi_callback_info info)
+{
+  napi_value jsthis;
+  NAPI_RETURN_IF_FAILED (
+      env, napi_get_cb_info (env, info, nullptr, nullptr, &jsthis, nullptr));
+  BindingHandle *wrapped = UnwrapHandle (env, jsthis);
+  if (wrapped == nullptr)
+    {
+      return ThrowCortextError (env, "invalid Cortext handle");
+    }
+
+  if (cortext_reset (wrapped->handle) != 0)
+    {
+      return ThrowCortextError (env, "cortext_reset failed");
+    }
+
+  napi_value undefined_value;
+  NAPI_RETURN_IF_FAILED (env, napi_get_undefined (env, &undefined_value));
+  return undefined_value;
+}
+
+napi_value
 Version (napi_env env, napi_callback_info info)
 {
   napi_value result;
@@ -586,15 +709,23 @@ Init (napi_env env, napi_value exports)
   const napi_property_descriptor ctor_props[] = {
     { "processTextJson", nullptr, ProcessTextJSON, nullptr, nullptr, nullptr,
       napi_default, nullptr },
+    { "embedTextJson", nullptr, EmbedTextJSON, nullptr, nullptr, nullptr,
+      napi_default, nullptr },
     { "processAudioJson", nullptr, ProcessAudioJSON, nullptr, nullptr, nullptr,
       napi_default, nullptr },
+    { "embedAudioJson", nullptr, EmbedAudioJSON, nullptr, nullptr, nullptr,
+      napi_default, nullptr },
     { "processImageJson", nullptr, ProcessImageJSON, nullptr, nullptr, nullptr,
+      napi_default, nullptr },
+    { "embedImageJson", nullptr, EmbedImageJSON, nullptr, nullptr, nullptr,
       napi_default, nullptr },
     { "consolidateJson", nullptr, ConsolidateJSON, nullptr, nullptr, nullptr,
       napi_default, nullptr },
     { "consolidateModeJson", nullptr, ConsolidateModeJSON, nullptr, nullptr,
       nullptr, napi_default, nullptr },
     { "flush", nullptr, Flush, nullptr, nullptr, nullptr, napi_default,
+      nullptr },
+    { "reset", nullptr, Reset, nullptr, nullptr, nullptr, napi_default,
       nullptr },
   };
 

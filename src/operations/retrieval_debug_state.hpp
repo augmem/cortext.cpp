@@ -119,4 +119,19 @@ void ClearLastRetrievalSummary ();
 void SetLastRetrievalSummary (const RetrievalSummary &summary);
 RetrievalSummary GetLastRetrievalSummary ();
 
+bool CaptureEnabled ();
+
+class ScopedCapture
+{
+public:
+  explicit ScopedCapture (bool enabled);
+  ~ScopedCapture ();
+
+  ScopedCapture (const ScopedCapture &) = delete;
+  ScopedCapture &operator= (const ScopedCapture &) = delete;
+
+private:
+  bool previous_;
+};
+
 } // namespace cortext::operations::retrieval_debug

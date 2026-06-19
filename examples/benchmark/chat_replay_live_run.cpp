@@ -89,6 +89,8 @@ struct Config
   int checkpoint_query_stride = 1;
   int checkpoint_query_days = 0;
   int checkpoint_queries_per_day = 0;
+  bool full_operation_ms = false;
+  std::string sqlite_profile = "realtime";
 };
 
 struct ResumeCheckpoint
@@ -240,6 +242,93 @@ ApplyReplayTimezone (const std::string &timezone)
     throw std::runtime_error ("failed to set replay timezone: " + timezone);
   tzset ();
 #endif
+}
+
+bool
+HasEnvValue (const char *name)
+{
+  const char *value = std::getenv (name);
+  return value && value[0] != '\0';
+}
+
+void
+SetEnvValue (const char *name, const char *value, bool overwrite)
+{
+#if defined(_WIN32)
+  if (!overwrite && HasEnvValue (name))
+    return;
+  if (_putenv_s (name, value) != 0)
+    throw std::runtime_error (std::string ("failed to set environment: ")
+                              + name);
+#else
+  if (setenv (name, value, overwrite ? 1 : 0) != 0)
+    throw std::runtime_error (std::string ("failed to set environment: ")
+                              + name);
+#endif
+}
+
+void
+ApplyEnvDefault (const char *name, const char *value,
+                 nlohmann::json &applied)
+{
+  if (HasEnvValue (name))
+    return;
+  SetEnvValue (name, value, false);
+  applied.push_back (name);
+}
+
+nlohmann::json
+SQLiteProfileJson (const std::string &profile,
+                   const nlohmann::json &applied)
+{
+  nlohmann::json env = nlohmann::json::object ();
+  for (const char *name :
+       { "CORTEXT_FOREGROUND_WAL_CHECKPOINT",
+         "CORTEXT_SQLITE_JOURNAL_MODE",
+         "CORTEXT_SQLITE_SYNCHRONOUS",
+         "CORTEXT_SQLITE_CACHE_SIZE_KB",
+         "CORTEXT_SQLITE_TEMP_STORE",
+         "CORTEXT_SQLITE_MMAP_SIZE" })
+    {
+      const char *value = std::getenv (name);
+      if (value && value[0] != '\0')
+        env[name] = value;
+    }
+  return {
+    { "profile", profile },
+    { "applied_defaults", applied },
+    { "effective_env", env },
+    { "policy",
+      "benchmark-only SQLite profile; core library defaults remain unchanged" },
+  };
+}
+
+nlohmann::json
+ApplySQLiteProfile (const std::string &profile)
+{
+  nlohmann::json applied = nlohmann::json::array ();
+  if (profile == "inherit")
+    return SQLiteProfileJson (profile, applied);
+  if (profile == "durable")
+    {
+      SetEnvValue ("CORTEXT_FOREGROUND_WAL_CHECKPOINT", "0", true);
+      SetEnvValue ("CORTEXT_SQLITE_JOURNAL_MODE", "wal", true);
+      SetEnvValue ("CORTEXT_SQLITE_SYNCHRONOUS", "normal", true);
+      applied = {
+        "CORTEXT_FOREGROUND_WAL_CHECKPOINT",
+        "CORTEXT_SQLITE_JOURNAL_MODE",
+        "CORTEXT_SQLITE_SYNCHRONOUS",
+      };
+      return SQLiteProfileJson (profile, applied);
+    }
+  if (profile != "realtime")
+    throw std::runtime_error (
+        "--sqlite-profile must be realtime, durable, or inherit");
+
+  ApplyEnvDefault ("CORTEXT_FOREGROUND_WAL_CHECKPOINT", "0", applied);
+  ApplyEnvDefault ("CORTEXT_SQLITE_JOURNAL_MODE", "memory", applied);
+  ApplyEnvDefault ("CORTEXT_SQLITE_SYNCHRONOUS", "off", applied);
+  return SQLiteProfileJson (profile, applied);
 }
 
 int
@@ -683,11 +772,27 @@ RetrievalDebugJson ()
 nlohmann::json
 WorkingSetCurveRow (int event_index,
                     const EventDoc &doc,
-                    const cortext::Cortext::Context &ctx)
+                    const cortext::Cortext::Context &ctx,
+                    bool full_operation_ms = false)
 {
   const int retrieved_tokens = EstimateMemoryPacketTokens (ctx.retrieved_memory);
   const int working_tokens = EstimateMemoryPacketTokens (ctx.working_memory);
-  return {
+  std::vector<std::pair<std::string, double> > sorted_ops (
+      ctx.output.operation_ms.begin (), ctx.output.operation_ms.end ());
+  std::sort (sorted_ops.begin (), sorted_ops.end (),
+             [] (const auto &lhs, const auto &rhs) {
+               if (lhs.second != rhs.second)
+                 return lhs.second > rhs.second;
+               return lhs.first < rhs.first;
+             });
+  nlohmann::json top_ops = nlohmann::json::array ();
+  for (const auto &row : sorted_ops)
+    {
+      if (static_cast<int> (top_ops.size ()) >= 8)
+        break;
+      top_ops.push_back ({ { "operation", row.first }, { "ms", row.second } });
+    }
+  nlohmann::json row = {
     { "event_index", event_index },
     { "cumulative_events", event_index + 1 },
     { "timestamp", doc.timestamp },
@@ -702,7 +807,18 @@ WorkingSetCurveRow (int event_index,
     { "encode_ms", ctx.encode_ms },
     { "process_ms", ctx.process_ms },
     { "hydrate_ms", ctx.hydrate_ms },
+    { "top_operation_ms", std::move (top_ops) },
   };
+  if (full_operation_ms)
+    {
+      nlohmann::json operation_ms = nlohmann::json::object ();
+      for (const auto &[name, ms] : ctx.output.operation_ms)
+        {
+          operation_ms[name] = ms;
+        }
+      row["operation_ms"] = std::move (operation_ms);
+    }
+  return row;
 }
 
 nlohmann::json
@@ -1443,6 +1559,10 @@ ParseArgs (int argc, char **argv)
         cfg.checkpoint_queries_per_day = std::stoi (require_value ());
       else if (arg == "--progress-stride")
         cfg.progress_stride = std::stoi (require_value ());
+      else if (arg == "--full-operation-ms")
+        cfg.full_operation_ms = true;
+      else if (arg == "--sqlite-profile")
+        cfg.sqlite_profile = require_value ();
       else
         throw std::runtime_error ("unknown argument: " + arg);
     }
@@ -1458,6 +1578,8 @@ main (int argc, char **argv)
     {
       Config cfg = ParseArgs (argc, argv);
       ApplyReplayTimezone (cfg.replay_timezone);
+      const nlohmann::json sqlite_profile
+          = ApplySQLiteProfile (cfg.sqlite_profile);
       const fs::path transcript
           = chat_replay::DiscoverTranscript (cfg.input_dir, cfg.transcript);
       auto messages = ParseMessages (transcript);
@@ -1956,6 +2078,7 @@ main (int argc, char **argv)
           nlohmann::json out;
           out["input_dir"] = cfg.input_dir.string ();
           out["db_path"] = cfg.db_path.string ();
+          out["sqlite_profile"] = sqlite_profile;
           out["label_bank_path"] = cfg.label_bank_path.string ();
           out["models_dir"] = cfg.models_dir;
           out["summarizer_provider"]
@@ -2266,6 +2389,7 @@ main (int argc, char **argv)
           nlohmann::json out;
           out["input_dir"] = cfg.input_dir.string ();
           out["db_path"] = cfg.db_path.string ();
+          out["sqlite_profile"] = sqlite_profile;
           out["label_bank_path"] = cfg.label_bank_path.string ();
           out["models_dir"] = cfg.models_dir;
           out["summarizer_provider"]
@@ -2411,7 +2535,9 @@ main (int argc, char **argv)
       };
       auto record_consolidation_event = [&] (const char *trigger,
                                              std::uint64_t timestamp,
-                                             double elapsed_ms) {
+                                             double elapsed_ms,
+                                             const cortext::Cortext::Context
+                                                 &ctx) {
         consolidation_events.push_back ({
           { "trigger", trigger },
           { "timestamp", timestamp },
@@ -2423,6 +2549,13 @@ main (int argc, char **argv)
           { "processed_text_messages", processed_text },
           { "media_processed", media_processed },
           { "mode", cfg.deep_consolidation ? "both" : "shallow" },
+          { "encode_ms", ctx.encode_ms },
+          { "process_ms", ctx.process_ms },
+          { "hydrate_ms", ctx.hydrate_ms },
+          { "total_ms", ctx.total_ms },
+          { "operation_ms", OperationTimingsJson (ctx.output.operation_ms) },
+          { "top_operation_ms",
+            TopOperationTimingsJson (ctx.output.operation_ms, 16) },
         });
       };
       auto maybe_run_daily_consolidation = [&] (std::uint64_t timestamp) {
@@ -2437,7 +2570,8 @@ main (int argc, char **argv)
                     timestamp, cfg.daily_consolidation_hour);
             const auto consolidation_started
                 = std::chrono::steady_clock::now ();
-            cortext::internal::ReplayIngress::ConsolidateAt (
+            auto consolidation_ctx
+                = cortext::internal::ReplayIngress::ConsolidateAt (
                 *engine, checkpoint_timestamp, consolidation_mode ());
             const auto consolidation_ended = std::chrono::steady_clock::now ();
             consolidation_ms_total
@@ -2448,7 +2582,8 @@ main (int argc, char **argv)
                 "daily_sleep_checkpoint", checkpoint_timestamp,
                 std::chrono::duration<double, std::milli> (
                     consolidation_ended - consolidation_started)
-                    .count ());
+                    .count (),
+                consolidation_ctx);
             ++consolidation_runs;
           }
         current_sleep_bucket = sleep_bucket;
@@ -2477,6 +2612,8 @@ main (int argc, char **argv)
           { "last_total_ms", ctx.total_ms },
           { "last_process_ms", ctx.process_ms },
           { "last_hydrate_ms", ctx.hydrate_ms },
+          { "last_top_operation_ms",
+            TopOperationTimingsJson (ctx.output.operation_ms, 8) },
           { "mean_total_ms_this_run",
             processed_text_this_run > 0
                 ? total_ms_total / static_cast<double> (processed_text_this_run)
@@ -2516,12 +2653,15 @@ main (int argc, char **argv)
                 "text",
                 msg.text,
               };
+              const bool run_probe
+                  = cfg.probe_stride > 0 && event_count >= cfg.warmup_events
+                    && event_count % cfg.probe_stride == 0;
               const auto cortext_started = std::chrono::steady_clock::now ();
-              auto ctx = engine->ProcessTextAt (msg.text, source,
-                                                msg.timestamp);
+              auto ctx = cortext::internal::ReplayIngress::ProcessTextAt (
+                  *engine, msg.text, source, msg.timestamp,
+                  cortext::Retention::Durable, run_probe);
               const auto cortext_ended = std::chrono::steady_clock::now ();
-              if (cfg.probe_stride > 0 && event_count >= cfg.warmup_events
-                  && event_count % cfg.probe_stride == 0)
+              if (run_probe)
                 {
                   const auto &probe_ctx = ctx;
                   const auto compaction_started
@@ -2663,7 +2803,8 @@ main (int argc, char **argv)
                   probes.push_back (std::move (probe));
                 }
               working_set_curve.push_back (
-                  WorkingSetCurveRow (event_count, doc, ctx));
+                  WorkingSetCurveRow (event_count, doc, ctx,
+                                      cfg.full_operation_ms));
               ++processed_text;
               encode_ms_total += ctx.encode_ms;
               process_ms_total += ctx.process_ms;
@@ -2681,7 +2822,8 @@ main (int argc, char **argv)
                 {
                   const auto consolidation_started
                       = std::chrono::steady_clock::now ();
-                  cortext::internal::ReplayIngress::ConsolidateAt (
+                  auto consolidation_ctx
+                      = cortext::internal::ReplayIngress::ConsolidateAt (
                       *engine, msg.timestamp, consolidation_mode ());
                   const auto consolidation_ended
                       = std::chrono::steady_clock::now ();
@@ -2693,7 +2835,8 @@ main (int argc, char **argv)
                       "periodic_interval", msg.timestamp,
                       std::chrono::duration<double, std::milli> (
                           consolidation_ended - consolidation_started)
-                          .count ());
+                          .count (),
+                      consolidation_ctx);
                   ++consolidation_runs;
                 }
               last_processed_timestamp = msg.timestamp;
@@ -2739,7 +2882,8 @@ main (int argc, char **argv)
                       *engine, bytes.data (), 224, 224, 3, media_source,
                       item.timestamp);
                   working_set_curve.push_back (
-                      WorkingSetCurveRow (event_count, media_doc, ctx));
+                      WorkingSetCurveRow (event_count, media_doc, ctx,
+                                          cfg.full_operation_ms));
                   ++media_processed;
                   item.kind == "image" ? ++image_processed : ++video_processed;
                   last_processed_timestamp = item.timestamp;
@@ -2772,7 +2916,8 @@ main (int argc, char **argv)
                               *engine, pcm.data (), pcm.size (), media_source,
                               item.timestamp);
                       working_set_curve.push_back (
-                          WorkingSetCurveRow (event_count, media_doc, ctx));
+                          WorkingSetCurveRow (event_count, media_doc, ctx,
+                                              cfg.full_operation_ms));
                       ++media_processed;
                       ++audio_processed;
                       last_processed_timestamp = item.timestamp;
@@ -2796,7 +2941,8 @@ main (int argc, char **argv)
           && last_processed_timestamp > 0)
         {
           const auto consolidation_started = std::chrono::steady_clock::now ();
-          cortext::internal::ReplayIngress::ConsolidateAt (
+          auto consolidation_ctx
+              = cortext::internal::ReplayIngress::ConsolidateAt (
               *engine, last_processed_timestamp, consolidation_mode ());
           const auto consolidation_ended = std::chrono::steady_clock::now ();
           consolidation_ms_total
@@ -2807,7 +2953,8 @@ main (int argc, char **argv)
               "final_window", last_processed_timestamp,
               std::chrono::duration<double, std::milli> (
                   consolidation_ended - consolidation_started)
-                  .count ());
+                  .count (),
+              consolidation_ctx);
           ++consolidation_runs;
           final_window_consolidated = true;
         }
@@ -2827,6 +2974,7 @@ main (int argc, char **argv)
       nlohmann::json out;
       out["input_dir"] = cfg.input_dir.string ();
       out["db_path"] = cfg.db_path.string ();
+      out["sqlite_profile"] = sqlite_profile;
       out["label_bank_path"] = cfg.label_bank_path.string ();
       out["models_dir"] = cfg.models_dir;
           out["summarizer_provider"]
@@ -2890,6 +3038,7 @@ main (int argc, char **argv)
       };
       out["warmup_events"] = cfg.warmup_events;
       out["probe_stride"] = cfg.probe_stride;
+      out["full_operation_ms"] = cfg.full_operation_ms;
       out["probe_count"] = resume.probe_count_offset + probe_count_this_run;
       out["probe_count_this_run"] = probe_count_this_run;
       out["probe_count_before_resume"] = resume.probe_count_offset;
@@ -2900,7 +3049,8 @@ main (int argc, char **argv)
             "each probe is constructed";
       out["working_set_curve_policy"]
           = "one row per successfully ingested timeline event after the "
-            "durable public Cortext processing call";
+            "durable replay ingress call; non-probe text rows may omit "
+            "hydrated context packets";
       out["working_set_curve"] = working_set_curve;
       out["rag_top_k"] = cfg.rag_top_k;
       out["normal_rag_retrieval"] = "raw_chat_vector";
@@ -2956,8 +3106,9 @@ main (int argc, char **argv)
             "media is not encoded into source_id";
       out["timeline_policy"]
           = "transcript messages and media files are processed in timestamp "
-            "order; text uses public timestamped text ingress and media uses "
-            "internal replay timestamped ingress; benchmark consolidation uses "
+            "order; text uses internal replay timestamped ingress so "
+            "non-probe turns can skip context hydration, media uses internal "
+            "replay timestamped ingress, and benchmark consolidation uses "
             "internal replay timestamped consolidation";
       out["media_timestamp_policy"]
           = "media replay uses internal timestamped ingress so signal "

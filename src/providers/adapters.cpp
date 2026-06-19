@@ -63,6 +63,40 @@ ProviderSummarizer::SummarizeTextsLimited (
   return provider_->Generate (request).text;
 }
 
+std::vector<std::string>
+ProviderSummarizer::SummarizeTextBatches (
+    const std::vector<BatchTextItem> &items)
+{
+  std::vector<std::string> summaries;
+  summaries.resize (items.size ());
+  if (items.empty ())
+    {
+      return summaries;
+    }
+
+  std::vector<GenerateRequest> requests;
+  requests.reserve (items.size ());
+  for (const auto &item : items)
+    {
+      auto request = MakeTextRequest (Role::Summarizer,
+                                      kSummarizerSystemPrompt, item.texts);
+      if (item.max_words > 0)
+        {
+          request.system_prompt += " Use at most "
+                                   + std::to_string (item.max_words)
+                                   + " words.";
+        }
+      requests.push_back (std::move (request));
+    }
+
+  const auto responses = provider_->GenerateBatch (requests);
+  for (std::size_t i = 0; i < items.size () && i < responses.size (); ++i)
+    {
+      summaries[i] = responses[i].text;
+    }
+  return summaries;
+}
+
 std::string
 ProviderSummarizer::SummarizeAudio (const float *pcm, size_t num_samples)
 {
@@ -134,6 +168,35 @@ ProviderExtractor::ExtractFromAudio (const float *pcm, size_t num_samples,
   part.kind = ContentPart::Kind::AudioPcm16k;
   part.pcm.assign (pcm, pcm + num_samples);
   return ExtractFromParts ({ std::move (part) }, schema);
+}
+
+std::vector<operations::ExtractionResult>
+ProviderExtractor::ExtractBatchFromTexts (
+    const std::vector<BatchTextItem> &items, const nlohmann::json &schema)
+{
+  std::vector<operations::ExtractionResult> results;
+  results.resize (items.size ());
+  if (items.empty ())
+    {
+      return results;
+    }
+  std::vector<GenerateRequest> requests;
+  requests.reserve (items.size ());
+  for (std::size_t i = 0; i < items.size (); ++i)
+    {
+      auto request = MakeTextRequest (Role::Extractor, kExtractorSystemPrompt,
+                                      { items[i].text });
+      request.schema = schema;
+      requests.push_back (std::move (request));
+    }
+
+  const auto responses = provider_->GenerateBatch (requests);
+  for (std::size_t i = 0; i < items.size () && i < responses.size (); ++i)
+    {
+      results[i] = ParseExtractionResponse (responses[i].text);
+      results[i].summary_id = items[i].id;
+    }
+  return results;
 }
 
 bool

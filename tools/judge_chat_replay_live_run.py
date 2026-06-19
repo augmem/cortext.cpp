@@ -553,19 +553,53 @@ def docs_by_index(timeline: list[TimelineDoc]) -> dict[int, TimelineDoc]:
     return {doc.index: doc for doc in timeline}
 
 
+def probe_event_index(probe: dict) -> int | None:
+    try:
+        return int(probe.get("event_index"))
+    except (TypeError, ValueError):
+        return None
+
+
+def doc_matches_probe_query(doc: TimelineDoc, query: dict) -> bool:
+    try:
+        timestamp = int(query.get("timestamp", -1))
+    except (TypeError, ValueError):
+        return False
+    return (
+        doc.timestamp == timestamp
+        and doc.source_id == query.get("source_id")
+        and doc.modality == query.get("modality")
+    )
+
+
 def find_query_doc(timeline: list[TimelineDoc], probe: dict) -> TimelineDoc | None:
-    event_index = int(probe["event_index"])
-    if 0 <= event_index < len(timeline):
-        return timeline[event_index]
+    event_index = probe_event_index(probe)
+    indexed_doc = (
+        timeline[event_index]
+        if event_index is not None and 0 <= event_index < len(timeline)
+        else None
+    )
     query = probe.get("query", {})
-    for doc in timeline:
-        if (
-            doc.timestamp == int(query.get("timestamp", -1))
-            and doc.source_id == query.get("source_id")
-            and doc.modality == query.get("modality")
-        ):
-            return doc
-    return None
+    if isinstance(query, dict) and query:
+        if indexed_doc is not None and doc_matches_probe_query(indexed_doc, query):
+            return indexed_doc
+        matches = [doc for doc in timeline if doc_matches_probe_query(doc, query)]
+        if matches:
+            try:
+                query_tokens = int(query.get("tokens", -1))
+            except (TypeError, ValueError):
+                query_tokens = -1
+            if query_tokens >= 0:
+                token_matches = [
+                    doc for doc in matches if estimate_tokens(doc.text) == query_tokens
+                ]
+                if token_matches:
+                    matches = token_matches
+            if event_index is not None:
+                return min(matches, key=lambda doc: abs(doc.index - event_index))
+            return matches[0]
+        return None
+    return indexed_doc
 
 
 def connect_db(path: pathlib.Path) -> sqlite3.Connection:
@@ -1627,7 +1661,8 @@ def expected_judgment_keys(
     query_probe_index = 0
     keys: set[tuple[int, int]] = set()
     for probe in summary.get("probes", []):
-        if not find_query_doc(timeline, probe):
+        query_doc = find_query_doc(timeline, probe)
+        if not query_doc:
             continue
         if judge_limit >= 0 and query_probe_index >= judge_limit:
             break
@@ -1635,7 +1670,7 @@ def expected_judgment_keys(
             query_probe_index += 1
             continue
         query_probe_index += 1
-        event_index = int(probe["event_index"])
+        event_index = int(query_doc.index)
         for repetition in range(judge_repetitions):
             keys.add((event_index, repetition))
     return keys
@@ -2075,9 +2110,9 @@ def main() -> int:
     compacting_snapshots: dict[int, list] = {}
     if compacting_enabled:
         probe_event_indices = [
-            int(p.get("event_index"))
+            int(query_doc.index)
             for p in (summary.get("probes") or [])
-            if p.get("event_index") is not None
+            if (query_doc := find_query_doc(timeline, p)) is not None
         ]
         compacting_snapshots = simulate_compacting_session(
             timeline,
@@ -2159,6 +2194,8 @@ def main() -> int:
             query_doc = find_query_doc(timeline, probe)
             if not query_doc:
                 continue
+            declared_event_index = probe_event_index(probe)
+            event_index = int(query_doc.index)
             if args.judge_limit >= 0 and query_probe_index >= args.judge_limit:
                 break
             if query_probe_index < args.judge_start_index:
@@ -2166,6 +2203,9 @@ def main() -> int:
                 continue
             query_probe_index += 1
             probes_seen += 1
+            if declared_event_index is not None and declared_event_index != event_index:
+                fairness_checks["probe_event_index_remapped"] += 1
+                judge_validation["probe_event_index_mismatch"] += 1
             frozen_working_rows = frozen_memory_rows(probe, "cortext_frozen_working_memory")
             frozen_retrieved_rows = frozen_memory_rows(
                 probe, "cortext_frozen_retrieved_memory"
@@ -2197,7 +2237,6 @@ def main() -> int:
                 raw_working_rows = load_memory_rows(conn, working_memory_ids)
                 raw_retrieved_rows = load_memory_rows(conn, retrieved_memory_ids)
                 cortext_packet_source["final_db_rehydration_fallback"] += 1
-            event_index = int(probe["event_index"])
             memory_rows, excluded_non_prior_memory_ids = exclude_non_prior_memory_rows(
                 raw_memory_rows,
                 timeline,
@@ -2320,7 +2359,7 @@ def main() -> int:
             }
             if compacting_enabled:
                 packet_docs_by_system["compacting_session"] = (
-                    compacting_snapshots.get(int(probe["event_index"]), [])
+                    compacting_snapshots.get(event_index, [])
                 )
                 token_totals["compacting_session_tokens"] += sum(
                     estimate_tokens(doc.text or "")
@@ -2360,7 +2399,7 @@ def main() -> int:
                     systems,
                     args.blind_packets,
                     args.judge_seed,
-                    int(probe["event_index"]),
+                    event_index,
                     repetition,
                 )
                 packet_key_list = ", ".join(real_to_label[system] for system in ordered_systems)
@@ -2487,7 +2526,8 @@ def main() -> int:
                         print(
                             "judge_prompt_fit_shrink "
                             f"ts={utc_now_text()} "
-                            f"probe_event_index={probe.get('event_index')} "
+                            f"probe_event_index={declared_event_index} "
+                            f"query_event_index={event_index} "
                             f"dropped_full_history_docs={dropped} "
                             f"kept_full_history_docs={len(best_docs)} "
                             f"prompt_tokens_estimate={estimate_judge_prompt_tokens(best_content)} "
@@ -2536,7 +2576,7 @@ def main() -> int:
                     for key, value in media_stats.get(system, {}).items():
                         media_attachment_totals[system][key] += int(value)
 
-                current_key = (int(probe["event_index"]), repetition)
+                current_key = (event_index, repetition)
                 if current_key in completed_judgment_keys:
                     skipped_checkpoint_judgments += 1
                     continue
@@ -2544,7 +2584,8 @@ def main() -> int:
                 print(
                     "judge_call "
                     f"ts={utc_now_text()} "
-                    f"probe_event_index={probe.get('event_index')} "
+                    f"probe_event_index={declared_event_index} "
+                    f"query_event_index={event_index} "
                     f"repetition={repetition + 1}/{args.judge_repetitions}",
                     flush=True,
                 )
@@ -2603,7 +2644,8 @@ def main() -> int:
                     failure_reason = expected
                 failure_reasons[failure_reason] += 1
                 row = {
-                    "event_index": int(probe["event_index"]),
+                    "event_index": event_index,
+                    "probe_event_index": declared_event_index,
                     "repetition": repetition,
                     "query": {
                         "timestamp": query_doc.timestamp,

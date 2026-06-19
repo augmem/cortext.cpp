@@ -1,3 +1,5 @@
+#include "test_helpers.hpp"
+
 // tests/store.test.cpp
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers.hpp>
@@ -517,6 +519,14 @@ TEST_CASE ("WAL mode configuration", "[store][wal]")
              == "wal");
   }
 
+  SECTION ("WAL autocheckpoint is disabled for file databases")
+  {
+    TempDatabase temp_db;
+    auto store = cortext::SQLiteStore::Create (temp_db.path ());
+
+    REQUIRE (store->WalAutoCheckpointPages () == 0);
+  }
+
   SECTION ("Memory databases use memory journal mode")
   {
     auto store = cortext::SQLiteStore::Create (":memory:");
@@ -568,6 +578,73 @@ TEST_CASE ("WAL mode configuration", "[store][wal]")
     auto result = store->Execute ("PRAGMA synchronous", {});
     REQUIRE (result.size () == 1);
     REQUIRE (std::any_cast<long long> (result[0].at ("synchronous")) == 2LL);
+  }
+
+  SECTION ("Synchronous mode can be overridden for diagnostics")
+  {
+    cortext::testing::ScopedEnvVar sync_override (
+        "CORTEXT_SQLITE_SYNCHRONOUS", "off");
+
+    cortext::SQLiteConfig config;
+    config.synchronous = 2; // FULL
+    auto store = cortext::SQLiteStore::Create (":memory:", config);
+    auto result = store->Execute ("PRAGMA synchronous", {});
+
+    REQUIRE (result.size () == 1);
+    REQUIRE (std::any_cast<long long> (result[0].at ("synchronous")) == 0LL);
+  }
+
+  SECTION ("Journal mode can be overridden for realtime diagnostics")
+  {
+    cortext::testing::ScopedEnvVar journal_override (
+        "CORTEXT_SQLITE_JOURNAL_MODE", "memory");
+
+    TempDatabase temp_db;
+    auto store = cortext::SQLiteStore::Create (temp_db.path ());
+    auto result = store->Execute ("PRAGMA journal_mode", {});
+
+    REQUIRE (result.size () == 1);
+    REQUIRE (std::any_cast<std::string> (result[0].at ("journal_mode"))
+             == "memory");
+  }
+
+  SECTION ("Locking mode can be overridden for diagnostics")
+  {
+    cortext::testing::ScopedEnvVar locking_override (
+        "CORTEXT_SQLITE_LOCKING_MODE", "exclusive");
+
+    TempDatabase temp_db;
+    auto store = cortext::SQLiteStore::Create (temp_db.path ());
+    auto result = store->Execute ("PRAGMA locking_mode", {});
+
+    REQUIRE (result.size () == 1);
+    REQUIRE (std::any_cast<std::string> (result[0].at ("locking_mode"))
+             == "exclusive");
+  }
+
+  SECTION ("Page size can be overridden before schema creation")
+  {
+    cortext::testing::ScopedEnvVar page_size_override (
+        "CORTEXT_SQLITE_PAGE_SIZE", "8192");
+
+    TempDatabase temp_db;
+    auto store = cortext::SQLiteStore::Create (temp_db.path ());
+    auto result = store->Execute ("PRAGMA page_size", {});
+
+    REQUIRE (result.size () == 1);
+    REQUIRE (std::any_cast<long long> (result[0].at ("page_size")) == 8192LL);
+  }
+
+  SECTION ("Temp store can be overridden for diagnostics")
+  {
+    cortext::testing::ScopedEnvVar temp_store_override (
+        "CORTEXT_SQLITE_TEMP_STORE", "memory");
+
+    auto store = cortext::SQLiteStore::Create (":memory:");
+    auto result = store->Execute ("PRAGMA temp_store", {});
+
+    REQUIRE (result.size () == 1);
+    REQUIRE (std::any_cast<long long> (result[0].at ("temp_store")) == 2LL);
   }
 }
 

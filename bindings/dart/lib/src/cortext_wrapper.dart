@@ -282,6 +282,25 @@ final class Cortext {
     return _decodeJsonObject(processTextJson(text, sourceId));
   }
 
+  String embedTextJson(String text) {
+    _ensureOpen();
+    final textPointer = text.toNativeUtf8();
+    try {
+      return _takeJsonString(
+        _library.bindings.cortext_embed_text_json(
+          _handle,
+          textPointer.cast(),
+        ),
+      );
+    } finally {
+      malloc.free(textPointer);
+    }
+  }
+
+  Float32List embedText(String text) {
+    return _decodeEmbedding(embedTextJson(text));
+  }
+
   String processAudioJson(Float32List pcm, String sourceId) {
     _ensureOpen();
     final sourcePointer = sourceId.toNativeUtf8();
@@ -308,6 +327,31 @@ final class Cortext {
 
   Map<String, dynamic> processAudio(Float32List pcm, String sourceId) {
     return _decodeJsonObject(processAudioJson(pcm, sourceId));
+  }
+
+  String embedAudioJson(Float32List pcm) {
+    _ensureOpen();
+    Pointer<Float> pcmPointer = nullptr;
+    try {
+      if (pcm.isNotEmpty) {
+        pcmPointer = malloc<Float>(pcm.length);
+        pcmPointer.asTypedList(pcm.length).setAll(0, pcm);
+      }
+      final raw = _library.bindings.cortext_embed_audio_json(
+        _handle,
+        pcmPointer,
+        pcm.length,
+      );
+      return _takeJsonString(raw);
+    } finally {
+      if (pcmPointer != nullptr) {
+        malloc.free(pcmPointer);
+      }
+    }
+  }
+
+  Float32List embedAudio(Float32List pcm) {
+    return _decodeEmbedding(embedAudioJson(pcm));
   }
 
   String processImageJson(
@@ -354,6 +398,43 @@ final class Cortext {
     );
   }
 
+  String embedImageJson(
+    Uint8List data,
+    int width,
+    int height,
+    int channels,
+  ) {
+    _ensureOpen();
+    Pointer<Uint8> dataPointer = nullptr;
+    try {
+      if (data.isNotEmpty) {
+        dataPointer = malloc<Uint8>(data.length);
+        dataPointer.asTypedList(data.length).setAll(0, data);
+      }
+      final raw = _library.bindings.cortext_embed_image_json(
+        _handle,
+        dataPointer,
+        width,
+        height,
+        channels,
+      );
+      return _takeJsonString(raw);
+    } finally {
+      if (dataPointer != nullptr) {
+        malloc.free(dataPointer);
+      }
+    }
+  }
+
+  Float32List embedImage(
+    Uint8List data,
+    int width,
+    int height,
+    int channels,
+  ) {
+    return _decodeEmbedding(embedImageJson(data, width, height, channels));
+  }
+
   String consolidateJson() {
     _ensureOpen();
     return _takeJsonString(_library.bindings.cortext_consolidate_json(_handle));
@@ -379,6 +460,14 @@ final class Cortext {
     final status = _library.bindings.cortext_flush(_handle);
     if (status != 0) {
       _throwLastError('cortext_flush failed');
+    }
+  }
+
+  void reset() {
+    _ensureOpen();
+    final status = _library.bindings.cortext_reset(_handle);
+    if (status != 0) {
+      _throwLastError('cortext_reset failed');
     }
   }
 
@@ -414,6 +503,17 @@ final class Cortext {
       throw const CortextError('Expected a JSON object from cortext');
     }
     return decoded;
+  }
+
+  Float32List _decodeEmbedding(String payload) {
+    final decoded = _decodeJsonObject(payload);
+    final values = decoded['embedding'];
+    if (values is! List) {
+      throw const CortextError('Expected an embedding array from cortext');
+    }
+    return Float32List.fromList([
+      for (final value in values) (value as num).toDouble(),
+    ]);
   }
 
   Never _throwLastError(String prefix) {

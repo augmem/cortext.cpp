@@ -157,6 +157,40 @@ RunReinforcementUpdate (double focus, double sensitivity, double stability,
 
 } // namespace
 
+TEST_CASE ("DetectMemoryUsage carries memory_id in usage events",
+           "[operations][detect_memory_usage]")
+{
+  auto unique_store = SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<Store> (std::move (unique_store));
+  cortext::testing::InitializeCoreSchema (*store);
+
+  cortext::testing::SeedEmbeddingV2 (*store, 700LL, MakeVec (), 1);
+  cortext::testing::SeedMemoryV2 (*store, 70LL, 700LL, "test", "LONG_TERM",
+                                  1.0, 1);
+
+  ProcessorContext pctx;
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+
+  auto signal = MakeSignal (10);
+  OperationContext ctx (signal, pctx, cfg, store.get ());
+  ctx.SetInterruptAllowed (true);
+  ctx.SetSelectedCandidateId (700LL);
+  ctx.SetRetrievedMemoryEmbeddings (
+      std::unordered_map<long long, Eigen::VectorXf>{ { 700LL, MakeVec () } });
+
+  operations::DetectMemoryUsage op;
+  auto tx = store->Begin ();
+  op.Execute (ctx, *tx);
+  tx->Commit ();
+
+  const auto &events = ctx.GetMemoryUsageEvents ();
+  REQUIRE (events.size () == 1);
+  REQUIRE (events[0].embedding_id == 700LL);
+  REQUIRE (events[0].memory_id == 70LL);
+  REQUIRE (events[0].used);
+}
+
 TEST_CASE ("High DA increases procedural value update gain",
            "[operations][detect_memory_usage][neuromod]")
 {

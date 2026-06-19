@@ -8,6 +8,7 @@
 #include "cortext/telemetry/telemetry.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cctype>
 #include <string>
 
@@ -16,6 +17,15 @@ namespace cortext::operations
 
 namespace
 {
+using SteadyClock = std::chrono::steady_clock;
+
+double
+ElapsedMillis (SteadyClock::time_point start)
+{
+  return std::chrono::duration<double, std::milli> (SteadyClock::now () - start)
+      .count ();
+}
+
 bool
 EnvFlag (const char *name)
 {
@@ -42,10 +52,20 @@ CreateSignalRecord (const Signal &signal, double score, int serial_position,
   rec.mime = signal.mimetype;
   rec.score = score;
   rec.serial_position = serial_position;
+  if ((signal.modality == "text" || signal.mimetype == "text/plain")
+      && signal.payload && !signal.payload->empty ())
+    {
+      rec.text_payload.assign (
+          reinterpret_cast<const char *> (signal.payload->data ()),
+          signal.payload->size ());
+    }
   if (signal.payload && !signal.payload->empty ())
     {
+      const auto put_start = SteadyClock::now ();
       rec.blob_id
           = PutObject (context.GetObjectTransaction (), tx, *signal.payload);
+      context.AddOperationTiming ("UpdateAccumulator.signal_payload_put",
+                                  ElapsedMillis (put_start));
     }
   return rec;
 }

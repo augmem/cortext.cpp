@@ -4,6 +4,7 @@
 
 #include <any>
 #include <cstddef>
+#include <cstdint>
 #include <deque>
 #include <map>
 #include <memory>
@@ -34,7 +35,7 @@ struct SQLiteConfig
   int busy_timeout_ms = 5000;       ///< Wait time on SQLITE_BUSY (ms)
   bool enable_foreign_keys = true;  ///< Enforce foreign key constraints
   int synchronous = 1;              ///< NORMAL (1), FULL (2), OFF (0)
-  int cache_size_kb = 2048;         ///< Cache size in KB (negative for KB)
+  int cache_size_kb = 65536;        ///< Cache size in KB (negative for KB)
 };
 
 /// @brief SQLite transaction with savepoint support for nested transactions.
@@ -192,6 +193,12 @@ public:
   /// @brief Get WAL status information.
   /// @return WAL status with page counts.
   WalStatus GetWalStatus () const;
+
+  /// @brief Return the connection-local SQLite auto-checkpoint threshold.
+  int WalAutoCheckpointPages () const;
+
+  /// @brief Return the current WAL file size in bytes, or zero when absent.
+  std::uintmax_t WalFileBytes () const;
 
   /// @brief Unregister a transaction from the transaction stack.
   /// Called by SQLiteTransaction destructor to prevent dangling pointers.

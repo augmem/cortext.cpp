@@ -19,6 +19,7 @@
 #include <algorithm>
 #include <any>
 #include <cctype>
+#include <chrono>
 #include <cstdlib>
 #include <ctime>
 #include <cmath>
@@ -27,6 +28,7 @@
 #include <stdexcept>
 #include <sstream>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -132,6 +134,24 @@ EnvBool (const char *name, bool fallback = false)
                     return static_cast<char> (std::tolower (c));
                   });
   return text == "1" || text == "true" || text == "yes" || text == "on";
+}
+
+int
+EnvInt (const char *name, int fallback, int min_value, int max_value)
+{
+  const char *raw = std::getenv (name);
+  if (raw == nullptr || *raw == '\0')
+    {
+      return fallback;
+    }
+
+  char *end = nullptr;
+  const long parsed = std::strtol (raw, &end, 10);
+  if (end == raw)
+    {
+      return fallback;
+    }
+  return std::clamp (static_cast<int> (parsed), min_value, max_value);
 }
 
 bool
@@ -517,6 +537,36 @@ struct SummaryRecord
   Eigen::VectorXf embedding;
 };
 
+std::string
+MakeSourceMemoryKey (std::vector<long long> source_memory_ids)
+{
+  if (source_memory_ids.empty ())
+    {
+      return {};
+    }
+  std::sort (source_memory_ids.begin (), source_memory_ids.end ());
+  source_memory_ids.erase (
+      std::unique (source_memory_ids.begin (), source_memory_ids.end ()),
+      source_memory_ids.end ());
+  return AuditJoinInt64s (source_memory_ids);
+}
+
+struct PendingSummaryAttachment
+{
+  int cluster_id = 0;
+  std::vector<std::pair<long long, long long>> source_links;
+};
+
+struct PendingSummaryJob
+{
+  std::string summary_id;
+  std::string source_key;
+  std::vector<std::string> source_texts;
+  std::vector<float> centroid;
+  std::size_t embedding_count = 0;
+  std::vector<PendingSummaryAttachment> attachments;
+};
+
 std::optional<SummaryRecord>
 LoadSummaryRecord (Transaction &tx, long long memory_id, int expected_dim)
 {
@@ -787,6 +837,82 @@ AttachClusterSources (Transaction &tx, long long association_memory_id,
     }
 }
 
+long long
+PersistDeepSummary (OperationContext &context, Transaction &tx,
+                    const PendingSummaryJob &job,
+                    const std::string &summary_text, uint64_t now_ts,
+                    double derived_source_edge_weight)
+{
+  std::vector<unsigned char> summary_blob_id;
+  summary_blob_id = PutObject (context.GetObjectTransaction (), tx,
+                               StringToBlob (summary_text));
+  if (summary_blob_id.empty ())
+    {
+      throw std::runtime_error (
+          "Consolidation summarization failed to persist blob for "
+          + job.summary_id);
+    }
+
+  AddWrite (tx,
+            "INSERT INTO embeddings (embedding, created_at) VALUES (?, ?)",
+            { job.centroid, static_cast<long long> (now_ts) });
+
+  auto id_rows = tx.Execute ("SELECT last_insert_rowid() AS id", {});
+  long long centroid_embedding_id = 0;
+  if (!id_rows.empty () && id_rows[0].count ("id"))
+    {
+      centroid_embedding_id = AnyToInt64 (id_rows[0].at ("id"));
+    }
+  if (centroid_embedding_id <= 0)
+    {
+      throw std::runtime_error (
+          "Consolidation summarization failed to persist embedding for "
+          + job.summary_id);
+    }
+
+  AddWrite (tx,
+            "INSERT INTO memories "
+            "(embedding_id, source_id, kind, label, start_ts, n_signals, blob_id, created_at) "
+            "VALUES (?, ?, 'LONG_TERM', ?, ?, ?, ?, ?)",
+            { centroid_embedding_id, job.summary_id, summary_text,
+              static_cast<long long> (now_ts),
+              static_cast<long long> (job.embedding_count), summary_blob_id,
+              static_cast<long long> (now_ts) });
+
+  auto mem_id_rows = tx.Execute ("SELECT last_insert_rowid() AS id", {});
+  long long centroid_memory_id = 0;
+  if (!mem_id_rows.empty () && mem_id_rows[0].count ("id"))
+    {
+      centroid_memory_id = AnyToInt64 (mem_id_rows[0].at ("id"));
+    }
+  if (centroid_memory_id <= 0)
+    {
+      throw std::runtime_error (
+          "Consolidation summarization failed to persist memory for "
+          + job.summary_id);
+    }
+
+  if (!job.centroid.empty ())
+    {
+      Eigen::VectorXf centroid_vec (
+          static_cast<Eigen::Index> (job.centroid.size ()));
+      for (size_t i = 0; i < job.centroid.size (); ++i)
+        {
+          centroid_vec (static_cast<Eigen::Index> (i)) = job.centroid[i];
+        }
+      context.GetProcessorContext ().UpsertSummaryCache (
+          centroid_memory_id, centroid_embedding_id, centroid_vec, false, false);
+    }
+
+  for (const auto &attachment : job.attachments)
+    {
+      AttachClusterSources (tx, centroid_memory_id, attachment.cluster_id,
+                            attachment.source_links,
+                            derived_source_edge_weight);
+    }
+  return centroid_memory_id;
+}
+
 void
 QueueExtractionIfNeeded (std::vector<ExtractionRequest> &requests,
                          const ConsolidationSummarizeParams &params,
@@ -900,6 +1026,87 @@ ConsolidationSummarize::Execute (OperationContext &context, Transaction &tx) con
 
   // Get deep summarizer backend selected during Cortext construction.
   Summarizer *summarizer = context.GetSummarizer ();
+  const int summary_batch_size = EnvInt (
+      "CORTEXT_CONSOLIDATION_SUMMARY_BATCH_SIZE", 8, 1, 128);
+  std::vector<PendingSummaryJob> pending_summary_jobs;
+  std::unordered_map<std::string, std::size_t> pending_summary_by_sources;
+
+  auto flush_pending_summaries = [&] {
+    if (pending_summary_jobs.empty ())
+      {
+        return;
+      }
+    if (!summarizer || !summarizer->IsAvailable ())
+      {
+        pending_summary_jobs.clear ();
+        pending_summary_by_sources.clear ();
+        return;
+      }
+
+    std::vector<Summarizer::BatchTextItem> items;
+    items.reserve (pending_summary_jobs.size ());
+    for (const auto &job : pending_summary_jobs)
+      {
+        Summarizer::BatchTextItem item;
+        item.id = job.summary_id;
+        item.texts = job.source_texts;
+        item.max_words = params.max_summary_words;
+        items.push_back (std::move (item));
+      }
+
+    std::vector<std::string> summaries;
+    try
+      {
+        internal::ThrowIfStopRequested ();
+        const auto summarize_start = std::chrono::steady_clock::now ();
+        summaries = summarizer->SummarizeTextBatches (items);
+        const auto summarize_end = std::chrono::steady_clock::now ();
+        const double batch_ms = std::chrono::duration<double, std::milli> (
+                                    summarize_end - summarize_start)
+                                    .count ();
+        context.AddOperationTiming (
+            "ConsolidationSummarize.summarizer_batch_call", batch_ms);
+        context.AddOperationTiming ("ConsolidationSummarize.summarizer_call",
+                                    batch_ms);
+      }
+    catch (const internal::CancellationError &)
+      {
+        throw;
+      }
+    catch (const std::exception &e)
+      {
+        throw std::runtime_error (
+            "Consolidation summarization batch failed: "
+            + std::string (e.what ()));
+      }
+
+    if (summaries.size () != pending_summary_jobs.size ())
+      {
+        throw std::runtime_error (
+            "Consolidation summarization batch returned "
+            + std::to_string (summaries.size ()) + " summaries for "
+            + std::to_string (pending_summary_jobs.size ()) + " jobs");
+      }
+
+    for (std::size_t i = 0; i < pending_summary_jobs.size (); ++i)
+      {
+        auto summary_text = SanitizeSummaryText (std::move (summaries[i]));
+        const auto &job = pending_summary_jobs[i];
+        if (summary_text.empty ())
+          {
+            throw std::runtime_error (
+                "Consolidation summarization returned empty text for "
+                + job.summary_id);
+          }
+        PersistDeepSummary (context, tx, job, summary_text, now_ts,
+                            derived_source_edge_weight);
+        ++summary_count;
+        ++summaries_with_summarizer;
+      }
+
+    pending_summary_jobs.clear ();
+    pending_summary_by_sources.clear ();
+  };
 
   for (const auto &cluster : clusters)
     {
@@ -1238,136 +1445,43 @@ ConsolidationSummarize::Execute (OperationContext &context, Transaction &tx) con
           continue;
         }
 
-      std::string summary_id = GenerateSummaryId (now_ts, summary_sequence++);
-
-      // Use the configured abstractive summarizer backend.
-      std::string summary_text;
-      try
+      const std::string source_key = MakeSourceMemoryKey (source_memory_ids);
+      if (!source_key.empty ())
         {
-          internal::ThrowIfStopRequested ();
-          summary_text = summarizer->SummarizeTextsLimited (
-              source_texts, params.max_summary_words);
-          summary_text = SanitizeSummaryText (summary_text);
-        }
-      catch (const internal::CancellationError &)
-        {
-          throw;
-        }
-      catch (const std::exception &e)
-        {
-          throw std::runtime_error (
-              "Consolidation summarization failed for " + summary_id + ": "
-              + e.what ());
-        }
-      if (summary_text.empty ())
-        {
-          throw std::runtime_error (
-              "Consolidation summarization returned empty text for "
-              + summary_id);
-        }
-      summary_count++;
-      summaries_with_summarizer++;
-
-      // 2. Store summary text as blob for downstream consolidation.
-      std::vector<unsigned char> summary_blob_id;
-      summary_blob_id = PutObject (context.GetObjectTransaction (), tx,
-                                   StringToBlob (summary_text));
-      if (summary_blob_id.empty ())
-        {
-          throw std::runtime_error (
-              "Consolidation summarization failed to persist blob for "
-              + summary_id);
-        }
-
-      // 3. Convert centroid to blob for storage.
-      std::vector<float> centroid_blob = cluster.centroid;
-
-      // 4. Create embeddings entry for centroid (v2: minimal table).
-      AddWrite (tx,
-                "INSERT INTO embeddings (embedding, created_at) VALUES (?, ?)",
-                { centroid_blob, static_cast<long long> (now_ts) });
-
-      // Get the auto-assigned embedding_id
-      auto id_rows = tx.Execute ("SELECT last_insert_rowid() AS id", {});
-      long long centroid_embedding_id = 0;
-      if (!id_rows.empty () && id_rows[0].count ("id"))
-        {
-          auto val = id_rows[0].at ("id");
-          if (val.type () == typeid (long long))
+          auto pending_it = pending_summary_by_sources.find (source_key);
+          if (pending_it != pending_summary_by_sources.end ())
             {
-              centroid_embedding_id = std::any_cast<long long> (val);
-            }
-          else if (val.type () == typeid (int))
-            {
-              centroid_embedding_id = std::any_cast<int> (val);
+              pending_summary_jobs[pending_it->second].attachments.push_back (
+                  PendingSummaryAttachment{ cluster.cluster_id,
+                                            std::move (source_links) });
+              continue;
             }
         }
 
-      // 5. Create MEMORIES row for the consolidated summary as durable LTM.
-      // Store summary_text as label + blob, n_signals as cluster size.
-      AddWrite (tx,
-                "INSERT INTO memories "
-                "(embedding_id, source_id, kind, label, start_ts, n_signals, blob_id, created_at) "
-                "VALUES (?, ?, 'LONG_TERM', ?, ?, ?, ?, ?)",
-                { centroid_embedding_id, summary_id, summary_text,
-                  static_cast<long long> (now_ts),
-                  static_cast<long long> (cluster.embedding_ids.size ()),
-                  summary_blob_id, static_cast<long long> (now_ts) });
-
-      // Get the memory_id for the centroid memory
-      auto mem_id_rows = tx.Execute ("SELECT last_insert_rowid() AS id", {});
-      centroid_memory_id = 0;
-      if (!mem_id_rows.empty () && mem_id_rows[0].count ("id"))
+      PendingSummaryJob job;
+      job.summary_id = GenerateSummaryId (now_ts, summary_sequence++);
+      job.source_key = source_key;
+      job.source_texts = std::move (source_texts);
+      job.centroid = cluster.centroid;
+      job.embedding_count = cluster.embedding_ids.size ();
+      job.attachments.push_back (
+          PendingSummaryAttachment{ cluster.cluster_id,
+                                    std::move (source_links) });
+      pending_summary_jobs.push_back (std::move (job));
+      if (!source_key.empty ())
         {
-          auto val = mem_id_rows[0].at ("id");
-          if (val.type () == typeid (long long))
-            {
-              centroid_memory_id = std::any_cast<long long> (val);
-            }
-          else if (val.type () == typeid (int))
-            {
-              centroid_memory_id = std::any_cast<int> (val);
-            }
+          pending_summary_by_sources[source_key]
+              = pending_summary_jobs.size () - 1;
         }
-
-      if (centroid_memory_id > 0 && centroid_embedding_id > 0
-          && !cluster.centroid.empty ())
+      if (static_cast<int> (pending_summary_jobs.size ())
+          >= summary_batch_size)
         {
-          Eigen::VectorXf centroid_vec (
-              static_cast<Eigen::Index> (cluster.centroid.size ()));
-          for (size_t i = 0; i < cluster.centroid.size (); ++i)
-            {
-              centroid_vec (static_cast<Eigen::Index> (i))
-                  = cluster.centroid[i];
-            }
-          context.GetProcessorContext ().UpsertSummaryCache (
-              centroid_memory_id, centroid_embedding_id, centroid_vec, false, false);
-        }
-
-      // 6. Update cluster_id in memories for source embeddings and create
-      // ASSOCIATIONS (derived_from edges).
-      for (const auto &[emb_id, src_memory_id] : source_links)
-        {
-          internal::ThrowIfStopRequested ();
-          // Update cluster_id
-          AddWrite (tx,
-                    "UPDATE memories SET cluster_id = ? "
-                    "WHERE embedding_id = ?",
-                    { cluster.cluster_id, emb_id });
-
-          // Create derived_from edge: centroid <- source
-          if (src_memory_id > 0 && centroid_memory_id > 0)
-            {
-              AddWrite (tx,
-                        "INSERT OR IGNORE INTO associations "
-                        "(source_memory_id, target_memory_id, edge_type, weight) "
-                        "VALUES (?, ?, 'derived_from', ?)",
-                        { centroid_memory_id, src_memory_id,
-                          derived_source_edge_weight });
-            }
+          flush_pending_summaries ();
         }
 
     }
+
+  flush_pending_summaries ();
 
   // 9. Pass extraction requests to next operation.
   const int jobs_queued = static_cast<int> (extraction_requests.size ());

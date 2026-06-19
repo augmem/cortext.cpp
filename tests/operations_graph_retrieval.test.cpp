@@ -804,6 +804,8 @@ TEST_CASE ("Evidence blending packets are feature flagged and rank preserving",
       "CORTEXT_ENABLE_PARTIAL_MATCHING_PENALTY");
   cortext::testing::ScopedEnvVar enable_constructive_recall (
       "CORTEXT_DISABLE_CONSTRUCTIVE_RECALL");
+  cortext::testing::ScopedEnvVar disable_reconstruction_cooldown (
+      "CORTEXT_RECONSTRUCTION_MIN_UPDATE_MS", "0");
 
   auto run = [&] (const std::shared_ptr<Store> &store,
                   bool enable_evidence_blending) {
@@ -938,6 +940,8 @@ TEST_CASE ("Evidence confidence annotates packets without changing rank",
       "CORTEXT_ENABLE_EVIDENCE_BLENDING", "1");
   cortext::testing::ScopedEnvVar enable_constructive_recall (
       "CORTEXT_DISABLE_CONSTRUCTIVE_RECALL");
+  cortext::testing::ScopedEnvVar disable_reconstruction_cooldown (
+      "CORTEXT_RECONSTRUCTION_MIN_UPDATE_MS", "0");
 
   struct Run
   {

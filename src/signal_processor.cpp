@@ -5,6 +5,7 @@
 #include "cortext/operations/constants.hpp"
 #include "cortext/processor.hpp"
 #include "cortext/processor/operation_context.hpp"
+#include "cortext/store/sqlite_store.hpp"
 #include "cortext/store/store.hpp"
 #include "cortext/telemetry/telemetry.hpp"
 #include "cortext/store/schema.hpp"
@@ -13,10 +14,15 @@
 #include <chrono>
 #include <any>
 #include <cmath>
+#include <cstdlib>
+#include <cstdint>
 #include <cstring>
 #include <map>
 #include <sstream>
 #include <stdexcept>
+#include <unordered_map>
+#include <unordered_set>
+#include <utility>
 #include <vector>
 
 namespace cortext
@@ -24,6 +30,330 @@ namespace cortext
 
 namespace
 {
+
+constexpr int kClosedWorkingMemoryPruneBatch = 1024;
+constexpr int kClosedWorkingMemoryIncrementalPruneBatch = 8;
+constexpr int kClosedWorkingMemoryIncrementalPruneIntervalSignals = 8;
+constexpr uint64_t kWalPassiveCheckpointIntervalSignals = 256;
+constexpr std::uintmax_t kWalPassiveCheckpointMinBytes
+    = 256ULL * 1024ULL * 1024ULL;
+
+double
+ElapsedMillis (std::chrono::steady_clock::time_point start,
+               std::chrono::steady_clock::time_point end)
+{
+  return std::chrono::duration_cast<std::chrono::duration<double, std::milli> > (
+             end - start)
+      .count ();
+}
+
+inline int64_t
+ExtractInt64 (const std::map<std::string, std::any> &row,
+              const std::string &key, int64_t default_val);
+
+std::string
+Placeholders (std::size_t count)
+{
+  std::string placeholders;
+  placeholders.reserve (count * 3);
+  for (std::size_t i = 0; i < count; ++i)
+    {
+      if (i > 0)
+        {
+          placeholders += ", ";
+        }
+      placeholders += "?";
+    }
+  return placeholders;
+}
+
+std::vector<std::any>
+MakeParams (const std::vector<long long> &values)
+{
+  std::vector<std::any> params;
+  params.reserve (values.size ());
+  for (const auto value : values)
+    {
+      params.push_back (value);
+    }
+  return params;
+}
+
+std::vector<long long>
+ExtractInt64Column (const std::vector<std::map<std::string, std::any>> &rows,
+                    const std::string &column)
+{
+  std::vector<long long> values;
+  values.reserve (rows.size ());
+  std::unordered_set<long long> seen;
+  seen.reserve (rows.size ());
+  for (const auto &row : rows)
+    {
+      const auto value = ExtractInt64 (row, column, 0);
+      if (value > 0 && seen.insert (value).second)
+        {
+          values.push_back (value);
+        }
+    }
+  return values;
+}
+
+struct DetachedProcessorCaches
+{
+  std::unordered_map<std::string, std::vector<float>> label_embedding_cache;
+  std::vector<ProcessorContext::SummaryCacheEntry> summary_cache;
+  std::unordered_map<long long, size_t> summary_cache_index;
+  std::vector<ProcessorContext::RetrievalSurfaceEntry>
+      retrieval_surface_cache;
+  std::unordered_map<long long, size_t> retrieval_surface_index;
+  std::unordered_map<long long, size_t> retrieval_surface_embedding_index;
+  std::unordered_map<
+      std::string,
+      std::vector<ProcessorContext::RetrievalSurfaceSourceIndexEntry>>
+      retrieval_surface_source_index;
+  std::unordered_set<std::string> retrieval_surface_source_index_dirty;
+  std::unordered_map<long long, ProcessorContext::FactEmbeddingCacheEntry>
+      fact_embedding_cache;
+  ProcessorContext::DurableSourceTextSeedCache durable_source_text_seed_cache;
+  ProcessorContext::LabelClusterCache label_cluster_cache;
+  ProcessorContext::LabelGraphRelationCache label_graph_relation_cache;
+  ProcessorContext::AssociationFanoutCache association_fanout_cache;
+  std::unordered_set<long long> predictive_pre_activation_embedding_ids;
+  std::unordered_set<long long> retrieval_suppression_embedding_ids;
+  std::unordered_map<std::string, std::vector<long long>> index_store;
+  std::unordered_map<long long, std::string> index_reverse;
+  std::unordered_map<std::string, std::unordered_map<long long, double>>
+      procedural_store;
+};
+
+void
+ClearRebuildableProcessorCaches (ProcessorContext &ctx)
+{
+  ctx.label_embedding_cache = {};
+  ctx.summary_cache = {};
+  ctx.summary_cache_index = {};
+  ctx.retrieval_surface_cache = {};
+  ctx.retrieval_surface_index = {};
+  ctx.retrieval_surface_embedding_index = {};
+  ctx.retrieval_surface_source_index = {};
+  ctx.retrieval_surface_source_index_dirty = {};
+  ctx.fact_embedding_cache = {};
+  ctx.durable_source_text_seed_cache = {};
+  ctx.label_cluster_cache = {};
+  ctx.label_graph_relation_cache = {};
+  ctx.association_fanout_cache = {};
+  ctx.predictive_pre_activation_embedding_ids = {};
+  ctx.retrieval_suppression_embedding_ids = {};
+  ctx.index_store = {};
+  ctx.index_reverse = {};
+  ctx.procedural_store = {};
+}
+
+DetachedProcessorCaches
+DetachRebuildableProcessorCaches (ProcessorContext &ctx)
+{
+  DetachedProcessorCaches caches;
+  caches.label_embedding_cache = std::move (ctx.label_embedding_cache);
+  caches.summary_cache = std::move (ctx.summary_cache);
+  caches.summary_cache_index = std::move (ctx.summary_cache_index);
+  caches.retrieval_surface_cache = std::move (ctx.retrieval_surface_cache);
+  caches.retrieval_surface_index = std::move (ctx.retrieval_surface_index);
+  caches.retrieval_surface_embedding_index
+      = std::move (ctx.retrieval_surface_embedding_index);
+  caches.retrieval_surface_source_index
+      = std::move (ctx.retrieval_surface_source_index);
+  caches.retrieval_surface_source_index_dirty
+      = std::move (ctx.retrieval_surface_source_index_dirty);
+  caches.fact_embedding_cache = std::move (ctx.fact_embedding_cache);
+  caches.durable_source_text_seed_cache
+      = std::move (ctx.durable_source_text_seed_cache);
+  caches.label_cluster_cache = std::move (ctx.label_cluster_cache);
+  caches.label_graph_relation_cache
+      = std::move (ctx.label_graph_relation_cache);
+  caches.association_fanout_cache
+      = std::move (ctx.association_fanout_cache);
+  caches.predictive_pre_activation_embedding_ids
+      = std::move (ctx.predictive_pre_activation_embedding_ids);
+  caches.retrieval_suppression_embedding_ids
+      = std::move (ctx.retrieval_suppression_embedding_ids);
+  caches.index_store = std::move (ctx.index_store);
+  caches.index_reverse = std::move (ctx.index_reverse);
+  caches.procedural_store = std::move (ctx.procedural_store);
+  ClearRebuildableProcessorCaches (ctx);
+  return caches;
+}
+
+void
+RestoreRebuildableProcessorCaches (ProcessorContext &ctx,
+                                   DetachedProcessorCaches &caches)
+{
+  ctx.label_embedding_cache = std::move (caches.label_embedding_cache);
+  ctx.summary_cache = std::move (caches.summary_cache);
+  ctx.summary_cache_index = std::move (caches.summary_cache_index);
+  ctx.retrieval_surface_cache = std::move (caches.retrieval_surface_cache);
+  ctx.retrieval_surface_index = std::move (caches.retrieval_surface_index);
+  ctx.retrieval_surface_embedding_index
+      = std::move (caches.retrieval_surface_embedding_index);
+  ctx.retrieval_surface_source_index
+      = std::move (caches.retrieval_surface_source_index);
+  ctx.retrieval_surface_source_index_dirty
+      = std::move (caches.retrieval_surface_source_index_dirty);
+  ctx.fact_embedding_cache = std::move (caches.fact_embedding_cache);
+  ctx.durable_source_text_seed_cache
+      = std::move (caches.durable_source_text_seed_cache);
+  ctx.label_cluster_cache = std::move (caches.label_cluster_cache);
+  ctx.label_graph_relation_cache
+      = std::move (caches.label_graph_relation_cache);
+  ctx.association_fanout_cache = std::move (caches.association_fanout_cache);
+  ctx.predictive_pre_activation_embedding_ids
+      = std::move (caches.predictive_pre_activation_embedding_ids);
+  ctx.retrieval_suppression_embedding_ids
+      = std::move (caches.retrieval_suppression_embedding_ids);
+  ctx.index_store = std::move (caches.index_store);
+  ctx.index_reverse = std::move (caches.index_reverse);
+  ctx.procedural_store = std::move (caches.procedural_store);
+}
+
+class ScopedProcessorCacheDetach
+{
+public:
+  explicit ScopedProcessorCacheDetach (ProcessorContext &ctx)
+      : ctx_ (&ctx), caches_ (DetachRebuildableProcessorCaches (ctx))
+  {
+  }
+
+  ~ScopedProcessorCacheDetach ()
+  {
+    if (ctx_)
+      {
+        RestoreRebuildableProcessorCaches (*ctx_, caches_);
+      }
+  }
+
+  ScopedProcessorCacheDetach (const ScopedProcessorCacheDetach &) = delete;
+  ScopedProcessorCacheDetach &
+  operator= (const ScopedProcessorCacheDetach &) = delete;
+
+private:
+  ProcessorContext *ctx_ = nullptr;
+  DetachedProcessorCaches caches_;
+};
+
+void
+DeleteStaleWorkingMemoryRows (Transaction &tx,
+                              const std::vector<long long> &memory_ids,
+                              bool deep_cleanup)
+{
+  if (memory_ids.empty ())
+    {
+      return;
+    }
+
+  const std::string placeholders = Placeholders (memory_ids.size ());
+  const auto memory_params = MakeParams (memory_ids);
+  std::vector<long long> embedding_ids;
+  if (deep_cleanup)
+    {
+      embedding_ids = ExtractInt64Column (
+          tx.Execute ("SELECT embedding_id FROM memories "
+                      "WHERE memory_id IN (" + placeholders + ") "
+                      "  AND kind = 'WORKING' "
+                      "  AND embedding_id IS NOT NULL",
+                      memory_params),
+          "embedding_id");
+      auto signal_embedding_ids = ExtractInt64Column (
+          tx.Execute ("SELECT embedding_id FROM signals "
+                      "WHERE memory_id IN (" + placeholders + ") "
+                      "  AND embedding_id IS NOT NULL",
+                      memory_params),
+          "embedding_id");
+      embedding_ids.insert (embedding_ids.end (), signal_embedding_ids.begin (),
+                            signal_embedding_ids.end ());
+      std::sort (embedding_ids.begin (), embedding_ids.end ());
+      embedding_ids.erase (
+          std::unique (embedding_ids.begin (), embedding_ids.end ()),
+          embedding_ids.end ());
+    }
+
+  if (deep_cleanup)
+    {
+      std::vector<std::any> assoc_params;
+      assoc_params.reserve (memory_ids.size () * 2);
+      for (const auto id : memory_ids)
+        {
+          assoc_params.push_back (id);
+        }
+      for (const auto id : memory_ids)
+        {
+          assoc_params.push_back (id);
+        }
+      tx.Execute ("DELETE FROM associations "
+                  "WHERE source_memory_id IN (" + placeholders + ") "
+                  "   OR target_memory_id IN (" + placeholders + ")",
+                  assoc_params);
+    }
+  tx.Execute ("DELETE FROM signals WHERE memory_id IN (" + placeholders + ")",
+              memory_params);
+  if (deep_cleanup)
+    {
+      tx.Execute ("DELETE FROM current_memory_embeddings "
+                  "WHERE memory_id IN (" + placeholders + ")",
+                  memory_params);
+    }
+  tx.Execute ("DELETE FROM memories "
+              "WHERE kind = 'WORKING' AND memory_id IN (" + placeholders + ")",
+              memory_params);
+
+  if (!embedding_ids.empty ())
+    {
+      const std::string embedding_placeholders
+          = Placeholders (embedding_ids.size ());
+      tx.Execute (
+          "DELETE FROM embeddings "
+          "WHERE embedding_id IN (" + embedding_placeholders + ") "
+          "  AND NOT EXISTS ("
+          "    SELECT 1 FROM memories m "
+          "    WHERE m.embedding_id = embeddings.embedding_id"
+          "  ) "
+          "  AND NOT EXISTS ("
+          "    SELECT 1 FROM signals s "
+          "    WHERE s.embedding_id = embeddings.embedding_id"
+          "  ) "
+          "  AND NOT EXISTS ("
+          "    SELECT 1 FROM memory_reconstructions mr "
+          "    WHERE mr.embedding_id = embeddings.embedding_id"
+          "  ) "
+          "  AND NOT EXISTS ("
+          "    SELECT 1 FROM fact_cache fc "
+          "    WHERE fc.embedding_id = embeddings.embedding_id"
+          "  )",
+          MakeParams (embedding_ids));
+    }
+}
+
+void
+DeleteUnreferencedEmbeddings (Transaction &tx)
+{
+  tx.Execute (
+      "DELETE FROM embeddings "
+      "WHERE NOT EXISTS ("
+      "    SELECT 1 FROM memories m "
+      "    WHERE m.embedding_id = embeddings.embedding_id"
+      "  ) "
+      "  AND NOT EXISTS ("
+      "    SELECT 1 FROM signals s "
+      "    WHERE s.embedding_id = embeddings.embedding_id"
+      "  ) "
+      "  AND NOT EXISTS ("
+      "    SELECT 1 FROM memory_reconstructions mr "
+      "    WHERE mr.embedding_id = embeddings.embedding_id"
+      "  ) "
+      "  AND NOT EXISTS ("
+      "    SELECT 1 FROM fact_cache fc "
+      "    WHERE fc.embedding_id = embeddings.embedding_id"
+      "  )",
+      {});
+}
 
 void
 AssembleOutputMemories (const OperationContext &op_context,
@@ -43,6 +373,79 @@ AssembleOutputMemories (const OperationContext &op_context,
               static_cast<long long> (e.embedding_id));
         }
     }
+}
+
+void
+CheckpointSQLiteStore (Store *store, bool full, OperationContext *op_context,
+                       const char *timing_name)
+{
+  auto *sqlite_store = dynamic_cast<SQLiteStore *> (store);
+  if (!sqlite_store)
+    {
+      return;
+    }
+  const auto start = std::chrono::steady_clock::now ();
+  try
+    {
+      sqlite_store->Checkpoint (full);
+    }
+  catch (const std::exception &e)
+    {
+      telemetry::LogWarn (
+          "cortext.sqlite_checkpoint_failed",
+          { telemetry::Attribute::String ("component", "signal_processor"),
+            telemetry::Attribute::String ("error", e.what ()) });
+    }
+  if (op_context && timing_name)
+    {
+      op_context->AddOperationTiming (
+          timing_name, ElapsedMillis (start, std::chrono::steady_clock::now ()));
+    }
+}
+
+void
+MaybeRunPassiveWalCheckpoint (Store *store, const Signal &signal,
+                              const ProcessorContext &context,
+                              OperationContext &op_context)
+{
+  static const bool enabled = [] {
+    const char *value = std::getenv ("CORTEXT_FOREGROUND_WAL_CHECKPOINT");
+    return value && (std::strcmp (value, "1") == 0
+                     || std::strcmp (value, "true") == 0
+                     || std::strcmp (value, "on") == 0);
+  } ();
+  if (!enabled)
+    {
+      return;
+    }
+  if (signal.consolidation_mode.has_value ())
+    {
+      return;
+    }
+  if (context.signals_processed == 0)
+    {
+      return;
+    }
+  if ((context.signals_processed % kWalPassiveCheckpointIntervalSignals) != 0)
+    {
+      return;
+    }
+
+  auto *sqlite_store = dynamic_cast<SQLiteStore *> (store);
+  if (!sqlite_store)
+    {
+      return;
+    }
+  if (sqlite_store->WalFileBytes () < kWalPassiveCheckpointMinBytes)
+    {
+      const auto start = std::chrono::steady_clock::now ();
+      op_context.AddOperationTiming (
+          "SignalProcessor.sqlite_wal_checkpoint_skip",
+          ElapsedMillis (start, std::chrono::steady_clock::now ()));
+      return;
+    }
+  CheckpointSQLiteStore (store, false, &op_context,
+                         "SignalProcessor.sqlite_wal_checkpoint_passive");
 }
 
 void
@@ -89,6 +492,7 @@ AssembleOutputFields (const OperationContext &op_context,
   out.operation_ms = op_context.GetOperationTimings ();
   out.stored_embedding_id = op_context.GetStoredEmbeddingId ();
   out.stored_memory_id = op_context.GetStoredMemoryId ();
+  out.stored_signal_id = op_context.GetStoredSignalId ();
   const auto &processor_context = op_context.GetProcessorContext ();
   out.shadow_stm_enabled = processor_context.shadow_stm_enabled;
   out.shadow_stm_size = processor_context.shadow_stm_last_size;
@@ -974,6 +1378,169 @@ LoadRecentScores (Store &store, ProcessorContext &ctx,
 }
 
 void
+LoadPredictivePreActivationIds (Store &store, ProcessorContext &ctx)
+{
+  try
+    {
+      ctx.predictive_pre_activation_embedding_ids.clear ();
+      auto rows = store.Execute (
+          "SELECT embedding_id FROM memories "
+          "WHERE embedding_id IS NOT NULL "
+          "  AND COALESCE(pre_activation, 0.0) > 1e-6");
+      ctx.predictive_pre_activation_embedding_ids.reserve (rows.size ());
+      for (const auto &row : rows)
+        {
+          const long long embedding_id = ExtractInt64 (row, "embedding_id", 0);
+          if (embedding_id > 0)
+            {
+              ctx.predictive_pre_activation_embedding_ids.insert (embedding_id);
+            }
+        }
+    }
+  catch (const std::exception &e)
+    {
+      telemetry::LogWarn (
+          "Failed to load predictive pre-activation ids",
+          { telemetry::Attribute::String ("component", "signal_processor"),
+            telemetry::Attribute::String ("error", e.what ()) });
+    }
+}
+
+void
+LoadRetrievalSuppressionIds (Store &store, ProcessorContext &ctx)
+{
+  try
+    {
+      ctx.retrieval_suppression_embedding_ids.clear ();
+      auto rows = store.Execute (
+          "SELECT embedding_id FROM memories "
+          "WHERE embedding_id IS NOT NULL "
+          "  AND COALESCE(suppression, 0.0) > 1e-9");
+      ctx.retrieval_suppression_embedding_ids.reserve (rows.size ());
+      for (const auto &row : rows)
+        {
+          const long long embedding_id = ExtractInt64 (row, "embedding_id", 0);
+          if (embedding_id > 0)
+            {
+              ctx.retrieval_suppression_embedding_ids.insert (embedding_id);
+            }
+        }
+    }
+  catch (const std::exception &e)
+    {
+      telemetry::LogWarn (
+          "Failed to load retrieval suppression ids",
+          { telemetry::Attribute::String ("component", "signal_processor"),
+            telemetry::Attribute::String ("error", e.what ()) });
+    }
+}
+
+void
+LoadRetrievalSurfaceCache (Store &store, ProcessorContext &ctx)
+{
+  try
+    {
+      ctx.retrieval_surface_cache.clear ();
+      ctx.retrieval_surface_index.clear ();
+      ctx.retrieval_surface_embedding_index.clear ();
+      ctx.retrieval_surface_source_index.clear ();
+      ctx.retrieval_surface_source_index_dirty.clear ();
+
+	      auto rows = store.Execute (
+	          "SELECT m.memory_id, m.embedding_id AS base_embedding_id, "
+	          "       COALESCE(cme.embedding_id, m.embedding_id) AS embedding_id, "
+	          "       CASE WHEN cme.memory_id IS NOT NULL "
+	          "            THEN cme.embedding ELSE e.embedding END AS embedding, "
+	          "       COALESCE(m.created_at, cme.created_at, e.created_at, 0) "
+	          "         AS created_at, "
+	          "       COALESCE(m.start_ts, 0) AS start_ts, "
+          "       COALESCE(m.last_access, 0) AS last_access, "
+          "       COALESCE(m.retrieved_count, 0) AS retrieved_count, "
+          "       COALESCE(m.used_count, 0) AS used_count, "
+          "       COALESCE(NULLIF(m.start_ts, 0), m.created_at, "
+          "                cme.created_at, e.created_at, 0) AS event_ts, "
+          "       m.context, m.source_reliability, "
+          "       m.source_contradiction_count, m.emotional_intensity, "
+          "       m.s_arousal_avg, m.kind, m.source_id, m.modality, "
+          "       COALESCE(m.pre_activation, 0.0) AS pre_activation, "
+          "       CASE WHEN cme.memory_id IS NOT NULL "
+          "             AND m.kind != 'WORKING' "
+          "             AND m.kind != 'LABEL' "
+          "             AND (m.kind != 'ASSOCIATION' OR EXISTS ("
+          "               SELECT 1 FROM associations a "
+          "               WHERE a.source_memory_id = m.memory_id "
+          "                 AND a.edge_type = 'derived_from'"
+          "             )) "
+          "            THEN 1 ELSE 0 END AS vector_seed_eligible "
+	          "FROM memories m "
+	          "LEFT JOIN current_memory_embeddings cme "
+	          "  ON cme.memory_id = m.memory_id "
+	          "JOIN embeddings e "
+	          "  ON e.embedding_id = COALESCE(cme.embedding_id, m.embedding_id) "
+	          "WHERE cme.memory_id IS NOT NULL "
+	          "   OR m.kind = 'LABEL'");
+
+      ctx.retrieval_surface_cache.reserve (rows.size ());
+      ctx.retrieval_surface_index.reserve (rows.size ());
+      ctx.retrieval_surface_embedding_index.reserve (rows.size ());
+      for (const auto &row : rows)
+        {
+          auto emb_it = row.find ("embedding");
+          if (emb_it == row.end () || !emb_it->second.has_value ())
+            {
+              continue;
+            }
+          ProcessorContext::RetrievalSurfaceEntry entry;
+	          entry.memory_id = ExtractInt64 (row, "memory_id", 0);
+	          entry.embedding_id = ExtractInt64 (row, "base_embedding_id", 0);
+	          if (entry.embedding_id <= 0)
+	            {
+	              entry.embedding_id = ExtractInt64 (row, "embedding_id", 0);
+	            }
+	          entry.created_at = ExtractInt64 (row, "created_at", 0);
+          entry.start_ts = ExtractInt64 (row, "start_ts", 0);
+          entry.last_access = ExtractInt64 (row, "last_access", 0);
+          entry.event_ts = ExtractInt64 (row, "event_ts", entry.created_at);
+          entry.retrieved_count = ExtractInt64 (row, "retrieved_count", 0);
+          entry.used_count = ExtractInt64 (row, "used_count", 0);
+          entry.kind = ExtractString (row, "kind");
+          entry.source_id = ExtractString (row, "source_id");
+          entry.modality = ExtractString (row, "modality");
+          entry.source_reliability
+              = ExtractDouble (row, "source_reliability", -1.0);
+          entry.source_contradiction_count = static_cast<int> (
+              ExtractInt64 (row, "source_contradiction_count", 0));
+          entry.emotional_intensity
+              = ExtractDouble (row, "emotional_intensity", 0.0);
+          entry.arousal_avg = ExtractDouble (row, "s_arousal_avg", 0.0);
+          entry.pre_activation = ExtractDouble (row, "pre_activation", 0.0);
+          entry.vector_seed_eligible
+              = ExtractInt64 (row, "vector_seed_eligible", 1) != 0;
+          entry.embedding = BlobToEigen (emb_it->second);
+          auto ctx_it = row.find ("context");
+          if (ctx_it != row.end () && ctx_it->second.has_value ())
+            {
+              entry.context_embedding = BlobToEigen (ctx_it->second);
+            }
+          ctx.UpsertRetrievalSurface (std::move (entry));
+        }
+      ctx.SortRetrievalSurfaceSourceIndexes ();
+      telemetry::LogDebug (
+          "cortext.retrieval_surface_cache.load",
+          { telemetry::Attribute::Int64 (
+              "entry_count",
+              static_cast<int64_t> (ctx.retrieval_surface_cache.size ())) });
+    }
+  catch (const std::exception &e)
+    {
+      telemetry::LogWarn (
+          "Failed to load retrieval surface cache",
+          { telemetry::Attribute::String ("component", "signal_processor"),
+            telemetry::Attribute::String ("error", e.what ()) });
+    }
+}
+
+void
 LoadObservedRetentionHistory (Store &store, ProcessorContext &ctx,
                               std::uint64_t now_ms, int history_limit)
 {
@@ -984,6 +1551,7 @@ LoadObservedRetentionHistory (Store &store, ProcessorContext &ctx,
           "SELECT COALESCE(last_used, last_access) AS last_used "
           "FROM memories "
           "WHERE COALESCE(last_used, last_access) IS NOT NULL "
+          "  AND kind != 'WORKING' "
           "ORDER BY last_used ASC "
           "LIMIT ?",
           { static_cast<long long> (limit) });
@@ -1057,6 +1625,7 @@ LoadWorkingMemory (Store &store, ProcessorContext &ctx,
 
           // Load embedding for slot
           const auto embedding_id = ExtractInt64 (row, "embedding_id", 0);
+          slot.embedding_id = embedding_id;
           if (embedding_id > 0)
             {
               auto emb_rows = store.Execute (
@@ -1137,6 +1706,33 @@ LoadWorkingMemory (Store &store, ProcessorContext &ctx,
               if (!rec.blob_id.empty ())
                 {
                   slot.blob_ids.push_back (rec.blob_id);
+                  const bool text_record
+                      = rec.modality == "text" || rec.mime == "text/plain";
+                  if (text_record)
+                    {
+                      try
+                        {
+                          auto payload_rows = store.Execute (
+                              "SELECT objstore_get(?1) AS payload",
+                              { rec.blob_id });
+                          if (!payload_rows.empty ()
+                              && payload_rows[0].count ("payload") > 0)
+                            {
+                              const auto payload = store::BlobFromAny (
+                                  payload_rows[0].at ("payload"));
+                              if (!payload.empty ())
+                                {
+                                  rec.text_payload.assign (
+                                      reinterpret_cast<const char *> (
+                                          payload.data ()),
+                                      payload.size ());
+                                }
+                            }
+                        }
+                      catch (...)
+                        {
+                        }
+                    }
                 }
 
               const auto sig_emb_id
@@ -1159,8 +1755,13 @@ LoadWorkingMemory (Store &store, ProcessorContext &ctx,
               slot.signal_records.push_back (std::move (rec));
             }
 
+          slot.persisted_signal_record_count = slot.signal_records.size ();
+          slot.metadata_dirty = false;
+          slot.embedding_dirty = false;
+          slot.signal_records_dirty = false;
           ctx.wm_slots.push_back (std::move (slot));
         }
+      ctx.wm_slots_dirty = false;
     }
   catch (const std::exception &e)
     {
@@ -1394,6 +1995,9 @@ SignalProcessor::SignalProcessor (const Config &config,
 
       // Load persisted state for algorithm resumption (v2 schema)
       loaded_state = LoadState (*store_, *context_, config_);      // Unified state
+      LoadPredictivePreActivationIds (*store_, *context_);
+      LoadRetrievalSuppressionIds (*store_, *context_);
+      LoadRetrievalSurfaceCache (*store_, *context_);
       LoadRecentContext (*store_, *context_, config_);
       LoadRecentScores (*store_, *context_, config_);
       LoadObservedRetentionHistory (
@@ -1424,6 +2028,7 @@ SignalProcessor::Process (const Signal &signal)
   telemetry::ScopedSpan span ("cortext.process");
 
   // Create transaction for this signal processing
+  const auto tx_begin_start = std::chrono::steady_clock::now ();
   auto tx = store_ ? store_->Begin () : nullptr;
   std::unique_ptr<ObjectTransaction> object_tx;
   if (object_store_ && tx)
@@ -1438,10 +2043,26 @@ SignalProcessor::Process (const Signal &signal)
           object_tx = object_store_->Begin ();
         }
     }
-  const ProcessorContext context_snapshot = *context_;
+  const auto tx_begin_end = std::chrono::steady_clock::now ();
+  const auto snapshot_start = std::chrono::steady_clock::now ();
+  ProcessorContext context_snapshot;
+  {
+    ScopedProcessorCacheDetach detach (*context_);
+    context_snapshot = *context_;
+  }
+  const auto snapshot_end = std::chrono::steady_clock::now ();
 
   OperationContext op_context (signal, *context_, config_, store_.get (),
                                object_tx.get ());
+  if (tx)
+    {
+      op_context.AddOperationTiming ("SignalProcessor.begin_transaction",
+                                     ElapsedMillis (tx_begin_start,
+                                                    tx_begin_end));
+    }
+  op_context.AddOperationTiming ("SignalProcessor.snapshot_context",
+                                 ElapsedMillis (snapshot_start,
+                                                snapshot_end));
   auto rollback_object_tx = [&object_tx] {
     if (object_tx)
       {
@@ -1454,11 +2075,24 @@ SignalProcessor::Process (const Signal &signal)
           }
       }
   };
+  auto restore_context_snapshot = [&] {
+    *context_ = std::move (context_snapshot);
+    context_->label_bank_loaded = false;
+    if (store_)
+      {
+        LoadPredictivePreActivationIds (*store_, *context_);
+        LoadRetrievalSuppressionIds (*store_, *context_);
+      }
+  };
 
   try
     {
       op_context.SetCurrentOperationType ("StartNewEpisode");
+      auto op_start = std::chrono::steady_clock::now ();
       StartNewEpisode (tx.get (), signal.timestamp);
+      op_context.AddOperationTiming (
+          "SignalProcessor.start_new_episode",
+          ElapsedMillis (op_start, std::chrono::steady_clock::now ()));
       if (tx)
         {
           root_operation_->Execute (op_context, *tx);
@@ -1484,7 +2118,11 @@ SignalProcessor::Process (const Signal &signal)
       if (op_context.ShouldFinalizeEpisode ())
         {
           op_context.SetCurrentOperationType ("FinalizeEpisode");
+          op_start = std::chrono::steady_clock::now ();
           FinalizeEpisode (tx.get (), &op_context);
+          op_context.AddOperationTiming (
+              "SignalProcessor.finalize_episode",
+              ElapsedMillis (op_start, std::chrono::steady_clock::now ()));
         }
 
       context_->signals_processed += 1;
@@ -1493,15 +2131,44 @@ SignalProcessor::Process (const Signal &signal)
       if (tx)
         {
           op_context.SetCurrentOperationType ("PersistState");
+          op_start = std::chrono::steady_clock::now ();
           PersistState (*tx);           // Unified state
+          op_context.AddOperationTiming (
+              "SignalProcessor.persist_state",
+              ElapsedMillis (op_start, std::chrono::steady_clock::now ()));
           op_context.SetCurrentOperationType ("PersistWorkingMemory");
-          PersistWorkingMemory (*tx);   // To MEMORIES
+          op_start = std::chrono::steady_clock::now ();
+          PersistWorkingMemory (*tx, signal.consolidation_mode.has_value (),
+                                &op_context);
+          op_context.AddOperationTiming (
+              "SignalProcessor.persist_working_memory",
+              ElapsedMillis (op_start, std::chrono::steady_clock::now ()));
           if (object_tx)
             {
               op_context.SetCurrentOperationType ("PersistObjects");
+              op_start = std::chrono::steady_clock::now ();
               object_tx->Commit ();
+              op_context.AddOperationTiming (
+                  "SignalProcessor.persist_objects",
+                  ElapsedMillis (op_start, std::chrono::steady_clock::now ()));
             }
+          op_context.SetCurrentOperationType ("CommitTransaction");
+          op_start = std::chrono::steady_clock::now ();
           tx->Commit ();
+          op_context.AddOperationTiming (
+              "SignalProcessor.commit_transaction",
+              ElapsedMillis (op_start, std::chrono::steady_clock::now ()));
+          if (signal.consolidation_mode.has_value ())
+            {
+              CheckpointSQLiteStore (
+                  store_.get (), true, &op_context,
+                  "SignalProcessor.sqlite_wal_checkpoint");
+            }
+          else
+            {
+              MaybeRunPassiveWalCheckpoint (store_.get (), signal,
+                                            *context_, op_context);
+            }
         }
     }
   catch (const internal::CancellationError &)
@@ -1511,7 +2178,7 @@ SignalProcessor::Process (const Signal &signal)
           rollback_object_tx ();
           tx->Rollback ();
         }
-      *context_ = context_snapshot;
+      restore_context_snapshot ();
       throw;
     }
   catch (const std::exception &e)
@@ -1521,7 +2188,7 @@ SignalProcessor::Process (const Signal &signal)
           rollback_object_tx ();
           tx->Rollback ();
         }
-      *context_ = context_snapshot;
+      restore_context_snapshot ();
       const std::string op_type = op_context.GetCurrentOperationType ();
       const std::string msg
           = "Process failed in " + op_type + ": " + e.what ();
@@ -1540,7 +2207,7 @@ SignalProcessor::Process (const Signal &signal)
           rollback_object_tx ();
           tx->Rollback ();
         }
-      *context_ = context_snapshot;
+      restore_context_snapshot ();
       const std::string op_type = op_context.GetCurrentOperationType ();
       const std::string msg
           = "Process failed in " + op_type + ": unknown error";
@@ -1558,10 +2225,7 @@ SignalProcessor::Process (const Signal &signal)
   AssembleOutputFields (op_context, out);
   ApplyConsolidationHint (signal, config_, *context_, out);
   const auto t1 = std::chrono::steady_clock::now ();
-  const double ms
-      = std::chrono::duration_cast<std::chrono::duration<double, std::milli> > (
-            t1 - t0)
-            .count ();
+  const double ms = ElapsedMillis (t0, t1);
   telemetry::RecordHistogram ("cortext.process_duration_ms", ms);
   telemetry::AddCounter ("cortext.signals_processed_total", 1);
   if (out.at_boundary)
@@ -1601,7 +2265,7 @@ SignalProcessor::Flush ()
     }
   FinalizeEpisode (tx.get (), nullptr);
   PersistState (*tx);           // v2: Unified state
-  PersistWorkingMemory (*tx);   // v2: To MEMORIES
+  PersistWorkingMemory (*tx, true); // v2: To MEMORIES
   PersistAccumulators (*tx);    // v2: To ACCUMULATORS
   const auto now_ms = clock_->NowMillis ();
   StartNewEpisode (tx.get (), static_cast<uint64_t> (now_ms));
@@ -1610,6 +2274,7 @@ SignalProcessor::Flush ()
       object_tx->Commit ();
     }
   tx->Commit ();
+  CheckpointSQLiteStore (store_.get (), true, nullptr, nullptr);
 }
 
 void
@@ -1892,10 +2557,40 @@ SignalProcessor::PersistState (Transaction &tx)
 
 // v2 Schema: Persist working memory to MEMORIES table (kind='WORKING')
 void
-SignalProcessor::PersistWorkingMemory (Transaction &tx)
+SignalProcessor::PersistWorkingMemory (Transaction &tx, bool force,
+                                       OperationContext *op_context)
 {
   if (!context_)
     return;
+
+  auto add_timing
+      = [op_context] (const char *name,
+                      std::chrono::steady_clock::time_point start) {
+          if (!op_context)
+            {
+              return;
+            }
+          op_context->AddOperationTiming (
+              name, ElapsedMillis (start, std::chrono::steady_clock::now ()));
+        };
+
+  if (!force && !context_->wm_slots_dirty)
+    {
+      bool has_dirty_slot = false;
+      for (const auto &slot : context_->wm_slots)
+        {
+          if (slot.metadata_dirty || slot.embedding_dirty
+              || slot.signal_records_dirty || slot.memory_id <= 0)
+            {
+              has_dirty_slot = true;
+              break;
+            }
+        }
+      if (!has_dirty_slot)
+        {
+          return;
+        }
+    }
 
   const auto wall_now_ms
       = static_cast<long long> (clock_->NowMillis ());
@@ -1904,7 +2599,8 @@ SignalProcessor::PersistWorkingMemory (Transaction &tx)
                                 context_->last_signal_timestamp)
                           : wall_now_ms;
 
-  // Close any stale WM rows not represented by active slots.
+  // Close any stale WM rows not represented by active slots. This only needs
+  // to run when the active slot set changed or when a caller forces a flush.
   std::vector<long long> active_ids;
   active_ids.reserve (context_->wm_slots.size ());
   for (const auto &slot : context_->wm_slots)
@@ -1919,37 +2615,67 @@ SignalProcessor::PersistWorkingMemory (Transaction &tx)
         }
     }
 
-  if (active_ids.empty ())
+  if (force || context_->wm_slots_dirty)
     {
-      tx.Execute (
-          "UPDATE memories SET end_ts = ? WHERE kind = 'WORKING' AND end_ts IS NULL",
-          { now_ms });
-    }
-  else
-    {
-      std::string placeholders;
-      placeholders.reserve (active_ids.size () * 2);
-      for (size_t i = 0; i < active_ids.size (); ++i)
+      const auto t_close_stale_start = std::chrono::steady_clock::now ();
+      if (active_ids.empty ())
         {
-          if (i > 0)
+          tx.Execute (
+              "UPDATE memories SET end_ts = ? "
+              "WHERE kind = 'WORKING' AND end_ts IS NULL",
+              { now_ms });
+        }
+      else
+        {
+          std::string query
+              = "UPDATE memories SET end_ts = ? "
+                "WHERE kind = 'WORKING' AND end_ts IS NULL "
+                "AND memory_id NOT IN ("
+                + Placeholders (active_ids.size ()) + ")";
+          std::vector<std::any> params;
+          params.reserve (1 + active_ids.size ());
+          params.push_back (now_ms);
+          for (const auto id : active_ids)
             {
-              placeholders += ", ";
+              params.push_back (id);
             }
-          placeholders += "?";
+          tx.Execute (query, params);
         }
-      std::string query
-          = "UPDATE memories SET end_ts = ? "
-            "WHERE kind = 'WORKING' AND end_ts IS NULL "
-            "AND memory_id NOT IN ("
-            + placeholders + ")";
-      std::vector<std::any> params;
-      params.reserve (1 + active_ids.size ());
-      params.push_back (now_ms);
-      for (const auto id : active_ids)
+      add_timing ("SignalProcessor.wm_close_stale",
+                  t_close_stale_start);
+    }
+
+  const bool should_incremental_prune
+      = !force && context_->wm_slots_dirty
+        && context_->signals_processed > 0
+        && ((context_->signals_processed
+             % kClosedWorkingMemoryIncrementalPruneIntervalSignals)
+            == 0);
+  if (force || should_incremental_prune)
+    {
+      const int prune_batch = force ? kClosedWorkingMemoryPruneBatch
+                                    : kClosedWorkingMemoryIncrementalPruneBatch;
+      const auto t_prune_select_start = std::chrono::steady_clock::now ();
+      auto stale_rows = tx.Execute (
+          "SELECT memory_id FROM memories "
+          "WHERE kind = 'WORKING' AND end_ts IS NOT NULL "
+          "ORDER BY end_ts ASC, memory_id ASC "
+          "LIMIT ?",
+          { static_cast<long long> (prune_batch) });
+      auto stale_ids = ExtractInt64Column (stale_rows, "memory_id");
+      add_timing ("SignalProcessor.wm_prune_select",
+                  t_prune_select_start);
+      const auto t_prune_delete_start = std::chrono::steady_clock::now ();
+      DeleteStaleWorkingMemoryRows (tx, stale_ids, force);
+      add_timing ("SignalProcessor.wm_prune_delete",
+                  t_prune_delete_start);
+      if (force)
         {
-          params.push_back (id);
+          const auto t_orphan_delete_start = std::chrono::steady_clock::now ();
+          DeleteUnreferencedEmbeddings (tx);
+          add_timing ("SignalProcessor.wm_prune_orphan_embeddings",
+                      t_orphan_delete_start);
         }
-      tx.Execute (query, params);
     }
 
   const double working_source_reliability = core::SourceReliabilityPrior (
@@ -1957,18 +2683,33 @@ SignalProcessor::PersistWorkingMemory (Transaction &tx)
   const double working_stability = core::MemoryInitialStabilityPolicy (
       config_.focus, config_.sensitivity, config_.stability);
 
-  // Upsert current slots as MEMORIES with kind='WORKING'
+  bool all_slots_clean = true;
+
+  // Upsert current slots as MEMORIES with kind='WORKING'. Clean slots are
+  // left untouched; passive decay is recovered from last_access on reload.
   for (auto &slot : context_->wm_slots)
     {
       std::string failure_stage = "slot_precheck";
       if (slot.strength <= 0.0)
         {
           slot.memory_id = 0;
+          slot.embedding_id = 0;
           continue;
         }
       if (slot.embedding.size () == 0)
         {
           slot.memory_id = 0;
+          slot.embedding_id = 0;
+          continue;
+        }
+
+      bool needs_memory_row
+          = force || slot.metadata_dirty || slot.embedding_dirty
+            || slot.memory_id <= 0;
+      bool needs_signal_rows
+          = force || slot.signal_records_dirty || slot.memory_id <= 0;
+      if (!needs_memory_row && !needs_signal_rows)
+        {
           continue;
         }
 
@@ -1982,43 +2723,59 @@ SignalProcessor::PersistWorkingMemory (Transaction &tx)
           const auto slot_embedding_created_at
               = ts_ms > 0 ? static_cast<long long> (ts_ms) : now_ms;
 
-          failure_stage = "insert_slot_embedding";
-          const std::vector<float> emb_vec = ToFloatVector (slot.embedding);
-          tx.Execute (
-              "INSERT INTO embeddings (embedding, created_at) VALUES (?, ?)",
-              { emb_vec, slot_embedding_created_at });
-          auto emb_rows
-              = tx.Execute ("SELECT last_insert_rowid() AS id", {});
-          const long long embedding_id
-              = emb_rows.empty () ? 0 : ExtractInt64 (emb_rows[0], "id", 0);
+          long long embedding_id = slot.embedding_id;
+          if (slot.embedding_dirty || embedding_id <= 0)
+            {
+              failure_stage = "insert_slot_embedding";
+              const std::vector<float> emb_vec = ToFloatVector (slot.embedding);
+              const auto t_sql_start = std::chrono::steady_clock::now ();
+              tx.Execute (
+                  "INSERT INTO embeddings (embedding, created_at) VALUES (?, ?)",
+                  { emb_vec, slot_embedding_created_at });
+              auto emb_rows
+                  = tx.Execute ("SELECT last_insert_rowid() AS id", {});
+              add_timing ("SignalProcessor.wm_insert_slot_embedding",
+                          t_sql_start);
+              embedding_id
+                  = emb_rows.empty () ? 0 : ExtractInt64 (emb_rows[0], "id", 0);
+            }
           if (embedding_id == 0)
             {
+              all_slots_clean = false;
               continue;
             }
 
           long long memory_id = slot.memory_id;
           if (memory_id > 0)
             {
-              failure_stage = "update_slot_memory";
-              tx.Execute (
-                  "UPDATE memories SET "
-                  "embedding_id = ?, source_id = ?, modality = ?, start_ts = ?, "
-                  "n_signals = ?, s_max = ?, s_avg = ?, s_emotion_max = ?, "
-                  "s_arousal_avg = ?, drift_mag = ?, strength = ?, "
-                  "source_reliability = ?, stability = ?, "
-                  "last_access = ?, end_ts = NULL "
-                  "WHERE memory_id = ? AND kind = 'WORKING'",
-                  { embedding_id,
-                    slot.source_id.empty () ? std::string ("unknown")
-                                            : slot.source_id,
-                    slot.modality, slot.start_ts, slot.n_signals, slot.s_max,
-                    slot.s_avg, slot.s_emotion_max, slot.s_arousal_avg,
-                    slot.drift_acc, slot.strength, working_source_reliability,
-                    working_stability, ts_ms, memory_id });
+              if (needs_memory_row)
+                {
+                  failure_stage = "update_slot_memory";
+                  const auto t_sql_start = std::chrono::steady_clock::now ();
+                  tx.Execute (
+                      "UPDATE memories SET "
+                      "embedding_id = ?, source_id = ?, modality = ?, "
+                      "start_ts = ?, n_signals = ?, s_max = ?, s_avg = ?, "
+                      "s_emotion_max = ?, s_arousal_avg = ?, drift_mag = ?, "
+                      "strength = ?, source_reliability = ?, stability = ?, "
+                      "last_access = ?, end_ts = NULL "
+                      "WHERE memory_id = ? AND kind = 'WORKING'",
+                      { embedding_id,
+                        slot.source_id.empty () ? std::string ("unknown")
+                                                : slot.source_id,
+                        slot.modality, slot.start_ts, slot.n_signals,
+                        slot.s_max, slot.s_avg, slot.s_emotion_max,
+                        slot.s_arousal_avg, slot.drift_acc, slot.strength,
+                        working_source_reliability, working_stability, ts_ms,
+                        memory_id });
+                  add_timing ("SignalProcessor.wm_update_slot_memory",
+                              t_sql_start);
+                }
             }
           else
             {
               failure_stage = "insert_slot_memory";
+              const auto t_sql_start = std::chrono::steady_clock::now ();
               tx.Execute (
                   "INSERT INTO memories "
                   "(embedding_id, source_id, kind, modality, start_ts, n_signals, "
@@ -2035,69 +2792,113 @@ SignalProcessor::PersistWorkingMemory (Transaction &tx)
                     working_stability, ts_ms, slot_created_at });
 
               auto mem_rows = tx.Execute ("SELECT last_insert_rowid() AS id", {});
+              add_timing ("SignalProcessor.wm_insert_slot_memory",
+                          t_sql_start);
               memory_id
                   = mem_rows.empty () ? 0 : ExtractInt64 (mem_rows[0], "id", 0);
               if (memory_id == 0)
                 {
+                  all_slots_clean = false;
                   continue;
                 }
               slot.memory_id = memory_id;
+              needs_signal_rows = true;
             }
+          slot.embedding_id = embedding_id;
 
           // Keep per-slot signals in sync with the current slot state.
-          failure_stage = "clear_slot_signals";
-          tx.Execute ("DELETE FROM signals WHERE memory_id = ?", { memory_id });
-
-          for (const auto &rec : slot.signal_records)
+          if (needs_signal_rows)
             {
-              try
+              std::size_t first_record_to_persist = 0;
+              if (!force
+                  && slot.persisted_signal_record_count
+                         <= slot.signal_records.size ())
                 {
-                  long long signal_embedding_id = embedding_id;
-                  if (rec.embedding.size () > 0
-                      && rec.embedding.size () == slot.embedding.size ())
-                    {
-                      failure_stage = "insert_signal_embedding";
-                      const std::vector<float> sig_vec
-                          = ToFloatVector (rec.embedding);
-                      tx.Execute (
-                          "INSERT INTO embeddings (embedding, created_at) VALUES (?, ?)",
-                          { sig_vec, static_cast<long long> (rec.timestamp) });
-                      auto sig_rows
-                          = tx.Execute ("SELECT last_insert_rowid() AS id", {});
-                      if (!sig_rows.empty ())
-                        {
-                          signal_embedding_id = ExtractInt64 (sig_rows[0], "id",
-                                                              embedding_id);
-                        }
-                    }
+                  first_record_to_persist
+                      = slot.persisted_signal_record_count;
+                }
+              else
+                {
+                  failure_stage = "clear_slot_signals";
+                  const auto t_sql_start = std::chrono::steady_clock::now ();
+                  tx.Execute ("DELETE FROM signals WHERE memory_id = ?",
+                              { memory_id });
+                  add_timing ("SignalProcessor.wm_clear_slot_signals",
+                              t_sql_start);
+                }
 
-                  failure_stage = "insert_signal_row";
-                  tx.Execute (
-                      "INSERT INTO signals "
-                      "(memory_id, source_id, embedding_id, timestamp, modality, "
-                      " mime, blob_id, serial_position, score, created_at) "
-                      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                      { memory_id,
-                        slot.source_id.empty () ? std::string ("unknown")
-                                                : slot.source_id,
-                        signal_embedding_id,
-                        static_cast<long long> (rec.timestamp), rec.modality,
-                        rec.mime,
-                        rec.blob_id.empty () ? std::any ()
-                                             : std::any (rec.blob_id),
-                        static_cast<long long> (rec.serial_position), rec.score,
-                        static_cast<long long> (rec.timestamp) });
-                }
-              catch (const std::exception &)
+              for (std::size_t rec_index = first_record_to_persist;
+                   rec_index < slot.signal_records.size (); ++rec_index)
                 {
-                  // Working-memory signal rows are auxiliary. If one record is
-                  // malformed, preserve the slot itself and continue.
-                  continue;
+                  const auto &rec = slot.signal_records[rec_index];
+                  try
+                    {
+                      long long signal_embedding_id = embedding_id;
+                      if (rec.embedding.size () > 0
+                          && rec.embedding.size () == slot.embedding.size ())
+                        {
+                          failure_stage = "insert_signal_embedding";
+                          const std::vector<float> sig_vec
+                              = ToFloatVector (rec.embedding);
+                          const auto t_sql_start
+                              = std::chrono::steady_clock::now ();
+                          tx.Execute (
+                              "INSERT INTO embeddings (embedding, created_at) "
+                              "VALUES (?, ?)",
+                              { sig_vec,
+                                static_cast<long long> (rec.timestamp) });
+                          auto sig_rows
+                              = tx.Execute ("SELECT last_insert_rowid() AS id", {});
+                          if (!sig_rows.empty ())
+                            {
+                              signal_embedding_id = ExtractInt64 (
+                                  sig_rows[0], "id", embedding_id);
+                            }
+                          add_timing (
+                              "SignalProcessor.wm_insert_signal_embedding",
+                              t_sql_start);
+                        }
+
+                      failure_stage = "insert_signal_row";
+                      const auto t_sql_start
+                          = std::chrono::steady_clock::now ();
+                      tx.Execute (
+                          "INSERT INTO signals "
+                          "(memory_id, source_id, embedding_id, timestamp, "
+                          "modality, mime, blob_id, serial_position, score, "
+                          "created_at) "
+                          "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                          { memory_id,
+                            slot.source_id.empty () ? std::string ("unknown")
+                                                    : slot.source_id,
+                            signal_embedding_id,
+                            static_cast<long long> (rec.timestamp),
+                            rec.modality, rec.mime,
+                            rec.blob_id.empty () ? std::any ()
+                                                 : std::any (rec.blob_id),
+                            static_cast<long long> (rec.serial_position),
+                            rec.score, static_cast<long long> (rec.timestamp) });
+                      add_timing ("SignalProcessor.wm_insert_signal_row",
+                                  t_sql_start);
+                    }
+                  catch (const std::exception &)
+                    {
+                      // Working-memory signal rows are auxiliary. If one record
+                      // is malformed, preserve the slot itself and continue.
+                      continue;
+                    }
                 }
+              slot.persisted_signal_record_count
+                  = slot.signal_records.size ();
             }
+
+          slot.metadata_dirty = false;
+          slot.embedding_dirty = false;
+          slot.signal_records_dirty = false;
         }
       catch (const std::exception &e)
         {
+          all_slots_clean = false;
           telemetry::LogWarn (
               "Failed to persist working-memory slot",
               { telemetry::Attribute::String ("component", "signal_processor"),
@@ -2117,6 +2918,11 @@ SignalProcessor::PersistWorkingMemory (Transaction &tx)
                 telemetry::Attribute::String ("error", e.what ()) });
           continue;
         }
+    }
+
+  if (all_slots_clean)
+    {
+      context_->wm_slots_dirty = false;
     }
 }
 

@@ -243,6 +243,70 @@ TEST_CASE (
   REQUIRE (strength <= 1.0);
 }
 
+TEST_CASE ("Algorithm 18 updates by memory_id when usage events provide it",
+           "[op18][memory_strength]")
+{
+  auto unique_store = cortext::SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<cortext::Store> (std::move (unique_store));
+  cortext::testing::InitializeCoreSchema (*store);
+
+  std::vector<float> vec (kEmbeddingDim, 0.0f);
+  vec[0] = 1.0f;
+  cortext::testing::SeedEmbeddingV2 (*store, 700LL, vec, 1);
+  cortext::testing::SeedMemoryV2 (*store, 70LL, 700LL, "test", "LONG_TERM",
+                                  0.2, 1);
+
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  cfg.focus = 1.0;
+  cfg.sensitivity = 0.5;
+  cfg.stability = 0.5;
+
+  cortext::ProcessorContext pctx;
+  cortext::ProcessorContext::RetrievalSurfaceEntry entry;
+  entry.memory_id = 70LL;
+  entry.embedding_id = 700LL;
+  entry.created_at = 1LL;
+  entry.start_ts = 1LL;
+  entry.kind = "LONG_TERM";
+  entry.source_id = "test";
+  entry.modality = "text";
+  entry.embedding = Eigen::Map<Eigen::VectorXf> (vec.data (), vec.size ());
+  pctx.UpsertRetrievalSurface (std::move (entry));
+
+  OperationContext::MemoryUsageEvent ev{};
+  ev.embedding_id = 701LL;
+  ev.memory_id = 70LL;
+  ev.used = true;
+  ev.contextual_gain = 1.0;
+
+  auto signal = MakeSignal (4, 100);
+  OperationContext ctx (signal, pctx, cfg, store.get ());
+  ctx.SetMemoryUsageEvents ({ ev });
+
+  cortext::operations::UpdateMemoryStrength update_strength;
+  auto tx = store->Begin ();
+  update_strength.Execute (ctx, *tx);
+  tx->Commit ();
+
+  auto rows = store->Execute (
+      "SELECT retrieved_count, used_count, strength "
+      "FROM memories WHERE memory_id = ?",
+      { 70LL });
+  REQUIRE (rows.size () == 1);
+  REQUIRE (std::any_cast<long long> (rows[0].at ("retrieved_count")) == 1LL);
+  REQUIRE (std::any_cast<long long> (rows[0].at ("used_count")) == 1LL);
+  REQUIRE (std::any_cast<double> (rows[0].at ("strength")) >= 0.0);
+  REQUIRE (std::any_cast<double> (rows[0].at ("strength")) <= 1.0);
+
+  const auto cache_it = pctx.retrieval_surface_index.find (70LL);
+  REQUIRE (cache_it != pctx.retrieval_surface_index.end ());
+  const auto &cached = pctx.retrieval_surface_cache[cache_it->second];
+  REQUIRE (cached.retrieved_count == 1LL);
+  REQUIRE (cached.used_count == 1LL);
+  REQUIRE (cached.last_access == 100LL);
+}
+
 TEST_CASE ("Algorithm 18 writes an eviction audit row before deleting long-term memory",
            "[op18][memory_strength][eviction_audit]")
 {
